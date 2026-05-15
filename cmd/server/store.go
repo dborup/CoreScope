@@ -173,6 +173,9 @@ type PacketStore struct {
 	nodeCache     []nodeInfo
 	nodePM        *prefixMap
 	nodeCacheTime time.Time
+	// Per-store dedupe set for one-shot schema-degradation warnings. Field
+	// (not package-level) so each test gets a fresh state — see #1199 item 5.
+	schemaDegradationLogged sync.Map
 	// Precomputed subpath index: raw comma-joined hops → occurrence count.
 	// Built during Load(), incrementally updated on ingest. Avoids full
 	// packet iteration at query time (O(unique_subpaths) vs O(total_packets)).
@@ -3440,7 +3443,7 @@ func buildHopContextPubkeys(tx *StoreTx, pm *prefixMap) []string {
 		return nil
 	}
 	seen := make(map[string]struct{}, 16)
-	var out []string
+	out := make([]string, 0, 16)
 	add := func(pk string) {
 		if pk == "" {
 			return
@@ -3537,6 +3540,14 @@ func buildAggregateHopContextPubkeys(txs []*StoreTx, pm *prefixMap) []string {
 // by all per-tx distance/topology loops to avoid 4× duplicate closure
 // definitions and per-tx map allocation. See #1197 (adversarial r1 #7,
 // carmack r1 #3).
+//
+// CONCURRENCY: NOT safe for concurrent use. The returned closures share
+// mutable captured state — `contextPubkeys` is reassigned by setContext and
+// read by resolveHop, and `hopCache` is mutated by both (resolveHop writes
+// on miss, setContext clears wholesale). Callers MUST invoke both functions
+// from a single goroutine for the lifetime of the (resolveHop, setContext)
+// pair. If a future caller fans out per-tx work across goroutines, allocate
+// a fresh resolver pair per goroutine. See #1199 item 4.
 func (s *PacketStore) hopResolverPerTx(pm *prefixMap) (resolveHop func(string) *nodeInfo, setContext func([]string)) {
 	hopCache := make(map[string]*nodeInfo, 16)
 	var contextPubkeys []string
@@ -4908,13 +4919,12 @@ type nodeInfo struct {
 	ObservationCount int // count of advertisements/observations; used for tier-3 tiebreak in resolveWithContext
 }
 
-// schemaDegradationLogged tracks one-shot schema degradation warnings so we
-// don't spam the log on every getAllNodes() call. See #1197 (adversarial r1
-// #10).
-var schemaDegradationLogged sync.Map
+// schemaDegradationLogged is now a PacketStore field (see type definition) so
+// each store/test instance has a fresh dedupe set. Issue #1199 item 5: the
+// prior package-level sync.Map silently suppressed re-emission across tests.
 
 func (s *PacketStore) logSchemaDegradationOnce(msg string) {
-	if _, loaded := schemaDegradationLogged.LoadOrStore(msg, true); !loaded {
+	if _, loaded := s.schemaDegradationLogged.LoadOrStore(msg, true); !loaded {
 		log.Printf("[store] schema-degradation: %s", msg)
 	}
 }
@@ -5303,6 +5313,31 @@ func (s *PacketStore) computeAnalyticsTopology(region string, window TimeWindow)
 	allNodes, pm := s.getCachedNodesAndPM()
 	_ = allNodes // only pm is needed for topology
 
+	// Materialize the filtered tx slice ONCE — both the context-build pass
+	// and the main aggregation pass need the same window+region predicate.
+	// Two scans of s.packets re-running identical predicates is wasteful at
+	// the 30k+ packet hot-path scale (#1199 item 2). One filter, two passes
+	// over the result.
+	filteredTxs := make([]*StoreTx, 0, len(s.packets))
+	for _, tx := range s.packets {
+		if !window.Includes(tx.FirstSeen) {
+			continue
+		}
+		if regionObs != nil {
+			match := false
+			for _, obs := range tx.Observations {
+				if regionObs[obs.ObserverID] {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		filteredTxs = append(filteredTxs, tx)
+	}
+
 	// Pre-pass: build the full hop-disambiguation context from all in-window
 	// txs BEFORE any resolveHop call. The earlier shape — populating
 	// contextPubkeys lazily during the main scan and reading it from a
@@ -5314,22 +5349,7 @@ func (s *PacketStore) computeAnalyticsTopology(region string, window TimeWindow)
 	var contextPubkeys []string
 	{
 		seen := make(map[string]struct{}, 64)
-		for _, tx := range s.packets {
-			if !window.Includes(tx.FirstSeen) {
-				continue
-			}
-			if regionObs != nil {
-				match := false
-				for _, obs := range tx.Observations {
-					if regionObs[obs.ObserverID] {
-						match = true
-						break
-					}
-				}
-				if !match {
-					continue
-				}
-			}
+		for _, tx := range filteredTxs {
 			for _, pk := range buildHopContextPubkeys(tx, pm) {
 				if _, ok := seen[pk]; ok {
 					continue
@@ -5358,28 +5378,11 @@ func (s *PacketStore) computeAnalyticsTopology(region string, window TimeWindow)
 	observerMap := map[string]string{} // observer_id → observer_name
 	perObserver := map[string]map[string]*struct{ minDist, maxDist, count int }{}
 
-	for _, tx := range s.packets {
-		if !window.Includes(tx.FirstSeen) {
-			continue
-		}
+	for _, tx := range filteredTxs {
 		hops := txGetParsedPath(tx)
 		if len(hops) == 0 {
 			continue
 		}
-		if regionObs != nil {
-			match := false
-			for _, obs := range tx.Observations {
-				if regionObs[obs.ObserverID] {
-					match = true
-					break
-				}
-			}
-			if !match {
-				continue
-			}
-		}
-
-		// Hop-disambiguation context was assembled in the pre-pass above (#1197).
 
 		n := len(hops)
 		hopCounts[n]++
