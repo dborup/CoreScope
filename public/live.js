@@ -240,6 +240,45 @@
 
   // === VCR Controls ===
 
+  // #1206: publish the VCR bar's measured height as --vcr-bar-height on the
+  // .live-page root so bottom-pinned overlays (feed, legend, corner panels)
+  // can reserve the right amount of space and never get occluded by the bar.
+  // Cleanup state is captured in module-scoped _vcrHeightCleanup so destroy()
+  // can disconnect the ResizeObserver + remove the resize/visualViewport
+  // listeners on SPA page navigation (otherwise re-mounts of /live would
+  // accumulate observers forever — same leak class as #1180).
+  var _vcrHeightCleanup = null;
+  function initVCRHeightTracker() {
+    // #1206 r1 (adversarial should-fix): guard against double-init —
+    // if a prior tracker is still active (re-mount race, dev hot-reload),
+    // tear it down BEFORE overwriting _vcrHeightCleanup so the previous
+    // ResizeObserver/listeners aren't orphaned.
+    if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
+    var bar = document.getElementById('vcrBar');
+    var page = document.querySelector('.live-page');
+    if (!bar || !page) return;
+    function publish() {
+      var h = Math.ceil(bar.getBoundingClientRect().height) || 58;
+      page.style.setProperty('--vcr-bar-height', h + 'px');
+    }
+    publish();
+    var ro = null;
+    if (typeof ResizeObserver === 'function') {
+      try { ro = new ResizeObserver(publish); ro.observe(bar); } catch (_) { ro = null; }
+    }
+    window.addEventListener('resize', publish);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', publish);
+    }
+    _vcrHeightCleanup = function() {
+      if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
+      window.removeEventListener('resize', publish);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', publish);
+      }
+    };
+  }
+
   function vcrSetMode(mode) {
     VCR.mode = mode;
     if (mode !== 'LIVE' && !VCR.frozenNow) VCR.frozenNow = Date.now();
@@ -1022,6 +1061,7 @@
     showHeatMap();
     connectWS();
     initResizeHandler();
+    initVCRHeightTracker();
     startRateCounter();
 
     // Check for packet replay from packets page (single or array of observations)
@@ -3358,6 +3398,7 @@
       window.removeEventListener('orientationchange', _onResize);
       if (window.visualViewport) window.visualViewport.removeEventListener('resize', _onResize);
     }
+    if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
     // Restore #app height to CSS default
     const appEl = document.getElementById('app');
     if (appEl) appEl.style.height = '';
