@@ -1633,27 +1633,38 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		return nil, 0, err
 	}
 
-	// 2) Page of transmission IDs — newest LIMIT msgs minus OFFSET, returned
-	//    in ASC order to match prior API contract (tail of message log).
-	pageSQL := `SELECT t.id FROM (
-			SELECT id FROM transmissions
-			WHERE channel_hash = ? AND payload_type = 5
-			ORDER BY first_seen DESC
-			LIMIT ? OFFSET ?
-		) t`
-	// When a region filter is in play, we must filter on the inner subquery
-	// against the transmissions table — re-use the same EXISTS form but
-	// wrap so we still get DESC-then-ASC pagination.
+	// 2) Page of transmission IDs — newest LIMIT msgs minus OFFSET.
+	//    Issue #1366 follow-up (fix #2): select page by latest observation
+	//    timestamp (LatestSeen) DESC, NOT by t.first_seen DESC — otherwise
+	//    a heartbeat tx whose FirstSeen is 24h old but whose latest
+	//    observation is fresh gets pushed off page 1.
+	//
+	//    PR #1368 perf fix: use a correlated subquery for MAX(timestamp) per
+	//    transmission. With the composite index idx_observations_tx_ts
+	//    (transmission_id, timestamp) sqlite resolves MAX as an index-only
+	//    rightmost-leaf lookup — total O(N_tx · log N_obs). The previously-
+	//    used grouped derived table (`GROUP BY transmission_id` over the
+	//    whole observations table) scanned all observation rows (O(N_obs))
+	//    and blew the 1.5s perf budget on 1500 tx × 50 obs under -race.
+	//    LEFT JOIN + GROUP BY t.id was even slower because GROUP BY forced
+	//    a temp B-tree on the full transmissions×observations join.
+	//
+	//    The returned page is in newest-LatestSeen-FIRST (DESC) order.
+	//    The Go side re-orders the emitted rows ASC below (fix #3) so the
+	//    contract matches the in-memory path's tail-of-msgOrder convention.
+	pageSQL := `SELECT t.id,
+		COALESCE((SELECT MAX(timestamp) FROM observations WHERE transmission_id = t.id), 0) AS latest_obs_epoch
+		FROM transmissions t
+		WHERE t.channel_hash = ? AND t.payload_type = 5
+		ORDER BY latest_obs_epoch DESC, t.id DESC
+		LIMIT ? OFFSET ?`
 	if len(regionCodes) > 0 {
-		pageSQL = `SELECT id FROM (
-				SELECT t.id, t.first_seen FROM transmissions t
-				WHERE t.channel_hash = ? AND t.payload_type = 5` + regionFilter + `
-				ORDER BY t.first_seen DESC
-				LIMIT ? OFFSET ?
-			) sub
-			ORDER BY first_seen ASC`
-	} else {
-		pageSQL += ` ORDER BY (SELECT first_seen FROM transmissions WHERE id = t.id) ASC`
+		pageSQL = `SELECT t.id,
+			COALESCE((SELECT MAX(timestamp) FROM observations WHERE transmission_id = t.id), 0) AS latest_obs_epoch
+			FROM transmissions t
+			WHERE t.channel_hash = ? AND t.payload_type = 5` + regionFilter + `
+			ORDER BY latest_obs_epoch DESC, t.id DESC
+			LIMIT ? OFFSET ?`
 	}
 	pageArgs := []interface{}{channelHash}
 	pageArgs = append(pageArgs, regionArgs...)
@@ -1666,7 +1677,8 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	pageIDs := make([]int, 0, limit)
 	for idRows.Next() {
 		var id int
-		if err := idRows.Scan(&id); err == nil {
+		var le sql.NullInt64
+		if err := idRows.Scan(&id, &le); err == nil {
 			pageIDs = append(pageIDs, id)
 		}
 	}
@@ -1688,7 +1700,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	var obsSQL string
 	if db.isV3 {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				obs.id, obs.name, o.snr, o.path_json
+				obs.id, obs.name, o.snr, o.path_json, o.timestamp
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -1696,7 +1708,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			ORDER BY o.id ASC`
 	} else {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				o.observer_id, o.observer_name, o.snr, o.path_json
+				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
@@ -1710,8 +1722,9 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	defer rows.Close()
 
 	type msg struct {
-		Data    map[string]interface{}
-		Repeats int
+		Data       map[string]interface{}
+		Repeats    int
+		LatestEpoch int64 // max observation timestamp (unix seconds) — issue #1366
 	}
 	msgMap := make(map[int]*msg, len(pageIDs))
 
@@ -1719,12 +1732,16 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		var pktID, txID int
 		var pktHash, dj, fs, obsID, obsName, pathJSON sql.NullString
 		var snr sql.NullFloat64
-		rows.Scan(&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON)
+		var obsTs sql.NullInt64
+		rows.Scan(&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs)
 		if !dj.Valid {
 			continue
 		}
 		if existing, ok := msgMap[txID]; ok {
 			existing.Repeats++
+			if obsTs.Valid && obsTs.Int64 > existing.LatestEpoch {
+				existing.LatestEpoch = obsTs.Int64
+			}
 			continue
 		}
 		var decoded map[string]interface{}
@@ -1759,6 +1776,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				"sender":           displaySender,
 				"text":             displayText,
 				"timestamp":        nullStr(fs),
+				"first_seen":       nullStr(fs),
 				"sender_timestamp": senderTs,
 				"packetId":         pktID,
 				"packetHash":       nullStr(pktHash),
@@ -1769,6 +1787,9 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			},
 			Repeats: 1,
 		}
+		if obsTs.Valid {
+			m.LatestEpoch = obsTs.Int64
+		}
 		if obsName.Valid {
 			m.Data["observers"] = []string{obsName.String}
 		} else if obsID.Valid {
@@ -1777,7 +1798,16 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		msgMap[txID] = m
 	}
 
-	messages := make([]map[string]interface{}, 0, len(pageIDs))
+	// Issue #1366 follow-up: emit batch sorted by LatestSeen ascending
+	// (newest LAST) — matches the in-memory path's tail-of-msgOrder
+	// convention and the frontend's scrollToBottom() behavior. pageIDs
+	// order is not LatestSeen-ordered for in-page rows after fix #2.
+	type emitted struct {
+		latestEpoch int64
+		txID        int
+		data        map[string]interface{}
+	}
+	rowsOut := make([]emitted, 0, len(pageIDs))
 	for _, id := range pageIDs {
 		m, ok := msgMap[id]
 		if !ok {
@@ -1787,7 +1817,22 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			continue
 		}
 		m.Data["repeats"] = m.Repeats
-		messages = append(messages, m.Data)
+		// Issue #1366: emit LatestSeen (max obs timestamp) as the rendered
+		// `timestamp` field. `first_seen` stays alongside for debug.
+		if m.LatestEpoch > 0 {
+			m.Data["timestamp"] = time.Unix(m.LatestEpoch, 0).UTC().Format(time.RFC3339)
+		}
+		rowsOut = append(rowsOut, emitted{latestEpoch: m.LatestEpoch, txID: id, data: m.Data})
+	}
+	sort.SliceStable(rowsOut, func(i, j int) bool {
+		if rowsOut[i].latestEpoch != rowsOut[j].latestEpoch {
+			return rowsOut[i].latestEpoch < rowsOut[j].latestEpoch
+		}
+		return rowsOut[i].txID < rowsOut[j].txID
+	})
+	messages := make([]map[string]interface{}, 0, len(rowsOut))
+	for _, e := range rowsOut {
+		messages = append(messages, e.data)
 	}
 
 	return messages, total, nil
