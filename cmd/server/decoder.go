@@ -91,6 +91,11 @@ type Payload struct {
 	MAC             string       `json:"mac,omitempty"`
 	EncryptedData   string       `json:"encryptedData,omitempty"`
 	ExtraHash       string       `json:"extraHash,omitempty"`
+	// Extended ACK fields per firmware 1.16.0 (issue #1610) — populated by
+	// decodeAck once the server-side re-decoder is upgraded (issue #1694).
+	AckLen     *int `json:"ackLen,omitempty"`
+	AckAttempt *int `json:"ackAttempt,omitempty"`
+	AckRand    *int `json:"ackRand,omitempty"`
 	PubKey          string       `json:"pubKey,omitempty"`
 	Timestamp       uint32       `json:"timestamp,omitempty"`
 	TimestampISO    string       `json:"timestampISO,omitempty"`
@@ -124,6 +129,11 @@ type Payload struct {
 	InnerType     *int   `json:"innerType,omitempty"`
 	InnerTypeName string `json:"innerTypeName,omitempty"`
 	InnerAckCrc   string `json:"innerAckCrc,omitempty"`
+	// Extended ACK inner fields (issue #1610 / #1694) — populated by
+	// decodeMultipart once ACK parity is ported from the ingestor.
+	InnerAckLen     *int   `json:"innerAckLen,omitempty"`
+	InnerAckAttempt *int   `json:"innerAckAttempt,omitempty"`
+	InnerAckRand    *int   `json:"innerAckRand,omitempty"`
 	InnerPayload  string `json:"innerPayload,omitempty"`
 	// CONTROL (PAYLOAD_TYPE_CONTROL=0x0B) byte0 flags, per
 	// firmware/src/Mesh.cpp:69 — high-bit = zero-hop direct subset.
@@ -241,10 +251,27 @@ func decodeAck(buf []byte) Payload {
 		return Payload{Type: "ACK", Error: "too short", RawHex: hex.EncodeToString(buf)}
 	}
 	checksum := binary.LittleEndian.Uint32(buf[0:4])
-	return Payload{
+	ackLen := len(buf)
+	if ackLen > 6 {
+		ackLen = 6
+	}
+	p := Payload{
 		Type:      "ACK",
 		ExtraHash: fmt.Sprintf("%08x", checksum),
+		AckLen:    &ackLen,
 	}
+	// Firmware 1.16.0 extended ACK (issue #1610): 5th byte is the attempt
+	// counter (commit f6e6fdaa), 6th byte is a random byte added so identical
+	// attempts still hash uniquely (commit a130a95a).
+	if len(buf) >= 5 {
+		attempt := int(buf[4])
+		p.AckAttempt = &attempt
+	}
+	if len(buf) >= 6 {
+		rnd := int(buf[5])
+		p.AckRand = &rnd
+	}
+	return p
 }
 
 func decodeAdvert(buf []byte, validateSignatures bool) Payload {
@@ -378,6 +405,22 @@ func decodeMultipart(buf []byte) Payload {
 	if innerType == PayloadACK && len(buf) >= 5 {
 		crc := binary.LittleEndian.Uint32(buf[1:5])
 		p.InnerAckCrc = fmt.Sprintf("%08x", crc)
+		// Firmware 1.16.0 extended ACK (issue #1610): inner ACK blob may be
+		// 5 or 6 bytes (payload_len = 1 + ack_len) instead of always 4.
+		// Attempt counter added in commit f6e6fdaa, RNG byte in commit a130a95a.
+		ackLen := len(buf) - 1
+		if ackLen > 6 {
+			ackLen = 6
+		}
+		p.InnerAckLen = &ackLen
+		if len(buf) >= 6 {
+			attempt := int(buf[5])
+			p.InnerAckAttempt = &attempt
+		}
+		if len(buf) >= 7 {
+			rnd := int(buf[6])
+			p.InnerAckRand = &rnd
+		}
 	} else if len(buf) > 1 {
 		p.InnerPayload = hex.EncodeToString(buf[1:])
 	}
