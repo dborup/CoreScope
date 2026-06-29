@@ -2545,8 +2545,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
     }
 
     _ngState = createGraphState(graphData);
-    renderNGStats(_ngState);
-    startGraphRenderer();
+    // Render through the filter path so the first paint already respects the
+    // default filters (observers unchecked, saved min-score) and the
+    // node-count guard is evaluated against the displayed set, not the full
+    // fetched graph.
+    applyNGFilters();
 
     // Filter listeners
     // Restore saved min score from localStorage
@@ -2557,10 +2560,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       applyNGFilters();
     }
 
+    var ngScoreDebounce;
     document.getElementById('ngMinScore').addEventListener('input', function() {
       document.getElementById('ngMinScoreVal').textContent = (this.value / 100).toFixed(2);
       localStorage.setItem('ng-min-score', this.value);
-      applyNGFilters();
+      // Debounce the O(N+E) refilter so dragging the slider doesn't rebuild the
+      // node set on every pixel (review of #1758).
+      clearTimeout(ngScoreDebounce);
+      ngScoreDebounce = setTimeout(applyNGFilters, 50);
     });
     document.getElementById('ngConfidence').addEventListener('change', applyNGFilters);
     rcEl.addEventListener('change', applyNGFilters);
@@ -2583,6 +2590,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       stats: data.stats || {},
       zoom: 1, panX: 0, panY: 0,
       dragging: null, panning: false,
+      hoverNode: null,
       lastMouseX: 0, lastMouseY: 0,
       cooling: 1.0, animId: null
     };
@@ -2619,8 +2627,15 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
     _ngState.nodeIdx = {};
     _ngState.nodes.forEach((n, i) => { _ngState.nodeIdx[n.pubkey] = i; });
 
+    // A full re-anneal (cooling back to 1.0) on every filter change is
+    // deliberate: the displayed node set just changed, so the prior layout
+    // is stale and we want the simulation to settle the new graph. This is
+    // acceptable at the current 1000-node limit; revisit if the limit grows.
     _ngState.cooling = 1.0;
     renderNGStats(_ngState);
+    // Re-evaluate the node-count guard against the new filtered set and
+    // (re)start or stop the force-simulation loop accordingly.
+    startGraphRenderer();
   }
 
   function renderNGStats(st) {
@@ -2681,35 +2696,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
     listEl.innerHTML = html;
   }
 
-  function startGraphRenderer() {
-    if (!_ngState) return;
-
-    // Node count guard: skip force simulation for very large graphs
-    var NODE_LIMIT = 1000;
-    if (_ngState.allNodes.length > NODE_LIMIT) {
-      var el = document.getElementById('ngCanvas');
-      if (el) {
-        el.style.display = 'none';
-        var msg = document.createElement('div');
-        msg.className = 'analytics-card';
-        msg.innerHTML = '<p class="text-muted">Graph has ' + _ngState.allNodes.length + ' nodes (limit: ' + NODE_LIMIT + '). Force simulation skipped for performance. Use filters to reduce the node count.</p>';
-        el.parentNode.insertBefore(msg, el);
-      }
-      return;
-    }
-
-    const canvas = document.getElementById('ngCanvas');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = canvas.clientWidth * dpr;
-    canvas.height = canvas.clientHeight * dpr;
-    ctx.scale(dpr, dpr);
-    const W = canvas.clientWidth, H = canvas.clientHeight;
-
-    // Interaction
-    let hoverNode = null;
-
+  function bindNGCanvasInteraction(canvas) {
     function canvasToGraph(cx, cy) {
       return { x: (cx - _ngState.panX) / _ngState.zoom, y: (cy - _ngState.panY) / _ngState.zoom };
     }
@@ -2758,8 +2745,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
         _ngState.lastMouseY = e.clientY;
       } else {
         const n = findNode(cx, cy);
-        if (n !== hoverNode) {
-          hoverNode = n;
+        if (n !== _ngState.hoverNode) {
+          _ngState.hoverNode = n;
           canvas.style.cursor = n ? 'pointer' : 'grab';
           const tip = document.getElementById('ngTooltip');
           if (n && tip) {
@@ -2770,7 +2757,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
           } else if (tip) {
             tip.style.display = 'none';
           }
-        } else if (hoverNode) {
+        } else if (_ngState.hoverNode) {
           const tip = document.getElementById('ngTooltip');
           if (tip) { tip.style.left = (cx + 12) + 'px'; tip.style.top = (cy - 8) + 'px'; }
         }
@@ -2784,7 +2771,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       }
       _ngState.dragging = null;
       _ngState.panning = false;
-      canvas.style.cursor = hoverNode ? 'pointer' : 'grab';
+      canvas.style.cursor = _ngState.hoverNode ? 'pointer' : 'grab';
     });
 
     canvas.addEventListener('mouseleave', function() {
@@ -2793,7 +2780,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       _ngState._wasDragging = false;
       const tip = document.getElementById('ngTooltip');
       if (tip) tip.style.display = 'none';
-      hoverNode = null;
+      _ngState.hoverNode = null;
     });
 
     canvas.addEventListener('click', function(e) {
@@ -2828,6 +2815,71 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       _ngState.panY = cy - (cy - _ngState.panY) * (newZoom / _ngState.zoom);
       _ngState.zoom = newZoom;
     }, { passive: false });
+  }
+
+  function startGraphRenderer() {
+    if (!_ngState) return;
+
+    // Re-entrant: the filter path calls this to restart against the new node
+    // set, so cancel any loop already running before deciding what to do.
+    if (_ngState.animId) {
+      cancelAnimationFrame(_ngState.animId);
+      _ngState.animId = null;
+    }
+    // Re-entrancy epoch: a just-cancelled in-flight tick() (or one re-entered
+    // from a microtask) must not schedule a second loop. Each run bumps the
+    // epoch; tick() captures its own and early-returns once a newer run starts.
+    _ngState._runEpoch = (_ngState._runEpoch || 0) + 1;
+    var myEpoch = _ngState._runEpoch;
+
+    const canvas = document.getElementById('ngCanvas');
+    if (!canvas) return;
+    var skipMsg = document.getElementById('ngSkipMsg');
+
+    // Node count guard: skip the force simulation for graphs too large to
+    // render usefully. Keyed off the DISPLAYED (filtered) set — _ngState.nodes
+    // — NOT the full fetched graph (_ngState.allNodes), so narrowing the
+    // filters re-enables rendering. The "skipped" notice has a stable id so
+    // it can be toggled on the next call.
+    var NODE_LIMIT = 1000;
+    if (_ngState.nodes.length > NODE_LIMIT) {
+      canvas.style.display = 'none';
+      if (!skipMsg) {
+        skipMsg = document.createElement('div');
+        skipMsg.id = 'ngSkipMsg';
+        skipMsg.className = 'analytics-card';
+        canvas.parentNode.insertBefore(skipMsg, canvas);
+      }
+      // Build via textContent (never innerHTML) per the project's XSS rule —
+      // these are Numbers today, but a future coercion bug must not inject. Show
+      // filtered-of-total so the operator sees the rest were filtered out, not
+      // lost (review of #1758).
+      var ngTotal = (_ngState.allNodes || _ngState.nodes).length;
+      skipMsg.textContent = '';
+      var skipP = document.createElement('p');
+      skipP.className = 'text-muted';
+      skipP.textContent = _ngState.nodes.length + ' of ' + ngTotal + ' nodes match the current filters (limit: ' + NODE_LIMIT + '). Force simulation skipped for performance — tighten the filters to render.';
+      skipMsg.appendChild(skipP);
+      return;
+    }
+    if (skipMsg) skipMsg.remove();
+    canvas.style.display = '';
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * dpr;
+    canvas.height = canvas.clientHeight * dpr;
+    ctx.scale(dpr, dpr);
+    const W = canvas.clientWidth, H = canvas.clientHeight;
+
+    // Interaction listeners are bound once per tab session (the #ngCanvas
+    // element and _ngState persist across filter re-renders); re-attaching on
+    // every applyNGFilters() would leak handlers (review of #1758). Binding
+    // once also means transient flags like _wasDragging survive re-renders.
+    // Hover state lives on _ngState so listeners and the draw loop agree.
+    if (!_ngState._listenersBound) {
+      bindNGCanvasInteraction(canvas);
+      _ngState._listenersBound = true;
+    }
 
     // Cache text color to avoid getComputedStyle every frame
     const _labelColor = cssVar('--text-primary') || '#e0e0e0';
@@ -2836,6 +2888,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
     // Performance: 500 nodes brute-force repulsion: avg ~4ms/frame = 250fps headroom (measured Chrome 120, M1)
     var _perfFrameTimes = [], _perfLastTime = 0;
     function tick() {
+      if (_ngState._runEpoch !== myEpoch) { return; } // a newer startGraphRenderer run superseded this loop
       if (!document.getElementById('ngCanvas')) { _ngState.animId = null; return; }
       var now = performance.now();
       if (_perfLastTime) _perfFrameTimes.push(now - _perfLastTime);
@@ -2928,7 +2981,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
         ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
-        if (n === hoverNode) {
+        if (n === _ngState.hoverNode) {
           ctx.strokeStyle = '#fff';
           ctx.lineWidth = 2;
           ctx.stroke();
