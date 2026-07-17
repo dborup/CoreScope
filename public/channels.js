@@ -1419,6 +1419,7 @@
         var pktId = m.data?.id || null;
         var snr = m.data?.snr ?? m.data?.packet?.snr ?? payload.SNR ?? null;
         var observer = m.data?.packet?.observer_name || m.data?.observer || null;
+        var scope = m.data?.scope_name || m.data?.packet?.scope_name || null;
 
         // Update channel list entry — only once per unique packet hash
         var isFirstObservation = pktHash && !seenHashes.has(pktHash + ':' + channelKey);
@@ -1470,6 +1471,7 @@
               observers: observer ? [observer] : [],
               hops: payload.path_len || 0,
               snr: snr,
+              scope: scope,
               // #1498: mark as WS-pushed so a later REST replacement
               // (selectChannel / refreshMessages) can merge instead of
               // stomp. Without this flag the REST response wipes any
