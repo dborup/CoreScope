@@ -3453,6 +3453,29 @@ func (s *Server) handleDroppedPackets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, results)
 }
 
+// normalizeRegionNames mirrors cmd/ingestor's loadRegionKeys name handling
+// (trim, ensure leading "#", dedupe) but only needs the names — the server
+// never derives HMAC keys, it just diffs configured names against observed
+// scope_name values for region-utilization analytics.
+func normalizeRegionNames(raw []string) []string {
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		name := strings.TrimSpace(r)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "#") {
+			name = "#" + name
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 	const scopeStatsTTL = 30 * time.Second
 
@@ -3479,6 +3502,21 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
+	}
+
+	if s.cfg != nil && len(s.cfg.HashRegions) > 0 {
+		configured := normalizeRegionNames(s.cfg.HashRegions)
+		resp.ConfiguredRegions = len(configured)
+		if matched, err := s.db.GetMatchedRegionNames(); err == nil {
+			unused := make([]string, 0, len(configured))
+			for _, name := range configured {
+				if !matched[name] {
+					unused = append(unused, name)
+				}
+			}
+			sort.Strings(unused)
+			resp.UnusedRegions = unused
+		}
 	}
 
 	s.scopeStatsMu.Lock()

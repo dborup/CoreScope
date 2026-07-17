@@ -2890,6 +2890,30 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 	return resp, nil
 }
 
+// GetMatchedRegionNames returns the set of scope_name values that have ever
+// matched at least one transmission still in retention (NULL and empty-string
+// "unknown" rows are excluded). Used to diff against the operator's
+// configured hashRegions list and surface which configured regions have
+// never actually matched anything — region-utilization analytics.
+func (db *DB) GetMatchedRegionNames() (map[string]bool, error) {
+	matched := make(map[string]bool)
+	if !db.hasScopeName {
+		return matched, nil
+	}
+	rows, err := db.conn.Query(`SELECT DISTINCT scope_name FROM transmissions WHERE scope_name IS NOT NULL AND scope_name != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("matched region names query: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil {
+			matched[name] = true
+		}
+	}
+	return matched, rows.Err()
+}
+
 // NodeForGeoPrune holds the minimal fields needed for geo-filter pruning.
 type NodeForGeoPrune struct {
 	PubKey string

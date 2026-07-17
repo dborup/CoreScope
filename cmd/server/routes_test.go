@@ -4246,6 +4246,57 @@ func TestHandleScopeStats(t *testing.T) {
 	}
 }
 
+// TestHandleScopeStats_UnusedRegions verifies the region-utilization diff:
+// configured hashRegions that never matched a transmission are reported so
+// an operator can see how much of their region list is dead weight.
+func TestHandleScopeStats_UnusedRegions(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT DEFAULT NULL`); err != nil {
+		t.Fatalf("add scope_name column: %v", err)
+	}
+	srv.db.hasScopeName = true
+
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := srv.db.conn.Exec(
+		`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,scope_name) VALUES (?,?,?,?,5,?)`,
+		"aa", "h1", now, 0, "#belgium",
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	// "noHashPrefix" should be normalized to "#noHashPrefix" — same rule
+	// the ingestor applies when deriving HMAC keys (loadRegionKeys).
+	srv.cfg.HashRegions = []string{"#belgium", "#unused-region", "noHashPrefix", "#belgium"}
+
+	req := httptest.NewRequest("GET", "/api/scope-stats?window=24h", nil)
+	w := httptest.NewRecorder()
+	srv.handleScopeStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp ScopeStatsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ConfiguredRegions != 3 { // dedup collapses the duplicate "#belgium"
+		t.Errorf("configuredRegions = %d, want 3", resp.ConfiguredRegions)
+	}
+	want := []string{"#noHashPrefix", "#unused-region"}
+	if len(resp.UnusedRegions) != len(want) {
+		t.Fatalf("unusedRegions = %v, want %v", resp.UnusedRegions, want)
+	}
+	for i, name := range want {
+		if resp.UnusedRegions[i] != name {
+			t.Errorf("unusedRegions[%d] = %q, want %q", i, resp.UnusedRegions[i], name)
+		}
+	}
+}
+
 func TestHandleScopeStatsInvalidWindow(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT DEFAULT NULL`); err != nil {

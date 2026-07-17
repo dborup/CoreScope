@@ -4489,7 +4489,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
           '<thead><tr><th>Region</th><th>Messages</th><th>% of Scoped</th></tr></thead>' +
           '<tbody id="scopes-tbody"></tbody>' +
         '</table>' +
-        '<div id="scopes-chart"></div>';
+        '<div id="scopes-chart"></div>' +
+        '<div id="scopes-utilization" style="margin-top:16px"></div>';
 
       // Attach window-button click listeners (once)
       el.querySelectorAll('[data-win]').forEach(function(btn) {
@@ -4617,6 +4618,36 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
           chartHtml = '<p class="text-muted" style="font-size:0.85em;margin:12px 0 0">Insufficient data points to render chart — wait for more observations in this window.</p>';
         }
         chartEl.innerHTML = chartHtml;
+      }
+
+      // Region utilization: how much of the configured hashRegions list
+      // has never actually matched anything — all-time (not window-scoped),
+      // so it doesn't fluctuate with the 1h/24h/7d selector above. Only
+      // shown when the server config has hashRegions configured.
+      var utilEl = document.getElementById('scopes-utilization');
+      if (utilEl) {
+        var configured = d.configuredRegions || 0;
+        if (configured > 0) {
+          var unused = d.unusedRegions || [];
+          var usedCount = configured - unused.length;
+          var unusedPct = (unused.length / configured * 100).toFixed(1);
+          var listHtml = unused.map(function(name) { return esc(name); }).join(', ');
+          utilEl.innerHTML =
+            '<h4 style="margin:0 0 4px">Region Utilization</h4>' +
+            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
+              'All-time, not limited to the window above — has this configured region ever matched a message still in retention?' +
+            '</p>' +
+            '<p style="margin:0 0 8px">' +
+              '<strong>' + usedCount.toLocaleString() + '</strong> of <strong>' + configured.toLocaleString() + '</strong> configured regions have matched at least once' +
+              (unused.length > 0 ? ' — <strong>' + unused.length.toLocaleString() + '</strong> (' + unusedPct + '%) have never matched anything.' : '.') +
+            '</p>' +
+            (unused.length > 0 ?
+              '<details><summary style="cursor:pointer">Show ' + unused.length.toLocaleString() + ' unused region' + (unused.length === 1 ? '' : 's') + '</summary>' +
+              '<div class="mono text-muted" style="font-size:11px;margin-top:8px;max-height:200px;overflow-y:auto;line-height:1.6">' + listHtml + '</div></details>'
+              : '');
+        } else {
+          utilEl.innerHTML = '';
+        }
       }
     }
 

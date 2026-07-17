@@ -41,6 +41,13 @@ type Config struct {
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
 
+	// HashRegions mirrors the ingestor's region-scope config (same
+	// config.json key). The server never derives HMAC keys from it — it
+	// only needs the configured *names* to report which regions have
+	// never matched any observed transmission (region-utilization
+	// analytics, /api/scope-stats "unusedRegions").
+	HashRegions []string `json:"hashRegions,omitempty"`
+
 	// NodeBlacklist is a list of public keys to exclude from all API responses.
 	// Blacklisted nodes are hidden from node lists, search, detail, map, and stats.
 	// Use this to filter out trolls, nodes with offensive names, or nodes

@@ -118,6 +118,13 @@ type ScopeStatsResponse struct {
 	Summary    ScopeStatsSummary  `json:"summary"`
 	ByRegion   []ScopeRegionCount `json:"byRegion"`
 	TimeSeries []ScopeTimePoint   `json:"timeSeries"`
+	// ConfiguredRegions/UnusedRegions are all-time (not window-scoped):
+	// how many hashRegions are configured, and which of them have never
+	// matched a single transmission still in retention. Lets an operator
+	// see at a glance how much of their region list is dead weight.
+	// Omitted (both zero-value) when the server config has no hashRegions.
+	ConfiguredRegions int      `json:"configuredRegions,omitempty"`
+	UnusedRegions     []string `json:"unusedRegions,omitempty"`
 }
 
 // ─── Health ────────────────────────────────────────────────────────────────────
