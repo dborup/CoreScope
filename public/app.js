@@ -15,11 +15,14 @@ function getPathLenOffset(routeType) { return isTransportRoute(routeType) ? 5 : 
 /**
  * scopeName is optional (callers that don't pass it get the original
  * unscoped "T" badge). Pass a packet's scope_name to also surface the
- * region-scope state: a non-empty string shows the region name in the
- * tooltip, an empty string (transport-eligible but no region matched, or
- * an HMAC collision made the match ambiguous) is flagged as "unknown"
- * with a distinct badge style so it's visually distinguishable from a
- * confidently-resolved scope.
+ * region-scope state directly in the badge label (not just on hover): a
+ * non-empty string is appended to the label as "T·#region", an empty
+ * string (transport-eligible but no region matched, or an HMAC collision
+ * made the match ambiguous) renders as "T?" with a distinct muted badge
+ * style so it's visually distinguishable from a resolved scope without
+ * relying on the tooltip or on color alone. The full name always stays
+ * in the title too, for the (rare) case a long region name gets
+ * ellipsis-truncated by the badge's CSS max-width.
  */
 function transportBadge(rt, scopeName) {
   if (!isTransportRoute(rt)) return '';
@@ -29,6 +32,7 @@ function transportBadge(rt, scopeName) {
   if (scopeName !== undefined) {
     if (scopeName) {
       title += ' · Scope: ' + scopeName;
+      label = 'T·' + scopeName;
     } else {
       title += ' · Scope: unknown';
       cls += ' badge-transport-unknown';

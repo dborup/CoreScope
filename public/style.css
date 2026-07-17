@@ -1424,6 +1424,11 @@ body.scroll-locked { overflow: hidden; }
   font-size: 9px; font-weight: 700; font-family: var(--mono);
   background: var(--transport-badge-bg, #f59e0b20); color: var(--transport-badge-fg, #d97706);
   letter-spacing: .5px; vertical-align: middle;
+  /* Region names can run long (e.g. "#dk-trekantsomraadet") — cap and
+     ellipsis instead of blowing out the Type column; full name is
+     always in the title attribute. */
+  max-width: 90px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: middle;
 }
 /* Transport-scoped but the region couldn't be resolved (no configured
    region matched, or an HMAC collision made the match ambiguous) —
