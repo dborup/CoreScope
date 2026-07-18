@@ -4495,8 +4495,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
         '<div id="scopes-hourly" style="margin-top:16px"></div>' +
         '<div id="scopes-utilization" style="margin-top:16px"></div>' +
         '<div id="scopes-repeaters" style="margin-top:16px"></div>' +
-        '<div id="scopes-bridges" style="margin-top:16px"></div>' +
-        '<div id="scopes-origin-nodes" style="margin-top:16px"></div>';
+        '<div id="scopes-origin-nodes" style="margin-top:16px"></div>' +
+        '<div id="scopes-bridges" style="margin-top:16px"></div>';
 
       // Attach window-button click listeners (once)
       el.querySelectorAll('[data-win]').forEach(function(btn) {
