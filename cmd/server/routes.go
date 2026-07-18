@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/packetpath"
 	"github.com/meshcore-analyzer/prunequeue"
+	regionutil "github.com/meshcore-analyzer/regions"
 )
 
 // memBreakdownNote is the static accounting caveat attached to the opt-in
@@ -3453,29 +3454,6 @@ func (s *Server) handleDroppedPackets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, results)
 }
 
-// normalizeRegionNames mirrors cmd/ingestor's loadRegionKeys name handling
-// (trim, ensure leading "#", dedupe) but only needs the names — the server
-// never derives HMAC keys, it just diffs configured names against observed
-// scope_name values for region-utilization analytics.
-func normalizeRegionNames(raw []string) []string {
-	seen := make(map[string]bool, len(raw))
-	out := make([]string, 0, len(raw))
-	for _, r := range raw {
-		name := strings.TrimSpace(r)
-		if name == "" {
-			continue
-		}
-		if !strings.HasPrefix(name, "#") {
-			name = "#" + name
-		}
-		if !seen[name] {
-			seen[name] = true
-			out = append(out, name)
-		}
-	}
-	return out
-}
-
 func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 	const scopeStatsTTL = 30 * time.Second
 
@@ -3505,7 +3483,7 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.cfg != nil && len(s.cfg.HashRegions) > 0 {
-		configured := normalizeRegionNames(s.cfg.HashRegions)
+		configured := regionutil.NormalizeNames(s.cfg.HashRegions)
 		resp.ConfiguredRegions = len(configured)
 		if matched, err := s.db.GetMatchedRegionNames(); err == nil {
 			unused := make([]string, 0, len(configured))
@@ -3516,6 +3494,8 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 			}
 			sort.Strings(unused)
 			resp.UnusedRegions = unused
+		} else {
+			log.Printf("WARN GetMatchedRegionNames: %v", err)
 		}
 	}
 
@@ -3600,22 +3580,30 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if byScope, err := s.db.GetNodesByDefaultScope(); err == nil && len(byScope) > 0 {
-		originating := make([]ScopeRegionRepeaters, 0, len(byScope))
-		for region, refs := range byScope {
-			sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
-			originating = append(originating, ScopeRegionRepeaters{Region: region, Count: len(refs), Repeaters: refs})
+	if byScope, err := s.db.GetNodesByDefaultScope(); err == nil {
+		if len(byScope) > 0 {
+			originating := make([]ScopeRegionRepeaters, 0, len(byScope))
+			for region, refs := range byScope {
+				sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+				originating = append(originating, ScopeRegionRepeaters{Region: region, Count: len(refs), Repeaters: refs})
+			}
+			sort.Slice(originating, func(i, j int) bool { return originating[i].Count > originating[j].Count })
+			resp.OriginatingNodesByRegion = originating
 		}
-		sort.Slice(originating, func(i, j int) bool { return originating[i].Count > originating[j].Count })
-		resp.OriginatingNodesByRegion = originating
+	} else {
+		log.Printf("WARN GetNodesByDefaultScope: %v", err)
 	}
 
 	if chanStats, err := s.db.GetChannelMessageScopeStats(window); err == nil {
 		resp.ChannelMessages = chanStats
+	} else {
+		log.Printf("WARN GetChannelMessageScopeStats: %v", err)
 	}
 
 	if adoption, err := s.db.GetChannelScopeAdoption(window); err == nil {
 		resp.ChannelScopeAdoption = adoption
+	} else {
+		log.Printf("WARN GetChannelScopeAdoption: %v", err)
 	}
 
 	s.scopeStatsMu.Lock()

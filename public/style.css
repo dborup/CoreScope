@@ -1428,7 +1428,7 @@ body.scroll-locked { overflow: hidden; }
      ellipsis instead of blowing out the Type column; full name is
      always in the title attribute. */
   max-width: 90px; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; vertical-align: middle;
+  white-space: nowrap;
 }
 /* Transport-scoped but the region couldn't be resolved (no configured
    region matched, or an HMAC collision made the match ambiguous) —

@@ -1912,7 +1912,9 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		if db.hasScopeName {
 			scanArgs = append(scanArgs, &scopeName)
 		}
-		rows.Scan(scanArgs...)
+		if err := rows.Scan(scanArgs...); err != nil {
+			return nil, 0, err
+		}
 		if !dj.Valid {
 			continue
 		}
@@ -2163,35 +2165,48 @@ func (db *DB) GetNodeLocationsByKeys(keys []string) map[string]map[string]interf
 // query doubles as the "is this actually a distinct node" existence check.
 // A matched pubkey with an empty/unset name falls back to itself so a
 // real repeater is never silently dropped just because it has no name yet.
+//
+// Queried in chunks of repeaterNamesByKeysBatchSize — SQLite's default
+// SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds, and a large mesh's
+// byPathHop candidate set can exceed that in one IN (...) clause.
+const repeaterNamesByKeysBatchSize = 500
+
 func (db *DB) GetRepeaterNamesByKeys(keys []string) map[string]string {
 	result := make(map[string]string)
 	if len(keys) == 0 {
 		return result
 	}
-	placeholders := make([]string, len(keys))
-	args := make([]interface{}, len(keys))
-	for i, k := range keys {
-		placeholders[i] = "?"
-		args[i] = strings.ToLower(k)
-	}
-	query := "SELECT public_key, name FROM nodes WHERE role IN ('repeater','room') AND public_key IN (" + strings.Join(placeholders, ",") + ")"
-	rows, err := db.conn.Query(query, args...)
-	if err != nil {
-		return result
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var pk string
-		var name sql.NullString
-		if rows.Scan(&pk, &name) != nil {
+	for start := 0; start < len(keys); start += repeaterNamesByKeysBatchSize {
+		end := start + repeaterNamesByKeysBatchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		chunk := keys[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, k := range chunk {
+			placeholders[i] = "?"
+			args[i] = strings.ToLower(k)
+		}
+		query := "SELECT public_key, name FROM nodes WHERE role IN ('repeater','room') AND public_key IN (" + strings.Join(placeholders, ",") + ")"
+		rows, err := db.conn.Query(query, args...)
+		if err != nil {
 			continue
 		}
-		pk = strings.ToLower(pk)
-		if name.Valid && name.String != "" {
-			result[pk] = name.String
-		} else {
-			result[pk] = pk
+		for rows.Next() {
+			var pk string
+			var name sql.NullString
+			if rows.Scan(&pk, &name) != nil {
+				continue
+			}
+			pk = strings.ToLower(pk)
+			if name.Valid && name.String != "" {
+				result[pk] = name.String
+			} else {
+				result[pk] = pk
+			}
 		}
+		rows.Close()
 	}
 	return result
 }

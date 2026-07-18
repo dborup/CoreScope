@@ -979,21 +979,6 @@ type ChannelListResponse struct {
 	Channels []map[string]interface{} `json:"channels"`
 }
 
-type ChannelMessageResp struct {
-	Sender          string      `json:"sender"`
-	Text            string      `json:"text"`
-	Timestamp       string      `json:"timestamp"`
-	SenderTimestamp interface{} `json:"sender_timestamp"`
-	PacketID        int64       `json:"packetId"`
-	PacketHash      string      `json:"packetHash"`
-	Repeats         int         `json:"repeats"`
-	Observers       []string    `json:"observers"`
-	Hops            int         `json:"hops"`
-	SNR             interface{} `json:"snr"`
-	Scope           interface{} `json:"scope"`
-	RouteType       interface{} `json:"routeType"`
-}
-
 type ChannelMessagesResponse struct {
 	Messages []map[string]interface{} `json:"messages"`
 	Total    int                      `json:"total"`

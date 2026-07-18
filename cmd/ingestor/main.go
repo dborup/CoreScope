@@ -23,6 +23,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/meshcore-analyzer/regions"
 )
 
 func main() {
@@ -1438,13 +1439,10 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 func loadRegionKeys(cfg *Config) map[string][]byte {
 	keys := make(map[string][]byte)
 	for _, raw := range cfg.HashRegions {
-		name := strings.TrimSpace(raw)
-		if name == "" {
+		name, ok := regions.Normalize(raw)
+		if !ok {
 			log.Printf("[regions] skipping empty hashRegions entry")
 			continue
-		}
-		if !strings.HasPrefix(name, "#") {
-			name = "#" + name
 		}
 		if _, exists := keys[name]; exists {
 			log.Printf("[regions] duplicate region %q ignored", name)

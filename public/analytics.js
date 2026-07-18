@@ -4602,11 +4602,12 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
               '<td><code>' + esc(ca.channel) + '</code></td>' +
               '<td>' + ca.totalMessages.toLocaleString() + '</td>' +
               '<td>' + ca.scoped.toLocaleString() + ' (' + pct(ca.scoped, caOverall) + ')</td>' +
+              '<td>' + ca.unscoped.toLocaleString() + '</td>' +
               '<td>' + ca.unknownScope.toLocaleString() + '</td>' +
               '</tr>';
           }).join('');
           adoptBody = '<table class="data-table analytics-table">' +
-            '<thead><tr><th>Channel</th><th>Messages</th><th>Scoped</th><th>Unknown</th></tr></thead>' +
+            '<thead><tr><th>Channel</th><th>Messages</th><th>Scoped</th><th>Unscoped</th><th>Unknown</th></tr></thead>' +
             '<tbody>' + adoptRows + '</tbody>' +
             '</table>';
         } else {
