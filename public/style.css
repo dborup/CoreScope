@@ -1436,6 +1436,18 @@ body.scroll-locked { overflow: hidden; }
 .badge-transport-unknown {
   background: var(--text-muted-bg, #6b728020); color: var(--text-muted, #6b7280);
 }
+/* Dedicated Scope column pill (#71 Packets column). Reuses the
+   badge-transport-unknown muted look for the "no match" state so it reads
+   consistently with the inline T? pill on the Type column. */
+.badge-scope {
+  display: inline-block; padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; font-family: var(--mono);
+  background: var(--transport-badge-bg, #f59e0b20); color: var(--transport-badge-fg, #d97706);
+  letter-spacing: .3px;
+}
+.badge-scope-unknown {
+  background: var(--text-muted-bg, #6b728020); color: var(--text-muted, #6b7280);
+}
 .badge-obs {
   display: inline-block; padding: 1px 6px; border-radius: 10px;
   font-size: 10px; font-weight: 600;
@@ -2137,6 +2149,7 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .obs-table td:first-child { white-space: nowrap; }
 .obs-table td:nth-child(6) { max-width: none; overflow: visible; }
 .col-observer { min-width: 70px; max-width: none; }
+.col-scope { min-width: 60px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spark-bar { position: relative; min-width: 60px; max-width: 100px; flex: 1; height: 18px; background: var(--border); border-radius: 4px; overflow: hidden; display: inline-block; vertical-align: middle; }
 @media (max-width: 640px) { .spark-bar { max-width: 60px; } }
 .spark-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover, #60a5fa)); border-radius: 4px; transition: width 0.3s; }
@@ -2993,7 +3006,7 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 
 /* Hide low-value columns on mobile */
 @media (max-width: 640px) {
-  .col-region, .col-rpt, .col-size, .col-hashsize, .col-pubkey { display: none; }
+  .col-region, .col-rpt, .col-size, .col-hashsize, .col-pubkey, .col-scope { display: none; }
 }
 
 /* Clickable hop links */
@@ -3185,6 +3198,7 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .hide-col-hash .col-hash,
 .hide-col-size .col-size,
 .hide-col-type .col-type,
+.hide-col-scope .col-scope,
 .hide-col-observer .col-observer,
 .hide-col-path .col-path,
 .hide-col-rpt .col-rpt,

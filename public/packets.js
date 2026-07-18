@@ -1626,7 +1626,7 @@
         <thead><tr>
           <th scope="col" class="col-expand" data-priority="1"></th><th scope="col" class="col-region" data-sort-key="region" data-priority="3">Region</th><th scope="col" class="col-time" data-sort-key="time" data-type="date" data-priority="1">Time</th><th scope="col" class="col-hash" data-sort-key="hash" data-priority="3">Hash</th><th scope="col" class="col-size" data-sort-key="size" data-type="numeric" data-priority="4">Size</th>
           <th scope="col" class="col-hashsize" data-sort-key="hb" data-type="numeric" data-priority="5">HB</th>
-          <th scope="col" class="col-type" data-sort-key="type" data-priority="1">Type</th><th scope="col" class="col-observer" data-sort-key="observer" data-priority="3">Observer</th><th scope="col" class="col-path" data-sort-key="path" data-priority="5">Path</th><th scope="col" class="col-rpt" data-sort-key="rpt" data-type="numeric" data-priority="3">Rpt</th><th scope="col" class="col-details" data-priority="1">Details</th>
+          <th scope="col" class="col-type" data-sort-key="type" data-priority="1">Type</th><th scope="col" class="col-scope" data-sort-key="scope" data-priority="4">Scope</th><th scope="col" class="col-observer" data-sort-key="observer" data-priority="3">Observer</th><th scope="col" class="col-path" data-sort-key="path" data-priority="5">Path</th><th scope="col" class="col-rpt" data-sort-key="rpt" data-type="numeric" data-priority="3">Rpt</th><th scope="col" class="col-details" data-priority="1">Details</th>
         </tr></thead>
         <tbody id="pktBody"></tbody>
       </table></div>
@@ -2010,6 +2010,7 @@
       { key: 'hash', label: 'Hash' },
       { key: 'size', label: 'Size' },
       { key: 'type', label: 'Type' },
+      { key: 'scope', label: 'Scope' },
       { key: 'observer', label: 'Observer' },
       { key: 'path', label: 'Path' },
       { key: 'rpt', label: 'Rpt' },
@@ -2019,7 +2020,7 @@
     // #1249: observer column must stay visible at narrow widths so the IATA
     // badge (#1188) renders on mobile. Without observer in scope the user
     // can't see who heard the packet at all.
-    const defaultHidden = isNarrow ? ['region', 'hash', 'path', 'rpt', 'size'] : ['region'];
+    const defaultHidden = isNarrow ? ['region', 'hash', 'path', 'rpt', 'size', 'scope'] : ['region'];
     let visibleCols;
     try {
       visibleCols = JSON.parse(localStorage.getItem('packets-visible-cols'));
@@ -2264,6 +2265,7 @@
           <td class="col-size" data-filter-field="size" data-filter-value="${groupSize || ''}">${groupSize ? groupSize + 'B' : '—'}</td>
           <td class="col-hashsize mono"${_grpHashSizeTitle}>${groupHashBytes}</td>
           <td class="col-type" data-filter-field="type" data-filter-value="${escapeHtml(groupTypeName || '')}">${p.payload_type != null ? `<span class="badge badge-${groupTypeClass}">${groupTypeName}</span>${transportBadge(p.route_type, p.scope_name)}` : '—'}</td>
+          <td class="col-scope">${scopeCellHtml(p.route_type, p.scope_name)}</td>
           <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(headerObserverId) || '')}">${isSingle ? escapeHtml(truncate(obsNameOnly(headerObserverId), 16)) + obsIataBadge(p) : escapeHtml(truncate(obsNameOnly(headerObserverId), 10)) + groupedObserverIataBadgesHtml(p)}</td>
           <td class="col-path"><span class="path-hops">${groupPathStr}</span></td>
           <td class="col-rpt">${p.observation_count > 1 ? '<span class="badge badge-obs" title="Seen ' + p.observation_count + ' times"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> ' + p.observation_count + '</span>' : (isSingle ? '' : p.count)}</td>
@@ -2298,6 +2300,7 @@
               <td class="col-size" data-filter-field="size" data-filter-value="${size || ''}">${size}B</td>
               <td class="col-hashsize mono"${_cHashSizeTitle}>${childHashBytes}</td>
               <td class="col-type" data-filter-field="type" data-filter-value="${escapeHtml(typeName || '')}"><span class="badge badge-${typeClass}">${typeName}</span>${transportBadge(c.route_type, c.scope_name)}</td>
+              <td class="col-scope">${scopeCellHtml(c.route_type, c.scope_name)}</td>
               <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(c.observer_id) || '')}">${escapeHtml(truncate(obsNameOnly(c.observer_id), 16))}${obsIataBadge(c)}</td>
               <td class="col-path"><span class="path-hops">${childPathStr}</span></td>
               <td class="col-rpt"></td>
@@ -2334,6 +2337,7 @@
         <td class="col-size" data-filter-field="size" data-filter-value="${size || ''}">${size}B</td>
         <td class="col-hashsize mono"${_flatHashSizeTitle}>${hashBytes}</td>
         <td class="col-type" data-filter-field="type" data-filter-value="${escapeHtml(typeName || '')}"><span class="badge badge-${typeClass}">${typeName}</span>${transportBadge(p.route_type, p.scope_name)}</td>
+        <td class="col-scope">${scopeCellHtml(p.route_type, p.scope_name)}</td>
         <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(p.observer_id) || '')}">${escapeHtml(truncate(obsNameOnly(p.observer_id), 16))}${obsIataBadge(p)}</td>
         <td class="col-path"><span class="path-hops">${pathStr}</span></td>
         <td class="col-rpt"></td>
@@ -2695,6 +2699,7 @@
       case 'type': accessor = function(p) { return typeName(p.payload_type); }; break;
       case 'hash': accessor = function(p) { return p.hash || ''; }; break;
       case 'observer': accessor = function(p) { return obsName(p.observer_id); }; break;
+      case 'scope': accessor = function(p) { return p.scope_name || ''; }; break;
       case 'size': accessor = function(p) { return p.packet_size || 0; }; break;
       case 'hb': accessor = function(p) { return p.hash_byte_count != null ? p.hash_byte_count : (p.hash_size || 0); }; break;
       case 'rpt': accessor = function(p) {

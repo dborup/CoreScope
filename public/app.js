@@ -43,6 +43,18 @@ function transportBadge(rt, scopeName) {
 }
 
 /**
+ * Dedicated Scope column cell (as opposed to transportBadge's inline pill
+ * on the Type column) — same three-state semantics: non-transport routes
+ * show a dash, transport routes with no resolved region show a muted
+ * "unknown", and a resolved match shows the region name.
+ */
+function scopeCellHtml(rt, scopeName) {
+  if (!isTransportRoute(rt)) return '—';
+  if (scopeName) return '<span class="badge-scope" title="Scope: ' + escapeHtml(scopeName) + '">' + escapeHtml(scopeName) + '</span>';
+  return '<span class="badge-scope badge-scope-unknown" title="Transport packet, matching region unknown">unknown</span>';
+}
+
+/**
  * Compute breakdown byte ranges from raw_hex on the client.
  * Mirrors cmd/server/decoder.go BuildBreakdown(). Used so per-observation raw_hex
  * (which can differ in path length from the top-level packet) gets accurate
