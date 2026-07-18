@@ -130,6 +130,7 @@
                  inside this tab) and before Prefix Tool (utility tabs trail). -->
             <button class="tab-btn" data-tab="roles">Roles</button>
             <button class="tab-btn" data-tab="scopes">Scopes</button>
+            <button class="tab-btn" data-tab="foreign-traffic">Foreign Traffic</button>
             <button class="tab-btn" data-tab="prefix-tool">Prefix Tool</button>
           </div>
         </div>
@@ -293,6 +294,7 @@
       case 'roles': await renderRolesTab(el); break;
       case 'prefix-tool': await renderPrefixTool(el); break;
       case 'scopes': await renderScopesTab(el); break;
+      case 'foreign-traffic': await renderForeignTrafficTab(el); break;
     }
     // Auto-apply column resizing to all analytics tables
     requestAnimationFrame(() => {
@@ -4843,6 +4845,68 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       if (!cur) { _stopScopesRefresh(); return; }
       load(selectedWindow);
     }, 60000);
+  }
+
+  // Repeaters relaying unscoped (route_type FLOOD) traffic, sorted by volume
+  // — a quick, no-new-backend-work way to surface an existing but previously
+  // unsurfaced metric (unscoped_relay_count_24h, see openapi.go) that flags
+  // repeaters whose flood.max.unscoped isn't set to 0. Phase 1 of the
+  // "foreign traffic" investigation: cross-referencing which of this
+  // unscoped volume actually traces back to a foreign-origin sender (via the
+  // geo_filter-derived `foreign` flag on nodes) needs foreign_advert data to
+  // accumulate first, since it's only set going forward from when geo_filter
+  // was configured — not backfilled for existing history.
+  async function renderForeignTrafficTab(el) {
+    el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading repeater relay stats…</div>';
+    function pct(n, total) {
+      if (!total) return '—';
+      return (n / total * 100).toFixed(1) + '%';
+    }
+    try {
+      const nodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
+      const allNodes = nodesResp.nodes || nodesResp;
+      const relays = allNodes.filter(function(n) {
+        return (n.role === 'repeater' || n.role === 'room') && (n.unscoped_relay_count_24h || 0) > 0;
+      });
+      relays.sort(function(a, b) { return (b.unscoped_relay_count_24h || 0) - (a.unscoped_relay_count_24h || 0); });
+      const foreignCount = allNodes.filter(function(n) { return n.foreign; }).length;
+
+      let body;
+      if (relays.length > 0) {
+        const rows = relays.map(function(n) {
+          const total = n.relay_count_24h || 0;
+          const unscoped = n.unscoped_relay_count_24h || 0;
+          return '<tr>' +
+            '<td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
+            '<td>' + esc(n.role) + '</td>' +
+            '<td>' + unscoped.toLocaleString() + '</td>' +
+            '<td>' + total.toLocaleString() + '</td>' +
+            '<td>' + pct(unscoped, total) + '</td>' +
+            '</tr>';
+        }).join('');
+        body = '<table class="data-table analytics-table">' +
+          '<thead><tr><th>Repeater</th><th>Role</th><th>Unscoped Relays (24h)</th><th>Total Relays (24h)</th><th>% Unscoped</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+          '</table>';
+      } else {
+        body = '<p class="text-muted" style="font-size:0.85em">No repeater has relayed an unscoped flood packet in the last 24 hours.</p>';
+      }
+
+      const foreignNote = foreignCount > 0
+        ? foreignCount.toLocaleString() + ' node(s) so far carry an advertised GPS position outside the configured geo_filter — cross-referencing which rows below actually trace back to those is a planned follow-up once more accumulates.'
+        : 'geo_filter is configured, but no foreign-origin node has advertised since — check back once traffic accumulates to cross-reference which of the unscoped relays below trace back to a foreign sender.';
+
+      el.innerHTML =
+        '<h3 style="margin:0 0 4px">Foreign Traffic</h3>' +
+        '<p class="text-muted" style="margin:0 0 16px;font-size:0.85em">' +
+          'Repeaters relaying unscoped (route_type FLOOD) packets in the last 24 hours, sorted by volume. ' +
+          'A well-configured repeater sets <code>flood.max.unscoped 0</code> — a non-trivial count here flags a base-config problem worth investigating on that specific node. ' +
+          foreignNote +
+        '</p>' +
+        body;
+    } catch (e) {
+      el.innerHTML = '<p class="text-muted">Failed to load repeater relay stats.</p>';
+    }
   }
 
   // #1085 — Roles tab (folded in from former /#/roles page).
