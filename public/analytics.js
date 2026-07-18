@@ -4940,10 +4940,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             'A small amount of unscoped traffic is normal — <code>flood.max.unscoped</code> caps it rather than blocking it outright. Disproportionate volume or % here is what\'s worth investigating on that specific node. ' +
             foreignNote +
           '</p>' +
-          body +
-          '<h3 style="margin:24px 0 4px">Foreign-Flagged Nodes (' + foreignNodes.length.toLocaleString() + ')</h3>' +
+          '<h4 style="margin:0 0 4px">Foreign-Flagged Nodes (' + foreignNodes.length.toLocaleString() + ')</h4>' +
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Nodes whose most recent advertised GPS position fell outside the configured geo_filter.</p>' +
-          foreignNodesBody;
+          foreignNodesBody +
+          '<h4 style="margin:24px 0 4px">Repeaters Relaying Unscoped Traffic</h4>' +
+          body;
       } catch (e) {
         el.innerHTML = '<p class="text-muted">Failed to load repeater relay stats.</p>';
       }

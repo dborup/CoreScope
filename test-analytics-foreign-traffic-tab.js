@@ -171,7 +171,9 @@ function fakeEl() {
     const el = fakeEl();
     await ctx.window._analyticsRenderForeignTrafficTab(el);
     assert.ok(el.innerHTML.includes('Foreign-Flagged Nodes (2)'), 'heading should show the correct count');
-    const foreignSectionHtml = el.innerHTML.slice(el.innerHTML.indexOf('Foreign-Flagged Nodes'));
+    const startIdx = el.innerHTML.indexOf('Foreign-Flagged Nodes');
+    const endIdx = el.innerHTML.indexOf('Repeaters Relaying Unscoped Traffic');
+    const foreignSectionHtml = el.innerHTML.slice(startIdx, endIdx > -1 ? endIdx : undefined);
     assert.ok(!foreignSectionHtml.includes('RepeaterA'), 'a non-foreign node must not appear in the foreign-nodes section');
     const idxNew = el.innerHTML.indexOf('NewForeign');
     const idxOld = el.innerHTML.indexOf('OldForeign');
