@@ -1426,7 +1426,16 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if s.cfg.GeoFilter != nil {
+	// Opt-in only (?geoFilter=1): configuring geo_filter alone must not
+	// change what /api/nodes (and therefore the live map, which lists
+	// straight off this endpoint) returns by default. It used to — any node
+	// outside the polygon and not YET foreign_advert-tagged (which only
+	// happens on that node's next ADVERT after geo_filter was configured)
+	// would silently vanish from every view the moment geo_filter was set,
+	// with no per-request way to see them anyway. geo_filter's own
+	// ingestor-side tagging (and the explicit prune-geo-filter admin flow)
+	// are unaffected by this — this only gates the passive declutter view.
+	if s.cfg.GeoFilter != nil && q.Get("geoFilter") == "1" {
 		filtered := nodes[:0]
 		for _, node := range nodes {
 			// Foreign-flagged nodes (#730) are kept even when their GPS lies
