@@ -154,6 +154,11 @@ type ScopeStatsResponse struct {
 	// channel chat specifically (payload_type=5), window-scoped like
 	// Summary above — see ChannelScopeStats doc.
 	ChannelMessages *ChannelScopeStats `json:"channelMessages,omitempty"`
+	// BridgeRepeaters is the RepeatersByRegion data inverted: repeaters
+	// that have relayed traffic for MORE than one region are the mesh's
+	// literal backbone nodes connecting separate regional communities.
+	// All-time, like RepeatersByRegion (same source data, same caveats).
+	BridgeRepeaters []BridgeRepeater `json:"bridgeRepeaters,omitempty"`
 }
 
 type RepeaterRef struct {
@@ -165,6 +170,13 @@ type ScopeRegionRepeaters struct {
 	Region    string        `json:"region"`
 	Count     int           `json:"count"`
 	Repeaters []RepeaterRef `json:"repeaters"`
+}
+
+type BridgeRepeater struct {
+	Name      string   `json:"name"`
+	PublicKey string   `json:"publicKey"`
+	Regions   []string `json:"regions"`
+	Count     int      `json:"count"`
 }
 
 // ─── Health ────────────────────────────────────────────────────────────────────

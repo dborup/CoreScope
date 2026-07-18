@@ -3568,6 +3568,35 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 			}
 			sort.Slice(repeaters, func(i, j int) bool { return repeaters[i].Count > repeaters[j].Count })
 			resp.RepeatersByRegion = repeaters
+
+			// Bridge repeaters: invert byRegion into pubkey -> regions and
+			// keep only repeaters relaying for MORE than one region — the
+			// mesh's literal backbone nodes connecting separate regional
+			// communities. Same `names` existence-filter as above.
+			pubkeyRegions := make(map[string][]string)
+			for region, pks := range byRegion {
+				for _, pk := range pks {
+					if _, ok := names[pk]; !ok {
+						continue
+					}
+					pubkeyRegions[pk] = append(pubkeyRegions[pk], region)
+				}
+			}
+			bridges := make([]BridgeRepeater, 0)
+			for pk, regions := range pubkeyRegions {
+				if len(regions) < 2 {
+					continue
+				}
+				sort.Strings(regions)
+				bridges = append(bridges, BridgeRepeater{Name: names[pk], PublicKey: pk, Regions: regions, Count: len(regions)})
+			}
+			sort.Slice(bridges, func(i, j int) bool {
+				if bridges[i].Count != bridges[j].Count {
+					return bridges[i].Count > bridges[j].Count
+				}
+				return bridges[i].Name < bridges[j].Name
+			})
+			resp.BridgeRepeaters = bridges
 		}
 	}
 

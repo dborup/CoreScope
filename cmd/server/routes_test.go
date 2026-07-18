@@ -4424,6 +4424,74 @@ func TestHandleScopeStats_RepeatersByRegion(t *testing.T) {
 	}
 }
 
+// TestHandleScopeStats_BridgeRepeaters verifies the RepeatersByRegion
+// inversion: a repeater that relayed traffic for TWO distinct regions must
+// appear in BridgeRepeaters with both region names, while a repeater that
+// only ever relayed one region must be excluded.
+func TestHandleScopeStats_BridgeRepeaters(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT DEFAULT NULL`); err != nil {
+		t.Fatalf("add scope_name column: %v", err)
+	}
+	srv.db.hasScopeName = true
+
+	if _, err := srv.db.conn.Exec(
+		`INSERT INTO nodes (public_key, name, role) VALUES ('bbbbccdd0011', 'BridgeNode', 'repeater')`,
+	); err != nil {
+		t.Fatalf("seed bridge node: %v", err)
+	}
+	if _, err := srv.db.conn.Exec(
+		`INSERT INTO nodes (public_key, name, role) VALUES ('ccccccdd0011', 'SingleRegionNode', 'repeater')`,
+	); err != nil {
+		t.Fatalf("seed single-region node: %v", err)
+	}
+
+	pt5 := 5
+	txBelgium := &StoreTx{ID: 1, Hash: "tx1", FirstSeen: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano), PayloadType: &pt5, ScopeName: "#belgium"}
+	txFrance := &StoreTx{ID: 2, Hash: "tx2", FirstSeen: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano), PayloadType: &pt5, ScopeName: "#france"}
+	txBelgium2 := &StoreTx{ID: 3, Hash: "tx3", FirstSeen: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano), PayloadType: &pt5, ScopeName: "#belgium"}
+
+	srv.store = &PacketStore{
+		byPathHop: map[string][]*StoreTx{
+			"bbbbccdd0011": {txBelgium, txFrance}, // relayed BOTH regions — a bridge
+			"ccccccdd0011": {txBelgium2},          // relayed only #belgium — not a bridge
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/scope-stats?window=24h", nil)
+	w := httptest.NewRecorder()
+	srv.handleScopeStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp ScopeStatsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.BridgeRepeaters) != 1 {
+		t.Fatalf("bridgeRepeaters = %v, want 1 entry", resp.BridgeRepeaters)
+	}
+	br := resp.BridgeRepeaters[0]
+	if br.Name != "BridgeNode" || br.PublicKey != "bbbbccdd0011" || br.Count != 2 {
+		t.Errorf("bridgeRepeaters[0] = %+v, want {BridgeNode bbbbccdd0011 2 [...]}", br)
+	}
+	wantRegions := []string{"#belgium", "#france"}
+	if len(br.Regions) != len(wantRegions) {
+		t.Fatalf("bridgeRepeaters[0].Regions = %v, want %v", br.Regions, wantRegions)
+	}
+	for i, r := range wantRegions {
+		if br.Regions[i] != r {
+			t.Errorf("bridgeRepeaters[0].Regions[%d] = %q, want %q", i, br.Regions[i], r)
+		}
+	}
+	for _, b := range resp.BridgeRepeaters {
+		if b.PublicKey == "ccccccdd0011" {
+			t.Errorf("SingleRegionNode should not appear in bridgeRepeaters (only relayed 1 region)")
+		}
+	}
+}
+
 // TestHandleScopeStats_OriginatingNodesByRegion verifies the complementary
 // breakdown to RepeatersByRegion: nodes whose OWN default_scope (#899) is a
 // given region, i.e. nodes actually configured with/running that region

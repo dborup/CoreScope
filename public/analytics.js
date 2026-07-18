@@ -4493,6 +4493,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
         '<div id="scopes-chart"></div>' +
         '<div id="scopes-utilization" style="margin-top:16px"></div>' +
         '<div id="scopes-repeaters" style="margin-top:16px"></div>' +
+        '<div id="scopes-bridges" style="margin-top:16px"></div>' +
         '<div id="scopes-origin-nodes" style="margin-top:16px"></div>';
 
       // Attach window-button click listeners (once)
@@ -4710,6 +4711,34 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
       renderRegionNodeGroups('scopes-repeaters', 'Repeaters by Region',
         'All-time, not limited to the window above — which repeaters have relayed traffic carrying each region scope. A region carried by only 1 repeater is a single point of failure for that area.',
         d.repeatersByRegion, 'repeater');
+
+      // Bridge repeaters: RepeatersByRegion inverted — repeaters relaying
+      // for MORE than one region are the mesh's literal backbone nodes.
+      var bridgeEl = document.getElementById('scopes-bridges');
+      if (bridgeEl) {
+        var bridges = d.bridgeRepeaters || [];
+        if (bridges.length > 0) {
+          var bridgeRows = bridges.map(function(b) {
+            var regionList = b.regions.map(function(r) { return '<code>' + esc(r) + '</code>'; }).join(', ');
+            return '<tr>' +
+              '<td><a href="#/nodes/' + encodeURIComponent(b.publicKey) + '">' + esc(b.name) + '</a></td>' +
+              '<td>' + b.count + '</td>' +
+              '<td>' + regionList + '</td>' +
+              '</tr>';
+          }).join('');
+          bridgeEl.innerHTML =
+            '<h4 style="margin:0 0 4px">Bridge Repeaters</h4>' +
+            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
+              'All-time — repeaters that have relayed traffic for more than one region. These connect otherwise-separate regional communities; losing one can split the mesh\'s regional coverage.' +
+            '</p>' +
+            '<table class="data-table analytics-table">' +
+              '<thead><tr><th>Repeater</th><th># Regions</th><th>Regions</th></tr></thead>' +
+              '<tbody>' + bridgeRows + '</tbody>' +
+            '</table>';
+        } else {
+          bridgeEl.innerHTML = '';
+        }
+      }
 
       renderRegionNodeGroups('scopes-origin-nodes', 'Nodes Running This Region',
         'All-time — nodes whose OWN configured scope is this region (not just relaying it for others). This is a much smaller, more specific set than "Repeaters by Region" above.',
