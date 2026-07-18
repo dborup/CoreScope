@@ -729,6 +729,31 @@
   let regionMap = {};
   const TYPE_NAMES = SHORT_BY_ID;
   function typeName(t) { return TYPE_NAMES[t] ?? `Type ${t}`; }
+
+  // Column keys that existed before the Scope column (#1852) — the "known"
+  // baseline for a saved array from before packets-visible-cols-known was
+  // ever persisted. A key missing from `saved` is only auto-shown if it's
+  // ALSO missing from `known`; a pre-existing key missing from `saved`
+  // means the user explicitly hid it, and must stay hidden.
+  const LEGACY_COL_KEYS = ['region', 'time', 'hash', 'size', 'type', 'observer', 'path', 'rpt', 'details'];
+
+  // Reconcile a saved column-visibility array (#71) against the current
+  // COL_DEFS, so a since-added column (e.g. "scope") gets shown by default
+  // for returning visitors instead of staying hidden forever — while a
+  // column the user explicitly unchecked (present in `known` but absent
+  // from `saved`) stays hidden. `known` is the column-key set from the last
+  // time prefs were saved; falls back to LEGACY_COL_KEYS when absent
+  // (a visitor whose saved prefs predate persisting it at all).
+  function reconcileVisibleCols(saved, known, colDefs, defaultHidden) {
+    if (!saved) return colDefs.map(c => c.key).filter(k => !defaultHidden.includes(k));
+    const knownSet = new Set(known && known.length ? known : LEGACY_COL_KEYS);
+    const result = saved.slice();
+    for (const c of colDefs) {
+      if (knownSet.has(c.key)) continue;
+      if (!result.includes(c.key) && !defaultHidden.includes(c.key)) result.push(c.key);
+    }
+    return result;
+  }
   const isMobile = window.innerWidth <= 1024;
   const PACKET_LIMIT = isMobile ? 1000 : 50000;
   let savedTimeWindowMin = Number(localStorage.getItem('meshcore-time-window'));
@@ -2021,19 +2046,12 @@
     // badge (#1188) renders on mobile. Without observer in scope the user
     // can't see who heard the packet at all.
     const defaultHidden = isNarrow ? ['region', 'hash', 'path', 'rpt', 'size', 'scope'] : ['region'];
-    let visibleCols;
+    let savedCols, knownCols;
     try {
-      visibleCols = JSON.parse(localStorage.getItem('packets-visible-cols'));
+      savedCols = JSON.parse(localStorage.getItem('packets-visible-cols'));
+      knownCols = JSON.parse(localStorage.getItem('packets-visible-cols-known'));
     } catch {}
-    if (!visibleCols) {
-      visibleCols = COL_DEFS.map(c => c.key).filter(k => !defaultHidden.includes(k));
-    } else {
-      // A saved preference predates a since-added column (e.g. "scope") —
-      // default new columns to visible instead of silently hiding them.
-      for (const c of COL_DEFS) {
-        if (!visibleCols.includes(c.key) && !defaultHidden.includes(c.key)) visibleCols.push(c.key);
-      }
-    }
+    let visibleCols = reconcileVisibleCols(savedCols, knownCols, COL_DEFS, defaultHidden);
     const colMenu = document.getElementById('colToggleMenu');
     const pktTable = document.getElementById('pktTable');
     function applyColVisibility() {
@@ -2041,6 +2059,7 @@
         pktTable.classList.toggle('hide-col-' + c.key, !visibleCols.includes(c.key));
       });
       localStorage.setItem('packets-visible-cols', JSON.stringify(visibleCols));
+      localStorage.setItem('packets-visible-cols-known', JSON.stringify(COL_DEFS.map(c => c.key)));
     }
     colMenu.innerHTML = COL_DEFS.map(c =>
       `<label><input type="checkbox" data-col="${c.key}" ${visibleCols.includes(c.key) ? 'checked' : ''}> ${c.label}</label>`
@@ -3887,6 +3906,7 @@
     window._packetsTestAPI = {
       typeName,
       obsName,
+      reconcileVisibleCols,
       getDetailPreview,
       sortGroupChildren,
       getPathHopCount,
