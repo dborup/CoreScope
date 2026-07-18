@@ -104,6 +104,13 @@ func main() {
 	regionKeys := loadRegionKeys(cfg)
 	store.BackfillDefaultScopeAsync(regionKeys)
 
+	// hashChannels/hashRegions additions in config.json otherwise require a
+	// full restart to take effect — SIGHUP reloads just these two derived
+	// key sets in place. See hot_reload.go.
+	keys := newHotKeys(channelKeys, regionKeys)
+	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
+	defer stopSIGHUPReload()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
@@ -180,7 +187,7 @@ func main() {
 			markReceiptForTag(tag, time.Now())
 			status.MarkPacket(time.Now())
 			ingestBuffer.Submit(func() {
-				handleMessage(store, tag, src, m, channelKeys, regionKeys, cfg)
+				handleMessage(store, tag, src, m, keys.Channels(), keys.Regions(), cfg)
 			})
 		})
 
