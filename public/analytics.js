@@ -4491,6 +4491,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
           '<tbody id="scopes-tbody"></tbody>' +
         '</table>' +
         '<div id="scopes-chart"></div>' +
+        '<div id="scopes-hourly" style="margin-top:16px"></div>' +
         '<div id="scopes-utilization" style="margin-top:16px"></div>' +
         '<div id="scopes-repeaters" style="margin-top:16px"></div>' +
         '<div id="scopes-bridges" style="margin-top:16px"></div>' +
@@ -4652,6 +4653,48 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _analyticsData =
           chartHtml = '<p class="text-muted" style="font-size:0.85em;margin:12px 0 0">Insufficient data points to render chart — wait for more observations in this window.</p>';
         }
         chartEl.innerHTML = chartHtml;
+      }
+
+      // Hour-of-day activity per region: when during a typical day is each
+      // region active — a heatmap, not a chronological chart. Color
+      // intensity is normalized PER ROW (each region's own busiest hour),
+      // not globally, so a quiet region's shape is still visible next to
+      // a loud one instead of being crushed to near-zero.
+      var hourlyEl = document.getElementById('scopes-hourly');
+      if (hourlyEl) {
+        var hourly = d.hourlyActivityByRegion || [];
+        if (hourly.length > 0) {
+          var hourLabels = '';
+          for (var hl = 0; hl < 24; hl += 3) {
+            hourLabels += '<div style="flex:3;text-align:left;font-size:9px" title="' + hl + ':00 UTC">' + hl + '</div>';
+          }
+          var hourlyRows = hourly.map(function(ha) {
+            var maxV = Math.max.apply(null, ha.hours.concat([1]));
+            var cells = ha.hours.map(function(v, h) {
+              var alpha = v > 0 ? (0.12 + 0.88 * (v / maxV)) : 0;
+              var bg = v > 0 ? 'background:var(--accent);opacity:' + alpha.toFixed(2) : 'background:var(--border)';
+              return '<div style="flex:1;height:16px;' + bg + '" title="' + esc(ha.region) + ' ' + h + ':00 UTC — ' + v.toLocaleString() + ' msg' + (v === 1 ? '' : 's') + '"></div>';
+            }).join('');
+            return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+              '<div style="width:110px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(ha.region) + '"><code>' + esc(ha.region) + '</code></div>' +
+              '<div style="flex:1;display:flex;gap:1px">' + cells + '</div>' +
+              '</div>';
+          }).join('');
+          hourlyEl.innerHTML =
+            '<h4 style="margin:0 0 4px">Activity by Hour of Day</h4>' +
+            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
+              'When during a typical day (UTC) each region is active, aggregated across every day in the window above. Reads best on 7d — color is normalized per region, so quiet and busy regions are both visible.' +
+            '</p>' +
+            '<div style="display:flex;gap:6px;margin-bottom:4px">' +
+              '<div style="width:110px"></div>' +
+              '<div style="flex:1;display:flex">' + hourLabels + '</div>' +
+            '</div>' +
+            hourlyRows;
+        } else {
+          hourlyEl.innerHTML =
+            '<h4 style="margin:0 0 4px">Activity by Hour of Day</h4>' +
+            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">No scoped messages in this window to chart by hour of day.</p>';
+        }
       }
 
       // Region utilization: how much of the configured hashRegions list

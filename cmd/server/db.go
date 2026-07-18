@@ -2958,6 +2958,52 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 		resp.TimeSeries = []ScopeTimePoint{}
 	}
 
+	// Hour-of-day activity per region: same named-region set as ByRegion,
+	// but bucketed by hour-of-day (0-23, UTC) instead of chronological
+	// time — answers "when during a typical day is this region active"
+	// rather than "how did volume change over the window". Aggregated
+	// across every day in the window, so this reads best on 7d (a single
+	// 1h/24h window won't show a meaningful daily shape).
+	hourRows, err := db.conn.Query(`
+		SELECT scope_name, CAST(strftime('%H', first_seen) AS INTEGER) AS hour, COUNT(*) AS cnt
+		FROM transmissions
+		WHERE ` + routeTypeTransportSQL + ` AND scope_name IS NOT NULL AND scope_name != '' AND first_seen >= ?
+		GROUP BY scope_name, hour
+	`, since)
+	if err != nil {
+		return nil, fmt.Errorf("scope hourly activity query: %w", err)
+	}
+	defer hourRows.Close()
+	hourly := make(map[string]*ScopeHourlyActivity)
+	var hourlyOrder []string
+	for hourRows.Next() {
+		var region string
+		var hour, cnt int
+		if hourRows.Scan(&region, &hour, &cnt) != nil {
+			continue
+		}
+		if hour < 0 || hour > 23 {
+			continue
+		}
+		ha, ok := hourly[region]
+		if !ok {
+			ha = &ScopeHourlyActivity{Region: region}
+			hourly[region] = ha
+			hourlyOrder = append(hourlyOrder, region)
+		}
+		ha.Hours[hour] = cnt
+	}
+	if err := hourRows.Err(); err != nil {
+		return nil, fmt.Errorf("scope hourly activity iteration: %w", err)
+	}
+	resp.HourlyActivityByRegion = make([]ScopeHourlyActivity, 0, len(hourlyOrder))
+	for _, region := range hourlyOrder {
+		resp.HourlyActivityByRegion = append(resp.HourlyActivityByRegion, *hourly[region])
+	}
+	sort.Slice(resp.HourlyActivityByRegion, func(i, j int) bool {
+		return resp.HourlyActivityByRegion[i].Region < resp.HourlyActivityByRegion[j].Region
+	})
+
 	return resp, nil
 }
 

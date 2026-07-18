@@ -126,6 +126,15 @@ type ScopeTimePoint struct {
 	Unscoped int    `json:"unscoped"`
 }
 
+// ScopeHourlyActivity is a region's message counts bucketed by hour-of-day
+// (0-23, UTC), aggregated across every day in the requested window —
+// "when during a typical day is this region active" rather than "how did
+// volume change over the window" (that's ScopeTimePoint/TimeSeries).
+type ScopeHourlyActivity struct {
+	Region string  `json:"region"`
+	Hours  [24]int `json:"hours"`
+}
+
 type ScopeStatsResponse struct {
 	Window     string             `json:"window"`
 	Summary    ScopeStatsSummary  `json:"summary"`
@@ -159,6 +168,9 @@ type ScopeStatsResponse struct {
 	// literal backbone nodes connecting separate regional communities.
 	// All-time, like RepeatersByRegion (same source data, same caveats).
 	BridgeRepeaters []BridgeRepeater `json:"bridgeRepeaters,omitempty"`
+	// HourlyActivityByRegion is window-scoped like Summary/TimeSeries
+	// above — see ScopeHourlyActivity doc.
+	HourlyActivityByRegion []ScopeHourlyActivity `json:"hourlyActivityByRegion,omitempty"`
 }
 
 type RepeaterRef struct {

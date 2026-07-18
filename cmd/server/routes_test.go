@@ -4263,6 +4263,85 @@ func TestHandleScopeStats(t *testing.T) {
 	}
 }
 
+// TestHandleScopeStats_HourlyActivityByRegion verifies the hour-of-day
+// bucketing: counts must land in the bucket matching first_seen's actual
+// hour-of-day (UTC), grouped separately per region.
+func TestHandleScopeStats_HourlyActivityByRegion(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT DEFAULT NULL`); err != nil {
+		t.Fatalf("add scope_name column: %v", err)
+	}
+	srv.db.hasScopeName = true
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	t2 := time.Now().UTC().Add(-1 * time.Hour)
+	hour1, hour2 := t1.Hour(), t2.Hour()
+
+	rows := []struct {
+		hash  string
+		scope string
+		ts    time.Time
+	}{
+		{"h1", "#belgium", t1},
+		{"h2", "#belgium", t1},
+		{"h3", "#belgium", t2},
+		{"h4", "#france", t1},
+	}
+	for _, r := range rows {
+		if _, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,scope_name) VALUES (?,?,?,0,5,?)`,
+			"aa", r.hash, r.ts.Format(time.RFC3339), r.scope,
+		); err != nil {
+			t.Fatalf("seed row %s: %v", r.hash, err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/api/scope-stats?window=24h", nil)
+	w := httptest.NewRecorder()
+	srv.handleScopeStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp ScopeStatsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var belgium, france *ScopeHourlyActivity
+	for i := range resp.HourlyActivityByRegion {
+		switch resp.HourlyActivityByRegion[i].Region {
+		case "#belgium":
+			belgium = &resp.HourlyActivityByRegion[i]
+		case "#france":
+			france = &resp.HourlyActivityByRegion[i]
+		}
+	}
+	if belgium == nil || france == nil {
+		t.Fatalf("hourlyActivityByRegion missing entries: %+v", resp.HourlyActivityByRegion)
+	}
+	if hour1 == hour2 {
+		// Edge case: test ran within a few minutes of an hour rollover, so
+		// t1 and t2 collapsed into the same hour-of-day bucket.
+		if belgium.Hours[hour1] != 3 {
+			t.Errorf("belgium.Hours[%d] = %d, want 3 (hour1==hour2 collapse case)", hour1, belgium.Hours[hour1])
+		}
+	} else {
+		if belgium.Hours[hour1] != 2 {
+			t.Errorf("belgium.Hours[%d] = %d, want 2", hour1, belgium.Hours[hour1])
+		}
+		if belgium.Hours[hour2] != 1 {
+			t.Errorf("belgium.Hours[%d] = %d, want 1", hour2, belgium.Hours[hour2])
+		}
+	}
+	if france.Hours[hour1] != 1 {
+		t.Errorf("france.Hours[%d] = %d, want 1", hour1, france.Hours[hour1])
+	}
+}
+
 // TestHandleScopeStats_ChannelMessagesExcludesOtherPayloadTypes verifies the
 // payload_type=5 filter: a non-channel transmission (e.g. an ADVERT) with a
 // scope must not be counted in ChannelMessages even though it affects the
