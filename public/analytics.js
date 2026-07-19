@@ -4521,12 +4521,15 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<div id="scopes-channel-messages" style="margin-bottom:16px"></div>' +
           '<div id="scopes-channel-adoption" style="margin-bottom:16px"></div>' +
           '<div class="text-center text-muted" id="scopes-loading" style="padding:20px">Loading scope stats…</div>' +
-          '<table class="data-table analytics-table" style="margin-bottom:8px">' +
-            '<thead><tr><th>Region</th><th>Messages</th><th>% of Scoped</th></tr></thead>' +
-            '<tbody id="scopes-tbody"></tbody>' +
-          '</table>' +
-          '<div id="scopes-chart"></div>' +
-          '<div id="scopes-hourly" style="margin-top:16px"></div>' +
+          '<details style="margin-top:16px">' +
+            '<summary style="cursor:pointer;font-weight:600;padding:2px 0">Region Breakdown &amp; Trend</summary>' +
+            '<table class="data-table analytics-table" style="margin:8px 0">' +
+              '<thead><tr><th>Region</th><th>Messages</th><th>% of Scoped</th></tr></thead>' +
+              '<tbody id="scopes-tbody"></tbody>' +
+            '</table>' +
+            '<div id="scopes-chart"></div>' +
+          '</details>' +
+          '<div id="scopes-hourly"></div>' +
         '</div>' +
         '<div id="scopes-panel-regions" style="display:' + (selectedSubtab === 'regions' ? '' : 'none') + '">' +
           '<div id="scopes-utilization"></div>' +
@@ -4569,6 +4572,18 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     function pct(n, total) {
       if (!total) return '—';
       return (n / total * 100).toFixed(1) + '%';
+    }
+
+    // Collapsed-by-default <details> wrapper for a scope-tab subsection —
+    // title can include a dynamic count ("Nodes Not Using Any Scope
+    // (1423 of 1491)") since it's built at render time with the real data
+    // already in hand, unlike a static skeleton-level heading would be.
+    function detailsSection(title, description, bodyHtml) {
+      return '<details style="margin-top:16px">' +
+        '<summary style="cursor:pointer;font-weight:600;padding:2px 0">' + title + '</summary>' +
+        (description ? '<p class="text-muted" style="margin:8px 0 8px 2px;font-size:0.85em">' + description + '</p>' : '') +
+        '<div style="margin:4px 0 0 2px">' + bodyHtml + '</div>' +
+      '</details>';
     }
 
     async function load(w) {
@@ -4670,12 +4685,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         } else {
           adoptBody = '<p class="text-muted" style="font-size:0.85em">No channel messages in this window.</p>';
         }
-        adoptEl.innerHTML =
-          '<h4 style="margin:0 0 4px">Scope Adoption by Channel</h4>' +
-          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
-            'Which channels actually use region scoping vs which never do. Top 30 by message volume.' +
-          '</p>' +
-          adoptBody;
+        adoptEl.innerHTML = detailsSection(
+          'Scope Adoption by Channel (' + adoption.length.toLocaleString() + ')',
+          'Which channels actually use region scoping vs which never do. Top 30 by message volume.',
+          adoptBody
+        );
       }
 
       // Per-region table
@@ -4771,20 +4785,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
               '<div style="flex:1;display:flex;gap:1px">' + cells + '</div>' +
               '</div>';
           }).join('');
-          hourlyEl.innerHTML =
-            '<h4 style="margin:0 0 4px">Activity by Hour of Day</h4>' +
-            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
-              'When during a typical day (UTC) each region is active, aggregated across every day in the window above. Reads best on 7d — color is normalized per region, so quiet and busy regions are both visible.' +
-            '</p>' +
+          hourlyEl.innerHTML = detailsSection(
+            'Activity by Hour of Day (' + hourly.length.toLocaleString() + ' region' + (hourly.length === 1 ? '' : 's') + ')',
+            'When during a typical day (UTC) each region is active, aggregated across every day in the window above. Reads best on 7d — color is normalized per region, so quiet and busy regions are both visible.',
             '<div style="display:flex;gap:6px;margin-bottom:4px">' +
               '<div style="width:110px"></div>' +
               '<div style="flex:1;display:flex">' + hourLabels + '</div>' +
             '</div>' +
-            hourlyRows;
+            hourlyRows
+          );
         } else {
-          hourlyEl.innerHTML =
-            '<h4 style="margin:0 0 4px">Activity by Hour of Day</h4>' +
-            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">No scoped messages in this window to chart by hour of day.</p>';
+          hourlyEl.innerHTML = detailsSection('Activity by Hour of Day', 'No scoped messages in this window to chart by hour of day.', '');
         }
       }
 
@@ -4800,11 +4811,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           var usedCount = configured - unused.length;
           var unusedPct = (unused.length / configured * 100).toFixed(1);
           var listHtml = unused.map(function(name) { return esc(name); }).join(', ');
-          utilEl.innerHTML =
-            '<h4 style="margin:0 0 4px">Region Utilization</h4>' +
-            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
-              'All-time, not limited to the window above — has this configured region ever matched a message still in retention?' +
-            '</p>' +
+          utilEl.innerHTML = detailsSection(
+            'Region Utilization (' + usedCount.toLocaleString() + ' of ' + configured.toLocaleString() + ' used)',
+            'All-time, not limited to the window above — has this configured region ever matched a message still in retention?',
             '<p style="margin:0 0 8px">' +
               '<strong>' + usedCount.toLocaleString() + '</strong> of <strong>' + configured.toLocaleString() + '</strong> configured regions have matched at least once' +
               (unused.length > 0 ? ' — <strong>' + unused.length.toLocaleString() + '</strong> (' + unusedPct + '%) have never matched anything.' : '.') +
@@ -4812,7 +4821,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             (unused.length > 0 ?
               '<details><summary style="cursor:pointer">Show ' + unused.length.toLocaleString() + ' unused region' + (unused.length === 1 ? '' : 's') + '</summary>' +
               '<div class="mono text-muted" style="font-size:11px;margin-top:8px;max-height:200px;overflow-y:auto;line-height:1.6">' + listHtml + '</div></details>'
-              : '');
+              : '')
+          );
         } else {
           utilEl.innerHTML = '';
         }
@@ -4842,10 +4852,12 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
                 '</details>';
             }).join('')
           : '<p class="text-muted" style="font-size:0.85em">No data yet — path resolution catches up gradually as traffic flows; check back in a few minutes.</p>';
-        el.innerHTML =
-          '<h4 style="margin:0 0 4px">' + esc(title) + '</h4>' +
-          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' + esc(description) + '</p>' +
-          body;
+        var count = groups ? groups.length : 0;
+        el.innerHTML = detailsSection(
+          esc(title) + ' (' + count.toLocaleString() + ' region' + (count === 1 ? '' : 's') + ')',
+          esc(description),
+          body
+        );
       }
 
       renderRegionNodeGroups('scopes-repeaters', 'Repeaters by Region',
@@ -4877,12 +4889,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           // empty longer, especially right after a restart.
           bridgeBody = '<p class="text-muted" style="font-size:0.85em">No bridge repeaters found yet — this needs a repeater confirmed in 2+ different regions, which takes longer to accumulate than the single-region data above.</p>';
         }
-        bridgeEl.innerHTML =
-          '<h4 style="margin:0 0 4px">Bridge Repeaters</h4>' +
-          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
-            'All-time — repeaters that have relayed traffic for more than one region. These connect otherwise-separate regional communities; losing one can split the mesh\'s regional coverage.' +
-          '</p>' +
-          bridgeBody;
+        bridgeEl.innerHTML = detailsSection(
+          'Bridge Repeaters (' + bridges.length.toLocaleString() + ')',
+          'All-time — repeaters that have relayed traffic for more than one region. These connect otherwise-separate regional communities; losing one can split the mesh\'s regional coverage.',
+          bridgeBody
+        );
       }
 
       renderRegionNodeGroups('scopes-origin-nodes', 'Nodes Running This Region',
@@ -4917,15 +4928,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             noScopeBody = '<p class="text-muted" style="font-size:0.85em">Every known node has a configured scope.</p>';
           }
 
-          noScopeEl.innerHTML =
-            '<h4 style="margin:0 0 4px">Nodes Not Using Any Scope (' + noScope.total.toLocaleString() + ' of ' + allNodes.length.toLocaleString() + ')</h4>' +
-            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
-              'Nodes with no default_scope at all — never configured a hashRegions region for themselves. By role: ' + (roleSummary || 'none') + '. ' +
-              'Sorted by most-recently-active first' + (noScope.truncated ? ' (showing the ' + noScope.sortedCapped.length + ' most recent)' : '') + '.' +
-            '</p>' +
-            noScopeBody;
+          noScopeEl.innerHTML = detailsSection(
+            'Nodes Not Using Any Scope (' + noScope.total.toLocaleString() + ' of ' + allNodes.length.toLocaleString() + ')',
+            'Nodes with no default_scope at all — never configured a hashRegions region for themselves. By role: ' + (roleSummary || 'none') + '. ' +
+              'Sorted by most-recently-active first' + (noScope.truncated ? ' (showing the ' + noScope.sortedCapped.length + ' most recent)' : '') + '.',
+            noScopeBody
+          );
         } catch (e) {
-          noScopeEl.innerHTML = '<h4 style="margin:0 0 4px">Nodes Not Using Any Scope</h4><p class="text-muted">Failed to load.</p>';
+          noScopeEl.innerHTML = detailsSection('Nodes Not Using Any Scope', null, '<p class="text-muted">Failed to load.</p>');
         }
       }
 
@@ -4954,15 +4964,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           } else {
             neverRelayBody = '<p class="text-muted" style="font-size:0.85em">Every known repeater/room has relayed at least one region-scoped packet.</p>';
           }
-          neverRelayEl.innerHTML =
-            '<h4 style="margin:0 0 4px">Repeaters Never Relaying Any Scope (' + neverRelay.total.toLocaleString() + ')</h4>' +
-            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
-              'Repeater/room nodes that have never carried a single region-scoped (TRANSPORT_FLOOD/DIRECT) packet, ever — not the same set as "no default_scope" above: a repeater\'s hashRegions config can let it relay for others even when its own adverts never carry a matching transport code. ' +
-              'Sorted by current relay volume — the busiest ones are the most consequential to configure first' + (neverRelay.truncated ? ' (showing the top ' + neverRelay.sortedCapped.length + ')' : '') + '.' +
-            '</p>' +
-            neverRelayBody;
+          neverRelayEl.innerHTML = detailsSection(
+            'Repeaters Never Relaying Any Scope (' + neverRelay.total.toLocaleString() + ')',
+            'Repeater/room nodes that have never carried a single region-scoped (TRANSPORT_FLOOD/DIRECT) packet, ever — not the same set as "no default_scope" above: a repeater\'s hashRegions config can let it relay for others even when its own adverts never carry a matching transport code. ' +
+              'Sorted by current relay volume — the busiest ones are the most consequential to configure first' + (neverRelay.truncated ? ' (showing the top ' + neverRelay.sortedCapped.length + ')' : '') + '.',
+            neverRelayBody
+          );
         } catch (e) {
-          neverRelayEl.innerHTML = '<h4 style="margin:0 0 4px">Repeaters Never Relaying Any Scope</h4><p class="text-muted">Failed to load.</p>';
+          neverRelayEl.innerHTML = detailsSection('Repeaters Never Relaying Any Scope', null, '<p class="text-muted">Failed to load.</p>');
         }
       }
     }
