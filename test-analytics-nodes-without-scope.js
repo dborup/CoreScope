@@ -173,6 +173,52 @@ test('returns zero total and empty rows when every node has a scope', () => {
   assert.deepStrictEqual(result.roleSummary, []);
 });
 
+test('opts.role narrows sortedCapped to that role but leaves total/roleSummary at the full count', () => {
+  const nodes = [
+    { public_key: 'pk1', name: 'Rep1', role: 'repeater', default_scope: null },
+    { public_key: 'pk2', name: 'Comp1', role: 'companion', default_scope: null },
+    { public_key: 'pk3', name: 'Comp2', role: 'companion', default_scope: '' },
+  ];
+  const result = computeNodesWithoutScope(nodes, 100, { role: 'companion' });
+  assert.strictEqual(result.total, 3, 'total stays the full unfiltered count');
+  assert.strictEqual(result.filteredTotal, 2, 'filteredTotal reflects the role filter');
+  assert.deepStrictEqual(result.sortedCapped.map(n => n.name).sort(), ['Comp1', 'Comp2']);
+  assert.strictEqual(result.roleSummary.length, 2, 'roleSummary is unaffected by the filter, still shows both roles');
+});
+
+test('opts.q matches case-insensitively against name or public_key', () => {
+  const nodes = [
+    { public_key: 'pkABC123', name: 'SkyMesh Node', role: 'repeater', default_scope: null },
+    { public_key: 'pkXYZ999', name: 'Other Repeater', role: 'repeater', default_scope: null },
+  ];
+  const byName = computeNodesWithoutScope(nodes, 100, { q: 'skymesh' });
+  assert.strictEqual(byName.filteredTotal, 1);
+  assert.strictEqual(byName.sortedCapped[0].name, 'SkyMesh Node');
+
+  const byKey = computeNodesWithoutScope(nodes, 100, { q: 'xyz999' });
+  assert.strictEqual(byKey.filteredTotal, 1);
+  assert.strictEqual(byKey.sortedCapped[0].name, 'Other Repeater');
+});
+
+test('opts.role and opts.q combine (AND, not OR)', () => {
+  const nodes = [
+    { public_key: 'pk1', name: 'Alpha', role: 'companion', default_scope: null },
+    { public_key: 'pk2', name: 'Alpha', role: 'repeater', default_scope: null },
+  ];
+  const result = computeNodesWithoutScope(nodes, 100, { role: 'companion', q: 'alpha' });
+  assert.strictEqual(result.filteredTotal, 1);
+  assert.strictEqual(result.sortedCapped[0].role, 'companion');
+});
+
+test('no opts (or empty opts) behaves exactly as before — filteredTotal equals total', () => {
+  const nodes = [
+    { public_key: 'pk1', name: 'A', role: 'repeater', default_scope: null },
+    { public_key: 'pk2', name: 'B', role: 'repeater', default_scope: null },
+  ];
+  const result = computeNodesWithoutScope(nodes, 100);
+  assert.strictEqual(result.filteredTotal, result.total);
+});
+
 console.log('\n=== analytics.js: computeRepeatersNeverRelayingScope ===');
 
 test('is exported for testing', () => {
