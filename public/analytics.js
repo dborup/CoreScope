@@ -4525,6 +4525,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             }).join('') +
           '</div>' +
           '<div id="scopes-cards" class="stats-grid" style="margin-bottom:16px"></div>' +
+          '<div id="scopes-highlights" style="margin-bottom:16px"></div>' +
           '<div id="scopes-channel-messages" style="margin-bottom:16px"></div>' +
           '<div id="scopes-channel-adoption" style="margin-bottom:16px"></div>' +
           '<div class="text-center text-muted" id="scopes-loading" style="padding:20px">Loading scope stats…</div>' +
@@ -4749,6 +4750,59 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             (c.note ? '<div class="stat-note text-muted" style="font-size:11px">' + c.note + '</div>' : '') +
             '</div>';
         }).join('');
+      }
+
+      // Highlights row: the single most-asked-about number from each of
+      // the Regions and Hygiene sub-tabs, surfaced here so a visitor
+      // doesn't have to switch sub-tabs to see them. Region/bridge counts
+      // come straight off `d` (already fetched above); the two
+      // node-list-derived counts need `allNodes`, fetched once here and
+      // reused below by the Hygiene sections themselves instead of each
+      // fetching their own copy.
+      var highlightsEl = document.getElementById('scopes-highlights');
+      var allNodes = null;
+      try {
+        var allNodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
+        allNodes = allNodesResp.nodes || allNodesResp;
+      } catch (e) {
+        allNodes = null;
+      }
+      if (highlightsEl) {
+        var hlConfigured = d.configuredRegions || 0;
+        var hlUnused = (d.unusedRegions || []).length;
+        var hlUsed = hlConfigured - hlUnused;
+        var hlBridges = (d.bridgeRepeaters || []).length;
+        var hlNoScope = allNodes ? computeNodesWithoutScope(allNodes, 0).total : null;
+        var hlNeverRelay = allNodes ? computeRepeatersNeverRelayingScope(allNodes, 0).total : null;
+        highlightsEl.innerHTML = '<div class="stats-grid">' +
+          [
+            {
+              label: 'Regions Used',
+              value: hlConfigured > 0 ? hlUsed.toLocaleString() + ' / ' + hlConfigured.toLocaleString() : '—',
+              note: hlConfigured > 0 ? pct(hlUsed, hlConfigured) + ' of configured' : 'no hashRegions configured',
+            },
+            {
+              label: 'Bridge Repeaters',
+              value: hlBridges.toLocaleString(),
+              note: 'relay for 2+ regions',
+            },
+            {
+              label: 'Nodes W/O Default Scope',
+              value: hlNoScope != null ? hlNoScope.toLocaleString() : '—',
+              note: (hlNoScope != null && allNodes.length) ? pct(hlNoScope, allNodes.length) + ' of all nodes' : '',
+            },
+            {
+              label: 'Never Relaying Scope',
+              value: hlNeverRelay != null ? hlNeverRelay.toLocaleString() : '—',
+              note: 'repeaters/rooms',
+            },
+          ].map(function(c) {
+            return '<div class="stat-card"><div class="stat-value">' + c.value + '</div>' +
+              '<div class="stat-label">' + c.label + '</div>' +
+              (c.note ? '<div class="stat-note text-muted" style="font-size:11px">' + c.note + '</div>' : '') +
+              '</div>';
+          }).join('') +
+        '</div>';
       }
 
       // Channel-messages-only breakdown: same scoped/unscoped/unknown
@@ -5031,17 +5085,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       // never configured a hashRegions region for itself. Computed
       // client-side from the full node list (default_scope isn't
       // windowed/aggregated server-side the way the other scope-stats
-      // fields are). Role filter + name/key search re-filter this same
-      // in-memory node list without a re-fetch; the debounced search
-      // input restores focus/caret after each re-render since the whole
-      // section (search box included) is rebuilt via setSectionHtml.
+      // fields are) — `allNodes` was already fetched above for the
+      // highlights row, reused here rather than fetched again. Role
+      // filter + name/key search re-filter this same in-memory node list
+      // without a re-fetch; the debounced search input restores
+      // focus/caret after each re-render since the whole section (search
+      // box included) is rebuilt via setSectionHtml.
       var noScopeEl = document.getElementById('scopes-no-scope');
       if (noScopeEl) {
-        try {
-          var allNodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
-          var allNodes = allNodesResp.nodes || allNodesResp;
+        if (allNodes) {
           renderNoScopeSection(allNodes);
-        } catch (e) {
+        } else {
           setSectionHtml(noScopeEl, detailsSection('Nodes Without a Default Scope', null, '<p class="text-muted">Failed to load.</p>', 'no-scope'));
         }
       }
@@ -5049,13 +5103,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       // Repeaters Never Relaying Any Scope: distinct from the section
       // above — a repeater's own default_scope and whether it has ever
       // relayed ANYONE's region-scoped traffic are different signals (see
-      // computeRepeatersNeverRelayingScope doc comment). Reuses the
-      // node list already fetched for the section above.
+      // computeRepeatersNeverRelayingScope doc comment). Reuses the same
+      // `allNodes` fetched above.
       var neverRelayEl = document.getElementById('scopes-never-relay-scope');
-      if (neverRelayEl) {
+      if (neverRelayEl && !allNodes) {
+        setSectionHtml(neverRelayEl, detailsSection('Repeaters Never Relaying Any Scope', null, '<p class="text-muted">Failed to load.</p>', 'never-relay'));
+      } else if (neverRelayEl) {
         try {
-          var nodesForRelay = typeof allNodes !== 'undefined' ? allNodes : (await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList })).nodes;
-          var neverRelay = computeRepeatersNeverRelayingScope(nodesForRelay, 100);
+          var neverRelay = computeRepeatersNeverRelayingScope(allNodes, 100);
           var neverRelayBody;
           if (neverRelay.sortedCapped.length > 0) {
             var neverRelayRows = neverRelay.sortedCapped.map(function(n) {
