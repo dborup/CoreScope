@@ -3076,9 +3076,9 @@ func (db *DB) GetChannelMessageScopeStats(window string) (*ChannelScopeStats, er
 // GetChannelScopeAdoption breaks the channel-messages-only scoped/unscoped
 // question (see GetChannelMessageScopeStats) down PER CHANNEL — which
 // specific channels (#test, #wardriving, ...) actually use region scoping
-// vs which never do. Ordered by message volume, capped at the top 30
-// channels so a long tail of barely-used channels doesn't bloat the
-// response.
+// vs which never do. Ordered by message volume; channel cardinality is
+// bounded by the 1-byte channel hash space so this is never large enough
+// to need a cap.
 func (db *DB) GetChannelScopeAdoption(window string) ([]ChannelScopeAdoption, error) {
 	if !db.hasScopeName {
 		return nil, fmt.Errorf("scope_name column not present — run ingestor to apply migrations")
@@ -3104,7 +3104,6 @@ func (db *DB) GetChannelScopeAdoption(window string) ([]ChannelScopeAdoption, er
 		WHERE payload_type = 5 AND first_seen >= ?
 		GROUP BY channel
 		ORDER BY total DESC
-		LIMIT 30
 	`, since)
 	if err != nil {
 		return nil, fmt.Errorf("channel scope adoption query: %w", err)

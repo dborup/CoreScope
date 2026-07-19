@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -4400,6 +4401,48 @@ func TestHandleScopeStats_ChannelScopeAdoption(t *testing.T) {
 	wardriving := resp.ChannelScopeAdoption[1]
 	if wardriving.Channel != "#wardriving" || wardriving.TotalMessages != 1 || wardriving.Scoped != 0 || wardriving.Unscoped != 1 {
 		t.Errorf("channelScopeAdoption[1] = %+v, want {#wardriving total=1 scoped=0 unscoped=1}", wardriving)
+	}
+}
+
+// TestHandleScopeStats_ChannelScopeAdoption_Uncapped verifies the endpoint
+// returns every distinct channel seen in the window, not just a top-N
+// subset — the handler used to LIMIT 30, which silently hid the encrypted/
+// unencrypted filter's less-active channels from the Scopes tab UI.
+func TestHandleScopeStats_ChannelScopeAdoption_Uncapped(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT DEFAULT NULL`); err != nil {
+		t.Fatalf("add scope_name column: %v", err)
+	}
+	srv.db.hasScopeName = true
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	const channelCount = 35
+	for i := 0; i < channelCount; i++ {
+		channel := fmt.Sprintf("#chan%d", i)
+		if _, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,scope_name) VALUES (?,?,?,?,5,?,?)`,
+			"aa", fmt.Sprintf("h%d", i), now, 1, channel, "",
+		); err != nil {
+			t.Fatalf("seed row %d: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/api/scope-stats?window=24h", nil)
+	w := httptest.NewRecorder()
+	srv.handleScopeStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp ScopeStatsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.ChannelScopeAdoption) != channelCount {
+		t.Fatalf("channelScopeAdoption has %d entries, want all %d (no cap)", len(resp.ChannelScopeAdoption), channelCount)
 	}
 }
 

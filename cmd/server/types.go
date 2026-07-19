@@ -175,7 +175,7 @@ type ScopeStatsResponse struct {
 	// Summary above — see ChannelScopeStats doc.
 	ChannelMessages *ChannelScopeStats `json:"channelMessages,omitempty"`
 	// ChannelScopeAdoption is ChannelMessages broken down per channel,
-	// ordered by message volume, capped at the top 30 channels.
+	// ordered by message volume. Uncapped — see GetChannelScopeAdoption.
 	ChannelScopeAdoption []ChannelScopeAdoption `json:"channelScopeAdoption,omitempty"`
 	// BridgeRepeaters is the RepeatersByRegion data inverted: repeaters
 	// that have relayed traffic for MORE than one region are the mesh's
