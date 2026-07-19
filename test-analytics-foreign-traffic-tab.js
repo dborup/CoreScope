@@ -92,11 +92,10 @@ function loadInCtx(ctx, file) {
   for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
 }
 
-function makeAnalyticsSandbox(nodesFixture) {
+function makeAnalyticsSandbox(nodesFixture, apiStub) {
   const ctx = makeSandbox();
   ctx.getComputedStyle = () => ({ getPropertyValue: () => '' });
   ctx.registerPage = () => {};
-  ctx.api = () => Promise.resolve({});
   ctx.timeAgo = (iso) => iso ? 'x ago' : '—';
   ctx.RegionFilter = { init: () => {}, onChange: () => {}, regionQueryString: () => '' };
   ctx.onWS = () => {};
@@ -108,10 +107,14 @@ function makeAnalyticsSandbox(nodesFixture) {
   ctx.IATA_COORDS_GEO = {};
   loadInCtx(ctx, 'public/roles.js');
   loadInCtx(ctx, 'public/app.js');
-  // Override fetchAllNodes (loaded from app.js) with a stub that hands
-  // back a fixed node list, instead of exercising its real pagination
-  // loop against the stubbed api().
+  // Override fetchAllNodes AND api (both loaded from app.js as top-level
+  // function declarations, which clobber whatever ctx.api/.fetchAllNodes
+  // were set to before loadInCtx ran) with stubs — fetchAllNodes hands
+  // back a fixed node list instead of exercising its real pagination loop,
+  // and api() is what Entry Points' per-node-detail + resolve-hops calls
+  // go through.
   ctx.fetchAllNodes = async () => ({ nodes: nodesFixture });
+  ctx.api = apiStub || (() => Promise.resolve({}));
   try { loadInCtx(ctx, 'public/analytics.js'); } catch (e) {
     for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   }
@@ -209,6 +212,86 @@ function fakeEl() {
     await ctx.window._analyticsRenderForeignTrafficTab(el);
     assert.ok(el.innerHTML.includes('Foreign-Flagged Nodes (0)'), 'heading should show a zero count');
     assert.ok(el.innerHTML.includes('None yet'), 'placeholder message should be shown when no node is foreign-flagged');
+  });
+
+  await testAsync('Entry Points ranks unique_prefix repeaters by observation count and counts distinct foreign nodes', async () => {
+    const apiStub = (path) => {
+      if (path.indexOf('/nodes/pkForeign1') === 0) {
+        return Promise.resolve({ recentAdverts: [{ observations: [
+          { path_json: '["AAAA","1111"]' },
+          { path_json: '["AAAA","2222"]' },
+        ] }] });
+      }
+      if (path.indexOf('/nodes/pkForeign2') === 0) {
+        return Promise.resolve({ recentAdverts: [{ observations: [
+          { path_json: '["AAAA","3333"]' },
+          { path_json: '["CCCC"]' },
+        ] }] });
+      }
+      if (path.indexOf('/resolve-hops') === 0) {
+        return Promise.resolve({ resolved: {
+          AAAA: { name: 'GatewayRepeater', pubkey: 'pkGateway', confidence: 'unique_prefix' },
+          CCCC: { name: 'RareRepeater', pubkey: 'pkRare', confidence: 'unique_prefix' },
+        } });
+      }
+      return Promise.resolve({});
+    };
+    const ctx = makeAnalyticsSandbox([
+      { public_key: 'pkForeign1', name: 'Foreign1', role: 'companion', foreign: true, last_seen: '2026-07-19T00:00:00Z' },
+      { public_key: 'pkForeign2', name: 'Foreign2', role: 'client', foreign: true, last_seen: '2026-07-19T00:00:00Z' },
+    ], apiStub);
+    const el = fakeEl();
+    await ctx.window._analyticsRenderForeignTrafficTab(el);
+
+    const startIdx = el.innerHTML.indexOf('Entry Points');
+    const endIdx = el.innerHTML.indexOf('Repeaters Relaying Unscoped Traffic');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('GatewayRepeater'), 'GatewayRepeater (3 observations, both foreign nodes) should appear');
+    assert.ok(section.includes('RareRepeater'), 'RareRepeater (1 observation, one foreign node) should appear');
+    const idxGateway = section.indexOf('GatewayRepeater');
+    const idxRare = section.indexOf('RareRepeater');
+    assert.ok(idxGateway < idxRare, 'GatewayRepeater (3 obs) should be ranked above RareRepeater (1 obs)');
+    // GatewayRepeater: 3 observations total, but only 2 distinct foreign nodes contributed them.
+    const gatewayRow = section.slice(idxGateway, section.indexOf('</tr>', idxGateway));
+    assert.ok(gatewayRow.includes('>3<'), 'GatewayRepeater should show 3 total observations');
+    assert.ok(gatewayRow.includes('>2<'), 'GatewayRepeater should show 2 distinct foreign nodes');
+  });
+
+  await testAsync('Entry Points folds non-unique_prefix (ambiguous) resolutions into a single bucket instead of guessing a name', async () => {
+    const apiStub = (path) => {
+      if (path.indexOf('/nodes/pkForeign1') === 0) {
+        return Promise.resolve({ recentAdverts: [{ observations: [{ path_json: '["3E"]' }] }] });
+      }
+      if (path.indexOf('/resolve-hops') === 0) {
+        return Promise.resolve({ resolved: {
+          '3E': { name: 'BestGuessRepeater', pubkey: 'pkGuess', confidence: 'gps_preference' },
+        } });
+      }
+      return Promise.resolve({});
+    };
+    const ctx = makeAnalyticsSandbox([
+      { public_key: 'pkForeign1', name: 'Foreign1', role: 'companion', foreign: true, last_seen: '2026-07-19T00:00:00Z' },
+    ], apiStub);
+    const el = fakeEl();
+    await ctx.window._analyticsRenderForeignTrafficTab(el);
+
+    const startIdx = el.innerHTML.indexOf('Entry Points');
+    const endIdx = el.innerHTML.indexOf('Repeaters Relaying Unscoped Traffic');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(!section.includes('BestGuessRepeater'), 'a non-unique_prefix resolution must not be shown as a specific named repeater — #1751-style false attribution');
+    assert.ok(section.includes('Ambiguous'), 'ambiguous hops should be folded into an explicit "Ambiguous" bucket');
+  });
+
+  await testAsync('Entry Points shows an empty-state message when no foreign node has any path data', async () => {
+    const ctx = makeAnalyticsSandbox([
+      { public_key: 'pkForeign1', name: 'Foreign1', role: 'companion', foreign: true, last_seen: '2026-07-19T00:00:00Z' },
+    ]);
+    const el = fakeEl();
+    await ctx.window._analyticsRenderForeignTrafficTab(el);
+    const startIdx = el.innerHTML.indexOf('Entry Points');
+    const endIdx = el.innerHTML.indexOf('Repeaters Relaying Unscoped Traffic');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('No traceable relay path yet'), 'empty state should be shown when no path data resolves');
   });
 
   await testAsync('rendering registers a real interval, and stop() actually clears it (not a no-op)', async () => {

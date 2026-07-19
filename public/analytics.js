@@ -4937,6 +4937,82 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           foreignNodesBody = '<p class="text-muted" style="font-size:0.85em">None yet — a node is only listed here after it advertises with a GPS position outside the configured geo_filter.</p>';
         }
 
+        // Entry Points: for each foreign-flagged node, walk its ADVERT
+        // observations' path[0] — the hop closest to the originator, per
+        // the same convention neighbor_graph.go uses ("Edge 1: originator
+        // ↔ path[0]") — to find which local repeater first relayed it.
+        // Capped so a large foreign-node population can't turn this into
+        // dozens of parallel node-detail fetches every 60s refresh.
+        const ENTRY_POINTS_NODE_CAP = 50;
+        let entryPointsBody;
+        try {
+          const capped = foreignNodes.slice(0, ENTRY_POINTS_NODE_CAP);
+          const details = await Promise.all(capped.map(function(n) {
+            return api('/nodes/' + encodeURIComponent(n.public_key), { ttl: CLIENT_TTL.nodeDetail }).catch(function() { return null; });
+          }));
+          const tally = {}; // hex prefix -> { count, foreignKeys: Set }
+          const prefixes = new Set();
+          details.forEach(function(detail, i) {
+            if (!detail) return;
+            const foreignKey = capped[i].public_key;
+            (detail.recentAdverts || []).forEach(function(a) {
+              (a.observations || []).forEach(function(o) {
+                let path;
+                try { path = typeof o.path_json === 'string' ? JSON.parse(o.path_json) : o.path_json; } catch (e) { path = null; }
+                if (!Array.isArray(path) || path.length === 0) return;
+                const prefix = path[0];
+                prefixes.add(prefix);
+                if (!tally[prefix]) tally[prefix] = { count: 0, foreignKeys: new Set() };
+                tally[prefix].count++;
+                tally[prefix].foreignKeys.add(foreignKey);
+              });
+            });
+          });
+
+          let resolved = {};
+          if (prefixes.size > 0) {
+            const resp = await api('/resolve-hops?hops=' + Array.from(prefixes).join(','), { ttl: CLIENT_TTL.nodeDetail }).catch(function() { return null; });
+            if (resp && resp.resolved) resolved = resp.resolved;
+          }
+
+          // #1751-style discipline: only a unique_prefix resolution names a
+          // specific repeater with confidence. Anything else (gps_preference
+          // etc.) is a real ambiguous hash collision across multiple
+          // candidates — folded into one "Ambiguous" bucket instead of
+          // picking and displaying a single misleading best guess.
+          let ambiguousCount = 0, ambiguousForeignKeys = new Set();
+          const named = [];
+          Object.keys(tally).forEach(function(prefix) {
+            const r = resolved[prefix];
+            const t = tally[prefix];
+            if (r && r.confidence === 'unique_prefix') {
+              named.push({ name: r.name, pubkey: r.pubkey, count: t.count, distinctForeign: t.foreignKeys.size });
+            } else {
+              ambiguousCount += t.count;
+              t.foreignKeys.forEach(function(k) { ambiguousForeignKeys.add(k); });
+            }
+          });
+          named.sort(function(a, b) { return b.count - a.count; });
+
+          if (named.length > 0 || ambiguousCount > 0) {
+            const rows = named.map(function(e) {
+              return '<tr><td><a href="#/nodes/' + encodeURIComponent(e.pubkey) + '">' + esc(e.name) + '</a></td>' +
+                '<td>' + e.count.toLocaleString() + '</td><td>' + e.distinctForeign.toLocaleString() + '</td></tr>';
+            }).join('') + (ambiguousCount > 0
+              ? '<tr><td class="text-muted">Ambiguous (hash prefix collides across multiple candidate repeaters)</td>' +
+                '<td>' + ambiguousCount.toLocaleString() + '</td><td>' + ambiguousForeignKeys.size.toLocaleString() + '</td></tr>'
+              : '');
+            entryPointsBody = '<table class="data-table analytics-table">' +
+              '<thead><tr><th>Entry-Point Repeater</th><th>Foreign Observations Seen Through</th><th># Distinct Foreign Nodes</th></tr></thead>' +
+              '<tbody>' + rows + '</tbody>' +
+              '</table>';
+          } else {
+            entryPointsBody = '<p class="text-muted" style="font-size:0.85em">No traceable relay path yet for any foreign-flagged node.</p>';
+          }
+        } catch (e) {
+          entryPointsBody = '<p class="text-muted">Failed to compute entry points.</p>';
+        }
+
         el.innerHTML =
           '<h3 style="margin:0 0 4px">Foreign Traffic</h3>' +
           '<p class="text-muted" style="margin:0 0 16px;font-size:0.85em">' +
@@ -4950,6 +5026,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             'A FLOOD packet can legitimately travel many hops through a dense mesh, so a node whose traffic you can trace through a real local relay chain (check its Trace) is genuinely reachable via that chain — that\'s foreign traffic actually entering the mesh, not a data artifact.' +
           '</p>' +
           foreignNodesBody +
+          '<h4 style="margin:24px 0 4px">Entry Points</h4>' +
+          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Which local repeater first relayed each foreign-flagged node\'s traffic — the hop closest to the origin across every observed ADVERT path' + (foreignNodes.length > ENTRY_POINTS_NODE_CAP ? ' (capped to the ' + ENTRY_POINTS_NODE_CAP + ' most recently heard foreign nodes)' : '') + '.</p>' +
+          entryPointsBody +
           '<h4 style="margin:24px 0 4px">Repeaters Relaying Unscoped Traffic</h4>' +
           body;
       } catch (e) {
