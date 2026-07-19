@@ -1,8 +1,11 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/lora"
 )
 
 // TestRepeaterRelayActivity_Active verifies that a repeater whose pubkey
@@ -82,7 +85,9 @@ func seedUnscopedRelayFixture(t *testing.T, hashPrefix string) (*PacketStore, st
 }
 
 // assertUnscopedCounts pins the contract both lookups share: FLOOD hops count
-// as unscoped, DIRECT hops only as plain relays.
+// as unscoped, DIRECT hops only as plain relays. Both fixture packets share
+// RawHex "0100" (2 payload bytes), so RelayAirtimeNs24h must be exactly 2×
+// that single packet's Time-on-Air, and UnscopedAirtimeNs24h exactly 1×.
 func assertUnscopedCounts(t *testing.T, info RepeaterRelayInfo) {
 	t.Helper()
 	if info.RelayCount24h != 2 {
@@ -90,6 +95,13 @@ func assertUnscopedCounts(t *testing.T, info RepeaterRelayInfo) {
 	}
 	if info.UnscopedRelayCount24h != 1 {
 		t.Errorf("expected UnscopedRelayCount24h=1 (only the FLOOD hop), got %d", info.UnscopedRelayCount24h)
+	}
+	onePacketToaNs := int64(lora.TimeOnAir(2, defaultLoRaPreset()))
+	if info.RelayAirtimeNs24h != 2*onePacketToaNs {
+		t.Errorf("expected RelayAirtimeNs24h=%d (2 packets × ToA(2 bytes)), got %d", 2*onePacketToaNs, info.RelayAirtimeNs24h)
+	}
+	if info.UnscopedAirtimeNs24h != onePacketToaNs {
+		t.Errorf("expected UnscopedAirtimeNs24h=%d (only the FLOOD packet's ToA), got %d", onePacketToaNs, info.UnscopedAirtimeNs24h)
 	}
 }
 
@@ -318,4 +330,71 @@ func TestRepeaterUnscopedRelayCount_Bulk(t *testing.T) {
 	store, pubkey, done := seedUnscopedRelayFixture(t, "bulk-")
 	defer done()
 	assertUnscopedCounts(t, store.computeRepeaterRelayInfoMap(24)[pubkey])
+}
+
+// seedSizeWeightedAirtimeFixture builds a store where pubkey relays two
+// UNSCOPED FLOOD packets of deliberately different payload sizes — proving
+// UnscopedAirtimeNs24h actually weights by Time-on-Air and isn't just
+// RelayCount24h in disguise (a bug that would slip through count-only
+// assertions, since both packets equally increment UnscopedRelayCount24h).
+func seedSizeWeightedAirtimeFixture(t *testing.T, hashPrefix string) (*PacketStore, string, int, int, func()) {
+	t.Helper()
+	db := setupCapabilityTestDB(t)
+	pubkey := "1122334455667788"
+	db.conn.Exec("INSERT INTO nodes (public_key, name, role, last_seen) VALUES (?, ?, ?, ?)",
+		pubkey, "RepAirtime", "repeater", recentTS(1))
+	store := NewPacketStore(db, nil)
+	pt := 1 // non-advert (TXT_MSG)
+	flood := routeTypeFlood
+	smallBytes, largeBytes := 2, 40
+	// RawHex is 2 hex chars per payload byte; content doesn't matter for
+	// ToA (only length does), so a run of "00" is fine.
+	hexOfLen := func(n int) string { return strings.Repeat("00", n) }
+	mk := func(hash string, bytes int) *StoreTx {
+		return &StoreTx{RawHex: hexOfLen(bytes), PayloadType: &pt, RouteType: &flood, PathJSON: `["aa"]`, FirstSeen: recentTS(2), Hash: hash}
+	}
+	small := mk(hashPrefix+"small", smallBytes)
+	large := mk(hashPrefix+"large", largeBytes)
+	store.mu.Lock()
+	for _, tx := range []*StoreTx{small, large} {
+		tx.ID = len(store.packets) + 1
+		store.packets = append(store.packets, tx)
+		store.byHash[tx.Hash] = tx
+		store.byTxID[tx.ID] = tx
+		store.byPathHop[pubkey] = append(store.byPathHop[pubkey], tx)
+	}
+	store.mu.Unlock()
+	return store, pubkey, smallBytes, largeBytes, func() { db.conn.Close() }
+}
+
+func assertSizeWeightedAirtime(t *testing.T, info RepeaterRelayInfo, smallBytes, largeBytes int) {
+	t.Helper()
+	if info.UnscopedRelayCount24h != 2 {
+		t.Fatalf("expected UnscopedRelayCount24h=2 (both FLOOD), got %d", info.UnscopedRelayCount24h)
+	}
+	preset := defaultLoRaPreset()
+	wantNs := int64(lora.TimeOnAir(smallBytes, preset)) + int64(lora.TimeOnAir(largeBytes, preset))
+	if info.UnscopedAirtimeNs24h != wantNs {
+		t.Errorf("expected UnscopedAirtimeNs24h=%d (ToA(%dB)+ToA(%dB)), got %d", wantNs, smallBytes, largeBytes, info.UnscopedAirtimeNs24h)
+	}
+	// The real regression this guards: a naive count-based stand-in
+	// (e.g. count × ToA(smallBytes)) would UNDER-report here, since the
+	// large packet costs strictly more airtime per packet than the small
+	// one — same count, different real channel-time cost.
+	countBasedNs := 2 * int64(lora.TimeOnAir(smallBytes, preset))
+	if info.UnscopedAirtimeNs24h <= countBasedNs {
+		t.Errorf("expected size-weighted airtime (%d ns) to exceed the count-based stand-in (%d ns) — a %dB packet must cost more air-time than two %dB packets' worth", info.UnscopedAirtimeNs24h, countBasedNs, largeBytes, smallBytes)
+	}
+}
+
+func TestRepeaterUnscopedAirtime_SizeWeighted(t *testing.T) {
+	store, pubkey, smallBytes, largeBytes, done := seedSizeWeightedAirtimeFixture(t, "")
+	defer done()
+	assertSizeWeightedAirtime(t, store.GetRepeaterRelayInfo(pubkey, 24), smallBytes, largeBytes)
+}
+
+func TestRepeaterUnscopedAirtime_SizeWeighted_Bulk(t *testing.T) {
+	store, pubkey, smallBytes, largeBytes, done := seedSizeWeightedAirtimeFixture(t, "bulk-")
+	defer done()
+	assertSizeWeightedAirtime(t, store.computeRepeaterRelayInfoMap(24)[pubkey], smallBytes, largeBytes)
 }

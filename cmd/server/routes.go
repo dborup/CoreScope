@@ -1401,6 +1401,8 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 					node["relay_count_1h"] = info.RelayCount1h
 					node["relay_count_24h"] = info.RelayCount24h
 					node["unscoped_relay_count_24h"] = info.UnscopedRelayCount24h
+					node["relay_airtime_ms_24h"] = float64(info.RelayAirtimeNs24h) / 1e6
+					node["unscoped_airtime_ms_24h"] = float64(info.UnscopedAirtimeNs24h) / 1e6
 					// #1751: region scopes this repeater has transported.
 					// Set only when non-empty so the field is absent for
 					// nodes without scopes / on older schemas.
@@ -1620,6 +1622,8 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 			node["relay_count_1h"] = info.RelayCount1h
 			node["relay_count_24h"] = info.RelayCount24h
 			node["unscoped_relay_count_24h"] = info.UnscopedRelayCount24h
+			node["relay_airtime_ms_24h"] = float64(info.RelayAirtimeNs24h) / 1e6
+			node["unscoped_airtime_ms_24h"] = float64(info.UnscopedAirtimeNs24h) / 1e6
 			// #1751: region scopes this repeater has transported. Set only
 			// when non-empty (absent for no-scope nodes / older schemas).
 			if len(info.TransportedScopes) > 0 {

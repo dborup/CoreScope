@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/meshcore-analyzer/lora"
 )
 
 // RepeaterRelayInfo describes whether a repeater has been observed
@@ -32,6 +34,17 @@ type RepeaterRelayInfo struct {
 	// `flood.max.unscoped 0` and should not forward these, so a non-trivial
 	// count flags a base-config problem (consumed by the ArcScope advisor).
 	UnscopedRelayCount24h int `json:"unscopedRelayCount24h"`
+	// RelayAirtimeNs24h is the sum of LoRa Time-on-Air (nanoseconds, per the
+	// same closed-form ToA calc and PHY preset as relay_airtime_share.go)
+	// across every packet counted in RelayCount24h. Unlike a raw packet
+	// count, this weights by how long each packet actually occupied the
+	// channel — a handful of large packets can cost more airtime than many
+	// small ones.
+	RelayAirtimeNs24h int64 `json:"relayAirtimeNs24h,omitempty"`
+	// UnscopedAirtimeNs24h is the RelayAirtimeNs24h subset attributable to
+	// UnscopedRelayCount24h specifically — the actual channel-time cost of
+	// this repeater's unscoped-flood forwarding, not just how many packets.
+	UnscopedAirtimeNs24h int64 `json:"unscopedAirtimeNs24h,omitempty"`
 	// TransportedScopes is the deduplicated, sorted set of region scope
 	// names (transmissions.scope_name) across ALL non-advert packets in
 	// which this pubkey appears as a path hop. Unlike RelayCount1h/24h this
@@ -111,6 +124,10 @@ type relayEntry struct {
 	// rt is the tx route type (transmissions.route_type), or -1 when absent.
 	// rt == routeTypeFlood marks an unscoped flood (UnscopedRelayCount24h).
 	rt int
+	// payloadBytes is len(RawHex)/2 — the packet's on-air payload length,
+	// used for the LoRa Time-on-Air airtime calc (RelayAirtimeNs24h /
+	// UnscopedAirtimeNs24h). 0 for entries where RawHex was unavailable.
+	payloadBytes int
 	// scope is the tx's region scope name (transmissions.scope_name).
 	// Empty when absent / on older schemas. Used for TransportedScopes (#1751).
 	scope string
@@ -170,7 +187,7 @@ func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
 			if tx.RouteType != nil {
 				rt = *tx.RouteType
 			}
-			entries = append(entries, relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix})
+			entries = append(entries, relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix, payloadBytes: len(tx.RawHex) / 2})
 		}
 	}
 	collect(txList, false)
@@ -179,8 +196,10 @@ func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
 }
 
 // computeRelayInfoFromEntries derives RepeaterRelayInfo from pre-snapshotted
-// relayEntry values. Safe to call without any lock held.
-func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) RepeaterRelayInfo {
+// relayEntry values. Safe to call without any lock held. preset is the LoRa
+// PHY config used for the RelayAirtimeNs24h / UnscopedAirtimeNs24h
+// Time-on-Air calc — see resolveLoRaPreset.
+func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64, preset lora.Preset) RepeaterRelayInfo {
 	info := RepeaterRelayInfo{WindowHours: windowHours}
 
 	now := time.Now().UTC()
@@ -215,8 +234,11 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 		}
 		if t.After(cutoff24h) {
 			info.RelayCount24h++
+			toaNs := int64(lora.TimeOnAir(e.payloadBytes, preset))
+			info.RelayAirtimeNs24h += toaNs
 			if e.rt == routeTypeFlood {
 				info.UnscopedRelayCount24h++
+				info.UnscopedAirtimeNs24h += toaNs
 			}
 			if t.After(cutoff1h) {
 				info.RelayCount1h++
@@ -268,5 +290,5 @@ func (s *PacketStore) GetRepeaterRelayInfo(pubkey string, windowHours float64) R
 	entries := s.collectRelayEntriesLocked(key)
 	s.mu.RUnlock()
 
-	return computeRelayInfoFromEntries(entries, windowHours)
+	return computeRelayInfoFromEntries(entries, windowHours, s.resolveLoRaPreset())
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"time"
+
+	"github.com/meshcore-analyzer/lora"
 )
 
 // GetRepeaterRelayInfoMap returns a cached pubkey → RepeaterRelayInfo
@@ -75,12 +77,16 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 	// Build a tx-id-keyed pre-parsed cache so the inner loop doesn't
 	// re-parse the same FirstSeen N times when the same tx is indexed
 	// under multiple hop keys (very common — every hop on a path indexes
-	// the tx).
+	// the tx). toaNs (LoRa Time-on-Air, same calc as relay_airtime_share.go)
+	// is precomputed here too, once per distinct tx.ID rather than once per
+	// (hop key, tx) pair.
 	type parsedTx struct {
-		t  time.Time
-		ok bool
-		pt int
+		t     time.Time
+		ok    bool
+		pt    int
+		toaNs int64
 	}
+	preset := s.resolveLoRaPreset()
 	parseCache := make(map[int]parsedTx, 1<<14)
 	for _, list := range snap {
 		for _, tx := range list {
@@ -95,7 +101,8 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 				pt = *tx.PayloadType
 			}
 			t, ok := parseRelayTS(tx.FirstSeen)
-			parseCache[tx.ID] = parsedTx{t: t, ok: ok, pt: pt}
+			toaNs := int64(lora.TimeOnAir(len(tx.RawHex)/2, preset))
+			parseCache[tx.ID] = parsedTx{t: t, ok: ok, pt: pt, toaNs: toaNs}
 		}
 	}
 	s.mu.RUnlock()
@@ -175,8 +182,10 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 				}
 				if p.t.After(cutoff24h) {
 					info.RelayCount24h++
+					info.RelayAirtimeNs24h += p.toaNs
 					if tx.RouteType != nil && *tx.RouteType == routeTypeFlood {
 						info.UnscopedRelayCount24h++
+						info.UnscopedAirtimeNs24h += p.toaNs
 					}
 					if p.t.After(cutoff1h) {
 						info.RelayCount1h++

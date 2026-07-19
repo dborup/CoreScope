@@ -128,7 +128,7 @@ function fakeEl() {
 (async () => {
   console.log('\n=== analytics.js: renderForeignTrafficTab ===');
 
-  await testAsync('sorts repeaters by unscoped_relay_count_24h descending', async () => {
+  await testAsync('falls back to sorting by unscoped_relay_count_24h when airtime data is absent', async () => {
     const ctx = makeAnalyticsSandbox([
       { public_key: 'pkA', name: 'RepeaterLow', role: 'repeater', unscoped_relay_count_24h: 10, relay_count_24h: 20, foreign: false },
       { public_key: 'pkB', name: 'RepeaterHigh', role: 'repeater', unscoped_relay_count_24h: 50, relay_count_24h: 50, foreign: false },
@@ -141,6 +141,23 @@ function fakeEl() {
     const idxLow = el.innerHTML.indexOf('RepeaterLow');
     assert.ok(idxHigh > -1 && idxMid > -1 && idxLow > -1, 'all three repeaters should be rendered');
     assert.ok(idxHigh < idxMid && idxMid < idxLow, 'rows should be sorted by unscoped_relay_count_24h descending');
+  });
+
+  await testAsync('sorts by unscoped_airtime_ms_24h (airtime cost) ahead of raw relay count when they disagree', async () => {
+    const ctx = makeAnalyticsSandbox([
+      // FewButBig has fewer unscoped relays than ManySmall, but each is a
+      // much larger packet — more real channel-time cost despite the lower
+      // count. Airtime-primary sort must rank it first; a count-primary
+      // sort would rank ManySmall first instead.
+      { public_key: 'pkFew', name: 'FewButBig', role: 'repeater', unscoped_relay_count_24h: 3, relay_count_24h: 3, unscoped_airtime_ms_24h: 9000, relay_airtime_ms_24h: 9000, foreign: false },
+      { public_key: 'pkMany', name: 'ManySmall', role: 'repeater', unscoped_relay_count_24h: 100, relay_count_24h: 100, unscoped_airtime_ms_24h: 500, relay_airtime_ms_24h: 500, foreign: false },
+    ]);
+    const el = fakeEl();
+    await ctx.window._analyticsRenderForeignTrafficTab(el);
+    const idxFew = el.innerHTML.indexOf('FewButBig');
+    const idxMany = el.innerHTML.indexOf('ManySmall');
+    assert.ok(idxFew > -1 && idxMany > -1, 'both repeaters should be rendered');
+    assert.ok(idxFew < idxMany, 'FewButBig (9000ms airtime, only 3 packets) must rank above ManySmall (500ms airtime, 100 packets) — airtime cost, not count, is the primary sort key');
   });
 
   await testAsync('excludes non-repeater/room roles and zero-unscoped repeaters', async () => {
@@ -182,7 +199,7 @@ function fakeEl() {
     ]);
     const el = fakeEl();
     await ctx.window._analyticsRenderForeignTrafficTab(el);
-    assert.ok(el.innerHTML.includes('no foreign-origin node has advertised'), 'should show the zero-foreign fallback message');
+    assert.ok(el.innerHTML.includes('No foreign-origin node has advertised'), 'should show the zero-foreign fallback message');
   });
 
   await testAsync('foreign-flagged nodes list renders every foreign node, sorted newest-heard first', async () => {

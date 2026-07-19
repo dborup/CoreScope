@@ -4877,24 +4877,44 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         const relays = allNodes.filter(function(n) {
           return (n.role === 'repeater' || n.role === 'room') && (n.unscoped_relay_count_24h || 0) > 0;
         });
-        relays.sort(function(a, b) { return Number(b.unscoped_relay_count_24h || 0) - Number(a.unscoped_relay_count_24h || 0); });
         const foreignCount = allNodes.filter(function(n) { return n.foreign; }).length;
+
+        function formatMs(ms) {
+          if (!ms) return '0ms';
+          if (ms < 1000) return ms.toFixed(0) + 'ms';
+          if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+          return (ms / 60000).toFixed(1) + 'min';
+        }
+
+        // Airtime cost, not just count: a repeater relaying few but large
+        // unscoped packets can occupy more channel time than one relaying
+        // many small ones — ranking by count alone would miss that. Falls
+        // back to unscoped_relay_count_24h when airtime is absent/equal
+        // (e.g. a schema/response predating relay_airtime tracking).
+        relays.sort(function(a, b) {
+          const byAirtime = Number(b.unscoped_airtime_ms_24h || 0) - Number(a.unscoped_airtime_ms_24h || 0);
+          if (byAirtime !== 0) return byAirtime;
+          return Number(b.unscoped_relay_count_24h || 0) - Number(a.unscoped_relay_count_24h || 0);
+        });
 
         let body;
         if (relays.length > 0) {
           const rows = relays.map(function(n) {
             const total = n.relay_count_24h || 0;
             const unscoped = n.unscoped_relay_count_24h || 0;
+            const unscopedMs = n.unscoped_airtime_ms_24h || 0;
+            const totalMs = n.relay_airtime_ms_24h || 0;
             return '<tr>' +
               '<td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
               '<td>' + esc(n.role) + '</td>' +
+              '<td>' + formatMs(unscopedMs) + '</td>' +
+              '<td>' + pct(unscopedMs, totalMs) + '</td>' +
               '<td>' + unscoped.toLocaleString() + '</td>' +
               '<td>' + total.toLocaleString() + '</td>' +
-              '<td>' + pct(unscoped, total) + '</td>' +
               '</tr>';
           }).join('');
           body = '<table class="data-table analytics-table">' +
-            '<thead><tr><th>Repeater</th><th>Role</th><th>Unscoped Relays (24h)</th><th>Total Relays (24h)</th><th>% Unscoped</th></tr></thead>' +
+            '<thead><tr><th>Repeater</th><th>Role</th><th>Unscoped Airtime (24h)</th><th>% of Repeater\'s Airtime</th><th>Unscoped Relays (24h)</th><th>Total Relays (24h)</th></tr></thead>' +
             '<tbody>' + rows + '</tbody>' +
             '</table>';
         } else {
@@ -4902,8 +4922,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         }
 
         const foreignNote = foreignCount > 0
-          ? foreignCount.toLocaleString() + ' node(s) so far carry an advertised GPS position outside the configured geo_filter — cross-referencing which rows below actually trace back to those is a planned follow-up once more accumulates.'
-          : 'geo_filter is configured, but no foreign-origin node has advertised since — check back once traffic accumulates to cross-reference which of the unscoped relays below trace back to a foreign sender.';
+          ? 'Investigating traffic from outside the configured geo_filter: which nodes are flagged, where they enter the local mesh, how far their signal actually travels, and how much repeater airtime unscoped traffic costs. ' + foreignCount.toLocaleString() + ' node(s) currently carry a self-reported GPS position outside the box.'
+          : 'Investigating traffic from outside the configured geo_filter: which nodes are flagged, where they enter the local mesh, how far their signal actually travels, and how much repeater airtime unscoped traffic costs. No foreign-origin node has advertised yet — check back once traffic accumulates.';
 
         // Foreign-flagged nodes so far (#730 foreign_advert), newest-heard
         // first. Only set going forward from when geo_filter was
@@ -5100,11 +5120,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
         el.innerHTML =
           '<h3 style="margin:0 0 4px">Foreign Traffic</h3>' +
-          '<p class="text-muted" style="margin:0 0 16px;font-size:0.85em">' +
-            'Repeaters relaying unscoped (route_type FLOOD) packets in the last 24 hours, sorted by volume. ' +
-            'A small amount of unscoped traffic is normal — <code>flood.max.unscoped</code> caps it rather than blocking it outright. Disproportionate volume or % here is what\'s worth investigating on that specific node. ' +
-            foreignNote +
-          '</p>' +
+          '<p class="text-muted" style="margin:0 0 16px;font-size:0.85em">' + foreignNote + '</p>' +
           '<h4 style="margin:0 0 4px">Foreign-Flagged Nodes (' + foreignNodes.length.toLocaleString() + ')</h4>' +
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
             'Nodes whose most recent advertised GPS position fell outside the configured geo_filter — self-reported GPS from the node\'s own ADVERT. ' +
@@ -5118,6 +5134,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Straight-line distance from each foreign node\'s self-reported GPS to the observer that heard it, divided by that observation\'s hop count — how many km this mesh actually covers per hop, using real data instead of assumed range.</p>' +
           distanceHopBody +
           '<h4 style="margin:24px 0 4px">Repeaters Relaying Unscoped Traffic</h4>' +
+          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
+            'Ranked by <strong>airtime cost</strong> — LoRa Time-on-Air, not raw packet count — so a repeater relaying few but large unscoped packets doesn\'t get lost behind one relaying many small ones. ' +
+            'A small amount of unscoped traffic is normal; <code>flood.max.unscoped</code> caps it rather than blocking it outright. Disproportionate airtime or % here is what\'s worth investigating on that specific node.' +
+          '</p>' +
           body;
       } catch (e) {
         el.innerHTML = '<p class="text-muted">Failed to load repeater relay stats.</p>';

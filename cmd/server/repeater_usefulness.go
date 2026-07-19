@@ -114,9 +114,10 @@ func (s *PacketStore) GetRepeaterNodeStatsBatch(pubkeys []string, windowHours fl
 
 	s.mu.RUnlock()
 
+	preset := s.resolveLoRaPreset()
 	for _, pk := range pubkeys {
 		snap := snaps[pk]
-		info := computeRelayInfoFromEntries(snap.entries, windowHours)
+		info := computeRelayInfoFromEntries(snap.entries, windowHours, preset)
 
 		var score float64
 		if totalNonAdvert > 0 && snap.relayed > 0 {
