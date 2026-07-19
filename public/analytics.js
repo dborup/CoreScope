@@ -4502,6 +4502,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     // finer-grained, more transient filter.
     var noScopeFilter = { role: '', q: '' };
 
+    // Encrypted/unencrypted filter for "Scope Adoption by Channel" below —
+    // same persistence reasoning as noScopeFilter above. '' = all,
+    // 'encrypted' = channel_hash prefixed 'enc_' (undecryptable at ingest,
+    // see db.go GetChannelScopeAdoption), 'unencrypted' = everything else
+    // (plain channel names — never encrypted to begin with).
+    var adoptFilter = { mode: '' };
+
     // Fix 5: write static frame only once
     if (!el.querySelector('#scopes-cards')) {
       el.innerHTML =
@@ -4708,6 +4715,70 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       }
     }
 
+    // Renders (and re-renders, on filter change) "Scope Adoption by
+    // Channel" from the already-fetched `adoption` array — uncapped
+    // server-side (see db.go GetChannelScopeAdoption), so every channel
+    // seen in the window shows up here, filterable by whether its
+    // channel_hash carries the 'enc_' prefix db.go uses for channels the
+    // ingestor couldn't decrypt.
+    function renderAdoptSection(adoption) {
+      var adoptElInner = document.getElementById('scopes-channel-adoption');
+      if (!adoptElInner) return;
+
+      function isEncrypted(ca) { return !!(ca.channel && ca.channel.indexOf('enc_') === 0); }
+      var encryptedCount = adoption.filter(isEncrypted).length;
+      var unencryptedCount = adoption.length - encryptedCount;
+
+      var filtered = adoption;
+      if (adoptFilter.mode === 'encrypted') filtered = adoption.filter(isEncrypted);
+      else if (adoptFilter.mode === 'unencrypted') filtered = adoption.filter(function(ca) { return !isEncrypted(ca); });
+
+      var filterButtons = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">' +
+        '<button type="button" class="tab-btn' + (!adoptFilter.mode ? ' active' : '') + '" data-adopt-filter="">All (' + adoption.length.toLocaleString() + ')</button>' +
+        '<button type="button" class="tab-btn' + (adoptFilter.mode === 'unencrypted' ? ' active' : '') + '" data-adopt-filter="unencrypted">Unencrypted (' + unencryptedCount.toLocaleString() + ')</button>' +
+        '<button type="button" class="tab-btn' + (adoptFilter.mode === 'encrypted' ? ' active' : '') + '" data-adopt-filter="encrypted">Encrypted (' + encryptedCount.toLocaleString() + ')</button>' +
+        '</div>';
+
+      var adoptBody;
+      if (filtered.length > 0) {
+        var adoptRows = filtered.map(function(ca) {
+          var caOverall = ca.scoped + ca.unscoped;
+          var label = isEncrypted(ca) ? 'Encrypted (0x' + ca.channel.slice(4).toUpperCase() + ')' : ca.channel;
+          return '<tr>' +
+            '<td><code>' + esc(label) + '</code></td>' +
+            '<td>' + ca.totalMessages.toLocaleString() + '</td>' +
+            '<td>' + ca.scoped.toLocaleString() + ' (' + pct(ca.scoped, caOverall) + ')</td>' +
+            '<td>' + ca.unscoped.toLocaleString() + '</td>' +
+            '<td>' + ca.unknownScope.toLocaleString() + '</td>' +
+            '</tr>';
+        }).join('');
+        adoptBody = '<table class="data-table analytics-table">' +
+          '<thead><tr><th>Channel</th><th>Messages</th><th>Scoped</th><th>Unscoped</th><th>Unknown</th></tr></thead>' +
+          '<tbody>' + adoptRows + '</tbody>' +
+          '</table>';
+      } else if (adoption.length > 0) {
+        adoptBody = '<p class="text-muted" style="font-size:0.85em">No channels match this filter.</p>';
+      } else {
+        adoptBody = '<p class="text-muted" style="font-size:0.85em">No channel messages in this window.</p>';
+      }
+
+      setSectionHtml(adoptElInner, detailsSection(
+        'Scope Adoption by Channel (' + adoption.length.toLocaleString() + ')',
+        'Which channels actually use region scoping vs which never do — every channel seen in this window.',
+        adoption.length > 0 ? (filterButtons + adoptBody) : adoptBody,
+        'scope-adoption'
+      ));
+
+      var sectionEl = document.getElementById('scopes-channel-adoption');
+      if (!sectionEl) return;
+      sectionEl.querySelectorAll('[data-adopt-filter]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          adoptFilter.mode = btn.dataset.adoptFilter || '';
+          renderAdoptSection(adoption);
+        });
+      });
+    }
+
     async function load(w) {
       var loadingEl = document.getElementById('scopes-loading');
       if (loadingEl) loadingEl.style.display = '';
@@ -4837,35 +4908,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
       // Channel scope adoption: the Channel Messages breakdown above, but
       // per channel — which specific channels actually use region scoping
-      // vs which never do. Top 30 by volume.
+      // vs which never do. Uncapped; filterable by encrypted/unencrypted.
       var adoptEl = document.getElementById('scopes-channel-adoption');
       if (adoptEl) {
-        var adoption = d.channelScopeAdoption || [];
-        var adoptBody;
-        if (adoption.length > 0) {
-          var adoptRows = adoption.map(function(ca) {
-            var caOverall = ca.scoped + ca.unscoped;
-            return '<tr>' +
-              '<td><code>' + esc(ca.channel) + '</code></td>' +
-              '<td>' + ca.totalMessages.toLocaleString() + '</td>' +
-              '<td>' + ca.scoped.toLocaleString() + ' (' + pct(ca.scoped, caOverall) + ')</td>' +
-              '<td>' + ca.unscoped.toLocaleString() + '</td>' +
-              '<td>' + ca.unknownScope.toLocaleString() + '</td>' +
-              '</tr>';
-          }).join('');
-          adoptBody = '<table class="data-table analytics-table">' +
-            '<thead><tr><th>Channel</th><th>Messages</th><th>Scoped</th><th>Unscoped</th><th>Unknown</th></tr></thead>' +
-            '<tbody>' + adoptRows + '</tbody>' +
-            '</table>';
-        } else {
-          adoptBody = '<p class="text-muted" style="font-size:0.85em">No channel messages in this window.</p>';
-        }
-        setSectionHtml(adoptEl, detailsSection(
-          'Scope Adoption by Channel (' + adoption.length.toLocaleString() + ')',
-          'Which channels actually use region scoping vs which never do. Top 30 by message volume.',
-          adoptBody,
-          'scope-adoption'
-        ));
+        renderAdoptSection(d.channelScopeAdoption || []);
       }
 
       // Per-region table
