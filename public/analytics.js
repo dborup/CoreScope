@@ -4495,6 +4495,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     var subtabKey = 'scopes_subtab';
     var selectedSubtab = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(subtabKey)) || 'overview';
 
+    // Role/text filter for the "Nodes Without a Default Scope" section
+    // below. Lives at this scope (not inside updateData) so it survives
+    // the 60s auto-refresh re-render — same reasoning as selectedWindow
+    // above, just kept in memory rather than sessionStorage since it's a
+    // finer-grained, more transient filter.
+    var noScopeFilter = { role: '', q: '' };
+
     // Fix 5: write static frame only once
     if (!el.querySelector('#scopes-cards')) {
       el.innerHTML =
@@ -4608,6 +4615,89 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           var k = d.getAttribute('data-key') || (s ? s.textContent : '');
           if (k && openKeys.indexOf(k) !== -1) d.open = true;
         });
+      }
+    }
+
+    // Renders (and re-renders, on every filter change) the "Nodes Without
+    // a Default Scope" section from an already-fetched node list — role
+    // buttons and the search box filter that same in-memory list, so
+    // narrowing to e.g. just companions never re-fetches. The search
+    // input's own re-render (triggered by typing) would otherwise steal
+    // focus every keystroke since setSectionHtml rebuilds the whole
+    // section including the input; focus + caret are captured before and
+    // restored after for that reason.
+    function renderNoScopeSection(allNodes) {
+      var noScopeElInner = document.getElementById('scopes-no-scope');
+      if (!noScopeElInner) return;
+
+      var searchFocused = document.activeElement && document.activeElement.id === 'noScopeSearch';
+      var caretPos = searchFocused ? document.activeElement.selectionStart : null;
+
+      var noScope = computeNodesWithoutScope(allNodes, 100, { role: noScopeFilter.role, q: noScopeFilter.q });
+      var roleSummaryText = noScope.roleSummary.map(function(r) { return r.count.toLocaleString() + ' ' + esc(r.role); }).join(', ');
+
+      var roleButtons = '<button type="button" class="tab-btn' + (!noScopeFilter.role ? ' active' : '') +
+          '" data-role-filter="">All (' + noScope.total.toLocaleString() + ')</button>' +
+        noScope.roleSummary.map(function(r) {
+          return '<button type="button" class="tab-btn' + (noScopeFilter.role === r.role ? ' active' : '') +
+            '" data-role-filter="' + esc(r.role) + '">' + esc(r.role) + ' (' + r.count.toLocaleString() + ')</button>';
+        }).join('');
+
+      var controlsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 10px">' +
+        roleButtons +
+        '<input type="text" id="noScopeSearch" placeholder="Search by name or key…" value="' + esc(noScopeFilter.q) + '" ' +
+          'style="margin-left:4px;padding:4px 8px;background:var(--card-bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.85em;min-width:180px">' +
+        '</div>';
+
+      var resultsBody;
+      if (noScope.sortedCapped.length > 0) {
+        var noScopeRows = noScope.sortedCapped.map(function(n) {
+          return '<tr><td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
+            '<td>' + esc(n.role || '—') + '</td>' +
+            '<td>' + timeAgo(n.last_seen) + '</td></tr>';
+        }).join('');
+        resultsBody = '<table class="data-table analytics-table">' +
+          '<thead><tr><th>Node</th><th>Role</th><th>Last Seen</th></tr></thead>' +
+          '<tbody>' + noScopeRows + '</tbody>' +
+          '</table>';
+      } else if (noScopeFilter.role || noScopeFilter.q) {
+        resultsBody = '<p class="text-muted" style="font-size:0.85em">No nodes without a default scope match this filter.</p>';
+      } else {
+        resultsBody = '<p class="text-muted" style="font-size:0.85em">Every known node has a configured default scope.</p>';
+      }
+
+      setSectionHtml(noScopeElInner, detailsSection(
+        'Nodes Without a Default Scope (' + noScope.total.toLocaleString() + ' of ' + allNodes.length.toLocaleString() + ')',
+        'Nodes with no <code>default_scope</code> configured — they never set a hashRegions region for themselves in their own adverts. By role: ' + (roleSummaryText || 'none') + '. ' +
+          'Sorted by most-recently-active first' +
+          (noScope.filteredTotal !== noScope.total ? ', filtered to ' + noScope.filteredTotal.toLocaleString() + ' matching below' : '') +
+          (noScope.truncated ? ' (capped at ' + noScope.sortedCapped.length + ')' : '') + '.',
+        controlsHtml + resultsBody,
+        'no-scope'
+      ));
+
+      var sectionEl = document.getElementById('scopes-no-scope');
+      if (!sectionEl) return;
+
+      sectionEl.querySelectorAll('[data-role-filter]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          noScopeFilter.role = btn.dataset.roleFilter || '';
+          renderNoScopeSection(allNodes);
+        });
+      });
+
+      var searchInput = sectionEl.querySelector('#noScopeSearch');
+      if (searchInput) {
+        searchInput.addEventListener('input', debounce(function() {
+          noScopeFilter.q = searchInput.value;
+          renderNoScopeSection(allNodes);
+        }, 200));
+        if (searchFocused) {
+          searchInput.focus();
+          if (caretPos != null) {
+            try { searchInput.setSelectionRange(caretPos, caretPos); } catch (e) { /* ignore */ }
+          }
+        }
       }
     }
 
@@ -4930,43 +5020,23 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         'All-time — nodes whose OWN configured scope is this region (not just relaying it for others). This is a much smaller, more specific set than "Repeaters by Region" above.',
         d.originatingNodesByRegion, 'node');
 
-      // Nodes Not Using Any Scope: the flip side of "Nodes Running This
-      // Region" — every node with no default_scope at all, i.e. never
-      // configured a hashRegions region for itself. Computed client-side
-      // from the full node list (default_scope isn't windowed/aggregated
-      // server-side the way the other scope-stats fields are).
+      // Nodes Without a Default Scope: the flip side of "Nodes Running
+      // This Region" — every node with no default_scope at all, i.e.
+      // never configured a hashRegions region for itself. Computed
+      // client-side from the full node list (default_scope isn't
+      // windowed/aggregated server-side the way the other scope-stats
+      // fields are). Role filter + name/key search re-filter this same
+      // in-memory node list without a re-fetch; the debounced search
+      // input restores focus/caret after each re-render since the whole
+      // section (search box included) is rebuilt via setSectionHtml.
       var noScopeEl = document.getElementById('scopes-no-scope');
       if (noScopeEl) {
         try {
           var allNodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
           var allNodes = allNodesResp.nodes || allNodesResp;
-          var noScope = computeNodesWithoutScope(allNodes, 100);
-          var roleSummary = noScope.roleSummary.map(function(r) { return r.count.toLocaleString() + ' ' + esc(r.role); }).join(', ');
-
-          var noScopeBody;
-          if (noScope.sortedCapped.length > 0) {
-            var noScopeRows = noScope.sortedCapped.map(function(n) {
-              return '<tr><td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
-                '<td>' + esc(n.role || '—') + '</td>' +
-                '<td>' + timeAgo(n.last_seen) + '</td></tr>';
-            }).join('');
-            noScopeBody = '<table class="data-table analytics-table">' +
-              '<thead><tr><th>Node</th><th>Role</th><th>Last Seen</th></tr></thead>' +
-              '<tbody>' + noScopeRows + '</tbody>' +
-              '</table>';
-          } else {
-            noScopeBody = '<p class="text-muted" style="font-size:0.85em">Every known node has a configured scope.</p>';
-          }
-
-          setSectionHtml(noScopeEl, detailsSection(
-            'Nodes Not Using Any Scope (' + noScope.total.toLocaleString() + ' of ' + allNodes.length.toLocaleString() + ')',
-            'Nodes with no default_scope at all — never configured a hashRegions region for themselves. By role: ' + (roleSummary || 'none') + '. ' +
-              'Sorted by most-recently-active first' + (noScope.truncated ? ' (showing the ' + noScope.sortedCapped.length + ' most recent)' : '') + '.',
-            noScopeBody,
-            'no-scope'
-          ));
+          renderNoScopeSection(allNodes);
         } catch (e) {
-          setSectionHtml(noScopeEl, detailsSection('Nodes Not Using Any Scope', null, '<p class="text-muted">Failed to load.</p>', 'no-scope'));
+          setSectionHtml(noScopeEl, detailsSection('Nodes Without a Default Scope', null, '<p class="text-muted">Failed to load.</p>', 'no-scope'));
         }
       }
 
@@ -5021,11 +5091,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     }, 60000);
   }
 
-  // Pure (no DOM/network) computation behind the Scopes tab's "Nodes Not
-  // Using Any Scope" section: filters to nodes with no default_scope,
-  // tallies by role (most common first), and returns a most-recently
-  // -active-first slice capped at `cap` rows.
-  function computeNodesWithoutScope(allNodes, cap) {
+  // Pure (no DOM/network) computation behind the Scopes tab's "Nodes
+  // Without a Default Scope" section: filters to nodes with no
+  // default_scope, tallies by role (most common first — always over the
+  // FULL unfiltered set, so the role filter buttons' counts don't shift
+  // as you filter), then optionally narrows further by `opts.role` and/or
+  // a case-insensitive `opts.q` match against name or public_key, and
+  // returns a most-recently-active-first slice capped at `cap` rows.
+  // `total` is always the full unfiltered count; `filteredTotal` reflects
+  // opts.
+  function computeNodesWithoutScope(allNodes, cap, opts) {
+    opts = opts || {};
     var noScopeNodes = allNodes.filter(function(n) { return !n.default_scope; });
     var roleCounts = {};
     noScopeNodes.forEach(function(n) {
@@ -5035,11 +5111,25 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     var roleSummary = Object.keys(roleCounts)
       .sort(function(a, b) { return roleCounts[b] - roleCounts[a]; })
       .map(function(r) { return { role: r, count: roleCounts[r] }; });
-    var sorted = noScopeNodes.slice().sort(function(a, b) {
+
+    var filtered = noScopeNodes;
+    if (opts.role) {
+      filtered = filtered.filter(function(n) { return (n.role || 'unknown') === opts.role; });
+    }
+    if (opts.q) {
+      var q = String(opts.q).toLowerCase();
+      filtered = filtered.filter(function(n) {
+        return ((n.name || '').toLowerCase().indexOf(q) !== -1) ||
+          ((n.public_key || '').toLowerCase().indexOf(q) !== -1);
+      });
+    }
+
+    var sorted = filtered.slice().sort(function(a, b) {
       return new Date(b.last_seen || 0) - new Date(a.last_seen || 0);
     });
     return {
       total: noScopeNodes.length,
+      filteredTotal: filtered.length,
       roleSummary: roleSummary,
       sortedCapped: sorted.slice(0, cap),
       truncated: sorted.length > cap,
