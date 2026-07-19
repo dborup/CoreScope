@@ -2708,6 +2708,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsRenderCollisionsFromServer = renderCollisionsFromServer;
     window._analyticsRenderForeignTrafficTab = renderForeignTrafficTab;
     window._analyticsStopForeignTrafficRefresh = _stopForeignTrafficRefresh;
+    window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
   }
 
   // ─── Neighbor Graph Tab ─────────────────────────────────────────────────────
@@ -4505,6 +4506,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         '<div id="scopes-utilization" style="margin-top:16px"></div>' +
         '<div id="scopes-repeaters" style="margin-top:16px"></div>' +
         '<div id="scopes-origin-nodes" style="margin-top:16px"></div>' +
+        '<div id="scopes-no-scope" style="margin-top:16px"></div>' +
         '<div id="scopes-bridges" style="margin-top:16px"></div>';
 
       // Attach window-button click listeners (once)
@@ -4535,7 +4537,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           if (cardsEl2) cardsEl2.innerHTML = '<div class="text-center text-muted" style="padding:20px">' + esc(data.error) + '</div>';
           return;
         }
-        updateData(data, w);
+        await updateData(data, w);
       } catch (err) {
         if (loadingEl) loadingEl.style.display = 'none';
         var cardsEl3 = document.getElementById('scopes-cards');
@@ -4543,7 +4545,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       }
     }
 
-    function updateData(d, w) {
+    async function updateData(d, w) {
       var s = d.summary;
       // #1838: denominator = transport-carrying transmissions (route_type 0,3).
       // Unscoped now includes non-transport routes (1,2) which are inherently
@@ -4840,7 +4842,48 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       renderRegionNodeGroups('scopes-origin-nodes', 'Nodes Running This Region',
         'All-time — nodes whose OWN configured scope is this region (not just relaying it for others). This is a much smaller, more specific set than "Repeaters by Region" above.',
         d.originatingNodesByRegion, 'node');
+
+      // Nodes Not Using Any Scope: the flip side of "Nodes Running This
+      // Region" — every node with no default_scope at all, i.e. never
+      // configured a hashRegions region for itself. Computed client-side
+      // from the full node list (default_scope isn't windowed/aggregated
+      // server-side the way the other scope-stats fields are).
+      var noScopeEl = document.getElementById('scopes-no-scope');
+      if (noScopeEl) {
+        try {
+          var allNodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
+          var allNodes = allNodesResp.nodes || allNodesResp;
+          var noScope = computeNodesWithoutScope(allNodes, 100);
+          var roleSummary = noScope.roleSummary.map(function(r) { return r.count.toLocaleString() + ' ' + esc(r.role); }).join(', ');
+
+          var noScopeBody;
+          if (noScope.sortedCapped.length > 0) {
+            var noScopeRows = noScope.sortedCapped.map(function(n) {
+              return '<tr><td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
+                '<td>' + esc(n.role || '—') + '</td>' +
+                '<td>' + timeAgo(n.last_seen) + '</td></tr>';
+            }).join('');
+            noScopeBody = '<table class="data-table analytics-table">' +
+              '<thead><tr><th>Node</th><th>Role</th><th>Last Seen</th></tr></thead>' +
+              '<tbody>' + noScopeRows + '</tbody>' +
+              '</table>';
+          } else {
+            noScopeBody = '<p class="text-muted" style="font-size:0.85em">Every known node has a configured scope.</p>';
+          }
+
+          noScopeEl.innerHTML =
+            '<h4 style="margin:0 0 4px">Nodes Not Using Any Scope (' + noScope.total.toLocaleString() + ' of ' + allNodes.length.toLocaleString() + ')</h4>' +
+            '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
+              'Nodes with no default_scope at all — never configured a hashRegions region for themselves. By role: ' + (roleSummary || 'none') + '. ' +
+              'Sorted by most-recently-active first' + (noScope.truncated ? ' (showing the ' + noScope.sortedCapped.length + ' most recent)' : '') + '.' +
+            '</p>' +
+            noScopeBody;
+        } catch (e) {
+          noScopeEl.innerHTML = '<h4 style="margin:0 0 4px">Nodes Not Using Any Scope</h4><p class="text-muted">Failed to load.</p>';
+        }
+      }
     }
+
 
     load(selectedWindow);
 
@@ -4852,6 +4895,31 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       if (!cur) { _stopScopesRefresh(); return; }
       load(selectedWindow);
     }, 60000);
+  }
+
+  // Pure (no DOM/network) computation behind the Scopes tab's "Nodes Not
+  // Using Any Scope" section: filters to nodes with no default_scope,
+  // tallies by role (most common first), and returns a most-recently
+  // -active-first slice capped at `cap` rows.
+  function computeNodesWithoutScope(allNodes, cap) {
+    var noScopeNodes = allNodes.filter(function(n) { return !n.default_scope; });
+    var roleCounts = {};
+    noScopeNodes.forEach(function(n) {
+      var r = n.role || 'unknown';
+      roleCounts[r] = (roleCounts[r] || 0) + 1;
+    });
+    var roleSummary = Object.keys(roleCounts)
+      .sort(function(a, b) { return roleCounts[b] - roleCounts[a]; })
+      .map(function(r) { return { role: r, count: roleCounts[r] }; });
+    var sorted = noScopeNodes.slice().sort(function(a, b) {
+      return new Date(b.last_seen || 0) - new Date(a.last_seen || 0);
+    });
+    return {
+      total: noScopeNodes.length,
+      roleSummary: roleSummary,
+      sortedCapped: sorted.slice(0, cap),
+      truncated: sorted.length > cap,
+    };
   }
 
   // Repeaters relaying unscoped (route_type FLOOD) traffic, sorted by volume
