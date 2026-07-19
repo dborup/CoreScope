@@ -294,6 +294,56 @@ function fakeEl() {
     assert.ok(section.includes('No traceable relay path yet'), 'empty state should be shown when no path data resolves');
   });
 
+  await testAsync('Distance vs Hop Count computes real haversine distance / hops and sorts farthest first', async () => {
+    // Copenhagen-ish node ~55.7,12.6; two observers at known offsets so the
+    // exact km figures are independently checkable, not just "some number".
+    const apiStub = (path) => {
+      if (path.indexOf('/nodes/pkForeign1') === 0) {
+        return Promise.resolve({ recentAdverts: [{ observations: [
+          { observer_id: 'obsNear', path_json: '["3E"]' },
+          { observer_id: 'obsFar', path_json: '["3E","1F"]' },
+        ] }] });
+      }
+      if (path.indexOf('/observers') === 0) {
+        return Promise.resolve({ observers: [
+          { id: 'obsNear', name: 'NearObserver', lat: 55.7, lon: 12.6 },
+          { id: 'obsFar', name: 'FarObserver', lat: 44.4, lon: 26.1 }, // ~2137km from CPH, matches RYDBOHOLM's real Bornholm-observer distance order of magnitude
+        ] });
+      }
+      return Promise.resolve({});
+    };
+    const ctx = makeAnalyticsSandbox([
+      { public_key: 'pkForeign1', name: 'Foreign1', role: 'companion', foreign: true, lat: 55.7, lon: 12.6, last_seen: '2026-07-19T00:00:00Z' },
+    ], apiStub);
+    const el = fakeEl();
+    await ctx.window._analyticsRenderForeignTrafficTab(el);
+
+    const startIdx = el.innerHTML.indexOf('Distance vs Hop Count');
+    const endIdx = el.innerHTML.indexOf('Repeaters Relaying Unscoped Traffic');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('FarObserver'), 'the far observer pair should appear');
+    assert.ok(section.includes('NearObserver'), 'the near observer pair (distance ~0km) should appear');
+    const idxFar = section.indexOf('FarObserver');
+    const idxNear = section.indexOf('NearObserver');
+    assert.ok(idxFar < idxNear, 'the far (larger-distance) pair should be sorted before the near pair');
+    // Real haversine(55.7,12.6, 44.4,26.1) is ~1578km — verifies the actual
+    // formula ran, not just that "some number" appeared.
+    const farRow = section.slice(idxFar - 200, idxFar + 200);
+    assert.ok(/>157\d</.test(farRow), 'far pair distance should be ~1578km for these coordinates, got: ' + farRow);
+  });
+
+  await testAsync('Distance vs Hop Count shows an empty-state message when nothing resolves', async () => {
+    const ctx = makeAnalyticsSandbox([
+      { public_key: 'pkForeign1', name: 'Foreign1', role: 'companion', foreign: true, last_seen: '2026-07-19T00:00:00Z' },
+    ]);
+    const el = fakeEl();
+    await ctx.window._analyticsRenderForeignTrafficTab(el);
+    const startIdx = el.innerHTML.indexOf('Distance vs Hop Count');
+    const endIdx = el.innerHTML.indexOf('Repeaters Relaying Unscoped Traffic');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('No distance data yet'), 'empty state should be shown when no distance/hop pair resolves');
+  });
+
   await testAsync('rendering registers a real interval, and stop() actually clears it (not a no-op)', async () => {
     const ctx = makeAnalyticsSandbox([]);
     const stop = ctx.window._analyticsStopForeignTrafficRefresh;

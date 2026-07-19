@@ -4937,19 +4937,27 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           foreignNodesBody = '<p class="text-muted" style="font-size:0.85em">None yet — a node is only listed here after it advertises with a GPS position outside the configured geo_filter.</p>';
         }
 
+        // Shared per-foreign-node detail fetch (ADVERT observations, incl.
+        // path_json) — feeds both Entry Points and Distance vs Hop Count
+        // below, so they don't each re-fetch the same N node details.
+        // Capped so a large foreign-node population can't turn this into
+        // dozens of parallel node-detail fetches every 60s refresh.
+        const ENTRY_POINTS_NODE_CAP = 50;
+        const capped = foreignNodes.slice(0, ENTRY_POINTS_NODE_CAP);
+        let details = null;
+        try {
+          details = await Promise.all(capped.map(function(n) {
+            return api('/nodes/' + encodeURIComponent(n.public_key), { ttl: CLIENT_TTL.nodeDetail }).catch(function() { return null; });
+          }));
+        } catch (e) { /* leave details null — both sections below show their own failure state */ }
+
         // Entry Points: for each foreign-flagged node, walk its ADVERT
         // observations' path[0] — the hop closest to the originator, per
         // the same convention neighbor_graph.go uses ("Edge 1: originator
         // ↔ path[0]") — to find which local repeater first relayed it.
-        // Capped so a large foreign-node population can't turn this into
-        // dozens of parallel node-detail fetches every 60s refresh.
-        const ENTRY_POINTS_NODE_CAP = 50;
         let entryPointsBody;
         try {
-          const capped = foreignNodes.slice(0, ENTRY_POINTS_NODE_CAP);
-          const details = await Promise.all(capped.map(function(n) {
-            return api('/nodes/' + encodeURIComponent(n.public_key), { ttl: CLIENT_TTL.nodeDetail }).catch(function() { return null; });
-          }));
+          if (!details) throw new Error('no details');
           const tally = {}; // hex prefix -> { count, foreignKeys: Set }
           const prefixes = new Set();
           details.forEach(function(detail, i) {
@@ -5013,6 +5021,83 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           entryPointsBody = '<p class="text-muted">Failed to compute entry points.</p>';
         }
 
+        // Distance vs Hop Count: for each (foreign node, observer) pair,
+        // the real straight-line distance (haversine, self-reported node
+        // GPS to the observer's own GPS) divided by that observation's
+        // hop count — an empirical km-per-hop figure for this mesh, using
+        // real long-distance data points instead of assumed LoRa range.
+        let distanceHopBody;
+        try {
+          if (!details) throw new Error('no details');
+          const observersResp = await api('/observers', { ttl: CLIENT_TTL.observers }).catch(function() { return null; });
+          const observersByID = {};
+          ((observersResp && observersResp.observers) || []).forEach(function(o) {
+            if (typeof o.lat === 'number' && typeof o.lon === 'number') observersByID[o.id] = o;
+          });
+
+          function haversineKm(lat1, lon1, lat2, lon2) {
+            const R = 6371;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+          }
+
+          const pairs = [];
+          details.forEach(function(detail, i) {
+            if (!detail) return;
+            const foreignNode = capped[i];
+            if (typeof foreignNode.lat !== 'number' || typeof foreignNode.lon !== 'number') return;
+            const seenObservers = new Set(); // one row per (node, observer) — first observation wins
+            (detail.recentAdverts || []).forEach(function(a) {
+              (a.observations || []).forEach(function(o) {
+                if (seenObservers.has(o.observer_id)) return;
+                let path;
+                try { path = typeof o.path_json === 'string' ? JSON.parse(o.path_json) : o.path_json; } catch (e) { path = null; }
+                const hops = Array.isArray(path) ? path.length : 0;
+                if (hops === 0) return;
+                const observer = observersByID[o.observer_id];
+                if (!observer) return;
+                seenObservers.add(o.observer_id);
+                const distanceKm = haversineKm(foreignNode.lat, foreignNode.lon, observer.lat, observer.lon);
+                pairs.push({
+                  nodeName: foreignNode.name || foreignNode.public_key,
+                  nodePubkey: foreignNode.public_key,
+                  observerName: observer.name,
+                  distanceKm: distanceKm,
+                  hops: hops,
+                  kmPerHop: distanceKm / hops,
+                });
+              });
+            });
+          });
+          pairs.sort(function(a, b) { return b.distanceKm - a.distanceKm; });
+
+          if (pairs.length > 0) {
+            const kmPerHopSorted = pairs.map(function(p) { return p.kmPerHop; }).sort(function(a, b) { return a - b; });
+            const median = kmPerHopSorted[Math.floor(kmPerHopSorted.length / 2)];
+            const DISTANCE_ROW_CAP = 30;
+            const rows = pairs.slice(0, DISTANCE_ROW_CAP).map(function(p) {
+              return '<tr><td><a href="#/nodes/' + encodeURIComponent(p.nodePubkey) + '">' + esc(p.nodeName) + '</a></td>' +
+                '<td>' + esc(p.observerName) + '</td>' +
+                '<td>' + p.distanceKm.toFixed(0) + '</td>' +
+                '<td>' + p.hops + '</td>' +
+                '<td>' + p.kmPerHop.toFixed(1) + '</td></tr>';
+            }).join('');
+            distanceHopBody =
+              '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Median <strong>' + median.toFixed(1) + ' km/hop</strong> across ' + pairs.length.toLocaleString() + ' node↔observer pair(s)' +
+                (pairs.length > DISTANCE_ROW_CAP ? ', showing the ' + DISTANCE_ROW_CAP + ' longest-distance pairs' : '') + '.</p>' +
+              '<table class="data-table analytics-table">' +
+                '<thead><tr><th>Foreign Node</th><th>Observer</th><th>Distance (km)</th><th>Hops</th><th>km/hop</th></tr></thead>' +
+                '<tbody>' + rows + '</tbody>' +
+              '</table>';
+          } else {
+            distanceHopBody = '<p class="text-muted" style="font-size:0.85em">No distance data yet — needs a foreign node with a GPS fix observed by at least one observer with a known location.</p>';
+          }
+        } catch (e) {
+          distanceHopBody = '<p class="text-muted">Failed to compute distance/hop data.</p>';
+        }
+
         el.innerHTML =
           '<h3 style="margin:0 0 4px">Foreign Traffic</h3>' +
           '<p class="text-muted" style="margin:0 0 16px;font-size:0.85em">' +
@@ -5029,6 +5114,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<h4 style="margin:24px 0 4px">Entry Points</h4>' +
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Which local repeater first relayed each foreign-flagged node\'s traffic — the hop closest to the origin across every observed ADVERT path' + (foreignNodes.length > ENTRY_POINTS_NODE_CAP ? ' (capped to the ' + ENTRY_POINTS_NODE_CAP + ' most recently heard foreign nodes)' : '') + '.</p>' +
           entryPointsBody +
+          '<h4 style="margin:24px 0 4px">Distance vs Hop Count</h4>' +
+          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Straight-line distance from each foreign node\'s self-reported GPS to the observer that heard it, divided by that observation\'s hop count — how many km this mesh actually covers per hop, using real data instead of assumed range.</p>' +
+          distanceHopBody +
           '<h4 style="margin:24px 0 4px">Repeaters Relaying Unscoped Traffic</h4>' +
           body;
       } catch (e) {
