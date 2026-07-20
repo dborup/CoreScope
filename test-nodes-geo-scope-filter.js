@@ -1,15 +1,23 @@
 /* Regression test for the Nodes page's Domestic/Foreign geo-scope filter.
  *
- * The unfiltered node list can be dominated by foreign-flagged nodes
- * (#730 geo_filter classification — self-reported GPS outside the
- * configured box), making it hard to see which nodes are actually local.
- * This adds an "All / Domestic / Foreign" filter-group (public/nodes.js,
- * matching the existing Status filter's pattern) that narrows the
- * client-side `nodes` array by each node's `foreign` boolean.
+ * The unfiltered node list can be dominated by out-of-region nodes on
+ * deployments with heavy cross-border traffic, making it hard to see
+ * which nodes are actually local. This adds an "All / Domestic / Foreign"
+ * filter-group (public/nodes.js, matching the existing Status filter's
+ * pattern) that narrows the client-side `nodes` array by classifying each
+ * node's own lat/lon against the configured geo_filter box/polygon
+ * (nodePassesGeoFilter, public/app.js) — NOT the `foreign` flag, which
+ * only reflects nodes classified at ADVERT-ingest time and badly
+ * undercounts on real data (see commit 6012ed0).
  *
  * Drives the real loadNodes() pipeline (via pageMod().init()) rather than
  * re-implementing the filter predicate, so this actually exercises the
  * production code path — same harness style as test-issue-1606-pagination.js.
+ * nodePassesGeoFilter itself is stubbed here with a simplified bbox-only
+ * version (see makeNodesEnv below) — this file tests that nodes.js wires
+ * the geo-scope filter correctly, not the geo-math predicate itself; that
+ * lives in test-geo-filter.js, cross-checked against the real Go
+ * internal/geofilter package.
  */
 'use strict';
 const vm = require('vm');
@@ -253,6 +261,46 @@ console.log('=== nodes.js: Domestic/Foreign geo-scope filter ===');
     await settle(env.ctx);
     const filtered = env.ctx.window._nodesGetFiltered();
     assert.strictEqual(filtered.length, 0, 'foreign+repeater should be empty — all foreign fixture nodes are companions');
+  });
+
+  await test('loadNodes() awaits window.MeshConfigReady before geo-scope filtering (cold-load race regression)', async () => {
+    // On a real cold page load, roles.js kicks off /api/config/client and
+    // only sets window.MC_GEO_FILTER once that promise resolves — which
+    // can still be in flight when nodes.js's loadNodes() runs. Without an
+    // explicit await, the filter would silently run against `undefined`
+    // and nodePassesGeoFilter's "no config = always passes" fallback
+    // would misclassify every foreign node as domestic. This simulates
+    // that exact timing with a promise under manual control.
+    const env = makeNodesEnv(makeFixture());
+    const appEl = env.ctx.document.getElementById('page');
+
+    delete env.ctx.window.MC_GEO_FILTER; // config not loaded yet
+    let resolveConfig;
+    env.ctx.window.MeshConfigReady = new Promise((r) => { resolveConfig = r; });
+
+    env.ctx.window._nodesSetGeoScope('foreign');
+    env.pageMod().init(appEl);
+
+    // Plenty of ticks for the node fetch + everything up to the await to
+    // run — loadNodes() must still be BLOCKED on MeshConfigReady, proving
+    // the await is really there and not a no-op.
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    assert.strictEqual(
+      env.ctx.window._nodesGetFiltered().length, 0,
+      'loadNodes() should still be blocked awaiting MeshConfigReady, not have finished filtering with a null config yet'
+    );
+
+    // Resolve late, mirroring roles.js's real .then() timing (MC_GEO_FILTER
+    // is set immediately before the promise it's derived from resolves).
+    env.ctx.window.MC_GEO_FILTER = GEO_BOX;
+    resolveConfig();
+    await settle(env.ctx);
+
+    const filtered = env.ctx.window._nodesGetFiltered();
+    assert.strictEqual(
+      filtered.length, 3,
+      'once MeshConfigReady resolves, the foreign filter should correctly show the 3 out-of-box nodes — not have locked in an "all domestic" result from before config arrived'
+    );
   });
 
   console.log('\n════════════════════════════════════════');

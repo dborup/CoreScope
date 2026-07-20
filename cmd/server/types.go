@@ -1116,13 +1116,9 @@ type ClientConfigResponse struct {
 	MapDarkTileProvider string                 `json:"mapDarkTileProvider,omitempty"` // deprecated. TODO: remove after v3.5.0
 	Customizer          CustomizerClientConfig `json:"customizer"`
 	ClientRxCoverage    bool                   `json:"clientRxCoverage"`
-	// GeoFilter is the configured geo_filter box/polygon (#730), exposed so
-	// the frontend can classify domestic vs foreign nodes directly from
-	// lat/lon. The `foreign` flag on /api/nodes only reflects nodes whose
-	// ADVERT was classified at ingest time — a node whose last-known GPS
-	// predates geo_filter being configured (or just hasn't re-advertised
-	// since) can be geographically outside the filter without ever being
-	// flagged, so the flag alone significantly undercounts. Omitted when
+	// GeoFilter is the configured geo_filter box/polygon (#730), exposed
+	// for client-side domestic/foreign classification — see
+	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when
 	// no geo_filter is configured.
 	GeoFilter *GeoFilterConfig `json:"geoFilter,omitempty"`
 }

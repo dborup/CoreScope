@@ -1220,6 +1220,16 @@
         await skewPromise;
       }
 
+      // window.MC_GEO_FILTER is set asynchronously by roles.js's
+      // /api/config/client fetch (window.MeshConfigReady), which can still
+      // be in flight on a cold page load — without this await, the geo
+      // scope filter below would run against `undefined` and
+      // nodePassesGeoFilter's "no config = always passes" fallback would
+      // silently classify every node as domestic. MeshConfigReady never
+      // rejects (it has its own .catch), and awaiting an already-resolved
+      // promise is a same-tick no-op, so this is free on every later call.
+      if (window.MeshConfigReady) await window.MeshConfigReady;
+
       // Client-side filtering
       let filtered = _allNodes;
       if (activeTab !== 'all') filtered = filtered.filter(n => (n.role || '').toLowerCase() === activeTab);
@@ -1317,12 +1327,12 @@
           ${TABS.map(t => `<button class="node-tab ${activeTab === t.key ? 'active' : ''}" data-tab="${t.key}">${t.label}</button>`).join('')}
         </div>
         <div class="nodes-filters">
-          <div class="filter-group" id="nodeStatusFilter">
+          <div class="filter-group" id="nodeStatusFilter" role="group" aria-label="Filter by status">
             <button class="btn ${statusFilter==='all'?'active':''}" data-status="all">All</button>
             <button class="btn ${statusFilter==='active'?'active':''}" data-status="active">Active</button>
             <button class="btn ${statusFilter==='stale'?'active':''}" data-status="stale">Stale</button>
           </div>
-          <div class="filter-group" id="nodeGeoFilter">
+          <div class="filter-group" id="nodeGeoFilter" role="group" aria-label="Filter by domestic/foreign">
             <button class="btn ${geoScope==='all'?'active':''}" data-geo="all">All</button>
             <button class="btn ${geoScope==='domestic'?'active':''}" data-geo="domestic">Domestic</button>
             <button class="btn ${geoScope==='foreign'?'active':''}" data-geo="foreign">Foreign</button>

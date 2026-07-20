@@ -458,7 +458,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Tiles:               s.cfg.Tiles,
 		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs},
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
-		GeoFilter:           s.cfg.GeoFilter,
+		GeoFilter:           s.getGeoFilter(),
 	})
 }
 
@@ -1345,6 +1345,7 @@ func (s *Server) handlePostPacket(w http.ResponseWriter, r *http.Request) {
 // apply the exact same predicate to every DB page it pulls.
 type nodeListPostFilters struct {
 	cfg           *Config
+	geoFilter     *GeoFilterConfig // resolved once via s.getGeoFilter() — cfgMu guards this field, see routes.go:53
 	applyGeo      bool
 	areaNodes     map[string]bool // nil = no area filter active
 	areaRequested bool            // true if ?area= was given but resolved to nothing
@@ -1353,13 +1354,13 @@ type nodeListPostFilters struct {
 func (f nodeListPostFilters) apply(nodes []map[string]interface{}) []map[string]interface{} {
 	out := nodes[:0]
 	for _, node := range nodes {
-		if f.cfg.GeoFilter != nil && f.applyGeo {
+		if f.geoFilter != nil && f.applyGeo {
 			// Foreign-flagged nodes (#730) are kept even when their GPS lies
 			// outside the geofilter polygon — that's the whole point of the
 			// flag: operators need to SEE bridged/leaked nodes, not have them
 			// filtered away.
 			isForeign, _ := node["foreign"].(bool)
-			if !isForeign && !NodePassesGeoFilter(node["lat"], node["lon"], f.cfg.GeoFilter) {
+			if !isForeign && !NodePassesGeoFilter(node["lat"], node["lon"], f.geoFilter) {
 				continue
 			}
 		}
@@ -1391,7 +1392,7 @@ func (f nodeListPostFilters) apply(nodes []map[string]interface{}) []map[string]
 // active reports whether any post-filter could actually drop a row — used
 // to skip the compensation loop entirely on the (common) unfiltered path.
 func (f nodeListPostFilters) active() bool {
-	return (f.cfg.GeoFilter != nil && f.applyGeo) || len(f.cfg.NodeBlacklist) > 0 ||
+	return (f.geoFilter != nil && f.applyGeo) || len(f.cfg.NodeBlacklist) > 0 ||
 		len(f.cfg.HiddenNamePrefixes) > 0 || f.areaRequested
 }
 
@@ -1424,7 +1425,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		// Any other value (including absent) falls through to the deployment default.
 	}
 
-	filters := nodeListPostFilters{cfg: s.cfg, applyGeo: applyGeoFilter}
+	filters := nodeListPostFilters{cfg: s.cfg, geoFilter: s.getGeoFilter(), applyGeo: applyGeoFilter}
 	if area := q.Get("area"); area != "" {
 		filters.areaRequested = true
 		if s.store != nil {

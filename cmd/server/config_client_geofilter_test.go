@@ -31,12 +31,26 @@ func TestConfigClientExposesGeoFilter(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	gf, present := body["geoFilter"].(map[string]interface{})
+	gfRaw, present := body["geoFilter"]
 	if !present {
 		t.Fatal("expected geoFilter in /api/config/client response when configured")
 	}
-	if gf["latMin"] != 53.0 || gf["latMax"] != 59.0 || gf["lonMin"] != 6.0 || gf["lonMax"] != 15.0 {
-		t.Errorf("geoFilter bbox mismatch: got %+v", gf)
+	gf, ok := gfRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected geoFilter to be a JSON object, got %T: %+v", gfRaw, gfRaw)
+	}
+	// Explicit float64 assertions (not a bare `!=` on interface{}) so a
+	// shape change — e.g. a field going missing or becoming a string —
+	// fails loudly here instead of just comparing unequal to the wrong type.
+	wantFields := map[string]float64{"latMin": 53.0, "latMax": 59.0, "lonMin": 6.0, "lonMax": 15.0}
+	for field, want := range wantFields {
+		got, ok := gf[field].(float64)
+		if !ok {
+			t.Fatalf("geoFilter[%q] = %T(%v), want a float64", field, gf[field], gf[field])
+		}
+		if got != want {
+			t.Errorf("geoFilter[%q] = %v, want %v", field, got, want)
+		}
 	}
 }
 
