@@ -1338,18 +1338,160 @@ func (s *Server) handlePostPacket(w http.ResponseWriter, r *http.Request) {
 
 // --- Node Handlers ---
 
+// nodeListPostFilters bundles the four filters handleNodes applies AFTER
+// the SQL LIMIT/OFFSET page comes back from the DB: geo_filter (#730),
+// node blacklist, hidden-name-prefix (#1181), and area membership. Kept
+// together so handleNodes' pagination-compensation loop (see below) can
+// apply the exact same predicate to every DB page it pulls.
+type nodeListPostFilters struct {
+	cfg           *Config
+	applyGeo      bool
+	areaNodes     map[string]bool // nil = no area filter active
+	areaRequested bool            // true if ?area= was given but resolved to nothing
+}
+
+func (f nodeListPostFilters) apply(nodes []map[string]interface{}) []map[string]interface{} {
+	out := nodes[:0]
+	for _, node := range nodes {
+		if f.cfg.GeoFilter != nil && f.applyGeo {
+			// Foreign-flagged nodes (#730) are kept even when their GPS lies
+			// outside the geofilter polygon — that's the whole point of the
+			// flag: operators need to SEE bridged/leaked nodes, not have them
+			// filtered away.
+			isForeign, _ := node["foreign"].(bool)
+			if !isForeign && !NodePassesGeoFilter(node["lat"], node["lon"], f.cfg.GeoFilter) {
+				continue
+			}
+		}
+		if len(f.cfg.NodeBlacklist) > 0 {
+			if pk, ok := node["public_key"].(string); ok && f.cfg.IsBlacklisted(pk) {
+				continue
+			}
+		}
+		if len(f.cfg.HiddenNamePrefixes) > 0 {
+			name, _ := node["name"].(string)
+			if f.cfg.IsNameHidden(name) {
+				continue
+			}
+		}
+		if f.areaRequested {
+			if f.areaNodes == nil {
+				continue // area given but couldn't be resolved — matches nothing
+			}
+			pk, _ := node["public_key"].(string)
+			if !f.areaNodes[pk] {
+				continue
+			}
+		}
+		out = append(out, node)
+	}
+	return out
+}
+
+// active reports whether any post-filter could actually drop a row — used
+// to skip the compensation loop entirely on the (common) unfiltered path.
+func (f nodeListPostFilters) active() bool {
+	return (f.cfg.GeoFilter != nil && f.applyGeo) || len(f.cfg.NodeBlacklist) > 0 ||
+		len(f.cfg.HiddenNamePrefixes) > 0 || f.areaRequested
+}
+
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	nodes, total, counts, err := s.db.GetNodes(
-		queryLimit(r, 50, s.cfg.ListLimits.NodesMax),
-		queryInt(r, "offset", 0),
-		q.Get("role"), q.Get("search"), q.Get("before"),
-		q.Get("lastHeard"), q.Get("sortBy"), q.Get("region"),
-	)
-	if err != nil {
-		writeError(w, 500, err.Error())
-		return
+	requestedLimit := queryLimit(r, 50, s.cfg.ListLimits.NodesMax)
+	requestedOffset := queryInt(r, "offset", 0)
+	role, search, before := q.Get("role"), q.Get("search"), q.Get("before")
+	lastHeard, sortBy, region := q.Get("lastHeard"), q.Get("sortBy"), q.Get("region")
+
+	// geo_filter applies to the node list (and therefore the live map,
+	// which lists straight off this endpoint) BY DEFAULT when configured —
+	// the long-standing #730 declutter behavior. Every deployment that
+	// already had geo_filter set before GeoFilterExemptNodeList existed
+	// keeps getting exactly that, unchanged: the field is absent from
+	// their config.json, which decodes to false, which preserves the
+	// default. A deployment that wants geo_filter purely for
+	// foreign_advert classification/analytics — without also hiding
+	// out-of-polygon nodes from the map — opts out via
+	// GeoFilterExemptNodeList. ?geoFilter=0 / ?geoFilter=1 overrides
+	// either default for a single request. geo_filter's own ingestor-side
+	// tagging (and the explicit prune-geo-filter admin flow) are
+	// unaffected either way — this only gates the passive declutter view.
+	applyGeoFilter := !s.cfg.GeoFilterExemptNodeList
+	switch q.Get("geoFilter") {
+	case "1", "true":
+		applyGeoFilter = true
+	case "0", "false":
+		applyGeoFilter = false
+		// Any other value (including absent) falls through to the deployment default.
 	}
+
+	filters := nodeListPostFilters{cfg: s.cfg, applyGeo: applyGeoFilter}
+	if area := q.Get("area"); area != "" {
+		filters.areaRequested = true
+		if s.store != nil {
+			filters.areaNodes = s.store.resolveAreaNodes(area)
+		} else if s.cfg != nil && s.cfg.Areas != nil {
+			if entry, ok := s.cfg.Areas[area]; ok {
+				if pks, err := s.db.GetNodePubkeysInArea(entry); err == nil {
+					filters.areaNodes = make(map[string]bool, len(pks))
+					for _, pk := range pks {
+						filters.areaNodes[pk] = true
+					}
+				}
+			}
+		}
+	}
+
+	var nodes []map[string]interface{}
+	var counts map[string]int
+	var total int
+
+	if !filters.active() {
+		// Fast path: nothing can drop a row post-LIMIT, so a single DB
+		// page is exactly what the client asked for.
+		var err error
+		nodes, total, counts, err = s.db.GetNodes(requestedLimit, requestedOffset, role, search, before, lastHeard, sortBy, region)
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+	} else {
+		// Compensation loop (fixes #1861-class truncation): geo_filter,
+		// blacklist, hidden-name-prefix, and area all filter the page
+		// AFTER the SQL LIMIT already fixed its size, so a page that was
+		// genuinely full at the DB layer can come back shorter than
+		// `requestedLimit`. The client's pagination loop (fetchAllNodes,
+		// public/app.js) treats "shorter page than requested" as "this
+		// was the last page" and stops — so a single filtered-out row
+		// anywhere in a page used to silently truncate everything after
+		// it (e.g. the live map showing ~450 of ~1300 GPS-valid nodes
+		// because a hidden-prefix node happened to fall in page 1).
+		// Keep pulling more DB pages and re-filtering until we've
+		// collected `requestedLimit` rows or the DB itself runs out
+		// (a raw page shorter than requested = genuine end of data).
+		const maxIterations = 50 // bounds worst case to 50*requestedLimit DB rows scanned
+		curOffset := requestedOffset
+		for iter := 0; iter < maxIterations; iter++ {
+			page, _, pageCounts, err := s.db.GetNodes(requestedLimit, curOffset, role, search, before, lastHeard, sortBy, region)
+			if err != nil {
+				writeError(w, 500, err.Error())
+				return
+			}
+			if counts == nil {
+				counts = pageCounts
+			}
+			dbPageLen := len(page)
+			nodes = append(nodes, filters.apply(page)...)
+			curOffset += requestedLimit
+			if dbPageLen < requestedLimit || len(nodes) >= requestedLimit {
+				break
+			}
+		}
+		if len(nodes) > requestedLimit {
+			nodes = nodes[:requestedLimit]
+		}
+		total = len(nodes)
+	}
+
 	if s.store != nil {
 		hashInfo := s.store.GetNodeHashSizeInfo()
 		relayWindow := s.cfg.GetHealthThresholds().RelayActiveHours
@@ -1425,100 +1567,6 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 					}, axesComputed)
 				}
 			}
-		}
-	}
-	// geo_filter applies to the node list (and therefore the live map,
-	// which lists straight off this endpoint) BY DEFAULT when configured —
-	// the long-standing #730 declutter behavior. Every deployment that
-	// already had geo_filter set before GeoFilterExemptNodeList existed
-	// keeps getting exactly that, unchanged: the field is absent from
-	// their config.json, which decodes to false, which preserves the
-	// default. A deployment that wants geo_filter purely for
-	// foreign_advert classification/analytics — without also hiding
-	// out-of-polygon nodes from the map — opts out via
-	// GeoFilterExemptNodeList. ?geoFilter=0 / ?geoFilter=1 overrides
-	// either default for a single request. geo_filter's own ingestor-side
-	// tagging (and the explicit prune-geo-filter admin flow) are
-	// unaffected either way — this only gates the passive declutter view.
-	applyGeoFilter := !s.cfg.GeoFilterExemptNodeList
-	switch q.Get("geoFilter") {
-	case "1", "true":
-		applyGeoFilter = true
-	case "0", "false":
-		applyGeoFilter = false
-		// Any other value (including absent) falls through to the deployment default.
-	}
-	if s.cfg.GeoFilter != nil && applyGeoFilter {
-		filtered := nodes[:0]
-		for _, node := range nodes {
-			// Foreign-flagged nodes (#730) are kept even when their GPS lies
-			// outside the geofilter polygon — that's the whole point of the
-			// flag: operators need to SEE bridged/leaked nodes, not have them
-			// filtered away. The ingestor sets foreign_advert=1 when its
-			// configured geo_filter rejected the advert; the server must
-			// surface those.
-			if isForeign, _ := node["foreign"].(bool); isForeign {
-				filtered = append(filtered, node)
-				continue
-			}
-			if NodePassesGeoFilter(node["lat"], node["lon"], s.cfg.GeoFilter) {
-				filtered = append(filtered, node)
-			}
-		}
-		total = len(filtered)
-		nodes = filtered
-	}
-	// Filter blacklisted nodes
-	if len(s.cfg.NodeBlacklist) > 0 {
-		filtered := nodes[:0]
-		for _, node := range nodes {
-			if pk, ok := node["public_key"].(string); !ok || !s.cfg.IsBlacklisted(pk) {
-				filtered = append(filtered, node)
-			}
-		}
-		total = len(filtered)
-		nodes = filtered
-	}
-	// Filter nodes whose name starts with a hidden prefix (#1181). DB rows
-	// are preserved — this only drops them from the API surface so observer
-	// history (paths, hops, distances) remains intact for analytics.
-	if len(s.cfg.HiddenNamePrefixes) > 0 {
-		filtered := nodes[:0]
-		for _, node := range nodes {
-			name, _ := node["name"].(string)
-			if !s.cfg.IsNameHidden(name) {
-				filtered = append(filtered, node)
-			}
-		}
-		total = len(filtered)
-		nodes = filtered
-	}
-	// Filter by area
-	if area := q.Get("area"); area != "" {
-		var areaNodes map[string]bool
-		if s.store != nil {
-			areaNodes = s.store.resolveAreaNodes(area)
-		} else if s.cfg != nil && s.cfg.Areas != nil {
-			if entry, ok := s.cfg.Areas[area]; ok {
-				pks, err := s.db.GetNodePubkeysInArea(entry)
-				if err == nil {
-					areaNodes = make(map[string]bool, len(pks))
-					for _, pk := range pks {
-						areaNodes[pk] = true
-					}
-				}
-			}
-		}
-		if areaNodes != nil {
-			filtered := make([]map[string]interface{}, 0, len(nodes))
-			for _, n := range nodes {
-				pk, _ := n["public_key"].(string)
-				if areaNodes[pk] {
-					filtered = append(filtered, n)
-				}
-			}
-			nodes = filtered
-			total = len(filtered)
 		}
 	}
 	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
