@@ -596,6 +596,20 @@
     });
 
     loadNodes().then(() => {
+      // Check for a wardriving GPS trail (via sessionStorage) — see
+      // drawGPSTrail. Distinct from map-route-hops: these are raw shared
+      // coordinates, not mesh hop keys needing node resolution.
+      const gpsTrailJson = sessionStorage.getItem('map-gps-trail');
+      if (gpsTrailJson) {
+        sessionStorage.removeItem('map-gps-trail');
+        try {
+          const parsed = JSON.parse(gpsTrailJson);
+          if (parsed && Array.isArray(parsed.points)) {
+            drawGPSTrail(parsed.points, { sender: parsed.sender });
+          }
+        } catch {}
+        return;
+      }
       // Check for route from packet detail (via sessionStorage)
       const routeHopsJson = sessionStorage.getItem('map-route-hops');
       if (routeHopsJson) {
@@ -854,6 +868,69 @@
       map.fitBounds(L.latLngBounds(coords).pad(0.3));
     } else if (coords.length === 1) {
       map.setView(coords[0], 13);
+    }
+  }
+
+  // Wardriving GPS trail — draws a polyline through a sequence of raw
+  // lat/lon points a sender explicitly shared during one session (see
+  // "View path on map" in the Wardriving analytics tab). Unlike
+  // drawPacketRoute, these are NOT mesh hop/repeater positions, so no node
+  // resolution is needed — just plot the points in order.
+  function drawGPSTrail(points, opts) {
+    opts = opts || {};
+    if (markerLayer) map.removeLayer(markerLayer);
+    if (clusterGroup) map.removeLayer(clusterGroup);
+    if (heatLayer) map.removeLayer(heatLayer);
+    routeLayer.clearLayers();
+
+    const closeBtn = L.control({ position: 'topright' });
+    closeBtn.onAdd = function () {
+      const div = L.DomUtil.create('div', 'leaflet-bar');
+      div.innerHTML = '<a href="#" title="Close path" style="font-size:18px;font-weight:bold;text-decoration:none;display:block;width:36px;height:36px;line-height:36px;text-align:center;background:var(--input-bg,#1e293b);color:var(--text,#e2e8f0);border-radius:4px" aria-label="Close path"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></a>';
+      L.DomEvent.on(div, 'click', function (e) {
+        L.DomEvent.preventDefault(e);
+        routeLayer.clearLayers();
+        if (markerLayer) map.addLayer(markerLayer);
+        if (clusterGroup) map.addLayer(clusterGroup);
+        map.removeControl(closeBtn);
+        const label = map.getContainer().querySelector('.mc-gps-trail-label');
+        if (label) label.remove();
+      });
+      return div;
+    };
+    closeBtn.addTo(map);
+
+    const valid = (points || []).filter(function (p) { return p && p.lat != null && p.lon != null; });
+    if (valid.length === 0) return;
+
+    const coords = valid.map(function (p) { return [p.lat, p.lon]; });
+    if (coords.length >= 2) {
+      L.polyline(coords, { color: '#22c55e', weight: 3, opacity: 0.85 }).addTo(routeLayer);
+    }
+    valid.forEach(function (p, i) {
+      const isFirst = i === 0, isLast = i === valid.length - 1;
+      const color = isFirst ? '#3b82f6' : (isLast ? '#ef4444' : '#22c55e');
+      const marker = L.circleMarker([p.lat, p.lon], {
+        radius: isFirst || isLast ? 7 : 5, color: color, fillColor: color, fillOpacity: 0.9, weight: 2
+      }).addTo(routeLayer);
+      const label = (isFirst ? 'Start' : isLast ? 'End' : 'Point ' + (i + 1)) +
+        (p.timestamp ? ' — ' + safeEsc(new Date(p.timestamp).toLocaleString()) : '');
+      marker.bindPopup(label);
+    });
+
+    if (coords.length >= 2) {
+      map.fitBounds(L.latLngBounds(coords).pad(0.2));
+    } else {
+      map.setView(coords[0], 15);
+    }
+
+    if (opts.sender) {
+      const container = map.getContainer();
+      const label = document.createElement('div');
+      label.className = 'mc-gps-trail-label';
+      label.style.cssText = 'position:absolute;top:10px;left:50px;z-index:1000;background:var(--input-bg,#1e293b);color:var(--text,#e2e8f0);padding:4px 10px;border-radius:4px;font-size:12px';
+      label.textContent = opts.sender + ' — ' + valid.length + ' shared position' + (valid.length === 1 ? '' : 's');
+      container.appendChild(label);
     }
   }
 

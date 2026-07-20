@@ -5663,8 +5663,15 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         var data = await api('/analytics/wardriving/sender-messages?' + qs, { ttl: 10000 });
         var messages = data.messages || [];
         if (messages.length === 0) {
-          return '<p class="text-muted" style="font-size:0.85em;margin:8px 0">No individual messages found for this sender in range.</p>';
+          return { html: '<p class="text-muted" style="font-size:0.85em;margin:8px 0">No individual messages found for this sender in range.</p>', gpsPoints: [] };
         }
+
+        // Messages come back most-recent-first; a path needs chronological
+        // (oldest-first) order to draw correctly.
+        var gpsPoints = messages
+          .filter(function(m) { return m.lat != null && m.lon != null; })
+          .map(function(m) { return { lat: m.lat, lon: m.lon, timestamp: m.timestamp }; })
+          .reverse();
 
         var allPrefixes = [];
         messages.forEach(function(m) {
@@ -5698,12 +5705,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             '<td>' + obsStr + '</td>' +
             '<td>' + posStr + '</td></tr>';
         }).join('');
-        return '<table class="data-table analytics-table" style="margin:4px 0 12px;font-size:0.85em">' +
+        var tableHtml = '<table class="data-table analytics-table" style="margin:4px 0 12px;font-size:0.85em">' +
           '<thead><tr><th>Time</th><th>Path (path[0] first)</th><th>Heard By (SNR / RSSI)</th><th>Shared Position</th></tr></thead>' +
           '<tbody>' + rows + '</tbody>' +
           '</table>';
+        var pathBtnHtml = gpsPoints.length >= 2
+          ? '<button type="button" data-wd-view-path style="background:none;border:1px solid var(--border);padding:4px 10px;border-radius:4px;color:var(--link-color);cursor:pointer;font-size:0.85em;margin-bottom:8px">View path on map (' + gpsPoints.length + ' shared positions)</button>'
+          : '';
+        return { html: pathBtnHtml + tableHtml, gpsPoints: gpsPoints };
       } catch (err) {
-        return '<p style="color:var(--status-red);font-size:0.85em">Failed to load messages: ' + esc(String(err)) + '</p>';
+        return { html: '<p style="color:var(--status-red);font-size:0.85em">Failed to load messages: ' + esc(String(err)) + '</p>', gpsPoints: [] };
       }
     }
 
@@ -5733,9 +5744,18 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           expansionRow.innerHTML = '<td colspan="' + cols + '"><div class="text-muted" style="padding:8px">Loading messages…</div></td>';
           tr.parentNode.insertBefore(expansionRow, tr.nextSibling);
           btn.setAttribute('aria-expanded', 'true');
-          var html = await buildSenderDrilldownHtml(btn.dataset.wdSender, btn.dataset.wdSince, btn.dataset.wdUntil);
+          var senderName = btn.dataset.wdSender;
+          var result = await buildSenderDrilldownHtml(senderName, btn.dataset.wdSince, btn.dataset.wdUntil);
           var cell = expansionRow.querySelector('td');
-          if (cell) cell.innerHTML = html;
+          if (!cell) return;
+          cell.innerHTML = result.html;
+          var pathBtn = cell.querySelector('[data-wd-view-path]');
+          if (pathBtn) {
+            pathBtn.addEventListener('click', function() {
+              sessionStorage.setItem('map-gps-trail', JSON.stringify({ points: result.gpsPoints, sender: senderName }));
+              window.location.hash = '#/map';
+            });
+          }
         });
       });
     }
