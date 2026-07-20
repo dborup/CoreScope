@@ -5299,6 +5299,20 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       if (!total) return '—';
       return (n / total * 100).toFixed(1) + '%';
     }
+    // Classifies live from the node's own lat/lon against the currently
+    // configured geo_filter box/polygon (window.MC_GEO_FILTER, set from
+    // /api/config/client — see public/roles.js), NOT the node's `foreign`
+    // DB flag. That flag is written once, only from ADVERT packets
+    // (ingestor's MarkNodeForeign, cmd/ingestor/db.go), and is one-way —
+    // it's never cleared. A node flagged foreign under an earlier,
+    // narrower geo_filter configuration stays flagged forever unless it
+    // happens to send a fresh ADVERT after the box changes. Real case:
+    // Bornholm repeaters at lon~15.07 were flagged foreign under a
+    // stricter historical box and stayed stuck even after the box widened
+    // to include them (verified against a live advert only hours old).
+    function isForeignNode(n) {
+      return !nodePassesGeoFilter(n.lat, n.lon, window.MC_GEO_FILTER);
+    }
     async function load() {
       try {
         const nodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
@@ -5307,7 +5321,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           return (n.role === 'repeater' || n.role === 'room') && (n.unscoped_relay_count_24h || 0) > 0;
         });
         relays.sort(function(a, b) { return Number(b.unscoped_relay_count_24h || 0) - Number(a.unscoped_relay_count_24h || 0); });
-        const foreignCount = allNodes.filter(function(n) { return n.foreign; }).length;
+        const foreignCount = allNodes.filter(isForeignNode).length;
 
         let body;
         if (relays.length > 0) {
@@ -5337,7 +5351,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         // Foreign-flagged nodes so far (#730 foreign_advert), newest-heard
         // first. Only set going forward from when geo_filter was
         // configured — this list grows as nodes send their next ADVERT.
-        const foreignNodes = allNodes.filter(function(n) { return n.foreign; });
+        const foreignNodes = allNodes.filter(isForeignNode);
         // Parse last_seen once per node (decorate-sort-undecorate) instead
         // of twice per comparator call — cheap either way at this list
         // size, but avoids the repeated Date() allocations on principle.
