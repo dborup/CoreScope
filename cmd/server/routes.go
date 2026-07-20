@@ -1471,6 +1471,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		// (a raw page shorter than requested = genuine end of data).
 		const maxIterations = 50 // bounds worst case to 50*requestedLimit DB rows scanned
 		curOffset := requestedOffset
+		exhaustedIterations := true
 		for iter := 0; iter < maxIterations; iter++ {
 			page, _, pageCounts, err := s.db.GetNodes(requestedLimit, curOffset, role, search, before, lastHeard, sortBy, region)
 			if err != nil {
@@ -1484,12 +1485,29 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			nodes = append(nodes, filters.apply(page)...)
 			curOffset += requestedLimit
 			if dbPageLen < requestedLimit || len(nodes) >= requestedLimit {
+				exhaustedIterations = false
 				break
 			}
+		}
+		if exhaustedIterations {
+			// Only reachable if a post-filter is dropping an extreme,
+			// sustained run of consecutive rows (>50*requestedLimit) —
+			// astronomically unlikely for blacklist/hidden-prefix in
+			// practice, but log it so a truncated response is diagnosable
+			// instead of silently under-filling the page.
+			log.Printf("WARN handleNodes: pagination compensation loop hit maxIterations=%d (offset=%d, limit=%d) — returning %d rows, possibly short",
+				maxIterations, requestedOffset, requestedLimit, len(nodes))
 		}
 		if len(nodes) > requestedLimit {
 			nodes = nodes[:requestedLimit]
 		}
+		// total reflects only this returned page-slice under any active
+		// post-filter, not a true all-pages count — matches the
+		// pre-existing filtered-path semantics (each filter block used to
+		// set total = len(filtered) the same way). fetchAllNodes
+		// (public/app.js) never reads `total` for its own pagination
+		// termination — it relies on page-length — so this is display-only
+		// and safe to leave approximate.
 		total = len(nodes)
 	}
 

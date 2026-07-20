@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +115,63 @@ func TestHandleNodes_PostFilterDoesNotTruncatePagination(t *testing.T) {
 	}
 	if seen["pk0000000000000h"] {
 		t.Error("hidden-prefix node's pubkey should never appear across any page")
+	}
+}
+
+// TestHandleNodes_PostFilterCompensationLoopLogsOnExhaustion covers the
+// bounded worst case of the compensation loop added above: if a post-filter
+// drops an extreme, sustained run of consecutive rows (more than
+// maxIterations*limit), the loop gives up rather than scanning forever —
+// but must leave a log breadcrumb so a short response is diagnosable
+// instead of silently under-filling the page (bot review MINOR, PR #1852).
+func TestHandleNodes_PostFilterCompensationLoopLogsOnExhaustion(t *testing.T) {
+	srv, router := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`DELETE FROM nodes`); err != nil {
+		t.Fatalf("clear nodes: %v", err)
+	}
+
+	// With limit=1, maxIterations=50 caps the loop at 50 DB pages. Seed 51
+	// consecutive hidden nodes (so every page in that window filters to
+	// zero) followed by one real node the loop should never reach.
+	for i := 0; i < 51; i++ {
+		pk := fmt.Sprintf("pkhidden%056d", i)
+		lastSeen := fmt.Sprintf("2026-06-01T%02d:00:00Z", 23-(i%24))
+		if _, err := srv.db.conn.Exec(`INSERT INTO nodes
+			(public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+			VALUES (?, '🚫 Hidden', 'repeater', 55.0, 10.0, ?, '2026-05-01T00:00:00Z', 1)`,
+			pk, lastSeen); err != nil {
+			t.Fatalf("insert hidden %d: %v", i, err)
+		}
+	}
+	if _, err := srv.db.conn.Exec(`INSERT INTO nodes
+		(public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+		VALUES ('pkreal0000000000000000000000000000000000000000000000000001', 'RealNode', 'repeater', 55.0, 10.0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)`,
+	); err != nil {
+		t.Fatalf("insert real node: %v", err)
+	}
+	srv.cfg.SetHiddenNamePrefixes([]string{"🚫"})
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	req := httptest.NewRequest("GET", "/api/nodes?limit=1&offset=0", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Nodes []map[string]interface{} `json:"nodes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Nodes) != 0 {
+		t.Errorf("expected 0 nodes (RealNode is beyond the 50-iteration cap), got %d: %+v", len(resp.Nodes), resp.Nodes)
+	}
+	if !strings.Contains(buf.String(), "maxIterations") {
+		t.Errorf("expected a log breadcrumb mentioning maxIterations when the compensation loop is exhausted, got log output: %q", buf.String())
 	}
 }
