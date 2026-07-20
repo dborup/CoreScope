@@ -3174,8 +3174,10 @@ func (db *DB) getChannelScopeRegions(since string) (map[string][]string, error) 
 // "#wardriving") over the requested window: message volume over time, who's
 // actively sending, which repeater first relayed each message (raw hash
 // prefixes — the caller resolves names via /api/resolve-hops), which
-// observer stations actually heard the traffic, and signal quality (SNR/RSSI)
-// over the same time buckets as the activity series. See WardrivingObserverCoverage
+// observer stations actually heard the traffic, signal quality (SNR/RSSI)
+// over the same time buckets as the activity series, and each sender's
+// messages grouped into distinct sessions/runs (see buildWardrivingSessions).
+// See WardrivingObserverCoverage
 // doc for why observer coverage — not sender GPS — is the reliable half of
 // a "where did this reach" picture: MeshMapper's #wardriving messages carry
 // an anonymous per-session token by default, not the sender's live
@@ -3372,7 +3374,146 @@ func (db *DB) GetWardrivingStats(window, channel string) (*WardrivingStatsRespon
 		resp.AvgRSSI = &v
 	}
 
+	sessions, err := db.buildWardrivingSessions(channel, since)
+	if err != nil {
+		return nil, err
+	}
+	resp.Sessions = sessions
+
 	return resp, nil
+}
+
+// wardrivingSessionGapMinutes is the max gap between two consecutive
+// messages from the same sender before buildWardrivingSessions treats them
+// as separate wardriving runs rather than one continuous session.
+const wardrivingSessionGapMinutes = 15.0
+
+// buildWardrivingSessions groups each sender's messages (ordered by time)
+// into runs, splitting on any gap over wardrivingSessionGapMinutes. For
+// each session it also computes how many distinct entry-point repeaters
+// and observers were involved, by unioning the per-transmission
+// observation data across every message in that session.
+func (db *DB) buildWardrivingSessions(channel, since string) ([]WardrivingSession, error) {
+	msgRows, err := db.conn.Query(`
+		SELECT id, json_extract(decoded_json, '$.sender') AS sender, first_seen
+		FROM transmissions
+		WHERE channel_hash = ? AND payload_type = 5 AND first_seen >= ?
+			AND json_extract(decoded_json, '$.sender') IS NOT NULL
+			AND json_extract(decoded_json, '$.sender') != ''
+		ORDER BY sender, first_seen ASC
+	`, channel, since)
+	if err != nil {
+		return nil, fmt.Errorf("wardriving sessions message query: %w", err)
+	}
+	type txInfo struct {
+		id     int64
+		sender string
+		ts     time.Time
+	}
+	var txs []txInfo
+	for msgRows.Next() {
+		var id int64
+		var sender, tsStr string
+		if err := msgRows.Scan(&id, &sender, &tsStr); err != nil {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, tsStr)
+		if err != nil {
+			continue
+		}
+		txs = append(txs, txInfo{id: id, sender: sender, ts: ts})
+	}
+	msgRows.Close()
+	if err := msgRows.Err(); err != nil {
+		return nil, fmt.Errorf("wardriving sessions message iteration: %w", err)
+	}
+
+	// Per-transmission entry-point prefixes and observer IDs, so each
+	// session can report how many distinct ones it touched.
+	var perTxQuery string
+	if db.isV3 {
+		perTxQuery = `
+			SELECT o.transmission_id, json_extract(o.path_json, '$[0]'), obs.rowid
+			FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE t.channel_hash = ? AND t.payload_type = 5 AND t.first_seen >= ?`
+	} else {
+		perTxQuery = `
+			SELECT o.transmission_id, json_extract(o.path_json, '$[0]'), obs.id
+			FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			JOIN observers obs ON obs.id = o.observer_id
+			WHERE t.channel_hash = ? AND t.payload_type = 5 AND t.first_seen >= ?`
+	}
+	perTxRows, err := db.conn.Query(perTxQuery, channel, since)
+	if err != nil {
+		return nil, fmt.Errorf("wardriving sessions per-tx query: %w", err)
+	}
+	txPrefixes := make(map[int64]map[string]bool)
+	txObservers := make(map[int64]map[string]bool)
+	for perTxRows.Next() {
+		var txID int64
+		var prefix sql.NullString
+		var observerID string
+		if err := perTxRows.Scan(&txID, &prefix, &observerID); err != nil {
+			continue
+		}
+		if prefix.Valid && prefix.String != "" {
+			if txPrefixes[txID] == nil {
+				txPrefixes[txID] = make(map[string]bool)
+			}
+			txPrefixes[txID][prefix.String] = true
+		}
+		if txObservers[txID] == nil {
+			txObservers[txID] = make(map[string]bool)
+		}
+		txObservers[txID][observerID] = true
+	}
+	perTxRows.Close()
+	if err := perTxRows.Err(); err != nil {
+		return nil, fmt.Errorf("wardriving sessions per-tx iteration: %w", err)
+	}
+
+	sessions := make([]WardrivingSession, 0)
+	var cur *WardrivingSession
+	var curPrefixes, curObservers map[string]bool
+	var lastTS time.Time
+	flush := func() {
+		if cur == nil {
+			return
+		}
+		cur.EntryPointCount = len(curPrefixes)
+		cur.ObserverCount = len(curObservers)
+		start, errS := time.Parse(time.RFC3339, cur.StartTime)
+		end, errE := time.Parse(time.RFC3339, cur.EndTime)
+		if errS == nil && errE == nil {
+			cur.DurationMinutes = end.Sub(start).Minutes()
+		}
+		sessions = append(sessions, *cur)
+	}
+	for _, tx := range txs {
+		newSession := cur == nil || cur.Sender != tx.sender || tx.ts.Sub(lastTS).Minutes() > wardrivingSessionGapMinutes
+		if newSession {
+			flush()
+			cur = &WardrivingSession{Sender: tx.sender, StartTime: tx.ts.UTC().Format(time.RFC3339)}
+			curPrefixes = make(map[string]bool)
+			curObservers = make(map[string]bool)
+		}
+		cur.EndTime = tx.ts.UTC().Format(time.RFC3339)
+		cur.MessageCount++
+		for p := range txPrefixes[tx.id] {
+			curPrefixes[p] = true
+		}
+		for o := range txObservers[tx.id] {
+			curObservers[o] = true
+		}
+		lastTS = tx.ts
+	}
+	flush()
+
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].StartTime > sessions[j].StartTime })
+	return sessions, nil
 }
 
 // GetMatchedRegionNames returns the set of scope_name values that have ever

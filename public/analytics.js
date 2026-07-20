@@ -5426,6 +5426,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         { label: 'Observers Reached', value: (d.observers || []).length.toLocaleString(), note: null },
         { label: 'Avg SNR', value: (d.avgSnr != null ? d.avgSnr.toFixed(1) + ' dB' : '—'), note: null },
         { label: 'Avg RSSI', value: (d.avgRssi != null ? d.avgRssi.toFixed(1) + ' dBm' : '—'), note: null },
+        { label: 'Sessions', value: (d.sessions || []).length.toLocaleString(), note: '15min+ gap starts a new one' },
       ].map(function(c) {
         return '<div class="stat-card"><div class="stat-value">' + c.value + '</div>' +
           '<div class="stat-label">' + c.label + '</div>' +
@@ -5491,6 +5492,33 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         grid +
         '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="2"/>' +
         '</svg>';
+    }
+
+    function formatSessionDuration(mins) {
+      if (mins < 1) return '<1m';
+      if (mins < 60) return Math.round(mins) + 'm';
+      var h = Math.floor(mins / 60), m = Math.round(mins % 60);
+      return h + 'h ' + m + 'm';
+    }
+
+    // Sessions — each sender's messages grouped into runs (backend splits
+    // on any gap over 15 minutes). Pre-sorted most-recent-first by the API.
+    function sessionsHtml(sessions) {
+      if (!sessions || sessions.length === 0) {
+        return '<p class="text-muted" style="font-size:0.85em">No wardriving sessions in this window.</p>';
+      }
+      var rows = sessions.map(function(s) {
+        return '<tr><td>' + esc(s.sender) + '</td>' +
+          '<td>' + (typeof timeAgo === 'function' ? timeAgo(s.startTime) : s.startTime) + '</td>' +
+          '<td>' + formatSessionDuration(s.durationMinutes) + '</td>' +
+          '<td>' + s.messageCount.toLocaleString() + '</td>' +
+          '<td>' + s.entryPointCount.toLocaleString() + '</td>' +
+          '<td>' + s.observerCount.toLocaleString() + '</td></tr>';
+      }).join('');
+      return '<table class="data-table analytics-table">' +
+        '<thead><tr><th>Sender</th><th>Started</th><th>Duration</th><th>Messages</th><th>Entry Points</th><th>Observers</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>';
     }
 
     function sendersHtml(senders, totalMessages) {
@@ -5592,6 +5620,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<h4 style="margin:16px 0 4px">Top Senders</h4>' +
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Who\'s actively wardriving in this window, by message count.</p>' +
           '<div id="wardrivingSenders">' + sendersHtml(d.topSenders, d.totalMessages) + '</div>' +
+          '<h4 style="margin:24px 0 4px">Sessions</h4>' +
+          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Each sender\'s messages grouped into distinct runs — a gap of more than 15 minutes starts a new session.</p>' +
+          '<div id="wardrivingSessions">' + sessionsHtml(d.sessions) + '</div>' +
           '<h4 style="margin:24px 0 4px">Entry Points</h4>' +
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Which local repeater first relayed each wardriving message — the hop closest to the origin (path[0]) across every observed copy.</p>' +
           '<div id="wardrivingEntryPoints">' + entryHtml + '</div>' +

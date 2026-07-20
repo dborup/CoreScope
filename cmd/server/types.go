@@ -262,6 +262,20 @@ type WardrivingSignalPoint struct {
 	ObservationCount int     `json:"observationCount"`
 }
 
+// WardrivingSession groups one sender's messages into a distinct "run":
+// consecutive messages no more than wardrivingSessionGapMinutes apart. A
+// bigger gap starts a new session, on the theory the sender paused, went
+// out of range, or ended one wardriving trip and started another later.
+type WardrivingSession struct {
+	Sender          string  `json:"sender"`
+	StartTime       string  `json:"startTime"`
+	EndTime         string  `json:"endTime"`
+	DurationMinutes float64 `json:"durationMinutes"`
+	MessageCount    int     `json:"messageCount"`
+	EntryPointCount int     `json:"entryPointCount"` // distinct path[0] entry-point prefixes seen during the session
+	ObserverCount   int     `json:"observerCount"`   // distinct observers that heard any message in the session
+}
+
 type WardrivingStatsResponse struct {
 	Window           string                       `json:"window"`
 	Channel          string                       `json:"channel"`
@@ -273,6 +287,7 @@ type WardrivingStatsResponse struct {
 	SignalTimeSeries []WardrivingSignalPoint      `json:"signalTimeSeries"`
 	AvgSNR           *float64                     `json:"avgSnr,omitempty"`
 	AvgRSSI          *float64                     `json:"avgRssi,omitempty"`
+	Sessions         []WardrivingSession          `json:"sessions"`
 }
 
 // ─── Health ────────────────────────────────────────────────────────────────────

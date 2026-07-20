@@ -177,6 +177,113 @@ func TestHandleWardrivingStats(t *testing.T) {
 	}
 }
 
+// TestHandleWardrivingStats_Sessions covers session/run grouping:
+// consecutive messages within wardrivingSessionGapMinutes (15) from the
+// same sender merge into one session; a bigger gap starts a new one.
+func TestHandleWardrivingStats_Sessions(t *testing.T) {
+	srv, router := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+	if _, err := srv.db.conn.Exec(`DELETE FROM observations`); err != nil {
+		t.Fatalf("clear observations: %v", err)
+	}
+
+	base := time.Now().UTC().Add(-2 * time.Hour)
+	t0 := base                       // Alice, session A, msg 1
+	t1 := base.Add(5 * time.Minute)  // Alice, session A, msg 2 (5min gap — same session)
+	t2 := base.Add(40 * time.Minute) // Alice, session B, msg 3 (35min gap from t1 — new session)
+	t3 := base.Add(10 * time.Minute) // Bob, single-message session
+
+	insertTx := func(hash, sender string, ts time.Time) int64 {
+		res, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,decoded_json) VALUES (?,?,?,1,5,'#wardriving',?)`,
+			"aa", hash, ts.Format(time.RFC3339), `{"sender":"`+sender+`","text":"`+sender+`: MM:x"}`,
+		)
+		if err != nil {
+			t.Fatalf("insert tx %s: %v", hash, err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	tx0 := insertTx("s1", "Alice", t0)
+	tx1 := insertTx("s2", "Alice", t1)
+	tx2 := insertTx("s3", "Alice", t2)
+	tx3 := insertTx("s4", "Bob", t3)
+
+	insertObserver := func(id, name string) int64 {
+		res, err := srv.db.conn.Exec(`INSERT INTO observers (id, name) VALUES (?,?)`, id, name)
+		if err != nil {
+			t.Fatalf("insert observer %s: %v", id, err)
+		}
+		rowid, _ := res.LastInsertId()
+		return rowid
+	}
+	o1 := insertObserver("obsO1", "ObsOne")
+	o2 := insertObserver("obsO2", "ObsTwo")
+
+	insertObs := func(txID, observerIdx int64, pathJSON string) {
+		if _, err := srv.db.conn.Exec(
+			`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?,?,1.0,-90,?,?)`,
+			txID, observerIdx, pathJSON, time.Now().Unix(),
+		); err != nil {
+			t.Fatalf("insert observation: %v", err)
+		}
+	}
+	insertObs(tx0, o1, `["EEEE"]`)
+	insertObs(tx1, o1, `["FFFF"]`)
+	insertObs(tx2, o2, `["EEEE"]`)
+	insertObs(tx3, o1, `["GGGG"]`)
+
+	req := httptest.NewRequest("GET", "/api/analytics/wardriving?window=24h", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp WardrivingStatsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+
+	if len(resp.Sessions) != 3 {
+		t.Fatalf("Sessions = %+v, want 3 (Alice session A, Alice session B, Bob session)", resp.Sessions)
+	}
+
+	// Ordered most-recent-first by StartTime: Alice-B (t2), Bob (t3), Alice-A (t0).
+	aliceB, bob, aliceA := resp.Sessions[0], resp.Sessions[1], resp.Sessions[2]
+
+	if aliceA.Sender != "Alice" || aliceA.MessageCount != 2 {
+		t.Errorf("Alice session A = %+v, want {Alice, 2 messages}", aliceA)
+	}
+	if aliceA.DurationMinutes < 4.9 || aliceA.DurationMinutes > 5.1 {
+		t.Errorf("Alice session A DurationMinutes = %v, want ~5.0", aliceA.DurationMinutes)
+	}
+	if aliceA.EntryPointCount != 2 {
+		t.Errorf("Alice session A EntryPointCount = %d, want 2 (EEEE, FFFF)", aliceA.EntryPointCount)
+	}
+	if aliceA.ObserverCount != 1 {
+		t.Errorf("Alice session A ObserverCount = %d, want 1 (only ObsOne heard it)", aliceA.ObserverCount)
+	}
+
+	if aliceB.Sender != "Alice" || aliceB.MessageCount != 1 {
+		t.Errorf("Alice session B = %+v, want {Alice, 1 message}", aliceB)
+	}
+	if aliceB.EntryPointCount != 1 || aliceB.ObserverCount != 1 {
+		t.Errorf("Alice session B = %+v, want {1 entry point, 1 observer}", aliceB)
+	}
+
+	if bob.Sender != "Bob" || bob.MessageCount != 1 {
+		t.Errorf("Bob session = %+v, want {Bob, 1 message}", bob)
+	}
+
+	// The 35-minute gap between t1 and t2 must NOT merge into one session —
+	// this is the core behavior under test.
+	if aliceA.MessageCount+aliceB.MessageCount != 3 {
+		t.Errorf("Alice's 3 messages should split into two sessions (2 + 1), got %d + %d", aliceA.MessageCount, aliceB.MessageCount)
+	}
+}
+
 // TestHandleWardrivingStats_InvalidWindow mirrors the existing scope-stats
 // window validation.
 func TestHandleWardrivingStats_InvalidWindow(t *testing.T) {
@@ -211,9 +318,9 @@ func TestHandleWardrivingStats_EmptyChannel(t *testing.T) {
 	if resp.TotalMessages != 0 {
 		t.Errorf("TotalMessages = %d, want 0", resp.TotalMessages)
 	}
-	if resp.TopSenders == nil || resp.EntryPoints == nil || resp.Observers == nil || resp.TimeSeries == nil || resp.SignalTimeSeries == nil {
-		t.Errorf("expected empty (non-nil) slices, got TopSenders=%v EntryPoints=%v Observers=%v TimeSeries=%v SignalTimeSeries=%v",
-			resp.TopSenders, resp.EntryPoints, resp.Observers, resp.TimeSeries, resp.SignalTimeSeries)
+	if resp.TopSenders == nil || resp.EntryPoints == nil || resp.Observers == nil || resp.TimeSeries == nil || resp.SignalTimeSeries == nil || resp.Sessions == nil {
+		t.Errorf("expected empty (non-nil) slices, got TopSenders=%v EntryPoints=%v Observers=%v TimeSeries=%v SignalTimeSeries=%v Sessions=%v",
+			resp.TopSenders, resp.EntryPoints, resp.Observers, resp.TimeSeries, resp.SignalTimeSeries, resp.Sessions)
 	}
 	if resp.AvgSNR != nil || resp.AvgRSSI != nil {
 		t.Errorf("expected nil AvgSNR/AvgRSSI for a channel with no observations, got AvgSNR=%v AvgRSSI=%v", resp.AvgSNR, resp.AvgRSSI)

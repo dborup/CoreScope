@@ -137,6 +137,11 @@ function makeWardrivingResponse(overrides) {
     ],
     avgSnr: 5.5,
     avgRssi: -72.5,
+    sessions: [
+      { sender: 'Alice', startTime: '2026-07-20T09:00:00Z', endTime: '2026-07-20T09:00:00Z', durationMinutes: 0, messageCount: 1, entryPointCount: 1, observerCount: 1 },
+      { sender: 'Bob', startTime: '2026-07-20T08:30:00Z', endTime: '2026-07-20T08:30:00Z', durationMinutes: 0, messageCount: 1, entryPointCount: 1, observerCount: 1 },
+      { sender: 'Alice', startTime: '2026-07-20T08:00:00Z', endTime: '2026-07-20T08:05:00Z', durationMinutes: 5, messageCount: 1, entryPointCount: 2, observerCount: 1 },
+    ],
   }, overrides);
 }
 
@@ -191,6 +196,20 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
     assert.ok(el.innerHTML.includes('66.7%'), 'Alice row should show 66.7% of total messages');
   });
 
+  await testAsync('Sessions table lists each run with duration, entry points, and observers', async () => {
+    const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse()));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderWardrivingTab(el);
+    const startIdx = el.innerHTML.indexOf('id="wardrivingSessions"');
+    const endIdx = el.innerHTML.indexOf('id="wardrivingEntryPoints"');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    // 3 sessions in the fixture: two Alice rows, one Bob row.
+    assert.strictEqual((section.match(/Alice/g) || []).length, 2, 'both Alice sessions should render as separate rows');
+    assert.ok(section.includes('Bob'), 'Bob session should render');
+    assert.ok(section.includes('5m'), 'the 5-minute session should show its duration');
+    assert.ok(el.innerHTML.includes('<div class="stat-value">3</div><div class="stat-label">Sessions</div>'), 'the Sessions stat card should show the session count (3)');
+  });
+
   await testAsync('Entry Points resolves unique_prefix repeaters and folds ambiguous into one bucket', async () => {
     const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse(), {
       resolved: {
@@ -200,8 +219,8 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
     }));
     const el = fakeEl();
     await ctx.window._analyticsRenderWardrivingTab(el);
-    const startIdx = el.innerHTML.indexOf('Entry Points');
-    const endIdx = el.innerHTML.indexOf('Coverage by Observer');
+    const startIdx = el.innerHTML.indexOf('id="wardrivingEntryPoints"');
+    const endIdx = el.innerHTML.indexOf('id="wardrivingObservers"');
     const section = el.innerHTML.slice(startIdx, endIdx);
     assert.ok(section.includes('GatewayRepeater'), 'unique_prefix resolution should show the real repeater name');
     assert.ok(!section.includes('BestGuessRepeater'), 'a non-unique_prefix resolution must not be shown as a specific named repeater');
@@ -227,11 +246,12 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
   await testAsync('shows empty-state messages when the window has no wardriving activity', async () => {
     const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse({
       totalMessages: 0, topSenders: [], entryPoints: [], observers: [], timeSeries: [],
-      signalTimeSeries: [], avgSnr: null, avgRssi: null,
+      signalTimeSeries: [], avgSnr: null, avgRssi: null, sessions: [],
     })));
     const el = fakeEl();
     await ctx.window._analyticsRenderWardrivingTab(el);
     assert.ok(el.innerHTML.includes('No wardriving messages in this window'), 'senders empty state should show');
+    assert.ok(el.innerHTML.includes('No wardriving sessions in this window'), 'sessions empty state should show');
     assert.ok(el.innerHTML.includes('No wardriving messages with a relay path'), 'entry points empty state should show');
     assert.ok(el.innerHTML.includes('No observer has heard wardriving traffic'), 'observers empty state should show');
     assert.ok(el.innerHTML.includes('Insufficient data points to chart'), 'signal chart empty state should show');
