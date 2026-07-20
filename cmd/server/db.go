@@ -3076,9 +3076,15 @@ func (db *DB) GetChannelMessageScopeStats(window string) (*ChannelScopeStats, er
 // GetChannelScopeAdoption breaks the channel-messages-only scoped/unscoped
 // question (see GetChannelMessageScopeStats) down PER CHANNEL — which
 // specific channels (#test, #wardriving, ...) actually use region scoping
-// vs which never do. Ordered by message volume; channel cardinality is
-// bounded by the 1-byte channel hash space so this is never large enough
-// to need a cap.
+// vs which never do. Ordered by message volume; uncapped.
+//
+// Cardinality isn't a hard bound like the 1-byte hash space alone would
+// suggest: encrypted channels ARE bounded to 256 'enc_%02x' buckets, but
+// plain-text CHAN channels use the free-form channel name string
+// (ingestor/db.go's `json_extract(decoded_json, '$.channel')`), so in
+// principle a mesh with many ad-hoc named channels could grow this
+// unbounded. In practice payload_type=5 rows within a single window stay
+// small enough that this hasn't needed a cap.
 func (db *DB) GetChannelScopeAdoption(window string) ([]ChannelScopeAdoption, error) {
 	if !db.hasScopeName {
 		return nil, fmt.Errorf("scope_name column not present — run ingestor to apply migrations")
