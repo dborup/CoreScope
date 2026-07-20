@@ -82,10 +82,11 @@
   }
   let lastHeard = localStorage.getItem('meshcore-nodes-last-heard') || '';
   let statusFilter = localStorage.getItem('meshcore-nodes-status-filter') || 'all';
-  // 'all' | 'domestic' | 'foreign' — domestic/foreign split on the `foreign`
-  // flag (#730 geo_filter classification: self-reported GPS outside the
-  // configured box). The unfiltered node list can be dominated by foreign
-  // nodes, making it hard to see which ones are actually local.
+  // 'all' | 'domestic' | 'foreign' — classifies each node's own lat/lon
+  // against the configured geo_filter box/polygon (see
+  // nodePassesGeoFilter in app.js). The unfiltered node list can be
+  // dominated by out-of-region nodes on deployments with heavy
+  // cross-border traffic, making it hard to see which ones are local.
   let geoScope = localStorage.getItem('meshcore-nodes-geo-scope') || 'all';
   let wsHandler = null;
   let detailMap = null;
@@ -1241,9 +1242,18 @@
           return getNodeStatus(role, lastMs) === statusFilter;
         });
       }
-      // Geo scope filter (domestic vs foreign, #730 `foreign` flag)
-      if (geoScope === 'domestic') filtered = filtered.filter(n => !n.foreign);
-      else if (geoScope === 'foreign') filtered = filtered.filter(n => n.foreign);
+      // Geo scope filter (domestic vs foreign). Classifies directly from
+      // lat/lon against the configured geo_filter box/polygon rather than
+      // the `foreign` flag alone — that flag only reflects nodes whose
+      // ADVERT was classified at ingest time, so a node whose last-known
+      // GPS predates geo_filter being configured (or just hasn't
+      // re-advertised since) can be geographically outside the filter
+      // without ever being flagged. window.MC_GEO_FILTER is set from
+      // /api/config/client (public/roles.js); nodePassesGeoFilter
+      // (public/app.js) mirrors the server's geofilter.PassesFilter
+      // exactly, including "no GPS / (0,0) always counts as domestic".
+      if (geoScope === 'domestic') filtered = filtered.filter(n => nodePassesGeoFilter(n.lat, n.lon, window.MC_GEO_FILTER));
+      else if (geoScope === 'foreign') filtered = filtered.filter(n => !nodePassesGeoFilter(n.lat, n.lon, window.MC_GEO_FILTER));
       nodes = filtered;
 
       // Defensive filter: hide nodes with obviously corrupted data

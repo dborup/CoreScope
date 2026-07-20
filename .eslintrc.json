@@ -247,6 +247,7 @@
     "miniMarkdown": "readonly",
     "module": "readonly",
     "navigate": "readonly",
+    "nodePassesGeoFilter": "readonly",
     "observerSkewSeverity": "readonly",
     "offWS": "readonly",
     "onWS": "readonly",

@@ -69,8 +69,12 @@ function makeSandbox() {
   return ctx;
 }
 
-// Fixture: a handful of nodes, some foreign-flagged, some not. All have a
-// 64-char pubkey and a name so the loadNodes() defensive filter keeps them.
+// Fixture: a handful of nodes with lat/lon either inside or outside the
+// configured geo_filter box (set as ctx.window.MC_GEO_FILTER below). All
+// have a 64-char pubkey and a name so the loadNodes() defensive filter
+// keeps them.
+const GEO_BOX = { latMin: 53, latMax: 59, lonMin: 6, lonMax: 15 }; // roughly Denmark
+
 function makeFixture() {
   const nodes = [];
   for (let i = 0; i < 5; i++) {
@@ -79,7 +83,7 @@ function makeFixture() {
       name: 'Domestic' + i,
       role: 'repeater',
       advert_count: 1,
-      foreign: false,
+      lat: 55.0, lon: 10.0, // inside GEO_BOX
       last_seen: new Date(Date.now() - i * 1000).toISOString(),
     });
   }
@@ -89,7 +93,7 @@ function makeFixture() {
       name: 'Foreign' + i,
       role: 'companion',
       advert_count: 1,
-      foreign: true,
+      lat: 40.7, lon: -74.0, // outside GEO_BOX (New York)
       last_seen: new Date(Date.now() - i * 1000).toISOString(),
     });
   }
@@ -126,6 +130,19 @@ function makeNodesEnv(fixture) {
     });
   };
   ctx.invalidateApiCache = () => {};
+
+  // Simplified bbox-only stand-in for the real nodePassesGeoFilter
+  // (public/app.js) — this file tests that nodes.js correctly WIRES the
+  // geo-scope filter into its loadNodes() pipeline, not the geo-math
+  // itself (see test-geo-filter.js for that, cross-checked against the
+  // real Go internal/geofilter package).
+  ctx.nodePassesGeoFilter = function (lat, lon, gf) {
+    if (!gf) return true;
+    if (typeof lat !== 'number' || typeof lon !== 'number') return true;
+    if (lat === 0 && lon === 0) return true;
+    return lat >= gf.latMin && lat <= gf.latMax && lon >= gf.lonMin && lon <= gf.lonMax;
+  };
+  ctx.window.MC_GEO_FILTER = GEO_BOX;
 
   ctx.ROLE_COLORS = { repeater: '#0', room: '#0', companion: '#0', sensor: '#0' };
   ctx.ROLE_STYLE = {};
@@ -181,26 +198,45 @@ console.log('=== nodes.js: Domestic/Foreign geo-scope filter ===');
     assert.strictEqual(filtered.length, 8, 'all 8 nodes (5 domestic + 3 foreign) should be present by default');
   });
 
-  await test('geoScope "domestic" excludes foreign-flagged nodes', async () => {
+  await test('geoScope "domestic" excludes nodes outside the geo_filter box', async () => {
     const env = makeNodesEnv(makeFixture());
     const appEl = env.ctx.document.getElementById('page');
     env.ctx.window._nodesSetGeoScope('domestic');
     env.pageMod().init(appEl);
     await settle(env.ctx);
     const filtered = env.ctx.window._nodesGetFiltered();
-    assert.strictEqual(filtered.length, 5, 'only the 5 domestic nodes should remain');
-    assert.ok(filtered.every(n => !n.foreign), 'no foreign node should be present');
+    assert.strictEqual(filtered.length, 5, 'only the 5 in-box nodes should remain');
+    assert.ok(filtered.every(n => n.name.startsWith('Domestic')), 'no out-of-box node should be present');
   });
 
-  await test('geoScope "foreign" includes only foreign-flagged nodes', async () => {
+  await test('geoScope "foreign" includes only nodes outside the geo_filter box', async () => {
     const env = makeNodesEnv(makeFixture());
     const appEl = env.ctx.document.getElementById('page');
     env.ctx.window._nodesSetGeoScope('foreign');
     env.pageMod().init(appEl);
     await settle(env.ctx);
     const filtered = env.ctx.window._nodesGetFiltered();
-    assert.strictEqual(filtered.length, 3, 'only the 3 foreign nodes should remain');
-    assert.ok(filtered.every(n => n.foreign), 'every remaining node should be foreign-flagged');
+    assert.strictEqual(filtered.length, 3, 'only the 3 out-of-box nodes should remain');
+    assert.ok(filtered.every(n => n.name.startsWith('Foreign')), 'every remaining node should be out of the box');
+  });
+
+  await test('geoScope "domestic" counts a node with no GPS at all as domestic', async () => {
+    const fixture = makeFixture();
+    fixture.push({
+      public_key: 'nogps00' + '0'.repeat(57),
+      name: 'NoGpsNode',
+      role: 'repeater',
+      advert_count: 1,
+      // no lat/lon at all
+      last_seen: new Date().toISOString(),
+    });
+    const env = makeNodesEnv(fixture);
+    const appEl = env.ctx.document.getElementById('page');
+    env.ctx.window._nodesSetGeoScope('domestic');
+    env.pageMod().init(appEl);
+    await settle(env.ctx);
+    const filtered = env.ctx.window._nodesGetFiltered();
+    assert.ok(filtered.some(n => n.name === 'NoGpsNode'), 'a node with no GPS should be treated as domestic, not hidden');
   });
 
   await test('geoScope combines with an existing role tab filter (AND, not OR)', async () => {
