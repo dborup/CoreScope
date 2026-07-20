@@ -251,14 +251,28 @@ type WardrivingObserverCoverage struct {
 	MessageCount     int      `json:"messageCount"` // distinct transmissions this observer heard
 }
 
+// WardrivingSignalPoint is one time bucket of average signal quality across
+// every observation of #wardriving traffic in that bucket (not per-observer —
+// see WardrivingObserverCoverage for the per-station breakdown). Always has
+// ObservationCount >= 1 since buckets only exist where there was traffic.
+type WardrivingSignalPoint struct {
+	T                string  `json:"t"`
+	AvgSNR           float64 `json:"avgSnr"`
+	AvgRSSI          float64 `json:"avgRssi"`
+	ObservationCount int     `json:"observationCount"`
+}
+
 type WardrivingStatsResponse struct {
-	Window        string                       `json:"window"`
-	Channel       string                       `json:"channel"`
-	TotalMessages int                          `json:"totalMessages"`
-	TimeSeries    []WardrivingTimePoint        `json:"timeSeries"`
-	TopSenders    []WardrivingSenderCount      `json:"topSenders"`
-	EntryPoints   []WardrivingEntryPrefix      `json:"entryPoints"`
-	Observers     []WardrivingObserverCoverage `json:"observers"`
+	Window           string                       `json:"window"`
+	Channel          string                       `json:"channel"`
+	TotalMessages    int                          `json:"totalMessages"`
+	TimeSeries       []WardrivingTimePoint        `json:"timeSeries"`
+	TopSenders       []WardrivingSenderCount      `json:"topSenders"`
+	EntryPoints      []WardrivingEntryPrefix      `json:"entryPoints"`
+	Observers        []WardrivingObserverCoverage `json:"observers"`
+	SignalTimeSeries []WardrivingSignalPoint      `json:"signalTimeSeries"`
+	AvgSNR           *float64                     `json:"avgSnr,omitempty"`
+	AvgRSSI          *float64                     `json:"avgRssi,omitempty"`
 }
 
 // ─── Health ────────────────────────────────────────────────────────────────────

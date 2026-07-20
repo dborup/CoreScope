@@ -62,21 +62,23 @@ func TestHandleWardrivingStats(t *testing.T) {
 	seaIdx := insertObserver("obsSEA", "SeattleObs", "SEA")
 	zzzIdx := insertObserver("obsXXX", "UnknownObs", "ZZZ")
 
-	insertObs := func(txID int64, observerIdx int64, pathJSON string) {
+	insertObs := func(txID int64, observerIdx int64, pathJSON string, snr, rssi float64) {
 		if _, err := srv.db.conn.Exec(
-			`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?,?,1.0,-90,?,?)`,
-			txID, observerIdx, pathJSON, time.Now().Unix(),
+			`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?,?,?,?,?,?)`,
+			txID, observerIdx, snr, rssi, pathJSON, time.Now().Unix(),
 		); err != nil {
 			t.Fatalf("insert observation: %v", err)
 		}
 	}
 	// tx1: two observations, both via entry prefix "AAAA", one from each observer.
-	insertObs(tx1, seaIdx, `["AAAA","1111"]`)
-	insertObs(tx1, zzzIdx, `["AAAA","2222"]`)
+	// Signal values are distinct so the avg-SNR/avg-RSSI math is verifiable:
+	// avg SNR = (2+4+6+8)/4 = 5.0, avg RSSI = (-80-100-70-60)/4 = -77.5.
+	insertObs(tx1, seaIdx, `["AAAA","1111"]`, 2.0, -80)
+	insertObs(tx1, zzzIdx, `["AAAA","2222"]`, 4.0, -100)
 	// tx2: entry prefix "BBBB", heard only by SEA.
-	insertObs(tx2, seaIdx, `["BBBB"]`)
+	insertObs(tx2, seaIdx, `["BBBB"]`, 6.0, -70)
 	// tx3: entry prefix "AAAA" again (same prefix as tx1 — tallies together), heard by SEA.
-	insertObs(tx3, seaIdx, `["AAAA","3333"]`)
+	insertObs(tx3, seaIdx, `["AAAA","3333"]`, 8.0, -60)
 
 	req := httptest.NewRequest("GET", "/api/analytics/wardriving?window=24h", nil)
 	w := httptest.NewRecorder()
@@ -150,6 +152,29 @@ func TestHandleWardrivingStats(t *testing.T) {
 	if sum != 3 {
 		t.Errorf("TimeSeries sums to %d, want 3", sum)
 	}
+
+	// Signal quality: all 4 observations land in the same hourly bucket
+	// (inserted back-to-back "now"), so there's exactly one signal point
+	// averaging all 4 readings: avg SNR = 5.0, avg RSSI = -77.5.
+	if len(resp.SignalTimeSeries) != 1 {
+		t.Fatalf("SignalTimeSeries = %+v, want 1 bucket", resp.SignalTimeSeries)
+	}
+	sig := resp.SignalTimeSeries[0]
+	if sig.ObservationCount != 4 {
+		t.Errorf("SignalTimeSeries[0].ObservationCount = %d, want 4", sig.ObservationCount)
+	}
+	if sig.AvgSNR != 5.0 {
+		t.Errorf("SignalTimeSeries[0].AvgSNR = %v, want 5.0", sig.AvgSNR)
+	}
+	if sig.AvgRSSI != -77.5 {
+		t.Errorf("SignalTimeSeries[0].AvgRSSI = %v, want -77.5", sig.AvgRSSI)
+	}
+	if resp.AvgSNR == nil || *resp.AvgSNR != 5.0 {
+		t.Errorf("AvgSNR = %v, want 5.0", resp.AvgSNR)
+	}
+	if resp.AvgRSSI == nil || *resp.AvgRSSI != -77.5 {
+		t.Errorf("AvgRSSI = %v, want -77.5", resp.AvgRSSI)
+	}
 }
 
 // TestHandleWardrivingStats_InvalidWindow mirrors the existing scope-stats
@@ -186,8 +211,11 @@ func TestHandleWardrivingStats_EmptyChannel(t *testing.T) {
 	if resp.TotalMessages != 0 {
 		t.Errorf("TotalMessages = %d, want 0", resp.TotalMessages)
 	}
-	if resp.TopSenders == nil || resp.EntryPoints == nil || resp.Observers == nil || resp.TimeSeries == nil {
-		t.Errorf("expected empty (non-nil) slices, got TopSenders=%v EntryPoints=%v Observers=%v TimeSeries=%v",
-			resp.TopSenders, resp.EntryPoints, resp.Observers, resp.TimeSeries)
+	if resp.TopSenders == nil || resp.EntryPoints == nil || resp.Observers == nil || resp.TimeSeries == nil || resp.SignalTimeSeries == nil {
+		t.Errorf("expected empty (non-nil) slices, got TopSenders=%v EntryPoints=%v Observers=%v TimeSeries=%v SignalTimeSeries=%v",
+			resp.TopSenders, resp.EntryPoints, resp.Observers, resp.TimeSeries, resp.SignalTimeSeries)
+	}
+	if resp.AvgSNR != nil || resp.AvgRSSI != nil {
+		t.Errorf("expected nil AvgSNR/AvgRSSI for a channel with no observations, got AvgSNR=%v AvgRSSI=%v", resp.AvgSNR, resp.AvgRSSI)
 	}
 }

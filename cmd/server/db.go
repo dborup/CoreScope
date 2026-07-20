@@ -3173,8 +3173,9 @@ func (db *DB) getChannelScopeRegions(since string) (map[string][]string, error) 
 // GetWardrivingStats aggregates activity on the given channel (normally
 // "#wardriving") over the requested window: message volume over time, who's
 // actively sending, which repeater first relayed each message (raw hash
-// prefixes — the caller resolves names via /api/resolve-hops), and which
-// observer stations actually heard the traffic. See WardrivingObserverCoverage
+// prefixes — the caller resolves names via /api/resolve-hops), which
+// observer stations actually heard the traffic, and signal quality (SNR/RSSI)
+// over the same time buckets as the activity series. See WardrivingObserverCoverage
 // doc for why observer coverage — not sender GPS — is the reliable half of
 // a "where did this reach" picture: MeshMapper's #wardriving messages carry
 // an anonymous per-session token by default, not the sender's live
@@ -3324,6 +3325,51 @@ func (db *DB) GetWardrivingStats(window, channel string) (*WardrivingStatsRespon
 	obsRows.Close()
 	if err := obsRows.Err(); err != nil {
 		return nil, fmt.Errorf("wardriving observers iteration: %w", err)
+	}
+
+	// Signal quality over time — same bucketing as the activity time series,
+	// but averaged across every observation (any observer) in that bucket.
+	sigBucketExpr := strings.ReplaceAll(bucketExpr, "first_seen", "t.first_seen")
+	sigQuery := fmt.Sprintf(`
+		SELECT %s AS bucket, AVG(o.snr) AS avg_snr, AVG(o.rssi) AS avg_rssi, COUNT(*) AS cnt
+		FROM observations o
+		JOIN transmissions t ON t.id = o.transmission_id
+		WHERE t.channel_hash = ? AND t.payload_type = 5 AND t.first_seen >= ?
+		GROUP BY bucket
+		ORDER BY bucket
+	`, sigBucketExpr)
+	sigRows, err := db.conn.Query(sigQuery, channel, since)
+	if err != nil {
+		return nil, fmt.Errorf("wardriving signal timeseries query: %w", err)
+	}
+	resp.SignalTimeSeries = make([]WardrivingSignalPoint, 0)
+	for sigRows.Next() {
+		var sp WardrivingSignalPoint
+		if sigRows.Scan(&sp.T, &sp.AvgSNR, &sp.AvgRSSI, &sp.ObservationCount) == nil {
+			resp.SignalTimeSeries = append(resp.SignalTimeSeries, sp)
+		}
+	}
+	sigRows.Close()
+	if err := sigRows.Err(); err != nil {
+		return nil, fmt.Errorf("wardriving signal timeseries iteration: %w", err)
+	}
+
+	var avgSNR, avgRSSI sql.NullFloat64
+	if err := db.conn.QueryRow(`
+		SELECT AVG(o.snr), AVG(o.rssi)
+		FROM observations o
+		JOIN transmissions t ON t.id = o.transmission_id
+		WHERE t.channel_hash = ? AND t.payload_type = 5 AND t.first_seen >= ?
+	`, channel, since).Scan(&avgSNR, &avgRSSI); err != nil {
+		return nil, fmt.Errorf("wardriving avg signal query: %w", err)
+	}
+	if avgSNR.Valid {
+		v := avgSNR.Float64
+		resp.AvgSNR = &v
+	}
+	if avgRSSI.Valid {
+		v := avgRSSI.Float64
+		resp.AvgRSSI = &v
 	}
 
 	return resp, nil

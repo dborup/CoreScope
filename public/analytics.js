@@ -5424,6 +5424,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         { label: 'Active Senders', value: (d.topSenders || []).length.toLocaleString(), note: null },
         { label: 'Entry-Point Repeaters', value: (d.entryPoints || []).length.toLocaleString(), note: 'distinct path[0] prefixes' },
         { label: 'Observers Reached', value: (d.observers || []).length.toLocaleString(), note: null },
+        { label: 'Avg SNR', value: (d.avgSnr != null ? d.avgSnr.toFixed(1) + ' dB' : '—'), note: null },
+        { label: 'Avg RSSI', value: (d.avgRssi != null ? d.avgRssi.toFixed(1) + ' dBm' : '—'), note: null },
       ].map(function(c) {
         return '<div class="stat-card"><div class="stat-value">' + c.value + '</div>' +
           '<div class="stat-label">' + c.label + '</div>' +
@@ -5457,6 +5459,37 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       return '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;max-height:' + H + 'px" role="img" aria-label="Wardriving message volume over time">' +
         grid +
         '<polyline points="' + pts + '" fill="none" stroke="var(--accent)" stroke-width="2"/>' +
+        '</svg>';
+    }
+
+    // Signal quality line chart — scaled to the data's own min/max (unlike
+    // chartHtml's 0-baseline) since SNR and RSSI have no natural zero floor.
+    function signalChartHtml(sig, key, color, ariaLabel) {
+      if (!sig || sig.length <= 1) {
+        return '<p class="text-muted" style="font-size:0.85em">Insufficient data points to chart.</p>';
+      }
+      var vals = sig.map(function(p) { return p[key]; });
+      var minVal = Math.min.apply(null, vals);
+      var maxVal = Math.max.apply(null, vals);
+      if (minVal === maxVal) { minVal -= 1; maxVal += 1; }
+      var W = 800, H = 140, padL = 44, padT = 10, padR = 10, padB = 20;
+      var plotW = W - padL - padR, plotH = H - padB - padT;
+      var n = sig.length;
+      var pts = vals.map(function(v, i) {
+        var x = padL + i * plotW / Math.max(n - 1, 1);
+        var y = padT + plotH - ((v - minVal) / (maxVal - minVal)) * plotH;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+      var grid = '';
+      for (var gi = 0; gi <= 3; gi++) {
+        var gy = padT + plotH * gi / 3;
+        var gv = maxVal - (maxVal - minVal) * gi / 3;
+        grid += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '" stroke="var(--border)" stroke-dasharray="2"/>';
+        grid += '<text x="' + (padL - 4) + '" y="' + (gy + 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--text-muted)">' + gv.toFixed(1) + '</text>';
+      }
+      return '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;max-height:' + H + 'px" role="img" aria-label="' + ariaLabel + '">' +
+        grid +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="2"/>' +
         '</svg>';
     }
 
@@ -5564,7 +5597,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<div id="wardrivingEntryPoints">' + entryHtml + '</div>' +
           '<h4 style="margin:24px 0 4px">Coverage by Observer</h4>' +
           '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Which observer stations actually heard wardriving traffic — observers sit at fixed, known locations, so this is the reliable half of "how far did it reach."</p>' +
-          '<div id="wardrivingObservers">' + observersHtml(d.observers) + '</div>';
+          '<div id="wardrivingObservers">' + observersHtml(d.observers) + '</div>' +
+          '<h4 style="margin:24px 0 4px">Signal Quality Trends</h4>' +
+          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Average SNR and RSSI across every observation of wardriving traffic in each time bucket — a rough proxy for link quality, not tied to any one observer.</p>' +
+          '<div id="wardrivingSignal" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">' +
+            '<div><div class="text-muted" style="font-size:0.8em;margin-bottom:4px">Avg SNR (dB)</div>' + signalChartHtml(d.signalTimeSeries, 'avgSnr', 'var(--accent)', 'Average SNR over time') + '</div>' +
+            '<div><div class="text-muted" style="font-size:0.8em;margin-bottom:4px">Avg RSSI (dBm)</div>' + signalChartHtml(d.signalTimeSeries, 'avgRssi', 'var(--warning, #f39c12)', 'Average RSSI over time') + '</div>' +
+          '</div>';
       } catch (err) {
         body = '<div class="text-center" style="color:var(--status-red);padding:20px">Failed to load wardriving stats: ' + esc(String(err)) + '</div>';
       }

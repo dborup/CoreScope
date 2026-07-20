@@ -111,7 +111,8 @@ function fakeEl() {
 
 // Minimal but representative /api/analytics/wardriving fixture: 2 senders,
 // 2 entry-point prefixes (one unique_prefix-resolvable, one ambiguous),
-// 2 observers (one with known coordinates, one without).
+// 2 observers (one with known coordinates, one without), and a 2-point
+// signal-quality time series.
 function makeWardrivingResponse(overrides) {
   return Object.assign({
     window: '24h',
@@ -130,6 +131,12 @@ function makeWardrivingResponse(overrides) {
       { observerId: '1', observerName: 'SeattleObs', iata: 'SEA', lat: 47.4502, lon: -122.3088, observationCount: 3, messageCount: 3 },
       { observerId: '2', observerName: 'UnknownObs', iata: 'ZZZ', observationCount: 1, messageCount: 1 },
     ],
+    signalTimeSeries: [
+      { t: '2026-07-20T08:00:00Z', avgSnr: 4.0, avgRssi: -80.0, observationCount: 1 },
+      { t: '2026-07-20T09:00:00Z', avgSnr: 6.0, avgRssi: -70.0, observationCount: 3 },
+    ],
+    avgSnr: 5.5,
+    avgRssi: -72.5,
   }, overrides);
 }
 
@@ -156,6 +163,20 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
     assert.ok(el.innerHTML.includes('Active Senders'), 'Active Senders card label should render');
     assert.ok(el.innerHTML.includes('Entry-Point Repeaters'), 'Entry-Point Repeaters card label should render');
     assert.ok(el.innerHTML.includes('Observers Reached'), 'Observers Reached card label should render');
+    assert.ok(el.innerHTML.includes('5.5 dB'), 'Avg SNR card should show the API-provided average');
+    assert.ok(el.innerHTML.includes('-72.5 dBm'), 'Avg RSSI card should show the API-provided average');
+  });
+
+  await testAsync('Signal Quality Trends renders both SNR and RSSI charts', async () => {
+    const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse()));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderWardrivingTab(el);
+    const startIdx = el.innerHTML.indexOf('Signal Quality Trends');
+    assert.ok(startIdx > -1, 'Signal Quality Trends heading should render');
+    const section = el.innerHTML.slice(startIdx);
+    assert.ok(section.includes('Avg SNR (dB)'), 'SNR chart label should render');
+    assert.ok(section.includes('Avg RSSI (dBm)'), 'RSSI chart label should render');
+    assert.ok(section.includes('<svg'), 'at least one SVG chart should render for the 2-point signal series');
   });
 
   await testAsync('Top Senders table is sorted by count and shows % of total', async () => {
@@ -206,12 +227,16 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
   await testAsync('shows empty-state messages when the window has no wardriving activity', async () => {
     const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse({
       totalMessages: 0, topSenders: [], entryPoints: [], observers: [], timeSeries: [],
+      signalTimeSeries: [], avgSnr: null, avgRssi: null,
     })));
     const el = fakeEl();
     await ctx.window._analyticsRenderWardrivingTab(el);
     assert.ok(el.innerHTML.includes('No wardriving messages in this window'), 'senders empty state should show');
     assert.ok(el.innerHTML.includes('No wardriving messages with a relay path'), 'entry points empty state should show');
     assert.ok(el.innerHTML.includes('No observer has heard wardriving traffic'), 'observers empty state should show');
+    assert.ok(el.innerHTML.includes('Insufficient data points to chart'), 'signal chart empty state should show');
+    assert.ok(el.innerHTML.includes('<div class="stat-value">—</div><div class="stat-label">Avg SNR</div>'), 'Avg SNR card should show a dash when there is no signal data');
+    assert.ok(el.innerHTML.includes('<div class="stat-value">—</div><div class="stat-label">Avg RSSI</div>'), 'Avg RSSI card should show a dash when there is no signal data');
   });
 
   await testAsync('rendering registers a real interval, and stop() actually clears it (not a no-op)', async () => {
