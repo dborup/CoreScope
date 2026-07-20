@@ -3128,7 +3128,50 @@ func (db *DB) GetChannelScopeAdoption(window string) ([]ChannelScopeAdoption, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("channel scope adoption iteration: %w", err)
 	}
+
+	regionsByChannel, err := db.getChannelScopeRegions(since)
+	if err != nil {
+		// Non-fatal: the adoption counts above are still useful without
+		// the per-channel region breakdown.
+		log.Printf("WARN getChannelScopeRegions: %v", err)
+	} else {
+		for i := range result {
+			result[i].Regions = regionsByChannel[result[i].Channel]
+		}
+	}
+
 	return result, nil
+}
+
+// getChannelScopeRegions answers "which regions" for GetChannelScopeAdoption's
+// "how many scoped messages" — for each channel, which distinct scope_name
+// values have actually been seen on its scoped messages, most-used first.
+func (db *DB) getChannelScopeRegions(since string) (map[string][]string, error) {
+	rows, err := db.conn.Query(`
+		SELECT
+			COALESCE(NULLIF(channel_hash, ''), '(unknown channel)') AS channel,
+			scope_name,
+			COUNT(*) AS cnt
+		FROM transmissions
+		WHERE payload_type = 5 AND first_seen >= ? AND `+routeTypeTransportSQL+` AND scope_name IS NOT NULL AND scope_name != ''
+		GROUP BY channel, scope_name
+		ORDER BY channel, cnt DESC
+	`, since)
+	if err != nil {
+		return nil, fmt.Errorf("channel scope regions query: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]string)
+	for rows.Next() {
+		var channel, region string
+		var cnt int
+		if err := rows.Scan(&channel, &region, &cnt); err != nil {
+			continue
+		}
+		result[channel] = append(result[channel], region)
+	}
+	return result, rows.Err()
 }
 
 // GetMatchedRegionNames returns the set of scope_name values that have ever

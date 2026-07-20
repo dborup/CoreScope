@@ -4398,9 +4398,73 @@ func TestHandleScopeStats_ChannelScopeAdoption(t *testing.T) {
 	if test.Channel != "#test" || test.TotalMessages != 3 || test.Scoped != 2 || test.Unscoped != 1 {
 		t.Errorf("channelScopeAdoption[0] = %+v, want {#test total=3 scoped=2 unscoped=1}", test)
 	}
+	if len(test.Regions) != 1 || test.Regions[0] != "#belgium" {
+		t.Errorf("channelScopeAdoption[0].Regions = %+v, want [#belgium]", test.Regions)
+	}
 	wardriving := resp.ChannelScopeAdoption[1]
 	if wardriving.Channel != "#wardriving" || wardriving.TotalMessages != 1 || wardriving.Scoped != 0 || wardriving.Unscoped != 1 {
 		t.Errorf("channelScopeAdoption[1] = %+v, want {#wardriving total=1 scoped=0 unscoped=1}", wardriving)
+	}
+	if len(wardriving.Regions) != 0 {
+		t.Errorf("channelScopeAdoption[1].Regions = %+v, want none — #wardriving has no scoped messages", wardriving.Regions)
+	}
+}
+
+// TestHandleScopeStats_ChannelScopeAdoption_RegionsOrderedByUsage verifies
+// the Regions field on each channel: which distinct scope_name values its
+// scoped messages actually carry, most-used first — a channel with mixed
+// region traffic (a shared/public channel spanning several hashRegions
+// areas) must list every region it's seen, not just the top one.
+func TestHandleScopeStats_ChannelScopeAdoption_RegionsOrderedByUsage(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT DEFAULT NULL`); err != nil {
+		t.Fatalf("add scope_name column: %v", err)
+	}
+	srv.db.hasScopeName = true
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows := []struct {
+		hash, channel, scope string
+	}{
+		// #public: 3x #dk, 2x #dk-oj, 1x #se — #dk must sort first.
+		{"h1", "#public", "#dk"}, {"h2", "#public", "#dk"}, {"h3", "#public", "#dk"},
+		{"h4", "#public", "#dk-oj"}, {"h5", "#public", "#dk-oj"},
+		{"h6", "#public", "#se"},
+	}
+	for _, r := range rows {
+		if _, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,scope_name) VALUES (?,?,?,0,5,?,?)`,
+			"aa", r.hash, now, r.channel, r.scope,
+		); err != nil {
+			t.Fatalf("seed row %s: %v", r.hash, err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/api/scope-stats?window=24h", nil)
+	w := httptest.NewRecorder()
+	srv.handleScopeStats(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp ScopeStatsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.ChannelScopeAdoption) != 1 {
+		t.Fatalf("channelScopeAdoption = %+v, want 1 entry", resp.ChannelScopeAdoption)
+	}
+	got := resp.ChannelScopeAdoption[0].Regions
+	want := []string{"#dk", "#dk-oj", "#se"}
+	if len(got) != len(want) {
+		t.Fatalf("Regions = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Regions[%d] = %q, want %q (most-used-first order) — full: %+v", i, got[i], want[i], got)
+		}
 	}
 }
 

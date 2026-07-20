@@ -124,6 +124,12 @@ type ChannelScopeAdoption struct {
 	Scoped        int    `json:"scoped"`
 	Unscoped      int    `json:"unscoped"`
 	UnknownScope  int    `json:"unknownScope"`
+	// Regions is which specific scope_name values have actually been seen
+	// on this channel's scoped messages, most-used first. Distinct from
+	// Scoped (a count) — this answers "which regions", not just "how
+	// many scoped messages". Omitted when the channel has no scoped
+	// messages in the window.
+	Regions []string `json:"regions,omitempty"`
 }
 
 type ScopeRegionCount struct {

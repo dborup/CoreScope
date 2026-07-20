@@ -4744,16 +4744,20 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         var adoptRows = filtered.map(function(ca) {
           var caOverall = ca.scoped + ca.unscoped;
           var label = isEncrypted(ca) ? 'Encrypted (0x' + ca.channel.slice(4).toUpperCase() + ')' : ca.channel;
+          var regionsHtml = (ca.regions && ca.regions.length)
+            ? ca.regions.map(function(r) { return '<code>' + esc(r) + '</code>'; }).join(', ')
+            : '<span class="text-muted">—</span>';
           return '<tr>' +
             '<td><code>' + esc(label) + '</code></td>' +
             '<td>' + ca.totalMessages.toLocaleString() + '</td>' +
             '<td>' + ca.scoped.toLocaleString() + ' (' + pct(ca.scoped, caOverall) + ')</td>' +
             '<td>' + ca.unscoped.toLocaleString() + '</td>' +
             '<td>' + ca.unknownScope.toLocaleString() + '</td>' +
+            '<td>' + regionsHtml + '</td>' +
             '</tr>';
         }).join('');
         adoptBody = '<table class="data-table analytics-table">' +
-          '<thead><tr><th>Channel</th><th>Messages</th><th>Scoped</th><th>Unscoped</th><th>Unknown</th></tr></thead>' +
+          '<thead><tr><th>Channel</th><th>Messages</th><th>Scoped</th><th>Unscoped</th><th>Unknown</th><th>Regions Used</th></tr></thead>' +
           '<tbody>' + adoptRows + '</tbody>' +
           '</table>';
       } else if (adoption.length > 0) {
