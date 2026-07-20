@@ -3764,6 +3764,18 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Airtime needs the in-memory store's resolved-path index (db.go alone
+	// can't resolve full relay paths to distinct repeaters) — omitted
+	// entirely in DB-only mode rather than shown as a misleading zero.
+	if s.store != nil {
+		for i := range resp.Sessions {
+			if ms, ok := s.store.AirtimeForTransmissions(resp.Sessions[i].TransmissionIDs); ok {
+				v := ms.Milliseconds()
+				resp.Sessions[i].AirtimeMs = &v
+			}
+		}
+	}
+
 	s.wardrivingStatsMu.Lock()
 	if s.wardrivingStatsCache == nil {
 		s.wardrivingStatsCache = make(map[string]*WardrivingStatsResponse)

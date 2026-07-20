@@ -274,6 +274,17 @@ type WardrivingSession struct {
 	MessageCount    int     `json:"messageCount"`
 	EntryPointCount int     `json:"entryPointCount"` // distinct path[0] entry-point prefixes seen during the session
 	ObserverCount   int     `json:"observerCount"`   // distinct observers that heard any message in the session
+	// AirtimeMs is total LoRa Time-on-Air (milliseconds) consumed relaying
+	// this session's messages across the mesh: for each message,
+	// ToA(payload_bytes) × COUNT(DISTINCT resolved repeater in its path) —
+	// the same formula as the Overview tab's "Relay Airtime Share" (issue
+	// #1768), applied to this session's transmissions specifically. Set by
+	// the route handler (needs the in-memory store's resolved-path index,
+	// which db.go alone doesn't have); omitted entirely in DB-only mode.
+	AirtimeMs *int64 `json:"airtimeMs,omitempty"`
+	// TransmissionIDs is internal — the session's own transmission IDs,
+	// used by the route handler to compute AirtimeMs. Never serialized.
+	TransmissionIDs []int64 `json:"-"`
 }
 
 // WardrivingGPSShare is one sender who has explicitly shared their own

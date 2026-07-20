@@ -121,6 +121,36 @@ func (s *PacketStore) distinctRelayCount(tx *StoreTx) int {
 	return len(s.resolvedPubkeyReverse[tx.ID])
 }
 
+// AirtimeForTransmissions sums LoRa Time-on-Air × distinct-resolved-repeater
+// count (the same score formula as computeRelayAirtimeShare / issue #1768)
+// for an arbitrary, caller-supplied set of transmission IDs — e.g. one
+// wardriving session's messages, rather than every packet in a time window.
+// Returns ok=false when the resolved-path index is unavailable, so callers
+// can omit the field entirely rather than show a misleading zero.
+func (s *PacketStore) AirtimeForTransmissions(txIDs []int64) (total time.Duration, ok bool) {
+	if s == nil || !s.useResolvedPathIndex || len(txIDs) == 0 {
+		return 0, false
+	}
+	want := make(map[int]bool, len(txIDs))
+	for _, id := range txIDs {
+		want[int(id)] = true
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	preset := s.resolveLoRaPreset()
+	for id := range want {
+		tx := s.byTxID[id]
+		if tx == nil {
+			continue
+		}
+		payloadBytes := len(tx.RawHex) / 2
+		relays := s.distinctRelayCount(tx)
+		total += lora.TimeOnAir(payloadBytes, preset) * time.Duration(relays)
+	}
+	return total, true
+}
+
 // computeRelayAirtimeShare aggregates relay-airtime-share per payload_type.
 //
 // Returns:

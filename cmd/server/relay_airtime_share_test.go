@@ -234,6 +234,73 @@ func TestRelayAirtimeShare_ToAReplacesByteProxy(t *testing.T) {
 	}
 }
 
+// TestAirtimeForTransmissions covers the wardriving-session use case: an
+// arbitrary caller-supplied set of transmission IDs (not a time window),
+// summing ToA × distinct-relay-count per transmission.
+func TestAirtimeForTransmissions(t *testing.T) {
+	tx1 := makeRelayAirtimeTx(601, PayloadGRP_TXT, 20, 3, "wd001")
+	tx2 := makeRelayAirtimeTx(602, PayloadGRP_TXT, 20, 2, "wd002")
+	tx3 := makeRelayAirtimeTx(603, PayloadGRP_TXT, 20, 0, "wd003") // never relayed — contributes 0
+	store := newRelayAirtimeShareTestStore([]*StoreTx{tx1, tx2, tx3})
+	store.addToResolvedPubkeyIndex(tx1.ID, []string{"r1", "r2", "r3"})
+	store.addToResolvedPubkeyIndex(tx2.ID, []string{"r1", "r2"})
+
+	total, ok := store.AirtimeForTransmissions([]int64{int64(tx1.ID), int64(tx2.ID), int64(tx3.ID)})
+	if !ok {
+		t.Fatal("AirtimeForTransmissions ok=false, want true")
+	}
+
+	preset := store.resolveLoRaPreset()
+	toa := lora.TimeOnAir(20, preset)
+	want := toa*3 + toa*2 // tx3 contributes toa*0 = 0
+	if total != want {
+		t.Errorf("total = %v, want %v", total, want)
+	}
+
+	// A session that ONLY contains the never-relayed message must airtime 0,
+	// not be mistaken for "unknown".
+	onlyTx3, ok := store.AirtimeForTransmissions([]int64{int64(tx3.ID)})
+	if !ok || onlyTx3 != 0 {
+		t.Errorf("AirtimeForTransmissions(tx3 only) = %v, ok=%v, want 0, true", onlyTx3, ok)
+	}
+}
+
+// TestAirtimeForTransmissions_UnknownIDs confirms transmission IDs the
+// store doesn't know about (e.g. evicted, or a test seeding gap) are
+// skipped rather than causing an error — the index itself is still
+// available, so ok stays true with whatever total the KNOWN IDs contribute.
+func TestAirtimeForTransmissions_UnknownIDs(t *testing.T) {
+	store := newRelayAirtimeShareTestStore(nil)
+	total, ok := store.AirtimeForTransmissions([]int64{999})
+	if !ok {
+		t.Fatal("ok = false, want true (index available, just no matching transmission)")
+	}
+	if total != 0 {
+		t.Errorf("total = %v, want 0", total)
+	}
+}
+
+// TestAirtimeForTransmissions_IndexDisabled confirms ok=false (omit the
+// field) rather than a misleading zero when the resolved-path index isn't
+// available at all.
+func TestAirtimeForTransmissions_IndexDisabled(t *testing.T) {
+	store := newRelayAirtimeShareTestStore(nil)
+	store.useResolvedPathIndex = false
+	if _, ok := store.AirtimeForTransmissions([]int64{1}); ok {
+		t.Error("ok = true, want false when the resolved-path index is disabled")
+	}
+}
+
+// TestAirtimeForTransmissions_EmptyInput confirms an empty ID list (e.g. a
+// session that somehow has zero transmissions) returns ok=false rather
+// than a vacuous zero.
+func TestAirtimeForTransmissions_EmptyInput(t *testing.T) {
+	store := newRelayAirtimeShareTestStore(nil)
+	if _, ok := store.AirtimeForTransmissions(nil); ok {
+		t.Error("ok = true, want false for an empty transmission-ID list")
+	}
+}
+
 func zeroPad(n, width int) string {
 	s := ""
 	for i := 0; i < width; i++ {

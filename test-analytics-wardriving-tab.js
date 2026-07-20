@@ -138,9 +138,9 @@ function makeWardrivingResponse(overrides) {
     avgSnr: 5.5,
     avgRssi: -72.5,
     sessions: [
-      { sender: 'Alice', startTime: '2026-07-20T09:00:00Z', endTime: '2026-07-20T09:00:00Z', durationMinutes: 0, messageCount: 1, entryPointCount: 1, observerCount: 1 },
-      { sender: 'Bob', startTime: '2026-07-20T08:30:00Z', endTime: '2026-07-20T08:30:00Z', durationMinutes: 0, messageCount: 1, entryPointCount: 1, observerCount: 1 },
-      { sender: 'Alice', startTime: '2026-07-20T08:00:00Z', endTime: '2026-07-20T08:05:00Z', durationMinutes: 5, messageCount: 1, entryPointCount: 2, observerCount: 1 },
+      { sender: 'Alice', startTime: '2026-07-20T09:00:00Z', endTime: '2026-07-20T09:00:00Z', durationMinutes: 0, messageCount: 1, entryPointCount: 1, observerCount: 1, airtimeMs: 245 },
+      { sender: 'Bob', startTime: '2026-07-20T08:30:00Z', endTime: '2026-07-20T08:30:00Z', durationMinutes: 0, messageCount: 1, entryPointCount: 1, observerCount: 1, airtimeMs: null },
+      { sender: 'Alice', startTime: '2026-07-20T08:00:00Z', endTime: '2026-07-20T08:05:00Z', durationMinutes: 5, messageCount: 1, entryPointCount: 2, observerCount: 1, airtimeMs: 1830 },
     ],
     gpsShares: [
       { sender: 'SiriusNet-mobile', lat: 55.59743, lon: 13.00128, messageCount: 8, lastSeen: '2026-07-20T09:00:00Z' },
@@ -257,6 +257,18 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
     assert.ok(section.includes('Bob'), 'Bob session should render');
     assert.ok(section.includes('5m'), 'the 5-minute session should show its duration');
     assert.ok(el.innerHTML.includes('<div class="stat-value">3</div><div class="stat-label">Sessions</div>'), 'the Sessions stat card should show the session count (3)');
+  });
+
+  await testAsync('Sessions table formats airtime (ms/s) and shows a dash when unavailable', async () => {
+    const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse()));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderWardrivingTab(el);
+    const startIdx = el.innerHTML.indexOf('id="wardrivingSessions"');
+    const endIdx = el.innerHTML.indexOf('id="wardrivingEntryPoints"');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('245ms'), 'sub-second airtime should render in milliseconds');
+    assert.ok(section.includes('1.8s'), 'airtime over 1000ms should render in seconds');
+    assert.ok(section.includes('<td>—</td></tr>'), 'a session with no airtime data (DB-only mode) should show a dash, not blank/null');
   });
 
   await testAsync('Entry Points resolves unique_prefix repeaters and folds ambiguous into one bucket', async () => {

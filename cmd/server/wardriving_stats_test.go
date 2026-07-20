@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/lora"
 )
 
 // TestHandleWardrivingStats covers the three sections item-by-item:
@@ -281,6 +284,105 @@ func TestHandleWardrivingStats_Sessions(t *testing.T) {
 	// this is the core behavior under test.
 	if aliceA.MessageCount+aliceB.MessageCount != 3 {
 		t.Errorf("Alice's 3 messages should split into two sessions (2 + 1), got %d + %d", aliceA.MessageCount, aliceB.MessageCount)
+	}
+}
+
+// TestHandleWardrivingStats_SessionAirtime covers the route-handler wiring
+// for session airtime: handleWardrivingStats must call
+// PacketStore.AirtimeForTransmissions with exactly that session's
+// transmission IDs and attach the result as AirtimeMs. Uses a
+// fully-controlled fake store (same helper as relay_airtime_share_test.go)
+// swapped in for the real one, so the resolved-repeater counts are
+// deterministic instead of depending on the store's async path resolver.
+func TestHandleWardrivingStats_SessionAirtime(t *testing.T) {
+	srv, router := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+
+	now := time.Now().UTC()
+	insertTx := func(hash string, ts time.Time, rawHex string) int64 {
+		res, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,decoded_json) VALUES (?,?,?,1,5,'#wardriving',?)`,
+			rawHex, hash, ts.Format(time.RFC3339), `{"sender":"Alice","text":"Alice: MM:x"}`,
+		)
+		if err != nil {
+			t.Fatalf("insert tx %s: %v", hash, err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	// Two messages, one session (5 min apart, well under the 15min gap).
+	// 20-byte payload each; tx1 relayed by 3 distinct repeaters, tx2 by 2.
+	tx1 := insertTx("at1", now.Add(-10*time.Minute), strings.Repeat("ab", 20))
+	tx2 := insertTx("at2", now.Add(-5*time.Minute), strings.Repeat("ab", 20))
+
+	fakeStore := newRelayAirtimeShareTestStore([]*StoreTx{
+		makeRelayAirtimeTx(int(tx1), PayloadGRP_TXT, 20, 3, "at1"),
+		makeRelayAirtimeTx(int(tx2), PayloadGRP_TXT, 20, 2, "at2"),
+	})
+	fakeStore.addToResolvedPubkeyIndex(int(tx1), []string{"r1", "r2", "r3"})
+	fakeStore.addToResolvedPubkeyIndex(int(tx2), []string{"r1", "r2"})
+	srv.store = fakeStore
+
+	req := httptest.NewRequest("GET", "/api/analytics/wardriving?window=24h", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp WardrivingStatsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("Sessions = %+v, want 1 (both messages within the gap)", resp.Sessions)
+	}
+
+	preset := fakeStore.resolveLoRaPreset()
+	toa := lora.TimeOnAir(20, preset)
+	wantMs := (toa*3 + toa*2).Milliseconds()
+
+	sess := resp.Sessions[0]
+	if sess.AirtimeMs == nil {
+		t.Fatal("AirtimeMs is nil, want a populated value (store is available)")
+	}
+	if *sess.AirtimeMs != wantMs {
+		t.Errorf("AirtimeMs = %d, want %d", *sess.AirtimeMs, wantMs)
+	}
+}
+
+// TestHandleWardrivingStats_SessionAirtime_DBOnlyMode confirms AirtimeMs is
+// omitted (nil), not a misleading zero, when the in-memory store isn't
+// available at all.
+func TestHandleWardrivingStats_SessionAirtime_DBOnlyMode(t *testing.T) {
+	srv, router := setupTestServer(t)
+	srv.store = nil
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+	if _, err := srv.db.conn.Exec(
+		`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,decoded_json) VALUES (?,?,?,1,5,'#wardriving',?)`,
+		"aa", "dbonly1", time.Now().UTC().Format(time.RFC3339), `{"sender":"Alice","text":"Alice: MM:x"}`,
+	); err != nil {
+		t.Fatalf("insert tx: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/analytics/wardriving?window=24h", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp WardrivingStatsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("Sessions = %+v, want 1", resp.Sessions)
+	}
+	if resp.Sessions[0].AirtimeMs != nil {
+		t.Errorf("AirtimeMs = %v, want nil in DB-only mode", *resp.Sessions[0].AirtimeMs)
 	}
 }
 

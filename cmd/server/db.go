@@ -3511,6 +3511,7 @@ func (db *DB) buildWardrivingSessions(channel, since string) ([]WardrivingSessio
 		}
 		cur.EndTime = tx.ts.UTC().Format(time.RFC3339)
 		cur.MessageCount++
+		cur.TransmissionIDs = append(cur.TransmissionIDs, tx.id)
 		for p := range txPrefixes[tx.id] {
 			curPrefixes[p] = true
 		}

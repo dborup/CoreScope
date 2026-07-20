@@ -5515,6 +5515,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
     // Sessions — each sender's messages grouped into runs (backend splits
     // on any gap over 15 minutes). Pre-sorted most-recent-first by the API.
+    // Airtime is LoRa Time-on-Air × distinct relaying repeaters, summed
+    // across the session's messages — same formula as the Overview tab's
+    // "Relay Airtime Share". Needs the in-memory store's resolved-path
+    // index; omitted (shows "—") in DB-only mode.
+    function formatAirtimeMs(ms) {
+      if (ms == null) return '—';
+      if (ms < 1000) return Math.round(ms) + 'ms';
+      return (ms / 1000).toFixed(1) + 's';
+    }
+
     function sessionsHtml(sessions) {
       if (!sessions || sessions.length === 0) {
         return '<p class="text-muted" style="font-size:0.85em">No wardriving sessions in this window.</p>';
@@ -5525,10 +5535,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<td>' + formatSessionDuration(s.durationMinutes) + '</td>' +
           '<td>' + s.messageCount.toLocaleString() + '</td>' +
           '<td>' + s.entryPointCount.toLocaleString() + '</td>' +
-          '<td>' + s.observerCount.toLocaleString() + '</td></tr>';
+          '<td>' + s.observerCount.toLocaleString() + '</td>' +
+          '<td>' + formatAirtimeMs(s.airtimeMs) + '</td></tr>';
       }).join('');
-      return '<table class="data-table analytics-table" data-wd-cols="6">' +
-        '<thead><tr><th>Sender</th><th>Started</th><th>Duration</th><th>Messages</th><th>Entry Points</th><th>Observers</th></tr></thead>' +
+      return '<table class="data-table analytics-table" data-wd-cols="7">' +
+        '<thead><tr><th>Sender</th><th>Started</th><th>Duration</th><th>Messages</th><th>Entry Points</th><th>Observers</th><th>Airtime</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>';
     }
