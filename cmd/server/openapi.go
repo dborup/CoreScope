@@ -107,6 +107,14 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "window", Description: "Time window: 1h, 24h (default), or 7d", Type: "string"},
 				{Name: "channel", Description: "Channel name to analyze (default #wardriving)", Type: "string"},
 			}},
+		"GET /api/analytics/wardriving/sender-messages": {Summary: "Wardriving sender message drill-down", Description: "Individual #wardriving messages from one sender (drill-down behind Top Senders/Sessions): each message's entry-point path (path[0] first, resolve names via /api/resolve-hops), per-observer SNR/RSSI, and payload standard/anomaly classification. Pass since+until (RFC3339) to scope to one session's exact range; otherwise window covers the sender's whole activity in that period. Capped at 200 messages, most-recent-first. Not cached.", Tag: "analytics",
+			QueryParams: []paramMeta{
+				{Name: "sender", Description: "Sender display name to look up (required, exact match)", Type: "string"},
+				{Name: "channel", Description: "Channel name (default #wardriving)", Type: "string"},
+				{Name: "window", Description: "Time window when since/until aren't given: 1h, 24h (default), or 7d", Type: "string"},
+				{Name: "since", Description: "RFC3339 start time — overrides window when paired with until", Type: "string"},
+				{Name: "until", Description: "RFC3339 end time — overrides window when paired with since", Type: "string"},
+			}},
 
 		// Channels
 		"GET /api/channels":                 {Summary: "List channels", Description: "Returns known mesh channels with message counts.", Tag: "channels"},

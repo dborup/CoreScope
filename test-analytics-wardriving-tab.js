@@ -223,6 +223,28 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
     assert.ok(el.innerHTML.includes('66.7%'), 'Alice row should show 66.7% of total messages');
   });
 
+  await testAsync('Top Senders names are clickable drill-down triggers (whole-window, no since/until)', async () => {
+    const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse()));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderWardrivingTab(el);
+    const startIdx = el.innerHTML.indexOf('id="wardrivingSenders"');
+    const endIdx = el.innerHTML.indexOf('id="wardrivingSessions"');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('data-wd-sender="Alice"'), 'Alice should be a drill-down trigger');
+    assert.ok(!section.includes('data-wd-since'), 'Top Senders triggers should not scope to a since/until range');
+  });
+
+  await testAsync('Sessions sender names are clickable drill-down triggers scoped to that session\'s exact range', async () => {
+    const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse()));
+    const el = fakeEl();
+    await ctx.window._analyticsRenderWardrivingTab(el);
+    const startIdx = el.innerHTML.indexOf('id="wardrivingSessions"');
+    const endIdx = el.innerHTML.indexOf('id="wardrivingEntryPoints"');
+    const section = el.innerHTML.slice(startIdx, endIdx);
+    assert.ok(section.includes('data-wd-since="2026-07-20T08:00:00Z"'), 'the 5-minute Alice session should carry its own startTime as data-wd-since');
+    assert.ok(section.includes('data-wd-until="2026-07-20T08:05:00Z"'), 'the 5-minute Alice session should carry its own endTime as data-wd-until');
+  });
+
   await testAsync('Sessions table lists each run with duration, entry points, and observers', async () => {
     const ctx = makeAnalyticsSandbox(makeApiStub(makeWardrivingResponse()));
     const el = fakeEl();
@@ -230,8 +252,10 @@ function makeApiStub(wardrivingResp, resolveHopsResp) {
     const startIdx = el.innerHTML.indexOf('id="wardrivingSessions"');
     const endIdx = el.innerHTML.indexOf('id="wardrivingEntryPoints"');
     const section = el.innerHTML.slice(startIdx, endIdx);
-    // 3 sessions in the fixture: two Alice rows, one Bob row.
-    assert.strictEqual((section.match(/Alice/g) || []).length, 2, 'both Alice sessions should render as separate rows');
+    // 3 sessions in the fixture: two Alice rows, one Bob row. Sender names
+    // render both as visible text and as a data-wd-sender attribute value,
+    // so match on the visible-text form specifically.
+    assert.strictEqual((section.match(/>Alice</g) || []).length, 2, 'both Alice sessions should render as separate rows');
     assert.ok(section.includes('Bob'), 'Bob session should render');
     assert.ok(section.includes('5m'), 'the 5-minute session should show its duration');
     assert.ok(el.innerHTML.includes('<div class="stat-value">3</div><div class="stat-label">Sessions</div>'), 'the Sessions stat card should show the session count (3)');

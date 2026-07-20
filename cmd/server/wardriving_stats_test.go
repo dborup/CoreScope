@@ -410,3 +410,125 @@ func TestHandleWardrivingStats_EmptyChannel(t *testing.T) {
 		t.Errorf("StandardPayloadCount = %d, want 0", resp.StandardPayloadCount)
 	}
 }
+
+// TestHandleWardrivingSenderMessages covers the drill-down endpoint: one
+// sender's individual messages, most-recent-first, with resolved path,
+// per-observer signal, and payload classification — and that another
+// sender's messages never leak in.
+func TestHandleWardrivingSenderMessages(t *testing.T) {
+	srv, router := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+	if _, err := srv.db.conn.Exec(`DELETE FROM observations`); err != nil {
+		t.Fatalf("clear observations: %v", err)
+	}
+
+	insertTx := func(hash, sender, mmPayload string, tsOffset time.Duration) int64 {
+		ts := time.Now().UTC().Add(tsOffset).Format(time.RFC3339)
+		text := sender + ": " + mmPayload
+		res, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,decoded_json) VALUES (?,?,?,1,5,'#wardriving',?)`,
+			"aa", hash, ts, `{"sender":"`+sender+`","text":"`+text+`"}`,
+		)
+		if err != nil {
+			t.Fatalf("insert tx %s: %v", hash, err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	insertObserver := func(id, name string) int64 {
+		res, err := srv.db.conn.Exec(`INSERT INTO observers (id, name) VALUES (?,?)`, id, name)
+		if err != nil {
+			t.Fatalf("insert observer %s: %v", id, err)
+		}
+		rowid, _ := res.LastInsertId()
+		return rowid
+	}
+	insertObs := func(txID, observerIdx int64, snr, rssi float64, pathJSON string) {
+		if _, err := srv.db.conn.Exec(
+			`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?,?,?,?,?,?)`,
+			txID, observerIdx, snr, rssi, pathJSON, time.Now().Unix(),
+		); err != nil {
+			t.Fatalf("insert observation: %v", err)
+		}
+	}
+
+	standardToken := base64.RawURLEncoding.EncodeToString([]byte{1, 2, 3, 4, 5, 6, 7})
+	longPayload := base64.RawURLEncoding.EncodeToString(make([]byte, 12))
+
+	obs1 := insertObserver("wsmObsOne", "ObsOne")
+	obs2 := insertObserver("wsmObsTwo", "ObsTwo")
+
+	// Alice's older message: standard payload, heard by ObsOne only, short path.
+	txOld := insertTx("aliceOld", "Alice", "MM:"+standardToken, -2*time.Hour)
+	insertObs(txOld, obs1, 3.0, -85, `["AAAA"]`)
+
+	// Alice's newer message: non-standard payload, heard by both observers;
+	// ObsTwo's observation carries the longer (more complete) path, which
+	// GetWardrivingSenderMessages should prefer.
+	txNew := insertTx("aliceNew", "Alice", "MM:"+longPayload, -30*time.Minute)
+	insertObs(txNew, obs1, 5.0, -80, `["BBBB"]`)
+	insertObs(txNew, obs2, 7.0, -75, `["BBBB","CCCC"]`)
+
+	// Bob's message must never appear in Alice's results.
+	insertTx("bobMsg", "Bob", "MM:"+standardToken, -1*time.Hour)
+
+	req := httptest.NewRequest("GET", "/api/analytics/wardriving/sender-messages?sender=Alice&window=24h", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp WardrivingSenderMessagesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+
+	if resp.Sender != "Alice" {
+		t.Errorf("Sender = %q, want Alice", resp.Sender)
+	}
+	if len(resp.Messages) != 2 {
+		t.Fatalf("Messages = %+v, want 2 (Bob's must not leak in)", resp.Messages)
+	}
+
+	// Most-recent-first: txNew before txOld.
+	newest, oldest := resp.Messages[0], resp.Messages[1]
+	if newest.TransmissionID != txNew {
+		t.Errorf("Messages[0].TransmissionID = %d, want %d (newest first)", newest.TransmissionID, txNew)
+	}
+	if len(newest.PathPrefixes) != 2 || newest.PathPrefixes[0] != "BBBB" || newest.PathPrefixes[1] != "CCCC" {
+		t.Errorf("newest.PathPrefixes = %v, want [BBBB CCCC] (the longer/more complete path)", newest.PathPrefixes)
+	}
+	if len(newest.Observations) != 2 {
+		t.Errorf("newest.Observations = %+v, want 2 (ObsOne + ObsTwo)", newest.Observations)
+	}
+	if newest.PayloadStandard == nil || *newest.PayloadStandard {
+		t.Errorf("newest.PayloadStandard = %v, want false (12-byte non-standard payload)", newest.PayloadStandard)
+	}
+	if newest.PayloadBytes == nil || *newest.PayloadBytes != 12 {
+		t.Errorf("newest.PayloadBytes = %v, want 12", newest.PayloadBytes)
+	}
+
+	if oldest.TransmissionID != txOld {
+		t.Errorf("Messages[1].TransmissionID = %d, want %d (oldest last)", oldest.TransmissionID, txOld)
+	}
+	if len(oldest.PathPrefixes) != 1 || oldest.PathPrefixes[0] != "AAAA" {
+		t.Errorf("oldest.PathPrefixes = %v, want [AAAA]", oldest.PathPrefixes)
+	}
+	if oldest.PayloadStandard == nil || !*oldest.PayloadStandard {
+		t.Errorf("oldest.PayloadStandard = %v, want true (standard 7-byte token)", oldest.PayloadStandard)
+	}
+}
+
+// TestHandleWardrivingSenderMessages_MissingSender confirms the required
+// sender param is enforced.
+func TestHandleWardrivingSenderMessages_MissingSender(t *testing.T) {
+	_, router := setupTestServer(t)
+	req := httptest.NewRequest("GET", "/api/analytics/wardriving/sender-messages?window=24h", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 400 {
+		t.Fatalf("status=%d, want 400 when sender is missing", w.Code)
+	}
+}

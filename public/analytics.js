@@ -5502,6 +5502,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       return h + 'h ' + m + 'm';
     }
 
+    // Sender name → clickable trigger for the per-message drill-down (see
+    // attachSenderDrilldown). data-wd-since/until scope the drill-down to
+    // an exact range (e.g. one session); omitted, it covers the whole
+    // window for that sender.
+    function senderTriggerHtml(sender, since, until) {
+      var attrs = 'data-wd-sender="' + esc(sender) + '"';
+      if (since) attrs += ' data-wd-since="' + esc(since) + '"';
+      if (until) attrs += ' data-wd-until="' + esc(until) + '"';
+      return '<button type="button" class="btn-link" ' + attrs + ' aria-expanded="false">' + esc(sender) + '</button>';
+    }
+
     // Sessions — each sender's messages grouped into runs (backend splits
     // on any gap over 15 minutes). Pre-sorted most-recent-first by the API.
     function sessionsHtml(sessions) {
@@ -5509,14 +5520,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         return '<p class="text-muted" style="font-size:0.85em">No wardriving sessions in this window.</p>';
       }
       var rows = sessions.map(function(s) {
-        return '<tr><td>' + esc(s.sender) + '</td>' +
+        return '<tr><td>' + senderTriggerHtml(s.sender, s.startTime, s.endTime) + '</td>' +
           '<td>' + (typeof timeAgo === 'function' ? timeAgo(s.startTime) : s.startTime) + '</td>' +
           '<td>' + formatSessionDuration(s.durationMinutes) + '</td>' +
           '<td>' + s.messageCount.toLocaleString() + '</td>' +
           '<td>' + s.entryPointCount.toLocaleString() + '</td>' +
           '<td>' + s.observerCount.toLocaleString() + '</td></tr>';
       }).join('');
-      return '<table class="data-table analytics-table">' +
+      return '<table class="data-table analytics-table" data-wd-cols="6">' +
         '<thead><tr><th>Sender</th><th>Started</th><th>Duration</th><th>Messages</th><th>Entry Points</th><th>Observers</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>';
@@ -5527,9 +5538,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         return '<p class="text-muted" style="font-size:0.85em">No wardriving messages in this window.</p>';
       }
       var rows = senders.map(function(s) {
-        return '<tr><td>' + esc(s.sender) + '</td><td>' + s.count.toLocaleString() + '</td><td>' + pct(s.count, totalMessages) + '</td></tr>';
+        return '<tr><td>' + senderTriggerHtml(s.sender) + '</td><td>' + s.count.toLocaleString() + '</td><td>' + pct(s.count, totalMessages) + '</td></tr>';
       }).join('');
-      return '<table class="data-table analytics-table">' +
+      return '<table class="data-table analytics-table" data-wd-cols="3">' +
         '<thead><tr><th>Sender</th><th>Messages</th><th>% of Total</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>';
@@ -5636,6 +5647,107 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       });
     }
 
+    // Per-message drill-down for one sender (whole window, or one exact
+    // since/until range when opened from a Sessions row). Resolves every
+    // distinct path[0..] prefix across the fetched messages in a single
+    // /resolve-hops call — same unique_prefix-only discipline as the
+    // aggregate Entry Points table (a non-unique_prefix match is shown as
+    // the raw hash, not guessed).
+    async function buildSenderDrilldownHtml(sender, since, until) {
+      try {
+        var qs = 'sender=' + encodeURIComponent(sender);
+        if (since && until) {
+          qs += '&since=' + encodeURIComponent(since) + '&until=' + encodeURIComponent(until);
+        } else {
+          qs += '&window=' + encodeURIComponent(selectedWindow);
+        }
+        var data = await api('/analytics/wardriving/sender-messages?' + qs, { ttl: 10000 });
+        var messages = data.messages || [];
+        if (messages.length === 0) {
+          return '<p class="text-muted" style="font-size:0.85em;margin:8px 0">No individual messages found for this sender in range.</p>';
+        }
+
+        var allPrefixes = [];
+        messages.forEach(function(m) {
+          (m.pathPrefixes || []).forEach(function(p) { if (allPrefixes.indexOf(p) === -1) allPrefixes.push(p); });
+        });
+        var resolved = {};
+        if (allPrefixes.length > 0) {
+          try {
+            var hopsResp = await api('/resolve-hops?hops=' + allPrefixes.join(','), { ttl: CLIENT_TTL.nodeDetail });
+            resolved = (hopsResp && hopsResp.resolved) || {};
+          } catch (e) { /* fall back to raw prefixes below */ }
+        }
+        function resolvePrefix(p) {
+          var r = resolved[p];
+          if (r && r.confidence === 'unique_prefix') return esc(r.name);
+          return '<span class="text-muted">' + esc(p) + '</span>';
+        }
+
+        var rows = messages.map(function(m) {
+          var pathStr = (m.pathPrefixes && m.pathPrefixes.length > 0)
+            ? m.pathPrefixes.map(resolvePrefix).join(' → ')
+            : '<span class="text-muted">—</span>';
+          var obsStr = (m.observations && m.observations.length > 0)
+            ? m.observations.map(function(o) {
+                return esc(o.observerName) + ' (' + o.snr.toFixed(1) + 'dB / ' + o.rssi.toFixed(0) + 'dBm)';
+              }).join(', ')
+            : '<span class="text-muted">—</span>';
+          var payloadStr;
+          if (m.payloadStandard == null) {
+            payloadStr = '<span class="text-muted">n/a</span>';
+          } else if (m.payloadStandard) {
+            payloadStr = 'standard';
+          } else {
+            payloadStr = '<span style="color:var(--warning, #f39c12)">anomaly (' + (m.payloadBytes != null ? m.payloadBytes + 'B' : 'undecodable') + ')</span>';
+          }
+          return '<tr><td>' + (typeof timeAgo === 'function' ? timeAgo(m.timestamp) : m.timestamp) + '</td>' +
+            '<td>' + pathStr + '</td>' +
+            '<td>' + obsStr + '</td>' +
+            '<td>' + payloadStr + '</td></tr>';
+        }).join('');
+        return '<table class="data-table analytics-table" style="margin:4px 0 12px;font-size:0.85em">' +
+          '<thead><tr><th>Time</th><th>Path (path[0] first)</th><th>Heard By (SNR / RSSI)</th><th>Payload</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+          '</table>';
+      } catch (err) {
+        return '<p style="color:var(--status-red);font-size:0.85em">Failed to load messages: ' + esc(String(err)) + '</p>';
+      }
+    }
+
+    // Clicking a sender name toggles an inline expansion row directly
+    // below it with that sender's individual messages. Only one expansion
+    // stays open per table at a time, to keep the tab from growing
+    // unbounded if a user clicks through several senders.
+    function attachSenderDrilldown() {
+      el.querySelectorAll('[data-wd-sender]').forEach(function(btn) {
+        btn.addEventListener('click', async function() {
+          var tr = btn.closest('tr');
+          if (!tr) return;
+          var next = tr.nextElementSibling;
+          if (next && next.hasAttribute('data-wd-expansion')) {
+            next.remove();
+            btn.setAttribute('aria-expanded', 'false');
+            return;
+          }
+          var table = tr.closest('table');
+          if (table) {
+            table.querySelectorAll('[data-wd-expansion]').forEach(function(r) { r.remove(); });
+            table.querySelectorAll('[data-wd-sender]').forEach(function(b) { b.setAttribute('aria-expanded', 'false'); });
+          }
+          var cols = (table && table.dataset.wdCols) || '1';
+          var expansionRow = document.createElement('tr');
+          expansionRow.setAttribute('data-wd-expansion', '1');
+          expansionRow.innerHTML = '<td colspan="' + cols + '"><div class="text-muted" style="padding:8px">Loading messages…</div></td>';
+          tr.parentNode.insertBefore(expansionRow, tr.nextSibling);
+          btn.setAttribute('aria-expanded', 'true');
+          var html = await buildSenderDrilldownHtml(btn.dataset.wdSender, btn.dataset.wdSince, btn.dataset.wdUntil);
+          var cell = expansionRow.querySelector('td');
+          if (cell) cell.innerHTML = html;
+        });
+      });
+    }
+
     async function load(w) {
       var body;
       try {
@@ -5681,6 +5793,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         '</div>' +
         body;
       attachWindowButtons();
+      attachSenderDrilldown();
     }
 
     await load(selectedWindow);

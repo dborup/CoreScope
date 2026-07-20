@@ -3628,6 +3628,149 @@ func (db *DB) detectWardrivingAnomalies(channel, since string) (int, []Wardrivin
 	return standardCount, anomalies, nil
 }
 
+// wardrivingSenderMessagesLimit caps how many individual messages
+// GetWardrivingSenderMessages returns per request — this is a drill-down
+// view (one sender, optionally one session), not a bulk export.
+const wardrivingSenderMessagesLimit = 200
+
+// GetWardrivingSenderMessages returns one sender's individual #wardriving
+// messages in [since, until], most-recent-first: each message's entry-point
+// path (path[0] first, same convention as WardrivingEntryPrefix), the
+// observers that heard it with their own SNR/RSSI, and its payload
+// standard/anomaly classification (see detectWardrivingAnomalies). This is
+// the per-message detail behind the aggregate Sessions/Entry Points/
+// Coverage views — used when a user drills into one sender or one session.
+func (db *DB) GetWardrivingSenderMessages(sender, channel, since, until string) (*WardrivingSenderMessagesResponse, error) {
+	resp := &WardrivingSenderMessagesResponse{
+		Sender: sender, Channel: channel, Since: since, Until: until,
+		Messages: make([]WardrivingMessage, 0),
+	}
+
+	txRows, err := db.conn.Query(`
+		SELECT id, first_seen, json_extract(decoded_json, '$.text')
+		FROM transmissions
+		WHERE channel_hash = ? AND payload_type = 5 AND first_seen >= ? AND first_seen <= ?
+			AND json_extract(decoded_json, '$.sender') = ?
+		ORDER BY first_seen DESC
+		LIMIT ?
+	`, channel, since, until, sender, wardrivingSenderMessagesLimit)
+	if err != nil {
+		return nil, fmt.Errorf("wardriving sender messages query: %w", err)
+	}
+	type txRow struct {
+		id   int64
+		ts   string
+		text sql.NullString
+	}
+	var txs []txRow
+	for txRows.Next() {
+		var t txRow
+		if err := txRows.Scan(&t.id, &t.ts, &t.text); err != nil {
+			continue
+		}
+		txs = append(txs, t)
+	}
+	txRows.Close()
+	if err := txRows.Err(); err != nil {
+		return nil, fmt.Errorf("wardriving sender messages iteration: %w", err)
+	}
+	if len(txs) == 0 {
+		return resp, nil
+	}
+
+	placeholders := make([]string, len(txs))
+	args := make([]interface{}, len(txs))
+	txIndex := make(map[int64]int, len(txs))
+	for i, t := range txs {
+		placeholders[i] = "?"
+		args[i] = t.id
+		txIndex[t.id] = i
+	}
+
+	var obsQuery string
+	if db.isV3 {
+		obsQuery = fmt.Sprintf(`
+			SELECT o.transmission_id, obs.name, o.snr, o.rssi, o.path_json
+			FROM observations o
+			JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE o.transmission_id IN (%s)`, strings.Join(placeholders, ","))
+	} else {
+		obsQuery = fmt.Sprintf(`
+			SELECT o.transmission_id, obs.name, o.snr, o.rssi, o.path_json
+			FROM observations o
+			JOIN observers obs ON obs.id = o.observer_id
+			WHERE o.transmission_id IN (%s)`, strings.Join(placeholders, ","))
+	}
+	obsRows, err := db.conn.Query(obsQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("wardriving sender messages observations query: %w", err)
+	}
+
+	type msgAgg struct {
+		observations []WardrivingMessageObservation
+		pathPrefixes []string
+	}
+	aggs := make([]*msgAgg, len(txs))
+	for i := range aggs {
+		aggs[i] = &msgAgg{observations: make([]WardrivingMessageObservation, 0), pathPrefixes: make([]string, 0)}
+	}
+
+	for obsRows.Next() {
+		var txID int64
+		var observerName sql.NullString
+		var snr, rssi sql.NullFloat64
+		var pathJSON sql.NullString
+		if err := obsRows.Scan(&txID, &observerName, &snr, &rssi, &pathJSON); err != nil {
+			continue
+		}
+		idx, ok := txIndex[txID]
+		if !ok {
+			continue
+		}
+		agg := aggs[idx]
+		agg.observations = append(agg.observations, WardrivingMessageObservation{
+			ObserverName: observerName.String,
+			SNR:          snr.Float64,
+			RSSI:         rssi.Float64,
+		})
+		if pathJSON.Valid && pathJSON.String != "" {
+			var path []string
+			if json.Unmarshal([]byte(pathJSON.String), &path) == nil && len(path) > len(agg.pathPrefixes) {
+				agg.pathPrefixes = path
+			}
+		}
+	}
+	obsRows.Close()
+	if err := obsRows.Err(); err != nil {
+		return nil, fmt.Errorf("wardriving sender messages observations iteration: %w", err)
+	}
+
+	for i, t := range txs {
+		msg := WardrivingMessage{
+			TransmissionID: t.id,
+			Timestamp:      t.ts,
+			PathPrefixes:   aggs[i].pathPrefixes,
+			Observations:   aggs[i].observations,
+		}
+		if t.text.Valid {
+			prefix := sender + ": MM:"
+			if strings.HasPrefix(t.text.String, prefix) {
+				payload := strings.TrimPrefix(t.text.String, prefix)
+				decoded, decErr := base64.RawURLEncoding.DecodeString(payload)
+				standard := decErr == nil && len(decoded) == wardrivingStandardPayloadBytes
+				msg.PayloadStandard = &standard
+				if decErr == nil {
+					n := len(decoded)
+					msg.PayloadBytes = &n
+				}
+			}
+		}
+		resp.Messages = append(resp.Messages, msg)
+	}
+
+	return resp, nil
+}
+
 // GetMatchedRegionNames returns the set of scope_name values that have ever
 // matched at least one transmission still in retention (NULL and empty-string
 // "unknown" rows are excluded). Used to diff against the operator's

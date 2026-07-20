@@ -237,6 +237,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/stats", s.handleStats).Methods("GET")
 	r.HandleFunc("/api/scope-stats", s.handleScopeStats).Methods("GET")
 	r.HandleFunc("/api/analytics/wardriving", s.handleWardrivingStats).Methods("GET")
+	r.HandleFunc("/api/analytics/wardriving/sender-messages", s.handleWardrivingSenderMessages).Methods("GET")
 	r.HandleFunc("/api/perf", s.handlePerf).Methods("GET")
 	r.HandleFunc("/api/perf/io", s.handlePerfIO).Methods("GET")
 	r.HandleFunc("/api/perf/sqlite", s.handlePerfSqlite).Methods("GET")
@@ -3772,6 +3773,54 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 	s.wardrivingStatsCachedAt[cacheKey] = time.Now()
 	s.wardrivingStatsMu.Unlock()
 
+	writeJSON(w, resp)
+}
+
+// handleWardrivingSenderMessages is the drill-down behind the Wardriving
+// tab's Top Senders/Sessions tables: one sender's individual messages, each
+// with its entry-point path and per-observer signal. Pass since+until to
+// scope to one session's exact time range (e.g. from a Sessions row);
+// otherwise window (default 24h, matching /api/analytics/wardriving)
+// covers the sender's whole activity in that period. Not cached — this is
+// an on-demand detail view, not a polled dashboard endpoint.
+func (s *Server) handleWardrivingSenderMessages(w http.ResponseWriter, r *http.Request) {
+	sender := strings.TrimSpace(r.URL.Query().Get("sender"))
+	if sender == "" {
+		writeError(w, 400, "sender is required")
+		return
+	}
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = "#wardriving"
+	}
+	since := r.URL.Query().Get("since")
+	until := r.URL.Query().Get("until")
+	if since == "" || until == "" {
+		window := r.URL.Query().Get("window")
+		if window == "" {
+			window = "24h"
+		}
+		var dur time.Duration
+		switch window {
+		case "1h":
+			dur = time.Hour
+		case "7d":
+			dur = 7 * 24 * time.Hour
+		case "24h":
+			dur = 24 * time.Hour
+		default:
+			writeError(w, 400, "window must be 1h, 24h, or 7d")
+			return
+		}
+		since = time.Now().Add(-dur).UTC().Format(time.RFC3339)
+		until = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	resp, err := s.db.GetWardrivingSenderMessages(sender, channel, since, until)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
 	writeJSON(w, resp)
 }
 

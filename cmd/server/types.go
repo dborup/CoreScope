@@ -309,6 +309,37 @@ type WardrivingStatsResponse struct {
 	Anomalies            []WardrivingAnomaly          `json:"anomalies"`
 }
 
+// WardrivingMessageObservation is one observer's reception of a single
+// wardriving message — the per-message counterpart to
+// WardrivingObserverCoverage's aggregate-across-all-messages view.
+type WardrivingMessageObservation struct {
+	ObserverName string  `json:"observerName"`
+	SNR          float64 `json:"snr"`
+	RSSI         float64 `json:"rssi"`
+}
+
+// WardrivingMessage is one individual #wardriving transmission from a
+// specific sender — the drill-down behind the aggregate Sessions/Entry
+// Points/Coverage views. PathPrefixes[0] is the entry-point repeater (same
+// path[0] convention as WardrivingEntryPrefix); the frontend resolves
+// names via /api/resolve-hops, same as the aggregate Entry Points table.
+type WardrivingMessage struct {
+	TransmissionID  int64                          `json:"transmissionId"`
+	Timestamp       string                         `json:"timestamp"`
+	PathPrefixes    []string                       `json:"pathPrefixes"`
+	Observations    []WardrivingMessageObservation `json:"observations"`
+	PayloadStandard *bool                          `json:"payloadStandard,omitempty"` // nil if this wasn't a recognizable "<sender>: MM:" wardriving ping
+	PayloadBytes    *int                           `json:"payloadBytes,omitempty"`
+}
+
+type WardrivingSenderMessagesResponse struct {
+	Sender   string              `json:"sender"`
+	Channel  string              `json:"channel"`
+	Since    string              `json:"since"`
+	Until    string              `json:"until"`
+	Messages []WardrivingMessage `json:"messages"`
+}
+
 // ─── Health ────────────────────────────────────────────────────────────────────
 
 type MemoryStats struct {
