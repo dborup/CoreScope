@@ -3031,6 +3031,20 @@ var iataCoords = map[string]IataCoord{
 	"ICN": {Lat: 37.4602, Lon: 126.4407},
 	"SYD": {Lat: -33.9461, Lon: 151.1772},
 	"MEL": {Lat: -37.669, Lon: 144.841},
+	// Denmark / southern Sweden — added for wardriving observer coverage
+	// (issue class: same as #1786, iataCoords lacked entries for the
+	// airport codes this mesh's observers actually use).
+	"CPH": {Lat: 55.618, Lon: 12.656},   // Copenhagen (Kastrup)
+	"AAL": {Lat: 57.0928, Lon: 9.8492},  // Aalborg
+	"AAR": {Lat: 56.3, Lon: 10.619},     // Aarhus (Tirstrup)
+	"BLL": {Lat: 55.7403, Lon: 9.1518},  // Billund
+	"ODE": {Lat: 55.4767, Lon: 10.3311}, // Odense
+	"RNN": {Lat: 55.0633, Lon: 14.7596}, // Bornholm (Rønne)
+	"RKE": {Lat: 55.5857, Lon: 12.1315}, // Roskilde
+	"SGD": {Lat: 54.9642, Lon: 9.7924},  // Sønderborg
+	"MMX": {Lat: 55.5363, Lon: 13.3762}, // Malmö
+	"HAD": {Lat: 56.6911, Lon: 12.8202}, // Halmstad
+	"VXO": {Lat: 56.9294, Lon: 14.7422}, // Växjö
 }
 
 func (s *Server) handleIATACoords(w http.ResponseWriter, r *http.Request) {
