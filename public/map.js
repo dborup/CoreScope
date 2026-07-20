@@ -605,7 +605,7 @@
         try {
           const parsed = JSON.parse(gpsTrailJson);
           if (parsed && Array.isArray(parsed.points)) {
-            drawGPSTrail(parsed.points, { sender: parsed.sender });
+            drawGPSTrail(parsed.points, { sender: parsed.sender, kind: parsed.kind });
           }
         } catch {}
         return;
@@ -871,11 +871,15 @@
     }
   }
 
-  // Wardriving GPS trail — draws a polyline through a sequence of raw
-  // lat/lon points a sender explicitly shared during one session (see
-  // "View path on map" in the Wardriving analytics tab). Unlike
-  // drawPacketRoute, these are NOT mesh hop/repeater positions, so no node
-  // resolution is needed — just plot the points in order.
+  // Wardriving trail — draws a polyline through a sequence of points in
+  // chronological order (see "View path on map" / "View approximate path
+  // via entry points" in the Wardriving analytics tab). Two flavors, both
+  // pre-resolved to plain lat/lon by the caller so no node resolution is
+  // needed here:
+  //  - opts.kind 'gps' (default): a sender's own literal shared positions.
+  //  - opts.kind 'entry-point': for senders who don't share GPS — each
+  //    point is the KNOWN position of the entry-point repeater that first
+  //    relayed one of their messages, not the sender's real position.
   function drawGPSTrail(points, opts) {
     opts = opts || {};
     if (markerLayer) map.removeLayer(markerLayer);
@@ -913,7 +917,7 @@
       const marker = L.circleMarker([p.lat, p.lon], {
         radius: isFirst || isLast ? 7 : 5, color: color, fillColor: color, fillOpacity: 0.9, weight: 2
       }).addTo(routeLayer);
-      const label = (isFirst ? 'Start' : isLast ? 'End' : 'Point ' + (i + 1)) +
+      const label = safeEsc(p.label || (isFirst ? 'Start' : isLast ? 'End' : 'Point ' + (i + 1))) +
         (p.timestamp ? ' — ' + safeEsc(new Date(p.timestamp).toLocaleString()) : '');
       marker.bindPopup(label);
     });
@@ -929,7 +933,9 @@
       const label = document.createElement('div');
       label.className = 'mc-gps-trail-label';
       label.style.cssText = 'position:absolute;top:10px;left:50px;z-index:1000;background:var(--input-bg,#1e293b);color:var(--text,#e2e8f0);padding:4px 10px;border-radius:4px;font-size:12px';
-      label.textContent = opts.sender + ' — ' + valid.length + ' shared position' + (valid.length === 1 ? '' : 's');
+      label.textContent = opts.kind === 'entry-point'
+        ? opts.sender + ' — approximate path via ' + valid.length + ' entry-point repeater' + (valid.length === 1 ? '' : 's') + ' (not their real position)'
+        : opts.sender + ' — ' + valid.length + ' shared position' + (valid.length === 1 ? '' : 's');
       container.appendChild(label);
     }
   }

@@ -5690,6 +5690,41 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           return '<span class="text-muted">' + esc(p) + '</span>';
         }
 
+        // Approximate path via entry-point repeater, for senders who don't
+        // share a literal position: each message's path[0] resolves to a
+        // fixed, known repeater location (same unique_prefix-only
+        // discipline as the path display above) — plotting those in
+        // chronological order gives a rough "which coverage area were they
+        // in" trail. This is NOT the sender's real position, just the
+        // nearest repeater that first relayed them at that moment.
+        var entryHits = messages
+          .filter(function(m) { return m.pathPrefixes && m.pathPrefixes.length > 0; })
+          .map(function(m) {
+            var r = resolved[m.pathPrefixes[0]];
+            if (!r || r.confidence !== 'unique_prefix' || !r.pubkey) return null;
+            return { pubkey: r.pubkey, name: r.name, timestamp: m.timestamp };
+          })
+          .filter(Boolean)
+          .reverse(); // chronological — messages come back most-recent-first
+
+        var entryTrailPoints = [];
+        if (entryHits.length >= 2) {
+          try {
+            var nodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
+            var nodesByKey = {};
+            (nodesResp.nodes || []).forEach(function(n) { nodesByKey[n.public_key] = n; });
+            var lastKey = null;
+            entryHits.forEach(function(hit) {
+              if (hit.pubkey === lastKey) return; // collapse consecutive hits on the same repeater
+              var node = nodesByKey[hit.pubkey];
+              if (node && node.lat != null && node.lon != null) {
+                entryTrailPoints.push({ lat: node.lat, lon: node.lon, timestamp: hit.timestamp, label: hit.name });
+                lastKey = hit.pubkey;
+              }
+            });
+          } catch (e) { /* leave entryTrailPoints empty — button just won't show */ }
+        }
+
         var rows = messages.map(function(m) {
           var pathStr = (m.pathPrefixes && m.pathPrefixes.length > 0)
             ? m.pathPrefixes.map(resolvePrefix).join(' → ')
@@ -5709,12 +5744,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<thead><tr><th>Time</th><th>Path (path[0] first)</th><th>Heard By (SNR / RSSI)</th><th>Shared Position</th></tr></thead>' +
           '<tbody>' + rows + '</tbody>' +
           '</table>';
+        var btnStyle = 'background:none;border:1px solid var(--border);padding:4px 10px;border-radius:4px;color:var(--link-color);cursor:pointer;font-size:0.85em;margin:0 8px 8px 0';
         var pathBtnHtml = gpsPoints.length >= 2
-          ? '<button type="button" data-wd-view-path style="background:none;border:1px solid var(--border);padding:4px 10px;border-radius:4px;color:var(--link-color);cursor:pointer;font-size:0.85em;margin-bottom:8px">View path on map (' + gpsPoints.length + ' shared positions)</button>'
+          ? '<button type="button" data-wd-view-path style="' + btnStyle + '">View path on map (' + gpsPoints.length + ' shared positions)</button>'
           : '';
-        return { html: pathBtnHtml + tableHtml, gpsPoints: gpsPoints };
+        var entryBtnHtml = entryTrailPoints.length >= 2
+          ? '<button type="button" data-wd-view-entry-path style="' + btnStyle + '">View approximate path via entry points (' + entryTrailPoints.length + ' repeaters)</button>'
+          : '';
+        var btnRow = (pathBtnHtml || entryBtnHtml) ? '<div>' + pathBtnHtml + entryBtnHtml + '</div>' : '';
+        return { html: btnRow + tableHtml, gpsPoints: gpsPoints, entryTrailPoints: entryTrailPoints };
       } catch (err) {
-        return { html: '<p style="color:var(--status-red);font-size:0.85em">Failed to load messages: ' + esc(String(err)) + '</p>', gpsPoints: [] };
+        return { html: '<p style="color:var(--status-red);font-size:0.85em">Failed to load messages: ' + esc(String(err)) + '</p>', gpsPoints: [], entryTrailPoints: [] };
       }
     }
 
@@ -5752,7 +5792,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           var pathBtn = cell.querySelector('[data-wd-view-path]');
           if (pathBtn) {
             pathBtn.addEventListener('click', function() {
-              sessionStorage.setItem('map-gps-trail', JSON.stringify({ points: result.gpsPoints, sender: senderName }));
+              sessionStorage.setItem('map-gps-trail', JSON.stringify({ points: result.gpsPoints, sender: senderName, kind: 'gps' }));
+              window.location.hash = '#/map';
+            });
+          }
+          var entryBtn = cell.querySelector('[data-wd-view-entry-path]');
+          if (entryBtn) {
+            entryBtn.addEventListener('click', function() {
+              sessionStorage.setItem('map-gps-trail', JSON.stringify({ points: result.entryTrailPoints, sender: senderName, kind: 'entry-point' }));
               window.location.hash = '#/map';
             });
           }
