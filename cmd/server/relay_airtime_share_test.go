@@ -265,18 +265,39 @@ func TestAirtimeForTransmissions(t *testing.T) {
 	}
 }
 
-// TestAirtimeForTransmissions_UnknownIDs confirms transmission IDs the
-// store doesn't know about (e.g. evicted, or a test seeding gap) are
-// skipped rather than causing an error — the index itself is still
-// available, so ok stays true with whatever total the KNOWN IDs contribute.
+// TestAirtimeForTransmissions_UnknownIDs confirms that when NONE of the
+// requested transmission IDs are held in memory (e.g. evicted from the
+// memory-bounded store despite still being in the SQL retention window),
+// the result is ok=false — a silent 0 would look like "genuinely never
+// relayed" instead of "don't know".
 func TestAirtimeForTransmissions_UnknownIDs(t *testing.T) {
 	store := newRelayAirtimeShareTestStore(nil)
 	total, ok := store.AirtimeForTransmissions([]int64{999})
-	if !ok {
-		t.Fatal("ok = false, want true (index available, just no matching transmission)")
+	if ok {
+		t.Fatal("ok = true, want false — no requested transmission was found in memory")
 	}
 	if total != 0 {
 		t.Errorf("total = %v, want 0", total)
+	}
+}
+
+// TestAirtimeForTransmissions_PartialMatch confirms a partial match (some
+// transmissions found, some evicted) still returns ok=true with the known
+// subset's total — the alternative (require ALL to match) would make the
+// feature return nothing once retention exceeds the in-memory window.
+func TestAirtimeForTransmissions_PartialMatch(t *testing.T) {
+	tx1 := makeRelayAirtimeTx(701, PayloadGRP_TXT, 20, 3, "pm1")
+	store := newRelayAirtimeShareTestStore([]*StoreTx{tx1})
+	store.addToResolvedPubkeyIndex(tx1.ID, []string{"r1", "r2", "r3"})
+
+	total, ok := store.AirtimeForTransmissions([]int64{int64(tx1.ID), 999})
+	if !ok {
+		t.Fatal("ok = false, want true — at least one transmission (tx1) was found")
+	}
+	preset := store.resolveLoRaPreset()
+	want := lora.TimeOnAir(20, preset) * 3
+	if total != want {
+		t.Errorf("total = %v, want %v (evicted id 999 contributes nothing, not an error)", total, want)
 	}
 }
 

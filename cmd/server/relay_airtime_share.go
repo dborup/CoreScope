@@ -125,8 +125,17 @@ func (s *PacketStore) distinctRelayCount(tx *StoreTx) int {
 // count (the same score formula as computeRelayAirtimeShare / issue #1768)
 // for an arbitrary, caller-supplied set of transmission IDs — e.g. one
 // wardriving session's messages, rather than every packet in a time window.
-// Returns ok=false when the resolved-path index is unavailable, so callers
-// can omit the field entirely rather than show a misleading zero.
+//
+// Returns ok=false when the resolved-path index is unavailable, OR when
+// NONE of the requested IDs are currently held in memory — the store is
+// memory-bounded (maxMemoryMB/maxPackets, see store.go), so a transmission
+// well within the SQL window can still have been evicted from RAM. In that
+// case a silent 0 would look like "genuinely never relayed" when it's
+// really "don't know" — callers should omit the field, not show a zero.
+// A PARTIAL match (some found, some evicted) still returns ok=true with
+// the known subset's total; the alternative (only ok when ALL match) would
+// make the feature return nothing at all once retention exceeds the
+// in-memory window, which every other airtime metric already tolerates.
 func (s *PacketStore) AirtimeForTransmissions(txIDs []int64) (total time.Duration, ok bool) {
 	if s == nil || !s.useResolvedPathIndex || len(txIDs) == 0 {
 		return 0, false
@@ -139,14 +148,19 @@ func (s *PacketStore) AirtimeForTransmissions(txIDs []int64) (total time.Duratio
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	preset := s.resolveLoRaPreset()
+	matched := 0
 	for id := range want {
 		tx := s.byTxID[id]
 		if tx == nil {
 			continue
 		}
+		matched++
 		payloadBytes := len(tx.RawHex) / 2
 		relays := s.distinctRelayCount(tx)
 		total += lora.TimeOnAir(payloadBytes, preset) * time.Duration(relays)
+	}
+	if matched == 0 {
+		return 0, false
 	}
 	return total, true
 }
