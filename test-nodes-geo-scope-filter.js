@@ -1,0 +1,226 @@
+/* Regression test for the Nodes page's Domestic/Foreign geo-scope filter.
+ *
+ * The unfiltered node list can be dominated by foreign-flagged nodes
+ * (#730 geo_filter classification — self-reported GPS outside the
+ * configured box), making it hard to see which nodes are actually local.
+ * This adds an "All / Domestic / Foreign" filter-group (public/nodes.js,
+ * matching the existing Status filter's pattern) that narrows the
+ * client-side `nodes` array by each node's `foreign` boolean.
+ *
+ * Drives the real loadNodes() pipeline (via pageMod().init()) rather than
+ * re-implementing the filter predicate, so this actually exercises the
+ * production code path — same harness style as test-issue-1606-pagination.js.
+ */
+'use strict';
+const vm = require('vm');
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+
+let passed = 0, failed = 0;
+function test(name, fn) {
+  const out = fn();
+  if (out && typeof out.then === 'function') {
+    return out.then(() => { passed++; console.log('  ✅ ' + name); })
+      .catch(e => { failed++; console.log('  ❌ ' + name + ': ' + e.message); });
+  }
+  try {
+    passed++; console.log('  ✅ ' + name);
+  } catch (e) {
+    failed++; console.log('  ❌ ' + name + ': ' + e.message);
+  }
+  return Promise.resolve();
+}
+
+function loadInCtx(ctx, file) {
+  vm.runInContext(fs.readFileSync(file, 'utf8'), ctx);
+  for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+}
+
+function makeSandbox() {
+  const ctx = {
+    window: { addEventListener: () => {}, dispatchEvent: () => {} },
+    document: {
+      readyState: 'complete',
+      createElement: () => ({ id: '', textContent: '', innerHTML: '', style: {}, classList: { add(){}, remove(){}, toggle(){}, contains(){return false;} }, appendChild(){}, addEventListener(){} }),
+      head: { appendChild: () => {} },
+      getElementById: () => null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      querySelectorAll: () => [],
+      querySelector: () => null,
+    },
+    console, Date, Infinity, Math, Array, Object, String, Number, JSON, RegExp, Error, TypeError,
+    parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+    setTimeout: (fn) => { fn(); return 0; }, clearTimeout: () => {},
+    setInterval: () => 0, clearInterval: () => {},
+    Promise, Map, Set, URLSearchParams,
+    fetch: () => Promise.resolve({ json: () => Promise.resolve({}) }),
+    performance: { now: () => Date.now() },
+    localStorage: (() => {
+      const store = {};
+      return { getItem: k => store[k] || null, setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } };
+    })(),
+    location: { hash: '' },
+    getHashParams: function () { return new URLSearchParams((ctx.location.hash.split('?')[1] || '')); },
+    CustomEvent: class CustomEvent {},
+  };
+  vm.createContext(ctx);
+  return ctx;
+}
+
+// Fixture: a handful of nodes, some foreign-flagged, some not. All have a
+// 64-char pubkey and a name so the loadNodes() defensive filter keeps them.
+function makeFixture() {
+  const nodes = [];
+  for (let i = 0; i < 5; i++) {
+    nodes.push({
+      public_key: 'domestic' + i.toString(16).padStart(56, '0'),
+      name: 'Domestic' + i,
+      role: 'repeater',
+      advert_count: 1,
+      foreign: false,
+      last_seen: new Date(Date.now() - i * 1000).toISOString(),
+    });
+  }
+  for (let i = 0; i < 3; i++) {
+    nodes.push({
+      public_key: 'foreign' + i.toString(16).padStart(57, '0'),
+      name: 'Foreign' + i,
+      role: 'companion',
+      advert_count: 1,
+      foreign: true,
+      last_seen: new Date(Date.now() - i * 1000).toISOString(),
+    });
+  }
+  return nodes;
+}
+
+function makeNodesEnv(fixture) {
+  const ctx = makeSandbox();
+  const domElements = {};
+  function getEl(id) {
+    if (!domElements[id]) {
+      domElements[id] = {
+        id, innerHTML: '', textContent: '', value: '', scrollTop: 0,
+        style: {}, dataset: {},
+        classList: { add(){}, remove(){}, toggle(){}, contains(){return false;} },
+        addEventListener() {}, querySelectorAll() { return []; }, querySelector() { return null; },
+        getAttribute() { return null; }, setAttribute() {}, appendChild() {},
+      };
+    }
+    return domElements[id];
+  }
+  ctx.document.getElementById = getEl;
+
+  ctx.api = function (url) {
+    const q = url.indexOf('?') >= 0 ? url.slice(url.indexOf('?') + 1) : '';
+    const params = new URLSearchParams(q);
+    const offset = parseInt(params.get('offset') || '0', 10);
+    const limit = parseInt(params.get('limit') || '500', 10);
+    const page = fixture.slice(offset, offset + limit);
+    return Promise.resolve({
+      nodes: page,
+      total: fixture.length,
+      counts: { repeaters: fixture.length },
+    });
+  };
+  ctx.invalidateApiCache = () => {};
+
+  ctx.ROLE_COLORS = { repeater: '#0', room: '#0', companion: '#0', sensor: '#0' };
+  ctx.ROLE_STYLE = {};
+  ctx.TYPE_COLORS = {};
+  ctx.getNodeStatus = () => 'active';
+  ctx.getHealthThresholds = () => ({ staleMs: 1, degradedMs: 1, silentMs: 1 });
+  ctx.timeAgo = () => '';
+  ctx.truncate = (s) => s;
+  ctx.escapeHtml = (s) => String(s || '');
+  ctx.payloadTypeName = () => '';
+  ctx.payloadTypeColor = () => '';
+  ctx.debounce = (fn) => fn;
+  ctx.initTabBar = () => {};
+  ctx.getFavorites = () => [];
+  ctx.favStar = () => '';
+  ctx.bindFavStars = () => {};
+  ctx.makeColumnsResizable = () => {};
+  ctx.CLIENT_TTL = { nodeList: 0, nodeDetail: 0, nodeHealth: 0 };
+  ctx.RegionFilter = { init(){}, onChange(){ return () => {}; }, offChange(){}, getRegionParam(){ return ''; } };
+  ctx.AreaFilter = { init(){}, onChange(){ return () => {}; }, offChange(){}, getAreaParam(){ return ''; } };
+  ctx.getFleetSkew = () => Promise.resolve({});
+  ctx.onWS = () => {};
+  ctx.offWS = () => {};
+  ctx.debouncedOnWS = () => () => {};
+  let pageMod = null;
+  ctx.registerPage = (name, handlers) => { pageMod = handlers; };
+
+  loadInCtx(ctx, path.join(__dirname, 'public/nodes.js'));
+
+  return { ctx, pageMod: () => pageMod };
+}
+
+async function settle(ctx) {
+  let lastLen = -1, stable = 0;
+  for (let i = 0; i < 50; i++) {
+    await new Promise(r => setImmediate(r));
+    const f = ctx.window._nodesGetFiltered();
+    const cur = Array.isArray(f) ? f.length : -1;
+    if (cur === lastLen) { stable++; if (stable > 3) break; } else { stable = 0; lastLen = cur; }
+  }
+}
+
+console.log('=== nodes.js: Domestic/Foreign geo-scope filter ===');
+
+(async () => {
+  await test('default geoScope ("all") includes both domestic and foreign nodes', async () => {
+    const env = makeNodesEnv(makeFixture());
+    const appEl = env.ctx.document.getElementById('page');
+    env.pageMod().init(appEl);
+    await settle(env.ctx);
+    const filtered = env.ctx.window._nodesGetFiltered();
+    assert.strictEqual(env.ctx.window._nodesGetGeoScope(), 'all', 'geoScope should default to all');
+    assert.strictEqual(filtered.length, 8, 'all 8 nodes (5 domestic + 3 foreign) should be present by default');
+  });
+
+  await test('geoScope "domestic" excludes foreign-flagged nodes', async () => {
+    const env = makeNodesEnv(makeFixture());
+    const appEl = env.ctx.document.getElementById('page');
+    env.ctx.window._nodesSetGeoScope('domestic');
+    env.pageMod().init(appEl);
+    await settle(env.ctx);
+    const filtered = env.ctx.window._nodesGetFiltered();
+    assert.strictEqual(filtered.length, 5, 'only the 5 domestic nodes should remain');
+    assert.ok(filtered.every(n => !n.foreign), 'no foreign node should be present');
+  });
+
+  await test('geoScope "foreign" includes only foreign-flagged nodes', async () => {
+    const env = makeNodesEnv(makeFixture());
+    const appEl = env.ctx.document.getElementById('page');
+    env.ctx.window._nodesSetGeoScope('foreign');
+    env.pageMod().init(appEl);
+    await settle(env.ctx);
+    const filtered = env.ctx.window._nodesGetFiltered();
+    assert.strictEqual(filtered.length, 3, 'only the 3 foreign nodes should remain');
+    assert.ok(filtered.every(n => n.foreign), 'every remaining node should be foreign-flagged');
+  });
+
+  await test('geoScope combines with an existing role tab filter (AND, not OR)', async () => {
+    const env = makeNodesEnv(makeFixture());
+    const appEl = env.ctx.document.getElementById('page');
+    env.ctx.window._nodesSetGeoScope('foreign');
+    env.pageMod().init(appEl);
+    await settle(env.ctx);
+    // All 3 foreign fixture nodes are role=companion; narrowing further to
+    // role=repeater (none of which are foreign) should yield zero rows,
+    // not fall back to ignoring the geo filter.
+    env.ctx.location.hash = '#/nodes?tab=repeater';
+    env.pageMod().init(appEl);
+    await settle(env.ctx);
+    const filtered = env.ctx.window._nodesGetFiltered();
+    assert.strictEqual(filtered.length, 0, 'foreign+repeater should be empty — all foreign fixture nodes are companions');
+  });
+
+  console.log('\n════════════════════════════════════════');
+  console.log(`  Nodes geo-scope filter: ${passed} passed, ${failed} failed`);
+  console.log('════════════════════════════════════════');
+  process.exit(failed === 0 ? 0 : 1);
+})();

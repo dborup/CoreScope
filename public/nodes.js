@@ -82,6 +82,11 @@
   }
   let lastHeard = localStorage.getItem('meshcore-nodes-last-heard') || '';
   let statusFilter = localStorage.getItem('meshcore-nodes-status-filter') || 'all';
+  // 'all' | 'domestic' | 'foreign' — domestic/foreign split on the `foreign`
+  // flag (#730 geo_filter classification: self-reported GPS outside the
+  // configured box). The unfiltered node list can be dominated by foreign
+  // nodes, making it hard to see which ones are actually local.
+  let geoScope = localStorage.getItem('meshcore-nodes-geo-scope') || 'all';
   let wsHandler = null;
   let detailMap = null;
 
@@ -1236,6 +1241,9 @@
           return getNodeStatus(role, lastMs) === statusFilter;
         });
       }
+      // Geo scope filter (domestic vs foreign, #730 `foreign` flag)
+      if (geoScope === 'domestic') filtered = filtered.filter(n => !n.foreign);
+      else if (geoScope === 'foreign') filtered = filtered.filter(n => n.foreign);
       nodes = filtered;
 
       // Defensive filter: hide nodes with obviously corrupted data
@@ -1304,6 +1312,11 @@
             <button class="btn ${statusFilter==='active'?'active':''}" data-status="active">Active</button>
             <button class="btn ${statusFilter==='stale'?'active':''}" data-status="stale">Stale</button>
           </div>
+          <div class="filter-group" id="nodeGeoFilter">
+            <button class="btn ${geoScope==='all'?'active':''}" data-geo="all">All</button>
+            <button class="btn ${geoScope==='domestic'?'active':''}" data-geo="domestic">Domestic</button>
+            <button class="btn ${geoScope==='foreign'?'active':''}" data-geo="foreign">Foreign</button>
+          </div>
           <select id="nodeLastHeard" aria-label="Filter by last heard time">
             <option value="">Last Heard: Any</option>
             <option value="1h" ${lastHeard==='1h'?'selected':''}>1 hour</option>
@@ -1348,6 +1361,16 @@
         statusFilter = btn.dataset.status;
         localStorage.setItem('meshcore-nodes-status-filter', statusFilter);
         document.querySelectorAll('#nodeStatusFilter .btn').forEach(b => b.classList.toggle('active', b.dataset.status === statusFilter));
+        loadNodes();
+      });
+    });
+
+    // Geo scope filter buttons (domestic vs foreign)
+    document.querySelectorAll('#nodeGeoFilter .btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        geoScope = btn.dataset.geo;
+        localStorage.setItem('meshcore-nodes-geo-scope', geoScope);
+        document.querySelectorAll('#nodeGeoFilter .btn').forEach(b => b.classList.toggle('active', b.dataset.geo === geoScope));
         loadNodes();
       });
     });
@@ -1808,6 +1831,9 @@
   window._nodesIsAdvertMessage = isAdvertMessage;
   window._nodesGetAllNodes = function() { return _allNodes; };
   window._nodesSetAllNodes = function(n) { _allNodes = n; };
+  window._nodesGetFiltered = function() { return nodes; };
+  window._nodesGetGeoScope = function() { return geoScope; };
+  window._nodesSetGeoScope = function(v) { geoScope = v; };
   window._nodesToggleSort = function(col) {
     if (_nodesTableSortCtrl) { _nodesTableSortCtrl.sort(col); return; }
     // Fallback for tests without DOM

@@ -15,6 +15,7 @@ node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js
 node test-fetch-all-nodes-pagination.js
+node test-nodes-geo-scope-filter.js
 node test-my-repeaters-dashboard.js
 node test-url-state.js
 node test-perf-go-runtime.js
