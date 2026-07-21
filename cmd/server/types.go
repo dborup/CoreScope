@@ -224,6 +224,13 @@ type AreaScopeAdoption struct {
 	// must still serialize, or the frontend has no way to distinguish it
 	// from "field absent".
 	NodesMatchingArea int `json:"nodesMatchingArea"`
+	// Matching/NotMatching are the actual nodes behind NodesMatchingArea —
+	// which specific nodes in this area relay/configure the area's own
+	// region (correctly "support" it) and which sit here but don't. Only
+	// populated when RegionScope is set (nothing to split into two groups
+	// otherwise).
+	Matching    []RepeaterRef `json:"matching,omitempty"`
+	NotMatching []RepeaterRef `json:"notMatching,omitempty"`
 }
 
 type RepeaterRef struct {

@@ -2364,6 +2364,9 @@ func TestComputeScopeAdoptionByArea(t *testing.T) {
 	if ode.NodesMatchingArea != 1 {
 		t.Errorf("ODE.NodesMatchingArea = %d, want 1 (only the dk-fyn-odense one matches, the dk-aarhus one doesn't)", ode.NodesMatchingArea)
 	}
+	if len(ode.Matching) != 1 || len(ode.NotMatching) != 2 {
+		t.Errorf("ODE.Matching=%v NotMatching=%v, want 1 matching + 2 not-matching (RegionScope is set)", ode.Matching, ode.NotMatching)
+	}
 
 	got2 := byKey["GOT"]
 	if got2.TotalNodes != 2 {
@@ -2374,6 +2377,9 @@ func TestComputeScopeAdoptionByArea(t *testing.T) {
 	}
 	if got2.NodesMatchingArea != 0 {
 		t.Errorf("GOT.NodesMatchingArea = %d, want 0 (area has no RegionScope link to match against)", got2.NodesMatchingArea)
+	}
+	if len(got2.Matching) != 0 || len(got2.NotMatching) != 0 {
+		t.Errorf("GOT.Matching=%v NotMatching=%v, want both empty (no RegionScope, nothing to split into two groups)", got2.Matching, got2.NotMatching)
 	}
 }
 
@@ -2418,6 +2424,12 @@ func TestComputeScopeAdoptionByArea_RelayedRegionCounts(t *testing.T) {
 	// generic #dk.
 	if h.NodesMatchingArea != 1 {
 		t.Errorf("NodesMatchingArea = %d, want 1 (relayer01 relays dk-horsens even though its default_scope is #dk)", h.NodesMatchingArea)
+	}
+	if len(h.Matching) != 1 || h.Matching[0].PublicKey != "relayer01" {
+		t.Errorf("Matching = %v, want just relayer01", h.Matching)
+	}
+	if len(h.NotMatching) != 2 {
+		t.Errorf("NotMatching = %v, want 2 (plainnode1 and relayerother)", h.NotMatching)
 	}
 }
 

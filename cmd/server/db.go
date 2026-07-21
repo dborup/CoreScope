@@ -2239,12 +2239,14 @@ func (db *DB) GetNodesByDefaultScope() (map[string][]RepeaterRef, error) {
 	return result, rows.Err()
 }
 
-// nodeAreaScopeInput is one node's position + default_scope + pubkey — the
-// raw input to computeScopeAdoptionByArea. DefaultScope is "" when unset or
-// when this DB predates #899 (no default_scope column at all). PublicKey is
-// lowercase, for looking a node up in a RepeaterRelayInfo map.
+// nodeAreaScopeInput is one node's position + name + default_scope +
+// pubkey — the raw input to computeScopeAdoptionByArea. DefaultScope is ""
+// when unset or when this DB predates #899 (no default_scope column at
+// all). PublicKey is lowercase, for looking a node up in a
+// RepeaterRelayInfo map.
 type nodeAreaScopeInput struct {
 	PublicKey    string
+	Name         string
 	Lat, Lon     float64
 	DefaultScope string
 }
@@ -2255,7 +2257,7 @@ type nodeAreaScopeInput struct {
 // area. Unlike GetNodesByDefaultScope, this includes nodes with NO scope
 // too — the whole point is measuring adoption, not just listing who has one.
 func (db *DB) GetNodesForScopeAdoption() ([]nodeAreaScopeInput, error) {
-	query := "SELECT public_key, lat, lon"
+	query := "SELECT public_key, name, lat, lon"
 	if db.hasDefaultScope {
 		query += ", default_scope"
 	}
@@ -2268,18 +2270,23 @@ func (db *DB) GetNodesForScopeAdoption() ([]nodeAreaScopeInput, error) {
 	var out []nodeAreaScopeInput
 	for rows.Next() {
 		var pk string
+		var name sql.NullString
 		var lat, lon float64
 		var scope sql.NullString
 		var scanErr error
 		if db.hasDefaultScope {
-			scanErr = rows.Scan(&pk, &lat, &lon, &scope)
+			scanErr = rows.Scan(&pk, &name, &lat, &lon, &scope)
 		} else {
-			scanErr = rows.Scan(&pk, &lat, &lon)
+			scanErr = rows.Scan(&pk, &name, &lat, &lon)
 		}
 		if scanErr != nil {
 			continue
 		}
-		out = append(out, nodeAreaScopeInput{PublicKey: strings.ToLower(pk), Lat: lat, Lon: lon, DefaultScope: scope.String})
+		displayName := pk
+		if name.Valid && name.String != "" {
+			displayName = name.String
+		}
+		out = append(out, nodeAreaScopeInput{PublicKey: strings.ToLower(pk), Name: displayName, Lat: lat, Lon: lon, DefaultScope: scope.String})
 	}
 	return out, rows.Err()
 }
@@ -2301,6 +2308,11 @@ func (db *DB) GetNodesForScopeAdoption() ([]nodeAreaScopeInput, error) {
 // without ever configuring dk-horsens as its own default_scope. relayInfo
 // may be nil (in-memory store unavailable), in which case matching falls
 // back to default_scope only.
+//
+// For areas with a RegionScope link, also returns the actual node lists
+// (Matching/NotMatching) — dborup wanted to see which specific nodes in
+// e.g. Østjylland relay dk-oj (correctly "support" the area) and which
+// don't, not just an aggregate count.
 func computeScopeAdoptionByArea(nodes []nodeAreaScopeInput, areas map[string]AreaEntry, relayInfo map[string]RepeaterRelayInfo) []AreaScopeAdoption {
 	counts := make(map[string]*AreaScopeAdoption)
 	for _, n := range nodes {
@@ -2340,12 +2352,23 @@ func computeScopeAdoptionByArea(nodes []nodeAreaScopeInput, areas map[string]Are
 		if hasAnyScope {
 			c.NodesWithAnyScope++
 		}
-		if regionMatch {
-			c.NodesMatchingArea++
+		// Matching/NotMatching per-node lists only make sense when the
+		// area actually has a region to compare against — an area with no
+		// RegionScope link has nothing to be "not matching".
+		if c.RegionScope != "" {
+			ref := RepeaterRef{Name: n.Name, PublicKey: n.PublicKey}
+			if regionMatch {
+				c.NodesMatchingArea++
+				c.Matching = append(c.Matching, ref)
+			} else {
+				c.NotMatching = append(c.NotMatching, ref)
+			}
 		}
 	}
 	result := make([]AreaScopeAdoption, 0, len(counts))
 	for _, c := range counts {
+		sort.Slice(c.Matching, func(i, j int) bool { return c.Matching[i].Name < c.Matching[j].Name })
+		sort.Slice(c.NotMatching, func(i, j int) bool { return c.NotMatching[i].Name < c.NotMatching[j].Name })
 		result = append(result, *c)
 	}
 	sort.Slice(result, func(i, j int) bool {

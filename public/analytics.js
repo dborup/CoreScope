@@ -5065,37 +5065,50 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         }
       }
 
-      // Scope Adoption by Area: buckets every positioned node by its
-      // configured geographic area and asks "does this real, physical
-      // community actually use the region-scope system at all" —
-      // independent of which raw hashRegion codes have ever appeared in
-      // traffic. Region Utilization below only knows about region strings
-      // that already showed up in a message; a real area with real nodes
-      // that has NEVER produced a single region-scoped message is
-      // invisible there. This section catches exactly that gap.
+      // Scope Adoption by Area: for each configured geographic area, which
+      // SPECIFIC nodes actually support the region that area is linked to
+      // (own default_scope OR ever relayed it — a repeater can carry
+      // dk-oj traffic and thereby support Østjylland without configuring
+      // dk-oj as its own scope) and which sit there but don't. Independent
+      // of Region Utilization below, which only knows about region
+      // strings that already appeared in a message — a real area with
+      // real nodes that never produced one is invisible there.
       var areaAdoptEl = document.getElementById('scopes-area-adoption');
       if (areaAdoptEl) {
         var byArea = d.scopeAdoptionByArea || [];
         if (byArea.length > 0) {
-          var areaRows = byArea.map(function(a) {
-            var withScope = a.nodesWithAnyScope.toLocaleString() + ' (' + pct(a.nodesWithAnyScope, a.totalNodes) + ')';
-            var matchCount = a.nodesMatchingArea || 0;
-            var matching = a.regionScope
-              ? matchCount.toLocaleString() + ' (' + pct(matchCount, a.totalNodes) + ')' +
-                ' <span class="text-muted" style="font-size:0.85em">of <code>#' + esc(a.regionScope) + '</code></span>'
-              : '<span class="text-muted" style="font-size:0.85em">no region linked to this area</span>';
-            return '<tr><td>' + esc(a.label) + '</td>' +
-              '<td>' + a.totalNodes.toLocaleString() + '</td>' +
-              '<td>' + withScope + '</td>' +
-              '<td>' + matching + '</td></tr>';
+          function nodeLinks(refs) {
+            return (refs || []).map(function(r) {
+              return '<a href="#/nodes/' + encodeURIComponent(r.publicKey) + '">' + esc(r.name) + '</a>';
+            }).join(', ');
+          }
+          var areaGroups = byArea.map(function(a) {
+            var summary, body;
+            if (a.regionScope) {
+              var matchCount = a.nodesMatchingArea || 0;
+              summary = esc(a.label) + ' — ' + matchCount.toLocaleString() + ' of ' + a.totalNodes.toLocaleString() +
+                ' support <code>#' + esc(a.regionScope) + '</code> (' + pct(matchCount, a.totalNodes) + ')';
+              body =
+                '<div style="margin-bottom:6px"><strong>Supporting</strong> (' + (a.matching || []).length + '): ' +
+                  (a.matching && a.matching.length ? nodeLinks(a.matching) : '<span class="text-muted">none</span>') +
+                '</div>' +
+                '<div><strong>Not supporting</strong> (' + (a.notMatching || []).length + '): ' +
+                  (a.notMatching && a.notMatching.length ? nodeLinks(a.notMatching) : '<span class="text-muted">none</span>') +
+                '</div>';
+            } else {
+              summary = esc(a.label) + ' — ' + a.totalNodes.toLocaleString() + ' node' + (a.totalNodes === 1 ? '' : 's') +
+                ', <span class="text-muted">no region linked to this area</span>';
+              body = '<p class="text-muted" style="margin:0;font-size:0.85em">This area has no regionScope configured, so there\'s nothing to check adoption against.</p>';
+            }
+            return '<details style="margin-bottom:8px" data-key="area-adopt:' + esc(a.areaKey) + '">' +
+              '<summary style="cursor:pointer">' + summary + '</summary>' +
+              '<div style="margin-top:6px;margin-left:12px;font-size:0.9em;line-height:1.6">' + body + '</div>' +
+              '</details>';
           }).join('');
           setSectionHtml(areaAdoptEl, detailsSection(
             'Scope Adoption by Area (' + byArea.length.toLocaleString() + ' areas)',
-            'All-time — every configured area with at least one positioned node. "With Any Scope" and "Matching" both count a node\'s own default_scope AND anything it has ever relayed — a repeater carrying dk-horsens traffic supports that region even without configuring it as its own.',
-            '<table class="data-table analytics-table">' +
-              '<thead><tr><th>Area</th><th>Nodes</th><th>With Any Scope</th><th>Matching Area’s Own Region</th></tr></thead>' +
-              '<tbody>' + areaRows + '</tbody>' +
-              '</table>',
+            'All-time — expand an area to see exactly which nodes support its linked region (own default_scope or ever relayed it) and which don\'t.',
+            areaGroups,
             'scope-adoption-by-area'
           ));
         } else {
