@@ -23,6 +23,12 @@ type AreaEntry struct {
 	LatMax  *float64     `json:"latMax,omitempty"`
 	LonMin  *float64     `json:"lonMin,omitempty"`
 	LonMax  *float64     `json:"lonMax,omitempty"`
+
+	// RegionScope links this area to a hashRegions channel scope (e.g.
+	// "dk-aarhus"), stored without the leading "#" — callers should run it
+	// through regions.Normalize before comparing against a scope_name.
+	// Left empty when no confident area<->scope mapping exists.
+	RegionScope string `json:"regionScope,omitempty"`
 }
 
 // ListLimitsConfig defines maximum row limits for list endpoints to prevent DoS.
