@@ -3746,7 +3746,15 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 
 	if s.cfg != nil && len(s.cfg.Areas) > 0 {
 		if nodes, err := s.db.GetNodesForScopeAdoption(); err == nil {
-			resp.ScopeAdoptionByArea = computeScopeAdoptionByArea(nodes, s.cfg.Areas)
+			// Reuses the same cached relay-info map as RepeatersByRegion
+			// above (GetRepeaterRelayInfoMap never rebuilds inline on a
+			// populated cache) so a node relaying an area's region counts
+			// as using it, not just one with a matching default_scope.
+			var relayInfo map[string]RepeaterRelayInfo
+			if s.store != nil {
+				relayInfo = s.store.GetRepeaterRelayInfoMap(s.cfg.GetHealthThresholds().RelayActiveHours)
+			}
+			resp.ScopeAdoptionByArea = computeScopeAdoptionByArea(nodes, s.cfg.Areas, relayInfo)
 		} else {
 			log.Printf("WARN GetNodesForScopeAdoption: %v", err)
 		}

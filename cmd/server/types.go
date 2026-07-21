@@ -210,15 +210,19 @@ type AreaScopeAdoption struct {
 	Label       string `json:"label"`
 	RegionScope string `json:"regionScope,omitempty"`
 	TotalNodes  int    `json:"totalNodes"`
-	// NodesWithAnyScope is how many of TotalNodes have ANY default_scope
-	// configured, regardless of which region it is.
+	// NodesWithAnyScope is how many of TotalNodes "use scope" in any
+	// sense: either their own default_scope is set, or they've ever
+	// relayed traffic carrying ANY region's scope (a repeater can support
+	// a region purely by relaying it, without configuring that region as
+	// its own — see computeScopeAdoptionByArea).
 	NodesWithAnyScope int `json:"nodesWithAnyScope"`
-	// NodesMatchingArea is the subset of NodesWithAnyScope whose scope
-	// matches this area's own RegionScope specifically. Only meaningful
-	// when RegionScope is set — 0 otherwise (not the same as "0 of them
-	// match", there's simply nothing configured to match against). No
-	// omitempty: a real 0 count must still serialize, or the frontend has
-	// no way to distinguish it from "field absent".
+	// NodesMatchingArea is the subset of NodesWithAnyScope that
+	// specifically use THIS area's own RegionScope — via default_scope OR
+	// by having relayed it. Only meaningful when RegionScope is set — 0
+	// otherwise (not the same as "0 of them match", there's simply
+	// nothing configured to match against). No omitempty: a real 0 count
+	// must still serialize, or the frontend has no way to distinguish it
+	// from "field absent".
 	NodesMatchingArea int `json:"nodesMatchingArea"`
 }
 

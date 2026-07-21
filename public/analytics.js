@@ -5091,7 +5091,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           }).join('');
           setSectionHtml(areaAdoptEl, detailsSection(
             'Scope Adoption by Area (' + byArea.length.toLocaleString() + ' areas)',
-            'All-time — every configured area with at least one positioned node. Shows whether that geographic community actually runs the region-scope system, and whether it runs the specific region this area is linked to.',
+            'All-time — every configured area with at least one positioned node. "With Any Scope" and "Matching" both count a node\'s own default_scope AND anything it has ever relayed — a repeater carrying dk-horsens traffic supports that region even without configuring it as its own.',
             '<table class="data-table analytics-table">' +
               '<thead><tr><th>Area</th><th>Nodes</th><th>With Any Scope</th><th>Matching Area’s Own Region</th></tr></thead>' +
               '<tbody>' + areaRows + '</tbody>' +

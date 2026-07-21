@@ -2239,10 +2239,12 @@ func (db *DB) GetNodesByDefaultScope() (map[string][]RepeaterRef, error) {
 	return result, rows.Err()
 }
 
-// nodeAreaScopeInput is one node's position + default_scope — the raw
-// input to computeScopeAdoptionByArea. DefaultScope is "" when unset or
-// when this DB predates #899 (no default_scope column at all).
+// nodeAreaScopeInput is one node's position + default_scope + pubkey — the
+// raw input to computeScopeAdoptionByArea. DefaultScope is "" when unset or
+// when this DB predates #899 (no default_scope column at all). PublicKey is
+// lowercase, for looking a node up in a RepeaterRelayInfo map.
 type nodeAreaScopeInput struct {
+	PublicKey    string
 	Lat, Lon     float64
 	DefaultScope string
 }
@@ -2253,7 +2255,7 @@ type nodeAreaScopeInput struct {
 // area. Unlike GetNodesByDefaultScope, this includes nodes with NO scope
 // too — the whole point is measuring adoption, not just listing who has one.
 func (db *DB) GetNodesForScopeAdoption() ([]nodeAreaScopeInput, error) {
-	query := "SELECT lat, lon"
+	query := "SELECT public_key, lat, lon"
 	if db.hasDefaultScope {
 		query += ", default_scope"
 	}
@@ -2265,31 +2267,41 @@ func (db *DB) GetNodesForScopeAdoption() ([]nodeAreaScopeInput, error) {
 	defer rows.Close()
 	var out []nodeAreaScopeInput
 	for rows.Next() {
+		var pk string
 		var lat, lon float64
 		var scope sql.NullString
 		var scanErr error
 		if db.hasDefaultScope {
-			scanErr = rows.Scan(&lat, &lon, &scope)
+			scanErr = rows.Scan(&pk, &lat, &lon, &scope)
 		} else {
-			scanErr = rows.Scan(&lat, &lon)
+			scanErr = rows.Scan(&pk, &lat, &lon)
 		}
 		if scanErr != nil {
 			continue
 		}
-		out = append(out, nodeAreaScopeInput{Lat: lat, Lon: lon, DefaultScope: scope.String})
+		out = append(out, nodeAreaScopeInput{PublicKey: strings.ToLower(pk), Lat: lat, Lon: lon, DefaultScope: scope.String})
 	}
 	return out, rows.Err()
 }
 
 // computeScopeAdoptionByArea buckets nodes by their most specific
 // configured area (AreaKeyForPoint) and tallies, per area: how many nodes
-// sit there at all, how many have ANY default_scope configured, and (when
-// the area itself has a RegionScope link) how many of those specifically
-// match the area's own region — i.e. does this geographic community
-// actually use the scope the area is nominally tied to, or something else
-// entirely (or nothing at all). A node outside every configured area is
-// excluded, same as the area-badge features above.
-func computeScopeAdoptionByArea(nodes []nodeAreaScopeInput, areas map[string]AreaEntry) []AreaScopeAdoption {
+// sit there at all, how many "use scope" in ANY sense, and (when the area
+// itself has a RegionScope link) how many specifically use THAT region —
+// i.e. does this geographic community actually engage with the scope the
+// area is nominally tied to, or something else entirely (or nothing at
+// all). A node outside every configured area is excluded, same as the
+// area-badge features above.
+//
+// "Uses scope" counts two distinct signals, same runs-this-region vs
+// carried-this-region's-traffic distinction as OriginatingNodesByRegion vs
+// RepeatersByRegion above: (1) the node's own default_scope, and (2) any
+// region it has ever RELAYED (relayInfo/TransportedScopes) — a repeater
+// can carry dk-horsens traffic and thereby support the Horsens area
+// without ever configuring dk-horsens as its own default_scope. relayInfo
+// may be nil (in-memory store unavailable), in which case matching falls
+// back to default_scope only.
+func computeScopeAdoptionByArea(nodes []nodeAreaScopeInput, areas map[string]AreaEntry, relayInfo map[string]RepeaterRelayInfo) []AreaScopeAdoption {
 	counts := make(map[string]*AreaScopeAdoption)
 	for _, n := range nodes {
 		key, ok := AreaKeyForPoint(n.Lat, n.Lon, areas)
@@ -2303,12 +2315,33 @@ func computeScopeAdoptionByArea(nodes []nodeAreaScopeInput, areas map[string]Are
 			counts[key] = c
 		}
 		c.TotalNodes++
-		scope := strings.ToLower(strings.TrimPrefix(n.DefaultScope, "#"))
-		if scope != "" {
-			c.NodesWithAnyScope++
-			if c.RegionScope != "" && scope == strings.ToLower(c.RegionScope) {
-				c.NodesMatchingArea++
+
+		ownScope := strings.ToLower(strings.TrimPrefix(n.DefaultScope, "#"))
+		hasAnyScope := ownScope != ""
+		var normalizedRegion string
+		regionMatch := false
+		if c.RegionScope != "" {
+			normalizedRegion = strings.ToLower(c.RegionScope)
+			regionMatch = ownScope == normalizedRegion
+		}
+
+		if info, ok := relayInfo[n.PublicKey]; ok && len(info.TransportedScopes) > 0 {
+			hasAnyScope = true
+			if normalizedRegion != "" && !regionMatch {
+				for _, r := range info.TransportedScopes {
+					if strings.ToLower(strings.TrimPrefix(r, "#")) == normalizedRegion {
+						regionMatch = true
+						break
+					}
+				}
 			}
+		}
+
+		if hasAnyScope {
+			c.NodesWithAnyScope++
+		}
+		if regionMatch {
+			c.NodesMatchingArea++
 		}
 	}
 	result := make([]AreaScopeAdoption, 0, len(counts))

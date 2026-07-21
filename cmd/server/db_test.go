@@ -2345,7 +2345,7 @@ func TestComputeScopeAdoptionByArea(t *testing.T) {
 		{Lat: 51.0, Lon: 4.0, DefaultScope: "#belgium"},              // outside every configured area, excluded
 	}
 
-	got := computeScopeAdoptionByArea(nodes, areas)
+	got := computeScopeAdoptionByArea(nodes, areas, nil)
 	if len(got) != 2 {
 		t.Fatalf("got %d areas, want 2 (ODE and GOT) -- result: %+v", len(got), got)
 	}
@@ -2377,8 +2377,52 @@ func TestComputeScopeAdoptionByArea(t *testing.T) {
 	}
 }
 
+// TestComputeScopeAdoptionByArea_RelayedRegionCounts covers the case
+// dborup flagged directly: a repeater sitting inside the Horsens area that
+// has RELAYED dk-horsens traffic supports that region, even if its own
+// default_scope is something else (or unset entirely) — matching must not
+// be limited to default_scope, same runs-this-region vs
+// carried-this-region's-traffic distinction as RepeatersByRegion vs
+// OriginatingNodesByRegion elsewhere in this file.
+func TestComputeScopeAdoptionByArea_RelayedRegionCounts(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	areas := map[string]AreaEntry{
+		"HORSENS": {Label: "Horsens", RegionScope: "dk-horsens", LatMin: f(55.76), LatMax: f(55.94), LonMin: f(9.6), LonMax: f(9.96)},
+	}
+	nodes := []nodeAreaScopeInput{
+		{PublicKey: "relayer01", Lat: 55.85, Lon: 9.85, DefaultScope: "#dk"}, // own scope is the generic #dk, NOT dk-horsens
+		{PublicKey: "plainnode1", Lat: 55.86, Lon: 9.86, DefaultScope: ""},   // no scope, no relay activity either
+		{PublicKey: "relayerother", Lat: 55.87, Lon: 9.87, DefaultScope: ""}, // relays something, but not dk-horsens
+	}
+	relayInfo := map[string]RepeaterRelayInfo{
+		"relayer01":    {TransportedScopes: []string{"#dk-horsens"}},
+		"relayerother": {TransportedScopes: []string{"#dk-aarhus"}},
+	}
+
+	got := computeScopeAdoptionByArea(nodes, areas, relayInfo)
+	if len(got) != 1 {
+		t.Fatalf("got %d areas, want 1", len(got))
+	}
+	h := got[0]
+	if h.TotalNodes != 3 {
+		t.Errorf("TotalNodes = %d, want 3", h.TotalNodes)
+	}
+	// relayer01 (relays dk-horsens) and relayerother (relays something,
+	// just not dk-horsens) both "use scope" in some sense; plainnode1 does
+	// nothing at all.
+	if h.NodesWithAnyScope != 2 {
+		t.Errorf("NodesWithAnyScope = %d, want 2", h.NodesWithAnyScope)
+	}
+	// Only relayer01 specifically relays THIS area's own region
+	// (dk-horsens) -- despite its own default_scope being the unrelated,
+	// generic #dk.
+	if h.NodesMatchingArea != 1 {
+		t.Errorf("NodesMatchingArea = %d, want 1 (relayer01 relays dk-horsens even though its default_scope is #dk)", h.NodesMatchingArea)
+	}
+}
+
 func TestComputeScopeAdoptionByArea_Empty(t *testing.T) {
-	got := computeScopeAdoptionByArea(nil, map[string]AreaEntry{"DK": {Label: "Danmark"}})
+	got := computeScopeAdoptionByArea(nil, map[string]AreaEntry{"DK": {Label: "Danmark"}}, nil)
 	if len(got) != 0 {
 		t.Errorf("expected no areas with 0 nodes, got %+v", got)
 	}
