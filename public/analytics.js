@@ -4812,7 +4812,36 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       }
     }
 
+    // regionScope -> area label lookup, e.g. "dk-aarhus" -> "Aarhus by".
+    // Areas rarely change, so this is fetched once and reused across every
+    // region-code section below rather than re-fetched per render.
+    var regionAreaLabels = null;
+    async function loadRegionAreaLabels() {
+      if (regionAreaLabels) return regionAreaLabels;
+      regionAreaLabels = {};
+      try {
+        var areas = await api('/config/areas', { ttl: CLIENT_TTL.nodeDetail });
+        (areas || []).forEach(function(a) {
+          if (a.regionScope) regionAreaLabels[a.regionScope.toLowerCase()] = a.label;
+        });
+      } catch (e) { /* leave empty -- region codes render unlabeled */ }
+      return regionAreaLabels;
+    }
+    // A configured hashRegions name is always "#"-prefixed (see
+    // internal/regions.Normalize); AreaEntry.RegionScope is stored without
+    // it, so strip before looking up.
+    function regionAreaLabel(rawRegionName) {
+      if (!regionAreaLabels || !rawRegionName) return null;
+      var key = String(rawRegionName).replace(/^#/, '').toLowerCase();
+      return regionAreaLabels[key] || null;
+    }
+    function regionCodeHtml(rawRegionName) {
+      var label = regionAreaLabel(rawRegionName);
+      return '<code>' + esc(rawRegionName) + '</code>' + (label ? ' <span class="text-muted">(' + esc(label) + ')</span>' : '');
+    }
+
     async function updateData(d, w) {
+      await loadRegionAreaLabels();
       var s = d.summary;
       // #1838: denominator = transport-carrying transmissions (route_type 0,3).
       // Unscoped now includes non-transport routes (1,2) which are inherently
@@ -5046,7 +5075,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           var unused = d.unusedRegions || [];
           var usedCount = configured - unused.length;
           var unusedPct = (unused.length / configured * 100).toFixed(1);
-          var listHtml = unused.map(function(name) { return esc(name); }).join(', ');
+          var listHtml = unused.map(function(name) { return regionCodeHtml(name); }).join(', ');
           setSectionHtml(utilEl, detailsSection(
             'Region Utilization (' + usedCount.toLocaleString() + ' of ' + configured.toLocaleString() + ' used)',
             'All-time, not limited to the window above — has this configured region ever matched a message still in retention?',
@@ -5084,7 +5113,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
                 return '<a href="#/nodes/' + encodeURIComponent(rp.publicKey) + '">' + esc(rp.name) + '</a>';
               }).join(', ');
               return '<details style="margin-bottom:6px" data-key="region:' + esc(g.region) + '">' +
-                '<summary style="cursor:pointer"><code>' + esc(g.region) + '</code> — ' + g.count.toLocaleString() + ' ' + unitLabel + (g.count === 1 ? '' : 's') + '</summary>' +
+                '<summary style="cursor:pointer">' + regionCodeHtml(g.region) + ' — ' + g.count.toLocaleString() + ' ' + unitLabel + (g.count === 1 ? '' : 's') + '</summary>' +
                 '<div class="text-muted" style="font-size:11px;margin-top:6px;margin-left:12px;max-height:200px;overflow-y:auto;line-height:1.8">' + links + '</div>' +
                 '</details>';
             }).join('')
@@ -5110,7 +5139,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         var bridgeBody;
         if (bridges.length > 0) {
           var bridgeRows = bridges.map(function(b) {
-            var regionList = b.regions.map(function(r) { return '<code>' + esc(r) + '</code>'; }).join(', ');
+            var regionList = b.regions.map(function(r) { return regionCodeHtml(r); }).join(', ');
             return '<tr>' +
               '<td><a href="#/nodes/' + encodeURIComponent(b.publicKey) + '">' + esc(b.name) + '</a></td>' +
               '<td>' + b.count + '</td>' +

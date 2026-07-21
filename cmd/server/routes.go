@@ -471,15 +471,16 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConfigAreas(w http.ResponseWriter, r *http.Request) {
 	type areaListEntry struct {
-		Key   string `json:"key"`
-		Label string `json:"label"`
+		Key         string `json:"key"`
+		Label       string `json:"label"`
+		RegionScope string `json:"regionScope,omitempty"`
 	}
 	result := make([]areaListEntry, 0, len(s.cfg.Areas))
 	for k, v := range s.cfg.Areas {
 		if v.Label == "" {
 			continue // skip comment/invalid entries (e.g. "_comment" keys in config)
 		}
-		result = append(result, areaListEntry{Key: k, Label: v.Label})
+		result = append(result, areaListEntry{Key: k, Label: v.Label, RegionScope: v.RegionScope})
 	}
 	writeJSON(w, result)
 }
