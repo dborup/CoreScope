@@ -5650,13 +5650,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         return '<p class="text-muted" style="font-size:0.85em">No sender has shared an explicit position in this window.</p>';
       }
       var rows = shares.map(function(s) {
+        var areaBadge = s.area
+          ? '<span class="badge" style="background:var(--border);color:var(--text)" title="Most specific configured area containing this position">' + esc(s.area) + '</span>'
+          : '<span class="text-muted" style="font-size:0.85em">—</span>';
         return '<tr><td>' + esc(s.sender) + '</td>' +
           '<td>' + mapLinkHtml(s.lat, s.lon) + '</td>' +
+          '<td>' + areaBadge + '</td>' +
           '<td>' + s.messageCount.toLocaleString() + '</td>' +
           '<td>' + (typeof timeAgo === 'function' ? timeAgo(s.lastSeen) : s.lastSeen) + '</td></tr>';
       }).join('');
       return '<table class="data-table analytics-table">' +
-        '<thead><tr><th>Sender</th><th>Position (most recent)</th><th>Times Shared</th><th>Last Seen</th></tr></thead>' +
+        '<thead><tr><th>Sender</th><th>Position (most recent)</th><th>Area</th><th>Times Shared</th><th>Last Seen</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>';
     }

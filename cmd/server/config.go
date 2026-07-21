@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,50 @@ type AreaEntry struct {
 	// through regions.Normalize before comparing against a scope_name.
 	// Left empty when no confident area<->scope mapping exists.
 	RegionScope string `json:"regionScope,omitempty"`
+}
+
+// AreaForPoint returns the label of the most specific configured area that
+// contains (lat, lon), preferring the smallest matching area when several
+// nested areas overlap (e.g. a point inside both "Odense by" and "Fyn").
+// Returns ok=false for (0,0)/no-fix points or when no area matches.
+func AreaForPoint(lat, lon float64, areas map[string]AreaEntry) (label string, ok bool) {
+	if lat == 0 && lon == 0 {
+		return "", false
+	}
+	bestSpan := math.MaxFloat64
+	for _, a := range areas {
+		gf := &geofilter.Config{Polygon: a.Polygon, LatMin: a.LatMin, LatMax: a.LatMax, LonMin: a.LonMin, LonMax: a.LonMax}
+		if !geofilter.PassesFilter(lat, lon, gf) {
+			continue
+		}
+		span := areaSpan(a)
+		if span < bestSpan {
+			bestSpan = span
+			label = a.Label
+			ok = true
+		}
+	}
+	return label, ok
+}
+
+// areaSpan approximates an area's size as its bounding-box extent in
+// degrees², used only to rank overlapping areas from most to least specific.
+func areaSpan(a AreaEntry) float64 {
+	var latMin, latMax, lonMin, lonMax float64
+	switch {
+	case len(a.Polygon) > 0:
+		latMin, latMax = a.Polygon[0][0], a.Polygon[0][0]
+		lonMin, lonMax = a.Polygon[0][1], a.Polygon[0][1]
+		for _, p := range a.Polygon {
+			latMin, latMax = math.Min(latMin, p[0]), math.Max(latMax, p[0])
+			lonMin, lonMax = math.Min(lonMin, p[1]), math.Max(lonMax, p[1])
+		}
+	case a.LatMin != nil && a.LatMax != nil && a.LonMin != nil && a.LonMax != nil:
+		latMin, latMax, lonMin, lonMax = *a.LatMin, *a.LatMax, *a.LonMin, *a.LonMax
+	default:
+		return math.MaxFloat64
+	}
+	return (latMax - latMin) * (lonMax - lonMin)
 }
 
 // ListLimitsConfig defines maximum row limits for list endpoints to prevent DoS.

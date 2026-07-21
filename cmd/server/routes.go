@@ -3776,6 +3776,14 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.cfg != nil && len(s.cfg.Areas) > 0 {
+		for i := range resp.GPSShares {
+			if label, ok := AreaForPoint(resp.GPSShares[i].Lat, resp.GPSShares[i].Lon, s.cfg.Areas); ok {
+				resp.GPSShares[i].Area = &label
+			}
+		}
+	}
+
 	s.wardrivingStatsMu.Lock()
 	if s.wardrivingStatsCache == nil {
 		s.wardrivingStatsCache = make(map[string]*WardrivingStatsResponse)

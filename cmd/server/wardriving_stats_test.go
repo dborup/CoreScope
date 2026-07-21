@@ -449,6 +449,64 @@ func TestHandleWardrivingStats_GPSShares(t *testing.T) {
 	}
 }
 
+// TestHandleWardrivingStats_GPSShareArea confirms a shared position gets
+// tagged with the most specific configured area (config.Areas), and is left
+// unset when no area matches or none are configured.
+func TestHandleWardrivingStats_GPSShareArea(t *testing.T) {
+	srv, router := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`DELETE FROM transmissions`); err != nil {
+		t.Fatalf("clear transmissions: %v", err)
+	}
+	f := func(v float64) *float64 { return &v }
+	srv.cfg.Areas = map[string]AreaEntry{
+		"DK":  {Label: "Danmark (alle)", LatMin: f(54.5), LatMax: f(57.8), LonMin: f(8.0), LonMax: f(15.25)},
+		"ODE": {Label: "Odense by", LatMin: f(55.32), LatMax: f(55.45), LonMin: f(10.3), LonMax: f(10.5)},
+	}
+
+	insertTx := func(hash, sender, mmPayload string) {
+		ts := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
+		text := sender + ": " + mmPayload
+		if _, err := srv.db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex,hash,first_seen,route_type,payload_type,channel_hash,decoded_json) VALUES (?,?,?,1,5,'#wardriving',?)`,
+			"aa", hash, ts, `{"sender":"`+sender+`","text":"`+text+`"}`,
+		); err != nil {
+			t.Fatalf("insert tx %s: %v", hash, err)
+		}
+	}
+	insertTx("in-ode", "InOdense", "MM:c3e_zJ1rUA:55.4047,10.3810")     // inside Odense (and DK)
+	insertTx("outside", "Elsewhere", "MM:c3e_zJ1rUA:40.0000,-74.0000") // outside every configured area
+
+	req := httptest.NewRequest("GET", "/api/analytics/wardriving?window=24h", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp WardrivingStatsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+
+	byShare := map[string]WardrivingGPSShare{}
+	for _, s := range resp.GPSShares {
+		byShare[s.Sender] = s
+	}
+	inOdense, ok := byShare["InOdense"]
+	if !ok {
+		t.Fatal("InOdense missing from GPSShares")
+	}
+	if inOdense.Area == nil || *inOdense.Area != "Odense by" {
+		t.Errorf("InOdense.Area = %v, want \"Odense by\" (most specific match, not \"Danmark (alle)\")", inOdense.Area)
+	}
+	elsewhere, ok := byShare["Elsewhere"]
+	if !ok {
+		t.Fatal("Elsewhere missing from GPSShares")
+	}
+	if elsewhere.Area != nil {
+		t.Errorf("Elsewhere.Area = %v, want nil (outside every configured area)", *elsewhere.Area)
+	}
+}
+
 // TestHandleWardrivingStats_InvalidWindow mirrors the existing scope-stats
 // window validation.
 func TestHandleWardrivingStats_InvalidWindow(t *testing.T) {

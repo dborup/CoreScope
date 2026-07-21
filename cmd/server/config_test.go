@@ -515,3 +515,60 @@ func TestApplyListLimitsDefaults(t *testing.T) {
 		}
 	})
 }
+
+func TestAreaForPoint(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+
+	areas := map[string]AreaEntry{
+		"DK": {
+			Label:  "Danmark (alle)",
+			LatMin: f(54.5), LatMax: f(57.8),
+			LonMin: f(8.0), LonMax: f(15.25),
+		},
+		"FYN": {
+			Label:  "Fyn",
+			LatMin: f(54.9), LatMax: f(55.65),
+			LonMin: f(9.85), LonMax: f(11.0),
+		},
+		"ODE": {
+			Label:  "Odense by",
+			LatMin: f(55.32), LatMax: f(55.45),
+			LonMin: f(10.3), LonMax: f(10.5),
+		},
+	}
+
+	t.Run("picks the most specific nested area", func(t *testing.T) {
+		label, ok := AreaForPoint(55.4047, 10.381, areas) // central Odense
+		if !ok || label != "Odense by" {
+			t.Errorf("expected Odense by, got %q (ok=%v)", label, ok)
+		}
+	})
+
+	t.Run("falls back to a broader area when no narrower one matches", func(t *testing.T) {
+		label, ok := AreaForPoint(55.0, 10.6, areas) // Fyn but not Odense
+		if !ok || label != "Fyn" {
+			t.Errorf("expected Fyn, got %q (ok=%v)", label, ok)
+		}
+	})
+
+	t.Run("no match outside every area", func(t *testing.T) {
+		_, ok := AreaForPoint(60.0, 20.0, areas)
+		if ok {
+			t.Error("expected no match far outside Denmark")
+		}
+	})
+
+	t.Run("zero coordinates never match", func(t *testing.T) {
+		_, ok := AreaForPoint(0, 0, areas)
+		if ok {
+			t.Error("expected (0,0) to never match an area")
+		}
+	})
+
+	t.Run("empty areas map", func(t *testing.T) {
+		_, ok := AreaForPoint(55.4, 10.4, map[string]AreaEntry{})
+		if ok {
+			t.Error("expected no match with no configured areas")
+		}
+	})
+}

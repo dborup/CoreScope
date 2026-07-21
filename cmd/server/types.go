@@ -299,6 +299,9 @@ type WardrivingGPSShare struct {
 	Lon          float64 `json:"lon"`
 	MessageCount int     `json:"messageCount"` // how many times this sender shared a position in this window
 	LastSeen     string  `json:"lastSeen"`
+	// Area is the most specific configured area containing (Lat, Lon), set
+	// by the handler from config.Areas — omitted when no area matches.
+	Area *string `json:"area,omitempty"`
 }
 
 type WardrivingStatsResponse struct {
