@@ -2743,29 +2743,10 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 // resolves this way, or the resolved node has no position, or areas aren't
 // configured.
 func (s *Server) resolveEntryPointArea(prefixes []string) (label string, ok bool) {
-	if s.store == nil || s.cfg == nil || len(s.cfg.Areas) == 0 || len(prefixes) == 0 {
+	if s.store == nil {
 		return "", false
 	}
-	s.store.mu.RLock()
-	_, pm := s.store.getCachedNodesAndPM()
-	s.store.mu.RUnlock()
-	if pm == nil {
-		return "", false
-	}
-	for _, prefix := range prefixes {
-		candidates, found := pm.m[strings.ToLower(prefix)]
-		if !found || len(candidates) != 1 {
-			continue
-		}
-		ni := candidates[0]
-		if !ni.HasGPS {
-			continue
-		}
-		if label, ok := AreaForPoint(ni.Lat, ni.Lon, s.cfg.Areas); ok {
-			return label, true
-		}
-	}
-	return "", false
+	return s.store.resolveEntryPointArea(prefixes)
 }
 
 // annotateMessageAreas resolves each message's entry-point repeater (its

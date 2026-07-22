@@ -1423,6 +1423,10 @@
         var observer = m.data?.packet?.observer_name || m.data?.observer || null;
         var scope = m.data?.scope_name || m.data?.packet?.scope_name || null;
         var routeType = m.data?.route_type ?? m.data?.packet?.route_type ?? null;
+        // Same path[0]-resolved area as the REST message list (server-side
+        // resolveEntryPointArea, see store.go) -- already computed at
+        // broadcast time, just read it here.
+        var area = m.data?.area || m.data?.packet?.area || null;
 
         // Update channel list entry — only once per unique packet hash
         var isFirstObservation = pktHash && !seenHashes.has(pktHash + ':' + channelKey);
@@ -1476,6 +1480,7 @@
               snr: snr,
               scope: scope,
               routeType: routeType,
+              area: area,
               // #1498: mark as WS-pushed so a later REST replacement
               // (selectChannel / refreshMessages) can merge instead of
               // stomp. Without this flag the REST response wipes any

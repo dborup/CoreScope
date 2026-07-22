@@ -34,6 +34,7 @@ func setupTestServer(t *testing.T) (*Server, *mux.Router) {
 	if !store.WaitIndexesReady(5 * time.Second) {
 		t.Fatalf("background indexes never became ready")
 	}
+	store.config = cfg // mirrors main.go's real wiring -- store.resolveEntryPointArea/resolveAreaNodes need it
 	srv.store = store
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
@@ -55,6 +56,7 @@ func setupTestServerWithAPIKey(t *testing.T, apiKey string) (*Server, *mux.Route
 	if !store.WaitIndexesReady(5 * time.Second) {
 		t.Fatalf("background indexes never became ready")
 	}
+	store.config = cfg
 	srv.store = store
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
