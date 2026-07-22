@@ -244,6 +244,15 @@ type Config struct {
 
 	Areas map[string]AreaEntry `json:"areas,omitempty"`
 
+	// HomeArea names an entry in Areas whose geometry defines "home" for
+	// the foreign/domestic classification (geo_filter above), instead of
+	// maintaining a second, separately-drawn boundary that can drift out
+	// of sync with the area map (see AreaForPoint/AreaKeysForPoint).
+	// When set and the named area exists, it takes priority over any
+	// standalone GeoFilter value — see (*Server).getGeoFilter. Leave
+	// unset to keep using GeoFilter exactly as before.
+	HomeArea string `json:"homeArea,omitempty"`
+
 	Timestamps *TimestampConfig `json:"timestamps,omitempty"`
 
 	// CORSAllowedOrigins is the list of origins permitted to make cross-origin

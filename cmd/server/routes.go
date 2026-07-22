@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/packetpath"
 	"github.com/meshcore-analyzer/prunequeue"
 	regionutil "github.com/meshcore-analyzer/regions"
@@ -180,9 +181,26 @@ func (s *Server) isPubkeyHidden(pubkey string) bool {
 	return s.cfg.IsNameHidden(name)
 }
 
+// getGeoFilter returns the effective home-boundary geometry. If
+// cfg.HomeArea names an existing entry in cfg.Areas, that area's geometry
+// wins — a single boundary shared with the areas system, instead of a
+// second copy that can silently drift (see cfg.HomeArea doc comment).
+// Falls back to the standalone GeoFilter field when HomeArea is unset or
+// doesn't resolve, so existing deployments see no behavior change.
 func (s *Server) getGeoFilter() *GeoFilterConfig {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
+	if s.cfg != nil && s.cfg.HomeArea != "" {
+		if area, ok := s.cfg.Areas[s.cfg.HomeArea]; ok {
+			return &geofilter.Config{
+				Polygon: area.Polygon,
+				LatMin:  area.LatMin,
+				LatMax:  area.LatMax,
+				LonMin:  area.LonMin,
+				LonMax:  area.LonMax,
+			}
+		}
+	}
 	return s.cfg.GeoFilter
 }
 
