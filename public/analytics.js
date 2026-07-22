@@ -4504,12 +4504,18 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     var subtabKey = 'scopes_subtab';
     var selectedSubtab = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(subtabKey)) || 'overview';
 
-    // Role/text filter for the "Nodes Without a Default Scope" section
+    // Role/text/geo filter for the "Nodes Without a Default Scope" section
     // below. Lives at this scope (not inside updateData) so it survives
     // the 60s auto-refresh re-render — same reasoning as selectedWindow
     // above, just kept in memory rather than sessionStorage since it's a
     // finer-grained, more transient filter.
-    var noScopeFilter = { role: '', q: '' };
+    var noScopeFilter = { role: '', q: '', geo: '' };
+
+    // Geo filter for "Repeaters Never Relaying Any Scope" below — same
+    // domestic/foreign split as noScopeFilter.geo, kept separate since the
+    // two sections' result sets are independent (see
+    // computeRepeatersNeverRelayingScope's doc comment).
+    var neverRelayFilter = { geo: '' };
 
     // Encrypted/unencrypted filter for "Scope Adoption by Channel" below —
     // same persistence reasoning as noScopeFilter above. '' = all,
@@ -4657,7 +4663,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       var searchFocused = document.activeElement && document.activeElement.id === 'noScopeSearch';
       var caretPos = searchFocused ? document.activeElement.selectionStart : null;
 
-      var noScope = computeNodesWithoutScope(allNodes, 100, { role: noScopeFilter.role, q: noScopeFilter.q });
+      var noScope = computeNodesWithoutScope(allNodes, 100, { role: noScopeFilter.role, q: noScopeFilter.q, geo: noScopeFilter.geo });
       var roleSummaryText = noScope.roleSummary.map(function(r) { return r.count.toLocaleString() + ' ' + esc(r.role); }).join(', ');
 
       var roleButtons = '<button type="button" class="tab-btn' + (!noScopeFilter.role ? ' active' : '') +
@@ -4667,7 +4673,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             '" data-role-filter="' + esc(r.role) + '">' + esc(r.role) + ' (' + r.count.toLocaleString() + ')</button>';
         }).join('');
 
-      var controlsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 10px">' +
+      var controlsHtml = geoFilterButtons(noScopeFilter, 'geo-filter') +
+        '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 10px">' +
         roleButtons +
         '<input type="text" id="noScopeSearch" placeholder="Search by name or key…" value="' + esc(noScopeFilter.q) + '" ' +
           'style="margin-left:4px;padding:4px 8px;background:var(--card-bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.85em;min-width:180px">' +
@@ -4684,7 +4691,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<thead><tr><th>Node</th><th>Role</th><th>Last Seen</th></tr></thead>' +
           '<tbody>' + noScopeRows + '</tbody>' +
           '</table>';
-      } else if (noScopeFilter.role || noScopeFilter.q) {
+      } else if (noScopeFilter.role || noScopeFilter.q || noScopeFilter.geo) {
         resultsBody = '<p class="text-muted" style="font-size:0.85em">No nodes without a default scope match this filter.</p>';
       } else {
         resultsBody = '<p class="text-muted" style="font-size:0.85em">Every known node has a configured default scope.</p>';
@@ -4706,6 +4713,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       sectionEl.querySelectorAll('[data-role-filter]').forEach(function(btn) {
         btn.addEventListener('click', function() {
           noScopeFilter.role = btn.dataset.roleFilter || '';
+          renderNoScopeSection(allNodes);
+        });
+      });
+
+      sectionEl.querySelectorAll('[data-geo-filter]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          noScopeFilter.geo = btn.dataset.geoFilter || '';
           renderNoScopeSection(allNodes);
         });
       });
@@ -5246,37 +5260,62 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       // computeRepeatersNeverRelayingScope doc comment). Reuses the same
       // `allNodes` fetched above.
       var neverRelayEl = document.getElementById('scopes-never-relay-scope');
-      if (neverRelayEl && !allNodes) {
-        setSectionHtml(neverRelayEl, detailsSection('Repeaters Never Relaying Any Scope', null, '<p class="text-muted">Failed to load.</p>', 'never-relay'));
-      } else if (neverRelayEl) {
-        try {
-          var neverRelay = computeRepeatersNeverRelayingScope(allNodes, 100);
-          var neverRelayBody;
-          if (neverRelay.sortedCapped.length > 0) {
-            var neverRelayRows = neverRelay.sortedCapped.map(function(n) {
-              return '<tr><td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
-                '<td>' + esc(n.role || '—') + '</td>' +
-                '<td>' + (n.relay_count_24h || 0).toLocaleString() + '</td>' +
-                '<td>' + timeAgo(n.last_seen) + '</td></tr>';
-            }).join('');
-            neverRelayBody = '<table class="data-table analytics-table">' +
-              '<thead><tr><th>Repeater</th><th>Role</th><th>Relays (24h)</th><th>Last Seen</th></tr></thead>' +
-              '<tbody>' + neverRelayRows + '</tbody>' +
-              '</table>';
-          } else {
-            neverRelayBody = '<p class="text-muted" style="font-size:0.85em">Every known repeater/room has relayed at least one region-scoped packet.</p>';
-          }
-          setSectionHtml(neverRelayEl, detailsSection(
-            'Repeaters Never Relaying Any Scope (' + neverRelay.total.toLocaleString() + ')',
-            'Repeater/room nodes that have never carried a single region-scoped (TRANSPORT_FLOOD/DIRECT) packet, ever — not the same set as "no default_scope" above: a repeater\'s hashRegions config can let it relay for others even when its own adverts never carry a matching transport code. ' +
-              'Sorted by current relay volume — the busiest ones are the most consequential to configure first' + (neverRelay.truncated ? ' (showing the top ' + neverRelay.sortedCapped.length + ')' : '') + '.',
-            neverRelayBody,
-            'never-relay'
-          ));
-        } catch (e) {
+      if (neverRelayEl) {
+        if (allNodes) {
+          renderNeverRelaySection(allNodes);
+        } else {
           setSectionHtml(neverRelayEl, detailsSection('Repeaters Never Relaying Any Scope', null, '<p class="text-muted">Failed to load.</p>', 'never-relay'));
         }
       }
+    }
+
+    // Renders (and re-renders, on geo filter change) the "Repeaters Never
+    // Relaying Any Scope" section from the already-fetched node list — same
+    // reactive-filter pattern as renderNoScopeSection above.
+    function renderNeverRelaySection(allNodes) {
+      var neverRelayElInner = document.getElementById('scopes-never-relay-scope');
+      if (!neverRelayElInner) return;
+      try {
+        var neverRelay = computeRepeatersNeverRelayingScope(allNodes, 100, { geo: neverRelayFilter.geo });
+        var neverRelayBody;
+        if (neverRelay.sortedCapped.length > 0) {
+          var neverRelayRows = neverRelay.sortedCapped.map(function(n) {
+            return '<tr><td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
+              '<td>' + esc(n.role || '—') + '</td>' +
+              '<td>' + (n.relay_count_24h || 0).toLocaleString() + '</td>' +
+              '<td>' + timeAgo(n.last_seen) + '</td></tr>';
+          }).join('');
+          neverRelayBody = '<table class="data-table analytics-table">' +
+            '<thead><tr><th>Repeater</th><th>Role</th><th>Relays (24h)</th><th>Last Seen</th></tr></thead>' +
+            '<tbody>' + neverRelayRows + '</tbody>' +
+            '</table>';
+        } else if (neverRelayFilter.geo) {
+          neverRelayBody = '<p class="text-muted" style="font-size:0.85em">No repeaters match this filter.</p>';
+        } else {
+          neverRelayBody = '<p class="text-muted" style="font-size:0.85em">Every known repeater/room has relayed at least one region-scoped packet.</p>';
+        }
+        setSectionHtml(neverRelayElInner, detailsSection(
+          'Repeaters Never Relaying Any Scope (' + neverRelay.total.toLocaleString() + ')',
+          'Repeater/room nodes that have never carried a single region-scoped (TRANSPORT_FLOOD/DIRECT) packet, ever — not the same set as "no default_scope" above: a repeater\'s hashRegions config can let it relay for others even when its own adverts never carry a matching transport code. ' +
+            'Sorted by current relay volume — the busiest ones are the most consequential to configure first' +
+            (neverRelay.filteredTotal !== neverRelay.total ? ', filtered to ' + neverRelay.filteredTotal.toLocaleString() + ' matching below' : '') +
+            (neverRelay.truncated ? ' (showing the top ' + neverRelay.sortedCapped.length + ')' : '') + '.',
+          geoFilterButtons(neverRelayFilter, 'never-relay-geo-filter') + neverRelayBody,
+          'never-relay'
+        ));
+      } catch (e) {
+        setSectionHtml(neverRelayElInner, detailsSection('Repeaters Never Relaying Any Scope', null, '<p class="text-muted">Failed to load.</p>', 'never-relay'));
+        return;
+      }
+
+      var sectionEl = document.getElementById('scopes-never-relay-scope');
+      if (!sectionEl) return;
+      sectionEl.querySelectorAll('[data-never-relay-geo-filter]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          neverRelayFilter.geo = btn.dataset.neverRelayGeoFilter || '';
+          renderNeverRelaySection(allNodes);
+        });
+      });
     }
 
 
@@ -5301,6 +5340,27 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // returns a most-recently-active-first slice capped at `cap` rows.
   // `total` is always the full unfiltered count; `filteredTotal` reflects
   // opts.
+
+  // Classifies live from the node's own lat/lon against the currently
+  // configured geo_filter (window.MC_GEO_FILTER, set from
+  // /api/config/client — see public/roles.js), mirroring the Nodes tab's
+  // Domestic/Foreign filter (public/nodes.js) and renderForeignTrafficTab's
+  // isForeignNode below — NOT the node's one-way, never-cleared `foreign`
+  // DB flag.
+  function nodeMatchesGeo(n, mode) {
+    if (!mode) return true;
+    var domestic = nodePassesGeoFilter(n.lat, n.lon, window.MC_GEO_FILTER);
+    return mode === 'domestic' ? domestic : !domestic;
+  }
+
+  function geoFilterButtons(filter, dataAttr) {
+    return '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">' +
+      '<button type="button" class="tab-btn' + (!filter.geo ? ' active' : '') + '" data-' + dataAttr + '="">All</button>' +
+      '<button type="button" class="tab-btn' + (filter.geo === 'domestic' ? ' active' : '') + '" data-' + dataAttr + '="domestic">Domestic</button>' +
+      '<button type="button" class="tab-btn' + (filter.geo === 'foreign' ? ' active' : '') + '" data-' + dataAttr + '="foreign">Foreign</button>' +
+      '</div>';
+  }
+
   function computeNodesWithoutScope(allNodes, cap, opts) {
     opts = opts || {};
     var noScopeNodes = allNodes.filter(function(n) { return !n.default_scope; });
@@ -5314,6 +5374,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       .map(function(r) { return { role: r, count: roleCounts[r] }; });
 
     var filtered = noScopeNodes;
+    if (opts.geo) {
+      filtered = filtered.filter(function(n) { return nodeMatchesGeo(n, opts.geo); });
+    }
     if (opts.role) {
       filtered = filtered.filter(function(n) { return (n.role || 'unknown') === opts.role; });
     }
@@ -5349,16 +5412,19 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // out rather than silently 0-counted alongside them. Sorted by
   // relay_count_24h descending: the busiest unconfigured repeaters are the
   // most consequential ones to fix first.
-  function computeRepeatersNeverRelayingScope(allNodes, cap) {
+  function computeRepeatersNeverRelayingScope(allNodes, cap, opts) {
+    opts = opts || {};
     var candidates = allNodes.filter(function(n) {
       return (n.role === 'repeater' || n.role === 'room') &&
         (!n.transported_scopes || n.transported_scopes.length === 0);
     });
-    var sorted = candidates.slice().sort(function(a, b) {
+    var filtered = opts.geo ? candidates.filter(function(n) { return nodeMatchesGeo(n, opts.geo); }) : candidates;
+    var sorted = filtered.slice().sort(function(a, b) {
       return Number(b.relay_count_24h || 0) - Number(a.relay_count_24h || 0);
     });
     return {
       total: candidates.length,
+      filteredTotal: filtered.length,
       sortedCapped: sorted.slice(0, cap),
       truncated: sorted.length > cap,
     };
