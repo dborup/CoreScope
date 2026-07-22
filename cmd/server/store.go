@@ -3645,9 +3645,12 @@ func (s *PacketStore) resolveEntryPointArea(prefixes []string) (label string, ok
 	if s == nil || s.config == nil || len(s.config.Areas) == 0 || len(prefixes) == 0 {
 		return "", false
 	}
-	s.mu.RLock()
+	// getCachedNodesAndPM guards itself with its own cacheMu -- it never
+	// touches s.mu. Do not wrap this call in s.mu.RLock(): callers like
+	// IngestNewFromDB/IngestNewObservations invoke this while already
+	// holding s.mu.Lock(), and Go's RWMutex is not reentrant, so an
+	// RLock here would deadlock against the caller's own write lock.
 	_, pm := s.getCachedNodesAndPM()
-	s.mu.RUnlock()
 	if pm == nil {
 		return "", false
 	}
