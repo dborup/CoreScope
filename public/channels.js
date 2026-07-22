@@ -60,7 +60,6 @@
   let selectedNode = null;
   let observerIataById = {};
   let observerIataByName = {};
-  let regionAreaLabels = {};
   let messageRequestId = 0;
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
 
@@ -116,26 +115,6 @@
       observerIataById = byId;
       observerIataByName = byName;
     } catch {}
-  }
-
-  // regionScope ("dk-aarhus", no leading '#') -> area label ("Aarhus by"),
-  // for annotating a message's "Scope: #dk-aarhus" tag with the linked
-  // area's human name. Same convention as analytics.js's Scopes tab.
-  async function loadRegionAreaLabels() {
-    try {
-      var areas = await api('/config/areas', { ttl: CLIENT_TTL.nodeDetail });
-      var labels = {};
-      (areas || []).forEach(function (a) {
-        if (a.regionScope) labels[a.regionScope.toLowerCase()] = a.label;
-      });
-      regionAreaLabels = labels;
-    } catch {}
-  }
-
-  function areaLabelForScope(rawScope) {
-    if (!rawScope) return null;
-    var key = String(rawScope).replace(/^#/, '').toLowerCase();
-    return regionAreaLabels[key] || null;
   }
 
   function beginMessageRequest(hash, regionParam) {
@@ -1140,7 +1119,6 @@
     });
 
     loadObserverRegions();
-    loadRegionAreaLabels();
     loadChannels().then(async function () {
       // Also load user-added encrypted channels into the sidebar.
       // mergeUserChannels() mutates `channels` (marks userAdded, appends
@@ -2295,10 +2273,8 @@
       // HMAC collision made the match ambiguous) — show it as unknown
       // rather than silently omitting the tag.
       const isTransportRoute = msg.routeType === 0 || msg.routeType === 3;
-      if (msg.scope) {
-        const areaLabel = areaLabelForScope(msg.scope);
-        meta.push(`Scope: ${escapeHtml(msg.scope)}` + (areaLabel ? ` (${escapeHtml(areaLabel)})` : ''));
-      } else if (isTransportRoute) meta.push('Scope: unknown');
+      if (msg.scope) meta.push(`Scope: ${escapeHtml(msg.scope)}`);
+      else if (isTransportRoute) meta.push('Scope: unknown');
       // msg.area (set server-side from the message's own path[0]
       // entry-point repeater, not from the scope string) is where the
       // SENDER physically was — distinct from the scope-linked area
