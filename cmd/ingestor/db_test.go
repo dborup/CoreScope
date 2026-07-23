@@ -1386,13 +1386,15 @@ func TestUpdateNodeTelemetry(t *testing.T) {
 
 	battery := 3700
 	temp := 28.5
-	if err := s.UpdateNodeTelemetry("telem1", &battery, &temp); err != nil {
+	feat1 := 0x12
+	feat2 := 0x34
+	if err := s.UpdateNodeTelemetry("telem1", &battery, &temp, &feat1, &feat2); err != nil {
 		t.Fatal(err)
 	}
 
-	var bv int
+	var bv, f1, f2 int
 	var tc float64
-	err = s.db.QueryRow("SELECT battery_mv, temperature_c FROM nodes WHERE public_key = 'telem1'").Scan(&bv, &tc)
+	err = s.db.QueryRow("SELECT battery_mv, temperature_c, feat1, feat2 FROM nodes WHERE public_key = 'telem1'").Scan(&bv, &tc, &f1, &f2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1402,12 +1404,18 @@ func TestUpdateNodeTelemetry(t *testing.T) {
 	if tc != 28.5 {
 		t.Errorf("temperature_c=%f, want 28.5", tc)
 	}
+	if f1 != 0x12 {
+		t.Errorf("feat1=%d, want %d", f1, 0x12)
+	}
+	if f2 != 0x34 {
+		t.Errorf("feat2=%d, want %d", f2, 0x34)
+	}
 
 	newTemp := -5.0
-	if err := s.UpdateNodeTelemetry("telem1", nil, &newTemp); err != nil {
+	if err := s.UpdateNodeTelemetry("telem1", nil, &newTemp, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	err = s.db.QueryRow("SELECT battery_mv, temperature_c FROM nodes WHERE public_key = 'telem1'").Scan(&bv, &tc)
+	err = s.db.QueryRow("SELECT battery_mv, temperature_c, feat1, feat2 FROM nodes WHERE public_key = 'telem1'").Scan(&bv, &tc, &f1, &f2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1416,6 +1424,12 @@ func TestUpdateNodeTelemetry(t *testing.T) {
 	}
 	if tc != -5.0 {
 		t.Errorf("temperature_c after update=%f, want -5.0", tc)
+	}
+	if f1 != 0x12 {
+		t.Errorf("feat1 after nil update=%d, want %d (preserved)", f1, 0x12)
+	}
+	if f2 != 0x34 {
+		t.Errorf("feat2 after nil update=%d, want %d (preserved)", f2, 0x34)
 	}
 }
 
@@ -1429,6 +1443,15 @@ func TestTelemetryMigrationAddsColumns(t *testing.T) {
 	_, err = s.db.Exec("SELECT battery_mv, temperature_c FROM nodes LIMIT 1")
 	if err != nil {
 		t.Errorf("nodes table should have battery_mv and temperature_c columns: %v", err)
+	}
+
+	_, err = s.db.Exec("SELECT feat1, feat2 FROM nodes LIMIT 1")
+	if err != nil {
+		t.Errorf("nodes table should have feat1 and feat2 columns: %v", err)
+	}
+	_, err = s.db.Exec("SELECT feat1, feat2 FROM inactive_nodes LIMIT 1")
+	if err != nil {
+		t.Errorf("inactive_nodes table should have feat1 and feat2 columns: %v", err)
 	}
 
 	_, err = s.db.Exec("SELECT battery_mv, temperature_c FROM inactive_nodes LIMIT 1")
