@@ -2290,6 +2290,23 @@
       if (msg.area) meta.push(`area: ${escapeHtml(msg.area)}`);
 
       const safeId = btoa(encodeURIComponent(sender));
+
+      // Ping-bot reply (server-synthesized in GetChannelMessages when this
+      // message's text is exactly "ping" -- see pingBotReply in db.go).
+      // CoreScope-only: never transmitted back onto the mesh, since
+      // CoreScope has no publish path to a MeshCore broker/radio. The
+      // "Not sent to the mesh" caveat is load-bearing, not decoration --
+      // without it this could be misread as a real bot reply the sender's
+      // own radio received.
+      const botReplyHtml = msg.botReply ? `<div class="ch-msg ch-message ch-bot-message">
+        <div class="ch-avatar" aria-hidden="true" style="background:var(--text-muted)">🤖</div>
+        <div class="ch-msg-content ch-message-content">
+          <div class="ch-msg-sender ch-message-sender" style="color:var(--text-muted)">${escapeHtml(msg.botReply.sender || 'MeshviewBot')}</div>
+          <div class="ch-msg-bubble ch-message-bubble">${escapeHtml(msg.botReply.text || '')}</div>
+          <div class="ch-msg-meta ch-message-meta">Not sent to the mesh — CoreScope-only reply</div>
+        </div>
+      </div>` : '';
+
       // #1367: emit BOTH the new chat-app class names (.ch-message /
       // .ch-message-bubble / .ch-message-meta) and the legacy .ch-msg*
       // names so existing tests/themes don't regress.
@@ -2300,7 +2317,7 @@
           <div class="ch-msg-bubble ch-message-bubble">${displayText}</div>
           <div class="ch-msg-meta ch-message-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
         </div>
-      </div>`;
+      </div>${botReplyHtml}`;
     }).join('');
   }
 
@@ -2309,6 +2326,7 @@
     if (msgEl) { msgEl.scrollTop = msgEl.scrollHeight; autoScroll = true; document.getElementById('chScrollBtn')?.classList.add('hidden'); }
   }
 
+  window._channelsRenderMessagesForTest = renderMessages;
   window._channelsSetStateForTest = function (state) {
     if (!state) return;
     if (Array.isArray(state.channels)) channels = state.channels;

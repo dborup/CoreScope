@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1397,6 +1398,88 @@ func TestGetChannelMessagesNoSender(t *testing.T) {
 	}
 	if len(messages) != 1 {
 		t.Errorf("expected 1 message, got %d", len(messages))
+	}
+}
+
+// TestGetChannelMessages_PingBotReply covers the CoreScope-only "ping"
+// bot: a channel message whose text is exactly "ping" gets a synthetic
+// botReply attached (never transmitted back onto the mesh -- see
+// pingBotReply's doc comment), while ordinary messages don't.
+func TestGetChannelMessages_PingBotReply(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+
+	// tx1: a plain chat message -- must NOT get a botReply.
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'chanmsg00000001', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"just chatting","sender":"Alice"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa","bb"]', 1736935200)`)
+
+	// tx2: bare "ping" -- must get a botReply with hops=2, snr=8.2, observer.
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('BB', 'chanmsg00000002', '2026-01-15T10:01:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Bob"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (2, 1, 8.2, -90, '["aa","bb"]', 1736935260)`)
+
+	// tx3: "@MeshviewBot ping" -- the mention-prefix must be stripped before matching.
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('CC', 'chanmsg00000003', '2026-01-15T10:02:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"@MeshviewBot ping","sender":"Carol"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (3, 1, 5.0, -95, '[]', 1736935320)`)
+
+	// tx4: "pinging" -- must NOT match (not an exact "ping").
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('DD', 'chanmsg00000004', '2026-01-15T10:03:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"pinging around","sender":"Dave"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (4, 1, 3.0, -99, '[]', 1736935380)`)
+
+	messages, total, err := db.GetChannelMessages("#ping", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 {
+		t.Fatalf("expected 4 messages, got %d", total)
+	}
+
+	byText := map[string]map[string]interface{}{}
+	for _, m := range messages {
+		byText[m["text"].(string)] = m
+	}
+
+	if r := byText["just chatting"]["botReply"]; r != nil {
+		t.Errorf("plain chat message should not get a botReply, got %+v", r)
+	}
+	if r := byText["pinging around"]["botReply"]; r != nil {
+		t.Errorf("\"pinging\" should not match the exact \"ping\" trigger, got %+v", r)
+	}
+
+	pingReply, _ := byText["ping"]["botReply"].(map[string]interface{})
+	if pingReply == nil {
+		t.Fatal("bare \"ping\" message should get a botReply")
+	}
+	if pingReply["sender"] != "MeshviewBot" {
+		t.Errorf("botReply sender = %v, want MeshviewBot", pingReply["sender"])
+	}
+	if pingReply["hops"] != 2 {
+		t.Errorf("botReply hops = %v, want 2", pingReply["hops"])
+	}
+	replyText, _ := pingReply["text"].(string)
+	if !strings.Contains(replyText, "2 hops") || !strings.Contains(replyText, "8.2dB") || !strings.Contains(replyText, "Observer One") {
+		t.Errorf("botReply text = %q, want hops/SNR/observer mentioned", replyText)
+	}
+
+	mentionReply, _ := byText["@MeshviewBot ping"]["botReply"].(map[string]interface{})
+	if mentionReply == nil {
+		t.Fatal("\"@MeshviewBot ping\" should get a botReply (mention prefix stripped before matching)")
+	}
+	if mentionReply["hops"] != 0 {
+		t.Errorf("mention-prefixed ping botReply hops = %v, want 0 (empty path)", mentionReply["hops"])
 	}
 }
 

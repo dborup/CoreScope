@@ -1749,6 +1749,48 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 // This avoids loading every observation row for a channel into Go memory
 // before paginating (issue #1225: 5703 tx × ~50 obs ≈ 275K rows → ~30s
 // for limit=50).
+// channelMentionPrefixRe strips a leading "@target " reply-address the
+// same way the frontend does (public/channels.js replyMatch) before
+// matching the ping trigger, so "@MeshviewBot ping" triggers the same as
+// a bare "ping".
+var channelMentionPrefixRe = regexp.MustCompile(`^@[A-Za-z0-9_-]{1,32}\s+`)
+
+// pingBotReply synthesizes a "pong" reply for a channel message whose
+// (mention-stripped) text is exactly "ping" — CoreScope-side only, never
+// transmitted back onto the mesh (CoreScope has no publish path to a
+// MeshCore broker/radio). Purely a read-time annotation over data this
+// message's own row already carries (hop count, SNR, hearing observer),
+// not a persisted message: nil when text isn't a ping trigger.
+func pingBotReply(displayText string, hops int, snr sql.NullFloat64, observer string) map[string]interface{} {
+	trigger := strings.TrimSpace(displayText)
+	trigger = channelMentionPrefixRe.ReplaceAllString(trigger, "")
+	if !strings.EqualFold(strings.TrimSpace(trigger), "ping") {
+		return nil
+	}
+	parts := make([]string, 0, 3)
+	if hops > 0 {
+		s := "s"
+		if hops == 1 {
+			s = ""
+		}
+		parts = append(parts, fmt.Sprintf("%d hop%s", hops, s))
+	} else {
+		parts = append(parts, "0 hops (direct)")
+	}
+	if snr.Valid {
+		parts = append(parts, fmt.Sprintf("SNR %.1fdB", snr.Float64))
+	}
+	if observer != "" {
+		parts = append(parts, "heard by "+observer)
+	}
+	return map[string]interface{}{
+		"sender": "MeshviewBot",
+		"text":   "🏓 pong! " + strings.Join(parts, " · "),
+		"hops":   hops,
+		"snr":    nullFloat(snr),
+	}
+}
+
 func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region ...string) ([]map[string]interface{}, int, error) {
 	if limit <= 0 {
 		limit = 100
@@ -1978,10 +2020,16 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		if obsTs.Valid {
 			m.LatestEpoch = obsTs.Int64
 		}
+		observerName := ""
 		if obsName.Valid {
+			observerName = obsName.String
 			m.Data["observers"] = []string{obsName.String}
 		} else if obsID.Valid {
+			observerName = obsID.String
 			m.Data["observers"] = []string{obsID.String}
+		}
+		if reply := pingBotReply(displayText, hops, snr, observerName); reply != nil {
+			m.Data["botReply"] = reply
 		}
 		msgMap[txID] = m
 	}

@@ -1,0 +1,143 @@
+/**
+ * Unit tests for the CoreScope-only "ping" bot reply bubble
+ * (public/channels.js renderMessages' botReplyHtml block).
+ *
+ * The backend (cmd/server/db.go pingBotReply) attaches a synthetic
+ * `botReply` field to a channel message whose text is exactly "ping" --
+ * this file covers that the frontend renders it distinctly, includes the
+ * "not sent to the mesh" caveat, and escapes attacker-controlled fields
+ * (observer names flow into botReply.text server-side, so it must not be
+ * trusted blindly).
+ *
+ * Sandbox pattern borrowed from test-channels-merge-1498-unit.js: load
+ * channels.js in a tolerant vm context, grab the test-only export.
+ */
+'use strict';
+const vm = require('vm');
+const fs = require('fs');
+const assert = require('assert');
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function makeSandbox() {
+  const noop = () => {};
+  const fakeEl = () => ({
+    addEventListener: noop, querySelector: () => null, querySelectorAll: () => [],
+    classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
+    appendChild: noop, removeChild: noop, setAttribute: noop, getAttribute: () => null,
+    textContent: '', innerHTML: '', style: {}, dataset: {}, scrollTop: 0, scrollHeight: 0,
+  });
+  const chMessagesEl = fakeEl();
+  const doc = {
+    readyState: 'complete', createElement: fakeEl, head: fakeEl(), body: fakeEl(),
+    documentElement: fakeEl(),
+    getElementById: (id) => (id === 'chMessages' ? chMessagesEl : null),
+    querySelector: () => null, querySelectorAll: () => [],
+    addEventListener: noop,
+  };
+  const win = { addEventListener: noop, matchMedia: () => ({ matches: false, addListener: noop, addEventListener: noop }) };
+  const ctx = {
+    window: win, document: doc, console, Date, Math, JSON, Set, Map, Array, Object, Promise, Response: function () {}, Error,
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    history: { replaceState: noop, pushState: noop },
+    location: { hash: '', href: '', pathname: '/' },
+    navigator: { userAgent: 'node' },
+    RegionFilter: { getRegionParam: () => '' },
+    api: () => Promise.resolve({ messages: [] }),
+    CLIENT_TTL: {},
+    ChannelDecrypt: undefined,
+    truncate: (s) => s,
+    formatHashHex: (h) => String(h),
+    channelDisplayName: (c) => c && c.name,
+    escapeHtml,
+    getSenderColor: () => '#123456',
+    fetch: () => Promise.resolve({ json: () => Promise.resolve({}) }),
+    btoa: (s) => Buffer.from(String(s), 'binary').toString('base64'),
+  };
+  vm.createContext(ctx);
+  try {
+    vm.runInContext(fs.readFileSync('public/channels.js', 'utf8'), ctx);
+  } catch (e) {
+    // Tolerant: only the render path under test needs to have been
+    // exported before any unrelated init code throws.
+  }
+  return { ctx, chMessagesEl };
+}
+
+let passed = 0, failed = 0;
+function test(name, fn) {
+  try { fn(); passed++; console.log('  ✅ ' + name); }
+  catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+}
+
+console.log('\n=== channels.js: ping-bot reply rendering ===');
+
+test('a message without botReply renders no bot bubble', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    { sender: 'Alice', text: 'just chatting', timestamp: '2026-01-15T10:00:00Z' },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  assert.ok(!chMessagesEl.innerHTML.includes('ch-bot-message'), 'no botReply field should mean no bot bubble');
+});
+
+test('a message with botReply renders a distinct bot bubble with the reply text', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    {
+      sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z',
+      botReply: { sender: 'MeshviewBot', text: '🏓 pong! 2 hops · SNR 8.2dB · heard by Observer One', hops: 2, snr: 8.2 },
+    },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  const html = chMessagesEl.innerHTML;
+  assert.ok(html.includes('ch-bot-message'), 'should render the distinct bot-message class');
+  assert.ok(html.includes('MeshviewBot'), 'should show the bot sender name');
+  assert.ok(html.includes('2 hops'), 'should include the hop count from the reply text');
+  assert.ok(html.includes('SNR 8.2dB'), 'should include the SNR from the reply text');
+});
+
+test('the "not sent to the mesh" caveat is always present on a bot bubble', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    { sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z', botReply: { sender: 'MeshviewBot', text: 'pong', hops: 0 } },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  assert.ok(chMessagesEl.innerHTML.includes('Not sent to the mesh'), 'the caveat must be visible so this is never mistaken for a real mesh reply');
+});
+
+test('botReply.text and .sender are HTML-escaped (observer names are operator-controlled)', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    {
+      sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z',
+      botReply: { sender: '<img src=x onerror=alert(1)>', text: 'heard by <script>alert(2)</script>', hops: 0 },
+    },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  const html = chMessagesEl.innerHTML;
+  assert.ok(!html.includes('<img src=x'), 'botReply.sender must be escaped');
+  assert.ok(!html.includes('<script>alert(2)'), 'botReply.text must be escaped');
+});
+
+test('the bot bubble renders immediately after its triggering message, not before other messages', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    { sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z', botReply: { sender: 'MeshviewBot', text: 'pong', hops: 0 } },
+    { sender: 'Carol', text: 'after', timestamp: '2026-01-15T10:02:00Z' },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  const html = chMessagesEl.innerHTML;
+  const pingIdx = html.indexOf('>ping<');
+  const botIdx = html.indexOf('ch-bot-message');
+  const afterIdx = html.indexOf('>after<');
+  assert.ok(pingIdx > -1 && botIdx > -1 && afterIdx > -1, 'all three pieces should be present');
+  assert.ok(pingIdx < botIdx && botIdx < afterIdx, 'order should be: ping message, bot reply, next message');
+});
+
+console.log('\n════════════════════════════════════════');
+console.log(`  Channels ping-bot reply: ${passed} passed, ${failed} failed`);
+console.log('════════════════════════════════════════');
+if (failed > 0) process.exit(1);
