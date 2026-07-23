@@ -2719,6 +2719,12 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsStopWardrivingRefresh = _stopWardrivingRefresh;
     window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
     window._analyticsComputeRepeatersNeverRelayingScope = computeRepeatersNeverRelayingScope;
+    window._analyticsHopDepthBucketStats = hopDepthBucketStats;
+    window._analyticsHopDepthPercentile = hopDepthPercentile;
+    window._analyticsRenderHopDepthSectionHtml = renderHopDepthSectionHtml;
+    window._analyticsHopDepthTimeSeriesChartHtml = hopDepthTimeSeriesChartHtml;
+    window._analyticsHopDepthLookupByPubkey = hopDepthLookupByPubkey;
+    window._analyticsBridgeRepeaterPubkeySet = bridgeRepeaterPubkeySet;
   }
 
   // ─── Neighbor Graph Tab ─────────────────────────────────────────────────────
@@ -4491,16 +4497,18 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     var winKey = 'scopes_window';
     var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
 
-    // #1852: the tab grew to 12 stacked sections (windowed adoption stats,
+    // #1852: the tab grew to stacked sections (windowed adoption stats,
     // all-time region breakdowns, all-time node/repeater hygiene lists) —
-    // grouped into 3 sub-tabs so a visitor sees one coherent screen at a
-    // time instead of one long scroll. Purely presentational: all three
-    // groups' data still loads together (one #scope-stats fetch + the two
-    // hygiene sections' own fetchAllNodes calls), only DOM visibility is
-    // gated on the active sub-tab. The 1h/24h/7d window picker only
-    // affects the Overview group (the all-time Regions/Hygiene sections
-    // ignore it entirely), so it lives inside that panel, not above the
-    // sub-tab bar.
+    // grouped into sub-tabs so a visitor sees one coherent screen at a
+    // time instead of one long scroll. Purely presentational: every
+    // group's data still loads together (one #scope-stats fetch + the
+    // hop-depth fetch + the two hygiene sections' own fetchAllNodes
+    // calls), only DOM visibility is gated on the active sub-tab. The
+    // 1h/24h/7d window picker affects Overview and Hop Depth (both
+    // windowed) but not the all-time Regions/Hygiene groups, so each
+    // windowed panel gets its own copy of the picker buttons rather than
+    // one shared control above the sub-tab bar — every button still
+    // drives the same selectedWindow/load(), see the click listener below.
     var subtabKey = 'scopes_subtab';
     var selectedSubtab = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(subtabKey)) || 'overview';
 
@@ -4534,6 +4542,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         '<div class="analytics-tabs" id="scopesSubtabs" style="margin-bottom:12px">' +
           [
             { key: 'overview', label: 'Overview' },
+            { key: 'hopdepth', label: 'Hop Depth' },
             { key: 'regions', label: 'Regions' },
             { key: 'hygiene', label: 'Hygiene' },
           ].map(function(t) {
@@ -4561,6 +4570,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             '<div id="scopes-chart"></div>' +
           '</details>' +
         '</div>' +
+        '<div id="scopes-panel-hopdepth" style="display:' + (selectedSubtab === 'hopdepth' ? '' : 'none') + '">' +
+          '<div style="margin-bottom:12px">' +
+            ['1h', '24h', '7d'].map(function(v) {
+              return '<button class="tab-btn' + (selectedWindow === v ? ' active' : '') + '" data-win="' + v + '">' + v + '</button>';
+            }).join('') +
+          '</div>' +
+          '<div id="scopes-hop-depth"></div>' +
+        '</div>' +
         '<div id="scopes-panel-regions" style="display:' + (selectedSubtab === 'regions' ? '' : 'none') + '">' +
           '<div id="scopes-area-adoption"></div>' +
           '<div id="scopes-utilization"></div>' +
@@ -4582,7 +4599,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           selectedSubtab = btn.dataset.subtab;
           if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(subtabKey, selectedSubtab);
           subtabsEl.querySelectorAll('[data-subtab]').forEach(function(b) { b.classList.toggle('active', b.dataset.subtab === selectedSubtab); });
-          ['overview', 'regions', 'hygiene'].forEach(function(key) {
+          ['overview', 'hopdepth', 'regions', 'hygiene'].forEach(function(key) {
             var panel = document.getElementById('scopes-panel-' + key);
             if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
           });
@@ -4936,6 +4953,22 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
               '</div>';
           }).join('') +
         '</div>';
+      }
+
+      // Flood-containment check: is scoping actually working, i.e. does
+      // scoped traffic travel fewer relay hops than unscoped traffic before
+      // a repeater's flood.max cap kicks in? Same 0-based per-node hop
+      // index as /api/nodes/{pubkey}/hop_analytics (issue #1812) — NOT the
+      // unrelated observer-distance hopDistribution field.
+      var hopDepthEl = document.getElementById('scopes-hop-depth');
+      var hopDepthData = null;
+      try {
+        hopDepthData = await api('/analytics/hop-depth?window=' + encodeURIComponent(w), { ttl: 30000 });
+      } catch (e) {
+        hopDepthData = null;
+      }
+      if (hopDepthEl) {
+        hopDepthEl.innerHTML = renderHopDepthSectionHtml(hopDepthData);
       }
 
       // Channel-messages-only breakdown: same scoped/unscoped/unknown
@@ -5386,6 +5419,213 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       '</div>';
   }
 
+  // Weighted median + total from a HopDepthBucket[] (see GetHopDepthAnalytics).
+  function hopDepthBucketStats(buckets) {
+    var total = 0;
+    (buckets || []).forEach(function(b) { total += b.count; });
+    if (!total) return { total: 0, median: null };
+    var sorted = (buckets || []).slice().sort(function(a, b) { return a.hops - b.hops; });
+    var cum = 0, median = null;
+    sorted.forEach(function(b) {
+      cum += b.count;
+      if (median === null && cum >= total / 2) median = b.hops;
+    });
+    return { total: total, median: median };
+  }
+
+  // Cumulative-count percentile from a HopDepthBucket[] (see
+  // GetHopDepthAnalytics) -- p is 0..1 (e.g. 0.95 for P95). Returns the
+  // smallest hop value whose cumulative count reaches that fraction of
+  // the total, or null when there's no data. Used to turn the raw
+  // scoped/unscoped histograms into a concrete "set flood.max.unscoped to
+  // roughly this" number, rather than making the operator eyeball the bar
+  // chart themselves.
+  function hopDepthPercentile(buckets, p) {
+    var total = 0;
+    (buckets || []).forEach(function(b) { total += b.count; });
+    if (!total) return null;
+    var sorted = (buckets || []).slice().sort(function(a, b) { return a.hops - b.hops; });
+    var target = total * p;
+    var cum = 0;
+    for (var i = 0; i < sorted.length; i++) {
+      cum += sorted[i].count;
+      if (cum >= target) return sorted[i].hops;
+    }
+    return sorted.length ? sorted[sorted.length - 1].hops : null;
+  }
+
+  // Two-line SVG chart of scoped vs unscoped median hop depth over time
+  // (HopDepthAnalyticsResponse.timeSeries) -- same visual language as the
+  // Scopes Overview's scoped/unscoped count time-series, but each series
+  // can have gaps (a bucket with no traffic of that kind reports
+  // scopedMedianHop/unscopedMedianHop as null, not 0) so the polyline is
+  // built as separate contiguous segments rather than one line that would
+  // otherwise silently interpolate straight through missing data.
+  function hopDepthTimeSeriesChartHtml(timeSeries) {
+    if (!timeSeries || timeSeries.length < 2) {
+      return '<p class="text-muted" style="font-size:0.85em;margin:12px 0 0">Insufficient data points to render a trend — wait for more observations in this window.</p>';
+    }
+    var n = timeSeries.length;
+    var maxVal = 1;
+    timeSeries.forEach(function(p) {
+      if (typeof p.scopedMedianHop === 'number') maxVal = Math.max(maxVal, p.scopedMedianHop);
+      if (typeof p.unscopedMedianHop === 'number') maxVal = Math.max(maxVal, p.unscopedMedianHop);
+    });
+
+    var W = 800, H = 180, padL = 30, padT = 10, padR = 10;
+    var plotW = W - padL - padR, plotH = H - 24 - padT;
+
+    function segments(key) {
+      var out = [];
+      var current = [];
+      timeSeries.forEach(function(p, i) {
+        var v = p[key];
+        if (typeof v !== 'number') {
+          if (current.length > 1) out.push(current);
+          current = [];
+          return;
+        }
+        var x = padL + i * plotW / Math.max(n - 1, 1);
+        var y = padT + plotH - (v / maxVal) * plotH;
+        current.push(x.toFixed(1) + ',' + y.toFixed(1));
+      });
+      if (current.length > 1) out.push(current);
+      return out;
+    }
+
+    function polylines(key, stroke, dash) {
+      return segments(key).map(function(seg) {
+        return '<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + stroke + '" stroke-width="2"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>';
+      }).join('');
+    }
+
+    var grid = '';
+    for (var gi = 0; gi <= 4; gi++) {
+      var gy = padT + plotH * gi / 4;
+      var gv = Math.round(maxVal * (4 - gi) / 4);
+      grid += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '" stroke="var(--border)" stroke-dasharray="2"/>';
+      grid += '<text x="' + (padL - 4) + '" y="' + (gy + 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--text-muted)">' + gv + '</text>';
+    }
+
+    var legendX = padL + plotW - 120;
+    return '<div style="margin-top:16px">' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;max-height:' + H + 'px" role="img" aria-label="Scoped vs unscoped median hop depth over time">' +
+      grid +
+      polylines('scopedMedianHop', 'var(--accent)') +
+      polylines('unscopedMedianHop', 'var(--text-muted)', '4') +
+      '<rect x="' + legendX + '" y="' + padT + '" width="10" height="10" fill="var(--accent)"/>' +
+      '<text x="' + (legendX + 14) + '" y="' + (padT + 9) + '" font-size="10" fill="var(--text)">Scoped median</text>' +
+      '<rect x="' + legendX + '" y="' + (padT + 16) + '" width="10" height="10" fill="var(--text-muted)"/>' +
+      '<text x="' + (legendX + 14) + '" y="' + (padT + 25) + '" font-size="10" fill="var(--text)">Unscoped median</text>' +
+      '</svg></div>';
+  }
+
+  // Renders the scoped-vs-unscoped hop-depth comparison (Scopes tab > Hop
+  // Depth sub-tab). Order (top to bottom): the median-hop-over-time trend
+  // chart first (most at-a-glance signal, "is this getting better or
+  // worse" — put at the top for visibility rather than buried below the
+  // static snapshot), then median-hop stat cards for both series, a
+  // P95-derived "suggested flood.max.unscoped" callout, and a grouped bar
+  // chart across hop values 0..max normalized to the taller of the two
+  // series at each hop. The whole point is to answer "is region scoping
+  // actually containing flood propagation" — scoped traffic clustering at
+  // a lower median hop than unscoped is the expected/healthy shape — turn
+  // that into a concrete number an operator can plug into their MeshCore
+  // firmware config instead of eyeballing the chart, and show whether
+  // it's getting better or worse over time.
+  function renderHopDepthSectionHtml(hopData) {
+    if (!hopData || (!hopData.scopedHopDepth && !hopData.unscopedHopDepth)) {
+      return '';
+    }
+    var scoped = hopData.scopedHopDepth || [];
+    var unscoped = hopData.unscopedHopDepth || [];
+    var scopedStats = hopDepthBucketStats(scoped);
+    var unscopedStats = hopDepthBucketStats(unscoped);
+    var unscopedP95 = hopDepthPercentile(unscoped, 0.95);
+    if (!scopedStats.total && !unscopedStats.total) {
+      return '<h4 style="margin:0 0 4px">Flood Containment: Scoped vs Unscoped Hop Depth</h4>' +
+        '<p class="text-muted" style="font-size:0.85em">No relay-hop data in this window.</p>';
+    }
+
+    var maxHops = 0;
+    scoped.concat(unscoped).forEach(function(b) { if (b.hops > maxHops) maxHops = b.hops; });
+    var scopedByHop = {}, unscopedByHop = {};
+    scoped.forEach(function(b) { scopedByHop[b.hops] = b.count; });
+    unscoped.forEach(function(b) { unscopedByHop[b.hops] = b.count; });
+    var maxCount = 1;
+    for (var h = 0; h <= maxHops; h++) {
+      maxCount = Math.max(maxCount, scopedByHop[h] || 0, unscopedByHop[h] || 0);
+    }
+
+    var rows = '';
+    for (var hi = 0; hi <= maxHops; hi++) {
+      var sc = scopedByHop[hi] || 0, un = unscopedByHop[hi] || 0;
+      if (!sc && !un) continue;
+      var scW = (sc / maxCount * 100).toFixed(1);
+      var unW = (un / maxCount * 100).toFixed(1);
+      rows += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+        '<div style="width:44px;font-size:11px;text-align:right" class="text-muted">' + hi + ' hop' + (hi === 1 ? '' : 's') + '</div>' +
+        '<div style="flex:1;display:flex;flex-direction:column;gap:1px">' +
+          '<div style="display:flex;align-items:center;gap:4px">' +
+            '<div style="height:7px;width:' + scW + '%;background:var(--accent);min-width:' + (sc ? '2px' : '0') + '"></div>' +
+            '<span style="font-size:10px" class="text-muted">' + sc.toLocaleString() + '</span>' +
+          '</div>' +
+          '<div style="display:flex;align-items:center;gap:4px">' +
+            '<div style="height:7px;width:' + unW + '%;background:var(--text-muted);min-width:' + (un ? '2px' : '0') + '"></div>' +
+            '<span style="font-size:10px" class="text-muted">' + un.toLocaleString() + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    return '<h4 style="margin:0 0 4px">Flood Containment: Scoped vs Unscoped Hop Depth</h4>' +
+      '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
+        'How many relay hops packets travel before reaching a repeater, split by whether they carried a region scope (TRANSPORT_FLOOD/TRANSPORT_DIRECT) or not (plain FLOOD). If scoping is containing traffic as intended, Scoped should cluster at fewer hops than Unscoped &mdash; a similar or higher scoped median means scope boundaries aren&rsquo;t actually limiting propagation.' +
+      '</p>' +
+      '<h4 style="margin:12px 0 4px">Median Hop Depth Over Time</h4>' +
+      '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Is containment trending better or worse within this window, rather than just where it stands right now. A gap in a line means no traffic of that kind in that bucket, not a median of zero.</p>' +
+      hopDepthTimeSeriesChartHtml(hopData.timeSeries) +
+      '<div class="stats-grid" style="margin:16px 0 10px">' +
+        [
+          { label: 'Scoped Median Hop', value: scopedStats.median === null ? '—' : scopedStats.median.toLocaleString(), note: scopedStats.total.toLocaleString() + ' samples' },
+          { label: 'Unscoped Median Hop', value: unscopedStats.median === null ? '—' : unscopedStats.median.toLocaleString(), note: unscopedStats.total.toLocaleString() + ' samples' },
+          { label: 'Suggested flood.max.unscoped', value: unscopedP95 === null ? '—' : unscopedP95.toLocaleString(), note: 'P95 of unscoped hop depth — caps runaway propagation, lets ~95% of legitimate unscoped traffic through' },
+        ].map(function(c) {
+          return '<div class="stat-card"><div class="stat-value">' + c.value + '</div>' +
+            '<div class="stat-label">' + c.label + '</div>' +
+            '<div class="stat-note text-muted" style="font-size:11px">' + c.note + '</div>' +
+            '</div>';
+        }).join('') +
+      '</div>' +
+      '<div style="display:flex;gap:10px;margin-bottom:4px;font-size:11px" class="text-muted">' +
+        '<span><span style="display:inline-block;width:8px;height:8px;background:var(--accent);margin-right:3px"></span>Scoped</span>' +
+        '<span><span style="display:inline-block;width:8px;height:8px;background:var(--text-muted);margin-right:3px"></span>Unscoped</span>' +
+      '</div>' +
+      rows;
+  }
+
+  // publicKey -> RepeaterUnscopedHopDepth lookup from
+  // HopDepthAnalyticsResponse.unscopedByRepeater (see GetHopDepthAnalytics),
+  // used to enrich the Foreign Traffic tab's unscoped-relay table with how
+  // far that traffic had already traveled before reaching each repeater.
+  function hopDepthLookupByPubkey(unscopedByRepeater) {
+    var byPK = {};
+    (unscopedByRepeater || []).forEach(function(r) { byPK[r.publicKey] = r; });
+    return byPK;
+  }
+
+  // publicKey -> true for every BridgeRepeater (ScopeStatsResponse.bridgeRepeaters,
+  // see db.go) -- repeaters confirmed relaying for 2+ regions. Cross-referenced
+  // against the Foreign Traffic tab's unscoped-relay table so a high hop-depth
+  // reading at a bridge reads as expected cross-region traffic, not a leak: a
+  // bridge is SUPPOSED to see traffic that already traveled far from another
+  // region's scope, unlike a plain regional repeater seeing the same pattern.
+  function bridgeRepeaterPubkeySet(bridgeRepeaters) {
+    var byPK = {};
+    (bridgeRepeaters || []).forEach(function(b) { byPK[b.publicKey] = true; });
+    return byPK;
+  }
+
   function computeNodesWithoutScope(allNodes, cap, opts) {
     opts = opts || {};
     var noScopeNodes = allNodes.filter(function(n) { return !n.default_scope; });
@@ -5514,6 +5754,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     function isForeignNode(n) {
       return !nodePassesGeoFilter(n.lat, n.lon, window.MC_GEO_FILTER);
     }
+    // publicKey -> RepeaterUnscopedHopDepth, populated by load() from
+    // /api/analytics/hop-depth. Enriches the volume-only unscoped_relay_count_24h
+    // metric with WHERE in the flood's propagation this repeater sits: low
+    // hops means mostly fresh/local unscoped traffic, high hops means
+    // traffic that already traveled far, unscoped, before reaching it — the
+    // stronger signal of an actual containment problem.
+    var hopDepthByPubkey = {};
+    // publicKey -> true for confirmed bridge repeaters (2+ regions), populated
+    // by load() from /api/scope-stats. See bridgeRepeaterPubkeySet's doc comment.
+    var bridgePubkeys = {};
     function relaysHtml(relays, expanded) {
       if (relays.length === 0) {
         return '<p class="text-muted" style="font-size:0.85em">No repeater has relayed an unscoped flood packet in the last 24 hours.</p>';
@@ -5522,16 +5772,25 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       var rows = shown.map(function(n) {
         var total = n.relay_count_24h || 0;
         var unscoped = n.unscoped_relay_count_24h || 0;
+        var hd = hopDepthByPubkey[n.public_key];
+        var bridgeBadge = bridgePubkeys[n.public_key]
+          ? ' <span class="badge" style="background:var(--accent);color:#fff;font-size:9px;padding:1px 5px" title="Confirmed relaying for 2+ regions — a high hop-depth reading here is expected cross-region traffic, not a containment leak">Bridge</span>'
+          : '';
         return '<tr>' +
-          '<td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a></td>' +
+          '<td><a href="#/nodes/' + encodeURIComponent(n.public_key) + '">' + esc(n.name || n.public_key) + '</a>' + bridgeBadge + '</td>' +
           '<td>' + esc(n.role) + '</td>' +
           '<td>' + unscoped.toLocaleString() + '</td>' +
           '<td>' + total.toLocaleString() + '</td>' +
           '<td>' + pct(unscoped, total) + '</td>' +
+          '<td>' + (hd ? hd.minHops : '—') + '</td>' +
+          '<td>' + (hd ? (hd.medianHops % 1 === 0 ? hd.medianHops : hd.medianHops.toFixed(1)) : '—') + '</td>' +
+          '<td>' + (hd ? hd.maxHops : '—') + '</td>' +
           '</tr>';
       }).join('');
       return '<table class="data-table analytics-table">' +
-        '<thead><tr><th>Repeater</th><th>Role</th><th>Unscoped Relays (24h)</th><th>Total Relays (24h)</th><th>% Unscoped</th></tr></thead>' +
+        '<thead><tr><th>Repeater</th><th>Role</th><th>Unscoped Relays (24h)</th><th>Total Relays (24h)</th><th>% Unscoped</th>' +
+          '<th title="0-based hop index within the packet\'s resolved relay path at this repeater — how far the packet had already traveled before this hop.">Min Hops</th>' +
+          '<th>Median Hops</th><th>Max Hops</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>' + topNToggleHtml(relays.length, expanded, 'repeaters');
     }
@@ -5560,6 +5819,20 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
     async function load() {
       try {
+        // Fired early but only awaited below, right before it's needed for
+        // relaysHtml -- deliberately NOT awaited here. An extra await
+        // ahead of the isForeignNode/geo_filter computation just below
+        // shifts how many microtask ticks elapse before it runs, which in
+        // the test sandbox lets roles.js's own async window.MC_GEO_FILTER
+        // config-fetch race ahead and clobber the fixture's geo filter
+        // before isForeignNode reads it (see
+        // test-analytics-foreign-traffic-tab.js's makeAnalyticsSandbox).
+        const hopDepthPromise = api('/analytics/hop-depth?window=24h', { ttl: 30000 }).catch(function() { return null; });
+        // bridgeRepeaters is all-time regardless of window (see BridgeRepeater's
+        // doc comment) -- 24h here just reuses the same cached /scope-stats
+        // response the Scopes tab's default window already warms.
+        const bridgeStatsPromise = api('/scope-stats?window=24h', { ttl: 30000 }).catch(function() { return null; });
+
         const nodesResp = await fetchAllNodes('', { ttl: CLIENT_TTL.nodeList });
         const allNodes = nodesResp.nodes || nodesResp;
         const relays = allNodes.filter(function(n) {
@@ -5583,6 +5856,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           .map(function(n) { return { n: n, t: new Date(n.last_seen || 0).getTime() }; })
           .sort(function(a, b) { return b.t - a.t; })
           .forEach(function(entry, i) { foreignNodes[i] = entry.n; });
+
+        const hopData = await hopDepthPromise;
+        hopDepthByPubkey = hopDepthLookupByPubkey(hopData && hopData.unscopedByRepeater);
+        const bridgeStats = await bridgeStatsPromise;
+        bridgePubkeys = bridgeRepeaterPubkeySet(bridgeStats && bridgeStats.bridgeRepeaters);
 
         el.innerHTML =
           '<h3 style="margin:0 0 4px">Foreign Traffic</h3>' +

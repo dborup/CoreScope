@@ -3170,6 +3170,269 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 	return resp, nil
 }
 
+// GetHopDepthAnalytics answers, network-wide over the given window, two
+// questions that share the same expensive "walk every resolved relay path"
+// pass — see HopDepthAnalyticsResponse's doc comment for the full
+// rationale. "Scoped" here is derived purely from route_type
+// (TRANSPORT_FLOOD=0/TRANSPORT_DIRECT=3 vs FLOOD=1/DIRECT=2, the same
+// convention used throughout this codebase — e.g. computeHopAnalyticsTransport),
+// not the scope_name column, so this works even on schemas predating #899.
+//
+// A transmission can have resolved_path stored on more than one
+// observation; this keeps whichever has the MOST entries per transmission
+// (a proxy for "most complete"), matching fetchResolvedPathForTxBest's
+// "longest wins" selection without needing per-tx round trips.
+func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, error) {
+	var since string
+	var bucketExpr string
+	switch window {
+	case "1h":
+		since = time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+		// 5-minute buckets -- same bucketing as GetScopeStats' TimeSeries.
+		bucketExpr = `strftime('%Y-%m-%dT%H:', t.first_seen) || printf('%02d', (CAST(strftime('%M', t.first_seen) AS INTEGER) / 5) * 5) || ':00Z'`
+	case "7d":
+		since = time.Now().Add(-7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+		// 6-hour buckets
+		bucketExpr = `strftime('%Y-%m-%dT', t.first_seen) || printf('%02d', (CAST(strftime('%H', t.first_seen) AS INTEGER) / 6) * 6) || ':00:00Z'`
+	default:
+		window = "24h"
+		since = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+		// 1-hour buckets
+		bucketExpr = `strftime('%Y-%m-%dT%H:00:00Z', t.first_seen)`
+	}
+
+	rows, err := db.conn.Query(`
+		SELECT t.id, t.route_type, t.payload_type, o.resolved_path, `+bucketExpr+` AS bucket
+		FROM transmissions t
+		JOIN observations o ON o.transmission_id = t.id
+		WHERE t.first_seen > ? AND o.resolved_path IS NOT NULL AND o.resolved_path != ''`, since)
+	if err != nil {
+		return nil, fmt.Errorf("hop depth analytics query: %w", err)
+	}
+	defer rows.Close()
+
+	type txInfo struct {
+		routeType   sql.NullInt64
+		payloadType sql.NullInt64
+		bestPath    []*string
+		bucket      string
+	}
+	byTx := make(map[int]*txInfo)
+	for rows.Next() {
+		var txID int
+		var routeType, payloadType sql.NullInt64
+		var rpJSON, bucket string
+		if err := rows.Scan(&txID, &routeType, &payloadType, &rpJSON, &bucket); err != nil {
+			continue
+		}
+		rp := unmarshalResolvedPath(rpJSON)
+		if len(rp) == 0 {
+			continue
+		}
+		cur, ok := byTx[txID]
+		if !ok {
+			byTx[txID] = &txInfo{routeType: routeType, payloadType: payloadType, bestPath: rp, bucket: bucket}
+			continue
+		}
+		if len(rp) > len(cur.bestPath) {
+			cur.bestPath = rp
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hop depth analytics iteration: %w", err)
+	}
+
+	scopedBuckets := map[int]int{}
+	unscopedBuckets := map[int]int{}
+	repeaterHops := map[string][]int{}
+	// Same scoped/unscoped hop-index tally as scopedBuckets/unscopedBuckets
+	// above, but split by time bucket too -- feeds TimeSeries, answering
+	// "is containment getting better or worse over the window" instead of
+	// just a single window-wide snapshot.
+	scopedByTimeBucket := map[string]map[int]int{}
+	unscopedByTimeBucket := map[string]map[int]int{}
+
+	for _, info := range byTx {
+		if !info.routeType.Valid {
+			continue
+		}
+		rt := int(info.routeType.Int64)
+		isFlood := rt == routeTypeFlood || rt == RouteTransportFlood
+		if !isFlood {
+			continue
+		}
+		scoped := rt == RouteTransportFlood
+		isAdvert := info.payloadType.Valid && int(info.payloadType.Int64) == payloadTypeAdvert
+		isUnscopedFlood := rt == routeTypeFlood && !isAdvert
+
+		for idx, pk := range info.bestPath {
+			if scoped {
+				scopedBuckets[idx]++
+				if scopedByTimeBucket[info.bucket] == nil {
+					scopedByTimeBucket[info.bucket] = map[int]int{}
+				}
+				scopedByTimeBucket[info.bucket][idx]++
+			} else {
+				unscopedBuckets[idx]++
+				if unscopedByTimeBucket[info.bucket] == nil {
+					unscopedByTimeBucket[info.bucket] = map[int]int{}
+				}
+				unscopedByTimeBucket[info.bucket][idx]++
+			}
+			if isUnscopedFlood && pk != nil && *pk != "" {
+				repeaterHops[*pk] = append(repeaterHops[*pk], idx)
+			}
+		}
+	}
+
+	toSortedBuckets := func(m map[int]int) []HopDepthBucket {
+		out := make([]HopDepthBucket, 0, len(m))
+		for hops, count := range m {
+			out = append(out, HopDepthBucket{Hops: hops, Count: count})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Hops < out[j].Hops })
+		return out
+	}
+
+	// medianHopFromCounts mirrors the frontend's hopDepthBucketStats: the
+	// smallest hop value whose cumulative count reaches half the total --
+	// a histogram-based median consistent with how ScopedHopDepth/
+	// UnscopedHopDepth's medians are read client-side, rather than
+	// introducing a second, subtly different median definition here.
+	medianHopFromCounts := func(counts map[int]int) *int {
+		total := 0
+		for _, c := range counts {
+			total += c
+		}
+		if total == 0 {
+			return nil
+		}
+		hops := make([]int, 0, len(counts))
+		for h := range counts {
+			hops = append(hops, h)
+		}
+		sort.Ints(hops)
+		cum := 0
+		for _, h := range hops {
+			cum += counts[h]
+			if cum*2 >= total {
+				v := h
+				return &v
+			}
+		}
+		return nil
+	}
+
+	bucketSet := map[string]bool{}
+	for b := range scopedByTimeBucket {
+		bucketSet[b] = true
+	}
+	for b := range unscopedByTimeBucket {
+		bucketSet[b] = true
+	}
+	timeBuckets := make([]string, 0, len(bucketSet))
+	for b := range bucketSet {
+		timeBuckets = append(timeBuckets, b)
+	}
+	sort.Strings(timeBuckets)
+	timeSeries := make([]HopDepthTimePoint, 0, len(timeBuckets))
+	for _, b := range timeBuckets {
+		timeSeries = append(timeSeries, HopDepthTimePoint{
+			T:                 b,
+			ScopedMedianHop:   medianHopFromCounts(scopedByTimeBucket[b]),
+			UnscopedMedianHop: medianHopFromCounts(unscopedByTimeBucket[b]),
+		})
+	}
+
+	// Only repeater/room nodes are meaningful here (matches the Foreign
+	// Traffic tab's existing "Repeaters Relaying Unscoped Traffic" role
+	// filter) -- look up name/role for the pubkeys that actually relayed
+	// unscoped flood traffic in this window, rather than every known node.
+	pubkeys := make([]string, 0, len(repeaterHops))
+	for pk := range repeaterHops {
+		pubkeys = append(pubkeys, pk)
+	}
+	names, roles := db.namesAndRolesForPubkeys(pubkeys)
+
+	unscopedByRepeater := make([]RepeaterUnscopedHopDepth, 0, len(repeaterHops))
+	for pk, hops := range repeaterHops {
+		if roles[pk] != "repeater" && roles[pk] != "room" {
+			continue
+		}
+		sort.Ints(hops)
+		n := len(hops)
+		median := float64(hops[n/2])
+		if n%2 == 0 {
+			median = float64(hops[n/2-1]+hops[n/2]) / 2
+		}
+		name := names[pk]
+		if name == "" {
+			name = pk
+		}
+		unscopedByRepeater = append(unscopedByRepeater, RepeaterUnscopedHopDepth{
+			PublicKey:  pk,
+			Name:       name,
+			Count:      n,
+			MinHops:    hops[0],
+			MedianHops: median,
+			MaxHops:    hops[n-1],
+		})
+	}
+	sort.Slice(unscopedByRepeater, func(i, j int) bool { return unscopedByRepeater[i].Count > unscopedByRepeater[j].Count })
+
+	return &HopDepthAnalyticsResponse{
+		Window:             window,
+		ScopedHopDepth:     toSortedBuckets(scopedBuckets),
+		UnscopedHopDepth:   toSortedBuckets(unscopedBuckets),
+		UnscopedByRepeater: unscopedByRepeater,
+		TimeSeries:         timeSeries,
+	}, nil
+}
+
+// namesAndRolesForPubkeys bulk-looks-up name/role for a set of pubkeys,
+// chunked to stay under SQLite's parameter limit. Missing pubkeys are
+// simply absent from the returned maps.
+func (db *DB) namesAndRolesForPubkeys(pubkeys []string) (names, roles map[string]string) {
+	names = make(map[string]string, len(pubkeys))
+	roles = make(map[string]string, len(pubkeys))
+	if len(pubkeys) == 0 {
+		return names, roles
+	}
+	const chunkSize = 499
+	for start := 0; start < len(pubkeys); start += chunkSize {
+		end := start + chunkSize
+		if end > len(pubkeys) {
+			end = len(pubkeys)
+		}
+		chunk := pubkeys[start:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]interface{}, len(chunk))
+		for i, pk := range chunk {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[i] = pk
+		}
+		query := "SELECT public_key, name, role FROM nodes WHERE public_key IN (" + string(placeholders) + ")"
+		rows, err := db.conn.Query(query, args...)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var pk string
+			var name, role sql.NullString
+			if err := rows.Scan(&pk, &name, &role); err != nil {
+				continue
+			}
+			names[pk] = name.String
+			roles[pk] = role.String
+		}
+		rows.Close()
+	}
+	return names, roles
+}
+
 // GetChannelMessageScopeStats narrows the scoped/unscoped/unknown question
 // to channel chat specifically (payload_type=5), for the given window.
 // Unlike GetScopeStats' TransportTotal (route_type 0/3 only), TotalMessages

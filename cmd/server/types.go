@@ -880,6 +880,69 @@ type NodeHopAnalyticsResponse struct {
 	Packets []HopAnalyticsPacket `json:"packets"`
 }
 
+// HopDepthBucket is a (hop count -> how many relay-hop instances saw that
+// count) tally, network-wide.
+type HopDepthBucket struct {
+	Hops  int `json:"hops"`
+	Count int `json:"count"`
+}
+
+// RepeaterUnscopedHopDepth is one repeater/room's hop-count profile across
+// the unscoped (FLOOD, non-advert) traffic it has relayed — the flip side
+// of unscoped_relay_count_24h's raw volume: whether that volume is mostly
+// FRESH/local unscoped traffic (low hops) or traffic that already
+// propagated far, unscoped, before reaching this repeater (high hops) --
+// the latter is the stronger signal of an actual containment problem.
+type RepeaterUnscopedHopDepth struct {
+	PublicKey  string  `json:"publicKey"`
+	Name       string  `json:"name"`
+	Count      int     `json:"count"`
+	MinHops    int     `json:"minHops"`
+	MedianHops float64 `json:"medianHops"`
+	MaxHops    int     `json:"maxHops"`
+}
+
+// HopDepthAnalyticsResponse answers two related "is flood containment
+// actually working" questions in one pass over resolved relay paths
+// (both need the same expensive walk, so they're computed together):
+//
+//  1. ScopedHopDepth/UnscopedHopDepth: network-wide, does SCOPED
+//     (TRANSPORT_FLOOD/TRANSPORT_DIRECT) traffic actually travel fewer
+//     hops than UNSCOPED (FLOOD/DIRECT) traffic? hashRegions exists
+//     specifically to contain flood propagation to a relevant area — if
+//     scoped hop depth isn't meaningfully lower, that's evidence region
+//     boundaries are too loose or flood_max isn't tuned differently per
+//     scope, not just an adoption-percentage number.
+//  2. UnscopedByRepeater: per-repeater hop-depth profile of the unscoped
+//     traffic it relays, enriching the Foreign Traffic tab's "Repeaters
+//     Relaying Unscoped Traffic" (which today only ranks by volume) with
+//     whether that volume is nearby noise or far-propagated pollution.
+//  3. TimeSeries: the same scoped/unscoped median hop split by time
+//     bucket instead of collapsed to one window-wide number -- is
+//     containment trending better or worse, not just where it stands
+//     right now.
+type HopDepthAnalyticsResponse struct {
+	Window             string                     `json:"window"`
+	ScopedHopDepth     []HopDepthBucket           `json:"scopedHopDepth"`
+	UnscopedHopDepth   []HopDepthBucket           `json:"unscopedHopDepth"`
+	UnscopedByRepeater []RepeaterUnscopedHopDepth `json:"unscopedByRepeater"`
+	TimeSeries         []HopDepthTimePoint        `json:"timeSeries"`
+}
+
+// HopDepthTimePoint is one time bucket's scoped/unscoped median hop depth
+// -- same time-series shape as ScopeTimePoint, but tracking flood-
+// propagation depth instead of raw scoped/unscoped transmission counts.
+// Same bucketing as ScopeStatsResponse.TimeSeries (5min/1h/6h for
+// 1h/24h/7d windows). Pointers, not plain ints: 0 is a valid median hop,
+// so "no scoped (or unscoped) traffic in this bucket" has to be
+// distinguishable from "median is 0" rather than silently defaulting to
+// zero and implying containment that isn't really there.
+type HopDepthTimePoint struct {
+	T                 string `json:"t"`
+	ScopedMedianHop   *int   `json:"scopedMedianHop,omitempty"`
+	UnscopedMedianHop *int   `json:"unscopedMedianHop,omitempty"`
+}
+
 // ─── Analytics — RF ────────────────────────────────────────────────────────────
 
 type PayloadTypeSignal struct {
