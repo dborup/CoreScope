@@ -2720,6 +2720,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
     window._analyticsComputeRepeatersNeverRelayingScope = computeRepeatersNeverRelayingScope;
     window._analyticsHopDepthBucketStats = hopDepthBucketStats;
+    window._analyticsHopDepthPercentile = hopDepthPercentile;
     window._analyticsRenderHopDepthSectionHtml = renderHopDepthSectionHtml;
     window._analyticsHopDepthLookupByPubkey = hopDepthLookupByPubkey;
   }
@@ -5430,12 +5431,36 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     return { total: total, median: median };
   }
 
-  // Renders the scoped-vs-unscoped hop-depth comparison (Scopes tab
-  // Overview): two stat cards (median hop, sample size) plus a grouped bar
-  // chart across hop values 0..max, normalized to the taller of the two
-  // series at each hop. The whole point is to answer "is region scoping
-  // actually containing flood propagation" — scoped traffic clustering at
-  // a lower median hop than unscoped is the expected/healthy shape.
+  // Cumulative-count percentile from a HopDepthBucket[] (see
+  // GetHopDepthAnalytics) -- p is 0..1 (e.g. 0.95 for P95). Returns the
+  // smallest hop value whose cumulative count reaches that fraction of
+  // the total, or null when there's no data. Used to turn the raw
+  // scoped/unscoped histograms into a concrete "set flood.max.unscoped to
+  // roughly this" number, rather than making the operator eyeball the bar
+  // chart themselves.
+  function hopDepthPercentile(buckets, p) {
+    var total = 0;
+    (buckets || []).forEach(function(b) { total += b.count; });
+    if (!total) return null;
+    var sorted = (buckets || []).slice().sort(function(a, b) { return a.hops - b.hops; });
+    var target = total * p;
+    var cum = 0;
+    for (var i = 0; i < sorted.length; i++) {
+      cum += sorted[i].count;
+      if (cum >= target) return sorted[i].hops;
+    }
+    return sorted.length ? sorted[sorted.length - 1].hops : null;
+  }
+
+  // Renders the scoped-vs-unscoped hop-depth comparison (Scopes tab > Hop
+  // Depth sub-tab): median-hop stat cards for both series, a P95-derived
+  // "suggested flood.max.unscoped" callout, plus a grouped bar chart
+  // across hop values 0..max, normalized to the taller of the two series
+  // at each hop. The whole point is to answer "is region scoping actually
+  // containing flood propagation" — scoped traffic clustering at a lower
+  // median hop than unscoped is the expected/healthy shape — and to turn
+  // that into a concrete number an operator can plug into their MeshCore
+  // firmware config instead of eyeballing the chart.
   function renderHopDepthSectionHtml(hopData) {
     if (!hopData || (!hopData.scopedHopDepth && !hopData.unscopedHopDepth)) {
       return '';
@@ -5444,6 +5469,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     var unscoped = hopData.unscopedHopDepth || [];
     var scopedStats = hopDepthBucketStats(scoped);
     var unscopedStats = hopDepthBucketStats(unscoped);
+    var unscopedP95 = hopDepthPercentile(unscoped, 0.95);
     if (!scopedStats.total && !unscopedStats.total) {
       return '<h4 style="margin:0 0 4px">Flood Containment: Scoped vs Unscoped Hop Depth</h4>' +
         '<p class="text-muted" style="font-size:0.85em">No relay-hop data in this window.</p>';
@@ -5488,6 +5514,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         [
           { label: 'Scoped Median Hop', value: scopedStats.median === null ? '—' : scopedStats.median.toLocaleString(), note: scopedStats.total.toLocaleString() + ' samples' },
           { label: 'Unscoped Median Hop', value: unscopedStats.median === null ? '—' : unscopedStats.median.toLocaleString(), note: unscopedStats.total.toLocaleString() + ' samples' },
+          { label: 'Suggested flood.max.unscoped', value: unscopedP95 === null ? '—' : unscopedP95.toLocaleString(), note: 'P95 of unscoped hop depth — caps runaway propagation, lets ~95% of legitimate unscoped traffic through' },
         ].map(function(c) {
           return '<div class="stat-card"><div class="stat-value">' + c.value + '</div>' +
             '<div class="stat-label">' + c.label + '</div>' +

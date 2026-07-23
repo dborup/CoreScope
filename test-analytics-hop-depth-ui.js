@@ -154,6 +154,37 @@ function fakeEl() {
     assert.strictEqual(stats.median, 2);
   });
 
+  console.log('\n=== analytics.js: hopDepthPercentile ===');
+
+  await testAsync('no data returns null', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    assert.strictEqual(ctx.window._analyticsHopDepthPercentile([], 0.95), null);
+    assert.strictEqual(ctx.window._analyticsHopDepthPercentile(null, 0.95), null);
+  });
+
+  await testAsync('P95 of a 100-sample even spread lands at hops=94', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    // hops 0..99, count 1 each -> total 100, cumulative >= 95 first at hops=94.
+    const buckets = [];
+    for (let h = 0; h < 100; h++) buckets.push({ hops: h, count: 1 });
+    assert.strictEqual(ctx.window._analyticsHopDepthPercentile(buckets, 0.95), 94);
+  });
+
+  await testAsync('P50 matches the median helper on the same data', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    const buckets = [{ hops: 0, count: 1 }, { hops: 1, count: 1 }, { hops: 2, count: 1 }, { hops: 3, count: 1 }, { hops: 4, count: 1 }];
+    const median = ctx.window._analyticsHopDepthBucketStats(buckets).median;
+    const p50 = ctx.window._analyticsHopDepthPercentile(buckets, 0.5);
+    assert.strictEqual(p50, median);
+  });
+
+  await testAsync('a single heavy bucket dominates the percentile regardless of p', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    const buckets = [{ hops: 0, count: 1000 }, { hops: 20, count: 1 }];
+    assert.strictEqual(ctx.window._analyticsHopDepthPercentile(buckets, 0.95), 0);
+    assert.strictEqual(ctx.window._analyticsHopDepthPercentile(buckets, 0.999), 0);
+  });
+
   console.log('\n=== analytics.js: renderHopDepthSectionHtml ===');
 
   await testAsync('null/empty hopData renders nothing', async () => {
@@ -176,6 +207,7 @@ function fakeEl() {
     });
     assert.ok(html.includes('Scoped Median Hop'), 'should show a scoped median stat card');
     assert.ok(html.includes('Unscoped Median Hop'), 'should show an unscoped median stat card');
+    assert.ok(html.includes('Suggested flood.max.unscoped'), 'should show a suggested flood.max.unscoped card');
     assert.ok(html.includes('10 samples'), 'scoped sample size should be 10');
     assert.ok(html.includes('0 hops'), 'should have a hop=0 row');
     assert.ok(html.includes('2 hops'), 'should have a hop=2 row');
