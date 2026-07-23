@@ -1491,6 +1491,62 @@ func TestGetChannelMessages_PingBotReply(t *testing.T) {
 	}
 }
 
+// TestGetChannelMessages_PingBotReply_MultiObservation covers a single
+// ping transmission heard by TWO different observer stations at
+// DIFFERENT hop depths (normal in a mesh: one station may hear an early
+// relay leg, another a later one). The botReply must report the DEEPEST
+// (max-hop) observation's path/SNR -- not whichever observation happened
+// to be scanned first -- and the breadth ("N stations") once more than
+// one distinct station heard it, per pingBotReply's doc comment.
+func TestGetChannelMessages_PingBotReply_MultiObservation(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs2', 'Observer Two', 'SFO')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkAlphaRepeater', 'RepeaterAlpha', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkCharlieRepeater', 'RepeaterCharlie', 'repeater')`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('EE', 'chanmsg00000005', '2026-01-15T10:04:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	// obs1 (scanned first, o.id=1): shallow leg, 1 hop. transmission_id=1
+	// since this is the first (only) transmission inserted in this fresh DB.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkAlphaRepeater"]', 1736935440)`)
+	// obs2 (scanned second, o.id=2): deeper leg, 3 hops -- must win despite
+	// being neither first nor having the highest SNR.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 2, 4.5, -99, '["aa","bb","cc"]', '["pkAlphaRepeater","pkBravoRepeater","pkCharlieRepeater"]', 1736935445)`)
+
+	messages, _, err := db.GetChannelMessages("#ping", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply map[string]interface{}
+	for _, m := range messages {
+		if m["text"] == "ping" {
+			reply, _ = m["botReply"].(map[string]interface{})
+		}
+	}
+	if reply == nil {
+		t.Fatal("expected a botReply on the ping message")
+	}
+	if reply["hops"] != 3 {
+		t.Errorf("botReply hops = %v, want 3 (the deeper of the two observations)", reply["hops"])
+	}
+	text, _ := reply["text"].(string)
+	if !strings.Contains(text, "SNR 4.5dB") {
+		t.Errorf("botReply text = %q, want the SNR paired with the deeper (3-hop) observation, not the shallower one's 9.0dB", text)
+	}
+	if !strings.Contains(text, "via RepeaterAlpha → pkBravoRepeater → RepeaterCharlie") {
+		t.Errorf("botReply text = %q, want the deeper observation's resolved relay path", text)
+	}
+	if !strings.Contains(text, "heard by 2 stations") {
+		t.Errorf("botReply text = %q, want breadth reported as \"2 stations\" now that more than one station heard it", text)
+	}
+}
+
 // TestAppendAreaToBotReply covers appendAreaToBotReply (routes.go): the
 // handler-level pass that folds a ping message's resolved "area" (set by
 // annotateMessageAreas, which needs server config unavailable to db.go)

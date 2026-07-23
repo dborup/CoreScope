@@ -1966,20 +1966,22 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	}
 	msgMap := make(map[int]*msg, len(pageIDs))
 
-	// pendingPing collects a ping-triggering message's ingredients for its
-	// botReply. Reply text isn't built inline in the scan loop below
-	// because the repeater-name lookup needs ONE bulk query across every
-	// ping on the page (see the pass after the loop) rather than a
-	// per-message round trip.
+	// pendingPing collects a ping-triggering message's REACH across every
+	// observation of it, not just the first: hops/snr/resolvedPath track
+	// the DEEPEST (max-hop) observation seen so far -- how far the packet
+	// had propagated before the farthest-along station heard it -- and
+	// observers is every distinct station that heard it at all (breadth).
+	// A single arbitrary "first observation wins" data point understates
+	// both: two stations can hear the same flood at very different hop
+	// depths depending on which relay leg reached them.
 	type pendingPing struct {
-		txID         int
 		hops         int
 		snr          sql.NullFloat64
-		observer     string
-		scope        string
 		resolvedPath []*string
+		observers    map[string]bool
+		scope        string
 	}
-	var pendingPings []pendingPing
+	pendingPings := make(map[int]*pendingPing)
 
 	for rows.Next() {
 		var pktID, txID int
@@ -2001,10 +2003,44 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		if !dj.Valid {
 			continue
 		}
+
+		// Hop count, relay path, and hearing station for THIS observation
+		// row -- computed for every row (not just the first) so a ping's
+		// reach can be tracked across every station that heard it.
+		var hops int
+		var entryPrefix string
+		if pathJSON.Valid {
+			var h []string
+			if json.Unmarshal([]byte(pathJSON.String), &h) == nil {
+				hops = len(h)
+				if len(h) > 0 {
+					entryPrefix = h[0]
+				}
+			}
+		}
+		var resolvedPath []*string
+		if resolvedPathJSON.Valid {
+			resolvedPath = unmarshalResolvedPath(resolvedPathJSON.String)
+		}
+		observerName := ""
+		if obsName.Valid {
+			observerName = obsName.String
+		} else if obsID.Valid {
+			observerName = obsID.String
+		}
+
 		if existing, ok := msgMap[txID]; ok {
 			existing.Repeats++
 			if obsTs.Valid && obsTs.Int64 > existing.LatestEpoch {
 				existing.LatestEpoch = obsTs.Int64
+			}
+			if agg, ok := pendingPings[txID]; ok {
+				if observerName != "" {
+					agg.observers[observerName] = true
+				}
+				if hops > agg.hops {
+					agg.hops, agg.snr, agg.resolvedPath = hops, snr, resolvedPath
+				}
 			}
 			continue
 		}
@@ -2025,17 +2061,6 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			if idx := strings.Index(text, ": "); idx > 0 && idx < 50 {
 				displaySender = text[:idx]
 				displayText = text[idx+2:]
-			}
-		}
-		var hops int
-		var entryPrefix string
-		if pathJSON.Valid {
-			var h []string
-			if json.Unmarshal([]byte(pathJSON.String), &h) == nil {
-				hops = len(h)
-				if len(h) > 0 {
-					entryPrefix = h[0]
-				}
 			}
 		}
 		senderTs := decoded["sender_timestamp"]
@@ -2061,31 +2086,24 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		if obsTs.Valid {
 			m.LatestEpoch = obsTs.Int64
 		}
-		observerName := ""
-		if obsName.Valid {
-			observerName = obsName.String
-			m.Data["observers"] = []string{obsName.String}
-		} else if obsID.Valid {
-			observerName = obsID.String
-			m.Data["observers"] = []string{obsID.String}
+		if observerName != "" {
+			m.Data["observers"] = []string{observerName}
 		}
 		if isPingTrigger(displayText) {
-			var resolvedPath []*string
-			if resolvedPathJSON.Valid {
-				resolvedPath = unmarshalResolvedPath(resolvedPathJSON.String)
+			agg := &pendingPing{hops: hops, snr: snr, resolvedPath: resolvedPath, scope: scopeName.String, observers: map[string]bool{}}
+			if observerName != "" {
+				agg.observers[observerName] = true
 			}
-			pendingPings = append(pendingPings, pendingPing{
-				txID: txID, hops: hops, snr: snr, observer: observerName,
-				scope: scopeName.String, resolvedPath: resolvedPath,
-			})
+			pendingPings[txID] = agg
 		}
 		msgMap[txID] = m
 	}
 
-	// Bulk-resolve every pubkey referenced by any ping's relay path in ONE
-	// query, then build each pending reply's "via RepeaterA → RepeaterB"
-	// text. Names default to the raw pubkey/prefix when unresolved rather
-	// than being dropped, so the hop count and reply still make sense.
+	// Bulk-resolve every pubkey referenced by any ping's DEEPEST relay path
+	// in ONE query, then build each pending reply's "via RepeaterA →
+	// RepeaterB" text plus its observer-breadth label. Names default to
+	// the raw pubkey/prefix when unresolved rather than being dropped, so
+	// the hop count and reply still make sense.
 	if len(pendingPings) > 0 {
 		pubkeySet := map[string]bool{}
 		for _, p := range pendingPings {
@@ -2101,7 +2119,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		}
 		names, _ := db.namesAndRolesForPubkeys(pubkeys)
 
-		for _, p := range pendingPings {
+		for txID, p := range pendingPings {
 			var repeaterNames []string
 			for _, pk := range p.resolvedPath {
 				if pk == nil || *pk == "" {
@@ -2113,8 +2131,23 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 					repeaterNames = append(repeaterNames, *pk)
 				}
 			}
-			if m, ok := msgMap[p.txID]; ok {
-				m.Data["botReply"] = pingBotReply(p.hops, p.snr, p.observer, p.scope, repeaterNames)
+			// Breadth: name the single station when there's only one (as
+			// specific as before), otherwise report the count -- "heard by
+			// 4 stations" says more about actual reach than an arbitrarily
+			// picked single name once more than one station heard it.
+			observerLabel := ""
+			switch len(p.observers) {
+			case 0:
+				// leave empty
+			case 1:
+				for name := range p.observers {
+					observerLabel = name
+				}
+			default:
+				observerLabel = fmt.Sprintf("%d stations", len(p.observers))
+			}
+			if m, ok := msgMap[txID]; ok {
+				m.Data["botReply"] = pingBotReply(p.hops, p.snr, observerLabel, p.scope, repeaterNames)
 			}
 		}
 	}
