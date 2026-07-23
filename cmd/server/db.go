@@ -1755,25 +1755,38 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 // a bare "ping".
 var channelMentionPrefixRe = regexp.MustCompile(`^@[A-Za-z0-9_-]{1,32}\s+`)
 
-// pingBotReply synthesizes a "pong" reply for a channel message whose
-// (mention-stripped) text is exactly "ping" — CoreScope-side only, never
-// transmitted back onto the mesh (CoreScope has no publish path to a
-// MeshCore broker/radio). Purely a read-time annotation over data this
-// message's own row already carries (hop count, SNR, hearing observer),
-// not a persisted message: nil when text isn't a ping trigger.
-func pingBotReply(displayText string, hops int, snr sql.NullFloat64, observer string) map[string]interface{} {
+// isPingTrigger reports whether displayText, after stripping a leading
+// "@target " mention the same way the frontend does (public/channels.js
+// replyMatch), is exactly "ping".
+func isPingTrigger(displayText string) bool {
 	trigger := strings.TrimSpace(displayText)
 	trigger = channelMentionPrefixRe.ReplaceAllString(trigger, "")
-	if !strings.EqualFold(strings.TrimSpace(trigger), "ping") {
-		return nil
-	}
-	parts := make([]string, 0, 3)
+	return strings.EqualFold(strings.TrimSpace(trigger), "ping")
+}
+
+// pingBotReply synthesizes a "pong" reply for a channel message whose
+// text matched isPingTrigger — CoreScope-side only, never transmitted
+// back onto the mesh (CoreScope has no publish path to a MeshCore
+// broker/radio). Purely a read-time annotation over data this message's
+// own row already carries (hop count + relay path, SNR, hearing
+// observer, region scope), not a persisted message.
+//
+// repeaterNames is the resolved relay path in hop order (element i is
+// hop i's node name, falling back to its pubkey/hash-prefix when a name
+// couldn't be resolved); nil/empty when hops == 0 or resolution wasn't
+// available -- the hop count itself is unaffected either way.
+func pingBotReply(hops int, snr sql.NullFloat64, observer, scope string, repeaterNames []string) map[string]interface{} {
+	parts := make([]string, 0, 4)
 	if hops > 0 {
 		s := "s"
 		if hops == 1 {
 			s = ""
 		}
-		parts = append(parts, fmt.Sprintf("%d hop%s", hops, s))
+		hopDesc := fmt.Sprintf("%d hop%s", hops, s)
+		if len(repeaterNames) > 0 {
+			hopDesc += " (via " + strings.Join(repeaterNames, " → ") + ")"
+		}
+		parts = append(parts, hopDesc)
 	} else {
 		parts = append(parts, "0 hops (direct)")
 	}
@@ -1782,6 +1795,9 @@ func pingBotReply(displayText string, hops int, snr sql.NullFloat64, observer st
 	}
 	if observer != "" {
 		parts = append(parts, "heard by "+observer)
+	}
+	if scope != "" {
+		parts = append(parts, "scope "+scope)
 	}
 	return map[string]interface{}{
 		"sender": "MeshviewBot",
@@ -1912,10 +1928,17 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	if db.hasScopeName {
 		scopeCol = ", t.scope_name"
 	}
+	// resolvedPathCol feeds the ping-bot reply's "via RepeaterA → RepeaterB"
+	// hop names (see the bulk-resolve pass below) -- optional like
+	// scopeCol since not every DB/test fixture has this column.
+	resolvedPathCol := ""
+	if db.hasResolvedPath {
+		resolvedPathCol = ", o.resolved_path"
+	}
 	var obsSQL string
 	if db.isV3 {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				obs.id, obs.name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + `
+				obs.id, obs.name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -1923,7 +1946,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			ORDER BY o.id ASC`
 	} else {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + `
+				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
@@ -1943,9 +1966,24 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	}
 	msgMap := make(map[int]*msg, len(pageIDs))
 
+	// pendingPing collects a ping-triggering message's ingredients for its
+	// botReply. Reply text isn't built inline in the scan loop below
+	// because the repeater-name lookup needs ONE bulk query across every
+	// ping on the page (see the pass after the loop) rather than a
+	// per-message round trip.
+	type pendingPing struct {
+		txID         int
+		hops         int
+		snr          sql.NullFloat64
+		observer     string
+		scope        string
+		resolvedPath []*string
+	}
+	var pendingPings []pendingPing
+
 	for rows.Next() {
 		var pktID, txID int
-		var pktHash, dj, fs, obsID, obsName, pathJSON sql.NullString
+		var pktHash, dj, fs, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
 		var snr sql.NullFloat64
 		var obsTs sql.NullInt64
 		var routeType sql.NullInt64
@@ -1953,6 +1991,9 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
 		if db.hasScopeName {
 			scanArgs = append(scanArgs, &scopeName)
+		}
+		if db.hasResolvedPath {
+			scanArgs = append(scanArgs, &resolvedPathJSON)
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			return nil, 0, err
@@ -2028,10 +2069,54 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			observerName = obsID.String
 			m.Data["observers"] = []string{obsID.String}
 		}
-		if reply := pingBotReply(displayText, hops, snr, observerName); reply != nil {
-			m.Data["botReply"] = reply
+		if isPingTrigger(displayText) {
+			var resolvedPath []*string
+			if resolvedPathJSON.Valid {
+				resolvedPath = unmarshalResolvedPath(resolvedPathJSON.String)
+			}
+			pendingPings = append(pendingPings, pendingPing{
+				txID: txID, hops: hops, snr: snr, observer: observerName,
+				scope: scopeName.String, resolvedPath: resolvedPath,
+			})
 		}
 		msgMap[txID] = m
+	}
+
+	// Bulk-resolve every pubkey referenced by any ping's relay path in ONE
+	// query, then build each pending reply's "via RepeaterA → RepeaterB"
+	// text. Names default to the raw pubkey/prefix when unresolved rather
+	// than being dropped, so the hop count and reply still make sense.
+	if len(pendingPings) > 0 {
+		pubkeySet := map[string]bool{}
+		for _, p := range pendingPings {
+			for _, pk := range p.resolvedPath {
+				if pk != nil && *pk != "" {
+					pubkeySet[*pk] = true
+				}
+			}
+		}
+		pubkeys := make([]string, 0, len(pubkeySet))
+		for pk := range pubkeySet {
+			pubkeys = append(pubkeys, pk)
+		}
+		names, _ := db.namesAndRolesForPubkeys(pubkeys)
+
+		for _, p := range pendingPings {
+			var repeaterNames []string
+			for _, pk := range p.resolvedPath {
+				if pk == nil || *pk == "" {
+					continue
+				}
+				if name := names[*pk]; name != "" {
+					repeaterNames = append(repeaterNames, name)
+				} else {
+					repeaterNames = append(repeaterNames, *pk)
+				}
+			}
+			if m, ok := msgMap[p.txID]; ok {
+				m.Data["botReply"] = pingBotReply(p.hops, p.snr, p.observer, p.scope, repeaterNames)
+			}
+		}
 	}
 
 	// Issue #1366 follow-up: emit batch sorted by LatestSeen ascending

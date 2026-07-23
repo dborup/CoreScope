@@ -119,6 +119,18 @@ test('hops=0 reports "0 hops (direct)"; missing SNR/observer are omitted cleanly
   assert.ok(!r.text.includes('heard by'), r.text);
 });
 
+test('scope and area are included when present, omitted when not', () => {
+  const { ctx } = makeSandbox();
+  const fn = ctx.window._channelsPingBotReplyForTest;
+  const withBoth = fn('ping', 1, 5, 'Obs', '#dk', 'Aarhus');
+  assert.ok(withBoth.text.includes('scope #dk'), withBoth.text);
+  assert.ok(withBoth.text.includes('area Aarhus'), withBoth.text);
+
+  const withNeither = fn('ping', 1, 5, 'Obs', null, null);
+  assert.ok(!withNeither.text.includes('scope'), withNeither.text);
+  assert.ok(!withNeither.text.includes('area'), withNeither.text);
+});
+
 console.log('\n=== channels.js: ping-bot reply rendering ===');
 
 test('a message without botReply renders no bot bubble', () => {

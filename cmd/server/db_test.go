@@ -1410,6 +1410,9 @@ func TestGetChannelMessages_PingBotReply(t *testing.T) {
 	defer db.Close()
 
 	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkAlphaRepeater', 'RepeaterAlpha', 'repeater')`)
+	// pkBravoRepeater deliberately has NO nodes row -- exercises the
+	// unresolved-pubkey fallback (raw pubkey shown instead of a name).
 
 	// tx1: a plain chat message -- must NOT get a botReply.
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
@@ -1418,12 +1421,14 @@ func TestGetChannelMessages_PingBotReply(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 9.0, -88, '["aa","bb"]', 1736935200)`)
 
-	// tx2: bare "ping" -- must get a botReply with hops=2, snr=8.2, observer.
+	// tx2: bare "ping" -- must get a botReply with hops=2, snr=8.2, observer,
+	// and the relay path resolved to "RepeaterAlpha → pkBravoRepeater"
+	// (second hop has no nodes row, so its raw pubkey is shown instead).
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
 		VALUES ('BB', 'chanmsg00000002', '2026-01-15T10:01:00Z', 1, 5,
 		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Bob"}', '#ping')`)
-	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (2, 1, 8.2, -90, '["aa","bb"]', 1736935260)`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (2, 1, 8.2, -90, '["aa","bb"]', '["pkAlphaRepeater","pkBravoRepeater"]', 1736935260)`)
 
 	// tx3: "@MeshviewBot ping" -- the mention-prefix must be stripped before matching.
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
@@ -1473,6 +1478,9 @@ func TestGetChannelMessages_PingBotReply(t *testing.T) {
 	if !strings.Contains(replyText, "2 hops") || !strings.Contains(replyText, "8.2dB") || !strings.Contains(replyText, "Observer One") {
 		t.Errorf("botReply text = %q, want hops/SNR/observer mentioned", replyText)
 	}
+	if !strings.Contains(replyText, "via RepeaterAlpha → pkBravoRepeater") {
+		t.Errorf("botReply text = %q, want the resolved relay path (RepeaterAlpha for the known node, raw pubkey fallback for the unresolved one)", replyText)
+	}
 
 	mentionReply, _ := byText["@MeshviewBot ping"]["botReply"].(map[string]interface{})
 	if mentionReply == nil {
@@ -1480,6 +1488,37 @@ func TestGetChannelMessages_PingBotReply(t *testing.T) {
 	}
 	if mentionReply["hops"] != 0 {
 		t.Errorf("mention-prefixed ping botReply hops = %v, want 0 (empty path)", mentionReply["hops"])
+	}
+}
+
+// TestAppendAreaToBotReply covers appendAreaToBotReply (routes.go): the
+// handler-level pass that folds a ping message's resolved "area" (set by
+// annotateMessageAreas, which needs server config unavailable to db.go)
+// into its already-built botReply text.
+func TestAppendAreaToBotReply(t *testing.T) {
+	withArea := map[string]interface{}{
+		"area":     "Aarhus",
+		"botReply": map[string]interface{}{"sender": "MeshviewBot", "text": "🏓 pong! 2 hops"},
+	}
+	noArea := map[string]interface{}{
+		"botReply": map[string]interface{}{"sender": "MeshviewBot", "text": "🏓 pong! 0 hops (direct)"},
+	}
+	noBotReply := map[string]interface{}{"area": "Aarhus", "text": "just chatting"}
+
+	appendAreaToBotReply([]map[string]interface{}{withArea, noArea, noBotReply})
+
+	gotText := withArea["botReply"].(map[string]interface{})["text"].(string)
+	if !strings.Contains(gotText, "area Aarhus") {
+		t.Errorf("botReply text = %q, want area appended", gotText)
+	}
+
+	gotNoAreaText := noArea["botReply"].(map[string]interface{})["text"].(string)
+	if strings.Contains(gotNoAreaText, "area") {
+		t.Errorf("botReply text = %q, want unchanged when message has no area", gotNoAreaText)
+	}
+
+	if _, ok := noBotReply["botReply"]; ok {
+		t.Error("a message with no botReply must not gain one")
 	}
 }
 
