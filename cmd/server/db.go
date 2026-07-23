@@ -1947,8 +1947,8 @@ func isPingTrigger(displayText string) bool {
 // hop i's node name, falling back to its pubkey/hash-prefix when a name
 // couldn't be resolved); nil/empty when hops == 0 or resolution wasn't
 // available -- the hop count itself is unaffected either way.
-func pingBotReply(hops int, snr sql.NullFloat64, observer, scope string, repeaterNames []string) map[string]interface{} {
-	parts := make([]string, 0, 4)
+func pingBotReply(hops int, snr sql.NullFloat64, observer string, repeaterNames []string) map[string]interface{} {
+	parts := make([]string, 0, 3)
 	if hops > 0 {
 		s := "s"
 		if hops == 1 {
@@ -1968,9 +1968,9 @@ func pingBotReply(hops int, snr sql.NullFloat64, observer, scope string, repeate
 	if observer != "" {
 		parts = append(parts, "heard by "+observer)
 	}
-	if scope != "" {
-		parts = append(parts, "scope "+scope)
-	}
+	// Deliberately no scope/area here -- both are already shown on the
+	// triggering message's own meta line right above this reply, so
+	// repeating them would just be redundant.
 	return map[string]interface{}{
 		"sender": "CoreScopeBot",
 		"text":   "🏓 pong! " + strings.Join(parts, " · "),
@@ -2151,7 +2151,6 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		snr          sql.NullFloat64
 		resolvedPath []*string
 		observers    map[string]bool
-		scope        string
 	}
 	pendingPings := make(map[int]*pendingPing)
 
@@ -2262,7 +2261,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			m.Data["observers"] = []string{observerName}
 		}
 		if isPingTrigger(displayText) {
-			agg := &pendingPing{hops: hops, snr: snr, resolvedPath: resolvedPath, scope: scopeName.String, observers: map[string]bool{}}
+			agg := &pendingPing{hops: hops, snr: snr, resolvedPath: resolvedPath, observers: map[string]bool{}}
 			if observerName != "" {
 				agg.observers[observerName] = true
 			}
@@ -2319,7 +2318,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				observerLabel = fmt.Sprintf("%d observers", len(p.observers))
 			}
 			if m, ok := msgMap[txID]; ok {
-				m.Data["botReply"] = pingBotReply(p.hops, p.snr, observerLabel, p.scope, repeaterNames)
+				m.Data["botReply"] = pingBotReply(p.hops, p.snr, observerLabel, repeaterNames)
 			}
 		}
 	}

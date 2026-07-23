@@ -1645,37 +1645,6 @@ func TestGetChannelMessages_PingBotReply_MultiObservation(t *testing.T) {
 	}
 }
 
-// TestAppendAreaToBotReply covers appendAreaToBotReply (routes.go): the
-// handler-level pass that folds a ping message's resolved "area" (set by
-// annotateMessageAreas, which needs server config unavailable to db.go)
-// into its already-built botReply text.
-func TestAppendAreaToBotReply(t *testing.T) {
-	withArea := map[string]interface{}{
-		"area":     "Aarhus",
-		"botReply": map[string]interface{}{"sender": "CoreScopeBot", "text": "🏓 pong! 2 hops"},
-	}
-	noArea := map[string]interface{}{
-		"botReply": map[string]interface{}{"sender": "CoreScopeBot", "text": "🏓 pong! 0 hops (direct)"},
-	}
-	noBotReply := map[string]interface{}{"area": "Aarhus", "text": "just chatting"}
-
-	appendAreaToBotReply([]map[string]interface{}{withArea, noArea, noBotReply})
-
-	gotText := withArea["botReply"].(map[string]interface{})["text"].(string)
-	if !strings.Contains(gotText, "area Aarhus") {
-		t.Errorf("botReply text = %q, want area appended", gotText)
-	}
-
-	gotNoAreaText := noArea["botReply"].(map[string]interface{})["text"].(string)
-	if strings.Contains(gotNoAreaText, "area") {
-		t.Errorf("botReply text = %q, want unchanged when message has no area", gotNoAreaText)
-	}
-
-	if _, ok := noBotReply["botReply"]; ok {
-		t.Error("a message with no botReply must not gain one")
-	}
-}
-
 func TestGetNetworkStatusDateFormats(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

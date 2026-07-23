@@ -334,18 +334,18 @@
   // Unlike the server version, this one can't show the resolved relay
   // path (repeater names) -- the live WS broadcast doesn't carry a
   // per-packet resolved_path, only REST-loaded history does (via
-  // GetChannelMessages). scope/area ARE available live and are included.
+  // GetChannelMessages). No scope/area either -- both are already shown
+  // on the triggering message's own meta line, so repeating them in the
+  // reply would just be redundant.
   // pingTriggerWords mirrors pingTriggerWords in cmd/server/db.go -- keep
   // both lists in sync by hand.
   var pingTriggerWords = { 'ping': true, '/ping': true };
-  function pingBotReply(text, hops, snr, observer, scope, area) {
+  function pingBotReply(text, hops, snr, observer) {
     var trigger = String(text || '').trim().replace(/^@[A-Za-z0-9_-]{1,32}\s+/, '').trim();
     if (!pingTriggerWords[trigger.toLowerCase()]) return null;
     var parts = [hops > 0 ? (hops + ' hop' + (hops === 1 ? '' : 's')) : '0 hops (direct)'];
     if (snr !== null && snr !== undefined) parts.push('SNR ' + Number(snr).toFixed(1) + 'dB');
     if (observer) parts.push('heard by ' + observer);
-    if (scope) parts.push('scope ' + scope);
-    if (area) parts.push('area ' + area);
     return { sender: 'CoreScopeBot', text: '🏓 pong! ' + parts.join(' · '), hops: hops, snr: snr };
   }
   function getSenderColor(name) {
@@ -692,7 +692,7 @@
           scope: c.packet.scope_name || null,
           routeType: c.packet.route_type ?? null,
           repeats: 1,
-          botReply: pingBotReply(text, d.path_len || 0, c.packet.snr || null, alreadyDecObserver, c.packet.scope_name || null)
+          botReply: pingBotReply(text, d.path_len || 0, c.packet.snr || null, alreadyDecObserver)
         });
         continue;
       }
@@ -712,7 +712,7 @@
           scope: c.packet.scope_name || null,
           routeType: c.packet.route_type ?? null,
           repeats: 1,
-          botReply: pingBotReply(result.message, 0, c.packet.snr || null, decObserver, c.packet.scope_name || null)
+          botReply: pingBotReply(result.message, 0, c.packet.snr || null, decObserver)
         });
       } else {
         macFailCount++;
@@ -1515,7 +1515,7 @@
               scope: scope,
               routeType: routeType,
               area: area,
-              botReply: pingBotReply(displayText, wsHops, snr, observer, scope, area),
+              botReply: pingBotReply(displayText, wsHops, snr, observer),
               // #1498: mark as WS-pushed so a later REST replacement
               // (selectChannel / refreshMessages) can merge instead of
               // stomp. Without this flag the REST response wipes any

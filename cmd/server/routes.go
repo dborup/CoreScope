@@ -2890,26 +2890,6 @@ func (s *Server) annotateMessageAreas(messages []map[string]interface{}) {
 	}
 }
 
-// appendAreaToBotReply folds a ping message's own resolved area (set by
-// annotateMessageAreas just above, which MUST run first) into its
-// botReply text. Area resolution needs server-level config (s.cfg.Areas)
-// that db.go's GetChannelMessages/pingBotReply don't have access to, so
-// this runs as a handler-level second pass instead.
-func appendAreaToBotReply(messages []map[string]interface{}) {
-	for _, m := range messages {
-		area, _ := m["area"].(string)
-		if area == "" {
-			continue
-		}
-		reply, ok := m["botReply"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		text, _ := reply["text"].(string)
-		reply["text"] = text + " · area " + area
-	}
-}
-
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	includeEncrypted := r.URL.Query().Get("includeEncrypted") == "true"
@@ -2955,14 +2935,12 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.annotateMessageAreas(messages)
-		appendAreaToBotReply(messages)
 		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
 		return
 	}
 	if s.store != nil {
 		messages, total := s.store.GetChannelMessages(hash, limit, offset, region)
 		s.annotateMessageAreas(messages)
-		appendAreaToBotReply(messages)
 		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
 		return
 	}
