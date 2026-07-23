@@ -1517,6 +1517,170 @@ func (db *DB) GetTraces(hash string) ([]map[string]interface{}, error) {
 	return traces, nil
 }
 
+// PacketPathPoint is one hop's position along a packet's resolved relay
+// path, for map visualization (public/packet-path-map.js). Lat/Lon are
+// nil when that node has never advertised a GPS position -- the caller
+// draws a gap rather than guessing.
+type PacketPathPoint struct {
+	PublicKey string   `json:"publicKey"`
+	Name      string   `json:"name"`
+	Role      string   `json:"role,omitempty"`
+	Lat       *float64 `json:"lat"`
+	Lon       *float64 `json:"lon"`
+}
+
+// PacketPathObserver is the station that produced the deepest observation
+// of a packet path (see GetPacketPath), positioned from its configured
+// IATA code the same way the Wardriving tab positions observers -- not a
+// stored per-observer lat/lon column.
+type PacketPathObserver struct {
+	Name string   `json:"name"`
+	IATA string   `json:"iata,omitempty"`
+	Lat  *float64 `json:"lat"`
+	Lon  *float64 `json:"lon"`
+}
+
+// PacketPathResponse is the geographic relay path for one packet hash,
+// used to draw it on a map (the ping-bot reply's "View path" link).
+type PacketPathResponse struct {
+	Hash     string              `json:"hash"`
+	Hops     int                 `json:"hops"`
+	Points   []PacketPathPoint   `json:"points"`
+	Observer *PacketPathObserver `json:"observer,omitempty"`
+}
+
+// GetPacketPath resolves a packet's DEEPEST observation (the one with the
+// most hops -- same "farthest leg" reasoning as the ping-bot reply, see
+// pingBotReply's doc comment) to a geographic point sequence: each
+// relay's name/role/lat/lon in path order, plus the hearing observer's
+// position. A packet can have several observations (heard by more than
+// one station, possibly at different hop depths); this always picks the
+// one that traveled farthest, since that's the more informative path to
+// show on a map.
+func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
+	if !db.hasResolvedPath {
+		return nil, fmt.Errorf("resolved_path not available on this server")
+	}
+	var querySQL string
+	if db.isV3 {
+		querySQL = `SELECT obs.name, obs.iata, o.resolved_path
+			FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE t.hash = ? AND o.resolved_path IS NOT NULL AND o.resolved_path != ''`
+	} else {
+		querySQL = `SELECT o.observer_name, NULL, o.resolved_path
+			FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			WHERE t.hash = ? AND o.resolved_path IS NOT NULL AND o.resolved_path != ''`
+	}
+	rows, err := db.conn.Query(querySQL, strings.ToLower(hash))
+	if err != nil {
+		return nil, fmt.Errorf("packet path query: %w", err)
+	}
+	defer rows.Close()
+
+	var bestPath []*string
+	var bestObserverName, bestObserverIATA sql.NullString
+	for rows.Next() {
+		var obsName, obsIATA, rpJSON sql.NullString
+		if err := rows.Scan(&obsName, &obsIATA, &rpJSON); err != nil {
+			continue
+		}
+		if !rpJSON.Valid {
+			continue
+		}
+		rp := unmarshalResolvedPath(rpJSON.String)
+		if len(rp) > len(bestPath) {
+			bestPath = rp
+			bestObserverName, bestObserverIATA = obsName, obsIATA
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("packet path iteration: %w", err)
+	}
+
+	resp := &PacketPathResponse{Hash: hash, Hops: len(bestPath), Points: []PacketPathPoint{}}
+	if len(bestPath) == 0 {
+		return resp, nil
+	}
+
+	pubkeys := make([]string, 0, len(bestPath))
+	for _, pk := range bestPath {
+		if pk != nil && *pk != "" {
+			pubkeys = append(pubkeys, *pk)
+		}
+	}
+	type nodeInfo struct {
+		name string
+		role string
+		lat  *float64
+		lon  *float64
+	}
+	nodeByPK := make(map[string]nodeInfo, len(pubkeys))
+	if len(pubkeys) > 0 {
+		placeholders := make([]byte, 0, len(pubkeys)*2)
+		args := make([]interface{}, len(pubkeys))
+		for i, pk := range pubkeys {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[i] = pk
+		}
+		nodeRows, err := db.conn.Query(
+			"SELECT public_key, name, role, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+")", args...)
+		if err == nil {
+			for nodeRows.Next() {
+				var pk string
+				var name, role sql.NullString
+				var lat, lon sql.NullFloat64
+				if nodeRows.Scan(&pk, &name, &role, &lat, &lon) == nil {
+					ni := nodeInfo{name: name.String, role: role.String}
+					if lat.Valid {
+						v := lat.Float64
+						ni.lat = &v
+					}
+					if lon.Valid {
+						v := lon.Float64
+						ni.lon = &v
+					}
+					nodeByPK[pk] = ni
+				}
+			}
+			nodeRows.Close()
+		}
+	}
+
+	for _, pk := range bestPath {
+		if pk == nil || *pk == "" {
+			continue
+		}
+		ni := nodeByPK[*pk]
+		name := ni.name
+		if name == "" {
+			name = *pk
+		}
+		resp.Points = append(resp.Points, PacketPathPoint{
+			PublicKey: *pk, Name: name, Role: ni.role, Lat: ni.lat, Lon: ni.lon,
+		})
+	}
+
+	if bestObserverName.Valid && bestObserverName.String != "" {
+		obs := &PacketPathObserver{Name: bestObserverName.String}
+		if bestObserverIATA.Valid {
+			obs.IATA = strings.ToUpper(strings.TrimSpace(bestObserverIATA.String))
+			if coord, ok := iataCoords[obs.IATA]; ok {
+				lat, lon := coord.Lat, coord.Lon
+				obs.Lat, obs.Lon = &lat, &lon
+			}
+		}
+		resp.Observer = obs
+	}
+
+	return resp, nil
+}
+
 // GetChannels returns channel list from GRP_TXT packets.
 // Queries transmissions directly (not a VIEW) to avoid observation-level
 // duplicates that could cause stale lastMessage when an older message has

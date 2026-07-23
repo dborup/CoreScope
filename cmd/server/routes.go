@@ -346,6 +346,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/observers/{id}", s.handleObserverDetail).Methods("GET")
 	r.HandleFunc("/api/observers", s.handleObservers).Methods("GET")
 	r.HandleFunc("/api/traces/{hash}", s.handleTraces).Methods("GET")
+	r.HandleFunc("/api/packets/{hash}/path", s.handlePacketPath).Methods("GET")
 	r.HandleFunc("/api/paths/inspect", s.handlePathInspect).Methods("POST")
 	r.HandleFunc("/api/iata-coords", s.handleIATACoords).Methods("GET")
 	r.HandleFunc("/api/audio-lab/buckets", s.handleAudioLabBuckets).Methods("GET")
@@ -3172,6 +3173,20 @@ func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, TraceResponse{Traces: traces})
+}
+
+func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
+	hash := mux.Vars(r)["hash"]
+	if s.db == nil {
+		writeJSON(w, PacketPathResponse{Hash: hash, Points: []PacketPathPoint{}})
+		return
+	}
+	resp, err := s.db.GetPacketPath(hash)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, resp)
 }
 
 var iataCoords = map[string]IataCoord{

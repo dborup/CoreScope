@@ -621,6 +621,89 @@ func TestGetTraces(t *testing.T) {
 	}
 }
 
+// TestGetPacketPath covers the "View path" map data source: given a
+// packet hash, resolve its DEEPEST observation's relay path to
+// name/role/lat/lon per hop, plus the hearing observer's IATA-derived
+// position. Deliberately independent of seedTestData's fixtures.
+func TestGetPacketPath(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs2', 'Observer Two', 'SFO')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkAlpha', 'RepeaterAlpha', 'repeater', 56.1, 10.2)`)
+	// pkBravo deliberately has NO nodes row -- exercises the raw-pubkey/no-position fallback.
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000001', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	// Shallow observation (obs1): 1 hop.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkAlpha"]', 1736935200)`)
+	// Deeper observation (obs2): 2 hops -- must win even though it's not first.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 2, 4.0, -95, '["aa","bb"]', '["pkAlpha","pkBravo"]', 1736935260)`)
+
+	resp, err := db.GetPacketPath("pathtest00000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Hops != 2 {
+		t.Fatalf("Hops = %d, want 2 (the deeper observation)", resp.Hops)
+	}
+	if len(resp.Points) != 2 {
+		t.Fatalf("Points = %+v, want 2 entries", resp.Points)
+	}
+	if resp.Points[0].Name != "RepeaterAlpha" || resp.Points[0].Lat == nil || *resp.Points[0].Lat != 56.1 {
+		t.Errorf("Points[0] = %+v, want RepeaterAlpha at lat 56.1", resp.Points[0])
+	}
+	if resp.Points[1].PublicKey != "pkBravo" || resp.Points[1].Name != "pkBravo" || resp.Points[1].Lat != nil {
+		t.Errorf("Points[1] = %+v, want raw pubkey fallback with nil lat (no nodes row)", resp.Points[1])
+	}
+	if resp.Observer == nil || resp.Observer.Name != "Observer Two" {
+		t.Fatalf("Observer = %+v, want Observer Two (heard the deeper observation)", resp.Observer)
+	}
+	if resp.Observer.Lat == nil || *resp.Observer.Lat != 37.6213 {
+		t.Errorf("Observer.Lat = %v, want the SFO IATA coordinate (37.6213)", resp.Observer.Lat)
+	}
+}
+
+func TestGetPacketPath_NoResolvedPath(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000002', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Points) != 0 {
+		t.Errorf("Points = %+v, want empty when no observation has a resolved_path", resp.Points)
+	}
+	if resp.Observer != nil {
+		t.Errorf("Observer = %+v, want nil when there's no resolved path", resp.Observer)
+	}
+}
+
+func TestGetPacketPath_UnknownHash(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	resp, err := db.GetPacketPath("doesnotexist0000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Hops != 0 || len(resp.Points) != 0 {
+		t.Errorf("expected an empty response for an unknown hash, got %+v", resp)
+	}
+}
+
 func TestGetChannels(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

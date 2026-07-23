@@ -1349,6 +1349,10 @@
     });
 
     msgEl.addEventListener('click', handleNodeTap);
+    msgEl.addEventListener('click', function (e) {
+      const el = e.target.closest('[data-view-path]');
+      if (el && window.PacketPathMap) window.PacketPathMap.open(el.dataset.viewPath);
+    });
     // touchend fires more reliably on mobile for non-button elements
     let touchMoved = false;
     msgEl.addEventListener('touchstart', () => { touchMoved = false; }, { passive: true });
@@ -2326,12 +2330,18 @@
       // "Not sent to the mesh" caveat is load-bearing, not decoration --
       // without it this could be misread as a real bot reply the sender's
       // own radio received.
+      // "View path" only makes sense when there's an actual multi-hop
+      // route to draw (hops > 0) and we have a packet hash to look it up
+      // by -- a direct (0-hop) reply has no relay path to show on a map.
+      const viewPathHtml = (msg.botReply && msg.botReply.hops > 0 && msg.packetHash)
+        ? ` · <button type="button" class="ch-analyze-link" data-view-path="${escapeHtml(msg.packetHash)}" style="background:none;border:none;padding:0;cursor:pointer;font:inherit">View path →</button>`
+        : '';
       const botReplyHtml = msg.botReply ? `<div class="ch-msg ch-message ch-bot-message">
         <div class="ch-avatar" aria-hidden="true" style="background:var(--text-muted)">🤖</div>
         <div class="ch-msg-content ch-message-content">
           <div class="ch-msg-sender ch-message-sender" style="color:var(--text-muted)">${escapeHtml(msg.botReply.sender || 'CoreScopeBot')}</div>
           <div class="ch-msg-bubble ch-message-bubble">${escapeHtml(msg.botReply.text || '')}</div>
-          <div class="ch-msg-meta ch-message-meta">Not sent to the mesh — CoreScope-only reply</div>
+          <div class="ch-msg-meta ch-message-meta">Not sent to the mesh — CoreScope-only reply${viewPathHtml}</div>
         </div>
       </div>` : '';
 

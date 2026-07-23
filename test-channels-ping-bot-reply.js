@@ -158,6 +158,44 @@ test('a message with botReply renders a distinct bot bubble with the reply text'
   assert.ok(html.includes('SNR 8.2dB'), 'should include the SNR from the reply text');
 });
 
+test('"View path" link appears when hops > 0 and a packetHash is available', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    {
+      sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z', packetHash: 'abc123',
+      botReply: { sender: 'CoreScopeBot', text: '🏓 pong! 2 hops', hops: 2, snr: null },
+    },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  const html = chMessagesEl.innerHTML;
+  assert.ok(html.includes('View path'), 'should show the View path link');
+  assert.ok(html.includes('data-view-path="abc123"'), 'should carry the packet hash for the click handler to look up');
+});
+
+test('"View path" link is absent for a direct (0-hop) reply -- nothing to draw', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    {
+      sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z', packetHash: 'abc123',
+      botReply: { sender: 'CoreScopeBot', text: '🏓 pong! 0 hops (direct)', hops: 0, snr: null },
+    },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  assert.ok(!chMessagesEl.innerHTML.includes('View path'), 'a direct reply has no relay path to visualize');
+});
+
+test('"View path" link is absent when there is no packetHash to look it up by', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    {
+      sender: 'Bob', text: 'ping', timestamp: '2026-01-15T10:01:00Z',
+      botReply: { sender: 'CoreScopeBot', text: '🏓 pong! 2 hops', hops: 2, snr: null },
+    },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  assert.ok(!chMessagesEl.innerHTML.includes('View path'), 'without a packetHash there is nothing to fetch the path for');
+});
+
 test('the "not sent to the mesh" caveat is always present on a bot bubble', () => {
   const { ctx, chMessagesEl } = makeSandbox();
   ctx.window._channelsSetStateForTest({ messages: [
