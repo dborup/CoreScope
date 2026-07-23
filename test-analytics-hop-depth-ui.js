@@ -231,6 +231,22 @@ function fakeEl() {
     assert.ok(html.includes('<svg'), 'should render an svg chart when there are 2+ time points');
   });
 
+  await testAsync('the time-series trend renders above the stat cards and bar chart (moved to the top for visibility)', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    const html = ctx.window._analyticsRenderHopDepthSectionHtml({
+      scopedHopDepth: [{ hops: 0, count: 10 }],
+      unscopedHopDepth: [{ hops: 0, count: 4 }],
+      timeSeries: [
+        { t: '2026-07-23T06:00:00Z', scopedMedianHop: 0, unscopedMedianHop: 1 },
+        { t: '2026-07-23T07:00:00Z', scopedMedianHop: 1, unscopedMedianHop: 2 },
+      ],
+    });
+    const trendIdx = html.indexOf('Median Hop Depth Over Time');
+    const statsIdx = html.indexOf('Scoped Median Hop');
+    assert.ok(trendIdx > -1 && statsIdx > -1, 'both sections should be present');
+    assert.ok(trendIdx < statsIdx, 'the time-series trend heading should appear before the stat cards');
+  });
+
   console.log('\n=== analytics.js: hopDepthTimeSeriesChartHtml ===');
 
   await testAsync('fewer than 2 points renders the insufficient-data message, not a broken chart', async () => {

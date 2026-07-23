@@ -5521,15 +5521,18 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   }
 
   // Renders the scoped-vs-unscoped hop-depth comparison (Scopes tab > Hop
-  // Depth sub-tab): median-hop stat cards for both series, a P95-derived
-  // "suggested flood.max.unscoped" callout, a grouped bar chart across
-  // hop values 0..max normalized to the taller of the two series at each
-  // hop, and a median-hop-over-time trend chart. The whole point is to
-  // answer "is region scoping actually containing flood propagation" —
-  // scoped traffic clustering at a lower median hop than unscoped is the
-  // expected/healthy shape — turn that into a concrete number an operator
-  // can plug into their MeshCore firmware config instead of eyeballing
-  // the chart, and show whether it's getting better or worse over time.
+  // Depth sub-tab). Order (top to bottom): the median-hop-over-time trend
+  // chart first (most at-a-glance signal, "is this getting better or
+  // worse" — put at the top for visibility rather than buried below the
+  // static snapshot), then median-hop stat cards for both series, a
+  // P95-derived "suggested flood.max.unscoped" callout, and a grouped bar
+  // chart across hop values 0..max normalized to the taller of the two
+  // series at each hop. The whole point is to answer "is region scoping
+  // actually containing flood propagation" — scoped traffic clustering at
+  // a lower median hop than unscoped is the expected/healthy shape — turn
+  // that into a concrete number an operator can plug into their MeshCore
+  // firmware config instead of eyeballing the chart, and show whether
+  // it's getting better or worse over time.
   function renderHopDepthSectionHtml(hopData) {
     if (!hopData || (!hopData.scopedHopDepth && !hopData.unscopedHopDepth)) {
       return '';
@@ -5579,7 +5582,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">' +
         'How many relay hops packets travel before reaching a repeater, split by whether they carried a region scope (TRANSPORT_FLOOD/TRANSPORT_DIRECT) or not (plain FLOOD). If scoping is containing traffic as intended, Scoped should cluster at fewer hops than Unscoped &mdash; a similar or higher scoped median means scope boundaries aren&rsquo;t actually limiting propagation.' +
       '</p>' +
-      '<div class="stats-grid" style="margin-bottom:10px">' +
+      '<h4 style="margin:12px 0 4px">Median Hop Depth Over Time</h4>' +
+      '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Is containment trending better or worse within this window, rather than just where it stands right now. A gap in a line means no traffic of that kind in that bucket, not a median of zero.</p>' +
+      hopDepthTimeSeriesChartHtml(hopData.timeSeries) +
+      '<div class="stats-grid" style="margin:16px 0 10px">' +
         [
           { label: 'Scoped Median Hop', value: scopedStats.median === null ? '—' : scopedStats.median.toLocaleString(), note: scopedStats.total.toLocaleString() + ' samples' },
           { label: 'Unscoped Median Hop', value: unscopedStats.median === null ? '—' : unscopedStats.median.toLocaleString(), note: unscopedStats.total.toLocaleString() + ' samples' },
@@ -5595,10 +5601,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         '<span><span style="display:inline-block;width:8px;height:8px;background:var(--accent);margin-right:3px"></span>Scoped</span>' +
         '<span><span style="display:inline-block;width:8px;height:8px;background:var(--text-muted);margin-right:3px"></span>Unscoped</span>' +
       '</div>' +
-      rows +
-      '<h4 style="margin:20px 0 4px">Median Hop Depth Over Time</h4>' +
-      '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Is containment trending better or worse within this window, rather than just where it stands right now. A gap in a line means no traffic of that kind in that bucket, not a median of zero.</p>' +
-      hopDepthTimeSeriesChartHtml(hopData.timeSeries);
+      rows;
   }
 
   // publicKey -> RepeaterUnscopedHopDepth lookup from
