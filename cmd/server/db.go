@@ -3184,18 +3184,25 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 // "longest wins" selection without needing per-tx round trips.
 func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, error) {
 	var since string
+	var bucketExpr string
 	switch window {
 	case "1h":
 		since = time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+		// 5-minute buckets -- same bucketing as GetScopeStats' TimeSeries.
+		bucketExpr = `strftime('%Y-%m-%dT%H:', t.first_seen) || printf('%02d', (CAST(strftime('%M', t.first_seen) AS INTEGER) / 5) * 5) || ':00Z'`
 	case "7d":
 		since = time.Now().Add(-7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+		// 6-hour buckets
+		bucketExpr = `strftime('%Y-%m-%dT', t.first_seen) || printf('%02d', (CAST(strftime('%H', t.first_seen) AS INTEGER) / 6) * 6) || ':00:00Z'`
 	default:
 		window = "24h"
 		since = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+		// 1-hour buckets
+		bucketExpr = `strftime('%Y-%m-%dT%H:00:00Z', t.first_seen)`
 	}
 
 	rows, err := db.conn.Query(`
-		SELECT t.id, t.route_type, t.payload_type, o.resolved_path
+		SELECT t.id, t.route_type, t.payload_type, o.resolved_path, `+bucketExpr+` AS bucket
 		FROM transmissions t
 		JOIN observations o ON o.transmission_id = t.id
 		WHERE t.first_seen > ? AND o.resolved_path IS NOT NULL AND o.resolved_path != ''`, since)
@@ -3208,13 +3215,14 @@ func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, e
 		routeType   sql.NullInt64
 		payloadType sql.NullInt64
 		bestPath    []*string
+		bucket      string
 	}
 	byTx := make(map[int]*txInfo)
 	for rows.Next() {
 		var txID int
 		var routeType, payloadType sql.NullInt64
-		var rpJSON string
-		if err := rows.Scan(&txID, &routeType, &payloadType, &rpJSON); err != nil {
+		var rpJSON, bucket string
+		if err := rows.Scan(&txID, &routeType, &payloadType, &rpJSON, &bucket); err != nil {
 			continue
 		}
 		rp := unmarshalResolvedPath(rpJSON)
@@ -3223,7 +3231,7 @@ func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, e
 		}
 		cur, ok := byTx[txID]
 		if !ok {
-			byTx[txID] = &txInfo{routeType: routeType, payloadType: payloadType, bestPath: rp}
+			byTx[txID] = &txInfo{routeType: routeType, payloadType: payloadType, bestPath: rp, bucket: bucket}
 			continue
 		}
 		if len(rp) > len(cur.bestPath) {
@@ -3237,6 +3245,12 @@ func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, e
 	scopedBuckets := map[int]int{}
 	unscopedBuckets := map[int]int{}
 	repeaterHops := map[string][]int{}
+	// Same scoped/unscoped hop-index tally as scopedBuckets/unscopedBuckets
+	// above, but split by time bucket too -- feeds TimeSeries, answering
+	// "is containment getting better or worse over the window" instead of
+	// just a single window-wide snapshot.
+	scopedByTimeBucket := map[string]map[int]int{}
+	unscopedByTimeBucket := map[string]map[int]int{}
 
 	for _, info := range byTx {
 		if !info.routeType.Valid {
@@ -3254,8 +3268,16 @@ func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, e
 		for idx, pk := range info.bestPath {
 			if scoped {
 				scopedBuckets[idx]++
+				if scopedByTimeBucket[info.bucket] == nil {
+					scopedByTimeBucket[info.bucket] = map[int]int{}
+				}
+				scopedByTimeBucket[info.bucket][idx]++
 			} else {
 				unscopedBuckets[idx]++
+				if unscopedByTimeBucket[info.bucket] == nil {
+					unscopedByTimeBucket[info.bucket] = map[int]int{}
+				}
+				unscopedByTimeBucket[info.bucket][idx]++
 			}
 			if isUnscopedFlood && pk != nil && *pk != "" {
 				repeaterHops[*pk] = append(repeaterHops[*pk], idx)
@@ -3270,6 +3292,56 @@ func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, e
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Hops < out[j].Hops })
 		return out
+	}
+
+	// medianHopFromCounts mirrors the frontend's hopDepthBucketStats: the
+	// smallest hop value whose cumulative count reaches half the total --
+	// a histogram-based median consistent with how ScopedHopDepth/
+	// UnscopedHopDepth's medians are read client-side, rather than
+	// introducing a second, subtly different median definition here.
+	medianHopFromCounts := func(counts map[int]int) *int {
+		total := 0
+		for _, c := range counts {
+			total += c
+		}
+		if total == 0 {
+			return nil
+		}
+		hops := make([]int, 0, len(counts))
+		for h := range counts {
+			hops = append(hops, h)
+		}
+		sort.Ints(hops)
+		cum := 0
+		for _, h := range hops {
+			cum += counts[h]
+			if cum*2 >= total {
+				v := h
+				return &v
+			}
+		}
+		return nil
+	}
+
+	bucketSet := map[string]bool{}
+	for b := range scopedByTimeBucket {
+		bucketSet[b] = true
+	}
+	for b := range unscopedByTimeBucket {
+		bucketSet[b] = true
+	}
+	timeBuckets := make([]string, 0, len(bucketSet))
+	for b := range bucketSet {
+		timeBuckets = append(timeBuckets, b)
+	}
+	sort.Strings(timeBuckets)
+	timeSeries := make([]HopDepthTimePoint, 0, len(timeBuckets))
+	for _, b := range timeBuckets {
+		timeSeries = append(timeSeries, HopDepthTimePoint{
+			T:                 b,
+			ScopedMedianHop:   medianHopFromCounts(scopedByTimeBucket[b]),
+			UnscopedMedianHop: medianHopFromCounts(unscopedByTimeBucket[b]),
+		})
 	}
 
 	// Only repeater/room nodes are meaningful here (matches the Foreign
@@ -3313,6 +3385,7 @@ func (db *DB) GetHopDepthAnalytics(window string) (*HopDepthAnalyticsResponse, e
 		ScopedHopDepth:     toSortedBuckets(scopedBuckets),
 		UnscopedHopDepth:   toSortedBuckets(unscopedBuckets),
 		UnscopedByRepeater: unscopedByRepeater,
+		TimeSeries:         timeSeries,
 	}, nil
 }
 

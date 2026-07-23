@@ -217,6 +217,71 @@ function fakeEl() {
     assert.ok(html.includes('2 hops'), 'should have a hop=2 row');
   });
 
+  await testAsync('renderHopDepthSectionHtml includes the time-series trend when timeSeries is present', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    const html = ctx.window._analyticsRenderHopDepthSectionHtml({
+      scopedHopDepth: [{ hops: 0, count: 10 }],
+      unscopedHopDepth: [{ hops: 0, count: 4 }],
+      timeSeries: [
+        { t: '2026-07-23T06:00:00Z', scopedMedianHop: 0, unscopedMedianHop: 1 },
+        { t: '2026-07-23T07:00:00Z', scopedMedianHop: 1, unscopedMedianHop: 2 },
+      ],
+    });
+    assert.ok(html.includes('Median Hop Depth Over Time'), 'should include the trend section heading');
+    assert.ok(html.includes('<svg'), 'should render an svg chart when there are 2+ time points');
+  });
+
+  console.log('\n=== analytics.js: hopDepthTimeSeriesChartHtml ===');
+
+  await testAsync('fewer than 2 points renders the insufficient-data message, not a broken chart', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    assert.ok(ctx.window._analyticsHopDepthTimeSeriesChartHtml([]).includes('Insufficient data'));
+    assert.ok(ctx.window._analyticsHopDepthTimeSeriesChartHtml(null).includes('Insufficient data'));
+    assert.ok(ctx.window._analyticsHopDepthTimeSeriesChartHtml([{ t: '2026-07-23T06:00:00Z', scopedMedianHop: 0, unscopedMedianHop: 0 }]).includes('Insufficient data'));
+  });
+
+  await testAsync('2+ points render an svg with both series polylines', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    const html = ctx.window._analyticsHopDepthTimeSeriesChartHtml([
+      { t: '2026-07-23T06:00:00Z', scopedMedianHop: 0, unscopedMedianHop: 2 },
+      { t: '2026-07-23T07:00:00Z', scopedMedianHop: 1, unscopedMedianHop: 3 },
+      { t: '2026-07-23T08:00:00Z', scopedMedianHop: 2, unscopedMedianHop: 4 },
+    ]);
+    assert.ok(html.includes('<svg'), 'should render an svg');
+    const polylineCount = (html.match(/<polyline/g) || []).length;
+    assert.strictEqual(polylineCount, 2, 'should render exactly one polyline per fully-populated series');
+  });
+
+  await testAsync('a null median in the middle of a series breaks it into two segments, not one connected line', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    // 3 points, middle one null for unscopedMedianHop -- the unscoped
+    // series must render as 0 polylines (each segment needs 2+ points to
+    // draw a line, and isolated single points on either side of the gap
+    // don't qualify), while scoped (fully populated) still renders 1.
+    const html = ctx.window._analyticsHopDepthTimeSeriesChartHtml([
+      { t: '2026-07-23T06:00:00Z', scopedMedianHop: 0, unscopedMedianHop: 2 },
+      { t: '2026-07-23T07:00:00Z', scopedMedianHop: 1, unscopedMedianHop: null },
+      { t: '2026-07-23T08:00:00Z', scopedMedianHop: 2, unscopedMedianHop: 4 },
+    ]);
+    const polylineCount = (html.match(/<polyline/g) || []).length;
+    assert.strictEqual(polylineCount, 1, 'only the fully-populated scoped series should draw a line; the gapped unscoped series draws none');
+  });
+
+  await testAsync('a run of 2+ consecutive non-null points around a gap still draws that segment', async () => {
+    const ctx = makeAnalyticsSandbox([]);
+    // 4 points: unscoped has data at [0,1], gap at [2], data at [3] --
+    // should draw exactly one segment (points 0-1), not connect across
+    // the gap to point 3, and not draw anything for the isolated point 3.
+    const html = ctx.window._analyticsHopDepthTimeSeriesChartHtml([
+      { t: 't0', scopedMedianHop: 0, unscopedMedianHop: 1 },
+      { t: 't1', scopedMedianHop: 1, unscopedMedianHop: 2 },
+      { t: 't2', scopedMedianHop: 2, unscopedMedianHop: null },
+      { t: 't3', scopedMedianHop: 3, unscopedMedianHop: 5 },
+    ]);
+    const polylineCount = (html.match(/<polyline/g) || []).length;
+    assert.strictEqual(polylineCount, 2, 'scoped draws 1 full segment, unscoped draws 1 segment for the [t0,t1] run and nothing for isolated t3');
+  });
+
   console.log('\n=== analytics.js: hopDepthLookupByPubkey ===');
 
   await testAsync('builds a publicKey -> entry map', async () => {

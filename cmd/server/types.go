@@ -917,11 +917,30 @@ type RepeaterUnscopedHopDepth struct {
 //     traffic it relays, enriching the Foreign Traffic tab's "Repeaters
 //     Relaying Unscoped Traffic" (which today only ranks by volume) with
 //     whether that volume is nearby noise or far-propagated pollution.
+//  3. TimeSeries: the same scoped/unscoped median hop split by time
+//     bucket instead of collapsed to one window-wide number -- is
+//     containment trending better or worse, not just where it stands
+//     right now.
 type HopDepthAnalyticsResponse struct {
 	Window             string                     `json:"window"`
 	ScopedHopDepth     []HopDepthBucket           `json:"scopedHopDepth"`
 	UnscopedHopDepth   []HopDepthBucket           `json:"unscopedHopDepth"`
 	UnscopedByRepeater []RepeaterUnscopedHopDepth `json:"unscopedByRepeater"`
+	TimeSeries         []HopDepthTimePoint        `json:"timeSeries"`
+}
+
+// HopDepthTimePoint is one time bucket's scoped/unscoped median hop depth
+// -- same time-series shape as ScopeTimePoint, but tracking flood-
+// propagation depth instead of raw scoped/unscoped transmission counts.
+// Same bucketing as ScopeStatsResponse.TimeSeries (5min/1h/6h for
+// 1h/24h/7d windows). Pointers, not plain ints: 0 is a valid median hop,
+// so "no scoped (or unscoped) traffic in this bucket" has to be
+// distinguishable from "median is 0" rather than silently defaulting to
+// zero and implying containment that isn't really there.
+type HopDepthTimePoint struct {
+	T                 string `json:"t"`
+	ScopedMedianHop   *int   `json:"scopedMedianHop,omitempty"`
+	UnscopedMedianHop *int   `json:"unscopedMedianHop,omitempty"`
 }
 
 // ─── Analytics — RF ────────────────────────────────────────────────────────────

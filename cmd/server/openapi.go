@@ -113,7 +113,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "window", Description: "Time window: 1h, 24h (default), or 7d", Type: "string"},
 				{Name: "channel", Description: "Channel name to analyze (default #wardriving)", Type: "string"},
 			}},
-		"GET /api/analytics/hop-depth": {Summary: "Network-wide hop-depth analytics", Description: "Answers two flood-containment questions in one pass over resolved relay paths, using the same 0-based per-node path-index hop count as /api/nodes/{pubkey}/hop_analytics (issue #1812), not the unrelated observer-distance hopDistribution field: (1) does scoped (TRANSPORT_FLOOD/TRANSPORT_DIRECT) traffic actually travel fewer hops network-wide than unscoped (plain FLOOD, non-advert) traffic, and (2) which repeater/room nodes are relaying unscoped flood traffic that already traveled far (high hops, a stronger containment-problem signal) vs merely locally (low hops). Plain DIRECT traffic never undergoes flood propagation and is excluded from both buckets. Cached 30s per window.", Tag: "analytics",
+		"GET /api/analytics/hop-depth": {Summary: "Network-wide hop-depth analytics", Description: "Answers three flood-containment questions in one pass over resolved relay paths, using the same 0-based per-node path-index hop count as /api/nodes/{pubkey}/hop_analytics (issue #1812), not the unrelated observer-distance hopDistribution field: (1) does scoped (TRANSPORT_FLOOD/TRANSPORT_DIRECT) traffic actually travel fewer hops network-wide than unscoped (plain FLOOD, non-advert) traffic, (2) which repeater/room nodes are relaying unscoped flood traffic that already traveled far (high hops, a stronger containment-problem signal) vs merely locally (low hops), and (3) is that containment trending better or worse over the window (timeSeries). Plain DIRECT traffic never undergoes flood propagation and is excluded throughout. Cached 30s per window.", Tag: "analytics",
 			QueryParams: []paramMeta{
 				{Name: "window", Description: "Time window: 1h, 24h (default), or 7d", Type: "string"},
 			},
@@ -312,6 +312,15 @@ func componentSchemas() map[string]interface{} {
 				"maxHops":    map[string]interface{}{"type": "integer"},
 			},
 		},
+		"HopDepthTimePoint": map[string]interface{}{
+			"type":        "object",
+			"description": "One time bucket's scoped/unscoped median hop depth (5min/1h/6h buckets for 1h/24h/7d windows, same bucketing as ScopeStatsResponse.timeSeries).",
+			"properties": map[string]interface{}{
+				"t":                 str("Bucket start, RFC3339 UTC."),
+				"scopedMedianHop":   map[string]interface{}{"type": "integer", "nullable": true, "description": "Median hop depth of scoped traffic in this bucket, or null if there was none (0 is a valid median, so absence isn't the same as zero)."},
+				"unscopedMedianHop": map[string]interface{}{"type": "integer", "nullable": true, "description": "Median hop depth of unscoped traffic in this bucket, or null if there was none."},
+			},
+		},
 		"HopDepthAnalyticsResponse": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -319,6 +328,7 @@ func componentSchemas() map[string]interface{} {
 				"scopedHopDepth":     map[string]interface{}{"type": "array", "items": schemaRef("HopDepthBucket"), "description": "Hop-depth histogram for scoped (TRANSPORT_FLOOD/TRANSPORT_DIRECT) traffic."},
 				"unscopedHopDepth":   map[string]interface{}{"type": "array", "items": schemaRef("HopDepthBucket"), "description": "Hop-depth histogram for unscoped (plain FLOOD) traffic."},
 				"unscopedByRepeater": map[string]interface{}{"type": "array", "items": schemaRef("RepeaterUnscopedHopDepth"), "description": "Per-repeater/room breakdown of unscoped hop depth, sorted by count descending."},
+				"timeSeries":         map[string]interface{}{"type": "array", "items": schemaRef("HopDepthTimePoint"), "description": "Scoped/unscoped median hop depth over time within the window — is containment trending better or worse."},
 			},
 		},
 	}

@@ -154,8 +154,71 @@ func TestGetHopDepthAnalytics_EmptyWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetHopDepthAnalytics: %v", err)
 	}
-	if len(resp.ScopedHopDepth) != 0 || len(resp.UnscopedHopDepth) != 0 || len(resp.UnscopedByRepeater) != 0 {
+	if len(resp.ScopedHopDepth) != 0 || len(resp.UnscopedHopDepth) != 0 || len(resp.UnscopedByRepeater) != 0 || len(resp.TimeSeries) != 0 {
 		t.Errorf("expected all-empty response on an empty DB, got %+v", resp)
+	}
+}
+
+// TestGetHopDepthAnalytics_TimeSeries covers the per-time-bucket
+// scoped/unscoped median hop trend: two transmissions two hours apart
+// must land in two distinct 1-hour buckets (24h window), sorted
+// chronologically, and a series with no samples in a given bucket must
+// report nil (not 0 -- 0 is itself a valid median hop).
+func TestGetHopDepthAnalytics_TimeSeries(t *testing.T) {
+	conn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer conn.Close()
+	conn.SetMaxOpenConns(1)
+	db := &DB{conn: conn}
+
+	conn.Exec(`CREATE TABLE nodes (public_key TEXT PRIMARY KEY, name TEXT, role TEXT)`)
+	conn.Exec(`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, hash TEXT, first_seen TEXT, route_type INTEGER, payload_type INTEGER)`)
+	conn.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY, transmission_id INTEGER, resolved_path TEXT)`)
+
+	repeaterA := "aa001111aaaabbbb"
+	conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES (?, 'RepeaterA', 'repeater')`, repeaterA)
+
+	now := time.Now().UTC()
+	// Truncated-hour-aligned with a safe +10min offset so a slow test run
+	// can't accidentally straddle an hour boundary and merge the buckets.
+	oldBucket := now.Truncate(time.Hour).Add(-3*time.Hour + 10*time.Minute)
+	recentBucket := now.Truncate(time.Hour).Add(-1*time.Hour + 10*time.Minute)
+
+	// oldBucket: one scoped, single-hop path -> ScopedMedianHop=0, no
+	// unscoped traffic in this bucket at all -> UnscopedMedianHop=nil.
+	conn.Exec(`INSERT INTO transmissions (id, hash, first_seen, route_type, payload_type) VALUES (1, 'h1', ?, 0, 5)`, oldBucket.Format(time.RFC3339))
+	conn.Exec(`INSERT INTO observations (id, transmission_id, resolved_path) VALUES (1, 1, ?)`, `["`+repeaterA+`"]`)
+
+	// recentBucket: one unscoped, single-hop path -> UnscopedMedianHop=0,
+	// no scoped traffic here -> ScopedMedianHop=nil.
+	conn.Exec(`INSERT INTO transmissions (id, hash, first_seen, route_type, payload_type) VALUES (2, 'h2', ?, 1, 5)`, recentBucket.Format(time.RFC3339))
+	conn.Exec(`INSERT INTO observations (id, transmission_id, resolved_path) VALUES (2, 2, ?)`, `["`+repeaterA+`"]`)
+
+	resp, err := db.GetHopDepthAnalytics("24h")
+	if err != nil {
+		t.Fatalf("GetHopDepthAnalytics: %v", err)
+	}
+	if len(resp.TimeSeries) != 2 {
+		t.Fatalf("TimeSeries = %+v, want exactly 2 buckets", resp.TimeSeries)
+	}
+
+	old, recentPt := resp.TimeSeries[0], resp.TimeSeries[1]
+	if old.T >= recentPt.T {
+		t.Errorf("TimeSeries not chronologically sorted: %q should be before %q", old.T, recentPt.T)
+	}
+	if old.ScopedMedianHop == nil || *old.ScopedMedianHop != 0 {
+		t.Errorf("old bucket ScopedMedianHop = %v, want pointer to 0", old.ScopedMedianHop)
+	}
+	if old.UnscopedMedianHop != nil {
+		t.Errorf("old bucket UnscopedMedianHop = %v, want nil (no unscoped traffic that hour)", *old.UnscopedMedianHop)
+	}
+	if recentPt.UnscopedMedianHop == nil || *recentPt.UnscopedMedianHop != 0 {
+		t.Errorf("recent bucket UnscopedMedianHop = %v, want pointer to 0", recentPt.UnscopedMedianHop)
+	}
+	if recentPt.ScopedMedianHop != nil {
+		t.Errorf("recent bucket ScopedMedianHop = %v, want nil (no scoped traffic that hour)", *recentPt.ScopedMedianHop)
 	}
 }
 

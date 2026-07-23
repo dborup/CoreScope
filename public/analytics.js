@@ -2722,6 +2722,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsHopDepthBucketStats = hopDepthBucketStats;
     window._analyticsHopDepthPercentile = hopDepthPercentile;
     window._analyticsRenderHopDepthSectionHtml = renderHopDepthSectionHtml;
+    window._analyticsHopDepthTimeSeriesChartHtml = hopDepthTimeSeriesChartHtml;
     window._analyticsHopDepthLookupByPubkey = hopDepthLookupByPubkey;
     window._analyticsBridgeRepeaterPubkeySet = bridgeRepeaterPubkeySet;
   }
@@ -5453,15 +5454,82 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     return sorted.length ? sorted[sorted.length - 1].hops : null;
   }
 
+  // Two-line SVG chart of scoped vs unscoped median hop depth over time
+  // (HopDepthAnalyticsResponse.timeSeries) -- same visual language as the
+  // Scopes Overview's scoped/unscoped count time-series, but each series
+  // can have gaps (a bucket with no traffic of that kind reports
+  // scopedMedianHop/unscopedMedianHop as null, not 0) so the polyline is
+  // built as separate contiguous segments rather than one line that would
+  // otherwise silently interpolate straight through missing data.
+  function hopDepthTimeSeriesChartHtml(timeSeries) {
+    if (!timeSeries || timeSeries.length < 2) {
+      return '<p class="text-muted" style="font-size:0.85em;margin:12px 0 0">Insufficient data points to render a trend — wait for more observations in this window.</p>';
+    }
+    var n = timeSeries.length;
+    var maxVal = 1;
+    timeSeries.forEach(function(p) {
+      if (typeof p.scopedMedianHop === 'number') maxVal = Math.max(maxVal, p.scopedMedianHop);
+      if (typeof p.unscopedMedianHop === 'number') maxVal = Math.max(maxVal, p.unscopedMedianHop);
+    });
+
+    var W = 800, H = 180, padL = 30, padT = 10, padR = 10;
+    var plotW = W - padL - padR, plotH = H - 24 - padT;
+
+    function segments(key) {
+      var out = [];
+      var current = [];
+      timeSeries.forEach(function(p, i) {
+        var v = p[key];
+        if (typeof v !== 'number') {
+          if (current.length > 1) out.push(current);
+          current = [];
+          return;
+        }
+        var x = padL + i * plotW / Math.max(n - 1, 1);
+        var y = padT + plotH - (v / maxVal) * plotH;
+        current.push(x.toFixed(1) + ',' + y.toFixed(1));
+      });
+      if (current.length > 1) out.push(current);
+      return out;
+    }
+
+    function polylines(key, stroke, dash) {
+      return segments(key).map(function(seg) {
+        return '<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + stroke + '" stroke-width="2"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>';
+      }).join('');
+    }
+
+    var grid = '';
+    for (var gi = 0; gi <= 4; gi++) {
+      var gy = padT + plotH * gi / 4;
+      var gv = Math.round(maxVal * (4 - gi) / 4);
+      grid += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '" stroke="var(--border)" stroke-dasharray="2"/>';
+      grid += '<text x="' + (padL - 4) + '" y="' + (gy + 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--text-muted)">' + gv + '</text>';
+    }
+
+    var legendX = padL + plotW - 120;
+    return '<div style="margin-top:16px">' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;max-height:' + H + 'px" role="img" aria-label="Scoped vs unscoped median hop depth over time">' +
+      grid +
+      polylines('scopedMedianHop', 'var(--accent)') +
+      polylines('unscopedMedianHop', 'var(--text-muted)', '4') +
+      '<rect x="' + legendX + '" y="' + padT + '" width="10" height="10" fill="var(--accent)"/>' +
+      '<text x="' + (legendX + 14) + '" y="' + (padT + 9) + '" font-size="10" fill="var(--text)">Scoped median</text>' +
+      '<rect x="' + legendX + '" y="' + (padT + 16) + '" width="10" height="10" fill="var(--text-muted)"/>' +
+      '<text x="' + (legendX + 14) + '" y="' + (padT + 25) + '" font-size="10" fill="var(--text)">Unscoped median</text>' +
+      '</svg></div>';
+  }
+
   // Renders the scoped-vs-unscoped hop-depth comparison (Scopes tab > Hop
   // Depth sub-tab): median-hop stat cards for both series, a P95-derived
-  // "suggested flood.max.unscoped" callout, plus a grouped bar chart
-  // across hop values 0..max, normalized to the taller of the two series
-  // at each hop. The whole point is to answer "is region scoping actually
-  // containing flood propagation" — scoped traffic clustering at a lower
-  // median hop than unscoped is the expected/healthy shape — and to turn
-  // that into a concrete number an operator can plug into their MeshCore
-  // firmware config instead of eyeballing the chart.
+  // "suggested flood.max.unscoped" callout, a grouped bar chart across
+  // hop values 0..max normalized to the taller of the two series at each
+  // hop, and a median-hop-over-time trend chart. The whole point is to
+  // answer "is region scoping actually containing flood propagation" —
+  // scoped traffic clustering at a lower median hop than unscoped is the
+  // expected/healthy shape — turn that into a concrete number an operator
+  // can plug into their MeshCore firmware config instead of eyeballing
+  // the chart, and show whether it's getting better or worse over time.
   function renderHopDepthSectionHtml(hopData) {
     if (!hopData || (!hopData.scopedHopDepth && !hopData.unscopedHopDepth)) {
       return '';
@@ -5527,7 +5595,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         '<span><span style="display:inline-block;width:8px;height:8px;background:var(--accent);margin-right:3px"></span>Scoped</span>' +
         '<span><span style="display:inline-block;width:8px;height:8px;background:var(--text-muted);margin-right:3px"></span>Unscoped</span>' +
       '</div>' +
-      rows;
+      rows +
+      '<h4 style="margin:20px 0 4px">Median Hop Depth Over Time</h4>' +
+      '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Is containment trending better or worse within this window, rather than just where it stands right now. A gap in a line means no traffic of that kind in that bucket, not a median of zero.</p>' +
+      hopDepthTimeSeriesChartHtml(hopData.timeSeries);
   }
 
   // publicKey -> RepeaterUnscopedHopDepth lookup from
