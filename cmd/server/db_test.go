@@ -672,6 +672,9 @@ func TestGetPacketPath(t *testing.T) {
 	if deep.Observer.Lat == nil || *deep.Observer.Lat != 37.6213 {
 		t.Errorf("Branches[0].Observer.Lat = %v, want the SFO IATA coordinate (37.6213)", deep.Observer.Lat)
 	}
+	if deep.Observer.PublicKey != "obs2" {
+		t.Errorf("Branches[0].Observer.PublicKey = %q, want obs2 (its observers.id)", deep.Observer.PublicKey)
+	}
 	if shallow.Hops != 1 || shallow.Observer == nil || shallow.Observer.Name != "Observer One" {
 		t.Fatalf("Branches[1] = %+v, want Observer One's 1-hop branch", shallow)
 	}

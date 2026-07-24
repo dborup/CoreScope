@@ -1540,6 +1540,13 @@ type PacketPathPoint struct {
 	// those neighbors -- 0 (and omitted) with a single contributor;
 	// larger means the neighbors disagree more about where "nearby" is.
 	ApproxSpreadKm *float64 `json:"approxSpreadKm,omitempty"`
+	// IsBridge is true when this node has been confirmed relaying
+	// traffic for 2+ distinct region scopes -- the same "Bridge" badge
+	// definition as the Foreign Traffic tab (ScopeStatsResponse.
+	// bridgeRepeaters). Set by the handler (routes.go), not GetPacketPath
+	// itself, since the underlying data lives in the in-memory store, not
+	// SQL. Absent/false when the store isn't available.
+	IsBridge bool `json:"isBridge,omitempty"`
 }
 
 // PacketPathObserver is the station that produced a given branch's
@@ -1549,17 +1556,25 @@ type PacketPathPoint struct {
 // neighbor_edges neighbor's position (Approx=true), otherwise -- not a
 // stored per-observer lat/lon column.
 type PacketPathObserver struct {
-	Name string   `json:"name"`
-	IATA string   `json:"iata,omitempty"`
-	Role string   `json:"role,omitempty"`
-	Lat  *float64 `json:"lat"`
-	Lon  *float64 `json:"lon"`
+	// PublicKey is the observer's mesh pubkey (observers.id for v3,
+	// observer_id for legacy), when it has one -- lets callers link out
+	// to the node detail page or cross-reference other per-node data
+	// (e.g. IsBridge, filled in by the handler). Empty for an observer
+	// whose id never resembled a pubkey.
+	PublicKey string   `json:"publicKey,omitempty"`
+	Name      string   `json:"name"`
+	IATA      string   `json:"iata,omitempty"`
+	Role      string   `json:"role,omitempty"`
+	Lat       *float64 `json:"lat"`
+	Lon       *float64 `json:"lon"`
 	// Approx is true when Lat/Lon are a weighted centroid of this
 	// station's positioned neighbors instead of its own position -- see
 	// PacketPathPoint.Approx (and ApproxNeighborCount/ApproxSpreadKm).
 	Approx              bool     `json:"approx,omitempty"`
 	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
 	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
+	// IsBridge -- see PacketPathPoint.IsBridge.
+	IsBridge bool `json:"isBridge,omitempty"`
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -1851,7 +1866,7 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			branch.Points = append(branch.Points, point)
 		}
 		if b.observerName != "" {
-			obs := &PacketPathObserver{Name: b.observerName}
+			obs := &PacketPathObserver{Name: b.observerName, PublicKey: b.observerPubkey}
 			if b.observerIATA.Valid {
 				obs.IATA = strings.ToUpper(strings.TrimSpace(b.observerIATA.String))
 			}

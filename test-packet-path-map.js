@@ -122,7 +122,10 @@ function makeSandbox(apiImpl) {
   const ctx = {
     window: {}, document: doc, console, Math, String, JSON, Promise, Error,
     setTimeout, clearTimeout,
-    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    // Returns the variable name itself (not a real color) so tests can
+    // assert two markers use DIFFERENT css vars without caring what the
+    // actual theme color is.
+    getComputedStyle: () => ({ getPropertyValue: (name) => name }),
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
@@ -413,6 +416,46 @@ function makeSandbox(apiImpl) {
       passed++;
       console.log('  ✅ nodes with a known role get a role icon in their tooltip');
     } catch (e) { failed++; console.log('  ❌ nodes with a known role get a role icon in their tooltip: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // isBridge=true should get a bold purple outline (overriding the
+      // normal stroke color/weight) and a "bridge repeater" tooltip note.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [
+              { publicKey: 'pk1', name: 'PlainRepeater', lat: 56.0, lon: 10.0, isBridge: false },
+              { publicKey: 'pk2', name: 'BridgeRepeater', lat: 56.1, lon: 10.1, isBridge: true },
+            ],
+            observer: null,
+          },
+        ],
+      }));
+
+      const optsByTooltip = {};
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: (latlng, opts) => ({ addTo() { return this; }, bindTooltip(t) { optsByTooltip[t] = opts; return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const plainKey = Object.keys(optsByTooltip).find((k) => k.includes('PlainRepeater'));
+      const bridgeKey = Object.keys(optsByTooltip).find((k) => k.includes('BridgeRepeater'));
+      assert.ok(plainKey, 'expected a tooltip for PlainRepeater');
+      assert.ok(bridgeKey, 'expected a tooltip for BridgeRepeater');
+      assert.ok(!plainKey.includes('bridge repeater'), 'PlainRepeater tooltip should not mention bridge, got: ' + plainKey);
+      assert.ok(bridgeKey.includes('bridge repeater'), 'BridgeRepeater tooltip should mention bridge, got: ' + bridgeKey);
+      assert.notStrictEqual(optsByTooltip[bridgeKey].color, optsByTooltip[plainKey].color, 'expected the bridge marker to use a distinct outline color');
+      assert.ok(optsByTooltip[bridgeKey].weight > optsByTooltip[plainKey].weight, 'expected the bridge marker outline to be thicker');
+      passed++;
+      console.log('  ✅ bridge repeaters get a distinct outline and tooltip note');
+    } catch (e) { failed++; console.log('  ❌ bridge repeaters get a distinct outline and tooltip note: ' + e.message); }
   })();
 
   console.log('\n════════════════════════════════════════');
