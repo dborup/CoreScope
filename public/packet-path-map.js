@@ -151,9 +151,12 @@
         var color = pt.isObserver ? observerColor : lineColor;
         var radius = p.primary ? (pt.isObserver ? 7 : 6) : (pt.isObserver ? 5 : 4);
         var markerOpts = pt.approx
-          // Approximate (borrowed-from-neighbor) position: hollow +
-          // dashed, so it reads as "roughly here" rather than a real fix.
-          ? { radius: radius, color: color, weight: 2, fillOpacity: 0, dashArray: '2,3' }
+          // Approximate (borrowed-from-neighbor) position: larger,
+          // thick-dashed ring with a faint fill -- a plain hollow outline
+          // at normal marker size was too easy to miss against map
+          // tiles, so this deliberately reads as a bigger, softer blob
+          // rather than a precise dot.
+          ? { radius: radius + 4, color: color, weight: 3, fillColor: color, fillOpacity: 0.2, dashArray: '5,4' }
           : { radius: radius, color: outline, weight: p.primary ? 2 : 1, fillColor: color, fillOpacity: p.primary ? 1 : 0.8 };
         L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)

@@ -293,7 +293,7 @@ function makeSandbox(apiImpl) {
         }),
         tileLayer: () => ({ addTo() { return this; } }),
         circleMarker: (latlng, opts) => {
-          if (opts && opts.fillOpacity === 0 && opts.dashArray) approxMarkerCalls++;
+          if (opts && opts.dashArray) approxMarkerCalls++;
           else solidMarkerCalls++;
           return { addTo() { return this; }, bindTooltip() { return this; } };
         },
