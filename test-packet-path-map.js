@@ -40,6 +40,13 @@ test('escapes node/observer names before interpolating into tooltip HTML (operat
   assert.ok(/escapeHtml\(pt\.name\)/.test(src), 'point tooltips must escape the name');
 });
 
+test('tooltips use a wrapping CSS class -- Leaflet\'s default nowrap tooltip becomes unreadable once role/approx/distance/timing info are all combined', () => {
+  const bindCalls = (src.match(/\.bindTooltip\(/g) || []).length;
+  const classNameUses = (src.match(/className:\s*'packet-path-tooltip'/g) || []).length;
+  assert.ok(bindCalls > 0, 'expected at least one bindTooltip call');
+  assert.strictEqual(classNameUses, bindCalls, `expected every bindTooltip call (${bindCalls}) to pass the wrapping class, found ${classNameUses}`);
+});
+
 test('draws every branch, not just the deepest one', () => {
   assert.ok(/branches\.map/.test(src), 'should iterate all branches from the response');
 });
@@ -122,7 +129,10 @@ function makeSandbox(apiImpl) {
   const ctx = {
     window: {}, document: doc, console, Math, String, JSON, Promise, Error,
     setTimeout, clearTimeout,
-    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    // Returns the variable name itself (not a real color) so tests can
+    // assert two markers use DIFFERENT css vars without caring what the
+    // actual theme color is.
+    getComputedStyle: () => ({ getPropertyValue: (name) => name }),
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
@@ -214,7 +224,7 @@ function makeSandbox(apiImpl) {
           remove() {},
         }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; } }; },
+        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } }; },
         polyline: () => { polylineCount++; return { addTo() { return this; } }; },
       };
 
@@ -252,7 +262,7 @@ function makeSandbox(apiImpl) {
           remove() {},
         }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; } }; },
+        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } }; },
         polyline: () => ({ addTo() { return this; } }),
       };
 
@@ -295,7 +305,7 @@ function makeSandbox(apiImpl) {
         circleMarker: (latlng, opts) => {
           if (opts && opts.dashArray) approxMarkerCalls++;
           else solidMarkerCalls++;
-          return { addTo() { return this; }, bindTooltip() { return this; } };
+          return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } };
         },
         polyline: () => ({ addTo() { return this; } }),
       };
@@ -308,6 +318,184 @@ function makeSandbox(apiImpl) {
       passed++;
       console.log('  ✅ approximate (neighbor-borrowed) positions render hollow/dashed and are called out in status');
     } catch (e) { failed++; console.log('  ❌ approximate (neighbor-borrowed) positions render hollow/dashed and are called out in status: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // branch.secondsAfterFirst (0 for the earliest arrival, positive
+      // for later ones) should show up in the observer's tooltip label.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          { hops: 2, points: [], observer: { name: 'LateObserver', lat: 56.0, lon: 10.0 }, secondsAfterFirst: 4.7 },
+        ],
+        first: { hops: 0, points: [], observer: { name: 'LateObserver', lat: 56.0, lon: 10.0 }, secondsAfterFirst: 0 },
+      }));
+
+      let tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert.ok(tooltips.some((t) => t.includes('+4.7s')), 'expected a tooltip with the +4.7s elapsed time, got: ' + JSON.stringify(tooltips));
+      passed++;
+      console.log('  ✅ secondsAfterFirst renders as an elapsed-time label in the tooltip');
+    } catch (e) { failed++; console.log('  ❌ secondsAfterFirst renders as an elapsed-time label in the tooltip: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // branch.distanceFromFirstKm (> 0) should show up in the observer's
+      // tooltip label; exactly 0 (First itself) should not add a
+      // redundant "0.0 km away".
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          { hops: 2, points: [], observer: { name: 'FarObserver', lat: 56.0, lon: 10.0 }, distanceFromFirstKm: 42.3 },
+        ],
+        first: { hops: 0, points: [], observer: { name: 'FarObserver', lat: 56.0, lon: 10.0 }, distanceFromFirstKm: 0 },
+      }));
+
+      let tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert.ok(tooltips.some((t) => t.includes('42.3 km away')), 'expected a tooltip with the 42.3 km distance, got: ' + JSON.stringify(tooltips));
+      assert.ok(!tooltips.some((t) => t.includes('0.0 km away')), 'did not expect a "0.0 km away" label, got: ' + JSON.stringify(tooltips));
+      passed++;
+      console.log('  ✅ distanceFromFirstKm renders as a "N km away" label in the tooltip');
+    } catch (e) { failed++; console.log('  ❌ distanceFromFirstKm renders as a "N km away" label in the tooltip: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // A single-neighbor approx point should render with a bigger,
+      // fainter ring than a 4-neighbor approx point -- more agreeing
+      // neighbors means more confidence, so a tighter, more solid marker.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 2,
+            points: [
+              { publicKey: 'pk1', name: 'LowConfidence', lat: 56.0, lon: 10.0, approx: true, approxNeighborCount: 1 },
+              { publicKey: 'pk2', name: 'HighConfidence', lat: 56.1, lon: 10.1, approx: true, approxNeighborCount: 4, approxSpreadKm: 5 },
+            ],
+            observer: null,
+          },
+        ],
+      }));
+
+      const markerOptsByName = {};
+      const tooltipByCall = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: (latlng, opts) => {
+          tooltipByCall.push(opts);
+          return { addTo() { return this; }, bindTooltip(t) { markerOptsByName[t] = opts; return this; }, on() { return this; } };
+        },
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const lowKey = Object.keys(markerOptsByName).find((k) => k.includes('LowConfidence'));
+      const highKey = Object.keys(markerOptsByName).find((k) => k.includes('HighConfidence'));
+      assert.ok(lowKey, 'expected a tooltip for LowConfidence');
+      assert.ok(highKey, 'expected a tooltip for HighConfidence');
+      assert.ok(markerOptsByName[lowKey].radius > markerOptsByName[highKey].radius,
+        'expected the 1-neighbor marker to be larger than the 4-neighbor marker, got radii ' + markerOptsByName[lowKey].radius + ' vs ' + markerOptsByName[highKey].radius);
+      assert.ok(markerOptsByName[lowKey].fillOpacity < markerOptsByName[highKey].fillOpacity,
+        'expected the 1-neighbor marker to be fainter than the 4-neighbor marker');
+      assert.ok(lowKey.includes('from 1 neighbor'), 'expected the tooltip to mention the neighbor count, got: ' + lowKey);
+      assert.ok(highKey.includes('from 4 neighbors'), 'expected the tooltip to mention the neighbor count, got: ' + highKey);
+      passed++;
+      console.log('  ✅ approximate markers scale size/opacity by neighbor confidence');
+    } catch (e) { failed++; console.log('  ❌ approximate markers scale size/opacity by neighbor confidence: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // A hop point and an observer with a known `role` should get a
+      // role-specific icon prefix in their tooltip.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk1', name: 'RepeaterA', lat: 56.0, lon: 10.0, role: 'repeater' }],
+            observer: { name: 'RoomObserver', lat: 56.1, lon: 10.1, role: 'room' },
+          },
+        ],
+      }));
+
+      const tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert.ok(tooltips.some((t) => t.includes('📡') && t.includes('RepeaterA')), 'expected a repeater icon on RepeaterA, got: ' + JSON.stringify(tooltips));
+      assert.ok(tooltips.some((t) => t.includes('🏠') && t.includes('RoomObserver')), 'expected a room icon on RoomObserver, got: ' + JSON.stringify(tooltips));
+      passed++;
+      console.log('  ✅ nodes with a known role get a role icon in their tooltip');
+    } catch (e) { failed++; console.log('  ❌ nodes with a known role get a role icon in their tooltip: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // A marker with a publicKey should register a click handler that
+      // navigates to #/nodes/{pubkey} (closing the modal first); one
+      // without a publicKey should register no click handler at all.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk-with-key', name: 'HasKey', lat: 56.0, lon: 10.0 }],
+            observer: { name: 'NoKeyObserver', lat: 56.1, lon: 10.1 }, // no publicKey
+          },
+        ],
+      }));
+      ctx.window.location = { hash: '' };
+
+      const clickHandlersByTooltip = {};
+      let lastTooltip = null;
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({
+          addTo() { return this; },
+          bindTooltip(t) { lastTooltip = t; return this; },
+          on(evt, fn) { if (evt === 'click') clickHandlersByTooltip[lastTooltip] = fn; return this; },
+        }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const hasKeyTooltip = Object.keys(clickHandlersByTooltip).find((t) => t.includes('HasKey'));
+      assert.ok(hasKeyTooltip, 'expected a click handler registered for the HasKey marker, got: ' + JSON.stringify(Object.keys(clickHandlersByTooltip)));
+      assert.ok(hasKeyTooltip.includes('click for node detail'), 'expected the tooltip to hint it is clickable, got: ' + hasKeyTooltip);
+      assert.ok(!Object.keys(clickHandlersByTooltip).some((t) => t.includes('NoKeyObserver')), 'expected NO click handler for the keyless observer');
+
+      clickHandlersByTooltip[hasKeyTooltip]();
+      assert.strictEqual(ctx.window.location.hash, '#/nodes/pk-with-key', 'expected clicking the marker to navigate to the node detail hash route, got: ' + ctx.window.location.hash);
+      assert.ok(!ctx.document.getElementById('packetPathModal'), 'expected the modal to close after navigating away');
+      passed++;
+      console.log('  ✅ markers with a publicKey are clickable and navigate to node detail, closing the modal');
+    } catch (e) { failed++; console.log('  ❌ markers with a publicKey are clickable and navigate to node detail, closing the modal: ' + e.message); }
   })();
 
   console.log('\n════════════════════════════════════════');

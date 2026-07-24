@@ -26,6 +26,36 @@
     return v || '#888';
   }
 
+  // Formats PacketPathBranch.secondsAfterFirst for a tooltip: how long
+  // after the earliest-arriving observation (the green landmark ring)
+  // this station's own observation arrived.
+  function formatElapsed(seconds) {
+    if (seconds === 0) return 'first to arrive';
+    if (seconds < 60) return '+' + seconds.toFixed(1) + 's';
+    var m = Math.floor(seconds / 60);
+    var s = Math.round(seconds % 60);
+    return '+' + m + 'm ' + s + 's';
+  }
+
+  // How much bigger/fuzzier an approximate marker's ring should be than
+  // a normal marker, given how many positioned neighbors fed the
+  // estimate (more = tighter) and how much they disagreed (a wide
+  // spread lowers confidence even with several contributors).
+  function approxRadiusBonus(count, spreadKm) {
+    var bonus;
+    if (!count || count <= 1) bonus = 6;
+    else if (count <= 3) bonus = 4;
+    else bonus = 2;
+    if (spreadKm != null && spreadKm > 100) bonus += 2;
+    return bonus;
+  }
+
+  function approxFillOpacity(count) {
+    if (!count || count <= 1) return 0.12;
+    if (count <= 3) return 0.2;
+    return 0.3;
+  }
+
   var activeMap = null;
 
   function onKeydown(e) {
@@ -42,6 +72,20 @@
     document.removeEventListener('keydown', onKeydown);
   }
 
+  // A short prefix marking a node's role in tooltips -- purely a label,
+  // markers stay circleMarker dots throughout (a role-specific shape
+  // would clash with the color/dash coding already carrying primary,
+  // approx, and observer meaning).
+  function roleIcon(role) {
+    switch (role) {
+      case 'repeater': return '📡 ';
+      case 'room': return '🏠 ';
+      case 'client': return '📱 ';
+      case 'sensor': return '🌡️ ';
+      default: return '';
+    }
+  }
+
   // Turns one branch into a plottable chain: resolved hops with a known
   // position, then the observer's own position when known. A branch with
   // no locatable hops still contributes a single-point chain -- just the
@@ -54,12 +98,21 @@
   function chainForBranch(b) {
     var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null; });
     var chain = located.map(function (p, hi) {
-      return { lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx };
+      return {
+        lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx,
+        approxNeighborCount: p.approxNeighborCount, approxSpreadKm: p.approxSpreadKm, role: p.role,
+        publicKey: p.publicKey,
+      };
     });
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
+      var observerLabel = b.hops + ' hop' + (b.hops === 1 ? '' : 's');
+      if (typeof b.secondsAfterFirst === 'number') observerLabel += ', ' + formatElapsed(b.secondsAfterFirst);
+      if (typeof b.distanceFromFirstKm === 'number' && b.distanceFromFirstKm > 0) observerLabel += ', ' + b.distanceFromFirstKm.toFixed(1) + ' km away';
       chain.push({
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
-        label: b.hops + ' hop' + (b.hops === 1 ? '' : 's'), isObserver: true, approx: !!b.observer.approx,
+        label: observerLabel, isObserver: true, approx: !!b.observer.approx,
+        approxNeighborCount: b.observer.approxNeighborCount, approxSpreadKm: b.observer.approxSpreadKm,
+        role: b.observer.role, publicKey: b.observer.publicKey,
       });
     }
     return { chain: chain, missing: (b.points || []).length - located.length };
@@ -76,7 +129,7 @@
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
           'style="position:absolute;top:8px;right:8px;background:none;border:none;cursor:pointer;font-size:22px;line-height:1;color:var(--text-muted)">&times;</button>' +
         '<h3 style="margin:0 0 4px;padding-right:24px">Relay Path</h3>' +
-        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed markers are approximate -- estimated from nearby positioned neighbors, not the station\'s own position.</p>' +
+        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed markers are approximate -- estimated from nearby positioned neighbors, not the station\'s own position. Click a marker to open that node\'s detail page.</p>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
       '</div>';
@@ -156,12 +209,31 @@
           // thick-dashed ring with a faint fill -- a plain hollow outline
           // at normal marker size was too easy to miss against map
           // tiles, so this deliberately reads as a bigger, softer blob
-          // rather than a precise dot.
-          ? { radius: radius + 4, color: color, weight: 3, fillColor: color, fillOpacity: 0.2, dashArray: '5,4' }
+          // rather than a precise dot. Size/fill scale with confidence:
+          // more agreeing neighbors = tighter, more solid; one neighbor
+          // or a wide spread among several = bigger, fainter.
+          ? {
+              radius: radius + approxRadiusBonus(pt.approxNeighborCount, pt.approxSpreadKm), color: color, weight: 3,
+              fillColor: color, fillOpacity: approxFillOpacity(pt.approxNeighborCount), dashArray: '5,4',
+            }
           : { radius: radius, color: outline, weight: p.primary ? 2 : 1, fillColor: color, fillOpacity: p.primary ? 1 : 0.8 };
-        L.circleMarker([pt.lat, pt.lon], markerOpts)
+        var approxNote = '';
+        if (pt.approx) {
+          approxNote = ', approx. position';
+          if (pt.approxNeighborCount) approxNote += ' from ' + pt.approxNeighborCount + ' neighbor' + (pt.approxNeighborCount === 1 ? '' : 's');
+        }
+        var clickNote = pt.publicKey ? ' — click for node detail' : '';
+        var marker = L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)
-          .bindTooltip(escapeHtml(pt.name) + ' (' + pt.label + (pt.approx ? ', approx. position' : '') + ')');
+          .bindTooltip(roleIcon(pt.role) + escapeHtml(pt.name) + ' (' + pt.label + approxNote + ')' + clickNote, { className: 'packet-path-tooltip' });
+        if (pt.publicKey) {
+          // Same #/nodes/{pubkey} hash route the rest of the app already
+          // links to (see e.g. public/channels.js's node-detail links).
+          marker.on('click', function () {
+            close();
+            window.location.hash = '#/nodes/' + encodeURIComponent(pt.publicKey);
+          });
+        }
       });
       if (line.length > 1) {
         L.polyline(line, { color: lineColor, weight: p.primary ? 2.5 : 1.5, opacity: p.primary ? 0.85 : 0.5 }).addTo(map);
@@ -182,7 +254,7 @@
         radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
       })
         .addTo(map)
-        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')');
+        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
     }
 
     try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }
