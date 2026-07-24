@@ -1530,9 +1530,10 @@ type PacketPathPoint struct {
 }
 
 // PacketPathObserver is the station that produced a given branch's
-// observation of a packet (see GetPacketPath), positioned from its
-// configured IATA code the same way the Wardriving tab positions
-// observers -- not a stored per-observer lat/lon column.
+// observation of a packet (see GetPacketPath), positioned from its own
+// self-advertised GPS (the same source /api/observers uses) when known,
+// falling back to its configured IATA code otherwise -- not a stored
+// per-observer lat/lon column.
 type PacketPathObserver struct {
 	Name string   `json:"name"`
 	IATA string   `json:"iata,omitempty"`
@@ -1574,13 +1575,13 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	}
 	var querySQL string
 	if db.isV3 {
-		querySQL = `SELECT obs.rowid, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr
+		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
 			WHERE t.hash = ?`
 	} else {
-		querySQL = `SELECT o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr
+		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.hash = ?`
@@ -1592,18 +1593,19 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	defer rows.Close()
 
 	type obsBranch struct {
-		hops         int
-		resolvedPath []*string
-		observerName string
-		observerIATA sql.NullString
-		snr          sql.NullFloat64
+		hops           int
+		resolvedPath   []*string
+		observerName   string
+		observerPubkey string
+		observerIATA   sql.NullString
+		snr            sql.NullFloat64
 	}
 	best := make(map[string]*obsBranch)
 
 	for rows.Next() {
-		var obsKey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString
+		var obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString
 		var snr sql.NullFloat64
-		if err := rows.Scan(&obsKey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr); err != nil {
+		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr); err != nil {
 			continue
 		}
 		if !pathJSON.Valid {
@@ -1628,7 +1630,8 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		if existing, ok := best[key]; !ok || hops > existing.hops {
 			best[key] = &obsBranch{
 				hops: hops, resolvedPath: resolvedPath,
-				observerName: obsName.String, observerIATA: obsIATA, snr: snr,
+				observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
+				observerIATA: obsIATA, snr: snr,
 			}
 		}
 	}
@@ -1647,6 +1650,13 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			if pk != nil && *pk != "" {
 				pubkeySet[*pk] = true
 			}
+		}
+		// An observer is itself a mesh node -- if it has ever self-advertised
+		// a GPS position, that's a more precise fix than its (often manually
+		// typed, sometimes wrong or missing) configured IATA code. Folded
+		// into the same batched lookup below rather than a second query.
+		if b.observerPubkey != "" {
+			pubkeySet[b.observerPubkey] = true
 		}
 	}
 	pubkeys := make([]string, 0, len(pubkeySet))
@@ -1713,6 +1723,16 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			obs := &PacketPathObserver{Name: b.observerName}
 			if b.observerIATA.Valid {
 				obs.IATA = strings.ToUpper(strings.TrimSpace(b.observerIATA.String))
+			}
+			// Prefer the observer's own self-advertised GPS (same source as
+			// /api/observers and the Wardriving tab) over its configured
+			// IATA code -- the IATA table only covers a fixed list of real
+			// airports plus a handful of hand-added local codes, so a
+			// custom/regional code an operator typed in (or a typo) falls
+			// through it even when the node itself knows exactly where it is.
+			if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
+				obs.Lat, obs.Lon = ni.lat, ni.lon
+			} else if obs.IATA != "" {
 				if coord, ok := iataCoords[obs.IATA]; ok {
 					lat, lon := coord.Lat, coord.Lon
 					obs.Lat, obs.Lon = &lat, &lon

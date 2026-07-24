@@ -677,6 +677,45 @@ func TestGetPacketPath(t *testing.T) {
 	}
 }
 
+// TestGetPacketPath_ObserverPositionPrefersOwnGPS covers an observer whose
+// configured IATA code isn't a real airport (a custom/regional code an
+// operator typed in, or a typo) and so isn't in the hardcoded iataCoords
+// table -- but the observer is itself a mesh node that has self-advertised
+// a real GPS position. That position must be used instead of leaving the
+// observer unplaced, since it's the same source /api/observers and the
+// Wardriving tab already treat as authoritative.
+func TestGetPacketPath_ObserverPositionPrefersOwnGPS(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('deadbeefcafe', 'Custom Coded Observer', 'QXV')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('deadbeefcafe', 'Custom Coded Observer', 'room', 56.19, 9.6)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000004', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 9.0, -88, '[]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000004")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Branches) != 1 {
+		t.Fatalf("Branches = %+v, want 1", resp.Branches)
+	}
+	obs := resp.Branches[0].Observer
+	if obs == nil {
+		t.Fatalf("Observer = nil, want a populated observer")
+	}
+	if obs.IATA != "QXV" {
+		t.Errorf("Observer.IATA = %q, want QXV (kept even though it's not in iataCoords)", obs.IATA)
+	}
+	if obs.Lat == nil || *obs.Lat != 56.19 || obs.Lon == nil || *obs.Lon != 9.6 {
+		t.Errorf("Observer.Lat/Lon = %v/%v, want the node's own self-advertised GPS (56.19, 9.6), not left nil just because QXV isn't a known airport", obs.Lat, obs.Lon)
+	}
+}
+
 // TestGetPacketPath_NoResolvedPath covers a station whose observation
 // never resolved: it still contributes a branch (hop count from
 // path_json, so reach is never silently dropped), just with no points.
