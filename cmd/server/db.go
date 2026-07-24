@@ -1527,10 +1527,19 @@ type PacketPathPoint struct {
 	Role      string   `json:"role,omitempty"`
 	Lat       *float64 `json:"lat"`
 	Lon       *float64 `json:"lon"`
-	// Approx is true when Lat/Lon are not this node's own position but
-	// its strongest neighbor_edges neighbor's position instead (used as
-	// a last-resort stand-in when the node itself has no known fix).
+	// Approx is true when Lat/Lon are a weighted centroid of this node's
+	// positioned neighbor_edges neighbors rather than its own position
+	// (used as a last-resort stand-in when the node itself has no known
+	// fix). ApproxNeighborCount/ApproxSpreadKm are only meaningful when
+	// Approx is true.
 	Approx bool `json:"approx,omitempty"`
+	// ApproxNeighborCount is how many positioned neighbors fed the
+	// centroid -- a rough confidence signal, higher is more confident.
+	ApproxNeighborCount int `json:"approxNeighborCount,omitempty"`
+	// ApproxSpreadKm is the widest distance (km) between any two of
+	// those neighbors -- 0 (and omitted) with a single contributor;
+	// larger means the neighbors disagree more about where "nearby" is.
+	ApproxSpreadKm *float64 `json:"approxSpreadKm,omitempty"`
 }
 
 // PacketPathObserver is the station that produced a given branch's
@@ -1544,10 +1553,12 @@ type PacketPathObserver struct {
 	IATA string   `json:"iata,omitempty"`
 	Lat  *float64 `json:"lat"`
 	Lon  *float64 `json:"lon"`
-	// Approx is true when Lat/Lon are not this station's own position
-	// but its strongest neighbor's position instead -- see
-	// PacketPathPoint.Approx.
-	Approx bool `json:"approx,omitempty"`
+	// Approx is true when Lat/Lon are a weighted centroid of this
+	// station's positioned neighbors instead of its own position -- see
+	// PacketPathPoint.Approx (and ApproxNeighborCount/ApproxSpreadKm).
+	Approx              bool     `json:"approx,omitempty"`
+	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
+	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -1824,11 +1835,16 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			point := PacketPathPoint{PublicKey: *pk, Name: name, Role: ni.role, Lat: ni.lat, Lon: ni.lon}
 			if point.Lat == nil {
 				// Last resort: this node has never itself reported a
-				// position -- borrow its strongest neighbor's instead,
-				// clearly flagged as approximate rather than a real fix.
-				if _, nLat, nLon, ok := db.nearestPositionedNeighbor(*pk); ok {
+				// position -- borrow a weighted centroid of its
+				// positioned neighbors instead, clearly flagged as
+				// approximate rather than a real fix.
+				if _, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(*pk); ok {
 					lat, lon := nLat, nLon
-					point.Lat, point.Lon, point.Approx = &lat, &lon, true
+					point.Lat, point.Lon, point.Approx, point.ApproxNeighborCount = &lat, &lon, true, nCount
+					if nCount > 1 {
+						s := nSpread
+						point.ApproxSpreadKm = &s
+					}
 				}
 			}
 			branch.Points = append(branch.Points, point)
@@ -1861,11 +1877,15 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			}
 			if obs.Lat == nil && b.observerPubkey != "" {
 				// Last resort, same as the hop-point fallback above: no
-				// position of its own anywhere, so borrow its strongest
-				// neighbor's instead, flagged as approximate.
-				if _, nLat, nLon, ok := db.nearestPositionedNeighbor(b.observerPubkey); ok {
+				// position of its own anywhere, so borrow a weighted
+				// centroid of its positioned neighbors, flagged as approximate.
+				if _, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(b.observerPubkey); ok {
 					lat, lon := nLat, nLon
-					obs.Lat, obs.Lon, obs.Approx = &lat, &lon, true
+					obs.Lat, obs.Lon, obs.Approx, obs.ApproxNeighborCount = &lat, &lon, true, nCount
+					if nCount > 1 {
+						s := nSpread
+						obs.ApproxSpreadKm = &s
+					}
 				}
 			}
 			branch.Observer = obs
@@ -1906,12 +1926,20 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 // each neighbor's OWN position is a real, precise fix; only pubkey's
 // position relative to them is unknown, so more of them narrows it
 // down. With exactly one positioned neighbor this is identical to
-// using that neighbor's position outright. Returns ok=false when
-// pubkey has no neighbor with a position at all.
-func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon float64, ok bool) {
+// using that neighbor's position outright.
+//
+// contributorCount is how many positioned neighbors fed the estimate,
+// and spreadKm is the widest distance between any two of them (0 when
+// there's only one) -- together a rough confidence signal callers can
+// use to size an "uncertainty" marker: more contributors that broadly
+// agree (small spread) means a tighter estimate than a single neighbor
+// or several that disagree (large spread).
+//
+// Returns ok=false when pubkey has no neighbor with a position at all.
+func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon float64, contributorCount int, spreadKm float64, ok bool) {
 	pk := strings.ToLower(strings.TrimSpace(pubkey))
 	if pk == "" {
-		return "", 0, 0, false
+		return "", 0, 0, 0, 0, false
 	}
 	rows, err := db.conn.Query(`
 		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor, count
@@ -1920,7 +1948,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 		ORDER BY count DESC
 		LIMIT 20`, pk, pk, pk)
 	if err != nil {
-		return "", 0, 0, false
+		return "", 0, 0, 0, 0, false
 	}
 	type candidate struct {
 		pubkey string
@@ -1936,7 +1964,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 	}
 	rows.Close()
 	if len(candidates) == 0 {
-		return "", 0, 0, false
+		return "", 0, 0, 0, 0, false
 	}
 
 	placeholders := make([]byte, 0, len(candidates)*2)
@@ -1972,6 +2000,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 	// otherwise cosmetic (current callers discard it).
 	var sumLat, sumLon, sumWeight float64
 	var strongestName string
+	var contributors []posInfo
 	for _, c := range candidates {
 		p, found := posByPK[c.pubkey]
 		if !found {
@@ -1987,11 +2016,21 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 		if strongestName == "" {
 			strongestName = p.name
 		}
+		contributors = append(contributors, p)
 	}
 	if sumWeight == 0 {
-		return "", 0, 0, false
+		return "", 0, 0, 0, 0, false
 	}
-	return strongestName, sumLat / sumWeight, sumLon / sumWeight, true
+	var spread float64
+	for i := 0; i < len(contributors); i++ {
+		for j := i + 1; j < len(contributors); j++ {
+			d := haversineKm(contributors[i].lat, contributors[i].lon, contributors[j].lat, contributors[j].lon)
+			if d > spread {
+				spread = d
+			}
+		}
+	}
+	return strongestName, sumLat / sumWeight, sumLon / sumWeight, len(contributors), spread, true
 }
 
 // GetChannels returns channel list from GRP_TXT packets.

@@ -337,6 +337,53 @@ function makeSandbox(apiImpl) {
     } catch (e) { failed++; console.log('  ❌ secondsAfterFirst renders as an elapsed-time label in the tooltip: ' + e.message); }
   })();
 
+  await (async () => {
+    try {
+      // A single-neighbor approx point should render with a bigger,
+      // fainter ring than a 4-neighbor approx point -- more agreeing
+      // neighbors means more confidence, so a tighter, more solid marker.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 2,
+            points: [
+              { publicKey: 'pk1', name: 'LowConfidence', lat: 56.0, lon: 10.0, approx: true, approxNeighborCount: 1 },
+              { publicKey: 'pk2', name: 'HighConfidence', lat: 56.1, lon: 10.1, approx: true, approxNeighborCount: 4, approxSpreadKm: 5 },
+            ],
+            observer: null,
+          },
+        ],
+      }));
+
+      const markerOptsByName = {};
+      const tooltipByCall = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: (latlng, opts) => {
+          tooltipByCall.push(opts);
+          return { addTo() { return this; }, bindTooltip(t) { markerOptsByName[t] = opts; return this; } };
+        },
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const lowKey = Object.keys(markerOptsByName).find((k) => k.includes('LowConfidence'));
+      const highKey = Object.keys(markerOptsByName).find((k) => k.includes('HighConfidence'));
+      assert.ok(lowKey, 'expected a tooltip for LowConfidence');
+      assert.ok(highKey, 'expected a tooltip for HighConfidence');
+      assert.ok(markerOptsByName[lowKey].radius > markerOptsByName[highKey].radius,
+        'expected the 1-neighbor marker to be larger than the 4-neighbor marker, got radii ' + markerOptsByName[lowKey].radius + ' vs ' + markerOptsByName[highKey].radius);
+      assert.ok(markerOptsByName[lowKey].fillOpacity < markerOptsByName[highKey].fillOpacity,
+        'expected the 1-neighbor marker to be fainter than the 4-neighbor marker');
+      assert.ok(lowKey.includes('from 1 neighbor'), 'expected the tooltip to mention the neighbor count, got: ' + lowKey);
+      assert.ok(highKey.includes('from 4 neighbors'), 'expected the tooltip to mention the neighbor count, got: ' + highKey);
+      passed++;
+      console.log('  ✅ approximate markers scale size/opacity by neighbor confidence');
+    } catch (e) { failed++; console.log('  ❌ approximate markers scale size/opacity by neighbor confidence: ' + e.message); }
+  })();
+
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);
   console.log('════════════════════════════════════════');

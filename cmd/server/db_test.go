@@ -839,6 +839,12 @@ func TestGetPacketPath_FallsBackToSingleNeighborPosition(t *testing.T) {
 	if p.Lat == nil || *p.Lat != 55.5 || p.Lon == nil || *p.Lon != 9.5 {
 		t.Errorf("Points[0].Lat/Lon = %v/%v, want AnchorRepeater's exact position (55.5, 9.5) -- its only positioned neighbor", p.Lat, p.Lon)
 	}
+	if p.ApproxNeighborCount != 1 {
+		t.Errorf("Points[0].ApproxNeighborCount = %d, want 1 (only AnchorRepeater is positioned)", p.ApproxNeighborCount)
+	}
+	if p.ApproxSpreadKm != nil {
+		t.Errorf("Points[0].ApproxSpreadKm = %v, want nil/omitted -- spread is meaningless with a single contributor", p.ApproxSpreadKm)
+	}
 
 	if b.Observer == nil || b.Observer.Name != "Ghost Observer" {
 		t.Fatalf("Observer = %+v, want Ghost Observer still named", b.Observer)
@@ -848,6 +854,9 @@ func TestGetPacketPath_FallsBackToSingleNeighborPosition(t *testing.T) {
 	}
 	if b.Observer.Lat == nil || *b.Observer.Lat != 55.5 || b.Observer.Lon == nil || *b.Observer.Lon != 9.5 {
 		t.Errorf("Observer.Lat/Lon = %v/%v, want AnchorRepeater's exact position (55.5, 9.5)", b.Observer.Lat, b.Observer.Lon)
+	}
+	if b.Observer.ApproxNeighborCount != 1 {
+		t.Errorf("Observer.ApproxNeighborCount = %d, want 1", b.Observer.ApproxNeighborCount)
 	}
 }
 
@@ -899,6 +908,12 @@ func TestGetPacketPath_FallsBackToWeightedNeighborCentroid(t *testing.T) {
 	}
 	if diff := *p.Lon - wantLon; diff > epsilon || diff < -epsilon {
 		t.Errorf("Lon = %v, want weighted centroid %v", *p.Lon, wantLon)
+	}
+	if p.ApproxNeighborCount != 2 {
+		t.Errorf("ApproxNeighborCount = %d, want 2 (AnchorRepeater + WeakRepeater)", p.ApproxNeighborCount)
+	}
+	if p.ApproxSpreadKm == nil || *p.ApproxSpreadKm < 100 {
+		t.Errorf("ApproxSpreadKm = %v, want a sizeable distance between AnchorRepeater (55.5,9.5) and WeakRepeater (60.0,15.0)", p.ApproxSpreadKm)
 	}
 }
 

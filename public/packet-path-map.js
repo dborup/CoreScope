@@ -37,6 +37,25 @@
     return '+' + m + 'm ' + s + 's';
   }
 
+  // How much bigger/fuzzier an approximate marker's ring should be than
+  // a normal marker, given how many positioned neighbors fed the
+  // estimate (more = tighter) and how much they disagreed (a wide
+  // spread lowers confidence even with several contributors).
+  function approxRadiusBonus(count, spreadKm) {
+    var bonus;
+    if (!count || count <= 1) bonus = 6;
+    else if (count <= 3) bonus = 4;
+    else bonus = 2;
+    if (spreadKm != null && spreadKm > 100) bonus += 2;
+    return bonus;
+  }
+
+  function approxFillOpacity(count) {
+    if (!count || count <= 1) return 0.12;
+    if (count <= 3) return 0.2;
+    return 0.3;
+  }
+
   var activeMap = null;
 
   function onKeydown(e) {
@@ -65,7 +84,10 @@
   function chainForBranch(b) {
     var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null; });
     var chain = located.map(function (p, hi) {
-      return { lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx };
+      return {
+        lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx,
+        approxNeighborCount: p.approxNeighborCount, approxSpreadKm: p.approxSpreadKm,
+      };
     });
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
       var observerLabel = b.hops + ' hop' + (b.hops === 1 ? '' : 's');
@@ -73,6 +95,7 @@
       chain.push({
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
         label: observerLabel, isObserver: true, approx: !!b.observer.approx,
+        approxNeighborCount: b.observer.approxNeighborCount, approxSpreadKm: b.observer.approxSpreadKm,
       });
     }
     return { chain: chain, missing: (b.points || []).length - located.length };
@@ -169,12 +192,22 @@
           // thick-dashed ring with a faint fill -- a plain hollow outline
           // at normal marker size was too easy to miss against map
           // tiles, so this deliberately reads as a bigger, softer blob
-          // rather than a precise dot.
-          ? { radius: radius + 4, color: color, weight: 3, fillColor: color, fillOpacity: 0.2, dashArray: '5,4' }
+          // rather than a precise dot. Size/fill scale with confidence:
+          // more agreeing neighbors = tighter, more solid; one neighbor
+          // or a wide spread among several = bigger, fainter.
+          ? {
+              radius: radius + approxRadiusBonus(pt.approxNeighborCount, pt.approxSpreadKm), color: color, weight: 3,
+              fillColor: color, fillOpacity: approxFillOpacity(pt.approxNeighborCount), dashArray: '5,4',
+            }
           : { radius: radius, color: outline, weight: p.primary ? 2 : 1, fillColor: color, fillOpacity: p.primary ? 1 : 0.8 };
+        var approxNote = '';
+        if (pt.approx) {
+          approxNote = ', approx. position';
+          if (pt.approxNeighborCount) approxNote += ' from ' + pt.approxNeighborCount + ' neighbor' + (pt.approxNeighborCount === 1 ? '' : 's');
+        }
         L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)
-          .bindTooltip(escapeHtml(pt.name) + ' (' + pt.label + (pt.approx ? ', approx. position' : '') + ')');
+          .bindTooltip(escapeHtml(pt.name) + ' (' + pt.label + approxNote + ')');
       });
       if (line.length > 1) {
         L.polyline(line, { color: lineColor, weight: p.primary ? 2.5 : 1.5, opacity: p.primary ? 0.85 : 0.5 }).addTo(map);
