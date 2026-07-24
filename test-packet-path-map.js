@@ -342,6 +342,35 @@ function makeSandbox(apiImpl) {
 
   await (async () => {
     try {
+      // branch.distanceFromFirstKm (> 0) should show up in the observer's
+      // tooltip label; exactly 0 (First itself) should not add a
+      // redundant "0.0 km away".
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          { hops: 2, points: [], observer: { name: 'FarObserver', lat: 56.0, lon: 10.0 }, distanceFromFirstKm: 42.3 },
+        ],
+        first: { hops: 0, points: [], observer: { name: 'FarObserver', lat: 56.0, lon: 10.0 }, distanceFromFirstKm: 0 },
+      }));
+
+      let tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert.ok(tooltips.some((t) => t.includes('42.3 km away')), 'expected a tooltip with the 42.3 km distance, got: ' + JSON.stringify(tooltips));
+      assert.ok(!tooltips.some((t) => t.includes('0.0 km away')), 'did not expect a "0.0 km away" label, got: ' + JSON.stringify(tooltips));
+      passed++;
+      console.log('  ✅ distanceFromFirstKm renders as a "N km away" label in the tooltip');
+    } catch (e) { failed++; console.log('  ❌ distanceFromFirstKm renders as a "N km away" label in the tooltip: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
       // A single-neighbor approx point should render with a bigger,
       // fainter ring than a 4-neighbor approx point -- more agreeing
       // neighbors means more confidence, so a tighter, more solid marker.

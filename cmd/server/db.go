@@ -1591,6 +1591,12 @@ type PacketPathBranch struct {
 	// deepest observation arrived, in seconds. Zero for First itself.
 	// Omitted when either timestamp is unknown.
 	SecondsAfterFirst *float64 `json:"secondsAfterFirst,omitempty"`
+	// DistanceFromFirstKm is the great-circle distance between this
+	// branch's own Observer and First's Observer. Zero for First itself.
+	// Omitted when either station's position is unknown (including when
+	// one or both are Approx -- an estimate compounding another estimate
+	// isn't worth surfacing).
+	DistanceFromFirstKm *float64 `json:"distanceFromFirstKm,omitempty"`
 }
 
 // PacketPathResponse is every branch a packet is known to have reached --
@@ -1922,15 +1928,30 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		return branch
 	}
 
-	for _, b := range best {
-		resp.Branches = append(resp.Branches, buildBranch(b))
-	}
-	sort.Slice(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
-
+	// Build First first so its Observer position is known before computing
+	// every other branch's DistanceFromFirstKm against it.
+	var firstLat, firstLon *float64
 	if first != nil {
 		fb := buildBranch(first)
+		if fb.Observer != nil && !fb.Observer.Approx {
+			firstLat, firstLon = fb.Observer.Lat, fb.Observer.Lon
+		}
+		if firstLat != nil {
+			zero := 0.0
+			fb.DistanceFromFirstKm = &zero
+		}
 		resp.First = &fb
 	}
+
+	for _, b := range best {
+		branch := buildBranch(b)
+		if firstLat != nil && branch.Observer != nil && !branch.Observer.Approx && branch.Observer.Lat != nil {
+			d := haversineKm(*branch.Observer.Lat, *branch.Observer.Lon, *firstLat, *firstLon)
+			branch.DistanceFromFirstKm = &d
+		}
+		resp.Branches = append(resp.Branches, branch)
+	}
+	sort.Slice(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
 
 	return resp, nil
 }

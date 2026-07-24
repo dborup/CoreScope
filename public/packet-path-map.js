@@ -106,6 +106,7 @@
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
       var observerLabel = b.hops + ' hop' + (b.hops === 1 ? '' : 's');
       if (typeof b.secondsAfterFirst === 'number') observerLabel += ', ' + formatElapsed(b.secondsAfterFirst);
+      if (typeof b.distanceFromFirstKm === 'number' && b.distanceFromFirstKm > 0) observerLabel += ', ' + b.distanceFromFirstKm.toFixed(1) + ' km away';
       chain.push({
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
         label: observerLabel, isObserver: true, approx: !!b.observer.approx,

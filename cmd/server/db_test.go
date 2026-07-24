@@ -745,6 +745,79 @@ func TestGetPacketPath_First(t *testing.T) {
 	if mid.SecondsAfterFirst == nil || *mid.SecondsAfterFirst != 200 {
 		t.Errorf("Observer Mid.SecondsAfterFirst = %v, want 200 (arrived at ts=300, 200s after First's ts=100)", mid.SecondsAfterFirst)
 	}
+
+	// SJC/SFO/OAK (Observer Early/Deep/Mid's IATA positions) are all
+	// real, non-approx Bay Area airport coordinates -- distances should
+	// be computed, First's own distance is exactly 0, and the others are
+	// a real (bounded, Bay-Area-scale) positive distance.
+	if resp.First.DistanceFromFirstKm == nil || *resp.First.DistanceFromFirstKm != 0 {
+		t.Errorf("First.DistanceFromFirstKm = %v, want 0 -- it defines the reference point", resp.First.DistanceFromFirstKm)
+	}
+	if deep.DistanceFromFirstKm == nil || *deep.DistanceFromFirstKm <= 0 || *deep.DistanceFromFirstKm > 200 {
+		t.Errorf("Branches[0].DistanceFromFirstKm = %v, want a positive, Bay-Area-scale distance from SJC to SFO", deep.DistanceFromFirstKm)
+	}
+	if mid.DistanceFromFirstKm == nil || *mid.DistanceFromFirstKm <= 0 || *mid.DistanceFromFirstKm > 200 {
+		t.Errorf("Observer Mid.DistanceFromFirstKm = %v, want a positive, Bay-Area-scale distance from SJC to OAK", mid.DistanceFromFirstKm)
+	}
+}
+
+// TestGetPacketPath_DistanceOmittedWhenApprox covers the "don't compound
+// an estimate on top of another estimate" rule: a branch whose Observer
+// position is itself Approx (borrowed from a neighbor, see
+// nearestPositionedNeighbor) must not get a DistanceFromFirstKm, even
+// though First has a real position -- the result would be a distance to
+// a guess, not a real measurement.
+func TestGetPacketPath_DistanceOmittedWhenApprox(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`)
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsfirst', 'Observer First', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsghost', 'Ghost Observer', NULL)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('obsghost', 'Ghost Observer', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkanchor', 'AnchorRepeater', 'repeater', 55.5, 9.5)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('obsghost', 'pkanchor', 10)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000011', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	// obsfirst: earliest (ts=100), real IATA position -- this is First.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 9.0, -88, '[]', 100)`)
+	// obsghost: later (ts=200), deeper (2 hops) -- Branches[0], but its
+	// only position comes from the neighbor-centroid fallback (Approx).
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 2, 4.0, -95, '["aa","bb"]', 200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000011")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.First == nil || resp.First.Observer == nil || resp.First.Observer.Name != "Observer First" {
+		t.Fatalf("First = %+v, want Observer First", resp.First)
+	}
+	if resp.First.Observer.Lat == nil {
+		t.Fatalf("First.Observer.Lat = nil, want a real IATA-derived position")
+	}
+	// Two distinct observers each contribute their own branch (obsfirst's
+	// own 0-hop observation is also a branch in its own right, separate
+	// from it being First) -- find Ghost Observer's specifically.
+	var ghost *PacketPathBranch
+	for i := range resp.Branches {
+		if resp.Branches[i].Observer != nil && resp.Branches[i].Observer.Name == "Ghost Observer" {
+			ghost = &resp.Branches[i]
+		}
+	}
+	if ghost == nil {
+		t.Fatalf("Branches = %+v, want a Ghost Observer branch", resp.Branches)
+	}
+	if !ghost.Observer.Approx {
+		t.Fatalf("Ghost Observer.Approx = false, want true (positioned only via the neighbor fallback)")
+	}
+	if ghost.DistanceFromFirstKm != nil {
+		t.Errorf("Ghost Observer.DistanceFromFirstKm = %v, want nil -- its own position is itself an estimate", ghost.DistanceFromFirstKm)
+	}
 }
 
 // TestGetPacketPath_ExcludesNullIsland covers a node whose nodes.lat/lon
