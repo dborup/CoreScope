@@ -46,16 +46,19 @@
   // position, then the observer's own position when known. A branch with
   // no locatable hops still contributes a single-point chain -- just the
   // observer -- so a station we can't trace a route through is still
-  // visible on the map rather than silently dropped.
+  // visible on the map rather than silently dropped. A point/observer
+  // can be `approx` (server borrowed its strongest neighbor's position,
+  // see GetPacketPath) -- carried through so it renders as a hollow,
+  // dashed marker instead of a solid one, never mistaken for a real fix.
   function chainForBranch(b) {
     var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null; });
     var chain = located.map(function (p, hi) {
-      return { lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops };
+      return { lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx };
     });
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
       chain.push({
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
-        label: b.hops + ' hop' + (b.hops === 1 ? '' : 's'), isObserver: true,
+        label: b.hops + ' hop' + (b.hops === 1 ? '' : 's'), isObserver: true, approx: !!b.observer.approx,
       });
     }
     return { chain: chain, missing: (b.points || []).length - located.length };
@@ -72,7 +75,7 @@
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
           'style="position:absolute;top:8px;right:8px;background:none;border:none;cursor:pointer;font-size:22px;line-height:1;color:var(--text-muted)">&times;</button>' +
         '<h3 style="margin:0 0 4px;padding-right:24px">Relay Path</h3>' +
-        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first.</p>' +
+        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed hollow markers are approximate -- borrowed from the station\'s strongest neighbor, not its own position.</p>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
       '</div>';
@@ -134,6 +137,7 @@
 
     var bounds = [];
     var missingTotal = 0;
+    var approxTotal = 0;
     // Draw secondary branches first so the primary (deepest) one ends up on top.
     var ordered = plotted.slice().sort(function (a, b) { return (a.primary ? 1 : 0) - (b.primary ? 1 : 0); });
     ordered.forEach(function (p) {
@@ -141,16 +145,19 @@
       var lineColor = p.primary ? accent : muted;
       var line = [];
       p.chain.forEach(function (pt) {
+        if (pt.approx) approxTotal++;
         bounds.push([pt.lat, pt.lon]);
         line.push([pt.lat, pt.lon]);
         var color = pt.isObserver ? observerColor : lineColor;
         var radius = p.primary ? (pt.isObserver ? 7 : 6) : (pt.isObserver ? 5 : 4);
-        L.circleMarker([pt.lat, pt.lon], {
-          radius: radius, color: outline, weight: p.primary ? 2 : 1,
-          fillColor: color, fillOpacity: p.primary ? 1 : 0.8,
-        })
+        var markerOpts = pt.approx
+          // Approximate (borrowed-from-neighbor) position: hollow +
+          // dashed, so it reads as "roughly here" rather than a real fix.
+          ? { radius: radius, color: color, weight: 2, fillOpacity: 0, dashArray: '2,3' }
+          : { radius: radius, color: outline, weight: p.primary ? 2 : 1, fillColor: color, fillOpacity: p.primary ? 1 : 0.8 };
+        L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)
-          .bindTooltip(escapeHtml(pt.name) + ' (' + pt.label + ')');
+          .bindTooltip(escapeHtml(pt.name) + ' (' + pt.label + (pt.approx ? ', approx. position' : '') + ')');
       });
       if (line.length > 1) {
         L.polyline(line, { color: lineColor, weight: p.primary ? 2.5 : 1.5, opacity: p.primary ? 0.85 : 0.5 }).addTo(map);
@@ -171,7 +178,7 @@
         radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
       })
         .addTo(map)
-        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + ')');
+        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')');
     }
 
     try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }
@@ -184,6 +191,7 @@
       'deepest reached ' + deepestHops + ' hop' + (deepestHops === 1 ? '' : 's'),
     ];
     if (firstPoint) statusParts.push('entered near ' + firstPoint.name);
+    if (approxTotal > 0) statusParts.push(approxTotal + ' approximate (via nearest neighbor)');
     if (missingTotal > 0) statusParts.push(missingTotal + ' hop' + (missingTotal === 1 ? '' : 's') + ' without a known position (not shown)');
     if (statusEl) statusEl.textContent = statusParts.join(' · ');
   }

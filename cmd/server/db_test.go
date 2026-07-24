@@ -764,6 +764,76 @@ func TestGetPacketPath_ExcludesNullIsland(t *testing.T) {
 	}
 }
 
+// TestGetPacketPath_FallsBackToNeighborPosition covers a hop and an
+// observer that have no position of their own anywhere (no GPS, no name
+// match, no IATA) but do have a strong neighbor_edges neighbor that IS
+// positioned -- their strongest neighbor's position should be borrowed
+// as an approximate stand-in, flagged via Approx so callers don't
+// mistake it for a real fix.
+func TestGetPacketPath_FallsBackToNeighborPosition(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`)
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsghost', 'Ghost Observer', NULL)`)
+	// pkghost/obsghost: no lat/lon at all (unadvertised). pkanchor: a
+	// real, positioned neighbor for both. Pubkeys lowercase throughout,
+	// matching real ingest data (and neighbor_edges' own storage/lookup
+	// casing) -- resolved_path entries and neighbor_edges rows must
+	// agree on case for the IN() lookups to match.
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkghost', 'GhostRepeater', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('obsghost', 'Ghost Observer', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkanchor', 'AnchorRepeater', 'repeater', 55.5, 9.5)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkweak', 'WeakRepeater', 'repeater', 60.0, 15.0)`)
+	// pkghost/obsghost each have two candidate neighbors -- pkanchor is
+	// the stronger edge (higher count) for both, so it should win over
+	// pkweak even though pkweak is also positioned.
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkanchor', 'pkghost', 10)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkghost', 'pkweak', 1)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('obsghost', 'pkanchor', 10)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('obsghost', 'pkweak', 1)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000009', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkghost"]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000009")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Branches) != 1 {
+		t.Fatalf("Branches = %+v, want 1", resp.Branches)
+	}
+	b := resp.Branches[0]
+
+	if len(b.Points) != 1 {
+		t.Fatalf("Points = %+v, want 1", b.Points)
+	}
+	p := b.Points[0]
+	if p.Name != "GhostRepeater" {
+		t.Errorf("Points[0].Name = %q, want GhostRepeater (its own name, not the neighbor's)", p.Name)
+	}
+	if !p.Approx {
+		t.Errorf("Points[0].Approx = false, want true -- position was borrowed from a neighbor")
+	}
+	if p.Lat == nil || *p.Lat != 55.5 || p.Lon == nil || *p.Lon != 9.5 {
+		t.Errorf("Points[0].Lat/Lon = %v/%v, want AnchorRepeater's position (55.5, 9.5) -- the stronger edge, not WeakRepeater's", p.Lat, p.Lon)
+	}
+
+	if b.Observer == nil || b.Observer.Name != "Ghost Observer" {
+		t.Fatalf("Observer = %+v, want Ghost Observer still named", b.Observer)
+	}
+	if !b.Observer.Approx {
+		t.Errorf("Observer.Approx = false, want true")
+	}
+	if b.Observer.Lat == nil || *b.Observer.Lat != 55.5 || b.Observer.Lon == nil || *b.Observer.Lon != 9.5 {
+		t.Errorf("Observer.Lat/Lon = %v/%v, want AnchorRepeater's position (55.5, 9.5)", b.Observer.Lat, b.Observer.Lon)
+	}
+}
+
 // TestGetPacketPath_ObserverPositionPrefersOwnGPS covers an observer whose
 // configured IATA code isn't a real airport (a custom/regional code an
 // operator typed in, or a typo) and so isn't in the hardcoded iataCoords

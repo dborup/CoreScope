@@ -1527,18 +1527,27 @@ type PacketPathPoint struct {
 	Role      string   `json:"role,omitempty"`
 	Lat       *float64 `json:"lat"`
 	Lon       *float64 `json:"lon"`
+	// Approx is true when Lat/Lon are not this node's own position but
+	// its strongest neighbor_edges neighbor's position instead (used as
+	// a last-resort stand-in when the node itself has no known fix).
+	Approx bool `json:"approx,omitempty"`
 }
 
 // PacketPathObserver is the station that produced a given branch's
 // observation of a packet (see GetPacketPath), positioned from its own
 // self-advertised GPS (the same source /api/observers uses) when known,
-// falling back to its configured IATA code otherwise -- not a stored
-// per-observer lat/lon column.
+// falling back to its configured IATA code, and finally its strongest
+// neighbor_edges neighbor's position (Approx=true), otherwise -- not a
+// stored per-observer lat/lon column.
 type PacketPathObserver struct {
 	Name string   `json:"name"`
 	IATA string   `json:"iata,omitempty"`
 	Lat  *float64 `json:"lat"`
 	Lon  *float64 `json:"lon"`
+	// Approx is true when Lat/Lon are not this station's own position
+	// but its strongest neighbor's position instead -- see
+	// PacketPathPoint.Approx.
+	Approx bool `json:"approx,omitempty"`
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -1802,9 +1811,17 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			if name == "" {
 				name = *pk
 			}
-			branch.Points = append(branch.Points, PacketPathPoint{
-				PublicKey: *pk, Name: name, Role: ni.role, Lat: ni.lat, Lon: ni.lon,
-			})
+			point := PacketPathPoint{PublicKey: *pk, Name: name, Role: ni.role, Lat: ni.lat, Lon: ni.lon}
+			if point.Lat == nil {
+				// Last resort: this node has never itself reported a
+				// position -- borrow its strongest neighbor's instead,
+				// clearly flagged as approximate rather than a real fix.
+				if _, nLat, nLon, ok := db.nearestPositionedNeighbor(*pk); ok {
+					lat, lon := nLat, nLon
+					point.Lat, point.Lon, point.Approx = &lat, &lon, true
+				}
+			}
+			branch.Points = append(branch.Points, point)
 		}
 		if b.observerName != "" {
 			obs := &PacketPathObserver{Name: b.observerName}
@@ -1832,6 +1849,15 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 					obs.Lat, obs.Lon = &lat, &lon
 				}
 			}
+			if obs.Lat == nil && b.observerPubkey != "" {
+				// Last resort, same as the hop-point fallback above: no
+				// position of its own anywhere, so borrow its strongest
+				// neighbor's instead, flagged as approximate.
+				if _, nLat, nLon, ok := db.nearestPositionedNeighbor(b.observerPubkey); ok {
+					lat, lon := nLat, nLon
+					obs.Lat, obs.Lon, obs.Approx = &lat, &lon, true
+				}
+			}
 			branch.Observer = obs
 		}
 		if b.snr.Valid {
@@ -1852,6 +1878,77 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// nearestPositionedNeighbor finds pubkey's strongest neighbor_edges
+// neighbor (ranked by observation count, the same adjacency data
+// path_resolver.go's context-aware resolver reads) that has a real,
+// known position, for use as an approximate stand-in when pubkey itself
+// has none -- e.g. a node that's never advertised a GPS fix, but is
+// almost certainly physically near whichever neighbor it relays through
+// most. Returns ok=false when pubkey has no neighbor with a position.
+func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon float64, ok bool) {
+	pk := strings.ToLower(strings.TrimSpace(pubkey))
+	if pk == "" {
+		return "", 0, 0, false
+	}
+	rows, err := db.conn.Query(`
+		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor
+		FROM neighbor_edges
+		WHERE node_a = ? OR node_b = ?
+		ORDER BY count DESC
+		LIMIT 20`, pk, pk, pk)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	var candidates []string
+	for rows.Next() {
+		var neighborPK string
+		if rows.Scan(&neighborPK) == nil {
+			candidates = append(candidates, neighborPK)
+		}
+	}
+	rows.Close()
+	if len(candidates) == 0 {
+		return "", 0, 0, false
+	}
+
+	placeholders := make([]byte, 0, len(candidates)*2)
+	args := make([]interface{}, len(candidates))
+	for i, c := range candidates {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[i] = c
+	}
+	type posInfo struct {
+		name     string
+		lat, lon float64
+	}
+	posByPK := make(map[string]posInfo, len(candidates))
+	nodeRows, err := db.conn.Query(
+		"SELECT public_key, name, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
+	if err == nil {
+		for nodeRows.Next() {
+			var candPK string
+			var candName sql.NullString
+			var candLat, candLon float64
+			if nodeRows.Scan(&candPK, &candName, &candLat, &candLon) == nil {
+				posByPK[candPK] = posInfo{name: candName.String, lat: candLat, lon: candLon}
+			}
+		}
+		nodeRows.Close()
+	}
+	// candidates is already ordered strongest-first; take the first that
+	// actually has a position rather than picking the globally-strongest
+	// neighbor regardless of whether it's positioned.
+	for _, c := range candidates {
+		if p, found := posByPK[c]; found {
+			return p.name, p.lat, p.lon, true
+		}
+	}
+	return "", 0, 0, false
 }
 
 // GetChannels returns channel list from GRP_TXT packets.
