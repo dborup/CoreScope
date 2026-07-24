@@ -2648,10 +2648,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
    approx/confidence, and distance/timing info together -- Leaflet's
    default tooltip is white-space:nowrap, which stretched a long one
    into an unreadable single line spanning the whole map. Wrap it onto
-   multiple lines within a fixed width instead. */
+   multiple lines instead. Width is in ch (character-relative) rather
+   than px so the box scales with font-size -- a fixed px width left
+   room for barely one word per line at larger text sizes. */
 .leaflet-tooltip.packet-path-tooltip {
   white-space: normal;
-  max-width: 220px;
+  max-width: 28ch;
 }
 
 /* For Leaflet layer control */
