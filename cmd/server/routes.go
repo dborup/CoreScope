@@ -2876,15 +2876,48 @@ func (s *Server) resolveEntryPointArea(prefixes []string) (label string, ok bool
 // sitting in Aarhus but sending with the broad #dk scope should still show
 // "Aarhus by" here. The raw entryPrefix never reaches the client, whether
 // or not it resolved.
+//
+// A 0-hop (direct) message has no relay path at all, so there's no
+// entryPrefix to resolve -- even though the hearing station's own GPS fix
+// (captured as "entryObserverPubkey", direct-reception case only) is a
+// reasonable stand-in for "where this happened". That fallback is resolved
+// in a second bulk pass below, deliberately not extended to messages whose
+// multi-hop path just failed to resolve (an estimate from the wrong end of
+// a relay chain isn't worth showing). entryObserverPubkey never reaches the
+// client either way.
 func (s *Server) annotateMessageAreas(messages []map[string]interface{}) {
 	hasAreas := s.cfg != nil && len(s.cfg.Areas) > 0
+	needsFallback := make([]map[string]interface{}, 0)
+	fallbackPubkeys := make([]string, 0)
 	for _, m := range messages {
 		prefix, _ := m["entryPrefix"].(string)
 		delete(m, "entryPrefix")
-		if !hasAreas || prefix == "" {
+		observerPK, _ := m["entryObserverPubkey"].(string)
+		delete(m, "entryObserverPubkey")
+		if !hasAreas {
 			continue
 		}
-		if label, ok := s.resolveEntryPointArea([]string{prefix}); ok {
+		if prefix != "" {
+			if label, ok := s.resolveEntryPointArea([]string{prefix}); ok {
+				m["area"] = label
+				continue
+			}
+		}
+		if observerPK != "" {
+			needsFallback = append(needsFallback, m)
+			fallbackPubkeys = append(fallbackPubkeys, observerPK)
+		}
+	}
+	if len(needsFallback) == 0 || s.db == nil {
+		return
+	}
+	gpsByPK := s.db.gpsByPubkeysExact(fallbackPubkeys)
+	for i, m := range needsFallback {
+		pos, ok := gpsByPK[fallbackPubkeys[i]]
+		if !ok {
+			continue
+		}
+		if label, ok := AreaForPoint(pos[0], pos[1], s.cfg.Areas); ok {
 			m["area"] = label
 		}
 	}
