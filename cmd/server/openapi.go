@@ -342,18 +342,18 @@ func componentSchemas() map[string]interface{} {
 				"role":      str("Node role (e.g. repeater, room), when known."),
 				"lat":       map[string]interface{}{"type": "number", "nullable": true, "description": "Null when this node has never advertised a GPS position and has no positioned neighbor either."},
 				"lon":       map[string]interface{}{"type": "number", "nullable": true},
-				"approx":    map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this node's own position but its strongest neighbor_edges neighbor's position instead -- a last-resort stand-in, not a real fix."},
+				"approx":    map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this node's own position but a count-weighted centroid of its positioned neighbor_edges neighbors instead -- a last-resort stand-in, not a real fix."},
 			},
 		},
 		"PacketPathObserver": map[string]interface{}{
 			"type":        "object",
-			"description": "The station that produced a given branch's observation of a packet path, positioned from its own self-advertised GPS when known (same source as /api/observers), else its configured IATA code, else its strongest neighbor's position (see approx).",
+			"description": "The station that produced a given branch's observation of a packet path, positioned from its own self-advertised GPS when known (same source as /api/observers), else its configured IATA code, else a weighted centroid of its positioned neighbors (see approx).",
 			"properties": map[string]interface{}{
 				"name":   str("Observer display name."),
 				"iata":   str("Observer's configured IATA airport code, when set."),
 				"lat":    map[string]interface{}{"type": "number", "nullable": true},
 				"lon":    map[string]interface{}{"type": "number", "nullable": true},
-				"approx": map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this station's own position but its strongest neighbor's position instead -- a last-resort stand-in, not a real fix."},
+				"approx": map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this station's own position but a count-weighted centroid of its positioned neighbors instead -- a last-resort stand-in, not a real fix."},
 			},
 		},
 		"PacketPathBranch": map[string]interface{}{

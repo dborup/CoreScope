@@ -1880,20 +1880,27 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	return resp, nil
 }
 
-// nearestPositionedNeighbor finds pubkey's strongest neighbor_edges
-// neighbor (ranked by observation count, the same adjacency data
-// path_resolver.go's context-aware resolver reads) that has a real,
-// known position, for use as an approximate stand-in when pubkey itself
-// has none -- e.g. a node that's never advertised a GPS fix, but is
-// almost certainly physically near whichever neighbor it relays through
-// most. Returns ok=false when pubkey has no neighbor with a position.
+// nearestPositionedNeighbor estimates pubkey's position from its
+// neighbor_edges neighbors that themselves have a real, known position,
+// for use as an approximate stand-in when pubkey has none of its own --
+// e.g. a node that's never advertised a GPS fix, but is almost
+// certainly physically near wherever its neighbors are. Weighted by
+// each edge's observation count (a neighbor seen relaying to/from
+// pubkey many times pulls the estimate harder than one seen once), so
+// with several positioned neighbors this settles somewhere among them
+// rather than collapsing onto a single neighbor's exact coordinates --
+// each neighbor's OWN position is a real, precise fix; only pubkey's
+// position relative to them is unknown, so more of them narrows it
+// down. With exactly one positioned neighbor this is identical to
+// using that neighbor's position outright. Returns ok=false when
+// pubkey has no neighbor with a position at all.
 func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon float64, ok bool) {
 	pk := strings.ToLower(strings.TrimSpace(pubkey))
 	if pk == "" {
 		return "", 0, 0, false
 	}
 	rows, err := db.conn.Query(`
-		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor
+		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor, count
 		FROM neighbor_edges
 		WHERE node_a = ? OR node_b = ?
 		ORDER BY count DESC
@@ -1901,11 +1908,16 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 	if err != nil {
 		return "", 0, 0, false
 	}
-	var candidates []string
+	type candidate struct {
+		pubkey string
+		weight float64
+	}
+	var candidates []candidate
 	for rows.Next() {
 		var neighborPK string
-		if rows.Scan(&neighborPK) == nil {
-			candidates = append(candidates, neighborPK)
+		var count float64
+		if rows.Scan(&neighborPK, &count) == nil {
+			candidates = append(candidates, candidate{pubkey: neighborPK, weight: count})
 		}
 	}
 	rows.Close()
@@ -1920,7 +1932,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 			placeholders = append(placeholders, ',')
 		}
 		placeholders = append(placeholders, '?')
-		args[i] = c
+		args[i] = c.pubkey
 	}
 	type posInfo struct {
 		name     string
@@ -1940,15 +1952,32 @@ func (db *DB) nearestPositionedNeighbor(pubkey string) (name string, lat, lon fl
 		}
 		nodeRows.Close()
 	}
-	// candidates is already ordered strongest-first; take the first that
-	// actually has a position rather than picking the globally-strongest
-	// neighbor regardless of whether it's positioned.
+
+	// candidates is count-DESC ordered, so the first contributor found
+	// is the strongest -- used only for the returned name, which is
+	// otherwise cosmetic (current callers discard it).
+	var sumLat, sumLon, sumWeight float64
+	var strongestName string
 	for _, c := range candidates {
-		if p, found := posByPK[c]; found {
-			return p.name, p.lat, p.lon, true
+		p, found := posByPK[c.pubkey]
+		if !found {
+			continue
+		}
+		w := c.weight
+		if w <= 0 {
+			w = 1
+		}
+		sumLat += p.lat * w
+		sumLon += p.lon * w
+		sumWeight += w
+		if strongestName == "" {
+			strongestName = p.name
 		}
 	}
-	return "", 0, 0, false
+	if sumWeight == 0 {
+		return "", 0, 0, false
+	}
+	return strongestName, sumLat / sumWeight, sumLon / sumWeight, true
 }
 
 // GetChannels returns channel list from GRP_TXT packets.

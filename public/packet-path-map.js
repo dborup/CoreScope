@@ -47,9 +47,10 @@
   // no locatable hops still contributes a single-point chain -- just the
   // observer -- so a station we can't trace a route through is still
   // visible on the map rather than silently dropped. A point/observer
-  // can be `approx` (server borrowed its strongest neighbor's position,
-  // see GetPacketPath) -- carried through so it renders as a hollow,
-  // dashed marker instead of a solid one, never mistaken for a real fix.
+  // can be `approx` (server used a weighted centroid of its positioned
+  // neighbors' positions, see GetPacketPath) -- carried through so it
+  // renders as a hollow, dashed marker instead of a solid one, never
+  // mistaken for a real fix.
   function chainForBranch(b) {
     var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null; });
     var chain = located.map(function (p, hi) {
@@ -75,7 +76,7 @@
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
           'style="position:absolute;top:8px;right:8px;background:none;border:none;cursor:pointer;font-size:22px;line-height:1;color:var(--text-muted)">&times;</button>' +
         '<h3 style="margin:0 0 4px;padding-right:24px">Relay Path</h3>' +
-        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed hollow markers are approximate -- borrowed from the station\'s strongest neighbor, not its own position.</p>' +
+        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed markers are approximate -- estimated from nearby positioned neighbors, not the station\'s own position.</p>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
       '</div>';
@@ -194,7 +195,7 @@
       'deepest reached ' + deepestHops + ' hop' + (deepestHops === 1 ? '' : 's'),
     ];
     if (firstPoint) statusParts.push('entered near ' + firstPoint.name);
-    if (approxTotal > 0) statusParts.push(approxTotal + ' approximate (via nearest neighbor)');
+    if (approxTotal > 0) statusParts.push(approxTotal + ' approximate (estimated from neighbors)');
     if (missingTotal > 0) statusParts.push(missingTotal + ' hop' + (missingTotal === 1 ? '' : 's') + ' without a known position (not shown)');
     if (statusEl) statusEl.textContent = statusParts.join(' · ');
   }
