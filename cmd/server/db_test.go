@@ -721,6 +721,49 @@ func TestGetPacketPath_First(t *testing.T) {
 	}
 }
 
+// TestGetPacketPath_ExcludesNullIsland covers a node whose nodes.lat/lon
+// are stored as literal (0,0) rather than NULL -- MeshCore's "never
+// actually reported a GPS position" sentinel in practice, not a real fix
+// off the coast of Ghana. Both the relay-hop-point lookup and the
+// observer-position lookup must treat it as unpositioned (matching the
+// same convention GetNodesForScopeAdoption and geofilter.PassesFilter
+// already use), keeping the node's name but not its bogus position.
+func TestGetPacketPath_ExcludesNullIsland(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsZero', 'Zero Observer', NULL)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkZero', 'ZeroRepeater', 'repeater', 0, 0)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('obsZero', 'Zero Observer', 'repeater', 0, 0)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000008', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkZero"]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000008")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Branches) != 1 {
+		t.Fatalf("Branches = %+v, want 1", resp.Branches)
+	}
+	b := resp.Branches[0]
+	if len(b.Points) != 1 || b.Points[0].Name != "ZeroRepeater" {
+		t.Fatalf("Points = %+v, want ZeroRepeater still named", b.Points)
+	}
+	if b.Points[0].Lat != nil || b.Points[0].Lon != nil {
+		t.Errorf("Points[0].Lat/Lon = %v/%v, want nil -- (0,0) is a no-fix sentinel, not a real position", b.Points[0].Lat, b.Points[0].Lon)
+	}
+	if b.Observer == nil || b.Observer.Name != "Zero Observer" {
+		t.Fatalf("Observer = %+v, want Zero Observer still named", b.Observer)
+	}
+	if b.Observer.Lat != nil || b.Observer.Lon != nil {
+		t.Errorf("Observer.Lat/Lon = %v/%v, want nil -- the observer's own node row is also (0,0)", b.Observer.Lat, b.Observer.Lon)
+	}
+}
+
 // TestGetPacketPath_ObserverPositionPrefersOwnGPS covers an observer whose
 // configured IATA code isn't a real airport (a custom/regional code an
 // operator typed in, or a typo) and so isn't in the hardcoded iataCoords

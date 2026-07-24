@@ -1714,13 +1714,15 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 				var lat, lon sql.NullFloat64
 				if nodeRows.Scan(&pk, &name, &role, &lat, &lon) == nil {
 					ni := nodeInfo{name: name.String, role: role.String}
-					if lat.Valid {
-						v := lat.Float64
-						ni.lat = &v
-					}
-					if lon.Valid {
-						v := lon.Float64
-						ni.lon = &v
+					// (0,0) is the ocean off Ghana, not a real fix -- some
+					// nodes have it stored literally instead of NULL when
+					// they've never actually reported a GPS position.
+					// Excluded the same way GetNodesForScopeAdoption and
+					// geofilter.PassesFilter already do; the node's own
+					// name/role are kept, just not its bogus position.
+					if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
+						v1, v2 := lat.Float64, lon.Float64
+						ni.lat, ni.lon = &v1, &v2
 					}
 					nodeByPK[pk] = ni
 				}
@@ -1767,7 +1769,7 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			args[i] = n
 		}
 		nameRows, err := db.conn.Query(
-			"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL", args...)
+			"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
 		if err == nil {
 			ambiguous := map[string]bool{}
 			for nameRows.Next() {
