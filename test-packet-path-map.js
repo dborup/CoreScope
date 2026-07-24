@@ -217,7 +217,7 @@ function makeSandbox(apiImpl) {
           remove() {},
         }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; } }; },
+        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } }; },
         polyline: () => { polylineCount++; return { addTo() { return this; } }; },
       };
 
@@ -255,7 +255,7 @@ function makeSandbox(apiImpl) {
           remove() {},
         }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; } }; },
+        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } }; },
         polyline: () => ({ addTo() { return this; } }),
       };
 
@@ -298,7 +298,7 @@ function makeSandbox(apiImpl) {
         circleMarker: (latlng, opts) => {
           if (opts && opts.dashArray) approxMarkerCalls++;
           else solidMarkerCalls++;
-          return { addTo() { return this; }, bindTooltip() { return this; } };
+          return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } };
         },
         polyline: () => ({ addTo() { return this; } }),
       };
@@ -329,7 +329,7 @@ function makeSandbox(apiImpl) {
       ctx.L = {
         map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
         polyline: () => ({ addTo() { return this; } }),
       };
 
@@ -357,7 +357,7 @@ function makeSandbox(apiImpl) {
       ctx.L = {
         map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
         polyline: () => ({ addTo() { return this; } }),
       };
 
@@ -395,7 +395,7 @@ function makeSandbox(apiImpl) {
         tileLayer: () => ({ addTo() { return this; } }),
         circleMarker: (latlng, opts) => {
           tooltipByCall.push(opts);
-          return { addTo() { return this; }, bindTooltip(t) { markerOptsByName[t] = opts; return this; } };
+          return { addTo() { return this; }, bindTooltip(t) { markerOptsByName[t] = opts; return this; }, on() { return this; } };
         },
         polyline: () => ({ addTo() { return this; } }),
       };
@@ -435,7 +435,7 @@ function makeSandbox(apiImpl) {
       ctx.L = {
         map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
         polyline: () => ({ addTo() { return this; } }),
       };
 
@@ -469,7 +469,7 @@ function makeSandbox(apiImpl) {
       ctx.L = {
         map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
         tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: (latlng, opts) => ({ addTo() { return this; }, bindTooltip(t) { optsByTooltip[t] = opts; return this; } }),
+        circleMarker: (latlng, opts) => ({ addTo() { return this; }, bindTooltip(t) { optsByTooltip[t] = opts; return this; }, on() { return this; } }),
         polyline: () => ({ addTo() { return this; } }),
       };
 
@@ -485,6 +485,50 @@ function makeSandbox(apiImpl) {
       passed++;
       console.log('  ✅ bridge repeaters get a distinct outline and tooltip note');
     } catch (e) { failed++; console.log('  ❌ bridge repeaters get a distinct outline and tooltip note: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // A marker with a publicKey should register a click handler that
+      // navigates to #/nodes/{pubkey} (closing the modal first); one
+      // without a publicKey should register no click handler at all.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk-with-key', name: 'HasKey', lat: 56.0, lon: 10.0 }],
+            observer: { name: 'NoKeyObserver', lat: 56.1, lon: 10.1 }, // no publicKey
+          },
+        ],
+      }));
+      ctx.window.location = { hash: '' };
+
+      const clickHandlersByTooltip = {};
+      let lastTooltip = null;
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({
+          addTo() { return this; },
+          bindTooltip(t) { lastTooltip = t; return this; },
+          on(evt, fn) { if (evt === 'click') clickHandlersByTooltip[lastTooltip] = fn; return this; },
+        }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const hasKeyTooltip = Object.keys(clickHandlersByTooltip).find((t) => t.includes('HasKey'));
+      assert.ok(hasKeyTooltip, 'expected a click handler registered for the HasKey marker, got: ' + JSON.stringify(Object.keys(clickHandlersByTooltip)));
+      assert.ok(hasKeyTooltip.includes('click for node detail'), 'expected the tooltip to hint it is clickable, got: ' + hasKeyTooltip);
+      assert.ok(!Object.keys(clickHandlersByTooltip).some((t) => t.includes('NoKeyObserver')), 'expected NO click handler for the keyless observer');
+
+      clickHandlersByTooltip[hasKeyTooltip]();
+      assert.strictEqual(ctx.window.location.hash, '#/nodes/pk-with-key', 'expected clicking the marker to navigate to the node detail hash route, got: ' + ctx.window.location.hash);
+      assert.ok(!ctx.document.getElementById('packetPathModal'), 'expected the modal to close after navigating away');
+      passed++;
+      console.log('  ✅ markers with a publicKey are clickable and navigate to node detail, closing the modal');
+    } catch (e) { failed++; console.log('  ❌ markers with a publicKey are clickable and navigate to node detail, closing the modal: ' + e.message); }
   })();
 
   console.log('\n════════════════════════════════════════');

@@ -101,6 +101,7 @@
       return {
         lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx,
         approxNeighborCount: p.approxNeighborCount, approxSpreadKm: p.approxSpreadKm, role: p.role, isBridge: !!p.isBridge,
+        publicKey: p.publicKey,
       };
     });
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
@@ -111,7 +112,7 @@
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
         label: observerLabel, isObserver: true, approx: !!b.observer.approx,
         approxNeighborCount: b.observer.approxNeighborCount, approxSpreadKm: b.observer.approxSpreadKm,
-        role: b.observer.role, isBridge: !!b.observer.isBridge,
+        role: b.observer.role, isBridge: !!b.observer.isBridge, publicKey: b.observer.publicKey,
       });
     }
     return { chain: chain, missing: (b.points || []).length - located.length };
@@ -128,7 +129,7 @@
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
           'style="position:absolute;top:8px;right:8px;background:none;border:none;cursor:pointer;font-size:22px;line-height:1;color:var(--text-muted)">&times;</button>' +
         '<h3 style="margin:0 0 4px;padding-right:24px">Relay Path</h3>' +
-        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed markers are approximate -- estimated from nearby positioned neighbors, not the station\'s own position. A bold purple outline marks a confirmed bridge repeater.</p>' +
+        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first. Dashed markers are approximate -- estimated from nearby positioned neighbors, not the station\'s own position. A bold purple outline marks a confirmed bridge repeater. Click a marker to open that node\'s detail page.</p>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
       '</div>';
@@ -230,9 +231,18 @@
           if (pt.approxNeighborCount) approxNote += ' from ' + pt.approxNeighborCount + ' neighbor' + (pt.approxNeighborCount === 1 ? '' : 's');
         }
         var bridgeNote = pt.isBridge ? ', bridge repeater' : '';
-        L.circleMarker([pt.lat, pt.lon], markerOpts)
+        var clickNote = pt.publicKey ? ' — click for node detail' : '';
+        var marker = L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)
-          .bindTooltip(roleIcon(pt.role) + escapeHtml(pt.name) + ' (' + pt.label + approxNote + bridgeNote + ')');
+          .bindTooltip(roleIcon(pt.role) + escapeHtml(pt.name) + ' (' + pt.label + approxNote + bridgeNote + ')' + clickNote);
+        if (pt.publicKey) {
+          // Same #/nodes/{pubkey} hash route the rest of the app already
+          // links to (see e.g. public/channels.js's node-detail links).
+          marker.on('click', function () {
+            close();
+            window.location.hash = '#/nodes/' + encodeURIComponent(pt.publicKey);
+          });
+        }
       });
       if (line.length > 1) {
         L.polyline(line, { color: lineColor, weight: p.primary ? 2.5 : 1.5, opacity: p.primary ? 0.85 : 0.5 }).addTo(map);
