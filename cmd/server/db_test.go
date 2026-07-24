@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2124,6 +2125,91 @@ func TestGetChannelMessages_PingBotReply_MultiObservation(t *testing.T) {
 	}
 	if !strings.Contains(text, "heard by 2 observers") {
 		t.Errorf("botReply text = %q, want breadth reported as \"2 observers\" now that more than one observer heard it", text)
+	}
+}
+
+// TestGetChannelMessages_PingBotReply_SpreadDistance covers the "spread up
+// to Nkm" part of the reply: when the first-hearing station and at least
+// one other distinct station both have their own GPS fix on file (as
+// mesh nodes, keyed by the observer's own pubkey), the farthest of those
+// distances from the first hearer is reported -- the same "how wide did
+// this spread" signal View Path's map shows.
+func TestGetChannelMessages_PingBotReply_SpreadDistance(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('pkobsnear', 'Near Observer', 'CPH')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('pkobsfar', 'Far Observer', 'AAR')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkobsnear', 'Near Observer', 'repeater', 55.6761, 12.5683)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkobsfar', 'Far Observer', 'repeater', 56.1629, 10.2039)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('FF', 'chanmsg00000006', '2026-01-15T10:05:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Grace"}', '#ping')`)
+	// pkObsNear (observer_idx=1) heard it first -- lower timestamp.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 10.0, -85, '[]', 1736935500)`)
+	// pkObsFar (observer_idx=2) heard it a moment later.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 2, 6.0, -95, '["aa"]', 1736935505)`)
+
+	messages, _, err := db.GetChannelMessages("#ping", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply map[string]interface{}
+	for _, m := range messages {
+		if m["text"] == "ping" {
+			reply, _ = m["botReply"].(map[string]interface{})
+		}
+	}
+	if reply == nil {
+		t.Fatal("expected a botReply on the ping message")
+	}
+	text, _ := reply["text"].(string)
+	wantKm := haversineKm(55.6761, 12.5683, 56.1629, 10.2039)
+	wantFrag := fmt.Sprintf("spread up to %.1fkm", wantKm)
+	if !strings.Contains(text, wantFrag) {
+		t.Errorf("botReply text = %q, want %q (farthest distance from the first hearer)", text, wantFrag)
+	}
+}
+
+// TestGetChannelMessages_PingBotReply_NoSpreadWithoutPositions covers the
+// omission side: when hearing stations don't have their own GPS fix on
+// file (the common case -- most observers aren't also positioned mesh
+// nodes), no "spread" claim should be fabricated.
+func TestGetChannelMessages_PingBotReply_NoSpreadWithoutPositions(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs2', 'Observer Two', 'SFO')`)
+	// Deliberately no nodes rows for obs1/obs2 -- neither has a GPS fix.
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('GG', 'chanmsg00000007', '2026-01-15T10:06:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Heidi"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 10.0, -85, '[]', 1736935600)`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 2, 6.0, -95, '["aa"]', 1736935605)`)
+
+	messages, _, err := db.GetChannelMessages("#ping", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply map[string]interface{}
+	for _, m := range messages {
+		if m["text"] == "ping" {
+			reply, _ = m["botReply"].(map[string]interface{})
+		}
+	}
+	if reply == nil {
+		t.Fatal("expected a botReply on the ping message")
+	}
+	text, _ := reply["text"].(string)
+	if strings.Contains(text, "spread up to") {
+		t.Errorf("botReply text = %q, want no \"spread up to\" claim when neither observer has a GPS fix", text)
 	}
 }
 

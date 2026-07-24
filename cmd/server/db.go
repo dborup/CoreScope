@@ -2331,8 +2331,13 @@ func isPingTrigger(displayText string) bool {
 // hop i's node name, falling back to its pubkey/hash-prefix when a name
 // couldn't be resolved); nil/empty when hops == 0 or resolution wasn't
 // available -- the hop count itself is unaffected either way.
-func pingBotReply(hops int, snr sql.NullFloat64, observer string, repeaterNames []string) map[string]interface{} {
-	parts := make([]string, 0, 3)
+//
+// farthestKm is the same "how wide did this spread geographically" signal
+// View Path's map shows (farthest any hearing station was from whoever
+// heard it first), computed from stations' own GPS fixes only -- nil when
+// fewer than two distinct stations have a position on file.
+func pingBotReply(hops int, snr sql.NullFloat64, observer string, repeaterNames []string, farthestKm *float64) map[string]interface{} {
+	parts := make([]string, 0, 4)
 	if hops > 0 {
 		s := "s"
 		if hops == 1 {
@@ -2348,6 +2353,9 @@ func pingBotReply(hops int, snr sql.NullFloat64, observer string, repeaterNames 
 	}
 	if snr.Valid {
 		parts = append(parts, fmt.Sprintf("SNR %.1fdB", snr.Float64))
+	}
+	if farthestKm != nil {
+		parts = append(parts, fmt.Sprintf("spread up to %.1fkm", *farthestKm))
 	}
 	if observer != "" {
 		parts = append(parts, "heard by "+observer)
@@ -2535,6 +2543,14 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		snr          sql.NullFloat64
 		resolvedPath []*string
 		observers    map[string]bool
+		// observerPubkeys/firstPubkey/firstTS feed the "spread up to Nkm"
+		// reply text -- the same farthest-from-first-hearer distance View
+		// Path shows on its map, computed here as a cheap position-only
+		// pass (no neighbor-centroid approximation) rather than reusing
+		// GetPacketPath's heavier per-branch query for every ping.
+		observerPubkeys map[string]bool
+		firstPubkey     string
+		firstTS         int64
 	}
 	pendingPings := make(map[int]*pendingPing)
 
@@ -2593,6 +2609,14 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				if observerName != "" {
 					agg.observers[observerName] = true
 				}
+				if obsID.Valid && obsID.String != "" {
+					pk := strings.ToLower(strings.TrimSpace(obsID.String))
+					agg.observerPubkeys[pk] = true
+					if obsTs.Valid && (agg.firstPubkey == "" || obsTs.Int64 < agg.firstTS) {
+						agg.firstPubkey = pk
+						agg.firstTS = obsTs.Int64
+					}
+				}
 				if hops > agg.hops {
 					agg.hops, agg.snr, agg.resolvedPath = hops, snr, resolvedPath
 				}
@@ -2645,9 +2669,20 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			m.Data["observers"] = []string{observerName}
 		}
 		if isPingTrigger(displayText) {
-			agg := &pendingPing{hops: hops, snr: snr, resolvedPath: resolvedPath, observers: map[string]bool{}}
+			agg := &pendingPing{
+				hops: hops, snr: snr, resolvedPath: resolvedPath,
+				observers: map[string]bool{}, observerPubkeys: map[string]bool{},
+			}
 			if observerName != "" {
 				agg.observers[observerName] = true
+			}
+			if obsID.Valid && obsID.String != "" {
+				pk := strings.ToLower(strings.TrimSpace(obsID.String))
+				agg.observerPubkeys[pk] = true
+				if obsTs.Valid {
+					agg.firstPubkey = pk
+					agg.firstTS = obsTs.Int64
+				}
 			}
 			pendingPings[txID] = agg
 		}
@@ -2673,6 +2708,53 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			pubkeys = append(pubkeys, pk)
 		}
 		names, _ := db.namesAndRolesForPubkeys(pubkeys)
+
+		// Bulk-resolve observer positions too, for the "spread up to Nkm"
+		// part of the reply -- only for pings that could possibly show one
+		// (a first-hearer plus at least one other distinct station), and
+		// deliberately WITHOUT GetPacketPath's neighbor-centroid fallback
+		// for unpositioned stations: that's a per-node query each, too
+		// expensive to run for every ping on a page of channel messages.
+		// A station missing its own GPS fix just doesn't contribute here.
+		posPubkeySet := map[string]bool{}
+		for _, p := range pendingPings {
+			if p.firstPubkey == "" || len(p.observerPubkeys) < 2 {
+				continue
+			}
+			for pk := range p.observerPubkeys {
+				posPubkeySet[pk] = true
+			}
+		}
+		posByPK := map[string][2]float64{}
+		if len(posPubkeySet) > 0 {
+			posPubkeys := make([]string, 0, len(posPubkeySet))
+			for pk := range posPubkeySet {
+				posPubkeys = append(posPubkeys, pk)
+			}
+			placeholders := make([]byte, 0, len(posPubkeys)*2)
+			args := make([]interface{}, len(posPubkeys))
+			for i, pk := range posPubkeys {
+				if i > 0 {
+					placeholders = append(placeholders, ',')
+				}
+				placeholders = append(placeholders, '?')
+				args[i] = pk
+			}
+			posRows, err := db.conn.Query(
+				"SELECT public_key, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+")", args...)
+			if err == nil {
+				for posRows.Next() {
+					var pk string
+					var lat, lon sql.NullFloat64
+					// (0,0) is the ocean off Ghana, not a real fix -- same
+					// exclusion GetPacketPath applies.
+					if posRows.Scan(&pk, &lat, &lon) == nil && lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
+						posByPK[pk] = [2]float64{lat.Float64, lon.Float64}
+					}
+				}
+				posRows.Close()
+			}
+		}
 
 		for txID, p := range pendingPings {
 			var repeaterNames []string
@@ -2701,8 +2783,27 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			default:
 				observerLabel = fmt.Sprintf("%d observers", len(p.observers))
 			}
+			var farthestKm *float64
+			if firstPos, ok := posByPK[p.firstPubkey]; ok {
+				var maxKm float64
+				sawOther := false
+				for pk := range p.observerPubkeys {
+					if pk == p.firstPubkey {
+						continue
+					}
+					if pos, ok2 := posByPK[pk]; ok2 {
+						d := haversineKm(firstPos[0], firstPos[1], pos[0], pos[1])
+						if !sawOther || d > maxKm {
+							maxKm, sawOther = d, true
+						}
+					}
+				}
+				if sawOther {
+					farthestKm = &maxKm
+				}
+			}
 			if m, ok := msgMap[txID]; ok {
-				m.Data["botReply"] = pingBotReply(p.hops, p.snr, observerLabel, repeaterNames)
+				m.Data["botReply"] = pingBotReply(p.hops, p.snr, observerLabel, repeaterNames, farthestKm)
 			}
 		}
 	}
