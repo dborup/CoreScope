@@ -141,7 +141,7 @@ func routeDescriptions() map[string]routeMeta {
 		// Misc
 		"GET /api/resolve-hops":  {Summary: "Resolve hop path", Description: "Resolves hash prefixes in a hop path to node names. Returns affinity scores and best candidates.", Tag: "nodes", QueryParams: []paramMeta{{Name: "hops", Description: "Comma-separated hop hash prefixes", Type: "string", Required: true}}},
 		"GET /api/traces/{hash}": {Summary: "Get packet traces", Description: "Returns all observer sightings for a packet hash.", Tag: "packets"},
-		"GET /api/packets/{hash}/path": {Summary: "Get a packet's full geographic flood spread", Description: "Resolves EVERY distinct station that observed a packet to its own branch: hop count (from that station's deepest observation) plus, where resolvable, each relay's name/role/lat/lon in path order and the station's own position (self-advertised GPS when known, same as /api/observers, else its configured IATA code). A station heard more than once (later flood copies via longer routes) contributes only its deepest observation. Lat/lon are null for any hop or observer that has no known position -- callers should draw a gap, not guess. Backs the Channels tab's ping-bot \"View path\" map link.", Tag: "packets",
+		"GET /api/packets/{hash}/path": {Summary: "Get a packet's full geographic flood spread", Description: "Resolves EVERY distinct station that observed a packet to its own branch: hop count (from that station's deepest observation) plus, where resolvable, each relay's name/role/lat/lon in path order and the station's own position (self-advertised GPS when known, same as /api/observers, else its configured IATA code). A station heard more than once (later flood copies via longer routes) contributes only its deepest observation. Lat/lon are null for any hop or observer that has no known position -- callers should draw a gap, not guess. Also returns `first`: the single earliest-arriving observation across every station (usually 0 hops, close to the sender) -- an approximate origin landmark, distinct from branches[0] which is the deepest/farthest-traveled branch. Backs the Channels tab's ping-bot \"View path\" map link.", Tag: "packets",
 			Response: schemaRef("PacketPathResponse")},
 		"GET /api/iata-coords":       {Summary: "Get IATA airport coordinates", Description: "Returns lat/lon for known airport codes (used for observer positioning).", Tag: "config"},
 		"GET /api/audio-lab/buckets": {Summary: "Audio lab frequency buckets", Description: "Returns frequency bucket data for audio analysis.", Tag: "analytics"},
@@ -369,6 +369,7 @@ func componentSchemas() map[string]interface{} {
 			"properties": map[string]interface{}{
 				"hash":     str("The packet hash this path was resolved for."),
 				"branches": map[string]interface{}{"type": "array", "items": schemaRef("PacketPathBranch"), "description": "One branch per distinct station that observed the packet, each kept at that station's own deepest observation, sorted deepest-first -- shows the full flood spread, not just the single farthest route."},
+				"first":    schemaRef("PacketPathBranch"),
 			},
 		},
 	}

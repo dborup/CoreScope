@@ -1556,9 +1556,15 @@ type PacketPathBranch struct {
 // one per distinct observer, kept at that observer's own deepest
 // observation -- used to draw the full flood spread on a map (the
 // ping-bot reply's "View path" link), not just the single farthest route.
+// First is the single EARLIEST-arriving observation across every station
+// (regardless of observer or hop depth) -- the same "first observation
+// wins" pick already used for a ping message's own meta line -- included
+// separately since it approximates where the message entered the visible
+// mesh, a landmark the deepest-first Branches ordering doesn't surface.
 type PacketPathResponse struct {
 	Hash     string             `json:"hash"`
 	Branches []PacketPathBranch `json:"branches"`
+	First    *PacketPathBranch  `json:"first,omitempty"`
 }
 
 // GetPacketPath resolves every distinct station that observed a packet to
@@ -1568,20 +1574,22 @@ type PacketPathResponse struct {
 // its deepest observation (by raw hop count, same "farthest leg"
 // reasoning as the ping-bot reply -- see pingBotReply's doc comment) is
 // kept, so each station contributes exactly one branch. Branches are
-// returned deepest-first.
+// returned deepest-first. The single earliest-arriving observation
+// (usually 0 hops, close to the sender) is additionally surfaced via
+// First, independent of which station it came from or how deep it was.
 func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	if !db.hasResolvedPath {
 		return nil, fmt.Errorf("resolved_path not available on this server")
 	}
 	var querySQL string
 	if db.isV3 {
-		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr
+		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
 			WHERE t.hash = ?`
 	} else {
-		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr
+		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.hash = ?`
@@ -1601,11 +1609,14 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		snr            sql.NullFloat64
 	}
 	best := make(map[string]*obsBranch)
+	var first *obsBranch
+	var firstTS int64
 
 	for rows.Next() {
 		var obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString
 		var snr sql.NullFloat64
-		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr); err != nil {
+		var ts sql.NullInt64
+		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts); err != nil {
 			continue
 		}
 		if !pathJSON.Valid {
@@ -1627,12 +1638,16 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		if key == "" {
 			continue // no way to attribute this observation to a station
 		}
+		branch := &obsBranch{
+			hops: hops, resolvedPath: resolvedPath,
+			observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
+			observerIATA: obsIATA, snr: snr,
+		}
 		if existing, ok := best[key]; !ok || hops > existing.hops {
-			best[key] = &obsBranch{
-				hops: hops, resolvedPath: resolvedPath,
-				observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
-				observerIATA: obsIATA, snr: snr,
-			}
+			best[key] = branch
+		}
+		if ts.Valid && (first == nil || ts.Int64 < firstTS) {
+			first, firstTS = branch, ts.Int64
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1645,6 +1660,16 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	}
 
 	pubkeySet := map[string]bool{}
+	if first != nil {
+		for _, pk := range first.resolvedPath {
+			if pk != nil && *pk != "" {
+				pubkeySet[*pk] = true
+			}
+		}
+		if first.observerPubkey != "" {
+			pubkeySet[first.observerPubkey] = true
+		}
+	}
 	for _, b := range best {
 		for _, pk := range b.resolvedPath {
 			if pk != nil && *pk != "" {
@@ -1713,15 +1738,19 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	// queried for observers the pubkey lookup left unpositioned, and only
 	// applied if the pubkey lookup didn't already find something.
 	nameFallbackNeeded := map[string]bool{}
-	for _, b := range best {
-		if b.observerName == "" {
-			continue
+	needsNameFallback := func(b *obsBranch) {
+		if b == nil || b.observerName == "" {
+			return
 		}
 		if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
-			continue
+			return
 		}
 		nameFallbackNeeded[b.observerName] = true
 	}
+	for _, b := range best {
+		needsNameFallback(b)
+	}
+	needsNameFallback(first)
 	nodeByName := make(map[string]nodeInfo, len(nameFallbackNeeded))
 	if len(nameFallbackNeeded) > 0 {
 		names := make([]string, 0, len(nameFallbackNeeded))
@@ -1760,7 +1789,7 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		}
 	}
 
-	for _, b := range best {
+	buildBranch := func(b *obsBranch) PacketPathBranch {
 		branch := PacketPathBranch{Hops: b.hops, Points: []PacketPathPoint{}}
 		for _, pk := range b.resolvedPath {
 			if pk == nil || *pk == "" {
@@ -1807,9 +1836,18 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			v := b.snr.Float64
 			branch.SNR = &v
 		}
-		resp.Branches = append(resp.Branches, branch)
+		return branch
+	}
+
+	for _, b := range best {
+		resp.Branches = append(resp.Branches, buildBranch(b))
 	}
 	sort.Slice(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
+
+	if first != nil {
+		fb := buildBranch(first)
+		resp.First = &fb
+	}
 
 	return resp, nil
 }

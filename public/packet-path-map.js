@@ -6,8 +6,13 @@
    position) ending at that station. The deepest branch is drawn on top
    in the accent color; every other branch is drawn muted underneath it,
    so the map reads as "how far AND how wide did this packet spread"
-   rather than a single route. Reuses node-reach-map.js's Leaflet setup
-   conventions (tile helper, circleMarker points, theme-aware colors).
+   rather than a single route. The response's `first` field (the single
+   earliest-arriving observation, usually 0 hops) is additionally drawn
+   as a distinct landmark ring on top of everything else -- an
+   approximate "where the message entered the mesh" anchor, since a
+   deepest-first branch list has no natural starting point of its own.
+   Reuses node-reach-map.js's Leaflet setup conventions (tile helper,
+   circleMarker points, theme-aware colors).
 
    Entry point today: the ping-bot reply's "View path" link
    (public/channels.js botReplyHtml) -- kept general (keyed by packet
@@ -67,7 +72,7 @@
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
           'style="position:absolute;top:8px;right:8px;background:none;border:none;cursor:pointer;font-size:22px;line-height:1;color:var(--text-muted)">&times;</button>' +
         '<h3 style="margin:0 0 4px;padding-right:24px">Relay Path</h3>' +
-        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too.</p>' +
+        '<p class="text-muted" style="margin:0 0 10px;font-size:12px">How far and how wide this packet spread. The highlighted route is the farthest-traveled branch; every other station that heard it is shown too. The green ring marks whoever heard it first.</p>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
       '</div>';
@@ -151,6 +156,24 @@
         L.polyline(line, { color: lineColor, weight: p.primary ? 2.5 : 1.5, opacity: p.primary ? 0.85 : 0.5 }).addTo(map);
       }
     });
+    // The earliest-arriving observation, drawn last so its landmark ring
+    // sits on top even when it coincides with one of the branch dots
+    // above (very often it does, since `first` is usually also one of
+    // the stations already plotted as its own branch).
+    var firstPoint = null;
+    if (data.first) {
+      var firstChain = chainForBranch(data.first).chain;
+      if (firstChain.length > 0) firstPoint = firstChain[firstChain.length - 1];
+    }
+    if (firstPoint) {
+      bounds.push([firstPoint.lat, firstPoint.lon]);
+      L.circleMarker([firstPoint.lat, firstPoint.lon], {
+        radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
+      })
+        .addTo(map)
+        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + ')');
+    }
+
     try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }
     setTimeout(function () { map.invalidateSize(); }, 120);
     activeMap = map;
@@ -160,6 +183,7 @@
       plotted.length + ' of ' + branches.length + ' station' + (branches.length === 1 ? '' : 's') + ' shown',
       'deepest reached ' + deepestHops + ' hop' + (deepestHops === 1 ? '' : 's'),
     ];
+    if (firstPoint) statusParts.push('entered near ' + firstPoint.name);
     if (missingTotal > 0) statusParts.push(missingTotal + ' hop' + (missingTotal === 1 ? '' : 's') + ' without a known position (not shown)');
     if (statusEl) statusEl.textContent = statusParts.join(' · ');
   }
