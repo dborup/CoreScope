@@ -360,10 +360,11 @@ func componentSchemas() map[string]interface{} {
 			"type":        "object",
 			"description": "One station's own route to a packet: how far it traveled to reach them (from that observation's raw hop count, independent of how much of it resolved) and, where resolvable, each hop's position in path order.",
 			"properties": map[string]interface{}{
-				"hops":     map[string]interface{}{"type": "integer", "description": "Hop count for this station's deepest observation, taken from the raw path length -- present even when none of it resolved."},
-				"points":   map[string]interface{}{"type": "array", "items": schemaRef("PacketPathPoint"), "description": "The resolvable portion of the relay path in hop order. Can be shorter than hops, or empty, when some/all hops never resolved."},
-				"observer": schemaRef("PacketPathObserver"),
-				"snr":      map[string]interface{}{"type": "number", "nullable": true, "description": "SNR of this station's deepest observation."},
+				"hops":              map[string]interface{}{"type": "integer", "description": "Hop count for this station's deepest observation, taken from the raw path length -- present even when none of it resolved."},
+				"points":            map[string]interface{}{"type": "array", "items": schemaRef("PacketPathPoint"), "description": "The resolvable portion of the relay path in hop order. Can be shorter than hops, or empty, when some/all hops never resolved."},
+				"observer":          schemaRef("PacketPathObserver"),
+				"snr":               map[string]interface{}{"type": "number", "nullable": true, "description": "SNR of this station's deepest observation."},
+				"secondsAfterFirst": map[string]interface{}{"type": "number", "description": "Seconds after the earliest-arriving observation (see PacketPathResponse.first) this branch's own observation arrived. Zero for first itself. Omitted when either timestamp is unknown."},
 			},
 		},
 		"PacketPathResponse": map[string]interface{}{

@@ -1559,6 +1559,11 @@ type PacketPathBranch struct {
 	Points   []PacketPathPoint   `json:"points"`
 	Observer *PacketPathObserver `json:"observer,omitempty"`
 	SNR      *float64            `json:"snr,omitempty"`
+	// SecondsAfterFirst is how long after the earliest-arriving
+	// observation (see PacketPathResponse.First) this branch's own
+	// deepest observation arrived, in seconds. Zero for First itself.
+	// Omitted when either timestamp is unknown.
+	SecondsAfterFirst *float64 `json:"secondsAfterFirst,omitempty"`
 }
 
 // PacketPathResponse is every branch a packet is known to have reached --
@@ -1616,6 +1621,7 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		observerPubkey string
 		observerIATA   sql.NullString
 		snr            sql.NullFloat64
+		ts             int64 // unix epoch seconds of the observation that produced this branch's hops/resolvedPath; 0 if unknown
 	}
 	best := make(map[string]*obsBranch)
 	var first *obsBranch
@@ -1647,10 +1653,14 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		if key == "" {
 			continue // no way to attribute this observation to a station
 		}
+		var tsVal int64
+		if ts.Valid {
+			tsVal = ts.Int64
+		}
 		branch := &obsBranch{
 			hops: hops, resolvedPath: resolvedPath,
 			observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
-			observerIATA: obsIATA, snr: snr,
+			observerIATA: obsIATA, snr: snr, ts: tsVal,
 		}
 		if existing, ok := best[key]; !ok || hops > existing.hops {
 			best[key] = branch
@@ -1863,6 +1873,10 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		if b.snr.Valid {
 			v := b.snr.Float64
 			branch.SNR = &v
+		}
+		if b.ts > 0 && first != nil && first.ts > 0 {
+			d := float64(b.ts - first.ts)
+			branch.SecondsAfterFirst = &d
 		}
 		return branch
 	}

@@ -26,6 +26,17 @@
     return v || '#888';
   }
 
+  // Formats PacketPathBranch.secondsAfterFirst for a tooltip: how long
+  // after the earliest-arriving observation (the green landmark ring)
+  // this station's own observation arrived.
+  function formatElapsed(seconds) {
+    if (seconds === 0) return 'first to arrive';
+    if (seconds < 60) return '+' + seconds.toFixed(1) + 's';
+    var m = Math.floor(seconds / 60);
+    var s = Math.round(seconds % 60);
+    return '+' + m + 'm ' + s + 's';
+  }
+
   var activeMap = null;
 
   function onKeydown(e) {
@@ -57,9 +68,11 @@
       return { lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx };
     });
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
+      var observerLabel = b.hops + ' hop' + (b.hops === 1 ? '' : 's');
+      if (typeof b.secondsAfterFirst === 'number') observerLabel += ', ' + formatElapsed(b.secondsAfterFirst);
       chain.push({
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
-        label: b.hops + ' hop' + (b.hops === 1 ? '' : 's'), isObserver: true, approx: !!b.observer.approx,
+        label: observerLabel, isObserver: true, approx: !!b.observer.approx,
       });
     }
     return { chain: chain, missing: (b.points || []).length - located.length };

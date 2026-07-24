@@ -719,6 +719,29 @@ func TestGetPacketPath_First(t *testing.T) {
 	if len(resp.Branches) == 0 || resp.Branches[0].Observer == nil || resp.Branches[0].Observer.Name != "Observer Deep" {
 		t.Fatalf("Branches[0] = %+v, want Observer Deep still first (deepest-first ordering unaffected by First)", resp.Branches)
 	}
+
+	if resp.First.SecondsAfterFirst == nil || *resp.First.SecondsAfterFirst != 0 {
+		t.Errorf("First.SecondsAfterFirst = %v, want 0 -- it defines the reference point", resp.First.SecondsAfterFirst)
+	}
+	// Observer Deep arrived at timestamp=200, Observer Early (First) at
+	// timestamp=100 -- 100 seconds later.
+	deep := resp.Branches[0]
+	if deep.SecondsAfterFirst == nil || *deep.SecondsAfterFirst != 100 {
+		t.Errorf("Branches[0].SecondsAfterFirst = %v, want 100 (arrived at ts=200, 100s after First's ts=100)", deep.SecondsAfterFirst)
+	}
+	// Observer Mid arrived at timestamp=300 -- 200 seconds after First.
+	var mid *PacketPathBranch
+	for i := range resp.Branches {
+		if resp.Branches[i].Observer != nil && resp.Branches[i].Observer.Name == "Observer Mid" {
+			mid = &resp.Branches[i]
+		}
+	}
+	if mid == nil {
+		t.Fatalf("Branches = %+v, want an Observer Mid branch", resp.Branches)
+	}
+	if mid.SecondsAfterFirst == nil || *mid.SecondsAfterFirst != 200 {
+		t.Errorf("Observer Mid.SecondsAfterFirst = %v, want 200 (arrived at ts=300, 200s after First's ts=100)", mid.SecondsAfterFirst)
+	}
 }
 
 // TestGetPacketPath_ExcludesNullIsland covers a node whose nodes.lat/lon
