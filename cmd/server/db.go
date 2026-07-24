@@ -1529,10 +1529,11 @@ type PacketPathPoint struct {
 	Lon       *float64 `json:"lon"`
 }
 
-// PacketPathObserver is the station that produced the deepest observation
-// of a packet path (see GetPacketPath), positioned from its configured
-// IATA code the same way the Wardriving tab positions observers -- not a
-// stored per-observer lat/lon column.
+// PacketPathObserver is the station that produced a given branch's
+// observation of a packet (see GetPacketPath), positioned from its own
+// self-advertised GPS (the same source /api/observers uses) when known,
+// falling back to its configured IATA code otherwise -- not a stored
+// per-observer lat/lon column.
 type PacketPathObserver struct {
 	Name string   `json:"name"`
 	IATA string   `json:"iata,omitempty"`
@@ -1540,39 +1541,50 @@ type PacketPathObserver struct {
 	Lon  *float64 `json:"lon"`
 }
 
-// PacketPathResponse is the geographic relay path for one packet hash,
-// used to draw it on a map (the ping-bot reply's "View path" link).
-type PacketPathResponse struct {
-	Hash     string              `json:"hash"`
+// PacketPathBranch is one station's route to a packet: how far it
+// traveled to reach them (hop count taken straight from that
+// observation's path_json, independent of how much of it resolved) and,
+// where resolvable, each hop's name/role/lat/lon in path order.
+type PacketPathBranch struct {
 	Hops     int                 `json:"hops"`
 	Points   []PacketPathPoint   `json:"points"`
 	Observer *PacketPathObserver `json:"observer,omitempty"`
+	SNR      *float64            `json:"snr,omitempty"`
 }
 
-// GetPacketPath resolves a packet's DEEPEST observation (the one with the
-// most hops -- same "farthest leg" reasoning as the ping-bot reply, see
-// pingBotReply's doc comment) to a geographic point sequence: each
-// relay's name/role/lat/lon in path order, plus the hearing observer's
-// position. A packet can have several observations (heard by more than
-// one station, possibly at different hop depths); this always picks the
-// one that traveled farthest, since that's the more informative path to
-// show on a map.
+// PacketPathResponse is every branch a packet is known to have reached --
+// one per distinct observer, kept at that observer's own deepest
+// observation -- used to draw the full flood spread on a map (the
+// ping-bot reply's "View path" link), not just the single farthest route.
+type PacketPathResponse struct {
+	Hash     string             `json:"hash"`
+	Branches []PacketPathBranch `json:"branches"`
+}
+
+// GetPacketPath resolves every distinct station that observed a packet to
+// its own branch: hop count and (where resolvable) relay names/positions
+// in path order, plus that station's own position. A station can hear a
+// packet more than once as flood copies arrive via different routes; only
+// its deepest observation (by raw hop count, same "farthest leg"
+// reasoning as the ping-bot reply -- see pingBotReply's doc comment) is
+// kept, so each station contributes exactly one branch. Branches are
+// returned deepest-first.
 func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	if !db.hasResolvedPath {
 		return nil, fmt.Errorf("resolved_path not available on this server")
 	}
 	var querySQL string
 	if db.isV3 {
-		querySQL = `SELECT obs.name, obs.iata, o.resolved_path
+		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
-			WHERE t.hash = ? AND o.resolved_path IS NOT NULL AND o.resolved_path != ''`
+			WHERE t.hash = ?`
 	} else {
-		querySQL = `SELECT o.observer_name, NULL, o.resolved_path
+		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
-			WHERE t.hash = ? AND o.resolved_path IS NOT NULL AND o.resolved_path != ''`
+			WHERE t.hash = ?`
 	}
 	rows, err := db.conn.Query(querySQL, strings.ToLower(hash))
 	if err != nil {
@@ -1580,36 +1592,76 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 	}
 	defer rows.Close()
 
-	var bestPath []*string
-	var bestObserverName, bestObserverIATA sql.NullString
+	type obsBranch struct {
+		hops           int
+		resolvedPath   []*string
+		observerName   string
+		observerPubkey string
+		observerIATA   sql.NullString
+		snr            sql.NullFloat64
+	}
+	best := make(map[string]*obsBranch)
+
 	for rows.Next() {
-		var obsName, obsIATA, rpJSON sql.NullString
-		if err := rows.Scan(&obsName, &obsIATA, &rpJSON); err != nil {
+		var obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString
+		var snr sql.NullFloat64
+		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr); err != nil {
 			continue
 		}
-		if !rpJSON.Valid {
+		if !pathJSON.Valid {
 			continue
 		}
-		rp := unmarshalResolvedPath(rpJSON.String)
-		if len(rp) > len(bestPath) {
-			bestPath = rp
-			bestObserverName, bestObserverIATA = obsName, obsIATA
+		var h []string
+		if json.Unmarshal([]byte(pathJSON.String), &h) != nil {
+			continue
+		}
+		hops := len(h)
+		var resolvedPath []*string
+		if resolvedPathJSON.Valid {
+			resolvedPath = unmarshalResolvedPath(resolvedPathJSON.String)
+		}
+		key := obsKey.String
+		if key == "" {
+			key = obsName.String
+		}
+		if key == "" {
+			continue // no way to attribute this observation to a station
+		}
+		if existing, ok := best[key]; !ok || hops > existing.hops {
+			best[key] = &obsBranch{
+				hops: hops, resolvedPath: resolvedPath,
+				observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
+				observerIATA: obsIATA, snr: snr,
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("packet path iteration: %w", err)
 	}
 
-	resp := &PacketPathResponse{Hash: hash, Hops: len(bestPath), Points: []PacketPathPoint{}}
-	if len(bestPath) == 0 {
+	resp := &PacketPathResponse{Hash: hash, Branches: []PacketPathBranch{}}
+	if len(best) == 0 {
 		return resp, nil
 	}
 
-	pubkeys := make([]string, 0, len(bestPath))
-	for _, pk := range bestPath {
-		if pk != nil && *pk != "" {
-			pubkeys = append(pubkeys, *pk)
+	pubkeySet := map[string]bool{}
+	for _, b := range best {
+		for _, pk := range b.resolvedPath {
+			if pk != nil && *pk != "" {
+				pubkeySet[*pk] = true
+			}
 		}
+		// An observer is itself a mesh node -- if it has ever self-advertised
+		// a GPS position, that's a more precise fix than its (often manually
+		// typed, sometimes wrong or missing) configured IATA code. Folded
+		// into the same batched lookup below rather than a second query.
+		if b.observerPubkey != "" {
+			pubkeySet[b.observerPubkey] = true
+		}
+	}
+	pubkeys := make([]string, 0, len(pubkeySet))
+	for pk := range pubkeySet {
+		pubkeys = append(pubkeys, pk)
 	}
 	type nodeInfo struct {
 		name string
@@ -1652,31 +1704,112 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 		}
 	}
 
-	for _, pk := range bestPath {
-		if pk == nil || *pk == "" {
+	// Fallback for observers whose own `observers.id` isn't its mesh
+	// pubkey at all -- e.g. an MQTT-bridge-type observer (observed:
+	// openHop-Repeater firmware) that publishes its status keyed by
+	// device name rather than pubkey, so the lookup above never matches
+	// even though the same physical device has a real, positioned nodes
+	// row under its actual pubkey. Matched by exact display name; only
+	// queried for observers the pubkey lookup left unpositioned, and only
+	// applied if the pubkey lookup didn't already find something.
+	nameFallbackNeeded := map[string]bool{}
+	for _, b := range best {
+		if b.observerName == "" {
 			continue
 		}
-		ni := nodeByPK[*pk]
-		name := ni.name
-		if name == "" {
-			name = *pk
+		if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
+			continue
 		}
-		resp.Points = append(resp.Points, PacketPathPoint{
-			PublicKey: *pk, Name: name, Role: ni.role, Lat: ni.lat, Lon: ni.lon,
-		})
+		nameFallbackNeeded[b.observerName] = true
 	}
-
-	if bestObserverName.Valid && bestObserverName.String != "" {
-		obs := &PacketPathObserver{Name: bestObserverName.String}
-		if bestObserverIATA.Valid {
-			obs.IATA = strings.ToUpper(strings.TrimSpace(bestObserverIATA.String))
-			if coord, ok := iataCoords[obs.IATA]; ok {
-				lat, lon := coord.Lat, coord.Lon
-				obs.Lat, obs.Lon = &lat, &lon
+	nodeByName := make(map[string]nodeInfo, len(nameFallbackNeeded))
+	if len(nameFallbackNeeded) > 0 {
+		names := make([]string, 0, len(nameFallbackNeeded))
+		for n := range nameFallbackNeeded {
+			names = append(names, n)
+		}
+		placeholders := make([]byte, 0, len(names)*2)
+		args := make([]interface{}, len(names))
+		for i, n := range names {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[i] = n
+		}
+		nameRows, err := db.conn.Query(
+			"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL", args...)
+		if err == nil {
+			ambiguous := map[string]bool{}
+			for nameRows.Next() {
+				var name, role sql.NullString
+				var lat, lon sql.NullFloat64
+				if nameRows.Scan(&name, &role, &lat, &lon) == nil {
+					if _, exists := nodeByName[name.String]; exists {
+						ambiguous[name.String] = true // >1 positioned node shares this name -- don't guess which one
+						continue
+					}
+					v1, v2 := lat.Float64, lon.Float64
+					nodeByName[name.String] = nodeInfo{role: role.String, lat: &v1, lon: &v2}
+				}
+			}
+			nameRows.Close()
+			for n := range ambiguous {
+				delete(nodeByName, n)
 			}
 		}
-		resp.Observer = obs
 	}
+
+	for _, b := range best {
+		branch := PacketPathBranch{Hops: b.hops, Points: []PacketPathPoint{}}
+		for _, pk := range b.resolvedPath {
+			if pk == nil || *pk == "" {
+				continue
+			}
+			ni := nodeByPK[*pk]
+			name := ni.name
+			if name == "" {
+				name = *pk
+			}
+			branch.Points = append(branch.Points, PacketPathPoint{
+				PublicKey: *pk, Name: name, Role: ni.role, Lat: ni.lat, Lon: ni.lon,
+			})
+		}
+		if b.observerName != "" {
+			obs := &PacketPathObserver{Name: b.observerName}
+			if b.observerIATA.Valid {
+				obs.IATA = strings.ToUpper(strings.TrimSpace(b.observerIATA.String))
+			}
+			// Prefer the observer's own self-advertised GPS (same source as
+			// /api/observers and the Wardriving tab), falling back to a
+			// name match against `nodes` (some bridge-type observers --
+			// seen on openHop-Repeater firmware -- publish their MQTT
+			// status keyed by device name rather than mesh pubkey, so the
+			// pubkey lookup above never finds their real, positioned node
+			// row), and only then the configured IATA code -- which only
+			// covers a fixed list of real airports plus a handful of
+			// hand-added local codes, so a custom/regional code an
+			// operator typed in (or a typo) falls through it even when
+			// the node itself knows exactly where it is.
+			if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
+				obs.Lat, obs.Lon = ni.lat, ni.lon
+			} else if ni, ok := nodeByName[b.observerName]; ok {
+				obs.Lat, obs.Lon = ni.lat, ni.lon
+			} else if obs.IATA != "" {
+				if coord, ok := iataCoords[obs.IATA]; ok {
+					lat, lon := coord.Lat, coord.Lon
+					obs.Lat, obs.Lon = &lat, &lon
+				}
+			}
+			branch.Observer = obs
+		}
+		if b.snr.Valid {
+			v := b.snr.Float64
+			branch.SNR = &v
+		}
+		resp.Branches = append(resp.Branches, branch)
+	}
+	sort.Slice(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
 
 	return resp, nil
 }
