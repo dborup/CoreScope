@@ -229,6 +229,42 @@ function makeSandbox(apiImpl) {
     } catch (e) { failed++; console.log('  ❌ multiple branches (including a 0-hop direct observer) are all plotted, not just the deepest: ' + e.message); }
   })();
 
+  await (async () => {
+    try {
+      // `first` is the earliest-arriving observation (usually 0 hops,
+      // close to the sender) -- distinct from the deepest branch. It
+      // should get its own extra landmark marker on top of the branch
+      // dots, and be called out in the status line.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          { hops: 5, points: [], observer: { name: 'FarObserver', lat: 56.2, lon: 10.2 } },
+        ],
+        first: { hops: 0, points: [], observer: { name: 'NearObserver', lat: 55.9, lon: 9.9 } },
+      }));
+
+      let markerCount = 0;
+      ctx.L = {
+        map: () => ({
+          setView() { return this; },
+          fitBounds() {},
+          invalidateSize() {},
+          remove() {},
+        }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => { markerCount++; return { addTo() { return this; }, bindTooltip() { return this; } }; },
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const status = ctx.document.getElementById('packetPathStatus');
+      assert.strictEqual(markerCount, 2, 'expected 2 markers: the branch observer dot plus the extra first-observer landmark ring, got ' + markerCount);
+      assert.ok(status.textContent.includes('entered near NearObserver'), 'status should call out the first observer, got: ' + status.textContent);
+      passed++;
+      console.log('  ✅ the earliest-arriving observation gets its own landmark marker and status callout');
+    } catch (e) { failed++; console.log('  ❌ the earliest-arriving observation gets its own landmark marker and status callout: ' + e.message); }
+  })();
+
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);
   console.log('════════════════════════════════════════');

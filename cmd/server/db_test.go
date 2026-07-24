@@ -677,6 +677,50 @@ func TestGetPacketPath(t *testing.T) {
 	}
 }
 
+// TestGetPacketPath_First covers the First field: the single
+// earliest-arriving observation across every station, independent of
+// which observer it came from or how many hops it took -- an approximate
+// "where the message entered the mesh" landmark, distinct from Branches[0]
+// (the deepest, i.e. farthest-traveled, branch).
+func TestGetPacketPath_First(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsEarly', 'Observer Early', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsDeep', 'Observer Deep', 'SFO')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsMid', 'Observer Mid', 'OAK')`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000007', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	// Earliest in time (timestamp=100), but shallow (0 hops, direct).
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 9.0, -88, '[]', 100)`)
+	// Arrives later, but travels deepest (5 hops) -- this is Branches[0].
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 2, 4.0, -95, '["aa","bb","cc","dd","ee"]', 200)`)
+	// Arrives last, middling depth.
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 3, 6.0, -90, '["aa","bb"]', 300)`)
+
+	resp, err := db.GetPacketPath("pathtest00000007")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.First == nil {
+		t.Fatalf("First = nil, want the earliest observation")
+	}
+	if resp.First.Observer == nil || resp.First.Observer.Name != "Observer Early" {
+		t.Errorf("First.Observer = %+v, want Observer Early (timestamp=100, the earliest)", resp.First.Observer)
+	}
+	if resp.First.Hops != 0 {
+		t.Errorf("First.Hops = %d, want 0 (Observer Early's own observation was direct)", resp.First.Hops)
+	}
+	if len(resp.Branches) == 0 || resp.Branches[0].Observer == nil || resp.Branches[0].Observer.Name != "Observer Deep" {
+		t.Fatalf("Branches[0] = %+v, want Observer Deep still first (deepest-first ordering unaffected by First)", resp.Branches)
+	}
+}
+
 // TestGetPacketPath_ObserverPositionPrefersOwnGPS covers an observer whose
 // configured IATA code isn't a real airport (a custom/regional code an
 // operator typed in, or a typo) and so isn't in the hardcoded iataCoords
