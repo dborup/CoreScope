@@ -3164,44 +3164,7 @@ func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	markBridgeRepeaters(resp, s.store, s.cfg)
 	writeJSON(w, resp)
-}
-
-// markBridgeRepeaters sets IsBridge on every point/observer in resp whose
-// pubkey has been confirmed relaying traffic for 2+ distinct region
-// scopes -- the same "Bridge" definition/data source as the Foreign
-// Traffic tab's badge (ScopeStatsResponse.bridgeRepeaters), just applied
-// to whichever handful of pubkeys this one packet's path touches instead
-// of scanning the whole mesh. No-op when the in-memory store isn't
-// available (IsBridge stays false/omitted on every entry).
-func markBridgeRepeaters(resp *PacketPathResponse, store *PacketStore, cfg *Config) {
-	if resp == nil || store == nil || cfg == nil {
-		return
-	}
-	relayMap := store.GetRepeaterRelayInfoMap(cfg.GetHealthThresholds().RelayActiveHours)
-	isBridge := func(pubkey string) bool {
-		if pubkey == "" {
-			return false
-		}
-		info, ok := relayMap[strings.ToLower(pubkey)]
-		return ok && len(info.TransportedScopes) >= 2
-	}
-	mark := func(b *PacketPathBranch) {
-		if b == nil {
-			return
-		}
-		for i := range b.Points {
-			b.Points[i].IsBridge = isBridge(b.Points[i].PublicKey)
-		}
-		if b.Observer != nil {
-			b.Observer.IsBridge = isBridge(b.Observer.PublicKey)
-		}
-	}
-	for i := range resp.Branches {
-		mark(&resp.Branches[i])
-	}
-	mark(resp.First)
 }
 
 var iataCoords = map[string]IataCoord{

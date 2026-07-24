@@ -1540,13 +1540,6 @@ type PacketPathPoint struct {
 	// those neighbors -- 0 (and omitted) with a single contributor;
 	// larger means the neighbors disagree more about where "nearby" is.
 	ApproxSpreadKm *float64 `json:"approxSpreadKm,omitempty"`
-	// IsBridge is true when this node has been confirmed relaying
-	// traffic for 2+ distinct region scopes -- the same "Bridge" badge
-	// definition as the Foreign Traffic tab (ScopeStatsResponse.
-	// bridgeRepeaters). Set by the handler (routes.go), not GetPacketPath
-	// itself, since the underlying data lives in the in-memory store, not
-	// SQL. Absent/false when the store isn't available.
-	IsBridge bool `json:"isBridge,omitempty"`
 }
 
 // PacketPathObserver is the station that produced a given branch's
@@ -1558,9 +1551,8 @@ type PacketPathPoint struct {
 type PacketPathObserver struct {
 	// PublicKey is the observer's mesh pubkey (observers.id for v3,
 	// observer_id for legacy), when it has one -- lets callers link out
-	// to the node detail page or cross-reference other per-node data
-	// (e.g. IsBridge, filled in by the handler). Empty for an observer
-	// whose id never resembled a pubkey.
+	// to the node detail page. Empty for an observer whose id never
+	// resembled a pubkey.
 	PublicKey string   `json:"publicKey,omitempty"`
 	Name      string   `json:"name"`
 	IATA      string   `json:"iata,omitempty"`
@@ -1573,8 +1565,6 @@ type PacketPathObserver struct {
 	Approx              bool     `json:"approx,omitempty"`
 	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
 	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
-	// IsBridge -- see PacketPathPoint.IsBridge.
-	IsBridge bool `json:"isBridge,omitempty"`
 }
 
 // PacketPathBranch is one station's route to a packet: how far it

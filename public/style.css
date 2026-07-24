@@ -2645,10 +2645,10 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .leaflet-popup-content { color: var(--text) !important; font-size: 13px !important; }
 
 /* packet-path-map.js: tooltips got long once they started carrying role,
-   approx/confidence, bridge, and distance/timing info together --
-   Leaflet's default tooltip is white-space:nowrap, which stretched a
-   long one into an unreadable single line spanning the whole map.
-   Wrap it onto multiple lines within a fixed width instead. */
+   approx/confidence, and distance/timing info together -- Leaflet's
+   default tooltip is white-space:nowrap, which stretched a long one
+   into an unreadable single line spanning the whole map. Wrap it onto
+   multiple lines within a fixed width instead. */
 .leaflet-tooltip.packet-path-tooltip {
   white-space: normal;
   max-width: 220px;

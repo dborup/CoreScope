@@ -345,7 +345,6 @@ func componentSchemas() map[string]interface{} {
 				"approx":              map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this node's own position but a count-weighted centroid of its positioned neighbor_edges neighbors instead -- a last-resort stand-in, not a real fix."},
 				"approxNeighborCount": map[string]interface{}{"type": "integer", "description": "Present only when approx=true. How many positioned neighbors fed the centroid -- a rough confidence signal, higher is more confident."},
 				"approxSpreadKm":      map[string]interface{}{"type": "number", "nullable": true, "description": "Present only when approx=true and approxNeighborCount>1. Widest distance (km) between any two contributing neighbors -- larger means they disagree more about where 'nearby' is."},
-				"isBridge":            map[string]interface{}{"type": "boolean", "description": "True when this node has been confirmed relaying traffic for 2+ distinct region scopes -- same definition/data source as the Foreign Traffic tab's Bridge badge. Set by the handler from the in-memory store; always false when that store isn't available."},
 			},
 		},
 		"PacketPathObserver": map[string]interface{}{
@@ -361,7 +360,6 @@ func componentSchemas() map[string]interface{} {
 				"approx":              map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this station's own position but a count-weighted centroid of its positioned neighbors instead -- a last-resort stand-in, not a real fix."},
 				"approxNeighborCount": map[string]interface{}{"type": "integer", "description": "Present only when approx=true. See PacketPathPoint.approxNeighborCount."},
 				"approxSpreadKm":      map[string]interface{}{"type": "number", "nullable": true, "description": "Present only when approx=true and approxNeighborCount>1. See PacketPathPoint.approxSpreadKm."},
-				"isBridge":            map[string]interface{}{"type": "boolean", "description": "See PacketPathPoint.isBridge."},
 			},
 		},
 		"PacketPathBranch": map[string]interface{}{

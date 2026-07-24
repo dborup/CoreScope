@@ -40,7 +40,7 @@ test('escapes node/observer names before interpolating into tooltip HTML (operat
   assert.ok(/escapeHtml\(pt\.name\)/.test(src), 'point tooltips must escape the name');
 });
 
-test('tooltips use a wrapping CSS class -- Leaflet\'s default nowrap tooltip becomes unreadable once role/approx/bridge/distance/timing info are all combined', () => {
+test('tooltips use a wrapping CSS class -- Leaflet\'s default nowrap tooltip becomes unreadable once role/approx/distance/timing info are all combined', () => {
   const bindCalls = (src.match(/\.bindTooltip\(/g) || []).length;
   const classNameUses = (src.match(/className:\s*'packet-path-tooltip'/g) || []).length;
   assert.ok(bindCalls > 0, 'expected at least one bindTooltip call');
@@ -452,46 +452,6 @@ function makeSandbox(apiImpl) {
       passed++;
       console.log('  ✅ nodes with a known role get a role icon in their tooltip');
     } catch (e) { failed++; console.log('  ❌ nodes with a known role get a role icon in their tooltip: ' + e.message); }
-  })();
-
-  await (async () => {
-    try {
-      // isBridge=true should get a bold purple outline (overriding the
-      // normal stroke color/weight) and a "bridge repeater" tooltip note.
-      const ctx = makeSandbox(() => Promise.resolve({
-        hash: 'deadbeef',
-        branches: [
-          {
-            hops: 1,
-            points: [
-              { publicKey: 'pk1', name: 'PlainRepeater', lat: 56.0, lon: 10.0, isBridge: false },
-              { publicKey: 'pk2', name: 'BridgeRepeater', lat: 56.1, lon: 10.1, isBridge: true },
-            ],
-            observer: null,
-          },
-        ],
-      }));
-
-      const optsByTooltip = {};
-      ctx.L = {
-        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
-        tileLayer: () => ({ addTo() { return this; } }),
-        circleMarker: (latlng, opts) => ({ addTo() { return this; }, bindTooltip(t) { optsByTooltip[t] = opts; return this; }, on() { return this; } }),
-        polyline: () => ({ addTo() { return this; } }),
-      };
-
-      await ctx.window.PacketPathMap.open('deadbeef');
-      const plainKey = Object.keys(optsByTooltip).find((k) => k.includes('PlainRepeater'));
-      const bridgeKey = Object.keys(optsByTooltip).find((k) => k.includes('BridgeRepeater'));
-      assert.ok(plainKey, 'expected a tooltip for PlainRepeater');
-      assert.ok(bridgeKey, 'expected a tooltip for BridgeRepeater');
-      assert.ok(!plainKey.includes('bridge repeater'), 'PlainRepeater tooltip should not mention bridge, got: ' + plainKey);
-      assert.ok(bridgeKey.includes('bridge repeater'), 'BridgeRepeater tooltip should mention bridge, got: ' + bridgeKey);
-      assert.notStrictEqual(optsByTooltip[bridgeKey].color, optsByTooltip[plainKey].color, 'expected the bridge marker to use a distinct outline color');
-      assert.ok(optsByTooltip[bridgeKey].weight > optsByTooltip[plainKey].weight, 'expected the bridge marker outline to be thicker');
-      passed++;
-      console.log('  ✅ bridge repeaters get a distinct outline and tooltip note');
-    } catch (e) { failed++; console.log('  ❌ bridge repeaters get a distinct outline and tooltip note: ' + e.message); }
   })();
 
   await (async () => {
