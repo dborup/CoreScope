@@ -265,6 +265,51 @@ function makeSandbox(apiImpl) {
     } catch (e) { failed++; console.log('  ❌ the earliest-arriving observation gets its own landmark marker and status callout: ' + e.message); }
   })();
 
+  await (async () => {
+    try {
+      // A hop point and an observer with `approx: true` (server borrowed
+      // the position from their strongest neighbor -- see GetPacketPath's
+      // nearestPositionedNeighbor). Must render hollow/dashed, not as a
+      // solid dot indistinguishable from a real fix, and get called out
+      // in the status line.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk1', name: 'GhostRepeater', lat: 56.0, lon: 10.0, approx: true }],
+            observer: { name: 'GhostObserver', lat: 56.1, lon: 10.1, approx: true },
+          },
+        ],
+      }));
+
+      let approxMarkerCalls = 0, solidMarkerCalls = 0;
+      ctx.L = {
+        map: () => ({
+          setView() { return this; },
+          fitBounds() {},
+          invalidateSize() {},
+          remove() {},
+        }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: (latlng, opts) => {
+          if (opts && opts.dashArray) approxMarkerCalls++;
+          else solidMarkerCalls++;
+          return { addTo() { return this; }, bindTooltip() { return this; } };
+        },
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const status = ctx.document.getElementById('packetPathStatus');
+      assert.strictEqual(approxMarkerCalls, 2, 'expected both the hop point and the observer to render as hollow/dashed (approx), got ' + approxMarkerCalls);
+      assert.strictEqual(solidMarkerCalls, 0, 'expected no solid markers -- both points in this branch are approximate, got ' + solidMarkerCalls);
+      assert.ok(status.textContent.includes('2 approximate'), 'status should call out the approximate count, got: ' + status.textContent);
+      passed++;
+      console.log('  ✅ approximate (neighbor-borrowed) positions render hollow/dashed and are called out in status');
+    } catch (e) { failed++; console.log('  ❌ approximate (neighbor-borrowed) positions render hollow/dashed and are called out in status: ' + e.message); }
+  })();
+
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);
   console.log('════════════════════════════════════════');

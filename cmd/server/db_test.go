@@ -721,6 +721,164 @@ func TestGetPacketPath_First(t *testing.T) {
 	}
 }
 
+// TestGetPacketPath_ExcludesNullIsland covers a node whose nodes.lat/lon
+// are stored as literal (0,0) rather than NULL -- MeshCore's "never
+// actually reported a GPS position" sentinel in practice, not a real fix
+// off the coast of Ghana. Both the relay-hop-point lookup and the
+// observer-position lookup must treat it as unpositioned (matching the
+// same convention GetNodesForScopeAdoption and geofilter.PassesFilter
+// already use), keeping the node's name but not its bogus position.
+func TestGetPacketPath_ExcludesNullIsland(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsZero', 'Zero Observer', NULL)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkZero', 'ZeroRepeater', 'repeater', 0, 0)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('obsZero', 'Zero Observer', 'repeater', 0, 0)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000008', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkZero"]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000008")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Branches) != 1 {
+		t.Fatalf("Branches = %+v, want 1", resp.Branches)
+	}
+	b := resp.Branches[0]
+	if len(b.Points) != 1 || b.Points[0].Name != "ZeroRepeater" {
+		t.Fatalf("Points = %+v, want ZeroRepeater still named", b.Points)
+	}
+	if b.Points[0].Lat != nil || b.Points[0].Lon != nil {
+		t.Errorf("Points[0].Lat/Lon = %v/%v, want nil -- (0,0) is a no-fix sentinel, not a real position", b.Points[0].Lat, b.Points[0].Lon)
+	}
+	if b.Observer == nil || b.Observer.Name != "Zero Observer" {
+		t.Fatalf("Observer = %+v, want Zero Observer still named", b.Observer)
+	}
+	if b.Observer.Lat != nil || b.Observer.Lon != nil {
+		t.Errorf("Observer.Lat/Lon = %v/%v, want nil -- the observer's own node row is also (0,0)", b.Observer.Lat, b.Observer.Lon)
+	}
+}
+
+// TestGetPacketPath_FallsBackToSingleNeighborPosition covers a hop and
+// an observer that have no position of their own anywhere (no GPS, no
+// name match, no IATA) but have exactly one neighbor_edges neighbor
+// that IS positioned -- that neighbor's exact position should be
+// borrowed as an approximate stand-in, flagged via Approx so callers
+// don't mistake it for a real fix.
+func TestGetPacketPath_FallsBackToSingleNeighborPosition(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`)
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obsghost', 'Ghost Observer', NULL)`)
+	// pkghost/obsghost: no lat/lon at all (unadvertised). pkanchor: their
+	// only positioned neighbor. Pubkeys lowercase throughout, matching
+	// real ingest data (and neighbor_edges' own storage/lookup casing) --
+	// resolved_path entries and neighbor_edges rows must agree on case
+	// for the IN() lookups to match.
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkghost', 'GhostRepeater', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('obsghost', 'Ghost Observer', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkanchor', 'AnchorRepeater', 'repeater', 55.5, 9.5)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkanchor', 'pkghost', 10)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('obsghost', 'pkanchor', 10)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000009', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkghost"]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000009")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Branches) != 1 {
+		t.Fatalf("Branches = %+v, want 1", resp.Branches)
+	}
+	b := resp.Branches[0]
+
+	if len(b.Points) != 1 {
+		t.Fatalf("Points = %+v, want 1", b.Points)
+	}
+	p := b.Points[0]
+	if p.Name != "GhostRepeater" {
+		t.Errorf("Points[0].Name = %q, want GhostRepeater (its own name, not the neighbor's)", p.Name)
+	}
+	if !p.Approx {
+		t.Errorf("Points[0].Approx = false, want true -- position was borrowed from a neighbor")
+	}
+	if p.Lat == nil || *p.Lat != 55.5 || p.Lon == nil || *p.Lon != 9.5 {
+		t.Errorf("Points[0].Lat/Lon = %v/%v, want AnchorRepeater's exact position (55.5, 9.5) -- its only positioned neighbor", p.Lat, p.Lon)
+	}
+
+	if b.Observer == nil || b.Observer.Name != "Ghost Observer" {
+		t.Fatalf("Observer = %+v, want Ghost Observer still named", b.Observer)
+	}
+	if !b.Observer.Approx {
+		t.Errorf("Observer.Approx = false, want true")
+	}
+	if b.Observer.Lat == nil || *b.Observer.Lat != 55.5 || b.Observer.Lon == nil || *b.Observer.Lon != 9.5 {
+		t.Errorf("Observer.Lat/Lon = %v/%v, want AnchorRepeater's exact position (55.5, 9.5)", b.Observer.Lat, b.Observer.Lon)
+	}
+}
+
+// TestGetPacketPath_FallsBackToWeightedNeighborCentroid covers a hop
+// with TWO positioned neighbors of different edge strength: the
+// approximate position must be a count-weighted average of both real
+// positions -- not just the stronger neighbor's exact coordinates --
+// since each neighbor's own GPS is precise even though the hop's
+// position relative to them isn't.
+func TestGetPacketPath_FallsBackToWeightedNeighborCentroid(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`)
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', NULL)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkghost', 'GhostRepeater', 'repeater')`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkanchor', 'AnchorRepeater', 'repeater', 55.5, 9.5)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkweak', 'WeakRepeater', 'repeater', 60.0, 15.0)`)
+	// pkanchor is a 10x stronger edge than pkweak -- weighted centroid:
+	// lat = (55.5*10 + 60.0*1) / 11 = 55.90909..., lon = (9.5*10 + 15.0*1) / 11 = 10.0
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkanchor', 'pkghost', 10)`)
+	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkghost', 'pkweak', 1)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'pathtest00000010', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#ping","text":"ping","sender":"Eve"}', '#ping')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
+		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkghost"]', 1736935200)`)
+
+	resp, err := db.GetPacketPath("pathtest00000010")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Branches) != 1 || len(resp.Branches[0].Points) != 1 {
+		t.Fatalf("Branches = %+v, want 1 branch with 1 point", resp.Branches)
+	}
+	p := resp.Branches[0].Points[0]
+	if !p.Approx {
+		t.Fatalf("Approx = false, want true")
+	}
+	if p.Lat == nil || p.Lon == nil {
+		t.Fatalf("Lat/Lon = %v/%v, want a computed centroid, not nil", p.Lat, p.Lon)
+	}
+	const wantLat, wantLon = 55.90909090909091, 10.0
+	const epsilon = 1e-9
+	if diff := *p.Lat - wantLat; diff > epsilon || diff < -epsilon {
+		t.Errorf("Lat = %v, want weighted centroid %v (not AnchorRepeater's exact 55.5, since WeakRepeater also has a real position)", *p.Lat, wantLat)
+	}
+	if diff := *p.Lon - wantLon; diff > epsilon || diff < -epsilon {
+		t.Errorf("Lon = %v, want weighted centroid %v", *p.Lon, wantLon)
+	}
+}
+
 // TestGetPacketPath_ObserverPositionPrefersOwnGPS covers an observer whose
 // configured IATA code isn't a real airport (a custom/regional code an
 // operator typed in, or a typo) and so isn't in the hardcoded iataCoords
