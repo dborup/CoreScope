@@ -40,6 +40,13 @@ test('escapes node/observer names before interpolating into tooltip HTML (operat
   assert.ok(/escapeHtml\(pt\.name\)/.test(src), 'point tooltips must escape the name');
 });
 
+test('tooltips use a wrapping CSS class -- Leaflet\'s default nowrap tooltip becomes unreadable once role/approx/bridge/distance/timing info are all combined', () => {
+  const bindCalls = (src.match(/\.bindTooltip\(/g) || []).length;
+  const classNameUses = (src.match(/className:\s*'packet-path-tooltip'/g) || []).length;
+  assert.ok(bindCalls > 0, 'expected at least one bindTooltip call');
+  assert.strictEqual(classNameUses, bindCalls, `expected every bindTooltip call (${bindCalls}) to pass the wrapping class, found ${classNameUses}`);
+});
+
 test('draws every branch, not just the deepest one', () => {
   assert.ok(/branches\.map/.test(src), 'should iterate all branches from the response');
 });

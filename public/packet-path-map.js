@@ -234,7 +234,7 @@
         var clickNote = pt.publicKey ? ' — click for node detail' : '';
         var marker = L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)
-          .bindTooltip(roleIcon(pt.role) + escapeHtml(pt.name) + ' (' + pt.label + approxNote + bridgeNote + ')' + clickNote);
+          .bindTooltip(roleIcon(pt.role) + escapeHtml(pt.name) + ' (' + pt.label + approxNote + bridgeNote + ')' + clickNote, { className: 'packet-path-tooltip' });
         if (pt.publicKey) {
           // Same #/nodes/{pubkey} hash route the rest of the app already
           // links to (see e.g. public/channels.js's node-detail links).
@@ -263,7 +263,7 @@
         radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
       })
         .addTo(map)
-        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')');
+        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
     }
 
     try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }
