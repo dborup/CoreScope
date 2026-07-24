@@ -72,6 +72,20 @@
     document.removeEventListener('keydown', onKeydown);
   }
 
+  // A short prefix marking a node's role in tooltips -- purely a label,
+  // markers stay circleMarker dots throughout (a role-specific shape
+  // would clash with the color/dash coding already carrying primary,
+  // approx, and observer meaning).
+  function roleIcon(role) {
+    switch (role) {
+      case 'repeater': return '📡 ';
+      case 'room': return '🏠 ';
+      case 'client': return '📱 ';
+      case 'sensor': return '🌡️ ';
+      default: return '';
+    }
+  }
+
   // Turns one branch into a plottable chain: resolved hops with a known
   // position, then the observer's own position when known. A branch with
   // no locatable hops still contributes a single-point chain -- just the
@@ -86,7 +100,7 @@
     var chain = located.map(function (p, hi) {
       return {
         lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx,
-        approxNeighborCount: p.approxNeighborCount, approxSpreadKm: p.approxSpreadKm,
+        approxNeighborCount: p.approxNeighborCount, approxSpreadKm: p.approxSpreadKm, role: p.role,
       };
     });
     if (b.observer && b.observer.lat != null && b.observer.lon != null) {
@@ -96,6 +110,7 @@
         lat: b.observer.lat, lon: b.observer.lon, name: b.observer.name,
         label: observerLabel, isObserver: true, approx: !!b.observer.approx,
         approxNeighborCount: b.observer.approxNeighborCount, approxSpreadKm: b.observer.approxSpreadKm,
+        role: b.observer.role,
       });
     }
     return { chain: chain, missing: (b.points || []).length - located.length };
@@ -207,7 +222,7 @@
         }
         L.circleMarker([pt.lat, pt.lon], markerOpts)
           .addTo(map)
-          .bindTooltip(escapeHtml(pt.name) + ' (' + pt.label + approxNote + ')');
+          .bindTooltip(roleIcon(pt.role) + escapeHtml(pt.name) + ' (' + pt.label + approxNote + ')');
       });
       if (line.length > 1) {
         L.polyline(line, { color: lineColor, weight: p.primary ? 2.5 : 1.5, opacity: p.primary ? 0.85 : 0.5 }).addTo(map);

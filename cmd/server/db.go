@@ -1551,6 +1551,7 @@ type PacketPathPoint struct {
 type PacketPathObserver struct {
 	Name string   `json:"name"`
 	IATA string   `json:"iata,omitempty"`
+	Role string   `json:"role,omitempty"`
 	Lat  *float64 `json:"lat"`
 	Lon  *float64 `json:"lon"`
 	// Approx is true when Lat/Lon are a weighted centroid of this
@@ -1865,6 +1866,11 @@ func (db *DB) GetPacketPath(hash string) (*PacketPathResponse, error) {
 			// hand-added local codes, so a custom/regional code an
 			// operator typed in (or a typo) falls through it even when
 			// the node itself knows exactly where it is.
+			if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.role != "" {
+				obs.Role = ni.role
+			} else if ni, ok := nodeByName[b.observerName]; ok && ni.role != "" {
+				obs.Role = ni.role
+			}
 			if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
 				obs.Lat, obs.Lon = ni.lat, ni.lon
 			} else if ni, ok := nodeByName[b.observerName]; ok {

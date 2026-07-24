@@ -384,6 +384,37 @@ function makeSandbox(apiImpl) {
     } catch (e) { failed++; console.log('  ❌ approximate markers scale size/opacity by neighbor confidence: ' + e.message); }
   })();
 
+  await (async () => {
+    try {
+      // A hop point and an observer with a known `role` should get a
+      // role-specific icon prefix in their tooltip.
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk1', name: 'RepeaterA', lat: 56.0, lon: 10.0, role: 'repeater' }],
+            observer: { name: 'RoomObserver', lat: 56.1, lon: 10.1, role: 'room' },
+          },
+        ],
+      }));
+
+      const tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert.ok(tooltips.some((t) => t.includes('📡') && t.includes('RepeaterA')), 'expected a repeater icon on RepeaterA, got: ' + JSON.stringify(tooltips));
+      assert.ok(tooltips.some((t) => t.includes('🏠') && t.includes('RoomObserver')), 'expected a room icon on RoomObserver, got: ' + JSON.stringify(tooltips));
+      passed++;
+      console.log('  ✅ nodes with a known role get a role icon in their tooltip');
+    } catch (e) { failed++; console.log('  ❌ nodes with a known role get a role icon in their tooltip: ' + e.message); }
+  })();
+
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);
   console.log('════════════════════════════════════════');

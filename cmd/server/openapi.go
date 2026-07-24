@@ -353,6 +353,7 @@ func componentSchemas() map[string]interface{} {
 			"properties": map[string]interface{}{
 				"name":                str("Observer display name."),
 				"iata":                str("Observer's configured IATA airport code, when set."),
+				"role":                str("Observer's own node role (e.g. repeater, room), when it's known as a mesh node itself -- not just an MQTT/API listener."),
 				"lat":                 map[string]interface{}{"type": "number", "nullable": true},
 				"lon":                 map[string]interface{}{"type": "number", "nullable": true},
 				"approx":              map[string]interface{}{"type": "boolean", "description": "True when lat/lon are not this station's own position but a count-weighted centroid of its positioned neighbors instead -- a last-resort stand-in, not a real fix."},

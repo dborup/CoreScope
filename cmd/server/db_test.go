@@ -954,6 +954,9 @@ func TestGetPacketPath_ObserverPositionPrefersOwnGPS(t *testing.T) {
 	if obs.Lat == nil || *obs.Lat != 56.19 || obs.Lon == nil || *obs.Lon != 9.6 {
 		t.Errorf("Observer.Lat/Lon = %v/%v, want the node's own self-advertised GPS (56.19, 9.6), not left nil just because QXV isn't a known airport", obs.Lat, obs.Lon)
 	}
+	if obs.Role != "room" {
+		t.Errorf("Observer.Role = %q, want room (from its own nodes row)", obs.Role)
+	}
 }
 
 // TestGetPacketPath_ObserverPositionFallsBackToNameMatch covers a
