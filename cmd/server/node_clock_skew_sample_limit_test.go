@@ -39,7 +39,7 @@ func setupClockSkewSampleLimitFixture(t *testing.T) (*Server, *mux.Router, *Pack
 		return &StoreTx{
 			Hash:        hash,
 			PayloadType: &pt,
-			DecodedJSON: fmt.Sprintf(`{"payload":{"timestamp":%d}}`, advertTS),
+			DecodedJSON: fmt.Sprintf(`{"payload":{"timestamp":%d},"pubKey":%q}`, advertTS, clockSkewSampleLimitTestPK),
 			Observations: []*StoreObs{
 				{ObserverID: "obs1", Timestamp: time.Unix(obsTS, 0).UTC().Format(time.RFC3339)},
 			},
