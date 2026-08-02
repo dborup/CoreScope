@@ -216,6 +216,11 @@ func TestRunMultibyteCapPersist_MalformedSnapshot(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	defer store.Close()
+	// OpenStore schedules async migrations (e.g. ping_triggers_backfill_v1)
+	// that log.Printf in the background; wait for them to finish before
+	// captureLogs below redirects log output, or their writes race the
+	// test's later reads of the captured buffer.
+	store.WaitForAsyncMigrations()
 
 	// Write malformed JSON directly to the snapshot path.
 	if err := mbcapqueue.EnsureDir(dbPath); err != nil {
@@ -262,6 +267,10 @@ func TestRunMultibyteCapPersist_MissingSchemaColumns(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	defer store.Close()
+	// See TestRunMultibyteCapPersist_MalformedSnapshot: wait for OpenStore's
+	// background async migrations to finish before captureLogs below, or
+	// their log.Printf calls race the test's later reads of the buffer.
+	store.WaitForAsyncMigrations()
 
 	// Drop the multibyte columns from both tables to simulate a legacy DB.
 	for _, stmt := range []string{
