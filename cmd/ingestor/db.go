@@ -30,6 +30,9 @@ type DBStats struct {
 	ObserverUpserts        atomic.Int64
 	WriteErrors            atomic.Int64
 	SignatureDrops         atomic.Int64
+	// RelayTouches counts nodes.last_seen refreshes driven by relay
+	// participation rather than an ADVERT.
+	RelayTouches atomic.Int64
 	// WALCommits tracks every successful tx.Commit() that may have flushed
 	// WAL pages.
 	WALCommits atomic.Int64
@@ -86,6 +89,7 @@ type Store struct {
 	stmtSelectNodeForChange    *sql.Stmt
 	stmtCheckInactiveNode      *sql.Stmt
 	stmtInsertNodeChange       *sql.Stmt
+	stmtTouchNodeLastSeen      *sql.Stmt
 
 	sampleIntervalSec int
 	backfillWg        sync.WaitGroup
@@ -99,7 +103,25 @@ type Store struct {
 	// by the context-aware resolver (#1560). Rebuilt on startup and
 	// once per neighbor-edges builder tick (60s).
 	neighborGraph neighborGraphHolder
+
+	// relayTouched is the debounce map for touchRelayNodesLocked:
+	// pubkey -> rxTime of the last last_seen write. Guarded by writerMu,
+	// which InsertTransmission holds for its whole body.
+	relayTouched map[string]time.Time
 }
+
+// relayTouchDebounce is the minimum interval between two last_seen writes
+// for the same relay node. A backbone repeater appears in thousands of
+// paths per hour; without this the ingest path would issue one UPDATE per
+// observation for no added freshness.
+const relayTouchDebounce = 5 * time.Minute
+
+// relayTouchedMaxEntries caps the debounce map. One entry per node ever
+// seen relaying -- on real deployments this stays small, but a long-lived
+// process on a large mesh should not grow it without bound. On overflow we
+// drop entries older than two debounce windows, which can only cause an
+// extra UPDATE, never a missed one.
+const relayTouchedMaxEntries = 50000
 
 // OpenStore opens or creates a SQLite DB at the given path, applying the
 // v3 schema that is compatible with the Node.js server.
@@ -887,6 +909,17 @@ func (s *Store) prepareStatements() error {
 		return err
 	}
 
+	// Relay-aware last_seen touch: a resolved hop proves the node was
+	// forwarding traffic at rxTime, so its last_seen should advance even
+	// when it adverts rarely or not at all. Ownership: nodes is written
+	// by the ingestor only (the server opens SQLite mode=ro), so this
+	// writer lives here, not in cmd/server. See touchRelayNodesLocked.
+	s.stmtTouchNodeLastSeen, err = s.db.Prepare(
+		"UPDATE nodes SET last_seen = ? WHERE public_key = ? AND (last_seen IS NULL OR last_seen < ?)")
+	if err != nil {
+		return fmt.Errorf("preparing touch node last_seen: %w", err)
+	}
+
 	s.stmtInsertObservation, err = s.db.Prepare(`
 		INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp, raw_hex, resolved_path)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -980,6 +1013,77 @@ func (s *Store) prepareStatements() error {
 	}
 
 	return nil
+}
+
+// touchRelayNodesLocked refreshes nodes.last_seen for nodes observed as
+// relay hops, so a node that forwards traffic stays fresh even when it
+// adverts rarely or not at all.
+//
+// MUST be called with writerMu held. InsertTransmission holds it for its
+// entire body, so the debounce map needs no lock of its own; the name
+// carries the requirement for future callers.
+//
+// Ownership: nodes is written by the ingestor only. The server opens
+// SQLite mode=ro; its former touchRelayLastSeen was failing on every call
+// since that refactor (the error was discarded at the call site) and is
+// removed in this change.
+//
+// Callers pass the resolved pubkeys already computed for
+// observations.resolved_path -- only unambiguously resolved hops reach
+// this function, so a 1-byte prefix collision cannot keep a silent node
+// alive. resolvedPubkeys already dedups, so no second pass here.
+//
+// Never inserts: the UPDATE matches an existing row or does nothing.
+// Never rewinds: the last_seen guard makes out-of-order ingest a no-op.
+func (s *Store) touchRelayNodesLocked(pubkeys []string, rxTime string) {
+	if len(pubkeys) == 0 || s.stmtTouchNodeLastSeen == nil {
+		return
+	}
+	// Reject unparsable timestamps rather than writing them into the node
+	// directory. Callers hand us the observation rxTime, which comes off
+	// the wire and is not guaranteed well-formed.
+	ts, err := time.Parse(time.RFC3339, rxTime)
+	if err != nil {
+		return
+	}
+	stamp := ts.UTC().Format(time.RFC3339)
+
+	if s.relayTouched == nil {
+		s.relayTouched = make(map[string]time.Time)
+	}
+	if len(s.relayTouched) >= relayTouchedMaxEntries {
+		s.compactRelayTouched(ts)
+	}
+	for _, pk := range pubkeys {
+		if pk == "" {
+			continue
+		}
+		if last, ok := s.relayTouched[pk]; ok && ts.Sub(last) < relayTouchDebounce {
+			continue
+		}
+		res, err := s.stmtTouchNodeLastSeen.Exec(stamp, pk, stamp)
+		if err != nil {
+			s.Stats.WriteErrors.Add(1)
+			continue
+		}
+		// Debounce on attempt, not on row match: an unknown pubkey would
+		// otherwise be retried on every observation it appears in.
+		s.relayTouched[pk] = ts
+		if n, _ := res.RowsAffected(); n > 0 {
+			s.Stats.RelayTouches.Add(n)
+		}
+	}
+}
+
+// compactRelayTouched drops debounce entries older than two windows.
+// Caller must hold writerMu.
+func (s *Store) compactRelayTouched(now time.Time) {
+	cutoff := now.Add(-2 * relayTouchDebounce)
+	for pk, t := range s.relayTouched {
+		if t.Before(cutoff) {
+			delete(s.relayTouched, pk)
+		}
+	}
 }
 
 // InsertTransmission inserts a decoded packet into transmissions + observations.
@@ -1105,6 +1209,10 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		log.Printf("[db] observation insert (non-fatal): %v", err)
 	} else {
 		s.Stats.ObservationsInserted.Add(1)
+		// A resolved hop proves the node was forwarding traffic at
+		// rxTime. Refresh its last_seen so staleness/eviction logic sees
+		// relay activity, not just ADVERTs.
+		s.touchRelayNodesLocked(resolvedPubkeys(resolved), rxTime)
 		// #1690: bump transmissions.last_seen so cold-load can filter on
 		// effective recency. Conditional `last_seen < ?` so we never go
 		// backwards on out-of-order ingest.
