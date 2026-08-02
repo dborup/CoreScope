@@ -191,24 +191,24 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 	// metadata-only ALTER); the populate query is potentially expensive
 	// (full obs scan + group) so we run it async. Subsequent observation
 	// inserts maintain the column inline (see InsertTransmission below).
+	//
+	// #1735 (ported from upstream): a single correlated UPDATE across the
+	// whole table held the ingestor's one write connection
+	// (SetMaxOpenConns(1)) for the entire backfill — at prod scale
+	// (1.9M+ observations, 86k+ transmissions) that is minutes during
+	// which every concurrent InsertTransmission blocks waiting for the
+	// pool's only connection. Chunk it: bounded batches with a sleep
+	// between them so queued writers get a turn.
+	//
+	// maxID is snapshotted once, up front, so rows inserted concurrently
+	// (which already arrive with last_seen populated — see
+	// InsertTransmission) cannot extend the loop indefinitely. The
+	// EXISTS filter excludes transmissions with zero observations from
+	// ever being selected — without it, a row whose MAX(timestamp)
+	// resolves to NULL keeps COALESCE-ing back to its own last_seen=0
+	// and would be re-selected by every subsequent batch forever.
 	// PREFLIGHT: async=true reason="full-table backfill JOIN (1.9M+ obs × 86k+ tx in prod) — must not block ingestor boot"
-	if err := s.RunAsyncMigration(context.Background(), "tx_last_seen_backfill_v1",
-		func(ctx context.Context, d *sql.DB) error {
-			log.Println("[migration/async] Backfilling transmissions.last_seen from MAX(observations.timestamp)...")
-			res, err := d.ExecContext(ctx, `
-				UPDATE transmissions
-				SET last_seen = COALESCE((
-					SELECT MAX(timestamp) FROM observations WHERE transmission_id = transmissions.id
-				), last_seen)
-				WHERE last_seen = 0
-			`)
-			if err != nil {
-				return err
-			}
-			n, _ := res.RowsAffected()
-			log.Printf("[migration/async] transmissions.last_seen backfill complete: %d rows updated", n)
-			return nil
-		}); err != nil {
+	if err := s.RunAsyncMigration(context.Background(), "tx_last_seen_backfill_v1", backfillTxLastSeen); err != nil {
 		log.Printf("[migration/async] scheduling tx_last_seen_backfill_v1 failed: %v", err)
 	}
 
@@ -223,6 +223,74 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 	}
 
 	return s, nil
+}
+
+// txLastSeenBackfillBatchSize and txLastSeenBackfillYield are package
+// vars (not const) so tests can shrink them and exercise the multi-batch
+// loop in backfillTxLastSeen without seeding thousands of rows.
+var (
+	txLastSeenBackfillBatchSize = 2000
+	txLastSeenBackfillYield     = 50 * time.Millisecond
+)
+
+// backfillTxLastSeen is the tx_last_seen_backfill_v1 async migration body
+// (#1690), pulled into its own named function like backfillPingTriggers
+// below so tests can call it directly.
+//
+// #1735 (ported from upstream): originally a single correlated UPDATE
+// across the whole table. That held the ingestor's one write connection
+// (SetMaxOpenConns(1)) for the entire backfill — at prod scale (1.9M+
+// observations, 86k+ transmissions) that is minutes during which every
+// concurrent InsertTransmission blocks waiting for the pool's only
+// connection. This chunks it into bounded batches with a yield between
+// them so queued writers get a turn.
+//
+// maxID is snapshotted once, up front, so transmissions inserted
+// concurrently (which already arrive with last_seen populated — see
+// InsertTransmission) cannot extend the loop indefinitely. The EXISTS
+// filter excludes transmissions with zero observations from ever being
+// selected — without it, a row whose MAX(timestamp) resolves to NULL
+// keeps COALESCE-ing back to its own last_seen=0 and would be
+// re-selected by every subsequent batch forever.
+func backfillTxLastSeen(ctx context.Context, d *sql.DB) error {
+	log.Println("[migration/async] Backfilling transmissions.last_seen from MAX(observations.timestamp)...")
+
+	var maxID int64
+	if err := d.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM transmissions`).Scan(&maxID); err != nil {
+		return err
+	}
+
+	var total int64
+	for {
+		res, err := d.ExecContext(ctx, `
+			UPDATE transmissions
+			SET last_seen = COALESCE((
+				SELECT MAX(timestamp) FROM observations WHERE transmission_id = transmissions.id
+			), last_seen)
+			WHERE id IN (
+				SELECT id FROM transmissions
+				WHERE last_seen = 0 AND id <= ?
+					AND EXISTS (SELECT 1 FROM observations WHERE observations.transmission_id = transmissions.id)
+				ORDER BY id
+				LIMIT ?
+			)
+		`, maxID, txLastSeenBackfillBatchSize)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(txLastSeenBackfillYield):
+		}
+	}
+	log.Printf("[migration/async] transmissions.last_seen backfill complete: %d rows updated", total)
+	return nil
 }
 
 // backfillPingTriggers is the ping_triggers_backfill_v1 async migration
