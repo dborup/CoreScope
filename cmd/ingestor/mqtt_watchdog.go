@@ -74,6 +74,69 @@ func WatchdogPanicCount() int64 {
 	return watchdogPanicCount.Load()
 }
 
+// asyncEmitQueueSize bounds the pending-log queue newAsyncEmit drains in
+// its background goroutine. Sized generously above realistic burst
+// volume (roughly one call per source per tick) — the queue exists to
+// absorb a transient stall in the sink, not to serve as a steady-state
+// buffer.
+const asyncEmitQueueSize = 256
+
+// watchdogLogDropCount (#1853) counts emit calls dropped because
+// newAsyncEmit's queue was full at send time. Mirrors watchdogPanicCount's
+// role: WatchdogLastTickUnix alone cannot distinguish "healthy" from "the
+// log sink is stuck and every emit is being silently discarded" — a
+// growing WatchdogLogDropCount is that signal.
+var watchdogLogDropCount atomic.Int64
+
+// WatchdogLogDropCount returns the running total of watchdog log calls
+// dropped by newAsyncEmit because its queue was full. Monotonic; 0 means
+// no drops (or the watchdog has never run).
+func WatchdogLogDropCount() int64 {
+	return watchdogLogDropCount.Load()
+}
+
+// newAsyncEmit (#1853) wraps a potentially-blocking emit function —
+// production passes log.Print — with a bounded, non-blocking queue and a
+// dedicated drain goroutine.
+//
+// #1749/#1810 already recover a PANIC in emit so it cannot kill the
+// watchdog loop; this closes the sibling failure mode where emit BLOCKS
+// instead of panicking (a backpressured Docker JSON-file log driver, a
+// stuck stderr pipe). A blocking call inside runLivenessWatchdogLoop's
+// per-tick work hangs the entire watchdog goroutine — every source,
+// forever — which is indistinguishable from #1749's original production
+// symptom (WATCHDOG log lines simply stop).
+//
+// The returned emit never blocks: on a full queue it increments
+// watchdogLogDropCount and returns immediately rather than waiting for
+// the drain goroutine to catch up.
+//
+// stop closes the queue (no further sends may be attempted after
+// calling stop — see runLivenessWatchdog's shutdown ordering) and blocks
+// until the drain goroutine has flushed everything already queued.
+func newAsyncEmit(realEmit func(...any)) (emit func(...any), stop func()) {
+	queue := make(chan []any, asyncEmitQueueSize)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for args := range queue {
+			realEmit(args...)
+		}
+	}()
+	emit = func(args ...any) {
+		select {
+		case queue <- args:
+		default:
+			watchdogLogDropCount.Add(1)
+		}
+	}
+	stop = func() {
+		close(queue)
+		<-drained
+	}
+	return emit, stop
+}
+
 // LivenessKind enumerates the watchdog verdicts for a source. Edge-triggered
 // transitions use this to decide whether to emit (and what severity).
 type LivenessKind int
@@ -358,10 +421,23 @@ func SnapshotLivenessClocks() map[string]SourceLivenessSnapshot {
 func runLivenessWatchdog(interval, threshold time.Duration) (stop func()) {
 	t := time.NewTicker(interval)
 	done := make(chan struct{})
-	go runLivenessWatchdogLoop(t.C, done, threshold, log.Print)
+	emit, stopEmit := newAsyncEmit(log.Print)
+	loopExited := make(chan struct{})
+	go func() {
+		defer close(loopExited)
+		runLivenessWatchdogLoop(t.C, done, threshold, emit)
+	}()
 	return func() {
 		t.Stop()
 		close(done)
+		// #1853: wait for the loop goroutine to fully exit before
+		// stopping the emit queue. The loop's per-source work can still
+		// be calling emit right up until it observes <-done at the top
+		// of its next select; closing the queue out from under it would
+		// panic on "send on closed channel" instead of letting the
+		// in-flight tick finish cleanly.
+		<-loopExited
+		stopEmit()
 	}
 }
 

@@ -123,6 +123,11 @@ type MqttStatusResponse struct {
 	// per-source processing is broken. 0 / omitted: no recovered
 	// panics OR older ingestor build.
 	WatchdogPanicCount int64 `json:"watchdogPanicCount,omitempty"`
+	// WatchdogLogDropCount (#1853) is the running total of ingestor
+	// watchdog log calls dropped because the async emit queue was full.
+	// 0 / omitted: no drops OR older ingestor build that predates
+	// newAsyncEmit.
+	WatchdogLogDropCount int64 `json:"watchdogLogDropCount,omitempty"`
 }
 
 // ingestorMqttStatusEnvelope is the partial shape the server decodes from
@@ -132,6 +137,7 @@ type ingestorMqttStatusEnvelope struct {
 	SourceStatuses       []MqttSourceStatus `json:"source_statuses"`
 	WatchdogLastTickUnix int64              `json:"watchdogLastTickUnix"`
 	WatchdogPanicCount   int64              `json:"watchdogPanicCount"`
+	WatchdogLogDropCount int64              `json:"watchdogLogDropCount"`
 }
 
 // handleMqttStatus serves GET /api/mqtt/status. Reads the ingestor stats
@@ -153,6 +159,7 @@ func (s *Server) handleMqttStatus(w http.ResponseWriter, r *http.Request) {
 	resp.SampleAt = env.SampledAt
 	resp.WatchdogLastTickUnix = env.WatchdogLastTickUnix
 	resp.WatchdogPanicCount = env.WatchdogPanicCount
+	resp.WatchdogLogDropCount = env.WatchdogLogDropCount
 	for _, src := range env.SourceStatuses {
 		src.Broker = maskBrokerURL(src.Broker)
 		// Broker libraries occasionally quote the failing URL in the
