@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -484,6 +485,33 @@ func (s *PacketStore) GetNodeClockSkew(pubkey string) *NodeClockSkew {
 	return s.getNodeClockSkewLocked(pubkey)
 }
 
+// txOriginatedBy reports whether tx is an ADVERT self-signed by pubkey, as
+// opposed to a transmission merely indexed under pubkey because it was
+// resolved as a relay hop. s.byNode is an involvement index that
+// intentionally includes relay-hop transmissions too (indexResolvedPathHops)
+// so the node-detail activity timeline shows everything a node touched.
+// Clock-skew computation must restrict to self-originated adverts only:
+// ADVERTs are self-signed, so decoded["pubKey"] is the originator per
+// protocol. Without this guard, every relay that forwards a broken-clock
+// node's advert inherits that node's skew, producing fleet-wide false
+// no_clock/bimodal classifications and bit-identical skew "clusters" across
+// unrelated relays, including cases where a node's own adverts are healthy
+// but a couple of relayed adverts from a broken-clock originator dominate
+// its small recent-window sample. Comparison is case-insensitive as a
+// defensive measure; pubkeys are lowercase hex today, but nothing enforces
+// that at this boundary.
+func txOriginatedBy(tx *StoreTx, pubkey string) bool {
+	decoded := tx.ParsedDecoded()
+	if decoded == nil {
+		return false
+	}
+	pk, ok := decoded["pubKey"].(string)
+	if !ok || pk == "" {
+		return false
+	}
+	return strings.EqualFold(pk, pubkey)
+}
+
 // getNodeClockSkewLocked returns clock skew for a node.
 // Must be called with s.mu held (at least RLock).
 func (s *PacketStore) getNodeClockSkewLocked(pubkey string) *NodeClockSkew {
@@ -506,6 +534,12 @@ func (s *PacketStore) getNodeClockSkewLocked(pubkey string) *NodeClockSkew {
 
 	for _, tx := range txs {
 		if tx.PayloadType == nil || *tx.PayloadType != PayloadADVERT {
+			continue
+		}
+		if !txOriginatedBy(tx, pubkey) {
+			// Skip adverts this node merely relayed (byNode is an
+			// involvement index, not an originator index) — see
+			// txOriginatedBy.
 			continue
 		}
 		cs, ok := s.clockSkew.nodeSkew[tx.Hash]
@@ -670,6 +704,11 @@ func (s *PacketStore) getNodeClockSkewLocked(pubkey string) *NodeClockSkew {
 	var evidenceHashes []hashMeta
 	for _, tx := range txs {
 		if tx.PayloadType == nil || *tx.PayloadType != PayloadADVERT {
+			continue
+		}
+		if !txOriginatedBy(tx, pubkey) {
+			// Keep evidence consistent with the self-only skew stream
+			// above — don't show relayed adverts as this node's evidence.
 			continue
 		}
 		ev, ok := s.clockSkew.hashEvidence[tx.Hash]

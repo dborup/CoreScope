@@ -29,12 +29,22 @@ func TestServerSourceHasNoCachedRWCalls(t *testing.T) {
 		regexp.MustCompile(`\bcachedRW\s*\(`),
 		regexp.MustCompile(`mode=rw`),
 		regexp.MustCompile(`sql\.Open\([^)]*\?[^)]*_journal_mode=WAL[^)]*\)`),
-		// #1324 follow-up: PR #903's persistMultibyteCapability moved
-		// to cmd/ingestor — the server may NEVER UPDATE these columns
-		// (it opens mode=ro since #1289). Server publishes a snapshot
-		// file via internal/mbcapqueue; the ingestor applies it.
-		regexp.MustCompile(`UPDATE\s+nodes\s+SET\s+multibyte_`),
-		regexp.MustCompile(`UPDATE\s+inactive_nodes\s+SET\s+multibyte_`),
+		// The node directory is ingestor-owned; the server opens mode=ro
+		// since #1289 and may never write it.
+		//
+		// This deliberately matches ANY column rather than naming them.
+		// The column-specific form (`UPDATE nodes SET multibyte_`) let a
+		// real bug through: touchRelayLastSeen wrote `SET last_seen`
+		// from a mode=ro handle, failing on every call for months with
+		// the error discarded at the call site — nodes.last_seen
+		// silently degraded into an advert-age proxy. Enumerating
+		// shapes does not scale — forbid the table instead. Now removed
+		// (the writer lives in cmd/ingestor's touchRelayNodesLocked);
+		// this broadened pattern guards against reintroduction.
+		nodeTableWritePattern(`UPDATE(\s+OR\s+\w+)?`, `SET`),
+		nodeTableWritePattern(`INSERT\s+(OR\s+\w+\s+)?INTO`, ``),
+		nodeTableWritePattern(`REPLACE\s+INTO`, ``),
+		nodeTableWritePattern(`DELETE\s+FROM`, ``),
 		regexp.MustCompile(`\bpersistMultibyteCapability\s*\(`),
 		regexp.MustCompile(`\bmaybePersistMultibyteCapability\s*\(`),
 	}
@@ -163,4 +173,33 @@ func TestPacketStoreHasNoMultibytePersistMethods(t *testing.T) {
 			t.Errorf("server *PacketStore exposes forbidden write method %q — must be relocated to ingestor (#1324)", name)
 		}
 	}
+}
+
+// nodeTableWritePattern builds a matcher for DML against the
+// ingestor-owned node directory. verb is the leading keyword(s); trailer
+// is what must follow the table name (e.g. SET for UPDATE), or empty.
+//
+// Covers the shapes a plain `UPDATE nodes SET` regex misses:
+//
+//	UPDATE OR REPLACE nodes SET ...
+//	UPDATE "nodes" SET ... / `nodes` / [nodes]
+//	UPDATE nodes AS n SET ...
+//	REPLACE INTO nodes ...
+//
+// Residual gap, stated rather than papered over: SQL assembled at
+// runtime (fmt.Sprintf("UPDATE %s SET ...", tbl)) cannot be caught by
+// source grepping. That is what TestServerDBHasNoWriteMethods and the
+// dedicated *PacketStore test above are for — the write helpers do not
+// exist on the type at all. This test is the cheap first line that names
+// the offending file and line; those are the structural backstop.
+func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
+	const table = "[\"`\\[]?(nodes|inactive_nodes)[\"`\\]]?"
+	const alias = `(\s+(AS\s+)?[a-z]\w*)?`
+	expr := `(?i)` + verb + `\s+` + table + alias
+	if trailer != "" {
+		expr += `\s+` + trailer
+	} else {
+		expr += `\b`
+	}
+	return regexp.MustCompile(expr)
 }
