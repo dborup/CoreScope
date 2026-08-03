@@ -1089,6 +1089,61 @@ console.log('\n=== live.js: clickable paths ===');
   });
 }
 
+// ===== foreignPathColor =====
+console.log('\n=== live.js: foreignPathColor ===');
+{
+  const ctx = makeLiveSandbox();
+  const foreignPathColor = ctx.window._liveForeignPathColor;
+  assert.ok(foreignPathColor, '_liveForeignPathColor must be exposed');
+
+  test('foreignPathColor returns an hsl(0, ...) red at any depth', () => {
+    for (const n of [0, 1, 2, 5, 8, 20]) {
+      assert.ok(/^hsl\(0, 85%, \d+%\)$/.test(foreignPathColor(n)), `unexpected format for hopCount=${n}: ${foreignPathColor(n)}`);
+    }
+  });
+
+  test('foreignPathColor gets darker (lower lightness) as hop count grows', () => {
+    const lightnessOf = (n) => parseInt(foreignPathColor(n).match(/(\d+)%\)$/)[1], 10);
+    let prev = lightnessOf(1);
+    for (const n of [2, 3, 4, 5, 6]) {
+      const cur = lightnessOf(n);
+      assert.ok(cur <= prev, `lightness should not increase from hopCount=${n - 1} to ${n} (got ${prev} -> ${cur})`);
+      prev = cur;
+    }
+  });
+
+  test('foreignPathColor caps the darkening beyond ~7 hops', () => {
+    assert.strictEqual(foreignPathColor(7), foreignPathColor(10), 'lightness should plateau past the cap');
+    assert.strictEqual(foreignPathColor(10), foreignPathColor(50), 'lightness should plateau far past the cap');
+  });
+
+  test('foreignPathColor treats hopCount 0/1 the same (no negative depth)', () => {
+    assert.strictEqual(foreignPathColor(0), foreignPathColor(1), 'depth cannot go negative for a 0/1-length path');
+  });
+
+  const src = fs.readFileSync('public/live.js', 'utf8');
+
+  test('renderPacketTree gates the foreign-origin override on the highlightForeign toggle', () => {
+    assert.ok(src.includes('highlightForeign && originKey && nodeData[originKey] && !!nodeData[originKey].foreign'),
+      'origin foreign lookup must respect the highlightForeign toggle and guard a missing nodeData entry');
+  });
+
+  test('renderPacketTree resolves the origin from hopPositions[0], matching the sender-anchor unshift', () => {
+    assert.ok(src.includes('allPaths[ai].hopPositions[0]'),
+      'origin lookup must read the first hop position (the sender anchor resolveHopPositions unshifts)');
+  });
+
+  test('animatePath suppresses colorByHash when forceColor is set', () => {
+    assert.ok(src.includes('const segHash = forceColor ? null : pktMeta?.hash;'),
+      'a forced path color must not be overridden by colorByHash downstream in drawAnimatedLine');
+  });
+
+  test('liveForeignToggle checkbox exists and defaults to checked', () => {
+    assert.ok(/id="liveForeignToggle"[^>]*checked/.test(src) || /checked[^>]*id="liveForeignToggle"/.test(src),
+      'Foreign origin toggle must default to on');
+  });
+}
+
 // ===== SUMMARY =====
 Promise.allSettled(pendingTests).then(() => {
   console.log(`\n${'═'.repeat(40)}`);
