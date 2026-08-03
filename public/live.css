@@ -403,6 +403,17 @@
   border: 1px solid #fff;
   opacity: 0.45;
 }
+/* Foreign-origin route legend swatch: mirrors the red gradient
+ * foreignPathColor() produces as a packet's path travels more hops. */
+.live-foreign-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 4px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: linear-gradient(to right, hsl(0, 85%, 68%), hsl(0, 85%, 26%));
+}
 
 /* ---- Tooltip ---- */
 .live-tooltip {

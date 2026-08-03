@@ -55,6 +55,24 @@
   let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
   let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
   let colorByHash = localStorage.getItem('meshcore-color-packets-by-hash') !== 'false';
+  // Color a path's connecting lines red instead of by packet type when the
+  // packet's origin node is flagged foreign (nodes.foreign_advert — GPS
+  // outside the configured geo_filter region). Darker red = more hops
+  // traveled since leaving the foreign origin. Overrides colorByHash for
+  // the affected segments so the flag stays visible either way.
+  let highlightForeign = localStorage.getItem('live-highlight-foreign') !== 'false';
+
+  // foreignPathColor returns a red HSL color whose lightness decreases
+  // (gets darker/more saturated-reading) as hopCount grows, so a longer
+  // penetration into the mesh reads as more alarming at a glance.
+  // hopCount is hopPositions.length (origin + every resolved hop after
+  // it); capped so the gradient doesn't flatten out on very long paths.
+  function foreignPathColor(hopCount) {
+    var depth = Math.max(0, (hopCount || 0) - 1);
+    var capped = Math.min(depth, 6);
+    var lightness = 68 - capped * 7; // 68% at 1 hop down to 26% at 7+ hops
+    return 'hsl(0, 85%, ' + lightness + '%)';
+  }
   /** Current theme string for hash-color functions. */
   function _liveTheme() { return document.documentElement.dataset.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
   let nodeFilterKeys = (localStorage.getItem('live-node-filter') || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -1151,6 +1169,8 @@
             <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
             <label><input type="checkbox" id="liveMultibyteToggle" aria-describedby="multibyteDesc"> Multibyte only</label>
             <span id="multibyteDesc" class="sr-only">Show only multibyte (≥2-byte path-hash) packets; hide unreliable single-byte traffic</span>
+            <label><input type="checkbox" id="liveForeignToggle" checked aria-describedby="foreignDesc"> Foreign origin</label>
+            <span id="foreignDesc" class="sr-only">Color a packet's route red when it originates from a node outside your configured region; darker red means more hops traveled</span>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>
             </div>
@@ -1208,6 +1228,7 @@
           <ul class="legend-list">
             <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring — repeater</li>
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
+            <li><span class="live-foreign-swatch" aria-hidden="true"></span> Red route — foreign-origin packet (darker = more hops)</li>
           </ul>
           </div>
         </div>
@@ -1616,6 +1637,13 @@
       multibyteOnly = e.target.checked;
       localStorage.setItem('live-multibyte-only', multibyteOnly);
       rebuildFeedList();
+    });
+
+    const foreignToggle = document.getElementById('liveForeignToggle');
+    foreignToggle.checked = highlightForeign;
+    foreignToggle.addEventListener('change', (e) => {
+      highlightForeign = e.target.checked;
+      localStorage.setItem('live-highlight-foreign', highlightForeign);
     });
 
     // Region filter (#1045): dropdown of observer IATA regions
@@ -3213,6 +3241,7 @@
   window._liveSetNodeFilter = setNodeFilter;
   window._liveFormatLiveTimestampHtml = formatLiveTimestampHtml;
   window._liveResolveHopPositions = resolveHopPositions;
+  window._liveForeignPathColor = foreignPathColor;
   window._liveVcrSpeedCycle = vcrSpeedCycle;
   window._liveSpeedLabel = speedLabel;
   window._liveVcrPause = vcrPause;
@@ -3478,21 +3507,28 @@
         }
       }
       firstPathDone = true;
+      // Foreign-origin highlight: the path's own hopPositions[0] is the
+      // originating node (see resolveHopPositions' sender-anchor unshift).
+      // When it's flagged foreign_advert, override the type color with a
+      // depth-scaled red for this path's line segments instead.
+      var originKey = allPaths[ai].hopPositions[0] && allPaths[ai].hopPositions[0].key;
+      var originForeign = highlightForeign && originKey && nodeData[originKey] && !!nodeData[originKey].foreign;
+      var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : color;
       // For TRACE packets, split at hopsCompleted: solid for completed, dashed for remaining
       var hopsCompleted = decoded.path && decoded.path.hopsCompleted;
       if (typeName === 'TRACE' && hopsCompleted != null && hopsCompleted < allPaths[ai].hopPositions.length) {
         var completedPositions = allPaths[ai].hopPositions.slice(0, hopsCompleted + 1);
         var remainingPositions = allPaths[ai].hopPositions.slice(hopsCompleted);
         if (completedPositions.length >= 2) {
-          animatePath(completedPositions, typeName, color, allPaths[ai].raw, onHop, pktMeta);
+          animatePath(completedPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, originForeign);
         } else if (completedPositions.length === 1) {
           pulseNode(completedPositions[0].key, completedPositions[0].pos, typeName);
         }
         if (remainingPositions.length >= 2) {
-          drawDashedPath(remainingPositions, color);
+          drawDashedPath(remainingPositions, pathColor);
         }
       } else {
-        animatePath(allPaths[ai].hopPositions, typeName, color, allPaths[ai].raw, onHop, pktMeta);
+        animatePath(allPaths[ai].hopPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, originForeign);
       }
     }
   }
@@ -3601,7 +3637,11 @@
     return raw.filter(h => h.pos != null);
   }
 
-  function animatePath(hopPositions, typeName, color, rawHex, onHop, pktMeta) {
+  // forceColor (foreign-origin highlight): when true, always draw this
+  // path's segments in `color` — suppresses the colorByHash per-segment
+  // override below so the foreign flag stays visible even when "Color by
+  // hash" is also enabled.
+  function animatePath(hopPositions, typeName, color, rawHex, onHop, pktMeta, forceColor) {
     if (!animLayer || !pathsLayer) return;
     if (activeAnims >= MAX_CONCURRENT_ANIMS) return;
     activeAnims++;
@@ -3657,7 +3697,8 @@
         const nextGhost = hopPositions[hopIndex + 1].ghost;
         const lineColor = (isGhost || nextGhost) ? '#94a3b8' : color;
         const lineOpacity = (isGhost || nextGhost) ? 0.3 : undefined;
-        drawAnimatedLine(hp.pos, nextPos, lineColor, () => { hopIndex++; nextHop(); }, lineOpacity, rawHex, pktMeta?.hash);
+        const segHash = forceColor ? null : pktMeta?.hash;
+        drawAnimatedLine(hp.pos, nextPos, lineColor, () => { hopIndex++; nextHop(); }, lineOpacity, rawHex, segHash);
       } else {
         if (!isGhost) pulseNode(hp.key, hp.pos, typeName);
         hopIndex++; nextHop();
