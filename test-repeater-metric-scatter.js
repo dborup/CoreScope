@@ -80,47 +80,22 @@ const fakeLocalStorage = (() => {
 
 const M = new Function(
   'esc', 'window', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'getFavorites', 'CLIENT_TTL', 'localStorage',
-  block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_AXIS_GROUPS, SCOPE_FILTERS, _scopeFilterPredicate, REPEATER_METRIC_PRESETS, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _sampleExact, _sampleForPlot, _toScatterPoints, renderMetricScatter, renderRepeaterMetricsTab };')(
+  block + '\nreturn { REPEATER_METRIC_AXES, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, renderMetricScatter, renderRepeaterMetricsTab };')(
   esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage);
 
-console.log('\n=== scope-ext [1]/[2]/[11] axis registry: all 12 axes exist (8 original + 4 scope) and read the right point fields ===');
-assert(M.REPEATER_METRIC_AXES.map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy,relay1h,relay24h,adverts,unscopedRelays24h,unscopedRatio24h,scopesObserved,scopesRecent',
-  'axis registry exposes the original 8 metrics UNCHANGED, in order, plus the 4 new scope axes appended after them');
+console.log('\n=== [1] axis registry: all 8 axes exist and read the right point fields ===');
+assert(M.REPEATER_METRIC_AXES.map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy,relay1h,relay24h,adverts',
+  'axis registry exposes exactly the 8 required metrics, in order');
 {
-  const sentinel = { traffic: 1, usefulness: 2, bridge: 3, coverage: 4, redundancy: 5, relay1h: 6, relay24h: 7, adverts: 8, unscopedRelays24h: 9, unscopedRatio24h: 10, scopesObserved: 11, scopesRecent: 12 };
+  const sentinel = { traffic: 1, usefulness: 2, bridge: 3, coverage: 4, redundancy: 5, relay1h: 6, relay24h: 7, adverts: 8 };
   M.REPEATER_METRIC_AXES.forEach((a, i) => {
     assert(a.get(sentinel) === i + 1, `axis "${a.key}" getter reads its own point.${a.key} field, not another axis's`);
   });
 }
 assert(M.REPEATER_METRIC_AXES.every(a => typeof a.score === 'boolean'),
   'every axis declares score:true/false (percent vs. integer formatting)');
-assert(M.REPEATER_METRIC_AXES.filter(a => a.score).map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy,unscopedRatio24h',
-  'the six percent-formatted axes (five original #672 scores + Unscoped ratio) are marked score:true');
-assert(M.REPEATER_METRIC_AXES.filter(a => !a.score).map(a => a.key).join(',') === 'relay1h,relay24h,adverts,unscopedRelays24h,scopesObserved,scopesRecent',
-  'the six integer-formatted count axes are marked score:false');
-
-console.log('\n=== scope-ext [12] optgroup axis grouping ===');
-assert(M.REPEATER_METRIC_AXIS_GROUPS.join(',') === 'Network importance,Activity,Scope health',
-  'the three axis groups are defined in the required display order');
-assert(M.REPEATER_METRIC_AXES.filter(a => a.group === 'Network importance').map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy',
-  '"Network importance" group contains exactly Traffic share, Usefulness, Bridge, Coverage, Redundancy');
-assert(M.REPEATER_METRIC_AXES.filter(a => a.group === 'Activity').map(a => a.key).join(',') === 'relay1h,relay24h,adverts',
-  '"Activity" group contains exactly Relays (1h/24h) and Adverts');
-assert(M.REPEATER_METRIC_AXES.filter(a => a.group === 'Scope health').map(a => a.key).join(',') === 'unscopedRelays24h,unscopedRatio24h,scopesObserved,scopesRecent',
-  '"Scope health" group contains exactly the 4 new scope axes');
-assert(M.REPEATER_METRIC_AXES.every(a => M.REPEATER_METRIC_AXIS_GROUPS.includes(a.group)),
-  'every axis belongs to one of the three declared groups (none orphaned)');
-
-console.log('\n=== scope-ext [17] every preset resolves to two real, registered axis keys ===');
-assert(M.REPEATER_METRIC_PRESETS.every(p => M.REPEATER_METRIC_AXES.some(a => a.key === p.x) && M.REPEATER_METRIC_AXES.some(a => a.key === p.y)),
-  'every preset\'s x/y keys resolve to a real entry in REPEATER_METRIC_AXES');
-{
-  const byKey = k => M.REPEATER_METRIC_PRESETS.find(p => p.key === k);
-  assert(byKey('scope-risk').x === 'usefulness' && byKey('scope-risk').y === 'unscopedRatio24h', '"Scope risk vs importance" = usefulness × unscopedRatio24h');
-  assert(byKey('bridge-risk').x === 'bridge' && byKey('bridge-risk').y === 'unscopedRelays24h', '"Bridge risk" = bridge × unscopedRelays24h');
-  assert(byKey('scope-diversity').x === 'traffic' && byKey('scope-diversity').y === 'scopesRecent', '"Scope diversity vs traffic" = traffic × scopesRecent');
-  assert(byKey('activity-vs-unscoped').x === 'relay24h' && byKey('activity-vs-unscoped').y === 'unscopedRatio24h', '"Activity vs unscoped ratio" = relay24h × unscopedRatio24h');
-}
+assert(M.REPEATER_METRIC_AXES.filter(a => a.score).map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy',
+  'the five #672 score axes are marked score:true; the three count axes are not');
 
 console.log('\n=== [2] default axes: X=Traffic share, Y=Usefulness ===');
 assert(/xKey\s*=\s*localStorage\.getItem\('meshcore-repeater-scatter-x'\)\s*\|\|\s*'traffic'/.test(block),
@@ -167,73 +142,12 @@ console.log('\n=== [3] traffic_share_score and usefulness_score stay independent
   console.log('\n=== [6] missing values become null, not 0 ===');
   assert(mapped[2].traffic === null && mapped[2].usefulness === null && mapped[2].bridge === null &&
          mapped[2].coverage === null && mapped[2].redundancy === null && mapped[2].relay1h === null &&
-         mapped[2].relay24h === null && mapped[2].adverts === null &&
-         mapped[2].unscopedRelays24h === null && mapped[2].unscopedRatio24h === null &&
-         mapped[2].scopesObserved === null && mapped[2].scopesRecent === null,
-    'a node with no scores at all maps every metric (including all 4 scope axes) to null, not 0/undefined');
+         mapped[2].relay24h === null && mapped[2].adverts === null,
+    'a node with no scores at all maps every metric to null (not 0/undefined) so plots can skip it');
   assert(mapped[3].name === 'NAMELESS0000',
     'nameless node falls back to a 12-char pubkey prefix');
   assert(mapped[4].name === '?' && mapped[4].pk === undefined,
     'node with neither name nor pubkey falls back to "?"');
-}
-
-console.log('\n=== scope-ext [3]/[4]/[5]/[6]/[7] unscoped ratio formula ===');
-{
-  const favSet = new Set();
-  const [withBoth, zeroDenom, missingDenom, missingNumerator, over1, nonArrayScopes] = M._toScatterPoints([
-    { public_key: 'A', role: 'repeater', relay_count_24h: 20, unscoped_relay_count_24h: 8 },
-    { public_key: 'B', role: 'repeater', relay_count_24h: 0, unscoped_relay_count_24h: 5 },
-    { public_key: 'C', role: 'repeater', unscoped_relay_count_24h: 5 }, // relay_count_24h absent
-    { public_key: 'D', role: 'repeater', relay_count_24h: 20 }, // unscoped_relay_count_24h absent
-    { public_key: 'E', role: 'repeater', relay_count_24h: 10, unscoped_relay_count_24h: 15 }, // inconsistent data: unscoped > total
-    { public_key: 'F', role: 'repeater', relay_count_24h: 20, unscoped_relay_count_24h: 8, transported_scopes: 'not-an-array', transported_scopes_recent: 42 },
-  ], favSet);
-
-  console.log('\n=== scope-ext [3] unscoped ratio = unscoped / relay24h ===');
-  assert(Math.abs(withBoth.unscopedRatio24h - 0.4) < 1e-9,
-    '8 unscoped of 20 relays24h computes to a 0.4 ratio');
-
-  console.log('\n=== scope-ext [4] a zero denominator gives null, not 0 or Infinity ===');
-  assert(zeroDenom.unscopedRatio24h === null,
-    'relay_count_24h === 0 makes the ratio null (never divides by zero, never coerces to 0)');
-
-  console.log('\n=== scope-ext [5] a missing denominator gives null ===');
-  assert(missingDenom.unscopedRatio24h === null && missingDenom.relay24h === null,
-    'relay_count_24h absent (not just falsy) makes the ratio null');
-
-  console.log('\n=== scope-ext [6] a missing unscoped field is handled per the actual API contract ===');
-  // Per cmd/server/routes.go, unscoped_relay_count_24h is set unconditionally
-  // alongside relay_count_24h in the same enrichment step -- it is never
-  // "missing while relay24h is known" on a current server. This test proves
-  // the DEFENSIVE behavior for the case anyway (e.g. an old server that
-  // predates the feature): the missing field must become null, and must
-  // NEVER be silently treated as 0 (which would falsely claim "0 unscoped").
-  assert(missingNumerator.unscopedRelays24h === null && missingNumerator.unscopedRatio24h === null,
-    'a missing unscoped_relay_count_24h maps to null (not 0), so the ratio is also null rather than a false "0%"');
-
-  console.log('\n=== scope-ext [7] a ratio above 1 is surfaced, never silently clamped ===');
-  assert(over1.unscopedRatio24h === 1.5,
-    'unscoped (15) exceeding relay24h (10) -- a real data inconsistency -- produces an UNCLAMPED 1.5 ratio, not a hidden/clamped 1.0');
-
-  console.log('\n=== scope-ext [10] non-array scope fields do not crash and map to null ===');
-  assert(nonArrayScopes.scopesObserved === null && nonArrayScopes.scopesRecent === null,
-    'a string/number in transported_scopes/transported_scopes_recent (not a real array) is treated as absent, not a crash');
-}
-
-console.log('\n=== scope-ext [8]/[9] transported_scopes / transported_scopes_recent are counted correctly ===');
-{
-  const favSet = new Set();
-  const [withScopes, withRecentOnly, withNeither] = M._toScatterPoints([
-    { public_key: 'A', role: 'repeater', transported_scopes: ['dk-mj', 'dk-oj', 'se12'], transported_scopes_recent: ['dk-mj'] },
-    { public_key: 'B', role: 'room', transported_scopes_recent: ['dk-oj', 'se12'] },
-    { public_key: 'C', role: 'repeater' },
-  ], favSet);
-  assert(withScopes.scopesObserved === 3, 'transported_scopes.length (3 scopes) maps to scopesObserved');
-  assert(withScopes.scopesRecent === 1, 'transported_scopes_recent.length (1 scope) maps to scopesRecent');
-  assert(withRecentOnly.scopesObserved === null && withRecentOnly.scopesRecent === 2,
-    'transported_scopes omitted (server omits when empty) -> null; transported_scopes_recent present -> counted independently');
-  assert(withNeither.scopesObserved === null && withNeither.scopesRecent === null,
-    'a repeater with neither scope field present maps both to null, not 0');
 }
 
 console.log('\n=== [8] axis formatting: scores as %, counts as integers ===');
@@ -262,20 +176,16 @@ console.log('\n=== [9] unknown/stale localStorage axis key falls back safely ===
 console.log('\n=== [7]/[10]/[11] scatter render: both-values-required, escaping, node links ===');
 {
   const pts = [
-    { pk: 'AA', name: 'Rptr Eins', role: 'repeater', fav: true, traffic: 0.42, usefulness: 0.55, bridge: 0.1, coverage: 0.2, redundancy: 0.3, relay1h: 12, relay24h: 200, adverts: 50,
-      defaultScope: 'dk-mj', defaultScopeConfirmed: true, unscopedRelays24h: 8, unscopedRatio24h: 0.04, scopesRecent: 2 },
-    { pk: 'BB', name: 'Raum <Zwei>', role: 'room', fav: false, traffic: 0.05, usefulness: 0.2, bridge: 0.8, coverage: 0.1, redundancy: 0.1, relay1h: 0, relay24h: 3, adverts: 5,
-      defaultScope: null, defaultScopeConfirmed: false, unscopedRelays24h: null, unscopedRatio24h: null, scopesRecent: null },
+    { pk: 'AA', name: 'Rptr Eins', role: 'repeater', fav: true, traffic: 0.42, usefulness: 0.55, bridge: 0.1, coverage: 0.2, redundancy: 0.3, relay1h: 12, relay24h: 200, adverts: 50 },
+    { pk: 'BB', name: 'Raum <Zwei>', role: 'room', fav: false, traffic: 0.05, usefulness: 0.2, bridge: 0.8, coverage: 0.1, redundancy: 0.1, relay1h: 0, relay24h: 3, adverts: 5 },
     { pk: 'CC', name: 'Rptr Drei', role: 'repeater', fav: false, traffic: null, usefulness: 0.4, bridge: 0.3, coverage: 0.3, redundancy: 0.3, relay1h: 4, relay24h: 40, adverts: 9 },
-    { pk: 'DD', name: 'Rptr Vier', role: 'repeater', fav: false, traffic: 0.15, usefulness: 0.25, bridge: 0.15, coverage: 0.15, redundancy: 0.15, relay1h: 1, relay24h: 10, adverts: 2,
-      defaultScope: 'se12', defaultScopeConfirmed: false, unscopedRelays24h: 1, unscopedRatio24h: 0.1, scopesRecent: 0 },
   ];
   const xa = M._resolveAxis('traffic', pts), ya = M._resolveAxis('bridge', pts);
   const svg = M.renderMetricScatter(pts, xa, ya);
   assert(svg.startsWith('<svg') && svg.endsWith('</svg>') && !/NaN/.test(svg),
     'produces a valid <svg> with no NaN coordinates');
-  assert((svg.match(/href="#\/nodes\//g) || []).length === 3,
-    'plots only points with BOTH axis values present (CC has null traffic → skipped; AA/BB/DD plotted)');
+  assert((svg.match(/href="#\/nodes\//g) || []).length === 2,
+    'plots only points with BOTH axis values present (CC has null traffic → skipped)');
   assert(/href="#\/nodes\/AA\/analytics"/.test(svg),
     'each point links to its per-node analytics page');
   assert(/fill="#3b82f6"/.test(svg) && /fill="#a855f7"/.test(svg),
@@ -286,20 +196,6 @@ console.log('\n=== [7]/[10]/[11] scatter render: both-values-required, escaping,
     'favorite ring uses the neutral var(--text), not a status colour');
   assert(/tabindex="-1"/.test(svg), 'points carry tabindex="-1" (out of sequential keyboard tab order)');
 
-  console.log('\n=== scope-ext [19]/[20]/[21] tooltip: default-scope status, numerator/denominator/percent, escaping ===');
-  assert(/Rptr Eins · [^<]*Scope: dk-mj \(confirmed\)/.test(svg),
-    'a confirmed default scope shows "<scope> (confirmed)" in the tooltip');
-  assert(/Rptr Vier · [^<]*Scope: se12 \(inferred\)/.test(svg),
-    'an inferred (unconfirmed) default scope shows "<scope> (inferred)" in the tooltip');
-  assert(/Raum &lt;Zwei&gt; · [^<]*Scope: No default scope/.test(svg),
-    'a node with no default scope shows "No default scope" in the tooltip, and the name is still escaped in this same string');
-  assert(/Unscoped: 8 of 200 relays \(4%\)/.test(svg),
-    'tooltip shows numerator, denominator, AND the percentage together: "8 of 200 relays (4%)"');
-  assert(/Unscoped: —/.test(svg),
-    'a node with no unscoped/relay24h data shows an em dash, not "undefined" or "0 of 0"');
-  assert(/Recent scopes: 2/.test(svg) && /Recent scopes: —/.test(svg),
-    'recent-scope count is shown numerically when known (2) and as an em dash when null');
-
   console.log('\n=== [15] empty axis combination shows a message, not a blank plot ===');
   const empties = [{ pk: 'E', name: 'e', role: 'repeater', fav: false, traffic: null, bridge: null }];
   const emptySvg = M.renderMetricScatter(empties, M._resolveAxis('traffic', empties), M._resolveAxis('bridge', empties));
@@ -309,71 +205,25 @@ console.log('\n=== [7]/[10]/[11] scatter render: both-values-required, escaping,
     'no sampling disclosure is shown for a small point set');
 }
 
-console.log('\n=== scope-ext [13] each scope filter includes/excludes the correct fixtures ===');
-{
-  const fixtures = [
-    { pk: 'no-default', defaultScope: null, defaultScopeConfirmed: false, scopesObserved: null, scopesRecent: null },
-    { pk: 'confirmed', defaultScope: 'dk-mj', defaultScopeConfirmed: true, scopesObserved: 1, scopesRecent: 1 },
-    { pk: 'inferred', defaultScope: 'dk-oj', defaultScopeConfirmed: false, scopesObserved: 2, scopesRecent: 0 },
-    { pk: 'relays-others-observed', defaultScope: null, defaultScopeConfirmed: false, scopesObserved: 3, scopesRecent: 0 },
-    { pk: 'relays-others-recent-only', defaultScope: null, defaultScopeConfirmed: false, scopesObserved: null, scopesRecent: 1 },
-    { pk: 'no-default-no-relays', defaultScope: null, defaultScopeConfirmed: false, scopesObserved: null, scopesRecent: null },
-  ];
-  const byKey = key => fixtures.filter(M._scopeFilterPredicate(key)).map(p => p.pk);
-
-  assert(byKey('all').length === fixtures.length, '"all" passes every fixture through unfiltered');
-  assert(byKey('no-default').sort().join(',') === ['no-default', 'relays-others-observed', 'relays-others-recent-only', 'no-default-no-relays'].sort().join(','),
-    '"no-default" includes every fixture with a falsy defaultScope, regardless of scope-transport activity');
-  assert(byKey('confirmed-default').join(',') === 'confirmed',
-    '"confirmed-default" includes only the fixture with BOTH a defaultScope AND defaultScopeConfirmed');
-  assert(byKey('inferred-default').join(',') === 'inferred',
-    '"inferred-default" includes only the fixture with a defaultScope but NOT confirmed');
-  assert(byKey('relays-without-own').sort().join(',') === ['relays-others-observed', 'relays-others-recent-only'].sort().join(','),
-    '"relays-without-own" includes fixtures with no default scope AND (scopesObserved>0 OR scopesRecent>0), excluding the truly idle no-default fixture');
-  assert(!byKey('relays-without-own').includes('no-default-no-relays'),
-    'a no-default fixture that has never transported any scope is excluded from "relays-without-own"');
-  assert(byKey('some-stale-unknown-key').length === fixtures.length,
-    'an unrecognized filter key falls back to the "all" predicate (matches _resolveAxis\'s own fallback style)');
-}
-
-console.log('\n=== scope-ext [22]/[23] _sampleExact selects EXACTLY min(budget, length), not ~budget/ceil(length/budget) ===');
-{
-  const arr2500 = Array.from({ length: 2500 }, (_, i) => i);
-  const sampled = M._sampleExact(arr2500, 2000);
-  assert(sampled.length === 2000,
-    '_sampleExact(2500 items, budget 2000) selects EXACTLY 2000 -- the old stride (i % Math.ceil(2500/2000) === 0 -> step 2) selected only ~1250');
-  assert(new Set(sampled).size === 2000, 'all 2000 selected items are distinct (no duplicate indices)');
-  assert(sampled[0] === arr2500[0] && sampled[sampled.length - 1] >= arr2500.length - 3,
-    'sampling spans the full input range (starts at the first source item, ends within a few items of the last)');
-  assert(M._sampleExact(arr2500, 3000).length === 2500,
-    '_sampleExact never fabricates points: budget > length returns the whole array (2500, not 3000)');
-  assert(M._sampleExact(arr2500, 0).length === 0, '_sampleExact with a 0 budget returns nothing');
-}
-
-console.log('\n=== scope-ext [22]/[23]/[24]/[25]/[26] favorites survive sampling; ~2000 cap holds even under an all-favorite set ===');
+console.log('\n=== [12]/[13]/[14] favorites survive sampling; ~2000 cap holds even under an all-favorite set ===');
 {
   const many = [];
   for (let i = 0; i < 2500; i++) many.push({ pk: 'p' + i, name: 'n' + i, role: 'repeater', fav: (i % 500 === 0), traffic: i / 2500, bridge: (i % 7) / 7 });
-  const favCount = many.filter(p => p.fav).length; // 5 favorites (i=0,500,1000,1500,2000)
+  const favCount = many.filter(p => p.fav).length;
   const bigSvg = M.renderMetricScatter(many, M._resolveAxis('traffic', many), M._resolveAxis('bridge', many));
   assert(/showing \d+ of 2500 points/.test(bigSvg),
     'sampling >2000 points is disclosed in-plot ("showing N of 2500 points")');
   const plotted = (bigSvg.match(/href="#\/nodes\//g) || []).length;
-  assert(plotted === M.REPEATER_METRIC_POINT_CAP,
-    `plotted point count is EXACTLY the ${M.REPEATER_METRIC_POINT_CAP}-point cap (5 favorites + 1995 sampled others), not an approximate ~1250`);
+  assert(plotted <= 2000 + favCount && plotted > 1000, 'plotted point count respects the ~2000 cap');
   const allFavsShown = many.filter(p => p.fav).every(p => bigSvg.includes('#/nodes/' + p.pk + '/analytics'));
   assert(allFavsShown, 'ALL favorites survive sampling — the legend favorite count is never a lie');
-
-  const { eligible, shown } = M._sampleForPlot(many, M._resolveAxis('traffic', many), M._resolveAxis('bridge', many));
-  assert(eligible.length === 2500 && shown.length === 2000,
-    '_sampleForPlot reports eligible=2500 (all have both values), shown=2000 (the cap) -- the single source of truth renderMetricScatter and the legend both read from');
 
   const allFav = [];
   for (let i = 0; i < 2500; i++) allFav.push({ pk: 'q' + i, name: 'n' + i, role: 'repeater', fav: true, traffic: i / 2500, bridge: 0.5 });
   const allFavSvg = M.renderMetricScatter(allFav, M._resolveAxis('traffic', allFav), M._resolveAxis('bridge', allFav));
   const allFavPlotted = (allFavSvg.match(/href="#\/nodes\//g) || []).length;
-  assert(allFavPlotted === M.REPEATER_METRIC_POINT_CAP,
-    '2500 favorites are themselves sampled down to EXACTLY the cap — the cap cannot be bypassed by favoriting everything');
+  assert(allFavPlotted <= 2000 && allFavPlotted > 1000,
+    '2500 favorites are themselves strided to respect the cap — the cap cannot be bypassed by favoriting everything');
 }
 
 function makeElement(id) {
@@ -462,104 +312,6 @@ function makeElement(id) {
     ySel.fireChange();
     assert(fakeLocalStorage.getItem('meshcore-repeater-scatter-y') === 'coverage',
       'the new Y axis choice is persisted to localStorage');
-  }
-
-  console.log('\n=== scope-ext [29] pre-existing (old) localStorage axis choices still resolve after this extension ===');
-  {
-    fakeLocalStorage.setItem('meshcore-repeater-scatter-x', 'bridge');
-    fakeLocalStorage.setItem('meshcore-repeater-scatter-y', 'redundancy');
-    nodesData = [{ public_key: 'A', name: 'A', role: 'repeater', bridge_score: 0.3, redundancy_score: 0.6 }];
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    assert(/id="metricScatterX"[\s\S]{0,900}option value="bridge" selected/.test(el.innerHTML),
-      'an old stored X axis key ("bridge", one of the original 8) still resolves and renders selected');
-    assert(/id="metricScatterY"[\s\S]{0,900}option value="redundancy" selected/.test(el.innerHTML),
-      'an old stored Y axis key ("redundancy") still resolves and renders selected');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-x');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-y');
-  }
-
-  console.log('\n=== scope-ext [14]/[15] scope filter is applied BEFORE axis-max/sampling, and the choice persists ===');
-  {
-    fakeLocalStorage.setItem('meshcore-repeater-scatter-x', 'traffic');
-    fakeLocalStorage.setItem('meshcore-repeater-scatter-y', 'bridge');
-    nodesData = [
-      { public_key: 'NODEFAULT', name: 'NoDefault', role: 'repeater', default_scope: null, traffic_share_score: 0.1, bridge_score: 0.1 },
-      { public_key: 'HASDEFAULT', name: 'HasDefault', role: 'repeater', default_scope: 'dk-mj', traffic_share_score: 0.9, bridge_score: 0.9 },
-    ];
-    favorites = [];
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    const scopeSel = el.querySelector('#metricScatterScopeFilter');
-    scopeSel.value = 'no-default';
-    scopeSel.fireChange();
-    const plot = el.querySelector('#metricScatterPlot').innerHTML;
-    assert(!/>100%</.test(plot),
-      'axis domain reflects ONLY the scope-filtered node (max 0.1 -> a 10% ceiling) -- if the excluded HasDefault node\'s 0.9 had leaked into the max/sampling pass, a 100% gridline would appear');
-    assert((plot.match(/href="#\/nodes\//g) || []).length === 1,
-      'only the no-default node is actually plotted once the scope filter is applied');
-    assert(fakeLocalStorage.getItem('meshcore-repeater-scatter-scope-filter') === 'no-default',
-      'selecting a scope filter persists its key to localStorage');
-  }
-
-  console.log('\n=== scope-ext [16] an unknown/stale stored scope-filter value falls back to "All scope states" ===');
-  {
-    fakeLocalStorage.setItem('meshcore-repeater-scatter-scope-filter', 'no-such-filter-anymore');
-    nodesData = [
-      { public_key: 'A', name: 'A', role: 'repeater', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 },
-      { public_key: 'B', name: 'B', role: 'repeater', default_scope: 'dk-mj', traffic_share_score: 0.5, usefulness_score: 0.5 },
-    ];
-    const el = makeElement('root');
-    let threw = false;
-    try { await M.renderRepeaterMetricsTab(el); } catch (e) { threw = true; }
-    assert(!threw, 'a stale scope-filter localStorage value does not crash the render');
-    assert(/id="metricScatterScopeFilter"[\s\S]{0,300}option value="all" selected/.test(el.innerHTML),
-      'the rendered scope-filter select falls back to "all" when the stored value is unrecognized');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-scope-filter');
-  }
-
-  console.log('\n=== scope-ext [17]/[18] presets select the correct axes, persist through the normal storage keys, and redraw ===');
-  {
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-x');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-y');
-    nodesData = [
-      { public_key: 'A', name: 'A', role: 'repeater', usefulness_score: 0.9, relay_count_24h: 10, unscoped_relay_count_24h: 5 },
-      { public_key: 'B', name: 'B', role: 'repeater', usefulness_score: 0.1, relay_count_24h: 20, unscoped_relay_count_24h: 2 },
-    ];
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    const plotBefore = el.querySelector('#metricScatterPlot').innerHTML;
-    const presetSel = el.querySelector('#metricScatterPreset');
-    presetSel.value = 'scope-risk';
-    presetSel.fireChange();
-    assert(el.querySelector('#metricScatterX').value === 'usefulness' && el.querySelector('#metricScatterY').value === 'unscopedRatio24h',
-      'the "Scope risk vs importance" preset sets X=usefulness, Y=unscopedRatio24h');
-    assert(fakeLocalStorage.getItem('meshcore-repeater-scatter-x') === 'usefulness' && fakeLocalStorage.getItem('meshcore-repeater-scatter-y') === 'unscopedRatio24h',
-      'choosing a preset persists the resulting axis pair through the SAME localStorage keys a manual axis change uses -- no separate storage path');
-    const plotAfter = el.querySelector('#metricScatterPlot').innerHTML;
-    assert(plotAfter !== plotBefore, 'choosing a preset redraws the plot');
-  }
-
-  console.log('\n=== scope-ext [26] legend favorite count reflects the scope-filtered view, not the unfiltered dataset ===');
-  {
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-x');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-y');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-scope-filter');
-    nodesData = [
-      { public_key: 'FAV_INCLUDED', name: 'FavIncluded', role: 'repeater', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 },
-      { public_key: 'FAV_EXCLUDED', name: 'FavExcluded', role: 'repeater', default_scope: 'dk-mj', traffic_share_score: 0.5, usefulness_score: 0.5 },
-      { public_key: 'PLAIN', name: 'Plain', role: 'repeater', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 },
-    ];
-    favorites = ['FAV_INCLUDED', 'FAV_EXCLUDED'];
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    const scopeSel = el.querySelector('#metricScatterScopeFilter');
-    scopeSel.value = 'no-default';
-    scopeSel.fireChange();
-    const legend = el.querySelector('#metricScatterLegend').innerHTML;
-    assert(/Favorites shown: 1\b/.test(legend) && !/Favorites shown: 2\b/.test(legend),
-      'the legend counts only the favorite that survived the scope filter (FAV_EXCLUDED has a default scope and is filtered out) -- not both originally-fetched favorites. The "N of M eligible" branch (favorites dropped by SAMPLING rather than filtering) is covered at the _sampleForPlot unit level above, where eligible=2500/shown=2000 is exact and independent of any DOM.');
-    favorites = [];
   }
 
   console.log('\n=== empty node set shows an explanatory empty state ===');
