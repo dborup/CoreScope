@@ -597,3 +597,103 @@ func TestAreaForPoint(t *testing.T) {
 		}
 	})
 }
+
+// TestAreaForPoint_TieBreaker covers areaMatchForPoint's deterministic
+// tie-break rule: when two or more matching areas have the EXACT same
+// bounding-box span, the lowest area config key wins (ordinal string
+// comparison), regardless of Go's randomized map iteration order. Without
+// this, two same-span overlapping areas could classify a point differently
+// from one call to the next within the same running process.
+func TestAreaForPoint_TieBreaker(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+
+	// Two areas with the exact same bounding-box span (0.5 x 0.5 degrees),
+	// both containing the test point below -- the scenario the tie-break
+	// exists for.
+	tiedAreas := func() map[string]AreaEntry {
+		return map[string]AreaEntry{
+			"ZZZ": {
+				Label:  "Area ZZZ",
+				LatMin: f(55.0), LatMax: f(55.5),
+				LonMin: f(10.0), LonMax: f(10.5),
+			},
+			"AAA": {
+				Label:  "Area AAA",
+				LatMin: f(55.0), LatMax: f(55.5),
+				LonMin: f(10.0), LonMax: f(10.5),
+			},
+		}
+	}
+	const testLat, testLon = 55.2, 10.2
+
+	t.Run("equal-span tie is broken by the lowest area key, not iteration order", func(t *testing.T) {
+		key, ok := AreaKeyForPoint(testLat, testLon, tiedAreas())
+		if !ok {
+			t.Fatal("expected a match")
+		}
+		if key != "AAA" {
+			t.Errorf("expected the alphabetically lowest key AAA to win an exact-span tie, got %q", key)
+		}
+	})
+
+	t.Run("tie-break result is stable across repeated calls on the same map", func(t *testing.T) {
+		areas := tiedAreas()
+		for i := 0; i < 500; i++ {
+			key, ok := AreaKeyForPoint(testLat, testLon, areas)
+			if !ok || key != "AAA" {
+				t.Fatalf("iteration %d: expected AAA, got %q (ok=%v) -- non-deterministic tie-break", i, key, ok)
+			}
+		}
+	})
+
+	t.Run("tie-break result is independent of map construction/insertion order", func(t *testing.T) {
+		// Built with the two keys in the opposite literal order from
+		// tiedAreas(). Go map iteration order is randomized regardless of
+		// construction order, but this pins that the RESULT doesn't depend
+		// on it either way.
+		base := tiedAreas()
+		reordered := map[string]AreaEntry{
+			"AAA": base["AAA"],
+			"ZZZ": base["ZZZ"],
+		}
+		key, ok := AreaKeyForPoint(testLat, testLon, reordered)
+		if !ok || key != "AAA" {
+			t.Errorf("expected AAA regardless of construction order, got %q (ok=%v)", key, ok)
+		}
+	})
+
+	t.Run("a smaller area still wins over a larger one despite an alphabetically later key", func(t *testing.T) {
+		// AAA is deliberately the LARGER area and alphabetically first --
+		// proves span comparison dominates the key tie-break, which only
+		// applies on an EXACT span match. Existing semantics for
+		// differently-sized areas must not change in this fix.
+		areas := map[string]AreaEntry{
+			"AAA": {
+				Label:  "Big AAA",
+				LatMin: f(50.0), LatMax: f(60.0),
+				LonMin: f(5.0), LonMax: f(15.0),
+			},
+			"ZZZ": {
+				Label:  "Small ZZZ",
+				LatMin: f(55.0), LatMax: f(55.5),
+				LonMin: f(10.0), LonMax: f(10.5),
+			},
+		}
+		key, ok := AreaKeyForPoint(testLat, testLon, areas)
+		if !ok || key != "ZZZ" {
+			t.Errorf("expected the smaller area ZZZ to win despite AAA sorting first, got %q (ok=%v)", key, ok)
+		}
+	})
+
+	t.Run("three-way exact tie still resolves to the lowest key", func(t *testing.T) {
+		areas := map[string]AreaEntry{
+			"CCC": {Label: "C", LatMin: f(55.0), LatMax: f(55.5), LonMin: f(10.0), LonMax: f(10.5)},
+			"BBB": {Label: "B", LatMin: f(55.0), LatMax: f(55.5), LonMin: f(10.0), LonMax: f(10.5)},
+			"DDD": {Label: "D", LatMin: f(55.0), LatMax: f(55.5), LonMin: f(10.0), LonMax: f(10.5)},
+		}
+		key, ok := AreaKeyForPoint(testLat, testLon, areas)
+		if !ok || key != "BBB" {
+			t.Errorf("expected BBB (lowest of CCC/BBB/DDD), got %q (ok=%v)", key, ok)
+		}
+	})
+}
