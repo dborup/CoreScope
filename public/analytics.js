@@ -2644,15 +2644,64 @@
   // dropped entirely: Traffic share and Usefulness are two independent
   // axes, each reading only its own field, null (not 0, not the other
   // axis's value) when absent.
+  // Scope-health extension (separate commit on top of the #1760 port):
+  // adds 4 scope-related axes, a scope-state filter, and 4 preset axis
+  // pairs, all reading fields /api/nodes already attaches to repeater/room
+  // rows -- no backend change. See _toScatterPoints below for the exact
+  // per-field API contract (in particular why unscoped_relay_count_24h and
+  // transported_scopes/transported_scopes_recent are handled differently).
   const REPEATER_METRIC_AXES = [
-    { key: 'traffic',    label: 'Traffic share', score: true,  get: p => p.traffic },
-    { key: 'usefulness', label: 'Usefulness',    score: true,  get: p => p.usefulness },
-    { key: 'bridge',     label: 'Bridge',        score: true,  get: p => p.bridge },
-    { key: 'coverage',   label: 'Coverage',      score: true,  get: p => p.coverage },
-    { key: 'redundancy', label: 'Redundancy',    score: true,  get: p => p.redundancy },
-    { key: 'relay1h',    label: 'Relays (1h)',   score: false, get: p => p.relay1h },
-    { key: 'relay24h',   label: 'Relays (24h)',  score: false, get: p => p.relay24h },
-    { key: 'adverts',    label: 'Adverts',       score: false, get: p => p.adverts },
+    { key: 'traffic',    label: 'Traffic share', score: true,  group: 'Network importance', get: p => p.traffic },
+    { key: 'usefulness', label: 'Usefulness',    score: true,  group: 'Network importance', get: p => p.usefulness },
+    { key: 'bridge',     label: 'Bridge',        score: true,  group: 'Network importance', get: p => p.bridge },
+    { key: 'coverage',   label: 'Coverage',      score: true,  group: 'Network importance', get: p => p.coverage },
+    { key: 'redundancy', label: 'Redundancy',    score: true,  group: 'Network importance', get: p => p.redundancy },
+    { key: 'relay1h',    label: 'Relays (1h)',   score: false, group: 'Activity', get: p => p.relay1h },
+    { key: 'relay24h',   label: 'Relays (24h)',  score: false, group: 'Activity', get: p => p.relay24h },
+    { key: 'adverts',    label: 'Adverts',       score: false, group: 'Activity', get: p => p.adverts },
+    { key: 'unscopedRelays24h', label: 'Unscoped relays (24h)',          score: false, group: 'Scope health', get: p => p.unscopedRelays24h },
+    { key: 'unscopedRatio24h',  label: 'Unscoped ratio (24h)',           score: true,  group: 'Scope health', get: p => p.unscopedRatio24h },
+    { key: 'scopesObserved',    label: 'Transported scopes (observed)', score: false, group: 'Scope health', get: p => p.scopesObserved },
+    { key: 'scopesRecent',      label: 'Recently transported scopes',   score: false, group: 'Scope health', get: p => p.scopesRecent },
+  ];
+  // Fixed display order for <optgroup> rendering -- independent of the
+  // array order above (which _resolveAxis's fallback-to-first relies on
+  // staying [0]==traffic; do not reorder REPEATER_METRIC_AXES itself).
+  const REPEATER_METRIC_AXIS_GROUPS = ['Network importance', 'Activity', 'Scope health'];
+
+  // Scope-state filter: narrows the plotted population by default-scope
+  // status. Applied BEFORE axis-domain, sampling and legend computation
+  // (see draw()) so every downstream number reflects the filtered view.
+  const SCOPE_FILTERS = [
+    { key: 'all', label: 'All scope states' },
+    { key: 'no-default', label: 'No default scope' },
+    { key: 'confirmed-default', label: 'Confirmed default scope' },
+    { key: 'inferred-default', label: 'Inferred default scope' },
+    { key: 'relays-without-own', label: 'Relays scopes without own default' },
+  ];
+  function _scopeFilterPredicate(key) {
+    switch (key) {
+      case 'no-default': return p => !p.defaultScope;
+      case 'confirmed-default': return p => Boolean(p.defaultScope && p.defaultScopeConfirmed);
+      case 'inferred-default': return p => Boolean(p.defaultScope && !p.defaultScopeConfirmed);
+      // Robust array checks: scopesObserved/scopesRecent are already null
+      // (not 0) when the source array was absent -- `|| 0` here is a
+      // boolean-predicate convenience (">0" reads the same for null and 0),
+      // not a reuse of null as a plotted value.
+      case 'relays-without-own': return p => !p.defaultScope && ((p.scopesObserved || 0) > 0 || (p.scopesRecent || 0) > 0);
+      default: return () => true;
+    }
+  }
+
+  // Scope-focused axis-pair shortcuts. A preset ONLY selects X/Y axes, then
+  // persists + redraws through the SAME path a manual axis change uses
+  // (see the presetSel wiring below) -- it must never introduce a second
+  // computation route.
+  const REPEATER_METRIC_PRESETS = [
+    { key: 'scope-risk', label: 'Scope risk vs importance', x: 'usefulness', y: 'unscopedRatio24h' },
+    { key: 'bridge-risk', label: 'Bridge risk', x: 'bridge', y: 'unscopedRelays24h' },
+    { key: 'scope-diversity', label: 'Scope diversity vs traffic', x: 'traffic', y: 'scopesRecent' },
+    { key: 'activity-vs-unscoped', label: 'Activity vs unscoped ratio', x: 'relay24h', y: 'unscopedRatio24h' },
   ];
 
   // _niceCeil rounds v up to a "nice" 1/2/5 x 10^n value for an axis ceiling
@@ -2699,28 +2748,110 @@
     return _axisFromMax(axis, max);
   }
 
+  // _sampleExact deterministically selects exactly min(budget, arr.length)
+  // items from arr, evenly spread across it. Replaces a stride
+  // (`i % Math.ceil(length / budget) === 0`) that under-filled the budget --
+  // e.g. only ~1250 of a 2000 budget from 2500 inputs, silently wasting
+  // ~40% of the point cap (scope-extension review finding). Index spacing
+  // (length/budget >= 1 whenever budget <= length) guarantees strictly
+  // increasing, therefore distinct, indices -- no dedup pass needed.
+  function _sampleExact(arr, budget) {
+    if (budget <= 0) return [];
+    if (budget >= arr.length) return arr.slice();
+    const out = [];
+    for (let i = 0; i < budget; i++) {
+      out.push(arr[Math.floor(i * arr.length / budget)]);
+    }
+    return out;
+  }
+
+  const REPEATER_METRIC_POINT_CAP = 2000;
+
+  // _sampleForPlot is the single source of truth for "eligible" (both axis
+  // values present, after the caller's scope filter) and "shown" (after the
+  // ~2000-point cap with favorites preserved) point sets. Shared by
+  // renderMetricScatter's own drawing pass and renderRepeaterMetricsTab's
+  // legend/favorite-count text so the two can never disagree -- the
+  // scope-extension review finding this fixes: the legend used to count
+  // ALL favorites in the unfiltered dataset, including ones missing an
+  // axis value, filtered out by scope, or dropped by sampling.
+  function _sampleForPlot(points, xAxis, yAxis) {
+    const eligible = points.filter(p => xAxis.get(p) != null && yAxis.get(p) != null);
+    let shown = eligible;
+    if (eligible.length > REPEATER_METRIC_POINT_CAP) {
+      let favs = eligible.filter(p => p.fav);
+      const others = eligible.filter(p => !p.fav);
+      // Favorites are kept ahead of non-favorites, but even they are
+      // sampled down if they ALONE exceed the cap -- so a pathological
+      // favorite count can't blow past REPEATER_METRIC_POINT_CAP.
+      if (favs.length > REPEATER_METRIC_POINT_CAP) {
+        favs = _sampleExact(favs, REPEATER_METRIC_POINT_CAP);
+      }
+      const budget = Math.max(0, REPEATER_METRIC_POINT_CAP - favs.length);
+      shown = favs.concat(_sampleExact(others, budget));
+    }
+    return { eligible, shown };
+  }
+
   // Map /api/nodes rows to plottable points. Pure and factored out of
   // renderRepeaterMetricsTab so the repeater/room filter and the name
   // fallback chain (name → pubkey prefix → '?') are unit-testable.
   // Traffic and usefulness are read independently -- see the block comment
   // above for why no fallback exists between them.
+  //
+  // Scope-field API contract (traced against cmd/server, not assumed):
+  //  - unscoped_relay_count_24h is set UNCONDITIONALLY alongside
+  //    relay_count_1h/24h in the same enrichment step (routes.go) -- as a
+  //    plain Go int, never omitted. It can only be absent on a server that
+  //    predates the whole relay-enrichment feature, in which case
+  //    relay_count_24h is ALSO absent -- so `!= null` on the field itself is
+  //    sufficient; there is no scenario where relay24h is known but
+  //    unscoped is unknown.
+  //  - unscopedRatio24h is computed here, never sent by the server. It is
+  //    null (not 0) whenever the denominator is 0 or missing, is NEVER
+  //    silently clamped (a ratio >1 would mean unscoped exceeded its own
+  //    superset -- a real data inconsistency that must stay visible, not
+  //    be hidden by a clamp), and never coerces a missing numerator to 0.
+  //  - transported_scopes / transported_scopes_recent are OMITTED by the
+  //    server whenever empty ("Absent when empty" -- openapi.go), on ANY
+  //    current server, not just old ones. That means a repeater confirmed
+  //    to have transported ZERO scopes and a repeater this field was never
+  //    populated for are indistinguishable from here -- both become
+  //    null/unplotted on these two axes. This is a real, documented
+  //    limitation of the current API shape (ambiguous zero-vs-missing),
+  //    not something this client code can resolve without a server change
+  //    that sends `[]` instead of omitting the key; per the task brief,
+  //    that backend change is out of scope here.
   function _toScatterPoints(nodes, favs) {
     return nodes
       .filter(n => n.role === 'repeater' || n.role === 'room')
-      .map(n => ({
-        pk: n.public_key,
-        name: n.name || (n.public_key ? n.public_key.slice(0, 12) : '?'),
-        role: n.role,
-        fav: favs.has(n.public_key),
-        traffic: n.traffic_share_score != null ? n.traffic_share_score : null,
-        usefulness: n.usefulness_score != null ? n.usefulness_score : null,
-        bridge: n.bridge_score != null ? n.bridge_score : null,
-        coverage: n.coverage_score != null ? n.coverage_score : null,
-        redundancy: n.redundancy_score != null ? n.redundancy_score : null,
-        relay1h: n.relay_count_1h != null ? n.relay_count_1h : null,
-        relay24h: n.relay_count_24h != null ? n.relay_count_24h : null,
-        adverts: n.advert_count != null ? n.advert_count : null,
-      }));
+      .map(n => {
+        const relay24h = n.relay_count_24h != null ? n.relay_count_24h : null;
+        const unscopedRelays24h = n.unscoped_relay_count_24h != null ? n.unscoped_relay_count_24h : null;
+        const unscopedRatio24h = (relay24h != null && relay24h > 0 && unscopedRelays24h != null)
+          ? unscopedRelays24h / relay24h
+          : null;
+        return {
+          pk: n.public_key,
+          name: n.name || (n.public_key ? n.public_key.slice(0, 12) : '?'),
+          role: n.role,
+          fav: favs.has(n.public_key),
+          traffic: n.traffic_share_score != null ? n.traffic_share_score : null,
+          usefulness: n.usefulness_score != null ? n.usefulness_score : null,
+          bridge: n.bridge_score != null ? n.bridge_score : null,
+          coverage: n.coverage_score != null ? n.coverage_score : null,
+          redundancy: n.redundancy_score != null ? n.redundancy_score : null,
+          relay1h: n.relay_count_1h != null ? n.relay_count_1h : null,
+          relay24h: relay24h,
+          adverts: n.advert_count != null ? n.advert_count : null,
+          unscopedRelays24h: unscopedRelays24h,
+          unscopedRatio24h: unscopedRatio24h,
+          scopesObserved: Array.isArray(n.transported_scopes) ? n.transported_scopes.length : null,
+          scopesRecent: Array.isArray(n.transported_scopes_recent) ? n.transported_scopes_recent.length : null,
+          defaultScope: n.default_scope || null,
+          defaultScopeConfirmed: Boolean(n.default_scope_confirmed_at),
+        };
+      });
   }
 
   function renderMetricScatter(points, xAxis, yAxis) {
@@ -2745,51 +2876,60 @@
     svg += `<line x1="${pad}" y1="${pad}" x2="${pad}" y2="${h-pad}" stroke="var(--text-muted)" stroke-width="0.75"/>`;
     svg += `<text x="${pad + plotW/2}" y="${h-6}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${esc(xAxis.label)}</text>`;
     svg += `<text x="14" y="${pad + plotH/2}" text-anchor="middle" font-size="11" fill="var(--text-muted)" transform="rotate(-90,14,${pad + plotH/2})">${esc(yAxis.label)}</text>`;
-    // Only points with BOTH axis values present are plottable.
-    const plottable = points.filter(p => xAxis.get(p) != null && yAxis.get(p) != null);
-    if (!plottable.length) {
+    // Only points with BOTH axis values present are eligible; sampling (with
+    // favorites preserved) is shared with the legend via _sampleForPlot.
+    const { eligible, shown } = _sampleForPlot(points, xAxis, yAxis);
+    if (!eligible.length) {
       svg += `<text x="${pad + plotW / 2}" y="${pad + plotH / 2}" text-anchor="middle" font-size="12" fill="var(--text-muted)">No repeaters have values for both selected metrics.</text></svg>`;
       return svg;
     }
-    // Cap plotted points to keep the SVG snappy (~2000 stays smooth in a
-    // headless browser), but keep ALL favorites unconditionally and stride
-    // only the non-favorites into the remaining budget — so the legend's
-    // favorite count can never be a lie.
-    const POINT_CAP = 2000;
-    let sample = plottable;
-    if (plottable.length > POINT_CAP) {
-      let favs = plottable.filter(p => p.fav);
-      const others = plottable.filter(p => !p.fav);
-      // Favorites are kept ahead of non-favorites, but even they are strided
-      // if they ALONE exceed the cap — so a pathological favorite count can't
-      // blow past POINT_CAP (the "showing N of M" disclosure stays honest).
-      if (favs.length > POINT_CAP) {
-        favs = favs.filter((_, i) => i % Math.ceil(favs.length / POINT_CAP) === 0);
-      }
-      const budget = Math.max(0, POINT_CAP - favs.length);
-      const strided = (budget > 0 && others.length > budget)
-        ? others.filter((_, i) => i % Math.ceil(others.length / budget) === 0)
-        : others.slice(0, budget);
-      sample = favs.concat(strided);
-    }
-    // Sampling disclosure (graphical integrity): if we strided the points
+    // Sampling disclosure (graphical integrity): if we sampled the points
     // down, say so in-plot rather than silently hiding the rest.
-    if (sample.length < plottable.length) {
-      svg += `<text x="${w - pad}" y="${pad - 6}" text-anchor="end" font-size="9" fill="var(--text-muted)">showing ${sample.length} of ${plottable.length} points</text>`;
+    if (shown.length < eligible.length) {
+      svg += `<text x="${w - pad}" y="${pad - 6}" text-anchor="end" font-size="9" fill="var(--text-muted)">showing ${shown.length} of ${eligible.length} points</text>`;
     }
     // Draw favorites last so their rings are never hidden behind other dots.
-    const ordered = sample.slice().sort((a, b) => (a.fav === b.fav ? 0 : a.fav ? 1 : -1));
+    const ordered = shown.slice().sort((a, b) => (a.fav === b.fav ? 0 : a.fav ? 1 : -1));
     // Favorite ring uses the neutral foreground colour, NOT a status colour:
     // statusYellow means "degraded" elsewhere in the dashboard, so reusing it
     // here would cross semantic wires.
     const favColor = 'var(--text)';
+    // Point overlap (known limitation, NOT fixed here): many points can land
+    // on IDENTICAL rounded pixel coordinates -- especially at/near 0 on a
+    // sparse Scope health axis, where most repeaters have no unscoped
+    // relays at all. Only the topmost <a> in SVG paint order receives
+    // hover/click, so nodes underneath are otherwise unreachable. Jittering
+    // the draw position was deliberately rejected (per review): it would
+    // visually misrepresent the true axis values. The safe, small mitigation
+    // below just names the sharers in every co-located point's tooltip, so
+    // at least their existence and identity are discoverable; a real fix
+    // (clustering, zoom-to-rect, or a coordinate picker list) is out of
+    // scope for this change.
+    const coordGroups = {};
+    ordered.forEach(p => {
+      const key = xOf(xAxis.get(p)).toFixed(1) + ',' + yOf(yAxis.get(p)).toFixed(1);
+      (coordGroups[key] = coordGroups[key] || []).push(p);
+    });
     ordered.forEach(p => {
       const cx = xOf(xAxis.get(p)).toFixed(1);
       const cy = yOf(yAxis.get(p)).toFixed(1);
       const color = (window.ROLE_COLORS && window.ROLE_COLORS[p.role]) || 'var(--text-muted)';
+      const scopeText = p.defaultScope
+        ? p.defaultScope + (p.defaultScopeConfirmed ? ' (confirmed)' : ' (inferred)')
+        : 'No default scope';
+      const unscopedText = (p.unscopedRelays24h != null && p.relay24h != null)
+        ? p.unscopedRelays24h + ' of ' + p.relay24h + ' relays' + (p.unscopedRatio24h != null ? ' (' + _axisFmt({ score: true }, p.unscopedRatio24h) + ')' : '')
+        : '—';
+      const recentScopesText = p.scopesRecent != null ? String(p.scopesRecent) : '—';
       // ' · ' separators, not '\n': SVG <title> tooltips collapse whitespace,
       // so newlines would render as a run-on string.
-      const tip = `${p.name} · ${xAxis.label}: ${_axisFmt(xAxis, xAxis.get(p))} · ${yAxis.label}: ${_axisFmt(yAxis, yAxis.get(p))}`;
+      let tip = `${p.name} · ${xAxis.label}: ${_axisFmt(xAxis, xAxis.get(p))} · ${yAxis.label}: ${_axisFmt(yAxis, yAxis.get(p))}` +
+        ` · Scope: ${scopeText} · Unscoped: ${unscopedText} · Recent scopes: ${recentScopesText}`;
+      const overlap = coordGroups[cx + ',' + cy];
+      if (overlap.length > 1) {
+        const others = overlap.filter(o => o !== p).map(o => o.name);
+        tip += ` · ${overlap.length - 1} other node(s) here: ${others.join(', ')}`;
+      }
       // tabindex="-1": with up to 2000 points we keep them clickable but out
       // of the sequential keyboard tab order (the Nodes table is the
       // keyboard-navigable surface for per-node drill-down).
@@ -2823,19 +2963,34 @@
       // (single validation path); the <select> then just shows its first option.
       let xKey = localStorage.getItem('meshcore-repeater-scatter-x') || 'traffic';
       let yKey = localStorage.getItem('meshcore-repeater-scatter-y') || 'usefulness';
-      const opts = sel => REPEATER_METRIC_AXES.map(a => `<option value="${a.key}"${a.key === sel ? ' selected' : ''}>${esc(a.label)}</option>`).join('');
+      let scopeFilterKey = localStorage.getItem('meshcore-repeater-scatter-scope-filter') || 'all';
+      if (!SCOPE_FILTERS.some(f => f.key === scopeFilterKey)) scopeFilterKey = 'all';
+      const opts = sel => REPEATER_METRIC_AXIS_GROUPS.map(g =>
+        `<optgroup label="${esc(g)}">` +
+        REPEATER_METRIC_AXES.filter(a => a.group === g).map(a => `<option value="${a.key}"${a.key === sel ? ' selected' : ''}>${esc(a.label)}</option>`).join('') +
+        `</optgroup>`
+      ).join('');
+      const scopeOpts = sel => SCOPE_FILTERS.map(f => `<option value="${f.key}"${f.key === sel ? ' selected' : ''}>${esc(f.label)}</option>`).join('');
+      const presetOpts = () => REPEATER_METRIC_PRESETS.map(p => `<option value="${p.key}">${esc(p.label)}</option>`).join('');
 
       el.innerHTML = `
         <div class="analytics-section">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-target"/></svg> Repeater Metric Scatter</h3>
           <p class="text-muted">Each point is a repeater or room. Pick two metrics to compare — colors follow node role, favorites are ringed. Click a point for its analytics.</p>
           <p class="text-muted" style="font-size:12px;margin-top:4px">Units — <strong>Usefulness</strong>: the #672 composite (0.30 bridge + 0.25 coverage + 0.25 redundancy + 0.20 traffic). <strong>Traffic share</strong>: % of non-advert traffic relayed. <strong>Bridge/Coverage/Redundancy</strong>: 0–100% (network-normalized). <strong>Relays (1h/24h)</strong> and <strong>Adverts</strong>: packet counts. Axes auto-scale to the data.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px">Scope health — <strong>Unscoped ratio</strong> is unscoped relays divided by all relays over 24h, e.g. "8 of 20 relays (40%)" — read a high percentage from very few relays cautiously. <strong>Transported scopes (observed)</strong> reflects scopes still resident in the server's current in-memory index, not a guaranteed all-time history. <strong>Recently transported scopes</strong> follows the server's relay-activity window, not necessarily 24h.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
             <label style="display:flex;gap:6px;align-items:center">X axis
               <select id="metricScatterX" class="analytics-time-window-select" aria-label="X axis metric">${opts(xKey)}</select>
             </label>
             <label style="display:flex;gap:6px;align-items:center">Y axis
               <select id="metricScatterY" class="analytics-time-window-select" aria-label="Y axis metric">${opts(yKey)}</select>
+            </label>
+            <label style="display:flex;gap:6px;align-items:center">Scope filter
+              <select id="metricScatterScopeFilter" class="analytics-time-window-select" aria-label="Scope state filter">${scopeOpts(scopeFilterKey)}</select>
+            </label>
+            <label style="display:flex;gap:6px;align-items:center">Preset
+              <select id="metricScatterPreset" class="analytics-time-window-select" aria-label="Scope analysis preset"><option value="">— choose —</option>${presetOpts()}</select>
             </label>
             <span class="text-muted">${points.length} repeater${points.length === 1 ? '' : 's'}</span>
           </div>
@@ -2847,28 +3002,38 @@
       const legendEl = el.querySelector('#metricScatterLegend');
       const xSel = el.querySelector('#metricScatterX');
       const ySel = el.querySelector('#metricScatterY');
+      const scopeFilterSel = el.querySelector('#metricScatterScopeFilter');
+      const presetSel = el.querySelector('#metricScatterPreset');
 
       function draw() {
-        // Both axes share the same point set, so compute their maxima in one
-        // pass instead of a full pass per _resolveAxis call.
+        // Scope filter is applied BEFORE axis-max, sampling, and legend
+        // counts -- every downstream number reflects the filtered view.
+        const scopeFiltered = points.filter(_scopeFilterPredicate(scopeFilterSel.value));
         const xA = REPEATER_METRIC_AXES.find(a => a.key === xSel.value) || REPEATER_METRIC_AXES[0];
         const yA = REPEATER_METRIC_AXES.find(a => a.key === ySel.value) || REPEATER_METRIC_AXES[0];
         let xMax = 0, yMax = 0;
-        points.forEach(p => {
+        scopeFiltered.forEach(p => {
           const xv = xA.get(p); if (xv != null && xv > xMax) xMax = xv;
           const yv = yA.get(p); if (yv != null && yv > yMax) yMax = yv;
         });
         const xAxis = _axisFromMax(xA, xMax), yAxis = _axisFromMax(yA, yMax);
-        plotEl.innerHTML = renderMetricScatter(points, xAxis, yAxis);
-        // Legend: each role present, plus the favorite-ring marker.
-        const roles = Array.from(new Set(points.map(p => p.role)));
+        plotEl.innerHTML = renderMetricScatter(scopeFiltered, xAxis, yAxis);
+        // Legend uses the SAME eligible/shown partition renderMetricScatter
+        // just drew from, so role list and favorite counts can never
+        // disagree with what's actually on screen.
+        const { eligible, shown } = _sampleForPlot(scopeFiltered, xAxis, yAxis);
+        const roles = Array.from(new Set(eligible.map(p => p.role)));
         let lg = roles.map(r => {
           const c = (window.ROLE_COLORS && window.ROLE_COLORS[r]) || 'var(--text-muted)';
           return `<span style="display:inline-flex;gap:6px;align-items:center"><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="${c}"/></svg>${esc(r)}</span>`;
         }).join('');
-        const favCount = points.filter(p => p.fav).length;
-        if (favCount) {
-          lg += `<span style="display:inline-flex;gap:6px;align-items:center"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--text)" stroke-width="1.75"/></svg>Favorite (${favCount})</span>`;
+        const eligibleFavCount = eligible.filter(p => p.fav).length;
+        const shownFavCount = shown.filter(p => p.fav).length;
+        if (eligibleFavCount) {
+          const favLabel = shownFavCount === eligibleFavCount
+            ? `Favorites shown: ${shownFavCount}`
+            : `Favorites shown: ${shownFavCount} of ${eligibleFavCount} eligible`;
+          lg += `<span style="display:inline-flex;gap:6px;align-items:center"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--text)" stroke-width="1.75"/></svg>${esc(favLabel)}</span>`;
         }
         legendEl.innerHTML = lg;
       }
@@ -2881,6 +3046,24 @@
       });
       wireAxis(xSel, 'meshcore-repeater-scatter-x');
       wireAxis(ySel, 'meshcore-repeater-scatter-y');
+      if (scopeFilterSel) scopeFilterSel.addEventListener('change', () => {
+        try { localStorage.setItem('meshcore-repeater-scatter-scope-filter', scopeFilterSel.value); } catch (e) { /* ignore */ }
+        draw();
+      });
+      // A preset ONLY sets X/Y select values, then persists + redraws
+      // through the exact same wireAxis-driven path a manual change uses --
+      // no separate computation route (see REPEATER_METRIC_PRESETS above).
+      if (presetSel) presetSel.addEventListener('change', () => {
+        const preset = REPEATER_METRIC_PRESETS.find(p => p.key === presetSel.value);
+        if (!preset) return;
+        xSel.value = preset.x;
+        ySel.value = preset.y;
+        try {
+          localStorage.setItem('meshcore-repeater-scatter-x', preset.x);
+          localStorage.setItem('meshcore-repeater-scatter-y', preset.y);
+        } catch (e) { /* ignore */ }
+        draw();
+      });
       draw();
     } catch (e) {
       el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--status-red)">Failed to load repeater metrics: ${esc(e.message)}</div>`;
