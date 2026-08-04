@@ -1405,6 +1405,39 @@ console.log('\n=== packets.js: scroll position preserved across renderTableRows 
   });
 }
 
+// ===== packets.js: View Path button (detail panel) =====
+console.log('\n=== packets.js: View Path button ===');
+{
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+
+  test('detail-actions renders a View Path button gated on pkt.hash', () => {
+    assert.ok(src.includes('${pkt.hash ? `<button class="detail-map-link" data-view-path="${escapeHtml(pkt.hash)}"'),
+      'renderDetail must emit a data-view-path button for any packet with a hash');
+  });
+
+  test('View Path button is not gated on pathHops.length, unlike View route on map', () => {
+    // The packet-path-map.js modal plots every station that heard the packet,
+    // not just the deepest relay chain, so a direct-only (0-hop) packet still
+    // has a spread worth visualizing (same rationale as channels.js's bot-reply
+    // "View path" link). Pin that the two buttons use different gates.
+    const viewPathIdx = src.indexOf('data-view-path="${escapeHtml(pkt.hash)}"');
+    const viewRouteIdx = src.indexOf('id="viewRouteBtn"');
+    assert.ok(viewPathIdx > -1 && viewRouteIdx > -1, 'both buttons must be present in the template');
+    const between = src.slice(Math.max(0, viewPathIdx - 80), viewPathIdx);
+    assert.ok(!between.includes('pathHops.length'), 'View Path button must not share the pathHops.length gate');
+  });
+
+  test('View Path button opens window.PacketPathMap.open with its own hash, not a full navigation', () => {
+    assert.ok(src.includes("if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);"),
+      'clicking View Path must call PacketPathMap.open in place, matching the ?viewPath=1 deep-link behavior');
+  });
+
+  test('View Path button wiring is queried via the shared [data-view-path] selector', () => {
+    assert.ok(src.includes("panel.querySelector('[data-view-path]')"),
+      'must reuse the same attribute selector pattern as channels.js/ping-scores.js');
+  });
+}
+
 // ===== SUMMARY =====
 console.log(`\n${'='.repeat(40)}`);
 console.log(`packets.js tests: ${passed} passed, ${failed} failed`);
