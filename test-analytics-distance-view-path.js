@@ -34,12 +34,43 @@ test('Top 10 Longest Multi-Hop Paths row builds a View Path button gated on p.ha
 });
 
 test('both leaderboards append viewPathBtn into the same actions cell as the existing map button', () => {
-  assert.ok(src.includes('<td>${mapBtn}${viewPathBtn}</td></tr>`;'),
+  assert.ok(src.includes('<td class="col-actions">${mapBtn}${viewPathBtn}</td></tr>`;'),
     'View Path must render alongside View on map, not replace it or need its own column');
   // Both rows use the identical closing shape; confirm it appears twice (hops row + paths row).
-  const count = (src.match(/<td>\$\{mapBtn\}\$\{viewPathBtn\}<\/td><\/tr>`;/g) || []).length;
+  const count = (src.match(/<td class="col-actions">\$\{mapBtn\}\$\{viewPathBtn\}<\/td><\/tr>`;/g) || []).length;
   assert.strictEqual(count, 2, 'expected exactly 2 rows (hops leaderboard + paths leaderboard) to use this cell shape, got ' + count);
 });
+
+test('both leaderboard headers mark the trailing th as col-actions, matching the row cells', () => {
+  const count = (src.match(/<th scope="col" class="col-actions"><\/th>/g) || []).length;
+  assert.strictEqual(count, 2, 'expected both table headers (hops + paths) to tag their empty actions header, got ' + count);
+});
+
+console.log('\n=== style.css: .col-actions sticky-right rule ===');
+{
+  const css = fs.readFileSync('public/style.css', 'utf8');
+
+  test('.col-actions is pinned to the right edge of the table scroll container', () => {
+    // The button pair (View on map + View Path, 48x48 each per the AGENTS
+    // glove-operability floor) sat past 8+ scrollable columns -- reachable
+    // but not visible without deliberately scrolling sideways to find it.
+    // Sticky-right keeps it in view regardless of scroll position.
+    const m = css.match(/\.data-table td\.col-actions,\s*\n\.data-table th\.col-actions\s*\{([^}]*)\}/);
+    assert.ok(m, '.col-actions rule not found in style.css');
+    assert.ok(/position:\s*sticky/.test(m[1]), 'must use position:sticky, not just a wider column');
+    assert.ok(/right:\s*0/.test(m[1]), 'must pin to the right edge (this is the trailing column)');
+  });
+
+  test('.col-actions has an opaque background so scrolled-under column content does not show through', () => {
+    assert.ok(/\.data-table td\.col-actions,\s*\n\.data-table th\.col-actions\s*\{[^}]*background:\s*var\(--card-bg\)/.test(css),
+      'sticky cells need their own background, otherwise horizontally-scrolled cells visibly bleed through underneath them');
+  });
+
+  test('.col-actions background is re-applied for zebra-striped (even) rows', () => {
+    assert.ok(css.includes('.data-table tbody tr:nth-child(even) td.col-actions { background: var(--row-stripe); }'),
+      'without this, striped rows would show the base background through their sticky cell instead of the stripe color');
+  });
+}
 
 test('dist-view-path buttons are wired via window.PacketPathMap.open, not a navigation', () => {
   assert.ok(src.includes("el.querySelectorAll('.dist-view-path').forEach(btn => {"),

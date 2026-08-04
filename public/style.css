@@ -1110,6 +1110,22 @@ img.brand-logo {
   padding: 3px 4px; text-align: center;
 }
 
+/* Distance tab leaderboards (analytics.js renderDistanceTab): the trailing
+ * actions cell (View on map / View Path icon buttons) sat past 8+ other
+ * columns inside analytics-table-scroll's horizontal scroll -- reachable,
+ * but not visible without deliberately scrolling the table sideways to
+ * find it. Pin it to the right edge of the scroll container instead so
+ * it's always in view. Needs its own opaque background (else scrolled
+ * column content shows through underneath) matching both the normal and
+ * zebra-striped row backgrounds. */
+.data-table td.col-actions,
+.data-table th.col-actions {
+  position: sticky; right: 0; z-index: 2;
+  background: var(--card-bg);
+  box-shadow: -6px 0 6px -4px rgba(0, 0, 0, 0.25);
+}
+.data-table tbody tr:nth-child(even) td.col-actions { background: var(--row-stripe); }
+
 /* #1415 / #1458 / #1461 — mobile packets UX overhaul.
  * NOTE: hiding the first dt/dd pair below assumes Payload Type is the
  * first <dt> in .detail-meta (per packets.js renderDetail). Keep that
