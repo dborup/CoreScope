@@ -301,75 +301,12 @@ console.log('\n=== [7]/[10]/[11] scatter render: both-values-required, escaping,
     'recent-scope count is shown numerically when known (2) and as an em dash when null');
 
   console.log('\n=== [15] empty axis combination shows a message, not a blank plot ===');
-  {
-    const empties = [{ pk: 'E', name: 'e', role: 'repeater', fav: false, traffic: null, bridge: null }];
-    const emptySvg = M.renderMetricScatter(empties, M._resolveAxis('traffic', empties), M._resolveAxis('bridge', empties));
-    assert(/No repeaters have values/.test(emptySvg),
-      'an axis combination with no plottable points renders an explicit message');
-    assert(!/showing \d+ of \d+ points/.test(svg),
-      'no sampling disclosure is shown for a small point set');
-  }
-}
-
-console.log('\n=== review-fix [overlap 1]/[2]/[3]/[4]/[5] co-located points: capped names, exact remainder, self-exclusion, escaping ===');
-{
-  // 8 points sharing the exact same (traffic, bridge) coordinate, so all 8
-  // round to the same pixel position and form one overlap group.
-  const overlapPts = [];
-  for (let i = 0; i < 8; i++) {
-    overlapPts.push({ pk: 'OV' + i, name: 'Overlap <' + i + '>', role: 'repeater', fav: false, traffic: 0.5, bridge: 0.5 });
-  }
-  const oxa = M._resolveAxis('traffic', overlapPts), oya = M._resolveAxis('bridge', overlapPts);
-  const osvg = M.renderMetricScatter(overlapPts, oxa, oya);
-
-  assert(/7 other node\(s\) here:/.test(osvg),
-    'review-fix [1]: each of the 8 co-located points reports the exact total (7 others) sharing its coordinate');
-
-  // The first <title> in the SVG is the chart-level accessibility title
-  // (e.g. "Repeater metric scatter: Traffic share (x) vs Bridge (y)"), not
-  // a point tooltip -- drop it before indexing against overlapPts.
-  const titles = [...osvg.matchAll(/<title>([^<]*)<\/title>/g)].map(m => m[1]).slice(1);
-  assert(titles.length === 8, 'sanity: found exactly 8 per-point tooltip <title> blocks (chart-level title excluded)');
-  titles.forEach((title, i) => {
-    const otherPart = (title.split('other node(s) here: ')[1] || '').replace(/, and \d+ more$/, '');
-    const shownNames = otherPart ? otherPart.split(', ') : [];
-    assert(shownNames.length <= 5,
-      `review-fix [2]: tooltip ${i} lists at most 5 other names (got ${shownNames.length})`);
-    const ownEscapedName = overlapPts[i].name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    assert(!shownNames.includes(ownEscapedName),
-      `review-fix [4]: point ${i}'s own name never appears in its own "others" list`);
-  });
-  assert(/, and 2 more/.test(osvg),
-    'review-fix [3]: with 8 points (7 others, 5 shown per tooltip), the remainder is EXACTLY 2 ("and 2 more")');
-  assert(osvg.includes('Overlap &lt;0&gt;') && !osvg.includes('Overlap <0>'),
-    'review-fix [5]: names containing HTML characters are still escaped in the overlap note (no raw "<"/">" leaks through)');
-}
-
-console.log('\n=== review-fix [overlap 6]/[7]/[8]/[9] 2000 identical coordinates: linear size, no O(n^2) blowup, bounded time ===');
-{
-  const many = [];
-  for (let i = 0; i < 2000; i++) many.push({ pk: 'z' + i, name: 'Node' + i, role: 'repeater', fav: false, traffic: 0.5, bridge: 0.5 });
-  const mxa = M._resolveAxis('traffic', many), mya = M._resolveAxis('bridge', many);
-  const t0 = Date.now();
-  const bigOverlapSvg = M.renderMetricScatter(many, mxa, mya);
-  const elapsedMs = Date.now() - t0;
-
-  // review-fix [7]: a fixture upper bound loose enough not to be flaky, but
-  // tight enough to catch the O(n^2) regression -- the previous
-  // implementation's overlap note alone would emit ~2000 names (each
-  // several bytes) PER tooltip, ~2000 times over, i.e. tens of MB just for
-  // that one coordinate. This build's per-tooltip overlap note is capped
-  // at 5 names, so total SVG growth across all 2000 points is linear.
-  assert(bigOverlapSvg.length < 2_000_000,
-    `review-fix [6]/[7]: SVG output for 2000 identical points stays well under a 2MB bound (got ${bigOverlapSvg.length} bytes)`);
-  // review-fix [9]: a conservative, CI-stable bound, not a tight
-  // microbenchmark -- this build should finish in low tens of ms; the old
-  // O(n^2) code (~4,000,000 filter/string ops for this one coordinate)
-  // would still blow well past even this generous 1s ceiling.
-  assert(elapsedMs < 1000,
-    `review-fix [8]/[9]: rendering 2000 identical points completes in well under a conservative 1000ms bound (took ${elapsedMs}ms)`);
-  assert(/, and 1994 more/.test(bigOverlapSvg),
-    'the remainder count is exact even at scale: 2000 points -> 1999 others -> 5 shown -> 1994 more');
+  const empties = [{ pk: 'E', name: 'e', role: 'repeater', fav: false, traffic: null, bridge: null }];
+  const emptySvg = M.renderMetricScatter(empties, M._resolveAxis('traffic', empties), M._resolveAxis('bridge', empties));
+  assert(/No repeaters have values/.test(emptySvg),
+    'an axis combination with no plottable points renders an explicit message');
+  assert(!/showing \d+ of \d+ points/.test(svg),
+    'no sampling disclosure is shown for a small point set');
 }
 
 console.log('\n=== scope-ext [13] each scope filter includes/excludes the correct fixtures ===');
@@ -601,35 +538,6 @@ function makeElement(id) {
       'choosing a preset persists the resulting axis pair through the SAME localStorage keys a manual axis change uses -- no separate storage path');
     const plotAfter = el.querySelector('#metricScatterPlot').innerHTML;
     assert(plotAfter !== plotBefore, 'choosing a preset redraws the plot');
-
-    console.log('\n=== review-fix [preset 13]/[14]/[15]/[16] preset select resets, is reselectable, never persists itself ===');
-    const presetSelAfter = el.querySelector('#metricScatterPreset');
-    assert(presetSelAfter.value === '',
-      'review-fix [13]: the preset <select> resets to the "" placeholder immediately after applying a preset');
-    assert(fakeLocalStorage.getItem('meshcore-repeater-preset') === null &&
-           fakeLocalStorage.getItem('meshcore-repeater-scatter-preset') === null,
-      'review-fix [16]: the preset CHOICE itself is never written to localStorage under any key -- only the resulting X/Y axis keys are');
-
-    // review-fix [15]: a manual axis change right after a preset must not
-    // leave a stale "active preset" impression -- already satisfied by [13]
-    // resetting to "" the moment the preset was applied, before any manual
-    // change even happens. Confirm the select still reads "" afterwards.
-    const xSelAfterPreset = el.querySelector('#metricScatterX');
-    xSelAfterPreset.value = 'bridge';
-    xSelAfterPreset.fireChange();
-    assert(el.querySelector('#metricScatterPreset').value === '',
-      'review-fix [15]: a manual axis change after a preset leaves the preset select at "" (never re-claims the old preset as active)');
-
-    // review-fix [14]: the SAME preset can be selected again immediately --
-    // this only works because the select's value returned to "" after the
-    // first application; a <select> that stayed on "scope-risk" would never
-    // fire a second 'change' event for the same value.
-    const presetSel2 = el.querySelector('#metricScatterPreset');
-    presetSel2.value = 'scope-risk';
-    presetSel2.fireChange();
-    assert(el.querySelector('#metricScatterX').value === 'usefulness' && el.querySelector('#metricScatterY').value === 'unscopedRatio24h',
-      'review-fix [14]: choosing the SAME preset again (after a manual change moved the axes away) re-applies it correctly');
-    assert(presetSel2.value === '', 'the preset select resets to "" again after this second application too');
   }
 
   console.log('\n=== scope-ext [26] legend favorite count reflects the scope-filtered view, not the unfiltered dataset ===');
@@ -652,72 +560,6 @@ function makeElement(id) {
     assert(/Favorites shown: 1\b/.test(legend) && !/Favorites shown: 2\b/.test(legend),
       'the legend counts only the favorite that survived the scope filter (FAV_EXCLUDED has a default scope and is filtered out) -- not both originally-fetched favorites. The "N of M eligible" branch (favorites dropped by SAMPLING rather than filtering) is covered at the _sampleForPlot unit level above, where eligible=2500/shown=2000 is exact and independent of any DOM.');
     favorites = [];
-  }
-
-  console.log('\n=== review-fix [counter 17]/[18]/[19]/[20]/[21] repeater counter tracks the scope filter ===');
-  {
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-x');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-y');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-scope-filter');
-    nodesData = [
-      { public_key: 'A', name: 'A', role: 'repeater', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 },
-      { public_key: 'B', name: 'B', role: 'repeater', default_scope: 'dk-mj', traffic_share_score: 0.5, usefulness_score: 0.5 },
-      { public_key: 'C', name: 'C', role: 'repeater', default_scope: null, traffic_share_score: 0.5 }, // no usefulness_score -> not eligible for the default X/Y pair
-      { public_key: 'D', name: 'D', role: 'room', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 },
-    ];
-    favorites = [];
-    _regionQS = ''; _areaQS = '';
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    // This minimal fake <select> stub does not derive .value from the
-    // rendered `<option selected>` markup (unlike a real browser), so the
-    // default axis pair must be set explicitly here for draw() to resolve
-    // X=traffic/Y=usefulness precisely -- otherwise both would silently
-    // fall back to REPEATER_METRIC_AXES[0] (traffic) via the empty-string
-    // .find() miss, making X and Y the same axis and hiding the very
-    // eligible/scopeFiltered distinction this test is checking for [21].
-    el.querySelector('#metricScatterX').value = 'traffic';
-    el.querySelector('#metricScatterY').value = 'usefulness';
-    const countText = () => el.querySelector('#metricScatterCount').textContent;
-
-    assert(countText() === '4 repeaters',
-      'review-fix [17]: with no scope filter active, the counter shows the plain total ("4 repeaters"), matching points.length');
-
-    const scopeSel = el.querySelector('#metricScatterScopeFilter');
-    scopeSel.value = 'no-default';
-    scopeSel.fireChange();
-    // A, C, D have no default scope; B does -> scope-filtered count is 3 of 4.
-    assert(countText().startsWith('3 of 4 repeaters'),
-      'review-fix [18]/[19]/[20]: selecting a scope filter immediately updates the counter to "X of Y repeaters" using the scope-filtered population, not the unfiltered total');
-    // C is scope-filtered IN (no default scope) but lacks usefulness_score,
-    // so it is not eligible for the default traffic x usefulness pair --
-    // only A and D are -> "2 plottable".
-    assert(countText() === '3 of 4 repeaters · 2 plottable',
-      'review-fix [21]: the "plottable" suffix (2) matches _sampleForPlot().eligible.length exactly -- not scopeFiltered.length (3) and not total (4)');
-  }
-
-  console.log('\n=== review-fix [counter 22] sampling never changes the scope-filtered/eligible counter totals ===');
-  {
-    fakeLocalStorage.setItem('meshcore-repeater-scatter-scope-filter', 'all');
-    const many = [];
-    for (let i = 0; i < 2500; i++) many.push({ public_key: 'm' + i, name: 'm' + i, role: 'repeater', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 });
-    nodesData = many;
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    assert(el.querySelector('#metricScatterCount').textContent === '2500 repeaters',
-      'review-fix [22]: with all 2500 points scope-filtered-in AND eligible, the counter reports the full 2500 -- the 2000-point drawing cap does not shrink the "X of Y"/"plottable" figures, only what actually gets a circle drawn');
-    fakeLocalStorage.removeItem('meshcore-repeater-scatter-scope-filter');
-  }
-
-  console.log('\n=== review-fix [counter 23] "Y" reflects the already region/area-filtered fetch ===');
-  {
-    _regionQS = '&region=dk-mj';
-    nodesData = [{ public_key: 'ONLY', name: 'Only', role: 'repeater', default_scope: null, traffic_share_score: 0.5, usefulness_score: 0.5 }];
-    const el = makeElement('root');
-    await M.renderRepeaterMetricsTab(el);
-    assert(el.querySelector('#metricScatterCount').textContent === '1 repeater',
-      'review-fix [23]: Y is points.length, built from whatever fetchAllNodes returned for the active region/area filter -- here the mock simulates the server already having narrowed the dataset to 1 node, and the counter reports exactly that, not a client-recomputed total. Combined with the existing [16] test (region/area query params reach fetchAllNodes), this confirms Y is the already-filtered fetch, not a separate client-side re-filter.');
-    _regionQS = '';
   }
 
   console.log('\n=== empty node set shows an explanatory empty state ===');

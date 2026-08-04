@@ -2905,30 +2905,11 @@
     // at least their existence and identity are discoverable; a real fix
     // (clustering, zoom-to-rect, or a coordinate picker list) is out of
     // scope for this change.
-    // Group by rounded coordinate in one O(shown) pass, then precompute a
-    // capped sample of at most 6 member points PER GROUP (not per point).
-    // Review fix: the previous version filtered the FULL group (`overlap.
-    // filter(o => o !== p)`) once for every point in it -- O(group size)
-    // work repeated group-size times, i.e. O(n^2) for one large group (a
-    // coordinate shared by 2000 points did ~4,000,000 filter ops and built
-    // a tooltip string proportional to the group size 2000 times over).
-    // Capping the sample at 6 (one more than the 5 we ever display) means
-    // `sample.filter(o => o !== p)` below is a fixed-size, O(1) operation
-    // per point regardless of how large the group actually is: whether p is
-    // one of the (up to) 6 sampled points or not, removing at most one
-    // match from a <=6-element array and slicing to 5 is constant work.
-    // Total overlap COUNT stays exact (group.length, from the first pass)
-    // even though only a sample of names is ever rendered.
     const coordGroups = {};
     ordered.forEach(p => {
       const key = xOf(xAxis.get(p)).toFixed(1) + ',' + yOf(yAxis.get(p)).toFixed(1);
       (coordGroups[key] = coordGroups[key] || []).push(p);
     });
-    const overlapSamples = {};
-    for (const key in coordGroups) {
-      const group = coordGroups[key];
-      if (group.length > 1) overlapSamples[key] = { size: group.length, sample: group.slice(0, 6) };
-    }
     ordered.forEach(p => {
       const cx = xOf(xAxis.get(p)).toFixed(1);
       const cy = yOf(yAxis.get(p)).toFixed(1);
@@ -2944,12 +2925,10 @@
       // so newlines would render as a run-on string.
       let tip = `${p.name} · ${xAxis.label}: ${_axisFmt(xAxis, xAxis.get(p))} · ${yAxis.label}: ${_axisFmt(yAxis, yAxis.get(p))}` +
         ` · Scope: ${scopeText} · Unscoped: ${unscopedText} · Recent scopes: ${recentScopesText}`;
-      const overlap = overlapSamples[cx + ',' + cy];
-      if (overlap) {
-        const others = overlap.sample.filter(o => o !== p).slice(0, 5);
-        const remaining = overlap.size - 1 - others.length;
-        tip += ` · ${overlap.size - 1} other node(s) here: ${others.map(o => o.name).join(', ')}`;
-        if (remaining > 0) tip += `, and ${remaining} more`;
+      const overlap = coordGroups[cx + ',' + cy];
+      if (overlap.length > 1) {
+        const others = overlap.filter(o => o !== p).map(o => o.name);
+        tip += ` · ${overlap.length - 1} other node(s) here: ${others.join(', ')}`;
       }
       // tabindex="-1": with up to 2000 points we keep them clickable but out
       // of the sequential keyboard tab order (the Nodes table is the
@@ -3013,7 +2992,7 @@
             <label style="display:flex;gap:6px;align-items:center">Preset
               <select id="metricScatterPreset" class="analytics-time-window-select" aria-label="Scope analysis preset"><option value="">— choose —</option>${presetOpts()}</select>
             </label>
-            <span class="text-muted" id="metricScatterCount">${points.length} repeater${points.length === 1 ? '' : 's'}</span>
+            <span class="text-muted">${points.length} repeater${points.length === 1 ? '' : 's'}</span>
           </div>
           <div id="metricScatterPlot"></div>
           <div id="metricScatterLegend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
@@ -3021,7 +3000,6 @@
 
       const plotEl = el.querySelector('#metricScatterPlot');
       const legendEl = el.querySelector('#metricScatterLegend');
-      const countEl = el.querySelector('#metricScatterCount');
       const xSel = el.querySelector('#metricScatterX');
       const ySel = el.querySelector('#metricScatterY');
       const scopeFilterSel = el.querySelector('#metricScatterScopeFilter');
@@ -3040,25 +3018,10 @@
         });
         const xAxis = _axisFromMax(xA, xMax), yAxis = _axisFromMax(yA, yMax);
         plotEl.innerHTML = renderMetricScatter(scopeFiltered, xAxis, yAxis);
-        // Legend AND the header count both read from this SAME eligible/
-        // shown partition renderMetricScatter just drew from -- review fix:
-        // the header used to always say points.length ("Y repeaters"),
-        // never reflecting the scope filter, so it could claim e.g. "1427
-        // repeaters" while the plot showed a small filtered subset.
+        // Legend uses the SAME eligible/shown partition renderMetricScatter
+        // just drew from, so role list and favorite counts can never
+        // disagree with what's actually on screen.
         const { eligible, shown } = _sampleForPlot(scopeFiltered, xAxis, yAxis);
-        if (countEl) {
-          const total = points.length;
-          const scopeCount = scopeFiltered.length;
-          let countText = scopeCount === total
-            ? `${total} repeater${total === 1 ? '' : 's'}`
-            : `${scopeCount} of ${total} repeater${total === 1 ? '' : 's'}`;
-          // Only call out "plottable" when it differs from the scope-
-          // filtered count (i.e. some scope-filtered nodes are missing a
-          // value for one of the two chosen axes) -- otherwise it would
-          // just repeat the same number and clutter the line.
-          if (eligible.length !== scopeCount) countText += ` · ${eligible.length} plottable`;
-          countEl.textContent = countText;
-        }
         const roles = Array.from(new Set(eligible.map(p => p.role)));
         let lg = roles.map(r => {
           const c = (window.ROLE_COLORS && window.ROLE_COLORS[r]) || 'var(--text-muted)';
@@ -3092,18 +3055,6 @@
       // no separate computation route (see REPEATER_METRIC_PRESETS above).
       if (presetSel) presetSel.addEventListener('change', () => {
         const preset = REPEATER_METRIC_PRESETS.find(p => p.key === presetSel.value);
-        // Review fix: reset to the placeholder immediately, before
-        // returning early on an unrecognized value too. Leaving a preset
-        // "selected" after applying it would (a) misrepresent a later
-        // manual axis change as if the preset were still active, since
-        // nothing else ever clears it, and (b) make the SAME preset
-        // unselectable a second time in a row -- a <select> only fires
-        // 'change' when its value actually changes, so picking "Bridge
-        // risk" twice with nothing in between would fire only once. The
-        // preset choice itself is intentionally never written to
-        // localStorage -- only the resulting X/Y axis keys are (the same
-        // keys a manual change uses), so there is nothing to restore here.
-        presetSel.value = '';
         if (!preset) return;
         xSel.value = preset.x;
         ySel.value = preset.y;
