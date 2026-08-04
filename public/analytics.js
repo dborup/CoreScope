@@ -2672,9 +2672,14 @@
     if (v == null) return '—';
     if (!axis.score) return String(Math.round(v));
     // Drop the trailing ".0" on whole-percent gridlines (0%, 20%, 40%); keep a
-    // decimal only when the value actually needs it.
+    // decimal only when the value actually needs it. Traffic share in
+    // particular is typically well under 1% of total mesh traffic (raw
+    // per-node share, not normalized) -- one decimal rounds a whole run of
+    // real gridlines down to an indistinguishable "0.0%", so sub-1% values
+    // get a second decimal instead of silently collapsing to zero.
     const pct = v * 100;
-    return (Number.isInteger(pct) ? pct.toFixed(0) : pct.toFixed(1)) + '%';
+    if (Number.isInteger(pct)) return pct.toFixed(0) + '%';
+    return pct.toFixed(pct < 1 ? 2 : 1) + '%';
   }
 
   // Build a concrete axis (domain [0, niceCeil(max)]) from a registry entry and
@@ -2824,7 +2829,7 @@
         <div class="analytics-section">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-target"/></svg> Repeater Metric Scatter</h3>
           <p class="text-muted">Each point is a repeater or room. Pick two metrics to compare — colors follow node role, favorites are ringed. Click a point for its analytics.</p>
-          <p class="text-muted" style="font-size:12px;margin-top:-6px">Units — <strong>Usefulness</strong>: the #672 composite (0.30 bridge + 0.25 coverage + 0.25 redundancy + 0.20 traffic). <strong>Traffic share</strong>: % of non-advert traffic relayed. <strong>Bridge/Coverage/Redundancy</strong>: 0–100% (network-normalized). <strong>Relays (1h/24h)</strong> and <strong>Adverts</strong>: packet counts. Axes auto-scale to the data.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px">Units — <strong>Usefulness</strong>: the #672 composite (0.30 bridge + 0.25 coverage + 0.25 redundancy + 0.20 traffic). <strong>Traffic share</strong>: % of non-advert traffic relayed. <strong>Bridge/Coverage/Redundancy</strong>: 0–100% (network-normalized). <strong>Relays (1h/24h)</strong> and <strong>Adverts</strong>: packet counts. Axes auto-scale to the data.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
             <label style="display:flex;gap:6px;align-items:center">X axis
               <select id="metricScatterX" class="analytics-time-window-select" aria-label="X axis metric">${opts(xKey)}</select>

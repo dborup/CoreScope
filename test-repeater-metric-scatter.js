@@ -161,6 +161,10 @@ assert(M._axisFmt({ score: true }, 0.2) === '20%' && M._axisFmt({ score: true },
   '_axisFmt drops the trailing .0 on whole-percent gridlines');
 assert(M._axisFmt({ score: true }, null) === '—' && M._axisFmt({ score: false }, null) === '—',
   '_axisFmt renders a missing value as an em dash on either axis kind');
+assert(M._axisFmt({ score: true }, 0.0002) === '0.02%' && M._axisFmt({ score: true }, 0.00005) === '0.01%',
+  '_axisFmt review fix: sub-1% values get a 2nd decimal so a run of tiny Traffic share gridlines is never all "0.0%"');
+assert(M._axisFmt({ score: true }, 0.033) === '3.3%',
+  '_axisFmt keeps 1 decimal for non-integer values ≥1% (not needlessly precise)');
 
 console.log('\n=== [9] unknown/stale localStorage axis key falls back safely ===');
 {
