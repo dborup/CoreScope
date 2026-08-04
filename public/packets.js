@@ -2966,11 +2966,19 @@
     // Requests/responses (encrypted)
     if (decoded.type === 'REQ' || decoded.type === 'RESPONSE') return `<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> ${decoded.srcHash?.slice(0,8) || '?'} → ${decoded.destHash?.slice(0,8) || '?'}`;
     // Anonymous requests
-    // #1864 — ANON_REQ carries the sender's FULL ephemeral pubkey (unlike
+    // #1864/#1866 — ANON_REQ carries the sender's FULL source pubkey (unlike
     // REQ/RESPONSE's 1-byte srcHash), so it's not actually anonymous to us.
-    // Row preview stays synchronous (no live lookup per row, same reasoning
-    // as CONTROL's pubkey in #1868) -- truncated to 8 hex chars.
-    if (decoded.type === 'ANON_REQ') return `<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> ${decoded.ephemeralPubKey ? escapeHtml(decoded.ephemeralPubKey.slice(0, 8)) + '…' : 'anon'} → ${decoded.destHash?.slice(0,8) || '?'}`;
+    // Row preview stays synchronous -- resolves via HopResolver's already-
+    // loaded node index (O(1), no live lookup per row, same reasoning as
+    // CONTROL's pubkey in #1868), falling back to a truncated hex prefix.
+    // srcPubKey is the current field name (#1866); ephemeralPubKey covers
+    // packets decoded before that backend rename.
+    if (decoded.type === 'ANON_REQ') {
+      const anonKey = decoded.srcPubKey || decoded.ephemeralPubKey || '';
+      const anonName = (anonKey && window.HopResolver && HopResolver.nameForKey) ? HopResolver.nameForKey(anonKey) : null;
+      const anonSrc = anonName ? escapeHtml(anonName) : (anonKey ? escapeHtml(anonKey.slice(0, 8)) + '…' : 'anon');
+      return `<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> ${anonSrc} → ${decoded.destHash?.slice(0,8) || '?'}`;
+    }
     // CONTROL packets (#1802) — DISCOVER_REQ / DISCOVER_RESP body fields,
     // decoded by cmd/ingestor/decoder.go decodeControl(). Wire format:
     //   firmware/src/Mesh.cpp:69
@@ -3193,12 +3201,15 @@
       if (nd?.node?.public_key) ctrlPubKeyNode = nd.node;
     }
 
-    // #1864 — ANON_REQ carries the sender's FULL ephemeral pubkey (32B, no
-    // prefix ambiguity), so it's not actually anonymous -- resolve it to a
-    // node the same way CONTROL's DISCOVER_RESP pubkey is resolved above.
+    // #1864/#1866 — ANON_REQ carries the sender's FULL source pubkey (32B,
+    // no prefix ambiguity), so it's not actually anonymous -- resolve it to
+    // a node the same way CONTROL's DISCOVER_RESP pubkey is resolved above.
+    // srcPubKey is the current field name; ephemeralPubKey is the fallback
+    // for packets decoded before the backend rename (#1866).
     let anonReqSenderNode = null;
-    if (decoded.type === 'ANON_REQ' && decoded.ephemeralPubKey) {
-      const nd = await api(`/nodes/${decoded.ephemeralPubKey}`, { ttl: 30000 }).catch(() => null);
+    const anonReqSenderKey = decoded.srcPubKey || decoded.ephemeralPubKey || '';
+    if (decoded.type === 'ANON_REQ' && anonReqSenderKey) {
+      const nd = await api(`/nodes/${anonReqSenderKey}`, { ttl: 30000 }).catch(() => null);
       if (nd?.node?.public_key) anonReqSenderNode = nd.node;
     }
 
@@ -3352,9 +3363,10 @@
     // src→dst). Replaces the prior byte-count title that buried packet
     // identity behind a byte counter (#1458 P0-A).
     const semanticSummary = getDetailPreview(decoded);
-    // #1864 — ANON_REQ's sender is anonReqSenderNode's resolved name (if
-    // known) or its ephemeralPubKey (not srcHash/pubKey, which it doesn't carry).
-    const srcLabel = decoded.sender || decoded.name || (decoded.srcHash ? decoded.srcHash.slice(0,8) : null) || (decoded.pubKey ? decoded.pubKey.slice(0,8) + '…' : null) || (anonReqSenderNode ? anonReqSenderNode.name || anonReqSenderNode.public_key.slice(0,8) + '…' : null) || (decoded.ephemeralPubKey ? decoded.ephemeralPubKey.slice(0,8) + '…' : null);
+    // #1864/#1866 — ANON_REQ's sender is anonReqSenderNode's resolved name
+    // (if known) or its srcPubKey/ephemeralPubKey (not srcHash/pubKey, which
+    // it doesn't carry).
+    const srcLabel = decoded.sender || decoded.name || (decoded.srcHash ? decoded.srcHash.slice(0,8) : null) || (decoded.pubKey ? decoded.pubKey.slice(0,8) + '…' : null) || (anonReqSenderNode ? anonReqSenderNode.name || anonReqSenderNode.public_key.slice(0,8) + '…' : null) || (anonReqSenderKey ? anonReqSenderKey.slice(0,8) + '…' : null);
     const dstLabel = decoded.recipient || (decoded.destHash ? decoded.destHash.slice(0,8) : null);
     const srcDstHtml = (srcLabel || dstLabel)
       ? `<div class="detail-srcdst">${escapeHtml(srcLabel || '?')} <span class="arrow">→</span> ${escapeHtml(dstLabel || (decoded.channel ? '#' + decoded.channel : '?'))}</div>`
@@ -3686,18 +3698,21 @@
         rows += fieldRow(off + 9, 'Route Hops', decoded.pathData.toUpperCase(), pathHops.length + ' hop(s)');
       }
     } else if (decoded.type === 'ANON_REQ') {
-      // #1864 — ANON_REQ's layout differs from REQ/RESPONSE: dest hash (1B)
-      // + FULL ephemeral pubkey (32B, not a 1B srcHash) + MAC (2B) + data.
+      // #1864/#1866 — ANON_REQ's layout differs from REQ/RESPONSE: dest hash
+      // (1B) + FULL source pubkey (32B, not a 1B srcHash) + MAC (2B) + data.
       // Must be checked before the generic destHash branch below, since
       // ANON_REQ also sets destHash and would otherwise be misread with
       // REQ/RESPONSE's byte offsets (empty Src Hash, MAC/data 31 bytes too
-      // early). cmd/ingestor/decoder.go decodeAnonReq().
+      // early). cmd/ingestor/decoder.go decodeAnonReq(). srcPubKey is the
+      // current field name; ephemeralPubKey covers packets decoded before
+      // the backend rename (#1866).
       rows += fieldRow(off, 'Dest Hash (1B)', decoded.destHash || '', '');
-      if (decoded.ephemeralPubKey) {
+      const anonKey = decoded.srcPubKey || decoded.ephemeralPubKey || '';
+      if (anonKey) {
         const pkValue = anonReqSenderNode
           ? `<a href="#/nodes/${encodeURIComponent(anonReqSenderNode.public_key)}" class="hop-link hop-named" data-hop-link="true">${escapeHtml(anonReqSenderNode.name || anonReqSenderNode.public_key.slice(0, 8) + '…')}</a>`
-          : escapeHtml(truncate(decoded.ephemeralPubKey, 24));
-        rows += fieldRow(off + 1, 'Ephemeral Pubkey (32B)', pkValue, anonReqSenderNode ? '' : 'Unknown node');
+          : escapeHtml(truncate(anonKey, 24));
+        rows += fieldRow(off + 1, 'Src Public Key (32B)', pkValue, anonReqSenderNode ? '' : 'Unknown node');
       }
       rows += fieldRow(off + 33, 'MAC (2B)', decoded.mac || '', '');
       rows += fieldRow(off + 35, 'Encrypted Data', truncate(decoded.encryptedData || '', 30), '');

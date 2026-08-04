@@ -481,16 +481,55 @@ console.log('\n=== packets.js: getDetailPreview ===');
     assert(result.includes('dd'));
   });
 
-  // #1864 — ANON_REQ carries the sender's FULL ephemeral pubkey (unlike
+  // #1864 — ANON_REQ carries the sender's FULL source pubkey (unlike
   // REQ/RESPONSE's 1-byte srcHash), so it's not really anonymous. Once
   // known, the row preview should show the truncated pubkey, not "anon".
-  test('getDetailPreview shows truncated ephemeralPubKey for ANON_REQ instead of "anon"', () => {
+  // ephemeralPubKey is the legacy field name (pre-#1866 backend rename) —
+  // packets decoded before the rename still carry it, so it must still work.
+  test('getDetailPreview shows truncated ephemeralPubKey for ANON_REQ instead of "anon" (legacy field)', () => {
     const result = api.getDetailPreview({
       type: 'ANON_REQ', destHash: 'dd', ephemeralPubKey: 'ab'.repeat(32),
     });
     assert(result.includes('abababab'), 'should show the truncated pubkey prefix, got: ' + result);
     assert(!result.includes('anon'), 'should not show "anon" when a pubkey is present, got: ' + result);
     assert(!result.includes('ab'.repeat(32)), 'should NOT render the full raw pubkey in the row preview, got: ' + result);
+  });
+
+  // #1866 — srcPubKey is the current backend field name for ANON_REQ's
+  // sender key (renamed from ephemeralPubKey so store.go's node indexer
+  // picks it up). Row preview must read it the same way.
+  test('getDetailPreview shows truncated srcPubKey for ANON_REQ (current field name)', () => {
+    const result = api.getDetailPreview({
+      type: 'ANON_REQ', destHash: 'dd', srcPubKey: 'ab'.repeat(32),
+    });
+    assert(result.includes('abababab'), 'should show the truncated pubkey prefix, got: ' + result);
+    assert(!result.includes('anon'), 'should not show "anon" when a pubkey is present, got: ' + result);
+  });
+
+  test('getDetailPreview prefers srcPubKey over legacy ephemeralPubKey when both are present', () => {
+    const result = api.getDetailPreview({
+      type: 'ANON_REQ', destHash: 'dd', srcPubKey: 'ab'.repeat(32), ephemeralPubKey: 'cd'.repeat(32),
+    });
+    assert(result.includes('abababab'), 'should use srcPubKey, got: ' + result);
+    assert(!result.includes('cdcdcdcd'), 'should NOT use the legacy field when srcPubKey is present, got: ' + result);
+  });
+
+  test('getDetailPreview resolves ANON_REQ sender to a node name via HopResolver.nameForKey when known', () => {
+    const key = 'ab'.repeat(32);
+    // Real browsers alias bare globals with window.<name>; the code checks
+    // both (window.HopResolver as an existence guard, bare HopResolver for
+    // the call) so the sandbox mock needs both bound to the same object.
+    const mock = { nameForKey: (k) => (k === key ? 'KnownSender' : null) };
+    ctx.window.HopResolver = mock;
+    ctx.HopResolver = mock;
+    try {
+      const result = api.getDetailPreview({ type: 'ANON_REQ', destHash: 'dd', srcPubKey: key });
+      assert(result.includes('KnownSender'), 'should show the resolved node name, got: ' + result);
+      assert(!result.includes('abababab'), 'should not show truncated hex once resolved to a name, got: ' + result);
+    } finally {
+      ctx.window.HopResolver = null;
+      delete ctx.HopResolver;
+    }
   });
 
   test('getDetailPreview handles text fallback', () => {
@@ -913,34 +952,46 @@ console.log('\n=== packets.js: buildFieldTable ===');
     assert(result.includes('KnownRepeater'), 'should show the resolved node name, got: ' + result);
   });
 
-  // #1864 — ANON_REQ must NOT fall into the generic destHash (REQ/RESPONSE)
-  // branch: it has a full 32B ephemeral pubkey where REQ/RESPONSE has a 1B
-  // srcHash, so the MAC/Encrypted Data byte offsets differ (33/35 vs 2/4).
+  // #1864/#1866 — ANON_REQ must NOT fall into the generic destHash
+  // (REQ/RESPONSE) branch: it has a full 32B source pubkey where
+  // REQ/RESPONSE has a 1B srcHash, so the MAC/Encrypted Data byte offsets
+  // differ (33/35 vs 2/4). srcPubKey is the current field name (#1866
+  // backend rename, so store.go's node indexer picks up ANON_REQ senders).
   test('buildFieldTable renders ANON_REQ with its own field layout, not the generic destHash one', () => {
     const pkt = { raw_hex: 'c040', route_type: 1, payload_type: 7 };
-    const decoded = { type: 'ANON_REQ', destHash: 'dd', ephemeralPubKey: 'ab'.repeat(32), mac: 'CAFE', encryptedData: 'beefbeef' };
+    const decoded = { type: 'ANON_REQ', destHash: 'dd', srcPubKey: 'ab'.repeat(32), mac: 'CAFE', encryptedData: 'beefbeef' };
     const result = api.buildFieldTable(pkt, decoded, [], []);
     assert(result.includes('Dest Hash'));
-    assert(result.includes('Ephemeral Pubkey'), 'should have its own pubkey field, not fall through to Src Hash, got: ' + result);
+    assert(result.includes('Src Public Key'), 'should have its own pubkey field, not fall through to Src Hash, got: ' + result);
     assert(!result.includes('Src Hash'), 'should NOT show the REQ/RESPONSE Src Hash field, got: ' + result);
     assert(result.includes('CAFE'));
   });
 
-  test('buildFieldTable renders ANON_REQ ephemeral pubkey as truncated hex when unresolved', () => {
+  test('buildFieldTable renders ANON_REQ srcPubKey as truncated hex when unresolved', () => {
     const pkt = { raw_hex: 'c040', route_type: 1, payload_type: 7 };
-    const decoded = { type: 'ANON_REQ', destHash: 'dd', ephemeralPubKey: 'cd'.repeat(32) };
+    const decoded = { type: 'ANON_REQ', destHash: 'dd', srcPubKey: 'cd'.repeat(32) };
     const result = api.buildFieldTable(pkt, decoded, [], []);
     assert(!result.includes('#/nodes/'), 'should not render a node link when unresolved, got: ' + result);
     assert(result.includes('cdcdcdcd'), 'should show truncated pubkey hex, got: ' + result);
   });
 
-  test('buildFieldTable renders ANON_REQ ephemeral pubkey as a clickable node link when resolved', () => {
+  test('buildFieldTable renders ANON_REQ srcPubKey as a clickable node link when resolved', () => {
     const pkt = { raw_hex: 'c040', route_type: 1, payload_type: 7 };
-    const decoded = { type: 'ANON_REQ', destHash: 'dd', ephemeralPubKey: 'ef'.repeat(32) };
+    const decoded = { type: 'ANON_REQ', destHash: 'dd', srcPubKey: 'ef'.repeat(32) };
     const anonReqSenderNode = { public_key: 'ef'.repeat(32), name: 'KnownSender' };
     const result = api.buildFieldTable(pkt, decoded, [], [], null, anonReqSenderNode);
     assert(result.includes('#/nodes/' + anonReqSenderNode.public_key), 'should link to the resolved node, got: ' + result);
     assert(result.includes('KnownSender'), 'should show the resolved node name, got: ' + result);
+  });
+
+  // #1866 — packets decoded before the backend rename only carry the legacy
+  // ephemeralPubKey field; buildFieldTable must still render them correctly.
+  test('buildFieldTable falls back to legacy ephemeralPubKey when srcPubKey is absent', () => {
+    const pkt = { raw_hex: 'c040', route_type: 1, payload_type: 7 };
+    const decoded = { type: 'ANON_REQ', destHash: 'dd', ephemeralPubKey: 'cd'.repeat(32) };
+    const result = api.buildFieldTable(pkt, decoded, [], []);
+    assert(result.includes('Src Public Key'), 'should still render the field under its current label, got: ' + result);
+    assert(result.includes('cdcdcdcd'), 'should show the legacy field\'s truncated pubkey hex, got: ' + result);
   });
 
   test('buildFieldTable hash_size calculation', () => {
