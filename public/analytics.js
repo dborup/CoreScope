@@ -2661,8 +2661,9 @@
         const obs = h.obsCount != null ? h.obsCount : 1;
         const pktLink = h.hash ? `<a href="#/packet/${encodeURIComponent(h.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(h.hash.slice(0, 12))}…</a>` : '—';
         const mapBtn = h.fromPk && h.toPk ? `<button class="btn-icon dist-map-hop" data-from="${esc(h.fromPk)}" data-to="${esc(h.toPk)}" title="View on map" aria-label="View on map"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg></button>` : '';
+        const viewPathBtn = h.hash ? `<button class="btn-icon dist-view-path" data-view-path="${esc(h.hash)}" title="View path" aria-label="View path"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg></button>` : '';
         const tsTitle = h.timestamp ? `Best observation: ${h.timestamp}` : '';
-        html += `<tr title="${esc(tsTitle)}"><td>${i+1}</td><td>${fromLink}</td><td>${toLink}</td><td><strong>${formatDistance(h.dist)}</strong></td><td>${esc(h.type)}</td><td>${obs}</td><td>${bestSnr}</td><td>${medianSnr}</td><td>${pktLink}</td><td>${mapBtn}</td></tr>`;
+        html += `<tr title="${esc(tsTitle)}"><td>${i+1}</td><td>${fromLink}</td><td>${toLink}</td><td><strong>${formatDistance(h.dist)}</strong></td><td>${esc(h.type)}</td><td>${obs}</td><td>${bestSnr}</td><td>${medianSnr}</td><td>${pktLink}</td><td>${mapBtn}${viewPathBtn}</td></tr>`;
       });
       html += `</tbody></table></div>`;
 
@@ -2677,7 +2678,8 @@
           p.hops.forEach(h => { if (h.fromPk && !pathPks.includes(h.fromPk)) pathPks.push(h.fromPk); });
           if (p.hops.length && p.hops[p.hops.length-1].toPk) { const last = p.hops[p.hops.length-1].toPk; if (!pathPks.includes(last)) pathPks.push(last); }
           const mapBtn = pathPks.length >= 2 ? `<button class="btn-icon dist-map-path" data-hops='${JSON.stringify(pathPks)}' title="View on map" aria-label="View on map"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg></button>` : '';
-          html += `<tr><td>${i+1}</td><td><strong>${formatDistance(p.totalDist)}</strong></td><td>${p.hopCount}</td><td style="font-size:0.9em">${route}</td><td>${pktLink}</td><td>${mapBtn}</td></tr>`;
+          const viewPathBtn = p.hash ? `<button class="btn-icon dist-view-path" data-view-path="${esc(p.hash)}" title="View path" aria-label="View path"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg></button>` : '';
+          html += `<tr><td>${i+1}</td><td><strong>${formatDistance(p.totalDist)}</strong></td><td>${p.hopCount}</td><td style="font-size:0.9em">${route}</td><td>${pktLink}</td><td>${mapBtn}${viewPathBtn}</td></tr>`;
         });
         html += `</tbody></table></div>`;
       }
@@ -2698,6 +2700,11 @@
             sessionStorage.setItem('map-route-hops', JSON.stringify({ hops }));
             window.location.hash = '#/map?route=1';
           } catch {}
+        });
+      });
+      el.querySelectorAll('.dist-view-path').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (window.PacketPathMap) window.PacketPathMap.open(btn.dataset.viewPath);
         });
       });
     } catch (e) {
