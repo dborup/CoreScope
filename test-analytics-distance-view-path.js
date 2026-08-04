@@ -1,13 +1,17 @@
 /**
- * Source-grep tests for the "View Path" button added to the Analytics
- * Distance tab's two leaderboards (public/analytics.js, renderDistanceTab):
- * "Top 20 Longest Hops" and "Top 10 Longest Multi-Hop Paths".
+ * Source-grep tests for the "View Path" button on the Analytics Distance
+ * tab's two leaderboards (public/analytics.js, renderDistanceTab): "Top 20
+ * Longest Hops" and "Top 10 Longest Multi-Hop Paths".
  *
- * Both tables already had a small packet-hash link and a "View on map"
- * icon button (dist-map-hop / dist-map-path, which just drop pins on the
- * main map via sessionStorage + #/map?route=1). View Path adds the richer
- * in-place packet-path-map.js modal (elapsed time, area shading, branch
- * legend) as a second icon button in the same actions cell.
+ * History: both tables originally had a "View on map" icon button
+ * (dist-map-hop / dist-map-path, dropped pins on the main map via
+ * sessionStorage + #/map?route=1). A first pass added View Path as a
+ * SECOND icon button in the same cell, which made two 48x48 touch-target
+ * buttons (the AGENTS glove-operability floor -- can't shrink below that)
+ * unreadable in a dense 20-row leaderboard regardless of scroll/sticky
+ * tricks. Since View Path is a strict superset of what View on map showed
+ * (same route, plus elapsed time, area shading, branch legend), the map
+ * button was dropped -- View Path is now the sole action per row.
  */
 'use strict';
 const fs = require('fs');
@@ -21,7 +25,7 @@ function test(name, fn) {
 
 const src = fs.readFileSync('public/analytics.js', 'utf8');
 
-console.log('\n=== analytics.js: Distance tab "View Path" buttons ===');
+console.log('\n=== analytics.js: Distance tab "View Path" button ===');
 
 test('Top 20 Longest Hops row builds a View Path button gated on h.hash', () => {
   assert.ok(src.includes('const viewPathBtn = h.hash ? `<button class="btn-icon dist-view-path" data-view-path="${esc(h.hash)}"'),
@@ -33,68 +37,53 @@ test('Top 10 Longest Multi-Hop Paths row builds a View Path button gated on p.ha
     'the per-path leaderboard row must build a dist-view-path button carrying the full hash');
 });
 
-test('both leaderboards append viewPathBtn into the same actions cell as the existing map button', () => {
-  assert.ok(src.includes('<td class="col-actions">${mapBtn}${viewPathBtn}</td></tr>`;'),
-    'View Path must render alongside View on map, not replace it or need its own column');
-  // Both rows use the identical closing shape; confirm it appears twice (hops row + paths row).
-  const count = (src.match(/<td class="col-actions">\$\{mapBtn\}\$\{viewPathBtn\}<\/td><\/tr>`;/g) || []).length;
-  assert.strictEqual(count, 2, 'expected exactly 2 rows (hops leaderboard + paths leaderboard) to use this cell shape, got ' + count);
+test('View Path is the only action rendered in the trailing cell of both leaderboards', () => {
+  const count = (src.match(/<td>\$\{viewPathBtn\}<\/td><\/tr>`;/g) || []).length;
+  assert.strictEqual(count, 2, 'expected exactly 2 rows (hops leaderboard + paths leaderboard) to render only viewPathBtn, got ' + count);
 });
 
-test('both leaderboard headers mark the trailing th as col-actions, matching the row cells', () => {
-  const count = (src.match(/<th scope="col" class="col-actions"><\/th>/g) || []).length;
-  assert.strictEqual(count, 2, 'expected both table headers (hops + paths) to tag their empty actions header, got ' + count);
+test('the old "View on map" button (dist-map-hop / dist-map-path) is gone from the Distance tab', () => {
+  // A historical mention in a code comment is fine; what must be gone is
+  // the actual markup/wiring -- a rendered button class or a querySelectorAll
+  // that would try to wire up a button no longer emitted.
+  assert.ok(!src.includes('class="btn-icon dist-map-hop"') && !src.includes('class="btn-icon dist-map-path"'),
+    'no row should render a dist-map-hop/dist-map-path button anymore');
+  assert.ok(!src.includes("querySelectorAll('.dist-map-hop')") && !src.includes("querySelectorAll('.dist-map-path')"),
+    'no wiring block should still be querying for a button that is never rendered');
 });
-
-console.log('\n=== style.css: .col-actions sticky-right rule ===');
-{
-  const css = fs.readFileSync('public/style.css', 'utf8');
-
-  test('.col-actions is pinned to the right edge of the table scroll container', () => {
-    // The button pair (View on map + View Path, 48x48 each per the AGENTS
-    // glove-operability floor) sat past 8+ scrollable columns -- reachable
-    // but not visible without deliberately scrolling sideways to find it.
-    // Sticky-right keeps it in view regardless of scroll position.
-    const m = css.match(/\.data-table td\.col-actions,\s*\n\.data-table th\.col-actions\s*\{([^}]*)\}/);
-    assert.ok(m, '.col-actions rule not found in style.css');
-    assert.ok(/position:\s*sticky/.test(m[1]), 'must use position:sticky, not just a wider column');
-    assert.ok(/right:\s*0/.test(m[1]), 'must pin to the right edge (this is the trailing column)');
-  });
-
-  test('.col-actions has an opaque background so scrolled-under column content does not show through', () => {
-    assert.ok(/\.data-table td\.col-actions,\s*\n\.data-table th\.col-actions\s*\{[^}]*background:\s*var\(--card-bg\)/.test(css),
-      'sticky cells need their own background, otherwise horizontally-scrolled cells visibly bleed through underneath them');
-  });
-
-  test('.col-actions background is re-applied for zebra-striped (even) rows', () => {
-    assert.ok(css.includes('.data-table tbody tr:nth-child(even) td.col-actions { background: var(--row-stripe); }'),
-      'without this, striped rows would show the base background through their sticky cell instead of the stripe color');
-  });
-}
 
 test('dist-view-path buttons are wired via window.PacketPathMap.open, not a navigation', () => {
   assert.ok(src.includes("el.querySelectorAll('.dist-view-path').forEach(btn => {"),
-    'must wire dist-view-path buttons the same per-button addEventListener pattern as dist-map-hop/dist-map-path');
+    'must delegate-wire dist-view-path buttons after render');
   const wireIdx = src.indexOf("el.querySelectorAll('.dist-view-path').forEach(btn => {");
   const snippet = src.slice(wireIdx, wireIdx + 200);
   assert.ok(snippet.includes('window.PacketPathMap') && snippet.includes('btn.dataset.viewPath'),
     'the click handler must call window.PacketPathMap.open(btn.dataset.viewPath)');
 });
 
-test('the View Path wiring block is registered after the innerHTML assignment, like the map-button wiring', () => {
+test('the View Path wiring block is registered after the innerHTML assignment', () => {
   const innerHtmlIdx = src.indexOf('el.innerHTML = html;');
   const wireIdx = src.indexOf("el.querySelectorAll('.dist-view-path').forEach(btn => {");
   assert.ok(innerHtmlIdx > -1 && wireIdx > -1 && wireIdx > innerHtmlIdx,
     'button listeners must attach after the HTML they target has been inserted into the DOM');
 });
 
-test('both leaderboard tables are wrapped in analytics-table-scroll so the actions column stays reachable', () => {
-  // 10 columns (hops table) plus two action icons overflowed the viewport
-  // with no way to reach the actions cell -- wrap in the same horizontal
-  // scroll container compare.js already uses for its similar table.
-  const count = (src.match(/<div class="analytics-table-scroll"><table class="data-table">/g) || []).length;
-  assert.strictEqual(count, 2, 'expected both the hops and paths leaderboards to be wrapped, got ' + count);
+test('neither leaderboard needs the analytics-table-scroll wrapper anymore', () => {
+  // A single 48x48 action column plus 9-10 compact text columns fits
+  // without a forced horizontal scroll container -- confirms the row
+  // template really did drop back to one action, not just hide a second.
+  const wrapCount = (src.match(/<div class="analytics-table-scroll">/g) || []).length;
+  assert.strictEqual(wrapCount, 0, 'renderDistanceTab should not need analytics-table-scroll, got ' + wrapCount + ' wrapper(s)');
 });
+
+console.log('\n=== style.css: no leftover .col-actions sticky rule ===');
+{
+  const css = fs.readFileSync('public/style.css', 'utf8');
+  test('the sticky .col-actions rule was removed along with its now-unused class', () => {
+    assert.ok(!css.includes('.col-actions'),
+      'renderDistanceTab no longer emits class="col-actions" anywhere -- this CSS would be dead weight');
+  });
+}
 
 // ===== SUMMARY =====
 console.log(`\n${'='.repeat(40)}`);
