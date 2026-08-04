@@ -57,6 +57,14 @@ test('the View Path wiring block is registered after the innerHTML assignment, l
     'button listeners must attach after the HTML they target has been inserted into the DOM');
 });
 
+test('both leaderboard tables are wrapped in analytics-table-scroll so the actions column stays reachable', () => {
+  // 10 columns (hops table) plus two action icons overflowed the viewport
+  // with no way to reach the actions cell -- wrap in the same horizontal
+  // scroll container compare.js already uses for its similar table.
+  const count = (src.match(/<div class="analytics-table-scroll"><table class="data-table">/g) || []).length;
+  assert.strictEqual(count, 2, 'expected both the hops and paths leaderboards to be wrapped, got ' + count);
+});
+
 // ===== SUMMARY =====
 console.log(`\n${'='.repeat(40)}`);
 console.log(`analytics.js Distance tab View Path tests: ${passed} passed, ${failed} failed`);
