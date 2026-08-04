@@ -445,7 +445,24 @@ function loadRenderDetailTemplate() {
   return m[1];
 }
 
-function renderObsDetail(obs) {
+// Extract the PRODUCTION directNeighborRoleIcon + renderDirectNeighbors pair
+// via named-marker slicing (indexOf, not a regex) -- the pair has nested
+// braces (a .map(function(n) {...}) callback) that a bracket-counting regex
+// would be fragile against. Same technique as this repo's other "extract a
+// real block and eval it" tests (see public/analytics.js's REPEATER METRICS
+// BLOCK markers). renderDirectNeighbors is the sink this gate is for: it
+// escapes n.name/n.scopes/n.pubkey at render time, and reverting any of
+// those escapeHtml() calls in production must flip this test red -- so we
+// run the real function, never a reimplementation or a payload-blind stub.
+function loadDirectNeighborsBlock() {
+  const src = fs.readFileSync('public/observer-detail.js', 'utf8');
+  const start = src.indexOf('function directNeighborRoleIcon');
+  const end = src.indexOf('window.renderDirectNeighbors = renderDirectNeighbors;');
+  if (start < 0 || end < 0) throw new Error('renderObsDetail: directNeighborRoleIcon/renderDirectNeighbors block not found');
+  return src.slice(start, end);
+}
+
+function renderObsDetail(obs, neighborsData) {
   const src = fs.readFileSync('public/observer-detail.js', 'utf8');
   const tpl = loadRenderDetailTemplate();
   // Extract the PRODUCTION radio-parsing block from source so reverting the
@@ -454,6 +471,7 @@ function renderObsDetail(obs) {
   const radioBlockM = src.match(/let radioHtml[\s\S]*?if \(obs\.radio\) \{[\s\S]*?\n\s*\}/);
   if (!radioBlockM) throw new Error('renderObsDetail: radio-parsing block not found');
   const radioBlock = radioBlockM[0];
+  const directNeighborsBlock = loadDirectNeighborsBlock();
   // Stub out window globals and helpers used inside the template.
   const sandbox = {
     window: { ObserverDetailNaiveBanner: { render: () => '' } },
@@ -465,22 +483,27 @@ function renderObsDetail(obs) {
     formatSkew: () => '',
     renderSkewBadge: () => '',
     observerSkewSeverity: () => 'ok',
+    // Default: no direct-neighbor rows, so callers that don't care about
+    // this sink (OBS-1/OBS-2 tests) get the static "no data yet" branch,
+    // which carries no payload markers and can't disturb their assertions.
+    neighborsData: neighborsData || { neighbors: [] },
   };
   const ago = obs.last_seen ? Date.now() - new Date(obs.last_seen).getTime() : Infinity;
   const statusCls = ago < 600000 ? 'health-green' : ago < sandbox.HEALTH_THRESHOLDS.nodeDegradedMs ? 'health-yellow' : 'health-red';
   const statusLabel = ago < 600000 ? 'Online' : ago < sandbox.HEALTH_THRESHOLDS.nodeDegradedMs ? 'Stale' : 'Offline';
-  // Eval the radio block in a fn body, then return the template render.
+  // Eval the radio block + the real directNeighborRoleIcon/renderDirectNeighbors
+  // pair in a fn body, then return the template render.
   const fn = new Function(
     'obs', 'obsSkew', 'escapeHtml', 'window', 'HEALTH_THRESHOLDS',
     'formatDuration', 'timeAgo', 'formatSkew', 'renderSkewBadge', 'observerSkewSeverity',
-    'statusCls', 'statusLabel',
-    radioBlock + '\nreturn `' + tpl + '`;'
+    'statusCls', 'statusLabel', 'neighborsData',
+    radioBlock + '\n' + directNeighborsBlock + '\nreturn `' + tpl + '`;'
   );
   return fn(
     obs, sandbox.obsSkew, escapeHtml, sandbox.window, sandbox.HEALTH_THRESHOLDS,
     sandbox.formatDuration, sandbox.timeAgo, sandbox.formatSkew,
     sandbox.renderSkewBadge, sandbox.observerSkewSeverity,
-    statusCls, statusLabel
+    statusCls, statusLabel, sandbox.neighborsData
   );
 }
 
@@ -530,6 +553,42 @@ test('OBS-2: contaminated string obs.noise_floor is Number()-coerced (no payload
     throw new Error('OBS-2 noise_floor: Number() coercion missing — raw <img survived: ' + html);
   if (html.includes(TAG_PAYLOAD))
     throw new Error('OBS-2 noise_floor: raw payload survived: ' + html);
+});
+
+// =========================================================================
+// H. Direct Neighbors panel (#1865 follow-up, PR #1867) — the sink this
+// gate exists for. renderDirectNeighbors is now run for real (see
+// loadDirectNeighborsBlock above), so these assert against the production
+// escaping, not a reimplementation. n.role and n.status are deliberately
+// NOT payload-tested here: neither is ever written into the HTML string —
+// role only selects an SVG icon via a switch (unmatched values fall to a
+// safe default), and status only feeds a strict `=== 'timeout'` compare —
+// so there is no sink to exercise for either field.
+// =========================================================================
+console.log('\n=== H. Direct Neighbors panel: neighbor-row payload containment ===');
+
+test('Direct Neighbors: neighbor.name (linked row) payload is escaped', () => {
+  const html = renderObsDetail({ id: 'obs-1' }, {
+    neighbors: [{ pubkey: 'AABBCCDDEEFF0011', name: TAG_PAYLOAD + ATTR_PAYLOAD, role: 'repeater', seenViaPackets: true }],
+  });
+  assertNoXss(html, 'Direct Neighbors neighbor.name');
+});
+
+test('Direct Neighbors: neighbor.scopes (Configured Scope column) payload is escaped', () => {
+  const html = renderObsDetail({ id: 'obs-1' }, {
+    neighbors: [{ pubkey: 'AABBCCDDEEFF0011', name: 'Real Node', role: 'room', scopes: TAG_PAYLOAD + ATTR_PAYLOAD, seenViaPackets: false }],
+  });
+  assertNoXss(html, 'Direct Neighbors neighbor.scopes');
+});
+
+test('Direct Neighbors: neighbor.pubkey (unnamed row + sparkline id attribute) payload is escaped', () => {
+  // No n.name -> falls to the shortPubkey branch (escapeHtml on a slice of
+  // pubkey) AND the sparkline placeholder's id="nb-spark-${escapeHtml(pubkey)}"
+  // attribute -- two separate sinks fed by the same field in one assertion.
+  const html = renderObsDetail({ id: 'obs-1' }, {
+    neighbors: [{ pubkey: TAG_PAYLOAD + ATTR_PAYLOAD, role: 'sensor', status: 'timeout', seenViaPackets: false }],
+  });
+  assertNoXss(html, 'Direct Neighbors neighbor.pubkey');
 });
 
 // =========================================================================
