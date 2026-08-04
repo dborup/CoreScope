@@ -252,3 +252,63 @@ func TestHandleGPSSanity_CachesResponse(t *testing.T) {
 		t.Fatalf("expected the cached (stale) 1-flagged-node response on the second request within the TTL window, got %+v", resp2.Nodes)
 	}
 }
+
+// TestComputeSuspiciousGPSPositions_ScanErrorPropagates proves the function
+// returns an error (not a zero-value "no suspicious nodes" success) when a
+// neighbor_edges row can't be scanned. count has no NOT NULL constraint --
+// a genuinely reachable, legitimately-insertable row shape -- so scanning
+// NULL into a plain (non-Null) float64 is a real, not fabricated, failure.
+func TestComputeSuspiciousGPSPositions_ScanErrorPropagates(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('badgps', 'BadGPSNode', 60.0, 20.0)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('n1', 'Neighbor1', 55.00, 10.00)`)
+	if _, err := db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('badgps', 'n1', NULL)`); err != nil {
+		t.Fatalf("insert NULL-count edge: %v", err)
+	}
+
+	positioned, _, err := db.GetNodesForAreaAnalytics()
+	if err != nil {
+		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
+	}
+	resp, err := computeSuspiciousGPSPositions(db, positioned)
+	if err == nil {
+		t.Fatal("computeSuspiciousGPSPositions: expected an error for the unscannable edge, got nil")
+	}
+	if resp.Nodes != nil || resp.TotalRealGPS != 0 || resp.Evaluated != 0 {
+		t.Errorf("computeSuspiciousGPSPositions: expected a zero-value response on error, got %+v -- partial result returned as success", resp)
+	}
+}
+
+// TestComputeSuspiciousGPSPositions_ScanErrorDiscardsAlreadyScannedEdges
+// confirms an edge scanned successfully BEFORE the failing one doesn't
+// leak into the result either -- the whole fetch fails as a unit.
+func TestComputeSuspiciousGPSPositions_ScanErrorDiscardsAlreadyScannedEdges(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('badgps', 'BadGPSNode', 60.0, 20.0)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('n1', 'Neighbor1', 55.00, 10.00)`)
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon) VALUES ('n2', 'Neighbor2', 55.05, 10.05)`)
+	// A perfectly valid edge that would normally be scanned fine.
+	if _, err := db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('badgps', 'n1', 10)`); err != nil {
+		t.Fatalf("insert valid edge: %v", err)
+	}
+	// The edge that fails to scan.
+	if _, err := db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('badgps', 'n2', NULL)`); err != nil {
+		t.Fatalf("insert NULL-count edge: %v", err)
+	}
+
+	positioned, _, err := db.GetNodesForAreaAnalytics()
+	if err != nil {
+		t.Fatalf("GetNodesForAreaAnalytics: %v", err)
+	}
+	resp, err := computeSuspiciousGPSPositions(db, positioned)
+	if err == nil {
+		t.Fatal("computeSuspiciousGPSPositions: expected an error, got nil")
+	}
+	if resp.Nodes != nil {
+		t.Errorf("computeSuspiciousGPSPositions: expected no flagged nodes on error, got %+v", resp.Nodes)
+	}
+}

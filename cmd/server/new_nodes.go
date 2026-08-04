@@ -8,6 +8,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -79,8 +80,13 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 		var name, role sql.NullString
 		var lat, lon sql.NullFloat64
 		var foreignAdvert sql.NullInt64
+		// A scan failure here (unexpected NULL in a non-nullable field,
+		// schema drift, cursor/interrupt error) aborts the whole fetch
+		// rather than silently dropping the row -- returning the rows
+		// scanned so far as if they were the complete, successful result
+		// would misrepresent a partial fetch as a full one.
 		if err := rows.Scan(&e.PublicKey, &name, &role, &lat, &lon, &e.FirstSeen, &foreignAdvert); err != nil {
-			continue
+			return nil, fmt.Errorf("computeNewNodes: scan row: %w", err)
 		}
 		e.Foreign = foreignAdvert.Valid && foreignAdvert.Int64 != 0
 		if s.cfg.IsBlacklisted(e.PublicKey) {
@@ -108,6 +114,9 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 		if len(out) >= limit {
 			break
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("computeNewNodes: row iteration: %w", err)
 	}
 	return out, nil
 }

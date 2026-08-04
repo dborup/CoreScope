@@ -9,6 +9,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -60,8 +61,12 @@ func (s *Server) computeNodeChanges(limit int) ([]NodeChangeEntry, error) {
 	for rows.Next() {
 		var e NodeChangeEntry
 		var oldValue, newValue sql.NullString
+		// A scan failure here aborts the whole fetch (see computeNewNodes
+		// for the same reasoning) -- rows must still be closed on this
+		// path since it isn't deferred (see the comment below).
 		if err := rows.Scan(&e.ID, &e.PublicKey, &e.ChangeType, &oldValue, &newValue, &e.DetectedAt); err != nil {
-			continue
+			rows.Close()
+			return nil, fmt.Errorf("computeNodeChanges: scan row: %w", err)
 		}
 		if s.cfg.IsBlacklisted(e.PublicKey) {
 			continue
@@ -81,8 +86,13 @@ func (s *Server) computeNodeChanges(limit int) ([]NodeChangeEntry, error) {
 	// above may `break` without draining every row) deadlocks the
 	// single-connection SQLite pool used in tests. Recurring lesson in
 	// this codebase; see ping_scores.go/observer neighbor code for the
-	// same pattern.
+	// same pattern. rows.Err() must be checked AFTER Close() (both are
+	// valid to call post-Close, and Close() itself doesn't surface a
+	// mid-iteration cursor error the way Err() does).
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("computeNodeChanges: row iteration: %w", err)
+	}
 
 	pubkeys := make([]string, 0, len(out))
 	for _, e := range out {
