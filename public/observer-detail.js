@@ -613,7 +613,7 @@ window.ObserverDetailNaiveBanner = {
     const el = document.getElementById('obsRecentPackets');
     if (!el || !packets.length) { if (el) el.innerHTML = '<div class="text-muted">No recent packets.</div>'; return; }
     el.innerHTML = `<table class="data-table" style="font-size:0.85em">
-      <thead><tr><th scope="col">Time</th><th scope="col">Type</th><th scope="col">Hash</th><th scope="col">SNR</th><th scope="col">RSSI</th><th scope="col">Hops</th></tr></thead>
+      <thead><tr><th scope="col">Time</th><th scope="col">Type</th><th scope="col">Hash</th><th scope="col">SNR</th><th scope="col">RSSI</th><th scope="col">Hops</th><th scope="col"></th></tr></thead>
       <tbody>${packets.map(p => {
         const decoded = typeof p.decoded_json === 'string' ? JSON.parse(p.decoded_json) : (p.decoded_json || {});
         const rawHops = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : (p.path_json || []);
@@ -625,6 +625,7 @@ window.ObserverDetailNaiveBanner = {
           ? window.MC_filterPathHops(rawHops)
           : rawHops;
         const typeName = PAYLOAD_LABELS[p.payload_type] || 'Type ' + p.payload_type;
+        const viewPathBtn = p.hash ? `<button type="button" class="btn-icon obs-view-path" data-view-path="${escapeHtml(p.hash)}" title="View path" aria-label="View path"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg></button>` : '';
         return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/packets/${p.hash || p.id}">
           <td>${timeAgo(p.timestamp)}</td>
           <td>${typeName}</td>
@@ -632,6 +633,7 @@ window.ObserverDetailNaiveBanner = {
           <td>${p.snr != null ? Number(p.snr).toFixed(1) : '—'}</td>
           <td>${p.rssi != null ? p.rssi : '—'}</td>
           <td>${hops.length}</td>
+          <td>${viewPathBtn}</td>
         </tr>`;
       }).join('')}</tbody>
     </table>`;
@@ -640,7 +642,17 @@ window.ObserverDetailNaiveBanner = {
     // an XSS-amplification path if data ever sneaks in. Replaced with a
     // single delegated click listener that reads data-value. The keydown
     // listener below already followed this pattern for #209.
+    //
+    // The View Path button lives inside the same navigable row, so it must
+    // be checked first and stop propagation -- otherwise clicking it would
+    // both open the path modal AND navigate away to the packet page.
     el.addEventListener('click', function (e) {
+      var viewPathBtn = e.target.closest('[data-view-path]');
+      if (viewPathBtn) {
+        e.stopPropagation();
+        if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);
+        return;
+      }
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       location.hash = row.dataset.value;
@@ -648,6 +660,10 @@ window.ObserverDetailNaiveBanner = {
 
     // #209 — Keyboard accessibility for recent packet rows
     el.addEventListener('keydown', function (e) {
+      // Same View Path guard as the click handler above: if focus is on the
+      // button, let its native Enter/Space activation (which fires a click
+      // event) handle it -- don't ALSO navigate the row away underneath it.
+      if (e.target.closest('[data-view-path]')) return;
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       if (e.key !== 'Enter' && e.key !== ' ') return;
