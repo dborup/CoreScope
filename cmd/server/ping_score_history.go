@@ -15,7 +15,12 @@
 // records and leaderboards -- it is a history store, not a disposable
 // cache, and corruption/version-mismatch handling below is written with
 // that in mind: never silently discard rows that cannot be reconstructed
-// from anywhere else.
+// from anywhere else. Corruption and an unrecognized future schema version
+// are therefore FATAL to Open (typed errors, see
+// PingScoreHistoryCorruptError / PingScoreHistoryMigrationError) rather
+// than something this package silently works around -- the caller decides
+// whether to run without a history store (falling back to the pre-4A
+// recomputer) or to involve an operator.
 //
 // Phase 4A scope: only the storage foundation (connection lifecycle,
 // versioned additive schema, upsert/delete/load operations, integrity
@@ -29,7 +34,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -87,23 +91,68 @@ type PingScoreHistoryEntry struct {
 	ComputedAt       string
 }
 
+// PingScoreHistoryCorruptError means the file failed PRAGMA integrity_check
+// (or couldn't even run it -- e.g. it isn't a valid SQLite database at
+// all). The file, and any -wal/-shm side files, are left completely
+// untouched: no rename, no delete, no replacement. Recovering from this is
+// an explicit, separate operator action in a later phase -- Open never
+// attempts it automatically, because after packetDays pruning this file
+// may be the only remaining source for old pings' all-time contribution.
+type PingScoreHistoryCorruptError struct {
+	Path   string
+	Detail string
+}
+
+func (e *PingScoreHistoryCorruptError) Error() string {
+	return fmt.Sprintf("ping score history store: %s failed integrity check: %s", e.Path, e.Detail)
+}
+
+// PingScoreHistoryMigrationError means an additive schema migration failed
+// partway. The connection is closed and no further writes are attempted --
+// this is a hard failure of Open, not a degraded-but-usable store. Rows
+// already committed by any EARLIER migration step remain in place (each
+// step is its own transaction; see pingScoreHistoryMigrations), so a retry
+// on a later Open call only re-attempts the step that failed.
+type PingScoreHistoryMigrationError struct {
+	Path        string
+	FromVersion int
+	ToVersion   int
+	Err         error
+}
+
+func (e *PingScoreHistoryMigrationError) Error() string {
+	return fmt.Sprintf("ping score history store: %s: migration v%d -> v%d failed: %v", e.Path, e.FromVersion, e.ToVersion, e.Err)
+}
+
+func (e *PingScoreHistoryMigrationError) Unwrap() error { return e.Err }
+
 // PingScoreHistoryIntegrity records an abnormal state of the history store
 // that a consumer (Phase 4B+, and eventually the API) should surface
 // rather than silently paper over. Fields not relevant to a given Status
 // are left zero-valued.
+//
+// IMPORTANT: OpenPingScoreHistoryStore itself NEVER sets this -- corruption
+// and an unrecognized future schema version are both FATAL to Open (typed
+// errors: PingScoreHistoryCorruptError / PingScoreHistoryMigrationError),
+// precisely so an operator/caller decides what happens next rather than
+// this package silently switching to a reduced-history state on their
+// behalf. StoreIntegrity/LoadIntegrity are plumbing for a LATER, explicit
+// recovery function (not built in Phase 4A) to use once it exists.
 type PingScoreHistoryIntegrity struct {
 	// Status is one of: "ok", "initial-backfill-incomplete",
 	// "degraded-unknown-version", "recovered-partial", "recovered-empty".
 	Status     string
 	DetectedAt string // RFC3339
 
-	// Relevant to "initial-backfill-incomplete" (Phase 4B populates these;
-	// Phase 4A only provides the storage for them).
+	// Relevant to "initial-backfill-incomplete" (a later phase populates
+	// these once GetPacketPathsBulk exists; Phase 4A only provides the
+	// storage for them).
 	TotalTriggers          int
 	ScoredCount            int
 	UnreconstructableCount int
 
-	// Relevant to "recovered-partial"/"recovered-empty".
+	// Relevant to "recovered-partial"/"recovered-empty", written by a
+	// future explicit recovery function -- never by Open itself.
 	RowsRecovered int
 
 	Detail string
@@ -122,21 +171,34 @@ func DefaultPingScoreHistoryPath(mainDBPath string) string {
 // path. It NEVER touches meshcore.db or any connection opened via OpenDB --
 // this is a completely independent *sql.DB against a different file.
 //
-// Corruption handling: PRAGMA integrity_check runs on open. If it fails,
-// the ORIGINAL file is renamed aside (never deleted) and a fresh, empty
-// store is created in its place, with a "recovered-empty" integrity record
-// explaining what happened and where the original file was preserved for
-// manual recovery. Automatic row-wise partial recovery from a corrupt
-// SQLite file is NOT implemented in this phase -- see the Phase 4A report's
-// "known limitations" section for why, rather than faking a "best effort"
-// that isn't actually reliable with this driver.
+// Corruption handling: if the file already exists, it is FIRST inspected
+// through a physically read-only connection (SQLite URI mode=ro, no
+// _journal_mode=WAL parameter -- so opening for inspection cannot itself
+// change the journal mode or create/modify -wal/-shm side files). If
+// PRAGMA integrity_check fails on that connection, Open returns a
+// *PingScoreHistoryCorruptError and touches NOTHING on disk: no rename, no
+// delete, no replacement file. Recovering from this is a separate,
+// explicit operator action in a later phase, not something this function
+// does automatically -- see the type's doc comment for why.
 //
 // Version handling: an on-disk schema_version newer than
 // pingScoreHistorySchemaVersion means a newer server version wrote this
-// file (e.g. a rolled-back deploy). The store opens successfully in
-// READ-ONLY mode in that case -- LoadAll/LoadIntegrity still work, but
-// UpsertAndDelete/StoreIntegrity return an error rather than risking
-// writing a layout this code doesn't understand.
+// file (e.g. a rolled-back deploy). In that case the store is returned
+// using the SAME physically read-only connection from the inspection pass
+// -- it is never reopened read-write, so there is no way for this code to
+// write a layout it doesn't understand, regardless of what any future
+// method might forget to check. ReadOnly() reports this for API
+// visibility, but is not the mechanism enforcing it.
+//
+// Migration handling: only reached when schema_version <= supported. The
+// inspection connection is closed and a genuinely read-write connection is
+// opened (this is the ONLY path that ever produces a write-capable
+// connection). The safety checks (integrity, version) are repeated against
+// that new connection before migrating, since decisions made against the
+// now-closed inspection connection aren't safe to assume still hold. On
+// migration failure, Open returns a *PingScoreHistoryMigrationError and
+// closes the connection -- no partial, silently-degraded store is ever
+// returned.
 func OpenPingScoreHistoryStore(path string) (*PingScoreHistoryStore, error) {
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if _, err := os.Stat(dir); err != nil {
@@ -144,57 +206,118 @@ func OpenPingScoreHistoryStore(path string) (*PingScoreHistoryStore, error) {
 		}
 	}
 
-	store, corrupt, corruptDetail, err := openAndCheck(path)
-	if err != nil {
-		return nil, err
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return createFreshPingScoreHistoryStore(path)
+	} else if err != nil {
+		return nil, fmt.Errorf("ping score history store: stat %s: %w", path, err)
 	}
-	if !corrupt {
-		return store, nil
-	}
-
-	// Corrupt: never delete, never silently keep using it. Preserve the
-	// original file for manual recovery and start a fresh, empty store.
-	store.conn.Close()
-	backupPath := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
-	if err := os.Rename(path, backupPath); err != nil {
-		return nil, fmt.Errorf("ping score history store: rename corrupt file %s aside: %w", path, err)
-	}
-	fresh, stillCorrupt, _, err := openAndCheck(path)
-	if err != nil {
-		return nil, fmt.Errorf("ping score history store: create fresh store after corruption: %w", err)
-	}
-	if stillCorrupt {
-		// A brand-new, just-created file failing its own integrity check
-		// would indicate something wrong with the environment itself
-		// (disk, filesystem) rather than the old file's content.
-		fresh.conn.Close()
-		return nil, fmt.Errorf("ping score history store: freshly created file at %s failed integrity_check", path)
-	}
-	integrity := PingScoreHistoryIntegrity{
-		Status:     "recovered-empty",
-		DetectedAt: time.Now().UTC().Format(time.RFC3339),
-		Detail: fmt.Sprintf(
-			"original file failed PRAGMA integrity_check (%s) and was preserved at %s for manual recovery; "+
-				"automatic row-wise partial recovery is not implemented in this version",
-			corruptDetail, backupPath),
-	}
-	if err := fresh.StoreIntegrity(integrity); err != nil {
-		fresh.Close()
-		return nil, fmt.Errorf("ping score history store: record corruption integrity state: %w", err)
-	}
-	return fresh, nil
+	return openExistingPingScoreHistoryStore(path)
 }
 
-// openAndCheck opens the connection, runs the integrity check, and -- if
-// the file is intact -- applies any pending additive migrations or flips
-// into read-only mode for an unrecognized future schema version. It does
-// NOT handle the corrupt case beyond reporting it; the caller (which may
-// need to close this connection and open a different path) does that.
-func openAndCheck(path string) (store *PingScoreHistoryStore, corrupt bool, corruptDetail string, err error) {
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
+// createFreshPingScoreHistoryStore handles the "file does not exist yet"
+// case: opened directly read-write (nothing to inspect, there is no prior
+// content to protect), then migrated from version 0.
+func createFreshPingScoreHistoryStore(path string) (*PingScoreHistoryStore, error) {
+	conn, err := openPingScoreHistoryConn(path, true)
+	if err != nil {
+		return nil, fmt.Errorf("ping score history store: create %s: %w", path, err)
+	}
+	s := &PingScoreHistoryStore{conn: conn, path: path}
+	if err := s.migrateFrom(0); err != nil {
+		conn.Close()
+		return nil, &PingScoreHistoryMigrationError{Path: path, FromVersion: 0, ToVersion: pingScoreHistorySchemaVersion, Err: err}
+	}
+	return s, nil
+}
+
+// openExistingPingScoreHistoryStore handles the "file already exists"
+// case, per the read/inspect-before-write flow documented on
+// OpenPingScoreHistoryStore.
+func openExistingPingScoreHistoryStore(path string) (*PingScoreHistoryStore, error) {
+	roConn, err := openPingScoreHistoryConn(path, false)
+	if err != nil {
+		return nil, fmt.Errorf("ping score history store: open %s read-only for inspection: %w", path, err)
+	}
+
+	if corruptErr := checkPingScoreHistoryIntegrity(roConn, path); corruptErr != nil {
+		roConn.Close()
+		return nil, corruptErr
+	}
+
+	version, err := readSchemaVersionFrom(roConn)
+	if err != nil {
+		roConn.Close()
+		return nil, fmt.Errorf("ping score history store: read schema version from %s: %w", path, err)
+	}
+
+	if version > pingScoreHistorySchemaVersion {
+		// Newer than this code understands: KEEP this physically read-only
+		// connection as-is. It never becomes write-capable.
+		return &PingScoreHistoryStore{conn: roConn, path: path, readOnly: true}, nil
+	}
+
+	// version <= supported: a write-capable connection is needed (at
+	// minimum to check/apply migrations). This is the ONLY branch that
+	// ever opens a read-write connection. The inspection connection's job
+	// is done.
+	roConn.Close()
+
+	rwConn, err := openPingScoreHistoryConn(path, true)
+	if err != nil {
+		return nil, fmt.Errorf("ping score history store: reopen %s read-write: %w", path, err)
+	}
+
+	// Re-verify against the NEW connection rather than trusting the
+	// now-closed inspection connection's findings -- cheap, and avoids
+	// acting on a decision made against a connection that no longer exists.
+	if corruptErr := checkPingScoreHistoryIntegrity(rwConn, path); corruptErr != nil {
+		rwConn.Close()
+		return nil, corruptErr
+	}
+	version2, err := readSchemaVersionFrom(rwConn)
+	if err != nil {
+		rwConn.Close()
+		return nil, fmt.Errorf("ping score history store: re-read schema version from %s: %w", path, err)
+	}
+	if version2 > pingScoreHistorySchemaVersion {
+		// Changed between the two checks. This store is server-owned and
+		// single-writer by design, so this "shouldn't" happen -- handled
+		// safely anyway rather than assumed impossible: close the
+		// write-capable connection and return a fresh, physically
+		// read-only one instead of ever using the one that's open now.
+		rwConn.Close()
+		roConn2, err := openPingScoreHistoryConn(path, false)
+		if err != nil {
+			return nil, fmt.Errorf("ping score history store: reopen %s read-only after version changed mid-open: %w", path, err)
+		}
+		return &PingScoreHistoryStore{conn: roConn2, path: path, readOnly: true}, nil
+	}
+
+	s := &PingScoreHistoryStore{conn: rwConn, path: path}
+	if version2 < pingScoreHistorySchemaVersion {
+		if err := s.migrateFrom(version2); err != nil {
+			rwConn.Close()
+			return nil, &PingScoreHistoryMigrationError{Path: path, FromVersion: version2, ToVersion: pingScoreHistorySchemaVersion, Err: err}
+		}
+	}
+	return s, nil
+}
+
+// openPingScoreHistoryConn opens a *sql.DB against path. writable=false
+// uses SQLite's URI mode=ro (physically read-only at the VFS level, no
+// _journal_mode parameter -- cannot change the journal mode or create/
+// touch -wal/-shm side files). writable=true is the ONLY DSN shape that
+// enables WAL and permits writes.
+func openPingScoreHistoryConn(path string, writable bool) (*sql.DB, error) {
+	var dsn string
+	if writable {
+		dsn = fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
+	} else {
+		dsn = fmt.Sprintf("file:%s?mode=ro&_busy_timeout=5000", path)
+	}
 	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, false, "", fmt.Errorf("ping score history store: open %s: %w", path, err)
+		return nil, err
 	}
 	// Single connection: this store is only ever driven by one goroutine
 	// (Phase 4B's design commits to this), and a single-connection pool
@@ -203,51 +326,35 @@ func openAndCheck(path string) (store *PingScoreHistoryStore, corrupt bool, corr
 	conn.SetMaxOpenConns(1)
 	if err := conn.Ping(); err != nil {
 		conn.Close()
-		return nil, false, "", fmt.Errorf("ping score history store: ping %s: %w", path, err)
+		return nil, err
 	}
-	s := &PingScoreHistoryStore{conn: conn, path: path}
+	return conn, nil
+}
 
-	// A file that isn't a valid SQLite database at all (garbage bytes,
-	// truncated, wrong format) fails the PRAGMA itself at the driver level
-	// -- e.g. modernc.org/sqlite's "file is not a database (26)" -- rather
-	// than returning a non-"ok" result row. Ping() above can succeed even
-	// on such a file (it doesn't necessarily read page content), so this
-	// is the first point corruption is actually detectable. Treat BOTH
-	// failure shapes (a hard query error, or a non-"ok" result string) as
-	// "corrupt": the safe, non-destructive recovery path is identical
-	// either way, and refusing to start the server over a corrupt cache
-	// file would be a worse outcome than recovering into a fresh one.
+// checkPingScoreHistoryIntegrity runs PRAGMA integrity_check against conn
+// and returns a *PingScoreHistoryCorruptError if the file is not a valid,
+// intact SQLite database. A file that isn't a valid SQLite database at all
+// (garbage bytes, truncated, wrong format) fails the PRAGMA itself at the
+// driver level -- e.g. modernc.org/sqlite's "file is not a database (26)"
+// -- rather than returning a non-"ok" result row; both failure shapes are
+// treated identically here.
+func checkPingScoreHistoryIntegrity(conn *sql.DB, path string) *PingScoreHistoryCorruptError {
 	var result string
-	queryErr := conn.QueryRow(`PRAGMA integrity_check`).Scan(&result)
-	if queryErr != nil {
-		return s, true, queryErr.Error(), nil
+	if err := conn.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
+		return &PingScoreHistoryCorruptError{Path: path, Detail: err.Error()}
 	}
 	if result != "ok" {
-		return s, true, result, nil
+		return &PingScoreHistoryCorruptError{Path: path, Detail: result}
 	}
-
-	version, err := s.readSchemaVersion()
-	if err != nil {
-		conn.Close()
-		return nil, false, "", fmt.Errorf("ping score history store: read schema version: %w", err)
-	}
-	switch {
-	case version < pingScoreHistorySchemaVersion:
-		if err := s.migrateFrom(version); err != nil {
-			conn.Close()
-			return nil, false, "", fmt.Errorf("ping score history store: migrate from v%d: %w", version, err)
-		}
-	case version > pingScoreHistorySchemaVersion:
-		// Newer than this code understands. Never migrate, never write --
-		// just serve reads from whatever this code's own SELECTs (which
-		// name every column explicitly, never `SELECT *`) can still find.
-		s.readOnly = true
-	}
-	return s, false, "", nil
+	return nil
 }
 
 // ReadOnly reports whether this store was opened against a newer-than-
-// understood schema version and is therefore refusing all writes.
+// understood schema version. This is API-level information for callers --
+// the actual write protection is the underlying connection itself being
+// opened with SQLite's mode=ro (see openPingScoreHistoryConn), not this
+// flag; UpsertAndDelete/StoreIntegrity check it only to fail with a clear
+// error message instead of a raw driver "readonly database" error.
 func (s *PingScoreHistoryStore) ReadOnly() bool { return s.readOnly }
 
 // Close releases the underlying connection. Safe to call multiple times.
@@ -260,9 +367,13 @@ func (s *PingScoreHistoryStore) Close() error {
 	return err
 }
 
-func (s *PingScoreHistoryStore) readSchemaVersion() (int, error) {
+// readSchemaVersionFrom is a free function (not a *PingScoreHistoryStore
+// method) because it must run against the inspection (read-only) or
+// reopened (read-write) connection BEFORE a PingScoreHistoryStore exists
+// for either of them, in openExistingPingScoreHistoryStore's flow.
+func readSchemaVersionFrom(conn *sql.DB) (int, error) {
 	var tableExists int
-	if err := s.conn.QueryRow(
+	if err := conn.QueryRow(
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_meta'`,
 	).Scan(&tableExists); err != nil {
 		return 0, fmt.Errorf("check _meta existence: %w", err)
@@ -271,7 +382,7 @@ func (s *PingScoreHistoryStore) readSchemaVersion() (int, error) {
 		return 0, nil // brand-new file, nothing migrated yet
 	}
 	var raw string
-	err := s.conn.QueryRow(`SELECT value FROM _meta WHERE key = 'schema_version'`).Scan(&raw)
+	err := conn.QueryRow(`SELECT value FROM _meta WHERE key = 'schema_version'`).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -283,6 +394,10 @@ func (s *PingScoreHistoryStore) readSchemaVersion() (int, error) {
 		return 0, fmt.Errorf("invalid schema_version value %q: %w", raw, err)
 	}
 	return v, nil
+}
+
+func (s *PingScoreHistoryStore) readSchemaVersion() (int, error) {
+	return readSchemaVersionFrom(s.conn)
 }
 
 // pingScoreHistoryMigration is one additive, idempotent step in the

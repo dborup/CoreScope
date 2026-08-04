@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -281,6 +283,153 @@ func TestOpenPingScoreHistoryStore_UnknownNewerVersionIsReadOnly(t *testing.T) {
 	}
 }
 
+// TestOpenPingScoreHistoryStore_UnknownNewerVersionConnectionIsPhysicallyReadOnly
+// proves the write protection is the underlying SQLite connection itself
+// (opened with mode=ro), not just the Go-level readOnly bool -- a direct
+// Exec against the internal connection, bypassing the public API entirely,
+// must still fail. This is the test the review specifically asked for:
+// the public methods checking the flag is not sufficient on its own.
+func TestOpenPingScoreHistoryStore_UnknownNewerVersionConnectionIsPhysicallyReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	rawSetSchemaVersion(t, path, "999")
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen with unknown future version: %v", err)
+	}
+	defer reopened.Close()
+	if !reopened.ReadOnly() {
+		t.Fatal("expected ReadOnly()=true")
+	}
+
+	// Bypass every public method and Exec directly against the internal
+	// connection. If this succeeds, the connection itself is writable and
+	// the whole scheme depends entirely on every future method
+	// remembering to check readOnly -- exactly what must NOT be true.
+	_, execErr := reopened.conn.Exec(
+		`INSERT INTO ping_score_history_entries (tx_id, hash, timestamp, station_count, deepest_hops, computed_at)
+		 VALUES (1, 'h', 't', 0, 0, 'c')`)
+	if execErr == nil {
+		t.Fatal("direct Exec against the internal connection succeeded -- connection is NOT physically read-only")
+	}
+	if !strings.Contains(strings.ToLower(execErr.Error()), "readonly") {
+		t.Errorf("expected a \"readonly database\" style driver error, got: %v", execErr)
+	}
+}
+
+// TestOpenPingScoreHistoryStore_UnknownNewerVersionJournalModeUnchanged
+// confirms the read-only inspection pass itself never issues a
+// _journal_mode=WAL (or any other) PRAGMA SET -- the file's on-disk journal
+// mode before and after an Open+Close cycle must be identical.
+func TestOpenPingScoreHistoryStore_UnknownNewerVersionJournalModeUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	rawSetSchemaVersion(t, path, "999")
+
+	before := rawGetJournalMode(t, path)
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen with unknown future version: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened: %v", err)
+	}
+
+	after := rawGetJournalMode(t, path)
+	if before != after {
+		t.Errorf("journal_mode changed from %q to %q across an Open+Close cycle on a future-version file", before, after)
+	}
+}
+
+// TestOpenPingScoreHistoryStore_UnknownNewerVersionDoesNotTouchWALFile
+// confirms opening a future-version file for read-only inspection neither
+// creates a new -wal side file nor modifies an existing one.
+func TestOpenPingScoreHistoryStore_UnknownNewerVersionDoesNotTouchWALFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if err := store.UpsertAndDelete([]PingScoreHistoryEntry{sampleHistoryEntry(1)}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	rawSetSchemaVersion(t, path, "999")
+
+	walPath := path + "-wal"
+	existedBefore := fileExistsForTest(walPath)
+	var contentBefore []byte
+	if existedBefore {
+		contentBefore, err = os.ReadFile(walPath)
+		if err != nil {
+			t.Fatalf("read wal file before: %v", err)
+		}
+	}
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen with unknown future version: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened: %v", err)
+	}
+
+	existedAfter := fileExistsForTest(walPath)
+	if existedAfter != existedBefore {
+		t.Fatalf("-wal file existence changed: existed before=%v, after=%v", existedBefore, existedAfter)
+	}
+	if existedAfter {
+		contentAfter, err := os.ReadFile(walPath)
+		if err != nil {
+			t.Fatalf("read wal file after: %v", err)
+		}
+		if !bytes.Equal(contentBefore, contentAfter) {
+			t.Error("-wal file content changed by opening a future-version file read-only")
+		}
+	}
+}
+
+func fileExistsForTest(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func rawGetJournalMode(t *testing.T, path string) string {
+	t.Helper()
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open for journal_mode read: %v", err)
+	}
+	defer conn.Close()
+	var mode string
+	if err := conn.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("raw read journal_mode: %v", err)
+	}
+	return mode
+}
+
 // --- 7. additive migration preserves existing rows ---
 
 func TestOpenPingScoreHistoryStore_MigrationPreservesExistingRows(t *testing.T) {
@@ -323,6 +472,98 @@ func TestOpenPingScoreHistoryStore_MigrationPreservesExistingRows(t *testing.T) 
 	}
 	if v != pingScoreHistorySchemaVersion {
 		t.Errorf("schema_version after migration = %d, want %d", v, pingScoreHistorySchemaVersion)
+	}
+}
+
+// TestOpenPingScoreHistoryStore_MigrationFailureIsTypedAndPreservesRows
+// provokes a REAL migration failure (not a fabricated stub): applyPingScoreHistoryV1's
+// first statement, `CREATE TABLE IF NOT EXISTS _meta (...)`, is made to
+// collide with a pre-existing INDEX named "_meta" -- SQLite's IF NOT EXISTS
+// only suppresses the "already exists" error when the existing object is
+// itself a TABLE of the same name; colliding with an object of a
+// DIFFERENT type (an index here) still raises a real error (verified
+// empirically against modernc.org/sqlite before writing this test).
+func TestOpenPingScoreHistoryStore_MigrationFailureIsTypedAndPreservesRows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if err := store.UpsertAndDelete([]PingScoreHistoryEntry{sampleHistoryEntry(1)}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Replace the real _meta TABLE with an INDEX of the same name (pointing
+	// at an unrelated table) so readSchemaVersion sees "no _meta table" (=
+	// version 0, migration needed), but the migration's own
+	// `CREATE TABLE IF NOT EXISTS _meta` then collides with that index.
+	func() {
+		conn, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatalf("raw open to corrupt _meta: %v", err)
+		}
+		defer conn.Close()
+		if _, err := conn.Exec(`DROP TABLE _meta`); err != nil {
+			t.Fatalf("drop real _meta: %v", err)
+		}
+		if _, err := conn.Exec(`CREATE TABLE dummy_unrelated (id INTEGER)`); err != nil {
+			t.Fatalf("create dummy table: %v", err)
+		}
+		if _, err := conn.Exec(`CREATE INDEX _meta ON dummy_unrelated(id)`); err != nil {
+			t.Fatalf("create colliding index named _meta: %v", err)
+		}
+	}()
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if reopened != nil {
+		reopened.Close()
+		t.Fatal("expected a nil store when migration fails, got a non-nil one")
+	}
+	if err == nil {
+		t.Fatal("expected an error from the provoked migration failure, got nil")
+	}
+	var migErr *PingScoreHistoryMigrationError
+	if !errors.As(err, &migErr) {
+		t.Fatalf("expected errors.As to find a *PingScoreHistoryMigrationError, got: %v (%T)", err, err)
+	}
+	if migErr.Path != path {
+		t.Errorf("MigrationError.Path = %q, want %q", migErr.Path, path)
+	}
+	if migErr.FromVersion != 0 || migErr.ToVersion != pingScoreHistorySchemaVersion {
+		t.Errorf("MigrationError versions = %d -> %d, want 0 -> %d", migErr.FromVersion, migErr.ToVersion, pingScoreHistorySchemaVersion)
+	}
+	if migErr.Unwrap() == nil {
+		t.Error("MigrationError.Unwrap() returned nil, want the underlying SQL error")
+	}
+
+	// schema_version must NOT have been bumped to 1 -- the migration's own
+	// transaction never committed.
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw reopen to verify: %v", err)
+	}
+	defer conn.Close()
+	var metaType string
+	if err := conn.QueryRow(`SELECT type FROM sqlite_master WHERE name = '_meta'`).Scan(&metaType); err != nil {
+		t.Fatalf("check _meta type: %v", err)
+	}
+	if metaType != "index" {
+		t.Errorf("_meta type = %q, want still \"index\" (unchanged by the failed migration)", metaType)
+	}
+
+	// The pre-existing entry in ping_score_history_entries must have
+	// survived -- the failed migration must not have touched that table.
+	var count int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM ping_score_history_entries`).Scan(&count); err != nil {
+		t.Fatalf("count entries: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("ping_score_history_entries row count = %d, want 1 (pre-existing row must survive a failed migration)", count)
 	}
 }
 
@@ -586,54 +827,150 @@ func TestPingScoreHistoryStore_NeverTouchesMainDatabase(t *testing.T) {
 	}
 }
 
-// --- corruption handling: preserved, never silently discarded ---
+// --- corruption handling: NEVER auto-replaced, a typed error instead ---
+//
+// ping_scores_history.db becomes the only remaining source for a ping's
+// all-time contribution once its raw packet data has been pruned --
+// automatically discarding a corrupt file and starting fresh, as an
+// earlier version of this code did, could silently and permanently reduce
+// "all-time" results. The correct behavior is to touch NOTHING and hand
+// the caller a typed error to decide what happens next (e.g. run without
+// a history store, or alert an operator) -- manual/offline recovery is
+// out of scope for Phase 4A.
 
-func TestOpenPingScoreHistoryStore_CorruptFileIsPreservedNotDeleted(t *testing.T) {
+func TestOpenPingScoreHistoryStore_CorruptFileReturnsTypedErrorAndIsUntouched(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "h.db")
+	const garbage = "this is not a sqlite database, just garbage bytes"
 
-	// Write garbage that is not a valid SQLite file at all -- guaranteed
-	// to fail PRAGMA integrity_check.
-	if err := os.WriteFile(path, []byte("this is not a sqlite database, just garbage bytes"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(garbage), 0o644); err != nil {
 		t.Fatalf("write garbage file: %v", err)
+	}
+	infoBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
 	}
 
 	store, err := OpenPingScoreHistoryStore(path)
-	if err != nil {
-		t.Fatalf("OpenPingScoreHistoryStore should recover from corruption, not fail: %v", err)
+	if store != nil {
+		store.Close()
+		t.Fatal("OpenPingScoreHistoryStore returned a non-nil store for a corrupt file -- must return nil, error")
 	}
-	defer store.Close()
-
-	entries, err := store.LoadAll()
-	if err != nil {
-		t.Fatalf("LoadAll on recovered store: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("expected an empty fresh store after corruption recovery, got %d entries", len(entries))
+	if err == nil {
+		t.Fatal("expected an error for a corrupt file, got nil")
 	}
 
-	integrity, err := store.LoadIntegrity()
-	if err != nil {
-		t.Fatalf("LoadIntegrity: %v", err)
+	var corruptErr *PingScoreHistoryCorruptError
+	if !errors.As(err, &corruptErr) {
+		t.Fatalf("expected errors.As to find a *PingScoreHistoryCorruptError, got: %v (%T)", err, err)
 	}
-	if integrity == nil || integrity.Status != "recovered-empty" {
-		t.Fatalf("expected integrity status \"recovered-empty\", got %+v", integrity)
+	if corruptErr.Path != path {
+		t.Errorf("PingScoreHistoryCorruptError.Path = %q, want %q", corruptErr.Path, path)
+	}
+	if corruptErr.Detail == "" {
+		t.Error("PingScoreHistoryCorruptError.Detail is empty, want the integrity_check failure detail")
 	}
 
-	// The ORIGINAL corrupt file must still be on disk, renamed aside, not deleted.
+	// The file must be byte-identical and at the SAME path -- no rename,
+	// no delete, no replacement.
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file after failed open: %v", err)
+	}
+	if string(content) != garbage {
+		t.Error("file content was modified by a failed Open -- must be byte-identical to the original")
+	}
+	infoAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if infoBefore.ModTime() != infoAfter.ModTime() {
+		t.Error("file mtime changed -- Open must not have written to it")
+	}
+
+	// No .corrupt-* sibling, no new active database, no side files.
 	matches, err := filepath.Glob(path + ".corrupt-*")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
-	if len(matches) != 1 {
-		t.Fatalf("expected exactly 1 preserved corrupt-file backup, found %d: %v", len(matches), matches)
+	if len(matches) != 0 {
+		t.Errorf("expected no .corrupt-* backup files to be created, found: %v", matches)
 	}
-	preserved, err := os.ReadFile(matches[0])
+	if fileExistsForTest(path + "-wal") {
+		t.Error("a -wal side file was created for a corrupt file that was never opened writably")
+	}
+	if fileExistsForTest(path + "-shm") {
+		t.Error("a -shm side file was created for a corrupt file that was never opened writably")
+	}
+
+	// Exactly one file exists in dir: the original, untouched garbage file.
+	dirEntries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("read preserved corrupt file: %v", err)
+		t.Fatalf("read dir: %v", err)
 	}
-	if string(preserved) != "this is not a sqlite database, just garbage bytes" {
-		t.Error("preserved corrupt file's content was altered -- must be byte-identical to the original")
+	if len(dirEntries) != 1 || dirEntries[0].Name() != filepath.Base(path) {
+		names := make([]string, len(dirEntries))
+		for i, de := range dirEntries {
+			names[i] = de.Name()
+		}
+		t.Errorf("expected exactly the original file in %s, found: %v", dir, names)
+	}
+}
+
+// TestOpenPingScoreHistoryStore_CorruptIntegrityCheckFailureIsAlsoTyped
+// covers the OTHER corruption shape: a file that IS parseable enough for
+// PRAGMA integrity_check to run and return a non-"ok" result, rather than
+// failing the PRAGMA outright. Constructed by damaging a real, previously
+// valid database file's bytes rather than using plain garbage.
+func TestOpenPingScoreHistoryStore_CorruptIntegrityCheckFailureIsAlsoTyped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if err := store.UpsertAndDelete([]PingScoreHistoryEntry{sampleHistoryEntry(1)}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Truncate a real database file's tail to corrupt it structurally,
+	// while keeping the SQLite header intact (unlike plain garbage bytes,
+	// this can pass Ping() and even the PRAGMA query itself, surfacing as
+	// a non-"ok" integrity_check RESULT rather than a query-level error).
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+	if len(original) < 200 {
+		t.Fatalf("original file too small to meaningfully truncate: %d bytes", len(original))
+	}
+	truncated := original[:len(original)/2]
+	if err := os.WriteFile(path, truncated, 0o644); err != nil {
+		t.Fatalf("write truncated file: %v", err)
+	}
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if reopened != nil {
+		reopened.Close()
+	}
+	if err == nil {
+		t.Fatal("expected an error opening a truncated/corrupt database, got nil")
+	}
+	var corruptErr *PingScoreHistoryCorruptError
+	if !errors.As(err, &corruptErr) {
+		t.Fatalf("expected errors.As to find a *PingScoreHistoryCorruptError, got: %v (%T)", err, err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after failed open: %v", err)
+	}
+	if !bytes.Equal(content, truncated) {
+		t.Error("truncated file was further modified by a failed Open")
 	}
 }
 
