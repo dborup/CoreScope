@@ -45,6 +45,17 @@ assert(/case 'repeater-metrics':\s*await renderRepeaterMetricsTab\(el\)/.test(sr
   'renderTab dispatches repeater-metrics');
 assert(/AREA_FILTER_TABS[\s\S]{0,250}'repeater-metrics'/.test(src),
   'repeater-metrics participates in region/area filtering');
+
+console.log('\n=== [S0] Scope Analytics stays fully removed — this re-fix must not resurrect it ===');
+[
+  'unscopedRelays24h', 'unscopedRatio24h', 'scopesObserved', 'scopesRecent',
+  'REPEATER_METRIC_AXIS_GROUPS', 'SCOPE_FILTERS', '_scopeFilterPredicate',
+  'REPEATER_METRIC_PRESETS', 'metricScatterScopeFilter', 'metricScatterPreset',
+  'Scope health', 'meshcore-repeater-scatter-scope-filter',
+].forEach(sym => {
+  assert(!src.includes(sym), `Scope Analytics symbol/string "${sym}" is absent from analytics.js`);
+});
+
 // --- Extract and execute the pure render pipeline with stub globals
 //     (same named-marker + new Function technique as test-my-repeaters-dashboard.js). ---
 const start = src.indexOf('const REPEATER_METRIC_AXES');
@@ -80,7 +91,7 @@ const fakeLocalStorage = (() => {
 
 const M = new Function(
   'esc', 'window', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'getFavorites', 'CLIENT_TTL', 'localStorage',
-  block + '\nreturn { REPEATER_METRIC_AXES, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, renderMetricScatter, renderRepeaterMetricsTab };')(
+  block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, _sampleExact, _sampleForPlot, renderMetricScatter, renderRepeaterMetricsTab };')(
   esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage);
 
 console.log('\n=== [1] axis registry: all 8 axes exist and read the right point fields ===');
@@ -226,6 +237,71 @@ console.log('\n=== [12]/[13]/[14] favorites survive sampling; ~2000 cap holds ev
     '2500 favorites are themselves strided to respect the cap — the cap cannot be bypassed by favoriting everything');
 }
 
+console.log('\n=== [S1] _sampleExact: exactness, no duplicates, full-range coverage, budget edges ===');
+{
+  assert(M.REPEATER_METRIC_POINT_CAP === 2000, 'REPEATER_METRIC_POINT_CAP is 2000');
+
+  const arr = Array.from({ length: 37 }, (_, i) => i);
+  assert(M._sampleExact(arr, 0).length === 0, '_sampleExact(arr, 0) returns an empty array');
+  assert(M._sampleExact(arr, -5).length === 0, '_sampleExact(arr, negative budget) returns an empty array, not a throw');
+
+  const full = M._sampleExact(arr, 37);
+  assert(full.length === 37 && full.every((v, i) => v === i), '_sampleExact(arr, arr.length) returns an exact full copy, in order');
+
+  const over = M._sampleExact(arr, 1000);
+  assert(over.length === 37 && over.every((v, i) => v === i), '_sampleExact(arr, budget > length) is capped at length — never fabricates elements');
+
+  const budget = 10;
+  const sampled = M._sampleExact(arr, budget);
+  assert(sampled.length === budget, `_sampleExact returns exactly the requested budget (${budget}) when budget < length`);
+  assert(new Set(sampled).size === sampled.length, '_sampleExact never returns duplicate elements');
+  assert(sampled.every(v => arr.includes(v)), '_sampleExact never fabricates elements absent from the input');
+  assert(sampled[0] === 0, '_sampleExact always includes the very first element of the range');
+  assert(sampled[sampled.length - 1] > arr.length / 2, '_sampleExact spreads across the WHOLE input range, not just the head');
+  assert(sampled.every((v, i) => i === 0 || v > sampled[i - 1]),
+    '_sampleExact indices are strictly increasing for an ascending input — proof of even spacing, not a clustered head-only slice');
+
+  const again = M._sampleExact(arr, budget);
+  assert(JSON.stringify(again) === JSON.stringify(sampled), '_sampleExact is deterministic — identical input always yields the identical sample');
+}
+
+console.log('\n=== [S2] _sampleForPlot: eligible/shown definitions ===');
+{
+  const pts = [
+    { pk: 'A', fav: false, traffic: 0.1, bridge: 0.2 },
+    { pk: 'B', fav: true,  traffic: 0.3, bridge: null },  // missing Y -> not eligible
+    { pk: 'C', fav: true,  traffic: null, bridge: 0.4 },  // missing X -> not eligible
+    { pk: 'D', fav: true,  traffic: 0.5, bridge: 0.6 },
+  ];
+  const xa = M._resolveAxis('traffic', pts), ya = M._resolveAxis('bridge', pts);
+  const { eligible, shown } = M._sampleForPlot(pts, xa, ya);
+  assert(eligible.length === 2 && eligible.every(p => p.pk === 'A' || p.pk === 'D'),
+    'eligible = points with values for BOTH selected axes (B and C are excluded, each missing one)');
+  assert(shown.length === eligible.length && shown.every(p => eligible.includes(p)),
+    'when eligible.length <= cap, shown is exactly eligible — no sampling needed');
+  const eligibleFavs = eligible.filter(p => p.fav);
+  assert(eligibleFavs.length === 1 && eligibleFavs[0].pk === 'D',
+    'a favorite missing either axis value (B, C) does not count as an eligible favorite');
+}
+
+console.log('\n=== [S3] _sampleForPlot at scale: favorite preservation and the hard cap ===');
+{
+  const many = [];
+  for (let i = 0; i < 2500; i++) many.push({ pk: 'p' + i, fav: (i % 500 === 0), traffic: i / 2500, bridge: (i % 7) / 7 });
+  const xa = M._resolveAxis('traffic', many), ya = M._resolveAxis('bridge', many);
+  const { eligible, shown } = M._sampleForPlot(many, xa, ya);
+  assert(eligible.length === 2500, 'eligible reflects the full input when every point has both axis values');
+  assert(shown.length === 2000, 'shown is capped at exactly REPEATER_METRIC_POINT_CAP (2000) once eligible exceeds it');
+  const favsIn = many.filter(p => p.fav);
+  assert(favsIn.every(p => shown.includes(p)), 'all 5 favorites (well under the cap, out of 2500) survive sampling into shown');
+
+  const allFav = [];
+  for (let i = 0; i < 2500; i++) allFav.push({ pk: 'q' + i, fav: true, traffic: i / 2500, bridge: 0.5 });
+  const r2 = M._sampleForPlot(allFav, xa, ya);
+  assert(r2.shown.length === 2000, '2500 favorites are themselves sampled down to exactly the 2000 cap');
+  assert(r2.shown.every(p => p.fav), 'when favorites alone exceed the cap, shown contains ONLY favorites — no non-favorite squeezed in');
+}
+
 function makeElement(id) {
   const children = {};
   return {
@@ -312,6 +388,95 @@ function makeElement(id) {
     ySel.fireChange();
     assert(fakeLocalStorage.getItem('meshcore-repeater-scatter-y') === 'coverage',
       'the new Y axis choice is persisted to localStorage');
+  }
+
+  console.log('\n=== [S4] (full render) legend favorite text: plain count when nothing is sampled away ===');
+  {
+    nodesData = [
+      { public_key: 'F1', name: 'Fav One', role: 'repeater', traffic_share_score: 0.1, usefulness_score: 0.2 },
+      { public_key: 'F2', name: 'Fav Two', role: 'repeater', traffic_share_score: 0.3, usefulness_score: 0.4 },
+      { public_key: 'N1', name: 'Plain', role: 'repeater', traffic_share_score: 0.5, usefulness_score: 0.6 },
+    ];
+    favorites = ['F1', 'F2'];
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-x', 'traffic');
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-y', 'usefulness');
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    // The fake-DOM <select>.value doesn't derive from rendered "selected"
+    // markup, so the auto-run initial draw() falls back to axis[0] for BOTH
+    // X and Y — force the intended X/Y pair with an explicit change event.
+    el.querySelector('#metricScatterX').value = 'traffic';
+    const ySel4 = el.querySelector('#metricScatterY');
+    ySel4.value = 'usefulness';
+    ySel4.fireChange();
+    const legend = el.querySelector('#metricScatterLegend').innerHTML;
+    assert(/Favorites shown: 2(?!\s*of)/.test(legend),
+      'legend shows a plain "Favorites shown: 2" when nothing was sampled away');
+    favorites = [];
+  }
+
+  console.log('\n=== [S5] (full render) a favorite missing the selected axis value is not counted as shown ===');
+  {
+    nodesData = [
+      { public_key: 'F1', name: 'Fav Complete', role: 'repeater', traffic_share_score: 0.1, usefulness_score: 0.2 },
+      { public_key: 'F2', name: 'Fav Incomplete', role: 'repeater', traffic_share_score: 0.3 }, // no usefulness_score
+    ];
+    favorites = ['F1', 'F2'];
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-x', 'traffic');
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-y', 'usefulness');
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    el.querySelector('#metricScatterX').value = 'traffic';
+    const ySel5 = el.querySelector('#metricScatterY');
+    ySel5.value = 'usefulness';
+    ySel5.fireChange();
+    const legend = el.querySelector('#metricScatterLegend').innerHTML;
+    assert(/Favorites shown: 1(?!\s*of)/.test(legend),
+      'a favorite missing the Y-axis value is excluded from BOTH the eligible and shown favorite counts');
+    favorites = [];
+  }
+
+  console.log('\n=== [S6] (full render) favorites past the cap show "Favorites shown: N of M eligible" ===');
+  {
+    const many = [];
+    for (let i = 0; i < 2500; i++) many.push({ public_key: 'p' + i, name: 'n' + i, role: 'repeater', traffic_share_score: i / 2500, usefulness_score: (i % 7) / 7 });
+    nodesData = many;
+    favorites = many.map(n => n.public_key); // every node favorited -> 2500 eligible favorites, cap = 2000
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-x', 'traffic');
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-y', 'usefulness');
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    el.querySelector('#metricScatterX').value = 'traffic';
+    const ySel6 = el.querySelector('#metricScatterY');
+    ySel6.value = 'usefulness';
+    ySel6.fireChange();
+    const legend = el.querySelector('#metricScatterLegend').innerHTML;
+    assert(/Favorites shown: 2000 of 2500 eligible/.test(legend),
+      'legend discloses "Favorites shown: 2000 of 2500 eligible" once sampling drops favorites past the cap');
+    const plot = el.querySelector('#metricScatterPlot').innerHTML;
+    assert(/showing 2000 of 2500 points/.test(plot),
+      'the in-plot sampling disclosure agrees with the legend — same shown/eligible numbers, one source of truth');
+    favorites = [];
+  }
+
+  console.log('\n=== [S7] (full render) legend role list reflects only eligible (plottable) points ===');
+  {
+    nodesData = [
+      { public_key: 'R1', name: 'Repeater With Both', role: 'repeater', traffic_share_score: 0.2, usefulness_score: 0.3 },
+      { public_key: 'M1', name: 'Room Missing Y', role: 'room', traffic_share_score: 0.4 }, // no usefulness_score -> not eligible
+    ];
+    favorites = [];
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-x', 'traffic');
+    fakeLocalStorage.setItem('meshcore-repeater-scatter-y', 'usefulness');
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    el.querySelector('#metricScatterX').value = 'traffic';
+    const ySel7 = el.querySelector('#metricScatterY');
+    ySel7.value = 'usefulness';
+    ySel7.fireChange();
+    const legend = el.querySelector('#metricScatterLegend').innerHTML;
+    assert(/fill="#3b82f6"/.test(legend), 'legend includes the repeater role swatch (eligible)');
+    assert(!/fill="#a855f7"/.test(legend), 'legend excludes the room role swatch — the only room node is not eligible for the selected axes');
   }
 
   console.log('\n=== empty node set shows an explanatory empty state ===');

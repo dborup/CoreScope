@@ -2723,6 +2723,48 @@
       }));
   }
 
+  // Plotting more than this many points makes the SVG sluggish in a headless
+  // browser, so large result sets get sampled down before drawing.
+  const REPEATER_METRIC_POINT_CAP = 2000;
+
+  // Deterministic proportional sampling: returns exactly min(budget, arr.length)
+  // elements spread evenly across the WHOLE array (not just the head), with no
+  // duplicates and nothing fabricated. index = floor(i * n / budget) is
+  // strictly increasing whenever budget <= n (since n / budget >= 1), so
+  // indices never repeat.
+  function _sampleExact(arr, budget) {
+    const n = arr.length;
+    if (budget <= 0) return [];
+    if (budget >= n) return arr.slice();
+    const out = new Array(budget);
+    for (let i = 0; i < budget; i++) {
+      out[i] = arr[Math.floor(i * n / budget)];
+    }
+    return out;
+  }
+
+  // Single source of truth for "which points are eligible to plot" (have a
+  // value for both selected axes) and "which of those actually get drawn"
+  // (after capping). renderMetricScatter and the legend/favorite-count text
+  // both call this with the same inputs so they can never disagree.
+  function _sampleForPlot(points, xAxis, yAxis) {
+    const eligible = points.filter(p => xAxis.get(p) != null && yAxis.get(p) != null);
+    if (eligible.length <= REPEATER_METRIC_POINT_CAP) {
+      return { eligible, shown: eligible };
+    }
+    // Favorites are kept ahead of non-favorites, but even they are sampled
+    // down if they ALONE exceed the cap — so a pathological favorite count
+    // can't blow past REPEATER_METRIC_POINT_CAP.
+    let favs = eligible.filter(p => p.fav);
+    const others = eligible.filter(p => !p.fav);
+    if (favs.length > REPEATER_METRIC_POINT_CAP) {
+      favs = _sampleExact(favs, REPEATER_METRIC_POINT_CAP);
+    }
+    const budget = REPEATER_METRIC_POINT_CAP - favs.length;
+    const shown = favs.concat(_sampleExact(others, budget));
+    return { eligible, shown };
+  }
+
   function renderMetricScatter(points, xAxis, yAxis) {
     const w = 620, h = 380, pad = 60;
     const plotW = w - pad * 2, plotH = h - pad * 2;
@@ -2745,40 +2787,20 @@
     svg += `<line x1="${pad}" y1="${pad}" x2="${pad}" y2="${h-pad}" stroke="var(--text-muted)" stroke-width="0.75"/>`;
     svg += `<text x="${pad + plotW/2}" y="${h-6}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${esc(xAxis.label)}</text>`;
     svg += `<text x="14" y="${pad + plotH/2}" text-anchor="middle" font-size="11" fill="var(--text-muted)" transform="rotate(-90,14,${pad + plotH/2})">${esc(yAxis.label)}</text>`;
-    // Only points with BOTH axis values present are plottable.
-    const plottable = points.filter(p => xAxis.get(p) != null && yAxis.get(p) != null);
-    if (!plottable.length) {
+    // Only points with BOTH axis values present are eligible; large eligible
+    // sets get sampled down to REPEATER_METRIC_POINT_CAP — see _sampleForPlot.
+    const { eligible, shown } = _sampleForPlot(points, xAxis, yAxis);
+    if (!eligible.length) {
       svg += `<text x="${pad + plotW / 2}" y="${pad + plotH / 2}" text-anchor="middle" font-size="12" fill="var(--text-muted)">No repeaters have values for both selected metrics.</text></svg>`;
       return svg;
     }
-    // Cap plotted points to keep the SVG snappy (~2000 stays smooth in a
-    // headless browser), but keep ALL favorites unconditionally and stride
-    // only the non-favorites into the remaining budget — so the legend's
-    // favorite count can never be a lie.
-    const POINT_CAP = 2000;
-    let sample = plottable;
-    if (plottable.length > POINT_CAP) {
-      let favs = plottable.filter(p => p.fav);
-      const others = plottable.filter(p => !p.fav);
-      // Favorites are kept ahead of non-favorites, but even they are strided
-      // if they ALONE exceed the cap — so a pathological favorite count can't
-      // blow past POINT_CAP (the "showing N of M" disclosure stays honest).
-      if (favs.length > POINT_CAP) {
-        favs = favs.filter((_, i) => i % Math.ceil(favs.length / POINT_CAP) === 0);
-      }
-      const budget = Math.max(0, POINT_CAP - favs.length);
-      const strided = (budget > 0 && others.length > budget)
-        ? others.filter((_, i) => i % Math.ceil(others.length / budget) === 0)
-        : others.slice(0, budget);
-      sample = favs.concat(strided);
-    }
-    // Sampling disclosure (graphical integrity): if we strided the points
+    // Sampling disclosure (graphical integrity): if we sampled the points
     // down, say so in-plot rather than silently hiding the rest.
-    if (sample.length < plottable.length) {
-      svg += `<text x="${w - pad}" y="${pad - 6}" text-anchor="end" font-size="9" fill="var(--text-muted)">showing ${sample.length} of ${plottable.length} points</text>`;
+    if (shown.length < eligible.length) {
+      svg += `<text x="${w - pad}" y="${pad - 6}" text-anchor="end" font-size="9" fill="var(--text-muted)">showing ${shown.length} of ${eligible.length} points</text>`;
     }
     // Draw favorites last so their rings are never hidden behind other dots.
-    const ordered = sample.slice().sort((a, b) => (a.fav === b.fav ? 0 : a.fav ? 1 : -1));
+    const ordered = shown.slice().sort((a, b) => (a.fav === b.fav ? 0 : a.fav ? 1 : -1));
     // Favorite ring uses the neutral foreground colour, NOT a status colour:
     // statusYellow means "degraded" elsewhere in the dashboard, so reusing it
     // here would cross semantic wires.
@@ -2860,15 +2882,24 @@
         });
         const xAxis = _axisFromMax(xA, xMax), yAxis = _axisFromMax(yA, yMax);
         plotEl.innerHTML = renderMetricScatter(points, xAxis, yAxis);
-        // Legend: each role present, plus the favorite-ring marker.
-        const roles = Array.from(new Set(points.map(p => p.role)));
+        // Same helper renderMetricScatter used above, so the legend below can
+        // never disagree with what's actually drawn (points/favorites missing
+        // an axis value, or dropped by sampling, don't count as "shown").
+        const { eligible: plotEligible, shown: plotShown } = _sampleForPlot(points, xAxis, yAxis);
+        // Legend: each role present among the plottable points, plus the
+        // favorite-ring marker.
+        const roles = Array.from(new Set(plotEligible.map(p => p.role)));
         let lg = roles.map(r => {
           const c = (window.ROLE_COLORS && window.ROLE_COLORS[r]) || 'var(--text-muted)';
           return `<span style="display:inline-flex;gap:6px;align-items:center"><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="${c}"/></svg>${esc(r)}</span>`;
         }).join('');
-        const favCount = points.filter(p => p.fav).length;
-        if (favCount) {
-          lg += `<span style="display:inline-flex;gap:6px;align-items:center"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--text)" stroke-width="1.75"/></svg>Favorite (${favCount})</span>`;
+        const eligibleFavCount = plotEligible.filter(p => p.fav).length;
+        const shownFavCount = plotShown.filter(p => p.fav).length;
+        if (eligibleFavCount) {
+          const favText = shownFavCount < eligibleFavCount
+            ? `Favorites shown: ${shownFavCount} of ${eligibleFavCount} eligible`
+            : `Favorites shown: ${shownFavCount}`;
+          lg += `<span style="display:inline-flex;gap:6px;align-items:center"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--text)" stroke-width="1.75"/></svg>${esc(favText)}</span>`;
         }
         legendEl.innerHTML = lg;
       }
