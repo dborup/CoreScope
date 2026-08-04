@@ -3387,6 +3387,7 @@
       </dl>
       <div class="detail-actions">
         <button class="copy-link-btn" data-packet-hash="${pkt.hash || ''}" data-packet-id="${pkt.id}" title="Copy link to this packet"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-link"/></svg> Copy Link</button>
+        ${pkt.hash ? `<button class="detail-map-link" data-view-path="${escapeHtml(pkt.hash)}" title="Open the packet-path map for this packet"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg> View Path</button>` : ''}
         ${pathHops.length ? `<button class="detail-map-link" id="viewRouteBtn"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg> View route on map</button>` : ''}
         ${pkt.hash ? `<a href="#/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Trace</a>` : ''}
         <button class="replay-live-btn" title="Replay this packet on the live map"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-play"/></svg> Replay</button>
@@ -3448,6 +3449,18 @@
         renderDetail(panel, data, obsId);
       });
     });
+
+    // Wire up View Path button -- same modal as the shareable ?viewPath=1
+    // deep link (packet-path-map.js), opened in place rather than requiring
+    // a URL round-trip. Not gated on pathHops.length: the modal plots every
+    // station that heard the packet, not just the deepest relay chain, so a
+    // direct-only reception still has a spread worth visualizing.
+    const viewPathBtn = panel.querySelector('[data-view-path]');
+    if (viewPathBtn) {
+      viewPathBtn.addEventListener('click', () => {
+        if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);
+      });
+    }
 
     // Wire up copy link button
     const copyLinkBtn = panel.querySelector('.copy-link-btn');

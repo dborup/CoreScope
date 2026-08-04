@@ -200,6 +200,29 @@ test('"View path" link is absent when there is no packetHash to look it up by', 
   assert.ok(!chMessagesEl.innerHTML.includes('View path'), 'without a packetHash there is nothing to fetch the path for');
 });
 
+test('an ordinary message (no botReply) with a packetHash also gets a "View path" link, alongside "View packet"', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    { sender: 'Alice', text: 'just chatting', timestamp: '2026-01-15T10:00:00Z', packetHash: 'def456' },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  const html = chMessagesEl.innerHTML;
+  assert.ok(html.includes('View packet'), 'the existing "View packet" link to the Packets page must still be present');
+  assert.ok(html.includes('View path'), 'every message with a packetHash should also get the same in-place "View path" modal link the pong reply has');
+  assert.ok(html.includes('data-view-path="def456"'), 'the button must carry the packet hash for the shared [data-view-path] click handler');
+});
+
+test('an ordinary message without a packetHash gets neither "View packet" nor "View path"', () => {
+  const { ctx, chMessagesEl } = makeSandbox();
+  ctx.window._channelsSetStateForTest({ messages: [
+    { sender: 'Alice', text: 'just chatting', timestamp: '2026-01-15T10:00:00Z' },
+  ] });
+  ctx.window._channelsRenderMessagesForTest();
+  const html = chMessagesEl.innerHTML;
+  assert.ok(!html.includes('View packet'), 'no packetHash means no link to a packet page');
+  assert.ok(!html.includes('View path'), 'no packetHash means nothing for the path modal to look up');
+});
+
 test('the "not sent to the mesh" caveat is always present on a bot bubble', () => {
   const { ctx, chMessagesEl } = makeSandbox();
   ctx.window._channelsSetStateForTest({ messages: [

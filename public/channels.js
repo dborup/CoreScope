@@ -2361,7 +2361,7 @@
         <div class="ch-msg-content ch-message-content">
           <div class="ch-msg-sender ch-message-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
           <div class="ch-msg-bubble ch-message-bubble">${displayText}</div>
-          <div class="ch-msg-meta ch-message-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
+          <div class="ch-msg-meta ch-message-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a> · <button type="button" class="ch-analyze-link" data-view-path="${escapeHtml(msg.packetHash)}" style="background:none;border:none;padding:0;cursor:pointer;font:inherit">View path →</button>` : ''}</div>
         </div>
       </div>${botReplyHtml}`;
     }).join('');
