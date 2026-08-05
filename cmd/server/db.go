@@ -2138,6 +2138,7 @@ type obsBranch struct {
 	observerIATA   sql.NullString
 	snr            sql.NullFloat64
 	ts             int64 // unix epoch seconds of the observation that produced this branch's hops/resolvedPath; 0 if unknown
+	obsID          int64 // observations.id -- a stable, monotonic DB identity used only to break ties deterministically (see packetPathReduction.fold); never displayed
 }
 
 // packetPathNodeInfo is the subset of a `nodes` row packet-path branch
@@ -2166,23 +2167,40 @@ func newPacketPathReduction() *packetPathReduction {
 	return &packetPathReduction{best: make(map[string]*obsBranch)}
 }
 
+// fold's tie-breaks are deliberately explicit rather than relying on SQL
+// row-scan order: "deepest wins" ties on equal hops by lowest obsID
+// (observations.id), and "earliest wins" ties on equal timestamp the same
+// way. obsID is a real, stable, monotonically-assigned DB identity (unlike
+// scan order, which the query planner is free to vary between the
+// single-hash query GetPacketPath issues and the multi-hash query
+// GetPacketPathsBulk issues) -- so both paths pick the identical branch on
+// a tie regardless of any difference in how their rows happen to arrive.
+// This determinizes previously-undefined behavior; it does not preserve
+// any order that was ever guaranteed before.
 func (r *packetPathReduction) fold(key string, branch *obsBranch, tsValid bool, ts int64) {
-	if existing, ok := r.best[key]; !ok || branch.hops > existing.hops {
+	if existing, ok := r.best[key]; !ok ||
+		branch.hops > existing.hops ||
+		(branch.hops == existing.hops && branch.obsID < existing.obsID) {
 		r.best[key] = branch
 	}
-	if tsValid && (r.first == nil || ts < r.firstTS) {
+	if tsValid && (r.first == nil ||
+		ts < r.firstTS ||
+		(ts == r.firstTS && branch.obsID < r.first.obsID)) {
 		r.first, r.firstTS = branch, ts
 	}
 }
 
 // parsePacketPathObsRow parses one row of the packet-path observations/
 // transmissions join (GetPacketPath and GetPacketPathsBulk use the same
-// column order, bulk with one leading `hash` column) into an obsBranch and
-// its best-map key. ok is false for rows that can't contribute a branch --
-// missing/unparsable path_json, or no attributable observer key/name --
-// matching the original tolerant per-row skip behavior; these are expected
-// data shapes, not errors.
-func parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString, snr sql.NullFloat64, ts sql.NullInt64) (branch *obsBranch, key string, ok bool) {
+// column order, bulk with one leading `hash` column and both with a
+// trailing `o.id` column) into an obsBranch and its best-map key. ok is
+// false for rows that can't contribute a branch -- missing/unparsable
+// path_json, or no attributable observer key/name -- matching the original
+// tolerant per-row skip behavior; these are expected data shapes, not
+// errors. obsID (observations.id) is carried through purely as a
+// deterministic tie-break identity for packetPathReduction.fold -- never
+// displayed, never used for lookup.
+func parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString, snr sql.NullFloat64, ts sql.NullInt64, obsID int64) (branch *obsBranch, key string, ok bool) {
 	if !pathJSON.Valid {
 		return nil, "", false
 	}
@@ -2208,7 +2226,7 @@ func parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolv
 	branch = &obsBranch{
 		hops: len(h), resolvedPath: resolvedPath,
 		observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
-		observerIATA: obsIATA, snr: snr, ts: tsVal,
+		observerIATA: obsIATA, snr: snr, ts: tsVal, obsID: obsID,
 	}
 	return branch, key, true
 }
@@ -2312,48 +2330,91 @@ func collectPacketPathFallbackCandidates(first *obsBranch, best map[string]*obsB
 	return needed
 }
 
+// packetPathNodeLookupChunkSize bounds bind parameters per query for every
+// chunked node lookup in this file (pubkey, name, and neighbor-candidate),
+// matching the codebase's existing chunking convention (namesAndRolesForPubkeys,
+// foreignFlagsForPubkeys in this same file).
+const packetPathNodeLookupChunkSize = 499
+
+// dedupPacketPathStrings returns s with duplicates removed, preserving
+// first-occurrence order. Used to dedupe pubkeys/names before chunking so
+// no chunk ever re-queries a value another chunk already covers -- the
+// precondition every chunked lookup below relies on to keep per-chunk
+// results non-overlapping and therefore trivially safe to merge.
+func dedupPacketPathStrings(ss []string) []string {
+	seen := make(map[string]bool, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
 // resolveNodesByPubkey bulk-resolves pubkeys against `nodes`, excluding the
 // (0,0) sentinel position the same way GetNodesForScopeAdoption and
-// geofilter.PassesFilter do. Shared by GetPacketPath (which discards the
-// error, preserving its existing tolerant-on-query-failure behavior
-// unchanged) and GetPacketPathsBulk (which propagates it, per the bulk
-// helpers' explicit-error contract).
+// geofilter.PassesFilter do. Input is deduped and chunked at
+// packetPathNodeLookupChunkSize bind parameters per query -- the caller may
+// pass an arbitrarily large pubkey set (e.g. GetPacketPathsBulk's whole-batch
+// union). If any chunk's query or scan fails, the entire call fails --
+// (nil, error), never a partial map, even though earlier chunks may have
+// already resolved cleanly; there is no cross-chunk aggregation logic
+// needed beyond that abort, since each pubkey is confined to exactly one
+// chunk (dedup happens before chunking) and therefore writes exactly one
+// map entry regardless of chunk order. Shared by GetPacketPath (which
+// discards the error, preserving its existing tolerant-on-query-failure
+// behavior unchanged) and GetPacketPathsBulk (which propagates it, per the
+// bulk helpers' explicit-error contract).
 func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeInfo, error) {
 	nodeByPK := make(map[string]packetPathNodeInfo, len(pubkeys))
 	if len(pubkeys) == 0 {
 		return nodeByPK, nil
 	}
-	placeholders := make([]byte, 0, len(pubkeys)*2)
-	args := make([]interface{}, len(pubkeys))
-	for i, pk := range pubkeys {
-		if i > 0 {
-			placeholders = append(placeholders, ',')
+	unique := dedupPacketPathStrings(pubkeys)
+	for i := 0; i < len(unique); i += packetPathNodeLookupChunkSize {
+		end := i + packetPathNodeLookupChunkSize
+		if end > len(unique) {
+			end = len(unique)
 		}
-		placeholders = append(placeholders, '?')
-		args[i] = pk
-	}
-	rows, err := db.conn.Query(
-		"SELECT public_key, name, role, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+")", args...)
-	if err != nil {
-		return nil, fmt.Errorf("packet path node lookup: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var pk string
-		var name, role sql.NullString
-		var lat, lon sql.NullFloat64
-		if err := rows.Scan(&pk, &name, &role, &lat, &lon); err != nil {
-			return nil, fmt.Errorf("packet path node scan: %w", err)
+		chunk := unique[i:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]interface{}, len(chunk))
+		for j, pk := range chunk {
+			if j > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[j] = pk
 		}
-		ni := packetPathNodeInfo{name: name.String, role: role.String}
-		if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
-			v1, v2 := lat.Float64, lon.Float64
-			ni.lat, ni.lon = &v1, &v2
+		rows, err := db.conn.Query(
+			"SELECT public_key, name, role, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+")", args...)
+		if err != nil {
+			return nil, fmt.Errorf("packet path node lookup: %w", err)
 		}
-		nodeByPK[pk] = ni
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("packet path node iteration: %w", err)
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var pk string
+				var name, role sql.NullString
+				var lat, lon sql.NullFloat64
+				if err := rows.Scan(&pk, &name, &role, &lat, &lon); err != nil {
+					return fmt.Errorf("packet path node scan: %w", err)
+				}
+				ni := packetPathNodeInfo{name: name.String, role: role.String}
+				if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
+					v1, v2 := lat.Float64, lon.Float64
+					ni.lat, ni.lon = &v1, &v2
+				}
+				nodeByPK[pk] = ni
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, fmt.Errorf("packet path node iteration: %w", scanErr)
+		}
 	}
 	return nodeByPK, nil
 }
@@ -2361,45 +2422,63 @@ func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeI
 // resolveNodesByName bulk-resolves observer display names against `nodes`
 // for observers whose pubkey lookup left them unpositioned (see
 // collectPacketPathNameFallback). A name matching more than one positioned
-// node is dropped entirely -- ambiguous, don't guess which one. Shared by
-// GetPacketPath (discards the error, preserving existing behavior) and
-// GetPacketPathsBulk (propagates it).
+// node is dropped entirely -- ambiguous, don't guess which one. Input is
+// deduped and chunked at packetPathNodeLookupChunkSize bind parameters per
+// query; ambiguity tracking (the `ambiguous` set) and the final delete pass
+// both span the WHOLE call, not any one chunk, so a name whose matches were
+// ever split across chunks (impossible today, since dedup confines each
+// unique name to exactly one chunk, but the logic doesn't rely on that) is
+// still detected correctly rather than only within its own chunk. Any
+// chunk's query/scan failure fails the entire call -- (nil, error), never a
+// partial map. Shared by GetPacketPath (discards the error, preserving
+// existing behavior) and GetPacketPathsBulk (propagates it).
 func (db *DB) resolveNodesByName(names []string) (map[string]packetPathNodeInfo, error) {
 	nodeByName := make(map[string]packetPathNodeInfo, len(names))
 	if len(names) == 0 {
 		return nodeByName, nil
 	}
-	placeholders := make([]byte, 0, len(names)*2)
-	args := make([]interface{}, len(names))
-	for i, n := range names {
-		if i > 0 {
-			placeholders = append(placeholders, ',')
+	unique := dedupPacketPathStrings(names)
+	ambiguous := map[string]bool{} // global across all chunks -- see func doc
+	for i := 0; i < len(unique); i += packetPathNodeLookupChunkSize {
+		end := i + packetPathNodeLookupChunkSize
+		if end > len(unique) {
+			end = len(unique)
 		}
-		placeholders = append(placeholders, '?')
-		args[i] = n
-	}
-	rows, err := db.conn.Query(
-		"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
-	if err != nil {
-		return nil, fmt.Errorf("packet path name lookup: %w", err)
-	}
-	defer rows.Close()
-	ambiguous := map[string]bool{}
-	for rows.Next() {
-		var name, role sql.NullString
-		var lat, lon sql.NullFloat64
-		if err := rows.Scan(&name, &role, &lat, &lon); err != nil {
-			return nil, fmt.Errorf("packet path name scan: %w", err)
+		chunk := unique[i:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]interface{}, len(chunk))
+		for j, n := range chunk {
+			if j > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[j] = n
 		}
-		if _, exists := nodeByName[name.String]; exists {
-			ambiguous[name.String] = true // >1 positioned node shares this name -- don't guess which one
-			continue
+		rows, err := db.conn.Query(
+			"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
+		if err != nil {
+			return nil, fmt.Errorf("packet path name lookup: %w", err)
 		}
-		v1, v2 := lat.Float64, lon.Float64
-		nodeByName[name.String] = packetPathNodeInfo{role: role.String, lat: &v1, lon: &v2}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("packet path name iteration: %w", err)
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var name, role sql.NullString
+				var lat, lon sql.NullFloat64
+				if err := rows.Scan(&name, &role, &lat, &lon); err != nil {
+					return fmt.Errorf("packet path name scan: %w", err)
+				}
+				if _, exists := nodeByName[name.String]; exists {
+					ambiguous[name.String] = true // >1 positioned node shares this name -- don't guess which one
+					continue
+				}
+				v1, v2 := lat.Float64, lon.Float64
+				nodeByName[name.String] = packetPathNodeInfo{role: role.String, lat: &v1, lon: &v2}
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, fmt.Errorf("packet path name iteration: %w", scanErr)
+		}
 	}
 	for n := range ambiguous {
 		delete(nodeByName, n)
@@ -2544,15 +2623,29 @@ func buildPacketPathResponseFromReduction(
 		resp.First = &fb
 	}
 
-	for _, b := range best {
-		branch := buildBranch(b)
+	// best's map iteration order is randomized by Go -- build in a
+	// deterministic order first (sorted by the observer key: pubkey, or
+	// display name when no pubkey, the same identity parsePacketPathObsRow
+	// grouped observations by) so the stable sort below has a reproducible
+	// starting order to preserve on a Hops tie.
+	keys := make([]string, 0, len(best))
+	for k := range best {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		branch := buildBranch(best[k])
 		if firstLat != nil && branch.Observer != nil && !branch.Observer.Approx && branch.Observer.Lat != nil {
 			d := haversineKm(*branch.Observer.Lat, *branch.Observer.Lon, *firstLat, *firstLon)
 			branch.DistanceFromFirstKm = &d
 		}
 		resp.Branches = append(resp.Branches, branch)
 	}
-	sort.Slice(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
+	// SliceStable, not Slice: two branches tied on Hops keep their
+	// deterministic build order above (observer-key ascending) rather than
+	// an arbitrary one. This determinizes previously-undefined ordering; it
+	// does not preserve any order that was ever guaranteed before.
+	sort.SliceStable(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
 
 	return resp
 }
@@ -2563,13 +2656,13 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	}
 	var querySQL string
 	if db.isV3() {
-		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
+		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id, o.id
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
 			WHERE t.hash = ?`
 	} else {
-		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
+		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id, o.id
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.hash = ?`
@@ -2586,13 +2679,14 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 		var snr sql.NullFloat64
 		var ts sql.NullInt64
 		var rowTxID sql.NullInt64
-		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts, &rowTxID); err != nil {
+		var obsID int64
+		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts, &rowTxID, &obsID); err != nil {
 			continue
 		}
 		if rowTxID.Valid {
 			red.txID = rowTxID.Int64
 		}
-		branch, key, ok := parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON, snr, ts)
+		branch, key, ok := parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON, snr, ts, obsID)
 		if !ok {
 			continue
 		}
@@ -2698,11 +2792,18 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	if pk == "" {
 		return "", 0, 0, 0, 0, false
 	}
+	// Secondary sort `neighbor ASC` is a deterministic tie-break for
+	// candidates with exactly equal count -- previously undefined (whichever
+	// row SQLite happened to return first), which meant this single-item
+	// query and nearestPositionedNeighborsBulk's differently-shaped
+	// per-target window query weren't guaranteed to pick the same top-20 on
+	// a tie. This determinizes it; it does not preserve any order that was
+	// ever guaranteed before. Both queries must stay in lockstep here.
 	rows, err := db.conn.Query(`
 		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor, count
 		FROM neighbor_edges
 		WHERE node_a = ? OR node_b = ?
-		ORDER BY count DESC
+		ORDER BY count DESC, neighbor ASC
 		LIMIT 20`, pk, pk, pk)
 	if err != nil {
 		return "", 0, 0, 0, 0, false

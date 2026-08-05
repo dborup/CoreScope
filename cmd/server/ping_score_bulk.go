@@ -95,25 +95,29 @@ func (db *DB) observationFingerprintsBulk(txIDs []int64) (map[int64]observationF
 // CTE's own VALUES list) -- the OR condition inside the join reads the
 // CTE's already-bound column, it does not re-bind a parameter per
 // reference. Verified empirically against modernc.org/sqlite before relying
-// on it here: a query built this way for N targets contains exactly N `?`
-// placeholders and errors on any other argument count, and per-target
-// top-20-by-count selection via a partitioned ROW_NUMBER() window produces
-// the same rows a per-target `ORDER BY count DESC LIMIT 20` would.
+// on it here (and re-verified against the shipped code by
+// TestNearestPositionedNeighborsBulk_ParameterBudgetIsExactlyNPerChunk): a
+// query built this way for N targets contains exactly N `?` placeholders
+// and errors on any other argument count. Per-target top-20-by-count
+// selection via a partitioned ROW_NUMBER() window, ordered `count DESC,
+// neighbor ASC`, produces the identical rows a per-target
+// `ORDER BY count DESC, neighbor ASC LIMIT 20` would -- the same secondary
+// tie-break nearestPositionedNeighbor's own query now uses, so a target
+// with more than 20 candidates and ties spanning the 20th-place cutoff
+// still resolves to the same top 20 either way. This determinizes
+// previously-undefined ordering; it does not preserve any order that was
+// ever guaranteed before.
 //
 // A pubkey with no result (no edges, or no positioned contributor within
 // maxEdgeKm of the strongest one) is simply absent from the returned map,
 // exactly matching nearestPositionedNeighbor's ok=false -- not a
 // zero-value entry.
 //
-// Known limitation shared with nearestPositionedNeighbor: neither query
-// has a deterministic secondary tie-break for candidates with exactly
-// equal `count`, so if a target's edge set has more than 20 candidates
-// with ties spanning the 20th-place cutoff, the single-item and bulk
-// queries are not guaranteed to select the identical 20 due to their
-// different query shapes. Not fixed here -- doing so would change
-// nearestPositionedNeighbor's own query, which is out of scope for this
-// phase. The golden-equivalence tests use fixtures with distinct counts to
-// avoid exercising this undefined ordering.
+// The candidate-position lookup inside each chunk (nodes matching the up-
+// to-20-per-target neighbor pubkeys the ranked query returned) has its own
+// independent chunk loop, separate from the targets chunking above: a
+// single 499-target chunk can produce up to 499*20 = 9980 distinct
+// candidate pubkeys, far past the 499-bind-parameter budget for one query.
 func (db *DB) nearestPositionedNeighborsBulk(pubkeys []string, maxEdgeKm float64) (map[string]neighborEstimate, error) {
 	result := make(map[string]neighborEstimate, len(pubkeys))
 	if len(pubkeys) == 0 {
@@ -169,7 +173,7 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 		),
 		ranked AS (
 			SELECT target, neighbor, count,
-				ROW_NUMBER() OVER (PARTITION BY target ORDER BY count DESC) AS rn
+				ROW_NUMBER() OVER (PARTITION BY target ORDER BY count DESC, neighbor ASC) AS rn
 			FROM edges
 		)
 		SELECT target, neighbor, count FROM ranked WHERE rn <= 20 ORDER BY target, rn`
@@ -218,16 +222,27 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 		name     string
 		lat, lon float64
 	}
+	// candidatePubkeys came from a map (candidatePubkeySet), so it's already
+	// deduped -- but it can hold up to len(targets)*20 entries, which for a
+	// full 499-target chunk is up to 9980, far past one query's
+	// packetPathNodeLookupChunkSize budget. Its own independent chunk loop
+	// keeps each query's bind-parameter count within budget regardless of
+	// how many targets this chunk covered.
 	posByPK := make(map[string]posInfo, len(candidatePubkeys))
-	if len(candidatePubkeys) > 0 {
-		nodePlaceholders := make([]byte, 0, len(candidatePubkeys)*2)
-		nodeArgs := make([]interface{}, len(candidatePubkeys))
-		for i, pk := range candidatePubkeys {
-			if i > 0 {
+	for i := 0; i < len(candidatePubkeys); i += packetPathNodeLookupChunkSize {
+		end := i + packetPathNodeLookupChunkSize
+		if end > len(candidatePubkeys) {
+			end = len(candidatePubkeys)
+		}
+		nodeChunk := candidatePubkeys[i:end]
+		nodePlaceholders := make([]byte, 0, len(nodeChunk)*2)
+		nodeArgs := make([]interface{}, len(nodeChunk))
+		for j, pk := range nodeChunk {
+			if j > 0 {
 				nodePlaceholders = append(nodePlaceholders, ',')
 			}
 			nodePlaceholders = append(nodePlaceholders, '?')
-			nodeArgs[i] = pk
+			nodeArgs[j] = pk
 		}
 		nodeRows, err := db.conn.Query(
 			"SELECT public_key, name, lat, lon FROM nodes WHERE public_key IN ("+string(nodePlaceholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", nodeArgs...)
@@ -316,33 +331,47 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 }
 
 // GetPacketPathsBulk computes the same PacketPathResponse GetPacketPath
-// would for each hash in hashes, in O(chunks) queries total instead of
-// O(len(hashes)). All branch-assembly logic is the single shared
-// buildPacketPathResponseFromReduction (db.go), so the two can never
+// would for each hash in hashes. All branch-assembly logic is the single
+// shared buildPacketPathResponseFromReduction (db.go), so the two can never
 // silently diverge in output shape or field values.
 //
-// Query shape: (1) one query per chunk of hashes (<=499 per chunk) for the
-// raw observation rows, grouped into a per-hash packetPathReduction as rows
-// are scanned since SQLite returns them in query order, not pre-grouped by
-// hash; (2) one bulk nodeByPK query across the pubkey union of every hash's
-// branches; (3) one bulk nodeByName query across the observer-name-fallback
-// union; (4) one nearestPositionedNeighborsBulk call (itself chunked) across
-// the union of every pubkey step 2/3 left unpositioned. Total query count
-// scales with chunk count, not with len(hashes) or the number of points/
-// observers inside each path -- see the query-count instrumentation in
-// ping_score_bulk_test.go.
+// Query count is NOT independent of the input size in every dimension --
+// it is O(hash-chunks + pubkey-chunks + name-chunks + neighbor-target-chunks
+// + candidate-pubkey-chunks), each dimension chunked independently at
+// packetPathNodeLookupChunkSize (nodes lookups) or the matching per-function
+// chunk size (hashes, neighbor targets): (1) one query per chunk of hashes
+// (<=499 per chunk) for the raw observation rows, grouped into a per-hash
+// packetPathReduction as rows are scanned since SQLite returns them in
+// query order, not pre-grouped by hash; (2) resolveNodesByPubkey, itself
+// chunked, across the pubkey union of every hash's branches; (3)
+// resolveNodesByName, itself chunked, across the observer-name-fallback
+// union; (4) nearestPositionedNeighborsBulk, itself chunked on BOTH targets
+// and (separately) resolved candidate pubkeys, across the union of every
+// pubkey step 2/3 left unpositioned. What stays flat regardless of input
+// size is the number of DISTINCT LOOKUPS (5, not one per hash/pubkey/name)
+// -- see TestGetPacketPathsBulk_QueryCountIndependentOfHashCount, which
+// holds each dimension's cardinality below its own chunk size and confirms
+// query count doesn't grow with hash count under that condition; growing
+// any one dimension past its chunk size adds more chunks for that
+// dimension only.
 //
 // A hash with no observation rows at all (never observed, or unknown to
 // this DB) is simply absent from the returned map -- not an error,
 // matching GetPacketPath's own contract of returning an empty-Branches
 // response rather than erroring for an unknown hash.
 func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string]*PacketPathResponse, error) {
-	if !db.hasResolvedPath() {
-		return nil, fmt.Errorf("resolved_path not available on this server")
-	}
+	// result is created and the empty-input check runs BEFORE the
+	// hasResolvedPath schema check on purpose: an empty request should
+	// short-circuit to an empty, error-free result without touching the
+	// database at all, even on a schema that lacks resolved_path entirely
+	// (e.g. a legacy DB mid-migration) -- there is nothing to look up, so
+	// there is nothing for that schema gap to affect.
 	result := make(map[string]*PacketPathResponse, len(hashes))
 	if len(hashes) == 0 {
 		return result, nil
+	}
+	if !db.hasResolvedPath() {
+		return nil, fmt.Errorf("resolved_path not available on this server")
 	}
 
 	seen := make(map[string]bool, len(hashes))
@@ -359,7 +388,7 @@ func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string
 	var buildQuery func(placeholders string) string
 	if db.isV3() {
 		buildQuery = func(placeholders string) string {
-			return `SELECT t.hash, obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
+			return `SELECT t.hash, obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id, o.id
 				FROM observations o
 				JOIN transmissions t ON t.id = o.transmission_id
 				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -367,7 +396,7 @@ func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string
 		}
 	} else {
 		buildQuery = func(placeholders string) string {
-			return `SELECT t.hash, o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
+			return `SELECT t.hash, o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id, o.id
 				FROM observations o
 				JOIN transmissions t ON t.id = o.transmission_id
 				WHERE t.hash IN (` + placeholders + `)`
@@ -403,7 +432,8 @@ func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string
 				var snr sql.NullFloat64
 				var ts sql.NullInt64
 				var rowTxID sql.NullInt64
-				if err := rows.Scan(&rowHash, &obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts, &rowTxID); err != nil {
+				var obsID int64
+				if err := rows.Scan(&rowHash, &obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts, &rowTxID, &obsID); err != nil {
 					return fmt.Errorf("packet path bulk scan: %w", err)
 				}
 				rowHash = strings.ToLower(rowHash)
@@ -415,7 +445,7 @@ func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string
 				if rowTxID.Valid {
 					red.txID = rowTxID.Int64
 				}
-				branch, key, ok := parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON, snr, ts)
+				branch, key, ok := parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON, snr, ts, obsID)
 				if !ok {
 					continue
 				}
