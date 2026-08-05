@@ -1083,6 +1083,293 @@ func TestDefaultPingScoreHistoryPath(t *testing.T) {
 	}
 }
 
+// --- fix-round-3 (review of a1c3022d): v1->v2 migration, gap storage,
+// and the history-initialized marker -----------------------------------
+
+// TestOpenPingScoreHistoryStore_MigrationV1ToV2PreservesDataAndDefaultsColumn
+// builds a GENUINE v1-shaped file (applyPingScoreHistoryV1 only -- no
+// permanently_unreconstructable column, no ping_score_history_gaps table,
+// exactly what a real v1 file on disk looks like), then reopens it through
+// the normal OpenPingScoreHistoryStore path to exercise the REAL v1->v2
+// migration (not just a schema_version-number rollback against an
+// already-v2 file, which would collide with the ALTER TABLE the moment it
+// re-ran).
+func TestOpenPingScoreHistoryStore_MigrationV1ToV2PreservesDataAndDefaultsColumn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	func() {
+		conn, err := openPingScoreHistoryConn(path, true)
+		if err != nil {
+			t.Fatalf("raw create: %v", err)
+		}
+		defer conn.Close()
+		tx, err := conn.Begin()
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := applyPingScoreHistoryV1(tx); err != nil {
+			t.Fatalf("apply v1: %v", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO _meta (key, value) VALUES ('schema_version', '1')`); err != nil {
+			t.Fatalf("set schema_version: %v", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO ping_score_history_entries
+			(tx_id, hash, timestamp, station_count, deepest_hops, computed_at)
+			VALUES (1, 'v1hash0000000001', 't1', 3, 2, 'c1'), (2, 'v1hash0000000002', 't2', 5, 4, 'c2')`); err != nil {
+			t.Fatalf("seed v1 rows: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}()
+
+	migrated, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen triggering v1->v2 migration: %v", err)
+	}
+	defer migrated.Close()
+
+	v, err := migrated.readSchemaVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != pingScoreHistorySchemaVersion {
+		t.Errorf("schema_version after migration = %d, want %d", v, pingScoreHistorySchemaVersion)
+	}
+
+	entries, err := migrated.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll after migration: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 pre-existing v1 rows to survive migration, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.PermanentlyUnreconstructable {
+			t.Errorf("tx_id=%d: PermanentlyUnreconstructable = true after migration, want false (v1 rows were never evaluated against the evidence rule)", e.TxID)
+		}
+	}
+	if entries[0].Hash != "v1hash0000000001" || entries[1].Hash != "v1hash0000000002" {
+		t.Errorf("entry content not preserved across migration: %+v", entries)
+	}
+
+	// The new gaps table must also now exist and be queryable (empty).
+	gap, err := migrated.LoadGap()
+	if err != nil {
+		t.Fatalf("LoadGap after migration: %v", err)
+	}
+	if gap != nil {
+		t.Errorf("LoadGap() = %+v, want nil (nothing recorded)", gap)
+	}
+
+	// A fresh write using the v2 column must actually persist correctly.
+	flagged := sampleHistoryEntry(3)
+	flagged.PermanentlyUnreconstructable = true
+	if err := migrated.UpsertAndDelete([]PingScoreHistoryEntry{flagged}, nil); err != nil {
+		t.Fatalf("upsert after migration: %v", err)
+	}
+	reLoaded, err := migrated.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range reLoaded {
+		if e.TxID == 3 {
+			found = true
+			if !e.PermanentlyUnreconstructable {
+				t.Error("PermanentlyUnreconstructable not persisted for a fresh v2-era upsert")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("tx_id=3 not found after upsert")
+	}
+}
+
+func TestGap_SurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	want := PingScoreHistoryGap{
+		Status:                            "history-incomplete",
+		FirstDetectedAt:                   "2026-08-05T00:00:00Z",
+		LastDetectedAt:                    "2026-08-06T00:00:00Z",
+		PermanentlyUnreconstructableCount: 3,
+		TotalTriggers:                     100,
+		Detail:                            "3 of 100 triggers permanently unreconstructable",
+	}
+	if err := store.StoreGap(want); err != nil {
+		t.Fatalf("StoreGap: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	got, err := reopened.LoadGap()
+	if err != nil {
+		t.Fatalf("LoadGap: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil gap after restart")
+	}
+	if *got != want {
+		t.Errorf("gap after restart = %+v, want %+v", *got, want)
+	}
+}
+
+func TestGap_NilWhenNeverRecorded(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	got, err := store.LoadGap()
+	if err != nil {
+		t.Fatalf("LoadGap: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil gap for a healthy store that never recorded a gap, got %+v", got)
+	}
+}
+
+func TestUpsertDeleteAndMetadata_GapCommitsWithUpserts(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	gap := &PingScoreHistoryGap{
+		Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-01T00:00:00Z",
+		PermanentlyUnreconstructableCount: 1, TotalTriggers: 5, Detail: "1 of 5",
+	}
+	if err := store.UpsertDeleteAndMetadata([]PingScoreHistoryEntry{sampleHistoryEntry(1)}, nil, nil, gap, nil); err != nil {
+		t.Fatalf("UpsertDeleteAndMetadata: %v", err)
+	}
+	entries, err := store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want 1", entries)
+	}
+	got, err := store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "history-incomplete" || got.PermanentlyUnreconstructableCount != 1 {
+		t.Errorf("LoadGap() = %+v, want the stored gap", got)
+	}
+}
+
+func TestUpsertDeleteAndMetadata_NilGapLeavesExistingUntouched(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	seeded := PingScoreHistoryGap{Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-01T00:00:00Z", PermanentlyUnreconstructableCount: 2, TotalTriggers: 10}
+	if err := store.StoreGap(seeded); err != nil {
+		t.Fatalf("seed gap: %v", err)
+	}
+
+	if err := store.UpsertDeleteAndMetadata([]PingScoreHistoryEntry{sampleHistoryEntry(2)}, nil, nil, nil, nil); err != nil {
+		t.Fatalf("UpsertDeleteAndMetadata: %v", err)
+	}
+
+	got, err := store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.PermanentlyUnreconstructableCount != 2 {
+		t.Errorf("LoadGap() = %+v, want the ORIGINAL gap, unmodified by a gap=nil call", got)
+	}
+}
+
+func TestUpsertDeleteAndMetadata_FailureRollsBackGapAndMarkerToo(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	bad := sampleHistoryEntry(-1) // violates tx_id>0 CHECK
+	gap := &PingScoreHistoryGap{Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-01T00:00:00Z", PermanentlyUnreconstructableCount: 1, TotalTriggers: 1}
+	marker := "2026-01-01T00:00:00Z"
+	err = store.UpsertDeleteAndMetadata([]PingScoreHistoryEntry{bad}, nil, nil, gap, &marker)
+	if err == nil {
+		t.Fatal("want an error from the CHECK-constraint-violating row")
+	}
+
+	if got, err := store.LoadGap(); err != nil || got != nil {
+		t.Errorf("LoadGap() = %+v, err=%v, want nil -- the gap write must roll back with the rest of the failed transaction", got, err)
+	}
+	if _, initialized, err := store.HistoryInitializedAt(); err != nil || initialized {
+		t.Errorf("HistoryInitializedAt() initialized=%v, err=%v, want false -- the marker write must roll back too", initialized, err)
+	}
+}
+
+func TestHistoryInitializedAt_SurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	marker := "2026-01-01T00:00:00Z"
+	if err := store.UpsertDeleteAndMetadata(nil, nil, nil, nil, &marker); err != nil {
+		t.Fatalf("UpsertDeleteAndMetadata: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	got, initialized, err := reopened.HistoryInitializedAt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !initialized || got != marker {
+		t.Errorf("HistoryInitializedAt() = (%q, %v), want (%q, true)", got, initialized, marker)
+	}
+}
+
+func TestHistoryInitializedAt_FalseWhenNeverRecorded(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	_, initialized, err := store.HistoryInitializedAt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialized {
+		t.Error("expected initialized=false for a store that never wrote the marker")
+	}
+}
+
 // --- test helpers: raw, out-of-band manipulation of _meta for migration/version tests ---
 
 func rawSetSchemaVersion(t *testing.T, path, version string) {

@@ -165,7 +165,9 @@ func pingScoreHistoryEntryFromScore(
 //   - score != nil ("a successful computation") replaces every path fact
 //     (StationCount, DeepestHops, DeepestPubkey, FarthestKm, FarthestPubkey,
 //     SpreadSeconds, RelayPubkeysJSON, FirstPubkey) with this cycle's
-//     values, and clears Unscorable.
+//     values, and clears Unscorable AND PermanentlyUnreconstructable (see
+//     the score != nil branch below for why the latter is a defensive
+//     clear, not an expected-to-fire code path).
 //   - score == nil ("an empty result") leaves every path fact AND
 //     Unscorable exactly as they were on entry -- an empty cycle can never
 //     downgrade an entry that was ever successfully scored, and Unscorable
@@ -200,6 +202,15 @@ func mergePingScoreHistoryEntry(
 
 	if score != nil {
 		merged.Unscorable = false
+		// Defensive clear: a real score for this tx_id, from ANY code path
+		// (fingerprint-changed merge or deep-sweep merge -- see Cycle),
+		// always wins over a previously-set PermanentlyUnreconstructable
+		// flag. Expected to be rare-to-never in practice, since a flagged
+		// entry stops being re-attempted at all (see the deep-sweep
+		// eligibility filter in Cycle) -- this exists so a bug elsewhere, a
+		// schema anomaly, or a future re-check mechanism can never leave a
+		// stale true flag on an entry that DOES have a real score.
+		merged.PermanentlyUnreconstructable = false
 		merged.StationCount = score.StationCount
 		merged.DeepestHops = score.DeepestHops
 		merged.DeepestPubkey = score.DeepestPubkey

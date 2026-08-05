@@ -46,7 +46,13 @@ import (
 // and will migrate an older on-disk file up to. A file with a HIGHER
 // recorded version was written by newer code (e.g. a rolled-back deploy)
 // and is opened read-only instead -- see openAndCheck.
-const pingScoreHistorySchemaVersion = 1
+//
+// v2 (fix-round-2 review of a1c3022d) adds
+// ping_score_history_entries.permanently_unreconstructable (see
+// PingScoreHistoryEntry.PermanentlyUnreconstructable) and the new
+// ping_score_history_gaps table (see PingScoreHistoryGap) -- both purely
+// additive, see applyPingScoreHistoryV2.
+const pingScoreHistorySchemaVersion = 2
 
 // PingScoreHistoryStore owns the separate, server-only SQLite connection to
 // ping_scores_history.db. Not safe for concurrent use from multiple
@@ -91,8 +97,79 @@ type PingScoreHistoryEntry struct {
 	StableSince      string
 	Settled          bool
 	DataPruned       bool
-	LastDeepSweptAt  string
-	ComputedAt       string
+
+	// PermanentlyUnreconstructable is true only once a REAL deep-sweep
+	// attempt (not an age estimate) has actually proven, this tx_id had
+	// never been scorable AND that attempt found nothing AND it was
+	// already past the retention window -- see
+	// maybeMarkPermanentlyUnreconstructable, the ONLY place this is ever
+	// set to true. Age alone (Unscorable && old) is deliberately NOT
+	// sufficient on its own (fix-round-2 review of a1c3022d) -- an entry
+	// stays deep-sweep-eligible until this evidence actually exists, so it
+	// always gets at least one real post-retention attempt first. Distinct
+	// from DataPruned (which requires the OPPOSITE: !Unscorable, i.e. "had
+	// a valid score once") -- mutually exclusive by construction, same as
+	// isPermanentlyUnreconstructable's former Unscorable-gated design.
+	// Defensively cleared (never left stale) the moment any later cycle
+	// DOES produce a real score for this tx_id -- see
+	// mergePingScoreHistoryEntry's score != nil branch.
+	PermanentlyUnreconstructable bool
+
+	LastDeepSweptAt string
+	ComputedAt      string
+}
+
+// PingScoreHistoryGap tracks whether ANY entry has EVER been
+// evidence-confirmed PermanentlyUnreconstructable over the WHOLE lifetime
+// of this history store -- a running, cumulative signal, deliberately
+// SEPARATE from PingScoreHistoryIntegrity's "initial-backfill-incomplete"
+// status (which is a one-time snapshot at the genuine first bootstrap
+// only, see buildInitialBootstrapIntegrity). A permanently-unreconstructable
+// ping can be proven at ANY point in the store's life, long after a
+// perfectly healthy bootstrap -- this record exists so that loss is never
+// silently invisible just because the ORIGINAL bootstrap had nothing to
+// report. Persisted as its own singleton row (id=1) in
+// ping_score_history_gaps, added in the v2 migration -- kept as a
+// SEPARATE table rather than overloading ping_score_history_integrity's
+// existing columns, since the two records answer genuinely different
+// questions (a one-time snapshot vs. a running cumulative count) and
+// conflating them would lose information (see applyPingScoreHistoryV2's
+// doc comment).
+//
+// nil (from LoadGap) means "no permanently-unreconstructable entry has
+// EVER been proven" -- the normal, healthy case, same "nil means healthy"
+// convention as PingScoreHistoryIntegrity.
+type PingScoreHistoryGap struct {
+	// Status is always "history-incomplete" whenever this struct is
+	// non-nil -- there is currently no other value this ever takes; the
+	// field exists (rather than the mere presence of the row) so a future
+	// caller has an explicit, self-describing value to branch on, matching
+	// PingScoreHistoryIntegrity's own Status-string convention.
+	Status string
+
+	// FirstDetectedAt (RFC3339) is set ONCE, the very first time this
+	// record is ever written, and PRESERVED VERBATIM on every later
+	// update -- never revised, no matter how many more cycles add further
+	// evidence. This is the "when was the first loss ever observed"
+	// timestamp the review specifically asked to never lose.
+	FirstDetectedAt string
+
+	// LastDetectedAt (RFC3339) is refreshed every cycle that writes this
+	// record (i.e. every cycle where PermanentlyUnreconstructableCount > 0).
+	LastDetectedAt string
+
+	// PermanentlyUnreconstructableCount is the GLOBAL count of entries
+	// with PermanentlyUnreconstructable=true across the CURRENT trigger/
+	// history population as of the cycle that wrote this record -- not
+	// just entries newly flagged that cycle (see buildPingScoreHistoryGap).
+	PermanentlyUnreconstructableCount int
+
+	// TotalTriggers is the live trigger count as of the same cycle, for
+	// context -- matches PingScoreHistoryIntegrity.TotalTriggers's own
+	// naming and scope.
+	TotalTriggers int
+
+	Detail string
 }
 
 // PingScoreHistoryCorruptError means the file failed PRAGMA integrity_check
@@ -425,6 +502,7 @@ type pingScoreHistoryMigration struct {
 // dropped or recreated by a migration.
 var pingScoreHistoryMigrations = []pingScoreHistoryMigration{
 	{toVersion: 1, apply: applyPingScoreHistoryV1},
+	{toVersion: 2, apply: applyPingScoreHistoryV2},
 }
 
 func (s *PingScoreHistoryStore) migrateFrom(fromVersion int) error {
@@ -516,6 +594,61 @@ func applyPingScoreHistoryV1(tx *sql.Tx) error {
 	return nil
 }
 
+// applyPingScoreHistoryV2 (fix-round-2 review of a1c3022d) adds:
+//   - ping_score_history_entries.permanently_unreconstructable: the
+//     evidence-based (never age-based) permanent-unreconstructability
+//     flag -- see PingScoreHistoryEntry.PermanentlyUnreconstructable and
+//     maybeMarkPermanentlyUnreconstructable in
+//     ping_score_history_engine.go. Defaults to 0/false for every
+//     pre-existing v1 row: a v1 file has no rows that were ever evaluated
+//     against the evidence rule, so "not (yet) flagged" is the only
+//     honest default -- a future deep-sweep cycle naturally establishes
+//     the flag for any row that genuinely qualifies, exactly as it would
+//     for a brand-new entry.
+//   - ping_score_history_gaps: a NEW singleton table (see
+//     PingScoreHistoryGap's own doc comment for why this must be separate
+//     from ping_score_history_integrity rather than overloading its
+//     existing columns).
+//
+// SQLite has no portable ADD COLUMN IF NOT EXISTS across the versions this
+// codebase targets, so the ALTER TABLE below is preceded by an explicit
+// PRAGMA table_info check and skipped if the column is already present --
+// this migration step is otherwise the only non-naturally-idempotent one
+// in the ladder (v1's statements are all CREATE ... IF NOT EXISTS), and
+// schema_version/schema CAN legitimately desync from what migrateFrom's
+// normal one-transaction-per-step design alone would guarantee, e.g. an
+// operator manually editing _meta.schema_version, or (as this package's
+// own tests do) reopening a file whose recorded version was rolled back
+// out-of-band while its tables already reflect a later version.
+func applyPingScoreHistoryV2(tx *sql.Tx) error {
+	var alreadyHasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('ping_score_history_entries') WHERE name = 'permanently_unreconstructable'`,
+	).Scan(&alreadyHasColumn); err != nil {
+		return fmt.Errorf("check permanently_unreconstructable column existence: %w", err)
+	}
+
+	var stmts []string
+	if alreadyHasColumn == 0 {
+		stmts = append(stmts, `ALTER TABLE ping_score_history_entries ADD COLUMN permanently_unreconstructable INTEGER NOT NULL DEFAULT 0`)
+	}
+	stmts = append(stmts, `CREATE TABLE IF NOT EXISTS ping_score_history_gaps (
+		id                                    INTEGER PRIMARY KEY CHECK (id = 1),
+		status                                TEXT NOT NULL,
+		first_detected_at                     TEXT NOT NULL,
+		last_detected_at                      TEXT NOT NULL,
+		permanently_unreconstructable_count   INTEGER NOT NULL DEFAULT 0,
+		total_triggers                        INTEGER NOT NULL DEFAULT 0,
+		detail                                TEXT
+	)`)
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
 // pingScoreHistoryUpsertSQL is executed as a PREPARED statement, once per
 // row, inside a single transaction in UpsertAndDelete -- deliberately NOT
 // a multi-row INSERT. chunkSize=499 (used below for the DELETE IN-list) is
@@ -532,8 +665,8 @@ INSERT INTO ping_score_history_entries (
 	deepest_pubkey, farthest_km, farthest_pubkey, spread_seconds, airtime_ms,
 	relay_count, relay_pubkeys_json, first_pubkey, unscorable,
 	fingerprint_count, fingerprint_max_id, stable_since, settled, data_pruned,
-	last_deep_swept_at, computed_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	permanently_unreconstructable, last_deep_swept_at, computed_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(tx_id) DO UPDATE SET
 	hash=excluded.hash, sender=excluded.sender, channel_hash=excluded.channel_hash,
 	timestamp=excluded.timestamp, station_count=excluded.station_count,
@@ -544,6 +677,7 @@ ON CONFLICT(tx_id) DO UPDATE SET
 	first_pubkey=excluded.first_pubkey, unscorable=excluded.unscorable,
 	fingerprint_count=excluded.fingerprint_count, fingerprint_max_id=excluded.fingerprint_max_id,
 	stable_since=excluded.stable_since, settled=excluded.settled, data_pruned=excluded.data_pruned,
+	permanently_unreconstructable=excluded.permanently_unreconstructable,
 	last_deep_swept_at=excluded.last_deep_swept_at, computed_at=excluded.computed_at
 `
 
@@ -565,26 +699,48 @@ func (s *PingScoreHistoryStore) UpsertAndDelete(upserts []PingScoreHistoryEntry,
 
 // UpsertDeleteAndIntegrity applies a batch of upserts, a set of tx_ids to
 // delete, and (when integrity is non-nil) an integrity-metadata write, all
-// as ONE SQL transaction: either everything lands, or (on any error)
-// NONE of it does -- the deferred Rollback is a no-op after a successful
-// Commit, and fires on every error path before this function returns.
-//
-// This exists (Phase 4D) because bootstrap-integrity detection --
-// recording "initial-backfill-incomplete" when some triggers turn out to
-// be permanently unreconstructable -- must be persisted atomically with
-// the SAME cycle's upserts/deletes: if the process crashes between two
-// separate writes, a reader could otherwise see freshly-computed entries
-// without the integrity record that explains why some are missing, or
-// vice versa. integrity=nil means "don't touch the integrity table this
-// cycle" (leaving whatever was there, including any PREVIOUSLY recorded
-// abnormal status -- this function never clears an existing abnormal
-// status as a side effect of an unrelated upsert/delete batch; only an
-// explicit non-nil integrity argument ever changes it).
+// as ONE SQL transaction. Thin wrapper around UpsertDeleteAndMetadata with
+// gap=nil and historyInitializedAt=nil -- unchanged signature and behavior
+// from Phase 4D, preserved verbatim for every existing caller. See
+// UpsertDeleteAndMetadata's own doc comment for the full transactional
+// guarantee this and UpsertAndDelete both share.
 func (s *PingScoreHistoryStore) UpsertDeleteAndIntegrity(upserts []PingScoreHistoryEntry, deleteTxIDs []int64, integrity *PingScoreHistoryIntegrity) error {
+	return s.UpsertDeleteAndMetadata(upserts, deleteTxIDs, integrity, nil, nil)
+}
+
+// UpsertDeleteAndMetadata applies a batch of upserts, a set of tx_ids to
+// delete, and up to three optional metadata writes -- an integrity record,
+// a gap record, and the one-time history-initialized marker -- all as ONE
+// SQL transaction: either everything lands, or (on any error) NONE of it
+// does -- the deferred Rollback is a no-op after a successful Commit, and
+// fires on every error path before this function returns.
+//
+// This exists (Phase 4D, extended in the fix-round-2 review of a1c3022d)
+// because none of these metadata writes are safe to persist as a SEPARATE
+// transaction from the SAME cycle's upserts/deletes: if the process
+// crashes between two separate writes, a reader could otherwise see
+// freshly-computed entries (e.g. one newly flagged
+// PermanentlyUnreconstructable) without the gap record that explains it,
+// or vice versa.
+//
+//   - integrity == nil means "don't touch the integrity table this cycle"
+//     (leaving whatever was there, including any PREVIOUSLY recorded
+//     abnormal status, untouched -- see PingScoreHistoryIntegrity).
+//   - gap == nil means "don't touch the gaps table this cycle" -- same
+//     never-silently-clear convention (see PingScoreHistoryGap and
+//     buildPingScoreHistoryGap, which is the only place that ever decides
+//     what to pass here).
+//   - historyInitializedAt == nil means "don't touch the history-
+//     initialized marker this cycle" (it is written EXACTLY once, ever,
+//     by the genuine first successful cycle -- see HistoryInitializedAt
+//     and isGenuineBootstrap in ping_score_history_engine.go). A non-nil
+//     value is an RFC3339 timestamp to record under the `_meta` key
+//     'history_initialized_at'.
+func (s *PingScoreHistoryStore) UpsertDeleteAndMetadata(upserts []PingScoreHistoryEntry, deleteTxIDs []int64, integrity *PingScoreHistoryIntegrity, gap *PingScoreHistoryGap, historyInitializedAt *string) error {
 	if s.readOnly {
 		return fmt.Errorf("ping score history store: read-only (on-disk schema is newer than this code understands)")
 	}
-	if len(upserts) == 0 && len(deleteTxIDs) == 0 && integrity == nil {
+	if len(upserts) == 0 && len(deleteTxIDs) == 0 && integrity == nil && gap == nil && historyInitializedAt == nil {
 		return nil
 	}
 
@@ -608,7 +764,8 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndIntegrity(upserts []PingScoreHist
 				nullableFloat(e.AirtimeMs), e.RelayCount, nullableString(e.RelayPubkeysJSON),
 				nullableString(e.FirstPubkey), boolToInt(e.Unscorable),
 				e.FingerprintCount, e.FingerprintMaxID, nullableString(e.StableSince),
-				boolToInt(e.Settled), boolToInt(e.DataPruned), nullableString(e.LastDeepSweptAt), e.ComputedAt,
+				boolToInt(e.Settled), boolToInt(e.DataPruned), boolToInt(e.PermanentlyUnreconstructable),
+				nullableString(e.LastDeepSweptAt), e.ComputedAt,
 			); err != nil {
 				return fmt.Errorf("ping score history store: upsert tx_id=%d: %w", e.TxID, err)
 			}
@@ -653,6 +810,33 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndIntegrity(upserts []PingScoreHist
 		}
 	}
 
+	if gap != nil {
+		if _, err := tx.Exec(`
+			INSERT INTO ping_score_history_gaps
+				(id, status, first_detected_at, last_detected_at, permanently_unreconstructable_count, total_triggers, detail)
+			VALUES (1, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				status=excluded.status, first_detected_at=excluded.first_detected_at,
+				last_detected_at=excluded.last_detected_at,
+				permanently_unreconstructable_count=excluded.permanently_unreconstructable_count,
+				total_triggers=excluded.total_triggers, detail=excluded.detail`,
+			gap.Status, gap.FirstDetectedAt, gap.LastDetectedAt,
+			gap.PermanentlyUnreconstructableCount, gap.TotalTriggers, nullableString(gap.Detail),
+		); err != nil {
+			return fmt.Errorf("ping score history store: store gap: %w", err)
+		}
+	}
+
+	if historyInitializedAt != nil {
+		if _, err := tx.Exec(
+			`INSERT INTO _meta (key, value) VALUES ('history_initialized_at', ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			*historyInitializedAt,
+		); err != nil {
+			return fmt.Errorf("ping score history store: store history_initialized_at: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("ping score history store: commit: %w", err)
 	}
@@ -669,7 +853,7 @@ func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
 			deepest_pubkey, farthest_km, farthest_pubkey, spread_seconds, airtime_ms,
 			relay_count, relay_pubkeys_json, first_pubkey, unscorable,
 			fingerprint_count, fingerprint_max_id, stable_since, settled, data_pruned,
-			last_deep_swept_at, computed_at
+			permanently_unreconstructable, last_deep_swept_at, computed_at
 		FROM ping_score_history_entries
 		ORDER BY tx_id`)
 	if err != nil {
@@ -684,13 +868,13 @@ func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
 		var stableSince, lastDeepSweptAt sql.NullString
 		var farthestKm, spreadSeconds, airtimeMs sql.NullFloat64
 		var relayCount sql.NullInt64
-		var unscorable, settled, dataPruned int
+		var unscorable, settled, dataPruned, permanentlyUnreconstructable int
 		if err := rows.Scan(
 			&e.TxID, &e.Hash, &sender, &channelHash, &e.Timestamp, &e.StationCount, &e.DeepestHops,
 			&deepestPubkey, &farthestKm, &farthestPubkey, &spreadSeconds, &airtimeMs,
 			&relayCount, &relayPubkeysJSON, &firstPubkey, &unscorable,
 			&e.FingerprintCount, &e.FingerprintMaxID, &stableSince, &settled, &dataPruned,
-			&lastDeepSweptAt, &e.ComputedAt,
+			&permanentlyUnreconstructable, &lastDeepSweptAt, &e.ComputedAt,
 		); err != nil {
 			return nil, fmt.Errorf("ping score history store: scan row: %w", err)
 		}
@@ -720,6 +904,7 @@ func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
 		e.Unscorable = unscorable != 0
 		e.Settled = settled != 0
 		e.DataPruned = dataPruned != 0
+		e.PermanentlyUnreconstructable = permanentlyUnreconstructable != 0
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -769,6 +954,73 @@ func (s *PingScoreHistoryStore) LoadIntegrity() (*PingScoreHistoryIntegrity, err
 	}
 	integrity.Detail = detail.String
 	return &integrity, nil
+}
+
+// StoreGap persists (upserting the singleton row) the current gap state --
+// see PingScoreHistoryGap's own doc comment. Exists mainly for tests (pre-
+// seeding a gap record); Cycle's normal path writes it atomically via
+// UpsertDeleteAndMetadata instead, never through this method directly.
+func (s *PingScoreHistoryStore) StoreGap(gap PingScoreHistoryGap) error {
+	if s.readOnly {
+		return fmt.Errorf("ping score history store: read-only (on-disk schema is newer than this code understands)")
+	}
+	_, err := s.conn.Exec(`
+		INSERT INTO ping_score_history_gaps
+			(id, status, first_detected_at, last_detected_at, permanently_unreconstructable_count, total_triggers, detail)
+		VALUES (1, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			status=excluded.status, first_detected_at=excluded.first_detected_at,
+			last_detected_at=excluded.last_detected_at,
+			permanently_unreconstructable_count=excluded.permanently_unreconstructable_count,
+			total_triggers=excluded.total_triggers, detail=excluded.detail`,
+		gap.Status, gap.FirstDetectedAt, gap.LastDetectedAt,
+		gap.PermanentlyUnreconstructableCount, gap.TotalTriggers, nullableString(gap.Detail))
+	if err != nil {
+		return fmt.Errorf("ping score history store: store gap: %w", err)
+	}
+	return nil
+}
+
+// LoadGap returns the persisted gap state, or nil if no
+// permanently-unreconstructable entry has ever been proven over this
+// store's whole lifetime (the normal, healthy case) -- see
+// PingScoreHistoryGap's own doc comment.
+func (s *PingScoreHistoryStore) LoadGap() (*PingScoreHistoryGap, error) {
+	var gap PingScoreHistoryGap
+	var detail sql.NullString
+	err := s.conn.QueryRow(`
+		SELECT status, first_detected_at, last_detected_at, permanently_unreconstructable_count, total_triggers, detail
+		FROM ping_score_history_gaps WHERE id = 1`,
+	).Scan(&gap.Status, &gap.FirstDetectedAt, &gap.LastDetectedAt,
+		&gap.PermanentlyUnreconstructableCount, &gap.TotalTriggers, &detail)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ping score history store: load gap: %w", err)
+	}
+	gap.Detail = detail.String
+	return &gap, nil
+}
+
+// HistoryInitializedAt returns the persisted RFC3339 timestamp of this
+// store's genuine first successful engine cycle, and whether one has ever
+// been recorded. This is the ONLY authoritative signal for "has bootstrap
+// already happened" (see isGenuineBootstrap in
+// ping_score_history_engine.go) -- deliberately NOT derived from whether
+// the in-memory index is currently empty, which a later full-prune cycle
+// (every tracked trigger deleted) could otherwise make indistinguishable
+// from a store that has never bootstrapped at all.
+func (s *PingScoreHistoryStore) HistoryInitializedAt() (string, bool, error) {
+	var raw string
+	err := s.conn.QueryRow(`SELECT value FROM _meta WHERE key = 'history_initialized_at'`).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ping score history store: load history_initialized_at: %w", err)
+	}
+	return raw, true, nil
 }
 
 func nullableString(s string) interface{} {

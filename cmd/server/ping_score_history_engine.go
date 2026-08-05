@@ -166,13 +166,20 @@ func newPingScoreHistoryEngine(server *Server, store *PingScoreHistoryStore, now
 			return nil, fmt.Errorf("ping score history engine: init: tx_id=%d: %w", e.TxID, err)
 		}
 	}
-	// LoadIntegrity is called here purely so construction fails fast on a
-	// broken integrity table rather than succeeding and failing later
-	// inside the first Cycle -- Cycle() re-reads it itself when it actually
-	// needs the current value (see the isGenuineBootstrap check near the
-	// top of Cycle), so nothing from this call is retained on the engine.
+	// LoadIntegrity/LoadGap/HistoryInitializedAt are called here purely so
+	// construction fails fast on a broken table rather than succeeding and
+	// failing later inside the first Cycle -- Cycle() re-reads whichever of
+	// these it actually needs itself (see the isGenuineBootstrap check and
+	// the gap computation near the top and bottom of Cycle respectively),
+	// so nothing from these calls is retained on the engine.
 	if _, err := store.LoadIntegrity(); err != nil {
 		return nil, fmt.Errorf("ping score history engine: init: load integrity: %w", err)
+	}
+	if _, err := store.LoadGap(); err != nil {
+		return nil, fmt.Errorf("ping score history engine: init: load gap: %w", err)
+	}
+	if _, _, err := store.HistoryInitializedAt(); err != nil {
+		return nil, fmt.Errorf("ping score history engine: init: load history-initialized marker: %w", err)
 	}
 
 	return &pingScoreHistoryEngine{
@@ -242,22 +249,26 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	}
 
 	// isGenuineBootstrap captures the ONLY signal for "is this cycle the
-	// real, first-ever bootstrap": the index was completely empty BEFORE
-	// this cycle changes anything, AND no integrity record has ever been
-	// written before, AND there is at least one trigger to actually
-	// bootstrap. Captured here, before candidateIndex exists and before
-	// any mutation, so a LATER cycle -- which will see a non-empty
-	// e.index -- can never mistake itself for the bootstrap moment, no
-	// matter how large that later cycle's own ToCompute set is (e.g. a
-	// newly-invalidated old trigger). LoadIntegrity is fallible and must
-	// run before any mutation/persistence -- exactly like the fetch above,
-	// an error here aborts the whole cycle with nothing touched yet.
-	indexWasEmpty := e.index.Len() == 0
-	existingIntegrity, err := e.store.LoadIntegrity()
+	// real, first-ever bootstrap": whether the persistent
+	// history_initialized_at marker has EVER been written before (see
+	// HistoryInitializedAt). Deliberately NOT derived from e.index.Len()==0
+	// -- an empty in-memory index is not a permanent fact: every tracked
+	// trigger could simply have been pruned/deleted by a LATER cycle (see
+	// planPingScoreHistoryReconcile's ToDelete), and brand-new triggers
+	// arriving after that point are normal operation resuming, not a new
+	// bootstrap (fix-round-2 review of a1c3022d: "en senere tom index
+	// bliver fejlklassificeret som ny bootstrap"). The marker itself is
+	// only ever written ONCE, by the genuine first successful cycle (see
+	// the historyInitializedAt persist call below), so this check is
+	// reliable no matter how many times the index later becomes empty
+	// again. HistoryInitializedAt is fallible and must run before any
+	// mutation/persistence -- exactly like the fetch above, an error here
+	// aborts the whole cycle with nothing touched yet.
+	_, alreadyInitialized, err := e.store.HistoryInitializedAt()
 	if err != nil {
-		return nil, fmt.Errorf("ping score history cycle: load integrity: %w", err)
+		return nil, fmt.Errorf("ping score history cycle: load history-initialized marker: %w", err)
 	}
-	isGenuineBootstrap := indexWasEmpty && existingIntegrity == nil && len(triggers) > 0
+	isGenuineBootstrap := !alreadyInitialized
 
 	// --- 2. plan reconciliation ---
 	plan := planPingScoreHistoryReconcile(e.index, triggers)
@@ -296,23 +307,32 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		if toComputeSet[entry.TxID] || fingerprintCandidateSet[entry.TxID] {
 			continue
 		}
-		trigger, present := triggerByID[entry.TxID]
-		if !present {
+		if _, present := triggerByID[entry.TxID]; !present {
 			continue
 		}
 		if !entry.Settled || entry.DataPruned {
 			continue
 		}
-		if isPermanentlyUnreconstructable(entry, trigger, now, e.config.RetentionDuration) {
-			// Excluded PERMANENTLY (as long as it stays past retention) from
-			// deep-sweep's expensive GetPacketPathsBulk recomputes -- there
-			// is nothing left to find; see isPermanentlyUnreconstructable's
-			// own doc comment for why this is distinct from DataPruned. It
-			// still settles normally (this check runs strictly after the
-			// Settled gate above, never before), still counts toward
-			// TotalPings via the live trigger list, stays Unscorable and
-			// DataPruned=false, and its explanation lives in the
-			// initial-backfill-incomplete integrity record, not here.
+		if entry.PermanentlyUnreconstructable {
+			// Excluded PERMANENTLY -- but only once REAL evidence already
+			// exists (this flag is only ever set by
+			// maybeMarkPermanentlyUnreconstructable, after an ACTUAL
+			// deep-sweep attempt found nothing while past retention -- see
+			// its own doc comment). Age past retention alone is
+			// deliberately NOT checked here (fix-round-2 review of
+			// a1c3022d: "alder alene er ikke bevis for permanent
+			// unreconstructability") -- an Unscorable entry that has JUST
+			// crossed retention, or crossed it long ago but was never
+			// actually re-attempted, REMAINS eligible below and gets
+			// exactly one real GetPacketPathsBulk-backed attempt; only
+			// THAT attempt's outcome (via maybeMarkPermanentlyUnreconstructable,
+			// called from the deep-sweep merge loop) can ever set this
+			// flag. It still settles normally (this check runs strictly
+			// after the Settled gate above, never before), still counts
+			// toward TotalPings via the live trigger list, stays
+			// Unscorable and DataPruned=false, and its explanation lives
+			// in the ping_score_history_gaps record (see
+			// buildPingScoreHistoryGap), not here.
 			continue
 		}
 		deepSweepEligible = append(deepSweepEligible, entry)
@@ -522,6 +542,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		}
 		merged := mergePingScoreHistoryEntry(existing, trigger, score, state, fp, now)
 		maybeMarkDataPruned(&merged, existing, trigger, score, now, e.config.RetentionDuration)
+		maybeMarkPermanentlyUnreconstructable(&merged, existing, trigger, score, now, e.config.RetentionDuration)
 
 		candidateIndex.Upsert(merged)
 		upserts = append(upserts, merged)
@@ -547,9 +568,41 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		integrity = e.buildInitialBootstrapIntegrity(triggers, candidateIndex, now)
 	}
 
-	// --- 9. UpsertAndDelete (via UpsertDeleteAndIntegrity) in one
+	// Gap tracking: a GLOBAL count of every entry in the post-cycle
+	// candidateIndex (the complete population, not just entries touched
+	// THIS cycle) that carries evidence-confirmed PermanentlyUnreconstructable
+	// -- distinct from, and computed on EVERY cycle regardless of
+	// isGenuineBootstrap (unlike the bootstrap-integrity record above,
+	// this can newly become true at ANY point in the store's life; see
+	// PingScoreHistoryGap's own doc comment). existingGap is loaded fresh
+	// each cycle (fallible, must run before persistence) so
+	// buildPingScoreHistoryGap can preserve FirstDetectedAt verbatim
+	// rather than resetting it every time new evidence is found.
+	permanentCount := 0
+	for _, ce := range candidateIndex.Entries() {
+		if ce.PermanentlyUnreconstructable {
+			permanentCount++
+		}
+	}
+	existingGap, err := e.store.LoadGap()
+	if err != nil {
+		return nil, fmt.Errorf("ping score history cycle: load gap: %w", err)
+	}
+	gap := buildPingScoreHistoryGap(existingGap, permanentCount, len(triggers), e.config.RetentionDuration, now)
+
+	// History-initialized marker: written EXACTLY once, ever, the very
+	// first time isGenuineBootstrap is true -- see HistoryInitializedAt's
+	// own doc comment for why this must be a persistent marker rather than
+	// re-derived from index size on every cycle.
+	var historyInitializedAt *string
+	if isGenuineBootstrap {
+		v := nowStr
+		historyInitializedAt = &v
+	}
+
+	// --- 9. UpsertAndDelete (via UpsertDeleteAndMetadata) in one
 	// persistent transaction ---
-	if err := e.store.UpsertDeleteAndIntegrity(upserts, plan.ToDelete, integrity); err != nil {
+	if err := e.store.UpsertDeleteAndMetadata(upserts, plan.ToDelete, integrity, gap, historyInitializedAt); err != nil {
 		return nil, fmt.Errorf("ping score history cycle: persist: %w", err)
 	}
 
@@ -563,49 +616,67 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	return snapshot, nil
 }
 
-// isPermanentlyUnreconstructable reports whether entry can NEVER be scored,
-// ever again, and should therefore be permanently excluded from deep-
-// sweep's expensive path recomputes (see the deep-sweep eligibility loop
-// in Cycle). Requires ALL of:
-//   - entry.Unscorable == true. By construction of
-//     pingScoreHistoryEntryFromScore/mergePingScoreHistoryEntry this field
-//     already IS exactly "this tx_id has never had a successful
-//     computation, ever" -- it is only ever cleared to false on a real
-//     success, and never resets back to true afterward (an empty result
-//     never downgrades a prior success). So Unscorable==true already
-//     means "never had a valid path-score to preserve"; there is no
-//     separate condition to derive here.
-//   - retention > 0 -- the same explicit-opt-in convention as
-//     maybeMarkDataPruned: retention<=0 means the caller hasn't told us
-//     the retention window, so nothing can be safely judged permanent.
+// maybeMarkPermanentlyUnreconstructable sets
+// merged.PermanentlyUnreconstructable = true in place, but ONLY when a
+// REAL deep-sweep attempt THIS cycle actually produced the evidence -- age
+// past retention is necessary but NEVER sufficient on its own (fix-round-2
+// review of a1c3022d: "alder alene er ikke bevis for permanent
+// unreconstructability" -- age alone is not proof of permanent
+// unreconstructability). Requires ALL of:
+//   - score == nil: THIS cycle's real GetPacketPathsBulk-backed recompute
+//     attempt (not a prediction) found nothing.
+//   - existingEntry.Unscorable == true (the PRE-cycle state, before this
+//     merge): this tx_id has never had a successful computation, ever --
+//     by construction of pingScoreHistoryEntryFromScore/
+//     mergePingScoreHistoryEntry this field already IS exactly that, so
+//     there is no separate condition to derive here. Mutually exclusive
+//     with DataPruned by construction (maybeMarkDataPruned itself requires
+//     the OPPOSITE: !existingEntry.Unscorable).
 //   - trigger.firstSeen parses as a valid timestamp (can't judge age
 //     otherwise -- an invalid timestamp is never treated as "old").
-//   - now - firstSeen >= retention: the underlying packet data is
-//     ALREADY gone by definition of the retention window, so no future
-//     cycle's GetPacketPathsBulk call could ever find it either. A YOUNG
-//     Unscorable entry (not yet past retention) returns false here and
-//     stays deep-sweep eligible, in case data simply hasn't arrived yet.
+//   - now - firstSeen >= retentionDuration: the underlying packet data is
+//     ALREADY gone by definition of the retention window, so THIS cycle's
+//     empty result is not just "data hasn't arrived yet".
+//   - retentionDuration > 0 -- the same explicit opt-in convention as
+//     maybeMarkDataPruned: retention<=0 means the caller hasn't told us
+//     the retention window, so nothing can be safely judged permanent.
+//
+// Only ever called from the deep-sweep merge loop (7d) in Cycle -- deep-
+// sweep is the ONLY code path that attempts a real, fingerprint-
+// independent recompute for an entry that is ALREADY Settled AND not yet
+// flagged (the deep-sweep eligibility filter's whole job, see Cycle). A
+// YOUNG Unscorable entry (not yet past retention) never reaches a state
+// where this can fire with a true result -- it keeps getting real attempts
+// via deep-sweep every cycle until either a score arrives or it crosses
+// retention with a real attempt still coming up empty.
+//
+// Once true, the eligibility filter in Cycle excludes this entry from
+// ALL FUTURE deep-sweep attempts -- there is nothing left to find. See
+// mergePingScoreHistoryEntry's score != nil branch for the defensive
+// clear that keeps this from ever going permanently stale if a real score
+// somehow does arrive later anyway.
 //
 // Distinct from DataPruned: DataPruned means "had a valid score once, its
 // raw data has SINCE been pruned" (existing facts are preserved and
 // merged going forward). Permanently unreconstructable means "never had
-// anything to preserve in the first place" -- these entries stay
-// Unscorable and DataPruned=false forever (mutually exclusive with
-// DataPruned by construction: maybeMarkDataPruned itself requires
-// !existingEntry.Unscorable). Their explanation lives in the
-// initial-backfill-incomplete integrity record (see
-// buildInitialBootstrapIntegrity), not in a per-entry flag -- they still
-// count toward TotalPings via the live trigger list and are still
-// visible in the history database, just never re-attempted.
-func isPermanentlyUnreconstructable(entry PingScoreHistoryEntry, trigger pingTriggerRow, now time.Time, retention time.Duration) bool {
-	if !entry.Unscorable || retention <= 0 {
-		return false
+// anything to preserve in the first place, AND a real attempt already
+// proved it" -- these entries stay Unscorable and DataPruned=false
+// forever. Their explanation lives in the ping_score_history_gaps record
+// (see buildPingScoreHistoryGap), not in the one-time bootstrap-integrity
+// record -- they still count toward TotalPings via the live trigger list
+// and are still visible in the history database, just never re-attempted
+// again after this.
+func maybeMarkPermanentlyUnreconstructable(merged *PingScoreHistoryEntry, existingEntry PingScoreHistoryEntry, trigger pingTriggerRow, score *PingScore, now time.Time, retentionDuration time.Duration) {
+	if score != nil || !existingEntry.Unscorable || retentionDuration <= 0 {
+		return
 	}
 	firstSeen, err := time.Parse(time.RFC3339, trigger.firstSeen)
 	if err != nil {
-		return false
+		return
 	}
-	return now.Sub(firstSeen) >= retention
+	if now.Sub(firstSeen) >= retentionDuration {
+		merged.PermanentlyUnreconstructable = true
+	}
 }
 
 // maybeMarkDataPruned sets merged.DataPruned = true in place, but ONLY
@@ -667,9 +738,15 @@ func maybeMarkDataPruned(merged *PingScoreHistoryEntry, existingEntry PingScoreH
 //     NEITHER scored nor unreconstructable -- never silently counted as
 //     scored.
 //   - UnreconstructableCount = triggers whose entry is Unscorable AND
-//     provably already older than RetentionDuration (same age test as
-//     isPermanentlyUnreconstructable). An unparseable firstSeen is never
-//     counted as unreconstructable (can't prove it).
+//     provably already older than RetentionDuration -- an AGE ESTIMATE
+//     for this one-time reporting snapshot only, deliberately NOT the
+//     same evidence-based test as PermanentlyUnreconstructable/
+//     maybeMarkPermanentlyUnreconstructable (an age estimate is fine for
+//     an informational count at bootstrap time; it is NOT fine as the
+//     basis for permanently excluding an entry from ever being
+//     re-attempted, which is exactly the distinction the fix-round-2
+//     review drew). An unparseable firstSeen is never counted as
+//     unreconstructable (can't prove it).
 //   - DetectedAt is set once, here, at bootstrap time, and never revised
 //     (there is no later call site that could revise it).
 //
@@ -711,6 +788,52 @@ func (e *pingScoreHistoryEngine) buildInitialBootstrapIntegrity(triggers []pingT
 		Detail: fmt.Sprintf(
 			"%d of %d triggers from the initial bootstrap could not be reconstructed (already older than the %s retention window)",
 			unreconstructableCount, len(triggers), e.config.RetentionDuration,
+		),
+	}
+}
+
+// buildPingScoreHistoryGap decides what (if anything) to persist to the
+// ping_score_history_gaps table THIS cycle, given permanentCount (the
+// GLOBAL count of entries with PermanentlyUnreconstructable=true across
+// the WHOLE post-cycle candidateIndex -- see the gap computation in Cycle,
+// step 9) and existing (whatever gap record, if any, was already there
+// before this cycle -- nil if none). Called on EVERY cycle, unlike
+// buildInitialBootstrapIntegrity (which only ever runs once) -- new
+// evidence can arrive at any point in the store's life, long after a
+// perfectly healthy bootstrap.
+//
+//   - permanentCount == 0, existing == nil: nil (nothing to write) -- a
+//     healthy history has no gap row at all, same "nil means healthy"
+//     convention as LoadIntegrity.
+//   - permanentCount == 0, existing != nil: nil (no write) -- a
+//     previously recorded abnormal status is NEVER silently reverted to
+//     "ok" by this function (fix-round-2 review: "en tidligere abnormal
+//     status må ikke stiltiende blive 'ok'"); the existing record is left
+//     completely untouched rather than downgraded.
+//   - permanentCount > 0, existing == nil: a brand-new record,
+//     FirstDetectedAt = LastDetectedAt = now.
+//   - permanentCount > 0, existing != nil: FirstDetectedAt is PRESERVED
+//     verbatim from existing (never revised once set -- "DetectedAt for
+//     det første observerede tab skal bevares"), LastDetectedAt and the
+//     counts are refreshed to this cycle's GLOBAL values.
+func buildPingScoreHistoryGap(existing *PingScoreHistoryGap, permanentCount, totalTriggers int, retention time.Duration, now time.Time) *PingScoreHistoryGap {
+	if permanentCount == 0 {
+		return nil
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	firstDetectedAt := nowStr
+	if existing != nil && existing.FirstDetectedAt != "" {
+		firstDetectedAt = existing.FirstDetectedAt
+	}
+	return &PingScoreHistoryGap{
+		Status:                            "history-incomplete",
+		FirstDetectedAt:                   firstDetectedAt,
+		LastDetectedAt:                    nowStr,
+		PermanentlyUnreconstructableCount: permanentCount,
+		TotalTriggers:                     totalTriggers,
+		Detail: fmt.Sprintf(
+			"%d of %d live triggers are permanently unreconstructable (proven by an empty deep-sweep already past the %s retention window)",
+			permanentCount, totalTriggers, retention,
 		),
 	}
 }
