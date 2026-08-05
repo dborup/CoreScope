@@ -16,6 +16,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"sort"
 	"sync/atomic"
@@ -136,6 +137,17 @@ type pingTriggerRow struct {
 // guarantees the table exists once the server has started at all, but a
 // recomputer's first tick can in principle race a test fixture that
 // doesn't go through the normal startup path.
+//
+// A Scan or cursor-iteration error (SQLite interrupt, unexpected schema
+// drift, file corruption) aborts and returns the error rather than
+// silently dropping the offending row -- every column here is either
+// NOT NULL/INTEGER PRIMARY KEY (tx_id, hash, first_seen: cannot legally
+// hold a value Scan would reject) or already read into a sql.NullString
+// (channel_hash, sender: NULL-tolerant by design). There is no row shape
+// this query can legitimately produce that Scan is expected to reject --
+// a failure here means something is actually wrong, not an anticipated
+// malformed row, so computeAllPingScores must not publish a partial
+// snapshot as if the cycle fully succeeded.
 func (db *DB) fetchPingTriggers() ([]pingTriggerRow, error) {
 	rows, err := db.conn.Query(`SELECT tx_id, hash, channel_hash, sender, first_seen FROM ping_triggers ORDER BY tx_id`)
 	if err != nil {
@@ -147,11 +159,14 @@ func (db *DB) fetchPingTriggers() ([]pingTriggerRow, error) {
 		var r pingTriggerRow
 		var channelHash, sender sql.NullString
 		if err := rows.Scan(&r.txID, &r.hash, &channelHash, &sender, &r.firstSeen); err != nil {
-			continue
+			return nil, fmt.Errorf("fetchPingTriggers: scan row: %w", err)
 		}
 		r.channelHash = channelHash.String
 		r.sender = sender.String
 		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("fetchPingTriggers: row iteration: %w", err)
 	}
 	return out, nil
 }
@@ -161,7 +176,29 @@ func (db *DB) fetchPingTriggers() ([]pingTriggerRow, error) {
 // highscore board always match what "View path" shows for that packet.
 func (s *Server) computePingScore(trigger pingTriggerRow) *PingScore {
 	resp, err := s.db.GetPacketPath(trigger.hash, EstimateMaxEdgeKm)
-	if err != nil || resp == nil || len(resp.Branches) == 0 {
+	if err != nil {
+		return nil
+	}
+	return s.buildPingScoreFromPath(trigger, resp)
+}
+
+// buildPingScoreFromPath is the shared scoring core computePingScore uses
+// (with resp sourced from a live GetPacketPath call, as before this
+// extraction -- behavior and API output are unchanged) and that a future
+// bulk recomputer (Phase 4D+) will reuse with resp sourced from
+// GetPacketPathsBulk instead, without duplicating this logic. resp is not
+// yet airtime-annotated when passed in -- annotatePacketPathAirtime is
+// applied exactly once, here, so neither caller needs to remember to call
+// it separately (and a caller that DOES call it first would double-annotate,
+// which this function's callers must not do).
+//
+// nil (or a response with zero branches) means GetPacketPath/
+// GetPacketPathsBulk couldn't build a usable path for this trigger this
+// cycle -- explicitly returns nil rather than a zero-value *PingScore, so
+// callers can distinguish "no score, don't record anything" from "score,
+// but every field happens to be zero".
+func (s *Server) buildPingScoreFromPath(trigger pingTriggerRow, resp *PacketPathResponse) *PingScore {
+	if resp == nil || len(resp.Branches) == 0 {
 		return nil
 	}
 	s.annotatePacketPathAirtime(resp)

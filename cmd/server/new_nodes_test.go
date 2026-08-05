@@ -231,3 +231,59 @@ func TestHandleNewNodes_ReturnsWrappedList(t *testing.T) {
 		t.Errorf("response missing newNodes key, got: %s", w.Body.String())
 	}
 }
+
+// TestComputeNewNodes_ScanErrorPropagates proves computeNewNodes returns an
+// error (not a silently-shortened list) when a row can't be scanned. nodes
+// declares public_key as a bare `TEXT PRIMARY KEY` with no explicit NOT
+// NULL -- a documented SQLite quirk (PRIMARY KEY alone does not imply NOT
+// NULL for a non-INTEGER column) that permits a single NULL public_key row
+// to actually be persisted, so this is a genuine reachable failure mode,
+// not a fabricated one. Scanning that NULL into e.PublicKey (a plain
+// string, not sql.NullString) is expected to fail.
+func TestComputeNewNodes_ScanErrorPropagates(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	ensureInactiveNodesTable(t, srv)
+
+	now := time.Now().UTC()
+	if _, err := srv.db.conn.Exec(
+		`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen) VALUES (NULL,?,?,?,?,?,?)`,
+		"Ghost", "repeater", 56.0, 10.0, now.Format(time.RFC3339), now.Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert NULL-pubkey row: %v", err)
+	}
+
+	entries, err := srv.computeNewNodes(50)
+	if err == nil {
+		t.Fatal("computeNewNodes: expected an error for the unscannable row, got nil")
+	}
+	if entries != nil {
+		t.Errorf("computeNewNodes: expected nil entries on error, got %d entries -- partial result returned as success", len(entries))
+	}
+}
+
+// TestComputeNewNodes_ScanErrorDiscardsAlreadyScannedRows confirms that a
+// row scanned successfully BEFORE the failing row is not returned either --
+// the whole fetch must fail as a unit, not silently downgrade to "everything
+// up to the bad row".
+func TestComputeNewNodes_ScanErrorDiscardsAlreadyScannedRows(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	ensureInactiveNodesTable(t, srv)
+
+	now := time.Now().UTC()
+	// Scanned first (newest first_seen, ORDER BY first_seen DESC) -- a
+	// perfectly valid row that would normally succeed on its own.
+	insertNewNodeRow(t, srv, "validnode00000001", "Valid", "repeater", f64(56.0), f64(10.0), now.Format(time.RFC3339))
+	// Scanned second (older first_seen) -- the row that fails.
+	if _, err := srv.db.conn.Exec(
+		`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen) VALUES (NULL,?,?,?,?,?,?)`,
+		"Ghost", "repeater", 56.0, 10.0, now.Add(-time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert NULL-pubkey row: %v", err)
+	}
+
+	entries, err := srv.computeNewNodes(50)
+	if err == nil {
+		t.Fatal("computeNewNodes: expected an error, got nil")
+	}
+	if len(entries) != 0 {
+		t.Errorf("computeNewNodes: expected zero entries (not the 1 valid row scanned before the failure), got %d", len(entries))
+	}
+}

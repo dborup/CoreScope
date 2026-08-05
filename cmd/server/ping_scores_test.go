@@ -453,3 +453,52 @@ func TestHandlePingScores_Populated(t *testing.T) {
 		t.Error("expected senderLeaderboard in the JSON response")
 	}
 }
+
+// TestFetchPingTriggers_QueryErrorPropagates confirms a database-level
+// failure (table gone, e.g. an interrupted migration) surfaces as an error
+// rather than silently returning an empty, "successful" list.
+//
+// Unlike computeNewNodes/computeSuspiciousGPSPositions, there is no
+// Scan-error-specific regression test here: every column fetchPingTriggers
+// scans into a non-nullable Go type is backed by an INTEGER PRIMARY KEY
+// (tx_id -- a SQLite rowid alias, always a real integer) or an explicit
+// NOT NULL TEXT column (hash, first_seen) -- ping_triggers has no
+// nullable/loosely-typed column feeding a non-Null* Scan target the way
+// nodes.public_key (bare TEXT PRIMARY KEY, no NOT NULL) does, so there is
+// no legitimate SQL statement that produces a row Scan is expected to
+// reject. The fix (propagate instead of `continue`, check rows.Err()) is
+// still correct defense-in-depth, but this table's current schema makes a
+// behavioral Scan-error test unachievable without corrupting the SQLite
+// file at the byte level -- noted here rather than faked with a test that
+// doesn't actually exercise real behavior.
+func TestFetchPingTriggers_QueryErrorPropagates(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	if _, err := srv.db.conn.Exec(`DROP TABLE ping_triggers`); err != nil {
+		t.Fatalf("drop ping_triggers: %v", err)
+	}
+
+	triggers, err := srv.db.fetchPingTriggers()
+	if err == nil {
+		t.Fatal("fetchPingTriggers: expected an error with the table gone, got nil")
+	}
+	if triggers != nil {
+		t.Errorf("fetchPingTriggers: expected nil triggers on error, got %d -- partial result returned as success", len(triggers))
+	}
+}
+
+// TestComputeAllPingScores_SkipsCycleOnFetchError confirms the recomputer
+// contract documented in computeAllPingScores: a fetchPingTriggers failure
+// returns a nil snapshot (caller keeps the last-good cached one) rather
+// than publishing an empty/partial snapshot that looks like "zero pings
+// ever recorded".
+func TestComputeAllPingScores_SkipsCycleOnFetchError(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	if _, err := srv.db.conn.Exec(`DROP TABLE ping_triggers`); err != nil {
+		t.Fatalf("drop ping_triggers: %v", err)
+	}
+
+	snap := srv.computeAllPingScores()
+	if snap != nil {
+		t.Errorf("computeAllPingScores: expected nil snapshot on fetch error, got %+v", snap)
+	}
+}

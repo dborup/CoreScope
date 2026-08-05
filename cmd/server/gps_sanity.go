@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -63,15 +64,21 @@ func computeSuspiciousGPSPositions(db *DB, positioned []areaAnalyticsNode) (GPSS
 	for rows.Next() {
 		var a, b string
 		var count float64
-		if rows.Scan(&a, &b, &count) != nil {
-			continue
+		// A scan failure here (e.g. a NULL count -- the column has no
+		// NOT NULL constraint) aborts the whole fetch rather than
+		// silently dropping the edge, same reasoning as new_nodes.go /
+		// node_changes.go: a partial adjacency graph is worse than no
+		// graph, since computeSuspiciousGPSPositions would then flag
+		// nodes as suspicious based on incomplete neighbor evidence.
+		if err := rows.Scan(&a, &b, &count); err != nil {
+			return GPSSanityResponse{}, fmt.Errorf("computeSuspiciousGPSPositions: scan neighbor_edges row: %w", err)
 		}
 		aLower, bLower := strings.ToLower(a), strings.ToLower(b)
 		adj[aLower] = append(adj[aLower], edge{neighbor: bLower, weight: count})
 		adj[bLower] = append(adj[bLower], edge{neighbor: aLower, weight: count})
 	}
 	if err := rows.Err(); err != nil {
-		return GPSSanityResponse{}, err
+		return GPSSanityResponse{}, fmt.Errorf("computeSuspiciousGPSPositions: row iteration: %w", err)
 	}
 
 	var flagged []SuspiciousGPSNode

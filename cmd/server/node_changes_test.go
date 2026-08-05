@@ -198,3 +198,32 @@ func TestComputeNodeChanges_LimitRespected(t *testing.T) {
 		t.Errorf("len(entries) = %d, want 2 (limit)", len(entries))
 	}
 }
+
+// TestComputeNodeChanges_QueryErrorPropagates confirms a database-level
+// failure (table gone) surfaces as an error rather than silently returning
+// an empty, "successful" list.
+//
+// Same reasoning as fetchPingTriggers (see
+// TestFetchPingTriggers_QueryErrorPropagates in ping_scores_test.go): every
+// column computeNodeChanges scans into a non-nullable Go type is backed by
+// an INTEGER PRIMARY KEY AUTOINCREMENT (id) or an explicit NOT NULL TEXT
+// column (public_key, change_type, detected_at) -- there is no legitimate
+// INSERT that produces a row Scan is expected to reject, so there is no
+// behavioral Scan-error test for this reader. The Scan-error-propagation
+// fix itself is still applied (see computeNodeChanges) as defense-in-depth
+// and for consistency with computeNewNodes/computeSuspiciousGPSPositions.
+func TestComputeNodeChanges_QueryErrorPropagates(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	ensureNodeChangesTable(t, srv)
+	if _, err := srv.db.conn.Exec(`DROP TABLE node_changes`); err != nil {
+		t.Fatalf("drop node_changes: %v", err)
+	}
+
+	entries, err := srv.computeNodeChanges(50)
+	if err == nil {
+		t.Fatal("computeNodeChanges: expected an error with the table gone, got nil")
+	}
+	if entries != nil {
+		t.Errorf("computeNodeChanges: expected nil entries on error, got %d -- partial result returned as success", len(entries))
+	}
+}

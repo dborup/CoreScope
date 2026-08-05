@@ -37,6 +37,12 @@ type AreaEntry struct {
 // AreaForPoint returns the label of the most specific configured area that
 // contains (lat, lon), preferring the smallest matching area when several
 // nested areas overlap (e.g. a point inside both "Odense by" and "Fyn").
+// When two or more matching areas have the EXACT same bounding-box span
+// (areaSpan), the tie is broken by the lowest area config key in ordinal
+// string order -- see areaMatchForPoint's doc comment for why this is
+// necessary at all (Go map iteration order is not just unstable across
+// runs, it's re-randomized on every `range`, so an unbroken tie could flip
+// between two consecutive requests in the same process).
 // Returns ok=false for (0,0)/no-fix points or when no area matches.
 func AreaForPoint(lat, lon float64, areas map[string]AreaEntry) (label string, ok bool) {
 	_, label, ok = areaMatchForPoint(lat, lon, areas)
@@ -74,6 +80,17 @@ func AreaKeysForPoint(lat, lon float64, areas map[string]AreaEntry) []string {
 	return keys
 }
 
+// areaMatchForPoint picks the smallest-bounding-box-span configured area
+// containing (lat, lon), out of a Go map -- whose range order is randomized
+// on every iteration (not just across process restarts). Without an
+// explicit tie-breaker, two areas sharing the exact same span could win
+// unpredictably from one call to the next: `span < bestSpan` alone never
+// replaces an already-chosen equal-span winner, so whichever one happened
+// to be visited first took it, and "first" isn't a stable property of a Go
+// map. Ties are broken deterministically by the lowest area config key
+// (ordinal string comparison, e.g. "AAA" beats "ZZZ") -- documented here
+// once since AreaForPoint's and AreaKeyForPoint's callers all funnel
+// through this one function.
 func areaMatchForPoint(lat, lon float64, areas map[string]AreaEntry) (key, label string, ok bool) {
 	if lat == 0 && lon == 0 {
 		return "", "", false
@@ -85,7 +102,7 @@ func areaMatchForPoint(lat, lon float64, areas map[string]AreaEntry) (key, label
 			continue
 		}
 		span := areaSpan(a)
-		if span < bestSpan {
+		if span < bestSpan || (span == bestSpan && k < key) {
 			bestSpan = span
 			key = k
 			label = a.Label

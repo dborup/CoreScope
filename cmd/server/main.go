@@ -474,14 +474,39 @@ func main() {
 	log.Printf("[neighbor-recompute] snapshot reload enabled (interval=%s)",
 		NeighborGraphRecomputerDefaultInterval)
 
-	// Ping-score highscore/leaderboard recomputer: joins ping_triggers
-	// (written by the ingestor at ingest time) with the same
-	// GetPacketPath + airtime-annotation logic View Path uses, so a
-	// later observation of an old ping can still improve a standing
-	// record without a migration. Global, not scoped by region/area.
-	stopPingScoresRecomp := srv.StartPingScoresRecomputer(pingScoresRecomputeInterval)
-	defer stopPingScoresRecomp()
-	log.Printf("[ping-scores] background recompute enabled (interval=%s)", pingScoresRecomputeInterval)
+	// Ping-score highscore/leaderboard: the persistent-history engine
+	// (fase 4A-4E design, fase 5B-5G production wiring) replaces the old
+	// synchronous-at-startup StartPingScoresRecomputer, which on a large
+	// database could block the HTTP listener from binding for several
+	// minutes (confirmed on stg: ~4.5 minutes at 105k+ transmissions /
+	// 1.6M+ observations -- see project memory). StartPingScoreHistoryEngine
+	// never blocks: it validates synchronously, then starts exactly one
+	// background goroutine and returns immediately, well before any
+	// QuickSnapshot or first Cycle has run. The old implementation stays
+	// in ping_scores.go, untouched, as tested rollback code -- see its
+	// own doc comment -- but must never run at the same time as this one.
+	retentionDuration, err := pingScoreHistoryRetentionDuration(cfg)
+	if err != nil {
+		log.Fatalf("[ping-scores-history] invalid retention.packetDays config: %v", err)
+	}
+	pingScoreHistoryConfig := defaultPingScoreHistoryEngineConfig()
+	pingScoreHistoryConfig.RetentionDuration = retentionDuration
+	pingScoreHistoryPath := DefaultPingScoreHistoryPath(resolvedDB)
+	stopPingScoreHistory, err := StartPingScoreHistoryEngine(
+		srv,
+		resolvedDB,
+		pingScoreHistoryPath,
+		pingScoreHistoryConfig,
+		pingScoresRecomputeInterval,
+		pingScoreHistoryProductionBackoff(),
+	)
+	if err != nil {
+		log.Fatalf("[ping-scores-history] failed to start: %v", err)
+	}
+	defer stopPingScoreHistory()
+	log.Printf("[ping-scores-history] worker enabled (interval=%s settleDebounce=%s deepSweepBatchSize=%d retentionDuration=%s historyPath=%s)",
+		pingScoresRecomputeInterval, pingScoreHistoryConfig.SettleDebounce, pingScoreHistoryConfig.DeepSweepBatchSize,
+		pingScoreHistoryConfig.RetentionDuration, pingScoreHistoryPath)
 
 	// Packet / metrics / observer retention moved to the ingestor in
 	// #1283 (writes only belong on the writer process). Neighbor-edge
@@ -540,6 +565,49 @@ func main() {
 
 		// 3. Close WebSocket hub
 		hub.Close()
+
+		// 3b. Stop the ping-score-history worker (fase 5G). MUST happen
+		// before dbClose: a Cycle in flight reads through s.db (the same
+		// connection dbClose closes), matching stopAnalyticsRecomp's own
+		// reasoning in step 1c above. stopPingScoreHistory() is
+		// sync.Once-safe and blocks until the worker has fully shut down,
+		// so this line cannot return before that is true. If cancellation
+		// lands during an active steady-state Cycle, that unwind is, in
+		// order: (1) the active Cycle returns naturally; (2) the worker
+		// loop returns; (3) `defer ticker.Stop()` runs in
+		// pingScoreHistoryWorkerCore; (4) `defer closeAndReport(store,
+		// ...)` runs in pingScoreHistoryAttempt, closing the history
+		// store; (5) any panic is caught by the single outermost recover
+		// in runPingScoreHistoryLifecycleRecovered; (6) the lifecycle
+		// goroutine returns; (7) `done` closes; (8) stopPingScoreHistory()
+		// returns. Only then may this goroutine call dbClose() below. If
+		// cancellation instead lands during the very first Cycle, the
+		// ticker was never constructed yet, so step (3) simply doesn't
+		// exist -- the store is still closed (step 4) before done closes.
+		//
+		// This explicit call is NOT redundant with the plain
+		// `defer stopPingScoreHistory()` declared at Start time: that
+		// defer only runs on the MAIN goroutine, once
+		// httpServer.ListenAndServe() returns below and main() begins
+		// unwinding -- but ListenAndServe() returns as soon as
+		// Shutdown() closes the listener (near the START of step 2
+		// above), essentially concurrently with the REST of this
+		// goroutine's own steps, including its own explicit dbClose()
+		// call a few lines down. Without this explicit call, THIS
+		// goroutine's dbClose() would have no ordering guarantee
+		// relative to the worker's shutdown at all -- the main-goroutine
+		// defer runs on a different goroutine and provides no
+		// happens-before relationship with this one. Calling it here,
+		// in this goroutine's own program order before its own
+		// dbClose(), is what actually guarantees the required
+		// cancel → active Cycle finishes → ticker stopped (if created) →
+		// history store closes → panic-recovery finishes → done closes →
+		// main DB closes ordering on THIS goroutine's shutdown path. The
+		// sync.Once inside stopPingScoreHistory makes both this call and
+		// the later deferred one safe together: whichever runs first
+		// does the real work; the other blocks until that work is done,
+		// then returns immediately.
+		stopPingScoreHistory()
 
 		// 4. Close database (release SQLite WAL lock)
 		if err := dbClose(); err != nil {
