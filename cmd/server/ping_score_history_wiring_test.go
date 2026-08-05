@@ -62,6 +62,22 @@ func TestMainGo_HistoryPathDerivedFromResolvedDB(t *testing.T) {
 	}
 }
 
+// Fase 5H fix: StartPingScoreHistoryEngine's new mainDBPath argument must
+// be resolvedDB itself, not a re-derived or hardcoded value -- that is
+// what lets its synchronous path-collision guard
+// (pingScoreHistoryPathsCollide) actually catch a misconfigured dbPath
+// before any goroutine starts.
+func TestMainGo_PassesResolvedDBAsMainDBPathToStartPingScoreHistoryEngine(t *testing.T) {
+	src := mainGoSource(t)
+	// Deliberately a literal, exact-formatting substring rather than
+	// paren-matching: pingScoreHistoryProductionBackoff() (itself one of
+	// the later arguments) contains its own "()" pair, which would
+	// confuse a naive "find the first closing paren" scan.
+	if !strings.Contains(src, "StartPingScoreHistoryEngine(\n\t\tsrv,\n\t\tresolvedDB,\n") {
+		t.Error("main.go's StartPingScoreHistoryEngine call does not pass resolvedDB as the argument right after srv (mainDBPath)")
+	}
+}
+
 func TestMainGo_UsesProductionBackoff(t *testing.T) {
 	src := mainGoSource(t)
 	if !strings.Contains(src, "pingScoreHistoryProductionBackoff()") {

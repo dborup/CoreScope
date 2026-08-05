@@ -270,8 +270,17 @@ type PingScoreHistoryIntegrity struct {
 // DefaultPingScoreHistoryPath derives the production location of the
 // history store: a sibling file next to the main database, so it lives in
 // the same persistent data directory/volume by construction (no separate
-// config knob to get wrong). Not yet called from main.go in Phase 4A --
-// wiring this in is Phase 4B's job.
+// config knob to get wrong). Called from main.go (fase 5G) to derive the
+// path passed to StartPingScoreHistoryEngine.
+//
+// The derived path is NOT automatically guaranteed to differ from
+// mainDBPath itself -- if mainDBPath's own basename happens to literally
+// be "ping_scores_history.db" (a misconfigured dbPath), this function
+// would return mainDBPath unchanged. Callers must not treat the result
+// as safe to open read-write without independently verifying it is
+// distinct from mainDBPath first -- see pingScoreHistoryPathsCollide,
+// which validatePingScoreHistoryStartConfig calls synchronously before
+// StartPingScoreHistoryEngine ever opens anything.
 func DefaultPingScoreHistoryPath(mainDBPath string) string {
 	return filepath.Join(filepath.Dir(mainDBPath), "ping_scores_history.db")
 }

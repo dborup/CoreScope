@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -818,6 +820,99 @@ func pingScoreHistoryProductionBackoff() backoffPolicy {
 	return backoffPolicy{initial: time.Minute, max: 30 * time.Minute}
 }
 
+// pingScoreHistoryPathsCollide reports whether mainDBPath and historyPath
+// would resolve to the SAME underlying file -- the one configuration
+// mistake this whole feature must never allow, since the history store
+// opens its target read-write and runs schema migrations against it: if
+// it ever aliased the main, ingestor-owned database, it would migrate
+// and write to that file instead. DefaultPingScoreHistoryPath derives
+// historyPath as a sibling of mainDBPath, so this can only actually
+// happen if something configures the main database's own path to
+// literally be named "ping_scores_history.db" -- but the check below
+// does not assume that particular derivation; it compares whatever two
+// paths it is given.
+//
+// This function is READ-ONLY: it never creates, opens for writing,
+// migrates, or deletes anything -- only filepath string canonicalization
+// and os.Stat/filepath.EvalSymlinks, which are themselves read-only.
+//
+// Detection, in order:
+//  1. Both paths are made absolute (filepath.Abs) and Clean()'d, so a
+//     relative path, a "." component, or a ".." component compares
+//     correctly against an absolute one. This alone already catches
+//     "identical string", "relative vs. absolute to the same file", and
+//     any Clean-able ".."-alias.
+//  2. If the Abs+Clean strings are already byte-identical, that is
+//     conclusively a collision -- no filesystem access needed.
+//  3. Otherwise, if BOTH paths currently exist as files, os.SameFile
+//     (via os.Stat, which follows symlinks) detects same-inode aliasing
+//     that a pure string comparison would miss -- e.g. an existing
+//     symlink pointing at the same target.
+//  4. Otherwise (at least one of the two does not exist yet -- the
+//     ordinary case for a brand-new history file), the two PARENT
+//     directories are canonicalized with filepath.EvalSymlinks (the file
+//     itself may not exist, but its parent almost always does) and
+//     compared together with the two basenames -- this still catches a
+//     symlinked parent directory even though the target file hasn't
+//     been created yet.
+//
+// Fail-closed: any unexpected error -- filepath.Abs failing, an os.Stat
+// error that is not "not exist", or a filepath.EvalSymlinks failure --
+// is returned as an error, NOT silently treated as "not a collision".
+// The caller (validatePingScoreHistoryStartConfig) treats any such error
+// exactly like a proven collision: reject the configuration synchronously.
+// A startup that refuses to start because of a permission error or a
+// broken symlink is recoverable (fix it and restart); a startup that
+// silently opens the wrong database file is not.
+func pingScoreHistoryPathsCollide(mainDBPath, historyPath string) (bool, error) {
+	mainAbs, err := filepath.Abs(mainDBPath)
+	if err != nil {
+		return false, fmt.Errorf("resolve main database path %q: %w", mainDBPath, err)
+	}
+	historyAbs, err := filepath.Abs(historyPath)
+	if err != nil {
+		return false, fmt.Errorf("resolve history database path %q: %w", historyPath, err)
+	}
+	mainAbs = filepath.Clean(mainAbs)
+	historyAbs = filepath.Clean(historyAbs)
+
+	if mainAbs == historyAbs {
+		return true, nil
+	}
+
+	mainInfo, mainErr := os.Stat(mainAbs)
+	historyInfo, historyErr := os.Stat(historyAbs)
+
+	switch {
+	case mainErr == nil && historyErr == nil:
+		return os.SameFile(mainInfo, historyInfo), nil
+	case mainErr != nil && !os.IsNotExist(mainErr):
+		return false, fmt.Errorf("stat main database path %q: %w", mainAbs, mainErr)
+	case historyErr != nil && !os.IsNotExist(historyErr):
+		return false, fmt.Errorf("stat history database path %q: %w", historyAbs, historyErr)
+	}
+
+	// At least one of the two doesn't exist yet. A pure basename
+	// mismatch is conclusive on its own (no two different basenames in
+	// the same directory can ever be the same file); only bother
+	// resolving parent symlinks when the basenames already match.
+	mainBase, historyBase := filepath.Base(mainAbs), filepath.Base(historyAbs)
+	if mainBase != historyBase {
+		return false, nil
+	}
+
+	mainParentReal, err := filepath.EvalSymlinks(filepath.Dir(mainAbs))
+	if err != nil {
+		return false, fmt.Errorf("resolve main database parent directory %q: %w", filepath.Dir(mainAbs), err)
+	}
+	historyParentReal, err := filepath.EvalSymlinks(filepath.Dir(historyAbs))
+	if err != nil {
+		return false, fmt.Errorf("resolve history database parent directory %q: %w", filepath.Dir(historyAbs), err)
+	}
+
+	return mainParentReal == historyParentReal, nil
+}
+
 // validatePingScoreHistoryStartConfig performs ALL synchronous, pre-
 // goroutine validation for StartPingScoreHistoryEngine. A permanently-
 // invalid configuration must fail immediately here, return a plain
@@ -832,8 +927,17 @@ func pingScoreHistoryProductionBackoff() backoffPolicy {
 // problem here means a bad config fails at Start time with a clear
 // synchronous error, not many minutes later buried in a cycle_failed log
 // line from the first opened attempt.
+//
+// mainDBPath/historyPath are also checked against each other via
+// pingScoreHistoryPathsCollide -- see that function's own doc comment.
+// This runs last, after every cheaper structural check, and covers both
+// the "identical" case and the "aliases via symlink" case; either one,
+// or an inability to prove they differ, is rejected here synchronously
+// rather than ever reaching OpenPingScoreHistoryStore, which opens its
+// target read-write and migrates it.
 func validatePingScoreHistoryStartConfig(
 	s *Server,
+	mainDBPath string,
 	historyPath string,
 	engineConfig pingScoreHistoryEngineConfig,
 	interval time.Duration,
@@ -841,6 +945,9 @@ func validatePingScoreHistoryStartConfig(
 ) error {
 	if s == nil {
 		return fmt.Errorf("ping score history: start: server is nil")
+	}
+	if strings.TrimSpace(mainDBPath) == "" {
+		return fmt.Errorf("ping score history: start: mainDBPath is empty")
 	}
 	if strings.TrimSpace(historyPath) == "" {
 		return fmt.Errorf("ping score history: start: historyPath is empty")
@@ -863,6 +970,13 @@ func validatePingScoreHistoryStartConfig(
 	if engineConfig.RetentionDuration < 0 {
 		return fmt.Errorf("ping score history: start: engineConfig.RetentionDuration is negative (%s)", engineConfig.RetentionDuration)
 	}
+	collide, err := pingScoreHistoryPathsCollide(mainDBPath, historyPath)
+	if err != nil {
+		return fmt.Errorf("ping score history: start: could not verify historyPath %q is distinct from mainDBPath %q: %w", historyPath, mainDBPath, err)
+	}
+	if collide {
+		return fmt.Errorf("ping score history: start: historyPath %q resolves to the same file as mainDBPath %q -- the history store must never open the main database", historyPath, mainDBPath)
+	}
 	return nil
 }
 
@@ -877,6 +991,7 @@ func validatePingScoreHistoryStartConfig(
 // above.
 func startPingScoreHistoryEngineWithDependencies(
 	s *Server,
+	mainDBPath string,
 	historyPath string,
 	engineConfig pingScoreHistoryEngineConfig,
 	interval time.Duration,
@@ -889,7 +1004,7 @@ func startPingScoreHistoryEngineWithDependencies(
 	setStatus pingScoreHistorySetStatus,
 	reportError pingScoreHistoryErrorReporter,
 ) (stop func(), err error) {
-	if err := validatePingScoreHistoryStartConfig(s, historyPath, engineConfig, interval, backoff); err != nil {
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, historyPath, engineConfig, interval, backoff); err != nil {
 		return nil, err
 	}
 
@@ -914,16 +1029,20 @@ func startPingScoreHistoryEngineWithDependencies(
 }
 
 // StartPingScoreHistoryEngine is the production Start wrapper around the
-// approved fase 5A/5D worker/lifecycle core: it validates synchronously,
-// sets the initial "initializing" status synchronously, then starts
-// EXACTLY ONE goroutine running runPingScoreHistoryLifecycleRecovered
-// with the real (production) adapters (A-G) above, and returns
-// immediately -- it never waits for QuickSnapshot or a first Cycle, so
-// the caller's HTTP listener is never blocked by this call (the exact
-// problem this whole redesign replaces -- see StartPingScoresRecomputer's
-// own doc comment in ping_scores.go for what the OLD synchronous
-// behavior was, and why it stays in place, untouched, as tested rollback
-// code rather than being deleted in this phase).
+// approved fase 5A/5D worker/lifecycle core: it validates synchronously
+// (including that mainDBPath and historyPath do not resolve to the same
+// file -- see pingScoreHistoryPathsCollide), sets the initial
+// "initializing" status synchronously, then starts EXACTLY ONE goroutine
+// running runPingScoreHistoryLifecycleRecovered with the real
+// (production) adapters (A-G) above, and returns immediately -- it never
+// waits for QuickSnapshot or a first Cycle, so the caller's HTTP
+// listener is never blocked by this call (the exact problem this whole
+// redesign replaces -- see StartPingScoresRecomputer's own doc comment
+// in ping_scores.go for what the OLD synchronous behavior was, and why
+// it stays in place, untouched, as tested rollback code rather than
+// being deleted in this phase). mainDBPath is the caller's own resolved
+// main-database path (main.go passes resolvedDB) -- it is used ONLY for
+// the collision check; this function never opens it.
 //
 // stop is sync.Once-safe: calling it more than once, or concurrently
 // from multiple goroutines, is safe, and every call returns only once
@@ -941,13 +1060,14 @@ func startPingScoreHistoryEngineWithDependencies(
 // fallback anywhere in this call chain.
 func StartPingScoreHistoryEngine(
 	s *Server,
+	mainDBPath string,
 	historyPath string,
 	engineConfig pingScoreHistoryEngineConfig,
 	interval time.Duration,
 	backoff backoffPolicy,
 ) (stop func(), err error) {
 	return startPingScoreHistoryEngineWithDependencies(
-		s, historyPath, engineConfig, interval, backoff,
+		s, mainDBPath, historyPath, engineConfig, interval, backoff,
 		pingScoreHistoryRealOpener,
 		pingScoreHistoryRealEngineFactory(s, engineConfig),
 		pingScoreHistoryRealNewTicker,

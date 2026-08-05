@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,90 +15,106 @@ import (
 
 // --- fase 5G: synchronous validation ---------------------------------------
 
-func validPingScoreHistoryStartArgs() (*Server, string, pingScoreHistoryEngineConfig, time.Duration, backoffPolicy) {
-	return &Server{}, "/tmp/ping_scores_history_test.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff()
+func validPingScoreHistoryStartArgs() (*Server, string, string, pingScoreHistoryEngineConfig, time.Duration, backoffPolicy) {
+	return &Server{}, "/tmp/ping_scores_history_test_main.db", "/tmp/ping_scores_history_test.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff()
 }
 
 func TestValidatePingScoreHistoryStartConfig_AllValidAccepted(t *testing.T) {
-	s, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
-	if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err != nil {
+	s, mainDBPath, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err != nil {
 		t.Errorf("want no error for a fully valid config, got %v", err)
 	}
 }
 
 func TestValidatePingScoreHistoryStartConfig_NilServerRejected(t *testing.T) {
-	_, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
-	if err := validatePingScoreHistoryStartConfig(nil, path, cfg, interval, backoff); err == nil {
+	_, mainDBPath, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
+	if err := validatePingScoreHistoryStartConfig(nil, mainDBPath, path, cfg, interval, backoff); err == nil {
 		t.Fatal("want an error for a nil Server")
 	}
 }
 
-func TestValidatePingScoreHistoryStartConfig_EmptyOrWhitespacePathRejected(t *testing.T) {
-	s, _, cfg, interval, backoff := validPingScoreHistoryStartArgs()
+func TestValidatePingScoreHistoryStartConfig_EmptyOrWhitespaceMainDBPathRejected(t *testing.T) {
+	s, _, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
+	for _, mainDBPath := range []string{"", "   ", "\t\n"} {
+		if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err == nil {
+			t.Errorf("mainDBPath=%q: want an error", mainDBPath)
+		}
+	}
+}
+
+func TestValidatePingScoreHistoryStartConfig_EmptyOrWhitespaceHistoryPathRejected(t *testing.T) {
+	s, mainDBPath, _, cfg, interval, backoff := validPingScoreHistoryStartArgs()
 	for _, path := range []string{"", "   ", "\t\n"} {
-		if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err == nil {
-			t.Errorf("path=%q: want an error", path)
+		if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err == nil {
+			t.Errorf("historyPath=%q: want an error", path)
 		}
 	}
 }
 
 func TestValidatePingScoreHistoryStartConfig_NonPositiveIntervalRejected(t *testing.T) {
-	s, path, cfg, _, backoff := validPingScoreHistoryStartArgs()
+	s, mainDBPath, path, cfg, _, backoff := validPingScoreHistoryStartArgs()
 	for _, interval := range []time.Duration{0, -time.Second} {
-		if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err == nil {
+		if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err == nil {
 			t.Errorf("interval=%s: want an error", interval)
 		}
 	}
 }
 
 func TestValidatePingScoreHistoryStartConfig_NonPositiveBackoffInitialRejected(t *testing.T) {
-	s, path, cfg, interval, _ := validPingScoreHistoryStartArgs()
+	s, mainDBPath, path, cfg, interval, _ := validPingScoreHistoryStartArgs()
 	for _, initial := range []time.Duration{0, -time.Minute} {
 		b := backoffPolicy{initial: initial, max: 30 * time.Minute}
-		if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, b); err == nil {
+		if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, b); err == nil {
 			t.Errorf("backoff.initial=%s: want an error", initial)
 		}
 	}
 }
 
 func TestValidatePingScoreHistoryStartConfig_MaxLessThanInitialRejected(t *testing.T) {
-	s, path, cfg, interval, _ := validPingScoreHistoryStartArgs()
+	s, mainDBPath, path, cfg, interval, _ := validPingScoreHistoryStartArgs()
 	b := backoffPolicy{initial: time.Minute, max: 30 * time.Second}
-	if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, b); err == nil {
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, b); err == nil {
 		t.Fatal("want an error when backoff.max < backoff.initial")
 	}
 }
 
 func TestValidatePingScoreHistoryStartConfig_NegativeEngineConfigFieldsRejected(t *testing.T) {
-	s, path, _, interval, backoff := validPingScoreHistoryStartArgs()
+	s, mainDBPath, path, _, interval, backoff := validPingScoreHistoryStartArgs()
 	base := defaultPingScoreHistoryEngineConfig()
 
 	cfg := base
 	cfg.SettleDebounce = -time.Second
-	if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err == nil {
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err == nil {
 		t.Error("negative SettleDebounce: want an error")
 	}
 
 	cfg = base
 	cfg.DeepSweepBatchSize = -1
-	if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err == nil {
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err == nil {
 		t.Error("negative DeepSweepBatchSize: want an error")
 	}
 
 	cfg = base
 	cfg.RetentionDuration = -time.Hour
-	if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err == nil {
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err == nil {
 		t.Error("negative RetentionDuration: want an error")
 	}
 }
 
 func TestValidatePingScoreHistoryStartConfig_NonPositiveMaxEdgeKmAccepted(t *testing.T) {
-	s, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
+	s, mainDBPath, path, cfg, interval, backoff := validPingScoreHistoryStartArgs()
 	for _, maxEdgeKm := range []float64{0, -1, -30} {
 		cfg.MaxEdgeKm = maxEdgeKm
-		if err := validatePingScoreHistoryStartConfig(s, path, cfg, interval, backoff); err != nil {
+		if err := validatePingScoreHistoryStartConfig(s, mainDBPath, path, cfg, interval, backoff); err != nil {
 			t.Errorf("MaxEdgeKm=%v: want no error (deliberate disable-geo-filter convention), got %v", maxEdgeKm, err)
 		}
+	}
+}
+
+func TestValidatePingScoreHistoryStartConfig_CollidingPathsRejected(t *testing.T) {
+	s, mainDBPath, _, cfg, interval, backoff := validPingScoreHistoryStartArgs()
+	if err := validatePingScoreHistoryStartConfig(s, mainDBPath, mainDBPath, cfg, interval, backoff); err == nil {
+		t.Fatal("want an error when historyPath == mainDBPath")
 	}
 }
 
@@ -125,7 +142,7 @@ func TestPingScoreHistoryProductionBackoff_ExactValues(t *testing.T) {
 func TestStartPingScoreHistoryEngineWithDependencies_ValidationFailure_NeverOpensOrStartsGoroutine(t *testing.T) {
 	stop, err := startPingScoreHistoryEngineWithDependencies(
 		nil, // nil server -- guaranteed synchronous validation failure
-		"/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+		"/tmp/x-main.db", "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
 		failIfCalledOpener(t), nil, failIfCalledNewTicker(t), failIfCalledWaiter(t),
 		func(*PingScoresSnapshot) { t.Fatal("publish must not be called") },
 		func(state, code, lastCycleAt string) { t.Fatal("setStatus must not be called") },
@@ -140,7 +157,7 @@ func TestStartPingScoreHistoryEngineWithDependencies_ValidationFailure_NeverOpen
 }
 
 func TestStartPingScoreHistoryEngine_ValidationFailurePropagates(t *testing.T) {
-	stop, err := StartPingScoreHistoryEngine(nil, "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff())
+	stop, err := StartPingScoreHistoryEngine(nil, "/tmp/x-main.db", "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff())
 	if err == nil {
 		t.Fatal("want an error for a nil Server")
 	}
@@ -172,7 +189,7 @@ func startPingScoreHistoryReadOnlyFixture(t *testing.T) (stop func(), openCalls 
 	errs = &errorRecorderSpy{}
 
 	stop, err := startPingScoreHistoryEngineWithDependencies(
-		&Server{}, "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+		&Server{}, "/tmp/x-main.db", "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
 		open, newEngine, failIfCalledNewTicker(t), failIfCalledWaiter(t),
 		pub.record, status.record, errs.record,
 	)
@@ -210,7 +227,7 @@ func TestStartPingScoreHistoryEngineWithDependencies_ReturnsWithoutWaitingForFir
 	startDone := make(chan result, 1)
 	go func() {
 		stop, err := startPingScoreHistoryEngineWithDependencies(
-			&Server{}, "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+			&Server{}, "/tmp/x-main.db", "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
 			open, newEngine, newTickerSignaling(ft, constructed), failIfCalledWaiter(t),
 			pub.record, status.record, errs.record,
 		)
@@ -281,7 +298,7 @@ func TestStartPingScoreHistoryEngineWithDependencies_StopWaitsForActiveCycle(t *
 	pub, status, errs := &publishRecorderSpy{}, &statusRecorderSpy{}, &errorRecorderSpy{}
 
 	stop, err := startPingScoreHistoryEngineWithDependencies(
-		&Server{}, "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+		&Server{}, "/tmp/x-main.db", "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
 		open, newEngine, failIfCalledNewTicker(t), failIfCalledWaiter(t),
 		pub.record, status.record, errs.record,
 	)
@@ -322,7 +339,7 @@ func TestStartPingScoreHistoryEngineWithDependencies_PanicBecomesStatusPanicAndS
 	pub, status, errs := &publishRecorderSpy{}, &statusRecorderSpy{}, &errorRecorderSpy{}
 
 	stop, err := startPingScoreHistoryEngineWithDependencies(
-		&Server{}, "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+		&Server{}, "/tmp/x-main.db", "/tmp/x.db", defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
 		open, newEngine, failIfCalledNewTicker(t), failIfCalledWaiter(t),
 		pub.record, status.record, errs.record,
 	)
@@ -341,6 +358,194 @@ func TestStartPingScoreHistoryEngineWithDependencies_PanicBecomesStatusPanicAndS
 	}
 	if n := store.closes(); n != 1 {
 		t.Errorf("store.closes() = %d, want 1 (closed during panic unwind)", n)
+	}
+}
+
+// --- fase 5H fix: history/main database path collision guard ---------------
+
+func TestPingScoreHistoryPathsCollide_IdenticalString(t *testing.T) {
+	collide, err := pingScoreHistoryPathsCollide("/data/meshcore.db", "/data/meshcore.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !collide {
+		t.Error("want a collision for byte-identical paths")
+	}
+}
+
+func TestPingScoreHistoryPathsCollide_RelativeVsAbsoluteSameFile(t *testing.T) {
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "meshcore.db")
+	if err := os.WriteFile(abs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	collide, err := pingScoreHistoryPathsCollide(abs, rel)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !collide {
+		t.Errorf("want a collision between absolute %q and relative %q pointing at the same file", abs, rel)
+	}
+}
+
+func TestPingScoreHistoryPathsCollide_DotDotAlias(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	clean := filepath.Join(dir, "meshcore.db")
+	messy := filepath.Join(sub, "..", "meshcore.db")
+
+	collide, err := pingScoreHistoryPathsCollide(clean, messy)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !collide {
+		t.Errorf("want a collision between %q and its ..-alias %q", clean, messy)
+	}
+}
+
+func TestPingScoreHistoryPathsCollide_ExistingSymlinkToSameFile(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "meshcore.db")
+	if err := os.WriteFile(real, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.db")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks not supported on this platform/filesystem: %v", err)
+	}
+
+	collide, err := pingScoreHistoryPathsCollide(real, link)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !collide {
+		t.Errorf("want a collision between %q and a symlink %q pointing at it", real, link)
+	}
+}
+
+func TestPingScoreHistoryPathsCollide_NonExistentHistoryFileUnderSymlinkedParent(t *testing.T) {
+	realDir := t.TempDir()
+	otherDir := t.TempDir()
+	linkedParent := filepath.Join(otherDir, "linked")
+	if err := os.Symlink(realDir, linkedParent); err != nil {
+		t.Skipf("symlinks not supported on this platform/filesystem: %v", err)
+	}
+
+	// Neither of these two files exists -- the ordinary "brand-new
+	// history file" case -- but they share a basename and their parent
+	// directories are symlink-aliases of the SAME real directory.
+	mainDBPath := filepath.Join(realDir, "ping_scores_history.db")
+	historyPath := filepath.Join(linkedParent, "ping_scores_history.db")
+
+	collide, err := pingScoreHistoryPathsCollide(mainDBPath, historyPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !collide {
+		t.Errorf("want a collision: %q and %q share a basename and their parent directories alias the same real directory via a symlink", mainDBPath, historyPath)
+	}
+}
+
+func TestPingScoreHistoryPathsCollide_TwoDifferentFilesNotAConflict(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "meshcore.db")
+	b := filepath.Join(dir, "ping_scores_history.db")
+
+	collide, err := pingScoreHistoryPathsCollide(a, b)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if collide {
+		t.Errorf("%q and %q are genuinely different files, want no collision", a, b)
+	}
+}
+
+func TestPingScoreHistoryPathsCollide_StandardDerivationAccepted(t *testing.T) {
+	mainDBPath := "/data/meshcore.db"
+	historyPath := DefaultPingScoreHistoryPath(mainDBPath)
+	if historyPath != "/data/ping_scores_history.db" {
+		t.Fatalf("sanity: DefaultPingScoreHistoryPath(%q) = %q, want /data/ping_scores_history.db", mainDBPath, historyPath)
+	}
+
+	collide, err := pingScoreHistoryPathsCollide(mainDBPath, historyPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if collide {
+		t.Errorf("the standard sibling-file derivation must never be flagged as a collision, got collide=true for %q vs %q", mainDBPath, historyPath)
+	}
+}
+
+func TestStartPingScoreHistoryEngineWithDependencies_PathCollision_RejectedBeforeAnyCall(t *testing.T) {
+	mainDBPath := "/tmp/ping_scores_history_collision_test.db"
+	historyPath := mainDBPath // identical -- guaranteed collision
+
+	stop, err := startPingScoreHistoryEngineWithDependencies(
+		&Server{}, mainDBPath, historyPath, defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+		failIfCalledOpener(t), nil, failIfCalledNewTicker(t), failIfCalledWaiter(t),
+		func(*PingScoresSnapshot) { t.Fatal("publish must not be called") },
+		func(state, code, lastCycleAt string) { t.Fatal("setStatus must not be called") },
+		func(code string, err error) { t.Fatal("reportError must not be called") },
+	)
+	if err == nil {
+		t.Fatal("want an error when historyPath collides with mainDBPath")
+	}
+	if stop != nil {
+		t.Fatal("want a nil stop func on validation failure")
+	}
+	if !strings.Contains(err.Error(), "same file") {
+		t.Errorf("err = %q, want it to mention the path collision", err.Error())
+	}
+}
+
+func TestStartPingScoreHistoryEngineWithDependencies_PathCollision_CreatesNoFilesAndLeavesMainDBUntouched(t *testing.T) {
+	dir := t.TempDir()
+	mainDBPath := filepath.Join(dir, "meshcore.db")
+	if err := os.WriteFile(mainDBPath, []byte("existing main db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	historyPath := mainDBPath // identical -- guaranteed collision
+
+	_, err := startPingScoreHistoryEngineWithDependencies(
+		&Server{}, mainDBPath, historyPath, defaultPingScoreHistoryEngineConfig(), time.Minute, pingScoreHistoryProductionBackoff(),
+		failIfCalledOpener(t), nil, failIfCalledNewTicker(t), failIfCalledWaiter(t),
+		func(*PingScoresSnapshot) { t.Fatal("publish must not be called") },
+		func(state, code, lastCycleAt string) { t.Fatal("setStatus must not be called") },
+		func(code string, err error) { t.Fatal("reportError must not be called") },
+	)
+	if err == nil {
+		t.Fatal("want an error when historyPath collides with mainDBPath")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "meshcore.db" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("directory contents = %v, want only the pre-existing meshcore.db untouched", names)
+	}
+	contents, err := os.ReadFile(mainDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "existing main db" {
+		t.Errorf("mainDBPath contents = %q, want unchanged %q", contents, "existing main db")
 	}
 }
 

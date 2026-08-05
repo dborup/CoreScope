@@ -494,6 +494,7 @@ func main() {
 	pingScoreHistoryPath := DefaultPingScoreHistoryPath(resolvedDB)
 	stopPingScoreHistory, err := StartPingScoreHistoryEngine(
 		srv,
+		resolvedDB,
 		pingScoreHistoryPath,
 		pingScoreHistoryConfig,
 		pingScoresRecomputeInterval,
