@@ -80,7 +80,7 @@ fi
 #                              from stdin (diff mode); else read whole file
 #
 # Exit 0 = no findings; exit 1 = one or more findings.
-PY_CORE=$(cat <<'PYEOF'
+IFS= read -r -d '' PY_CORE <<'PYEOF' || true
 import os, re, sys
 
 ALLOW_TOKENS = os.environ.get("XSS_ALLOW_TOKENS", "").split()
@@ -367,7 +367,6 @@ else:
     pairs = [(i + 1, line) for i, line in enumerate(text.split("\n"))]
     sys.exit(scan_lines(pairs))
 PYEOF
-)
 
 scan_file() {
   local target="$1" offset="${2:-0}"
