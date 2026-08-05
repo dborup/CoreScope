@@ -119,22 +119,32 @@ type PingScoreHistoryEntry struct {
 	ComputedAt      string
 }
 
-// PingScoreHistoryGap tracks whether ANY entry has EVER been
-// evidence-confirmed PermanentlyUnreconstructable over the WHOLE lifetime
-// of this history store -- a running, cumulative signal, deliberately
-// SEPARATE from PingScoreHistoryIntegrity's "initial-backfill-incomplete"
-// status (which is a one-time snapshot at the genuine first bootstrap
-// only, see buildInitialBootstrapIntegrity). A permanently-unreconstructable
-// ping can be proven at ANY point in the store's life, long after a
-// perfectly healthy bootstrap -- this record exists so that loss is never
-// silently invisible just because the ORIGINAL bootstrap had nothing to
-// report. Persisted as its own singleton row (id=1) in
-// ping_score_history_gaps, added in the v2 migration -- kept as a
-// SEPARATE table rather than overloading ping_score_history_integrity's
-// existing columns, since the two records answer genuinely different
-// questions (a one-time snapshot vs. a running cumulative count) and
-// conflating them would lose information (see applyPingScoreHistoryV2's
-// doc comment).
+// PingScoreHistoryGap's ROW EXISTENCE is a permanent, cumulative
+// historical signal: once written, it records that AT LEAST ONE entry has
+// EVER been evidence-confirmed PermanentlyUnreconstructable over the
+// WHOLE lifetime of this history store -- deliberately SEPARATE from
+// PingScoreHistoryIntegrity's "initial-backfill-incomplete" status (which
+// is a one-time snapshot at the genuine first bootstrap only, see
+// buildInitialBootstrapIntegrity). A permanently-unreconstructable ping
+// can be proven at ANY point in the store's life, long after a perfectly
+// healthy bootstrap -- this record exists so that loss is never silently
+// invisible just because the ORIGINAL bootstrap had nothing to report.
+//
+// The COUNT fields are NOT cumulative, though -- PermanentlyUnreconstructableCount
+// and TotalTriggers (see their own doc comments below) are the CURRENT
+// live trigger population, refreshed every cycle, free to rise, fall, and
+// reach 0. Only the row's existence and FirstDetectedAt are the permanent,
+// cumulative part of this record -- the row is never deleted or reverted
+// to an "ok" status just because the current count happens to be 0 (see
+// buildPingScoreHistoryGap for the exact update decision this asymmetry
+// drives).
+//
+// Persisted as its own singleton row (id=1) in ping_score_history_gaps,
+// added in the v2 migration -- kept as a SEPARATE table rather than
+// overloading ping_score_history_integrity's existing columns, since the
+// two records answer genuinely different questions (a one-time snapshot
+// vs. a permanent signal paired with a live count) and conflating them
+// would lose information (see applyPingScoreHistoryV2's doc comment).
 //
 // nil (from LoadGap) means "no permanently-unreconstructable entry has
 // EVER been proven" -- the normal, healthy case, same "nil means healthy"
