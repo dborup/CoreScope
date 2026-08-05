@@ -17,6 +17,25 @@ import (
 	"time"
 )
 
+// PingScoreHistoryMismatchError means a persisted entry's hash or timestamp
+// no longer matches the live ping_triggers row for the same tx_id --
+// reconciliation (planPingScoreHistoryReconcile) hasn't caught up with an
+// invalidation yet, so the entry may describe a different packet entirely.
+// buildPingScoresSnapshotFromHistory returns this instead of ever showing
+// the mismatched entry as if it were current.
+type PingScoreHistoryMismatchError struct {
+	TxID                             int64
+	TriggerHash, EntryHash           string
+	TriggerTimestamp, EntryTimestamp string
+}
+
+func (e *PingScoreHistoryMismatchError) Error() string {
+	return fmt.Sprintf(
+		"ping score history: tx_id=%d trigger/entry mismatch (trigger hash=%q ts=%q vs entry hash=%q ts=%q) -- reconciliation required before building a snapshot",
+		e.TxID, e.TriggerHash, e.TriggerTimestamp, e.EntryHash, e.EntryTimestamp,
+	)
+}
+
 // observerNamesByPubkey bulk-resolves observer display names for a set of
 // pubkeys -- v3 schema only.
 //
@@ -120,6 +139,15 @@ func (db *DB) observerNamesByPubkey(pubkeys []string) map[string]string {
 // trigger GetPacketPath couldn't resolve. TotalPings is len(triggers) --
 // the fresh, live count -- never len(entries) or an index's Len().
 //
+// A trigger whose hash or timestamp doesn't match its history entry's own
+// (same tx_id, different content -- reconciliation hasn't caught up with
+// an invalidation yet) is a HARD failure: (nil, *PingScoreHistoryMismatchError).
+// This function never shows a known-stale/mismatched entry as if it were
+// current -- that would silently publish wrong data with no signal.
+// Reconciling this away (recomputing the tx_id under its new hash/
+// timestamp) is planPingScoreHistoryReconcile's + the engine's job; this
+// function only refuses to paper over the gap.
+//
 // A materialization failure (invalid persisted relay_pubkeys_json -- see
 // materializePingScoreFromHistoryEntry) aborts the WHOLE build with an
 // error rather than silently skipping that one entry: skipping would
@@ -161,6 +189,20 @@ func (s *Server) buildPingScoresSnapshotFromHistory(
 		entry, ok := byTxID[trigger.txID]
 		if !ok {
 			continue // no history entry for this trigger (yet)
+		}
+		if entry.Hash != trigger.hash || entry.Timestamp != trigger.firstSeen {
+			// A persisted entry whose hash/timestamp no longer matches the
+			// live trigger row means reconciliation (planPingScoreHistoryReconcile)
+			// hasn't caught up with this tx_id yet -- the entry may describe
+			// a completely different packet. Showing it anyway (a "known
+			// stale score") would silently publish wrong data with no
+			// signal; failing the whole build instead makes reconciliation
+			// a HANDHÆVET invariant rather than just a comment's promise.
+			return nil, &PingScoreHistoryMismatchError{
+				TxID:        trigger.txID,
+				TriggerHash: trigger.hash, EntryHash: entry.Hash,
+				TriggerTimestamp: trigger.firstSeen, EntryTimestamp: entry.Timestamp,
+			}
 		}
 		score, err := materializePingScoreFromHistoryEntry(entry)
 		if err != nil {

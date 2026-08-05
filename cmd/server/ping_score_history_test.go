@@ -225,6 +225,93 @@ func TestUpsertAndDelete_FailureRollsBackEntireTransaction(t *testing.T) {
 	}
 }
 
+// --- 5b. UpsertDeleteAndIntegrity: integrity commits atomically ------------
+
+func TestUpsertDeleteAndIntegrity_IntegrityCommitsWithUpserts(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	integrity := &PingScoreHistoryIntegrity{
+		Status: "initial-backfill-incomplete", DetectedAt: "2026-01-01T00:00:00Z",
+		TotalTriggers: 10, ScoredCount: 8, UnreconstructableCount: 2, Detail: "2 triggers older than retention",
+	}
+	if err := store.UpsertDeleteAndIntegrity([]PingScoreHistoryEntry{sampleHistoryEntry(1)}, nil, integrity); err != nil {
+		t.Fatalf("UpsertDeleteAndIntegrity: %v", err)
+	}
+
+	entries, err := store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want 1", entries)
+	}
+	got, err := store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "initial-backfill-incomplete" || got.TotalTriggers != 10 || got.ScoredCount != 8 || got.UnreconstructableCount != 2 {
+		t.Errorf("LoadIntegrity() = %+v, want the stored integrity", got)
+	}
+}
+
+func TestUpsertDeleteAndIntegrity_NilIntegrityLeavesExistingUntouched(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	// Seed an abnormal integrity status first.
+	seeded := PingScoreHistoryIntegrity{Status: "initial-backfill-incomplete", DetectedAt: "2026-01-01T00:00:00Z", UnreconstructableCount: 3}
+	if err := store.StoreIntegrity(seeded); err != nil {
+		t.Fatalf("seed integrity: %v", err)
+	}
+
+	// A later cycle upserts entries but passes nil for integrity -- must
+	// NOT clear the previously recorded abnormal status.
+	if err := store.UpsertDeleteAndIntegrity([]PingScoreHistoryEntry{sampleHistoryEntry(2)}, nil, nil); err != nil {
+		t.Fatalf("UpsertDeleteAndIntegrity: %v", err)
+	}
+
+	got, err := store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "initial-backfill-incomplete" || got.UnreconstructableCount != 3 {
+		t.Errorf("LoadIntegrity() = %+v, want the ORIGINAL abnormal status, unmodified by an integrity=nil call", got)
+	}
+}
+
+func TestUpsertDeleteAndIntegrity_FailureRollsBackIntegrityToo(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	bad := sampleHistoryEntry(-1) // violates tx_id>0 CHECK
+	integrity := &PingScoreHistoryIntegrity{Status: "initial-backfill-incomplete", DetectedAt: "2026-01-01T00:00:00Z", UnreconstructableCount: 1}
+	err = store.UpsertDeleteAndIntegrity([]PingScoreHistoryEntry{bad}, nil, integrity)
+	if err == nil {
+		t.Fatal("want an error from the CHECK-constraint-violating row")
+	}
+
+	got, err := store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("LoadIntegrity() = %+v, want nil -- the integrity write must roll back with the rest of the failed transaction", got)
+	}
+}
+
 // --- 6. unknown newer schema version opens read-only, never writes ---
 
 func TestOpenPingScoreHistoryStore_UnknownNewerVersionIsReadOnly(t *testing.T) {

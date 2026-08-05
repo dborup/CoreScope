@@ -556,13 +556,35 @@ const pingScoreHistoryDeleteChunkSize = 499
 
 // UpsertAndDelete applies a batch of upserts and a set of tx_ids to delete
 // as ONE SQL transaction: either the whole batch lands, or (on any error)
-// none of it does -- the deferred Rollback is a no-op after a successful
-// Commit, and fires on every error path before this function returns.
+// none of it does. Thin wrapper around UpsertDeleteAndIntegrity with
+// integrity=nil (leave the integrity table untouched) -- see that
+// function's doc comment for the shared transactional guarantee.
 func (s *PingScoreHistoryStore) UpsertAndDelete(upserts []PingScoreHistoryEntry, deleteTxIDs []int64) error {
+	return s.UpsertDeleteAndIntegrity(upserts, deleteTxIDs, nil)
+}
+
+// UpsertDeleteAndIntegrity applies a batch of upserts, a set of tx_ids to
+// delete, and (when integrity is non-nil) an integrity-metadata write, all
+// as ONE SQL transaction: either everything lands, or (on any error)
+// NONE of it does -- the deferred Rollback is a no-op after a successful
+// Commit, and fires on every error path before this function returns.
+//
+// This exists (Phase 4D) because bootstrap-integrity detection --
+// recording "initial-backfill-incomplete" when some triggers turn out to
+// be permanently unreconstructable -- must be persisted atomically with
+// the SAME cycle's upserts/deletes: if the process crashes between two
+// separate writes, a reader could otherwise see freshly-computed entries
+// without the integrity record that explains why some are missing, or
+// vice versa. integrity=nil means "don't touch the integrity table this
+// cycle" (leaving whatever was there, including any PREVIOUSLY recorded
+// abnormal status -- this function never clears an existing abnormal
+// status as a side effect of an unrelated upsert/delete batch; only an
+// explicit non-nil integrity argument ever changes it).
+func (s *PingScoreHistoryStore) UpsertDeleteAndIntegrity(upserts []PingScoreHistoryEntry, deleteTxIDs []int64, integrity *PingScoreHistoryIntegrity) error {
 	if s.readOnly {
 		return fmt.Errorf("ping score history store: read-only (on-disk schema is newer than this code understands)")
 	}
-	if len(upserts) == 0 && len(deleteTxIDs) == 0 {
+	if len(upserts) == 0 && len(deleteTxIDs) == 0 && integrity == nil {
 		return nil
 	}
 
@@ -611,6 +633,23 @@ func (s *PingScoreHistoryStore) UpsertAndDelete(upserts []PingScoreHistoryEntry,
 		query := "DELETE FROM ping_score_history_entries WHERE tx_id IN (" + string(placeholders) + ")"
 		if _, err := tx.Exec(query, args...); err != nil {
 			return fmt.Errorf("ping score history store: delete chunk [%d:%d]: %w", start, end, err)
+		}
+	}
+
+	if integrity != nil {
+		if _, err := tx.Exec(`
+			INSERT INTO ping_score_history_integrity
+				(id, status, detected_at, total_triggers, scored_count, unreconstructable_count, rows_recovered, detail)
+			VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				status=excluded.status, detected_at=excluded.detected_at,
+				total_triggers=excluded.total_triggers, scored_count=excluded.scored_count,
+				unreconstructable_count=excluded.unreconstructable_count, rows_recovered=excluded.rows_recovered,
+				detail=excluded.detail`,
+			integrity.Status, integrity.DetectedAt, integrity.TotalTriggers, integrity.ScoredCount,
+			integrity.UnreconstructableCount, integrity.RowsRecovered, nullableString(integrity.Detail),
+		); err != nil {
+			return fmt.Errorf("ping score history store: store integrity: %w", err)
 		}
 	}
 

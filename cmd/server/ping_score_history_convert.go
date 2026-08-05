@@ -51,14 +51,36 @@ func marshalRelayPubkeysJSON(pubkeys []string) string {
 // an error rather than silently treating invalid content as an empty
 // list: a relay set silently going empty would permanently and invisibly
 // erase that ping's contribution to the relay leaderboard.
+// Normalized the same way after a successful decode as marshalRelayPubkeysJSON
+// normalizes before encoding: empty-string entries are dropped (never a
+// real pubkey -- matches this package's general "" == absent convention),
+// duplicates are removed, and the result is sorted ascending. This means
+// valid but non-canonical JSON (a hand edit, or a future writer that
+// didn't go through marshalRelayPubkeysJSON) -- e.g. ["r1","r1","r2"] --
+// can never over-count a relay in RelayLeaderboard: every caller of this
+// function sees the same deduplicated, sorted list marshalRelayPubkeysJSON
+// itself would have produced for that same underlying set.
 func unmarshalRelayPubkeysJSON(raw string) ([]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	var out []string
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+	var decoded []string
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
 		return nil, fmt.Errorf("invalid relay_pubkeys_json %q: %w", raw, err)
 	}
+	seen := make(map[string]bool, len(decoded))
+	out := make([]string, 0, len(decoded))
+	for _, pk := range decoded {
+		if pk == "" || seen[pk] {
+			continue
+		}
+		seen[pk] = true
+		out = append(out, pk)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	sort.Strings(out)
 	return out, nil
 }
 

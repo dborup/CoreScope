@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -237,7 +238,7 @@ func TestBuildPingScoresSnapshotFromHistory_DerivedKmPerSecondAirtime(t *testing
 		{txID: 1, hash: "kmpersec0000001", firstSeen: "2026-01-01T00:00:00Z"},
 	}
 	entries := []PingScoreHistoryEntry{
-		{TxID: 1, Hash: "kmpersec0000001", StationCount: 2, DeepestHops: 1, FarthestKm: f64(150), AirtimeMs: f64(500), RelayCount: 1},
+		{TxID: 1, Hash: "kmpersec0000001", Timestamp: "2026-01-01T00:00:00Z", StationCount: 2, DeepestHops: 1, FarthestKm: f64(150), AirtimeMs: f64(500), RelayCount: 1},
 	}
 	snap, err := srv.buildPingScoresSnapshotFromHistory(triggers, entries, time.Now())
 	if err != nil {
@@ -266,7 +267,7 @@ func TestBuildPingScoresSnapshotFromHistory_UnscorableEntrySkippedButCounted(t *
 		{txID: 1, hash: "unscore00001", channelHash: "#u", sender: "S", firstSeen: "2026-01-01T00:00:00Z"},
 	}
 	entries := []PingScoreHistoryEntry{
-		{TxID: 1, Hash: "unscore00001", Unscorable: true},
+		{TxID: 1, Hash: "unscore00001", Timestamp: "2026-01-01T00:00:00Z", Unscorable: true},
 	}
 	snap, err := srv.buildPingScoresSnapshotFromHistory(triggers, entries, time.Now())
 	if err != nil {
@@ -324,17 +325,15 @@ func TestBuildPingScoresSnapshotFromHistory_HistoryEntryWithoutTrigger(t *testin
 	}
 }
 
-// TestBuildPingScoresSnapshotFromHistory_ChangedTriggerHashDoesNotCorrupt
-// is a robustness check, not a correctness contract: reconciling a
-// changed hash/timestamp (recomputing it) is planPingScoreHistoryReconcile's
-// job, run BEFORE building a snapshot in the intended flow -- this test
-// only confirms that calling buildPingScoresSnapshotFromHistory directly
-// with a stale (unreconciled) entry doesn't crash or produce a
-// field-mixed/corrupted result: the entry's OWN persisted hash/timestamp
-// are shown (not silently substituted with the trigger's), since deciding
-// what to do about the mismatch belongs to reconciliation, not this
-// function.
-func TestBuildPingScoresSnapshotFromHistory_ChangedTriggerHashDoesNotCorrupt(t *testing.T) {
+// TestBuildPingScoresSnapshotFromHistory_ChangedTriggerHashFailsFast covers
+// the Phase 4D-reviewed fix: a persisted entry whose hash no longer
+// matches the live trigger for the same tx_id must abort the WHOLE build
+// with a typed error, never be shown as if it were current data.
+// Reconciling a changed hash/timestamp (recomputing it) is
+// planPingScoreHistoryReconcile's + the engine's job, run BEFORE building
+// a snapshot in the intended flow -- this test covers what happens if
+// that hasn't happened yet.
+func TestBuildPingScoresSnapshotFromHistory_ChangedTriggerHashFailsFast(t *testing.T) {
 	srv, _ := setupPingScoresFixture(t)
 	triggers := []pingTriggerRow{
 		{txID: 1, hash: "newhash0000001", firstSeen: "2026-01-01T00:00:00Z"},
@@ -343,14 +342,35 @@ func TestBuildPingScoresSnapshotFromHistory_ChangedTriggerHashDoesNotCorrupt(t *
 		{TxID: 1, Hash: "oldhash0000001", StationCount: 1, DeepestHops: 0, Timestamp: "2026-01-01T00:00:00Z"},
 	}
 	snap, err := srv.buildPingScoresSnapshotFromHistory(triggers, entries, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatalf("want an error for a hash mismatch, got a snapshot: %+v", snap)
 	}
-	if snap.TotalPings != 1 {
-		t.Errorf("TotalPings = %d, want 1", snap.TotalPings)
+	if snap != nil {
+		t.Errorf("snapshot = %+v, want nil alongside the error", snap)
 	}
-	if snap.MostHopsPing == nil || snap.MostHopsPing.Hash != "oldhash0000001" {
-		t.Errorf("MostHopsPing = %+v, want the entry's own (stale) hash -- reconciliation, not this function, decides what to do about the mismatch", snap.MostHopsPing)
+	var mismatchErr *PingScoreHistoryMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("err = %v (%T), want a *PingScoreHistoryMismatchError", err, err)
+	}
+	if mismatchErr.TxID != 1 || mismatchErr.TriggerHash != "newhash0000001" || mismatchErr.EntryHash != "oldhash0000001" {
+		t.Errorf("mismatchErr = %+v, want TxID=1 TriggerHash=newhash... EntryHash=oldhash...", mismatchErr)
+	}
+}
+
+// TestBuildPingScoresSnapshotFromHistory_ChangedTriggerTimestampFailsFast
+// is the timestamp-mismatch sibling of the hash-mismatch test above.
+func TestBuildPingScoresSnapshotFromHistory_ChangedTriggerTimestampFailsFast(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	triggers := []pingTriggerRow{
+		{txID: 1, hash: "samehash00001", firstSeen: "2026-02-01T00:00:00Z"},
+	}
+	entries := []PingScoreHistoryEntry{
+		{TxID: 1, Hash: "samehash00001", StationCount: 1, Timestamp: "2026-01-01T00:00:00Z"},
+	}
+	_, err := srv.buildPingScoresSnapshotFromHistory(triggers, entries, time.Now())
+	var mismatchErr *PingScoreHistoryMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("err = %v, want a *PingScoreHistoryMismatchError", err)
 	}
 }
 
@@ -401,7 +421,7 @@ func TestBuildPingScoresSnapshotFromHistory_MissingNamesFallBackToPubkey(t *test
 		{txID: 1, hash: "noname0000001", firstSeen: "2026-01-01T00:00:00Z"},
 	}
 	entries := []PingScoreHistoryEntry{
-		{TxID: 1, Hash: "noname0000001", StationCount: 1, DeepestHops: 0, DeepestPubkey: "pingobsnoname", FirstPubkey: "pingobsnoname"},
+		{TxID: 1, Hash: "noname0000001", Timestamp: "2026-01-01T00:00:00Z", StationCount: 1, DeepestHops: 0, DeepestPubkey: "pingobsnoname", FirstPubkey: "pingobsnoname"},
 	}
 	snap, err := srv.buildPingScoresSnapshotFromHistory(triggers, entries, time.Now())
 	if err != nil {

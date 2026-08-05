@@ -62,6 +62,57 @@ func TestUnmarshalRelayPubkeysJSON_InvalidReturnsError(t *testing.T) {
 	}
 }
 
+// TestUnmarshalRelayPubkeysJSON_NormalizesValidButNonCanonicalInput covers
+// the Phase 4D-reviewed fix: VALID JSON that isn't in
+// marshalRelayPubkeysJSON's own canonical (deduped, sorted) form -- e.g. a
+// hand-edited row, or a future writer that skipped the canonical marshal
+// path -- must still be normalized on read, so it can never over-count a
+// relay in RelayLeaderboard.
+func TestUnmarshalRelayPubkeysJSON_NormalizesValidButNonCanonicalInput(t *testing.T) {
+	got, err := unmarshalRelayPubkeysJSON(`["r1","r1","r2","r1"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"r1", "r2"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("got = %v, want %v (deduplicated)", got, want)
+	}
+}
+
+func TestUnmarshalRelayPubkeysJSON_NormalizesUnsortedInput(t *testing.T) {
+	got, err := unmarshalRelayPubkeysJSON(`["zzz","aaa","mmm"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"aaa", "mmm", "zzz"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got = %v, want %v (sorted)", got, want)
+		}
+	}
+}
+
+func TestUnmarshalRelayPubkeysJSON_DropsEmptyStringEntries(t *testing.T) {
+	got, err := unmarshalRelayPubkeysJSON(`["r1","","r2"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"r1", "r2"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("got = %v, want %v (empty entries dropped)", got, want)
+	}
+}
+
+func TestUnmarshalRelayPubkeysJSON_AllEmptyYieldsNil(t *testing.T) {
+	got, err := unmarshalRelayPubkeysJSON(`["",""]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("got = %v, want nil", got)
+	}
+}
+
 // --- pingScoreHistoryEntryFromScore --------------------------------------
 
 func TestPingScoreHistoryEntryFromScore_NilScoreIsUnscorable(t *testing.T) {
