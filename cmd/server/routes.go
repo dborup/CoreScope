@@ -117,6 +117,19 @@ type Server struct {
 	// StartPingScoresRecomputer (see ping_scores.go).
 	pingScores pingScoresCache
 
+	// Ping-score-history worker lifecycle status (fase 5F), exposed
+	// additively via /api/healthz -- see setPingScoreHistoryStatus /
+	// pingScoreHistoryStatusView in ping_score_history_recomputer.go.
+	// Always holds a pingScoreHistoryStatusSnapshot VALUE (never a
+	// pointer, never any other concrete type), written with a single
+	// atomic.Value.Store call so State/Code/LastCycleAt are always
+	// observed together as one consistent tuple, never torn across
+	// separate fields. Nothing outside this package's fase 5
+	// worker/lifecycle code (not yet wired into main.go) ever calls the
+	// setter today; until it does, the zero-value accessor's
+	// "initializing" default is what /api/healthz reports.
+	pingScoreHistoryStatus atomic.Value
+
 	// Cached /api/analytics/areas response, recomputed at most once every
 	// 30s. Worth a TTL cache: computeAreaPositionGaps calls
 	// nearestPositionedNeighbor once per unpositioned node, each a couple

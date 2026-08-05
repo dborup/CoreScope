@@ -564,11 +564,21 @@ func pingScoreHistoryLifecycleCore(
 // --- fase 5D: panic-safe outermost wrapper -------------------------------
 
 // pingScoreHistoryStatusSnapshot is the last (state, code, lastCycleAt)
-// tuple pingScoreHistoryStatusRecorder observed.
+// tuple pingScoreHistoryStatusRecorder observed. Reused unchanged as the
+// Server-scoped, healthz-exposed status value (fase 5F, see
+// setPingScoreHistoryStatus/pingScoreHistoryStatusView below and
+// handleHealthz in healthz.go) -- the JSON tags below are load-bearing
+// for that exposure and deliberately carry ONLY the sanitized
+// state/code/timestamp strings pingScoreHistorySetStatus's own doc
+// comment already promises: never a raw error, Detail, file path, or SQL
+// fragment, because none of those ever get assigned to these fields in
+// the first place (see runOneCycle/pingScoreHistoryLifecycleCore, which
+// route anything like that through pingScoreHistoryErrorReporter
+// instead).
 type pingScoreHistoryStatusSnapshot struct {
-	State       string
-	Code        string
-	LastCycleAt string
+	State       string `json:"state"`
+	Code        string `json:"code"`
+	LastCycleAt string `json:"lastCycleAt"`
 }
 
 // pingScoreHistoryStatusRecorder wraps a pingScoreHistorySetStatus
@@ -639,4 +649,45 @@ func runPingScoreHistoryLifecycleRecovered(
 	}()
 
 	pingScoreHistoryLifecycleCore(ctx, open, path, newEngine, newTicker, interval, backoff, wait, publish, wrappedSetStatus, reportError)
+}
+
+// --- fase 5F: Server-scoped healthz status -------------------------------
+//
+// Additive-only: this section adds a way to READ/WRITE a status on
+// *Server and to SHOW it in /api/healthz. Nothing here starts the
+// worker, calls runPingScoreHistoryLifecycleRecovered, or touches
+// main.go/StartPingScoresRecomputer/routes.go's ping-scores handler --
+// that wiring is a later, separate phase. Until it lands, nothing ever
+// calls setPingScoreHistoryStatus in production, and
+// pingScoreHistoryStatusView's zero-value default ("initializing") is
+// exactly what /api/healthz reports.
+
+// setPingScoreHistoryStatus stores a complete pingScoreHistoryStatusSnapshot
+// with a single atomic.Value.Store call, matching pingScoreHistorySetStatus's
+// own signature so a later production adapter can pass this method
+// directly wherever a pingScoreHistorySetStatus callback is expected.
+// State, Code, and LastCycleAt are always written together as one
+// value -- a concurrent reader can never observe a torn mix of fields
+// from two different calls.
+func (s *Server) setPingScoreHistoryStatus(state, code, lastCycleAt string) {
+	s.pingScoreHistoryStatus.Store(pingScoreHistoryStatusSnapshot{
+		State:       state,
+		Code:        code,
+		LastCycleAt: lastCycleAt,
+	})
+}
+
+// pingScoreHistoryStatusView returns the most recently stored ping-score-
+// history status. Safe to call on a zero-value *Server.pingScoreHistoryStatus
+// (e.g. a test fixture built as &Server{}, or before any fase 5 worker
+// wiring has ever called the setter): atomic.Value.Load on a field that
+// was never Store'd returns a nil interface{}, not a panic, and that nil
+// case is exactly what maps to the documented "initializing"/""/""
+// default here.
+func (s *Server) pingScoreHistoryStatusView() pingScoreHistoryStatusSnapshot {
+	v := s.pingScoreHistoryStatus.Load()
+	if v == nil {
+		return pingScoreHistoryStatusSnapshot{State: "initializing"}
+	}
+	return v.(pingScoreHistoryStatusSnapshot)
 }

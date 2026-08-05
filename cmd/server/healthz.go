@@ -61,5 +61,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if liveness := readIngestorSourceLiveness(); len(liveness) > 0 {
 		resp["ingest_liveness"] = liveness
 	}
+	// Fase 5F: additive-only ping-score-history worker lifecycle status
+	// (see ping_score_history_recomputer.go). This NEVER gates readiness
+	// -- the early return above, driven solely by the existing global
+	// `readiness` int32, has already decided the HTTP status by the time
+	// we get here. Defaults to {"initializing","",""} until a later,
+	// separate wiring phase ever calls s.setPingScoreHistoryStatus.
+	resp["ping_scores_history"] = s.pingScoreHistoryStatusView()
 	json.NewEncoder(w).Encode(resp)
 }
