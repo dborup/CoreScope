@@ -122,11 +122,18 @@ func TestPingScoreHistoryRetentionDuration_DoesNotMutateConfig(t *testing.T) {
 	}
 }
 
-// 10. The positive-value interpretation matches cmd/ingestor's own
-// packet-retention semantics exactly. cmd/ingestor is a separate `package
-// main` (can't be imported directly), so this reconstructs the two
-// relevant call sites' actual logic inline, cited by file:line, rather
-// than asserting against a copy that could silently drift:
+// 10. This test verifies and documents equivalence with cmd/ingestor's
+// CURRENT, KNOWN implementation of packet retention -- it compares this
+// duration bridge against the present `UTC().AddDate(0, 0, -days)`
+// semantics, reconstructed inline below since cmd/ingestor is a separate
+// `package main` and can't be imported directly. That reconstruction is
+// itself a copy: this test is NOT automatic protection against future
+// semantic drift between the two packages -- if cmd/ingestor's retention
+// logic ever changes, this test can keep passing against its own
+// (now-stale) copy without anyone noticing. The concrete ingestor
+// files/call sites are cited below specifically so a future change to
+// either side is easier to spot in review, not because the test itself
+// would catch it:
 //
 //   - cmd/ingestor/config.go PacketDaysOrZero(): `if c.Retention != nil
 //     && c.Retention.PacketDays > 0 { return c.Retention.PacketDays };
@@ -140,7 +147,8 @@ func TestPingScoreHistoryRetentionDuration_DoesNotMutateConfig(t *testing.T) {
 // This test proves: (a) for PacketDays==0, both sides agree on
 // "disabled/no window" (0 here, no prune call there); (b) for a positive
 // PacketDays, this bridge's RetentionDuration corresponds to EXACTLY the
-// same cutoff instant PruneOldPackets would compute from the same "now".
+// same cutoff instant PruneOldPackets would compute from the same "now",
+// AS OF THE INGESTOR LOGIC CITED ABOVE.
 func TestPingScoreHistoryRetentionDuration_PositiveValueMatchesIngestorCutoff(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 
