@@ -525,6 +525,14 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	// result for one entry doesn't mean the SWEEP failed, only that this
 	// particular attempt found nothing; the rotation must still advance so
 	// this entry doesn't get picked as "oldest" again next cycle.
+	// newEvidenceThisCycle tracks whether ANY entry transitions from
+	// PermanentlyUnreconstructable=false to =true THIS cycle -- the ONLY
+	// signal buildPingScoreHistoryGap uses to decide whether
+	// LastDetectedAt may advance (see its own doc comment). maybeMarkPermanentlyUnreconstructable
+	// is only ever called here (7d) -- see its own doc comment for why 7a/
+	// 7b can never newly set this flag -- so this is the only place this
+	// needs tracking.
+	newEvidenceThisCycle := false
 	for _, entry := range deepSweepEligible {
 		trigger := triggerByID[entry.TxID]
 		existing, _ := candidateIndex.Get(entry.TxID)
@@ -543,6 +551,9 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		merged := mergePingScoreHistoryEntry(existing, trigger, score, state, fp, now)
 		maybeMarkDataPruned(&merged, existing, trigger, score, now, e.config.RetentionDuration)
 		maybeMarkPermanentlyUnreconstructable(&merged, existing, trigger, score, now, e.config.RetentionDuration)
+		if merged.PermanentlyUnreconstructable && !existing.PermanentlyUnreconstructable {
+			newEvidenceThisCycle = true
+		}
 
 		candidateIndex.Upsert(merged)
 		upserts = append(upserts, merged)
@@ -568,18 +579,30 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		integrity = e.buildInitialBootstrapIntegrity(triggers, candidateIndex, now)
 	}
 
-	// Gap tracking: a GLOBAL count of every entry in the post-cycle
-	// candidateIndex (the complete population, not just entries touched
-	// THIS cycle) that carries evidence-confirmed PermanentlyUnreconstructable
-	// -- distinct from, and computed on EVERY cycle regardless of
-	// isGenuineBootstrap (unlike the bootstrap-integrity record above,
-	// this can newly become true at ANY point in the store's life; see
-	// PingScoreHistoryGap's own doc comment). existingGap is loaded fresh
-	// each cycle (fallible, must run before persistence) so
-	// buildPingScoreHistoryGap can preserve FirstDetectedAt verbatim
-	// rather than resetting it every time new evidence is found.
+	// Gap tracking: a GLOBAL count over the SAME post-cycle live population
+	// TotalTriggers=len(triggers) describes -- i.e. candidateIndex.Entries()
+	// with plan.ToDelete's tx_ids excluded. candidateIndex itself doesn't
+	// reflect deletes yet (those are only applied to e.index in step 10,
+	// strictly after commit -- see the Cycle doc comment's all-or-nothing
+	// guarantee), so a tx_id being deleted THIS cycle would otherwise still
+	// be counted here even though it will not exist in the live population
+	// this record is meant to describe (fix-round-4 review of bea755e5:
+	// permanentCount was computed before plan.ToDelete was accounted for,
+	// while TotalTriggers already reflected it -- an entry deleted the same
+	// cycle it would have been counted could produce a nonsensical "1 of 0
+	// live triggers"). existingGap is loaded fresh each cycle (fallible,
+	// must run before persistence) so buildPingScoreHistoryGap can preserve
+	// FirstDetectedAt verbatim and decide whether anything actually needs
+	// writing -- see its own doc comment for the full semantics.
+	deletedThisCycle := make(map[int64]bool, len(plan.ToDelete))
+	for _, id := range plan.ToDelete {
+		deletedThisCycle[id] = true
+	}
 	permanentCount := 0
 	for _, ce := range candidateIndex.Entries() {
+		if deletedThisCycle[ce.TxID] {
+			continue
+		}
 		if ce.PermanentlyUnreconstructable {
 			permanentCount++
 		}
@@ -588,7 +611,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ping score history cycle: load gap: %w", err)
 	}
-	gap := buildPingScoreHistoryGap(existingGap, permanentCount, len(triggers), e.config.RetentionDuration, now)
+	gap := buildPingScoreHistoryGap(existingGap, permanentCount, len(triggers), newEvidenceThisCycle, now)
 
 	// History-initialized marker: written EXACTLY once, ever, the very
 	// first time isGenuineBootstrap is true -- see HistoryInitializedAt's
@@ -793,47 +816,79 @@ func (e *pingScoreHistoryEngine) buildInitialBootstrapIntegrity(triggers []pingT
 }
 
 // buildPingScoreHistoryGap decides what (if anything) to persist to the
-// ping_score_history_gaps table THIS cycle, given permanentCount (the
-// GLOBAL count of entries with PermanentlyUnreconstructable=true across
-// the WHOLE post-cycle candidateIndex -- see the gap computation in Cycle,
-// step 9) and existing (whatever gap record, if any, was already there
-// before this cycle -- nil if none). Called on EVERY cycle, unlike
+// ping_score_history_gaps table THIS cycle. Called on EVERY cycle, unlike
 // buildInitialBootstrapIntegrity (which only ever runs once) -- new
 // evidence can arrive at any point in the store's life, long after a
 // perfectly healthy bootstrap.
 //
-//   - permanentCount == 0, existing == nil: nil (nothing to write) -- a
-//     healthy history has no gap row at all, same "nil means healthy"
-//     convention as LoadIntegrity.
-//   - permanentCount == 0, existing != nil: nil (no write) -- a
-//     previously recorded abnormal status is NEVER silently reverted to
-//     "ok" by this function (fix-round-2 review: "en tidligere abnormal
-//     status må ikke stiltiende blive 'ok'"); the existing record is left
-//     completely untouched rather than downgraded.
-//   - permanentCount > 0, existing == nil: a brand-new record,
-//     FirstDetectedAt = LastDetectedAt = now.
-//   - permanentCount > 0, existing != nil: FirstDetectedAt is PRESERVED
-//     verbatim from existing (never revised once set -- "DetectedAt for
-//     det første observerede tab skal bevares"), LastDetectedAt and the
-//     counts are refreshed to this cycle's GLOBAL values.
-func buildPingScoreHistoryGap(existing *PingScoreHistoryGap, permanentCount, totalTriggers int, retention time.Duration, now time.Time) *PingScoreHistoryGap {
-	if permanentCount == 0 {
-		return nil
-	}
+// The model (fix-round-4 review of bea755e5, which found the previous
+// version wrote LastDetectedAt=now on every cycle with permanentCount>0
+// even with no new detection and no population change):
+//
+//   - The row, once created, is a PERMANENT historical signal: Status
+//     ("history-incomplete", the only value this ever writes) and
+//     FirstDetectedAt (the first cycle that EVER proved a permanent loss)
+//     never change again for the lifetime of the store, even if every
+//     currently-flagged entry is later resolved.
+//   - PermanentlyUnreconstructableCount and TotalTriggers are the CURRENT
+//     live population (matching Cycle's own post-delete computation) --
+//     NOT a cumulative/ever count. They are free to go up OR down,
+//     including all the way down to 0 (e.g. every permanently-flagged
+//     entry's trigger eventually gets pruned) -- the row still isn't
+//     deleted or reverted to "ok" when that happens; its counts are
+//     simply refreshed to reflect reality rather than left stale.
+//   - LastDetectedAt advances ONLY when newEvidence is true (an entry
+//     transitioned to PermanentlyUnreconstructable=true THIS cycle -- see
+//     the newEvidenceThisCycle tracking in Cycle's deep-sweep loop).
+//     A pure recount (population changed for any OTHER reason: a flagged
+//     entry's trigger was deleted, or -- defensively -- a flagged entry
+//     was cleared by a later real score) never touches it.
+//   - If NEITHER any field would change (existing already equals what
+//     this cycle would write), this function returns nil so Cycle skips
+//     the write entirely -- an unchanged permanent population must never
+//     cost a metadata write every single cycle.
+//
+// Parameters: permanentCount and totalTriggers are this cycle's current
+// live values (see Cycle's own doc comment on the deletedThisCycle
+// exclusion for how permanentCount is made to describe the SAME
+// population totalTriggers does). newEvidence is whether Cycle observed a
+// false->true PermanentlyUnreconstructable transition this cycle. existing
+// is whatever gap record, if any, was already there before this cycle --
+// nil if none has ever been written.
+func buildPingScoreHistoryGap(existing *PingScoreHistoryGap, permanentCount, totalTriggers int, newEvidence bool, now time.Time) *PingScoreHistoryGap {
 	nowStr := now.UTC().Format(time.RFC3339)
-	firstDetectedAt := nowStr
-	if existing != nil && existing.FirstDetectedAt != "" {
-		firstDetectedAt = existing.FirstDetectedAt
+	detail := fmt.Sprintf(
+		"%d of %d current live triggers are permanently unreconstructable (each proven by an empty deep-sweep past the retention window)",
+		permanentCount, totalTriggers,
+	)
+
+	if existing == nil {
+		if permanentCount == 0 {
+			// Healthy history, nothing to record, ever -- same "nil means
+			// healthy" convention as LoadIntegrity.
+			return nil
+		}
+		// First-ever detection: FirstDetectedAt and LastDetectedAt both
+		// start at now.
+		return &PingScoreHistoryGap{
+			Status: "history-incomplete", FirstDetectedAt: nowStr, LastDetectedAt: nowStr,
+			PermanentlyUnreconstructableCount: permanentCount, TotalTriggers: totalTriggers, Detail: detail,
+		}
 	}
-	return &PingScoreHistoryGap{
-		Status:                            "history-incomplete",
-		FirstDetectedAt:                   firstDetectedAt,
-		LastDetectedAt:                    nowStr,
-		PermanentlyUnreconstructableCount: permanentCount,
-		TotalTriggers:                     totalTriggers,
-		Detail: fmt.Sprintf(
-			"%d of %d live triggers are permanently unreconstructable (proven by an empty deep-sweep already past the %s retention window)",
-			permanentCount, totalTriggers, retention,
-		),
+
+	// existing != nil: the row is a permanent historical signal --
+	// Status/FirstDetectedAt are carried forward VERBATIM, never
+	// recomputed, regardless of what permanentCount is this cycle.
+	lastDetectedAt := existing.LastDetectedAt
+	if newEvidence {
+		lastDetectedAt = nowStr
 	}
+	updated := &PingScoreHistoryGap{
+		Status: existing.Status, FirstDetectedAt: existing.FirstDetectedAt, LastDetectedAt: lastDetectedAt,
+		PermanentlyUnreconstructableCount: permanentCount, TotalTriggers: totalTriggers, Detail: detail,
+	}
+	if *updated == *existing {
+		return nil // nothing persisted would actually change -- skip the write
+	}
+	return updated
 }

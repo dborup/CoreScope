@@ -2011,6 +2011,268 @@ func TestCycle_LaterGapAfterHealthyBootstrap_PersistentlyVisible(t *testing.T) {
 	}
 }
 
+// --- Fix round 4 (review of bea755e5): gap-count must describe the SAME
+// post-delete population as TotalTriggers, and the gap record's update
+// semantics (LastDetectedAt only on new evidence, no write when
+// unchanged) ------------------------------------------------------------
+
+func TestBuildPingScoreHistoryGap_FirstDetection_SetsFirstAndLastDetectedAtToNow(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	gap := buildPingScoreHistoryGap(nil, 1, 5, true, now)
+	if gap == nil {
+		t.Fatal("want a non-nil gap for a first detection")
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	if gap.FirstDetectedAt != nowStr || gap.LastDetectedAt != nowStr {
+		t.Errorf("FirstDetectedAt=%q LastDetectedAt=%q, want both %q", gap.FirstDetectedAt, gap.LastDetectedAt, nowStr)
+	}
+	if gap.Status != "history-incomplete" {
+		t.Errorf("Status = %q, want history-incomplete", gap.Status)
+	}
+}
+
+func TestBuildPingScoreHistoryGap_NoExistingNoPermanentCount_Nil(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	if gap := buildPingScoreHistoryGap(nil, 0, 5, false, now); gap != nil {
+		t.Errorf("gap = %+v, want nil for a healthy history with no existing record", gap)
+	}
+}
+
+func TestBuildPingScoreHistoryGap_NoWriteWhenUnchanged(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	existing := &PingScoreHistoryGap{
+		Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-15T00:00:00Z",
+		PermanentlyUnreconstructableCount: 2, TotalTriggers: 10,
+		Detail: "2 of 10 current live triggers are permanently unreconstructable (each proven by an empty deep-sweep past the retention window)",
+	}
+	// Recomputing the SAME counts, no new evidence -- nothing to write.
+	got := buildPingScoreHistoryGap(existing, 2, 10, false, now)
+	if got != nil {
+		t.Errorf("got %+v, want nil -- an unchanged permanent population must not cost a write", got)
+	}
+}
+
+func TestBuildPingScoreHistoryGap_CountChangeWithoutNewEvidence_UpdatesCountsNotLastDetectedAt(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	existing := &PingScoreHistoryGap{
+		Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-15T00:00:00Z",
+		PermanentlyUnreconstructableCount: 2, TotalTriggers: 10,
+	}
+	// Population changed (e.g. a flagged entry's trigger was pruned) but
+	// NO new entry was newly flagged this cycle.
+	got := buildPingScoreHistoryGap(existing, 1, 9, false, now)
+	if got == nil {
+		t.Fatal("want a non-nil update -- the counts genuinely changed")
+	}
+	if got.PermanentlyUnreconstructableCount != 1 || got.TotalTriggers != 9 {
+		t.Errorf("counts = %d/%d, want 1/9", got.PermanentlyUnreconstructableCount, got.TotalTriggers)
+	}
+	if got.LastDetectedAt != existing.LastDetectedAt {
+		t.Errorf("LastDetectedAt = %q, want unchanged %q -- a mere recount is not new evidence", got.LastDetectedAt, existing.LastDetectedAt)
+	}
+	if got.FirstDetectedAt != existing.FirstDetectedAt {
+		t.Errorf("FirstDetectedAt = %q, want preserved %q", got.FirstDetectedAt, existing.FirstDetectedAt)
+	}
+}
+
+func TestBuildPingScoreHistoryGap_NewEvidenceAdvancesLastDetectedAt(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	existing := &PingScoreHistoryGap{
+		Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-15T00:00:00Z",
+		PermanentlyUnreconstructableCount: 2, TotalTriggers: 10,
+	}
+	got := buildPingScoreHistoryGap(existing, 3, 10, true, now)
+	if got == nil {
+		t.Fatal("want a non-nil update")
+	}
+	if got.LastDetectedAt != now.UTC().Format(time.RFC3339) {
+		t.Errorf("LastDetectedAt = %q, want now (%s) -- new evidence was observed this cycle", got.LastDetectedAt, now.UTC().Format(time.RFC3339))
+	}
+	if got.FirstDetectedAt != existing.FirstDetectedAt {
+		t.Errorf("FirstDetectedAt = %q, want preserved %q", got.FirstDetectedAt, existing.FirstDetectedAt)
+	}
+}
+
+func TestBuildPingScoreHistoryGap_CountDropsToZero_RowUpdatedNotDeleted(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	existing := &PingScoreHistoryGap{
+		Status: "history-incomplete", FirstDetectedAt: "2026-01-01T00:00:00Z", LastDetectedAt: "2026-01-15T00:00:00Z",
+		PermanentlyUnreconstructableCount: 3, TotalTriggers: 10,
+	}
+	got := buildPingScoreHistoryGap(existing, 0, 7, false, now)
+	if got == nil {
+		t.Fatal("want a non-nil update -- the row must be updated to 0, not silently kept stale, and never simply nil'd out")
+	}
+	if got.PermanentlyUnreconstructableCount != 0 {
+		t.Errorf("PermanentlyUnreconstructableCount = %d, want 0", got.PermanentlyUnreconstructableCount)
+	}
+	if got.Status != "history-incomplete" {
+		t.Errorf("Status = %q, want history-incomplete preserved as a permanent historical signal even at count=0", got.Status)
+	}
+	if got.FirstDetectedAt != existing.FirstDetectedAt {
+		t.Errorf("FirstDetectedAt = %q, want preserved %q", got.FirstDetectedAt, existing.FirstDetectedAt)
+	}
+	if got.LastDetectedAt != existing.LastDetectedAt {
+		t.Errorf("LastDetectedAt = %q, want unchanged %q -- dropping to 0 is not new evidence", got.LastDetectedAt, existing.LastDetectedAt)
+	}
+}
+
+// TestCycle_DeletedTriggerExcludedFromGapCount is the central fix-round-4
+// regression test: an entry proven PermanentlyUnreconstructable, whose
+// trigger is THEN deleted in a later cycle, must be excluded from that
+// SAME cycle's gap count -- proving permanentCount and TotalTriggers
+// describe the identical post-delete population, and that the metadata
+// can never claim something impossible like "1 of 0 live triggers".
+func TestCycle_DeletedTriggerExcludedFromGapCount(t *testing.T) {
+	const retention = 30 * 24 * time.Hour
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: retention})
+
+	// 1. Create and get an entry marked permanently unreconstructable.
+	firstSeen := fx.clock.Now().Add(-(retention - 24*time.Hour)).UTC().Format(time.RFC3339)
+	txID := seedPingTrigger(t, fx.srv, "deletedgap00001", "#d", "S", firstSeen)
+	if _, err := fx.engine.Cycle(); err != nil { // bootstrap
+		t.Fatal(err)
+	}
+	fx.clock.Advance(2 * time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil { // settles
+		t.Fatal(err)
+	}
+	fx.clock.Advance(2 * 24 * time.Hour) // crosses retention -- flags
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	flagged, _ := fx.engine.index.Get(txID)
+	if !flagged.PermanentlyUnreconstructable {
+		t.Fatal("sanity check failed: entry not flagged")
+	}
+	gapBefore, err := fx.store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gapBefore == nil || gapBefore.PermanentlyUnreconstructableCount != 1 || gapBefore.TotalTriggers != 1 {
+		t.Fatalf("sanity check failed: gap = %+v, want count=1 total=1", gapBefore)
+	}
+	firstDetectedAt := gapBefore.FirstDetectedAt
+	lastDetectedAtBeforeDelete := gapBefore.LastDetectedAt
+
+	// 2. Remove its ping_trigger.
+	if _, err := fx.srv.db.conn.Exec(`DELETE FROM ping_triggers WHERE tx_id = ?`, txID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Run the next cycle.
+	fx.clock.Advance(time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Confirm the entry is deleted from DB/index.
+	if _, ok := fx.engine.index.Get(txID); ok {
+		t.Error("entry still present in the in-memory index after its trigger was deleted")
+	}
+	persisted, err := fx.store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range persisted {
+		if e.TxID == txID {
+			t.Error("entry still persisted after its trigger was deleted")
+		}
+	}
+
+	// 5+6. Confirm it no longer counts toward the current global count, and
+	// the metadata can never claim more permanently-unreconstructable
+	// entries than live triggers exist.
+	gapAfter, err := fx.store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gapAfter == nil {
+		t.Fatal("LoadGap() = nil, want the row preserved as a permanent historical signal")
+	}
+	if gapAfter.PermanentlyUnreconstructableCount != 0 {
+		t.Errorf("PermanentlyUnreconstructableCount = %d, want 0 -- the deleted entry must not be counted", gapAfter.PermanentlyUnreconstructableCount)
+	}
+	if gapAfter.TotalTriggers != 0 {
+		t.Errorf("TotalTriggers = %d, want 0", gapAfter.TotalTriggers)
+	}
+	if gapAfter.PermanentlyUnreconstructableCount > gapAfter.TotalTriggers {
+		t.Errorf("gap = %+v -- count exceeds TotalTriggers, an impossible state ('N of fewer-than-N live triggers')", gapAfter)
+	}
+	if gapAfter.Status != "history-incomplete" {
+		t.Errorf("Status = %q, want history-incomplete preserved as a historical signal", gapAfter.Status)
+	}
+	if gapAfter.FirstDetectedAt != firstDetectedAt {
+		t.Errorf("FirstDetectedAt = %q, want preserved %q", gapAfter.FirstDetectedAt, firstDetectedAt)
+	}
+	if gapAfter.LastDetectedAt != lastDetectedAtBeforeDelete {
+		t.Errorf("LastDetectedAt changed from %q to %q on a mere recount/deletion, want unchanged -- deletion is not new evidence", lastDetectedAtBeforeDelete, gapAfter.LastDetectedAt)
+	}
+}
+
+// TestCycle_UnchangedPermanentPopulation_NoGapWriteAcrossCycles proves the
+// "no unnecessary metadata write" requirement BEHAVIORALLY, not just at
+// buildPingScoreHistoryGap's pure-function level: triggers on the gaps
+// table count every INSERT/UPDATE that actually reaches it, and several
+// cycles with a completely unchanged permanent population must not
+// increment that counter at all.
+func TestCycle_UnchangedPermanentPopulation_NoGapWriteAcrossCycles(t *testing.T) {
+	const retention = 30 * 24 * time.Hour
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: retention})
+
+	firstSeen := fx.clock.Now().Add(-(retention - 24*time.Hour)).UTC().Format(time.RFC3339)
+	seedPingTrigger(t, fx.srv, "nowritegap00001", "#n", "S", firstSeen)
+	if _, err := fx.engine.Cycle(); err != nil { // bootstrap
+		t.Fatal(err)
+	}
+	fx.clock.Advance(2 * time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil { // settles
+		t.Fatal(err)
+	}
+	fx.clock.Advance(2 * 24 * time.Hour) // crosses retention, flags, writes the gap row
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	gap, err := fx.store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gap == nil || gap.PermanentlyUnreconstructableCount != 1 {
+		t.Fatalf("sanity check failed: gap = %+v", gap)
+	}
+
+	if _, err := fx.store.conn.Exec(`CREATE TABLE gap_write_counter (n INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.store.conn.Exec(`INSERT INTO gap_write_counter (n) VALUES (0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.store.conn.Exec(`CREATE TRIGGER gap_insert_counter AFTER INSERT ON ping_score_history_gaps BEGIN UPDATE gap_write_counter SET n = n + 1; END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.store.conn.Exec(`CREATE TRIGGER gap_update_counter AFTER UPDATE ON ping_score_history_gaps BEGIN UPDATE gap_write_counter SET n = n + 1; END`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Several more cycles, nothing about the permanent population changes
+	// (the entry stays excluded from deep-sweep -- see the eligibility
+	// filter -- so nothing re-examines it at all).
+	for i := 0; i < 4; i++ {
+		fx.clock.Advance(time.Minute)
+		if _, err := fx.engine.Cycle(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var writes int
+	if err := fx.store.conn.QueryRow(`SELECT n FROM gap_write_counter`).Scan(&writes); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 0 {
+		t.Errorf("gap table was written %d times across 4 cycles with an unchanged permanent population, want 0", writes)
+	}
+}
+
 // --- Fix 3: hash normalization at bulk-result lookup ------------------------
 
 // seedMixedCaseTrigger inserts a transmission with hash stored LOWERCASE

@@ -148,25 +148,40 @@ type PingScoreHistoryGap struct {
 	Status string
 
 	// FirstDetectedAt (RFC3339) is set ONCE, the very first time this
-	// record is ever written, and PRESERVED VERBATIM on every later
-	// update -- never revised, no matter how many more cycles add further
-	// evidence. This is the "when was the first loss ever observed"
-	// timestamp the review specifically asked to never lose.
+	// record is ever written, and PRESERVED VERBATIM forever after --
+	// never revised, no matter how many more cycles add further evidence,
+	// how the counts below change, or even if PermanentlyUnreconstructableCount
+	// later drops back to 0. This is the "when was the first loss ever
+	// observed" timestamp the review specifically asked to never lose.
 	FirstDetectedAt string
 
-	// LastDetectedAt (RFC3339) is refreshed every cycle that writes this
-	// record (i.e. every cycle where PermanentlyUnreconstructableCount > 0).
+	// LastDetectedAt (RFC3339) advances ONLY when a cycle observes NEW
+	// evidence -- an entry transitioning to PermanentlyUnreconstructable=true
+	// for the first time (see newEvidenceThisCycle in Cycle and
+	// buildPingScoreHistoryGap's own doc comment). It is deliberately NOT
+	// "last cycle this row was written" or "last time it was checked": a
+	// cycle that only re-counts an unchanged population, or that counts
+	// FEWER permanently-unreconstructable entries because one's trigger
+	// was pruned, updates the counts below without touching this field
+	// (fix-round-4 review of bea755e5 -- the previous version stamped this
+	// with `now` on every single cycle a permanent entry existed, whether
+	// or not anything was actually newly detected).
 	LastDetectedAt string
 
-	// PermanentlyUnreconstructableCount is the GLOBAL count of entries
-	// with PermanentlyUnreconstructable=true across the CURRENT trigger/
-	// history population as of the cycle that wrote this record -- not
-	// just entries newly flagged that cycle (see buildPingScoreHistoryGap).
+	// PermanentlyUnreconstructableCount is the CURRENT live count of
+	// entries with PermanentlyUnreconstructable=true -- NOT a cumulative/
+	// ever count. It is refreshed every cycle (even when unchanged, the
+	// computed value is still current; see buildPingScoreHistoryGap for
+	// when that refresh is actually WRITTEN vs skipped) and can legitimately
+	// drop all the way to 0 -- when it does, the row is updated to 0
+	// rather than left showing a stale earlier count; the row itself
+	// still isn't deleted or reverted to "ok" (see Status above).
 	PermanentlyUnreconstructableCount int
 
-	// TotalTriggers is the live trigger count as of the same cycle, for
-	// context -- matches PingScoreHistoryIntegrity.TotalTriggers's own
-	// naming and scope.
+	// TotalTriggers is the CURRENT live trigger count, describing the
+	// exact SAME post-cycle population PermanentlyUnreconstructableCount
+	// is scoped to (see Cycle's deletedThisCycle exclusion) -- matches
+	// PingScoreHistoryIntegrity.TotalTriggers's own naming and scope.
 	TotalTriggers int
 
 	Detail string
@@ -828,9 +843,17 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndMetadata(upserts []PingScoreHisto
 	}
 
 	if historyInitializedAt != nil {
+		// ON CONFLICT DO NOTHING (not DO UPDATE): write-once is
+		// DATABASE-enforced here, not merely a convention Cycle's own
+		// isGenuineBootstrap gating happens to uphold (fix-round-4 review
+		// of bea755e5) -- if this is ever somehow called a second time
+		// with a different value (a bug elsewhere, concurrent/duplicate
+		// initialization), the ORIGINAL value silently wins rather than
+		// being overwritten, exactly matching FirstDetectedAt's own
+		// never-revised contract on the gap record.
 		if _, err := tx.Exec(
 			`INSERT INTO _meta (key, value) VALUES ('history_initialized_at', ?)
-			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			 ON CONFLICT(key) DO NOTHING`,
 			*historyInitializedAt,
 		); err != nil {
 			return fmt.Errorf("ping score history store: store history_initialized_at: %w", err)
@@ -1010,7 +1033,10 @@ func (s *PingScoreHistoryStore) LoadGap() (*PingScoreHistoryGap, error) {
 // ping_score_history_engine.go) -- deliberately NOT derived from whether
 // the in-memory index is currently empty, which a later full-prune cycle
 // (every tracked trigger deleted) could otherwise make indistinguishable
-// from a store that has never bootstrapped at all.
+// from a store that has never bootstrapped at all. The underlying value is
+// write-once at the DATABASE level (see UpsertDeleteAndMetadata's
+// ON CONFLICT DO NOTHING) -- a second write attempt, whatever value it
+// carries, can never change what this method returns.
 func (s *PingScoreHistoryStore) HistoryInitializedAt() (string, bool, error) {
 	var raw string
 	err := s.conn.QueryRow(`SELECT value FROM _meta WHERE key = 'history_initialized_at'`).Scan(&raw)

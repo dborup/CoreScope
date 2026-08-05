@@ -1370,6 +1370,37 @@ func TestHistoryInitializedAt_FalseWhenNeverRecorded(t *testing.T) {
 	}
 }
 
+// TestHistoryInitializedAt_WriteOnceEnforced is the fix-round-4 regression
+// test: a SECOND write attempt, carrying a genuinely different timestamp,
+// must be silently ignored at the database level -- ON CONFLICT DO
+// NOTHING, not merely "Cycle never calls this twice in practice".
+func TestHistoryInitializedAt_WriteOnceEnforced(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	first := "2026-01-01T00:00:00Z"
+	if err := store.UpsertDeleteAndMetadata(nil, nil, nil, nil, &first); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+
+	second := "2027-06-15T12:00:00Z"
+	if err := store.UpsertDeleteAndMetadata(nil, nil, nil, nil, &second); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+
+	got, initialized, err := store.HistoryInitializedAt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !initialized || got != first {
+		t.Errorf("HistoryInitializedAt() = (%q, %v), want (%q, true) -- the second write must be silently ignored (database-enforced write-once)", got, initialized, first)
+	}
+}
+
 // --- test helpers: raw, out-of-band manipulation of _meta for migration/version tests ---
 
 func rawSetSchemaVersion(t *testing.T, path, version string) {
