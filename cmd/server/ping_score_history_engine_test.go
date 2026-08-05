@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -29,11 +30,19 @@ type engineFixture struct {
 
 // setupEngineFixture builds a Server+DB (reusing setupPingScoresFixture's
 // observers/nodes -- pingobsa/b/c with known positions), a fresh temp-file
-// history store, and an engine with an injectable clock. config's
-// SettleDebounce/DeepSweepBatchSize default to the Phase 4 design values
-// when zero; RetentionDuration stays at whatever the caller passed (zero
-// means DataPruned/bootstrap-integrity detection disabled, matching
-// production safety -- tests that need it set it explicitly).
+// history store, and an engine with an injectable clock.
+//
+// setupEngineFixture deliberately applies NO hidden defaults -- config is
+// passed to newPingScoreHistoryEngine exactly as given. Per the Phase 4D
+// review: a test fixture must never have defaults the production
+// constructor doesn't also have, or a test could pass while exercising
+// different behavior than production would for the same config. Every
+// zero value (SettleDebounce, DeepSweepBatchSize, RetentionDuration,
+// MaxEdgeKm) is itself a real, documented, valid behavior -- see
+// pingScoreHistoryEngineConfig's own doc comment -- not a placeholder
+// this fixture should silently replace. A test that wants
+// defaultPingScoreHistoryEngineConfig's production defaults calls that
+// function explicitly.
 func setupEngineFixture(t *testing.T, config pingScoreHistoryEngineConfig) *engineFixture {
 	t.Helper()
 	srv, _ := setupPingScoresFixture(t)
@@ -43,16 +52,6 @@ func setupEngineFixture(t *testing.T, config pingScoreHistoryEngineConfig) *engi
 		t.Fatalf("open history store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-
-	if config.SettleDebounce == 0 {
-		config.SettleDebounce = 10 * time.Minute
-	}
-	if config.DeepSweepBatchSize == 0 {
-		config.DeepSweepBatchSize = 100
-	}
-	if config.MaxEdgeKm == 0 {
-		config.MaxEdgeKm = EstimateMaxEdgeKm
-	}
 
 	clock := &testClock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
 	engine, err := newPingScoreHistoryEngine(srv, store, clock.Now, config)
@@ -882,8 +881,11 @@ func TestCycle_DeterministicRepeatedCalls(t *testing.T) {
 // setupEngineFaultFixture builds an engine whose *Server.db is wired
 // through Phase 4B's fault-injecting counting driver (setupPacketPathCountingDB),
 // extended with a ping_triggers table -- so setBulkTestFailAfterQueries can
-// deterministically fail the Nth query Cycle() issues against the main DB.
-func setupEngineFaultFixture(t *testing.T) *engineFixture {
+// deterministically fail the Nth query Cycle() issues against the main DB,
+// and bulkTestQueryLog() can be inspected to prove which queries a cycle
+// did or didn't issue. config is passed through exactly as given -- no
+// hidden defaults (same rule as setupEngineFixture).
+func setupEngineFaultFixture(t *testing.T, config pingScoreHistoryEngineConfig) *engineFixture {
 	t.Helper()
 	db := setupPacketPathCountingDB(t)
 	if _, err := db.conn.Exec(`CREATE TABLE ping_triggers (
@@ -900,7 +902,6 @@ func setupEngineFaultFixture(t *testing.T) *engineFixture {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	config := pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, MaxEdgeKm: EstimateMaxEdgeKm}
 	clock := &testClock{t: time.Now()}
 	engine, err := newPingScoreHistoryEngine(srv, store, clock.Now, config)
 	if err != nil {
@@ -973,7 +974,7 @@ func assertEngineStateUnchanged(t *testing.T, fx *engineFixture, before engineSt
 }
 
 func TestCycle_FetchTriggersFailure_LeavesEverythingUnchanged(t *testing.T) {
-	fx := setupEngineFaultFixture(t)
+	fx := setupEngineFaultFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, MaxEdgeKm: EstimateMaxEdgeKm})
 	seedFaultTrigger(t, fx, 1, "faultfetch0001")
 	if _, err := fx.engine.Cycle(); err != nil { // seed one real entry first
 		t.Fatal(err)
@@ -999,7 +1000,7 @@ func TestCycle_FetchTriggersFailure_LeavesEverythingUnchanged(t *testing.T) {
 }
 
 func TestCycle_FingerprintQueryFailure_LeavesEverythingUnchanged(t *testing.T) {
-	fx := setupEngineFaultFixture(t)
+	fx := setupEngineFaultFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, MaxEdgeKm: EstimateMaxEdgeKm})
 	seedFaultTrigger(t, fx, 1, "faultfp000001")
 	if _, err := fx.engine.Cycle(); err != nil {
 		t.Fatal(err)
@@ -1024,7 +1025,7 @@ func TestCycle_FingerprintQueryFailure_LeavesEverythingUnchanged(t *testing.T) {
 }
 
 func TestCycle_BulkPathQueryFailure_LeavesEverythingUnchanged(t *testing.T) {
-	fx := setupEngineFaultFixture(t)
+	fx := setupEngineFaultFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, MaxEdgeKm: EstimateMaxEdgeKm})
 	// A brand-new trigger goes straight to the bulk-path query without any
 	// fingerprint check (ToCompute path) -- query #1 = fetchPingTriggers,
 	// query #2 = observationFingerprintsBulk for this new tx_id's
@@ -1127,4 +1128,741 @@ func TestCycle_PersistFailure_LeavesEverythingUnchanged(t *testing.T) {
 	fx.store.conn = originalConn
 	fx.store.readOnly = false
 	assertEngineStateUnchanged(t, fx, before)
+}
+
+// ============================================================================
+// Fix round 2 (review of commit 1dbcfb33): permanent-unreconstructable
+// exclusion from deep-sweep, genuinely-initial bootstrap-integrity,
+// hash-normalization at bulk-result lookup, and constructor validation.
+// ============================================================================
+
+// --- Fix 1: isPermanentlyUnreconstructable ----------------------------------
+
+func TestIsPermanentlyUnreconstructable(t *testing.T) {
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	const retention = 30 * 24 * time.Hour
+	oldFirstSeen := now.Add(-40 * 24 * time.Hour).Format(time.RFC3339)
+	youngFirstSeen := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	cases := []struct {
+		name      string
+		entry     PingScoreHistoryEntry
+		trigger   pingTriggerRow
+		retention time.Duration
+		want      bool
+	}{
+		{"unscorable + old + retention set -> true", PingScoreHistoryEntry{Unscorable: true}, pingTriggerRow{firstSeen: oldFirstSeen}, retention, true},
+		{"not unscorable -> false (has a prior valid score, DataPruned's territory)", PingScoreHistoryEntry{Unscorable: false}, pingTriggerRow{firstSeen: oldFirstSeen}, retention, false},
+		{"retention=0 -> false (disabled)", PingScoreHistoryEntry{Unscorable: true}, pingTriggerRow{firstSeen: oldFirstSeen}, 0, false},
+		{"retention negative -> false (disabled)", PingScoreHistoryEntry{Unscorable: true}, pingTriggerRow{firstSeen: oldFirstSeen}, -time.Hour, false},
+		{"invalid timestamp -> false (can't judge age)", PingScoreHistoryEntry{Unscorable: true}, pingTriggerRow{firstSeen: "not-a-timestamp"}, retention, false},
+		{"missing timestamp -> false (can't judge age)", PingScoreHistoryEntry{Unscorable: true}, pingTriggerRow{firstSeen: ""}, retention, false},
+		{"young unscorable -> false (still eligible for future deep-sweep)", PingScoreHistoryEntry{Unscorable: true}, pingTriggerRow{firstSeen: youngFirstSeen}, retention, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := isPermanentlyUnreconstructable(c.entry, c.trigger, now, c.retention)
+			if got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestCycle_OldNeverScorableEntry_SettlesButNeverDeepSwept(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 100, RetentionDuration: 30 * 24 * time.Hour})
+	oldFirstSeen := fx.clock.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	txID := seedPingTrigger(t, fx.srv, "zombietest0001", "#z", "S", oldFirstSeen)
+	// Deliberately no observations -- permanently unscorable.
+
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	entry1, _ := fx.engine.index.Get(txID)
+	if !entry1.Unscorable {
+		t.Fatal("sanity check failed: entry should be Unscorable")
+	}
+	if entry1.Settled {
+		t.Fatal("sanity check failed: entry should start unsettled")
+	}
+
+	fx.clock.Advance(2 * time.Minute) // > 1-minute debounce, fingerprint stays 0/0 (no observations ever)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	entry2, _ := fx.engine.index.Get(txID)
+	if !entry2.Settled {
+		t.Error("Settled = false after the debounce elapsed, want true -- settling must still happen for a never-scorable entry")
+	}
+
+	// Now Settled=true, Unscorable=true, past retention -- must NEVER be
+	// deep-swept, across several further cycles.
+	for i := 0; i < 3; i++ {
+		fx.clock.Advance(time.Minute)
+		if _, err := fx.engine.Cycle(); err != nil {
+			t.Fatal(err)
+		}
+		entry, _ := fx.engine.index.Get(txID)
+		if entry.LastDeepSweptAt != "" {
+			t.Fatalf("cycle %d: LastDeepSweptAt = %q, want empty forever -- a permanently unreconstructable entry must never be deep-swept", i, entry.LastDeepSweptAt)
+		}
+		if entry.DataPruned {
+			t.Fatalf("cycle %d: DataPruned = true, want false -- never had a valid score to preserve", i)
+		}
+	}
+
+	// Still counted, still visible, still explained by bootstrap-integrity.
+	entry, _ := fx.engine.index.Get(txID)
+	if !entry.Unscorable {
+		t.Error("Unscorable = false, want true")
+	}
+	integrity, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrity == nil || integrity.Status != "initial-backfill-incomplete" {
+		t.Errorf("LoadIntegrity() = %+v, want an initial-backfill-incomplete record explaining this entry", integrity)
+	}
+}
+
+// TestCycle_PermanentlyUnreconstructableEntry_NoBulkPathQueryIssued proves
+// the exclusion at the query level: once an entry is settled and
+// permanently unreconstructable, a later cycle issues NO GetPacketPathsBulk
+// call carrying its hash, even though it's the ONLY entry that would
+// otherwise be deep-sweep eligible.
+func TestCycle_PermanentlyUnreconstructableEntry_NoBulkPathQueryIssued(t *testing.T) {
+	fx := setupEngineFaultFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, MaxEdgeKm: EstimateMaxEdgeKm, RetentionDuration: 30 * 24 * time.Hour})
+	oldFirstSeen := fx.clock.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	hash := "zombiequery0001"
+	if _, err := fx.srv.db.conn.Exec(`INSERT INTO ping_triggers (tx_id, hash, channel_hash, sender, first_seen) VALUES (1, ?, '#z', 'S', ?)`, hash, oldFirstSeen); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately no transmission/observation rows at all -- unscorable by construction.
+
+	if _, err := fx.engine.Cycle(); err != nil { // bootstrap: Unscorable, unsettled
+		t.Fatal(err)
+	}
+	fx.clock.Advance(2 * time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil { // settles
+		t.Fatal(err)
+	}
+	entry, _ := fx.engine.index.Get(1)
+	if !entry.Settled || !entry.Unscorable {
+		t.Fatalf("sanity check failed: entry = %+v, want Settled=true Unscorable=true", entry)
+	}
+
+	resetBulkTestQueryLog()
+	fx.clock.Advance(time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range bulkTestQueryLog() {
+		if strings.Contains(q.sql, "GetPacketPathsBulk") || (strings.Contains(strings.ToLower(q.sql), "packet path bulk")) {
+			t.Errorf("unexpected packet-path bulk query issued for a permanently unreconstructable entry: %s", q.sql)
+		}
+	}
+	// More directly: GetPacketPathsBulk's own query text always contains
+	// "FROM observations o" / "JOIN transmissions t" for the v3 path-fetch
+	// shape (see ping_score_bulk.go) -- confirm none of the logged queries
+	// reference observations/transmissions at all this cycle, since the
+	// only entry in the index is excluded from every path-fetch category.
+	for _, q := range bulkTestQueryLog() {
+		if strings.Contains(q.sql, "FROM observations o") {
+			t.Errorf("a packet-path query was issued this cycle even though the only entry is permanently unreconstructable: %s", q.sql)
+		}
+	}
+}
+
+func TestCycle_YoungUnscorableEntry_StillDeepSweptAfterSettle(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 100, RetentionDuration: 30 * 24 * time.Hour})
+	recentFirstSeen := fx.clock.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339) // well within the 30-day retention
+	txID := seedPingTrigger(t, fx.srv, "youngzombie0001", "#y", "S", recentFirstSeen)
+	// No observations -- unscorable, but too young to be permanent.
+
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	fx.clock.Advance(2 * time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil { // settles
+		t.Fatal(err)
+	}
+	entry, _ := fx.engine.index.Get(txID)
+	if !entry.Settled {
+		t.Fatal("sanity check failed: entry did not settle")
+	}
+
+	fx.clock.Advance(time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := fx.engine.index.Get(txID)
+	if after.LastDeepSweptAt == "" {
+		t.Error("LastDeepSweptAt is empty, want a real timestamp -- a YOUNG unscorable entry must still be deep-sweep eligible in case data eventually arrives")
+	}
+}
+
+// TestCycle_DataPrunedEntry_UnaffectedByPermanentUnreconstructableCheck
+// proves the two exclusions are independent: a DataPruned entry is
+// excluded from deep-sweep by its OWN existing rule (DataPruned=true),
+// never by isPermanentlyUnreconstructable (which requires Unscorable==true
+// -- mutually exclusive with DataPruned by construction).
+func TestCycle_DataPrunedEntry_UnaffectedByPermanentUnreconstructableCheck(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 100, RetentionDuration: 30 * 24 * time.Hour})
+	firstSeen := fx.clock.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	txID := setupSettledPingWithGoneData(t, fx, "datapruned0chk1", firstSeen)
+
+	fx.clock.Advance(2 * time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil { // triggers DataPruned
+		t.Fatal(err)
+	}
+	entry, _ := fx.engine.index.Get(txID)
+	if !entry.DataPruned {
+		t.Fatal("sanity check failed: entry did not become DataPruned")
+	}
+	if entry.Unscorable {
+		t.Fatal("sanity check failed: a DataPruned entry must not be Unscorable (it has preserved valid facts)")
+	}
+	// isPermanentlyUnreconstructable requires Unscorable==true, so it can
+	// never fire for this entry regardless of age -- confirm directly.
+	trigger := pingTriggerRow{firstSeen: firstSeen}
+	if isPermanentlyUnreconstructable(entry, trigger, fx.clock.Now(), fx.config.RetentionDuration) {
+		t.Error("isPermanentlyUnreconstructable = true for a DataPruned (not Unscorable) entry, want false")
+	}
+}
+
+// --- Fix 2: genuinely-initial bootstrap-integrity ---------------------------
+
+func TestBuildInitialBootstrapIntegrity_MissingEntryNotCountedAsScored(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{RetentionDuration: 30 * 24 * time.Hour})
+	now := fx.clock.Now()
+	oldFirstSeen := now.Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	triggers := []pingTriggerRow{
+		{txID: 1, hash: "h1", firstSeen: oldFirstSeen}, // no matching entry at all
+		{txID: 2, hash: "h2", firstSeen: oldFirstSeen}, // Unscorable, past retention
+	}
+	idx := newPingScoreHistoryIndex([]PingScoreHistoryEntry{
+		{TxID: 2, Hash: "h2", Timestamp: oldFirstSeen, Unscorable: true},
+	})
+	integrity := fx.engine.buildInitialBootstrapIntegrity(triggers, idx, now)
+	if integrity == nil {
+		t.Fatal("want a non-nil integrity record")
+	}
+	if integrity.ScoredCount != 0 {
+		t.Errorf("ScoredCount = %d, want 0 -- a missing candidate entry must never be counted as scored", integrity.ScoredCount)
+	}
+	if integrity.UnreconstructableCount != 1 {
+		t.Errorf("UnreconstructableCount = %d, want 1", integrity.UnreconstructableCount)
+	}
+	if integrity.TotalTriggers != 2 {
+		t.Errorf("TotalTriggers = %d, want 2", integrity.TotalTriggers)
+	}
+}
+
+func TestCycle_GenuineBootstrap_MixedScoredAndUnreconstructableGivesCorrectCounts(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: 30 * 24 * time.Hour})
+	now := fx.clock.Now()
+	oldFirstSeen := now.Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	recentFirstSeen := now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+
+	// 2 scorable triggers (real data).
+	tx1 := seedPingTrigger(t, fx.srv, "bootmix000001", "#b", "S", recentFirstSeen)
+	seedPingObservation(t, fx.srv, tx1, "pingobsa", 9.0, `[]`, `[]`, now.Add(-1*time.Hour).Unix())
+	tx2 := seedPingTrigger(t, fx.srv, "bootmix000002", "#b", "S", recentFirstSeen)
+	seedPingObservation(t, fx.srv, tx2, "pingobsb", 9.0, `[]`, `[]`, now.Add(-1*time.Hour).Unix())
+
+	// 1 permanently unreconstructable trigger (old, no data).
+	seedPingTrigger(t, fx.srv, "bootmix000003", "#b", "S", oldFirstSeen)
+
+	// 1 young unscorable trigger (no data, but too young to judge -- must
+	// NOT be counted as unreconstructable).
+	seedPingTrigger(t, fx.srv, "bootmix000004", "#b", "S", recentFirstSeen)
+
+	snap, err := fx.engine.Cycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.TotalPings != 4 {
+		t.Errorf("TotalPings = %d, want 4", snap.TotalPings)
+	}
+
+	integrity, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrity == nil {
+		t.Fatal("LoadIntegrity() = nil, want a record (1 unreconstructable trigger)")
+	}
+	if integrity.Status != "initial-backfill-incomplete" {
+		t.Errorf("Status = %q, want initial-backfill-incomplete", integrity.Status)
+	}
+	if integrity.TotalTriggers != 4 {
+		t.Errorf("TotalTriggers = %d, want 4", integrity.TotalTriggers)
+	}
+	if integrity.ScoredCount != 2 {
+		t.Errorf("ScoredCount = %d, want 2", integrity.ScoredCount)
+	}
+	if integrity.UnreconstructableCount != 1 {
+		t.Errorf("UnreconstructableCount = %d, want 1 (only the OLD unscorable trigger, not the young one)", integrity.UnreconstructableCount)
+	}
+}
+
+func TestCycle_SecondCycleDoesNotChangeBootstrapRecord(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: 30 * 24 * time.Hour})
+	oldFirstSeen := fx.clock.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	seedPingTrigger(t, fx.srv, "secondcycle001", "#s", "S", oldFirstSeen)
+
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil {
+		t.Fatal("want a record after bootstrap")
+	}
+
+	fx.clock.Advance(time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Errorf("integrity changed on the second cycle:\n first:  %+v\n second: %+v", first, second)
+	}
+}
+
+// TestCycle_LaterOldUnscorableTrigger_DoesNotOverwriteBootstrapRecord is
+// the key regression test for the review's finding: a SECOND, later,
+// old-and-never-scorable trigger must NOT be mistaken for a new bootstrap
+// just because it's ALSO in that cycle's ToCompute and ALSO ends up
+// Unscorable+past-retention.
+func TestCycle_LaterOldUnscorableTrigger_DoesNotOverwriteBootstrapRecord(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: 30 * 24 * time.Hour})
+	oldFirstSeen := fx.clock.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	seedPingTrigger(t, fx.srv, "regressiontest1", "#r", "S", oldFirstSeen)
+
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || first.TotalTriggers != 1 || first.UnreconstructableCount != 1 {
+		t.Fatalf("sanity check failed: first = %+v", first)
+	}
+
+	fx.clock.Advance(time.Hour)
+	anotherOldFirstSeen := fx.clock.Now().Add(-50 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	seedPingTrigger(t, fx.srv, "regressiontest2", "#r", "S", anotherOldFirstSeen)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Errorf("bootstrap-integrity record was overwritten by a later ordinary trigger:\n first:  %+v\n second: %+v", first, second)
+	}
+}
+
+func TestCycle_IntegrityLoadFailure_LeavesEverythingUnchanged(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10})
+	txID := seedPingTrigger(t, fx.srv, "intfail0000001", "#i", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	before := captureEngineState(t, fx)
+
+	// Corrupt the integrity table so a later LoadIntegrity call fails at
+	// the query level (a genuine failure, not simulated).
+	if _, err := fx.store.conn.Exec(`DROP TABLE ping_score_history_integrity`); err != nil {
+		t.Fatal(err)
+	}
+
+	tx2 := seedPingTrigger(t, fx.srv, "intfail0000002", "#i", "S", "2026-01-16T10:00:00Z")
+	seedPingObservation(t, fx.srv, tx2, "pingobsb", 9.0, `[]`, `[]`, 1737025200)
+	fx.clock.Advance(time.Minute)
+
+	snap, err := fx.engine.Cycle()
+	if err == nil {
+		t.Fatal("want an error from the corrupted integrity table")
+	}
+	if snap != nil {
+		t.Errorf("snap = %+v, want nil alongside the error", snap)
+	}
+	if !reflect.DeepEqual(before.indexEntries, fx.engine.index.Entries()) {
+		t.Error("in-memory index changed after a failed cycle")
+	}
+	persistedAfter, err := fx.store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before.persistedEntries, persistedAfter) {
+		t.Error("persisted entries changed after a failed cycle")
+	}
+}
+
+// TestCycle_BootstrapPersistFailure_NoPartialEntriesOrIntegrity proves the
+// bootstrap's entries AND its integrity record commit as one transaction:
+// forcing the persist step to fail leaves NEITHER behind.
+func TestCycle_BootstrapPersistFailure_NoPartialEntriesOrIntegrity(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: 30 * 24 * time.Hour})
+	oldFirstSeen := fx.clock.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	seedPingTrigger(t, fx.srv, "bootfail0000001", "#b", "S", oldFirstSeen)
+
+	roConn, err := openPingScoreHistoryConn(fx.store.path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.store.conn = roConn
+	fx.store.readOnly = true
+
+	snap, err := fx.engine.Cycle()
+	if err == nil {
+		t.Fatal("want an error from the read-only history store connection during bootstrap")
+	}
+	if snap != nil {
+		t.Errorf("snap = %+v, want nil", snap)
+	}
+	if fx.engine.index.Len() != 0 {
+		t.Errorf("index.Len() = %d, want 0 -- a failed bootstrap must leave the index empty", fx.engine.index.Len())
+	}
+	roConn.Close()
+
+	rwConn, err := openPingScoreHistoryConn(fx.store.path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rwConn.Close()
+	fx.store.conn = rwConn
+	fx.store.readOnly = false
+
+	entries, err := fx.store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("persisted entries = %+v, want empty -- failed bootstrap must not partially persist", entries)
+	}
+	integrity, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrity != nil {
+		t.Errorf("integrity = %+v, want nil -- failed bootstrap must not partially persist integrity either", integrity)
+	}
+}
+
+// --- Fix 3: hash normalization at bulk-result lookup ------------------------
+
+// seedMixedCaseTrigger inserts a transmission with hash stored LOWERCASE
+// (the only form GetPacketPath/GetPacketPathsBulk's `t.hash = LOWER(?)`
+// queries can ever match -- both callsites lowercase their query input,
+// so a mixed-case-STORED transmissions.hash could never be found at all,
+// mixed case or not) paired with a ping_triggers row whose hash is a
+// DIFFERENT casing of the exact same value. This models a real, possible
+// divergence between how the transmission decoder and the ping-trigger
+// detector each stored the identical packet hash -- exactly the case
+// pathResultFor's normalization exists to bridge, without ever touching
+// the persisted entry.Hash identity itself.
+func seedMixedCaseTrigger(t *testing.T, srv *Server, lowerHash, mixedHash, channelHash, sender, firstSeen string) int64 {
+	t.Helper()
+	res, err := srv.db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AABBCCDDEE', ?, ?, 1, 5, '{"type":"CHAN","channel":"'||?||'","text":"'||?||': ping","sender":"'||?||'"}', ?)`,
+		lowerHash, firstSeen, channelHash, sender, sender, channelHash)
+	if err != nil {
+		t.Fatalf("insert tx: %v", err)
+	}
+	txID, _ := res.LastInsertId()
+	if _, err := srv.db.conn.Exec(`INSERT INTO ping_triggers (tx_id, hash, channel_hash, sender, first_seen) VALUES (?, ?, ?, ?, ?)`,
+		txID, mixedHash, channelHash, sender, firstSeen); err != nil {
+		t.Fatalf("insert ping_trigger: %v", err)
+	}
+	return txID
+}
+
+func TestCycle_MixedCaseTriggerHashScoredCorrectly(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: 10 * time.Minute, DeepSweepBatchSize: 100})
+	mixedHash := "MiXedCaseHash01"
+	txID := seedMixedCaseTrigger(t, fx.srv, "mixedcasehash01", mixedHash, "#m", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	seedPingObservation(t, fx.srv, txID, "pingobsb", 6.0, `["aa"]`, `["pkrelay1"]`, 1736935210)
+
+	snap, err := fx.engine.Cycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := fx.engine.index.Get(txID)
+	if !ok {
+		t.Fatal("index missing entry for mixed-case hash trigger")
+	}
+	if entry.Unscorable {
+		t.Error("Unscorable = true, want false -- GetPacketPathsBulk's result must be found despite hash casing")
+	}
+	if entry.StationCount != 2 {
+		t.Errorf("StationCount = %d, want 2", entry.StationCount)
+	}
+	if entry.Hash != mixedHash {
+		t.Errorf("entry.Hash = %q, want the ORIGINAL mixed-case value %q preserved -- only the map lookup is normalized, never the persisted field", entry.Hash, mixedHash)
+	}
+	if snap.TotalPings != 1 {
+		t.Errorf("TotalPings = %d, want 1", snap.TotalPings)
+	}
+}
+
+func TestCycle_MixedCaseHash_SingleBulkScoreMatches(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: 10 * time.Minute, DeepSweepBatchSize: 100})
+	mixedHash := "MiXedBulkSingle1"
+	txID := seedMixedCaseTrigger(t, fx.srv, "mixedbulksingle1", mixedHash, "#m", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	seedPingObservation(t, fx.srv, txID, "pingobsb", 6.0, `["aa"]`, `["pkrelay1"]`, 1736935210)
+
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := fx.engine.index.Get(txID)
+	bulkScore, err := materializePingScoreFromHistoryEntry(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bulkScore == nil {
+		t.Fatal("bulkScore = nil, want a real score")
+	}
+
+	trigger := pingTriggerRow{txID: txID, hash: mixedHash, channelHash: "#m", sender: "S", firstSeen: "2026-01-15T10:00:00Z"}
+	singleScore := fx.srv.computePingScore(trigger)
+	if singleScore == nil {
+		t.Fatal("computePingScore(mixed-case hash) returned nil")
+	}
+	if bulkScore.StationCount != singleScore.StationCount || bulkScore.DeepestHops != singleScore.DeepestHops {
+		t.Errorf("bulk = %+v, single = %+v, want matching path facts", bulkScore, singleScore)
+	}
+}
+
+// TestCycle_MixedCaseHash_MismatchDetectionStillWorks confirms the
+// trigger/entry mismatch check (buildPingScoresSnapshotFromHistory, exact-
+// string comparison) still correctly fires for a GENUINELY different hash
+// even when mixed-case hashes are in play throughout -- proving the
+// case-insensitive pathResults lookup fix didn't accidentally make the
+// persisted-identity comparison case-insensitive too.
+func TestCycle_MixedCaseHash_MismatchDetectionStillWorks(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: 10 * time.Minute, DeepSweepBatchSize: 100})
+	mixedHash := "MixedMismatch001"
+	txID := seedPingTrigger(t, fx.srv, mixedHash, "#m", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	staleEntry, _ := fx.engine.index.Get(txID)
+
+	triggers := []pingTriggerRow{{txID: txID, hash: "DifferentHash001", firstSeen: "2026-01-15T10:00:00Z"}}
+	_, err := fx.srv.buildPingScoresSnapshotFromHistory(triggers, []PingScoreHistoryEntry{staleEntry}, fx.clock.Now())
+	var mismatchErr *PingScoreHistoryMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("err = %v, want a *PingScoreHistoryMismatchError for the genuinely different hash", err)
+	}
+
+	// Sanity: the SAME mixed-case hash on both sides is NOT a mismatch.
+	sameTriggers := []pingTriggerRow{{txID: txID, hash: mixedHash, firstSeen: "2026-01-15T10:00:00Z"}}
+	if _, err := fx.srv.buildPingScoresSnapshotFromHistory(sameTriggers, []PingScoreHistoryEntry{staleEntry}, fx.clock.Now()); err != nil {
+		t.Errorf("unexpected error for a matching (identically-cased) hash: %v", err)
+	}
+}
+
+// --- Fix 4: constructor input/config validation -----------------------------
+
+func TestNewPingScoreHistoryEngine_RejectsNilServer(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, err = newPingScoreHistoryEngine(nil, store, time.Now, pingScoreHistoryEngineConfig{})
+	if err == nil {
+		t.Fatal("want an error for nil server")
+	}
+}
+
+func TestNewPingScoreHistoryEngine_RejectsNilServerDB(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := &Server{} // db is nil
+	_, err = newPingScoreHistoryEngine(srv, store, time.Now, pingScoreHistoryEngineConfig{})
+	if err == nil {
+		t.Fatal("want an error for nil server.db")
+	}
+}
+
+func TestNewPingScoreHistoryEngine_RejectsNilStore(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	_, err := newPingScoreHistoryEngine(srv, nil, time.Now, pingScoreHistoryEngineConfig{})
+	if err == nil {
+		t.Fatal("want an error for nil store")
+	}
+}
+
+func TestNewPingScoreHistoryEngine_RejectsNilNow(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, err = newPingScoreHistoryEngine(srv, store, nil, pingScoreHistoryEngineConfig{})
+	if err == nil {
+		t.Fatal("want an error for nil now")
+	}
+}
+
+func TestNewPingScoreHistoryEngine_RejectsNegativeConfig(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	cases := []struct {
+		name   string
+		config pingScoreHistoryEngineConfig
+	}{
+		{"negative SettleDebounce", pingScoreHistoryEngineConfig{SettleDebounce: -time.Minute}},
+		{"negative DeepSweepBatchSize", pingScoreHistoryEngineConfig{DeepSweepBatchSize: -1}},
+		{"negative RetentionDuration", pingScoreHistoryEngineConfig{RetentionDuration: -time.Hour}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			_, err = newPingScoreHistoryEngine(srv, store, time.Now, c.config)
+			if err == nil {
+				t.Fatalf("want an error for %s", c.name)
+			}
+		})
+	}
+}
+
+// TestNewPingScoreHistoryEngine_AllowsNegativeMaxEdgeKm confirms MaxEdgeKm
+// is NOT subject to the same negative-rejects-as-error rule as the other
+// three fields -- it mirrors nearestPositionedNeighbor's own <=0-disables-
+// the-filter convention, a meaningful value, not an error.
+func TestNewPingScoreHistoryEngine_AllowsNegativeMaxEdgeKm(t *testing.T) {
+	srv, _ := setupPingScoresFixture(t)
+	dir := t.TempDir()
+	store, err := OpenPingScoreHistoryStore(filepath.Join(dir, "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := newPingScoreHistoryEngine(srv, store, time.Now, pingScoreHistoryEngineConfig{MaxEdgeKm: -5}); err != nil {
+		t.Fatalf("MaxEdgeKm<0 should be accepted (disables the geo-filter): %v", err)
+	}
+}
+
+func TestNewPingScoreHistoryEngine_ConstructorFailureDoesNotMutateStore(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.db")
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := PingScoreHistoryEntry{TxID: 1, Hash: "h", Timestamp: "t", ComputedAt: "c"}
+	if err := store.UpsertAndDelete([]PingScoreHistoryEntry{seed}, nil); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	store2, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store2.Close()
+	srv, _ := setupPingScoresFixture(t)
+	_, err = newPingScoreHistoryEngine(srv, store2, time.Now, pingScoreHistoryEngineConfig{SettleDebounce: -1})
+	if err == nil {
+		t.Fatal("want a constructor error")
+	}
+
+	entries, err := store2.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Hash != "h" {
+		t.Errorf("store mutated by a failed constructor call: %+v", entries)
+	}
+}
+
+// --- Fix 4: zero-value semantics, explicitly tested -------------------------
+
+func TestCycle_ZeroSettleDebounce_SettlesAtNextUnchangedCheck(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: 0, DeepSweepBatchSize: 10})
+	txID := seedPingTrigger(t, fx.srv, "zerodebounce01", "#z", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+
+	if _, err := fx.engine.Cycle(); err != nil { // bootstrap: unsettled
+		t.Fatal(err)
+	}
+	entry1, _ := fx.engine.index.Get(txID)
+	if entry1.Settled {
+		t.Fatal("Settled = true immediately at bootstrap, want false")
+	}
+
+	fx.clock.Advance(time.Second) // any positive advance satisfies debounce=0
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	entry2, _ := fx.engine.index.Get(txID)
+	if !entry2.Settled {
+		t.Error("Settled = false at the next unchanged check with SettleDebounce=0, want true")
+	}
+}
+
+func TestCycle_ZeroDeepSweepBatchSize_DisablesDeepSweep(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 0})
+	txID := seedPingTrigger(t, fx.srv, "zerobatch000001", "#z", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	settleEntry(t, fx)
+
+	before, _ := fx.engine.index.Get(txID)
+	if !before.Settled {
+		t.Fatal("sanity check failed: entry not settled")
+	}
+
+	fx.clock.Advance(time.Minute)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := fx.engine.index.Get(txID)
+	if after.LastDeepSweptAt != "" {
+		t.Errorf("LastDeepSweptAt = %q, want empty -- DeepSweepBatchSize=0 must disable deep-sweep entirely", after.LastDeepSweptAt)
+	}
+}
+
+func TestCycle_ZeroRetentionDuration_DisablesDataPrunedAndBootstrapIntegrity(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 10, RetentionDuration: 0})
+	oldFirstSeen := fx.clock.Now().Add(-100 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	seedPingTrigger(t, fx.srv, "zeroretent0001", "#z", "S", oldFirstSeen) // old, never scorable
+
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	integrity, err := fx.store.LoadIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrity != nil {
+		t.Errorf("integrity = %+v, want nil -- RetentionDuration=0 must disable bootstrap-integrity detection entirely", integrity)
+	}
 }
