@@ -639,6 +639,68 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	return snapshot, nil
 }
 
+// QuickSnapshot builds a snapshot from whatever is ALREADY persisted
+// (e.index, loaded synchronously by newPingScoreHistoryEngine at
+// construction, or left behind by the most recent committed Cycle) plus a
+// fresh trigger fetch -- steps 1 and 8 of Cycle's own numbered sequence,
+// nothing else:
+//   - ONE fresh fetchPingTriggers read (a single SELECT over ping_triggers).
+//   - e.index's ALREADY-LOADED entries -- no DB read for these at all.
+//   - buildPingScoresSnapshotFromHistory's own bulk/chunked name-
+//     enrichment queries (observerNamesByPubkey against observers,
+//     namesAndRolesForPubkeys against nodes -- both chunked the same way
+//     Cycle's own snapshot-build step already does), so display names on
+//     the returned records/leaderboards are resolved fresh, not frozen.
+//
+// Explicitly NOT done here: no per-trigger GetPacketPath calls, no
+// GetPacketPathsBulk/path-recompute of any kind, no reconciliation
+// (planPingScoreHistoryReconcile), no fingerprint or deep-sweep work, and
+// no persistence (no store write of any kind). This makes QuickSnapshot
+// CHEAPER than a full Cycle -- it skips every DB round-trip that scales
+// with how many pings need a real path recompute -- but it is NOT a
+// constant-time or "one query" operation: fetchPingTriggers scales with
+// the live trigger count, and the name-enrichment queries scale with the
+// number of distinct pubkeys appearing in e.index's current records/
+// leaderboards. Safe to call before the first real Cycle has ever run,
+// and safe to call against a read-only (future-schema) store, since it
+// never writes.
+//
+// This exists for the production-wiring phase (fase 5): a freshly
+// constructed engine can publish something immediately -- reflecting
+// whatever was already durably known before this process started --
+// instead of leaving callers with nothing to show until a full Cycle
+// (which may need to reconcile and re-fetch paths for every live
+// trigger) completes. See buildPingScoresSnapshotFromHistory's own doc
+// comment for the exact reconciliation contract this reuses unchanged --
+// in particular, a persisted entry whose hash/timestamp no longer matches
+// its trigger (reconciliation hasn't caught up with an invalidation yet
+// since the last Cycle) is a hard error here too, never silently shown as
+// current. Callers must treat that error as "nothing to publish yet, wait
+// for a real Cycle" -- exactly like any other QuickSnapshot error -- not
+// as fatal.
+//
+// TotalPings on the returned snapshot always reflects the FRESH live
+// trigger count, even though most of the actual scoring detail
+// (FarthestPing, leaderboards, etc.) can only ever be as current as
+// e.index already is -- a trigger with no matching persisted entry yet
+// is silently excluded from every record/leaderboard (see
+// buildPingScoresSnapshotFromHistory's own "no history entry for this
+// trigger (yet)" skip), never counted as scored. On a genuine first
+// bootstrap (e.index empty) this means a non-nil snapshot with a real
+// TotalPings and zero records -- a legitimate, if minimal, result, not a
+// bug.
+func (e *pingScoreHistoryEngine) QuickSnapshot() (*PingScoresSnapshot, error) {
+	triggers, err := e.server.db.fetchPingTriggers()
+	if err != nil {
+		return nil, fmt.Errorf("ping score history quick snapshot: fetch triggers: %w", err)
+	}
+	snapshot, err := e.server.buildPingScoresSnapshotFromHistory(triggers, e.index.Entries(), e.now())
+	if err != nil {
+		return nil, fmt.Errorf("ping score history quick snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
 // maybeMarkPermanentlyUnreconstructable sets
 // merged.PermanentlyUnreconstructable = true in place, but ONLY when a
 // REAL deep-sweep attempt THIS cycle actually produced the evidence -- age

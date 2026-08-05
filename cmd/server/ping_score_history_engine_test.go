@@ -2578,3 +2578,288 @@ func TestCycle_ZeroRetentionDuration_DisablesDataPrunedAndBootstrapIntegrity(t *
 		t.Errorf("integrity = %+v, want nil -- RetentionDuration=0 must disable bootstrap-integrity detection entirely", integrity)
 	}
 }
+
+// ============================================================================
+// Fase 5B (production-wiring design, approved v5): QuickSnapshot -- a
+// read-only, synchronous snapshot built from whatever is ALREADY
+// persisted plus a fresh trigger fetch, with no GetPacketPathsBulk,
+// reconciliation, or persistence. Isolated tests only -- no worker,
+// healthz, or main.go wiring in this phase.
+// ============================================================================
+
+func TestQuickSnapshot_EmptyIndexFreshBootstrap_TotalPingsButNoRecords(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	seedPingTrigger(t, fx.srv, "quickfresh000001", "#q", "S", "2026-01-15T10:00:00Z")
+	seedPingTrigger(t, fx.srv, "quickfresh000002", "#q", "S", "2026-01-15T10:01:00Z")
+	// Deliberately no Cycle() call -- e.index is still empty.
+
+	if fx.engine.index.Len() != 0 {
+		t.Fatal("sanity check failed: index should still be empty")
+	}
+
+	snap, err := fx.engine.QuickSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap == nil {
+		t.Fatal("want a non-nil snapshot even with an empty index")
+	}
+	if snap.TotalPings != 2 {
+		t.Errorf("TotalPings = %d, want 2 (from the live trigger list, not the empty index)", snap.TotalPings)
+	}
+	if snap.FarthestPing != nil || snap.MostHopsPing != nil {
+		t.Errorf("snap = %+v, want no records materialized -- no persisted entries exist yet", snap)
+	}
+}
+
+func TestQuickSnapshot_NoTriggersNoEntries_EmptyButNonNilSnapshot(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	// No triggers seeded at all.
+
+	snap, err := fx.engine.QuickSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap == nil {
+		t.Fatal("want a non-nil snapshot even with zero live triggers")
+	}
+	if snap.TotalPings != 0 {
+		t.Errorf("TotalPings = %d, want 0", snap.TotalPings)
+	}
+}
+
+// TestQuickSnapshot_ReflectsAlreadyPersistedEntries proves QuickSnapshot's
+// ENTIRE output is structurally identical to what the immediately
+// preceding Cycle already computed -- not just a few spot-checked fields.
+// Given a deterministic clock and an unchanged DB between the two calls,
+// this must hold exactly: QuickSnapshot rebuilds the snapshot from
+// precisely the same inputs Cycle's own step 8 already used (e.index
+// post-commit, the same live trigger list, the same `now` reading -- see
+// QuickSnapshot's own doc comment: it reuses buildPingScoresSnapshotFromHistory
+// unchanged). Records/leaderboards are built from maps internally, but
+// topPingLeaderboard's own Count-desc/Name-asc sort is fully deterministic
+// regardless of map iteration order, so no legitimate difference between
+// the two calls is expected here.
+func TestQuickSnapshot_ReflectsAlreadyPersistedEntries(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	// Recent enough (within 7 days of fx.clock's 2026-03-01) to populate
+	// ThisWeek too, not just the all-time records.
+	recentFirstSeen := fx.clock.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	recentUnix := fx.clock.Now().Add(-24 * time.Hour).Unix()
+
+	tx1 := seedPingTrigger(t, fx.srv, "quickpersist001", "#q", "Alice", recentFirstSeen)
+	seedPingObservation(t, fx.srv, tx1, "pingobsa", 9.0, `[]`, `[]`, recentUnix)
+	seedPingObservation(t, fx.srv, tx1, "pingobsb", 6.0, `["aa"]`, `["pkrelay1"]`, recentUnix+5)
+	seedPingObservation(t, fx.srv, tx1, "pingobsc", 4.0, `["aa","bb"]`, `["pkrelay1","pkrelay2"]`, recentUnix+10)
+
+	tx2 := seedPingTrigger(t, fx.srv, "quickpersist002", "#q", "Bob", recentFirstSeen)
+	seedPingObservation(t, fx.srv, tx2, "pingobsa", 9.0, `[]`, `[]`, recentUnix)
+
+	cycleSnap, err := fx.engine.Cycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// SAME clock reading (never advanced), SAME DB state -- QuickSnapshot
+	// must reproduce Cycle's own step-8 snapshot exactly.
+	quickSnap, err := fx.engine.QuickSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(cycleSnap, quickSnap) {
+		t.Errorf("QuickSnapshot() != the immediately preceding Cycle()'s own snapshot (same clock, same DB -- want byte-identical):\n cycle: %+v\n quick: %+v", cycleSnap, quickSnap)
+	}
+
+	// Sanity checks so the DeepEqual above can't pass vacuously on two
+	// equally-empty snapshots -- confirm every category this test claims
+	// to cover is actually non-trivially populated.
+	if cycleSnap.TotalPings != 2 {
+		t.Fatalf("sanity check failed: TotalPings = %d, want 2", cycleSnap.TotalPings)
+	}
+	if cycleSnap.FarthestPing == nil || cycleSnap.MostHopsPing == nil || cycleSnap.WidestSpreadPing == nil || cycleSnap.FastestSpreadPing == nil {
+		t.Fatalf("sanity check failed: want all-time records populated, got %+v", cycleSnap)
+	}
+	if cycleSnap.ThisWeek == nil {
+		t.Fatal("sanity check failed: want ThisWeek populated -- both pings are recent")
+	}
+	if len(cycleSnap.RelayLeaderboard) == 0 {
+		t.Fatal("sanity check failed: want a non-empty RelayLeaderboard (pkrelay1/pkrelay2 relayed tx1)")
+	}
+	if len(cycleSnap.ObserverLeaderboard) == 0 {
+		t.Fatal("sanity check failed: want a non-empty ObserverLeaderboard")
+	}
+	if len(cycleSnap.SenderLeaderboard) != 2 {
+		t.Fatalf("sanity check failed: SenderLeaderboard = %+v, want 2 entries (Alice, Bob)", cycleSnap.SenderLeaderboard)
+	}
+	if cycleSnap.GeneratedAt == "" {
+		t.Fatal("sanity check failed: want GeneratedAt set")
+	}
+}
+
+// TestQuickSnapshot_MismatchBetweenPersistedEntryAndFreshTrigger_ReturnsError
+// proves QuickSnapshot refuses to paper over a trigger that changed since
+// the last committed Cycle -- exactly buildPingScoresSnapshotFromHistory's
+// own hard-failure contract, reused unchanged.
+func TestQuickSnapshot_MismatchBetweenPersistedEntryAndFreshTrigger_ReturnsError(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	txID := seedPingTrigger(t, fx.srv, "quickmismatch01", "#q", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the trigger changing since the last Cycle (e.g. an
+	// invalidation) WITHOUT letting a new Cycle reconcile it yet -- the
+	// exact scenario QuickSnapshot must never silently show as current.
+	if _, err := fx.srv.db.conn.Exec(`UPDATE ping_triggers SET hash = ? WHERE tx_id = ?`, "differenthash001", txID); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := fx.engine.QuickSnapshot()
+	if snap != nil {
+		t.Errorf("snap = %+v, want nil alongside the mismatch error", snap)
+	}
+	var mismatchErr *PingScoreHistoryMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("err = %v, want a *PingScoreHistoryMismatchError", err)
+	}
+}
+
+// TestQuickSnapshot_MaterializationFailure_ReturnsError proves an invalid
+// in-memory entry (e.g. corrupted relay_pubkeys_json) aborts the whole
+// build with an error, never silently dropping just that one ping.
+func TestQuickSnapshot_MaterializationFailure_ReturnsError(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	txID := seedPingTrigger(t, fx.srv, "quickmatfail001", "#q", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, ok := fx.engine.index.Get(txID)
+	if !ok {
+		t.Fatal("sanity check failed: no entry for txID")
+	}
+	entry.RelayPubkeysJSON = "not valid json"
+	fx.engine.index.Upsert(entry) // in-memory only -- the persisted row is untouched
+
+	snap, err := fx.engine.QuickSnapshot()
+	if err == nil {
+		t.Fatal("want an error from the corrupted in-memory entry")
+	}
+	if snap != nil {
+		t.Errorf("snap = %+v, want nil alongside the error", snap)
+	}
+}
+
+// TestQuickSnapshot_FetchTriggersFailure_ReturnsError uses the
+// query-counting fault fixture to force fetchPingTriggers itself to fail.
+func TestQuickSnapshot_FetchTriggersFailure_ReturnsError(t *testing.T) {
+	fx := setupEngineFaultFixture(t, pingScoreHistoryEngineConfig{MaxEdgeKm: EstimateMaxEdgeKm})
+	seedFaultTrigger(t, fx, 1, "quickfaultfe001")
+
+	resetBulkTestQueryLog()
+	setBulkTestFailAfterQueries(0) // fail the very first query (fetchPingTriggers)
+	defer clearBulkTestFailAfterQueries()
+
+	snap, err := fx.engine.QuickSnapshot()
+	if err == nil {
+		t.Fatal("want an error from the forced fetchPingTriggers failure")
+	}
+	if snap != nil {
+		t.Errorf("snap = %+v, want nil alongside the error", snap)
+	}
+}
+
+// TestQuickSnapshot_ReadOnlyStore_StillWorks proves QuickSnapshot works
+// fine against a physically read-only (future-schema) store, since it
+// never writes anything -- a real Cycle would fail here, but
+// QuickSnapshot is pure read.
+func TestQuickSnapshot_ReadOnlyStore_StillWorks(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	txID := seedPingTrigger(t, fx.srv, "quickro00000001", "#q", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	path := fx.store.path
+	if err := fx.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rawSetSchemaVersion(t, path, "999")
+	roStore, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		t.Fatalf("reopen read-only: %v", err)
+	}
+	defer roStore.Close()
+	if !roStore.ReadOnly() {
+		t.Fatal("sanity check failed: store not read-only after version bump")
+	}
+
+	roEngine, err := newPingScoreHistoryEngine(fx.srv, roStore, fx.clock.Now, fx.config)
+	if err != nil {
+		t.Fatalf("newPingScoreHistoryEngine against a read-only store: %v", err)
+	}
+
+	snap, err := roEngine.QuickSnapshot()
+	if err != nil {
+		t.Fatalf("QuickSnapshot against a read-only store: %v", err)
+	}
+	if snap == nil || snap.TotalPings != 1 {
+		t.Errorf("snap = %+v, want a real snapshot with TotalPings=1", snap)
+	}
+}
+
+// TestQuickSnapshot_NeverMutatesIndexOrStore proves QuickSnapshot is
+// genuinely read-only: no in-memory index change, no persisted entry
+// change, and no change to ANY of the store's metadata records (integrity,
+// gap, the history-initialized marker) -- QuickSnapshot never opens a
+// write transaction at all, so none of these can legitimately move.
+func TestQuickSnapshot_NeverMutatesIndexOrStore(t *testing.T) {
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{})
+	txID := seedPingTrigger(t, fx.srv, "quicknomutate01", "#q", "S", "2026-01-15T10:00:00Z")
+	seedPingObservation(t, fx.srv, txID, "pingobsa", 9.0, `[]`, `[]`, 1736935200)
+	if _, err := fx.engine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	before := captureEngineState(t, fx)
+	beforeGap, err := fx.store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInitializedAt, beforeInitialized, err := fx.store.HistoryInitializedAt()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fx.engine.QuickSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+
+	after := captureEngineState(t, fx)
+	if !reflect.DeepEqual(before.indexEntries, after.indexEntries) {
+		t.Error("in-memory index changed after QuickSnapshot")
+	}
+	if !reflect.DeepEqual(before.persistedEntries, after.persistedEntries) {
+		t.Error("persisted entries changed after QuickSnapshot")
+	}
+	if !reflect.DeepEqual(before.integrity, after.integrity) {
+		t.Error("integrity metadata changed after QuickSnapshot")
+	}
+	afterGap, err := fx.store.LoadGap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(beforeGap, afterGap) {
+		t.Errorf("gap metadata changed after QuickSnapshot: before=%+v after=%+v", beforeGap, afterGap)
+	}
+	afterInitializedAt, afterInitialized, err := fx.store.HistoryInitializedAt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeInitialized != afterInitialized || beforeInitializedAt != afterInitializedAt {
+		t.Errorf("history-initialized marker changed after QuickSnapshot: before=(%q,%v) after=(%q,%v)", beforeInitializedAt, beforeInitialized, afterInitializedAt, afterInitialized)
+	}
+}
