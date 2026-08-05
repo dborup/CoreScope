@@ -2,29 +2,36 @@
 // the recompute redesign (see reviews/CoreScope-code-review-2026-08-04.md
 // and the accompanying fase 5A design discussion, approved as v5). This
 // file is where the glue between the already-approved engine/store (fase
-// 4A-4E) and a real running server accumulates, phase by phase, per the
-// approved design's commit breakdown -- NOT wired into main.go yet.
+// 4A-4E) and a real running server lives.
 //
 // Fase 5C added the retention-configuration bridge (pingScoreHistoryRetentionDuration).
 //
-// Fase 5D adds the single-owner worker/lifecycle core below: every type
-// is a small, internal (unexported) interface or function type satisfied
+// Fase 5D added the single-owner worker/lifecycle core: every type is a
+// small, internal (unexported) interface or function type satisfied
 // structurally by the already-approved fase 4 engine/store types
 // (*pingScoreHistoryEngine, *PingScoreHistoryStore) with zero adapter
-// code required in production, and by fakes in tests. Nothing here
-// touches *Server, main.go, healthz, or routes -- every dependency this
-// layer needs (publish/setStatus/reportError) is a plain injected
-// callback, so the whole thing is testable in complete isolation. The
-// thin production adapters that actually wrap *Server/*PingScoreHistoryStore/
-// real time and get called from main.go are a LATER phase.
+// code required in production, and by fakes in tests. Every dependency
+// that layer needs (publish/setStatus/reportError/open/newEngine/
+// newTicker/wait) is a plain injected callback, so it is testable in
+// complete isolation from *Server, main.go, healthz, and routes.
+//
+// Fase 5F added the Server-scoped, healthz-exposed status
+// (setPingScoreHistoryStatus/pingScoreHistoryStatusView), additive-only.
+//
+// Fase 5G, at the bottom of this file, adds the thin production
+// adapters around fase 5D's core and StartPingScoreHistoryEngine -- the
+// actual main.go entry point that starts the worker for real.
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"runtime/debug"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -654,13 +661,12 @@ func runPingScoreHistoryLifecycleRecovered(
 // --- fase 5F: Server-scoped healthz status -------------------------------
 //
 // Additive-only: this section adds a way to READ/WRITE a status on
-// *Server and to SHOW it in /api/healthz. Nothing here starts the
-// worker, calls runPingScoreHistoryLifecycleRecovered, or touches
-// main.go/StartPingScoresRecomputer/routes.go's ping-scores handler --
-// that wiring is a later, separate phase. Until it lands, nothing ever
-// calls setPingScoreHistoryStatus in production, and
-// pingScoreHistoryStatusView's zero-value default ("initializing") is
-// exactly what /api/healthz reports.
+// *Server and to SHOW it in /api/healthz. Nothing in fase 5F itself
+// started the worker or called setPingScoreHistoryStatus in production --
+// that wiring is fase 5G, immediately below. Before fase 5G's
+// StartPingScoreHistoryEngine has ever been called (e.g. in a unit test
+// building its own *Server), pingScoreHistoryStatusView's zero-value
+// default ("initializing") is exactly what /api/healthz reports.
 
 // setPingScoreHistoryStatus stores a complete pingScoreHistoryStatusSnapshot
 // with a single atomic.Value.Store call, matching pingScoreHistorySetStatus's
@@ -690,4 +696,256 @@ func (s *Server) pingScoreHistoryStatusView() pingScoreHistoryStatusSnapshot {
 		return pingScoreHistoryStatusSnapshot{State: "initializing"}
 	}
 	return v.(pingScoreHistoryStatusSnapshot)
+}
+
+// --- fase 5G: production adapters + Start wrapper ------------------------
+//
+// This is the first phase allowed to actually start the worker. Every
+// adapter below is a thin, directly-testable wrapper around a single
+// real dependency (a *time.Ticker, a *time.Timer, OpenPingScoreHistoryStore,
+// newPingScoreHistoryEngine, s.pingScores, s.setPingScoreHistoryStatus, or
+// log.Printf) -- none of them contain any lifecycle/retry logic of their
+// own, which all still lives entirely in fase 5D's core above. Adapters
+// with no state to close over (A, B, C, G) are plain package-level
+// functions, directly assignable to their respective callback types with
+// no wrapper needed; adapters that must close over *Server/engineConfig
+// (D, E) are small constructors returning the closure.
+
+// A. Real ticker adapter -- wraps *time.Ticker.
+type pingScoreHistoryRealTicker struct{ t *time.Ticker }
+
+func (r pingScoreHistoryRealTicker) C() <-chan time.Time { return r.t.C }
+func (r pingScoreHistoryRealTicker) Stop()               { r.t.Stop() }
+
+// pingScoreHistoryRealNewTicker is a pingScoreHistoryNewTicker backed by a
+// real *time.Ticker. d must already have been validated > 0 by the
+// caller (validatePingScoreHistoryStartConfig, synchronously, before any
+// goroutine starts) -- time.NewTicker itself panics on d<=0, and this
+// function performs no validation of its own.
+func pingScoreHistoryRealNewTicker(d time.Duration) pingScoreHistoryTicker {
+	return pingScoreHistoryRealTicker{t: time.NewTicker(d)}
+}
+
+// B. Real cancellable waiter -- waits for d or ctx.Done(), whichever
+// comes first. Uses time.NewTimer (not a bare time.After in a select)
+// so the timer is always explicitly Stop()'d rather than left to fire
+// uselessly into an unread channel until it naturally elapses -- worth
+// doing here specifically since backoff delays can be tens of minutes
+// (see pingScoreHistoryProductionBackoff below). A fresh *time.Timer is
+// created on every call and never reused/Reset, so there is no need to
+// drain timer.C after Stop() -- the classic Reset-without-draining
+// hazard doesn't apply to a single-shot, never-reused timer.
+func pingScoreHistoryRealWaiter(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// C. Production opener -- wraps OpenPingScoreHistoryStore. Explicitly
+// returns a nil INTERFACE value (not a nil *PingScoreHistoryStore boxed
+// into a non-nil interface -- the classic Go typed-nil hazard) on error,
+// even though pingScoreHistoryLifecycleCore's error-first switch never
+// actually inspects store when err != nil, purely so this adapter is
+// correct in isolation, not just correct given today's caller.
+func pingScoreHistoryRealOpener(path string) (pingScoreHistoryStoreHandle, error) {
+	store, err := OpenPingScoreHistoryStore(path)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// D. Production engine factory -- closes over server and engineConfig,
+// using time.Now as the engine's clock. The production opener above is
+// the ONLY thing that ever produces the store handle this factory
+// receives, and it always produces a *PingScoreHistoryStore -- but this
+// still type-asserts rather than blindly casting, returning a clear,
+// descriptive error (not a panic) if some other pingScoreHistoryStoreHandle
+// implementation ever reaches this adapter (e.g. a future refactor, or a
+// miswired test that meant to use a fake). No separate engine_init_failed
+// classification is needed here: pingScoreHistoryAttempt (fase 5D)
+// already classifies ANY error this factory returns that way.
+func pingScoreHistoryRealEngineFactory(server *Server, engineConfig pingScoreHistoryEngineConfig) pingScoreHistoryEngineFactory {
+	return func(handle pingScoreHistoryStoreHandle) (pingScoreHistoryCycler, error) {
+		store, ok := handle.(*PingScoreHistoryStore)
+		if !ok {
+			return nil, fmt.Errorf("ping score history: engine factory: unexpected store handle type %T (want *PingScoreHistoryStore)", handle)
+		}
+		return newPingScoreHistoryEngine(server, store, time.Now, engineConfig)
+	}
+}
+
+// E. Production publisher -- stores into s.pingScores, the SAME cache
+// handlePingScores already reads (see routes.go and ping_scores.go).
+// pingScoresCache.Store is itself already a no-op on a nil snapshot; the
+// core (runOneCycle/pingScoreHistoryWorkerCore) additionally guarantees
+// this is never even called with nil, so both layers agree.
+func pingScoreHistoryRealPublisher(server *Server) pingScoreHistoryPublish {
+	return func(snap *PingScoresSnapshot) {
+		server.pingScores.Store(snap)
+	}
+}
+
+// F. Production status -- *Server.setPingScoreHistoryStatus (fase 5F)
+// already has exactly the pingScoreHistorySetStatus signature; it is
+// passed directly as a method value wherever this is needed, with no
+// adapter function required.
+
+// G. Production error reporter -- the ONLY place any FULL internal error
+// detail (which may contain file paths, SQL fragments, or a panic's
+// stack trace -- see runPingScoreHistoryLifecycleRecovered's own doc
+// comment) is ever written anywhere. /api/healthz (fase 5F) only ever
+// sees the sanitized state/code/lastCycleAt tuple via
+// pingScoreHistorySetStatus -- never routed through this function, and
+// this function never touches status.
+func pingScoreHistoryRealReportError(code string, err error) {
+	log.Printf("[ping-scores-history] %s: %v", code, err)
+}
+
+// pingScoreHistoryProductionBackoff is the ONE place the production
+// backoff policy is defined: 1 minute initial, doubling (see
+// backoffPolicy.next), capped at 30 minutes. A function rather than a
+// package-level var, so there is no mutable global for anything to
+// accidentally reassign -- every call just returns the same value.
+func pingScoreHistoryProductionBackoff() backoffPolicy {
+	return backoffPolicy{initial: time.Minute, max: 30 * time.Minute}
+}
+
+// validatePingScoreHistoryStartConfig performs ALL synchronous, pre-
+// goroutine validation for StartPingScoreHistoryEngine. A permanently-
+// invalid configuration must fail immediately here, return a plain
+// error, and never start a goroutine or fall into an async retry loop
+// (see fase 5A v5's explicit requirement on this exact point -- an
+// invalid engineConfig must not end in an infinite async retry).
+//
+// The engineConfig checks intentionally mirror newPingScoreHistoryEngine's
+// own validation exactly (SettleDebounce/DeepSweepBatchSize/RetentionDuration
+// must be >= 0; MaxEdgeKm <= 0 is a deliberate, valid "disable the
+// geo-filter" convention and is never rejected) -- catching the same
+// problem here means a bad config fails at Start time with a clear
+// synchronous error, not many minutes later buried in a cycle_failed log
+// line from the first opened attempt.
+func validatePingScoreHistoryStartConfig(
+	s *Server,
+	historyPath string,
+	engineConfig pingScoreHistoryEngineConfig,
+	interval time.Duration,
+	backoff backoffPolicy,
+) error {
+	if s == nil {
+		return fmt.Errorf("ping score history: start: server is nil")
+	}
+	if strings.TrimSpace(historyPath) == "" {
+		return fmt.Errorf("ping score history: start: historyPath is empty")
+	}
+	if interval <= 0 {
+		return fmt.Errorf("ping score history: start: interval must be positive, got %s", interval)
+	}
+	if backoff.initial <= 0 {
+		return fmt.Errorf("ping score history: start: backoff.initial must be positive, got %s", backoff.initial)
+	}
+	if backoff.max < backoff.initial {
+		return fmt.Errorf("ping score history: start: backoff.max (%s) must be >= backoff.initial (%s)", backoff.max, backoff.initial)
+	}
+	if engineConfig.SettleDebounce < 0 {
+		return fmt.Errorf("ping score history: start: engineConfig.SettleDebounce is negative (%s)", engineConfig.SettleDebounce)
+	}
+	if engineConfig.DeepSweepBatchSize < 0 {
+		return fmt.Errorf("ping score history: start: engineConfig.DeepSweepBatchSize is negative (%d)", engineConfig.DeepSweepBatchSize)
+	}
+	if engineConfig.RetentionDuration < 0 {
+		return fmt.Errorf("ping score history: start: engineConfig.RetentionDuration is negative (%s)", engineConfig.RetentionDuration)
+	}
+	return nil
+}
+
+// startPingScoreHistoryEngineWithDependencies is StartPingScoreHistoryEngine's
+// fully-injectable core: every dependency the lifecycle needs is a plain
+// parameter, so tests can exercise Start/Stop semantics (single-goroutine,
+// double/concurrent Stop safety, Stop waiting for an active Cycle, panic
+// recovery, Start never blocking on the first Cycle) with the SAME
+// deterministic fakes fase 5D's own tests already use, with no wall-clock
+// waiting anywhere. StartPingScoreHistoryEngine below is the thin,
+// production-only entry point that supplies the real adapters (A-G)
+// above.
+func startPingScoreHistoryEngineWithDependencies(
+	s *Server,
+	historyPath string,
+	engineConfig pingScoreHistoryEngineConfig,
+	interval time.Duration,
+	backoff backoffPolicy,
+	open pingScoreHistoryOpener,
+	newEngine pingScoreHistoryEngineFactory,
+	newTicker pingScoreHistoryNewTicker,
+	wait pingScoreHistoryWaiter,
+	publish pingScoreHistoryPublish,
+	setStatus pingScoreHistorySetStatus,
+	reportError pingScoreHistoryErrorReporter,
+) (stop func(), err error) {
+	if err := validatePingScoreHistoryStartConfig(s, historyPath, engineConfig, interval, backoff); err != nil {
+		return nil, err
+	}
+
+	setStatus("initializing", "", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runPingScoreHistoryLifecycleRecovered(ctx, open, historyPath, newEngine, newTicker, interval, backoff, wait, publish, setStatus, reportError)
+	}()
+
+	var stopOnce sync.Once
+	stop = func() {
+		stopOnce.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+	return stop, nil
+}
+
+// StartPingScoreHistoryEngine is the production Start wrapper around the
+// approved fase 5A/5D worker/lifecycle core: it validates synchronously,
+// sets the initial "initializing" status synchronously, then starts
+// EXACTLY ONE goroutine running runPingScoreHistoryLifecycleRecovered
+// with the real (production) adapters (A-G) above, and returns
+// immediately -- it never waits for QuickSnapshot or a first Cycle, so
+// the caller's HTTP listener is never blocked by this call (the exact
+// problem this whole redesign replaces -- see StartPingScoresRecomputer's
+// own doc comment in ping_scores.go for what the OLD synchronous
+// behavior was, and why it stays in place, untouched, as tested rollback
+// code rather than being deleted in this phase).
+//
+// stop is sync.Once-safe: calling it more than once, or concurrently
+// from multiple goroutines, is safe, and every call returns only once
+// the worker has FULLY shut down -- an active Cycle has finished, the
+// history store is closed, the ticker is stopped, and any panic has
+// already been recovered (Model A: an unbounded wait, no internal
+// timeout -- see fase 5A v2's explicit rejection of a
+// timeout-then-close-resources-anyway approach). There is no legacy-
+// recomputer fallback anywhere in this call chain.
+func StartPingScoreHistoryEngine(
+	s *Server,
+	historyPath string,
+	engineConfig pingScoreHistoryEngineConfig,
+	interval time.Duration,
+	backoff backoffPolicy,
+) (stop func(), err error) {
+	return startPingScoreHistoryEngineWithDependencies(
+		s, historyPath, engineConfig, interval, backoff,
+		pingScoreHistoryRealOpener,
+		pingScoreHistoryRealEngineFactory(s, engineConfig),
+		pingScoreHistoryRealNewTicker,
+		pingScoreHistoryRealWaiter,
+		pingScoreHistoryRealPublisher(s),
+		s.setPingScoreHistoryStatus,
+		pingScoreHistoryRealReportError,
+	)
 }
