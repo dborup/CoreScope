@@ -825,12 +825,19 @@ func pingScoreHistoryProductionBackoff() backoffPolicy {
 // mistake this whole feature must never allow, since the history store
 // opens its target read-write and runs schema migrations against it: if
 // it ever aliased the main, ingestor-owned database, it would migrate
-// and write to that file instead. DefaultPingScoreHistoryPath derives
-// historyPath as a sibling of mainDBPath, so this can only actually
-// happen if something configures the main database's own path to
-// literally be named "ping_scores_history.db" -- but the check below
-// does not assume that particular derivation; it compares whatever two
-// paths it is given.
+// and write to that file instead. The simplest way this happens is a
+// literal basename collision -- something configures the main database's
+// own path to literally be named "ping_scores_history.db", so
+// DefaultPingScoreHistoryPath's sibling-file derivation lands right back
+// on mainDBPath -- but that is not the only way: an existing sibling
+// symlink could point AT the main database, a hardlink could share its
+// inode, or the two paths' parent directories could themselves be
+// symlink-aliases of one another even though neither literal path looks
+// like the other. This function does not assume any particular
+// derivation or cause; it compares whatever two paths it is given, which
+// is why the checks below cover normalized-path equality, os.SameFile
+// for two already-existing files, AND canonicalized parent directories --
+// not just a literal string/basename comparison.
 //
 // This function is READ-ONLY: it never creates, opens for writing,
 // migrates, or deletes anything -- only filepath string canonicalization

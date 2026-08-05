@@ -286,8 +286,21 @@ func DefaultPingScoreHistoryPath(mainDBPath string) string {
 }
 
 // OpenPingScoreHistoryStore opens (creating if absent) the history store at
-// path. It NEVER touches meshcore.db or any connection opened via OpenDB --
-// this is a completely independent *sql.DB against a different file.
+// path, using its own, completely independent *sql.DB connection -- never
+// the *DB/*sql.DB OpenDB returns or any connection already open against
+// the main database.
+//
+// This function opens and migrates EXACTLY the path it is given -- it has
+// no way to know the main database's own path, so it cannot itself detect
+// or refuse a path that aliases it (e.g. a caller passing the main
+// database's own path by mistake). Ensuring path is NOT the main
+// database (and does not alias it via a symlink/hardlink) is entirely
+// the CALLER's responsibility. The production call path enforces this
+// synchronously, before Open is ever reached: StartPingScoreHistoryEngine
+// validates path against the main database path via
+// pingScoreHistoryPathsCollide (see ping_score_history_recomputer.go)
+// through validatePingScoreHistoryStartConfig, and refuses to start if
+// they collide. OpenPingScoreHistoryStore itself performs no such check.
 //
 // Corruption handling: if the file already exists, it is FIRST inspected
 // through a physically read-only connection (SQLite URI mode=ro, no
