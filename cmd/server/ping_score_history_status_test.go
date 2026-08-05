@@ -4,7 +4,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // A. Zero-value accessor: a *Server built without ever calling the
@@ -64,14 +63,25 @@ func TestPingScoreHistoryStatus_ServerIsolation(t *testing.T) {
 	}
 }
 
-// E. Concurrent load/store: many goroutines hammering the setter and the
-// accessor at once, under -race, must never produce a torn read -- every
-// observed tuple must be exactly one of the complete tuples a writer
-// actually stored, never a mix of State/Code/LastCycleAt from different
-// calls. This is guaranteed by construction (a single atomic.Value.Store
-// per write, of a plain string-only struct value), but is worth pinning
-// down as an explicit regression test.
+// E. Concurrent load/store: a fixed number of writer and reader
+// goroutines, each doing a fixed number of operations, released together
+// off one start gate (so none of them can begin -- or finish -- before
+// every goroutine has actually been created). Deterministic in shape (no
+// time.Sleep, no time-based stop): the test asserts the EXACT operation
+// counts completed, not just "some work happened". Every observed tuple
+// must still be exactly one of the complete tuples a writer actually
+// stored, never a mix of State/Code/LastCycleAt from different calls --
+// guaranteed by construction (a single atomic.Value.Store per write, of
+// a plain string-only struct value), pinned down here as an explicit
+// regression test.
 func TestPingScoreHistoryStatus_ConcurrentLoadStore_NoTornReads(t *testing.T) {
+	const (
+		numWriters         = 8
+		numReaders         = 8
+		writesPerGoroutine = 500
+		readsPerGoroutine  = 500
+	)
+
 	s := &Server{}
 	tuples := []pingScoreHistoryStatusSnapshot{
 		{State: "initializing"},
@@ -85,51 +95,56 @@ func TestPingScoreHistoryStatus_ConcurrentLoadStore_NoTornReads(t *testing.T) {
 	for _, tup := range tuples {
 		valid[tup] = true
 	}
+	// A valid tuple is in place before any goroutine starts, so every
+	// read -- including the very first one -- is guaranteed to observe a
+	// member of `valid`, never the (also valid, but distinct) zero-value
+	// default this same accessor returns before any Store at all.
 	s.setPingScoreHistoryStatus(tuples[0].State, tuples[0].Code, tuples[0].LastCycleAt)
 
-	stop := make(chan struct{})
+	start := make(chan struct{})
 	var wg sync.WaitGroup
-	var badReads atomic.Int64
+	var writeCount, readCount, badReads atomic.Int64
 
-	for i := 0; i < 8; i++ {
+	for i := 0; i < numWriters; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			n := 0
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				tup := tuples[n%len(tuples)]
+			<-start
+			for n := 0; n < writesPerGoroutine; n++ {
+				tup := tuples[(i+n)%len(tuples)]
 				s.setPingScoreHistoryStatus(tup.State, tup.Code, tup.LastCycleAt)
-				n++
+				writeCount.Add(1)
 			}
 		}(i)
 	}
-	for i := 0; i < 8; i++ {
+	for i := 0; i < numReaders; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
+			<-start
+			for n := 0; n < readsPerGoroutine; n++ {
 				if got := s.pingScoreHistoryStatusView(); !valid[got] {
 					badReads.Add(1)
 				}
+				readCount.Add(1)
 			}
 		}()
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	close(stop)
+	// Every goroutine now exists and is blocked on <-start; releasing it
+	// is the only thing that lets any of them begin.
+	close(start)
 	wg.Wait()
 
+	wantWrites := int64(numWriters * writesPerGoroutine)
+	wantReads := int64(numReaders * readsPerGoroutine)
+	if got := writeCount.Load(); got != wantWrites {
+		t.Errorf("writeCount = %d, want exactly %d", got, wantWrites)
+	}
+	if got := readCount.Load(); got != wantReads {
+		t.Errorf("readCount = %d, want exactly %d", got, wantReads)
+	}
 	if n := badReads.Load(); n != 0 {
-		t.Errorf("%d reads observed a tuple that was never one complete write (torn read)", n)
+		t.Errorf("%d of %d reads observed a tuple that was never one complete write (torn read)", n, wantReads)
 	}
 }
