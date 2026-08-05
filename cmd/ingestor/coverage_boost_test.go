@@ -27,20 +27,29 @@ func newTestContext(t *testing.T) (*Store, MQTTSource) {
 // --- config.go: NodeDaysOrDefault (0% coverage) ---
 
 func TestNodeDaysOrDefault(t *testing.T) {
+	// Table stores only the primitive input (a *RetentionConfig, or nil)
+	// rather than a Config value -- Config embeds two sync.Once fields
+	// (obsIATAWhitelistOnce/obsBlacklistOnce), and both the slice literal
+	// and `for _, tt := range tests` copy every element by value, which
+	// go vet correctly flags as copying a lock. *RetentionConfig has no
+	// such fields, so it's safe to carry through the table; each subtest
+	// then constructs its own fresh Config from it, so no Config value
+	// -- and therefore no sync.Once -- is ever copied.
 	tests := []struct {
-		name string
-		cfg  Config
-		want int
+		name      string
+		retention *RetentionConfig
+		want      int
 	}{
-		{"nil retention", Config{}, 7},
-		{"zero nodeDays", Config{Retention: &RetentionConfig{NodeDays: 0}}, 7},
-		{"negative nodeDays", Config{Retention: &RetentionConfig{NodeDays: -1}}, 7},
-		{"custom nodeDays", Config{Retention: &RetentionConfig{NodeDays: 14}}, 14},
-		{"one day", Config{Retention: &RetentionConfig{NodeDays: 1}}, 1},
+		{"nil retention", nil, 7},
+		{"zero nodeDays", &RetentionConfig{NodeDays: 0}, 7},
+		{"negative nodeDays", &RetentionConfig{NodeDays: -1}, 7},
+		{"custom nodeDays", &RetentionConfig{NodeDays: 14}, 14},
+		{"one day", &RetentionConfig{NodeDays: 1}, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.cfg.NodeDaysOrDefault()
+			cfg := &Config{Retention: tt.retention}
+			got := cfg.NodeDaysOrDefault()
 			if got != tt.want {
 				t.Errorf("NodeDaysOrDefault() = %d, want %d", got, tt.want)
 			}
