@@ -2125,228 +2125,323 @@ type PacketPathResponse struct {
 // maxEdgeKm is threaded straight through to nearestPositionedNeighbor's
 // geo-sanity filter for the Approx position fallback (see its doc
 // comment) -- pass Config.NeighborMaxEdgeKm().
-func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse, error) {
-	if !db.hasResolvedPath() {
-		return nil, fmt.Errorf("resolved_path not available on this server")
-	}
-	var querySQL string
-	if db.isV3() {
-		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
-			FROM observations o
-			JOIN transmissions t ON t.id = o.transmission_id
-			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
-			WHERE t.hash = ?`
-	} else {
-		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
-			FROM observations o
-			JOIN transmissions t ON t.id = o.transmission_id
-			WHERE t.hash = ?`
-	}
-	rows, err := db.conn.Query(querySQL, strings.ToLower(hash))
-	if err != nil {
-		return nil, fmt.Errorf("packet path query: %w", err)
-	}
-	defer rows.Close()
+// obsBranch is one candidate branch of a packet's path: the deepest-hop
+// observation attributed to a single observer. Shared by GetPacketPath
+// (built from one hash's rows) and GetPacketPathsBulk (built the same way,
+// per hash, from a multi-hash result set) via parsePacketPathObsRow so the
+// two can never parse a row differently.
+type obsBranch struct {
+	hops           int
+	resolvedPath   []*string
+	observerName   string
+	observerPubkey string
+	observerIATA   sql.NullString
+	snr            sql.NullFloat64
+	ts             int64 // unix epoch seconds of the observation that produced this branch's hops/resolvedPath; 0 if unknown
+}
 
-	type obsBranch struct {
-		hops           int
-		resolvedPath   []*string
-		observerName   string
-		observerPubkey string
-		observerIATA   sql.NullString
-		snr            sql.NullFloat64
-		ts             int64 // unix epoch seconds of the observation that produced this branch's hops/resolvedPath; 0 if unknown
-	}
-	best := make(map[string]*obsBranch)
-	var first *obsBranch
-	var firstTS int64
-	var txID int64 // transmissions.id -- same value on every row (one tx per hash), captured for annotatePacketPathAirtime
+// packetPathNodeInfo is the subset of a `nodes` row packet-path branch
+// building needs. Named distinctly from store.go's topology-analytics
+// nodeInfo (different fields, different purpose) to avoid colliding with it.
+type packetPathNodeInfo struct {
+	name string
+	role string
+	lat  *float64
+	lon  *float64
+}
 
-	for rows.Next() {
-		var obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString
-		var snr sql.NullFloat64
-		var ts sql.NullInt64
-		var rowTxID sql.NullInt64
-		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts, &rowTxID); err != nil {
-			continue
-		}
-		if rowTxID.Valid {
-			txID = rowTxID.Int64
-		}
-		if !pathJSON.Valid {
-			continue
-		}
-		var h []string
-		if json.Unmarshal([]byte(pathJSON.String), &h) != nil {
-			continue
-		}
-		hops := len(h)
-		var resolvedPath []*string
-		if resolvedPathJSON.Valid {
-			resolvedPath = unmarshalResolvedPath(resolvedPathJSON.String)
-		}
-		key := obsKey.String
-		if key == "" {
-			key = obsName.String
-		}
-		if key == "" {
-			continue // no way to attribute this observation to a station
-		}
-		var tsVal int64
-		if ts.Valid {
-			tsVal = ts.Int64
-		}
-		branch := &obsBranch{
-			hops: hops, resolvedPath: resolvedPath,
-			observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
-			observerIATA: obsIATA, snr: snr, ts: tsVal,
-		}
-		if existing, ok := best[key]; !ok || hops > existing.hops {
-			best[key] = branch
-		}
-		if ts.Valid && (first == nil || ts.Int64 < firstTS) {
-			first, firstTS = branch, ts.Int64
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("packet path iteration: %w", err)
-	}
+// packetPathReduction accumulates one hash's observation rows into the
+// deepest-hop branch per observer (best) and the single earliest-arriving
+// branch overall (first), exactly as GetPacketPath's original inline loop
+// did. GetPacketPathsBulk keeps one packetPathReduction per hash while
+// scanning a combined multi-hash result set.
+type packetPathReduction struct {
+	best    map[string]*obsBranch
+	first   *obsBranch
+	firstTS int64
+	txID    int64 // transmissions.id -- same value on every row for a given hash, captured for annotatePacketPathAirtime
+}
 
-	resp := &PacketPathResponse{Hash: hash, Branches: []PacketPathBranch{}, TxID: txID}
-	if len(best) == 0 {
-		return resp, nil
-	}
+func newPacketPathReduction() *packetPathReduction {
+	return &packetPathReduction{best: make(map[string]*obsBranch)}
+}
 
-	pubkeySet := map[string]bool{}
-	if first != nil {
-		for _, pk := range first.resolvedPath {
-			if pk != nil && *pk != "" {
-				pubkeySet[*pk] = true
-			}
-		}
-		if first.observerPubkey != "" {
-			pubkeySet[first.observerPubkey] = true
-		}
+func (r *packetPathReduction) fold(key string, branch *obsBranch, tsValid bool, ts int64) {
+	if existing, ok := r.best[key]; !ok || branch.hops > existing.hops {
+		r.best[key] = branch
 	}
-	for _, b := range best {
+	if tsValid && (r.first == nil || ts < r.firstTS) {
+		r.first, r.firstTS = branch, ts
+	}
+}
+
+// parsePacketPathObsRow parses one row of the packet-path observations/
+// transmissions join (GetPacketPath and GetPacketPathsBulk use the same
+// column order, bulk with one leading `hash` column) into an obsBranch and
+// its best-map key. ok is false for rows that can't contribute a branch --
+// missing/unparsable path_json, or no attributable observer key/name --
+// matching the original tolerant per-row skip behavior; these are expected
+// data shapes, not errors.
+func parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString, snr sql.NullFloat64, ts sql.NullInt64) (branch *obsBranch, key string, ok bool) {
+	if !pathJSON.Valid {
+		return nil, "", false
+	}
+	var h []string
+	if json.Unmarshal([]byte(pathJSON.String), &h) != nil {
+		return nil, "", false
+	}
+	var resolvedPath []*string
+	if resolvedPathJSON.Valid {
+		resolvedPath = unmarshalResolvedPath(resolvedPathJSON.String)
+	}
+	key = obsKey.String
+	if key == "" {
+		key = obsName.String
+	}
+	if key == "" {
+		return nil, "", false // no way to attribute this observation to a station
+	}
+	var tsVal int64
+	if ts.Valid {
+		tsVal = ts.Int64
+	}
+	branch = &obsBranch{
+		hops: len(h), resolvedPath: resolvedPath,
+		observerName: obsName.String, observerPubkey: strings.ToLower(strings.TrimSpace(obsPubkey.String)),
+		observerIATA: obsIATA, snr: snr, ts: tsVal,
+	}
+	return branch, key, true
+}
+
+// collectPacketPathPubkeys returns every resolved-path pubkey and observer
+// pubkey referenced by first and every branch in best -- the set that
+// needs a bulk `nodes` position lookup.
+func collectPacketPathPubkeys(first *obsBranch, best map[string]*obsBranch) map[string]bool {
+	set := map[string]bool{}
+	add := func(b *obsBranch) {
+		if b == nil {
+			return
+		}
 		for _, pk := range b.resolvedPath {
 			if pk != nil && *pk != "" {
-				pubkeySet[*pk] = true
+				set[*pk] = true
 			}
 		}
 		// An observer is itself a mesh node -- if it has ever self-advertised
 		// a GPS position, that's a more precise fix than its (often manually
 		// typed, sometimes wrong or missing) configured IATA code. Folded
-		// into the same batched lookup below rather than a second query.
+		// into the same batched lookup rather than a second query.
 		if b.observerPubkey != "" {
-			pubkeySet[b.observerPubkey] = true
+			set[b.observerPubkey] = true
 		}
 	}
-	pubkeys := make([]string, 0, len(pubkeySet))
-	for pk := range pubkeySet {
-		pubkeys = append(pubkeys, pk)
+	add(first)
+	for _, b := range best {
+		add(b)
 	}
-	type nodeInfo struct {
-		name string
-		role string
-		lat  *float64
-		lon  *float64
-	}
-	nodeByPK := make(map[string]nodeInfo, len(pubkeys))
-	if len(pubkeys) > 0 {
-		placeholders := make([]byte, 0, len(pubkeys)*2)
-		args := make([]interface{}, len(pubkeys))
-		for i, pk := range pubkeys {
-			if i > 0 {
-				placeholders = append(placeholders, ',')
-			}
-			placeholders = append(placeholders, '?')
-			args[i] = pk
-		}
-		nodeRows, err := db.conn.Query(
-			"SELECT public_key, name, role, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+")", args...)
-		if err == nil {
-			for nodeRows.Next() {
-				var pk string
-				var name, role sql.NullString
-				var lat, lon sql.NullFloat64
-				if nodeRows.Scan(&pk, &name, &role, &lat, &lon) == nil {
-					ni := nodeInfo{name: name.String, role: role.String}
-					// (0,0) is the ocean off Ghana, not a real fix -- some
-					// nodes have it stored literally instead of NULL when
-					// they've never actually reported a GPS position.
-					// Excluded the same way GetNodesForScopeAdoption and
-					// geofilter.PassesFilter already do; the node's own
-					// name/role are kept, just not its bogus position.
-					if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
-						v1, v2 := lat.Float64, lon.Float64
-						ni.lat, ni.lon = &v1, &v2
-					}
-					nodeByPK[pk] = ni
-				}
-			}
-			nodeRows.Close()
-		}
-	}
+	return set
+}
 
-	// Fallback for observers whose own `observers.id` isn't its mesh
-	// pubkey at all -- e.g. an MQTT-bridge-type observer (observed:
-	// openHop-Repeater firmware) that publishes its status keyed by
-	// device name rather than pubkey, so the lookup above never matches
-	// even though the same physical device has a real, positioned nodes
-	// row under its actual pubkey. Matched by exact display name; only
-	// queried for observers the pubkey lookup left unpositioned, and only
-	// applied if the pubkey lookup didn't already find something.
-	nameFallbackNeeded := map[string]bool{}
-	needsNameFallback := func(b *obsBranch) {
+// collectPacketPathNameFallback returns observer display names that need
+// the by-name node fallback lookup -- any observer whose own pubkey lookup
+// in nodeByPK didn't yield a position. See resolveNodesByName's caller for
+// why: an MQTT-bridge-type observer (observed: openHop-Repeater firmware)
+// can publish its status keyed by device name rather than pubkey.
+func collectPacketPathNameFallback(first *obsBranch, best map[string]*obsBranch, nodeByPK map[string]packetPathNodeInfo) map[string]bool {
+	needed := map[string]bool{}
+	consider := func(b *obsBranch) {
 		if b == nil || b.observerName == "" {
 			return
 		}
 		if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
 			return
 		}
-		nameFallbackNeeded[b.observerName] = true
+		needed[b.observerName] = true
 	}
 	for _, b := range best {
-		needsNameFallback(b)
+		consider(b)
 	}
-	needsNameFallback(first)
-	nodeByName := make(map[string]nodeInfo, len(nameFallbackNeeded))
-	if len(nameFallbackNeeded) > 0 {
-		names := make([]string, 0, len(nameFallbackNeeded))
-		for n := range nameFallbackNeeded {
-			names = append(names, n)
+	consider(first)
+	return needed
+}
+
+// collectPacketPathFallbackCandidates returns every pubkey that would need
+// the nearestPositionedNeighbor fallback -- every resolved-path pubkey
+// without a position in nodeByPK, plus every observer pubkey without a
+// position in nodeByPK, nodeByName, or its IATA code -- computed the exact
+// same way buildPacketPathResponseFromReduction's buildBranch decides to
+// call neighborLookup. Used only by the bulk path to pre-fetch the whole
+// batch's neighbor estimates in one call; the single-hash path calls
+// nearestPositionedNeighbor on demand instead and doesn't need this.
+func collectPacketPathFallbackCandidates(first *obsBranch, best map[string]*obsBranch, nodeByPK, nodeByName map[string]packetPathNodeInfo) map[string]bool {
+	needed := map[string]bool{}
+	consider := func(b *obsBranch) {
+		if b == nil {
+			return
 		}
-		placeholders := make([]byte, 0, len(names)*2)
-		args := make([]interface{}, len(names))
-		for i, n := range names {
-			if i > 0 {
-				placeholders = append(placeholders, ',')
+		for _, pk := range b.resolvedPath {
+			if pk == nil || *pk == "" {
+				continue
 			}
-			placeholders = append(placeholders, '?')
-			args[i] = n
-		}
-		nameRows, err := db.conn.Query(
-			"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
-		if err == nil {
-			ambiguous := map[string]bool{}
-			for nameRows.Next() {
-				var name, role sql.NullString
-				var lat, lon sql.NullFloat64
-				if nameRows.Scan(&name, &role, &lat, &lon) == nil {
-					if _, exists := nodeByName[name.String]; exists {
-						ambiguous[name.String] = true // >1 positioned node shares this name -- don't guess which one
-						continue
-					}
-					v1, v2 := lat.Float64, lon.Float64
-					nodeByName[name.String] = nodeInfo{role: role.String, lat: &v1, lon: &v2}
-				}
-			}
-			nameRows.Close()
-			for n := range ambiguous {
-				delete(nodeByName, n)
+			if ni, ok := nodeByPK[*pk]; !ok || ni.lat == nil {
+				needed[*pk] = true
 			}
 		}
+		if b.observerName == "" {
+			return
+		}
+		hasPos := false
+		if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
+			hasPos = true
+		} else if _, ok := nodeByName[b.observerName]; ok {
+			hasPos = true
+		} else if b.observerIATA.Valid {
+			iata := strings.ToUpper(strings.TrimSpace(b.observerIATA.String))
+			if _, ok := iataCoords[iata]; ok {
+				hasPos = true
+			}
+		}
+		if !hasPos && b.observerPubkey != "" {
+			needed[b.observerPubkey] = true
+		}
+	}
+	consider(first)
+	for _, b := range best {
+		consider(b)
+	}
+	return needed
+}
+
+// resolveNodesByPubkey bulk-resolves pubkeys against `nodes`, excluding the
+// (0,0) sentinel position the same way GetNodesForScopeAdoption and
+// geofilter.PassesFilter do. Shared by GetPacketPath (which discards the
+// error, preserving its existing tolerant-on-query-failure behavior
+// unchanged) and GetPacketPathsBulk (which propagates it, per the bulk
+// helpers' explicit-error contract).
+func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeInfo, error) {
+	nodeByPK := make(map[string]packetPathNodeInfo, len(pubkeys))
+	if len(pubkeys) == 0 {
+		return nodeByPK, nil
+	}
+	placeholders := make([]byte, 0, len(pubkeys)*2)
+	args := make([]interface{}, len(pubkeys))
+	for i, pk := range pubkeys {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[i] = pk
+	}
+	rows, err := db.conn.Query(
+		"SELECT public_key, name, role, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+")", args...)
+	if err != nil {
+		return nil, fmt.Errorf("packet path node lookup: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pk string
+		var name, role sql.NullString
+		var lat, lon sql.NullFloat64
+		if err := rows.Scan(&pk, &name, &role, &lat, &lon); err != nil {
+			return nil, fmt.Errorf("packet path node scan: %w", err)
+		}
+		ni := packetPathNodeInfo{name: name.String, role: role.String}
+		if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
+			v1, v2 := lat.Float64, lon.Float64
+			ni.lat, ni.lon = &v1, &v2
+		}
+		nodeByPK[pk] = ni
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("packet path node iteration: %w", err)
+	}
+	return nodeByPK, nil
+}
+
+// resolveNodesByName bulk-resolves observer display names against `nodes`
+// for observers whose pubkey lookup left them unpositioned (see
+// collectPacketPathNameFallback). A name matching more than one positioned
+// node is dropped entirely -- ambiguous, don't guess which one. Shared by
+// GetPacketPath (discards the error, preserving existing behavior) and
+// GetPacketPathsBulk (propagates it).
+func (db *DB) resolveNodesByName(names []string) (map[string]packetPathNodeInfo, error) {
+	nodeByName := make(map[string]packetPathNodeInfo, len(names))
+	if len(names) == 0 {
+		return nodeByName, nil
+	}
+	placeholders := make([]byte, 0, len(names)*2)
+	args := make([]interface{}, len(names))
+	for i, n := range names {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[i] = n
+	}
+	rows, err := db.conn.Query(
+		"SELECT name, role, lat, lon FROM nodes WHERE name IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
+	if err != nil {
+		return nil, fmt.Errorf("packet path name lookup: %w", err)
+	}
+	defer rows.Close()
+	ambiguous := map[string]bool{}
+	for rows.Next() {
+		var name, role sql.NullString
+		var lat, lon sql.NullFloat64
+		if err := rows.Scan(&name, &role, &lat, &lon); err != nil {
+			return nil, fmt.Errorf("packet path name scan: %w", err)
+		}
+		if _, exists := nodeByName[name.String]; exists {
+			ambiguous[name.String] = true // >1 positioned node shares this name -- don't guess which one
+			continue
+		}
+		v1, v2 := lat.Float64, lon.Float64
+		nodeByName[name.String] = packetPathNodeInfo{role: role.String, lat: &v1, lon: &v2}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("packet path name iteration: %w", err)
+	}
+	for n := range ambiguous {
+		delete(nodeByName, n)
+	}
+	return nodeByName, nil
+}
+
+// neighborEstimate mirrors nearestPositionedNeighbor's return values (minus
+// ok, which becomes map membership in nearestPositionedNeighborsBulk). Name
+// is carried for fidelity even though buildPacketPathResponseFromReduction
+// never consumes it, matching nearestPositionedNeighbor's own callers today.
+type neighborEstimate struct {
+	Name             string
+	Lat, Lon         float64
+	ContributorCount int
+	SpreadKm         float64
+}
+
+// buildPacketPathResponseFromReduction builds a PacketPathResponse from an
+// already-reduced (best-per-observer, single first) set of branches for one
+// hash, given already-resolved node position maps and a neighbor-estimate
+// lookup. This is the single shared implementation of branch assembly,
+// hop-point/observer position resolution, DistanceFromFirstKm, and sort
+// order -- used identically by GetPacketPath (single hash, maps resolved
+// via a per-hash query, neighborLookup calling nearestPositionedNeighbor
+// directly on demand, unchanged from before this refactor) and
+// GetPacketPathsBulk (many hashes, maps resolved via one batched query
+// across the whole request, neighborLookup reading a pre-fetched map so no
+// per-point query happens here). Changing this function changes both paths
+// identically -- they cannot silently diverge.
+func buildPacketPathResponseFromReduction(
+	hash string,
+	txID int64,
+	first *obsBranch,
+	best map[string]*obsBranch,
+	nodeByPK map[string]packetPathNodeInfo,
+	nodeByName map[string]packetPathNodeInfo,
+	neighborLookup func(pubkey string) (neighborEstimate, bool),
+) *PacketPathResponse {
+	resp := &PacketPathResponse{Hash: hash, Branches: []PacketPathBranch{}, TxID: txID}
+	if len(best) == 0 {
+		return resp
 	}
 
 	buildBranch := func(b *obsBranch) PacketPathBranch {
@@ -2366,11 +2461,11 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 				// position -- borrow a weighted centroid of its
 				// positioned neighbors instead, clearly flagged as
 				// approximate rather than a real fix.
-				if _, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(*pk, maxEdgeKm); ok {
-					lat, lon := nLat, nLon
-					point.Lat, point.Lon, point.Approx, point.ApproxNeighborCount = &lat, &lon, true, nCount
-					if nCount > 1 {
-						s := nSpread
+				if est, ok := neighborLookup(*pk); ok {
+					lat, lon := est.Lat, est.Lon
+					point.Lat, point.Lon, point.Approx, point.ApproxNeighborCount = &lat, &lon, true, est.ContributorCount
+					if est.ContributorCount > 1 {
+						s := est.SpreadKm
 						point.ApproxSpreadKm = &s
 					}
 				}
@@ -2412,11 +2507,11 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 				// Last resort, same as the hop-point fallback above: no
 				// position of its own anywhere, so borrow a weighted
 				// centroid of its positioned neighbors, flagged as approximate.
-				if _, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(b.observerPubkey, maxEdgeKm); ok {
-					lat, lon := nLat, nLon
-					obs.Lat, obs.Lon, obs.Approx, obs.ApproxNeighborCount = &lat, &lon, true, nCount
-					if nCount > 1 {
-						s := nSpread
+				if est, ok := neighborLookup(b.observerPubkey); ok {
+					lat, lon := est.Lat, est.Lon
+					obs.Lat, obs.Lon, obs.Approx, obs.ApproxNeighborCount = &lat, &lon, true, est.ContributorCount
+					if est.ContributorCount > 1 {
+						s := est.SpreadKm
 						obs.ApproxSpreadKm = &s
 					}
 				}
@@ -2459,7 +2554,85 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	}
 	sort.Slice(resp.Branches, func(i, j int) bool { return resp.Branches[i].Hops > resp.Branches[j].Hops })
 
-	return resp, nil
+	return resp
+}
+
+func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse, error) {
+	if !db.hasResolvedPath() {
+		return nil, fmt.Errorf("resolved_path not available on this server")
+	}
+	var querySQL string
+	if db.isV3() {
+		querySQL = `SELECT obs.rowid, obs.id, obs.name, obs.iata, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
+			FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE t.hash = ?`
+	} else {
+		querySQL = `SELECT o.observer_id, o.observer_id, o.observer_name, NULL, o.path_json, o.resolved_path, o.snr, o.timestamp, t.id
+			FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			WHERE t.hash = ?`
+	}
+	rows, err := db.conn.Query(querySQL, strings.ToLower(hash))
+	if err != nil {
+		return nil, fmt.Errorf("packet path query: %w", err)
+	}
+	defer rows.Close()
+
+	red := newPacketPathReduction()
+	for rows.Next() {
+		var obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON sql.NullString
+		var snr sql.NullFloat64
+		var ts sql.NullInt64
+		var rowTxID sql.NullInt64
+		if err := rows.Scan(&obsKey, &obsPubkey, &obsName, &obsIATA, &pathJSON, &resolvedPathJSON, &snr, &ts, &rowTxID); err != nil {
+			continue
+		}
+		if rowTxID.Valid {
+			red.txID = rowTxID.Int64
+		}
+		branch, key, ok := parsePacketPathObsRow(obsKey, obsPubkey, obsName, obsIATA, pathJSON, resolvedPathJSON, snr, ts)
+		if !ok {
+			continue
+		}
+		red.fold(key, branch, ts.Valid, ts.Int64)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("packet path iteration: %w", err)
+	}
+
+	if len(red.best) == 0 {
+		return &PacketPathResponse{Hash: hash, Branches: []PacketPathBranch{}, TxID: red.txID}, nil
+	}
+
+	pubkeySet := collectPacketPathPubkeys(red.first, red.best)
+	pubkeys := make([]string, 0, len(pubkeySet))
+	for pk := range pubkeySet {
+		pubkeys = append(pubkeys, pk)
+	}
+	// Error discarded here on purpose -- preserves GetPacketPath's existing
+	// tolerant-on-query-failure behavior (a failed lookup just leaves
+	// positions unresolved, same as before this refactor). GetPacketPathsBulk
+	// propagates this same helper's error instead; see its own call site.
+	nodeByPK, _ := db.resolveNodesByPubkey(pubkeys)
+
+	nameFallbackSet := collectPacketPathNameFallback(red.first, red.best, nodeByPK)
+	names := make([]string, 0, len(nameFallbackSet))
+	for n := range nameFallbackSet {
+		names = append(names, n)
+	}
+	nodeByName, _ := db.resolveNodesByName(names) // discarded for the same reason as above
+
+	neighborLookup := func(pk string) (neighborEstimate, bool) {
+		_, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(pk, maxEdgeKm)
+		if !ok {
+			return neighborEstimate{}, false
+		}
+		return neighborEstimate{Lat: nLat, Lon: nLon, ContributorCount: nCount, SpreadKm: nSpread}, true
+	}
+
+	return buildPacketPathResponseFromReduction(hash, red.txID, red.first, red.best, nodeByPK, nodeByName, neighborLookup), nil
 }
 
 // EstimateMaxEdgeKm is the geo-sanity threshold nearestPositionedNeighbor's

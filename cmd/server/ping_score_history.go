@@ -15,12 +15,16 @@
 // records and leaderboards -- it is a history store, not a disposable
 // cache, and corruption/version-mismatch handling below is written with
 // that in mind: never silently discard rows that cannot be reconstructed
-// from anywhere else. Corruption and an unrecognized future schema version
-// are therefore FATAL to Open (typed errors, see
+// from anywhere else. Corruption, and a KNOWN older version whose
+// migration fails, are therefore FATAL to Open (typed errors, see
 // PingScoreHistoryCorruptError / PingScoreHistoryMigrationError) rather
 // than something this package silently works around -- the caller decides
 // whether to run without a history store (falling back to the pre-4A
-// recomputer) or to involve an operator.
+// recomputer) or to involve an operator. An UNRECOGNIZED FUTURE schema
+// version is not fatal: Open still succeeds and returns a usable store,
+// just a physically read-only one (see openExistingPingScoreHistoryStore)
+// -- existing rows stay readable, nothing is migrated or written, and no
+// caller fallback is needed for that case.
 //
 // Phase 4A scope: only the storage foundation (connection lifecycle,
 // versioned additive schema, upsert/delete/load operations, integrity
@@ -132,11 +136,14 @@ func (e *PingScoreHistoryMigrationError) Unwrap() error { return e.Err }
 // are left zero-valued.
 //
 // IMPORTANT: OpenPingScoreHistoryStore itself NEVER sets this -- corruption
-// and an unrecognized future schema version are both FATAL to Open (typed
-// errors: PingScoreHistoryCorruptError / PingScoreHistoryMigrationError),
+// and a failed migration of a known older version are both FATAL to Open
+// (typed errors: PingScoreHistoryCorruptError / PingScoreHistoryMigrationError),
 // precisely so an operator/caller decides what happens next rather than
 // this package silently switching to a reduced-history state on their
-// behalf. StoreIntegrity/LoadIntegrity are plumbing for a LATER, explicit
+// behalf. (An unrecognized FUTURE schema version is a third, non-fatal
+// case: Open just returns a usable, physically read-only store -- see the
+// package doc comment above -- so there is nothing to record here for it
+// either.) StoreIntegrity/LoadIntegrity are plumbing for a LATER, explicit
 // recovery function (not built in Phase 4A) to use once it exists.
 type PingScoreHistoryIntegrity struct {
 	// Status is one of: "ok", "initial-backfill-incomplete",
