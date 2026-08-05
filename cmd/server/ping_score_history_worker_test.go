@@ -407,6 +407,16 @@ func TestWorkerCore_QuickSnapshotFailure_NonFatalWorkerProceeds(t *testing.T) {
 	if !errs.hasCode("quick_snapshot_failed") {
 		t.Errorf("errs = %+v, want a quick_snapshot_failed entry", errs.all())
 	}
+	all := status.all()
+	if len(all) != 2 {
+		t.Fatalf("status calls = %+v, want exactly 2 (quick-snapshot failure, then the first Cycle's own status)", all)
+	}
+	if all[0].State != "initializing" || all[0].Code != "quick_snapshot_failed" {
+		t.Errorf("status[0] = %+v, want {initializing quick_snapshot_failed ...} (sanitized code, not just reportError)", all[0])
+	}
+	if all[1].State != "ok" || all[1].Code != "" || all[1].LastCycleAt != "cycle1" {
+		t.Errorf("status[1] = %+v, want {ok  cycle1} -- the first successful Cycle must replace the quick_snapshot_failed status", all[1])
+	}
 	calls := pub.all()
 	if len(calls) != 1 || calls[0].GeneratedAt != "cycle1" {
 		t.Fatalf("publish calls = %+v, want exactly [cycle1]", calls)
@@ -431,6 +441,9 @@ func TestWorkerCore_QuickSnapshotNilNil_DefensiveNoPublish(t *testing.T) {
 
 	if len(errs.all()) != 0 {
 		t.Errorf("errs = %+v, want none", errs.all())
+	}
+	if all := status.all(); len(all) < 1 || all[0].State != "initializing" || all[0].Code != "" {
+		t.Errorf("status.all() = %+v, want status[0] = {initializing  ...} (empty code, like the success case)", all)
 	}
 	calls := pub.all()
 	if len(calls) != 1 || calls[0].GeneratedAt != "cycle1" {
@@ -457,8 +470,8 @@ func TestWorkerCore_StatusInitializing_SetBeforeFirstCycle(t *testing.T) {
 	if len(all) < 2 {
 		t.Fatalf("status calls = %+v, want at least 2", all)
 	}
-	if all[0].State != "initializing" {
-		t.Errorf("status[0] = %+v, want state=initializing", all[0])
+	if all[0].State != "initializing" || all[0].Code != "" {
+		t.Errorf("status[0] = %+v, want {initializing  ...} (empty code -- QuickSnapshot succeeded)", all[0])
 	}
 	if all[1].State != "ok" {
 		t.Errorf("status[1] = %+v, want state=ok (from the first Cycle)", all[1])
@@ -956,6 +969,72 @@ func TestLifecycleCore_GenericOpenError_ClassifiedOpenFailedRetries(t *testing.T
 	}
 }
 
+// A defensive case: open returns (nil, nil) -- no error, but also no
+// store. pingScoreHistoryOpener's contract never permits this, but a
+// buggy or future implementation could still produce it, and treating it
+// as a normal attempt would crash on store.ReadOnly() with a nil
+// receiver. It must instead be classified exactly like a plain open
+// error (degraded/open_failed), with newEngine and Close both never
+// invoked for the nil attempt, and the lifecycle must survive without
+// panicking and retry normally afterward.
+func TestLifecycleCore_NilStoreNilError_TreatedAsOpenFailedNoPanicNoEngineCall(t *testing.T) {
+	openCalls := 0
+	var secondStore *fakeStoreHandle
+	open := func(string) (pingScoreHistoryStoreHandle, error) {
+		openCalls++
+		if openCalls == 1 {
+			return nil, nil // the defensive (nil, nil) case under test
+		}
+		secondStore = &fakeStoreHandle{readOnly: true}
+		return secondStore, nil
+	}
+	engineCalls := 0
+	newEngine := func(pingScoreHistoryStoreHandle) (pingScoreHistoryCycler, error) {
+		engineCalls++
+		return &fakeCycler{quickResult: snap("quick")}, nil
+	}
+	waitCalls := 0
+	waiter := func(context.Context, time.Duration) bool {
+		waitCalls++
+		return false // release exactly one retry
+	}
+	status, errs, pub := &statusRecorderSpy{}, &errorRecorderSpy{}, &publishRecorderSpy{}
+
+	pingScoreHistoryLifecycleCore(context.Background(), open, "path", newEngine, failIfCalledNewTicker(t), time.Minute,
+		backoffPolicy{initial: time.Millisecond, max: time.Second}, waiter, pub.record, status.record, errs.record)
+	// Reaching this line at all -- rather than a nil-pointer panic inside
+	// store.ReadOnly()/newEngine(store) -- is itself part of the proof
+	// that the nil,nil attempt was never handed to either.
+
+	if openCalls != 2 {
+		t.Fatalf("openCalls = %d, want 2 (one nil,nil attempt, one real retry)", openCalls)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("waitCalls = %d, want exactly 1 (one retry after the nil,nil open)", waitCalls)
+	}
+	if engineCalls != 1 {
+		t.Errorf("engineCalls = %d, want exactly 1 (newEngine must never be called for the nil,nil attempt)", engineCalls)
+	}
+	foundOpenFailed := false
+	for _, s := range status.all() {
+		if s.State == "degraded" && s.Code == "open_failed" {
+			foundOpenFailed = true
+		}
+	}
+	if !foundOpenFailed {
+		t.Errorf("status.all() = %+v, want a degraded/open_failed entry for the nil,nil open", status.all())
+	}
+	if !errs.hasCode("open_failed") {
+		t.Errorf("errs = %+v, want an open_failed entry for the nil,nil open", errs.all())
+	}
+	if last := status.last(); last.State != "read_only" {
+		t.Errorf("status.last() = %+v, want read_only (the second, valid attempt completed normally)", last)
+	}
+	if secondStore == nil || secondStore.closes() != 1 {
+		t.Errorf("second store closes = %v, want exactly 1 (normal attempt cleanup, no double-close)", secondStore)
+	}
+}
+
 // 20. A *PingScoreHistoryCorruptError is terminal: no retry, and wait is
 // never even called.
 func TestLifecycleCore_CorruptOpenError_TerminalNoRetryNoWait(t *testing.T) {
@@ -972,8 +1051,8 @@ func TestLifecycleCore_CorruptOpenError_TerminalNoRetryNoWait(t *testing.T) {
 	if openCalls != 1 {
 		t.Errorf("openCalls = %d, want exactly 1 (corrupt is terminal, no retry)", openCalls)
 	}
-	if last := status.last(); last.State != "degraded" || last.Code != "corrupt" {
-		t.Errorf("status.last() = %+v, want {degraded corrupt ...}", last)
+	if last := status.last(); last.State != "corrupt" || last.Code != "corrupt" {
+		t.Errorf("status.last() = %+v, want {corrupt corrupt ...} (corrupt is its own state, not degraded)", last)
 	}
 	if !errs.hasCode("corrupt") {
 		t.Errorf("errs = %+v, want a corrupt entry", errs.all())

@@ -185,8 +185,8 @@ type pingScoreHistoryNewTicker func(d time.Duration) pingScoreHistoryTicker
 type pingScoreHistoryPublish func(snap *PingScoresSnapshot)
 
 // pingScoreHistorySetStatus reports a SANITIZED status: state (e.g.
-// "initializing", "ok", "degraded", "read_only", "panic"), a short
-// machine-readable code (e.g. "cycle_failed", ""  when state=="ok"), and
+// "initializing", "ok", "degraded", "read_only", "corrupt", "panic"), a
+// short machine-readable code (e.g. "cycle_failed", ""  when state=="ok"), and
 // the RFC3339 timestamp of the last successful cycle's GeneratedAt (""
 // if none has ever succeeded yet). Never a raw error -- that is exactly
 // what pingScoreHistoryErrorReporter is for. A production adapter (a
@@ -257,19 +257,29 @@ func runOneCycle(
 // until the current runOneCycle call has returned.
 //
 // QuickSnapshot has three possible outcomes, all non-fatal to starting
-// the worker:
+// the worker -- state is always "initializing" (a status distinct from
+// both "ok" and "degraded", since nothing about the WORKER itself has
+// failed yet), but the code distinguishes what actually happened:
 //   - it fails: reported via reportError("quick_snapshot_failed", err),
 //     nothing is published (whatever handlePingScores' own nil-fallback
-//     already shows keeps showing), and the worker proceeds anyway.
+//     already shows keeps showing), status becomes "initializing"/
+//     "quick_snapshot_failed" (LastCycleAt unchanged), and the worker
+//     proceeds anyway.
 //   - it succeeds with a snapshot: published immediately, so a restart
 //     doesn't leave clients looking at an empty board for the full first
 //     Cycle -- a snapshot built from already-loaded persisted state,
 //     cheaper but not free (see QuickSnapshot's own doc comment in
 //     ping_score_history_engine.go), not a substitute for a real Cycle.
-//   - either way, status becomes "initializing" (code "", LastCycleAt
-//     still whatever was carried in) until the first real Cycle
-//     completes -- a status distinct from both "ok" and "degraded",
-//     since nothing has actually failed yet.
+//     Status becomes "initializing"/"" (empty code -- nothing failed).
+//   - it returns (nil, nil) (QuickSnapshot's own contract says it never
+//     does this, but nothing stops a future/faulty implementation):
+//     nothing to publish, no error to report, status still becomes
+//     "initializing"/"" exactly like the success case.
+//
+// Whichever of the three happened, this "initializing" status is only
+// ever transient: runOneCycle's very next call (the first real Cycle,
+// just below) unconditionally overwrites it with either "ok"/"" or
+// "degraded"/"cycle_failed".
 //
 // If the store is read-only (a future-schema store opened by older
 // code -- see PingScoreHistoryStore's own ReadOnly() doc comment),
@@ -304,13 +314,15 @@ func pingScoreHistoryWorkerCore(
 	}
 
 	quick, err := cycler.QuickSnapshot()
-	switch {
-	case err != nil:
+	if err != nil {
 		reportError("quick_snapshot_failed", err)
-	case quick != nil:
-		publish(quick)
+		setStatus("initializing", "quick_snapshot_failed", *lastSuccessfulCycleAt)
+	} else {
+		if quick != nil {
+			publish(quick)
+		}
+		setStatus("initializing", "", *lastSuccessfulCycleAt)
 	}
-	setStatus("initializing", "", *lastSuccessfulCycleAt)
 
 	if readOnly {
 		setStatus("read_only", "read_only", *lastSuccessfulCycleAt)
@@ -454,10 +466,13 @@ func (b backoffPolicy) next(cur time.Duration) time.Duration {
 //
 // open's error is classified via errors.As, matching the exact typed
 // errors OpenPingScoreHistoryStore already returns (ping_score_history.go):
-//   - *PingScoreHistoryCorruptError: terminal. The file failed
+//   - *PingScoreHistoryCorruptError: terminal, and its OWN distinct
+//     state -- "corrupt"/"corrupt", not "degraded" -- since this is not
+//     a transient or retryable condition like the other failure classes
+//     below, it is a permanently broken store. The file failed
 //     PRAGMA integrity_check; nothing about waiting and reopening the
-//     same bytes would ever fix that. Status becomes degraded/corrupt,
-//     the error is reported, and the loop returns -- no retry, ever.
+//     same bytes would ever fix that. The error is reported, and the
+//     loop returns -- no retry, ever, no wait() call at all.
 //   - *PingScoreHistoryMigrationError: an additive schema migration
 //     failed partway; OpenPingScoreHistoryStore's own doc comment
 //     guarantees this touches nothing on disk beyond what the failed
@@ -467,6 +482,17 @@ func (b backoffPolicy) next(cur time.Duration) time.Duration {
 //     -- may resolve).
 //   - anything else (a plain open/permission/lock error): status becomes
 //     degraded/open_failed, reported, falls through to backoff-and-retry.
+//
+// A defensive case sits alongside the above: open returning (nil, nil)
+// -- no error, but also no store. Nothing in pingScoreHistoryOpener's
+// contract permits this, but a buggy or future implementation could still
+// do it, and treating it as an ordinary "attempt" would crash on
+// store.ReadOnly()/newEngine(store) with a nil receiver. It is instead
+// classified exactly like a plain open error: status becomes
+// degraded/open_failed, a clear synthetic error is reported, newEngine
+// and Close are never called (there is no store to hand either one), and
+// the loop falls through to the SAME backoff-and-retry as any other
+// open_failed.
 //
 // The backoff wait only ever happens AFTER any store opened this
 // iteration is already closed (pingScoreHistoryAttempt's defer has
@@ -496,12 +522,13 @@ func pingScoreHistoryLifecycleCore(
 		}
 
 		store, err := open(path)
-		if err != nil {
+		switch {
+		case err != nil:
 			var corruptErr *PingScoreHistoryCorruptError
 			var migrationErr *PingScoreHistoryMigrationError
 			switch {
 			case errors.As(err, &corruptErr):
-				setStatus("degraded", "corrupt", *lastSuccessfulCycleAt)
+				setStatus("corrupt", "corrupt", *lastSuccessfulCycleAt)
 				reportError("corrupt", err)
 				return
 			case errors.As(err, &migrationErr):
@@ -511,7 +538,13 @@ func pingScoreHistoryLifecycleCore(
 				setStatus("degraded", "open_failed", *lastSuccessfulCycleAt)
 				reportError("open_failed", err)
 			}
-		} else {
+		case store == nil:
+			// Defensive: open returned (nil, nil). Never call newEngine or
+			// Close on this -- there is no store -- just classify it as an
+			// open failure and let the normal retry/backoff below handle it.
+			setStatus("degraded", "open_failed", *lastSuccessfulCycleAt)
+			reportError("open_failed", errors.New("ping score history: opener returned a nil store without an error"))
+		default:
 			result := pingScoreHistoryAttempt(ctx, store, newEngine, newTicker, interval, publish, setStatus, reportError, lastSuccessfulCycleAt)
 			if result == attemptDone {
 				return
