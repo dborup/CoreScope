@@ -569,10 +569,20 @@ func main() {
 		// before dbClose: a Cycle in flight reads through s.db (the same
 		// connection dbClose closes), matching stopAnalyticsRecomp's own
 		// reasoning in step 1c above. stopPingScoreHistory() is
-		// sync.Once-safe and blocks until the worker has fully shut down
-		// (an active Cycle finished, the history store closed, the
-		// ticker stopped, any panic recovered -- Model A, no internal
-		// timeout), so this line cannot return before that is true.
+		// sync.Once-safe and blocks until the worker has fully shut down,
+		// so this line cannot return before that is true. If cancellation
+		// lands during an active steady-state Cycle, that unwind is, in
+		// order: (1) the active Cycle returns naturally; (2) the worker
+		// loop returns; (3) `defer ticker.Stop()` runs in
+		// pingScoreHistoryWorkerCore; (4) `defer closeAndReport(store,
+		// ...)` runs in pingScoreHistoryAttempt, closing the history
+		// store; (5) any panic is caught by the single outermost recover
+		// in runPingScoreHistoryLifecycleRecovered; (6) the lifecycle
+		// goroutine returns; (7) `done` closes; (8) stopPingScoreHistory()
+		// returns. Only then may this goroutine call dbClose() below. If
+		// cancellation instead lands during the very first Cycle, the
+		// ticker was never constructed yet, so step (3) simply doesn't
+		// exist -- the store is still closed (step 4) before done closes.
 		//
 		// This explicit call is NOT redundant with the plain
 		// `defer stopPingScoreHistory()` declared at Start time: that
@@ -589,7 +599,8 @@ func main() {
 		// happens-before relationship with this one. Calling it here,
 		// in this goroutine's own program order before its own
 		// dbClose(), is what actually guarantees the required
-		// stop/cancel → active Cycle finishes → history store closes →
+		// cancel → active Cycle finishes → ticker stopped (if created) →
+		// history store closes → panic-recovery finishes → done closes →
 		// main DB closes ordering on THIS goroutine's shutdown path. The
 		// sync.Once inside stopPingScoreHistory makes both this call and
 		// the later deferred one safe together: whichever runs first

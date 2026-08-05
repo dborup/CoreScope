@@ -615,11 +615,13 @@ func (r *pingScoreHistoryStatusRecorder) wrap(setStatus pingScoreHistorySetStatu
 // runPingScoreHistoryLifecycleRecovered runs pingScoreHistoryLifecycleCore
 // under a single outermost recover(). Go re-runs every deferred function
 // at every stack frame during a panic's unwind, not just at the frame
-// that eventually calls recover() -- so pingScoreHistoryAttempt's
-// `defer closeAndReport(store, ...)` and pingScoreHistoryWorkerCore's
-// `defer ticker.Stop()` still fire correctly, in the right order, on the
-// way up through this single recover point; no per-layer recover is
-// needed anywhere else in this file.
+// that eventually calls recover() -- so, on the way up through this
+// single recover point, pingScoreHistoryWorkerCore's own
+// `defer ticker.Stop()` fires FIRST (that frame is nested inside
+// pingScoreHistoryAttempt's call), and only then, as the unwind
+// continues outward, does pingScoreHistoryAttempt's own
+// `defer closeAndReport(store, ...)` fire, closing the history store.
+// No per-layer recover is needed anywhere else in this file.
 //
 // A panic here is terminal for this worker: it is reported via
 // reportError("panic", ...) with a full stack trace, status becomes
@@ -925,12 +927,18 @@ func startPingScoreHistoryEngineWithDependencies(
 //
 // stop is sync.Once-safe: calling it more than once, or concurrently
 // from multiple goroutines, is safe, and every call returns only once
-// the worker has FULLY shut down -- an active Cycle has finished, the
-// history store is closed, the ticker is stopped, and any panic has
-// already been recovered (Model A: an unbounded wait, no internal
-// timeout -- see fase 5A v2's explicit rejection of a
-// timeout-then-close-resources-anyway approach). There is no legacy-
-// recomputer fallback anywhere in this call chain.
+// the worker has FULLY shut down (Model A: an unbounded wait, no
+// internal timeout -- see fase 5A v2's explicit rejection of a
+// timeout-then-close-resources-anyway approach). Cancellation during an
+// active steady-state Cycle unwinds in order: the active Cycle finishes
+// naturally, the ticker is stopped (pingScoreHistoryWorkerCore's own
+// defer), the history store is closed (pingScoreHistoryAttempt's own
+// defer), any panic is caught by the single outermost recover, and only
+// then does the lifecycle goroutine return and `done` close. If
+// cancellation instead lands during the very first Cycle, the ticker was
+// never constructed yet, so that step simply doesn't apply -- the store
+// is still closed before `done` closes. There is no legacy-recomputer
+// fallback anywhere in this call chain.
 func StartPingScoreHistoryEngine(
 	s *Server,
 	historyPath string,
