@@ -176,34 +176,61 @@
     const isInfra = role === 'repeater' || role === 'room';
     const threshMs = isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;
     const threshold = threshMs >= 3600000 ? Math.round(threshMs / 3600000) + 'h' : Math.round(threshMs / 60000) + 'm';
+    // "activity"/"no activity", not "heard"/"not heard": status is driven
+    // by getNodeFreshness, which can be satisfied by last_seen alone via a
+    // safely-resolved relay hop (#1855's touchRelayNodesLocked), not just
+    // an ADVERT -- "heard" would overclaim the underlying signal.
     if (status === 'active') {
-      return 'Active \u2014 heard within the last ' + threshold + '.' + (isInfra ? ' Repeaters typically advertise every 12-24h.' : '');
+      return 'Active \u2014 activity within the last ' + threshold + '.' + (isInfra ? ' Repeaters typically advertise every 12-24h.' : '');
     }
     if (role === 'companion') {
-      return 'Stale \u2014 not heard for over ' + threshold + '. Companions only advertise when the user initiates \u2014 this may be normal.';
+      return 'Stale \u2014 no activity for over ' + threshold + '. Companions only advertise when the user initiates \u2014 this may be normal.';
     }
     if (role === 'sensor') {
-      return 'Stale \u2014 not heard for over ' + threshold + '. This sensor may be offline.';
+      return 'Stale \u2014 no activity for over ' + threshold + '. This sensor may be offline.';
     }
-    return 'Stale \u2014 not heard for over ' + threshold + '. This ' + role + ' may be offline or out of range.';
+    return 'Stale \u2014 no activity for over ' + threshold + '. This ' + role + ' may be offline or out of range.';
   }
 
   function getStatusInfo(n) {
     // Single source of truth for all status-related info
     const role = (n.role || '').toLowerCase();
     const roleColor = ROLE_COLORS[n.role] || '#6b7280';
-    // Prefer last_heard (from in-memory packets) > _lastHeard (health API) > last_seen (DB)
-    const lastHeardTime = n._lastHeard || n.last_heard || n.last_seen;
-    const lastHeardMs = lastHeardTime ? new Date(lastHeardTime).getTime() : 0;
-    const status = getNodeStatus(role, lastHeardMs);
+    // Resolved exactly once and reused for both the status calculation
+    // and the display-freshness calculation below, so the two can't
+    // straddle two different Date.now() reads (reviewfix on 06cd0b73).
+    const now = Date.now();
+    // Status uses the full freshness candidate set (getNodeStatus(n, now) ->
+    // getNodeFreshness with includeLiveSeen defaulted true).
+    const status = getNodeStatus(n, now);
     const statusTooltip = getStatusTooltip(role, status);
     const statusLabel = status === 'active' ? '<span style="color:var(--status-green-text)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Active' : '<span style="color:var(--text-muted)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Stale';
-    const statusAge = lastHeardMs ? (Date.now() - lastHeardMs) : Infinity;
+
+    // Display freshness is deliberately NARROWER than status freshness:
+    // { includeLiveSeen: false } excludes _liveSeen, which live.js stamps
+    // to Date.now() for every API-loaded node regardless of its true last
+    // activity -- a legitimate STATUS signal (the node really was just
+    // displayed) but showing it as "Last activity" would claim network
+    // activity that didn't happen. last_relayed can never be a candidate
+    // here (getNodeFreshness's fixed field set never includes it): the
+    // backend can currently source it from a 1-byte pubkey-prefix
+    // collision bucket (cmd/server/repeater_liveness.go), so it isn't a
+    // safe per-node signal yet.
+    const displayFresh = window.getNodeFreshness
+      ? getNodeFreshness(n, now, { includeLiveSeen: false })
+      : null;
+    const statusAge = displayFresh ? (now - displayFresh.timestampMs) : Infinity;
 
     let explanation = '';
     if (status === 'active') {
-      explanation = 'Last heard ' + (lastHeardTime ? renderNodeTimestampText(lastHeardTime) : 'unknown');
-    } else {
+      // "Last activity" rather than "Last heard": last_seen can be fresh
+      // purely from a safely-resolved relay hop (#1855's
+      // touchRelayNodesLocked), not necessarily an ADVERT, so "heard"
+      // would overclaim the source.
+      explanation = 'Last activity ' + (displayFresh
+        ? renderNodeTimestampText(new Date(displayFresh.timestampMs).toISOString())
+        : 'unknown');
+    } else if (isFinite(statusAge)) {
       const ageDays = Math.floor(statusAge / 86400000);
       const ageHours = Math.floor(statusAge / 3600000);
       const ageStr = ageDays >= 1 ? ageDays + 'd' : ageHours + 'h';
@@ -211,10 +238,15 @@
       const reason = isInfra
         ? 'repeaters typically advertise every 12-24h'
         : 'companions only advertise when user initiates, this may be normal';
-      explanation = 'Not heard for ' + ageStr + ' — ' + reason;
+      // "No activity" rather than "Not heard": displayFresh.source can be
+      // last_seen, which may be fresh purely via a safely-resolved relay
+      // hop rather than an ADVERT -- see the active-branch comment above.
+      explanation = 'No activity for ' + ageStr + ' — ' + reason;
+    } else {
+      explanation = 'Last activity unknown';
     }
 
-    return { status, statusLabel, statusTooltip, statusAge, explanation, roleColor, lastHeardMs, role };
+    return { status, statusLabel, statusTooltip, statusAge, explanation, roleColor, role };
   }
 
   function renderNodeBadges(n, roleColor) {
@@ -1298,12 +1330,7 @@
       }
       // Status filter (active/stale)
       if (statusFilter === 'active' || statusFilter === 'stale') {
-        filtered = filtered.filter(n => {
-          const role = (n.role || 'companion').toLowerCase();
-          const t = n.last_heard || n.last_seen;
-          const lastMs = t ? new Date(t).getTime() : 0;
-          return getNodeStatus(role, lastMs) === statusFilter;
-        });
+        filtered = filtered.filter(n => getNodeStatus(n) === statusFilter);
       }
       // Geo scope filter (domestic vs foreign). Classifies directly from
       // lat/lon against the configured geo_filter box/polygon rather than
@@ -1555,8 +1582,7 @@
     tbody.innerHTML = sorted.map(n => {
       const roleColor = ROLE_COLORS[n.role] || '#6b7280';
       const isClaimed = myKeys.has(n.public_key);
-      const lastSeenTime = n.last_heard || n.last_seen;
-      const status = getNodeStatus(n.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0);
+      const status = getNodeStatus(n);
       const lastSeenClass = status === 'active' ? 'last-seen-active' : 'last-seen-stale';
       const cs = _fleetSkew && _fleetSkew[n.public_key];
       const skewBadgeHtml = cs && cs.severity && cs.severity !== 'ok' ? renderSkewBadge(cs.severity, window.currentSkewValue(cs), cs) : '';

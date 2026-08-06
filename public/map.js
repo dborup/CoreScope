@@ -1771,8 +1771,7 @@
     for (const n of nodes) {
       const role = (n.role || 'companion').toLowerCase();
       if (!roleCounts[role]) roleCounts[role] = { active: 0, stale: 0 };
-      const lastMs = (n.last_heard || n.last_seen) ? new Date(n.last_heard || n.last_seen).getTime() : 0;
-      const status = getNodeStatus(role, lastMs);
+      const status = getNodeStatus(n);
       roleCounts[role][status]++;
     }
 
@@ -2113,9 +2112,7 @@
       }
       // Status filter
       if (filters.statusFilter !== 'all') {
-        const role = (n.role || 'companion').toLowerCase();
-        const lastMs = (n.last_heard || n.last_seen) ? new Date(n.last_heard || n.last_seen).getTime() : 0;
-        const status = getNodeStatus(role, lastMs);
+        const status = getNodeStatus(n);
         if (status !== filters.statusFilter) return false;
       }
       // Neighbor filter: show only the reference node and its direct neighbors
@@ -2144,8 +2141,7 @@
     }
 
     for (const node of filtered) {
-      const lastSeenTime = node.last_heard || node.last_seen;
-      const isStale = getNodeStatus(node.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0) === 'stale';
+      const isStale = getNodeStatus(node) === 'stale';
       const pk = (node.public_key || '').toLowerCase();
       const isAlsoObserver = _observerByPubkey.has(pk);
       const useLabel = node.role === 'repeater' && filters.hashLabels;

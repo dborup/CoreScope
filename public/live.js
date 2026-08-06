@@ -3164,27 +3164,55 @@
   }
 
   // Prune nodes not seen within their role's health threshold.
-  // API-loaded nodes (_fromAPI) are dimmed instead of removed — matches static map behavior.
-  // WS-only nodes (dynamically added from ADVERTs) are removed to prevent memory leaks.
+  // getNodeFreshness distinguishes "no safe timestamp at all" (skip, leave
+  // the marker untouched) from "known but old" (evaluate against the
+  // threshold) -- a plain 'active'/'stale' status can't make that
+  // distinction on its own.
+  //
+  // API-loaded nodes (_fromAPI) are dimmed instead of removed — matches
+  // static map behavior. Infra roles (repeater/room) are ALWAYS dimmed,
+  // never removed, regardless of _fromAPI -- a dimmed marker still tells
+  // operators "infrastructure exists here, no recent safe signal",
+  // whereas deletion silently rewrites the map. Remaining WS-only
+  // non-infra nodes (companion/sensor/observer) are removed to prevent
+  // unbounded memory growth.
+  //
+  // Known risk, not mitigated here: dimming WS-only infra instead of
+  // deleting it removes the memory bound that used to apply uniformly to
+  // every WS-only node. A long-lived tab can accumulate one dimmed
+  // marker per distinct repeater/room ever observed during the session,
+  // with no LRU or hard cap. Flagged as a follow-up, not addressed here.
   function pruneStaleNodes() {
     var now = Date.now();
     var pruned = false;
     for (var key in nodeMarkers) {
       var n = nodeData[key];
       if (!n) continue;
-      var lastSeen = n._liveSeen || (n.last_heard ? new Date(n.last_heard).getTime() : null) || (n.last_seen ? new Date(n.last_seen).getTime() : null);
-      if (lastSeen == null) continue;
-      var status = window.getNodeStatus ? getNodeStatus(n.role || 'unknown', lastSeen) : 'active';
+      var fresh = window.getNodeFreshness ? getNodeFreshness(n, now) : null;
+      if (fresh === null) continue;
+      // Normalized once, reused for both isInfra and the classifier below
+      // -- matches getNodeStatus(node)'s own normalization exactly, so a
+      // mixed/upper-case role (e.g. "Repeater") can't fall through to the
+      // companion threshold here while still getting the infra threshold
+      // via getNodeStatus(node) elsewhere.
+      var role = typeof n.role === 'string' ? n.role.toLowerCase() : 'companion';
+      var isInfra = role === 'repeater' || role === 'room';
+      // Reuses the already-computed fresh + now (same clock read, no
+      // second freshness pass) via the shared classifier roles.js exposes
+      // -- same threshold table getNodeStatus uses, by construction.
+      var status = window._nodeStatusFromFreshness
+        ? window._nodeStatusFromFreshness(fresh, role, now)
+        : 'active';
       var marker = nodeMarkers[key];
       if (status === 'stale') {
-        if (n._fromAPI) {
-          // API-loaded nodes: dim instead of removing (consistent with static map)
+        if (n._fromAPI || isInfra) {
+          // API-loaded or infra nodes: dim instead of removing.
           if (marker && !marker._staleDimmed) {
             marker._staleDimmed = true;
             _liveSetMarkerOpacity(marker, 0.35);
           }
         } else {
-          // WS-only nodes: remove to prevent unbounded memory growth
+          // WS-only non-infra nodes: remove to prevent unbounded memory growth
           if (marker) {
             if (nodesLayer) {
               try { nodesLayer.removeLayer(marker); } catch (e) { }
