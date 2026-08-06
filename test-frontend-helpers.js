@@ -943,6 +943,140 @@ console.log('\n=== roles.js: copyToClipboard ===');
   });
 }
 
+// ===== ROLES.JS: getNodeFreshness / getNodeStatus(node) (relay-aware staleness) =====
+console.log('\n=== roles.js: getNodeFreshness ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  const getNodeFreshness = ctx.window.getNodeFreshness;
+  const getNodeStatus = ctx.window.getNodeStatus;
+  const NOW = 1700000000000; // fixed reference instant -- getNodeFreshness takes an explicit nowMs
+  const H = 3600000;
+  const iso = (ms) => new Date(ms).toISOString();
+
+  test('getNodeFreshness is exposed on window', () => assert.strictEqual(typeof getNodeFreshness, 'function'));
+
+  test('newer last_seen wins over older _lastHeard and last_heard (max, not first-truthy)', () => {
+    const node = {
+      _lastHeard: iso(NOW - 10 * H),
+      last_heard: iso(NOW - 5 * H),
+      last_seen: iso(NOW - 1 * H),
+    };
+    const fresh = getNodeFreshness(node, NOW);
+    assert.strictEqual(fresh.timestampMs, NOW - 1 * H);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('accepts a numeric millisecond candidate', () => {
+    const fresh = getNodeFreshness({ _liveSeen: NOW - 2 * H }, NOW);
+    assert.strictEqual(fresh.timestampMs, NOW - 2 * H);
+    assert.strictEqual(fresh.source, '_liveSeen');
+  });
+
+  test('accepts a parseable string candidate', () => {
+    const fresh = getNodeFreshness({ last_seen: iso(NOW - 3 * H) }, NOW);
+    assert.strictEqual(fresh.timestampMs, NOW - 3 * H);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('null/undefined/empty-string candidates are ignored', () => {
+    const fresh = getNodeFreshness({ _liveSeen: null, _lastHeard: undefined, last_heard: '', last_seen: iso(NOW - 1 * H) }, NOW);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('boolean candidates are ignored, never implicitly Date-coerced', () => {
+    // new Date(true).getTime() === 1 -- must never be treated as a valid candidate.
+    const fresh = getNodeFreshness({ _liveSeen: true, last_seen: iso(NOW - 1 * H) }, NOW);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('object and array candidates are ignored', () => {
+    const fresh = getNodeFreshness({ _liveSeen: {}, _lastHeard: [NOW - 1 * H], last_seen: iso(NOW - 2 * H) }, NOW);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('malformed last_relayed never affects the result -- it is not a candidate field at all', () => {
+    const withBadRelay = getNodeFreshness({ last_seen: iso(NOW - 1 * H), last_relayed: 'not-a-date' }, NOW);
+    const withoutRelay = getNodeFreshness({ last_seen: iso(NOW - 1 * H) }, NOW);
+    assert.deepStrictEqual(withBadRelay, withoutRelay);
+  });
+
+  test('last_relayed alone yields null -- it is never a safe candidate', () => {
+    assert.strictEqual(getNodeFreshness({ last_relayed: iso(NOW - 60000) }, NOW), null);
+  });
+
+  test('no safe timestamps at all yields null', () => {
+    assert.strictEqual(getNodeFreshness({ role: 'repeater' }, NOW), null);
+  });
+
+  test('non-object node yields null', () => {
+    assert.strictEqual(getNodeFreshness(null, NOW), null);
+    assert.strictEqual(getNodeFreshness(undefined, NOW), null);
+  });
+
+  test('small future skew (within 30s tolerance) is accepted and clamped to now', () => {
+    const fresh = getNodeFreshness({ last_seen: iso(NOW + 10000) }, NOW);
+    assert.strictEqual(fresh.timestampMs, NOW);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('large future skew (beyond 30s tolerance) is ignored entirely', () => {
+    assert.strictEqual(getNodeFreshness({ last_seen: iso(NOW + 3600000) }, NOW), null);
+  });
+
+  test('deterministic source on an exact timestamp tie: earlier field in priority order wins', () => {
+    const tied = iso(NOW - 1 * H);
+    const fresh = getNodeFreshness({ _lastHeard: tied, last_heard: tied }, NOW);
+    assert.strictEqual(fresh.source, '_lastHeard');
+  });
+
+  test('custom fields list can exclude _liveSeen from consideration', () => {
+    const node = { _liveSeen: NOW, last_seen: iso(NOW - 1 * H) };
+    const fresh = getNodeFreshness(node, NOW, ['_lastHeard', 'last_heard', 'last_seen']);
+    assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  console.log('\n=== roles.js: getNodeStatus legacy (role, ms) signature — unchanged ===');
+  const legacyNow = Date.now();
+  test('legacy: repeater seen 1h ago is active', () => assert.strictEqual(getNodeStatus('repeater', legacyNow - 1 * H), 'active'));
+  test('legacy: repeater seen 80h ago is stale (infraSilentMs=72h)', () => assert.strictEqual(getNodeStatus('repeater', legacyNow - 80 * H), 'stale'));
+  test('legacy: companion seen 25h ago is stale (nodeSilentMs=24h)', () => assert.strictEqual(getNodeStatus('companion', legacyNow - 25 * H), 'stale'));
+  test('legacy: non-number lastSeenMs is stale', () => assert.strictEqual(getNodeStatus('repeater', undefined), 'stale'));
+
+  console.log('\n=== roles.js: getNodeStatus(node) — full-node form ===');
+  // getNodeStatus(node) has no injectable nowMs (matches the legacy form's
+  // own signature, which never had one either) -- fixtures use Date.now()-
+  // relative offsets, same convention as the legacy tests above.
+  const realNow = Date.now();
+  test('node: last_seen 25h old is active (under 72h infra threshold)', () =>
+    assert.strictEqual(getNodeStatus({ role: 'repeater', last_seen: new Date(realNow - 25 * H).toISOString() }), 'active'));
+  test('node: last_seen past 72h is stale', () =>
+    assert.strictEqual(getNodeStatus({ role: 'repeater', last_seen: new Date(realNow - 80 * H).toISOString() }), 'stale'));
+  test('node: room honors the same infra threshold as repeater', () =>
+    assert.strictEqual(getNodeStatus({ role: 'room', last_seen: new Date(realNow - 80 * H).toISOString() }), 'stale'));
+  test('node: relay-touched last_seen alone can make a node active (no _liveSeen needed)', () =>
+    assert.strictEqual(getNodeStatus({ role: 'repeater', last_seen: new Date(realNow - 5 * 60000).toISOString() }), 'active'));
+  test('node: last_relayed never influences getNodeStatus, even when very fresh', () => {
+    const status = getNodeStatus({
+      role: 'repeater',
+      last_seen: new Date(realNow - 80 * H).toISOString(),
+      last_relayed: new Date(realNow - 60000).toISOString(),
+    });
+    assert.strictEqual(status, 'stale'); // a fresh last_relayed must NOT flip this to active
+  });
+  test('node: missing role defaults to companion thresholds', () =>
+    assert.strictEqual(getNodeStatus({ last_seen: new Date(realNow - 25 * H).toISOString() }), 'stale'));
+  test('node: API-load _liveSeen stamp keeps an old node active (existing, intentionally unchanged semantic)', () => {
+    // live.js stamps _liveSeen = Date.now() for every API-loaded node
+    // regardless of true last activity (public/live.js, list.forEach ...
+    // n._liveSeen = now). This test locks in that existing status
+    // semantic so a future change to the stamping logic is caught here,
+    // not discovered as a silent behavior drift.
+    const node = { role: 'companion', _liveSeen: realNow, last_seen: new Date(realNow - 240 * H).toISOString() };
+    assert.strictEqual(getNodeStatus(node), 'active');
+  });
+}
+
 // ===== LIVE.JS: pruneStaleNodes =====
 console.log('\n=== live.js: pruneStaleNodes ===');
 {
@@ -1062,20 +1196,27 @@ console.log('\n=== live.js: pruneStaleNodes ===');
     const markers = ctx.window._liveNodeMarkers();
     const data = ctx.window._liveNodeData();
 
-    // A repeater seen 48h ago should NOT be pruned (infraSilentMs = 72h)
+    // A repeater seen 48h ago should NOT be stale (infraSilentMs = 72h)
     markers['rpt1'] = { _glowMarker: null };
     data['rpt1'] = { public_key: 'rpt1', role: 'repeater', _liveSeen: Date.now() - 48 * 3600000 };
 
-    // A repeater seen 96h ago SHOULD be pruned
-    markers['rpt2'] = { _glowMarker: null };
+    // A repeater seen 96h ago IS stale, but infra is dimmed, never removed
+    // (dim-not-delete, #1598) -- see the dedicated dim/delete matrix tests
+    // below for the WS-only-vs-_fromAPI/companion-vs-infra split.
+    markers['rpt2'] = {
+      getElement: function() { return { style: {} }; },
+      _glowMarker: null,
+    };
     data['rpt2'] = { public_key: 'rpt2', role: 'repeater', _liveSeen: Date.now() - 96 * 3600000 };
 
     prune();
 
     assert.ok(markers['rpt1'], 'repeater at 48h should remain (under 72h threshold)');
     assert.ok(data['rpt1'], 'repeater data at 48h should remain');
-    assert.ok(!markers['rpt2'], 'repeater at 96h should be pruned (over 72h threshold)');
-    assert.ok(!data['rpt2'], 'repeater data at 96h should be pruned');
+    assert.ok(!markers['rpt1']._staleDimmed, 'repeater at 48h should not be dimmed');
+    assert.ok(markers['rpt2'], 'repeater at 96h should remain (dim-not-delete)');
+    assert.ok(data['rpt2'], 'repeater data at 96h should remain (dim-not-delete)');
+    assert.strictEqual(markers['rpt2']._staleDimmed, true, 'repeater at 96h should be dimmed');
   });
 
   test('node count does not grow unbounded with repeated ADVERTs', () => {
@@ -1200,6 +1341,52 @@ console.log('\n=== live.js: pruneStaleNodes ===');
     assert.ok(!data['wsNode'], 'WS-only stale node data should be removed');
     assert.ok(markers['apiNode'], 'API stale node should NOT be removed');
     assert.ok(data['apiNode'], 'API stale node data should NOT be removed');
+  });
+
+  test('pruneStaleNodes dims WS-only stale infra instead of removing it (#1598)', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+
+    // WS-only repeater (no _fromAPI) — dimmed, not removed
+    markers['wsRepeater'] = { getElement: function() { return { style: {} }; }, _glowMarker: null };
+    data['wsRepeater'] = { public_key: 'wsRepeater', role: 'repeater', _liveSeen: Date.now() - 96 * 3600000 };
+
+    // WS-only sensor (no _fromAPI) — still removed, scope doesn't extend to non-infra
+    markers['wsSensor'] = { _glowMarker: null };
+    data['wsSensor'] = { public_key: 'wsSensor', role: 'sensor', _liveSeen: Date.now() - 48 * 3600000 };
+
+    prune();
+
+    assert.ok(markers['wsRepeater'], 'WS-only stale repeater should remain (dimmed)');
+    assert.ok(data['wsRepeater'], 'WS-only stale repeater data should remain');
+    assert.strictEqual(markers['wsRepeater']._staleDimmed, true, 'WS-only stale repeater should be dimmed');
+    assert.ok(!markers['wsSensor'], 'WS-only stale sensor should still be removed');
+    assert.ok(!data['wsSensor'], 'WS-only stale sensor data should still be removed');
+  });
+
+  test('pruneStaleNodes ignores last_relayed entirely — skips a node with no other signal', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+
+    // last_relayed is fresh, but it is not a getNodeFreshness candidate --
+    // with no _liveSeen/_lastHeard/last_heard/last_seen, freshness is null
+    // and the node must be left untouched (not treated as active, not
+    // pruned), exactly like the no-timestamp-at-all case.
+    markers['relayOnly'] = { _glowMarker: null };
+    data['relayOnly'] = {
+      public_key: 'relayOnly', role: 'repeater',
+      last_relayed: new Date(Date.now() - 60000).toISOString(),
+    };
+
+    prune();
+
+    assert.ok(markers['relayOnly'], 'node with only last_relayed should not be pruned');
+    assert.ok(data['relayOnly'], 'node data with only last_relayed should remain');
+    assert.ok(!markers['relayOnly']._staleDimmed, 'node with only last_relayed should not be dimmed either');
   });
 
   test('pruneStaleNodes cleans up nodeActivity for removed nodes', () => {
@@ -4092,7 +4279,9 @@ console.log('\n=== nodes.js: getStatusInfo edge cases ===');
   test('getStatusInfo with no timestamps returns stale', () => {
     const info = gsi({ role: 'companion' });
     assert.strictEqual(info.status, 'stale');
-    assert.strictEqual(info.lastHeardMs, 0);
+    // No safe display candidate at all -> statusAge is Infinity, not 0
+    // (getNodeFreshness returns null, not a synthetic zero timestamp).
+    assert.strictEqual(info.statusAge, Infinity);
   });
 
   test('getStatusInfo uses last_seen as fallback', () => {
@@ -4121,7 +4310,34 @@ console.log('\n=== nodes.js: getStatusInfo edge cases ===');
 
   test('getStatusInfo returns explanation for active node', () => {
     const info = gsi({ role: 'repeater', last_heard: new Date().toISOString() });
-    assert.ok(info.explanation.includes('Last heard'));
+    // "Last activity", not "Last heard" -- last_seen can be fresh purely
+    // from a safely-resolved relay hop, not just an ADVERT.
+    assert.ok(info.explanation.includes('Last activity'));
+  });
+
+  test('getStatusInfo explanation shows "Last activity unknown" when active purely via _liveSeen with no display-safe timestamp', () => {
+    // _liveSeen is a valid STATUS signal but excluded from the display
+    // freshness computation -- with no _lastHeard/last_heard/last_seen at
+    // all, there is nothing safe to show even though status is active.
+    const info = gsi({ role: 'companion', _liveSeen: Date.now() });
+    assert.strictEqual(info.status, 'active');
+    assert.strictEqual(info.explanation, 'Last activity unknown');
+  });
+
+  test('getStatusInfo explanation reflects a relay-touched last_seen neutrally as "Last activity"', () => {
+    const recent = new Date(Date.now() - 5 * 60000).toISOString();
+    const info = gsi({ role: 'repeater', last_seen: recent });
+    assert.strictEqual(info.status, 'active');
+    assert.ok(info.explanation.includes('Last activity'));
+    assert.ok(!info.explanation.includes('Last heard'));
+  });
+
+  test('getStatusInfo explanation never reflects last_relayed, even when it alone is fresh', () => {
+    const staleAdvert = new Date(Date.now() - 96 * 3600000).toISOString();
+    const freshRelay = new Date(Date.now() - 60000).toISOString();
+    const info = gsi({ role: 'repeater', last_heard: staleAdvert, last_relayed: freshRelay });
+    assert.strictEqual(info.status, 'stale'); // last_relayed must not flip status
+    assert.ok(!info.explanation.includes('Last activity')); // stale branch, not the active/last_relayed text
   });
 
   test('getStatusInfo returns explanation for stale companion', () => {

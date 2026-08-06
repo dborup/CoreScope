@@ -61,17 +61,18 @@ test('0 lastSeenMs → stale', () => assert.strictEqual(getNodeStatus('repeater'
 
 
 
-// === Bug check: renderRows uses last_seen instead of last_heard || last_seen ===
+// === Bug check: nodes.js row rendering must use the node-object form of
+// getNodeStatus (getNodeStatus(n)) so relay-touched last_seen, _liveSeen,
+// and last_heard/_lastHeard are all considered via getNodeFreshness --
+// not an inlined last_heard||last_seen fallback that could silently drop
+// a signal again in the future. ===
 console.log('\n=== BUG CHECK ===');
 const nodesJs = fs.readFileSync('public/nodes.js', 'utf8');
-const renderRowsMatch = nodesJs.match(/const status = getNodeStatus\(n\.role[^;]+/);
+const renderRowsMatch = nodesJs.match(/const status = getNodeStatus\(n\)/);
 if (renderRowsMatch) {
-  const line = renderRowsMatch[0];
-  console.log(`  renderRows status line: ${line}`);
-  if (!line.includes('last_heard')) {
-    console.log('  🐛 BUG: renderRows() uses only n.last_seen, ignoring n.last_heard!');
-    console.log('     Should be: n.last_heard || n.last_seen');
-  }
+  console.log(`  renderRows status line: ${renderRowsMatch[0]}`);
+} else {
+  console.log('  🐛 BUG: nodes.js row rendering no longer calls getNodeStatus(n) -- freshness regression risk.');
 }
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);

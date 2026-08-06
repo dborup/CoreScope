@@ -444,12 +444,102 @@
     };
   };
 
-  // Simplified two-state helper: returns 'active' or 'stale'
-  window.getNodeStatus = function (role, lastSeenMs) {
+  function _nodeStaleMs(role) {
     var isInfra = role === 'repeater' || role === 'room';
-    var staleMs = isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;
-    var age = typeof lastSeenMs === 'number' ? (Date.now() - lastSeenMs) : Infinity;
-    return age < staleMs ? 'active' : 'stale';
+    return isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;
+  }
+
+  function _statusFromAge(ageMs, staleMs) {
+    return ageMs < staleMs ? 'active' : 'stale';
+  }
+
+  // Default candidate fields for getNodeFreshness, in tie-break priority
+  // order (first listed wins when two candidates parse to the identical
+  // timestamp). last_relayed is deliberately never a candidate: the
+  // backend's RepeaterRelayInfo.LastRelayed can currently be sourced from
+  // a 1-byte wire-prefix collision bucket (cmd/server/repeater_liveness.go
+  // collectRelayEntriesLocked's fromPrefix fallback), so it is not a safe
+  // per-node signal until a trusted/exact-only backend field exists.
+  var NODE_FRESHNESS_FIELDS = ['_liveSeen', '_lastHeard', 'last_heard', 'last_seen'];
+
+  // Tolerance for a candidate timestamp landing after `nowMs` (client/server
+  // clock drift, not malicious data). Reuses the 30000ms magnitude already
+  // established in observers.js's healthStatus() for the same class of
+  // problem (comparing a server-issued timestamp against the client's
+  // Date.now()) -- this is an independent implementation, not shared code
+  // or a shared policy with that helper.
+  var NODE_FRESHNESS_FUTURE_TOLERANCE_MS = 30000;
+
+  // Parses a single freshness candidate value. Accepts a finite number
+  // (milliseconds) or a non-empty string (parsed via Date). Everything
+  // else -- null, undefined, '', boolean, object, array -- is rejected
+  // explicitly by type, never handed to `new Date()` for implicit
+  // coercion (e.g. `new Date(true).getTime()` is 1, a finite but bogus
+  // result that a bare truthy-check would let through).
+  function _parseFreshnessCandidate(value) {
+    if (typeof value === 'number') {
+      return isFinite(value) ? value : null;
+    }
+    if (typeof value === 'string' && value !== '') {
+      var t = new Date(value).getTime();
+      return isFinite(t) ? t : null;
+    }
+    return null;
+  }
+
+  // getNodeFreshness(node, nowMs, fields?) -> { timestampMs, source } | null
+  //
+  // Returns the NEWEST valid, safe timestamp found across `fields`
+  // (defaults to NODE_FRESHNESS_FIELDS), or null if none parsed. Selection
+  // is by max value, not first-truthy-field -- an older but present field
+  // earlier in `fields` never masks a newer one later in the list.
+  //
+  // Future timestamps: a candidate within NODE_FRESHNESS_FUTURE_TOLERANCE_MS
+  // of `nowMs` is accepted and clamped to `nowMs`; a candidate further out
+  // is dropped entirely (never allowed to win, clamped or not).
+  //
+  // Tie-break: when two candidates parse to the identical millisecond
+  // value, the one appearing earlier in `fields` wins (deterministic).
+  //
+  // `nowMs` must be passed explicitly by callers that need deterministic
+  // behavior (tests); it defaults to Date.now() only for convenience at
+  // real call sites.
+  window.getNodeFreshness = function (node, nowMs, fields) {
+    if (!node || typeof node !== 'object') return null;
+    var now = typeof nowMs === 'number' ? nowMs : Date.now();
+    var candidateFields = fields || NODE_FRESHNESS_FIELDS;
+    var best = null;
+    for (var i = 0; i < candidateFields.length; i++) {
+      var field = candidateFields[i];
+      var t = _parseFreshnessCandidate(node[field]);
+      if (t === null) continue;
+      if (t > now + NODE_FRESHNESS_FUTURE_TOLERANCE_MS) continue;
+      if (t > now) t = now;
+      if (best === null || t > best.timestampMs) {
+        best = { timestampMs: t, source: field };
+      }
+    }
+    return best;
+  };
+
+  // getNodeStatus(role, lastSeenMs) -> 'active' | 'stale'
+  //   Legacy two-arg signature. Exact prior semantics preserved verbatim
+  //   -- same age expression, same threshold table, same boundary
+  //   comparison. No new parsing or future-timestamp handling applies here.
+  // getNodeStatus(node) -> 'active' | 'stale'
+  //   Full-node form. Freshness comes from getNodeFreshness (max of safe
+  //   candidates, future-tolerant, last_relayed never consulted), then the
+  //   SAME threshold/boundary rule as the legacy form decides the result.
+  window.getNodeStatus = function (roleOrNode, lastSeenMs) {
+    if (roleOrNode && typeof roleOrNode === 'object') {
+      var node = roleOrNode;
+      var role = node.role || 'companion';
+      var fresh = window.getNodeFreshness(node, Date.now());
+      var age = fresh ? (Date.now() - fresh.timestampMs) : Infinity;
+      return _statusFromAge(age, _nodeStaleMs(role));
+    }
+    var ageLegacy = typeof lastSeenMs === 'number' ? (Date.now() - lastSeenMs) : Infinity;
+    return _statusFromAge(ageLegacy, _nodeStaleMs(roleOrNode));
   };
 
   // ─── Tile URLs ───

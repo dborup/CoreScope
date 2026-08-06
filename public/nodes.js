@@ -192,18 +192,37 @@
     // Single source of truth for all status-related info
     const role = (n.role || '').toLowerCase();
     const roleColor = ROLE_COLORS[n.role] || '#6b7280';
-    // Prefer last_heard (from in-memory packets) > _lastHeard (health API) > last_seen (DB)
-    const lastHeardTime = n._lastHeard || n.last_heard || n.last_seen;
-    const lastHeardMs = lastHeardTime ? new Date(lastHeardTime).getTime() : 0;
-    const status = getNodeStatus(role, lastHeardMs);
+    // Status uses the full freshness candidate set (getNodeStatus(n) ->
+    // getNodeFreshness with its default fields, including _liveSeen).
+    const status = getNodeStatus(n);
     const statusTooltip = getStatusTooltip(role, status);
     const statusLabel = status === 'active' ? '<span style="color:var(--status-green-text)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Active' : '<span style="color:var(--text-muted)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Stale';
-    const statusAge = lastHeardMs ? (Date.now() - lastHeardMs) : Infinity;
+
+    // Display freshness is deliberately NARROWER than status freshness:
+    // _liveSeen is excluded here. live.js stamps _liveSeen = Date.now()
+    // for every API-loaded node regardless of its true last activity, so
+    // it's a legitimate STATUS signal (the node really was just
+    // displayed) but showing it as "Last activity" would claim network
+    // activity that didn't happen. last_relayed is excluded for the same
+    // reason it's excluded from status everywhere: the backend can
+    // currently source it from a 1-byte pubkey-prefix collision bucket
+    // (cmd/server/repeater_liveness.go), so it isn't a safe per-node
+    // signal yet.
+    const displayFresh = window.getNodeFreshness
+      ? getNodeFreshness(n, Date.now(), ['_lastHeard', 'last_heard', 'last_seen'])
+      : null;
+    const statusAge = displayFresh ? (Date.now() - displayFresh.timestampMs) : Infinity;
 
     let explanation = '';
     if (status === 'active') {
-      explanation = 'Last heard ' + (lastHeardTime ? renderNodeTimestampText(lastHeardTime) : 'unknown');
-    } else {
+      // "Last activity" rather than "Last heard": last_seen can be fresh
+      // purely from a safely-resolved relay hop (#1855's
+      // touchRelayNodesLocked), not necessarily an ADVERT, so "heard"
+      // would overclaim the source.
+      explanation = 'Last activity ' + (displayFresh
+        ? renderNodeTimestampText(new Date(displayFresh.timestampMs).toISOString())
+        : 'unknown');
+    } else if (isFinite(statusAge)) {
       const ageDays = Math.floor(statusAge / 86400000);
       const ageHours = Math.floor(statusAge / 3600000);
       const ageStr = ageDays >= 1 ? ageDays + 'd' : ageHours + 'h';
@@ -212,9 +231,11 @@
         ? 'repeaters typically advertise every 12-24h'
         : 'companions only advertise when user initiates, this may be normal';
       explanation = 'Not heard for ' + ageStr + ' — ' + reason;
+    } else {
+      explanation = 'Last activity unknown';
     }
 
-    return { status, statusLabel, statusTooltip, statusAge, explanation, roleColor, lastHeardMs, role };
+    return { status, statusLabel, statusTooltip, statusAge, explanation, roleColor, role };
   }
 
   function renderNodeBadges(n, roleColor) {
@@ -1298,12 +1319,7 @@
       }
       // Status filter (active/stale)
       if (statusFilter === 'active' || statusFilter === 'stale') {
-        filtered = filtered.filter(n => {
-          const role = (n.role || 'companion').toLowerCase();
-          const t = n.last_heard || n.last_seen;
-          const lastMs = t ? new Date(t).getTime() : 0;
-          return getNodeStatus(role, lastMs) === statusFilter;
-        });
+        filtered = filtered.filter(n => getNodeStatus(n) === statusFilter);
       }
       // Geo scope filter (domestic vs foreign). Classifies directly from
       // lat/lon against the configured geo_filter box/polygon rather than
@@ -1555,8 +1571,7 @@
     tbody.innerHTML = sorted.map(n => {
       const roleColor = ROLE_COLORS[n.role] || '#6b7280';
       const isClaimed = myKeys.has(n.public_key);
-      const lastSeenTime = n.last_heard || n.last_seen;
-      const status = getNodeStatus(n.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0);
+      const status = getNodeStatus(n);
       const lastSeenClass = status === 'active' ? 'last-seen-active' : 'last-seen-stale';
       const cs = _fleetSkew && _fleetSkew[n.public_key];
       const skewBadgeHtml = cs && cs.severity && cs.severity !== 'ok' ? renderSkewBadge(cs.severity, window.currentSkewValue(cs), cs) : '';
