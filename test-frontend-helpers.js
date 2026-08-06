@@ -1030,10 +1030,62 @@ console.log('\n=== roles.js: getNodeFreshness ===');
     assert.strictEqual(fresh.source, '_lastHeard');
   });
 
-  test('custom fields list can exclude _liveSeen from consideration', () => {
+  test('{ includeLiveSeen: false } excludes _liveSeen from consideration', () => {
     const node = { _liveSeen: NOW, last_seen: iso(NOW - 1 * H) };
-    const fresh = getNodeFreshness(node, NOW, ['_lastHeard', 'last_heard', 'last_seen']);
+    const fresh = getNodeFreshness(node, NOW, { includeLiveSeen: false });
     assert.strictEqual(fresh.source, 'last_seen');
+  });
+
+  test('default (options omitted) still includes _liveSeen', () => {
+    const node = { _liveSeen: NOW, last_seen: iso(NOW - 1 * H) };
+    const fresh = getNodeFreshness(node, NOW);
+    assert.strictEqual(fresh.source, '_liveSeen');
+  });
+
+  test('{ includeLiveSeen: true } explicitly is equivalent to the default', () => {
+    const node = { _liveSeen: NOW, last_seen: iso(NOW - 1 * H) };
+    const fresh = getNodeFreshness(node, NOW, { includeLiveSeen: true });
+    assert.strictEqual(fresh.source, '_liveSeen');
+  });
+
+  test('there is no way for a caller to smuggle last_relayed in as a candidate', () => {
+    // Reviewfix on 06cd0b73: the original getNodeFreshness(node, nowMs,
+    // fields?) let ANY caller pass ['last_relayed'] and defeat the safety
+    // guarantee. The public contract is now a fixed field set plus a
+    // single boolean option -- there is no argument shape that reaches
+    // last_relayed. Try every plausible misuse and confirm none of them
+    // pick up a last_relayed-only value.
+    const node = { last_relayed: iso(NOW - 1000) };
+    assert.strictEqual(getNodeFreshness(node, NOW, ['last_relayed']), null, 'an array 3rd arg is not the fields list anymore -- ignored as a non-matching options shape');
+    assert.strictEqual(getNodeFreshness(node, NOW, { fields: ['last_relayed'] }), null, 'an unrecognized options key must be a no-op, not a backdoor');
+    assert.strictEqual(getNodeFreshness(node, NOW, { includeLiveSeen: false, fields: ['last_relayed'] }), null);
+    assert.strictEqual(getNodeFreshness(node, NOW, 'last_relayed'), null, 'a bare string 3rd arg must not be treated as a field name');
+  });
+
+  console.log('\n=== roles.js: getNodeFreshness nowMs validation (fix: non-finite falls back to Date.now()) ===');
+  test('NaN nowMs falls back to Date.now() rather than producing a bogus result', () => {
+    const realNow = Date.now();
+    const fresh = getNodeFreshness({ last_seen: new Date(realNow - 60000).toISOString() }, NaN);
+    assert.ok(fresh, 'a recent last_seen must still resolve to a valid freshness with NaN nowMs');
+    assert.ok(Math.abs(fresh.timestampMs - (realNow - 60000)) < 5000, 'timestamp should reflect the real Date.now(), not NaN arithmetic');
+  });
+  test('+Infinity nowMs falls back to Date.now()', () => {
+    const realNow = Date.now();
+    const fresh = getNodeFreshness({ last_seen: new Date(realNow - 60000).toISOString() }, Infinity);
+    assert.ok(fresh);
+    assert.ok(Math.abs(fresh.timestampMs - (realNow - 60000)) < 5000);
+  });
+  test('-Infinity nowMs falls back to Date.now()', () => {
+    const realNow = Date.now();
+    const fresh = getNodeFreshness({ last_seen: new Date(realNow - 60000).toISOString() }, -Infinity);
+    assert.ok(fresh);
+    assert.ok(Math.abs(fresh.timestampMs - (realNow - 60000)) < 5000);
+  });
+  test('a non-number nowMs (string) falls back to Date.now()', () => {
+    const realNow = Date.now();
+    const fresh = getNodeFreshness({ last_seen: new Date(realNow - 60000).toISOString() }, 'not-a-number');
+    assert.ok(fresh);
+    assert.ok(Math.abs(fresh.timestampMs - (realNow - 60000)) < 5000);
   });
 
   console.log('\n=== roles.js: getNodeStatus legacy (role, ms) signature — unchanged ===');
@@ -1044,9 +1096,10 @@ console.log('\n=== roles.js: getNodeFreshness ===');
   test('legacy: non-number lastSeenMs is stale', () => assert.strictEqual(getNodeStatus('repeater', undefined), 'stale'));
 
   console.log('\n=== roles.js: getNodeStatus(node) — full-node form ===');
-  // getNodeStatus(node) has no injectable nowMs (matches the legacy form's
-  // own signature, which never had one either) -- fixtures use Date.now()-
-  // relative offsets, same convention as the legacy tests above.
+  // getNodeStatus(node, nowMs?) accepts an optional explicit nowMs (added
+  // in the 06cd0b73 reviewfix -- see the dedicated determinism section
+  // below). These fixtures don't need it and use Date.now()-relative
+  // offsets, same convention as the legacy tests above.
   const realNow = Date.now();
   test('node: last_seen 25h old is active (under 72h infra threshold)', () =>
     assert.strictEqual(getNodeStatus({ role: 'repeater', last_seen: new Date(realNow - 25 * H).toISOString() }), 'active'));
@@ -1075,6 +1128,86 @@ console.log('\n=== roles.js: getNodeFreshness ===');
     const node = { role: 'companion', _liveSeen: realNow, last_seen: new Date(realNow - 240 * H).toISOString() };
     assert.strictEqual(getNodeStatus(node), 'active');
   });
+
+  console.log('\n=== roles.js: getNodeStatus(node, nowMs) — one deterministic now, exact boundaries ===');
+  {
+    const FIXED = 1700000000000;
+    const HEALTH_THRESHOLDS = ctx.window.HEALTH_THRESHOLDS;
+
+    test('exact threshold boundary (age === nodeSilentMs) is stale, not active', () => {
+      const node = { role: 'companion', last_seen: new Date(FIXED - HEALTH_THRESHOLDS.nodeSilentMs).toISOString() };
+      assert.strictEqual(getNodeStatus(node, FIXED), 'stale');
+    });
+
+    test('just under the threshold (age = nodeSilentMs - 1) is active', () => {
+      const node = { role: 'companion', last_seen: new Date(FIXED - HEALTH_THRESHOLDS.nodeSilentMs + 1).toISOString() };
+      assert.strictEqual(getNodeStatus(node, FIXED), 'active');
+    });
+
+    test('exact infra threshold boundary (age === infraSilentMs) is stale', () => {
+      const node = { role: 'repeater', last_seen: new Date(FIXED - HEALTH_THRESHOLDS.infraSilentMs).toISOString() };
+      assert.strictEqual(getNodeStatus(node, FIXED), 'stale');
+    });
+
+    test('timestamp exactly at nowMs+30s is accepted (clamped to now) -> active', () => {
+      const node = { role: 'companion', last_seen: new Date(FIXED + 30000).toISOString() };
+      assert.strictEqual(getNodeStatus(node, FIXED), 'active');
+    });
+
+    test('timestamp just over nowMs+30s is dropped as a candidate -> no safe timestamp -> stale', () => {
+      const node = { role: 'companion', last_seen: new Date(FIXED + 30001).toISOString() };
+      assert.strictEqual(getNodeStatus(node, FIXED), 'stale');
+    });
+
+    test('repeated calls with the same explicit nowMs return an identical result regardless of real wall-clock time passing', () => {
+      const node = { role: 'companion', last_seen: new Date(FIXED - 23 * H).toISOString() }; // just under 24h -> active
+      const first = getNodeStatus(node, FIXED);
+      // Force real wall-clock time to actually advance between the two
+      // calls -- if the implementation secretly read a fresh Date.now()
+      // anywhere instead of using the passed nowMs throughout, this gap
+      // is exactly what would surface it as a flip in the result.
+      const spinUntil = Date.now() + 5;
+      while (Date.now() < spinUntil) { /* spin */ }
+      const second = getNodeStatus(node, FIXED);
+      assert.strictEqual(first, 'active');
+      assert.strictEqual(second, 'active');
+      assert.strictEqual(first, second);
+    });
+  }
+
+  console.log('\n=== roles.js: getNodeStatus(node) — role normalization (object form only) ===');
+  {
+    const FIXED = 1700000000000;
+    const justUnderInfra = new Date(FIXED - (259200000 - 1)).toISOString(); // infraSilentMs - 1ms
+
+    test('role "Repeater" (mixed case) uses the 72h infra threshold', () =>
+      assert.strictEqual(getNodeStatus({ role: 'Repeater', last_seen: justUnderInfra }, FIXED), 'active'));
+    test('role "REPEATER" (upper case) uses the 72h infra threshold', () =>
+      assert.strictEqual(getNodeStatus({ role: 'REPEATER', last_seen: justUnderInfra }, FIXED), 'active'));
+    test('role "Room" (mixed case) uses the 72h infra threshold', () =>
+      assert.strictEqual(getNodeStatus({ role: 'Room', last_seen: justUnderInfra }, FIXED), 'active'));
+    test('role "room" (already lowercase) still uses the 72h infra threshold', () =>
+      assert.strictEqual(getNodeStatus({ role: 'room', last_seen: justUnderInfra }, FIXED), 'active'));
+    test('mixed-case non-infra role ("Companion") does NOT get the infra threshold', () => {
+      // At justUnderInfra's age (just under 72h), a companion (24h
+      // threshold) must be stale -- proves normalization doesn't
+      // accidentally widen the companion/sensor bucket too.
+      assert.strictEqual(getNodeStatus({ role: 'Companion', last_seen: justUnderInfra }, FIXED), 'stale');
+    });
+    test('missing role falls back safely to companion thresholds', () =>
+      assert.strictEqual(getNodeStatus({ last_seen: justUnderInfra }, FIXED), 'stale'));
+    test('non-string role (number) falls back safely to companion thresholds', () =>
+      assert.strictEqual(getNodeStatus({ role: 42, last_seen: justUnderInfra }, FIXED), 'stale'));
+    test('non-string role (object) falls back safely to companion thresholds', () =>
+      assert.strictEqual(getNodeStatus({ role: {}, last_seen: justUnderInfra }, FIXED), 'stale'));
+    test('legacy getNodeStatus(role, ms) is NOT normalized -- role is used exactly as given', () => {
+      // Reviewfix explicitly scopes normalization to the object form only.
+      // A raw uppercase role string through the legacy path does not get
+      // the infra threshold (matches the byte-identical prior behavior).
+      const ageJustUnderInfra = 259200000 - 1;
+      assert.strictEqual(getNodeStatus('REPEATER', Date.now() - ageJustUnderInfra), 'stale');
+    });
+  }
 }
 
 // ===== LIVE.JS: pruneStaleNodes =====

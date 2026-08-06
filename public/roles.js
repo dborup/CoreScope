@@ -453,14 +453,18 @@
     return ageMs < staleMs ? 'active' : 'stale';
   }
 
-  // Default candidate fields for getNodeFreshness, in tie-break priority
-  // order (first listed wins when two candidates parse to the identical
-  // timestamp). last_relayed is deliberately never a candidate: the
-  // backend's RepeaterRelayInfo.LastRelayed can currently be sourced from
-  // a 1-byte wire-prefix collision bucket (cmd/server/repeater_liveness.go
-  // collectRelayEntriesLocked's fromPrefix fallback), so it is not a safe
-  // per-node signal until a trusted/exact-only backend field exists.
+  // The full, fixed candidate set for getNodeFreshness, in tie-break
+  // priority order (first listed wins when two candidates parse to the
+  // identical timestamp). last_relayed is deliberately absent and there
+  // is NO way for a caller to add it or any other field: the public
+  // signature only exposes a boolean includeLiveSeen option, never an
+  // arbitrary field list -- the backend's RepeaterRelayInfo.LastRelayed
+  // can currently be sourced from a 1-byte wire-prefix collision bucket
+  // (cmd/server/repeater_liveness.go collectRelayEntriesLocked's
+  // fromPrefix fallback), so it must never be reachable as a candidate.
   var NODE_FRESHNESS_FIELDS = ['_liveSeen', '_lastHeard', 'last_heard', 'last_seen'];
+  // Used when { includeLiveSeen: false } is passed -- see getNodeFreshness.
+  var NODE_FRESHNESS_FIELDS_NO_LIVESEEN = ['_lastHeard', 'last_heard', 'last_seen'];
 
   // Tolerance for a candidate timestamp landing after `nowMs` (client/server
   // clock drift, not malicious data). Reuses the 30000ms magnitude already
@@ -487,27 +491,45 @@
     return null;
   }
 
-  // getNodeFreshness(node, nowMs, fields?) -> { timestampMs, source } | null
+  // Resolves the "now" instant used for both future-tolerance clamping and
+  // (by callers) age calculation. Only a finite number is honored; NaN,
+  // +/-Infinity, or any non-number falls back to Date.now() rather than
+  // being rejected -- keeps the contract permissive for callers that don't
+  // care about determinism, while still being fully overridable by tests.
+  function _resolveNow(nowMs) {
+    return (typeof nowMs === 'number' && isFinite(nowMs)) ? nowMs : Date.now();
+  }
+
+  // getNodeFreshness(node, nowMs, options?) -> { timestampMs, source } | null
   //
-  // Returns the NEWEST valid, safe timestamp found across `fields`
-  // (defaults to NODE_FRESHNESS_FIELDS), or null if none parsed. Selection
-  // is by max value, not first-truthy-field -- an older but present field
-  // earlier in `fields` never masks a newer one later in the list.
+  // Returns the NEWEST valid, safe timestamp found across a FIXED candidate
+  // set, or null if none parsed. Selection is by max value, not
+  // first-truthy-field -- an older but present field never masks a newer
+  // one. The candidate set cannot be extended or replaced by the caller;
+  // the only option is:
+  //   { includeLiveSeen: false } -- excludes _liveSeen, leaving
+  //     _lastHeard/last_heard/last_seen. Used by nodes.js's "Last
+  //     activity" display text, since live.js stamps _liveSeen =
+  //     Date.now() for every API-loaded node regardless of true recency
+  //     -- a valid STATUS signal but not a safe DISPLAY signal.
+  // Default (options omitted or includeLiveSeen not false) includes
+  // _liveSeen. last_relayed is NEVER a candidate, under any options.
   //
   // Future timestamps: a candidate within NODE_FRESHNESS_FUTURE_TOLERANCE_MS
   // of `nowMs` is accepted and clamped to `nowMs`; a candidate further out
   // is dropped entirely (never allowed to win, clamped or not).
   //
   // Tie-break: when two candidates parse to the identical millisecond
-  // value, the one appearing earlier in `fields` wins (deterministic).
+  // value, the one appearing earlier in the candidate set wins
+  // (deterministic).
   //
-  // `nowMs` must be passed explicitly by callers that need deterministic
-  // behavior (tests); it defaults to Date.now() only for convenience at
-  // real call sites.
-  window.getNodeFreshness = function (node, nowMs, fields) {
+  // `nowMs` must be a finite number to be honored (see _resolveNow);
+  // callers that need deterministic behavior (tests) must pass one.
+  window.getNodeFreshness = function (node, nowMs, options) {
     if (!node || typeof node !== 'object') return null;
-    var now = typeof nowMs === 'number' ? nowMs : Date.now();
-    var candidateFields = fields || NODE_FRESHNESS_FIELDS;
+    var now = _resolveNow(nowMs);
+    var includeLiveSeen = !(options && options.includeLiveSeen === false);
+    var candidateFields = includeLiveSeen ? NODE_FRESHNESS_FIELDS : NODE_FRESHNESS_FIELDS_NO_LIVESEEN;
     var best = null;
     for (var i = 0; i < candidateFields.length; i++) {
       var field = candidateFields[i];
@@ -522,23 +544,42 @@
     return best;
   };
 
+  // Classifies an ALREADY-COMPUTED getNodeFreshness result against a role
+  // and a fixed `now`, sharing the exact threshold table and boundary
+  // comparison (age < staleMs is active, else stale) that getNodeStatus
+  // uses -- without recomputing freshness. Exposed on window (not just
+  // closure-local) so live.js's pruneStaleNodes, which lives in a
+  // separate file/closure, can reuse it with the SAME now it already
+  // resolved for the freshness lookup, instead of parsing/validating the
+  // timestamp against a second, potentially different Date.now() call.
+  // `role` is used as-is (not normalized) -- callers decide normalization.
+  function _statusFromFreshness(fresh, role, now) {
+    var age = fresh ? (now - fresh.timestampMs) : Infinity;
+    return _statusFromAge(age, _nodeStaleMs(role));
+  }
+  window._nodeStatusFromFreshness = _statusFromFreshness;
+
   // getNodeStatus(role, lastSeenMs) -> 'active' | 'stale'
   //   Legacy two-arg signature. Exact prior semantics preserved verbatim
   //   -- same age expression, same threshold table, same boundary
-  //   comparison. No new parsing or future-timestamp handling applies here.
-  // getNodeStatus(node) -> 'active' | 'stale'
-  //   Full-node form. Freshness comes from getNodeFreshness (max of safe
-  //   candidates, future-tolerant, last_relayed never consulted), then the
-  //   SAME threshold/boundary rule as the legacy form decides the result.
-  window.getNodeStatus = function (roleOrNode, lastSeenMs) {
+  //   comparison, role used as-is (no normalization). No new parsing or
+  //   future-timestamp handling applies here.
+  // getNodeStatus(node, nowMs?) -> 'active' | 'stale'
+  //   Full-node form. `now` is resolved exactly once (via _resolveNow) and
+  //   used for BOTH the getNodeFreshness lookup and the age calculation,
+  //   so the result can't straddle two different Date.now() reads. role is
+  //   lowercased before threshold selection (isolated to this form only --
+  //   the legacy form above is untouched). nowMs is optional; omitted or
+  //   non-finite falls back to Date.now(), matching getNodeFreshness.
+  window.getNodeStatus = function (roleOrNode, lastSeenMsOrNowMs) {
     if (roleOrNode && typeof roleOrNode === 'object') {
       var node = roleOrNode;
-      var role = node.role || 'companion';
-      var fresh = window.getNodeFreshness(node, Date.now());
-      var age = fresh ? (Date.now() - fresh.timestampMs) : Infinity;
-      return _statusFromAge(age, _nodeStaleMs(role));
+      var now = _resolveNow(lastSeenMsOrNowMs);
+      var role = typeof node.role === 'string' ? node.role.toLowerCase() : 'companion';
+      var fresh = window.getNodeFreshness(node, now);
+      return _statusFromFreshness(fresh, role, now);
     }
-    var ageLegacy = typeof lastSeenMs === 'number' ? (Date.now() - lastSeenMs) : Infinity;
+    var ageLegacy = typeof lastSeenMsOrNowMs === 'number' ? (Date.now() - lastSeenMsOrNowMs) : Infinity;
     return _statusFromAge(ageLegacy, _nodeStaleMs(roleOrNode));
   };
 

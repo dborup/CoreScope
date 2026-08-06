@@ -65,15 +65,20 @@ test('0 lastSeenMs → stale', () => assert.strictEqual(getNodeStatus('repeater'
 // getNodeStatus (getNodeStatus(n)) so relay-touched last_seen, _liveSeen,
 // and last_heard/_lastHeard are all considered via getNodeFreshness --
 // not an inlined last_heard||last_seen fallback that could silently drop
-// a signal again in the future. ===
+// a signal again in the future. A real, failing assertion (not just a
+// console warning): reviewfix on 06cd0b73 found the prior version only
+// logged and never touched `failed`, so a regression here could never
+// fail the process. Anchored to the status+lastSeenClass pairing that is
+// unique to the row-render block (public/nodes.js), not a bare
+// getNodeStatus\(n\) regex that other callsites could also satisfy. ===
 console.log('\n=== BUG CHECK ===');
 const nodesJs = fs.readFileSync('public/nodes.js', 'utf8');
-const renderRowsMatch = nodesJs.match(/const status = getNodeStatus\(n\)/);
-if (renderRowsMatch) {
-  console.log(`  renderRows status line: ${renderRowsMatch[0]}`);
-} else {
-  console.log('  🐛 BUG: nodes.js row rendering no longer calls getNodeStatus(n) -- freshness regression risk.');
-}
+test('nodes.js row rendering still calls the node-object getNodeStatus(n) form', () => {
+  const renderRowsMatch = nodesJs.match(
+    /const status = getNodeStatus\(n\);\s*\n\s*const lastSeenClass = status === 'active'/
+  );
+  assert.ok(renderRowsMatch, 'row-render status/lastSeenClass block must call getNodeStatus(n)');
+});
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
 process.exit(failed > 0 ? 1 : 0);

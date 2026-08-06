@@ -3191,8 +3191,12 @@
       var fresh = window.getNodeFreshness ? getNodeFreshness(n, now) : null;
       if (fresh === null) continue;
       var isInfra = n.role === 'repeater' || n.role === 'room';
-      // Same threshold rule as getNodeStatus, by construction (calls it).
-      var status = window.getNodeStatus ? getNodeStatus(n) : 'active';
+      // Reuses the already-computed fresh + now (same clock read, no
+      // second freshness pass) via the shared classifier roles.js exposes
+      // -- same threshold table getNodeStatus uses, by construction.
+      var status = window._nodeStatusFromFreshness
+        ? window._nodeStatusFromFreshness(fresh, n.role, now)
+        : 'active';
       var marker = nodeMarkers[key];
       if (status === 'stale') {
         if (n._fromAPI || isInfra) {
