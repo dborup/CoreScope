@@ -1499,6 +1499,102 @@ console.log('\n=== live.js: pruneStaleNodes ===');
     assert.ok(!data['wsSensor'], 'WS-only stale sensor data should still be removed');
   });
 
+  test('pruneStaleNodes normalizes a mixed-case WS-only role="Repeater" -- dimmed, not deleted (reviewfix)', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+    const activity = ctx.window._liveNodeActivity();
+
+    markers['mixedRepeater'] = { getElement: function() { return { style: {} }; }, _glowMarker: null };
+    data['mixedRepeater'] = { public_key: 'mixedRepeater', role: 'Repeater', _liveSeen: Date.now() - 96 * 3600000 };
+    activity['mixedRepeater'] = 7;
+
+    prune();
+
+    assert.ok(markers['mixedRepeater'], 'marker should be preserved, not deleted');
+    assert.ok(data['mixedRepeater'], 'data should be preserved, not deleted');
+    assert.strictEqual(markers['mixedRepeater']._staleDimmed, true, 'marker should be dimmed');
+    assert.strictEqual(activity['mixedRepeater'], 7, 'nodeActivity should be preserved (not treated as a removal)');
+  });
+
+  test('pruneStaleNodes normalizes a fully-uppercase WS-only role="ROOM" -- dimmed, not deleted (reviewfix)', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+    const activity = ctx.window._liveNodeActivity();
+
+    markers['upperRoom'] = { getElement: function() { return { style: {} }; }, _glowMarker: null };
+    data['upperRoom'] = { public_key: 'upperRoom', role: 'ROOM', _liveSeen: Date.now() - 96 * 3600000 };
+    activity['upperRoom'] = 3;
+
+    prune();
+
+    assert.ok(markers['upperRoom'], 'marker should be preserved, not deleted');
+    assert.ok(data['upperRoom'], 'data should be preserved, not deleted');
+    assert.strictEqual(markers['upperRoom']._staleDimmed, true, 'marker should be dimmed');
+    assert.strictEqual(activity['upperRoom'], 3, 'nodeActivity should be preserved');
+  });
+
+  test('pruneStaleNodes: mixed-case "Companion" uses the companion threshold and is still deleted as WS-only non-infra', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+
+    // 48h exceeds nodeSilentMs (24h) but not infraSilentMs (72h) -- this
+    // only removes the node if "Companion" is correctly normalized to the
+    // non-infra threshold rather than accidentally matching neither
+    // isInfra branch string comparison (which would also mean deletion,
+    // but for the wrong reason -- assert active would already have
+    // failed the threshold check to catch that).
+    markers['mixedCompanion'] = { _glowMarker: null };
+    data['mixedCompanion'] = { public_key: 'mixedCompanion', role: 'Companion', _liveSeen: Date.now() - 48 * 3600000 };
+
+    prune();
+
+    assert.ok(!markers['mixedCompanion'], 'mixed-case companion should still be removed when WS-only and stale');
+    assert.ok(!data['mixedCompanion'], 'data should be removed');
+  });
+
+  test('pruneStaleNodes: non-string or missing role falls back to companion threshold without throwing', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+
+    markers['noRole'] = { _glowMarker: null };
+    data['noRole'] = { public_key: 'noRole', _liveSeen: Date.now() - 48 * 3600000 }; // role omitted entirely
+
+    markers['numericRole'] = { _glowMarker: null };
+    data['numericRole'] = { public_key: 'numericRole', role: 42, _liveSeen: Date.now() - 48 * 3600000 };
+
+    assert.doesNotThrow(() => prune());
+
+    assert.ok(!markers['noRole'], 'missing role should fall back to companion threshold (removed as WS-only non-infra when stale)');
+    assert.ok(!markers['numericRole'], 'non-string role should fall back to companion threshold the same way');
+  });
+
+  test('pruneStaleNodes: lowercase repeater/room are unaffected by the normalization fix (regression guard)', () => {
+    const { ctx } = makeLiveSandbox();
+    const prune = ctx.window._livePruneStaleNodes;
+    const markers = ctx.window._liveNodeMarkers();
+    const data = ctx.window._liveNodeData();
+
+    markers['lcRepeater'] = { getElement: function() { return { style: {} }; }, _glowMarker: null };
+    data['lcRepeater'] = { public_key: 'lcRepeater', role: 'repeater', _liveSeen: Date.now() - 96 * 3600000 };
+    markers['lcRoom'] = { getElement: function() { return { style: {} }; }, _glowMarker: null };
+    data['lcRoom'] = { public_key: 'lcRoom', role: 'room', _liveSeen: Date.now() - 96 * 3600000 };
+
+    prune();
+
+    assert.ok(markers['lcRepeater'], 'lowercase repeater should still be dimmed, not deleted');
+    assert.strictEqual(markers['lcRepeater']._staleDimmed, true);
+    assert.ok(markers['lcRoom'], 'lowercase room should still be dimmed, not deleted');
+    assert.strictEqual(markers['lcRoom']._staleDimmed, true);
+  });
+
   test('pruneStaleNodes ignores last_relayed entirely — skips a node with no other signal', () => {
     const { ctx } = makeLiveSandbox();
     const prune = ctx.window._livePruneStaleNodes;

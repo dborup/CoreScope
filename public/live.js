@@ -3190,12 +3190,18 @@
       if (!n) continue;
       var fresh = window.getNodeFreshness ? getNodeFreshness(n, now) : null;
       if (fresh === null) continue;
-      var isInfra = n.role === 'repeater' || n.role === 'room';
+      // Normalized once, reused for both isInfra and the classifier below
+      // -- matches getNodeStatus(node)'s own normalization exactly, so a
+      // mixed/upper-case role (e.g. "Repeater") can't fall through to the
+      // companion threshold here while still getting the infra threshold
+      // via getNodeStatus(node) elsewhere.
+      var role = typeof n.role === 'string' ? n.role.toLowerCase() : 'companion';
+      var isInfra = role === 'repeater' || role === 'room';
       // Reuses the already-computed fresh + now (same clock read, no
       // second freshness pass) via the shared classifier roles.js exposes
       // -- same threshold table getNodeStatus uses, by construction.
       var status = window._nodeStatusFromFreshness
-        ? window._nodeStatusFromFreshness(fresh, n.role, now)
+        ? window._nodeStatusFromFreshness(fresh, role, now)
         : 'active';
       var marker = nodeMarkers[key];
       if (status === 'stale') {
