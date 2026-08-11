@@ -626,6 +626,9 @@
         localStorage.setItem('meshcore-map-byte-filter', filters.byteSize);
         document.querySelectorAll('#mcByteFilter .btn').forEach(b => b.classList.toggle('active', b.dataset.byte === filters.byteSize));
         renderMarkers();
+        // Redraw Important Links immediately if it's on and edges are already
+        // cached — reuses topRoutesEdges, no new /analytics/neighbor-graph call.
+        if (topRoutesEdges && document.getElementById('mcTopRoutes')?.checked) renderTopRoutes();
       });
     });
 
@@ -1800,6 +1803,18 @@
     }
   }
 
+  // Pure predicate for the Byte Size filter — shared by renderMarkers and
+  // the Important Links overlay (renderTopRoutes) so the two never drift.
+  // Applies only to the repeater role (byteSize is a repeater-only concept);
+  // every other role always passes. Missing hash_size falls back to 1,
+  // matching makeRepeaterLabelIcon's hash-length fallback.
+  function nodePassesByteSizeFilter(node, byteSize) {
+    if (byteSize === 'all') return true;
+    if ((node.role || 'companion') !== 'repeater') return true;
+    const hs = node.hash_size || 1;
+    return String(hs) === byteSize;
+  }
+
   // Pure predicate so tests can exercise the matching rule without a DOM.
   // scopeValue is filters.scope: 'all' (no filtering), '__none__' (nodes
   // with no default_scope), or an exact scope string.
@@ -2106,10 +2121,7 @@
       if (!n.lat || !n.lon) return false;
       if (!filters[n.role || 'companion']) return false;
       // Byte size filter (applies only to repeaters)
-      if (filters.byteSize !== 'all' && (n.role || 'companion') === 'repeater') {
-        const hs = n.hash_size || 1;
-        if (String(hs) !== filters.byteSize) return false;
-      }
+      if (!nodePassesByteSizeFilter(n, filters.byteSize)) return false;
       // Status filter
       if (filters.statusFilter !== 'all') {
         const status = getNodeStatus(n);
@@ -2720,7 +2732,13 @@
     clearTopRoutes();
     const axis = (document.getElementById('mcTopRoutesRankBy') || {}).value || 'usefulness';
     const topN = parseInt((document.getElementById('mcTopRoutesN') || {}).value, 10) || 50;
-    const top = computeTopRouteEdges(topRoutesEdges, nodes, axis, topN);
+    // Byte Size filter sync: an edge's endpoint is only geo-located
+    // in computeTopRouteEdges's pos[] map when it's in the nodeList passed in,
+    // so filtering the nodeList here — the same nodePassesByteSizeFilter used
+    // by renderMarkers — is enough to make Important Links respect the
+    // repeater byte-size filter without touching the ranking core itself.
+    const byteFilteredNodes = filters.byteSize === 'all' ? nodes : nodes.filter(n => nodePassesByteSizeFilter(n, filters.byteSize));
+    const top = computeTopRouteEdges(topRoutesEdges, byteFilteredNodes, axis, topN);
     // Empty-state hint: the toggle is on but nothing rendered (no geo-located
     // endpoints, or the chosen axis has no scores yet).
     const hint = document.getElementById('mcTopRoutesHint');
@@ -2874,6 +2892,7 @@
   if (typeof window !== 'undefined') {
     window.__meshcoreMapInternals = {
       createClusterGroup: createClusterGroup, makeClusterIcon: makeClusterIcon,
+      nodePassesByteSizeFilter: nodePassesByteSizeFilter,
       nodePassesScopeFilter: nodePassesScopeFilter, buildScopeOptions: buildScopeOptions,
       nodePassesRelayedScopeFilter: nodePassesRelayedScopeFilter, buildRelayedScopeOptions: buildRelayedScopeOptions,
       nodePassesConfiguredScopeFilter: nodePassesConfiguredScopeFilter, buildConfiguredScopeOptions: buildConfiguredScopeOptions,
@@ -2893,6 +2912,7 @@
       getTopRoutesGenerationForTesting: function () { return topRoutesGeneration; },
       setMapForTesting: function (m) { map = m; },
       setNodesForTesting: function (n) { nodes = n; },
+      setFiltersForTesting: function (f) { Object.assign(filters, f); },
       destroyForTesting: function () { return destroy(); },
     };
   }
