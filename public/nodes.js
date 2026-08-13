@@ -532,6 +532,8 @@
       <div class="nodes-topbar">
         <input type="text" class="nodes-search" id="nodeSearch" placeholder="Search by name or pubkey prefix…" aria-label="Search nodes by name or pubkey prefix">
         <div class="nodes-counts" id="nodeCounts"></div>
+        <button class="btn-secondary nodes-export-btn" id="nodesExportBtn" disabled
+          title="Download the visible nodes as a MeshCore companion config">Export JSON</button>
       </div>
       <div id="nodesRegionFilter" class="region-filter-container"></div>
       <div id="nodesAreaFilter" style="display:none"></div>
@@ -556,6 +558,14 @@
       updateNodesUrl();
       loadNodes();
     }, 250));
+
+    document.getElementById('nodesExportBtn').addEventListener('click', function () {
+      // WYSIWYG (#1889): computeDisplayOrder() is the same helper
+      // renderRows() uses, so the exported file's row order always
+      // matches what's on screen -- sort column/direction, then claimed,
+      // then favorites -- never the raw unsorted `nodes` array.
+      window.NodesExport.download(computeDisplayOrder(nodes), AreaFilter.getSelected());
+    });
 
     loadNodes();
     if (directNode) selectNode(directNode);
@@ -1370,6 +1380,7 @@
       syncClaimedToFavorites();
 
       renderCounts();
+      updateExportBtn();
       if (refreshOnly) {
         renderRows();
       } else {
@@ -1384,6 +1395,18 @@
       var nodesContainer = document.getElementById('nodesLeft') || document.getElementById('nodesBody');
       if (nodesContainer) nodesContainer.setAttribute('data-loaded', 'true');
     }
+  }
+
+  // Order doesn't affect the exportable count (contactFor's skip rules are
+  // per-node, not position-dependent), so this deliberately uses the raw
+  // `nodes` array rather than computeDisplayOrder() -- no need to pay for
+  // a sort just to count.
+  function updateExportBtn() {
+    const btn = document.getElementById('nodesExportBtn');
+    if (!btn || !window.NodesExport) return;
+    const n = window.NodesExport.buildContacts(nodes).contacts.length;
+    btn.disabled = n === 0;
+    btn.textContent = n ? 'Export JSON (' + n + ')' : 'Export JSON';
   }
 
   function renderCounts() {
@@ -1544,6 +1567,28 @@
     renderRows();
   }
 
+  // Computes the table's final display order: sortNodes() by the active
+  // column/direction, then claimed ("My Mesh") nodes pinned first, then
+  // favorites pinned second, preserving the column-sort order within each
+  // group (stable re-sort). This is the SINGLE source of order truth --
+  // renderRows() and the JSON export (#1889) both call it, so the two can
+  // never diverge the way a duplicated copy of this logic could.
+  function computeDisplayOrder(arr) {
+    const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
+    const myKeys = new Set(myNodes.map(n => n.pubkey));
+    const favs = getFavorites();
+    const sorted = sortNodes([...arr]);
+    sorted.sort((a, b) => {
+      const aMy = myKeys.has(a.public_key) ? 0 : 1;
+      const bMy = myKeys.has(b.public_key) ? 0 : 1;
+      if (aMy !== bMy) return aMy - bMy;
+      const aFav = favs.includes(a.public_key) ? 0 : 1;
+      const bFav = favs.includes(b.public_key) ? 0 : 1;
+      return aFav - bFav;
+    });
+    return sorted;
+  }
+
   function renderRows() {
     const tbody = document.getElementById('nodesBody');
     if (!tbody) return;
@@ -1553,20 +1598,11 @@
       return;
     }
 
-    // Claimed ("My Mesh") nodes always on top, then favorites, then sort
+    const sorted = computeDisplayOrder(nodes);
+    // Still needed here (separately from the pinning logic above) to badge
+    // each row as claimed in the rendered markup below.
     const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
     const myKeys = new Set(myNodes.map(n => n.pubkey));
-    const favs = getFavorites();
-    const sorted = sortNodes([...nodes]);
-    // Stable re-sort: claimed first, then favorites, preserving sort within each group
-    sorted.sort((a, b) => {
-      const aMy = myKeys.has(a.public_key) ? 0 : 1;
-      const bMy = myKeys.has(b.public_key) ? 0 : 1;
-      if (aMy !== bMy) return aMy - bMy;
-      const aFav = favs.includes(a.public_key) ? 0 : 1;
-      const bFav = favs.includes(b.public_key) ? 0 : 1;
-      return aFav - bFav;
-    });
 
     const dupMap = buildDupNameMap(_allNodes);
     // #1616 followup: capture the focused row's data-key BEFORE we replace
@@ -1970,6 +2006,7 @@
     localStorage.setItem('meshcore-nodes-sort', JSON.stringify(_fallbackSortState));
   };
   window._nodesSortNodes = sortNodes;
+  window._nodesComputeDisplayOrder = computeDisplayOrder;
   window._nodesSortArrow = function(col) {
     var st = _getSortState();
     if (st.column !== col) return '';
