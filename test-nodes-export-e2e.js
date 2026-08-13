@@ -123,10 +123,34 @@ function parseCount(label) {
   const prefix = target.public_key.slice(0, 24);
 
   await page.fill('#nodeSearch', prefix);
-  await page.waitForFunction(function (want) {
+  // Reviewfix (post-eb6d604f): the previous wait wanted the button's
+  // textContent to differ from its PRE-search label. That is not
+  // deterministic — when the dataset already had exactly one exportable
+  // contact (expectedCount === 1), the label is "Export JSON (1)" both
+  // before and after searching for that same contact's own prefix, so
+  // the label never "changes" and the wait timed out for a perfectly
+  // correct outcome.
+  //
+  // Wait for the actual target state instead of a delta from the prior
+  // state: the search box holds the prefix we typed, the button is
+  // enabled, and it shows exactly one contact. This is correct whether
+  // the count was already 1 (resolves immediately/on the next settle,
+  // no false timeout) or narrowed down from many (resolves once the
+  // debounced search + re-render actually applies).
+  //
+  // This predicate's logic (the three checks below) is mirrored as a
+  // plain, DOM-free function in test-nodes-export-narrow-wait.js so it
+  // can be proven correct — including the exactly-one-contact case that
+  // caused the original timeout — without a live browser. Keep the two
+  // in sync if this changes.
+  await page.waitForFunction(function (expectedPrefix) {
+    var input = document.getElementById('nodeSearch');
     var b = document.getElementById('nodesExportBtn');
-    return b && b.textContent.trim() !== want;
-  }, label, { timeout: 15000 });
+    if (!input || !b) return false;
+    if (input.value !== expectedPrefix) return false;
+    if (b.disabled) return false;
+    return b.textContent.trim() === 'Export JSON (1)';
+  }, prefix, { timeout: 15000 });
 
   const narrowed = (await page.textContent('#nodesExportBtn')).trim();
   const narrowedCount = parseCount(narrowed);
