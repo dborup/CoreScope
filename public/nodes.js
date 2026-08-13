@@ -1632,7 +1632,19 @@
         <td>${n.advert_count || 0}</td>
       </tr>`;
     }).join('');
-    bindFavStars(tbody);
+    // Reviewfix (post-#1889): a favorite toggle updates localStorage and the
+    // star icon itself (bindFavStars, app.js) but never used to re-render
+    // the table. computeDisplayOrder(nodes) -- called by both renderRows()
+    // and the export handler -- reads the favorites list live, so the
+    // export would immediately reflect a new favorite's position while the
+    // DOM table still showed the old order until some unrelated re-render
+    // (a sort click, a filter change) happened to catch up. Passing
+    // renderRows itself as the onToggle callback closes that gap: the
+    // click that changes the favorite is also the trigger that reorders
+    // the table, so DOM and export can never observably disagree.
+    bindFavStars(tbody, function () {
+      renderRows();
+    });
     makeColumnsResizable('#nodesTable', 'meshcore-nodes-col-widths');
     // #1056: fluid columns + +N hidden pill
     if (window.TableResponsive) {
@@ -1991,6 +2003,8 @@
   window._nodesGetAllNodes = function() { return _allNodes; };
   window._nodesSetAllNodes = function(n) { _allNodes = n; };
   window._nodesGetFiltered = function() { return nodes; };
+  window._nodesSetFiltered = function(arr) { nodes = arr; };
+  window._nodesRenderRows = renderRows;
   window._nodesGetGeoScope = function() { return geoScope; };
   window._nodesSetGeoScope = function(v) { geoScope = v; };
   window._nodesToggleSort = function(col) {
