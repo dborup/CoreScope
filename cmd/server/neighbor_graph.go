@@ -160,6 +160,16 @@ type NeighborGraph struct {
 	// checks during upsertEdge. Populated by the builder; empty for graphs
 	// constructed via NewNeighborGraph directly (geo filter inert).
 	nodeGeo map[string]nodeGeoInfo
+
+	// loggedGeoFarRejects tracks which edge keys have already produced a
+	// "reject geo-far edge" log line for this graph instance. upsertEdge is
+	// called once per observation, so without this a single implausible
+	// pair gets re-evaluated (and re-logged) for every observation that
+	// references it — in production this produced ~22k duplicate log lines
+	// for only 7 distinct edges per rebuild, burning CPU/disk I/O on a
+	// 2-vCPU host. A fresh NeighborGraph is built on every rebuild cycle,
+	// so this map naturally resets to "log once per unique edge per build".
+	loggedGeoFarRejects map[edgeKey]bool
 }
 
 // nodeGeoInfo is the minimal geo slice cached on the graph for upsertEdge.
@@ -171,8 +181,9 @@ type nodeGeoInfo struct {
 // NewNeighborGraph creates an empty graph.
 func NewNeighborGraph() *NeighborGraph {
 	return &NeighborGraph{
-		edges:  make(map[edgeKey]*NeighborEdge),
-		byNode: make(map[string][]*NeighborEdge),
+		edges:               make(map[edgeKey]*NeighborEdge),
+		byNode:              make(map[string][]*NeighborEdge),
+		loggedGeoFarRejects: make(map[edgeKey]bool),
 	}
 }
 
@@ -798,9 +809,23 @@ func (g *NeighborGraph) shouldRejectGeoFar(a, b string) bool {
 	if d <= g.maxEdgeKm {
 		return false
 	}
-	// PII-truncated INFO log (8-char prefix max).
-	log.Printf("[neighbor-graph] reject geo-far edge %s↔%s distance=%.0fkm threshold=%.0fkm",
-		piiTruncPubkey(a), piiTruncPubkey(b), d, g.maxEdgeKm)
+
+	// Log at most once per unique edge per build — upsertEdge is invoked
+	// once per observation, and a single implausible pair can appear in
+	// thousands of observations within one rebuild.
+	key := makeEdgeKey(a, b)
+	g.mu.Lock()
+	alreadyLogged := g.loggedGeoFarRejects[key]
+	if !alreadyLogged {
+		g.loggedGeoFarRejects[key] = true
+	}
+	g.mu.Unlock()
+
+	if !alreadyLogged {
+		// PII-truncated INFO log (8-char prefix max).
+		log.Printf("[neighbor-graph] reject geo-far edge %s↔%s distance=%.0fkm threshold=%.0fkm",
+			piiTruncPubkey(a), piiTruncPubkey(b), d, g.maxEdgeKm)
+	}
 	return true
 }
 
