@@ -114,3 +114,44 @@ func TestBuildNeighborGraph_RejectedCounterIncrements(t *testing.T) {
 		t.Fatalf("RejectedEdgesGeoFar = %d, want >= 2", got)
 	}
 }
+
+// TestBuildNeighborGraph_GeoFarRejectLoggedOnce — regression test for a
+// production incident on meshview.dk: upsertEdge is called once per
+// observation, so a single geo-implausible pair re-evaluated across many
+// observations produced one duplicate "reject geo-far edge" log line per
+// observation (22k duplicate lines for 7 unique edges in one rebuild),
+// contributing to CPU spikes and hard resets on a 2-vCPU host. The counter
+// must still count every rejection, but the dedup-tracking map must record
+// each unique edge pair at most once per build.
+func TestBuildNeighborGraph_GeoFarRejectLoggedOnce(t *testing.T) {
+	nodes := []nodeInfo{
+		{Role: "repeater", PublicKey: "aaaa1111", Name: "A_SF", Lat: 37.77, Lon: -122.41, HasGPS: true},
+		{Role: "repeater", PublicKey: "bbbb2222", Name: "B_BE", Lat: 52.52, Lon: 13.40, HasGPS: true},
+		{Role: "repeater", PublicKey: "obs00001", Name: "Observer", Lat: 37.77, Lon: -122.41, HasGPS: true},
+	}
+	// Ten adverts each re-triggering the same far A↔B edge attempt, mimicking
+	// many observations of the same implausible pair within one rebuild.
+	txs := make([]*StoreTx, 0, 10)
+	for i := 0; i < 10; i++ {
+		txs = append(txs, ngMakeTx(i+1, 4, ngFromNodeJSON("aaaa1111"), []*StoreObs{
+			ngMakeObs("obs00001", `["bbbb"]`, nowStr, nil),
+		}))
+	}
+	store := ngTestStore(nodes, txs)
+	g := BuildFromStore(store)
+
+	// Each advert attempts two edges — originator↔path[0] (A↔B) and
+	// observer↔path[last] (obs↔B, also far since the observer sits at A's
+	// location) — so 10 observations of the same two pairs reject >= 20
+	// times, but only 2 *unique* pairs should ever be logged.
+	if got := atomic.LoadUint64(&g.RejectedEdgesGeoFar); got < 20 {
+		t.Fatalf("RejectedEdgesGeoFar = %d, want >= 20 (every observation still counted)", got)
+	}
+
+	g.mu.RLock()
+	loggedCount := len(g.loggedGeoFarRejects)
+	g.mu.RUnlock()
+	if loggedCount != 2 {
+		t.Fatalf("loggedGeoFarRejects has %d entries, want exactly 2 (one per unique edge pair, not per observation)", loggedCount)
+	}
+}
