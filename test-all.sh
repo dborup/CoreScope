@@ -17,6 +17,10 @@ node test-frontend-helpers.js
 node test-geo-filter.js
 node test-fetch-all-nodes-pagination.js
 node test-nodes-geo-scope-filter.js
+node test-nodes-export.js
+node test-nodes-export-wiring.js
+node test-nodes-export-order.js
+node test-nodes-export-narrow-wait.js
 node test-my-repeaters-dashboard.js
 node test-repeater-metric-scatter.js
 node test-top-routes-overlay.js
