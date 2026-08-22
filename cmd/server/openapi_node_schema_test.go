@@ -216,3 +216,56 @@ func TestOpenAPINodeSchema_ConfiguredScope(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenAPINodeSchema_DefaultScope pins the #7 default_scope follow-up:
+// default_scope and default_scope_confirmed_at must be nullable strings
+// (default_scope_confirmed_at additionally format:date-time) with
+// descriptions spelling out the null/empty/wildcard/provenance contract,
+// including the cross-table protection guarantee (confirmed evidence in the
+// OTHER retention table still blocks inference into the row being read).
+func TestOpenAPINodeSchema_DefaultScope(t *testing.T) {
+	spec := fetchSpec(t)
+	components := asMap(t, spec["components"], "components")
+	schemas := asMap(t, components["schemas"], "components.schemas")
+	node := asMap(t, schemas["Node"], "Node")
+	props := asMap(t, node["properties"], "Node.properties")
+
+	scope, ok := props["default_scope"]
+	if !ok {
+		t.Fatal("Node.properties.default_scope missing")
+	}
+	scopeMap := asMap(t, scope, "default_scope")
+	if scopeMap["type"] != "string" {
+		t.Errorf("default_scope: want type string, got %v", scopeMap["type"])
+	}
+	if scopeMap["nullable"] != true {
+		t.Errorf("default_scope: want nullable:true, got %v", scopeMap["nullable"])
+	}
+	scopeDesc, _ := scopeMap["description"].(string)
+	for _, want := range []string{"null", "\"\"", "\"*\"", "inferred", "confirmed", "OTHER retention table"} {
+		if !strings.Contains(scopeDesc, want) {
+			t.Errorf("default_scope description missing %q: %s", want, scopeDesc)
+		}
+	}
+
+	at, ok := props["default_scope_confirmed_at"]
+	if !ok {
+		t.Fatal("Node.properties.default_scope_confirmed_at missing")
+	}
+	atMap2 := asMap(t, at, "default_scope_confirmed_at")
+	if atMap2["type"] != "string" {
+		t.Errorf("default_scope_confirmed_at: want type string, got %v", atMap2["type"])
+	}
+	if atMap2["nullable"] != true {
+		t.Errorf("default_scope_confirmed_at: want nullable:true, got %v", atMap2["nullable"])
+	}
+	if atMap2["format"] != "date-time" {
+		t.Errorf("default_scope_confirmed_at: want format:date-time, got %v", atMap2["format"])
+	}
+	atDesc2, _ := atMap2["description"].(string)
+	for _, want := range []string{"Non-empty", "null", "cross-table-protected", "historical"} {
+		if !strings.Contains(atDesc2, want) {
+			t.Errorf("default_scope_confirmed_at description missing %q: %s", want, atDesc2)
+		}
+	}
+}

@@ -80,6 +80,35 @@ func configuredScopeInactive(t *testing.T, store *Store, pubkey string) (sql.Nul
 	return sc, at
 }
 
+// defaultScopeConfirmedInactive mirrors defaultScopeConfirmed but reads
+// inactive_nodes -- needed because default_scope's cross-table protection
+// (unlike configured_scope's row-local protection) requires proving both
+// tables independently.
+func defaultScopeConfirmedInactive(t *testing.T, store *Store, pubkey string) (sql.NullString, sql.NullString) {
+	t.Helper()
+	var sc, at sql.NullString
+	if err := store.db.QueryRow(
+		`SELECT default_scope, default_scope_confirmed_at FROM inactive_nodes WHERE public_key = ?`, pubkey,
+	).Scan(&sc, &at); err != nil {
+		t.Fatalf("read inactive_nodes default_scope for %s: %v", pubkey, err)
+	}
+	return sc, at
+}
+
+// seedDefaultScope sets default_scope/default_scope_confirmed_at directly on
+// an already-seeded row in table ("nodes" or "inactive_nodes"), bypassing
+// the Store methods under test -- used to construct fixtures whose confirmed
+// state must be known precisely rather than derived from another method's
+// behavior.
+func seedDefaultScope(t *testing.T, store *Store, table, pubkey, scope string, confirmedAt string) {
+	t.Helper()
+	if _, err := store.db.Exec(
+		`UPDATE `+table+` SET default_scope = ?, default_scope_confirmed_at = ? WHERE public_key = ?`,
+		scope, confirmedAt, pubkey); err != nil {
+		t.Fatalf("seed %s default_scope for %s: %v", table, pubkey, err)
+	}
+}
+
 func openNeighborsStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "test.db"))
@@ -633,11 +662,13 @@ func TestUpdateNodeConfiguredScope_SecondUpdateFailureRollsBackFirst(t *testing.
 
 // ─── #7: one log line per invalid report, not one per neighbor ─────────────
 
-func TestHandleNeighborsReportInvalidTimestampLogsOnceForConfiguredScope(t *testing.T) {
+func TestHandleNeighborsReportInvalidTimestampLogsOnceForBothScopeTypes(t *testing.T) {
 	store := openNeighborsStore(t)
+	origin := "d000000000000000000000000000000000000000000000000000000000000010"
 	respA := "d100000000000000000000000000000000000000000000000000000000000011"
 	respB := "d200000000000000000000000000000000000000000000000000000000000012"
 	respC := "d300000000000000000000000000000000000000000000000000000000000013"
+	seedActiveNodeOnly(t, store, origin)
 	seedActiveNodeOnly(t, store, respA)
 	seedActiveNodeOnly(t, store, respB)
 	seedActiveNodeOnly(t, store, respC)
@@ -647,8 +678,13 @@ func TestHandleNeighborsReportInvalidTimestampLogsOnceForConfiguredScope(t *test
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(prev) })
 
+	// Carries self.scopes AND self.default_scope (both evidence types) plus
+	// several responded neighbors -- the log line must still appear exactly
+	// once, not once per evidence type and not once per neighbor.
 	report := map[string]interface{}{
 		"timestamp": "not-a-valid-timestamp",
+		"origin_id": origin,
+		"self":      map[string]interface{}{"scopes": "dk", "default_scope": "dk"},
 		"neighbors": []interface{}{
 			map[string]interface{}{"pubkey": respA, "scopes": "de", "status": "responded"},
 			map[string]interface{}{"pubkey": respB, "scopes": "eu", "status": "responded"},
@@ -657,13 +693,621 @@ func TestHandleNeighborsReportInvalidTimestampLogsOnceForConfiguredScope(t *test
 	}
 	handleNeighborsReport(store, "test", "obs-many", report)
 
-	got := strings.Count(buf.String(), "configured-scope evidence ignored")
+	got := strings.Count(buf.String(), "configured-scope and default-scope evidence ignored")
 	if got != 1 {
-		t.Errorf("logged %d 'configured-scope evidence ignored' line(s) for a 3-neighbor report, want exactly 1", got)
+		t.Errorf("logged %d 'configured-scope and default-scope evidence ignored' line(s) for a report with self+3 neighbors, want exactly 1", got)
 	}
-	for _, pk := range []string{respA, respB, respC} {
+	for _, pk := range []string{origin, respA, respB, respC} {
 		if sc, _ := configuredScope(t, store, pk); sc.Valid {
 			t.Errorf("node %s configured_scope = %v, want still NULL", pk, sc)
 		}
+	}
+	if sc, _ := defaultScopeConfirmed(t, store, origin); sc.Valid {
+		t.Errorf("origin %s default_scope = %v, want still NULL", origin, sc)
+	}
+}
+
+// TestHandleNeighborsReportInvalidTimestampLogsEvenWithoutScopeEvidence pins
+// design v3's chosen behavior (option A): the report-level warning fires
+// unconditionally on an invalid/missing envelope timestamp, even when the
+// report carries no self block and no neighbors at all -- an invalid
+// envelope timestamp is itself a signal about the observer's firmware/clock,
+// independent of whether this particular report happened to carry any scope
+// evidence to protect. This is a deliberate choice, not an oversight; do not
+// "fix" this test by making the log conditional on payload content.
+func TestHandleNeighborsReportInvalidTimestampLogsEvenWithoutScopeEvidence(t *testing.T) {
+	store := openNeighborsStore(t)
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	report := map[string]interface{}{
+		"timestamp": "not-a-valid-timestamp",
+	}
+	handleNeighborsReport(store, "test", "obs-empty", report)
+
+	got := strings.Count(buf.String(), "configured-scope and default-scope evidence ignored")
+	if got != 1 {
+		t.Errorf("logged %d warning line(s) for an invalid-timestamp report with no self/neighbors, want exactly 1 (option A: unconditional)", got)
+	}
+}
+
+// ─── #7 default_scope follow-up: UpdateNodeDefaultScopeConfirmed hardening ─
+
+func TestUpdateNodeDefaultScopeConfirmed_MalformedTimestampIsNoop(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e100000000000000000000000000000000000000000000000000000000000001"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "not-a-timestamp"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#eu" {
+		t.Errorf("default_scope = %q, want unchanged '#eu' (malformed timestamp must be a no-op)", sc.String)
+	}
+	if at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want unchanged", at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_MissingTimestampIsNoop(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e200000000000000000000000000000000000000000000000000000000000002"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", ""); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#eu" {
+		t.Errorf("default_scope = %q, want unchanged '#eu' (missing timestamp must be a no-op)", sc.String)
+	}
+	if at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want unchanged", at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_InvalidTimestampCreatesNoFalseEvidenceOnNullRow(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e300000000000000000000000000000000000000000000000000000000000003"
+	seedActiveNodeOnly(t, store, pk) // default_scope/at both NULL, never touched
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "garbage"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.Valid {
+		t.Errorf("default_scope = %v, want still NULL (no evidence was ever accepted)", sc)
+	}
+	if at.Valid {
+		t.Errorf("default_scope_confirmed_at = %v, want still NULL, not a false empty confirmation", at)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_InvalidTimestampChangesNeitherTable(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e400000000000000000000000000000000000000000000000000000000000004"
+	seedNode(t, store, pk) // both tables
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "not-a-timestamp"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#eu" || at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("nodes row changed: default_scope=%q default_scope_confirmed_at=%q, want unchanged", sc.String, at.String)
+	}
+	isc, iat := defaultScopeConfirmedInactive(t, store, pk)
+	if isc.String != "#eu" || iat.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("inactive_nodes row changed: default_scope=%q default_scope_confirmed_at=%q, want unchanged", isc.String, iat.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_EqualTimestampIsNoop(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e500000000000000000000000000000000000000000000000000000000000005"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// Exact same instant, different scope value — must NOT overwrite.
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	sc, _ := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#eu" {
+		t.Errorf("default_scope = %q, want unchanged '#eu' (equal timestamp must be an idempotent no-op)", sc.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_EmptyScopeIsNoop(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e600000000000000000000000000000000000000000000000000000000000006"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// A later report with a valid, newer timestamp but an empty scope must
+	// still be a no-op: default_scope has no legitimate "confirmed empty"
+	// state, unlike configured_scope.
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "", "2026-07-26T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#eu" {
+		t.Errorf("default_scope = %q, want unchanged '#eu' (empty scope must be a no-op even with a valid newer timestamp)", sc.String)
+	}
+	if at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want unchanged (empty-scope report must not even touch the timestamp)", at.String)
+	}
+}
+
+// TestUpdateNodeDefaultScopeConfirmed_WhitespaceOnlyScopeIsNoop covers the
+// only way normalizeSingleScope actually produces "" for non-empty input:
+// regions.Normalize (internal/regions) is a pure syntactic "#"-prefix
+// transform with no known-region validation -- any non-blank string becomes
+// a valid region name, so there is no distinct "unrecognized region" no-op
+// path to test separately from a literal empty/whitespace-only scope.
+func TestUpdateNodeDefaultScopeConfirmed_WhitespaceOnlyScopeIsNoop(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e700000000000000000000000000000000000000000000000000000000000007"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "   ", "2026-07-26T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#eu" {
+		t.Errorf("default_scope = %q, want unchanged '#eu' (whitespace-only scope must normalize to a no-op, not overwrite)", sc.String)
+	}
+	if at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want unchanged", at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_WildcardPreservedDirectly(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e800000000000000000000000000000000000000000000000000000000000008"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "*", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "*" {
+		t.Errorf("default_scope = %q, want literal '*' (the firmware's \"no default region\" sentinel)", sc.String)
+	}
+	if at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want the report timestamp", at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_CanonicalUTCNormalization(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "e900000000000000000000000000000000000000000000000000000000000009"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-26T09:43:48.000000+00:00"); err != nil {
+		t.Fatal(err)
+	}
+	_, at := defaultScopeConfirmed(t, store, pk)
+	if at.String != "2026-07-26T09:43:48Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want canonical UTC RFC3339 '2026-07-26T09:43:48Z'", at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_ActiveOnlyNode_LastWriteWinsApplies(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "ea00000000000000000000000000000000000000000000000000000000000a"
+	seedActiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "stale", "2026-07-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _ := defaultScopeConfirmed(t, store, pk); sc.String != "#eu" {
+		t.Errorf("default_scope = %q, want '#eu' (older report on an active-only node must still be rejected)", sc.String)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "2026-07-26T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _ := defaultScopeConfirmed(t, store, pk); sc.String != "#dk" {
+		t.Errorf("default_scope = %q, want '#dk' (newer report on an active-only node must update)", sc.String)
+	}
+}
+
+// TestUpdateNodeDefaultScopeConfirmed_InactiveOnlyNode_LastWriteWinsApplies
+// is the direct regression test for the pre-fix bug: the old LWW guard only
+// ever read nodes.default_scope_confirmed_at, so a node that exists ONLY in
+// inactive_nodes had no ordering protection at all.
+func TestUpdateNodeDefaultScopeConfirmed_InactiveOnlyNode_LastWriteWinsApplies(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "eb00000000000000000000000000000000000000000000000000000000000b"
+	seedInactiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "stale", "2026-07-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _ := defaultScopeConfirmedInactive(t, store, pk); sc.String != "#eu" {
+		t.Errorf("inactive_nodes.default_scope = %q, want '#eu' (older report on an inactive-only node must be rejected)", sc.String)
+	}
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "2026-07-26T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _ := defaultScopeConfirmedInactive(t, store, pk); sc.String != "#dk" {
+		t.Errorf("inactive_nodes.default_scope = %q, want '#dk' (newer report on an inactive-only node must update)", sc.String)
+	}
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE public_key = ?`, pk).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("nodes row count = %d, want 0 (this node only ever existed in inactive_nodes)", n)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_BothTablesIndependentLWW(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "ec00000000000000000000000000000000000000000000000000000000000c"
+	seedActiveNodeOnly(t, store, pk)
+	seedInactiveNodeOnly(t, store, pk)
+
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(
+		`UPDATE inactive_nodes SET default_scope = ?, default_scope_confirmed_at = ? WHERE public_key = ?`,
+		"#dk", "2026-07-20T00:00:00Z", pk); err != nil {
+		t.Fatal(err)
+	}
+
+	// Between the two existing values: newer than inactive_nodes' (07-20),
+	// older than nodes' (07-25).
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "de", "2026-07-22T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	if sc, at := defaultScopeConfirmed(t, store, pk); sc.String != "#eu" || at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("nodes = (%q,%q), want unchanged ('#eu','2026-07-25T12:00:00Z')", sc.String, at.String)
+	}
+	if sc, at := defaultScopeConfirmedInactive(t, store, pk); sc.String != "#de" || at.String != "2026-07-22T00:00:00Z" {
+		t.Errorf("inactive_nodes = (%q,%q), want ('#de','2026-07-22T00:00:00Z')", sc.String, at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_SecondUpdateFailureRollsBackFirst(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "ed00000000000000000000000000000000000000000000000000000000000d"
+	seedActiveNodeOnly(t, store, pk)
+
+	if _, err := store.db.Exec(`DROP TABLE inactive_nodes`); err != nil {
+		t.Fatalf("drop inactive_nodes in throwaway test db: %v", err)
+	}
+
+	err := store.UpdateNodeDefaultScopeConfirmed(pk, "eu", "2026-07-25T12:00:00Z")
+	if err == nil {
+		t.Fatal("want a non-nil error once inactive_nodes is gone, got nil")
+	}
+
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.Valid || at.Valid {
+		t.Errorf("nodes row = (%v,%v), want still NULL/NULL — the nodes UPDATE must have been rolled back when the inactive_nodes UPDATE failed", sc, at)
+	}
+}
+
+func TestUpdateNodeDefaultScopeConfirmed_OverwritesPriorInferredValue(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "ee00000000000000000000000000000000000000000000000000000000000e"
+	seedActiveNodeOnly(t, store, pk)
+
+	// Packet-inferred write first (no confirmation yet).
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	// A firmware self-report must be able to replace it, even though the
+	// inferred write never set default_scope_confirmed_at (so this isn't a
+	// timestamp comparison -- it's the first confirmation for this node).
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "2026-07-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#dk" {
+		t.Errorf("default_scope = %q, want '#dk' (confirmation must replace a prior inferred value)", sc.String)
+	}
+	if at.String != "2026-07-25T12:00:00Z" {
+		t.Errorf("default_scope_confirmed_at = %q, want the confirmation's timestamp", at.String)
+	}
+}
+
+// TestUpdateNodeDefaultScopeConfirmed_ThenInferredWriteAcrossTablesIsBlocked
+// is the end-to-end proof that a confirmation landing in ONE table protects
+// the OTHER table too: the resurrection scenario from the design report,
+// where a confirmed inactive_nodes row precedes a fresh, unconfirmed active
+// row for the same node.
+func TestUpdateNodeDefaultScopeConfirmed_ThenInferredWriteAcrossTablesIsBlocked(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "ef00000000000000000000000000000000000000000000000000000000000f"
+	seedInactiveNodeOnly(t, store, pk)
+
+	// Confirmation lands only in inactive_nodes (no active row exists yet).
+	if err := store.UpdateNodeDefaultScopeConfirmed(pk, "dk", "2026-07-29T22:40:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Node "resurrects": UpsertNode's INSERT creates a fresh, unconfirmed
+	// active row (simulated directly here, matching its real column set).
+	seedActiveNodeOnly(t, store, pk)
+
+	// A packet-inferred ADVERT tries to write a different scope.
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+
+	sc, at := defaultScopeConfirmed(t, store, pk) // reads nodes
+	if sc.Valid {
+		t.Errorf("nodes.default_scope = %v, want still NULL -- inference must not overwrite confirmation held only in inactive_nodes", sc)
+	}
+	if at.Valid {
+		t.Errorf("nodes.default_scope_confirmed_at = %v, want still NULL", at)
+	}
+	// inactive_nodes' confirmed evidence itself must be untouched too.
+	isc, iat := defaultScopeConfirmedInactive(t, store, pk)
+	if isc.String != "#dk" || iat.String != "2026-07-29T22:40:00Z" {
+		t.Errorf("inactive_nodes = (%q,%q), want unchanged ('#dk','2026-07-29T22:40:00Z')", isc.String, iat.String)
+	}
+}
+
+// ─── #7 default_scope follow-up: UpdateNodeDefaultScope cross-table protection ─
+
+func TestUpdateNodeDefaultScope_UnknownPubkeyIsNoop(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f000000000000000000000000000000000000000000000000000000000000f"
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE public_key = ?`, pk).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("nodes row count = %d, want 0 (an unknown pubkey must never create a row)", n)
+	}
+}
+
+func TestUpdateNodeDefaultScope_ActiveOnlyConfirmed_NoOverwrite(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f100000000000000000000000000000000000000000000000000000000001f"
+	seedActiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "nodes", pk, "#dk", "2026-07-29T22:40:00Z")
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.String != "#dk" || at.String != "2026-07-29T22:40:00Z" {
+		t.Errorf("nodes = (%q,%q), want unchanged ('#dk','2026-07-29T22:40:00Z') -- confirmed active row must never be overwritten by inference", sc.String, at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScope_InactiveOnlyConfirmed_NoOverwrite(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f200000000000000000000000000000000000000000000000000000000002f"
+	seedInactiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "inactive_nodes", pk, "#dk", "2026-07-29T22:40:00Z")
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmedInactive(t, store, pk)
+	if sc.String != "#dk" || at.String != "2026-07-29T22:40:00Z" {
+		t.Errorf("inactive_nodes = (%q,%q), want unchanged -- this is the original #7 default_scope regression: the pre-fix code only ever checked nodes.default_scope_confirmed_at, so an inactive-only confirmed row had no protection at all", sc.String, at.String)
+	}
+}
+
+// TestUpdateNodeDefaultScope_ActiveUnconfirmedInactiveConfirmed_ActiveMustNotGetInference
+// is the corrected resurrection scenario from the design report: a fresh,
+// unconfirmed active row must NOT accept inference when a sibling
+// inactive_nodes row for the same pubkey is confirmed -- this is the
+// directly observable bug (via /api/nodes, which reads only the active row)
+// that the row-local-only design would have missed.
+func TestUpdateNodeDefaultScope_ActiveUnconfirmedInactiveConfirmed_ActiveMustNotGetInference(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f300000000000000000000000000000000000000000000000000000000003f"
+	seedActiveNodeOnly(t, store, pk) // default_scope/at both NULL
+	seedInactiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "inactive_nodes", pk, "#dk", "2026-07-29T22:40:00Z")
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmed(t, store, pk) // reads nodes
+	if sc.Valid {
+		t.Errorf("nodes.default_scope = %v, want still NULL -- a confirmation in inactive_nodes must cross-table-block inference into the active row", sc)
+	}
+	if at.Valid {
+		t.Errorf("nodes.default_scope_confirmed_at = %v, want still NULL", at)
+	}
+}
+
+func TestUpdateNodeDefaultScope_ActiveConfirmedInactiveUnconfirmed_InactiveMustNotGetInference(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f400000000000000000000000000000000000000000000000000000000004f"
+	seedActiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "nodes", pk, "#dk", "2026-07-29T22:40:00Z")
+	seedInactiveNodeOnly(t, store, pk) // default_scope/at both NULL
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	sc, at := defaultScopeConfirmedInactive(t, store, pk)
+	if sc.Valid {
+		t.Errorf("inactive_nodes.default_scope = %v, want still NULL -- a confirmation in nodes must cross-table-block inference into the inactive row", sc)
+	}
+	if at.Valid {
+		t.Errorf("inactive_nodes.default_scope_confirmed_at = %v, want still NULL", at)
+	}
+}
+
+func TestUpdateNodeDefaultScope_BothConfirmed_NoUpdateAnywhere(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f500000000000000000000000000000000000000000000000000000000005f"
+	seedActiveNodeOnly(t, store, pk)
+	seedInactiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "nodes", pk, "#dk", "2026-07-29T22:40:00Z")
+	seedDefaultScope(t, store, "inactive_nodes", pk, "#se", "2026-07-20T00:00:00Z")
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, at := defaultScopeConfirmed(t, store, pk); sc.String != "#dk" || at.String != "2026-07-29T22:40:00Z" {
+		t.Errorf("nodes = (%q,%q), want unchanged", sc.String, at.String)
+	}
+	if sc, at := defaultScopeConfirmedInactive(t, store, pk); sc.String != "#se" || at.String != "2026-07-20T00:00:00Z" {
+		t.Errorf("inactive_nodes = (%q,%q), want unchanged", sc.String, at.String)
+	}
+}
+
+func TestUpdateNodeDefaultScope_BothUnconfirmed_NewValue_BothUpdated(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f600000000000000000000000000000000000000000000000000000000006f"
+	seedActiveNodeOnly(t, store, pk)
+	seedInactiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "nodes", pk, "#dk", "")
+	seedDefaultScope(t, store, "inactive_nodes", pk, "#dk", "")
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _ := defaultScopeConfirmed(t, store, pk); sc.String != "#eu" {
+		t.Errorf("nodes.default_scope = %q, want '#eu'", sc.String)
+	}
+	if sc, _ := defaultScopeConfirmedInactive(t, store, pk); sc.String != "#eu" {
+		t.Errorf("inactive_nodes.default_scope = %q, want '#eu'", sc.String)
+	}
+}
+
+func TestUpdateNodeDefaultScope_BothUnconfirmed_SameValue_NoOp(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f700000000000000000000000000000000000000000000000000000000007f"
+	seedActiveNodeOnly(t, store, pk)
+	seedInactiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "nodes", pk, "#eu", "")
+	seedDefaultScope(t, store, "inactive_nodes", pk, "#eu", "")
+
+	if err := store.UpdateNodeDefaultScope(pk, "#eu"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _ := defaultScopeConfirmed(t, store, pk); sc.String != "#eu" {
+		t.Errorf("nodes.default_scope = %q, want unchanged '#eu'", sc.String)
+	}
+	if sc, _ := defaultScopeConfirmedInactive(t, store, pk); sc.String != "#eu" {
+		t.Errorf("inactive_nodes.default_scope = %q, want unchanged '#eu'", sc.String)
+	}
+}
+
+// TestUpdateNodeDefaultScope_FinalUPDATEGuardIsSelfSufficient exercises the
+// exact SQL text of the guarded UPDATE directly, bypassing the fast-path
+// SELECT entirely, to prove the correctness guard lives in the UPDATE's own
+// WHERE clause -- not in the fast-path decision. This is what makes the fast
+// path safe against a race where state changes between the SELECT and the
+// UPDATE: even if the fast path were skipped or its decision were stale, the
+// UPDATE alone still refuses to write a confirmed row. NOTE: this
+// intentionally duplicates the WHERE clause from UpdateNodeDefaultScope in
+// db.go -- if that guard SQL changes, update this test's copy too.
+func TestUpdateNodeDefaultScope_FinalUPDATEGuardIsSelfSufficient(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f800000000000000000000000000000000000000000000000000000000008f"
+	seedActiveNodeOnly(t, store, pk)
+	seedDefaultScope(t, store, "nodes", pk, "#dk", "2026-07-29T22:40:00Z")
+
+	res, err := store.db.Exec(
+		`UPDATE nodes SET default_scope = ?
+		 WHERE public_key = ?
+		   AND (default_scope_confirmed_at IS NULL OR default_scope_confirmed_at = '')
+		   AND (default_scope IS NULL OR default_scope != ?)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM inactive_nodes i
+		       WHERE i.public_key = nodes.public_key
+		         AND i.default_scope_confirmed_at IS NOT NULL
+		         AND i.default_scope_confirmed_at != ''
+		   )`,
+		"#eu", pk, "#eu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := res.RowsAffected()
+	if n != 0 {
+		t.Errorf("UPDATE affected %d row(s), want 0 -- the WHERE clause itself, not the caller, must refuse to write a confirmed row", n)
+	}
+}
+
+func TestUpdateNodeDefaultScope_SecondUpdateFailureRollsBackFirst(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "f900000000000000000000000000000000000000000000000000000000009f"
+	seedActiveNodeOnly(t, store, pk)
+	seedInactiveNodeOnly(t, store, pk)
+
+	// Force the inactive_nodes UPDATE to fail while leaving the fast-path
+	// SELECT (a read, not a write, so triggers on UPDATE never fire for it)
+	// intact -- isolates a mid-transaction failure from a read-side failure.
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_inactive_default_scope_update
+		BEFORE UPDATE OF default_scope ON inactive_nodes
+		BEGIN SELECT RAISE(ABORT, 'forced failure for test'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	err := store.UpdateNodeDefaultScope(pk, "#eu")
+	if err == nil {
+		t.Fatal("want a non-nil error once the inactive_nodes UPDATE is forced to fail, got nil")
+	}
+
+	sc, at := defaultScopeConfirmed(t, store, pk) // reads nodes
+	if sc.Valid || at.Valid {
+		t.Errorf("nodes row = (%v,%v), want still NULL/NULL — the nodes UPDATE must have been rolled back when the inactive_nodes UPDATE failed", sc, at)
+	}
+}
+
+// TestHandleNeighborsReportMissingSelfDefaultScopeChangesNothing covers a
+// report whose self block carries scopes but not default_scope (an older
+// firmware predating the 2026-07-29 self.default_scope addition, or simply
+// a field the sender omitted): UpdateNodeDefaultScopeConfirmed must never be
+// called at all for this pubkey, so nothing in either table changes.
+func TestHandleNeighborsReportMissingSelfDefaultScopeChangesNothing(t *testing.T) {
+	store := openNeighborsStore(t)
+	pk := "fa0000000000000000000000000000000000000000000000000000000000af"
+	seedActiveNodeOnly(t, store, pk)
+
+	report := map[string]interface{}{
+		"timestamp": "2026-07-25T12:00:00Z",
+		"origin_id": pk,
+		"self":      map[string]interface{}{"scopes": "dk"}, // no default_scope key
+	}
+	handleNeighborsReport(store, "test", "obs", report)
+
+	sc, at := defaultScopeConfirmed(t, store, pk)
+	if sc.Valid || at.Valid {
+		t.Errorf("default_scope = (%v,%v), want still NULL/NULL -- a report without self.default_scope must never touch it", sc, at)
 	}
 }

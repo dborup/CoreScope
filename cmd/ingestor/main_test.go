@@ -117,7 +117,7 @@ func (m *mockMessage) MessageID() uint16 { return 0 }
 func (m *mockMessage) Payload() []byte   { return m.payload }
 func (m *mockMessage) Ack()              {}
 
-func newTestStore(t *testing.T) *Store {
+func newTestStore(t testing.TB) *Store {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := dir + "/test.db"

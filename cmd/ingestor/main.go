@@ -1538,20 +1538,26 @@ func init() {
 // are a no-op (the UPDATE matches no row) until a later advert creates the node.
 func handleNeighborsReport(store *Store, tag string, observerID string, msg map[string]interface{}) {
 	reportedAt, _ := msg["timestamp"].(string)
-	// #7: UpdateNodeConfiguredScope now rejects any report whose timestamp is
+	// #7 / default_scope follow-up: both UpdateNodeConfiguredScope and
+	// UpdateNodeDefaultScopeConfirmed reject any report whose timestamp is
 	// missing or unparseable outright, so an out-of-order/undated report can
-	// never overwrite newer confirmed configured_scope evidence. Log that
+	// never overwrite newer confirmed evidence of either kind. Log that
 	// exactly once per report here (not once per self/neighbor write below,
-	// which would spam the log on a report with many entries) rather than
-	// inside UpdateNodeConfiguredScope itself. This does not mean the rest
-	// of the report's data is discarded -- TouchObserverNeighborsReport,
-	// ReplaceObserverNeighbors, and RecordObserverNeighborMetrics already
-	// have their own pre-existing guards against a blank timestamp -- and it
-	// says nothing about default_scope: UpdateNodeDefaultScopeConfirmed is
-	// NOT yet hardened the same way (see its doc comment), so this message
-	// is deliberately scoped to configured-scope evidence only.
+	// which would spam the log on a report with many entries, and not inside
+	// either store method, which would double the line for a single bad
+	// report) regardless of whether this particular report actually carried
+	// self.scopes, self.default_scope, or any neighbor entry at all -- an
+	// invalid envelope timestamp is itself a signal worth surfacing (the
+	// observer's firmware/clock is misbehaving), independent of payload
+	// content, and unconditionally checking it here is far cheaper than
+	// inspecting the report body first to decide whether to log. This does
+	// not mean the rest of the report's data is discarded -- TouchObserver-
+	// NeighborsReport, ReplaceObserverNeighbors, and RecordObserverNeighbor-
+	// Metrics already have their own pre-existing guards against a blank
+	// timestamp -- and it says nothing about the rest of the report either;
+	// it only means these two specific evidence types were ignored.
 	if normalizeReportTS(reportedAt) == "" {
-		log.Printf("MQTT [%s] neighbors report from observer %.8s: invalid/missing timestamp %q; configured-scope evidence ignored", tag, observerID, reportedAt)
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: invalid/missing timestamp %q; configured-scope and default-scope evidence ignored", tag, observerID, reportedAt)
 	}
 
 	// #1865 follow-up: record that this observer sends /neighbors reports
