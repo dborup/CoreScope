@@ -164,3 +164,55 @@ func TestOpenAPISchema_FullCoverage(t *testing.T) {
 		t.Errorf("Node should set additionalProperties:true, got %v", node["additionalProperties"])
 	}
 }
+
+// TestOpenAPINodeSchema_ConfiguredScope pins issue #7: configured_scope and
+// configured_scope_at must be explicitly documented on the Node schema (not
+// merely tolerated via additionalProperties), as nullable strings, with
+// descriptions that spell out the null/empty/wildcard/freshness contract a
+// consumer needs to interpret the field safely.
+func TestOpenAPINodeSchema_ConfiguredScope(t *testing.T) {
+	spec := fetchSpec(t)
+	components := asMap(t, spec["components"], "components")
+	schemas := asMap(t, components["schemas"], "components.schemas")
+	node := asMap(t, schemas["Node"], "Node")
+	props := asMap(t, node["properties"], "Node.properties")
+
+	scope, ok := props["configured_scope"]
+	if !ok {
+		t.Fatal("Node.properties.configured_scope missing")
+	}
+	scopeMap := asMap(t, scope, "configured_scope")
+	if scopeMap["type"] != "string" {
+		t.Errorf("configured_scope: want type string, got %v", scopeMap["type"])
+	}
+	if scopeMap["nullable"] != true {
+		t.Errorf("configured_scope: want nullable:true, got %v", scopeMap["nullable"])
+	}
+	scopeDesc, _ := scopeMap["description"].(string)
+	for _, want := range []string{"null", "\"\"", "confirmed", "\"*\"", "wildcard", "timeout"} {
+		if !strings.Contains(scopeDesc, want) {
+			t.Errorf("configured_scope description missing %q: %s", want, scopeDesc)
+		}
+	}
+
+	at, ok := props["configured_scope_at"]
+	if !ok {
+		t.Fatal("Node.properties.configured_scope_at missing")
+	}
+	atMap := asMap(t, at, "configured_scope_at")
+	if atMap["type"] != "string" {
+		t.Errorf("configured_scope_at: want type string, got %v", atMap["type"])
+	}
+	if atMap["nullable"] != true {
+		t.Errorf("configured_scope_at: want nullable:true, got %v", atMap["nullable"])
+	}
+	if atMap["format"] != "date-time" {
+		t.Errorf("configured_scope_at: want format:date-time, got %v", atMap["format"])
+	}
+	atDesc, _ := atMap["description"].(string)
+	for _, want := range []string{"ACCEPTED", "not a guarantee", "missing or unparseable"} {
+		if !strings.Contains(atDesc, want) {
+			t.Errorf("configured_scope_at description missing %q: %s", want, atDesc)
+		}
+	}
+}
