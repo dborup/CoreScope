@@ -1955,10 +1955,19 @@ func (s *Store) UpdateNodeDefaultScope(pubkey, scope string) error {
 // here. "*" (the firmware's "no default region set" sentinel) is passed
 // through unchanged, same as UpdateNodeConfiguredScope treats it.
 //
-// reportedAt is the report envelope timestamp (ISO-8601), used the same way
-// UpdateNodeConfiguredScope uses it: last-write-wins so an out-of-order
-// older report can't clobber a newer confirmation. A blank reportedAt skips
-// the ordering guard (always writes).
+// reportedAt is the report envelope timestamp (ISO-8601), intended to work
+// the same way UpdateNodeConfiguredScope's does: last-write-wins so an
+// out-of-order older report can't clobber a newer confirmation.
+//
+// KNOWN GAP, NOT YET HARDENED (tracked as a follow-up to #7, deliberately
+// left unchanged by that fix): unlike UpdateNodeConfiguredScope, this method
+// still (a) falls through to an unconditional write — including a blank
+// default_scope_confirmed_at — when reportedAt is missing or unparseable,
+// which can overwrite newer confirmed evidence with stale/undated data, and
+// (b) only checks nodes.default_scope_confirmed_at for last-write-wins, so a
+// node that exists only in inactive_nodes has no ordering protection at all.
+// Do not assume this function is safe against either failure mode until it
+// receives the same fix.
 func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string) error {
 	if pubkey == "" {
 		return nil
@@ -2010,37 +2019,60 @@ func normalizeReportTS(raw string) string {
 // gates on status. An empty scope IS a valid "responded, no scopes configured"
 // statement and is stored; a timeout must simply not reach this method.
 //
-// reportedAt is the report envelope timestamp (ISO-8601). It is stored in
-// configured_scope_at and used for last-write-wins: an out-of-order older
-// report must not clobber a newer confirmed value. A blank reportedAt skips
-// the ordering guard (always writes).
+// reportedAt is the report envelope timestamp (ISO-8601), normalized to
+// canonical UTC RFC3339 and stored in configured_scope_at. A missing or
+// unparseable reportedAt is rejected outright: the update is a complete no-op
+// (pubkey and scope are never even normalized) rather than falling back to
+// the server's own receive time, which would let a stale or replayed report
+// masquerade as fresh. Reject as early as possible, before any other work.
+//
+// Last-write-wins is enforced independently for nodes and inactive_nodes via
+// two conditional UPDATE statements (not a SELECT-then-UPDATE, which would
+// race two concurrent reports for the same node) inside one transaction, so
+// the two tables either both apply the update or neither does. A node can
+// transiently exist in both tables at once (resurrection after retention
+// moved it to inactive_nodes does not delete the old inactive_nodes row), so
+// each table's own configured_scope_at — not a single cross-table read — is
+// the source of truth for whether IT should accept this report. An existing
+// value that is NULL, empty (pre-fix rows may have been stamped with an
+// empty configured_scope_at before this guard existed), or strictly older
+// than the incoming timestamp is superseded; an equal or newer timestamp
+// leaves that table's row untouched (idempotent no-op on equality).
 func (s *Store) UpdateNodeConfiguredScope(pubkey, scope, reportedAt string) error {
 	if pubkey == "" {
 		return nil
 	}
-	scope = normalizeConfiguredScopeList(scope)
-	// Normalize to canonical UTC RFC3339 so the last-write-wins comparison is
-	// chronological, not lexicographic (see normalizeReportTS). Stored values
-	// are therefore always canonical or empty.
+	// Normalize to canonical UTC RFC3339 first and reject invalid evidence
+	// immediately — scope is normalized only once we know the timestamp is
+	// usable, so malformed/missing timestamps do the least possible work.
 	reportedAt = normalizeReportTS(reportedAt)
-	// Last-write-wins: skip if the stored confirmation is newer-or-equal.
-	if reportedAt != "" {
-		var curAt sql.NullString
-		row := s.db.QueryRow(`SELECT configured_scope_at FROM nodes WHERE public_key = ?`, pubkey)
-		if row.Scan(&curAt) == nil && curAt.Valid && curAt.String != "" && curAt.String >= reportedAt {
-			return nil
-		}
+	if reportedAt == "" {
+		return nil
 	}
-	if _, err := s.db.Exec(
-		`UPDATE nodes SET configured_scope = ?, configured_scope_at = ? WHERE public_key = ?`,
-		scope, reportedAt, pubkey); err != nil {
+	scope = normalizeConfiguredScopeList(scope)
+
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	// Mirror to inactive_nodes (node may be there if recently moved by retention).
-	_, err := s.db.Exec(
-		`UPDATE inactive_nodes SET configured_scope = ?, configured_scope_at = ? WHERE public_key = ?`,
-		scope, reportedAt, pubkey)
-	return err
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`UPDATE nodes SET configured_scope = ?, configured_scope_at = ?
+		 WHERE public_key = ? AND (configured_scope_at IS NULL OR configured_scope_at = '' OR configured_scope_at < ?)`,
+		scope, reportedAt, pubkey, reportedAt); err != nil {
+		return err
+	}
+	// Mirror to inactive_nodes under its own independent LWW guard (node may
+	// be there if recently moved by retention, or transiently present in
+	// both tables — see doc comment above).
+	if _, err := tx.Exec(
+		`UPDATE inactive_nodes SET configured_scope = ?, configured_scope_at = ?
+		 WHERE public_key = ? AND (configured_scope_at IS NULL OR configured_scope_at = '' OR configured_scope_at < ?)`,
+		scope, reportedAt, pubkey, reportedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // TouchObserverNeighborsReport records that the given observer sent a

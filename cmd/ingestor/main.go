@@ -1538,6 +1538,21 @@ func init() {
 // are a no-op (the UPDATE matches no row) until a later advert creates the node.
 func handleNeighborsReport(store *Store, tag string, observerID string, msg map[string]interface{}) {
 	reportedAt, _ := msg["timestamp"].(string)
+	// #7: UpdateNodeConfiguredScope now rejects any report whose timestamp is
+	// missing or unparseable outright, so an out-of-order/undated report can
+	// never overwrite newer confirmed configured_scope evidence. Log that
+	// exactly once per report here (not once per self/neighbor write below,
+	// which would spam the log on a report with many entries) rather than
+	// inside UpdateNodeConfiguredScope itself. This does not mean the rest
+	// of the report's data is discarded -- TouchObserverNeighborsReport,
+	// ReplaceObserverNeighbors, and RecordObserverNeighborMetrics already
+	// have their own pre-existing guards against a blank timestamp -- and it
+	// says nothing about default_scope: UpdateNodeDefaultScopeConfirmed is
+	// NOT yet hardened the same way (see its doc comment), so this message
+	// is deliberately scoped to configured-scope evidence only.
+	if normalizeReportTS(reportedAt) == "" {
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: invalid/missing timestamp %q; configured-scope evidence ignored", tag, observerID, reportedAt)
+	}
 
 	// #1865 follow-up: record that this observer sends /neighbors reports
 	// at all, regardless of whether self/neighbors below carry usable scope
