@@ -17,11 +17,26 @@ import (
 // before seeding dedicated, full 64-char-pubkey fixtures.
 
 const (
-	defaultScopeContractNullPK      = "a100000000000000000000000000000000000000000000000000000000000001"
-	defaultScopeContractInferredPK  = "a200000000000000000000000000000000000000000000000000000000000002"
-	defaultScopeContractConfirmedPK = "a300000000000000000000000000000000000000000000000000000000000003"
-	defaultScopeContractWildcardPK  = "a400000000000000000000000000000000000000000000000000000000000004"
+	defaultScopeContractNullPK         = "a100000000000000000000000000000000000000000000000000000000000001"
+	defaultScopeContractInferredPK     = "a200000000000000000000000000000000000000000000000000000000000002"
+	defaultScopeContractConfirmedPK    = "a300000000000000000000000000000000000000000000000000000000000003"
+	defaultScopeContractWildcardPK     = "a400000000000000000000000000000000000000000000000000000000000004"
+	defaultScopeContractResurrectionPK = "a500000000000000000000000000000000000000000000000000000000000005"
 )
+
+// defaultScopeContractFixturePubkeys lists every public key this file seeds
+// as a default_scope fixture, so TestDefaultScopeContractFixturePubkeysAreFullKeys
+// can validate all of them in one place instead of only the one that was
+// once wrong (a previous version of defaultScopeContractResurrectionPK was
+// 61 hex chars, three short of a real MeshCore public key -- caught only by
+// manual inspection, not by any test).
+var defaultScopeContractFixturePubkeys = []string{
+	defaultScopeContractNullPK,
+	defaultScopeContractInferredPK,
+	defaultScopeContractConfirmedPK,
+	defaultScopeContractWildcardPK,
+	defaultScopeContractResurrectionPK,
+}
 
 // setupDefaultScopeContractServer builds the standard test server, adds the
 // default_scope columns to its nodes table, and seeds four fixture nodes
@@ -218,7 +233,7 @@ func TestGetNodeByPubkey_DefaultScope_FullKeyNoAmbiguity(t *testing.T) {
 // API never shows a downgraded or borrowed value.
 func TestGetNodeByPubkey_DefaultScope_ResurrectionFixture(t *testing.T) {
 	srv, router := setupTestServer(t)
-	pk := "a500000000000000000000000000000000000000000000000000000000005"
+	pk := defaultScopeContractResurrectionPK
 
 	// setupTestDB's shared schema predates inactive_nodes entirely; reuse
 	// new_nodes_test.go's helper rather than duplicating the CREATE TABLE.
@@ -274,5 +289,30 @@ func TestGetNodeByPubkey_DefaultScope_ResurrectionFixture(t *testing.T) {
 	atVal, hasAt := node["default_scope_confirmed_at"]
 	if !hasAt || atVal != nil {
 		t.Errorf("default_scope_confirmed_at = %#v (present=%v), want null", atVal, hasAt)
+	}
+}
+
+// TestDefaultScopeContractFixturePubkeysAreFullKeys guards every public-key
+// fixture in this file against the shape of bug this test was added for: a
+// resurrection-fixture key that was 61 hex chars instead of a real 64-char
+// MeshCore public key, undetected until manual review. Every fixture in
+// defaultScopeContractFixturePubkeys -- not just the one that was wrong --
+// must be exactly 64 lowercase hex characters and mutually unique.
+func TestDefaultScopeContractFixturePubkeysAreFullKeys(t *testing.T) {
+	seen := make(map[string]bool, len(defaultScopeContractFixturePubkeys))
+	for _, pk := range defaultScopeContractFixturePubkeys {
+		if len(pk) != 64 {
+			t.Errorf("fixture pubkey %q has length %d, want exactly 64", pk, len(pk))
+		}
+		for _, c := range pk {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				t.Errorf("fixture pubkey %q contains non-lowercase-hex character %q", pk, c)
+				break
+			}
+		}
+		if seen[pk] {
+			t.Errorf("fixture pubkey %q is used more than once, want each fixture unique", pk)
+		}
+		seen[pk] = true
 	}
 }
