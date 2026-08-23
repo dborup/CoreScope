@@ -113,84 +113,155 @@ func benchFastPathThenTx(db *sql.DB, pubkey, scope string) error {
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
-type dsFixture struct {
-	name  string
-	setup func(db *sql.DB, pubkey string) // leaves nodes/inactive_nodes rows (or none) for pubkey
-	scope string
+// rowSnapshot captures the columns UpdateNodeDefaultScope can observe or
+// change for one pubkey in one table. It is comparable (both fields of
+// sql.NullString are comparable, as is bool), so two snapshots can be
+// compared with == directly -- no reflect.DeepEqual needed.
+type rowSnapshot struct {
+	exists    bool
+	scope     sql.NullString
+	confirmed sql.NullString
 }
 
-func dsSeed(table, pubkey, scope string, confirmed bool) func(db *sql.DB) {
+func readSnapshot(tb testing.TB, db *sql.DB, table, pubkey string) rowSnapshot {
+	tb.Helper()
+	var sc, at sql.NullString
+	err := db.QueryRow(`SELECT default_scope, default_scope_confirmed_at FROM `+table+` WHERE public_key = ?`, pubkey).Scan(&sc, &at)
+	if err == sql.ErrNoRows {
+		return rowSnapshot{exists: false}
+	}
+	if err != nil {
+		tb.Fatalf("read %s snapshot for %s: %v", table, pubkey, err)
+	}
+	return rowSnapshot{exists: true, scope: sc, confirmed: at}
+}
+
+type dsFixture struct {
+	name  string
+	setup func(tb testing.TB, db *sql.DB, pubkey string) // leaves nodes/inactive_nodes rows (or none) for pubkey
+	scope string
+
+	// anyConfirmedBefore selects which invariant TestDefaultScopeBenchCandidates_Correctness
+	// checks: true -> confirmation exists somewhere for this pubkey, so
+	// neither table's row may be mutated at all (checked against a snapshot
+	// taken right before the candidate write, not a fixed expectation).
+	// false -> no confirmation exists anywhere, so the exact expected
+	// end-state below must hold, for both candidates identically.
+	anyConfirmedBefore bool
+	wantNodesAfter     rowSnapshot // only checked when !anyConfirmedBefore
+	wantInactiveAfter  rowSnapshot // only checked when !anyConfirmedBefore
+}
+
+// dsSeed inserts (or updates) a row in table for pubkey with the given
+// default_scope/confirmed state, failing the test/benchmark immediately on
+// any SQL error -- a silently-dropped seed insert would make every
+// assertion downstream meaningless rather than catching the real bug.
+func dsSeed(tb testing.TB, db *sql.DB, table, pubkey, scope string, confirmed bool) {
+	tb.Helper()
 	at := ""
 	if confirmed {
 		at = "2026-07-29T22:40:00Z"
 	}
-	return func(db *sql.DB) {
-		db.Exec(`INSERT INTO `+table+` (public_key, default_scope, default_scope_confirmed_at, last_seen, first_seen) VALUES (?, ?, ?, '', '')`, pubkey, scope, at)
+	if _, err := db.Exec(
+		`INSERT INTO `+table+` (public_key, default_scope, default_scope_confirmed_at, last_seen, first_seen) VALUES (?, ?, ?, '', '')`,
+		pubkey, scope, at); err != nil {
+		tb.Fatalf("seed %s: table=%s pubkey=%s scope=%q confirmed=%v: %v", "dsSeed", table, pubkey, scope, confirmed, err)
 	}
 }
 
+// unconfirmedScope is the sentinel default_scope_confirmed_at value dsSeed
+// writes for confirmed=false: an empty string, not SQL NULL (matching real
+// unconfirmed rows, which are never touched by UpdateNodeDefaultScope's
+// UPDATE -- it only ever sets default_scope). Both NULL and "" mean
+// "unconfirmed" to the production guard, but readSnapshot reads back
+// whatever was actually stored, so expected end-states below must use this,
+// not a NULL NullString.
+var unconfirmedScope = sql.NullString{String: "", Valid: true}
+
 var dsFixtures = []dsFixture{
 	{
-		name:  "ActiveOnly_SameValue",
-		setup: func(db *sql.DB, pk string) { dsSeed("nodes", pk, "#eu", false)(db) },
-		scope: "#eu",
+		name:               "ActiveOnly_SameValue",
+		setup:              func(tb testing.TB, db *sql.DB, pk string) { dsSeed(tb, db, "nodes", pk, "#eu", false) },
+		scope:              "#eu",
+		anyConfirmedBefore: false,
+		wantNodesAfter:     rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
+		wantInactiveAfter:  rowSnapshot{exists: false},
 	},
 	{
-		name:  "ActiveOnly_NewValue",
-		setup: func(db *sql.DB, pk string) { dsSeed("nodes", pk, "#dk", false)(db) },
-		scope: "#eu",
+		name:               "ActiveOnly_NewValue",
+		setup:              func(tb testing.TB, db *sql.DB, pk string) { dsSeed(tb, db, "nodes", pk, "#dk", false) },
+		scope:              "#eu",
+		anyConfirmedBefore: false,
+		wantNodesAfter:     rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
+		wantInactiveAfter:  rowSnapshot{exists: false},
 	},
 	{
-		name:  "ActiveOnly_Confirmed",
-		setup: func(db *sql.DB, pk string) { dsSeed("nodes", pk, "#dk", true)(db) },
-		scope: "#eu",
+		name:               "ActiveOnly_Confirmed",
+		setup:              func(tb testing.TB, db *sql.DB, pk string) { dsSeed(tb, db, "nodes", pk, "#dk", true) },
+		scope:              "#eu",
+		anyConfirmedBefore: true,
 	},
 	{
-		name:  "InactiveOnly_SameValue",
-		setup: func(db *sql.DB, pk string) { dsSeed("inactive_nodes", pk, "#eu", false)(db) },
-		scope: "#eu",
+		name:               "InactiveOnly_SameValue",
+		setup:              func(tb testing.TB, db *sql.DB, pk string) { dsSeed(tb, db, "inactive_nodes", pk, "#eu", false) },
+		scope:              "#eu",
+		anyConfirmedBefore: false,
+		wantNodesAfter:     rowSnapshot{exists: false},
+		wantInactiveAfter:  rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
 	},
 	{
-		name:  "InactiveOnly_Confirmed",
-		setup: func(db *sql.DB, pk string) { dsSeed("inactive_nodes", pk, "#dk", true)(db) },
-		scope: "#eu",
+		name:               "InactiveOnly_Confirmed",
+		setup:              func(tb testing.TB, db *sql.DB, pk string) { dsSeed(tb, db, "inactive_nodes", pk, "#dk", true) },
+		scope:              "#eu",
+		anyConfirmedBefore: true,
 	},
 	{
 		name: "BothUnconfirmed_SameValue",
-		setup: func(db *sql.DB, pk string) {
-			dsSeed("nodes", pk, "#eu", false)(db)
-			dsSeed("inactive_nodes", pk, "#eu", false)(db)
+		setup: func(tb testing.TB, db *sql.DB, pk string) {
+			dsSeed(tb, db, "nodes", pk, "#eu", false)
+			dsSeed(tb, db, "inactive_nodes", pk, "#eu", false)
 		},
-		scope: "#eu",
+		scope:              "#eu",
+		anyConfirmedBefore: false,
+		wantNodesAfter:     rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
+		wantInactiveAfter:  rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
 	},
 	{
 		name: "BothUnconfirmed_DifferentValue",
-		setup: func(db *sql.DB, pk string) {
-			dsSeed("nodes", pk, "#dk", false)(db)
-			dsSeed("inactive_nodes", pk, "#dk", false)(db)
+		setup: func(tb testing.TB, db *sql.DB, pk string) {
+			dsSeed(tb, db, "nodes", pk, "#dk", false)
+			dsSeed(tb, db, "inactive_nodes", pk, "#dk", false)
 		},
-		scope: "#eu",
+		scope:              "#eu",
+		anyConfirmedBefore: false,
+		wantNodesAfter:     rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
+		wantInactiveAfter:  rowSnapshot{exists: true, scope: sql.NullString{String: "#eu", Valid: true}, confirmed: unconfirmedScope},
 	},
 	{
 		name: "ConfirmedInActiveOnly",
-		setup: func(db *sql.DB, pk string) {
-			dsSeed("nodes", pk, "#dk", true)(db)
-			dsSeed("inactive_nodes", pk, "#dk", false)(db)
+		setup: func(tb testing.TB, db *sql.DB, pk string) {
+			dsSeed(tb, db, "nodes", pk, "#dk", true)
+			dsSeed(tb, db, "inactive_nodes", pk, "#dk", false)
 		},
-		scope: "#eu",
+		scope:              "#eu",
+		anyConfirmedBefore: true,
 	},
 	{
 		name: "ConfirmedInInactiveOnly",
-		setup: func(db *sql.DB, pk string) {
-			dsSeed("nodes", pk, "", false)(db)
-			dsSeed("inactive_nodes", pk, "#dk", true)(db)
+		setup: func(tb testing.TB, db *sql.DB, pk string) {
+			dsSeed(tb, db, "nodes", pk, "", false)
+			dsSeed(tb, db, "inactive_nodes", pk, "#dk", true)
 		},
-		scope: "#eu",
+		scope:              "#eu",
+		anyConfirmedBefore: true,
 	},
 	{
-		name:  "UnknownPubkey",
-		setup: func(db *sql.DB, pk string) {}, // no row seeded at all
-		scope: "#eu",
+		name:               "UnknownPubkey",
+		setup:              func(tb testing.TB, db *sql.DB, pk string) {}, // no row seeded at all
+		scope:              "#eu",
+		anyConfirmedBefore: false,
+		wantNodesAfter:     rowSnapshot{exists: false},
+		wantInactiveAfter:  rowSnapshot{exists: false},
 	},
 }
 
@@ -212,7 +283,7 @@ func runDefaultScopeBench(b *testing.B, write func(db *sql.DB, pubkey, scope str
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				pk := fmt.Sprintf("pk%d", i)
-				fx.setup(db, pk)
+				fx.setup(b, db, pk)
 				b.StartTimer()
 				if err := write(db, pk, fx.scope); err != nil {
 					b.Fatal(err)
@@ -232,9 +303,17 @@ func BenchmarkDefaultScope_FastPathThenTx(b *testing.B) {
 
 // TestDefaultScopeBenchCandidates_Correctness is not a benchmark -- it pins
 // that both candidates reach the identical, correct end state for every
-// fixture above before their timings are trusted. Cross-table protection
-// (confirmation in either table blocks inference in both) is the property
-// under test; the two candidates must never disagree.
+// fixture above before their timings are trusted. Two invariants are
+// checked, selected per fixture by anyConfirmedBefore:
+//
+//   - A confirmation exists somewhere for this pubkey (before the candidate
+//     write runs): neither table's row may be mutated AT ALL -- checked
+//     against a snapshot taken immediately before the write, not a
+//     hardcoded expectation, and including the "no row was created where
+//     none existed" case.
+//   - No confirmation exists anywhere: the exact expected end-state (an
+//     explicit value per fixture, not derived from the fixture's name) must
+//     hold for both candidates identically.
 func TestDefaultScopeBenchCandidates_Correctness(t *testing.T) {
 	for _, fx := range dsFixtures {
 		for _, cand := range []struct {
@@ -248,37 +327,31 @@ func TestDefaultScopeBenchCandidates_Correctness(t *testing.T) {
 				store := newTestStore(t)
 				db := store.db
 				pk := "correctness-" + fx.name
-				fx.setup(db, pk)
+				fx.setup(t, db, pk)
+
+				beforeNodes := readSnapshot(t, db, "nodes", pk)
+				beforeInactive := readSnapshot(t, db, "inactive_nodes", pk)
 
 				if err := cand.write(db, pk, fx.scope); err != nil {
 					t.Fatal(err)
 				}
 
-				var nSc, nAt sql.NullString
-				nErr := db.QueryRow(`SELECT default_scope, default_scope_confirmed_at FROM nodes WHERE public_key = ?`, pk).Scan(&nSc, &nAt)
-				var iSc, iAt sql.NullString
-				iErr := db.QueryRow(`SELECT default_scope, default_scope_confirmed_at FROM inactive_nodes WHERE public_key = ?`, pk).Scan(&iSc, &iAt)
+				afterNodes := readSnapshot(t, db, "nodes", pk)
+				afterInactive := readSnapshot(t, db, "inactive_nodes", pk)
 
-				// A confirmed row (in either table) must never lose its own
-				// default_scope/confirmed_at to this write.
-				if nErr == nil && nAt.Valid && nAt.String != "" {
-					if nSc.String == fx.scope && fx.name != "ConfirmedInActiveOnly" {
-						// value coincidentally equals input in some fixtures; only assert
-						// the confirmed timestamp itself was never touched.
+				if fx.anyConfirmedBefore {
+					if afterNodes != beforeNodes {
+						t.Errorf("%s: nodes row changed despite a confirmation existing somewhere for this pubkey: before=%+v after=%+v", cand.name, beforeNodes, afterNodes)
 					}
-				}
-
-				// The cross-table invariant: if EITHER table is confirmed for this
-				// pubkey, NEITHER table's default_scope may have become fx.scope as a
-				// fresh inferred write when it wasn't already that value AND unconfirmed.
-				activeConfirmedBefore := fx.name == "ActiveOnly_Confirmed" || fx.name == "ConfirmedInActiveOnly"
-				inactiveConfirmedBefore := fx.name == "InactiveOnly_Confirmed" || fx.name == "ConfirmedInInactiveOnly"
-				if activeConfirmedBefore || inactiveConfirmedBefore {
-					if nErr == nil && !nAt.Valid && nSc.Valid && nSc.String == fx.scope {
-						t.Errorf("%s/%s: nodes.default_scope became %q via inference despite confirmation existing for this pubkey", fx.name, cand.name, nSc.String)
+					if afterInactive != beforeInactive {
+						t.Errorf("%s: inactive_nodes row changed despite a confirmation existing somewhere for this pubkey: before=%+v after=%+v", cand.name, beforeInactive, afterInactive)
 					}
-					if iErr == nil && !iAt.Valid && iSc.Valid && iSc.String == fx.scope {
-						t.Errorf("%s/%s: inactive_nodes.default_scope became %q via inference despite confirmation existing for this pubkey", fx.name, cand.name, iSc.String)
+				} else {
+					if afterNodes != fx.wantNodesAfter {
+						t.Errorf("%s: nodes after = %+v, want %+v", cand.name, afterNodes, fx.wantNodesAfter)
+					}
+					if afterInactive != fx.wantInactiveAfter {
+						t.Errorf("%s: inactive_nodes after = %+v, want %+v", cand.name, afterInactive, fx.wantInactiveAfter)
 					}
 				}
 			})

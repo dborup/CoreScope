@@ -1956,15 +1956,30 @@ func scopeNameForDB(data *PacketData) *string {
 // write can possibly be needed at all -- no rows, a confirmed row anywhere,
 // or every existing row already matching scope all short-circuit with zero
 // writes and no transaction. This is an optimization only, never a
-// correctness authority: if state changes between the read and the write (a
-// confirmation lands in the gap), the final UPDATE statements below carry
-// the exact same row-local + cross-table NOT EXISTS guards regardless, so
-// the read can never be responsible for a wrong write, only for extra
-// (always safe) work. This choice -- fast-path read over always running the
-// guarded transaction unconditionally -- is based on a reproducible,
-// measured comparison; see default_scope_bench_test.go
-// (BenchmarkDefaultScope_CrossTableTx vs. BenchmarkDefaultScope_FastPathThenTx)
-// for the two candidates and how to reproduce the numbers.
+// correctness authority: the final UPDATE statements below carry the exact
+// same row-local + cross-table NOT EXISTS guards regardless of what the read
+// saw, so the read can never be responsible for a WRONG write -- it can
+// never cause confirmed evidence to be overwritten, and it can never write a
+// value other than the one this call was asked to write.
+//
+// The one thing a stale read CAN cause: if table state changes in the gap
+// between this SELECT and the (skipped) transaction -- e.g. a concurrent
+// call for the same pubkey lands a different inferred value in the narrow
+// window after allSame was computed true -- an early return here can defer
+// an otherwise-useful inferred update rather than apply it immediately. That
+// is acceptable: inferred scope is opportunistic best-effort data, not
+// evidence that must land on any particular call, and the next ADVERT for
+// the same node (which re-reads fresh state) self-heals it. The one case
+// that must never happen -- writing over confirmed evidence -- cannot occur
+// this way, because confirmations are only ever added, never removed, so a
+// confirmed-anywhere read can only become "more confirmed," never less, by
+// the time the (already-skipped) write would have run.
+//
+// This choice -- fast-path read over always running the guarded transaction
+// unconditionally -- is based on a reproducible, measured comparison; see
+// default_scope_bench_test.go (BenchmarkDefaultScope_CrossTableTx vs.
+// BenchmarkDefaultScope_FastPathThenTx) for the two candidates and how to
+// reproduce the numbers.
 func (s *Store) UpdateNodeDefaultScope(pubkey, scope string) error {
 	if scope == "" {
 		return nil
@@ -2065,13 +2080,15 @@ func (s *Store) UpdateNodeDefaultScope(pubkey, scope string) error {
 // early as possible, before any other work -- same contract as
 // UpdateNodeConfiguredScope.
 //
-// A scope that normalizes to empty (blank input, or an unrecognized region
-// name normalizeSingleScope couldn't match) is also a no-op: unlike
-// configured_scope, default_scope has no legitimate "confirmed empty" state
-// -- "*" is the firmware's only "no default region set" signal -- so an
-// empty value here is noise, not evidence, the same contract
-// UpdateNodeDefaultScope's own scope=="" guard already enforces for
-// inference.
+// A scope that normalizes to empty is also a no-op: normalizeSingleScope
+// trims raw, passes a blank/whitespace-only result or "*" through as-is, and
+// otherwise syntactically "#"-prefixes any other non-empty string -- it does
+// not look up a known-region list, so there is no "unrecognized region"
+// outcome distinct from blank input. Unlike configured_scope, default_scope
+// has no legitimate "confirmed empty" state -- "*" is the firmware's only
+// "no default region set" signal -- so a blank value here is noise, not
+// evidence, the same contract UpdateNodeDefaultScope's own scope=="" guard
+// already enforces for inference.
 //
 // Last-write-wins is enforced independently for nodes and inactive_nodes via
 // two conditional UPDATE statements inside one transaction (not a
