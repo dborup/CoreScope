@@ -1715,6 +1715,15 @@ func (s *Store) BackfillPathJSONAsync() {
 // MQTT packet inserts and any concurrent backfill goroutines — serialize through
 // the single connection pool. busy_timeout(5000) handles transient cross-process
 // contention with the read-only server process. No additional locking is needed.
+//
+// Cross-table protection (#7 default_scope follow-up): the guard below only
+// ever writes a row that has no confirmed evidence of its own AND no
+// confirmed evidence for the same public key in inactive_nodes -- the same
+// invariant UpdateNodeDefaultScope enforces for the live ingest path. The
+// _migrations marker makes this a one-time operation on any long-running
+// database, but a fresh or restored database (no marker recorded yet) could
+// otherwise have this backfill race ahead of a firmware confirmation and
+// overwrite it with a lower-quality packet-inferred guess.
 func (s *Store) BackfillDefaultScopeAsync(regionKeys map[string][]byte) {
 	// No region keys configured — all scope_name values will be NULL, nothing to backfill.
 	if len(regionKeys) == 0 {
@@ -1746,6 +1755,13 @@ func (s *Store) BackfillDefaultScopeAsync(regionKeys map[string][]byte) {
 				WHERE t.from_pubkey = nodes.public_key
 				  AND t.payload_type = 4
 				  AND t.scope_name IS NOT NULL AND t.scope_name != ''
+			)
+			AND (default_scope_confirmed_at IS NULL OR default_scope_confirmed_at = '')
+			AND NOT EXISTS (
+				SELECT 1 FROM inactive_nodes i
+				WHERE i.public_key = nodes.public_key
+				  AND i.default_scope_confirmed_at IS NOT NULL
+				  AND i.default_scope_confirmed_at != ''
 			)`)
 		if err != nil {
 			log.Printf("[backfill] default_scope: %v", err)
@@ -1908,42 +1924,141 @@ func scopeNameForDB(data *PacketData) *string {
 	return &s
 }
 
-// UpdateNodeDefaultScope records the most-recently observed region scope for a
-// node, INFERRED from a transport-scoped advert. Skips the UPDATE when the
-// stored value already matches to avoid redundant writes on the hot MQTT
-// ingest path. Updates both nodes and inactive_nodes to stay consistent.
+// UpdateNodeDefaultScope records the most-recently observed region scope for
+// a node, INFERRED from a transport-scoped advert. Called on nearly every
+// ADVERT with a matched transport scope -- the hottest MQTT-ingest write in
+// this file -- so it is deliberately optimized to avoid opening a write
+// transaction on its dominant paths (already-correct value, confirmed
+// evidence present anywhere, unknown pubkey).
 //
 // Defense-in-depth (#1534): an empty scope is treated as a no-op. The call
 // site at handleMessage is the primary guard (shouldUpdateDefaultScope),
 // but this layer refuses the invalid write so a future caller cannot
 // reintroduce the bug by passing "" directly.
 //
-// #1865 follow-up: also refuses to write once default_scope_confirmed_at is
-// set -- a firmware self-report (UpdateNodeDefaultScopeConfirmed, from the
-// observer /neighbors report's self.default_scope) is concrete evidence and
-// must never be silently downgraded by a later packet-inferred guess.
+// Cross-table protection (#7 default_scope follow-up): a packet-inferred
+// value is a strictly lower evidence class than a firmware-confirmed
+// self-report (UpdateNodeDefaultScopeConfirmed) and carries no timestamp of
+// its own to arbitrate against one -- so unlike the confirmed write path
+// (which compares same-class evidence via row-local timestamp LWW), this
+// method must never write to EITHER nodes or inactive_nodes when a
+// non-empty default_scope_confirmed_at exists for that public key in EITHER
+// table. A node can transiently exist in both (resurrection after retention
+// moved it to inactive_nodes does not delete that row), and the resurrected
+// active row starts unconfirmed -- UpsertNode's INSERT never sets
+// default_scope_confirmed_at -- even when the old inactive_nodes row is
+// still confirmed. Without this cross-table check, inference would silently
+// downgrade that confirmed evidence the moment the node re-adverts, and the
+// downgrade would be directly visible via /api/nodes (the active row is
+// what that endpoint reads).
+//
+// Implementation: a cheap two-row UNION ALL read decides up front whether a
+// write can possibly be needed at all -- no rows, a confirmed row anywhere,
+// or every existing row already matching scope all short-circuit with zero
+// writes and no transaction. This is an optimization only, never a
+// correctness authority: the final UPDATE statements below carry the exact
+// same row-local + cross-table NOT EXISTS guards regardless of what the read
+// saw, so the read can never be responsible for a WRONG write -- it can
+// never cause confirmed evidence to be overwritten, and it can never write a
+// value other than the one this call was asked to write.
+//
+// The one thing a stale read CAN cause: if table state changes in the gap
+// between this SELECT and the (skipped) transaction -- e.g. a concurrent
+// call for the same pubkey lands a different inferred value in the narrow
+// window after allSame was computed true -- an early return here can defer
+// an otherwise-useful inferred update rather than apply it immediately. That
+// is acceptable: inferred scope is opportunistic best-effort data, not
+// evidence that must land on any particular call, and the next ADVERT for
+// the same node (which re-reads fresh state) self-heals it. The one case
+// that must never happen -- writing over confirmed evidence -- cannot occur
+// this way, because confirmations are only ever added, never removed, so a
+// confirmed-anywhere read can only become "more confirmed," never less, by
+// the time the (already-skipped) write would have run.
+//
+// This choice -- fast-path read over always running the guarded transaction
+// unconditionally -- is based on a reproducible, measured comparison; see
+// default_scope_bench_test.go (BenchmarkDefaultScope_CrossTableTx vs.
+// BenchmarkDefaultScope_FastPathThenTx) for the two candidates and how to
+// reproduce the numbers.
 func (s *Store) UpdateNodeDefaultScope(pubkey, scope string) error {
 	if scope == "" {
 		return nil
 	}
-	// Short-circuit: skip if already stored, or if a firmware self-report
-	// has already confirmed this node's default_scope.
-	var cur, confirmedAt sql.NullString
-	row := s.db.QueryRow(`SELECT default_scope, default_scope_confirmed_at FROM nodes WHERE public_key = ?`, pubkey)
-	if row.Scan(&cur, &confirmedAt) == nil {
-		if confirmedAt.Valid && confirmedAt.String != "" {
-			return nil
-		}
-		if cur.Valid && cur.String == scope {
-			return nil
-		}
-	}
-	if _, err := s.db.Exec(`UPDATE nodes SET default_scope = ? WHERE public_key = ?`, scope, pubkey); err != nil {
+
+	rows, err := s.db.Query(
+		`SELECT default_scope, default_scope_confirmed_at FROM nodes WHERE public_key = ?
+		 UNION ALL
+		 SELECT default_scope, default_scope_confirmed_at FROM inactive_nodes WHERE public_key = ?`,
+		pubkey, pubkey)
+	if err != nil {
 		return err
 	}
-	// Mirror to inactive_nodes (node may be there if recently moved by retention).
-	_, err := s.db.Exec(`UPDATE inactive_nodes SET default_scope = ? WHERE public_key = ?`, scope, pubkey)
-	return err
+	found := false
+	allSame := true
+	anyConfirmed := false
+	for rows.Next() {
+		var cur, confirmedAt sql.NullString
+		if err := rows.Scan(&cur, &confirmedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		found = true
+		if confirmedAt.Valid && confirmedAt.String != "" {
+			anyConfirmed = true
+		}
+		if !(cur.Valid && cur.String == scope) {
+			allSame = false
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	// No row for this pubkey anywhere, a confirmation exists somewhere (which
+	// cross-table-blocks inference in BOTH tables, not just the confirmed
+	// one), or every existing row already matches scope -- nothing to write.
+	if !found || anyConfirmed || allSame {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`UPDATE nodes SET default_scope = ?
+		 WHERE public_key = ?
+		   AND (default_scope_confirmed_at IS NULL OR default_scope_confirmed_at = '')
+		   AND (default_scope IS NULL OR default_scope != ?)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM inactive_nodes i
+		       WHERE i.public_key = nodes.public_key
+		         AND i.default_scope_confirmed_at IS NOT NULL
+		         AND i.default_scope_confirmed_at != ''
+		   )`,
+		scope, pubkey, scope); err != nil {
+		return err
+	}
+	// Mirror to inactive_nodes under its own independent row-local +
+	// cross-table guard (node may be there if recently moved by retention,
+	// or transiently present in both tables -- see doc comment above).
+	if _, err := tx.Exec(
+		`UPDATE inactive_nodes SET default_scope = ?
+		 WHERE public_key = ?
+		   AND (default_scope_confirmed_at IS NULL OR default_scope_confirmed_at = '')
+		   AND (default_scope IS NULL OR default_scope != ?)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM nodes n
+		       WHERE n.public_key = inactive_nodes.public_key
+		         AND n.default_scope_confirmed_at IS NOT NULL
+		         AND n.default_scope_confirmed_at != ''
+		   )`,
+		scope, pubkey, scope); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateNodeDefaultScopeConfirmed records the region a node floods to by
@@ -1952,44 +2067,73 @@ func (s *Store) UpdateNodeDefaultScope(pubkey, scope string) error {
 // self-report rather than an inference from observed packets. Unlike
 // UpdateNodeDefaultScope, this stamps default_scope_confirmed_at, which in
 // turn makes UpdateNodeDefaultScope refuse to overwrite the value it sets
-// here. "*" (the firmware's "no default region set" sentinel) is passed
-// through unchanged, same as UpdateNodeConfiguredScope treats it.
+// here -- in EITHER table, not just the one a given confirmed write happens
+// to land in (see UpdateNodeDefaultScope's cross-table protection). "*"
+// (the firmware's "no default region set" sentinel) is passed through
+// unchanged, same as UpdateNodeConfiguredScope treats it.
 //
-// reportedAt is the report envelope timestamp (ISO-8601), intended to work
-// the same way UpdateNodeConfiguredScope's does: last-write-wins so an
-// out-of-order older report can't clobber a newer confirmation.
+// reportedAt is the report envelope timestamp (ISO-8601), normalized to
+// canonical UTC RFC3339. A missing or unparseable reportedAt is rejected
+// outright: the update is a complete no-op (pubkey and scope are never even
+// normalized) rather than falling back to the server's own receive time,
+// which would let a stale or replayed report masquerade as fresh. Reject as
+// early as possible, before any other work -- same contract as
+// UpdateNodeConfiguredScope.
 //
-// KNOWN GAP, NOT YET HARDENED (tracked as a follow-up to #7, deliberately
-// left unchanged by that fix): unlike UpdateNodeConfiguredScope, this method
-// still (a) falls through to an unconditional write — including a blank
-// default_scope_confirmed_at — when reportedAt is missing or unparseable,
-// which can overwrite newer confirmed evidence with stale/undated data, and
-// (b) only checks nodes.default_scope_confirmed_at for last-write-wins, so a
-// node that exists only in inactive_nodes has no ordering protection at all.
-// Do not assume this function is safe against either failure mode until it
-// receives the same fix.
+// A scope that normalizes to empty is also a no-op: normalizeSingleScope
+// trims raw, passes a blank/whitespace-only result or "*" through as-is, and
+// otherwise syntactically "#"-prefixes any other non-empty string -- it does
+// not look up a known-region list, so there is no "unrecognized region"
+// outcome distinct from blank input. Unlike configured_scope, default_scope
+// has no legitimate "confirmed empty" state -- "*" is the firmware's only
+// "no default region set" signal -- so a blank value here is noise, not
+// evidence, the same contract UpdateNodeDefaultScope's own scope=="" guard
+// already enforces for inference.
+//
+// Last-write-wins is enforced independently for nodes and inactive_nodes via
+// two conditional UPDATE statements inside one transaction (not a
+// SELECT-then-UPDATE, which would race two concurrent reports for the same
+// node), so the two tables either both apply the update or neither does.
+// Each table's own default_scope_confirmed_at is the source of truth for
+// whether IT should accept this report -- row-local timestamp comparison is
+// correct here, unlike the inferred write path above, because both sides of
+// the comparison are the same evidence class: a firmware self-report
+// timestamp against a previous firmware self-report timestamp. A NULL,
+// empty, or strictly older existing value is superseded; an equal or newer
+// timestamp leaves that table's row untouched (idempotent no-op on
+// equality).
 func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string) error {
 	if pubkey == "" {
 		return nil
 	}
-	scope = normalizeSingleScope(scope)
 	reportedAt = normalizeReportTS(reportedAt)
-	if reportedAt != "" {
-		var curAt sql.NullString
-		row := s.db.QueryRow(`SELECT default_scope_confirmed_at FROM nodes WHERE public_key = ?`, pubkey)
-		if row.Scan(&curAt) == nil && curAt.Valid && curAt.String != "" && curAt.String >= reportedAt {
-			return nil
-		}
+	if reportedAt == "" {
+		return nil
 	}
-	if _, err := s.db.Exec(
-		`UPDATE nodes SET default_scope = ?, default_scope_confirmed_at = ? WHERE public_key = ?`,
-		scope, reportedAt, pubkey); err != nil {
+	scope = normalizeSingleScope(scope)
+	if scope == "" {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	_, err := s.db.Exec(
-		`UPDATE inactive_nodes SET default_scope = ?, default_scope_confirmed_at = ? WHERE public_key = ?`,
-		scope, reportedAt, pubkey)
-	return err
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`UPDATE nodes SET default_scope = ?, default_scope_confirmed_at = ?
+		 WHERE public_key = ? AND (default_scope_confirmed_at IS NULL OR default_scope_confirmed_at = '' OR default_scope_confirmed_at < ?)`,
+		scope, reportedAt, pubkey, reportedAt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE inactive_nodes SET default_scope = ?, default_scope_confirmed_at = ?
+		 WHERE public_key = ? AND (default_scope_confirmed_at IS NULL OR default_scope_confirmed_at = '' OR default_scope_confirmed_at < ?)`,
+		scope, reportedAt, pubkey, reportedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // normalizeReportTS parses an observer report timestamp and returns it in
