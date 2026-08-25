@@ -5448,6 +5448,10 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 		Sender          string      `json:"sender"`
 		SenderTimestamp interface{} `json:"sender_timestamp"`
 		PathLen         int         `json:"path_len"`
+		// ChannelHashHex is the on-wire one-byte channel hash the decoder
+		// took from the packet (see normalizeChannelHashHex). Emitted as
+		// evidence only; legacy rows without it stay absent.
+		ChannelHashHex string `json:"channelHashHex"`
 	}
 
 	grpTxts := s.byPayloadType[5]
@@ -5578,6 +5582,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 				Repeats:   1,
 				Observers: observers,
 			}
+			setChannelHashHex(entry.Data, decoded.ChannelHashHex)
 			msgMap[dedupeKey] = entry
 			msgOrder = append(msgOrder, dedupeKey)
 		}

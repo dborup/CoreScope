@@ -136,8 +136,13 @@ func routeDescriptions() map[string]routeMeta {
 			}},
 
 		// Channels
-		"GET /api/channels":                 {Summary: "List channels", Description: "Returns known mesh channels with message counts.", Tag: "channels"},
-		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel.", Tag: "channels"},
+		"GET /api/channels": {Summary: "List channels", Description: "Returns known mesh channels with message counts.", Tag: "channels"},
+		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel. The {hash} path parameter is the existing channel route key: the operator-assigned channel name for a decrypted channel, or \"enc_<HEX>\" for an undecryptable one — it is not the on-wire channel hash. The separate channelHashHex field on each message carries the actual one-byte hash taken from the packet (see the ChannelMessage schema).", Tag: "channels", Response: schemaRef("ChannelMessagesResponse"),
+			QueryParams: []paramMeta{
+				{Name: "limit", Description: "Max messages to return", Type: "integer"},
+				{Name: "offset", Description: "Pagination offset", Type: "integer"},
+				{Name: "region", Description: "Filter to transmissions observed by an observer in the given region code(s).", Type: "string"},
+			}},
 
 		// Observers
 		"GET /api/observers":                                 {Summary: "List observers", Description: "Returns all known packet observers/gateways.", Tag: "observers"},
@@ -252,6 +257,45 @@ func componentSchemas() map[string]interface{} {
 					"type": "string", "enum": []string{"A", "B", "C", "D", "F"},
 					"description": "Letter grade derived from usefulness_score. Repeater/room only.",
 				},
+			},
+		},
+		"ChannelMessage": map[string]interface{}{
+			"type": "object",
+			// additionalProperties:true — the message object carries more
+			// fields than are spelled out here (area/bot-reply annotations,
+			// resolved path data). Only the stable contract fields are
+			// documented.
+			"additionalProperties": true,
+			"description":          "A single channel message, aggregated across every observation of the same transmission.",
+			"properties": map[string]interface{}{
+				"sender": str("Display sender, split from the message text at its first \": \" separator. A heuristic label, never an identity: channel frames carry no sender field, so this is a substring of the message body and can be the body's first clause rather than a real name."),
+				"text":   str("Message body with the sender prefix removed."),
+				"timestamp": map[string]interface{}{
+					"type": "string", "nullable": true,
+					"description": "Existing observation/ingest-based display timestamp: the latest observation time recorded for this transmission (server-side), falling back to first-seen when no observation timestamp exists. It reflects when the message was observed, not when the sender stamped it, and it moves forward as further observations of the same transmission arrive. Unchanged by this schema.",
+				},
+				"sender_timestamp": map[string]interface{}{
+					"type": "integer", "nullable": true,
+					"description": "The sender's own embedded wire timestamp, read verbatim from the decrypted payload. Absent when the decoded packet carries no value. Unchanged by this schema.",
+				},
+				"channelHashHex": map[string]interface{}{
+					"type": "string", "pattern": "^[0-9A-F]{2}$",
+					"description": "The two-digit uppercase hexadecimal representation of the actual one-byte channel hash carried by the packet, taken from the decoded payload. Always exactly two uppercase hex characters, including a leading zero (\"00\", \"03\", \"A7\", \"FF\"). Optional: absent for legacy records whose decoded payload has no wire value, and absent rather than guessed when the stored value is malformed. Non-secret — the byte is transmitted in the clear in every packet header and no channel key or PSK is read or exposed to produce it. Independent of the operator-assigned channel name, and unaffected by timestamp and sender_timestamp. COLLISION-PRONE: one byte is not a unique channel identity — distinct channels collide, so this field is an evidence component to be combined with other signals, never sufficient on its own to identify a channel.",
+				},
+				"packetId":   map[string]interface{}{"type": "integer", "description": "CoreScope row id of the transmission."},
+				"packetHash": map[string]interface{}{"type": "string", "nullable": true, "description": "Transmission hash used for dedup."},
+				"repeats":    map[string]interface{}{"type": "integer", "description": "Number of observations aggregated into this message."},
+				"observers":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Distinct observers that heard this transmission."},
+				"hops":       map[string]interface{}{"type": "integer", "description": "Relay path length for the reported observation."},
+				"snr":        map[string]interface{}{"type": "number", "nullable": true},
+				"scope":      map[string]interface{}{"type": "string", "nullable": true},
+			},
+		},
+		"ChannelMessagesResponse": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"messages": map[string]interface{}{"type": "array", "items": schemaRef("ChannelMessage")},
+				"total":    map[string]interface{}{"type": "integer", "description": "Total messages in the channel after region filtering, before pagination."},
 			},
 		},
 		"NodeListResponse": map[string]interface{}{
