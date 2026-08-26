@@ -270,6 +270,120 @@ func TestChannelHashHexPathParity(t *testing.T) {
 	}
 }
 
+// ─── Non-string JSON values (P3-1) ─────────────────────────────────────────────
+
+// decoded_json is untrusted stored data: CoreScope's own decoders always write
+// channelHashHex as a string, but a hand-edited row or a future non-Go
+// producer could store any JSON type. A non-string value must only drop the
+// optional field, never the containing message. Before this fix, the
+// in-memory path typed the field as `string` inside its json.Unmarshal
+// target, so a non-string value failed the whole Unmarshal and silently
+// discarded the message; the SQLite path (map[string]interface{}) already
+// kept the message and merely omitted the field. This matrix locks both
+// paths to the SQLite behavior.
+var nonStringHashHexMatrix = []struct {
+	name    string
+	rawHex  string
+	pktHash string
+	extra   string
+}{
+	{"numeric value", "N001", "chx_hash_numeric", `,"channelHashHex":167`},
+	{"boolean value", "N002", "chx_hash_boolean", `,"channelHashHex":true`},
+	{"object value", "N003", "chx_hash_object", `,"channelHashHex":{"a":1}`},
+	{"array value", "N004", "chx_hash_array", `,"channelHashHex":["A","B"]`},
+	{"json null value", "N005", "chx_hash_null", `,"channelHashHex":null`},
+}
+
+func TestDBGetChannelMessagesNonStringChannelHashHexMatrix(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db)
+
+	for _, tc := range nonStringHashHexMatrix {
+		insertChanTx(t, db, tc.rawHex, tc.pktHash, chanJSON(tc.extra))
+	}
+
+	msgs, total, err := db.GetChannelMessages("#chx", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != len(nonStringHashHexMatrix) {
+		t.Fatalf("total = %d, want %d — a non-string channelHashHex must not drop the message", total, len(nonStringHashHexMatrix))
+	}
+	for _, tc := range nonStringHashHexMatrix {
+		t.Run(tc.name, func(t *testing.T) {
+			assertMatrixRow(t, findMsg(t, msgs, tc.pktHash), "", false)
+		})
+	}
+}
+
+func TestStoreGetChannelMessagesNonStringChannelHashHexMatrix(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db)
+
+	for _, tc := range nonStringHashHexMatrix {
+		insertChanTx(t, db, tc.rawHex, tc.pktHash, chanJSON(tc.extra))
+	}
+
+	store := NewPacketStore(db, nil)
+	store.Load()
+
+	msgs, total := store.GetChannelMessages("#chx", 100, 0)
+	if total != len(nonStringHashHexMatrix) {
+		t.Fatalf("total = %d, want %d — this is the exact P3-1 regression: a non-string channelHashHex must not drop the message from the in-memory path", total, len(nonStringHashHexMatrix))
+	}
+	for _, tc := range nonStringHashHexMatrix {
+		t.Run(tc.name, func(t *testing.T) {
+			assertMatrixRow(t, findMsg(t, msgs, tc.pktHash), "", false)
+		})
+	}
+}
+
+func TestChannelHashHexNonStringParity(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db)
+
+	for _, tc := range nonStringHashHexMatrix {
+		insertChanTx(t, db, tc.rawHex, tc.pktHash, chanJSON(tc.extra))
+	}
+
+	dbMsgs, dbTotal, err := db.GetChannelMessages("#chx", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewPacketStore(db, nil)
+	store.Load()
+	memMsgs, memTotal := store.GetChannelMessages("#chx", 100, 0)
+
+	if dbTotal != memTotal {
+		t.Errorf("total mismatch: sqlite %d, in-memory %d", dbTotal, memTotal)
+	}
+	if dbTotal != len(nonStringHashHexMatrix) {
+		t.Errorf("total = %d, want %d", dbTotal, len(nonStringHashHexMatrix))
+	}
+
+	for _, tc := range nonStringHashHexMatrix {
+		t.Run(tc.name, func(t *testing.T) {
+			a := findMsg(t, dbMsgs, tc.pktHash)
+			b := findMsg(t, memMsgs, tc.pktHash)
+
+			if _, present := a[channelHashHexKey]; present {
+				t.Errorf("sqlite: channelHashHex must be absent for %s, got %#v", tc.name, a[channelHashHexKey])
+			}
+			if _, present := b[channelHashHexKey]; present {
+				t.Errorf("in-memory: channelHashHex must be absent for %s, got %#v", tc.name, b[channelHashHexKey])
+			}
+			for _, field := range []string{"sender", "text", "sender_timestamp", "packetHash", "repeats"} {
+				if fmt.Sprintf("%v", a[field]) != fmt.Sprintf("%v", b[field]) {
+					t.Errorf("%s parity: sqlite %#v vs in-memory %#v", field, a[field], b[field])
+				}
+			}
+		})
+	}
+}
+
 // ─── Security ──────────────────────────────────────────────────────────────────
 
 // The field must be derived from the wire byte alone: no key material may
@@ -451,11 +565,18 @@ func TestOpenAPIDocumentsChannelHashHex(t *testing.T) {
 	}
 
 	desc, _ := field["description"].(string)
-	// The field must never be documented as a sufficient channel identity.
-	for _, required := range []string{"COLLISION-PRONE", "Non-secret", "legacy"} {
+	// The field must never be documented as a sufficient channel identity,
+	// and absence must be documented as unavailable/provenance-based (not
+	// just "legacy"), and REST validation must be documented as not
+	// extending to the WebSocket surface (P3-2, P3-3).
+	for _, required := range []string{"COLLISION-PRONE", "Non-secret", "legacy", "Companion", "permanently", "WebSocket"} {
 		if !strings.Contains(desc, required) {
 			t.Errorf("%s description must mention %q", channelHashHexKey, required)
 		}
+	}
+	// "00" must be documented as a real present value, not an absence.
+	if !strings.Contains(desc, "\"00\"") {
+		t.Errorf("%s description must state that \"00\" is a valid present value", channelHashHexKey)
 	}
 
 	// Required-list membership would break legacy records, which legitimately
