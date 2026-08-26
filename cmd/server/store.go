@@ -2884,6 +2884,14 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			},
 		}
 		if tx.DecodedJSON != "" {
+			// Raw pass-through, not the validated REST ChannelMessage
+			// contract: decoded_json is unmarshalled and broadcast
+			// verbatim, including any stored channelHashHex value, without
+			// running it through normalizeChannelHashHex/setChannelHashHex
+			// (cmd/server/channel_hash_hex.go). A malformed or lowercase
+			// stored value that REST would suppress is emitted here as-is.
+			// Consumers must not treat a WebSocket channelHashHex as
+			// pre-validated REST evidence.
 			var payload map[string]interface{}
 			if json.Unmarshal([]byte(tx.DecodedJSON), &payload) == nil {
 				decoded["payload"] = payload
@@ -5448,6 +5456,16 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 		Sender          string      `json:"sender"`
 		SenderTimestamp interface{} `json:"sender_timestamp"`
 		PathLen         int         `json:"path_len"`
+		// ChannelHashHex is the on-wire one-byte channel hash the decoder
+		// took from the packet (see normalizeChannelHashHex). Emitted as
+		// evidence only; legacy rows without it stay absent. Typed as
+		// interface{}, not string: decoded_json is untrusted stored data,
+		// and a struct-typed string field would fail the whole Unmarshal
+		// (dropping the entire message) on a non-string stored value. The
+		// raw value is instead handed to setChannelHashHex below, which
+		// already validates it — mirroring the SQLite path in db.go, which
+		// decodes into map[string]interface{} for the same reason.
+		ChannelHashHex interface{} `json:"channelHashHex"`
 	}
 
 	grpTxts := s.byPayloadType[5]
@@ -5578,6 +5596,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 				Repeats:   1,
 				Observers: observers,
 			}
+			setChannelHashHex(entry.Data, decoded.ChannelHashHex)
 			msgMap[dedupeKey] = entry
 			msgOrder = append(msgOrder, dedupeKey)
 		}
