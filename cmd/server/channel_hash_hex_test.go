@@ -579,6 +579,25 @@ func TestOpenAPIDocumentsChannelHashHex(t *testing.T) {
 		t.Errorf("%s description must state that \"00\" is a valid present value", channelHashHexKey)
 	}
 
+	// Load-bearing rule (P3): absence always means unavailable, never zero.
+	// This is what consumers key correctness off of, so lock the exact
+	// phrasing rather than just the loose keyword check above.
+	if !strings.Contains(desc, `Absence always means "unavailable"`) {
+		t.Errorf("%s description must state absence always means \"unavailable\"", channelHashHexKey)
+	}
+	if !strings.Contains(desc, `never "zero"`) {
+		t.Errorf("%s description must state absence never means \"zero\"", channelHashHexKey)
+	}
+
+	// Companion/MQTT-provenance messages can permanently lack the field --
+	// not just as legacy backlog that will eventually be backfilled.
+	if !strings.Contains(desc, "Companion/MQTT") {
+		t.Errorf("%s description must call out Companion/MQTT provenance specifically", channelHashHexKey)
+	}
+	if !strings.Contains(desc, "permanently and by design") {
+		t.Errorf("%s description must state Companion/MQTT absence is permanent and by design, not legacy backlog", channelHashHexKey)
+	}
+
 	// Required-list membership would break legacy records, which legitimately
 	// omit the field.
 	if req, present := cm["required"]; present {
@@ -609,5 +628,40 @@ func TestOpenAPIDocumentsChannelHashHex(t *testing.T) {
 	}
 	if route.Response["$ref"] != "#/components/schemas/ChannelMessagesResponse" {
 		t.Errorf("route response = %#v, want ChannelMessagesResponse ref", route.Response)
+	}
+}
+
+// TestOpenAPIDocumentsPacketIdBackendDivergence locks the corrected
+// packetId description (P3): it must document that packetId's identity
+// semantics are backend-dependent and point consumers -- including
+// MeshViewLive #88 -- at packetHash for stable cross-backend correlation,
+// rather than claiming a single consistent meaning the runtime doesn't
+// deliver.
+func TestOpenAPIDocumentsPacketIdBackendDivergence(t *testing.T) {
+	schemas := componentSchemas()
+
+	cm, ok := schemas["ChannelMessage"].(map[string]interface{})
+	if !ok {
+		t.Fatal("ChannelMessage schema missing from components/schemas")
+	}
+	props, ok := cm["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("ChannelMessage schema has no properties")
+	}
+
+	field, ok := props["packetId"].(map[string]interface{})
+	if !ok {
+		t.Fatal("packetId not documented on ChannelMessage")
+	}
+	desc, _ := field["description"].(string)
+
+	if !strings.Contains(desc, "backend-dependent") {
+		t.Errorf("packetId description must document backend-dependent id semantics, got: %q", desc)
+	}
+	if !strings.Contains(desc, "cross-backend") {
+		t.Errorf("packetId description must warn against use as a cross-backend correlation key, got: %q", desc)
+	}
+	if !strings.Contains(desc, "packetHash") {
+		t.Errorf("packetId description must point consumers to packetHash for stable correlation, got: %q", desc)
 	}
 }
