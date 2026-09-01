@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -343,21 +344,79 @@ type CustomizerConfig struct {
 // PrivacyConfig holds the operator-side fields for the privacy-notice page
 // (#/privacy). Every field is plain text by contract: the frontend
 // HTML-escapes all values before rendering (public/privacy.js), so operator
-// config can never inject markup. All fields except Enabled are optional —
-// the page falls back to neutral wording when a field is empty (e.g.
-// "The operator of this site"), so operators who prefer not to publish a
-// personal name can simply leave OperatorName blank.
+// config can never inject markup.
+//
+// The software deliberately ships NO default legal text. A privacy notice is
+// a statement the operator makes about their own deployment — retention
+// periods, legal basis and a working contact are facts only they know — so
+// enabling the page requires supplying them. CoreScope cannot infer them and
+// must not invent them: a fabricated notice is worse than none, because it
+// looks authoritative while being wrong. Enabled with any required field
+// missing is a configuration error (see Validate) and the notice is simply
+// not published.
+//
+// None of this is legal advice, and publishing the page does not by itself
+// make a deployment GDPR-compliant.
 type PrivacyConfig struct {
 	// Enabled gates the whole feature: the injected nav link, the
 	// #/privacy page content, and the privacy field in /api/config/client.
+	// Enabling it also makes the fields below mandatory.
 	Enabled bool `json:"enabled"`
-	// OperatorName is shown as the data controller. Optional.
+	// OperatorName is shown as the data controller. Optional — when blank
+	// the page says "The operator of this site", so an operator who does
+	// not want to publish a personal name can leave it out.
 	OperatorName string `json:"operatorName,omitempty"`
 	// ContactEmail is the address shown for privacy questions and node
-	// hide/removal requests.
+	// hide/removal requests. REQUIRED when Enabled: every remedy the page
+	// offers (hiding, erasure, complaints) routes through it, so a notice
+	// without a reachable contact promises something it cannot deliver.
 	ContactEmail string `json:"contactEmail,omitempty"`
-	// RetentionText replaces the page's default data-retention paragraph.
+	// RetentionText states how long data is kept, in the operator's own
+	// words. REQUIRED when Enabled. CoreScope has several independent
+	// retention knobs (packets, metrics, nodes, client-RX) that do not map
+	// one-to-one onto the data categories the notice describes, so the
+	// software cannot derive an accurate sentence — the operator states
+	// the actual period or the actual criteria.
 	RetentionText string `json:"retentionText,omitempty"`
+	// LegalBasisText states the lawful basis for processing, in the
+	// operator's own words. REQUIRED when Enabled. Deliberately not
+	// defaulted to "legitimate interest": the basis depends on the
+	// deployment's jurisdiction and purpose, and asserting one on the
+	// operator's behalf would be putting words in their mouth.
+	LegalBasisText string `json:"legalBasisText,omitempty"`
+}
+
+// privacyEmailRe is a deliberately conservative address check. It proves
+// shape, never deliverability: exactly one "@", no whitespace or control
+// characters (CR/LF would enable header injection in a mailto:), no
+// characters that would start or forge a mailto query ("?", "&", quotes,
+// angle brackets), and a dotted domain. Anything it rejects is a
+// configuration mistake worth surfacing loudly rather than rendering.
+var privacyEmailRe = regexp.MustCompile(`^[^\s<>"'&?/\\,;:@]+@[^\s<>"'&?/\\,;:@]+\.[A-Za-z]{2,}$`)
+
+// Validate reports the configuration errors that make an enabled privacy
+// notice unpublishable. It returns nil when the notice is safe to publish,
+// or when the feature is off (a disabled/absent block is not an error).
+//
+// Callers must refuse to publish the notice when this returns anything —
+// see handleConfigClient. The page never falls back to invented defaults.
+func (p *PrivacyConfig) Validate() []string {
+	if p == nil || !p.Enabled {
+		return nil
+	}
+	var errs []string
+	if strings.TrimSpace(p.ContactEmail) == "" {
+		errs = append(errs, "privacy.contactEmail is required when privacy.enabled is true")
+	} else if !privacyEmailRe.MatchString(strings.TrimSpace(p.ContactEmail)) {
+		errs = append(errs, "privacy.contactEmail is not a valid plain email address")
+	}
+	if strings.TrimSpace(p.RetentionText) == "" {
+		errs = append(errs, "privacy.retentionText is required when privacy.enabled is true (state the actual retention period or criteria)")
+	}
+	if strings.TrimSpace(p.LegalBasisText) == "" {
+		errs = append(errs, "privacy.legalBasisText is required when privacy.enabled is true (state the lawful basis for processing)")
+	}
+	return errs
 }
 
 // weakAPIKeys is the blocklist of known default/example API keys that must be rejected.
@@ -619,13 +678,36 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.migrateDeprecatedConfig()
 		cfg.applyListLimitsDefaults()
 		applyCORSEnv(cfg)
+		cfg.logPrivacyConfigErrors()
 		return cfg, nil
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
+	cfg.logPrivacyConfigErrors()
 	return cfg, nil // defaults
+}
+
+// logPrivacyConfigErrors surfaces an unpublishable privacy notice loudly at
+// startup. It does NOT abort the process: CoreScope is a monitoring
+// dashboard, and taking the whole mesh view down over a misconfigured
+// optional page would be disproportionate. The notice is simply withheld
+// (handleConfigClient re-checks Validate), so the failure mode is "no
+// privacy page" — never a fabricated one — and the log says exactly which
+// fields to fix.
+func (c *Config) logPrivacyConfigErrors() {
+	if c == nil {
+		return
+	}
+	errs := c.Privacy.Validate()
+	if len(errs) == 0 {
+		return
+	}
+	log.Printf("[privacy] CONFIG ERROR: privacy.enabled is true but the notice cannot be published; the #/privacy page and its nav link stay OFF until this is fixed:")
+	for _, e := range errs {
+		log.Printf("[privacy]   - %s", e)
+	}
 }
 
 func (c *Config) applyListLimitsDefaults() {
@@ -964,6 +1046,45 @@ func (c *Config) IsNameHidden(name string) bool {
 		}
 	}
 	return false
+}
+
+// ActiveHiddenNamePrefixes returns a copy of the hide prefixes IsNameHidden
+// is actually enforcing right now, with empty/whitespace entries dropped —
+// the same entries IsNameHidden skips. Reads through the same atomic pointer
+// (including its lazy first-read materialisation) so a SIGHUP-updated list
+// is reflected, and returns a copy so callers cannot mutate live config.
+//
+// Used by the privacy notice to name the real self-service hide prefix
+// instead of hardcoding one. An empty result means the deployment offers no
+// prefix-based hiding, and the page must not claim it does.
+func (c *Config) ActiveHiddenNamePrefixes() []string {
+	if c == nil {
+		return nil
+	}
+	pp := c.hiddenPrefixesPtr.Load()
+	if pp == nil {
+		built := make([]string, len(c.HiddenNamePrefixes))
+		copy(built, c.HiddenNamePrefixes)
+		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
+			pp = &built
+		} else {
+			pp = c.hiddenPrefixesPtr.Load()
+		}
+	}
+	if pp == nil {
+		return nil
+	}
+	out := make([]string, 0, len(*pp))
+	for _, p := range *pp {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SetHiddenNamePrefixes atomically replaces HiddenNamePrefixes with the

@@ -115,6 +115,66 @@
     return h || 'packets';
   }
 
+  function makeSheetItem(r) {
+    var a = document.createElement('a');
+    a.className = 'bottom-nav-sheet-item';
+    a.setAttribute('href', r.hash);
+    a.setAttribute('role', 'menuitem');
+    a.setAttribute('data-bottom-nav-more-route', r.route);
+    a.setAttribute('data-route', r.route);
+
+    var ic = document.createElement('span');
+    ic.className = 'bottom-nav-sheet-icon';
+    ic.setAttribute('aria-hidden', 'true');
+    ic.innerHTML = phIconHTML(r.ph);
+
+    var lb = document.createElement('span');
+    lb.className = 'bottom-nav-sheet-label';
+    lb.textContent = r.label;
+
+    a.appendChild(ic);
+    a.appendChild(lb);
+
+    // Tap a route → close sheet (the <a href> handles navigation via
+    // the existing hashchange router in app.js).
+    a.addEventListener('click', function () { closeSheet(); });
+    return a;
+  }
+
+  // Idempotent: drops every existing route link before re-adding, so a
+  // refresh after config cannot duplicate links or their listeners. Route
+  // items are inserted BEFORE the separator so the dark-mode button (and
+  // the separator itself, both built once) keep their position.
+  function renderSheetRoutes(sheet) {
+    var existing = sheet.querySelectorAll('[data-bottom-nav-more-route]');
+    for (var i = 0; i < existing.length; i++) existing[i].parentNode.removeChild(existing[i]);
+    var sep = sheet.querySelector('.bottom-nav-sheet-sep');
+    moreRoutes().forEach(function (r) {
+      var a = makeSheetItem(r);
+      if (sep) sheet.insertBefore(a, sep);
+      else sheet.appendChild(a);
+    });
+  }
+
+  // The opt-in routes (rx-coverage, privacy) are only known once
+  // /api/config/client resolves, which is AFTER init() builds the sheet.
+  // Refresh rather than relying on the user opening the sheet late enough.
+  function refreshSheetRoutes() {
+    var sheet = document.getElementById(SHEET_ID);
+    if (sheet) renderSheetRoutes(sheet);
+  }
+
+  // Settled (resolved OR rejected), or synchronous when there is no config
+  // promise -- preserves pre-existing ordering for pages/tests without
+  // roles.js.
+  function whenConfigReady(cb) {
+    var p = (typeof window !== 'undefined') ? window.MeshConfigReady : null;
+    if (!p || typeof p.then !== 'function') { cb(); return; }
+    var done = false;
+    var run = function () { if (done) return; done = true; cb(); };
+    try { p.then(run, run); } catch (_) { run(); }
+  }
+
   function build() {
     if (document.querySelector('[data-bottom-nav]')) return;
 
@@ -176,8 +236,13 @@
     // routes; reflect that in the active-class so users on /tools,
     // /analytics, etc. still see WHICH tab they're under. Without this
     // every long-tail route lit up zero tabs.
+    // Use the DYNAMIC list: the opt-in routes (rx-coverage, privacy) live
+    // in the More sheet too, so the More tab must light up on them as
+    // well. Reading the static MORE_ROUTES here left #/privacy and
+    // #/rx-coverage with zero active tabs.
     var moreRouteSet = {};
-    for (var k = 0; k < MORE_ROUTES.length; k++) moreRouteSet[MORE_ROUTES[k].route] = 1;
+    var dynMore = moreRoutes();
+    for (var k = 0; k < dynMore.length; k++) moreRouteSet[dynMore[k].route] = 1;
     var routeIsLongTail = !!moreRouteSet[route];
     var tabs = document.querySelectorAll('[data-bottom-nav-tab]');
     for (var i = 0; i < tabs.length; i++) {
@@ -221,32 +286,7 @@
     sheet.setAttribute('aria-label', 'More navigation');
     sheet.hidden = true;
 
-    moreRoutes().forEach(function (r) {
-      var a = document.createElement('a');
-      a.className = 'bottom-nav-sheet-item';
-      a.setAttribute('href', r.hash);
-      a.setAttribute('role', 'menuitem');
-      a.setAttribute('data-bottom-nav-more-route', r.route);
-      a.setAttribute('data-route', r.route);
-
-      var ic = document.createElement('span');
-      ic.className = 'bottom-nav-sheet-icon';
-      ic.setAttribute('aria-hidden', 'true');
-      ic.innerHTML = phIconHTML(r.ph);
-
-      var lb = document.createElement('span');
-      lb.className = 'bottom-nav-sheet-label';
-      lb.textContent = r.label;
-
-      a.appendChild(ic);
-      a.appendChild(lb);
-
-      // Tap a route → close sheet (the <a href> handles navigation via
-      // the existing hashchange router in app.js).
-      a.addEventListener('click', function () { closeSheet(); });
-
-      sheet.appendChild(a);
-    });
+    renderSheetRoutes(sheet);
 
     // Dark mode toggle — mirrors #darkModeToggle in the hidden top-nav.
     // Delegates the click to the real button so app.js owns all theme logic.
@@ -382,6 +422,13 @@
     build();
     syncActive();
     window.addEventListener('hashchange', syncActive);
+    // Reconcile the sheet + the More-tab active state once the opt-in
+    // routes are actually known. Inside the singleton guard, so the
+    // refresh is wired exactly once no matter how often init() is called.
+    whenConfigReady(function () {
+      refreshSheetRoutes();
+      syncActive();
+    });
   }
 
   if (document.readyState === 'loading') {

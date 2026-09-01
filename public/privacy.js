@@ -5,8 +5,14 @@
 // through /api/config/client — see PrivacyConfig (cmd/server/config.go) and
 // window.MC_PRIVACY (public/roles.js). Every config value is rendered
 // through escapeHtml: the config fields are plain text by contract, never
-// markup. Defaults are deliberately neutral so an operator can publish a
-// usable notice with nothing but `"privacy": { "enabled": true }`.
+// markup.
+//
+// This page ships NO default legal text. Retention, legal basis and the
+// contact address are facts only the operator knows, so the server refuses
+// to publish the notice unless they are configured (PrivacyConfig.Validate)
+// — the page therefore never has to invent them. Nothing here is legal
+// advice, and rendering this page does not by itself make a deployment
+// compliant.
 
 (function () {
   // Phosphor icons, not emoji — see issue #1648. New files start clean.
@@ -14,20 +20,20 @@
     return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg>';
   }
 
+  // The ONLY default: a neutral stand-in when the operator chose not to
+  // publish a name. Retention / legal basis / contact have no defaults by
+  // design — the server withholds the whole notice when they are missing.
   var DEFAULT_OPERATOR = 'The operator of this site';
-  var DEFAULT_RETENTION =
-    'Packet data, telemetry, and decoded public-channel messages are kept ' +
-    'as a historical archive used for long-term network analysis (coverage ' +
-    'trends, node health over time). The node directory and map reflect the ' +
-    'current state of the network; nodes that stop advertising disappear ' +
-    'from the live view. Contact us (below) to have historical data about ' +
-    'your node or your messages deleted.';
 
-  // The default hidden-name convention (Config.HiddenNamePrefixes) is the
-  // no-entry-sign character. Built via fromCodePoint so this source file
-  // stays plain-ASCII (emoji-scan hygiene) while the page shows the real
-  // character operators must prepend.
-  var HIDDEN_PREFIX_CHAR = String.fromCodePoint(0x1F6AB);
+  // mailtoHref builds a mailto: URL that cannot be turned into a header or
+  // query injection by a malformed config value. The server already
+  // validates the address conservatively, but this is the render-side belt:
+  // percent-encode everything, then put "@" back so the href stays readable.
+  // CR/LF -> %0D%0A, "?" -> %3F, "&" -> %26, quotes and spaces likewise, so
+  // no extra mailto header (?subject=, &cc=) can be smuggled in.
+  function mailtoHref(email) {
+    return 'mailto:' + encodeURIComponent(email).replace(/%40/g, '@');
+  }
 
   function section(icon, title, bodyHtml) {
     return '<h3 class="privacy-h">' + phIcon(icon) + ' ' + title + '</h3>' + bodyHtml;
@@ -44,12 +50,18 @@
 
   function render(container, cfg) {
     var operator = escapeHtml(String(cfg.operatorName || '').trim() || DEFAULT_OPERATOR);
-    var email = escapeHtml(String(cfg.contactEmail || '').trim());
-    var retention = escapeHtml(String(cfg.retentionText || '').trim() || DEFAULT_RETENTION);
-    // escapeHtml covers the 5-char OWASP set (incl. quotes), so the same
-    // escaped value is safe in both text and attribute context here.
-    var contactInline = email
-      ? '<a href="mailto:' + email + '">' + email + '</a>'
+    var rawEmail = String(cfg.contactEmail || '').trim();
+    var email = escapeHtml(rawEmail);
+    // href and text are escaped separately: the href goes through
+    // mailtoHref (percent-encoding) FIRST so a stray "?" or CR/LF cannot
+    // open a mailto query, then through escapeHtml for attribute context.
+    var emailHref = escapeHtml(mailtoHref(rawEmail));
+    // No fallbacks: the server does not publish the notice unless these are
+    // present, so reaching render() means they are.
+    var retention = escapeHtml(String(cfg.retentionText || '').trim());
+    var legalBasis = escapeHtml(String(cfg.legalBasisText || '').trim());
+    var contactInline = rawEmail
+      ? '<a href="' + emailHref + '">' + email + '</a>'
       : 'the contact listed by this site’s operator';
 
     var html =
@@ -63,7 +75,7 @@
 
     html += section('info', 'Data controller',
       '<p><strong>' + operator + '</strong>' +
-      (email ? '<br>Contact: <a href="mailto:' + email + '" class="mono">' + email + '</a>' : '') +
+      (rawEmail ? '<br>Contact: <a href="' + emailHref + '" class="mono">' + email + '</a>' : '') +
       '</p>');
 
     html += section('broadcast', 'What data this site processes',
@@ -76,14 +88,41 @@
       '</ul>' +
       '<p><strong>Website visitors</strong>: this site itself sets no analytics, tracking, or advertising cookies. Display preferences (such as theme) are stored only in your own browser.</p>');
 
+    // The lawful basis is the operator's statement, not the software's.
+    // CoreScope does not assert one on their behalf and does not claim the
+    // wording is legal advice.
     html += section('scales', 'Why, and on what legal basis',
-      '<p>This data is processed under <strong>legitimate interest</strong> (GDPR Art. 6(1)(f)): operating, mapping, and troubleshooting a community radio network — the same purpose for which node operators broadcast this information in the first place. The data shown is limited to what devices already transmit openly over the air, and an easy opt-out exists (below).</p>');
+      '<p>' + legalBasis + '</p>' +
+      '<p class="text-muted">This basis is stated by the operator of this deployment.</p>');
 
     html += section('clock', 'How long data is kept',
       '<p>' + retention + '</p>');
 
+    // Self-service hiding is only offered when this deployment actually
+    // has hide prefixes configured. The list comes from the server's live
+    // Config.HiddenNamePrefixes, so the page names the real prefix instead
+    // of hardcoding one -- and stays silent when there is none rather than
+    // promising a remedy that would not work.
+    var prefixes = Array.isArray(cfg.hiddenNamePrefixes) ? cfg.hiddenNamePrefixes.filter(function (x) {
+      return typeof x === 'string' && x.trim() !== '';
+    }) : [];
+    var selfServiceHtml = '';
+    if (prefixes.length) {
+      var rendered = prefixes.map(function (x) {
+        return '<span class="mono">' + escapeHtml(x) + '</span>';
+      }).join(prefixes.length === 2 ? ' or ' : ', ');
+      selfServiceHtml =
+        '<p>You can also hide your node yourself: rename it so it starts with ' + rendered +
+        '. This site then stops listing it, without waiting for data to age out.</p>' +
+        '<p class="text-muted">Two caveats. This hides the node from <strong>this site’s</strong> dashboard and API only — your radio keeps transmitting and every other listener on the mesh still receives it. And it hides the node going forward; packets and observations already recorded may remain in this site’s database until they age out or the operator deletes them. For actual deletion, use the contact above.</p>';
+    } else {
+      selfServiceHtml =
+        '<p class="text-muted">This deployment has no self-service name prefix configured, so hiding a node requires contacting the operator above.</p>';
+    }
+
     html += section('prohibit', 'Your rights and opting out',
-      '<p>If you operate a node and do not want it shown here, contact ' + contactInline + ' and it will be hidden or removed. You can also make your node effectively anonymous yourself: give it a name that does not identify you, and disable or coarsen its advertised position. By default, this software also hides any node whose name starts with <span class="mono">' + HIDDEN_PREFIX_CHAR + '</span> — rename your node with that prefix and it disappears from this site without waiting for data to age out.</p>' + // EMOJI-OK-LEGACY-RENDER: the actual configured hidden-name prefix character
+      '<p>If you operate a node and do not want it shown here, contact ' + contactInline + ' and it will be hidden or removed. You can also make your node effectively anonymous yourself: give it a name that does not identify you, and disable or coarsen its advertised position.</p>' +
+      selfServiceHtml +
       '<p>Under the GDPR you additionally have the right to access, rectify, erase, restrict, and object to the processing of your personal data (Arts. 15–21), and to lodge a complaint with your national data protection authority.</p>');
 
     html += section('chats', 'A note on public channels',

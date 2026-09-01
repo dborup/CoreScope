@@ -521,11 +521,26 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		disabledTabs = s.cfg.Customizer.DisabledTabs
 	}
 	// #/privacy page content — only surfaced when the operator opted in
-	// (privacy.enabled). Nil keeps the field out of the JSON entirely via
-	// omitempty, which the frontend reads as "feature off".
-	var privacy *PrivacyConfig
-	if s.cfg.Privacy != nil && s.cfg.Privacy.Enabled {
-		privacy = s.cfg.Privacy
+	// (privacy.enabled) AND supplied every field the notice needs. An
+	// enabled-but-incomplete block is a configuration error (logged loudly
+	// at startup by logPrivacyConfigErrors) and is withheld here: the page
+	// must never fall back to invented retention/legal-basis text. Nil
+	// keeps the field out of the JSON entirely via omitempty, which the
+	// frontend reads as "feature off".
+	var privacy *PrivacyClientConfig
+	if s.cfg.Privacy != nil && s.cfg.Privacy.Enabled && len(s.cfg.Privacy.Validate()) == 0 {
+		privacy = &PrivacyClientConfig{
+			Enabled:        true,
+			OperatorName:   s.cfg.Privacy.OperatorName,
+			ContactEmail:   s.cfg.Privacy.ContactEmail,
+			RetentionText:  s.cfg.Privacy.RetentionText,
+			LegalBasisText: s.cfg.Privacy.LegalBasisText,
+			// The ACTUAL active hide prefixes, so the page can name them
+			// instead of hardcoding a character the deployment may not
+			// use. Empty means the operator configured none, and the page
+			// must not promise self-service hiding.
+			HiddenNamePrefixes: s.cfg.ActiveHiddenNamePrefixes(),
+		}
 	}
 	writeJSON(w, ClientConfigResponse{
 		Roles:               s.cfg.Roles,

@@ -1563,10 +1563,29 @@ type ClientConfigResponse struct {
 	// no geo_filter is configured.
 	GeoFilter *GeoFilterConfig `json:"geoFilter,omitempty"`
 	// Privacy is the operator-configured privacy-notice content for the
-	// #/privacy page. Omitted entirely unless privacy.enabled is true in
-	// config.json — the frontend treats "field absent" as "feature off"
-	// (no nav link injected). See PrivacyConfig (config.go).
-	Privacy *PrivacyConfig `json:"privacy,omitempty"`
+	// #/privacy page. Omitted entirely unless privacy.enabled is true AND
+	// the block passes PrivacyConfig.Validate() — the frontend treats
+	// "field absent" as "feature off" (no nav link injected). See
+	// PrivacyClientConfig below and PrivacyConfig (config.go).
+	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
+}
+
+// PrivacyClientConfig is the browser-facing shape of the privacy notice.
+// Separate from PrivacyConfig because the page needs one thing the operator
+// does not type into the privacy block: the deployment's ACTIVE
+// hiddenNamePrefixes, so the notice can name the real self-service hide
+// prefix (or stay silent about it when none is configured) instead of
+// hardcoding a character.
+type PrivacyClientConfig struct {
+	Enabled        bool   `json:"enabled"`
+	OperatorName   string `json:"operatorName,omitempty"`
+	ContactEmail   string `json:"contactEmail"`
+	RetentionText  string `json:"retentionText"`
+	LegalBasisText string `json:"legalBasisText"`
+	// HiddenNamePrefixes is the live Config.HiddenNamePrefixes list. Empty
+	// or absent means no self-service hiding is available on this
+	// deployment, and the page must not claim otherwise.
+	HiddenNamePrefixes []string `json:"hiddenNamePrefixes,omitempty"`
 }
 
 // CustomizerClientConfig is the operator-side customizer-modal knobs that
