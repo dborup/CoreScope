@@ -398,5 +398,12 @@
   "customizer": {
     "disabledTabs": [],
     "_comment_disabledTabs": "Issue #1508. List of customizer-modal tab ids to hide from end users. Useful when operators want to expose only daily-use viewer controls and keep one-shot admin chrome out of the way. Recognized ids: branding, theme, nodes, home, display, geofilter, export. Example: [\"branding\", \"geofilter\", \"export\"] hides the admin tabs and leaves theme/colors/home/display visible. Default [] keeps the legacy behavior (all tabs visible). Operators edit this in config.json directly — there is no in-app UI for this list (by design)."
+  },
+  "privacy": {
+    "enabled": false,
+    "operatorName": "",
+    "contactEmail": "",
+    "retentionText": "",
+    "_comment": "Opt-in GDPR/privacy-notice page at #/privacy. Default off: no nav link, no page content, and /api/config/client omits the section entirely. Set enabled=true to publish the page. operatorName is shown as the data controller — leave it empty to render the neutral 'The operator of this site' (for operators who prefer not to publish a personal name). contactEmail is shown for privacy questions and node hide/removal requests. retentionText (plain text) replaces the page's default retention paragraph — describe how long YOUR deployment keeps packet data and decoded channel messages, e.g. 'Packet data and decoded messages are deleted after 30 days.'. All values are rendered as plain text (HTML-escaped by the frontend) — markup is not supported, by design."
   }
 }

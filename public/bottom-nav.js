@@ -87,11 +87,18 @@
   // by which point MeshConfigReady has resolved window.MC_CLIENT_RX_COVERAGE.
   var COVERAGE_ROUTE = { route: 'rx-coverage', hash: '#/rx-coverage', label: 'Coverage', ph: 'broadcast' };
 
+  // The Privacy route is opt-in too (config `privacy.enabled` -> server omits
+  // or emits cfg.privacy -> window.MC_PRIVACY, see public/roles.js). Appended
+  // last to mirror its desktop top-nav position.
+  var PRIVACY_ROUTE = { route: 'privacy', hash: '#/privacy', label: 'Privacy', ph: 'lock' };
+
   function moreRoutes() {
-    if (!window.MC_CLIENT_RX_COVERAGE) return MORE_ROUTES;
     var out = MORE_ROUTES.slice();
-    var after = out.findIndex(function (r) { return r.route === 'analytics'; }) + 1;
-    out.splice(after, 0, COVERAGE_ROUTE);
+    if (window.MC_CLIENT_RX_COVERAGE) {
+      var after = out.findIndex(function (r) { return r.route === 'analytics'; }) + 1;
+      out.splice(after, 0, COVERAGE_ROUTE);
+    }
+    if (window.MC_PRIVACY) out.push(PRIVACY_ROUTE);
     return out;
   }
 

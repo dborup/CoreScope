@@ -317,6 +317,12 @@ type Config struct {
 	// (theme/branding/etc.). See CustomizerConfig and issue #1508.
 	Customizer *CustomizerConfig `json:"customizer,omitempty"`
 
+	// Privacy holds the operator-configured content for the opt-in
+	// privacy-notice page (#/privacy). Nil or enabled=false keeps the
+	// feature fully off: no nav link, and /api/config/client omits the
+	// privacy field entirely. See PrivacyConfig.
+	Privacy *PrivacyConfig `json:"privacy,omitempty"`
+
 	// Known-channels catalogue integration (issue #1323).
 	// URL of a JSON catalogue file (channels-by-country shape) fetched
 	// periodically and exposed via /api/known-channels. Empty disables.
@@ -332,6 +338,26 @@ type Config struct {
 // filters those tabs out before rendering. Issue #1508.
 type CustomizerConfig struct {
 	DisabledTabs []string `json:"disabledTabs"`
+}
+
+// PrivacyConfig holds the operator-side fields for the privacy-notice page
+// (#/privacy). Every field is plain text by contract: the frontend
+// HTML-escapes all values before rendering (public/privacy.js), so operator
+// config can never inject markup. All fields except Enabled are optional —
+// the page falls back to neutral wording when a field is empty (e.g.
+// "The operator of this site"), so operators who prefer not to publish a
+// personal name can simply leave OperatorName blank.
+type PrivacyConfig struct {
+	// Enabled gates the whole feature: the injected nav link, the
+	// #/privacy page content, and the privacy field in /api/config/client.
+	Enabled bool `json:"enabled"`
+	// OperatorName is shown as the data controller. Optional.
+	OperatorName string `json:"operatorName,omitempty"`
+	// ContactEmail is the address shown for privacy questions and node
+	// hide/removal requests.
+	ContactEmail string `json:"contactEmail,omitempty"`
+	// RetentionText replaces the page's default data-retention paragraph.
+	RetentionText string `json:"retentionText,omitempty"`
 }
 
 // weakAPIKeys is the blocklist of known default/example API keys that must be rejected.

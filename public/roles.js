@@ -687,6 +687,26 @@
         window.dispatchEvent(new Event('resize'));
       }
     }
+    // #/privacy page (opt-in, mirrors the rx-coverage pattern above): the
+    // nav link is NOT in static HTML so the default-off nav matches
+    // upstream and the nav-overflow tests. Appended last so it sits at the
+    // end of the nav and overflows into the "More" menu first. The server
+    // omits cfg.privacy entirely unless privacy.enabled is true, so a
+    // simple presence check gates both the link and the page content
+    // (public/privacy.js reads window.MC_PRIVACY).
+    window.MC_PRIVACY = (cfg.privacy && typeof cfg.privacy === 'object') ? cfg.privacy : null;
+    if (window.MC_PRIVACY && !document.querySelector('.nav-links [data-route="privacy"]')) {
+      var navLinksEl = document.querySelector('.nav-links');
+      if (navLinksEl) {
+        var privLink = document.createElement('a');
+        privLink.href = '#/privacy';
+        privLink.className = 'nav-link';
+        privLink.setAttribute('data-route', 'privacy');
+        privLink.innerHTML = '<svg class="ph-icon" aria-hidden="true" focusable="false"><use href="/icons/phosphor-sprite.svg#ph-lock"></use></svg> Privacy';
+        navLinksEl.appendChild(privLink);
+        window.dispatchEvent(new Event('resize'));
+      }
+    }
     if (cfg.roles) {
       if (cfg.roles.colors) {
         // #1407 — ROLE_COLORS is now a live getter; merge into the override map.

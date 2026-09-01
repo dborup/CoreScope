@@ -1562,6 +1562,11 @@ type ClientConfigResponse struct {
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when
 	// no geo_filter is configured.
 	GeoFilter *GeoFilterConfig `json:"geoFilter,omitempty"`
+	// Privacy is the operator-configured privacy-notice content for the
+	// #/privacy page. Omitted entirely unless privacy.enabled is true in
+	// config.json — the frontend treats "field absent" as "feature off"
+	// (no nav link injected). See PrivacyConfig (config.go).
+	Privacy *PrivacyConfig `json:"privacy,omitempty"`
 }
 
 // CustomizerClientConfig is the operator-side customizer-modal knobs that

@@ -520,6 +520,13 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Customizer != nil && s.cfg.Customizer.DisabledTabs != nil {
 		disabledTabs = s.cfg.Customizer.DisabledTabs
 	}
+	// #/privacy page content — only surfaced when the operator opted in
+	// (privacy.enabled). Nil keeps the field out of the JSON entirely via
+	// omitempty, which the frontend reads as "feature off".
+	var privacy *PrivacyConfig
+	if s.cfg.Privacy != nil && s.cfg.Privacy.Enabled {
+		privacy = s.cfg.Privacy
+	}
 	writeJSON(w, ClientConfigResponse{
 		Roles:               s.cfg.Roles,
 		HealthThresholds:    s.cfg.GetHealthThresholds().ToClientMs(),
@@ -541,6 +548,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs},
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
 		GeoFilter:           s.getGeoFilter(),
+		Privacy:             privacy,
 	})
 }
 
