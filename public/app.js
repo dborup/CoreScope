@@ -1612,7 +1612,18 @@ window.addEventListener('DOMContentLoaded', () => {
       function fits() {
         const visibleLinks = allLinks.filter(a => !a.classList.contains('is-overflow'));
         let linkW = 0;
-        visibleLinks.forEach(a => { linkW += a.getBoundingClientRect().width; });
+        // Intrinsic width per link, not whatever the flex line currently
+        // grants it. Today .nav-link is white-space:nowrap and never actually
+        // shrinks, so rect and scrollWidth agree (measured at 1200px: home
+        // 58.35/58, observers 85.46/85, and the SVG-bearing live 63.16/63) —
+        // scrollWidth is verified to include padding (11.2px a side) and the
+        // inline SVG. Taking the max is therefore a no-op today and a guard
+        // if .nav-link ever becomes shrinkable: a compressed rect would then
+        // under-report and hide links under "More ▾". Read-only, no cloning
+        // and no style mutation per iteration.
+        visibleLinks.forEach(a => {
+          linkW += Math.max(a.getBoundingClientRect().width, a.scrollWidth);
+        });
         const linkGapPx = parseFloat(getComputedStyle(linksContainer).columnGap ||
                                      getComputedStyle(linksContainer).gap || '0') || 0;
         const linksGap = Math.max(0, visibleLinks.length - 1) * linkGapPx;
@@ -1709,6 +1720,32 @@ window.addEventListener('DOMContentLoaded', () => {
       // Defer so the route handler's class toggles run first.
       requestAnimationFrame(applyNavPriority);
     });
+    // ...and when the RIGHT side finishes growing. #navStats is filled from
+    // /api/stats, which lands after DOMContentLoaded — measured on staging at
+    // 1200px: stats responseEnd 2106ms vs domContentLoadedEventEnd 2046ms.
+    // The load-time run therefore measured .nav-right at 212px instead of its
+    // final 467px, under-reserving 255px, so fits() returned true with the
+    // strip already too wide and the greedy loop stopped early. Nothing
+    // re-measured afterwards, so links stayed inline underneath "More ▾"
+    // until the next resize. Observing .nav-right closes that window for any
+    // late-filling right-hand content, not just the stats.
+    //
+    // Safe against feedback: .nav-right is flex-grow:0/flex-shrink:0, so
+    // collapsing links on the left cannot change its width (verified live —
+    // collapsing 3 links left scrollWidth at 467). The width guard below is
+    // a second belt: a run that does not change the observed width cannot
+    // schedule another run, so this cannot loop.
+    if (typeof ResizeObserver === 'function') {
+      var lastRightW = -1;
+      var ro = new ResizeObserver(function () {
+        var w = navRightEl.scrollWidth;
+        if (w === lastRightW) return;
+        lastRightW = w;
+        if (rafId) cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(applyNavPriority);
+      });
+      ro.observe(navRightEl);
+    }
 
     // #1406: position the fixed dropdown relative to the More button on each open.
     // Required because .nav-more-menu is position:fixed (so it escapes
