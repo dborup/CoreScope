@@ -1577,11 +1577,28 @@ type ClientConfigResponse struct {
 // prefix (or stay silent about it when none is configured) instead of
 // hardcoding a character.
 type PrivacyClientConfig struct {
-	Enabled        bool   `json:"enabled"`
-	OperatorName   string `json:"operatorName,omitempty"`
-	ContactEmail   string `json:"contactEmail"`
-	RetentionText  string `json:"retentionText"`
-	LegalBasisText string `json:"legalBasisText"`
+	Enabled                     bool   `json:"enabled"`
+	ControllerName              string `json:"controllerName"`
+	ContactEmail                string `json:"contactEmail"`
+	EffectiveDate               string `json:"effectiveDate"`
+	PurposesText                string `json:"purposesText"`
+	LegalBasisType              string `json:"legalBasisType"`
+	LegalBasisText              string `json:"legalBasisText"`
+	LegitimateInterestsText     string `json:"legitimateInterestsText,omitempty"`
+	RetentionText               string `json:"retentionText"`
+	RecipientsText              string `json:"recipientsText"`
+	DataSourcesText             string `json:"dataSourcesText"`
+	ThirdPartyServicesText      string `json:"thirdPartyServicesText"`
+	InternationalTransfersText  string `json:"internationalTransfersText"`
+	BrowserStorageText          string `json:"browserStorageText"`
+	ServerLogsText              string `json:"serverLogsText"`
+	RightsRequestText           string `json:"rightsRequestText"`
+	SupervisoryAuthorityName    string `json:"supervisoryAuthorityName"`
+	SupervisoryAuthorityURL     string `json:"supervisoryAuthorityUrl"`
+	AutomatedDecisionMakingText string `json:"automatedDecisionMakingText"`
+	// Optional: omitted entirely when the deployment has no DPO.
+	DPOName    string `json:"dpoName,omitempty"`
+	DPOContact string `json:"dpoContact,omitempty"`
 	// HiddenNamePrefixes is the live Config.HiddenNamePrefixes list. Empty
 	// or absent means no self-service hiding is available on this
 	// deployment, and the page must not claim otherwise.

@@ -13,15 +13,35 @@ import (
 // render notice + inject nav link; field ABSENT => feature off. These
 // tests pin both directions plus the disabled-but-configured case.
 
+// validPrivacy returns a fully-populated, publishable config. Tests blank
+// ONE field at a time from this baseline, so a new required field
+// automatically gains coverage in TestPrivacyEachRequiredFieldIsMandatory.
+func validPrivacy() *PrivacyConfig {
+	return &PrivacyConfig{
+		Enabled:                     true,
+		ControllerName:              "Example Mesh Community",
+		ContactEmail:                "privacy@example.org",
+		EffectiveDate:               "2026-09-01",
+		PurposesText:                "Operating and troubleshooting the community network.",
+		LegalBasisType:              "public_task",
+		LegalBasisText:              "Processing is necessary for our community task.",
+		RetentionText:               "Packet data is deleted after 30 days.",
+		RecipientsText:              "Website and API visitors; our hosting provider.",
+		DataSourcesText:             "Observer nodes, radio packets and derived measurements.",
+		ThirdPartyServicesText:      "Map tiles are loaded from a third-party provider.",
+		InternationalTransfersText:  "No transfers outside the EU/EEA.",
+		BrowserStorageText:          "Interface settings are stored in your browser.",
+		ServerLogsText:              "Our proxy keeps access logs for 14 days.",
+		RightsRequestText:           "Email us and we will assess your request.",
+		SupervisoryAuthorityName:    "Datatilsynet",
+		SupervisoryAuthorityURL:     "https://www.datatilsynet.dk",
+		AutomatedDecisionMakingText: "No automated decision-making is used.",
+	}
+}
+
 func TestConfigClientExposesPrivacyWhenEnabled(t *testing.T) {
 	srv, router := setupTestServer(t)
-	srv.cfg.Privacy = &PrivacyConfig{
-		Enabled:        true,
-		OperatorName:   "Example Mesh Community",
-		ContactEmail:   "privacy@example.org",
-		RetentionText:  "Packet data is deleted after 30 days.",
-		LegalBasisText: "Legitimate interest in operating the mesh.",
-	}
+	srv.cfg.Privacy = validPrivacy()
 
 	req := httptest.NewRequest("GET", "/api/config/client", nil)
 	w := httptest.NewRecorder()
@@ -49,10 +69,14 @@ func TestConfigClientExposesPrivacyWhenEnabled(t *testing.T) {
 		t.Errorf("privacy[enabled] = %T(%v), want true", p["enabled"], p["enabled"])
 	}
 	wantStrings := map[string]string{
-		"operatorName":   "Example Mesh Community",
-		"contactEmail":   "privacy@example.org",
-		"retentionText":  "Packet data is deleted after 30 days.",
-		"legalBasisText": "Legitimate interest in operating the mesh.",
+		"controllerName":              "Example Mesh Community",
+		"contactEmail":                "privacy@example.org",
+		"effectiveDate":               "2026-09-01",
+		"legalBasisType":              "public_task",
+		"retentionText":               "Packet data is deleted after 30 days.",
+		"supervisoryAuthorityName":    "Datatilsynet",
+		"supervisoryAuthorityUrl":     "https://www.datatilsynet.dk",
+		"automatedDecisionMakingText": "No automated decision-making is used.",
 	}
 	for field, want := range wantStrings {
 		got, ok := p[field].(string)
@@ -70,7 +94,7 @@ func TestConfigClientExposesPrivacyWhenEnabled(t *testing.T) {
 // so the frontend's single presence check gates the whole feature.
 func TestConfigClientOmitsPrivacyWhenDisabled(t *testing.T) {
 	srv, router := setupTestServer(t)
-	srv.cfg.Privacy = &PrivacyConfig{Enabled: false, OperatorName: "Example"}
+	srv.cfg.Privacy = &PrivacyConfig{Enabled: false, ControllerName: "Example"}
 
 	req := httptest.NewRequest("GET", "/api/config/client", nil)
 	w := httptest.NewRecorder()
@@ -114,7 +138,7 @@ func TestPrivacyConfigParsing(t *testing.T) {
 	raw := `{
 		"privacy": {
 			"enabled": true,
-			"operatorName": "Example Mesh Community",
+			"controllerName": "Example Mesh Community",
 			"contactEmail": "privacy@example.org",
 			"retentionText": "Deleted after 30 days.",
 			"legalBasisText": "Legitimate interest."
@@ -130,8 +154,8 @@ func TestPrivacyConfigParsing(t *testing.T) {
 	if !cfg.Privacy.Enabled {
 		t.Error("Enabled = false, want true")
 	}
-	if cfg.Privacy.OperatorName != "Example Mesh Community" {
-		t.Errorf("OperatorName = %q", cfg.Privacy.OperatorName)
+	if cfg.Privacy.ControllerName != "Example Mesh Community" {
+		t.Errorf("ControllerName = %q", cfg.Privacy.ControllerName)
 	}
 	if cfg.Privacy.ContactEmail != "privacy@example.org" {
 		t.Errorf("ContactEmail = %q", cfg.Privacy.ContactEmail)
@@ -159,51 +183,74 @@ func TestPrivacyConfigParsing(t *testing.T) {
 // working contact, and must never invent them — so an incomplete block is a
 // configuration error and the notice is withheld rather than published with
 // made-up content.
-func TestPrivacyValidateRequiresOperatorSuppliedFields(t *testing.T) {
-	full := func() *PrivacyConfig {
-		return &PrivacyConfig{
-			Enabled:        true,
-			ContactEmail:   "privacy@example.org",
-			RetentionText:  "Deleted after 30 days.",
-			LegalBasisText: "Legitimate interest.",
-		}
+// Every REQUIRED field, blanked one at a time from a known-good baseline.
+// Driven by a table so adding a required field to PrivacyConfig without
+// adding it here shows up as a gap rather than passing silently.
+func TestPrivacyEachRequiredFieldIsMandatory(t *testing.T) {
+	if errs := validPrivacy().Validate(); len(errs) != 0 {
+		t.Fatalf("the baseline must validate, got %v", errs)
 	}
-	if errs := full().Validate(); len(errs) != 0 {
-		t.Fatalf("a fully-populated config must validate, got %v", errs)
+	blank := map[string]func(*PrivacyConfig){
+		"controllerName":              func(p *PrivacyConfig) { p.ControllerName = "" },
+		"contactEmail":                func(p *PrivacyConfig) { p.ContactEmail = "" },
+		"effectiveDate":               func(p *PrivacyConfig) { p.EffectiveDate = "" },
+		"purposesText":                func(p *PrivacyConfig) { p.PurposesText = "" },
+		"legalBasisType":              func(p *PrivacyConfig) { p.LegalBasisType = "" },
+		"legalBasisText":              func(p *PrivacyConfig) { p.LegalBasisText = "" },
+		"retentionText":               func(p *PrivacyConfig) { p.RetentionText = "" },
+		"recipientsText":              func(p *PrivacyConfig) { p.RecipientsText = "" },
+		"dataSourcesText":             func(p *PrivacyConfig) { p.DataSourcesText = "" },
+		"thirdPartyServicesText":      func(p *PrivacyConfig) { p.ThirdPartyServicesText = "" },
+		"internationalTransfersText":  func(p *PrivacyConfig) { p.InternationalTransfersText = "" },
+		"browserStorageText":          func(p *PrivacyConfig) { p.BrowserStorageText = "" },
+		"serverLogsText":              func(p *PrivacyConfig) { p.ServerLogsText = "" },
+		"rightsRequestText":           func(p *PrivacyConfig) { p.RightsRequestText = "" },
+		"supervisoryAuthorityName":    func(p *PrivacyConfig) { p.SupervisoryAuthorityName = "" },
+		"supervisoryAuthorityUrl":     func(p *PrivacyConfig) { p.SupervisoryAuthorityURL = "" },
+		"automatedDecisionMakingText": func(p *PrivacyConfig) { p.AutomatedDecisionMakingText = "" },
 	}
-
-	cases := map[string]func(*PrivacyConfig){
-		"contactEmail":   func(p *PrivacyConfig) { p.ContactEmail = "" },
-		"retentionText":  func(p *PrivacyConfig) { p.RetentionText = "" },
-		"legalBasisText": func(p *PrivacyConfig) { p.LegalBasisText = "" },
-	}
-	for field, blank := range cases {
-		p := full()
-		blank(p)
-		errs := p.Validate()
-		if len(errs) == 0 {
-			t.Errorf("missing %s must be a validation error", field)
-			continue
-		}
-		var mentioned bool
-		for _, e := range errs {
-			if strings.Contains(e, field) {
-				mentioned = true
+	for field, clear := range blank {
+		t.Run(field, func(t *testing.T) {
+			p := validPrivacy()
+			clear(p)
+			errs := p.Validate()
+			if len(errs) == 0 {
+				t.Fatalf("missing %s must be a validation error", field)
 			}
-		}
-		if !mentioned {
-			t.Errorf("validation error for %s should name the field; got %v", field, errs)
-		}
+			var named bool
+			for _, e := range errs {
+				if strings.Contains(e, field) {
+					named = true
+				}
+			}
+			if !named {
+				t.Errorf("the error for %s should name the field; got %v", field, errs)
+			}
+		})
 	}
 
-	// Whitespace-only is empty.
-	p := full()
+	// Whitespace-only is empty for every text field.
+	p := validPrivacy()
 	p.RetentionText = "   \t "
 	if len(p.Validate()) == 0 {
 		t.Error("whitespace-only retentionText must not satisfy the requirement")
 	}
 
-	// Disabled or absent is never an error — the feature is simply off.
+	// controllerName specifically has NO fallback anywhere in the stack.
+	p = validPrivacy()
+	p.ControllerName = "   "
+	if len(p.Validate()) == 0 {
+		t.Error("controllerName must have no fallback — blank is a hard error")
+	}
+
+	// DPO fields stay optional.
+	p = validPrivacy()
+	p.DPOName, p.DPOContact = "", ""
+	if errs := p.Validate(); len(errs) != 0 {
+		t.Errorf("DPO fields are optional, got %v", errs)
+	}
+
+	// Disabled or absent is never an error.
 	if errs := (&PrivacyConfig{Enabled: false}).Validate(); len(errs) != 0 {
 		t.Errorf("a disabled block must not report errors, got %v", errs)
 	}
@@ -213,12 +260,71 @@ func TestPrivacyValidateRequiresOperatorSuppliedFields(t *testing.T) {
 	}
 }
 
+// legalBasisType is structured, not inferred from prose, and
+// legitimate_interests additionally requires the specific interests.
+func TestPrivacyLegalBasisTypeContract(t *testing.T) {
+	for _, bt := range PrivacyLegalBasisTypes() {
+		p := validPrivacy()
+		p.LegalBasisType = bt
+		if bt == "legitimate_interests" {
+			if errs := p.Validate(); len(errs) == 0 {
+				t.Error("legitimate_interests without legitimateInterestsText must fail")
+			}
+			p.LegitimateInterestsText = "We rely on X to keep the mesh operable; see our assessment."
+		}
+		if errs := p.Validate(); len(errs) != 0 {
+			t.Errorf("legalBasisType %q should validate, got %v", bt, errs)
+		}
+	}
+
+	// Unrecognised values are rejected rather than passed through.
+	for _, bad := range []string{"legitimate interest", "LegitimateInterests", "art6f", "other"} {
+		p := validPrivacy()
+		p.LegalBasisType = bad
+		if errs := p.Validate(); len(errs) == 0 {
+			t.Errorf("legalBasisType %q should be rejected", bad)
+		}
+	}
+
+	// legitimateInterestsText is NOT required for other bases.
+	p := validPrivacy()
+	p.LegalBasisType = "consent"
+	p.LegitimateInterestsText = ""
+	if errs := p.Validate(); len(errs) != 0 {
+		t.Errorf("legitimateInterestsText should only be required for legitimate_interests, got %v", errs)
+	}
+}
+
+func TestPrivacySupervisoryAuthorityURLIsSafe(t *testing.T) {
+	// Trailing whitespace is trimmed (and the trimmed form is what ships to
+	// the browser -- see handleConfigClient), so it is a typo, not a threat.
+	good := []string{"https://www.datatilsynet.dk", "http://example.org/privacy", "  https://example.org  ", "https://example.org\n"}
+	for _, u := range good {
+		p := validPrivacy()
+		p.SupervisoryAuthorityURL = u
+		if errs := p.Validate(); len(errs) != 0 {
+			t.Errorf("%q should be accepted, got %v", u, errs)
+		}
+	}
+	bad := []string{
+		"javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
+		"//example.org", "example.org", "ftp://example.org",
+		"https://exa mple.org", "https://exa\nmple.org", "",
+	}
+	for _, u := range bad {
+		p := validPrivacy()
+		p.SupervisoryAuthorityURL = u
+		if errs := p.Validate(); len(errs) == 0 {
+			t.Errorf("%q should be rejected as supervisoryAuthorityUrl", u)
+		}
+	}
+}
+
 func TestPrivacyValidateEmailShape(t *testing.T) {
 	base := func(email string) *PrivacyConfig {
-		return &PrivacyConfig{
-			Enabled: true, ContactEmail: email,
-			RetentionText: "x", LegalBasisText: "y",
-		}
+		p := validPrivacy()
+		p.ContactEmail = email
+		return p
 	}
 	good := []string{"privacy@example.org", "a.b+c@sub.example.co.uk", "x_y@example.io"}
 	for _, e := range good {
@@ -245,19 +351,42 @@ func TestPrivacyValidateEmailShape(t *testing.T) {
 
 // An enabled-but-invalid block must NOT reach the browser: the page would
 // otherwise have to invent the missing text.
+// An enabled-but-invalid block must NOT reach the browser: the page would
+// otherwise have to invent the missing text, or name no controller at all.
+// One subtest per required field, so every one of them is proven to gate
+// publication end-to-end, not just in Validate().
 func TestConfigClientWithholdsPrivacyWhenInvalid(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		cfg  *PrivacyConfig
-	}{
-		{"no contact", &PrivacyConfig{Enabled: true, RetentionText: "x", LegalBasisText: "y"}},
-		{"no retention", &PrivacyConfig{Enabled: true, ContactEmail: "a@b.co", LegalBasisText: "y"}},
-		{"no legal basis", &PrivacyConfig{Enabled: true, ContactEmail: "a@b.co", RetentionText: "x"}},
-		{"malformed email", &PrivacyConfig{Enabled: true, ContactEmail: "nope", RetentionText: "x", LegalBasisText: "y"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	blank := map[string]func(*PrivacyConfig){
+		"controllerName":              func(p *PrivacyConfig) { p.ControllerName = "" },
+		"contactEmail":                func(p *PrivacyConfig) { p.ContactEmail = "" },
+		"effectiveDate":               func(p *PrivacyConfig) { p.EffectiveDate = "" },
+		"purposesText":                func(p *PrivacyConfig) { p.PurposesText = "" },
+		"legalBasisType":              func(p *PrivacyConfig) { p.LegalBasisType = "" },
+		"legalBasisText":              func(p *PrivacyConfig) { p.LegalBasisText = "" },
+		"retentionText":               func(p *PrivacyConfig) { p.RetentionText = "" },
+		"recipientsText":              func(p *PrivacyConfig) { p.RecipientsText = "" },
+		"dataSourcesText":             func(p *PrivacyConfig) { p.DataSourcesText = "" },
+		"thirdPartyServicesText":      func(p *PrivacyConfig) { p.ThirdPartyServicesText = "" },
+		"internationalTransfersText":  func(p *PrivacyConfig) { p.InternationalTransfersText = "" },
+		"browserStorageText":          func(p *PrivacyConfig) { p.BrowserStorageText = "" },
+		"serverLogsText":              func(p *PrivacyConfig) { p.ServerLogsText = "" },
+		"rightsRequestText":           func(p *PrivacyConfig) { p.RightsRequestText = "" },
+		"supervisoryAuthorityName":    func(p *PrivacyConfig) { p.SupervisoryAuthorityName = "" },
+		"supervisoryAuthorityUrl":     func(p *PrivacyConfig) { p.SupervisoryAuthorityURL = "" },
+		"automatedDecisionMakingText": func(p *PrivacyConfig) { p.AutomatedDecisionMakingText = "" },
+		"malformed email":             func(p *PrivacyConfig) { p.ContactEmail = "nope" },
+		"unsafe authority url":        func(p *PrivacyConfig) { p.SupervisoryAuthorityURL = "javascript:alert(1)" },
+		"legitimate_interests without interests": func(p *PrivacyConfig) {
+			p.LegalBasisType = "legitimate_interests"
+			p.LegitimateInterestsText = ""
+		},
+	}
+	for name, clear := range blank {
+		t.Run(name, func(t *testing.T) {
 			srv, router := setupTestServer(t)
-			srv.cfg.Privacy = tc.cfg
+			p := validPrivacy()
+			clear(p)
+			srv.cfg.Privacy = p
 			req := httptest.NewRequest("GET", "/api/config/client", nil)
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
@@ -275,14 +404,50 @@ func TestConfigClientWithholdsPrivacyWhenInvalid(t *testing.T) {
 	}
 }
 
+// The happy path: a complete config publishes every documented field, so the
+// page and the nav link both light up.
+func TestConfigClientPublishesCompletePrivacy(t *testing.T) {
+	srv, router := setupTestServer(t)
+	p := validPrivacy()
+	p.LegalBasisType = "legitimate_interests"
+	p.LegitimateInterestsText = "Keeping the community mesh operable; see our assessment."
+	p.DPOName = "Jane Doe"
+	srv.cfg.Privacy = p
+
+	req := httptest.NewRequest("GET", "/api/config/client", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	pc, ok := body["privacy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("privacy missing from a complete config: %+v", body["privacy"])
+	}
+	for _, f := range []string{
+		"enabled", "controllerName", "contactEmail", "effectiveDate", "purposesText",
+		"legalBasisType", "legalBasisText", "legitimateInterestsText", "retentionText",
+		"recipientsText", "dataSourcesText", "thirdPartyServicesText",
+		"internationalTransfersText", "browserStorageText", "serverLogsText",
+		"rightsRequestText", "supervisoryAuthorityName", "supervisoryAuthorityUrl",
+		"automatedDecisionMakingText", "dpoName",
+	} {
+		if _, present := pc[f]; !present {
+			t.Errorf("privacy[%q] missing from the published payload", f)
+		}
+	}
+	// The optional DPO contact was left blank and must be omitted.
+	if _, present := pc["dpoContact"]; present {
+		t.Error("blank dpoContact should be omitted, not published as an empty string")
+	}
+}
+
 // The page names the deployment's REAL hide prefixes instead of hardcoding a
 // character, so the server has to publish the active list.
 func TestConfigClientExposesActiveHiddenNamePrefixes(t *testing.T) {
 	srv, router := setupTestServer(t)
-	srv.cfg.Privacy = &PrivacyConfig{
-		Enabled: true, ContactEmail: "a@b.co",
-		RetentionText: "x", LegalBasisText: "y",
-	}
+	srv.cfg.Privacy = validPrivacy()
 	srv.cfg.SetHiddenNamePrefixes([]string{"##", "  ", "zz"})
 
 	req := httptest.NewRequest("GET", "/api/config/client", nil)
@@ -314,10 +479,7 @@ func TestConfigClientExposesActiveHiddenNamePrefixes(t *testing.T) {
 // not to promise self-service hiding.
 func TestConfigClientOmitsHiddenPrefixesWhenNoneConfigured(t *testing.T) {
 	srv, router := setupTestServer(t)
-	srv.cfg.Privacy = &PrivacyConfig{
-		Enabled: true, ContactEmail: "a@b.co",
-		RetentionText: "x", LegalBasisText: "y",
-	}
+	srv.cfg.Privacy = validPrivacy()
 	srv.cfg.SetHiddenNamePrefixes([]string{"   "})
 
 	req := httptest.NewRequest("GET", "/api/config/client", nil)

@@ -42,13 +42,39 @@ assert(escMatch, 'could not extract escapeHtml from public/app.js');
 
 // A fully-populated, valid config — mirrors what the server publishes only
 // after Validate() passes.
+// Mirrors validPrivacy() in cmd/server/privacy_config_test.go: the server
+// only ever publishes a block that passed Validate(), so the page's fixture
+// is a COMPLETE one. REQUIRED_FIELDS drives the "blank one at a time" tests.
+const REQUIRED_FIELDS = [
+  'controllerName', 'contactEmail', 'effectiveDate', 'purposesText',
+  'legalBasisType', 'legalBasisText', 'retentionText', 'recipientsText',
+  'dataSourcesText', 'thirdPartyServicesText', 'internationalTransfersText',
+  'browserStorageText', 'serverLogsText', 'rightsRequestText',
+  'supervisoryAuthorityName', 'supervisoryAuthorityUrl',
+  'automatedDecisionMakingText',
+];
+
 const VALID = {
   enabled: true,
-  operatorName: 'Example Mesh Community',
+  controllerName: 'Example Mesh Community',
   contactEmail: 'privacy@example.org',
+  effectiveDate: '2026-09-01',
+  purposesText: 'Operating and troubleshooting the community network.',
+  legalBasisType: 'public_task',
+  legalBasisText: 'Processing is necessary for our community task.',
   retentionText: 'Packet data is deleted after 30 days.',
-  legalBasisText: 'We rely on legitimate interest to operate the mesh.',
+  recipientsText: 'Website and API visitors; our hosting provider.',
+  dataSourcesText: 'Observer nodes, radio packets and derived measurements.',
+  thirdPartyServicesText: 'Map tiles are loaded from a third-party provider.',
+  internationalTransfersText: 'No transfers outside the EU/EEA.',
+  browserStorageText: 'Interface settings are stored in your browser.',
+  serverLogsText: 'Our proxy keeps access logs for 14 days.',
+  rightsRequestText: 'Email us and we will assess your request.',
+  supervisoryAuthorityName: 'Datatilsynet',
+  supervisoryAuthorityUrl: 'https://www.datatilsynet.dk',
+  automatedDecisionMakingText: 'No automated decision-making is used.',
 };
+const withField = (k, v) => Object.assign({}, VALID, { [k]: v });
 
 // ───────────────────────── privacy.js render sandbox ─────────────────────────
 
@@ -292,12 +318,50 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   // ─── content correctness: no invented legal text ──────────────────────────
 
-  await test('renders operator, contact, retention and legal basis from config', async () => {
+  await test('renders every configured field', async () => {
     const html = await renderWith(VALID);
-    assert(html.includes('Example Mesh Community'), 'operator name missing');
+    assert(html.includes('Example Mesh Community'), 'controller name missing');
     assert(html.includes('href="mailto:privacy@example.org"'), 'mailto link missing');
-    assert(html.includes('Packet data is deleted after 30 days.'), 'retention text missing');
-    assert(html.includes('We rely on legitimate interest to operate the mesh.'), 'legal basis text missing');
+    assert(html.includes('2026-09-01'), 'effective date missing');
+    for (const f of REQUIRED_FIELDS) {
+      const v = VALID[f];
+      if (f === 'legalBasisType') continue;   // rendered as a friendly label
+      assert(html.includes(v), 'field ' + f + ' (' + v + ') missing from the page');
+    }
+    assert(html.includes('Public task'), 'legalBasisType should render as a readable label');
+  });
+
+  await test('each REQUIRED field blanked individually → notice withheld', async () => {
+    for (const f of REQUIRED_FIELDS) {
+      const html = await renderWith(withField(f, ''));
+      if (f === 'controllerName') {
+        assert(html.includes('has not published a privacy notice'),
+          'blank controllerName must withhold the notice client-side too');
+      } else {
+        // The server withholds these; the page must at minimum never
+        // invent a value for them.
+        assert(!html.includes('undefined') && !html.includes('null'),
+          'blank ' + f + ' must not leak a placeholder into the page');
+      }
+    }
+  });
+
+  await test('legitimateInterestsText is rendered for the legitimate_interests basis', async () => {
+    const cfg = Object.assign({}, VALID, {
+      legalBasisType: 'legitimate_interests',
+      legitimateInterestsText: 'Keeping the community mesh operable; see our assessment.',
+    });
+    const html = await renderWith(cfg);
+    assert(html.includes('Legitimate interests'), 'basis label missing');
+    assert(html.includes('Keeping the community mesh operable'), 'the specific interests must be shown');
+  });
+
+  await test('optional DPO section appears only when configured', async () => {
+    const without = await renderWith(VALID);
+    assert(!without.includes('Data protection officer'), 'no DPO section when unconfigured');
+    const withDpo = await renderWith(Object.assign({}, VALID, { dpoName: 'Jane Doe' }));
+    assert(withDpo.includes('Data protection officer') && withDpo.includes('Jane Doe'),
+      'DPO section should render when configured');
   });
 
   await test('ships NO default retention paragraph', async () => {
@@ -317,17 +381,23 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
       'the page must attribute the legal basis to the operator');
   });
 
-  await test('empty operatorName falls back to neutral wording (the only default)', async () => {
-    const html = await renderWith({ enabled: true, contactEmail: '', retentionText: 'x', legalBasisText: 'y' });
-    assert(html.includes('The operator of this site'), 'neutral operator fallback missing');
-    assert(!html.includes('mailto:'), 'no mailto without contactEmail');
+  await test('controllerName has NO fallback — blank withholds the notice', async () => {
+    for (const v of ['', '   ', undefined, null]) {
+      const html = await renderWith(withField('controllerName', v));
+      assert(html.includes('has not published a privacy notice'),
+        'blank controllerName (' + JSON.stringify(v) + ') must not render a notice');
+    }
+    const src = fs.readFileSync('public/privacy.js', 'utf8');
+    assert(!src.includes('The operator of this site'),
+      'the generic operator fallback must be gone from the source entirely');
+    assert(!/DEFAULT_OPERATOR/.test(src), 'no default-operator constant should remain');
   });
 
   // ─── hidden-name prefixes: real list, or silence ──────────────────────────
 
   await test('names the ACTUAL configured hidden prefixes', async () => {
     const html = await renderWith(Object.assign({}, VALID, { hiddenNamePrefixes: ['##'] }));
-    assert(html.includes('rename it so it starts with'), 'self-service hiding should be offered');
+    assert(html.includes('hides nodes whose name begins with'), 'the real prefix should be described');
     assert(html.includes('<span class="mono">##</span>'), 'the real configured prefix must be shown');
   });
 
@@ -338,10 +408,9 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   await test('no configured prefixes → no self-service promise', async () => {
     const html = await renderWith(VALID);
-    assert(!html.includes('rename it so it starts with'),
-      'must not promise self-service hiding when no prefix is configured');
-    assert(html.includes('no self-service name prefix configured'),
-      'must say so explicitly and point at the operator contact');
+    assert(!html.includes('hides nodes whose name begins with'),
+      'must not describe prefix hiding when none is configured');
+    assert(html.includes('no name-prefix hiding configured'), 'must say so explicitly');
   });
 
   await test('does not hardcode the no-entry emoji as a guarantee', async () => {
@@ -355,26 +424,32 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
   await test('explains the real scope of hiding (dashboard/API, not the mesh; history may remain)', async () => {
     const html = await renderWith(Object.assign({}, VALID, { hiddenNamePrefixes: ['##'] }));
     assert(/dashboard and API/i.test(html), 'must scope hiding to this site, not the mesh');
-    assert(/every other listener on the mesh/i.test(html), 'must say the radio keeps transmitting');
-    assert(/may remain in this site’s database|already recorded may remain/i.test(html),
+    assert(/does not remove a node from the radio network/i.test(html),
+      'must say the node stays on the radio network');
+    assert(/other listeners still receive/i.test(html), 'must say others still receive it');
+    assert(/does not by itself delete stored packets/i.test(html),
       'must be honest that recorded history can persist');
   });
 
   // ─── escaping + mailto edge cases ─────────────────────────────────────────
 
   await test('config values are HTML-escaped (XSS)', async () => {
-    const html = await renderWith({
-      enabled: true,
-      operatorName: '<img src=x onerror=alert(1)>',
+    const html = await renderWith(Object.assign({}, VALID, {
+      controllerName: '<img src=x onerror=alert(1)>',
       contactEmail: '"><script>alert(2)</script>',
       retentionText: '<b onmouseover=alert(3)>bold</b>',
       legalBasisText: '<svg onload=alert(4)>',
-    });
+      purposesText: '</p><iframe src=evil>',
+      supervisoryAuthorityName: '<a href=javascript:alert(5)>x</a>',
+      supervisoryAuthorityUrl: 'javascript:alert(6)',
+    }));
     assert(!html.includes('<img'), 'unescaped <img in output');
     assert(!html.includes('<script'), 'unescaped <script in output');
     assert(!html.includes('<b '), 'unescaped <b in output');
     assert(!html.includes('<svg onload'), 'unescaped <svg in output');
-    assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'escaped operator name missing');
+    assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'escaped controller name missing');
+    assert(!html.includes('<iframe'), 'unescaped <iframe in output');
+    assert(!/href="javascript:/i.test(html), 'javascript: URL must never reach an href');
     assert(!html.includes('href="mailto:"><'), 'contactEmail broke out of href attribute');
   });
 
@@ -417,6 +492,77 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     const html = await renderWith(VALID);
     assert(html.includes('href="mailto:privacy@example.org"'),
       'a clean address should render as-is, not percent-mangled');
+  });
+
+  await test('the old problematic phrasings are gone from the source', async () => {
+    const src = fs.readFileSync('public/privacy.js', 'utf8');
+    const banned = [
+      // invented operator identity
+      ['The operator of this site', 'generic controller fallback'],
+      ['DEFAULT_OPERATOR', 'default-operator constant'],
+      // invented retention policy
+      ['historical archive', 'fabricated retention paragraph'],
+      // legal basis asserted by the software
+      ['processed under <strong>legitimate interest</strong>', 'hardcoded legitimate-interest claim'],
+      ['GDPR Art. 6(1)(f)', 'hardcoded article citation'],
+      // over-broad claim about public channels
+      ['receivable and readable by anyone with a radio', 'over-broad public-channel claim'],
+      // hardcoded hide character + unconditional promises
+      ['0x1F6AB', 'hardcoded hide-prefix character'],
+      ['it will be hidden or removed', 'unconditional hiding/removal promise'],
+      ['disappears from this site', 'unconditional disappearance promise'],
+    ];
+    for (const [needle, why] of banned) {
+      assert(!src.includes(needle), 'removed phrasing reappeared (' + why + '): ' + needle);
+    }
+    const html = await renderWith(VALID);
+    for (const [needle, why] of banned) {
+      assert(!html.includes(needle), 'removed phrasing rendered (' + why + '): ' + needle);
+    }
+  });
+
+  await test('the page states the correct message semantics', async () => {
+    const html = await renderWith(VALID);
+    assert(/Direct-message content is not decrypted/i.test(html),
+      'must say direct message CONTENT is not decrypted');
+    assert(/metadata associated with direct messages/i.test(html),
+      'must say direct-message METADATA is still processed');
+    assert(/may become readable later if a corresponding key/i.test(html),
+      'must say stored ciphertext may be decodable later');
+    assert(/channels whose keys are available to this deployment/i.test(html),
+      'channel decoding must be scoped to keys this deployment holds');
+  });
+
+  await test('the page names both radio traffic and CoreScope-generated data', async () => {
+    const html = await renderWith(VALID);
+    assert(/Reception metadata produced by observer nodes/i.test(html),
+      'must name observer-produced reception metadata');
+    assert(/Derived information/i.test(html), 'must name derived analytics');
+    assert(/Observer identity, status and operational metrics/i.test(html),
+      'must name observer metadata');
+  });
+
+  await test('rights section does not promise unconditional erasure', async () => {
+    const html = await renderWith(VALID);
+    assert(/not automatically granted/i.test(html),
+      'must say requests are assessed, not automatically granted');
+    assert(html.includes('Datatilsynet'), 'supervisory authority name missing');
+    assert(html.includes('https://www.datatilsynet.dk'), 'supervisory authority URL missing');
+  });
+
+  await test('a complete config renders the page AND enables the nav surfaces', async () => {
+    const html = await renderWith(VALID);
+    assert(!html.includes('has not published a privacy notice'), 'complete config must render the notice');
+    assert(html.includes('Privacy Notice'), 'heading missing');
+    // ...and the same config drives both dynamic nav surfaces.
+    const d = bootNav('public/nav-drawer.js', { withConfigPromise: true });
+    const b = bootNav('public/bottom-nav.js', { withConfigPromise: true });
+    d.settle({ privacy: VALID });
+    b.settle({ privacy: VALID });
+    await d.tick(); await b.tick();
+    openMoreSheet(b.doc);
+    assert(drawerLinks(d.doc).includes('privacy'), 'drawer must show Privacy for a complete config');
+    assert(sheetLinks(b.doc).includes('privacy'), 'More sheet must show Privacy for a complete config');
   });
 
   // ─── navigation lifecycle: nav-drawer ─────────────────────────────────────

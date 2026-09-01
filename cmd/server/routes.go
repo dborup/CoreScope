@@ -529,12 +529,33 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 	// frontend reads as "feature off".
 	var privacy *PrivacyClientConfig
 	if s.cfg.Privacy != nil && s.cfg.Privacy.Enabled && len(s.cfg.Privacy.Validate()) == 0 {
+		// Publish TRIMMED values: Validate() checks the trimmed form, so
+		// sending the raw one could hand the browser a string its own
+		// safeUrl()/mailto guards then reject (e.g. a stray trailing
+		// newline in config.json). What was validated is what ships.
+		tr := strings.TrimSpace
 		privacy = &PrivacyClientConfig{
-			Enabled:        true,
-			OperatorName:   s.cfg.Privacy.OperatorName,
-			ContactEmail:   s.cfg.Privacy.ContactEmail,
-			RetentionText:  s.cfg.Privacy.RetentionText,
-			LegalBasisText: s.cfg.Privacy.LegalBasisText,
+			Enabled:                     true,
+			ControllerName:              tr(s.cfg.Privacy.ControllerName),
+			ContactEmail:                tr(s.cfg.Privacy.ContactEmail),
+			EffectiveDate:               tr(s.cfg.Privacy.EffectiveDate),
+			PurposesText:                tr(s.cfg.Privacy.PurposesText),
+			LegalBasisType:              tr(s.cfg.Privacy.LegalBasisType),
+			LegalBasisText:              tr(s.cfg.Privacy.LegalBasisText),
+			LegitimateInterestsText:     tr(s.cfg.Privacy.LegitimateInterestsText),
+			RetentionText:               tr(s.cfg.Privacy.RetentionText),
+			RecipientsText:              tr(s.cfg.Privacy.RecipientsText),
+			DataSourcesText:             tr(s.cfg.Privacy.DataSourcesText),
+			ThirdPartyServicesText:      tr(s.cfg.Privacy.ThirdPartyServicesText),
+			InternationalTransfersText:  tr(s.cfg.Privacy.InternationalTransfersText),
+			BrowserStorageText:          tr(s.cfg.Privacy.BrowserStorageText),
+			ServerLogsText:              tr(s.cfg.Privacy.ServerLogsText),
+			RightsRequestText:           tr(s.cfg.Privacy.RightsRequestText),
+			SupervisoryAuthorityName:    tr(s.cfg.Privacy.SupervisoryAuthorityName),
+			SupervisoryAuthorityURL:     tr(s.cfg.Privacy.SupervisoryAuthorityURL),
+			AutomatedDecisionMakingText: tr(s.cfg.Privacy.AutomatedDecisionMakingText),
+			DPOName:                     tr(s.cfg.Privacy.DPOName),
+			DPOContact:                  tr(s.cfg.Privacy.DPOContact),
 			// The ACTUAL active hide prefixes, so the page can name them
 			// instead of hardcoding a character the deployment may not
 			// use. Empty means the operator configured none, and the page
