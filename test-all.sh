@@ -15,6 +15,7 @@ node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js
 node test-privacy-page.js
+node test-nav-dynamic-link-lifecycle.js
 node test-geo-filter.js
 node test-fetch-all-nodes-pagination.js
 node test-nodes-geo-scope-filter.js

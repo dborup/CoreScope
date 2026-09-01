@@ -1430,8 +1430,17 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('nav-open');
     hamburger.setAttribute('aria-expanded', String(opening));
   });
-  navLinks.querySelectorAll('.nav-link').forEach(link => {
-    link.addEventListener('click', closeNav);
+  // Delegated, not per-link: roles.js injects the opt-in routes (privacy,
+  // rx-coverage) once /api/config/client resolves, which is long after this
+  // runs. A forEach over the links present right now would silently miss
+  // them, leaving a late link that never closes the hamburger on mobile.
+  // One listener on the container covers every current and future
+  // .nav-link, and cannot double-register on the ones already here.
+  // #navMoreMenu is a sibling of .nav-links, so the menu clones (which get
+  // their own closeNav in rebuildMoreMenu) never reach this handler.
+  navLinks.addEventListener('click', function (e) {
+    var link = e.target && e.target.closest ? e.target.closest('.nav-link') : null;
+    if (link && navLinks.contains(link)) closeNav();
   });
 
   // --- "More" dropdown — JS-driven Priority+ (Issue #1102) ---
@@ -1453,7 +1462,25 @@ window.addEventListener('DOMContentLoaded', () => {
     // at a time (right-to-left, lowest priority first) until it does.
     // Then mirror the hidden links into the "More ▾" menu so nothing
     // disappears from the user's reach.
-    const allLinks = Array.from(linksContainer.querySelectorAll('.nav-link'));
+    // The link set is LIVE, not a snapshot. roles.js injects the opt-in
+    // routes (privacy, rx-coverage) when /api/config/client resolves, which
+    // races this block: when app.js wins (typically a warm cache, where the
+    // 99KB bundle is instant but the config still needs a round trip), an
+    // init-time snapshot would exclude those links permanently. They would
+    // never gain .is-overflow, their width would never enter fits(), and the
+    // More button would render on top of them. Re-querying per run makes a
+    // dynamically added link exactly as overflow-capable as a static one.
+    //
+    // Scoped to DIRECT children so the clones rebuildMoreMenu() puts into
+    // #navMoreMenu can never re-enter the list and duplicate themselves.
+    // (.nav-more-wrap is a sibling of .nav-links today; the containment
+    // check keeps that from becoming a latent trap if it ever nests.)
+    function currentLinks() {
+      return Array.from(linksContainer.children).filter(function (el) {
+        return el.classList && el.classList.contains('nav-link') &&
+               !(navMoreMenu && navMoreMenu.contains(el));
+      });
+    }
     // overflowQueue (#1105 MINOR 6): the order links are removed from the
     // inline strip when space runs out. Built right-to-left from
     // non-priority links (lowest priority dropped first) and then high-
@@ -1468,19 +1495,20 @@ window.addEventListener('DOMContentLoaded', () => {
     // ≥768px." The queue is rebuilt on hashchange (applyNavPriority
     // is wired to hashchange below), so the exclusion tracks the
     // current route automatically.
-    function buildOverflowQueue() {
+    function buildOverflowQueue(links) {
       var isPinned = function(a) {
         return a.dataset.priority === 'high' || a.classList.contains('active');
       };
-      return allLinks.filter(a => !isPinned(a))
-                     .reverse() // right-to-left
-                     .concat(allLinks.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
+      return links.filter(a => !isPinned(a))
+                  .reverse() // right-to-left
+                  .concat(links.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
     }
-    var overflowQueue = buildOverflowQueue();
 
-    function rebuildMoreMenu() {
+    // Always rebuilt from the CURRENT originals, so a link removed since the
+    // last run cannot survive as a stale clone in the menu.
+    function rebuildMoreMenu(links) {
       navMoreMenu.innerHTML = '';
-      const hidden = allLinks.filter(a => a.classList.contains('is-overflow'));
+      const hidden = links.filter(a => a.classList.contains('is-overflow'));
       hidden.forEach(function(link) {
         var clone = link.cloneNode(true);
         // The clone is in the overflow menu, not the inline strip.
@@ -1512,13 +1540,19 @@ window.addEventListener('DOMContentLoaded', () => {
     var MORE_BTN_RESERVE_PX = 70;
 
     function applyNavPriority() {
+      // One fresh read per run, shared by the reset, the queue, the fit
+      // measurement, the overflow count and the menu rebuild — so every
+      // stage of a single run agrees on the same set of links.
+      const allLinks = currentLinks();
       // Skip on mobile (<768px) — hamburger CSS owns that layout.
       if (window.innerWidth < 768) {
         allLinks.forEach(a => a.classList.remove('is-overflow'));
         navMoreWrap.classList.add('is-hidden');
         return;
       }
-      // Reset: show everything, then hide as needed.
+      // Reset: show everything, then hide as needed. Reading the live list
+      // means a link added since the last run starts clean, and one that was
+      // removed simply isn't here to carry stale state.
       allLinks.forEach(a => a.classList.remove('is-overflow'));
       navMoreWrap.classList.remove('is-hidden');
       // #1106: in the 768-1100px narrow-desktop band the CSS already
@@ -1544,7 +1578,7 @@ window.addEventListener('DOMContentLoaded', () => {
             a.classList.add('is-overflow');
           }
         });
-        rebuildMoreMenu();
+        rebuildMoreMenu(allLinks);
         return;
       }
       // Iteratively hide low-priority links until the link strip fits.
@@ -1600,10 +1634,11 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       let i = 0;
       // #1391: rebuild queue here so it reflects the CURRENT active
-      // link (hashchange wakes applyNavPriority, but the queue was
-      // captured at init-time; we need to re-evaluate which link is
-      // active on every run). Cheap — just filters allLinks twice.
-      overflowQueue = buildOverflowQueue();
+      // link: hashchange wakes applyNavPriority, and which link carries
+      // .active changes between runs. Cheap — just filters allLinks twice.
+      // Local to the run: the queue must never outlive the link list it was
+      // built from, or a later run could enqueue a detached element.
+      var overflowQueue = buildOverflowQueue(allLinks);
       // #1311 floor: protect data-priority="high" links from being
       // dropped by the greedy fit loop. The bug was that on a non-high
       // active route (e.g. /#/perf, /#/audio-lab) at ~1101-1200px, the
@@ -1653,7 +1688,7 @@ window.addEventListener('DOMContentLoaded', () => {
           console.warn('[nav] More menu floor: overflowQueue exhausted with 1 item; cannot enforce >=2 floor');
         }
       }
-      rebuildMoreMenu();
+      rebuildMoreMenu(allLinks);
     }
 
     // Run once on load, again after fonts settle (label widths shift),
