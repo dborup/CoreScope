@@ -359,19 +359,46 @@
       }
     }
     const _initTile = _resolveTileUrl(isDark);
+    // #7: created but deliberately NOT added yet. Leaflet issues tile
+    // requests the moment a layer joins a map, so adding it here would fire
+    // keyless CARTO requests before /api/config/client has delivered
+    // carto.token — the watermarked tiles would already be in the browser
+    // cache by the time the URL could be swapped. The map, panes and
+    // controls below are still created immediately; only the first tile
+    // request waits.
     const tileLayer = L.tileLayer(_initTile.url, {
       attribution: _initTile.attribution,
       maxZoom: 19,
-    }).addTo(autoLayerGroup);
-    if (isDark && _initTile.refUrl) {
-      _darkRefLayer = L.tileLayer(_initTile.refUrl, { maxZoom: 19, attribution: _initTile.attribution }).addTo(autoLayerGroup);
+    });
+    // One idempotent config-ready step for everything that resolves a CARTO
+    // URL: the Auto base layer AND the layer picker. The picker must wait
+    // too — MC_createLayerControl builds a real L.tileLayer per registry
+    // style with the URL current at build time, so building it early would
+    // hand the user selectable keyless layers, and picking one inside that
+    // window would fire unauthenticated requests.
+    let _tilesReady = false;
+    function _attachTiles() {
+      if (_tilesReady) return;          // exactly once per map init
+      _tilesReady = true;
+      const darkNow = document.documentElement.getAttribute('data-theme') === 'dark' ||
+        (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      // Re-resolve against the now-loaded config, then attach. _syncDarkTiles
+      // also owns the Esri labels overlay and the CSS filter, so the ref
+      // layer is created there rather than twice.
+      _syncDarkTiles(darkNow);
+      if (!autoLayerGroup.hasLayer(tileLayer)) tileLayer.addTo(autoLayerGroup);
+      // Layer Control, passing 'topleft' to put it on the left. Built here so
+      // every explicit style it offers is already authenticated.
+      if (typeof window.MC_createLayerControl === 'function') {
+        window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
+      }
     }
-    if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
-    
-    // Add Layer Control, passing 'topleft' to put it on the left
-    if (typeof window.MC_createLayerControl === 'function') {
-      window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
-    }
+    // Guarded like every other cross-file MC_* call in this function: if
+    // map-tile-providers.js failed to load there is no config gate to wait
+    // on, and attaching immediately (keyless, as before #7) is far better
+    // than throwing here and aborting the rest of init().
+    if (typeof window.MC_whenTileConfigReady === 'function') window.MC_whenTileConfigReady(_attachTiles);
+    else _attachTiles();
 
     const _mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
