@@ -440,6 +440,6 @@
     "_comment_automatedDecisionMakingText": "REQUIRED. Whether automated decision-making or profiling with legal or similarly significant effects is used. For a normal CoreScope deployment this is typically: 'This deployment does not use automated decision-making producing legal or similarly significant effects.'",
     "dpoName": "",
     "dpoContact": "",
-    "_comment_dpo": "OPTIONAL. Most community deployments have no data protection officer; leave blank and the page omits the section entirely."
+    "_comment_dpo": "OPTIONAL. Most community deployments have no data protection officer; leave BOTH blank and the page omits the section entirely. If dpoName is set, dpoContact is REQUIRED - a named DPO the reader cannot reach is an incomplete disclosure, and the whole privacy block is withheld until you add one. A contact without a name is allowed."
   }
 }

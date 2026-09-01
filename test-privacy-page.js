@@ -359,9 +359,22 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
   await test('optional DPO section appears only when configured', async () => {
     const without = await renderWith(VALID);
     assert(!without.includes('Data protection officer'), 'no DPO section when unconfigured');
-    const withDpo = await renderWith(Object.assign({}, VALID, { dpoName: 'Jane Doe' }));
-    assert(withDpo.includes('Data protection officer') && withDpo.includes('Jane Doe'),
-      'DPO section should render when configured');
+    // Both fields together: the server refuses to publish a name without a
+    // contact route (PrivacyConfig.Validate), so that pairing is the only
+    // shape the page can actually receive with a name in it.
+    const withDpo = await renderWith(Object.assign({}, VALID, {
+      dpoName: 'Jane Doe', dpoContact: 'dpo@example.org',
+    }));
+    assert(withDpo.includes('Data protection officer') && withDpo.includes('Jane Doe') &&
+      withDpo.includes('dpo@example.org'), 'DPO section should render when configured');
+  });
+
+  await test('DPO contact alone still renders the section', async () => {
+    // A contact without a name is a valid published shape: it tells the
+    // reader where to write even though no individual is named.
+    const html = await renderWith(Object.assign({}, VALID, { dpoContact: 'dpo@example.org' }));
+    assert(html.includes('Data protection officer') && html.includes('dpo@example.org'),
+      'a contact-only DPO block should still render');
   });
 
   await test('ships NO default retention paragraph', async () => {

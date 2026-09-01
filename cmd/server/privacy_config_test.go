@@ -380,6 +380,10 @@ func TestConfigClientWithholdsPrivacyWhenInvalid(t *testing.T) {
 			p.LegalBasisType = "legitimate_interests"
 			p.LegitimateInterestsText = ""
 		},
+		"dpoName without dpoContact": func(p *PrivacyConfig) {
+			p.DPOName = "Jane Doe"
+			p.DPOContact = ""
+		},
 	}
 	for name, clear := range blank {
 		t.Run(name, func(t *testing.T) {
@@ -412,6 +416,7 @@ func TestConfigClientPublishesCompletePrivacy(t *testing.T) {
 	p.LegalBasisType = "legitimate_interests"
 	p.LegitimateInterestsText = "Keeping the community mesh operable; see our assessment."
 	p.DPOName = "Jane Doe"
+	p.DPOContact = "dpo@example.org"
 	srv.cfg.Privacy = p
 
 	req := httptest.NewRequest("GET", "/api/config/client", nil)
@@ -431,15 +436,11 @@ func TestConfigClientPublishesCompletePrivacy(t *testing.T) {
 		"recipientsText", "dataSourcesText", "thirdPartyServicesText",
 		"internationalTransfersText", "browserStorageText", "serverLogsText",
 		"rightsRequestText", "supervisoryAuthorityName", "supervisoryAuthorityUrl",
-		"automatedDecisionMakingText", "dpoName",
+		"automatedDecisionMakingText", "dpoName", "dpoContact",
 	} {
 		if _, present := pc[f]; !present {
 			t.Errorf("privacy[%q] missing from the published payload", f)
 		}
-	}
-	// The optional DPO contact was left blank and must be omitted.
-	if _, present := pc["dpoContact"]; present {
-		t.Error("blank dpoContact should be omitted, not published as an empty string")
 	}
 }
 
@@ -519,5 +520,89 @@ func TestActiveHiddenNamePrefixesMatchesEnforcement(t *testing.T) {
 	var nilCfg *Config
 	if nilCfg.ActiveHiddenNamePrefixes() != nil {
 		t.Error("nil config must return nil")
+	}
+}
+
+// The DPO block is optional, but not divisible: a named DPO the reader cannot
+// reach is an incomplete disclosure, while a contact route without a name
+// still says where to write. All four combinations are pinned here, at both
+// the Validate() layer and the /api/config/client publishing gate, because a
+// withheld privacy block also removes the page from the navigation.
+func TestPrivacyDPONameRequiresContact(t *testing.T) {
+	cases := []struct {
+		name        string
+		dpoName     string
+		dpoContact  string
+		wantValid   bool
+		wantName    bool // dpoName present in the published payload
+		wantContact bool // dpoContact present in the published payload
+	}{
+		{"both blank", "", "", true, false, false},
+		{"name without contact", "Jane Doe", "", false, false, false},
+		{"contact without name", "", "dpo@example.org", true, false, true},
+		{"both present", "Jane Doe", "dpo@example.org", true, true, true},
+		// Trimming must match the rest of the contract: a whitespace-only
+		// contact is blank, not a contact route.
+		{"name with whitespace-only contact", "Jane Doe", "   \t  ", false, false, false},
+		{"whitespace-only name is not a name", "   ", "", true, false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Layer 1: Validate() itself.
+			p := validPrivacy()
+			p.DPOName = tc.dpoName
+			p.DPOContact = tc.dpoContact
+			errs := p.Validate()
+			if tc.wantValid && len(errs) != 0 {
+				t.Fatalf("expected a valid config, got errors: %v", errs)
+			}
+			if !tc.wantValid {
+				if len(errs) == 0 {
+					t.Fatal("expected a validation error for a half-filled DPO block, got none")
+				}
+				var found bool
+				for _, e := range errs {
+					if strings.Contains(e, "privacy.dpoContact is required") {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("expected the dpoContact error, got: %v", errs)
+				}
+			}
+
+			// Layer 2: the end-to-end publishing gate. An invalid DPO block
+			// must withhold the WHOLE privacy payload, not just the section.
+			srv, router := setupTestServer(t)
+			srv.cfg.Privacy = p
+			req := httptest.NewRequest("GET", "/api/config/client", nil)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code != 200 {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			var body map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			raw, present := body["privacy"]
+			if !tc.wantValid {
+				if present {
+					t.Fatal("a half-filled DPO block must withhold the entire privacy payload")
+				}
+				return
+			}
+			pc, ok := raw.(map[string]interface{})
+			if !ok {
+				t.Fatalf("privacy missing from a valid config: %+v", raw)
+			}
+			if _, got := pc["dpoName"]; got != tc.wantName {
+				t.Errorf("dpoName present = %v, want %v", got, tc.wantName)
+			}
+			if _, got := pc["dpoContact"]; got != tc.wantContact {
+				t.Errorf("dpoContact present = %v, want %v", got, tc.wantContact)
+			}
+		})
 	}
 }

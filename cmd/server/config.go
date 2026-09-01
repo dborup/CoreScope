@@ -532,6 +532,14 @@ func (p *PrivacyConfig) Validate() []string {
 		errs = append(errs, "privacy.legitimateInterestsText is required when privacy.legalBasisType is legitimate_interests (describe the specific interests, do not merely name the basis)")
 	}
 
+	// The DPO block is optional as a whole, but a HALF-filled one is worse
+	// than none: naming a designated DPO the reader has no way to reach is
+	// an incomplete disclosure. The reverse is fine — a contact route
+	// without a name still tells the reader where to write.
+	if strings.TrimSpace(p.DPOName) != "" && strings.TrimSpace(p.DPOContact) == "" {
+		errs = append(errs, "privacy.dpoContact is required when privacy.dpoName is set (a named DPO must be reachable; leave both blank if none is designated)")
+	}
+
 	return errs
 }
 
