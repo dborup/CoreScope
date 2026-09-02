@@ -89,10 +89,18 @@
           "provider": "",
           "token": ""
         },
+        "_comment_opentopomap": "OpenTopoMap topographical tile provider. Limited to zoom level 17.",
+        "opentopomap": {
+          "enabled": false
+        },
         "_comment_stamen": "Stamen (hosted by Stadia). WARNING: Tokens are sent to the browser. Apply origin/referrer restrictions.",
         "stamen": {
           "enabled": false,
           "token": ""
+        },
+        "_comment_usgs": "USGS topographical tile provider. Limited to zoom level 16.",
+        "usgs": {
+          "enabled": false
         }
       }
     }
