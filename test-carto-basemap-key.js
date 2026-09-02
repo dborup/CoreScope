@@ -133,13 +133,13 @@ console.log('── #7 CARTO Basemaps API key ──');
 // ─── The shared helper ───────────────────────────────────────────────────────
 
 test('MC_getCartoTileUrl is exposed publicly', () => {
-  const ctx = withCarto({ enabled: true, token: FAKE_TOKEN });
+  const ctx = withCarto({ enabled: true, key: FAKE_TOKEN });
   assert.strictEqual(typeof ctx.window.MC_getCartoTileUrl, 'function',
     'other files (roles.js, customize-v2.js, geofilter-builder.html) depend on this global');
 });
 
 test('helper composes base + path + key, with no bare "?" when unkeyed', () => {
-  const keyed = withCarto({ enabled: true, token: FAKE_TOKEN });
+  const keyed = withCarto({ enabled: true, key: FAKE_TOKEN });
   assert.strictEqual(
     keyed.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
     'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=' + FAKE_TOKEN);
@@ -151,7 +151,7 @@ test('helper composes base + path + key, with no bare "?" when unkeyed', () => {
 });
 
 test('helper accepts a tile path ONLY — never a complete URL', () => {
-  const ctx = withCarto({ enabled: true, token: FAKE_TOKEN });
+  const ctx = withCarto({ enabled: true, key: FAKE_TOKEN });
   const bad = [
     'https://evil.example.com/{z}/{x}/{y}.png',      // full URL
     'dark_all/{z}/{x}/{y}.png',                       // no leading slash
@@ -168,7 +168,7 @@ test('helper accepts a tile path ONLY — never a complete URL', () => {
 // ─── Registry styles ─────────────────────────────────────────────────────────
 
 test('token is appended to ALL five CARTO registry styles', () => {
-  const ctx = withCarto({ enabled: true, token: FAKE_TOKEN });
+  const ctx = withCarto({ enabled: true, key: FAKE_TOKEN });
   for (const id of ALL_CARTO_IDS) {
     assert.ok(urlFor(ctx, id).indexOf('?key=' + FAKE_TOKEN) >= 0,
       id + ' must carry ?key=<token>; got: ' + urlFor(ctx, id));
@@ -176,7 +176,7 @@ test('token is appended to ALL five CARTO registry styles', () => {
 });
 
 test('each CARTO style keeps its own distinct tile path alongside the key', () => {
-  const ctx = withCarto({ enabled: true, token: FAKE_TOKEN });
+  const ctx = withCarto({ enabled: true, key: FAKE_TOKEN });
   const expectPath = {
     'carto-dark': '/dark_all/', 'carto-light': '/light_all/',
     'carto-voyager': '/rastertiles/voyager/', 'carto-voyager-dark': '/rastertiles/voyager/',
@@ -192,7 +192,7 @@ test('each CARTO style keeps its own distinct tile path alongside the key', () =
 // ─── Encoding ────────────────────────────────────────────────────────────────
 
 test('token is URL-encoded exactly once', () => {
-  const ctx = withCarto({ enabled: true, token: FAKE_TOKEN_NEEDING_ENCODING });
+  const ctx = withCarto({ enabled: true, key: FAKE_TOKEN_NEEDING_ENCODING });
   const expected = '?key=' + encodeURIComponent(FAKE_TOKEN_NEEDING_ENCODING);
   for (const id of ALL_CARTO_IDS) {
     const url = urlFor(ctx, id);
@@ -206,7 +206,7 @@ test('token is URL-encoded exactly once', () => {
 });
 
 test('token is trimmed before encoding', () => {
-  const ctx = withCarto({ enabled: true, token: '  ' + FAKE_TOKEN + '  ' });
+  const ctx = withCarto({ enabled: true, key: '  ' + FAKE_TOKEN + '  ' });
   assert.ok(urlFor(ctx, 'carto-dark').endsWith('?key=' + FAKE_TOKEN),
     'surrounding whitespace must be trimmed, not encoded as %20');
 });
@@ -224,7 +224,7 @@ test('no carto config at all → registered, no querystring (back-compat)', () =
 
 test('empty / whitespace / non-string token → no bare "?" left behind', () => {
   for (const tok of ['', '   ', 123, null, true, {}, []]) {
-    const ctx = withCarto({ enabled: true, token: tok });
+    const ctx = withCarto({ enabled: true, key: tok });
     for (const id of ALL_CARTO_IDS) {
       const url = urlFor(ctx, id);
       assert.ok(url.indexOf('?') < 0, id + ' with token ' + JSON.stringify(tok) + ' must not emit "?": ' + url);
@@ -241,7 +241,7 @@ test('enabled=true without a token still registers CARTO (no hidden-layer mode)'
 });
 
 test('enabled=false still removes CARTO, even with a token present', () => {
-  const ctx = withCarto({ enabled: false, token: FAKE_TOKEN });
+  const ctx = withCarto({ enabled: false, key: FAKE_TOKEN });
   for (const id of ALL_CARTO_IDS) {
     assert.ok(!ctx.window.MC_TILE_PROVIDERS[id], id + ' must be absent when carto.enabled=false');
   }
@@ -250,7 +250,7 @@ test('enabled=false still removes CARTO, even with a token present', () => {
 // ─── Domain override ─────────────────────────────────────────────────────────
 
 test('enterprise domain override composes on every CARTO path, keyed and unkeyed', () => {
-  const withKey = withCarto({ enabled: true, domain: 'mycompany', token: FAKE_TOKEN });
+  const withKey = withCarto({ enabled: true, domain: 'mycompany', key: FAKE_TOKEN });
   const noKey = withCarto({ enabled: true, domain: 'mycompany' });
   for (const id of ALL_CARTO_IDS) {
     const a = urlFor(withKey, id);
@@ -270,7 +270,7 @@ test('enterprise domain override composes on every CARTO path, keyed and unkeyed
 // ─── Querystring shape + provider isolation ──────────────────────────────────
 
 test('never emits a double "?" or a duplicate key parameter', () => {
-  const ctx = withCarto({ enabled: true, domain: 'mycompany', token: FAKE_TOKEN_NEEDING_ENCODING });
+  const ctx = withCarto({ enabled: true, domain: 'mycompany', key: FAKE_TOKEN_NEEDING_ENCODING });
   for (const id of ALL_CARTO_IDS) {
     const url = urlFor(ctx, id);
     assert.strictEqual(url.split('?').length - 1, 1, id + ' must contain exactly one "?": ' + url);
@@ -280,7 +280,7 @@ test('never emits a double "?" or a duplicate key parameter', () => {
 
 test('CARTO token never leaks onto Esri / OSM / Stamen URLs', () => {
   const ctx = withCarto(
-    { enabled: true, token: FAKE_TOKEN },
+    { enabled: true, key: FAKE_TOKEN },
     { osm: { enabled: true, provider: 'maptiler', token: 'OSM_FAKE_TOKEN' },
       stamen: { enabled: true, token: 'STAMEN_FAKE_TOKEN' } }
   );
@@ -295,7 +295,7 @@ test('CARTO token never leaks onto Esri / OSM / Stamen URLs', () => {
 // ─── Unrelated behaviour must not regress ────────────────────────────────────
 
 test('dark/light defaults, switching, labels, attribution and filters unchanged', () => {
-  const ctx = withCarto({ enabled: true, token: FAKE_TOKEN });
+  const ctx = withCarto({ enabled: true, key: FAKE_TOKEN });
   assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'carto-dark');
   assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-light');
   assert.strictEqual(ctx.window.MC_setDarkTileProvider('carto-voyager-dark'), true);
@@ -327,7 +327,7 @@ test('async config load swaps the early keyless registry URL for the keyed one',
   const before = urlFor(ctx, 'carto-dark');
   assert.ok(before.indexOf('?') < 0, 'no key before config arrives');
 
-  ctx.window.MC_MAP_CFG = { tiles: { providers: { carto: { enabled: true, token: FAKE_TOKEN } } } };
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { carto: { enabled: true, key: FAKE_TOKEN } } } };
   ctx.window.MC_initTileRegistry(true);
 
   const after = urlFor(ctx, 'carto-dark');
@@ -364,7 +364,7 @@ function loadRolesStack(clientCfg, theme) {
   return { ctx, landConfig: () => { resolveFetch(); return ctx.window.MeshConfigReady; } };
 }
 
-const CLIENT_CFG_WITH_KEY = { map: { tiles: { providers: { carto: { enabled: true, token: FAKE_TOKEN } } } } };
+const CLIENT_CFG_WITH_KEY = { map: { tiles: { providers: { carto: { enabled: true, key: FAKE_TOKEN } } } } };
 
 test('roles.js TILE_DARK/TILE_LIGHT are keyless before config, and never frozen literals', () => {
   const { ctx } = loadRolesStack(CLIENT_CFG_WITH_KEY);
@@ -475,8 +475,8 @@ test('no real API key is hardcoded in production source or fixtures', () => {
   }
   const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8'));
   const carto = cfg.map.tiles.providers.carto;
-  assert.ok(Object.prototype.hasOwnProperty.call(carto, 'token'), 'carto.token must be documented in the example');
-  assert.strictEqual(carto.token, '', 'config.example.json must ship an EMPTY carto token');
+  assert.ok(Object.prototype.hasOwnProperty.call(carto, 'key'), 'carto.key must be documented in the example');
+  assert.strictEqual(carto.key, '', 'config.example.json must ship an EMPTY carto token');
   assert.ok(!Object.prototype.hasOwnProperty.call(carto, 'requireKey'), 'requireKey must be gone from the example');
   assert.ok(readPub('map-tile-providers.js').indexOf('requireKey') < 0, 'requireKey must be gone from production code');
 });
@@ -574,7 +574,7 @@ function runTileInit(which, opts) {
   return { ctx, added, created, controlBuilds, baseLayerChangeHandlers, settle: settle || (() => {}), wait: () => new Promise(r => setTimeout(r, 0)).then(() => new Promise(r => setTimeout(r, 0))) };
 }
 
-const CFG_TOKEN = { map: { tiles: { providers: { carto: { enabled: true, token: FAKE_TOKEN } } } } };
+const CFG_TOKEN = { map: { tiles: { providers: { carto: { enabled: true, key: FAKE_TOKEN } } } } };
 const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } } } };
 
 // ─── Async-dependent checks ──────────────────────────────────────────────────
@@ -773,7 +773,7 @@ const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } }
 
   await atest('MC_whenTileConfigReady fires once, on settle (resolve AND reject), never twice', async () => {
     // resolve
-    const a = withCarto({ enabled: true, token: FAKE_TOKEN });
+    const a = withCarto({ enabled: true, key: FAKE_TOKEN });
     let aN = 0;
     let resA; a.window.MeshConfigReady = new Promise(r => { resA = r; });
     a.window.MC_whenTileConfigReady(() => { aN++; });
@@ -782,7 +782,7 @@ const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } }
     assert.strictEqual(aN, 1, 'must fire exactly once on resolve');
 
     // reject
-    const b = withCarto({ enabled: true, token: FAKE_TOKEN });
+    const b = withCarto({ enabled: true, key: FAKE_TOKEN });
     let bN = 0;
     let rejB; b.window.MeshConfigReady = new Promise((_, rj) => { rejB = rj; });
     b.window.MeshConfigReady.catch(() => {});
@@ -791,7 +791,7 @@ const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } }
     assert.strictEqual(bN, 1, 'must fire exactly once on reject too (settled, not fulfilled)');
 
     // absent → synchronous
-    const c = withCarto({ enabled: true, token: FAKE_TOKEN });
+    const c = withCarto({ enabled: true, key: FAKE_TOKEN });
     let cN = 0;
     c.window.MC_whenTileConfigReady(() => { cN++; });
     assert.strictEqual(cN, 1, 'must fire synchronously when there is no MeshConfigReady');
@@ -836,7 +836,7 @@ const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } }
     const CUSTOM_D = 'https://tiles.example.com/dark/{z}/{x}/{y}.png';
     const CUSTOM_L = 'https://tiles.example.com/light/{z}/{x}/{y}.png';
     const { ctx, landConfig } = loadRolesStack({
-      map: { tiles: { darkUrl: CUSTOM_D, lightUrl: CUSTOM_L, providers: { carto: { enabled: true, token: FAKE_TOKEN } } } }
+      map: { tiles: { darkUrl: CUSTOM_D, lightUrl: CUSTOM_L, providers: { carto: { enabled: true, key: FAKE_TOKEN } } } }
     });
     await landConfig();
     assert.strictEqual(ctx.window.TILE_DARK, CUSTOM_D, 'explicit darkUrl override must be honoured');
@@ -848,6 +848,91 @@ const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } }
     await landConfig();
     assert.strictEqual(ctx.window.TILE_DARK, 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
     assert.ok(ctx.window.TILE_DARK.indexOf('?') < 0, 'no bare "?" without a token');
+  });
+
+  // ─── carto.domain hardening ──────────────────────────────────────────────
+  // `domain` is concatenated straight into the host, so an unvalidated value
+  // escapes the host and (with a key set) sends the key somewhere else.
+  // Upstream Kpa-clawbot/CoreScope#1919 has the same unvalidated _getCartoBase.
+
+  test('a valid enterprise domain still builds the documented host', () => {
+    const ctx = withCarto({ enabled: true, domain: 'mycompany' });
+    const u = ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png');
+    assert.strictEqual(u, 'https://{s}.mycompany.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+  });
+
+  test('a dotted enterprise domain is still accepted', () => {
+    const ctx = withCarto({ enabled: true, domain: 'eu.mycompany' });
+    assert.ok(ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png')
+      .indexOf('https://{s}.eu.mycompany.cartocdn.com/') === 0);
+  });
+
+  test('domain is trimmed', () => {
+    const ctx = withCarto({ enabled: true, domain: '  mycompany  ' });
+    assert.strictEqual(ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+      'https://{s}.mycompany.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+  });
+
+  test('a domain that would move the tile host is ignored', () => {
+    const BAD = ['evil.com/x?a=b', 'foo?a=b', 'foo#frag', 'https://evil.com',
+                 'foo bar', 'evil.com@real', '../evil', 'foo/', '?a=b', '//evil.com'];
+    for (const d of BAD) {
+      const ctx = withCarto({ enabled: true, domain: d });
+      const u = ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png');
+      assert.strictEqual(u, 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        'domain ' + JSON.stringify(d) + ' must fall back to the public base, got: ' + u);
+    }
+  });
+
+  test('an injected domain can never receive the key', () => {
+    for (const d of ['evil.com/x?a=b', 'https://evil.com', 'foo?a=b']) {
+      const ctx = withCarto({ enabled: true, domain: d, key: FAKE_TOKEN });
+      const u = ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png');
+      const host = u.replace('{s}', 'a').split('/')[2];
+      assert.strictEqual(host, 'a.basemaps.cartocdn.com',
+        'key must never be sent to an injected host, got: ' + u);
+      assert.ok(u.indexOf('?key=' + FAKE_TOKEN) > 0, 'the key still reaches the real host: ' + u);
+      assert.strictEqual(u.split('?').length, 2, 'exactly one querystring: ' + u);
+    }
+  });
+
+  test('a valid domain and the key compose on every style', () => {
+    const ctx = withCarto({ enabled: true, domain: 'mycompany', key: FAKE_TOKEN });
+    for (const id of ALL_CARTO_IDS) {
+      const u = urlFor(ctx, id);
+      assert.ok(u.indexOf('https://{s}.mycompany.cartocdn.com/') === 0, id + ': ' + u);
+      assert.ok(u.indexOf('?key=' + FAKE_TOKEN) > 0, id + ' missing key: ' + u);
+      assert.strictEqual(u.split('?').length, 2, id + ' has more than one querystring: ' + u);
+    }
+  });
+
+  // ─── clean rename: token -> key (no permanent dual support) ──────────────
+
+  test('the legacy carto.token field is NOT honoured', () => {
+    const ctx = withCarto({ enabled: true, token: FAKE_TOKEN });
+    const u = ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png');
+    assert.strictEqual(u, 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      'carto.token must be inert after the rename to carto.key, got: ' + u);
+  });
+
+  test('production source no longer reads carto.token', () => {
+    const src = readPub('map-tile-providers.js');
+    assert.ok(src.indexOf('carto.token') < 0, 'map-tile-providers.js still mentions carto.token');
+    assert.ok(/providers\.carto\.key/.test(src) || /_cfg\.providers\.carto\) \? _cfg\.providers\.carto\.key/.test(src),
+      'map-tile-providers.js must read carto.key');
+  });
+
+  test('config.example.json exposes key and no longer exposes token', () => {
+    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8'));
+    const carto = cfg.map.tiles.providers.carto;
+    assert.ok(Object.prototype.hasOwnProperty.call(carto, 'key'), 'carto.key must exist');
+    assert.ok(!Object.prototype.hasOwnProperty.call(carto, 'token'), 'carto.token must be gone');
+    assert.strictEqual(carto.key, '', 'the shipped example must carry an EMPTY key');
+    const cmt = cfg.map.tiles.providers._comment_carto;
+    assert.ok(/'key'/.test(cmt), 'the comment must name the key field');
+    assert.ok(!/restrict it by origin\/referrer/i.test(cmt),
+      'the comment must not claim CARTO basemap keys can be origin/referrer restricted');
+    assert.ok(/SUBDOMAIN LABEL/i.test(cmt), 'the comment must document the domain restriction');
   });
 
   console.log('\n#7 CARTO Basemaps API key: ' + passed + ' passed, ' + failed + ' failed');

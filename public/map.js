@@ -362,7 +362,7 @@
     // #7: created but deliberately NOT added yet. Leaflet issues tile
     // requests the moment a layer joins a map, so adding it here would fire
     // keyless CARTO requests before /api/config/client has delivered
-    // carto.token — the watermarked tiles would already be in the browser
+    // carto.key — the watermarked tiles would already be in the browser
     // cache by the time the URL could be swapped. The map, panes and
     // controls below are still created immediately; only the first tile
     // request waits.

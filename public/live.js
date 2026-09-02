@@ -1473,7 +1473,7 @@
     const _liveInitTile = _liveResolveTile(isDark);
     // #7: same deferral as map.js — the layer is built now but only joins the
     // map once /api/config/client has settled, so the very first CARTO
-    // request already carries carto.token instead of being watermarked and
+    // request already carries carto.key instead of being watermarked and
     // cached. Map creation, zoom/layer controls and panes are unaffected.
     let tileLayer = L.tileLayer(_liveInitTile.url, { maxZoom: 19, attribution: _liveInitTile.attribution });
     // One idempotent config-ready step for both tile-dependent pieces — see

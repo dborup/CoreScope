@@ -1836,7 +1836,7 @@
 
     _gfModalMap = L.map(mapDiv, { zoomControl: true });
     // #7: resolve through the shared helper so the CARTO Basemaps API key
-    // (map.tiles.providers.carto.token) is applied here too. The modal is
+    // (map.tiles.providers.carto.key) is applied here too. The modal is
     // opened by user action, long after /api/config/client has landed.
     L.tileLayer(window.MC_getCartoTileUrl('/light_all/{z}/{x}/{y}{r}.png'), {
       attribution: '© OpenStreetMap © CartoDB', maxZoom: 19

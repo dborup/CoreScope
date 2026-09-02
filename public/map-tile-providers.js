@@ -28,24 +28,56 @@
 
   var _cfg = null;
 
-  var _getCartoBase = function() { return (_cfg && _cfg.providers && _cfg.providers.carto && _cfg.providers.carto.domain) ? 'https://{s}.' + _cfg.providers.carto.domain + '.cartocdn.com' : 'https://{s}.basemaps.cartocdn.com'; };
+  // `domain` is the CARTO *enterprise subdomain* label only — the documented
+  // form is 'mycompany' for https://{s}.mycompany.cartocdn.com. It is
+  // concatenated straight into the host, so an unvalidated value escapes the
+  // host entirely: 'evil.com/x?a=b' yields
+  //   https://{s}.evil.com/x?a=b.cartocdn.com/dark_all/...
+  // whose host is {s}.evil.com — and with a key configured the ?key= suffix
+  // is then sent to THAT host. A '?' or '#' in the value also smuggles a
+  // query/fragment ahead of our own suffix, producing a second '?'.
+  // So: accept dot-separated DNS labels only, and ignore anything else
+  // (falling back to the public base) rather than build a broken or
+  // key-leaking URL. Trimmed, because a stray space would fail the same way.
+  var _CARTO_DOMAIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+  var _warnedDomain = false;
+  var _getCartoDomain = function() {
+    var d = (_cfg && _cfg.providers && _cfg.providers.carto) ? _cfg.providers.carto.domain : null;
+    if (typeof d !== 'string') return '';
+    d = d.trim();
+    if (!d) return '';
+    if (!_CARTO_DOMAIN_RE.test(d)) {
+      if (!_warnedDomain && typeof console !== 'undefined' && console.warn) {
+        _warnedDomain = true;
+        console.warn('[tiles] ignoring invalid carto.domain (expected an enterprise subdomain label such as "mycompany"):', d);
+      }
+      return '';
+    }
+    return d;
+  };
+
+  var _getCartoBase = function() {
+    var d = _getCartoDomain();
+    return d ? 'https://{s}.' + d + '.cartocdn.com' : 'https://{s}.basemaps.cartocdn.com';
+  };
 
   // CARTO Basemaps API key (#7). From August 2026 CARTO requires a key on
   // raster basemap requests; keyless tiles come back watermarked
   // ("API KEY REQUIRED — carto.com/basemapsapikey"). Never hardcode a key
-  // here — it comes from map.tiles.providers.carto.token, which the server
-  // hands to the browser via MC_MAP_CFG.
-  var _getCartoToken = function() {
-    var t = (_cfg && _cfg.providers && _cfg.providers.carto) ? _cfg.providers.carto.token : null;
-    return (typeof t === 'string' && t.trim()) ? t.trim() : '';
+  // here — it comes from map.tiles.providers.carto.key, which the server
+  // hands to the browser via MC_MAP_CFG. The field name matches upstream
+  // (Kpa-clawbot/CoreScope#1919) so one config works on both.
+  var _getCartoKey = function() {
+    var k = (_cfg && _cfg.providers && _cfg.providers.carto) ? _cfg.providers.carto.key : null;
+    return (typeof k === 'string' && k.trim()) ? k.trim() : '';
   };
 
   // Single source of truth for the key querystring, so no style has to
   // repeat (or drift on) the "?key=" spelling and encoding. Returns the
   // suffix or an empty string — never a bare "?".
   var _getCartoKeySuffix = function() {
-    var t = _getCartoToken();
-    return t ? '?key=' + encodeURIComponent(t) : '';
+    var k = _getCartoKey();
+    return k ? '?key=' + encodeURIComponent(k) : '';
   };
 
   // MC_getCartoTileUrl — the ONE place a CARTO tile URL is built, for the
@@ -83,7 +115,7 @@
 
   // MC_whenTileConfigReady — run cb once the server config has SETTLED, so a
   // tile layer is never added to a map (and therefore never fires a request)
-  // while the CARTO token is still unknown. Resolving the token late is not
+  // while the CARTO key is still unknown. Resolving the token late is not
   // enough on its own: Leaflet starts fetching the moment a layer is added,
   // so a keyless first paint would still hit CARTO and get watermarked tiles
   // into the browser cache before setUrl() could swap them.
@@ -156,7 +188,7 @@
     //                                render CARTO (and still need a token).
     //   - token missing/empty      → the styles stay registered and keep the
     //                                pre-key, keyless behaviour, which CARTO
-    //                                now serves watermarked. Set carto.token
+    //                                now serves watermarked. Set carto.key
     //                                to clear the watermark.
     //   - token non-empty          → every CARTO URL is authenticated.
     // Registration is not used as a key-enforcement mechanism: the token
