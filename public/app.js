@@ -1430,8 +1430,17 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('nav-open');
     hamburger.setAttribute('aria-expanded', String(opening));
   });
-  navLinks.querySelectorAll('.nav-link').forEach(link => {
-    link.addEventListener('click', closeNav);
+  // Delegated, not per-link: roles.js injects the opt-in routes (privacy,
+  // rx-coverage) once /api/config/client resolves, which is long after this
+  // runs. A forEach over the links present right now would silently miss
+  // them, leaving a late link that never closes the hamburger on mobile.
+  // One listener on the container covers every current and future
+  // .nav-link, and cannot double-register on the ones already here.
+  // #navMoreMenu is a sibling of .nav-links, so the menu clones (which get
+  // their own closeNav in rebuildMoreMenu) never reach this handler.
+  navLinks.addEventListener('click', function (e) {
+    var link = e.target && e.target.closest ? e.target.closest('.nav-link') : null;
+    if (link && navLinks.contains(link)) closeNav();
   });
 
   // --- "More" dropdown — JS-driven Priority+ (Issue #1102) ---
@@ -1453,7 +1462,25 @@ window.addEventListener('DOMContentLoaded', () => {
     // at a time (right-to-left, lowest priority first) until it does.
     // Then mirror the hidden links into the "More ▾" menu so nothing
     // disappears from the user's reach.
-    const allLinks = Array.from(linksContainer.querySelectorAll('.nav-link'));
+    // The link set is LIVE, not a snapshot. roles.js injects the opt-in
+    // routes (privacy, rx-coverage) when /api/config/client resolves, which
+    // races this block: when app.js wins (typically a warm cache, where the
+    // 99KB bundle is instant but the config still needs a round trip), an
+    // init-time snapshot would exclude those links permanently. They would
+    // never gain .is-overflow, their width would never enter fits(), and the
+    // More button would render on top of them. Re-querying per run makes a
+    // dynamically added link exactly as overflow-capable as a static one.
+    //
+    // Scoped to DIRECT children so the clones rebuildMoreMenu() puts into
+    // #navMoreMenu can never re-enter the list and duplicate themselves.
+    // (.nav-more-wrap is a sibling of .nav-links today; the containment
+    // check keeps that from becoming a latent trap if it ever nests.)
+    function currentLinks() {
+      return Array.from(linksContainer.children).filter(function (el) {
+        return el.classList && el.classList.contains('nav-link') &&
+               !(navMoreMenu && navMoreMenu.contains(el));
+      });
+    }
     // overflowQueue (#1105 MINOR 6): the order links are removed from the
     // inline strip when space runs out. Built right-to-left from
     // non-priority links (lowest priority dropped first) and then high-
@@ -1468,19 +1495,20 @@ window.addEventListener('DOMContentLoaded', () => {
     // ≥768px." The queue is rebuilt on hashchange (applyNavPriority
     // is wired to hashchange below), so the exclusion tracks the
     // current route automatically.
-    function buildOverflowQueue() {
+    function buildOverflowQueue(links) {
       var isPinned = function(a) {
         return a.dataset.priority === 'high' || a.classList.contains('active');
       };
-      return allLinks.filter(a => !isPinned(a))
-                     .reverse() // right-to-left
-                     .concat(allLinks.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
+      return links.filter(a => !isPinned(a))
+                  .reverse() // right-to-left
+                  .concat(links.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
     }
-    var overflowQueue = buildOverflowQueue();
 
-    function rebuildMoreMenu() {
+    // Always rebuilt from the CURRENT originals, so a link removed since the
+    // last run cannot survive as a stale clone in the menu.
+    function rebuildMoreMenu(links) {
       navMoreMenu.innerHTML = '';
-      const hidden = allLinks.filter(a => a.classList.contains('is-overflow'));
+      const hidden = links.filter(a => a.classList.contains('is-overflow'));
       hidden.forEach(function(link) {
         var clone = link.cloneNode(true);
         // The clone is in the overflow menu, not the inline strip.
@@ -1512,13 +1540,19 @@ window.addEventListener('DOMContentLoaded', () => {
     var MORE_BTN_RESERVE_PX = 70;
 
     function applyNavPriority() {
+      // One fresh read per run, shared by the reset, the queue, the fit
+      // measurement, the overflow count and the menu rebuild — so every
+      // stage of a single run agrees on the same set of links.
+      const allLinks = currentLinks();
       // Skip on mobile (<768px) — hamburger CSS owns that layout.
       if (window.innerWidth < 768) {
         allLinks.forEach(a => a.classList.remove('is-overflow'));
         navMoreWrap.classList.add('is-hidden');
         return;
       }
-      // Reset: show everything, then hide as needed.
+      // Reset: show everything, then hide as needed. Reading the live list
+      // means a link added since the last run starts clean, and one that was
+      // removed simply isn't here to carry stale state.
       allLinks.forEach(a => a.classList.remove('is-overflow'));
       navMoreWrap.classList.remove('is-hidden');
       // #1106: in the 768-1100px narrow-desktop band the CSS already
@@ -1544,7 +1578,7 @@ window.addEventListener('DOMContentLoaded', () => {
             a.classList.add('is-overflow');
           }
         });
-        rebuildMoreMenu();
+        rebuildMoreMenu(allLinks);
         return;
       }
       // Iteratively hide low-priority links until the link strip fits.
@@ -1552,9 +1586,9 @@ window.addEventListener('DOMContentLoaded', () => {
       // an overflowing strip silently clips rather than pushing
       // nav-right out — bounding-rect math on .nav-left lies. Instead
       // measure the *intrinsic* widths of the parts (independent of
-      // current clipping) and compare to the viewport. SAFETY absorbs
-      // the .top-nav side padding + nav-right inner gaps + sub-pixel
-      // rounding (the historic #1055 bug was a 6–20px overlap).
+      // current clipping) and compare to .top-nav's own content box — see
+      // fits() below for why the viewport width and a SAFETY constant were
+      // the wrong yardstick (the historic #1055 bug was a 6–20px overlap).
       //
       // #1105 MINOR 3: at the 1101px media-query flip `.nav-stats`
       // toggles from display:none → flex (and vice-versa). The resize
@@ -1562,7 +1596,11 @@ window.addEventListener('DOMContentLoaded', () => {
       // navRightEl.scrollWidth measured here reflects the post-flip
       // intrinsic width — not stale pre-flip width.
       const navBrand   = document.querySelector('.nav-brand');
-      const SAFETY     = 32;
+      // Sub-pixel tolerance for both the budget test and the containment
+      // test. Widths here are fractional (e.g. 82.79px links, 22.8px gaps)
+      // while clientWidth/scrollWidth are integers, so an exact comparison
+      // would flip on rounding alone.
+      const FIT_EPS    = 1;
       // #1105 MINOR 1+2: read both gap values from CSS rather than a
       // shared `GUTTER = 24` constant. Today `.nav-left` (gap between
       // brand/links/more/right cells) and `.nav-links` (gap between
@@ -1578,7 +1616,18 @@ window.addEventListener('DOMContentLoaded', () => {
       function fits() {
         const visibleLinks = allLinks.filter(a => !a.classList.contains('is-overflow'));
         let linkW = 0;
-        visibleLinks.forEach(a => { linkW += a.getBoundingClientRect().width; });
+        // Intrinsic width per link, not whatever the flex line currently
+        // grants it. Today .nav-link is white-space:nowrap and never actually
+        // shrinks, so rect and scrollWidth agree (measured at 1200px: home
+        // 58.35/58, observers 85.46/85, and the SVG-bearing live 63.16/63) —
+        // scrollWidth is verified to include padding (11.2px a side) and the
+        // inline SVG. Taking the max is therefore a no-op today and a guard
+        // if .nav-link ever becomes shrinkable: a compressed rect would then
+        // under-report and hide links under "More ▾". Read-only, no cloning
+        // and no style mutation per iteration.
+        visibleLinks.forEach(a => {
+          linkW += Math.max(a.getBoundingClientRect().width, a.scrollWidth);
+        });
         const linkGapPx = parseFloat(getComputedStyle(linksContainer).columnGap ||
                                      getComputedStyle(linksContainer).gap || '0') || 0;
         const linksGap = Math.max(0, visibleLinks.length - 1) * linkGapPx;
@@ -1595,15 +1644,41 @@ window.addEventListener('DOMContentLoaded', () => {
         const moreW = liveMoreW > 0 ? liveMoreW
                     : (cachedMoreW > 0 ? cachedMoreW : MORE_BTN_RESERVE_PX);
         const rightW  = navRightEl.scrollWidth; // intrinsic, ignores clipping
-        const needed  = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + navLeftGap + rightW + SAFETY;
-        return needed <= window.innerWidth;
+        // Budget from the REAL container, not window.innerWidth minus a guess.
+        // Measured at 1440px on staging, the old formula reported 5.23px of
+        // headroom while the strip actually overran its box by 18px, because:
+        //   .top-nav padding 28.8px a side (57.6px) was never counted at all;
+        //   window.innerWidth 1440 includes a 6px scrollbar the layout lacks
+        //     (.top-nav clientWidth is 1434);
+        //   the .nav-left/.nav-right seam is governed by .top-nav's own gap
+        //     (16px), but navLeftGap (22.8px) was used, over-counting 6.8px.
+        // SAFETY=32 was an ad-hoc compensation that covered part of that
+        // 57.6 + 6 - 6.8 = 56.8px error and left ~24.8px unreserved.
+        // Reading the padding box and the real seam gap removes the guess.
+        const tnCS   = getComputedStyle(navTop);
+        const avail  = navTop.clientWidth -
+                       (parseFloat(tnCS.paddingLeft) || 0) -
+                       (parseFloat(tnCS.paddingRight) || 0);
+        const topGap = parseFloat(tnCS.columnGap || tnCS.gap || '0') || 0;
+        const needed = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + topGap + rightW;
+        // EPS covers sub-pixel rounding only (contract: at most 1px).
+        return needed <= avail - FIT_EPS;
+      }
+      // Direct containment: whatever the arithmetic says, the strip must not
+      // render wider than the box flex actually granted it. This is the
+      // acceptance contract, checked against the live layout, so a future
+      // CSS change that the formula does not model still cannot leave links
+      // sticking out from under "More ▾".
+      function contained() {
+        return linksContainer.scrollWidth <= linksContainer.clientWidth + FIT_EPS;
       }
       let i = 0;
       // #1391: rebuild queue here so it reflects the CURRENT active
-      // link (hashchange wakes applyNavPriority, but the queue was
-      // captured at init-time; we need to re-evaluate which link is
-      // active on every run). Cheap — just filters allLinks twice.
-      overflowQueue = buildOverflowQueue();
+      // link: hashchange wakes applyNavPriority, and which link carries
+      // .active changes between runs. Cheap — just filters allLinks twice.
+      // Local to the run: the queue must never outlive the link list it was
+      // built from, or a later run could enqueue a detached element.
+      var overflowQueue = buildOverflowQueue(allLinks);
       // #1311 floor: protect data-priority="high" links from being
       // dropped by the greedy fit loop. The bug was that on a non-high
       // active route (e.g. /#/perf, /#/audio-lab) at ~1101-1200px, the
@@ -1620,7 +1695,12 @@ window.addEventListener('DOMContentLoaded', () => {
       // #1391: also break on .active — buildOverflowQueue already
       // excludes the active link from the queue, but the break is a
       // defensive belt for any future code that re-enqueues it.
-      while (!fits() && i < overflowQueue.length) {
+      // Keep dropping while EITHER the budget says no or the strip still
+      // renders wider than its box. Both shrink monotonically as links leave
+      // the line (scrollWidth falls, clientWidth grows), and the queue is
+      // finite, so this converges; the high-priority and active guards below
+      // remain the only stopping conditions that can leave a strip over-full.
+      while ((!fits() || !contained()) && i < overflowQueue.length) {
         if (overflowQueue[i].dataset.priority === 'high') break;
         if (overflowQueue[i].classList.contains('active')) break;
         overflowQueue[i].classList.add('is-overflow');
@@ -1653,27 +1733,84 @@ window.addEventListener('DOMContentLoaded', () => {
           console.warn('[nav] More menu floor: overflowQueue exhausted with 1 item; cannot enforce >=2 floor');
         }
       }
-      rebuildMoreMenu();
+      rebuildMoreMenu(allLinks);
+    }
+
+    // ONE coalescing scheduler owns the nav rAF slot. Every async trigger goes
+    // through it, so at most one applyNavPriority can ever be pending.
+    //
+    // Before this, resize and the ResizeObserver shared a cancel/recreate id
+    // while hashchange and updateNavStats each queued their own unguarded
+    // rAF. rAF callbacks do not run while a tab is hidden, so those two
+    // accumulated without bound: updateNavStats fires on a 15s interval AND
+    // on every debounced WebSocket event, and a backgrounded tab therefore
+    // built up one queued layout pass per tick. Measured on staging: 74
+    // Priority+ runs released in a single frame when the pane became visible.
+    // Not an infinite loop — an unbounded hidden-tab backlog — but the work
+    // is redundant (only the last run can matter) and it all lands in one
+    // frame.
+    //
+    // The flag is cleared BEFORE applyNavPriority runs, so an event fired
+    // from inside the layout pass schedules exactly one follow-up frame
+    // rather than being swallowed. No cancelAnimationFrame is needed: a
+    // pending callback is always still the work we want, so the cheapest
+    // correct behaviour is to keep it and drop the duplicate request.
+    //
+    // A boolean rather than the rAF id, deliberately. Since nothing is ever
+    // cancelled the id has no use, and claiming the slot BEFORE calling
+    // requestAnimationFrame keeps this correct even where rAF runs its
+    // callback synchronously (some test harnesses, and any polyfill that
+    // falls back to a 0ms timer): storing the returned id afterwards would
+    // overwrite the 0 the callback just wrote and wedge the scheduler shut.
+    let navPriorityPending = false;
+    function scheduleNavPriority() {
+      if (navPriorityPending) return;
+      navPriorityPending = true;
+      requestAnimationFrame(function () {
+        navPriorityPending = false;
+        applyNavPriority();
+      });
     }
 
     // Run once on load, again after fonts settle (label widths shift),
-    // and on resize (debounced via rAF).
-    navPriorityFn = applyNavPriority;
+    // and on resize (coalesced via the scheduler).
+    // navPriorityFn is the SCHEDULER, not the raw layout pass, so external
+    // callsites (updateNavStats) are coalesced automatically.
+    navPriorityFn = scheduleNavPriority;
     applyNavPriority();
     if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(applyNavPriority);
+      document.fonts.ready.then(scheduleNavPriority);
     }
-    let rafId = 0;
-    window.addEventListener('resize', function() {
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(applyNavPriority);
-    });
+    window.addEventListener('resize', scheduleNavPriority);
     // Re-apply on route change too: the active link gets bigger padding
     // (background pill), so which links fit can shift between pages.
-    window.addEventListener('hashchange', function() {
-      // Defer so the route handler's class toggles run first.
-      requestAnimationFrame(applyNavPriority);
-    });
+    // Deferred by the scheduler, so the route handler's class toggles run first.
+    window.addEventListener('hashchange', scheduleNavPriority);
+    // ...and when the RIGHT side finishes growing. #navStats is filled from
+    // /api/stats, which lands after DOMContentLoaded — measured on staging at
+    // 1200px: stats responseEnd 2106ms vs domContentLoadedEventEnd 2046ms.
+    // The load-time run therefore measured .nav-right at 212px instead of its
+    // final 467px, under-reserving 255px, so fits() returned true with the
+    // strip already too wide and the greedy loop stopped early. Nothing
+    // re-measured afterwards, so links stayed inline underneath "More ▾"
+    // until the next resize. Observing .nav-right closes that window for any
+    // late-filling right-hand content, not just the stats.
+    //
+    // Safe against feedback: .nav-right is flex-grow:0/flex-shrink:0, so
+    // collapsing links on the left cannot change its width (verified live —
+    // collapsing 3 links left scrollWidth at 467). The width guard below is
+    // a second belt: a run that does not change the observed width cannot
+    // schedule another run, so this cannot loop.
+    if (typeof ResizeObserver === 'function') {
+      var lastRightW = -1;
+      var ro = new ResizeObserver(function () {
+        var w = navRightEl.scrollWidth;
+        if (w === lastRightW) return;
+        lastRightW = w;
+        scheduleNavPriority();
+      });
+      ro.observe(navRightEl);
+    }
 
     // #1406: position the fixed dropdown relative to the More button on each open.
     // Required because .nav-more-menu is position:fixed (so it escapes
@@ -1905,7 +2042,10 @@ window.addEventListener('DOMContentLoaded', () => {
         el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
         setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
-        if (navPriorityFn) requestAnimationFrame(navPriorityFn);
+        // navPriorityFn IS the coalescing scheduler, so this cannot stack up
+        // even though updateNavStats runs on a 15s interval and on every
+        // debounced WebSocket event.
+        if (navPriorityFn) navPriorityFn();
       }
     } catch {}
   }

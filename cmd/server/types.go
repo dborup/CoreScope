@@ -1562,6 +1562,47 @@ type ClientConfigResponse struct {
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when
 	// no geo_filter is configured.
 	GeoFilter *GeoFilterConfig `json:"geoFilter,omitempty"`
+	// Privacy is the operator-configured privacy-notice content for the
+	// #/privacy page. Omitted entirely unless privacy.enabled is true AND
+	// the block passes PrivacyConfig.Validate() — the frontend treats
+	// "field absent" as "feature off" (no nav link injected). See
+	// PrivacyClientConfig below and PrivacyConfig (config.go).
+	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
+}
+
+// PrivacyClientConfig is the browser-facing shape of the privacy notice.
+// Separate from PrivacyConfig because the page needs one thing the operator
+// does not type into the privacy block: the deployment's ACTIVE
+// hiddenNamePrefixes, so the notice can name the real self-service hide
+// prefix (or stay silent about it when none is configured) instead of
+// hardcoding a character.
+type PrivacyClientConfig struct {
+	Enabled                     bool   `json:"enabled"`
+	ControllerName              string `json:"controllerName"`
+	ContactEmail                string `json:"contactEmail"`
+	EffectiveDate               string `json:"effectiveDate"`
+	PurposesText                string `json:"purposesText"`
+	LegalBasisType              string `json:"legalBasisType"`
+	LegalBasisText              string `json:"legalBasisText"`
+	LegitimateInterestsText     string `json:"legitimateInterestsText,omitempty"`
+	RetentionText               string `json:"retentionText"`
+	RecipientsText              string `json:"recipientsText"`
+	DataSourcesText             string `json:"dataSourcesText"`
+	ThirdPartyServicesText      string `json:"thirdPartyServicesText"`
+	InternationalTransfersText  string `json:"internationalTransfersText"`
+	BrowserStorageText          string `json:"browserStorageText"`
+	ServerLogsText              string `json:"serverLogsText"`
+	RightsRequestText           string `json:"rightsRequestText"`
+	SupervisoryAuthorityName    string `json:"supervisoryAuthorityName"`
+	SupervisoryAuthorityURL     string `json:"supervisoryAuthorityUrl"`
+	AutomatedDecisionMakingText string `json:"automatedDecisionMakingText"`
+	// Optional: omitted entirely when the deployment has no DPO.
+	DPOName    string `json:"dpoName,omitempty"`
+	DPOContact string `json:"dpoContact,omitempty"`
+	// HiddenNamePrefixes is the live Config.HiddenNamePrefixes list. Empty
+	// or absent means no self-service hiding is available on this
+	// deployment, and the page must not claim otherwise.
+	HiddenNamePrefixes []string `json:"hiddenNamePrefixes,omitempty"`
 }
 
 // CustomizerClientConfig is the operator-side customizer-modal knobs that

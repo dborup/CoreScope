@@ -71,11 +71,18 @@
   // point MeshConfigReady has resolved window.MC_CLIENT_RX_COVERAGE.
   var COVERAGE_ROUTE = { route: 'rx-coverage', hash: '#/rx-coverage', label: 'Coverage', ph: 'broadcast' };
 
+  // The Privacy route is opt-in too (config `privacy.enabled` -> server omits
+  // or emits cfg.privacy -> window.MC_PRIVACY, see public/roles.js). Appended
+  // last to mirror its desktop top-nav position.
+  var PRIVACY_ROUTE = { route: 'privacy', hash: '#/privacy', label: 'Privacy', ph: 'lock' };
+
   function routes() {
-    if (!window.MC_CLIENT_RX_COVERAGE) return ROUTES;
     var out = ROUTES.slice();
-    var after = out.findIndex(function (r) { return r.route === 'analytics'; }) + 1;
-    out.splice(after, 0, COVERAGE_ROUTE);
+    if (window.MC_CLIENT_RX_COVERAGE) {
+      var after = out.findIndex(function (r) { return r.route === 'analytics'; }) + 1;
+      out.splice(after, 0, COVERAGE_ROUTE);
+    }
+    if (window.MC_PRIVACY) out.push(PRIVACY_ROUTE);
     return out;
   }
 
@@ -105,6 +112,59 @@
   }
 
   // ── DOM construction (idempotent) ───────────────────────────────────────
+  function makeItem(r) {
+    var a = document.createElement('a');
+    a.className = 'nav-drawer-item';
+    a.setAttribute('href', r.hash);
+    a.setAttribute('data-nav-drawer-item', r.route);
+    a.setAttribute('data-route', r.route);
+
+    var ic = document.createElement('span');
+    ic.className = 'nav-drawer-icon';
+    ic.setAttribute('aria-hidden', 'true');
+    ic.innerHTML = phIconHTML(r.ph);
+
+    var lb = document.createElement('span');
+    lb.className = 'nav-drawer-label';
+    lb.textContent = r.label;
+
+    a.appendChild(ic);
+    a.appendChild(lb);
+    a.addEventListener('click', function () { close(); });
+    return a;
+  }
+
+  // Idempotent: replaces the list's children outright, so calling it again
+  // after config lands can never duplicate a route link or leave a stale
+  // one behind. Listeners live on the <a> elements it owns, so they are
+  // discarded with them -- no accumulation across refreshes.
+  function renderRoutes(list) {
+    while (list.firstChild) list.removeChild(list.firstChild);
+    routes().forEach(function (r) { list.appendChild(makeItem(r)); });
+  }
+
+  // The opt-in routes (rx-coverage, privacy) are only known once
+  // /api/config/client has resolved, which happens well AFTER
+  // DOMContentLoaded builds the drawer. Without this refresh the drawer
+  // would be frozen at its pre-config state and those links could never
+  // appear, no matter how long the user waited.
+  function refreshRoutes() {
+    if (!drawerEl) return;
+    var list = drawerEl.querySelector('.nav-drawer-list');
+    if (list) renderRoutes(list);
+  }
+
+  // Run cb once the client config has SETTLED (resolved or rejected), or
+  // synchronously when there is no config promise at all -- which keeps the
+  // pre-existing ordering for pages/tests that never load roles.js.
+  function whenConfigReady(cb) {
+    var p = (typeof window !== 'undefined') ? window.MeshConfigReady : null;
+    if (!p || typeof p.then !== 'function') { cb(); return; }
+    var done = false;
+    var run = function () { if (done) return; done = true; cb(); };
+    try { p.then(run, run); } catch (_) { run(); }
+  }
+
   function buildDom() {
     if (drawerEl && backdropEl) return;
 
@@ -140,27 +200,7 @@
 
     var list = document.createElement('nav');
     list.className = 'nav-drawer-list';
-    routes().forEach(function (r) {
-      var a = document.createElement('a');
-      a.className = 'nav-drawer-item';
-      a.setAttribute('href', r.hash);
-      a.setAttribute('data-nav-drawer-item', r.route);
-      a.setAttribute('data-route', r.route);
-
-      var ic = document.createElement('span');
-      ic.className = 'nav-drawer-icon';
-      ic.setAttribute('aria-hidden', 'true');
-      ic.innerHTML = phIconHTML(r.ph);
-
-      var lb = document.createElement('span');
-      lb.className = 'nav-drawer-label';
-      lb.textContent = r.label;
-
-      a.appendChild(ic);
-      a.appendChild(lb);
-      a.addEventListener('click', function () { close(); });
-      list.appendChild(a);
-    });
+    renderRoutes(list);
     drawerEl.appendChild(list);
 
     document.body.appendChild(backdropEl);
@@ -373,6 +413,10 @@
   function init() {
     wireOnce();
     buildDom();
+    // Build now so the drawer is usable immediately, then reconcile once
+    // config is known. Deterministic: driven by the promise, not by how
+    // long the user takes to open the drawer.
+    whenConfigReady(refreshRoutes);
   }
 
   // Public API for tests + manual triggers (e.g. a hamburger button).
