@@ -32,9 +32,6 @@ func validPrivacy() *PrivacyConfig {
 		InternationalTransfersText:  "No transfers outside the EU/EEA.",
 		BrowserStorageText:          "Interface settings are stored in your browser.",
 		ServerLogsText:              "Our proxy keeps access logs for 14 days.",
-		RightsRequestText:           "Email us and we will assess your request.",
-		SupervisoryAuthorityName:    "Datatilsynet",
-		SupervisoryAuthorityURL:     "https://www.datatilsynet.dk",
 		AutomatedDecisionMakingText: "No automated decision-making is used.",
 	}
 }
@@ -74,8 +71,6 @@ func TestConfigClientExposesPrivacyWhenEnabled(t *testing.T) {
 		"effectiveDate":               "2026-09-01",
 		"legalBasisType":              "public_task",
 		"retentionText":               "Packet data is deleted after 30 days.",
-		"supervisoryAuthorityName":    "Datatilsynet",
-		"supervisoryAuthorityUrl":     "https://www.datatilsynet.dk",
 		"automatedDecisionMakingText": "No automated decision-making is used.",
 	}
 	for field, want := range wantStrings {
@@ -204,9 +199,6 @@ func TestPrivacyEachRequiredFieldIsMandatory(t *testing.T) {
 		"internationalTransfersText":  func(p *PrivacyConfig) { p.InternationalTransfersText = "" },
 		"browserStorageText":          func(p *PrivacyConfig) { p.BrowserStorageText = "" },
 		"serverLogsText":              func(p *PrivacyConfig) { p.ServerLogsText = "" },
-		"rightsRequestText":           func(p *PrivacyConfig) { p.RightsRequestText = "" },
-		"supervisoryAuthorityName":    func(p *PrivacyConfig) { p.SupervisoryAuthorityName = "" },
-		"supervisoryAuthorityUrl":     func(p *PrivacyConfig) { p.SupervisoryAuthorityURL = "" },
 		"automatedDecisionMakingText": func(p *PrivacyConfig) { p.AutomatedDecisionMakingText = "" },
 	}
 	for field, clear := range blank {
@@ -295,31 +287,6 @@ func TestPrivacyLegalBasisTypeContract(t *testing.T) {
 	}
 }
 
-func TestPrivacySupervisoryAuthorityURLIsSafe(t *testing.T) {
-	// Trailing whitespace is trimmed (and the trimmed form is what ships to
-	// the browser -- see handleConfigClient), so it is a typo, not a threat.
-	good := []string{"https://www.datatilsynet.dk", "http://example.org/privacy", "  https://example.org  ", "https://example.org\n"}
-	for _, u := range good {
-		p := validPrivacy()
-		p.SupervisoryAuthorityURL = u
-		if errs := p.Validate(); len(errs) != 0 {
-			t.Errorf("%q should be accepted, got %v", u, errs)
-		}
-	}
-	bad := []string{
-		"javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
-		"//example.org", "example.org", "ftp://example.org",
-		"https://exa mple.org", "https://exa\nmple.org", "",
-	}
-	for _, u := range bad {
-		p := validPrivacy()
-		p.SupervisoryAuthorityURL = u
-		if errs := p.Validate(); len(errs) == 0 {
-			t.Errorf("%q should be rejected as supervisoryAuthorityUrl", u)
-		}
-	}
-}
-
 func TestPrivacyValidateEmailShape(t *testing.T) {
 	base := func(email string) *PrivacyConfig {
 		p := validPrivacy()
@@ -370,12 +337,8 @@ func TestConfigClientWithholdsPrivacyWhenInvalid(t *testing.T) {
 		"internationalTransfersText":  func(p *PrivacyConfig) { p.InternationalTransfersText = "" },
 		"browserStorageText":          func(p *PrivacyConfig) { p.BrowserStorageText = "" },
 		"serverLogsText":              func(p *PrivacyConfig) { p.ServerLogsText = "" },
-		"rightsRequestText":           func(p *PrivacyConfig) { p.RightsRequestText = "" },
-		"supervisoryAuthorityName":    func(p *PrivacyConfig) { p.SupervisoryAuthorityName = "" },
-		"supervisoryAuthorityUrl":     func(p *PrivacyConfig) { p.SupervisoryAuthorityURL = "" },
 		"automatedDecisionMakingText": func(p *PrivacyConfig) { p.AutomatedDecisionMakingText = "" },
 		"malformed email":             func(p *PrivacyConfig) { p.ContactEmail = "nope" },
-		"unsafe authority url":        func(p *PrivacyConfig) { p.SupervisoryAuthorityURL = "javascript:alert(1)" },
 		"legitimate_interests without interests": func(p *PrivacyConfig) {
 			p.LegalBasisType = "legitimate_interests"
 			p.LegitimateInterestsText = ""
@@ -435,12 +398,94 @@ func TestConfigClientPublishesCompletePrivacy(t *testing.T) {
 		"legalBasisType", "legalBasisText", "legitimateInterestsText", "retentionText",
 		"recipientsText", "dataSourcesText", "thirdPartyServicesText",
 		"internationalTransfersText", "browserStorageText", "serverLogsText",
-		"rightsRequestText", "supervisoryAuthorityName", "supervisoryAuthorityUrl",
 		"automatedDecisionMakingText", "dpoName", "dpoContact",
 	} {
 		if _, present := pc[f]; !present {
 			t.Errorf("privacy[%q] missing from the published payload", f)
 		}
+	}
+}
+
+// The "Your rights" section was deleted from the privacy page outright, so
+// the three fields that fed it are gone from the config, the validator and
+// the client DTO. These tests fail if any of them is reintroduced: the page
+// has no renderer for them, so publishing them again would ship dead data to
+// every browser and re-impose a required field operators cannot use.
+func TestConfigClientOmitsRemovedRightsFields(t *testing.T) {
+	srv, router := setupTestServer(t)
+	srv.cfg.Privacy = validPrivacy()
+
+	req := httptest.NewRequest("GET", "/api/config/client", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	pc, ok := body["privacy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("privacy missing from a complete config: %+v", body["privacy"])
+	}
+	for _, f := range []string{"rightsRequestText", "supervisoryAuthorityName", "supervisoryAuthorityUrl"} {
+		if _, present := pc[f]; present {
+			t.Errorf("privacy[%q] was removed with the rights section but is still published", f)
+		}
+	}
+}
+
+// The removed fields are no longer required, so a config that omits them
+// entirely must still publish the notice.
+func TestPrivacyValidatesWithoutRemovedRightsFields(t *testing.T) {
+	if errs := validPrivacy().Validate(); len(errs) != 0 {
+		t.Fatalf("a config without the removed rights fields must validate, got %v", errs)
+	}
+	for _, e := range validPrivacy().Validate() {
+		if strings.Contains(e, "rightsRequestText") || strings.Contains(e, "supervisoryAuthority") {
+			t.Errorf("validator still demands a removed field: %s", e)
+		}
+	}
+}
+
+// An existing deployment upgrades in place: its config.json still carries the
+// three deleted keys. They must be ignored, not rejected, and must not reach
+// the browser.
+func TestPrivacyStaleRemovedKeysAreIgnored(t *testing.T) {
+	raw := []byte(`{
+	  "enabled": true,
+	  "controllerName": "Example Mesh Community",
+	  "contactEmail": "privacy@example.org",
+	  "effectiveDate": "2026-09-01",
+	  "purposesText": "x",
+	  "legalBasisType": "public_task",
+	  "legalBasisText": "x",
+	  "retentionText": "x",
+	  "recipientsText": "x",
+	  "dataSourcesText": "x",
+	  "thirdPartyServicesText": "x",
+	  "internationalTransfersText": "x",
+	  "browserStorageText": "x",
+	  "serverLogsText": "x",
+	  "automatedDecisionMakingText": "x",
+	  "rightsRequestText": "STALE",
+	  "supervisoryAuthorityName": "STALE",
+	  "supervisoryAuthorityUrl": "https://stale.example"
+	}`)
+	var p PrivacyConfig
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("a config.json written before the removal must still parse: %v", err)
+	}
+	if errs := p.Validate(); len(errs) != 0 {
+		t.Fatalf("stale keys must be ignored, not rejected, got %v", errs)
+	}
+
+	srv, router := setupTestServer(t)
+	srv.cfg.Privacy = &p
+	req := httptest.NewRequest("GET", "/api/config/client", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), "STALE") || strings.Contains(w.Body.String(), "stale.example") {
+		t.Error("a stale removed key leaked into /api/config/client")
 	}
 }
 

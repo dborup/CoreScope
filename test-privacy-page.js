@@ -49,8 +49,7 @@ const REQUIRED_FIELDS = [
   'controllerName', 'contactEmail', 'effectiveDate', 'purposesText',
   'legalBasisType', 'legalBasisText', 'retentionText', 'recipientsText',
   'dataSourcesText', 'thirdPartyServicesText', 'internationalTransfersText',
-  'browserStorageText', 'serverLogsText', 'rightsRequestText',
-  'supervisoryAuthorityName', 'supervisoryAuthorityUrl',
+  'browserStorageText', 'serverLogsText',
   'automatedDecisionMakingText',
 ];
 
@@ -69,9 +68,6 @@ const VALID = {
   internationalTransfersText: 'No transfers outside the EU/EEA.',
   browserStorageText: 'Interface settings are stored in your browser.',
   serverLogsText: 'Our proxy keeps access logs for 14 days.',
-  rightsRequestText: 'Email us and we will assess your request.',
-  supervisoryAuthorityName: 'Datatilsynet',
-  supervisoryAuthorityUrl: 'https://www.datatilsynet.dk',
   automatedDecisionMakingText: 'No automated decision-making is used.',
 };
 const withField = (k, v) => Object.assign({}, VALID, { [k]: v });
@@ -453,8 +449,6 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
       retentionText: '<b onmouseover=alert(3)>bold</b>',
       legalBasisText: '<svg onload=alert(4)>',
       purposesText: '</p><iframe src=evil>',
-      supervisoryAuthorityName: '<a href=javascript:alert(5)>x</a>',
-      supervisoryAuthorityUrl: 'javascript:alert(6)',
     }));
     assert(!html.includes('<img'), 'unescaped <img in output');
     assert(!html.includes('<script'), 'unescaped <script in output');
@@ -555,12 +549,145 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
       'must name observer metadata');
   });
 
-  await test('rights section does not promise unconditional erasure', async () => {
+  // ─── the removed "Your rights" section (permanent deletion) ───────────────
+  //
+  // The section was deleted outright, not hidden behind a flag: there is no
+  // config key that can bring it back. These tests fail if any part of it --
+  // heading, boilerplate, request routing, GDPR article reference, public
+  // channel note, or the supervisory-authority complaint block -- reappears
+  // in the rendered page, and if a stale deployment's config could smuggle
+  // it back in through the removed fields.
+
+  await test('removed: no "Your rights" heading is rendered', async () => {
     const html = await renderWith(VALID);
-    assert(/not automatically granted/i.test(html),
-      'must say requests are assessed, not automatically granted');
-    assert(html.includes('Datatilsynet'), 'supervisory authority name missing');
-    assert(html.includes('https://www.datatilsynet.dk'), 'supervisory authority URL missing');
+    assert(!/Your rights/i.test(html), '"Your rights" heading must not render');
+    assert(!/Your rights and opting out/i.test(html),
+      '"Your rights and opting out" must not render');
+    // The section used the Phosphor "scroll" icon and nothing else does.
+    assert(!/ph-scroll/.test(html), 'the rights-section icon must not render');
+  });
+
+  await test('removed: no generic rights boilerplate is rendered', async () => {
+    const html = await renderWith(VALID);
+    [
+      /Depending on the circumstances/i,
+      /rights to request access/i,
+      /correction, erasure, restriction/i,
+      /data portability/i,
+      /object to processing/i,
+      /not automatically granted/i,
+      /The operator will assess/i,
+    ].forEach((re) => assert(!re.test(html), 'rights boilerplate still rendered: ' + re));
+  });
+
+  await test('removed: no request-routing or complaint text is rendered', async () => {
+    const html = await renderWith(VALID);
+    assert(!/Send privacy requests to/i.test(html),
+      '"Send privacy requests to" must not render');
+    assert(!/If you are dissatisfied/i.test(html), 'complaint intro must not render');
+    assert(!/you may complain to/i.test(html), 'complaint routing must not render');
+    assert(!/supervisory authority/i.test(html), 'supervisory authority must not render');
+    assert(!/Datatilsynet/i.test(html), 'authority name must not render');
+    assert(!/datatilsynet\.dk/i.test(html), 'authority link must not render');
+  });
+
+  await test('removed: no hide/remove-my-node or GDPR-article text is rendered', async () => {
+    const html = await renderWith(VALID);
+    assert(!/we will hide or remove it/i.test(html),
+      'node hide/remove promise must not render');
+    assert(!/Arts?\. 15/i.test(html), 'GDPR Art. 15-21 reference must not render');
+    assert(!/15\u2013?21|15-21/.test(html), 'GDPR article range must not render');
+    assert(!/lodge a complaint/i.test(html), 'complaint wording must not render');
+  });
+
+  await test('removed: public-channel note from the rights block is not rendered', async () => {
+    const html = await renderWith(VALID);
+    assert(!/A note on public channels/i.test(html),
+      'the rights-block public-channel heading must not render');
+    assert(!/receivable and readable by anyone with a radio/i.test(html),
+      'the rights-block public-channel text must not render');
+  });
+
+  await test('removed: stale config values for the deleted fields cannot resurface', async () => {
+    // A deployment upgrading in place still has the old keys in config.json
+    // and the server no longer strips them from ITS side only -- the page must
+    // ignore them outright.
+    const html = await renderWith(Object.assign({}, VALID, {
+      rightsRequestText: 'SHOULD-NEVER-RENDER-rights',
+      supervisoryAuthorityName: 'SHOULD-NEVER-RENDER-authority',
+      supervisoryAuthorityUrl: 'https://should-never-render.example',
+    }));
+    assert(!html.includes('SHOULD-NEVER-RENDER-rights'), 'rightsRequestText still rendered');
+    assert(!html.includes('SHOULD-NEVER-RENDER-authority'), 'supervisoryAuthorityName still rendered');
+    assert(!html.includes('should-never-render.example'), 'supervisoryAuthorityUrl still rendered');
+  });
+
+  await test('removed: the page leaves no empty heading, wrapper or separator', async () => {
+    const html = await renderWith(VALID);
+    // Every h3 the page emits must carry a real title and be followed by
+    // content, so a deleted section cannot leave a bare heading behind.
+    const headings = html.match(/<h3 class="privacy-h">.*?<\/h3>/g) || [];
+    assert(headings.length > 0, 'expected the page to still render sections');
+    headings.forEach((h) => {
+      const text = h.replace(/<[^>]*>/g, '').trim();
+      assert(text.length > 0, 'empty section heading rendered: ' + h);
+    });
+    assert(!/<h3 class="privacy-h">[^<]*<\/h3>\s*<h3/.test(html),
+      'two consecutive headings means a section body went missing');
+    assert(!/<p>\s*<\/p>/.test(html), 'empty paragraph left behind');
+    assert(!/<div[^>]*>\s*<\/div>/.test(html), 'empty wrapper left behind');
+    assert(!/<hr\s*\/?>\s*<\/div>/.test(html), 'orphan separator before the page close');
+    // "Hidden nodes" used to be followed by "Your rights"; it must now be
+    // followed directly by "Automated decision-making".
+    const order = headings.map((h) => h.replace(/<[^>]*>/g, '').trim());
+    const hidden = order.indexOf('Hidden nodes');
+    assert(hidden >= 0, '"Hidden nodes" section missing');
+    assert.strictEqual(order[hidden + 1], 'Automated decision-making',
+      'expected Hidden nodes -> Automated decision-making, got ' + order[hidden + 1]);
+  });
+
+  await test('removed: privacy.js source carries no rights-section code', async () => {
+    const src = fs.readFileSync('public/privacy.js', 'utf8');
+    assert(!/supervisoryAuthority/i.test(src), 'privacy.js still reads a supervisoryAuthority field');
+    assert(!/rightsRequestText/.test(src), 'privacy.js still reads rightsRequestText');
+    assert(!/Your rights/i.test(src), 'privacy.js still contains the rights heading');
+    assert(!/safeUrl/.test(src), 'safeUrl became dead with the section and must be gone');
+  });
+
+  await test('removed: the fields are gone from the Go config, DTO and example', async () => {
+    const gone = ['RightsRequestText', 'SupervisoryAuthorityName', 'SupervisoryAuthorityURL'];
+    ['cmd/server/config.go', 'cmd/server/types.go', 'cmd/server/routes.go'].forEach((f) => {
+      const src = fs.readFileSync(f, 'utf8');
+      gone.forEach((g) => assert(!src.includes(g), f + ' still references ' + g));
+    });
+    const ex = JSON.parse(fs.readFileSync('config.example.json', 'utf8'));
+    ['rightsRequestText', 'supervisoryAuthorityName', 'supervisoryAuthorityUrl'].forEach((k) => {
+      assert(!(k in ex.privacy), 'config.example.json still declares privacy.' + k);
+      assert(!('_comment_' + k in ex.privacy), 'config.example.json still documents privacy.' + k);
+    });
+  });
+
+  // ─── what MUST survive the removal ────────────────────────────────────────
+
+  await test('kept: contactEmail still renders as the privacy contact', async () => {
+    const html = await renderWith(VALID);
+    assert(/Privacy contact:/.test(html), 'the privacy contact line must survive');
+    assert(html.includes('privacy@example.org'), 'contact address must still render');
+    assert(html.includes('href="mailto:privacy@example.org"'),
+      'contact address must still be a mailto link');
+  });
+
+  await test('kept: every other section still renders with the temporary notice text', async () => {
+    const html = await renderWith(VALID);
+    [
+      'Privacy Notice', 'What data this site processes', 'Purpose of processing',
+      'Legal basis', 'Sources of the data', 'Who can receive the data', 'Retention',
+      'Channel and direct messages', 'Storage in your browser', 'Server and proxy logs',
+      'External services', 'International transfers', 'Hidden nodes',
+      'Automated decision-making', 'Changes to this notice',
+    ].forEach((h) => assert(html.includes(h), 'section missing after removal: ' + h));
+    assert(!html.includes('has not published a privacy notice'),
+      'a complete config must still render the notice');
   });
 
   await test('a complete config renders the page AND enables the nav surfaces', async () => {

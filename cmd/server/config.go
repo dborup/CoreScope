@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -423,13 +422,6 @@ type PrivacyConfig struct {
 	// (reverse proxy, host), not in CoreScope.
 	ServerLogsText string `json:"serverLogsText,omitempty"`
 
-	// RightsRequestText explains how to exercise data-protection rights
-	// and how requests are handled. REQUIRED.
-	RightsRequestText string `json:"rightsRequestText,omitempty"`
-	// SupervisoryAuthorityName is the complaint body. REQUIRED.
-	SupervisoryAuthorityName string `json:"supervisoryAuthorityName,omitempty"`
-	// SupervisoryAuthorityURL links to it. REQUIRED, http/https only.
-	SupervisoryAuthorityURL string `json:"supervisoryAuthorityUrl,omitempty"`
 	// AutomatedDecisionMakingText states whether automated
 	// decision-making/profiling with legal or similarly significant
 	// effects is used. REQUIRED (a plain "not used" is a valid answer).
@@ -501,8 +493,6 @@ func (p *PrivacyConfig) Validate() []string {
 		{"internationalTransfersText", p.InternationalTransfersText, "state transfers and safeguards, or that none apply"},
 		{"browserStorageText", p.BrowserStorageText, "describe what is stored in the visitor's browser"},
 		{"serverLogsText", p.ServerLogsText, "describe server/proxy access logs and their retention"},
-		{"rightsRequestText", p.RightsRequestText, "explain how to exercise data-protection rights"},
-		{"supervisoryAuthorityName", p.SupervisoryAuthorityName, "name the supervisory authority"},
 		{"automatedDecisionMakingText", p.AutomatedDecisionMakingText, "state whether automated decision-making is used"},
 	}
 	for _, r := range required {
@@ -515,12 +505,6 @@ func (p *PrivacyConfig) Validate() []string {
 		errs = append(errs, "privacy.contactEmail is required when privacy.enabled is true")
 	} else if !privacyEmailRe.MatchString(strings.TrimSpace(p.ContactEmail)) {
 		errs = append(errs, "privacy.contactEmail is not a valid plain email address")
-	}
-
-	if u := strings.TrimSpace(p.SupervisoryAuthorityURL); u == "" {
-		errs = append(errs, "privacy.supervisoryAuthorityUrl is required when privacy.enabled is true")
-	} else if !isSafeHTTPURL(u) {
-		errs = append(errs, "privacy.supervisoryAuthorityUrl must be an http(s) URL")
 	}
 
 	switch bt := strings.TrimSpace(p.LegalBasisType); {
@@ -541,23 +525,6 @@ func (p *PrivacyConfig) Validate() []string {
 	}
 
 	return errs
-}
-
-// isSafeHTTPURL accepts only absolute http/https URLs with a host and no
-// control characters. Deliberately narrow: the value becomes an href, so
-// javascript:, data: and similar schemes must never pass.
-func isSafeHTTPURL(raw string) bool {
-	if raw == "" || strings.ContainsAny(raw, " \t\r\n<>\"") {
-		return false
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
-	}
-	return u.Host != ""
 }
 
 // weakAPIKeys is the blocklist of known default/example API keys that must be rejected.

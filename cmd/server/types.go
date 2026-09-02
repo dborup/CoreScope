@@ -1592,9 +1592,6 @@ type PrivacyClientConfig struct {
 	InternationalTransfersText  string `json:"internationalTransfersText"`
 	BrowserStorageText          string `json:"browserStorageText"`
 	ServerLogsText              string `json:"serverLogsText"`
-	RightsRequestText           string `json:"rightsRequestText"`
-	SupervisoryAuthorityName    string `json:"supervisoryAuthorityName"`
-	SupervisoryAuthorityURL     string `json:"supervisoryAuthorityUrl"`
 	AutomatedDecisionMakingText string `json:"automatedDecisionMakingText"`
 	// Optional: omitted entirely when the deployment has no DPO.
 	DPOName    string `json:"dpoName,omitempty"`

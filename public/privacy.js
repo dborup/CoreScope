@@ -14,9 +14,8 @@
 //
 // SECURITY: every operator-supplied value is inserted as TEXT, never as
 // markup. Values reach the DOM through txt() (escapeHtml) or, for the one
-// href we emit, through mailtoHref()/safeUrl() + escapeHtml. Config fields
-// are plain text by contract; this file enforces that rather than trusting
-// it.
+// href we emit, through mailtoHref() + escapeHtml. Config fields are plain
+// text by contract; this file enforces that rather than trusting it.
 
 (function () {
   // Phosphor icons, not emoji — see issue #1648. New files start clean.
@@ -47,14 +46,6 @@
   // no extra mailto header (?subject=, &cc=) can be smuggled in.
   function mailtoHref(email) {
     return 'mailto:' + encodeURIComponent(String(email == null ? '' : email).trim()).replace(/%40/g, '@');
-  }
-
-  // safeUrl returns the value only when it is an absolute http(s) URL, so a
-  // javascript:/data: value can never reach an href. The server validates
-  // this too (isSafeHTTPURL); belt-and-braces for stale caches.
-  function safeUrl(u) {
-    var s = String(u == null ? '' : u).trim();
-    return /^https?:\/\/[^\s<>"]+$/i.test(s) ? s : '';
   }
 
   function section(icon, title, bodyHtml) {
@@ -190,24 +181,6 @@
       'transmissions — and it does not by itself delete stored packets, observations or ' +
       'derived analytics.</p>';
     html += section('eye-slash', 'Hidden nodes', hiddenBody);
-
-    // Rights. Deliberately conditional: requests are assessed, not
-    // automatically granted, and the page must not promise unconditional
-    // hiding or erasure.
-    var authorityUrl = safeUrl(cfg.supervisoryAuthorityUrl);
-    var authorityName = txt(cfg.supervisoryAuthorityName);
-    html += section('scroll', 'Your rights',
-      '<p>Depending on the circumstances and applicable data-protection law, you may have ' +
-      'rights to request access, correction, erasure, restriction, data portability, or to ' +
-      'object to processing.</p>' +
-      '<p>Requests are not automatically granted in every situation. The operator will assess ' +
-      'each request under applicable law.</p>' +
-      paras(cfg.rightsRequestText) +
-      (rawEmail ? '<p>Send privacy requests to ' + contactInline + '.</p>' : '') +
-      '<p>If you are dissatisfied with the handling of your data, you may complain to:<br>' +
-      '<strong>' + authorityName + '</strong>' +
-      (authorityUrl ? '<br><a href="' + escapeHtml(authorityUrl) + '" rel="noopener noreferrer" target="_blank">' + escapeHtml(authorityUrl) + '</a>' : '') +
-      '</p>');
 
     html += section('cpu', 'Automated decision-making', paras(cfg.automatedDecisionMakingText));
 
