@@ -1736,24 +1736,56 @@ window.addEventListener('DOMContentLoaded', () => {
       rebuildMoreMenu(allLinks);
     }
 
+    // ONE coalescing scheduler owns the nav rAF slot. Every async trigger goes
+    // through it, so at most one applyNavPriority can ever be pending.
+    //
+    // Before this, resize and the ResizeObserver shared a cancel/recreate id
+    // while hashchange and updateNavStats each queued their own unguarded
+    // rAF. rAF callbacks do not run while a tab is hidden, so those two
+    // accumulated without bound: updateNavStats fires on a 15s interval AND
+    // on every debounced WebSocket event, and a backgrounded tab therefore
+    // built up one queued layout pass per tick. Measured on staging: 74
+    // Priority+ runs released in a single frame when the pane became visible.
+    // Not an infinite loop — an unbounded hidden-tab backlog — but the work
+    // is redundant (only the last run can matter) and it all lands in one
+    // frame.
+    //
+    // The flag is cleared BEFORE applyNavPriority runs, so an event fired
+    // from inside the layout pass schedules exactly one follow-up frame
+    // rather than being swallowed. No cancelAnimationFrame is needed: a
+    // pending callback is always still the work we want, so the cheapest
+    // correct behaviour is to keep it and drop the duplicate request.
+    //
+    // A boolean rather than the rAF id, deliberately. Since nothing is ever
+    // cancelled the id has no use, and claiming the slot BEFORE calling
+    // requestAnimationFrame keeps this correct even where rAF runs its
+    // callback synchronously (some test harnesses, and any polyfill that
+    // falls back to a 0ms timer): storing the returned id afterwards would
+    // overwrite the 0 the callback just wrote and wedge the scheduler shut.
+    let navPriorityPending = false;
+    function scheduleNavPriority() {
+      if (navPriorityPending) return;
+      navPriorityPending = true;
+      requestAnimationFrame(function () {
+        navPriorityPending = false;
+        applyNavPriority();
+      });
+    }
+
     // Run once on load, again after fonts settle (label widths shift),
-    // and on resize (debounced via rAF).
-    navPriorityFn = applyNavPriority;
+    // and on resize (coalesced via the scheduler).
+    // navPriorityFn is the SCHEDULER, not the raw layout pass, so external
+    // callsites (updateNavStats) are coalesced automatically.
+    navPriorityFn = scheduleNavPriority;
     applyNavPriority();
     if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(applyNavPriority);
+      document.fonts.ready.then(scheduleNavPriority);
     }
-    let rafId = 0;
-    window.addEventListener('resize', function() {
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(applyNavPriority);
-    });
+    window.addEventListener('resize', scheduleNavPriority);
     // Re-apply on route change too: the active link gets bigger padding
     // (background pill), so which links fit can shift between pages.
-    window.addEventListener('hashchange', function() {
-      // Defer so the route handler's class toggles run first.
-      requestAnimationFrame(applyNavPriority);
-    });
+    // Deferred by the scheduler, so the route handler's class toggles run first.
+    window.addEventListener('hashchange', scheduleNavPriority);
     // ...and when the RIGHT side finishes growing. #navStats is filled from
     // /api/stats, which lands after DOMContentLoaded — measured on staging at
     // 1200px: stats responseEnd 2106ms vs domContentLoadedEventEnd 2046ms.
@@ -1775,8 +1807,7 @@ window.addEventListener('DOMContentLoaded', () => {
         var w = navRightEl.scrollWidth;
         if (w === lastRightW) return;
         lastRightW = w;
-        if (rafId) cancelAnimationFrame(rafId);
-        rafId = requestAnimationFrame(applyNavPriority);
+        scheduleNavPriority();
       });
       ro.observe(navRightEl);
     }
@@ -2011,7 +2042,10 @@ window.addEventListener('DOMContentLoaded', () => {
         el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
         setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
-        if (navPriorityFn) requestAnimationFrame(navPriorityFn);
+        // navPriorityFn IS the coalescing scheduler, so this cannot stack up
+        // even though updateNavStats runs on a 15s interval and on every
+        // debounced WebSocket event.
+        if (navPriorityFn) navPriorityFn();
       }
     } catch {}
   }
