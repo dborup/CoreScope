@@ -222,6 +222,10 @@ function boot(opts) {
   const moreBtn = mk('button', 'nav-btn nav-more-btn', 'navMoreBtn');
   const moreMenu = mk('div', 'nav-more-menu', 'navMoreMenu');
   const navRight = mk('div', 'nav-right'); navRight.scrollWidth = opts.rightW || 300;
+  // applyNavPriority() budgets against .top-nav's own content box and gap
+  // (see fits() in public/app.js), so the shim has to model them.
+  const TOPNAV_PAD = 24, TOP_GAP = 16, SCROLLBAR = 6;
+  topNav.clientWidth = viewport - SCROLLBAR;
   const hamburger = mk('button', 'nav-btn hamburger', 'hamburger');
   const body = mk('body', '');
 
@@ -237,6 +241,26 @@ function boot(opts) {
   const root = new El('html');
   root.appendChild(topNav);
   root.appendChild(body);
+
+  // .nav-links reports what flex granted it vs what its content needs.
+  const LINK_GAP = 24, LEFT_GAP = 24, BRAND_W = 125, MORE_W = 70;
+  function inlineLinks() {
+    return linksEl.children.filter(e => e.classList && e.classList.contains('nav-link') &&
+                                        !e.classList.contains('is-overflow'));
+  }
+  function naturalScrollW() {
+    const inl = inlineLinks();
+    let w = 0; inl.forEach(a => { w += Math.max(a.getBoundingClientRect().width, a.scrollWidth); });
+    return w + Math.max(0, inl.length - 1) * LINK_GAP;
+  }
+  function maxGrantedW() {
+    const moreW = moreWrap.classList.contains('is-hidden') ? 0 : MORE_W;
+    return (topNav.clientWidth - 2 * TOPNAV_PAD) - TOP_GAP - navRight.scrollWidth
+           - BRAND_W - 2 * LEFT_GAP - moreW;
+  }
+  Object.defineProperty(linksEl, 'scrollWidth', { get: () => Math.round(naturalScrollW()) });
+  Object.defineProperty(linksEl, 'clientWidth', {
+    get: () => Math.round(Math.max(0, Math.min(naturalScrollW(), maxGrantedW()))) });
 
   STATIC_LINKS.forEach(s => linksEl.appendChild(makeLink(doc, s)));
   (opts.preInject || []).forEach(s => linksEl.appendChild(makeLink(doc, s)));
@@ -257,7 +281,10 @@ function boot(opts) {
     addEventListener(t, f) { (this._on[t] = this._on[t] || []).push(f); },
     requestAnimationFrame(fn) { fn(); return 1; },   // synchronous => deterministic
     cancelAnimationFrame() {},
-    getComputedStyle: () => ({ columnGap: '24px', gap: '24px' }),
+    getComputedStyle: el => (el === topNav
+      ? { columnGap: TOP_GAP + 'px', gap: TOP_GAP + 'px',
+          paddingLeft: TOPNAV_PAD + 'px', paddingRight: TOPNAV_PAD + 'px' }
+      : { columnGap: '24px', gap: '24px', paddingLeft: '0px', paddingRight: '0px' }),
   };
 
   const ctx = {

@@ -1586,9 +1586,9 @@ window.addEventListener('DOMContentLoaded', () => {
       // an overflowing strip silently clips rather than pushing
       // nav-right out — bounding-rect math on .nav-left lies. Instead
       // measure the *intrinsic* widths of the parts (independent of
-      // current clipping) and compare to the viewport. SAFETY absorbs
-      // the .top-nav side padding + nav-right inner gaps + sub-pixel
-      // rounding (the historic #1055 bug was a 6–20px overlap).
+      // current clipping) and compare to .top-nav's own content box — see
+      // fits() below for why the viewport width and a SAFETY constant were
+      // the wrong yardstick (the historic #1055 bug was a 6–20px overlap).
       //
       // #1105 MINOR 3: at the 1101px media-query flip `.nav-stats`
       // toggles from display:none → flex (and vice-versa). The resize
@@ -1596,7 +1596,11 @@ window.addEventListener('DOMContentLoaded', () => {
       // navRightEl.scrollWidth measured here reflects the post-flip
       // intrinsic width — not stale pre-flip width.
       const navBrand   = document.querySelector('.nav-brand');
-      const SAFETY     = 32;
+      // Sub-pixel tolerance for both the budget test and the containment
+      // test. Widths here are fractional (e.g. 82.79px links, 22.8px gaps)
+      // while clientWidth/scrollWidth are integers, so an exact comparison
+      // would flip on rounding alone.
+      const FIT_EPS    = 1;
       // #1105 MINOR 1+2: read both gap values from CSS rather than a
       // shared `GUTTER = 24` constant. Today `.nav-left` (gap between
       // brand/links/more/right cells) and `.nav-links` (gap between
@@ -1640,8 +1644,33 @@ window.addEventListener('DOMContentLoaded', () => {
         const moreW = liveMoreW > 0 ? liveMoreW
                     : (cachedMoreW > 0 ? cachedMoreW : MORE_BTN_RESERVE_PX);
         const rightW  = navRightEl.scrollWidth; // intrinsic, ignores clipping
-        const needed  = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + navLeftGap + rightW + SAFETY;
-        return needed <= window.innerWidth;
+        // Budget from the REAL container, not window.innerWidth minus a guess.
+        // Measured at 1440px on staging, the old formula reported 5.23px of
+        // headroom while the strip actually overran its box by 18px, because:
+        //   .top-nav padding 28.8px a side (57.6px) was never counted at all;
+        //   window.innerWidth 1440 includes a 6px scrollbar the layout lacks
+        //     (.top-nav clientWidth is 1434);
+        //   the .nav-left/.nav-right seam is governed by .top-nav's own gap
+        //     (16px), but navLeftGap (22.8px) was used, over-counting 6.8px.
+        // SAFETY=32 was an ad-hoc compensation that covered part of that
+        // 57.6 + 6 - 6.8 = 56.8px error and left ~24.8px unreserved.
+        // Reading the padding box and the real seam gap removes the guess.
+        const tnCS   = getComputedStyle(navTop);
+        const avail  = navTop.clientWidth -
+                       (parseFloat(tnCS.paddingLeft) || 0) -
+                       (parseFloat(tnCS.paddingRight) || 0);
+        const topGap = parseFloat(tnCS.columnGap || tnCS.gap || '0') || 0;
+        const needed = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + topGap + rightW;
+        // EPS covers sub-pixel rounding only (contract: at most 1px).
+        return needed <= avail - FIT_EPS;
+      }
+      // Direct containment: whatever the arithmetic says, the strip must not
+      // render wider than the box flex actually granted it. This is the
+      // acceptance contract, checked against the live layout, so a future
+      // CSS change that the formula does not model still cannot leave links
+      // sticking out from under "More ▾".
+      function contained() {
+        return linksContainer.scrollWidth <= linksContainer.clientWidth + FIT_EPS;
       }
       let i = 0;
       // #1391: rebuild queue here so it reflects the CURRENT active
@@ -1666,7 +1695,12 @@ window.addEventListener('DOMContentLoaded', () => {
       // #1391: also break on .active — buildOverflowQueue already
       // excludes the active link from the queue, but the break is a
       // defensive belt for any future code that re-enqueues it.
-      while (!fits() && i < overflowQueue.length) {
+      // Keep dropping while EITHER the budget says no or the strip still
+      // renders wider than its box. Both shrink monotonically as links leave
+      // the line (scrollWidth falls, clientWidth grows), and the queue is
+      // finite, so this converges; the high-priority and active guards below
+      // remain the only stopping conditions that can leave a strip over-full.
+      while ((!fits() || !contained()) && i < overflowQueue.length) {
         if (overflowQueue[i].dataset.priority === 'high') break;
         if (overflowQueue[i].classList.contains('active')) break;
         overflowQueue[i].classList.add('is-overflow');
