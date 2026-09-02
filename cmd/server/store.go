@@ -178,7 +178,6 @@ type PacketStore struct {
 	byNode        map[string][]*StoreTx      // pubkey → transmissions
 	nodeHashes    map[string]map[string]bool // pubkey → Set<hash>
 	byPathHop     map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
-	relayTimes    map[string][]int64         // lowercase pubkey → sorted unix-millis of relay events (full pubkeys only)
 	byPayloadType map[int][]*StoreTx         // payload_type → transmissions
 	loaded        bool
 	totalObs      int
@@ -646,7 +645,6 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
 		byPathHop:     make(map[string][]*StoreTx),
-		relayTimes:    make(map[string][]int64),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
 		rfCache:       make(map[string]*cachedResult),
