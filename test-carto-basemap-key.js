@@ -935,6 +935,115 @@ const CFG_NO_TOKEN = { map: { tiles: { providers: { carto: { enabled: true } } }
     assert.ok(/SUBDOMAIN LABEL/i.test(cmt), 'the comment must document the domain restriction');
   });
 
+  // ─── domain length contract (DNS) ────────────────────────────────────────
+
+  test('a 63-character label is accepted, 64 is not', () => {
+    const ok = 'a'.repeat(63), tooLong = 'a'.repeat(64);
+    assert.strictEqual(withCarto({ enabled: true, domain: ok })
+      .window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+      'https://{s}.' + ok + '.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+    assert.strictEqual(withCarto({ enabled: true, domain: tooLong })
+      .window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      'a 64-character label exceeds the DNS label limit and must be ignored');
+  });
+
+  test('an over-long overall domain is ignored', () => {
+    const many = Array(60).fill('abcd').join('.');   // 299 chars
+    assert.ok(many.length > 238);
+    assert.strictEqual(withCarto({ enabled: true, domain: many })
+      .window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+  });
+
+  test('empty labels, leading/trailing dots and hyphens are ignored', () => {
+    for (const d of ['.mycompany', 'mycompany.', 'my..company', '-mycompany',
+                     'mycompany-', 'eu.-my', 'eu.my-', '.', '..']) {
+      assert.strictEqual(withCarto({ enabled: true, domain: d })
+        .window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        'domain ' + JSON.stringify(d) + ' must be ignored');
+    }
+  });
+
+  test('an internal hyphen is still allowed', () => {
+    assert.strictEqual(withCarto({ enabled: true, domain: 'my-company' })
+      .window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+      'https://{s}.my-company.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+  });
+
+  // ─── the warning must not echo operator input, and fires once ────────────
+
+  test('the invalid-domain warning never reprints the rejected value', () => {
+    const SECRETISH = 'https://evil.example/leak?token=SUPERSECRET';
+    const ctx = makeSandbox();
+    const seen = [];
+    ctx.console = Object.assign({}, ctx.console, { warn: (...a) => seen.push(a.map(String).join(' ')) });
+    loadProviders(ctx, { tiles: { providers: { carto: { enabled: true, domain: SECRETISH } } } });
+    ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png');
+    const joined = seen.join('\n');
+    assert.ok(joined.indexOf('carto.domain') >= 0, 'expected a warning, got: ' + JSON.stringify(seen));
+    assert.ok(joined.indexOf(SECRETISH) < 0, 'the warning must not echo the value: ' + joined);
+    assert.ok(joined.indexOf('SUPERSECRET') < 0, 'no fragment of the value may leak: ' + joined);
+    assert.ok(joined.indexOf('evil.example') < 0, 'no fragment of the value may leak: ' + joined);
+    assert.ok(/mycompany/.test(joined), 'the warning should show the expected form');
+  });
+
+  test('the invalid-domain warning is emitted at most once', () => {
+    const ctx = makeSandbox();
+    let n = 0;
+    ctx.console = Object.assign({}, ctx.console, { warn: (...a) => { if (/carto\.domain/.test(a.map(String).join(' '))) n++; } });
+    loadProviders(ctx, { tiles: { providers: { carto: { enabled: true, domain: 'evil.com/x' } } } });
+    for (let i = 0; i < 12; i++) ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png');
+    for (const id of ALL_CARTO_IDS) urlFor(ctx, id);
+    assert.strictEqual(n, 1, 'expected exactly one warning, got ' + n);
+  });
+
+  test('a blank or whitespace-only domain warns not at all', () => {
+    for (const d of ['', '   ', '\t']) {
+      const ctx = makeSandbox();
+      let n = 0;
+      ctx.console = Object.assign({}, ctx.console, { warn: (...a) => { if (/carto\.domain/.test(a.map(String).join(' '))) n++; } });
+      loadProviders(ctx, { tiles: { providers: { carto: { enabled: true, domain: d } } } });
+      assert.strictEqual(ctx.window.MC_getCartoTileUrl('/dark_all/{z}/{x}/{y}{r}.png'),
+        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+      assert.strictEqual(n, 0, 'blank domain must not warn (' + JSON.stringify(d) + ')');
+    }
+  });
+
+  // ─── static guards: carto.token must not come back ───────────────────────
+
+  test('no production source mentions carto.token or _getCartoToken', () => {
+    for (const f of ['map-tile-providers.js', 'roles.js', 'customize-v2.js', 'map.js', 'live.js', 'geofilter-builder.html']) {
+      const src = readPub(f);
+      assert.ok(src.indexOf('carto.token') < 0, f + ' still mentions carto.token');
+      assert.ok(src.indexOf('_getCartoToken') < 0, f + ' still defines/uses _getCartoToken');
+    }
+  });
+
+  test('config.example.json carries no carto token field or wording', () => {
+    const raw = fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8');
+    const cfg = JSON.parse(raw);
+    const carto = cfg.map.tiles.providers.carto;
+    assert.ok(!Object.prototype.hasOwnProperty.call(carto, 'token'), 'carto.token must be gone');
+    assert.ok(Object.prototype.hasOwnProperty.call(carto, 'key'), 'carto.key must exist');
+    const cmt = cfg.map.tiles.providers._comment_carto;
+    assert.ok(!/\btoken\b/i.test(cmt), 'the carto comment must not say "token": ' + cmt.slice(0, 120));
+    // OSM/Stamen keep their own token wording — make sure we did not over-rename.
+    assert.ok(/token/i.test(cfg.map.tiles.providers._comment_osm), 'the OSM comment should still say token');
+  });
+
+  test('the example makes no unverifiable claim about key restrictions', () => {
+    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8'));
+    const cmt = cfg.map.tiles.providers._comment_carto;
+    assert.ok(!/cannot be restricted/i.test(cmt), 'must not assert restrictions are unavailable');
+    assert.ok(!/restrict it by origin\/referrer in the CARTO dashboard/i.test(cmt),
+      'must not assert restrictions are available either');
+    assert.ok(/Follow any domain\/referrer restrictions offered when CARTO issues the key/.test(cmt),
+      'expected the neutral guidance');
+    assert.ok(/rotate it if abused/i.test(cmt), 'expected rotation guidance');
+  });
+
   console.log('\n#7 CARTO Basemaps API key: ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed === 0 ? 0 : 1);
 })();

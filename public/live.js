@@ -1480,7 +1480,7 @@
     // the equivalent block in map.js for the reasoning. The layer picker is
     // built here rather than immediately because it materialises a real
     // L.tileLayer per registry style at build time; building it before the
-    // token is known would offer the user selectable keyless CARTO layers.
+    // key is known would offer the user selectable keyless CARTO layers.
     let _liveTilesReady = false;
     function _liveAttachTiles() {
       if (_liveTilesReady) return;      // exactly once per map init

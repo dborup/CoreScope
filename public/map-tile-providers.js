@@ -39,17 +39,42 @@
   // So: accept dot-separated DNS labels only, and ignore anything else
   // (falling back to the public base) rather than build a broken or
   // key-leaking URL. Trimmed, because a stray space would fail the same way.
-  var _CARTO_DOMAIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+  //
+  // This is URL/misconfiguration hardening, not an authorization boundary:
+  // `domain` comes from the operator's own config.json, so the point is that
+  // a typo or a copy-pasted full URL degrades to the public base instead of
+  // silently retargeting tile requests (and the key) at another host.
+  //
+  // Lengths follow DNS: each label at most 63 characters, and the whole value
+  // capped so the final host stays inside the 253-character limit —
+  // "a." + <domain> + ".cartocdn.com" is len + 15.
+  var _CARTO_LABEL_RE  = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+  var _CARTO_LABEL_MAX = 63;
+  var _CARTO_DOMAIN_MAX = 238;
+  var _isValidCartoDomain = function(d) {
+    if (d.length > _CARTO_DOMAIN_MAX) return false;
+    var labels = d.split('.');
+    for (var i = 0; i < labels.length; i++) {
+      var l = labels[i];
+      // Rejects empty labels, which also covers a leading/trailing dot
+      // and any '..' run.
+      if (!l || l.length > _CARTO_LABEL_MAX || !_CARTO_LABEL_RE.test(l)) return false;
+    }
+    return true;
+  };
   var _warnedDomain = false;
   var _getCartoDomain = function() {
     var d = (_cfg && _cfg.providers && _cfg.providers.carto) ? _cfg.providers.carto.domain : null;
     if (typeof d !== 'string') return '';
     d = d.trim();
-    if (!d) return '';
-    if (!_CARTO_DOMAIN_RE.test(d)) {
+    if (!d) return '';                    // unset/blank is normal — no warning
+    if (!_isValidCartoDomain(d)) {
       if (!_warnedDomain && typeof console !== 'undefined' && console.warn) {
         _warnedDomain = true;
-        console.warn('[tiles] ignoring invalid carto.domain (expected an enterprise subdomain label such as "mycompany"):', d);
+        // The rejected value is deliberately NOT echoed: it is operator input
+        // of unknown provenance and this line can end up in shared logs or a
+        // screenshot. The expected form is enough to fix the config.
+        console.warn('[tiles] ignoring invalid carto.domain; expected dot-separated enterprise subdomain labels such as "mycompany"');
       }
       return '';
     }
@@ -115,7 +140,7 @@
 
   // MC_whenTileConfigReady — run cb once the server config has SETTLED, so a
   // tile layer is never added to a map (and therefore never fires a request)
-  // while the CARTO key is still unknown. Resolving the token late is not
+  // while the CARTO key is still unknown. Resolving the key late is not
   // enough on its own: Leaflet starts fetching the moment a layer is added,
   // so a keyless first paint would still hit CARTO and get watermarked tiles
   // into the browser cache before setUrl() could swap them.
@@ -177,7 +202,7 @@
     _cfg = (typeof window !== 'undefined' && window.MC_MAP_CFG && window.MC_MAP_CFG.tiles) ? window.MC_MAP_CFG.tiles : null;
 
     // CARTO gating (#7) — unchanged from before the API-key work, and
-    // deliberately independent of the token:
+    // deliberately independent of the key:
     //   - carto.enabled === false  → the CARTO styles are not registered, so
     //                                they leave the main map and the layer
     //                                picker. It does NOT disable CARTO
@@ -185,13 +210,13 @@
     //                                customize-v2.js and the standalone
     //                                geofilter-builder call
     //                                MC_getCartoTileUrl directly and still
-    //                                render CARTO (and still need a token).
-    //   - token missing/empty      → the styles stay registered and keep the
+    //                                render CARTO (and still need a key).
+    //   - key missing/empty        → the styles stay registered and keep the
     //                                pre-key, keyless behaviour, which CARTO
     //                                now serves watermarked. Set carto.key
     //                                to clear the watermark.
-    //   - token non-empty          → every CARTO URL is authenticated.
-    // Registration is not used as a key-enforcement mechanism: the token
+    //   - key non-empty            → every CARTO URL is authenticated.
+    // Registration is not used as a key-enforcement mechanism: the key
     // question is answered by MC_getCartoTileUrl, which every CARTO surface
     // now goes through.
     var HAS_CARTO = !_cfg || !_cfg.providers || !_cfg.providers.carto || _cfg.providers.carto.enabled !== false;

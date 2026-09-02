@@ -594,7 +594,7 @@
   //     Resolving on read instead of on parse sidesteps that entirely.
   //   - async config: MC_MAP_CFG only arrives with the
   //     /api/config/client fetch below, so a value frozen now would never
-  //     pick up the token. Every read re-resolves, so the first read after
+  //     pick up the key. Every read re-resolves, so the first read after
   //     config lands returns the keyed URL with no re-assignment plumbing.
   // Assignment is still supported (see the cfg.tiles.dark / map.tiles.darkUrl
   // overrides below): setting the property pins an explicit URL and stops
