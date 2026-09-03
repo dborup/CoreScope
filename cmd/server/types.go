@@ -1562,11 +1562,13 @@ type ClientConfigResponse struct {
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when
 	// no geo_filter is configured.
 	GeoFilter *GeoFilterConfig `json:"geoFilter,omitempty"`
-	// Privacy is the operator-configured privacy-notice content for the
-	// #/privacy page. Omitted entirely unless privacy.enabled is true AND
-	// the block passes PrivacyConfig.Validate() — the frontend treats
-	// "field absent" as "feature off" (no nav link injected). See
-	// PrivacyClientConfig below and PrivacyConfig (config.go).
+	// Privacy is the opt-in signal for the #/privacy page, not its content:
+	// the notice is a fixed document in public/privacy.js. Omitted entirely
+	// when privacy is unconfigured or privacy.enabled is false — the
+	// frontend treats "field absent" as "feature off" (no nav link
+	// injected). When enabled, the published block is exactly
+	// {"enabled":true}: no operator-configured text is ever sent to the
+	// frontend. See PrivacyClientConfig below and PrivacyConfig (config.go).
 	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
 }
 
