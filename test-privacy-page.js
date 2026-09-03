@@ -45,32 +45,121 @@ assert(escMatch, 'could not extract escapeHtml from public/app.js');
 // Mirrors validPrivacy() in cmd/server/privacy_config_test.go: the server
 // only ever publishes a block that passed Validate(), so the page's fixture
 // is a COMPLETE one. REQUIRED_FIELDS drives the "blank one at a time" tests.
-const REQUIRED_FIELDS = [
-  'controllerName', 'contactEmail', 'effectiveDate', 'purposesText',
-  'legalBasisType', 'legalBasisText', 'retentionText', 'recipientsText',
-  'dataSourcesText', 'thirdPartyServicesText', 'internationalTransfersText',
-  'browserStorageText', 'serverLogsText',
-  'automatedDecisionMakingText',
-];
+// ─────────────────────── the authoritative notice ───────────────────────
+//
+// This is the notice, verbatim, in the Markdown it was signed off in. It is
+// the single source of truth for the golden test below: the rendered page,
+// normalised back to visible text, must equal this EXACTLY -- so extra,
+// missing or reworded text all fail, not just missing text.
+//
+// String.raw is load-bearing: a plain template literal would let JS eat the
+// Markdown escapes (\. \@) and the trailing-backslash hard line break before
+// the test ever parsed them, quietly weakening the comparison.
+const AUTHORITATIVE = String.raw`## WHO WE ARE
 
-const VALID = {
+meshview\.dk is a non-commercial community service that visualises the Danish [MeshCore](https://meshcore.co.uk/) LoRa mesh network. It runs the open-source CoreScope analyzer. The data controller is:
+
+**The operator of meshview\.dk**\
+Contact: **kontakt\@meshview\.dk**
+
+## WHAT THIS SITE DOES
+
+Volunteer-run observer nodes listen to MeshCore radio traffic and forward the packets they hear to this site over MQTT. The site displays a live map and analysis of the network so that node operators and the community can see coverage, diagnose problems, and keep the mesh healthy.
+
+## WHAT DATA WE PROCESS
+
+All data originates from radio packets that MeshCore devices broadcast themselves:
+
+- **Node adverts**: node name, role, public key, and the GPS position the node is configured to advertise. Node names are chosen by their operators and may contain a personal handle or name; an advertised position may reveal where the operator lives.
+- **Packet metadata**: timestamps, packet types, routing paths, hop counts, and signal measurements (SNR/RSSI) as heard by observers.
+- **Node telemetry**: values a node chooses to broadcast, such as battery level and uptime.
+- **Public channel messages**: messages sent on well-known public channels (whose encryption keys are community knowledge) are decoded and shown, including the sender's node name and timestamp. Direct (private) messages are end-to-end encrypted and are never decrypted or displayed.
+
+**Website visitors**: the site uses no analytics, tracking, or advertising cookies. [Our web server keeps standard technical logs, including IP addresses, for a short period for security and abuse prevention.]
+
+## WHY, AND ON WHAT LEGAL BASIS
+
+We process this data under **legitimate interest** (GDPR Art. 6(1)(f)): operating, mapping, and troubleshooting a community radio network — the same purpose for which node operators broadcast this information in the first place. The data shown is limited to what devices already transmit openly over the air, and an easy opt-out exists (below).
+
+## HOW LONG WE KEEP IT
+
+Packet data, telemetry, and decoded public-channel messages are kept **indefinitely**, as a historical archive used for long-term network analysis (coverage trends, node health over time). We periodically review the archive and delete data that is no longer needed for that purpose. The node directory and map reflect the **current** state of the network; nodes that stop advertising disappear from the live view, though their historical packets remain in the archive.
+
+## WHO CAN SEE IT, AND WHO WE SHARE IT WITH
+
+The site is publicly accessible, so anything displayed here can be seen by anyone. We do not sell data or share it with third parties, apart from the hosting provider that technically operates the server [hosted within the EU/EEA].
+
+## A NOTE ON PUBLIC CHANNELS
+
+Public MeshCore channels are receivable and readable by anyone with a radio. Please do not send personal information over them — this site, like any other listener, will pick it up and keep it in the archive.`;
+
+// The page is opt-in only; there is no operator content to configure.
+const ENABLED = { enabled: true };
+
+// A pre-removal config.json: every operator-text key the model used to
+// carry. None of it may reach the page.
+const STALE_CONFIG = {
   enabled: true,
-  controllerName: 'Example Mesh Community',
-  contactEmail: 'privacy@example.org',
-  effectiveDate: '2026-09-01',
-  purposesText: 'Operating and troubleshooting the community network.',
-  legalBasisType: 'public_task',
-  legalBasisText: 'Processing is necessary for our community task.',
-  retentionText: 'Packet data is deleted after 30 days.',
-  recipientsText: 'Website and API visitors; our hosting provider.',
-  dataSourcesText: 'Observer nodes, radio packets and derived measurements.',
-  thirdPartyServicesText: 'Map tiles are loaded from a third-party provider.',
-  internationalTransfersText: 'No transfers outside the EU/EEA.',
-  browserStorageText: 'Interface settings are stored in your browser.',
-  serverLogsText: 'Our proxy keeps access logs for 14 days.',
-  automatedDecisionMakingText: 'No automated decision-making is used.',
+  controllerName: 'STALE-controller',
+  contactEmail: 'stale@example.invalid',
+  effectiveDate: 'STALE-date',
+  purposesText: 'STALE-purposes',
+  legalBasisType: 'legitimate_interests',
+  legalBasisText: 'STALE-basis',
+  legitimateInterestsText: 'STALE-interests',
+  retentionText: 'STALE-retention',
+  recipientsText: 'STALE-recipients',
+  dataSourcesText: 'STALE-sources',
+  thirdPartyServicesText: 'STALE-third-party',
+  internationalTransfersText: 'STALE-transfers',
+  browserStorageText: 'STALE-storage',
+  serverLogsText: 'STALE-logs',
+  automatedDecisionMakingText: 'STALE-automated',
+  rightsRequestText: 'STALE-rights',
+  supervisoryAuthorityName: 'STALE-authority',
+  supervisoryAuthorityUrl: 'https://stale.example',
+  dpoName: 'STALE-dpo',
+  dpoContact: 'STALE-dpo-contact',
+  hiddenNamePrefixes: ['STALE-prefix'],
 };
-const withField = (k, v) => Object.assign({}, VALID, { [k]: v });
+
+// One normaliser, applied to BOTH sides, so the comparison is about words
+// and order -- never about indentation or how a line happens to wrap.
+const normalize = (s) => s.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+
+// Markdown inline syntax -> the text a reader actually sees.
+const inlineText = (s) => s
+  .replace(/\[([^\]]+)\]\([^)\s]+\)/g, '$1')   // [label](url) -> label
+  .replace(/\*\*([\s\S]+?)\*\*/g, '$1')        // **bold** -> bold
+  .replace(/\\([\s\S])/g, '$1');                // \. \@ -> . @
+
+// The authoritative Markdown, reduced to the visible text it specifies.
+function expectedVisibleText(md) {
+  const out = [];
+  md.trim().split(/\n\s*\n/).forEach((chunk) => {
+    chunk = chunk.replace(/^\n+|\n+$/g, '');
+    if (chunk.startsWith('## ')) { out.push(chunk.slice(3).trim()); return; }
+    const lines = chunk.split('\n');
+    if (lines.every((l) => l.trim().startsWith('- '))) {
+      lines.forEach((l) => out.push(inlineText(l.trim().slice(2))));
+      return;
+    }
+    // A trailing backslash is a Markdown hard line break.
+    out.push(chunk.split(/\\\n/).map((part) => inlineText(part.replace(/\n/g, ' '))).join('\n'));
+  });
+  return normalize(out.join('\n'));
+}
+
+// Rendered markup -> the visible text. Block ends and <br> become line
+// breaks; everything else is tags, which carry no words.
+function visibleText(html) {
+  return normalize(html
+    .replace(/<br\s*\/?>/g, '\n')
+    .replace(/<\/(h1|h2|h3|h4|p|li|div)>/g, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'"));
+}
 
 // ───────────────────────── privacy.js render sandbox ─────────────────────────
 
@@ -287,7 +376,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
   });
 
   await test('enabled:false renders the not-published state (stale-cache guard)', async () => {
-    const html = await renderWith({ enabled: false, operatorName: 'X' });
+    const html = await renderWith({ enabled: false });
     assert(html.includes('has not published a privacy notice'), 'expected disabled state');
   });
 
@@ -298,10 +387,10 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     const container = { innerHTML: '' };
     const p = pages.privacy.init(container);
     assert(container.innerHTML.includes('Loading'), 'should show a loading state while config is in flight');
-    ctx.window.MC_PRIVACY = VALID;   // config lands
+    ctx.window.MC_PRIVACY = ENABLED; // config lands
     settle({});
     await p;
-    assert(container.innerHTML.includes('Example Mesh Community'),
+    assert(container.innerHTML.includes('WHO WE ARE'),
       'must render the notice once config resolves, not the disabled state');
   });
 
@@ -312,397 +401,173 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     assert(html.includes('has not published a privacy notice'), 'expected disabled state on config failure');
   });
 
-  // ─── content correctness: no invented legal text ──────────────────────────
+  // ─── GOLDEN: the page is the notice, exactly ─────────────────────────────
 
-  await test('renders every configured field', async () => {
-    const html = await renderWith(VALID);
-    assert(html.includes('Example Mesh Community'), 'controller name missing');
-    assert(html.includes('href="mailto:privacy@example.org"'), 'mailto link missing');
-    assert(html.includes('2026-09-01'), 'effective date missing');
-    for (const f of REQUIRED_FIELDS) {
-      const v = VALID[f];
-      if (f === 'legalBasisType') continue;   // rendered as a friendly label
-      assert(html.includes(v), 'field ' + f + ' (' + v + ') missing from the page');
+  await test('GOLDEN: rendered visible text equals the authoritative notice, exactly', async () => {
+    const actual = visibleText(await renderWith(ENABLED));
+    const expected = expectedVisibleText(AUTHORITATIVE);
+    if (actual !== expected) {
+      // Report the first divergent line so a reword is obvious, not a wall.
+      const a = actual.split('\n'), e = expected.split('\n');
+      let i = 0;
+      while (i < Math.max(a.length, e.length) && a[i] === e[i]) i++;
+      assert.fail(
+        `visible text diverges at line ${i + 1} of ${e.length}\n` +
+        `  expected: ${JSON.stringify(e[i])}\n` +
+        `  actual  : ${JSON.stringify(a[i])}\n` +
+        `  (lines: expected ${e.length}, actual ${a.length})`);
     }
-    assert(html.includes('Public task'), 'legalBasisType should render as a readable label');
+    assert.strictEqual(actual, expected);
   });
 
-  await test('each REQUIRED field blanked individually → notice withheld', async () => {
-    for (const f of REQUIRED_FIELDS) {
-      const html = await renderWith(withField(f, ''));
-      if (f === 'controllerName') {
-        assert(html.includes('has not published a privacy notice'),
-          'blank controllerName must withhold the notice client-side too');
-      } else {
-        // The server withholds these; the page must at minimum never
-        // invent a value for them.
-        assert(!html.includes('undefined') && !html.includes('null'),
-          'blank ' + f + ' must not leak a placeholder into the page');
-      }
-    }
+  await test('GOLDEN: no config value can add, remove or reword a single line', async () => {
+    // Same assertion, but driven by a full pre-removal config. Byte-identical
+    // output proves the page reads nothing but the enabled flag.
+    const clean = visibleText(await renderWith(ENABLED));
+    const stale = visibleText(await renderWith(STALE_CONFIG));
+    assert.strictEqual(stale, clean, 'a stale config changed the rendered notice');
+    assert(!/STALE-/.test(stale), 'a stale config value reached the page');
+    assert.strictEqual(stale, expectedVisibleText(AUTHORITATIVE));
   });
 
-  await test('legitimateInterestsText is rendered for the legitimate_interests basis', async () => {
-    const cfg = Object.assign({}, VALID, {
-      legalBasisType: 'legitimate_interests',
-      legitimateInterestsText: 'Keeping the community mesh operable; see our assessment.',
-    });
-    const html = await renderWith(cfg);
-    assert(html.includes('Legitimate interests'), 'basis label missing');
-    assert(html.includes('Keeping the community mesh operable'), 'the specific interests must be shown');
+  // ─── structure of the notice ──────────────────────────────────────────────
+
+  await test('exactly 7 headings, in the authoritative order', async () => {
+    const html = await renderWith(ENABLED);
+    const headings = (html.match(/<h[1-6][^>]*>[\s\S]*?<\/h[1-6]>/g) || [])
+      .map((h) => h.replace(/<[^>]*>/g, '').trim());
+    assert.deepStrictEqual(headings, [
+      'WHO WE ARE',
+      'WHAT THIS SITE DOES',
+      'WHAT DATA WE PROCESS',
+      'WHY, AND ON WHAT LEGAL BASIS',
+      'HOW LONG WE KEEP IT',
+      'WHO CAN SEE IT, AND WHO WE SHARE IT WITH',
+      'A NOTE ON PUBLIC CHANNELS',
+    ]);
+    assert.strictEqual(headings.length, 7, 'expected exactly 7 headings');
   });
 
-  await test('optional DPO section appears only when configured', async () => {
-    const without = await renderWith(VALID);
-    assert(!without.includes('Data protection officer'), 'no DPO section when unconfigured');
-    // Both fields together: the server refuses to publish a name without a
-    // contact route (PrivacyConfig.Validate), so that pairing is the only
-    // shape the page can actually receive with a name in it.
-    const withDpo = await renderWith(Object.assign({}, VALID, {
-      dpoName: 'Jane Doe', dpoContact: 'dpo@example.org',
-    }));
-    assert(withDpo.includes('Data protection officer') && withDpo.includes('Jane Doe') &&
-      withDpo.includes('dpo@example.org'), 'DPO section should render when configured');
+  await test('exactly 4 data points, in order, each with its bold lead-in', async () => {
+    const html = await renderWith(ENABLED);
+    const items = (html.match(/<li>[\s\S]*?<\/li>/g) || []);
+    assert.strictEqual(items.length, 4, 'expected exactly 4 list items');
+    const leads = items.map((li) => (li.match(/<strong>([^<]*)<\/strong>/) || [])[1]);
+    assert.deepStrictEqual(leads,
+      ['Node adverts', 'Packet metadata', 'Node telemetry', 'Public channel messages']);
+    assert.strictEqual((html.match(/<ul>/g) || []).length, 1, 'expected exactly one list');
   });
 
-  await test('DPO contact alone still renders the section', async () => {
-    // A contact without a name is a valid published shape: it tells the
-    // reader where to write even though no individual is named.
-    const html = await renderWith(Object.assign({}, VALID, { dpoContact: 'dpo@example.org' }));
-    assert(html.includes('Data protection officer') && html.includes('dpo@example.org'),
-      'a contact-only DPO block should still render');
+  await test('the MeshCore link points at the authoritative URL and is safe', async () => {
+    const html = await renderWith(ENABLED);
+    const links = html.match(/<a\b[^>]*>/g) || [];
+    assert.strictEqual(links.length, 1, 'the notice has exactly one link');
+    assert(/href="https:\/\/meshcore\.co\.uk\/"/.test(html), 'MeshCore href is wrong or missing');
+    assert(/>MeshCore<\/a>/.test(html), 'the link text must be MeshCore');
+    assert(/rel="noopener noreferrer"/.test(html), 'external link needs rel=noopener noreferrer');
+    assert(!/href="(?!https?:)/i.test(html), 'only http(s) hrefs may be emitted');
+    assert(!/javascript:|data:/i.test(html), 'no javascript:/data: URL anywhere');
   });
 
-  await test('ships NO default retention paragraph', async () => {
-    const html = await renderWith(VALID);
-    assert(!html.includes('historical archive'),
-      'the old fabricated default retention paragraph must be gone');
-    const bare = await renderWith({ enabled: true, contactEmail: 'a@b.co' });
-    assert(!bare.includes('historical archive'),
-      'a config missing retentionText must not fall back to invented text');
+  await test('meshview.dk and kontakt@meshview.dk render without backslashes', async () => {
+    const text = visibleText(await renderWith(ENABLED));
+    assert(!text.includes('\\'), 'a Markdown escape leaked into the visible text');
+    assert(text.includes('meshview.dk is a non-commercial community service'),
+      'meshview.dk must render as plain text in the opening sentence');
+    assert(text.includes('The operator of meshview.dk'), 'controller line must render unescaped');
+    assert(text.includes('Contact: kontakt@meshview.dk'), 'contact must render unescaped');
+    assert(!text.includes('meshview\\.dk'), 'escaped domain leaked');
+    assert(!text.includes('kontakt\\@'), 'escaped address leaked');
+    // The contact is bold text, not a mailto link.
+    const html = await renderWith(ENABLED);
+    assert(html.includes('<strong>kontakt@meshview.dk</strong>'), 'contact must be bold text');
+    assert(!/mailto:/.test(html), 'the notice specifies no mailto link');
   });
 
-  await test('does NOT assert a legal basis on the operator behalf', async () => {
-    const html = await renderWith(VALID);
-    assert(!/processed under <strong>legitimate interest<\/strong>/.test(html),
-      'the software must not hardcode legitimate interest');
-    assert(html.includes('stated by the operator'),
-      'the page must attribute the legal basis to the operator');
+  await test('both square-bracket passages survive verbatim, brackets included', async () => {
+    const text = visibleText(await renderWith(ENABLED));
+    assert(text.includes('[Our web server keeps standard technical logs, including IP addresses, ' +
+      'for a short period for security and abuse prevention.]'),
+      'the server-log passage must keep its square brackets');
+    assert(text.includes('[hosted within the EU/EEA]'),
+      'the hosting passage must keep its square brackets');
   });
 
-  await test('controllerName has NO fallback — blank withholds the notice', async () => {
-    for (const v of ['', '   ', undefined, null]) {
-      const html = await renderWith(withField('controllerName', v));
-      assert(html.includes('has not published a privacy notice'),
-        'blank controllerName (' + JSON.stringify(v) + ') must not render a notice');
-    }
+  await test('no extra privacy sections: every removed section is gone', async () => {
+    const text = visibleText(await renderWith(STALE_CONFIG));
+    [
+      'Privacy Notice', 'Effective date', 'Data controller', 'Privacy contact',
+      'What data this site processes', 'Purpose of processing', 'Legal basis',
+      'Sources of the data', 'Who can receive the data', 'Retention',
+      'Channel and direct messages', 'Storage in your browser',
+      'Server and proxy logs', 'External services', 'International transfers',
+      'Hidden nodes', 'Your rights', 'Automated decision-making',
+      'Changes to this notice', 'Data protection officer', 'Datatilsynet',
+      'supervisory authority', 'CoreScope deployment provides status information',
+      'not automatically granted', 'Send privacy requests to',
+    ].forEach((s) => assert(!text.includes(s), 'removed section still rendered: ' + s));
+    // Structural: exactly the blocks the notice specifies, nothing spare.
+    const html = await renderWith(ENABLED);
+    assert.strictEqual((html.match(/<h2/g) || []).length, 7, 'exactly 7 section headings');
+    assert.strictEqual((html.match(/<p>/g) || []).length, 9, 'exactly 9 paragraphs');
+    assert(!/<p>\s*<\/p>/.test(html), 'empty paragraph left behind');
+    assert(!/<h2[^>]*>\s*<\/h2>/.test(html), 'empty heading left behind');
+    assert(!/<ul>\s*<\/ul>|<li>\s*<\/li>/.test(html), 'empty list left behind');
+    assert(!/<div[^>]*>\s*<\/div>/.test(html), 'empty wrapper left behind');
+    assert(!/<hr\b/.test(html), 'no separator element belongs in the notice');
+    assert.strictEqual((html.match(/<div/g) || []).length, 1, 'exactly one wrapper div');
+  });
+
+  // ─── safety of the fixed document ─────────────────────────────────────────
+
+  await test('the page reads nothing from config but the enabled flag', async () => {
     const src = fs.readFileSync('public/privacy.js', 'utf8');
-    assert(!src.includes('The operator of this site'),
-      'the generic operator fallback must be gone from the source entirely');
-    assert(!/DEFAULT_OPERATOR/.test(src), 'no default-operator constant should remain');
+    const reads = src.match(/cfg\.[A-Za-z_$][\w$]*/g) || [];
+    assert.deepStrictEqual([...new Set(reads)], ['cfg.enabled'],
+      'privacy.js must read only cfg.enabled, got: ' + [...new Set(reads)].join(', '));
+    assert(!/MC_PRIVACY\s*\.\s*[A-Za-z]/.test(src), 'no direct field read off MC_PRIVACY');
   });
 
-  // ─── hidden-name prefixes: real list, or silence ──────────────────────────
-
-  await test('names the ACTUAL configured hidden prefixes', async () => {
-    const html = await renderWith(Object.assign({}, VALID, { hiddenNamePrefixes: ['##'] }));
-    assert(html.includes('hides nodes whose name begins with'), 'the real prefix should be described');
-    assert(html.includes('<span class="mono">##</span>'), 'the real configured prefix must be shown');
-  });
-
-  await test('multiple prefixes are all listed', async () => {
-    const html = await renderWith(Object.assign({}, VALID, { hiddenNamePrefixes: ['##', 'zz'] }));
-    assert(html.includes('##') && html.includes('zz'), 'both prefixes must be shown');
-  });
-
-  await test('no configured prefixes → no self-service promise', async () => {
-    const html = await renderWith(VALID);
-    assert(!html.includes('hides nodes whose name begins with'),
-      'must not describe prefix hiding when none is configured');
-    assert(html.includes('no name-prefix hiding configured'), 'must say so explicitly');
-  });
-
-  await test('does not hardcode the no-entry emoji as a guarantee', async () => {
-    const src = fs.readFileSync('public/privacy.js', 'utf8');
-    assert(!src.includes('0x1F6AB'), 'the hardcoded hidden-prefix character must be gone');
-    const html = await renderWith(VALID);
-    assert(!html.includes(String.fromCodePoint(0x1F6AB)),
-      'no hardcoded prefix character should reach the page');
-  });
-
-  await test('explains the real scope of hiding (dashboard/API, not the mesh; history may remain)', async () => {
-    const html = await renderWith(Object.assign({}, VALID, { hiddenNamePrefixes: ['##'] }));
-    assert(/dashboard and API/i.test(html), 'must scope hiding to this site, not the mesh');
-    assert(/does not remove a node from the radio network/i.test(html),
-      'must say the node stays on the radio network');
-    assert(/other listeners still receive/i.test(html), 'must say others still receive it');
-    assert(/does not by itself delete stored packets/i.test(html),
-      'must be honest that recorded history can persist');
-  });
-
-  // ─── escaping + mailto edge cases ─────────────────────────────────────────
-
-  await test('config values are HTML-escaped (XSS)', async () => {
-    const html = await renderWith(Object.assign({}, VALID, {
+  await test('hostile config values cannot inject markup', async () => {
+    const html = await renderWith(Object.assign({}, STALE_CONFIG, {
       controllerName: '<img src=x onerror=alert(1)>',
-      contactEmail: '"><script>alert(2)</script>',
-      retentionText: '<b onmouseover=alert(3)>bold</b>',
-      legalBasisText: '<svg onload=alert(4)>',
       purposesText: '</p><iframe src=evil>',
+      supervisoryAuthorityUrl: 'javascript:alert(2)',
     }));
     assert(!html.includes('<img'), 'unescaped <img in output');
-    assert(!html.includes('<script'), 'unescaped <script in output');
-    assert(!html.includes('<b '), 'unescaped <b in output');
-    assert(!html.includes('<svg onload'), 'unescaped <svg in output');
-    assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'escaped controller name missing');
     assert(!html.includes('<iframe'), 'unescaped <iframe in output');
-    assert(!/href="javascript:/i.test(html), 'javascript: URL must never reach an href');
-    assert(!html.includes('href="mailto:"><'), 'contactEmail broke out of href attribute');
+    assert(!/onerror=/.test(html), 'event handler reached the DOM');
+    assert(!/javascript:/i.test(html), 'javascript: URL reached the DOM');
+    assert.strictEqual(visibleText(html), expectedVisibleText(AUTHORITATIVE),
+      'hostile config changed the rendered notice');
   });
 
-  await test('mailto href is percent-encoded: quotes, ampersand, query chars, CR/LF', async () => {
-    const cases = [
-      ['a"b@example.org', '%22'],
-      ['a&cc=x@example.org', '%26'],
-      ['a?subject=x@example.org', '%3F'],
-      ['a\r\nBcc:v@example.org', '%0D'],
-      ['a b@example.org', '%20'],
-      // encodeURIComponent leaves "'" alone; escapeHtml then renders it as
-      // &#39;, which cannot break a double-quoted attribute either way.
-      ["a'b@example.org", '&#39;'],
-    ];
-    for (const [addr, expected] of cases) {
-      const html = await renderWith(Object.assign({}, VALID, { contactEmail: addr }));
-      const m = html.match(/href="mailto:([^"]*)"/);
-      assert(m, 'no mailto href rendered for ' + JSON.stringify(addr));
-      assert(m[1].includes(expected),
-        JSON.stringify(addr) + ' must be encoded (' + expected + '); got: ' + m[1]);
-      assert(!/[\r\n]/.test(m[1]), 'raw CR/LF must never survive into the href');
-      // What the browser actually navigates to is the entity-DECODED href.
-      // encodeURIComponent runs first, so any character that could act as a
-      // mailto separator is already percent-encoded; the only entities that
-      // can appear come from escapeHtml re-encoding characters
-      // encodeURIComponent leaves alone (e.g. "'" -> &#39;). Decode before
-      // asserting, otherwise the "&" that starts an entity looks like a
-      // separator.
-      const decoded = m[1]
-        .replace(/&#39;/g, "'").replace(/&quot;/g, '"')
-        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&');
-      assert(decoded.indexOf('?') < 0 && decoded.indexOf('&') < 0,
-        'no raw mailto query separator may survive: ' + decoded);
-      assert(!/[\r\n]/.test(decoded), 'no CR/LF after entity decoding either');
-    }
-  });
-
-  await test('mailto keeps a normal address readable (@ not over-encoded)', async () => {
-    const html = await renderWith(VALID);
-    assert(html.includes('href="mailto:privacy@example.org"'),
-      'a clean address should render as-is, not percent-mangled');
-  });
-
-  await test('the old problematic phrasings are gone from the source', async () => {
+  await test('the notice text lives in code, not in config', async () => {
     const src = fs.readFileSync('public/privacy.js', 'utf8');
-    const banned = [
-      // invented operator identity
-      ['The operator of this site', 'generic controller fallback'],
-      ['DEFAULT_OPERATOR', 'default-operator constant'],
-      // invented retention policy
-      ['historical archive', 'fabricated retention paragraph'],
-      // legal basis asserted by the software
-      ['processed under <strong>legitimate interest</strong>', 'hardcoded legitimate-interest claim'],
-      ['GDPR Art. 6(1)(f)', 'hardcoded article citation'],
-      // over-broad claim about public channels
-      ['receivable and readable by anyone with a radio', 'over-broad public-channel claim'],
-      // hardcoded hide character + unconditional promises
-      ['0x1F6AB', 'hardcoded hide-prefix character'],
-      ['it will be hidden or removed', 'unconditional hiding/removal promise'],
-      ['disappears from this site', 'unconditional disappearance promise'],
-    ];
-    for (const [needle, why] of banned) {
-      assert(!src.includes(needle), 'removed phrasing reappeared (' + why + '): ' + needle);
-    }
-    const html = await renderWith(VALID);
-    for (const [needle, why] of banned) {
-      assert(!html.includes(needle), 'removed phrasing rendered (' + why + '): ' + needle);
-    }
-  });
-
-  await test('the page states the correct message semantics', async () => {
-    const html = await renderWith(VALID);
-    assert(/Direct-message content is not decrypted/i.test(html),
-      'must say direct message CONTENT is not decrypted');
-    assert(/metadata associated with direct messages/i.test(html),
-      'must say direct-message METADATA is still processed');
-    assert(/may become readable later if a corresponding key/i.test(html),
-      'must say stored ciphertext may be decodable later');
-    assert(/channels whose keys are available to this deployment/i.test(html),
-      'channel decoding must be scoped to keys this deployment holds');
-  });
-
-  await test('the page names both radio traffic and CoreScope-generated data', async () => {
-    const html = await renderWith(VALID);
-    assert(/Reception metadata produced by observer nodes/i.test(html),
-      'must name observer-produced reception metadata');
-    assert(/Derived information/i.test(html), 'must name derived analytics');
-    assert(/Observer identity, status and operational metrics/i.test(html),
-      'must name observer metadata');
-  });
-
-  // ─── the removed "Your rights" section (permanent deletion) ───────────────
-  //
-  // The section was deleted outright, not hidden behind a flag: there is no
-  // config key that can bring it back. These tests fail if any part of it --
-  // heading, boilerplate, request routing, GDPR article reference, public
-  // channel note, or the supervisory-authority complaint block -- reappears
-  // in the rendered page, and if a stale deployment's config could smuggle
-  // it back in through the removed fields.
-
-  await test('removed: no "Your rights" heading is rendered', async () => {
-    const html = await renderWith(VALID);
-    assert(!/Your rights/i.test(html), '"Your rights" heading must not render');
-    assert(!/Your rights and opting out/i.test(html),
-      '"Your rights and opting out" must not render');
-    // The section used the Phosphor "scroll" icon and nothing else does.
-    assert(!/ph-scroll/.test(html), 'the rights-section icon must not render');
-  });
-
-  await test('removed: no generic rights boilerplate is rendered', async () => {
-    const html = await renderWith(VALID);
-    [
-      /Depending on the circumstances/i,
-      /rights to request access/i,
-      /correction, erasure, restriction/i,
-      /data portability/i,
-      /object to processing/i,
-      /not automatically granted/i,
-      /The operator will assess/i,
-    ].forEach((re) => assert(!re.test(html), 'rights boilerplate still rendered: ' + re));
-  });
-
-  await test('removed: no request-routing or complaint text is rendered', async () => {
-    const html = await renderWith(VALID);
-    assert(!/Send privacy requests to/i.test(html),
-      '"Send privacy requests to" must not render');
-    assert(!/If you are dissatisfied/i.test(html), 'complaint intro must not render');
-    assert(!/you may complain to/i.test(html), 'complaint routing must not render');
-    assert(!/supervisory authority/i.test(html), 'supervisory authority must not render');
-    assert(!/Datatilsynet/i.test(html), 'authority name must not render');
-    assert(!/datatilsynet\.dk/i.test(html), 'authority link must not render');
-  });
-
-  await test('removed: no hide/remove-my-node or GDPR-article text is rendered', async () => {
-    const html = await renderWith(VALID);
-    assert(!/we will hide or remove it/i.test(html),
-      'node hide/remove promise must not render');
-    assert(!/Arts?\. 15/i.test(html), 'GDPR Art. 15-21 reference must not render');
-    assert(!/15\u2013?21|15-21/.test(html), 'GDPR article range must not render');
-    assert(!/lodge a complaint/i.test(html), 'complaint wording must not render');
-  });
-
-  await test('removed: public-channel note from the rights block is not rendered', async () => {
-    const html = await renderWith(VALID);
-    assert(!/A note on public channels/i.test(html),
-      'the rights-block public-channel heading must not render');
-    assert(!/receivable and readable by anyone with a radio/i.test(html),
-      'the rights-block public-channel text must not render');
-  });
-
-  await test('removed: stale config values for the deleted fields cannot resurface', async () => {
-    // A deployment upgrading in place still has the old keys in config.json
-    // and the server no longer strips them from ITS side only -- the page must
-    // ignore them outright.
-    const html = await renderWith(Object.assign({}, VALID, {
-      rightsRequestText: 'SHOULD-NEVER-RENDER-rights',
-      supervisoryAuthorityName: 'SHOULD-NEVER-RENDER-authority',
-      supervisoryAuthorityUrl: 'https://should-never-render.example',
-    }));
-    assert(!html.includes('SHOULD-NEVER-RENDER-rights'), 'rightsRequestText still rendered');
-    assert(!html.includes('SHOULD-NEVER-RENDER-authority'), 'supervisoryAuthorityName still rendered');
-    assert(!html.includes('should-never-render.example'), 'supervisoryAuthorityUrl still rendered');
-  });
-
-  await test('removed: the page leaves no empty heading, wrapper or separator', async () => {
-    const html = await renderWith(VALID);
-    // Every h3 the page emits must carry a real title and be followed by
-    // content, so a deleted section cannot leave a bare heading behind.
-    const headings = html.match(/<h3 class="privacy-h">.*?<\/h3>/g) || [];
-    assert(headings.length > 0, 'expected the page to still render sections');
-    headings.forEach((h) => {
-      const text = h.replace(/<[^>]*>/g, '').trim();
-      assert(text.length > 0, 'empty section heading rendered: ' + h);
-    });
-    assert(!/<h3 class="privacy-h">[^<]*<\/h3>\s*<h3/.test(html),
-      'two consecutive headings means a section body went missing');
-    assert(!/<p>\s*<\/p>/.test(html), 'empty paragraph left behind');
-    assert(!/<div[^>]*>\s*<\/div>/.test(html), 'empty wrapper left behind');
-    assert(!/<hr\s*\/?>\s*<\/div>/.test(html), 'orphan separator before the page close');
-    // "Hidden nodes" used to be followed by "Your rights"; it must now be
-    // followed directly by "Automated decision-making".
-    const order = headings.map((h) => h.replace(/<[^>]*>/g, '').trim());
-    const hidden = order.indexOf('Hidden nodes');
-    assert(hidden >= 0, '"Hidden nodes" section missing');
-    assert.strictEqual(order[hidden + 1], 'Automated decision-making',
-      'expected Hidden nodes -> Automated decision-making, got ' + order[hidden + 1]);
-  });
-
-  await test('removed: privacy.js source carries no rights-section code', async () => {
-    const src = fs.readFileSync('public/privacy.js', 'utf8');
-    assert(!/supervisoryAuthority/i.test(src), 'privacy.js still reads a supervisoryAuthority field');
-    assert(!/rightsRequestText/.test(src), 'privacy.js still reads rightsRequestText');
-    assert(!/Your rights/i.test(src), 'privacy.js still contains the rights heading');
-    assert(!/safeUrl/.test(src), 'safeUrl became dead with the section and must be gone');
-  });
-
-  await test('removed: the fields are gone from the Go config, DTO and example', async () => {
-    const gone = ['RightsRequestText', 'SupervisoryAuthorityName', 'SupervisoryAuthorityURL'];
-    ['cmd/server/config.go', 'cmd/server/types.go', 'cmd/server/routes.go'].forEach((f) => {
-      const src = fs.readFileSync(f, 'utf8');
-      gone.forEach((g) => assert(!src.includes(g), f + ' still references ' + g));
-    });
+    ['WHO WE ARE', 'A NOTE ON PUBLIC CHANNELS', 'https://meshcore.co.uk/'].forEach((s) =>
+      assert(src.includes(s), 'privacy.js must carry the notice itself: ' + s));
     const ex = JSON.parse(fs.readFileSync('config.example.json', 'utf8'));
-    ['rightsRequestText', 'supervisoryAuthorityName', 'supervisoryAuthorityUrl'].forEach((k) => {
-      assert(!(k in ex.privacy), 'config.example.json still declares privacy.' + k);
-      assert(!('_comment_' + k in ex.privacy), 'config.example.json still documents privacy.' + k);
+    assert.deepStrictEqual(Object.keys(ex.privacy), ['enabled', '_comment'],
+      'config.example.json privacy block must be the opt-in flag plus its comment');
+    ['cmd/server/config.go', 'cmd/server/types.go', 'cmd/server/routes.go'].forEach((f) => {
+      const go = fs.readFileSync(f, 'utf8');
+      ['ControllerName', 'PurposesText', 'RetentionText', 'SupervisoryAuthorityName', 'DPOName']
+        .forEach((g) => assert(!go.includes(g), f + ' still references removed privacy field ' + g));
     });
   });
 
-  // ─── what MUST survive the removal ────────────────────────────────────────
-
-  await test('kept: contactEmail still renders as the privacy contact', async () => {
-    const html = await renderWith(VALID);
-    assert(/Privacy contact:/.test(html), 'the privacy contact line must survive');
-    assert(html.includes('privacy@example.org'), 'contact address must still render');
-    assert(html.includes('href="mailto:privacy@example.org"'),
-      'contact address must still be a mailto link');
-  });
-
-  await test('kept: every other section still renders with the temporary notice text', async () => {
-    const html = await renderWith(VALID);
-    [
-      'Privacy Notice', 'What data this site processes', 'Purpose of processing',
-      'Legal basis', 'Sources of the data', 'Who can receive the data', 'Retention',
-      'Channel and direct messages', 'Storage in your browser', 'Server and proxy logs',
-      'External services', 'International transfers', 'Hidden nodes',
-      'Automated decision-making', 'Changes to this notice',
-    ].forEach((h) => assert(html.includes(h), 'section missing after removal: ' + h));
-    assert(!html.includes('has not published a privacy notice'),
-      'a complete config must still render the notice');
-  });
-
-  await test('a complete config renders the page AND enables the nav surfaces', async () => {
-    const html = await renderWith(VALID);
-    assert(!html.includes('has not published a privacy notice'), 'complete config must render the notice');
-    assert(html.includes('Privacy Notice'), 'heading missing');
-    // ...and the same config drives both dynamic nav surfaces.
+  await test('an enabled config renders the notice AND enables the nav surfaces', async () => {
+    const html = await renderWith(ENABLED);
+    assert(!html.includes('has not published a privacy notice'), 'enabled must render the notice');
+    assert(html.includes('WHO WE ARE'), 'notice missing');
     const d = bootNav('public/nav-drawer.js', { withConfigPromise: true });
     const b = bootNav('public/bottom-nav.js', { withConfigPromise: true });
-    d.settle({ privacy: VALID });
-    b.settle({ privacy: VALID });
+    d.settle({ privacy: ENABLED });
+    b.settle({ privacy: ENABLED });
     await d.tick(); await b.tick();
     openMoreSheet(b.doc);
-    assert(drawerLinks(d.doc).includes('privacy'), 'drawer must show Privacy for a complete config');
-    assert(sheetLinks(b.doc).includes('privacy'), 'More sheet must show Privacy for a complete config');
+    assert(drawerLinks(d.doc).includes('privacy'), 'drawer must show Privacy when enabled');
+    assert(sheetLinks(b.doc).includes('privacy'), 'More sheet must show Privacy when enabled');
   });
 
   // ─── navigation lifecycle: nav-drawer ─────────────────────────────────────
@@ -711,7 +576,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     const h = bootNav('public/nav-drawer.js', { withConfigPromise: true });
     assert(!drawerLinks(h.doc).includes('privacy'),
       'no Privacy link before config — nothing is known yet');
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick();
     assert(drawerLinks(h.doc).includes('privacy'),
       'the drawer must reconcile once config lands (this was the permanent-omission bug)');
@@ -719,7 +584,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   await test('drawer shows exactly one Privacy link (no duplicates on refresh)', async () => {
     const h = bootNav('public/nav-drawer.js', { withConfigPromise: true });
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick(); await h.tick();
     const n = drawerLinks(h.doc).filter((r) => r === 'privacy').length;
     assert.strictEqual(n, 1, 'expected exactly one Privacy link, got ' + n);
@@ -767,7 +632,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     openMoreSheet(h.doc);                       // user is fast; config is not
     assert(h.doc.getElementById('bottomNavMoreSheet'), 'sheet should be built on open');
     assert(!sheetLinks(h.doc).includes('privacy'), 'no Privacy link yet — config has not landed');
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick();
     assert(sheetLinks(h.doc).includes('privacy'),
       'an already-open sheet must be reconciled once config lands (this was the race)');
@@ -775,7 +640,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   await test('More sheet opened AFTER config has the Privacy link immediately', async () => {
     const h = bootNav('public/bottom-nav.js', { withConfigPromise: true });
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick();
     openMoreSheet(h.doc);
     assert(sheetLinks(h.doc).includes('privacy'), 'sheet built post-config must include Privacy');
@@ -784,7 +649,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
   await test('More sheet shows exactly one Privacy link (no duplicates on refresh)', async () => {
     const h = bootNav('public/bottom-nav.js', { withConfigPromise: true });
     openMoreSheet(h.doc);
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick(); await h.tick();
     const n = sheetLinks(h.doc).filter((r) => r === 'privacy').length;
     assert.strictEqual(n, 1, 'expected exactly one Privacy link, got ' + n);
@@ -793,7 +658,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
   await test('More sheet refresh keeps the separator and dark-mode button intact', async () => {
     const h = bootNav('public/bottom-nav.js', { withConfigPromise: true });
     openMoreSheet(h.doc);
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick();
     const sheet = h.doc.getElementById('bottomNavMoreSheet');
     assert(sheet, 'sheet should exist');
@@ -817,7 +682,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   await test('More tab is active on #/privacy (after config)', async () => {
     const h = bootNav('public/bottom-nav.js', { withConfigPromise: true, hash: '#/privacy' });
-    h.settle({ privacy: VALID });
+    h.settle({ privacy: ENABLED });
     await h.tick();
     const moreTab = h.doc.querySelector('[data-bottom-nav-tab="more"]');
     assert(moreTab, 'more tab should exist');
@@ -848,8 +713,8 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     for (const enabled of [true, false]) {
       const d = bootNav('public/nav-drawer.js', { withConfigPromise: true });
       const b = bootNav('public/bottom-nav.js', { withConfigPromise: true });
-      d.settle({ privacy: enabled ? VALID : null });
-      b.settle({ privacy: enabled ? VALID : null });
+      d.settle({ privacy: enabled ? ENABLED : null });
+      b.settle({ privacy: enabled ? ENABLED : null });
       await d.tick(); await b.tick();
       openMoreSheet(b.doc);
       assert.strictEqual(

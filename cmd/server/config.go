@@ -7,9 +7,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -343,188 +340,15 @@ type CustomizerConfig struct {
 	DisabledTabs []string `json:"disabledTabs"`
 }
 
-// PrivacyConfig holds the operator-side fields for the privacy-notice page
-// (#/privacy). Every field is plain text by contract: the frontend renders
-// all values as TEXT, never markup (public/privacy.js), so operator config
-// can never inject HTML.
-//
-// The software ships NO default legal text and NO stand-in operator
-// identity. A privacy notice is a statement the operator makes about their
-// own deployment; CoreScope cannot know the controller, the purposes, the
-// retention rules or the lawful basis, and inventing any of them would be
-// worse than publishing nothing, because a fabricated notice looks
-// authoritative while being wrong. Enabling the page therefore requires
-// supplying every field below. Enabled with anything missing is a
-// configuration error (see Validate) and the notice is simply not
-// published.
-//
-// None of this is legal advice, and publishing the page does not by itself
-// make a deployment compliant.
+// PrivacyConfig is the entire privacy feature's configuration: one opt-in
+// switch. The notice itself is a FIXED document in public/privacy.js, not
+// operator text, so the published wording cannot drift from the notice that
+// was signed off. Nothing configured here reaches the page as content --
+// there is deliberately nothing to configure but whether to publish it.
 type PrivacyConfig struct {
-	// Enabled gates the whole feature: the injected nav link, the
-	// #/privacy page content, and the privacy field in /api/config/client.
-	// Enabling it makes every field marked REQUIRED below mandatory.
+	// Enabled publishes the #/privacy page and the nav links pointing at
+	// it. Default false: a deployment opts in explicitly.
 	Enabled bool `json:"enabled"`
-
-	// ControllerName is the data controller. REQUIRED — there is
-	// deliberately no fallback: a notice that cannot name who is
-	// responsible for the processing does not identify a controller at
-	// all, and a generic stand-in would misrepresent that as an answer.
-	ControllerName string `json:"controllerName,omitempty"`
-	// ContactEmail is the address for privacy questions and requests.
-	// REQUIRED: every remedy the page describes routes through it.
-	ContactEmail string `json:"contactEmail,omitempty"`
-	// EffectiveDate identifies the version of the notice. REQUIRED.
-	// Free text so operators can use their own date format.
-	EffectiveDate string `json:"effectiveDate,omitempty"`
-
-	// PurposesText describes what the deployment processes data FOR.
-	// REQUIRED.
-	PurposesText string `json:"purposesText,omitempty"`
-	// LegalBasisType is the structured lawful basis. REQUIRED. Structured
-	// rather than inferred: guessing the basis by pattern-matching free
-	// text would be both fragile and presumptuous, and the value decides
-	// whether LegitimateInterestsText is mandatory.
-	LegalBasisType string `json:"legalBasisType,omitempty"`
-	// LegalBasisText is the operator's own description of the basis.
-	// REQUIRED.
-	LegalBasisText string `json:"legalBasisText,omitempty"`
-	// LegitimateInterestsText describes the specific interests relied on.
-	// REQUIRED only when LegalBasisType is "legitimate_interests" —
-	// naming the basis without describing the interests is exactly the
-	// "merely write legitimate interest" failure the notice must avoid.
-	LegitimateInterestsText string `json:"legitimateInterestsText,omitempty"`
-
-	// RetentionText states how long data is kept, per category where they
-	// differ. REQUIRED: CoreScope has several independent retention knobs
-	// (packets, metrics, nodes, client-RX) that do not map one-to-one onto
-	// the categories the notice describes, so it cannot derive a sentence.
-	RetentionText string `json:"retentionText,omitempty"`
-	// RecipientsText names who can receive the data beyond site/API
-	// visitors (hosting, monitoring, other processors). REQUIRED.
-	RecipientsText string `json:"recipientsText,omitempty"`
-	// DataSourcesText describes where the data comes from. REQUIRED.
-	DataSourcesText string `json:"dataSourcesText,omitempty"`
-	// ThirdPartyServicesText lists external services the browser contacts
-	// (map/tile providers, CDNs, monitoring) and what they receive.
-	// REQUIRED — the deployment's own choice of providers, which CoreScope
-	// cannot enumerate for it.
-	ThirdPartyServicesText string `json:"thirdPartyServicesText,omitempty"`
-	// InternationalTransfersText states any transfers and safeguards, or
-	// explicitly that none apply. REQUIRED (an explicit "none" is a valid
-	// answer; silence is not).
-	InternationalTransfersText string `json:"internationalTransfersText,omitempty"`
-	// BrowserStorageText describes what this site stores in the visitor's
-	// browser. REQUIRED.
-	BrowserStorageText string `json:"browserStorageText,omitempty"`
-	// ServerLogsText describes server/proxy access logs, purpose and
-	// retention. REQUIRED — these live in the operator's infrastructure
-	// (reverse proxy, host), not in CoreScope.
-	ServerLogsText string `json:"serverLogsText,omitempty"`
-
-	// AutomatedDecisionMakingText states whether automated
-	// decision-making/profiling with legal or similarly significant
-	// effects is used. REQUIRED (a plain "not used" is a valid answer).
-	AutomatedDecisionMakingText string `json:"automatedDecisionMakingText,omitempty"`
-
-	// DPOName / DPOContact are OPTIONAL: most community deployments have
-	// no data protection officer, and the page simply omits the section
-	// when they are blank.
-	DPOName    string `json:"dpoName,omitempty"`
-	DPOContact string `json:"dpoContact,omitempty"`
-}
-
-// privacyEmailRe is a deliberately conservative address check. It proves
-// shape, never deliverability: exactly one "@", no whitespace or control
-// characters (CR/LF would enable header injection in a mailto:), no
-// characters that would start or forge a mailto query ("?", "&", quotes,
-// angle brackets), and a dotted domain. Anything it rejects is a
-// configuration mistake worth surfacing loudly rather than rendering.
-var privacyEmailRe = regexp.MustCompile(`^[^\s<>"'&?/\\,;:@]+@[^\s<>"'&?/\\,;:@]+\.[A-Za-z]{2,}$`)
-
-// privacyLegalBasisTypes are the GDPR Art. 6(1) lawful bases, as structured
-// values. Operators pick one; the page prints their own LegalBasisText
-// alongside it. "legitimate_interests" additionally requires
-// LegitimateInterestsText.
-var privacyLegalBasisTypes = map[string]bool{
-	"consent":              true,
-	"contract":             true,
-	"legal_obligation":     true,
-	"vital_interests":      true,
-	"public_task":          true,
-	"legitimate_interests": true,
-}
-
-// PrivacyLegalBasisTypes returns the accepted legalBasisType values, sorted,
-// for error messages and documentation.
-func PrivacyLegalBasisTypes() []string {
-	out := make([]string, 0, len(privacyLegalBasisTypes))
-	for k := range privacyLegalBasisTypes {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// Validate reports the configuration errors that make an enabled privacy
-// notice unpublishable. It returns nil when the notice is safe to publish,
-// or when the feature is off (a disabled/absent block is not an error).
-//
-// Callers must refuse to publish the notice when this returns anything —
-// see handleConfigClient. The page never falls back to invented defaults,
-// and never to a stand-in controller name.
-func (p *PrivacyConfig) Validate() []string {
-	if p == nil || !p.Enabled {
-		return nil
-	}
-	var errs []string
-	// Every required free-text field, in the order the page presents them.
-	required := []struct {
-		name, val, hint string
-	}{
-		{"controllerName", p.ControllerName, "name the data controller; there is no default"},
-		{"effectiveDate", p.EffectiveDate, "identify the version of this notice"},
-		{"purposesText", p.PurposesText, "describe what the deployment processes data for"},
-		{"legalBasisText", p.LegalBasisText, "state the lawful basis in your own words"},
-		{"retentionText", p.RetentionText, "state the actual retention period or criteria"},
-		{"recipientsText", p.RecipientsText, "describe who else receives the data"},
-		{"dataSourcesText", p.DataSourcesText, "describe where the data comes from"},
-		{"thirdPartyServicesText", p.ThirdPartyServicesText, "list external services and what they receive"},
-		{"internationalTransfersText", p.InternationalTransfersText, "state transfers and safeguards, or that none apply"},
-		{"browserStorageText", p.BrowserStorageText, "describe what is stored in the visitor's browser"},
-		{"serverLogsText", p.ServerLogsText, "describe server/proxy access logs and their retention"},
-		{"automatedDecisionMakingText", p.AutomatedDecisionMakingText, "state whether automated decision-making is used"},
-	}
-	for _, r := range required {
-		if strings.TrimSpace(r.val) == "" {
-			errs = append(errs, "privacy."+r.name+" is required when privacy.enabled is true ("+r.hint+")")
-		}
-	}
-
-	if strings.TrimSpace(p.ContactEmail) == "" {
-		errs = append(errs, "privacy.contactEmail is required when privacy.enabled is true")
-	} else if !privacyEmailRe.MatchString(strings.TrimSpace(p.ContactEmail)) {
-		errs = append(errs, "privacy.contactEmail is not a valid plain email address")
-	}
-
-	switch bt := strings.TrimSpace(p.LegalBasisType); {
-	case bt == "":
-		errs = append(errs, "privacy.legalBasisType is required when privacy.enabled is true (one of: "+strings.Join(PrivacyLegalBasisTypes(), ", ")+")")
-	case !privacyLegalBasisTypes[bt]:
-		errs = append(errs, "privacy.legalBasisType "+strconv.Quote(bt)+" is not recognised (one of: "+strings.Join(PrivacyLegalBasisTypes(), ", ")+")")
-	case bt == "legitimate_interests" && strings.TrimSpace(p.LegitimateInterestsText) == "":
-		errs = append(errs, "privacy.legitimateInterestsText is required when privacy.legalBasisType is legitimate_interests (describe the specific interests, do not merely name the basis)")
-	}
-
-	// The DPO block is optional as a whole, but a HALF-filled one is worse
-	// than none: naming a designated DPO the reader has no way to reach is
-	// an incomplete disclosure. The reverse is fine — a contact route
-	// without a name still tells the reader where to write.
-	if strings.TrimSpace(p.DPOName) != "" && strings.TrimSpace(p.DPOContact) == "" {
-		errs = append(errs, "privacy.dpoContact is required when privacy.dpoName is set (a named DPO must be reachable; leave both blank if none is designated)")
-	}
-
-	return errs
 }
 
 // weakAPIKeys is the blocklist of known default/example API keys that must be rejected.
@@ -786,36 +610,13 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.migrateDeprecatedConfig()
 		cfg.applyListLimitsDefaults()
 		applyCORSEnv(cfg)
-		cfg.logPrivacyConfigErrors()
 		return cfg, nil
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
-	cfg.logPrivacyConfigErrors()
 	return cfg, nil // defaults
-}
-
-// logPrivacyConfigErrors surfaces an unpublishable privacy notice loudly at
-// startup. It does NOT abort the process: CoreScope is a monitoring
-// dashboard, and taking the whole mesh view down over a misconfigured
-// optional page would be disproportionate. The notice is simply withheld
-// (handleConfigClient re-checks Validate), so the failure mode is "no
-// privacy page" — never a fabricated one — and the log says exactly which
-// fields to fix.
-func (c *Config) logPrivacyConfigErrors() {
-	if c == nil {
-		return
-	}
-	errs := c.Privacy.Validate()
-	if len(errs) == 0 {
-		return
-	}
-	log.Printf("[privacy] CONFIG ERROR: privacy.enabled is true but the notice cannot be published; the #/privacy page and its nav link stay OFF until this is fixed:")
-	for _, e := range errs {
-		log.Printf("[privacy]   - %s", e)
-	}
 }
 
 func (c *Config) applyListLimitsDefaults() {

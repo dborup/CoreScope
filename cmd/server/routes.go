@@ -520,45 +520,15 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Customizer != nil && s.cfg.Customizer.DisabledTabs != nil {
 		disabledTabs = s.cfg.Customizer.DisabledTabs
 	}
-	// #/privacy page content — only surfaced when the operator opted in
-	// (privacy.enabled) AND supplied every field the notice needs. An
-	// enabled-but-incomplete block is a configuration error (logged loudly
-	// at startup by logPrivacyConfigErrors) and is withheld here: the page
-	// must never fall back to invented retention/legal-basis text. Nil
-	// keeps the field out of the JSON entirely via omitempty, which the
+	// #/privacy page — published only when the operator opted in. The
+	// notice itself is a fixed document in public/privacy.js, so this
+	// carries the flag and nothing else; there is no operator text to send
+	// and therefore nothing that could put unreviewed wording on the page.
+	// Nil keeps the field out of the JSON entirely via omitempty, which the
 	// frontend reads as "feature off".
 	var privacy *PrivacyClientConfig
-	if s.cfg.Privacy != nil && s.cfg.Privacy.Enabled && len(s.cfg.Privacy.Validate()) == 0 {
-		// Publish TRIMMED values: Validate() checks the trimmed form, so
-		// sending the raw one could hand the browser a string its own
-		// safeUrl()/mailto guards then reject (e.g. a stray trailing
-		// newline in config.json). What was validated is what ships.
-		tr := strings.TrimSpace
-		privacy = &PrivacyClientConfig{
-			Enabled:                     true,
-			ControllerName:              tr(s.cfg.Privacy.ControllerName),
-			ContactEmail:                tr(s.cfg.Privacy.ContactEmail),
-			EffectiveDate:               tr(s.cfg.Privacy.EffectiveDate),
-			PurposesText:                tr(s.cfg.Privacy.PurposesText),
-			LegalBasisType:              tr(s.cfg.Privacy.LegalBasisType),
-			LegalBasisText:              tr(s.cfg.Privacy.LegalBasisText),
-			LegitimateInterestsText:     tr(s.cfg.Privacy.LegitimateInterestsText),
-			RetentionText:               tr(s.cfg.Privacy.RetentionText),
-			RecipientsText:              tr(s.cfg.Privacy.RecipientsText),
-			DataSourcesText:             tr(s.cfg.Privacy.DataSourcesText),
-			ThirdPartyServicesText:      tr(s.cfg.Privacy.ThirdPartyServicesText),
-			InternationalTransfersText:  tr(s.cfg.Privacy.InternationalTransfersText),
-			BrowserStorageText:          tr(s.cfg.Privacy.BrowserStorageText),
-			ServerLogsText:              tr(s.cfg.Privacy.ServerLogsText),
-			AutomatedDecisionMakingText: tr(s.cfg.Privacy.AutomatedDecisionMakingText),
-			DPOName:                     tr(s.cfg.Privacy.DPOName),
-			DPOContact:                  tr(s.cfg.Privacy.DPOContact),
-			// The ACTUAL active hide prefixes, so the page can name them
-			// instead of hardcoding a character the deployment may not
-			// use. Empty means the operator configured none, and the page
-			// must not promise self-service hiding.
-			HiddenNamePrefixes: s.cfg.ActiveHiddenNamePrefixes(),
-		}
+	if s.cfg.Privacy != nil && s.cfg.Privacy.Enabled {
+		privacy = &PrivacyClientConfig{Enabled: true}
 	}
 	writeJSON(w, ClientConfigResponse{
 		Roles:               s.cfg.Roles,
