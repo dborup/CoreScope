@@ -57,7 +57,7 @@ assert(escMatch, 'could not extract escapeHtml from public/app.js');
 // the test ever parsed them, quietly weakening the comparison.
 const AUTHORITATIVE = String.raw`## WHO WE ARE
 
-meshview\.dk is a non-commercial community service that visualises the Danish [MeshCore](https://meshcore.co.uk/) LoRa mesh network. It runs the open-source CoreScope analyzer. The data controller is:
+meshview\.dk is a non-commercial community service that visualises the Danish [MeshCore](https://meshcore.io) LoRa mesh network. It runs the open-source CoreScope analyzer. The data controller is:
 
 **The operator of meshview\.dk**\
 Contact: **kontakt\@meshview\.dk**
@@ -462,7 +462,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
     const html = await renderWith(ENABLED);
     const links = html.match(/<a\b[^>]*>/g) || [];
     assert.strictEqual(links.length, 1, 'the notice has exactly one link');
-    assert(/href="https:\/\/meshcore\.co\.uk\/"/.test(html), 'MeshCore href is wrong or missing');
+    assert(/href="https:\/\/meshcore\.io"/.test(html), 'MeshCore href is wrong or missing');
     assert(/>MeshCore<\/a>/.test(html), 'the link text must be MeshCore');
     assert(/rel="noopener noreferrer"/.test(html), 'external link needs rel=noopener noreferrer');
     assert(!/href="(?!https?:)/i.test(html), 'only http(s) hrefs may be emitted');
@@ -544,7 +544,7 @@ const sheetLinks = (doc) => doc.querySelectorAll('[data-bottom-nav-more-route]')
 
   await test('the notice text lives in code, not in config', async () => {
     const src = fs.readFileSync('public/privacy.js', 'utf8');
-    ['WHO WE ARE', 'A NOTE ON PUBLIC CHANNELS', 'https://meshcore.co.uk/'].forEach((s) =>
+    ['WHO WE ARE', 'A NOTE ON PUBLIC CHANNELS', 'https://meshcore.io'].forEach((s) =>
       assert(src.includes(s), 'privacy.js must carry the notice itself: ' + s));
     const ex = JSON.parse(fs.readFileSync('config.example.json', 'utf8'));
     assert.deepStrictEqual(Object.keys(ex.privacy), ['enabled', '_comment'],

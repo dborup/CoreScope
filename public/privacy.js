@@ -33,7 +33,7 @@
     ['h', "WHO WE ARE"],
     ['p', [
       t("meshview.dk is a non-commercial community service that visualises the Danish "),
-      a("MeshCore", "https://meshcore.co.uk/"),
+      a("MeshCore", "https://meshcore.io"),
       t(" LoRa mesh network. It runs the open-source CoreScope analyzer. The data controller is:"),
     ]],
     ['p', [
