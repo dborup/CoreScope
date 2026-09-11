@@ -90,6 +90,37 @@
   let geoScope = localStorage.getItem('meshcore-nodes-geo-scope') || 'all';
   let wsHandler = null;
   let detailMap = null;
+  let detailMapResizeTimer = null;
+  // #1970 port: identity of the node-detail view (side pane or full view) that
+  // may still change the page. Every detail request, close and destroy takes
+  // the next number, so a delayed response from an earlier view is ignored --
+  // even for the same node (A -> B -> A) in a panel that is still connected.
+  let detailViewSeq = 0;
+
+  // Disposes the detail map together with its pending resize, so the timer
+  // can never outlive the map it was scheduled for.
+  function removeDetailMap() {
+    clearTimeout(detailMapResizeTimer);
+    detailMapResizeTimer = null;
+    if (detailMap) { detailMap.remove(); detailMap = null; }
+  }
+
+  // Ends the current detail view on close, Escape or destroy: its pending
+  // responses lose ownership and its map is disposed.
+  function closeDetailView() {
+    detailViewSeq++;
+    removeDetailMap();
+  }
+
+  function resizeDetailMapAfterLayout() {
+    // Resize the map this call was made for, never a later replacement.
+    const map = detailMap;
+    clearTimeout(detailMapResizeTimer);
+    detailMapResizeTimer = setTimeout(() => {
+      detailMapResizeTimer = null;
+      map.invalidateSize();
+    }, 100);
+  }
 
   // #1461 followup: node-detail inset map tile layer that honors the
   // customizer dark-tile-provider pick (#1420/#1430). Falls back to
@@ -624,8 +655,10 @@
 
   async function loadFullNode(pubkey) {
     const body = document.getElementById('nodeFullBody');
+    const viewSeq = ++detailViewSeq;
     try {
       const nodeData = await fetchNodeDetail(pubkey);
+      if (viewSeq !== detailViewSeq || !body.isConnected) return;
       const healthData = nodeData.healthData;
       const n = nodeData.node;
       const adverts = (nodeData.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -664,6 +697,7 @@
       const dupKeys = n.name && dupMap[n.name.toLowerCase()] ? dupMap[n.name.toLowerCase()].filter(function(k) { return k !== n.public_key; }) : [];
       const dupSection = dupKeys.length ? '<div class="dup-also-known" style="font-size:11px;color:var(--text-muted);margin-top:4px">Also known as: ' + dupKeys.map(function(k) { return '<a href="#/nodes/' + encodeURIComponent(k) + '" class="mono" style="font-size:11px">' + escapeHtml(k.slice(0, 12)) + '…</a>'; }).join(', ') + '</div>' : '';
 
+      removeDetailMap();
       body.innerHTML = `
         <div class="node-full-card" style="padding:12px 16px;margin-bottom:8px">
           <div class="node-detail-name" style="font-size:20px">${escapeHtml(n.name || '(unnamed)')}${dupBadge}</div>
@@ -841,7 +875,6 @@
       // visually cross-checked against its own claimed position.
       if (hasLoc || hasEstLoc) {
         try {
-          if (detailMap) { detailMap.remove(); detailMap = null; }
           detailMap = L.map('nodeFullMap', { zoomControl: true, attributionControl: false });
           _applyTilesToNodeMap(detailMap);
           var bounds = [];
@@ -867,7 +900,7 @@
           } else {
             detailMap.setView(bounds[0], 13);
           }
-          setTimeout(() => detailMap.invalidateSize(), 100);
+          resizeDetailMapAfterLayout();
         } catch {}
       }
 
@@ -1071,6 +1104,9 @@
       });
 
     } catch (e) {
+      // A failure for a view that has since been replaced or closed must not
+      // touch the current page.
+      if (viewSeq !== detailViewSeq || !body.isConnected) return;
       // #1150: surface a real error state in BOTH the back-row title and the body
       // when /api/nodes/{pubkey} returns 404 (or any failure). Otherwise the title
       // stays "Loading…" forever and there's no link back to the Nodes list.
@@ -1087,6 +1123,7 @@
       const detail = is404
         ? 'No node matched the requested public key on this instance. It may exist on another deployment, or it may have been evicted/blacklisted here.'
         : 'The node detail API call failed: ' + escapeHtml(msg);
+      removeDetailMap();
       body.innerHTML =
         '<div class="node-full-card" style="padding:24px;margin:16px auto;max-width:560px;text-align:center">' +
           '<div style="font-size:18px;font-weight:600;margin-bottom:8px">' + headline + '</div>' +
@@ -1111,7 +1148,7 @@
   function destroy() {
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
-    if (detailMap) { detailMap.remove(); detailMap = null; }
+    closeDetailView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
     nodes = [];
@@ -1530,6 +1567,7 @@
       if (e.key === 'Escape') {
         const panel = document.getElementById('nodesRight');
         if (panel && !panel.classList.contains('empty')) {
+          closeDetailView();
           panel.classList.add('empty');
           panel.innerHTML = '<span>Select a node to view details</span>';
           selectedKey = null;
@@ -1556,6 +1594,7 @@
       }
       if (e.target.closest('.panel-close-btn')) {
         const panel = document.getElementById('nodesRight');
+        closeDetailView();
         panel.classList.add('empty');
         panel.innerHTML = '<span>Select a node to view details</span>';
         selectedKey = null;
@@ -1683,6 +1722,9 @@
       location.hash = '#/nodes/' + encodeURIComponent(pubkey);
       return;
     }
+    // Every selection starts a new detail view: pending responses from earlier
+    // selections, including one for this same node, lose ownership.
+    const viewSeq = ++detailViewSeq;
     // #1056 AC#4: narrow desktop/tablet (641–1023) — open detail in slide-over.
     if (window.SlideOver && window.SlideOver.shouldUse()) {
       selectedKey = pubkey;
@@ -1731,12 +1773,16 @@
     renderRows();
     const panel = document.getElementById('nodesRight');
     panel.classList.remove('empty');
+    removeDetailMap();
     panel.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
 
     try {
       const data = await fetchNodeDetail(pubkey);
+      if (viewSeq !== detailViewSeq || !panel.isConnected) return;
       renderDetail(panel, data);
     } catch (e) {
+      if (viewSeq !== detailViewSeq || !panel.isConnected) return;
+      removeDetailMap();
       panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
     }
   }
@@ -1764,6 +1810,7 @@
     const dupMap = buildDupNameMap(_allNodes);
     const dupBadge = dupNameBadge(n.name, n.public_key, dupMap);
 
+    removeDetailMap();
     panel.innerHTML = `
       <button class="panel-close-btn" title="Close detail pane (Esc)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
       <div class="node-detail">
@@ -1856,7 +1903,6 @@
     // Init map -- same real+estimate side-by-side treatment as loadFullNode.
     if (hasLoc || hasEstLoc) {
       try {
-        if (detailMap) { detailMap.remove(); detailMap = null; }
         detailMap = L.map('nodeMap', { zoomControl: false, attributionControl: false });
         _applyTilesToNodeMap(detailMap);
         var panelBounds = [];
@@ -1880,7 +1926,7 @@
         } else {
           detailMap.setView(panelBounds[0], 13);
         }
-        setTimeout(() => detailMap.invalidateSize(), 100);
+        resizeDetailMapAfterLayout();
       } catch {}
     }
 
