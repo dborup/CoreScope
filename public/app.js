@@ -809,7 +809,10 @@ function connectWS() {
   ws.onopen = () => Logo.setConnected(true);
   ws.onclose = () => {
     Logo.setConnected(false);
-    setTimeout(connectWS, 3000);
+    // WS_RECONNECT_MS comes from roles.js (operator setting `wsReconnectMs`).
+    // It used to be honoured only by the live map's private socket; now that
+    // every view shares this one, the setting applies here or nowhere.
+    setTimeout(connectWS, window.WS_RECONNECT_MS || 3000);
   };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
