@@ -1179,12 +1179,15 @@ console.log('\n=== live.js: shared WebSocket channel ===');
       if (i >= 0) registered.splice(i, 1);
     };
     ctx.registerPage = (name, mod) => { pages[name] = mod; };
+    // destroy() removes body classes (nav-pinned, live-fullscreen). The shared
+    // fixture's document.body has no classList, which made destroy() throw
+    // part-way through; this is the only stub it needs to run to completion.
+    ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
     loadInCtx(ctx, 'public/payload-labels.js');
     loadInCtx(ctx, 'public/roles.js');
     loadInCtx(ctx, 'public/packet-helpers.js');
-    try { loadInCtx(ctx, 'public/live.js'); } catch (e) {
-      for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
-    }
+    // Deliberately unguarded: a live.js load failure must fail these tests.
+    loadInCtx(ctx, 'public/live.js');
     // app.js's real fan-out is `wsListeners.forEach(fn => fn(msg))`.
     const fanOut = (msg) => registered.slice().forEach((fn) => fn(msg));
     return {
@@ -1207,40 +1210,44 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     assert.strictEqual(t.registered[0], t.handler(), 'the registered listener is the page handler');
   });
 
-  test('re-entering keeps ONE listener, bound to the current visit, and no packet doubles', () => {
-    // Two failure modes sit either side of this: re-registering without
-    // dropping the old handler doubles every packet; skipping registration
-    // leaves the previous visit's closure subscribed to a page that is gone.
+  test('repeated entry keeps exactly one listener (the newest) and no packet doubles', () => {
+    // connectWS() registers idempotently: each call removes the handler it
+    // registered before and adds a new one, so repeated calls never leave a
+    // duplicate listener on the shared channel. A duplicate would buffer every
+    // broadcast packet twice.
     const t = makeWSSandbox();
     t.connect();
     const first = t.registered[0];
     t.connect();
     t.connect();
     assert.strictEqual(t.registered.length, 1, 'exactly one listener after repeated entry');
-    assert.notStrictEqual(t.registered[0], first, 'and it is the newest one, not the first visit\'s');
+    assert.notStrictEqual(t.registered[0], first, 'and it is the newly registered handler, not the first one');
     const before = t.buffer().length;
     t.fanOut(pkt('ws1991-once'));
     assert.strictEqual(t.buffer().length, before + 1, 'one broadcast must buffer exactly one packet');
   });
 
-  test('destroy unsubscribes, releases the handler, and a later broadcast reaches nothing', () => {
+  test('destroy completes, unsubscribes, releases the handler, and a later broadcast reaches nothing', () => {
     const t = makeWSSandbox();
     assert.ok(t.page() && typeof t.page().destroy === 'function', 'live page must register destroy');
     t.connect();
-    let destroyErr = null;
-    try { t.page().destroy(); } catch (e) { destroyErr = e; }
-    assert.strictEqual(t.registered.length, 0,
-      'destroy must remove Live\'s listener' + (destroyErr ? ' (destroy threw: ' + destroyErr.message + ')' : ''));
+    t.fanOut(pkt('ws1991-before-destroy'));
+    assert.strictEqual(t.buffer().length, 1, 'precondition: one packet buffered before destroy');
+    assert.doesNotThrow(() => t.page().destroy(), 'destroy() must complete without an exception');
+    // destroy() resets the VCR buffer at its very end, so an empty buffer shows
+    // it ran all the way through rather than stopping after the unsubscribe.
+    assert.strictEqual(t.buffer().length, 0, 'destroy() must reach its final statement (VCR buffer reset)');
+    assert.strictEqual(t.registered.length, 0, 'destroy must remove Live\'s listener');
     assert.strictEqual(t.handler(), null, 'destroy must release the handler reference');
-    const before = t.buffer().length;
     t.fanOut(pkt('ws1991-after-destroy'));
-    assert.strictEqual(t.buffer().length, before, 'no packet may reach an abandoned Live view');
+    assert.strictEqual(t.buffer().length, 0, 'no packet may reach Live after destroy');
   });
 
   test('a return visit after destroy re-subscribes exactly once', () => {
     const t = makeWSSandbox();
     t.connect();
-    try { t.page().destroy(); } catch (e) { /* asserted in the previous test */ }
+    assert.doesNotThrow(() => t.page().destroy(), 'destroy() must complete without an exception');
+    assert.strictEqual(t.handler(), null, 'destroy must release the handler before the return visit');
     t.connect();
     assert.strictEqual(t.registered.length, 1, 'return visit must hold exactly one listener');
     assert.strictEqual(t.constructedCount(), 0, 'and still construct no socket');

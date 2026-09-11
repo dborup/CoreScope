@@ -3352,11 +3352,11 @@
   // view. Reconnection belongs to app.js, which owns the socket; the listener
   // registered here survives a reconnect because app.js's listener list does.
   function connectWS() {
-    // Drop any earlier registration before adding the fresh one. An early
-    // return would leave the PREVIOUS visit's closure subscribed, rendering
-    // into a page that no longer exists; re-registering without dropping it
-    // would render every packet twice. Dropping first always binds the
-    // current page and is idempotent.
+    // Idempotent registration: connectWS() runs on every entry to the page and
+    // must never leave more than one Live listener on app.js's shared channel.
+    // Removing the handler this module registered earlier before adding a new
+    // one keeps exactly one subscription however many times it is called, with
+    // or without destroy() in between, so each broadcast packet is buffered once.
     if (wsHandler) offWS(wsHandler);
     wsHandler = (msg) => {
       if (!msg || msg.type !== 'packet') return;
