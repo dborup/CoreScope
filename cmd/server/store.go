@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/mbcapqueue"
+	"golang.org/x/sync/singleflight"
 )
 
 // payloadTypeNames maps payload_type int → human-readable name (firmware-standard).
@@ -482,6 +483,12 @@ type PacketStore struct {
 	statsCacheTime time.Time
 	statsLastHour  int
 	statsLast24h   int
+	// Concurrent cache misses share one observations scan (upstream #1963);
+	// see loadObsCounts.
+	statsSF singleflight.Group
+	// Test-only hook called with "obs-miss", "obs-scan" and "obs-write" as a
+	// cache miss moves through loadObsCounts. Nil in production.
+	statsHook func(stage string)
 
 	// Test-only hook fired at the very start of loadBackgroundChunks
 	// (after the #1809 invariant check). Nil in production. Used by
@@ -2046,13 +2053,11 @@ func (s *PacketStore) GetStoreStats() (*Stats, error) {
 
 	// Serve observation counts from cache if fresh (avoids per-request full-table scan).
 	var obsFromCache bool
-	s.statsCacheMu.Lock()
-	if !s.statsCacheTime.IsZero() && time.Since(s.statsCacheTime) < 30*time.Second {
-		st.PacketsLastHour = s.statsLastHour
-		st.PacketsLast24h = s.statsLast24h
+	if lastHour, last24h, ok := s.cachedObsCounts(); ok {
+		st.PacketsLastHour = lastHour
+		st.PacketsLast24h = last24h
 		obsFromCache = true
 	}
-	s.statsCacheMu.Unlock()
 
 	// Run node/observer counts and (if cache miss) observation counts concurrently.
 	var wg sync.WaitGroup
@@ -2075,20 +2080,13 @@ func (s *PacketStore) GetStoreStats() (*Stats, error) {
 	if !obsFromCache {
 		go func() {
 			defer wg.Done()
-			obsErr = s.db.conn.QueryRow(
-				`SELECT
-					COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0),
-					COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0)
-				FROM observations WHERE timestamp > ?`,
-				oneHourAgo, oneDayAgo, oneDayAgo,
-			).Scan(&st.PacketsLastHour, &st.PacketsLast24h)
-			if obsErr == nil {
-				s.statsCacheMu.Lock()
-				s.statsLastHour = st.PacketsLastHour
-				s.statsLast24h = st.PacketsLast24h
-				s.statsCacheTime = time.Now()
-				s.statsCacheMu.Unlock()
+			lastHour, last24h, err := s.loadObsCounts(oneHourAgo, oneDayAgo)
+			if err != nil {
+				obsErr = err
+				return
 			}
+			st.PacketsLastHour = lastHour
+			st.PacketsLast24h = last24h
 		}()
 	}
 	wg.Wait()
@@ -2101,6 +2099,61 @@ func (s *PacketStore) GetStoreStats() (*Stats, error) {
 	}
 
 	return st, nil
+}
+
+// cachedObsCounts returns the cached observation counts while they are younger
+// than the 30s TTL.
+func (s *PacketStore) cachedObsCounts() (lastHour, last24h int, ok bool) {
+	s.statsCacheMu.Lock()
+	defer s.statsCacheMu.Unlock()
+	if s.statsCacheTime.IsZero() || time.Since(s.statsCacheTime) >= 30*time.Second {
+		return 0, 0, false
+	}
+	return s.statsLastHour, s.statsLast24h, true
+}
+
+// loadObsCounts runs the observations scan behind a cache miss and stores its
+// result. Concurrent misses share one scan through statsSF (upstream #1963), so
+// scans never overlap and an older result cannot overwrite a newer one. The
+// cache is checked again inside the flight, so a caller that missed just before
+// an earlier scan stored its counts uses those instead of scanning. A failed
+// scan's error reaches every caller that shared it and is not cached.
+func (s *PacketStore) loadObsCounts(oneHourAgo, oneDayAgo int64) (int, int, error) {
+	s.statsHookAt("obs-miss")
+	v, err, _ := s.statsSF.Do("obs-counts", func() (interface{}, error) {
+		if lastHour, last24h, ok := s.cachedObsCounts(); ok {
+			return [2]int{lastHour, last24h}, nil
+		}
+		s.statsHookAt("obs-scan")
+		var counts [2]int
+		if err := s.db.conn.QueryRow(
+			`SELECT
+				COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0)
+			FROM observations WHERE timestamp > ?`,
+			oneHourAgo, oneDayAgo, oneDayAgo,
+		).Scan(&counts[0], &counts[1]); err != nil {
+			return nil, err
+		}
+		s.statsHookAt("obs-write")
+		s.statsCacheMu.Lock()
+		s.statsLastHour = counts[0]
+		s.statsLast24h = counts[1]
+		s.statsCacheTime = time.Now()
+		s.statsCacheMu.Unlock()
+		return counts, nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	counts := v.([2]int)
+	return counts[0], counts[1], nil
+}
+
+func (s *PacketStore) statsHookAt(stage string) {
+	if s.statsHook != nil {
+		s.statsHook(stage)
+	}
 }
 
 // GetPerfStoreStats returns packet store statistics for /api/perf.
