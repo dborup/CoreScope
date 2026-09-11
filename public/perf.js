@@ -1,7 +1,7 @@
 /* === CoreScope — perf.js === */
 'use strict';
 
-var GH = 'https://github.com/Kpa-clawbot/corescope';
+var SOURCE_REPO_URL = 'https://github.com/dborup/CoreScope';
 
 // detectPerfAnomalies — pure, testable.
 // Computes per-component write rates over a rolling time window and flags any
@@ -72,16 +72,23 @@ if (typeof window !== 'undefined') {
   window.detectPerfAnomalies = detectPerfAnomalies;
 }
 
+// Version and commit render as plain text, never as links: a git-describe
+// build (v0.0.1-36-gdc1297db) or a local integration commit may not exist on
+// GitHub, and the string format can't tell us. The source link is separate.
 function renderVersionCard(health) {
   if (!health || (!health.version && !health.commit)) return '';
-  var ver = health.version && health.version !== 'unknown' ? health.version : null;
-  var sha = health.commit && health.commit !== 'unknown' ? health.commit : null;
+  var ver = health.version && health.version !== 'unknown' ? String(health.version) : null;
+  var sha = health.commit && health.commit !== 'unknown' ? String(health.commit) : null;
   if (!ver && !sha) return '';
-  var vTag = ver ? (ver.charAt(0) === 'v' ? ver : 'v' + ver) : null;
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
   var parts = [];
-  if (vTag) parts.push('<a href="' + GH + '/releases/tag/' + vTag + '" target="_blank" rel="noopener">' + vTag + '</a>');
-  if (sha) parts.push('<a href="' + GH + '/commit/' + sha + '" target="_blank" rel="noopener">' + sha.slice(0, 7) + '</a>');
-  return '<div class="perf-card"><div class="perf-num perf-num--small">' + parts.join(' · ') + '</div><div class="perf-label">Version</div></div>';
+  if (ver) parts.push(esc(ver));
+  if (sha) parts.push('<span title="' + esc(sha) + '">' + esc(sha.slice(0, 8)) + '</span>');
+  return '<div class="perf-card"><div class="perf-num perf-num--small">' + parts.join(' · ') + '</div>' +
+    '<div class="perf-label">Version</div>' +
+    '<div class="perf-num--small"><a href="' + SOURCE_REPO_URL + '" target="_blank" rel="noopener">Source Code</a></div></div>';
 }
 
 (function () {
