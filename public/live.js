@@ -17,7 +17,7 @@
   function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   function statusGreen() { return cssVar('--status-green') || '#22c55e'; }
 
-  let map, ws, nodesLayer, pathsLayer, animLayer, heatLayer, geoFilterLayer, selectedAreaLayer, clickablePathsLayer;
+  let map, wsHandler, nodesLayer, pathsLayer, animLayer, heatLayer, geoFilterLayer, selectedAreaLayer, clickablePathsLayer;
   // New animation canvas
   let animCanvas, animCtx;
   let _dprMedia = null;
@@ -3256,6 +3256,10 @@
   window._liveExpandToBufferEntriesAsync = expandToBufferEntriesAsync;
   window._liveSEG_MAP = SEG_MAP;
   window._liveBufferPacket = bufferPacket;
+  // "One socket per viewer" tests: Live must reach the packet stream through
+  // app.js's shared channel and never open a socket of its own.
+  window._liveConnectWS = connectWS;
+  window._liveWSHandler = function() { return wsHandler; };
   window._liveVCR = function() { return VCR; };
   window._liveGetFavoritePubkeys = getFavoritePubkeys;
   window._livePacketInvolvesFavorite = packetInvolvesFavorite;
@@ -3339,17 +3343,30 @@
     } catch { }
   }
 
+  // The live map used to open its OWN WebSocket to the endpoint app.js already
+  // holds open on every page. The hub broadcasts the full packet stream to every
+  // client with no per-client filtering, so each Live viewer pulled it twice --
+  // on the page people leave open for hours.
+  //
+  // It now subscribes to app.js's shared channel (onWS/offWS) like every other
+  // view. Reconnection belongs to app.js, which owns the socket; the listener
+  // registered here survives a reconnect because app.js's listener list does.
   function connectWS() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}`);
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'packet') bufferPacket(msg.data);
-      } catch { }
+    // Idempotent registration: connectWS() runs on every entry to the page and
+    // must never leave more than one Live listener on app.js's shared channel.
+    // Removing the handler this module registered earlier before adding a new
+    // one keeps exactly one subscription however many times it is called, with
+    // or without destroy() in between, so each broadcast packet is buffered once.
+    if (wsHandler) offWS(wsHandler);
+    wsHandler = (msg) => {
+      if (!msg || msg.type !== 'packet') return;
+      // Contain rendering errors here, exactly as the private socket's
+      // onmessage used to: app.js fans one message out to every listener in a
+      // single loop, so an exception escaping this handler would skip every
+      // listener registered after it.
+      try { bufferPacket(msg.data); } catch { }
     };
-    ws.onclose = () => setTimeout(connectWS, WS_RECONNECT_MS);
-    ws.onerror = () => {};
+    onWS(wsHandler);
   }
 
   // A packet group is multibyte when its path hash size is >= 2 bytes.
@@ -4654,7 +4671,9 @@
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
-    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    // Unsubscribe rather than close: the socket belongs to app.js and the rest
+    // of the app still needs it.
+    if (wsHandler) { offWS(wsHandler); wsHandler = null; }
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;
