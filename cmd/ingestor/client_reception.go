@@ -77,7 +77,7 @@ func handleClientPacket(store *Store, tag, rxPubkey string, msg map[string]inter
 
 	rec, ok := buildClientReception(
 		rxPubkey,
-		direction, decoded.Header.RouteType, decoded.Path.Hops, decoded.Payload.PubKey, isAdvert,
+		direction, decoded.Header.RouteType, decoded.Header.PayloadType, decoded.Path.Hops, decoded.Payload.PubKey, isAdvert,
 		snrPtr, rssiPtr, lat, lon, accPtr, rxAt, time.Now().UTC().Format(time.RFC3339),
 	)
 	if !ok {
@@ -146,6 +146,8 @@ type ClientReception struct {
 // deriveHeardKey applies the RX capture HARD RULE: record only what the
 // companion heard itself and directly.
 //   - direction must be "rx".
+//   - payload type must not repurpose the header path bytes (TRACE stores
+//     per-hop SNR there, not node hashes — packetpath.PathBytesAreHops).
 //   - hops present AND a FLOOD route → the directly-heard node is the LAST hop
 //     (path[len-1] = the forwarder that just transmitted; each FLOOD forwarder
 //     appends its hash to the end). 1-byte (2 hex char) prefixes are rejected.
@@ -156,8 +158,11 @@ type ClientReception struct {
 //   - otherwise → not attributable (ok=false).
 //
 // Returns (heardKey lowercased, keylenBytes, src, ok).
-func deriveHeardKey(direction string, routeType int, hops []string, advertPubkey string, isAdvert bool) (string, int, string, bool) {
+func deriveHeardKey(direction string, routeType, payloadType int, hops []string, advertPubkey string, isAdvert bool) (string, int, string, bool) {
 	if !strings.EqualFold(direction, "rx") {
+		return "", 0, "", false
+	}
+	if !packetpath.PathBytesAreHops(byte(payloadType)) {
 		return "", 0, "", false
 	}
 	if len(hops) > 0 {
@@ -185,7 +190,7 @@ func deriveHeardKey(direction string, routeType int, hops []string, advertPubkey
 // buildClientReception validates inputs and assembles a ClientReception, or
 // returns ok=false when the packet is not attributable / out of range.
 func buildClientReception(
-	rxPubkey, direction string, routeType int, hops []string, advertPubkey string, isAdvert bool,
+	rxPubkey, direction string, routeType, payloadType int, hops []string, advertPubkey string, isAdvert bool,
 	snr *float64, rssi *int, lat, lon float64, posAccM *float64, rxAt, ingestedAt string,
 ) (*ClientReception, bool) {
 	if rxPubkey == "" || rxAt == "" {
@@ -194,7 +199,7 @@ func buildClientReception(
 	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
 		return nil, false
 	}
-	heardKey, keylen, src, ok := deriveHeardKey(direction, routeType, hops, advertPubkey, isAdvert)
+	heardKey, keylen, src, ok := deriveHeardKey(direction, routeType, payloadType, hops, advertPubkey, isAdvert)
 	if !ok {
 		return nil, false
 	}
