@@ -108,6 +108,11 @@ const (
 // statsFlightWaiters counts goroutines parked in singleflight.(*Group).Do
 // behind a call already in progress, with frame on their stack. The goroutine
 // running the call is excluded: its stack also holds doCall.
+//
+// Maintenance: the match depends on the runtime.Stack text format, the
+// singleflight-internal frames (Do, doCall, WaitGroup.Wait) and the named
+// callers in obsCountsFlightFrame and statsFlightFrame. Re-verify it when
+// changing the Go version, golang.org/x/sync, or those function names.
 func statsFlightWaiters(frame string) int {
 	buf := make([]byte, 1<<16)
 	for {
