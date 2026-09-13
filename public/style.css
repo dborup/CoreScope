@@ -3062,6 +3062,14 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 }
 .detail-map-link:hover { background: rgba(245, 158, 11, 0.25); }
 
+/* Anchors lack the native vertical content centering of adjacent buttons. */
+.detail-actions > a.detail-map-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
 .copy-link-btn {
   padding: 5px 12px;
   background: var(--accent-bg);
