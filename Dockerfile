@@ -3,7 +3,7 @@
 # BUILDPLATFORM is auto-set by buildx; default to linux/amd64 so plain
 # `docker build` (without buildx) doesn't fail on an empty platform string.
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24 AS builder
 
 ARG APP_VERSION=unknown
 ARG GIT_COMMIT=unknown
@@ -57,7 +57,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-s -w" -o /corescope-decrypt .
 
 # Runtime image
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache mosquitto mosquitto-clients supervisor caddy wget
 
