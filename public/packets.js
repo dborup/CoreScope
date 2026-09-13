@@ -3369,7 +3369,7 @@
     const srcLabel = decoded.sender || decoded.name || (decoded.srcHash ? decoded.srcHash.slice(0,8) : null) || (decoded.pubKey ? decoded.pubKey.slice(0,8) + '…' : null) || (anonReqSenderNode ? anonReqSenderNode.name || anonReqSenderNode.public_key.slice(0,8) + '…' : null) || (anonReqSenderKey ? anonReqSenderKey.slice(0,8) + '…' : null);
     const dstLabel = decoded.recipient || (decoded.destHash ? decoded.destHash.slice(0,8) : null);
     const srcDstHtml = (srcLabel || dstLabel)
-      ? `<div class="detail-srcdst">${escapeHtml(srcLabel || '?')} <span class="arrow">→</span> ${escapeHtml(dstLabel || (decoded.channel ? '#' + decoded.channel : '?'))}</div>`
+      ? `<div class="detail-srcdst">${escapeHtml(srcLabel || '?')} <span class="arrow">→</span> ${escapeHtml(dstLabel || (decoded.channel ? (String(decoded.channel).startsWith('#') ? decoded.channel : '#' + decoded.channel) : '?'))}</div>`
       : '';
 
     panel.innerHTML = `
