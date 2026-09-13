@@ -86,6 +86,9 @@ jobs:
       - name: Staging disk-monitor unit tests (issue #1684)
         run: bash scripts/staging/test-disk-monitor.sh
 
+      - name: QA SQL parameter-binding unit tests (issue #1977)
+        run: bash qa/scripts/test-blacklist-sql.sh
+
       - name: Lint CSS variables (issue #1128)
         run: |
           set -e
@@ -100,6 +103,7 @@ jobs:
           node test-confidence-indicator.js
           node test-1659-analytics-warmup.js
           node test-channels-merge-1498-unit.js
+          node test-packets-local-channels.js
           node test-issue-1518-home-url.js
           node test-channel-decrypt-insecure-context.js
           node test-live-region-filter.js

@@ -1067,6 +1067,92 @@
     else _docColMenuCloseHandler = handler;
   }
 
+  // --- Locally-added channels in the channel filter ---------------------
+  // Channels the operator adds in their own browser (Channels page → "Add
+  // channel") live only in localStorage — the keys never leave the client
+  // (channel-decrypt.js). The server therefore cannot decrypt their traffic
+  // and files it under the synthetic channel hash "enc_<HH>", which
+  // /api/channels omits. Result: a channel you just added is invisible in
+  // the packets channel picker.
+  //
+  // Fix: derive the same "enc_<HH>" value client-side from the stored key
+  // (SHA-256(key)[0], exactly what the ingestor writes) and offer those
+  // channels as extra options. /api/packets?channel=enc_<HH> already
+  // filters on that value server-side, so no backend change is needed.
+
+  /**
+   * Read the browser's stored channel keys and map each to the server-side
+   * channel-hash value its packets are stored under.
+   * Cost: one SHA-256 per stored key (a handful), once per page init.
+   * @returns {Promise<Array<{value:string,name:string,label:string}>>}
+   */
+  async function collectLocalChannels() {
+    const CD = window.ChannelDecrypt;
+    if (!CD || typeof CD.getStoredKeys !== 'function') return [];
+    let keys;
+    try { keys = CD.getStoredKeys() || {}; } catch (e) { return []; }
+    const out = [];
+    for (const name of Object.keys(keys)) {
+      const keyHex = keys[name];
+      if (!keyHex || typeof keyHex !== 'string') continue;
+      let hashByte;
+      try {
+        const keyBytes = CD.hexToBytes(keyHex);
+        if (!keyBytes || keyBytes.length !== 16) continue;
+        hashByte = await CD.computeChannelHash(keyBytes);
+      } catch (e) { continue; }
+      if (typeof hashByte !== 'number') continue;
+      const label = (typeof CD.getLabel === 'function' && CD.getLabel(name)) || name;
+      out.push({
+        // Uppercase 2-digit hex — matches cmd/ingestor/decoder.go ("%02X").
+        value: 'enc_' + hashByte.toString(16).padStart(2, '0').toUpperCase(),
+        name: name,
+        label: label
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Merge the server channel list with locally-added ones into the two
+   * option groups the picker renders. Pure — unit-tested.
+   * A local channel is dropped when the server already exposes it (same
+   * hash value, or same name because the server holds the key too).
+   * @returns {{server: Array<{value:string,label:string}>, local: Array<{value:string,label:string}>}}
+   */
+  function buildChannelOptions(serverChannels, localChannels) {
+    const byLabel = (a, b) => {
+      const an = (a.label || '').toLowerCase();
+      const bn = (b.label || '').toLowerCase();
+      return an < bn ? -1 : an > bn ? 1 : 0;
+    };
+    const server = [];
+    const seenValues = new Set();
+    const seenNames = new Set();
+    for (const ch of serverChannels || []) {
+      const value = (ch && (ch.hash || ch.name)) || '';
+      if (!value || seenValues.has(value)) continue;
+      seenValues.add(value);
+      seenNames.add(String(ch.name || value).toLowerCase());
+      server.push({ value: value, label: ch.name || value });
+    }
+    const local = [];
+    for (const lc of localChannels || []) {
+      if (!lc || !lc.value) continue;
+      if (seenValues.has(lc.value)) continue;
+      if (seenNames.has(String(lc.name || '').toLowerCase())) continue;
+      seenValues.add(lc.value);
+      local.push({ value: lc.value, label: lc.label || lc.name });
+    }
+    return { server: server.sort(byLabel), local: local.sort(byLabel) };
+  }
+
+  // Exported for test-packets-local-channels.js (no DOM required).
+  if (typeof window !== 'undefined') {
+    window._packetsBuildChannelOptionsForTest = buildChannelOptions;
+    window._packetsCollectLocalChannelsForTest = collectLocalChannels;
+  }
+
   function renderTimestampCell(isoString) {
     if (typeof formatTimestampWithTooltip !== 'function' || typeof getTimestampMode !== 'function') {
       return escapeHtml(typeof timeAgo === 'function' ? timeAgo(isoString) : '—');
@@ -1851,31 +1937,37 @@
         opt.selected = true;
         channelSel.appendChild(opt);
       }
-      api('/channels').then(data => {
+      Promise.all([
+        api('/channels').catch(() => null),
+        collectLocalChannels()
+      ]).then(([data, localChannels]) => {
         const channels = (data && data.channels) || [];
         // Build options via DOM API: channel names are network-supplied
         // and must NOT be interpolated into innerHTML (XSS, #812).
         // Sort alphabetically (case-insensitive) for predictable picker order;
         // the API returns last-activity order which is unstable for a dropdown.
-        const sorted = channels.slice().sort((a, b) => {
-          const an = (a.name || a.hash || '').toLowerCase();
-          const bn = (b.name || b.hash || '').toLowerCase();
-          return an < bn ? -1 : an > bn ? 1 : 0;
-        });
+        const groups = buildChannelOptions(channels, localChannels);
         channelSel.textContent = '';
         const allOpt = document.createElement('option');
         allOpt.value = '';
         allOpt.textContent = 'All Channels';
         channelSel.appendChild(allOpt);
         let matched = false;
-        for (const ch of sorted) {
-          const v = ch.hash || ch.name || '';
-          if (!v) continue;
+        const addOption = (o, parent) => {
           const opt = document.createElement('option');
-          opt.value = v;
-          opt.textContent = ch.name || v;
-          if (v === filters.channel) { opt.selected = true; matched = true; }
-          channelSel.appendChild(opt);
+          opt.value = o.value;
+          opt.textContent = o.label;
+          if (o.value === filters.channel) { opt.selected = true; matched = true; }
+          parent.appendChild(opt);
+        };
+        for (const o of groups.server) addOption(o, channelSel);
+        // Browser-added channels the server can't see, grouped so it's
+        // obvious they come from keys stored in this browser only.
+        if (groups.local.length) {
+          const grp = document.createElement('optgroup');
+          grp.label = 'My Channels (this browser)';
+          for (const o of groups.local) addOption(o, grp);
+          channelSel.appendChild(grp);
         }
         // If current filter isn't in the list (encrypted hash, stale, or
         // race with cache), keep it as a selected option so the UI reflects state.
@@ -2775,6 +2867,47 @@
     });
   }
 
+  // applyObserverFilter decides which already-loaded packets remain visible
+  // under the current observer filter. Extracted into its own function
+  // (rather than left inline in renderTableRows) specifically so tests can
+  // exercise the real production logic instead of a hand-copied
+  // reimplementation — see #1748 PR review (kent-beck): a test that only
+  // checks a copy of this logic doesn't fail if this function regresses.
+  //
+  // #1748: In grouped mode, the server already filters transmissions
+  // correctly (buildTransmissionWhere emits an EXISTS subquery over ALL
+  // observations of the transmission, not just the displayed one — see
+  // cmd/server/db.go). Each row's `observer_id` here is only the
+  // *representative* observer chosen for display (longest observed path),
+  // which may legitimately differ from the observer that satisfied the
+  // filter. Re-filtering client-side against that single representative —
+  // with `_children` still unpopulated at this point (only fetched lazily
+  // on row-expand or observer-sort-change) — hid every multi-observer
+  // transmission whose representative happened not to be one of the
+  // selected observers. In practice this meant a transmission only stayed
+  // visible when the filtered observer was also the one with the longest
+  // path (which is why the report described it as "works only for
+  // whichever observer logged it first" in dense meshes, where
+  // longest-path and earliest-seen correlate). The server-side EXISTS
+  // filter is authoritative for grouped rows, so no client-side
+  // re-filtering is needed or correct here.
+  //
+  // Flat/expanded mode (groupByHash === false) has no such
+  // representative-vs-actual mismatch — buildPacketWhere filters each
+  // observation row by its own exact observer_id — but we keep the
+  // defensive re-filter for that path since it costs nothing and guards
+  // against any future flat-mode server change.
+  function applyObserverFilter(displayPackets, filters, groupByHash, hashOnly) {
+    if (hashOnly || !filters.observer) return displayPackets;
+    if (groupByHash) return displayPackets;
+    const obsIds = new Set(filters.observer.split(','));
+    return displayPackets.filter(p => {
+      if (obsIds.has(p.observer_id)) return true;
+      if (p._children) return p._children.some(c => obsIds.has(String(c.observer_id)));
+      return false;
+    });
+  }
+
   async function renderTableRows() {
     const tbody = document.getElementById('pktBody');
     if (!tbody) return;
@@ -2817,14 +2950,7 @@
       const types = filters.type.split(',').map(Number);
       displayPackets = displayPackets.filter(p => types.includes(p.payload_type));
     }
-    if (!hashOnly && filters.observer) {
-      const obsIds = new Set(filters.observer.split(','));
-      displayPackets = displayPackets.filter(p => {
-        if (obsIds.has(p.observer_id)) return true;
-        if (p._children) return p._children.some(c => obsIds.has(String(c.observer_id)));
-        return false;
-      });
-    }
+    displayPackets = applyObserverFilter(displayPackets, filters, groupByHash, hashOnly);
 
     // Packet Filter Language
     const pfCount = document.getElementById('packetFilterCount');
@@ -3503,7 +3629,11 @@
               id: o.id, hash: pkt.hash, raw: o.raw_hex || pkt.raw_hex,
               _ts: new Date(o.timestamp).getTime(),
               decoded: { header: { payloadTypeName: typeName }, payload: oDec, path: { hops: oPath } },
-              snr: o.snr, rssi: o.rssi, observer: obsName(o.observer_id)
+              snr: o.snr, rssi: o.rssi, observer: obsName(o.observer_id),
+              // #1900: carry the id itself, not just the resolved name. The Live
+              // region filter matches on observer_id, so without it the replay
+              // silently renders nothing whenever a region is selected.
+              observer_id: o.observer_id, observer_iata: o.observer_iata
             });
           }
         } else {
@@ -3511,7 +3641,8 @@
             id: pkt.id, hash: pkt.hash, raw: pkt.raw_hex,
             _ts: new Date(pkt.timestamp).getTime(),
             decoded: { header: { payloadTypeName: typeName }, payload: decoded, path: { hops: pathHops } },
-            snr: pkt.snr, rssi: pkt.rssi, observer: obsName(pkt.observer_id)
+            snr: pkt.snr, rssi: pkt.rssi, observer: obsName(pkt.observer_id),
+            observer_id: pkt.observer_id, observer_iata: pkt.observer_iata
           });
         }
         sessionStorage.setItem('replay-packet', JSON.stringify(replayPackets));
@@ -4074,6 +4205,7 @@
       buildFlatRowHtml,
       _calcVisibleRange,
       buildPacketsParams,
+      applyObserverFilter,
       renderTableRows,
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },

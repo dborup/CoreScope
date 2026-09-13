@@ -11,6 +11,7 @@ echo ""
 echo "── Unit Tests ──"
 node test-packet-filter.js
 node test-packet-filter-ux.js
+node test-packets-local-channels.js
 node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js
@@ -50,6 +51,7 @@ node test-issue-1648-m2-emoji-scan.js
 node test-issue-1648-m3-emoji-scan.js
 node test-issue-1648-m6-final-sweep.js
 node test-issue-1648-m6-lint-self.js
+node test-issue-1890-og-url.js
 node test-traces.js
 node test-live-multibyte-filter.js
 

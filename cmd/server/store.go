@@ -178,7 +178,6 @@ type PacketStore struct {
 	byNode        map[string][]*StoreTx      // pubkey → transmissions
 	nodeHashes    map[string]map[string]bool // pubkey → Set<hash>
 	byPathHop     map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
-	relayTimes    map[string][]int64         // lowercase pubkey → sorted unix-millis of relay events (full pubkeys only)
 	byPayloadType map[int][]*StoreTx         // payload_type → transmissions
 	loaded        bool
 	totalObs      int
@@ -476,6 +475,13 @@ type PacketStore struct {
 	trackedBytes    int64          // running total of estimated packet store memory
 	memoryEstimator func() float64 // injectable for tests; nil = use runtime.ReadMemStats (stats only)
 
+	// Per-store ReadMemStats cache (5s TTL). Fields (not package-level vars) so
+	// that test helpers constructing &PacketStore{...} directly get independent
+	// cache state, avoiding order-dependent test failures.
+	estMemMu  sync.Mutex
+	estMemVal float64
+	estMemAt  time.Time
+
 	// Short-lived cache for the observations aggregate in GetStoreStats (30s TTL).
 	// Avoids a per-/api/stats full-table scan; values accurate to ~30s which is
 	// sufficient for dashboard display.
@@ -646,7 +652,6 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
 		byPathHop:     make(map[string][]*StoreTx),
-		relayTimes:    make(map[string][]int64),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
 		rfCache:       make(map[string]*cachedResult),
@@ -4155,14 +4160,81 @@ func (s *PacketStore) buildSubpathIndex() {
 		len(s.spIndex), s.spTotalPaths)
 }
 
-// buildPathHopIndex scans all packets and populates byPathHop.
+// buildPathHopIndex rebuilds byPathHop: raw wire hops from every packet's
+// path_json, plus the resolved full-pubkey hops carried over from the
+// previous index (see retainResolvedPathHops).
 // Must be called with s.mu held.
 func (s *PacketStore) buildPathHopIndex() {
-	s.byPathHop = make(map[string][]*StoreTx, 4096)
+	prev := s.byPathHop
+	s.byPathHop = make(map[string][]*StoreTx, max(4096, len(prev)))
 	for _, tx := range s.packets {
 		addTxToPathHopIndex(s.byPathHop, tx)
 	}
-	log.Printf("[store] Built path-hop index: %d unique keys", len(s.byPathHop))
+	retained := s.retainResolvedPathHops(prev)
+	log.Printf("[store] Built path-hop index: %d unique keys (%d resolved-hop entries retained)",
+		len(s.byPathHop), retained)
+}
+
+// retainResolvedPathHops re-merges the entries of a pre-rebuild byPathHop
+// that the raw-hop pass above cannot reproduce: the resolved full-pubkey
+// keys fed by indexResolvedPathHops. Their pubkey strings are retained
+// nowhere — #800 dropped the per-StoreTx ResolvedPath field in favour of a
+// hash-only membership index — so a plain rebuild silently discarded every
+// resolved relay attribution, leaving relay counts and transported scopes
+// empty after each cold load until live ingestion refilled them (#1904).
+//
+// Only transmissions still in s.packets are carried over. This matters:
+// eviction's removeTxFromPathHopIndex strips raw hops only (it derives them
+// from txGetParsedPath), so evicted transmissions linger in prev under their
+// resolved keys. Filtering them here is what keeps the index bounded by the
+// eviction policy instead of turning that gap into a permanent leak.
+//
+// Cost is O(entries in prev) with one reused scratch map, and it runs only
+// where buildPathHopIndex already runs — cold load and background-fill
+// completion — never on an ingest or request path.
+//
+// Returns the number of entries carried over. Must be called with s.mu held,
+// after s.byPathHop has been rebuilt from raw hops.
+func (s *PacketStore) retainResolvedPathHops(prev map[string][]*StoreTx) int {
+	if len(prev) == 0 {
+		return 0
+	}
+	live := make(map[*StoreTx]struct{}, len(s.packets))
+	for _, tx := range s.packets {
+		live[tx] = struct{}{}
+	}
+
+	// Reused across keys (cleared per key) so a large index does not churn
+	// one map allocation per key. Guards against both a key that the raw
+	// pass already produced and repeated appends of the same tx in prev —
+	// indexResolvedPathHops dedups within a call, not across the several
+	// observations of one transmission.
+	seen := make(map[*StoreTx]struct{}, 16)
+	retained := 0
+	for key, list := range prev {
+		if len(list) == 0 {
+			continue
+		}
+		clear(seen)
+		for _, tx := range s.byPathHop[key] {
+			seen[tx] = struct{}{}
+		}
+		for _, tx := range list {
+			if tx == nil {
+				continue
+			}
+			if _, ok := live[tx]; !ok {
+				continue
+			}
+			if _, dup := seen[tx]; dup {
+				continue
+			}
+			seen[tx] = struct{}{}
+			s.byPathHop[key] = append(s.byPathHop[key], tx)
+			retained++
+		}
+	}
+	return retained
 }
 
 // addTxToPathHopIndex indexes a transmission under each unique raw hop key.
@@ -4587,13 +4659,24 @@ func estimateStoreObsBytes(obs *StoreObs) int64 {
 // estimatedMemoryMB returns current Go heap allocation in MB.
 // Kept for stats/debug endpoints only — NOT used in eviction decisions.
 // In tests, memoryEstimator can be set to inject a deterministic value.
+// Caches the result for 5 seconds because runtime.ReadMemStats() stops the
+// world and this is called from stats/debug endpoints that may be polled.
+// The cache is per-store (not package-level) so that test helpers constructing
+// &PacketStore{...} directly get independent cache state, avoiding
+// order-dependent test failures from a shared global cache.
 func (s *PacketStore) estimatedMemoryMB() float64 {
 	if s.memoryEstimator != nil {
 		return s.memoryEstimator()
 	}
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return float64(ms.HeapAlloc) / 1048576.0
+	s.estMemMu.Lock()
+	defer s.estMemMu.Unlock()
+	if time.Since(s.estMemAt) > 5*time.Second {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		s.estMemVal = float64(ms.HeapAlloc) / 1048576.0
+		s.estMemAt = time.Now()
+	}
+	return s.estMemVal
 }
 
 // trackedMemoryMB returns the self-accounted packet store memory in MB.
@@ -8196,14 +8279,17 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 					name = pk
 				}
 			}
-			// Skip zero-hop direct adverts for hash_size — the
-			// path byte is locally generated and unreliable.
-			// Still count the packet and update lastSeen.
-			isZeroHop := (routeType == uint64(RouteDirect) || routeType == uint64(RouteTransportDirect)) && (actualPathByte&0x3F) == 0
+			// Skip zero-hop direct adverts whose path byte is entirely zero —
+			// there the size bits were wiped by the sender and say nothing.
+			// A non-zero byte with a zero hop count (0x40 / 0x80) is a
+			// deliberate size declaration; keep it. Same rule as
+			// computeNodeHashSizeInfo. Skipped packets still count and still
+			// update lastSeen.
+			isUndeclaredZeroHop := (routeType == uint64(RouteDirect) || routeType == uint64(RouteTransportDirect)) && actualPathByte == 0x00
 			if byNode[pk] == nil {
 				role := nodeRoleByPK[pk] // empty if unknown
 				initHS := hashSize
-				if isZeroHop {
+				if isUndeclaredZeroHop {
 					initHS = 0
 				}
 				byNode[pk] = map[string]interface{}{
@@ -8213,7 +8299,7 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 				}
 			}
 			byNode[pk]["packets"] = byNode[pk]["packets"].(int) + 1
-			if !isZeroHop {
+			if !isUndeclaredZeroHop {
 				byNode[pk]["hashSize"] = hashSize
 			}
 			byNode[pk]["lastSeen"] = tx.FirstSeen
@@ -8811,9 +8897,15 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 		if err != nil {
 			continue
 		}
-		// Direct zero-hop adverts (route types 2 and 3) use path byte 0x00
-		// locally and can misreport multibyte hash mode as 1-byte.
-		if (routeType == RouteDirect || routeType == RouteTransportDirect) && (pathByte&0x3F) == 0 {
+		// Direct zero-hop adverts carry no path, so the hop count is 0. Whether
+		// the SIZE bits are meaningful depends on the sender: firmware that
+		// predates meshcore-dev/MeshCore#3293 does `path_len = 0`, wiping the
+		// whole byte including the two size bits, so 0x00 says nothing about
+		// the node's path.hash.mode. A sender that writes the size through
+		// setPathHashSizeAndCount() emits 0x40 / 0x80 with a zero hop count —
+		// that is a deliberate declaration and the only way those bits can be
+		// non-zero here. Skip on the byte's content, not on the route type.
+		if (routeType == RouteDirect || routeType == RouteTransportDirect) && pathByte == 0x00 {
 			continue
 		}
 		hs := int((pathByte>>6)&0x3) + 1

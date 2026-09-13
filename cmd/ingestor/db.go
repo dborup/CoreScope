@@ -1413,8 +1413,68 @@ func (s *Store) UpsertObserverAt(id, name, iata string, meta *ObserverMeta, last
 	}
 	normalizedIATA := strings.TrimSpace(strings.ToUpper(iata))
 
-	var model, firmware, clientVersion, radio interface{}
-	var batteryMv, uptimeSecs, noiseFloor, canRelay interface{}
+	model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay := observerMetaColumns(meta)
+
+	_, err := s.stmtUpsertObserver.Exec(
+		id, name, normalizedIATA, lastSeen, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
+		name, normalizedIATA, ingestNow, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
+	)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+		return err
+	}
+	s.Stats.ObserverUpserts.Add(1)
+
+	// Reactivate if this observer was previously marked inactive
+	s.db.Exec(`UPDATE observers SET inactive = 0 WHERE id = ? AND inactive = 1`, id)
+	return nil
+}
+
+// UpsertObserverRetained applies the metadata from a RETAINED status message
+// without treating it as a sign of life. The broker replays retained messages
+// on every subscribe, so an ingestor restart would otherwise stamp last_seen
+// with the restart time for every observer that ever published one — making
+// dead observers permanently un-ageable by RemoveStaleObservers, and undoing
+// any inactive flag it did manage to set.
+//
+// Deliberately narrower than UpsertObserverAt: it updates metadata columns on
+// an existing row only. It does not advance last_seen, does not clear
+// inactive, does not bump packet_count, and does not INSERT — a retained-only
+// observer the analyzer has never heard from live describes a past that may be
+// months old and does not belong in the list. A live message from the same
+// observer arrives moments later and creates the row through the normal path.
+func (s *Store) UpsertObserverRetained(id, name, iata string, meta *ObserverMeta) error {
+	normalizedIATA := strings.TrimSpace(strings.ToUpper(iata))
+	model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay := observerMetaColumns(meta)
+
+	_, err := s.db.Exec(`
+		UPDATE observers SET
+			name = COALESCE(?, name),
+			iata = COALESCE(?, iata),
+			model = COALESCE(?, model),
+			firmware = COALESCE(?, firmware),
+			client_version = COALESCE(?, client_version),
+			radio = COALESCE(?, radio),
+			battery_mv = COALESCE(?, battery_mv),
+			uptime_secs = COALESCE(?, uptime_secs),
+			noise_floor = COALESCE(?, noise_floor),
+			can_relay = COALESCE(?, can_relay),
+			can_relay_seen = CASE WHEN ? IS NULL THEN can_relay_seen ELSE 1 END
+		WHERE id = ?`,
+		name, normalizedIATA, model, firmware, clientVersion, radio,
+		batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay, id,
+	)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+		return err
+	}
+	return nil
+}
+
+// observerMetaColumns flattens an *ObserverMeta into the driver args the
+// observer upserts bind. A nil field stays nil so the COALESCE in the SQL
+// leaves the existing column untouched (#1290).
+func observerMetaColumns(meta *ObserverMeta) (model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay interface{}) {
 	if meta != nil {
 		if meta.Model != nil {
 			model = *meta.Model
@@ -1449,20 +1509,7 @@ func (s *Store) UpsertObserverAt(id, name, iata string, meta *ObserverMeta, last
 			}
 		}
 	}
-
-	_, err := s.stmtUpsertObserver.Exec(
-		id, name, normalizedIATA, lastSeen, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
-		name, normalizedIATA, ingestNow, lastSeen, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay, canRelay,
-	)
-	if err != nil {
-		s.Stats.WriteErrors.Add(1)
-		return err
-	}
-	s.Stats.ObserverUpserts.Add(1)
-
-	// Reactivate if this observer was previously marked inactive
-	s.db.Exec(`UPDATE observers SET inactive = 0 WHERE id = ? AND inactive = 1`, id)
-	return nil
+	return model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay
 }
 
 // Close checkpoints the WAL and closes the database.
@@ -1837,6 +1884,42 @@ func (s *Store) RemoveStaleObservers(observerDays int) (int64, error) {
 		log.Printf("Marked %d observer(s) as inactive (not seen in %d days)", removed, observerDays)
 	}
 	return removed, nil
+}
+
+// PurgeStaleObservers hard-deletes rows RemoveStaleObservers already soft-deleted,
+// once they are older than purgeDays and nothing references them any more. It is
+// the second stage of observer retention: the soft-delete hides the observer,
+// this reclaims the row after its packets have aged out via packetDays.
+//
+// observations.observer_idx is a bare rowid with no foreign key, so deleting a
+// still-referenced observer silently orphans history — packets_v stops resolving
+// the observer and the packets are mis-attributed. The three NOT EXISTS guards
+// are what make the delete safe; they are correctness, not defensive padding.
+// Each is an index seek per candidate row (observers is O(100)), so the whole
+// statement stays cheap enough for the daily retention tick.
+//
+// purgeDays <= 0 disables the purge (the default).
+func (s *Store) PurgeStaleObservers(purgeDays int) (int64, error) {
+	if purgeDays <= 0 {
+		return 0, nil // disabled
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -purgeDays).Format(time.RFC3339)
+	// Tagged for /api/perf writer-lock visibility (#1340).
+	result, err := s.instrumentedExec("purge_observers", `
+		DELETE FROM observers
+		WHERE inactive = 1
+		  AND last_seen < ?
+		  AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.observer_idx = observers.rowid)
+		  AND NOT EXISTS (SELECT 1 FROM observer_metrics m WHERE m.observer_id = observers.id)
+		  AND NOT EXISTS (SELECT 1 FROM dropped_packets d WHERE d.observer_id = observers.id)`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge stale observers: %w", err)
+	}
+	purged, _ := result.RowsAffected()
+	if purged > 0 {
+		log.Printf("Purged %d inactive observer(s) with no remaining data (not seen in %d days)", purged, purgeDays)
+	}
+	return purged, nil
 }
 
 // DroppedPacket holds data for a packet rejected during ingest.
