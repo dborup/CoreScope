@@ -22,6 +22,7 @@ import (
 	"github.com/meshcore-analyzer/packetpath"
 	"github.com/meshcore-analyzer/prunequeue"
 	regionutil "github.com/meshcore-analyzer/regions"
+	"golang.org/x/sync/singleflight"
 )
 
 // memBreakdownNote is the static accounting caveat attached to the opt-in
@@ -50,6 +51,11 @@ type Server struct {
 	statsMu       sync.Mutex
 	statsCache    *StatsResponse
 	statsCachedAt time.Time
+	// Concurrent cache misses share one rebuild (upstream #1963); see handleStats.
+	statsSF singleflight.Group
+	// Test-only hook called with "stats-miss" and "stats-build" as a cache
+	// miss moves through handleStats. Nil in production.
+	statsHook func(stage string)
 
 	// Guards s.cfg.GeoFilter — read by ingest/handler goroutines, written by PUT handler
 	cfgMu sync.RWMutex
@@ -969,18 +975,61 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	const statsTTL = 10 * time.Second
+// statsTTL is how long a built /api/stats response is served from cache.
+const statsTTL = 10 * time.Second
 
-	s.statsMu.Lock()
-	if s.statsCache != nil && time.Since(s.statsCachedAt) < statsTTL {
-		cached := s.statsCache
-		s.statsMu.Unlock()
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if cached := s.cachedStats(); cached != nil {
 		writeJSON(w, cached)
 		return
 	}
-	s.statsMu.Unlock()
 
+	// Concurrent misses share one rebuild (upstream #1963). The cache is checked
+	// again inside the flight, so a request that missed just before an earlier
+	// rebuild stored its response uses that instead of rebuilding. A failed
+	// rebuild's error reaches every request that shared it and is not cached.
+	s.statsHookAt("stats-miss")
+	v, err, _ := s.statsSF.Do("stats", func() (interface{}, error) {
+		if cached := s.cachedStats(); cached != nil {
+			return cached, nil
+		}
+		s.statsHookAt("stats-build")
+		resp, err := s.buildStats()
+		if err != nil {
+			return nil, err
+		}
+		s.statsMu.Lock()
+		s.statsCache = resp
+		s.statsCachedAt = time.Now()
+		s.statsMu.Unlock()
+		return resp, nil
+	})
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, v.(*StatsResponse))
+}
+
+// cachedStats returns the cached /api/stats response while it is younger than
+// statsTTL.
+func (s *Server) cachedStats() *StatsResponse {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.statsCache != nil && time.Since(s.statsCachedAt) < statsTTL {
+		return s.statsCache
+	}
+	return nil
+}
+
+func (s *Server) statsHookAt(stage string) {
+	if s.statsHook != nil {
+		s.statsHook(stage)
+	}
+}
+
+// buildStats computes a fresh /api/stats response.
+func (s *Server) buildStats() (*StatsResponse, error) {
 	var stats *Stats
 	var err error
 	if s.store != nil {
@@ -989,8 +1038,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats, err = s.db.GetStats()
 	}
 	if err != nil {
-		writeError(w, 500, err.Error())
-		return
+		return nil, err
 	}
 	counts := s.db.GetRoleCounts()
 
@@ -1035,12 +1083,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		NeighborGraphCacheRebuildFailures: atomic.LoadUint64(&s.neighborGraphCacheRebuildFailures),
 	}
 
-	s.statsMu.Lock()
-	s.statsCache = resp
-	s.statsCachedAt = time.Now()
-	s.statsMu.Unlock()
-
-	writeJSON(w, resp)
+	return resp, nil
 }
 
 func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
