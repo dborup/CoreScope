@@ -102,13 +102,14 @@ function loadInCtx(ctx, file) {
   }
 }
 
-function loadPacketsSandbox() {
+function loadPacketsSandbox(captureRoutes = false) {
   const ctx = makeSandbox();
   // Load dependencies first
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
   loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
+  if (captureRoutes) ctx.registerPage = (name, handler) => { ctx._registeredPages[name] = handler; };
   // HopDisplay stub (simpler than loading real file which may have DOM deps)
   vm.runInContext(`
     window.HopDisplay = {
@@ -1489,7 +1490,57 @@ console.log('\n=== packets.js: View Path button ===');
   });
 }
 
-// ===== SUMMARY =====
-console.log(`\n${'='.repeat(40)}`);
-console.log(`packets.js tests: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+// Exercise the real route and renderDetail, awaiting completion so rejected
+// renders cannot accidentally count as passing synchronous assertions.
+async function testChannelDestinations() {
+  console.log('\n=== packets.js: channel destination (#20) ===');
+  const cases = [
+    ['unprefixed channel', { channel: 'test' }, '#test'],
+    ['already-prefixed channel', { channel: '#test' }, '#test'],
+    ['missing channel', {}, '?'],
+    ['empty channel', { channel: '' }, '?'],
+    ['channel HTML is escaped', { channel: '<test>&' }, '#&lt;test&gt;&amp;'],
+    ['prefixed channel HTML is escaped', { channel: '#<test>&' }, '#&lt;test&gt;&amp;'],
+    ['recipient wins over channel and hash', { channel: '#test', recipient: '<recipient>', destHash: '1234567890' }, '&lt;recipient&gt;'],
+    ['destination hash wins over channel', { channel: '#test', destHash: '1234567890' }, '12345678'],
+  ];
+  for (const [name, fields, expected] of cases) {
+    try {
+      const ctx = loadPacketsSandbox(true);
+      const elements = [];
+      const createElement = ctx.document.createElement;
+      ctx.document.createElement = tag => {
+        const element = createElement(tag);
+        elements.push(element);
+        return element;
+      };
+      ctx.api = async path => {
+        if (path === '/observers') return [];
+        if (path === '/packets/channel-fixture') return {
+          packet: { id: 1, hash: 'channel-fixture', payload_type: 5,
+            route_type: 1, timestamp: '2026-01-01T00:00:00Z', path_json: '[]',
+            decoded_json: JSON.stringify({ type: 'GRP_TXT', sender: 'Sender', ...fields }) },
+          observations: [],
+        };
+        throw new Error('Unexpected API request: ' + path);
+      };
+      const app = createElement('div');
+      await ctx._registeredPages['packet-detail'].init(app, 'channel-fixture');
+      const detail = elements.find(el => el.innerHTML.includes('class="detail-srcdst"'));
+      assert.ok(detail, 'real packet detail must render, got: ' + app.innerHTML);
+      const row = detail.innerHTML.match(/<div class="detail-srcdst">(.*?)<\/div>/)[1];
+      assert.strictEqual(row, 'Sender <span class="arrow">→</span> ' + expected);
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) {
+      failed++;
+      console.log('  ❌ ' + name + ': ' + e.message);
+    }
+  }
+}
+
+testChannelDestinations().then(() => {
+  console.log(`\n${'='.repeat(40)}`);
+  console.log(`packets.js tests: ${passed} passed, ${failed} failed`);
+  if (failed > 0) process.exit(1);
+}).catch(error => { console.error(error); process.exit(1); });
