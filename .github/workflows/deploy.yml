@@ -119,6 +119,7 @@ jobs:
           node test-issue-1356-map-a11y.js
           node test-issue-1360-pill-letter-count.js
           node test-issue-1364-pill-no-clamp.js
+          node test-issue-1890-og-url.js
           node test-issue-1375-scope-stats-fetch.js
           node test-issue-1361-cb-presets.js
           node test-issue-1380-cb-sim-overlay.js

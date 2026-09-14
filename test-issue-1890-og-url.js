@@ -3,11 +3,17 @@
  * Open Graph tags.
  *
  * `<meta property="og:url" content="https://analyzer.00id.net">` shipped to
- * every self-hosted CoreScope. Facebook, Messenger and other OG consumers treat
- * og:url as the canonical destination, so clicking a shared preview from ANY
- * instance navigated to that one host instead of the instance the link came
- * from. With no og:url present, consumers fall back to the URL they crawled,
- * which is correct for every deployment without any configuration.
+ * every self-hosted CoreScope, declaring that one upstream URL as the
+ * canonical destination for the page's Open Graph metadata on every
+ * instance. og:url is metadata, not an HTTP redirect, and it does not by
+ * itself determine what a viewer's click navigates to — but Facebook,
+ * Messenger and other OG consumers treat it as canonical (per Meta's own
+ * sharing docs, likes/shares aggregate at that URL, and a differing og:url
+ * is followed), so every self-hosted instance was shipping the wrong
+ * canonical reference for its own pages. With no og:url present, consumers
+ * fall back to treating the URL they crawled as canonical, which is correct
+ * for every deployment without any configuration. This does not refresh
+ * previews a consumer already cached under the old, hardcoded value.
  *
  * og:image is deliberately NOT covered: it points at the project's own asset on
  * raw.githubusercontent.com, which is a shared project resource, not a
