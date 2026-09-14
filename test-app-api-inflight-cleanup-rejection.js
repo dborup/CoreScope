@@ -45,8 +45,14 @@
  *   2. A watchdog `setTimeout` (not unref'd) is armed for the whole
  *      run's duration. A real, non-unref'd timer is a pending macrotask,
  *      so it keeps the event loop alive even if some other promise
- *      chain stalls -- Node cannot silently drain and exit while it is
- *      pending. If the suite hasn't finished by the deadline, the
+ *      chain stalls -- Node cannot silently drain and exit while this
+ *      timer is still the sole reason it stays alive. This is strictly
+ *      an event-loop-based safety bound for ASYNC stalls: it cannot
+ *      interrupt spawnSync (used by scenarios C and H) or any other
+ *      synchronous blocking in this main process, because a blocked
+ *      main thread never gets to run the timer's callback either --
+ *      an outer runner-level timeout remains the only backstop for
+ *      that case. If the suite hasn't finished by the deadline, the
  *      watchdog itself fails loudly and exits 1. It is cleared on the
  *      normal completion path, so a healthy run's timing is unaffected.
  */
@@ -64,11 +70,13 @@ const WATCHDOG_MS = 15000;
 const watchdog = setTimeout(() => {
   console.error(
     '\n✗ WATCHDOG: the suite did not finish within ' + WATCHDOG_MS + 'ms. ' +
-    'A real, non-unref\'d timer (this one) is a pending macrotask, so this ' +
-    'firing means the event loop was otherwise still alive -- something is ' +
-    'genuinely hung (not the historical "silent early exit 0" failure mode, ' +
-    'which this timer separately prevents just by existing). Failing loudly ' +
-    'instead of hanging CI indefinitely.'
+    'This is an event-loop-based safety bound for an ASYNC stall (e.g. a ' +
+    'permanently-pending promise) -- it cannot interrupt spawnSync or any ' +
+    'other synchronous blocking in this main process, so it firing means ' +
+    'something is genuinely stuck in async code (not the historical ' +
+    '"silent early exit 0" failure mode, which this timer separately ' +
+    'prevents just by existing). Failing loudly instead of hanging CI ' +
+    'indefinitely.'
   );
   process.exitCode = 1;
   process.exit(1);
@@ -238,7 +246,11 @@ function buildScenarioCChildScript(appJsPath) {
 
   await checkAsync('C. A handled request failure produces NO additional unhandled rejection (child process, --unhandled-rejections=strict)', async () => {
     const script = buildScenarioCChildScript(APP_JS_PATH);
-    const r = spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', script], { timeout: 10000, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', script],
+      { timeout: 10000, killSignal: 'SIGKILL', encoding: 'utf8' });
+    assert.ok(!(r.error && r.error.code === 'ETIMEDOUT'),
+      'child process TIMED OUT after 10000ms and was killed with SIGKILL -- it never reached completion ' +
+      '(this is a hang in the child, not an unhandled-rejection failure)');
     assert.strictEqual(r.error, undefined,
       'child process failed to spawn: ' + (r.error && r.error.message));
     assert.strictEqual(r.signal, null,
@@ -326,15 +338,34 @@ function buildScenarioCChildScript(appJsPath) {
       for (let i = 0; i < 10; i++) p = p.then(() => new Promise((r) => setImmediate(r)));
       p.then(() => { console.log('SHOULD_NOT_REACH_HERE_IF_STRICT_MODE_WORKS'); });
     `;
-    const r = spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', script], { timeout: 10000, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', script],
+      { timeout: 10000, killSignal: 'SIGKILL', encoding: 'utf8' });
+    assert.ok(!(r.error && r.error.code === 'ETIMEDOUT'),
+      'child process TIMED OUT after 10000ms and was killed with SIGKILL -- it never reached completion ' +
+      '(this is a hang in the child, not evidence for or against the strict-mode technique)');
     assert.strictEqual(r.error, undefined,
       'child process failed to spawn: ' + (r.error && r.error.message));
-    assert.notStrictEqual(r.status, 0,
-      'expected the deliberate unhandled rejection to make the child exit non-zero under --unhandled-rejections=strict -- ' +
-      'got status=' + r.status + ' (if this is 0, the harness technique used in scenario C cannot be trusted)');
-    assert.ok((r.stderr || '').includes(marker),
-      'expected the crash to be caused SPECIFICALLY by our deliberate rejection (stderr should mention "' + marker + '"), ' +
-      'not an unrelated child-process failure -- stderr=' + r.stderr);
+    assert.strictEqual(r.signal, null,
+      'child process was killed by a signal (' + r.signal + ') instead of exiting normally -- a signal kill ' +
+      '(including our own 10s timeout SIGKILL) must never be mistaken for the deliberate-rejection crash');
+    assert.ok(typeof r.status === 'number' && r.status !== 0,
+      'expected the deliberate unhandled rejection to make the child exit with a numeric non-zero status under ' +
+      '--unhandled-rejections=strict -- got status=' + JSON.stringify(r.status) + ' (null would mean the process ' +
+      'was killed rather than exiting on its own, and must not count as a pass)');
+    // A substring check here is not enough: when the child crashes for ANY
+    // reason (a typo, a syntax error), Node echoes the OFFENDING SOURCE LINE
+    // to stderr, and the script line above containing `${marker}` would
+    // itself satisfy a plain `.includes(marker)` check even though no
+    // deliberate-rejection crash occurred. Require the exact thrown-message
+    // line instead -- `Error: <marker>` alone on its own line -- which only
+    // appears when Node prints the uncaught exception's message, not when it
+    // is merely quoting a source line.
+    const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const thrownMessageLine = new RegExp('^Error: ' + escapedMarker + '$', 'm');
+    assert.ok(thrownMessageLine.test(r.stderr || ''),
+      'expected the crash to be caused SPECIFICALLY by our deliberate rejection -- stderr should contain the exact ' +
+      'thrown-message line "Error: ' + marker + '" on its own line, not merely mention the marker (e.g. by quoting ' +
+      'the source line for an unrelated crash) -- stderr=' + r.stderr);
     assert.ok(!(r.stdout || '').includes('SHOULD_NOT_REACH_HERE_IF_STRICT_MODE_WORKS'),
       'the .then() scheduled after the rejection must never have run once the process crashed');
   });
