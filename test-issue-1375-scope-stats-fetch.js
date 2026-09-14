@@ -48,12 +48,18 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 
+process.exitCode = 1; // Flipped to 0 only after every scenario (A-F) is confirmed to have run AND all passed.
+
+const EXPECTED_SCENARIOS = ['A', 'B', 'C', 'D', 'E', 'F'];
+const ranScenarios = new Set();
+
 let passed = 0, failed = 0;
 function check(cond, msg) {
   if (cond) { passed++; console.log('  ✓ ' + msg); }
   else { failed++; console.error('  ✗ ' + msg); }
 }
 async function checkAsync(name, fn) {
+  const label = (/^([A-F])\./.exec(name) || [])[1];
   try {
     await fn();
     passed++;
@@ -61,29 +67,22 @@ async function checkAsync(name, fn) {
   } catch (e) {
     failed++;
     console.error('  ✗ ' + name + ': ' + e.message);
+  } finally {
+    if (label) ranScenarios.add(label);
   }
 }
 
-// api()'s real implementation (public/app.js ~199-200) does
-// `promise.finally(() => _inflight.delete(path))` and discards the
-// derived promise. When `promise` rejects (e.g. scenario F's induced
-// 500), that discarded `.finally()` promise rejects too, with nothing
-// ever attached to observe it — an "orphaned" rejection. In a real
-// browser this surfaces only as a benign `Uncaught (in promise)`
-// console warning (nothing reads its value; api()'s actual callers all
-// get the *original* `promise`, which both real call sites already
-// catch — see analytics.js's own try/catch at ~5147 and `.catch()` at
-// ~6148). Node's stricter default (crash the process on any unhandled
-// rejection) has no browser equivalent, so it would kill this whole
-// test run over a pre-existing, functionally-inert characteristic of
-// unmodified production code that has nothing to do with the #1375
-// contract under test. Logged, not silently swallowed, and it does not
-// touch pass/fail accounting below.
-process.on('unhandledRejection', (err) => {
-  console.error('  (note) benign unhandled rejection from api()\'s orphaned `promise.finally()` ' +
-    '(public/app.js ~200, pre-existing, browser-harmless) -- not part of the #1375 contract: ' +
-    (err && err.message));
-});
+// This file's behavioral scenarios (Part 3, A-F) load the REAL,
+// unmodified public/app.js via vm, so they exercise api()'s actual
+// `promise.finally(() => _inflight.delete(path))` line. That line
+// discards its derived promise; when the underlying request rejects
+// (e.g. scenario F's induced 500), the derived promise rejects too
+// with nothing observing it -- a genuine unhandled rejection. PR #53
+// fixes this in public/app.js via an added `.catch(() => {})`. Without
+// PR #53 present in the tree, running this file against
+// `codex/fix-1375-scope-stats-test` alone is expected to CRASH under
+// Node's default unhandled-rejection behavior -- a real, documented
+// cross-branch dependency, not a bug in this test. No longer suppressed.
 
 const src = fs.readFileSync(
   path.join(__dirname, 'public', 'analytics.js'), 'utf8');
@@ -345,9 +344,18 @@ function flush(times) {
     assert.strictEqual(calls.length, 2, 'expected a real retry after the first failure, got ' + calls.length + ': ' + JSON.stringify(calls.map(c => c.url)));
   });
 
+  const missing = EXPECTED_SCENARIOS.filter((l) => !ranScenarios.has(l));
+  if (missing.length > 0) {
+    failed++;
+    console.error('\n✗ INCOMPLETE SUITE: scenario(s) ' + missing.join(', ') + ' never ran to completion (expected exactly ' +
+      EXPECTED_SCENARIOS.join(', ') + ')');
+  }
+
   console.log('\n=== Summary ===');
+  console.log('  Ran: ' + Array.from(ranScenarios).sort().join(', ') + ' (' + ranScenarios.size + '/' + EXPECTED_SCENARIOS.length + ')');
   console.log('  Passed: ' + passed);
   console.log('  Failed: ' + failed);
-  console.log('\n#1375 ' + (failed === 0 ? 'PASS' : 'FAIL'));
-  process.exitCode = failed === 0 ? 0 : 1;
+  const complete = missing.length === 0;
+  console.log('\n#1375 ' + (failed === 0 && complete ? 'PASS' : 'FAIL'));
+  process.exitCode = (failed === 0 && complete) ? 0 : 1;
 })();
