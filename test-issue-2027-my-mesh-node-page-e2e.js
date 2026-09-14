@@ -11,44 +11,45 @@
  * at all -- confirmed here with Playwright's keyboard API (real key events,
  * not dispatchEvent/click()), not just by reading the code.
  *
- * Scope: public/home.js, public/home.css only. See the local commit for
- * the exact upstream-vs-local diff.
+ * Scope: public/home.js, public/home.css only.
  *
  * Real production rendering: the actual public/app.js, roles.js, home.js
- * and (for the node-route reality check) nodes.js execute unmodified in a
- * real Chromium page. Only network responses are stubbed (a mock `api()`,
+ * and (for the mocked-404 step) nodes.js execute unmodified in a real
+ * Chromium page. Only network responses are stubbed (a mock `api()`,
  * following the same technique test-packet-trace-alignment-e2e.js already
  * uses in this repo) -- no card HTML or event-handler logic is duplicated
  * into this test.
  *
- * Reality check (brief-required, before trusting upstream's own commit
- * message): "the node page still resolves for a node that has only been
- * seen in channel messages" is FALSE for this fork. cmd/ingestor/main.go
- * only calls Store.UpsertNode() inside the ADVERT branch, so a node with no
- * advert yet has no `nodes` table row at all -- GET /api/nodes/{pubkey}
- * 404s (cmd/server/routes.go handleNodeDetail), and the pre-existing #1150
- * error state ("Node not found") renders instead of the full detail page.
- * The button's OWN behavior (always navigates to the right hash) is
- * correct and is what this PR actually changes; what the destination page
- * then shows is existing, unrelated backend-data behavior, verified below
- * by loading the real nodes.js and calling its own init() -- not asserted
- * from the upstream commit message.
+ * Node route vs. node data: the button always navigates to the correct
+ * `#/nodes/<pubkey>` route; what the detail page then shows depends on the
+ * backend's node lookup (GET /api/nodes/{pubkey}). The mocked-404 step only
+ * proves the frontend's handling of a 404 from that lookup. It makes no
+ * claim about which nodes -- channel-only or otherwise -- the backend can
+ * or cannot find.
  *
- * Run: node test-issue-2027-my-mesh-node-page-e2e.js (requires Playwright
- * Chromium; SKIPs cleanly if unavailable, same convention as
- * test-nav-priority-1391-e2e.js / test-home-coverage-e2e.js).
+ * Failure reporting: every page a step opens is closed when the step ends,
+ * and any pageerror or console.error that page raised fails the step. The
+ * process only exits 0 when all EXPECTED_STEPS scenarios ran with zero
+ * failures. SIGINT/SIGTERM/SIGHUP close the browser and exit non-zero.
  *
- * Not yet registered in any test runner -- see the commit message / report
- * for why, and the proposed one-line CI registration.
+ * Run: CHROMIUM_REQUIRE=1 node test-issue-2027-my-mesh-node-page-e2e.js
+ * (without CHROMIUM_REQUIRE=1 it SKIPs when Chromium is unavailable).
  */
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
 
+const FILE = path.basename(__filename);
 const ORIGIN = 'http://127.0.0.1:18739';
 const PUB = path.join(__dirname, 'public');
+// Bump together with any added/removed step(): a run that finishes fewer
+// scenarios is reported as a failure, never as a pass.
+const EXPECTED_STEPS = 24;
+// Missing elements fail a scenario in seconds instead of Playwright's 30s.
+const DEFAULT_TIMEOUT_MS = 5000;
 
 // Real-shaped 64-hex-char pubkeys for the two card states.
 const NORMAL_PK = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9';
@@ -58,8 +59,8 @@ const ERROR_PK = 'b2c3d4e5f60718293a4b5c6d7e8f9a1b2c3d4e5f60718293a4b5c6d7e8f9a1
 // encoding them is a no-op and wouldn't catch a regression that dropped
 // the encodeURIComponent() call).
 const ENCODE_PK = 'deadbeef+cafebabe';
-// A pubkey never seen in an ADVERT -- base /api/nodes/{pubkey} 404s too.
-const CHANNEL_ONLY_PK = 'channelonly000000000000000000000000000000000000000000000000ab';
+// Only ever served through a mocked 404 node lookup.
+const MOCK_404_PK = '4040404040404040404040404040404040404040404040404040404040404040';
 
 const HEALTH_OK = {
   node: { name: 'Repeater One', role: 'repeater', lat: null, lon: null },
@@ -69,16 +70,46 @@ const HEALTH_OK = {
 };
 
 let passed = 0, failed = 0;
+let interrupted = null;
+let stepPages = null;
+
 async function step(name, fn) {
-  try { await fn(); passed++; console.log('  ✅ ' + name); }
-  catch (e) { failed++; console.error('  ❌ ' + name + ': ' + e.message); }
+  if (interrupted) return;
+  const pages = [];
+  stepPages = pages;
+  let problem = null;
+  try {
+    await fn();
+  } catch (e) {
+    problem = e.message;
+  } finally {
+    stepPages = null;
+  }
+  if (interrupted) return;
+  for (const tracked of pages) {
+    // Closing first delivers every event the page emitted before it closed,
+    // so errors raised right at the end of the step are still counted.
+    if (!tracked.page.isClosed()) await tracked.page.close();
+    if (tracked.errors.length) {
+      problem = (problem ? problem + '; ' : '') + 'unexpected page errors: ' + JSON.stringify(tracked.errors);
+    }
+  }
+  if (problem) { failed++; console.error('  ❌ ' + name + ': ' + problem); }
+  else { passed++; console.log('  ✅ ' + name); }
+}
+
+function trackPage(page) {
+  assert.ok(stepPages, 'harness pages must be opened inside step()');
+  const tracked = { page, errors: [] };
+  page.on('pageerror', (e) => tracked.errors.push('[pageerror] ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error') tracked.errors.push('[console.error] ' + m.text()); });
+  page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+  stepPages.push(tracked);
+  return page;
 }
 
 async function newHarness(browser) {
-  const page = await browser.newPage();
-  const pageErrors = [];
-  page.on('pageerror', (e) => pageErrors.push(e.message));
-  page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('[console] ' + m.text()); });
+  const page = trackPage(await browser.newPage());
 
   await page.route('**/*', (route) => {
     const url = new URL(route.request().url());
@@ -90,9 +121,9 @@ async function newHarness(browser) {
   });
 
   await page.goto(ORIGIN + '/');
-  // home.css only overrides/extends the shared stylesheet -- .my-nodes-grid's
-  // own `display:grid` lives in style.css, so the wrap/overflow assertions
-  // need both, matching what index.html actually links.
+  // Match index.html's stylesheet order. The My Mesh grid layout itself
+  // comes from home.css; style.css supplies shared base rules the overflow
+  // assertion depends on, among others `box-sizing: border-box`.
   await page.addStyleTag({ path: path.join(PUB, 'style.css') });
   await page.addStyleTag({ path: path.join(PUB, 'home.css') });
   for (const file of ['app.js', 'roles.js']) await page.addScriptTag({ path: path.join(PUB, file) });
@@ -117,7 +148,7 @@ async function newHarness(browser) {
   });
   await page.addScriptTag({ path: path.join(PUB, 'home.js') });
 
-  return { page, pageErrors };
+  return { page };
 }
 
 function stub(page, path_, data) {
@@ -143,13 +174,38 @@ function cardFor(page, pubkey) {
 }
 
 (async () => {
+  // Only the explicit success path at the end may report success.
+  process.exitCode = 1;
   const requireChromium = process.env.CHROMIUM_REQUIRE === '1';
   let browser;
+
+  // Playwright's own SIGTERM/SIGHUP handlers only close the browser; once
+  // its connection is gone the event loop can drain and the process exits 0
+  // without a summary. This file owns the signals instead: it reports the
+  // interrupted run, closes the browser and exits 128+signal.
+  const onSignal = (signal) => {
+    const code = 128 + os.constants.signals[signal];
+    if (interrupted) process.exit(code);
+    interrupted = signal;
+    console.error(`${FILE}: FAIL — interrupted by ${signal} after ${passed + failed} of ${EXPECTED_STEPS} scenarios (${failed} failing)`);
+    const exit = () => process.exit(code);
+    setTimeout(exit, 5000);
+    if (!browser) return exit();
+    browser.close().then(exit, (err) => {
+      console.error(`${FILE}: browser.close() after ${signal} failed: ${err.message}`);
+      exit();
+    });
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, onSignal);
+
   try {
     browser = await chromium.launch({
       headless: true,
       executablePath: process.env.CHROMIUM_PATH || undefined,
       args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
     });
   } catch (err) {
     if (requireChromium) {
@@ -301,7 +357,7 @@ function cardFor(page, pubkey) {
     });
   }
 
-  await step('mouse click / keyboard on Remove still removes the card without opening health', async () => {
+  await step('mouse click on Remove still removes the card without opening health', async () => {
     const { page } = await newHarness(browser);
     await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
     await renderMyMesh(page, [NORMAL_PK]);
@@ -312,6 +368,32 @@ function cardFor(page, pubkey) {
     assert.ok(!visible, 'removing must not open the health panel');
     await page.close();
   });
+
+  for (const key of ['Enter', 'Space']) {
+    await step(`${key} on a focused Remove removes that node exactly once without opening health`, async () => {
+      const { page } = await newHarness(browser);
+      await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
+      await stubError(page, '/nodes/' + encodeURIComponent(ERROR_PK) + '/health', 'API 404: not found');
+      await renderMyMesh(page, [NORMAL_PK, ERROR_PK]);
+      const before = await page.evaluate(() => window.__apiCalls.length);
+      await cardFor(page, NORMAL_PK).locator('.mnc-remove').focus();
+      await page.keyboard.press(key);
+      await page.waitForFunction((pk) => !document.querySelector(`.my-node-card[data-key="${pk}"]`)
+        && document.querySelectorAll('.my-node-card').length === 1, NORMAL_PK);
+      // loadMyNodes() issues its fetches synchronously, so a doubled remove
+      // (or a leaked card click) has already recorded its calls by the time
+      // the re-render lands.
+      const added = await page.evaluate((n) => window.__apiCalls.slice(n), before);
+      assert.deepEqual(added, ['/nodes/' + encodeURIComponent(ERROR_PK) + '/health'],
+        'exactly one re-render of the remaining node and no health fetch for the removed one');
+      const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]').map((n) => n.pubkey));
+      assert.deepEqual(stored, [ERROR_PK], 'only the focused node is removed from My Mesh');
+      assert.equal(await page.evaluate(() => location.hash), '', 'removing must not navigate');
+      const visible = await page.evaluate(() => document.getElementById('homeHealth')?.classList.contains('visible'));
+      assert.ok(!visible, 'removing must not open the health panel');
+      await page.close();
+    });
+  }
 
   // ---- 8. Narrow screen: buttons wrap, no horizontal overflow ----
   await step('narrow card wraps the 3 action buttons without horizontal overflow', async () => {
@@ -347,13 +429,11 @@ function cardFor(page, pubkey) {
     await page.close();
   });
 
-  // ---- Reality check: what #/nodes/<pubkey> actually shows for a node
-  //      that only exists in channel messages (no advert -> no `nodes` row
-  //      -> the base lookup 404s too, per cmd/ingestor/main.go). Loads the
-  //      real nodes.js and calls its own init(), same technique as home.js
-  //      above -- not a claim copied from upstream's commit message. ----
-  await step('a channel-message-only node opens the existing "Node not found" state, not a populated detail page', async () => {
-    const page = await browser.newPage();
+  // ---- Mocked 404 from the node lookup: frontend handling only. Whether a
+  //      real node resolves depends on the backend's GET /api/nodes/{pubkey}
+  //      lookup, which this fixture does not exercise. ----
+  await step('a mocked 404 from the node lookup renders nodes.js\'s existing "Node not found" state', async () => {
+    const page = trackPage(await browser.newPage());
     await page.route('**/*', (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== ORIGIN) return route.abort();
@@ -378,15 +458,16 @@ function cardFor(page, pubkey) {
         title: document.querySelector('.node-full-title')?.textContent || '',
         bodyText: (document.getElementById('nodeFullBody')?.textContent || '').replace(/\s+/g, ' ').trim(),
       };
-    }, CHANNEL_ONLY_PK);
+    }, MOCK_404_PK);
     assert.match(r.title, /Node not found/);
     assert.match(r.bodyText, /Node not found/);
     await page.close();
   });
 
-  // ---- No new browser errors across the whole run ----
-  await step('no page/console errors across all fixture-driven interactions above', async () => {
-    const { page, pageErrors } = await newHarness(browser);
+  // ---- Combined interactions on one page. The page/console error check
+  //      itself runs for every step's pages (see step()). ----
+  await step('combined click/Enter/Space on both card types raises no page or console errors', async () => {
+    const { page } = await newHarness(browser);
     await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
     await stubError(page, '/nodes/' + encodeURIComponent(ERROR_PK) + '/health', 'API 404: not found');
     await renderMyMesh(page, [NORMAL_PK, ERROR_PK]);
@@ -397,12 +478,19 @@ function cardFor(page, pubkey) {
       await page.keyboard.press('Space');
     }
     await page.waitForTimeout(150);
-    assert.deepEqual(pageErrors, [], 'expected zero page/console errors, got: ' + JSON.stringify(pageErrors));
     await page.close();
   });
 
+  if (interrupted) return;
+  const completed = passed + failed;
   console.log(`\n${'='.repeat(50)}`);
   console.log(`#2027 My Mesh node-page-link tests: ${passed} passed, ${failed} failed`);
+  if (completed !== EXPECTED_STEPS) {
+    console.error(`${FILE}: FAIL — ${completed} of ${EXPECTED_STEPS} expected scenarios ran`);
+  }
   await browser.close();
-  process.exit(failed > 0 ? 1 : 0);
-})().catch((e) => { console.error('FATAL', e); process.exit(1); });
+  process.exit(failed === 0 && completed === EXPECTED_STEPS ? 0 : 1);
+})().catch((e) => {
+  console.error(`${FILE}: FAIL — fatal: ${e && e.stack ? e.stack : e}`);
+  process.exit(1);
+});
