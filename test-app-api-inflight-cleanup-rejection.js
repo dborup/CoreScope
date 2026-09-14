@@ -21,16 +21,38 @@
  *
  * Fix: `promise.finally(() => _inflight.delete(path)).catch(() => {})`.
  * The added `.catch()` only consumes the *derived* promise's mirrored
- * rejection -- it is a different promise object from the `promise`
- * returned to callers, so callers' error handling is completely
- * unaffected (proven by scenario B below matching the pre-fix error
- * text exactly).
+ * rejection -- it is a different promise object from the promise chain
+ * returned to callers (api() is `async function`, so every caller
+ * actually holds a promise that FOLLOWS `promise`, never `promise`
+ * itself -- but that followed promise mirrors the same resolution, so
+ * callers' error handling is unaffected either way, proven by scenario
+ * B below matching the pre-fix error text exactly).
  *
  * Scenarios A-H below load the REAL, unmodified public/app.js via vm
  * (only `fetch` is stubbed) so the real api()/_apiCache/_inflight logic
  * runs unmodified from this test's perspective.
+ *
+ * --- Completion guarantee (round 2 review fix) ---
+ * A prior version of this file set `process.exitCode` only at the very
+ * end. If an in-flight dedup regression left one branch of a
+ * Promise.all() permanently pending (scenario F), nothing else kept the
+ * event loop alive, so Node drained and exited 0 WITHOUT ever reaching
+ * F/G/H or the summary -- a silent false pass. Two independent guards
+ * now prevent that:
+ *   1. `process.exitCode = 1` is set immediately, before anything else
+ *      runs, and only flipped to 0 after every named scenario has been
+ *      confirmed to have run AND all of them passed.
+ *   2. A watchdog `setTimeout` (not unref'd) is armed for the whole
+ *      run's duration. A real, non-unref'd timer is a pending macrotask,
+ *      so it keeps the event loop alive even if some other promise
+ *      chain stalls -- Node cannot silently drain and exit while it is
+ *      pending. If the suite hasn't finished by the deadline, the
+ *      watchdog itself fails loudly and exits 1. It is cleared on the
+ *      normal completion path, so a healthy run's timing is unaffected.
  */
 'use strict';
+
+process.exitCode = 1; // Flipped to 0 only after every scenario is confirmed complete AND passing.
 
 const vm = require('vm');
 const fs = require('fs');
@@ -38,12 +60,26 @@ const path = require('path');
 const assert = require('assert');
 const { spawnSync } = require('child_process');
 
+const WATCHDOG_MS = 15000;
+const watchdog = setTimeout(() => {
+  console.error(
+    '\n✗ WATCHDOG: the suite did not finish within ' + WATCHDOG_MS + 'ms. ' +
+    'A real, non-unref\'d timer (this one) is a pending macrotask, so this ' +
+    'firing means the event loop was otherwise still alive -- something is ' +
+    'genuinely hung (not the historical "silent early exit 0" failure mode, ' +
+    'which this timer separately prevents just by existing). Failing loudly ' +
+    'instead of hanging CI indefinitely.'
+  );
+  process.exitCode = 1;
+  process.exit(1);
+}, WATCHDOG_MS);
+
+const EXPECTED_SCENARIOS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+const ranScenarios = new Set();
+
 let passed = 0, failed = 0;
-function check(cond, msg) {
-  if (cond) { passed++; console.log('  ✓ ' + msg); }
-  else { failed++; console.error('  ✗ ' + msg); }
-}
 async function checkAsync(name, fn) {
+  const label = (/^([A-H])\./.exec(name) || [])[1];
   try {
     await fn();
     passed++;
@@ -51,6 +87,8 @@ async function checkAsync(name, fn) {
   } catch (e) {
     failed++;
     console.error('  ✗ ' + name + ': ' + e.message);
+  } finally {
+    if (label) ranScenarios.add(label);
   }
 }
 
@@ -107,6 +145,81 @@ function flush(times) {
   return p;
 }
 
+// Shared child-process source for scenario C. Deliberately verbose and
+// self-checking rather than a bare try/catch: a wrong/missing api(), an
+// error thrown before fetch, or a mismatched failure must each produce
+// their OWN distinguishable failure line, and only the fully-verified
+// exact path may print SUCCESS_MARKER. An empty catch cannot let any of
+// this slide, because there is no catch-and-ignore left in this script;
+// every branch either explicitly fails or explicitly proceeds.
+const C_SUCCESS_MARKER = 'REACHED_EXPECTED_SUCCESS_MARKER_9f3a1c';
+function buildScenarioCChildScript(appJsPath) {
+  return `
+    const vm = require('vm');
+    const fs = require('fs');
+    const fetchLog = [];
+    const ctx = {
+      window: { addEventListener: () => {}, dispatchEvent: () => {} },
+      document: { readyState: 'complete', getElementById: () => null, addEventListener: () => {}, querySelectorAll: () => [] },
+      console, Date, Promise, Map, Set, JSON, Math, Error, TypeError,
+      parseInt, isFinite, encodeURIComponent, decodeURIComponent,
+      setTimeout: (fn) => setTimeout(fn, 0), clearTimeout: () => {},
+      performance: { now: () => Date.now() },
+      location: { hash: '' }, addEventListener: () => {}, dispatchEvent: () => {},
+    };
+    ctx.fetch = function (url) {
+      fetchLog.push(url);
+      return Promise.resolve({ ok: false, status: 500, headers: { get: () => null }, json: async () => ({}) });
+    };
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(${JSON.stringify(appJsPath)}, 'utf8'), ctx);
+    for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+
+    (async () => {
+      if (typeof ctx.api !== 'function') {
+        console.error('CHILD_FAIL: ctx.api is not a function (got ' + typeof ctx.api + ') -- app.js did not expose the real api() helper');
+        process.exitCode = 1;
+        return;
+      }
+
+      const PATH = '/c-handled-fail';
+      const EXPECTED_MESSAGE = 'API 500: ' + PATH;
+      let rejection = null;
+      try {
+        const result = await ctx.api(PATH);
+        console.error('CHILD_FAIL: expected api(' + PATH + ') to reject, but it resolved with ' + JSON.stringify(result));
+        process.exitCode = 1;
+        return;
+      } catch (e) {
+        rejection = e;
+      }
+
+      if (!rejection || rejection.message !== EXPECTED_MESSAGE) {
+        console.error('CHILD_FAIL: expected rejection message ' + JSON.stringify(EXPECTED_MESSAGE) + ', got ' + JSON.stringify(rejection && rejection.message));
+        process.exitCode = 1;
+        return;
+      }
+
+      const matchingFetches = fetchLog.filter((u) => u === '/api' + PATH);
+      if (matchingFetches.length !== 1) {
+        console.error('CHILD_FAIL: expected exactly 1 fetch to /api' + PATH + ', got ' + matchingFetches.length + ': ' + JSON.stringify(fetchLog));
+        process.exitCode = 1;
+        return;
+      }
+
+      // Drain queued microtasks/macrotasks so the orphaned .finally()
+      // promise's rejection (if the production fix is absent) gets a
+      // chance to surface as an unhandled rejection BEFORE we declare
+      // success -- this is the actual condition under test.
+      let p = Promise.resolve();
+      for (let i = 0; i < 10; i++) p = p.then(() => new Promise((r) => setImmediate(r)));
+      await p;
+
+      console.log('${C_SUCCESS_MARKER}');
+    })();
+  `;
+}
+
 (async () => {
   console.log('\n=== api() orphaned .finally() cleanup-rejection fix ===');
 
@@ -124,34 +237,20 @@ function flush(times) {
   });
 
   await checkAsync('C. A handled request failure produces NO additional unhandled rejection (child process, --unhandled-rejections=strict)', async () => {
-    const script = `
-      const vm = require('vm');
-      const fs = require('fs');
-      const ctx = {
-        window: { addEventListener: () => {}, dispatchEvent: () => {} },
-        document: { readyState: 'complete', getElementById: () => null, addEventListener: () => {}, querySelectorAll: () => [] },
-        console, Date, Promise, Map, Set, JSON, Math, Error, TypeError,
-        parseInt, isFinite, encodeURIComponent, decodeURIComponent,
-        setTimeout: (fn) => setTimeout(fn, 0), clearTimeout: () => {},
-        performance: { now: () => Date.now() },
-        location: { hash: '' }, addEventListener: () => {}, dispatchEvent: () => {},
-      };
-      ctx.fetch = () => Promise.resolve({ ok: false, status: 500, headers: { get: () => null }, json: async () => ({}) });
-      vm.createContext(ctx);
-      vm.runInContext(fs.readFileSync(${JSON.stringify(APP_JS_PATH)}, 'utf8'), ctx);
-      for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
-      (async () => {
-        try { await ctx.api('/c-handled-fail'); process.exitCode = 1; }
-        catch (e) { /* caller correctly handles it -- this is the ONLY place the rejection should be observed */ }
-        let p = Promise.resolve();
-        for (let i = 0; i < 10; i++) p = p.then(() => new Promise((r) => setImmediate(r)));
-        await p;
-      })();
-    `;
+    const script = buildScenarioCChildScript(APP_JS_PATH);
     const r = spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', script], { timeout: 10000, encoding: 'utf8' });
+    assert.strictEqual(r.error, undefined,
+      'child process failed to spawn: ' + (r.error && r.error.message));
+    assert.strictEqual(r.signal, null,
+      'child process was killed by a signal (likely the 10s timeout) instead of exiting normally: ' + r.signal);
     assert.strictEqual(r.status, 0,
-      'expected the child process to exit 0 (no unhandled rejection) under --unhandled-rejections=strict; ' +
-      'got status=' + r.status + ' stderr=' + r.stderr);
+      'expected the child to exit 0 (no unhandled rejection) under --unhandled-rejections=strict; ' +
+      'got status=' + r.status + ' stdout=' + r.stdout + ' stderr=' + r.stderr);
+    assert.ok((r.stdout || '').includes(C_SUCCESS_MARKER),
+      'child exited 0 but never printed the success marker -- it must have returned early without ' +
+      'actually exercising and verifying the real api() call. stdout=' + r.stdout + ' stderr=' + r.stderr);
+    assert.strictEqual((r.stderr || '').trim(), '',
+      'expected no stderr output on the success path; got: ' + r.stderr);
   });
 
   await checkAsync('D. In-flight entry is cleared after a SUCCESSFUL request (no stale dedup blocking a later independent call)', async () => {
@@ -187,6 +286,13 @@ function flush(times) {
     const p1 = h.api('/test/f-dedup');
     const p2 = h.api('/test/f-dedup'); // fired before p1 settles -> must reuse the same in-flight promise
     await flush(3);
+    // If dedup were broken, p2 would have triggered its OWN fetch here,
+    // silently reassigning `resolveFetch` to the second call's resolver
+    // and leaving p1 permanently pending. Fail loudly on that instead of
+    // calling a possibly-stale resolver and hanging inside Promise.all.
+    assert.strictEqual(h.countFor('/test/f-dedup'), 1,
+      'expected exactly 1 real fetch to have been made BEFORE resolving (dedup must reuse the in-flight promise, ' +
+      'not start a second real fetch that would leave the first caller\'s promise permanently pending)');
     resolveFetch();
     const [d1, d2] = await Promise.all([p1, p2]);
     assert.deepStrictEqual(d1, { shared: true });
@@ -205,27 +311,48 @@ function flush(times) {
     assert.strictEqual(h.countFor('/test/g-ttl'), 2, 'after invalidation, the next call must be a real fetch');
   });
 
-  await checkAsync('H. The harness itself does not hide a real unhandled rejection (no suppressing global handler; the same strict-mode check DOES catch a genuine one)', async () => {
+  await checkAsync('H. The strict-mode child-process technique used in C genuinely detects a deliberate unhandled rejection (and this file installs no suppressing handler)', async () => {
     assert.strictEqual(process.listenerCount('unhandledRejection'), 0,
       'this test file must not install any process-wide unhandledRejection handler');
-    // Same technique as C, but with a deliberately uncaught rejection
-    // unrelated to api() -- proves the check is discriminating, not
-    // vacuously green regardless of what runs inside it.
+    // Deliberately uncaught rejection, unrelated to api(), with a unique
+    // message so the parent can confirm the crash was caused BY THIS
+    // rejection specifically -- not by some unrelated child-process
+    // failure (a syntax error, a missing module, etc.) that would also
+    // produce a nonzero exit but prove nothing about the technique.
+    const marker = 'deliberate-uncaught-control-7d2e';
     const script = `
-      Promise.reject(new Error('deliberate-uncaught-control'));
+      Promise.reject(new Error('${marker}'));
       let p = Promise.resolve();
       for (let i = 0; i < 10; i++) p = p.then(() => new Promise((r) => setImmediate(r)));
-      p.then(() => { process.exitCode = 0; });
+      p.then(() => { console.log('SHOULD_NOT_REACH_HERE_IF_STRICT_MODE_WORKS'); });
     `;
     const r = spawnSync(process.execPath, ['--unhandled-rejections=strict', '-e', script], { timeout: 10000, encoding: 'utf8' });
+    assert.strictEqual(r.error, undefined,
+      'child process failed to spawn: ' + (r.error && r.error.message));
     assert.notStrictEqual(r.status, 0,
-      'expected a deliberately uncaught rejection to make the child process exit non-zero under --unhandled-rejections=strict -- ' +
+      'expected the deliberate unhandled rejection to make the child exit non-zero under --unhandled-rejections=strict -- ' +
       'got status=' + r.status + ' (if this is 0, the harness technique used in scenario C cannot be trusted)');
+    assert.ok((r.stderr || '').includes(marker),
+      'expected the crash to be caused SPECIFICALLY by our deliberate rejection (stderr should mention "' + marker + '"), ' +
+      'not an unrelated child-process failure -- stderr=' + r.stderr);
+    assert.ok(!(r.stdout || '').includes('SHOULD_NOT_REACH_HERE_IF_STRICT_MODE_WORKS'),
+      'the .then() scheduled after the rejection must never have run once the process crashed');
   });
 
+  clearTimeout(watchdog);
+
+  const missing = EXPECTED_SCENARIOS.filter((l) => !ranScenarios.has(l));
+  if (missing.length > 0) {
+    failed++;
+    console.error('\n✗ INCOMPLETE SUITE: scenario(s) ' + missing.join(', ') + ' never ran to completion (expected exactly ' +
+      EXPECTED_SCENARIOS.join(', ') + ')');
+  }
+
   console.log('\n=== Summary ===');
+  console.log('  Ran: ' + Array.from(ranScenarios).sort().join(', ') + ' (' + ranScenarios.size + '/' + EXPECTED_SCENARIOS.length + ')');
   console.log('  Passed: ' + passed);
   console.log('  Failed: ' + failed);
-  console.log('\napi()-inflight-cleanup-rejection ' + (failed === 0 ? 'PASS' : 'FAIL'));
-  process.exitCode = failed === 0 ? 0 : 1;
+  const complete = missing.length === 0;
+  console.log('\napi()-inflight-cleanup-rejection ' + (failed === 0 && complete ? 'PASS' : 'FAIL'));
+  process.exitCode = (failed === 0 && complete) ? 0 : 1;
 })();
