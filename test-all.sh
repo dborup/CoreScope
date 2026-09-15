@@ -14,6 +14,7 @@ node test-packet-filter-ux.js
 node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js
+node test-app-api-inflight-cleanup-rejection.js
 node test-privacy-page.js
 node test-nav-dynamic-link-lifecycle.js
 node test-nav-first-load-fit.js
