@@ -584,8 +584,39 @@
   };
 
   // ─── Tile URLs ───
-  window.TILE_DARK  = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  window.TILE_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  // #7: these were frozen keyless CARTO string literals, which meant every
+  // fallback path (getTileUrl below, map.js/live.js' `|| TILE_DARK`) served
+  // tiles without the Basemaps API key and got them back watermarked. They
+  // are now accessors that re-derive through MC_getCartoTileUrl on every
+  // read, which solves two problems at once:
+  //   - load order: map-tile-providers.js is loaded AFTER roles.js in
+  //     index.html, so the helper does not exist yet at parse time here.
+  //     Resolving on read instead of on parse sidesteps that entirely.
+  //   - async config: MC_MAP_CFG only arrives with the
+  //     /api/config/client fetch below, so a value frozen now would never
+  //     pick up the key. Every read re-resolves, so the first read after
+  //     config lands returns the keyed URL with no re-assignment plumbing.
+  // Assignment is still supported (see the cfg.tiles.dark / map.tiles.darkUrl
+  // overrides below): setting the property pins an explicit URL and stops
+  // the CARTO derivation for that slot.
+  function _defineTileUrl(prop, path) {
+    var override = null;
+    Object.defineProperty(window, prop, {
+      configurable: true,
+      enumerable: true,
+      get: function () {
+        if (override !== null) return override;
+        // Defensive: if map-tile-providers.js is missing the map is broken
+        // anyway — return '' rather than reintroducing a keyless literal.
+        return (typeof window.MC_getCartoTileUrl === 'function')
+          ? window.MC_getCartoTileUrl(path)
+          : '';
+      },
+      set: function (v) { override = v; }
+    });
+  }
+  _defineTileUrl('TILE_DARK', '/dark_all/{z}/{x}/{y}{r}.png');
+  _defineTileUrl('TILE_LIGHT', '/light_all/{z}/{x}/{y}{r}.png');
 
   window.getTileUrl = function () {
     var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||

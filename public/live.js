@@ -1471,19 +1471,38 @@
       }
     }
     const _liveInitTile = _liveResolveTile(isDark);
-    let tileLayer = L.tileLayer(_liveInitTile.url, { maxZoom: 19, attribution: _liveInitTile.attribution }).addTo(liveAutoLayerGroup);
-    if (isDark && _liveInitTile.refUrl) {
-      _liveDarkRefLayer = L.tileLayer(_liveInitTile.refUrl, { maxZoom: 19, attribution: _liveInitTile.attribution }).addTo(liveAutoLayerGroup);
+    // #7: same deferral as map.js — the layer is built now but only joins the
+    // map once /api/config/client has settled, so the very first CARTO
+    // request already carries carto.key instead of being watermarked and
+    // cached. Map creation, zoom/layer controls and panes are unaffected.
+    let tileLayer = L.tileLayer(_liveInitTile.url, { maxZoom: 19, attribution: _liveInitTile.attribution });
+    // One idempotent config-ready step for both tile-dependent pieces — see
+    // the equivalent block in map.js for the reasoning. The layer picker is
+    // built here rather than immediately because it materialises a real
+    // L.tileLayer per registry style at build time; building it before the
+    // key is known would offer the user selectable keyless CARTO layers.
+    let _liveTilesReady = false;
+    function _liveAttachTiles() {
+      if (_liveTilesReady) return;      // exactly once per map init
+      _liveTilesReady = true;
+      const darkNow = document.documentElement.getAttribute('data-theme') === 'dark' ||
+        (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      // _liveSyncDarkTiles re-resolves the URL against the loaded config and
+      // owns the Esri labels overlay + CSS filter, so it creates the ref
+      // layer rather than duplicating it here.
+      _liveSyncDarkTiles(darkNow);
+      if (!liveAutoLayerGroup.hasLayer(tileLayer)) tileLayer.addTo(liveAutoLayerGroup);
+      // Layer Control, passing 'topright' to put it on the right.
+      if (typeof window.MC_createLayerControl === 'function') {
+        window.MC_createLayerControl(map, liveAutoLayerGroup, 'topright');
+      }
     }
-    if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
-  
-    // Add Zoom Control
-    L.control.zoom({ position: 'topright' }).addTo(map);
+    // Guarded like every other cross-file MC_* call here — see map.js.
+    if (typeof window.MC_whenTileConfigReady === 'function') window.MC_whenTileConfigReady(_liveAttachTiles);
+    else _liveAttachTiles();
 
-    // Add Layer Control, passing 'topright' to put it on the right
-    if (typeof window.MC_createLayerControl === 'function') {
-      window.MC_createLayerControl(map, liveAutoLayerGroup, 'topright');
-    }
+    // Add Zoom Control — no tile dependency, so it stays immediate.
+    L.control.zoom({ position: 'topright' }).addTo(map);
 
     // Add custom Leaflet Control for Fullscreen
     const LiveFullscreenControl = L.Control.extend({
