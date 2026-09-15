@@ -30,9 +30,17 @@
 # and com.corescope.test.run=<RUN_ID>. On normal exit, failures and
 # SIGINT/SIGTERM/SIGHUP the test keeps each container's logs, removes exactly
 # its own labelled containers and their anonymous volumes, and verifies they
-# are gone. SIGKILL cannot run that cleanup, so still run the test under an
-# outer timeout; leftovers of a killed run can be listed with
+# are gone. A container or volume only counts as gone when a successful docker
+# listing no longer contains it; when docker cannot answer, cleanup is reported
+# as unresolved and the run fails. If the case 1 container cannot be removed,
+# case 2 is never started. Status, RESULT and cleanup lines go to the original
+# stdout even when a signal interrupts a redirected docker call, and child
+# processes that ignore TERM are killed after a short grace period. SIGKILL
+# cannot run any of this, so still run the test under an outer timeout;
+# leftovers of a killed run can be listed with
 #   docker ps -a --filter label=com.corescope.test.run=<RUN_ID>
+#
+# Requires bash, the docker CLI and ps supporting -o ppid,lstart,stat.
 #
 # Environment (wall-clock seconds):
 #   TOTAL_S  budget for the whole run, including a 45s cleanup reserve (default 900)
@@ -41,11 +49,15 @@
 #   LOG_DIR  where container logs are kept
 #            (default ${TMPDIR:-/tmp}/corescope-mqtt-compat-<RUN_ID>)
 #
-# Exit status: 0 all 28 checks and all 15 preconditions ran and passed;
-# 1 a check or precondition failed, the budget ran out or the run was incomplete;
-# 2 setup error (bad arguments, no docker, image not local, platform mismatch);
-# 3 all checks passed but cleanup failed; 128+N stopped by signal N.
+# Exit status: 0 all 28 checks and all 15 preconditions ran and passed and
+# cleanup was verified; 1 a check or precondition failed, the budget ran out, or
+# the run stopped early or was incomplete; 2 setup error (bad arguments, no
+# docker, image not local, platform mismatch, unsuitable ps); 3 all checks
+# passed but cleanup failed or could not be verified; 128+N stopped by signal N.
 set -uo pipefail
+# Keep the original stdout/stderr: the traps write through them even when a
+# signal lands inside a function call whose output is redirected.
+exec 3>&1 4>&2
 
 IMAGE=${1:-}
 PLATFORM=${2:-}
@@ -71,13 +83,15 @@ PRECONDITIONS=0
 PRECONDITION_FAILS=0
 COMPLETED=0
 BUDGET_EXHAUSTED=0
-CLEANUP_FAILED=0
+CLEANUP_FAILED=0 # an earlier cleanup step failed; a later successful pass never clears it
+CLEANUP_DONE=0
 RESULT_PRINTED=0
 IN_CLEANUP=0
 OWNED=""         # IDs of the containers this run created
 OWNED_VOLUMES="" # anonymous volumes those containers were created with
 LAST_ID=""
-BG_PID=""
+BG_PID=""        # background child of this shell, with the ps identity recorded at spawn
+BG_IDENT=""
 TMP=""
 
 setup_error() {
@@ -95,25 +109,64 @@ CLEANUP_DEADLINE=$((SECONDS + TOTAL_S))
 # ---------------------------------------------------------------------------
 # Wall-clock bounded execution
 
+# A process identity is its parent PID plus start time as reported by ps.
+# Signals are only sent while a PID still has the identity recorded when this
+# script spawned it, so a recycled PID is never signalled.
+proc_identity() { ps -o ppid= -o lstart= -p "$1" 2> /dev/null | tr -s ' '; }
+proc_zombie() { case "$(ps -o stat= -p "$1" 2> /dev/null)" in *Z*) return 0 ;; *) return 1 ;; esac; }
+proc_alive() { [ -n "$2" ] && [ "$(proc_identity "$1")" = "$2" ] && ! proc_zombie "$1"; }
+
+# stop_own_child <pid> <identity> <grace>: TERM, KILL after <grace> seconds, then
+# reap. Never waits unbounded: returns 1 if the process is still there 2s after
+# KILL, or if it cannot be verified as ours (no recorded identity).
+stop_own_child() {
+    local pid=$1 ident=$2 grace=$3 end
+    [ -n "$pid" ] || return 0
+    if ! proc_alive "$pid" "$ident"; then
+        if kill -0 "$pid" 2> /dev/null && ! proc_zombie "$pid"; then
+            [ -n "$ident" ] && return 0 # the PID now belongs to another process: not ours
+            return 1                    # no recorded identity: do not signal, report it
+        fi
+        wait "$pid" 2> /dev/null
+        return 0
+    fi
+    kill -TERM "$pid" 2> /dev/null
+    end=$((SECONDS + grace))
+    while proc_alive "$pid" "$ident"; do
+        if [ "$SECONDS" -ge "$end" ]; then
+            kill -KILL "$pid" 2> /dev/null
+            break
+        fi
+        sleep 0.2
+    done
+    end=$((SECONDS + 2))
+    while proc_alive "$pid" "$ident"; do
+        [ "$SECONDS" -lt "$end" ] || return 1
+        sleep 0.2
+    done
+    wait "$pid" 2> /dev/null
+    return 0
+}
+
 # run_bounded <limit> <command...>: run an external command with a wall-clock
 # limit, capped by what is left of the run's budget. Returns 124 on timeout.
 run_bounded() {
-    local limit=$1 left end pid rc
+    local limit=$1 left end pid ident rc
     shift
     if [ "$IN_CLEANUP" = 1 ]; then left=$((CLEANUP_DEADLINE - SECONDS)); else left=$((DEADLINE - SECONDS)); fi
     [ "$left" -ge "$limit" ] || limit=$left
     [ "$limit" -gt 0 ] || return 124
-    "$@" &
+    "$@" 3>&- 4>&- &
     pid=$!
+    ident=$(proc_identity "$pid")
     BG_PID=$pid
+    BG_IDENT=$ident
     end=$((SECONDS + limit))
     while kill -0 "$pid" 2> /dev/null; do
         if [ "$SECONDS" -ge "$end" ]; then
-            kill -TERM "$pid" 2> /dev/null
-            sleep 1
-            kill -KILL "$pid" 2> /dev/null
-            wait "$pid" 2> /dev/null
+            stop_own_child "$pid" "$ident" 2
             BG_PID=""
+            BG_IDENT=""
             return 124
         fi
         sleep 0.2
@@ -121,6 +174,7 @@ run_bounded() {
     wait "$pid"
     rc=$?
     BG_PID=""
+    BG_IDENT=""
     return "$rc"
 }
 
@@ -128,10 +182,12 @@ pause() { # <seconds>: interruptible sleep, capped by the run's budget
     local s=$1 left=$((DEADLINE - SECONDS))
     [ "$left" -ge "$s" ] || s=$left
     [ "$s" -gt 0 ] || return 0
-    sleep "$s" &
+    sleep "$s" 3>&- 4>&- &
     BG_PID=$!
+    BG_IDENT=$(proc_identity "$BG_PID")
     wait "$BG_PID"
     BG_PID=""
+    BG_IDENT=""
 }
 
 wait_until() { # <limit> <predicate...>: poll until the predicate succeeds; 1 on timeout
@@ -147,20 +203,45 @@ wait_until() { # <limit> <predicate...>: poll until the predicate succeeds; 1 on
 # ---------------------------------------------------------------------------
 # Results
 
+begin_cleanup() { # once: ignore further signals and switch to the cleanup reserve
+    [ "$IN_CLEANUP" = 1 ] && return 0
+    trap '' INT TERM HUP
+    IN_CLEANUP=1
+    CLEANUP_DEADLINE=$((SECONDS + CLEANUP_RESERVE_S))
+}
+
+cleanup_summary() { # <state of the last cleanup pass>
+    local note=""
+    [ "$CLEANUP_FAILED" = 0 ] || note=" (an earlier cleanup step failed)"
+    echo "# checks: $CHECKS of $EXPECTED_CHECKS run, $FAILS failed; preconditions: $((PRECONDITIONS - PRECONDITION_FAILS)) of $EXPECTED_PRECONDITIONS met; cleanup: $1$note"
+}
+
 finish() {
-    local met=$((PRECONDITIONS - PRECONDITION_FAILS))
-    echo "# checks: $CHECKS of $EXPECTED_CHECKS run, $FAILS failed; preconditions: $met of $EXPECTED_PRECONDITIONS met"
+    local met=$((PRECONDITIONS - PRECONDITION_FAILS)) state=verified
+    exec 1>&3 2>&4
+    begin_cleanup
+    cleanup || state="FAILED or unresolved"
+    CLEANUP_DONE=1
+    cleanup_summary "$state"
     RESULT_PRINTED=1
-    if [ "$FAILS" -ne 0 ] || [ "$PRECONDITION_FAILS" -ne 0 ] || [ "$BUDGET_EXHAUSTED" -ne 0 ]; then
-        if [ "$COMPLETED" = 1 ]; then echo "RESULT: FAIL"; else echo "RESULT: FAIL (run incomplete)"; fi
+    if [ "$COMPLETED" != 1 ]; then
+        if [ "$FAILS" -ne 0 ] || [ "$PRECONDITION_FAILS" -ne 0 ] || [ "$BUDGET_EXHAUSTED" -ne 0 ] || [ "$CLEANUP_FAILED" -ne 0 ]; then
+            echo "RESULT: FAIL (run incomplete)"
+        else
+            echo "RESULT: INCOMPLETE"
+        fi
         exit 1
     fi
-    if [ "$COMPLETED" != 1 ] || [ "$CHECKS" -ne "$EXPECTED_CHECKS" ] || [ "$met" -ne "$EXPECTED_PRECONDITIONS" ]; then
+    if [ "$FAILS" -ne 0 ] || [ "$PRECONDITION_FAILS" -ne 0 ] || [ "$BUDGET_EXHAUSTED" -ne 0 ]; then
+        echo "RESULT: FAIL"
+        exit 1
+    fi
+    if [ "$CHECKS" -ne "$EXPECTED_CHECKS" ] || [ "$met" -ne "$EXPECTED_PRECONDITIONS" ]; then
         echo "RESULT: INCOMPLETE"
         exit 1
     fi
-    if [ "$CLEANUP_FAILED" -ne 0 ]; then
-        echo "RESULT: FAIL (all checks passed, cleanup failed)"
+    if [ "$state" != verified ] || [ "$CLEANUP_FAILED" -ne 0 ]; then
+        echo "RESULT: FAIL (all checks passed, cleanup failed or unresolved)"
         exit 3
     fi
     echo "RESULT: PASS"
@@ -220,8 +301,23 @@ require_now() { # description command...: one attempt, stop the run if it fails
 
 volumes_of() { run_bounded "$EXEC_S" docker container inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$1"; }
 
+# container_state / volume_state <id|name>: prints present, absent or unknown.
+# Absence is only concluded from a successful listing that does not contain the
+# object; a failed or timed-out docker command yields unknown.
+container_state() {
+    local out
+    out=$(run_bounded "$EXEC_S" docker ps -a -q --no-trunc) || { echo unknown; return; }
+    if printf '%s\n' "$out" | grep -qxF "$1"; then echo present; else echo absent; fi
+}
+
+volume_state() {
+    local out
+    out=$(run_bounded "$EXEC_S" docker volume ls -q) || { echo unknown; return; }
+    if printf '%s\n' "$out" | grep -qxF "$1"; then echo present; else echo absent; fi
+}
+
 start_container() { # name [file copied into /app/data ...]; sets LAST_ID
-    local name=$1 id f
+    local name=$1 id vols f
     shift
     local plat=()
     [ -n "$PLATFORM" ] && plat=(--platform "$PLATFORM")
@@ -235,7 +331,11 @@ start_container() { # name [file copied into /app/data ...]; sets LAST_ID
     fi
     OWNED="$OWNED $id"
     LAST_ID=$id
-    OWNED_VOLUMES="$OWNED_VOLUMES $(volumes_of "$id")"
+    if ! vols=$(volumes_of "$id"); then
+        echo "# could not read the volumes of $name"
+        return 1
+    fi
+    OWNED_VOLUMES="$OWNED_VOLUMES $vols"
     if [ "$(run_bounded "$EXEC_S" docker container inspect -f '{{.Image}}' "$id")" != "$IMAGE_ID" ]; then
         echo "# $name was not created from $IMAGE_ID"
         return 1
@@ -252,99 +352,139 @@ start_container() { # name [file copied into /app/data ...]; sets LAST_ID
     fi
 }
 
-remove_volume() { # anonymous volume created with one of our containers
-    local v=$1 rc users labels
-    run_bounded "$EXEC_S" docker volume inspect "$v" > /dev/null 2>&1
-    rc=$?
-    [ "$rc" -ne 124 ] || { echo "CLEANUP FAIL - timed out inspecting volume $v"; return 1; }
-    [ "$rc" -eq 0 ] || return 0
-    labels=$(run_bounded "$EXEC_S" docker volume inspect -f '{{json .Labels}}' "$v")
+remove_volume() { # anonymous volume recorded from one of this run's containers
+    local v=$1 labels users
+    case "$(volume_state "$v")" in
+        absent) return 0 ;;
+        present) ;;
+        *) echo "CLEANUP UNRESOLVED - could not determine whether volume $v still exists; left untouched"; return 1 ;;
+    esac
+    if ! labels=$(run_bounded "$EXEC_S" docker volume inspect -f '{{json .Labels}}' "$v"); then
+        echo "CLEANUP UNRESOLVED - could not inspect volume $v; left untouched"
+        return 1
+    fi
     case "$labels" in
         *'"com.docker.volume.anonymous"'*) ;;
         *) echo "CLEANUP SKIP - volume $v is not marked anonymous; left untouched"; return 1 ;;
     esac
-    users=$(run_bounded "$EXEC_S" docker ps -a -q --filter "volume=$v")
+    if ! users=$(run_bounded "$EXEC_S" docker ps -a -q --no-trunc --filter "volume=$v"); then
+        echo "CLEANUP UNRESOLVED - could not list the users of volume $v; left untouched"
+        return 1
+    fi
     if [ -n "$users" ]; then
         echo "CLEANUP SKIP - volume $v is still used by $users; left untouched"
         return 1
     fi
     run_bounded "$EXEC_S" docker volume rm "$v" > /dev/null 2>&1
-    run_bounded "$EXEC_S" docker volume inspect "$v" > /dev/null 2>&1
-    [ $? -eq 1 ] || { echo "CLEANUP FAIL - volume $v still exists or could not be checked"; return 1; }
+    case "$(volume_state "$v")" in
+        absent) return 0 ;;
+        present) echo "CLEANUP FAIL - volume $v still exists"; return 1 ;;
+        *) echo "CLEANUP UNRESOLVED - could not confirm that volume $v is gone"; return 1 ;;
+    esac
 }
 
 remove_container() { # container id: verify the run label, keep logs, remove it and its anonymous volumes
-    local id=$1 rc label name vols v
-    run_bounded "$EXEC_S" docker container inspect "$id" > /dev/null 2>&1
-    rc=$?
-    [ "$rc" -ne 124 ] || { echo "CLEANUP FAIL - timed out inspecting container $id"; return 1; }
-    [ "$rc" -eq 0 ] || return 0
-    label=$(run_bounded "$EXEC_S" docker container inspect -f "{{index .Config.Labels \"$LABEL_RUN\"}}" "$id")
+    local id=$1 label name vols vols_known=1 v ok=0
+    case "$(container_state "$id")" in
+        absent) echo "# container $id is already gone"; return 0 ;;
+        present) ;;
+        *) echo "CLEANUP UNRESOLVED - could not determine whether container $id still exists; left untouched"; return 1 ;;
+    esac
+    if ! label=$(run_bounded "$EXEC_S" docker container inspect -f "{{index .Config.Labels \"$LABEL_RUN\"}}" "$id"); then
+        echo "CLEANUP UNRESOLVED - could not read the labels of container $id; left untouched"
+        return 1
+    fi
     if [ "$label" != "$RUN_ID" ]; then
         echo "CLEANUP SKIP - container $id is not labelled $LABEL_RUN=$RUN_ID; left untouched"
         return 1
     fi
     name=$(run_bounded "$EXEC_S" docker container inspect -f '{{.Name}}' "$id" | tr -d '/')
-    vols=$(volumes_of "$id")
+    vols=$(volumes_of "$id") || vols_known=0
     if mkdir -p "$LOG_DIR" 2> /dev/null; then
-        run_bounded "$EXEC_S" docker logs -t "$id" > "$LOG_DIR/${name:-$id}.log" 2>&1
+        run_bounded "$EXEC_S" docker logs -t "$id" > "$LOG_DIR/${name:-$id}.log" 2>&1 ||
+            echo "# could not save the logs of ${name:-$id}"
     fi
     run_bounded 20 docker stop -t 10 "$id" > /dev/null 2>&1
     run_bounded "$EXEC_S" docker rm -f -v "$id" > /dev/null 2>&1
-    run_bounded "$EXEC_S" docker container inspect "$id" > /dev/null 2>&1
-    [ $? -eq 1 ] || { echo "CLEANUP FAIL - container ${name:-$id} still exists or could not be checked"; return 1; }
+    case "$(container_state "$id")" in
+        absent) ;;
+        present) echo "CLEANUP FAIL - container ${name:-$id} still exists"; return 1 ;;
+        *) echo "CLEANUP UNRESOLVED - could not confirm that container ${name:-$id} is gone"; return 1 ;;
+    esac
+    if [ "$vols_known" = 0 ]; then
+        echo "CLEANUP UNRESOLVED - removed container ${name:-$id}, but could not list its volumes to verify them"
+        return 1
+    fi
     for v in $vols; do
-        remove_volume "$v" || return 1
+        remove_volume "$v" || ok=1
     done
+    [ "$ok" = 0 ] || return 1
     echo "# removed container ${name:-$id} and its anonymous volumes:" $vols
 }
 
-retire_container() { # container id: remove it now and forget it
+forget_container() { # container id
     local x rest=""
+    for x in $OWNED; do [ "$x" = "$1" ] || rest="$rest $x"; done
+    OWNED=$rest
+}
+
+retire_container() { # container id, label: it must be verifiably gone before anything else starts
     if remove_container "$1"; then
-        for x in $OWNED; do [ "$x" = "$1" ] || rest="$rest $x"; done
-        OWNED=$rest
+        forget_container "$1"
     else
         CLEANUP_FAILED=1
+        echo "FAIL - [sequence] $2 container could not be stopped and removed safely; no further containers are started"
+        finish
     fi
 }
 
-cleanup() {
+cleanup() { # one cleanup pass; status 1 if anything failed or stayed unresolved in this pass
     local ok=0 id v listed
-    listed=$(run_bounded "$EXEC_S" docker ps -a -q --no-trunc --filter "label=$LABEL_RUN=$RUN_ID")
+    if ! listed=$(run_bounded "$EXEC_S" docker ps -a -q --no-trunc --filter "label=$LABEL_RUN=$RUN_ID"); then
+        echo "CLEANUP UNRESOLVED - could not list containers labelled $LABEL_RUN=$RUN_ID"
+        listed=""
+        ok=1
+    fi
     for id in $(printf '%s\n' $OWNED $listed | sort -u); do
-        remove_container "$id" || ok=1
+        if remove_container "$id"; then forget_container "$id"; else ok=1; fi
     done
     for v in $(printf '%s\n' $OWNED_VOLUMES | sort -u); do
         remove_volume "$v" || ok=1
     done
-    [ "$CLEANUP_FAILED" = 0 ] || ok=1
     return "$ok"
 }
 
 on_signal() { # number name
+    exec 1>&3 2>&4
     echo "# received SIG$2; stopping and cleaning up"
     exit $((128 + $1))
 }
 
 on_exit() {
-    local rc=$?
-    trap '' INT TERM HUP
-    IN_CLEANUP=1
-    CLEANUP_DEADLINE=$((SECONDS + CLEANUP_RESERVE_S))
+    local rc=$? state=verified
+    exec 1>&3 2>&4
+    begin_cleanup
     if [ -n "$BG_PID" ]; then
-        kill -TERM "$BG_PID" 2> /dev/null
-        wait "$BG_PID" 2> /dev/null
+        if ! stop_own_child "$BG_PID" "$BG_IDENT" 3; then
+            echo "CLEANUP UNRESOLVED - own child process $BG_PID could not be stopped and verified"
+            CLEANUP_FAILED=1
+        fi
+        BG_PID=""
+        BG_IDENT=""
     fi
-    if [ "$RESULT_PRINTED" != 1 ]; then
-        echo "# checks: $CHECKS of $EXPECTED_CHECKS run, $FAILS failed; preconditions: $((PRECONDITIONS - PRECONDITION_FAILS)) of $EXPECTED_PRECONDITIONS met"
-        echo "RESULT: INCOMPLETE"
-        [ "$rc" -ne 0 ] || rc=1
+    if [ "$CLEANUP_DONE" != 1 ]; then
+        cleanup || state="FAILED or unresolved"
+        CLEANUP_DONE=1
+        if [ "$RESULT_PRINTED" != 1 ]; then
+            cleanup_summary "$state"
+            echo "RESULT: INCOMPLETE"
+            [ "$rc" -ne 0 ] || rc=1
+        elif [ "$state" != verified ]; then
+            echo "CLEANUP FAIL - leftovers may carry the label $LABEL_RUN=$RUN_ID"
+            [ "$rc" -ne 0 ] || rc=3
+        fi
     fi
-    if ! cleanup; then
-        echo "CLEANUP FAIL - check for leftovers labelled $LABEL_RUN=$RUN_ID"
-        [ "$rc" -ne 0 ] || rc=3
-    fi
+    if [ "$CLEANUP_FAILED" != 0 ] && [ "$rc" -eq 0 ]; then rc=3; fi
     [ -z "$TMP" ] || rm -rf "$TMP"
     exit "$rc"
 }
@@ -402,6 +542,7 @@ check_broker_persistence() { # container-id label
 # Setup: local image only, resolved once
 
 command -v docker > /dev/null 2>&1 || setup_error "docker CLI not found"
+ps -o ppid= -o lstart= -o stat= -p $$ > /dev/null 2>&1 || setup_error "ps with -o ppid,lstart,stat is required to bound child processes"
 TMP=$(mktemp -d) || setup_error "mktemp failed"
 trap on_exit EXIT
 trap 'on_signal 1 HUP' HUP
@@ -455,7 +596,7 @@ STATS=$(dx "$C1" wget -T 5 -qO- http://localhost:3000/api/stats)
 check "case 1: /api/stats totalTransmissions" "1" "$(echo "$STATS" | json_int totalTransmissions)"
 check "case 1: /api/stats totalObservations" "1" "$(echo "$STATS" | json_int totalObservations)"
 check_broker_persistence "$C1" "case 1"
-retire_container "$C1"
+retire_container "$C1" "case 1"
 
 # ---------------------------------------------------------------------------
 echo "# case 2: PUID=1000 PGID=1000 in /app/data/.env (exported by the entrypoint)"
@@ -478,7 +619,6 @@ dx "$C2" mosquitto_pub -h localhost -q 0 -t "$TOPIC" -m "$PAYLOAD"
 require "case 2: ingestor stored the packet" "$WAIT_S" obs_at_least "$C2" 1
 check "case 2: ingestor stored the packet via the broker" "1" "$(stats_file_int "$C2" tx_inserted)"
 check_broker_persistence "$C2" "case 2"
-retire_container "$C2"
-
 COMPLETED=1
+retire_container "$C2" "case 2"
 finish
