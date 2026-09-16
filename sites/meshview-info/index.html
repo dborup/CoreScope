@@ -4,8 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MeshView.dk — MeshCore LoRa Netværk</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/meshview-info-assets/site.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -313,7 +312,7 @@
           <span class="dash-card-title">Noder</span>
           <span class="dash-card-badge" id="node-badge">—</span>
         </div>
-        <div style="overflow-x:auto; padding:0 4px">
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Noder — rul vandret for alle kolonner" style="overflow-x:auto; padding:0 4px">
           <div class="empty-state" id="node-err" style="display:none">
             <div class="empty-icon">📡</div>
             <div class="empty-msg">Ingen node-data</div>
@@ -401,7 +400,8 @@
     <ul class="footer-links">
       <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
       <li><a href="https://meshcore.io/docs" target="_blank" rel="noopener">Docs</a></li>
-      <li><a href="https://github.com/Kpa-clawbot/CoreScope" target="_blank" rel="noopener">CoreScope</a></li>
+      <li><a href="https://github.com/dborup/CoreScope" target="_blank" rel="noopener">CoreScope · MeshView</a></li>
+      <li><a href="https://github.com/Kpa-clawbot/CoreScope" target="_blank" rel="noopener">CoreScope · upstream</a></li>
       <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
     </ul>
     <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>

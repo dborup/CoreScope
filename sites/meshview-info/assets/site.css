@@ -1,0 +1,30 @@
+@font-face {
+  font-family: 'Share Tech Mono'; font-style: normal; font-weight: 400;
+  font-display: swap; src: url('./fonts/share-tech-mono.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Syne'; font-style: normal; font-weight: 400 800;
+  font-display: swap; src: url('./fonts/syne-variable.ttf') format('truetype');
+}
+body .copy-commands {
+  min-height: 44px; min-width: 88px; padding: 8px 12px;
+  border: 1px solid var(--accent); border-radius: 4px;
+  background: var(--bg3); color: var(--accent); font: inherit;
+  cursor: pointer;
+}
+.copy-commands:focus-visible { outline: 3px solid var(--accent2); outline-offset: 3px; }
+.copy-commands:disabled { cursor: wait; }
+.copy-status { display: block; padding: 0 18px; color: var(--text); }
+.copy-status:empty { display: none; }
+body .footer-links { flex-wrap: wrap; }
+.table-wrap:focus-visible { outline: 2px solid var(--accent2); outline-offset: -2px; }
+body .dash-card { min-width: 0; }
+@media (max-width: 900px) {
+  body h1 { overflow-wrap: anywhere; }
+  body .nav-inner { height: auto; min-height: 60px; flex-wrap: wrap; gap: 12px; padding-top: 12px; padding-bottom: 12px; }
+  body .nav-links { display: flex; flex-wrap: wrap; gap: 12px 20px; }
+  body .nav-links a, body .footer-links a { display: inline-flex; align-items: center; min-height: 44px; }
+  body .code-bar { flex-wrap: wrap; }
+  body .set-row { gap: 12px; }
+  body .set-row .v { overflow-wrap: anywhere; }
+}

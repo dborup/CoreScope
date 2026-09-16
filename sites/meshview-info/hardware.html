@@ -4,8 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Hardware — MeshView.dk</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/meshview-info-assets/site.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -151,10 +150,10 @@
   <div class="wrap">
     <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
     <div class="doc-tag" style="margin-top:18px">// understøttet hardware</div>
-    <h1>Understøttede <em>enheder</em></h1>
+    <h1>Hardware til <em>MeshCore</em></h1>
     <p class="lead">
-      Herunder er de enheder, vi anbefaler og aktivt tester på det danske netværk, delt op efter
-      brug. Vælg én, følg <a class="inline" href="/velkommen#guide">kom i gang-guiden</a>, og anvend derefter det
+      Herunder er en oversigt over relevante enheder, delt op efter brug. Kontrollér den præcise
+      hardwareversion, 868 MHz-variant og firmwareunderstøttelse før køb. Følg <a class="inline" href="/velkommen#guide">kom i gang-guiden</a>, og kontrollér derefter de
       danske preset på <a class="inline" href="/radio">radio-indstillingerne</a>.
     </p>
   </div>
@@ -166,7 +165,7 @@
 <section class="doc-section">
   <div class="wrap">
     <h2 style="margin-top:40px">Companions <em>· nRF</em></h2>
-    <p class="sec-sub">Bærbare noder du har med dig. nRF52-chips er bedst her pga. det lave strømforbrug — de kører i uger på én opladning.</p>
+    <p class="sec-sub">Bærbare noder du har med dig. nRF52-baserede enheder er ofte velegnede til batteridrift; driftstiden afhænger af batteri, GPS, skærm og trafik.</p>
 
     <div class="dev-grid">
 
@@ -187,7 +186,7 @@
         </div>
       </a>
 
-      <a class="dev-card" href="https://www.seeedstudio.com/Wio-Tracker-L1-Pro-p-6454.html" target="_blank" rel="noopener">
+      <a class="dev-card" href="https://www.seeedstudio.com/Wio-Tracker-L1-Pro-for-Meshcore-p-6717.html" target="_blank" rel="noopener">
         <div class="dev-head">
           <div>
             <div class="dev-name">Wio Tracker L1 Pro</div>
@@ -214,11 +213,11 @@
 <section class="doc-section">
   <div class="wrap">
     <h2>Solcelle <em>· off-grid</em></h2>
-    <p class="sec-sub">Færdige solcelledrevne noder til permanente, strømløse installationer — perfekt til repeatere på tag, mast eller i terræn.</p>
+    <p class="sec-sub">Solcelledrevne noder til udendørs installationer. Kontrollér firmware til den ønskede rolle og dimensionér batteri og panel til vinterdrift.</p>
 
     <div class="dev-grid">
 
-      <a class="dev-card" href="https://www.seeedstudio.com/SenseCAP-Solar-Node-P1-Pro-for-Meshtastic-LoRa-p-6412.html" target="_blank" rel="noopener">
+      <a class="dev-card" href="https://www.seeedstudio.com/SenseCAP-Solar-Node-P1-Pro-for-Meshcore-p-6741.html" target="_blank" rel="noopener">
         <div class="dev-head">
           <div>
             <div class="dev-name">SenseCAP Solar Node P1 Pro</div>
@@ -226,7 +225,7 @@
           </div>
           <span class="dev-arrow">→</span>
         </div>
-        <div class="dev-desc">Komplet solcellenode med indbygget panel, batteri og vejrbestandigt kabinet (IP65). Sæt den op og glem den.</div>
+        <div class="dev-desc">Solcellenode med panel, batteri og udendørskabinet. Kontrollér producentens krav til montering, temperatur og opladning; sol og batteribehov afhænger af placeringen.</div>
         <div class="dev-tags">
           <span class="dev-tag hot">nRF</span>
           <span class="dev-tag hot">Solcelle</span>
@@ -271,7 +270,7 @@
           </div>
           <span class="dev-arrow">→</span>
         </div>
-        <div class="dev-desc">Kompakt nRF-node med 0.96" OLED-skærm. Velegnet til strømbesparende egne builds og companions.</div>
+        <div class="dev-desc">Kompakt nRF-node med GNSS og SX1262-radio. Kontrollér skærm og tilbehør for den konkrete variant hos producenten.</div>
         <div class="dev-tags">
           <span class="dev-tag hot">nRF</span>
           <span class="dev-tag hot">Lavt forbrug</span>
@@ -286,7 +285,7 @@
           </div>
           <span class="dev-arrow">→</span>
         </div>
-        <div class="dev-desc">Indbygget OLED-skærm. Masser af GPIO. Det mest populære startboard på netværket.</div>
+        <div class="dev-desc">ESP32-S3-board med WiFi og LoRa. V3 og V4 har forskellige hardwareegenskaber; vælg firmware til præcis din version.</div>
         <div class="dev-tags">
           <span class="dev-tag hot">ESP32</span>
           <span class="dev-tag hot">For begyndere</span>
@@ -332,7 +331,7 @@
           </div>
           <span class="dev-arrow">→</span>
         </div>
-        <div class="dev-desc">Branchens laveste sleep-strøm. Modulært WisBlock-system, ideelt til strømbesparende egne builds.</div>
+        <div class="dev-desc">Modulært WisBlock-system til batterivenlige egne builds. Kræver en kompatibel base og passende firmware.</div>
         <div class="dev-tags">
           <span class="dev-tag hot">nRF</span>
           <span class="dev-tag hot">Lavt forbrug</span>
@@ -349,7 +348,7 @@
           </div>
           <span class="dev-arrow">→</span>
         </div>
-        <div class="dev-desc">Kraftig base-station med højt TX-output og ekstern antenne. God som fast repeater eller observatør-gateway.</div>
+        <div class="dev-desc">Base-station med ekstern antenne. Producentens tidligere G2-salgsside viser nu G3; kontrollér model, firmware og sendeeffekt, før du køber eller opdaterer.</div>
         <div class="dev-tags">
           <span class="dev-tag hot">ESP32</span>
           <span class="dev-tag hot">Repeatere</span>
@@ -387,7 +386,7 @@
           <span class="dev-tag hot">Kompakt</span>
         </div>
       </a>
-    
+
     </div>
   </div>
 </section>

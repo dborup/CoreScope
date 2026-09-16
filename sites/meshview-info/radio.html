@@ -4,8 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Radio-indstillinger — MeshView.dk</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/meshview-info-assets/site.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -146,9 +145,9 @@
     <div class="doc-tag" style="margin-top:18px">// anbefalede radio-indstillinger</div>
     <h1>Radio-<em>indstillinger</em></h1>
     <p class="lead">
-      Indstil din MeshCore-radio til disse værdier, så du kan tale med resten af netværket. Start
-      med at vælge presettet <strong>EU/UK (Narrow)</strong> i MeshCore-appen, og ændr kun Coding Rate hvis
-      nødvendigt. Når du ændrer noget, viser presettet "Custom" — det er helt normalt.
+      Her er MeshViews hidtidige lokale indstillinger. Bekræft altid frekvens, bandwidth, spreading factor
+      og coding rate med dit lokale netværk; presetnavne og standardværdier kan ændre sig mellem appversioner.
+      Brug ikke presetnavnet alene som kontrol. Appen kan vise "Custom", når du ændrer værdierne.
     </p>
   </div>
 </section>
@@ -215,9 +214,8 @@
   <div class="wrap">
     <h2><span class="ico">⏱</span> TX Delay-indstillinger</h2>
     <p class="sec-sub">
-      Har du lige sat din repeater op, skal du vente cirka en uge, så den kan lære sine omgivelser og
-      naboer at kende ved at lytte til zero-hop-adverts på meshet. Har den været oppe et stykke tid, kan
-      du bruge tabellen herunder som en generel rettesnor.
+      Observer trafikken og naboerne, før du justerer forsinkelserne. Tabellen er en lokal rettesnor,
+      ikke en automatisk firmwareberegning eller et krav om en uges indlæring. Justér sammen med dit lokale netværk.
     </p>
     <table class="tx-table">
       <thead><tr><th>Antal naboer</th><th>TX Delay</th><th>Direct TX Delay</th></tr></thead>
@@ -239,15 +237,14 @@
   <div class="wrap">
     <h2><span class="ico">🗺</span> Region <em>scope</em></h2>
     <p class="sec-sub">
-      Scope styrer, hvor bredt din node deltager i netværket. En node skal inkludere de scopes, der
-      passer til dens dækningsområde — fra det globale <code class="scope-code">*</code> ned til den lokale by.
+      Regionsindstillinger styrer, hvilken scoped flood-trafik en repeater må videresende.
+      Vælg regioner sammen med dit lokale netværk. <code class="scope-code">*</code> styrer tilladelse
+      til flood-pakker uden regionkode; det er ikke blot navnet på en global region.
     </p>
     <p class="sec-sub">
-      Det er vigtigt at forstå, at <strong style="color:var(--text)">pakker stadig flyder frit overalt på meshet</strong> —
-      scope begrænser ikke selve routingen. Region scope bruges udelukkende til at afgrænse <em style="color:var(--text);font-style:normal">lokal
-      trafik som kanalbeskeder</em>, så f.eks. en chat i Horsens ikke flyder ud over hele landet, men bliver
-      i sit lokalområde. På den måde holder vi støjen nede og lader det landsdækkende mesh fokusere på det,
-      der faktisk skal nå langt.
+      Scope kan altså begrænse videresendelsen — ikke kun visningen af kanalbeskeder.
+      Eksemplerne nedenfor er illustrative, ikke en opdateret dansk regionliste.
+      Se <a class="inline" href="https://github.com/meshcore-dev/MeshCore/blob/main/docs/cli_commands.md#region-management-v110" target="_blank" rel="noopener">firmwarens regionskommandoer</a> og den lokale guide før ændringer.
     </p>
 
     <div class="scope-list">
@@ -299,7 +296,7 @@
   <div class="wrap">
     <div class="callout warn">
       <span class="ico">⚠</span>
-      <p><strong>Bemærk #1:</strong> Det danske netværk er samlet om EU/UK (Narrow)-presettet. Kan du ikke høre trafik, så tjek din frekvens først — en fejlkonfigureret enhed på en forkert frekvens er den hyppigste årsag til "netværket virker ikke". Bekræft at spread factor og bandwidth matcher præcist.</p>
+      <p><strong>Kontrollér lokalt:</strong> De viste værdier er ikke en garanti for alle danske regioner. Bekræft frekvens, spreading factor, bandwidth og coding rate med dit lokale netværk. Valg af sendeeffekt og antenne skal også passe til de gældende regler.</p>
     </div>
     <div class="callout info">
       <span class="ico">ℹ</span>
