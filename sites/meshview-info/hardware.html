@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hardware — MeshView.dk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #080c10;
+      --bg2:     #0d1520;
+      --bg3:     #111d2c;
+      --accent:  #00e5a0;
+      --accent2: #00aaff;
+      --warn:    #ffb400;
+      --danger:  #ff4d6d;
+      --text:    #cdd9e5;
+      --muted:   #4a6070;
+      --border:  rgba(0,229,160,.15);
+      --glow:    0 0 18px rgba(0,229,160,.35);
+      --mono:    'Share Tech Mono', monospace;
+      --main:    'Syne', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size:200px; pointer-events:none;
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:0;
+      background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+      pointer-events:none;
+    }
+    .wrap { position:relative; z-index:1; max-width:980px; margin:0 auto; padding:0 24px; }
+
+    /* NAV */
+    nav { position:sticky; top:0; z-index:100; border-bottom:1px solid var(--border); background:rgba(8,12,16,.92); backdrop-filter:blur(12px); }
+    .nav-inner { display:flex; align-items:center; justify-content:space-between; height:60px; max-width:1200px; margin:0 auto; padding:0 24px; }
+    .logo { font-family:var(--mono); font-size:1.1rem; color:var(--accent); letter-spacing:.08em; text-decoration:none; }
+    .logo span { color:var(--text); }
+    .nav-links { display:flex; gap:32px; list-style:none; }
+    .nav-links a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; text-transform:uppercase; transition:color .2s; }
+    .nav-links a:hover { color:var(--accent); }
+    .back-link { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+    .back-link:hover { text-decoration:underline; }
+
+    /* HERO */
+    .doc-hero { padding:70px 0 36px; }
+    .doc-tag { font-family:var(--mono); font-size:.72rem; color:var(--accent); letter-spacing:.2em; text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+    .doc-tag::before { content:''; width:24px; height:1px; background:var(--accent); }
+    h1 { font-size:clamp(2.2rem,4.5vw,3.4rem); font-weight:800; line-height:1.08; letter-spacing:-.02em; margin-bottom:20px; }
+    h1 em { font-style:normal; color:var(--accent); }
+    .lead { font-size:1.05rem; color:var(--muted); line-height:1.75; max-width:700px; }
+    .lead a.inline { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .lead a.inline:hover { border-color:var(--accent); }
+
+    .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:8px 0; }
+
+    /* QUICK START CALLOUT */
+    .quickstart {
+      display:flex; gap:20px; align-items:center; flex-wrap:wrap;
+      background:linear-gradient(135deg, rgba(0,229,160,.08), rgba(0,170,255,.05));
+      border:1px solid var(--border); border-radius:10px; padding:24px 26px; margin:36px 0;
+    }
+    .qs-body { flex:1; min-width:240px; }
+    .qs-tag { font-family:var(--mono); font-size:.66rem; color:var(--accent); letter-spacing:.18em; text-transform:uppercase; margin-bottom:8px; }
+    .qs-title { font-size:1.2rem; font-weight:800; margin-bottom:8px; }
+    .qs-desc { font-size:.92rem; color:var(--muted); line-height:1.65; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:12px 26px; font-family:var(--mono); font-size:.84rem; letter-spacing:.06em; text-decoration:none; border-radius:4px; transition:all .2s; white-space:nowrap; }
+    .btn-primary { background:var(--accent); color:#030608; box-shadow:var(--glow); }
+    .btn-primary:hover { background:#00ffb2; box-shadow:0 0 28px rgba(0,229,160,.6); }
+
+    /* SECTION */
+    .doc-section { padding:20px 0 60px; }
+    h2 { font-size:1.6rem; font-weight:800; letter-spacing:-.01em; margin-bottom:8px; }
+    h2 em { font-style:normal; color:var(--accent); }
+    .sec-sub { font-size:.95rem; color:var(--muted); line-height:1.7; margin-bottom:28px; max-width:620px; }
+
+    /* DEVICE GRID */
+    .dev-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .dev-card {
+      background:var(--bg2); border:1px solid var(--border); border-radius:10px;
+      padding:24px; display:flex; flex-direction:column; gap:12px;
+      transition:border-color .2s, transform .2s; position:relative; overflow:hidden;
+      text-decoration:none;
+    }
+    .dev-card::before {
+      content:''; position:absolute; top:0; left:0; right:0; height:2px;
+      background:linear-gradient(90deg,var(--accent),var(--accent2));
+      transform:scaleX(0); transform-origin:left; transition:transform .3s;
+    }
+    .dev-card:hover::before { transform:scaleX(1); }
+    .dev-card:hover { border-color:rgba(0,229,160,.4); transform:translateY(-3px); }
+    .dev-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .dev-name { font-size:1.15rem; font-weight:800; color:var(--text); line-height:1.2; }
+    .dev-chip { font-family:var(--mono); font-size:.7rem; color:var(--accent2); margin-top:4px; }
+    .dev-arrow { font-family:var(--mono); color:var(--accent); font-size:1.1rem; flex-shrink:0; opacity:.5; transition:opacity .2s, transform .2s; }
+    .dev-card:hover .dev-arrow { opacity:1; transform:translateX(3px); }
+    .dev-desc { font-size:.9rem; color:var(--muted); line-height:1.6; flex:1; }
+    .dev-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+    .dev-tag { font-family:var(--mono); font-size:.6rem; letter-spacing:.06em; text-transform:uppercase; padding:3px 8px; border-radius:20px; background:var(--bg3); color:var(--muted); border:1px solid var(--border); }
+    .dev-tag.hot { color:var(--accent); border-color:rgba(0,229,160,.3); }
+
+    /* EQUIPMENT */
+    .eq-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .eq-card { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:22px 24px; }
+    .eq-head { display:flex; align-items:center; gap:11px; margin-bottom:12px; }
+    .eq-ico { font-size:1.3rem; }
+    .eq-name { font-size:1.1rem; font-weight:800; color:var(--text); }
+    .eq-desc { font-size:.9rem; color:var(--muted); line-height:1.65; margin-bottom:14px; }
+    .eq-pick { display:flex; align-items:baseline; gap:8px; padding-top:12px; border-top:1px solid rgba(0,229,160,.08); }
+    .eq-pick .lbl { font-family:var(--mono); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); white-space:nowrap; }
+    .eq-pick a { font-family:var(--mono); font-size:.8rem; color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .eq-pick a:hover { border-color:var(--accent); }
+    .eq-pick .placeholder { font-family:var(--mono); font-size:.78rem; color:var(--muted); font-style:italic; }
+
+    /* FOOTER */
+    footer { border-top:1px solid var(--border); padding:36px 0; margin-top:40px; }
+    .footer-inner { max-width:1200px; margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+    .footer-logo { font-family:var(--mono); color:var(--accent); font-size:.9rem; }
+    .footer-links { display:flex; gap:24px; list-style:none; }
+    .footer-links a { font-family:var(--mono); font-size:.7rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; }
+    .footer-links a:hover { color:var(--accent); }
+    .footer-copy { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+
+    @media(max-width:700px) {
+      .dev-grid,.eq-grid { grid-template-columns:1fr; }
+      .nav-links { display:none; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/velkommen" class="logo">mesh<span>view</span>.dk</a>
+    <ul class="nav-links">
+      <li><a href="https://meshview.dk/#/live" target="_blank" rel="noopener">Live</a></li>
+      <li><a href="/velkommen#noder">Noder</a></li>
+      <li><a href="/velkommen#guide">Kom i gang</a></li>
+      <li><a href="https://tools.meshview.dk">Værktøjer</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="doc-hero">
+  <div class="wrap">
+    <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
+    <div class="doc-tag" style="margin-top:18px">// understøttet hardware</div>
+    <h1>Understøttede <em>enheder</em></h1>
+    <p class="lead">
+      Herunder er de enheder, vi anbefaler og aktivt tester på det danske netværk, delt op efter
+      brug. Vælg én, følg <a class="inline" href="/velkommen#guide">kom i gang-guiden</a>, og anvend derefter det
+      danske preset på <a class="inline" href="/radio">radio-indstillingerne</a>.
+    </p>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- COMPANIONS -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2 style="margin-top:40px">Companions <em>· nRF</em></h2>
+    <p class="sec-sub">Bærbare noder du har med dig. nRF52-chips er bedst her pga. det lave strømforbrug — de kører i uger på én opladning.</p>
+
+    <div class="dev-grid">
+
+      <a class="dev-card" href="https://www.seeedstudio.com/SenseCAP-Card-Tracker-T1000-E-for-Meshtastic-p-5913.html" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">SenseCAP T1000-E Card Tracker</div>
+            <div class="dev-chip">nRF52840 + LR1110</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">På størrelse med et kreditkort med indbygget GPS, sensorer og batteri. Den ultimative lommevenlige companion.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Bærbar</span>
+          <span class="dev-tag hot">GPS</span>
+          <span class="dev-tag hot">Lavt forbrug</span>
+        </div>
+      </a>
+
+      <a class="dev-card" href="https://www.seeedstudio.com/Wio-Tracker-L1-Pro-p-6454.html" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">Wio Tracker L1 Pro</div>
+            <div class="dev-chip">nRF52840 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Kompakt tracker med skærm, GPS og sensorer. Velegnet som alt-i-en companion-node til feltbrug.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Bærbar</span>
+          <span class="dev-tag hot">GPS</span>
+          <span class="dev-tag hot">Skærm</span>
+        </div>
+      </a>
+
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- SOLCELLER -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2>Solcelle <em>· off-grid</em></h2>
+    <p class="sec-sub">Færdige solcelledrevne noder til permanente, strømløse installationer — perfekt til repeatere på tag, mast eller i terræn.</p>
+
+    <div class="dev-grid">
+
+      <a class="dev-card" href="https://www.seeedstudio.com/SenseCAP-Solar-Node-P1-Pro-for-Meshtastic-LoRa-p-6412.html" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">SenseCAP Solar Node P1 Pro</div>
+            <div class="dev-chip">nRF52840 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Komplet solcellenode med indbygget panel, batteri og vejrbestandigt kabinet (IP65). Sæt den op og glem den.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Solcelle</span>
+          <span class="dev-tag hot">Off-grid</span>
+          <span class="dev-tag hot">Vejrbestandig</span>
+        </div>
+      </a>
+
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- BYG SELV -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2>Byg selv <em>· ESP32 &amp; nRF</em></h2>
+    <p class="sec-sub">Moduler og dev-boards til at bygge dine egne noder, repeatere og observatører.</p>
+
+    <div class="dev-grid">
+      <a class="dev-card" href="https://heltec.org/project/mesh-node-t114/" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">Heltec Mesh Node T114</div>
+            <div class="dev-chip">nRF52840 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">nRF-baseret node med skærm og lavt strømforbrug. God til batterivenlige companions og egne builds.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Lavt forbrug</span>
+          <span class="dev-tag hot">Skærm</span>
+        </div>
+      </a>
+      <a class="dev-card" href="https://heltec.org/project/t096/" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">Heltec T096</div>
+            <div class="dev-chip">nRF52840 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Kompakt nRF-node med 0.96" OLED-skærm. Velegnet til strømbesparende egne builds og companions.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Lavt forbrug</span>
+          <span class="dev-tag hot">Skærm</span>
+        </div>
+      </a>
+      <a class="dev-card" href="/velkommen#guide">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">Heltec WiFi LoRa 32 V3/V4</div>
+            <div class="dev-chip">ESP32-S3 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Indbygget OLED-skærm. Masser af GPIO. Det mest populære startboard på netværket.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">ESP32</span>
+          <span class="dev-tag hot">For begyndere</span>
+          <span class="dev-tag hot">Repeatere</span>
+          <span class="dev-tag hot">Observatører</span>
+        </div>
+      </a>
+      <a class="dev-card" href="https://heltec.org/project/wireless-tracker-v2/" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">Heltec Wireless Tracker V2</div>
+            <div class="dev-chip">ESP32-S3 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">ESP32-board med indbygget GPS og TFT-skærm. God til mobile noder og felt-test af placeringer.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">ESP32</span>
+          <span class="dev-tag hot">GPS-tagget</span>
+          <span class="dev-tag hot">Skærm</span>
+        </div>
+      </a>
+      <a class="dev-card" href="/velkommen#guide">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">LilyGo T-Beam (v1.1+)</div>
+            <div class="dev-chip">ESP32 + SX1276/SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Indbygget GPS og holder til 18650-batteri. Fremragende til at felt-teste placeringer til repeatere.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">ESP32</span>
+          <span class="dev-tag hot">GPS-tagget</span>
+          <span class="dev-tag hot">Repeatere</span>
+        </div>
+      </a>
+      <a class="dev-card" href="/velkommen#guide">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">RAK4631 / WisBlock</div>
+            <div class="dev-chip">nRF52840 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Branchens laveste sleep-strøm. Modulært WisBlock-system, ideelt til strømbesparende egne builds.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Lavt forbrug</span>
+          <span class="dev-tag hot">Modulært</span>
+          <span class="dev-tag hot">Repeatere</span>
+          <span class="dev-tag hot">Companions</span>
+        </div>
+      </a>
+      <a class="dev-card" href="/velkommen#guide">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">Station G2</div>
+            <div class="dev-chip">ESP32-S3 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Kraftig base-station med højt TX-output og ekstern antenne. God som fast repeater eller observatør-gateway.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">ESP32</span>
+          <span class="dev-tag hot">Repeatere</span>
+          <span class="dev-tag hot">Base-station</span>
+          <span class="dev-tag hot">Observatører</span>
+        </div>
+      </a>
+      <a class="dev-card" href="https://www.seeedstudio.com/Wio-SX1262-with-XIAO-ESP32S3-p-5982.html" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">XIAO ESP32S3 + Wio SX1262 Kit</div>
+            <div class="dev-chip">ESP32-S3 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">ESP32-baseret byggesæt med Wi-Fi og Bluetooth. Nemt at komme i gang med til egne noder og observatører.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">ESP32</span>
+          <span class="dev-tag hot">Kompakt</span>
+          <span class="dev-tag hot">Observatører</span>
+        </div>
+      </a>
+      <a class="dev-card" href="https://www.seeedstudio.com/XIAO-nRF52840-Wio-SX1262-Kit-for-Meshtastic-p-6400.html" target="_blank" rel="noopener">
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">XIAO nRF52840 + Wio SX1262 Kit</div>
+            <div class="dev-chip">nRF52840 + SX1262</div>
+          </div>
+          <span class="dev-arrow">→</span>
+        </div>
+        <div class="dev-desc">Lille nRF-baseret byggesæt med lavt strømforbrug. Ideelt til kompakte, batterivenlige egne builds.</div>
+        <div class="dev-tags">
+          <span class="dev-tag hot">nRF</span>
+          <span class="dev-tag hot">Lavt forbrug</span>
+          <span class="dev-tag hot">Kompakt</span>
+        </div>
+      </a>
+    
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- EKSTRA UDSTYR -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2>Ekstra <em>udstyr</em></h2>
+    <p class="sec-sub">Selve radioen er kun halvdelen. Antenne, placering og filtrering afgør, hvor langt din node reelt rækker — især for repeatere. Her er hvad der gør størst forskel.</p>
+
+    <div class="eq-grid">
+
+      <div class="eq-card">
+        <div class="eq-head"><span class="eq-ico">📶</span><span class="eq-name">Antenner</span></div>
+        <div class="eq-desc">Den vigtigste opgradering. En god 868 MHz-antenne med høj gain (f.eks. 5–8 dBi rundstråler) monteret højt og frit giver langt mere end mere sendeeffekt. Sørg for at antennen er tunet til 868 MHz — en forkert antenne koster rækkevidde.</div>
+        <div class="eq-pick"><span class="lbl">Anbefaling</span><span class="placeholder">[ udfyld produkt + link ]</span></div>
+      </div>
+
+      <div class="eq-card">
+        <div class="eq-head"><span class="eq-ico">🔬</span><span class="eq-name">Filtre</span></div>
+        <div class="eq-desc">Et båndpasfilter på 868 MHz skærer stærke signaler fra GSM, broadcast og andre sendere væk, før de overdøver din modtager. Især nyttigt i byområder eller tæt på mobilmaster, hvor støjgulvet er højt.</div>
+        <div class="eq-pick"><span class="lbl">Anbefaling</span><span class="placeholder">[ udfyld produkt + link ]</span></div>
+      </div>
+
+      <div class="eq-card">
+        <div class="eq-head"><span class="eq-ico">🎛️</span><span class="eq-name">Cavity-filtre</span></div>
+        <div class="eq-desc">Til seriøse repeater-sites med flere radioer eller kraftig interferens. Et cavity-filter har langt skarpere selektivitet end almindelige filtre og beskytter modtageren på udsatte placeringer som mastetoppe og fællesantenneanlæg.</div>
+        <div class="eq-pick"><span class="lbl">Anbefaling</span><span class="placeholder">[ udfyld produkt + link ]</span></div>
+      </div>
+
+      <div class="eq-card">
+        <div class="eq-head"><span class="eq-ico">🔌</span><span class="eq-name">Kabler & stik</span></div>
+        <div class="eq-desc">Brug kvalitetskoaks (f.eks. LMR-400) og hold kablet kort — tab i kablet æder din gain. Til udendørs/maste-installationer bør der altid sidde en surge arrestor mellem antenne og radio for at beskytte udstyret.</div>
+        <div class="eq-pick"><span class="lbl">Anbefaling</span><span class="placeholder">[ udfyld produkt + link ]</span></div>
+      </div>
+
+      <div class="eq-card">
+        <div class="eq-head"><span class="eq-ico">🗼</span><span class="eq-name">Master & beslag</span></div>
+        <div class="eq-desc">Højde er konge for LoRa. Et tagbeslag, en kort mast eller montering på en eksisterende antennemast løfter antennen fri af forhindringer og øger rækkevidden markant. Sørg for vejrbestandig montering og ordentlig jording.</div>
+        <div class="eq-pick"><span class="lbl">Anbefaling</span><span class="placeholder">[ udfyld produkt + link ]</span></div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">meshview.dk</div>
+    <ul class="footer-links">
+      <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
+      <li><a href="https://meshguide.dk" target="_blank" rel="noopener">Guide</a></li>
+      <li><a href="/observer">Bliv observer</a></li>
+      <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
+    </ul>
+    <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>
+  </div>
+</footer>
+
+</body>
+</html>

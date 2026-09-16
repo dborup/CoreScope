@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Radio-indstillinger — MeshView.dk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #080c10;
+      --bg2:     #0d1520;
+      --bg3:     #111d2c;
+      --accent:  #00e5a0;
+      --accent2: #00aaff;
+      --warn:    #ffb400;
+      --danger:  #ff4d6d;
+      --text:    #cdd9e5;
+      --muted:   #4a6070;
+      --border:  rgba(0,229,160,.15);
+      --glow:    0 0 18px rgba(0,229,160,.35);
+      --mono:    'Share Tech Mono', monospace;
+      --main:    'Syne', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size:200px; pointer-events:none;
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:0;
+      background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+      pointer-events:none;
+    }
+    .wrap { position:relative; z-index:1; max-width:900px; margin:0 auto; padding:0 24px; }
+
+    /* NAV */
+    nav { position:sticky; top:0; z-index:100; border-bottom:1px solid var(--border); background:rgba(8,12,16,.92); backdrop-filter:blur(12px); }
+    .nav-inner { display:flex; align-items:center; justify-content:space-between; height:60px; max-width:1200px; margin:0 auto; padding:0 24px; }
+    .logo { font-family:var(--mono); font-size:1.1rem; color:var(--accent); letter-spacing:.08em; text-decoration:none; }
+    .logo span { color:var(--text); }
+    .nav-links { display:flex; gap:32px; list-style:none; }
+    .nav-links a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; text-transform:uppercase; transition:color .2s; }
+    .nav-links a:hover { color:var(--accent); }
+    .back-link { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+    .back-link:hover { text-decoration:underline; }
+
+    /* HERO */
+    .doc-hero { padding:70px 0 36px; }
+    .doc-tag { font-family:var(--mono); font-size:.72rem; color:var(--accent); letter-spacing:.2em; text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+    .doc-tag::before { content:''; width:24px; height:1px; background:var(--accent); }
+    h1 { font-size:clamp(2.2rem,4.5vw,3.4rem); font-weight:800; line-height:1.08; letter-spacing:-.02em; margin-bottom:20px; }
+    h1 em { font-style:normal; color:var(--accent); }
+    .lead { font-size:1.05rem; color:var(--muted); line-height:1.75; max-width:700px; }
+    .lead strong { color:var(--text); }
+
+    .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:8px 0; }
+
+    /* SECTION */
+    .doc-section { padding:30px 0; }
+    h2 { font-size:1.5rem; font-weight:800; letter-spacing:-.01em; margin-bottom:6px; display:flex; align-items:center; gap:12px; }
+    h2 em { font-style:normal; color:var(--accent); }
+    h2 .ico { font-size:1.1rem; }
+    .sec-sub { font-size:.92rem; color:var(--muted); line-height:1.7; margin-bottom:22px; max-width:620px; }
+    h3 { font-size:1.05rem; font-weight:700; margin:26px 0 10px; }
+
+    /* SETTINGS CARD */
+    .set-card { background:var(--bg2); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin:16px 0; }
+    .set-head { padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+    .set-head .dot { width:8px; height:8px; border-radius:50%; }
+    .set-head.companion .dot { background:var(--accent2); box-shadow:0 0 6px var(--accent2); }
+    .set-head.repeater .dot { background:var(--accent); box-shadow:0 0 6px var(--accent); }
+    .set-head .title { font-family:var(--mono); font-size:.82rem; color:var(--text); letter-spacing:.06em; text-transform:uppercase; }
+    .set-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:11px 20px; border-bottom:1px solid rgba(0,229,160,.05); }
+    .set-row:last-child { border-bottom:none; }
+    .set-row .k { font-family:var(--mono); font-size:.72rem; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; }
+    .set-row .v { font-family:var(--mono); font-size:.86rem; color:var(--accent); text-align:right; }
+    .set-row .v.dim { color:var(--text); }
+    .set-row .v small { color:var(--muted); font-size:.72rem; }
+
+    /* TABLE */
+    .tx-table { width:100%; border-collapse:collapse; margin:14px 0; background:var(--bg2); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+    .tx-table th { font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.1em; text-transform:uppercase; text-align:left; padding:12px 18px; border-bottom:1px solid var(--border); background:var(--bg3); }
+    .tx-table td { font-family:var(--mono); font-size:.84rem; color:var(--text); padding:11px 18px; border-bottom:1px solid rgba(0,229,160,.05); }
+    .tx-table tr:last-child td { border-bottom:none; }
+    .tx-table td:first-child { color:var(--accent2); }
+    .tx-table td:not(:first-child) { color:var(--accent); }
+
+    /* REGION SCOPE */
+    .scope-code { font-family:var(--mono); font-size:.82rem; color:var(--accent); background:var(--bg3); padding:1px 6px; border-radius:3px; }
+    .scope-list { display:flex; flex-direction:column; gap:14px; margin:18px 0; }
+    .scope-item { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px 20px; }
+    .scope-title { font-size:1rem; font-weight:700; color:var(--text); margin-bottom:4px; }
+    .scope-desc { font-size:.85rem; color:var(--muted); margin-bottom:12px; }
+    .scope-tags { display:flex; flex-wrap:wrap; gap:7px; }
+    .scope-tag { font-family:var(--mono); font-size:.74rem; padding:4px 11px; border-radius:20px; background:var(--bg3); color:var(--accent2); border:1px solid var(--border); }
+    .scope-tag.hot { background:rgba(0,229,160,.1); color:var(--accent); border-color:rgba(0,229,160,.35); }
+
+    /* CALLOUT */
+    .callout { display:flex; gap:12px; border-radius:8px; padding:14px 18px; margin:18px 0; }
+    .callout p { margin:0; font-size:.88rem; line-height:1.6; }
+    .callout .ico { font-size:1.05rem; flex-shrink:0; }
+    .callout.warn { background:rgba(255,180,0,.07); border:1px solid rgba(255,180,0,.25); }
+    .callout.warn .ico { color:var(--warn); }
+    .callout.warn p { color:var(--text); }
+    .callout.info { background:rgba(0,170,255,.06); border:1px solid rgba(0,170,255,.25); }
+    .callout.info .ico { color:var(--accent2); }
+    .callout.info p { color:var(--text); }
+    .callout strong { color:var(--text); }
+
+    /* FOOTER */
+    footer { border-top:1px solid var(--border); padding:36px 0; margin-top:40px; }
+    .footer-inner { max-width:1200px; margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+    .footer-logo { font-family:var(--mono); color:var(--accent); font-size:.9rem; }
+    .footer-links { display:flex; gap:24px; list-style:none; }
+    .footer-links a { font-family:var(--mono); font-size:.7rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; }
+    .footer-links a:hover { color:var(--accent); }
+    .footer-copy { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+
+    @media(max-width:700px) {
+      .nav-links { display:none; }
+      .set-row .v { font-size:.8rem; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/velkommen" class="logo">mesh<span>view</span>.dk</a>
+    <ul class="nav-links">
+      <li><a href="https://meshview.dk/#/live" target="_blank" rel="noopener">Live</a></li>
+      <li><a href="/velkommen#noder">Noder</a></li>
+      <li><a href="/velkommen#guide">Kom i gang</a></li>
+      <li><a href="https://tools.meshview.dk">Værktøjer</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="doc-hero">
+  <div class="wrap">
+    <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
+    <div class="doc-tag" style="margin-top:18px">// anbefalede radio-indstillinger</div>
+    <h1>Radio-<em>indstillinger</em></h1>
+    <p class="lead">
+      Indstil din MeshCore-radio til disse værdier, så du kan tale med resten af netværket. Start
+      med at vælge presettet <strong>EU/UK (Narrow)</strong> i MeshCore-appen, og ændr kun Coding Rate hvis
+      nødvendigt. Når du ændrer noget, viser presettet "Custom" — det er helt normalt.
+    </p>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- COMPANION -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2><span class="ico">📱</span> Companion-enheder</h2>
+    <p class="sec-sub">Indstillinger til håndholdte og bærbare companion-noder.</p>
+    <div class="set-card">
+      <div class="set-head companion"><span class="dot"></span><span class="title">Companion-indstillinger</span></div>
+      <div class="set-row"><span class="k">Preset</span><span class="v dim">EU/UK (Narrow)</span></div>
+      <div class="set-row"><span class="k">Frekvens</span><span class="v">869.618 MHz</span></div>
+      <div class="set-row"><span class="k">Bandwidth</span><span class="v">62.5 kHz</span></div>
+      <div class="set-row"><span class="k">Spread factor</span><span class="v">8</span></div>
+      <div class="set-row"><span class="k">Coding rate</span><span class="v">8</span></div>
+      <div class="set-row"><span class="k">Path Hash Mode</span><span class="v">2-Byte</span></div>
+    </div>
+    <div class="callout warn">
+      <span class="ico">⚠</span>
+      <p>For entydigt at kunne identificere repeatere anbefaler vi at sætte <strong>Path Hash Mode</strong> til <strong>2-Byte</strong>. På companion-noden finder du indstillingen direkte i MeshCore-appen under <em style="font-style:normal;color:var(--text)">Experimental Settings</em>.</p>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- REPEATER -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2><span class="ico">📡</span> Repeater-indstillinger</h2>
+    <p class="sec-sub">Indstillinger til stationære repeatere, der videresender trafik på netværket.</p>
+    <div class="callout info">
+      <span class="ico">ℹ</span>
+      <p>Indstillingerne herunder med <strong>set</strong> sættes via kommandolinjen (CLI) i MeshCore-appen under <em style="font-style:normal;color:var(--text)">Command Line</em>. Alle kommandoer skrives med små bogstaver — f.eks. <code class="scope-code">set loop.detect moderate</code>.</p>
+    </div>
+    <div class="set-card">
+      <div class="set-head repeater"><span class="dot"></span><span class="title">Repeater-indstillinger</span></div>
+      <div class="set-row"><span class="k">Preset</span><span class="v dim">EU/UK (Narrow)</span></div>
+      <div class="set-row"><span class="k">Frekvens</span><span class="v">869.618 MHz</span></div>
+      <div class="set-row"><span class="k">Bandwidth</span><span class="v">62.5 kHz</span></div>
+      <div class="set-row"><span class="k">Spread factor</span><span class="v">8</span></div>
+      <div class="set-row"><span class="k">Coding rate</span><span class="v">8</span></div>
+      <div class="set-row"><span class="k">Byte path</span><span class="v">2</span></div>
+      <div class="set-row"><span class="k">Zero-hop adverts</span><span class="v">240 minutter</span></div>
+      <div class="set-row"><span class="k">Flood adverts</span><span class="v">47 timer</span></div>
+      <div class="set-row"><span class="k">set agc.reset.interval</span><span class="v">4</span></div>
+      <div class="set-row"><span class="k">set multi.acks</span><span class="v">1</span></div>
+      <div class="set-row"><span class="k">set rxdelay</span><span class="v">3</span></div>
+      <div class="set-row"><span class="k">set path.hash.mode</span><span class="v">1</span></div>
+      <div class="set-row"><span class="k">set loop.detect</span><span class="v">moderate</span></div>
+      <div class="set-row"><span class="k">set txdelay</span><span class="v dim"><small>se nedenfor</small></span></div>
+      <div class="set-row"><span class="k">set direct.txdelay</span><span class="v dim"><small>se nedenfor</small></span></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- TX DELAY -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2><span class="ico">⏱</span> TX Delay-indstillinger</h2>
+    <p class="sec-sub">
+      Har du lige sat din repeater op, skal du vente cirka en uge, så den kan lære sine omgivelser og
+      naboer at kende ved at lytte til zero-hop-adverts på meshet. Har den været oppe et stykke tid, kan
+      du bruge tabellen herunder som en generel rettesnor.
+    </p>
+    <table class="tx-table">
+      <thead><tr><th>Antal naboer</th><th>TX Delay</th><th>Direct TX Delay</th></tr></thead>
+      <tbody>
+        <tr><td>0–1</td><td>0.3</td><td>0.1</td></tr>
+        <tr><td>2–4</td><td>0.5</td><td>0.5</td></tr>
+        <tr><td>5–9</td><td>1.0</td><td>0.5</td></tr>
+        <tr><td>10–14</td><td>1.5</td><td>1.0</td></tr>
+        <tr><td>&gt;14</td><td>2.0</td><td>2.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- REGION SCOPE -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2><span class="ico">🗺</span> Region <em>scope</em></h2>
+    <p class="sec-sub">
+      Scope styrer, hvor bredt din node deltager i netværket. En node skal inkludere de scopes, der
+      passer til dens dækningsområde — fra det globale <code class="scope-code">*</code> ned til den lokale by.
+    </p>
+    <p class="sec-sub">
+      Det er vigtigt at forstå, at <strong style="color:var(--text)">pakker stadig flyder frit overalt på meshet</strong> —
+      scope begrænser ikke selve routingen. Region scope bruges udelukkende til at afgrænse <em style="color:var(--text);font-style:normal">lokal
+      trafik som kanalbeskeder</em>, så f.eks. en chat i Horsens ikke flyder ud over hele landet, men bliver
+      i sit lokalområde. På den måde holder vi støjen nede og lader det landsdækkende mesh fokusere på det,
+      der faktisk skal nå langt.
+    </p>
+
+    <div class="scope-list">
+      <div class="scope-item">
+        <div class="scope-title">Bakketop-repeater · Ejer Bavnehøj</div>
+        <div class="scope-desc">Dækker bredt og bør inkludere:</div>
+        <div class="scope-tags">
+          <span class="scope-tag">*</span>
+          <span class="scope-tag">eu</span>
+          <span class="scope-tag">dk</span>
+          <span class="scope-tag">dk-oj</span>
+          <span class="scope-tag">dk-mdj</span>
+        </div>
+      </div>
+
+      <div class="scope-item">
+        <div class="scope-title">Lokal repeater · Horsens</div>
+        <div class="scope-desc">Dækker kun byen og bør inkludere:</div>
+        <div class="scope-tags">
+          <span class="scope-tag">*</span>
+          <span class="scope-tag">eu</span>
+          <span class="scope-tag">dk</span>
+          <span class="scope-tag">dk-oj</span>
+          <span class="scope-tag">dk-mdj</span>
+          <span class="scope-tag hot">dk-horsens</span>
+        </div>
+      </div>
+
+      <div class="scope-item">
+        <div class="scope-title">Lokal-chat · #horsens</div>
+        <div class="scope-desc">Brugere skal sætte Scope til:</div>
+        <div class="scope-tags">
+          <span class="scope-tag hot">dk-horsens</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <span class="ico">ℹ</span>
+      <p>Find de opdaterede regioner og scopes for netop dit område på <a class="inline" href="https://meshguide.dk" target="_blank" rel="noopener" style="color:var(--accent2)">meshguide.dk</a>.</p>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- NOTES -->
+<section class="doc-section">
+  <div class="wrap">
+    <div class="callout warn">
+      <span class="ico">⚠</span>
+      <p><strong>Bemærk #1:</strong> Det danske netværk er samlet om EU/UK (Narrow)-presettet. Kan du ikke høre trafik, så tjek din frekvens først — en fejlkonfigureret enhed på en forkert frekvens er den hyppigste årsag til "netværket virker ikke". Bekræft at spread factor og bandwidth matcher præcist.</p>
+    </div>
+    <div class="callout info">
+      <span class="ico">ℹ</span>
+      <p><strong>Bemærk #2:</strong> Tjek med dine lokale MeshCore-grupper, da de kan have andre advert-intervaller. Værdierne her er gennemsnit af, hvad vi har set på netværket.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">meshview.dk</div>
+    <ul class="footer-links">
+      <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
+      <li><a href="/hardware">Hardware</a></li>
+      <li><a href="/observer">Bliv observer</a></li>
+      <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
+    </ul>
+    <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>
+  </div>
+</footer>
+
+</body>
+</html>

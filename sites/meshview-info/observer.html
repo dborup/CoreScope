@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bliv observer — MeshView.dk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #080c10;
+      --bg2:     #0d1520;
+      --bg3:     #111d2c;
+      --accent:  #00e5a0;
+      --accent2: #00aaff;
+      --warn:    #ffb400;
+      --danger:  #ff4d6d;
+      --text:    #cdd9e5;
+      --muted:   #4a6070;
+      --border:  rgba(0,229,160,.15);
+      --glow:    0 0 18px rgba(0,229,160,.35);
+      --mono:    'Share Tech Mono', monospace;
+      --main:    'Syne', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size:200px; pointer-events:none;
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:0;
+      background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+      pointer-events:none;
+    }
+    .wrap { position:relative; z-index:1; max-width:880px; margin:0 auto; padding:0 24px; }
+
+    /* NAV */
+    nav { position:sticky; top:0; z-index:100; border-bottom:1px solid var(--border); background:rgba(8,12,16,.92); backdrop-filter:blur(12px); }
+    .nav-inner { display:flex; align-items:center; justify-content:space-between; height:60px; max-width:1200px; margin:0 auto; padding:0 24px; }
+    .logo { font-family:var(--mono); font-size:1.1rem; color:var(--accent); letter-spacing:.08em; text-decoration:none; }
+    .logo span { color:var(--text); }
+    .nav-links { display:flex; gap:32px; list-style:none; }
+    .nav-links a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; text-transform:uppercase; transition:color .2s; }
+    .nav-links a:hover { color:var(--accent); }
+    .back-link { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+    .back-link:hover { text-decoration:underline; }
+
+    /* HERO */
+    .doc-hero { padding:70px 0 40px; }
+    .doc-tag { font-family:var(--mono); font-size:.72rem; color:var(--accent); letter-spacing:.2em; text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+    .doc-tag::before { content:''; width:24px; height:1px; background:var(--accent); }
+    h1 { font-size:clamp(2.2rem,4.5vw,3.4rem); font-weight:800; line-height:1.08; letter-spacing:-.02em; margin-bottom:20px; }
+    h1 em { font-style:normal; color:var(--accent); }
+    .lead { font-size:1.05rem; color:var(--muted); line-height:1.75; max-width:680px; }
+
+    .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:8px 0; }
+
+    /* SECTIONS */
+    .doc-section { padding:48px 0; }
+    h2 { font-size:1.6rem; font-weight:800; letter-spacing:-.01em; margin-bottom:8px; display:flex; align-items:center; gap:12px; }
+    h2 .num { font-family:var(--mono); font-size:1rem; color:var(--accent); background:rgba(0,229,160,.1); border:1px solid var(--border); border-radius:6px; padding:4px 10px; }
+    h2 em { font-style:normal; color:var(--accent); }
+    h3 { font-size:1.05rem; font-weight:700; margin:24px 0 10px; color:var(--text); }
+    p { font-size:.95rem; color:var(--muted); line-height:1.75; margin-bottom:14px; }
+    p strong { color:var(--text); }
+    a.inline { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    a.inline:hover { border-color:var(--accent); }
+    ul.doc-list { list-style:none; margin:14px 0; display:flex; flex-direction:column; gap:8px; }
+    ul.doc-list li { font-size:.92rem; color:var(--muted); line-height:1.6; padding-left:20px; position:relative; }
+    ul.doc-list li::before { content:'▹'; position:absolute; left:0; color:var(--accent); }
+
+    /* CONNECTION TABLE */
+    .conn-card { background:var(--bg2); border:1px solid var(--border); border-radius:8px; overflow:hidden; margin:18px 0; }
+    .conn-head { padding:12px 18px; border-bottom:1px solid var(--border); font-family:var(--mono); font-size:.74rem; color:var(--text); letter-spacing:.08em; text-transform:uppercase; display:flex; align-items:center; gap:8px; }
+    .conn-head .live-dot { width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 6px var(--accent); }
+    .conn-grid { display:grid; grid-template-columns:1fr 1fr; }
+    .conn-row { display:flex; justify-content:space-between; gap:12px; padding:11px 18px; border-bottom:1px solid rgba(0,229,160,.05); border-right:1px solid rgba(0,229,160,.05); }
+    .conn-row .k { font-family:var(--mono); font-size:.72rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; }
+    .conn-row .v { font-family:var(--mono); font-size:.82rem; color:var(--accent); text-align:right; word-break:break-all; }
+
+    /* CODE BLOCK */
+    .code-block { background:#05080b; border:1px solid var(--border); border-radius:8px; overflow:hidden; margin:14px 0; }
+    .code-bar { display:flex; align-items:center; gap:8px; padding:9px 14px; background:var(--bg3); border-bottom:1px solid var(--border); }
+    .code-dot { width:10px; height:10px; border-radius:50%; }
+    .cd1 { background:#ff5f57; } .cd2 { background:#febc2e; } .cd3 { background:#28c840; }
+    .code-lang { margin-left:auto; font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.1em; text-transform:uppercase; }
+    .code-block pre { margin:0; padding:16px 18px; overflow-x:auto; }
+    .code-block code { font-family:var(--mono); font-size:.82rem; line-height:1.8; color:#9fd6bb; white-space:pre; }
+    .code-block .cmt { color:var(--muted); }
+    .code-block .key { color:var(--accent2); }
+    .code-block .val { color:var(--accent); }
+
+    /* HARDWARE PILLS */
+    .hw-grid { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
+    .hw-pill { font-family:var(--mono); font-size:.76rem; padding:8px 14px; border-radius:20px; background:var(--bg3); border:1px solid var(--border); color:var(--text); text-decoration:none; transition:all .2s; }
+    .hw-pill:hover { border-color:var(--accent); color:var(--accent); background:rgba(0,229,160,.06); }
+    .hw-pill.rec { border-color:var(--accent); color:var(--accent); }
+    .hw-pill .tag { font-size:.6rem; color:var(--accent); margin-left:6px; }
+
+    /* CALLOUT */
+    .callout { display:flex; gap:12px; background:rgba(255,180,0,.07); border:1px solid rgba(255,180,0,.25); border-radius:8px; padding:14px 18px; margin:18px 0; }
+    .callout .ico { color:var(--warn); font-size:1.1rem; flex-shrink:0; }
+    .callout p { margin:0; font-size:.88rem; color:var(--text); }
+    .callout.info { background:rgba(0,170,255,.06); border-color:rgba(0,170,255,.25); }
+    .callout.info .ico { color:var(--accent2); }
+
+    /* BUTTONS */
+    .btn-row { display:flex; gap:14px; flex-wrap:wrap; margin:18px 0; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:11px 24px; font-family:var(--mono); font-size:.82rem; letter-spacing:.06em; text-decoration:none; border-radius:4px; transition:all .2s; }
+    .btn-primary { background:var(--accent); color:#030608; box-shadow:var(--glow); }
+    .btn-primary:hover { background:#00ffb2; }
+    .btn-outline { background:transparent; color:var(--accent); border:1px solid var(--border); }
+    .btn-outline:hover { border-color:var(--accent); background:rgba(0,229,160,.06); }
+
+    /* FOOTER */
+    footer { border-top:1px solid var(--border); padding:36px 0; margin-top:40px; }
+    .footer-inner { max-width:1200px; margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+    .footer-logo { font-family:var(--mono); color:var(--accent); font-size:.9rem; }
+    .footer-links { display:flex; gap:24px; list-style:none; }
+    .footer-links a { font-family:var(--mono); font-size:.7rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; }
+    .footer-links a:hover { color:var(--accent); }
+    .footer-copy { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+
+    @media(max-width:700px) {
+      .conn-grid { grid-template-columns:1fr; }
+      .nav-links { display:none; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/velkommen" class="logo">mesh<span>view</span>.dk</a>
+    <ul class="nav-links">
+      <li><a href="https://meshview.dk/#/live" target="_blank" rel="noopener">Live</a></li>
+      <li><a href="/velkommen#noder">Noder</a></li>
+      <li><a href="/velkommen#guide">Kom i gang</a></li>
+      <li><a href="https://tools.meshview.dk">Værktøjer</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="doc-hero">
+  <div class="wrap">
+    <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
+    <div class="doc-tag" style="margin-top:18px">// observer → MQTT</div>
+    <h1>Bliv <em>observer</em></h1>
+    <p class="lead">
+      Observer-noder er MeshCore-radioer, der enten er forbundet til en lille Linux-host
+      (Raspberry Pi, Mini-PC) eller standalone-radioer med indbygget MQTT-understøttelse, som
+      udgiver opfangede pakker til centrale MQTT-brokere. Observatører er afgørende for at forstå
+      netværkets samlede sundhed og giver indblik i, hvordan pakker bevæger sig gennem nettet.
+      Denne side guider dig gennem at sætte din observer op, så data kan opsamles af analyzers og visualizers.
+    </p>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- BROKER CONNECTION -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2>Broker-forbindelse</h2>
+    <p>Brug device auth til nye observers: enheden logger ind med sin egen MeshCore Ed25519-nøgle (JWT), uden et delt brugernavn og password. Din firmware skal understøtte device auth og MQTT over WebSocket.</p>
+    <div class="conn-card">
+      <div class="conn-head"><span class="live-dot"></span> Online-host</div>
+      <div class="conn-grid">
+        <div class="conn-row"><span class="k">Host</span><span class="v">mqtt.meshview.dk</span></div>
+        <div class="conn-row"><span class="k">Server</span><span class="v">wss://mqtt.meshview.dk:443/mqtt</span></div>
+        <div class="conn-row"><span class="k">Transport</span><span class="v">WebSocket med TLS · port 443</span></div>
+        <div class="conn-row"><span class="k">Authentication</span><span class="v">Device auth · Ed25519 JWT</span></div>
+        <div class="conn-row"><span class="k">Audience</span><span class="v">mqtt.meshview.dk</span></div>
+        <div class="conn-row"><span class="k">Topic</span><span class="v">meshcore/{iata}/{device}/{type}</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- STANDALONE OBSERVERS -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2><span class="num">A</span> Standalone observatører</h2>
+
+    <h3>1. Hent imaget</h3>
+    <p>
+      Hent og flash observer-firmware fra <a class="inline" href="https://observer.gessaman.com/" target="_blank" rel="noopener">observer.gessaman.com</a>.
+      Vælg din enhed og den aktuelle stabile firmwareversion i flasheren.
+    </p>
+    <p>
+      Brug Chrome eller Edge på en computer og et USB-datakabel. Konfigurér derefter radioen til dit lokale netværk,
+      WiFi og MQTT som beskrevet nedenfor. Se også vores <a class="inline" href="/radio">radio-indstillinger</a>.
+    </p>
+    <p>Har du ikke en radio, men vil gerne hjælpe? Vi anbefaler <strong>Heltec V3</strong>.</p>
+
+    <h3>Understøttet hardware</h3>
+    <div class="hw-grid">
+      <a class="hw-pill rec" href="https://heltec.org/project/wifi-lora-32-v3/" target="_blank" rel="noopener">Heltec V3<span class="tag">ANBEFALET</span></a>
+      <a class="hw-pill" href="https://heltec.org/project/wifi-lora-32-v4/" target="_blank" rel="noopener">Heltec V4</a>
+      <a class="hw-pill" href="https://shop.uniteng.com/product/meshtastic-mesh-device-station-edition/" target="_blank" rel="noopener">Station G2</a>
+      <a class="hw-pill" href="https://lilygo.cc/products/t-beam-supreme-meshtastic" target="_blank" rel="noopener">T-Beam SX1262</a>
+      <a class="hw-pill" href="https://lilygo.cc/products/t-beam" target="_blank" rel="noopener">T-Beam SX1276</a>
+      <a class="hw-pill" href="https://lilygo.cc/products/t-beam-supreme-meshtastic" target="_blank" rel="noopener">T-Beam S3 Supreme SX1262</a>
+      <a class="hw-pill" href="https://www.seeedstudio.com/Wio-SX1262-with-XIAO-ESP32S3-p-5982.html" target="_blank" rel="noopener">Xiao S3 WIO</a>
+    </div>
+
+    <div class="callout">
+      <span class="ico">⚠</span>
+      <p>
+        Opdaterer du en eksisterende enhed, så lad <strong>Erase device</strong> være fravalgt.
+        En fuld sletning fjerner enhedens MeshCore-identitet og indstillinger. Følg flasherens vejledning.
+      </p>
+    </div>
+
+    <h3>2. Flashing og konfiguration</h3>
+    <p>
+      Åbn <a class="inline" href="https://observer.gessaman.com/" target="_blank" rel="noopener">observer-flasheren</a>, vælg din enhed og rollen <strong>Repeater</strong> (eller Room Server, hvis du også vil have et chatrum), og følg trinene til flashingen er færdig.
+      Er du ny til MeshCore, kan du læse mere om flashing <a class="inline" href="https://meshguide.dk" target="_blank" rel="noopener">her</a>.
+    </p>
+    <p>
+      Åbn derefter flasherens <strong>Console</strong> over USB, eller enhedens <strong>Command Line</strong> i MeshCore-appen, og indtast kommandoerne herunder med dine egne værdier. Slot 1 konfigureres til MeshView; en eksisterende opsætning i dette slot erstattes.
+    </p>
+    <div class="code-block">
+      <div class="code-bar"><span class="code-dot cd1"></span><span class="code-dot cd2"></span><span class="code-dot cd3"></span><span class="code-lang">bash</span></div>
+<pre><code>set wifi.ssid <span class="val">NAVN_PÅ_WIFI</span>
+set wifi.pwd <span class="val">KODE_TIL_WIFI</span>
+set mqtt.iata <span class="val">DIT_IATA</span>
+set mqtt1.preset custom
+set mqtt1.server wss://mqtt.meshview.dk:443/mqtt
+set mqtt1.audience mqtt.meshview.dk
+set mqtt1.topic meshcore/{iata}/{device}/{type}
+set mqtt.owner <span class="val">DIT_PUB_KEY</span>
+reboot</code></pre>
+    </div>
+
+    <p><strong>Vælg din IATA-kode:</strong> IATA er “lufthavnskoden” for den region, du er i — eksempelvis <strong>AAR</strong> for Aarhus eller <strong>BLL</strong> for Billund. Erstat <strong>DIT_IATA</strong> med koden for dit område. I Danmark bruger vi <strong>AAL, AAR, BLL, ODE, CPH og RNN</strong>. Se <a class="inline" href="https://dk.meshmapper.net/" target="_blank" rel="noopener">dk.meshmapper.net</a>, hvis du er i tvivl om, hvilken region du tilhører.</p>
+
+    <p><strong>Observerens public key:</strong> Erstat <strong>DIT_PUB_KEY</strong> med observerens egen offentlige nøgle (public key), ikke din companion-enheds nøgle. Brug kun den offentlige nøgle — aldrig en privat nøgle.</p>
+
+    <h3>MeshMapper i slot 2 (valgfrit)</h3>
+    <p>Hvis du også vil sende til MeshMapper, kan du konfigurere slot 2 med kommandoerne herunder. Det erstatter den eksisterende opsætning i slot 2, men ændrer ikke MeshView i slot 1. Din firmware skal understøtte MeshMapper-preset'et.</p>
+    <div class="code-block">
+      <div class="code-bar"><span class="code-dot cd1"></span><span class="code-dot cd2"></span><span class="code-dot cd3"></span><span class="code-lang">MeshCore CLI</span></div>
+<pre><code><span class="cmt"># MeshMapper opsætning i slot 2</span>
+set mqtt2.preset meshmapper
+reboot</code></pre>
+    </div>
+
+    <h3>3. Bekræft at du er online</h3>
+    <p>Tjek observer-statussen for at se, at din node sender data.</p>
+    <div class="btn-row">
+      <a href="https://meshview.dk/#/observers" target="_blank" rel="noopener" class="btn btn-outline">Observer-status</a>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- CONNECTED OBSERVERS -->
+<section class="doc-section">
+  <div class="wrap">
+    <h2><span class="num">B</span> Tilsluttede observatører</h2>
+    <p>Til en observer forbundet til en PC/Linux-host (Raspberry Pi, Mini-PC).</p>
+
+    <h3>1. Installer observer-tjenesten</h3>
+    <p>
+      <a class="inline" href="https://letsmesh.net" target="_blank" rel="noopener">Letsmesh.net</a> er den bedste kilde til at lave en PC-tilsluttet observer.
+      De har en komplet onboarding-proces, der er forenklet ud fra hvilken hardware/firmware-type du vil bruge.
+    </p>
+
+    <h3>2. Konfigurer din klient</h3>
+    <p>PC-klienten skal understøtte MQTT over WebSocket med TLS og MeshCore device auth (Ed25519 JWT). Brug serveradressen og audience fra tabellen ovenfor. De konkrete feltnavne afhænger af klienten og dens version; firmwarekommandoerne til slot 1 og slot 2 er ikke en PC-konfigurationsfil.</p>
+    <div class="callout info">
+      <span class="ico">ℹ</span>
+      <p>Den eksisterende Mosquitto-adgang på TCP-port 8883 med brugernavn og password er fortsat separat fra device auth på WSS-port 443. Har du allerede en fungerende forbindelse, skal du ikke ændre den ud fra de nye firmwarekommandoer. Kontakt <a class="inline" href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>, hvis du er i tvivl om din klients opsætning.</p>
+    </div>
+
+    <h3>3. Genstart og kontrollér</h3>
+    <p>Når klienten er konfigureret efter dens egen dokumentation, genstart observer-tjenesten og kontrollér forbindelsen i dens log.</p>
+
+    <h3>4. Bekræft at du er online</h3>
+    <p>Tjek observer-statussen for at se, at din node sender data.</p>
+    <div class="btn-row">
+      <a href="https://meshview.dk/#/observers" target="_blank" rel="noopener" class="btn btn-outline">Observer-status</a>
+      <a href="mailto:kontakt@meshview.dk" class="btn btn-primary">Kontakt os</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">meshview.dk</div>
+    <ul class="footer-links">
+      <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
+      <li><a href="https://meshguide.dk" target="_blank" rel="noopener">Guide</a></li>
+      <li><a href="https://github.com/Kpa-clawbot/CoreScope" target="_blank" rel="noopener">CoreScope</a></li>
+      <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
+    </ul>
+    <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>
+  </div>
+</footer>
+
+</body>
+</html>
