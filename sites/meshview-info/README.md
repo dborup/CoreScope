@@ -33,6 +33,7 @@ Fra repoet, med Playwright tilgængelig:
 
 ```sh
 node sites/meshview-info/test-copy-commands.js
+node sites/meshview-info/test-xss.cjs
 node sites/meshview-info/test-mobile.cjs
 ```
 
@@ -74,9 +75,18 @@ Begge serveres lokalt med `font-display: swap`; ingen Google Fonts requests.
 - Ingen fysisk hardwaretest, købstest eller fuld firmwarekompatibilitetstest
   af hver model. Uunderbyggede generelle batteri-/test-/popularitetspåstande er nedtonet.
 
-## Separat fund — ikke rettet her
+## HTML-injektion i API-visning
 
-Forsidens eksisterende `renderNodes`, `renderObservers` og `renderPackets`
-interpolerer API-felter direkte i `innerHTML`. Det bør sikkerhedsreviewes og
-rettes separat med regressionsprøver for HTML-injektion. Layouttesten bruger
-almindelig syntetisk tekst og er ikke en sikkerhedsgodkendelse af disse renderere.
+Den oprindelige forside interpolerede API-felter direkte i `innerHTML`.
+En isoleret Chromium-regression med syntetiske felter reproducerede
+HTML-injektion og eksekvering af en ufarlig lokal testmarkør. Testen har
+blokeret netværk og blev ikke kørt på produktion. Ingest/API-kædens mulighed
+for at levere et angriberstyret payload er ikke undersøgt, og der er ingen
+konklusion om faktisk misbrug.
+
+Regressionen dækker navne, fallbackfelter, role-attribut, numeriske felter,
+bevarelse af bogstavelig tekst og normal formatering i de tre renderere.
+Rettelsen HTML-escaper tekst, begrænser rolleklasser til kendte værdier og
+normaliserer numeriske felter før interpolation. De eksisterende API-kald
+og maksimumantal viste rækker er uændrede. Dette er en lokal rettelse;
+den er ikke publiceret på prod.
