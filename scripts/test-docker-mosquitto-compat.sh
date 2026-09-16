@@ -303,17 +303,26 @@ volumes_of() { run_bounded "$EXEC_S" docker container inspect -f '{{range .Mount
 
 # container_state / volume_state <id|name>: prints present, absent or unknown.
 # Absence is only concluded from a successful listing that does not contain the
-# object; a failed or timed-out docker command yields unknown.
+# object; a failed or timed-out docker command yields unknown. The match has to
+# read the whole listing: grep -q exits at the first hit, the writing printf
+# then gets SIGPIPE and pipefail turns that hit into a non-zero pipeline, so on
+# a host with many containers or volumes a present object looked absent. Only a
+# clean no-match (writer 0, grep 1) is absence; a failed writer or a grep error
+# is unknown, never absent.
 container_state() {
-    local out
+    local out st
     out=$(run_bounded "$EXEC_S" docker ps -a -q --no-trunc) || { echo unknown; return; }
-    if printf '%s\n' "$out" | grep -qxF "$1"; then echo present; else echo absent; fi
+    printf '%s\n' "$out" | grep -xF -- "$1" > /dev/null
+    st="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
+    case "$st" in 0:0) echo present ;; 0:1) echo absent ;; *) echo unknown ;; esac
 }
 
 volume_state() {
-    local out
+    local out st
     out=$(run_bounded "$EXEC_S" docker volume ls -q) || { echo unknown; return; }
-    if printf '%s\n' "$out" | grep -qxF "$1"; then echo present; else echo absent; fi
+    printf '%s\n' "$out" | grep -xF -- "$1" > /dev/null
+    st="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
+    case "$st" in 0:0) echo present ;; 0:1) echo absent ;; *) echo unknown ;; esac
 }
 
 start_container() { # name [file copied into /app/data ...]; sets LAST_ID
