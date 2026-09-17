@@ -40,7 +40,12 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 		}
 		tx := storeObservedTx(store, id, 2, ts, `{"type":"TXT_MSG"}`, alt, `["D4E5F6","D4E5F6","D4E5F6"]`)
 		resolved[id] = []string{relay, hop}
-		store.indexResolvedPathHops(tx, resolved[id], hopsSeen)
+		// Restart shape: the relay is reachable only through byNode, whose
+		// slices eviction compacts in place, so a stale candidate would
+		// change the relay result instead of being hidden by a full-key
+		// path-hop entry.
+		store.addToByNode(tx, relay)
+		store.indexResolvedPathHops(tx, []string{hop}, hopsSeen)
 	}
 	// oracle[round] is the single-path relay info for every key in the store
 	// state published as round, computed under the writer's lock.
@@ -127,8 +132,9 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 		for j := 0; j < txPerRound; j++ {
 			addLocked()
 		}
-		// Evict all but the newest keepTx transmissions (1s apart; the cutoff
-		// sits mid-second so clock progress during the round cannot move it).
+		// Evict older transmissions (1s apart). The cutoff sits mid-second so
+		// clock progress during the round cannot move it; eviction formats it
+		// with whole seconds, so keepTx+1 transmissions remain.
 		keepFrom := base.Add(time.Duration(nextID-keepTx)*time.Second - 500*time.Millisecond)
 		store.retentionHours = time.Since(keepFrom).Hours()
 		store.EvictStaleWithRP(resolved)
@@ -148,11 +154,11 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 	if !matchesSomeRound(got, round, round) {
 		t.Fatalf("final bulk relay info differs from single path: %+v", got)
 	}
-	// Each transmission credits exactly one relay plus the shared hop.
-	// (Eviction leaves resolved full-key path-hop entries in place, so counts
-	// can exceed len(store.packets); that policy is out of scope here.)
+	// Each retained transmission credits exactly one relay. (The shared hop
+	// is also indexed under its full key, which eviction leaves in place;
+	// that policy is out of scope here.)
 	final := oracle[round]
-	if final[relayA].RelayCount24h == 0 || final[relayB].RelayCount24h == 0 || final[relayA].RelayCount24h+final[relayB].RelayCount24h != final[hop].RelayCount24h {
-		t.Fatalf("fixture relay evidence inconsistent: %+v", final)
+	if final[relayA].RelayCount24h == 0 || final[relayB].RelayCount24h == 0 || final[relayA].RelayCount24h+final[relayB].RelayCount24h != len(store.packets) || len(store.packets) != keepTx+1 {
+		t.Fatalf("fixture relay evidence inconsistent: packets=%d oracle=%+v", len(store.packets), final)
 	}
 }

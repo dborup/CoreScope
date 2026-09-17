@@ -144,7 +144,7 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 	// was indexed above under the same lock); it is skipped, never mapped to
 	// another transmission.
 	type relayRef struct {
-		tx         int32
+		tx         int
 		fromPrefix bool
 	}
 	type keyRefs struct {
@@ -171,7 +171,7 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 				b.gen = gen
 				for _, have := range b.keys {
 					if have == key {
-						refs = append(refs, relayRef{tx: int32(i), fromPrefix: fromPrefix})
+						refs = append(refs, relayRef{tx: i, fromPrefix: fromPrefix})
 						return
 					}
 				}
