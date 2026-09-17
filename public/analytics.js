@@ -292,6 +292,20 @@
     }
   }
 
+  // This runs again after tabs insert tables asynchronously (and on theme
+  // refresh), so a table added ahead of an already-numbered one would reuse
+  // that table's positional index; skip ids that are already taken.
+  function assignAnalyticsTableIds(el, tab) {
+    el.querySelectorAll('.analytics-table').forEach((tbl, i) => {
+      if (!tbl.id) {
+        let n = i;
+        while (document.getElementById(`analytics-tbl-${tab}-${n}`)) n++;
+        tbl.id = `analytics-tbl-${tab}-${n}`;
+      }
+      if (typeof makeColumnsResizable === 'function') makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tab}-${i}-col-widths`);
+    });
+  }
+
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
@@ -319,10 +333,7 @@
     }
     // Auto-apply column resizing to all analytics tables
     requestAnimationFrame(() => {
-      el.querySelectorAll('.analytics-table').forEach((tbl, i) => {
-        tbl.id = tbl.id || `analytics-tbl-${tab}-${i}`;
-        if (typeof makeColumnsResizable === 'function') makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tab}-${i}-col-widths`);
-      });
+      assignAnalyticsTableIds(el, tab);
       // #206 — Wrap analytics tables in scroll containers on mobile
       el.querySelectorAll('.analytics-table').forEach(tbl => {
         if (!tbl.parentElement.classList.contains('analytics-table-scroll')) {
@@ -3008,6 +3019,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
   // Expose for testing
   if (typeof window !== 'undefined') {
+    window._analyticsAssignTableIds = assignAnalyticsTableIds;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
     window._analyticsLoadChannelSort = loadChannelSort;

@@ -14,6 +14,7 @@ node test-packet-filter-ux.js
 node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js
+node test-app-api-inflight-cleanup-rejection.js
 node test-privacy-page.js
 node test-nav-dynamic-link-lifecycle.js
 node test-nav-first-load-fit.js
@@ -43,6 +44,8 @@ node test-issue-1409-no-encrypted-flood.js
 node test-analytics-channels-integration.js
 node test-analytics-foreign-traffic-tab.js
 node test-analytics-nodes-without-scope.js
+node test-analytics-table-ids-unique.js
+node test-live-vcr-mode-contrast.js
 node test-observers-headings.js
 node test-issue-1789-observer-firmware-cols.js
 node test-issue-1648-m1-emoji-scan.js
@@ -50,6 +53,7 @@ node test-issue-1648-m2-emoji-scan.js
 node test-issue-1648-m3-emoji-scan.js
 node test-issue-1648-m6-final-sweep.js
 node test-issue-1648-m6-lint-self.js
+node test-issue-1890-og-url.js
 node test-traces.js
 node test-live-multibyte-filter.js
 
