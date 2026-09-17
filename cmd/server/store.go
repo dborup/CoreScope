@@ -9309,13 +9309,15 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
 	results := make([]map[string]interface{}, 0, len(nodes))
+	pm := s.relayPrefixMapLocked()
 
 	for _, n := range nodes {
 		packets := s.byNode[n.pk]
+		activityKey := strings.ToLower(n.pk)
 		var packetsToday int
 		var snrSum float64
 		var snrCount int
-		var lastHeard string
+		var lastHeard, lastAdvert string
 		observerStats := map[string]*struct {
 			name                       string
 			snrSum, rssiSum            float64
@@ -9335,9 +9337,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				snrSum += *pkt.SNR
 				snrCount++
 			}
-			if lastHeard == "" || pkt.FirstSeen > lastHeard {
-				lastHeard = pkt.FirstSeen
-			}
+			updateNodeActivity(pkt, activityKey, pm, &lastHeard, &lastAdvert)
 			obsID := pkt.ObserverID
 			if obsID != "" {
 				obs := observerStats[obsID]
@@ -9379,13 +9379,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
 		})
 
-		var avgSnr interface{}
+		var avgSnr *float64
 		if snrCount > 0 {
-			avgSnr = snrSum / float64(snrCount)
-		}
-		var lhVal interface{}
-		if lastHeard != "" {
-			lhVal = lastHeard
+			v := snrSum / float64(snrCount)
+			avgSnr = &v
 		}
 
 		results = append(results, map[string]interface{}{
@@ -9394,13 +9391,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			"role":       nilIfEmpty(n.role),
 			"lat":        n.lat,
 			"lon":        n.lon,
-			"stats": map[string]interface{}{
-				"totalTransmissions": len(packets),
-				"totalObservations":  totalObservations,
-				"totalPackets":       len(packets),
-				"packetsToday":       packetsToday,
-				"avgSnr":             avgSnr,
-				"lastHeard":          lhVal,
+			"stats": NodeHealthStats{
+				TotalTransmissions: len(packets), TotalObservations: totalObservations,
+				TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: avgSnr,
+				LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 			},
 			"observers": observerRows,
 		})
@@ -9439,13 +9433,15 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	defer s.mu.RUnlock()
 
 	packets := s.byNode[pubkey]
+	activityKey := strings.ToLower(pubkey)
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
 
 	var packetsToday int
 	var snrSum float64
 	var snrCount int
 	var totalHops, hopCount int
-	var lastHeard string
+	var lastHeard, lastAdvert string
+	pm := s.relayPrefixMapLocked()
 	totalObservations := 0
 
 	observerStats := map[string]*struct {
@@ -9463,9 +9459,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			snrSum += *pkt.SNR
 			snrCount++
 		}
-		if lastHeard == "" || pkt.FirstSeen > lastHeard {
-			lastHeard = pkt.FirstSeen
-		}
+		updateNodeActivity(pkt, activityKey, pm, &lastHeard, &lastAdvert)
 		// Hop counting
 		hops := txGetParsedPath(pkt)
 		if len(hops) > 0 {
@@ -9552,17 +9546,14 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 		return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
 	})
 
-	var avgSnr interface{}
+	var avgSnr *float64
 	if snrCount > 0 {
-		avgSnr = snrSum / float64(snrCount)
+		v := snrSum / float64(snrCount)
+		avgSnr = &v
 	}
 	avgHops := 0
 	if hopCount > 0 {
 		avgHops = int(math.Round(float64(totalHops) / float64(hopCount)))
-	}
-	var lhVal interface{}
-	if lastHeard != "" {
-		lhVal = lastHeard
 	}
 
 	// Recent packets (up to 20, newest first — read from tail of oldest-first slice)
@@ -9580,14 +9571,10 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	return map[string]interface{}{
 		"node":      node,
 		"observers": observerRows,
-		"stats": map[string]interface{}{
-			"totalTransmissions": len(packets),
-			"totalObservations":  totalObservations,
-			"totalPackets":       len(packets),
-			"packetsToday":       packetsToday,
-			"avgSnr":             avgSnr,
-			"avgHops":            avgHops,
-			"lastHeard":          lhVal,
+		"stats": NodeHealthStats{
+			TotalTransmissions: len(packets), TotalObservations: totalObservations,
+			TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: avgSnr,
+			AvgHops: &avgHops, LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 		},
 		"recentPackets": recentPackets,
 	}, nil

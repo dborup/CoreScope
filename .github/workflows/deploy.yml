@@ -401,6 +401,7 @@ jobs:
 
       - name: Run Playwright E2E tests (fail-fast)
         run: |
+          node test-node-liveness-e2e.js 2>&1 | tee node-liveness-e2e-output.txt
           BASE_URL=http://localhost:13581 node test-e2e-playwright.js 2>&1 | tee e2e-output.txt
           # M5+M6 of #1668 — axe-core CI gate.
           # M5: color-contrast on desktop dark+light.
