@@ -9310,6 +9310,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
 	results := make([]map[string]interface{}, 0, len(nodes))
 	pm := s.relayPrefixMapLocked()
+	relaySeen := make(map[int]struct{}) // request-local relay-evidence dedupe scratch
 
 	for _, n := range nodes {
 		packets := s.byNode[n.pk]
@@ -9337,7 +9338,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				snrSum += *pkt.SNR
 				snrCount++
 			}
-			updateNodeActivity(pkt, activityKey, pm, &lastHeard, &lastAdvert)
+			updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
 			obsID := pkt.ObserverID
 			if obsID != "" {
 				obs := observerStats[obsID]
@@ -9360,7 +9361,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				}
 			}
 		}
-		s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard)
+		s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, relaySeen)
 
 		observerRows := make([]map[string]interface{}, 0)
 		for id, o := range observerStats {
@@ -9460,7 +9461,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			snrSum += *pkt.SNR
 			snrCount++
 		}
-		updateNodeActivity(pkt, activityKey, pm, &lastHeard, &lastAdvert)
+		updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
 		// Hop counting
 		hops := txGetParsedPath(pkt)
 		if len(hops) > 0 {
@@ -9490,7 +9491,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			}
 		}
 	}
-	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard)
+	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, make(map[int]struct{}))
 
 	observerRows := make([]map[string]interface{}, 0)
 	// Issue #1290: surface listener/repeater hint on node detail by

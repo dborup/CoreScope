@@ -384,3 +384,191 @@ func TestVisitPathJSONHops_MatchesParsePathJSON(t *testing.T) {
 		}
 	}
 }
+
+// Review fix F1: after a restart buildPathHopIndex re-indexes display paths
+// only, so a relay named solely by a non-display observation is no longer in
+// its full-key path-hop bucket. Relay status and health must still agree with
+// the same transmission ingested live.
+func TestNodeActivity_AlternateObservationRelaySurvivesRestart(t *testing.T) {
+	relay := "a1b2c3" + strings.Repeat("11", 29)
+	hopA := "d4e5f6" + strings.Repeat("22", 29)
+	hopB := "e7f8a9" + strings.Repeat("33", 29)
+	type activity struct {
+		relayActive          bool
+		lastRelayed          string
+		count1h, count24h    int
+		heard, bulkHeard     string
+		advert, bulkAdvert   string
+		bulkRelayActive      bool
+		bulkLastRelayed      string
+		bulkCount24h         int
+		totalPackets, obsCnt int
+	}
+	snapshot := func(t *testing.T, store *PacketStore) activity {
+		t.Helper()
+		got := snapshotNodeActivity(t, store, relay)
+		return activity{
+			relayActive: got.relay.RelayActive, lastRelayed: got.relay.LastRelayed,
+			count1h: got.relay.RelayCount1h, count24h: got.relay.RelayCount24h,
+			heard: derefTS(got.health.LastHeard), bulkHeard: derefTS(got.bulkHealth.LastHeard),
+			advert: derefTS(got.health.LastAdvert), bulkAdvert: derefTS(got.bulkHealth.LastAdvert),
+			bulkRelayActive: got.bulkRelay.RelayActive, bulkLastRelayed: got.bulkRelay.LastRelayed, bulkCount24h: got.bulkRelay.RelayCount24h,
+			totalPackets: got.health.TotalPackets, obsCnt: got.health.TotalObservations,
+		}
+	}
+	for _, persisted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persisted_resolved_path=%v", persisted), func(t *testing.T) {
+			now := time.Now().UTC()
+			firstSeen := now.Add(-10 * time.Minute).Format(time.RFC3339)
+			seed := func(t *testing.T, db *DB) {
+				for _, key := range []string{relay, hopA, hopB} {
+					mustExec(t, db, `INSERT INTO nodes (public_key, name, role, last_seen, first_seen, advert_count) VALUES (?, ?, 'repeater', ?, '2026-01-01', 1)`, key, "Synthetic "+key[:6], firstSeen)
+				}
+			}
+			insertTx := func(t *testing.T, db *DB) {
+				mustExec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, decoded_json) VALUES (7, 'CAFE', 'restart-alt-obs', ?, 1, 2, '{"type":"TXT_MSG"}')`, firstSeen)
+				var short, long interface{}
+				if persisted {
+					short, long = `["`+relay+`"]`, `["`+hopA+`","`+hopB+`"]`
+				}
+				mustExec(t, db, `INSERT INTO observations (transmission_id, observer_idx, path_json, timestamp, resolved_path) VALUES (7, NULL, '["D4","E7"]', ?, ?)`, now.Add(-10*time.Minute).Unix(), long)
+				mustExec(t, db, `INSERT INTO observations (transmission_id, observer_idx, path_json, timestamp, resolved_path) VALUES (7, NULL, '["A1"]', ?, ?)`, now.Add(-9*time.Minute).Unix(), short)
+			}
+
+			// Restart: rows already persisted, loaded via Load + deferred index build.
+			loadDB := setupTestDB(t)
+			defer loadDB.conn.Close()
+			seed(t, loadDB)
+			insertTx(t, loadDB)
+			loaded := NewPacketStore(loadDB, nil)
+			if err := loaded.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if !loaded.WaitIndexesReady(5 * time.Second) {
+				t.Fatal("indexes not ready")
+			}
+			tx := loaded.byTxID[7]
+			if tx == nil || len(tx.Observations) != 2 || tx.PathJSON != `["D4","E7"]` {
+				t.Fatalf("fixture must load two observations with the longer display path: %+v", tx)
+			}
+			for _, bucket := range []string{relay, "a1"} {
+				for _, indexed := range loaded.byPathHop[bucket] {
+					if indexed == tx {
+						t.Fatalf("fixture must reproduce the restart index shape; tx found in byPathHop[%s]", bucket)
+					}
+				}
+			}
+
+			// Live: same rows ingested after startup.
+			liveDB := setupTestDB(t)
+			defer liveDB.conn.Close()
+			seed(t, liveDB)
+			live := NewPacketStore(liveDB, nil)
+			if err := live.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if !live.WaitIndexesReady(5 * time.Second) {
+				t.Fatal("live indexes not ready")
+			}
+			insertTx(t, liveDB)
+			live.IngestNewFromDB(0, 100)
+			if live.byTxID[7] == nil || len(live.byTxID[7].Observations) != 2 {
+				t.Fatalf("live ingest fixture incomplete: %+v", live.byTxID[7])
+			}
+
+			want := activity{relayActive: true, lastRelayed: firstSeen, count1h: 1, count24h: 1, heard: firstSeen, bulkHeard: firstSeen, advert: "null", bulkAdvert: "null",
+				bulkRelayActive: true, bulkLastRelayed: firstSeen, bulkCount24h: 1, totalPackets: 1, obsCnt: 2}
+			gotLive := snapshot(t, live)
+			if !reflect.DeepEqual(gotLive, want) {
+				t.Errorf("live ingest activity:\n got %+v\nwant %+v", gotLive, want)
+			}
+			gotLoaded := snapshot(t, loaded)
+			if !reflect.DeepEqual(gotLoaded, gotLive) {
+				t.Errorf("restart activity differs from live ingest:\nrestart %+v\n   live %+v", gotLoaded, gotLive)
+			}
+		})
+	}
+}
+
+// byNode membership is only a candidate, never identity proof, and must not
+// widen transported-scope provenance.
+func TestRelayActivity_ByNodeCandidatesKeepEvidenceRules(t *testing.T) {
+	relay := "a1b2c3" + strings.Repeat("11", 29)
+	listener := "c5d6e7" + strings.Repeat("22", 29)
+	guessed := "b0cafe" + strings.Repeat("44", 29)
+	twin := "b0beef" + strings.Repeat("55", 29)
+	hop := "d4e5f6" + strings.Repeat("66", 29)
+	var nodes []nodeInfo
+	for _, key := range []string{relay, listener, guessed, twin, hop} {
+		nodes = append(nodes, nodeInfo{PublicKey: key, Role: "repeater"})
+	}
+	pm := buildPrefixMap(nodes)
+	pm.markNonRelay([]string{listener})
+	ts := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	mk := func(id, route int, scope string, paths ...string) *StoreTx {
+		pt := 2
+		tx := &StoreTx{ID: id, PayloadType: &pt, RouteType: &route, FirstSeen: ts, ScopeName: scope}
+		for _, path := range paths {
+			tx.Observations = append(tx.Observations, &StoreObs{TransmissionID: id, PathJSON: path, Timestamp: ts})
+		}
+		pickBestObservation(tx)
+		return tx
+	}
+	alternate := mk(1, routeTypeFlood, "scoped", `["A1B2C3"]`, `["D4E5F6","D4E5F6"]`)
+	ambiguous := mk(2, routeTypeFlood, "", `["B0"]`, `["D4E5F6","D4E5F6"]`)
+	planned := mk(3, 2, "", `["A1B2C3"]`, `["D4E5F6","D4E5F6"]`)
+	quiet := mk(4, routeTypeFlood, "", `["C5D6E7"]`, `["D4E5F6","D4E5F6"]`)
+	store := &PacketStore{nodePM: pm, byPathHop: map[string][]*StoreTx{}, byNode: map[string][]*StoreTx{
+		// Duplicated candidates must still count once.
+		relay:    {alternate, planned, alternate},
+		guessed:  {ambiguous},
+		listener: {quiet},
+	}}
+	for _, tx := range []*StoreTx{alternate, ambiguous, planned, quiet} {
+		addTxToPathHopIndex(store.byPathHop, tx)
+	}
+	store.byPathHop["a1b2c3"] = append(store.byPathHop["a1b2c3"], alternate)
+	bulk := store.computeRepeaterRelayInfoMap(24)
+	for _, key := range []string{relay, listener, guessed, twin} {
+		single := store.GetRepeaterRelayInfo(key, 24)
+		if b, ok := bulk[key]; ok && !reflect.DeepEqual(single, b) {
+			t.Fatalf("single/bulk mismatch for %s: %+v vs %+v", key[:6], single, b)
+		} else if !ok && (single.RelayActive || single.LastRelayed != "") {
+			t.Fatalf("bulk omitted active key %s: %+v", key[:6], single)
+		}
+		var heard string
+		store.updateIndexedRelayActivityLocked(key, pm, &heard, map[int]struct{}{})
+		if key == relay {
+			if !single.RelayActive || single.RelayCount24h != 1 || len(single.TransportedScopes) != 0 || heard != ts {
+				t.Fatalf("byNode alternate-observation relay: relay %+v heard %q (want once, no scope from candidate)", single, heard)
+			}
+			continue
+		}
+		if single.RelayActive || single.LastRelayed != "" || heard != "" {
+			t.Fatalf("%s: candidate membership became evidence: relay %+v heard %q", key[:6], single, heard)
+		}
+	}
+}
+
+// relayKeyMatcher replaces confirmedRelayKey(token) == key on hot paths.
+func TestRelayKeyMatcher_MatchesConfirmedRelayKey(t *testing.T) {
+	unique := "a1b2c3" + strings.Repeat("11", 29)
+	collideA := "b0cafe" + strings.Repeat("44", 29)
+	collideB := "b0cbee" + strings.Repeat("55", 29)
+	listener := "c5d6e7" + strings.Repeat("22", 29)
+	short := "e9f0"
+	pm := buildPrefixMap([]nodeInfo{{PublicKey: strings.ToUpper(unique), Role: "repeater"}, {PublicKey: collideA, Role: "repeater"}, {PublicKey: collideB, Role: "repeater"}, {PublicKey: listener, Role: "repeater"}, {PublicKey: short, Role: "room"}, {PublicKey: "f1" + strings.Repeat("00", 31), Role: "companion"}})
+	pm.markNonRelay([]string{listener})
+	keys := []string{unique, collideA, collideB, listener, short, "f1" + strings.Repeat("00", 31), "", "a1", "zz" + strings.Repeat("11", 31)}
+	tokens := []string{"", "a", "A1", "a1", "A1B2", "a1B2", "A1B2C3", "a1b2c4", "A1B2C3D4", "B0", "B0CA", "b0cb", "C5", "c5d6e7", "E9", "e9f0", "F1", "g1", "A1B2C", strings.ToUpper(unique), unique, collideA, listener, "zz" + strings.Repeat("11", 31), "K1"}
+	for _, withPM := range []*prefixMap{pm, nil} {
+		for _, key := range keys {
+			m := newRelayKeyMatcher(key, withPM)
+			for _, token := range tokens {
+				if got, want := m.matches(token), key != "" && confirmedRelayKey(token, withPM) == key; got != want {
+					t.Errorf("pm=%v key=%q token=%q: matcher %v, confirmedRelayKey %v", withPM != nil, key, token, got, want)
+				}
+			}
+		}
+	}
+}

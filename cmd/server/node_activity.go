@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // NodeHealthStats keeps packet analytics separate from identity-safe activity.
 // LastHeard is own advert or unambiguous relay evidence; LastAdvert is strictly
@@ -51,25 +54,127 @@ func confirmedRelayKey(token string, pm *prefixMap) string {
 }
 
 func txHasConfirmedRelay(tx *StoreTx, key string, pm *prefixMap) bool {
+	return txConfirmsRelay(tx, newRelayKeyMatcher(key, pm))
+}
+
+// relayPrefixHexLens are the supported wire hash sizes (1/2/3 bytes).
+var relayPrefixHexLens = [...]int{2, 4, 6}
+
+// relayKeyMatcher answers confirmedRelayKey(token, pm) == key for one key
+// without per-token allocation or prefix-map lookups: uniqueness of the key's
+// own wire prefixes is decided once. Build one per key per request.
+type relayKeyMatcher struct {
+	key      string
+	unique   [3]bool // indexed like relayPrefixHexLens
+	listener bool
+}
+
+func newRelayKeyMatcher(key string, pm *prefixMap) relayKeyMatcher {
+	m := relayKeyMatcher{key: key}
+	if pm == nil {
+		return m
+	}
+	_, m.listener = pm.nonRelay[key]
+	for i, l := range relayPrefixHexLens {
+		if len(key) < l || !isHexLower(key[:l]) {
+			continue
+		}
+		cands := pm.m[key[:l]]
+		m.unique[i] = len(cands) == 1 && strings.ToLower(cands[0].PublicKey) == key
+	}
+	return m
+}
+
+// possible reports whether any token can confirm key; listener-only nodes
+// and empty keys never relay.
+func (m relayKeyMatcher) possible() bool {
+	return m.key != "" && !m.listener
+}
+
+func (m relayKeyMatcher) uniquePrefix(hexLen int) bool {
+	for i, l := range relayPrefixHexLens {
+		if l == hexLen {
+			return m.unique[i]
+		}
+	}
+	return false
+}
+
+func (m relayKeyMatcher) matches(token string) bool {
+	if !m.possible() {
+		return false
+	}
+	switch len(token) {
+	case 64: // exact internal identity, not a wire prefix
+		return len(m.key) == 64 && hexFoldEqual(token, m.key)
+	case 2, 4, 6:
+		return m.uniquePrefix(len(token)) && hexFoldEqual(token, m.key[:len(token)])
+	}
+	return false
+}
+
+// hexFoldEqual reports whether token equals the lowercase hex string lower,
+// ignoring ASCII case, i.e. strings.ToLower(token) == lower && isHexLower(lower).
+func hexFoldEqual(token, lower string) bool {
+	if len(token) != len(lower) {
+		return false
+	}
+	for i := 0; i < len(lower); i++ {
+		c, want := token[i], lower[i]
+		if !((want >= '0' && want <= '9') || (want >= 'a' && want <= 'f')) {
+			return false
+		}
+		if c != want && !(want >= 'a' && c == want-'a'+'A') {
+			return false
+		}
+	}
+	return true
+}
+
+// txConfirmsRelay reports whether any raw observed flood path of tx names
+// m.key with identity-safe evidence.
+func txConfirmsRelay(tx *StoreTx, m relayKeyMatcher) bool {
 	// Flood paths record already-observed hops. Direct paths list the
 	// remaining intended route, not nodes that forwarded this observation.
-	if !txHasObservedFloodPath(tx) {
+	if !m.possible() || !txHasObservedFloodPath(tx) {
 		return false
 	}
 	found := false
 	forEachObservedRelayHop(tx, func(token string) bool {
-		found = confirmedRelayKey(token, pm) == key
+		found = m.matches(token)
 		return !found
 	})
 	return found
+}
+
+// relayTokenResolver memoizes confirmedRelayKey per distinct raw token for one
+// request, so repeated hops cost a map lookup instead of ToLower + resolve.
+// Not safe for concurrent use.
+type relayTokenResolver struct {
+	pm    *prefixMap
+	cache map[string]string
+}
+
+func newRelayTokenResolver(pm *prefixMap) *relayTokenResolver {
+	return &relayTokenResolver{pm: pm, cache: make(map[string]string, 1024)}
+}
+
+func (r *relayTokenResolver) key(token string) string {
+	if key, ok := r.cache[token]; ok {
+		return key
+	}
+	key := confirmedRelayKey(token, r.pm)
+	r.cache[token] = key
+	return key
 }
 
 // forEachObservedRelayHop visits the display path hops, then the hops of every
 // other raw observation path. The display observation is only the longest
 // route, so a shorter observation can be the sole raw evidence for a relay that
 // resolved indexing attached to the transmission. visit returns false to stop.
-// Repeated identical paths are rescanned instead of deduplicated: scanning
-// does not allocate, a per-transmission set would. Caller holds s.mu.
+// Repeated identical paths are rescanned instead of deduplicated: the scanner
+// itself does not allocate (visit may), a per-transmission set would. Caller
+// holds s.mu.
 func forEachObservedRelayHop(tx *StoreTx, visit func(token string) bool) {
 	for _, token := range txGetParsedPath(tx) {
 		if !visit(token) {
@@ -193,39 +298,67 @@ func txIsInvalidAdvert(tx *StoreTx) bool {
 	return ok && !valid
 }
 
+// updateNodeActivity is the single-transmission form of node activity: own
+// advert, then relay evidence. Health endpoints use the two parts separately
+// so each relay candidate is evaluated once per node.
 func updateNodeActivity(tx *StoreTx, key string, pm *prefixMap, heard, advert *string) {
-	if txIsInvalidAdvert(tx) {
+	updateOwnAdvertActivity(tx, key, heard, advert)
+	heardAt, _ := parseRelayTS(*heard)
+	updateRelayActivity(tx, newRelayKeyMatcher(key, pm), heard, &heardAt)
+}
+
+// updateOwnAdvertActivity advances advert and heard for a valid own ADVERT.
+func updateOwnAdvertActivity(tx *StoreTx, key string, heard, advert *string) {
+	if !txIsOwnAdvert(tx, key) {
 		return
 	}
 	timestamp, valid := parseRelayTS(tx.FirstSeen)
 	if !valid {
 		return
 	}
-	ownAdvert := txIsOwnAdvert(tx, key)
-	oldAdvert, _ := parseRelayTS(*advert)
-	if ownAdvert && timestamp.After(oldAdvert) {
+	if oldAdvert, _ := parseRelayTS(*advert); timestamp.After(oldAdvert) {
 		*advert = tx.FirstSeen
 	}
-	oldHeard, _ := parseRelayTS(*heard)
-	if (ownAdvert || txHasConfirmedRelay(tx, key, pm)) && timestamp.After(oldHeard) {
+	if oldHeard, _ := parseRelayTS(*heard); timestamp.After(oldHeard) {
 		*heard = tx.FirstSeen
 	}
 }
 
+// updateRelayActivity advances heard (and its parsed heardAt) when tx is newer
+// and confirms relay evidence. The timestamp gate runs first: path evidence
+// can only matter for a newer transmission. Returns whether the evidence was
+// evaluated. Never touches advert.
+func updateRelayActivity(tx *StoreTx, m relayKeyMatcher, heard *string, heardAt *time.Time) bool {
+	timestamp, valid := parseRelayTS(tx.FirstSeen)
+	if !valid || !timestamp.After(*heardAt) {
+		return false
+	}
+	if txIsInvalidAdvert(tx) || !txConfirmsRelay(tx, m) {
+		return true
+	}
+	*heard, *heardAt = tx.FirstSeen, timestamp
+	return true
+}
+
 // updateIndexedRelayActivityLocked folds the relay evidence behind
-// GetRepeaterRelayInfo into health activity. byNode only holds decoded and
-// resolved-path membership, so a unique raw-prefix relay would otherwise be
-// RelayActive while health stayed silent. Only heard changes: a relay is never
-// an advert. Caller holds s.mu; cost is the node's own index buckets.
-func (s *PacketStore) updateIndexedRelayActivityLocked(key string, pm *prefixMap, heard *string) {
-	forEachConfirmedRelayTx(s.byPathHop, key, pm, nil, func(tx *StoreTx, _ bool) {
-		if txIsInvalidAdvert(tx) {
+// GetRepeaterRelayInfo into health activity, over the same candidates
+// (byPathHop full key, byNode, unique raw prefixes). Only heard changes: a
+// relay is never an advert. seen is request-local scratch (cleared here) so a
+// transmission's path evidence is evaluated at most once per node; candidates
+// not newer than heard are skipped before any path work. Caller holds s.mu.
+func (s *PacketStore) updateIndexedRelayActivityLocked(key string, pm *prefixMap, heard *string, seen map[int]struct{}) {
+	m := newRelayKeyMatcher(key, pm)
+	if !m.possible() {
+		return
+	}
+	clear(seen)
+	heardAt, _ := parseRelayTS(*heard)
+	forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, _ bool) {
+		if _, done := seen[tx.ID]; done {
 			return
 		}
-		timestamp, valid := parseRelayTS(tx.FirstSeen)
-		oldHeard, _ := parseRelayTS(*heard)
-		if valid && timestamp.After(oldHeard) {
-			*heard = tx.FirstSeen
+		if updateRelayActivity(tx, m, heard, &heardAt) {
+			seen[tx.ID] = struct{}{}
 		}
 	})
 }

@@ -124,81 +124,74 @@ type relayEntry struct {
 	// Empty when absent / on older schemas. Used for TransportedScopes (#1751).
 	scope string
 	// fromPrefix preserves the existing scope-field contract: only exact
-	// full-key index entries contribute transported scopes. Unique raw-only
-	// evidence can advance relay activity, but does not broaden scope claims.
-	fromPrefix    bool
-	parsed        bool
-	t             time.Time
-	valid         bool
-	confirmedKeys map[string]struct{}
+	// full-key path-hop entries contribute transported scopes. Raw-prefix and
+	// byNode candidates can advance relay activity, but never broaden scope
+	// claims.
+	fromPrefix bool
+	parsed     bool
+	t          time.Time
+	valid      bool
 }
 
-// collectRelayEntriesLocked returns deduplicated relayEntry snapshots for
-// StoreTx entries indexed under key and its unique 1/2/3-byte wire prefixes.
-// Caller MUST hold s.mu at least for reading.
+func newRelayEntry(tx *StoreTx, fromPrefix bool) relayEntry {
+	pt, rt := -1, -1
+	if tx.PayloadType != nil {
+		pt = *tx.PayloadType
+	}
+	if tx.RouteType != nil {
+		rt = *tx.RouteType
+	}
+	return relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix}
+}
+
+// collectRelayEntriesLocked returns one relayEntry per transmission that is a
+// relay candidate for key (see forEachRelayCandidate) and whose raw observed
+// flood paths confirm key. Caller MUST hold s.mu at least for reading.
 //
-// byPathHop is keyed by both full resolved pubkey AND raw 1-byte hop
-// prefix (e.g. "a3"). Resolve only unique raw identity evidence, not the
-// target-biased/heuristic membership permitted by the Paths view.
-//
-// Raw prefixes must uniquely identify the node. Full-key index membership
-// alone is not proof: persisted/live resolution can include heuristic guesses.
-// Verify the raw path even for full-key buckets, without target-biased resolve.
+// Candidate membership is never proof: persisted/live resolution can include
+// heuristic guesses. Every candidate is verified against its raw observation
+// paths, without target-biased resolve. Each transmission is checked once.
 func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
-	return collectConfirmedRelayEntries(s.byPathHop, key, s.relayPrefixMapLocked(), nil)
-}
-
-func collectConfirmedRelayEntries(index map[string][]*StoreTx, key string, pm *prefixMap, parsed map[int]relayEntry) []relayEntry {
-	// Capacity hint from the full-key bucket; prefix-only matches may grow it.
-	entries := make([]relayEntry, 0, len(index[key]))
-	forEachConfirmedRelayTx(index, key, pm, parsed, func(tx *StoreTx, fromPrefix bool) {
-		pt := -1
-		if tx.PayloadType != nil {
-			pt = *tx.PayloadType
+	m := newRelayKeyMatcher(key, s.relayPrefixMapLocked())
+	var entries []relayEntry
+	if !m.possible() {
+		return entries
+	}
+	seen := make(map[int]struct{})
+	forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, fromPrefix bool) {
+		if _, done := seen[tx.ID]; done {
+			return
 		}
-		rt := -1
-		if tx.RouteType != nil {
-			rt = *tx.RouteType
+		seen[tx.ID] = struct{}{}
+		if txConfirmsRelay(tx, m) {
+			entries = append(entries, newRelayEntry(tx, fromPrefix))
 		}
-		e := relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix}
-		if p, ok := parsed[tx.ID]; ok {
-			e.parsed, e.t, e.valid = true, p.t, p.valid
-		}
-		entries = append(entries, e)
 	})
 	return entries
 }
 
-// forEachConfirmedRelayTx visits each transmission in key's full-key bucket and
-// unique 1/2/3-byte raw-prefix buckets that carries identity-safe observed relay
-// evidence for key. It is the single relay-evidence source for relay status and
-// node health. Visits once per transmission ID across buckets, observations and
-// hops. fromPrefix is true only for transmissions not in the full-key bucket.
-func forEachConfirmedRelayTx(index map[string][]*StoreTx, key string, pm *prefixMap, parsed map[int]relayEntry, visit func(tx *StoreTx, fromPrefix bool)) {
-	txList := index[key]
-	tokens := reliableTokens(key, pm)
-	seen := make(map[int]bool, len(txList))
-	collect := func(list []*StoreTx, fromPrefix bool) {
-		for _, tx := range list {
-			if tx == nil || seen[tx.ID] {
-				continue
+// forEachRelayCandidate visits key's candidate transmissions, newest index
+// entries first, possibly more than once across buckets (callers deduplicate
+// by ID). Order matters for scope provenance: the full-key path-hop bucket
+// comes first and is the only one with fromPrefix=false.
+//   - byPathHop[key]: raw full-key hops and live resolved-path indexing.
+//   - byNode[key]: decoded and resolved-path membership from every
+//     observation. Needed after a restart, where buildPathHopIndex re-indexes
+//     display paths only and drops non-display resolved hops.
+//   - byPathHop[unique 1/2/3-byte prefix]: raw wire hops.
+func forEachRelayCandidate(pathHop, byNode map[string][]*StoreTx, m relayKeyMatcher, visit func(tx *StoreTx, fromPrefix bool)) {
+	each := func(list []*StoreTx, fromPrefix bool) {
+		for i := len(list) - 1; i >= 0; i-- {
+			if list[i] != nil {
+				visit(list[i], fromPrefix)
 			}
-			if p, ok := parsed[tx.ID]; ok {
-				if _, confirmed := p.confirmedKeys[key]; !confirmed {
-					continue
-				}
-			} else if !txHasConfirmedRelay(tx, key, pm) {
-				continue
-			}
-			seen[tx.ID] = true
-			visit(tx, fromPrefix)
 		}
 	}
-	collect(txList, false)
-	for token := range tokens {
-		prefix := strings.ToLower(token)
-		if prefix != key {
-			collect(index[prefix], true)
+	each(pathHop[m.key], false)
+	each(byNode[m.key], true)
+	for _, l := range relayPrefixHexLens {
+		if m.uniquePrefix(l) && m.key[:l] != m.key {
+			each(pathHop[m.key[:l]], true)
 		}
 	}
 }
