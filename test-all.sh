@@ -44,6 +44,8 @@ node test-issue-1409-no-encrypted-flood.js
 node test-analytics-channels-integration.js
 node test-analytics-foreign-traffic-tab.js
 node test-analytics-nodes-without-scope.js
+node test-analytics-table-ids-unique.js
+node test-live-vcr-mode-contrast.js
 node test-observers-headings.js
 node test-issue-1789-observer-firmware-cols.js
 node test-issue-1648-m1-emoji-scan.js
