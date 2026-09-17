@@ -123,6 +123,9 @@ if (typeof assign === 'function') {
     assign(dom.el, 'scopes');
     assert.deepStrictEqual(dupes(dom.tables), [], `duplicate ids: ${ids(dom.tables).join(', ')}`);
     assert.strictEqual(staticTbl.id, 'analytics-tbl-scopes-0', 'an already-assigned id must not change');
+    // Same sequence the browser shows on the Scopes tab after the fix.
+    assert.deepStrictEqual(ids(dom.tables),
+      ['analytics-tbl-scopes-1', 'analytics-tbl-scopes-0', 'analytics-tbl-scopes-2', 'analytics-tbl-scopes-3']);
     for (const t of dom.tables) {
       assert.match(t.id, /^analytics-tbl-scopes-\d+$/);
       assert.ok(dom.resizeCalls.some(c => c.selector === '#' + t.id), `makeColumnsResizable not called for #${t.id}`);
