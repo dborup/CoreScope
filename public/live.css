@@ -1054,8 +1054,8 @@ input.live-node-filter-input:focus {
   margin-left: auto;
 }
 .vcr-mode-live { color: var(--status-green-text); }
-.vcr-mode-paused { color: var(--status-yellow); background: rgba(251,191,36,0.1); }
-.vcr-mode-replay { color: var(--accent); background: rgba(96,165,250,0.1); }
+.vcr-mode-paused { color: var(--warning); background: rgba(251,191,36,0.1); }
+.vcr-mode-replay { color: var(--link-color); background: rgba(96,165,250,0.1); }
 
 .vcr-live-dot {
   display: inline-block;
