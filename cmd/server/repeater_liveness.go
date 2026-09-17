@@ -170,10 +170,13 @@ func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
 	return entries
 }
 
-// forEachRelayCandidate visits key's candidate transmissions, newest index
-// entries first, possibly more than once across buckets (callers deduplicate
-// by ID). Order matters for scope provenance: the full-key path-hop bucket
-// comes first and is the only one with fromPrefix=false.
+// forEachRelayCandidate visits key's candidate transmissions, possibly more
+// than once across buckets (callers deduplicate by ID). Within a bucket it
+// walks from the most recently indexed entry backwards; index order is not
+// chronological, so callers must not stop early based on timestamps. Bucket
+// order matters for scope provenance: the full-key path-hop bucket comes
+// first and is the only one with fromPrefix=false. Reads live index slices:
+// caller holds s.mu.
 //   - byPathHop[key]: raw full-key hops and live resolved-path indexing.
 //   - byNode[key]: decoded and resolved-path membership from every
 //     observation. Needed after a restart, where buildPathHopIndex re-indexes

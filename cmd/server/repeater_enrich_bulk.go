@@ -52,10 +52,10 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 	return cached
 }
 
-// computeRepeaterRelayInfoMap walks the relay candidate indexes once under a
-// single RLock, pre-parses every FirstSeen timestamp and relay identity once
-// (not once-per-pubkey-bucket), and emits one RepeaterRelayInfo per hop key
-// and per confirmed relay key.
+// computeRepeaterRelayInfoMap walks the relay candidate indexes under a single
+// RLock, pre-parses every FirstSeen timestamp and relay identity once (not
+// once-per-pubkey-bucket), and emits one RepeaterRelayInfo per hop key and per
+// confirmed relay key. Only aggregation runs after the lock is released.
 //
 // Time-complexity invariant: O(unique candidate tx + observation-path hops +
 // total candidate-bucket entries): each tx's identity-safe keys and timestamp
@@ -65,30 +65,15 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 // avoiding collided-prefix fanout. Memory: O(unique tx + keys + distinct hop
 // tokens), bounded by store eviction.
 func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[string]RepeaterRelayInfo {
+	// Everything that reads store data happens under the read lock: ingest
+	// appends to and eviction compacts byPathHop/byNode slices in place, so a
+	// copied slice header is not a stable snapshot, and StoreTx observations
+	// are mutable. The unlocked phase reads only values owned by this call.
 	s.mu.RLock()
 	pm := s.relayPrefixMapLocked()
 
-	// Snapshot the slices (header copy) so we can release the lock before
-	// the per-key pass. Slice headers point at the live underlying
-	// arrays but those are append-only-by-id; the worst-case race here is
-	// that ingest grows a slice we already snapshotted (we miss the new
-	// tail), which is acceptable for a 15s-TTL status read.
-	snap := make(map[string][]*StoreTx, len(s.byPathHop))
-	for k, list := range s.byPathHop {
-		snap[k] = list
-	}
-	// byNode candidates only matter for keys a raw hop can confirm: known
-	// relay prefixes/keys or exact 64-hex identities.
-	nodeSnap := make(map[string][]*StoreTx)
-	for k, list := range s.byNode {
-		if len(k) == 64 || (pm != nil && len(pm.m[k]) > 0) {
-			nodeSnap[k] = list
-		}
-	}
-
-	// Pre-compute, per transmission and under the lock (observations are
-	// mutable), its timestamp and the identity-safe relay keys confirmed by
-	// its raw observed flood paths. The unlocked pass below uses only this.
+	// Per transmission: its relay entry values and the identity-safe relay
+	// keys confirmed by its raw observed flood paths, computed once.
 	type bulkRelayTx struct {
 		entry relayEntry
 		keys  []string
@@ -129,16 +114,19 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 			txs = append(txs, b)
 		}
 	}
-	for _, list := range snap {
+	for _, list := range s.byPathHop {
 		add(list)
 	}
-	for _, list := range nodeSnap {
-		add(list)
+	// byNode candidates only matter for keys a raw hop can confirm: known
+	// relay prefixes/keys or exact 64-hex identities.
+	for k, list := range s.byNode {
+		if len(k) == 64 || (pm != nil && len(pm.m[k]) > 0) {
+			add(list)
+		}
 	}
-	s.mu.RUnlock()
 
-	keys := make(map[string]struct{}, len(snap)+len(confirmed))
-	for key := range snap {
+	keys := make(map[string]struct{}, len(s.byPathHop)+len(confirmed))
+	for key := range s.byPathHop {
 		keys[key] = struct{}{}
 		// Unique raw-only prefixes need a full-key result too.
 		if resolved := resolve.key(key); resolved != "" {
@@ -150,31 +138,59 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 	for key := range confirmed {
 		keys[key] = struct{}{}
 	}
-	out := make(map[string]RepeaterRelayInfo, len(keys))
-	var entries []relayEntry
+
+	// Per key: indexes into txs of its deduplicated, confirmed candidates.
+	// A candidate missing from index cannot confirm key (every candidate list
+	// was indexed above under the same lock); it is skipped, never mapped to
+	// another transmission.
+	type relayRef struct {
+		tx         int32
+		fromPrefix bool
+	}
+	type keyRefs struct {
+		key        string
+		start, end int
+	}
+	var refs []relayRef
+	perKey := make([]keyRefs, 0, len(keys))
 	gen := 0
 	for key := range keys {
 		gen++
-		entries = entries[:0]
+		start := len(refs)
 		m := newRelayKeyMatcher(key, pm)
 		if m.possible() {
-			forEachRelayCandidate(snap, nodeSnap, m, func(tx *StoreTx, fromPrefix bool) {
-				b := &txs[index[tx.ID]]
+			forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, fromPrefix bool) {
+				i, ok := index[tx.ID]
+				if !ok {
+					return
+				}
+				b := &txs[i]
 				if b.gen == gen {
 					return
 				}
 				b.gen = gen
 				for _, have := range b.keys {
 					if have == key {
-						e := b.entry
-						e.fromPrefix = fromPrefix
-						entries = append(entries, e)
+						refs = append(refs, relayRef{tx: int32(i), fromPrefix: fromPrefix})
 						return
 					}
 				}
 			})
 		}
-		out[key] = computeRelayInfoFromEntries(entries, windowHours)
+		perKey = append(perKey, keyRefs{key: key, start: start, end: len(refs)})
+	}
+	s.mu.RUnlock()
+
+	out := make(map[string]RepeaterRelayInfo, len(perKey))
+	var entries []relayEntry
+	for _, k := range perKey {
+		entries = entries[:0]
+		for _, ref := range refs[k.start:k.end] {
+			e := txs[ref.tx].entry
+			e.fromPrefix = ref.fromPrefix
+			entries = append(entries, e)
+		}
+		out[k.key] = computeRelayInfoFromEntries(entries, windowHours)
 	}
 	return out
 }
