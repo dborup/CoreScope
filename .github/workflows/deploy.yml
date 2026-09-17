@@ -251,6 +251,7 @@ jobs:
     name: "🎭 Playwright E2E Tests"
     needs: [go-test]
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     defaults:
       run:
         shell: bash
