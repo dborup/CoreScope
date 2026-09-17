@@ -82,6 +82,7 @@ const server = http.createServer((req, res) => {
       await body.locator('tr').filter({ hasText: 'Last Heard (advert)' }).waitFor();
       const text = await body.innerText();
       assert.match(text, fixture.active ? /Active/ : /Stale/, fixture.name + ': full detail status'); checks++;
+      assert.doesNotMatch(text, fixture.active ? /Stale/ : /Active/, fixture.name + ': no contradictory full detail status'); checks++;
       assert.ok(!text.includes('alive (idle)'), fixture.name + ': no unsupported alive claim'); checks++;
       const advertRow = body.locator('tr').filter({ hasText: 'Last Heard (advert)' });
       assert.match(await advertRow.innerText(), fixture.advert ? (fixture.active ? /\d+m ago/ : /4d ago/) : /—/); checks++;
@@ -90,7 +91,9 @@ const server = http.createServer((req, res) => {
       await page.locator('tr[data-key="' + fixture.key + '"]').click();
       const pane = page.locator('#nodesRight');
       await pane.locator('dt').filter({ hasText: 'Last Heard (advert)' }).waitFor();
-      assert.match(await pane.innerText(), fixture.active ? /Active/ : /Stale/, fixture.name + ': sidepane status'); checks++;
+      const paneText = await pane.innerText();
+      assert.match(paneText, fixture.active ? /Active/ : /Stale/, fixture.name + ': sidepane status'); checks++;
+      assert.doesNotMatch(paneText, fixture.active ? /Stale/ : /Active/, fixture.name + ': no contradictory sidepane status'); checks++;
       const advertValue = pane.locator('dt').filter({ hasText: 'Last Heard (advert)' }).locator('xpath=following-sibling::dd[1]');
       assert.match(await advertValue.innerText(), fixture.advert ? (fixture.active ? /\d+m ago/ : /4d ago/) : /—/); checks++;
       if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'node-liveness-' + fixture.key.slice(0, 2) + '.png') });
