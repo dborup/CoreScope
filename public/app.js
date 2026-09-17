@@ -200,7 +200,13 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     }
   })();
   _inflight.set(path, promise);
-  promise.finally(() => _inflight.delete(path));
+  // `.finally()` returns its own derived promise that mirrors `promise`'s
+  // outcome; discarding it uncaught leaves the real caller's rejection
+  // (delivered via the returned `promise` below, unaffected by this)
+  // duplicated as a second, unobserved rejection on this derived one.
+  // The `.catch()` here only silences that duplicate -- it does not
+  // touch `promise` itself or its resolution to callers.
+  promise.finally(() => _inflight.delete(path)).catch(() => {});
   return promise;
 }
 
