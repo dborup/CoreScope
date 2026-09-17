@@ -92,11 +92,12 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 			p := relayEntry{t: t, valid: ok}
 			if txHasObservedFloodPath(tx) {
 				p.confirmedKeys = make(map[string]struct{})
-				for _, token := range txGetParsedPath(tx) {
+				forEachObservedRelayHop(tx, func(token string) bool {
 					if key := confirmedRelayKey(token, pm); key != "" {
 						p.confirmedKeys[key] = struct{}{}
 					}
-				}
+					return true
+				})
 			}
 			parseCache[tx.ID] = p
 		}

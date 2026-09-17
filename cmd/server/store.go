@@ -9360,6 +9360,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				}
 			}
 		}
+		s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard)
 
 		observerRows := make([]map[string]interface{}, 0)
 		for id, o := range observerStats {
@@ -9489,6 +9490,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			}
 		}
 	}
+	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard)
 
 	observerRows := make([]map[string]interface{}, 0)
 	// Issue #1290: surface listener/repeater hint on node detail by

@@ -149,14 +149,35 @@ func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
 }
 
 func collectConfirmedRelayEntries(index map[string][]*StoreTx, key string, pm *prefixMap, parsed map[int]relayEntry) []relayEntry {
+	// Capacity hint from the full-key bucket; prefix-only matches may grow it.
+	entries := make([]relayEntry, 0, len(index[key]))
+	forEachConfirmedRelayTx(index, key, pm, parsed, func(tx *StoreTx, fromPrefix bool) {
+		pt := -1
+		if tx.PayloadType != nil {
+			pt = *tx.PayloadType
+		}
+		rt := -1
+		if tx.RouteType != nil {
+			rt = *tx.RouteType
+		}
+		e := relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix}
+		if p, ok := parsed[tx.ID]; ok {
+			e.parsed, e.t, e.valid = true, p.t, p.valid
+		}
+		entries = append(entries, e)
+	})
+	return entries
+}
+
+// forEachConfirmedRelayTx visits each transmission in key's full-key bucket and
+// unique 1/2/3-byte raw-prefix buckets that carries identity-safe observed relay
+// evidence for key. It is the single relay-evidence source for relay status and
+// node health. Visits once per transmission ID across buckets, observations and
+// hops. fromPrefix is true only for transmissions not in the full-key bucket.
+func forEachConfirmedRelayTx(index map[string][]*StoreTx, key string, pm *prefixMap, parsed map[int]relayEntry, visit func(tx *StoreTx, fromPrefix bool)) {
 	txList := index[key]
 	tokens := reliableTokens(key, pm)
-
-	// Capacity hint from the full-key bucket; prefix-only matches may grow it.
-	// Dedup by transmission ID, including multiple supported wire hash sizes.
-	hint := len(txList)
-	entries := make([]relayEntry, 0, hint)
-	seen := make(map[int]bool, hint)
+	seen := make(map[int]bool, len(txList))
 	collect := func(list []*StoreTx, fromPrefix bool) {
 		for _, tx := range list {
 			if tx == nil || seen[tx.ID] {
@@ -170,19 +191,7 @@ func collectConfirmedRelayEntries(index map[string][]*StoreTx, key string, pm *p
 				continue
 			}
 			seen[tx.ID] = true
-			pt := -1
-			if tx.PayloadType != nil {
-				pt = *tx.PayloadType
-			}
-			rt := -1
-			if tx.RouteType != nil {
-				rt = *tx.RouteType
-			}
-			e := relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix}
-			if p, ok := parsed[tx.ID]; ok {
-				e.parsed, e.t, e.valid = true, p.t, p.valid
-			}
-			entries = append(entries, e)
+			visit(tx, fromPrefix)
 		}
 	}
 	collect(txList, false)
@@ -192,7 +201,6 @@ func collectConfirmedRelayEntries(index map[string][]*StoreTx, key string, pm *p
 			collect(index[prefix], true)
 		}
 	}
-	return entries
 }
 
 // computeRelayInfoFromEntries derives RepeaterRelayInfo from pre-snapshotted
