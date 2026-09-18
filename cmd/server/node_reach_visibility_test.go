@@ -26,6 +26,8 @@ type visFixture struct {
 	n, hidName, blNode, blObs, hidObsName, visible string
 	// observer-only pubkeys (lower-case; stored upper-case in observers.id)
 	o1, o2Hidden, o3Blacklisted string
+	// hidden identities outside the plain nodes/observers tables
+	inactiveHidden, mixedCaseObs string
 }
 
 // newReachVisibilityDB builds a Reach DB where target N has, in 30 days:
@@ -38,12 +40,15 @@ type visFixture struct {
 //	O1 "Obs one"        — observer-only, visible       (direct observer)
 //	O2 "🚫 hidden obs"  — observer-only, hidden name   (direct observer)
 //	O3 "Obs three"      — observer-only, observer-blacklisted (direct observer)
+//	G  "🚫 gone quiet"  — only in inactive_nodes, hidden name (advert heard by N)
+//	M  "Mixed case"     — observer-only, visible, id stored in mixed case (direct observer)
 func newReachVisibilityDB(t *testing.T) *visFixture {
 	t.Helper()
 	f := &visFixture{
 		n: pk64("01fa"), hidName: pk64("aabb"), blNode: pk64("ccdd"), blObs: pk64("ee11"),
 		hidObsName: pk64("dd22"), visible: pk64("e5e5"),
 		o1: pk64("0b01"), o2Hidden: pk64("0b02"), o3Blacklisted: pk64("0b03"),
+		inactiveHidden: pk64("7777"), mixedCaseObs: pk64("0b0abc"),
 	}
 	conn, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -59,6 +64,7 @@ func newReachVisibilityDB(t *testing.T) *visFixture {
 		`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, from_pubkey TEXT, payload_type INTEGER)`,
 		`CREATE TABLE observations (id INTEGER PRIMARY KEY, transmission_id INTEGER, observer_idx INTEGER, snr REAL, path_json TEXT, timestamp INTEGER)`,
 		`CREATE TABLE neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`,
+		`CREATE TABLE inactive_nodes (public_key TEXT PRIMARY KEY, name TEXT, role TEXT, lat REAL, lon REAL, last_seen TEXT, first_seen TEXT, advert_count INTEGER DEFAULT 0)`,
 	}
 	for _, s := range stmts {
 		if _, err := conn.Exec(s); err != nil {
@@ -77,6 +83,7 @@ func newReachVisibilityDB(t *testing.T) *visFixture {
 	for _, o := range []struct{ id, name string }{
 		{up(f.o1), "Obs one"}, {up(f.o2Hidden), "🚫 hidden obs"}, {up(f.o3Blacklisted), "Obs three"},
 		{up(f.hidObsName), "🚫 obs D"}, {up(pk64("0b05")), "Relay watcher"},
+		{"0B0aBC" + f.mixedCaseObs[6:], "Mixed case"}, // rowid 6, raw mixed-case id
 	} {
 		if _, err := conn.Exec(`INSERT INTO observers (id, name) VALUES (?, ?)`, o.id, o.name); err != nil {
 			t.Fatal(err)
@@ -93,6 +100,7 @@ func newReachVisibilityDB(t *testing.T) *visFixture {
 		{`["01FA"]`, 1},               // O1 heard us directly
 		{`["01FA"]`, 2},               // O2 heard us directly
 		{`["01FA"]`, 3},               // O3 heard us directly
+		{`["01FA"]`, 6},               // M (mixed-case id) heard us directly
 	}
 	for i, p := range paths {
 		if _, err := conn.Exec(`INSERT INTO transmissions (id, from_pubkey, payload_type) VALUES (?, '', 5)`, i+1); err != nil {
@@ -101,6 +109,17 @@ func newReachVisibilityDB(t *testing.T) *visFixture {
 		if _, err := conn.Exec(`INSERT INTO observations (id, transmission_id, observer_idx, snr, path_json, timestamp) VALUES (?, ?, ?, -7.0, ?, ?)`, i+1, i+1, p.obs, p.path, now); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// G aged out of `nodes` into inactive_nodes; its advert, relayed first by
+	// N, is still inside the 30-day window ("we hear G").
+	if _, err := conn.Exec(`INSERT INTO inactive_nodes (public_key, name, role) VALUES (?, '🚫 gone quiet', 'repeater')`, f.inactiveHidden); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(`INSERT INTO transmissions (id, from_pubkey, payload_type) VALUES (100, ?, ?)`, f.inactiveHidden, PayloadADVERT); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(`INSERT INTO observations (id, transmission_id, observer_idx, snr, path_json, timestamp) VALUES (100, 100, 5, -7.0, '["01FA"]', ?)`, now-10*86400); err != nil {
+		t.Fatal(err)
 	}
 	f.db = &DB{conn: conn}
 	f.db.isV3Flag.forceTrue()
@@ -184,17 +203,18 @@ func TestNodeReach_HiddenNeighboursFiltered(t *testing.T) {
 		t.Fatalf("status=%d body=%s", res.StatusCode, body)
 	}
 	watcher := pk64("0b05")
-	if got, want := linkSet(resp), strings.Join(sortedPrefixes(f.visible, f.o1, watcher), ","); got != want {
+	if got, want := linkSet(resp), strings.Join(sortedPrefixes(f.visible, f.o1, watcher, f.mixedCaseObs), ","); got != want {
 		t.Fatalf("links=%s want %s", got, want)
 	}
-	if got, want := obsSet(resp), strings.Join(sortedPrefixes(f.o1, watcher), ","); got != want {
+	if got, want := obsSet(resp), strings.Join(sortedPrefixes(f.o1, watcher, f.mixedCaseObs), ","); got != want {
 		t.Fatalf("direct_observers=%s want %s", got, want)
 	}
-	if resp.Importance.BidirectionalLinks != 1 || resp.Importance.DirectObservers != 2 {
-		t.Fatalf("counts=%+v want 1 two-way (Echo; Bravo removed) and 2 direct observers", resp.Importance)
+	if resp.Importance.BidirectionalLinks != 1 || resp.Importance.DirectObservers != 3 {
+		t.Fatalf("counts=%+v want 1 two-way (Echo; Bravo removed) and 3 direct observers", resp.Importance)
 	}
 	for _, leak := range []string{f.hidName, f.blNode, f.blObs, f.hidObsName, f.o2Hidden, f.o3Blacklisted,
-		"private A", "Bravo", "Charlie", "Delta", "hidden obs", "Obs three", "obs D"} {
+		f.inactiveHidden, "private A", "Bravo", "Charlie", "Delta", "hidden obs", "Obs three",
+		"obs D", "gone quiet"} {
 		if strings.Contains(strings.ToLower(body), strings.ToLower(leak)) {
 			t.Errorf("body leaks %q", leak)
 		}
@@ -250,6 +270,15 @@ func TestNodeReach_WarmCacheHonoursVisibilityChanges(t *testing.T) {
 		t.Fatalf("renamed-hidden observer still served: links=%s obs=%s", linkSet(resp), obsSet(resp))
 	}
 	exec(`UPDATE observers SET name = 'Obs one' WHERE id = ?`, strings.ToUpper(f.o1))
+
+	// Observer whose id is stored in mixed case, renamed into a hidden prefix.
+	exec(`UPDATE observers SET name = '🚫 mixed now hidden' WHERE lower(id) = ?`, f.mixedCaseObs)
+	if _, resp, _ := f.get(t, f.n); has(resp, f.mixedCaseObs) {
+		t.Fatalf("renamed-hidden mixed-case observer still served: %s", linkSet(resp))
+	}
+	if res, _, _ := f.get(t, f.mixedCaseObs); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("renamed-hidden mixed-case observer's own reach: %d", res.StatusCode)
+	}
 
 	// Hidden-prefix config change (does not purge the cache).
 	f.cfg.SetHiddenNamePrefixes([]string{"🚫", "Obs one"})
@@ -341,5 +370,49 @@ func TestIdentityNames_LargeBatch(t *testing.T) {
 	sort.Strings(d)
 	if fmt.Sprint(d) != "[Delta 🚫 obs D]" {
 		t.Fatalf("node + observer names for D = %v", d)
+	}
+}
+
+// A neighbour hidden when the report was computed stays hidden after its row
+// disappears from the DB: the name recorded in the cached report still counts.
+func TestNodeReach_RecordedNameStillHidesAfterRowDeleted(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	if _, resp, _ := f.get(t, f.n); strings.Contains(linkSet(resp), f.hidName[:4]) {
+		t.Fatalf("warm-up already leaks %s", f.hidName[:4])
+	}
+	if _, err := f.db.conn.Exec(`DELETE FROM nodes WHERE public_key = ?`, f.hidName); err != nil {
+		t.Fatal(err)
+	}
+	if _, resp, body := f.get(t, f.n); strings.Contains(linkSet(resp), f.hidName[:4]) || strings.Contains(body, "private A") {
+		t.Fatalf("deleted hidden neighbour served from the cache: %s", linkSet(resp))
+	}
+}
+
+// A whitespace-only prefix is honoured by IsNameHidden, so it must also turn
+// on the live name lookup.
+func TestNodeReach_WhitespacePrefixStillLooksUpNames(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	f.get(t, f.n) // warm
+	f.cfg.SetHiddenNamePrefixes([]string{" "})
+	if _, err := f.db.conn.Exec(`UPDATE nodes SET name = ' sneaky' WHERE public_key = ?`, f.visible); err != nil {
+		t.Fatal(err)
+	}
+	if _, resp, _ := f.get(t, f.n); strings.Contains(linkSet(resp), f.visible[:4]) {
+		t.Fatalf("whitespace-prefixed rename not hidden: %s", linkSet(resp))
+	}
+	if !f.cfg.HasHiddenNamePrefixes() || (&Config{HiddenNamePrefixes: []string{""}}).HasHiddenNamePrefixes() {
+		t.Fatalf("HasHiddenNamePrefixes must mirror IsNameHidden: only empty prefixes are inert")
+	}
+}
+
+// Minimal DBs without inactive_nodes still work (the table is probed).
+func TestNodeReach_NoInactiveNodesTable(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	if _, err := f.db.conn.Exec(`DROP TABLE inactive_nodes`); err != nil {
+		t.Fatal(err)
+	}
+	res, resp, body := f.get(t, f.n)
+	if res.StatusCode != http.StatusOK || strings.Contains(body, "private A") || !strings.Contains(linkSet(resp), f.visible[:4]) {
+		t.Fatalf("status=%d links=%s", res.StatusCode, linkSet(resp))
 	}
 }

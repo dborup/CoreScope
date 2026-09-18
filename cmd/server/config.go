@@ -957,6 +957,35 @@ func (c *Config) IsNameHidden(name string) bool {
 	return false
 }
 
+// HasHiddenNamePrefixes reports whether IsNameHidden can return true for some
+// name — i.e. at least one non-empty prefix is active. It uses exactly
+// IsNameHidden's predicate (a whitespace-only prefix counts), so callers can
+// skip name lookups safely when it is false.
+func (c *Config) HasHiddenNamePrefixes() bool {
+	if c == nil {
+		return false
+	}
+	pp := c.hiddenPrefixesPtr.Load()
+	if pp == nil {
+		built := make([]string, len(c.HiddenNamePrefixes))
+		copy(built, c.HiddenNamePrefixes)
+		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
+			pp = &built
+		} else {
+			pp = c.hiddenPrefixesPtr.Load()
+		}
+	}
+	if pp == nil {
+		return false
+	}
+	for _, p := range *pp {
+		if p != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // ActiveHiddenNamePrefixes returns a copy of the hide prefixes IsNameHidden
 // is actually enforcing right now, with empty/whitespace entries dropped —
 // the same entries IsNameHidden skips. Reads through the same atomic pointer

@@ -725,12 +725,15 @@ reliably identified in paths; `links`/`direct_observers` will be empty.
 ### Visibility
 
 An identity is **hidden** when its pubkey is in `nodeBlacklist` or
-`observerBlacklist`, or when its node name **or** observer name starts with a
-`hiddenNamePrefixes` entry. A hidden target returns `404` (same body as an
-unknown node). Hidden identities are omitted from `links` and
-`direct_observers`, and `bidirectional_links` / `direct_observers` count only
-what is listed. Names are read live on every request — including cached
-reports — so a blacklist, prefix or rename change applies on the next request.
+`observerBlacklist`, or when any of its names — node, inactive node or
+observer — starts with a `hiddenNamePrefixes` entry. A hidden target returns
+`404` (same body as an unknown node). Hidden identities are omitted from
+`links` and `direct_observers`, and `bidirectional_links` / `direct_observers`
+count only what is listed. Names are read live on every request — including
+cached reports — so **hiding** (a blacklist or prefix change, or a rename into
+a hidden prefix) applies on the next request. Un-hiding a neighbour by
+renaming it can take up to the 5-minute cache TTL, because the name recorded
+when the report was computed still counts.
 `neighbor_degree`, `degree_rank` and `nodes_with_edges` are counts over the
 whole neighbour graph and are not changed by this filtering.
 

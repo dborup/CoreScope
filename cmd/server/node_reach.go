@@ -302,6 +302,10 @@ type reachState struct {
 
 	degreeMu   sync.Mutex
 	degreeSnap *degreeSnapshot
+
+	// inactiveNodesTable caches a positive inactive_nodes probe for the
+	// visibility name lookup (identity_visibility.go).
+	inactiveNodesTable atomic.Bool
 }
 
 // reachCacheGet returns the cached entry for key. Its raw slice and resp
