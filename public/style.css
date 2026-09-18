@@ -2360,7 +2360,7 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
    answer. data-priority="high" links are pinned to the left via
    order:-1 and are kept inline as long as possible (low-priority links
    overflow first). Spacing/type still use #1054 fluid clamp() tokens. */
-@media (min-width: 769px) {
+@media (min-width: 768px) {
   .nav-links { display: flex !important; flex-direction: row; gap: var(--space-xs); }
   .nav-more-wrap { display: flex; align-items: center; }
   .hamburger { display: none; }
