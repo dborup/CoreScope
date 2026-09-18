@@ -4490,6 +4490,69 @@ console.log('\n=== nodes.js: renderNodeTimestampHtml / renderNodeTimestampText =
   });
 }
 
+console.log('\n=== nodes.js: own advert freshness ===');
+{
+  test('advert timestamp ignores recent arbitrary health traffic and relay-touched last_seen', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const stale = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const n = { public_key: key, role: 'repeater', last_seen: stale, last_heard: stale };
+    const advert = { payload_type: 4, timestamp: stale, decoded_json: JSON.stringify({ pubKey: key }) };
+    const lastAdvert = ctx.window._nodesGetLastAdvert(n, { lastHeard: recent, lastAdvert: stale }, [advert]);
+    assert.strictEqual(lastAdvert, stale);
+    n._lastHeard = lastAdvert;
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(n).status, 'stale');
+  });
+  test('legacy API fallback uses only exact-owned adverts, never ACKs or another origin', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const old = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const adverts = [
+      { payload_type: 4, timestamp: old, decoded_json: JSON.stringify({ pubKey: key.toUpperCase() }) },
+      { payload_type: 4, timestamp: recent, decoded_json: JSON.stringify({ pubKey: 'bb' + '22'.repeat(31) }) },
+      { payload_type: 3, timestamp: recent, decoded_json: JSON.stringify({ pubKey: key }) },
+      { payload_type: 4, timestamp: recent, decoded_json: JSON.stringify({ pubKey: key, signatureValid: false }) },
+    ];
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastHeard: recent }, adverts), old);
+  });
+  test('explicit unknown advert is null, even if legacy packet evidence or last_seen is fresh', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const recent = new Date().toISOString();
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastAdvert: null, lastHeard: recent }, []), null);
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastHeard: recent }, []), null);
+  });
+  test('safe health activity outranks polluted directory timestamps without mutating the node', () => {
+    const ctx = makeNodesSandbox();
+    const old = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const node = { role: 'repeater', last_seen: recent, last_heard: recent, _liveSeen: Date.now() };
+    const safe = ctx.window._nodesWithHealthActivity(node, { lastAdvert: old, lastHeard: old }, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'stale');
+    assert.strictEqual(node.last_seen, recent);
+    const unknown = ctx.window._nodesWithHealthActivity(node, { lastAdvert: null, lastHeard: null }, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(unknown).status, 'stale');
+  });
+  test('relay-only safe general activity is active but the advert timestamp remains unknown', () => {
+    const ctx = makeNodesSandbox();
+    const stats = { lastAdvert: null, lastHeard: new Date().toISOString() };
+    const node = { role: 'repeater' };
+    const safe = ctx.window._nodesWithHealthActivity(node, stats, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'active');
+    assert.strictEqual(ctx.window._nodesGetLastAdvert(node, stats, []), null);
+  });
+  test('absent or historical relays do not claim the node is alive', () => {
+    const ctx = makeNodesSandbox();
+    for (const node of [{}, { last_relayed: new Date(Date.now() - 96 * 3600000).toISOString(), relay_active: false }]) {
+      const html = ctx.window._nodesRenderRelayActivity(node);
+      assert.ok(html.includes('no recent confirmed relay'));
+      assert.ok(!html.includes('alive'));
+    }
+  });
+}
+
 // ===== NODES.JS: getStatusInfo edge cases (P0 coverage expansion) =====
 console.log('\n=== nodes.js: getStatusInfo edge cases ===');
 {
