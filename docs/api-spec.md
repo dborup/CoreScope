@@ -722,11 +722,24 @@ to a recent window. Identifies nodes only by **unique 2–3 byte** path prefixes
 `reliable_tokens: []` means the node has no unique 1–3 byte prefix and cannot be
 reliably identified in paths; `links`/`direct_observers` will be empty.
 
+### Visibility
+
+An identity is **hidden** when its pubkey is in `nodeBlacklist` or
+`observerBlacklist`, or when its node name **or** observer name starts with a
+`hiddenNamePrefixes` entry. A hidden target returns `404` (same body as an
+unknown node). Hidden identities are omitted from `links` and
+`direct_observers`, and `bidirectional_links` / `direct_observers` count only
+what is listed. Names are read live on every request — including cached
+reports — so a blacklist, prefix or rename change applies on the next request.
+`neighbor_degree`, `degree_rank` and `nodes_with_edges` are counts over the
+whole neighbour graph and are not changed by this filtering.
+
 ### Caching & limits
 
 - **Response cache:** computed responses are cached for **5 minutes** per
-  `pubkey|days`. Polling faster than that returns an identical body — clients
-  should not expect sub-5-minute freshness.
+  `pubkey|days`. Polling faster than that returns the same report — clients
+  should not expect sub-5-minute freshness. Visibility (above) is applied on
+  every request, cached or not.
 - **Scan cap:** the windowed path scan is hard-capped at **200,000** rows. A node
   with more matching observations in the window is truncated (counts become a
   representative sample rather than exhaustive).
@@ -741,10 +754,19 @@ Returned when `:pubkey` is not a 64-char hex string.
 
 ### Response `404`
 
-Returned when the node is unknown or blacklisted.
+Returned when the node is unknown or hidden (see Visibility).
 
 ```json
 { "error": "Not found" }
+```
+
+### Response `500`
+
+Returned when the scan fails, or when the live name lookup for visibility
+fails — the endpoint fails closed rather than serving unfiltered data.
+
+```json
+{ "error": "reach computation failed" }
 ```
 
 ---
