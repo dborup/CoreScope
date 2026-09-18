@@ -1109,6 +1109,10 @@ img.brand-logo {
   -webkit-line-clamp: 1;
   line-clamp: 1;
   overflow: hidden;
+  /* Give the clip box room for focus rings (2px outline + 2px offset) and
+   * .chan-tag padding without changing the row height. */
+  padding-block: 4px;
+  margin-block: -4px;
 }
 /* Direct Neighbors' Configured Scope cell (observer-detail.js) can hold a
  * long comma-joined scope list (e.g. a #eu/#dk/#dk-sjl/... catch-all
@@ -2487,7 +2491,8 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   /* #1770: packets-view virtual-scroller assumes constant row height
      (VSCROLL_ROW_HEIGHT). The base rule at ~L1097 sets
      `.data-table td.col-details { white-space: normal; word-break: break-word }`
-     which lets the "Details" cell wrap on narrow viewports, producing
+     (since #1122 the inner clip is line-clamped to one line at every width,
+     see the rule right after it) which let the "Details" cell wrap on narrow viewports, producing
      variable row heights → visible jitter when scrolling past ~900px on
      iOS. Quick-fix (S path): clamp the cell to a single line on mobile.
      The proper L-path fix (per-row measurement) tracks separately.

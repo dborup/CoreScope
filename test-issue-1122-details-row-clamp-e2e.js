@@ -74,13 +74,17 @@ function measureRows() {
     const contentW = td.clientWidth - parseFloat(tdcs.paddingLeft) - parseFloat(tdcs.paddingRight);
     const textW = ctx.measureText(clip.textContent.replace(/\s+/g, ' ').trim()).width;
     const lineH = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
-    // Line boxes the clip actually occupies (works for inline and block clips).
-    const lineTops = new Set([...clip.getClientRects()].map(q => Math.round(q.top)));
+    // Visible height of the summary: the clip's content box (bounding box minus
+    // its vertical padding). A wrapped summary makes this a multiple of the
+    // line height; a one-line clamp keeps it at ~1 line. (getClientRects() is
+    // not used: a block-level clip always reports a single rect.)
+    const clipBox = clip.getBoundingClientRect();
+    const clipH = clipBox.height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
     return {
       hash: r.getAttribute('data-hash'),
       rowH: r.getBoundingClientRect().height,
-      clipH: clip.getBoundingClientRect().height,
-      lineH, lines: lineTops.size, textW: Math.round(textW), contentW: Math.round(contentW),
+      clipH,
+      lineH, textW: Math.round(textW), contentW: Math.round(contentW),
       overflowing: textW > contentW + 1,
       text: clip.textContent.trim().slice(0, 60),
     };
@@ -117,10 +121,12 @@ function measureRows() {
         JSON.stringify(rows.slice(0, 3)));
     });
 
-    await step(`[${vp.name}] overflowing Details summaries stay on one line`, async () => {
-      const bad = rows.filter(r => r.overflowing && (r.lines > 1 || r.clipH > r.lineH * 1.5));
+    await step(`[${vp.name}] Details summaries stay on one line`, async () => {
+      // Every row, not just the overflowing ones; the overflowing ones are the
+      // rows that would wrap without the clamp (proven present above).
+      const bad = rows.filter(r => r.clipH > r.lineH * 1.5);
       assert(bad.length === 0,
-        `${bad.length} Details summaries wrap: ` + JSON.stringify(bad.slice(0, 4)));
+        `${bad.length} Details summaries wrap (${bad.filter(r => r.overflowing).length} overflowing): ` + JSON.stringify(bad.slice(0, 4)));
     });
 
     await step(`[${vp.name}] every packet row stays < 60px`, async () => {
@@ -163,7 +169,8 @@ function measureRows() {
       assert(target, 'no overflowing channel-message row with decoded text found');
       const row = page.locator(`#pktBody tr[data-hash="${target.hash}"]`).first();
       await row.scrollIntoViewIfNeeded();
-      await row.click({ position: { x: 60, y: 10 } });
+      // Click a plain data cell (not the expand column, not a link).
+      await row.locator('td.col-time').click();
       // The full text must be VISIBLE in a detail surface (never the table):
       // desktop split pane, SlideOver (<=1023px) or the small-mobile bottom
       // sheet (which shows it in its header summary, #1471). innerText only
