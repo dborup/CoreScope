@@ -8,17 +8,24 @@
 'use strict';
 (function () {
   var PAGE_SIZE = 50;           // mirrors the server default (reachRankDefaultLimit)
-  var MAX_QUERY = 64;           // mirrors reachRankMaxQueryLen
+  var MAX_QUERY = 64;           // mirrors reachRankMaxQueryLen (code points, like the server's runes)
+  var MAX_PAGE = 100000;        // keeps offset a safe integer; past-the-end pages snap back
   var SEARCH_DEBOUNCE_MS = 250;
   var loadGen = 0;              // bumped per fetch + on destroy; drops stale responses
   var state = null;             // { q, page } while the page is mounted
   var searchTimer = null;
 
+  // clipQuery trims and caps a query at MAX_QUERY code points. Array.from
+  // splits by code point, so an emoji is never cut in half (a lone surrogate
+  // would make encodeURIComponent throw).
+  function clipQuery(q) {
+    return Array.from(String(q || '').trim()).slice(0, MAX_QUERY).join('');
+  }
+
   // parseState reads ?q=&page= (1-based) from the hash query string.
   function parseState(params) {
-    var q = String(params.get('q') || '').trim().slice(0, MAX_QUERY);
     var page = parseInt(params.get('page'), 10);
-    return { q: q, page: isFinite(page) && page > 1 ? page : 1 };
+    return { q: clipQuery(params.get('q')), page: isFinite(page) && page > 1 ? Math.min(page, MAX_PAGE) : 1 };
   }
 
   // Keep search + page in the URL (replaceState: no router re-run, no history
@@ -153,7 +160,7 @@
   }
 
   function setQuery(q) {
-    q = String(q || '').trim().slice(0, MAX_QUERY);
+    q = clipQuery(q);
     if (q === state.q) return;
     state.q = q;
     state.page = 1;
@@ -176,7 +183,7 @@
       if (state.page > 1) { state.page--; syncHash(); fetchPage(); }
     });
     el('rrNext').addEventListener('click', function () {
-      state.page++; syncHash(); fetchPage();
+      if (state.page < MAX_PAGE) { state.page++; syncHash(); fetchPage(); }
     });
   }
 
@@ -197,5 +204,5 @@
   registerPage('reach-rank', { init: init, destroy: destroy });
 
   // Pure helpers, exposed for test-reach-rank.js (vm sandbox).
-  window.ReachRank = { rowHtml: rowHtml, statusText: statusText, snapshotText: snapshotText, parseState: parseState };
+  window.ReachRank = { rowHtml: rowHtml, statusText: statusText, snapshotText: snapshotText, parseState: parseState, clipQuery: clipQuery };
 })();

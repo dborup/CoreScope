@@ -86,15 +86,49 @@ assert.strictEqual(snapshotText('not a date'), 'Snapshot time unknown.');
   assert.strictEqual(s.q.length, 64, 'query capped at the server limit');
   s = parseState(new URLSearchParams(''));
   assert.deepStrictEqual({ q: s.q, page: s.page }, { q: '', page: 1 });
+  s = parseState(new URLSearchParams('page=200000000000000000'));
+  assert.strictEqual(s.page, 100000, 'absurd page clamps so the offset stays a safe integer');
 }
 
-// --- node-reach.js wires the Rank card to the leaderboard -----------------------------
+// --- clipQuery: caps by code point, never splits an emoji -------------------------
 {
+  const { clipQuery } = sandbox.window.ReachRank;
+  const q = clipQuery('a'.repeat(63) + '💥💥');
+  assert.strictEqual(Array.from(q).length, 64, 'capped at 64 code points');
+  assert.ok(q.endsWith('💥'), 'last emoji kept whole');
+  assert.doesNotThrow(() => encodeURIComponent(q), 'no lone surrogate left behind');
+  assert.doesNotThrow(() => encodeURIComponent(parseState(new URLSearchParams('q=' + encodeURIComponent('a'.repeat(63) + '💥x'))).q));
+  assert.strictEqual(clipQuery('  hub  '), 'hub');
+  assert.strictEqual(clipQuery(null), '');
+}
+
+// --- node-reach.js: Rank card states and the leaderboard link --------------------------
+{
+  const reachBox = { window: {}, document: {}, registerPage: function () {} };
+  vm.createContext(reachBox);
+  vm.runInContext(escSrc[0], reachBox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'node-reach.js'), 'utf8'), reachBox);
+  const { rankValue, positionHtml } = reachBox.window.NodeReach;
+
+  assert.strictEqual(rankValue({ rank_status: 'ranked', degree_rank: 3, nodes_with_edges: 106 }), '#3 / 106');
+  assert.strictEqual(rankValue({ rank_status: 'unranked', degree_rank: 0, nodes_with_edges: 106 }), 'Not ranked',
+    'unranked never renders "#0 / N"');
+  assert.strictEqual(rankValue({ rank_status: 'unavailable' }), '—');
+
+  const ranked = positionHtml({ rank_status: 'ranked', degree_rank: 2, nodes_with_edges: 106, neighbor_degree: 5 });
+  assert.ok(ranked.includes('href="#/reach-rank"') && ranked.includes('View leaderboard'), 'Rank card links to the leaderboard');
+  assert.ok(ranked.includes('>#2 / 106<') && ranked.includes('>5<'), 'rank and neighbours rendered: ' + ranked);
+  const down = positionHtml({ rank_status: 'unavailable', degree_rank: 0, nodes_with_edges: 0, neighbor_degree: 0 });
+  assert.ok(down.includes('Rank unavailable') && !down.includes('>0<'), 'unavailable shows no fake zero: ' + down);
+
+  // The no-token branch (node cannot be identified in paths) still renders the
+  // position cards — the rank does not depend on path tokens.
   const reachSrc = fs.readFileSync(path.join(__dirname, 'public', 'node-reach.js'), 'utf8');
-  assert.ok(reachSrc.includes('href="#/reach-rank"'), 'Reach Rank card links to #/reach-rank');
-  assert.ok(/rank_status === 'ranked'/.test(reachSrc), 'Rank card reads rank_status (no "#0 / N" for unranked)');
+  const emptyBranch = reachSrc.slice(reachSrc.indexOf('var emptyHtml'), reachSrc.indexOf('container.innerHTML = emptyHtml'));
+  assert.ok(emptyBranch.includes('positionHtml(imp)'), 'no-token Reach page renders the Rank card');
+
   const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
   assert.ok(html.includes('<script src="reach-rank.js?v=__BUST__"'), 'index.html loads reach-rank.js with the cache-buster placeholder');
 }
 
-console.log('reach-rank.js helpers OK (escaping, fallback, status, snapshot, state)');
+console.log('reach-rank.js + node-reach.js helpers OK (escaping, fallback, status, snapshot, state, clipping, Rank card)');

@@ -58,6 +58,21 @@ async function tableRows(page) {
 
 function nodeLabel(r) { return r.name || r.pubkey.slice(0, 12); }
 
+// Reach + leaderboard read one shared snapshot. Fetch both until they report
+// the same snapshot time (a 60s refresh can land between two requests).
+async function sameSnapshot(page, pubkey) {
+  for (let i = 0; i < 3; i++) {
+    const reach = await getJson(page, '/api/nodes/' + pubkey + '/reach');
+    const board = await getJson(page, '/api/reach-rank?limit=100&q=' + pubkey);
+    if (reach.importance.rank_snapshot_at === board.snapshot_at) return { reach, board };
+  }
+  throw new Error('Reach and leaderboard never reported the same snapshot');
+}
+
+// Top node of the committed CI fixture: 10 neighbours before legacy
+// empty-endpoint edges were excluded, 9 real ones after.
+const FIXTURE_TOP = '1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74';
+
 async function main() {
   let browser;
   try {
@@ -201,18 +216,49 @@ async function main() {
     await page.keyboard.press('Enter');
     await page.waitForSelector('.nq-rank-link');
     assert(page.url().endsWith('#/nodes/' + target.pubkey + '/reach'), 'navigated to ' + page.url());
-    const reach = await getJson(page, '/api/nodes/' + target.pubkey + '/reach');
-    const board = await getJson(page, '/api/reach-rank');
-    assert(reach.importance.rank_snapshot_at === board.snapshot_at, 'same snapshot expected');
+    const { reach, board } = await sameSnapshot(page, target.pubkey);
+    const row = board.rows.find(r => r.pubkey === target.pubkey);
+    assert(row, 'target missing from leaderboard search');
     assert(reach.importance.rank_status === 'ranked', 'rank_status ' + reach.importance.rank_status);
-    assert(reach.importance.degree_rank === target.rank && reach.importance.nodes_with_edges === board.total,
-      'Reach rank #' + reach.importance.degree_rank + '/' + reach.importance.nodes_with_edges + ' != board #' + target.rank + '/' + board.total);
+    assert(reach.importance.degree_rank === row.rank && reach.importance.nodes_with_edges === board.total &&
+      reach.importance.neighbor_degree === row.neighbors,
+      'Reach #' + reach.importance.degree_rank + '/' + reach.importance.nodes_with_edges + ' (' + reach.importance.neighbor_degree +
+      ') != board #' + row.rank + '/' + board.total + ' (' + row.neighbors + ')');
     const cardText = await page.$$eval('.analytics-stat-card', cs => cs.map(c => c.textContent).join('|'));
     assert(cardText.includes('#' + target.rank + ' / ' + board.total), 'Rank card text: ' + cardText);
     assert(await page.getAttribute('.nq-rank-link', 'href') === '#/reach-rank', 'View leaderboard link');
     await page.goBack();
     await page.waitForSelector('#rrSearch');
     assert(await page.inputValue('#rrSearch') === q, 'search restored after Back');
+  });
+
+  await step('legacy empty-endpoint edges are not neighbours (fixture top node shows 9, not 10)', async () => {
+    const board = await getJson(page, '/api/reach-rank?q=' + FIXTURE_TOP);
+    if (!board.rows.length) { console.log('    (fixture top node not present — skipped)'); return; }
+    const row = board.rows[0];
+    assert(row.neighbors === 9 && row.rank === 1, 'fixture top node: #' + row.rank + ' with ' + row.neighbors + ' neighbours');
+    const reach = await getJson(page, '/api/nodes/' + FIXTURE_TOP + '/reach');
+    assert(reach.importance.neighbor_degree === 9, 'Reach Neighbours ' + reach.importance.neighbor_degree);
+    await page.goto(BASE + '/#/nodes/' + FIXTURE_TOP + '/reach');
+    await page.waitForSelector('.nq-rank-link');
+    const cards = await page.$$eval('.analytics-stat-card', cs => cs.map(c => c.innerText.replace(/\s+/g, ' ')));
+    assert(cards.some(t => /NEIGHBOURS 9 /i.test(t + ' ')), 'Neighbours card: ' + cards.join(' | '));
+  });
+
+  await step('ranked node without a reliable path token still shows its Rank card', async () => {
+    const all = (await getJson(page, '/api/reach-rank?limit=100')).rows
+      .concat((await getJson(page, '/api/reach-rank?limit=100&offset=100')).rows);
+    let noToken = null;
+    for (const r of all) {
+      const rep = await getJson(page, '/api/nodes/' + r.pubkey + '/reach');
+      if (!rep.reliable_tokens || !rep.reliable_tokens.length) { noToken = r; break; }
+    }
+    if (!noToken) { console.log('    (no ranked node without tokens in dataset — skipped)'); return; }
+    await page.goto(BASE + '/#/nodes/' + noToken.pubkey + '/reach');
+    await page.waitForSelector('.nq-msg');
+    await page.waitForSelector('.nq-rank-link');
+    const text = await page.$$eval('.analytics-stat-card', cs => cs.map(c => c.innerText).join(' | '));
+    assert(text.includes('#' + noToken.rank + ' / '), 'no-token Rank card: ' + text);
   });
 
   await step('Reach card: "View leaderboard" opens the leaderboard', async () => {

@@ -45,6 +45,7 @@ func resetReachState(t *testing.T, servers ...*Server) {
 			s.reach.degreeMu.Lock()
 			s.reach.degreeSnap = nil
 			s.reach.rankView = nil
+			s.reach.degreeFailAt, s.reach.degreeFailErr = time.Time{}, nil
 			s.reach.degreeMu.Unlock()
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -11,18 +12,26 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // reach_rank.go — the neighbour-degree snapshot shared by the Reach page's
 // Rank card (/api/nodes/{pubkey}/reach) and the Reach leaderboard
 // (/api/reach-rank). One definition, one snapshot:
 //
-//   - Neighbours: distinct neighbours of a pubkey in neighbor_edges (all-time,
-//     i.e. within the ingestor's edge retention), counted over every edge.
-//   - Ranked population: pubkeys with at least one edge that have a node or
-//     observer record (so they have a Reach page) and are not node-blacklisted,
-//     observer-blacklisted, or hidden by node/observer name prefix. Hidden
-//     nodes never occupy a placement, so no rank gap or total reveals them.
+//   - Valid edge: a neighbor_edges row whose endpoints are both MeshCore
+//     pubkeys (exactly 64 hex characters, case-insensitive) and differ from
+//     each other. Legacy rows that fail this (e.g. an empty endpoint) are
+//     filtered here, never deleted.
+//   - Neighbours: distinct neighbours of a pubkey over every valid edge
+//     (all-time, i.e. within the ingestor's edge retention).
+//   - Ranked population: pubkeys with at least one valid edge that have a node
+//     row or a named observer row — exactly the pubkeys buildNodeInfoMap knows,
+//     so every placement has a Reach page — and are not node-blacklisted,
+//     observer-blacklisted, or hidden by any of their node/observer names.
+//     Hidden nodes never occupy a placement, so no rank gap or total reveals
+//     them.
 //   - Rank: 1 + the number of ranked pubkeys with strictly more neighbours
 //     (competition ranking: 1, 1, 3). Ties are listed in pubkey order.
 //   - Total: the size of the ranked population.
@@ -42,34 +51,43 @@ const (
 	reachRankUnavailable = "unavailable"
 )
 
+// reachDegreeRetryBackoff is how long a failed snapshot rebuild suppresses the
+// next attempt, so a failing DB is not re-queried on every request. var (not
+// const) so tests can shorten it.
+var reachDegreeRetryBackoff = 15 * time.Second
+
 var errReachRankNoDB = errors.New("reach rank: no database")
 
 // onDegreeSnapshotLoad runs at the start of every snapshot DB load. A no-op in
 // production; tests swap it to count loads and to hold one in flight.
 var onDegreeSnapshotLoad = func() {}
 
+// reachDegreeSQL counts distinct neighbours over valid edges only. Endpoints
+// are lower-cased and each pair is canonicalised before DISTINCT, so case or
+// orientation variants of one pair count once.
+const reachDegreeSQL = `
+	WITH e AS (
+		SELECT DISTINCT min(lower(node_a), lower(node_b)) AS a,
+		                max(lower(node_a), lower(node_b)) AS b
+		FROM neighbor_edges
+		WHERE length(node_a) = 64 AND length(node_b) = 64
+		  AND lower(node_a) NOT GLOB '*[^0-9a-f]*'
+		  AND lower(node_b) NOT GLOB '*[^0-9a-f]*'
+		  AND lower(node_a) <> lower(node_b)
+	)
+	SELECT pk, COUNT(*) FROM (SELECT a AS pk FROM e UNION ALL SELECT b FROM e) GROUP BY pk`
+
 // degreeSnapshot is one complete read of the neighbour graph plus the node /
 // observer records of its endpoints. Immutable once published.
 type degreeSnapshot struct {
 	at    time.Time
-	deg   map[string]int       // lowercase pubkey → distinct neighbour count, every edge endpoint
-	ident map[string]rankIdent // endpoints that have a node or observer record
+	deg   map[string]int       // lowercase pubkey → distinct neighbours over valid edges
+	ident map[string]rankIdent // endpoints that have a Reach page (node row or named observer row)
 }
 
 type rankIdent struct {
-	hasNode  bool
-	nodeName string
-	obsName  string
-}
-
-// displayName mirrors buildNodeInfoMap: a node row wins over an observer row
-// even when its name is empty, so the leaderboard and the Reach page header
-// name a node the same way.
-func (id rankIdent) displayName() string {
-	if id.hasNode {
-		return id.nodeName
-	}
-	return id.obsName
+	name  string   // display name, as the Reach page header shows it
+	names []string // every non-empty node/observer name, for the hidden-prefix check
 }
 
 // reachRankRow is one leaderboard placement. The unexported nameLower is the
@@ -140,7 +158,7 @@ func (v *reachRankView) page(q string, offset, limit int) ([]reachRankRow, int) 
 
 // reachRankVisible reports whether a pubkey may occupy a placement. Mirrors the
 // per-pubkey 404 rules (IsBlacklisted, isPubkeyHidden on the node name) and
-// also drops observer-blacklisted pubkeys and hidden observer names.
+// also drops observer-blacklisted pubkeys and any hidden node/observer name.
 func reachRankVisible(cfg *Config, pubkey string, id rankIdent) bool {
 	if cfg == nil {
 		return true
@@ -148,7 +166,12 @@ func reachRankVisible(cfg *Config, pubkey string, id rankIdent) bool {
 	if cfg.IsBlacklisted(pubkey) || cfg.IsObserverBlacklisted(pubkey) {
 		return false
 	}
-	return !cfg.IsNameHidden(id.nodeName) && !cfg.IsNameHidden(id.obsName)
+	for _, name := range id.names {
+		if cfg.IsNameHidden(name) {
+			return false
+		}
+	}
+	return true
 }
 
 func buildReachRankView(snap *degreeSnapshot, cfg *Config, id, blGen, hidGen uint64) *reachRankView {
@@ -158,8 +181,7 @@ func buildReachRankView(snap *degreeSnapshot, cfg *Config, id, blGen, hidGen uin
 		if n <= 0 || !reachRankVisible(cfg, pk, ident) {
 			continue
 		}
-		name := ident.displayName()
-		rows = append(rows, reachRankRow{Pubkey: pk, Name: name, Neighbors: n, nameLower: strings.ToLower(name)})
+		rows = append(rows, reachRankRow{Pubkey: pk, Name: ident.name, Neighbors: n, nameLower: strings.ToLower(ident.name)})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Neighbors != rows[j].Neighbors {
@@ -179,11 +201,23 @@ func buildReachRankView(snap *degreeSnapshot, cfg *Config, id, blGen, hidGen uin
 	return &reachRankView{id: id, snap: snap, blGen: blGen, hidGen: hidGen, rows: rows, pos: pos}
 }
 
+// currentRankView returns the published view if it matches snap and the
+// generations, else nil.
+func (s *Server) currentRankView(snap *degreeSnapshot, blGen, hidGen uint64) *reachRankView {
+	s.reach.degreeMu.Lock()
+	defer s.reach.degreeMu.Unlock()
+	if v := s.reach.rankView; v != nil && v.snap == snap && v.blGen == blGen && v.hidGen == hidGen {
+		return v
+	}
+	return nil
+}
+
 // reachRankView returns the current ranked view, rebuilding it when the
 // snapshot or a visibility generation moved. The generations are read before
 // filtering, so a concurrent blacklist / prefix change at worst tags the view
 // with the older generation and forces one more rebuild on the next request.
-// The rebuild is CPU-only (no DB) and runs outside the lock.
+// Rebuilds (CPU-only, no DB) are serialised on viewBuildMu so a burst of
+// requests after a change builds one view; the fast path never takes it.
 func (s *Server) reachRankView(ctx context.Context) (*reachRankView, error) {
 	snap, err := s.getDegreeSnapshot(ctx)
 	if err != nil {
@@ -193,12 +227,15 @@ func (s *Server) reachRankView(ctx context.Context) (*reachRankView, error) {
 	if s.cfg != nil {
 		blGen, hidGen = s.cfg.BlacklistGeneration(), s.cfg.HiddenNamePrefixesGeneration()
 	}
-	s.reach.degreeMu.Lock()
-	cur := s.reach.rankView
-	if cur != nil && cur.snap == snap && cur.blGen == blGen && cur.hidGen == hidGen {
-		s.reach.degreeMu.Unlock()
-		return cur, nil
+	if v := s.currentRankView(snap, blGen, hidGen); v != nil {
+		return v, nil
 	}
+	s.reach.viewBuildMu.Lock()
+	defer s.reach.viewBuildMu.Unlock()
+	if v := s.currentRankView(snap, blGen, hidGen); v != nil {
+		return v, nil // built by the request we queued behind
+	}
+	s.reach.degreeMu.Lock()
 	s.reach.rankViewSeq++
 	id := s.reach.rankViewSeq
 	s.reach.degreeMu.Unlock()
@@ -206,30 +243,71 @@ func (s *Server) reachRankView(ctx context.Context) (*reachRankView, error) {
 	v := buildReachRankView(snap, s.cfg, id, blGen, hidGen)
 
 	s.reach.degreeMu.Lock()
-	// Publish unless a newer snapshot landed meanwhile; an equivalent view
-	// built concurrently is harmless (last writer wins).
-	if s.reach.degreeSnap == snap {
+	if s.reach.degreeSnap == snap { // not superseded by a newer snapshot meanwhile
 		s.reach.rankView = v
 	}
 	s.reach.degreeMu.Unlock()
 	return v, nil
 }
 
-// getDegreeSnapshot serves the snapshot while fresh; otherwise one caller
-// rebuilds it (singleflight) and concurrent callers share that result. The
-// rebuild runs on a context detached from the triggering request (bounded by
-// reachDegreeQueryTimeout) so one client disconnecting cannot fail every
-// waiter. On a failed rebuild the previous complete snapshot is served —
-// its timestamp tells the reader its age; with no previous snapshot the error
-// is returned. A failed or partial read is never published.
+// getDegreeSnapshot returns the shared snapshot. While fresh it is served
+// directly. Once expired, the old snapshot is still served immediately while
+// one background rebuild refreshes it (stale-while-revalidate), so cached
+// Reach responses never wait on the aggregate; its timestamp tells readers its
+// age. Only a cold start (no snapshot yet) waits for the rebuild, shared by all
+// concurrent callers. After a failed rebuild, no new attempt starts for
+// reachDegreeRetryBackoff; a cold caller then gets the last error at once.
 func (s *Server) getDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error) {
 	s.reach.degreeMu.Lock()
-	cur := s.reach.degreeSnap
+	cur, failAt, failErr := s.reach.degreeSnap, s.reach.degreeFailAt, s.reach.degreeFailErr
 	s.reach.degreeMu.Unlock()
 	if cur != nil && time.Since(cur.at) < reachDegreeTTL {
 		return cur, nil
 	}
-	ch := s.reach.degreeSF.DoChan("degree", func() (interface{}, error) {
+	backingOff := !failAt.IsZero() && time.Since(failAt) < reachDegreeRetryBackoff
+	if cur != nil {
+		if !backingOff {
+			s.refreshDegreeSnapshot(ctx) // not awaited; the channel is buffered
+		}
+		return cur, nil
+	}
+	if backingOff {
+		return nil, failErr
+	}
+	select {
+	case res := <-s.refreshDegreeSnapshot(ctx):
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(*degreeSnapshot), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// refreshDegreeSnapshot starts (or joins) the single in-flight rebuild. It runs
+// on a context detached from the triggering request and bounded by
+// reachDegreeQueryTimeout, so one client disconnecting cannot fail it. A
+// failed or partial read is never published; a panic is turned into an error
+// (DoChan would otherwise re-panic outside any handler and crash the server).
+func (s *Server) refreshDegreeSnapshot(ctx context.Context) <-chan singleflight.Result {
+	return s.reach.degreeSF.DoChan("degree", func() (v interface{}, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("reach rank snapshot load panicked: %v", r)
+			}
+			if err != nil {
+				s.reach.degreeMu.Lock()
+				s.reach.degreeFailAt, s.reach.degreeFailErr = time.Now(), err
+				stale := s.reach.degreeSnap
+				s.reach.degreeMu.Unlock()
+				if stale != nil {
+					log.Printf("[reach] degree snapshot rebuild failed: %v (serving snapshot from %s)", err, stale.at.UTC().Format(time.RFC3339))
+				} else {
+					log.Printf("[reach] degree snapshot rebuild failed: %v (no snapshot to serve)", err)
+				}
+			}
+		}()
 		s.reach.degreeMu.Lock()
 		c := s.reach.degreeSnap
 		s.reach.degreeMu.Unlock()
@@ -245,89 +323,86 @@ func (s *Server) getDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error)
 		}
 		s.reach.degreeMu.Lock()
 		s.reach.degreeSnap = snap
+		s.reach.degreeFailAt, s.reach.degreeFailErr = time.Time{}, nil
 		s.reach.degreeMu.Unlock()
 		return snap, nil
 	})
-	select {
-	case res := <-ch:
-		if res.Err != nil {
-			if cur != nil {
-				log.Printf("[reach] degree snapshot rebuild failed: %v (serving snapshot from %s)", res.Err, cur.at.UTC().Format(time.RFC3339))
-				return cur, nil
-			}
-			log.Printf("[reach] degree snapshot rebuild failed: %v (no snapshot to serve)", res.Err)
-			return nil, res.Err
-		}
-		return res.Val.(*degreeSnapshot), nil
-	case <-ctx.Done():
-		if cur != nil {
-			return cur, nil
-		}
-		return nil, ctx.Err()
-	}
 }
 
 // loadDegreeSnapshot reads the neighbour degrees and the node / observer
 // records of every edge endpoint: three bulk queries, no per-row lookups. Any
-// query, scan or iteration error fails the whole load. The node list is read
+// query, scan or iteration error fails the whole load. The records are read
 // here rather than via getCachedNodesAndPM because that cache swallows DB
 // errors — an empty node list would silently drop every node from the ranking
-// (or skip their hidden-name check).
+// (or skip their hidden-name check). Which records make a pubkey "known"
+// mirrors buildNodeInfoMap exactly (any node row; an observer row only with a
+// non-NULL id and name), so every placement has a Reach page.
 func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error) {
 	if s.db == nil || s.db.conn == nil {
 		return nil, errReachRankNoDB
 	}
 	at := time.Now()
 	deg := make(map[string]int)
-	err := s.scanRankRows(ctx, "degree", `
-		SELECT pk, COUNT(*) FROM (
-			SELECT node_a pk FROM neighbor_edges
-			UNION ALL SELECT node_b FROM neighbor_edges
-		) GROUP BY pk`, func(scan func(...interface{}) error) error {
+	err := s.scanRankRows(ctx, "degree", reachDegreeSQL, func(scan func(...interface{}) error) error {
 		var pk string
 		var n int
 		if err := scan(&pk, &n); err != nil {
 			return err
 		}
-		// The ingestor writes lowercase pubkeys; fold case defensively.
-		deg[strings.ToLower(pk)] += n
+		deg[pk] = n // already lower-case, valid and distinct per pk
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	ident := make(map[string]rankIdent)
-	err = s.scanRankRows(ctx, "nodes", `SELECT COALESCE(public_key,''), COALESCE(name,'') FROM nodes`,
+	addName := func(id *rankIdent, name string) {
+		if name != "" {
+			id.names = append(id.names, name)
+		}
+	}
+	err = s.scanRankRows(ctx, "nodes", `SELECT public_key, name FROM nodes WHERE public_key IS NOT NULL`,
 		func(scan func(...interface{}) error) error {
-			var pk, name string
+			var pk string
+			var name sql.NullString
 			if err := scan(&pk, &name); err != nil {
 				return err
 			}
 			pk = strings.ToLower(pk)
-			if deg[pk] > 0 {
-				id := ident[pk]
-				id.hasNode, id.nodeName = true, name
-				ident[pk] = id
+			if deg[pk] == 0 {
+				return nil
 			}
+			id := ident[pk]
+			id.name = name.String
+			addName(&id, name.String)
+			ident[pk] = id
 			return nil
 		})
 	if err != nil {
 		return nil, err
 	}
-	err = s.scanRankRows(ctx, "observers", `SELECT COALESCE(id,''), COALESCE(name,'') FROM observers`,
+	err = s.scanRankRows(ctx, "observers", `SELECT id, name FROM observers WHERE id IS NOT NULL`,
 		func(scan func(...interface{}) error) error {
-			var pk, name string
+			var pk string
+			var name sql.NullString
 			if err := scan(&pk, &name); err != nil {
 				return err
 			}
 			pk = strings.ToLower(pk) // observer ids are stored upper-case
-			if deg[pk] > 0 {
-				id, seen := ident[pk]
-				if !seen || id.obsName == "" {
-					id.obsName = name
-				}
-				ident[pk] = id
+			if deg[pk] == 0 {
+				return nil
 			}
+			id, known := ident[pk]
+			if !name.Valid {
+				// buildNodeInfoMap skips a NULL-name observer row, so it does
+				// not give the pubkey a Reach page; it has no name to hide.
+				return nil
+			}
+			if !known {
+				id.name = name.String // node rows win the display name
+			}
+			addName(&id, name.String)
+			ident[pk] = id
 			return nil
 		})
 	if err != nil {

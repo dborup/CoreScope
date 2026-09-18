@@ -61,6 +61,18 @@
       '<a class="nq-link nq-rank-link nq-noprint" href="#/reach-rank">View leaderboard</a></div>';
   }
 
+  // positionHtml renders the all-time "Network position" cards (neighbours +
+  // rank). They come from neighbor_edges, not from path tokens, so they show
+  // for every node — including one without a reliable path-hash token.
+  function positionHtml(imp) {
+    return '<div class="nq-group-h">Network position (all-time)</div>' +
+      '<div class="analytics-stats">' +
+      statCard('Neighbours', imp.rank_status === 'unavailable' ? '—' : imp.neighbor_degree, 'All-time distinct neighbours',
+        'Distinct neighbours in the all-time neighbour graph (advert first-hop + observer last-hop, geo-filtered).') +
+      rankCard(imp) +
+      '</div>';
+  }
+
   function linkRow(i, l) {
     var dist = l.distance_km != null ? Number(l.distance_km).toFixed(1) : '—';
     var dir = l.bidir ? '' : (l.we_hear > 0 ? 'incoming' : 'outgoing');
@@ -164,6 +176,7 @@
       // nodeName is already escaped; build then assign (keeps it off the
       // innerHTML line for the XSS-sink gate, like statsHtml below).
       var emptyHtml = '<div id="nq-report">' + headerHtml(n, nodeName, days) +
+        '<div class="nq-body">' + positionHtml(imp) + '</div>' +
         '<div class="nq-msg">This node has no unique 1–3 byte prefix, so it cannot be reliably identified in paths — no link data available.</div></div>';
       container.innerHTML = emptyHtml;
       wireTimeRange(container, pubkey);
@@ -172,12 +185,7 @@
 
     var statsHtml = headerHtml(n, nodeName, days) +
       '<div class="nq-body">' +
-      '<div class="nq-group-h">Network position (all-time)</div>' +
-      '<div class="analytics-stats">' +
-      statCard('Neighbours', imp.rank_status === 'unavailable' ? '—' : imp.neighbor_degree, 'All-time distinct neighbours',
-        'Distinct neighbours in the all-time neighbour graph (advert first-hop + observer last-hop, geo-filtered).') +
-      rankCard(imp) +
-      '</div>' +
+      positionHtml(imp) +
       '<div class="nq-group-h">Last ' + d.window.days + ' days</div>' +
       '<div class="analytics-stats">' +
       statCard('Links', d.links.length, 'Neighbours seen this window',
@@ -295,4 +303,7 @@
   }
 
   registerPage('node-reach', { init: init, destroy: destroy });
+
+  // Pure helpers, exposed for test-reach-rank.js (vm sandbox).
+  window.NodeReach = { rankValue: rankValue, positionHtml: positionHtml };
 })();

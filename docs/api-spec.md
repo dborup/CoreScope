@@ -698,7 +698,7 @@ to a recent window. Identifies nodes only by **unique 2–3 byte** path prefixes
   "window": { "days": number, "since": string (ISO) },
   "reliable_tokens": [string],          // uppercase hex prefixes unique to this node ([] if unidentifiable)
   "importance": {
-    "neighbor_degree":    number,        // all-time distinct neighbours, from neighbor_edges
+    "neighbor_degree":    number,        // all-time distinct neighbours over valid neighbor_edges rows (see /api/reach-rank)
     "degree_rank":        number,        // placement on /api/reach-rank; 0 unless rank_status is "ranked"
     "nodes_with_edges":   number,        // ranked (visible) population = /api/reach-rank total
     "rank_status":        string,        // "ranked" | "unranked" | "unavailable" (snapshot unreadable)
@@ -762,11 +762,16 @@ Reach leaderboard: nodes ranked by **all-time neighbour count** — the same Ran
 shown on each node's Reach page. A historical count, **not** a measure of radio
 quality, range or traffic.
 
-- **Neighbours** = distinct neighbours in `neighbor_edges` (within the
-  ingestor's edge retention), counted over every edge.
-- **Ranked population** = nodes with at least one edge that have a node or
-  observer record and are not node-blacklisted, observer-blacklisted or hidden
-  by node/observer name prefix. Hidden nodes never occupy a placement.
+- **Valid edge** = a `neighbor_edges` row whose endpoints are both MeshCore
+  pubkeys (exactly 64 hex characters, case-insensitive) and differ from each
+  other. Legacy rows that fail this (e.g. an empty endpoint) are ignored at
+  computation time; nothing is deleted.
+- **Neighbours** = distinct neighbours over valid edges (within the ingestor's
+  edge retention). The same value is `neighbor_degree` on `/api/nodes/:pubkey/reach`.
+- **Ranked population** = nodes with at least one valid edge that have a Reach
+  page (a node row, or an observer row with a name) and are not
+  node-blacklisted, observer-blacklisted or hidden by any node/observer name
+  prefix. Hidden nodes never occupy a placement.
 - **Rank** = 1 + the number of ranked nodes with strictly more neighbours
   (competition ranking: 1, 1, 3); ties are listed in pubkey order.
 - A search or page returns the global placements — nothing is renumbered.
@@ -777,7 +782,7 @@ quality, range or traffic.
 |----------|--------|---------|-----------------------------------------------------------------|
 | `q`      | string | —       | Case-insensitive substring of name or pubkey; max 64 characters |
 | `offset` | number | `0`     | Rows to skip within the (filtered) list; must be ≥ 0            |
-| `limit`  | number | `50`    | Rows per page, clamped 1–100                                    |
+| `limit`  | number | `50`    | Rows per page; above 100 → 100; zero, negative or non-numeric → 50 |
 
 ### Response `200`
 
@@ -800,9 +805,11 @@ quality, range or traffic.
 ### Caching
 
 Served from a shared snapshot with a **60 s** TTL (also behind the Reach page's
-Rank). A rebuild is shared by concurrent requests; if it fails, the previous
-complete snapshot keeps being served with its own `snapshot_at`. Blacklist and
-hidden-prefix changes re-rank immediately without a new DB read.
+Rank). Once it expires, the previous snapshot keeps being served — with its own
+`snapshot_at` — while one background rebuild refreshes it; only the very first
+request after start-up waits for the read. A failed rebuild is retried at most
+every 15 s. Blacklist and hidden-prefix changes re-rank immediately without a
+new DB read.
 
 ### Response `400`
 

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,15 +136,53 @@ func snapOf(deg map[string]int, ident map[string]rankIdent) *degreeSnapshot {
 	return &degreeSnapshot{at: time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC), deg: deg, ident: ident}
 }
 
-func node(name string) rankIdent { return rankIdent{hasNode: true, nodeName: name} }
+func node(name string) rankIdent {
+	id := rankIdent{name: name}
+	if name != "" {
+		id.names = []string{name}
+	}
+	return id
+}
 
-// expireDegreeSnapshot backdates the published snapshot past its TTL (test
-// only — single goroutine) and returns its new timestamp.
+// expireDegreeSnapshot replaces the published snapshot with a copy backdated
+// past its TTL (a new value, so readers of the old pointer never race) and
+// returns its timestamp.
 func expireDegreeSnapshot(srv *Server) time.Time {
 	srv.reach.degreeMu.Lock()
 	defer srv.reach.degreeMu.Unlock()
-	srv.reach.degreeSnap.at = srv.reach.degreeSnap.at.Add(-reachDegreeTTL - time.Minute)
-	return srv.reach.degreeSnap.at
+	old := *srv.reach.degreeSnap
+	old.at = old.at.Add(-reachDegreeTTL - time.Minute)
+	srv.reach.degreeSnap = &old
+	return old.at
+}
+
+// clearDegreeBackoff forgets the last rebuild failure so the next request
+// retries at once.
+func clearDegreeBackoff(srv *Server) {
+	srv.reach.degreeMu.Lock()
+	srv.reach.degreeFailAt, srv.reach.degreeFailErr = time.Time{}, nil
+	srv.reach.degreeMu.Unlock()
+}
+
+// publishedSnap returns the currently published snapshot pointer.
+func publishedSnap(srv *Server) *degreeSnapshot {
+	srv.reach.degreeMu.Lock()
+	defer srv.reach.degreeMu.Unlock()
+	return srv.reach.degreeSnap
+}
+
+// waitForSnapshotChange polls until the published snapshot is no longer prev.
+func waitForSnapshotChange(t *testing.T, srv *Server, prev *degreeSnapshot) *degreeSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cur := publishedSnap(srv); cur != prev {
+			return cur
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("background snapshot refresh never published")
+	return nil
 }
 
 func rowPKs(rows []reachRankRow) []string {
@@ -270,30 +310,6 @@ func TestReachRankView_SearchAndPagingKeepGlobalRanks(t *testing.T) {
 	}
 }
 
-func TestReachRankView_NameFallbackMirrorsReachPage(t *testing.T) {
-	both, obsOnly, blank := pk64("b0"), pk64("0b"), pk64("ba")
-	snap := snapOf(
-		map[string]int{both: 3, obsOnly: 2, blank: 1},
-		map[string]rankIdent{
-			both:    {hasNode: true, nodeName: "", obsName: "Observer name"}, // node row wins, even empty
-			obsOnly: {obsName: "Rooftop observer"},
-			blank:   {hasNode: true},
-		},
-	)
-	v := buildReachRankView(snap, &Config{}, 1, 0, 0)
-	names := map[string]string{}
-	for _, r := range v.rows {
-		names[r.Pubkey] = r.Name
-	}
-	if names[both] != "" || names[obsOnly] != "Rooftop observer" || names[blank] != "" {
-		t.Fatalf("names=%v (node row wins; observer-only uses observer name; empty → client pubkey fallback)", names)
-	}
-	// An unnamed node is still findable by pubkey.
-	if rows, _ := v.page(strings.ToUpper(blank[:6]), 0, 10); len(rows) != 1 || rows[0].Pubkey != blank {
-		t.Fatalf("unnamed node not searchable by pubkey: %+v", rows)
-	}
-}
-
 func TestReachRankView_HiddenAndBlacklistedNeverPlaced(t *testing.T) {
 	top, bl, obsBl, hidNode, hidObs, a, b := pk64("f0"), pk64("f1"), pk64("f2"), pk64("f3"), pk64("f4"), pk64("a1"), pk64("b2")
 	snap := snapOf(
@@ -301,9 +317,9 @@ func TestReachRankView_HiddenAndBlacklistedNeverPlaced(t *testing.T) {
 		map[string]rankIdent{
 			top:     node("🚫 private top"),
 			bl:      node("Blacklisted"),
-			obsBl:   {obsName: "Blocked observer"},
-			hidNode: {hasNode: true, nodeName: "", obsName: "🚫 hidden obs name"},
-			hidObs:  {obsName: "🚫 observer"},
+			obsBl:   node("Blocked observer"),
+			hidNode: {name: "", names: []string{"🚫 hidden obs name"}},                      // unnamed node, hidden observer name
+			hidObs:  {name: "Visible node", names: []string{"Visible node", "🚫 observer"}}, // any hidden name hides
 			a:       node("A"),
 			b:       node("B"),
 		},
@@ -328,7 +344,7 @@ func TestReachRankView_HiddenAndBlacklistedNeverPlaced(t *testing.T) {
 			t.Fatalf("hidden pubkey %s leaked via search", pk[:4])
 		}
 	}
-	for _, q := range []string{"private", "blacklisted", "blocked", "hidden", "🚫"} {
+	for _, q := range []string{"private", "blacklisted", "blocked", "hidden", "visible", "🚫"} {
 		if rows, m := v.page(q, 0, 50); len(rows) != 0 || m != 0 {
 			t.Fatalf("hidden name leaked via search %q: %+v", q, rows)
 		}
@@ -501,10 +517,17 @@ func TestReachRank_SnapshotCacheHitAndExpiry(t *testing.T) {
 		t.Fatalf("within TTL the cached view must be served (rows=%d)", len(v2.rows))
 	}
 
-	// Expire the snapshot: the next request re-reads and re-ranks.
+	// Expire the snapshot: the next request is served the old data at once
+	// and triggers one background re-read; later requests see the new data.
 	expireDegreeSnapshot(srv)
+	stale := publishedSnap(srv)
+	vStale, _ := srv.reachRankView(ctx)
+	if vStale.snap != stale || len(vStale.rows) != 2 {
+		t.Fatalf("expired snapshot must be served while it refreshes (rows=%d)", len(vStale.rows))
+	}
+	waitForSnapshotChange(t, srv, stale)
 	v3, _ := srv.reachRankView(ctx)
-	if v3 == v1 || v3.snap == v1.snap || len(v3.rows) != 3 || v3.id <= v1.id {
+	if v3.snap == stale || len(v3.rows) != 3 || v3.id <= v1.id {
 		t.Fatalf("expired snapshot not rebuilt: rows=%d id %d→%d", len(v3.rows), v1.id, v3.id)
 	}
 	if _, rank, _, _ := v3.lookup(b); rank != 1 {
@@ -601,8 +624,10 @@ func TestReachRank_ColdDBErrorIsNotAnEmptyLeaderboard(t *testing.T) {
 	if imp := getReachImportance(t, srv, a); imp.RankStatus != reachRankUnavailable || imp.DegreeRank != 0 || imp.RankSnapshotAt != "" {
 		t.Fatalf("reach rank on DB error: %+v", imp)
 	}
-	// Recovery: once the table is back the rank appears, including in the
-	// Reach body cached while it was unavailable.
+	// Recovery: once the table is back (and the retry backoff has passed)
+	// the rank appears, including in the Reach body cached while it was
+	// unavailable.
+	clearDegreeBackoff(srv)
 	if _, err := db.conn.Exec(`CREATE TABLE neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`); err != nil {
 		t.Fatal(err)
 	}
@@ -623,16 +648,41 @@ func TestReachRank_RefreshErrorServesPreviousSnapshot(t *testing.T) {
 	srv := newReachRankServer(t, db, &Config{})
 	warm := getRank(t, srv, "/api/reach-rank")
 
+	var loads atomic.Int32
+	prev := onDegreeSnapshotLoad
+	onDegreeSnapshotLoad = func() { loads.Add(1) }
+	t.Cleanup(func() { onDegreeSnapshotLoad = prev })
+
 	if _, err := db.conn.Exec(`DROP TABLE neighbor_edges`); err != nil {
 		t.Fatal(err)
 	}
 	expiredAt := expireDegreeSnapshot(srv)
 
-	stale := getRank(t, srv, "/api/reach-rank")
-	if stale.Total != warm.Total || stale.Rows[0].Pubkey != warm.Rows[0].Pubkey ||
-		stale.SnapshotAt != expiredAt.UTC().Format(time.RFC3339) {
-		t.Fatalf("refresh error must keep serving the last complete snapshot with its own (old) timestamp %s: warm=%+v stale=%+v",
-			expiredAt.UTC().Format(time.RFC3339), warm, stale)
+	// Every request keeps getting the last complete snapshot with its own
+	// (old) timestamp; the failing DB is tried once, then backed off.
+	for i := 0; i < 20; i++ {
+		stale := getRank(t, srv, "/api/reach-rank")
+		if stale.Total != warm.Total || stale.Rows[0].Pubkey != warm.Rows[0].Pubkey ||
+			stale.SnapshotAt != expiredAt.UTC().Format(time.RFC3339) {
+			t.Fatalf("request %d: want the last complete snapshot from %s: warm=%+v stale=%+v",
+				i, expiredAt.UTC().Format(time.RFC3339), warm, stale)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.reach.degreeMu.Lock()
+		failed := !srv.reach.degreeFailAt.IsZero()
+		srv.reach.degreeMu.Unlock()
+		if failed || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for i := 0; i < 5; i++ {
+		getRank(t, srv, "/api/reach-rank")
+	}
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("failing refresh ran %d loads over 25 requests, want 1 (backoff)", got)
 	}
 }
 
@@ -673,5 +723,221 @@ func TestReachRank_NoDB(t *testing.T) {
 	resetReachState(t, srv)
 	if rr := serveRankRoutes(srv, "/api/reach-rank"); rr.Code != http.StatusInternalServerError {
 		t.Fatalf("no DB: status=%d want 500", rr.Code)
+	}
+}
+
+// ---- valid-edge rule ------------------------------------------------------------
+
+// Only edges whose endpoints are both 64-hex pubkeys (any case) and differ
+// count; case / orientation variants of one pair count once.
+func TestReachRank_OnlyValidEdgesCount(t *testing.T) {
+	a, b, c, d := pk64("a1"), pk64("b2"), pk64("c3"), pk64("d4")
+	upper := strings.ToUpper
+	edges := [][2]string{
+		{a, b},                       // valid
+		{upper(a), c},                // valid, upper-case endpoint
+		{c, upper(a)},                // same pair reversed → counted once
+		{upper(b), upper(a)},         // same pair as a-b in another case → counted once
+		{a, ""},                      // empty endpoint (legacy rows)
+		{"", b},                      //
+		{a, d[:63]},                  // shortened (63 chars)
+		{a, d[:62] + "zz"},           // 64 chars, not hex
+		{a, d + "0"},                 // 65 chars
+		{d, d},                       // self-edge
+		{d, upper(d)},                // self-edge, case variant
+		{b, "a1b2c3d4"},              // prefix, not a pubkey
+		{c, strings.Repeat("g", 64)}, // not hex
+	}
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}, {c, "C"}, {d, "D"}}, nil, edges)
+	srv := newReachRankServer(t, db, &Config{})
+
+	snap, err := srv.loadDegreeSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{a: 2, b: 1, c: 1}
+	if fmt.Sprint(snap.deg) != fmt.Sprint(want) {
+		t.Fatalf("degrees=%v want %v (only valid, distinct, non-self edges)", snap.deg, want)
+	}
+	lb := getRank(t, srv, "/api/reach-rank")
+	if lb.Total != 3 || lb.Rows[0].Pubkey != a || lb.Rows[0].Neighbors != 2 {
+		t.Fatalf("leaderboard=%+v (d has only invalid/self edges and is unranked)", lb)
+	}
+	if imp := getReachImportance(t, srv, a); imp.NeighborDegree != 2 || imp.DegreeRank != 1 || imp.NodesWithEdges != 3 {
+		t.Fatalf("reach(a)=%+v want 2 neighbours, #1/3", imp)
+	}
+	if imp := getReachImportance(t, srv, d); imp.NeighborDegree != 0 || imp.RankStatus != reachRankUnranked {
+		t.Fatalf("reach(d)=%+v want 0 neighbours, unranked", imp)
+	}
+}
+
+// The committed CI fixture carries 55 legacy edges with an empty endpoint.
+// Its most-connected node has 9 real neighbours and must show 9, not 10.
+func TestReachRank_FixtureLegacyEdgesNotCounted(t *testing.T) {
+	src := filepath.Join("..", "..", "test-fixtures", "e2e-fixture.db")
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Skipf("fixture not available: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "fixture.db")
+	if err := os.WriteFile(dst, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sql.Open("sqlite", dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var legacy int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM neighbor_edges WHERE node_a = '' OR node_b = ''`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy == 0 {
+		t.Skip("fixture no longer carries legacy empty-endpoint edges")
+	}
+	srv := &Server{db: &DB{conn: conn}, cfg: &Config{}}
+	resetReachState(t, srv)
+	v, err := srv.reachRankView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const top = "1000009e310d729534b70faa33a1abe5cd5e45d594f72f786febccbb770b7e74"
+	if _, ok := v.snap.deg[""]; ok {
+		t.Fatalf("empty endpoint counted as a node")
+	}
+	if deg, rank, _, ok := v.lookup(top); !ok || deg != 9 || rank != 1 {
+		t.Fatalf("fixture top node: degree=%d rank=%d ranked=%v, want 9 neighbours at #1", deg, rank, ok)
+	}
+}
+
+// ---- which pubkeys have a Reach page ------------------------------------------
+
+func TestReachRank_KnownPubkeysMirrorReachPage(t *testing.T) {
+	nodeUnnamed, obsOnly, obsNull, both, hub := pk64("10"), pk64("20"), pk64("30"), pk64("40"), pk64("f0")
+	db := newReachRankDB(t,
+		[]rankTestNode{{hub, "Hub"}, {nodeUnnamed, ""}, {both, ""}},
+		[]rankTestObserver{{strings.ToUpper(obsOnly), "Rooftop observer"}, {strings.ToUpper(both), "Observer name"}},
+		star(hub, nodeUnnamed, obsOnly, obsNull, both))
+	// An observer row with a NULL name: buildNodeInfoMap skips it, so the
+	// pubkey has no Reach page and must not be ranked.
+	if _, err := db.conn.Exec(`INSERT INTO observers (id, name) VALUES (?, NULL)`, strings.ToUpper(obsNull)); err != nil {
+		t.Fatal(err)
+	}
+	srv := newReachRankServer(t, db, &Config{})
+	lb := getRank(t, srv, "/api/reach-rank")
+	names := map[string]string{}
+	for _, r := range lb.Rows {
+		names[r.Pubkey] = r.Name
+	}
+	if _, ok := names[obsNull]; ok || lb.Total != 4 {
+		t.Fatalf("NULL-name observer must not be ranked: total=%d rows=%v", lb.Total, names)
+	}
+	if names[nodeUnnamed] != "" || names[obsOnly] != "Rooftop observer" || names[both] != "" {
+		t.Fatalf("names=%v (node row wins even when empty; observer-only uses its name)", names)
+	}
+	// Every placement opens a Reach page, and it reports the same placement.
+	for _, r := range lb.Rows {
+		if imp := getReachImportance(t, srv, r.Pubkey); imp.DegreeRank != r.Rank || imp.RankStatus != reachRankRanked {
+			t.Fatalf("%s: reach=%+v leaderboard rank %d", r.Pubkey[:4], imp, r.Rank)
+		}
+	}
+	if rr := serveRankRoutes(srv, "/api/nodes/"+obsNull+"/reach?days=30"); rr.Code != http.StatusNotFound {
+		t.Fatalf("NULL-name observer reach: %d (test assumes it has no Reach page)", rr.Code)
+	}
+	// An unnamed node is findable by its pubkey.
+	if r := getRank(t, srv, "/api/reach-rank?q="+strings.ToUpper(nodeUnnamed[:6])); r.Matched != 1 || r.Rows[0].Pubkey != nodeUnnamed {
+		t.Fatalf("unnamed node not searchable by pubkey: %+v", r)
+	}
+}
+
+// ---- refresh never blocks a warm server; panics; view builds -------------------
+
+func TestReachRank_ExpiredSnapshotRefreshesInBackground(t *testing.T) {
+	a, b := pk64("a1"), pk64("b2")
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}}, nil, star(a, b))
+	srv := newReachRankServer(t, db, &Config{})
+	getRank(t, srv, "/api/reach-rank")
+	getReachImportance(t, srv, a) // warm the Reach response cache too
+
+	release := make(chan struct{})
+	var loads atomic.Int32
+	prev := onDegreeSnapshotLoad
+	onDegreeSnapshotLoad = func() { loads.Add(1); <-release }
+	t.Cleanup(func() { onDegreeSnapshotLoad = prev })
+	stale := expireDegreeSnapshot(srv)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 5; i++ {
+			lb := getRank(t, srv, "/api/reach-rank")
+			if lb.SnapshotAt != stale.UTC().Format(time.RFC3339) {
+				t.Errorf("want the stale snapshot while refreshing, got %s", lb.SnapshotAt)
+			}
+			if imp := getReachImportance(t, srv, a); imp.RankStatus != reachRankRanked {
+				t.Errorf("reach cache hit during refresh: %+v", imp)
+			}
+		}
+	}()
+	select {
+	case <-done: // served while the rebuild is still held
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatalf("requests waited for the snapshot rebuild")
+	}
+	close(release)
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("%d background loads, want 1", got)
+	}
+}
+
+func TestReachRank_PanickingLoadIsAnErrorNotACrash(t *testing.T) {
+	a, b := pk64("a1"), pk64("b2")
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}}, nil, star(a, b))
+	srv := newReachRankServer(t, db, &Config{})
+	prev := onDegreeSnapshotLoad
+	onDegreeSnapshotLoad = func() { panic("boom") }
+	t.Cleanup(func() { onDegreeSnapshotLoad = prev })
+
+	if rr := serveRankRoutes(srv, "/api/reach-rank"); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500", rr.Code)
+	}
+	srv.reach.degreeMu.Lock()
+	failErr := srv.reach.degreeFailErr
+	srv.reach.degreeMu.Unlock()
+	if failErr == nil || !strings.Contains(failErr.Error(), "panicked") {
+		t.Fatalf("panic not recorded as a rebuild failure: %v", failErr)
+	}
+}
+
+func TestReachRank_ConcurrentRequestsAfterChangeBuildOneView(t *testing.T) {
+	a, b, c := pk64("a1"), pk64("b2"), pk64("c3")
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}, {c, "C"}}, nil, star(a, b, c))
+	cfg := &Config{}
+	srv := newReachRankServer(t, db, cfg)
+	v0, err := srv.reachRankView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SetNodeBlacklist([]string{c})
+
+	const n = 64
+	views := make([]*reachRankView, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			views[i], _ = srv.reachRankView(context.Background())
+		}(i)
+	}
+	wg.Wait()
+	for i, v := range views {
+		if v != views[0] {
+			t.Fatalf("request %d got view id %d, request 0 got %d: rebuilds were not collapsed", i, v.id, views[0].id)
+		}
+	}
+	if views[0] == v0 || len(views[0].rows) != 2 {
+		t.Fatalf("view not rebuilt for the blacklist change: rows=%d", len(views[0].rows))
 	}
 }

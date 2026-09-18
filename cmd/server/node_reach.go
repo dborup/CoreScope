@@ -306,14 +306,18 @@ type reachState struct {
 	// round-2, adversarial #5).
 	lastSeenBlacklistGen atomic.Uint64
 
-	// degreeMu guards the shared degree snapshot and the ranked view built
-	// from it (reach_rank.go); degreeSF collapses concurrent rebuilds into
-	// one set of DB queries.
-	degreeMu    sync.Mutex
-	degreeSnap  *degreeSnapshot
-	degreeSF    singleflight.Group
-	rankView    *reachRankView
-	rankViewSeq uint64
+	// degreeMu guards the shared degree snapshot, the last rebuild failure
+	// and the ranked view built from the snapshot (reach_rank.go). degreeSF
+	// collapses concurrent rebuilds into one set of DB queries; viewBuildMu
+	// serialises view rebuilds so a burst after a change builds one view.
+	degreeMu      sync.Mutex
+	degreeSnap    *degreeSnapshot
+	degreeFailAt  time.Time
+	degreeFailErr error
+	degreeSF      singleflight.Group
+	rankView      *reachRankView
+	rankViewSeq   uint64
+	viewBuildMu   sync.Mutex
 }
 
 // reachCacheGet returns the cached entry for key. Its raw slice and resp
