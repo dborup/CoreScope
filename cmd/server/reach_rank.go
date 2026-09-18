@@ -62,20 +62,9 @@ var errReachRankNoDB = errors.New("reach rank: no database")
 // production; tests swap it to count loads and to hold one in flight.
 var onDegreeSnapshotLoad = func() {}
 
-// reachDegreeSQL counts distinct neighbours over valid edges only. Endpoints
-// are lower-cased and each pair is canonicalised before DISTINCT, so case or
-// orientation variants of one pair count once.
-const reachDegreeSQL = `
-	WITH e AS (
-		SELECT DISTINCT min(lower(node_a), lower(node_b)) AS a,
-		                max(lower(node_a), lower(node_b)) AS b
-		FROM neighbor_edges
-		WHERE length(node_a) = 64 AND length(node_b) = 64
-		  AND lower(node_a) NOT GLOB '*[^0-9a-f]*'
-		  AND lower(node_b) NOT GLOB '*[^0-9a-f]*'
-		  AND lower(node_a) <> lower(node_b)
-	)
-	SELECT pk, COUNT(*) FROM (SELECT a AS pk FROM e UNION ALL SELECT b FROM e) GROUP BY pk`
+// edgeExistChunk bounds the row-value IN list of canonicalEdgesExisting
+// (2 parameters per pair) well under SQLite's variable limit.
+const edgeExistChunk = 400
 
 // degreeSnapshot is one complete read of the neighbour graph plus the node /
 // observer records of its endpoints. Immutable once published.
@@ -342,16 +331,7 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 		return nil, errReachRankNoDB
 	}
 	at := time.Now()
-	deg := make(map[string]int)
-	err := s.scanRankRows(ctx, "degree", reachDegreeSQL, func(scan func(...interface{}) error) error {
-		var pk string
-		var n int
-		if err := scan(&pk, &n); err != nil {
-			return err
-		}
-		deg[pk] = n // already lower-case, valid and distinct per pk
-		return nil
-	})
+	deg, err := s.loadValidDegrees(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -409,6 +389,137 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 		return nil, err
 	}
 	return &degreeSnapshot{at: at, deg: deg, ident: ident}, nil
+}
+
+// degreeCounter counts neighbours per pubkey; each count lives in a slice so
+// an edge costs one map lookup and no map write once the pubkey is known.
+type degreeCounter struct {
+	idx map[string]int
+	n   []int
+}
+
+func (d *degreeCounter) add(pk string) {
+	if i, ok := d.idx[pk]; ok {
+		d.n[i]++
+		return
+	}
+	d.idx[pk] = len(d.n)
+	d.n = append(d.n, 1)
+}
+
+// pubkeyForm reports whether s is a MeshCore pubkey (exactly 64 hex
+// characters, any case) and whether it is already lower-case.
+func pubkeyForm(s string) (valid, lower bool) {
+	if len(s) != 64 {
+		return false, false
+	}
+	lower = true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+			lower = false
+		default:
+			return false, false
+		}
+	}
+	return true, lower
+}
+
+// loadValidDegrees counts, per pubkey, its distinct neighbours over valid
+// edges: rows whose endpoints are both pubkeys (case-insensitive) and differ.
+// One plain scan of neighbor_edges; the checks run in Go — much cheaper than
+// per-row SQL string functions (GLOB / ltrim / lower + DISTINCT). A row already in the form
+// the ingestor writes (lower-case, node_a < node_b) is unique by the primary
+// key and is counted directly. Any other valid row (upper-case hex or reversed
+// order) is lower-cased and canonicalised, deduplicated against the other such
+// rows and against an existing canonical row (one bulk lookup), then counted.
+func (s *Server) loadValidDegrees(ctx context.Context) (map[string]int, error) {
+	counter := degreeCounter{idx: make(map[string]int)}
+	odd := map[[2]string]bool{}
+	err := s.scanRankRows(ctx, "degree", `SELECT node_a, node_b FROM neighbor_edges`, func(scan func(...interface{}) error) error {
+		var a, b string
+		if err := scan(&a, &b); err != nil {
+			return err
+		}
+		aOK, aLower := pubkeyForm(a)
+		bOK, bLower := pubkeyForm(b)
+		if !aOK || !bOK {
+			return nil
+		}
+		if aLower && bLower && a < b {
+			counter.add(a)
+			counter.add(b)
+			return nil
+		}
+		la, lb := strings.ToLower(a), strings.ToLower(b)
+		if la == lb {
+			return nil // self-edge, in any case
+		}
+		if la > lb {
+			la, lb = lb, la
+		}
+		odd[[2]string{la, lb}] = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(odd) > 0 {
+		existing, err := s.canonicalEdgesExisting(ctx, odd)
+		if err != nil {
+			return nil, err
+		}
+		for pair := range odd {
+			if !existing[pair] {
+				counter.add(pair[0])
+				counter.add(pair[1])
+			}
+		}
+	}
+	deg := make(map[string]int, len(counter.idx))
+	for pk, i := range counter.idx {
+		deg[pk] = counter.n[i]
+	}
+	return deg, nil
+}
+
+// canonicalEdgesExisting returns which of the given lower-case canonical pairs
+// also exist as a canonical row (and were therefore already counted).
+func (s *Server) canonicalEdgesExisting(ctx context.Context, pairs map[[2]string]bool) (map[[2]string]bool, error) {
+	list := make([][2]string, 0, len(pairs))
+	for p := range pairs {
+		list = append(list, p)
+	}
+	found := make(map[[2]string]bool)
+	for start := 0; start < len(list); start += edgeExistChunk {
+		chunk := list[start:min(start+edgeExistChunk, len(list))]
+		args := make([]interface{}, 0, 2*len(chunk))
+		for _, p := range chunk {
+			args = append(args, p[0], p[1])
+		}
+		q := `SELECT node_a, node_b FROM neighbor_edges WHERE (node_a, node_b) IN (VALUES ` +
+			strings.TrimSuffix(strings.Repeat("(?,?),", len(chunk)), ",") + `)`
+		rows, err := s.db.conn.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("reach rank edge lookup: %w", err)
+		}
+		for rows.Next() {
+			var a, b string
+			if err := rows.Scan(&a, &b); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("reach rank edge lookup scan: %w", err)
+			}
+			found[[2]string{a, b}] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reach rank edge lookup rows: %w", err)
+		}
+	}
+	return found, nil
 }
 
 // scanRankRows runs one snapshot query and feeds each row to fn, turning any
