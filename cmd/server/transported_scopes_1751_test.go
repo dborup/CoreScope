@@ -20,16 +20,18 @@ import (
 // so the field stays in parity for /api/nodes (bulk) and the single-node
 // detail endpoint (per-node).
 
-const scope1751Key = "aabbccdd11223344"
+const scope1751Key = "aabbccdd11223344000000000000000000000000000000000000000000000000"
 
 // scopeTx builds a path-hop StoreTx with the given payload type, scope name,
 // and an in-window FirstSeen.
 func scopeTx(id int, payloadType int, scope string) *StoreTx {
-	pt := payloadType
+	pt, rt := payloadType, routeTypeFlood
 	return &StoreTx{
 		ID:          id,
 		Hash:        "scope-tx-" + scope + "-" + strconv.Itoa(id),
 		PayloadType: &pt,
+		RouteType:   &rt,
+		PathJSON:    `["` + scope1751Key + `"]`,
 		ScopeName:   scope,
 		FirstSeen:   time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano),
 	}
@@ -112,7 +114,8 @@ func TestTransportedScopes_EmptyWhenNoScope(t *testing.T) {
 func TestTransportedScopes_PrefixBucketExcludedFromScope(t *testing.T) {
 	full := scopeTx(1, 2, "region-direct")           // only in the full-key bucket — must count
 	prefixOnly := scopeTx(2, 2, "region-via-prefix") // only in the 1-byte bucket — must NOT count
-	shared := scopeTx(3, 2, "region-shared")         // in BOTH buckets — must count (present in the full-key list)
+	prefixOnly.PathJSON = `["aa"]`
+	shared := scopeTx(3, 2, "region-shared") // in BOTH buckets — must count (present in the full-key list)
 
 	store := &PacketStore{
 		byPathHop: map[string][]*StoreTx{
@@ -137,6 +140,7 @@ func TestTransportedScopes_PrefixBucketExcludedFromScope(t *testing.T) {
 func TestTransportedScopes_PerNodePrefixBucketExcludedFromScope(t *testing.T) {
 	full := scopeTx(1, 2, "region-direct")
 	prefixOnly := scopeTx(2, 2, "region-via-prefix")
+	prefixOnly.PathJSON = `["aa"]`
 	shared := scopeTx(3, 2, "region-shared")
 
 	store := &PacketStore{
