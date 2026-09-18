@@ -1109,10 +1109,16 @@ img.brand-logo {
   -webkit-line-clamp: 1;
   line-clamp: 1;
   overflow: hidden;
-  /* Give the clip box room for focus rings (2px outline + 2px offset) and
-   * .chan-tag padding without changing the row height. */
-  padding-block: 4px;
-  margin-block: -4px;
+}
+/* The one-line clip box is only a line box tall, so anything drawn outside
+ * it is clipped (padding would expose the top of the hidden 2nd line).
+ * Draw link focus rings inside the link box instead of around it... */
+.data-table td.col-details > .col-details-clip a:focus-visible { outline-offset: -2px; }
+/* ...and give the line box room for .chan-tag pills (17px, baseline-aligned)
+ * where that is height-neutral: above 768px the Path chips already make rows
+ * ~30px tall. (<=640px keeps the #1805 inline-block clip below.) */
+@media (min-width: 769px) {
+  .data-table td.col-details > .col-details-clip { line-height: 18px; }
 }
 /* Direct Neighbors' Configured Scope cell (observer-detail.js) can hold a
  * long comma-joined scope list (e.g. a #eu/#dk/#dk-sjl/... catch-all
@@ -2354,7 +2360,7 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
    answer. data-priority="high" links are pinned to the left via
    order:-1 and are kept inline as long as possible (low-priority links
    overflow first). Spacing/type still use #1054 fluid clamp() tokens. */
-@media (min-width: 768px) {
+@media (min-width: 769px) {
   .nav-links { display: flex !important; flex-direction: row; gap: var(--space-xs); }
   .nav-more-wrap { display: flex; align-items: center; }
   .hamburger { display: none; }
@@ -2491,8 +2497,8 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   /* #1770: packets-view virtual-scroller assumes constant row height
      (VSCROLL_ROW_HEIGHT). The base rule at ~L1097 sets
      `.data-table td.col-details { white-space: normal; word-break: break-word }`
-     (since #1122 the inner clip is line-clamped to one line at every width,
-     see the rule right after it) which let the "Details" cell wrap on narrow viewports, producing
+     which let the "Details" cell wrap on narrow viewports (since #1122 the
+     inner clip is also line-clamped at wider widths, see ~L1106), producing
      variable row heights → visible jitter when scrolling past ~900px on
      iOS. Quick-fix (S path): clamp the cell to a single line on mobile.
      The proper L-path fix (per-row measurement) tracks separately.
