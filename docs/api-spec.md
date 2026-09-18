@@ -771,9 +771,9 @@ quality, range or traffic.
 - **Ranked population** = nodes with at least one valid edge that have a Reach
   page (a node row, or an observer row with a name) and are not
   node-blacklisted, observer-blacklisted or hidden by a hidden-name prefix on
-  any current name: node name, observer name, or — for a node that has aged out
-  of `nodes` — its `inactive_nodes` name. Hidden nodes never occupy a
-  placement.
+  any current name: node name, observer name, or its `inactive_nodes` name
+  while it has no named `nodes` row (a node that aged out). Hidden nodes never
+  occupy a placement.
 - **Rank** = 1 + the number of ranked nodes with strictly more neighbours
   (competition ranking: 1, 1, 3); ties are listed in pubkey order.
 - A search or page returns the global placements — nothing is renumbered.

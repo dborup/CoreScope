@@ -959,6 +959,18 @@ func TestReachRank_InactiveNamesOnlyForInactiveNodes(t *testing.T) {
 	if !pks[active] || pks[gone] || lb.Total != 2 {
 		t.Fatalf("ranked=%v: an active node's stale inactive name must not hide it; an inactive hidden identity must stay hidden", pks)
 	}
+	// A nameless return (stored as an empty name) does not supersede the old
+	// hidden name.
+	if _, err := db.conn.Exec(`UPDATE nodes SET name = '' WHERE public_key = ?`, active); err != nil {
+		t.Fatal(err)
+	}
+	expireDegreeSnapshot(srv)
+	stale := publishedSnap(srv)
+	getRank(t, srv, "/api/reach-rank") // triggers the background refresh
+	waitForSnapshotChange(t, srv, stale)
+	if lb := getRank(t, srv, "/api/reach-rank"); lb.Total != 1 {
+		t.Fatalf("nameless return un-hid a hidden inactive name: %+v", lb)
+	}
 }
 
 // A NULL endpoint (nullable legacy schemas) is skipped, not a load failure.

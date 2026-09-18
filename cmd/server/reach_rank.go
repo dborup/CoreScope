@@ -29,8 +29,8 @@ import (
 //   - Ranked population: pubkeys with at least one valid edge that have a node
 //     row or a named observer row — exactly the pubkeys buildNodeInfoMap knows,
 //     so every placement has a Reach page — and are not node-blacklisted,
-//     observer-blacklisted, or hidden by any current node/observer name (for
-//     a node aged out of `nodes`, its inactive_nodes name).
+//     observer-blacklisted, or hidden by any current node/observer name (or
+//     its inactive_nodes name while it has no named nodes row).
 //     Hidden nodes never occupy a placement, so no rank gap or total reveals
 //     them.
 //   - Rank: 1 + the number of ranked pubkeys with strictly more neighbours
@@ -76,9 +76,9 @@ type degreeSnapshot struct {
 }
 
 type rankIdent struct {
-	name    string   // display name, as the Reach page header shows it
-	names   []string // every non-empty current node/observer name, for the hidden-prefix check
-	hasNode bool     // has a row in nodes (so inactive_nodes names are stale)
+	name  string   // display name, as the Reach page header shows it
+	names []string // every non-empty current node/observer name, for the hidden-prefix check
+	named bool     // has a nodes row with a name (so an inactive_nodes name is stale)
 }
 
 // reachRankRow is one leaderboard placement. The unexported nameLower is the
@@ -347,8 +347,9 @@ type rankQueryer interface {
 // mirrors buildNodeInfoMap exactly (any node row; an observer row only with a
 // non-NULL id and name), so every placement has a Reach page. An
 // inactive_nodes name (a node aged out of `nodes`) feeds the hidden-name check
-// only while the pubkey has no nodes row: rows there are never removed when a
-// node returns, so for an active node it is stale.
+// unless the pubkey has a nodes row with a name: rows there are never removed
+// when a node returns, so a current name supersedes it (a nameless return
+// does not).
 func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error) {
 	if s.db == nil || s.db.conn == nil {
 		return nil, errReachRankNoDB
@@ -381,7 +382,8 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 				return nil
 			}
 			id := ident[pk]
-			id.name, id.hasNode = name.String, true
+			id.name = name.String
+			id.named = id.named || name.String != ""
 			addName(&id, name.String)
 			ident[pk] = id
 			return nil
@@ -430,7 +432,7 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 					return err
 				}
 				pk = strings.ToLower(pk)
-				if id, known := ident[pk]; known && !id.hasNode {
+				if id, known := ident[pk]; known && !id.named {
 					addName(&id, name)
 					ident[pk] = id
 				}
