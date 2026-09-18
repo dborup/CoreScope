@@ -416,3 +416,21 @@ func TestNodeReach_NoInactiveNodesTable(t *testing.T) {
 		t.Fatalf("status=%d links=%s", res.StatusCode, linkSet(resp))
 	}
 }
+
+// inactive_nodes keeps a returning node's old row. A node that went quiet as
+// "🚫 …" and came back under a visible name is visible again: an inactive
+// name only counts while the pubkey has no nodes row.
+func TestNodeReach_StaleInactiveNameDoesNotHideReturnedNode(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	if _, err := f.db.conn.Exec(`INSERT INTO inactive_nodes (public_key, name, role) VALUES (?, '🚫 old name', 'repeater')`, f.visible); err != nil {
+		t.Fatal(err)
+	}
+	if res, _, _ := f.get(t, f.visible); res.StatusCode != http.StatusOK {
+		t.Fatalf("returned node's own reach: %d, want 200", res.StatusCode)
+	}
+	if _, resp, _ := f.get(t, f.n); !strings.Contains(linkSet(resp), f.visible[:4]) {
+		t.Fatalf("returned node hidden from links by a stale inactive name: %s", linkSet(resp))
+	}
+	// (The inactive-only case — no nodes row, hidden inactive name — is
+	// fixture node G, checked in TestNodeReach_HiddenNeighboursFiltered.)
+}

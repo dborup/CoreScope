@@ -32,6 +32,8 @@ func identityHidden(cfg *Config, pubkey string, names ...string) bool {
 //   - nodes and inactive_nodes: keys are lower-case (the ingestor normalises
 //     them), so the primary-key index is used per pubkey. inactive_nodes holds
 //     nodes aged out of `nodes`, whose adverts can still sit in a Reach window.
+//     Its row is never removed when a node returns, so an inactive name only
+//     counts while the pubkey has no nodes row (otherwise it is stale).
 //   - observers: ids arrive raw from the MQTT topic in any case, so they are
 //     matched case-insensitively in one pass over the (small) table.
 const identityNamesSQL = `
@@ -41,7 +43,8 @@ const identityNamesSQL = `
 
 const identityNamesInactiveSQL = identityNamesSQL + `
 	UNION ALL
-	SELECT i.public_key, COALESCE(i.name, '') FROM json_each(?1) j JOIN inactive_nodes i ON i.public_key = j.value`
+	SELECT i.public_key, COALESCE(i.name, '') FROM json_each(?1) j JOIN inactive_nodes i ON i.public_key = j.value
+	WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE n.public_key = j.value)`
 
 // identityNames returns the current node, inactive-node and observer names of
 // the given pubkeys, read live from the DB in one bulk query (no per-pubkey
