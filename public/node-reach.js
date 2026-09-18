@@ -43,6 +43,24 @@
       '<div class="analytics-stat-desc">' + escapeHtml(descShort) + '</div></div>';
   }
 
+  // Rank card: one snapshot with the leaderboard (#/reach-rank), so the same
+  // placement and total show on both. rank_status distinguishes a placed node
+  // from one outside the ranked population and from a failed snapshot read.
+  function rankValue(imp) {
+    if (imp.rank_status === 'ranked') return '#' + imp.degree_rank + ' / ' + imp.nodes_with_edges;
+    if (imp.rank_status === 'unavailable') return '—';
+    return 'Not ranked';
+  }
+
+  function rankCard(imp) {
+    var desc = imp.rank_status === 'unavailable' ? 'Rank unavailable' : 'Rank by neighbour count';
+    return '<div class="analytics-stat-card" title="' + escapeHtml('Rank by all-time neighbour count among ranked nodes. #1 = most neighbours; equal counts share a placement. Historical neighbour count — not a measure of radio quality or range.') + '">' +
+      '<div class="analytics-stat-label">Rank</div>' +
+      '<div class="analytics-stat-value">' + escapeHtml(rankValue(imp)) + '</div>' +
+      '<div class="analytics-stat-desc">' + escapeHtml(desc) + '</div>' +
+      '<a class="nq-link nq-rank-link nq-noprint" href="#/reach-rank">View leaderboard</a></div>';
+  }
+
   function linkRow(i, l) {
     var dist = l.distance_km != null ? Number(l.distance_km).toFixed(1) : '—';
     var dir = l.bidir ? '' : (l.we_hear > 0 ? 'incoming' : 'outgoing');
@@ -156,10 +174,9 @@
       '<div class="nq-body">' +
       '<div class="nq-group-h">Network position (all-time)</div>' +
       '<div class="analytics-stats">' +
-      statCard('Neighbours', imp.neighbor_degree, 'All-time distinct neighbours',
+      statCard('Neighbours', imp.rank_status === 'unavailable' ? '—' : imp.neighbor_degree, 'All-time distinct neighbours',
         'Distinct neighbours in the all-time neighbour graph (advert first-hop + observer last-hop, geo-filtered).') +
-      statCard('Rank', '#' + imp.degree_rank + ' / ' + imp.nodes_with_edges, 'Rank by neighbour count',
-        'Rank by neighbour count among all nodes with edges. #1 = most-connected node in the network.') +
+      rankCard(imp) +
       '</div>' +
       '<div class="nq-group-h">Last ' + d.window.days + ' days</div>' +
       '<div class="analytics-stats">' +

@@ -199,13 +199,20 @@ type NodeReachWindow struct {
 	Days  int    `json:"days"`
 	Since string `json:"since"`
 }
+
+// NodeReachImportance: NeighborDegree / DegreeRank / NodesWithEdges come from
+// the shared degree snapshot (see reach_rank.go) and match /api/reach-rank for
+// the same RankSnapshotAt. DegreeRank is 0 unless RankStatus is "ranked";
+// NodesWithEdges is the ranked (visible) population.
 type NodeReachImportance struct {
-	NeighborDegree     int `json:"neighbor_degree"`
-	DegreeRank         int `json:"degree_rank"`
-	NodesWithEdges     int `json:"nodes_with_edges"`
-	RelayObservations  int `json:"relay_observations"`
-	BidirectionalLinks int `json:"bidirectional_links"`
-	DirectObservers    int `json:"direct_observers"`
+	NeighborDegree     int    `json:"neighbor_degree"`
+	DegreeRank         int    `json:"degree_rank"`
+	NodesWithEdges     int    `json:"nodes_with_edges"`
+	RankStatus         string `json:"rank_status"`      // "ranked" | "unranked" | "unavailable"
+	RankSnapshotAt     string `json:"rank_snapshot_at"` // RFC3339 UTC; "" when unavailable
+	RelayObservations  int    `json:"relay_observations"`
+	BidirectionalLinks int    `json:"bidirectional_links"`
+	DirectObservers    int    `json:"direct_observers"`
 }
 type NodeReachObserver struct {
 	Pubkey     string   `json:"pubkey"`
@@ -261,17 +268,25 @@ func clampDays(d int) int {
 // --- bounded TTL cache. perf is gated by the time window; this just avoids
 // recompute under dashboard polling. Keyed "pubkey|days". ---
 //
-// reachCacheMax bounds entry count; at ~2KB of marshalled JSON per entry the
-// worst case is well under 1MB, so an entry cap (rather than a byte budget)
-// keeps the bookkeeping trivial while staying memory-safe.
+// reachCacheMax bounds entry count; an entry holds the report plus its
+// marshalled JSON (~2KB each for a typical node, so a few KB per entry), so
+// the worst case stays in the low MB and an entry cap (rather than a byte
+// budget) keeps the bookkeeping trivial while staying memory-safe.
 const (
 	reachCacheTTL = 5 * time.Minute
 	reachCacheMax = 256
 )
 
+// reachCacheEntry keeps the computed report and its marshalled body. The
+// body embeds the rank of view viewID (0 = rank unavailable); when the shared
+// rank view moves on, the body is re-marshalled from resp once rather than
+// recomputing the scan, so cached reports always carry the current rank.
 type reachCacheEntry struct {
-	at  time.Time
-	raw []byte
+	at     time.Time
+	resp   NodeReachResponse
+	raw    []byte
+	viewID uint64
+	found  bool // false only for the "node not found" result, which is never cached
 }
 
 // reachState bundles per-server reach caches. Was a set of package-level
@@ -291,21 +306,27 @@ type reachState struct {
 	// round-2, adversarial #5).
 	lastSeenBlacklistGen atomic.Uint64
 
-	degreeMu   sync.Mutex
-	degreeSnap *degreeSnapshot
+	// degreeMu guards the shared degree snapshot and the ranked view built
+	// from it (reach_rank.go); degreeSF collapses concurrent rebuilds into
+	// one set of DB queries.
+	degreeMu    sync.Mutex
+	degreeSnap  *degreeSnapshot
+	degreeSF    singleflight.Group
+	rankView    *reachRankView
+	rankViewSeq uint64
 }
 
-// reachCacheGet returns the cached marshalled JSON for key. The returned slice
-// is shared (not copied): it is treated as immutable — only ever handed to
-// w.Write — so callers MUST NOT mutate it.
-func (s *Server) reachCacheGet(key string) ([]byte, bool) {
+// reachCacheGet returns the cached entry for key. Its raw slice and resp
+// slices are shared (not copied) and treated as immutable — raw is only ever
+// handed to w.Write — so callers MUST NOT mutate them.
+func (s *Server) reachCacheGet(key string) (reachCacheEntry, bool) {
 	s.reach.cacheMu.RLock()
 	defer s.reach.cacheMu.RUnlock()
 	e, ok := s.reach.cache[key]
 	if !ok || time.Since(e.at) > reachCacheTTL {
-		return nil, false
+		return reachCacheEntry{}, false
 	}
-	return e.raw, true
+	return e, true
 }
 
 // reachCacheLen returns the current entry count in the reach response cache.
@@ -350,7 +371,7 @@ func isHexPubkey(s string) bool {
 	return true
 }
 
-func (s *Server) reachCachePut(key string, raw []byte) {
+func (s *Server) reachCachePut(key string, e reachCacheEntry) {
 	s.reach.cacheMu.Lock()
 	defer s.reach.cacheMu.Unlock()
 	if s.reach.cache == nil {
@@ -359,7 +380,45 @@ func (s *Server) reachCachePut(key string, raw []byte) {
 	if _, exists := s.reach.cache[key]; !exists && len(s.reach.cache) >= reachCacheMax {
 		s.evictReachLocked()
 	}
-	s.reach.cache[key] = reachCacheEntry{at: time.Now(), raw: raw}
+	s.reach.cache[key] = e
+}
+
+// reachCacheSetBody stores a re-marshalled body for the entry computed at at,
+// keeping its original TTL; a no-op if the entry was replaced or evicted.
+func (s *Server) reachCacheSetBody(key string, at time.Time, raw []byte, viewID uint64) {
+	s.reach.cacheMu.Lock()
+	defer s.reach.cacheMu.Unlock()
+	if e, ok := s.reach.cache[key]; ok && e.at.Equal(at) {
+		e.raw, e.viewID = raw, viewID
+		s.reach.cache[key] = e
+	}
+}
+
+// reachBody returns e's JSON body carrying the rank of view v, re-marshalling
+// (and refreshing the cache) only when e was marshalled under another view.
+func (s *Server) reachBody(key string, e reachCacheEntry, v *reachRankView) ([]byte, error) {
+	if e.raw != nil && e.viewID == v.viewID() {
+		return e.raw, nil
+	}
+	resp := e.resp // Importance is a value field; slices stay shared read-only
+	applyReachRank(&resp.Importance, resp.Node.Pubkey, v)
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	s.reachCacheSetBody(key, e.at, raw, v.viewID())
+	return raw, nil
+}
+
+// currentReachRankView is the rank view for a Reach response, or nil when no
+// snapshot can be read — the report then renders with rank "unavailable"
+// instead of failing.
+func (s *Server) currentReachRankView(ctx context.Context) *reachRankView {
+	v, err := s.reachRankView(ctx)
+	if err != nil {
+		return nil
+	}
+	return v
 }
 
 // evictReachLocked drops expired entries first; if still at the cap it evicts
@@ -427,9 +486,8 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 	// the gen actually moved (#1629 round-2, adversarial #5).
 	s.reachPurgeIfBlacklistGenChanged(gen)
 	cacheKey := pubkey + "|" + strconv.Itoa(days) + "|g" + strconv.FormatUint(gen, 10)
-	if raw, ok := s.reachCacheGet(cacheKey); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(raw)
+	if e, ok := s.reachCacheGet(cacheKey); ok {
+		s.writeReachEntry(w, r, cacheKey, e)
 		return
 	}
 
@@ -438,8 +496,8 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 	// there can cancel the in-flight scan for all waiters (acceptable — the
 	// next request recomputes).
 	v, err, _ := s.reach.sf.Do(cacheKey, func() (interface{}, error) {
-		if raw, ok := s.reachCacheGet(cacheKey); ok {
-			return raw, nil
+		if e, ok := s.reachCacheGet(cacheKey); ok {
+			return e, nil
 		}
 		resp, ok, cErr := s.computeNodeReach(r.Context(), pubkey, days)
 		if cErr != nil {
@@ -449,23 +507,40 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 			return nil, cErr
 		}
 		if !ok {
-			return []byte(nil), nil
+			return reachCacheEntry{}, nil
 		}
-		raw, mErr := json.Marshal(resp)
+		// Marshal once here (with the current rank) so the waiters sharing
+		// this result don't each re-marshal it.
+		e := reachCacheEntry{at: time.Now(), resp: resp, found: true}
+		view := s.currentReachRankView(r.Context())
+		applyReachRank(&e.resp.Importance, pubkey, view)
+		raw, mErr := json.Marshal(e.resp)
 		if mErr != nil {
 			log.Printf("[reach] marshal failed for %s: %v", cacheKey, mErr)
 			return nil, mErr
 		}
-		s.reachCachePut(cacheKey, raw)
-		return raw, nil
+		e.raw, e.viewID = raw, view.viewID()
+		s.reachCachePut(cacheKey, e)
+		return e, nil
 	})
 	if err != nil {
 		writeError(w, 500, "reach computation failed")
 		return
 	}
-	raw, _ := v.([]byte)
-	if len(raw) == 0 {
+	e, _ := v.(reachCacheEntry)
+	if !e.found {
 		writeError(w, 404, "Not found")
+		return
+	}
+	s.writeReachEntry(w, r, cacheKey, e)
+}
+
+// writeReachEntry writes a found entry's body with the current rank view.
+func (s *Server) writeReachEntry(w http.ResponseWriter, r *http.Request, key string, e reachCacheEntry) {
+	raw, err := s.reachBody(key, e, s.currentReachRankView(r.Context()))
+	if err != nil {
+		log.Printf("[reach] marshal failed for %s: %v", key, err)
+		writeError(w, 500, "reach computation failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -502,10 +577,9 @@ func (s *Server) computeNodeReach(ctx context.Context, pubkey string, days int) 
 		d = dirCounts{we: map[string]int{}, they: map[string]int{}, obs: map[string]obsAgg{}}
 	}
 
-	// importance: neighbor_edges degree + rank (all-time). Served from a
-	// coarse-TTL snapshot so the full UNION+GROUP-BY aggregate runs at most
-	// once per snapshotTTL, not on every cache miss.
-	degree, rank, nodesWithEdges := s.reachDegreeRank(ctx, pubkey)
+	// importance: the all-time neighbour degree + rank are NOT computed here —
+	// the handler applies them from the shared rank view (applyReachRank) at
+	// serve time, so a cached report always carries the leaderboard's rank.
 
 	// node first_seen comes from nodeInfo (buildNodeInfoMap folds it in via a
 	// single bulk SELECT). Missing → empty string (the node may be
@@ -580,86 +654,11 @@ func (s *Server) computeNodeReach(ctx context.Context, pubkey string, days int) 
 		Window:         NodeReachWindow{Days: days, Since: since.Format(time.RFC3339)},
 		ReliableTokens: toks,
 		Importance: NodeReachImportance{
-			NeighborDegree: degree, DegreeRank: rank, NodesWithEdges: nodesWithEdges,
 			RelayObservations: d.relay, BidirectionalLinks: bidir, DirectObservers: len(directObs),
 		},
 		DirectObservers: directObs,
 		Links:           links,
 	}, true, nil
-}
-
-// --- neighbor-degree snapshot ---------------------------------------------
-// The degree/rank importance is identical across all reach requests except the
-// pubkey match, so the full neighbor_edges aggregate is computed once and shared
-// behind a coarse TTL. Rank is a binary search over the descending degree list.
-const reachDegreeTTL = 60 * time.Second
-
-type degreeSnapshot struct {
-	at         time.Time
-	total      int            // nodes that have any edge
-	deg        map[string]int // lowercase pubkey → neighbour count
-	sortedDesc []int          // degrees sorted descending, for rank
-}
-
-func (s *Server) reachDegreeRank(ctx context.Context, pubkey string) (degree, rank, total int) {
-	snap := s.getDegreeSnapshot(ctx)
-	if snap == nil {
-		return 0, 0, 0
-	}
-	degree = snap.deg[pubkey]
-	if degree == 0 {
-		// No edges → not ranked. rank=0 is the documented "off-the-list" value;
-		// avoids the nonsensical "#N+1 / N" the binary search would produce.
-		return 0, 0, snap.total
-	}
-	// rank = 1 + (number of nodes with strictly higher degree). sortedDesc is
-	// descending, so the count of entries > degree is the first index whose
-	// value is <= degree.
-	rank = 1 + sort.Search(len(snap.sortedDesc), func(i int) bool { return snap.sortedDesc[i] <= degree })
-	return degree, rank, snap.total
-}
-
-func (s *Server) getDegreeSnapshot(ctx context.Context) *degreeSnapshot {
-	// Fast path: serve a fresh snapshot under a short lock.
-	s.reach.degreeMu.Lock()
-	if s.reach.degreeSnap != nil && time.Since(s.reach.degreeSnap.at) < reachDegreeTTL {
-		snap := s.reach.degreeSnap
-		s.reach.degreeMu.Unlock()
-		return snap
-	}
-	stale := s.reach.degreeSnap
-	s.reach.degreeMu.Unlock()
-
-	// Rebuild WITHOUT holding the lock so concurrent reach requests aren't
-	// serialized behind the aggregate query. A brief cold-start herd may run a
-	// few redundant queries; the last writer wins.
-	rows, err := s.db.conn.QueryContext(ctx, `
-		SELECT pk, COUNT(*) neigh FROM (
-			SELECT node_a pk FROM neighbor_edges
-			UNION ALL SELECT node_b FROM neighbor_edges
-		) GROUP BY pk`)
-	if err != nil {
-		log.Printf("[reach] degree snapshot query failed: %v (serving stale)", err)
-		return stale // serve stale on error rather than zeroing
-	}
-	defer rows.Close()
-	deg := make(map[string]int)
-	var sortedDesc []int
-	for rows.Next() {
-		var pk string
-		var neigh int
-		if rows.Scan(&pk, &neigh) != nil {
-			continue
-		}
-		deg[strings.ToLower(pk)] = neigh
-		sortedDesc = append(sortedDesc, neigh)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sortedDesc)))
-	snap := &degreeSnapshot{at: time.Now(), total: len(deg), deg: deg, sortedDesc: sortedDesc}
-	s.reach.degreeMu.Lock()
-	s.reach.degreeSnap = snap
-	s.reach.degreeMu.Unlock()
-	return snap
 }
 
 // scanReachRows reads windowed observations whose path contains any reliable

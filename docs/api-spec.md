@@ -24,6 +24,7 @@
 - [GET /api/nodes/:pubkey/paths](#get-apinodespubkeypaths)
 - [GET /api/nodes/:pubkey/analytics](#get-apinodespubkeyanalytics)
 - [GET /api/nodes/:pubkey/reach](#get-apinodespubkeyreach)
+- [GET /api/reach-rank](#get-apireach-rank)
 - [GET /api/packets](#get-apipackets)
 - [GET /api/packets/timestamps](#get-apipacketstimestamps)
 - [GET /api/packets/:id](#get-apipacketsid)
@@ -697,9 +698,11 @@ to a recent window. Identifies nodes only by **unique 2–3 byte** path prefixes
   "window": { "days": number, "since": string (ISO) },
   "reliable_tokens": [string],          // uppercase hex prefixes unique to this node ([] if unidentifiable)
   "importance": {
-    "neighbor_degree":    number,        // all-time, from neighbor_edges
-    "degree_rank":        number,        // 1-based rank among nodes with edges
-    "nodes_with_edges":   number,
+    "neighbor_degree":    number,        // all-time distinct neighbours, from neighbor_edges
+    "degree_rank":        number,        // placement on /api/reach-rank; 0 unless rank_status is "ranked"
+    "nodes_with_edges":   number,        // ranked (visible) population = /api/reach-rank total
+    "rank_status":        string,        // "ranked" | "unranked" | "unavailable" (snapshot unreadable)
+    "rank_snapshot_at":   string (ISO),  // snapshot behind the three fields above; "" when unavailable
     "relay_observations": number,        // windowed obs with this node anywhere in path
     "bidirectional_links":number,
     "direct_observers":   number
@@ -725,8 +728,12 @@ reliably identified in paths; `links`/`direct_observers` will be empty.
 ### Caching & limits
 
 - **Response cache:** computed responses are cached for **5 minutes** per
-  `pubkey|days`. Polling faster than that returns an identical body — clients
-  should not expect sub-5-minute freshness.
+  `pubkey|days`. Polling faster than that returns the same report — clients
+  should not expect sub-5-minute freshness. The exception is the rank fields
+  (`neighbor_degree`, `degree_rank`, `nodes_with_edges`, `rank_status`,
+  `rank_snapshot_at`): they are applied from the shared degree snapshot at
+  serve time, so they always match `/api/reach-rank` for the same
+  `rank_snapshot_at`.
 - **Scan cap:** the windowed path scan is hard-capped at **200,000** rows. A node
   with more matching observations in the window is truncated (counts become a
   representative sample rather than exhaustive).
@@ -745,6 +752,68 @@ Returned when the node is unknown or blacklisted.
 
 ```json
 { "error": "Not found" }
+```
+
+---
+
+## GET /api/reach-rank
+
+Reach leaderboard: nodes ranked by **all-time neighbour count** — the same Rank
+shown on each node's Reach page. A historical count, **not** a measure of radio
+quality, range or traffic.
+
+- **Neighbours** = distinct neighbours in `neighbor_edges` (within the
+  ingestor's edge retention), counted over every edge.
+- **Ranked population** = nodes with at least one edge that have a node or
+  observer record and are not node-blacklisted, observer-blacklisted or hidden
+  by node/observer name prefix. Hidden nodes never occupy a placement.
+- **Rank** = 1 + the number of ranked nodes with strictly more neighbours
+  (competition ranking: 1, 1, 3); ties are listed in pubkey order.
+- A search or page returns the global placements — nothing is renumbered.
+
+### Query Parameters
+
+| Param    | Type   | Default | Description                                                     |
+|----------|--------|---------|-----------------------------------------------------------------|
+| `q`      | string | —       | Case-insensitive substring of name or pubkey; max 64 characters |
+| `offset` | number | `0`     | Rows to skip within the (filtered) list; must be ≥ 0            |
+| `limit`  | number | `50`    | Rows per page, clamped 1–100                                    |
+
+### Response `200`
+
+```jsonc
+{
+  "snapshot_at": string (ISO),  // when the neighbour graph was read
+  "total":   number,            // ranked nodes in the whole leaderboard
+  "matched": number,            // rows matching q (== total without q)
+  "offset":  number,
+  "limit":   number,
+  "q":       string,            // trimmed query
+  "rows": [
+    { "rank": number, "pubkey": string, "name": string, "neighbors": number }
+  ]
+}
+```
+
+`name` may be empty (clients fall back to the pubkey).
+
+### Caching
+
+Served from a shared snapshot with a **60 s** TTL (also behind the Reach page's
+Rank). A rebuild is shared by concurrent requests; if it fails, the previous
+complete snapshot keeps being served with its own `snapshot_at`. Blacklist and
+hidden-prefix changes re-rank immediately without a new DB read.
+
+### Response `400`
+
+`q` longer than 64 characters (or not UTF-8), or `offset` not a non-negative integer.
+
+### Response `500`
+
+No snapshot could be read (never an empty leaderboard).
+
+```json
+{ "error": "reach rank unavailable" }
 ```
 
 ---

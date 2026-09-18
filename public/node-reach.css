@@ -43,6 +43,26 @@
 .nq-tier { font-weight:700; }
 .nq-tier-glyph { font-size:10px; margin-left:4px; letter-spacing:1px; }
 
+/* Rank card link to the Reach leaderboard. New links use --link-color (the
+   AA-contrast link token, #1668 M5) rather than --accent. */
+.nq-rank-link { display:inline-block; margin-top:4px; font-size:12px; color:var(--link-color); }
+
+/* Reach leaderboard (#/reach-rank, reach-rank.js) — reuses the report styles
+   above; these are the leaderboard-specific bits. */
+.rr-meta { margin:8px 0 0; color:var(--text-muted); font-size:12px; font-weight:500; }
+.rr-search { display:flex; flex-direction:column; gap:4px; max-width:360px; margin:10px 0 4px; }
+.rr-search label { font-size:12px; font-weight:600; color:var(--text-muted); }
+.rr-search .nodes-search { flex:none; width:100%; box-sizing:border-box; font-size:14px; }
+.rr-table { font-size:14px; margin:8px 0 12px; }
+.rr-table td { vertical-align:top; }
+.rr-rank { width:56px; }
+.rr-node { overflow-wrap:anywhere; }
+.rr-node .nq-link { color:var(--link-color); }
+.rr-pk { font-family:var(--mono); font-size:12px; font-weight:500; color:var(--text-muted); }
+.rr-msg { color:var(--text-muted); padding:16px 8px; }
+.rr-error { padding:12px 0; text-align:left; }
+.rr-pager { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:0 0 24px; font-size:13px; }
+
 @media print {
   /* Scope the print to the report only — the SPA shell (nav/header/sidebar)
      must not bleed onto the page. */
