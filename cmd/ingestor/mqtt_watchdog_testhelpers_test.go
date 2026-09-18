@@ -60,16 +60,27 @@ func sendTickOrFail(t *testing.T, tick chan<- time.Time, stamp time.Time, timeou
 //
 // That is measured, not theoretical. With four call sites closing done and
 // walking away, TestMQTTStallWatchdog_DisconnectedEscalationThrottled_1749
-// failed 2 to 3 times per 20 runs of the watchdog tests and never once in 50
-// runs on its own. Debug tracing showed two loops reaching maybeForceReconnect
-// for the same source with tick clocks 420s apart, both reading
-// LastForceReconnectUnix as 0 before either wrote it, so the throttle the test
-// asserts on let both through.
+// failed intermittently when run with the other watchdog tests and not when
+// run on its own. A trace of one failure showed the loop from
+// TestMQTTStallWatchdog_EscalateOnPersistentDisconnect_1749, whose last tick
+// carried a clock 420s ahead, still running after its test returned. The
+// throttle test's own loop had already forced a reconnect and stamped
+// LastForceReconnectUnix. The old loop then read that non-zero stamp, measured
+// it against its own clock, saw more than forceReconnectThrottle elapse and
+// forced a second reconnect. The throttle itself was correct; it was given two
+// clocks for one source.
 func startWatchdogTestLoop(t *testing.T, threshold time.Duration, emit func(...any)) (tick chan time.Time, stop func()) {
 	t.Helper()
 	tick, done, exited := setupWatchdogTestLoop(t, threshold, emit)
+	return tick, joiningWatchdogStop(done, exited)
+}
+
+// joiningWatchdogStop returns the stop function used by startWatchdogTestLoop:
+// close done once, then wait for exited. It is separate only so
+// TestStartWatchdogTestLoop_StopJoinsLoop can hold done and exited itself.
+func joiningWatchdogStop(done, exited chan struct{}) func() {
 	var once sync.Once
-	return tick, func() {
+	return func() {
 		once.Do(func() { close(done) })
 		<-exited
 	}
