@@ -29,7 +29,8 @@ import (
 //   - Ranked population: pubkeys with at least one valid edge that have a node
 //     row or a named observer row — exactly the pubkeys buildNodeInfoMap knows,
 //     so every placement has a Reach page — and are not node-blacklisted,
-//     observer-blacklisted, or hidden by any of their node/observer names.
+//     observer-blacklisted, or hidden by any current node/observer name (for
+//     a node aged out of `nodes`, its inactive_nodes name).
 //     Hidden nodes never occupy a placement, so no rank gap or total reveals
 //     them.
 //   - Rank: 1 + the number of ranked pubkeys with strictly more neighbours
@@ -75,8 +76,9 @@ type degreeSnapshot struct {
 }
 
 type rankIdent struct {
-	name  string   // display name, as the Reach page header shows it
-	names []string // every non-empty node/observer name, for the hidden-prefix check
+	name    string   // display name, as the Reach page header shows it
+	names   []string // every non-empty current node/observer name, for the hidden-prefix check
+	hasNode bool     // has a row in nodes (so inactive_nodes names are stale)
 }
 
 // reachRankRow is one leaderboard placement. The unexported nameLower is the
@@ -255,7 +257,8 @@ func (s *Server) getDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error)
 	}
 	backingOff := !failAt.IsZero() && time.Since(failAt) < reachDegreeRetryBackoff
 	if cur != nil {
-		if !backingOff {
+		// One background refresh at a time; stale requests don't queue on it.
+		if !backingOff && s.reach.degreeRefreshing.CompareAndSwap(false, true) {
 			s.refreshDegreeSnapshot(ctx) // not awaited; the channel is buffered
 		}
 		return cur, nil
@@ -281,11 +284,13 @@ func (s *Server) getDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error)
 // (DoChan would otherwise re-panic outside any handler and crash the server).
 func (s *Server) refreshDegreeSnapshot(ctx context.Context) <-chan singleflight.Result {
 	return s.reach.degreeSF.DoChan("degree", func() (v interface{}, err error) {
+		defer s.reach.degreeRefreshing.Store(false)
+		attempted := false // only a real load attempt records a failure
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("reach rank snapshot load panicked: %v", r)
 			}
-			if err != nil {
+			if attempted && err != nil {
 				s.reach.degreeMu.Lock()
 				s.reach.degreeFailAt, s.reach.degreeFailErr = time.Now(), err
 				stale := s.reach.degreeSnap
@@ -298,11 +303,20 @@ func (s *Server) refreshDegreeSnapshot(ctx context.Context) <-chan singleflight.
 			}
 		}()
 		s.reach.degreeMu.Lock()
-		c := s.reach.degreeSnap
+		c, failAt, failErr := s.reach.degreeSnap, s.reach.degreeFailAt, s.reach.degreeFailErr
 		s.reach.degreeMu.Unlock()
 		if c != nil && time.Since(c.at) < reachDegreeTTL {
 			return c, nil // refreshed while this caller queued
 		}
+		if !failAt.IsZero() && time.Since(failAt) < reachDegreeRetryBackoff {
+			// A rebuild failed while this caller queued: honour the backoff.
+			// (A nil err with a stale c is fine — callers serve it.)
+			if c != nil {
+				return c, nil
+			}
+			return nil, failErr
+		}
+		attempted = true
 		onDegreeSnapshotLoad()
 		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reachDegreeQueryTimeout)
 		defer cancel()
@@ -318,20 +332,34 @@ func (s *Server) refreshDegreeSnapshot(ctx context.Context) <-chan singleflight.
 	})
 }
 
+// rankQueryer is the read surface of the snapshot load (a *sql.Tx).
+type rankQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+}
+
 // loadDegreeSnapshot reads the neighbour degrees and the node / observer
-// records of every edge endpoint: three bulk queries, no per-row lookups. Any
+// records of every edge endpoint with bulk queries (no per-row lookups), all
+// in one read transaction so they see one consistent database state. Any
 // query, scan or iteration error fails the whole load. The records are read
 // here rather than via getCachedNodesAndPM because that cache swallows DB
 // errors — an empty node list would silently drop every node from the ranking
 // (or skip their hidden-name check). Which records make a pubkey "known"
 // mirrors buildNodeInfoMap exactly (any node row; an observer row only with a
-// non-NULL id and name), so every placement has a Reach page.
+// non-NULL id and name), so every placement has a Reach page. An
+// inactive_nodes name (a node aged out of `nodes`) feeds the hidden-name check
+// only while the pubkey has no nodes row: rows there are never removed when a
+// node returns, so for an active node it is stale.
 func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error) {
 	if s.db == nil || s.db.conn == nil {
 		return nil, errReachRankNoDB
 	}
 	at := time.Now()
-	deg, err := s.loadValidDegrees(ctx)
+	tx, err := s.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reach rank begin: %w", err)
+	}
+	defer tx.Rollback() // read-only: nothing to commit
+	deg, err := loadValidDegrees(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +369,7 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 			id.names = append(id.names, name)
 		}
 	}
-	err = s.scanRankRows(ctx, "nodes", `SELECT public_key, name FROM nodes WHERE public_key IS NOT NULL`,
+	err = scanRankRows(ctx, tx, "nodes", `SELECT public_key, name FROM nodes WHERE public_key IS NOT NULL`,
 		func(scan func(...interface{}) error) error {
 			var pk string
 			var name sql.NullString
@@ -353,7 +381,7 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 				return nil
 			}
 			id := ident[pk]
-			id.name = name.String
+			id.name, id.hasNode = name.String, true
 			addName(&id, name.String)
 			ident[pk] = id
 			return nil
@@ -361,7 +389,7 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 	if err != nil {
 		return nil, err
 	}
-	err = s.scanRankRows(ctx, "observers", `SELECT id, name FROM observers WHERE id IS NOT NULL`,
+	err = scanRankRows(ctx, tx, "observers", `SELECT id, name FROM observers WHERE id IS NOT NULL`,
 		func(scan func(...interface{}) error) error {
 			var pk string
 			var name sql.NullString
@@ -387,6 +415,30 @@ func (s *Server) loadDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error
 		})
 	if err != nil {
 		return nil, err
+	}
+	var hasInactive int
+	err = scanRankRows(ctx, tx, "schema", `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'inactive_nodes'`,
+		func(scan func(...interface{}) error) error { return scan(&hasInactive) })
+	if err != nil {
+		return nil, err
+	}
+	if hasInactive > 0 { // always in production (dbschema); minimal DBs may lack it
+		err = scanRankRows(ctx, tx, "inactive nodes", `SELECT public_key, name FROM inactive_nodes WHERE public_key IS NOT NULL AND name IS NOT NULL`,
+			func(scan func(...interface{}) error) error {
+				var pk, name string
+				if err := scan(&pk, &name); err != nil {
+					return err
+				}
+				pk = strings.ToLower(pk)
+				if id, known := ident[pk]; known && !id.hasNode {
+					addName(&id, name)
+					ident[pk] = id
+				}
+				return nil
+			})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &degreeSnapshot{at: at, deg: deg, ident: ident}, nil
 }
@@ -434,11 +486,12 @@ func pubkeyForm(s string) (valid, lower bool) {
 // the ingestor writes (lower-case, node_a < node_b) is unique by the primary
 // key and is counted directly. Any other valid row (upper-case hex or reversed
 // order) is lower-cased and canonicalised, deduplicated against the other such
-// rows and against an existing canonical row (one bulk lookup), then counted.
-func (s *Server) loadValidDegrees(ctx context.Context) (map[string]int, error) {
+// rows and against an existing canonical row (one bulk lookup in the same
+// read transaction as the scan), then counted.
+func loadValidDegrees(ctx context.Context, tx rankQueryer) (map[string]int, error) {
 	counter := degreeCounter{idx: make(map[string]int)}
 	odd := map[[2]string]bool{}
-	err := s.scanRankRows(ctx, "degree", `SELECT node_a, node_b FROM neighbor_edges`, func(scan func(...interface{}) error) error {
+	err := scanRankRows(ctx, tx, "degree", `SELECT node_a, node_b FROM neighbor_edges WHERE node_a IS NOT NULL AND node_b IS NOT NULL`, func(scan func(...interface{}) error) error {
 		var a, b string
 		if err := scan(&a, &b); err != nil {
 			return err
@@ -467,7 +520,7 @@ func (s *Server) loadValidDegrees(ctx context.Context) (map[string]int, error) {
 		return nil, err
 	}
 	if len(odd) > 0 {
-		existing, err := s.canonicalEdgesExisting(ctx, odd)
+		existing, err := canonicalEdgesExisting(ctx, tx, odd)
 		if err != nil {
 			return nil, err
 		}
@@ -487,7 +540,7 @@ func (s *Server) loadValidDegrees(ctx context.Context) (map[string]int, error) {
 
 // canonicalEdgesExisting returns which of the given lower-case canonical pairs
 // also exist as a canonical row (and were therefore already counted).
-func (s *Server) canonicalEdgesExisting(ctx context.Context, pairs map[[2]string]bool) (map[[2]string]bool, error) {
+func canonicalEdgesExisting(ctx context.Context, tx rankQueryer, pairs map[[2]string]bool) (map[[2]string]bool, error) {
 	list := make([][2]string, 0, len(pairs))
 	for p := range pairs {
 		list = append(list, p)
@@ -501,7 +554,7 @@ func (s *Server) canonicalEdgesExisting(ctx context.Context, pairs map[[2]string
 		}
 		q := `SELECT node_a, node_b FROM neighbor_edges WHERE (node_a, node_b) IN (VALUES ` +
 			strings.TrimSuffix(strings.Repeat("(?,?),", len(chunk)), ",") + `)`
-		rows, err := s.db.conn.QueryContext(ctx, q, args...)
+		rows, err := tx.QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, fmt.Errorf("reach rank edge lookup: %w", err)
 		}
@@ -524,8 +577,8 @@ func (s *Server) canonicalEdgesExisting(ctx context.Context, pairs map[[2]string
 
 // scanRankRows runs one snapshot query and feeds each row to fn, turning any
 // query / scan / iteration error into a load failure.
-func (s *Server) scanRankRows(ctx context.Context, what, q string, fn func(scan func(...interface{}) error) error) error {
-	rows, err := s.db.conn.QueryContext(ctx, q)
+func scanRankRows(ctx context.Context, tx rankQueryer, what, q string, fn func(scan func(...interface{}) error) error) error {
+	rows, err := tx.QueryContext(ctx, q)
 	if err != nil {
 		return fmt.Errorf("reach rank %s query: %w", what, err)
 	}

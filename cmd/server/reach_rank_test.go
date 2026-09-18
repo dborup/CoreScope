@@ -859,35 +859,124 @@ func TestReachRank_ExpiredSnapshotRefreshesInBackground(t *testing.T) {
 	getRank(t, srv, "/api/reach-rank")
 	getReachImportance(t, srv, a) // warm the Reach response cache too
 
+	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	var loads atomic.Int32
 	prev := onDegreeSnapshotLoad
-	onDegreeSnapshotLoad = func() { loads.Add(1); <-release }
+	onDegreeSnapshotLoad = func() { loads.Add(1); started <- struct{}{}; <-release }
 	t.Cleanup(func() { onDegreeSnapshotLoad = prev })
 	stale := expireDegreeSnapshot(srv)
+	staleAt := stale.UTC().Format(time.RFC3339)
 
-	done := make(chan struct{})
+	// The first request after expiry is answered from the stale snapshot and
+	// starts exactly one background load; wait until that load is held.
+	if lb := getRank(t, srv, "/api/reach-rank"); lb.SnapshotAt != staleAt {
+		t.Fatalf("want the stale snapshot %s, got %s", staleAt, lb.SnapshotAt)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no background load started")
+	}
+
+	// While it is held, requests are still answered at once. Results are
+	// checked on this goroutine (t.Fatal must not run elsewhere).
+	type result struct{ rank, reach *httptest.ResponseRecorder }
+	results := make(chan result, 5)
 	go func() {
-		defer close(done)
 		for i := 0; i < 5; i++ {
-			lb := getRank(t, srv, "/api/reach-rank")
-			if lb.SnapshotAt != stale.UTC().Format(time.RFC3339) {
-				t.Errorf("want the stale snapshot while refreshing, got %s", lb.SnapshotAt)
-			}
-			if imp := getReachImportance(t, srv, a); imp.RankStatus != reachRankRanked {
-				t.Errorf("reach cache hit during refresh: %+v", imp)
-			}
+			results <- result{serveRankRoutes(srv, "/api/reach-rank"), serveRankRoutes(srv, "/api/nodes/"+a+"/reach?days=30")}
 		}
 	}()
-	select {
-	case <-done: // served while the rebuild is still held
-	case <-time.After(3 * time.Second):
-		close(release)
-		t.Fatalf("requests waited for the snapshot rebuild")
+	for i := 0; i < 5; i++ {
+		select {
+		case r := <-results:
+			var lb ReachRankResponse
+			var rep NodeReachResponse
+			if r.rank.Code != http.StatusOK || json.Unmarshal(r.rank.Body.Bytes(), &lb) != nil || lb.SnapshotAt != staleAt {
+				t.Errorf("request %d during refresh: %d %.120s", i, r.rank.Code, r.rank.Body.String())
+			}
+			if r.reach.Code != http.StatusOK || json.Unmarshal(r.reach.Body.Bytes(), &rep) != nil || rep.Importance.RankStatus != reachRankRanked {
+				t.Errorf("reach cache hit %d during refresh: %d %.120s", i, r.reach.Code, r.reach.Body.String())
+			}
+		case <-time.After(3 * time.Second):
+			close(release)
+			t.Fatalf("requests waited for the held snapshot rebuild")
+		}
 	}
 	close(release)
+	waitForSnapshotChange(t, srv, publishedSnap(srv)) // no goroutine outlives the test
 	if got := loads.Load(); got != 1 {
 		t.Fatalf("%d background loads, want 1", got)
+	}
+}
+
+// A caller that queued behind a failing rebuild must not start another load
+// inside the backoff window.
+func TestReachRank_RefreshHonoursBackoffAfterQueuedFailure(t *testing.T) {
+	a, b := pk64("a1"), pk64("b2")
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}}, nil, star(a, b))
+	if _, err := db.conn.Exec(`DROP TABLE neighbor_edges`); err != nil {
+		t.Fatal(err)
+	}
+	srv := newReachRankServer(t, db, &Config{})
+	var loads atomic.Int32
+	prev := onDegreeSnapshotLoad
+	onDegreeSnapshotLoad = func() { loads.Add(1) }
+	t.Cleanup(func() { onDegreeSnapshotLoad = prev })
+
+	first := <-srv.refreshDegreeSnapshot(context.Background())
+	second := <-srv.refreshDegreeSnapshot(context.Background()) // as a caller that read failAt before the failure
+	if first.Err == nil || second.Err == nil || second.Err.Error() != first.Err.Error() {
+		t.Fatalf("errors: first=%v second=%v (second must reuse the recorded failure)", first.Err, second.Err)
+	}
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("%d loads inside the backoff window, want 1", got)
+	}
+}
+
+// inactive_nodes names hide a pubkey only while it has no nodes row: that
+// table keeps a node's old row after it returns, possibly with an old name.
+func TestReachRank_InactiveNamesOnlyForInactiveNodes(t *testing.T) {
+	hub, active, gone := pk64("f0"), pk64("a1"), pk64("b2")
+	db := newReachRankDB(t, []rankTestNode{{hub, "Hub"}, {active, "Back and visible"}},
+		[]rankTestObserver{{strings.ToUpper(gone), "Rooftop"}}, star(hub, active, gone))
+	for _, q := range []string{
+		`CREATE TABLE inactive_nodes (public_key TEXT PRIMARY KEY, name TEXT)`,
+		`INSERT INTO inactive_nodes VALUES ('` + active + `', '🚫 old hidden name')`,
+		`INSERT INTO inactive_nodes VALUES ('` + gone + `', '🚫 went quiet')`,
+	} {
+		if _, err := db.conn.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := newReachRankServer(t, db, &Config{HiddenNamePrefixes: []string{"🚫"}})
+	lb := getRank(t, srv, "/api/reach-rank")
+	pks := map[string]bool{}
+	for _, r := range lb.Rows {
+		pks[r.Pubkey] = true
+	}
+	if !pks[active] || pks[gone] || lb.Total != 2 {
+		t.Fatalf("ranked=%v: an active node's stale inactive name must not hide it; an inactive hidden identity must stay hidden", pks)
+	}
+}
+
+// A NULL endpoint (nullable legacy schemas) is skipped, not a load failure.
+func TestReachRank_NullEndpointSkipped(t *testing.T) {
+	a, b := pk64("a1"), pk64("b2")
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}}, nil, nil)
+	for _, q := range []string{
+		`DROP TABLE neighbor_edges`,
+		`CREATE TABLE neighbor_edges (node_a TEXT, node_b TEXT, count INTEGER, last_seen TEXT)`,
+		`INSERT INTO neighbor_edges (node_a, node_b) VALUES ('` + a + `', '` + b + `'), (NULL, '` + a + `'), ('` + b + `', NULL)`,
+	} {
+		if _, err := db.conn.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := newReachRankServer(t, db, &Config{})
+	if lb := getRank(t, srv, "/api/reach-rank"); lb.Total != 2 || lb.Rows[0].Neighbors != 1 {
+		t.Fatalf("leaderboard=%+v", lb)
 	}
 }
 

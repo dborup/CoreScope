@@ -315,9 +315,12 @@ type reachState struct {
 	degreeFailAt  time.Time
 	degreeFailErr error
 	degreeSF      singleflight.Group
-	rankView      *reachRankView
-	rankViewSeq   uint64
-	viewBuildMu   sync.Mutex
+	// degreeRefreshing is set while a background (stale-while-revalidate)
+	// refresh runs, so stale requests don't each join it.
+	degreeRefreshing atomic.Bool
+	rankView         *reachRankView
+	rankViewSeq      uint64
+	viewBuildMu      sync.Mutex
 }
 
 // reachCacheGet returns the cached entry for key. Its raw slice and resp

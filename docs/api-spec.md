@@ -770,8 +770,10 @@ quality, range or traffic.
   edge retention). The same value is `neighbor_degree` on `/api/nodes/:pubkey/reach`.
 - **Ranked population** = nodes with at least one valid edge that have a Reach
   page (a node row, or an observer row with a name) and are not
-  node-blacklisted, observer-blacklisted or hidden by any node/observer name
-  prefix. Hidden nodes never occupy a placement.
+  node-blacklisted, observer-blacklisted or hidden by a hidden-name prefix on
+  any current name: node name, observer name, or — for a node that has aged out
+  of `nodes` — its `inactive_nodes` name. Hidden nodes never occupy a
+  placement.
 - **Rank** = 1 + the number of ranked nodes with strictly more neighbours
   (competition ranking: 1, 1, 3); ties are listed in pubkey order.
 - A search or page returns the global placements — nothing is renumbered.
@@ -806,9 +808,9 @@ quality, range or traffic.
 
 Served from a shared snapshot with a **60 s** TTL (also behind the Reach page's
 Rank). Once it expires, the previous snapshot keeps being served — with its own
-`snapshot_at` — while one background rebuild refreshes it; only the very first
-request after start-up waits for the read. A failed rebuild is retried at most
-every 15 s. Blacklist and hidden-prefix changes re-rank immediately without a
+`snapshot_at` — while one background rebuild refreshes it. Only a request that
+finds no snapshot at all (at start-up, or after a failed start-up read) waits
+for the read. A failed rebuild is retried at most every 15 s. Blacklist and hidden-prefix changes re-rank immediately without a
 new DB read.
 
 ### Response `400`
