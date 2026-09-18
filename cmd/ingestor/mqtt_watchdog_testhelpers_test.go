@@ -85,3 +85,27 @@ func joiningWatchdogStop(done, exited chan struct{}) func() {
 		<-exited
 	}
 }
+
+// TestStartWatchdogTestLoop_StopIsIdempotent turns the "safe to call more
+// than once" claim in startWatchdogTestLoop's doc comment above into an
+// executable assertion. joiningWatchdogStop's returned func uses sync.Once
+// to guard close(done), so a second call skips that close and falls
+// straight to <-exited — which returns immediately once exited is closed,
+// on every subsequent read. If either the once-guard or that closed-channel
+// behaviour ever regressed, a second stop() call would hang instead of
+// returning immediately, and this test would time out.
+func TestStartWatchdogTestLoop_StopIsIdempotent(t *testing.T) {
+	_, stop := startWatchdogTestLoop(t, time.Minute, func(args ...any) {})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+		stop()
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("calling stop twice blocked; stop must remain idempotent")
+	}
+}
