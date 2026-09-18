@@ -257,9 +257,10 @@ func (s *Server) getDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error)
 	}
 	backingOff := !failAt.IsZero() && time.Since(failAt) < reachDegreeRetryBackoff
 	if cur != nil {
-		// One background refresh at a time; stale requests don't queue on it.
-		if !backingOff && s.reach.degreeRefreshing.CompareAndSwap(false, true) {
-			s.refreshDegreeSnapshot(ctx) // not awaited; the channel is buffered
+		if !backingOff {
+			// Starts one background refresh, or joins the running one
+			// (singleflight); not awaited — the channel is buffered.
+			s.refreshDegreeSnapshot(ctx)
 		}
 		return cur, nil
 	}
@@ -284,7 +285,6 @@ func (s *Server) getDegreeSnapshot(ctx context.Context) (*degreeSnapshot, error)
 // (DoChan would otherwise re-panic outside any handler and crash the server).
 func (s *Server) refreshDegreeSnapshot(ctx context.Context) <-chan singleflight.Result {
 	return s.reach.degreeSF.DoChan("degree", func() (v interface{}, err error) {
-		defer s.reach.degreeRefreshing.Store(false)
 		attempted := false // only a real load attempt records a failure
 		defer func() {
 			if r := recover(); r != nil {

@@ -904,10 +904,39 @@ func TestReachRank_ExpiredSnapshotRefreshesInBackground(t *testing.T) {
 			t.Fatalf("requests waited for the held snapshot rebuild")
 		}
 	}
+	expired := publishedSnap(srv) // captured before the held load can publish
 	close(release)
-	waitForSnapshotChange(t, srv, publishedSnap(srv)) // no goroutine outlives the test
+	waitForSnapshotChange(t, srv, expired) // no goroutine outlives the test
 	if got := loads.Load(); got != 1 {
 		t.Fatalf("%d background loads, want 1", got)
+	}
+}
+
+// Liveness: after every expiry, concurrent stale requests always lead to a
+// refresh — no state may stick and stop refreshes for good. (Review round 2
+// found an in-flight flag that could stick; it was removed. Its race window
+// was too narrow to reproduce deterministically, so this is a property check,
+// not a reproduction of that bug.)
+func TestReachRank_ExpiredSnapshotAlwaysRefreshes(t *testing.T) {
+	a, b := pk64("a1"), pk64("b2")
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}}, nil, star(a, b))
+	srv := newReachRankServer(t, db, &Config{})
+	if _, err := srv.getDegreeSnapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 200; round++ {
+		expireDegreeSnapshot(srv)
+		expired := publishedSnap(srv)
+		var wg sync.WaitGroup
+		for g := 0; g < 16; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				srv.getDegreeSnapshot(context.Background())
+			}()
+		}
+		wg.Wait()
+		waitForSnapshotChange(t, srv, expired)
 	}
 }
 
