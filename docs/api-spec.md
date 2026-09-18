@@ -725,8 +725,9 @@ reliably identified in paths; `links`/`direct_observers` will be empty.
 ### Visibility
 
 An identity is **hidden** when its pubkey is in `nodeBlacklist` or
-`observerBlacklist`, or when any of its names — node, inactive node or
-observer — starts with a `hiddenNamePrefixes` entry. A hidden target returns
+`observerBlacklist`, or when any of its names — node, observer, or its
+`inactive_nodes` name while it has no named `nodes` row — starts with a
+`hiddenNamePrefixes` entry. A hidden target returns
 `404` (same body as an unknown node). Hidden identities are omitted from
 `links` and `direct_observers`, and `bidirectional_links` / `direct_observers`
 count only what is listed. Names are read live on every request — including

@@ -431,6 +431,14 @@ func TestNodeReach_StaleInactiveNameDoesNotHideReturnedNode(t *testing.T) {
 	if _, resp, _ := f.get(t, f.n); !strings.Contains(linkSet(resp), f.visible[:4]) {
 		t.Fatalf("returned node hidden from links by a stale inactive name: %s", linkSet(resp))
 	}
+	// A nameless return (the ingestor stores '') does not supersede the old
+	// hidden name: the node stays hidden.
+	if _, err := f.db.conn.Exec(`UPDATE nodes SET name = '' WHERE public_key = ?`, f.visible); err != nil {
+		t.Fatal(err)
+	}
+	if _, resp, _ := f.get(t, f.n); strings.Contains(linkSet(resp), f.visible[:4]) {
+		t.Fatalf("nameless return un-hid a hidden inactive name: %s", linkSet(resp))
+	}
 	// (The inactive-only case — no nodes row, hidden inactive name — is
 	// fixture node G, checked in TestNodeReach_HiddenNeighboursFiltered.)
 }
