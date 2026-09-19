@@ -547,10 +547,6 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// singleflight: collapse a thundering herd on a cold key to one scan. The
-	// shared computation uses the triggering request's context; a disconnect
-	// there can cancel the in-flight scan for all waiters (acceptable — the
-	// next request recomputes).
 	// Cache miss: check the target's live names before the expensive scan.
 	// A failed name lookup fails closed.
 	if hidden, err := s.isIdentityHidden(pubkey); err != nil {
@@ -561,6 +557,11 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "Not found")
 		return
 	}
+
+	// singleflight: collapse a thundering herd on a cold key to one scan. The
+	// shared computation uses the triggering request's context; a disconnect
+	// there can cancel the in-flight scan for all waiters (acceptable — the
+	// next request recomputes).
 	v, err, _ := s.reach.sf.Do(cacheKey, func() (interface{}, error) {
 		if e, ok := s.reachCacheGet(cacheKey); ok {
 			return e, nil

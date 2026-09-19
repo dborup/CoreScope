@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -441,4 +442,107 @@ func TestNodeReach_StaleInactiveNameDoesNotHideReturnedNode(t *testing.T) {
 	}
 	// (The inactive-only case — no nodes row, hidden inactive name — is
 	// fixture node G, checked in TestNodeReach_HiddenNeighboursFiltered.)
+}
+
+// Over-filtering controls: names that merely contain a hidden prefix, and a
+// node visible under both its node and observer name, stay listed and keep
+// their own Reach page.
+func TestNodeReach_VisibleControlsNotOverfiltered(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	midName, dual := pk64("5151"), pk64("6262")
+	now := time.Now().Unix()
+	for _, q := range []struct {
+		sql  string
+		args []interface{}
+	}{
+		{`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count) VALUES (?, 'Relay 🚫 mid-name', 'repeater', 56.1, 10.2, '2026-09-01T00:00:00Z', '2026-06-01T00:00:00Z', 1)`, []interface{}{midName}},
+		{`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count) VALUES (?, 'Dual', 'repeater', 56.1, 10.2, '2026-09-01T00:00:00Z', '2026-06-01T00:00:00Z', 1)`, []interface{}{dual}},
+		{`INSERT INTO observers (id, name) VALUES (?, 'Dual obs')`, []interface{}{strings.ToUpper(dual)}},
+		{`INSERT INTO transmissions (id, from_pubkey, payload_type) VALUES (200, '', 5), (201, '', 5)`, nil},
+		{`INSERT INTO observations (id, transmission_id, observer_idx, snr, path_json, timestamp) VALUES (200, 200, 5, -7.0, '["5151","01FA"]', ?), (201, 201, 5, -7.0, '["01FA","6262"]', ?)`, []interface{}{now, now}},
+	} {
+		if _, err := f.db.conn.Exec(q.sql, q.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, resp, _ := f.get(t, f.n)
+	for name, pk := range map[string]string{"mid-name 🚫": midName, "dual visible": dual, "visible node": f.visible, "visible observer": f.o1} {
+		if !strings.Contains(linkSet(resp), pk[:4]) {
+			t.Errorf("%s (%s) over-filtered: links=%s", name, pk[:4], linkSet(resp))
+		}
+	}
+	for _, pk := range []string{midName, dual} {
+		if res, _, body := f.get(t, pk); res.StatusCode != http.StatusOK {
+			t.Errorf("%s own reach: %d %s", pk[:4], res.StatusCode, body)
+		}
+	}
+}
+
+// Cache: a hit reuses the computed report; a hidden-prefix change is applied
+// to that same cached report at serve time (no recompute, no bypass); a
+// blacklist change purges and recomputes.
+func TestNodeReach_CacheHitMissAndInvalidation(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	key := func() string {
+		return f.n + "|30|g" + strconv.FormatUint(f.cfg.BlacklistGeneration(), 10)
+	}
+	_, first, body1 := f.get(t, f.n) // miss → computed and cached
+	e1, ok := f.srv.reachCacheGet(key())
+	if !ok || !strings.Contains(linkSet(first), f.visible[:4]) {
+		t.Fatalf("miss did not cache (ok=%v) or links wrong: %s", ok, linkSet(first))
+	}
+	_, _, body2 := f.get(t, f.n) // hit
+	if e2, _ := f.srv.reachCacheGet(key()); !e2.at.Equal(e1.at) || body2 != body1 {
+		t.Fatalf("second request was not a cache hit with the same body")
+	}
+
+	f.cfg.SetHiddenNamePrefixes([]string{"🚫", "Echo"})
+	_, resp, _ := f.get(t, f.n)
+	e3, ok := f.srv.reachCacheGet(key())
+	if !ok || !e3.at.Equal(e1.at) {
+		t.Fatalf("prefix change must filter the cached report at serve time, not recompute (ok=%v)", ok)
+	}
+	if strings.Contains(linkSet(resp), f.visible[:4]) || !strings.Contains(e3.hiddenKey, f.visible) {
+		t.Fatalf("cached report served unfiltered after prefix change: links=%s hiddenKey=%q", linkSet(resp), e3.hiddenKey)
+	}
+	f.cfg.SetHiddenNamePrefixes([]string{"🚫"})
+
+	genBefore := f.cfg.BlacklistGeneration()
+	f.cfg.SetNodeBlacklist([]string{f.blNode, f.o1})
+	_, resp, _ = f.get(t, f.n)
+	e4, ok := f.srv.reachCacheGet(key())
+	if !ok || f.cfg.BlacklistGeneration() == genBefore || e4.at.Equal(e1.at) || f.srv.reachCacheLen() != 1 {
+		t.Fatalf("blacklist change must purge and recompute (ok=%v, len=%d)", ok, f.srv.reachCacheLen())
+	}
+	if strings.Contains(linkSet(resp), f.o1[:4]) || strings.Contains(obsSet(resp), f.o1[:4]) {
+		t.Fatalf("newly blacklisted observer still served: links=%s obs=%s", linkSet(resp), obsSet(resp))
+	}
+}
+
+// The filtering does not touch the rank/total contract: neighbour degree, rank
+// and total are identical with and without hidden identities configured.
+func TestNodeReach_FilteringLeavesRankFieldsUnchanged(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	for _, pair := range [][2]string{{f.n, f.hidName}, {f.n, f.visible}, {f.n, f.blNode}, {f.visible, f.hidName}} {
+		a, b := pair[0], pair[1]
+		if a > b {
+			a, b = b, a
+		}
+		if _, err := f.db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b) VALUES (?, ?)`, a, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, hiddenCfg, _ := f.get(t, f.n)
+	plain := &Config{}
+	srv := &Server{store: newTestStoreWithDB(t, f.db, plain), db: f.db, cfg: plain, perfStats: NewPerfStats()}
+	resetReachState(t, srv)
+	rr := serveReach(srv, "/api/nodes/"+f.n+"/reach?days=30")
+	var noHiding NodeReachResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &noHiding); err != nil {
+		t.Fatal(err)
+	}
+	h, p := hiddenCfg.Importance, noHiding.Importance
+	if h.NeighborDegree != 3 || h.NeighborDegree != p.NeighborDegree || h.DegreeRank != p.DegreeRank || h.NodesWithEdges != p.NodesWithEdges {
+		t.Fatalf("rank fields changed by filtering: with hiding %+v, without %+v", h, p)
+	}
 }
