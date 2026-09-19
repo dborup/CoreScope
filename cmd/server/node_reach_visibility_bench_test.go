@@ -31,6 +31,8 @@ func benchReachVisibilityDB(b *testing.B, neighbours int) (*DB, string) {
 		`CREATE TABLE observations (id INTEGER PRIMARY KEY, transmission_id INTEGER, observer_idx INTEGER, snr REAL, path_json TEXT, timestamp INTEGER)`,
 		`CREATE TABLE neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`,
 		`CREATE INDEX idx_obs_ts ON observations(timestamp)`,
+		// Production schemas always have inactive_nodes (dbschema.AssertReady).
+		`CREATE TABLE inactive_nodes (public_key TEXT PRIMARY KEY, name TEXT, role TEXT, lat REAL, lon REAL, last_seen TEXT, first_seen TEXT, advert_count INTEGER DEFAULT 0)`,
 	} {
 		if _, err := conn.Exec(s); err != nil {
 			b.Fatal(err)
@@ -123,6 +125,15 @@ func benchReachScaleDB(b *testing.B, links, direct, observers, nodes int) (*DB, 
 	for i := 1 + links; i < nodes; i++ {
 		ins(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen) VALUES (?, ?, 'companion', 56.2, 10.3, '2026-09-01T00:00:00Z', '2026-06-01T00:00:00Z')`,
 			pk64(fmt.Sprintf("d%05x", i)), fmt.Sprintf("Companion %d", i))
+	}
+	// Aged-out nodes: as many inactive rows as nodes, a tenth of them for
+	// pubkeys that are listed in the report (their old rows are kept).
+	for i := 0; i < nodes; i++ {
+		pk := pk64(fmt.Sprintf("a%05x", i))
+		if i%10 == 0 && i/10 < links {
+			pk = pk64(fmt.Sprintf("%04x", 0x2000+i/10))
+		}
+		ins(`INSERT OR IGNORE INTO inactive_nodes (public_key, name, role) VALUES (?, ?, 'companion')`, pk, fmt.Sprintf("Old %d", i))
 	}
 	now := time.Now().Unix()
 	for i := 0; i < direct; i++ { // observer rowid 6.. heard the target at 0 hops

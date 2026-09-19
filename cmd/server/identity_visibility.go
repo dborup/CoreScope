@@ -57,7 +57,7 @@ func hiddenNamesSQL(n int, withInactive bool) string {
 	UNION ALL
 	SELECT i.public_key, i.name FROM json_each(?1) j JOIN inactive_nodes i ON i.public_key = j.value
 	WHERE ` + match("i.name") + `
-	  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.public_key = j.value AND COALESCE(n.name, '') <> '')`
+	  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.public_key = i.public_key AND COALESCE(n.name, '') <> '')`
 	}
 	return q
 }
