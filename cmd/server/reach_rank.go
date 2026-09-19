@@ -147,22 +147,13 @@ func (v *reachRankView) page(q string, offset, limit int) ([]reachRankRow, int) 
 	return out, matched
 }
 
-// reachRankVisible reports whether a pubkey may occupy a placement. Mirrors the
-// per-pubkey 404 rules (IsBlacklisted, isPubkeyHidden on the node name) and
-// also drops observer-blacklisted pubkeys and any hidden node/observer name.
+// reachRankVisible reports whether a pubkey may occupy a placement. It is the
+// same identityHidden rule the Reach page enforces (identity_visibility.go,
+// #1181) — blacklisted, observer-blacklisted, or hidden by any current
+// node/observer/inactive-node name — never a separate check, so the two
+// endpoints cannot drift apart.
 func reachRankVisible(cfg *Config, pubkey string, id rankIdent) bool {
-	if cfg == nil {
-		return true
-	}
-	if cfg.IsBlacklisted(pubkey) || cfg.IsObserverBlacklisted(pubkey) {
-		return false
-	}
-	for _, name := range id.names {
-		if cfg.IsNameHidden(name) {
-			return false
-		}
-	}
-	return true
+	return !identityHidden(cfg, pubkey, id.names...)
 }
 
 func buildReachRankView(snap *degreeSnapshot, cfg *Config, id, blGen, hidGen uint64) *reachRankView {

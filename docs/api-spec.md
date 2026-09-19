@@ -725,14 +725,38 @@ to a recent window. Identifies nodes only by **unique 2–3 byte** path prefixes
 `reliable_tokens: []` means the node has no unique 1–3 byte prefix and cannot be
 reliably identified in paths; `links`/`direct_observers` will be empty.
 
+### Visibility
+
+An identity is **hidden** when its pubkey is in `nodeBlacklist` or
+`observerBlacklist`, or when any of its names — node, observer, or its
+`inactive_nodes` name while it has no named `nodes` row — starts with a
+`hiddenNamePrefixes` entry. A hidden target returns
+`404` (same body as an unknown node). Hidden identities are omitted from
+`links` and `direct_observers`, and `bidirectional_links` / `direct_observers`
+count only what is listed. Names are read live on every request — including
+cached reports — so **hiding** (a blacklist or prefix change, or a rename into
+a hidden prefix) applies on the next request. Un-hiding by renaming — of a
+neighbour or of the target itself — can take up to the 5-minute cache TTL
+(plus the server's 30 s node cache for the target), because the name recorded
+when the report was computed still counts. This errs on the side of hiding.
+
+`neighbor_degree` counts every valid edge, including ones to a hidden
+neighbour — it is a number, not an identity, so it does not leak who the
+neighbour is (see `/api/reach-rank`). `degree_rank` and `nodes_with_edges`,
+by contrast, are computed over the **visible** (ranked) population: a hidden
+or blacklisted node never occupies a placement or is counted in the total,
+so no rank gap or total reveals it.
+
 ### Caching & limits
 
 - **Response cache:** computed responses are cached for **5 minutes** per
   `pubkey|days`. Polling faster than that returns the same report — clients
-  should not expect sub-5-minute freshness. The exception is the rank fields
-  (`neighbor_degree`, `degree_rank`, `nodes_with_edges`, `rank_status`,
-  `rank_snapshot_at`): they are applied from the shared degree snapshot at
-  serve time, so they always match `/api/reach-rank` for the same
+  should not expect sub-5-minute freshness. Both **visibility** (above) and
+  the **rank fields** (`neighbor_degree`, `degree_rank`, `nodes_with_edges`,
+  `rank_status`, `rank_snapshot_at`) are applied on every request, cached or
+  not: visibility from a live name lookup, rank from the shared degree
+  snapshot — so a cached body always reflects the current blacklist/prefix
+  state and always matches `/api/reach-rank` for the same
   `rank_snapshot_at`.
 - **Scan cap:** the windowed path scan is hard-capped at **200,000** rows. A node
   with more matching observations in the window is truncated (counts become a
@@ -748,10 +772,19 @@ Returned when `:pubkey` is not a 64-char hex string.
 
 ### Response `404`
 
-Returned when the node is unknown or blacklisted.
+Returned when the node is unknown or hidden (see Visibility).
 
 ```json
 { "error": "Not found" }
+```
+
+### Response `500`
+
+Returned when the scan fails, or when the live name lookup for visibility
+fails — the endpoint fails closed rather than serving unfiltered data.
+
+```json
+{ "error": "reach computation failed" }
 ```
 
 ---

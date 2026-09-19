@@ -269,24 +269,33 @@ func clampDays(d int) int {
 // recompute under dashboard polling. Keyed "pubkey|days". ---
 //
 // reachCacheMax bounds entry count; an entry holds the report plus its
-// marshalled JSON (~2KB each for a typical node, so a few KB per entry), so
-// the worst case stays in the low MB and an entry cap (rather than a byte
-// budget) keeps the bookkeeping trivial while staying memory-safe.
+// marshalled JSON. A typical node needs a few KB; a hub with hundreds of links
+// and direct observers can reach a few hundred KB (≈195 KB of JSON for 300
+// links + 100 observers), so the cap bounds the worst case at tens of MB while
+// keeping the bookkeeping trivial (an entry cap rather than a byte budget).
 const (
 	reachCacheTTL = 5 * time.Minute
 	reachCacheMax = 256
 )
 
-// reachCacheEntry keeps the computed report and its marshalled body. The
-// body embeds the rank of view viewID (0 = rank unavailable); when the shared
-// rank view moves on, the body is re-marshalled from resp once rather than
-// recomputing the scan, so cached reports always carry the current rank.
+// reachCacheEntry keeps the computed report (resp, unfiltered, no rank
+// applied) and the body last served for it. Visibility and rank are both
+// applied on every serve, not at compute time, so a cached report never
+// outlives a blacklist, hidden-prefix, rename or rank-view change:
+//   - hiddenKey records which identities the served body's links/observers
+//     omit (visibleReach) — see identity_visibility.go and #1181.
+//   - viewID records which reachRankView (reach_rank.go) the served body's
+//     rank fields were applied from.
+//
+// raw is only re-marshalled when either one moved on from what it was last
+// computed under (reachBody).
 type reachCacheEntry struct {
-	at     time.Time
-	resp   NodeReachResponse
-	raw    []byte
-	viewID uint64
-	found  bool // false only for the "node not found" result, which is never cached
+	at        time.Time
+	resp      NodeReachResponse
+	raw       []byte
+	hiddenKey string
+	viewID    uint64
+	found     bool // false only for the "node not found" result, which is never cached
 }
 
 // reachState bundles per-server reach caches. Was a set of package-level
@@ -318,6 +327,10 @@ type reachState struct {
 	rankView      *reachRankView
 	rankViewSeq   uint64
 	viewBuildMu   sync.Mutex
+
+	// inactiveNodesTable caches a positive inactive_nodes probe for the
+	// visibility name lookup (identity_visibility.go).
+	inactiveNodesTable atomic.Bool
 }
 
 // reachCacheGet returns the cached entry for key. Its raw slice and resp
@@ -389,40 +402,130 @@ func (s *Server) reachCachePut(key string, e reachCacheEntry) {
 
 // reachCacheSetBody stores a re-marshalled body for the entry computed at at,
 // keeping its original TTL; a no-op if the entry was replaced or evicted.
-func (s *Server) reachCacheSetBody(key string, at time.Time, raw []byte, viewID uint64) {
+func (s *Server) reachCacheSetBody(key string, at time.Time, raw []byte, hiddenKey string, viewID uint64) {
 	s.reach.cacheMu.Lock()
 	defer s.reach.cacheMu.Unlock()
 	if e, ok := s.reach.cache[key]; ok && e.at.Equal(at) {
-		e.raw, e.viewID = raw, viewID
+		e.raw, e.hiddenKey, e.viewID = raw, hiddenKey, viewID
 		s.reach.cache[key] = e
 	}
 }
 
-// reachBody returns e's JSON body carrying the rank of view v, re-marshalling
-// (and refreshing the cache) only when e was marshalled under another view.
-func (s *Server) reachBody(key string, e reachCacheEntry, v *reachRankView) ([]byte, error) {
-	if e.raw != nil && e.viewID == v.viewID() {
-		return e.raw, nil
+// visibleReach applies visibility to a report on every serve, cached or not,
+// so no visibility change waits for the cache TTL. One live-name lookup covers
+// the target and every listed identity; each is checked with identityHidden
+// against its live names and the name recorded in the report. targetHidden
+// reports that the target itself is hidden now (the caller must 404).
+// Otherwise every hidden identity is removed from links and direct_observers
+// and the counts derived from those lists are recomputed; hiddenKey lists the
+// removed pubkeys (sorted, comma-joined; "" when none, in which case resp is
+// returned as is, without copying). Rank fields (NeighborDegree and friends)
+// are untouched here — they are counts over every valid edge, including
+// hidden neighbours (see reach_rank.go); applyReachRank sets them separately.
+func (s *Server) visibleReach(ctx context.Context, resp NodeReachResponse) (out NodeReachResponse, hiddenKey string, targetHidden bool, err error) {
+	var live map[string][]string // hiding names by pubkey; nil without prefixes
+	if len(s.cfg.EnforcedHiddenNamePrefixes()) > 0 {
+		pks := make([]string, 0, 1+len(resp.Links)+len(resp.DirectObservers))
+		pks = append(pks, resp.Node.Pubkey)
+		for _, l := range resp.Links {
+			pks = append(pks, l.Pubkey)
+		}
+		for _, o := range resp.DirectObservers {
+			pks = append(pks, o.Pubkey)
+		}
+		if live, err = s.hiddenIdentityNames(ctx, pks); err != nil {
+			return NodeReachResponse{}, "", false, err
+		}
 	}
-	resp := e.resp // Importance is a value field; slices stay shared read-only
-	applyReachRank(&resp.Importance, resp.Node.Pubkey, v)
-	raw, err := json.Marshal(resp)
-	if err != nil {
-		return nil, err
+	// Report pubkeys are lower-case (the handler, resolver and scan all
+	// normalise them), matching the keys of live.
+	hidden := func(pk, recorded string) bool {
+		if identityHidden(s.cfg, pk, recorded) {
+			return true
+		}
+		return live != nil && identityHidden(s.cfg, pk, live[pk]...)
 	}
-	s.reachCacheSetBody(key, e.at, raw, v.viewID())
-	return raw, nil
+	if hidden(resp.Node.Pubkey, resp.Node.Name) {
+		return NodeReachResponse{}, "", true, nil
+	}
+	var removed []string
+	for _, l := range resp.Links {
+		if hidden(l.Pubkey, l.Name) {
+			removed = append(removed, l.Pubkey)
+		}
+	}
+	for _, o := range resp.DirectObservers {
+		if hidden(o.Pubkey, o.Name) {
+			removed = append(removed, o.Pubkey)
+		}
+	}
+	if len(removed) == 0 {
+		return resp, "", false, nil
+	}
+	drop := make(map[string]bool, len(removed))
+	for _, pk := range removed {
+		drop[pk] = true
+	}
+	links := make([]NodeReachLink, 0, len(resp.Links))
+	bidir := 0
+	for _, l := range resp.Links {
+		if !drop[l.Pubkey] {
+			if l.Bidir {
+				bidir++
+			}
+			links = append(links, l)
+		}
+	}
+	obs := make([]NodeReachObserver, 0, len(resp.DirectObservers))
+	for _, o := range resp.DirectObservers {
+		if !drop[o.Pubkey] {
+			obs = append(obs, o)
+		}
+	}
+	keys := make([]string, 0, len(drop))
+	for pk := range drop {
+		keys = append(keys, pk)
+	}
+	sort.Strings(keys)
+	out = resp // Node, Window, ReliableTokens, Importance are the target's own
+	out.Links, out.DirectObservers = links, obs
+	out.Importance.BidirectionalLinks, out.Importance.DirectObservers = bidir, len(obs)
+	return out, strings.Join(keys, ","), false, nil
 }
 
 // currentReachRankView is the rank view for a Reach response, or nil when no
-// snapshot can be read — the report then renders with rank "unavailable"
-// instead of failing.
+// snapshot can be read — the report then renders with rank_status
+// "unavailable" instead of failing (applyReachRank handles a nil view).
 func (s *Server) currentReachRankView(ctx context.Context) *reachRankView {
 	v, err := s.reachRankView(ctx)
 	if err != nil {
 		return nil
 	}
 	return v
+}
+
+// reachBody returns e's body with visibility and the current rank view v both
+// applied now, re-marshalling (and refreshing the cached body) only when the
+// set of hidden identities or the rank view changed since raw was last
+// marshalled. targetHidden means the caller must answer 404 instead — a
+// target that was visible when e was computed can still be hidden by a rename
+// or a blacklist/prefix change since.
+func (s *Server) reachBody(ctx context.Context, key string, e reachCacheEntry, v *reachRankView) (raw []byte, targetHidden bool, err error) {
+	vis, hiddenKey, targetHidden, err := s.visibleReach(ctx, e.resp)
+	if err != nil || targetHidden {
+		return nil, targetHidden, err
+	}
+	viewID := v.viewID()
+	if e.raw != nil && hiddenKey == e.hiddenKey && viewID == e.viewID {
+		return e.raw, false, nil
+	}
+	applyReachRank(&vis.Importance, vis.Node.Pubkey, v)
+	raw, err = json.Marshal(vis)
+	if err != nil {
+		return nil, false, err
+	}
+	s.reachCacheSetBody(key, e.at, raw, hiddenKey, viewID)
+	return raw, false, nil
 }
 
 // evictReachLocked drops expired entries first; if still at the cap it evicts
@@ -459,11 +562,10 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid pubkey: expected 64 hex chars")
 		return
 	}
-	if s.cfg != nil && s.cfg.IsBlacklisted(pubkey) {
-		writeError(w, 404, "Not found")
-		return
-	}
-	if s.isPubkeyHidden(pubkey) {
+	// Hidden identities 404 so callers learn nothing about them (#1181):
+	// blacklisted / observer-blacklisted pubkeys here, hidden node or
+	// observer names (live) on every serve — see visibleReach.
+	if identityHidden(s.cfg, pubkey) {
 		writeError(w, 404, "Not found")
 		return
 	}
@@ -495,6 +597,17 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cache miss: check the target's live names before the expensive scan.
+	// A failed name lookup fails closed.
+	if hidden, err := s.isIdentityHidden(r.Context(), pubkey); err != nil {
+		log.Printf("[reach] visibility check failed for %s: %v", pubkey, err)
+		writeError(w, 500, "reach computation failed")
+		return
+	} else if hidden {
+		writeError(w, 404, "Not found")
+		return
+	}
+
 	// singleflight: collapse a thundering herd on a cold key to one scan. The
 	// shared computation uses the triggering request's context; a disconnect
 	// there can cancel the in-flight scan for all waiters (acceptable — the
@@ -513,17 +626,24 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return reachCacheEntry{}, nil
 		}
-		// Marshal once here (with the current rank) so the waiters sharing
-		// this result don't each re-marshal it.
+		// Marshal the visible, ranked body once here so the waiters sharing
+		// this result reuse it (each still re-checks visibility and rank in
+		// reachBody on later serves).
 		e := reachCacheEntry{at: time.Now(), resp: resp, found: true}
-		view := s.currentReachRankView(r.Context())
-		applyReachRank(&e.resp.Importance, pubkey, view)
-		raw, mErr := json.Marshal(e.resp)
-		if mErr != nil {
-			log.Printf("[reach] marshal failed for %s: %v", cacheKey, mErr)
-			return nil, mErr
+		vis, hiddenKey, targetHidden, vErr := s.visibleReach(r.Context(), resp)
+		if vErr != nil {
+			return nil, vErr
 		}
-		e.raw, e.viewID = raw, view.viewID()
+		if !targetHidden { // else leave raw nil; writeReachEntry re-checks and 404s
+			view := s.currentReachRankView(r.Context())
+			applyReachRank(&vis.Importance, pubkey, view)
+			raw, mErr := json.Marshal(vis)
+			if mErr != nil {
+				log.Printf("[reach] marshal failed for %s: %v", cacheKey, mErr)
+				return nil, mErr
+			}
+			e.raw, e.hiddenKey, e.viewID = raw, hiddenKey, view.viewID()
+		}
 		s.reachCachePut(cacheKey, e)
 		return e, nil
 	})
@@ -539,12 +659,18 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 	s.writeReachEntry(w, r, cacheKey, e)
 }
 
-// writeReachEntry writes a found entry's body with the current rank view.
+// writeReachEntry writes a found entry's body with visibility and the current
+// rank view both applied now: 404 when the target itself became hidden. A
+// failed live-name lookup fails closed (500), never serving unfiltered data.
 func (s *Server) writeReachEntry(w http.ResponseWriter, r *http.Request, key string, e reachCacheEntry) {
-	raw, err := s.reachBody(key, e, s.currentReachRankView(r.Context()))
+	raw, targetHidden, err := s.reachBody(r.Context(), key, e, s.currentReachRankView(r.Context()))
 	if err != nil {
-		log.Printf("[reach] marshal failed for %s: %v", key, err)
+		log.Printf("[reach] serving %s failed: %v", key, err)
 		writeError(w, 500, "reach computation failed")
+		return
+	}
+	if targetHidden {
+		writeError(w, 404, "Not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

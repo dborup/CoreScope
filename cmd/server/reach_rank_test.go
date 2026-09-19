@@ -731,24 +731,29 @@ func TestReachRank_NoDB(t *testing.T) {
 // Only edges whose endpoints are both 64-hex pubkeys (any case) and differ
 // count; case / orientation variants of one pair count once.
 func TestReachRank_OnlyValidEdgesCount(t *testing.T) {
-	a, b, c, d := pk64("a1"), pk64("b2"), pk64("c3"), pk64("d4")
+	a, b, c, d, e := pk64("a1"), pk64("b2"), pk64("c3"), pk64("d4"), pk64("e5")
 	upper := strings.ToUpper
 	edges := [][2]string{
-		{a, b},                       // valid
-		{upper(a), c},                // valid, upper-case endpoint
-		{c, upper(a)},                // same pair reversed → counted once
-		{upper(b), upper(a)},         // same pair as a-b in another case → counted once
-		{a, ""},                      // empty endpoint (legacy rows)
-		{"", b},                      //
-		{a, d[:63]},                  // shortened (63 chars)
-		{a, d[:62] + "zz"},           // 64 chars, not hex
-		{a, d + "0"},                 // 65 chars
-		{d, d},                       // self-edge
-		{d, upper(d)},                // self-edge, case variant
+		{a, b},               // valid
+		{upper(a), c},        // valid, upper-case endpoint
+		{c, upper(a)},        // same pair reversed → counted once
+		{upper(b), upper(a)}, // same pair as a-b in another case → counted once
+		{a, ""},              // empty endpoint (legacy rows)
+		{"", b},              //
+		{a, d[:63]},          // shortened (63 chars)
+		{a, d[:62] + "zz"},   // 64 chars, not hex
+		{a, d + "0"},         // 65 chars
+		{d, d},               // self-edge, exact lowercase row
+		{d, upper(d)},        // self-edge, case variant of the same pubkey
+		// e's self-edge appears ONLY in mixed case: no lower-lower row for it
+		// exists anywhere, unlike d above. A mutation that drops the explicit
+		// la==lb skip cannot hide behind canonicalEdgesExisting finding a
+		// pre-existing literal row for the (e,e) pair — there isn't one.
+		{e, upper(e)},                // self-edge, mixed case only
 		{b, "a1b2c3d4"},              // prefix, not a pubkey
 		{c, strings.Repeat("g", 64)}, // not hex
 	}
-	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}, {c, "C"}, {d, "D"}}, nil, edges)
+	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}, {c, "C"}, {d, "D"}, {e, "E"}}, nil, edges)
 	srv := newReachRankServer(t, db, &Config{})
 
 	snap, err := srv.loadDegreeSnapshot(context.Background())
@@ -768,6 +773,9 @@ func TestReachRank_OnlyValidEdgesCount(t *testing.T) {
 	}
 	if imp := getReachImportance(t, srv, d); imp.NeighborDegree != 0 || imp.RankStatus != reachRankUnranked {
 		t.Fatalf("reach(d)=%+v want 0 neighbours, unranked", imp)
+	}
+	if imp := getReachImportance(t, srv, e); imp.NeighborDegree != 0 || imp.RankStatus != reachRankUnranked {
+		t.Fatalf("reach(e)=%+v want 0 neighbours, unranked (mixed-case-only self-edge)", imp)
 	}
 }
 
@@ -1076,5 +1084,43 @@ func TestReachRank_ConcurrentRequestsAfterChangeBuildOneView(t *testing.T) {
 	}
 	if views[0] == v0 || len(views[0].rows) != 2 {
 		t.Fatalf("view not rebuilt for the blacklist change: rows=%d", len(views[0].rows))
+	}
+}
+
+// reachRankVisible must be exactly !identityHidden — never a separate rule
+// that could drift from the shared visibility helper #1181 introduced for
+// the Reach page. Compares both functions directly across every combination
+// of blacklist / observer-blacklist / hidden-name-prefix state and every
+// name slot (node, observer, inactive), so a mutation that reintroduces a
+// parallel check (even one that starts equivalent) is caught the moment it
+// diverges.
+func TestReachRankVisible_MatchesIdentityHidden(t *testing.T) {
+	pk := pk64("a1")
+	configs := []*Config{
+		{},
+		{NodeBlacklist: []string{pk}},
+		{ObserverBlacklist: []string{pk}},
+		{HiddenNamePrefixes: []string{"🚫"}},
+		{NodeBlacklist: []string{pk}, HiddenNamePrefixes: []string{"🚫"}},
+		{ObserverBlacklist: []string{strings.ToUpper(pk)}, HiddenNamePrefixes: []string{"X"}},
+	}
+	nameSets := [][]string{
+		nil,
+		{""},
+		{"Plain"},
+		{"🚫 hidden"},
+		{"Plain", "🚫 hidden"}, // node name plain, but an observer/inactive name hides it
+		{"XPlain"},
+		{"xplain"}, // prefix match is case-sensitive, like IsNameHidden
+	}
+	for _, cfg := range configs {
+		for _, names := range nameSets {
+			id := rankIdent{names: names}
+			got := reachRankVisible(cfg, pk, id)
+			want := !identityHidden(cfg, pk, names...)
+			if got != want {
+				t.Fatalf("reachRankVisible(cfg=%+v, names=%v) = %v, want %v (identityHidden)", cfg, names, got, want)
+			}
+		}
 	}
 }
