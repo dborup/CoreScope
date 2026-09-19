@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -97,5 +98,77 @@ func BenchmarkNodeReachCacheHitVisibility(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// benchReachScaleDB is a realistic-to-large Reach report: `links` neighbours
+// (half both ways), `direct` observers that heard the target at 0 hops,
+// `observers` rows in total and `nodes` rows in total — what the per-serve
+// visibility lookup has to cover.
+func benchReachScaleDB(b *testing.B, links, direct, observers, nodes int) (*DB, string) {
+	b.Helper()
+	db, target := benchReachVisibilityDB(b, links)
+	tx, err := db.conn.Begin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	ins := func(q string, args ...interface{}) {
+		if _, err := tx.Exec(q, args...); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for i := 5; i < observers; i++ {
+		ins(`INSERT INTO observers (id, name) VALUES (?, ?)`, strings.ToUpper(pk64(fmt.Sprintf("0c%04x", i))), fmt.Sprintf("Observer %d", i))
+	}
+	for i := 1 + links; i < nodes; i++ {
+		ins(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen) VALUES (?, ?, 'companion', 56.2, 10.3, '2026-09-01T00:00:00Z', '2026-06-01T00:00:00Z')`,
+			pk64(fmt.Sprintf("d%05x", i)), fmt.Sprintf("Companion %d", i))
+	}
+	now := time.Now().Unix()
+	for i := 0; i < direct; i++ { // observer rowid 6.. heard the target at 0 hops
+		id := 100000 + i
+		ins(`INSERT INTO transmissions (id, from_pubkey, payload_type) VALUES (?, '', 5)`, id)
+		ins(`INSERT INTO observations (id, transmission_id, observer_idx, snr, path_json, timestamp) VALUES (?, ?, ?, -7.0, '["01FA"]', ?)`, id, id, 6+i, now)
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+	return db, target
+}
+
+// BenchmarkNodeReachCacheHitVisibilityScale: the same cache hit at realistic
+// and large report sizes (links / direct observers / observers / nodes).
+func BenchmarkNodeReachCacheHitVisibilityScale(b *testing.B) {
+	for _, sz := range []struct {
+		name                            string
+		links, direct, observers, nodes int
+	}{
+		{"hub_150l_100o_200obs_3000n", 150, 100, 200, 3000},
+		{"large_300l_100o_2000obs_5000n", 300, 100, 2000, 5000},
+	} {
+		for _, c := range []struct {
+			name     string
+			prefixes []string
+		}{{"prefixes", []string{"🚫"}}, {"no_prefixes", nil}} {
+			b.Run(sz.name+"/"+c.name, func(b *testing.B) {
+				db, target := benchReachScaleDB(b, sz.links, sz.direct, sz.observers, sz.nodes)
+				cfg := &Config{HiddenNamePrefixes: c.prefixes}
+				srv := &Server{store: &PacketStore{db: db}, db: db, cfg: cfg, perfStats: NewPerfStats()}
+				path := "/api/nodes/" + target + "/reach?days=7"
+				rr := serveReach(srv, path)
+				var resp NodeReachResponse
+				if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &resp) != nil ||
+					len(resp.Links) < sz.links || len(resp.DirectObservers) < sz.direct {
+					b.Fatalf("warm-up: %d links=%d obs=%d", rr.Code, len(resp.Links), len(resp.DirectObservers))
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if rr := serveReach(srv, path); rr.Code != http.StatusOK {
+						b.Fatalf("status %d", rr.Code)
+					}
+				}
+			})
+		}
 	}
 }

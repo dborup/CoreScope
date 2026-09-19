@@ -732,9 +732,10 @@ An identity is **hidden** when its pubkey is in `nodeBlacklist` or
 `links` and `direct_observers`, and `bidirectional_links` / `direct_observers`
 count only what is listed. Names are read live on every request — including
 cached reports — so **hiding** (a blacklist or prefix change, or a rename into
-a hidden prefix) applies on the next request. Un-hiding a neighbour by
-renaming it can take up to the 5-minute cache TTL, because the name recorded
-when the report was computed still counts.
+a hidden prefix) applies on the next request. Un-hiding by renaming — of a
+neighbour or of the target itself — can take up to the 5-minute cache TTL
+(plus the server's 30 s node cache for the target), because the name recorded
+when the report was computed still counts. This errs on the side of hiding.
 `neighbor_degree`, `degree_rank` and `nodes_with_edges` are counts over the
 whole neighbour graph and are not changed by this filtering.
 

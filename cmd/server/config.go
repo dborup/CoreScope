@@ -928,25 +928,7 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 // IsBlacklisted's CAS-style lazy first-read materialisation for the
 // JSON-load path where SetHiddenNamePrefixes was never called.
 func (c *Config) IsNameHidden(name string) bool {
-	if c == nil {
-		return false
-	}
-	pp := c.hiddenPrefixesPtr.Load()
-	if pp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
-		built := make([]string, len(c.HiddenNamePrefixes))
-		copy(built, c.HiddenNamePrefixes)
-		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
-			pp = &built
-		} else {
-			pp = c.hiddenPrefixesPtr.Load()
-		}
-	}
-	if pp == nil || len(*pp) == 0 {
-		return false
-	}
-	for _, p := range *pp {
+	for _, p := range c.hiddenPrefixes() {
 		if p == "" {
 			continue
 		}
@@ -957,13 +939,12 @@ func (c *Config) IsNameHidden(name string) bool {
 	return false
 }
 
-// HasHiddenNamePrefixes reports whether IsNameHidden can return true for some
-// name — i.e. at least one non-empty prefix is active. It uses exactly
-// IsNameHidden's predicate (a whitespace-only prefix counts), so callers can
-// skip name lookups safely when it is false.
-func (c *Config) HasHiddenNamePrefixes() bool {
+// hiddenPrefixes returns the active hide-prefix slice (shared, read-only),
+// materialising it lazily from the JSON-loaded HiddenNamePrefixes on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) hiddenPrefixes() []string {
 	if c == nil {
-		return false
+		return nil
 	}
 	pp := c.hiddenPrefixesPtr.Load()
 	if pp == nil {
@@ -976,14 +957,23 @@ func (c *Config) HasHiddenNamePrefixes() bool {
 		}
 	}
 	if pp == nil {
-		return false
+		return nil
 	}
-	for _, p := range *pp {
+	return *pp
+}
+
+// EnforcedHiddenNamePrefixes returns (a copy of) exactly the prefixes
+// IsNameHidden enforces — every non-empty entry, a whitespace-only one
+// included — or nil when none is active, so callers can skip name lookups
+// safely and match the same prefixes elsewhere (e.g. in SQL).
+func (c *Config) EnforcedHiddenNamePrefixes() []string {
+	var out []string
+	for _, p := range c.hiddenPrefixes() {
 		if p != "" {
-			return true
+			out = append(out, p)
 		}
 	}
-	return false
+	return out
 }
 
 // ActiveHiddenNamePrefixes returns a copy of the hide prefixes IsNameHidden
@@ -996,24 +986,12 @@ func (c *Config) HasHiddenNamePrefixes() bool {
 // instead of hardcoding one. An empty result means the deployment offers no
 // prefix-based hiding, and the page must not claim it does.
 func (c *Config) ActiveHiddenNamePrefixes() []string {
-	if c == nil {
+	prefixes := c.hiddenPrefixes()
+	if prefixes == nil {
 		return nil
 	}
-	pp := c.hiddenPrefixesPtr.Load()
-	if pp == nil {
-		built := make([]string, len(c.HiddenNamePrefixes))
-		copy(built, c.HiddenNamePrefixes)
-		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
-			pp = &built
-		} else {
-			pp = c.hiddenPrefixesPtr.Load()
-		}
-	}
-	if pp == nil {
-		return nil
-	}
-	out := make([]string, 0, len(*pp))
-	for _, p := range *pp {
+	out := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}

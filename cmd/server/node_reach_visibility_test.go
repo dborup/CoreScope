@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -341,36 +342,110 @@ func TestNodeReach_NothingHiddenBodyUnchanged(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Links) != len(resp.Links) || len(got.DirectObservers) != len(resp.DirectObservers) ||
-		got.Importance != resp.Importance {
-		t.Fatalf("unfiltered report changed: got %d links/%d obs %+v, want %d/%d %+v",
-			len(got.Links), len(got.DirectObservers), got.Importance, len(resp.Links), len(resp.DirectObservers), resp.Importance)
+	// Full comparison (not just counts). Link order among equal-scored links
+	// is not specified, so compare as sorted lists; round-trip resp through
+	// JSON so pointer fields compare by value.
+	var want NodeReachResponse
+	raw, _ := json.Marshal(resp)
+	if err := json.Unmarshal(raw, &want); err != nil {
+		t.Fatal(err)
 	}
-	if names, err := (&Server{cfg: &Config{}}).identityNames([]string{f.n}); names != nil || err != nil {
-		t.Fatalf("identityNames without prefixes = %v, %v; want nil, nil and no DB access", names, err)
+	sortReport := func(r *NodeReachResponse) {
+		sort.Slice(r.Links, func(i, j int) bool { return r.Links[i].Pubkey < r.Links[j].Pubkey })
+		sort.Slice(r.DirectObservers, func(i, j int) bool { return r.DirectObservers[i].Pubkey < r.DirectObservers[j].Pubkey })
+	}
+	sortReport(&got)
+	sortReport(&want)
+	want.Window.Since = got.Window.Since // computed a moment apart
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unfiltered report changed:\n got %+v\nwant %+v", got, want)
+	}
+	if names, err := (&Server{cfg: &Config{}}).hiddenIdentityNames(context.Background(), []string{f.n}); names != nil || err != nil {
+		t.Fatalf("hiddenIdentityNames without prefixes = %v, %v; want nil, nil and no DB access", names, err)
 	}
 }
 
-// identityNames handles a large batch (a hub's full link list) in one query
-// and maps upper-case observer ids back to lower-case pubkeys.
-func TestIdentityNames_LargeBatch(t *testing.T) {
+// hiddenIdentityNames handles a large batch (a hub's full link list) in one
+// query, returns only names that start with a hidden prefix, and maps
+// upper-case observer ids back to lower-case pubkeys.
+func TestHiddenIdentityNames_LargeBatchOnlyHidingNames(t *testing.T) {
 	f := newReachVisibilityDB(t)
 	pks := make([]string, 0, 1010)
 	for i := 0; i < 1000; i++ {
 		pks = append(pks, pk64(fmt.Sprintf("f%05x", i)))
 	}
-	pks = append(pks, f.o2Hidden, strings.ToUpper(f.hidName), f.hidObsName)
-	names, err := f.srv.identityNames(pks)
+	pks = append(pks, f.o2Hidden, strings.ToUpper(f.hidName), f.hidObsName, f.visible, f.o1, f.inactiveHidden)
+	names, err := f.srv.hiddenIdentityNames(context.Background(), pks)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(names[f.o2Hidden]) != "[🚫 hidden obs]" || fmt.Sprint(names[f.hidName]) != "[🚫 private A]" {
-		t.Fatalf("names=%v", names)
+	want := map[string]string{
+		f.o2Hidden:       "[🚫 hidden obs]",
+		f.hidName:        "[🚫 private A]",
+		f.hidObsName:     "[🚫 obs D]", // its visible node name "Delta" is not returned
+		f.inactiveHidden: "[🚫 gone quiet]",
 	}
-	d := names[f.hidObsName]
-	sort.Strings(d)
-	if fmt.Sprint(d) != "[Delta 🚫 obs D]" {
-		t.Fatalf("node + observer names for D = %v", d)
+	if len(names) != len(want) {
+		t.Fatalf("names=%v, want only the hiding names %v", names, want)
+	}
+	for pk, w := range want {
+		if fmt.Sprint(names[pk]) != w {
+			t.Fatalf("names[%s]=%v want %s (all=%v)", pk[:4], names[pk], w, names)
+		}
+	}
+}
+
+// The SQL prefix test is byte-exact strings.HasPrefix, as IsNameHidden.
+func TestHiddenIdentityNames_PrefixMatchIsExact(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	cases := []struct {
+		name string
+		hide bool
+	}{
+		{"Ab visible", false}, // case differs from prefix "AB"
+		{"AB", true},          // exactly the prefix
+		{"A", false},          // shorter than the prefix
+		{"AB side", true},
+		{"x AB", false}, // prefix not at the start
+		{"🚫", true},     // multi-byte prefix
+		{"🚫x", true},
+		{"\U0001F6ABx", true}, // same emoji, escaped
+	}
+	f.cfg.SetHiddenNamePrefixes([]string{"AB", "🚫"})
+	pks := make([]string, len(cases))
+	for i, c := range cases {
+		pks[i] = pk64(fmt.Sprintf("e0%02x", i))
+		if _, err := f.db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater')`, pks[i], c.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, err := f.srv.hiddenIdentityNames(context.Background(), pks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range cases {
+		if got := len(names[pks[i]]) > 0; got != c.hide || got != f.cfg.IsNameHidden(c.name) {
+			t.Errorf("%q: SQL hiding=%v, IsNameHidden=%v, want %v", c.name, got, f.cfg.IsNameHidden(c.name), c.hide)
+		}
+	}
+}
+
+// reachCacheSetBody never attaches a body to an entry computed at another
+// time: a body built from an older report must not be reused for a newer one.
+func TestReachCacheSetBody_StaleEntryUntouched(t *testing.T) {
+	srv := &Server{}
+	resetReachState(t, srv)
+	old := time.Now().Add(-time.Minute)
+	cur := reachCacheEntry{at: time.Now(), raw: []byte(`{"current":true}`), hiddenKey: "", found: true}
+	srv.reachCachePut("k", cur)
+	srv.reachCacheSetBody("k", old, []byte(`{"stale":true}`), "x")
+	got, ok := srv.reachCacheGet("k")
+	if !ok || string(got.raw) != `{"current":true}` || got.hiddenKey != "" {
+		t.Fatalf("stale body attached to a newer entry: %s %q", got.raw, got.hiddenKey)
+	}
+	srv.reachCacheSetBody("k", cur.at, []byte(`{"refreshed":true}`), "y")
+	if got, _ := srv.reachCacheGet("k"); string(got.raw) != `{"refreshed":true}` || got.hiddenKey != "y" {
+		t.Fatalf("matching entry not refreshed: %s %q", got.raw, got.hiddenKey)
 	}
 }
 
@@ -401,8 +476,8 @@ func TestNodeReach_WhitespacePrefixStillLooksUpNames(t *testing.T) {
 	if _, resp, _ := f.get(t, f.n); strings.Contains(linkSet(resp), f.visible[:4]) {
 		t.Fatalf("whitespace-prefixed rename not hidden: %s", linkSet(resp))
 	}
-	if !f.cfg.HasHiddenNamePrefixes() || (&Config{HiddenNamePrefixes: []string{""}}).HasHiddenNamePrefixes() {
-		t.Fatalf("HasHiddenNamePrefixes must mirror IsNameHidden: only empty prefixes are inert")
+	if len(f.cfg.EnforcedHiddenNamePrefixes()) != 1 || (&Config{HiddenNamePrefixes: []string{""}}).EnforcedHiddenNamePrefixes() != nil {
+		t.Fatalf("EnforcedHiddenNamePrefixes must mirror IsNameHidden: only empty prefixes are inert")
 	}
 }
 
