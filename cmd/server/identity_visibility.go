@@ -49,17 +49,23 @@ func hiddenNamesSQL(n int, withInactive bool) string {
 		}
 		return "(" + strings.Join(terms, " OR ") + ")"
 	}
-	q := `SELECT n.public_key, n.name FROM json_each(?1) j JOIN nodes n ON n.public_key = j.value WHERE ` + match("n.name") + `
-	UNION ALL
-	SELECT o.id, o.name FROM observers o WHERE ` + match("o.name") + ` AND lower(o.id) IN (SELECT value FROM json_each(?1))`
+	// One pass over the keys: the nodes row and, when present, the
+	// inactive_nodes row are joined by primary key; the inactive name is only
+	// returned while the node has no named row.
+	nodes := `SELECT j.value, COALESCE(n.name, ''), '' FROM json_each(?1) j
+	LEFT JOIN nodes n ON n.public_key = j.value
+	WHERE ` + match("n.name")
 	if withInactive {
-		q += `
-	UNION ALL
-	SELECT i.public_key, i.name FROM json_each(?1) j JOIN inactive_nodes i ON i.public_key = j.value
-	WHERE ` + match("i.name") + `
-	  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.public_key = i.public_key AND COALESCE(n.name, '') <> '')`
+		nodes = `SELECT j.value, COALESCE(n.name, ''),
+	       CASE WHEN COALESCE(n.name, '') = '' THEN COALESCE(i.name, '') ELSE '' END
+	FROM json_each(?1) j
+	LEFT JOIN nodes n ON n.public_key = j.value
+	LEFT JOIN inactive_nodes i ON i.public_key = j.value
+	WHERE ` + match("n.name") + ` OR (COALESCE(n.name, '') = '' AND ` + match("i.name") + `)`
 	}
-	return q
+	return nodes + `
+	UNION ALL
+	SELECT o.id, o.name, '' FROM observers o WHERE ` + match("o.name") + ` AND lower(o.id) IN (SELECT value FROM json_each(?1))`
 }
 
 // hiddenIdentityNames returns, keyed by lowercase pubkey, the current names of
@@ -105,12 +111,16 @@ func (s *Server) hiddenIdentityNames(ctx context.Context, pubkeys []string) (map
 	defer rows.Close()
 	out := make(map[string][]string)
 	for rows.Next() {
-		var pk, name string
-		if err := rows.Scan(&pk, &name); err != nil {
+		var pk, name, inactiveName string
+		if err := rows.Scan(&pk, &name, &inactiveName); err != nil {
 			return nil, fmt.Errorf("identity names: %w", err)
 		}
 		pk = strings.ToLower(pk)
-		out[pk] = append(out[pk], name)
+		for _, nm := range []string{name, inactiveName} {
+			if nm != "" {
+				out[pk] = append(out[pk], nm) // callers confirm with IsNameHidden
+			}
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("identity names: %w", err)
