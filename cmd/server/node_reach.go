@@ -261,17 +261,27 @@ func clampDays(d int) int {
 // --- bounded TTL cache. perf is gated by the time window; this just avoids
 // recompute under dashboard polling. Keyed "pubkey|days". ---
 //
-// reachCacheMax bounds entry count; at ~2KB of marshalled JSON per entry the
-// worst case is well under 1MB, so an entry cap (rather than a byte budget)
-// keeps the bookkeeping trivial while staying memory-safe.
+// reachCacheMax bounds entry count; an entry holds the report plus its
+// marshalled JSON. A typical node needs a few KB; a hub with hundreds of links
+// and direct observers can reach a few hundred KB (≈195 KB of JSON for 300
+// links + 100 observers), so the cap bounds the worst case at tens of MB while
+// keeping the bookkeeping trivial (an entry cap rather than a byte budget).
 const (
 	reachCacheTTL = 5 * time.Minute
 	reachCacheMax = 256
 )
 
+// reachCacheEntry keeps the computed report (resp, unfiltered) and the body
+// last served for it. Visibility is applied on every serve (visibleReach), not
+// at compute time, so a cached report never outlives a blacklist, hidden-prefix
+// or rename change; hiddenKey records which identities the cached body omits so
+// an unchanged result reuses it without re-marshalling.
 type reachCacheEntry struct {
-	at  time.Time
-	raw []byte
+	at        time.Time
+	resp      NodeReachResponse
+	raw       []byte
+	hiddenKey string
+	found     bool // false only for the "node not found" result, which is never cached
 }
 
 // reachState bundles per-server reach caches. Was a set of package-level
@@ -293,19 +303,23 @@ type reachState struct {
 
 	degreeMu   sync.Mutex
 	degreeSnap *degreeSnapshot
+
+	// inactiveNodesTable caches a positive inactive_nodes probe for the
+	// visibility name lookup (identity_visibility.go).
+	inactiveNodesTable atomic.Bool
 }
 
-// reachCacheGet returns the cached marshalled JSON for key. The returned slice
-// is shared (not copied): it is treated as immutable — only ever handed to
-// w.Write — so callers MUST NOT mutate it.
-func (s *Server) reachCacheGet(key string) ([]byte, bool) {
+// reachCacheGet returns the cached entry for key. Its raw slice and resp
+// slices are shared (not copied) and treated as immutable — raw is only ever
+// handed to w.Write — so callers MUST NOT mutate them.
+func (s *Server) reachCacheGet(key string) (reachCacheEntry, bool) {
 	s.reach.cacheMu.RLock()
 	defer s.reach.cacheMu.RUnlock()
 	e, ok := s.reach.cache[key]
 	if !ok || time.Since(e.at) > reachCacheTTL {
-		return nil, false
+		return reachCacheEntry{}, false
 	}
-	return e.raw, true
+	return e, true
 }
 
 // reachCacheLen returns the current entry count in the reach response cache.
@@ -350,7 +364,7 @@ func isHexPubkey(s string) bool {
 	return true
 }
 
-func (s *Server) reachCachePut(key string, raw []byte) {
+func (s *Server) reachCachePut(key string, e reachCacheEntry) {
 	s.reach.cacheMu.Lock()
 	defer s.reach.cacheMu.Unlock()
 	if s.reach.cache == nil {
@@ -359,7 +373,117 @@ func (s *Server) reachCachePut(key string, raw []byte) {
 	if _, exists := s.reach.cache[key]; !exists && len(s.reach.cache) >= reachCacheMax {
 		s.evictReachLocked()
 	}
-	s.reach.cache[key] = reachCacheEntry{at: time.Now(), raw: raw}
+	s.reach.cache[key] = e
+}
+
+// reachCacheSetBody stores a re-marshalled body for the entry computed at at,
+// keeping its original TTL; a no-op if the entry was replaced or evicted.
+func (s *Server) reachCacheSetBody(key string, at time.Time, raw []byte, hiddenKey string) {
+	s.reach.cacheMu.Lock()
+	defer s.reach.cacheMu.Unlock()
+	if e, ok := s.reach.cache[key]; ok && e.at.Equal(at) {
+		e.raw, e.hiddenKey = raw, hiddenKey
+		s.reach.cache[key] = e
+	}
+}
+
+// visibleReach applies visibility to a report on every serve, cached or not,
+// so no visibility change waits for the cache TTL. One live-name lookup covers
+// the target and every listed identity; each is checked with identityHidden
+// against its live names and the name recorded in the report. targetHidden
+// reports that the target itself is hidden now (the caller must 404).
+// Otherwise every hidden identity is removed from links and direct_observers
+// and the counts derived from those lists are recomputed; hiddenKey lists the
+// removed pubkeys (sorted, comma-joined; "" when none, in which case resp is
+// returned as is, without copying).
+func (s *Server) visibleReach(ctx context.Context, resp NodeReachResponse) (out NodeReachResponse, hiddenKey string, targetHidden bool, err error) {
+	var live map[string][]string // hiding names by pubkey; nil without prefixes
+	if len(s.cfg.EnforcedHiddenNamePrefixes()) > 0 {
+		pks := make([]string, 0, 1+len(resp.Links)+len(resp.DirectObservers))
+		pks = append(pks, resp.Node.Pubkey)
+		for _, l := range resp.Links {
+			pks = append(pks, l.Pubkey)
+		}
+		for _, o := range resp.DirectObservers {
+			pks = append(pks, o.Pubkey)
+		}
+		if live, err = s.hiddenIdentityNames(ctx, pks); err != nil {
+			return NodeReachResponse{}, "", false, err
+		}
+	}
+	// Report pubkeys are lower-case (the handler, resolver and scan all
+	// normalise them), matching the keys of live.
+	hidden := func(pk, recorded string) bool {
+		if identityHidden(s.cfg, pk, recorded) {
+			return true
+		}
+		return live != nil && identityHidden(s.cfg, pk, live[pk]...)
+	}
+	if hidden(resp.Node.Pubkey, resp.Node.Name) {
+		return NodeReachResponse{}, "", true, nil
+	}
+	var removed []string
+	for _, l := range resp.Links {
+		if hidden(l.Pubkey, l.Name) {
+			removed = append(removed, l.Pubkey)
+		}
+	}
+	for _, o := range resp.DirectObservers {
+		if hidden(o.Pubkey, o.Name) {
+			removed = append(removed, o.Pubkey)
+		}
+	}
+	if len(removed) == 0 {
+		return resp, "", false, nil
+	}
+	drop := make(map[string]bool, len(removed))
+	for _, pk := range removed {
+		drop[pk] = true
+	}
+	links := make([]NodeReachLink, 0, len(resp.Links))
+	bidir := 0
+	for _, l := range resp.Links {
+		if !drop[l.Pubkey] {
+			if l.Bidir {
+				bidir++
+			}
+			links = append(links, l)
+		}
+	}
+	obs := make([]NodeReachObserver, 0, len(resp.DirectObservers))
+	for _, o := range resp.DirectObservers {
+		if !drop[o.Pubkey] {
+			obs = append(obs, o)
+		}
+	}
+	keys := make([]string, 0, len(drop))
+	for pk := range drop {
+		keys = append(keys, pk)
+	}
+	sort.Strings(keys)
+	out = resp // Node, Window, ReliableTokens are the target's own
+	out.Links, out.DirectObservers = links, obs
+	out.Importance.BidirectionalLinks, out.Importance.DirectObservers = bidir, len(obs)
+	return out, strings.Join(keys, ","), false, nil
+}
+
+// reachBody returns e's body with visibility applied now, re-marshalling (and
+// refreshing the cached body) only when the set of hidden identities changed.
+// targetHidden means the caller must answer 404 instead.
+func (s *Server) reachBody(ctx context.Context, key string, e reachCacheEntry) (raw []byte, targetHidden bool, err error) {
+	vis, hiddenKey, targetHidden, err := s.visibleReach(ctx, e.resp)
+	if err != nil || targetHidden {
+		return nil, targetHidden, err
+	}
+	if e.raw != nil && hiddenKey == e.hiddenKey {
+		return e.raw, false, nil
+	}
+	raw, err = json.Marshal(vis)
+	if err != nil {
+		return nil, false, err
+	}
+	s.reachCacheSetBody(key, e.at, raw, hiddenKey)
+	return raw, false, nil
 }
 
 // evictReachLocked drops expired entries first; if still at the cap it evicts
@@ -396,11 +520,10 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid pubkey: expected 64 hex chars")
 		return
 	}
-	if s.cfg != nil && s.cfg.IsBlacklisted(pubkey) {
-		writeError(w, 404, "Not found")
-		return
-	}
-	if s.isPubkeyHidden(pubkey) {
+	// Hidden identities 404 so callers learn nothing about them (#1181):
+	// blacklisted / observer-blacklisted pubkeys here, hidden node or
+	// observer names (live) on every serve — see visibleReach.
+	if identityHidden(s.cfg, pubkey) {
 		writeError(w, 404, "Not found")
 		return
 	}
@@ -427,9 +550,19 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 	// the gen actually moved (#1629 round-2, adversarial #5).
 	s.reachPurgeIfBlacklistGenChanged(gen)
 	cacheKey := pubkey + "|" + strconv.Itoa(days) + "|g" + strconv.FormatUint(gen, 10)
-	if raw, ok := s.reachCacheGet(cacheKey); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(raw)
+	if e, ok := s.reachCacheGet(cacheKey); ok {
+		s.writeReachEntry(w, r, cacheKey, e)
+		return
+	}
+
+	// Cache miss: check the target's live names before the expensive scan.
+	// A failed name lookup fails closed.
+	if hidden, err := s.isIdentityHidden(r.Context(), pubkey); err != nil {
+		log.Printf("[reach] visibility check failed for %s: %v", pubkey, err)
+		writeError(w, 500, "reach computation failed")
+		return
+	} else if hidden {
+		writeError(w, 404, "Not found")
 		return
 	}
 
@@ -438,8 +571,8 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 	// there can cancel the in-flight scan for all waiters (acceptable — the
 	// next request recomputes).
 	v, err, _ := s.reach.sf.Do(cacheKey, func() (interface{}, error) {
-		if raw, ok := s.reachCacheGet(cacheKey); ok {
-			return raw, nil
+		if e, ok := s.reachCacheGet(cacheKey); ok {
+			return e, nil
 		}
 		resp, ok, cErr := s.computeNodeReach(r.Context(), pubkey, days)
 		if cErr != nil {
@@ -449,22 +582,49 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 			return nil, cErr
 		}
 		if !ok {
-			return []byte(nil), nil
+			return reachCacheEntry{}, nil
 		}
-		raw, mErr := json.Marshal(resp)
-		if mErr != nil {
-			log.Printf("[reach] marshal failed for %s: %v", cacheKey, mErr)
-			return nil, mErr
+		// Marshal the visible body once here so the waiters sharing this
+		// result reuse it (each still re-checks visibility in reachBody).
+		e := reachCacheEntry{at: time.Now(), resp: resp, found: true}
+		vis, hiddenKey, targetHidden, vErr := s.visibleReach(r.Context(), resp)
+		if vErr != nil {
+			return nil, vErr
 		}
-		s.reachCachePut(cacheKey, raw)
-		return raw, nil
+		if !targetHidden { // else leave raw nil; writeReachEntry re-checks and 404s
+			raw, mErr := json.Marshal(vis)
+			if mErr != nil {
+				log.Printf("[reach] marshal failed for %s: %v", cacheKey, mErr)
+				return nil, mErr
+			}
+			e.raw, e.hiddenKey = raw, hiddenKey
+		}
+		s.reachCachePut(cacheKey, e)
+		return e, nil
 	})
 	if err != nil {
 		writeError(w, 500, "reach computation failed")
 		return
 	}
-	raw, _ := v.([]byte)
-	if len(raw) == 0 {
+	e, _ := v.(reachCacheEntry)
+	if !e.found {
+		writeError(w, 404, "Not found")
+		return
+	}
+	s.writeReachEntry(w, r, cacheKey, e)
+}
+
+// writeReachEntry writes a found entry's body with visibility applied now:
+// 404 when the target itself became hidden. A failed live-name lookup fails
+// closed (500), never serving unfiltered data.
+func (s *Server) writeReachEntry(w http.ResponseWriter, r *http.Request, key string, e reachCacheEntry) {
+	raw, targetHidden, err := s.reachBody(r.Context(), key, e)
+	if err != nil {
+		log.Printf("[reach] serving %s failed: %v", key, err)
+		writeError(w, 500, "reach computation failed")
+		return
+	}
+	if targetHidden {
 		writeError(w, 404, "Not found")
 		return
 	}

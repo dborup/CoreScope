@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strconv"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -189,7 +190,7 @@ func TestReachCacheEviction_BoundedNotWiped(t *testing.T) {
 	srv := &Server{}
 	resetReachState(t, srv)
 	for i := 0; i < reachCacheMax+50; i++ {
-		srv.reachCachePut("k"+strconv.Itoa(i), []byte("x"))
+		srv.reachCachePut("k"+strconv.Itoa(i), reachCacheEntry{at: time.Now(), raw: []byte("x"), found: true})
 	}
 	srv.reach.cacheMu.RLock()
 	n := len(srv.reach.cache)
