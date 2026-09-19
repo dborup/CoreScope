@@ -192,3 +192,47 @@ func BenchmarkNodeReachCacheHit(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkReachAndRankParallel: concurrent GOMAXPROCS goroutines hitting a
+// warm cache/view — 3 parts /api/reach-rank (page1) to 1 part
+// /api/nodes/{pk}/reach, resembling the leaderboard driving traffic to
+// individual Reach pages. Confirms the shared snapshot/view mutex is not a
+// bottleneck under concurrent readers.
+func BenchmarkReachAndRankParallel(b *testing.B) {
+	for _, ds := range reachRankBenchSets {
+		b.Run(ds.name, func(b *testing.B) {
+			db, pks := benchRankDB(b, ds.nodes, ds.edgesPerNode)
+			srv := benchRankServer(db)
+			router := mux.NewRouter()
+			router.HandleFunc("/api/nodes/{pubkey}/reach", srv.handleNodeReach).Methods("GET")
+			router.HandleFunc("/api/reach-rank", srv.handleReachRank).Methods("GET")
+			get := func(path string) int {
+				rr := httptest.NewRecorder()
+				router.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+				return rr.Code
+			}
+			reachPath := "/api/nodes/" + pks[0] + "/reach?days=7"
+			if code := get("/api/reach-rank"); code != http.StatusOK {
+				b.Fatalf("warm-up rank: %d", code)
+			}
+			if code := get(reachPath); code != http.StatusOK {
+				b.Fatalf("warm-up reach: %d", code)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					i++
+					path := "/api/reach-rank"
+					if i%4 == 0 {
+						path = reachPath
+					}
+					if code := get(path); code != http.StatusOK {
+						b.Fatalf("%s: %d", path, code)
+					}
+				}
+			})
+		})
+	}
+}
