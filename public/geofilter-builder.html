@@ -85,13 +85,40 @@
 </div>
 
 <script src="geofilter-draft.js"></script>
+<!-- #7: this standalone page has no roles.js and no /api/config/client fetch
+     of its own, so it previously hardcoded a keyless CARTO URL and now gets
+     watermarked tiles. Pull in the shared provider module purely for
+     MC_getCartoTileUrl — it is self-contained (no roles.js dependency) and
+     its parse-time registry init is harmless here. -->
+<script src="map-tile-providers.js"></script>
 <script>
 const map = L.map('map').setView([50.5, 4.4], 8);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-  attribution: '© OpenStreetMap © CartoDB',
-  maxZoom: 19
-}).addTo(map);
+const CARTO_TILE_PATH = '/dark_all/{z}/{x}/{y}{r}.png';
+
+// #7: this page has no roles.js, so it owns its own config load. The CARTO
+// layer is created only AFTER /api/config/client settles — creating it first
+// and swapping the URL afterwards would already have fired keyless requests
+// and cached watermarked tiles. On failure we still add the layer (keyless),
+// so an offline / API-less use of the builder keeps working instead of
+// showing an empty map. Exactly one layer is created on either path.
+function addCartoLayer() {
+  L.tileLayer(window.MC_getCartoTileUrl(CARTO_TILE_PATH), {
+    attribution: '© OpenStreetMap © CartoDB',
+    maxZoom: 19
+  }).addTo(map);
+}
+
+fetch('/api/config/client')
+  .then(function (r) { return r.json(); })
+  .then(function (cfg) {
+    if (cfg && cfg.map) {
+      window.MC_MAP_CFG = cfg.map;
+      if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
+    }
+  })
+  .catch(function () { /* standalone/offline use: fall back to keyless tiles */ })
+  .then(addCartoLayer);
 
 let points = [];
 let markers = [];
