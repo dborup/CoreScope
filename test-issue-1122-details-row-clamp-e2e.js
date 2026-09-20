@@ -168,8 +168,19 @@ function measureRows() {
       }, rows.filter(r => r.overflowing).map(r => r.hash));
       assert(target, 'no overflowing channel-message row with decoded text found');
       const row = page.locator(`#pktBody tr[data-hash="${target.hash}"]`).first();
-      await row.scrollIntoViewIfNeeded();
       // Click a plain data cell (not the expand column, not a link).
+      // No separate scrollIntoViewIfNeeded(): the page re-renders #pktBody
+      // from under this step. The trigger measured in CI is the one-shot
+      // theme-refresh — app.js fetches /api/config/theme, dispatches
+      // theme-changed, debounces 300ms, and packets.js re-runs
+      // renderTableRows(), which resets _lastVisibleStart and clears
+      // tbody.innerHTML (observed: rows ready at +279ms, theme-refresh at
+      // +496ms, every row detached at +535ms). The background hop-resolution
+      // job re-renders the same way with unbounded latency.
+      // scrollIntoViewIfNeeded() resolves one element handle and does NOT
+      // re-resolve it, so a detach mid-action throws "Element is not attached
+      // to the DOM". click() scrolls as part of its actionability checks and
+      // re-resolves the selector on every retry, so it waits the row out.
       await row.locator('td.col-time').click();
       // The full text must be VISIBLE in a detail surface (never the table):
       // desktop split pane, SlideOver (<=1023px) or the small-mobile bottom
