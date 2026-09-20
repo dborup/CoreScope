@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -43,5 +44,74 @@ func sendTickOrFail(t *testing.T, tick chan<- time.Time, stamp time.Time, timeou
 	case tick <- stamp:
 	case <-time.After(timeout):
 		t.Fatalf("%s: tick blocked after %s — loop dead?", label, timeout)
+	}
+}
+
+// startWatchdogTestLoop is setupWatchdogTestLoop for the common case: a test
+// that wants the loop running for its own duration and nothing more. The
+// returned stop closes done AND waits for the loop goroutine to return. It is
+// safe to call more than once.
+//
+// Waiting is the part that must not be skipped. Closing done only asks the
+// loop to stop; the goroutine can still be inside a scan, and that scan walks
+// the package-level livenessRegistry. The next test registers its own source
+// there, so a loop that has not returned yet will process that source on a
+// tick carrying the previous test's fabricated clock.
+//
+// That is measured, not theoretical. With four call sites closing done and
+// walking away, TestMQTTStallWatchdog_DisconnectedEscalationThrottled_1749
+// failed intermittently when run with the other watchdog tests and not when
+// run on its own. A trace of one failure showed the loop from
+// TestMQTTStallWatchdog_EscalateOnPersistentDisconnect_1749, whose last tick
+// carried a clock 420s ahead, still running after its test returned. The
+// throttle test's own loop had already forced a reconnect and stamped
+// LastForceReconnectUnix. The old loop then read that non-zero stamp, measured
+// it against its own clock, saw more than forceReconnectThrottle elapse and
+// forced a second reconnect. The throttle itself was correct; it was given two
+// clocks for one source.
+func startWatchdogTestLoop(t *testing.T, threshold time.Duration, emit func(...any)) (tick chan time.Time, stop func()) {
+	t.Helper()
+	tick, done, exited := setupWatchdogTestLoop(t, threshold, emit)
+	return tick, joiningWatchdogStop(done, exited)
+}
+
+// joiningWatchdogStop returns the stop function used by startWatchdogTestLoop:
+// close done once, then wait for exited. It is separate only so
+// TestStartWatchdogTestLoop_StopJoinsLoop can hold done and exited itself.
+func joiningWatchdogStop(done, exited chan struct{}) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
+}
+
+// TestStartWatchdogTestLoop_StopIsIdempotent turns the "safe to call more
+// than once" claim in startWatchdogTestLoop's doc comment above into an
+// executable assertion. It calls stop() twice, sequentially, from the same
+// goroutine. joiningWatchdogStop's returned func uses sync.Once to guard
+// close(done), so the second call skips that close and falls straight to
+// <-exited — which returns immediately once exited is closed, on every
+// subsequent read.
+//
+// If the once-guard regressed, a second close(done) call panics with
+// "close of closed channel" (verified: this is what removing sync.Once
+// actually produces) and fails the test that way rather than by timing
+// out. If instead the closed-channel behaviour of <-exited regressed so a
+// second call blocked, that second call would hang and the select below
+// would catch it via the 1s timeout.
+func TestStartWatchdogTestLoop_StopIsIdempotent(t *testing.T) {
+	_, stop := startWatchdogTestLoop(t, time.Minute, func(args ...any) {})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+		stop()
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("calling stop twice blocked; stop must remain idempotent")
 	}
 }
