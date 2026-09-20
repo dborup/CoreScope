@@ -187,9 +187,14 @@ async function effectiveBgFor(page, selector) {
       const outline = parseFloat(style.outlineWidth) >= 1 && style.outlineStyle === 'solid';
       const border = ['Top', 'Right', 'Bottom', 'Left'].every(side =>
         parseFloat(style['border' + side + 'Width']) >= 1 && style['border' + side + 'Style'] === 'solid');
+      // A shadow ring counts too: outline is reserved for :focus-visible, so
+      // the marker deliberately uses box-shadow instead (see style.css).
+      const shadowMatch = /rgba?\([^)]*\)/.exec(style.boxShadow || '');
+      const shadow = style.boxShadow !== 'none' && !!shadowMatch;
       return {
         marked: Array.from(chain.querySelectorAll('.hop-current')).map(el => el.getAttribute('href')),
-        ring: outline || border, ringColor: outline ? style.outlineColor : style.borderTopColor,
+        ring: outline || border || shadow,
+        ringColor: outline ? style.outlineColor : border ? style.borderTopColor : (shadowMatch && shadowMatch[0]),
         outline, dashedBottom: style.borderBottomStyle === 'dashed' && parseFloat(style.borderBottomWidth) >= 1,
         textColor: style.color, padding: parseFloat(style.paddingLeft),
         text: target.textContent, injectedElements: target.childElementCount,
@@ -213,11 +218,21 @@ async function effectiveBgFor(page, selector) {
     const bg = parseRgb(await effectiveBgFor(page, targetSelector));
     assert(contrast(parseRgb(result.ringColor), bg) >= 3, 'Selected hop ring must contrast with the active theme');
     assert(contrast(parseRgb(result.textColor), bg) >= 4.5, 'Selected hop text must remain readable');
+    // The marker must not impersonate the focus ring. `outline` is this app's
+    // focus affordance (style.css "Focus Indicators"), so an unfocused marked
+    // hop drawing its own outline would read as focused, and a genuinely
+    // focused one would differ only in ring width — leaving a keyboard user
+    // unable to tell which hop of an 18-hop chain actually has focus.
+    // (:focus-visible itself is not asserted here: it needs real keyboard
+    // interaction, and the rule that provides it is not part of this change.)
+    assert(!result.outline,
+      'The selected-hop marker must not use outline — that is reserved for :focus-visible');
+
     if (hasHopDisplay) {
       assert(result.warning && result.conflict && result.siblingAmbiguous,
         'Shared hop rendering must preserve unreliable and ambiguous indicators');
-      assert(result.outline && result.dashedBottom,
-        'The selected ambiguous hop must keep its dashed bottom border alongside the enclosing outline');
+      assert(result.ring && result.dashedBottom,
+        'The selected ambiguous hop must keep its dashed bottom border alongside the enclosing marker ring');
     }
     if (SCREENSHOT_DIR) {
       const theme = await page.locator('html').getAttribute('data-theme');
