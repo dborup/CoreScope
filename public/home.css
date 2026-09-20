@@ -455,6 +455,13 @@
   opacity: 0;
 }
 .my-node-card:hover .mnc-remove { opacity: 1; }
+/* #2027 follow-up: the card's keydown handler no longer swallows Enter/Space
+   on nested buttons, so Remove is now genuinely keyboard-activatable. It is
+   hover-revealed (opacity: 0), which would otherwise hide both the control
+   and its focus ring from a keyboard user operating a destructive action
+   (WCAG 2.4.7). Reveal it whenever it, or its card, holds focus. */
+.my-node-card:focus-within .mnc-remove,
+.mnc-remove:focus-visible { opacity: 1; }
 .mnc-remove:hover { background: var(--status-red); color: #fff; }
 
 .mnc-status-text { font-size: .8rem; color: var(--text-muted); margin-bottom: 12px; padding-left: 28px; }
@@ -471,7 +478,7 @@
 .spark-bars { display: flex; align-items: flex-end; gap: 2px; height: 28px; }
 .spark-bar { flex: 1; background: var(--accent); border-radius: 1px; min-width: 0; }
 
-.mnc-actions { display: flex; gap: 8px; }
+.mnc-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .mnc-btn {
   padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--surface-2); color: var(--text); font: 500 .75rem var(--font);
