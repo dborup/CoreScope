@@ -338,6 +338,10 @@ func TestNodeReach_NothingHiddenBodyUnchanged(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("compute: ok=%v err=%v", ok, err)
 	}
+	// computeNodeReach itself leaves the rank fields zero — the handler
+	// applies them from the shared rank view at serve time (applyReachRank),
+	// same as visibleReach does for the HTTP body compared below.
+	applyReachRank(&resp.Importance, resp.Node.Pubkey, f.srv.currentReachRankView(context.Background()))
 	var got NodeReachResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
@@ -432,20 +436,22 @@ func TestHiddenIdentityNames_PrefixMatchIsExact(t *testing.T) {
 
 // reachCacheSetBody never attaches a body to an entry computed at another
 // time: a body built from an older report must not be reused for a newer one.
+// Covers both freshness keys it carries: hiddenKey (visibility) and viewID
+// (rank).
 func TestReachCacheSetBody_StaleEntryUntouched(t *testing.T) {
 	srv := &Server{}
 	resetReachState(t, srv)
 	old := time.Now().Add(-time.Minute)
-	cur := reachCacheEntry{at: time.Now(), raw: []byte(`{"current":true}`), hiddenKey: "", found: true}
+	cur := reachCacheEntry{at: time.Now(), raw: []byte(`{"current":true}`), hiddenKey: "", viewID: 1, found: true}
 	srv.reachCachePut("k", cur)
-	srv.reachCacheSetBody("k", old, []byte(`{"stale":true}`), "x")
+	srv.reachCacheSetBody("k", old, []byte(`{"stale":true}`), "x", 2)
 	got, ok := srv.reachCacheGet("k")
-	if !ok || string(got.raw) != `{"current":true}` || got.hiddenKey != "" {
-		t.Fatalf("stale body attached to a newer entry: %s %q", got.raw, got.hiddenKey)
+	if !ok || string(got.raw) != `{"current":true}` || got.hiddenKey != "" || got.viewID != 1 {
+		t.Fatalf("stale body attached to a newer entry: %s %q view=%d", got.raw, got.hiddenKey, got.viewID)
 	}
-	srv.reachCacheSetBody("k", cur.at, []byte(`{"refreshed":true}`), "y")
-	if got, _ := srv.reachCacheGet("k"); string(got.raw) != `{"refreshed":true}` || got.hiddenKey != "y" {
-		t.Fatalf("matching entry not refreshed: %s %q", got.raw, got.hiddenKey)
+	srv.reachCacheSetBody("k", cur.at, []byte(`{"refreshed":true}`), "y", 3)
+	if got, _ := srv.reachCacheGet("k"); string(got.raw) != `{"refreshed":true}` || got.hiddenKey != "y" || got.viewID != 3 {
+		t.Fatalf("matching entry not refreshed: %s %q view=%d", got.raw, got.hiddenKey, got.viewID)
 	}
 }
 
@@ -594,10 +600,19 @@ func TestNodeReach_CacheHitMissAndInvalidation(t *testing.T) {
 	}
 }
 
-// The filtering does not touch the rank/total contract: neighbour degree, rank
-// and total are identical with and without hidden identities configured.
+// The filtering does not touch the numeric neighbour count: NeighborDegree
+// counts every valid edge — including ones to a hidden or blacklisted
+// neighbour — the same with or without hiding configured (it is a count, not
+// an identity, so it does not leak who the neighbour is). DegreeRank and
+// NodesWithEdges, by contrast, ARE affected by hiding: they are computed over
+// the visible (ranked) population, so a hidden or blacklisted node never
+// itself occupies a placement or is counted in the total (the agreed "visible
+// population" contract — see reach_rank.go and the PR description).
 func TestNodeReach_FilteringLeavesRankFieldsUnchanged(t *testing.T) {
 	f := newReachVisibilityDB(t)
+	// n–hidName, n–visible, n–blNode, visible–hidName: n has 3 neighbours;
+	// hidName and blNode are each hidden from ranking one way (name prefix,
+	// node blacklist) with the fixture's own config.
 	for _, pair := range [][2]string{{f.n, f.hidName}, {f.n, f.visible}, {f.n, f.blNode}, {f.visible, f.hidName}} {
 		a, b := pair[0], pair[1]
 		if a > b {
@@ -617,7 +632,83 @@ func TestNodeReach_FilteringLeavesRankFieldsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, p := hiddenCfg.Importance, noHiding.Importance
-	if h.NeighborDegree != 3 || h.NeighborDegree != p.NeighborDegree || h.DegreeRank != p.DegreeRank || h.NodesWithEdges != p.NodesWithEdges {
-		t.Fatalf("rank fields changed by filtering: with hiding %+v, without %+v", h, p)
+	if h.NeighborDegree != 3 || p.NeighborDegree != 3 {
+		t.Fatalf("NeighborDegree changed by filtering: with hiding %d, without %d, want 3 both (hidden neighbours still counted)", h.NeighborDegree, p.NeighborDegree)
+	}
+	// With hiding: only n and visible are ranked (hidName is name-hidden,
+	// blNode is blacklisted) — total 2. Without hiding: all four edge
+	// endpoints are ranked — total 4.
+	if h.NodesWithEdges != 2 {
+		t.Fatalf("NodesWithEdges with hiding = %d, want 2 (hidden/blacklisted nodes excluded from the ranked population)", h.NodesWithEdges)
+	}
+	if p.NodesWithEdges != 4 {
+		t.Fatalf("NodesWithEdges without hiding = %d, want 4 (nothing excluded)", p.NodesWithEdges)
+	}
+	// n has the highest degree (3) in both populations, so removing the two
+	// lower-degree nodes from the ranking does not change n's own placement.
+	if h.DegreeRank != 1 || p.DegreeRank != 1 {
+		t.Fatalf("DegreeRank changed unexpectedly: with hiding %d, without %d, want 1 both (n is always the top neighbour count)", h.DegreeRank, p.DegreeRank)
+	}
+}
+
+// Cross-endpoint integration: a hidden neighbour of a visible node (a) never
+// appears in that node's Reach links, (b) never appears in the leaderboard's
+// rows or search — by pubkey or by name — yet (c) is still counted in the
+// visible node's own NeighborDegree, and the leaderboard's total reflects
+// only the visible population. Exercises /api/nodes/{pk}/reach and
+// /api/reach-rank together, on the same fixture config (hidName is
+// name-hidden, blNode is node-blacklisted).
+func TestNodeReach_HiddenNeighbourCountedNotListedOrRanked(t *testing.T) {
+	f := newReachVisibilityDB(t)
+	for _, pair := range [][2]string{{f.n, f.hidName}, {f.n, f.visible}, {f.n, f.blNode}} {
+		a, b := pair[0], pair[1]
+		if a > b {
+			a, b = b, a
+		}
+		if _, err := f.db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b) VALUES (?, ?)`, a, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// (a) + (c): n's own Reach page.
+	_, resp, body := f.get(t, f.n)
+	for _, l := range resp.Links {
+		if l.Pubkey == f.hidName || l.Pubkey == f.blNode {
+			t.Fatalf("hidden/blacklisted neighbour listed in links: %+v", l)
+		}
+	}
+	for _, leak := range []string{f.hidName, f.blNode, "🚫 private A", "Bravo"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(leak)) {
+			t.Fatalf("hidden identity %q leaked into n's Reach body: %s", leak, body)
+		}
+	}
+	if resp.Importance.NeighborDegree != 3 {
+		t.Fatalf("n's NeighborDegree = %d, want 3 (counts hidden/blacklisted neighbours numerically)", resp.Importance.NeighborDegree)
+	}
+
+	// (b): the leaderboard.
+	lb := getRank(t, f.srv, "/api/reach-rank")
+	for _, row := range lb.Rows {
+		if row.Pubkey == f.hidName || row.Pubkey == f.blNode {
+			t.Fatalf("hidden/blacklisted node placed on the leaderboard: %+v", row)
+		}
+	}
+	// n and visible are the only ranked pubkeys from this edge set (hidName,
+	// blNode are excluded); n is #1 with 3 neighbours.
+	if lb.Total != 2 {
+		t.Fatalf("leaderboard total = %d, want 2", lb.Total)
+	}
+	if len(lb.Rows) == 0 || lb.Rows[0].Pubkey != f.n || lb.Rows[0].Neighbors != 3 {
+		t.Fatalf("leaderboard top row = %+v, want n with 3 neighbours", lb.Rows)
+	}
+	for _, q := range []string{f.hidName, f.hidName[:10], "private", "🚫", f.blNode, f.blNode[:10], "bravo"} {
+		if r := getRank(t, f.srv, "/api/reach-rank?q="+q); r.Matched != 0 {
+			t.Fatalf("search %q found %d hidden/blacklisted rows, want 0: %+v", q, r.Matched, r.Rows)
+		}
+	}
+
+	// Cross-check: the hidden node's own Reach page is still 404.
+	if rr := serveRankRoutes(f.srv, "/api/nodes/"+f.hidName+"/reach?days=30"); rr.Code != http.StatusNotFound {
+		t.Fatalf("hidden neighbour's own reach page: %d want 404", rr.Code)
 	}
 }
