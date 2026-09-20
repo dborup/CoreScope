@@ -126,6 +126,17 @@ func newTestStore(t testing.TB) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// OpenStore kicks off RunAsyncMigration in the background so boot is not
+	// blocked. Draining it here makes every test that uses this helper start
+	// from a settled database instead of racing a migration it never asked
+	// for. Individual tests that already knew to wait (see
+	// tx_last_seen_backfill_test.go and backfill_default_scope_test.go) keep
+	// their own call; this makes the guarantee the default rather than
+	// something each new test has to remember.
+	//
+	// Same synchronization point Close() uses (db.go:1470). Production is
+	// unaffected: main.go still never blocks on it.
+	s.backfillWg.Wait()
 	t.Cleanup(func() { s.Close() })
 	return s
 }
