@@ -135,6 +135,88 @@ test('OSM providers appear when osm.enabled=true in MC_MAP_CFG', () => {
   for (const id of ALL_OSM_IDS) assert.ok(reg[id], 'should have ' + id + ' when osm enabled');
 });
 
+// --- #1891: opt-in topographic layers (OpenTopoMap, USGS) ---
+// These reach third-party tile servers the operator has to opt into, so the
+// default-off gating is the security-relevant part, not a nicety.
+const TOPO_IDS = { opentopomap: ['opentopomap'], usgs: ['usgs-topo', 'usgs-imagery'] };
+
+test('#1891 topo providers are absent by default (no MC_MAP_CFG)', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  for (const ids of Object.values(TOPO_IDS)) {
+    for (const id of ids) assert.ok(!reg[id], id + ' must not appear without explicit opt-in');
+  }
+});
+
+test('#1891 topo providers stay absent under the shipped config.example.json', () => {
+  const providers = JSON.parse(require('fs').readFileSync('config.example.json', 'utf8')).map.tiles.providers;
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  for (const ids of Object.values(TOPO_IDS)) {
+    for (const id of ids) assert.ok(!reg[id], id + ' must ship disabled in config.example.json');
+  }
+});
+
+for (const [provider, ids] of Object.entries(TOPO_IDS)) {
+  test('#1891 ' + provider + ' appears only when ' + provider + '.enabled=true', () => {
+    const on = makeSandbox();
+    loadProviders(on);
+    on.window.MC_MAP_CFG = { tiles: { providers: { [provider]: { enabled: true } } } };
+    on.window.MC_initTileRegistry(false);
+    for (const id of ids) assert.ok(on.window.MC_TILE_PROVIDERS[id], id + ' should appear when enabled');
+    // Enabling one topo provider must not pull in the other.
+    for (const [other, otherIds] of Object.entries(TOPO_IDS)) {
+      if (other === provider) continue;
+      for (const id of otherIds) assert.ok(!on.window.MC_TILE_PROVIDERS[id], id + ' must stay absent');
+    }
+
+    const off = makeSandbox();
+    loadProviders(off);
+    off.window.MC_MAP_CFG = { tiles: { providers: { [provider]: { enabled: false } } } };
+    off.window.MC_initTileRegistry(false);
+    for (const id of ids) assert.ok(!off.window.MC_TILE_PROVIDERS[id], id + ' should be absent when disabled');
+  });
+}
+
+test('#1891 topo layers carry their required attribution and zoom caps', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { opentopomap: { enabled: true }, usgs: { enabled: true } } } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  // OpenTopoMap is CC-BY-SA: dropping the credit is a licence violation.
+  assert.match(reg['opentopomap'].attribution, /OpenTopoMap/, 'OpenTopoMap credit required');
+  assert.match(reg['opentopomap'].attribution, /CC-BY-SA/, 'OpenTopoMap licence required');
+  assert.strictEqual(reg['opentopomap'].maxZoom, 17, 'OpenTopoMap serves no tiles above z17');
+  for (const id of TOPO_IDS.usgs) {
+    assert.match(reg[id].attribution, /U\.S\. Geological Survey/, id + ' must credit USGS');
+    assert.strictEqual(reg[id].maxZoom, 16, id + ' serves no tiles above z16');
+  }
+});
+
+test('#1891 topo tile URLs use the template each service expects', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { opentopomap: { enabled: true }, usgs: { enabled: true } } } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  const urlOf = (id) => typeof reg[id].url === 'function' ? reg[id].url() : reg[id].url;
+  // OpenTopoMap is {z}/{x}/{y}; the ArcGIS services are {z}/{y}/{x}. Getting
+  // the order wrong still yields 200s in some places, so pin it here.
+  assert.ok(urlOf('opentopomap').endsWith('/{z}/{x}/{y}.png'), 'OpenTopoMap uses z/x/y');
+  assert.ok(urlOf('opentopomap').startsWith('https://'), 'tiles must be fetched over TLS');
+  for (const id of TOPO_IDS.usgs) {
+    assert.ok(urlOf(id).endsWith('/tile/{z}/{y}/{x}'), id + ' uses the ArcGIS z/y/x order');
+    assert.ok(urlOf(id).startsWith('https://'), id + ' must be fetched over TLS');
+    assert.ok(!/\?|api_key|token/i.test(urlOf(id)), id + ' needs no credentials');
+  }
+});
+
 test('OSM providers absent when osm.enabled=false', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
