@@ -256,7 +256,17 @@
       // meantime. Restarting the renderer keeps the current filter state and
       // still picks up the new theme: node colors are read live per frame
       // from window.ROLE_COLORS, role swatches use CSS tokens, and the one
-      // cached value (_labelColor) is re-read on restart.
+      // cached value (_labelColor) is re-read on restart. Measured: this also
+      // stops the old path leaking one rAF render loop and one canvas
+      // listener set per theme-refresh (a 10-event burst ran the force
+      // simulation at ~20x speed; it now stays flat).
+      //
+      // Not covered, pre-existing: _ngState is only assigned after the graph
+      // fetch resolves, while the checkboxes exist from the synchronous
+      // innerHTML before it. A theme-refresh landing inside that fetch window
+      // still falls through to renderTab() and still discards a filter
+      // applied during the load. Closing that needs a "load in flight"
+      // sentinel, which is deliberately left out of this port.
       if (_currentTab === 'neighbor-graph' && _ngState) { startGraphRenderer(); return; }
       renderTab(_currentTab);
     };
