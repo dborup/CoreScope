@@ -1095,6 +1095,31 @@ img.brand-logo {
   max-width: 0; /* forces td to respect table width instead of expanding to content */
 }
 .data-table td.col-details { white-space: normal; word-break: break-word; max-width: 480px; }
+/* #1122/#1124: the packets "Details" cell is a one-line summary (the full
+ * message is in the detail pane / SlideOver). Letting it wrap made rows taller
+ * whenever table-layout:auto narrowed the column (e.g. 1030-1280px desktop
+ * widths), breaking the bounded row height and the virtual scroller's
+ * constant-row-height assumption (#1770). Clamp the INNER .col-details-clip to
+ * one line; the td keeps white-space:normal so the column's intrinsic widths
+ * (and thus the table layout) are unchanged -- see the #1805 note in the
+ * mobile block, whose inline-block/nowrap clip still overrides this. */
+.data-table td.col-details > .col-details-clip {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+/* The one-line clip box is only a line box tall, so anything drawn outside
+ * it is clipped (padding would expose the top of the hidden 2nd line).
+ * Draw link focus rings inside the link box instead of around it... */
+.data-table td.col-details > .col-details-clip a:focus-visible { outline-offset: -2px; }
+/* ...and give the line box room for .chan-tag pills (17px, baseline-aligned)
+ * where that is height-neutral: above 768px the Path chips already make rows
+ * ~30px tall. (<=640px keeps the #1805 inline-block clip below.) */
+@media (min-width: 769px) {
+  .data-table td.col-details > .col-details-clip { line-height: 18px; }
+}
 /* Direct Neighbors' Configured Scope cell (observer-detail.js) can hold a
  * long comma-joined scope list (e.g. a #eu/#dk/#dk-sjl/... catch-all
  * observer) -- the generic max-width:0 ellipsis rule above truncated it
@@ -2472,7 +2497,8 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   /* #1770: packets-view virtual-scroller assumes constant row height
      (VSCROLL_ROW_HEIGHT). The base rule at ~L1097 sets
      `.data-table td.col-details { white-space: normal; word-break: break-word }`
-     which lets the "Details" cell wrap on narrow viewports, producing
+     which let the "Details" cell wrap on narrow viewports (since #1122 the
+     inner clip is also line-clamped at wider widths, see ~L1106), producing
      variable row heights → visible jitter when scrolling past ~900px on
      iOS. Quick-fix (S path): clamp the cell to a single line on mobile.
      The proper L-path fix (per-row measurement) tracks separately.
