@@ -1595,15 +1595,21 @@
 
     // Repeaters and routing nodes no longer needed — collision data is server-computed
 
+    // #1914: keep both the bookmark and the section links on this byte size.
+    // Deliberately not part of the rendering path, and called last:
+    // history.replaceState can throw (Safari throttles it, and it is
+    // unavailable on an opaque origin), and a URL-sync failure must not take
+    // the whole tab down with it — the views have already rendered by then.
+    function syncHashUrl(bytes) {
+      if (!window.URLState) return;
+      const newHash = URLState.updateHashParams({ bytes }, location.hash);
+      if (newHash !== location.hash) history.replaceState(null, '', newHash);
+      el.querySelectorAll('[data-hash-section]').forEach(link => {
+        link.href = URLState.updateHashParams({ section: link.dataset.hashSection }, newHash);
+      });
+    }
+
     function refreshHashViews(bytes) {
-      // #1914: keep both the bookmark and section links on this byte size.
-      if (window.URLState) {
-        const newHash = URLState.updateHashParams({ bytes }, location.hash);
-        if (newHash !== location.hash) history.replaceState(null, '', newHash);
-        el.querySelectorAll('[data-hash-section]').forEach(link => {
-          link.href = URLState.updateHashParams({ section: link.dataset.hashSection }, newHash);
-        });
-      }
       hideMatrixTip();
       // Update selector button states
       document.querySelectorAll('.hash-byte-btn').forEach(b => {
@@ -1625,6 +1631,7 @@
       const riskCard = document.getElementById('collisionRiskSection');
       if (riskCard) riskCard.style.display = '';
       renderCollisionsFromServer(cData.by_size[String(bytes)], bytes);
+      syncHashUrl(bytes);
     }
 
     // Wire up selector
