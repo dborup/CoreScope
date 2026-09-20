@@ -3688,14 +3688,44 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
     assert.strictEqual(result.length, 1, 'observer B is among the already-loaded children');
   });
 
-  test('hashOnly bypasses the observer filter entirely (pinned-hash view)', () => {
-    const result = applyObserverFilter([groupedRowGenuinelyExcludedByServer, flatRowNonMatching], { observer: 'B' }, true, true);
+  // groupByHash MUST be false here: with it true the grouped early-return
+  // would return everything anyway, so the assertion would hold even with the
+  // hashOnly guard deleted and would pin nothing. Pinning a hash and then
+  // toggling "Group by Hash" off is a reachable state, and is exactly the
+  // case buildPacketsParams's hash short-circuit (which suppresses the
+  // `observer` param server-side) relies on.
+  test('hashOnly bypasses the observer filter entirely in FLAT mode (pinned-hash view)', () => {
+    const result = applyObserverFilter([flatRowNonMatching, { hash: 'hash6', observer_id: 'C' }], { observer: 'B' }, false, true);
     assert.strictEqual(result.length, 2, 'hashOnly must return every row unfiltered, matching renderTableRows()');
+  });
+
+  // The children fallback coerces with String() because an observation's
+  // observer_id arrives as a number on some payloads while filters.observer is
+  // always a comma-joined string. A fixture with string ids only would make
+  // the coercion a no-op and let its removal go unnoticed.
+  test('flat mode: numeric child observer_id still matches the string filter', () => {
+    const numericChildRow = { hash: 'hash7', observer_id: 'A', _children: [{ observer_id: 7 }] };
+    const result = applyObserverFilter([numericChildRow], { observer: '7' }, false, false);
+    assert.strictEqual(result.length, 1, 'String(c.observer_id) must bridge a numeric child id to the string filter');
   });
 
   test('no observer filter set: all rows pass through unchanged', () => {
     const result = applyObserverFilter([groupedRowGenuinelyExcludedByServer, flatRowNonMatching], {}, false, false);
     assert.strictEqual(result.length, 2);
+  });
+
+  // The grouped early-return is only safe because changing the observer
+  // filter refetches from the server. If that handler ever stops calling
+  // loadPackets(), the filter silently becomes a no-op in grouped mode (the
+  // default view) until the next page load — the regression this pins.
+  test('the observer multi-select handler refetches instead of only re-rendering', () => {
+    const src = fs.readFileSync('public/packets.js', 'utf8');
+    const handler = src.slice(src.indexOf("obsMenu.addEventListener('change'"));
+    const body = handler.slice(0, handler.indexOf('\n    });'));
+    assert.ok(body.includes('loadPackets()'),
+      'observer filter changes must refetch from the server (grouped rows are server-filtered)');
+    assert.ok(!/\brenderTableRows\(\)/.test(body),
+      'a bare renderTableRows() would only re-filter the already-loaded page');
   });
 }
 

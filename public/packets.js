@@ -1785,7 +1785,18 @@
       buildObserverMenu();
       updateObsTrigger();
       updatePacketsUrl();
-      renderTableRows();
+      // The observer filter is a SERVER-side filter (buildPacketsParams sends
+      // `observer`), so changing it must refetch — the same thing every other
+      // server-side filter handler here does (hash, time window, group toggle,
+      // myNodes, region, channel, clear-filters). It previously only
+      // re-rendered, relying on the client-side re-filter in
+      // applyObserverFilter to narrow the already-loaded page. That is exactly
+      // the re-filter grouped mode must not do (a grouped row's observer_id is
+      // only the representative observer), so without a refetch the filter
+      // would silently do nothing in grouped mode until the next page load.
+      // Refetching also fixes the converse: unticking back to "All Observers"
+      // now restores the wider set instead of leaving the page narrowed.
+      loadPackets();
     });
 
     // --- Type multi-select ---
@@ -2782,10 +2793,16 @@
   // reimplementation — see #1748 PR review (kent-beck): a test that only
   // checks a copy of this logic doesn't fail if this function regresses.
   //
-  // #1748: In grouped mode, the server already filters transmissions
-  // correctly (buildTransmissionWhere emits an EXISTS subquery over ALL
-  // observations of the transmission, not just the displayed one — see
-  // cmd/server/db.go). Each row's `observer_id` here is only the
+  // #1748: In grouped mode, the server already filters transmissions over
+  // ALL observations of a transmission, not just the displayed one. Both
+  // server paths do this: the usual in-memory one (store.QueryGroupedPackets
+  // → filterPackets / transmissionsForObserver, cmd/server/store.go, which
+  // scans every tx.Observations) and the SQL fallback used for windows older
+  // than oldestLoaded (buildTransmissionWhere's EXISTS subquery,
+  // cmd/server/db.go). Because it is a server-side filter, changing it
+  // refetches — see the observer multi-select handler above; without that
+  // refetch this early return would make the filter a no-op in grouped mode.
+  // Each row's `observer_id` here is only the
   // *representative* observer chosen for display (longest observed path),
   // which may legitimately differ from the observer that satisfied the
   // filter. Re-filtering client-side against that single representative —
@@ -2800,11 +2817,11 @@
   // filter is authoritative for grouped rows, so no client-side
   // re-filtering is needed or correct here.
   //
-  // Flat/expanded mode (groupByHash === false) has no such
-  // representative-vs-actual mismatch — buildPacketWhere filters each
-  // observation row by its own exact observer_id — but we keep the
-  // defensive re-filter for that path since it costs nothing and guards
-  // against any future flat-mode server change.
+  // Flat/expanded mode (groupByHash === false) lists individual observations,
+  // each carrying its own observer_id, so re-filtering them against the
+  // selected set is exact rather than representative-based. We keep that
+  // defensive re-filter: it costs nothing and guards against any future
+  // flat-mode server change.
   function applyObserverFilter(displayPackets, filters, groupByHash, hashOnly) {
     if (hashOnly || !filters.observer) return displayPackets;
     if (groupByHash) return displayPackets;
