@@ -168,8 +168,13 @@ function measureRows() {
       }, rows.filter(r => r.overflowing).map(r => r.hash));
       assert(target, 'no overflowing channel-message row with decoded text found');
       const row = page.locator(`#pktBody tr[data-hash="${target.hash}"]`).first();
-      await row.scrollIntoViewIfNeeded();
       // Click a plain data cell (not the expand column, not a link).
+      // No separate scrollIntoViewIfNeeded(): the packets table live-updates,
+      // and the await'd fetch above gives it time to re-render, so a one-shot
+      // scroll on a locator resolved before that fetch can hit a detached
+      // node ("Element is not attached to the DOM"). click() performs the
+      // same scroll as part of its actionability checks AND re-resolves the
+      // selector on detachment, so it waits the row out instead of failing.
       await row.locator('td.col-time').click();
       // The full text must be VISIBLE in a detail surface (never the table):
       // desktop split pane, SlideOver (<=1023px) or the small-mobile bottom
