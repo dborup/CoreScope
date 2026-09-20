@@ -678,7 +678,7 @@
     })();
 
     // Selected area outline — distinct from the geo filter boundary above:
-    // this draws whichever area is currently picked via the "Area: X ▾"
+    // this draws whichever area is currently picked via the "Area: X"
     // dropdown (AreaFilter, shared with Nodes/Live/Analytics), not
     // necessarily the homeArea-linked geo_filter. Falls back to a plain
     // box when the area has no polygon. Only one area can be selected at
