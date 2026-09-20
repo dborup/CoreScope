@@ -53,6 +53,9 @@ func txLastSeen(t *testing.T, s *Store, id int64) int64 {
 // MAX of their timestamps.
 func TestBackfillTxLastSeen_ResolvesFromMaxObservationTimestamp(t *testing.T) {
 	store := newTestStore(t)
+	// OpenStore schedules tx_last_seen_backfill_v1 in the background; if it
+	// runs mid-seed it stamps a partial MAX and the direct call skips the row.
+	store.WaitForAsyncMigrations()
 	id := seedTxWithObs(t, store, "resolve1", 100, 300, 200)
 
 	if err := backfillTxLastSeen(context.Background(), store.db); err != nil {
@@ -71,6 +74,7 @@ func TestBackfillTxLastSeen_ResolvesFromMaxObservationTimestamp(t *testing.T) {
 // if the EXISTS filter regresses, this test hangs.
 func TestBackfillTxLastSeen_OrphanNeverLoopsForever(t *testing.T) {
 	store := newTestStore(t)
+	store.WaitForAsyncMigrations()
 	orphan := seedTxNoObs(t, store, "orphan1")
 	resolvable := seedTxWithObs(t, store, "resolvable1", 555)
 
@@ -108,6 +112,7 @@ func TestBackfillTxLastSeen_OrphanNeverLoopsForever(t *testing.T) {
 // batch must still resolve every row.
 func TestBackfillTxLastSeen_ChunksAcrossMultipleBatches(t *testing.T) {
 	store := newTestStore(t)
+	store.WaitForAsyncMigrations()
 
 	oldBatch, oldYield := txLastSeenBackfillBatchSize, txLastSeenBackfillYield
 	txLastSeenBackfillBatchSize = 2
@@ -144,6 +149,7 @@ func TestBackfillTxLastSeen_ChunksAcrossMultipleBatches(t *testing.T) {
 // production; this test just confirms the snapshot really is a bound).
 func TestBackfillTxLastSeen_IgnoresRowsInsertedAfterSnapshot(t *testing.T) {
 	store := newTestStore(t)
+	store.WaitForAsyncMigrations()
 	before := seedTxWithObs(t, store, "before1", 42)
 
 	// Snapshot maxID by calling the same query the function uses, then
@@ -176,5 +182,44 @@ func TestBackfillTxLastSeen_IgnoresRowsInsertedAfterSnapshot(t *testing.T) {
 	}
 	if got := txLastSeen(t, store, after); got != 0 {
 		t.Errorf("after-snapshot row last_seen = %d, want 0 (must not be touched by a run that snapshotted maxID before it existed)", got)
+	}
+}
+
+// TestBackfillTxLastSeen_PartialClaimHealedByObservationBump pins the
+// invariant the last_seen = 0 selection filter relies on: once a backfill
+// has stamped a row from only part of its observations, it never revisits
+// it, so a later observation arriving through InsertTransmission must bump
+// last_seen to the new MAX.
+func TestBackfillTxLastSeen_PartialClaimHealedByObservationBump(t *testing.T) {
+	store := newTestStore(t)
+	store.WaitForAsyncMigrations()
+
+	const hash = "claimheal1"
+	id := seedTxWithObs(t, store, hash, 100)
+
+	if err := backfillTxLastSeen(context.Background(), store.db); err != nil {
+		t.Fatalf("backfillTxLastSeen: %v", err)
+	}
+	if got := txLastSeen(t, store, id); got != 100 {
+		t.Fatalf("after partial backfill: last_seen = %d, want 100", got)
+	}
+
+	snr, rssi := 5.5, -100.0
+	later := &PacketData{
+		RawHex:      "aabb",
+		Timestamp:   time.Unix(300, 0).UTC().Format(time.RFC3339),
+		ObserverID:  "obs-heal",
+		Hash:        hash,
+		PayloadType: 1,
+		PathJSON:    "[]",
+		SNR:         &snr,
+		RSSI:        &rssi,
+	}
+	if _, err := store.InsertTransmission(later); err != nil {
+		t.Fatalf("InsertTransmission: %v", err)
+	}
+
+	if got := txLastSeen(t, store, id); got != 300 {
+		t.Errorf("last_seen = %d, want 300 (observation bump must heal a partial backfill)", got)
 	}
 }
