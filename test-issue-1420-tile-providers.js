@@ -151,7 +151,7 @@ test('#1891 topo providers are absent by default (no MC_MAP_CFG)', () => {
 });
 
 test('#1891 topo providers stay absent under the shipped config.example.json', () => {
-  const providers = JSON.parse(require('fs').readFileSync('config.example.json', 'utf8')).map.tiles.providers;
+  const providers = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8')).map.tiles.providers;
   const ctx = makeSandbox();
   loadProviders(ctx);
   ctx.window.MC_MAP_CFG = { tiles: { providers } };
@@ -192,6 +192,10 @@ test('#1891 topo layers carry their required attribution and zoom caps', () => {
   // OpenTopoMap is CC-BY-SA: dropping the credit is a licence violation.
   assert.match(reg['opentopomap'].attribution, /OpenTopoMap/, 'OpenTopoMap credit required');
   assert.match(reg['opentopomap'].attribution, /CC-BY-SA/, 'OpenTopoMap licence required');
+  // CC BY-SA 3.0 4(a) asks for the licence URI where the medium allows it,
+  // and Leaflet renders HTML here, so the credit and licence must be links.
+  assert.match(reg['opentopomap'].attribution, /creativecommons\.org\/licenses\/by-sa/, 'CC-BY-SA licence URI required');
+  assert.match(reg['opentopomap'].attribution, /href="https:\/\/opentopomap\.org"/, 'OpenTopoMap credit must link to the project');
   assert.strictEqual(reg['opentopomap'].maxZoom, 17, 'OpenTopoMap serves no tiles above z17');
   for (const id of TOPO_IDS.usgs) {
     assert.match(reg[id].attribution, /U\.S\. Geological Survey/, id + ' must credit USGS');
