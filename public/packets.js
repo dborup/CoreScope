@@ -2833,6 +2833,44 @@
     });
   }
 
+  // buildReplayPackets shapes the objects the VCR replay reads back out of
+  // sessionStorage. Extracted from the replay button's click handler — the
+  // same reason applyObserverFilter above was extracted (#1748 review): a
+  // test that re-implements this mapping cannot fail when the real one
+  // regresses, and this mapping has a history of dropping fields.
+  //
+  // #1900: observer_id must be carried, not just the resolved observer NAME.
+  // The Live region filter (packetMatchesRegion in live.js) matches on
+  // observer_id and skips any packet where it is null, returning false when
+  // none match — so omitting it made the replay render nothing at all
+  // whenever a region was selected. observer_iata rides along so the IATA
+  // badge does not have to fall back to the roster map.
+  function buildReplayPackets(pkt, data, ctx) {
+    const { typeName, decoded, pathHops, obsName } = ctx;
+    const obs = (data && data.observations) || [];
+    const replayPackets = [];
+    if (obs.length > 1) {
+      for (const o of obs) {
+        replayPackets.push({
+          id: o.id, hash: pkt.hash, raw: o.raw_hex || pkt.raw_hex,
+          _ts: new Date(o.timestamp).getTime(),
+          decoded: { header: { payloadTypeName: typeName }, payload: getParsedDecoded(o), path: { hops: getParsedPath(o) } },
+          snr: o.snr, rssi: o.rssi, observer: obsName(o.observer_id),
+          observer_id: o.observer_id, observer_iata: o.observer_iata
+        });
+      }
+    } else {
+      replayPackets.push({
+        id: pkt.id, hash: pkt.hash, raw: pkt.raw_hex,
+        _ts: new Date(pkt.timestamp).getTime(),
+        decoded: { header: { payloadTypeName: typeName }, payload: decoded, path: { hops: pathHops } },
+        snr: pkt.snr, rssi: pkt.rssi, observer: obsName(pkt.observer_id),
+        observer_id: pkt.observer_id, observer_iata: pkt.observer_iata
+      });
+    }
+    return replayPackets;
+  }
+
   async function renderTableRows() {
     const tbody = document.getElementById('pktBody');
     if (!tbody) return;
@@ -3543,34 +3581,8 @@
     const replayBtn = panel.querySelector('.replay-live-btn');
     if (replayBtn) {
       replayBtn.addEventListener('click', () => {
-        // Build replay packets for ALL observations of this transmission
-        const obs = data.observations || [];
-        const replayPackets = [];
-        if (obs.length > 1) {
-          for (const o of obs) {
-            const oPath = getParsedPath(o);
-            const oDec = getParsedDecoded(o);
-            replayPackets.push({
-              id: o.id, hash: pkt.hash, raw: o.raw_hex || pkt.raw_hex,
-              _ts: new Date(o.timestamp).getTime(),
-              decoded: { header: { payloadTypeName: typeName }, payload: oDec, path: { hops: oPath } },
-              snr: o.snr, rssi: o.rssi, observer: obsName(o.observer_id),
-              // #1900: carry the id itself, not just the resolved name. The Live
-              // region filter matches on observer_id, so without it the replay
-              // silently renders nothing whenever a region is selected.
-              observer_id: o.observer_id, observer_iata: o.observer_iata
-            });
-          }
-        } else {
-          replayPackets.push({
-            id: pkt.id, hash: pkt.hash, raw: pkt.raw_hex,
-            _ts: new Date(pkt.timestamp).getTime(),
-            decoded: { header: { payloadTypeName: typeName }, payload: decoded, path: { hops: pathHops } },
-            snr: pkt.snr, rssi: pkt.rssi, observer: obsName(pkt.observer_id),
-            observer_id: pkt.observer_id, observer_iata: pkt.observer_iata
-          });
-        }
-        sessionStorage.setItem('replay-packet', JSON.stringify(replayPackets));
+        sessionStorage.setItem('replay-packet', JSON.stringify(
+          buildReplayPackets(pkt, data, { typeName, decoded, pathHops, obsName })));
         window.location.hash = '#/live';
       });
     }
@@ -4131,6 +4143,7 @@
       _calcVisibleRange,
       buildPacketsParams,
       applyObserverFilter,
+      buildReplayPackets,
       renderTableRows,
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },

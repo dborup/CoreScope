@@ -3652,6 +3652,43 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
     _children: [{ observer_id: 'A' }, { observer_id: 'B' }],
   };
 
+  // --- #1900: the VCR replay mapping must carry observer_id ---
+  // Same rationale as applyObserverFilter above: exercise the real
+  // production mapping. Dropping observer_id here previously passed every
+  // test in the suite, because the only coverage lived in
+  // test-live-region-filter.js and only reached live.js's half of the fix.
+  const buildReplayPackets = obsFilterCtx.window._packetsTestAPI.buildReplayPackets;
+  const replayCtx = {
+    typeName: 'ADVERT', decoded: { t: 1 }, pathHops: ['AA'],
+    obsName: (id) => 'Name of ' + id,
+  };
+
+  test('#1900 replay carries observer_id for a single-observation packet', () => {
+    const out = buildReplayPackets(
+      { id: 5, hash: 'h5', raw_hex: 'CAFE', timestamp: '2026-01-01T00:00:00Z', observer_id: 'obs1', observer_iata: 'BRU' },
+      { observations: [{ id: 9 }] }, replayCtx);
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].observer_id, 'obs1', 'the Live region filter matches on observer_id');
+    assert.strictEqual(out[0].observer_iata, 'BRU');
+    assert.strictEqual(out[0].observer, 'Name of obs1', 'the resolved name is still carried too');
+  });
+
+  test('#1900 replay carries observer_id for every observation of a multi-observer packet', () => {
+    const out = buildReplayPackets(
+      { id: 5, hash: 'h5', raw_hex: 'CAFE', timestamp: '2026-01-01T00:00:00Z', observer_id: 'obs1' },
+      { observations: [
+        { id: 1, observer_id: 'obsA', observer_iata: 'BRU', timestamp: '2026-01-01T00:00:00Z' },
+        { id: 2, observer_id: 'obsB', observer_iata: 'LAX', timestamp: '2026-01-01T00:00:01Z' },
+      ] }, replayCtx);
+    assert.strictEqual(out.length, 2, 'one replay packet per observation');
+    // Joined rather than deepStrictEqual: the array comes from the vm
+    // sandbox's realm, so its prototype differs and a strict deep compare
+    // fails on identical contents.
+    assert.strictEqual(out.map((p) => p.observer_id).join(','), 'obsA,obsB',
+      'each observation must carry its OWN observer_id, not the transmission representative');
+    assert.strictEqual(out.map((p) => p.observer_iata).join(','), 'BRU,LAX');
+  });
+
   test('grouped mode: keeps a multi-observer row whose representative is not the filtered observer (#1748 core bug)', () => {
     const result = applyObserverFilter([groupedRowRepresentativeNotFiltered], { observer: 'B' }, true, false);
     assert.strictEqual(result.length, 1, 'server already guaranteed observer B saw this transmission');
