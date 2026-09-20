@@ -42,7 +42,10 @@ func TestStatsFileWriter_SampledAtMatchesProcIOSampledAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	// Close via t.Cleanup, not defer: test defers run BEFORE cleanups, so a
+	// deferred Close would let the writer tick against a closed Store. LIFO
+	// cleanup ordering puts the writer's stop (registered later) ahead of it.
+	t.Cleanup(func() { store.Close() })
 
 	// Inject a deterministic procIO reader. `at` is pinned far in the
 	// past so any code path that formats the inner SampledAt from
@@ -69,7 +72,12 @@ func TestStatsFileWriter_SampledAtMatchesProcIOSampledAt(t *testing.T) {
 		}
 	}
 
-	StartStatsFileWriter(store, 50*time.Millisecond)
+	// Registered AFTER the t.Cleanup that restores readProcSelfIOFn, so LIFO
+	// ordering stops the writer BEFORE the hook is put back. Without that
+	// ordering the writer's next tick reads the variable while the cleanup
+	// writes it — and because the goroutine outlived the test, the race was
+	// reported against whichever unrelated test ran next.
+	t.Cleanup(StartStatsFileWriter(store, 50*time.Millisecond))
 
 	// Wait for the file to land with a populated procIO block.
 	deadline := time.Now().Add(3 * time.Second)
