@@ -21,15 +21,17 @@ import (
 //   - computeRepeaterRelayInfoMap (bulk, repeater_enrich_bulk.go)
 //   - GetRepeaterRelayInfo        (per-node, repeater_liveness.go)
 
-const scopeRecentKey = "ffeeddcc55667788"
+const scopeRecentKey = "ffeeddcc55667788000000000000000000000000000000000000000000000000"
 
 // scopeTxAt builds a path-hop StoreTx with an explicit FirstSeen age.
 func scopeTxAt(id int, payloadType int, scope string, age time.Duration) *StoreTx {
-	pt := payloadType
+	pt, rt := payloadType, routeTypeFlood
 	return &StoreTx{
 		ID:          id,
 		Hash:        "scope-recent-tx-" + scope + "-" + strconv.Itoa(id),
 		PayloadType: &pt,
+		RouteType:   &rt,
+		PathJSON:    `["` + scopeRecentKey + `"]`,
 		ScopeName:   scope,
 		FirstSeen:   time.Now().UTC().Add(-age).Format(time.RFC3339Nano),
 	}
@@ -104,6 +106,7 @@ func TestTransportedScopesRecent_DisabledWhenWindowHoursZero(t *testing.T) {
 // region matches, so an unresolved hop can't be credited with any scope).
 func TestTransportedScopesRecent_PrefixBucketExcluded(t *testing.T) {
 	prefixOnly := scopeTxAt(1, 2, "region-via-prefix", 10*time.Minute)
+	prefixOnly.PathJSON = `["ff"]`
 
 	store := &PacketStore{
 		byPathHop: map[string][]*StoreTx{

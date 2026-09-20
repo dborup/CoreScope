@@ -52,176 +52,145 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 	return cached
 }
 
-// computeRepeaterRelayInfoMap walks byPathHop once under a single RLock,
-// pre-parses every FirstSeen timestamp once (not once-per-pubkey-bucket),
-// and emits one RepeaterRelayInfo per hop key.
+// computeRepeaterRelayInfoMap walks the relay candidate indexes under a single
+// RLock, pre-parses every FirstSeen timestamp and relay identity once (not
+// once-per-pubkey-bucket), and emits one RepeaterRelayInfo per hop key and per
+// confirmed relay key. Only aggregation runs after the lock is released.
 //
-// Time-complexity invariant: O(unique-tx-in-byPathHop + total-key-bucket
-// entries). Memory: one map entry per byPathHop key. Both are bounded by
-// the same eviction policy that bounds byPathHop itself.
+// Time-complexity invariant: O(unique candidate tx + observation-path hops +
+// total candidate-bucket entries): each tx's identity-safe keys and timestamp
+// are computed once (hop tokens memoized per request), then every key walks
+// only its own candidate buckets (see forEachRelayCandidate) with O(1)
+// generation-stamped dedupe. A unique raw prefix belongs to only one full key,
+// avoiding collided-prefix fanout. Memory: O(unique tx + keys + distinct hop
+// tokens), bounded by store eviction.
 func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[string]RepeaterRelayInfo {
+	// Everything that reads store data happens under the read lock: ingest
+	// appends to and eviction compacts byPathHop/byNode slices in place, so a
+	// copied slice header is not a stable snapshot, and StoreTx observations
+	// are mutable. The unlocked phase reads only values owned by this call.
 	s.mu.RLock()
+	pm := s.relayPrefixMapLocked()
 
-	// Snapshot the slices (header copy) so we can release the lock before
-	// the expensive parse pass. Slice headers point at the live underlying
-	// arrays but those are append-only-by-id; the worst-case race here is
-	// that ingest grows a slice we already snapshotted (we miss the new
-	// tail), which is acceptable for a 15s-TTL status read.
-	snap := make(map[string][]*StoreTx, len(s.byPathHop))
-	for k, list := range s.byPathHop {
-		snap[k] = list
+	// Per transmission: its relay entry values and the identity-safe relay
+	// keys confirmed by its raw observed flood paths, computed once.
+	type bulkRelayTx struct {
+		entry relayEntry
+		keys  []string
+		gen   int
 	}
-
-	// Build a tx-id-keyed pre-parsed cache so the inner loop doesn't
-	// re-parse the same FirstSeen N times when the same tx is indexed
-	// under multiple hop keys (very common — every hop on a path indexes
-	// the tx).
-	type parsedTx struct {
-		t  time.Time
-		ok bool
-		pt int
-	}
-	parseCache := make(map[int]parsedTx, 1<<14)
-	for _, list := range snap {
+	resolve := newRelayTokenResolver(pm)
+	index := make(map[int]int, 1<<14)
+	txs := make([]bulkRelayTx, 0, 1<<14)
+	confirmed := make(map[string]struct{})
+	add := func(list []*StoreTx) {
 		for _, tx := range list {
 			if tx == nil {
 				continue
 			}
-			if _, ok := parseCache[tx.ID]; ok {
+			if _, ok := index[tx.ID]; ok {
 				continue
 			}
-			pt := -1
-			if tx.PayloadType != nil {
-				pt = *tx.PayloadType
+			b := bulkRelayTx{entry: newRelayEntry(tx, false)}
+			b.entry.parsed = true
+			b.entry.t, b.entry.valid = parseRelayTS(tx.FirstSeen)
+			if txHasObservedFloodPath(tx) {
+				forEachObservedRelayHop(tx, func(token string) bool {
+					key := resolve.key(token)
+					if key == "" {
+						return true
+					}
+					for _, have := range b.keys {
+						if have == key {
+							return true
+						}
+					}
+					b.keys = append(b.keys, key)
+					confirmed[key] = struct{}{}
+					return true
+				})
 			}
-			t, ok := parseRelayTS(tx.FirstSeen)
-			parseCache[tx.ID] = parsedTx{t: t, ok: ok, pt: pt}
+			index[tx.ID] = len(txs)
+			txs = append(txs, b)
 		}
+	}
+	for _, list := range s.byPathHop {
+		add(list)
+	}
+	// byNode candidates only matter for keys a raw hop can confirm: known
+	// relay prefixes/keys or exact 64-hex identities.
+	for k, list := range s.byNode {
+		if len(k) == 64 || (pm != nil && len(pm.m[k]) > 0) {
+			add(list)
+		}
+	}
+
+	keys := make(map[string]struct{}, len(s.byPathHop)+len(confirmed))
+	for key := range s.byPathHop {
+		keys[key] = struct{}{}
+		// Unique raw-only prefixes need a full-key result too.
+		if resolved := resolve.key(key); resolved != "" {
+			keys[resolved] = struct{}{}
+		}
+	}
+	// Keys with evidence only via byNode (e.g. non-display observations after
+	// a restart) need a result too; otherwise list and detail disagree.
+	for key := range confirmed {
+		keys[key] = struct{}{}
+	}
+
+	// Per key: indexes into txs of its deduplicated, confirmed candidates.
+	// A candidate missing from index cannot confirm key (every candidate list
+	// was indexed above under the same lock); it is skipped, never mapped to
+	// another transmission.
+	type relayRef struct {
+		tx         int
+		fromPrefix bool
+	}
+	type keyRefs struct {
+		key        string
+		start, end int
+	}
+	var refs []relayRef
+	perKey := make([]keyRefs, 0, len(keys))
+	gen := 0
+	for key := range keys {
+		gen++
+		start := len(refs)
+		m := newRelayKeyMatcher(key, pm)
+		if m.possible() {
+			forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, fromPrefix bool) {
+				i, ok := index[tx.ID]
+				if !ok {
+					return
+				}
+				b := &txs[i]
+				if b.gen == gen {
+					return
+				}
+				b.gen = gen
+				for _, have := range b.keys {
+					if have == key {
+						refs = append(refs, relayRef{tx: i, fromPrefix: fromPrefix})
+						return
+					}
+				}
+			})
+		}
+		perKey = append(perKey, keyRefs{key: key, start: start, end: len(refs)})
 	}
 	s.mu.RUnlock()
 
-	now := time.Now().UTC()
-	cutoff1h := now.Add(-1 * time.Hour)
-	cutoff24h := now.Add(-24 * time.Hour)
-	var windowCutoff time.Time
-	if windowHours > 0 {
-		windowCutoff = now.Add(-time.Duration(windowHours * float64(time.Hour)))
-	}
-
-	out := make(map[string]RepeaterRelayInfo, len(snap))
-	for key, list := range snap {
-		info := RepeaterRelayInfo{WindowHours: windowHours}
-		// #1751: accumulate the set of region scope names carried by this
-		// hop key across every non-advert path-hop tx (NOT time-windowed).
-		// Captured by the visit closure below — lazily allocated on the first
-		// scope hit so hosts without scope_name pay nothing per key; converted
-		// to a sorted, capped slice before this key's info is stored.
-		var scopeSet map[string]struct{}
-		// Map scope-filter parity follow-up: latest parseable timestamp
-		// per scope, mirroring computeRelayInfoFromEntries's scopeLatest
-		// — kept in exact parity per this file's existing convention.
-		var scopeLatest map[string]time.Time
-		// When key looks like a full pubkey (>= 2 hex chars), also fold
-		// in the matching 1-byte raw-prefix bucket to mirror
-		// GetRepeaterRelayInfo's behavior. We dedup by tx ID.
-		var seen map[int]bool
-		if len(key) >= 2 {
-			prefix := key[:2]
-			if prefix != key {
-				if extra := snap[prefix]; len(extra) > 0 {
-					seen = make(map[int]bool, len(list)+len(extra))
-				}
-			}
+	out := make(map[string]RepeaterRelayInfo, len(perKey))
+	var entries []relayEntry
+	for _, k := range perKey {
+		entries = entries[:0]
+		for _, ref := range refs[k.start:k.end] {
+			e := txs[ref.tx].entry
+			e.fromPrefix = ref.fromPrefix
+			entries = append(entries, e)
 		}
-		// includeScope gates TransportedScopes accumulation: the 1-byte
-		// prefix-bucket fallback below folds in transmissions whose hop
-		// hash was NEVER resolved to this specific pubkey — MeshCore
-		// firmware (examples/simple_repeater/MyMesh.cpp allowPacketForward)
-		// only relays a TRANSPORT_FLOOD/DIRECT packet when the repeater's
-		// own locally configured region matches, so crediting a scope to a
-		// node based on nothing but a shared 1-byte hash prefix produces
-		// claims the protocol itself would never allow (e.g. a repeater
-		// hundreds of km away "transporting" a hyper-local town scope).
-		// RelayCount/LastRelayed/RelayActive keep the fallback — those are
-		// intentionally approximate "is this node active" signals, not a
-		// specific factual claim about which region it carried.
-		visit := func(txs []*StoreTx, includeScope bool) {
-			for _, tx := range txs {
-				if tx == nil {
-					continue
-				}
-				if seen != nil {
-					if seen[tx.ID] {
-						continue
-					}
-					seen[tx.ID] = true
-				}
-				p, ok := parseCache[tx.ID]
-				if !ok {
-					continue
-				}
-				if p.pt == payloadTypeAdvert {
-					continue
-				}
-				// #1751 (tightened, see includeScope doc above): scope
-				// accumulation is intentionally NOT gated on p.ok
-				// (timestamp parseability) — a packet with an unparseable
-				// first_seen still proves the repeater transported that
-				// scope, as long as the hop resolved unambiguously to it.
-				if includeScope && tx.ScopeName != "" {
-					if scopeSet == nil {
-						scopeSet = map[string]struct{}{}
-					}
-					scopeSet[tx.ScopeName] = struct{}{}
-				}
-				if !p.ok {
-					continue
-				}
-				if includeScope && tx.ScopeName != "" && windowHours > 0 {
-					if scopeLatest == nil {
-						scopeLatest = map[string]time.Time{}
-					}
-					if p.t.After(scopeLatest[tx.ScopeName]) {
-						scopeLatest[tx.ScopeName] = p.t
-					}
-				}
-				if p.t.After(cutoff24h) {
-					info.RelayCount24h++
-					if tx.RouteType != nil && *tx.RouteType == routeTypeFlood {
-						info.UnscopedRelayCount24h++
-					}
-					if p.t.After(cutoff1h) {
-						info.RelayCount1h++
-					}
-				}
-				if info.LastRelayed == "" || tx.FirstSeen > info.LastRelayed {
-					info.LastRelayed = tx.FirstSeen
-					if windowHours > 0 && p.t.After(windowCutoff) {
-						info.RelayActive = true
-					} else if windowHours > 0 {
-						info.RelayActive = false
-					}
-				}
-			}
-		}
-		visit(list, true)
-		if seen != nil {
-			prefix := key[:2]
-			if prefix != key {
-				visit(snap[prefix], false)
-			}
-		}
-		info.TransportedScopes = sortedCappedScopes(scopeSet)
-		if windowHours > 0 && scopeLatest != nil {
-			recentSet := make(map[string]struct{}, len(scopeLatest))
-			for scope, t := range scopeLatest {
-				if t.After(windowCutoff) {
-					recentSet[scope] = struct{}{}
-				}
-			}
-			info.TransportedScopesRecent = sortedCappedScopes(recentSet)
-		}
-		out[key] = info
+		out[k.key] = computeRelayInfoFromEntries(entries, windowHours)
 	}
 	return out
 }
