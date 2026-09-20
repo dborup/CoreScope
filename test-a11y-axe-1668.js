@@ -80,7 +80,11 @@ const ROUTES = [
   '/analytics?tab=prefix-tool',
   '/analytics?tab=my-repeaters',
   '/analytics?tab=repeater-metrics',
+  '/analytics?tab=foreign-traffic',
+  '/analytics?tab=wardriving',
+  '/analytics?tab=areas',
   '/audio-lab',
+  '/reach-rank',                    // Reach leaderboard (reach-rank.js)
 ];
 
 // Source-of-truth for ROUTES reciprocity. Keep these in sync with the
@@ -90,12 +94,13 @@ const REGISTERED_PAGES = [
   'home', 'packets', 'packet-detail', 'nodes', 'node-analytics', 'node-reach',
   'channels', 'live', 'map', 'observers', 'observer-detail', 'compare',
   'analytics', 'audio-lab', 'perf', 'traces', 'path-inspector', 'tools-landing',
+  'reach-rank',
 ];
 const REGISTERED_ANALYTICS_TABS = [
   'overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions',
   'subpaths', 'nodes', 'distance', 'neighbor-graph', 'rf-health',
   'clock-health', 'roles', 'prefix-tool', 'scopes', 'my-repeaters',
-  'repeater-metrics',
+  'repeater-metrics', 'foreign-traffic', 'wardriving', 'areas',
 ];
 
 const THEMES = ['dark', 'light'];
