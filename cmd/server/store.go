@@ -8823,6 +8823,14 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 		if (routeType == RouteDirect || routeType == RouteTransportDirect) && pathByte == 0x00 {
 			continue
 		}
+		// NOTE: hash_size 4 is reserved and rejected by the decoder (#1211),
+		// but this function has always reported it (TestHashSizeTransport-
+		// RoutePathByteOffset pins HashSize=4 for path byte 0xC1), unlike
+		// computeAnalyticsHashSizes which drops it. Skipping on byte content
+		// widens that pre-existing gap slightly, from 0xC1 to also 0xC0.
+		// Adding a `hs > 3` guard here would change the behaviour that test
+		// deliberately pins, so reconciling the two sites is left as separate
+		// work rather than smuggled into this fix.
 		hs := int((pathByte>>6)&0x3) + 1
 
 		var d map[string]interface{}
@@ -8898,13 +8906,17 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 	return info
 }
 
-// hashSizeMinObservations is the minimum number of non-zero-hop adverts in the
-// window before a node is eligible to be flagged as flip-flopping at all.
+// hashSizeMinObservations is the minimum number of size-declaring adverts in
+// the window before a node is eligible to be flagged as flip-flopping at all.
+// Since #1913 that includes zero-hop direct adverts whose path byte declares a
+// size (0x40 / 0x80); only an all-zero path byte is treated as "says nothing".
 const hashSizeMinObservations = 3
 
-// hashSizeRecentAgreeCount is how many of the most recent non-zero-hop adverts
-// must share a single hash size for a node to be considered "settled", clearing
-// its flip-flop ("varies") flag.
+// hashSizeRecentAgreeCount is how many of the most recent size-declaring
+// adverts must share a single hash size for a node to be considered "settled",
+// clearing its flip-flop ("varies") flag. Zero-hop directs that declare a size
+// now count here too (#1913), and they are frequent, so a settled node clears
+// the "varies" flag sooner than it did before.
 const hashSizeRecentAgreeCount = 3
 
 // recentAdvertsAgree reports whether the last n entries of a chronologically

@@ -185,3 +185,67 @@ func TestZeroHopDeclaredSizeReachesMultiByteCapability(t *testing.T) {
 		t.Errorf("want MaxHashSize=2, got %d", found.MaxHashSize)
 	}
 }
+
+// #1913: the analytics aggregate must honour a DECLARED size on a zero-hop
+// direct advert, not just the node-info path. Without this, reverting the
+// computeAnalyticsHashSizes half of the fix passed the entire suite — the
+// only analytics zero-hop test (TestAnalyticsHashSizesZeroHopSkip) uses path
+// byte 0x00, which both the old and the new rule skip, so it cannot tell the
+// two rules apart.
+func TestAnalyticsHashSizesZeroHopDeclaredSizeCounts(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	recentEpoch := now.Add(-1 * time.Hour).Unix()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
+		VALUES ('obs1', 'Obs', 'SJC', ?, '2026-01-01T00:00:00Z', 10)`, recent)
+
+	// declared: only ever sends zero-hop direct adverts, but declares 3-byte
+	// mode in the path byte (0x80 = size bits 10 → 3, hop count 0).
+	declared := "dddd000000000001"
+	// wiped: same shape, but path byte 0x00 — the pre-#3293 firmware that
+	// erases the size bits. It must stay unknown, not become 1-byte.
+	wiped := "dddd000000000002"
+	for pk, name := range map[string]string{declared: "ZH-Declared", wiped: "ZH-Wiped"} {
+		db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater')`, pk, name)
+	}
+
+	decodedFor := func(pk, name string) string {
+		return `{"pubKey":"` + pk + `","name":"` + name + `","type":"ADVERT"}`
+	}
+	// header 0x12 = route_type 2 (direct), payload_type 4
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('1280aabbccdd', 'zh_declared', ?, 2, 4, ?)`, recent, decodedFor(declared, "ZH-Declared"))
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 10.0, -90, '[]', ?)`, recentEpoch)
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('1200aabbccdd', 'zh_wiped', ?, 2, 4, ?)`, recent, decodedFor(wiped, "ZH-Wiped"))
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (2, 1, 10.0, -90, '[]', ?)`, recentEpoch)
+
+	store := NewPacketStore(db, nil)
+	store.Load()
+	result := store.GetAnalyticsHashSizes("", "")
+
+	multiByteNodes, ok := result["multiByteNodes"].([]map[string]interface{})
+	if !ok {
+		t.Fatal("expected multiByteNodes slice in analytics hash sizes")
+	}
+	sizes := map[string]int{}
+	for _, n := range multiByteNodes {
+		if pk, _ := n["pubkey"].(string); pk != "" {
+			if hs, ok := n["hashSize"].(int); ok {
+				sizes[pk] = hs
+			}
+		}
+	}
+	if got := sizes[declared]; got != 3 {
+		t.Errorf("zero-hop advert declaring 3-byte mode: analytics hashSize = %d, want 3", got)
+	}
+	if got, present := sizes[wiped]; present {
+		t.Errorf("zero-hop advert with an all-zero path byte must stay unknown, got hashSize = %d", got)
+	}
+}
