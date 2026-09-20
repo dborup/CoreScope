@@ -353,6 +353,9 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// catch-all /api/nodes/{pubkey} — mux matches in registration order, so
 	// reordering these below the catch-all would shadow them and break the route.
 	r.HandleFunc("/api/nodes/{pubkey}/reach", s.handleNodeReach).Methods("GET")
+	// Reach leaderboard: every visible node's placement from the same degree
+	// snapshot as the /reach Rank card (reach_rank.go).
+	r.HandleFunc("/api/reach-rank", s.handleReachRank).Methods("GET")
 	// Coverage routes are always registered; each handler 404s when the opt-in
 	// clientRxCoverage flag is off (a clean 404 rather than the SPA fallback that
 	// an unregistered /api route would hit). See requireClientRxCoverage.
