@@ -103,3 +103,58 @@ func TestBuildPathHopIndex_NoDuplicateOnRepeatedBuild_1904(t *testing.T) {
 		t.Fatalf("resolved hop bucket has %d entries after two builds, want 1", got)
 	}
 }
+
+// A bucket holding BOTH a live and an evicted transmission is the realistic
+// shape — several relays share a resolved pubkey key, and eviction removes
+// them one at a time. Testing only single-tenant keys let a mutation that
+// drops the whole key when ANY entry is non-live pass unnoticed.
+func TestBuildPathHopIndex_MixedLiveAndEvictedBucket_1904(t *testing.T) {
+	live := pathHopTx(1, hop1904Raw)
+	evicted := pathHopTx(2, hop1904Raw)
+
+	store := newPathHopStore([]*StoreTx{live}, map[string][]*StoreTx{
+		hop1904Raw: {live},
+		// One key, both transmissions: the evicted one must be pruned and
+		// the live one must survive.
+		hop1904Resolved: {evicted, live},
+	})
+
+	store.buildPathHopIndex()
+
+	if !hopKeyHas(store.byPathHop, hop1904Resolved, live) {
+		t.Fatal("live transmission dropped from a bucket it shared with an evicted one")
+	}
+	if hopKeyHas(store.byPathHop, hop1904Resolved, evicted) {
+		t.Fatal("evicted transmission retained from a mixed bucket")
+	}
+	if got := len(store.byPathHop[hop1904Resolved]); got != 1 {
+		t.Fatalf("mixed bucket has %d entries after rebuild, want exactly the live one", got)
+	}
+}
+
+// indexResolvedPathHops dedups within a call but not across the several
+// observations of one transmission, so a pre-rebuild bucket legitimately
+// holds the same *StoreTx more than once. The retain pass must collapse
+// those: without it the bucket grows on every rebuild, and the repeater
+// usefulness readers count ENTRIES, not distinct transmissions.
+func TestBuildPathHopIndex_CollapsesRepeatedTxInPrevBucket_1904(t *testing.T) {
+	tx := pathHopTx(1, hop1904Raw)
+
+	store := newPathHopStore([]*StoreTx{tx}, map[string][]*StoreTx{
+		hop1904Raw: {tx},
+		// Three observations of one transmission → three appends.
+		hop1904Resolved: {tx, tx, tx},
+	})
+
+	store.buildPathHopIndex()
+
+	if got := len(store.byPathHop[hop1904Resolved]); got != 1 {
+		t.Fatalf("resolved bucket has %d entries after rebuild, want 1 — repeated appends of one tx must collapse", got)
+	}
+
+	// And it must stay collapsed rather than regrowing across rebuilds.
+	store.buildPathHopIndex()
+	if got := len(store.byPathHop[hop1904Resolved]); got != 1 {
+		t.Fatalf("resolved bucket regrew to %d entries on a second rebuild", got)
+	}
+}

@@ -4164,7 +4164,16 @@ func (s *PacketStore) buildPathHopIndex() {
 		addTxToPathHopIndex(s.byPathHop, tx)
 	}
 	retained := s.retainResolvedPathHops(prev)
-	log.Printf("[store] Built path-hop index: %d unique keys (%d resolved-hop entries retained)",
+	// addResolvedPubkeysToPathHopIndex states the contract: mutating
+	// byPathHop must be paired with invalidateRelayStatsCache. A rebuild
+	// replaces the whole map, and now also restores relay attribution, so
+	// without this the 300s batch cache can pin the pre-rebuild empty relay
+	// stats for minutes AFTER the index was fixed — hiding exactly the data
+	// this retention restores. GetRepeaterNodeStatsBatchCached is not gated
+	// on PathHopIndexReady, and HTTP binds before the load completes, so a
+	// request landing just before the rebuild is enough to trigger it.
+	s.invalidateRelayStatsCache()
+	log.Printf("[store] Built path-hop index: %d unique keys (%d entries carried over from the previous index)",
 		len(s.byPathHop), retained)
 }
 
