@@ -56,7 +56,10 @@ func TestStatsFileWriter_PublishesProcIO(t *testing.T) {
 	}
 	defer store.Close()
 
-	StartStatsFileWriter(store, 50*time.Millisecond)
+	// Stop the writer when the test ends: it writes into t.TempDir() and
+	// reads the package-level readProcSelfIOFn hook, neither of which may
+	// outlive the test.
+	t.Cleanup(StartStatsFileWriter(store, 50*time.Millisecond))
 
 	// Wait for at least 2 ticks so the writer has had a chance to populate
 	// procIO rates from a delta.

@@ -69,7 +69,12 @@ func TestStatsFileWriter_SampledAtMatchesProcIOSampledAt(t *testing.T) {
 		}
 	}
 
-	StartStatsFileWriter(store, 50*time.Millisecond)
+	// Registered AFTER the t.Cleanup that restores readProcSelfIOFn, so LIFO
+	// ordering stops the writer BEFORE the hook is put back. Without that
+	// ordering the writer's next tick reads the variable while the cleanup
+	// writes it — and because the goroutine outlived the test, the race was
+	// reported against whichever unrelated test ran next.
+	t.Cleanup(StartStatsFileWriter(store, 50*time.Millisecond))
 
 	// Wait for the file to land with a populated procIO block.
 	deadline := time.Now().Add(3 * time.Second)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/meshcore-analyzer/perfio"
@@ -236,11 +237,22 @@ func procIORate(prev, cur procIOSnapshot, stamp string) *PerfIOSample {
 // The stats file path is resolved via statsFilePath() once at writer-loop
 // start; the env var (CORESCOPE_INGESTOR_STATS) is only re-read on process
 // restart, not per tick.
-func StartStatsFileWriter(s *Store, interval time.Duration) {
+//
+// Returns a stop function that signals the loop and BLOCKS until the
+// goroutine has actually returned. Production (main.go) runs the writer for
+// the lifetime of the process and ignores it; tests must call it, because a
+// writer that outlives its test keeps calling readProcSelfIOFn every tick —
+// which races the t.Cleanup that restores the hook, and gets reported against
+// whichever unrelated test happens to run next. Stopping asynchronously would
+// not fix that: the stop has to be ordered before the restore, so it waits.
+func StartStatsFileWriter(s *Store, interval time.Duration) (stop func()) {
 	if interval <= 0 {
 		interval = time.Second
 	}
+	quit := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		path := statsFilePath()
@@ -253,7 +265,12 @@ func StartStatsFileWriter(s *Store, interval time.Duration) {
 		// The buffer grows once and stays.
 		var buf bytes.Buffer
 		enc := json.NewEncoder(&buf)
-		for range t.C {
+		for {
+			select {
+			case <-quit:
+				return
+			case <-t.C:
+			}
 			// Capture time.Now() ONCE per tick (Carmack must-fix #5).
 			// Both snapshot.SampledAt and procIO.SampledAt MUST share the
 			// same string so the freshness guard isn't validating one
@@ -301,4 +318,9 @@ func StartStatsFileWriter(s *Store, interval time.Duration) {
 			}
 		}
 	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(quit) })
+		<-done
+	}
 }
