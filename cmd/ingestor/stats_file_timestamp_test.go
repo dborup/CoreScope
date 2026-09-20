@@ -42,7 +42,10 @@ func TestStatsFileWriter_SampledAtMatchesProcIOSampledAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	// Close via t.Cleanup, not defer: test defers run BEFORE cleanups, so a
+	// deferred Close would let the writer tick against a closed Store. LIFO
+	// cleanup ordering puts the writer's stop (registered later) ahead of it.
+	t.Cleanup(func() { store.Close() })
 
 	// Inject a deterministic procIO reader. `at` is pinned far in the
 	// past so any code path that formats the inner SampledAt from

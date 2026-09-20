@@ -126,14 +126,15 @@ func newTestStore(t testing.TB) *Store {
 		t.Fatal(err)
 	}
 	// OpenStore kicks off RunAsyncMigration in the background so boot is not
-	// blocked. In a test that is a race against the test's own seeding:
-	// backfillTxLastSeen only selects rows with last_seen = 0, so if it lands
-	// after a transmission is inserted but before all of its observations
-	// are, it resolves the row from a partial set and marks it done — the
-	// test's later synchronous call then skips the row. That is exactly the
-	// intermittent `last_seen = 100, want 300 (MAX of 100,300,200)` failure.
-	// Same synchronization point Close() uses (db.go:1470) and the same one
-	// backfill_default_scope_test.go already waits on.
+	// blocked. Draining it here makes every test that uses this helper start
+	// from a settled database instead of racing a migration it never asked
+	// for. Individual tests that already knew to wait (see
+	// tx_last_seen_backfill_test.go and backfill_default_scope_test.go) keep
+	// their own call; this makes the guarantee the default rather than
+	// something each new test has to remember.
+	//
+	// Same synchronization point Close() uses (db.go:1470). Production is
+	// unaffected: main.go still never blocks on it.
 	s.backfillWg.Wait()
 	t.Cleanup(func() { s.Close() })
 	return s
