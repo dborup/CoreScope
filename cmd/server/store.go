@@ -156,12 +156,17 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 //     result (hashSizeInfoCache). Acquired independently or
 //     under mu (in EvictStale).
 //
+//  7. estMemMu      (sync.Mutex)  — guards the ReadMemStats result cache
+//     (estMemVal/estMemAt). Strict leaf: no other lock is
+//     acquired while holding it.
+//
 // Nesting that occurs today:
 //   - IngestNew:               mu → cacheMu → channelsCacheMu  (1 → 2 → 3, OK)
 //   - IngestObservations:      mu → cacheMu                    (1 → 2, OK)
 //   - RunEviction/EvictStale:  mu → cacheMu → channelsCacheMu  (1 → 2 → 3, OK)
 //   - RunEviction/EvictStale:  mu → hashSizeInfoMu             (1 → 6, OK)
 //   - invalidateCachesFor:     cacheMu → channelsCacheMu       (2 → 3, OK)
+//   - Load (startup log lines): mu → estMemMu                  (1 → 7, OK)
 //
 // All other locks are acquired independently (no nesting).
 // When adding new lock acquisitions, respect this ordering.

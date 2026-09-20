@@ -133,7 +133,8 @@ func resolvePathForObs(pathJSON, observerID string, tx *StoreTx, pm *prefixMap, 
 	}
 	resolved := make([]*string, len(hops))
 	// Reuse a single ctx buffer across hops instead of allocating per hop.
-	// Capacity +2 for the previous-hop resolved PK that may be appended.
+	// At most one element (the previous hop's resolved PK) is ever appended;
+	// the spare capacity is headroom so that append never reallocates.
 	ctx := make([]string, len(contextPKs), len(contextPKs)+2)
 	copy(ctx, contextPKs)
 	ctxLen := len(ctx)
