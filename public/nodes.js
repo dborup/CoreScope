@@ -203,6 +203,47 @@
 
   /* === Shared helper functions for node detail rendering === */
 
+  function getLastAdvert(n, stats, adverts) {
+    // New health APIs distinguish own adverts from arbitrary packet analytics.
+    // Null is authoritative: never relabel relay-touched last_seen as an advert.
+    if (Object.prototype.hasOwnProperty.call(stats, 'lastAdvert')) return stats.lastAdvert || null;
+    let latest = null;
+    // Compatibility with older APIs: exact origin, never a path/prefix match.
+    for (const packet of adverts || []) {
+      if (Number(packet.payload_type) !== 4) continue;
+      let decoded = packet.decoded_json;
+      if (typeof decoded === 'string') {
+        try { decoded = JSON.parse(decoded); } catch (_) { continue; }
+      }
+      if (decoded && decoded.signatureValid === false) continue;
+      const source = decoded && (decoded.pubKey || decoded.publicKey);
+      if (typeof source !== 'string' || source.toLowerCase() !== String(n.public_key || '').toLowerCase()) continue;
+      const ts = packet.first_seen || packet.timestamp;
+      if (ts && Number.isFinite(Date.parse(ts)) && (!latest || Date.parse(ts) > Date.parse(latest))) latest = ts;
+    }
+    return latest;
+  }
+
+  function nodeWithHealthActivity(n, stats, adverts) {
+    // Directory last_seen/last_heard can include historical heuristic relay
+    // inference. Do not let them outrank the identity-safe health contract.
+    const activity = Object.prototype.hasOwnProperty.call(stats, 'lastAdvert')
+      ? stats.lastHeard || null
+      : getLastAdvert(n, stats, adverts);
+    return Object.assign({}, n, { _lastHeard: activity, last_heard: null, last_seen: null, _liveSeen: null });
+  }
+
+  function renderRelayActivity(n) {
+    let html = n.last_relayed ? renderNodeTimestampHtml(n.last_relayed) + ' ' : '';
+    html += n.last_relayed && n.relay_active
+      ? '<span style="color:var(--status-green-text);font-size:11px">actively relaying</span>'
+      : '<span style="color:var(--text-muted);font-size:11px">no recent confirmed relay</span>';
+    if (n.relay_count_1h != null || n.relay_count_24h != null) {
+      html += ` <span style="color:var(--text-muted);font-size:11px;margin-left:4px">(${n.relay_count_1h || 0} relays/hr, ${n.relay_count_24h || 0} relays/24h)</span>`;
+    }
+    return html;
+  }
+
   function getStatusTooltip(role, status) {
     const isInfra = role === 'repeater' || role === 'room';
     const threshMs = isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;
@@ -660,7 +701,7 @@
       const nodeData = await fetchNodeDetail(pubkey);
       if (viewSeq !== detailViewSeq || !body.isConnected) return;
       const healthData = nodeData.healthData;
-      const n = nodeData.node;
+      const n = nodeWithHealthActivity(nodeData.node, (healthData && healthData.stats) || {}, nodeData.recentAdverts || []);
       const adverts = (nodeData.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       const title = document.querySelector('.node-full-title');
       if (title) title.textContent = n.name || pubkey.slice(0, 12);
@@ -683,10 +724,9 @@
       const stats = h.stats || {};
       const observers = h.observers || [];
       const recent = h.recentPackets || [];
-      const lastHeard = stats.lastHeard;
+      const lastHeard = getLastAdvert(n, stats, adverts);
 
-      // Attach health lastHeard for shared helpers
-      n._lastHeard = lastHeard || n.last_seen;
+      // General activity was supplied separately by nodeWithHealthActivity.
       const si = getStatusInfo(n);
       const roleColor = si.roleColor;
       const statusLabel = si.statusLabel;
@@ -724,8 +764,8 @@
 
         <table class="node-stats-table" id="node-stats">
           <tr><td>Status</td><td><span title="${si.statusTooltip}">${statusLabel}</span> <span style="font-size:11px;color:var(--text-muted);margin-left:4px">${statusExplanation}</span></td></tr>
-          <tr><td>Last Heard</td><td>${renderNodeTimestampHtml(lastHeard || n.last_seen)}</td></tr>
-          ${(n.role === 'repeater' || n.role === 'room') ? `<tr><td title="Last time this repeater appeared as a relay hop in a non-advert packet observed by the network. Distinct from 'Last Heard' (which counts the repeater's own adverts). See issue #662.">Last Relayed</td><td>${n.last_relayed ? renderNodeTimestampHtml(n.last_relayed) + ' ' + (n.relay_active ? '<span style="color:var(--status-green-text);font-size:11px"><span style="color:var(--status-green-text)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> actively relaying</span>' : '<span style="color:var(--status-yellow);font-size:11px"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> alive (idle)</span>') : '<span style="color:var(--text-muted)">never observed as relay hop</span> <span style="color:var(--status-yellow);font-size:11px"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> alive (idle)</span>'}${(n.relay_count_1h != null || n.relay_count_24h != null) ? ` <span style="color:var(--text-muted);font-size:11px;margin-left:4px">(${n.relay_count_1h || 0} relays/hr, ${n.relay_count_24h || 0} relays/24h)</span>` : ''}</td></tr>` : ''}
+          <tr><td>Last Heard (advert)</td><td>${renderNodeTimestampHtml(lastHeard)}</td></tr>
+          ${(n.role === 'repeater' || n.role === 'room') ? `<tr><td title="Confirmed observed flood-path relay hops; ambiguous hashes and intended direct routes are excluded.">Last Relayed</td><td>${renderRelayActivity(n)}</td></tr>` : ''}
           ${(n.role === 'repeater' || n.role === 'room') && (n.traffic_share_score != null || n.usefulness_score != null) ? (() => {
             // #1456: prefer the new traffic_share_score field; fall back
             // to legacy usefulness_score for graceful degradation
@@ -1787,7 +1827,7 @@
   }
 
   function renderDetail(panel, data) {
-    const n = data.node;
+    const n = nodeWithHealthActivity(data.node, (data.healthData && data.healthData.stats) || {}, data.recentAdverts || []);
     const adverts = (data.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     const h = data.healthData || {};
     const stats = h.stats || {};
@@ -1800,8 +1840,7 @@
     const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
 
     // Status calculation via shared helper
-    const lastHeard = stats.lastHeard;
-    n._lastHeard = lastHeard || n.last_seen;
+    const lastHeard = getLastAdvert(n, stats, adverts);
     const si = getStatusInfo(n);
     const roleColor = si.roleColor;
     const totalPackets = stats.totalTransmissions || stats.totalPackets || n.advert_count || 0;
@@ -1833,7 +1872,8 @@
         <div class="node-detail-section">
           <h4>Overview</h4>
           <dl class="detail-meta">
-            <dt>Last Heard</dt><dd>${renderNodeTimestampHtml(lastHeard || n.last_seen)}</dd>
+            <dt>Last Heard (advert)</dt><dd>${renderNodeTimestampHtml(lastHeard)}</dd>
+            ${(n.role === 'repeater' || n.role === 'room') ? `<dt>Last Relayed</dt><dd>${renderRelayActivity(n)}</dd>` : ''}
             <dt>First Seen</dt><dd>${renderNodeTimestampHtml(n.first_seen)}</dd>
             <dt>Total Packets</dt><dd>${totalPackets}</dd>
             <dt>Packets Today</dt><dd>${stats.packetsToday || 0}</dd>
@@ -2077,6 +2117,9 @@
   };
   window._nodesSyncClaimedToFavorites = syncClaimedToFavorites;
   window._nodesRenderNodeTimestampHtml = renderNodeTimestampHtml;
+  window._nodesGetLastAdvert = getLastAdvert;
+  window._nodesWithHealthActivity = nodeWithHealthActivity;
+  window._nodesRenderRelayActivity = renderRelayActivity;
   window._nodesRenderNodeTimestampText = renderNodeTimestampText;
   window._nodesGetStatusInfo = getStatusInfo;
   window._nodesGetStatusTooltip = getStatusTooltip;
