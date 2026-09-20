@@ -1023,8 +1023,8 @@ func TestNodeHealthPartialFromPackets(t *testing.T) {
 	if stats["totalPackets"] != 1.0 { // JSON numbers are float64
 		t.Errorf("expected totalPackets=1, got %v", stats["totalPackets"])
 	}
-	if stats["lastHeard"] == nil {
-		t.Error("expected lastHeard to be set")
+	if stats["lastHeard"] != nil || stats["lastAdvert"] != nil {
+		t.Error("unattributed packet analytics must not imply confirmed node activity or advert")
 	}
 }
 
@@ -4883,12 +4883,15 @@ func TestHandleScopeStats_RepeatersByRegion(t *testing.T) {
 	}
 
 	pt5 := 5 // GRP_TXT — non-advert, so it counts toward TransportedScopes
+	flood := routeTypeFlood
 	tx := &StoreTx{
 		ID:          1,
 		Hash:        "txhash1",
 		FirstSeen:   time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano),
 		PayloadType: &pt5,
 		ScopeName:   "#belgium",
+		RouteType:   &flood,
+		PathJSON:    `["aa"]`,
 	}
 	// #1751 follow-up regression: byPathHop also indexes short hex-prefix
 	// "bucket" keys (ambiguous-hop resolution fallback) alongside full
@@ -4902,6 +4905,7 @@ func TestHandleScopeStats_RepeatersByRegion(t *testing.T) {
 		ScopeName:   "#belgium",
 	}
 	srv.store = &PacketStore{
+		nodePM: buildPrefixMap([]nodeInfo{{PublicKey: "aabbccdd0011", Role: "repeater"}}),
 		byPathHop: map[string][]*StoreTx{
 			"aabbccdd0011": {tx},
 			"aabb":         {bucketTx},
@@ -4957,8 +4961,14 @@ func TestHandleScopeStats_BridgeRepeaters(t *testing.T) {
 	txBelgium := &StoreTx{ID: 1, Hash: "tx1", FirstSeen: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano), PayloadType: &pt5, ScopeName: "#belgium"}
 	txFrance := &StoreTx{ID: 2, Hash: "tx2", FirstSeen: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano), PayloadType: &pt5, ScopeName: "#france"}
 	txBelgium2 := &StoreTx{ID: 3, Hash: "tx3", FirstSeen: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano), PayloadType: &pt5, ScopeName: "#belgium"}
+	flood := routeTypeFlood
+	for _, tx := range []*StoreTx{txBelgium, txFrance} {
+		tx.RouteType, tx.PathJSON = &flood, `["bb"]`
+	}
+	txBelgium2.RouteType, txBelgium2.PathJSON = &flood, `["cc"]`
 
 	srv.store = &PacketStore{
+		nodePM: buildPrefixMap([]nodeInfo{{PublicKey: "bbbbccdd0011", Role: "repeater"}, {PublicKey: "ccccccdd0011", Role: "repeater"}}),
 		byPathHop: map[string][]*StoreTx{
 			"bbbbccdd0011": {txBelgium, txFrance}, // relayed BOTH regions — a bridge
 			"ccccccdd0011": {txBelgium2},          // relayed only #belgium — not a bridge
