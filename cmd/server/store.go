@@ -156,12 +156,17 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 //     result (hashSizeInfoCache). Acquired independently or
 //     under mu (in EvictStale).
 //
+//  7. estMemMu      (sync.Mutex)  — guards the ReadMemStats result cache
+//     (estMemVal/estMemAt). Strict leaf: no other lock is
+//     acquired while holding it.
+//
 // Nesting that occurs today:
 //   - IngestNew:               mu → cacheMu → channelsCacheMu  (1 → 2 → 3, OK)
 //   - IngestObservations:      mu → cacheMu                    (1 → 2, OK)
 //   - RunEviction/EvictStale:  mu → cacheMu → channelsCacheMu  (1 → 2 → 3, OK)
 //   - RunEviction/EvictStale:  mu → hashSizeInfoMu             (1 → 6, OK)
 //   - invalidateCachesFor:     cacheMu → channelsCacheMu       (2 → 3, OK)
+//   - Load (startup log lines): mu → estMemMu                  (1 → 7, OK)
 //
 // All other locks are acquired independently (no nesting).
 // When adding new lock acquisitions, respect this ordering.
@@ -474,6 +479,13 @@ type PacketStore struct {
 	evicted         int64          // total packets evicted
 	trackedBytes    int64          // running total of estimated packet store memory
 	memoryEstimator func() float64 // injectable for tests; nil = use runtime.ReadMemStats (stats only)
+
+	// Per-store ReadMemStats cache (5s TTL). Fields (not package-level vars) so
+	// that test helpers constructing &PacketStore{...} directly get independent
+	// cache state, avoiding order-dependent test failures.
+	estMemMu  sync.Mutex
+	estMemVal float64
+	estMemAt  time.Time
 
 	// Short-lived cache for the observations aggregate in GetStoreStats (30s TTL).
 	// Avoids a per-/api/stats full-table scan; values accurate to ~30s which is
@@ -4661,13 +4673,24 @@ func estimateStoreObsBytes(obs *StoreObs) int64 {
 // estimatedMemoryMB returns current Go heap allocation in MB.
 // Kept for stats/debug endpoints only — NOT used in eviction decisions.
 // In tests, memoryEstimator can be set to inject a deterministic value.
+// Caches the result for 5 seconds because runtime.ReadMemStats() stops the
+// world and this is called from stats/debug endpoints that may be polled.
+// The cache is per-store (not package-level) so that test helpers constructing
+// &PacketStore{...} directly get independent cache state, avoiding
+// order-dependent test failures from a shared global cache.
 func (s *PacketStore) estimatedMemoryMB() float64 {
 	if s.memoryEstimator != nil {
 		return s.memoryEstimator()
 	}
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return float64(ms.HeapAlloc) / 1048576.0
+	s.estMemMu.Lock()
+	defer s.estMemMu.Unlock()
+	if time.Since(s.estMemAt) > 5*time.Second {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		s.estMemVal = float64(ms.HeapAlloc) / 1048576.0
+		s.estMemAt = time.Now()
+	}
+	return s.estMemVal
 }
 
 // trackedMemoryMB returns the self-accounted packet store memory in MB.
