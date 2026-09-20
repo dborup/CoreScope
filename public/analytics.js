@@ -246,7 +246,30 @@
     }
 
     // Re-render when distance unit or theme changes
-    _themeRefreshHandler = function () { renderTab(_currentTab); };
+    _themeRefreshHandler = function () {
+      // #1925: never full-rebuild the neighbor-graph tab on theme-refresh.
+      // Every page load fires one theme-refresh ~300ms after
+      // /api/config/theme resolves (app.js dispatches 'theme-changed', then
+      // debounces 300ms). renderTab() here replaced el.innerHTML, which reset
+      // the role checkboxes to their defaults and rebuilt _ngState from the
+      // full graph, discarding any filtering the user had applied in the
+      // meantime. Restarting the renderer keeps the current filter state and
+      // still picks up the new theme: node colors are read live per frame
+      // from window.ROLE_COLORS, role swatches use CSS tokens, and the one
+      // cached value (_labelColor) is re-read on restart. Measured: this also
+      // stops the old path leaking one rAF render loop and one canvas
+      // listener set per theme-refresh (a 10-event burst ran the force
+      // simulation at ~20x speed; it now stays flat).
+      //
+      // Not covered, pre-existing: _ngState is only assigned after the graph
+      // fetch resolves, while the checkboxes exist from the synchronous
+      // innerHTML before it. A theme-refresh landing inside that fetch window
+      // still falls through to renderTab() and still discards a filter
+      // applied during the load. Closing that needs a "load in flight"
+      // sentinel, which is deliberately left out of this port.
+      if (_currentTab === 'neighbor-graph' && _ngState) { startGraphRenderer(); return; }
+      renderTab(_currentTab);
+    };
     window.addEventListener('theme-refresh', _themeRefreshHandler);
 
     loadAnalytics();
