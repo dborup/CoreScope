@@ -3681,12 +3681,13 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
         { id: 2, observer_id: 'obsB', observer_iata: 'LAX', timestamp: '2026-01-01T00:00:01Z' },
       ] }, replayCtx);
     assert.strictEqual(out.length, 2, 'one replay packet per observation');
-    // Joined rather than deepStrictEqual: the array comes from the vm
-    // sandbox's realm, so its prototype differs and a strict deep compare
-    // fails on identical contents.
-    assert.strictEqual(out.map((p) => p.observer_id).join(','), 'obsA,obsB',
+    // deepEqual, not deepStrictEqual: the array comes from the vm sandbox's
+    // realm, so its prototype differs from this one and a STRICT deep compare
+    // fails on identical contents ("same structure but not reference-equal").
+    // The loose form compares across realms and is stronger than joining.
+    assert.deepEqual(out.map((p) => p.observer_id), ['obsA', 'obsB'],
       'each observation must carry its OWN observer_id, not the transmission representative');
-    assert.strictEqual(out.map((p) => p.observer_iata).join(','), 'BRU,LAX');
+    assert.deepEqual(out.map((p) => p.observer_iata), ['BRU', 'LAX']);
   });
 
   test('grouped mode: keeps a multi-observer row whose representative is not the filtered observer (#1748 core bug)', () => {

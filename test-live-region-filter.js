@@ -164,8 +164,15 @@ test('#1898: a replayed packet survives an active region filter', () => {
     'with observer_id carried the group matches and is rendered');
 });
 
-test('#1898: dropping observer_id is what broke it (guards the regression)', () => {
-  assert.strictEqual(fn([{ observer: 'Obs One' }], { obs1: 'BRU' }, ['BRU']), false,
+test('#1898: a source row without observer_id still yields an unmatched packet', () => {
+  // Drive the real mapping rather than hand-building the object: asserting on
+  // packetMatchesRegion alone only re-tests the filter (already covered by
+  // "does not match when packet has no observer_id" above) and cannot fail if
+  // dbPacketToLive stops carrying the field — which is the regression this is
+  // named for.
+  const live = toLive({ id: 1, hash: 'h', timestamp: '2026-01-01T00:00:00Z', observer_name: 'Obs One' });
+  assert.strictEqual(live.observer_id, undefined, 'nothing to carry when the source row has no id');
+  assert.strictEqual(fn([live], { obs1: 'BRU' }, ['BRU']), false,
     'a packet with no observer_id is skipped, so the group is dropped');
 });
 
