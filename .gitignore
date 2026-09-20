@@ -41,3 +41,6 @@ deploy-staging.sh
 
 __pycache__/
 *.pyc
+
+# Playwright E2E screenshot output (written by test-issue-*-e2e.js)
+e2e-screenshots/
