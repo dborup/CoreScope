@@ -123,68 +123,80 @@ type relayEntry struct {
 	// scope is the tx's region scope name (transmissions.scope_name).
 	// Empty when absent / on older schemas. Used for TransportedScopes (#1751).
 	scope string
-	// fromPrefix marks entries that came from the 1-byte raw-prefix
-	// fallback bucket rather than this exact (resolved-pubkey) key — see
-	// collectRelayEntriesLocked. computeRelayInfoFromEntries must not
-	// accumulate `scope` for these: MeshCore firmware only relays a
-	// TRANSPORT_FLOOD/DIRECT packet when the repeater's own configured
-	// region matches (allowPacketForward in examples/simple_repeater/
-	// MyMesh.cpp), so crediting a scope based on nothing but a shared
-	// 1-byte hash prefix asserts something the protocol wouldn't allow.
+	// fromPrefix preserves the existing scope-field contract: only exact
+	// full-key path-hop entries contribute transported scopes. Raw-prefix and
+	// byNode candidates can advance relay activity, but never broaden scope
+	// claims.
 	fromPrefix bool
+	parsed     bool
+	t          time.Time
+	valid      bool
 }
 
-// collectRelayEntriesLocked returns deduplicated relayEntry snapshots for
-// all StoreTx entries indexed under key (full pubkey) and its 1-byte wire
-// prefix. Caller MUST hold s.mu at least for reading.
-//
-// byPathHop is keyed by both full resolved pubkey AND raw 1-byte hop
-// prefix (e.g. "a3"). Many ingested non-advert packets only carry the
-// raw hop on the wire — resolution to the full pubkey happens later via
-// neighbor affinity. Looking up both keys and de-duping by tx ID matches
-// what the "Paths seen through node" view shows.
-//
-// The 1-byte prefix lookup CAN over-count when multiple nodes share the
-// same first byte. This trades a possible over-count for clearly false
-// zeros (issue #662).
-func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
-	txList := s.byPathHop[key]
-	var prefixList []*StoreTx
-	if len(key) >= 2 {
-		// key[:2] is the first 2 hex characters — exactly 1 byte of raw
-		// hop data, matching addTxToPathHopIndex for wire-level hops.
-		prefix := key[:2]
-		if prefix != key {
-			prefixList = s.byPathHop[prefix]
-		}
+func newRelayEntry(tx *StoreTx, fromPrefix bool) relayEntry {
+	pt, rt := -1, -1
+	if tx.PayloadType != nil {
+		pt = *tx.PayloadType
 	}
+	if tx.RouteType != nil {
+		rt = *tx.RouteType
+	}
+	return relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix}
+}
 
-	// Capacity hint: upper-bound is len(txList)+len(prefixList). The
-	// collect() pass below uses `seen` for true dedup, so we don't need
-	// a separate prepass (PR #1164 CR item 3: dead `uniq` map removed).
-	hint := len(txList) + len(prefixList)
-	entries := make([]relayEntry, 0, hint)
-	seen := make(map[int]bool, hint)
-	collect := func(list []*StoreTx, fromPrefix bool) {
-		for _, tx := range list {
-			if tx == nil || seen[tx.ID] {
-				continue
+// collectRelayEntriesLocked returns one relayEntry per transmission that is a
+// relay candidate for key (see forEachRelayCandidate) and whose raw observed
+// flood paths confirm key. Caller MUST hold s.mu at least for reading.
+//
+// Candidate membership is never proof: persisted/live resolution can include
+// heuristic guesses. Every candidate is verified against its raw observation
+// paths, without target-biased resolve. Each transmission is checked once.
+func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
+	m := newRelayKeyMatcher(key, s.relayPrefixMapLocked())
+	var entries []relayEntry
+	if !m.possible() {
+		return entries
+	}
+	seen := make(map[int]struct{})
+	forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, fromPrefix bool) {
+		if _, done := seen[tx.ID]; done {
+			return
+		}
+		seen[tx.ID] = struct{}{}
+		if txConfirmsRelay(tx, m) {
+			entries = append(entries, newRelayEntry(tx, fromPrefix))
+		}
+	})
+	return entries
+}
+
+// forEachRelayCandidate visits key's candidate transmissions, possibly more
+// than once across buckets (callers deduplicate by ID). Within a bucket it
+// walks from the most recently indexed entry backwards; index order is not
+// chronological, so callers must not stop early based on timestamps. Bucket
+// order matters for scope provenance: the full-key path-hop bucket comes
+// first and is the only one with fromPrefix=false. Reads live index slices:
+// caller holds s.mu.
+//   - byPathHop[key]: raw full-key hops and live resolved-path indexing.
+//   - byNode[key]: decoded and resolved-path membership from every
+//     observation. Needed after a restart, where buildPathHopIndex re-indexes
+//     display paths only and drops non-display resolved hops.
+//   - byPathHop[unique 1/2/3-byte prefix]: raw wire hops.
+func forEachRelayCandidate(pathHop, byNode map[string][]*StoreTx, m relayKeyMatcher, visit func(tx *StoreTx, fromPrefix bool)) {
+	each := func(list []*StoreTx, fromPrefix bool) {
+		for i := len(list) - 1; i >= 0; i-- {
+			if list[i] != nil {
+				visit(list[i], fromPrefix)
 			}
-			seen[tx.ID] = true
-			pt := -1
-			if tx.PayloadType != nil {
-				pt = *tx.PayloadType
-			}
-			rt := -1
-			if tx.RouteType != nil {
-				rt = *tx.RouteType
-			}
-			entries = append(entries, relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix})
 		}
 	}
-	collect(txList, false)
-	collect(prefixList, true)
-	return entries
+	each(pathHop[m.key], false)
+	each(byNode[m.key], true)
+	for _, l := range relayPrefixHexLens {
+		if m.uniquePrefix(l) && m.key[:l] != m.key {
+			each(pathHop[m.key[:l]], true)
+		}
+	}
 }
 
 // computeRelayInfoFromEntries derives RepeaterRelayInfo from pre-snapshotted
@@ -215,7 +227,10 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 			}
 			scopeSet[e.scope] = struct{}{}
 		}
-		t, ok := parseRelayTS(e.ts)
+		t, ok := e.t, e.valid
+		if !e.parsed {
+			t, ok = parseRelayTS(e.ts)
+		}
 		if !ok {
 			continue
 		}
@@ -271,8 +286,9 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 }
 
 // GetRepeaterRelayInfo returns relay-activity information for a node by
-// scanning the byPathHop index for non-advert packets that name the
-// pubkey as a hop. It computes the most recent appearance timestamp,
+// scanning byPathHop for non-advert flood packets with identity-safe observed
+// hop evidence. Direct routes describe planned hops and are not relay evidence.
+// It computes the most recent appearance timestamp,
 // 1h/24h hop counts, and whether the latest appearance falls within
 // windowHours.
 //
