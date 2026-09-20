@@ -339,7 +339,7 @@
           ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${obs.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
           ${sparkHtml ? `<div class="mnc-spark">${sparkHtml}</div>` : ''}
           <div class="mnc-actions">
-            <button class="mnc-btn" data-action="node" data-key="${mn.pubkey}">Node page →</button>
+            <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
             <button class="mnc-btn" data-action="health" data-key="${mn.pubkey}">Full health →</button>
             <button class="mnc-btn" data-action="packets" data-key="${mn.pubkey}">View packets →</button>
           </div>
@@ -358,7 +358,7 @@
           </div>
           <div class="mnc-status-text">${statusMsg}</div>
           <div class="mnc-actions">
-            <button class="mnc-btn" data-action="node" data-key="${mn.pubkey}">Node page →</button>
+            <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
           </div>
         </div>`;
       }

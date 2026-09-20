@@ -47,7 +47,7 @@ const ORIGIN = 'http://127.0.0.1:18739';
 const PUB = path.join(__dirname, 'public');
 // Bump together with any added/removed step(): a run that finishes fewer
 // scenarios is reported as a failure, never as a pass.
-const EXPECTED_STEPS = 24;
+const EXPECTED_STEPS = 25;
 // Missing elements fail a scenario in seconds instead of Playwright's 30s.
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -394,6 +394,39 @@ function cardFor(page, pubkey) {
       await page.close();
     });
   }
+
+  // ---- 7b. The now-reachable Remove must be visible while focused ----
+  // The keydown guard makes Remove genuinely keyboard-activatable. It is
+  // hover-revealed (opacity: 0), so without a focus rule a keyboard user
+  // would be operating an invisible destructive control (WCAG 2.4.7).
+  await step('keyboard-focused Remove is visible, and still hidden when unfocused', async () => {
+    const { page } = await newHarness(browser);
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
+    await renderMyMesh(page, [NORMAL_PK]);
+    const remove = cardFor(page, NORMAL_PK).locator('.mnc-remove');
+    // .mnc-remove eases opacity over .15s, so wait for the transition to land
+    // and assert the meaningful contract (visible vs invisible) rather than an
+    // exact value an easing curve only approaches.
+    const awaitOpacity = async (visible) => {
+      await page.waitForFunction(
+        ([pk, wantVisible]) => {
+          const el = document.querySelector(`.my-node-card[data-key="${pk}"] .mnc-remove`);
+          if (!el) return false;
+          const o = parseFloat(getComputedStyle(el).opacity);
+          return wantVisible ? o > 0.9 : o < 0.1;
+        },
+        [NORMAL_PK, visible],
+      );
+      return parseFloat(await remove.evaluate((el) => getComputedStyle(el).opacity));
+    };
+    assert.ok(await awaitOpacity(false) < 0.1, 'Remove stays hidden while nothing on the card has focus');
+    await remove.focus();
+    assert.ok(await awaitOpacity(true) > 0.9, 'Remove becomes visible once it holds keyboard focus');
+    await page.evaluate(() => document.activeElement.blur());
+    assert.ok(await awaitOpacity(false) < 0.1, 'Remove hides again when focus leaves the card');
+    await page.close();
+  });
 
   // ---- 8. Narrow screen: buttons wrap, no horizontal overflow ----
   await step('narrow card wraps the 3 action buttons without horizontal overflow', async () => {
