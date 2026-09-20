@@ -8194,14 +8194,17 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 					name = pk
 				}
 			}
-			// Skip zero-hop direct adverts for hash_size — the
-			// path byte is locally generated and unreliable.
-			// Still count the packet and update lastSeen.
-			isZeroHop := (routeType == uint64(RouteDirect) || routeType == uint64(RouteTransportDirect)) && (actualPathByte&0x3F) == 0
+			// Skip zero-hop direct adverts whose path byte is entirely zero —
+			// there the size bits were wiped by the sender and say nothing.
+			// A non-zero byte with a zero hop count (0x40 / 0x80) is a
+			// deliberate size declaration; keep it. Same rule as
+			// computeNodeHashSizeInfo. Skipped packets still count and still
+			// update lastSeen.
+			isUndeclaredZeroHop := (routeType == uint64(RouteDirect) || routeType == uint64(RouteTransportDirect)) && actualPathByte == 0x00
 			if byNode[pk] == nil {
 				role := nodeRoleByPK[pk] // empty if unknown
 				initHS := hashSize
-				if isZeroHop {
+				if isUndeclaredZeroHop {
 					initHS = 0
 				}
 				byNode[pk] = map[string]interface{}{
@@ -8211,7 +8214,7 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 				}
 			}
 			byNode[pk]["packets"] = byNode[pk]["packets"].(int) + 1
-			if !isZeroHop {
+			if !isUndeclaredZeroHop {
 				byNode[pk]["hashSize"] = hashSize
 			}
 			byNode[pk]["lastSeen"] = tx.FirstSeen
@@ -8809,11 +8812,25 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 		if err != nil {
 			continue
 		}
-		// Direct zero-hop adverts (route types 2 and 3) use path byte 0x00
-		// locally and can misreport multibyte hash mode as 1-byte.
-		if (routeType == RouteDirect || routeType == RouteTransportDirect) && (pathByte&0x3F) == 0 {
+		// Direct zero-hop adverts carry no path, so the hop count is 0. Whether
+		// the SIZE bits are meaningful depends on the sender: firmware that
+		// predates meshcore-dev/MeshCore#3293 does `path_len = 0`, wiping the
+		// whole byte including the two size bits, so 0x00 says nothing about
+		// the node's path.hash.mode. A sender that writes the size through
+		// setPathHashSizeAndCount() emits 0x40 / 0x80 with a zero hop count —
+		// that is a deliberate declaration and the only way those bits can be
+		// non-zero here. Skip on the byte's content, not on the route type.
+		if (routeType == RouteDirect || routeType == RouteTransportDirect) && pathByte == 0x00 {
 			continue
 		}
+		// NOTE: hash_size 4 is reserved and rejected by the decoder (#1211),
+		// but this function has always reported it (TestHashSizeTransport-
+		// RoutePathByteOffset pins HashSize=4 for path byte 0xC1), unlike
+		// computeAnalyticsHashSizes which drops it. Skipping on byte content
+		// widens that pre-existing gap slightly, from 0xC1 to also 0xC0.
+		// Adding a `hs > 3` guard here would change the behaviour that test
+		// deliberately pins, so reconciling the two sites is left as separate
+		// work rather than smuggled into this fix.
 		hs := int((pathByte>>6)&0x3) + 1
 
 		var d map[string]interface{}
@@ -8889,13 +8906,17 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 	return info
 }
 
-// hashSizeMinObservations is the minimum number of non-zero-hop adverts in the
-// window before a node is eligible to be flagged as flip-flopping at all.
+// hashSizeMinObservations is the minimum number of size-declaring adverts in
+// the window before a node is eligible to be flagged as flip-flopping at all.
+// Since #1913 that includes zero-hop direct adverts whose path byte declares a
+// size (0x40 / 0x80); only an all-zero path byte is treated as "says nothing".
 const hashSizeMinObservations = 3
 
-// hashSizeRecentAgreeCount is how many of the most recent non-zero-hop adverts
-// must share a single hash size for a node to be considered "settled", clearing
-// its flip-flop ("varies") flag.
+// hashSizeRecentAgreeCount is how many of the most recent size-declaring
+// adverts must share a single hash size for a node to be considered "settled",
+// clearing its flip-flop ("varies") flag. Zero-hop directs that declare a size
+// now count here too (#1913), and they are frequent, so a settled node clears
+// the "varies" flag sooner than it did before.
 const hashSizeRecentAgreeCount = 3
 
 // recentAdvertsAgree reports whether the last n entries of a chronologically
