@@ -1785,7 +1785,18 @@
       buildObserverMenu();
       updateObsTrigger();
       updatePacketsUrl();
-      renderTableRows();
+      // The observer filter is a SERVER-side filter (buildPacketsParams sends
+      // `observer`), so changing it must refetch — the same thing every other
+      // server-side filter handler here does (hash, time window, group toggle,
+      // myNodes, region, channel, clear-filters). It previously only
+      // re-rendered, relying on the client-side re-filter in
+      // applyObserverFilter to narrow the already-loaded page. That is exactly
+      // the re-filter grouped mode must not do (a grouped row's observer_id is
+      // only the representative observer), so without a refetch the filter
+      // would silently do nothing in grouped mode until the next page load.
+      // Refetching also fixes the converse: unticking back to "All Observers"
+      // now restores the wider set instead of leaving the page narrowed.
+      loadPackets();
     });
 
     // --- Type multi-select ---
@@ -2775,6 +2786,53 @@
     });
   }
 
+  // applyObserverFilter decides which already-loaded packets remain visible
+  // under the current observer filter. Extracted into its own function
+  // (rather than left inline in renderTableRows) specifically so tests can
+  // exercise the real production logic instead of a hand-copied
+  // reimplementation — see #1748 PR review (kent-beck): a test that only
+  // checks a copy of this logic doesn't fail if this function regresses.
+  //
+  // #1748: In grouped mode, the server already filters transmissions over
+  // ALL observations of a transmission, not just the displayed one. Both
+  // server paths do this: the usual in-memory one (store.QueryGroupedPackets
+  // → filterPackets / transmissionsForObserver, cmd/server/store.go, which
+  // scans every tx.Observations) and the SQL fallback used for windows older
+  // than oldestLoaded (buildTransmissionWhere's EXISTS subquery,
+  // cmd/server/db.go). Because it is a server-side filter, changing it
+  // refetches — see the observer multi-select handler above; without that
+  // refetch this early return would make the filter a no-op in grouped mode.
+  // Each row's `observer_id` here is only the
+  // *representative* observer chosen for display (longest observed path),
+  // which may legitimately differ from the observer that satisfied the
+  // filter. Re-filtering client-side against that single representative —
+  // with `_children` still unpopulated at this point (only fetched lazily
+  // on row-expand or observer-sort-change) — hid every multi-observer
+  // transmission whose representative happened not to be one of the
+  // selected observers. In practice this meant a transmission only stayed
+  // visible when the filtered observer was also the one with the longest
+  // path (which is why the report described it as "works only for
+  // whichever observer logged it first" in dense meshes, where
+  // longest-path and earliest-seen correlate). The server-side EXISTS
+  // filter is authoritative for grouped rows, so no client-side
+  // re-filtering is needed or correct here.
+  //
+  // Flat/expanded mode (groupByHash === false) lists individual observations,
+  // each carrying its own observer_id, so re-filtering them against the
+  // selected set is exact rather than representative-based. We keep that
+  // defensive re-filter: it costs nothing and guards against any future
+  // flat-mode server change.
+  function applyObserverFilter(displayPackets, filters, groupByHash, hashOnly) {
+    if (hashOnly || !filters.observer) return displayPackets;
+    if (groupByHash) return displayPackets;
+    const obsIds = new Set(filters.observer.split(','));
+    return displayPackets.filter(p => {
+      if (obsIds.has(p.observer_id)) return true;
+      if (p._children) return p._children.some(c => obsIds.has(String(c.observer_id)));
+      return false;
+    });
+  }
+
   async function renderTableRows() {
     const tbody = document.getElementById('pktBody');
     if (!tbody) return;
@@ -2817,14 +2875,7 @@
       const types = filters.type.split(',').map(Number);
       displayPackets = displayPackets.filter(p => types.includes(p.payload_type));
     }
-    if (!hashOnly && filters.observer) {
-      const obsIds = new Set(filters.observer.split(','));
-      displayPackets = displayPackets.filter(p => {
-        if (obsIds.has(p.observer_id)) return true;
-        if (p._children) return p._children.some(c => obsIds.has(String(c.observer_id)));
-        return false;
-      });
-    }
+    displayPackets = applyObserverFilter(displayPackets, filters, groupByHash, hashOnly);
 
     // Packet Filter Language
     const pfCount = document.getElementById('packetFilterCount');
@@ -4079,6 +4130,7 @@
       buildFlatRowHtml,
       _calcVisibleRange,
       buildPacketsParams,
+      applyObserverFilter,
       renderTableRows,
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },
