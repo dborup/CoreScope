@@ -24,6 +24,11 @@ env:
 # Pipeline (sequential, fail-fast):
 #   go-test → e2e-test → build-and-publish → deploy → publish-badges
 #   PRs stop after build-and-publish (no GHCR push). Master continues to deploy + badges.
+#
+# Fork guard: everything with an external side effect (GHCR login/push, release
+# upload, staging deploy, badge commits) additionally requires
+# github.repository == 'Kpa-clawbot/CoreScope'. On a fork (e.g. dborup/CoreScope)
+# only the tests, the local image build and CI artifact uploads run.
 
 jobs:
   # ───────────────────────────────────────────────────────────────
@@ -41,10 +46,10 @@ jobs:
       - name: Clean Go module cache
         run: rm -rf ~/go/pkg/mod 2>/dev/null || true
 
-      - name: Set up Go 1.22
+      - name: Set up Go 1.27.1
         uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version: '1.27.1'
           cache-dependency-path: |
             cmd/server/go.sum
             cmd/ingestor/go.sum
@@ -99,6 +104,7 @@ jobs:
           node test-packet-filter-time.js
           node test-confidence-indicator.js
           node test-1659-analytics-warmup.js
+          node test-app-api-inflight-cleanup-rejection.js
           node test-channels-merge-1498-unit.js
           node test-issue-1518-home-url.js
           node test-channel-decrypt-insecure-context.js
@@ -119,6 +125,7 @@ jobs:
           node test-issue-1356-map-a11y.js
           node test-issue-1360-pill-letter-count.js
           node test-issue-1364-pill-no-clamp.js
+          node test-issue-1890-og-url.js
           node test-issue-1375-scope-stats-fetch.js
           node test-issue-1361-cb-presets.js
           node test-issue-1380-cb-sim-overlay.js
@@ -141,6 +148,7 @@ jobs:
           node test-live.js
           node test-coverage-gate.js
           node test-node-reach-coverage.js
+          node test-reach-rank.js
           node test-issue-1107-live-layout.js
           node test-issue-1532-live-fullscreen.js
           node test-issue-1619-feed-detail-card-draggable.js
@@ -158,6 +166,8 @@ jobs:
           node test-a11y-axe-1668-selftest.js
           node test-a11y-1716-rf-range-btn-active.js
           node test-issue-1705-subpath-contrast.js
+          node test-analytics-table-ids-unique.js
+          node test-live-vcr-mode-contrast.js
           node test-issue-1770-mobile-row-clamp.js
           node test-a11y-axe-routes-coverage.js
 
@@ -244,6 +254,7 @@ jobs:
     name: "🎭 Playwright E2E Tests"
     needs: [go-test]
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     defaults:
       run:
         shell: bash
@@ -261,10 +272,10 @@ jobs:
       - name: Clean Go module cache
         run: rm -rf ~/go/pkg/mod 2>/dev/null || true
 
-      - name: Set up Go 1.22
+      - name: Set up Go 1.27.1
         uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version: '1.27.1'
           cache-dependency-path: cmd/server/go.sum
 
       - name: Build Go server
@@ -391,6 +402,7 @@ jobs:
 
       - name: Run Playwright E2E tests (fail-fast)
         run: |
+          node test-node-liveness-e2e.js 2>&1 | tee node-liveness-e2e-output.txt
           BASE_URL=http://localhost:13581 node test-e2e-playwright.js 2>&1 | tee e2e-output.txt
           # M5+M6 of #1668 — axe-core CI gate.
           # M5: color-contrast on desktop dark+light.
@@ -431,6 +443,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-slideover-1168-munger-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-logo-pulse-1173-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1122-packets-filter-ux-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-1122-details-row-clamp-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1128-packets-layout-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1128-multi-viewport-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1136-live-region-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -469,6 +482,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1279-legend-p2-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1799-label-vocab-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-home-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-issue-2027-my-mesh-node-page-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-path-inspector-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1206-resize-observer-leak-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-nav-drawer-1064-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -494,6 +508,7 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1487-byop-modal-layout-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1630-reach-mobile-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-node-reach-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-reach-rank-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1640-compare-discovery-e2e.js 2>&1 | tee -a e2e-output.txt
 
       # #1616: slide-over focus-restore flake-gate. Runs the slide-over
@@ -605,15 +620,15 @@ jobs:
           echo "Built Go staging image ✅"
 
       - name: Set up Docker Buildx
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
         uses: docker/setup-buildx-action@v3
 
       - name: Set up QEMU (arm64 runtime stage)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
         uses: docker/setup-qemu-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -621,7 +636,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract Docker metadata
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
         id: docker-meta
         uses: docker/metadata-action@v5
         with:
@@ -634,7 +649,7 @@ jobs:
             type=edge,branch=master
 
       - name: Build and push to GHCR
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -654,7 +669,8 @@ jobs:
   # ───────────────────────────────────────────────────────────────
   release-artifacts:
     name: "📦 Release Artifacts"
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Fork guard: release uploads only on the upstream repository.
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'Kpa-clawbot/CoreScope'
     needs: [go-test]
     runs-on: ubuntu-latest
     permissions:
@@ -663,10 +679,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up Go 1.22
+      - name: Set up Go 1.27.1
         uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version: '1.27.1'
 
       - name: Build corescope-decrypt (static, linux/amd64)
         run: |
@@ -690,9 +706,12 @@ jobs:
   # ───────────────────────────────────────────────────────────────
   deploy:
     name: "🚀 Deploy Staging"
+    # Fork guard (last clause): never scheduled on a fork, so no fork run can
+    # reach the self-hosted staging runner.
     if: |
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && github.ref == 'refs/heads/master'
+      && github.repository == 'Kpa-clawbot/CoreScope'
     needs: [build-and-publish]
     runs-on: [self-hosted, meshcore-runner-2]
     steps:
@@ -780,7 +799,8 @@ jobs:
   # ───────────────────────────────────────────────────────────────
   publish:
     name: "📝 Publish Badges & Summary"
-    if: github.event_name == 'push'
+    # Fork guard: badge files are committed to master only on the upstream repository.
+    if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
     needs: [deploy]
     runs-on: ubuntu-latest
     steps:

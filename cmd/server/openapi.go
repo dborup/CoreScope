@@ -103,6 +103,12 @@ func routeDescriptions() map[string]routeMeta {
 			QueryParams: []paramMeta{
 				{Name: "days", Description: "Time window in days, 1-365.", Type: "integer"},
 			}},
+		"GET /api/reach-rank": {Summary: "Reach leaderboard", Description: "Nodes ranked by all-time neighbour count: distinct neighbours over valid neighbor_edges rows (both endpoints 64-hex pubkeys, not equal; within the ingestor's edge retention) — a historical count, not a measure of radio quality, range or traffic. Only nodes with a Reach page (node row, or named observer row) that are not blacklisted or hidden are ranked. Rank is competition ranking (1, 1, 3) with ties listed in pubkey order; a search or page never renumbers. Served from a shared snapshot (60s TTL, refreshed in the background) that also backs the Rank on /api/nodes/{pubkey}/reach; snapshot_at is when it was read.", Tag: "nodes",
+			QueryParams: []paramMeta{
+				{Name: "q", Description: "Case-insensitive substring of node name or pubkey (max 64 characters)", Type: "string"},
+				{Name: "offset", Description: "Rows to skip within the (filtered) list; non-negative (default 0)", Type: "integer"},
+				{Name: "limit", Description: "Rows per page (default 50; above 100 → 100; zero, negative or non-numeric → 50)", Type: "integer"},
+			}},
 		"GET /api/nodes/{pubkey}/neighbors": {Summary: "Get node neighbors", Description: "Returns the queried node's first-hop neighbors with affinity scores and observation metadata (count, SNR, distance, observers). Ambiguous edges carry candidate pubkeys.", Tag: "nodes", Response: schemaRef("NodeNeighborsResponse")},
 
 		// Analytics
