@@ -451,12 +451,32 @@ func TestNodeActivity_AlternateObservationRelaySurvivesRestart(t *testing.T) {
 			if tx == nil || len(tx.Observations) != 2 || tx.PathJSON != `["D4","E7"]` {
 				t.Fatalf("fixture must load two observations with the longer display path: %+v", tx)
 			}
-			for _, bucket := range []string{relay, "a1"} {
+			// Index shape after a restart. The raw-hop pass never produces
+			// these buckets: the display path is ["D4","E7"], so "a1" and the
+			// full relay pubkey can only come from a RESOLVED path.
+			//
+			// Before #1904 they were absent in both cases, because
+			// buildPathHopIndex rebuilt from raw hops and discarded whatever
+			// indexResolvedPathHops had added. Since that fix, a restart that
+			// has resolved_path persisted keeps the relay bucket — the index
+			// is built more than once during Load, and the later build
+			// retains what the earlier population established. Without a
+			// persisted resolved_path there is still nothing to retain.
+			indexedIn := func(bucket string) bool {
 				for _, indexed := range loaded.byPathHop[bucket] {
 					if indexed == tx {
-						t.Fatalf("fixture must reproduce the restart index shape; tx found in byPathHop[%s]", bucket)
+						return true
 					}
 				}
+				return false
+			}
+			if got := indexedIn(relay); got != persisted {
+				t.Fatalf("byPathHop[relay] contains tx = %v, want %v (persisted resolved_path = %v)", got, persisted, persisted)
+			}
+			// "a1" is a raw wire hop of the SHORTER observation, which is not
+			// the display path, so it is never indexed either way.
+			if indexedIn("a1") {
+				t.Fatal("tx must not be indexed under a non-display raw hop")
 			}
 
 			// Live: same rows ingested after startup.
