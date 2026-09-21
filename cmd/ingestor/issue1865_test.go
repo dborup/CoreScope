@@ -115,6 +115,11 @@ func openNeighborsStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	// Drain RunAsyncMigration's goroutine before returning. It calls
+	// log.Printf, and TestHandleNeighborsReportInvalidTimestampLogs...
+	// swaps the log sink for its own bytes.Buffer and then reads it — the
+	// two race on that buffer if the migration is still running.
+	store.backfillWg.Wait()
 	t.Cleanup(func() { store.Close() })
 	return store
 }

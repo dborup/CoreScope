@@ -99,10 +99,18 @@
           "provider": "",
           "token": ""
         },
+        "_comment_opentopomap": "OpenTopoMap topographical tile provider. Enabling this makes USERS' BROWSERS fetch tiles from tile.opentopomap.org, exposing their IP and approximate viewing area to that third party. Tiles are CC-BY-SA: the credit and licence link must stay on the map. Limited to zoom level 17, and it is a small volunteer-run service with informal fair-use expectations.",
+        "opentopomap": {
+          "enabled": false
+        },
         "_comment_stamen": "Stamen (hosted by Stadia). WARNING: Tokens are sent to the browser. Apply origin/referrer restrictions.",
         "stamen": {
           "enabled": false,
           "token": ""
+        },
+        "_comment_usgs": "USGS topographical tile providers (USGS Topo, USGS Imagery). Enabling these makes USERS' BROWSERS fetch tiles from basemap.nationalmap.gov, exposing their IP and approximate viewing area to that third party. Limited to zoom level 16, and The National Map only serves the United States and its territories — elsewhere these layers render blank with no on-screen explanation.",
+        "usgs": {
+          "enabled": false
         }
       }
     }
