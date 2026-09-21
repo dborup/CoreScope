@@ -156,12 +156,17 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 //     result (hashSizeInfoCache). Acquired independently or
 //     under mu (in EvictStale).
 //
+//  7. estMemMu      (sync.Mutex)  — guards the ReadMemStats result cache
+//     (estMemVal/estMemAt). Strict leaf: no other lock is
+//     acquired while holding it.
+//
 // Nesting that occurs today:
 //   - IngestNew:               mu → cacheMu → channelsCacheMu  (1 → 2 → 3, OK)
 //   - IngestObservations:      mu → cacheMu                    (1 → 2, OK)
 //   - RunEviction/EvictStale:  mu → cacheMu → channelsCacheMu  (1 → 2 → 3, OK)
 //   - RunEviction/EvictStale:  mu → hashSizeInfoMu             (1 → 6, OK)
 //   - invalidateCachesFor:     cacheMu → channelsCacheMu       (2 → 3, OK)
+//   - Load (startup log lines): mu → estMemMu                  (1 → 7, OK)
 //
 // All other locks are acquired independently (no nesting).
 // When adding new lock acquisitions, respect this ordering.
@@ -178,7 +183,6 @@ type PacketStore struct {
 	byNode        map[string][]*StoreTx      // pubkey → transmissions
 	nodeHashes    map[string]map[string]bool // pubkey → Set<hash>
 	byPathHop     map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
-	relayTimes    map[string][]int64         // lowercase pubkey → sorted unix-millis of relay events (full pubkeys only)
 	byPayloadType map[int][]*StoreTx         // payload_type → transmissions
 	loaded        bool
 	totalObs      int
@@ -476,6 +480,13 @@ type PacketStore struct {
 	trackedBytes    int64          // running total of estimated packet store memory
 	memoryEstimator func() float64 // injectable for tests; nil = use runtime.ReadMemStats (stats only)
 
+	// Per-store ReadMemStats cache (5s TTL). Fields (not package-level vars) so
+	// that test helpers constructing &PacketStore{...} directly get independent
+	// cache state, avoiding order-dependent test failures.
+	estMemMu  sync.Mutex
+	estMemVal float64
+	estMemAt  time.Time
+
 	// Short-lived cache for the observations aggregate in GetStoreStats (30s TTL).
 	// Avoids a per-/api/stats full-table scan; values accurate to ~30s which is
 	// sufficient for dashboard display.
@@ -646,7 +657,6 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
 		byPathHop:     make(map[string][]*StoreTx),
-		relayTimes:    make(map[string][]int64),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
 		rfCache:       make(map[string]*cachedResult),
@@ -4155,14 +4165,90 @@ func (s *PacketStore) buildSubpathIndex() {
 		len(s.spIndex), s.spTotalPaths)
 }
 
-// buildPathHopIndex scans all packets and populates byPathHop.
+// buildPathHopIndex rebuilds byPathHop: raw wire hops from every packet's
+// path_json, plus the resolved full-pubkey hops carried over from the
+// previous index (see retainResolvedPathHops).
 // Must be called with s.mu held.
 func (s *PacketStore) buildPathHopIndex() {
-	s.byPathHop = make(map[string][]*StoreTx, 4096)
+	prev := s.byPathHop
+	s.byPathHop = make(map[string][]*StoreTx, max(4096, len(prev)))
 	for _, tx := range s.packets {
 		addTxToPathHopIndex(s.byPathHop, tx)
 	}
-	log.Printf("[store] Built path-hop index: %d unique keys", len(s.byPathHop))
+	retained := s.retainResolvedPathHops(prev)
+	// addResolvedPubkeysToPathHopIndex states the contract: mutating
+	// byPathHop must be paired with invalidateRelayStatsCache. A rebuild
+	// replaces the whole map, and now also restores relay attribution, so
+	// without this the 300s batch cache can pin the pre-rebuild empty relay
+	// stats for minutes AFTER the index was fixed — hiding exactly the data
+	// this retention restores. GetRepeaterNodeStatsBatchCached is not gated
+	// on PathHopIndexReady, and HTTP binds before the load completes, so a
+	// request landing just before the rebuild is enough to trigger it.
+	s.invalidateRelayStatsCache()
+	log.Printf("[store] Built path-hop index: %d unique keys (%d entries carried over from the previous index)",
+		len(s.byPathHop), retained)
+}
+
+// retainResolvedPathHops re-merges the entries of a pre-rebuild byPathHop
+// that the raw-hop pass above cannot reproduce: the resolved full-pubkey
+// keys fed by indexResolvedPathHops. Their pubkey strings are retained
+// nowhere — #800 dropped the per-StoreTx ResolvedPath field in favour of a
+// hash-only membership index — so a plain rebuild silently discarded every
+// resolved relay attribution, leaving relay counts and transported scopes
+// empty after each cold load until live ingestion refilled them (#1904).
+//
+// Only transmissions still in s.packets are carried over. This matters:
+// eviction's removeTxFromPathHopIndex strips raw hops only (it derives them
+// from txGetParsedPath), so evicted transmissions linger in prev under their
+// resolved keys. Filtering them here is what keeps the index bounded by the
+// eviction policy instead of turning that gap into a permanent leak.
+//
+// Cost is O(entries in prev) with one reused scratch map, and it runs only
+// where buildPathHopIndex already runs — cold load and background-fill
+// completion — never on an ingest or request path.
+//
+// Returns the number of entries carried over. Must be called with s.mu held,
+// after s.byPathHop has been rebuilt from raw hops.
+func (s *PacketStore) retainResolvedPathHops(prev map[string][]*StoreTx) int {
+	if len(prev) == 0 {
+		return 0
+	}
+	live := make(map[*StoreTx]struct{}, len(s.packets))
+	for _, tx := range s.packets {
+		live[tx] = struct{}{}
+	}
+
+	// Reused across keys (cleared per key) so a large index does not churn
+	// one map allocation per key. Guards against both a key that the raw
+	// pass already produced and repeated appends of the same tx in prev —
+	// indexResolvedPathHops dedups within a call, not across the several
+	// observations of one transmission.
+	seen := make(map[*StoreTx]struct{}, 16)
+	retained := 0
+	for key, list := range prev {
+		if len(list) == 0 {
+			continue
+		}
+		clear(seen)
+		for _, tx := range s.byPathHop[key] {
+			seen[tx] = struct{}{}
+		}
+		for _, tx := range list {
+			if tx == nil {
+				continue
+			}
+			if _, ok := live[tx]; !ok {
+				continue
+			}
+			if _, dup := seen[tx]; dup {
+				continue
+			}
+			seen[tx] = struct{}{}
+			s.byPathHop[key] = append(s.byPathHop[key], tx)
+			retained++
+		}
+	}
+	return retained
 }
 
 // addTxToPathHopIndex indexes a transmission under each unique raw hop key.
@@ -4587,13 +4673,24 @@ func estimateStoreObsBytes(obs *StoreObs) int64 {
 // estimatedMemoryMB returns current Go heap allocation in MB.
 // Kept for stats/debug endpoints only — NOT used in eviction decisions.
 // In tests, memoryEstimator can be set to inject a deterministic value.
+// Caches the result for 5 seconds because runtime.ReadMemStats() stops the
+// world and this is called from stats/debug endpoints that may be polled.
+// The cache is per-store (not package-level) so that test helpers constructing
+// &PacketStore{...} directly get independent cache state, avoiding
+// order-dependent test failures from a shared global cache.
 func (s *PacketStore) estimatedMemoryMB() float64 {
 	if s.memoryEstimator != nil {
 		return s.memoryEstimator()
 	}
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return float64(ms.HeapAlloc) / 1048576.0
+	s.estMemMu.Lock()
+	defer s.estMemMu.Unlock()
+	if time.Since(s.estMemAt) > 5*time.Second {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		s.estMemVal = float64(ms.HeapAlloc) / 1048576.0
+		s.estMemAt = time.Now()
+	}
+	return s.estMemVal
 }
 
 // trackedMemoryMB returns the self-accounted packet store memory in MB.
@@ -8196,14 +8293,17 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 					name = pk
 				}
 			}
-			// Skip zero-hop direct adverts for hash_size — the
-			// path byte is locally generated and unreliable.
-			// Still count the packet and update lastSeen.
-			isZeroHop := (routeType == uint64(RouteDirect) || routeType == uint64(RouteTransportDirect)) && (actualPathByte&0x3F) == 0
+			// Skip zero-hop direct adverts whose path byte is entirely zero —
+			// there the size bits were wiped by the sender and say nothing.
+			// A non-zero byte with a zero hop count (0x40 / 0x80) is a
+			// deliberate size declaration; keep it. Same rule as
+			// computeNodeHashSizeInfo. Skipped packets still count and still
+			// update lastSeen.
+			isUndeclaredZeroHop := (routeType == uint64(RouteDirect) || routeType == uint64(RouteTransportDirect)) && actualPathByte == 0x00
 			if byNode[pk] == nil {
 				role := nodeRoleByPK[pk] // empty if unknown
 				initHS := hashSize
-				if isZeroHop {
+				if isUndeclaredZeroHop {
 					initHS = 0
 				}
 				byNode[pk] = map[string]interface{}{
@@ -8213,7 +8313,7 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 				}
 			}
 			byNode[pk]["packets"] = byNode[pk]["packets"].(int) + 1
-			if !isZeroHop {
+			if !isUndeclaredZeroHop {
 				byNode[pk]["hashSize"] = hashSize
 			}
 			byNode[pk]["lastSeen"] = tx.FirstSeen
@@ -8811,11 +8911,25 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 		if err != nil {
 			continue
 		}
-		// Direct zero-hop adverts (route types 2 and 3) use path byte 0x00
-		// locally and can misreport multibyte hash mode as 1-byte.
-		if (routeType == RouteDirect || routeType == RouteTransportDirect) && (pathByte&0x3F) == 0 {
+		// Direct zero-hop adverts carry no path, so the hop count is 0. Whether
+		// the SIZE bits are meaningful depends on the sender: firmware that
+		// predates meshcore-dev/MeshCore#3293 does `path_len = 0`, wiping the
+		// whole byte including the two size bits, so 0x00 says nothing about
+		// the node's path.hash.mode. A sender that writes the size through
+		// setPathHashSizeAndCount() emits 0x40 / 0x80 with a zero hop count —
+		// that is a deliberate declaration and the only way those bits can be
+		// non-zero here. Skip on the byte's content, not on the route type.
+		if (routeType == RouteDirect || routeType == RouteTransportDirect) && pathByte == 0x00 {
 			continue
 		}
+		// NOTE: hash_size 4 is reserved and rejected by the decoder (#1211),
+		// but this function has always reported it (TestHashSizeTransport-
+		// RoutePathByteOffset pins HashSize=4 for path byte 0xC1), unlike
+		// computeAnalyticsHashSizes which drops it. Skipping on byte content
+		// widens that pre-existing gap slightly, from 0xC1 to also 0xC0.
+		// Adding a `hs > 3` guard here would change the behaviour that test
+		// deliberately pins, so reconciling the two sites is left as separate
+		// work rather than smuggled into this fix.
 		hs := int((pathByte>>6)&0x3) + 1
 
 		var d map[string]interface{}
@@ -8891,13 +9005,17 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 	return info
 }
 
-// hashSizeMinObservations is the minimum number of non-zero-hop adverts in the
-// window before a node is eligible to be flagged as flip-flopping at all.
+// hashSizeMinObservations is the minimum number of size-declaring adverts in
+// the window before a node is eligible to be flagged as flip-flopping at all.
+// Since #1913 that includes zero-hop direct adverts whose path byte declares a
+// size (0x40 / 0x80); only an all-zero path byte is treated as "says nothing".
 const hashSizeMinObservations = 3
 
-// hashSizeRecentAgreeCount is how many of the most recent non-zero-hop adverts
-// must share a single hash size for a node to be considered "settled", clearing
-// its flip-flop ("varies") flag.
+// hashSizeRecentAgreeCount is how many of the most recent size-declaring
+// adverts must share a single hash size for a node to be considered "settled",
+// clearing its flip-flop ("varies") flag. Zero-hop directs that declare a size
+// now count here too (#1913), and they are frequent, so a settled node clears
+// the "varies" flag sooner than it did before.
 const hashSizeRecentAgreeCount = 3
 
 // recentAdvertsAgree reports whether the last n entries of a chronologically
@@ -9309,13 +9427,16 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
 	results := make([]map[string]interface{}, 0, len(nodes))
+	pm := s.relayPrefixMapLocked()
+	relaySeen := make(map[int]struct{}) // request-local relay-evidence dedupe scratch
 
 	for _, n := range nodes {
 		packets := s.byNode[n.pk]
+		activityKey := strings.ToLower(n.pk)
 		var packetsToday int
 		var snrSum float64
 		var snrCount int
-		var lastHeard string
+		var lastHeard, lastAdvert string
 		observerStats := map[string]*struct {
 			name                       string
 			snrSum, rssiSum            float64
@@ -9335,9 +9456,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				snrSum += *pkt.SNR
 				snrCount++
 			}
-			if lastHeard == "" || pkt.FirstSeen > lastHeard {
-				lastHeard = pkt.FirstSeen
-			}
+			updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
 			obsID := pkt.ObserverID
 			if obsID != "" {
 				obs := observerStats[obsID]
@@ -9360,6 +9479,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				}
 			}
 		}
+		s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, relaySeen)
 
 		observerRows := make([]map[string]interface{}, 0)
 		for id, o := range observerStats {
@@ -9379,13 +9499,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
 		})
 
-		var avgSnr interface{}
+		var avgSnr *float64
 		if snrCount > 0 {
-			avgSnr = snrSum / float64(snrCount)
-		}
-		var lhVal interface{}
-		if lastHeard != "" {
-			lhVal = lastHeard
+			v := snrSum / float64(snrCount)
+			avgSnr = &v
 		}
 
 		results = append(results, map[string]interface{}{
@@ -9394,13 +9511,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			"role":       nilIfEmpty(n.role),
 			"lat":        n.lat,
 			"lon":        n.lon,
-			"stats": map[string]interface{}{
-				"totalTransmissions": len(packets),
-				"totalObservations":  totalObservations,
-				"totalPackets":       len(packets),
-				"packetsToday":       packetsToday,
-				"avgSnr":             avgSnr,
-				"lastHeard":          lhVal,
+			"stats": NodeHealthStats{
+				TotalTransmissions: len(packets), TotalObservations: totalObservations,
+				TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: avgSnr,
+				LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 			},
 			"observers": observerRows,
 		})
@@ -9439,13 +9553,15 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	defer s.mu.RUnlock()
 
 	packets := s.byNode[pubkey]
+	activityKey := strings.ToLower(pubkey)
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
 
 	var packetsToday int
 	var snrSum float64
 	var snrCount int
 	var totalHops, hopCount int
-	var lastHeard string
+	var lastHeard, lastAdvert string
+	pm := s.relayPrefixMapLocked()
 	totalObservations := 0
 
 	observerStats := map[string]*struct {
@@ -9463,9 +9579,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			snrSum += *pkt.SNR
 			snrCount++
 		}
-		if lastHeard == "" || pkt.FirstSeen > lastHeard {
-			lastHeard = pkt.FirstSeen
-		}
+		updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
 		// Hop counting
 		hops := txGetParsedPath(pkt)
 		if len(hops) > 0 {
@@ -9495,6 +9609,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			}
 		}
 	}
+	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, make(map[int]struct{}))
 
 	observerRows := make([]map[string]interface{}, 0)
 	// Issue #1290: surface listener/repeater hint on node detail by
@@ -9552,17 +9667,14 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 		return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
 	})
 
-	var avgSnr interface{}
+	var avgSnr *float64
 	if snrCount > 0 {
-		avgSnr = snrSum / float64(snrCount)
+		v := snrSum / float64(snrCount)
+		avgSnr = &v
 	}
 	avgHops := 0
 	if hopCount > 0 {
 		avgHops = int(math.Round(float64(totalHops) / float64(hopCount)))
-	}
-	var lhVal interface{}
-	if lastHeard != "" {
-		lhVal = lastHeard
 	}
 
 	// Recent packets (up to 20, newest first — read from tail of oldest-first slice)
@@ -9580,14 +9692,10 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	return map[string]interface{}{
 		"node":      node,
 		"observers": observerRows,
-		"stats": map[string]interface{}{
-			"totalTransmissions": len(packets),
-			"totalObservations":  totalObservations,
-			"totalPackets":       len(packets),
-			"packetsToday":       packetsToday,
-			"avgSnr":             avgSnr,
-			"avgHops":            avgHops,
-			"lastHeard":          lhVal,
+		"stats": NodeHealthStats{
+			TotalTransmissions: len(packets), TotalObservations: totalObservations,
+			TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: avgSnr,
+			AvgHops: &avgHops, LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 		},
 		"recentPackets": recentPackets,
 	}, nil

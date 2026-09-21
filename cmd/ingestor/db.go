@@ -2375,12 +2375,20 @@ func (s *Store) RecordObserverNeighborMetrics(observerID string, neighbors []Obs
 	return nil
 }
 
+// pruneNeighborMetricsNow is the package-level clock hook PruneOldNeighborMetrics
+// reads "now" from, following the same swap-in-test/restore-in-cleanup pattern
+// as readProcSelfIOFn (stats_file.go): production always leaves this as
+// time.Now, and TestPruneOldNeighborMetrics overrides it with a fixed instant
+// so the exact retention-boundary row (timestamp == cutoff) can be asserted
+// deterministically instead of racing a second live time.Now() call.
+var pruneNeighborMetricsNow = time.Now
+
 // PruneOldNeighborMetrics deletes observer_neighbor_metrics rows older than
 // retentionDays, mirroring PruneOldMetrics' retention model for
 // observer_metrics (same MetricsRetentionDays config knob, no separate
 // setting for this table).
 func (s *Store) PruneOldNeighborMetrics(retentionDays int) (int64, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+	cutoff := pruneNeighborMetricsNow().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 	result, err := s.instrumentedExec("prune_neighbor_metrics", `DELETE FROM observer_neighbor_metrics WHERE timestamp < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("prune neighbor metrics: %w", err)
