@@ -5606,6 +5606,10 @@ body.embed #app.app-fixed {
 .path-symbols-legend[open] > summary { color: var(--text, inherit); }
 .path-symbols-legend .path-legend-list {
   position: absolute;
+  right: 0;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  text-align: left;
   z-index: 50;
   margin: 4px 0 0;
   padding: 8px 12px;
@@ -5616,7 +5620,6 @@ body.embed #app.app-fixed {
   box-shadow: 0 2px 6px rgba(0,0,0,0.15);
   font-size: 11px;
   line-height: 1.5;
-  max-width: 360px;
   color: var(--text, inherit);
 }
 .path-symbols-legend .path-legend-list li { padding: 2px 0; }
