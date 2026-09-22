@@ -999,6 +999,54 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 	return obsByTx[txID]
 }
 
+// ObservationRawHexForHash returns the stored wire bytes per observation id for
+// one transmission, keyed by observations.id. Empty when the schema has no
+// observations.raw_hex column (#881 made it optional) or nothing is stored.
+//
+// Why this is read on demand instead of held in memory (upstream #1999): the
+// store deliberately does not retain obs.RawHex (#881, ~98MB on a
+// ~1.7M-observation store), on the belief that one content hash implies one
+// frame. It does not: the firmware hashes payload and type independently of the
+// relay path, so observations of one transmission legitimately carry different
+// bytes. Keeping the memory saving and paying one query on the packet-detail
+// path, which is a single packet a human is looking at, is the trade this makes.
+//
+// Two indexed lookups regardless of observation count: transmissions.hash via
+// idx_transmissions_hash, then observations.transmission_id via
+// idx_observations_transmission_id.
+func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
+	if db == nil || db.conn == nil || !db.hasObsRawHex() || hash == "" {
+		return nil
+	}
+	var txID int
+	if err := db.conn.QueryRow("SELECT id FROM transmissions WHERE hash = ?",
+		strings.ToLower(hash)).Scan(&txID); err != nil {
+		return nil
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, raw_hex FROM observations
+		 WHERE transmission_id = ? AND raw_hex IS NOT NULL AND raw_hex <> ''`, txID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make(map[int]string)
+	for rows.Next() {
+		var id int
+		var hx sql.NullString
+		if err := rows.Scan(&id, &hx); err != nil {
+			continue
+		}
+		if hx.Valid && hx.String != "" {
+			out[id] = hx.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
+	return out
+}
+
 // GetNodes returns filtered, paginated node list.
 func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortBy, region string) ([]map[string]interface{}, int, map[string]int, error) {
 	var where []string

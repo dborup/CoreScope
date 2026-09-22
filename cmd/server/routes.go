@@ -1430,6 +1430,37 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	if len(observations) == 0 && fromDB && s.db != nil && hash != "" {
 		observations = s.db.GetObservationsForHash(hash)
 	}
+	// Upstream #1999: give each observation its OWN wire bytes. Neither the
+	// store nor the DB observation query carries them — both deliberately drop
+	// observations.raw_hex (#881) on the belief that one content hash means one
+	// frame. Observations of one transmission legitimately differ in their path
+	// bytes, so without this the detail view showed the canonical frame for
+	// every observation, which can contradict the path_json shown beside it.
+	//
+	// One query for the whole request, after the store lock is released. A
+	// stored per-observation frame WINS over whatever is already in the map:
+	// on the store path enrichObsWithTx has already put the transmission's
+	// canonical frame there. Only where no frame is stored does the canonical
+	// value stand, which also fills the DB-fallback path, whose observation
+	// query selects no raw_hex at all.
+	canonicalHex, _ := packet["raw_hex"].(string)
+	if s.db != nil && hash != "" && len(observations) > 0 {
+		byObsID := s.db.ObservationRawHexForHash(hash)
+		for _, obs := range observations {
+			if id, ok := obs["id"].(int); ok {
+				if hx := byObsID[id]; hx != "" {
+					obs["raw_hex"] = hx
+					continue
+				}
+			}
+			if existing, ok := obs["raw_hex"].(string); ok && existing != "" {
+				continue
+			}
+			if canonicalHex != "" {
+				obs["raw_hex"] = canonicalHex
+			}
+		}
+	}
 	observationCount := len(observations)
 	if observationCount == 0 {
 		observationCount = 1
