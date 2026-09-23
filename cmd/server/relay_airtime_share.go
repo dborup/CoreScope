@@ -247,15 +247,49 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 	}
 }
 
+// Machine-readable ADVERT route classes, returned as route_class. They are
+// part of the API contract and deliberately independent of the display
+// labels built by relayAirtimeBucketName.
+const (
+	relayAirtimeRouteClassFlood   = "flood"
+	relayAirtimeRouteClassZeroHop = "zero_hop"
+	relayAirtimeRouteClassLegacy  = "legacy"
+)
+
+// relayAirtimeRouteClass returns the route_class value for a row: one of the
+// constants above for ADVERT rows and nil (JSON null) for every other payload
+// type, so (type, route_class) identifies each row.
+func relayAirtimeRouteClass(key relayAirtimeBucketKey) interface{} {
+	if key.payloadType != PayloadADVERT {
+		return nil
+	}
+	switch key.advertRoute {
+	case relayAirtimeAdvertFlood:
+		return relayAirtimeRouteClassFlood
+	case relayAirtimeAdvertZeroHop:
+		return relayAirtimeRouteClassZeroHop
+	default:
+		return relayAirtimeRouteClassLegacy
+	}
+}
+
 // computeRelayAirtimeShare aggregates relay-airtime-share per payload_type,
 // separating ADVERT rows by their flood and zero-hop route classes.
+//
+// The route class is the route_type stored on the transmission, which is the
+// route of the first observation the ingestor inserted for that content hash.
+// The content hash ignores route bits, so a contact re-shared as a zero-hop
+// advert has the same hash as the original flood advert; later observations
+// never change the stored route (see cmd/ingestor InsertTransmission).
 //
 // Returns:
 //
 //	{
-//	  "rows":        [{payload_type, type, count, count_pct, score, airtime_pct}, ...] sorted by airtime_pct desc,
-//	                 where type is the numeric payload type and payload_type the row label;
-//	                 up to three ADVERT rows share type 4 and differ only by label,
+//	  "rows":        [{payload_type, type, route_class, count, count_pct, score, airtime_pct}, ...]
+//	                 sorted by airtime_pct desc, where type is the numeric payload type,
+//	                 payload_type the display label and route_class "flood" / "zero_hop" /
+//	                 "legacy" on ADVERT rows and null otherwise; up to three ADVERT rows
+//	                 share type 4, and (type, route_class) identifies each row,
 //	  "total_count": int,
 //	  "total_score": int64 (nanoseconds of LoRa Time-on-Air × repeater-count, summed across packets),
 //	  "window":      window label,
@@ -325,6 +359,7 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 		rows = append(rows, map[string]interface{}{
 			"payload_type": name,
 			"type":         key.payloadType,
+			"route_class":  relayAirtimeRouteClass(key),
 			"count":        b.count,
 			"count_pct":    countPct,
 			"score":        b.score,

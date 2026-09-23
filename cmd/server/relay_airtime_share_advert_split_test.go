@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -28,17 +29,18 @@ func TestRelayAirtimeKey_RouteClassification(t *testing.T) {
 		routeType   *int
 		wantRoute   relayAirtimeAdvertRoute
 		wantLabel   string
+		wantClass   interface{} // route_class: string for ADVERT rows, nil otherwise
 	}{
-		{"advert transport flood", PayloadADVERT, intPtr(RouteTransportFlood), relayAirtimeAdvertFlood, "ADVERT (flood)"},
-		{"advert flood", PayloadADVERT, intPtr(RouteFlood), relayAirtimeAdvertFlood, "ADVERT (flood)"},
-		{"advert direct", PayloadADVERT, intPtr(RouteDirect), relayAirtimeAdvertZeroHop, "ADVERT (zero-hop)"},
-		{"advert transport direct", PayloadADVERT, intPtr(RouteTransportDirect), relayAirtimeAdvertZeroHop, "ADVERT (zero-hop)"},
-		{"advert NULL route", PayloadADVERT, nil, relayAirtimeAdvertUnknown, "ADVERT"},
-		{"advert route 4", PayloadADVERT, intPtr(4), relayAirtimeAdvertUnknown, "ADVERT"},
-		{"advert route 99", PayloadADVERT, intPtr(99), relayAirtimeAdvertUnknown, "ADVERT"},
-		{"advert route -1", PayloadADVERT, intPtr(-1), relayAirtimeAdvertUnknown, "ADVERT"},
-		{"advert route -2", PayloadADVERT, intPtr(-2), relayAirtimeAdvertUnknown, "ADVERT"},
-		{"unknown payload 12", 12, intPtr(RouteFlood), relayAirtimeAdvertUnknown, "UNK"},
+		{"advert transport flood", PayloadADVERT, intPtr(RouteTransportFlood), relayAirtimeAdvertFlood, "ADVERT (flood)", "flood"},
+		{"advert flood", PayloadADVERT, intPtr(RouteFlood), relayAirtimeAdvertFlood, "ADVERT (flood)", "flood"},
+		{"advert direct", PayloadADVERT, intPtr(RouteDirect), relayAirtimeAdvertZeroHop, "ADVERT (zero-hop)", "zero_hop"},
+		{"advert transport direct", PayloadADVERT, intPtr(RouteTransportDirect), relayAirtimeAdvertZeroHop, "ADVERT (zero-hop)", "zero_hop"},
+		{"advert NULL route", PayloadADVERT, nil, relayAirtimeAdvertUnknown, "ADVERT", "legacy"},
+		{"advert route 4", PayloadADVERT, intPtr(4), relayAirtimeAdvertUnknown, "ADVERT", "legacy"},
+		{"advert route 99", PayloadADVERT, intPtr(99), relayAirtimeAdvertUnknown, "ADVERT", "legacy"},
+		{"advert route -1", PayloadADVERT, intPtr(-1), relayAirtimeAdvertUnknown, "ADVERT", "legacy"},
+		{"advert route -2", PayloadADVERT, intPtr(-2), relayAirtimeAdvertUnknown, "ADVERT", "legacy"},
+		{"unknown payload 12", 12, intPtr(RouteFlood), relayAirtimeAdvertUnknown, "UNK", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,6 +52,9 @@ func TestRelayAirtimeKey_RouteClassification(t *testing.T) {
 			}
 			if got := relayAirtimeBucketName(key); got != tc.wantLabel {
 				t.Fatalf("relayAirtimeBucketName = %q, want %q", got, tc.wantLabel)
+			}
+			if got := relayAirtimeRouteClass(key); got != tc.wantClass {
+				t.Fatalf("relayAirtimeRouteClass = %#v, want %#v", got, tc.wantClass)
 			}
 		})
 	}
@@ -76,6 +81,9 @@ func TestRelayAirtimeKey_NonAdvertPayloadsIgnoreRoute(t *testing.T) {
 			if got := relayAirtimeBucketName(key); got != wantName {
 				t.Fatalf("payload %d route %v: name = %q, want %q", pt, rt, got, wantName)
 			}
+			if got := relayAirtimeRouteClass(key); got != nil {
+				t.Fatalf("payload %d route %v: route_class = %#v, want nil", pt, rt, got)
+			}
 		}
 	}
 }
@@ -87,6 +95,7 @@ type relayAirtimeSplitRow struct {
 	CountPct    float64 `json:"count_pct"`
 	Score       int64   `json:"score"`
 	AirtimePct  float64 `json:"airtime_pct"`
+	RouteClass  *string `json:"route_class"`
 }
 
 type relayAirtimeSplitResponse struct {
@@ -315,7 +324,7 @@ func TestRelayAirtimeShareAPI_AdvertRowsShareNumericType(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode rows: %v", err)
 	}
-	wantFields := []string{"airtime_pct", "count", "count_pct", "payload_type", "score", "type"}
+	wantFields := []string{"airtime_pct", "count", "count_pct", "payload_type", "route_class", "score", "type"}
 	for _, r := range raw.Rows {
 		fields := make([]string, 0, len(r))
 		for k := range r {
@@ -327,13 +336,43 @@ func TestRelayAirtimeShareAPI_AdvertRowsShareNumericType(t *testing.T) {
 		}
 	}
 
+	// route_class is the machine-readable ADVERT identity; it is JSON null on
+	// every other row, never absent.
+	wantClass := map[string]string{
+		"ADVERT (flood)":    `"flood"`,
+		"ADVERT (zero-hop)": `"zero_hop"`,
+		"ADVERT":            `"legacy"`,
+		"ACK":               `null`,
+		"GRP_TXT":           `null`,
+		"UNK":               `null`,
+	}
+	for _, r := range raw.Rows {
+		var label string
+		if err := json.Unmarshal(r["payload_type"], &label); err != nil {
+			t.Fatalf("decode payload_type: %v", err)
+		}
+		if got := string(r["route_class"]); got != wantClass[label] {
+			t.Errorf("%s: route_class = %s, want %s", label, got, wantClass[label])
+		}
+	}
+
 	var resp relayAirtimeSplitResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	advertLabels := []string{}
 	labels := make(map[string]bool, len(resp.Rows))
+	identities := make(map[string]bool, len(resp.Rows))
 	for _, r := range resp.Rows {
+		class := "<null>"
+		if r.RouteClass != nil {
+			class = *r.RouteClass
+		}
+		id := fmt.Sprintf("%d/%s", r.Type, class)
+		if identities[id] {
+			t.Fatalf("(type, route_class) %s repeated; it must identify each row", id)
+		}
+		identities[id] = true
 		if labels[r.PayloadType] {
 			t.Fatalf("payload_type %q repeated; rows must be distinguishable by label", r.PayloadType)
 		}
@@ -399,5 +438,45 @@ func TestRelayAirtimeShare_UnknownPayloadTieOrderIsStable(t *testing.T) {
 		if !reflect.DeepEqual(got, []int{12, 13, 14}) {
 			t.Fatalf("run %d: UNK row types = %v, want [12 13 14]", i, got)
 		}
+	}
+}
+
+// A contact re-shared as a zero-hop advert (shareContactZeroHop) has the same
+// content hash as the original flood advert, so both land on one transmission
+// whose route_type is that of the first observation the ingestor inserted
+// (pinned in cmd/ingestor TestInsertTransmission_AdvertRouteIsFirstIngested).
+// Relay Airtime Share classifies by that stored route and scores relays from
+// every observation. When the zero-hop re-share was inserted first, the flood
+// observations' relays are therefore reported on the zero_hop row. This test
+// pins that documented first-ingested contract so changing it is deliberate.
+func TestRelayAirtimeShare_MixedRouteHashFollowsStoredRoute(t *testing.T) {
+	cases := []struct {
+		name      string
+		stored    int
+		wantLabel string
+		wantClass string
+	}{
+		{"flood observation inserted first", RouteFlood, "ADVERT (flood)", "flood"},
+		{"zero-hop re-share inserted first", RouteTransportDirect, "ADVERT (zero-hop)", "zero_hop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Relays come from the flood observations' resolved paths; the
+			// zero-hop observation contributes none.
+			store := relayAirtimeSplitStore([]relayAirtimeSplitFixture{
+				{PayloadADVERT, intPtr(tc.stored), 110, 2, "mixed"},
+			})
+			rows := store.computeRelayAirtimeShare(TimeWindow{})["rows"].([]map[string]interface{})
+			if len(rows) != 1 {
+				t.Fatalf("got %d rows, want 1: %+v", len(rows), rows)
+			}
+			r := rows[0]
+			if r["payload_type"] != tc.wantLabel || r["route_class"] != tc.wantClass {
+				t.Fatalf("row = %v/%v, want %s/%s", r["payload_type"], r["route_class"], tc.wantLabel, tc.wantClass)
+			}
+			if r["count"].(int) != 1 || r["score"].(int64) != relayAirtimeSplitScore(110, 2) {
+				t.Errorf("count=%v score=%v, want 1 and the flood relays' score", r["count"], r["score"])
+			}
+		})
 	}
 }
