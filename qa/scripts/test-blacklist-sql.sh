@@ -302,7 +302,10 @@ teardown_case() {  # MODE FAILS NODE_VISIBLE_RC → prints exit status
         calls="$2/calls"; visible_rc=$3; fails=$4; mode=$5
         . "$1"
         remove_from_blacklist() { echo remove >>"$calls"; }
-        restart_target() { :; }
+        # A child started during teardown must still die on SIGINT, or a hung ssh
+        # could not be interrupted. It signals itself; "survived" means the
+        # disposition was inherited as ignored (trap -p cannot show that).
+        restart_target() { echo "child-int:$(sh -c "kill -INT \$\$; echo survived" 2>/dev/null)" >>"$calls"; }
         wait_for_stats() {
             if [ "$mode" = exit-sig-in-teardown ]; then kill -TERM $$; kill -INT $$; fi
         }
@@ -326,8 +329,10 @@ assert_eq "SIGTERM still tore down (once)" "1"   "$(grep -c remove "$TD_DIR/call
 assert_eq "SIGTERM + failed teardown"      "144" "$(teardown_case term 0 1)"
 assert_eq "SIGINT mid-run exits 130"       "130" "$(teardown_case int 0 0)"
 assert_eq "SIGINT still tore down (once)"  "1"   "$(grep -c remove "$TD_DIR/calls")"
+assert_eq "SIGINT + failed teardown"       "131" "$(teardown_case int 0 1)"
 assert_eq "signal during teardown: status kept" "2" "$(teardown_case exit-sig-in-teardown 2 0)"
 assert_eq "signal during teardown: teardown finished" "1" "$(grep -c visible-checked "$TD_DIR/calls")"
+assert_eq "teardown children still die on SIGINT" "child-int:" "$(grep child-int "$TD_DIR/calls")"
 rm -rf "$TD_DIR"
 
 echo "test-blacklist-sql.sh: $PASS passed, $FAIL failed"

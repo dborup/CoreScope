@@ -34,7 +34,8 @@
 #
 # Exit code = number of failures (0 = pass). An interrupted run still tears
 # down, then exits 130 (SIGINT) or 143 (SIGTERM), plus 1 if teardown failed.
-# Further INT/TERM are ignored while teardown restores the target.
+# A further INT/TERM does not abort teardown: it stops only the step in
+# progress (e.g. a hung ssh), which is then reported as teardown-failed.
 # PUBLIC repo: zero PII — no real pubkeys, IPs, or hostnames as defaults.
 #
 # Structure: helpers live at top level and the imperative body lives in main(),
@@ -57,10 +58,12 @@ teardown() {
   if [[ -n "${1:-}" ]]; then rc=$1; fi
   if [[ "$TEARDOWN_DONE" == "1" ]]; then rm -rf "$TMP"; exit "$rc"; fi
   TEARDOWN_DONE=1
-  # Restoring the target must not be cut short by a second Ctrl-C/TERM, or the
-  # node would stay blacklisted with no warning. Each step below is bounded by
-  # CURL_TIMEOUT / RESTART_WAIT_S; SIGKILL still stops a hung run.
-  trap '' INT TERM
+  # A second Ctrl-C/TERM must not abort the restore, or the node would stay
+  # blacklisted with no warning. Note the signal rather than ignoring it: an
+  # ignored disposition is inherited by ssh/curl, so a hung step could no longer
+  # be interrupted. With a handler, a terminal Ctrl-C still stops the running
+  # step; that step fails and teardown reports teardown-failed.
+  trap 'echo "  (signal received — teardown continues restoring the target)" >&2' INT TERM
   echo "=== teardown: removing $TEST_PUBKEY from nodeBlacklist ==="
   if remove_from_blacklist && restart_target && wait_for_stats; then
     if node_visible; then
@@ -350,7 +353,10 @@ main() {
   CURL_TIMEOUT="${CURL_TIMEOUT:-60}"
   RESTART_WAIT_S="${RESTART_WAIT_S:-120}"
 
-  SSH_OPTS=(-i "$TARGET_SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o BatchMode=yes)
+  # ServerAlive*: a dead connection mid-command fails after ~60s instead of
+  # hanging; ConnectTimeout only bounds connection setup.
+  SSH_OPTS=(-i "$TARGET_SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o BatchMode=yes
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 
   TMP=$(mktemp -d)
   fails=0
