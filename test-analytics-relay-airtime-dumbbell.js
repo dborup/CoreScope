@@ -91,6 +91,7 @@ function rowsOf(html) {
 }
 const labelOf = (row) => (row.match(/class="dumbbell-label"[^>]*>([^<]*)</) || [])[1];
 const titleOf = (row) => (row.match(/^ title="([^"]*)"/) || [])[1] || '';
+const airtimeColourOf = (row) => (row.match(/dumbbell-dot-airtime" style="[^"]*background:([^;"]+)/) || [])[1];
 const airtimeLeftOf = (row) => (row.match(/dumbbell-dot-airtime" style="[^"]*left:([0-9.]+)%/) || [])[1];
 
 console.log('\n=== analytics.js: renderRelayAirtimeDumbbell ===');
@@ -116,6 +117,13 @@ if (typeof render === 'function') {
       assert.ok(tip.includes('Airtime: ' + r.airtime_pct.toFixed(2) + '%'), `row ${i} tooltip airtime`);
       assert.strictEqual(airtimeLeftOf(rows[i]), r.airtime_pct.toFixed(3), `row ${i} airtime dot position`);
     });
+  });
+
+  test('ADVERT rows sharing numeric type get distinct airtime colours', () => {
+    const rows = rowsOf(render(splitResponse));
+    const colours = rows.filter(r => /ADVERT/.test(labelOf(r))).map(airtimeColourOf);
+    assert.strictEqual(colours.length, 3);
+    assert.strictEqual(new Set(colours).size, 3, `colours: ${colours.join(', ')}`);
   });
 
   test('rendered chart introduces no element ids', () => {

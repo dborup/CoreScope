@@ -214,7 +214,7 @@ type relayAirtimeBucketKey struct {
 // relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
 // two ADVERT behaviours defined by MeshCore's route bits. Unknown/legacy route
 // values deliberately keep the historical unsuffixed ADVERT bucket rather than
-// being silently assigned to either behaviour.
+// being silently assigned to either behaviour. tx.PayloadType must be non-nil.
 func relayAirtimeKey(tx *StoreTx) relayAirtimeBucketKey {
 	key := relayAirtimeBucketKey{payloadType: *tx.PayloadType}
 	if key.payloadType != PayloadADVERT || tx.RouteType == nil {
@@ -332,8 +332,8 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 		})
 	}
 
-	// Sort descending by airtime_pct; tiebreak count desc, then name asc
-	// for deterministic ordering.
+	// Sort descending by airtime_pct; tiebreak count desc, then name asc,
+	// then numeric type asc for deterministic ordering.
 	sort.SliceStable(rows, func(i, j int) bool {
 		ai, _ := rows[i]["airtime_pct"].(float64)
 		aj, _ := rows[j]["airtime_pct"].(float64)
@@ -347,7 +347,13 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 		}
 		ni, _ := rows[i]["payload_type"].(string)
 		nj, _ := rows[j]["payload_type"].(string)
-		return ni < nj
+		if ni != nj {
+			return ni < nj
+		}
+		// Unnamed payload types all share the "UNK" label.
+		ti, _ := rows[i]["type"].(int)
+		tj, _ := rows[j]["type"].(int)
+		return ti < tj
 	})
 
 	label := ""

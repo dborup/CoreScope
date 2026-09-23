@@ -381,3 +381,23 @@ func TestPayloadTypeMix_AdvertStaysCombined(t *testing.T) {
 		t.Fatalf("Payload Type Mix has %d ADVERT entries %v, want exactly 1", len(adverts), adverts)
 	}
 }
+
+// Unnamed payload types share the "UNK" label, so equal-airtime UNK rows
+// need the numeric type as the final tiebreak to keep a stable order.
+func TestRelayAirtimeShare_UnknownPayloadTieOrderIsStable(t *testing.T) {
+	store := relayAirtimeSplitStore([]relayAirtimeSplitFixture{
+		{14, intPtr(1), 30, 1, "pt14"},
+		{12, intPtr(1), 30, 1, "pt12"},
+		{13, intPtr(1), 30, 1, "pt13"},
+	})
+	for i := 0; i < 50; i++ {
+		rows := store.computeRelayAirtimeShare(TimeWindow{})["rows"].([]map[string]interface{})
+		got := make([]int, len(rows))
+		for j, r := range rows {
+			got[j] = r["type"].(int)
+		}
+		if !reflect.DeepEqual(got, []int{12, 13, 14}) {
+			t.Fatalf("run %d: UNK row types = %v, want [12 13 14]", i, got)
+		}
+	}
+}
