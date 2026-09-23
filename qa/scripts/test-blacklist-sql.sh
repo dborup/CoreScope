@@ -54,6 +54,10 @@ BLACKLIST_SH="${BLACKLIST_TEST_SH:-$SCRIPT_DIR/blacklist-test.sh}"
 PERL_BREAK='my $fd = shift; $SIG{PIPE} = "DEFAULT"; pipe(my $r, my $w) or die "pipe: $!"; close $r;
   if ($fd == 1) { open(STDOUT, ">&", $w) or die "dup: $!" } else { open(STDERR, ">&", $w) or die "dup: $!" }
   close $w; exec { $ARGV[0] } @ARGV or die "exec: $!"'
+# `perl -e "$PERL_DEFAULT" cmd...` only resets SIGPIPE to default. CI runners
+# (GitHub Actions) start steps with SIGPIPE ignored, which bash cannot trap, so
+# every case that tests the PIPE trap itself must start from the default.
+PERL_DEFAULT='$SIG{PIPE} = "DEFAULT"; exec { $ARGV[0] } @ARGV or die "exec: $!"'
 PERL_IGNORE='my $fd = shift; $SIG{PIPE} = "IGNORE"; pipe(my $r, my $w) or die "pipe: $!"; close $r;
   if ($fd == 1) { open(STDOUT, ">&", $w) or die "dup: $!" } else { open(STDERR, ">&", $w) or die "dup: $!" }
   close $w; exec { $ARGV[0] } @ARGV or die "exec: $!"'
@@ -902,10 +906,10 @@ assert_eq "teardown children still die on SIGINT" "child-int:" "$(grep child-int
 # SIGPIPE (issue #83). kill -PIPE is the plain case; the stream breaker makes
 # the shell's own write raise it for real. A shell killed by SIGPIPE also exits
 # 141, so every case also checks that teardown actually ran.
-assert_eq   "SIGPIPE mid-run exits 141"      "141" "$(teardown_case pipe 0 0)"
-assert_true "SIGPIPE mid-run tore down"      tore_down
-assert_eq   "SIGPIPE + failed teardown"      "142" "$(teardown_case pipe 0 1)"
 if command -v perl >/dev/null 2>&1; then
+    assert_eq   "SIGPIPE mid-run exits 141"      "141" "$(teardown_case pipe 0 0 perl -e "$PERL_DEFAULT")"
+    assert_true "SIGPIPE mid-run tore down"      tore_down
+    assert_eq   "SIGPIPE + failed teardown"      "142" "$(teardown_case pipe 0 1 perl -e "$PERL_DEFAULT")"
     assert_eq   "broken stderr, shell writes: 141" "141" "$(teardown_case stderr-write 0 0 perl -e "$PERL_BREAK" 2)"
     assert_true "broken stderr, shell writes: tore down" tore_down
     assert_eq   "broken stdout, shell writes: 141" "141" "$(teardown_case stdout-write 2 0 perl -e "$PERL_BREAK" 1)"
