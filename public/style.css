@@ -518,8 +518,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 /* === Touch Targets === */
-/* WCAG 2.5.5 / Apple HIG / Material: 48x48 CSS px minimum touch target for
-   all interactive controls. Targets are achieved with min-height/min-width
+/* WCAG 2.5.5 and Apple HIG use a 44x44 CSS px target; Material uses 48x48.
+   Most controls in this section use the 48x48 house preference. Compact
+   .nav-btn and .ch-icon-btn controls retain 44x44 in their component rules.
+   Targets are achieved with min-height/min-width
    plus inline-flex centering so existing visual styling (font-size, padding,
    icon size) is preserved on desktop while the *hit area* grows for touch.
    Issue #1060.
@@ -558,13 +560,6 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   touch-action: manipulation;
 }
 
-.nav-btn {
-  min-height: 48px;
-  min-width: 48px;
-  touch-action: manipulation;
-}
-
-.ch-icon-btn,
 .ch-remove-btn,
 .ch-share-btn {
   min-height: 48px;
@@ -891,6 +886,7 @@ img.brand-logo {
   background: none; border: 1px solid var(--border); color: var(--nav-text-muted); padding: 6px 12px;
   border-radius: 6px; cursor: pointer; font-size: 14px; transition: all .15s;
   min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  touch-action: manipulation;
 }
 .nav-btn:hover { background: var(--nav-bg2); color: var(--nav-text); }
 
@@ -1870,6 +1866,7 @@ button.ch-item.selected { background: var(--selected-bg); }
   background: none; border: none; color: var(--text-muted);
   cursor: pointer; padding: 4px; margin-left: 2px;
   min-width: 44px; min-height: 44px; box-sizing: border-box;
+  touch-action: manipulation;
   opacity: 0.55; transition: opacity 0.15s, color 0.15s;
   line-height: 1; user-select: none;
 }
