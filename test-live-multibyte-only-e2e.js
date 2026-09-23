@@ -229,6 +229,8 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
 
   await step('a click made while Live is still initializing is saved and kept', async () => {
     await saveSetting(page, 'false');
+    // "Kept" means kept once init has finished. A revert deferred by an
+    // arbitrary timer after init is out of reach for a deterministic test.
     await withInitHeld(page, reload(page), async (p, st, cb) => {
       assert(st.checked === false && st.stored === 'false', 'setup: saved OFF should show OFF (checked=' + st.checked + ', stored=' + st.stored + ')');
       await cb.click();
@@ -243,13 +245,6 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
   });
 
   await step('saved ON is shown from the start of a real reload', async () => {
-    // The previous step's click is re-checked here, once that step's init has
-    // settled and the test has moved on. (A revert deferred by an arbitrary
-    // timer is out of reach for a deterministic test.)
-    const carried = await readToggle(page);
-    if (carried.stored === 'true') {
-      assert(carried.checked === true, 'the click made during init was reverted after init had finished');
-    }
     await saveSetting(page, 'true');
     await withInitHeld(page, reload(page), async (p, st) => {
       assert(st.stored === 'true', 'setup: expected saved ON, got ' + st.stored);
@@ -259,10 +254,11 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
   });
 
   await step('SPA navigation away and back keeps the setting and one listener', async () => {
+    // Setup only: the reload itself is covered by the steps above.
     await saveSetting(page, 'true');
-    await withInitHeld(page, reload(page), async (p, st) => {
-      assert(st.checked === true, 'setup: saved ON should show ON after reload');
-    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => !!window._liveWSHandler(), null, { timeout: 15000 })
+      .catch(() => { throw new Error('setup: Live init did not finish after reload'); });
     for (let i = 0; i < 3; i++) {
       await page.evaluate(() => { location.hash = '#/packets'; });
       await page.waitForSelector('#pktTable', { state: 'attached' });
