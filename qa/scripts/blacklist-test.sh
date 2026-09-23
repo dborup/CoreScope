@@ -34,6 +34,7 @@
 #
 # Exit code = number of failures (0 = pass). An interrupted run still tears
 # down, then exits 130 (SIGINT) or 143 (SIGTERM), plus 1 if teardown failed.
+# Further INT/TERM are ignored while teardown restores the target.
 # PUBLIC repo: zero PII — no real pubkeys, IPs, or hostnames as defaults.
 #
 # Structure: helpers live at top level and the imperative body lives in main(),
@@ -56,6 +57,10 @@ teardown() {
   if [[ -n "${1:-}" ]]; then rc=$1; fi
   if [[ "$TEARDOWN_DONE" == "1" ]]; then rm -rf "$TMP"; exit "$rc"; fi
   TEARDOWN_DONE=1
+  # Restoring the target must not be cut short by a second Ctrl-C/TERM, or the
+  # node would stay blacklisted with no warning. Each step below is bounded by
+  # CURL_TIMEOUT / RESTART_WAIT_S; SIGKILL still stops a hung run.
+  trap '' INT TERM
   echo "=== teardown: removing $TEST_PUBKEY from nodeBlacklist ==="
   if remove_from_blacklist && restart_target && wait_for_stats; then
     if node_visible; then

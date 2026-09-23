@@ -106,7 +106,11 @@ assert_match "ingestor DDL has from_pubkey" "from_pubkey[[:space:]]+TEXT" "$DDL"
 assert_true  "ingestor DDL has no from_node" lacks "$DDL" "from_node"
 
 # ----- against a real sqlite3 ----------------------------------------------
-if ! command -v sqlite3 >/dev/null 2>&1; then
+if ! command -v sqlite3 >/dev/null 2>&1 && [ -n "${CI:-}" ]; then
+    # In CI a missing sqlite3 must not turn the binding and error-surfacing
+    # groups into a silent pass.
+    FAIL=$((FAIL + 1)); echo "FAIL: sqlite3 not on PATH in CI — the query group cannot run" >&2
+elif ! command -v sqlite3 >/dev/null 2>&1; then
     echo "SKIP: sqlite3 not on PATH — skipping the ${#SQLITE_ARGS[@]}-flag query group" >&2
     echo "      (the alphabet, query-text and schema assertions above still ran)" >&2
 else
@@ -182,8 +186,10 @@ SQL
     if [ -f "$REAL_FIXTURE" ]; then
         cp "$REAL_FIXTURE" "$FIXTURE_DIR/real.db"
         real_pk=$(run_local "$FIXTURE_DIR/real.db" <<<"SELECT from_pubkey FROM transmissions WHERE from_pubkey IS NOT NULL GROUP BY from_pubkey ORDER BY COUNT(*) DESC, from_pubkey LIMIT 1;")
-        real_n=$(run_local "$FIXTURE_DIR/real.db" <<<"SELECT COUNT(*) FROM transmissions WHERE from_pubkey = '$real_pk';")
         assert_match "real fixture has an attributed pubkey" '^[0-9a-f]{64}$' "$real_pk"
+        # Only interpolated into the reference count once it is known to be hex.
+        [[ "$real_pk" =~ ^[0-9a-f]{64}$ ]] || real_pk=""
+        real_n=$(run_local "$FIXTURE_DIR/real.db" <<<"SELECT COUNT(*) FROM transmissions WHERE from_pubkey = '$real_pk';")
         assert_match "real fixture count > 0" '^[1-9][0-9]*$' "$real_n"
         assert_eq "script query on real fixture" "$real_n" "$(count "$real_pk" "$FIXTURE_DIR/real.db")"
     else
@@ -288,19 +294,25 @@ fi
 # effects stubbed. The run must always tear down, and an interrupted run must
 # never exit 0: before the fix, SIGTERM tore down and then exited as a pass.
 TD_DIR=$(mktemp -d)
-teardown_case() {  # MODE(term|exit) FAILS NODE_VISIBLE_RC → prints exit status
+# MODE: exit | term | int | exit-sig-in-teardown. The last one signals the run
+# while teardown is restoring the target; teardown must still finish.
+teardown_case() {  # MODE FAILS NODE_VISIBLE_RC → prints exit status
     : >"$TD_DIR/calls"
     bash -c '
         calls="$2/calls"; visible_rc=$3; fails=$4; mode=$5
         . "$1"
         remove_from_blacklist() { echo remove >>"$calls"; }
-        restart_target() { :; }; wait_for_stats() { :; }
-        node_visible() { return "$visible_rc"; }
+        restart_target() { :; }
+        wait_for_stats() {
+            if [ "$mode" = exit-sig-in-teardown ]; then kill -TERM $$; kill -INT $$; fi
+        }
+        node_visible() { echo visible-checked >>"$calls"; return "$visible_rc"; }
         TMP=$(mktemp -d); TEST_PUBKEY=synthetic; TEARDOWN_DONE=0
         install_teardown_traps
         case "$mode" in
             term) kill -TERM $$; sleep 5; exit 0 ;;
-            exit) exit "$fails" ;;
+            int)  kill -INT  $$; sleep 5; exit 0 ;;
+            exit|exit-sig-in-teardown) exit "$fails" ;;
         esac
     ' _ "$SCRIPT_DIR/blacklist-test.sh" "$TD_DIR" "$3" "$2" "$1" >/dev/null 2>&1
     echo $?
@@ -312,6 +324,10 @@ assert_eq "teardown failure adds 1"        "3"   "$(teardown_case exit 2 1)"
 assert_eq "SIGTERM mid-run exits 143"      "143" "$(teardown_case term 0 0)"
 assert_eq "SIGTERM still tore down (once)" "1"   "$(grep -c remove "$TD_DIR/calls")"
 assert_eq "SIGTERM + failed teardown"      "144" "$(teardown_case term 0 1)"
+assert_eq "SIGINT mid-run exits 130"       "130" "$(teardown_case int 0 0)"
+assert_eq "SIGINT still tore down (once)"  "1"   "$(grep -c remove "$TD_DIR/calls")"
+assert_eq "signal during teardown: status kept" "2" "$(teardown_case exit-sig-in-teardown 2 0)"
+assert_eq "signal during teardown: teardown finished" "1" "$(grep -c visible-checked "$TD_DIR/calls")"
 rm -rf "$TD_DIR"
 
 echo "test-blacklist-sql.sh: $PASS passed, $FAIL failed"
