@@ -427,6 +427,16 @@ FAKE
     export FAKE_NODES="$PK_A $PK_B"
     ALL_ARGV="$FAKE/all-argv.log"; : >"$ALL_ARGV"
     RUN_N=0
+    # Optional strace evidence (Linux): needs strace and an EMPTY directory, so
+    # no earlier run's traces can mix into this run's checks.
+    if [ -n "${BLACKLIST_TEST_STRACE_DIR:-}" ]; then
+        if ! command -v strace >/dev/null 2>&1; then
+            echo "BLACKLIST_TEST_STRACE_DIR is set but strace is not on PATH (Linux only)" >&2; exit 2
+        fi
+        if [ -n "$(ls -A "$BLACKLIST_TEST_STRACE_DIR" 2>/dev/null)" ] || [ ! -d "$BLACKLIST_TEST_STRACE_DIR" ]; then
+            echo "BLACKLIST_TEST_STRACE_DIR must be an existing, empty directory" >&2; exit 2
+        fi
+    fi
 
     snapshot_files() { (cd "$FAKE" && find host container-root tmp target -print | LC_ALL=C sort); }
     db_sums() { cksum "$FAKE_CROOT$CONTAINER_DB_PATH" "$HOST_DB_PATH" | awk '{print $1, $2}'; }
@@ -854,7 +864,7 @@ teardown_case() {  # MODE FAILS NODE_VISIBLE_RC [WRAPPER...] → prints exit sta
         # disposition was inherited as ignored (trap -p cannot show that).
         restart_target() { echo "child-int:$(sh -c "kill -INT \$\$; echo survived" 2>/dev/null)" >>"$calls"; }
         wait_for_stats() {
-            if [ "$mode" = exit-sig-in-teardown ]; then kill -TERM $$; kill -INT $$; kill -PIPE $$; fi
+            if [ "$mode" = exit-sig-in-teardown ]; then kill -TERM $$; kill -INT $$; kill -HUP $$; kill -PIPE $$; fi
         }
         node_visible() { echo visible-checked >>"$calls"; return "$visible_rc"; }
         TMP=$(mktemp -d); TEST_PUBKEY=synthetic; TEARDOWN_DONE=0
