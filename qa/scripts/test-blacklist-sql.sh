@@ -361,6 +361,7 @@ fi
 BL=(); while IFS= read -r b; do BL+=("$b"); done <"$FAKE_STATE/live-blacklist"
 hidden() {
     [ "${FAKE_LEAK:-0}" = 1 ] && return 1
+    [ "${FAKE_DETAIL_LEAK:-0}" = 1 ] && [ "${path#/api/nodes/}" != "$path" ] && return 1
     local b; for b in ${BL[@]+"${BL[@]}"}; do [ "$b" = "$1" ] && return 0; done; return 1
 }
 code=404; body='{"error":"not found"}'
@@ -372,7 +373,7 @@ case $path in
             if [ "$n" = "$want" ] && ! hidden "$n"; then code=200; body="{\"public_key\":\"$n\"}"; fi
         done ;;
     '/api/nodes?limit=10000')
-        code=200; body='{"nodes":['; sep=''
+        code=${FAKE_LIST_CODE:-200}; body='{"nodes":['; sep=''
         for n in $FAKE_NODES; do hidden "$n" && continue; body+="$sep{\"public_key\":\"$n\"}"; sep=','; done
         body+=']}' ;;
     /api/topology)
@@ -395,6 +396,7 @@ FAKECURL
     sqlite3 "$FAKE_CROOT$CONTAINER_DB_PATH" "INSERT INTO transmissions(raw_hex,hash,first_seen,payload_type,from_pubkey) VALUES
       ('00','c1','t',4,'$PK_A'),('00','c2','t',4,'$PK_A'),('00','c3','t',4,'$PK_B');"
     cp "$DB" "$HOST_DB_PATH"
+    : >"$FAKE_CROOT/srv/corescope/data/empty.db"
     cp "$LEGACY_DB" "$HOST_DIR/legacy.db"
     UNBINDABLE_BIN="$FIXTURE_DIR/unbindable-bin"; mkdir -p "$UNBINDABLE_BIN"
     cat >"$UNBINDABLE_BIN/sqlite3" <<'FAKE'
@@ -405,6 +407,15 @@ echo ".parameter CMD ...       Manage SQL parameter bindings"
 echo "0"
 FAKE
     chmod +x "$UNBINDABLE_BIN/sqlite3"
+    NOISY_BIN="$FIXTURE_DIR/noisy-bin"; mkdir -p "$NOISY_BIN"
+    cat >"$NOISY_BIN/sqlite3" <<'FAKE'
+#!/usr/bin/env bash
+# Echoes the probe token among other output without having bound anything.
+cat >/dev/null
+echo ".parameter CMD ...       Manage SQL parameter bindings"
+echo "corescope-probe-ok"
+FAKE
+    chmod +x "$NOISY_BIN/sqlite3"
 
     FAKE_CONFIG="$FAKE/target/config.json"
     ORIG_CONFIG='{"port":3000,"nodeBlacklist":["aa00aa00"],"mqtt":{"sources":[]}}'
@@ -415,6 +426,7 @@ FAKE
     export FAKE_CONTAINER="corescope-stub" FAKE_URL="http://target.invalid"
     export FAKE_NODES="$PK_A $PK_B"
     ALL_ARGV="$FAKE/all-argv.log"; : >"$ALL_ARGV"
+    RUN_N=0
 
     snapshot_files() { (cd "$FAKE" && find host container-root tmp target -print | LC_ALL=C sort); }
     db_sums() { cksum "$FAKE_CROOT$CONTAINER_DB_PATH" "$HOST_DB_PATH" | awk '{print $1, $2}'; }
@@ -429,9 +441,11 @@ FAKE
         printf '%s\n' "$ORIG_CONFIG" >"$FAKE_CONFIG"
         : >"$FAKE_ARGV_LOG"
         FILES_BEFORE=$(snapshot_files)
+        RUN_N=$((RUN_N + 1))
         (
             unset TARGET_DB_PATH ADMIN_API_TOKEN TARGET_CONTAINER_DB_PATH TARGET_HOST_DB_PATH \
                   FAKE_CONTAINER_SQLITE FAKE_SIGNAL_ON FAKE_SIGNAL FAKE_SIGNAL_NTH FAKE_LEAK \
+                  FAKE_DETAIL_LEAK FAKE_LIST_CODE \
                   FAKE_SSH_FAIL_CMD FAKE_SSH_FAIL_FROM
             export TEST_NODE_PUBKEY="$PK_A" TARGET_SSH_HOST="stub-host" TARGET_SSH_KEY="/nonexistent/key" \
                    TARGET_CONFIG_PATH="$FAKE_CONFIG" TARGET_CONTAINER="$FAKE_CONTAINER" \
@@ -441,9 +455,15 @@ FAKE
             [ "${1:-}" = -- ] && shift
             wrap=("$@")
             export PATH="$SHIM_DIR:$ORIG_PATH"
+            # Optional kernel-level evidence (Linux): strace every execve of the
+            # run, including anything the PATH shims cannot see.
+            local tracer=()
+            if [ -n "${BLACKLIST_TEST_STRACE_DIR:-}" ]; then
+                tracer=(strace -f -qq -e trace=execve -s 65535 -o "$BLACKLIST_TEST_STRACE_DIR/run.$RUN_N")
+            fi
             # Foreground, so SIGINT is not ignored the way it is for a background
             # job; the pid is recorded for the fake curl to signal.
-            ${wrap[@]+"${wrap[@]}"} bash -c 'echo $$ >"$FAKE_STATE/script.pid"; exec bash "$@"' _ \
+            ${tracer[@]+"${tracer[@]}"} ${wrap[@]+"${wrap[@]}"} bash -c 'echo $$ >"$FAKE_STATE/script.pid"; exec bash "$@"' _ \
                 "$BLACKLIST_SH" "http://baseline.invalid" "$FAKE_URL" \
                 >"$FAKE/out" 2>"$FAKE/err"
         )
@@ -640,8 +660,34 @@ FAKE
     assert_true "grep error: no hide ok claimed" lacks "$RUN_OUT" "hide ok"
     common_after "grep error"
 
+    # 11c. Hidden means detail 404 AND absent from the listing; a listing that
+    #      could not be fetched proves nothing.
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_LIST_CODE=500
+    assert_eq   "listing HTTP 500: fails" "1" "$RUN_RC"
+    assert_true "listing HTTP 500: classified" contains "$RUN_OUT" "hide-failed: /api/nodes HTTP 500"
+    common_after "listing HTTP 500"
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_DETAIL_LEAK=1
+    assert_eq   "detail leaks, listing hides: fails" "1" "$RUN_RC"
+    assert_true "detail leaks, listing hides: classified" contains "$RUN_OUT" "hide-failed: detail=200 in_list=0"
+    common_after "detail leaks, listing hides"
+
+    # 11d. Empty file at the container path, sqlite3-capable container →
+    #      refused before any query; the file stays empty.
+    run_full TARGET_CONTAINER_DB_PATH="/srv/corescope/data/empty.db" FAKE_CONTAINER_SQLITE=1
+    assert_eq   "empty container db: exit 1" "1" "$RUN_RC"
+    assert_true "empty container db: classified" contains "$RUN_OUT" "TARGET_CONTAINER_DB_PATH=/srv/corescope/data/empty.db is not a non-empty file in the container"
+    assert_true "empty container db: still empty" test ! -s "$FAKE_CROOT/srv/corescope/data/empty.db"
+    assert_true "empty container db: sqlite3 never opened it" lacks "$(grep '^sqlite3 ' "$FAKE_ARGV_LOG")" "empty.db"
+    common_after "empty container db"
+
+    # 11e. The probe wants the token back and nothing else.
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REAL_PATH="$NOISY_BIN:$ORIG_PATH"
+    assert_eq   "noisy sqlite3: rejected" "1" "$RUN_RC"
+    assert_true "noisy sqlite3: classified" contains "$RUN_OUT" "retain-failed: no sqlite3 able to bind"
+    common_after "noisy sqlite3"
+
     # 12. Signals mid-run: classified exit, full teardown.
-    for sig in TERM:143 INT:130; do
+    for sig in TERM:143 INT:130 HUP:129; do
         run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SIGNAL_ON=/api/topology FAKE_SIGNAL="${sig%%:*}"
         assert_eq   "SIG${sig%%:*} mid-run: exit ${sig#*:}" "${sig#*:}" "$RUN_RC"
         assert_true "SIG${sig%%:*} mid-run: teardown ok" contains "$RUN_OUT" "teardown ok"
@@ -707,6 +753,15 @@ FAKE
     assert_true "all runs: pubkey never in argv" lacks "$(cat "$ALL_ARGV")" "$PK_A"
     assert_true "all runs: token never in argv"  lacks "$(cat "$ALL_ARGV")" "$SYNTH_TOKEN"
     assert_true "all runs: SQL never in argv"    lacks "$(cat "$ALL_ARGV")" "from_pubkey"
+    if [ -n "${BLACKLIST_TEST_STRACE_DIR:-}" ]; then
+        traces=$(cat "$BLACKLIST_TEST_STRACE_DIR"/run.* 2>/dev/null)
+        assert_eq   "strace: one trace per run" "$RUN_N" "$(find "$BLACKLIST_TEST_STRACE_DIR" -name 'run.*' | wc -l | tr -d ' ')"
+        assert_true "strace: traced ssh/curl/sqlite3/jq execs" contains "$traces" 'execve("'
+        for c in /ssh /curl /sqlite3 /jq /grep; do assert_true "strace: saw $c" contains "$traces" "$c\""; done
+        assert_true "strace: pubkey in no execve" lacks "$traces" "$PK_A"
+        assert_true "strace: SQL in no execve"    lacks "$traces" "from_pubkey"
+        assert_true "strace: token in no execve"  lacks "$traces" "$SYNTH_TOKEN"
+    fi
 
     # ----- the two empty-file guards, each on its own ---------------------------
     # db_path_ok and -readonly are independent: each alone must stop sqlite3
@@ -738,6 +793,15 @@ FAKE
     TARGET_HOST_DB_PATH=""
     assert_eq "read_retain_count: no path → 1, no count" "1:" "$(with_fake rrc)"
     TARGET_HOST_DB_PATH="$HOST_DB_PATH"
+
+    # The remote edit re-checks the pubkey it reads from stdin: a non-hex value
+    # (main() never lets one through) is refused and the config left alone.
+    printf '%s\n' "$ORIG_CONFIG" >"$FAKE_CONFIG"; before_cfg=$(cat "$FAKE_CONFIG")
+    TARGET_CONFIG_PATH="$FAKE_CONFIG"; TEST_PUBKEY='zz"; touch /tmp/pr83-never'
+    with_fake set_blacklist_state add >/dev/null 2>&1; rc=$?
+    assert_eq   "remote hex check: refused" "1" "$rc"
+    assert_eq   "remote hex check: config untouched" "$before_cfg" "$(cat "$FAKE_CONFIG")"
+    TEST_PUBKEY="$PK_A"
 
     # run_sqlite with no resolved runner must refuse rather than guess.
     SQLITE_RUNNER=""
@@ -799,6 +863,7 @@ teardown_case() {  # MODE FAILS NODE_VISIBLE_RC [WRAPPER...] → prints exit sta
             term) kill -TERM $$; sleep 5; exit 0 ;;
             int)  kill -INT  $$; sleep 5; exit 0 ;;
             pipe) kill -PIPE $$; sleep 5; exit 0 ;;
+            hup)  kill -HUP  $$; sleep 5; exit 0 ;;
             stderr-write) echo "diagnostic" >&2; exit "$fails" ;;
             stdout-write) echo "progress";       exit "$fails" ;;
             exit|exit-sig-in-teardown) exit "$fails" ;;
@@ -817,6 +882,9 @@ assert_eq "SIGTERM + failed teardown"      "144" "$(teardown_case term 0 1)"
 assert_eq "SIGINT mid-run exits 130"       "130" "$(teardown_case int 0 0)"
 assert_eq "SIGINT still tore down (once)"  "1"   "$(grep -c remove "$TD_DIR/calls")"
 assert_eq "SIGINT + failed teardown"       "131" "$(teardown_case int 0 1)"
+assert_eq   "SIGHUP mid-run exits 129"     "129" "$(teardown_case hup 0 0)"
+assert_true "SIGHUP mid-run tore down"     tore_down
+assert_eq   "SIGHUP + failed teardown"     "130" "$(teardown_case hup 0 1)"
 assert_eq "signal during teardown: status kept" "2" "$(teardown_case exit-sig-in-teardown 2 0)"
 assert_eq "signal during teardown: teardown finished" "1" "$(grep -c visible-checked "$TD_DIR/calls")"
 assert_eq "teardown children still die on SIGINT" "child-int:" "$(grep child-int "$TD_DIR/calls")"
@@ -838,6 +906,10 @@ if command -v perl >/dev/null 2>&1; then
     assert_eq   "broken stderr, signal in teardown: status kept" "2" \
                 "$(teardown_case exit-sig-in-teardown 2 0 perl -e "$PERL_BREAK" 2)"
     assert_true "broken stderr, signal in teardown: teardown finished" tore_down
+    # say on a dead stdout must not leave text for the next subshell to
+    # replay (bash 3.2 keeps it buffered; bash 5 purges it).
+    replay=$(perl -e "$PERL_IGNORE" 1 bash -c '. "$1"; say "STALE-MARK"; x=$(printf clean); printf "%s" "$x" >&3' _ "$BLACKLIST_SH" 3>&1 2>/dev/null)
+    assert_eq   "dead stdout: nothing replayed into a capture" "clean" "$replay"
     # Started with SIGPIPE ignored: not trappable, so writes fail with EPIPE and
     # the run keeps its real status — never a pass it did not earn.
     assert_eq   "SIGPIPE ignored on entry: status kept" "2" "$(teardown_case stderr-write 2 0 perl -e "$PERL_IGNORE" 2)"

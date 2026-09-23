@@ -56,8 +56,8 @@
 #   teardown-failed→ post-test removal did not restore listing
 #
 # Exit code = number of failures (0 = pass). An interrupted run still tears
-# down, then exits 130 (SIGINT), 143 (SIGTERM) or 141 (SIGPIPE), plus 1 if
-# teardown failed.
+# down, then exits 130 (SIGINT), 143 (SIGTERM), 129 (SIGHUP) or 141 (SIGPIPE),
+# plus 1 if teardown failed.
 #
 # SIGPIPE: the script's own writes go to stdout/stderr, so if either is a pipe
 # whose reader has gone, the shell gets SIGPIPE. It is handled like INT/TERM:
@@ -65,14 +65,15 @@
 # run the EXIT trap but then re-raise the signal, so the status would be 141
 # whatever teardown found, and teardown's own next write to the dead stream
 # would raise SIGPIPE again and cut the restore short. Inside teardown SIGPIPE
-# is ignored, so a lost output channel cannot do that. Child processes keep
-# the default disposition; one killed by SIGPIPE fails its step, which is
-# classified as usual. A shell started with SIGPIPE already ignored cannot
+# is ignored, so a lost output channel cannot do that. Outside teardown child
+# processes keep the default disposition, and one killed by SIGPIPE fails its
+# step, which is classified as usual; inside it they inherit the ignore and
+# see EPIPE instead. A shell started with SIGPIPE already ignored cannot
 # trap it; its writes then fail with EPIPE and the run continues to its normal
 # exit status. Either way a dead stream is sent to /dev/null (see say/warn),
 # never replayed.
 #
-# A further INT/TERM does not abort teardown: it stops only the step in
+# A further INT/TERM/HUP does not abort teardown: it stops only the step in
 # progress. An interrupted ssh step fails and is reported as teardown-failed;
 # an interrupted /api/stats poll only counts as one failed poll, so the wait
 # goes on until RESTART_WAIT_S and teardown can still succeed.
@@ -129,7 +130,7 @@ teardown() {
   # ignored disposition is inherited by ssh/curl, so a hung step could no longer
   # be interrupted. With a handler, a terminal Ctrl-C still stops the running
   # step; that step fails and teardown reports teardown-failed.
-  trap 'warn "  (signal received — teardown continues restoring the target)"' INT TERM
+  trap 'warn "  (signal received — teardown continues restoring the target)"' INT TERM HUP
   say "=== teardown: removing $TEST_PUBKEY from nodeBlacklist ==="
   if remove_from_blacklist && restart_target && wait_for_stats; then
     if node_visible; then
@@ -150,6 +151,7 @@ install_teardown_traps() {
   trap teardown EXIT
   trap 'teardown 130' INT
   trap 'teardown 143' TERM
+  trap 'teardown 129' HUP
   trap 'teardown 141' PIPE
 }
 
@@ -299,6 +301,9 @@ node_visible() {
 #                    exist fails "unable to open database" instead of leaving an
 #                    empty file behind. db_path_ok checks the path first; this is
 #                    the second, independent guard.
+#                    CoreScope's database is in WAL mode: a read-only open
+#                    needs the -wal/-shm files a running app keeps; §10.2
+#                    runs after /api/stats has shown the restarted app is up.
 SQLITE_ARGS=(-batch -bail -init /dev/null -noheader -list -readonly)
 # Round-trip probe token. The value is arbitrary; it only has to come back intact.
 SQLITE_PROBE_TOKEN="corescope-probe-ok"
@@ -464,7 +469,7 @@ read_retain_count() {
     say "  ❌ retain-failed: ssh failed while checking $(runner_db_var) (exit 255)"
     return 1
   elif (( path_rc != 0 )); then
-    say "  ❌ retain-failed: $(runner_db_var)=$(runner_db_path) is not a non-empty file in the $SQLITE_RUNNER"
+    say "  ❌ retain-failed: $(runner_db_var)=$(runner_db_path) is not a non-empty file in the $SQLITE_RUNNER (check exit $path_rc)"
     return 1
   fi
   if ! RETAIN_COUNT=$(run_sqlite <<<"$(transmission_count_sql "$TEST_PUBKEY")" 2>"$TMP/sqlite.err"); then
@@ -575,7 +580,10 @@ main() {
 
   detail_code=$(fetch_code "$TARGET_URL/api/nodes/$TEST_PUBKEY" "$TMP/detail.json")
   list_code=$(fetch_code "$TARGET_URL/api/nodes?limit=10000" "$TMP/list.json")
-  in_list=0
+  # Hidden means BOTH: the detail endpoint 404s and the listing omits it. A
+  # listing that could not be fetched or searched proves nothing, so it fails
+  # rather than counting as "not in the list".
+  in_list=unknown
   if [[ "$list_code" == "200" ]]; then
     file_has_pattern "$PK_QUOTED_PATTERN" "$TMP/list.json"
     case $? in
@@ -584,10 +592,13 @@ main() {
       *) in_list=error ;;
     esac
   fi
-  if [[ "$in_list" == "error" ]]; then
+  if [[ "$in_list" == "unknown" ]]; then
+    say "  ❌ hide-failed: /api/nodes HTTP $list_code — listing not checked"
+    fails=$((fails+1))
+  elif [[ "$in_list" == "error" ]]; then
     say "  ❌ hide-failed: could not search /api/nodes response (grep error)"
     fails=$((fails+1))
-  elif [[ "$detail_code" == "404" || "$in_list" == "0" ]]; then
+  elif [[ "$detail_code" == "404" && "$in_list" == "0" ]]; then
     say "  ✅ hide ok: detail=$detail_code in_list=$in_list"
   else
     say "  ❌ hide-failed: detail=$detail_code in_list=$in_list — pubkey still surfaced"
