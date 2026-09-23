@@ -27,6 +27,7 @@
 const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
+const ORIGIN = new URL(BASE).origin;
 const KEY = 'live-multibyte-only';
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -68,7 +69,14 @@ async function newLivePage(browser, errors, storedValue) {
   const page = await ctx.newPage();
   page.setDefaultTimeout(15000);
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push('console.error: ' + m.text()); });
+  page.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    // Map tiles come from an external CDN whose failures have nothing to do
+    // with Live; only errors from this app's own origin count.
+    const url = (m.location() && m.location().url) || '';
+    if (url && !url.startsWith(ORIGIN)) return;
+    errors.push('console.error: ' + m.text());
+  });
   await page.addInitScript(([key, value]) => {
     // Seed once per tab, not on every reload.
     if (!sessionStorage.getItem('mb-e2e-seeded')) {
@@ -155,6 +163,11 @@ async function clickToggleAsUser(page) {
   await page.locator('#liveMultibyteToggle').click();
 }
 
+// Sets the saved value directly, so a step does not depend on the previous one.
+async function saveSetting(page, value) {
+  await page.evaluate(([key, v]) => { localStorage.setItem(key, v); }, [KEY, value]);
+}
+
 const loadLive = (page) => () => page.goto(BASE + '/#/live', { waitUntil: 'domcontentloaded' });
 const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
 
@@ -194,7 +207,7 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
     }, { single: makePkt(singleHash, SINGLE_HEX), multi: makePkt(multiHash, MULTI_HEX) });
 
     await page.waitForFunction((h) => !!document.querySelector('.live-feed-item[data-hash="' + h + '"]'),
-      multiHash, { timeout: 5000 }).catch(() => {});
+      multiHash, { timeout: 5000 }).catch(() => { throw new Error('multibyte packet never rendered a feed item within 5s with the toggle ON'); });
 
     const multiShown = await page.evaluate((h) => !!document.querySelector('.live-feed-item[data-hash="' + h + '"]'), multiHash);
     const singleShown = await page.evaluate((h) => !!document.querySelector('.live-feed-item[data-hash="' + h + '"]'), singleHash);
@@ -209,14 +222,15 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
       cb.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await page.waitForFunction((h) => !!document.querySelector('.live-feed-item[data-hash="' + h + '"]'),
-      singleHash, { timeout: 5000 }).catch(() => {});
+      singleHash, { timeout: 5000 }).catch(() => { throw new Error('single-byte packet never reappeared within 5s after toggle OFF + feed rebuild'); });
     const singleShown = await page.evaluate((h) => !!document.querySelector('.live-feed-item[data-hash="' + h + '"]'), singleHash);
     assert(singleShown, 'single-byte packet should reappear after toggle OFF + feed rebuild');
   });
 
   await step('a click made while Live is still initializing is saved and kept', async () => {
+    await saveSetting(page, 'false');
     await withInitHeld(page, reload(page), async (p, st, cb) => {
-      assert(st.checked === false && st.stored === 'false', 'precondition: saved OFF, shown OFF (checked=' + st.checked + ', stored=' + st.stored + ')');
+      assert(st.checked === false && st.stored === 'false', 'setup: saved OFF should show OFF (checked=' + st.checked + ', stored=' + st.stored + ')');
       await cb.click();
       const after = await readToggle(p);
       assert(after.checked === true, 'the click should turn the toggle ON');
@@ -229,14 +243,26 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
   });
 
   await step('saved ON is shown from the start of a real reload', async () => {
+    // The previous step's click is re-checked here, once that step's init has
+    // settled and the test has moved on. (A revert deferred by an arbitrary
+    // timer is out of reach for a deterministic test.)
+    const carried = await readToggle(page);
+    if (carried.stored === 'true') {
+      assert(carried.checked === true, 'the click made during init was reverted after init had finished');
+    }
+    await saveSetting(page, 'true');
     await withInitHeld(page, reload(page), async (p, st) => {
-      assert(st.stored === 'true', 'precondition: saved ON by the previous step');
+      assert(st.stored === 'true', 'setup: expected saved ON, got ' + st.stored);
       assert(st.checked === true, 'toggle must show the saved ON state while init is still running (it showed OFF)');
     });
     assert((await readToggle(page)).checked === true, 'toggle must stay ON after init');
   });
 
   await step('SPA navigation away and back keeps the setting and one listener', async () => {
+    await saveSetting(page, 'true');
+    await withInitHeld(page, reload(page), async (p, st) => {
+      assert(st.checked === true, 'setup: saved ON should show ON after reload');
+    });
     for (let i = 0; i < 3; i++) {
       await page.evaluate(() => { location.hash = '#/packets'; });
       await page.waitForSelector('#pktTable', { state: 'attached' });
@@ -261,14 +287,17 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
     await step('fresh load with the setting ' + (saved === null ? 'unset' : 'saved as ' + saved) + ' shows it before init finishes', async () => {
       const fresh = await newLivePage(browser, errors, saved);
       const want = saved === 'true';
-      await withInitHeld(fresh.page, loadLive(fresh.page), async (p, st) => {
-        assert(st.stored === saved, 'precondition: stored=' + saved + ', got ' + st.stored);
-        assert(st.checked === want, 'toggle must show ' + (want ? 'ON' : 'OFF') + ' while init is still running, got ' + (st.checked ? 'ON' : 'OFF'));
-      });
-      const st = await readToggle(fresh.page);
-      assert(st.checked === want, 'toggle must still show ' + (want ? 'ON' : 'OFF') + ' after init');
-      assert(st.writes === 0, 'loading the page must not write the setting (writes=' + st.writes + ')');
-      await fresh.ctx.close();
+      try {
+        await withInitHeld(fresh.page, loadLive(fresh.page), async (p, st) => {
+          assert(st.stored === saved, 'setup: stored=' + saved + ', got ' + st.stored);
+          assert(st.checked === want, 'toggle must show ' + (want ? 'ON' : 'OFF') + ' while init is still running, got ' + (st.checked ? 'ON' : 'OFF'));
+        });
+        const st = await readToggle(fresh.page);
+        assert(st.checked === want, 'toggle must still show ' + (want ? 'ON' : 'OFF') + ' after init');
+        assert(st.writes === 0, 'loading the page must not write the setting (writes=' + st.writes + ')');
+      } finally {
+        await fresh.ctx.close();
+      }
     });
   }
 
