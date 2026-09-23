@@ -4,7 +4,22 @@
  *   2. With it ON, a single-byte synthetic packet does NOT create a feed item,
  *      while a multibyte one does.
  *   3. Turning it OFF and rebuilding shows the previously-hidden single-byte pkt.
- *   4. The setting persists across a reload (localStorage round-trip).
+ *   4. The saved setting (true, false or unset) is shown from the moment the
+ *      toggle is rendered, survives a real reload and SPA navigation, and a
+ *      click made while Live is still initializing is saved and kept.
+ *
+ * Why step 4 holds init: live.js awaits /api/config/map and loadNodes() after
+ * rendering the controls. The toggle's saved state and change listener used to
+ * be applied only after both awaits, so during init the box showed OFF even
+ * when saved ON, and a click made then was never saved and was reverted. The
+ * test holds /api/config/map with request interception, which freezes init at
+ * its first await, and checks the toggle while it is held. It then releases
+ * init and waits until Live has subscribed to packets (window._liveWSHandler()
+ * returns a handler). connectWS() sets that handler after loadNodes() in the same
+ * synchronous run of init as the old toggle wiring, and destroy() clears it,
+ * so it marks a finished init on every load and SPA mount. The test also
+ * asserts there is no handler while init is held, so the checks after init
+ * cannot run too early. No step sleeps or retries.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-live-multibyte-only-e2e.js
  */
@@ -12,6 +27,7 @@
 const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
+const KEY = 'live-multibyte-only';
 let passed = 0, failed = 0;
 async function step(name, fn) {
   try { await fn(); passed++; console.log('  ✓ ' + name); }
@@ -43,29 +59,124 @@ function makePkt(hash, rawHex) {
   };
 }
 
+// Records page errors, console errors and unhandled rejections, and counts
+// writes of the setting (a doubled change listener would write twice per
+// change). storedValue: 'true' / 'false' seeds the setting before the first
+// load, null removes it.
+async function newLivePage(browser, errors, storedValue) {
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const page = await ctx.newPage();
+  page.setDefaultTimeout(15000);
+  page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push('console.error: ' + m.text()); });
+  await page.addInitScript(([key, value]) => {
+    // Seed once per tab, not on every reload.
+    if (!sessionStorage.getItem('mb-e2e-seeded')) {
+      sessionStorage.setItem('mb-e2e-seeded', '1');
+      if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value);
+    }
+    window.__mbWrites = 0;
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (this === window.localStorage && k === key) window.__mbWrites++;
+      return setItem.call(this, k, v);
+    };
+    window.addEventListener('unhandledrejection', (e) => {
+      console.error('unhandledrejection: ' + (e.reason && e.reason.message || e.reason));
+    });
+  }, [KEY, storedValue]);
+  return { ctx, page };
+}
+
+// Holds the next /api/config/map request, the first await in Live init, so
+// init stays frozen right after rendering the controls.
+async function holdLiveInit(page) {
+  let release, hit;
+  const released = new Promise((r) => { release = r; });
+  const intercepted = new Promise((r) => { hit = r; });
+  await page.route('**/api/config/map', async (route) => {
+    hit();
+    await released;
+    await route.continue().catch((e) => { if (!page.isClosed()) throw e; });
+  }, { times: 1 });
+  return {
+    release,
+    async reached() {
+      let timer;
+      const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(
+        'Live init never requested /api/config/map within 15s; the init hold point this test relies on has moved')), 15000); });
+      try { await Promise.race([intercepted, timeout]); } finally { clearTimeout(timer); }
+    },
+  };
+}
+
+async function readToggle(page) {
+  return page.evaluate((key) => {
+    const cb = document.getElementById('liveMultibyteToggle');
+    return {
+      exists: !!cb,
+      checked: cb ? cb.checked : null,
+      stored: localStorage.getItem(key),
+      liveReady: !!window._liveWSHandler(),
+      writes: window.__mbWrites,
+    };
+  }, KEY);
+}
+
+// Runs load() with Live init held, then inspect(page, state, toggle) while it
+// is still held, then releases init and waits for init to finish. It waits
+// even when a check failed, so the next step never starts on a half-built page.
+async function withInitHeld(page, load, inspect) {
+  const hold = await holdLiveInit(page);
+  let failure = null;
+  try {
+    await load();
+    await hold.reached();
+    const cb = page.locator('#liveMultibyteToggle');
+    await cb.waitFor({ state: 'visible' });
+    const st = await readToggle(page);
+    assert(!st.liveReady, 'Live is already subscribed to packets while init is held; the readiness signal moved and the checks after init would run too early');
+    assert(await cb.isEnabled(), 'toggle should be enabled while init is held (the user can already click it)');
+    await inspect(page, st, cb);
+  } catch (e) {
+    failure = e;
+  } finally {
+    hold.release();
+  }
+  const ready = await page.waitForFunction(() => !!window._liveWSHandler(), null, { timeout: 15000 }).then(() => true, () => false);
+  if (failure) throw failure;
+  if (!ready) throw new Error('Live init did not finish: it never subscribed to packets (window._liveWSHandler() stayed empty) after init was released');
+}
+
+// Clicks the toggle the way a user does after init: init collapses the
+// controls panel by default, so open it first when it is collapsed.
+async function clickToggleAsUser(page) {
+  if (await page.locator('#liveControlsBody').isHidden()) await page.locator('#liveControlsToggle').click();
+  await page.locator('#liveMultibyteToggle').click();
+}
+
+const loadLive = (page) => () => page.goto(BASE + '/#/live', { waitUntil: 'domcontentloaded' });
+const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
+
 (async () => {
   const browser = await chromium.launch({
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   });
-  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
-  const page = await ctx.newPage();
-  page.setDefaultTimeout(15000);
-  page.on('pageerror', (e) => console.error('[pageerror]', e.message));
+  const errors = [];
+  const { ctx, page } = await newLivePage(browser, errors, null);
 
   console.log('\n=== live multibyte-only E2E against ' + BASE + ' ===');
 
   await step('navigate to /#/live, toggle exists and defaults OFF', async () => {
-    await page.addInitScript(() => {
-      try { localStorage.removeItem('live-multibyte-only'); } catch (e) {}
+    await withInitHeld(page, loadLive(page), async (p, st) => {
+      assert(st.stored === null, 'precondition: no saved setting');
+      assert(st.checked === false, 'multibyte toggle must default OFF when nothing is saved');
     });
-    await page.goto(BASE + '/#/live', { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => !!window._liveBufferPacket, { timeout: 15000 });
-    const cb = await page.$('#liveMultibyteToggle');
-    assert(cb, '#liveMultibyteToggle must exist in the live controls');
-    const checked = await page.evaluate(() => document.getElementById('liveMultibyteToggle').checked);
-    assert(checked === false, 'multibyte toggle must default OFF');
+    const st = await readToggle(page);
+    assert(st.checked === false, 'multibyte toggle must still be OFF after init');
+    assert(st.writes === 0, 'init must not write the setting on its own (writes=' + st.writes + ')');
   });
 
   const singleHash = 'mb-single-' + Date.now().toString(16);
@@ -103,26 +214,66 @@ function makePkt(hash, rawHex) {
     assert(singleShown, 'single-byte packet should reappear after toggle OFF + feed rebuild');
   });
 
-  await step('setting persists across reload', async () => {
-    // Ensure the toggle is ON and localStorage is written.
-    await page.evaluate(() => {
-      const cb = document.getElementById('liveMultibyteToggle');
-      cb.checked = true;
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
+  await step('a click made while Live is still initializing is saved and kept', async () => {
+    await withInitHeld(page, reload(page), async (p, st, cb) => {
+      assert(st.checked === false && st.stored === 'false', 'precondition: saved OFF, shown OFF (checked=' + st.checked + ', stored=' + st.stored + ')');
+      await cb.click();
+      const after = await readToggle(p);
+      assert(after.checked === true, 'the click should turn the toggle ON');
+      assert(after.stored === 'true', 'a click during init must save the setting at once (stored=' + after.stored + ')');
+      assert(after.writes === 1, 'one click must write the setting exactly once (writes=' + after.writes + ')');
     });
-    // Open a fresh context (no addInitScript) to simulate a cold reload.
-    const persistCtx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
-    const persistPage = await persistCtx.newPage();
-    persistPage.setDefaultTimeout(15000);
-    // Seed localStorage before navigation so the page boots with it set.
-    await persistPage.addInitScript(() => {
-      localStorage.setItem('live-multibyte-only', 'true');
+    const st = await readToggle(page);
+    assert(st.checked === true, 'init must not revert the user\'s click (toggle is OFF after init)');
+    assert(st.stored === 'true', 'setting must stay saved ON after init (stored=' + st.stored + ')');
+  });
+
+  await step('saved ON is shown from the start of a real reload', async () => {
+    await withInitHeld(page, reload(page), async (p, st) => {
+      assert(st.stored === 'true', 'precondition: saved ON by the previous step');
+      assert(st.checked === true, 'toggle must show the saved ON state while init is still running (it showed OFF)');
     });
-    await persistPage.goto(BASE + '/#/live', { waitUntil: 'domcontentloaded' });
-    await persistPage.waitForFunction(() => !!document.getElementById('liveMultibyteToggle'), { timeout: 15000 });
-    const checked = await persistPage.evaluate(() => document.getElementById('liveMultibyteToggle').checked);
-    await persistCtx.close();
-    assert(checked === true, 'multibyte toggle should restore checked=true from localStorage');
+    assert((await readToggle(page)).checked === true, 'toggle must stay ON after init');
+  });
+
+  await step('SPA navigation away and back keeps the setting and one listener', async () => {
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => { location.hash = '#/packets'; });
+      await page.waitForSelector('#pktTable', { state: 'attached' });
+      assert(!(await readToggle(page)).exists, 'live controls should be gone on the packets page');
+      await withInitHeld(page, () => page.evaluate(() => { location.hash = '#/live'; }), async (p, st) => {
+        assert(st.checked === true, 'toggle must show the saved ON state after navigating back (round trip ' + (i + 1) + ')');
+      });
+    }
+    const before = (await readToggle(page)).writes;
+    await clickToggleAsUser(page);
+    const st = await readToggle(page);
+    assert(st.checked === false && st.stored === 'false', 'click after navigation should turn the setting OFF (checked=' + st.checked + ', stored=' + st.stored + ')');
+    assert(st.writes - before === 1, 'one click after 3 round trips must write once, not ' + (st.writes - before) + ' times (listeners piled up)');
+    await withInitHeld(page, reload(page), async (p, s) => {
+      assert(s.checked === false, 'toggle must show the saved OFF state after reload');
+    });
+  });
+
+  await ctx.close();
+
+  for (const saved of ['true', 'false', null]) {
+    await step('fresh load with the setting ' + (saved === null ? 'unset' : 'saved as ' + saved) + ' shows it before init finishes', async () => {
+      const fresh = await newLivePage(browser, errors, saved);
+      const want = saved === 'true';
+      await withInitHeld(fresh.page, loadLive(fresh.page), async (p, st) => {
+        assert(st.stored === saved, 'precondition: stored=' + saved + ', got ' + st.stored);
+        assert(st.checked === want, 'toggle must show ' + (want ? 'ON' : 'OFF') + ' while init is still running, got ' + (st.checked ? 'ON' : 'OFF'));
+      });
+      const st = await readToggle(fresh.page);
+      assert(st.checked === want, 'toggle must still show ' + (want ? 'ON' : 'OFF') + ' after init');
+      assert(st.writes === 0, 'loading the page must not write the setting (writes=' + st.writes + ')');
+      await fresh.ctx.close();
+    });
+  }
+
+  await step('no page errors, console errors or unhandled rejections', async () => {
+    assert(errors.length === 0, errors.length + ' error(s):\n    ' + errors.join('\n    '));
   });
 
   await browser.close();
