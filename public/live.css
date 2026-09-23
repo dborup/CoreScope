@@ -906,11 +906,13 @@ body.live-fullscreen #liveFullscreenToggle:hover,
 .feed-hide-btn:hover { opacity: 1; color: #fff; background: rgba(239,68,68,0.6); }
 
 .feed-show-btn {
-  /* #1107: pin fixed bottom-right (stacked above legend toggle) so the
+  /* #1107: pin bottom-right (stacked above legend toggle) so the
    * activate/hide button group docks together as a tidy cluster.
-   * bottom uses max() to clear the VCR bar when present (#1206). */
+   * bottom uses max() to clear the VCR bar when present (#1206).
+   * #1833 round 2: use the same .live-page containing block as .vcr-bar.
+   * A viewport-fixed anchor drifts by --bottom-nav-reserve at 641..768px. */
   --legend-toggle-stack: calc(var(--legend-toggle-h, 46px) + 10px); /* gap above legend-toggle */
-  position: fixed;
+  position: absolute;
   bottom: max(1rem, calc(var(--vcr-bar-height, 0px) + 10px + var(--legend-toggle-stack)));
   right: 1rem; z-index: 500;
   /* Stack above .legend-toggle-btn using margin-bottom so the `right: 1rem`
@@ -1316,11 +1318,13 @@ input.live-node-filter-input:focus {
 }
 
 /* Legend toggle button — visible at all sizes (#60, #279).
- * #1107: pinned fixed bottom-right so the activate/hide button group
+ * #1107: pinned bottom-right so the activate/hide button group
  * docks consistently (with .feed-show-btn) instead of floating loose
- * inside the map container. */
+ * inside the map container.
+ * #1833 round 2: anchor to .live-page, like .vcr-bar, so the mobile bottom
+ * navigation reserve cannot move this button underneath the VCR bar. */
 .legend-toggle-btn {
-  position: fixed;
+  position: absolute;
   bottom: calc(var(--vcr-bar-height, 58px) + 10px);
   right: 1rem;
   z-index: 500;
