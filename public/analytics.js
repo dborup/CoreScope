@@ -3065,6 +3065,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsChannelTbodyHtml = channelTbodyHtml;
     window._analyticsChannelTheadHtml = channelTheadHtml;
     window._analyticsRfNFColumnChart = rfNFColumnChart;
+    window._analyticsRenderRelayAirtimeDumbbell = renderRelayAirtimeDumbbell;
     window._analyticsRenderMultiByteCapability = renderMultiByteCapability;
     window._analyticsRenderMultiByteAdopters = renderMultiByteAdopters;
     window._analyticsHashStatCardsHtml = hashStatCardsHtml;

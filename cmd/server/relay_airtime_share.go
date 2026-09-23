@@ -254,6 +254,8 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 //
 //	{
 //	  "rows":        [{payload_type, type, count, count_pct, score, airtime_pct}, ...] sorted by airtime_pct desc,
+//	                 where type is the numeric payload type and payload_type the row label;
+//	                 up to three ADVERT rows share type 4 and differ only by label,
 //	  "total_count": int,
 //	  "total_score": int64 (nanoseconds of LoRa Time-on-Air × repeater-count, summed across packets),
 //	  "window":      window label,
