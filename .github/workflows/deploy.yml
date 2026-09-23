@@ -510,6 +510,17 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-node-reach-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-reach-rank-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1640-compare-discovery-e2e.js 2>&1 | tee -a e2e-output.txt
+          # These eight existing root E2Es previously had no CI runner.
+          # test-rx-coverage-mobile-nav-e2e.js remains excluded because it
+          # skips when clientRxCoverage is disabled, the default configuration.
+          BASE_URL=http://localhost:13581 node test-1110-live-filter.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-analytics-fluid-charts.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-e2e-1267-mobile-vcr.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-1274-legend-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m5-icons-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-live-dedup.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-nodes-export-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-show-neighbors.js 2>&1 | tee -a e2e-output.txt
 
       # #1616: slide-over focus-restore flake-gate. Runs the slide-over
       # E2E 20 consecutive times against the SAME backend instance so
