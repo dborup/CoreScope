@@ -259,18 +259,20 @@ const (
 // relayAirtimeRouteClass returns the route_class value for a row: one of the
 // constants above for ADVERT rows and nil (JSON null) for every other payload
 // type, so (type, route_class) identifies each row.
-func relayAirtimeRouteClass(key relayAirtimeBucketKey) interface{} {
+func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 	if key.payloadType != PayloadADVERT {
 		return nil
 	}
+	var class string
 	switch key.advertRoute {
 	case relayAirtimeAdvertFlood:
-		return relayAirtimeRouteClassFlood
+		class = relayAirtimeRouteClassFlood
 	case relayAirtimeAdvertZeroHop:
-		return relayAirtimeRouteClassZeroHop
+		class = relayAirtimeRouteClassZeroHop
 	default:
-		return relayAirtimeRouteClassLegacy
+		class = relayAirtimeRouteClassLegacy
 	}
+	return &class
 }
 
 // computeRelayAirtimeShare aggregates relay-airtime-share per payload_type,
