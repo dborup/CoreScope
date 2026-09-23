@@ -125,7 +125,8 @@ func TestComputeAnalyticsDistanceReleasesLockBeforeCompute(t *testing.T) {
 	store.distPaths = nil
 	unblock()
 	var r map[string]interface{}
-	distanceWaitFor(t, "computeAnalyticsDistance to return or block on s.mu", func() bool {
+	distanceWaitFor(t, "computeAnalyticsDistance to return or block in s.mu.RLock() "+
+		"(a timeout here means it is stuck on s.mu some other way, e.g. Lock())", func() bool {
 		select {
 		case r = <-done:
 			return true
@@ -150,10 +151,12 @@ func TestComputeAnalyticsDistanceReleasesLockBeforeCompute(t *testing.T) {
 	}
 }
 
-// distanceComputeWaiting reports whether a goroutine inside
+// distanceComputeWaiting reports whether a goroutine started by
+// TestComputeAnalyticsDistanceReleasesLockBeforeCompute and inside
 // computeAnalyticsDistance has every marker in its runtime.Stack dump. The
 // markers are frames (sync.(*Once).doSlow under tx.ParsedDecoded) or the
-// wait reason in the goroutine header ([sync.RWMutex.RLock]).
+// wait reason in the goroutine header ([sync.RWMutex.RLock]). Requiring the
+// creator keeps a compute leaked by another test from matching.
 //
 // Maintenance: the match depends on the runtime.Stack text format, those
 // runtime frame names and wait reasons, and the method names used here.
@@ -169,7 +172,8 @@ func distanceComputeWaiting(markers ...string) bool {
 		buf = make([]byte, 2*len(buf))
 	}
 	for _, g := range strings.Split(string(buf), "\n\n") {
-		if !strings.Contains(g, ".(*PacketStore).computeAnalyticsDistance(") {
+		if !strings.Contains(g, ".(*PacketStore).computeAnalyticsDistance(") ||
+			!strings.Contains(g, ".TestComputeAnalyticsDistanceReleasesLockBeforeCompute in goroutine ") {
 			continue
 		}
 		all := true
