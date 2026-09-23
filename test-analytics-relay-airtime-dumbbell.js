@@ -75,10 +75,10 @@ function makeCtx() {
 // Shape returned by the API for a window containing all three ADVERT buckets.
 const splitResponse = {
   rows: [
-    { payload_type: 'ADVERT (flood)', type: 4, count: 30, count_pct: 30, score: 6e9, airtime_pct: 60 },
-    { payload_type: 'ACK', type: 3, count: 50, count_pct: 50, score: 2e9, airtime_pct: 20 },
-    { payload_type: 'ADVERT (zero-hop)', type: 4, count: 15, count_pct: 15, score: 1.5e9, airtime_pct: 15 },
-    { payload_type: 'ADVERT', type: 4, count: 5, count_pct: 5, score: 5e8, airtime_pct: 5 },
+    { payload_type: 'ADVERT (flood)', type: 4, route_class: 'flood', count: 30, count_pct: 30, score: 6e9, airtime_pct: 60 },
+    { payload_type: 'ACK', type: 3, route_class: null, count: 50, count_pct: 50, score: 2e9, airtime_pct: 20 },
+    { payload_type: 'ADVERT (zero-hop)', type: 4, route_class: 'zero_hop', count: 15, count_pct: 15, score: 1.5e9, airtime_pct: 15 },
+    { payload_type: 'ADVERT', type: 4, route_class: 'legacy', count: 5, count_pct: 5, score: 5e8, airtime_pct: 5 },
   ],
   total_count: 100,
   total_score: 1e10,
@@ -92,6 +92,8 @@ function rowsOf(html) {
 const labelOf = (row) => (row.match(/class="dumbbell-label"[^>]*>([^<]*)</) || [])[1];
 const titleOf = (row) => (row.match(/^ title="([^"]*)"/) || [])[1] || '';
 const airtimeColourOf = (row) => (row.match(/dumbbell-dot-airtime" style="[^"]*background:([^;"]+)/) || [])[1];
+const attrOf = (row, name) => { const m = row.match(new RegExp('^[^>]*\\s' + name + '="([^"]*)"')); return m ? m[1] : null; };
+const identityOf = (row) => attrOf(row, 'data-payload-type') + '/' + attrOf(row, 'data-route-class');
 const airtimeLeftOf = (row) => (row.match(/dumbbell-dot-airtime" style="[^"]*left:([0-9.]+)%/) || [])[1];
 
 console.log('\n=== analytics.js: renderRelayAirtimeDumbbell ===');
@@ -124,6 +126,29 @@ if (typeof render === 'function') {
     const colours = rows.filter(r => /ADVERT/.test(labelOf(r))).map(airtimeColourOf);
     assert.strictEqual(colours.length, 3);
     assert.strictEqual(new Set(colours).size, 3, `colours: ${colours.join(', ')}`);
+  });
+
+  test('each row exposes its stable (type, route_class) identity', () => {
+    const rows = rowsOf(render(splitResponse));
+    assert.deepStrictEqual(rows.map(identityOf), ['4/flood', '3/null', '4/zero_hop', '4/legacy']);
+    assert.strictEqual(new Set(rows.map(identityOf)).size, rows.length, 'row identities must be unique');
+  });
+
+  test('identity comes from route_class, not from the display label', () => {
+    const relabelled = Object.assign({}, splitResponse, {
+      rows: splitResponse.rows.map(r => Object.assign({}, r, { payload_type: 'Advert #' + r.count })),
+    });
+    const rows = rowsOf(render(relabelled));
+    assert.deepStrictEqual(rows.map(identityOf), ['4/flood', '3/null', '4/zero_hop', '4/legacy']);
+  });
+
+  test('responses without route_class (older servers) still render every row', () => {
+    const legacy = Object.assign({}, splitResponse, {
+      rows: splitResponse.rows.map(r => { const c = Object.assign({}, r); delete c.route_class; return c; }),
+    });
+    const rows = rowsOf(render(legacy));
+    assert.deepStrictEqual(rows.map(labelOf), ['ADVERT (flood)', 'ACK', 'ADVERT (zero-hop)', 'ADVERT']);
+    assert.deepStrictEqual(rows.map(r => attrOf(r, 'data-route-class')), [null, null, null, null]);
   });
 
   test('rendered chart introduces no element ids', () => {
