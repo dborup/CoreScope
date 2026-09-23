@@ -17,8 +17,9 @@ import (
 // readers, which turned a 3s analytics call into 15s under heavy ingest.
 //
 // The test checks the lock state directly instead of timing writers. It
-// parks the compute at a known point after the snapshot and asks the mutex
-// whether a writer can get in:
+// parks the compute at a known point after the snapshot, asks the mutex
+// whether a writer can get in, and then lets the compute finish while the
+// writer still holds the lock:
 //
 //  1. The test enters tx.decodedOnce.Do first and blocks inside it, so the
 //     compute's tx.ParsedDecoded() call has to wait. With a region and an
@@ -29,18 +30,24 @@ import (
 //  3. s.mu.TryLock() must then succeed. No other goroutine touches this
 //     store's mu (NewPacketStore starts none), so a failure can only mean
 //     the compute still holds the read lock.
-//  4. Holding the write lock, the test replaces distHops/distPaths the way
-//     ingest does. After release, the result must come from the snapshot
-//     alone; under -race this also covers the post-snapshot reads.
+//  4. Still holding the write lock, the test points distHops/distPaths at
+//     fresh slices and releases the park. Any s.mu.RLock() the compute takes
+//     from here on blocks behind the test, so the compute either returns
+//     (pass) or shows up parked in RLock (fail). The result must come from
+//     the snapshot alone; under -race this also covers the post-snapshot
+//     reads.
 //
-// A regression that holds the lock past the snapshot fails at step 3 on any
-// machine, core count or race mode, because nothing here is measured. The
-// deadlines only turn a broken setup into a failure instead of a hang.
+// A regression that still holds the read lock at the park point fails at
+// step 3; one that takes it again later in the compute fails at step 4. Both
+// fail on any machine, core count or race mode, because nothing is measured.
+// The deadlines only turn a broken setup into a failure instead of a hang.
 //
-// Scope: the default (region="", area="") path has no call the test can
-// block, so it is covered through the lock/unlock pair that all paths share,
-// not by its own parking point. A later s.mu.RLock() added around one path's
-// compute would not be caught here.
+// Scope: only the region+area path is driven. The default (region="",
+// area="") path has no call the test can block. It shares the lock
+// acquisition with this path, so a change to that shared code is caught,
+// but a lock taken on the default or area-only path alone is not. Step 4
+// assigns fresh slices; it does not model ingest and eviction compacting
+// distHops/distPaths in place.
 //
 // This replaces a writer-latency threshold (150µs, then 5ms) that overlapped
 // both healthy CI runs and a deliberate regression on fast machines. The
@@ -101,7 +108,9 @@ func TestComputeAnalyticsDistanceReleasesLockBeforeCompute(t *testing.T) {
 	go func() { done <- store.computeAnalyticsDistance(region, area) }()
 
 	// Step 2: the compute is past the snapshot and parked in the area filter.
-	distanceWaitFor(t, "computeAnalyticsDistance to park in tx.ParsedDecoded", distanceComputeParked)
+	distanceWaitFor(t, "computeAnalyticsDistance to park in tx.ParsedDecoded", func() bool {
+		return distanceComputeWaiting(".(*StoreTx).ParsedDecoded(", "sync.(*Once).doSlow(")
+	})
 
 	// Step 3: the invariant.
 	if !store.mu.TryLock() {
@@ -110,17 +119,25 @@ func TestComputeAnalyticsDistanceReleasesLockBeforeCompute(t *testing.T) {
 		t.Fatal("s.mu.TryLock() failed while computeAnalyticsDistance was parked after its snapshot: " +
 			"the main RLock is still held across the compute, so ingest writers queue behind analytics readers (issue #1239)")
 	}
-	// Step 4: an ingest-style swap while the compute is mid-flight.
+	// Step 4: new data while the compute is mid-flight, then let it finish
+	// with the write lock still held.
 	store.distHops = []distHopRecord{hop("xx", 500, inArea)}
 	store.distPaths = nil
-	store.mu.Unlock()
-
 	unblock()
 	var r map[string]interface{}
-	select {
-	case r = <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("computeAnalyticsDistance did not finish after the seam was released")
+	distanceWaitFor(t, "computeAnalyticsDistance to return or block on s.mu", func() bool {
+		select {
+		case r = <-done:
+			return true
+		default:
+			return distanceComputeWaiting("[sync.RWMutex.RLock")
+		}
+	})
+	store.mu.Unlock()
+	if r == nil {
+		<-done
+		t.Fatal("computeAnalyticsDistance blocked in s.mu.RLock() after its snapshot: " +
+			"it takes the main lock again for the compute, so ingest writers queue behind analytics readers (issue #1239)")
 	}
 
 	topHops, _ := r["topHops"].([]map[string]interface{})
@@ -133,13 +150,15 @@ func TestComputeAnalyticsDistanceReleasesLockBeforeCompute(t *testing.T) {
 	}
 }
 
-// distanceComputeParked reports whether a goroutine is inside
-// computeAnalyticsDistance and blocked on a tx.ParsedDecoded sync.Once.
+// distanceComputeWaiting reports whether a goroutine inside
+// computeAnalyticsDistance has every marker in its runtime.Stack dump. The
+// markers are frames (sync.(*Once).doSlow under tx.ParsedDecoded) or the
+// wait reason in the goroutine header ([sync.RWMutex.RLock]).
 //
-// Maintenance: the match depends on the runtime.Stack text format, the
-// sync.(*Once).doSlow frame and the two method names below. Re-verify it when
-// changing the Go version or renaming those methods.
-func distanceComputeParked() bool {
+// Maintenance: the match depends on the runtime.Stack text format, those
+// runtime frame names and wait reasons, and the method names used here.
+// Re-verify it when changing the Go version or renaming those methods.
+func distanceComputeWaiting(markers ...string) bool {
 	buf := make([]byte, 1<<16)
 	for {
 		n := runtime.Stack(buf, true)
@@ -150,9 +169,14 @@ func distanceComputeParked() bool {
 		buf = make([]byte, 2*len(buf))
 	}
 	for _, g := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(g, ".(*PacketStore).computeAnalyticsDistance(") &&
-			strings.Contains(g, ".(*StoreTx).ParsedDecoded(") &&
-			strings.Contains(g, "sync.(*Once).doSlow(") {
+		if !strings.Contains(g, ".(*PacketStore).computeAnalyticsDistance(") {
+			continue
+		}
+		all := true
+		for _, m := range markers {
+			all = all && strings.Contains(g, m)
+		}
+		if all {
 			return true
 		}
 	}
@@ -174,7 +198,7 @@ func distanceWaitFor(t *testing.T, what string, cond func() bool) {
 
 // BenchmarkComputeAnalyticsDistanceWriterCycle times one bare
 // s.mu.Lock/Unlock (ns/op) while 8 goroutines run computeAnalyticsDistance
-// on 20k hops. It is the measurement the lock test above used to gate on. The
+// on 20k hops, the setup the lock test above used to time and gate on. The
 // number depends on core count, scheduler and -race, so it is only for
 // comparing builds on one machine and is never asserted.
 func BenchmarkComputeAnalyticsDistanceWriterCycle(b *testing.B) {
@@ -200,16 +224,20 @@ func BenchmarkComputeAnalyticsDistanceWriterCycle(b *testing.B) {
 
 	const Readers = 8
 	var stop atomic.Bool
-	var wg sync.WaitGroup
+	var wg, ready sync.WaitGroup
 	wg.Add(Readers)
+	ready.Add(Readers)
 	for i := 0; i < Readers; i++ {
 		go func() {
 			defer wg.Done()
+			store.computeAnalyticsDistance("", "")
+			ready.Done()
 			for !stop.Load() {
 				store.computeAnalyticsDistance("", "")
 			}
 		}()
 	}
+	ready.Wait() // time only while every reader is in its compute loop
 	defer func() {
 		stop.Store(true)
 		wg.Wait()
