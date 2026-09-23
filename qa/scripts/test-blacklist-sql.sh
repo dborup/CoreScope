@@ -283,5 +283,36 @@ FAKE
     fi
 fi
 
+# ----- teardown exit status ----------------------------------------------------
+# Drives the script's own install_teardown_traps in a child bash with the side
+# effects stubbed. The run must always tear down, and an interrupted run must
+# never exit 0: before the fix, SIGTERM tore down and then exited as a pass.
+TD_DIR=$(mktemp -d)
+teardown_case() {  # MODE(term|exit) FAILS NODE_VISIBLE_RC → prints exit status
+    : >"$TD_DIR/calls"
+    bash -c '
+        calls="$2/calls"; visible_rc=$3; fails=$4; mode=$5
+        . "$1"
+        remove_from_blacklist() { echo remove >>"$calls"; }
+        restart_target() { :; }; wait_for_stats() { :; }
+        node_visible() { return "$visible_rc"; }
+        TMP=$(mktemp -d); TEST_PUBKEY=synthetic; TEARDOWN_DONE=0
+        install_teardown_traps
+        case "$mode" in
+            term) kill -TERM $$; sleep 5; exit 0 ;;
+            exit) exit "$fails" ;;
+        esac
+    ' _ "$SCRIPT_DIR/blacklist-test.sh" "$TD_DIR" "$3" "$2" "$1" >/dev/null 2>&1
+    echo $?
+}
+assert_eq "clean run exits 0"              "0"   "$(teardown_case exit 0 0)"
+assert_eq "clean run tore down once"       "1"   "$(grep -c remove "$TD_DIR/calls")"
+assert_eq "two failures exit 2"            "2"   "$(teardown_case exit 2 0)"
+assert_eq "teardown failure adds 1"        "3"   "$(teardown_case exit 2 1)"
+assert_eq "SIGTERM mid-run exits 143"      "143" "$(teardown_case term 0 0)"
+assert_eq "SIGTERM still tore down (once)" "1"   "$(grep -c remove "$TD_DIR/calls")"
+assert_eq "SIGTERM + failed teardown"      "144" "$(teardown_case term 0 1)"
+rm -rf "$TD_DIR"
+
 echo "test-blacklist-sql.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

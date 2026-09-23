@@ -32,7 +32,8 @@
 #                    there is no fallback to interpolated SQL.
 #   teardown-failed→ post-test removal did not restore listing
 #
-# Exit code = number of failures (0 = pass).
+# Exit code = number of failures (0 = pass). An interrupted run still tears
+# down, then exits 130 (SIGINT) or 143 (SIGTERM), plus 1 if teardown failed.
 # PUBLIC repo: zero PII — no real pubkeys, IPs, or hostnames as defaults.
 #
 # Structure: helpers live at top level and the imperative body lives in main(),
@@ -49,6 +50,10 @@ ssh_t() { ssh "${SSH_OPTS[@]}" "$TARGET_SSH_HOST" "$@"; }
 # -----------------------------------------------------------------------------
 teardown() {
   local rc=$?
+  # Signal traps pass the conventional 128+signo. Without it $? is the status
+  # of whatever ran before the signal — usually 0 — and an aborted run would
+  # exit as a pass.
+  if [[ -n "${1:-}" ]]; then rc=$1; fi
   if [[ "$TEARDOWN_DONE" == "1" ]]; then rm -rf "$TMP"; exit "$rc"; fi
   TEARDOWN_DONE=1
   echo "=== teardown: removing $TEST_PUBKEY from nodeBlacklist ==="
@@ -65,6 +70,12 @@ teardown() {
   fi
   rm -rf "$TMP"
   exit "$rc"
+}
+
+install_teardown_traps() {
+  trap teardown EXIT
+  trap 'teardown 130' INT
+  trap 'teardown 143' TERM
 }
 
 # -----------------------------------------------------------------------------
@@ -339,7 +350,7 @@ main() {
   TMP=$(mktemp -d)
   fails=0
   TEARDOWN_DONE=0
-  trap teardown EXIT INT TERM
+  install_teardown_traps
 
   # ---------------------------------------------------------------------------
   # §10.1 — hide
