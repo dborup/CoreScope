@@ -210,9 +210,13 @@ file_has_pattern() {
 # one per line, and compared whole-line with the canonical pubkey — not a text
 # grep over the body. Arrays the server filtered empty come back as null.
 # A shape mismatch makes jq exit non-zero ("not the expected topology JSON").
+# jq runs with -n and reads the body itself: exactly one JSON document, so an
+# empty or blank body (which plain `jq FILE` accepts silently, printing
+# nothing — "clean") or two concatenated documents fail too.
 TOPOLOGY_PUBKEYS_JQ='
   def list(k): .[k] // [] | if type == "array" then . else error("\(k) is not an array") end;
-  if type != "object" then error("not an object") else . end
+  [inputs] | if length == 1 then .[0] else error("expected one JSON document, got \(length)") end
+  | if type != "object" then error("not an object") else . end
   | . as $r
   | if (["uniqueNodes","topRepeaters","topPairs","bestPathList","multiObsNodes","perObserverReach"]
         | all(. as $k | $r | has($k))) and ((.uniqueNodes | type) == "number")
@@ -272,7 +276,10 @@ restart_target() {
 # through the environment. It is therefore in neither the local ssh argv nor
 # any remote argv; only the config path and the constant mode are on the
 # command line. Returns the remote status; for check: 0 = not blacklisted,
-# 10 = already blacklisted (any case), anything else = could not tell.
+# 10 = already blacklisted, anything else = could not tell. check compares the
+# way the server does (cmd/server/config.go buildBlacklistSet): trimmed and
+# lower-cased. A missing or null nodeBlacklist means none; a non-array one, or
+# a config that is not JSON, is "could not tell" — never "not blacklisted".
 #
 # add appends and remove drops only the exact canonical value, so the rest of
 # nodeBlacklist — order, duplicates, other spellings — is left as it was. add
@@ -293,7 +300,7 @@ if [ "$MODE" = check ]; then
   if command -v jq >/dev/null; then
     if jq -e '(.nodeBlacklist // [])
               | if type == "array" then . else error("nodeBlacklist is not an array") end
-              | any(.[]; type == "string" and ascii_downcase == (env.PK | ascii_downcase)) | not' \
+              | any(.[]; type == "string" and (ascii_downcase | gsub("^\\s+|\\s+$"; "")) == (env.PK | ascii_downcase)) | not' \
           "$CFG" >/dev/null; then
       exit 0
     else
@@ -308,7 +315,7 @@ try:
 except Exception:
     sys.exit(4)
 if not isinstance(bl, list): sys.exit(4)
-sys.exit(10 if any(isinstance(x, str) and x.lower() == pk for x in bl) else 0)
+sys.exit(10 if any(isinstance(x, str) and x.strip().lower() == pk for x in bl) else 0)
 PY
   exit 0
 fi
@@ -719,7 +726,7 @@ main() {
   if [[ "$TOPO_CODE" != "200" ]]; then
     say "  ❌ hide-failed: /api/analytics/topology HTTP $TOPO_CODE — topology not checked"
     fails=$((fails+1))
-  elif ! jq -r "$TOPOLOGY_PUBKEYS_JQ" "$TMP/topo.json" >"$TMP/topo.pubkeys" 2>"$TMP/topo.err"; then
+  elif ! jq -r -n "$TOPOLOGY_PUBKEYS_JQ" "$TMP/topo.json" >"$TMP/topo.pubkeys" 2>"$TMP/topo.err"; then
     say "  ❌ hide-failed: /api/analytics/topology is not the expected topology JSON — topology not checked"
     fails=$((fails+1))
   else

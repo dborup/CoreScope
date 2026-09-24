@@ -426,6 +426,11 @@ case $path in
                 html)     code=200; body='<!DOCTYPE html><html><head><title>CoreScope</title></head><body><div id="app"></div></body></html>' ;;
                 badshape) code=200; body='{"nodes":[],"edges":[]}' ;;
                 notjson)  code=200; body='{"uniqueNodes": 2, "topRepeaters": [' ;;
+                empty)    code=200; body='' ;;
+                blank)    code=200; body='   ' ;;
+                twodocs)  code=200; topo_body; body="$body$body" ;;
+                wrongtype) code=200; topo_body; body=${body/\"topRepeaters\":\[/\"topRepeaters\":\{\"x\":\[}; body=${body/\],\"topPairs\"/\]\},\"topPairs\"} ;;
+                badunique) code=200; topo_body; body=${body/\"uniqueNodes\":2/\"uniqueNodes\":\"2\"} ;;
                 500)      code=500; body='{"error":"internal"}' ;;
                 *)        code=200; topo_body ;;
             esac
@@ -544,7 +549,11 @@ FAKE
         if [ -f "$FAKE_STATE/restarts" ]; then awk '$0 == "restart" { n++ } END { print n + 0 }' "$FAKE_STATE/restarts"
         else echo 0; fi
     }
-    config_restored() { [ "$(jq -S . "$FAKE_CONFIG")" = "$(printf '%s' "$ORIG_CONFIG" | jq -S .)" ]; }
+    # A missing or null nodeBlacklist comes back as [] — the same to the server
+    # (documented); everything else, the array's order included, must match.
+    config_restored() {
+        [ "$(jq -S '.nodeBlacklist //= []' "$FAKE_CONFIG")" = "$(printf '%s' "$ORIG_CONFIG" | jq -S '.nodeBlacklist //= []')" ]
+    }
     files_unchanged() { [ "$(snapshot_files)" = "$FILES_BEFORE" ]; }
     argv_has()        { grep -qF -- "$1" "$FAKE_ARGV_LOG"; }
     # The ssh call whose command contains $1: prints its number.
@@ -788,6 +797,42 @@ FAKE
         assert_true "$label: upper pubkey not printed" lacks "$RUN_OUT$RUN_ERR" "$PK_A_UPPER"
         common_after "$label"
     done
+    # The server trims entries before comparing (cmd/server/config.go
+    # buildBlacklistSet), so a padded entry is the same rule.
+    for pre in "padded:$SHIM_DIR" "python3-padded:$SHIM_NOJQ_DIR"; do
+        label="pre-blacklisted ${pre%%:*}"
+        ORIG_CONFIG="{\"nodeBlacklist\":[\"  $PK_A_UPPER \"]}"
+        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REMOTE_PATH="${pre#*:}"
+        assert_eq   "$label: refused, exit 2" "2" "$RUN_RC"
+        assert_eq   "$label: no restart" "0" "$(restarts)"
+        assert_eq   "$label: config bytes unchanged" "$CONFIG_SUM" "$(cksum <"$FAKE_CONFIG")"
+    done
+    # A config the check cannot read is a failure before any side effect —
+    # never "not blacklisted". Both remote implementations.
+    for cfgcase in 'nonarray:{"nodeBlacklist":"ff00ff00"}' 'object:{"nodeBlacklist":{"a":1}}' 'notjson:{"nodeBlacklist":[' 'toplevel:[1,2]'; do
+        for rpath in "jq:$SHIM_DIR" "python3:$SHIM_NOJQ_DIR"; do
+            label="unreadable config ${cfgcase%%:*} (${rpath%%:*})"
+            ORIG_CONFIG=${cfgcase#*:}
+            run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REMOTE_PATH="${rpath#*:}"
+            assert_eq   "$label: exit 1" "1" "$RUN_RC"
+            assert_true "$label: classified" contains "$RUN_OUT" "could not read nodeBlacklist"
+            assert_eq   "$label: no restart" "0" "$(restarts)"
+            assert_eq   "$label: config bytes unchanged" "$CONFIG_SUM" "$(cksum <"$FAKE_CONFIG")"
+            assert_true "$label: no add sent" lacks "$(cat "$FAKE_STATE"/ssh.*.cmd)" "MODE=add"
+        done
+    done
+    # No nodeBlacklist key, or null: nothing is blacklisted, the run proceeds,
+    # and the list comes back empty.
+    for cfgcase in 'missing:{"port":3000}' 'null:{"port":3000,"nodeBlacklist":null}'; do
+        for rpath in "jq:$SHIM_DIR" "python3:$SHIM_NOJQ_DIR"; do
+            label="no blacklist ${cfgcase%%:*} (${rpath%%:*})"
+            ORIG_CONFIG=${cfgcase#*:}
+            run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REMOTE_PATH="${rpath#*:}"
+            assert_eq   "$label: passes" "0" "$RUN_RC"
+            assert_eq   "$label: list back to empty" "[]" "$(jq -c '.nodeBlacklist' "$FAKE_CONFIG")"
+            common_after "$label"
+        done
+    done
     ORIG_CONFIG=$DEFAULT_CONFIG
     # The check itself failing (ssh down) is a failure before any side effect.
     run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SSH_FAIL_CMD="MODE=check" FAKE_SSH_FAIL_FROM=1
@@ -799,7 +844,10 @@ FAKE
     # 11g. Topology is /api/analytics/topology, and only a 200 with the expected
     #      JSON shape can pass. Everything else fails — never skipped.
     for bad in "html:not the expected topology JSON" "badshape:not the expected topology JSON" \
-               "notjson:not the expected topology JSON" "500:/api/analytics/topology HTTP 500"; do
+               "notjson:not the expected topology JSON" "500:/api/analytics/topology HTTP 500" \
+               "empty:not the expected topology JSON" "blank:not the expected topology JSON" \
+               "twodocs:not the expected topology JSON" "wrongtype:not the expected topology JSON" \
+               "badunique:not the expected topology JSON"; do
         v=${bad%%:*}; want=${bad#*:}
         run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO="$v"
         assert_eq   "topology $v: fails" "1" "$RUN_RC"
