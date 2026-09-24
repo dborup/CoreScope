@@ -214,3 +214,81 @@ func TestHealthz_RouteMaskBackfillWaitsForTheServer(t *testing.T) {
 		t.Fatalf("healthz after the refresh = %+v, want complete", st)
 	}
 }
+
+// Production start-up loads through LoadChunked and background loadChunk
+// calls; both must queue NULL rows so a running server picks them up.
+func TestRouteMask_ChunkedLoadPathsQueueNullRows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		load func(*PacketStore) error
+	}{
+		{"LoadChunked", func(s *PacketStore) error { return s.LoadChunked(1) }},
+		{"loadChunk", func(s *PacketStore) error {
+			return s.loadChunk(time.Now().Add(-48*time.Hour), time.Now().Add(time.Hour))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := rmIndexedDB(t)
+			s := NewPacketStore(db, nil)
+			if err := tc.load(s); err != nil {
+				t.Fatal(err)
+			}
+			rmExec(t, db, `UPDATE transmissions SET route_mask = 6 WHERE id = 3`)
+			if st := s.routeMaskBackfillStatus(); st.Status == "complete" {
+				t.Fatalf("complete before the server read the mask: %+v", st)
+			}
+			s.RefreshBackfilledRouteMasks()
+			if v := rmSnapshot(s)["legacy"]; v != (rmView{0b0110, true}) {
+				t.Fatalf("legacy = %v, want 0110 known", v)
+			}
+			if st := s.routeMaskBackfillStatus(); st.Status != "complete" {
+				t.Fatalf("status = %+v, want complete", st)
+			}
+		})
+	}
+}
+
+// A poller tick that runs after the background loader scanned a chunk but
+// before it merged the chunk into the store must not drop the NULL row: the
+// status would then say complete while the row stays unknown.
+func TestRouteMask_RefreshDuringBackgroundChunkKeepsTheRow(t *testing.T) {
+	db := rmIndexedDB(t)
+	s := NewPacketStore(db, nil)
+	s.loadChunkScannedHook = func() {
+		rmExec(t, db, `UPDATE transmissions SET route_mask = 6 WHERE id = 3`)
+		s.RefreshBackfilledRouteMasks()
+	}
+	if err := s.loadChunk(time.Now().Add(-48*time.Hour), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	s.loadChunkScannedHook = nil
+	if v := rmSnapshot(s)["legacy"]; !v.Known {
+		if st := s.routeMaskBackfillStatus(); st.Status == "complete" {
+			t.Fatalf("status complete while legacy is unknown in memory: %+v", st)
+		}
+	}
+	s.RefreshBackfilledRouteMasks()
+	if v := rmSnapshot(s)["legacy"]; v != (rmView{0b0110, true}) {
+		t.Fatalf("legacy after the next tick = %v, want 0110 known", v)
+	}
+	if st := s.routeMaskBackfillStatus(); st.Status != "complete" {
+		t.Fatalf("status = %+v, want complete", st)
+	}
+}
+
+// Without the route_mask column (only possible in tests; AssertReady
+// requires it) nothing is queued and a refresh is a no-op.
+func TestRouteMask_NoColumnQueuesNothing(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+	s := NewPacketStore(db, nil)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.routeMaskPendingLen(); n != 0 {
+		t.Fatalf("queued %d transmissions on a database without route_mask", n)
+	}
+	if n := s.RefreshBackfilledRouteMasks(); n != 0 {
+		t.Fatalf("refresh merged %d", n)
+	}
+}

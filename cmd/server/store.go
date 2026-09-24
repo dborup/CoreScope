@@ -230,11 +230,15 @@ type PacketStore struct {
 	pendingInv      *cacheInvalidation // accumulated dirty flags during cooldown
 	invCooldown     time.Duration      // minimum time between invalidations
 	// #89: ids of transmissions loaded while their route_mask was still NULL
-	// (not backfilled yet). The poller re-reads them as the ingestor's
-	// backfill fills them; see RefreshBackfilledRouteMasks.
-	routeMaskPendingMu     sync.Mutex
-	routeMaskPending       []int
-	routeMaskPendingSorted bool
+	// (not backfilled yet). Load and ingest paths append to the unsorted
+	// inbox; RefreshBackfilledRouteMasks (serialised by its own mutex) moves
+	// the inbox into the sorted queue and re-reads it as the backfill fills
+	// the rows. The count covers both.
+	routeMaskInboxMu     sync.Mutex // guards routeMaskInbox
+	routeMaskInbox       []int
+	routeMaskRefreshMu   sync.Mutex // serialises refreshes; guards routeMaskQueue
+	routeMaskQueue       []int      // sorted ascending
+	routeMaskQueuedCount atomic.Int64
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string
@@ -519,6 +523,10 @@ type PacketStore struct {
 	// ordering tests to capture the bg-loader entry timestamp/signal
 	// without polling. See runstartup_load_test.go.
 	bgLoaderEntryHook func()
+	// loadChunkScannedHook, if non-nil, runs in loadChunk after the chunk is
+	// scanned into local maps and before it is merged into the store.
+	// Test-only (#89 route_mask refresh race).
+	loadChunkScannedHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -1261,7 +1269,9 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				observerSet: make(map[string]bool),
 			}
 			localByHash[hashStr] = tx
-			s.mergeRouteMaskOrQueue(tx, routeMask)
+			// Queued only once it is in s.byTxID (merge section below);
+			// a refresh in between would otherwise drop the id.
+			tx.mergeRouteMask(routeMask)
 			localPackets = append(localPackets, tx)
 			localByTxID[txID] = tx
 			if txID > localMaxTxID {
@@ -1374,6 +1384,9 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// intermediate state where indexes contain a superset of s.packets
 	// (which is harmless: nothing in s.packets dangles), or the fully
 	// merged new state.
+	if s.loadChunkScannedHook != nil {
+		s.loadChunkScannedHook()
+	}
 	const mergeBatchSize = 500
 
 	for batchStart := 0; batchStart < len(localPackets); batchStart += mergeBatchSize {
@@ -1419,6 +1432,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		for k, v := range batchTxIDs {
 			if s.byTxID[k] == nil {
 				s.byTxID[k] = v
+				s.queueUnknownRouteMask(v)
 			}
 		}
 		for k, v := range batchObsIDs {

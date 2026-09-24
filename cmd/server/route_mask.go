@@ -28,23 +28,31 @@ func (tx *StoreTx) mergeRouteMask(v sql.NullInt64) {
 }
 
 // mergeRouteMaskOrQueue merges the mask of a transmission the store has just
-// created and, while that mask is still NULL, queues the transmission so
-// RefreshBackfilledRouteMasks reads it once the ingestor has backfilled it.
+// created and published in s.byTxID and, while that mask is still NULL,
+// queues it so RefreshBackfilledRouteMasks reads it once the ingestor has
+// backfilled it. Caller holds s.mu for writing.
 func (s *PacketStore) mergeRouteMaskOrQueue(tx *StoreTx, v sql.NullInt64) {
 	tx.mergeRouteMask(v)
-	if tx.routeMaskKnown {
-		return
-	}
-	s.routeMaskPendingMu.Lock()
-	s.routeMaskPending = append(s.routeMaskPending, tx.ID)
-	s.routeMaskPendingSorted = false
-	s.routeMaskPendingMu.Unlock()
+	s.queueUnknownRouteMask(tx)
 }
 
+// queueUnknownRouteMask queues tx if its mask is still unknown. The tx must
+// already be in s.byTxID: a refresh drops queued ids it cannot find there.
+func (s *PacketStore) queueUnknownRouteMask(tx *StoreTx) {
+	if tx.routeMaskKnown || s.db == nil || !s.db.hasRouteMask() {
+		return
+	}
+	s.routeMaskInboxMu.Lock()
+	s.routeMaskInbox = append(s.routeMaskInbox, tx.ID)
+	s.routeMaskInboxMu.Unlock()
+	s.routeMaskQueuedCount.Add(1)
+}
+
+// routeMaskPendingLen is an upper bound on the queued transmissions whose
+// backfilled mask this server has not read yet (it still counts evicted or
+// deleted ids until a refresh reaches them).
 func (s *PacketStore) routeMaskPendingLen() int {
-	s.routeMaskPendingMu.Lock()
-	defer s.routeMaskPendingMu.Unlock()
-	return len(s.routeMaskPending)
+	return int(s.routeMaskQueuedCount.Load())
 }
 
 // routeMaskRefreshLimit and routeMaskRefreshChunk bound one refresh: at most
@@ -63,23 +71,28 @@ const (
 // The backfill fills NULL rows in ascending id order, so the queue is kept
 // sorted and resolved up to the first id that is still NULL; that id and all
 // later ones wait for a later tick. Ids whose row is gone (retention) or
-// whose transmission was evicted are dropped. Read-only; called from the
-// poller goroutine only.
+// whose transmission was evicted are dropped. Read-only; the poller calls it
+// on every tick.
 func (s *PacketStore) RefreshBackfilledRouteMasks() int {
-	if s.db == nil || s.db.conn == nil {
+	if s.db == nil || s.db.conn == nil || !s.db.hasRouteMask() {
 		return 0
 	}
-	s.routeMaskPendingMu.Lock()
-	if !s.routeMaskPendingSorted {
-		sort.Ints(s.routeMaskPending)
-		s.routeMaskPendingSorted = true
+	s.routeMaskRefreshMu.Lock()
+	defer s.routeMaskRefreshMu.Unlock()
+
+	s.routeMaskInboxMu.Lock()
+	inbox := s.routeMaskInbox
+	s.routeMaskInbox = nil
+	s.routeMaskInboxMu.Unlock()
+	if len(inbox) > 0 {
+		// Sorted here, outside s.mu and the inbox lock that load paths take.
+		s.routeMaskQueue = append(s.routeMaskQueue, inbox...)
+		sort.Ints(s.routeMaskQueue)
 	}
-	n := len(s.routeMaskPending)
-	if n > routeMaskRefreshLimit {
-		n = routeMaskRefreshLimit
+	ids := s.routeMaskQueue
+	if len(ids) > routeMaskRefreshLimit {
+		ids = ids[:routeMaskRefreshLimit]
 	}
-	ids := append([]int(nil), s.routeMaskPending[:n]...)
-	s.routeMaskPendingMu.Unlock()
 	if len(ids) == 0 {
 		return 0
 	}
@@ -122,14 +135,11 @@ func (s *PacketStore) RefreshBackfilledRouteMasks() int {
 	}
 	s.mu.Unlock()
 
-	// Only this goroutine removes from the queue and appends never reorder
-	// it, so the first resolved entries are still the ones read above.
-	s.routeMaskPendingMu.Lock()
-	s.routeMaskPending = s.routeMaskPending[resolved:]
-	if len(s.routeMaskPending) == 0 {
-		s.routeMaskPending = nil
+	s.routeMaskQueue = s.routeMaskQueue[resolved:]
+	if len(s.routeMaskQueue) == 0 {
+		s.routeMaskQueue = nil
 	}
-	s.routeMaskPendingMu.Unlock()
+	s.routeMaskQueuedCount.Add(-int64(resolved))
 
 	if changed > 0 {
 		// Relay Airtime Share lives in rfCache.
