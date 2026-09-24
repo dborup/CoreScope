@@ -118,6 +118,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureTransmissionsLastSeenColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.last_seen: %w", err)
 	}
+	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
+		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
+	}
 	return nil
 }
 
@@ -160,6 +163,7 @@ func AssertReady(ro *sql.DB) error {
 	// (cmd/ingestor/db.go OpenStore: ALTER + index + async backfill);
 	// server reads it to filter the hot-window query.
 	mustCol("transmissions", "last_seen")
+	mustCol("transmissions", "route_mask")
 	// #1321: server's detectSchema PRAGMA-detects these and caches a
 	// boolean. To kill the startup race they're owned + asserted here.
 	mustCol("transmissions", "scope_name")
@@ -572,6 +576,47 @@ func ensureObservationsRawHexColumn(rw *sql.DB, logf Logger) error {
 	}
 	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES ('observations_raw_hex_v1')`); err != nil {
 		return fmt.Errorf("record observations_raw_hex_v1: %w", err)
+	}
+	return nil
+}
+
+// Issue #89: transmissions.route_mask records every raw route type observed
+// for a content hash. Bit r (0..3) is set when a frame with route type r was
+// seen; bits are only ever OR-ed in, never cleared, so the result does not
+// depend on ingest order. NULL means "not backfilled yet": the column is
+// added without a default, so existing rows stay NULL until the ingestor's
+// async backfill fills them from route_type and observations.raw_hex (a
+// lower bound; it never invents bits).
+//
+// RouteMaskPendingIndex tracks the rows the backfill still has to process. It
+// is deliberately NOT created here: building it on a staging-sized DB takes
+// 18-19.5 s cold, and Apply runs before the MQTT subscription exists. The
+// ingestor builds it inside the async backfill, where IngestBuffer covers the
+// write stall. The server reports the backfill as pending until it exists.
+const (
+	RouteMaskColumnMigration       = "transmissions_route_mask_v1"
+	RouteMaskBackfillMigration     = "tx_route_mask_backfill_v1"
+	RouteMaskPendingIndex          = "idx_tx_route_mask_null"
+	CreateRouteMaskPendingIndexSQL = `CREATE INDEX IF NOT EXISTS idx_tx_route_mask_null ON transmissions(id) WHERE route_mask IS NULL`
+)
+
+func ensureTransmissionsRouteMaskColumn(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	has, err := TableHasColumn(rw, "transmissions", "route_mask")
+	if err != nil {
+		return err
+	}
+	if !has {
+		// PREFLIGHT: async=false reason="nullable ADD COLUMN without a default is a metadata-only schema change in SQLite (no row scan); measured 8-15 ms on a 4.95 GB staging copy"
+		if _, err := rw.Exec(`ALTER TABLE transmissions ADD COLUMN route_mask INTEGER`); err != nil {
+			return fmt.Errorf("alter transmissions add route_mask: %w", err)
+		}
+		logf("[dbschema] added route_mask column to transmissions (#89)")
+	}
+	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskColumnMigration); err != nil {
+		return fmt.Errorf("record %s: %w", RouteMaskColumnMigration, err)
 	}
 	return nil
 }
