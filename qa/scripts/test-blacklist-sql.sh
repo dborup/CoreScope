@@ -541,6 +541,9 @@ FAKE
         RUN_OUT=$(cat "$FAKE/out"); RUN_ERR=$(cat "$FAKE/err")
         cat "$FAKE_ARGV_LOG" >>"$ALL_ARGV"
     }
+    # ls -l is the one way to read mode and owner that is the same on macOS and
+    # Linux (stat's flags differ); the path is a fixed test fixture.
+    # shellcheck disable=SC2012
     config_perm() { ls -l "$FAKE_CONFIG" | awk '{print $1, $3, $4}'; }
     # GNU chmod --reference is what the remote edit uses to keep the mode; the
     # macOS fake "remote" lacks it, so mode is only compared where it exists.

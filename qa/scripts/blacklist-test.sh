@@ -213,6 +213,7 @@ file_has_pattern() {
 # jq runs with -n and reads the body itself: exactly one JSON document, so an
 # empty or blank body (which plain `jq FILE` accepts silently, printing
 # nothing — "clean") or two concatenated documents fail too.
+# shellcheck disable=SC2016  # a jq program: $r and $k are jq variables
 TOPOLOGY_PUBKEYS_JQ='
   def list(k): .[k] // [] | if type == "array" then . else error("\(k) is not an array") end;
   [inputs] | if length == 1 then .[0] else error("expected one JSON document, got \(length)") end
