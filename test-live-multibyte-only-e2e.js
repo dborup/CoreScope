@@ -6,7 +6,9 @@
  *   3. Turning it OFF and rebuilding shows the previously-hidden single-byte pkt.
  *   4. The saved setting (true, false or unset) is shown from the moment the
  *      toggle is rendered, survives a real reload and SPA navigation, and a
- *      click made while Live is still initializing is saved and kept.
+ *      click made while Live is still initializing is saved and kept. In each
+ *      of these cases the feed itself is probed, both while init is held and
+ *      after it, so a box that shows ON over a feed that filters as OFF fails.
  *
  * Why step 4 holds init: live.js awaits /api/config/map and loadNodes() after
  * rendering the controls. The toggle's saved state and change listener used to
@@ -36,10 +38,13 @@ async function step(name, fn) {
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
-// raw_hex builders (non-transport, route_type 1 => path-len byte at offset 1).
-// byte0 = 0x10 header; byte1 top bits set hash size.
-const SINGLE_HEX = '1000'; // (0x00>>6)+1 = 1
-const MULTI_HEX  = '1040'; // (0x40>>6)+1 = 2
+// raw_hex builders. Header 0x15 = 0b00010101: route type 01 (FLOOD, so no
+// transport codes and the path-length byte sits at offset 1) and payload type
+// 5 (GRP_TXT), matching makePkt's route_type and payloadTypeName. The top
+// two bits of the path-length byte encode hash size - 1 (firmware
+// docs/packet_format.md).
+const SINGLE_HEX = '1500'; // (0x00>>6)+1 = 1-byte path hash, 0 hops
+const MULTI_HEX  = '1540'; // (0x40>>6)+1 = 2-byte path hash, 0 hops
 
 function makePkt(hash, rawHex) {
   return {
@@ -58,6 +63,36 @@ function makePkt(hash, rawHex) {
       path: { hops: [] },
     },
   };
+}
+
+// Buffers one packet with a 1-byte and one with a 2-byte path hash and reports
+// which of them the feed rendered. In LIVE mode with Realistic off,
+// bufferPacket -> renderPacketTree -> addFeedItem runs synchronously, so the
+// feed DOM is final when this evaluate returns; nothing needs to wait.
+let probeSeq = 0;
+async function probeFeed(page, tag) {
+  const id = tag.replace(/\W+/g, '-') + '-' + (++probeSeq) + '-' + Date.now().toString(16);
+  return page.evaluate((a) => {
+    window._liveBufferPacket(a.single);
+    window._liveBufferPacket(a.multi);
+    const shown = (h) => !!document.querySelector('.live-feed-item[data-hash="' + h + '"]');
+    return {
+      single: shown(a.single.hash),
+      multi: shown(a.multi.hash),
+      sizes: [a.single, a.multi].map((p) => window.MC_packetHashSize(p.raw_hex, p.route_type)),
+    };
+  }, { single: makePkt('mb-probe-1b-' + id, SINGLE_HEX), multi: makePkt('mb-probe-2b-' + id, MULTI_HEX) });
+}
+
+// The feed must filter the way the setting says: ON hides the 1-byte packet,
+// OFF shows it. The 2-byte packet must render either way, which proves the
+// feed was live when probed.
+async function assertFeedFilter(page, on, tag) {
+  const f = await probeFeed(page, tag);
+  assert(f.sizes[0] === 1 && f.sizes[1] === 2, 'probe packets must carry 1-byte and 2-byte path hashes, got ' + f.sizes + ' (' + tag + ')');
+  assert(f.multi, 'the multibyte probe packet did not render, so the feed was not live (' + tag + ')');
+  assert(f.single === !on, 'setting is ' + (on ? 'ON' : 'OFF') + ' but the feed filter behaves as ' + (f.single ? 'OFF' : 'ON') +
+    ': the single-byte packet was ' + (f.single ? 'shown' : 'hidden') + ' (' + tag + ')');
 }
 
 // Records page errors, console errors and unhandled rejections, and counts
@@ -238,10 +273,12 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
       assert(after.checked === true, 'the click should turn the toggle ON');
       assert(after.stored === 'true', 'a click during init must save the setting at once (stored=' + after.stored + ')');
       assert(after.writes === 1, 'one click must write the setting exactly once (writes=' + after.writes + ')');
+      await assertFeedFilter(p, true, 'click during init, init still held');
     });
     const st = await readToggle(page);
     assert(st.checked === true, 'init must not revert the user\'s click (toggle is OFF after init)');
     assert(st.stored === 'true', 'setting must stay saved ON after init (stored=' + st.stored + ')');
+    await assertFeedFilter(page, true, 'click during init, after init');
   });
 
   await step('saved ON is shown from the start of a real reload', async () => {
@@ -249,8 +286,10 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
     await withInitHeld(page, reload(page), async (p, st) => {
       assert(st.stored === 'true', 'setup: expected saved ON, got ' + st.stored);
       assert(st.checked === true, 'toggle must show the saved ON state while init is still running (it showed OFF)');
+      await assertFeedFilter(p, true, 'reload with saved ON, init still held');
     });
     assert((await readToggle(page)).checked === true, 'toggle must stay ON after init');
+    await assertFeedFilter(page, true, 'reload with saved ON, after init');
   });
 
   await step('SPA navigation away and back keeps the setting and one listener', async () => {
@@ -265,13 +304,16 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
       assert(!(await readToggle(page)).exists, 'live controls should be gone on the packets page');
       await withInitHeld(page, () => page.evaluate(() => { location.hash = '#/live'; }), async (p, st) => {
         assert(st.checked === true, 'toggle must show the saved ON state after navigating back (round trip ' + (i + 1) + ')');
+        await assertFeedFilter(p, true, 'SPA round trip ' + (i + 1) + ', init still held');
       });
     }
+    await assertFeedFilter(page, true, 'after 3 SPA round trips, after init');
     const before = (await readToggle(page)).writes;
     await clickToggleAsUser(page);
     const st = await readToggle(page);
     assert(st.checked === false && st.stored === 'false', 'click after navigation should turn the setting OFF (checked=' + st.checked + ', stored=' + st.stored + ')');
     assert(st.writes - before === 1, 'one click after 3 round trips must write once, not ' + (st.writes - before) + ' times (listeners piled up)');
+    await assertFeedFilter(page, false, 'click OFF after SPA round trips');
     await withInitHeld(page, reload(page), async (p, s) => {
       assert(s.checked === false, 'toggle must show the saved OFF state after reload');
     });
@@ -287,10 +329,12 @@ const reload = (page) => () => page.reload({ waitUntil: 'domcontentloaded' });
         await withInitHeld(fresh.page, loadLive(fresh.page), async (p, st) => {
           assert(st.stored === saved, 'setup: stored=' + saved + ', got ' + st.stored);
           assert(st.checked === want, 'toggle must show ' + (want ? 'ON' : 'OFF') + ' while init is still running, got ' + (st.checked ? 'ON' : 'OFF'));
+          await assertFeedFilter(p, want, 'fresh load, saved ' + saved + ', init still held');
         });
         const st = await readToggle(fresh.page);
         assert(st.checked === want, 'toggle must still show ' + (want ? 'ON' : 'OFF') + ' after init');
         assert(st.writes === 0, 'loading the page must not write the setting (writes=' + st.writes + ')');
+        await assertFeedFilter(fresh.page, want, 'fresh load, saved ' + saved + ', after init');
       } finally {
         await fresh.ctx.close();
       }
