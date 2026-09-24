@@ -239,6 +239,18 @@ type PacketStore struct {
 	routeMaskRefreshMu   sync.Mutex // serialises refreshes; guards routeMaskQueue
 	routeMaskQueue       []int      // sorted ascending
 	routeMaskQueuedCount atomic.Int64
+	// #89: live route_mask changes from the ingestor's route_mask_changes
+	// log (see RefreshRouteMaskChanges). The cursor is the highest log id
+	// applied or parked; routeMaskChangesMu serialises refreshes and guards
+	// the cursor. routeMaskParked (guarded by s.mu) holds changes for
+	// transmissions not in the store yet, e.g. still in an unpublished
+	// start-up chunk; they are applied when the transmission is published.
+	routeMaskChangesMu      sync.Mutex
+	routeMaskChangesCursor  int64
+	routeMaskChangesState   int // 0 not initialised, 1 polling, -1 no change log
+	routeMaskParked         map[int]uint8
+	routeMaskLoadSettled    atomic.Bool // Load() or RunStartupLoad returned: start-up loading is over
+	routeMaskChangeRowsRead atomic.Int64
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string
@@ -527,6 +539,12 @@ type PacketStore struct {
 	// scanned into local maps and before it is merged into the store.
 	// Test-only (#89 route_mask refresh race).
 	loadChunkScannedHook func()
+	// loadScannedRowHook, if non-nil, runs once in Load / LoadChunked right
+	// after the first transmission row is read, then is cleared. It runs
+	// while s.mu is held, so it must not call anything that takes s.mu
+	// (e.g. RefreshRouteMaskChanges). Test-only (#89 route_mask_changes
+	// watermark placement).
+	loadScannedRowHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -741,6 +759,10 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 // When maxMemoryMB > 0, loads only the newest N transmissions that fit
 // within the memory budget, avoiding OOM on large databases.
 func (s *PacketStore) Load() error {
+	// #89: the change-log watermark is read before any row is loaded, and
+	// before s.mu (a refresh takes routeMaskChangesMu, then s.mu).
+	s.initRouteMaskChangeCursor()
+	defer s.routeMaskLoadSettled.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -912,6 +934,11 @@ func (s *PacketStore) Load() error {
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] scan error: %v", err)
 			continue
+		}
+		if s.loadScannedRowHook != nil {
+			hook := s.loadScannedRowHook
+			s.loadScannedRowHook = nil
+			hook()
 		}
 
 		hashStr := nullStrVal(hash)
@@ -1432,6 +1459,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		for k, v := range batchTxIDs {
 			if s.byTxID[k] == nil {
 				s.byTxID[k] = v
+				s.applyParkedRouteMask(v)
 				s.queueUnknownRouteMask(v)
 			}
 		}

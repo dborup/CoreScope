@@ -172,6 +172,10 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 // parallelism while ensuring oldestLoaded has a valid floor when the
 // bg loader starts.
 func (s *PacketStore) RunStartupLoad(chunkSize int) error {
+	// #89: once this returns, on every path (including a failed or partial
+	// background fill), nothing more is loaded at start-up; parked
+	// route_mask changes for transmissions still missing can be dropped.
+	defer s.routeMaskLoadSettled.Store(true)
 	// Clear any stale error from a previous invocation (single-call
 	// invariant — see godoc above). Production never re-enters but
 	// test fixtures may construct fresh stores that share no state;
@@ -263,6 +267,8 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	if neighborEdgesTableExists(s.db.conn) && s.graph.Load() == nil {
 		panic("packet store LoadChunked(): neighbor_edges table has rows but s.graph is nil — graph must be loaded before packet load (see main.go #1643 invariant)")
 	}
+	// #89: the change-log watermark is read before any row is loaded.
+	s.initRouteMaskChangeCursor()
 	s.chunkedLoadInit()
 	// Reset state for repeat calls in tests.
 	s.loadComplete.Store(false)
@@ -538,6 +544,11 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
 			continue
+		}
+		if s.loadScannedRowHook != nil {
+			hook := s.loadScannedRowHook
+			s.loadScannedRowHook = nil
+			hook()
 		}
 
 		if int64(txID) > maxID {

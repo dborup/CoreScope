@@ -33,6 +33,7 @@ func (tx *StoreTx) mergeRouteMask(v sql.NullInt64) {
 // backfilled it. Caller holds s.mu for writing.
 func (s *PacketStore) mergeRouteMaskOrQueue(tx *StoreTx, v sql.NullInt64) {
 	tx.mergeRouteMask(v)
+	s.applyParkedRouteMask(tx)
 	s.queueUnknownRouteMask(tx)
 }
 
@@ -146,6 +147,157 @@ func (s *PacketStore) RefreshBackfilledRouteMasks() int {
 		s.invalidateCachesFor(cacheInvalidation{hasNewObservations: true})
 	}
 	return changed
+}
+
+// routeMaskChangesBatch bounds how many route_mask_changes rows one poller
+// tick reads. A var so tests can exercise several batches.
+var routeMaskChangesBatch = 1000
+
+// initRouteMaskChangeCursor sets the route_mask_changes watermark to the
+// newest log row. Load and LoadChunked call it before they read any
+// transmission: every change logged before the watermark is already in the
+// masks they load, and every later one is read by RefreshRouteMaskChanges.
+// A repeated call keeps the first watermark. Must not be called under s.mu.
+func (s *PacketStore) initRouteMaskChangeCursor() {
+	if s.db == nil || s.db.conn == nil {
+		return
+	}
+	s.routeMaskChangesMu.Lock()
+	defer s.routeMaskChangesMu.Unlock()
+	s.initRouteMaskChangeCursorLocked()
+}
+
+func (s *PacketStore) initRouteMaskChangeCursorLocked() {
+	if s.routeMaskChangesState != 0 {
+		return
+	}
+	var max sql.NullInt64
+	err := s.db.conn.QueryRow(`SELECT MAX(id) FROM route_mask_changes`).Scan(&max)
+	switch {
+	case err == nil:
+		s.routeMaskChangesCursor = max.Int64
+		s.routeMaskChangesState = 1
+	case strings.Contains(err.Error(), "no such table"):
+		// Test schemas only: dbschema.AssertReady requires the table.
+		s.routeMaskChangesState = -1
+	default:
+		// Without a watermark, read the whole log rather than start at its
+		// end: merges are idempotent, while starting at the end would skip
+		// every change logged since the load began.
+		log.Printf("[route-mask] reading the change-log watermark failed; reading the change log from the start: %v", err)
+		s.routeMaskChangesCursor = 0
+		s.routeMaskChangesState = 1
+	}
+}
+
+// RefreshRouteMaskChanges applies route_mask_changes rows logged after the
+// cursor, in id order, at most routeMaskChangesBatch per call. Each row
+// carries the transmission's full mask after a new route bit, so no
+// transmissions lookup is needed. The rows of a batch are ORed per
+// transmission, read without s.mu, and merged under s.mu into transmissions
+// the store holds. A change for a transmission not in the store is parked
+// until the transmission is published (applyParkedRouteMask), and dropped once
+// the start-up load has settled and the store has seen past its id, so an
+// evicted, deleted or out-of-window transmission is never re-created. Returns
+// how many in-memory masks changed; the Relay Airtime Share cache is
+// invalidated only then. Read-only; the poller calls it on every tick.
+func (s *PacketStore) RefreshRouteMaskChanges() int {
+	if s.db == nil || s.db.conn == nil {
+		return 0
+	}
+	s.routeMaskChangesMu.Lock()
+	defer s.routeMaskChangesMu.Unlock()
+	if s.routeMaskChangesState == 0 {
+		// No load ran (tests): start from the current end of the log.
+		s.initRouteMaskChangeCursorLocked()
+		return 0
+	}
+	if s.routeMaskChangesState < 0 {
+		return 0
+	}
+
+	rows, err := s.db.conn.Query(`SELECT id, transmission_id, route_mask FROM route_mask_changes
+		WHERE id > ? ORDER BY id LIMIT ?`, s.routeMaskChangesCursor, routeMaskChangesBatch)
+	if err != nil {
+		log.Printf("[route-mask] reading route_mask_changes failed: %v", err)
+		return 0
+	}
+	masks := make(map[int]uint8)
+	last := s.routeMaskChangesCursor
+	var n int64
+	for rows.Next() {
+		var id, mask int64
+		var txID int
+		if err := rows.Scan(&id, &txID, &mask); err != nil {
+			rows.Close()
+			log.Printf("[route-mask] reading route_mask_changes failed: %v", err)
+			return 0
+		}
+		masks[txID] |= uint8(mask & packetpath.RouteMaskAll)
+		last = id
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		log.Printf("[route-mask] reading route_mask_changes failed: %v", err)
+		return 0
+	}
+	rows.Close()
+	s.routeMaskChangeRowsRead.Add(n)
+
+	settled := s.routeMaskLoadSettled.Load()
+	changed := 0
+	s.mu.Lock()
+	for txID, m := range masks {
+		if tx := s.byTxID[txID]; tx != nil {
+			if mergeKnownRouteMask(tx, m) {
+				changed++
+			}
+			continue
+		}
+		if s.routeMaskParked == nil {
+			s.routeMaskParked = make(map[int]uint8)
+		}
+		s.routeMaskParked[txID] |= m
+	}
+	for txID, m := range s.routeMaskParked {
+		if tx := s.byTxID[txID]; tx != nil {
+			if mergeKnownRouteMask(tx, m) {
+				changed++
+			}
+			delete(s.routeMaskParked, txID)
+		} else if settled && txID <= s.maxTxID {
+			// Not in the store after the load settled, and the poller has
+			// read past its id: evicted, deleted or outside the load window.
+			delete(s.routeMaskParked, txID)
+		}
+	}
+	s.mu.Unlock()
+	// Advanced only after every row of the batch was applied or parked.
+	s.routeMaskChangesCursor = last
+
+	if changed > 0 {
+		// Relay Airtime Share lives in rfCache.
+		s.invalidateCachesFor(cacheInvalidation{hasNewObservations: true})
+	}
+	return changed
+}
+
+// mergeKnownRouteMask ORs a logged (known) mask into tx and reports whether
+// the in-memory mask changed. Caller holds s.mu for writing.
+func mergeKnownRouteMask(tx *StoreTx, mask uint8) bool {
+	known, before := tx.routeMaskKnown, tx.routeMask
+	tx.mergeRouteMask(sql.NullInt64{Int64: int64(mask), Valid: true})
+	return !known || tx.routeMask != before
+}
+
+// applyParkedRouteMask merges a parked change into a transmission the store
+// is publishing in s.byTxID. Caller holds s.mu for writing.
+func (s *PacketStore) applyParkedRouteMask(tx *StoreTx) {
+	if m, ok := s.routeMaskParked[tx.ID]; ok {
+		mergeKnownRouteMask(tx, m)
+		delete(s.routeMaskParked, tx.ID)
+	}
 }
 
 // readRouteMasks adds route_mask for each existing transmission in ids to
