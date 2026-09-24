@@ -60,14 +60,14 @@ async function settleBoard(page, navigate) {
       if (el && !el.__rrStale) return true;
       if (window.__rrFlushRoute) window.__rrFlushRoute(); // a held route (see installRouteHold) may run now
       return false;
-    }).catch(() => { throw new Error('the leaderboard never re-rendered after navigating to ' + page.url()); });
+    }).catch(e => { throw new Error('the leaderboard never re-rendered after navigating to ' + page.url() + ': ' + e.message); });
     await page.waitForFunction(() => {
       const app = document.getElementById('app');
       const target = app.querySelector('h1, h2, h3, [role="heading"]') || app; // app.js #630-7
       if (document.activeElement === target) return true;
       if (window.__rrFlushFrames) window.__rrFlushFrames(); // the held route's frame callbacks may run now
       return false;
-    }).catch(() => { throw new Error("app.js never moved focus to the leaderboard heading after navigating to " + page.url()); });
+    }).catch(e => { throw new Error('app.js never moved focus to the leaderboard heading after navigating to ' + page.url() + ': ' + e.message); });
   }
   await page.waitForSelector('#rrRows tr');
   await page.waitForFunction(() => document.getElementById('rrTable') &&
@@ -293,7 +293,7 @@ async function main() {
     const searchShown = async (when) => {
       await page.waitForFunction(n => document.querySelectorAll('#rrRows a.nq-link').length === n &&
         !document.getElementById('rrTable').hasAttribute('aria-busy'), expect.rows.length)
-        .catch(() => { throw new Error('rows never matched the search for "' + q + '" ' + when); });
+        .catch(e => { throw new Error('rows never matched the search for "' + q + '" ' + when + ': ' + e.message); });
       const st = await page.evaluate(() => ({ hash: location.hash, value: document.getElementById('rrSearch').value,
         hrefs: [...document.querySelectorAll('#rrRows a.nq-link')].map(a => a.getAttribute('href')) }));
       assert(st.value === q, 'search field shows ' + JSON.stringify(st.value) + ', want ' + JSON.stringify(q) + ' ' + when);
@@ -337,8 +337,18 @@ async function main() {
     // the same document, not a reload, and must bring the search back.
     const reachUrl = page.url();
     const doc = await page.evaluate(() => ({ len: history.length, doc: window.__rrDoc }));
+    assert(doc.doc, 'document token missing before Back');
     for (let round = 1; round <= 2; round++) {
-      await settleBoard(page, () => page.goBack());
+      // A reload can destroy the page context under settleBoard. If Back failed,
+      // check which document the page shows once it has loaded: a different
+      // __rrDoc token means Back reloaded instead of traversing history.
+      await settleBoard(page, () => page.goBack()).catch(async e => {
+        await page.waitForLoadState('domcontentloaded');
+        if (!(await page.evaluate(d => window.__rrDoc === d, doc.doc))) {
+          throw new Error('Back ' + round + ' reloaded the page instead of traversing history (' + e.message + ')');
+        }
+        throw e;
+      });
       const after = await page.evaluate(() => ({ len: history.length, doc: window.__rrDoc }));
       assert(after.doc === doc.doc && after.len === doc.len, 'Back ' + round + ' reloaded the page or changed history (' + JSON.stringify(after) + ' vs ' + JSON.stringify(doc) + ')');
       await searchShown('after Back ' + round);
