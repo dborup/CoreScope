@@ -1276,6 +1276,19 @@
         </div>
       </div>`;
 
+    // "Multibyte only" is restored and wired before the first await. The
+    // controls are visible and clickable as soon as they are rendered, and the
+    // feed already filters on the saved multibyteOnly. Wired after the awaits
+    // below, the box showed OFF while init ran even when saved ON, and a click
+    // made then was not saved and was reset when init caught up.
+    const multibyteToggle = document.getElementById('liveMultibyteToggle');
+    multibyteToggle.checked = multibyteOnly;
+    multibyteToggle.addEventListener('change', (e) => {
+      multibyteOnly = e.target.checked;
+      localStorage.setItem('live-multibyte-only', multibyteOnly);
+      rebuildFeedList();
+    });
+
     // Fetch configurable map defaults (#115)
     let mapCenter = [37.45, -122.0];
     let mapZoom = 9;
@@ -1634,14 +1647,6 @@
       showOnlyFavorites = e.target.checked;
       localStorage.setItem('live-favorites-only', showOnlyFavorites);
       applyFavoritesFilter();
-    });
-
-    const multibyteToggle = document.getElementById('liveMultibyteToggle');
-    multibyteToggle.checked = multibyteOnly;
-    multibyteToggle.addEventListener('change', (e) => {
-      multibyteOnly = e.target.checked;
-      localStorage.setItem('live-multibyte-only', multibyteOnly);
-      rebuildFeedList();
     });
 
     const foreignToggle = document.getElementById('liveForeignToggle');
