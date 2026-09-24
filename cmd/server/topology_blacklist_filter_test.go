@@ -656,3 +656,61 @@ func TestFilterBlacklistedFromTopology_UnknownShapeFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// The filter decides from the response alone. It must not look nodes up in
+// the database per entry: with HiddenNamePrefixes set that was one SQLite
+// query per bestPathList entry (up to 50) on every request. A server without
+// a database makes any such lookup panic.
+func TestFilterBlacklistedFromTopology_NoDatabaseLookups(t *testing.T) {
+	_, data := computedTopology(t)
+	srv := &Server{cfg: &Config{}}
+	srv.cfg.SetHiddenNamePrefixes([]string{"Targ"})
+	out := jsonOf(t, srv.filterBlacklistedFromTopology(data))
+	if strings.Contains(out, topoTarget) {
+		t.Errorf("name-hidden target still present")
+	}
+	if !strings.Contains(out, topoOther) {
+		t.Errorf("visible nodes were dropped")
+	}
+}
+
+// Unresolved hops carry no pubkey (nil): nothing to match, so they stay.
+func TestFilterBlacklistedFromTopology_UnresolvedHopsKept(t *testing.T) {
+	srv, _ := computedTopology(t)
+	unresolved := func(hop string) map[string]interface{} {
+		return map[string]interface{}{"hop": hop, "name": nil, "pubkey": nil, "count": 1}
+	}
+	data := map[string]interface{}{
+		"topRepeaters": []map[string]interface{}{unresolved("ee01"), {"hop": "7a", "name": "Target", "pubkey": topoTarget}},
+		"perObserverReach": map[string]interface{}{"obs1": map[string]interface{}{"observer_name": "o", "rings": []map[string]interface{}{
+			{"hops": 1, "nodes": []map[string]interface{}{unresolved("ee02"), {"hop": "7a", "pubkey": topoTarget}}}}}},
+	}
+	out := jsonOf(t, srv.filterBlacklistedFromTopology(data))
+	if strings.Contains(out, topoTarget) {
+		t.Errorf("target kept: %s", out)
+	}
+	for _, hop := range []string{"ee01", "ee02"} {
+		if !strings.Contains(out, hop) {
+			t.Errorf("unresolved hop %s dropped: %s", hop, out)
+		}
+	}
+}
+
+// A name the filter cannot read (not a string) cannot be checked against
+// HiddenNamePrefixes, so the entry goes — fail closed, like pubkeys.
+func TestFilterBlacklistedFromTopology_NonStringNameFailsClosed(t *testing.T) {
+	srv, _ := computedTopology(t)
+	data := map[string]interface{}{
+		"topRepeaters": []map[string]interface{}{
+			{"hop": "9d", "pubkey": topoOther, "name": map[string]interface{}{"n": "odd-name-marker"}},
+			{"hop": "5b", "pubkey": topoLower, "name": "Lower"},
+		},
+	}
+	out := jsonOf(t, srv.filterBlacklistedFromTopology(data))
+	if strings.Contains(out, "odd-name-marker") {
+		t.Errorf("entry with an unreadable name kept: %s", out)
+	}
+	if !strings.Contains(out, topoLower) {
+		t.Errorf("readable entry dropped: %s", out)
+	}
+}
