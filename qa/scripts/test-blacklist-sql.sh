@@ -767,7 +767,11 @@ FAKE
     #      rule on the target. The run must refuse before any side effect —
     #      teardown would otherwise remove the operator's rule — and must not
     #      print the pubkey. Lower- and upper-case entries, jq and python3.
-    for pre in "lower:$PK_A:$SHIM_DIR" "upper:$PK_A_UPPER:$SHIM_DIR" "python3:$PK_A_UPPER:$SHIM_NOJQ_DIR"; do
+    # Mixed case only matches a genuinely case-insensitive comparison.
+    PK_A_MIXED="$(printf '%s' "${PK_A:0:32}" | tr 'a-f' 'A-F')${PK_A:32}"
+    for pre in "lower:$PK_A:$SHIM_DIR" "upper:$PK_A_UPPER:$SHIM_DIR" "mixed:$PK_A_MIXED:$SHIM_DIR" \
+               "python3-lower:$PK_A:$SHIM_NOJQ_DIR" "python3-upper:$PK_A_UPPER:$SHIM_NOJQ_DIR" \
+               "python3-mixed:$PK_A_MIXED:$SHIM_NOJQ_DIR"; do
         label="pre-blacklisted ${pre%%:*}"; entry=${pre#*:}; entry=${entry%%:*}; rpath=${pre##*:}
         ORIG_CONFIG="{\"nodeBlacklist\":[\"ff00ff00\",\"$entry\"],\"port\":3000}"
         run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REMOTE_PATH="$rpath"
