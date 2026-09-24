@@ -151,6 +151,42 @@ if (typeof render === 'function') {
     assert.deepStrictEqual(rows.map(r => attrOf(r, 'data-route-class')), [null, null, null, null]);
   });
 
+  // #89: a payload seen on both flood and zero-hop routes is one mixed row.
+  const mixedResponse = {
+    rows: [
+      { payload_type: 'ADVERT (flood)', type: 4, route_class: 'flood', count: 30, count_pct: 60, score: 6e9, airtime_pct: 75 },
+      { payload_type: 'ADVERT (mixed)', type: 4, route_class: 'mixed', count: 5, count_pct: 10, score: 2e9, airtime_pct: 25 },
+      { payload_type: 'ADVERT (zero-hop)', type: 4, route_class: 'zero_hop', count: 15, count_pct: 30, score: 0, airtime_pct: 0 },
+    ],
+    total_count: 50,
+    total_score: 8e9,
+  };
+
+  test('mixed ADVERT row renders with its own stable identity', () => {
+    const rows = rowsOf(render(mixedResponse));
+    assert.deepStrictEqual(rows.map(labelOf), ['ADVERT (flood)', 'ADVERT (mixed)', 'ADVERT (zero-hop)']);
+    assert.deepStrictEqual(rows.map(identityOf), ['4/flood', '4/mixed', '4/zero_hop']);
+  });
+
+  test('mixed row uses the theme colour and explains the route mix', () => {
+    const rows = rowsOf(render(mixedResponse));
+    const mixed = rows[1];
+    assert.strictEqual(airtimeColourOf(mixed), 'var(--status-purple)');
+    assert.ok(!['flood', 'zero_hop'].some((_, i) => airtimeColourOf(rows[i * 2]) === 'var(--status-purple)'),
+      'only the mixed row uses the mixed colour');
+    const tip = titleOf(mixed);
+    assert.ok(/both flood and zero-hop routes/.test(tip), 'tooltip explains both routes: ' + tip);
+    assert.ok(/counted once/.test(tip), 'tooltip says it is counted once: ' + tip);
+    assert.ok(!/both flood and zero-hop routes/.test(titleOf(rows[0])), 'flood row has no mixed explanation');
+  });
+
+  test('mixed colour does not depend on the row position', () => {
+    const onlyMixed = { rows: [mixedResponse.rows[1]], total_count: 5, total_score: 2e9 };
+    const rows = rowsOf(render(onlyMixed));
+    assert.deepStrictEqual(rows.map(identityOf), ['4/mixed']);
+    assert.strictEqual(airtimeColourOf(rows[0]), 'var(--status-purple)');
+  });
+
   test('rendered chart introduces no element ids', () => {
     const html = render(splitResponse);
     assert.ok(!/\sid="/.test(html), 'dumbbell markup must not contain id attributes');
