@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -294,5 +295,125 @@ func TestInsertTransmission_ObservationIsVisibleOnlyWithItsRouteBit(t *testing.T
 	}
 	if n < 4 {
 		t.Fatalf("probe saw %d observation writes, want at least 4", n)
+	}
+}
+
+// Recording a new route bit and writing the observation that carries it
+// happen together or not at all. If the route_mask update fails, the
+// observation must not become visible: a known mask is never backfilled
+// again, so an observation stored without its bit would leave the mask
+// permanently short. If the observation write fails after the update, the
+// update is rolled back too. Test-only triggers make one of the two writes
+// fail deterministically.
+func TestInsertTransmission_FailedRouteBitKeepsObservationOut(t *testing.T) {
+	type obsRow struct {
+		observer string
+		raw      string
+	}
+	observations := func(t *testing.T, s *Store, hash string) []obsRow {
+		t.Helper()
+		rows, err := s.db.Query(`SELECT obs.id, o.raw_hex FROM observations o
+			JOIN transmissions t ON t.id = o.transmission_id
+			JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE t.hash = ? ORDER BY obs.id`, hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []obsRow
+		for rows.Next() {
+			var r obsRow
+			if err := rows.Scan(&r.observer, &r.raw); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+	faults := []struct {
+		name     string
+		triggers []string
+	}{
+		{"route_mask update fails", []string{
+			`CREATE TRIGGER fault_route_mask BEFORE UPDATE OF route_mask ON transmissions
+				BEGIN SELECT RAISE(ABORT, 'injected route_mask failure'); END`,
+		}},
+		{"observation write fails after the update", []string{
+			`CREATE TRIGGER fault_obs_insert BEFORE INSERT ON observations
+				BEGIN SELECT RAISE(ABORT, 'injected observation failure'); END`,
+			`CREATE TRIGGER fault_obs_update BEFORE UPDATE ON observations
+				BEGIN SELECT RAISE(ABORT, 'injected observation failure'); END`,
+		}},
+	}
+	paths := []struct {
+		name  string
+		first routeMaskObs
+		next  routeMaskObs // brings a new route bit; fails, then succeeds
+		want  int64        // mask after the successful retry
+	}{
+		{"new observation row (insert)",
+			routeMaskObs{firstIngestedFloodRaw, "obs-a", routeMaskT0},
+			routeMaskObs{firstIngestedZeroHopRaw, "obs-b", routeMaskT5}, 0b1010},
+		{"same observer and path (upsert)",
+			routeMaskObs{firstIngestedZeroHopRaw, "obs-a", routeMaskT0},
+			routeMaskObs{routeMaskFlood0HopRaw, "obs-a", routeMaskT5}, 0b1001},
+	}
+	for _, fault := range faults {
+		for _, tc := range paths {
+			t.Run(fault.name+"/"+tc.name, func(t *testing.T) {
+				s := routeMaskStore(t, filepath.Join(t.TempDir(), "fail.db"))
+				defer s.Close()
+				hash := routeMaskInsert(t, s, tc.first)
+				wantMask, _ := routeMaskOf(t, s, hash)
+				wantObs := observations(t, s, hash)
+
+				for _, q := range fault.triggers {
+					if _, err := s.db.Exec(q); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writeErrs, inserted := s.Stats.WriteErrors.Load(), s.Stats.ObservationsInserted.Load()
+				decoded, err := DecodePacket(tc.next.raw, nil, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pd := BuildPacketData(&MQTTPacketMessage{Raw: tc.next.raw}, decoded, tc.next.observer, "", nil)
+				pd.Timestamp = tc.next.rx
+				isNew, err := s.InsertTransmission(pd)
+				if err != nil || isNew {
+					t.Fatalf("InsertTransmission = (%v, %v), want the non-fatal (false, nil) of a failed observation write", isNew, err)
+				}
+				if got := s.Stats.WriteErrors.Load() - writeErrs; got != 1 {
+					t.Fatalf("WriteErrors grew by %d, want exactly 1", got)
+				}
+				if got := s.Stats.ObservationsInserted.Load() - inserted; got != 0 {
+					t.Fatalf("ObservationsInserted grew by %d, want 0", got)
+				}
+				if got, _ := routeMaskOf(t, s, hash); got != wantMask {
+					t.Fatalf("route_mask = %v after the failed update, want unchanged %v", got, wantMask)
+				}
+				if got := observations(t, s, hash); !reflect.DeepEqual(got, wantObs) {
+					t.Fatalf("observations after the failed update = %v, want unchanged %v", got, wantObs)
+				}
+
+				// Once the failure is gone, a redelivery stores both.
+				for _, name := range []string{"fault_route_mask", "fault_obs_insert", "fault_obs_update"} {
+					if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				routeMaskInsert(t, s, tc.next)
+				if got, _ := routeMaskOf(t, s, hash); !got.Valid || got.Int64 != tc.want {
+					t.Fatalf("route_mask after the redelivery = %v, want %04b", got, tc.want)
+				}
+				found := false
+				for _, o := range observations(t, s, hash) {
+					found = found || (o.observer == tc.next.observer && strings.EqualFold(o.raw, tc.next.raw))
+				}
+				if !found {
+					t.Fatalf("redelivered observation missing: %v", observations(t, s, hash))
+				}
+			})
+		}
 	}
 }
