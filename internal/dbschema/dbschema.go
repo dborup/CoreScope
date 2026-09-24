@@ -121,6 +121,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
 	}
+	if err := ensureRouteMaskChangesTable(rw, logf); err != nil {
+		return fmt.Errorf("ensure route_mask_changes: %w", err)
+	}
 	return nil
 }
 
@@ -164,6 +167,7 @@ func AssertReady(ro *sql.DB) error {
 	// server reads it to filter the hot-window query.
 	mustCol("transmissions", "last_seen")
 	mustCol("transmissions", "route_mask")
+	mustTable("route_mask_changes")
 	// #1321: server's detectSchema PRAGMA-detects these and caches a
 	// boolean. To kill the startup race they're owned + asserted here.
 	mustCol("transmissions", "scope_name")
@@ -618,6 +622,51 @@ func ensureTransmissionsRouteMaskColumn(rw *sql.DB, logf Logger) error {
 	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskColumnMigration); err != nil {
 		return fmt.Errorf("record %s: %w", RouteMaskColumnMigration, err)
 	}
+	return nil
+}
+
+const (
+	RouteMaskChangesMigration = "route_mask_changes_v1"
+	RouteMaskChangesTxIndex   = "idx_route_mask_changes_tx"
+	// CreateRouteMaskChangesTableSQL and CreateRouteMaskChangesIndexSQL are
+	// exported so tests build the table exactly as Apply does.
+	CreateRouteMaskChangesTableSQL = `CREATE TABLE IF NOT EXISTS route_mask_changes (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		transmission_id INTEGER NOT NULL,
+		route_mask      INTEGER NOT NULL,
+		created_at      INTEGER NOT NULL
+	)`
+	CreateRouteMaskChangesIndexSQL = `CREATE INDEX IF NOT EXISTS ` + RouteMaskChangesTxIndex + ` ON route_mask_changes(transmission_id)`
+)
+
+// ensureRouteMaskChangesTable creates route_mask_changes, the durable change
+// log from the ingestor to running servers (#89, PR #93 review). The
+// ingestor appends one row, in the same transaction, whenever an observation
+// adds a route bit to an existing transmission's route_mask; route_mask is
+// the resulting full mask and created_at the ingest time (Unix seconds).
+// Servers poll it by id, so AUTOINCREMENT keeps ids from being reused after
+// retention deletes the newest rows. The full route_mask in transmissions
+// stays authoritative on a cold load; this table only notifies servers that
+// already hold the transmission. A new, empty table: no scan of existing data.
+func ensureRouteMaskChangesTable(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	var one int
+	if err := rw.QueryRow(`SELECT 1 FROM _migrations WHERE name = ?`, RouteMaskChangesMigration).Scan(&one); err == nil {
+		return nil // already applied
+	}
+	if _, err := rw.Exec(CreateRouteMaskChangesTableSQL); err != nil {
+		return fmt.Errorf("create route_mask_changes: %w", err)
+	}
+	// PREFLIGHT: async=false reason="index on a new, empty table; no scan of existing data"
+	if _, err := rw.Exec(CreateRouteMaskChangesIndexSQL); err != nil {
+		return fmt.Errorf("create %s: %w", RouteMaskChangesTxIndex, err)
+	}
+	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskChangesMigration); err != nil {
+		return fmt.Errorf("record %s: %w", RouteMaskChangesMigration, err)
+	}
+	logf("[dbschema] created route_mask_changes table (#89)")
 	return nil
 }
 
