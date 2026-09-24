@@ -2461,19 +2461,16 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
 
-  /* Channel list row: name must dominate. The inline share/remove icons
-     were eating >88px because of their 44x44 touch target — push them
-     onto a per-row reveal pattern: show a single ⋮ trigger that toggles
-     the action set. Until then, shrink them to icon-only and let the
-     name grow via flex:1. */
+  /* Channel list row: name must dominate. Below 768px channels.js renders
+     the flat .ch-row list (#1367), which has no inline share/remove
+     actions, so there is no size override for .ch-icon-btn here: wherever
+     those actions render they keep the 44x44 target from the base rule. */
   #chList .ch-item { padding: 10px 12px; gap: 10px; }
   #chList .ch-item-name { flex: 1 1 auto; min-width: 0; }
   #chList .ch-item-top { gap: 6px; }
-  #chList .ch-icon-btn { min-width: 32px; min-height: 32px; padding: 2px 4px; }
   /* #1648 M5: share-btn now renders an inline <svg.ph-icon> from channels.js,
    * so the legacy `font-size: 0` + `::before { content: '<emoji>' }` shim is
-   * obsolete. The icon-button class above already sets the touch target;
-   * the SVG inherits color via currentColor. */
+   * obsolete. The SVG inherits color via currentColor. */
   #chList .ch-share-btn .ph-icon { font-size: 13px; }
   #chList .ch-share-btn { font-size: 0; }
   #chList .ch-share-btn .ph-icon, #chList .ch-share-btn svg { font-size: 13px; }
