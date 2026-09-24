@@ -91,8 +91,11 @@ jobs:
       - name: Staging disk-monitor unit tests (issue #1684)
         run: bash scripts/staging/test-disk-monitor.sh
 
-      - name: QA SQL parameter-binding unit tests (issue #1977)
+      - name: QA blacklist script unit tests (issues #1977, #83)
         run: bash qa/scripts/test-blacklist-sql.sh
+
+      - name: ShellCheck QA blacklist scripts (issue #83)
+        run: shellcheck -x -P SCRIPTDIR qa/scripts/blacklist-test.sh qa/scripts/test-blacklist-sql.sh
 
       - name: Lint CSS variables (issue #1128)
         run: |
