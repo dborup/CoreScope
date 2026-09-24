@@ -229,6 +229,12 @@ type PacketStore struct {
 	lastInvalidated time.Time
 	pendingInv      *cacheInvalidation // accumulated dirty flags during cooldown
 	invCooldown     time.Duration      // minimum time between invalidations
+	// #89: ids of transmissions loaded while their route_mask was still NULL
+	// (not backfilled yet). The poller re-reads them as the ingestor's
+	// backfill fills them; see RefreshBackfilledRouteMasks.
+	routeMaskPendingMu     sync.Mutex
+	routeMaskPending       []int
+	routeMaskPendingSorted bool
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string
@@ -917,7 +923,7 @@ func (s *PacketStore) Load() error {
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
-			tx.mergeRouteMask(routeMask)
+			s.mergeRouteMaskOrQueue(tx, routeMask)
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			if txID > s.maxTxID {
@@ -1255,7 +1261,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				observerSet: make(map[string]bool),
 			}
 			localByHash[hashStr] = tx
-			tx.mergeRouteMask(routeMask)
+			s.mergeRouteMaskOrQueue(tx, routeMask)
 			localPackets = append(localPackets, tx)
 			localByTxID[txID] = tx
 			if txID > localMaxTxID {
@@ -2843,7 +2849,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[r.hash] = tx
-			tx.mergeRouteMask(r.routeMask)
+			s.mergeRouteMaskOrQueue(tx, r.routeMask)
 			s.packets = append(s.packets, tx) // oldest-first; new items go to tail
 			s.byTxID[r.txID] = tx
 			if r.txID > s.maxTxID {

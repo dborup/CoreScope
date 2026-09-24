@@ -90,7 +90,7 @@ type DB struct {
 	hasRouteMaskFlag               schemaFlag    // transmissions.route_mask (#89) -- read via hasRouteMask()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
 
-	// route_mask backfill status cache (#89), see route_mask_status.go.
+	// route_mask backfill status cache (#89), see route_mask.go.
 	routeMaskStatusMu  sync.Mutex
 	routeMaskStatus    RouteMaskBackfillStatus
 	routeMaskStatusExp time.Time

@@ -330,6 +330,9 @@ func (p *Poller) Start() {
 				if nextObsID > lastObsID {
 					lastObsID = nextObsID
 				}
+				// #89: pick up route_mask values the ingestor backfilled
+				// after this server loaded the rows.
+				p.store.RefreshBackfilledRouteMasks()
 				if len(newTxs) > 0 {
 					log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
 				}

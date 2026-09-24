@@ -562,7 +562,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
-			tx.mergeRouteMask(routeMask)
+			s.mergeRouteMaskOrQueue(tx, routeMask)
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			if txID > s.maxTxID {

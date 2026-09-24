@@ -467,7 +467,7 @@ func (s *PacketStore) GetRelayAirtimeShareWithWindow(window TimeWindow) map[stri
 	// #89: outside s.mu. While the route_mask backfill is not complete, some
 	// ADVERT rows are still classified by their legacy first-inserted route.
 	if s.db != nil {
-		result["route_mask_backfill"] = s.db.routeMaskBackfillStatus()
+		result["route_mask_backfill"] = s.routeMaskBackfillStatus()
 	}
 
 	s.cacheMu.Lock()
