@@ -282,6 +282,10 @@ func main() {
 			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
 		}
 	}
+	// #89: route_mask_changes rows of transmissions deleted by any path.
+	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+		log.Printf("[prune] route_mask_changes error: %v", err)
+	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
 	// Independent of the feature flag, so data persists are reaped even after
@@ -361,6 +365,9 @@ func main() {
 					log.Printf("[prune] error: %v", err)
 				} else if n > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
+				}
+				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+					log.Printf("[prune] route_mask_changes error: %v", err)
 				}
 			}
 		}()

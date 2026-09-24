@@ -344,6 +344,10 @@ func TestInsertTransmission_FailedRouteBitKeepsObservationOut(t *testing.T) {
 			`CREATE TRIGGER fault_obs_update BEFORE UPDATE ON observations
 				BEGIN SELECT RAISE(ABORT, 'injected observation failure'); END`,
 		}},
+		{"change event insert fails after both writes", []string{
+			`CREATE TRIGGER fault_change BEFORE INSERT ON route_mask_changes
+				BEGIN SELECT RAISE(ABORT, 'injected change event failure'); END`,
+		}},
 	}
 	paths := []struct {
 		name  string
@@ -395,9 +399,12 @@ func TestInsertTransmission_FailedRouteBitKeepsObservationOut(t *testing.T) {
 				if got := observations(t, s, hash); !reflect.DeepEqual(got, wantObs) {
 					t.Fatalf("observations after the failed update = %v, want unchanged %v", got, wantObs)
 				}
+				if got := routeMaskChanges(t, s); len(got) != 0 {
+					t.Fatalf("change rows after the failed update = %+v, want none", got)
+				}
 
 				// Once the failure is gone, a redelivery stores both.
-				for _, name := range []string{"fault_route_mask", "fault_obs_insert", "fault_obs_update"} {
+				for _, name := range []string{"fault_route_mask", "fault_obs_insert", "fault_obs_update", "fault_change"} {
 					if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 						t.Fatal(err)
 					}
@@ -412,6 +419,9 @@ func TestInsertTransmission_FailedRouteBitKeepsObservationOut(t *testing.T) {
 				}
 				if !found {
 					t.Fatalf("redelivered observation missing: %v", observations(t, s, hash))
+				}
+				if got := routeMaskChanges(t, s); len(got) != 1 || got[0].mask != tc.want {
+					t.Fatalf("change rows after the redelivery = %+v, want one with mask %04b", got, tc.want)
 				}
 			})
 		}

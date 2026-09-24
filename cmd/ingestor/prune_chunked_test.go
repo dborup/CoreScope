@@ -248,9 +248,10 @@ func TestPruneAgedTransmissionIDsUsesFirstSeenIndex(t *testing.T) {
 
 	cutoff := time.Now().UTC().AddDate(0, 0, -5).Format(time.RFC3339)
 	for name, q := range map[string]string{
-		"batch subquery":       pruneAgedTransmissionIDs,
-		"observations delete":  pruneObservationsBatch,
-		"transmissions delete": pruneTransmissionsBatch,
+		"batch subquery":            pruneAgedTransmissionIDs,
+		"observations delete":       pruneObservationsBatch,
+		"route_mask_changes delete": pruneRouteMaskChangesBatch,
+		"transmissions delete":      pruneTransmissionsBatch,
 	} {
 		rows, err := store.db.Query("EXPLAIN QUERY PLAN "+q, cutoff, pruneBatchTransmissions)
 		if err != nil {
@@ -281,6 +282,11 @@ func TestPruneAgedTransmissionIDsUsesFirstSeenIndex(t *testing.T) {
 		}
 		if strings.Contains(plan, "TEMP B-TREE") {
 			t.Errorf("%s: plan sorts in a temp b-tree instead of walking the index in order: %s", name, plan)
+		}
+		// #89: the change rows of a batch are found through their index,
+		// not by scanning the change log.
+		if name == "route_mask_changes delete" && (!strings.Contains(plan, "idx_route_mask_changes_tx") || strings.Contains(plan, "SCAN route_mask_changes")) {
+			t.Errorf("%s: plan does not delete through idx_route_mask_changes_tx: %s", name, plan)
 		}
 	}
 }

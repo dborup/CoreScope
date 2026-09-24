@@ -77,6 +77,7 @@ type Store struct {
 	stmtInsertTransmission     *sql.Stmt
 	stmtUpdateTxFirstSeen      *sql.Stmt
 	stmtOrTxRouteMask          *sql.Stmt
+	stmtInsertRouteMaskChange  *sql.Stmt
 	stmtBumpTxLastSeen         *sql.Stmt
 	stmtInsertObservation      *sql.Stmt
 	stmtUpsertNode             *sql.Stmt
@@ -876,6 +877,13 @@ func (s *Store) prepareStatements() error {
 	if err != nil {
 		return err
 	}
+	// Change log for running servers (route_mask_changes): the transmission's
+	// full mask as it is inside the current transaction, right after the OR.
+	s.stmtInsertRouteMaskChange, err = s.db.Prepare(`INSERT INTO route_mask_changes (transmission_id, route_mask, created_at)
+		SELECT id, route_mask, ? FROM transmissions WHERE id = ? AND route_mask IS NOT NULL`)
+	if err != nil {
+		return err
+	}
 
 	// Ping-score highscore/leaderboard feature (see ping_triggers.go and
 	// internal/dbschema's ensurePingTriggersTable). INSERT OR IGNORE on
@@ -1257,9 +1265,13 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 }
 
 // insertObservationWithRouteBit ORs routeBit into the transmission's
-// route_mask and inserts (or upserts) the observation in one transaction, so
-// either both become visible or neither does. Caller holds writerMu. The pool
-// has a single connection, which this transaction holds until it ends: every
+// route_mask, inserts (or upserts) the observation and, when the mask
+// actually changed, appends a route_mask_changes row with the resulting mask,
+// all in one transaction: either everything becomes visible or nothing does.
+// The change row is what tells a running server about a bit that arrived
+// through an upsert of an existing observation row (same id, so its
+// new-observation poll never sees it). Caller holds writerMu. The pool has a
+// single connection, which this transaction holds until it ends: every
 // statement in between must run on dbTx, never on s.db.
 func (s *Store) insertObservationWithRouteBit(txID, routeBit int64, obsArgs []interface{}) error {
 	dbTx, err := s.db.Begin()
@@ -1267,11 +1279,17 @@ func (s *Store) insertObservationWithRouteBit(txID, routeBit int64, obsArgs []in
 		return fmt.Errorf("begin route_mask transaction: %w", err)
 	}
 	defer dbTx.Rollback() // no-op after a successful Commit
-	if _, err := dbTx.Stmt(s.stmtOrTxRouteMask).Exec(routeBit, txID, routeBit); err != nil {
+	res, err := dbTx.Stmt(s.stmtOrTxRouteMask).Exec(routeBit, txID, routeBit)
+	if err != nil {
 		return fmt.Errorf("route_mask update: %w", err)
 	}
 	if _, err := dbTx.Stmt(s.stmtInsertObservation).Exec(obsArgs...); err != nil {
 		return err
+	}
+	if changed, _ := res.RowsAffected(); changed > 0 {
+		if _, err := dbTx.Stmt(s.stmtInsertRouteMaskChange).Exec(time.Now().Unix(), txID); err != nil {
+			return fmt.Errorf("route_mask change row: %w", err)
+		}
 	}
 	return dbTx.Commit()
 }
