@@ -320,3 +320,21 @@ func TestMain_StartsRouteMaskBackfillAfterBufferReady(t *testing.T) {
 		t.Errorf("shutdown must cancel the route_mask backfill before disconnecting MQTT clients")
 	}
 }
+
+// The pending-index build is one long write (about 18 s cold on the staging
+// copy). It holds writerMu and is recorded under its own component, so the
+// stall it causes is not attributed to the MQTT handler waiting behind it.
+func TestStartRouteMaskBackfill_IndexBuildIsAttributed(t *testing.T) {
+	s := routeMaskLegacyFixture(t, filepath.Join(t.TempDir(), "attr.db"), 3)
+	defer s.Close()
+	ResetWriterStatsForTest()
+	s.StartRouteMaskBackfill(context.Background())
+	s.WaitForAsyncMigrations()
+	snap := s.WriterStatsSnapshot()
+	if got := snap["route_mask_index"].Count; got != 1 {
+		t.Fatalf("route_mask_index writer samples = %d, want 1 (snapshot %v)", got, snap)
+	}
+	if got := snap["route_mask_backfill"].Count; got < 1 {
+		t.Fatalf("route_mask_backfill writer samples = %d, want at least 1", got)
+	}
+}

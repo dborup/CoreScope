@@ -63,9 +63,8 @@ func (s *Store) StartRouteMaskBackfill(ctx context.Context) {
 // bounded batches until none are left.
 func (s *Store) backfillTxRouteMask(ctx context.Context, d *sql.DB) error {
 	start := time.Now()
-	// PREFLIGHT: async=true reason="partial index over transmissions; one full-table scan, measured 18-19.5 s cold on a 4.95 GB staging copy; runs after MQTT subscribe so IngestBuffer absorbs the write stall"
-	if _, err := d.ExecContext(ctx, dbschema.CreateRouteMaskPendingIndexSQL); err != nil {
-		return fmt.Errorf("create %s: %w", dbschema.RouteMaskPendingIndex, err)
+	if err := createRouteMaskPendingIndex(ctx, d); err != nil {
+		return err
 	}
 	log.Printf("[route-mask] pending index ready in %s; backfilling route_mask", time.Since(start).Round(time.Millisecond))
 	var total int64
@@ -88,6 +87,27 @@ func (s *Store) backfillTxRouteMask(ctx context.Context, d *sql.DB) error {
 		}
 	}
 	log.Printf("[route-mask] backfill complete: %d rows in %s", total, time.Since(start).Round(time.Second))
+	return nil
+}
+
+// createRouteMaskPendingIndex builds the partial index the backfill and the
+// server's status query use. It holds writerMu like every other writer, so
+// the stall it causes is recorded as route_mask_index instead of showing up as
+// wait time of whichever writer queues behind it on the single connection.
+func createRouteMaskPendingIndex(ctx context.Context, d *sql.DB) error {
+	waitStart := time.Now()
+	writerMu.Lock()
+	wait := time.Since(waitStart)
+	holdStart := time.Now()
+	defer func() {
+		hold := time.Since(holdStart)
+		writerMu.Unlock()
+		recordWriterTiming("route_mask_index", wait, hold, dbschema.CreateRouteMaskPendingIndexSQL)
+	}()
+	// PREFLIGHT: async=true reason="partial index over transmissions; one full-table scan, measured 18-19.5 s cold on a 4.95 GB staging copy; runs after MQTT subscribe so IngestBuffer absorbs the write stall"
+	if _, err := d.ExecContext(ctx, dbschema.CreateRouteMaskPendingIndexSQL); err != nil {
+		return fmt.Errorf("create %s: %w", dbschema.RouteMaskPendingIndex, err)
+	}
 	return nil
 }
 
