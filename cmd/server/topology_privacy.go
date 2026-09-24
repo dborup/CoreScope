@@ -49,14 +49,14 @@ func (s *Server) filterBlacklistedFromTopology(data map[string]interface{}) map[
 		if !ok {
 			continue
 		}
-		hidden := s.topologyNodeHidden
+		hidden := (*Server).topologyNodeHidden
 		switch key {
 		case "topPairs":
-			hidden = s.topologyPairHidden
+			hidden = (*Server).topologyPairHidden
 		case "bestPathList":
-			hidden = s.topologyBestPathHidden
+			hidden = (*Server).topologyBestPathHidden
 		}
-		if nv, changed := filterTopologyList(key, v, hidden); changed {
+		if nv, changed := s.filterTopologyList(key, v, hidden); changed {
 			set(key, nv)
 		}
 	}
@@ -140,22 +140,28 @@ func topologyEntries(v interface{}) (entries []map[string]interface{}, native, o
 		}
 		return entries, false, true
 	}
+	// A local target, not the named result: taking the result's address
+	// would move it to the heap on every call, the native path included.
+	var converted []map[string]interface{}
 	b, err := json.Marshal(v)
-	if err != nil || json.Unmarshal(b, &entries) != nil {
+	if err != nil || json.Unmarshal(b, &converted) != nil {
 		return nil, false, false
 	}
-	for _, e := range entries {
+	for _, e := range converted {
 		if e == nil {
 			return nil, false, false
 		}
 	}
-	return entries, false, true
+	return converted, false, true
 }
 
 // filterTopologyList returns the part without hidden entries. changed is false
 // (and v is returned as is) when there is nothing to remove. A part that is not
 // a list of objects is replaced by an empty list — fail closed.
-func filterTopologyList(key string, v interface{}, hidden func(map[string]interface{}) bool) (interface{}, bool) {
+//
+// hidden is a method expression rather than a bound method value, so passing
+// it does not allocate on the per-request path.
+func (s *Server) filterTopologyList(key string, v interface{}, hidden func(*Server, map[string]interface{}) bool) (interface{}, bool) {
 	entries, _, ok := topologyEntries(v)
 	if !ok {
 		log.Printf("[privacy] topology: %s has an unexpected shape (%T); dropped", key, v)
@@ -163,7 +169,7 @@ func filterTopologyList(key string, v interface{}, hidden func(map[string]interf
 	}
 	first := -1
 	for i, e := range entries {
-		if hidden(e) {
+		if hidden(s, e) {
 			first = i
 			break
 		}
@@ -174,7 +180,7 @@ func filterTopologyList(key string, v interface{}, hidden func(map[string]interf
 	kept := make([]map[string]interface{}, first, len(entries)-1)
 	copy(kept, entries[:first])
 	for _, e := range entries[first+1:] {
-		if !hidden(e) {
+		if !hidden(s, e) {
 			kept = append(kept, e)
 		}
 	}
@@ -183,7 +189,8 @@ func filterTopologyList(key string, v interface{}, hidden func(map[string]interf
 
 // filterTopologyReach filters perObserverReach: observer id → {observer_name,
 // rings: [{hops, nodes: [...]}]}. Observers, rings and nodes are copied only
-// where something changes; anything unreadable is dropped.
+// where something changes (nothing is allocated when nothing is hidden);
+// anything unreadable is dropped.
 func (s *Server) filterTopologyReach(v interface{}) (interface{}, bool) {
 	var observers map[string]interface{}
 	converted := false
@@ -193,29 +200,42 @@ func (s *Server) filterTopologyReach(v interface{}) (interface{}, bool) {
 	case map[string]interface{}:
 		observers = m
 	default: // map[string]*ObserverReach or an unknown shape
+		var decoded map[string]interface{} // local: see topologyEntries
 		b, err := json.Marshal(v)
-		if err != nil || json.Unmarshal(b, &observers) != nil {
+		if err != nil || json.Unmarshal(b, &decoded) != nil {
 			log.Printf("[privacy] topology: perObserverReach has an unexpected shape (%T); dropped", v)
 			return map[string]interface{}{}, true
 		}
+		observers = decoded
 		converted = true
 	}
-	changed := converted
-	out := make(map[string]interface{}, len(observers))
+	var out map[string]interface{} // copy-on-write
+	touch := func() {
+		if out == nil {
+			out = make(map[string]interface{}, len(observers))
+			for k, val := range observers {
+				out[k] = val
+			}
+		}
+	}
+	if converted {
+		touch()
+	}
 	for id, ov := range observers {
 		obs, ok := ov.(map[string]interface{})
 		if !ok {
-			changed = true
+			touch()
+			delete(out, id)
 			continue
 		}
 		rings, ringsChanged, ok := s.filterReachRings(obs["rings"])
 		if !ok {
 			log.Printf("[privacy] topology: perObserverReach[%s].rings has an unexpected shape; dropped", id)
-			changed = true
+			touch()
+			delete(out, id)
 			continue
 		}
 		if !ringsChanged {
-			out[id] = obs
 			continue
 		}
 		cp := make(map[string]interface{}, len(obs))
@@ -223,26 +243,32 @@ func (s *Server) filterTopologyReach(v interface{}) (interface{}, bool) {
 			cp[k] = val
 		}
 		cp["rings"] = rings
+		touch()
 		out[id] = cp
-		changed = true
 	}
-	if !changed {
+	if out == nil {
 		return v, false
 	}
 	return out, true
 }
 
+// filterReachRings filters the nodes of each ring; rings are copied only when
+// their nodes change, and a non-native (converted) ring list is always
+// returned as the converted copy.
 func (s *Server) filterReachRings(v interface{}) (rings interface{}, changed, ok bool) {
 	entries, native, ok := topologyEntries(v)
 	if !ok {
 		return nil, false, false
 	}
-	out := make([]map[string]interface{}, len(entries))
+	var out []map[string]interface{} // copy-on-write
 	for i, ring := range entries {
-		nodes, nodesChanged := filterTopologyList("perObserverReach nodes", ring["nodes"], s.topologyNodeHidden)
+		nodes, nodesChanged := s.filterTopologyList("perObserverReach nodes", ring["nodes"], (*Server).topologyNodeHidden)
 		if !nodesChanged {
-			out[i] = ring
 			continue
+		}
+		if out == nil {
+			out = make([]map[string]interface{}, len(entries))
+			copy(out, entries)
 		}
 		cp := make(map[string]interface{}, len(ring))
 		for k, val := range ring {
@@ -250,10 +276,13 @@ func (s *Server) filterReachRings(v interface{}) (rings interface{}, changed, ok
 		}
 		cp["nodes"] = nodes
 		out[i] = cp
-		changed = true
 	}
-	if !changed && native {
+	switch {
+	case out != nil:
+		return out, true, true
+	case !native:
+		return entries, true, true
+	default:
 		return v, false, true
 	}
-	return out, changed || !native, true
 }
