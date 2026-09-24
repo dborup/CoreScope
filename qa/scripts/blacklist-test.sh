@@ -187,11 +187,56 @@ write_pubkey_patterns() {
     printf '"%s"\n' "$TEST_PUBKEY" >"$PK_QUOTED_PATTERN" )
 }
 
+# Whole-line variant, for lists of extracted values (one per line).
+file_has_line() {
+  local pattern_file="$1" file="$2"
+  grep -qxF -f "$pattern_file" -- "$file"
+}
+
 # grep FILE for a pattern file. Status is grep's: 0 found, 1 not found, 2 error.
 # Callers must not read 2 as "not found" — for a hide check that is a pass.
 file_has_pattern() {
   local pattern_file="$1" file="$2"
   grep -qF -f "$pattern_file" -- "$file"
+}
+
+# §10.1 topology. The route is /api/analytics/topology (cmd/server/routes.go);
+# /api/topology does not exist and the SPA fallback answers it 200 with HTML,
+# which used to pass as "clean". Only a 200 whose body has the TopologyResponse
+# shape can pass. The pubkeys it carries are the fields the server's
+# filterBlacklistedFromTopology filters: topRepeaters[].pubkey,
+# topPairs[].pubkeyA/pubkeyB, bestPathList[].pubkey, multiObsNodes[].pubkey and
+# perObserverReach{}.rings[].nodes[].pubkey. Those are extracted, lower-cased,
+# one per line, and compared whole-line with the canonical pubkey — not a text
+# grep over the body. Arrays the server filtered empty come back as null.
+# A shape mismatch makes jq exit non-zero ("not the expected topology JSON").
+TOPOLOGY_PUBKEYS_JQ='
+  def list(k): .[k] // [] | if type == "array" then . else error("\(k) is not an array") end;
+  if type != "object" then error("not an object") else . end
+  | . as $r
+  | if (["uniqueNodes","topRepeaters","topPairs","bestPathList","multiObsNodes","perObserverReach"]
+        | all(. as $k | $r | has($k))) and ((.uniqueNodes | type) == "number")
+    then . else error("missing topology fields") end
+  | [ (list("topRepeaters")[] | .pubkey),
+      (list("topPairs")[] | .pubkeyA, .pubkeyB),
+      (list("bestPathList")[] | .pubkey),
+      (list("multiObsNodes")[] | .pubkey),
+      (.perObserverReach // {}
+        | if type == "object" then . else error("perObserverReach is not an object") end
+        | .[] | (.rings // [])[] | (.nodes // [])[] | .pubkey) ]
+  | .[] | select(type == "string") | ascii_downcase'
+
+# Fetch the topology into $TMP/topo.json, setting TOPO_CODE. The analytics
+# recomputer answers 503 while it warms up after a restart; that is waited out
+# for up to RESTART_WAIT_S. Any other code is final.
+fetch_topology() {
+  local deadline=$(( $(date +%s) + RESTART_WAIT_S ))
+  while :; do
+    TOPO_CODE=$(fetch_code "$TARGET_URL/api/analytics/topology" "$TMP/topo.json")
+    [[ "$TOPO_CODE" == "503" ]] || return 0
+    (( $(date +%s) < deadline )) || return 0
+    sleep 3
+  done
 }
 
 wait_for_stats() {
@@ -219,28 +264,59 @@ restart_target() {
   return 0
 }
 
-# Mutate config.json on target. The pubkey travels on ssh's stdin, in the line
-# right after the remote script's first command, which reads it: bash -s reads
-# its script from stdin without reading ahead, so `read` gets exactly that line
-# (POSIX requires this of a shell reading commands from stdin). From there it
-# reaches jq/python3 through the environment. It is therefore in neither the
-# local ssh argv nor any remote argv; only the config path and the constant
-# mode are on the command line.
-set_blacklist_state() {
-  local mode="$1" q_cfg q_mode  # mode: add | remove
+# Run the remote config script on the target. MODE is check | add | remove.
+# The pubkey travels on ssh's stdin, in the line right after the remote
+# script's first command, which reads it: bash -s reads its script from stdin
+# without reading ahead, so `read` gets exactly that line (POSIX requires this
+# of a shell reading commands from stdin). From there it reaches jq/python3
+# through the environment. It is therefore in neither the local ssh argv nor
+# any remote argv; only the config path and the constant mode are on the
+# command line. Returns the remote status; for check: 0 = not blacklisted,
+# 10 = already blacklisted (any case), anything else = could not tell.
+#
+# add appends and remove drops only the exact canonical value, so the rest of
+# nodeBlacklist — order, duplicates, other spellings — is left as it was. add
+# only ever runs after check has shown the value absent, which is what makes
+# teardown's remove an exact undo.
+remote_config() {
+  local q_cfg q_mode
   printf -v q_cfg '%q' "$TARGET_CONFIG_PATH"
-  printf -v q_mode '%q' "$mode"
+  printf -v q_mode '%q' "$1"
   {
     printf 'IFS= read -r PK || exit 3\n%s\n' "$TEST_PUBKEY"
     cat <<'REMOTE'
 set -euo pipefail
 case "$PK" in ""|*[!0-9a-fA-F]*) echo "blacklist-test: pubkey on stdin is not hex" >&2; exit 3 ;; esac
+case "$MODE" in check|add|remove) ;; *) echo "blacklist-test: bad mode" >&2; exit 3 ;; esac
 export PK
+if [ "$MODE" = check ]; then
+  if command -v jq >/dev/null; then
+    if jq -e '(.nodeBlacklist // [])
+              | if type == "array" then . else error("nodeBlacklist is not an array") end
+              | any(.[]; type == "string" and ascii_downcase == (env.PK | ascii_downcase)) | not' \
+          "$CFG" >/dev/null; then
+      exit 0
+    else
+      rc=$?; [ "$rc" = 1 ] && exit 10; exit 4
+    fi
+  fi
+  python3 - "$CFG" <<'PY'
+import json, os, sys
+pk = os.environ["PK"].lower()
+try:
+    with open(sys.argv[1]) as f: bl = json.load(f).get("nodeBlacklist") or []
+except Exception:
+    sys.exit(4)
+if not isinstance(bl, list): sys.exit(4)
+sys.exit(10 if any(isinstance(x, str) and x.lower() == pk for x in bl) else 0)
+PY
+  exit 0
+fi
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 if command -v jq >/dev/null; then
   if [ "$MODE" = "add" ]; then
-    jq '.nodeBlacklist = ((.nodeBlacklist // []) + [env.PK] | unique)' "$CFG" > "$TMP"
+    jq '.nodeBlacklist = ((.nodeBlacklist // []) | if any(.[]; . == env.PK) then . else . + [env.PK] end)' "$CFG" > "$TMP"
   else
     jq '.nodeBlacklist = ((.nodeBlacklist // []) - [env.PK])' "$CFG" > "$TMP"
   fi
@@ -250,7 +326,7 @@ import json, os, sys
 cfg, mode, out = sys.argv[1:]
 pk = os.environ["PK"]
 with open(cfg) as f: d = json.load(f)
-bl = list(dict.fromkeys(d.get("nodeBlacklist") or []))
+bl = list(d.get("nodeBlacklist") or [])
 if mode == "add":
     if pk not in bl: bl.append(pk)
 else:
@@ -266,8 +342,11 @@ mv "$TMP" "$CFG"
 trap - EXIT
 REMOTE
   } | ssh_t "CFG=$q_cfg MODE=$q_mode bash -s"
-  local rc=$?
-  if (( rc != 0 )); then
+}
+
+set_blacklist_state() {
+  local mode="$1"  # add | remove
+  if ! remote_config "$mode"; then
     say "  ❌ ssh-failed: could not edit $TARGET_CONFIG_PATH ($mode)"
     return 1
   fi
@@ -529,6 +608,11 @@ main() {
     warn "error: TEST_NODE_PUBKEY must be hex (got: redacted)"
     exit 2
   fi
+  # One canonical form from here on: lower case, as the ingestor stores it
+  # (hex.EncodeToString) and the API returns it. The config entry, API paths,
+  # pattern files and the SQLite binding all use this value. (tr reads the
+  # value on stdin; only the character classes are arguments.)
+  TEST_PUBKEY=$(printf '%s' "$TEST_PUBKEY" | tr 'A-F' 'a-f')
   # Container name must match docker's allowed chars: [a-zA-Z0-9][a-zA-Z0-9_.-]*
   if ! [[ "$TARGET_CONTAINER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
     warn "error: TARGET_CONTAINER has illegal chars"
@@ -552,6 +636,11 @@ main() {
     warn "error: TARGET_URL must be an http(s) URL without whitespace, quotes or backslashes"
     exit 2
   fi
+  # The topology check parses JSON locally.
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "error: jq is required on the machine running this script"
+    exit 2
+  fi
 
   CURL_TIMEOUT="${CURL_TIMEOUT:-60}"
   RESTART_WAIT_S="${RESTART_WAIT_S:-120}"
@@ -561,6 +650,24 @@ main() {
   SSH_OPTS=(-i "$TARGET_SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o BatchMode=yes
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 
+  # Is the pubkey already a privacy rule on the target? If so, refuse before
+  # any side effect: teardown removes the pubkey, and would take the
+  # operator's rule with it. Case-insensitive, like the server's blacklist.
+  # Runs before the traps, so a refusal or a failure here tears nothing down,
+  # and the message does not name the pubkey. It prints nothing on success
+  # until the traps are in place, so a dead stdout still meets the trap.
+  local pre_rc=0
+  remote_config check || pre_rc=$?
+  if (( pre_rc == 10 )); then
+    say "  ❌ refused: TEST_NODE_PUBKEY is already in nodeBlacklist on the target."
+    say "     Teardown would remove that existing rule, so nothing was changed."
+    say "     Use a node that is not blacklisted."
+    exit 2
+  elif (( pre_rc != 0 )); then
+    say "  ❌ ssh-failed: could not read nodeBlacklist from $TARGET_CONFIG_PATH (exit $pre_rc) — nothing was changed"
+    exit 1
+  fi
+
   # Everything the run writes locally is private to it: $TMP is mode 700, and
   # the pattern files and responses inside are mode 600.
   umask 077
@@ -569,6 +676,7 @@ main() {
   TEARDOWN_DONE=0
   install_teardown_traps
   write_pubkey_patterns
+  say "=== preflight: TEST_NODE_PUBKEY is not in the target's nodeBlacklist — ok ==="
 
   # ---------------------------------------------------------------------------
   # §10.1 — hide
@@ -605,16 +713,22 @@ main() {
     fails=$((fails+1))
   fi
 
-  topo_code=$(fetch_code "$TARGET_URL/api/topology" "$TMP/topo.json")
-  if [[ "$topo_code" != "200" ]]; then
-    say "  ⚠️  /api/topology HTTP $topo_code — skipping topology assertion"
+  # Anything short of a well-formed topology fails: absence is only proven
+  # by a response that could have contained the pubkey.
+  fetch_topology
+  if [[ "$TOPO_CODE" != "200" ]]; then
+    say "  ❌ hide-failed: /api/analytics/topology HTTP $TOPO_CODE — topology not checked"
+    fails=$((fails+1))
+  elif ! jq -r "$TOPOLOGY_PUBKEYS_JQ" "$TMP/topo.json" >"$TMP/topo.pubkeys" 2>"$TMP/topo.err"; then
+    say "  ❌ hide-failed: /api/analytics/topology is not the expected topology JSON — topology not checked"
+    fails=$((fails+1))
   else
-    file_has_pattern "$PK_PATTERN" "$TMP/topo.json"
+    file_has_line "$PK_PATTERN" "$TMP/topo.pubkeys"
     case $? in
-      0) say "  ❌ hide-failed: /api/topology references blacklisted pubkey"
+      0) say "  ❌ hide-failed: /api/analytics/topology lists the blacklisted pubkey"
          fails=$((fails+1)) ;;
-      1) say "  ✅ topology clean" ;;
-      *) say "  ❌ hide-failed: could not search /api/topology response (grep error)"
+      1) say "  ✅ topology clean ($(grep -c . "$TMP/topo.pubkeys") pubkey fields checked)" ;;
+      *) say "  ❌ hide-failed: could not search /api/analytics/topology response (grep error)"
          fails=$((fails+1)) ;;
     esac
   fi

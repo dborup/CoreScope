@@ -312,6 +312,7 @@ case $1 in
         "$FAKE_REAL_JQ" -r '.nodeBlacklist // [] | .[] | ascii_downcase' "$FAKE_CONFIG" \
             >"$FAKE_STATE/live-blacklist" || exit 1
         { echo "restart"; cat "$FAKE_STATE/live-blacklist"; } >>"$FAKE_STATE/restarts" 2>/dev/null
+        "$FAKE_REAL_JQ" -c '.nodeBlacklist' "$FAKE_CONFIG" >>"$FAKE_STATE/restarts-raw"
         echo "$2" ;;
     exec)
         shift; [ "$1" = -i ] && shift
@@ -368,6 +369,39 @@ hidden() {
     [ "${FAKE_DETAIL_LEAK:-0}" = 1 ] && [ "${path#/api/nodes/}" != "$path" ] && return 1
     local b; for b in ${BL[@]+"${BL[@]}"}; do [ "$b" = "$1" ] && return 0; done; return 1
 }
+topo_el() {  # PART PUBKEY → one element of that part
+    local h=${2:0:2}
+    case $1 in
+        topRepeaters)     printf '{"hop":"%s","count":3,"name":"n","pubkey":"%s"}' "$h" "$2" ;;
+        topPairsA)        printf '{"hopA":"%s","hopB":"ee","count":1,"nameA":"n","nameB":null,"pubkeyA":"%s","pubkeyB":"%s"}' "$h" "$2" "$FAKE_THIRD" ;;
+        topPairsB)        printf '{"hopA":"ee","hopB":"%s","count":1,"nameA":null,"nameB":"n","pubkeyA":"%s","pubkeyB":"%s"}' "$h" "$FAKE_THIRD" "$2" ;;
+        bestPathList)     printf '{"hop":"%s","name":"n","pubkey":"%s","minDist":1,"observer_id":"obs1","observer_name":"o"}' "$h" "$2" ;;
+        multiObsNodes)    printf '{"hop":"%s","name":"n","pubkey":"%s","observers":[]}' "$h" "$2" ;;
+        perObserverReach) printf '{"hop":"%s","name":"n","pubkey":"%s","count":1}' "$h" "$2" ;;
+    esac
+}
+topo_part() {  # PART... → JSON array of the visible nodes (plus a leak), or null
+    local part n out='' sep=''
+    for part in "$@"; do
+        for n in $FAKE_NODES; do
+            hidden "$n" && continue
+            out+="$sep$(topo_el "$part" "$n")"; sep=','
+        done
+        if [ "${FAKE_TOPO_LEAK:-}" = "$part" ]; then
+            out+="$sep$(topo_el "$part" "$FAKE_TOPO_LEAK_PK")"; sep=','
+        fi
+    done
+    if [ -z "$out" ] || [ "${FAKE_TOPO:-}" = nulls ]; then printf 'null'; else printf '[%s]' "$out"; fi
+}
+topo_body() {
+    body='{"uniqueNodes":2,"avgHops":1.5,"medianHops":1,"maxHops":2,"hopDistribution":[{"hops":1,"count":2}],'
+    body+="\"topRepeaters\":$(topo_part topRepeaters),"
+    body+="\"topPairs\":$(topo_part topPairsA topPairsB),"
+    body+='"hopsVsSnr":[],"observers":[{"id":"obs1","name":"o"}],'
+    body+="\"perObserverReach\":{\"obs1\":{\"observer_name\":\"o\",\"rings\":[{\"hops\":1,\"nodes\":$(topo_part perObserverReach)}]}},"
+    body+="\"multiObsNodes\":$(topo_part multiObsNodes),"
+    body+="\"bestPathList\":$(topo_part bestPathList)}"
+}
 code=404; body='{"error":"not found"}'
 case $path in
     /api/stats) code=200; body='{"ok":true}' ;;
@@ -380,10 +414,22 @@ case $path in
         code=${FAKE_LIST_CODE:-200}; body='{"nodes":['; sep=''
         for n in $FAKE_NODES; do hidden "$n" && continue; body+="$sep{\"public_key\":\"$n\"}"; sep=','; done
         body+=']}' ;;
-    /api/topology)
-        code=200; body='{"nodes":['; sep=''
-        for n in $FAKE_NODES; do hidden "$n" && continue; body+="$sep\"$n\""; sep=','; done
-        body+=']}' ;;
+    /api/analytics/topology)
+        # cmd/server TopologyResponse. Pubkeys sit in topRepeaters[].pubkey,
+        # topPairs[].pubkeyA/B, bestPathList[].pubkey, multiObsNodes[].pubkey
+        # and perObserverReach{}.rings[].nodes[].pubkey. FAKE_TOPO picks a
+        # broken variant; FAKE_TOPO_LEAK puts the hidden node back into one part.
+        if [ "$hits" -le "${FAKE_TOPO_503:-0}" ]; then
+            code=503; body='{"error":"analytics warming up","retry_after_s":5}'
+        else
+            case ${FAKE_TOPO:-json} in
+                html)     code=200; body='<!DOCTYPE html><html><head><title>CoreScope</title></head><body><div id="app"></div></body></html>' ;;
+                badshape) code=200; body='{"nodes":[],"edges":[]}' ;;
+                notjson)  code=200; body='{"uniqueNodes": 2, "topRepeaters": [' ;;
+                500)      code=500; body='{"error":"internal"}' ;;
+                *)        code=200; topo_body ;;
+            esac
+        fi ;;
 esac
 printf '%s' "$body" >"$out"
 [ "$fmt" = '%{http_code}' ] && printf '%s' "$code"
@@ -422,13 +468,17 @@ FAKE
     chmod +x "$NOISY_BIN/sqlite3"
 
     FAKE_CONFIG="$FAKE/target/config.json"
-    ORIG_CONFIG='{"port":3000,"nodeBlacklist":["aa00aa00"],"mqtt":{"sources":[]}}'
+    # Unsorted, with a duplicate and an upper-case entry: the run must restore
+    # this array exactly — not sorted, not de-duplicated, not case-folded.
+    DEFAULT_CONFIG='{"port":3000,"nodeBlacklist":["ff00ff00","AA00AA00","ff00ff00"],"mqtt":{"sources":[]}}'
+    ORIG_CONFIG=$DEFAULT_CONFIG
+    PK_C="7777777777777777777777777777777777777777777777777777777777777777"
     SYNTH_TOKEN="synthetic-admin-token-not-a-secret-83"
     export FAKE_ARGV_LOG="$FAKE/argv.log" FAKE_STATE FAKE_CROOT FAKE_CONFIG
     export FAKE_REAL_TEE; FAKE_REAL_TEE=$(command -v tee)
     export FAKE_REAL_JQ; FAKE_REAL_JQ=$(command -v jq)
     export FAKE_CONTAINER="corescope-stub" FAKE_URL="http://target.invalid"
-    export FAKE_NODES="$PK_A $PK_B"
+    export FAKE_NODES="$PK_A $PK_B" FAKE_THIRD="$PK_C" FAKE_TOPO_LEAK_PK="$PK_A"
     ALL_ARGV="$FAKE/all-argv.log"; : >"$ALL_ARGV"
     RUN_N=0
     # Optional strace evidence (Linux): needs strace and an EMPTY directory, so
@@ -452,14 +502,15 @@ FAKE
     run_full() {
         local kv wrap=()
         rm -rf "$FAKE_STATE"; mkdir -p "$FAKE_STATE"; : >"$FAKE_STATE/live-blacklist"
-        printf '%s\n' "$ORIG_CONFIG" >"$FAKE_CONFIG"
+        printf '%s\n' "$ORIG_CONFIG" >"$FAKE_CONFIG"; chmod 640 "$FAKE_CONFIG"
+        CONFIG_SUM=$(cksum <"$FAKE_CONFIG"); CONFIG_PERM=$(config_perm)
         : >"$FAKE_ARGV_LOG"
         FILES_BEFORE=$(snapshot_files)
         RUN_N=$((RUN_N + 1))
         (
             unset TARGET_DB_PATH ADMIN_API_TOKEN TARGET_CONTAINER_DB_PATH TARGET_HOST_DB_PATH \
                   FAKE_CONTAINER_SQLITE FAKE_SIGNAL_ON FAKE_SIGNAL FAKE_SIGNAL_NTH FAKE_LEAK \
-                  FAKE_DETAIL_LEAK FAKE_LIST_CODE \
+                  FAKE_DETAIL_LEAK FAKE_LIST_CODE FAKE_TOPO FAKE_TOPO_503 FAKE_TOPO_LEAK \
                   FAKE_SSH_FAIL_CMD FAKE_SSH_FAIL_FROM
             export TEST_NODE_PUBKEY="$PK_A" TARGET_SSH_HOST="stub-host" TARGET_SSH_KEY="/nonexistent/key" \
                    TARGET_CONFIG_PATH="$FAKE_CONFIG" TARGET_CONTAINER="$FAKE_CONTAINER" \
@@ -485,6 +536,10 @@ FAKE
         RUN_OUT=$(cat "$FAKE/out"); RUN_ERR=$(cat "$FAKE/err")
         cat "$FAKE_ARGV_LOG" >>"$ALL_ARGV"
     }
+    config_perm() { ls -l "$FAKE_CONFIG" | awk '{print $1, $3, $4}'; }
+    # GNU chmod --reference is what the remote edit uses to keep the mode; the
+    # macOS fake "remote" lacks it, so mode is only compared where it exists.
+    GNU_CHMOD=0; chmod --reference="$FIXTURE_DIR" "$FIXTURE_DIR" 2>/dev/null && GNU_CHMOD=1
     restarts() {
         if [ -f "$FAKE_STATE/restarts" ]; then awk '$0 == "restart" { n++ } END { print n + 0 }' "$FAKE_STATE/restarts"
         else echo 0; fi
@@ -510,6 +565,8 @@ FAKE
         assert_true "$label: no new or leftover files"    files_unchanged
         assert_true "$label: argv log recorded the run"   test -s "$FAKE_ARGV_LOG"
         assert_true "$label: pubkey not in any argv"      lacks "$(cat "$FAKE_ARGV_LOG")" "$PK_A"
+        assert_true "$label: upper-case pubkey not in any argv" lacks "$(cat "$FAKE_ARGV_LOG")" "$PK_A_UPPER"
+        if [ "$GNU_CHMOD" = 1 ]; then assert_eq "$label: config mode/owner kept" "$CONFIG_PERM" "$(config_perm)"; fi
         assert_true "$label: SQL not in any argv"         lacks "$(cat "$FAKE_ARGV_LOG")" "SELECT"
         assert_true "$label: token not in any argv"       lacks "$(cat "$FAKE_ARGV_LOG")" "$SYNTH_TOKEN"
         assert_true "$label: remote input exactly as built" remote_input_clean
@@ -524,7 +581,7 @@ FAKE
             cmd=$(cat "$FAKE_STATE/ssh.$n.cmd"); first=$(head -n 1 "$FAKE_STATE/ssh.$n.stdin")
             case $cmd in
                 *"bash -s")
-                    [[ "$cmd" =~ ^CFG=[^[:space:]]+\ MODE=(add|remove)\ bash\ -s$ ]] || { echo "  unexpected edit cmd: $cmd" >&2; return 1; }
+                    [[ "$cmd" =~ ^CFG=[^[:space:]]+\ MODE=(check|add|remove)\ bash\ -s$ ]] || { echo "  unexpected edit cmd: $cmd" >&2; return 1; }
                     [ "$first" = "IFS= read -r PK || exit 3" ] || { echo "  unexpected edit stdin: $first" >&2; return 1; } ;;
                 *sqlite3*)
                     [ "$first" = ".parameter init" ] || { echo "  unexpected sqlite stdin: $first" >&2; return 1; } ;;
@@ -542,13 +599,15 @@ FAKE
     assert_true "host fallback: runner named" contains "$RUN_OUT" "sqlite3 runner: host (TARGET_HOST_DB_PATH)"
     assert_true "host fallback: host db count" contains "$RUN_OUT" "DB retains 3 packets"
     assert_true "host fallback: hidden"        contains "$RUN_OUT" "hide ok: detail=404 in_list=0"
-    assert_true "host fallback: topology"      contains "$RUN_OUT" "topology clean"
+    assert_true "host fallback: topology"      contains "$RUN_OUT" "✅ topology clean"
     assert_true "host fallback: teardown ok"   contains "$RUN_OUT" "teardown ok"
     assert_eq   "host fallback: two restarts"  "2" "$(restarts)"
     # The pubkey reached the app through the stdin edit: the first restart saw
     # it in the blacklist, the second (teardown) did not.
-    assert_eq   "stdin edit: added, then removed" "restart $PK_A aa00aa00 restart aa00aa00" \
+    assert_eq   "stdin edit: appended, then removed" "restart ff00ff00 aa00aa00 ff00ff00 $PK_A restart ff00ff00 aa00aa00 ff00ff00" \
                 "$(tr '\n' ' ' <"$FAKE_STATE/restarts" | sed 's/ $//')"
+    assert_eq   "blacklist order, duplicate and case kept while added" \
+                "[\"ff00ff00\",\"AA00AA00\",\"ff00ff00\",\"$PK_A\"]" "$(head -n 1 "$FAKE_STATE/restarts-raw")"
     common_after "host fallback"
     assert_true "host fallback: container path never used" lacks "$(cat "$FAKE_ARGV_LOG")" "$CONTAINER_DB_PATH"
     assert_true "host fallback: host path used"      argv_has "$HOST_DB_PATH"
@@ -561,6 +620,9 @@ FAKE
     assert_true "curl reads its URL from stdin"       grep -q '^curl .*-K -' "$FAKE_ARGV_LOG"
     assert_true "no URL in curl argv"                 lacks "$(grep '^curl ' "$FAKE_ARGV_LOG")" "$FAKE_URL"
     edit=$(ssh_call "bash -s")
+    assert_eq   "first remote call is the read-only check" \
+                "CFG=$FAKE_CONFIG MODE=check bash -s" "$(cat "$FAKE_STATE/ssh.1.cmd")"
+    edit=$(ssh_call "MODE=add bash -s")
     assert_eq   "config-edit command carries no value" \
                 "CFG=$FAKE_CONFIG MODE=add bash -s" "$(cat "$FAKE_STATE/ssh.$edit.cmd")"
     assert_eq   "config-edit stdin: pubkey is line 2" "$PK_A" "$(sed -n 2p "$FAKE_STATE/ssh.$edit.stdin")"
@@ -634,7 +696,8 @@ FAKE
     run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REMOTE_PATH="$SHIM_NOJQ_DIR"
     assert_eq   "python3 edit: exit 0" "0" "$RUN_RC"
     assert_true "python3 edit: python3 did the edit" grep -q '^python3 - ' "$FAKE_ARGV_LOG"
-    assert_true "python3 edit: jq not used remotely" lacks "$(cat "$FAKE_ARGV_LOG")" "jq "
+    assert_true "python3 edit: jq not used remotely" lacks "$(grep '^jq ' "$FAKE_ARGV_LOG")" "nodeBlacklist"
+    assert_true "python3 edit: python3 did the check" grep -q "^python3 - $FAKE_CONFIG\$" "$FAKE_ARGV_LOG"
     common_after "python3 edit"
 
     # 10. Removed variables refuse to start: nothing runs against the target.
@@ -659,7 +722,7 @@ FAKE
     run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_LEAK=1
     assert_eq   "server leaks: exit 2" "2" "$RUN_RC"
     assert_true "server leaks: hide-failed" contains "$RUN_OUT" "hide-failed: detail=200 in_list=1"
-    assert_true "server leaks: topology hide-failed" contains "$RUN_OUT" "/api/topology references blacklisted pubkey"
+    assert_true "server leaks: topology hide-failed" contains "$RUN_OUT" "/api/analytics/topology lists the blacklisted pubkey"
     common_after "server leaks"
 
     # 11b. grep itself failing is a failure, never "pubkey absent" (which, for
@@ -670,7 +733,7 @@ FAKE
     run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REAL_PATH="$GREP_ERR_BIN:$ORIG_PATH"
     assert_eq   "grep error: both searches fail" "2" "$RUN_RC"
     assert_true "grep error: list classified" contains "$RUN_OUT" "could not search /api/nodes response"
-    assert_true "grep error: topology classified" contains "$RUN_OUT" "could not search /api/topology response"
+    assert_true "grep error: topology classified" contains "$RUN_OUT" "could not search /api/analytics/topology response"
     assert_true "grep error: no hide ok claimed" lacks "$RUN_OUT" "hide ok"
     common_after "grep error"
 
@@ -700,9 +763,87 @@ FAKE
     assert_true "noisy sqlite3: classified" contains "$RUN_OUT" "retain-failed: no sqlite3 able to bind"
     common_after "noisy sqlite3"
 
+    # 11f. PRE-BLACKLISTED (issue #83 review): the pubkey is already a privacy
+    #      rule on the target. The run must refuse before any side effect —
+    #      teardown would otherwise remove the operator's rule — and must not
+    #      print the pubkey. Lower- and upper-case entries, jq and python3.
+    for pre in "lower:$PK_A:$SHIM_DIR" "upper:$PK_A_UPPER:$SHIM_DIR" "python3:$PK_A_UPPER:$SHIM_NOJQ_DIR"; do
+        label="pre-blacklisted ${pre%%:*}"; entry=${pre#*:}; entry=${entry%%:*}; rpath=${pre##*:}
+        ORIG_CONFIG="{\"nodeBlacklist\":[\"ff00ff00\",\"$entry\"],\"port\":3000}"
+        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_REMOTE_PATH="$rpath"
+        assert_eq   "$label: refused, exit 2" "2" "$RUN_RC"
+        assert_true "$label: says why" contains "$RUN_OUT$RUN_ERR" "already in nodeBlacklist"
+        assert_eq   "$label: no restart" "0" "$(restarts)"
+        assert_eq   "$label: config bytes unchanged" "$CONFIG_SUM" "$(cksum <"$FAKE_CONFIG")"
+        assert_eq   "$label: config mode/owner unchanged" "$CONFIG_PERM" "$(config_perm)"
+        assert_eq   "$label: entry still blacklisted" "$entry" "$(jq -r '.nodeBlacklist[1]' "$FAKE_CONFIG")"
+        assert_true "$label: no add/remove sent" lacks "$(cat "$FAKE_STATE"/ssh.*.cmd)" "MODE=add"
+        assert_true "$label: no teardown remove" lacks "$(cat "$FAKE_STATE"/ssh.*.cmd)" "MODE=remove"
+        assert_true "$label: no API call" lacks "$(cat "$FAKE_ARGV_LOG")" "curl "
+        assert_true "$label: pubkey not printed" lacks "$RUN_OUT$RUN_ERR" "$PK_A"
+        assert_true "$label: upper pubkey not printed" lacks "$RUN_OUT$RUN_ERR" "$PK_A_UPPER"
+        common_after "$label"
+    done
+    ORIG_CONFIG=$DEFAULT_CONFIG
+    # The check itself failing (ssh down) is a failure before any side effect.
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SSH_FAIL_CMD="MODE=check" FAKE_SSH_FAIL_FROM=1
+    assert_eq   "blacklist check unreachable: exit 1" "1" "$RUN_RC"
+    assert_true "blacklist check unreachable: classified" contains "$RUN_OUT" "ssh-failed: could not read nodeBlacklist"
+    assert_eq   "blacklist check unreachable: no restart" "0" "$(restarts)"
+    assert_eq   "blacklist check unreachable: config bytes unchanged" "$CONFIG_SUM" "$(cksum <"$FAKE_CONFIG")"
+
+    # 11g. Topology is /api/analytics/topology, and only a 200 with the expected
+    #      JSON shape can pass. Everything else fails — never skipped.
+    for bad in "html:not the expected topology JSON" "badshape:not the expected topology JSON" \
+               "notjson:not the expected topology JSON" "500:/api/analytics/topology HTTP 500"; do
+        v=${bad%%:*}; want=${bad#*:}
+        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO="$v"
+        assert_eq   "topology $v: fails" "1" "$RUN_RC"
+        assert_true "topology $v: classified" contains "$RUN_OUT" "$want"
+        assert_true "topology $v: not clean" lacks "$RUN_OUT" "topology clean"
+        assert_true "topology $v: not skipped" lacks "$RUN_OUT" "skipping topology"
+        common_after "topology $v"
+    done
+    # Warm-up 503s after the restart are waited out; a 503 that never ends fails.
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=2
+    assert_eq   "topology warm-up then 200: passes" "0" "$RUN_RC"
+    assert_true "topology warm-up then 200: clean" contains "$RUN_OUT" "✅ topology clean"
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=999
+    assert_eq   "topology stuck warming up: fails" "1" "$RUN_RC"
+    assert_true "topology stuck warming up: classified" contains "$RUN_OUT" "/api/analytics/topology HTTP 503"
+    common_after "topology stuck warming up"
+    # Arrays the server nulls out after filtering are a valid, clean shape.
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO=nulls
+    assert_eq   "topology null arrays: clean" "0" "$RUN_RC"
+    assert_true "topology null arrays: reported clean" contains "$RUN_OUT" "✅ topology clean"
+    # The blacklisted pubkey back in each part, in both cases.
+    for part in topRepeaters topPairsA topPairsB bestPathList multiObsNodes perObserverReach; do
+        for leak in "$PK_A" "$PK_A_UPPER"; do
+            run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_LEAK="$part" FAKE_TOPO_LEAK_PK="$leak"
+            assert_eq   "topology leak in $part (${leak:0:4}): fails" "1" "$RUN_RC"
+            assert_true "topology leak in $part (${leak:0:4}): classified" contains "$RUN_OUT" "/api/analytics/topology lists the blacklisted pubkey"
+        done
+    done
+    common_after "topology leak"
+    # The old route must not be what is asked for.
+    assert_true "old /api/topology route never requested" lacks "$(cat "$FAKE_STATE"/hits.* 2>/dev/null; ls "$FAKE_STATE")" "hits._api_topology"
+
+    # 11h. Upper-case TEST_NODE_PUBKEY while the API and the database hold the
+    #      canonical lower-case form: one canonical value everywhere.
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" TEST_NODE_PUBKEY="$PK_A_UPPER"
+    assert_eq   "upper-case input: passes" "0" "$RUN_RC"
+    assert_true "upper-case input: hidden" contains "$RUN_OUT" "hide ok: detail=404 in_list=0"
+    assert_true "upper-case input: topology" contains "$RUN_OUT" "✅ topology clean"
+    assert_true "upper-case input: db count" contains "$RUN_OUT" "DB retains 3 packets"
+    assert_true "upper-case input: teardown ok" contains "$RUN_OUT" "teardown ok"
+    assert_eq   "upper-case input: config got the canonical form" \
+                "[\"ff00ff00\",\"AA00AA00\",\"ff00ff00\",\"$PK_A\"]" "$(head -n 1 "$FAKE_STATE/restarts-raw")"
+    assert_true "upper-case input: detail path canonical" test -f "$FAKE_STATE/hits._api_nodes_$(printf '%s' "$PK_A" | tr -c 'a-z\n' '_')"
+    common_after "upper-case input"
+
     # 12. Signals mid-run: classified exit, full teardown.
     for sig in TERM:143 INT:130 HUP:129; do
-        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SIGNAL_ON=/api/topology FAKE_SIGNAL="${sig%%:*}"
+        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SIGNAL_ON=/api/analytics/topology FAKE_SIGNAL="${sig%%:*}"
         assert_eq   "SIG${sig%%:*} mid-run: exit ${sig#*:}" "${sig#*:}" "$RUN_RC"
         assert_true "SIG${sig%%:*} mid-run: teardown ok" contains "$RUN_OUT" "teardown ok"
         assert_eq   "SIG${sig%%:*} mid-run: two restarts" "2" "$(restarts)"
@@ -710,7 +851,7 @@ FAKE
     done
 
     # 13. SIGTERM mid-run and a failing teardown restart → 143 + 1.
-    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SIGNAL_ON=/api/topology FAKE_SIGNAL=TERM \
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_SIGNAL_ON=/api/analytics/topology FAKE_SIGNAL=TERM \
              FAKE_SSH_FAIL_CMD="docker restart" FAKE_SSH_FAIL_FROM=2
     assert_eq   "SIGTERM + failed teardown: exit 144" "144" "$RUN_RC"
     assert_true "SIGTERM + failed teardown: classified" contains "$RUN_OUT" "teardown-failed"
