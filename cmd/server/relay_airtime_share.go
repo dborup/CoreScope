@@ -26,10 +26,11 @@ import (
 // preset 869.6 MHz / BW 62.5 kHz / SF 8 / CR 4/5, with the
 // SF-dependent preamble pulled from internal/lora.PreambleForSF.
 //
-// Aggregated by payload_type, except ADVERT packets which are split into flood
-// and zero-hop route classes. Originator TX is deliberately excluded — a
-// never-relayed direct message scores 0, which is the correct framing for a
-// "relay amplification" metric. In-memory only; no SQL, no new index.
+// Aggregated by payload_type, except ADVERT packets which are split into
+// route classes (flood, zero-hop, mixed, legacy). Originator TX is
+// deliberately excluded — a never-relayed direct message scores 0, which is
+// the correct framing for a "relay amplification" metric. In-memory only; no
+// SQL, no new index.
 
 // defaultLoRaPreset is the canonical fallback when config is absent.
 // Matches the reporter's `get radio` output `869.6179809, 62.5, 8, 5`.
@@ -307,13 +308,16 @@ func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 }
 
 // computeRelayAirtimeShare aggregates relay-airtime-share per payload_type,
-// separating ADVERT rows by their flood and zero-hop route classes.
+// separating ADVERT rows by their route class (see advertRouteClass).
 //
-// The route class is the route_type stored on the transmission, which is the
-// route of the first observation the ingestor inserted for that content hash.
 // The content hash ignores route bits, so a contact re-shared as a zero-hop
-// advert has the same hash as the original flood advert; later observations
-// never change the stored route (see cmd/ingestor InsertTransmission).
+// advert has the same hash as the original flood advert. The route class
+// comes from transmissions.route_mask, every raw route observed for the hash
+// (#89): only route bits 0/1 is flood, only route bits 2/3 is zero-hop
+// (direct), both groups is mixed; each hash is counted once. Only while the
+// mask is not known (not backfilled yet) or has no usable route bits does it
+// fall back to the legacy first-inserted route_type ("legacy" when that is
+// not a valid route either).
 //
 // Returns:
 //
@@ -321,8 +325,8 @@ func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 //	  "rows":        [{payload_type, type, route_class, count, count_pct, score, airtime_pct}, ...]
 //	                 sorted by airtime_pct desc, where type is the numeric payload type,
 //	                 payload_type the display label and route_class "flood" / "zero_hop" /
-//	                 "legacy" on ADVERT rows and null otherwise; up to three ADVERT rows
-//	                 share type 4, and (type, route_class) identifies each row,
+//	                 "mixed" / "legacy" on ADVERT rows and null otherwise; up to four
+//	                 ADVERT rows share type 4, and (type, route_class) identifies each row,
 //	  "total_count": int,
 //	  "total_score": int64 (nanoseconds of LoRa Time-on-Air × repeater-count, summed across packets),
 //	  "window":      window label,
