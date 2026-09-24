@@ -329,3 +329,41 @@ func TestHealthz_ReportsRouteMaskBackfill(t *testing.T) {
 		t.Fatalf("healthz route_mask_backfill = %+v, want pending remaining=1", body.RouteMask)
 	}
 }
+
+// Payload Type Mix stays one combined ADVERT entry even when the masks mark
+// transmissions as flood, zero-hop and mixed.
+func TestPayloadTypeMix_AdvertStaysCombinedWithRouteMasks(t *testing.T) {
+	store := relayAirtimeSplitStore(mixedAdvertFixtures())
+	masks := []uint8{0b1010, 0b0010, 0b1000, 0b0001}
+	i := 0
+	for _, tx := range store.packets {
+		if tx.PayloadType != nil && *tx.PayloadType == PayloadADVERT {
+			tx.routeMask, tx.routeMaskKnown = masks[i%len(masks)], true
+			i++
+		}
+	}
+	encoded, err := json.Marshal(store.computeAnalyticsRF("", "", TimeWindow{})["payloadTypes"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []struct {
+		Type  int    `json:"type"`
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	if err := json.Unmarshal(encoded, &entries); err != nil {
+		t.Fatal(err)
+	}
+	var adverts int
+	for _, e := range entries {
+		if e.Type == PayloadADVERT {
+			adverts++
+			if e.Name != "ADVERT" || e.Count != 6 {
+				t.Errorf("ADVERT entry = %+v, want name ADVERT count 6", e)
+			}
+		}
+	}
+	if adverts != 1 {
+		t.Fatalf("Payload Type Mix has %d ADVERT entries, want exactly 1", adverts)
+	}
+}

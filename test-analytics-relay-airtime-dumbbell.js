@@ -180,6 +180,15 @@ if (typeof render === 'function') {
     assert.ok(!/both flood and zero-hop routes/.test(titleOf(rows[0])), 'flood row has no mixed explanation');
   });
 
+  test('mixed colour and tooltip come from route_class, not the display label', () => {
+    const relabelled = { rows: [Object.assign({}, mixedResponse.rows[1], { payload_type: 'Advert, both routes' })], total_count: 5, total_score: 2e9 };
+    const rows = rowsOf(render(relabelled));
+    assert.strictEqual(airtimeColourOf(rows[0]), 'var(--status-purple)');
+    assert.ok(/counted once/.test(titleOf(rows[0])));
+    const labelOnly = { rows: [Object.assign({}, mixedResponse.rows[0], { payload_type: 'ADVERT (mixed)' })], total_count: 30, total_score: 6e9 };
+    assert.notStrictEqual(airtimeColourOf(rowsOf(render(labelOnly))[0]), 'var(--status-purple)', 'a flood row labelled "(mixed)" is not mixed');
+  });
+
   test('mixed colour does not depend on the row position', () => {
     const onlyMixed = { rows: [mixedResponse.rows[1]], total_count: 5, total_score: 2e9 };
     const rows = rowsOf(render(onlyMixed));
