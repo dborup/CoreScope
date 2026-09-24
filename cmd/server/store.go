@@ -3224,7 +3224,6 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			continue // transmission not yet in store
 		}
 		tx.mergeRouteMask(r.routeMask)
-		tx.mergeObservationRoute(r.rawHex)
 
 		// Dedup by observer + path (O(1) map lookup)
 		dk := r.observerID + "|" + r.pathJSON

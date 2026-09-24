@@ -154,8 +154,9 @@ func TestRouteMask_ColdAndChunkedLoadKeepMask(t *testing.T) {
 
 // Live ingest must end with the same masks a cold load of the same database
 // produces: new transmissions carry their mask, and a new observation of an
-// existing transmission brings its route bit even when the server polls
-// before the ingestor's OR has committed.
+// existing transmission brings its route bit. The ingestor ORs the bit into
+// transmissions.route_mask before it writes the observation row, so a poll
+// that sees the observation also sees the bit.
 func TestRouteMask_IncrementalIngestMatchesColdLoad(t *testing.T) {
 	db := routeMaskServerDB(t)
 	rmSeed(t, db)
@@ -164,20 +165,18 @@ func TestRouteMask_IncrementalIngestMatchesColdLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts := time.Now().UTC().Add(-30 * time.Minute)
-	// New transmission, then a zero-hop observation of the known flood tx
-	// whose OR has not reached transmissions.route_mask yet.
+	// New transmission, then a zero-hop observation of the known flood tx.
 	rmInsertTx(t, db, 4, "new-zero-hop", 3, 0b1000, ts.Format(time.RFC3339))
 	rmInsertObs(t, db, 5, 4, 2, `[]`, "130000000000", ts.Unix())
 	s.IngestNewFromDB(3, 100)
+	if _, err := db.conn.Exec(`UPDATE transmissions SET route_mask = route_mask | 8 WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
 	rmInsertObs(t, db, 6, 2, 2, `[]`, "130000000000", ts.Unix())
 	s.IngestNewObservations(5, 100)
 	got := rmSnapshot(s)
 	if got["flood"] != (rmView{0b1010, true}) || got["new-zero-hop"] != (rmView{0b1000, true}) {
 		t.Fatalf("after incremental ingest: %v", got)
-	}
-	// The ingestor's OR lands; a cold load must agree with the live view.
-	if _, err := db.conn.Exec(`UPDATE transmissions SET route_mask = route_mask | 8 WHERE id = 2`); err != nil {
-		t.Fatal(err)
 	}
 	cold := NewPacketStore(db, nil)
 	if err := cold.Load(); err != nil {

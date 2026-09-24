@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 // Issue #89: transmissions.route_mask records every raw route type (0..3)
@@ -239,5 +241,58 @@ func TestInsertTransmission_RouteMaskLeavesLegacyNullAndNeverClears(t *testing.T
 	routeMaskInsert(t, s, routeMaskObs{firstIngestedFloodRaw, "obs-b", routeMaskT5})
 	if mask, _ := routeMaskOf(t, s, hash); mask.Int64 != 15 {
 		t.Fatalf("route_mask = %v after a later observation, want 1111 (bits are never cleared)", mask)
+	}
+}
+
+// A server poll that sees an observation row must also see its route bit in
+// transmissions.route_mask; otherwise the server can store the observation
+// with a mask that lacks the bit and never re-read it. A trigger records the
+// mask at the moment each observation row is written (insert or upsert).
+func TestInsertTransmission_ObservationIsVisibleOnlyWithItsRouteBit(t *testing.T) {
+	s := routeMaskStore(t, filepath.Join(t.TempDir(), "visible.db"))
+	defer s.Close()
+	for _, q := range []string{
+		`CREATE TABLE obs_mask_seen (obs_id INTEGER, raw_hex TEXT, mask INTEGER)`,
+		`CREATE TRIGGER obs_mask_probe_ins AFTER INSERT ON observations BEGIN
+			INSERT INTO obs_mask_seen SELECT NEW.id, NEW.raw_hex, route_mask FROM transmissions WHERE id = NEW.transmission_id; END`,
+		`CREATE TRIGGER obs_mask_probe_upd AFTER UPDATE ON observations BEGIN
+			INSERT INTO obs_mask_seen SELECT NEW.id, NEW.raw_hex, route_mask FROM transmissions WHERE id = NEW.transmission_id; END`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range []routeMaskObs{
+		{firstIngestedFloodRaw, "obs-a", routeMaskT0},
+		{firstIngestedZeroHopRaw, "obs-b", routeMaskT5},
+		{firstIngestedZeroHopRaw, "obs-a", routeMaskT0},
+		{routeMaskFlood0HopRaw, "obs-a", routeMaskT5}, // upserts the previous row
+	} {
+		routeMaskInsert(t, s, o)
+	}
+	rows, err := s.db.Query(`SELECT obs_id, raw_hex, mask FROM obs_mask_seen ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var n int
+	for rows.Next() {
+		var id int64
+		var raw string
+		var mask sql.NullInt64
+		if err := rows.Scan(&id, &raw, &mask); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		rt, ok := packetpath.RouteTypeFromRawHex(raw)
+		if !ok {
+			t.Fatalf("obs %d: unparseable raw_hex %q", id, raw)
+		}
+		if bit := packetpath.RouteMaskBit(rt); !mask.Valid || mask.Int64&bit == 0 {
+			t.Fatalf("obs %d (route %d) became visible while route_mask was %v, without its bit", id, rt, mask)
+		}
+	}
+	if n < 4 {
+		t.Fatalf("probe saw %d observation writes, want at least 4", n)
 	}
 }

@@ -1181,6 +1181,19 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		s.Stats.DuplicateTransmissions.Add(1)
 	}
 
+	// #89: record this observation's route in the transmission's route_mask
+	// before the observation row exists. The server reads the mask together
+	// with new observation rows, so an observation must never be visible
+	// without its bit. writerMu keeps the backfill out for the whole function.
+	// Skipped when the bit is already set or the row is still an un-backfilled
+	// legacy row (NULL), which the backfill owns.
+	if !isNew && routeBit != 0 && existingMask.Valid && existingMask.Int64&routeBit == 0 {
+		if _, err := s.stmtOrTxRouteMask.Exec(routeBit, txID, routeBit); err != nil {
+			s.Stats.WriteErrors.Add(1)
+			log.Printf("[db] route_mask update (non-fatal): %v", err)
+		}
+	}
+
 	// Resolve observer_idx and update last_seen
 	var observerIdx *int64
 	if data.ObserverID != "" {
@@ -1236,19 +1249,6 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		// backwards on out-of-order ingest.
 		if _, err := s.stmtBumpTxLastSeen.Exec(epochTs, txID, epochTs); err != nil {
 			log.Printf("[db] tx last_seen bump (non-fatal): %v", err)
-		}
-	}
-
-	// #89: record this observation's route in the transmission's route_mask.
-	// Deliberately after the observation insert: a concurrent backfill batch
-	// that runs between the two statements then already sees this
-	// observation's frame, and one that ran before it leaves a known mask this
-	// OR extends. Skipped when the bit is already set or the row is still an
-	// un-backfilled legacy row (NULL).
-	if !isNew && routeBit != 0 && existingMask.Valid && existingMask.Int64&routeBit == 0 {
-		if _, err := s.stmtOrTxRouteMask.Exec(routeBit, txID, routeBit); err != nil {
-			s.Stats.WriteErrors.Add(1)
-			log.Printf("[db] route_mask update (non-fatal): %v", err)
 		}
 	}
 

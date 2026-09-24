@@ -24,20 +24,6 @@ func (tx *StoreTx) mergeRouteMask(v sql.NullInt64) {
 	tx.routeMaskKnown = true
 }
 
-// mergeObservationRoute ORs the route bit of a newly ingested observation's
-// frame into a known mask. The ingestor ORs the same bit into the database
-// right after inserting the observation, so a poll that lands in between
-// would otherwise miss it. Unknown (legacy NULL) masks stay unknown so the
-// live view never claims more than a cold load of the same database.
-func (tx *StoreTx) mergeObservationRoute(rawHex string) {
-	if !tx.routeMaskKnown {
-		return
-	}
-	if rt, ok := packetpath.RouteTypeFromRawHex(rawHex); ok {
-		tx.routeMask |= uint8(packetpath.RouteMaskBit(rt))
-	}
-}
-
 // RouteMaskBackfillStatus is the read-only view of the ingestor's route_mask
 // backfill, reported on /api/healthz and the Relay Airtime Share response.
 //   - pending: the column or the pending index does not exist yet, or rows
