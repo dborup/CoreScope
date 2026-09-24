@@ -383,13 +383,18 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 		if s.db.hasScopeName() {
 			scopeNameCol = ", t.scope_name"
 		}
+		// #89: route_mask follows scope_name as the last optional column.
+		routeMaskCol := ""
+		if s.db.hasRouteMask() {
+			routeMaskCol = ", t.route_mask"
+		}
 
 		var chunkSQL string
 		if s.db.isV3() {
 			chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 					t.payload_type, t.payload_version, t.decoded_json,
 					o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-					o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + `
+					o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 				FROM (SELECT * FROM transmissions t2 ` + whereClause + ` ORDER BY t2.id ASC LIMIT ` + fmt.Sprintf("%d", chunkSize) + `) AS t
 				LEFT JOIN observations o ON o.transmission_id = t.id
 				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -398,7 +403,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 			chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 					t.payload_type, t.payload_version, t.decoded_json,
 					o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-					o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + `
+					o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 				FROM (SELECT * FROM transmissions t2 ` + whereClause + ` ORDER BY t2.id ASC LIMIT ` + fmt.Sprintf("%d", chunkSize) + `) AS t
 				LEFT JOIN observations o ON o.transmission_id = t.id
 				LEFT JOIN observers obs ON obs.id = o.observer_id
@@ -512,6 +517,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 		var obsRawHex sql.NullString
 		var resolvedPathStr sql.NullString
 		var scopeName sql.NullString
+		var routeMask sql.NullInt64
 
 		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
 			&payloadVersion, &decodedJSON,
@@ -525,6 +531,9 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 		}
 		if s.db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
+		}
+		if s.db.hasRouteMask() {
+			scanArgs = append(scanArgs, &routeMask)
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
@@ -553,6 +562,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
+			tx.mergeRouteMask(routeMask)
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			if txID > s.maxTxID {

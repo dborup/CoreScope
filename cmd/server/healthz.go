@@ -74,5 +74,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// here. Defaults to {"initializing","",""} until a later, separate
 	// wiring phase ever calls s.setPingScoreHistoryStatus.
 	resp["ping_scores_history"] = s.pingScoreHistoryStatusView()
+	// #89: route_mask backfill status, computed read-only from the database
+	// (never "complete" while a transmission still has no mask).
+	if s.db != nil {
+		resp["route_mask_backfill"] = s.db.routeMaskBackfillStatus()
+	}
 	json.NewEncoder(w).Encode(resp)
 }

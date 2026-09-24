@@ -87,7 +87,13 @@ type DB struct {
 	hasDefaultScopeConfirmedAtFlag schemaFlag    // nodes.default_scope_confirmed_at (#1865 follow-up) -- read via hasDefaultScopeConfirmedAt()
 	hasMultibyteSupColsFlag        schemaFlag    // nodes.multibyte_sup (#903) -- read via hasMultibyteSupCols()
 	hasLastSeenFlag                schemaFlag    // transmissions.last_seen (#1690) -- read via hasLastSeen()
+	hasRouteMaskFlag               schemaFlag    // transmissions.route_mask (#89) -- read via hasRouteMask()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
+
+	// route_mask backfill status cache (#89), see route_mask_status.go.
+	routeMaskStatusMu  sync.Mutex
+	routeMaskStatus    RouteMaskBackfillStatus
+	routeMaskStatusExp time.Time
 
 	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
 	channelsCacheMu  sync.Mutex
@@ -110,6 +116,7 @@ func (db *DB) hasConfiguredScope() bool         { return db.hasConfiguredScopeFl
 func (db *DB) hasDefaultScopeConfirmedAt() bool { return db.hasDefaultScopeConfirmedAtFlag.get() }
 func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsFlag.get() }
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
+func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
 
 // OpenDB opens a read-only SQLite connection with WAL mode.
 func OpenDB(path string) (*DB, error) {
@@ -147,7 +154,7 @@ func (db *DB) healSchemaFlags() {
 	flags := []*schemaFlag{
 		&db.isV3Flag, &db.hasResolvedPathFlag, &db.hasObsRawHexFlag, &db.hasScopeNameFlag,
 		&db.hasDefaultScopeFlag, &db.hasConfiguredScopeFlag, &db.hasDefaultScopeConfirmedAtFlag,
-		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag,
+		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag, &db.hasRouteMaskFlag,
 	}
 	allTrue := func() bool {
 		for _, f := range flags {
@@ -231,6 +238,9 @@ func (db *DB) detectSchema() {
 			}
 			if colName == "last_seen" {
 				db.hasLastSeenFlag.forceTrue()
+			}
+			if colName == "route_mask" {
+				db.hasRouteMaskFlag.forceTrue()
 			}
 		}
 	}

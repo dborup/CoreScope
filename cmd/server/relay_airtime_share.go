@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/lora"
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 // relay_airtime_share.go — issues #1359 + #1768
@@ -204,6 +205,7 @@ const (
 	relayAirtimeAdvertUnknown relayAirtimeAdvertRoute = iota
 	relayAirtimeAdvertFlood
 	relayAirtimeAdvertZeroHop
+	relayAirtimeAdvertMixed // #89: the same content hash was seen on flood and zero-hop routes
 )
 
 type relayAirtimeBucketKey struct {
@@ -211,20 +213,44 @@ type relayAirtimeBucketKey struct {
 	advertRoute relayAirtimeAdvertRoute
 }
 
-// relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
-// two ADVERT behaviours defined by MeshCore's route bits. Unknown/legacy route
-// values deliberately keep the historical unsuffixed ADVERT bucket rather than
-// being silently assigned to either behaviour. tx.PayloadType must be non-nil.
-func relayAirtimeKey(tx *StoreTx) relayAirtimeBucketKey {
-	key := relayAirtimeBucketKey{payloadType: *tx.PayloadType}
-	if key.payloadType != PayloadADVERT || tx.RouteType == nil {
-		return key
+// advertRouteClass is the single place that classifies an ADVERT's route.
+// With a known route_mask (#89) it uses every raw route observed for the
+// hash, so the result does not depend on ingest order: only routes 0/1 is
+// flood, only routes 2/3 is zero-hop, both groups is mixed. Without usable
+// mask bits (column absent, row not backfilled yet, or no valid route ever
+// recorded) it falls back to the legacy first-inserted route_type, and
+// NULL/out-of-range values stay unknown (the historical ADVERT bucket).
+func advertRouteClass(tx *StoreTx) relayAirtimeAdvertRoute {
+	if tx.routeMaskKnown && int64(tx.routeMask)&packetpath.RouteMaskAll != 0 {
+		flood := int64(tx.routeMask)&packetpath.RouteMaskFlood != 0
+		direct := int64(tx.routeMask)&packetpath.RouteMaskDirect != 0
+		switch {
+		case flood && direct:
+			return relayAirtimeAdvertMixed
+		case flood:
+			return relayAirtimeAdvertFlood
+		default:
+			return relayAirtimeAdvertZeroHop
+		}
+	}
+	if tx.RouteType == nil {
+		return relayAirtimeAdvertUnknown
 	}
 	switch *tx.RouteType {
 	case RouteTransportFlood, RouteFlood:
-		key.advertRoute = relayAirtimeAdvertFlood
+		return relayAirtimeAdvertFlood
 	case RouteDirect, RouteTransportDirect:
-		key.advertRoute = relayAirtimeAdvertZeroHop
+		return relayAirtimeAdvertZeroHop
+	}
+	return relayAirtimeAdvertUnknown
+}
+
+// relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
+// ADVERT route classes (see advertRouteClass). tx.PayloadType must be non-nil.
+func relayAirtimeKey(tx *StoreTx) relayAirtimeBucketKey {
+	key := relayAirtimeBucketKey{payloadType: *tx.PayloadType}
+	if key.payloadType == PayloadADVERT {
+		key.advertRoute = advertRouteClass(tx)
 	}
 	return key
 }
@@ -242,6 +268,8 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 		return name + " (flood)"
 	case relayAirtimeAdvertZeroHop:
 		return name + " (zero-hop)"
+	case relayAirtimeAdvertMixed:
+		return name + " (mixed)"
 	default:
 		return name
 	}
@@ -253,6 +281,7 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 const (
 	relayAirtimeRouteClassFlood   = "flood"
 	relayAirtimeRouteClassZeroHop = "zero_hop"
+	relayAirtimeRouteClassMixed   = "mixed"
 	relayAirtimeRouteClassLegacy  = "legacy"
 )
 
@@ -269,6 +298,8 @@ func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 		class = relayAirtimeRouteClassFlood
 	case relayAirtimeAdvertZeroHop:
 		class = relayAirtimeRouteClassZeroHop
+	case relayAirtimeAdvertMixed:
+		class = relayAirtimeRouteClassMixed
 	default:
 		class = relayAirtimeRouteClassLegacy
 	}
@@ -433,6 +464,11 @@ func (s *PacketStore) GetRelayAirtimeShareWithWindow(window TimeWindow) map[stri
 	s.cacheMu.Unlock()
 
 	result := s.computeRelayAirtimeShare(window)
+	// #89: outside s.mu. While the route_mask backfill is not complete, some
+	// ADVERT rows are still classified by their legacy first-inserted route.
+	if s.db != nil {
+		result["route_mask_backfill"] = s.db.routeMaskBackfillStatus()
+	}
 
 	s.cacheMu.Lock()
 	s.rfCache[cacheKey] = &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)}
