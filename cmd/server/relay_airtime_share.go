@@ -25,7 +25,8 @@ import (
 // preset 869.6 MHz / BW 62.5 kHz / SF 8 / CR 4/5, with the
 // SF-dependent preamble pulled from internal/lora.PreambleForSF.
 //
-// Aggregated by payload_type. Originator TX is deliberately excluded — a
+// Aggregated by payload_type, except ADVERT packets which are split into flood
+// and zero-hop route classes. Originator TX is deliberately excluded — a
 // never-relayed direct message scores 0, which is the correct framing for a
 // "relay amplification" metric. In-memory only; no SQL, no new index.
 
@@ -197,12 +198,100 @@ func (s *PacketStore) AirtimeAndRelayCountForTransmission(txID int64) (total tim
 	return total, relays, true
 }
 
-// computeRelayAirtimeShare aggregates relay-airtime-share per payload_type.
+type relayAirtimeAdvertRoute uint8
+
+const (
+	relayAirtimeAdvertUnknown relayAirtimeAdvertRoute = iota
+	relayAirtimeAdvertFlood
+	relayAirtimeAdvertZeroHop
+)
+
+type relayAirtimeBucketKey struct {
+	payloadType int
+	advertRoute relayAirtimeAdvertRoute
+}
+
+// relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
+// two ADVERT behaviours defined by MeshCore's route bits. Unknown/legacy route
+// values deliberately keep the historical unsuffixed ADVERT bucket rather than
+// being silently assigned to either behaviour. tx.PayloadType must be non-nil.
+func relayAirtimeKey(tx *StoreTx) relayAirtimeBucketKey {
+	key := relayAirtimeBucketKey{payloadType: *tx.PayloadType}
+	if key.payloadType != PayloadADVERT || tx.RouteType == nil {
+		return key
+	}
+	switch *tx.RouteType {
+	case RouteTransportFlood, RouteFlood:
+		key.advertRoute = relayAirtimeAdvertFlood
+	case RouteDirect, RouteTransportDirect:
+		key.advertRoute = relayAirtimeAdvertZeroHop
+	}
+	return key
+}
+
+func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
+	name := payloadTypeNames[key.payloadType]
+	if name == "" {
+		name = "UNK"
+	}
+	if key.payloadType != PayloadADVERT {
+		return name
+	}
+	switch key.advertRoute {
+	case relayAirtimeAdvertFlood:
+		return name + " (flood)"
+	case relayAirtimeAdvertZeroHop:
+		return name + " (zero-hop)"
+	default:
+		return name
+	}
+}
+
+// Machine-readable ADVERT route classes, returned as route_class. They are
+// part of the API contract and deliberately independent of the display
+// labels built by relayAirtimeBucketName.
+const (
+	relayAirtimeRouteClassFlood   = "flood"
+	relayAirtimeRouteClassZeroHop = "zero_hop"
+	relayAirtimeRouteClassLegacy  = "legacy"
+)
+
+// relayAirtimeRouteClass returns the route_class value for a row: one of the
+// constants above for ADVERT rows and nil (JSON null) for every other payload
+// type, so (type, route_class) identifies each row.
+func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
+	if key.payloadType != PayloadADVERT {
+		return nil
+	}
+	var class string
+	switch key.advertRoute {
+	case relayAirtimeAdvertFlood:
+		class = relayAirtimeRouteClassFlood
+	case relayAirtimeAdvertZeroHop:
+		class = relayAirtimeRouteClassZeroHop
+	default:
+		class = relayAirtimeRouteClassLegacy
+	}
+	return &class
+}
+
+// computeRelayAirtimeShare aggregates relay-airtime-share per payload_type,
+// separating ADVERT rows by their flood and zero-hop route classes.
+//
+// The route class is the route_type stored on the transmission, which is the
+// route of the first observation the ingestor inserted for that content hash.
+// The content hash ignores route bits, so a contact re-shared as a zero-hop
+// advert has the same hash as the original flood advert; later observations
+// never change the stored route (see cmd/ingestor InsertTransmission).
 //
 // Returns:
 //
 //	{
-//	  "rows":        [{payload_type, type, count, count_pct, score, airtime_pct}, ...] sorted by airtime_pct desc,
+//	  "rows":        [{payload_type, type, route_class, count, count_pct, score, airtime_pct}, ...]
+//	                 sorted by airtime_pct desc, where type is the numeric payload type,
+//	                 payload_type the display label and route_class "flood" / "zero_hop" /
+//	                 "legacy" on ADVERT rows and null otherwise; up to three ADVERT rows
+//	                 share type 4, and (type, route_class) identifies each row,
 //	  "total_count": int,
 //	  "total_score": int64 (nanoseconds of LoRa Time-on-Air × repeater-count, summed across packets),
 //	  "window":      window label,
@@ -212,14 +301,13 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ptNames := payloadTypeNames
 	preset := s.resolveLoRaPreset()
 
 	type bucket struct {
 		count int
 		score int64 // sum of ToA(payload) × relays, in nanoseconds
 	}
-	buckets := make(map[int]*bucket)
+	buckets := make(map[relayAirtimeBucketKey]*bucket)
 	seenHash := make(map[string]bool, len(s.packets))
 	totalCount := 0
 	var totalScore int64
@@ -240,11 +328,11 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 			}
 			seenHash[tx.Hash] = true
 		}
-		pt := *tx.PayloadType
-		b := buckets[pt]
+		key := relayAirtimeKey(tx)
+		b := buckets[key]
 		if b == nil {
 			b = &bucket{}
-			buckets[pt] = b
+			buckets[key] = b
 		}
 		b.count++
 		totalCount++
@@ -261,11 +349,8 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 	}
 
 	rows := make([]map[string]interface{}, 0, len(buckets))
-	for pt, b := range buckets {
-		name := ptNames[pt]
-		if name == "" {
-			name = "UNK"
-		}
+	for key, b := range buckets {
+		name := relayAirtimeBucketName(key)
 		var countPct, airtimePct float64
 		if totalCount > 0 {
 			countPct = float64(b.count) / float64(totalCount) * 100.0
@@ -275,7 +360,8 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 		}
 		rows = append(rows, map[string]interface{}{
 			"payload_type": name,
-			"type":         pt,
+			"type":         key.payloadType,
+			"route_class":  relayAirtimeRouteClass(key),
 			"count":        b.count,
 			"count_pct":    countPct,
 			"score":        b.score,
@@ -283,8 +369,8 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 		})
 	}
 
-	// Sort descending by airtime_pct; tiebreak count desc, then name asc
-	// for deterministic ordering.
+	// Sort descending by airtime_pct; tiebreak count desc, then name asc,
+	// then numeric type asc for deterministic ordering.
 	sort.SliceStable(rows, func(i, j int) bool {
 		ai, _ := rows[i]["airtime_pct"].(float64)
 		aj, _ := rows[j]["airtime_pct"].(float64)
@@ -298,7 +384,13 @@ func (s *PacketStore) computeRelayAirtimeShare(window TimeWindow) map[string]int
 		}
 		ni, _ := rows[i]["payload_type"].(string)
 		nj, _ := rows[j]["payload_type"].(string)
-		return ni < nj
+		if ni != nj {
+			return ni < nj
+		}
+		// Unnamed payload types all share the "UNK" label.
+		ti, _ := rows[i]["type"].(int)
+		tj, _ := rows[j]["type"].(int)
+		return ti < tj
 	})
 
 	label := ""
