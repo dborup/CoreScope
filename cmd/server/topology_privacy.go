@@ -50,11 +50,8 @@ func (s *Server) filterBlacklistedFromTopology(data map[string]interface{}) map[
 			continue
 		}
 		hidden := (*Server).topologyNodeHidden
-		switch key {
-		case "topPairs":
+		if key == "topPairs" {
 			hidden = (*Server).topologyPairHidden
-		case "bestPathList":
-			hidden = (*Server).topologyBestPathHidden
 		}
 		if nv, changed := s.filterTopologyList(key, v, hidden); changed {
 			set(key, nv)
@@ -98,7 +95,10 @@ func (s *Server) topologyNameHidden(v interface{}) bool {
 	}
 }
 
-// topRepeaters, multiObsNodes and perObserverReach nodes.
+// topRepeaters, bestPathList, multiObsNodes and perObserverReach nodes. The
+// entry carries the node's resolved name, so nothing is looked up per entry
+// (an isPubkeyHidden database query per bestPathList entry was up to 50
+// queries a request).
 func (s *Server) topologyNodeHidden(e map[string]interface{}) bool {
 	return s.topologyPubkeyHidden(e["pubkey"]) || s.topologyNameHidden(e["name"])
 }
@@ -107,16 +107,6 @@ func (s *Server) topologyNodeHidden(e map[string]interface{}) bool {
 func (s *Server) topologyPairHidden(e map[string]interface{}) bool {
 	return s.topologyPubkeyHidden(e["pubkeyA"]) || s.topologyPubkeyHidden(e["pubkeyB"]) ||
 		s.topologyNameHidden(e["nameA"]) || s.topologyNameHidden(e["nameB"])
-}
-
-// bestPathList: the entry's own pubkey and name, plus — as this part always
-// did — the node's stored name (isPubkeyHidden).
-func (s *Server) topologyBestPathHidden(e map[string]interface{}) bool {
-	if s.topologyPubkeyHidden(e["pubkey"]) || s.topologyNameHidden(e["name"]) {
-		return true
-	}
-	pk, _ := e["pubkey"].(string)
-	return pk != "" && s.isPubkeyHidden(pk)
 }
 
 // topologyEntries reads a list part as its entries. ok is false when v is not
