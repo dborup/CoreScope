@@ -68,6 +68,9 @@ async function openChannels(browser, errors, options) {
 // Keyboard focus lands on the control, matches :focus-visible, and the
 // existing focus rule (.ch-icon-btn:focus { opacity: 1 }) takes effect. The
 // opacity has a 0.15s transition, so wait for its end state, not a time.
+// This checks the focus state and the existing opacity cue only; the same
+// rule also sets outline: none (unchanged here, as on master), so no focus
+// ring is asserted.
 async function assertFocused(page, selector, name) {
   const st = await page.evaluate((sel) => {
     const e = document.querySelector(sel);
@@ -188,7 +191,10 @@ async function main() {
       await dp.focus(SHARE); // the closed modal does not have to hand focus back
       await dp.keyboard.press('Tab');
       await assertFocused(dp, REMOVE, 'remove (Tab from share)');
-      const dialog = new Promise((resolve) => dp.once('dialog', (d) => { const text = d.message(); d.dismiss().then(() => resolve(text)); }));
+      // waitForEvent has a timeout, so a missing confirmation fails the step
+      // instead of hanging the run.
+      const dialog = dp.waitForEvent('dialog', { timeout: 10000 })
+        .then(async (d) => { const text = d.message(); await d.dismiss(); return text; });
       await dp.keyboard.press('Enter');
       const text = await dialog;
       assert(/Remove channel/.test(text), 'remove did not ask for confirmation: ' + text);
