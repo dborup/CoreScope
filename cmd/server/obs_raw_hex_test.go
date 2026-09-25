@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,11 +139,10 @@ func TestObservationRawHexForHashReturnsDatabaseErrors(t *testing.T) {
 	}
 }
 
-func TestPacketDetailReturns500WhenObservationFrameLookupFails(t *testing.T) {
-	db := setupTestDB(t)
-	db.hasObsRawHexFlag.forceTrue()
-	hash, _ := seedDistinctFrames(t, db, "1999deadbeef0011")
-
+// newStoreBackedRouter serves the packet API from a loaded in-memory store, so
+// transmissions seeded before the call take the handler's store path.
+func newStoreBackedRouter(t *testing.T, db *DB) (*Server, *mux.Router) {
+	t.Helper()
 	srv := NewServer(db, &Config{Port: 3000}, NewHub())
 	store := NewPacketStore(db, nil)
 	if err := store.Load(); err != nil {
@@ -154,6 +154,37 @@ func TestPacketDetailReturns500WhenObservationFrameLookupFails(t *testing.T) {
 	srv.store = store
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
+	return srv, router
+}
+
+// assertGenericFrameFailure pins the client-facing side of a failed
+// observation-frame lookup: HTTP 500 with exactly the generic message, and
+// nothing from the database error in the body. The deny-list is checked
+// case-insensitively; none of its entries occur in the generic message itself
+// ("observation frames" is not "observations").
+func assertGenericFrameFailure(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	body := w.Body.String()
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500 for failed observation-frame lookup (body: %s)", w.Code, body)
+	}
+	if got, want := strings.TrimSpace(body), `{"error":"Failed to load observation frames"}`; got != want {
+		t.Fatalf("body = %s, want exactly %s", got, want)
+	}
+	lower := strings.ToLower(body)
+	for _, leak := range []string{"no such column", "sql", "sqlite", "raw_hex", "observations", ":memory:", ".db", "/"} {
+		if strings.Contains(lower, leak) {
+			t.Errorf("response body leaks %q: %s", leak, body)
+		}
+	}
+}
+
+func TestPacketDetailReturns500WhenObservationFrameLookupFails(t *testing.T) {
+	db := setupTestDB(t)
+	db.hasObsRawHexFlag.forceTrue()
+	hash, _ := seedDistinctFrames(t, db, "1999deadbeef0011")
+
+	_, router := newStoreBackedRouter(t, db)
 	if err := db.conn.Close(); err != nil {
 		t.Fatalf("close test database: %v", err)
 	}
@@ -161,11 +192,78 @@ func TestPacketDetailReturns500WhenObservationFrameLookupFails(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/packets/"+hash, nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("got %d, want 500 for failed observation-frame lookup (body: %s)", w.Code, w.Body.String())
+	assertGenericFrameFailure(t, w)
+}
+
+// TestObservationFrameFailuresAfterTransmissionLookup covers the error branches
+// that come after the transmission lookup succeeded: the observation query, the
+// row scan, and an error raised while stepping to a later row (rows.Err). Each
+// is provoked through a real SQLite schema change made after the store loaded
+// and after the column was detected, not through a test seam:
+//   - query:   observations.raw_hex is dropped (schema drift under a stale flag);
+//   - scan:    observations becomes a view whose id is not an integer;
+//   - iterate: observations becomes a view whose raw_hex expression fails at
+//     runtime on every stored frame except the first one the query returns.
+//     The driver steps the first row inside Query, so the failure surfaces
+//     from rows.Next. Rows without a frame are left alone because the scan
+//     may visit them before the first match, and the failing expression
+//     depends on the row (`'{' || id`) because SQLite hoists constant ones.
+func TestObservationFrameFailuresAfterTransmissionLookup(t *testing.T) {
+	const viewCols = `transmission_id, observer_idx, direction, snr, rssi, score,
+		path_json, timestamp, resolved_path`
+	cases := []struct {
+		name    string
+		wantErr string
+		breakDB func(t *testing.T, db *DB, txHash string)
+	}{
+		{"query", "query observation frames", func(t *testing.T, db *DB, _ string) {
+			mustExec(t, db, `ALTER TABLE observations DROP COLUMN raw_hex`)
+		}},
+		{"scan", "scan observation frame", func(t *testing.T, db *DB, _ string) {
+			mustExec(t, db, `ALTER TABLE observations RENAME TO observations_real`)
+			mustExec(t, db, `CREATE VIEW observations AS SELECT 'not-an-int' AS id, `+viewCols+`,
+				raw_hex FROM observations_real`)
+		}},
+		{"iterate", "iterate observation frames", func(t *testing.T, db *DB, txHash string) {
+			// The row the production query returns first must still succeed,
+			// otherwise the error would surface from Query instead. Ask SQLite
+			// with the same statement ObservationRawHexForHash runs.
+			var txID, firstID int
+			if err := db.conn.QueryRow("SELECT id FROM transmissions WHERE hash = ?", txHash).Scan(&txID); err != nil {
+				t.Fatalf("find transmission: %v", err)
+			}
+			if err := db.conn.QueryRow(
+				`SELECT id, raw_hex FROM observations
+		 WHERE transmission_id = ? AND raw_hex IS NOT NULL AND raw_hex <> ''`, txID).Scan(&firstID, new(string)); err != nil {
+				t.Fatalf("find first frame row: %v", err)
+			}
+			mustExec(t, db, `ALTER TABLE observations RENAME TO observations_real`)
+			mustExec(t, db, fmt.Sprintf(`CREATE VIEW observations AS SELECT id, `+viewCols+`,
+				CASE WHEN id <> %d AND raw_hex IS NOT NULL AND raw_hex <> ''
+					THEN json_extract('{' || id, '$') ELSE raw_hex END AS raw_hex
+				FROM observations_real`, firstID))
+		}},
 	}
-	if !strings.Contains(w.Body.String(), "Failed to load observation frames") {
-		t.Fatalf("response does not report the observation-frame failure: %s", w.Body.String())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			db.hasObsRawHexFlag.forceTrue()
+			hash, _ := seedDistinctFrames(t, db, "1999c0ffee000011")
+			_, router := newStoreBackedRouter(t, db)
+			tc.breakDB(t, db, hash)
+
+			got, err := db.ObservationRawHexForHash(hash)
+			if err == nil {
+				t.Fatalf("got frames %v and nil error, want the %s error", got, tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not identify the failed operation %q", err, tc.wantErr)
+			}
+
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/packets/"+hash, nil))
+			assertGenericFrameFailure(t, w)
+		})
 	}
 }
 
@@ -250,18 +348,7 @@ func TestPacketDetailExposesPerObservationFramesFromStore(t *testing.T) {
 	// handler never reaches its DB fallback.
 	hash, ids := seedDistinctFrames(t, db, "1999aabbccdd0011")
 
-	cfg := &Config{Port: 3000}
-	srv := NewServer(db, cfg, NewHub())
-	store := NewPacketStore(db, nil)
-	if err := store.Load(); err != nil {
-		t.Fatalf("store.Load: %v", err)
-	}
-	if !store.WaitIndexesReady(5 * time.Second) {
-		t.Fatal("background indexes never became ready")
-	}
-	srv.store = store
-	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
+	srv, router := newStoreBackedRouter(t, db)
 
 	if got := srv.store.GetPacketByHash(hash); got == nil {
 		t.Fatal("precondition failed: the store does not hold the seeded transmission")

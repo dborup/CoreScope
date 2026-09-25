@@ -1011,9 +1011,12 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 // bytes. Keeping the memory saving and paying one query on the packet-detail
 // path, which is a single packet a human is looking at, is the trade this makes.
 //
-// Two indexed lookups regardless of observation count: transmissions.hash via
-// idx_transmissions_hash, then observations.transmission_id via
-// idx_observations_transmission_id.
+// Two indexed lookups regardless of observation count: transmissions.hash,
+// then observations.transmission_id. Which index SQLite picks is the planner's
+// choice; on the migrated e2e fixture EXPLAIN QUERY PLAN shows the UNIQUE
+// autoindex sqlite_autoindex_transmissions_1 and the composite
+// idx_observations_tx_ts (idx_transmissions_hash and
+// idx_observations_transmission_id also cover these columns).
 func (db *DB) ObservationRawHexForHash(hash string) (map[int]string, error) {
 	if db == nil || db.conn == nil || !db.hasObsRawHex() || hash == "" {
 		return nil, nil
