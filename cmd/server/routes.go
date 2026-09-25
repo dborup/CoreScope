@@ -3327,7 +3327,10 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("WARN GetEncryptedChannels: %v", err)
 			} else {
-				channels = append(channels, encrypted...)
+				// channels is GetChannels' cached slice: the full slice
+				// expression forces append to copy instead of writing into
+				// spare capacity of the shared backing array.
+				channels = append(channels[:len(channels):len(channels)], encrypted...)
 			}
 		}
 		writeJSON(w, ChannelListResponse{Channels: channels})
@@ -3336,7 +3339,10 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		channels := s.store.GetChannels(region)
 		if includeEncrypted {
-			channels = append(channels, s.store.GetEncryptedChannels(region)...)
+			// channels is GetChannels' cached slice: the full slice
+			// expression forces append to copy instead of writing into
+			// spare capacity of the shared backing array.
+			channels = append(channels[:len(channels):len(channels)], s.store.GetEncryptedChannels(region)...)
 		}
 		writeJSON(w, ChannelListResponse{Channels: channels})
 		return
