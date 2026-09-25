@@ -85,6 +85,20 @@ jobs:
           go test ./...
           echo "--- Decrypt CLI tests passed ---"
 
+      # internal/anomaly is its own module (not wired into any binary), so the
+      # server/ingestor steps above do not reach it. No -fuzz and no -bench:
+      # fuzz targets run their in-code seeds only, benchmarks do not run.
+      - name: Vet and test anomaly library (internal/anomaly, with -race)
+        run: |
+          set -e -o pipefail
+          cd internal/anomaly
+          go vet ./...
+          go test ./...
+          go test -race -v ./... 2>&1 | tee anomaly-race-test.log
+          passed=$(grep -c -- '^--- PASS: ' anomaly-race-test.log || true)
+          echo "--- Anomaly library: ${passed} top-level tests passed under -race ---"
+          test "${passed}" -gt 0
+
       - name: Verify Dockerfile COPY invariants (issue #1316)
         run: bash scripts/check-dockerfile-internal-pkgs.sh
 
