@@ -15,8 +15,13 @@ import (
 // the newest pulse with one period P: a gap g is explained if
 // |g - k*P| <= tol(P) for some k in 1..MaxMissing+1 (k-1 missing pulses).
 //
-// Candidate periods come from recent gaps divided by k, refined with the
-// phase estimator (chain span / periods spanned). They are ranked by
+// Candidate periods come from recent gaps divided by k, and the best is
+// refined with the phase estimator (chain span / periods spanned). Where a
+// candidate misses some of the newest gaps that one common period explains,
+// that period is measured too (chainRefined); the best such period replaces
+// the estimate only if it would signal (meets the criteria, Chance within
+// MaxChance) and strictly outranks it.
+// Candidates are ranked by
 // (meets MinPulses/MinCoverage/MaxJitterFraction first, then chain length
 // desc, coverage desc, median residual asc, period asc). A multiple of the
 // true period cannot explain the gaps of the true period, so its chain
@@ -92,7 +97,10 @@ func classFlags(c TrafficClass) pulseFlags {
 // goroutine), so periodic evaluation neither allocates per event nor keeps
 // buffers per key.
 type periodicScratch struct {
-	resid, med, seen []int64
+	resid, med, seen, seenRef []int64
+	// work counters (chains measured, gaps visited), for bound tests and
+	// benchmarks
+	chains, steps uint64
 }
 
 // periodicSignal is a hot evaluation result.
@@ -156,6 +164,21 @@ func (c chainInfo) preferred(o chainInfo, r *PeriodicRule) bool {
 	return c.better(o)
 }
 
+// outranks is preferred without the final tie-break on the period: an exact
+// tie on everything that describes the chain keeps o.
+func (c chainInfo) outranks(o chainInfo, r *PeriodicRule) bool {
+	if cm, om := c.meets(r), o.meets(r); cm != om {
+		return cm
+	}
+	if c.gaps != o.gaps {
+		return c.gaps > o.gaps
+	}
+	if c.coverage != o.coverage {
+		return c.coverage > o.coverage
+	}
+	return c.residual < o.residual
+}
+
 func (c chainInfo) better(o chainInfo) bool {
 	if c.gaps != o.gaps {
 		return c.gaps > o.gaps
@@ -205,7 +228,9 @@ func (p *periodicState) chainFor(period int64, r *PeriodicRule, sc *periodicScra
 	c := chainInfo{period: period, tol: tolNanos(r, period)}
 	scratch := sc.resid[:0]
 	maxK := r.MaxMissing + 1
+	sc.chains++
 	for i := p.n - 1; i >= 1; i-- {
+		sc.steps++
 		g := p.at(i) - p.at(i-1)
 		k, d := explain(g, period, c.tol, maxK)
 		if k == 0 {
@@ -332,7 +357,14 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 	if newest+tolNanos(r, maxP) < minP-tolNanos(r, minP) || newest > int64(maxK)*maxP+tolNanos(r, maxP) {
 		return best
 	}
-	seen := sc.seen[:0]
+	// The seeds and the phase refinement below give exactly the estimate
+	// they give without refined candidates; the best refined candidate
+	// (ranked on its own) replaces that estimate only if it would signal and
+	// strictly outranks it. So the search never returns a chain the seeds
+	// alone would rank higher, and until a refined period would signal it
+	// changes nothing.
+	var bestRef chainInfo
+	seen, seenRef := sc.seen[:0], sc.seenRef[:0]
 	for i := p.n - 1; i >= 1 && i >= p.n-recentGaps; i-- {
 		g := p.at(i) - p.at(i-1)
 		for k := 1; k <= maxK; k++ {
@@ -344,27 +376,138 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 				continue
 			}
 			seen = append(seen, cand)
-			c := p.chainFor(cand, r, sc)
+			c, ref := p.chainRefined(cand, r, sc)
 			if c.gaps > 0 && (best.gaps == 0 || c.preferred(best, r)) {
+				best = c
+			}
+			if ref != cand && !slices.Contains(seenRef, ref) && !slices.Contains(seen, ref) {
+				seenRef = append(seenRef, ref)
+				if c := p.chainFor(ref, r, sc); c.gaps > 0 && (bestRef.gaps == 0 || c.preferred(bestRef, r)) {
+					bestRef = c
+				}
+			}
+		}
+	}
+	sc.seen, sc.seenRef = seen, seenRef
+	if best.gaps > 0 {
+		// Refine with the phase estimator span/slots over the chain. It is
+		// robust to per-pulse jitter, whereas ranking by gap residual favours
+		// a biased gap. It replaces the estimate whenever it explains a chain
+		// at least as long with at least the same coverage.
+		span := p.at(p.n-1) - p.at(p.n-1-best.gaps)
+		if ref := span / int64(best.slots); ref >= minP && ref <= maxP && ref != best.period {
+			if c := p.chainFor(ref, r, sc); c.gaps >= best.gaps && c.coverage >= best.coverage && (c.meets(r) || !best.meets(r)) {
 				best = c
 			}
 		}
 	}
-	sc.seen = seen
-	if best.gaps == 0 {
-		return best
-	}
-	// Refine with the phase estimator span/slots over the chain. It is
-	// robust to per-pulse jitter, whereas ranking by gap residual favours a
-	// biased gap. It replaces the estimate whenever it explains a chain at
-	// least as long with at least the same coverage.
-	span := p.at(p.n-1) - p.at(p.n-1-best.gaps)
-	if ref := span / int64(best.slots); ref >= minP && ref <= maxP && ref != best.period {
-		if c := p.chainFor(ref, r, sc); c.gaps >= best.gaps && c.coverage >= best.coverage && (c.meets(r) || !best.meets(r)) {
-			best = c
-		}
+	// only a refined candidate that would signal (meets the criteria and its
+	// Chance is within MaxChance): until one does, the hypothesis kept from
+	// pulse to pulse stays the one the seeds give, and a kept hypothesis
+	// that meets the criteria stops the search, so it must not be one that
+	// cannot signal yet
+	if bestRef.meets(r) && p.chance(bestRef, r) <= r.MaxChance && (best.gaps == 0 || bestRef.outranks(best, r)) {
+		best = bestRef
 	}
 	return best
+}
+
+// chainRefined measures seed's chain exactly as chainFor does and returns it
+// with the period this search cell tests: seed, or a refinement of it.
+//
+// A single gap fixes P only to within tol/k. When the jitter of neighbouring
+// gaps cancels (gaps of 294s, 306s, 294s... around 300s with tol 6s) no seed
+// taken from one gap explains the next one, so no chain forms. Every period
+// in the intersection of the ranges [(g-tol)/k, (g+tol)/k] of the newest gaps
+// explains all of them. In the same pass as the chain, over the recentGaps
+// newest gaps (the window the seeds come from) and with the multiples k the
+// seed assigns them, chainRefined intersects those ranges. If the common
+// range covers at least two gaps and more than the seed's chain, it also
+// returns the phase estimate span/slots clamped into it, which estimate()
+// measures as a refined candidate.
+//
+// A refined period is fitted to up to recentGaps gaps, not one, so a chance
+// chain fits it more often than pg^(gaps-1) alone says. The union bound in
+// chance() still covers it: a period explaining n of the newest gaps exists
+// roughly as often as one of those n gaps' own seeds explains the others,
+// and searchCells already charges each of those seeds. So searchCells, and
+// the Chance values, are unchanged.
+//
+// Cost: the chain pass as before, the range adds O(1) per gap in the window;
+// a refined cell adds one walk of recentGaps gaps and one chainFor. No
+// allocation; see BenchmarkPeriodicSearch and TestPeriodicSearchWorkIsBounded.
+func (p *periodicState) chainRefined(seed int64, r *PeriodicRule, sc *periodicScratch) (chainInfo, int64) {
+	c := chainInfo{period: seed, tol: tolNanos(r, seed)}
+	resid := sc.resid[:0]
+	maxK := r.MaxMissing + 1
+	lo, hi := int64(1), int64(math.MaxInt64)
+	var n int
+	var span, slots int64
+	inChain, inRange := true, true
+	sc.chains++
+	for i := p.n - 1; i >= 1; i-- {
+		if inRange = inRange && i >= p.n-recentGaps; !inChain && !inRange {
+			break
+		}
+		sc.steps++
+		g := p.at(i) - p.at(i-1)
+		if inChain {
+			if k, d := explain(g, seed, c.tol, maxK); k > 0 {
+				c.gaps++
+				c.slots += k
+				resid = append(resid, d)
+			} else {
+				inChain = false
+			}
+		}
+		if inRange {
+			k := max((g+seed/2)/seed, 1)
+			l, h := lo, min(hi, (g+c.tol)/k)
+			if g-c.tol > 0 {
+				l = max(l, (g-c.tol+k-1)/k)
+			}
+			if k > int64(maxK) || l > h {
+				inRange = false
+			} else {
+				lo, hi = l, h
+				n++
+				span += g
+				slots += k
+			}
+		}
+	}
+	sc.resid = resid
+	if c.gaps > 0 {
+		c.coverage = float64(c.gaps) / float64(c.slots)
+		c.residual = medianInt64(resid, sc)
+	}
+	// With one gap the phase estimate is newest/k, a seed the search tries
+	// anyway.
+	if n < 2 || n <= c.gaps {
+		return c, seed
+	}
+	ref := min(max(span/slots, lo), hi)
+	// The range uses the seed's tolerance, but the tolerance grows with the
+	// period (JitterRel): keep ref only if, with its own tolerance, it
+	// explains more of the newest gaps than the seed does.
+	if ref < int64(r.MinPeriod) || ref > int64(r.MaxPeriod) || p.recentExplained(ref, r, sc) <= c.gaps {
+		return c, seed
+	}
+	return c, ref
+}
+
+// recentExplained counts the consecutive newest gaps, at most recentGaps,
+// that period explains with its own tolerance.
+func (p *periodicState) recentExplained(period int64, r *PeriodicRule, sc *periodicScratch) int {
+	tol, maxK, n := tolNanos(r, period), r.MaxMissing+1, 0
+	for i := p.n - 1; i >= 1 && i >= p.n-recentGaps; i-- {
+		sc.steps++
+		if k, _ := explain(p.at(i)-p.at(i-1), period, tol, maxK); k == 0 {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // alternatives reports multiples and sub-multiples of the chosen period

@@ -2,6 +2,7 @@ package anomaly
 
 import (
 	"container/heap"
+	"slices"
 	"time"
 )
 
@@ -133,6 +134,17 @@ func New(cfg Config) (*Detector, error) {
 	c.Rate = append([]RateRule(nil), cfg.Rate...)
 	c.NewStream = append([]NewStreamRule(nil), cfg.NewStream...)
 	c.Periodic = append([]PeriodicRule(nil), cfg.Periodic...)
+	// PayloadTypes are the only slices inside the rules: copy them too, so the
+	// caller's config and the Detector never share a backing array.
+	for i := range c.Rate {
+		c.Rate[i].PayloadTypes = slices.Clone(c.Rate[i].PayloadTypes)
+	}
+	for i := range c.NewStream {
+		c.NewStream[i].PayloadTypes = slices.Clone(c.NewStream[i].PayloadTypes)
+	}
+	for i := range c.Periodic {
+		c.Periodic[i].PayloadTypes = slices.Clone(c.Periodic[i].PayloadTypes)
+	}
 	d := &Detector{cfg: c, dedup: make(map[TxID]int64)}
 	for i := range c.Rate {
 		d.table(c.Rate[i].Scope).addRate(i, c.Rate[i].Window)
@@ -171,7 +183,10 @@ func (d *Detector) Observe(e Event) Result {
 	if f := e.finalAt().UnixNano(); f > d.clock {
 		d.clock = f
 	}
-	if prev, ok := d.dedup[e.ID]; ok {
+	// A repeat more than DedupHorizon after the remembered copy counts again,
+	// even if no accepted event has expired that copy yet. An older copy
+	// (t < prev) stays a duplicate, so it can never revive the ID.
+	if prev, ok := d.dedup[e.ID]; ok && t-prev <= int64(d.cfg.Limits.DedupHorizon) {
 		d.stats.Duplicates++
 		if prev != t {
 			d.stats.DuplicateConflicts++
@@ -189,9 +204,6 @@ func (d *Detector) Observe(e Event) Result {
 		return d.finish(res)
 	}
 	d.started = true
-	if !d.historySet {
-		d.history, d.historySet = t, true
-	}
 	d.rememberID(e.ID, t)
 	d.stats.Accepted++
 	if e.Truncated {
@@ -574,6 +586,11 @@ type emitCtx struct {
 func (d *Detector) handle(e *Event) {
 	d.stats.Processed++
 	t := e.Time.UnixNano()
+	if !d.historySet {
+		// Config.HistoryStart zero: the first event processed, which with a
+		// reorder delay need not be the first one accepted.
+		d.history, d.historySet = t, true
+	}
 	d.lastEvT, d.lastEvID, d.evDone = t, e.ID, true
 	for s := Scope(1); s < numScopes; s++ {
 		tb := d.scopes[s]

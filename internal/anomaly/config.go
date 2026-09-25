@@ -323,7 +323,7 @@ func (c *Config) Validate() error {
 		switch {
 		case r.MinPeriod <= 0 || r.MaxPeriod <= r.MinPeriod || r.MaxPeriod > maxWindow:
 			return fmt.Errorf("anomaly: rule %s: need 0 < MinPeriod < MaxPeriod <= 24h", r.Name)
-		case r.BurstGap < 0 || 2*r.BurstGap >= r.MinPeriod:
+		case r.BurstGap < 0 || r.BurstGap >= r.MinPeriod-r.BurstGap: // 2*BurstGap >= MinPeriod, without overflow
 			return fmt.Errorf("anomaly: rule %s: BurstGap must be in [0, MinPeriod/2)", r.Name)
 		case r.JitterAbs < 0 || !finiteIn(r.JitterRel, 0, 0.25) || (r.JitterAbs == 0 && r.JitterRel == 0):
 			return fmt.Errorf("anomaly: rule %s: need JitterAbs >= 0, JitterRel in [0,0.25], not both 0", r.Name)

@@ -144,9 +144,11 @@ func (r ReplayRecord) Event() (Event, error) {
 		return Event{}, err
 	}
 	e.RouteClass, e.RouteKind = RouteClass(rc), RouteKind(rk)
+	// Width 0 is valid only with no bytes (an empty hop or route); NewRoute
+	// enforces the same, so nonempty bytes never vanish silently.
 	if w, b, err := parseWidthHex(r.FirstHop); err != nil {
 		return Event{}, err
-	} else if w != 0 {
+	} else if w != 0 || len(b) != 0 {
 		if w != len(b) {
 			return Event{}, errors.New("anomaly: first_hop width mismatch")
 		}
@@ -156,10 +158,8 @@ func (r ReplayRecord) Event() (Event, error) {
 	}
 	if w, b, err := parseWidthHex(r.FullRoute); err != nil {
 		return Event{}, err
-	} else if w != 0 {
-		if e.FullRoute, err = NewRoute(w, b); err != nil {
-			return Event{}, err
-		}
+	} else if e.FullRoute, err = NewRoute(w, b); err != nil {
+		return Event{}, err
 	}
 	if r.PayloadBytes != nil {
 		e.PayloadBytes, e.PayloadKnown = *r.PayloadBytes, true
