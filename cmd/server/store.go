@@ -55,10 +55,17 @@ type StoreTx struct {
 	LatestSeen          string // max observation timestamp (or FirstSeen if no observations)
 	UniqueObserverCount int    // cached count of distinct observer IDs
 	// Cached parsed fields (set once, read many)
-	parsedPath    []string               // cached parsePathJSON result
-	pathParsed    bool                   // whether parsedPath has been set
-	decodedOnce   sync.Once              // guards parsedDecoded
-	parsedDecoded map[string]interface{} // cached json.Unmarshal of DecodedJSON
+	parsedPath []string // cached parsePathJSON result
+	pathParsed bool     // whether parsedPath has been set
+	// routeMask mirrors transmissions.route_mask (#89): bit r is set when a
+	// frame with raw route type r was observed for this hash. routeMaskKnown
+	// is false while the row is NULL (not backfilled yet) or the column is
+	// absent. Both fit in the padding before decodedOnce (StoreTx stays 320
+	// bytes on 64-bit, see TestStoreTxLayoutFitsRouteMaskInPadding).
+	routeMask      uint8
+	routeMaskKnown bool
+	decodedOnce    sync.Once              // guards parsedDecoded
+	parsedDecoded  map[string]interface{} // cached json.Unmarshal of DecodedJSON
 	// Dedup map: "observerID|pathJSON" → true for O(1) duplicate checks
 	obsKeys     map[string]bool
 	observerSet map[string]bool // unique observer IDs (for UniqueObserverCount)
@@ -222,6 +229,28 @@ type PacketStore struct {
 	lastInvalidated time.Time
 	pendingInv      *cacheInvalidation // accumulated dirty flags during cooldown
 	invCooldown     time.Duration      // minimum time between invalidations
+	// #89: ids of transmissions loaded while their route_mask was still NULL
+	// (not backfilled yet). Load and ingest paths append to the unsorted
+	// inbox; RefreshBackfilledRouteMasks (serialised by its own mutex) moves
+	// the inbox into the sorted queue and re-reads it as the backfill fills
+	// the rows. The count covers both.
+	routeMaskInboxMu     sync.Mutex // guards routeMaskInbox
+	routeMaskInbox       []int
+	routeMaskRefreshMu   sync.Mutex // serialises refreshes; guards routeMaskQueue
+	routeMaskQueue       []int      // sorted ascending
+	routeMaskQueuedCount atomic.Int64
+	// #89: live route_mask changes from the ingestor's route_mask_changes
+	// log (see RefreshRouteMaskChanges). The cursor is the highest log id
+	// applied or parked; routeMaskChangesMu serialises refreshes and guards
+	// the cursor. routeMaskParked (guarded by s.mu) holds changes for
+	// transmissions not in the store yet, e.g. still in an unpublished
+	// start-up chunk; they are applied when the transmission is published.
+	routeMaskChangesMu      sync.Mutex
+	routeMaskChangesCursor  int64
+	routeMaskChangesState   int // 0 not initialised, 1 polling, -1 no change log
+	routeMaskParked         map[int]uint8
+	routeMaskLoadSettled    atomic.Bool // Load() or RunStartupLoad returned: start-up loading is over
+	routeMaskChangeRowsRead atomic.Int64
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string
@@ -506,6 +535,16 @@ type PacketStore struct {
 	// ordering tests to capture the bg-loader entry timestamp/signal
 	// without polling. See runstartup_load_test.go.
 	bgLoaderEntryHook func()
+	// loadChunkScannedHook, if non-nil, runs in loadChunk after the chunk is
+	// scanned into local maps and before it is merged into the store.
+	// Test-only (#89 route_mask refresh race).
+	loadChunkScannedHook func()
+	// loadScannedRowHook, if non-nil, runs once in Load / LoadChunked right
+	// after the first transmission row is read, then is cleared. It runs
+	// while s.mu is held, so it must not call anything that takes s.mu
+	// (e.g. RefreshRouteMaskChanges). Test-only (#89 route_mask_changes
+	// watermark placement).
+	loadScannedRowHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -720,6 +759,10 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 // When maxMemoryMB > 0, loads only the newest N transmissions that fit
 // within the memory budget, avoiding OOM on large databases.
 func (s *PacketStore) Load() error {
+	// #89: the change-log watermark is read before any row is loaded, and
+	// before s.mu (a refresh takes routeMaskChangesMu, then s.mu).
+	s.initRouteMaskChangeCursor()
+	defer s.routeMaskLoadSettled.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -773,6 +816,11 @@ func (s *PacketStore) Load() error {
 	if s.db.hasScopeName() {
 		scopeNameCol = ", t.scope_name"
 	}
+	// #89: route_mask follows scope_name as the last optional column.
+	routeMaskCol := ""
+	if s.db.hasRouteMask() {
+		routeMaskCol = ", t.route_mask"
+	}
 
 	// Build WHERE conditions: retention cutoff (mirrors Evict logic) + optional memory-cap limit.
 	// When hotStartupHours > 0, use it as the initial cutoff (smaller window = fast startup).
@@ -817,7 +865,7 @@ func (s *PacketStore) Load() error {
 		loadSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx` + filterClause + `
@@ -826,7 +874,7 @@ func (s *PacketStore) Load() error {
 		loadSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.id = o.observer_id` + filterClause + `
@@ -865,6 +913,7 @@ func (s *PacketStore) Load() error {
 		var obsRawHex sql.NullString
 		var resolvedPathStr sql.NullString
 		var scopeName sql.NullString
+		var routeMask sql.NullInt64
 
 		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
 			&payloadVersion, &decodedJSON,
@@ -879,9 +928,17 @@ func (s *PacketStore) Load() error {
 		if s.db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
+		if s.db.hasRouteMask() {
+			scanArgs = append(scanArgs, &routeMask)
+		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] scan error: %v", err)
 			continue
+		}
+		if s.loadScannedRowHook != nil {
+			hook := s.loadScannedRowHook
+			s.loadScannedRowHook = nil
+			hook()
 		}
 
 		hashStr := nullStrVal(hash)
@@ -901,6 +958,7 @@ func (s *PacketStore) Load() error {
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
+			s.mergeRouteMaskOrQueue(tx, routeMask)
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			if txID > s.maxTxID {
@@ -1104,6 +1162,11 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	if s.db.hasScopeName() {
 		scopeNameCol = ", t.scope_name"
 	}
+	// #89: route_mask follows scope_name as the last optional column.
+	routeMaskCol := ""
+	if s.db.hasRouteMask() {
+		routeMaskCol = ", t.route_mask"
+	}
 
 	// #1690: window on the denormalized last_seen (effective recency)
 	// rather than first_seen. See chunked_load.go for the full rationale.
@@ -1123,7 +1186,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, obs.id, obs.name, o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx` + filterClause + `
@@ -1132,7 +1195,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, o.observer_id, o.observer_name, o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id` + filterClause + `
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
@@ -1193,6 +1256,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		var obsRawHex sql.NullString
 		var resolvedPathStr sql.NullString
 		var scopeName sql.NullString
+		var routeMask sql.NullInt64
 
 		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
 			&payloadVersion, &decodedJSON,
@@ -1206,6 +1270,9 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		}
 		if s.db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
+		}
+		if s.db.hasRouteMask() {
+			scanArgs = append(scanArgs, &routeMask)
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] loadChunk scan error: %v", err)
@@ -1229,6 +1296,9 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				observerSet: make(map[string]bool),
 			}
 			localByHash[hashStr] = tx
+			// Queued only once it is in s.byTxID (merge section below);
+			// a refresh in between would otherwise drop the id.
+			tx.mergeRouteMask(routeMask)
 			localPackets = append(localPackets, tx)
 			localByTxID[txID] = tx
 			if txID > localMaxTxID {
@@ -1341,6 +1411,9 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// intermediate state where indexes contain a superset of s.packets
 	// (which is harmless: nothing in s.packets dangles), or the fully
 	// merged new state.
+	if s.loadChunkScannedHook != nil {
+		s.loadChunkScannedHook()
+	}
 	const mergeBatchSize = 500
 
 	for batchStart := 0; batchStart < len(localPackets); batchStart += mergeBatchSize {
@@ -1386,6 +1459,8 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		for k, v := range batchTxIDs {
 			if s.byTxID[k] == nil {
 				s.byTxID[k] = v
+				s.applyParkedRouteMask(v)
+				s.queueUnknownRouteMask(v)
 			}
 		}
 		for k, v := range batchObsIDs {
@@ -2650,11 +2725,16 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	if s.db.hasScopeName() {
 		scopeNameCol = ", t.scope_name"
 	}
+	// #89: route_mask follows scope_name as the last optional column.
+	routeMaskCol := ""
+	if s.db.hasRouteMask() {
+		routeMaskCol = ", t.route_mask"
+	}
 	if s.db.isV3() {
 		querySQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol + scopeNameCol + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -2664,7 +2744,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		querySQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol + scopeNameCol + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.id = o.observer_id
@@ -2688,6 +2768,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		observerID, observerName, observerIATA, direction, pathJSON, obsTS string
 		obsRawHex                                                          string
 		scopeName                                                          string
+		routeMask                                                          sql.NullInt64
 		snr, rssi                                                          *float64
 		score                                                              *int
 	}
@@ -2706,6 +2787,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		var scoreVal sql.NullInt64
 		var obsRawHex sql.NullString
 		var scopeName sql.NullString
+		var routeMask sql.NullInt64
 
 		scanArgs2 := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
 			&payloadVersion, &decodedJSON,
@@ -2716,6 +2798,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		}
 		if s.db.hasScopeName() {
 			scanArgs2 = append(scanArgs2, &scopeName)
+		}
+		if s.db.hasRouteMask() {
+			scanArgs2 = append(scanArgs2, &routeMask)
 		}
 		if err := rows.Scan(scanArgs2...); err != nil {
 			continue
@@ -2745,6 +2830,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			obsTS:        nullStrVal(obsTimestamp),
 			obsRawHex:    nullStrVal(obsRawHex),
 			scopeName:    nullStrVal(scopeName),
+			routeMask:    routeMask,
 			snr:          nullFloatPtr(snrVal),
 			rssi:         nullFloatPtr(rssiVal),
 			score:        nullIntPtr(scoreVal),
@@ -2787,6 +2873,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		}
 
 		tx := s.byHash[r.hash]
+		if tx != nil {
+			tx.mergeRouteMask(r.routeMask)
+		}
 		if tx == nil {
 			tx = &StoreTx{
 				ID:          r.txID,
@@ -2802,6 +2891,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[r.hash] = tx
+			s.mergeRouteMaskOrQueue(tx, r.routeMask)
 			s.packets = append(s.packets, tx) // oldest-first; new items go to tail
 			s.byTxID[r.txID] = tx
 			if r.txID > s.maxTxID {
@@ -3066,19 +3156,26 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	if s.db.hasObsRawHex() {
 		obsRHCol2 = ", o.raw_hex"
 	}
+	// #89: the transmission's current route_mask rides along with each new
+	// observation so the live view converges with a cold load.
+	routeMaskCol2, routeMaskJoin2 := "", ""
+	if s.db.hasRouteMask() {
+		routeMaskCol2 = ", t.route_mask"
+		routeMaskJoin2 = "\n\t\t\tLEFT JOIN transmissions t ON t.id = o.transmission_id"
+	}
 	if s.db.isV3() {
 		querySQL = `SELECT o.id, o.transmission_id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol2 + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol2 + routeMaskCol2 + `
 			FROM observations o
-			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+			LEFT JOIN observers obs ON obs.rowid = o.observer_idx` + routeMaskJoin2 + `
 			WHERE o.id > ?
 			ORDER BY o.id ASC
 			LIMIT ?`
 	} else {
 		querySQL = `SELECT o.id, o.transmission_id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol2 + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol2 + routeMaskCol2 + `
 			FROM observations o
-			LEFT JOIN observers obs ON obs.id = o.observer_id
+			LEFT JOIN observers obs ON obs.id = o.observer_id` + routeMaskJoin2 + `
 			WHERE o.id > ?
 			ORDER BY o.id ASC
 			LIMIT ?`
@@ -3103,6 +3200,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		pathJSON     string
 		rawHex       string
 		timestamp    string
+		routeMask    sql.NullInt64
 	}
 
 	var obsRows []obsRow
@@ -3112,11 +3210,15 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		var snr, rssi sql.NullFloat64
 		var score sql.NullInt64
 		var obsRawHex sql.NullString
+		var routeMask sql.NullInt64
 
 		scanArgs3 := []interface{}{&oid, &txID, &observerID, &observerName, &observerIATA, &direction,
 			&snr, &rssi, &score, &pathJSON, &ts}
 		if s.db.hasObsRawHex() {
 			scanArgs3 = append(scanArgs3, &obsRawHex)
+		}
+		if s.db.hasRouteMask() {
+			scanArgs3 = append(scanArgs3, &routeMask)
 		}
 		if err := rows.Scan(scanArgs3...); err != nil {
 			continue
@@ -3135,6 +3237,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			pathJSON:     nullStrVal(pathJSON),
 			rawHex:       nullStrVal(obsRawHex),
 			timestamp:    nullStrVal(ts),
+			routeMask:    routeMask,
 		})
 	}
 
@@ -3168,6 +3271,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		if tx == nil {
 			continue // transmission not yet in store
 		}
+		tx.mergeRouteMask(r.routeMask)
 
 		// Dedup by observer + path (O(1) map lookup)
 		dk := r.observerID + "|" + r.pathJSON
