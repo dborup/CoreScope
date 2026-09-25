@@ -57,6 +57,21 @@ The `hashChannels` config lists channel names that CoreScope should try to match
 
 CoreScope computes the hash of each name and matches incoming packets to identify which channel they belong to.
 
+## Shared channels
+
+When the administrator enables `channelProposals` (see [Configuration](configuration.md#shared-channel-suggestions)), the **Add Channel** dialog gets a **Suggest a Shared Channel** section. Anyone can suggest a public hashtag channel there. Only the name is sent, never a key, and the name is case-sensitive: `#MeshCore` and `#meshcore` are different channels.
+
+Names can be at most 31 bytes including the `#`. That is the firmware's limit (the name is stored in a 32-byte field with a terminating NUL). Any language or emoji is fine; control characters and text-direction overrides are refused.
+
+An administrator reviews suggestions at `#/channels?view=proposals`:
+
+1. Enter the `apiKey`. It is kept only in the tab's memory and is forgotten on reload or with **Lock**.
+2. Approve or reject each pending suggestion.
+
+Approved channels are decrypted by the ingestor from then on and appear for everyone under **Network** with a **Shared** label, even before they carry any messages. Shared channels have no remove button, because they are not stored in your browser.
+
+The local **Add Channel** tools (PSK channels, **Monitor Hashtag Channel**) are unchanged and still only affect your browser.
+
 ## Region filter
 
 Channels respect the region filter. Select a region to see only messages captured by observers in that area.

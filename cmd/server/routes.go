@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/packetpath"
 	"github.com/meshcore-analyzer/prunequeue"
@@ -56,6 +57,10 @@ type Server struct {
 	// Test-only hook called with "stats-miss" and "stats-build" as a cache
 	// miss moves through handleStats. Nil in production.
 	statsHook func(stage string)
+
+	// Shared channel proposals; built lazily from cfg/db (tests may preset).
+	proposals     *channelProposalService
+	proposalsOnce sync.Once
 
 	// Guards s.cfg.GeoFilter — read by ingest/handler goroutines, written by PUT handler
 	cfgMu sync.RWMutex
@@ -321,6 +326,11 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// runs the DELETE. /status reports completion.
 	r.Handle("/api/admin/prune-geo-filter", s.requireAPIKey(http.HandlerFunc(s.handlePruneGeoFilter))).Methods("POST")
 	r.Handle("/api/admin/prune-geo-filter/status", s.requireAPIKey(http.HandlerFunc(s.handlePruneGeoFilterStatus))).Methods("GET")
+	// Shared channel proposals: admin review uses the existing apiKey. The
+	// server only queues decisions; the ingestor applies them.
+	r.Handle("/api/admin/channel-proposals", s.requireAPIKey(http.HandlerFunc(s.handleAdminChannelProposals))).Methods("GET")
+	r.Handle("/api/admin/channel-proposals/{id}/approve", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpApprove))).Methods("POST")
+	r.Handle("/api/admin/channel-proposals/{id}/reject", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpReject))).Methods("POST")
 	r.Handle("/api/debug/affinity", s.requireAPIKey(http.HandlerFunc(s.handleDebugAffinity))).Methods("GET")
 	r.Handle("/api/dropped-packets", s.requireAPIKey(http.HandlerFunc(s.handleDroppedPackets))).Methods("GET")
 	r.Handle("/api/backup", s.requireAPIKey(http.HandlerFunc(s.handleBackup))).Methods("GET")
@@ -384,6 +394,9 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/resolve-hops", s.handleResolveHops).Methods("GET")
 	r.HandleFunc("/api/channels/{hash}/messages", s.handleChannelMessages).Methods("GET")
 	r.HandleFunc("/api/channels", s.handleChannels).Methods("GET")
+	r.HandleFunc("/api/channel-proposals/config", s.handleChannelProposalConfig).Methods("GET")
+	r.HandleFunc("/api/channel-proposals", s.handleChannelProposalSubmit).Methods("POST")
+	r.HandleFunc("/api/channel-proposals/requests/{requestId}", s.handleChannelProposalRequest).Methods("GET")
 	r.HandleFunc("/api/known-channels", s.handleKnownChannels).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
 	r.HandleFunc("/api/observers/{id}/metrics", s.handleObserverMetrics).Methods("GET")
@@ -3327,18 +3340,21 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("WARN GetEncryptedChannels: %v", err)
 			} else {
-				channels = append(channels, encrypted...)
+				// channels is GetChannels' cached slice: the full slice
+				// expression forces append to copy instead of writing into
+				// spare capacity of the shared backing array.
+				channels = append(channels[:len(channels):len(channels)], encrypted...)
 			}
 		}
-		writeJSON(w, ChannelListResponse{Channels: channels})
+		writeJSON(w, ChannelListResponse{Channels: channels, ApprovedChannels: s.channelProposals().approvedChannels(r.Context())})
 		return
 	}
 	if s.store != nil {
 		channels := s.store.GetChannels(region)
 		if includeEncrypted {
-			channels = append(channels, s.store.GetEncryptedChannels(region)...)
+			channels = append(channels[:len(channels):len(channels)], s.store.GetEncryptedChannels(region)...)
 		}
-		writeJSON(w, ChannelListResponse{Channels: channels})
+		writeJSON(w, ChannelListResponse{Channels: channels, ApprovedChannels: s.channelProposals().approvedChannels(r.Context())})
 		return
 	}
 	writeJSON(w, ChannelListResponse{Channels: []map[string]interface{}{}})

@@ -85,6 +85,12 @@ jobs:
           go test ./...
           echo "--- Decrypt CLI tests passed ---"
 
+      - name: Test shared channel registry + schema packages
+        run: |
+          set -e -o pipefail
+          (cd internal/channelregistry && go test ./...)
+          (cd internal/dbschema && go test ./...)
+
       - name: Verify Dockerfile COPY invariants (issue #1316)
         run: bash scripts/check-dockerfile-internal-pkgs.sh
 
@@ -116,6 +122,7 @@ jobs:
           node test-channel-decrypt-insecure-context.js
           node test-live-region-filter.js
           node test-issue-2052-touch-target-css.js
+          node test-channel-proposals.js
           node test-issue-1136-observer-iata-map.js
           node test-channel-qr.js
           node test-channel-qr-wiring.js
@@ -298,6 +305,12 @@ jobs:
           cd cmd/migrate
           go build -o ../../corescope-migrate .
           echo "Go migrate tool built successfully"
+
+      - name: Build Go ingestor (channel proposals E2E)
+        run: |
+          cd cmd/ingestor
+          go build -o ../../corescope-ingestor .
+          echo "Go ingestor built successfully"
 
       - name: Install npm dependencies
         run: npm ci --production=false
@@ -486,6 +499,8 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1224-channels-mobile-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1367-channels-chat-app-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-2052-touch-target-e2e.js 2>&1 | tee -a e2e-output.txt
+          # Starts its own ingestor + server on a temp copy of the fixture.
+          CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channel-proposals-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1236-map-mobile-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1329-map-controls-accordion-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1273-qr-overlay-height-e2e.js 2>&1 | tee -a e2e-output.txt

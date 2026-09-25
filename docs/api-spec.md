@@ -35,6 +35,11 @@
 - [GET /api/observers/:id/analytics](#get-apiobserversidanalytics)
 - [GET /api/channels](#get-apichannels)
 - [GET /api/channels/:hash/messages](#get-apichannelshashmessages)
+- [GET /api/channel-proposals/config](#get-apichannel-proposalsconfig)
+- [POST /api/channel-proposals](#post-apichannel-proposals)
+- [GET /api/channel-proposals/requests/:requestId](#get-apichannel-proposalsrequestsrequestid)
+- [GET /api/admin/channel-proposals](#get-apiadminchannel-proposals)
+- [POST /api/admin/channel-proposals/:id/approve and /reject](#post-apiadminchannel-proposalsidapprove-and-reject)
 - [GET /api/analytics/rf](#get-apianalyticsrf)
 - [GET /api/analytics/topology](#get-apianalyticstopology)
 - [GET /api/analytics/channels](#get-apianalyticschannels)
@@ -1216,6 +1221,11 @@ List decoded channels with message counts.
       "messageCount": number,
       "lastActivity": string (ISO)
     }
+  ],
+  // Shared hashtag channels approved by the administrator, listed even
+  // before they carry traffic. Omitted when there are none. hash == name.
+  "approvedChannels"?: [
+    { "name": string, "hash": string }
   ]
 }
 ```
@@ -1260,6 +1270,70 @@ Messages for a specific channel.
   "total": number                           // total deduplicated messages
 }
 ```
+
+---
+
+## Shared channel proposals
+
+Visitors suggest public hashtag channels; the administrator approves or rejects them with the existing `apiKey`. The server is read-only: it validates each request and writes it to a bounded file queue next to the database, and the ingestor applies it. Every request answers `202 { "requestId": string }` right away; poll the request status for the outcome. Timestamps are Unix epoch **milliseconds**.
+
+A proposal:
+
+```jsonc
+{
+  "id":         string,        // 16 hex characters
+  "name":       string,        // "#Channel", case preserved, <= 31 UTF-8 bytes
+  "status":     "pending" | "approved" | "rejected",
+  "createdAt":  number,        // ms
+  "reviewedAt"?: number        // ms, once reviewed
+}
+```
+
+## GET /api/channel-proposals/config
+
+```json
+{ "enabled": true }
+```
+
+`enabled` is true only when `channelProposals.enabled` is set and `apiKey` is strong.
+
+## POST /api/channel-proposals
+
+Body `{ "name": "#Channel" }` (the `#` is optional; surrounding spaces are trimmed). Only public hashtag channel names are accepted, never keys.
+
+| Status | Meaning |
+|--------|---------|
+| `202` | `{ "requestId": string }` |
+| `400` | Invalid body or name (empty, over 31 bytes, control or direction-override characters) |
+| `403` | Suggestions disabled |
+| `429` | `submissionsPerHour` reached; `Retry-After` in seconds |
+| `503` | Request queue full; `Retry-After` in seconds |
+
+## GET /api/channel-proposals/requests/:requestId
+
+```jsonc
+{
+  "status":    "queued" | "pending" | "approved" | "rejected" | "error",
+  "proposal"?: Proposal,   // once the ingestor has processed the request
+  "error"?:    string      // with status "error"
+}
+```
+
+A duplicate suggestion reports the existing proposal and its status. `404` when the id is unknown or older than 24 hours.
+
+## GET /api/admin/channel-proposals
+
+Requires `X-API-Key`. Optional `?status=pending|approved|rejected`. Newest first, bounded.
+
+```jsonc
+{ "proposals": [Proposal], "enabled": boolean }
+```
+
+## POST /api/admin/channel-proposals/:id/approve and /reject
+
+Requires `X-API-Key`. `202 { "requestId": string }`, `404` for an unknown proposal. Only pending proposals change; repeating the stored decision is harmless, and a contradicting one (reject after approve) ends with status `error`.
+
+Missing or wrong key: `401`. No key configured, or a weak one: `403`.
 
 ---
 

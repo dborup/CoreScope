@@ -118,6 +118,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureTransmissionsLastSeenColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.last_seen: %w", err)
 	}
+	if err := ensureChannelProposalsTable(rw, logf); err != nil {
+		return fmt.Errorf("ensure channel_proposals: %w", err)
+	}
 	return nil
 }
 
@@ -921,5 +924,30 @@ func ensureObserverNeighborMetricsTable(rw *sql.DB, logf Logger) error {
 		return fmt.Errorf("record observer_neighbor_metrics_v1: %w", err)
 	}
 	logf("[dbschema] created observer_neighbor_metrics table")
+	return nil
+}
+
+// ensureChannelProposalsTable creates the table behind publicly suggested
+// hashtag channels (internal/channelregistry). The ingestor is its only
+// writer. It is deliberately NOT part of AssertReady: a new server must keep
+// working against a database an older ingestor has not migrated yet, and its
+// readers (channelregistry.ListApprovedNames / ListProposals) treat the
+// missing table as empty on every query instead of caching its absence.
+//
+// name is COLLATE BINARY because the firmware derives the channel key from
+// the exact bytes of the name: "#Test" and "#test" are different channels.
+func ensureChannelProposalsTable(rw *sql.DB, logf Logger) error {
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS channel_proposals (
+		id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL UNIQUE,
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NULL
+	)`); err != nil {
+		return fmt.Errorf("create channel_proposals: %w", err)
+	}
+	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_channel_proposals_status ON channel_proposals(status, created_at)`); err != nil {
+		return fmt.Errorf("create idx_channel_proposals_status: %w", err)
+	}
 	return nil
 }

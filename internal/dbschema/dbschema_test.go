@@ -255,3 +255,42 @@ func TestPartialIdxTxLastSeenZero_FullIndexDropped(t *testing.T) {
 		t.Fatalf("legacy idx_tx_last_seen must be dropped after partial index is in place (#1740); still present as %q", legacyName)
 	}
 }
+
+// Shared channel proposals: Apply owns the table, names are unique with
+// byte-exact (BINARY) semantics, and the server's AssertReady does NOT
+// require the table, so a new server keeps starting against a database an
+// older ingestor has not migrated yet (rolling upgrade).
+func TestChannelProposalsTable(t *testing.T) {
+	db := minimalDB(t)
+	defer db.Close()
+	for i := 0; i < 2; i++ { // idempotent
+		if err := Apply(db, nil); err != nil {
+			t.Fatalf("Apply #%d: %v", i+1, err)
+		}
+	}
+	ins := func(id, name string) error {
+		_, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at) VALUES (?, ?, 'pending', 1)`, id, name)
+		return err
+	}
+	if err := ins("a", "#Test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ins("b", "#test"); err != nil {
+		t.Fatalf("#test must be distinct from #Test: %v", err)
+	}
+	if err := ins("c", "#Test"); err == nil {
+		t.Fatal("duplicate #Test must violate UNIQUE")
+	}
+	if _, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at) VALUES ('d', '#x', 'bogus', 1)`); err == nil {
+		t.Fatal("status CHECK not enforced")
+	}
+	if err := AssertReady(db); err != nil {
+		t.Fatalf("AssertReady after Apply: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE channel_proposals`); err != nil {
+		t.Fatal(err)
+	}
+	if err := AssertReady(db); err != nil {
+		t.Fatalf("AssertReady must not require channel_proposals: %v", err)
+	}
+}

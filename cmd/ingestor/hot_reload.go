@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -14,17 +15,75 @@ import (
 // loadChannelKeys nor loadRegionKeys re-runs automatically otherwise —
 // hashChannels/hashRegions additions in config.json require a full ingestor
 // restart to take effect without this.
+//
+// Channel keys come in two layers. base is what loadChannelKeys derives from
+// config (builtin, rainbow, hashChannels, channelKeys) and is replaced on
+// every SIGHUP. approved holds the publicly suggested hashtag channels an
+// administrator approved (internal/channelregistry); it only ever grows while
+// the process runs and is reloaded from the database at startup, so a SIGHUP
+// can never drop an approved channel. channelKeys is the merged snapshot the
+// MQTT handlers read, with base winning over approved, so a manually
+// configured key for the same name keeps priority.
 type hotKeys struct {
 	channelKeys atomic.Pointer[map[string]string]
 	regionKeys  atomic.Pointer[map[string][]byte]
+
+	mu       sync.Mutex // serializes writers of base/approved and the merge
+	base     map[string]string
+	approved map[string]string
 }
 
 // newHotKeys wraps the initial startup-loaded key maps.
 func newHotKeys(channelKeys map[string]string, regionKeys map[string][]byte) *hotKeys {
-	hk := &hotKeys{}
-	hk.channelKeys.Store(&channelKeys)
+	hk := &hotKeys{approved: make(map[string]string)}
 	hk.regionKeys.Store(&regionKeys)
+	hk.setBase(channelKeys)
 	return hk
+}
+
+// setBase replaces the config-derived channel keys and republishes the merge.
+func (hk *hotKeys) setBase(channelKeys map[string]string) {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	hk.base = channelKeys
+	hk.publishLocked()
+}
+
+// AddApproved adds approved hashtag channels, deriving each key with the same
+// algorithm as hashChannels. It returns how many names were new. Names
+// already approved are ignored, so repeated calls (startup load, replayed
+// approvals) are harmless.
+func (hk *hotKeys) AddApproved(names ...string) int {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	added := 0
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := hk.approved[name]; ok {
+			continue
+		}
+		hk.approved[name] = deriveHashtagChannelKey(name)
+		added++
+	}
+	if added > 0 {
+		hk.publishLocked()
+	}
+	return added
+}
+
+// publishLocked builds a fresh merged map (never mutating one a reader may
+// hold) and swaps it in. O(base + approved), and only on reload/approval.
+func (hk *hotKeys) publishLocked() {
+	merged := make(map[string]string, len(hk.base)+len(hk.approved))
+	for name, key := range hk.approved {
+		merged[name] = key
+	}
+	for name, key := range hk.base {
+		merged[name] = key
+	}
+	hk.channelKeys.Store(&merged)
 }
 
 // Channels returns the current channel-decryption key snapshot. Safe to
@@ -50,9 +109,9 @@ func (hk *hotKeys) reload(configPath string) error {
 	}
 	ck := loadChannelKeys(cfg, configPath)
 	rk := loadRegionKeys(cfg)
-	hk.channelKeys.Store(&ck)
+	hk.setBase(ck)
 	hk.regionKeys.Store(&rk)
-	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s", len(ck), len(rk), configPath)
+	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels kept)", len(ck), len(rk), configPath)
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -88,6 +89,11 @@ type Config struct {
 	// (#1608). Received messages are drained once the write path is ready.
 	// 0 / unset => default. Bounded memory.
 	IngestBufferSize int `json:"ingestBufferSize,omitempty"`
+
+	// ChannelProposals: limits for publicly suggested hashtag channels
+	// (internal/channelregistry). Approved channels are always loaded into
+	// the channel keys, whether or not new submissions are enabled.
+	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
 }
 
 // NeighborEdgesDaysOrDefault returns the configured pruning window or 5.

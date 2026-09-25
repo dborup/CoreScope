@@ -123,6 +123,21 @@ See [#919](https://github.com/Kpa-clawbot/CoreScope/issues/919) for background.
 
 See [Channels](channels.md) for details.
 
+### Shared channel suggestions
+
+`channelProposals` lets visitors suggest public hashtag channels that an administrator approves for everyone. The server and the ingestor read the same block.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Opens public suggestions. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). |
+| `maxPending` | `100` | Suggestions waiting for review. Further suggestions are refused until some are reviewed. |
+| `maxApproved` | `128` | Shared channels that can be approved. |
+| `maxQueuedRequests` | `256` | Requests waiting for the ingestor in the queue directory next to the database. |
+| `retentionDays` | `30` | Rejected and never-reviewed suggestions are deleted after this many days. Approved channels are kept. |
+| `submissionsPerHour` | `20` | Global limit on new suggestions per hour. It is global rather than per visitor, because behind a reverse proxy every visitor can share one address. |
+
+Approved channels stay decrypted and listed when `enabled` is later set to `false`, and survive restarts and `SIGHUP` reloads. A key configured in `channelKeys` for the same name takes priority.
+
 ## Map defaults
 
 ```json
