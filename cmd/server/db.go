@@ -1014,20 +1014,23 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 // Two indexed lookups regardless of observation count: transmissions.hash via
 // idx_transmissions_hash, then observations.transmission_id via
 // idx_observations_transmission_id.
-func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
+func (db *DB) ObservationRawHexForHash(hash string) (map[int]string, error) {
 	if db == nil || db.conn == nil || !db.hasObsRawHex() || hash == "" {
-		return nil
+		return nil, nil
 	}
 	var txID int
 	if err := db.conn.QueryRow("SELECT id FROM transmissions WHERE hash = ?",
 		strings.ToLower(hash)).Scan(&txID); err != nil {
-		return nil
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup transmission for observation frames: %w", err)
 	}
 	rows, err := db.conn.Query(
 		`SELECT id, raw_hex FROM observations
 		 WHERE transmission_id = ? AND raw_hex IS NOT NULL AND raw_hex <> ''`, txID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("query observation frames: %w", err)
 	}
 	defer rows.Close()
 	out := make(map[int]string)
@@ -1035,16 +1038,16 @@ func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
 		var id int
 		var hx sql.NullString
 		if err := rows.Scan(&id, &hx); err != nil {
-			continue
+			return nil, fmt.Errorf("scan observation frame: %w", err)
 		}
 		if hx.Valid && hx.String != "" {
 			out[id] = hx.String
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil
+		return nil, fmt.Errorf("iterate observation frames: %w", err)
 	}
-	return out
+	return out, nil
 }
 
 // GetNodes returns filtered, paginated node list.

@@ -1445,7 +1445,12 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	// query selects no raw_hex at all.
 	canonicalHex, _ := packet["raw_hex"].(string)
 	if s.db != nil && hash != "" && len(observations) > 0 {
-		byObsID := s.db.ObservationRawHexForHash(hash)
+		byObsID, err := s.db.ObservationRawHexForHash(hash)
+		if err != nil {
+			log.Printf("ERROR packet detail observation-frame lookup failed for hash %s: %v", hash, err)
+			writeError(w, http.StatusInternalServerError, "Failed to load observation frames")
+			return
+		}
 		for _, obs := range observations {
 			if id, ok := obs["id"].(int); ok {
 				if hx := byObsID[id]; hx != "" {

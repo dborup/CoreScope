@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +79,10 @@ func TestObservationRawHexForHash(t *testing.T) {
 
 	hash, ids := seedDistinctFrames(t, db, "1999aaaabbbbcccc")
 
-	got := db.ObservationRawHexForHash(hash)
+	got, err := db.ObservationRawHexForHash(hash)
+	if err != nil {
+		t.Fatalf("ObservationRawHexForHash: %v", err)
+	}
 	if len(got) != 3 {
 		t.Fatalf("got %d frames, want 3 (the fourth observation stores none): %v", len(got), got)
 	}
@@ -94,7 +99,10 @@ func TestObservationRawHexForHash(t *testing.T) {
 	}
 
 	// Unknown hash: no rows, no error, no panic.
-	if got := db.ObservationRawHexForHash("0000000000000000"); len(got) != 0 {
+	if got, err := db.ObservationRawHexForHash("0000000000000000"); err != nil || len(got) != 0 {
+		if err != nil {
+			t.Errorf("unknown hash returned error: %v", err)
+		}
 		t.Errorf("unknown hash returned %d frames, want 0", len(got))
 	}
 }
@@ -106,8 +114,58 @@ func TestObservationRawHexForHashRespectsSchemaFlag(t *testing.T) {
 	db := setupTestDB(t)
 	db.hasObsRawHexFlag.v.Store(false) // explicit: a schema without the column
 	hash, _ := seedDistinctFrames(t, db, "1999ddddeeeeffff")
-	if got := db.ObservationRawHexForHash(hash); got != nil {
+	if got, err := db.ObservationRawHexForHash(hash); err != nil || got != nil {
+		if err != nil {
+			t.Errorf("hasObsRawHex() false returned error: %v", err)
+		}
 		t.Errorf("hasObsRawHex() false must return nil, got %v", got)
+	}
+}
+
+func TestObservationRawHexForHashReturnsDatabaseErrors(t *testing.T) {
+	db := setupTestDB(t)
+	db.hasObsRawHexFlag.forceTrue()
+	if err := db.conn.Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+
+	got, err := db.ObservationRawHexForHash("1999aaaabbbbcccc")
+	if err == nil {
+		t.Fatalf("got frames %v and nil error from a closed database, want a visible error", got)
+	}
+	if !strings.Contains(err.Error(), "lookup transmission for observation frames") {
+		t.Fatalf("error %q does not identify the failed operation", err)
+	}
+}
+
+func TestPacketDetailReturns500WhenObservationFrameLookupFails(t *testing.T) {
+	db := setupTestDB(t)
+	db.hasObsRawHexFlag.forceTrue()
+	hash, _ := seedDistinctFrames(t, db, "1999deadbeef0011")
+
+	srv := NewServer(db, &Config{Port: 3000}, NewHub())
+	store := NewPacketStore(db, nil)
+	if err := store.Load(); err != nil {
+		t.Fatalf("store.Load: %v", err)
+	}
+	if !store.WaitIndexesReady(5 * time.Second) {
+		t.Fatal("background indexes never became ready")
+	}
+	srv.store = store
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+	if err := db.conn.Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/packets/"+hash, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500 for failed observation-frame lookup (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Failed to load observation frames") {
+		t.Fatalf("response does not report the observation-frame failure: %s", w.Body.String())
 	}
 }
 
