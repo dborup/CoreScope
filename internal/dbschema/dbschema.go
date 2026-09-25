@@ -2,7 +2,9 @@
 // assertions for the CoreScope SQLite DB. Per issue #1287 the writer
 // (cmd/ingestor) owns ALL CREATE/ALTER/INSERT/UPDATE/DELETE on schema
 // objects; the server (cmd/server) only ASSERTS that the schema is in
-// the expected shape and refuses to start otherwise.
+// the expected shape. It waits (bounded) while the ingestor's in-progress
+// start-up migration is still missing (NotReadyError.Transient) and refuses
+// to start otherwise.
 //
 // Apply(rw, log) runs from the ingestor at startup BEFORE subscribing to
 // MQTT. AssertReady(ro) runs from the server at startup and returns an
@@ -127,30 +129,183 @@ func Apply(rw *sql.DB, logf Logger) error {
 	return nil
 }
 
+// NotReadyError is AssertReady's error: the required schema items that are
+// missing or malformed, and the items whose probe failed (each with its
+// error, so no failure can be recorded without the error that classifies it).
+type NotReadyError struct {
+	Missing []string // human-readable item names; never row data
+	Probes  []ProbeFailure
+}
+
+// ProbeFailure is a schema item AssertReady could not verify.
+type ProbeFailure struct {
+	Item string
+	Err  error
+}
+
+// Items lists every item that is missing, malformed or unverified.
+func (e *NotReadyError) Items() []string {
+	items := append([]string(nil), e.Missing...)
+	for _, p := range e.Probes {
+		items = append(items, fmt.Sprintf("%s (probe error: %v)", p.Item, p.Err))
+	}
+	return items
+}
+
+func (e *NotReadyError) Error() string {
+	return fmt.Sprintf("schema not migrated by ingestor; restart ingestor first. missing: %s",
+		strings.Join(e.Items(), ", "))
+}
+
+// Transient reports whether the ingestor resolves the problem by itself
+// while it starts: the only missing items are this PR's start-up migration
+// still in progress (route_mask_changes not created yet, and possibly the
+// transmissions.route_mask column added just before it in the same Apply),
+// and every probe failure is SQLite BUSY or LOCKED. Anything else (another
+// missing item, a malformed change log, a change log whose migration is
+// recorded but whose table is gone, the column missing while the table
+// exists, any other SQLite error) is permanent. Classification uses SQLite
+// result codes, never error text.
+func (e *NotReadyError) Transient() bool {
+	if len(e.Missing) == 0 && len(e.Probes) == 0 {
+		return false
+	}
+	tableUnknown := false // not created yet, or its probe was BUSY/LOCKED
+	for _, p := range e.Probes {
+		if !isBusyOrLocked(p.Err) {
+			return false
+		}
+		if p.Item == "table:route_mask_changes" {
+			tableUnknown = true
+		}
+	}
+	for _, m := range e.Missing {
+		if m == "table:route_mask_changes" {
+			tableUnknown = true
+		}
+	}
+	for _, m := range e.Missing {
+		switch {
+		case m == "table:route_mask_changes":
+		case m == "transmissions.route_mask" && tableUnknown:
+			// Added by the same Apply, right before the table.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isBusyOrLocked reports whether err carries SQLite primary result code
+// SQLITE_BUSY (5) or SQLITE_LOCKED (6), including extended codes such as
+// SQLITE_BUSY_SNAPSHOT. The driver's errors expose Code().
+func isBusyOrLocked(err error) bool {
+	var coded interface{ Code() int }
+	if !errors.As(err, &coded) {
+		return false
+	}
+	primary := coded.Code() & 0xff
+	return primary == 5 || primary == 6
+}
+
 // AssertReady verifies the schema is in the expected shape. The server
-// calls this at startup against a read-only connection; if it returns
-// non-nil, the server MUST fatal-log and exit so the operator restarts
-// the ingestor (which owns migrations).
-func AssertReady(ro *sql.DB) error {
+// calls this at startup against a read-only connection. A non-nil result is
+// a *NotReadyError: the server waits (bounded) while it is Transient() and
+// fails otherwise, so the operator restarts the ingestor (which owns
+// migrations).
+func AssertReady(ro *sql.DB) error { return assertReady(ro, nil) }
+
+// assertReady is AssertReady; tests pass probed to run code right after the
+// probe of an item ("table:<name>" or "<table>.<column>").
+func assertReady(ro *sql.DB, probed func(item string)) error {
+	if probed == nil {
+		probed = func(string) {}
+	}
+	// Every probe reads one snapshot: the ingestor may commit a migration
+	// while this runs, and a check that saw half of it would call the
+	// in-progress migration permanent.
+	tx, err := ro.Begin()
+	if err != nil {
+		return &NotReadyError{Probes: []ProbeFailure{{Item: "read transaction", Err: err}}}
+	}
+	defer tx.Rollback()
+
 	var missing []string
+	var probes []ProbeFailure
+	probeFailed := func(item string, err error) {
+		probes = append(probes, ProbeFailure{Item: item, Err: err})
+	}
 
 	mustCol := func(table, col string) {
-		has, err := TableHasColumn(ro, table, col)
+		has, err := tableHasColumn(tx, table, col)
+		probed(table + "." + col)
 		if err != nil {
-			missing = append(missing, fmt.Sprintf("%s.%s (probe error: %v)", table, col, err))
+			probeFailed(table+"."+col, err)
 			return
 		}
 		if !has {
 			missing = append(missing, fmt.Sprintf("%s.%s", table, col))
 		}
 	}
-	mustTable := func(name string) {
+	tableExists := func(name string) (bool, error) {
 		var n int
-		err := ro.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+		err := tx.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+		probed("table:" + name)
 		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	mustTable := func(name string) {
+		ok, err := tableExists(name)
+		if err != nil {
+			probeFailed("table:"+name, err)
+		} else if !ok {
 			missing = append(missing, "table:"+name)
-		} else if err != nil {
-			missing = append(missing, fmt.Sprintf("table:%s (probe error: %v)", name, err))
+		}
+	}
+	// #89: once the change log exists it must match the approved definition
+	// (the ingestor creates table, index and marker in one transaction). A
+	// missing table is the migration still to come, unless its marker is
+	// already recorded: the ingestor never recreates such a table.
+	mustRouteMaskChanges := func() {
+		const item = "table:route_mask_changes"
+		ok, err := tableExists("route_mask_changes")
+		if err != nil {
+			probeFailed(item, err)
+			return
+		}
+		if !ok {
+			recorded, err := migrationRecorded(tx, RouteMaskChangesMigration)
+			switch {
+			case err != nil:
+				probeFailed(item, err)
+			case recorded:
+				missing = append(missing, item+" (recorded in _migrations)")
+			default:
+				missing = append(missing, item)
+			}
+			return
+		}
+		for _, col := range []string{"id", "transmission_id", "route_mask", "created_at"} {
+			mustCol("route_mask_changes", col)
+		}
+		var ddl string
+		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='route_mask_changes'`).Scan(&ddl); err != nil {
+			probeFailed("route_mask_changes definition", err)
+		} else if !strings.Contains(strings.ToUpper(ddl), "AUTOINCREMENT") {
+			missing = append(missing, "route_mask_changes.id AUTOINCREMENT")
+		}
+		// The index covers exactly transmission_id (columns in index order).
+		var cols string
+		err = tx.QueryRow(`SELECT COALESCE(group_concat(name, ','), '') FROM (
+			SELECT ii.name AS name FROM sqlite_master m, pragma_index_info(m.name) ii
+			WHERE m.type='index' AND m.name=? AND m.tbl_name='route_mask_changes' ORDER BY ii.seqno)`, RouteMaskChangesTxIndex).Scan(&cols)
+		switch {
+		case err != nil:
+			probeFailed("index:"+RouteMaskChangesTxIndex, err)
+		case cols != "transmission_id":
+			missing = append(missing, "index:"+RouteMaskChangesTxIndex)
 		}
 	}
 
@@ -167,7 +322,7 @@ func AssertReady(ro *sql.DB) error {
 	// server reads it to filter the hot-window query.
 	mustCol("transmissions", "last_seen")
 	mustCol("transmissions", "route_mask")
-	mustTable("route_mask_changes")
+	mustRouteMaskChanges()
 	// #1321: server's detectSchema PRAGMA-detects these and caches a
 	// boolean. To kill the startup race they're owned + asserted here.
 	mustCol("transmissions", "scope_name")
@@ -216,16 +371,40 @@ func AssertReady(ro *sql.DB) error {
 	mustTable("observer_neighbors")
 	mustTable("observer_neighbor_metrics")
 
-	if len(missing) > 0 {
-		return fmt.Errorf("schema not migrated by ingestor; restart ingestor first. missing: %s",
-			strings.Join(missing, ", "))
+	if len(missing) > 0 || len(probes) > 0 {
+		return &NotReadyError{Missing: missing, Probes: probes}
 	}
 	return nil
+}
+
+// migrationRecorded reports whether the _migrations marker name exists. A
+// database without _migrations has recorded nothing yet.
+func migrationRecorded(db querier, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_migrations'`).Scan(&n)
+	if err != nil || n == 0 {
+		return false, err
+	}
+	err = db.QueryRow(`SELECT 1 FROM _migrations WHERE name = ?`, name).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// querier is what *sql.DB and *sql.Tx share for schema probes.
+type querier interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
 }
 
 // TableHasColumn reports whether the given table has the given column.
 // Exported because tests and the read-side need it without re-implementing.
 func TableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	return tableHasColumn(db, table, column)
+}
+
+func tableHasColumn(db querier, table, column string) (bool, error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false, err
@@ -656,15 +835,25 @@ func ensureRouteMaskChangesTable(rw *sql.DB, logf Logger) error {
 	if err := rw.QueryRow(`SELECT 1 FROM _migrations WHERE name = ?`, RouteMaskChangesMigration).Scan(&one); err == nil {
 		return nil // already applied
 	}
-	if _, err := rw.Exec(CreateRouteMaskChangesTableSQL); err != nil {
+	// Table, index and marker in one transaction: a server that sees the
+	// table also sees its index, and a failure leaves nothing behind.
+	tx, err := rw.Begin()
+	if err != nil {
+		return fmt.Errorf("begin route_mask_changes: %w", err)
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	if _, err := tx.Exec(CreateRouteMaskChangesTableSQL); err != nil {
 		return fmt.Errorf("create route_mask_changes: %w", err)
 	}
 	// PREFLIGHT: async=false reason="index on a new, empty table; no scan of existing data"
-	if _, err := rw.Exec(CreateRouteMaskChangesIndexSQL); err != nil {
+	if _, err := tx.Exec(CreateRouteMaskChangesIndexSQL); err != nil {
 		return fmt.Errorf("create %s: %w", RouteMaskChangesTxIndex, err)
 	}
-	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskChangesMigration); err != nil {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, RouteMaskChangesMigration); err != nil {
 		return fmt.Errorf("record %s: %w", RouteMaskChangesMigration, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit route_mask_changes: %w", err)
 	}
 	logf("[dbschema] created route_mask_changes table (#89)")
 	return nil
