@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"strconv"
 	"time"
 )
@@ -158,6 +159,8 @@ type PeriodicEvidence struct {
 	// equally long chains under a Poisson null with the key's local pulse
 	// rate, over all pulses evaluated on the key so far and every candidate
 	// period the search may try; one gap is discounted for fitting Period.
+	// The detector compares the full value with MaxChance; JSON carries it
+	// rounded to ChanceDigits significant digits (see MarshalJSON).
 	Chance       float64
 	SufficientAt time.Time // first time the evidence met every criterion
 	Alternatives []PeriodAlternative
@@ -235,6 +238,39 @@ func (r Route) MarshalJSON() ([]byte, error) {
 		return json.Marshal("-")
 	}
 	return json.Marshal(strconv.Itoa(int(r.w)) + ":" + hex.EncodeToString(r.hops))
+}
+
+// ChanceDigits is the number of significant digits PeriodicEvidence.Chance
+// keeps in JSON. Chance comes from Exp/Expm1/Pow, whose last bits differ
+// between CPU architectures (measured: at most about 5e-13 relative over the
+// valid parameter range); six digits leave a margin of about 1e6 over that.
+// Chance is a union-bound estimate compared with a MaxChance set to one or
+// two significant digits, so six digits keep far more precision than the
+// value carries.
+const ChanceDigits = 6
+
+// canonicalFloat rounds v to sig significant digits (correctly rounded,
+// half to even on the exact binary value). Zero, NaN and infinities are
+// returned unchanged.
+func canonicalFloat(v float64, sig int) float64 {
+	if v == 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return v
+	}
+	r, err := strconv.ParseFloat(strconv.FormatFloat(v, 'e', sig-1, 64), 64)
+	if err != nil {
+		return v
+	}
+	return r
+}
+
+// MarshalJSON writes Chance rounded to ChanceDigits significant digits, so
+// the JSON is byte-identical on every architecture. Every other field is
+// written unchanged.
+func (e PeriodicEvidence) MarshalJSON() ([]byte, error) {
+	type plain PeriodicEvidence // no methods: avoids recursion
+	p := plain(e)
+	p.Chance = canonicalFloat(e.Chance, ChanceDigits)
+	return json.Marshal(p)
 }
 
 // MarshalJSON lists the set flags by name.

@@ -66,8 +66,21 @@ func TestReplayFixtureIsDeterministicAndMatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing golden file (run with -anomaly.update): %v", err)
 	}
-	if !bytes.Equal(append(a, '\n'), want) {
-		t.Fatal("replay output differs from testdata/replay_golden.json (run with -anomaly.update after reviewing)")
+	if got := append(a, '\n'); !bytes.Equal(got, want) {
+		// name the first differing line so a CI log shows the actual diff
+		gl, wl := strings.Split(string(got), "\n"), strings.Split(string(want), "\n")
+		for i := 0; i < len(gl) || i < len(wl); i++ {
+			var g, w string
+			if i < len(gl) {
+				g = gl[i]
+			}
+			if i < len(wl) {
+				w = wl[i]
+			}
+			if g != w {
+				t.Fatalf("replay output differs from testdata/replay_golden.json at line %d:\n got: %s\nwant: %s\n(run with -anomaly.update after reviewing)", i+1, g, w)
+			}
+		}
 	}
 }
 

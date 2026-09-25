@@ -396,7 +396,11 @@ func (p *periodicState) chance(c chainInfo, r *PeriodicRule) float64 {
 			lo = 0
 		}
 		hi := float64(int64(k)*c.period + c.tol)
-		pg += math.Exp(-lambda*lo) - math.Exp(-lambda*hi)
+		// P(lo <= gap <= hi) = exp(-l*lo) - exp(-l*hi), written without the
+		// subtraction of two nearly equal numbers: for small tolerances
+		// that subtraction loses digits, which Pow then amplifies (and the
+		// lost digits differ between CPU architectures).
+		pg += math.Exp(-lambda*lo) * -math.Expm1(-lambda*(hi-lo))
 	}
 	if pg > 1 {
 		pg = 1
