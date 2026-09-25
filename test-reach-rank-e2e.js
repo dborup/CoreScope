@@ -8,7 +8,8 @@
  *     no-match and past-the-end states.
  *  3. Keyboard: search → Enter → Tab to a row link → Enter opens that node's
  *     Reach page, whose Rank card matches the leaderboard (same snapshot) and
- *     links back; Back restores the search from the hash.
+ *     links back; Back restores the search from the hash (field, URL and
+ *     filtered rows), twice via Back/Forward, without reloading the page.
  *  4. Mobile 375×812: no horizontal scroll, all three columns visible.
  *  5. Hostile node names render as text (API response intercepted); a failed
  *     API call shows an error, never an empty leaderboard.
@@ -35,11 +36,96 @@ async function getJson(page, path) {
   return r.json();
 }
 
-async function openBoard(page, hash) {
-  await page.goto(BASE + '/#/reach-rank' + (hash || ''));
+// Runs a navigation that should end on the leaderboard and waits until the
+// board it produced is ready for input. A same-document hash navigation
+// resolves page.goto()/goBack() as soon as the history entry commits, but
+// app.js re-renders on the later hashchange, and one frame after each mount
+// it moves focus to the page heading (#630-7). Acting earlier types into the
+// board that is about to be replaced, or loses keystrokes to that focus move.
+// So when the hash changes: wait for a #rrSearch that did not exist before,
+// then for the focus hand-off; then for the mount's first fetch. When the hash
+// does not change, the router does not re-render and the current board stays.
+async function settleBoard(page, navigate) {
+  const before = await page.evaluate(() => {
+    const el = document.getElementById('rrSearch');
+    if (el) el.__rrStale = true;
+    window.__rrDoc = window.__rrDoc || String(Math.random());
+    return { hash: location.hash, doc: window.__rrDoc };
+  });
+  await navigate();
+  const remounted = await page.evaluate(b => window.__rrDoc !== b.doc || location.hash !== b.hash, before);
+  if (remounted) {
+    await page.waitForFunction(() => {
+      const el = document.getElementById('rrSearch');
+      if (el && !el.__rrStale) return true;
+      if (window.__rrFlushRoute) window.__rrFlushRoute(); // a held route (see installRouteHold) may run now
+      return false;
+    }).catch(e => { throw new Error('the leaderboard never re-rendered after navigating to ' + page.url() + ': ' + e.message); });
+    await page.waitForFunction(() => {
+      const app = document.getElementById('app');
+      const target = app.querySelector('h1, h2, h3, [role="heading"]') || app; // app.js #630-7
+      if (document.activeElement === target) return true;
+      if (window.__rrFlushFrames) window.__rrFlushFrames(); // the held route's frame callbacks may run now
+      return false;
+    }).catch(e => { throw new Error('app.js never moved focus to the leaderboard heading after navigating to ' + page.url() + ': ' + e.message); });
+  }
   await page.waitForSelector('#rrRows tr');
   await page.waitForFunction(() => document.getElementById('rrTable') &&
     !document.getElementById('rrTable').hasAttribute('aria-busy'));
+}
+
+async function openBoard(page, hash) {
+  await settleBoard(page, () => page.goto(BASE + '/#/reach-rank' + (hash || '')));
+}
+
+// Race amplifier for the keyboard step. In CI the router usually re-renders
+// within a millisecond of a hash navigation committing, and moves focus one
+// frame later, so acting too early failed only sometimes. installRouteHold()
+// wraps app.js's router (the hashchange listener named 'navigate');
+// holdNextRoute() then holds the next route change, and after it runs, the
+// animation-frame callbacks it scheduled (the focus hand-off), until the
+// page's next key press. settleBoard releases them only after seeing that its
+// condition does not hold yet (__rrFlushRoute, __rrFlushFrames). Typing before
+// the board is ready therefore loses the search every time instead of now and
+// then. Nothing is timed.
+async function installRouteHold(page) {
+  await page.addInitScript(() => {
+    const add = window.addEventListener;
+    window.addEventListener = function (type, fn, opts) {
+      if (type !== 'hashchange' || typeof fn !== 'function' || fn.name !== 'navigate') return add.call(this, type, fn, opts);
+      window.__rrRouteHooked = true;
+      return add.call(this, type, function (e) {
+        if (!window.__rrHoldNext) return fn.call(this, e);
+        window.__rrHoldNext = false;
+        let pending = true;
+        const run = () => {
+          if (!pending) return;
+          pending = false;
+          window.__rrFlushRoute = null;
+          window.removeEventListener('keydown', run, true);
+          const raf = window.requestAnimationFrame;
+          const frames = [];
+          window.requestAnimationFrame = cb => { frames.push(cb); return 0; };
+          try { fn.call(window, e); } finally { window.requestAnimationFrame = raf; }
+          if (!frames.length) return;
+          const runFrames = () => {
+            window.__rrFlushFrames = null;
+            window.removeEventListener('keydown', runFrames, true);
+            frames.splice(0).forEach(cb => cb(performance.now()));
+          };
+          window.__rrFlushFrames = runFrames;
+          add.call(window, 'keydown', runFrames, true);
+        };
+        window.__rrFlushRoute = run;
+        add.call(window, 'keydown', run, true);
+      }, opts);
+    };
+  });
+}
+
+async function holdNextRoute(page) {
+  const hooked = await page.evaluate(() => { window.__rrHoldNext = true; return window.__rrRouteHooked === true; });
+  assert(hooked, "the route hold did not catch app.js's hashchange router (listener named 'navigate')");
 }
 
 async function tableRows(page) {
@@ -99,6 +185,7 @@ async function main() {
   const LEAFLET_TEARDOWN = /reading '_leaflet_pos'/;
   const pageErrors = [];
   page.on('pageerror', e => { if (!LEAFLET_TEARDOWN.test(e.message)) pageErrors.push(e.message); });
+  await installRouteHold(page);
 
   const api = await getJson(page, '/api/reach-rank');
   console.log('reach-rank E2E: total=' + api.total + ' snapshot_at=' + api.snapshot_at);
@@ -199,10 +286,29 @@ async function main() {
 
   await step('keyboard: search → Tab → Enter opens Reach; Rank card matches; Back restores search', async () => {
     const q = target.name ? target.name : target.pubkey.slice(0, 10);
+    const expect = await getJson(page, '/api/reach-rank?q=' + encodeURIComponent(q));
+    const expectHrefs = expect.rows.map(r => '#/nodes/' + r.pubkey + '/reach');
+    // The board shows the search, both in the field and in the URL, and lists
+    // exactly the API's matches for it.
+    const searchShown = async (when) => {
+      await page.waitForFunction(n => document.querySelectorAll('#rrRows a.nq-link').length === n &&
+        !document.getElementById('rrTable').hasAttribute('aria-busy'), expect.rows.length)
+        .catch(e => { throw new Error('rows never matched the search for "' + q + '" ' + when + ': ' + e.message); });
+      const st = await page.evaluate(() => ({ hash: location.hash, value: document.getElementById('rrSearch').value,
+        hrefs: [...document.querySelectorAll('#rrRows a.nq-link')].map(a => a.getAttribute('href')) }));
+      assert(st.value === q, 'search field shows ' + JSON.stringify(st.value) + ', want ' + JSON.stringify(q) + ' ' + when);
+      assert(st.hash.includes('q=' + encodeURIComponent(q)), 'hash lacks the search ' + when + ': ' + st.hash);
+      assert(JSON.stringify(st.hrefs) === JSON.stringify(expectHrefs), 'rows are not the search results ' + when);
+    };
+    // Hold the router for this navigation so acting on the old board fails
+    // deterministically (see installRouteHold).
+    await holdNextRoute(page);
     await openBoard(page);
+    assert(await page.evaluate(() => window.__rrHoldNext === false), 'openBoard did not change route, so the held navigation never happened');
     await page.focus('#rrSearch');
     await page.keyboard.type(q);
     await page.keyboard.press('Enter');
+    await searchShown('after typing it and pressing Enter');
     await page.waitForFunction(h => [...document.querySelectorAll('#rrRows a.nq-link')].some(a => a.getAttribute('href') === h),
       '#/nodes/' + target.pubkey + '/reach');
     // Tab from the search box walks the rows' links in order.
@@ -227,9 +333,31 @@ async function main() {
     const cardText = await page.$$eval('.analytics-stat-card', cs => cs.map(c => c.textContent).join('|'));
     assert(cardText.includes('#' + target.rank + ' / ' + board.total), 'Rank card text: ' + cardText);
     assert(await page.getAttribute('.nq-rank-link', 'href') === '#/reach-rank', 'View leaderboard link');
-    await page.goBack();
-    await page.waitForSelector('#rrSearch');
-    assert(await page.inputValue('#rrSearch') === q, 'search restored after Back');
+    // Back (twice, with Forward in between) must be a history traversal inside
+    // the same document, not a reload, and must bring the search back.
+    const reachUrl = page.url();
+    const doc = await page.evaluate(() => ({ len: history.length, doc: window.__rrDoc }));
+    assert(doc.doc, 'document token missing before Back');
+    for (let round = 1; round <= 2; round++) {
+      // A reload can destroy the page context under settleBoard. If Back failed,
+      // check which document the page shows once it has loaded: a different
+      // __rrDoc token means Back reloaded instead of traversing history.
+      await settleBoard(page, () => page.goBack()).catch(async e => {
+        await page.waitForLoadState('domcontentloaded');
+        if (!(await page.evaluate(d => window.__rrDoc === d, doc.doc))) {
+          throw new Error('Back ' + round + ' reloaded the page instead of traversing history (' + e.message + ')');
+        }
+        throw e;
+      });
+      const after = await page.evaluate(() => ({ len: history.length, doc: window.__rrDoc }));
+      assert(after.doc === doc.doc && after.len === doc.len, 'Back ' + round + ' reloaded the page or changed history (' + JSON.stringify(after) + ' vs ' + JSON.stringify(doc) + ')');
+      await searchShown('after Back ' + round);
+      assert(await page.inputValue('#rrSearch') === q, 'search restored after Back');
+      if (round === 2) break;
+      await page.goForward();
+      await page.waitForSelector('.nq-rank-link');
+      assert(page.url() === reachUrl, 'Forward returned to ' + page.url());
+    }
   });
 
   await step('legacy empty-endpoint edges are not neighbours (fixture top node shows 9, not 10)', async () => {

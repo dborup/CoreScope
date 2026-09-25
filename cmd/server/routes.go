@@ -2804,8 +2804,10 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
+		// The store hands out its shared cached result; the filter never
+		// writes to it and returns a filtered copy when anything is hidden.
 		data := s.store.GetAnalyticsTopologyWithWindow(region, area, window)
-		if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
+		if s.cfg != nil && (s.cfg.HasNodeBlacklist() || len(s.cfg.hiddenPrefixes()) > 0) {
 			data = s.filterBlacklistedFromTopology(data)
 		}
 		writeJSON(w, data)
@@ -4233,109 +4235,6 @@ func parseWindowDuration(window string) (time.Duration, error) {
 // constantTimeEqual compares two strings in constant time to prevent timing attacks.
 func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-// filterBlacklistedFromTopology removes blacklisted + hidden-prefix node
-// references (#1181) from the topology analytics response (TopRepeaters,
-// TopPairs, BestPathList, MultiObsNodes, PerObserverReach).
-func (s *Server) filterBlacklistedFromTopology(data map[string]interface{}) map[string]interface{} {
-	// Filter TopRepeaters
-	if repeaters, ok := data["topRepeaters"]; ok {
-		if arr, ok := repeaters.([]TopRepeater); ok {
-			var filtered []TopRepeater
-			for _, r := range arr {
-				if pk, ok := r.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-					continue
-				}
-				if name, ok := r.Name.(string); ok && s.cfg.IsNameHidden(name) {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			data["topRepeaters"] = filtered
-		}
-	}
-
-	// Filter TopPairs
-	if pairs, ok := data["topPairs"]; ok {
-		if arr, ok := pairs.([]TopPair); ok {
-			var filtered []TopPair
-			for _, p := range arr {
-				if pkA, ok := p.PubkeyA.(string); ok && s.cfg.IsBlacklisted(pkA) {
-					continue
-				}
-				if pkB, ok := p.PubkeyB.(string); ok && s.cfg.IsBlacklisted(pkB) {
-					continue
-				}
-				if nameA, ok := p.NameA.(string); ok && s.cfg.IsNameHidden(nameA) {
-					continue
-				}
-				if nameB, ok := p.NameB.(string); ok && s.cfg.IsNameHidden(nameB) {
-					continue
-				}
-				filtered = append(filtered, p)
-			}
-			data["topPairs"] = filtered
-		}
-	}
-
-	// Filter BestPathList
-	if paths, ok := data["bestPathList"]; ok {
-		if arr, ok := paths.([]BestPathEntry); ok {
-			var filtered []BestPathEntry
-			for _, p := range arr {
-				if pk, ok := p.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-					continue
-				}
-				if pk, ok := p.Pubkey.(string); ok && s.isPubkeyHidden(pk) {
-					continue
-				}
-				filtered = append(filtered, p)
-			}
-			data["bestPathList"] = filtered
-		}
-	}
-
-	// Filter MultiObsNodes
-	if nodes, ok := data["multiObsNodes"]; ok {
-		if arr, ok := nodes.([]MultiObsNode); ok {
-			var filtered []MultiObsNode
-			for _, n := range arr {
-				if pk, ok := n.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-					continue
-				}
-				if name, ok := n.Name.(string); ok && s.cfg.IsNameHidden(name) {
-					continue
-				}
-				filtered = append(filtered, n)
-			}
-			data["multiObsNodes"] = filtered
-		}
-	}
-
-	// Filter PerObserverReach
-	if reach, ok := data["perObserverReach"]; ok {
-		if m, ok := reach.(map[string]*ObserverReach); ok {
-			for k, v := range m {
-				for ri := range v.Rings {
-					var filteredNodes []ReachNode
-					for _, rn := range v.Rings[ri].Nodes {
-						if pk, ok := rn.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-							continue
-						}
-						if name, ok := rn.Name.(string); ok && s.cfg.IsNameHidden(name) {
-							continue
-						}
-						filteredNodes = append(filteredNodes, rn)
-					}
-					v.Rings[ri].Nodes = filteredNodes
-				}
-				m[k] = v
-			}
-		}
-	}
-
-	return data
 }
 
 // filterBlacklistedFromSubpaths removes blacklisted node references from
