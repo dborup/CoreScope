@@ -910,14 +910,24 @@ body.live-fullscreen #liveFullscreenToggle:hover,
    * activate/hide button group docks together as a tidy cluster.
    * bottom uses max() to clear the VCR bar when present (#1206).
    * #1833 round 2: use the same .live-page containing block as .vcr-bar.
-   * A viewport-fixed anchor drifts by --bottom-nav-reserve at 641..768px. */
+   * A viewport-fixed anchor drifts by --bottom-nav-reserve at 641..768px.
+   * #1833 round 3: at short viewport heights the stacked-above-legend
+   * offset can rise far enough to land under .top-nav (.live-page sits at
+   * viewport-top, with .top-nav fixed on top of it, not pushing it down —
+   * so "bottom" offsets big enough reach right into the nav's 52px band).
+   * The old margin-bottom stacking trick is folded into bottom below so
+   * there is a single total offset to clamp; its ceiling keeps the
+   * button's top edge at least .top-nav's height below .live-page's own
+   * top edge, regardless of viewport height. min() only ever pulls the
+   * offset DOWN from its VCR-bar-clearing value, so it cannot reintroduce
+   * the VCR-bar overlap this same rule already prevents. */
   --legend-toggle-stack: calc(var(--legend-toggle-h, 46px) + 10px); /* gap above legend-toggle */
   position: absolute;
-  bottom: max(1rem, calc(var(--vcr-bar-height, 0px) + 10px + var(--legend-toggle-stack)));
+  bottom: max(1rem, min(
+    calc(max(1rem, calc(var(--vcr-bar-height, 0px) + 10px + var(--legend-toggle-stack))) + var(--legend-toggle-stack)),
+    calc(100% - var(--legend-toggle-h, 46px) - 52px - 10px)
+  ));
   right: 1rem; z-index: 500;
-  /* Stack above .legend-toggle-btn using margin-bottom so the `right: 1rem`
-   * invariant (and bottom-right anchor) stays consistent across both buttons. */
-  margin-bottom: var(--legend-toggle-stack);
   background: color-mix(in srgb, var(--surface-1) 92%, transparent); backdrop-filter: blur(8px);
   border: 1px solid var(--border); border-radius: 8px;
   color: var(--text-muted); font-size: 18px; padding: 8px 10px;
