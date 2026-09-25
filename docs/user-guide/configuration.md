@@ -138,6 +138,8 @@ See [Channels](channels.md) for details.
 
 Approved channels stay decrypted and listed when `enabled` is later set to `false`, and survive restarts and `SIGHUP` reloads. A key configured in `channelKeys` for the same name takes priority.
 
+An administrator can also revoke a previously approved channel (see [Channels](channels.md#revoking-an-approved-channel)) — this undoes the decryption going forward but never deletes or hides messages already decoded while it was approved. A revoked row is retained and pruned by the same `retentionDays` rule as a rejected one (counted from when it was revoked, not when it was first submitted); an approved row is still never pruned. Revoking introduces no new configuration of its own — it reuses the `maxPending`/`maxApproved`/`retentionDays`/`submissionsPerHour` limits above.
+
 ## Map defaults
 
 ```json

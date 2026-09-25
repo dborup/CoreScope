@@ -73,6 +73,20 @@ func (hk *hotKeys) AddApproved(names ...string) int {
 	return added
 }
 
+// RemoveApproved removes a name from the approved layer only (never touches
+// base, so a manually configured key for the same channel keeps decrypting
+// it). Returns whether it was present.
+func (hk *hotKeys) RemoveApproved(name string) bool {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	if _, ok := hk.approved[name]; !ok {
+		return false
+	}
+	delete(hk.approved, name)
+	hk.publishLocked()
+	return true
+}
+
 // publishLocked builds a fresh merged map (never mutating one a reader may
 // hold) and swaps it in. O(base + approved), and only on reload/approval.
 func (hk *hotKeys) publishLocked() {

@@ -331,6 +331,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.Handle("/api/admin/channel-proposals", s.requireAPIKey(http.HandlerFunc(s.handleAdminChannelProposals))).Methods("GET")
 	r.Handle("/api/admin/channel-proposals/{id}/approve", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpApprove))).Methods("POST")
 	r.Handle("/api/admin/channel-proposals/{id}/reject", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpReject))).Methods("POST")
+	r.Handle("/api/admin/channel-proposals/{id}/revoke", s.requireAPIKey(http.HandlerFunc(s.handleAdminChannelProposalRevoke))).Methods("POST")
 	r.Handle("/api/debug/affinity", s.requireAPIKey(http.HandlerFunc(s.handleDebugAffinity))).Methods("GET")
 	r.Handle("/api/dropped-packets", s.requireAPIKey(http.HandlerFunc(s.handleDroppedPackets))).Methods("GET")
 	r.Handle("/api/backup", s.requireAPIKey(http.HandlerFunc(s.handleBackup))).Methods("GET")

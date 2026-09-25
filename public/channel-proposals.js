@@ -7,6 +7,7 @@
  *   GET  /api/channel-proposals/requests/{requestId}   → {status, proposal, error}
  *   GET  /api/admin/channel-proposals[?status=]        → {proposals, enabled}   (X-API-Key)
  *   POST /api/admin/channel-proposals/{id}/approve|reject → 202 {requestId}   (X-API-Key)
+ *   POST /api/admin/channel-proposals/{id}/revoke      → 202 {requestId} or 409 (not approved, nothing queued) (X-API-Key)
  *   GET  /api/channels → approvedChannels: [{name, hash}]
  *
  * The admin key lives only in this module's memory (never localStorage,
@@ -249,9 +250,10 @@
   }
 
   // ── Admin dialog (#/channels?view=proposals) ───────────────────────────
-  var FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected']];
+  var FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['revoked', 'Revoked']];
 
   function adminEl() { return document.getElementById('chProposalsAdmin'); }
+  function confirmEl() { return document.getElementById('chProposalsConfirm'); }
 
   function focusables(container) {
     return Array.prototype.filter.call(
@@ -287,6 +289,7 @@
   function closeAdmin(opts) {
     var el = adminEl();
     if (!el) return;
+    closeConfirm({ skipFocusReturn: true }); // never leave an orphaned confirm layer behind
     if (state) state.adminPoller.cancel();
     document.removeEventListener('keydown', onAdminKeydown);
     el.remove();
@@ -366,17 +369,67 @@
     var when = p.status === 'pending'
       ? 'Suggested ' + esc(fmtTime(p.createdAt))
       : 'Reviewed ' + esc(fmtTime(p.reviewedAt || p.createdAt));
-    var actions = p.status === 'pending'
-      ? '<div class="ch-proposals-actions">' +
+    var actions;
+    if (p.status === 'pending') {
+      actions = '<div class="ch-proposals-actions">' +
           '<button type="button" class="btn-primary" data-proposals-decide="approve" data-proposal-id="' + esc(p.id) + '"' +
           ' aria-label="Approve ' + esc(p.name) + '">Approve</button>' +
           '<button type="button" class="ch-modal-btn-secondary" data-proposals-decide="reject" data-proposal-id="' + esc(p.id) + '"' +
           ' aria-label="Reject ' + esc(p.name) + '">Reject</button>' +
-        '</div>'
-      : '<span class="ch-proposals-state" data-state="' + esc(p.status) + '">' + esc(p.status) + '</span>';
+        '</div>';
+    } else if (p.status === 'approved') {
+      // Approved rows additionally get a Remove (revoke) action, guarded by
+      // a confirmation step (see openConfirm) before anything is sent.
+      actions = '<div class="ch-proposals-actions">' +
+          '<span class="ch-proposals-state" data-state="approved">approved</span>' +
+          '<button type="button" class="ch-modal-btn-secondary ch-proposals-remove" data-proposals-decide="revoke"' +
+          ' data-proposal-id="' + esc(p.id) + '" data-proposal-name="' + esc(p.name) + '"' +
+          ' aria-label="Remove ' + esc(p.name) + '">Remove</button>' +
+        '</div>';
+    } else {
+      actions = '<span class="ch-proposals-state" data-state="' + esc(p.status) + '">' + esc(p.status) + '</span>';
+    }
     return '<li class="ch-proposals-item" data-proposal-id="' + esc(p.id) + '">' +
       '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' +
       '<span class="ch-proposals-meta">' + when + '</span></div>' + actions + '</li>';
+  }
+
+  // ── Remove (revoke) confirmation layer, nested inside the admin dialog ──
+  // Reuses the admin dialog's own overlay/modal classes and its single
+  // document keydown listener (onAdminKeydown), which checks confirmEl()
+  // first so Escape/Tab-trapping apply to whichever layer is on top —
+  // never two independent keydown listeners fighting over the same keys.
+  function openConfirm(id, name) {
+    if (!state || !adminEl() || confirmEl()) return;
+    state.confirmTrigger = document.activeElement;
+    var dlg = document.createElement('div');
+    dlg.id = 'chProposalsConfirm';
+    dlg.className = 'modal-overlay ch-modal-overlay ch-proposals-confirm-overlay';
+    dlg.setAttribute('role', 'alertdialog');
+    dlg.setAttribute('aria-modal', 'true');
+    dlg.setAttribute('aria-labelledby', 'chProposalsConfirmTitle');
+    dlg.innerHTML =
+      '<div class="modal ch-modal ch-proposals-confirm" role="document">' +
+        '<h4 id="chProposalsConfirmTitle">Remove ' + esc(name) + '?</h4>' +
+        '<p class="ch-modal-section-hint">It will stop being shared with everyone.</p>' +
+        '<div class="ch-modal-row ch-proposals-confirm-actions">' +
+          '<button type="button" class="ch-modal-btn-secondary" data-proposals-confirm-action="cancel">Cancel</button>' +
+          '<button type="button" class="btn-primary" data-proposals-confirm-action="confirm"' +
+          ' data-proposal-id="' + esc(id) + '" data-proposal-name="' + esc(name) + '">Remove</button>' +
+        '</div>' +
+      '</div>';
+    adminEl().appendChild(dlg);
+    var confirmBtn = dlg.querySelector('[data-proposals-confirm-action="confirm"]');
+    if (confirmBtn) confirmBtn.focus();
+  }
+
+  function closeConfirm(opts) {
+    var el = confirmEl();
+    if (!el) return;
+    el.remove();
+    if (opts && opts.skipFocusReturn) return;
+    var back = state && state.confirmTrigger;
+    if (back && document.contains(back) && typeof back.focus === 'function') back.focus();
   }
 
   function onAdminError(err) {
@@ -393,7 +446,8 @@
     var row = btn.closest('.ch-proposals-item');
     var name = row ? (row.querySelector('.ch-proposals-name') || {}).textContent : '';
     if (row) Array.prototype.forEach.call(row.querySelectorAll('button'), function (b) { b.disabled = true; });
-    adminStatus((op === 'approve' ? 'Approving ' : 'Rejecting ') + name + '…', 'info');
+    var verb = op === 'approve' ? 'Approving ' : op === 'revoke' ? 'Removing ' : 'Rejecting ';
+    adminStatus(verb + name + '…', 'info');
     request('POST', '/admin/channel-proposals/' + encodeURIComponent(id) + '/' + op, { admin: true }).then(function (res) {
       if (!state) return;
       state.adminPending = { op: op, name: name };
@@ -413,6 +467,8 @@
       if (typeof state.onApproved === 'function') state.onApproved(name);
     } else if (st.status === 'rejected') {
       adminStatus(name + ' was rejected.', 'success');
+    } else if (st.status === 'revoked') {
+      adminStatus(name + ' was removed and is no longer shared.', 'success');
     } else {
       adminStatus(st.error || 'The decision could not be applied.', 'error');
     }
@@ -422,6 +478,25 @@
   function onAdminClick(e) {
     var overlay = adminEl();
     var t = e.target;
+    // The confirm layer sits on top when open: its own backdrop click and
+    // its Cancel/Confirm buttons are handled here first, before anything
+    // that would act on the admin dialog underneath it.
+    if (confirmEl()) {
+      if (t === confirmEl()) { closeConfirm(); return; }
+      var ca = t.closest && t.closest('[data-proposals-confirm-action]');
+      if (ca) {
+        var action = ca.getAttribute('data-proposals-confirm-action');
+        if (action === 'cancel') { closeConfirm(); return; }
+        if (action === 'confirm') {
+          var confirmId = ca.getAttribute('data-proposal-id');
+          var trigger = state && state.confirmTrigger;
+          closeConfirm({ skipFocusReturn: true });
+          if (trigger) decide(confirmId, 'revoke', trigger);
+          return;
+        }
+      }
+      return; // swallow everything else while the confirm layer is open
+    }
     if (t === overlay || (t.closest && t.closest('[data-proposals-action="close"]'))) {
       e.preventDefault();
       closeAdmin();
@@ -447,7 +522,14 @@
       return;
     }
     var d = t.closest && t.closest('[data-proposals-decide]');
-    if (d && !d.disabled) decide(d.getAttribute('data-proposal-id'), d.getAttribute('data-proposals-decide'), d);
+    if (d && !d.disabled) {
+      var op = d.getAttribute('data-proposals-decide');
+      if (op === 'revoke') {
+        openConfirm(d.getAttribute('data-proposal-id'), d.getAttribute('data-proposal-name') || '');
+        return;
+      }
+      decide(d.getAttribute('data-proposal-id'), op, d);
+    }
   }
 
   function onAdminSubmit(e) {
@@ -462,21 +544,26 @@
     renderAdminBody();
   }
 
+  // Single document-level keydown listener for the whole admin dialog,
+  // including the confirm layer nested inside it: whichever is currently on
+  // top handles Escape and Tab-trapping, so there is never a second,
+  // independently-stacked listener fighting this one over the same keys.
   function onAdminKeydown(e) {
     var overlay = adminEl();
     if (!overlay) return;
+    var layer = confirmEl() || overlay;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      closeAdmin();
+      if (layer === overlay) closeAdmin(); else closeConfirm();
       return;
     }
     if (e.key !== 'Tab') return;
-    var f = focusables(overlay);
+    var f = focusables(layer);
     if (!f.length) return;
     var first = f[0];
     var last = f[f.length - 1];
-    if (!overlay.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+    if (!layer.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
@@ -531,10 +618,12 @@
   root.ChannelProposals = {
     MAX_NAME_BYTES: MAX_NAME_BYTES,
     MAX_POLL_ATTEMPTS: MAX_POLL_ATTEMPTS,
+    FILTERS: FILTERS,
     normalizeName: normalizeName,
     mergeApprovedChannels: mergeApprovedChannels,
     pollDelay: pollDelay,
     createPoller: createPoller,
+    renderAdminRow: renderAdminRow,
     mount: mount,
     unmount: unmount,
     openAdmin: openAdmin,

@@ -346,6 +346,25 @@ async function main() {
       assert.ok(box && box.x >= 0 && box.x + box.width <= 390, 'dialog exceeds the viewport: ' + JSON.stringify(box));
     });
 
+    await step('mobile: Remove opens a confirm dialog that fits 390px (cancelled, so the channel stays approved)', async () => {
+      await pageMobile.fill('#chProposalsKey', API_KEY);
+      await pageMobile.tap('#chProposalsKeyForm button[type="submit"]');
+      await pageMobile.click('[data-proposals-filter="approved"]');
+      const row = `.ch-proposals-item:has(.ch-proposals-name:text-is("${NAME}"))`;
+      await pageMobile.waitForSelector(row + ' [data-proposals-decide="revoke"]');
+      await pageMobile.tap(row + ' [data-proposals-decide="revoke"]');
+      await pageMobile.waitForSelector('#chProposalsConfirm[role="alertdialog"]');
+      const overflow = await pageMobile.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert.ok(overflow <= 0, 'confirm dialog causes horizontal overflow: ' + overflow + 'px');
+      const box = await pageMobile.locator('#chProposalsConfirm .ch-proposals-confirm').boundingBox();
+      assert.ok(box && box.x >= 0 && box.x + box.width <= 390, 'confirm dialog exceeds the viewport: ' + JSON.stringify(box));
+      // Cancel: this mobile pass only proves the dialog itself; the actual
+      // revoke below happens once, from the admin desktop session.
+      await pageMobile.tap('[data-proposals-confirm-action="cancel"]');
+      await pageMobile.waitForSelector('#chProposalsConfirm', { state: 'detached' });
+      await pageMobile.waitForSelector(row + ' .ch-proposals-state[data-state="approved"]');
+    });
+
     await step('restart: the approval survives restarting ingestor and server', async () => {
       await stopProcess(stack.server);
       await stopProcess(stack.ingestor);
@@ -355,6 +374,82 @@ async function main() {
       const body = await res.json();
       const names = (body.approvedChannels || []).map((c) => c.name);
       assert.ok(names.includes(NAME), 'approvedChannels after restart: ' + JSON.stringify(names));
+    });
+
+    await step('admin: revoke the approved channel — Escape cancels the confirm layer only, keeping the admin dialog open', async () => {
+      await pageAdmin.goto(env.base + '/#/channels?view=proposals');
+      await pageAdmin.waitForSelector('#chProposalsAdmin[role="dialog"][aria-modal="true"]');
+      // adminKey lives only in this tab's JS memory (see the module doc
+      // comment); a hash-only navigation is not a full reload, so it is
+      // still unlocked here from the earlier "admin: approve…" step and the
+      // list renders directly rather than the key form.
+      await pageAdmin.click('[data-proposals-filter="approved"]');
+      const row = `.ch-proposals-item:has(.ch-proposals-name:text-is("${NAME}"))`;
+      await pageAdmin.waitForSelector(row + ' [data-proposals-decide="revoke"]');
+      await pageAdmin.click(row + ' [data-proposals-decide="revoke"]');
+      await pageAdmin.waitForSelector('#chProposalsConfirm[role="alertdialog"]');
+      assert.match(await pageAdmin.textContent('#chProposalsConfirm'), /stop being shared with everyone/);
+
+      await pageAdmin.keyboard.press('Escape');
+      await pageAdmin.waitForSelector('#chProposalsConfirm', { state: 'detached' });
+      assert.ok(await pageAdmin.isVisible('#chProposalsAdmin'), 'the admin dialog must stay open after cancelling the confirm');
+      const focused = await pageAdmin.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-proposals-decide'));
+      assert.strictEqual(focused, 'revoke', 'focus must return to the Remove button that opened the confirm');
+    });
+
+    await step('admin: confirming Remove revokes it', async () => {
+      const row = `.ch-proposals-item:has(.ch-proposals-name:text-is("${NAME}"))`;
+      await pageAdmin.click(row + ' [data-proposals-decide="revoke"]');
+      await pageAdmin.waitForSelector('#chProposalsConfirm [data-proposals-confirm-action="confirm"]');
+      await pageAdmin.click('#chProposalsConfirm [data-proposals-confirm-action="confirm"]');
+      await pageAdmin.waitForFunction((n) => document.getElementById('chProposalsStatus').textContent.includes(n + ' was removed'), NAME);
+      await pageAdmin.click('[data-proposals-filter="revoked"]');
+      await pageAdmin.waitForSelector(row + ' .ch-proposals-state[data-state="revoked"]');
+    });
+
+    await step('ingestor removed the revoked channel from its live keys', async () => {
+      await waitFor('ingestor revoke log', () => logHas(stack.ingestor, new RegExp('revoked "' + NAME + '" — removed from channel keys')));
+    });
+
+    await step('B: no longer sees the channel as shared once revoked', async () => {
+      await pageB.goto(env.base + '/#/channels');
+      await pageB.reload();
+      const row = `#chList .ch-item[data-hash="${NAME}"]`;
+      await pageB.waitForFunction((sel) => !document.querySelector(sel), row);
+    });
+
+    await step('restart after revoke: the revoked channel stays gone', async () => {
+      await stopProcess(stack.server);
+      await stopProcess(stack.ingestor);
+      // startStack() already waits for the ingestor's MQTT subscription log,
+      // which happens after LoadApproved in main.go — a sufficient readiness
+      // signal here. The "N approved shared channel(s) added" log line from
+      // the earlier restart step is NOT reusable as a wait condition after a
+      // revoke: LoadApproved now legitimately finds zero approved channels,
+      // so main.go's `else if n > 0` guard means that line is never printed.
+      stack = await startStack(env);
+      const res = await fetch(env.base + '/api/channels');
+      const body = await res.json();
+      const names = (body.approvedChannels || []).map((c) => c.name);
+      assert.ok(!names.includes(NAME), 'a revoked channel reappeared after restart: ' + JSON.stringify(names));
+    });
+
+    await step('re-suggesting the same name after revoke lands as pending, never auto-approved', async () => {
+      await pageA.goto(env.base + '/#/channels');
+      await pageA.click('#chAddChannelBtn');
+      await pageA.waitForSelector('#chSuggestSection:not([hidden]) #chSuggestName');
+      await pageA.fill('#chSuggestName', NAME.slice(1));
+      await pageA.click('#chSuggestBtn');
+      await pageA.waitForFunction((n) => {
+        const s = document.getElementById('chSuggestStatus');
+        return s && s.textContent.includes(n) && /waiting for an administrator/.test(s.textContent);
+      }, NAME);
+      const pendingRes = await fetch(env.base + '/api/admin/channel-proposals?status=pending', { headers: { 'X-API-Key': API_KEY } });
+      const pendingNames = ((await pendingRes.json()).proposals || []).map((p) => p.name);
+      assert.ok(pendingNames.includes(NAME), 'resuggested channel not pending: ' + JSON.stringify(pendingNames));
+      const approvedRes = await fetch(env.base + '/api/admin/channel-proposals?status=approved', { headers: { 'X-API-Key': API_KEY } });
+      const approvedNames = ((await approvedRes.json()).proposals || []).map((p) => p.name);
+      assert.ok(!approvedNames.includes(NAME), 'resuggestion must never be auto-approved');
     });
 
     await step('no uncaught page errors', async () => {

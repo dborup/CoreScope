@@ -72,7 +72,7 @@
 .ch-proposals-main { display: flex; flex-direction: column; min-width: 0; }
 .ch-proposals-name { font-weight: 600; overflow-wrap: anywhere; }
 .ch-proposals-meta { font-size: 12px; color: var(--text-muted); }
-.ch-proposals-actions { display: flex; gap: 6px; }
+.ch-proposals-actions { display: flex; gap: 6px; align-items: center; }
 .ch-proposals-actions button,
 .ch-proposals-toolbar button { min-height: 44px; }
 .ch-proposals-state {
@@ -84,7 +84,16 @@
 .ch-proposals-state[data-state="rejected"] { color: var(--status-red); }
 .ch-proposals-empty { padding: 12px 0; font-size: 13px; color: var(--text-muted); }
 
+/* Remove (revoke) confirmation, nested inside the admin dialog's own
+ * overlay (see openConfirm in channel-proposals.js). Reuses .modal-overlay/
+ * .modal/.ch-modal and .ch-modal-row so it looks identical to the rest of
+ * the channel modals; only the narrower max-width is specific to it. */
+.ch-proposals-confirm { max-width: 420px; }
+.ch-proposals-confirm h4 { margin: 0 0 8px; font-size: 16px; }
+.ch-proposals-confirm-actions { justify-content: flex-end; margin-top: 14px; margin-bottom: 0; }
+
 @media (max-width: 640px) {
   .ch-proposals-actions { width: 100%; }
   .ch-proposals-actions button { flex: 1; }
+  .ch-proposals-confirm-actions button { flex: 1; }
 }

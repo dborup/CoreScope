@@ -68,7 +68,19 @@ An administrator reviews suggestions at `#/channels?view=proposals`:
 1. Enter the `apiKey`. It is kept only in the tab's memory and is forgotten on reload or with **Lock**.
 2. Approve or reject each pending suggestion.
 
-Approved channels are decrypted by the ingestor from then on and appear for everyone under **Network** with a **Shared** label, even before they carry any messages. Shared channels have no remove button, because they are not stored in your browser.
+Approved channels are decrypted by the ingestor from then on and appear for everyone under **Network** with a **Shared** label, even before they carry any messages. Shared channels have no remove button for a regular visitor, because they are not stored in your browser.
+
+### Revoking an approved channel
+
+An administrator can undo a previous approval from the same **Pending / Approved / Rejected / Revoked** review dialog: switch to the **Approved** tab and click **Remove** on a channel. A confirmation prompt names the channel before anything happens — nothing is sent until you confirm.
+
+Removing a channel:
+
+- Stops the ingestor from decrypting new traffic on it (unless the administrator also has it configured directly via `channelKeys`/`hashChannels` in `config.json`, in which case that key keeps working — see [Configuration](configuration.md#channel-decryption)).
+- Takes it out of everyone's **Network** section going forward.
+- Does **not** delete or hide any messages that were already decoded and shown while it was approved — those stay on the Channels page exactly as before. Revoking only affects future traffic.
+
+A removed channel shows up under the **Revoked** tab. Suggesting the same name again later starts a fresh review from **Pending** — it is never auto-approved just because it was approved before.
 
 The local **Add Channel** tools (PSK channels, **Monitor Hashtag Channel**) are unchanged and still only affect your browser.
 

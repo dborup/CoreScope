@@ -24,7 +24,7 @@ const strongTestKey = "proposal-admin-key-strong-enough"
 const proposalTableDDL = `CREATE TABLE channel_proposals (
 	id TEXT PRIMARY KEY,
 	name TEXT COLLATE BINARY NOT NULL UNIQUE,
-	status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+	status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','revoked')),
 	created_at INTEGER NOT NULL,
 	reviewed_at INTEGER NULL
 )`
@@ -469,6 +469,141 @@ func TestChannelProposalsMissingTable(t *testing.T) {
 		t.Fatalf("approvedChannels after the table appeared = %+v", resp.ApprovedChannels)
 	}
 }
+
+// ── revoke ──────────────────────────────────────────────────────────────
+
+func queueFileNames(t *testing.T, ps *proposalServer) []string {
+	t.Helper()
+	entries, err := os.ReadDir(ps.queue.Dir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+func TestAdminChannelProposalRevokeRequiresStrongKey(t *testing.T) {
+	cases := []struct {
+		name, configured, sent string
+		want                   int
+	}{
+		{"no key configured", "", strongTestKey, http.StatusForbidden},
+		{"missing header", strongTestKey, "", http.StatusUnauthorized},
+		{"wrong key", strongTestKey, "wrong-key-wrong-key-wrong", http.StatusUnauthorized},
+		{"weak configured key", "test", "test", http.StatusForbidden},
+		{"correct key", strongTestKey, strongTestKey, http.StatusAccepted},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ps := newProposalServer(t, c.configured, enabledConfig(nil), true)
+			ps.insert("abcdefabcdefabcd", "#x", channelregistry.StatusApproved)
+			if w := ps.do("POST", "/api/admin/channel-proposals/abcdefabcdefabcd/revoke", "", c.sent); w.Code != c.want {
+				t.Fatalf("revoke = %d, want %d", w.Code, c.want)
+			}
+		})
+	}
+}
+
+func TestAdminChannelProposalRevokeUnknownIDIs404WithNoQueueFile(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	before := queueFileNames(t, ps)
+	if w := ps.do("POST", "/api/admin/channel-proposals/ffffffffffffffff/revoke", "", strongTestKey); w.Code != http.StatusNotFound {
+		t.Fatalf("revoke unknown = %d", w.Code)
+	}
+	if got := queueFileNames(t, ps); !reflect.DeepEqual(got, before) {
+		t.Fatalf("revoke of an unknown id wrote a queue file: %v -> %v", before, got)
+	}
+	if w := ps.do("POST", "/api/admin/channel-proposals/not-hex/revoke", "", strongTestKey); w.Code != http.StatusBadRequest {
+		t.Fatalf("revoke bad id = %d", w.Code)
+	}
+}
+
+// The synchronous, side-effect-free 409: pending, rejected and already-
+// revoked proposals may not be revoked, and none of these writes a command
+// file to the queue.
+func TestAdminChannelProposalRevokeNonApprovedIs409WithNoQueueFile(t *testing.T) {
+	for _, status := range []string{channelregistry.StatusPending, channelregistry.StatusRejected, channelregistry.StatusRevoked} {
+		t.Run(status, func(t *testing.T) {
+			ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+			ps.insert("abcdefabcdefabcd", "#x", status)
+			before := queueFileNames(t, ps)
+			w := ps.do("POST", "/api/admin/channel-proposals/abcdefabcdefabcd/revoke", "", strongTestKey)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("revoke of %s = %d, want 409", status, w.Code)
+			}
+			if got := queueFileNames(t, ps); !reflect.DeepEqual(got, before) {
+				t.Fatalf("409 revoke wrote a queue file: %v -> %v", before, got)
+			}
+		})
+	}
+}
+
+func TestAdminChannelProposalRevokeApprovedQueuesExactlyOneRevokeCommand(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	ps.insert("abcdefabcdefabcd", "#x", channelregistry.StatusApproved)
+	w := ps.do("POST", "/api/admin/channel-proposals/abcdefabcdefabcd/revoke", "", strongTestKey)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("revoke = %d %s", w.Code, w.Body)
+	}
+	id := decode[ChannelProposalAcceptedResponse](t, w).RequestID
+	if !channelregistry.ValidID(id) {
+		t.Fatalf("request id %q", id)
+	}
+	pending, err := ps.queue.Pending()
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("queue = %+v, %v", pending, err)
+	}
+	cmd := pending[0].Command
+	if cmd.Op != channelregistry.OpRevoke || cmd.ProposalID != "abcdefabcdefabcd" || cmd.RequestID != id {
+		t.Fatalf("queued command = %+v", cmd)
+	}
+}
+
+// Once a channel is (simulated as) revoked in the DB, GET /api/channels no
+// longer lists it, and a request-status read that observes the revocation
+// invalidates the cache immediately rather than waiting out the TTL —
+// mirroring TestApprovedStatusInvalidatesCache for approval.
+func TestRevokedStatusInvalidatesApprovedCache(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	ps.insert("aaaaaaaaaaaaaaaa", "#Fresh", channelregistry.StatusApproved)
+	ps.clock = ps.clock.Add(approvedCacheTTL + time.Second)
+	warm := decode[ChannelListResponse](t, ps.do("GET", "/api/channels", "", ""))
+	if len(warm.ApprovedChannels) != 1 {
+		t.Fatalf("precondition: #Fresh must be approved and cached: %+v", warm)
+	}
+
+	// The ingestor revoked it directly in the DB (as RunOnce would after
+	// applying an OpRevoke command).
+	if _, err := ps.srv.db.conn.Exec(`UPDATE channel_proposals SET status = 'revoked', reviewed_at = ? WHERE id = ?`,
+		ps.clock.UnixMilli(), "aaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	reqID := channelregistry.NewID()
+	p := &channelregistry.Proposal{ID: "aaaaaaaaaaaaaaaa", Name: "#Fresh", Status: channelregistry.StatusRevoked}
+	if err := ps.queue.Complete(channelregistry.Result{RequestID: reqID, Status: channelregistry.RequestRevoked, Proposal: p}); err != nil {
+		t.Fatal(err)
+	}
+	// Still inside the cache TTL: without the early invalidation this would
+	// still read the stale, pre-revoke snapshot.
+	if st := decode[channelregistry.RequestStatus](t, ps.do("GET", "/api/channel-proposals/requests/"+reqID, "", "")); st.Status != channelregistry.RequestRevoked {
+		t.Fatalf("status = %+v", st)
+	}
+	resp := decode[ChannelListResponse](t, ps.do("GET", "/api/channels", "", ""))
+	if len(resp.ApprovedChannels) != 0 {
+		t.Fatalf("approvedChannels after revoke = %+v, want none", resp.ApprovedChannels)
+	}
+}
+
+// TestOpenAPICompleteness (openapi_completeness_test.go) already asserts
+// every /api/ HandleFunc/Handle route is covered by routeDescriptions() or
+// the known-gaps allowlist; running the full suite (see the report) proves
+// the new revoke route passes that gate without a gaps-file entry.
 
 // The server keeps its read-only contract: the queue directory is the only
 // thing it writes, and only command files.

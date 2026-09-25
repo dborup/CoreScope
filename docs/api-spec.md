@@ -40,6 +40,7 @@
 - [GET /api/channel-proposals/requests/:requestId](#get-apichannel-proposalsrequestsrequestid)
 - [GET /api/admin/channel-proposals](#get-apiadminchannel-proposals)
 - [POST /api/admin/channel-proposals/:id/approve and /reject](#post-apiadminchannel-proposalsidapprove-and-reject)
+- [POST /api/admin/channel-proposals/:id/revoke](#post-apiadminchannel-proposalsidrevoke)
 - [GET /api/analytics/rf](#get-apianalyticsrf)
 - [GET /api/analytics/topology](#get-apianalyticstopology)
 - [GET /api/analytics/channels](#get-apianalyticschannels)
@@ -1283,11 +1284,13 @@ A proposal:
 {
   "id":         string,        // 16 hex characters
   "name":       string,        // "#Channel", case preserved, <= 31 UTF-8 bytes
-  "status":     "pending" | "approved" | "rejected",
+  "status":     "pending" | "approved" | "rejected" | "revoked",
   "createdAt":  number,        // ms
-  "reviewedAt"?: number        // ms, once reviewed
+  "reviewedAt"?: number        // ms, once reviewed (also set when revoked)
 }
 ```
+
+State machine: `pending` → `approved` or `rejected` (admin decision); `approved` → `revoked` (admin revoke, see below); `revoked` → `pending` by suggesting the same name again (never auto-approved — see POST /api/channel-proposals). `rejected` and `revoked` are terminal except for that resuggestion path.
 
 ## GET /api/channel-proposals/config
 
@@ -1323,7 +1326,7 @@ A duplicate suggestion reports the existing proposal and its status. `404` when 
 
 ## GET /api/admin/channel-proposals
 
-Requires `X-API-Key`. Optional `?status=pending|approved|rejected`. Newest first, bounded.
+Requires `X-API-Key`. Optional `?status=pending|approved|rejected|revoked`. Newest first, bounded.
 
 ```jsonc
 { "proposals": [Proposal], "enabled": boolean }
@@ -1334,6 +1337,27 @@ Requires `X-API-Key`. Optional `?status=pending|approved|rejected`. Newest first
 Requires `X-API-Key`. `202 { "requestId": string }`, `404` for an unknown proposal. Only pending proposals change; repeating the stored decision is harmless, and a contradicting one (reject after approve) ends with status `error`.
 
 Missing or wrong key: `401`. No key configured, or a weak one: `403`.
+
+## POST /api/admin/channel-proposals/:id/revoke
+
+Requires `X-API-Key`. Undoes a previous approval: the ingestor stops decrypting the channel (unless a `channelKeys`/`hashChannels` entry for the same name is also configured, in which case that key keeps it decrypting) and it drops out of `GET /api/channels`' `approvedChannels`.
+
+Unlike approve/reject, this endpoint checks synchronously, before queuing anything:
+
+| Status | Meaning |
+|--------|---------|
+| `202` | `{ "requestId": string }` — the proposal was approved; the revoke is queued |
+| `400` | Invalid suggestion id |
+| `404` | Unknown proposal |
+| `409` | The proposal is not currently approved (pending, rejected, or already revoked) — **nothing is queued** |
+
+Missing or wrong key: `401`. No key configured, or a weak one: `403`.
+
+There is a real race between the `409` check and the ingestor actually applying the command: another admin could approve, reject or revoke the same proposal in between. The ingestor re-validates the status from scratch when it applies the command and is the true source of truth; the synchronous `409` here is only a best-effort fast-fail for the common case, not a guarantee.
+
+**Historical messages are not affected.** Revoking a channel only removes its decryption key going forward — messages the ingestor already decoded and stored while the channel was approved stay exactly as they are and remain visible on the Channels page. There is no mechanism (and none is planned as part of this) to hide or delete previously-decoded messages when a channel is revoked.
+
+**Retention.** A revoked proposal's row is not deleted at revoke time — only its status changes, keeping `reviewedAt` as the audit timestamp of when it was revoked. It is removed later by the same retention sweep that prunes rejected proposals, once `reviewedAt` is older than `channelProposals.retentionDays` (see [Configuration](user-guide/configuration.md#shared-channel-suggestions)). Approved rows are still never pruned.
 
 ---
 

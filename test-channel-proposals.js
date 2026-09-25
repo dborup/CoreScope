@@ -245,6 +245,359 @@ test('the admin key is never persisted or put in a URL', () => {
   assert.ok(!/[?&](key|apiKey|api_key)=/.test(code), 'key-like query parameter found');
 });
 
+// ── revoke: FILTERS, renderAdminRow, XSS ──────────────────────────────────
+test('FILTERS includes a revoked tab alongside the existing three', () => {
+  // Array.from copies out of the vm realm first: comparing a vm-realm array
+  // straight to a host array literal with deepStrictEqual fails on
+  // prototype identity even when every element is equal.
+  assert.deepStrictEqual(Array.from(CP.FILTERS, (f) => f[0]), ['pending', 'approved', 'rejected', 'revoked']);
+  // Every filter key must be a status the server actually accepts
+  // (channelregistry.ValidStatus); a typo here would 400 the admin list.
+  for (const [key] of CP.FILTERS) assert.match(key, /^(pending|approved|rejected|revoked)$/);
+});
+
+test('renderAdminRow: pending gets Approve/Reject, approved gets a Remove (revoke) action, others a plain pill', () => {
+  const pending = CP.renderAdminRow({ id: 'aaaaaaaaaaaaaaaa', name: '#Pending', status: 'pending', createdAt: 1700000000000 });
+  assert.match(pending, /data-proposals-decide="approve"/);
+  assert.match(pending, /data-proposals-decide="reject"/);
+  assert.ok(!/data-proposals-decide="revoke"/.test(pending));
+
+  const approved = CP.renderAdminRow({ id: 'bbbbbbbbbbbbbbbb', name: '#Approved', status: 'approved', createdAt: 1700000000000, reviewedAt: 1700000001000 });
+  assert.match(approved, /data-proposals-decide="revoke"/);
+  assert.match(approved, /data-proposal-id="bbbbbbbbbbbbbbbb"/);
+  assert.match(approved, /data-proposal-name="#Approved"/);
+  assert.match(approved, /aria-label="Remove #Approved"/);
+  assert.match(approved, /data-state="approved"/, 'the approved pill must stay alongside Remove');
+
+  for (const status of ['rejected', 'revoked']) {
+    const html = CP.renderAdminRow({ id: 'cccccccccccccccc', name: '#X', status, createdAt: 1700000000000, reviewedAt: 1700000001000 });
+    assert.ok(!/data-proposals-decide/.test(html), `${status} row must have no action buttons`);
+    assert.match(html, new RegExp('data-state="' + status + '"'));
+  }
+});
+
+test('renderAdminRow escapes the channel name everywhere it is interpolated (XSS)', () => {
+  // NormalizeName/the firmware's 31-byte limit mean a real channel name can
+  // never contain HTML-special bytes; this proves the render function is
+  // safe on its own terms regardless of what validated it upstream.
+  const evil = '#<img src=x onerror=alert(1)>';
+  const html = CP.renderAdminRow({ id: 'dddddddddddddddd', name: evil, status: 'approved', createdAt: 1700000000000, reviewedAt: 1700000001000 });
+  assert.ok(!html.includes('<img'), 'raw <img> tag leaked into the rendered row — a live element, not inert text');
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/, 'the name must appear HTML-escaped (onerror= survives only as inert text inside it)');
+  // Also proves the aria-label and data-proposal-name attributes specifically:
+  assert.ok(!/aria-label="Remove #<img/.test(html), 'aria-label not escaped');
+  assert.ok(!/data-proposal-name="#<img/.test(html), 'data-proposal-name not escaped');
+});
+
+// ── revoke: mergeApprovedChannels degrades correctly once a channel is
+// revoked and drops out of the server's approvedChannels list ────────────
+test('merge: a channel that drops out of approvedChannels (revoked) loses shared:true and is not phantom-duplicated', () => {
+  // Before revoke: server still reports it as approved.
+  const channels = [{ hash: '#WasShared', name: '#WasShared', messageCount: 3, lastActivityMs: 10 }];
+  const beforeRevoke = CP.mergeApprovedChannels(channels, [{ name: '#WasShared', hash: '#WasShared' }]);
+  assert.strictEqual(beforeRevoke[0].shared, true);
+
+  // After revoke: approvedChannels no longer includes it (GET /api/channels
+  // stops listing it — cmd/server/channel_proposals.go's approvedChannels()
+  // filters by status='approved' via channelregistry.ListApprovedNames).
+  // With no local key/messages for it, it simply disappears from the list,
+  // same as any channel with zero traffic and no local data.
+  const afterRevokeNoLocalData = CP.mergeApprovedChannels([], []);
+  assert.deepStrictEqual(afterRevokeNoLocalData, []);
+
+  // With the viewer's OWN local key/messages for that hash (they had it
+  // monitored independently), it reverts to an ordinary, non-shared local
+  // channel row: present, but shared is no longer set, and it is not
+  // duplicated into a second phantom row.
+  const localOnly = [{ hash: '#WasShared', name: '#WasShared', messageCount: 3, lastActivityMs: 10 }];
+  const afterRevokeWithLocalData = CP.mergeApprovedChannels(localOnly, []);
+  assert.strictEqual(afterRevokeWithLocalData.length, 1, 'must not leave a phantom duplicate row');
+  assert.strictEqual(afterRevokeWithLocalData[0].shared, undefined, 'shared:true must not survive the channel dropping out of approvedChannels');
+  assert.strictEqual(afterRevokeWithLocalData[0], localOnly[0], 'untouched local row is reused, not copied');
+});
+
+// ── revoke: admin dialog + confirm flow (hand-rolled minimal DOM) ─────────
+//
+// public/channel-proposals.js is a browser-only module with no DOM
+// abstraction layer to inject (test-frontend-helpers.js establishes the
+// pattern of hand-rolling just enough of `document` inside a vm context
+// for exactly this reason — no jsdom dependency in this repo). This block
+// builds only what openAdmin/renderAdminRow/decide/onAdminClick/
+// onAdminKeydown actually touch: element creation, attributes, class,
+// simple selectors (#id/.class/[attr]/[attr="v"]/tag, comma lists, and the
+// one :not([tabindex="-1"]) case focusables() uses), a small innerHTML
+// parser (our own markup is simple, well-formed and always escaped), event
+// listeners with bubbling, and focus/activeElement tracking.
+function buildMiniDom() {
+  const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" };
+  function decodeEntities(s) {
+    return String(s).replace(/&(amp|lt|gt|quot|#39);/g, (_, n) => ENTITIES[n]);
+  }
+
+  function splitSelectorList(sel) { return sel.split(',').map((s) => s.trim()).filter(Boolean); }
+  function parseAttrSel(s) {
+    const m = /^\[([\w-]+)(?:=("|')(.*?)\2)?\]$/.exec(s);
+    if (!m) return null;
+    return { name: m[1], value: m[3] };
+  }
+  function matchesPart(el, part) {
+    const notMatch = /^(.*?):not\((.*)\)$/.exec(part);
+    let notSel = null;
+    if (notMatch) { part = notMatch[1]; notSel = notMatch[2]; }
+    let base;
+    if (part === '') base = true;
+    else if (part[0] === '#') base = el.id === part.slice(1);
+    else if (part[0] === '.') base = (el.className || '').split(/\s+/).indexOf(part.slice(1)) !== -1;
+    else if (part[0] === '[') {
+      const a = parseAttrSel(part);
+      base = !a ? false : a.value === undefined ? el.hasAttribute(a.name) : el.getAttribute(a.name) === a.value;
+    } else {
+      base = el.tagName === part.toLowerCase();
+    }
+    if (base && notSel) base = !matchesPart(el, notSel);
+    return base;
+  }
+  function elMatches(el, selector) {
+    return el.nodeType === 1 && splitSelectorList(selector).some((p) => matchesPart(el, p));
+  }
+
+  class TextNode {
+    constructor(text) { this.nodeType = 3; this.textContent = text; }
+  }
+
+  class Elem {
+    constructor(tag) {
+      this.nodeType = 1;
+      this.tagName = tag;
+      this.attrs = {};
+      this.children = [];
+      this.parentNode = null;
+      this._listeners = {};
+      this.disabled = false;
+    }
+    get id() { return this.attrs.id || ''; }
+    set id(v) { this.attrs.id = v; }
+    get className() { return this.attrs.class || ''; }
+    set className(v) { this.attrs.class = v; }
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; }
+    setAttribute(name, value) { this.attrs[name] = String(value); }
+    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name); }
+    removeAttribute(name) { delete this.attrs[name]; }
+    get textContent() {
+      let out = '';
+      (function walk(n) {
+        if (n.nodeType === 3) { out += n.textContent; return; }
+        (n.children || []).forEach(walk);
+      })(this);
+      return out;
+    }
+    set textContent(v) { this.children = [new TextNode(String(v))]; }
+    set innerHTML(html) { this.children = []; parseInto(this, html); }
+    appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+    remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); this.parentNode = null; }
+    contains(node) { for (let n = node; n; n = n.parentNode) if (n === this) return true; return false; }
+    closest(selector) { for (let n = this; n; n = n.parentNode) if (n.nodeType === 1 && elMatches(n, selector)) return n; return null; }
+    querySelectorAll(selector) {
+      const out = [];
+      (function walk(n) {
+        (n.children || []).forEach((c) => {
+          if (c.nodeType === 1) { if (elMatches(c, selector)) out.push(c); walk(c); }
+        });
+      })(this);
+      return out;
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); }
+    removeEventListener(type, fn) { this._listeners[type] = (this._listeners[type] || []).filter((f) => f !== fn); }
+    focus() { doc.activeElement = this; }
+    get offsetParent() { return this.hasAttribute('hidden') ? null : {}; }
+  }
+
+  function parseInto(parent, html) {
+    const stack = [parent];
+    const re = /<\/([a-zA-Z0-9-]+)\s*>|<([a-zA-Z0-9-]+)((?:\s+[a-zA-Z_:][\w:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)>|([^<]+)/g;
+    const VOID = { input: 1, br: 1, hr: 1, img: 1, use: 1 };
+    let m;
+    while ((m = re.exec(html))) {
+      if (m[1]) {
+        for (let i = stack.length - 1; i > 0; i--) {
+          if (stack[i].tagName === m[1].toLowerCase()) { stack.length = i; break; }
+        }
+      } else if (m[2]) {
+        const tag = m[2].toLowerCase();
+        const el = new Elem(tag);
+        const attrRe = /([a-zA-Z_:][\w:-]*)(?:\s*=\s*("([^"]*)"|'([^']*)'))?/g;
+        let am;
+        while ((am = attrRe.exec(m[3] || ''))) {
+          if (!am[1]) continue;
+          const val = am[3] !== undefined ? am[3] : am[4] !== undefined ? am[4] : '';
+          el.setAttribute(am[1], decodeEntities(val));
+        }
+        stack[stack.length - 1].appendChild(el);
+        if (!(m[4] === '/' || VOID[tag])) stack.push(el);
+      } else if (m[5]) {
+        stack[stack.length - 1].appendChild(new TextNode(decodeEntities(m[5])));
+      }
+    }
+  }
+
+  const docListeners = {};
+  const body = new Elem('body');
+  const doc = {
+    activeElement: body,
+    body,
+    createElement: (tag) => new Elem(tag),
+    getElementById(id) { return body.querySelectorAll('*').concat([body]).find((e) => e.id === id) || null; },
+    querySelector: (sel) => body.querySelector(sel),
+    querySelectorAll: (sel) => body.querySelectorAll(sel),
+    addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { docListeners[type] = (docListeners[type] || []).filter((f) => f !== fn); },
+    contains: (node) => body.contains(node) || node === body,
+    __events: docListeners, // test-only escape hatch: see fireDocKeydown below
+  };
+  // '*' pseudo-selector for getElementById's full-tree scan.
+  const origMatches = elMatches;
+  function elMatchesStar(el, selector) { return selector === '*' || origMatches(el, selector); }
+  body.querySelectorAll = function (selector) {
+    const out = [];
+    (function walk(n) { (n.children || []).forEach((c) => { if (c.nodeType === 1) { if (elMatchesStar(c, selector)) out.push(c); walk(c); } }); })(body);
+    return out;
+  };
+
+  return { doc };
+}
+
+function flush() {
+  let p = Promise.resolve();
+  for (let i = 0; i < 12; i++) p = p.then(() => new Promise((r) => setImmediate(r)));
+  return p;
+}
+
+function loadWithDom(fetchImpl) {
+  const { doc } = buildMiniDom();
+  const fetchCalls = [];
+  const fakeFetch = (url, opts) => {
+    fetchCalls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
+    const res = fetchImpl(url, opts);
+    return Promise.resolve({
+      ok: res.status >= 200 && res.status < 300,
+      status: res.status,
+      text: () => Promise.resolve(JSON.stringify(res.body === undefined ? {} : res.body)),
+    });
+  };
+  const location = { hash: '#/channels?view=proposals' };
+  const history = { replaceState: (_s, _t, url) => { location.hash = url; } };
+  const ctx = { console, Promise, Map, Set, Math, JSON, Object, Array, String, encodeURIComponent, setImmediate };
+  ctx.window = ctx;
+  ctx.document = doc;
+  ctx.location = location;
+  ctx.history = history;
+  ctx.fetch = fakeFetch;
+  ctx.setTimeout = setTimeout;
+  ctx.clearTimeout = clearTimeout;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx, { filename: SRC_PATH });
+  return { CP: ctx.ChannelProposals, document: doc, fetchCalls };
+}
+
+test('admin dialog: Remove opens a confirm dialog; Escape cancels it and returns focus to Remove', async () => {
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: [{ id: 'bbbbbbbbbbbbbbbb', name: '#Approved', status: 'approved', createdAt: 1, reviewedAt: 2 }], enabled: true } }));
+  await openApprovedAdminWithConfirm(env);
+  const removeBtn = env.document.getElementById('chProposalsList').querySelector('[data-proposals-decide="revoke"]');
+  assert.ok(removeBtn, 'Remove button must be rendered for the approved row');
+
+  const confirmDlg = env.document.getElementById('chProposalsConfirm');
+  assert.ok(confirmDlg, 'confirm dialog must open');
+  assert.match(confirmDlg.textContent, /Remove #Approved\?/);
+  assert.match(confirmDlg.textContent, /stop being shared with everyone/);
+
+  // Escape closes only the confirm layer, not the whole admin dialog.
+  fireDocKeydown(env, { key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.strictEqual(env.document.getElementById('chProposalsConfirm'), null, 'confirm must close on Escape');
+  assert.ok(env.document.getElementById('chProposalsAdmin'), 'admin dialog must stay open');
+  assert.strictEqual(env.document.activeElement, removeBtn, 'focus must return to the Remove button');
+});
+
+test('admin dialog: Tab traps inside the confirm dialog while it is open', async () => {
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: [{ id: 'bbbbbbbbbbbbbbbb', name: '#Approved', status: 'approved', createdAt: 1, reviewedAt: 2 }], enabled: true } }));
+  await openApprovedAdminWithConfirm(env);
+  const confirmDlg = env.document.getElementById('chProposalsConfirm');
+  const buttons = confirmDlg.querySelectorAll('button');
+  assert.strictEqual(buttons.length, 2, 'Cancel and Remove');
+  const [cancelBtn, confirmBtn] = buttons;
+  assert.strictEqual(env.document.activeElement, confirmBtn, 'the Remove/confirm button starts focused');
+
+  // Tab forward from the last focusable wraps to the first.
+  const tabEvt = { key: 'Tab', shiftKey: false, preventDefault() {} };
+  fireDocKeydown(env, tabEvt);
+  assert.strictEqual(env.document.activeElement, cancelBtn, 'Tab from the last item wraps to the first');
+
+  // Shift+Tab from the first wraps to the last.
+  const shiftTabEvt = { key: 'Tab', shiftKey: true, preventDefault() {} };
+  fireDocKeydown(env, shiftTabEvt);
+  assert.strictEqual(env.document.activeElement, confirmBtn, 'Shift+Tab from the first item wraps to the last');
+});
+
+test('admin dialog: Confirm posts to the revoke endpoint and handles success', async () => {
+  const env = loadWithDom((url) => {
+    if (/\/revoke$/.test(url)) return { status: 202, body: { requestId: '0123456789abcdef' } };
+    if (/\/requests\//.test(url)) return { status: 200, body: { status: 'revoked', proposal: { id: 'bbbbbbbbbbbbbbbb', name: '#Approved', status: 'revoked' } } };
+    return { status: 200, body: { proposals: [{ id: 'bbbbbbbbbbbbbbbb', name: '#Approved', status: 'approved', createdAt: 1, reviewedAt: 2 }], enabled: true } };
+  });
+  const overlay = await openApprovedAdminWithConfirm(env);
+  const confirmBtn = env.document.getElementById('chProposalsConfirm').querySelectorAll('button')[1];
+  overlay._listeners.click[0]({ target: confirmBtn, preventDefault() {} });
+  await flush();
+
+  assert.strictEqual(env.document.getElementById('chProposalsConfirm'), null, 'confirm dialog must close on Confirm');
+  const revokeCalls = env.fetchCalls.filter((c) => /\/revoke$/.test(c.url));
+  assert.strictEqual(revokeCalls.length, 1, 'exactly one POST to the revoke endpoint');
+  assert.strictEqual(revokeCalls[0].method, 'POST');
+});
+
+test('admin dialog: a synchronous 409 (not approved anymore) is surfaced without ever starting a poller', async () => {
+  const env = loadWithDom((url) => {
+    if (/\/revoke$/.test(url)) return { status: 409, body: { error: 'suggestion is not currently approved' } };
+    return { status: 200, body: { proposals: [{ id: 'bbbbbbbbbbbbbbbb', name: '#Approved', status: 'approved', createdAt: 1, reviewedAt: 2 }], enabled: true } };
+  });
+  const overlay = await openApprovedAdminWithConfirm(env);
+  const confirmBtn = env.document.getElementById('chProposalsConfirm').querySelectorAll('button')[1];
+  overlay._listeners.click[0]({ target: confirmBtn, preventDefault() {} });
+  await flush();
+
+  const revokeCalls = env.fetchCalls.filter((c) => /\/revoke$/.test(c.url));
+  assert.strictEqual(revokeCalls.length, 1);
+  const requestPolls = env.fetchCalls.filter((c) => /\/requests\//.test(c.url));
+  assert.strictEqual(requestPolls.length, 0, 'a 409 must never start polling a request status');
+  const status = env.document.getElementById('chProposalsStatus');
+  assert.match(status.textContent, /not currently approved/);
+  assert.strictEqual(status.getAttribute('data-kind'), 'error');
+});
+
+// Shared setup: unlock the admin dialog on a fixture with one approved
+// proposal, click its Remove button, and return the overlay (with the
+// confirm dialog open) for the caller to act on.
+async function openApprovedAdminWithConfirm(env) {
+  env.CP.mount({ root: env.document.body });
+  env.CP.openAdmin();
+  const keyInput = env.document.getElementById('chProposalsKey');
+  keyInput.value = 'strong-enough-admin-key-012345';
+  const overlay = env.document.getElementById('chProposalsAdmin');
+  overlay._listeners.submit[0]({ target: env.document.getElementById('chProposalsKeyForm'), preventDefault() {} });
+  await flush();
+  const removeBtn = env.document.getElementById('chProposalsList').querySelector('[data-proposals-decide="revoke"]');
+  env.document.activeElement = removeBtn;
+  overlay._listeners.click[0]({ target: removeBtn, preventDefault() {} });
+  return overlay;
+}
+
+function fireDocKeydown(env, evt) {
+  // onAdminKeydown is registered via document.addEventListener('keydown', ...)
+  // in openAdmin(); replaying it the same way a real keydown would reach it,
+  // through the document-level listener registry buildMiniDom exposes.
+  (env.document.__events.keydown || []).slice().forEach((fn) => fn(evt));
+}
+
 (async () => {
   for (const t of tests) {
     try {

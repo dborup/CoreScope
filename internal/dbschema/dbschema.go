@@ -937,10 +937,16 @@ func ensureObserverNeighborMetricsTable(rw *sql.DB, logf Logger) error {
 // name is COLLATE BINARY because the firmware derives the channel key from
 // the exact bytes of the name: "#Test" and "#test" are different channels.
 func ensureChannelProposalsTable(rw *sql.DB, logf Logger) error {
+	// status also accepts 'revoked' (an approval an admin later undid, #TBD):
+	// this table has never shipped to any real database yet (it is part of
+	// the same unreleased, unpushed commit that first introduced it), so the
+	// CHECK constraint is changed in place rather than through a migration —
+	// there is no existing row anywhere with the old, narrower constraint to
+	// reconcile.
 	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS channel_proposals (
 		id TEXT PRIMARY KEY,
 		name TEXT COLLATE BINARY NOT NULL UNIQUE,
-		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','revoked')),
 		created_at INTEGER NOT NULL,
 		reviewed_at INTEGER NULL
 	)`); err != nil {

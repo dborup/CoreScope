@@ -63,7 +63,11 @@ func scanProposalRow(row *sql.Row) (channelregistry.Proposal, bool, error) {
 }
 
 // submitChannelProposal stores a new pending proposal, or reports the existing
-// one for a replayed request or an already-proposed name.
+// one for a replayed request or an already-proposed name. A name that was
+// previously approved and then revoked is free to re-propose: the existing
+// row (its id, and so its identity, is kept — UNIQUE(name) means it cannot
+// become a second row) is resurrected to pending rather than left revoked
+// forever or auto-approved.
 func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.Command, maxPending int, nowMs int64) (channelregistry.Proposal, error) {
 	// Never trust the queue file: validate again with the shared rules.
 	name, err := channelregistry.NormalizeName(cmd.Name)
@@ -83,7 +87,7 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 	if err != nil {
 		return channelregistry.Proposal{}, err
 	}
-	if found {
+	if found && existing.Status != channelregistry.StatusRevoked {
 		return existing, nil
 	}
 	var pending int
@@ -97,6 +101,34 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 	if created <= 0 {
 		created = nowMs
 	}
+	if found {
+		// existing.Status == StatusRevoked here (the only other reachable
+		// branch above already returned). Resurrect the same row instead of
+		// inserting a new one, using its ORIGINAL id, not cmd.RequestID: a
+		// later replay of THIS exact resubmission command looks the row up
+		// by name (its id will not match cmd.RequestID), finds it already
+		// 'pending', and falls into the "return existing unchanged" branch
+		// above — which is what makes resubmission idempotent across a
+		// crash-and-retry, the same way plain submit is idempotent via id.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE channel_proposals SET status = 'pending', created_at = ?, reviewed_at = NULL WHERE id = ? AND status = 'revoked'`,
+			created, existing.ID)
+		if err != nil {
+			return channelregistry.Proposal{}, err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return channelregistry.Proposal{}, err
+		} else if n == 0 {
+			// Guard tripped: something else changed this row between the
+			// SELECT and the UPDATE above. Report it rather than fabricate a
+			// result — the next tick's replay (if any) resolves it cleanly.
+			return channelregistry.Proposal{}, errProposalStorage
+		}
+		if err := tx.Commit(); err != nil {
+			return channelregistry.Proposal{}, err
+		}
+		return channelregistry.Proposal{ID: existing.ID, Name: name, Status: channelregistry.StatusPending, CreatedAt: created}, nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO channel_proposals (id, name, status, created_at) VALUES (?, ?, 'pending', ?)`,
 		cmd.RequestID, name, created); err != nil {
@@ -108,8 +140,11 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 	return channelregistry.Proposal{ID: cmd.RequestID, Name: name, Status: channelregistry.StatusPending, CreatedAt: created}, nil
 }
 
-// reviewChannelProposal moves a pending proposal to approved or rejected.
-func (s *Store) reviewChannelProposal(ctx context.Context, id, target string, maxApproved int, nowMs int64) (channelregistry.Proposal, error) {
+// reviewChannelProposal moves a proposal currently in status source to
+// status target: approve/reject move pending → approved/rejected, revoke
+// moves approved → revoked. Repeating the same decision (source already ==
+// target) is idempotent; anything else that isn't source is a conflict.
+func (s *Store) reviewChannelProposal(ctx context.Context, id, source, target string, maxApproved int, nowMs int64) (channelregistry.Proposal, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return channelregistry.Proposal{}, err
@@ -126,9 +161,11 @@ func (s *Store) reviewChannelProposal(ctx context.Context, id, target string, ma
 	if p.Status == target {
 		return p, nil // repeated decision: nothing to do
 	}
-	if p.Status != channelregistry.StatusPending {
+	if p.Status != source {
 		return p, errProposalConflict{p.Status}
 	}
+	// Capacity is only consumed by approving; revoking (target == revoked)
+	// frees a slot instead, so this check naturally does not apply to it.
 	if target == channelregistry.StatusApproved {
 		var approved int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_proposals WHERE status = 'approved'`).Scan(&approved); err != nil {
@@ -138,9 +175,11 @@ func (s *Store) reviewChannelProposal(ctx context.Context, id, target string, ma
 			return p, errTooManyApproved
 		}
 	}
+	// reviewed_at is reused as "last status-change timestamp" for revoke too,
+	// same as it already is for approve/reject.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE channel_proposals SET status = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'`,
-		target, nowMs, id); err != nil {
+		`UPDATE channel_proposals SET status = ?, reviewed_at = ? WHERE id = ? AND status = ?`,
+		target, nowMs, id, source); err != nil {
 		return channelregistry.Proposal{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -151,13 +190,16 @@ func (s *Store) reviewChannelProposal(ctx context.Context, id, target string, ma
 	return p, nil
 }
 
-// PruneChannelProposals deletes rejected proposals reviewed before cutoffMs
-// and pending ones submitted before it. Approved channels are kept: they are
-// bounded by maxApproved and must stay active.
+// PruneChannelProposals deletes rejected/revoked proposals reviewed before
+// cutoffMs and pending ones submitted before it. Approved channels are kept:
+// they are bounded by maxApproved and must stay active. A revoked row is not
+// deleted at revoke time — only its status changes, preserving reviewed_at
+// as the audit timestamp — but it is not kept forever either: retention
+// removes it exactly like a rejected row once it is old enough.
 func (s *Store) PruneChannelProposals(ctx context.Context, cutoffMs int64) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM channel_proposals
-		 WHERE (status = 'rejected' AND reviewed_at < ?)
+		 WHERE (status IN ('rejected', 'revoked') AND reviewed_at < ?)
 		    OR (status = 'pending' AND created_at < ?)`, cutoffMs, cutoffMs)
 	if err != nil {
 		return 0, err
@@ -217,6 +259,11 @@ func (r *channelProposalRunner) RunOnce(ctx context.Context) {
 				log.Printf("[channel-proposals] approved %q — added to channel keys", res.Proposal.Name)
 			}
 		}
+		if qc.Command.Op == channelregistry.OpRevoke && res.Status == channelregistry.RequestRevoked && res.Proposal != nil {
+			if r.keys.RemoveApproved(res.Proposal.Name) {
+				log.Printf("[channel-proposals] revoked %q — removed from channel keys", res.Proposal.Name)
+			}
+		}
 		if err := r.queue.Complete(res); err != nil {
 			log.Printf("[channel-proposals] write result %s failed: %v", res.RequestID, err)
 		}
@@ -239,9 +286,11 @@ func (r *channelProposalRunner) apply(ctx context.Context, cmd channelregistry.C
 	case channelregistry.OpSubmit:
 		p, err = r.store.submitChannelProposal(ctx, cmd, r.limits.MaxPending, nowMs)
 	case channelregistry.OpApprove:
-		p, err = r.store.reviewChannelProposal(ctx, cmd.ProposalID, channelregistry.StatusApproved, r.limits.MaxApproved, nowMs)
+		p, err = r.store.reviewChannelProposal(ctx, cmd.ProposalID, channelregistry.StatusPending, channelregistry.StatusApproved, r.limits.MaxApproved, nowMs)
 	case channelregistry.OpReject:
-		p, err = r.store.reviewChannelProposal(ctx, cmd.ProposalID, channelregistry.StatusRejected, r.limits.MaxApproved, nowMs)
+		p, err = r.store.reviewChannelProposal(ctx, cmd.ProposalID, channelregistry.StatusPending, channelregistry.StatusRejected, r.limits.MaxApproved, nowMs)
+	case channelregistry.OpRevoke:
+		p, err = r.store.reviewChannelProposal(ctx, cmd.ProposalID, channelregistry.StatusApproved, channelregistry.StatusRevoked, r.limits.MaxApproved, nowMs)
 	default:
 		err = channelregistry.ErrInvalidCommand
 	}

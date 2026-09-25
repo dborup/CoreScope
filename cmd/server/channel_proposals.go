@@ -283,19 +283,22 @@ func (s *Server) handleChannelProposalRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "could not read the request status")
 		return
 	}
-	if st.Status == channelregistry.RequestApproved {
+	// Both an approval and a revocation change the approvedChannels list;
+	// invalidate the same single cached snapshot early for either so a
+	// caller does not have to wait out approvedCacheTTL to see the result.
+	if st.Status == channelregistry.RequestApproved || st.Status == channelregistry.RequestRevoked {
 		p.invalidateApproved()
 	}
 	writeJSON(w, st)
 }
 
-// GET /api/admin/channel-proposals?status=pending|approved|rejected
+// GET /api/admin/channel-proposals?status=pending|approved|rejected|revoked
 func (s *Server) handleAdminChannelProposals(w http.ResponseWriter, r *http.Request) {
 	p := s.channelProposals()
 	noStore(w)
 	status := r.URL.Query().Get("status")
 	if status != "" && !channelregistry.ValidStatus(status) {
-		writeError(w, http.StatusBadRequest, "status must be pending, approved or rejected")
+		writeError(w, http.StatusBadRequest, "status must be pending, approved, rejected or revoked")
 		return
 	}
 	resp := ChannelProposalListResponse{Proposals: []channelregistry.Proposal{}, Enabled: p.enabled}
@@ -312,26 +315,38 @@ func (s *Server) handleAdminChannelProposals(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, resp)
 }
 
+// loadAdminProposal validates id and loads the proposal, writing the
+// 400/404/500 response itself and returning ok=false when the caller must
+// not proceed. Shared by the decision handler below and the revoke handler.
+func (s *Server) loadAdminProposal(w http.ResponseWriter, r *http.Request, p *channelProposalService, id string) (proposal channelregistry.Proposal, ok bool) {
+	if !channelregistry.ValidID(id) {
+		writeError(w, http.StatusBadRequest, "invalid suggestion id")
+		return channelregistry.Proposal{}, false
+	}
+	if p.db == nil {
+		writeError(w, http.StatusNotFound, "suggestion not found")
+		return channelregistry.Proposal{}, false
+	}
+	proposal, found, err := channelregistry.GetProposal(r.Context(), p.db, id)
+	if err != nil {
+		log.Printf("[channel-proposals] get %s failed: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "could not read the suggestion")
+		return channelregistry.Proposal{}, false
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "suggestion not found")
+		return channelregistry.Proposal{}, false
+	}
+	return proposal, true
+}
+
 // POST /api/admin/channel-proposals/{id}/approve and .../reject
 func (s *Server) handleAdminChannelProposalDecision(op string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := s.channelProposals()
 		noStore(w)
 		id := mux.Vars(r)["id"]
-		if !channelregistry.ValidID(id) {
-			writeError(w, http.StatusBadRequest, "invalid suggestion id")
-			return
-		}
-		if p.db == nil {
-			writeError(w, http.StatusNotFound, "suggestion not found")
-			return
-		}
-		if _, found, err := channelregistry.GetProposal(r.Context(), p.db, id); err != nil {
-			log.Printf("[channel-proposals] get %s failed: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "could not read the suggestion")
-			return
-		} else if !found {
-			writeError(w, http.StatusNotFound, "suggestion not found")
+		if _, ok := s.loadAdminProposal(w, r, p, id); !ok {
 			return
 		}
 		s.enqueueProposalCommand(w, p, channelregistry.Command{
@@ -341,4 +356,45 @@ func (s *Server) handleAdminChannelProposalDecision(op string) http.HandlerFunc 
 			CreatedAt:  p.now().UnixMilli(),
 		})
 	}
+}
+
+// POST /api/admin/channel-proposals/{id}/revoke undoes a previous approval.
+//
+// Unlike approve/reject, this performs a synchronous precondition check
+// before enqueueing anything: only a currently-approved proposal may be
+// revoked, and a caller who asks to revoke something else gets an
+// immediate 409 with no side effect at all (no command file is written).
+// This is a deliberate, narrow exception to the rest of this package's
+// "let the ingestor validate asynchronously" pattern — approve/reject
+// always answer 202 and let a conflict surface later via polling
+// GET /api/channel-proposals/requests/{requestId} — because the caller
+// here specifically wants a synchronous, side-effect-free rejection for
+// the common case of "it's not approved anymore" instead of having to
+// poll a request that was never going to do anything.
+//
+// There is still a real TOCTOU window between this check and the ingestor
+// actually applying the command: another admin could approve, reject or
+// revoke the same proposal in the meantime. reviewChannelProposal in the
+// ingestor (cmd/ingestor/channel_proposals.go) re-validates the status
+// from scratch under its own transaction and is the true source of truth;
+// the 409 here is only a best-effort fast-fail for the common case, not a
+// substitute for that re-validation.
+func (s *Server) handleAdminChannelProposalRevoke(w http.ResponseWriter, r *http.Request) {
+	p := s.channelProposals()
+	noStore(w)
+	id := mux.Vars(r)["id"]
+	proposal, ok := s.loadAdminProposal(w, r, p, id)
+	if !ok {
+		return
+	}
+	if proposal.Status != channelregistry.StatusApproved {
+		writeError(w, http.StatusConflict, "suggestion is not currently approved")
+		return
+	}
+	s.enqueueProposalCommand(w, p, channelregistry.Command{
+		RequestID:  channelregistry.NewID(),
+		Op:         channelregistry.OpRevoke,
+		ProposalID: id,
+		CreatedAt:  p.now().UnixMilli(),
+	})
 }

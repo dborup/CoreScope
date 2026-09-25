@@ -5,11 +5,15 @@ const (
 	StatusPending  = "pending"
 	StatusApproved = "approved"
 	StatusRejected = "rejected"
+	// StatusRevoked marks a previously approved channel an administrator has
+	// undone. The row is kept (not deleted) so the audit trail and retention
+	// rules apply the same way as for rejected rows; see PruneChannelProposals.
+	StatusRevoked = "revoked"
 )
 
 // ValidStatus reports whether s is a stored proposal status.
 func ValidStatus(s string) bool {
-	return s == StatusPending || s == StatusApproved || s == StatusRejected
+	return s == StatusPending || s == StatusApproved || s == StatusRejected || s == StatusRevoked
 }
 
 // Request states reported by GET /api/channel-proposals/requests/{id}.
@@ -20,6 +24,7 @@ const (
 	RequestPending  = StatusPending
 	RequestApproved = StatusApproved
 	RequestRejected = StatusRejected
+	RequestRevoked  = StatusRevoked
 	RequestError    = "error"
 )
 
@@ -28,6 +33,9 @@ const (
 	OpSubmit  = "submit"
 	OpApprove = "approve"
 	OpReject  = "reject"
+	// OpRevoke undoes a previous approval, moving an approved channel back to
+	// revoked. It reuses Command.ProposalID, same as OpApprove/OpReject.
+	OpRevoke = "revoke"
 )
 
 // Proposal is one suggested channel. Timestamps are Unix epoch milliseconds.
