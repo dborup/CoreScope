@@ -937,7 +937,7 @@ func ensureObserverNeighborMetricsTable(rw *sql.DB, logf Logger) error {
 // name is COLLATE BINARY because the firmware derives the channel key from
 // the exact bytes of the name: "#Test" and "#test" are different channels.
 func ensureChannelProposalsTable(rw *sql.DB, logf Logger) error {
-	// status also accepts 'revoked' (an approval an admin later undid, #TBD):
+	// status also accepts 'revoked' (an approval an admin later undid):
 	// this table has never shipped to any real database yet (it is part of
 	// the same unreleased, unpushed commit that first introduced it), so the
 	// CHECK constraint is changed in place rather than through a migration —
