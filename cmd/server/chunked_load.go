@@ -172,6 +172,10 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 // parallelism while ensuring oldestLoaded has a valid floor when the
 // bg loader starts.
 func (s *PacketStore) RunStartupLoad(chunkSize int) error {
+	// #89: once this returns, on every path (including a failed or partial
+	// background fill), nothing more is loaded at start-up; parked
+	// route_mask changes for transmissions still missing can be dropped.
+	defer s.routeMaskLoadSettled.Store(true)
 	// Clear any stale error from a previous invocation (single-call
 	// invariant — see godoc above). Production never re-enters but
 	// test fixtures may construct fresh stores that share no state;
@@ -263,6 +267,8 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	if neighborEdgesTableExists(s.db.conn) && s.graph.Load() == nil {
 		panic("packet store LoadChunked(): neighbor_edges table has rows but s.graph is nil — graph must be loaded before packet load (see main.go #1643 invariant)")
 	}
+	// #89: the change-log watermark is read before any row is loaded.
+	s.initRouteMaskChangeCursor()
 	s.chunkedLoadInit()
 	// Reset state for repeat calls in tests.
 	s.loadComplete.Store(false)
@@ -383,13 +389,18 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 		if s.db.hasScopeName() {
 			scopeNameCol = ", t.scope_name"
 		}
+		// #89: route_mask follows scope_name as the last optional column.
+		routeMaskCol := ""
+		if s.db.hasRouteMask() {
+			routeMaskCol = ", t.route_mask"
+		}
 
 		var chunkSQL string
 		if s.db.isV3() {
 			chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 					t.payload_type, t.payload_version, t.decoded_json,
 					o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-					o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + `
+					o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 				FROM (SELECT * FROM transmissions t2 ` + whereClause + ` ORDER BY t2.id ASC LIMIT ` + fmt.Sprintf("%d", chunkSize) + `) AS t
 				LEFT JOIN observations o ON o.transmission_id = t.id
 				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -398,7 +409,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 			chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 					t.payload_type, t.payload_version, t.decoded_json,
 					o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-					o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + `
+					o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 				FROM (SELECT * FROM transmissions t2 ` + whereClause + ` ORDER BY t2.id ASC LIMIT ` + fmt.Sprintf("%d", chunkSize) + `) AS t
 				LEFT JOIN observations o ON o.transmission_id = t.id
 				LEFT JOIN observers obs ON obs.id = o.observer_id
@@ -512,6 +523,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 		var obsRawHex sql.NullString
 		var resolvedPathStr sql.NullString
 		var scopeName sql.NullString
+		var routeMask sql.NullInt64
 
 		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
 			&payloadVersion, &decodedJSON,
@@ -526,9 +538,17 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 		if s.db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
+		if s.db.hasRouteMask() {
+			scanArgs = append(scanArgs, &routeMask)
+		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
 			continue
+		}
+		if s.loadScannedRowHook != nil {
+			hook := s.loadScannedRowHook
+			s.loadScannedRowHook = nil
+			hook()
 		}
 
 		if int64(txID) > maxID {
@@ -553,6 +573,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
+			s.mergeRouteMaskOrQueue(tx, routeMask)
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			if txID > s.maxTxID {

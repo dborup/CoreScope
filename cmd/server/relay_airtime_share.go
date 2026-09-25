@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/lora"
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 // relay_airtime_share.go — issues #1359 + #1768
@@ -25,10 +26,11 @@ import (
 // preset 869.6 MHz / BW 62.5 kHz / SF 8 / CR 4/5, with the
 // SF-dependent preamble pulled from internal/lora.PreambleForSF.
 //
-// Aggregated by payload_type, except ADVERT packets which are split into flood
-// and zero-hop route classes. Originator TX is deliberately excluded — a
-// never-relayed direct message scores 0, which is the correct framing for a
-// "relay amplification" metric. In-memory only; no SQL, no new index.
+// Aggregated by payload_type, except ADVERT packets which are split into
+// route classes (flood, zero-hop, mixed, legacy). Originator TX is
+// deliberately excluded — a never-relayed direct message scores 0, which is
+// the correct framing for a "relay amplification" metric. In-memory only; no
+// SQL, no new index.
 
 // defaultLoRaPreset is the canonical fallback when config is absent.
 // Matches the reporter's `get radio` output `869.6179809, 62.5, 8, 5`.
@@ -204,6 +206,7 @@ const (
 	relayAirtimeAdvertUnknown relayAirtimeAdvertRoute = iota
 	relayAirtimeAdvertFlood
 	relayAirtimeAdvertZeroHop
+	relayAirtimeAdvertMixed // #89: the same content hash was seen on flood and zero-hop routes
 )
 
 type relayAirtimeBucketKey struct {
@@ -211,20 +214,44 @@ type relayAirtimeBucketKey struct {
 	advertRoute relayAirtimeAdvertRoute
 }
 
-// relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
-// two ADVERT behaviours defined by MeshCore's route bits. Unknown/legacy route
-// values deliberately keep the historical unsuffixed ADVERT bucket rather than
-// being silently assigned to either behaviour. tx.PayloadType must be non-nil.
-func relayAirtimeKey(tx *StoreTx) relayAirtimeBucketKey {
-	key := relayAirtimeBucketKey{payloadType: *tx.PayloadType}
-	if key.payloadType != PayloadADVERT || tx.RouteType == nil {
-		return key
+// advertRouteClass is the single place that classifies an ADVERT's route.
+// With a known route_mask (#89) it uses every raw route observed for the
+// hash, so the result does not depend on ingest order: only routes 0/1 is
+// flood, only routes 2/3 is zero-hop, both groups is mixed. Without usable
+// mask bits (column absent, row not backfilled yet, or no valid route ever
+// recorded) it falls back to the legacy first-inserted route_type, and
+// NULL/out-of-range values stay unknown (the historical ADVERT bucket).
+func advertRouteClass(tx *StoreTx) relayAirtimeAdvertRoute {
+	if tx.routeMaskKnown && int64(tx.routeMask)&packetpath.RouteMaskAll != 0 {
+		flood := int64(tx.routeMask)&packetpath.RouteMaskFlood != 0
+		direct := int64(tx.routeMask)&packetpath.RouteMaskDirect != 0
+		switch {
+		case flood && direct:
+			return relayAirtimeAdvertMixed
+		case flood:
+			return relayAirtimeAdvertFlood
+		default:
+			return relayAirtimeAdvertZeroHop
+		}
+	}
+	if tx.RouteType == nil {
+		return relayAirtimeAdvertUnknown
 	}
 	switch *tx.RouteType {
 	case RouteTransportFlood, RouteFlood:
-		key.advertRoute = relayAirtimeAdvertFlood
+		return relayAirtimeAdvertFlood
 	case RouteDirect, RouteTransportDirect:
-		key.advertRoute = relayAirtimeAdvertZeroHop
+		return relayAirtimeAdvertZeroHop
+	}
+	return relayAirtimeAdvertUnknown
+}
+
+// relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
+// ADVERT route classes (see advertRouteClass). tx.PayloadType must be non-nil.
+func relayAirtimeKey(tx *StoreTx) relayAirtimeBucketKey {
+	key := relayAirtimeBucketKey{payloadType: *tx.PayloadType}
+	if key.payloadType == PayloadADVERT {
+		key.advertRoute = advertRouteClass(tx)
 	}
 	return key
 }
@@ -242,6 +269,8 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 		return name + " (flood)"
 	case relayAirtimeAdvertZeroHop:
 		return name + " (zero-hop)"
+	case relayAirtimeAdvertMixed:
+		return name + " (mixed)"
 	default:
 		return name
 	}
@@ -253,6 +282,7 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 const (
 	relayAirtimeRouteClassFlood   = "flood"
 	relayAirtimeRouteClassZeroHop = "zero_hop"
+	relayAirtimeRouteClassMixed   = "mixed"
 	relayAirtimeRouteClassLegacy  = "legacy"
 )
 
@@ -269,6 +299,8 @@ func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 		class = relayAirtimeRouteClassFlood
 	case relayAirtimeAdvertZeroHop:
 		class = relayAirtimeRouteClassZeroHop
+	case relayAirtimeAdvertMixed:
+		class = relayAirtimeRouteClassMixed
 	default:
 		class = relayAirtimeRouteClassLegacy
 	}
@@ -276,13 +308,16 @@ func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 }
 
 // computeRelayAirtimeShare aggregates relay-airtime-share per payload_type,
-// separating ADVERT rows by their flood and zero-hop route classes.
+// separating ADVERT rows by their route class (see advertRouteClass).
 //
-// The route class is the route_type stored on the transmission, which is the
-// route of the first observation the ingestor inserted for that content hash.
 // The content hash ignores route bits, so a contact re-shared as a zero-hop
-// advert has the same hash as the original flood advert; later observations
-// never change the stored route (see cmd/ingestor InsertTransmission).
+// advert has the same hash as the original flood advert. The route class
+// comes from transmissions.route_mask, every raw route observed for the hash
+// (#89): only route bits 0/1 is flood, only route bits 2/3 is zero-hop
+// (direct), both groups is mixed; each hash is counted once. Only while the
+// mask is not known (not backfilled yet) or has no usable route bits does it
+// fall back to the legacy first-inserted route_type ("legacy" when that is
+// not a valid route either).
 //
 // Returns:
 //
@@ -290,8 +325,8 @@ func relayAirtimeRouteClass(key relayAirtimeBucketKey) *string {
 //	  "rows":        [{payload_type, type, route_class, count, count_pct, score, airtime_pct}, ...]
 //	                 sorted by airtime_pct desc, where type is the numeric payload type,
 //	                 payload_type the display label and route_class "flood" / "zero_hop" /
-//	                 "legacy" on ADVERT rows and null otherwise; up to three ADVERT rows
-//	                 share type 4, and (type, route_class) identifies each row,
+//	                 "mixed" / "legacy" on ADVERT rows and null otherwise; up to four
+//	                 ADVERT rows share type 4, and (type, route_class) identifies each row,
 //	  "total_count": int,
 //	  "total_score": int64 (nanoseconds of LoRa Time-on-Air × repeater-count, summed across packets),
 //	  "window":      window label,
@@ -432,7 +467,19 @@ func (s *PacketStore) GetRelayAirtimeShareWithWindow(window TimeWindow) map[stri
 	s.cacheMisses++
 	s.cacheMu.Unlock()
 
+	// #89: outside s.mu, and read before the rows so a refresh that lands
+	// in between errs toward "backfilling". While the route_mask backfill is
+	// not complete, some ADVERT rows are still classified by their legacy
+	// first-inserted route.
+	var backfill *RouteMaskBackfillStatus
+	if s.db != nil {
+		st := s.routeMaskBackfillStatus()
+		backfill = &st
+	}
 	result := s.computeRelayAirtimeShare(window)
+	if backfill != nil {
+		result["route_mask_backfill"] = *backfill
+	}
 
 	s.cacheMu.Lock()
 	s.rfCache[cacheKey] = &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)}

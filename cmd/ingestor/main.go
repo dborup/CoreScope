@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -281,6 +282,10 @@ func main() {
 			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
 		}
 	}
+	// #89: route_mask_changes rows of transmissions deleted by any path.
+	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+		log.Printf("[prune] route_mask_changes error: %v", err)
+	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
 	// Independent of the feature flag, so data persists are reaped even after
@@ -308,6 +313,15 @@ func main() {
 	} else {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (0 dropped)")
 	}
+
+	// #89: route_mask backfill runs next to live ingest, after the buffer is
+	// draining, so its one-time pending-index build (~20 s on a staging-sized
+	// DB) is absorbed by IngestBuffer instead of delaying start-up. Cancelled
+	// on shutdown so store.Close() does not wait for it; it resumes on the
+	// next start.
+	routeMaskCtx, stopRouteMaskBackfill := context.WithCancel(context.Background())
+	defer stopRouteMaskBackfill()
+	store.StartRouteMaskBackfill(routeMaskCtx)
 
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
@@ -351,6 +365,9 @@ func main() {
 					log.Printf("[prune] error: %v", err)
 				} else if n > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
+				}
+				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+					log.Printf("[prune] route_mask_changes error: %v", err)
 				}
 			}
 		}()
@@ -475,6 +492,7 @@ func main() {
 	<-sig
 
 	log.Println("Shutting down...")
+	stopRouteMaskBackfill()
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {

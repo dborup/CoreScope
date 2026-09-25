@@ -310,41 +310,7 @@ func (p *Poller) Start() {
 		select {
 		case <-ticker.C:
 			if p.store != nil {
-				// Ingest new transmissions into in-memory store and broadcast
-				newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
-				if newMax > lastID {
-					lastID = newMax
-				}
-				// Ingest new observations for existing transmissions (fixes #174)
-				nextObsID := lastObsID
-				if err := p.db.conn.QueryRow(`
-					SELECT COALESCE(MAX(id), ?) FROM (
-						SELECT id FROM observations
-						WHERE id > ?
-						ORDER BY id ASC
-						LIMIT 500
-					)`, lastObsID, lastObsID).Scan(&nextObsID); err != nil {
-					nextObsID = lastObsID
-				}
-				newObs := p.store.IngestNewObservations(lastObsID, 500)
-				if nextObsID > lastObsID {
-					lastObsID = nextObsID
-				}
-				if len(newTxs) > 0 {
-					log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
-				}
-				for _, tx := range newTxs {
-					p.hub.Broadcast(WSMessage{
-						Type: "packet",
-						Data: tx,
-					})
-				}
-				for _, obs := range newObs {
-					p.hub.Broadcast(WSMessage{
-						Type: "packet",
-						Data: obs,
-					})
-				}
+				lastID, lastObsID = p.pollStore(lastID, lastObsID)
 			} else {
 				// Fallback: direct DB query (used when store is nil, e.g. tests)
 				newTxs, err := p.db.GetNewTransmissionsSince(lastID, 100)
@@ -373,6 +339,54 @@ func (p *Poller) Start() {
 			return
 		}
 	}
+}
+
+// pollStore is one poller tick against the in-memory store: ingest new
+// transmissions and observations, apply route_mask changes, and broadcast.
+// It returns the advanced cursors.
+func (p *Poller) pollStore(lastID, lastObsID int) (int, int) {
+	// Ingest new transmissions into in-memory store and broadcast
+	newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
+	if newMax > lastID {
+		lastID = newMax
+	}
+	// Ingest new observations for existing transmissions (fixes #174)
+	nextObsID := lastObsID
+	if err := p.db.conn.QueryRow(`
+		SELECT COALESCE(MAX(id), ?) FROM (
+			SELECT id FROM observations
+			WHERE id > ?
+			ORDER BY id ASC
+			LIMIT 500
+		)`, lastObsID, lastObsID).Scan(&nextObsID); err != nil {
+		nextObsID = lastObsID
+	}
+	newObs := p.store.IngestNewObservations(lastObsID, 500)
+	if nextObsID > lastObsID {
+		lastObsID = nextObsID
+	}
+	// #89: route bits that reached existing transmissions without a new
+	// observation id (an upserted observation row), from the change log.
+	p.store.RefreshRouteMaskChanges()
+	// #89: pick up route_mask values the ingestor backfilled
+	// after this server loaded the rows.
+	p.store.RefreshBackfilledRouteMasks()
+	if len(newTxs) > 0 {
+		log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
+	}
+	for _, tx := range newTxs {
+		p.hub.Broadcast(WSMessage{
+			Type: "packet",
+			Data: tx,
+		})
+	}
+	for _, obs := range newObs {
+		p.hub.Broadcast(WSMessage{
+			Type: "packet",
+			Data: obs,
+		})
+	}
+	return lastID, lastObsID
 }
 
 func (p *Poller) Stop() {

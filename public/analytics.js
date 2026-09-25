@@ -566,7 +566,10 @@
       var cpct = Number(r.count_pct || 0);
       var apct = Number(r.airtime_pct || 0);
       var score = Number(r.score || 0);
-      var color = palette[i % palette.length];
+      // #89: a payload seen on both flood and zero-hop routes is one mixed
+      // row; it gets a fixed theme colour so it reads the same in any position.
+      var isMixed = r.route_class === 'mixed';
+      var color = isMixed ? 'var(--status-purple)' : palette[i % palette.length];
       // Rows are rendered positionally; (type, route_class) is the stable row
       // identity. The three ADVERT rows share type 4, so type alone is not.
       var identityAttrs = ' data-payload-type="' + esc(String(Number(r.type))) + '"' +
@@ -583,6 +586,7 @@
         : scoreMs.toFixed(2) + ' ms';
       var tip =
         name + '\n' +
+        (isMixed ? 'Same payload observed on both flood and zero-hop routes; counted once.\n' : '') +
         'Count: ' + cnt.toLocaleString() + ' (' + cpct.toFixed(2) + '%)\n' +
         'Airtime: ' + apct.toFixed(2) + '% (score ' + scoreStr + ' · airtime × repeaters)\n' +
         'Score = LoRa Time-on-Air × distinct repeaters. Within-mesh only.';
