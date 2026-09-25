@@ -31,6 +31,7 @@ node test-repeater-metric-scatter.js
 node test-top-routes-overlay.js
 node test-important-links-byte-filter.js
 node test-url-state.js
+node test-node-adverts.js
 node test-perf-go-runtime.js
 node test-channel-psk-ux.js
 node test-channel-sidebar-layout.js

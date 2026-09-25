@@ -16,28 +16,62 @@ type floodAdvertEntry struct {
 	hash string
 }
 
-// countFloodAdverts counts distinct flood adverts (route_type ==
-// advertRouteTypeFlood) whose first-seen lies within the past windowHours. Entries
-// with unparseable timestamps are skipped, matching relay-liveness behaviour;
+// advertWindow is the exact first-seen window shared by the windowed advert
+// counters (flood_advert_count_7d and the #2073 advertCounts). Entries with
+// unparseable timestamps are skipped, matching relay-liveness behaviour;
 // entries without a hash fall back to their timestamp as the dedup key.
-func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours float64) int {
-	cutoff := now.Add(-time.Duration(windowHours * float64(time.Hour)))
-	seen := map[string]struct{}{}
-	for _, e := range entries {
-		if e.rt != advertRouteTypeFlood {
-			continue
-		}
-		t, ok := parseRelayTS(e.ts)
-		if !ok || !t.After(cutoff) {
-			continue
-		}
-		key := e.hash
-		if key == "" {
-			key = e.ts
-		}
-		seen[key] = struct{}{}
+type advertWindow struct {
+	cutoff time.Time
+	seen   map[string]struct{}
+}
+
+func newAdvertWindow(now time.Time, windowHours float64) advertWindow {
+	return advertWindow{
+		cutoff: now.Add(-time.Duration(windowHours * float64(time.Hour))),
+		seen:   map[string]struct{}{},
 	}
-	return len(seen)
+}
+
+// admit reports whether an advert first seen at ts lies inside the window
+// and has not been counted yet (by hash), and records it.
+func (w advertWindow) admit(ts, hash string) bool {
+	t, ok := parseRelayTS(ts)
+	if !ok || !t.After(w.cutoff) {
+		return false
+	}
+	key := hash
+	if key == "" {
+		key = ts
+	}
+	if _, dup := w.seen[key]; dup {
+		return false
+	}
+	w.seen[key] = struct{}{}
+	return true
+}
+
+// advertDateFloor is the SQL pre-filter for an advert window: a DATE-ONLY
+// string one day before the window start. A date prefix compares lexically
+// the same whatever follows it (separator, precision, zone suffix), so the
+// floor never drops an in-window row; the exact check is advertWindow.admit
+// in Go, which skips what parseRelayTS cannot parse (e.g. a legacy
+// 'YYYY-MM-DD HH:MM:SS' value).
+func advertDateFloor(now time.Time, windowHours float64) string {
+	return now.UTC().Add(-time.Duration(windowHours*float64(time.Hour))).AddDate(0, 0, -1).Format("2006-01-02")
+}
+
+// countFloodAdverts counts distinct flood adverts (route_type ==
+// advertRouteTypeFlood) whose first-seen lies within the past windowHours
+// (see advertWindow).
+func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours float64) int {
+	w := newAdvertWindow(now, windowHours)
+	n := 0
+	for _, e := range entries {
+		if e.rt == advertRouteTypeFlood && w.admit(e.ts, e.hash) {
+			n++
+		}
+	}
+	return n
 }
 
 // CountFloodAdvertsForNode returns how many distinct FLOOD adverts pubkey
@@ -47,9 +81,14 @@ func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours fl
 //
 // route_type is filtered in SQL so an advert-spamming node cannot truncate
 // the flood count (review feedback on the earlier LIMIT approach). The time
-// floor is a DATE-ONLY string with one day of slack: a date prefix compares
-// lexically the same across every first_seen format parseRelayTS accepts
-// ('T' and ' ' separators alike); the exact window check stays in Go.
+// floor is advertDateFloor; the exact window check stays in Go.
+//
+// This is an external contract (the ArcScope advisor reads it) and is kept
+// as is: route_type 1 only, i.e. the first-inserted route. It therefore
+// differs from advertCounts["7d"].flood (node_advert_routes.go), which is
+// route_mask based: that one also counts transport flood (route 0) and never
+// counts a mixed advert (flood + zero-hop), while this one counts a mixed
+// advert whenever its first-inserted route was 1.
 //
 // The row cap is a pure safety valve on per-request allocation: it applies to
 // flood adverts inside the floor window only, and 50000 in ~8 days is ~4 per
@@ -61,7 +100,7 @@ func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours fl
 const floodAdvertRowCap = 50000
 
 func (db *DB) CountFloodAdvertsForNode(pubkey string, windowHours float64, rowCap int) (int, error) {
-	floor := time.Now().UTC().Add(-time.Duration(windowHours*float64(time.Hour))).AddDate(0, 0, -1).Format("2006-01-02")
+	floor := advertDateFloor(time.Now(), windowHours)
 	rows, err := db.conn.Query(
 		"SELECT COALESCE(first_seen, ''), COALESCE(route_type, -1), COALESCE(hash, '') FROM transmissions WHERE from_pubkey = ? AND payload_type = ? AND route_type = ? AND first_seen >= ? ORDER BY id DESC LIMIT ?",
 		pubkey, payloadTypeAdvert, advertRouteTypeFlood, floor, rowCap)

@@ -68,6 +68,10 @@ type Server struct {
 	neighborMu    sync.Mutex
 	neighborGraph *NeighborGraph
 
+	// #2073 node-detail advert route breakdown, per pubkey
+	// (node_advert_routes_cache.go).
+	advertRoutes nodeAdvertRouteCache
+
 	// Cached /api/scope-stats response — per-window, recomputed at most once every 30s
 	scopeStatsMu       sync.Mutex
 	scopeStatsCache    map[string]*ScopeStatsResponse
@@ -2085,10 +2089,32 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, NodeDetailResponse{
+	resp := NodeDetailResponse{
 		Node:          node,
 		RecentAdverts: recentAdverts,
-	})
+	}
+	// #2073: adverts per route class and per-class counts. Same visibility
+	// rule as the rest of node detail plus identityHidden (#68), which also
+	// covers the observer blacklist and observer names; a failed lookup
+	// fails closed. A hidden identity gets neither the new fields nor
+	// route_class on recentAdverts (it is route_mask data too).
+	hidden, err := s.isIdentityHidden(r.Context(), pubkey)
+	if err != nil {
+		log.Printf("WARN isIdentityHidden(%s): %v", pubkey, err)
+	}
+	if err != nil || hidden {
+		for _, p := range recentAdverts {
+			delete(p, "route_class")
+		}
+	} else {
+		if byRoute, counts, err := s.nodeAdvertRoutes(pubkey, time.Now()); err == nil {
+			resp.RecentAdvertsByRoute = &byRoute
+			resp.AdvertCounts = &counts
+		} else {
+			log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, err)
+		}
+	}
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {

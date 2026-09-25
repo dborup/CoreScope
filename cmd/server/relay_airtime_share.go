@@ -214,17 +214,19 @@ type relayAirtimeBucketKey struct {
 	advertRoute relayAirtimeAdvertRoute
 }
 
-// advertRouteClass is the single place that classifies an ADVERT's route.
-// With a known route_mask (#89) it uses every raw route observed for the
-// hash, so the result does not depend on ingest order: only routes 0/1 is
-// flood, only routes 2/3 is zero-hop, both groups is mixed. Without usable
-// mask bits (column absent, row not backfilled yet, or no valid route ever
-// recorded) it falls back to the legacy first-inserted route_type, and
-// NULL/out-of-range values stay unknown (the historical ADVERT bucket).
-func advertRouteClass(tx *StoreTx) relayAirtimeAdvertRoute {
-	if tx.routeMaskKnown && int64(tx.routeMask)&packetpath.RouteMaskAll != 0 {
-		flood := int64(tx.routeMask)&packetpath.RouteMaskFlood != 0
-		direct := int64(tx.routeMask)&packetpath.RouteMaskDirect != 0
+// classifyAdvertRoute is the single place that classifies an ADVERT's route;
+// Relay Airtime Share (advertRouteClass) and the node-detail advert lists
+// (node_advert_routes.go, whose SQL CASE mirrors it) both use it. With a
+// known route_mask (#89) it uses every raw route observed for the hash, so
+// the result does not depend on ingest order: only routes 0/1 is flood, only
+// routes 2/3 is zero-hop, both groups is mixed. Without usable mask bits
+// (column absent, row not backfilled yet, or no valid route ever recorded)
+// it falls back to the legacy first-inserted route_type, and NULL/out-of-
+// range values stay unknown (the historical ADVERT bucket).
+func classifyAdvertRoute(mask int64, maskKnown bool, routeType *int) relayAirtimeAdvertRoute {
+	if maskKnown && mask&packetpath.RouteMaskAll != 0 {
+		flood := mask&packetpath.RouteMaskFlood != 0
+		direct := mask&packetpath.RouteMaskDirect != 0
 		switch {
 		case flood && direct:
 			return relayAirtimeAdvertMixed
@@ -234,16 +236,21 @@ func advertRouteClass(tx *StoreTx) relayAirtimeAdvertRoute {
 			return relayAirtimeAdvertZeroHop
 		}
 	}
-	if tx.RouteType == nil {
+	if routeType == nil {
 		return relayAirtimeAdvertUnknown
 	}
-	switch *tx.RouteType {
+	switch *routeType {
 	case RouteTransportFlood, RouteFlood:
 		return relayAirtimeAdvertFlood
 	case RouteDirect, RouteTransportDirect:
 		return relayAirtimeAdvertZeroHop
 	}
 	return relayAirtimeAdvertUnknown
+}
+
+// advertRouteClass classifies an in-memory ADVERT (see classifyAdvertRoute).
+func advertRouteClass(tx *StoreTx) relayAirtimeAdvertRoute {
+	return classifyAdvertRoute(int64(tx.routeMask), tx.routeMaskKnown, tx.RouteType)
 }
 
 // relayAirtimeKey keeps non-ADVERT aggregation unchanged while separating the
@@ -280,10 +287,12 @@ func relayAirtimeBucketName(key relayAirtimeBucketKey) string {
 // part of the API contract and deliberately independent of the display
 // labels built by relayAirtimeBucketName.
 const (
-	relayAirtimeRouteClassFlood   = "flood"
-	relayAirtimeRouteClassZeroHop = "zero_hop"
-	relayAirtimeRouteClassMixed   = "mixed"
-	relayAirtimeRouteClassLegacy  = "legacy"
+	relayAirtimeRouteClassFlood   = advertClassFlood
+	relayAirtimeRouteClassZeroHop = advertClassZeroHop
+	relayAirtimeRouteClassMixed   = advertClassMixed
+	// Relay Airtime Share names the no-usable-route bucket "legacy" (its
+	// historical plain ADVERT row); node detail calls it advertClassUnknown.
+	relayAirtimeRouteClassLegacy = "legacy"
 )
 
 // relayAirtimeRouteClass returns the route_class value for a row: one of the

@@ -860,8 +860,53 @@ type NodeSearchResponse struct {
 }
 
 type NodeDetailResponse struct {
-	Node          map[string]interface{}   `json:"node"`
-	RecentAdverts []map[string]interface{} `json:"recentAdverts"`
+	Node          map[string]interface{} `json:"node"`
+	RecentAdverts NodeAdvertRows         `json:"recentAdverts"`
+	// #2073: omitted when the identity is hidden (identityHidden, #68).
+	RecentAdvertsByRoute *NodeAdvertsByRoute `json:"recentAdvertsByRoute,omitempty"`
+	AdvertCounts         *NodeAdvertCounts   `json:"advertCounts,omitempty"`
+}
+
+// NodeAdvertRow is one transmission row on node detail: the /api/packets
+// transmission shape of the shared scanTransmissionRow plus, depending on
+// the list, observations and route_class (#2073). It stays map-shaped
+// because that shared scanner is (#1383); the named type keeps the response
+// fields typed.
+type NodeAdvertRow map[string]interface{}
+
+// NodeAdvertRows is a list of NodeAdvertRow.
+type NodeAdvertRows []NodeAdvertRow
+
+// NodeAdvertsByRoute is the newest adverts of a node per route class
+// (#2073), classified like Relay Airtime Share (classifyAdvertRoute). The
+// class is filtered in SQL before the per-class limit, so frequent zero-hop
+// adverts cannot push rare flood adverts out. Unknown (no usable route) is
+// only present when the node has such adverts.
+type NodeAdvertsByRoute struct {
+	Limit   int            `json:"limit"`
+	Flood   NodeAdvertRows `json:"flood"`
+	ZeroHop NodeAdvertRows `json:"zero_hop"`
+	Mixed   NodeAdvertRows `json:"mixed"`
+	Unknown NodeAdvertRows `json:"unknown,omitempty"`
+}
+
+// NodeAdvertCounts counts a node's distinct adverts (by hash) per route class
+// whose first_seen lies in the last 24 hours and 7 days (#2073).
+// RouteMaskBackfill tells whether legacy rows are still classified by their
+// first-inserted route_type (anything but "complete": provisional).
+type NodeAdvertCounts struct {
+	H24               AdvertRouteCounts       `json:"24h"`
+	D7                AdvertRouteCounts       `json:"7d"`
+	Truncated         bool                    `json:"truncated"`
+	RouteMaskBackfill RouteMaskBackfillStatus `json:"route_mask_backfill"`
+}
+
+// AdvertRouteCounts is one window of NodeAdvertCounts.
+type AdvertRouteCounts struct {
+	Flood   int `json:"flood"`
+	ZeroHop int `json:"zero_hop"`
+	Mixed   int `json:"mixed"`
+	Unknown int `json:"unknown"`
 }
 
 type NodeStatsResp struct {

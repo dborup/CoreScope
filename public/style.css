@@ -2844,6 +2844,29 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 .node-activity-item:last-child { border-bottom: none; }
 .node-activity-time { color: var(--text-muted); white-space: nowrap; min-width: 70px; font-size: 12px; }
 
+/* #2073 Recent Adverts (node-adverts.js): per-route counts, tabs, route badge.
+   Colors reuse the status tokens; badge text stays --text for contrast. */
+.node-adverts-counts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); }
+.node-adverts-count-row strong { margin-right: 4px; color: var(--text); }
+.node-adverts-note { margin: 0 0 8px; font-size: 12px; }
+.node-adverts-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
+.node-adverts-tabs .tab-btn { padding: 4px 10px; }
+.node-adverts-empty { font-size: 13px; }
+.advert-timeline .node-adverts-empty { padding: 8px; }
+.advert-route-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 11px; font-weight: var(--fw-semibold); color: var(--text); white-space: nowrap;
+}
+.advert-route-badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.advert-route-badge[data-route-class="flood"]::before { background: var(--status-info); }
+.advert-route-badge[data-route-class="zero_hop"]::before { background: var(--status-green); }
+.advert-route-badge[data-route-class="mixed"]::before { background: var(--status-purple); }
+/* Per-advert hash size when a node's adverts disagree (was inline colors). */
+.advert-hs-badge { font-size: 9px; font-family: var(--mono); color: var(--text-on-accent); background: var(--palette-green-600); }
+.advert-hs-badge.hs-1 { background: var(--status-orange); }
+.advert-hs-badge.hs-2 { background: var(--palette-green-300); color: var(--palette-gray-900); }
+
 /* Analytics page */
 .analytics-page { padding: 16px 24px; max-width: 1600px; margin: 0 auto; }
 .analytics-header { margin-bottom: 20px; }

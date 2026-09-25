@@ -473,13 +473,69 @@ Node detail page data.
     "advert_count":  number,
     "hash_size":     number | null,
     "hash_size_inconsistent": boolean,
-    "hash_sizes_seen": [number] | undefined
+    "hash_sizes_seen": [number] | undefined,
+    "flood_advert_count_7d": number   // route_type 1 only (see below)
   },
-  "recentAdverts": [Packet]   // last 20 packets for this node, newest first
+  "recentAdverts": [Packet],  // last 20 packets for this node, newest ingest first;
+                              // ADVERT rows also carry route_class
+  "recentAdvertsByRoute": {   // absent when the identity is hidden
+    "limit":    20,           // max rows per class
+    "flood":    [Packet],     // newest adverts per route class, newest ingest first;
+                              // rows without the observations array
+    "zero_hop": [Packet],
+    "mixed":    [Packet],
+    "unknown":  [Packet]      // only present when the node has such adverts
+  },
+  "advertCounts": {           // absent when the identity is hidden
+    "24h": { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
+    "7d":  { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
+    "truncated": boolean,     // more adverts than the 50,000-row cap in the 7d floor
+    "route_mask_backfill": { "status": "pending" | "backfilling" | "complete", "remaining": number | null }
+  }
 }
 ```
 
 Where `Packet` is a transmission object (see [Packet Object](#packet-object)).
+
+#### Advert route classes
+
+`recentAdvertsByRoute`, `advertCounts` and `route_class` (port/extension of
+upstream `Kpa-clawbot/CoreScope#2073`) classify ADVERTs exactly like the
+ADVERT rows of Relay Airtime Share (#89), from `transmissions.route_mask`
+(every raw route type observed for the content hash):
+
+| `route_class` | Meaning |
+|---------------|---------|
+| `flood`       | only route 0/1 (transport flood / flood) seen |
+| `zero_hop`    | only route 2/3 — a zero-hop advert is sent DIRECT with an empty path |
+| `mixed`       | both flood and zero-hop routes seen for the same advert |
+| `unknown`     | no usable route (Relay Airtime Share calls this bucket `legacy`) |
+
+Rows whose mask is not backfilled yet (and databases without the column)
+fall back to the first-inserted `route_type`; `route_mask_backfill` says
+whether that fallback is still in use (anything but `complete`: provisional).
+
+- The class is filtered in SQL before the per-class limit, so frequent
+  zero-hop adverts cannot push rare flood adverts out of `flood`. A mixed
+  advert appears only under `mixed`.
+- `advertCounts` counts distinct adverts (by hash) whose `first_seen` — when
+  the advert was first heard, the axis `flood_advert_count_7d` uses too —
+  lies in the window. Rows whose `first_seen` cannot be parsed are skipped,
+  as for `flood_advert_count_7d`.
+- `flood_advert_count_7d` is unchanged (an external contract): it counts
+  `route_type` 1 only. `advertCounts["7d"].flood` differs from it: it also
+  counts transport flood (route 0) and never counts a mixed advert, while
+  `flood_advert_count_7d` counts a mixed advert whose first-inserted route
+  was 1.
+- Both new fields follow the node-detail visibility rules (blacklisted and
+  hidden-name nodes are 404) and are omitted when the identity is hidden by
+  the observer blacklist or an observer name (#68); `route_class` is then
+  left off the `recentAdverts` rows as well.
+- The per-class rows omit the `observations` array (they repeat rows of
+  `recentAdverts`); `observation_count` and the best observation's fields
+  stay. Their `route_class` is the class they were listed under.
+- The breakdown is cached per node for up to 30 s, and refreshed once the
+  node has a newer transmission (at most every 5 s).
 
 ### Response `404`
 
