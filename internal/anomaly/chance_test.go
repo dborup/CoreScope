@@ -121,9 +121,9 @@ func TestChanceIsAccurateForSmallTolerances(t *testing.T) {
 // value, far outside the measured cross-architecture spread (about 5e-13).
 func TestMaxChanceDecisionAroundTheBoundary(t *testing.T) {
 	const (
-		canonical = 4.59387e-08            // the value rounded to ChanceDigits
-		justBelow = 4.5938728007910717e-08 // value * (1 - 1e-10)
-		justAbove = 4.5938728017098456e-08 // value * (1 + 1e-10)
+		canonical = 9.09399e-08            // the value rounded to ChanceDigits
+		justBelow = 9.0939930954435484e-08 // value * (1 - 1e-10)
+		justAbove = 9.0939930972623478e-08 // value * (1 + 1e-10)
 	)
 	signalAt := func(maxChance float64) (PeriodicEvidence, bool) {
 		r := experimentalPeriodic()
@@ -240,7 +240,9 @@ func TestPeriodicEvidenceJSONIsCanonical(t *testing.T) {
 // "Chance" member removed (numbers kept verbatim, keys sorted), taken from
 // the golden file before Chance was canonicalized. Timestamps, transitions,
 // reason codes, coverage, counters and the number of candidates are therefore
-// unchanged; only the documented Chance values changed.
+// unchanged; only the documented Chance values changed: rounded to
+// ChanceDigits, then multiplied by 97/49 (searchCells of the fixture rule)
+// when the union bound began to charge the refined candidates.
 const goldenWithoutChance = "2538014b83e1976a614da59c3db2eeb8d403ba76de63f3f58d55aad221eaf959"
 
 func stripChance(v interface{}) interface{} {
@@ -294,8 +296,8 @@ func TestGoldenChangedOnlyInTheDocumentedChanceValues(t *testing.T) {
 	for _, c := range chances {
 		n[c]++
 	}
-	if len(chances) != 4 || n["4.59387e-8"] != 2 || n["0.000241965"] != 2 {
-		t.Fatalf("golden Chance values %v, want 4.59387e-8 x2 and 0.000241965 x2", chances)
+	if len(chances) != 4 || n["9.09399e-8"] != 2 || n["0.000478992"] != 2 {
+		t.Fatalf("golden Chance values %v, want 9.09399e-8 x2 and 0.000478992 x2", chances)
 	}
 	b, err := json.Marshal(stripChance(decode()))
 	if err != nil {

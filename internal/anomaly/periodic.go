@@ -42,8 +42,9 @@ import (
 // where p_gap is the probability that one exponential gap falls within tol
 // of some k*P. The exponent drops one gap because P is fitted to the chain
 // (the gap it was derived from matches by construction). cells is the
-// number of candidate periods the search may try per pulse and evaluated is
-// the number of pulses tested on the key so far: a union bound over the
+// number of candidate periods the search may report per pulse (seeds,
+// refined periods and the phase refinement; see searchCells) and evaluated
+// is the number of pulses tested on the key so far: a union bound over the
 // period search and over every pulse that was another chance to fire.
 
 // recentGaps is how many of the newest gaps seed the period search.
@@ -405,7 +406,10 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 	// Chance is within MaxChance): until one does, the hypothesis kept from
 	// pulse to pulse stays the one the seeds give, and a kept hypothesis
 	// that meets the criteria stops the search, so it must not be one that
-	// cannot signal yet
+	// cannot signal yet. Only the best-ranked refined candidate is tried; a
+	// lower-ranked one that would pass MaxChance is deliberately not taken
+	// instead, so the estimate is always the best-ranked chain and never the
+	// one picked because it is the most likely to fire.
 	if bestRef.meets(r) && p.chance(bestRef, r) <= r.MaxChance && (best.gaps == 0 || bestRef.outranks(best, r)) {
 		best = bestRef
 	}
@@ -427,11 +431,9 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 // measures as a refined candidate.
 //
 // A refined period is fitted to up to recentGaps gaps, not one, so a chance
-// chain fits it more often than pg^(gaps-1) alone says. The union bound in
-// chance() still covers it: a period explaining n of the newest gaps exists
-// roughly as often as one of those n gaps' own seeds explains the others,
-// and searchCells already charges each of those seeds. So searchCells, and
-// the Chance values, are unchanged.
+// chain fits it up to that many times more often than one seed; it is a
+// hypothesis of its own, and searchCells charges a cell for it (see there
+// for why one gap per cell is still what the fit costs).
 //
 // Cost: the chain pass as before, the range adds O(1) per gap in the window;
 // a refined cell adds one walk of recentGaps gaps and one chainFor. No
@@ -553,6 +555,30 @@ func (p *periodicState) chance(c chainInfo, r *PeriodicRule) float64 {
 	return float64(p.evaluated) * float64(searchCells(r)) * math.Pow(pg, float64(c.gaps-1))
 }
 
-// searchCells is the number of candidate periods estimate may try per pulse:
-// recentGaps gaps times MaxMissing+1 divisors, plus the refinement.
-func searchCells(r *PeriodicRule) int { return recentGaps*(r.MaxMissing+1) + 1 }
+// searchCells is the number of candidate periods the search may report per
+// pulse, each one cell of the union bound: a seed g/k for each of the
+// recentGaps newest gaps and k = 1..MaxMissing+1, at most one refined period
+// per seed, and the phase refinement of the best seed. (A kept hypothesis
+// reports only when the search does not run, with at most MaxMissing+1
+// periods: itself and its multiples.)
+//
+// Each cell spends one gap on its fit: chance() uses pg^(gaps-1). For a seed
+// that is the gap it is taken from. A refined period lies in the common
+// range of the m newest gaps it explains, the intersection of their ranges
+// [(g-tol)/k, (g+tol)/k]. That intersection is non-empty exactly when its
+// highest lower end, L = (g_j-tol)/k_j of one gap j, lies in every other
+// range, that is when the period L explains each of the other m-1 gaps. So
+// "some period explains these m gaps" is the union, over the
+// recentGaps*(MaxMissing+1) pairs (j, k_j), of "(g_j-tol)/k_j explains the
+// other m-1 gaps", each with one gap spent: as many cells as there are
+// seeds. For one set of multiples, a common period exists up to m times as
+// often as one given seed explains the other gaps, so the refined periods
+// cannot share the seeds' cells. Gaps older than the window are tested
+// against a period the window fixes, one independent chance pg each. As
+// everywhere in this bound, pg is taken at the reported period.
+//
+// All of this assumes the Poisson null. For traffic more regular than
+// Poisson (gaps spread evenly around their mean) Chance is not a bound, and
+// the fitted refined periods find more of its chance chains than the seeds
+// alone.
+func searchCells(r *PeriodicRule) int { return 2*recentGaps*(r.MaxMissing+1) + 1 }

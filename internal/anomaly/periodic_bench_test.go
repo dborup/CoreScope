@@ -119,8 +119,10 @@ func periodicWorkBound(r *PeriodicRule) (chains, steps uint64) {
 // measuredSteps is the total number of gaps visited by the search over the
 // deterministic runs of TestPeriodicSearchWorkIsBounded (4*maxHistoryLen
 // pulses per shape). The test allows 25% above it, so a change that makes
-// the search markedly more expensive fails here even though it stays
-// within the loose analytic periodicWorkBound.
+// the search visit markedly more chains or gaps fails here even though it
+// stays within the loose analytic periodicWorkBound. Work these counters do
+// not count (more CPU per visited gap, say) is not caught; only
+// BenchmarkPeriodicSearch measures it.
 var measuredSteps = map[string]uint64{
 	"periodic/0.6": 236631, "alternating/0.6": 1434346, "jitter/0.6": 246825,
 	"missing/0.6": 243414, "bursty/0.6": 196561, "noise/0.6": 144778,

@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -474,6 +475,148 @@ func TestChainRefinedMatchesChainForAndNeverLosesGaps(t *testing.T) {
 	t.Logf("%d refined cells", refined)
 }
 
+// ---- union bound over the refined candidates (cloud review of 5b816f66) ----
+
+// scenarioA is the loose rule of the cloud review's scenario a): a wide
+// absolute tolerance, no missing pulses and weak shape criteria, so under a
+// null only the Chance condition stops chance chains.
+func scenarioA(maxChance float64) PeriodicRule {
+	r := experimentalPeriodic()
+	r.JitterAbs, r.JitterRel, r.MaxJitterFraction, r.MinPulses, r.MinCoverage, r.MaxMissing = 20*time.Second, 0, 1, 4, 0.1, 0
+	r.MaxChance = maxChance
+	return r
+}
+
+// poissonTrain returns 64 pulse offsets of a Poisson train (mean gap 2m to
+// 22m, pulses at least 10s apart), generated in full from its seed.
+func poissonTrain(seed int64) []time.Duration {
+	rng := rand.New(rand.NewSource(seed))
+	mean := time.Duration(120+rng.Intn(1200)) * time.Second
+	out := make([]time.Duration, 0, 64)
+	ts := time.Duration(0)
+	for len(out) < 64 {
+		ts += 10*time.Second + time.Duration(rng.ExpFloat64()*float64(mean))
+		out = append(out, ts)
+	}
+	return out
+}
+
+// Chance is a union bound over every period the search can report, so the
+// cells it charges must cover every period estimate measures: up to
+// recentGaps*(MaxMissing+1) seeds, as many refined periods and the phase
+// refinement. Some of these trains need more than the seeds and the phase
+// refinement alone.
+func TestSearchCellsCoverEveryPeriodTheSearchMeasures(t *testing.T) {
+	b := experimentalPeriodic()
+	b.JitterRel, b.MaxJitterFraction, b.MinPulses, b.MinCoverage = 0.1, 1, 4, 0.1
+	beyondSeeds := false
+	for _, r := range []PeriodicRule{experimentalPeriodic(), scenarioA(0.1), b} {
+		for _, shape := range benchShapes {
+			p := newPeriodicState(r.HistoryLen)
+			var sc periodicScratch
+			for i, ts := range pulseTimes(shape, 4*r.HistoryLen) {
+				p.observe(ts, TrafficUnclassified, &r, &sc)
+				if p.n < 2 {
+					continue
+				}
+				var own periodicScratch
+				p.estimate(&r, &own)
+				if own.chains > uint64(searchCells(&r)) {
+					t.Fatalf("%s MaxMissing=%d pulse %d: estimate measured %d periods, Chance charges %d cells",
+						shape, r.MaxMissing, i, own.chains, searchCells(&r))
+				}
+				beyondSeeds = beyondSeeds || own.chains > uint64(recentGaps*(r.MaxMissing+1)+1)
+			}
+		}
+	}
+	if !beyondSeeds {
+		t.Fatal("fixture: no search measured more periods than the seeds and the phase refinement")
+	}
+}
+
+// Refined candidates are hypotheses the search tries, so they must not make
+// chance chains fire more often than the seeds alone. On these fixed Poisson
+// trains, with the rule of scenario a) and MaxChance 0.1, ad3ab30f (seeds
+// only) fires on 60; 5b816f66, whose Chance did not charge the refined
+// candidates, fired on 107.
+func TestRefinedCandidatesDoNotRaiseTheNullFalseAlarmRate(t *testing.T) {
+	const trains, seedsOnly = 10000, 60
+	fired := 0
+	for trial := 0; trial < trains; trial++ {
+		d := newDet(t, Config{Periodic: []PeriodicRule{scenarioA(0.1)}})
+		var evs []Event
+		for i, off := range poissonTrain(int64(trial)) {
+			evs = append(evs, relayEvent(t, "n"+strconv.Itoa(i), at(off), 1, 2))
+		}
+		if len(run(t, d, evs)) > 0 {
+			fired++
+		}
+	}
+	if fired > seedsOnly+seedsOnly/10 {
+		t.Fatalf("%d of %d null trains fired, seeds alone %d (+10%% allowed)", fired, trains, seedsOnly)
+	}
+	t.Logf("%d of %d null trains fired, seeds alone %d", fired, trains, seedsOnly)
+}
+
+// A gap that bridges a missing pulse takes the nearest multiple of the
+// seed, not the one below: with a seed of 303s (from the 606s gap), 594s is
+// two periods although 594/303 < 2. The range then runs through both
+// missing-pulse gaps to exactly 300s, which explains four newest gaps where
+// the seed explains two.
+func TestRefinementRoundsTheMultipleOfAGap(t *testing.T) {
+	r := experimentalPeriodic()
+	r.JitterAbs, r.JitterRel, r.MaxMissing = 6*time.Second, 0, 1
+	p := ringOf(&r, 0, 1000*time.Second, 1606*time.Second, 2200*time.Second, 2502*time.Second, 2800*time.Second)
+	var sc periodicScratch
+	c, ref := p.chainRefined(int64(303*time.Second), &r, &sc)
+	if c.gaps != 2 {
+		t.Fatalf("fixture: the seed explains %d gaps, want 2", c.gaps)
+	}
+	if ref != int64(300*time.Second) {
+		t.Fatalf("refined period %v, want 5m0s", time.Duration(ref))
+	}
+	if got := p.recentExplained(ref, &r, &sc); got != 4 {
+		t.Fatalf("refined period explains %d newest gaps, want 4", got)
+	}
+}
+
+// A gap that needs more than MaxMissing+1 periods ends the common range:
+// with MaxMissing 0, the oldest gap (590s, two periods) must neither narrow
+// the range nor enter the phase estimate, which stays 902s/3 over the three
+// newest gaps.
+func TestRefinementRangeEndsAtAGapBeyondMaxMissing(t *testing.T) {
+	r := experimentalPeriodic()
+	r.JitterAbs, r.JitterRel, r.MaxMissing = 6*time.Second, 0, 0
+	p := ringOf(&r, 0, 590*time.Second, 890*time.Second, 1192*time.Second, 1492*time.Second)
+	var sc periodicScratch
+	c, ref := p.chainRefined(int64(294*time.Second), &r, &sc)
+	if c.gaps != 1 {
+		t.Fatalf("fixture: the seed explains %d gaps, want 1", c.gaps)
+	}
+	if want := int64(902*time.Second) / 3; ref != want {
+		t.Fatalf("refined period %v, want %v", time.Duration(ref), time.Duration(want))
+	}
+}
+
+// A refined period equal to a seed already measured is not measured again.
+// Newest first, the gaps are 300s, 306s and 294s: the seed 300s explains all
+// three, and the seeds 306s and 294s both refine to exactly 300s. The search
+// measures three chains: one pass of three gaps per seed, plus a
+// verification walk of three gaps for each of the two refined cells.
+func TestRefinedPeriodEqualToASeedIsNotMeasuredAgain(t *testing.T) {
+	r := experimentalPeriodic()
+	r.JitterAbs, r.JitterRel, r.MaxMissing = 6*time.Second, 0, 0
+	p := ringOf(&r, 0, 294*time.Second, 600*time.Second, 900*time.Second)
+	var sc periodicScratch
+	best := p.estimate(&r, &sc)
+	if best.period != int64(300*time.Second) || best.gaps != 3 {
+		t.Fatalf("fixture: estimate %v over %d gaps, want 5m0s over 3", time.Duration(best.period), best.gaps)
+	}
+	if sc.chains != 3 || sc.steps != 15 {
+		t.Fatalf("%d chains and %d steps, want 3 and 15", sc.chains, sc.steps)
+	}
+}
+
 // ---- dedup horizon (finding 2) ----
 
 func dedupDet(t *testing.T, horizon, reorder time.Duration) *Detector {
@@ -544,6 +687,24 @@ func TestDedupOlderCopyOutOfOrderKeepsTheNewerCopy(t *testing.T) {
 	}
 	if s := d.Snapshot(); s.Accepted != 2 || s.Duplicates != 2 {
 		t.Fatalf("accepted=%d duplicates=%d, want 2 and 2", s.Accepted, s.Duplicates)
+	}
+}
+
+// An older copy more than the horizon before the remembered one is still a
+// duplicate: only a copy beyond the horizon after the remembered one counts
+// again. The remembered copy (10m) is still held for the reorder delay, so
+// nothing has been processed and the older copy is not late.
+func TestDedupOlderCopyBeyondTheHorizonIsStillADuplicate(t *testing.T) {
+	const h, rd = 6 * time.Minute, 5 * time.Minute
+	d := dedupDet(t, h, rd)
+	if got := observeStatus(t, d, "same", at(10*time.Minute)); got != StatusAccepted {
+		t.Fatal(got)
+	}
+	if got := observeStatus(t, d, "same", at(10*time.Minute-h-time.Nanosecond)); got != StatusDuplicate {
+		t.Fatalf("older copy beyond the horizon: %v, want duplicate", got)
+	}
+	if s := d.Snapshot(); s.Accepted != 1 || s.Duplicates != 1 {
+		t.Fatalf("accepted=%d duplicates=%d, want 1 and 1", s.Accepted, s.Duplicates)
 	}
 }
 
