@@ -848,6 +848,71 @@ async function run() {
     assert(noWinFor(/\/api\/analytics\/hash-collisions/), `hash-collisions must NOT carry window param, saw: ${seen.join(', ')}`);
   });
 
+  // #89: Relay Airtime Share rows mirror the API rows, and a mixed ADVERT row
+  // (same payload seen on flood and zero-hop routes) has its own identity,
+  // fixed colour and tooltip. The fixture DB has no mixed rows, so the second
+  // half injects one via page.route.
+  await test('#89 Relay Airtime Share renders API rows and the mixed ADVERT row', async () => {
+    const relayUrl = '**/api/analytics/relay-airtime-share*';
+    const readRows = () => page.$$eval('.dumbbell-row', els => els.map(e => ({
+      type: e.getAttribute('data-payload-type'),
+      routeClass: e.getAttribute('data-route-class'),
+      label: e.querySelector('.dumbbell-label').textContent,
+      dot: e.querySelector('.dumbbell-dot-airtime').style.background,
+      title: e.getAttribute('title'),
+    })));
+
+    await page.goto(`${BASE}/#/analytics?tab=overview`, { waitUntil: 'domcontentloaded' });
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('.dumbbell-chart, .analytics-card .text-muted', { timeout: 15000 });
+    // Re-read exactly the URL the page rendered from (window param included);
+    // the server caches it and the fixture DB is static.
+    const api = await page.evaluate(async () => {
+      const hit = performance.getEntriesByType('resource').map(e => e.name)
+        .filter(u => /\/api\/analytics\/relay-airtime-share(\?|$)/.test(u)).pop();
+      return (await fetch(hit || '/api/analytics/relay-airtime-share')).json();
+    });
+    assert(api.route_mask_backfill && ['pending', 'backfilling', 'complete'].includes(api.route_mask_backfill.status),
+      `route_mask_backfill must report a status, got ${JSON.stringify(api.route_mask_backfill)}`);
+    const real = await readRows();
+    if (api.total_score > 0) {
+      assert(real.length === api.rows.length, `DOM rows ${real.length} != API rows ${api.rows.length}`);
+      api.rows.forEach((r, i) => {
+        assert(real[i].type === String(r.type) && real[i].routeClass === r.route_class && real[i].label === (r.payload_type || 'UNK'),
+          `row ${i}: DOM ${JSON.stringify(real[i])} != API ${JSON.stringify(r)}`);
+      });
+    }
+
+    await page.route(relayUrl, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        total_count: 3, total_score: 3000, window: '', cached: false,
+        route_mask_backfill: { status: 'complete', remaining: 0 },
+        rows: [
+          { payload_type: 'ADVERT (flood)', type: 4, route_class: 'flood', count: 1, count_pct: 33.3, score: 2000, airtime_pct: 66.7 },
+          { payload_type: 'ADVERT (mixed)', type: 4, route_class: 'mixed', count: 1, count_pct: 33.3, score: 1000, airtime_pct: 33.3 },
+          { payload_type: 'ADVERT (zero-hop)', type: 4, route_class: 'zero_hop', count: 1, count_pct: 33.3, score: 0, airtime_pct: 0 },
+        ],
+      }),
+    }));
+    try {
+      await page.reload({ waitUntil: 'load' });
+      await page.waitForSelector('.dumbbell-row[data-route-class="mixed"]', { timeout: 15000 });
+      const rows = await readRows();
+      assert(rows.length === 3, `expected 3 injected rows, got ${rows.length}`);
+      const mixed = rows.find(r => r.routeClass === 'mixed');
+      assert(mixed.label === 'ADVERT (mixed)' && mixed.type === '4', `mixed row identity: ${JSON.stringify(mixed)}`);
+      assert(mixed.dot === 'var(--status-purple)', `mixed row colour must be var(--status-purple), got ${mixed.dot}`);
+      assert(/observed on both flood and zero-hop routes; counted once/.test(mixed.title), `mixed tooltip: ${mixed.title}`);
+      rows.filter(r => r.routeClass !== 'mixed').forEach(r => {
+        assert(!/counted once/.test(r.title), `non-mixed row ${r.label} must not carry the mixed tooltip`);
+      });
+    } finally {
+      await page.unroute(relayUrl);
+    }
+  });
+
   // Analytics sub-tab tests
   await test('Analytics RF tab renders content', async () => {
     await page.click('[data-tab="rf"]');

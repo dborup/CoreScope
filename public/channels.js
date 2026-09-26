@@ -815,6 +815,10 @@
             <div class="ch-modal-warn"><span class="status-warn"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg></span> Case-sensitive — <code>#meshcore</code> ≠ <code>#MeshCore</code></div>
           </section>
 
+          <!-- Shared channel proposals: filled by channel-proposals.js only
+               when public suggestions are enabled on this server. -->
+          <section class="ch-modal-section" id="chSuggestSection" aria-labelledby="chSecSuggestTitle" hidden></section>
+
           <div class="ch-modal-footer">
             <span class=""><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg></span> Keys stay in your browser — CoreScope is a passive observer that monitors and decrypts traffic but cannot transmit over RF. Use the close button to remove individual channels.
           </div>
@@ -892,6 +896,23 @@
     }
     var addBtn = document.getElementById('chAddChannelBtn');
     if (addBtn) addBtn.addEventListener('click', openAddModal);
+
+    // Shared channel proposals: the suggest form lives in the Add modal and
+    // #/channels?view=proposals opens the admin review dialog.
+    if (window.ChannelProposals) {
+      window.ChannelProposals.mount({
+        root: app,
+        suggestSection: document.getElementById('chSuggestSection'),
+        view: _initUrlParams.get('view'),
+        onApproved: function () {
+          invalidateApiCache('/channels');
+          loadChannels(true).then(function () {
+            mergeUserChannels();
+            renderChannelList();
+          });
+        }
+      });
+    }
     if (modalEl) {
       modalEl.addEventListener('click', function (e) {
         // Close on overlay backdrop click or any [data-action=ch-modal-close]
@@ -1646,24 +1667,31 @@
     }
 
     // Tick relative timestamps every 1s — iterates channels array, updates DOM text only
-    timeAgoTimer = setInterval(function () {
-      var now = Date.now();
-      for (var i = 0; i < channels.length; i++) {
-        var ch = channels[i];
-        if (!ch.lastActivityMs) continue;
-        var text = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
-        var el = document.querySelector('.ch-item-time[data-channel-hash="' + ch.hash + '"]');
-        if (el) el.textContent = text;
-        // #1367: mobile rows live in a flat list; update those too.
-        var rowEl = document.querySelector('.ch-row[data-hash="' + ch.hash + '"] .ch-row-time');
-        if (rowEl) rowEl.textContent = text;
-      }
-    }, 1000);
+    timeAgoTimer = setInterval(function () { tickChannelTimes(channels, Date.now()); }, 1000);
+  }
+
+  // Updates the relative "last activity" text of every rendered channel row.
+  // ch.hash is the channel name for hashtag channels, and shared channel
+  // names may contain quotes or backslashes, so it is CSS.escape'd before it
+  // goes into a selector (unescaped, a '"' throws and stops the loop).
+  function tickChannelTimes(list, now) {
+    for (var i = 0; i < list.length; i++) {
+      var ch = list[i];
+      if (!ch.lastActivityMs) continue;
+      var text = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
+      var sel = CSS.escape(String(ch.hash));
+      var el = document.querySelector('.ch-item-time[data-channel-hash="' + sel + '"]');
+      if (el) el.textContent = text;
+      // #1367: mobile rows live in a flat list; update those too.
+      var rowEl = document.querySelector('.ch-row[data-hash="' + sel + '"] .ch-row-time');
+      if (rowEl) rowEl.textContent = text;
+    }
   }
 
   var timeAgoTimer = null;
 
   function destroy() {
+    if (window.ChannelProposals) window.ChannelProposals.unmount();
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     if (timeAgoTimer) clearInterval(timeAgoTimer);
@@ -1691,7 +1719,13 @@
       channels = (data.channels || []).map(ch => {
         ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
         return ch;
-      }).sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
+      });
+      // Approved shared channels are listed for everyone, even before they
+      // carry traffic.
+      if (window.ChannelProposals) {
+        channels = window.ChannelProposals.mergeApprovedChannels(channels, data.approvedChannels);
+      }
+      channels.sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
     } catch (e) {
@@ -1729,6 +1763,10 @@
   function renderChannelRow(ch) {
     const isEncrypted = ch.encrypted === true;
     const isUserAdded = ch.userAdded === true;
+    // Shared (approved) channels belong to everyone: no local remove/share
+    // controls, even when this browser also saved a key for the same name.
+    const isShared = ch.shared === true;
+    const managesLocalKey = isUserAdded && !isShared;
     // #1041: route through channelDisplayName so the psk:* → "Private
     // Channel" rule lives in one place. Pass an `encryptedFallback` so
     // rows for non-user-added encrypted channels keep showing "Unknown"
@@ -1748,11 +1786,13 @@
       preview = `0x${formatHashHex(ch.hash)}`;
     } else if (typeof ch.messageCount === 'number' && ch.messageCount > 0) {
       preview = `${ch.messageCount} messages`;
+    } else if (isShared) {
+      preview = 'Shared channel · no messages yet';
     } else {
       preview = '';
     }
     const sel = selectedHash === ch.hash ? ' selected' : '';
-    const encClass = isUserAdded
+    const encClass = managesLocalKey
       ? ' ch-user-added'
       : (isEncrypted ? ' ch-encrypted' : '');
     const badgeIcon = isUserAdded ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock-open"/></svg>' : (isEncrypted ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg>' : null);
@@ -1774,26 +1814,27 @@
         + ' title="' + title + '"'
         + ' aria-label="' + ariaVerb + ' ' + escapeHtml(name) + '">' + glyph + '</span>';
     }
-    const removeBtn = isUserAdded
+    const removeBtn = managesLocalKey
       ? iconBtn('ch-remove-btn', 'data-remove-channel', ch.hash, name, '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg>',
                 'Remove channel and clear saved key', 'Remove', '')
       : '';
-    const shareBtn = isUserAdded
+    const shareBtn = managesLocalKey
       ? iconBtn('ch-share-btn', 'data-share-channel', ch.hash, name, '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Share',
                 'Share channel key (QR + URL)', 'Share', ' aria-haspopup="dialog"')
       : '';
     const userBadge = isUserAdded ? ' <span class="ch-user-badge" title="You added this key" aria-label="Your key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-key"/></svg></span>' : '';
+    const sharedBadge = isShared ? ' <span class="ch-shared-badge" title="Shared channel approved for everyone on this site">Shared</span>' : '';
     const unreadBadge = (ch.unread && ch.unread > 0)
       ? ' <span class="ch-unread-badge" data-unread-channel="' + escapeHtml(ch.hash) + '" title="' + ch.unread + ' new" aria-label="' + ch.unread + ' unread">' + (ch.unread > 99 ? '99+' : ch.unread) + '</span>'
       : '';
 
-    return `<button class="ch-item${sel}${encClass}" data-hash="${ch.hash}"${borderStyle} type="button" role="option" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}"${isEncrypted ? ' data-encrypted="true"' : ''}${isUserAdded ? ' data-user-added="true"' : ''}>
+    return `<button class="ch-item${sel}${encClass}" data-hash="${escapeHtml(ch.hash)}"${borderStyle} type="button" role="option" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}"${isEncrypted ? ' data-encrypted="true"' : ''}${managesLocalKey ? ' data-user-added="true"' : ''}${isShared ? ' data-shared="true"' : ''}>
       <div class="ch-badge" style="background:${color}" aria-hidden="true">${badgeIcon ? badgeIcon : escapeHtml(abbr)}</div>
       <div class="ch-item-body">
         <div class="ch-item-top">
-          <span class="ch-item-name">${escapeHtml(name)}</span>${userBadge}${unreadBadge}
+          <span class="ch-item-name">${escapeHtml(name)}</span>${sharedBadge}${userBadge}${unreadBadge}
           <span class="ch-color-dot" data-channel="${escapeHtml(ch.hash)}"${dotStyle} title="Change channel color" aria-label="Change color for ${escapeHtml(name)}"></span>${chColor ? '<span class="ch-color-clear" data-channel="' + escapeHtml(ch.hash) + '" title="Clear color" aria-label="Clear color for ' + escapeHtml(name) + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></span>' : ''}
-          <span class="ch-item-time" data-channel-hash="${ch.hash}">${time}</span>${shareBtn}${removeBtn}
+          <span class="ch-item-time" data-channel-hash="${escapeHtml(ch.hash)}">${time}</span>${shareBtn}${removeBtn}
         </div>
         <div class="ch-item-preview">${escapeHtml(preview)}</div>
       </div>
@@ -1835,6 +1876,8 @@
       preview = '0x' + formatHashHex(ch.hash);
     } else if (typeof ch.messageCount === 'number' && ch.messageCount > 0) {
       preview = ch.messageCount + ' messages';
+    } else if (ch.shared === true) {
+      preview = 'Shared channel · no messages yet';
     }
     const abbr = avatarTextForChannel(ch);
     // abbr may be a Phosphor sprite (HTML) or plain text — detect & emit raw vs escaped.
@@ -1942,10 +1985,14 @@
   }
   function renderKnownChannelRow(entry) {
     // entry: {channel, description, region, regionName, key?}
+    // The catalogue comes from a third-party URL: every field is escaped.
+    function escCatalogue(v) {
+      return String(v).replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
+    }
     var chName = String(entry.channel || '').toLowerCase();
-    var safeName = chName.replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
-    var desc = String(entry.description || '').replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
-    var region = String(entry.region || '').toUpperCase();
+    var safeName = escCatalogue(chName);
+    var desc = escCatalogue(entry.description || '');
+    var region = escCatalogue(String(entry.region || '').toUpperCase());
     return '' +
       '<div class="ch-channel ch-channel-catalogue" data-known-channel="' + safeName + '">' +
         '<div class="ch-channel-info">' +
@@ -2021,9 +2068,11 @@
     const sortByActivity = (a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0);
     const sortByCount = (a, b) => (b.messageCount || 0) - (a.messageCount || 0);
 
-    const mine = channels.filter(c => c.userAdded === true).sort(sortByActivity);
-    const network = channels.filter(c => c.userAdded !== true && c.encrypted !== true).sort(sortByActivity);
-    const encrypted = channels.filter(c => c.userAdded !== true && c.encrypted === true).sort(sortByCount);
+    // Shared (approved) channels are listed under Network for everyone, even
+    // when this browser also holds a local key for them.
+    const mine = channels.filter(c => c.userAdded === true && c.shared !== true).sort(sortByActivity);
+    const network = channels.filter(c => (c.userAdded !== true || c.shared === true) && c.encrypted !== true).sort(sortByActivity);
+    const encrypted = channels.filter(c => c.userAdded !== true && c.shared !== true && c.encrypted === true).sort(sortByCount);
 
     // Encrypted section collapsed by default; user toggle persisted in localStorage.
     const collapsed = localStorage.getItem('ch-encrypted-collapsed') !== 'false';
@@ -2388,6 +2437,9 @@
   window._channelsRefreshMessagesForTest = refreshMessages;
   window._channelsMergeWsAppendedIntoRestForTest = mergeWsAppendedIntoRest;
   window._channelsLoadChannelsForTest = loadChannels;
+  window._channelsRenderChannelRowForTest = renderChannelRow;
+  window._channelsTickChannelTimesForTest = tickChannelTimes;
+  window._channelsRenderKnownChannelRowForTest = renderKnownChannelRow;
   window._channelsBeginMessageRequestForTest = beginMessageRequest;
   window._channelsIsStaleMessageRequestForTest = isStaleMessageRequest;
   window._channelsReconcileSelectionForTest = reconcileSelectionAfterChannelRefresh;

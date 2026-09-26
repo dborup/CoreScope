@@ -44,11 +44,13 @@ const pruneBatchTransmissions = 250
 // pins the plan.
 const pruneAgedTransmissionIDs = `SELECT id FROM transmissions WHERE first_seen < ? ORDER BY first_seen, id LIMIT ?`
 
-// The two statements of one prune batch. Child observations go first (no
-// CASCADE in SQLite).
+// The statements of one prune batch. Child rows go first (no CASCADE in
+// SQLite): observations, then the batch's route_mask_changes rows (#89; via
+// idx_route_mask_changes_tx), then the transmissions themselves.
 const (
-	pruneObservationsBatch  = `DELETE FROM observations WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
-	pruneTransmissionsBatch = `DELETE FROM transmissions WHERE id IN (` + pruneAgedTransmissionIDs + `)`
+	pruneObservationsBatch     = `DELETE FROM observations WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
+	pruneRouteMaskChangesBatch = `DELETE FROM route_mask_changes WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
+	pruneTransmissionsBatch    = `DELETE FROM transmissions WHERE id IN (` + pruneAgedTransmissionIDs + `)`
 )
 
 // PruneOldPackets deletes transmissions (and their child observations)
@@ -80,6 +82,9 @@ func (s *Store) PruneOldPackets(days int) (int64, error) {
 			if _, err := tx.Exec(pruneObservationsBatch, cutoff, pruneBatchTransmissions); err != nil {
 				return fmt.Errorf("prune observations: %w", err)
 			}
+			if _, err := tx.Exec(pruneRouteMaskChangesBatch, cutoff, pruneBatchTransmissions); err != nil {
+				return fmt.Errorf("prune route_mask_changes: %w", err)
+			}
 			res, err := tx.Exec(pruneTransmissionsBatch, cutoff, pruneBatchTransmissions)
 			if err != nil {
 				return fmt.Errorf("prune transmissions: %w", err)
@@ -100,6 +105,65 @@ func (s *Store) PruneOldPackets(days int) (int64, error) {
 	}
 	if total > 0 {
 		log.Printf("[prune] deleted %d transmissions older than %d days", total, days)
+	}
+	return total, nil
+}
+
+// routeMaskOrphanPruneBatch bounds one orphan-prune transaction. A var so
+// tests can exercise several batches.
+var routeMaskOrphanPruneBatch = 1000
+
+// PruneOrphanRouteMaskChanges deletes route_mask_changes rows whose
+// transmission no longer exists. PruneOldPackets already deletes a pruned
+// transmission's rows in the same batch; this catches any other deletion path
+// so the log never outlives its transmission. It never deletes a row of an
+// existing transmission: the log carries no time-based expiry, so a slow
+// server can never miss a change of a transmission it still holds.
+//
+// Each writer transaction examines the next routeMaskOrphanPruneBatch ids
+// (a primary-key range, one transmissions primary-key probe per row) and
+// deletes the orphans among them, so its work is bounded however far apart
+// the orphans are. The table is small in practice (22 rows on a
+// 496,798-transmission staging copy; at most three per transmission, one per
+// route bit it can gain). Returns the number of rows deleted.
+func (s *Store) PruneOrphanRouteMaskChanges() (int64, error) {
+	batch := routeMaskOrphanPruneBatch
+	if batch <= 0 {
+		batch = 1000
+	}
+	var total, after int64
+	for {
+		var examined, deleted int64
+		err := s.WriterTx("prune_route_mask_changes", func(tx *sql.Tx) error {
+			var last sql.NullInt64
+			if err := tx.QueryRow(`SELECT MAX(id), COUNT(*) FROM (
+				SELECT id FROM route_mask_changes WHERE id > ? ORDER BY id LIMIT ?)`,
+				after, batch).Scan(&last, &examined); err != nil {
+				return fmt.Errorf("scan route_mask_changes: %w", err)
+			}
+			if examined == 0 {
+				return nil
+			}
+			res, err := tx.Exec(`DELETE FROM route_mask_changes WHERE id > ? AND id <= ?
+				AND NOT EXISTS (SELECT 1 FROM transmissions t WHERE t.id = route_mask_changes.transmission_id)`,
+				after, last.Int64)
+			if err != nil {
+				return fmt.Errorf("prune orphan route_mask_changes: %w", err)
+			}
+			deleted, _ = res.RowsAffected()
+			after = last.Int64
+			return nil
+		})
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+		if examined < int64(batch) {
+			break
+		}
+	}
+	if total > 0 {
+		log.Printf("[prune] deleted %d route_mask_changes rows of deleted transmissions", total)
 	}
 	return total, nil
 }

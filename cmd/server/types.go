@@ -1421,6 +1421,16 @@ type ChannelResp struct {
 
 type ChannelListResponse struct {
 	Channels []map[string]interface{} `json:"channels"`
+	// ApprovedChannels are the shared hashtag channels an administrator
+	// approved, listed even before they carry any traffic. Omitted when empty.
+	ApprovedChannels []ApprovedChannel `json:"approvedChannels,omitempty"`
+}
+
+// ApprovedChannel is one shared hashtag channel. Hash equals Name: decrypted
+// hashtag traffic is stored under the channel name (see db.GetChannels).
+type ApprovedChannel struct {
+	Name string `json:"name"`
+	Hash string `json:"hash"`
 }
 
 type ChannelMessagesResponse struct {

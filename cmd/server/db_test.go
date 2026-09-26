@@ -2570,6 +2570,7 @@ func TestHealSchemaFlagsStopsOnceAllTrue(t *testing.T) {
 	db.hasDefaultScopeConfirmedAtFlag.forceTrue()
 	db.hasMultibyteSupColsFlag.forceTrue()
 	db.hasLastSeenFlag.forceTrue()
+	db.hasRouteMaskFlag.forceTrue()
 	db.schemaHealerStop = make(chan struct{})
 
 	done := make(chan struct{})

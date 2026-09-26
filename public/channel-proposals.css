@@ -1,0 +1,100 @@
+/* Shared channel proposals (channel-proposals.js). Colors come only from the
+ * theme variables in style.css so the customizer and dark mode apply. */
+
+/* Status line under the suggest form and in the admin dialog. */
+.ch-proposal-status {
+  font-size: 12px;
+  margin-top: 6px;
+  min-height: 1em;
+  color: var(--text-muted);
+}
+.ch-proposal-status[data-kind="success"] { color: var(--status-green); }
+.ch-proposal-status[data-kind="warn"] { color: var(--status-yellow); }
+.ch-proposal-status[data-kind="error"] { color: var(--status-red); }
+
+.ch-proposal-admin-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--link-color, var(--accent));
+}
+
+/* "Shared" label on approved channels in the sidebar. */
+.ch-shared-badge {
+  flex-shrink: 0;
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-muted);
+}
+
+/* Admin review dialog. */
+.ch-proposals-modal { max-width: 560px; }
+.ch-proposals-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ch-proposals-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.ch-proposals-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-right: auto; }
+.ch-proposals-filter[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+}
+.ch-proposals-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+}
+.ch-proposals-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.ch-proposals-item:first-child { border-top: none; }
+.ch-proposals-main { display: flex; flex-direction: column; min-width: 0; }
+.ch-proposals-name { font-weight: 600; overflow-wrap: anywhere; }
+.ch-proposals-meta { font-size: 12px; color: var(--text-muted); }
+.ch-proposals-builtin { font-size: 12px; color: var(--warning); }
+.ch-proposals-actions { display: flex; gap: 6px; align-items: center; }
+.ch-proposals-actions button,
+.ch-proposals-toolbar button { min-height: 44px; }
+.ch-proposals-state {
+  font-size: 12px;
+  text-transform: capitalize;
+  color: var(--text-muted);
+}
+.ch-proposals-state[data-state="approved"] { color: var(--status-green); }
+.ch-proposals-state[data-state="rejected"] { color: var(--status-red); }
+.ch-proposals-empty { padding: 12px 0; font-size: 13px; color: var(--text-muted); }
+
+/* Remove (revoke) confirmation, nested inside the admin dialog's own
+ * overlay (see openConfirm in channel-proposals.js). Reuses .modal-overlay/
+ * .modal/.ch-modal and .ch-modal-row so it looks identical to the rest of
+ * the channel modals; only the narrower max-width is specific to it. */
+.ch-proposals-confirm { max-width: 420px; }
+.ch-proposals-confirm h4 { margin: 0 0 8px; font-size: 16px; }
+.ch-proposals-confirm-actions { justify-content: flex-end; margin-top: 14px; margin-bottom: 0; }
+
+@media (max-width: 640px) {
+  .ch-proposals-actions { width: 100%; }
+  .ch-proposals-actions button { flex: 1; }
+  .ch-proposals-confirm-actions button { flex: 1; }
+}

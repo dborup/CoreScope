@@ -74,6 +74,16 @@ jobs:
           echo "--- Go Ingestor Coverage ---"
           go tool cover -func=ingestor-coverage.out | tail -1
 
+      # The full ingestor suite runs without -race (too slow), so the
+      # force-reconnect tests (upstream #1897) get their own -race pass: a
+      # Disconnect moved into a goroutine races paho's retry loop, and the
+      # race detector backs up the behavioural real-paho tests.
+      - name: Race-check Go ingestor force-reconnect
+        run: |
+          set -e -o pipefail
+          cd cmd/ingestor
+          go test -race -count=1 -timeout 5m -run 'ForceReconnect' ./...
+
       - name: Build and test channel library + decrypt CLI
         run: |
           set -e -o pipefail
@@ -84,6 +94,12 @@ jobs:
           CGO_ENABLED=0 go build -ldflags="-s -w" -o corescope-decrypt .
           go test ./...
           echo "--- Decrypt CLI tests passed ---"
+
+      - name: Test shared channel registry + schema packages
+        run: |
+          set -e -o pipefail
+          (cd internal/channelregistry && go test ./...)
+          (cd internal/dbschema && go test ./...)
 
       # internal/anomaly is its own module (not wired into any binary), so the
       # server/ingestor steps above do not reach it. No -fuzz and no -bench:
@@ -129,6 +145,10 @@ jobs:
           node test-issue-1518-home-url.js
           node test-channel-decrypt-insecure-context.js
           node test-live-region-filter.js
+          node test-issue-2052-touch-target-css.js
+          node test-channel-proposals.js
+          node test-packet-detail-channel-xss.js
+          node test-channels-name-escaping.js
           node test-issue-1136-observer-iata-map.js
           node test-channel-qr.js
           node test-channel-qr-wiring.js
@@ -170,6 +190,7 @@ jobs:
           node test-node-reach-coverage.js
           node test-reach-rank.js
           node test-issue-1107-live-layout.js
+          node test-issue-1833-legend-toggle-vcr-offset.js
           node test-issue-1532-live-fullscreen.js
           node test-issue-1619-feed-detail-card-draggable.js
           node test-xss-escape-sinks.js
@@ -310,6 +331,12 @@ jobs:
           cd cmd/migrate
           go build -o ../../corescope-migrate .
           echo "Go migrate tool built successfully"
+
+      - name: Build Go ingestor (channel proposals E2E)
+        run: |
+          cd cmd/ingestor
+          go build -o ../../corescope-ingestor .
+          echo "Go ingestor built successfully"
 
       - name: Install npm dependencies
         run: npm ci --production=false
@@ -485,6 +512,7 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1204-live-panel-structure-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1234-live-chrome-pass2-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1206-vcr-overlap-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1833-legend-toggle-clickable-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1244-live-vcr-row-hints-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1510-live-nav-pin-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-live-fullscreen-1572-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -496,6 +524,9 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1657-analytics-channels-group-sprites-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1224-channels-mobile-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1367-channels-chat-app-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-2052-touch-target-e2e.js 2>&1 | tee -a e2e-output.txt
+          # Starts its own ingestor + server on a temp copy of the fixture.
+          CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channel-proposals-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1236-map-mobile-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1329-map-controls-accordion-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1273-qr-overlay-height-e2e.js 2>&1 | tee -a e2e-output.txt

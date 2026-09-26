@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -112,6 +113,18 @@ func main() {
 	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
 	defer stopSIGHUPReload()
 
+	// Shared channel proposals: approved hashtag channels join the live keys
+	// before any MQTT traffic is handled, and the ingestor applies the
+	// server's queued suggestions/decisions (the server is read-only).
+	proposals := newChannelProposalRunner(store, keys, cfg.ChannelProposals)
+	if n, err := proposals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[channel-proposals] loading approved channels failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[channel-proposals] %d approved shared channel(s) added to channel keys", n)
+	}
+	stopProposals := proposals.Start(2*time.Second, time.Hour)
+	defer stopProposals()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
@@ -201,14 +214,10 @@ func main() {
 		// half-open TCP socket and re-dial when paho.IsConnected==true
 		// but no messages have flowed past the stall threshold. Throttled
 		// per source by the watchdog itself (forceReconnectThrottle).
-		// Disconnect(250) gives in-flight publishes 250ms to drain;
-		// Connect() returns immediately and paho's reconnect machinery
-		// takes over from there. Captured-by-value `client` is the same
-		// pointer used everywhere else for this source.
-		liveness.ForceReconnectFn = func() {
-			client.Disconnect(250)
-			client.Connect()
-		}
+		// Captured-by-value `client` is the same pointer used everywhere
+		// else for this source. See buildForceReconnectFn for why this is
+		// NOT simply "Disconnect(250) then Connect()".
+		liveness.ForceReconnectFn = buildForceReconnectFn(client, tag)
 		// PR #1216 r2 item 3: tag collisions used to log.Fatalf, which
 		// killed the entire ingestor over one config typo and recreated
 		// the #1212 total-ingest-stop class this PR exists to prevent.
@@ -281,6 +290,10 @@ func main() {
 			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
 		}
 	}
+	// #89: route_mask_changes rows of transmissions deleted by any path.
+	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+		log.Printf("[prune] route_mask_changes error: %v", err)
+	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
 	// Independent of the feature flag, so data persists are reaped even after
@@ -308,6 +321,15 @@ func main() {
 	} else {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (0 dropped)")
 	}
+
+	// #89: route_mask backfill runs next to live ingest, after the buffer is
+	// draining, so its one-time pending-index build (~20 s on a staging-sized
+	// DB) is absorbed by IngestBuffer instead of delaying start-up. Cancelled
+	// on shutdown so store.Close() does not wait for it; it resumes on the
+	// next start.
+	routeMaskCtx, stopRouteMaskBackfill := context.WithCancel(context.Background())
+	defer stopRouteMaskBackfill()
+	store.StartRouteMaskBackfill(routeMaskCtx)
 
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
@@ -351,6 +373,9 @@ func main() {
 					log.Printf("[prune] error: %v", err)
 				} else if n > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
+				}
+				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+					log.Printf("[prune] route_mask_changes error: %v", err)
 				}
 			}
 		}()
@@ -475,6 +500,7 @@ func main() {
 	<-sig
 
 	log.Println("Shutting down...")
+	stopRouteMaskBackfill()
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {
@@ -552,6 +578,54 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		opts.SetTLSConfig(&tls.Config{})
 	}
 	return opts
+}
+
+// buildForceReconnectFn builds the watchdog's forced-reconnect action for a
+// source (#1335, hardened against a race found while investigating a 100+
+// minute reconnect failure).
+//
+// paho's own client.IsConnected() — used as liveness.IsConnectedFn — reports
+// true not only when genuinely connected but for the ENTIRE time paho's
+// background AutoReconnect/ConnectRetry loop is retrying (status
+// reconnecting/connecting). So the watchdog's LivenessStalled classification
+// (IsConnected==true, no messages) fires just as often for "paho is actively,
+// correctly retrying a still-down broker" as it does for the true #1335
+// half-open-TCP case. Naively doing Disconnect(250) then Connect() in the
+// first case is actively harmful: paho's Disconnecting() must block until the
+// CURRENT in-flight connection attempt plus its backoff sleep unwind (up to
+// ConnectTimeout+MaxReconnectInterval, tens of seconds) before status
+// actually reaches `disconnected`. Disconnect(250) returns to the caller
+// after the 250ms quiesce regardless, so the following Connect() usually runs
+// while status is still the transitional `disconnecting` state — paho then
+// returns an error token (silently discarded by the old code) AND, because
+// Disconnect() was called at all, tears down paho's own retry loop for good
+// ("user requested no auto reconnection"). The client is left with nothing
+// retrying until the watchdog's next trigger fires, which can repeat the same
+// race — compounding into very long outages.
+//
+// client.IsConnectionOpen() (unlike IsConnected()) is strictly status ==
+// connected — never true while paho is reconnecting/connecting — so it
+// reliably distinguishes "genuinely connected, maybe half-open" (safe to
+// Disconnect then Connect; Disconnecting() does not need to wait on any
+// in-flight retry loop from status connected, so it completes well within
+// the 250ms quiesce) from "paho is already retrying on its own" (must NOT
+// call Disconnect; Connect() alone is a safe no-op per paho when a retry is
+// already under way, and properly starts a fresh attempt on the rare
+// occasion status has actually settled to disconnected).
+func buildForceReconnectFn(client mqtt.Client, tag string) func() {
+	return func() {
+		if client.IsConnectionOpen() {
+			client.Disconnect(250)
+		}
+		// Connect() resolves synchronously (Error() readable immediately,
+		// no Wait() needed) for both error returns and the "already
+		// retrying, treated as a safe no-op" success case — only a genuine
+		// fresh connection attempt leaves the token pending in the
+		// background, and we must not block this call on that.
+		if token := client.Connect(); token.Error() != nil {
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %v", tag, token.Error())
+		}
+	}
 }
 
 func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string, regionKeys map[string][]byte, cfg *Config) {

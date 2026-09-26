@@ -58,6 +58,10 @@ node test-issue-1883-redirect-history.js
 node test-issue-1890-og-url.js
 node test-traces.js
 node test-live-multibyte-filter.js
+node test-issue-2052-touch-target-css.js
+node test-channel-proposals.js
+node test-packet-detail-channel-xss.js
+node test-channels-name-escaping.js
 
 # #1418 — route-view v2 (Tufte) coverage
 node test-issue-1418-raw-hex-extraction.js
@@ -82,6 +86,7 @@ node test-issue-1461-mobile-page-actions.js
 node test-issue-1470-node-tile-helper.js
 node test-issue-1485-live-anim-z.js
 node test-issue-1532-live-fullscreen.js
+node test-issue-1833-legend-toggle-vcr-offset.js
 node test-naive-banner-tone.js
 node test-issue-1473-reserved-prefixes.js
 node test-issue-1473-prefix-generator.js

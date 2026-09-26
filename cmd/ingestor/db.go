@@ -76,6 +76,8 @@ type Store struct {
 	stmtGetTxByHash            *sql.Stmt
 	stmtInsertTransmission     *sql.Stmt
 	stmtUpdateTxFirstSeen      *sql.Stmt
+	stmtOrTxRouteMask          *sql.Stmt
+	stmtInsertRouteMaskChange  *sql.Stmt
 	stmtBumpTxLastSeen         *sql.Stmt
 	stmtInsertObservation      *sql.Stmt
 	stmtUpsertNode             *sql.Stmt
@@ -849,20 +851,36 @@ func applySchema(db *sql.DB) error {
 func (s *Store) prepareStatements() error {
 	var err error
 
-	s.stmtGetTxByHash, err = s.db.Prepare("SELECT id, first_seen FROM transmissions WHERE hash = ?")
+	s.stmtGetTxByHash, err = s.db.Prepare("SELECT id, first_seen, route_mask FROM transmissions WHERE hash = ?")
 	if err != nil {
 		return err
 	}
 
 	s.stmtInsertTransmission, err = s.db.Prepare(`
-		INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, scope_name, from_pubkey, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, scope_name, from_pubkey, last_seen, route_mask)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
 	}
 
 	s.stmtUpdateTxFirstSeen, err = s.db.Prepare("UPDATE transmissions SET first_seen = ? WHERE id = ?")
+	if err != nil {
+		return err
+	}
+
+	// #89: OR a newly observed route bit into a known route_mask. The OR runs
+	// in SQL, so it is atomic against any other writer; NULL rows are left to
+	// the backfill (backfillTxRouteMask), which owns un-backfilled legacy rows.
+	s.stmtOrTxRouteMask, err = s.db.Prepare(`UPDATE transmissions SET route_mask = route_mask | ?
+		WHERE id = ? AND route_mask IS NOT NULL AND (route_mask & ?) = 0`)
+	if err != nil {
+		return err
+	}
+	// Change log for running servers (route_mask_changes): the transmission's
+	// full mask as it is inside the current transaction, right after the OR.
+	s.stmtInsertRouteMaskChange, err = s.db.Prepare(`INSERT INTO route_mask_changes (transmission_id, route_mask, created_at)
+		SELECT id, route_mask, ? FROM transmissions WHERE id = ? AND route_mask IS NOT NULL`)
 	if err != nil {
 		return err
 	}
@@ -1126,7 +1144,9 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// Check for existing transmission
 	var existingID int64
 	var existingFirstSeen string
-	err := s.stmtGetTxByHash.QueryRow(hash).Scan(&existingID, &existingFirstSeen)
+	var existingMask sql.NullInt64
+	routeBit := packetpath.RouteMaskBit(data.RouteType)
+	err := s.stmtGetTxByHash.QueryRow(hash).Scan(&existingID, &existingFirstSeen, &existingMask)
 	if err == nil {
 		// Existing transmission
 		txID = existingID
@@ -1143,6 +1163,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 			scopeNameForDB(data),
 			nilIfEmpty(data.FromPubkey),
 			epochSecondsForLastSeen(rxTime),
+			routeBit,
 		)
 		if err != nil {
 			s.Stats.WriteErrors.Add(1)
@@ -1203,12 +1224,22 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	)
 	resolvedJSON := marshalResolvedPath(resolved)
 
-	_, err = s.stmtInsertObservation.Exec(
+	obsArgs := []interface{}{
 		txID, observerIdx, data.Direction,
 		data.SNR, data.RSSI, data.Score,
 		data.PathJSON, epochTs, nilIfEmpty(data.RawHex),
 		nilIfEmpty(resolvedJSON),
-	)
+	}
+	// #89: an observation that brings a route bit its transmission does not
+	// have yet is written together with that bit, in one transaction: an
+	// observation must never be visible without its bit, and a known mask is
+	// never backfilled again. Skipped when the bit is already set or the row
+	// is still an un-backfilled legacy row (NULL), which the backfill owns.
+	if !isNew && routeBit != 0 && existingMask.Valid && existingMask.Int64&routeBit == 0 {
+		err = s.insertObservationWithRouteBit(txID, routeBit, obsArgs)
+	} else {
+		_, err = s.stmtInsertObservation.Exec(obsArgs...)
+	}
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
 		log.Printf("[db] observation insert (non-fatal): %v", err)
@@ -1231,6 +1262,36 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	s.Stats.WALCommits.Add(1)
 
 	return isNew, nil
+}
+
+// insertObservationWithRouteBit ORs routeBit into the transmission's
+// route_mask, inserts (or upserts) the observation and, when the mask
+// actually changed, appends a route_mask_changes row with the resulting mask,
+// all in one transaction: either everything becomes visible or nothing does.
+// The change row is what tells a running server about a bit that arrived
+// through an upsert of an existing observation row (same id, so its
+// new-observation poll never sees it). Caller holds writerMu. The pool has a
+// single connection, which this transaction holds until it ends: every
+// statement in between must run on dbTx, never on s.db.
+func (s *Store) insertObservationWithRouteBit(txID, routeBit int64, obsArgs []interface{}) error {
+	dbTx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin route_mask transaction: %w", err)
+	}
+	defer dbTx.Rollback() // no-op after a successful Commit
+	res, err := dbTx.Stmt(s.stmtOrTxRouteMask).Exec(routeBit, txID, routeBit)
+	if err != nil {
+		return fmt.Errorf("route_mask update: %w", err)
+	}
+	if _, err := dbTx.Stmt(s.stmtInsertObservation).Exec(obsArgs...); err != nil {
+		return err
+	}
+	if changed, _ := res.RowsAffected(); changed > 0 {
+		if _, err := dbTx.Stmt(s.stmtInsertRouteMaskChange).Exec(time.Now().Unix(), txID); err != nil {
+			return fmt.Errorf("route_mask change row: %w", err)
+		}
+	}
+	return dbTx.Commit()
 }
 
 // UpsertNode inserts or updates a node.
