@@ -3582,6 +3582,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			},
 			Repeats: 1,
 		}
+		setChannelHashHex(m.Data, decoded[channelHashHexKey])
 		if obsTs.Valid {
 			m.LatestEpoch = obsTs.Int64
 		}

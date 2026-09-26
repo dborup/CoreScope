@@ -329,6 +329,14 @@ func (p *Poller) Start() {
 						pkt[k] = v
 					}
 					tx["packet"] = pkt
+					// Raw pass-through, not the validated REST ChannelMessage
+					// contract: tx (including decoded_json and any stored
+					// channelHashHex value) is broadcast verbatim from the DB
+					// row here too, without running it through
+					// normalizeChannelHashHex/setChannelHashHex
+					// (cmd/server/channel_hash_hex.go). REST GET
+					// /api/channels/{hash}/messages goes through shared
+					// validation; WebSocket parity must not be assumed.
 					p.hub.Broadcast(WSMessage{
 						Type: "packet",
 						Data: tx,
