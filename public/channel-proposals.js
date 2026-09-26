@@ -419,21 +419,15 @@
   // document keydown listener (onAdminKeydown), which checks confirmEl()
   // first so Escape/Tab-trapping apply to whichever layer is on top —
   // never two independent keydown listeners fighting over the same keys.
-  function confirmDialogHtml(id, name, builtIn) {
-    var hint = builtIn
-      ? 'It will stop being listed as shared, but this site keeps decrypting it through its built-in channel list.'
-      : 'It will stop being shared with everyone.';
-    return '<div class="modal ch-modal ch-proposals-confirm" role="document">' +
-        '<h4 id="chProposalsConfirmTitle">Remove ' + esc(name) + '?</h4>' +
-        '<p class="ch-modal-section-hint">' + esc(hint) + '</p>' +
-        '<div class="ch-modal-row ch-proposals-confirm-actions">' +
-          '<button type="button" class="ch-modal-btn-secondary" data-proposals-confirm-action="cancel">Cancel</button>' +
-          '<button type="button" class="btn-primary" data-proposals-confirm-action="confirm"' +
-          ' data-proposal-id="' + esc(id) + '" data-proposal-name="' + esc(name) + '">Remove</button>' +
-        '</div>' +
-      '</div>';
+  function makeEl(tag, className, text) {
+    var e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text != null) e.textContent = text;
+    return e;
   }
 
+  // Built with the DOM API: the channel name only ever reaches textContent
+  // and setAttribute, never an HTML string.
   function openConfirm(id, name, builtIn) {
     if (!state || !adminEl() || confirmEl()) return;
     state.confirmTrigger = document.activeElement;
@@ -443,10 +437,32 @@
     dlg.setAttribute('role', 'alertdialog');
     dlg.setAttribute('aria-modal', 'true');
     dlg.setAttribute('aria-labelledby', 'chProposalsConfirmTitle');
-    dlg.innerHTML = confirmDialogHtml(id, name, builtIn);
+
+    var modal = makeEl('div', 'modal ch-modal ch-proposals-confirm');
+    modal.setAttribute('role', 'document');
+    var title = makeEl('h4', null, 'Remove ' + name + '?');
+    title.id = 'chProposalsConfirmTitle';
+    var hint = makeEl('p', 'ch-modal-section-hint', builtIn
+      ? 'It will stop being listed as shared, but this site keeps decrypting it through its built-in channel list.'
+      : 'It will stop being shared with everyone.');
+    var row = makeEl('div', 'ch-modal-row ch-proposals-confirm-actions');
+    var cancelBtn = makeEl('button', 'ch-modal-btn-secondary', 'Cancel');
+    cancelBtn.setAttribute('type', 'button');
+    cancelBtn.setAttribute('data-proposals-confirm-action', 'cancel');
+    var confirmBtn = makeEl('button', 'btn-primary', 'Remove');
+    confirmBtn.setAttribute('type', 'button');
+    confirmBtn.setAttribute('data-proposals-confirm-action', 'confirm');
+    confirmBtn.setAttribute('data-proposal-id', id);
+    confirmBtn.setAttribute('data-proposal-name', name);
+    row.appendChild(cancelBtn);
+    row.appendChild(confirmBtn);
+    modal.appendChild(title);
+    modal.appendChild(hint);
+    modal.appendChild(row);
+    dlg.appendChild(modal);
+
     adminEl().appendChild(dlg);
-    var confirmBtn = dlg.querySelector('[data-proposals-confirm-action="confirm"]');
-    if (confirmBtn) confirmBtn.focus();
+    confirmBtn.focus();
   }
 
   function closeConfirm(opts) {
@@ -651,7 +667,6 @@
     pollDelay: pollDelay,
     createPoller: createPoller,
     renderAdminRow: renderAdminRow,
-    confirmDialogHtml: confirmDialogHtml,
     suggestMessage: suggestMessage,
     mount: mount,
     unmount: unmount,

@@ -620,14 +620,36 @@ test('normalizeName keeps emoji with ZWJ and variation selectors', () => {
 });
 
 // ── Remove confirmation escaping (mutant M21) ────────────────────────────
-test('confirmDialogHtml escapes the name in the title and the confirm button', () => {
+// The dialog is built with the DOM API (no HTML strings with data), so the
+// name must arrive as text in the title and as a plain attribute value on
+// the confirm button: no element or handler may come out of it.
+test('admin dialog: the Remove confirmation renders an XSS name as inert text', async () => {
   const evil = '#"><img src=x onerror=__x=1>';
-  const html = CP.confirmDialogHtml('dddddddddddddddd', evil, false);
-  assert.ok(!/<img\b/i.test(html), 'raw <img survived: ' + html);
-  assert.match(html, /<h4 id="chProposalsConfirmTitle">Remove #&quot;&gt;&lt;img src=x onerror=__x=1&gt;\?<\/h4>/);
-  assert.match(html, /data-proposal-name="#&quot;&gt;&lt;img/);
-  assert.match(html, /stop being shared with everyone/);
-  assert.match(CP.confirmDialogHtml('dddddddddddddddd', '#test', true), /keeps decrypting it through its built-in channel list/);
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: [{ id: 'dddddddddddddddd', name: evil, status: 'approved', createdAt: 1, reviewedAt: 2 }], enabled: true } }));
+  await openApprovedAdminWithConfirm(env);
+  const dlg = env.document.getElementById('chProposalsConfirm');
+  assert.ok(dlg, 'confirm dialog must open');
+  assert.strictEqual(dlg.querySelectorAll('img').length, 0, 'no <img> element may be created from the name');
+  assert.ok(!dlg.querySelectorAll('*').some((el) => Object.keys(el.attrs).some((a) => /^on/i.test(a))), 'no event-handler attribute may appear');
+  const title = env.document.getElementById('chProposalsConfirmTitle');
+  assert.strictEqual(title.tagName, 'h4');
+  assert.strictEqual(title.textContent, 'Remove ' + evil + '?');
+  const confirmBtn = dlg.querySelector('[data-proposals-confirm-action="confirm"]');
+  assert.strictEqual(confirmBtn.getAttribute('data-proposal-name'), evil);
+  assert.strictEqual(confirmBtn.getAttribute('data-proposal-id'), 'dddddddddddddddd');
+  assert.match(dlg.textContent, /stop being shared with everyone/);
+  assert.strictEqual(dlg.getAttribute('role'), 'alertdialog');
+  assert.strictEqual(dlg.getAttribute('aria-modal'), 'true');
+  assert.strictEqual(dlg.getAttribute('aria-labelledby'), 'chProposalsConfirmTitle');
+  assert.strictEqual(env.document.activeElement, confirmBtn, 'focus starts on the confirm button');
+});
+
+test('the confirmation dialog is not built from an HTML string', () => {
+  // Guards the preflight XSS gate's reason for this design: data must never
+  // reach .innerHTML in the confirm layer again.
+  const body = SRC.slice(SRC.indexOf('function openConfirm('), SRC.indexOf('function closeConfirm('));
+  assert.ok(body.length > 0, 'openConfirm not found');
+  assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(body), 'openConfirm must use createElement/textContent/setAttribute');
 });
 
 // ── Built-in names (PR #99 review, finding 4) ────────────────────────────
