@@ -7,10 +7,12 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// The #2073 advert route breakdown scans all of a node's ADVERT rows: a
-// table lookup per row, ~130 ms for a node with 50,000 adverts on a
-// 2,000,000-transmission database (node_advert_routes_bench_test.go). The
-// result is cached per pubkey so repeated views do not rescan:
+// The #2073 advert route breakdown (asked for with include=advertRoutes)
+// scans all of a node's ADVERT rows: a table lookup per row, ~110 ms for a
+// node with 50,000 adverts on a 1,000,000-transmission database on an Apple
+// M5 and about three times that on a 4-vCPU server
+// (node_advert_routes_bench_test.go). The result is cached per pubkey so
+// repeated views do not rescan:
 //   - nodeAdvertRouteTTL bounds staleness from changes that do not add a
 //     row - a route_mask promoted to mixed, the backfill, the windows
 //     sliding;
@@ -19,7 +21,10 @@ import (
 //     every few seconds is rescanned at most once per nodeAdvertRouteDebounce;
 //   - at most nodeAdvertRouteCacheMax entries, expired ones dropped on every
 //     put and the oldest evicted first. An entry holds up to 4 x 20 lean
-//     rows (no observation arrays), a few KB each;
+//     rows (no observation arrays, but raw_hex and decoded_json), measured
+//     at ~2.5 KB of heap per row: ~125 KB for a typical entry (~52 rows),
+//     ~200 KB at the 80-row maximum, so ~16 MB for 128 typical entries and
+//     at most ~25 MB;
 //   - concurrent misses for one pubkey share a single scan (singleflight).
 //
 // These are hardcoded for now; like the other cache TTLs they are candidates
@@ -40,10 +45,11 @@ type nodeAdvertRouteEntry struct {
 // nodeAdvertRouteCache is usable as a zero value. Cached rows are shared
 // between responses and never mutated after put.
 type nodeAdvertRouteCache struct {
-	mu      sync.Mutex
-	entries map[string]nodeAdvertRouteEntry
-	flight  singleflight.Group
-	onScan  func() // test hook: called once per scan
+	mu       sync.Mutex
+	entries  map[string]nodeAdvertRouteEntry
+	flight   singleflight.Group
+	onLookup func() // test hook: called once per nodeAdvertRoutes call
+	onScan   func() // test hook: called once per scan
 }
 
 func (c *nodeAdvertRouteCache) get(pubkey string, latestID int64, now time.Time) (nodeAdvertRouteEntry, bool) {
@@ -100,33 +106,65 @@ func (db *DB) latestTransmissionIDForNode(pubkey string) (int64, error) {
 	return id, err
 }
 
+// nodeAdvertRouteResult is the breakdown for one request. floodAdvertCount7d
+// is set only when this request ran the scan itself (not a cache hit, not a
+// scan shared with a concurrent request): then it is the node's fresh
+// flood_advert_count_7d and CountFloodAdvertsForNode can be skipped. It is
+// never cached.
+type nodeAdvertRouteResult struct {
+	byRoute            NodeAdvertsByRoute
+	counts             NodeAdvertCounts
+	floodAdvertCount7d *int
+}
+
+// nodeAdvertRouteScan is what one scan hands to singleflight.
+type nodeAdvertRouteScan struct {
+	entry   nodeAdvertRouteEntry
+	flood7d int
+}
+
 // nodeAdvertRoutes is GetNodeAdvertRoutes through the per-pubkey cache; the
 // route_mask backfill status is read fresh (it has its own short cache).
-func (s *Server) nodeAdvertRoutes(pubkey string, now time.Time) (NodeAdvertsByRoute, NodeAdvertCounts, error) {
+// Callers apply the privacy gates first: this is only reached for a visible
+// identity that asked for the breakdown.
+func (s *Server) nodeAdvertRoutes(pubkey string, now time.Time) (nodeAdvertRouteResult, error) {
+	c := &s.advertRoutes
+	if c.onLookup != nil {
+		c.onLookup()
+	}
 	latestID, err := s.db.latestTransmissionIDForNode(pubkey)
 	if err != nil {
-		return NodeAdvertsByRoute{}, NodeAdvertCounts{}, err
+		return nodeAdvertRouteResult{}, err
 	}
-	c := &s.advertRoutes
+	var res nodeAdvertRouteResult
 	e, ok := c.get(pubkey, latestID, now)
 	if !ok {
+		// singleflight runs fn in the calling goroutine of the one request
+		// that scans; the others wait and see scanned == false.
+		scanned := false
 		v, err, _ := c.flight.Do(pubkey, func() (interface{}, error) {
+			scanned = true
 			if c.onScan != nil {
 				c.onScan()
 			}
-			byRoute, counts, err := s.db.GetNodeAdvertRoutes(pubkey, nodeAdvertRouteLimit, now, floodAdvertRowCap)
+			byRoute, counts, flood7d, err := s.db.GetNodeAdvertRoutes(pubkey, nodeAdvertRouteLimit, now, floodAdvertRowCap)
 			if err != nil {
 				return nil, err
 			}
 			fresh := nodeAdvertRouteEntry{byRoute: byRoute, counts: counts, latestID: latestID, at: now}
 			c.put(pubkey, fresh, now)
-			return fresh, nil
+			return nodeAdvertRouteScan{entry: fresh, flood7d: flood7d}, nil
 		})
 		if err != nil {
-			return NodeAdvertsByRoute{}, NodeAdvertCounts{}, err
+			return nodeAdvertRouteResult{}, err
 		}
-		e = v.(nodeAdvertRouteEntry)
+		scan := v.(nodeAdvertRouteScan)
+		e = scan.entry
+		if scanned {
+			res.floodAdvertCount7d = &scan.flood7d
+		}
 	}
-	e.counts.RouteMaskBackfill = s.db.routeMaskBackfillStatus()
-	return e.byRoute, e.counts, nil
+	res.byRoute, res.counts = e.byRoute, e.counts
+	res.counts.RouteMaskBackfill = s.db.routeMaskBackfillStatus()
+	return res, nil
 }

@@ -1248,23 +1248,27 @@ func (db *DB) GetNodeByPubkey(pubkey string) (map[string]interface{}, error) {
 // same-name false positives and an adversarial spoof path where any node
 // could attribute its transmissions to a victim by naming itself with the
 // victim's pubkey. Pubkey is unique by design — that's the whole point.
-func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int) (NodeAdvertRows, error) {
+//
+// withRouteClass (node detail with include=advertRoutes, #2073) adds
+// route_class to the ADVERT rows; without it the rows are unchanged.
+func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int, withRouteClass bool) (NodeAdvertRows, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	// #1345: order by ingest id, not first_seen (=rxTime). Buffered observer
 	// uploads with old rxTime would otherwise displace fresh activity from
 	// the "recent transmissions for node" list.
-	return db.queryNodeAdvertRows(true, "t.from_pubkey = ? ORDER BY t.id DESC LIMIT ?", pubkey, limit)
+	return db.queryNodeAdvertRows(true, withRouteClass, "t.from_pubkey = ? ORDER BY t.id DESC LIMIT ?", pubkey, limit)
 }
 
 // queryNodeAdvertRows runs the transmission-centric query with the given
-// WHERE tail (including ORDER BY/LIMIT). With detail it also attaches every
-// observation and, for ADVERTs, route_class (#2073: classifyAdvertRoute over
-// route_mask with the route_type fallback); a failed mask read only leaves
-// route_class out. Without detail the rows keep the transmission shape and
-// the best observation's fields only (the lean #2073 per-class rows).
-func (db *DB) queryNodeAdvertRows(detail bool, whereTail string, args ...interface{}) (NodeAdvertRows, error) {
+// WHERE tail (including ORDER BY/LIMIT). With observations it attaches every
+// observation (otherwise the rows keep the transmission shape and the best
+// observation's fields only: the lean #2073 per-class rows). With
+// routeClass it adds, for ADVERTs, route_class (#2073: classifyAdvertRoute
+// over route_mask with the route_type fallback); a failed mask read only
+// leaves route_class out.
+func (db *DB) queryNodeAdvertRows(observations, routeClass bool, whereTail string, args ...interface{}) (NodeAdvertRows, error) {
 	selectCols, observerJoin := db.transmissionBaseSQL()
 	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s WHERE %s", selectCols, observerJoin, whereTail)
 
@@ -1279,7 +1283,7 @@ func (db *DB) queryNodeAdvertRows(detail bool, whereTail string, args ...interfa
 	for rows.Next() {
 		p := db.scanTransmissionRow(rows)
 		if p != nil {
-			if detail {
+			if observations {
 				// Placeholder for observations — filled below
 				p["observations"] = []map[string]interface{}{}
 			}
@@ -1292,28 +1296,34 @@ func (db *DB) queryNodeAdvertRows(detail bool, whereTail string, args ...interfa
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if !detail || len(txIDs) == 0 {
+	if len(txIDs) == 0 {
 		return packets, nil
 	}
 
-	// Fetch observations and route masks for all transmissions
-	obsMap := db.getObservationsForTransmissions(txIDs)
+	// Fetch observations for all transmissions
+	if observations {
+		obsMap := db.getObservationsForTransmissions(txIDs)
+		for _, p := range packets {
+			if id, ok := p["id"].(int); ok {
+				if obs, found := obsMap[id]; found {
+					p["observations"] = obs
+				}
+			}
+		}
+	}
+	if !routeClass {
+		return packets, nil
+	}
 	masks := make(map[int]sql.NullInt64, len(txIDs))
-	masksOK := true
 	if db.hasRouteMask() {
 		if err := db.readRouteMasks(txIDs, masks); err != nil {
 			log.Printf("[node-adverts] route_mask read failed, route_class omitted: %v", err)
-			masksOK = false
+			return packets, nil
 		}
 	}
 	for _, p := range packets {
 		if id, ok := p["id"].(int); ok {
-			if obs, found := obsMap[id]; found {
-				p["observations"] = obs
-			}
-			if masksOK {
-				setAdvertRouteClass(p, masks[id])
-			}
+			setAdvertRouteClass(p, masks[id])
 		}
 	}
 	return packets, nil

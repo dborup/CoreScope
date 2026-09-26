@@ -458,6 +458,18 @@ Node detail page data.
 |----------|--------|----------------------|
 | `pubkey` | string | Node public key (hex)|
 
+### Query Parameters
+
+| Param     | Type   | Description |
+|-----------|--------|-------------|
+| `include` | string | Opt-in extras, comma-separated (may also repeat). `advertRoutes` adds `recentAdvertsByRoute`, `advertCounts` and `route_class` on the `recentAdverts` ADVERT rows (see [Advert route classes](#advert-route-classes)). Unknown values are ignored. |
+
+Without `include=advertRoutes` the response is exactly the pre-#2073 one:
+no `recentAdvertsByRoute`, no `advertCounts`, no `route_class`. The breakdown
+scans all of the node's ADVERT rows, so only the node page (full view and
+side panel) asks for it; the packets, live, channels and route views and the
+claimed-nodes lookups do not.
+
 ### Response `200`
 
 ```jsonc
@@ -477,8 +489,8 @@ Node detail page data.
     "flood_advert_count_7d": number   // route_type 1 only (see below)
   },
   "recentAdverts": [Packet],  // last 20 packets for this node, newest ingest first;
-                              // ADVERT rows also carry route_class
-  "recentAdvertsByRoute": {   // absent when the identity is hidden
+                              // with include=advertRoutes ADVERT rows also carry route_class
+  "recentAdvertsByRoute": {   // include=advertRoutes only; absent when the identity is hidden
     "limit":    20,           // max rows per class
     "flood":    [Packet],     // newest adverts per route class, newest ingest first;
                               // rows without the observations array
@@ -486,7 +498,7 @@ Node detail page data.
     "mixed":    [Packet],
     "unknown":  [Packet]      // only present when the node has such adverts
   },
-  "advertCounts": {           // absent when the identity is hidden
+  "advertCounts": {           // include=advertRoutes only; absent when the identity is hidden
     "24h": { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
     "7d":  { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
     "truncated": boolean,     // more adverts than the 50,000-row cap in the 7d floor
@@ -509,13 +521,13 @@ ADVERT rows of Relay Airtime Share (#89), from `transmissions.route_mask`
 | `flood`       | only route 0/1 (transport flood / flood) seen |
 | `zero_hop`    | only route 2/3 — a zero-hop advert is sent DIRECT with an empty path |
 | `mixed`       | both flood and zero-hop routes seen for the same advert |
-| `unknown`     | no usable route (Relay Airtime Share calls this bucket `legacy`) |
+| `unknown`     | no usable route — the same bucket Relay Airtime Share's `route_class` calls `legacy` (its historical plain ADVERT row); one classifier, two names kept for API compatibility |
 
 Rows whose mask is not backfilled yet (and databases without the column)
 fall back to the first-inserted `route_type`; `route_mask_backfill` says
 whether that fallback is still in use (anything but `complete`: provisional).
 
-- The class is filtered in SQL before the per-class limit, so frequent
+- The class is filtered before the per-class limit, so frequent
   zero-hop adverts cannot push rare flood adverts out of `flood`. A mixed
   advert appears only under `mixed`.
 - `advertCounts` counts distinct adverts (by hash) whose `first_seen` — when
@@ -535,7 +547,10 @@ whether that fallback is still in use (anything but `complete`: provisional).
   `recentAdverts`); `observation_count` and the best observation's fields
   stay. Their `route_class` is the class they were listed under.
 - The breakdown is cached per node for up to 30 s, and refreshed once the
-  node has a newer transmission (at most every 5 s).
+  node has a newer transmission (at most every 5 s). `flood_advert_count_7d`
+  is never cached: it is counted on every request (a request that scanned
+  the node for the breakdown itself takes the identical number from that
+  scan).
 
 ### Response `404`
 

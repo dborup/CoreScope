@@ -84,11 +84,14 @@ func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours fl
 // floor is advertDateFloor; the exact window check stays in Go.
 //
 // This is an external contract (the ArcScope advisor reads it) and is kept
-// as is: route_type 1 only, i.e. the first-inserted route. It therefore
-// differs from advertCounts["7d"].flood (node_advert_routes.go), which is
-// route_mask based: that one also counts transport flood (route 0) and never
-// counts a mixed advert (flood + zero-hop), while this one counts a mixed
-// advert whenever its first-inserted route was 1.
+// as is, counted fresh on every request and never cached: route_type 1
+// only, i.e. the first-inserted route. It therefore differs from
+// advertCounts["7d"].flood (node_advert_routes.go), which is route_mask
+// based: that one also counts transport flood (route 0) and never counts a
+// mixed advert (flood + zero-hop), while this one counts a mixed advert
+// whenever its first-inserted route was 1. When a node-detail request scans
+// the node for the #2073 breakdown itself, that scan yields this same number
+// (GetNodeAdvertRoutes, pinned by a parity test) and this query is skipped.
 //
 // The row cap is a pure safety valve on per-request allocation: it applies to
 // flood adverts inside the floor window only, and 50000 in ~8 days is ~4 per
@@ -100,7 +103,14 @@ func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours fl
 const floodAdvertRowCap = 50000
 
 func (db *DB) CountFloodAdvertsForNode(pubkey string, windowHours float64, rowCap int) (int, error) {
-	floor := advertDateFloor(time.Now(), windowHours)
+	return db.countFloodAdvertsForNodeAt(pubkey, windowHours, rowCap, time.Now())
+}
+
+// countFloodAdvertsForNodeAt is CountFloodAdvertsForNode at a given instant,
+// for the parity test of the #2073 scan that can stand in for it
+// (GetNodeAdvertRoutes).
+func (db *DB) countFloodAdvertsForNodeAt(pubkey string, windowHours float64, rowCap int, now time.Time) (int, error) {
+	floor := advertDateFloor(now, windowHours)
 	rows, err := db.conn.Query(
 		"SELECT COALESCE(first_seen, ''), COALESCE(route_type, -1), COALESCE(hash, '') FROM transmissions WHERE from_pubkey = ? AND payload_type = ? AND route_type = ? AND first_seen >= ? ORDER BY id DESC LIMIT ?",
 		pubkey, payloadTypeAdvert, advertRouteTypeFlood, floor, rowCap)
@@ -116,5 +126,5 @@ func (db *DB) CountFloodAdvertsForNode(pubkey string, windowHours float64, rowCa
 		}
 		entries = append(entries, e)
 	}
-	return countFloodAdverts(entries, time.Now(), windowHours), nil
+	return countFloodAdverts(entries, now, windowHours), nil
 }

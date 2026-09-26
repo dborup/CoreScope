@@ -173,5 +173,85 @@ test('existing badges and signal readouts are kept', () => {
   assert.ok(pane.includes('advert-entry') && pane.includes('advert-dot') && pane.includes('badge-obs'));
 });
 
+// PR #97 review P3: every node-controlled or caller-supplied value that
+// reaches the markup is escaped - one test per value, so dropping a single
+// esc() fails it.
+function evilRender(extra, o) {
+  const r = row(9, 'flood', extra);
+  return NA.render(detail({ recentAdverts: [r], recentAdvertsByRoute: { limit: 20, flood: [r], zero_hop: [], mixed: [] } }), opts(o));
+}
+
+test('escaping: decoded text', () => {
+  const html = evilRender({ decoded_json: JSON.stringify({ text: '<img src=x onerror=alert(4)>' }) });
+  assert.ok(!html.includes('<img src=x'), 'decoded.text reached the HTML raw');
+  assert.ok(html.includes(': &lt;img src=x onerror=alert(4)&gt;'), html);
+});
+
+test('escaping: SNR and RSSI', () => {
+  const html = evilRender({ snr: '<b id=snr>1</b>', rssi: '<b id=rssi>2</b>' });
+  assert.ok(!html.includes('<b id=snr>'), 'snr reached the HTML raw');
+  assert.ok(!html.includes('<b id=rssi>'), 'rssi reached the HTML raw');
+  assert.ok(html.includes('SNR &lt;b id=snr&gt;1&lt;/b&gt;dB') && html.includes('RSSI &lt;b id=rssi&gt;2&lt;/b&gt;dBm'), html);
+});
+
+test('escaping: role colour in the pane dot', () => {
+  const html = evilRender({}, { variant: 'pane', roleColor: 'red"><script>alert(5)</script>' });
+  assert.ok(!html.includes('<script>alert(5)'), 'roleColor reached the HTML raw');
+  assert.ok(html.includes('style="background:red&quot;&gt;&lt;script&gt;alert(5)&lt;/script&gt;"'), html);
+});
+
+test('escaping: timestamp without a timestampHtml formatter', () => {
+  const html = evilRender({ timestamp: '<i id=ts>2026</i>' }, { timestampHtml: null });
+  assert.ok(!html.includes('<i id=ts>'), 'timestamp fallback reached the HTML raw');
+  assert.ok(html.includes('&lt;i id=ts&gt;2026&lt;/i&gt;'), html);
+});
+
+test('tabs: exactly the selected tab is aria-selected at render, the rest false and out of the tab order', () => {
+  for (const tab of ['all', 'flood', 'zero_hop', 'mixed']) {
+    const html = NA.render(detail(), opts({ tab: tab }));
+    const tabs = html.match(/<button[^>]*role="tab"[^>]*>/g) || [];
+    assert.strictEqual(tabs.length, 4);
+    for (const b of tabs) {
+      const key = /data-adverts-tab="([^"]+)"/.exec(b)[1];
+      const on = key === tab;
+      assert.ok(b.includes('aria-selected="' + on + '"'), tab + ': ' + b);
+      assert.ok(b.includes('tabindex="' + (on ? '0' : '-1') + '"'), tab + ': ' + b);
+    }
+  }
+});
+
+// PR #97 review P2-2: the breakdown costs a scan of the node's adverts, so
+// only the node page (full view and side panel, both through nodes.js
+// fetchNodeDetail) asks for it. Packets, live, channels, route view and the
+// claimed-nodes lookups keep the plain /api/nodes/{pubkey} URL.
+test('detailPath: the opt-in URL, a distinct client-cache key under the plain one', () => {
+  assert.strictEqual(NA.detailPath('ab/c d'), '/nodes/ab%2Fc%20d?include=advertRoutes');
+  const plain = '/nodes/' + encodeURIComponent('abc');
+  assert.notStrictEqual(NA.detailPath('abc'), plain, 'api() caches by path: the two responses must not share a key');
+  assert.ok(NA.detailPath('abc').startsWith(plain + '?'), "invalidateApiCache('/nodes/' + pk) must still clear it");
+});
+
+test('only the node page sends include=advertRoutes', () => {
+  const dir = path.join(__dirname, 'public');
+  const offenders = [];
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+    if (f === 'node-adverts.js') continue;
+    const code = fs.readFileSync(path.join(dir, f), 'utf8');
+    if (f !== 'nodes.js' && /advertRoutes|detailPath/.test(code)) offenders.push(f);
+  }
+  assert.deepStrictEqual(offenders, [], 'files other than nodes.js ask for the breakdown');
+  const nodesJs = fs.readFileSync(path.join(dir, 'nodes.js'), 'utf8');
+  assert.ok(!/advertRoutes/.test(nodesJs), 'nodes.js must go through NodeAdverts.detailPath');
+  const uses = nodesJs.match(/NodeAdverts\.detailPath\(/g) || [];
+  assert.strictEqual(uses.length, 1, 'exactly one node-detail fetch sends it');
+  const fetchFn = /async function fetchNodeDetail\(pubkey\) \{[\s\S]*?\n  \}\n/.exec(nodesJs);
+  assert.ok(fetchFn, 'fetchNodeDetail not found');
+  assert.ok(/api\(NodeAdverts\.detailPath\(pubkey\), \{ ttl: CLIENT_TTL\.nodeDetail \}\)/.test(fetchFn[0]), 'fetchNodeDetail (full view + side panel) must send it');
+  assert.ok(/async function selectNode[\s\S]*?fetchNodeDetail\(/.test(nodesJs) && /async function loadFullNode[\s\S]*?fetchNodeDetail\(/.test(nodesJs),
+    'the side panel and the full view both fetch through fetchNodeDetail');
+  // The claimed-nodes lookup stays on the plain URL.
+  assert.ok(/missing\.map\(mn => api\('\/nodes\/' \+ encodeURIComponent\(mn\.pubkey\), \{ ttl: CLIENT_TTL\.nodeDetail \}\)\)/.test(nodesJs), 'claimed nodes changed');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 if (failed) process.exit(1);

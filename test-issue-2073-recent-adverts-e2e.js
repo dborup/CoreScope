@@ -88,6 +88,13 @@ async function waitSettled(page, root) {
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  // Node-detail requests (GET /api/nodes/{pubkey}, no sub-path) the node
+  // page makes: all of them must opt in to the breakdown.
+  const detailRequests = [];
+  page.on('request', (req) => {
+    const u = new URL(req.url());
+    if (/^\/api\/nodes\/[0-9a-f]{64}$/.test(u.pathname)) detailRequests.push(u.pathname + u.search);
+  });
 
   console.log(`\n=== #2073 Recent Adverts E2E against ${BASE} ===`);
   const full = '#node-packets';
@@ -182,6 +189,23 @@ async function waitSettled(page, root) {
     assert(selectedTab(s) === 'mixed' && s.entries === 2, 'pane Mixed');
     assert(new URL(page.url()).hash === '#/nodes/' + MIX + '?adverts=mixed', 'pane hash: ' + new URL(page.url()).hash);
     await shot(page, 'pane-mixed-light');
+  });
+
+  await step('opt-in: the node page asks for the breakdown, the plain URL stays master-shaped', async () => {
+    assert(detailRequests.length > 0 && detailRequests.every(u => /[?&]include=advertRoutes(&|$)/.test(u)),
+      'node page detail requests: ' + detailRequests.join(' '));
+    const r = await page.evaluate(async (pk) => {
+      const plain = await (await fetch('/api/nodes/' + pk)).text();
+      const opted = await (await fetch('/api/nodes/' + pk + '?include=advertRoutes')).text();
+      return {
+        plainKeys: Object.keys(JSON.parse(plain)).sort().join(),
+        plainRouteClass: plain.includes('route_class'),
+        optedKeys: Object.keys(JSON.parse(opted)).sort().join(),
+        optedRouteClass: opted.includes('"route_class"'),
+      };
+    }, MIX);
+    assert(r.plainKeys === 'node,recentAdverts' && !r.plainRouteClass, 'plain: ' + JSON.stringify(r));
+    assert(r.optedKeys === 'advertCounts,node,recentAdverts,recentAdvertsByRoute' && r.optedRouteClass, 'opted in: ' + JSON.stringify(r));
   });
 
   await step('mobile 390×844: no horizontal overflow, tabs usable', async () => {

@@ -23,7 +23,8 @@ func TestNodeAdvertRouteCache_HitAndTTL(t *testing.T) {
 	s := narCacheServer(t)
 	id := narInsert(t, s.db, narNode, "c-a", payloadTypeAdvert, 1, 0b0010, narAgo(time.Hour), true)
 	t0 := time.Now()
-	br, _, err := s.nodeAdvertRoutes(narNode, t0)
+	res, err := s.nodeAdvertRoutes(narNode, t0)
+	br := res.byRoute
 	if err != nil || len(br.Flood) != 1 {
 		t.Fatalf("first read: flood=%d err=%v", len(br.Flood), err)
 	}
@@ -32,11 +33,13 @@ func TestNodeAdvertRouteCache_HitAndTTL(t *testing.T) {
 	if _, err := s.db.conn.Exec(`UPDATE transmissions SET route_mask = 6 WHERE id = ?`, id); err != nil {
 		t.Fatal(err)
 	}
-	br, _, _ = s.nodeAdvertRoutes(narNode, t0.Add(nodeAdvertRouteTTL-time.Second))
+	res, _ = s.nodeAdvertRoutes(narNode, t0.Add(nodeAdvertRouteTTL-time.Second))
+	br = res.byRoute
 	if len(br.Flood) != 1 || len(br.Mixed) != 0 {
 		t.Fatalf("within TTL want cached flood=1 mixed=0, got flood=%d mixed=%d", len(br.Flood), len(br.Mixed))
 	}
-	br, counts, _ := s.nodeAdvertRoutes(narNode, t0.Add(nodeAdvertRouteTTL+time.Second))
+	res, _ = s.nodeAdvertRoutes(narNode, t0.Add(nodeAdvertRouteTTL+time.Second))
+	br, counts := res.byRoute, res.counts
 	if len(br.Flood) != 0 || len(br.Mixed) != 1 {
 		t.Fatalf("after TTL want recomputed flood=0 mixed=1, got flood=%d mixed=%d", len(br.Flood), len(br.Mixed))
 	}
@@ -56,7 +59,8 @@ func TestNodeAdvertRouteCache_TargetedInvalidation(t *testing.T) {
 
 	narInsert(t, s.db, narNode, "t-a2", payloadTypeAdvert, 2, 0b0100, narAgo(time.Minute), true)
 	// Inside the debounce window a newer advert does not force a rescan yet.
-	br, _, _ := s.nodeAdvertRoutes(narNode, t0.Add(nodeAdvertRouteDebounce/2))
+	res, _ := s.nodeAdvertRoutes(narNode, t0.Add(nodeAdvertRouteDebounce/2))
+	br := res.byRoute
 	if len(br.ZeroHop) != 0 {
 		t.Fatalf("within debounce want cached result, got zero_hop=%d", len(br.ZeroHop))
 	}
@@ -65,11 +69,13 @@ func TestNodeAdvertRouteCache_TargetedInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	later := t0.Add(nodeAdvertRouteDebounce + time.Second)
-	br, counts, _ := s.nodeAdvertRoutes(narNode, later)
+	res, _ = s.nodeAdvertRoutes(narNode, later)
+	br, counts := res.byRoute, res.counts
 	if len(br.ZeroHop) != 1 || counts.H24.ZeroHop != 1 {
 		t.Fatalf("after invalidation want zero_hop list=1 count=1, got %d/%d", len(br.ZeroHop), counts.H24.ZeroHop)
 	}
-	br, _, _ = s.nodeAdvertRoutes(other, later)
+	res, _ = s.nodeAdvertRoutes(other, later)
+	br = res.byRoute
 	if len(br.Flood) != 1 || len(br.Mixed) != 0 {
 		t.Fatalf("other node must stay cached (flood=1 mixed=0), got flood=%d mixed=%d", len(br.Flood), len(br.Mixed))
 	}
@@ -121,8 +127,8 @@ func TestNodeAdvertRouteCache_ConcurrentMissesShareOneScan(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if br, _, err := s.nodeAdvertRoutes(narNode, now); err != nil || len(br.Flood) != 1 {
-				t.Errorf("flood=%d err=%v", len(br.Flood), err)
+			if res, err := s.nodeAdvertRoutes(narNode, now); err != nil || len(res.byRoute.Flood) != 1 {
+				t.Errorf("flood=%d err=%v", len(res.byRoute.Flood), err)
 			}
 		}()
 	}

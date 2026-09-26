@@ -9,12 +9,17 @@
  * render() returns an HTML string built only from escaped values; bind()
  * wires the tab bar through the app's initTabBar (roles, arrow keys) and
  * reports tab changes so the caller can keep ?adverts= in the URL. Nothing
- * here fetches: everything comes from the one node-detail response.
+ * here fetches: everything comes from the one node-detail response, which
+ * carries the breakdown only when requested through detailPath() - the node
+ * page does, other callers of /api/nodes/{pubkey} do not pay for it.
  */
 (function (root) {
   'use strict';
 
   var PARAM = 'adverts';
+  // Opt-in query of GET /api/nodes/{pubkey} for recentAdvertsByRoute,
+  // advertCounts and route_class (docs/api-spec.md).
+  var INCLUDE = 'include=advertRoutes';
   var TITLE_TIP = 'Adverts this node originated. The section is limited to adverts because they are the only packet type attributable to an originating node: transmissions.from_pubkey is populated for ADVERTs only, so a relayed CHAN or TXT packet cannot be traced back to its sender without path resolution.';
   var CLASSES = [
     { key: 'flood', label: 'Flood' },
@@ -202,6 +207,11 @@
     return html;
   }
 
+  /** The api() path of a node's detail with the advert route breakdown. */
+  function detailPath(pubkey) {
+    return '/nodes/' + encodeURIComponent(pubkey) + '?' + INCLUDE;
+  }
+
   /** Wire the tab bar rendered into el; opts.onTabChange(key) on every switch. */
   function bind(el, opts) {
     var bar = el && el.querySelector('.node-adverts-tabs');
@@ -218,5 +228,5 @@
     });
   }
 
-  root.NodeAdverts = { parseTab: parseTab, hashWithTab: hashWithTab, render: render, bind: bind };
+  root.NodeAdverts = { parseTab: parseTab, hashWithTab: hashWithTab, render: render, bind: bind, detailPath: detailPath };
 })(typeof window !== 'undefined' ? window : this);

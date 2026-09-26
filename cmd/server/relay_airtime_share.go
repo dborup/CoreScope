@@ -291,7 +291,9 @@ const (
 	relayAirtimeRouteClassZeroHop = advertClassZeroHop
 	relayAirtimeRouteClassMixed   = advertClassMixed
 	// Relay Airtime Share names the no-usable-route bucket "legacy" (its
-	// historical plain ADVERT row); node detail calls it advertClassUnknown.
+	// historical plain ADVERT row, kept for API compatibility); node detail
+	// (include=advertRoutes) calls the same bucket advertClassUnknown. Both
+	// come from classifyAdvertRoute's relayAirtimeAdvertUnknown.
 	relayAirtimeRouteClassLegacy = "legacy"
 )
 

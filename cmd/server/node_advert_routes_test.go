@@ -164,7 +164,7 @@ func TestNodeAdvertRoutes_PerClassLimitInSQL(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		narInsert(t, db, narNode, fmt.Sprintf("zh%03d", i), payloadTypeAdvert, 2, 0b0100, narAgo(time.Duration(100-i)*time.Minute), true)
 	}
-	byRoute, counts, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
+	byRoute, counts, _, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestNodeAdvertRoutes_PerClassLimitInSQL(t *testing.T) {
 			t.Fatal("per-class rows keep observation_count")
 		}
 	}
-	recent, err := db.GetRecentTransmissionsForNode(narNode, 20)
+	recent, err := db.GetRecentTransmissionsForNode(narNode, 20, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestNodeAdvertRoutes_MixedOnlyInMixed(t *testing.T) {
 	narInsert(t, db, narNode, "mixed1", payloadTypeAdvert, 1, 0b0110, narAgo(time.Hour), true)
 	narInsert(t, db, narNode, "flood1", payloadTypeAdvert, 1, 0b0010, narAgo(2*time.Hour), true)
 	narInsert(t, db, narNode, "zh1", payloadTypeAdvert, 2, 0b0100, narAgo(3*time.Hour), true)
-	byRoute, counts, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
+	byRoute, counts, _, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestNodeAdvertRoutes_LegacyFallback(t *testing.T) {
 			narInsert(t, db, narNode, "legacy-r0", payloadTypeAdvert, 0, nil, narAgo(time.Hour), withMask)
 			narInsert(t, db, narNode, "legacy-r1", payloadTypeAdvert, 1, nil, narAgo(2*time.Hour), withMask)
 			narInsert(t, db, narNode, "legacy-r2", payloadTypeAdvert, 2, nil, narAgo(3*time.Hour), withMask)
-			byRoute, counts, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
+			byRoute, counts, _, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -258,7 +258,7 @@ func TestNodeAdvertRoutes_LegacyFallback(t *testing.T) {
 				t.Fatalf("24h counts = %+v", counts.H24)
 			}
 			narInsert(t, db, narNode, "legacy-null", payloadTypeAdvert, nil, nil, narAgo(4*time.Hour), withMask)
-			byRoute, counts, err = db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
+			byRoute, counts, _, err = db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -277,7 +277,7 @@ func TestNodeAdvertRoutes_AdvertsOnly(t *testing.T) {
 	db := narDB(t)
 	narInsert(t, db, narNode, "grp1", 5, 1, 0b0010, narAgo(time.Hour), true)
 	narInsert(t, db, narNode, "adv1", payloadTypeAdvert, 1, 0b0010, narAgo(2*time.Hour), true)
-	byRoute, counts, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
+	byRoute, counts, _, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), floodAdvertRowCap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestNodeAdvertRoutes_WindowsAndTimestampFormats(t *testing.T) {
 	narInsert(t, db, narNode, "w-7.5d", payloadTypeAdvert, 1, 0b0010, at(180*time.Hour, time.RFC3339), true)
 	narInsert(t, db, narNode, "w-9d", payloadTypeAdvert, 1, 0b0010, at(9*24*time.Hour, time.RFC3339), true)
 	narInsert(t, db, narNode, "w-bad", payloadTypeAdvert, 1, 0b0010, "not-a-time-but-sorts-high", true)
-	_, counts, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, now, floodAdvertRowCap)
+	_, counts, _, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, now, floodAdvertRowCap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestNodeAdvertRoutes_RowCap(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		narInsert(t, db, narNode, fmt.Sprintf("cap%d", i), payloadTypeAdvert, 2, 0b0100, narAgo(time.Duration(3-i)*time.Hour), true)
 	}
-	byRoute, counts, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), 2)
+	byRoute, counts, _, err := db.GetNodeAdvertRoutes(narNode, nodeAdvertRouteLimit, time.Now(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func narServer(t *testing.T) (*Server, http.Handler) {
 // keeps its external meaning.
 func TestNodeDetail_AdvertRouteFields(t *testing.T) {
 	_, router := narServer(t)
-	body, _ := narGetNode(t, router, narNode, 200)
+	body, _ := narGetNode(t, router, narNode+narIncludeQuery, 200)
 	if len(body.RecentAdverts) != 5 {
 		t.Fatalf("recentAdverts = %d rows, want 5", len(body.RecentAdverts))
 	}
@@ -471,7 +471,7 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 	t.Run("node blacklist", func(t *testing.T) {
 		srv, router := narServer(t)
 		srv.cfg.SetNodeBlacklist([]string{narNode})
-		_, raw := narGetNode(t, router, narNode, 404)
+		_, raw := narGetNode(t, router, narNode+narIncludeQuery, 404)
 		if strings.Contains(raw, "advertCounts") || strings.Contains(raw, "h-flood") {
 			t.Fatalf("blacklisted node leaked: %s", raw)
 		}
@@ -479,7 +479,7 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 	t.Run("hidden name prefix", func(t *testing.T) {
 		srv, router := narServer(t)
 		srv.cfg.SetHiddenNamePrefixes([]string{"Route"})
-		_, raw := narGetNode(t, router, narNode, 404)
+		_, raw := narGetNode(t, router, narNode+narIncludeQuery, 404)
 		if strings.Contains(raw, "advertCounts") || strings.Contains(raw, "h-flood") {
 			t.Fatalf("hidden node leaked: %s", raw)
 		}
@@ -493,7 +493,7 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 	t.Run("observer blacklist", func(t *testing.T) {
 		srv, router := narServer(t)
 		srv.cfg.ObserverBlacklist = []string{strings.ToUpper(narNode)} // read lazily on first use
-		body, raw := narGetNode(t, router, narNode, 200)
+		body, raw := narGetNode(t, router, narNode+narIncludeQuery, 200)
 		if leaked(body, raw) || len(body.RecentAdverts) != 5 {
 			t.Fatalf("identity hidden via observer blacklist leaked route fields (or lost recentAdverts): %s", raw)
 		}
@@ -504,7 +504,7 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 			t.Fatal(err)
 		}
 		srv.cfg.SetHiddenNamePrefixes([]string{"Secret"})
-		body, raw := narGetNode(t, router, narNode, 200)
+		body, raw := narGetNode(t, router, narNode+narIncludeQuery, 200)
 		if leaked(body, raw) {
 			t.Fatalf("identity hidden via its observer name leaked route fields: %s", raw)
 		}
@@ -512,25 +512,36 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 }
 
 // recentAdverts keeps its chronological role for nodeWithHealthActivity and
-// other consumers: same 20-row limit and id DESC order as before.
+// other consumers: same 20-row limit and id DESC order as before. route_class
+// is added only when asked for (include=advertRoutes); otherwise the rows are
+// exactly master's.
 func TestGetRecentTransmissionsForNode_RouteClassAdditive(t *testing.T) {
 	db := narDB(t)
 	for i := 0; i < 25; i++ {
 		narInsert(t, db, narNode, fmt.Sprintf("r%02d", i), payloadTypeAdvert, 2, 0b0100, narAgo(time.Duration(25-i)*time.Minute), true)
 	}
 	narInsert(t, db, narNode, "r-grp", 5, 1, 0b0010, narAgo(time.Minute), true)
-	rows, err := db.GetRecentTransmissionsForNode(narNode, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 20 || rows[0]["hash"] != "r-grp" || rows[1]["hash"] != "r24" {
-		t.Fatalf("rows=%d first=%v second=%v", len(rows), rows[0]["hash"], rows[1]["hash"])
-	}
-	if _, ok := rows[0]["route_class"]; ok {
-		t.Fatal("route_class is an ADVERT classification; non-advert rows must not carry it")
-	}
-	if rows[1]["route_class"] != advertClassZeroHop {
-		t.Fatalf("advert route_class = %v", rows[1]["route_class"])
+	for _, withRouteClass := range []bool{true, false} {
+		rows, err := db.GetRecentTransmissionsForNode(narNode, 20, withRouteClass)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 20 || rows[0]["hash"] != "r-grp" || rows[1]["hash"] != "r24" {
+			t.Fatalf("withRouteClass=%v: rows=%d first=%v second=%v", withRouteClass, len(rows), rows[0]["hash"], rows[1]["hash"])
+		}
+		if _, ok := rows[0]["route_class"]; ok {
+			t.Fatal("route_class is an ADVERT classification; non-advert rows must not carry it")
+		}
+		if _, ok := rows[1]["observations"]; !ok {
+			t.Fatalf("withRouteClass=%v: recentAdverts rows keep their observations", withRouteClass)
+		}
+		got, ok := rows[1]["route_class"]
+		if withRouteClass && got != advertClassZeroHop {
+			t.Fatalf("advert route_class = %v", got)
+		}
+		if !withRouteClass && ok {
+			t.Fatalf("without include=advertRoutes the rows must not carry route_class, got %v", got)
+		}
 	}
 }
 
@@ -560,5 +571,17 @@ func TestOpenAPI_NodeAdvertRouteSchemas(t *testing.T) {
 	check("AdvertRouteCounts", AdvertRouteCounts{})
 	if _, ok := props("NodeAdvert")["route_class"]; !ok {
 		t.Error("NodeAdvert.route_class is emitted but not documented")
+	}
+	get := asMap(t, asMap(t, asMap(t, spec["paths"], "paths")["/api/nodes/{pubkey}"], "/api/nodes/{pubkey}")["get"], "get")
+	params, _ := get["parameters"].([]interface{})
+	documented := false
+	for _, p := range params {
+		if m, ok := p.(map[string]interface{}); ok && m["name"] == "include" && m["in"] == "query" &&
+			strings.Contains(fmt.Sprint(m["description"]), nodeDetailIncludeAdvertRoutes) {
+			documented = true
+		}
+	}
+	if !documented {
+		t.Errorf("GET /api/nodes/{pubkey} must document the include=%s opt-in: %v", nodeDetailIncludeAdvertRoutes, params)
 	}
 }
