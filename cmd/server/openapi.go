@@ -151,8 +151,18 @@ func routeDescriptions() map[string]routeMeta {
 			}},
 
 		// Channels
-		"GET /api/channels":                 {Summary: "List channels", Description: "Returns known mesh channels with message counts.", Tag: "channels"},
+		"GET /api/channels":                 {Summary: "List channels", Description: "Returns known mesh channels with message counts. approvedChannels ([{name, hash}]) lists the shared hashtag channels an administrator approved, even before they carry traffic; omitted when empty.", Tag: "channels"},
 		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel.", Tag: "channels"},
+
+		// Shared channel proposals (internal/channelregistry). The server only
+		// queues requests; the ingestor applies them. Timestamps are Unix ms.
+		"GET /api/channel-proposals/config":               {Summary: "Channel suggestion availability", Description: "Returns {enabled}: whether public suggestions are open (requires channelProposals.enabled and a strong apiKey).", Tag: "channels"},
+		"POST /api/channel-proposals":                     {Summary: "Suggest a public hashtag channel", Description: "Body {name}, exactly one JSON object without other fields. Only public hashtag channel names (at most 31 UTF-8 bytes including #, case preserved, no control, line-separator or invisible formatting characters) are accepted — never keys. Returns 202 {requestId}; 400 invalid body or name, 403 disabled, 429 rate limited, 503 queue full (both with Retry-After).", Tag: "channels"},
+		"GET /api/channel-proposals/requests/{requestId}": {Summary: "Status of a suggestion or review request", Description: "Returns {status: queued|pending|approved|rejected|revoked|error, proposal: {id, name, status, createdAt, reviewedAt}, error, builtIn}. builtIn is true when the ingestor already decrypts the name through its built-in/config list. 404 when unknown or expired (24h).", Tag: "channels"},
+		"GET /api/admin/channel-proposals":                {Summary: "List channel suggestions", Description: "Returns {proposals, enabled}, newest first, bounded. A proposal whose name the ingestor already decrypts through its built-in/config list (rainbow table, hashChannels, channelKeys) carries builtIn: true. Optional status filter.", Tag: "admin", Auth: true, QueryParams: []paramMeta{{Name: "status", Description: "pending, approved, rejected or revoked", Type: "string"}}},
+		"POST /api/admin/channel-proposals/{id}/approve":  {Summary: "Approve a channel suggestion", Description: "Queues the approval and returns 202 {requestId}. Approved channels are decrypted by the ingestor and listed for everyone.", Tag: "admin", Auth: true},
+		"POST /api/admin/channel-proposals/{id}/reject":   {Summary: "Reject a channel suggestion", Description: "Queues the rejection and returns 202 {requestId}.", Tag: "admin", Auth: true},
+		"POST /api/admin/channel-proposals/{id}/revoke":   {Summary: "Revoke an approved channel suggestion", Description: "Undoes a previous approval: the ingestor stops decrypting the channel and it drops out of GET /api/channels' approvedChannels. Historical messages already decoded and stored are NOT deleted or hidden. Synchronous precondition check: 202 {requestId} only when the proposal is currently approved; 409 (no side effect, nothing queued) when it is not.", Tag: "admin", Auth: true},
 
 		// Observers
 		"GET /api/observers":                                 {Summary: "List observers", Description: "Returns all known packet observers/gateways.", Tag: "observers"},

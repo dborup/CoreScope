@@ -35,6 +35,12 @@
 - [GET /api/observers/:id/analytics](#get-apiobserversidanalytics)
 - [GET /api/channels](#get-apichannels)
 - [GET /api/channels/:hash/messages](#get-apichannelshashmessages)
+- [GET /api/channel-proposals/config](#get-apichannel-proposalsconfig)
+- [POST /api/channel-proposals](#post-apichannel-proposals)
+- [GET /api/channel-proposals/requests/:requestId](#get-apichannel-proposalsrequestsrequestid)
+- [GET /api/admin/channel-proposals](#get-apiadminchannel-proposals)
+- [POST /api/admin/channel-proposals/:id/approve and /reject](#post-apiadminchannel-proposalsidapprove-and-reject)
+- [POST /api/admin/channel-proposals/:id/revoke](#post-apiadminchannel-proposalsidrevoke)
 - [GET /api/analytics/rf](#get-apianalyticsrf)
 - [GET /api/analytics/topology](#get-apianalyticstopology)
 - [GET /api/analytics/channels](#get-apianalyticschannels)
@@ -1287,6 +1293,11 @@ List decoded channels with message counts.
       "messageCount": number,
       "lastActivity": string (ISO)
     }
+  ],
+  // Shared hashtag channels approved by the administrator, listed even
+  // before they carry traffic. Omitted when there are none. hash == name.
+  "approvedChannels"?: [
+    { "name": string, "hash": string }
   ]
 }
 ```
@@ -1331,6 +1342,100 @@ Messages for a specific channel.
   "total": number                           // total deduplicated messages
 }
 ```
+
+---
+
+## Shared channel proposals
+
+Visitors suggest public hashtag channels; the administrator approves or rejects them with the existing `apiKey`. The server is read-only: it validates each request and writes it to a bounded file queue next to the database, and the ingestor applies it. An accepted request answers `202 { "requestId": string }` right away; poll the request status for the outcome. Validation errors answer `4xx` before anything is queued, and revoke also checks the stored status first and answers `409` when the proposal is not approved (see below). Timestamps are Unix epoch **milliseconds**.
+
+A proposal:
+
+```jsonc
+{
+  "id":         string,        // 16 hex characters
+  "name":       string,        // "#Channel", case preserved, <= 31 UTF-8 bytes
+  "status":     "pending" | "approved" | "rejected" | "revoked",
+  "createdAt":  number,        // ms
+  "reviewedAt"?: number        // ms, once reviewed (also set when revoked)
+}
+```
+
+In `GET /api/admin/channel-proposals` each proposal may also carry `"builtIn": true` (see [Built-in names](#built-in-names)).
+
+State machine: `pending` → `approved` or `rejected` (admin decision); `approved` → `revoked` (admin revoke, see below); `revoked` → `pending` by suggesting the same name again (never auto-approved — see POST /api/channel-proposals). `rejected` is terminal: suggesting a rejected name again reports the earlier rejection and does not reopen it, until retention deletes the rejected row `channelProposals.retentionDays` (default 30) days after the review; from then on the name can be suggested afresh. This keeps a rejected name from being pushed back into the review queue over and over.
+
+### Built-in names
+
+The ingestor already decrypts every name in its config-derived key list: the built-in keys, the rainbow table `channel-rainbow.json` (about 320 common names such as `#test`, `#chat` and `#general`), `hashChannels` and `channelKeys`. That list wins over approved suggestions, so approving such a name adds nothing (its traffic was already decrypted and listed once it has traffic) and revoking it does not stop decryption. The ingestor publishes those hashtag names to `builtin-channels.json` in the request queue directory at startup and after each `SIGHUP` reload; the server marks matching proposals with `"builtIn": true` in the admin list and in the request status, and the UI says so. An ingestor that predates this file simply leaves nothing marked.
+
+## GET /api/channel-proposals/config
+
+```json
+{ "enabled": true }
+```
+
+`enabled` is true only when `channelProposals.enabled` is set and `apiKey` is strong.
+
+## POST /api/channel-proposals
+
+Body `{ "name": "#Channel" }` (the `#` is optional; surrounding spaces are trimmed). Only public hashtag channel names are accepted, never keys.
+
+| Status | Meaning |
+|--------|---------|
+| `202` | `{ "requestId": string }` |
+| `400` | Invalid body or name. The body must be exactly one JSON object with only `name` (unknown fields and trailing data are refused). The name must not be empty or over 31 bytes, and must not contain control characters, the line/paragraph separators U+2028/U+2029, direction overrides, or other invisible formatting characters (Unicode category Cf, such as U+200B, U+FEFF, U+00AD and the tag characters U+E0000–U+E007F; the zero-width joiner U+200D is allowed, and variation selectors are not Cf, so emoji sequences work). The firmware only limits the length; the character rule is CoreScope's own, so two different channels cannot look identical. |
+| `403` | Suggestions disabled |
+| `429` | `submissionsPerHour` reached; `Retry-After` in seconds |
+| `503` | Request queue full; `Retry-After` in seconds |
+
+## GET /api/channel-proposals/requests/:requestId
+
+```jsonc
+{
+  "status":    "queued" | "pending" | "approved" | "rejected" | "revoked" | "error",
+  "proposal"?: Proposal,   // once the ingestor has processed the request
+  "error"?:    string,     // with status "error"
+  "builtIn"?:  true        // the proposal's name is a built-in name (see above)
+}
+```
+
+A duplicate suggestion reports the existing proposal and its status (for a rejected name: `rejected`, until retention). `revoked` is the outcome of a revoke request. `404` when the id is unknown or older than 24 hours.
+
+## GET /api/admin/channel-proposals
+
+Requires `X-API-Key`. Optional `?status=pending|approved|rejected|revoked`. Newest first, bounded.
+
+```jsonc
+{ "proposals": [Proposal & { "builtIn"?: true }], "enabled": boolean }
+```
+
+## POST /api/admin/channel-proposals/:id/approve and /reject
+
+Requires `X-API-Key`. `202 { "requestId": string }`, `404` for an unknown proposal. Only pending proposals change; repeating the stored decision is harmless, and a contradicting one (reject after approve) ends with status `error`.
+
+Missing or wrong key: `401`. No key configured, or a weak one: `403`.
+
+## POST /api/admin/channel-proposals/:id/revoke
+
+Requires `X-API-Key`. Undoes a previous approval: the ingestor stops decrypting the channel (unless the name is also in its config-derived list — the rainbow table, `channelKeys` or `hashChannels`, see [Built-in names](#built-in-names) — in which case that key keeps it decrypting) and it drops out of `GET /api/channels`' `approvedChannels`.
+
+Unlike approve/reject, this endpoint checks synchronously, before queuing anything:
+
+| Status | Meaning |
+|--------|---------|
+| `202` | `{ "requestId": string }` — the proposal was approved; the revoke is queued |
+| `400` | Invalid suggestion id |
+| `404` | Unknown proposal |
+| `409` | The proposal is not currently approved (pending, rejected, or already revoked) — **nothing is queued** |
+
+Missing or wrong key: `401`. No key configured, or a weak one: `403`.
+
+There is a real race between the `409` check and the ingestor actually applying the command: another admin could approve, reject or revoke the same proposal in between. The ingestor re-validates the status from scratch when it applies the command and is the true source of truth; the synchronous `409` here is only a best-effort fast-fail for the common case, not a guarantee. When the race is lost, the request ends with status `error` and an error such as `suggestion is not approved (it is pending)`.
+
+**Historical messages are not affected.** Revoking a channel only removes its decryption key going forward — messages the ingestor already decoded and stored while the channel was approved stay exactly as they are and remain visible on the Channels page. There is no mechanism (and none is planned as part of this) to hide or delete previously-decoded messages when a channel is revoked.
+
+**Retention.** A revoked proposal's row is not deleted at revoke time — only its status changes, keeping `reviewedAt` as the audit timestamp of when it was revoked. It is removed later by the same retention sweep that prunes rejected proposals, once `reviewedAt` is older than `channelProposals.retentionDays` (see [Configuration](user-guide/configuration.md#shared-channel-suggestions)). Approved rows are still never pruned.
 
 ---
 

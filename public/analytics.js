@@ -1047,9 +1047,9 @@
     var nameHtml = c.displayNameHtml
       ? c.displayNameHtml
       : esc(c.displayName || c.name || 'Unknown');
-    return '<tr class="clickable-row" data-action="navigate" data-value="#/channels?ch=' + c.hash + '" tabindex="0" role="row">' +
+    return '<tr class="clickable-row" data-action="navigate" data-value="#/channels?ch=' + esc(String(c.hash)) + '" tabindex="0" role="row">' +
       '<td><strong>' + nameHtml + '</strong></td>' +
-      '<td class="mono">' + (typeof c.hash === 'number' ? '0x' + c.hash.toString(16).toUpperCase().padStart(2, '0') : c.hash) + '</td>' +
+      '<td class="mono">' + (typeof c.hash === 'number' ? '0x' + c.hash.toString(16).toUpperCase().padStart(2, '0') : esc(c.hash)) + '</td>' +
       '<td>' + c.messages + '</td>' +
       '<td>' + c.senders + '</td>' +
       '<td>' + timeAgo(c.lastActivity) + '</td>' +

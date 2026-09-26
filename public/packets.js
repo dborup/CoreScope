@@ -3007,7 +3007,7 @@
     }
     // Undecrypted channel messages — show channel hash and decryption status
     if (decoded.type === 'GRP_TXT' && decoded.channelHash != null) {
-      const hashHex = decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase();
+      const hashHex = escapeHtml(decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase());
       const statusLabel = decoded.decryptionStatus === 'no_key' ? 'no key' : 'decryption failed';
       return `<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Ch 0x${hashHex} <span class="muted">(${statusLabel})</span>`;
     }
@@ -3015,7 +3015,7 @@
     // Envelope: channel_hash + MAC + ciphertext. When decrypted, inner is
     // data_type(uint16 LE) + data_len(1) + blob (firmware BaseChatMesh.cpp:382-385).
     if (decoded.type === 'GRP_DATA' && decoded.channelHash != null) {
-      const hashHex = decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase();
+      const hashHex = escapeHtml(decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase());
       // #1796 r1 DRY: all three GRP_DATA branches below share the same
       // database-icon + `Ch 0x${hashHex}` prefix. Extract once; behavior is
       // byte-identical with the prior inline form.
@@ -3215,6 +3215,32 @@
     }
   }
 
+  // Message block at the top of the packet detail: the decrypted text with
+  // its channel / hops / SNR line, or the channel hash of an undecrypted
+  // group message.
+  function buildDetailMessageHtml(decoded, snr) {
+    if (decoded.text) {
+      const chLabel = decoded.channel || (decoded.channel_idx != null ? `Ch ${decoded.channel_idx}` : null) || (decoded.channelHash != null ? `Ch 0x${decoded.channelHash.toString(16)}` : '');
+      const hopLabel = decoded.path_len != null ? `${decoded.path_len} hops` : '';
+      const snrLabel = snr != null ? `SNR ${snr} dB` : '';
+      // Every part can come from packet data, and shared channel names are
+      // publicly suggestible (and may contain < > " '), so escape each one.
+      const meta = [chLabel, hopLabel, snrLabel].filter(Boolean).map(escapeHtml).join(' · ');
+      return `<div class="detail-message" style="padding:12px;margin:8px 0;background:var(--card-bg);border-radius:8px;border-left:3px solid var(--accent)">
+        <div style="font-size:1.1em">${escapeHtml(decoded.text)}</div>
+        ${meta ? `<div style="font-size:0.85em;color:var(--text-muted);margin-top:4px">${meta}</div>` : ''}
+      </div>`;
+    }
+    if (decoded.type === 'GRP_TXT' && decoded.channelHash != null) {
+      const hashHex = escapeHtml(decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase());
+      const statusLabel = decoded.decryptionStatus === 'no_key' ? 'no key' : 'decryption failed';
+      return `<div class="detail-message" style="padding:12px;margin:8px 0;background:var(--card-bg);border-radius:8px;border-left:3px solid var(--warning)">
+        <div style="font-size:1.1em"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Channel Hash: 0x${hashHex} <span style="color:var(--text-muted)">(${statusLabel})</span></div>
+      </div>`;
+    }
+    return '';
+  }
+
   async function renderDetail(panel, data, chosenObsId) {
     const pkt = data.packet;
     const observations = data.observations || [];
@@ -3335,24 +3361,7 @@
     const rssi = effectivePkt.rssi ?? decoded.RSSI ?? decoded.rssi ?? null;
     const hasRawHex = !!(effectivePkt.raw_hex || pkt.raw_hex);
 
-    // Build message preview
-    let messageHtml = '';
-    if (decoded.text) {
-      const chLabel = decoded.channel || (decoded.channel_idx != null ? `Ch ${decoded.channel_idx}` : null) || (decoded.channelHash != null ? `Ch 0x${decoded.channelHash.toString(16)}` : '');
-      const hopLabel = decoded.path_len != null ? `${decoded.path_len} hops` : '';
-      const snrLabel = snr != null ? `SNR ${snr} dB` : '';
-      const meta = [chLabel, hopLabel, snrLabel].filter(Boolean).join(' · ');
-      messageHtml = `<div class="detail-message" style="padding:12px;margin:8px 0;background:var(--card-bg);border-radius:8px;border-left:3px solid var(--accent)">
-        <div style="font-size:1.1em">${escapeHtml(decoded.text)}</div>
-        ${meta ? `<div style="font-size:0.85em;color:var(--text-muted);margin-top:4px">${meta}</div>` : ''}
-      </div>`;
-    } else if (decoded.type === 'GRP_TXT' && decoded.channelHash != null) {
-      const hashHex = decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase();
-      const statusLabel = decoded.decryptionStatus === 'no_key' ? 'no key' : 'decryption failed';
-      messageHtml = `<div class="detail-message" style="padding:12px;margin:8px 0;background:var(--card-bg);border-radius:8px;border-left:3px solid var(--warning, #f0ad4e)">
-        <div style="font-size:1.1em"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Channel Hash: 0x${hashHex} <span style="color:var(--text-muted)">(${statusLabel})</span></div>
-      </div>`;
-    }
+    const messageHtml = buildDetailMessageHtml(decoded, snr);
 
     const obsCount = data.observation_count || observations.length || 1;
     const uniqueObservers = new Set(observations.map(o => o.observer_id)).size;
@@ -3747,7 +3756,7 @@
         }
       }
     } else if (decoded.type === 'GRP_TXT') {
-      const hashHex = decoded.channelHashHex || (decoded.channelHash != null ? decoded.channelHash.toString(16).padStart(2, '0').toUpperCase() : '??');
+      const hashHex = escapeHtml(decoded.channelHashHex || (decoded.channelHash != null ? decoded.channelHash.toString(16).padStart(2, '0').toUpperCase() : '??'));
       const statusLabel = decoded.decryptionStatus === 'no_key' ? '(no key)' : decoded.decryptionStatus === 'decryption_failed' ? '(decryption failed)' : '';
       rows += fieldRow(off, 'Channel Hash', `0x${hashHex} ${statusLabel}`, '');
       rows += fieldRow(off + 1, 'MAC (2B)', decoded.mac || '', '');
@@ -4125,6 +4134,7 @@
       obsName,
       reconcileVisibleCols,
       getDetailPreview,
+      buildDetailMessageHtml,
       sortGroupChildren,
       getPathHopCount,
       renderDecodedPacket,

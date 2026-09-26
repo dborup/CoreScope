@@ -229,6 +229,15 @@
     "#bookclub",
     "#shtf"
   ],
+  "channelProposals": {
+    "enabled": false,
+    "maxPending": 100,
+    "maxApproved": 128,
+    "maxQueuedRequests": 256,
+    "retentionDays": 30,
+    "submissionsPerHour": 20
+  },
+  "_comment_channelProposals": "Shared hashtag channels: visitors suggest public hashtag channels (names only, never keys) on the Channels page and an administrator approves or rejects them at #/channels?view=proposals with the apiKey. Submissions open only when enabled is true AND apiKey is strong (16+ characters, not a placeholder). Approved channels are decrypted by the ingestor and listed for everyone, even before they carry traffic; they stay active if enabled is later set to false. Limits: maxPending/maxApproved bound the table, maxQueuedRequests bounds the request queue next to the database, submissionsPerHour is a global sliding window, and rejected or unreviewed suggestions are deleted after retentionDays. Read by both server and ingestor.",
   "healthThresholds": {
     "infraDegradedHours": 24,
     "infraSilentHours": 72,

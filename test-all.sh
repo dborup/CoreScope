@@ -60,6 +60,9 @@ node test-issue-1890-og-url.js
 node test-traces.js
 node test-live-multibyte-filter.js
 node test-issue-2052-touch-target-css.js
+node test-channel-proposals.js
+node test-packet-detail-channel-xss.js
+node test-channels-name-escaping.js
 
 # #1418 — route-view v2 (Tufte) coverage
 node test-issue-1418-raw-hex-extraction.js

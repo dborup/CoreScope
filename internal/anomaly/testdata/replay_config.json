@@ -1,0 +1,75 @@
+{
+ "limits": {
+  "max_keys_per_scope": 1000,
+  "state_ttl": "48h",
+  "dedup_horizon": "6h",
+  "max_dedup_ids": 100000,
+  "reorder_delay": "0s",
+  "max_reorder_buffer": 64,
+  "max_window_entries": 4096,
+  "max_candidates_per_call": 1000,
+  "max_pending_candidates": 10000
+ },
+ "expected": "include",
+ "rate": [
+  {
+   "name": "stream_5m_example",
+   "scope": "stream",
+   "window": "5m",
+   "threshold": 10,
+   "state": {
+    "confirm_after": "0s",
+    "end_after_quiet": "10m",
+    "cooldown": "30m"
+   }
+  },
+  {
+   "name": "global_5m_example",
+   "scope": "global",
+   "window": "5m",
+   "threshold": 20,
+   "state": {
+    "confirm_after": "0s",
+    "end_after_quiet": "10m",
+    "cooldown": "30m"
+   }
+  }
+ ],
+ "new_stream": [
+  {
+   "name": "new_stream_example",
+   "scope": "stream",
+   "window": "1h",
+   "min_count": 10,
+   "censor_window": "30m",
+   "quiet_period": "30m",
+   "state": {
+    "confirm_after": "0s",
+    "end_after_quiet": "30m",
+    "cooldown": "0s"
+   }
+  }
+ ],
+ "periodic": [
+  {
+   "name": "periodic_example",
+   "scope": "stream",
+   "min_period": "1m",
+   "max_period": "1h",
+   "burst_gap": "5s",
+   "jitter_abs": "5s",
+   "jitter_rel": 0.02,
+   "max_missing": 2,
+   "min_pulses": 8,
+   "history_len": 32,
+   "min_coverage": 0.6,
+   "max_jitter_fraction": 0.5,
+   "max_chance": 0.01,
+   "state": {
+    "confirm_after": "0s",
+    "end_after_quiet": "30m",
+    "cooldown": "0s"
+   }
+  }
+ ]
+}

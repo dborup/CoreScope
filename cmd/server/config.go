@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -147,6 +148,11 @@ type Config struct {
 	APIKey     string            `json:"apiKey"`
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
+
+	// ChannelProposals configures publicly suggested hashtag channels
+	// (internal/channelregistry). Submissions open only when enabled AND a
+	// strong apiKey is set; the same block is read by the ingestor.
+	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
 
 	// HashRegions mirrors the ingestor's region-scope config (same
 	// config.json key). The server never derives HMAC keys from it — it
