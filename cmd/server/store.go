@@ -306,6 +306,12 @@ type PacketStore struct {
 	// incrementally by updateDistanceIndexForTxs on ingest.
 	distHops  []distHopRecord
 	distPaths []distPathRecord
+	// distSnapReaders counts computeAnalyticsDistance calls that are
+	// reading a distHops/distPaths snapshot outside s.mu. While it is
+	// non-zero, compactDistIndex writes into a fresh backing array
+	// instead of compacting in place, so a pinned snapshot is never
+	// overwritten. Incremented only under s.mu.RLock, read under s.mu.Lock.
+	distSnapReaders atomic.Int64
 
 	// Lazy-build gate for the distance index (#1011). distLazyBuilt is
 	// true once the first /api/analytics/distance request has completed
@@ -4533,22 +4539,7 @@ func (s *PacketStore) updateDistanceIndexForTxs(txs []*StoreTx) {
 	for _, tx := range txs {
 		removeSet[tx] = true
 	}
-	n := 0
-	for _, r := range s.distHops {
-		if !removeSet[r.tx] {
-			s.distHops[n] = r
-			n++
-		}
-	}
-	s.distHops = s.distHops[:n]
-	n = 0
-	for _, r := range s.distPaths {
-		if !removeSet[r.tx] {
-			s.distPaths[n] = r
-			n++
-		}
-	}
-	s.distPaths = s.distPaths[:n]
+	s.compactDistIndex(removeSet)
 
 	// Build lookup maps once.
 	allNodes, pm := s.getCachedNodesAndPM()
@@ -4575,6 +4566,35 @@ func (s *PacketStore) updateDistanceIndexForTxs(txs []*StoreTx) {
 			s.distPaths = append(s.distPaths, *txPath)
 		}
 	}
+}
+
+// compactDistIndex drops every distHops/distPaths record whose tx is in
+// remove. Compacts in place when no computeAnalyticsDistance holds a
+// snapshot (the common case: no allocation); otherwise copies into fresh
+// slices so the pinned snapshot's backing array is left untouched.
+// Must be called with s.mu held (Lock).
+func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
+	hops, paths := s.distHops, s.distPaths
+	if s.distSnapReaders.Load() > 0 {
+		hops = make([]distHopRecord, len(s.distHops))
+		paths = make([]distPathRecord, len(s.distPaths))
+	}
+	n := 0
+	for _, r := range s.distHops {
+		if !remove[r.tx] {
+			hops[n] = r
+			n++
+		}
+	}
+	s.distHops = hops[:n]
+	n = 0
+	for _, r := range s.distPaths {
+		if !remove[r.tx] {
+			paths[n] = r
+			n++
+		}
+	}
+	s.distPaths = paths[:n]
 }
 
 // DistanceIndexBuilt reports whether the distance analytics index has
@@ -5060,21 +5080,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	for _, tx := range evicting {
 		evictedTxSet[tx] = true
 	}
-	newDistHops := s.distHops[:0]
-	for i := range s.distHops {
-		if !evictedTxSet[s.distHops[i].tx] {
-			newDistHops = append(newDistHops, s.distHops[i])
-		}
-	}
-	s.distHops = newDistHops
-
-	newDistPaths := s.distPaths[:0]
-	for i := range s.distPaths {
-		if !evictedTxSet[s.distPaths[i].tx] {
-			newDistPaths = append(newDistPaths, s.distPaths[i])
-		}
-	}
-	s.distPaths = newDistPaths
+	s.compactDistIndex(evictedTxSet)
 
 	// Trim packets slice
 	n := copy(s.packets, s.packets[cutoffIdx:])
@@ -7877,14 +7883,12 @@ func (s *PacketStore) computeAnalyticsDistance(region, area string) map[string]i
 	// and category stats run on locally-captured slices OUTSIDE the
 	// lock so concurrent ingest writers are not blocked by readers.
 	//
-	// Safety: snapshot slice headers are O(1). distHops/distPaths are
-	// append-only via re-slice in buildDistanceIndex / updateDistanceIndexForTxs
-	// under s.mu.Lock; if the backing array is reallocated after we
-	// release the RLock, our snapshot still points at the prior backing
-	// array (kept alive by GC) and observes the consistent length we
-	// captured. The distHopRecord / distPathRecord values themselves
-	// are value types (not pointers to live records) so we cannot read
-	// torn writes from them post-release.
+	// Safety: snapshot slice headers are O(1). Ingest only appends past
+	// the snapshot's length, and buildDistanceIndex swaps in fresh
+	// slices. updateDistanceIndexForTxs and eviction compact in place,
+	// which would rewrite the snapshot's elements, so the snapshot is
+	// pinned (distSnapReaders) until the filter loops below have copied
+	// it; compactDistIndex copies instead of compacting while pinned.
 	var regionObs map[string]bool
 	if region != "" {
 		// resolveRegionObservers uses its own mutex (regionObsMu)
@@ -7899,6 +7903,13 @@ func (s *PacketStore) computeAnalyticsDistance(region, area string) map[string]i
 	s.mu.RLock()
 	hopsSnap := s.distHops
 	pathsSnap := s.distPaths
+	s.distSnapReaders.Add(1)
+	pinned := true
+	defer func() {
+		if pinned {
+			s.distSnapReaders.Add(-1)
+		}
+	}()
 
 	// Build region match set INSIDE the lock — touches tx.Observations
 	// (slice header mutated by ingest). For non-region calls (the common
@@ -7937,8 +7948,7 @@ func (s *PacketStore) computeAnalyticsDistance(region, area string) map[string]i
 	s.mu.RUnlock()
 
 	// Everything below operates on hopsSnap / pathsSnap / matchSet —
-	// no s.mu, no s.distHops / s.distPaths access. Safe to run while
-	// ingest writers reallocate the underlying store-owned slices.
+	// no s.mu, no s.distHops / s.distPaths access.
 
 	// Additionally filter matchSet by area nodes
 	if areaNodes != nil && matchSet != nil {
@@ -8000,6 +8010,9 @@ func (s *PacketStore) computeAnalyticsDistance(region, area string) map[string]i
 			filteredPaths = append(filteredPaths, pathsSnap[i])
 		}
 	}
+	// Snapshot fully copied; let compaction go back to in-place.
+	s.distSnapReaders.Add(-1)
+	pinned = false
 
 	// Build category stats and time series from precomputed data
 	catDists := map[string][]float64{"R↔R": {}, "C↔R": {}, "C↔C": {}}

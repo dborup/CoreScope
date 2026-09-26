@@ -252,3 +252,225 @@ func TestDistanceSnapshot_AreaOnly_RaceStress(t *testing.T) {
 		t.Fatalf("%d of 30 area-only computes panicked", panics)
 	}
 }
+
+// The same mid-loop writers, but removing only some records: the writer
+// then moves the survivors down in place, over snapshot elements the compute
+// has yet to copy. The compute must still report its snapshot.
+func TestDistanceSnapshot_AreaOnly_UpdateIndexMidLoop_Partial(t *testing.T) {
+	s := newDistSnapStore(t, 5, time.Now().Add(-time.Hour), 1)
+	release := distSnapParkDecode(s.packets[2])
+	defer release()
+	done := distSnapRunCompute(s, "", distSnapArea)
+	distSnapWaitParked(t)
+
+	s.mu.Lock()
+	// Not the parked tx: the writer decodes every tx it recomputes.
+	s.updateDistanceIndexForTxs([]*StoreTx{s.packets[0], s.packets[1], s.packets[3], s.packets[4]})
+	s.mu.Unlock()
+	release()
+
+	distSnapAssertSnapshotState(t, <-done)
+}
+
+func TestDistanceSnapshot_AreaOnly_EvictMidLoop_Partial(t *testing.T) {
+	// Ages 74h, 50h, 26h, 2h, -22h: retention 24h evicts the first three
+	// and the parked packets[3] survives.
+	s := newDistSnapStore(t, 5, time.Now().Add(-74*time.Hour), 24*60)
+	s.retentionHours = 24
+	release := distSnapParkDecode(s.packets[3])
+	defer release()
+	done := distSnapRunCompute(s, "", distSnapArea)
+	distSnapWaitParked(t)
+
+	s.mu.Lock()
+	if ev := s.EvictStale(); ev != 3 {
+		s.mu.Unlock()
+		t.Fatalf("evicted %d, want 3", ev)
+	}
+	s.mu.Unlock()
+	release()
+
+	distSnapAssertSnapshotState(t, <-done)
+}
+
+// Region+area: the compute parks in the area filter over matchSet, after
+// RUnlock and before its filter loops copy hopsSnap/pathsSnap. Before the
+// fix, eviction compacted the shared backing array to
+// [h4 h1 h2 h3 h4]: totalHops 5, avgDist 3.8, hash0004 twice.
+func TestDistanceSnapshot_RegionArea_EvictAfterSnapshot(t *testing.T) {
+	s := newDistSnapStore(t, 5, time.Now().Add(-100*time.Hour), 24*60)
+	s.retentionHours = 24
+	release := distSnapParkDecode(s.packets[4])
+	defer release()
+	done := distSnapRunCompute(s, distSnapRegion, distSnapArea)
+	distSnapWaitParked(t)
+
+	s.mu.Lock()
+	if ev := s.EvictStale(); ev != 4 {
+		s.mu.Unlock()
+		t.Fatalf("evicted %d, want 4", ev)
+	}
+	s.mu.Unlock()
+	release()
+
+	distSnapAssertSnapshotState(t, <-done)
+}
+
+// Same with updateDistanceIndexForTxs dropping tx1's records. Before the
+// fix: [h0 h2 h3 h4 h4], avgDist 3.6, hash0004 twice.
+func TestDistanceSnapshot_RegionArea_UpdateIndexAfterSnapshot(t *testing.T) {
+	s := newDistSnapStore(t, 5, time.Now().Add(-time.Hour), 1)
+	release := distSnapParkDecode(s.packets[4])
+	defer release()
+	done := distSnapRunCompute(s, distSnapRegion, distSnapArea)
+	distSnapWaitParked(t)
+
+	s.mu.Lock()
+	s.updateDistanceIndexForTxs([]*StoreTx{s.packets[1]})
+	s.mu.Unlock()
+	release()
+
+	distSnapAssertSnapshotState(t, <-done)
+}
+
+func distSnapHopHashes(h []distHopRecord) []string {
+	out := make([]string, len(h))
+	for i := range h {
+		out[i] = h[i].Hash
+	}
+	return out
+}
+
+func distSnapPathHashes(p []distPathRecord) []string {
+	out := make([]string, len(p))
+	for i := range p {
+		out[i] = p[i].Hash
+	}
+	return out
+}
+
+// Without a pinned snapshot compaction stays in place (no new backing array,
+// so ingest pays no allocation). With one pinned, compaction plus a later
+// ingest append must leave the pinned snapshot untouched.
+func TestCompactDistIndex_InPlaceUnlessPinned(t *testing.T) {
+	s := newDistSnapStore(t, 5, time.Now().Add(-time.Hour), 1)
+
+	s.mu.Lock()
+	hops0, paths0 := &s.distHops[0], &s.distPaths[0]
+	s.updateDistanceIndexForTxs([]*StoreTx{s.packets[0]})
+	if &s.distHops[0] != hops0 || &s.distPaths[0] != paths0 {
+		s.mu.Unlock()
+		t.Fatal("unpinned compaction allocated new distHops/distPaths")
+	}
+	s.mu.Unlock()
+
+	s.mu.RLock()
+	hopsSnap, pathsSnap := s.distHops, s.distPaths
+	s.distSnapReaders.Add(1)
+	s.mu.RUnlock()
+	wantHops, wantPaths := distSnapHopHashes(hopsSnap), distSnapPathHashes(pathsSnap)
+
+	s.mu.Lock()
+	s.updateDistanceIndexForTxs([]*StoreTx{s.packets[1]})
+	s.distHops = append(s.distHops, distHopRecord{Hash: "new"}) // as IngestNewFromDB
+	s.distPaths = append(s.distPaths, distPathRecord{Hash: "new"})
+	gotLive := distSnapHopHashes(s.distHops)
+	s.mu.Unlock()
+	s.distSnapReaders.Add(-1)
+
+	if got := distSnapHopHashes(hopsSnap); fmt.Sprint(got) != fmt.Sprint(wantHops) {
+		t.Errorf("pinned hop snapshot changed: %v, want %v", got, wantHops)
+	}
+	if got := distSnapPathHashes(pathsSnap); fmt.Sprint(got) != fmt.Sprint(wantPaths) {
+		t.Errorf("pinned path snapshot changed: %v, want %v", got, wantPaths)
+	}
+	if want := "[hash0002 hash0003 hash0004 new]"; fmt.Sprint(gotLive) != want {
+		t.Errorf("distHops = %v, want %s", gotLive, want)
+	}
+}
+
+// Every compute must release its pin; a leaked pin would turn every later
+// compaction into a full copy.
+func TestDistanceSnapshot_PinReleased(t *testing.T) {
+	s := newDistSnapStore(t, 20, time.Now().Add(-time.Hour), 1)
+	for _, q := range [][2]string{{"", ""}, {"", distSnapArea}, {distSnapRegion, ""}, {distSnapRegion, distSnapArea}} {
+		s.computeAnalyticsDistance(q[0], q[1])
+		if n := s.distSnapReaders.Load(); n != 0 {
+			t.Fatalf("distSnapReaders=%d after compute(region=%q, area=%q), want 0", n, q[0], q[1])
+		}
+	}
+}
+
+// Default computes (the recomputer's call) under -race against the real
+// updateDistanceIndexForTxs plus an IngestNewFromDB-style append. Before the
+// fix the race detector reports the filter loop reading snapshot elements
+// that the compaction overwrites.
+func TestDistanceSnapshot_DefaultCompute_RaceStress(t *testing.T) {
+	const n = 2000
+	s := newDistSnapStore(t, n, time.Now().Add(-time.Hour), 0)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for k := 0; ; k++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.mu.Lock()
+			tx := s.packets[k%n]
+			s.updateDistanceIndexForTxs([]*StoreTx{tx})
+			s.distHops = append(s.distHops, distHopRecord{Hash: tx.Hash, Dist: 1, Type: "R↔R", tx: tx})
+			s.distPaths = append(s.distPaths, distPathRecord{Hash: tx.Hash, TotalDist: 1, tx: tx})
+			s.mu.Unlock()
+			runtime.Gosched()
+		}
+	}()
+	for i := 0; i < 30; i++ {
+		if out := <-distSnapRunCompute(s, "", ""); out.panicVal != "" {
+			t.Errorf("compute panicked: %s", out.panicVal)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// BenchmarkUpdateDistanceIndexForTxs measures one ingest-cycle recompute
+// (one tx) at ~30K transmissions: 3.6 hop records per tx as in the e2e
+// fixture, ~110K hops and ~21.6K paths. "pinned" is the rare case of a
+// compute holding a snapshot, where compaction copies instead.
+func BenchmarkUpdateDistanceIndexForTxs(b *testing.B) {
+	for _, pinned := range []bool{false, true} {
+		name := "unpinned"
+		if pinned {
+			name = "pinned"
+		}
+		b.Run(name, func(b *testing.B) {
+			s := newDistSnapStore(b, 30000, time.Now().Add(-time.Hour), 0)
+			base := s.distHops
+			hops := make([]distHopRecord, 0, 110000)
+			for len(hops) < cap(hops) {
+				r := base[len(hops)%len(base)]
+				r.ToPk = fmt.Sprintf("to-%d", len(hops)%5000)
+				hops = append(hops, r)
+			}
+			s.distHops = hops
+			s.distPaths = s.distPaths[:21600]
+			if pinned {
+				s.distSnapReaders.Add(1)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				s.mu.Lock()
+				tx := s.packets[i%len(s.packets)]
+				s.updateDistanceIndexForTxs([]*StoreTx{tx})
+				s.distHops = append(s.distHops, distHopRecord{tx: tx})
+				s.distPaths = append(s.distPaths, distPathRecord{tx: tx})
+				s.mu.Unlock()
+			}
+		})
+	}
+}
