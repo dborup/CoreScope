@@ -87,7 +87,13 @@ type DB struct {
 	hasDefaultScopeConfirmedAtFlag schemaFlag    // nodes.default_scope_confirmed_at (#1865 follow-up) -- read via hasDefaultScopeConfirmedAt()
 	hasMultibyteSupColsFlag        schemaFlag    // nodes.multibyte_sup (#903) -- read via hasMultibyteSupCols()
 	hasLastSeenFlag                schemaFlag    // transmissions.last_seen (#1690) -- read via hasLastSeen()
+	hasRouteMaskFlag               schemaFlag    // transmissions.route_mask (#89) -- read via hasRouteMask()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
+
+	// route_mask backfill status cache (#89), see route_mask.go.
+	routeMaskStatusMu  sync.Mutex
+	routeMaskStatus    RouteMaskBackfillStatus
+	routeMaskStatusExp time.Time
 
 	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
 	channelsCacheMu  sync.Mutex
@@ -110,6 +116,7 @@ func (db *DB) hasConfiguredScope() bool         { return db.hasConfiguredScopeFl
 func (db *DB) hasDefaultScopeConfirmedAt() bool { return db.hasDefaultScopeConfirmedAtFlag.get() }
 func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsFlag.get() }
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
+func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
 
 // OpenDB opens a read-only SQLite connection with WAL mode.
 func OpenDB(path string) (*DB, error) {
@@ -147,7 +154,7 @@ func (db *DB) healSchemaFlags() {
 	flags := []*schemaFlag{
 		&db.isV3Flag, &db.hasResolvedPathFlag, &db.hasObsRawHexFlag, &db.hasScopeNameFlag,
 		&db.hasDefaultScopeFlag, &db.hasConfiguredScopeFlag, &db.hasDefaultScopeConfirmedAtFlag,
-		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag,
+		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag, &db.hasRouteMaskFlag,
 	}
 	allTrue := func() bool {
 		for _, f := range flags {
@@ -231,6 +238,9 @@ func (db *DB) detectSchema() {
 			}
 			if colName == "last_seen" {
 				db.hasLastSeenFlag.forceTrue()
+			}
+			if colName == "route_mask" {
+				db.hasRouteMaskFlag.forceTrue()
 			}
 		}
 	}
@@ -997,6 +1007,60 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 	}
 	obsByTx := db.getObservationsForTransmissions([]int{txID})
 	return obsByTx[txID]
+}
+
+// ObservationRawHexForHash returns the stored wire bytes per observation id for
+// one transmission, keyed by observations.id. Empty when the schema has no
+// observations.raw_hex column (#881 made it optional) or nothing is stored.
+//
+// Why this is read on demand instead of held in memory (upstream #1999): the
+// store deliberately does not retain obs.RawHex (#881, ~98MB on a
+// ~1.7M-observation store), on the belief that one content hash implies one
+// frame. It does not: the firmware hashes payload and type independently of the
+// relay path, so observations of one transmission legitimately carry different
+// bytes. Keeping the memory saving and paying one query on the packet-detail
+// path, which is a single packet a human is looking at, is the trade this makes.
+//
+// Two indexed lookups regardless of observation count: transmissions.hash,
+// then observations.transmission_id. Which index SQLite picks is the planner's
+// choice; on the migrated e2e fixture EXPLAIN QUERY PLAN shows the UNIQUE
+// autoindex sqlite_autoindex_transmissions_1 and the composite
+// idx_observations_tx_ts (idx_transmissions_hash and
+// idx_observations_transmission_id also cover these columns).
+func (db *DB) ObservationRawHexForHash(hash string) (map[int]string, error) {
+	if db == nil || db.conn == nil || !db.hasObsRawHex() || hash == "" {
+		return nil, nil
+	}
+	var txID int
+	if err := db.conn.QueryRow("SELECT id FROM transmissions WHERE hash = ?",
+		strings.ToLower(hash)).Scan(&txID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup transmission for observation frames: %w", err)
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, raw_hex FROM observations
+		 WHERE transmission_id = ? AND raw_hex IS NOT NULL AND raw_hex <> ''`, txID)
+	if err != nil {
+		return nil, fmt.Errorf("query observation frames: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int]string)
+	for rows.Next() {
+		var id int
+		var hx sql.NullString
+		if err := rows.Scan(&id, &hx); err != nil {
+			return nil, fmt.Errorf("scan observation frame: %w", err)
+		}
+		if hx.Valid && hx.String != "" {
+			out[id] = hx.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate observation frames: %w", err)
+	}
+	return out, nil
 }
 
 // GetNodes returns filtered, paginated node list.

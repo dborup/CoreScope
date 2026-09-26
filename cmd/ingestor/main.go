@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -277,6 +278,10 @@ func main() {
 			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
 		}
 	}
+	// #89: route_mask_changes rows of transmissions deleted by any path.
+	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+		log.Printf("[prune] route_mask_changes error: %v", err)
+	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
 	// Independent of the feature flag, so data persists are reaped even after
@@ -304,6 +309,15 @@ func main() {
 	} else {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (0 dropped)")
 	}
+
+	// #89: route_mask backfill runs next to live ingest, after the buffer is
+	// draining, so its one-time pending-index build (~20 s on a staging-sized
+	// DB) is absorbed by IngestBuffer instead of delaying start-up. Cancelled
+	// on shutdown so store.Close() does not wait for it; it resumes on the
+	// next start.
+	routeMaskCtx, stopRouteMaskBackfill := context.WithCancel(context.Background())
+	defer stopRouteMaskBackfill()
+	store.StartRouteMaskBackfill(routeMaskCtx)
 
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
@@ -347,6 +361,9 @@ func main() {
 					log.Printf("[prune] error: %v", err)
 				} else if n > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
+				}
+				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+					log.Printf("[prune] route_mask_changes error: %v", err)
 				}
 			}
 		}()
@@ -471,6 +488,7 @@ func main() {
 	<-sig
 
 	log.Println("Shutting down...")
+	stopRouteMaskBackfill()
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {
@@ -676,6 +694,22 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		name, _ := msg["origin"].(string)
 		iata := parts[1]
 		meta := extractObserverMeta(msg)
+		// A replayed status message is the broker handing us the observer's
+		// last published snapshot — it is not evidence the observer is alive
+		// now. Stamping last_seen from it resurrects dead observers, so the
+		// replay path only refreshes metadata.
+		//
+		// Two ways to recognise one: the retain flag (our own subscribe), and
+		// the payload itself (a replay that reached us through the mosquitto
+		// bridge, where the flag does not survive the hop — see
+		// statusIsLiveness).
+		if m.Retained() || !statusIsLiveness(msg, time.Now().UTC()) {
+			if err := store.UpsertObserverRetained(observerID, name, iata, meta); err != nil {
+				log.Printf("MQTT [%s] retained observer status error: %v", tag, err)
+			}
+			log.Print(formatStatusLog(tag, firstNonEmpty(name, observerID), iata))
+			return
+		}
 		// observer.last_seen is "when did the analyzer last hear from this
 		// observer" — fundamentally an ingest-time question. Passing "" makes
 		// UpsertObserverAt use time.Now(), independent of the envelope timestamp

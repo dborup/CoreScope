@@ -205,7 +205,7 @@ type DecodedPacket struct {
 }
 
 func decodeHeader(b byte) Header {
-	rt := int(b & 0x03)
+	rt := packetpath.RouteTypeFromHeader(b)
 	pt := int((b >> 2) & 0x0F)
 	pv := int((b >> 6) & 0x03)
 

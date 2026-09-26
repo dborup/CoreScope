@@ -279,6 +279,10 @@ type Config struct {
 	// so browsers enforce same-origin policy. Set to ["*"] to allow all origins.
 	CORSAllowedOrigins []string `json:"corsAllowedOrigins,omitempty"`
 
+	// WebSocket carries the /ws transport limits from #1794. Omitted entirely
+	// means: rate limit at its default, connection cap off, no deny list.
+	WebSocket *WebSocketConfig `json:"webSocket,omitempty"`
+
 	DebugAffinity bool `json:"debugAffinity,omitempty"`
 
 	// MapDarkTileProvider selects the default dark-mode basemap provider for
@@ -619,6 +623,81 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 	return cfg, nil // defaults
 }
 
+// WebSocketConfig holds the /ws transport limits (#1794). These sit behind
+// the CheckOrigin allowlist (#1793) and catch non-browser clients, which can
+// omit or forge Origin.
+type WebSocketConfig struct {
+	// MaxConnsPerIP caps concurrent /ws connections from one client address.
+	// DEFAULT 0, meaning OFF, and that is a deliberate departure from the
+	// value floated on #1794.
+	//
+	// A cap of 5 is safe only when one address means one household. It does
+	// not on mobile: carrier-grade NAT puts thousands of unrelated subscribers
+	// behind a single public IPv4, so a low cap would refuse real visitors on
+	// phones while barely inconveniencing a scraper that can rent more
+	// addresses. Operators who know their audience can set it; we must not
+	// pick it for them.
+	MaxConnsPerIP int `json:"maxConnsPerIP,omitempty"`
+
+	// UpgradesPerMinPerIP caps handshakes per minute from one client address.
+	// DEFAULT 30, on. Unlike the connection cap this is safe under CGNAT: a
+	// real client upgrades a handful of times per minute even while
+	// reconnecting, so 30 leaves ordinary traffic untouched while flattening
+	// the reconnect loop that makes scrapers expensive.
+	UpgradesPerMinPerIP *int `json:"upgradesPerMinPerIP,omitempty"`
+
+	// TrustedProxies lists the addresses or CIDRs of reverse proxies whose
+	// X-Forwarded-For may be believed. REQUIRED for the limits to do anything
+	// behind nginx/Caddy/Traefik/ingress: without it every visitor shares the
+	// proxy's address, so the limits are skipped and a warning is logged.
+	// Never list an address you do not control; anyone reaching the server
+	// from a trusted address can name any client IP they like.
+	TrustedProxies []string `json:"trustedProxies,omitempty"`
+
+	// Deny blocks addresses outright at the upgrade, before the handshake.
+	// Accepts both bare addresses ("1.2.3.4") and CIDRs ("1.2.3.0/24").
+	// Applies even when clients cannot be told apart, because it is an
+	// explicit instruction rather than an inference.
+	Deny []string `json:"deny,omitempty"`
+}
+
+// WSMaxConnsPerIP returns the configured concurrent-connection cap, 0 = off.
+func (c *Config) WSMaxConnsPerIP() int {
+	if c.WebSocket == nil || c.WebSocket.MaxConnsPerIP < 0 {
+		return 0
+	}
+	return c.WebSocket.MaxConnsPerIP
+}
+
+// WSUpgradesPerMinPerIP returns the upgrade-rate cap, defaulting to 30 when
+// unset. A pointer distinguishes "not configured" (use the default) from an
+// explicit 0, which an operator uses to turn the limit off.
+func (c *Config) WSUpgradesPerMinPerIP() int {
+	if c.WebSocket == nil || c.WebSocket.UpgradesPerMinPerIP == nil {
+		return 30
+	}
+	if v := *c.WebSocket.UpgradesPerMinPerIP; v > 0 {
+		return v
+	}
+	return 0
+}
+
+// WSTrustedProxies returns the configured reverse-proxy addresses, if any.
+func (c *Config) WSTrustedProxies() []string {
+	if c.WebSocket == nil {
+		return nil
+	}
+	return c.WebSocket.TrustedProxies
+}
+
+// WSDeny returns the configured deny entries, if any.
+func (c *Config) WSDeny() []string {
+	if c.WebSocket == nil {
+		return nil
+	}
+	return c.WebSocket.Deny
+}
+
 func (c *Config) applyListLimitsDefaults() {
 	if c.ListLimits == nil {
 		c.ListLimits = &ListLimitsConfig{}
@@ -896,13 +975,29 @@ func (c *Config) BlacklistGeneration() uint64 {
 // lazily on first read from c.NodeBlacklist (covering the JSON-load path
 // where the setter was never called).
 func (c *Config) IsBlacklisted(pubkey string) bool {
-	if c == nil {
+	set := c.blacklistSet()
+	if len(set) == 0 {
 		return false
+	}
+	return set[strings.ToLower(strings.TrimSpace(pubkey))]
+}
+
+// HasNodeBlacklist reports whether at least one (non-blank) pubkey is
+// blacklisted. It reads the same atomic set as IsBlacklisted, so unlike
+// len(c.NodeBlacklist) it is safe against a concurrent SetNodeBlacklist.
+func (c *Config) HasNodeBlacklist() bool {
+	return len(c.blacklistSet()) > 0
+}
+
+// blacklistSet returns the active normalised blacklist set (shared,
+// read-only), materialising it lazily from the JSON-loaded slice on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) blacklistSet() map[string]bool {
+	if c == nil {
+		return nil
 	}
 	mp := c.blacklistSetPtr.Load()
 	if mp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
 		built := buildBlacklistSet(c.NodeBlacklist)
 		if c.blacklistSetPtr.CompareAndSwap(nil, &built) {
 			mp = &built
@@ -910,10 +1005,10 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 			mp = c.blacklistSetPtr.Load()
 		}
 	}
-	if mp == nil || len(*mp) == 0 {
-		return false
+	if mp == nil {
+		return nil
 	}
-	return (*mp)[strings.ToLower(strings.TrimSpace(pubkey))]
+	return *mp
 }
 
 // IsNameHidden returns true if the given node name starts with any of the

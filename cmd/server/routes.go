@@ -889,8 +889,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(s.startedAt).Seconds()
 
 	wsClients := 0
+	var wsDeny, wsRate, wsConnCap int64
 	if s.hub != nil {
 		wsClients = s.hub.ClientCount()
+		wsDeny, wsRate, wsConnCap = s.hub.limits.counts() // #1794; nil-safe
 	}
 
 	// Real packet store stats
@@ -962,8 +964,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			P95Ms:        round(percentile(sortedPauses, 0.95), 1),
 			P99Ms:        round(percentile(sortedPauses, 0.99), 1),
 		},
-		Cache:     cs,
-		WebSocket: WebSocketStatsResp{Clients: wsClients},
+		Cache: cs,
+		WebSocket: WebSocketStatsResp{Clients: wsClients,
+			RejectedDeny: wsDeny, RejectedRate: wsRate, RejectedConnCap: wsConnCap},
 		PacketStore: HealthPacketStoreStats{
 			Packets:     pktCount,
 			EstimatedMB: pktEstMB,
@@ -1426,6 +1429,42 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(observations) == 0 && fromDB && s.db != nil && hash != "" {
 		observations = s.db.GetObservationsForHash(hash)
+	}
+	// Upstream #1999: give each observation its OWN wire bytes. Neither the
+	// store nor the DB observation query carries them — both deliberately drop
+	// observations.raw_hex (#881) on the belief that one content hash means one
+	// frame. Observations of one transmission legitimately differ in their path
+	// bytes, so without this the detail view showed the canonical frame for
+	// every observation, which can contradict the path_json shown beside it.
+	//
+	// One query for the whole request, after the store lock is released. A
+	// stored per-observation frame WINS over whatever is already in the map:
+	// on the store path enrichObsWithTx has already put the transmission's
+	// canonical frame there. Only where no frame is stored does the canonical
+	// value stand, which also fills the DB-fallback path, whose observation
+	// query selects no raw_hex at all.
+	canonicalHex, _ := packet["raw_hex"].(string)
+	if s.db != nil && hash != "" && len(observations) > 0 {
+		byObsID, err := s.db.ObservationRawHexForHash(hash)
+		if err != nil {
+			log.Printf("ERROR packet detail observation-frame lookup failed for hash %s: %v", hash, err)
+			writeError(w, http.StatusInternalServerError, "Failed to load observation frames")
+			return
+		}
+		for _, obs := range observations {
+			if id, ok := obs["id"].(int); ok {
+				if hx := byObsID[id]; hx != "" {
+					obs["raw_hex"] = hx
+					continue
+				}
+			}
+			if existing, ok := obs["raw_hex"].(string); ok && existing != "" {
+				continue
+			}
+			if canonicalHex != "" {
+				obs["raw_hex"] = canonicalHex
+			}
+		}
 	}
 	observationCount := len(observations)
 	if observationCount == 0 {
@@ -2770,8 +2809,10 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
+		// The store hands out its shared cached result; the filter never
+		// writes to it and returns a filtered copy when anything is hidden.
 		data := s.store.GetAnalyticsTopologyWithWindow(region, area, window)
-		if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
+		if s.cfg != nil && (s.cfg.HasNodeBlacklist() || len(s.cfg.hiddenPrefixes()) > 0) {
 			data = s.filterBlacklistedFromTopology(data)
 		}
 		writeJSON(w, data)
@@ -3322,7 +3363,10 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("WARN GetEncryptedChannels: %v", err)
 			} else {
-				channels = append(channels, encrypted...)
+				// channels is GetChannels' cached slice: the full slice
+				// expression forces append to copy instead of writing into
+				// spare capacity of the shared backing array.
+				channels = append(channels[:len(channels):len(channels)], encrypted...)
 			}
 		}
 		writeJSON(w, ChannelListResponse{Channels: channels})
@@ -3331,7 +3375,10 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		channels := s.store.GetChannels(region)
 		if includeEncrypted {
-			channels = append(channels, s.store.GetEncryptedChannels(region)...)
+			// channels is GetChannels' cached slice: the full slice
+			// expression forces append to copy instead of writing into
+			// spare capacity of the shared backing array.
+			channels = append(channels[:len(channels):len(channels)], s.store.GetEncryptedChannels(region)...)
 		}
 		writeJSON(w, ChannelListResponse{Channels: channels})
 		return
@@ -4199,109 +4246,6 @@ func parseWindowDuration(window string) (time.Duration, error) {
 // constantTimeEqual compares two strings in constant time to prevent timing attacks.
 func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-// filterBlacklistedFromTopology removes blacklisted + hidden-prefix node
-// references (#1181) from the topology analytics response (TopRepeaters,
-// TopPairs, BestPathList, MultiObsNodes, PerObserverReach).
-func (s *Server) filterBlacklistedFromTopology(data map[string]interface{}) map[string]interface{} {
-	// Filter TopRepeaters
-	if repeaters, ok := data["topRepeaters"]; ok {
-		if arr, ok := repeaters.([]TopRepeater); ok {
-			var filtered []TopRepeater
-			for _, r := range arr {
-				if pk, ok := r.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-					continue
-				}
-				if name, ok := r.Name.(string); ok && s.cfg.IsNameHidden(name) {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			data["topRepeaters"] = filtered
-		}
-	}
-
-	// Filter TopPairs
-	if pairs, ok := data["topPairs"]; ok {
-		if arr, ok := pairs.([]TopPair); ok {
-			var filtered []TopPair
-			for _, p := range arr {
-				if pkA, ok := p.PubkeyA.(string); ok && s.cfg.IsBlacklisted(pkA) {
-					continue
-				}
-				if pkB, ok := p.PubkeyB.(string); ok && s.cfg.IsBlacklisted(pkB) {
-					continue
-				}
-				if nameA, ok := p.NameA.(string); ok && s.cfg.IsNameHidden(nameA) {
-					continue
-				}
-				if nameB, ok := p.NameB.(string); ok && s.cfg.IsNameHidden(nameB) {
-					continue
-				}
-				filtered = append(filtered, p)
-			}
-			data["topPairs"] = filtered
-		}
-	}
-
-	// Filter BestPathList
-	if paths, ok := data["bestPathList"]; ok {
-		if arr, ok := paths.([]BestPathEntry); ok {
-			var filtered []BestPathEntry
-			for _, p := range arr {
-				if pk, ok := p.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-					continue
-				}
-				if pk, ok := p.Pubkey.(string); ok && s.isPubkeyHidden(pk) {
-					continue
-				}
-				filtered = append(filtered, p)
-			}
-			data["bestPathList"] = filtered
-		}
-	}
-
-	// Filter MultiObsNodes
-	if nodes, ok := data["multiObsNodes"]; ok {
-		if arr, ok := nodes.([]MultiObsNode); ok {
-			var filtered []MultiObsNode
-			for _, n := range arr {
-				if pk, ok := n.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-					continue
-				}
-				if name, ok := n.Name.(string); ok && s.cfg.IsNameHidden(name) {
-					continue
-				}
-				filtered = append(filtered, n)
-			}
-			data["multiObsNodes"] = filtered
-		}
-	}
-
-	// Filter PerObserverReach
-	if reach, ok := data["perObserverReach"]; ok {
-		if m, ok := reach.(map[string]*ObserverReach); ok {
-			for k, v := range m {
-				for ri := range v.Rings {
-					var filteredNodes []ReachNode
-					for _, rn := range v.Rings[ri].Nodes {
-						if pk, ok := rn.Pubkey.(string); ok && s.cfg.IsBlacklisted(pk) {
-							continue
-						}
-						if name, ok := rn.Name.(string); ok && s.cfg.IsNameHidden(name) {
-							continue
-						}
-						filteredNodes = append(filteredNodes, rn)
-					}
-					v.Rings[ri].Nodes = filteredNodes
-				}
-				m[k] = v
-			}
-		}
-	}
-
-	return data
 }
 
 // filterBlacklistedFromSubpaths removes blacklisted node references from

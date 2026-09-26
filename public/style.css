@@ -518,8 +518,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 /* === Touch Targets === */
-/* WCAG 2.5.5 / Apple HIG / Material: 48x48 CSS px minimum touch target for
-   all interactive controls. Targets are achieved with min-height/min-width
+/* WCAG 2.5.5 and Apple HIG use a 44x44 CSS px target; Material uses 48x48.
+   Most controls in this section use the 48x48 house preference. Compact
+   .nav-btn and .ch-icon-btn controls retain 44x44 in their component rules.
+   Targets are achieved with min-height/min-width
    plus inline-flex centering so existing visual styling (font-size, padding,
    icon size) is preserved on desktop while the *hit area* grows for touch.
    Issue #1060.
@@ -558,13 +560,6 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   touch-action: manipulation;
 }
 
-.nav-btn {
-  min-height: 48px;
-  min-width: 48px;
-  touch-action: manipulation;
-}
-
-.ch-icon-btn,
 .ch-remove-btn,
 .ch-share-btn {
   min-height: 48px;
@@ -891,6 +886,7 @@ img.brand-logo {
   background: none; border: 1px solid var(--border); color: var(--nav-text-muted); padding: 6px 12px;
   border-radius: 6px; cursor: pointer; font-size: 14px; transition: all .15s;
   min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  touch-action: manipulation;
 }
 .nav-btn:hover { background: var(--nav-bg2); color: var(--nav-text); }
 
@@ -1870,6 +1866,7 @@ button.ch-item.selected { background: var(--selected-bg); }
   background: none; border: none; color: var(--text-muted);
   cursor: pointer; padding: 4px; margin-left: 2px;
   min-width: 44px; min-height: 44px; box-sizing: border-box;
+  touch-action: manipulation;
   opacity: 0.55; transition: opacity 0.15s, color 0.15s;
   line-height: 1; user-select: none;
 }
@@ -2464,19 +2461,16 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
 
-  /* Channel list row: name must dominate. The inline share/remove icons
-     were eating >88px because of their 44x44 touch target — push them
-     onto a per-row reveal pattern: show a single ⋮ trigger that toggles
-     the action set. Until then, shrink them to icon-only and let the
-     name grow via flex:1. */
+  /* Channel list row: name must dominate. Below 768px channels.js renders
+     the flat .ch-row list (#1367), which has no inline share/remove
+     actions, so there is no size override for .ch-icon-btn here: wherever
+     those actions render they keep the 44x44 target from the base rule. */
   #chList .ch-item { padding: 10px 12px; gap: 10px; }
   #chList .ch-item-name { flex: 1 1 auto; min-width: 0; }
   #chList .ch-item-top { gap: 6px; }
-  #chList .ch-icon-btn { min-width: 32px; min-height: 32px; padding: 2px 4px; }
   /* #1648 M5: share-btn now renders an inline <svg.ph-icon> from channels.js,
    * so the legacy `font-size: 0` + `::before { content: '<emoji>' }` shim is
-   * obsolete. The icon-button class above already sets the touch target;
-   * the SVG inherits color via currentColor. */
+   * obsolete. The SVG inherits color via currentColor. */
   #chList .ch-share-btn .ph-icon { font-size: 13px; }
   #chList .ch-share-btn { font-size: 0; }
   #chList .ch-share-btn .ph-icon, #chList .ch-share-btn svg { font-size: 13px; }
@@ -4987,7 +4981,8 @@ body[data-cb-preset="achromat"] {
 .fux-ctx-item { display: block; width: 100%; text-align: left; background: transparent; border: none; color: var(--text); padding: 5px 12px; font-size: 12px; cursor: pointer; font-family: var(--mono); }
 .fux-ctx-item:hover { background: var(--bg-hover, rgba(120,160,255,0.12)); }
 
-.fux-saved-menu { position: absolute; top: 100%; left: 0; min-width: 320px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; z-index: var(--z-dropdown); box-shadow: 0 4px 14px rgba(0,0,0,0.3); margin-top: 4px; padding: 4px 0; }
+/* #72: the Saved trigger sits at the right end of the filter row — anchor right and bound the width so long expressions ellipsize instead of widening #pktLeft. */
+.fux-saved-menu { position: absolute; top: 100%; right: 0; width: max-content; min-width: 320px; max-width: min(480px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; z-index: var(--z-dropdown); box-shadow: 0 4px 14px rgba(0,0,0,0.3); margin-top: 4px; padding: 4px 0; }
 .fux-saved-menu.hidden { display: none; }
 .fux-saved-header { padding: 6px 10px; font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
 .fux-saved-item { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
@@ -5606,6 +5601,10 @@ body.embed #app.app-fixed {
 .path-symbols-legend[open] > summary { color: var(--text, inherit); }
 .path-symbols-legend .path-legend-list {
   position: absolute;
+  right: 0;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  text-align: left;
   z-index: 50;
   margin: 4px 0 0;
   padding: 8px 12px;
@@ -5616,7 +5615,6 @@ body.embed #app.app-fixed {
   box-shadow: 0 2px 6px rgba(0,0,0,0.15);
   font-size: 11px;
   line-height: 1.5;
-  max-width: 360px;
   color: var(--text, inherit);
 }
 .path-symbols-legend .path-legend-list li { padding: 2px 0; }

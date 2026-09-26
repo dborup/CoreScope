@@ -566,7 +566,14 @@
       var cpct = Number(r.count_pct || 0);
       var apct = Number(r.airtime_pct || 0);
       var score = Number(r.score || 0);
-      var color = palette[i % palette.length];
+      // #89: a payload seen on both flood and zero-hop routes is one mixed
+      // row; it gets a fixed theme colour so it reads the same in any position.
+      var isMixed = r.route_class === 'mixed';
+      var color = isMixed ? 'var(--status-purple)' : palette[i % palette.length];
+      // Rows are rendered positionally; (type, route_class) is the stable row
+      // identity. The three ADVERT rows share type 4, so type alone is not.
+      var identityAttrs = ' data-payload-type="' + esc(String(Number(r.type))) + '"' +
+        (typeof r.route_class === 'string' ? ' data-route-class="' + esc(r.route_class) + '"' : '');
       var loPct = Math.min(cpct, apct);
       var hiPct = Math.max(cpct, apct);
       // Tooltip per row — payload_type, count %, count N, airtime %, raw score, caveat.
@@ -579,10 +586,11 @@
         : scoreMs.toFixed(2) + ' ms';
       var tip =
         name + '\n' +
+        (isMixed ? 'Same payload observed on both flood and zero-hop routes; counted once.\n' : '') +
         'Count: ' + cnt.toLocaleString() + ' (' + cpct.toFixed(2) + '%)\n' +
         'Airtime: ' + apct.toFixed(2) + '% (score ' + scoreStr + ' · airtime × repeaters)\n' +
         'Score = LoRa Time-on-Air × distinct repeaters. Within-mesh only.';
-      html += '<div class="dumbbell-row" title="' + esc(tip) + '" style="display:grid;grid-template-columns:80px 1fr 180px;align-items:center;gap:10px;font-size:12px">' +
+      html += '<div class="dumbbell-row" title="' + esc(tip) + '"' + identityAttrs + ' style="display:grid;grid-template-columns:80px 1fr 180px;align-items:center;gap:10px;font-size:12px">' +
         '<div class="dumbbell-label" style="font-weight:600;color:var(--text)">' + esc(name) + '</div>' +
         '<div class="dumbbell-track" style="position:relative;height:18px;background:var(--bg-elev,rgba(127,127,127,0.12));border-radius:9px">' +
           '<div class="dumbbell-connector" style="position:absolute;top:50%;left:' + loPct.toFixed(3) + '%;width:' + (hiPct - loPct).toFixed(3) + '%;height:2px;background:var(--text-muted,#888);transform:translateY(-50%);opacity:0.5"></div>' +
@@ -3065,6 +3073,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsChannelTbodyHtml = channelTbodyHtml;
     window._analyticsChannelTheadHtml = channelTheadHtml;
     window._analyticsRfNFColumnChart = rfNFColumnChart;
+    window._analyticsRenderRelayAirtimeDumbbell = renderRelayAirtimeDumbbell;
     window._analyticsRenderMultiByteCapability = renderMultiByteCapability;
     window._analyticsRenderMultiByteAdopters = renderMultiByteAdopters;
     window._analyticsHashStatCardsHtml = hashStatCardsHtml;

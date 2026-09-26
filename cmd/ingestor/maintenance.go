@@ -10,42 +10,162 @@ import (
 	"github.com/meshcore-analyzer/dbschema"
 )
 
+// pruneBatchTransmissions bounds how many transmissions (and their child
+// observations) one prune transaction deletes before it commits and
+// releases the writer lock.
+//
+// Releasing between batches is the entire point. writerMu serialises every
+// wrapped writer call, so while the prune holds it the MQTT ingest path is
+// blocked. Go's sync.Mutex switches to FIFO handoff once a waiter has been
+// blocked for 1ms (starvation mode), so an ingest goroutine queued behind
+// the prune is served at the next batch boundary instead of after the whole
+// retention day.
+//
+// The bound is on transmissions, but hold time scales with the rows actually
+// deleted, and each transmission carries an unbounded number of observations.
+// At ~16 observations per transmission a batch is ~4k row deletes and a few
+// hundred milliseconds; an instance with a denser observation ratio gets a
+// proportionally longer hold from the same batch size. 250 also keeps the
+// commit count low (a 16k-transmission day is 64 transactions, not 16k).
+const pruneBatchTransmissions = 250
+
+// pruneAgedTransmissionIDs selects the next batch of transmissions older than
+// the cutoff. Both statements of a batch embed it, so they resolve the same
+// set: nothing modifies `transmissions` between them inside the transaction.
+//
+// The ORDER BY must be satisfiable from idx_transmissions_first_seen. That
+// index carries the rowid as its tiebreaker, so "first_seen, id" is walked
+// straight off it and the LIMIT stays deterministic even when timestamps tie.
+// Ordering by id alone looks equivalent but makes SQLite abandon the index for
+// a rowid SCAN. That is harmless while rows are being deleted — the oldest
+// rows have the lowest rowids and match at once — but the batch that finds
+// nothing, which is the steady state whenever nothing has aged out, walks the
+// whole table under writerMu. TestPruneAgedTransmissionIDsUsesFirstSeenIndex
+// pins the plan.
+const pruneAgedTransmissionIDs = `SELECT id FROM transmissions WHERE first_seen < ? ORDER BY first_seen, id LIMIT ?`
+
+// The statements of one prune batch. Child rows go first (no CASCADE in
+// SQLite): observations, then the batch's route_mask_changes rows (#89; via
+// idx_route_mask_changes_tx), then the transmissions themselves.
+const (
+	pruneObservationsBatch     = `DELETE FROM observations WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
+	pruneRouteMaskChangesBatch = `DELETE FROM route_mask_changes WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
+	pruneTransmissionsBatch    = `DELETE FROM transmissions WHERE id IN (` + pruneAgedTransmissionIDs + `)`
+)
+
 // PruneOldPackets deletes transmissions (and their child observations)
 // older than `days`. Returns count of transmissions deleted.
 //
 // Owned by the ingestor per #1283: the writer process is the only one
 // allowed to hold the DB write lock; previously this lived in
 // cmd/server/db.go and raced ingestor INSERTs (SQLITE_BUSY).
+//
+// Deletion is chunked into bounded transactions so ingest is never blocked
+// for longer than a single batch. Deleting a whole retention day in one
+// transaction held the writer lock for ~35s on a mesh doing ~260k
+// observations/day, stalling MQTT ingest for the same duration.
+//
+// On error the transmissions deleted by already-committed batches are
+// returned alongside it — those rows are gone, so reporting 0 would be
+// wrong.
 func (s *Store) PruneOldPackets(days int) (int64, error) {
 	if days <= 0 {
 		return 0, nil
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 
-	// Tagged for writer-perf visibility (#1340).
-	var n int64
-	err := s.WriterTx("prune_packets", func(tx *sql.Tx) error {
-		// Delete child observations first (no CASCADE in SQLite).
-		if _, err := tx.Exec(`DELETE FROM observations WHERE transmission_id IN (
-			SELECT id FROM transmissions WHERE first_seen < ?
-		)`, cutoff); err != nil {
-			return fmt.Errorf("prune observations: %w", err)
-		}
-
-		res, err := tx.Exec(`DELETE FROM transmissions WHERE first_seen < ?`, cutoff)
+	var total int64
+	for {
+		var batch int64
+		// Tagged for writer-perf visibility (#1340).
+		err := s.WriterTx("prune_packets", func(tx *sql.Tx) error {
+			if _, err := tx.Exec(pruneObservationsBatch, cutoff, pruneBatchTransmissions); err != nil {
+				return fmt.Errorf("prune observations: %w", err)
+			}
+			if _, err := tx.Exec(pruneRouteMaskChangesBatch, cutoff, pruneBatchTransmissions); err != nil {
+				return fmt.Errorf("prune route_mask_changes: %w", err)
+			}
+			res, err := tx.Exec(pruneTransmissionsBatch, cutoff, pruneBatchTransmissions)
+			if err != nil {
+				return fmt.Errorf("prune transmissions: %w", err)
+			}
+			batch, _ = res.RowsAffected()
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("prune transmissions: %w", err)
+			return total, err
 		}
-		n, _ = res.RowsAffected()
-		return nil
-	})
-	if err != nil {
-		return 0, err
+		total += batch
+		// A short batch proves nothing is left below the cutoff: the subquery
+		// found fewer rows than it was allowed to take. Only a batch that came
+		// back exactly full needs another pass.
+		if batch < pruneBatchTransmissions {
+			break
+		}
 	}
-	if n > 0 {
-		log.Printf("[prune] deleted %d transmissions older than %d days", n, days)
+	if total > 0 {
+		log.Printf("[prune] deleted %d transmissions older than %d days", total, days)
 	}
-	return n, nil
+	return total, nil
+}
+
+// routeMaskOrphanPruneBatch bounds one orphan-prune transaction. A var so
+// tests can exercise several batches.
+var routeMaskOrphanPruneBatch = 1000
+
+// PruneOrphanRouteMaskChanges deletes route_mask_changes rows whose
+// transmission no longer exists. PruneOldPackets already deletes a pruned
+// transmission's rows in the same batch; this catches any other deletion path
+// so the log never outlives its transmission. It never deletes a row of an
+// existing transmission: the log carries no time-based expiry, so a slow
+// server can never miss a change of a transmission it still holds.
+//
+// Each writer transaction examines the next routeMaskOrphanPruneBatch ids
+// (a primary-key range, one transmissions primary-key probe per row) and
+// deletes the orphans among them, so its work is bounded however far apart
+// the orphans are. The table is small in practice (22 rows on a
+// 496,798-transmission staging copy; at most three per transmission, one per
+// route bit it can gain). Returns the number of rows deleted.
+func (s *Store) PruneOrphanRouteMaskChanges() (int64, error) {
+	batch := routeMaskOrphanPruneBatch
+	if batch <= 0 {
+		batch = 1000
+	}
+	var total, after int64
+	for {
+		var examined, deleted int64
+		err := s.WriterTx("prune_route_mask_changes", func(tx *sql.Tx) error {
+			var last sql.NullInt64
+			if err := tx.QueryRow(`SELECT MAX(id), COUNT(*) FROM (
+				SELECT id FROM route_mask_changes WHERE id > ? ORDER BY id LIMIT ?)`,
+				after, batch).Scan(&last, &examined); err != nil {
+				return fmt.Errorf("scan route_mask_changes: %w", err)
+			}
+			if examined == 0 {
+				return nil
+			}
+			res, err := tx.Exec(`DELETE FROM route_mask_changes WHERE id > ? AND id <= ?
+				AND NOT EXISTS (SELECT 1 FROM transmissions t WHERE t.id = route_mask_changes.transmission_id)`,
+				after, last.Int64)
+			if err != nil {
+				return fmt.Errorf("prune orphan route_mask_changes: %w", err)
+			}
+			deleted, _ = res.RowsAffected()
+			after = last.Int64
+			return nil
+		})
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+		if examined < int64(batch) {
+			break
+		}
+	}
+	if total > 0 {
+		log.Printf("[prune] deleted %d route_mask_changes rows of deleted transmissions", total)
+	}
+	return total, nil
 }
 
 // PruneOldClientReceptions deletes mobile client-RX coverage rows older than

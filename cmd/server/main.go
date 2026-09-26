@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -18,7 +19,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/meshcore-analyzer/dbschema"
 )
 
 // Set via -ldflags at build time
@@ -191,7 +191,19 @@ func main() {
 	// (#1287). The server NEVER migrates — it only reads. If a required
 	// column/index/table is missing, the operator must restart the
 	// ingestor (which owns dbschema.Apply) before this server can start.
-	if err := dbschema.AssertReady(database.conn); err != nil {
+	// #89 / PR #93: the ingestor creates this PR's migration while both
+	// processes start, so the server waits for it in-process (bounded,
+	// see schema_wait.go) instead of exiting until supervisord gives up.
+	// SIGINT/SIGTERM cancel the wait; the regular shutdown handler below is
+	// registered only after it, so nothing is registered twice.
+	schemaCtx, stopSchemaSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	_, err = waitForDBSchema(schemaCtx, database, defaultSchemaWaitPolicy, realClock{}, log.Printf)
+	stopSchemaSignals()
+	if errors.Is(err, context.Canceled) {
+		log.Printf("[db] shutdown requested while waiting for the ingestor's schema; exiting")
+		return
+	}
+	if err != nil {
 		log.Fatalf("[db] schema not ready (ingestor must run migrations first): %v", err)
 	}
 
@@ -349,6 +361,8 @@ func main() {
 	// WebSocket hub
 	hub := NewHub()
 	hub.SetAllowedOrigins(cfg.CORSAllowedOrigins)
+	hub.ConfigureLimits(cfg.WSMaxConnsPerIP(), cfg.WSUpgradesPerMinPerIP(),
+		cfg.WSTrustedProxies(), cfg.WSDeny()) // #1794
 	hub.upgrader.EnableCompression = cfg.WSCompressionEnabled()
 
 	// HTTP server
