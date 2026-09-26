@@ -3389,6 +3389,9 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		channels := s.store.GetChannels(region)
 		if includeEncrypted {
+			// channels is GetChannels' cached slice: the full slice
+			// expression forces append to copy instead of writing into
+			// spare capacity of the shared backing array.
 			channels = append(channels[:len(channels):len(channels)], s.store.GetEncryptedChannels(region)...)
 		}
 		writeJSON(w, ChannelListResponse{Channels: channels, ApprovedChannels: s.channelProposals().approvedChannels(r.Context())})
