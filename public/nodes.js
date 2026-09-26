@@ -3,7 +3,6 @@
 
 (function () {
   let nodes = [];
-  const PAYLOAD_TYPES = {0:'Request',1:'Response',2:'Direct Msg',3:'ACK',4:'Advert',5:'Channel Msg',7:'Anon Req',8:'Path',9:'Trace'};
 
   function syncClaimedToFavorites() {
     const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
@@ -684,10 +683,13 @@
    * Fetch node detail + health data in parallel.
    * Both selectNode() and loadFullNode() need the same data —
    * this shared helper avoids duplicating the fetch logic (fixes #391).
+   * It is the only caller that asks for the Recent Adverts route breakdown
+   * (#2073, the advertRoutes opt-in, docs/api-spec.md); other node-detail
+   * fetches stay on the plain URL, which the server answers as before.
    */
   async function fetchNodeDetail(pubkey) {
     const [nodeData, healthData] = await Promise.all([
-      api('/nodes/' + encodeURIComponent(pubkey), { ttl: CLIENT_TTL.nodeDetail }),
+      api('/nodes/' + encodeURIComponent(pubkey) + '?include=advertRoutes', { ttl: CLIENT_TTL.nodeDetail }),
       api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null)
     ]);
     nodeData.healthData = healthData;
@@ -833,36 +835,10 @@
         </table>
 
         <div class="node-full-card" id="node-packets">
-          ${(() => { const validPackets = adverts.filter(p => p.hash && p.timestamp); return `
-          <h4>Recent Packets (${validPackets.length})</h4>
-          <div class="node-activity-list">
-            ${validPackets.length ? validPackets.map(p => {
-              let decoded; try { decoded = JSON.parse(p.decoded_json); } catch {}
-              const typeLabel = p.payload_type === 4 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Advert' : p.payload_type === 5 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chat-circle"/></svg> Channel' : p.payload_type === 2 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-envelope"/></svg> DM' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg> Packet';
-              const detail = decoded?.text ? ': ' + escapeHtml(truncate(decoded.text, 50)) : decoded?.name ? ' — ' + escapeHtml(decoded.name) : '';
-              const obs = p.observer_name || p.observer_id;
-              const snr = p.snr != null ? ` · SNR ${p.snr}dB` : '';
-              const rssi = p.rssi != null ? ` · RSSI ${p.rssi}dBm` : '';
-              const obsBadge = p.observation_count > 1 ? ` <span class="badge badge-obs" title="Seen ${p.observation_count} times"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> ${p.observation_count}</span>` : '';
-              // Show hash size per advert if inconsistent
-              let hashSizeBadge = '';
-              if (n.hash_size_inconsistent && p.payload_type === 4 && p.raw_hex) {
-                const pb = parseInt(p.raw_hex.slice(2, 4), 16);
-                if ((pb & 0x3F) !== 0) {
-                  const hs = ((pb >> 6) & 0x3) + 1;
-                  const hsColor = hs >= 3 ? '#16a34a' : hs === 2 ? '#86efac' : '#f97316';
-                  const hsFg = hs === 2 ? '#064e3b' : '#fff';
-                  hashSizeBadge = ` <span class="badge" style="background:${hsColor};color:${hsFg};font-size:9px;font-family:var(--mono)">${hs}B</span>`;
-                }
-              }
-              return `<div class="node-activity-item">
-                <span class="node-activity-time">${renderNodeTimestampHtml(p.timestamp)}</span>
-                <span>${typeLabel}${detail}${hashSizeBadge}${obsBadge}${obs ? ' via ' + escapeHtml(obs) : ''}${snr}${rssi}</span>
-                <a href="#/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
-              </div>`;
-            }).join('') : '<div class="text-muted">No recent packets</div>'}
-          </div>
-        `; })()}
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts }, {
+            variant: 'full', idPrefix: 'nodeFullAdverts', tab: NodeAdverts.parseTab(location.hash),
+            timestampHtml: renderNodeTimestampHtml, hashSizeInconsistent: !!n.hash_size_inconsistent,
+          })}
         </div>
 
         ${observers.length ? `<div class="node-full-card" id="node-observers">
@@ -963,6 +939,8 @@
           setTimeout(() => btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Copy short URL', 2000);
         });
       });
+
+      bindNodeAdverts(document.getElementById('node-packets'));
 
       // Deep-link scroll: ?section=node-packets or ?section=node-packets
       const hashParams = location.hash.split('?')[1] || '';
@@ -1827,6 +1805,14 @@
     }
   }
 
+  // #2073: the Recent Adverts tab lives in the URL (?adverts=) so it survives a
+  // reload and can be shared; replaceState, so switching never re-inits.
+  function bindNodeAdverts(el) {
+    NodeAdverts.bind(el, {
+      onTabChange: function (tab) { history.replaceState(null, '', NodeAdverts.hashWithTab(location.hash, tab)); },
+    });
+  }
+
   function renderDetail(panel, data) {
     const n = nodeWithHealthActivity(data.node, (data.healthData && data.healthData.stats) || {}, data.recentAdverts || []);
     const adverts = (data.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -1884,30 +1870,11 @@
           </dl>
         </div>
 
-        <div class="node-detail-section">
-          ${(() => { const validPackets = adverts.filter(a => a.hash && a.timestamp); return `
-          <h4>Recent Packets (${validPackets.length})</h4>
-          <div id="advertTimeline">
-            ${validPackets.length ? validPackets.map(a => {
-              let decoded;
-              try { decoded = JSON.parse(a.decoded_json); } catch {}
-              const pType = PAYLOAD_TYPES[a.payload_type] || 'Packet';
-              const icon = a.payload_type === 4 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg>' : a.payload_type === 5 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chat-circle"/></svg>' : a.payload_type === 2 ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-envelope"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg>';
-              const detail = decoded?.text ? ': ' + escapeHtml(truncate(decoded.text, 50)) : decoded?.name ? ' — ' + escapeHtml(decoded.name) : '';
-              const obs = a.observer_name || a.observer_id;
-              return `<div class="advert-entry">
-                <span class="advert-dot" style="background:${roleColor}"></span>
-                <div class="advert-info">
-                  <strong>${renderNodeTimestampHtml(a.timestamp)}</strong> ${icon} ${pType}${detail}
-                  ${a.observation_count > 1 ? ' <span class="badge badge-obs"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> ' + a.observation_count + '</span>' : ''}
-                  ${obs ? ' via ' + escapeHtml(obs) : ''}
-                  ${a.snr != null ? ` · SNR ${a.snr}dB` : ''}${a.rssi != null ? ` · RSSI ${a.rssi}dBm` : ''}
-                  <br><a href="#/packets/${a.hash}" class="ch-analyze-link">Analyze →</a>
-                </div>
-              </div>`;
-            }).join('') : '<div class="text-muted" style="padding:8px">No recent packets</div>'}
-          </div>
-          `; })()}
+        <div class="node-detail-section" id="node-pane-adverts">
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts }, {
+            variant: 'pane', idPrefix: 'nodePaneAdverts', tab: NodeAdverts.parseTab(location.hash),
+            timestampHtml: renderNodeTimestampHtml, roleColor: roleColor,
+          })}
         </div>
 
         ${observers.length ? `<div class="node-detail-section">
@@ -1938,6 +1905,7 @@
 
         <div class="node-detail-section skew-detail-section" id="node-clock-skew" style="display:none"></div>
       </div>`;
+    bindNodeAdverts(document.getElementById('node-pane-adverts'));
 
     // Init map -- same real+estimate side-by-side treatment as loadFullNode.
     if (hasLoc || hasEstLoc) {

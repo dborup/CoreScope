@@ -73,6 +73,10 @@ type Server struct {
 	neighborMu    sync.Mutex
 	neighborGraph *NeighborGraph
 
+	// #2073 node-detail advert route breakdown, per pubkey
+	// (node_advert_routes_cache.go).
+	advertRoutes nodeAdvertRouteCache
+
 	// Cached /api/scope-stats response — per-window, recomputed at most once every 30s
 	scopeStatsMu       sync.Mutex
 	scopeStatsCache    map[string]*ScopeStatsResponse
@@ -2093,15 +2097,50 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// #2073: adverts per route class and per-class counts, only on request
+	// (include=advertRoutes; the node page sends it, other callers of this
+	// endpoint do not pay for it). Same visibility rule as the rest of node
+	// detail plus identityHidden (#68), which also covers the observer
+	// blacklist and observer names, checked before the breakdown's cache; a
+	// failed lookup fails closed. A hidden identity gets neither the new
+	// fields nor route_class on recentAdverts (it is route_mask data too).
+	advertRoutes := wantsNodeAdvertRoutes(r)
+	if advertRoutes {
+		hidden, err := s.isIdentityHidden(r.Context(), pubkey)
+		if err != nil {
+			log.Printf("WARN isIdentityHidden(%s): %v", pubkey, err)
+		}
+		advertRoutes = err == nil && !hidden
+	}
+
 	// #1143: GetRecentTransmissionsForNode no longer accepts a name fallback;
 	// attribution is strict exact-match on the indexed from_pubkey column.
-	recentAdverts, _ := s.db.GetRecentTransmissionsForNode(pubkey, 20)
+	recentAdverts, _ := s.db.GetRecentTransmissionsForNode(pubkey, 20, advertRoutes)
+
+	resp := NodeDetailResponse{
+		Node:          node,
+		RecentAdverts: recentAdverts,
+	}
+	var floodFromScan *int
+	if advertRoutes {
+		if res, err := s.nodeAdvertRoutes(pubkey, time.Now()); err == nil {
+			resp.RecentAdvertsByRoute = &res.byRoute
+			resp.AdvertCounts = &res.counts
+			floodFromScan = res.floodAdvertCount7d
+		} else {
+			log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, err)
+		}
+	}
 
 	// Windowed flood-advert count (7d): only the mesh-wide-airtime advert kind,
 	// separated from zero-hop adverts so a nearby observer hearing a node's
 	// cheap local adverts does not inflate the number. Consumed by the ArcScope
-	// repeater advisor to rate advert hygiene.
-	if n, err := s.db.CountFloodAdvertsForNode(pubkey, 7*24, floodAdvertRowCap); err == nil {
+	// repeater advisor to rate advert hygiene. Always fresh, never cached: a
+	// breakdown scan this request ran itself yields the identical number
+	// (GetNodeAdvertRoutes), otherwise it is counted here.
+	if floodFromScan != nil {
+		node["flood_advert_count_7d"] = *floodFromScan
+	} else if n, err := s.db.CountFloodAdvertsForNode(pubkey, 7*24, floodAdvertRowCap); err == nil {
 		node["flood_advert_count_7d"] = n
 	} else {
 		log.Printf("WARN CountFloodAdvertsForNode(%s): %v", pubkey, err)
@@ -2135,10 +2174,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, NodeDetailResponse{
-		Node:          node,
-		RecentAdverts: recentAdverts,
-	})
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {

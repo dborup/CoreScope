@@ -87,7 +87,10 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/nodes/search":         {Summary: "Search nodes", Description: "Search nodes by name or public key prefix.", Tag: "nodes", QueryParams: []paramMeta{{Name: "q", Description: "Search query", Type: "string", Required: true}}},
 		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for all nodes in one call.", Tag: "nodes"},
 		"GET /api/nodes/network-status": {Summary: "Network status summary", Description: "Returns counts of active, stale, and offline nodes.", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}":       {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema).", Tag: "nodes", Response: schemaRef("NodeDetailResponse")},
+		"GET /api/nodes/{pubkey}": {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema). recentAdverts is the chronological list; with include=advertRoutes, recentAdvertsByRoute and advertCounts (#2073) split the node's adverts into flood / zero_hop / mixed and the ADVERT rows of recentAdverts carry route_class.", Tag: "nodes", Response: schemaRef("NodeDetailResponse"),
+			QueryParams: []paramMeta{
+				{Name: "include", Description: "Opt-in extras, comma-separated (the parameter may also repeat). advertRoutes (#2073): adds recentAdvertsByRoute, advertCounts and route_class on the recentAdverts ADVERT rows. That costs a scan of all the node's ADVERT rows (cached per node for up to 30 s), so only the node page asks for it; without it the response has neither field and no route_class. Unknown values are ignored. Hidden identities never get the extras.", Type: "string"},
+			}},
 		"GET /api/nodes/{pubkey}/clock-skew": {Summary: "Get node clock skew", Description: "Per-node clock-skew analysis derived from ADVERT advert-timestamps vs observation times, calibrated per observer (see ClockSkewEngine). samples is the full per-advert time series in chronological order (sparkline data) by default. Fase 5.2b's sample_limit trims that array before it's sent to the client — it only reduces JSON serialization/payload/client-decoding cost, not the server-side computation or allocation that already produced the full samples slice.", Tag: "nodes",
 			QueryParams: []paramMeta{
 				{Name: "sample_limit", Description: "Trims samples to at most the N most-recent entries, chronological order preserved. Omitted, non-numeric, or negative: unchanged, every sample returned (legacy default). 0: samples is omitted from the response entirely. N at or above the current sample count: unchanged, every sample returned. sampleCount and every other field are unaffected regardless of sample_limit.", Type: "integer"},
@@ -122,7 +125,7 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/analytics/subpaths-bulk":   {Summary: "Bulk subpath analysis", Tag: "analytics"},
 		"GET /api/analytics/subpath-detail":  {Summary: "Subpath detail", Tag: "analytics"},
 		"GET /api/analytics/neighbor-graph":  {Summary: "Neighbor graph", Description: "Full neighbor affinity graph for visualization.", Tag: "analytics"},
-		"GET /api/analytics/relay-airtime-share": {Summary: "Relay airtime share per payload type", Description: "Overview tab's Relay Airtime Share. Each distinct packet (deduplicated by content hash) scores LoRa Time-on-Air of its raw bytes × distinct repeaters that relayed it, under the assumed preset returned in preset (config analytics.loraPreset); originator TX is excluded. rows[] = {payload_type, type, route_class, count, count_pct, score, airtime_pct}, sorted by airtime_pct desc. type is the numeric payload type; payload_type is a display label and may change. ADVERT is split into up to four rows that all have type 4, classified from transmissions.route_mask (every raw route type observed for the content hash, independent of ingest order): route_class \"flood\" (only route 0/1 seen, label \"ADVERT (flood)\"), \"zero_hop\" (only route 2/3, label \"ADVERT (zero-hop)\"), \"mixed\" (the same payload was seen on both flood and zero-hop routes, e.g. a contact re-shared as a zero-hop advert; label \"ADVERT (mixed)\"; counted once, with all of its relays) and \"legacy\" (no usable route, label \"ADVERT\"). Rows whose route_mask is not backfilled yet fall back to the legacy first-inserted route_type; route_mask_backfill {status: pending|backfilling|complete, remaining} reports whether that fallback is still in use: complete only when no transmission lacks a mask and this server has read every backfilled mask (the server picks them up while running); remaining counts rows without a mask, or, once none are left, an upper bound on the transmissions this server has not re-read yet (null while it cannot be counted). route_class is null on every other row, so key rows by (type, route_class), never by type alone. Time-on-Air uses the frame of the first inserted observation, so its length (path bytes, transport codes) can still depend on ingest order. count_pct and airtime_pct are shares of total_count and total_score (nanoseconds). Payload Type Mix (/api/analytics/rf payloadTypes) is not split. Cached in the RF analytics cache (60s default).", Tag: "analytics",
+		"GET /api/analytics/relay-airtime-share": {Summary: "Relay airtime share per payload type", Description: "Overview tab's Relay Airtime Share. Each distinct packet (deduplicated by content hash) scores LoRa Time-on-Air of its raw bytes × distinct repeaters that relayed it, under the assumed preset returned in preset (config analytics.loraPreset); originator TX is excluded. rows[] = {payload_type, type, route_class, count, count_pct, score, airtime_pct}, sorted by airtime_pct desc. type is the numeric payload type; payload_type is a display label and may change. ADVERT is split into up to four rows that all have type 4, classified from transmissions.route_mask (every raw route type observed for the content hash, independent of ingest order): route_class \"flood\" (only route 0/1 seen, label \"ADVERT (flood)\"), \"zero_hop\" (only route 2/3, label \"ADVERT (zero-hop)\"), \"mixed\" (the same payload was seen on both flood and zero-hop routes, e.g. a contact re-shared as a zero-hop advert; label \"ADVERT (mixed)\"; counted once, with all of its relays) and \"legacy\" (no usable route, label \"ADVERT\"; node detail's route_class calls the same bucket \"unknown\", one classifier). Rows whose route_mask is not backfilled yet fall back to the legacy first-inserted route_type; route_mask_backfill {status: pending|backfilling|complete, remaining} reports whether that fallback is still in use: complete only when no transmission lacks a mask and this server has read every backfilled mask (the server picks them up while running); remaining counts rows without a mask, or, once none are left, an upper bound on the transmissions this server has not re-read yet (null while it cannot be counted). route_class is null on every other row, so key rows by (type, route_class), never by type alone. Time-on-Air uses the frame of the first inserted observation, so its length (path bytes, transport codes) can still depend on ingest order. count_pct and airtime_pct are shares of total_count and total_score (nanoseconds). Payload Type Mix (/api/analytics/rf payloadTypes) is not split. Cached in the RF analytics cache (60s default).", Tag: "analytics",
 			QueryParams: []paramMeta{
 				{Name: "window", Description: "Relative window: 1h, 24h/1d, 3d, 7d/1w or 30d (default: all loaded packets)", Type: "string"},
 				{Name: "from", Description: "RFC3339 start; if from or to is given, window is ignored (an unparseable value leaves that bound open)", Type: "string"},
@@ -205,6 +208,69 @@ func schemaRef(name string) map[string]interface{} {
 	return map[string]interface{}{"$ref": "#/components/schemas/" + name}
 }
 
+// openAPISchema is a typed OpenAPI 3.0 schema object. It marshals to the
+// same JSON as the map literals in componentSchemas; schemas added since
+// #2073 use it instead of new untyped map literals (#1383).
+type openAPISchema struct {
+	Ref         string                    `json:"$ref,omitempty"`
+	Type        string                    `json:"type,omitempty"`
+	Description string                    `json:"description,omitempty"`
+	Enum        []string                  `json:"enum,omitempty"`
+	Nullable    bool                      `json:"nullable,omitempty"`
+	Minimum     *int                      `json:"minimum,omitempty"`
+	Items       *openAPISchema            `json:"items,omitempty"`
+	Properties  map[string]*openAPISchema `json:"properties,omitempty"`
+}
+
+func openAPIRef(name string) *openAPISchema {
+	return &openAPISchema{Ref: "#/components/schemas/" + name}
+}
+
+// nodeAdvertRouteSchemas documents the #2073 node-detail advert route fields
+// (port of upstream Kpa-clawbot/CoreScope#2073).
+func nodeAdvertRouteSchemas() map[string]*openAPISchema {
+	zero := 0
+	count := &openAPISchema{Type: "integer", Minimum: &zero}
+	list := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "array", Items: openAPIRef("NodeAdvert"), Description: desc}
+	}
+	return map[string]*openAPISchema{
+		"NodeAdvertsByRoute": {
+			Type:        "object",
+			Description: "Node detail with include=advertRoutes only (#2073): the newest ADVERTs of the node per route class (see NodeAdvert.route_class), newest ingest first. The class is filtered before the per-class limit, so frequent zero-hop adverts cannot push rare flood adverts out; a mixed advert is listed only under mixed. Rows are the NodeAdvert shape without the observations array (observation_count and the best observation's observer/snr/rssi/path fields are kept); route_class is the class the row was listed under. Absent without include=advertRoutes and when the node's identity is hidden (node or observer blacklist, hidden-name prefix). Cached per node for up to 30 s (refreshed once the node has a newer transmission, at most every 5 s).",
+			Properties: map[string]*openAPISchema{
+				"limit":    {Type: "integer", Description: "Maximum rows per class (20)."},
+				"flood":    list("Adverts seen only on flood routes (0/1)."),
+				"zero_hop": list("Adverts seen only on zero-hop routes (2/3)."),
+				"mixed":    list("Adverts seen on both flood and zero-hop routes."),
+				"unknown":  list("Adverts with no usable route (Relay Airtime Share's legacy bucket); present only when the node has any."),
+			},
+		},
+		"NodeAdvertCounts": {
+			Type:        "object",
+			Description: "Node detail with include=advertRoutes only (#2073): distinct ADVERTs (by content hash) per route class whose first_seen - when the advert was first heard, the axis flood_advert_count_7d also uses - lies in the last 24 hours / 7 days. Classified like NodeAdvert.route_class. Unlike Node.flood_advert_count_7d (route_type 1 only, unchanged external contract), 7d.flood also counts transport flood (route 0) and never counts a mixed advert. Rows whose first_seen cannot be parsed are skipped, as for flood_advert_count_7d. unknown is the bucket Relay Airtime Share calls legacy (same classifier, see NodeAdvert.route_class). Absent without include=advertRoutes and when the node's identity is hidden.",
+			Properties: map[string]*openAPISchema{
+				"24h":                 openAPIRef("AdvertRouteCounts"),
+				"7d":                  openAPIRef("AdvertRouteCounts"),
+				"truncated":           {Type: "boolean", Description: "true when the node had more adverts at or after the 7d date floor than the per-request row cap (50000); the counts then cover the newest rows only."},
+				"route_mask_backfill": openAPIRef("RouteMaskBackfillStatus"),
+			},
+		},
+		"AdvertRouteCounts": {
+			Type:       "object",
+			Properties: map[string]*openAPISchema{"flood": count, "zero_hop": count, "mixed": count, "unknown": count},
+		},
+		"RouteMaskBackfillStatus": {
+			Type:        "object",
+			Description: "The ingestor's transmissions.route_mask backfill (#89). Until complete, rows without a mask are classified by their first-inserted route_type, so route classes are provisional.",
+			Properties: map[string]*openAPISchema{
+				"status":    {Type: "string", Enum: []string{"pending", "backfilling", "complete"}},
+				"remaining": {Type: "integer", Nullable: true, Description: "Rows still without a mask; null when it cannot be counted cheaply."},
+			},
+		},
+	}
+}
+
 // componentSchemas returns the reusable OpenAPI schemas surfaced under
 // components/schemas. The Node schema documents the per-node usefulness
 // metrics (issue #672) that the /api/nodes handlers attach to repeater/room
@@ -226,7 +292,7 @@ func componentSchemas() map[string]interface{} {
 		}
 		return m
 	}
-	return map[string]interface{}{
+	schemas := map[string]interface{}{
 		"Node": map[string]interface{}{
 			"type": "object",
 			// additionalProperties:true — the node object carries more fields
@@ -287,8 +353,10 @@ func componentSchemas() map[string]interface{} {
 		"NodeDetailResponse": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"node":          schemaRef("Node"),
-				"recentAdverts": map[string]interface{}{"type": "array", "items": schemaRef("NodeAdvert"), "description": "Up to 20 most recent transmissions from this node (newest first)."},
+				"node":                 schemaRef("Node"),
+				"recentAdverts":        map[string]interface{}{"type": "array", "items": schemaRef("NodeAdvert"), "description": "Up to 20 most recent transmissions from this node (newest ingest first, #1345), all route classes together."},
+				"recentAdvertsByRoute": openAPIRef("NodeAdvertsByRoute"),
+				"advertCounts":         openAPIRef("NodeAdvertCounts"),
 			},
 		},
 		"NodeAdvert": map[string]interface{}{
@@ -301,6 +369,7 @@ func componentSchemas() map[string]interface{} {
 				"payload_type": map[string]interface{}{"type": "integer", "description": "MeshCore payload type."},
 				"first_seen":   str("RFC3339 time the transmission was first observed."),
 				"from_pubkey":  str("Originating node public key."),
+				"route_class":  &openAPISchema{Type: "string", Enum: []string{advertClassFlood, advertClassZeroHop, advertClassMixed, advertClassUnknown}, Description: "Node detail with include=advertRoutes, ADVERT rows only (absent on other payload types and without the opt-in): the advert's route class, classified like Relay Airtime Share's ADVERT rows. flood: only route 0/1 (transport flood/flood) seen for the content hash; zero_hop: only route 2/3 (a zero-hop advert is sent DIRECT with an empty path); mixed: both; unknown: no usable route - the same bucket Relay Airtime Share's route_class calls \"legacy\" (its historical plain ADVERT row); node detail names it for what it is, both come from one classifier. Omitted when the node's identity is hidden. From transmissions.route_mask, falling back to the first-inserted route_type while the mask is not backfilled (see advertCounts.route_mask_backfill)."},
 			},
 		},
 		"CandidateEntry": map[string]interface{}{
@@ -711,6 +780,10 @@ func componentSchemas() map[string]interface{} {
 			},
 		},
 	}
+	for name, schema := range nodeAdvertRouteSchemas() {
+		schemas[name] = schema
+	}
+	return schemas
 }
 
 // buildOpenAPISpec constructs an OpenAPI 3.0 spec by walking the mux router.

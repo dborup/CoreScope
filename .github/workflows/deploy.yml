@@ -189,6 +189,7 @@ jobs:
           node test-coverage-gate.js
           node test-node-reach-coverage.js
           node test-reach-rank.js
+          node test-node-adverts.js
           node test-issue-1107-live-layout.js
           node test-issue-1833-legend-toggle-vcr-offset.js
           node test-issue-1532-live-fullscreen.js
@@ -430,6 +431,11 @@ jobs:
         # required shape before the server boots.
         run: ./corescope-migrate -db test-fixtures/e2e-fixture.db
 
+      - name: Seed route-classified adverts for #2073 E2E
+        # Runs after the migration because it sets transmissions.route_mask
+        # (#89). See the file header for the rows and expected classes.
+        run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-2073-route-adverts.sql
+
       - name: Start Go server with fixture DB
         run: |
           fuser -k 13581/tcp 2>/dev/null || true
@@ -500,6 +506,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1146-path-link-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-issue-1705-subpath-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1147-section-order-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-2073-recent-adverts-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1151-orphan-separators-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1486-collapse-reopens-detail-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-logo-rebrand-e2e.js 2>&1 | tee -a e2e-output.txt
