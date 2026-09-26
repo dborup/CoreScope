@@ -227,12 +227,27 @@ test('tabs: exactly the selected tab is aria-selected at render, the rest false 
 // builds the URL itself: a missing node-adverts.js must not turn a 404 into
 // "Failed to load node" (test-issue-2027-my-mesh-node-page-e2e.js loads
 // nodes.js without it).
+//
+// N2 (re-review of 658d8a08): this is a textual check, not a runtime one — it
+// greps source, it does not execute a stubbed api() and inspect the URLs
+// callers actually build. The offender scan matches the bare token
+// `advertRoutes` (not just the literal `include=advertRoutes`), which still
+// catches the two mutants the review named without touching runtime
+// behaviour: a split literal (`'?include=' + 'advertRoutes'`) and a
+// `URLSearchParams`-built query (`params.set('include', 'advertRoutes')`)
+// both still contain the whole `advertRoutes` string somewhere in the file.
+// It cannot catch a caller that assembles the string from smaller pieces
+// (e.g. `'advert' + 'Routes'`) or from data outside the source (a fetched
+// config, `String.fromCharCode`); that residual gap needs the runtime check
+// this rule stops short of.
 test('only the node page sends include=advertRoutes', () => {
   const dir = path.join(__dirname, 'public');
   const offenders = [];
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+  // node-adverts.js is the shared render component: it names the opt-in only
+  // in a comment (`docs/api-spec.md` link) and makes no api()/fetch call.
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'nodes.js' && f !== 'node-adverts.js')) {
     const code = fs.readFileSync(path.join(dir, f), 'utf8');
-    if (f !== 'nodes.js' && /include=advertRoutes/.test(code)) offenders.push(f);
+    if (/advertRoutes/.test(code)) offenders.push(f);
   }
   assert.deepStrictEqual(offenders, [], 'files other than nodes.js ask for the breakdown');
   const nodesJs = fs.readFileSync(path.join(dir, 'nodes.js'), 'utf8');

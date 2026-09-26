@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"reflect"
 	"sort"
 	"strings"
@@ -100,6 +102,57 @@ func TestNodeDetail_IncludeAdvertRoutesPrivacyBeforeCache(t *testing.T) {
 	}
 	if l, s := lookups.Load(), scans.Load(); l != 0 || s != 0 {
 		t.Fatalf("hidden identity reached the breakdown: %d lookups, %d scans", l, s)
+	}
+}
+
+// N1 (re-review of 658d8a08): a failed identity-hidden lookup must fail
+// closed, not merely agree with a hidden-by-config identity by coincidence.
+// The mutant `advertRoutes = !hidden` (dropping the err check) survives the
+// PrivacyBeforeCache test above because isIdentityHidden short-circuits to
+// (true, nil) for a blacklisted/observer-blacklisted identity without ever
+// running the name lookup that can fail — so `!hidden` and `err == nil &&
+// !hidden` agree there. They only diverge when the lookup itself errors:
+// isIdentityHidden then returns (false, err), so the mutant's bare !hidden
+// is true (fail OPEN) while the real gate is false. Forcing that error
+// needs a non-empty hidden-name-prefix list (otherwise hiddenIdentityNames
+// short-circuits to (nil, nil) without touching the DB) plus a request
+// whose context is already canceled once the lookup's QueryContext /
+// QueryRowContext calls run. The configured prefix must not match this
+// node's own name, so the request reaches this code instead of 404-ing on
+// the earlier, unrelated IsNameHidden(node name) gate.
+func TestNodeDetail_IncludeAdvertRoutesFailsClosedOnLookupError(t *testing.T) {
+	srv, router := narServer(t)
+	lookups, scans := narCountRouteWork(srv)
+	srv.cfg.SetHiddenNamePrefixes([]string{"ZZ-does-not-match-any-node-or-observer"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest("GET", "/api/nodes/"+narNode+narIncludeQuery, nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("GET with a canceled context = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	raw := w.Body.String()
+	if strings.Contains(raw, "route_class") || strings.Contains(raw, "advertCounts") || strings.Contains(raw, "recentAdvertsByRoute") {
+		t.Fatalf("a failed privacy lookup must fail closed, leaked breakdown fields: %s", raw)
+	}
+	var body narResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if body.ByRoute != nil || body.Counts != nil {
+		t.Fatalf("a failed lookup must not populate the breakdown: byRoute=%v counts=%v", body.ByRoute, body.Counts)
+	}
+	if len(body.RecentAdverts) != 5 {
+		t.Fatalf("recentAdverts = %d rows, want master's 5", len(body.RecentAdverts))
+	}
+	if _, ok := body.RecentAdverts[0]["route_class"]; ok {
+		t.Fatalf("recentAdverts must not carry route_class when the lookup failed: %v", body.RecentAdverts[0])
+	}
+	if l, s := lookups.Load(), scans.Load(); l != 0 || s != 0 {
+		t.Fatalf("a failed lookup must never reach the breakdown cache or scan: %d lookups, %d scans", l, s)
 	}
 }
 
