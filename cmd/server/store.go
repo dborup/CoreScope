@@ -7955,8 +7955,8 @@ func (s *PacketStore) computeAnalyticsDistance(region, area string) map[string]i
 	} else if areaNodes != nil {
 		// No region filter but area filter: build matchSet from area nodes
 		matchSet = make(map[*StoreTx]bool)
-		for i := range s.distHops {
-			tx := s.distHops[i].tx
+		for i := range hopsSnap {
+			tx := hopsSnap[i].tx
 			if matchSet[tx] {
 				continue
 			}
@@ -7969,8 +7969,8 @@ func (s *PacketStore) computeAnalyticsDistance(region, area string) map[string]i
 				matchSet[tx] = true
 			}
 		}
-		for i := range s.distPaths {
-			tx := s.distPaths[i].tx
+		for i := range pathsSnap {
+			tx := pathsSnap[i].tx
 			if matchSet[tx] {
 				continue
 			}
