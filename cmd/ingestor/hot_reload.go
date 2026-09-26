@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -14,17 +15,107 @@ import (
 // loadChannelKeys nor loadRegionKeys re-runs automatically otherwise —
 // hashChannels/hashRegions additions in config.json require a full ingestor
 // restart to take effect without this.
+//
+// Channel keys come in two layers. base is what loadChannelKeys derives from
+// config (builtin, rainbow, hashChannels, channelKeys) and is replaced on
+// every SIGHUP. approved holds the publicly suggested hashtag channels an
+// administrator approved (internal/channelregistry): approvals add to it and
+// revocations remove from it (RemoveApproved), it is reloaded from the
+// database at startup, and a SIGHUP never touches it, so a reload can neither
+// drop an approved channel nor bring back a revoked one. channelKeys is the
+// merged snapshot the MQTT handlers read, with base winning over approved, so
+// a manually configured key for the same name keeps priority. It also means
+// a name already in base (for example one of the ~320 rainbow-table names
+// such as #test or #chat) gains nothing from approval and keeps decrypting
+// after a revoke; BaseNames lets the proposal runner tell the server so.
 type hotKeys struct {
 	channelKeys atomic.Pointer[map[string]string]
 	regionKeys  atomic.Pointer[map[string][]byte]
+
+	mu       sync.Mutex // serializes writers of base/approved and the merge
+	base     map[string]string
+	approved map[string]string
+	baseGen  uint64 // incremented by every setBase
 }
 
 // newHotKeys wraps the initial startup-loaded key maps.
 func newHotKeys(channelKeys map[string]string, regionKeys map[string][]byte) *hotKeys {
-	hk := &hotKeys{}
-	hk.channelKeys.Store(&channelKeys)
+	hk := &hotKeys{approved: make(map[string]string)}
 	hk.regionKeys.Store(&regionKeys)
+	hk.setBase(channelKeys)
 	return hk
+}
+
+// setBase replaces the config-derived channel keys and republishes the merge.
+func (hk *hotKeys) setBase(channelKeys map[string]string) {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	hk.base = channelKeys
+	hk.baseGen++
+	hk.publishLocked()
+}
+
+// BaseNames returns the names in the config-derived layer and its generation,
+// which changes on every setBase (startup and each reload).
+func (hk *hotKeys) BaseNames() ([]string, uint64) {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	names := make([]string, 0, len(hk.base))
+	for name := range hk.base {
+		names = append(names, name)
+	}
+	return names, hk.baseGen
+}
+
+// AddApproved adds approved hashtag channels, deriving each key with the same
+// algorithm as hashChannels. It returns how many names were new. Names
+// already approved are ignored, so repeated calls (startup load, replayed
+// approvals) are harmless.
+func (hk *hotKeys) AddApproved(names ...string) int {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	added := 0
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := hk.approved[name]; ok {
+			continue
+		}
+		hk.approved[name] = deriveHashtagChannelKey(name)
+		added++
+	}
+	if added > 0 {
+		hk.publishLocked()
+	}
+	return added
+}
+
+// RemoveApproved removes a name from the approved layer only (never touches
+// base, so a manually configured key for the same channel keeps decrypting
+// it). Returns whether it was present.
+func (hk *hotKeys) RemoveApproved(name string) bool {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	if _, ok := hk.approved[name]; !ok {
+		return false
+	}
+	delete(hk.approved, name)
+	hk.publishLocked()
+	return true
+}
+
+// publishLocked builds a fresh merged map (never mutating one a reader may
+// hold) and swaps it in. O(base + approved), and only on reload/approval.
+func (hk *hotKeys) publishLocked() {
+	merged := make(map[string]string, len(hk.base)+len(hk.approved))
+	for name, key := range hk.approved {
+		merged[name] = key
+	}
+	for name, key := range hk.base {
+		merged[name] = key
+	}
+	hk.channelKeys.Store(&merged)
 }
 
 // Channels returns the current channel-decryption key snapshot. Safe to
@@ -50,9 +141,9 @@ func (hk *hotKeys) reload(configPath string) error {
 	}
 	ck := loadChannelKeys(cfg, configPath)
 	rk := loadRegionKeys(cfg)
-	hk.channelKeys.Store(&ck)
+	hk.setBase(ck)
 	hk.regionKeys.Store(&rk)
-	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s", len(ck), len(rk), configPath)
+	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels kept)", len(ck), len(rk), configPath)
 	return nil
 }
 

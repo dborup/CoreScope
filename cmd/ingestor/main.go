@@ -113,6 +113,18 @@ func main() {
 	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
 	defer stopSIGHUPReload()
 
+	// Shared channel proposals: approved hashtag channels join the live keys
+	// before any MQTT traffic is handled, and the ingestor applies the
+	// server's queued suggestions/decisions (the server is read-only).
+	proposals := newChannelProposalRunner(store, keys, cfg.ChannelProposals)
+	if n, err := proposals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[channel-proposals] loading approved channels failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[channel-proposals] %d approved shared channel(s) added to channel keys", n)
+	}
+	stopProposals := proposals.Start(2*time.Second, time.Hour)
+	defer stopProposals()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
