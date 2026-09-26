@@ -74,6 +74,16 @@ jobs:
           echo "--- Go Ingestor Coverage ---"
           go tool cover -func=ingestor-coverage.out | tail -1
 
+      # The full ingestor suite runs without -race (too slow), so the
+      # force-reconnect tests (upstream #1897) get their own -race pass: a
+      # Disconnect moved into a goroutine races paho's retry loop, and the
+      # race detector backs up the behavioural real-paho tests.
+      - name: Race-check Go ingestor force-reconnect
+        run: |
+          set -e -o pipefail
+          cd cmd/ingestor
+          go test -race -count=1 -timeout 5m -run 'ForceReconnect' ./...
+
       - name: Build and test channel library + decrypt CLI
         run: |
           set -e -o pipefail
