@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -387,6 +388,53 @@ func TestCompactDistIndex_InPlaceUnlessPinned(t *testing.T) {
 	if want := "[hash0002 hash0003 hash0004 new]"; fmt.Sprint(gotLive) != want {
 		t.Errorf("distHops = %v, want %s", gotLive, want)
 	}
+}
+
+// After an unpinned in-place compaction the vacated tail of each backing
+// array (between the new and the old length) must be zeroed, so it no
+// longer keeps removed or evicted *StoreTx (and their observations)
+// reachable until a later append happens to overwrite it.
+func TestCompactDistIndex_ClearsVacatedTail(t *testing.T) {
+	check := func(t *testing.T, s *PacketStore, oldHops, oldPaths int, wantLive string) {
+		t.Helper()
+		if got := fmt.Sprint(distSnapHopHashes(s.distHops)); got != wantLive {
+			t.Fatalf("live distHops = %s, want %s", got, wantLive)
+		}
+		if got := fmt.Sprint(distSnapPathHashes(s.distPaths)); got != wantLive {
+			t.Fatalf("live distPaths = %s, want %s", got, wantLive)
+		}
+		for i, r := range s.distHops[len(s.distHops):oldHops] {
+			if !reflect.ValueOf(r).IsZero() {
+				t.Errorf("distHops tail[%d] not zeroed: hash=%q tx=%p", i, r.Hash, r.tx)
+			}
+		}
+		for i, r := range s.distPaths[len(s.distPaths):oldPaths] {
+			if !reflect.ValueOf(r).IsZero() {
+				t.Errorf("distPaths tail[%d] not zeroed: hash=%q tx=%p", i, r.Hash, r.tx)
+			}
+		}
+	}
+
+	t.Run("updateDistanceIndexForTxs", func(t *testing.T) {
+		s := newDistSnapStore(t, 5, time.Now().Add(-time.Hour), 1)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		oldHops, oldPaths := len(s.distHops), len(s.distPaths)
+		s.updateDistanceIndexForTxs([]*StoreTx{s.packets[0], s.packets[2]})
+		check(t, s, oldHops, oldPaths, "[hash0001 hash0003 hash0004]")
+	})
+	t.Run("EvictStale", func(t *testing.T) {
+		// Ages 100h, 76h, 52h, 28h, 4h: retention 24h evicts four.
+		s := newDistSnapStore(t, 5, time.Now().Add(-100*time.Hour), 24*60)
+		s.retentionHours = 24
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		oldHops, oldPaths := len(s.distHops), len(s.distPaths)
+		if ev := s.EvictStale(); ev != 4 {
+			t.Fatalf("evicted %d, want 4", ev)
+		}
+		check(t, s, oldHops, oldPaths, "[hash0004]")
+	})
 }
 
 // Every compute must release its pin; a leaked pin would turn every later

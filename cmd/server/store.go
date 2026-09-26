@@ -4570,12 +4570,15 @@ func (s *PacketStore) updateDistanceIndexForTxs(txs []*StoreTx) {
 
 // compactDistIndex drops every distHops/distPaths record whose tx is in
 // remove. Compacts in place when no computeAnalyticsDistance holds a
-// snapshot (the common case: no allocation); otherwise copies into fresh
-// slices so the pinned snapshot's backing array is left untouched.
+// snapshot (the common case: no allocation) and zeroes the vacated tail,
+// so it does not keep removed or evicted *StoreTx reachable until a later
+// append overwrites it. While a snapshot is pinned it copies into fresh
+// slices instead and leaves the pinned backing array untouched.
 // Must be called with s.mu held (Lock).
 func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
+	inPlace := s.distSnapReaders.Load() == 0
 	hops, paths := s.distHops, s.distPaths
-	if s.distSnapReaders.Load() > 0 {
+	if !inPlace {
 		hops = make([]distHopRecord, len(s.distHops))
 		paths = make([]distPathRecord, len(s.distPaths))
 	}
@@ -4586,6 +4589,9 @@ func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
 			n++
 		}
 	}
+	if inPlace {
+		clear(hops[n:len(s.distHops)])
+	}
 	s.distHops = hops[:n]
 	n = 0
 	for _, r := range s.distPaths {
@@ -4593,6 +4599,9 @@ func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
 			paths[n] = r
 			n++
 		}
+	}
+	if inPlace {
+		clear(paths[n:len(s.distPaths)])
 	}
 	s.distPaths = paths[:n]
 }
