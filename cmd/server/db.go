@@ -1105,8 +1105,33 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 			if !db.isV3() {
 				joinCond = "obs.id = o.observer_id"
 			}
+			// #1143: from_pubkey is a dedicated column the ingestor fills at
+			// write time for ADVERT rows, so this lookup does not have to
+			// JSON_EXTRACT and parse decoded_json for every candidate row.
+			// Measured against a live 4.9GB database, 9 interleaved rounds so
+			// concurrent ingest cannot bias one variant: 934ms -> 835ms median
+			// (1.12x) for a single-region filter, identical result set both
+			// ways. The win is purely the avoided JSON parse — EXPLAIN QUERY
+			// PLAN is byte-identical before and after, both driving off
+			// idx_transmissions_payload_type. Despite the column being
+			// indexed, idx_transmissions_from_pubkey does not participate in
+			// this plan at all.
+			//
+			// THE TRAP, for whoever touches this next: from_pubkey is only
+			// written for ADVERTs that actually carry a pubkey — see the
+			// guard in cmd/ingestor/db.go. A NULL here drops out of IN (...)
+			// silently, so a write path that fills decoded_json but forgets
+			// from_pubkey would cost nodes from this filter with no error to
+			// notice. That is safe today only because it is measured to be:
+			// on live staging 25 of 62104 ADVERTs have NULL from_pubkey, and
+			// all 25 have no pubKey in decoded_json either — nothing is lost,
+			// because there was never a pubkey to record. A COALESCE fallback
+			// to JSON_EXTRACT was measured and rejected: it rescued 0 rows and
+			// cost half the win (1.12x -> 1.05x). If you add a new write path
+			// for transmissions, populate from_pubkey there rather than
+			// reintroducing a per-row JSON parse here.
 			subq := fmt.Sprintf(`public_key IN (
-				SELECT DISTINCT JSON_EXTRACT(t.decoded_json, '$.pubKey')
+				SELECT DISTINCT t.from_pubkey
 				FROM transmissions t
 				JOIN observations o ON o.transmission_id = t.id
 				JOIN observers obs ON %s
