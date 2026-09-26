@@ -684,11 +684,12 @@
    * Both selectNode() and loadFullNode() need the same data —
    * this shared helper avoids duplicating the fetch logic (fixes #391).
    * It is the only caller that asks for the Recent Adverts route breakdown
-   * (#2073, NodeAdverts.detailPath); other node-detail fetches stay plain.
+   * (#2073, the advertRoutes opt-in, docs/api-spec.md); other node-detail
+   * fetches stay on the plain URL, which the server answers as before.
    */
   async function fetchNodeDetail(pubkey) {
     const [nodeData, healthData] = await Promise.all([
-      api(NodeAdverts.detailPath(pubkey), { ttl: CLIENT_TTL.nodeDetail }),
+      api('/nodes/' + encodeURIComponent(pubkey) + '?include=advertRoutes', { ttl: CLIENT_TTL.nodeDetail }),
       api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null)
     ]);
     nodeData.healthData = healthData;

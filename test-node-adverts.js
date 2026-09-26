@@ -223,33 +223,30 @@ test('tabs: exactly the selected tab is aria-selected at render, the rest false 
 // PR #97 review P2-2: the breakdown costs a scan of the node's adverts, so
 // only the node page (full view and side panel, both through nodes.js
 // fetchNodeDetail) asks for it. Packets, live, channels, route view and the
-// claimed-nodes lookups keep the plain /api/nodes/{pubkey} URL.
-test('detailPath: the opt-in URL, a distinct client-cache key under the plain one', () => {
-  assert.strictEqual(NA.detailPath('ab/c d'), '/nodes/ab%2Fc%20d?include=advertRoutes');
-  const plain = '/nodes/' + encodeURIComponent('abc');
-  assert.notStrictEqual(NA.detailPath('abc'), plain, 'api() caches by path: the two responses must not share a key');
-  assert.ok(NA.detailPath('abc').startsWith(plain + '?'), "invalidateApiCache('/nodes/' + pk) must still clear it");
-});
-
+// claimed-nodes lookups keep the plain /api/nodes/{pubkey} URL. The fetch
+// builds the URL itself: a missing node-adverts.js must not turn a 404 into
+// "Failed to load node" (test-issue-2027-my-mesh-node-page-e2e.js loads
+// nodes.js without it).
 test('only the node page sends include=advertRoutes', () => {
   const dir = path.join(__dirname, 'public');
   const offenders = [];
   for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
-    if (f === 'node-adverts.js') continue;
     const code = fs.readFileSync(path.join(dir, f), 'utf8');
-    if (f !== 'nodes.js' && /advertRoutes|detailPath/.test(code)) offenders.push(f);
+    if (f !== 'nodes.js' && /include=advertRoutes/.test(code)) offenders.push(f);
   }
   assert.deepStrictEqual(offenders, [], 'files other than nodes.js ask for the breakdown');
   const nodesJs = fs.readFileSync(path.join(dir, 'nodes.js'), 'utf8');
-  assert.ok(!/advertRoutes/.test(nodesJs), 'nodes.js must go through NodeAdverts.detailPath');
-  const uses = nodesJs.match(/NodeAdverts\.detailPath\(/g) || [];
-  assert.strictEqual(uses.length, 1, 'exactly one node-detail fetch sends it');
+  assert.strictEqual((nodesJs.match(/include=advertRoutes/g) || []).length, 1, 'exactly one node-detail fetch sends it');
   const fetchFn = /async function fetchNodeDetail\(pubkey\) \{[\s\S]*?\n  \}\n/.exec(nodesJs);
   assert.ok(fetchFn, 'fetchNodeDetail not found');
-  assert.ok(/api\(NodeAdverts\.detailPath\(pubkey\), \{ ttl: CLIENT_TTL\.nodeDetail \}\)/.test(fetchFn[0]), 'fetchNodeDetail (full view + side panel) must send it');
+  assert.ok(fetchFn[0].includes("api('/nodes/' + encodeURIComponent(pubkey) + '?include=advertRoutes', { ttl: CLIENT_TTL.nodeDetail })"),
+    'fetchNodeDetail (full view + side panel) must send it');
+  assert.ok(!/NodeAdverts/.test(fetchFn[0]), 'fetchNodeDetail must not depend on node-adverts.js');
   assert.ok(/async function selectNode[\s\S]*?fetchNodeDetail\(/.test(nodesJs) && /async function loadFullNode[\s\S]*?fetchNodeDetail\(/.test(nodesJs),
     'the side panel and the full view both fetch through fetchNodeDetail');
-  // The claimed-nodes lookup stays on the plain URL.
+  // The claimed-nodes lookup stays on the plain URL; the opted-in URL is a
+  // distinct api() cache key under the plain one (invalidateApiCache prefixes
+  // still clear it).
   assert.ok(/missing\.map\(mn => api\('\/nodes\/' \+ encodeURIComponent\(mn\.pubkey\), \{ ttl: CLIENT_TTL\.nodeDetail \}\)\)/.test(nodesJs), 'claimed nodes changed');
 });
 

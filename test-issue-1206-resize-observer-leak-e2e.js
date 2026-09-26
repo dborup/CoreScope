@@ -156,6 +156,12 @@ async function viewText(page, view) {
   }, view);
 }
 
+// The node page's detail request: nodes.js fetchNodeDetail opts in to the
+// Recent Adverts route breakdown (#2073), so api() keys, in-flight entries and
+// error messages carry the query. Routes below match on the pathname.
+const DETAIL_QUERY = '?include=advertRoutes';
+const detailApiPath = (key) => '/nodes/' + key + DETAIL_QUERY;
+
 // Holds the first request for `node` until released and then answers it with
 // `firstResponse` (an HTTP status for a failure, otherwise a node payload).
 // Later requests for the node are answered at once with `laterResponse`.
@@ -164,7 +170,7 @@ async function holdFirstDetail(page, node, firstResponse, laterResponse) {
   const gate = new Promise((resolve) => { release = resolve; });
   let requests = 0;
   const path = '/api/nodes/' + node.public_key;
-  await page.route('**' + path, async (route) => {
+  await page.route((url) => url.pathname === path, async (route) => {
     const first = ++requests === 1;
     if (first) await gate;
     const response = first ? firstResponse : laterResponse;
@@ -183,11 +189,10 @@ async function holdFirstDetail(page, node, firstResponse, laterResponse) {
 // request for the same node is a separate response and the held one can
 // arrive last.
 async function trackHeldDetail(page, node, detach) {
-  await page.evaluate(([key, detachHeld]) => {
-    const path = '/nodes/' + key;
+  await page.evaluate(([path, detachHeld]) => {
     window.__heldDetail = api(path).then(() => null, (error) => error.message);
     if (detachHeld) _inflight.delete(path);
-  }, [node.public_key, detach]);
+  }, [detailApiPath(node.public_key), detach]);
 }
 
 async function releaseHeldDetail(page, held) {
@@ -394,7 +399,7 @@ async function releaseHeldDetail(page, held) {
     { view: 'side', fails: true },
     { view: 'side', fails: false },
   ]) {
-    const expectedError = scenario.fails ? 'API 500: /nodes/' + nodeA.public_key : null;
+    const expectedError = scenario.fails ? 'API 500: ' + detailApiPath(nodeA.public_key) : null;
     await step(scenario.view + ' node map: stale ' + (scenario.fails ? 'failure' : 'no-location response') + ' preserves the replacement',
       () => withNodeMaps(browser, async (page, open) => {
         const held = await holdFirstDetail(page, nodeA, scenario.fails ? 500 : { ...nodeA, lat: null, lon: null }, nodeA);
@@ -455,7 +460,7 @@ async function releaseHeldDetail(page, held) {
 
   for (const view of ['side', 'full']) {
     for (const fails of [false, true]) {
-      const expectedError = fails ? 'API 500: /nodes/' + nodeA.public_key : null;
+      const expectedError = fails ? 'API 500: ' + detailApiPath(nodeA.public_key) : null;
       await step(view + ' node map: A -> B -> A ignores the first A ' + (fails ? 'failure' : 'response') + ' arriving last',
         () => withNodeMaps(browser, async (page, open) => {
           const held = await holdFirstDetail(page, nodeA, fails ? 500 : staleA, nodeA);
