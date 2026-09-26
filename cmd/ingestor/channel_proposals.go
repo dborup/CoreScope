@@ -37,9 +37,15 @@ var (
 )
 
 // errProposalConflict reports a decision that contradicts the stored one.
-type errProposalConflict struct{ status string }
+// source is the status the decision needed (pending for approve/reject,
+// approved for revoke); status is the one actually stored.
+type errProposalConflict struct{ source, status string }
 
 func (e errProposalConflict) Error() string {
+	if e.source == channelregistry.StatusApproved {
+		// Revoke: "already pending" would read as if revoking had worked.
+		return "suggestion is not approved (it is " + e.status + ")"
+	}
 	return "suggestion was already " + e.status
 }
 
@@ -63,11 +69,14 @@ func scanProposalRow(row *sql.Row) (channelregistry.Proposal, bool, error) {
 }
 
 // submitChannelProposal stores a new pending proposal, or reports the existing
-// one for a replayed request or an already-proposed name. A name that was
-// previously approved and then revoked is free to re-propose: the existing
-// row (its id, and so its identity, is kept — UNIQUE(name) means it cannot
-// become a second row) is resurrected to pending rather than left revoked
-// forever or auto-approved.
+// one for a replayed request or an already-proposed name. A rejected name
+// therefore stays blocked — re-suggesting it reports the rejection — until
+// retention (RetentionDays after the review) deletes the row; that keeps a
+// rejected name from being pushed back into the review queue over and over.
+// A name that was previously approved and then revoked is free to re-propose:
+// the existing row (its id, and so its identity, is kept — UNIQUE(name) means
+// it cannot become a second row) is resurrected to pending rather than left
+// revoked forever or auto-approved.
 func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.Command, maxPending int, nowMs int64) (channelregistry.Proposal, error) {
 	// Never trust the queue file: validate again with the shared rules.
 	name, err := channelregistry.NormalizeName(cmd.Name)
@@ -162,7 +171,7 @@ func (s *Store) reviewChannelProposal(ctx context.Context, id, source, target st
 		return p, nil // repeated decision: nothing to do
 	}
 	if p.Status != source {
-		return p, errProposalConflict{p.Status}
+		return p, errProposalConflict{source: source, status: p.Status}
 	}
 	// Capacity is only consumed by approving; revoking (target == revoked)
 	// frees a slot instead, so this check naturally does not apply to it.
@@ -214,6 +223,10 @@ type channelProposalRunner struct {
 	keys   *hotKeys
 	limits channelregistry.Limits
 	now    func() time.Time
+
+	// publishedBaseGen is the hotKeys base generation last written to the
+	// builtin names file; 0 means never written.
+	publishedBaseGen uint64
 }
 
 func newChannelProposalRunner(store *Store, keys *hotKeys, cfg *channelregistry.Config) *channelProposalRunner {
@@ -236,8 +249,10 @@ func (r *channelProposalRunner) LoadApproved(ctx context.Context) (int, error) {
 	return r.keys.AddApproved(names...), nil
 }
 
-// RunOnce applies every waiting command in submission order.
+// RunOnce publishes the builtin names when the config-derived key layer has
+// changed, then applies every waiting command in submission order.
 func (r *channelProposalRunner) RunOnce(ctx context.Context) {
+	r.publishBuiltinNames()
 	cmds, err := r.queue.Pending()
 	if err != nil {
 		log.Printf("[channel-proposals] list queue failed: %v", err)
@@ -268,6 +283,23 @@ func (r *channelProposalRunner) RunOnce(ctx context.Context) {
 			log.Printf("[channel-proposals] write result %s failed: %v", res.RequestID, err)
 		}
 	}
+}
+
+// publishBuiltinNames writes the hashtag names of the base key layer (built-in,
+// rainbow table, hashChannels, channelKeys) for the server, once at startup
+// and again after each reload. Those names decrypt whether or not they are
+// approved, because base wins over approved in hotKeys. O(base) and only when
+// the base generation changed, never per tick.
+func (r *channelProposalRunner) publishBuiltinNames() {
+	names, gen := r.keys.BaseNames()
+	if gen == r.publishedBaseGen {
+		return
+	}
+	if err := r.queue.WriteBuiltinNames(names); err != nil {
+		log.Printf("[channel-proposals] publishing built-in channel names failed: %v", err)
+		return
+	}
+	r.publishedBaseGen = gen
 }
 
 func (r *channelProposalRunner) apply(ctx context.Context, cmd channelregistry.Command) channelregistry.Result {
@@ -316,7 +348,7 @@ func userFacingProposalError(cmd channelregistry.Command, err error) string {
 		errors.Is(err, errProposalNotFound), errors.Is(err, channelregistry.ErrInvalidCommand),
 		errors.Is(err, channelregistry.ErrNameEmpty), errors.Is(err, channelregistry.ErrNameTooLong),
 		errors.Is(err, channelregistry.ErrNameInvalidUTF8), errors.Is(err, channelregistry.ErrNameControl),
-		errors.Is(err, channelregistry.ErrNameSpace):
+		errors.Is(err, channelregistry.ErrNameSpace), errors.Is(err, channelregistry.ErrNameInvisible):
 		return err.Error()
 	}
 	log.Printf("[channel-proposals] %s %s failed: %v", cmd.Op, cmd.RequestID, err)

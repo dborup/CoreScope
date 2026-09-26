@@ -133,10 +133,10 @@ See [Channels](channels.md) for details.
 | `maxPending` | `100` | Suggestions waiting for review. Further suggestions are refused until some are reviewed. |
 | `maxApproved` | `128` | Shared channels that can be approved. |
 | `maxQueuedRequests` | `256` | Requests waiting for the ingestor in the queue directory next to the database. |
-| `retentionDays` | `30` | Rejected and never-reviewed suggestions are deleted after this many days. Approved channels are kept. |
+| `retentionDays` | `30` | Rejected and never-reviewed suggestions are deleted after this many days. Approved channels are kept. Until its rejection is deleted, a rejected name cannot be suggested again. |
 | `submissionsPerHour` | `20` | Global limit on new suggestions per hour. It is global rather than per visitor, because behind a reverse proxy every visitor can share one address. |
 
-Approved channels stay decrypted and listed when `enabled` is later set to `false`, and survive restarts and `SIGHUP` reloads. A key configured in `channelKeys` for the same name takes priority.
+Approved channels stay decrypted and listed when `enabled` is later set to `false`, and survive restarts and `SIGHUP` reloads. A key configured in `channelKeys` for the same name takes priority, and so does the rainbow table (`channel-rainbow.json`): approving or revoking one of those built-in names changes nothing, and the review dialog marks them (see [Channels](channels.md#built-in-names)).
 
 An administrator can also revoke a previously approved channel (see [Channels](channels.md#revoking-an-approved-channel)) — this undoes the decryption going forward but never deletes or hides messages already decoded while it was approved. A revoked row is retained and pruned by the same `retentionDays` rule as a rejected one (counted from when it was revoked, not when it was first submitted); an approved row is still never pruned. Revoking introduces no new configuration of its own — it reuses the `maxPending`/`maxApproved`/`retentionDays`/`submissionsPerHour` limits above.
 

@@ -1211,32 +1211,83 @@ func ensureObserverNeighborMetricsTable(rw *sql.DB, logf Logger) error {
 }
 
 // ensureChannelProposalsTable creates the table behind publicly suggested
-// hashtag channels (internal/channelregistry). The ingestor is its only
-// writer. It is deliberately NOT part of AssertReady: a new server must keep
-// working against a database an older ingestor has not migrated yet, and its
-// readers (channelregistry.ListApprovedNames / ListProposals) treat the
-// missing table as empty on every query instead of caching its absence.
+// hashtag channels (internal/channelregistry), and upgrades one created
+// before 'revoked' existed (see upgradeChannelProposalsStatusCheck). The
+// ingestor is its only writer. It is deliberately NOT part of AssertReady: a
+// new server must keep working against a database an older ingestor has not
+// migrated yet, and its readers (channelregistry.ListApprovedNames /
+// ListProposals) treat the missing table as empty on every query instead of
+// caching its absence.
 //
 // name is COLLATE BINARY because the firmware derives the channel key from
 // the exact bytes of the name: "#Test" and "#test" are different channels.
 func ensureChannelProposalsTable(rw *sql.DB, logf Logger) error {
-	// status also accepts 'revoked' (an approval an admin later undid):
-	// this table has never shipped to any real database yet (it is part of
-	// the same unreleased, unpushed commit that first introduced it), so the
-	// CHECK constraint is changed in place rather than through a migration —
-	// there is no existing row anywhere with the old, narrower constraint to
-	// reconcile.
-	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS channel_proposals (
+	if _, err := rw.Exec(channelProposalsDDL("channel_proposals")); err != nil {
+		return fmt.Errorf("create channel_proposals: %w", err)
+	}
+	if err := upgradeChannelProposalsStatusCheck(rw, logf); err != nil {
+		return err
+	}
+	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_channel_proposals_status ON channel_proposals(status, created_at)`); err != nil {
+		return fmt.Errorf("create idx_channel_proposals_status: %w", err)
+	}
+	return nil
+}
+
+// channelProposalsDDL is the current channel_proposals definition under the
+// given table name. status includes 'revoked' (an approval an admin undid).
+func channelProposalsDDL(table string) string {
+	return `CREATE TABLE IF NOT EXISTS ` + table + ` (
 		id TEXT PRIMARY KEY,
 		name TEXT COLLATE BINARY NOT NULL UNIQUE,
 		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','revoked')),
 		created_at INTEGER NOT NULL,
 		reviewed_at INTEGER NULL
-	)`); err != nil {
-		return fmt.Errorf("create channel_proposals: %w", err)
+	)`
+}
+
+// upgradeChannelProposalsStatusCheck rebuilds a channel_proposals table
+// created by commit 4868622e, the first shared-channel-proposals commit,
+// which was pushed and can have run against test databases. Its status CHECK
+// lacks 'revoked', CREATE TABLE IF NOT EXISTS does not change an existing
+// table, and SQLite cannot alter a CHECK in place, so every revoke would fail
+// with "CHECK constraint failed". The rebuild keeps every row and runs in one
+// transaction: a crash leaves either the old table or the new one, never
+// neither. A table whose DDL already allows 'revoked' is left alone.
+func upgradeChannelProposalsStatusCheck(rw *sql.DB, logf Logger) error {
+	var ddl string
+	err := rw.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channel_proposals'`).Scan(&ddl)
+	if err != nil {
+		return fmt.Errorf("read channel_proposals DDL: %w", err)
 	}
-	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_channel_proposals_status ON channel_proposals(status, created_at)`); err != nil {
-		return fmt.Errorf("create idx_channel_proposals_status: %w", err)
+	if strings.Contains(ddl, "'revoked'") {
+		return nil
 	}
+	tx, err := rw.Begin()
+	if err != nil {
+		return fmt.Errorf("begin channel_proposals rebuild: %w", err)
+	}
+	defer tx.Rollback()
+	steps := []string{
+		`DROP TABLE IF EXISTS channel_proposals_rebuild`,
+		channelProposalsDDL("channel_proposals_rebuild"),
+		`INSERT INTO channel_proposals_rebuild (id, name, status, created_at, reviewed_at)
+		 SELECT id, name, status, created_at, reviewed_at FROM channel_proposals`,
+		`DROP TABLE channel_proposals`,
+		`ALTER TABLE channel_proposals_rebuild RENAME TO channel_proposals`,
+	}
+	for _, q := range steps {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("rebuild channel_proposals: %w", err)
+		}
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM channel_proposals`).Scan(&n); err != nil {
+		return fmt.Errorf("count rebuilt channel_proposals: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel_proposals rebuild: %w", err)
+	}
+	logf("[dbschema] rebuilt channel_proposals so status CHECK allows 'revoked' (%d row(s) kept)", n)
 	return nil
 }

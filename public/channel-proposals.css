@@ -72,6 +72,7 @@
 .ch-proposals-main { display: flex; flex-direction: column; min-width: 0; }
 .ch-proposals-name { font-weight: 600; overflow-wrap: anywhere; }
 .ch-proposals-meta { font-size: 12px; color: var(--text-muted); }
+.ch-proposals-builtin { font-size: 12px; color: var(--warning); }
 .ch-proposals-actions { display: flex; gap: 6px; align-items: center; }
 .ch-proposals-actions button,
 .ch-proposals-toolbar button { min-height: 44px; }

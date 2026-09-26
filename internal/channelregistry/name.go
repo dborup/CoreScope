@@ -31,6 +31,7 @@ var (
 	ErrNameInvalidUTF8 = errors.New("channel name is not valid UTF-8")
 	ErrNameControl     = errors.New("channel name contains control or direction-override characters")
 	ErrNameSpace       = errors.New("channel name must not start or end with a space")
+	ErrNameInvisible   = errors.New("channel name contains invisible formatting characters")
 )
 
 // NormalizeName turns user input into the exact channel name whose bytes the
@@ -41,11 +42,15 @@ var (
 // case and Unicode form are kept byte-for-byte, because the firmware derives
 // the key from the exact bytes, so "#Test" and "#test" are different channels.
 //
-// The firmware imposes no character set, so neither do we beyond what could
-// never be a working or honest name: invalid UTF-8, control characters (a NUL
-// would truncate the name on a radio), bidirectional overrides (which make a
-// name display as something it is not), and a body that starts or ends with
-// whitespace.
+// The firmware imposes no character set (it only limits the length), so
+// neither do we beyond what could never be a working or honest name: invalid
+// UTF-8, control characters (a NUL would truncate the name on a radio) and the
+// line/paragraph separators U+2028/U+2029, bidirectional overrides and other
+// invisible formatting characters (which make a name display as something it
+// is not, or two different channels look identical), and a body that starts
+// or ends with whitespace. The invisible-character rule is CoreScope's own
+// presentation rule, not a firmware one; the frontend and the ingestor apply
+// the same rule.
 func NormalizeName(raw string) (string, error) {
 	s := strings.TrimSpace(raw)
 	if !utf8.ValidString(s) {
@@ -62,8 +67,11 @@ func NormalizeName(raw string) (string, error) {
 		return "", ErrNameTooLong
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) || isBidiControl(r) {
+		if unicode.IsControl(r) || isBidiControl(r) || isLineBreakSeparator(r) {
 			return "", ErrNameControl
+		}
+		if isInvisibleFormat(r) {
+			return "", ErrNameInvisible
 		}
 	}
 	first, _ := utf8.DecodeRuneInString(body)
@@ -87,4 +95,29 @@ func isBidiControl(r rune) bool {
 		return true
 	}
 	return false
+}
+
+// isLineBreakSeparator reports U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
+// SEPARATOR. They are not Cf (they are Zl/Zp), but a line break inside a
+// channel name breaks every single-line place the name is shown.
+func isLineBreakSeparator(r rune) bool {
+	return r == 0x2028 || r == 0x2029
+}
+
+// isInvisibleFormat reports Unicode format characters (category Cf) that
+// render as nothing: zero-width space U+200B, BOM U+FEFF, soft hyphen U+00AD,
+// the tag characters U+E0000–U+E007F and the like. They would let two
+// different channel names (different keys) look identical. The exceptions
+// are what emoji need: ZERO WIDTH JOINER U+200D and the variation selectors
+// U+FE00–U+FE0F and U+E0100–U+E01EF (those are Mn, not Cf, today; they are
+// listed so the rule stays explicit if that ever changes). Emoji tag
+// sequences, such as the subdivision flags, are rejected with the tags.
+func isInvisibleFormat(r rune) bool {
+	switch {
+	case r == 0x200D:
+		return false
+	case r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF:
+		return false
+	}
+	return unicode.Is(unicode.Cf, r)
 }

@@ -2,6 +2,7 @@ package dbschema
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -292,5 +293,105 @@ func TestChannelProposalsTable(t *testing.T) {
 	}
 	if err := AssertReady(db); err != nil {
 		t.Fatalf("AssertReady must not require channel_proposals: %v", err)
+	}
+}
+
+// A database that ran commit 4868622e (the first shared-channel-proposals
+// commit, deployed to test instances) has channel_proposals with a CHECK that
+// does not allow 'revoked'. CREATE TABLE IF NOT EXISTS leaves that table
+// alone, so Apply must rebuild it — keeping every row — or every revoke fails
+// with "CHECK constraint failed".
+func TestChannelProposalsTable_UpgradesCheckWithoutRevoked(t *testing.T) {
+	db := minimalDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE channel_proposals (
+		id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL UNIQUE,
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE INDEX idx_channel_proposals_status ON channel_proposals(status, created_at)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at, reviewed_at) VALUES
+		('a', '#Alpha', 'approved', 10, 20),
+		('b', '#beta', 'pending', 11, NULL),
+		('c', '#Gamma', 'rejected', 12, 22)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE channel_proposals SET status = 'revoked' WHERE id = 'a'`); err == nil {
+		t.Fatal("precondition: the old CHECK must reject 'revoked'")
+	}
+
+	var logs []string
+	logf := func(format string, args ...interface{}) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	if err := Apply(db, logf); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	rebuilt := 0
+	for _, l := range logs {
+		if strings.Contains(l, "channel_proposals") && strings.Contains(l, "revoked") {
+			rebuilt++
+		}
+	}
+	if rebuilt != 1 {
+		t.Fatalf("want exactly one log line about rebuilding channel_proposals for 'revoked', got %q", logs)
+	}
+
+	rows, err := db.Query(`SELECT id, name, status, created_at, COALESCE(reviewed_at, -1) FROM channel_proposals ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for rows.Next() {
+		var id, name, status string
+		var created, reviewed int64
+		if err := rows.Scan(&id, &name, &status, &created, &reviewed); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%s|%s|%s|%d|%d", id, name, status, created, reviewed))
+	}
+	rows.Close()
+	want := []string{"a|#Alpha|approved|10|20", "b|#beta|pending|11|-1", "c|#Gamma|rejected|12|22"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rows after rebuild = %v, want %v", got, want)
+	}
+	if _, err := db.Exec(`UPDATE channel_proposals SET status = 'revoked' WHERE id = 'a'`); err != nil {
+		t.Fatalf("revoke after rebuild: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at) VALUES ('d', '#alpha', 'pending', 1)`); err != nil {
+		t.Fatalf("#alpha must still be distinct from #Alpha (BINARY): %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at) VALUES ('e', '#Alpha', 'pending', 1)`); err == nil {
+		t.Fatal("UNIQUE(name) lost in rebuild")
+	}
+	if _, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at) VALUES ('f', '#x', 'bogus', 1)`); err == nil {
+		t.Fatal("status CHECK lost in rebuild")
+	}
+	var idx int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_channel_proposals_status'`).Scan(&idx); err != nil || idx != 1 {
+		t.Fatalf("status index after rebuild: n=%d err=%v", idx, err)
+	}
+	var leftovers int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'channel_proposals_%'`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("temporary table left behind: n=%d err=%v", leftovers, err)
+	}
+
+	// A second run is a no-op: nothing is rebuilt or logged, rows unchanged.
+	logs = nil
+	if err := Apply(db, logf); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	for _, l := range logs {
+		if strings.Contains(l, "channel_proposals") {
+			t.Fatalf("second Apply must not touch channel_proposals, logged %q", l)
+		}
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM channel_proposals`).Scan(&n); err != nil || n != 4 {
+		t.Fatalf("row count after second Apply = %d (%v), want 4", n, err)
 	}
 }

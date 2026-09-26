@@ -24,8 +24,16 @@
   // name is at most 31 bytes of UTF-8 including the '#'. Mirrors
   // internal/channelregistry.NormalizeName; the server stays authoritative.
   var MAX_NAME_BYTES = 31;
-  var CONTROL_RE = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+  var CONTROL_RE = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u2028\u2029]/;
   var LEADING_SPACE_RE = /^\s/;
+  // Invisible formatting characters (Unicode category Cf) except the
+  // ZERO WIDTH JOINER emoji need; variation selectors are not Cf. CoreScope's
+  // own presentation rule, the same as isInvisibleFormat in
+  // internal/channelregistry (the firmware only limits the length). An
+  // engine without \p{} skips this check; the server still enforces it.
+  var INVISIBLE_RE = (function () {
+    try { return new RegExp('(?!\\u200D)\\p{Cf}', 'u'); } catch (e) { return null; }
+  })();
 
   function utf8Length(s) {
     // encodeURIComponent throws on lone surrogates, which are not valid UTF-8.
@@ -41,6 +49,7 @@
     try { bytes = utf8Length(s); } catch (e) { return { error: 'The channel name contains invalid characters.' }; }
     if (bytes > MAX_NAME_BYTES) return { error: 'Channel names can be at most ' + MAX_NAME_BYTES + ' bytes including the #.' };
     if (CONTROL_RE.test(s)) return { error: 'The channel name contains control characters.' };
+    if (INVISIBLE_RE && INVISIBLE_RE.test(s)) return { error: 'The channel name contains invisible formatting characters.' };
     if (LEADING_SPACE_RE.test(body)) return { error: 'The channel name must not start with a space.' };
     return { name: s };
   }
@@ -192,14 +201,18 @@
   }
 
   // ── Suggest form (a section of the Add Channel modal) ─────────────────
+  var BUILTIN_NOTE = 'This site already decrypts it through its built-in channel list, so sharing it changes nothing.';
+
+  // Plain text for the suggest form's status line (shown with textContent).
   function suggestMessage(st, fallbackName) {
     var p = st && st.proposal;
     var name = (p && p.name) || fallbackName || 'The channel';
+    var note = st && st.builtIn ? ' ' + BUILTIN_NOTE : '';
     switch (st && st.status) {
       case 'queued': return { text: 'Sending your suggestion…', kind: 'info' };
-      case 'pending': return { text: 'Thanks! ' + name + ' is waiting for an administrator to review it.', kind: 'success' };
-      case 'approved': return { text: name + ' is already shared with everyone.', kind: 'success' };
-      case 'rejected': return { text: name + ' was not accepted as a shared channel.', kind: 'warn' };
+      case 'pending': return { text: 'Thanks! ' + name + ' is waiting for an administrator to review it.' + note, kind: note ? 'warn' : 'success' };
+      case 'approved': return { text: name + ' is already shared with everyone.' + note, kind: 'success' };
+      case 'rejected': return { text: name + ' was not accepted as a shared channel. A rejected name can be suggested again once the earlier decision expires (30 days by default).', kind: 'warn' };
       default: return { text: (st && st.error) || 'The suggestion could not be processed.', kind: 'error' };
     }
   }
@@ -384,13 +397,20 @@
           '<span class="ch-proposals-state" data-state="approved">approved</span>' +
           '<button type="button" class="ch-modal-btn-secondary ch-proposals-remove" data-proposals-decide="revoke"' +
           ' data-proposal-id="' + esc(p.id) + '" data-proposal-name="' + esc(p.name) + '"' +
+          (p.builtIn === true ? ' data-proposal-builtin="true"' : '') +
           ' aria-label="Remove ' + esc(p.name) + '">Remove</button>' +
         '</div>';
     } else {
       actions = '<span class="ch-proposals-state" data-state="' + esc(p.status) + '">' + esc(p.status) + '</span>';
     }
-    return '<li class="ch-proposals-item" data-proposal-id="' + esc(p.id) + '">' +
-      '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' +
+    // A name in the ingestor's built-in list (rainbow table / config)
+    // decrypts whatever the decision: say so before anyone approves it or
+    // expects a Remove to stop it.
+    var builtin = p.builtIn === true
+      ? '<span class="ch-proposals-builtin" title="' + esc(BUILTIN_NOTE) + '">Built in: already decrypted</span>'
+      : '';
+    return '<li class="ch-proposals-item" data-proposal-id="' + esc(p.id) + '"' + (p.builtIn === true ? ' data-builtin="true"' : '') + '>' +
+      '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' + builtin +
       '<span class="ch-proposals-meta">' + when + '</span></div>' + actions + '</li>';
   }
 
@@ -399,7 +419,22 @@
   // document keydown listener (onAdminKeydown), which checks confirmEl()
   // first so Escape/Tab-trapping apply to whichever layer is on top —
   // never two independent keydown listeners fighting over the same keys.
-  function openConfirm(id, name) {
+  function confirmDialogHtml(id, name, builtIn) {
+    var hint = builtIn
+      ? 'It will stop being listed as shared, but this site keeps decrypting it through its built-in channel list.'
+      : 'It will stop being shared with everyone.';
+    return '<div class="modal ch-modal ch-proposals-confirm" role="document">' +
+        '<h4 id="chProposalsConfirmTitle">Remove ' + esc(name) + '?</h4>' +
+        '<p class="ch-modal-section-hint">' + esc(hint) + '</p>' +
+        '<div class="ch-modal-row ch-proposals-confirm-actions">' +
+          '<button type="button" class="ch-modal-btn-secondary" data-proposals-confirm-action="cancel">Cancel</button>' +
+          '<button type="button" class="btn-primary" data-proposals-confirm-action="confirm"' +
+          ' data-proposal-id="' + esc(id) + '" data-proposal-name="' + esc(name) + '">Remove</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function openConfirm(id, name, builtIn) {
     if (!state || !adminEl() || confirmEl()) return;
     state.confirmTrigger = document.activeElement;
     var dlg = document.createElement('div');
@@ -408,16 +443,7 @@
     dlg.setAttribute('role', 'alertdialog');
     dlg.setAttribute('aria-modal', 'true');
     dlg.setAttribute('aria-labelledby', 'chProposalsConfirmTitle');
-    dlg.innerHTML =
-      '<div class="modal ch-modal ch-proposals-confirm" role="document">' +
-        '<h4 id="chProposalsConfirmTitle">Remove ' + esc(name) + '?</h4>' +
-        '<p class="ch-modal-section-hint">It will stop being shared with everyone.</p>' +
-        '<div class="ch-modal-row ch-proposals-confirm-actions">' +
-          '<button type="button" class="ch-modal-btn-secondary" data-proposals-confirm-action="cancel">Cancel</button>' +
-          '<button type="button" class="btn-primary" data-proposals-confirm-action="confirm"' +
-          ' data-proposal-id="' + esc(id) + '" data-proposal-name="' + esc(name) + '">Remove</button>' +
-        '</div>' +
-      '</div>';
+    dlg.innerHTML = confirmDialogHtml(id, name, builtIn);
     adminEl().appendChild(dlg);
     var confirmBtn = dlg.querySelector('[data-proposals-confirm-action="confirm"]');
     if (confirmBtn) confirmBtn.focus();
@@ -525,7 +551,8 @@
     if (d && !d.disabled) {
       var op = d.getAttribute('data-proposals-decide');
       if (op === 'revoke') {
-        openConfirm(d.getAttribute('data-proposal-id'), d.getAttribute('data-proposal-name') || '');
+        openConfirm(d.getAttribute('data-proposal-id'), d.getAttribute('data-proposal-name') || '',
+          d.getAttribute('data-proposal-builtin') === 'true');
         return;
       }
       decide(d.getAttribute('data-proposal-id'), op, d);
@@ -624,6 +651,8 @@
     pollDelay: pollDelay,
     createPoller: createPoller,
     renderAdminRow: renderAdminRow,
+    confirmDialogHtml: confirmDialogHtml,
+    suggestMessage: suggestMessage,
     mount: mount,
     unmount: unmount,
     openAdmin: openAdmin,

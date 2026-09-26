@@ -277,9 +277,8 @@ test('renderAdminRow: pending gets Approve/Reject, approved gets a Remove (revok
 });
 
 test('renderAdminRow escapes the channel name everywhere it is interpolated (XSS)', () => {
-  // NormalizeName/the firmware's 31-byte limit mean a real channel name can
-  // never contain HTML-special bytes; this proves the render function is
-  // safe on its own terms regardless of what validated it upstream.
+  // NormalizeName allows < > " ' (the firmware has no character set), so a
+  // publicly suggested name can carry markup: every sink must escape it.
   const evil = '#<img src=x onerror=alert(1)>';
   const html = CP.renderAdminRow({ id: 'dddddddddddddddd', name: evil, status: 'approved', createdAt: 1700000000000, reviewedAt: 1700000001000 });
   assert.ok(!html.includes('<img'), 'raw <img> tag leaked into the rendered row — a live element, not inert text');
@@ -597,6 +596,73 @@ function fireDocKeydown(env, evt) {
   // through the document-level listener registry buildMiniDom exposes.
   (env.document.__events.keydown || []).slice().forEach((fn) => fn(evt));
 }
+
+// ── Invisible formatting characters (PR #99 review, finding 3) ───────────
+test('normalizeName rejects invisible format characters (Cf) and line separators', () => {
+  const chars = ['\u00AD', '\u0600', '\u180E', '\u200B', '\u200C', '\u2060', '\u2062', '\uFEFF', '\uFFF9',
+    '\u{E0001}', '\u{E0020}', '\u{E0061}', '\u{E007F}', '\u2028', '\u2029', '\u202E', '\u200E'];
+  for (const c of chars) {
+    for (const input of ['#a' + c + 'b', '#' + c + 'ab']) {
+      const r = CP.normalizeName(input);
+      assert.ok(r.error && !r.name, `${JSON.stringify(input)} should be rejected, got ${JSON.stringify(r)}`);
+    }
+  }
+  assert.match(CP.normalizeName('#a\u200Bb').error, /invisible/);
+});
+
+test('normalizeName keeps emoji with ZWJ and variation selectors', () => {
+  for (const input of ['#\u{1F3F3}\uFE0F\u200D\u{1F308}', '#\u2764\uFE0F', '#\u2764\uFE0E', '#\u{1F469}\u200D\u{1F4BB}',
+    '#a\uFE00b', '#\u845B\u{E0100}', '#mesh\u200Dcore']) {
+    const r = CP.normalizeName(input);
+    assert.strictEqual(r.error, undefined, `${JSON.stringify(input)}: ${r.error}`);
+    assert.strictEqual(r.name, input);
+  }
+});
+
+// ── Remove confirmation escaping (mutant M21) ────────────────────────────
+test('confirmDialogHtml escapes the name in the title and the confirm button', () => {
+  const evil = '#"><img src=x onerror=__x=1>';
+  const html = CP.confirmDialogHtml('dddddddddddddddd', evil, false);
+  assert.ok(!/<img\b/i.test(html), 'raw <img survived: ' + html);
+  assert.match(html, /<h4 id="chProposalsConfirmTitle">Remove #&quot;&gt;&lt;img src=x onerror=__x=1&gt;\?<\/h4>/);
+  assert.match(html, /data-proposal-name="#&quot;&gt;&lt;img/);
+  assert.match(html, /stop being shared with everyone/);
+  assert.match(CP.confirmDialogHtml('dddddddddddddddd', '#test', true), /keeps decrypting it through its built-in channel list/);
+});
+
+// ── Built-in names (PR #99 review, finding 4) ────────────────────────────
+test('renderAdminRow marks names the server already decrypts through its built-in list', () => {
+  const html = CP.renderAdminRow({ id: 'eeeeeeeeeeeeeeee', name: '#test', status: 'approved', createdAt: 1, reviewedAt: 2, builtIn: true });
+  assert.match(html, /class="ch-proposals-builtin"/);
+  assert.match(html, /Built in: already decrypted/);
+  assert.match(html, /data-builtin="true"/);
+  assert.match(html, /data-proposal-builtin="true"/, 'the Remove button must carry the built-in flag to its confirmation');
+  const plain = CP.renderAdminRow({ id: 'ffffffffffffffff', name: '#Mine', status: 'pending', createdAt: 1 });
+  assert.ok(!/ch-proposals-builtin|data-builtin/.test(plain), 'a normal name must not be marked');
+});
+
+test('suggestMessage warns when a suggestion is already decrypted, and explains the rejection block', () => {
+  const warn = CP.suggestMessage({ status: 'pending', builtIn: true, proposal: { name: '#chat' } });
+  assert.strictEqual(warn.kind, 'warn');
+  assert.match(warn.text, /#chat is waiting/);
+  assert.match(warn.text, /already decrypts it through its built-in channel list/);
+  const normal = CP.suggestMessage({ status: 'pending', proposal: { name: '#Mine' } });
+  assert.strictEqual(normal.kind, 'success');
+  assert.ok(!/built-in/.test(normal.text));
+  assert.match(CP.suggestMessage({ status: 'rejected', proposal: { name: '#Spam' } }).text, /suggested again once the earlier decision expires/);
+});
+
+test('admin dialog: the Remove confirmation shows a markup name as text and warns for built-in names', async () => {
+  const evil = '#<b>bold</b>';
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: [{ id: 'bbbbbbbbbbbbbbbb', name: evil, status: 'approved', createdAt: 1, reviewedAt: 2, builtIn: true }], enabled: true } }));
+  await openApprovedAdminWithConfirm(env);
+  const confirmDlg = env.document.getElementById('chProposalsConfirm');
+  assert.ok(confirmDlg, 'confirm dialog must open');
+  const title = env.document.getElementById('chProposalsConfirmTitle');
+  assert.strictEqual(title.textContent, 'Remove ' + evil + '?', 'the name must render as text, not markup');
+  assert.strictEqual(title.querySelectorAll('b').length, 0, 'no element may be created from the name');
+  assert.match(confirmDlg.textContent, /keeps decrypting it through its built-in channel list/);
+});
 
 (async () => {
   for (const t of tests) {

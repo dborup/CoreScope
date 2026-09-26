@@ -19,11 +19,15 @@ import (
 // Channel keys come in two layers. base is what loadChannelKeys derives from
 // config (builtin, rainbow, hashChannels, channelKeys) and is replaced on
 // every SIGHUP. approved holds the publicly suggested hashtag channels an
-// administrator approved (internal/channelregistry); it only ever grows while
-// the process runs and is reloaded from the database at startup, so a SIGHUP
-// can never drop an approved channel. channelKeys is the merged snapshot the
-// MQTT handlers read, with base winning over approved, so a manually
-// configured key for the same name keeps priority.
+// administrator approved (internal/channelregistry): approvals add to it and
+// revocations remove from it (RemoveApproved), it is reloaded from the
+// database at startup, and a SIGHUP never touches it, so a reload can neither
+// drop an approved channel nor bring back a revoked one. channelKeys is the
+// merged snapshot the MQTT handlers read, with base winning over approved, so
+// a manually configured key for the same name keeps priority. It also means
+// a name already in base (for example one of the ~320 rainbow-table names
+// such as #test or #chat) gains nothing from approval and keeps decrypting
+// after a revoke; BaseNames lets the proposal runner tell the server so.
 type hotKeys struct {
 	channelKeys atomic.Pointer[map[string]string]
 	regionKeys  atomic.Pointer[map[string][]byte]
@@ -31,6 +35,7 @@ type hotKeys struct {
 	mu       sync.Mutex // serializes writers of base/approved and the merge
 	base     map[string]string
 	approved map[string]string
+	baseGen  uint64 // incremented by every setBase
 }
 
 // newHotKeys wraps the initial startup-loaded key maps.
@@ -46,7 +51,20 @@ func (hk *hotKeys) setBase(channelKeys map[string]string) {
 	hk.mu.Lock()
 	defer hk.mu.Unlock()
 	hk.base = channelKeys
+	hk.baseGen++
 	hk.publishLocked()
+}
+
+// BaseNames returns the names in the config-derived layer and its generation,
+// which changes on every setBase (startup and each reload).
+func (hk *hotKeys) BaseNames() ([]string, uint64) {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	names := make([]string, 0, len(hk.base))
+	for name := range hk.base {
+		names = append(names, name)
+	}
+	return names, hk.baseGen
 }
 
 // AddApproved adds approved hashtag channels, deriving each key with the same

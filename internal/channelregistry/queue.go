@@ -217,7 +217,7 @@ func (q *Queue) Lookup(id string) (RequestStatus, error) {
 		if err := json.Unmarshal(b, &res); err != nil {
 			return RequestStatus{}, err
 		}
-		return RequestStatus{Status: res.Status, Proposal: res.Proposal, Error: res.Error}, nil
+		return RequestStatus{Status: res.Status, Proposal: res.Proposal, Error: res.Error, CompletedAt: res.CompletedAt}, nil
 	}
 	if !os.IsNotExist(err) {
 		return RequestStatus{}, err
@@ -306,8 +306,8 @@ func (q *Queue) listNames(prefix string) ([]string, error) {
 }
 
 // writeAtomic writes v as JSON to a temp file in the same directory, syncs
-// it, and renames it into place, so a reader never sees a partial file and a
-// crash never leaves a truncated one under the final name.
+// it, renames it into place and syncs the directory, so a reader never sees a
+// partial file and a crash never leaves a truncated one under the final name.
 func (q *Queue) writeAtomic(path string, v interface{}) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -340,5 +340,18 @@ func (q *Queue) writeAtomic(path string, v interface{}) error {
 		os.Remove(tmp)
 		return err
 	}
+	syncDir(filepath.Dir(path))
 	return nil
+}
+
+// syncDir fsyncs a directory so a rename into it survives a power loss, not
+// just a process crash. Best effort: some filesystems and platforms refuse to
+// sync a directory, and the file itself is already synced.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	d.Sync()
+	d.Close()
 }

@@ -167,3 +167,75 @@ func TestPruneTTLCapAndTempFiles(t *testing.T) {
 		t.Fatal("orphaned temp file not removed")
 	}
 }
+
+// The ingestor publishes the hashtag names its config-derived key layer
+// (built-in, rainbow table, hashChannels, channelKeys) already decrypts, so
+// the read-only server can tell an administrator that approving or revoking
+// such a name changes nothing.
+func TestBuiltinNamesRoundTrip(t *testing.T) {
+	q := NewQueue(filepath.Join(t.TempDir(), QueueDirName))
+	names, err := q.ReadBuiltinNames()
+	if err != nil || len(names) != 0 {
+		t.Fatalf("missing file must read as empty: %v, %v", names, err)
+	}
+	in := []string{"#test", "Public", "#Test", "#test", "", "#chat", "psk:abc"}
+	if err := q.WriteBuiltinNames(in); err != nil {
+		t.Fatal(err)
+	}
+	names, err = q.ReadBuiltinNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"#Test": true, "#chat": true, "#test": true}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want only the distinct hashtag names %v", names, want)
+	}
+	for n := range want {
+		if !names[n] {
+			t.Fatalf("names = %v, missing %q", names, n)
+		}
+	}
+	// A rewrite replaces the set.
+	if err := q.WriteBuiltinNames([]string{"#only"}); err != nil {
+		t.Fatal(err)
+	}
+	names, _ = q.ReadBuiltinNames()
+	if len(names) != 1 || !names["#only"] {
+		t.Fatalf("after rewrite names = %v", names)
+	}
+	// The file never counts as a command or a result.
+	if pending, err := q.Pending(); err != nil || len(pending) != 0 {
+		t.Fatalf("builtin names file must not be a command: %v, %v", pending, err)
+	}
+	if _, err := q.Prune(time.Now().Add(1000*time.Hour), time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ = q.ReadBuiltinNames(); !names["#only"] {
+		t.Fatal("Prune must keep the builtin names file")
+	}
+}
+
+func TestBuiltinNamesBounded(t *testing.T) {
+	q := NewQueue(filepath.Join(t.TempDir(), QueueDirName))
+	many := make([]string, 0, MaxBuiltinNames+50)
+	for i := 0; i < MaxBuiltinNames+50; i++ {
+		many = append(many, "#n"+string(rune('a'+i%26))+NewID()[:6])
+	}
+	if err := q.WriteBuiltinNames(many); err != nil {
+		t.Fatal(err)
+	}
+	names, err := q.ReadBuiltinNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) > MaxBuiltinNames {
+		t.Fatalf("read %d names, cap is %d", len(names), MaxBuiltinNames)
+	}
+	// A corrupt file reads as an error, not as a partial set.
+	if err := os.WriteFile(filepath.Join(q.Dir(), BuiltinNamesFileName), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ReadBuiltinNames(); err == nil {
+		t.Fatal("corrupt file must be an error")
+	}
+}

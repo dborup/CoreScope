@@ -357,7 +357,7 @@ func TestApprovedStatusInvalidatesCache(t *testing.T) {
 	ps.insert("aaaaaaaaaaaaaaaa", "#Fresh", channelregistry.StatusApproved)
 	reqID := channelregistry.NewID()
 	p := &channelregistry.Proposal{ID: "aaaaaaaaaaaaaaaa", Name: "#Fresh", Status: channelregistry.StatusApproved}
-	if err := ps.queue.Complete(channelregistry.Result{RequestID: reqID, Status: channelregistry.RequestApproved, Proposal: p}); err != nil {
+	if err := ps.queue.Complete(channelregistry.Result{RequestID: reqID, Status: channelregistry.RequestApproved, Proposal: p, CompletedAt: ps.clock.Add(time.Millisecond).UnixMilli()}); err != nil {
 		t.Fatal(err)
 	}
 	if st := decode[channelregistry.RequestStatus](t, ps.do("GET", "/api/channel-proposals/requests/"+reqID, "", "")); st.Status != channelregistry.RequestApproved {
@@ -586,7 +586,7 @@ func TestRevokedStatusInvalidatesApprovedCache(t *testing.T) {
 	}
 	reqID := channelregistry.NewID()
 	p := &channelregistry.Proposal{ID: "aaaaaaaaaaaaaaaa", Name: "#Fresh", Status: channelregistry.StatusRevoked}
-	if err := ps.queue.Complete(channelregistry.Result{RequestID: reqID, Status: channelregistry.RequestRevoked, Proposal: p}); err != nil {
+	if err := ps.queue.Complete(channelregistry.Result{RequestID: reqID, Status: channelregistry.RequestRevoked, Proposal: p, CompletedAt: ps.clock.Add(time.Millisecond).UnixMilli()}); err != nil {
 		t.Fatal(err)
 	}
 	// Still inside the cache TTL: without the early invalidation this would
@@ -622,5 +622,142 @@ func TestChannelProposalServerWritesOnlyCommandFiles(t *testing.T) {
 		if !strings.HasPrefix(e.Name(), "cmd-") {
 			t.Fatalf("unexpected file %s", e.Name())
 		}
+	}
+}
+
+// Anyone may poll a request id, so reading an approved/revoked result must
+// not flush the approved-channel cache every time: only a result the current
+// snapshot may predate (completed after it was built) invalidates it, once.
+func TestRequestStatusPollsDoNotFlushApprovedCache(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	ps.insert("aaaaaaaaaaaaaaaa", "#A", channelregistry.StatusApproved)
+	ps.clock = ps.clock.Add(approvedCacheTTL + time.Second)
+	names := func() string {
+		var out []string
+		for _, c := range decode[ChannelListResponse](t, ps.do("GET", "/api/channels", "", "")).ApprovedChannels {
+			out = append(out, c.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := names(); got != "#A" {
+		t.Fatalf("precondition approved = %q", got)
+	}
+	poll := func(id string) {
+		t.Helper()
+		if w := ps.do("GET", "/api/channel-proposals/requests/"+id, "", ""); w.Code != http.StatusOK {
+			t.Fatalf("poll = %d %s", w.Code, w.Body)
+		}
+	}
+	complete := func(status string, completedAt time.Time) string {
+		t.Helper()
+		id := channelregistry.NewID()
+		p := &channelregistry.Proposal{ID: "aaaaaaaaaaaaaaaa", Name: "#A", Status: status}
+		if err := ps.queue.Complete(channelregistry.Result{RequestID: id, Status: status, Proposal: p, CompletedAt: completedAt.UnixMilli()}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	// An old result (completed before the snapshot) never invalidates.
+	old := complete(channelregistry.RequestApproved, ps.clock.Add(-time.Minute))
+	ps.insert("bbbbbbbbbbbbbbbb", "#B", channelregistry.StatusApproved) // changed behind the cache
+	for i := 0; i < 5; i++ {
+		poll(old)
+		ps.clock = ps.clock.Add(time.Millisecond)
+		if got := names(); got != "#A" {
+			t.Fatalf("poll %d of an old result flushed the cache: approved = %q", i, got)
+		}
+	}
+
+	// A new result invalidates once; polling it again does not.
+	fresh := complete(channelregistry.RequestRevoked, ps.clock.Add(time.Millisecond))
+	ps.clock = ps.clock.Add(2 * time.Millisecond)
+	poll(fresh)
+	if got := names(); got != "#A,#B" {
+		t.Fatalf("a new result must invalidate: approved = %q", got)
+	}
+	ps.insert("cccccccccccccccc", "#C", channelregistry.StatusApproved)
+	for i := 0; i < 5; i++ {
+		ps.clock = ps.clock.Add(time.Millisecond)
+		poll(fresh)
+		if got := names(); got != "#A,#B" {
+			t.Fatalf("repeated poll %d flushed the cache again: approved = %q", i, got)
+		}
+	}
+}
+
+// Approving or revoking a name the ingestor already decrypts through its
+// config-derived layer (built-in, rainbow table, hashChannels, channelKeys)
+// changes nothing; the admin list and the submitter's status say so.
+func TestChannelProposalBuiltinNamesAreMarked(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	if err := ps.queue.WriteBuiltinNames([]string{"#test", "#chat"}); err != nil {
+		t.Fatal(err)
+	}
+	ps.insert("aaaaaaaaaaaaaaaa", "#test", channelregistry.StatusPending)
+	ps.insert("bbbbbbbbbbbbbbbb", "#Test", channelregistry.StatusApproved) // different bytes: not built in
+	w := ps.do("GET", "/api/admin/channel-proposals", "", strongTestKey)
+	list := decode[ChannelProposalListResponse](t, w)
+	marks := map[string]bool{}
+	for _, p := range list.Proposals {
+		marks[p.Name] = p.BuiltIn
+	}
+	if len(marks) != 2 || !marks["#test"] || marks["#Test"] {
+		t.Fatalf("builtIn marks = %v (%s)", marks, w.Body)
+	}
+	if strings.Count(w.Body.String(), `"builtIn":true`) != 1 {
+		t.Fatalf("builtIn must be omitted when false: %s", w.Body)
+	}
+
+	id := channelregistry.NewID()
+	p := &channelregistry.Proposal{ID: id, Name: "#chat", Status: channelregistry.StatusPending}
+	if err := ps.queue.Complete(channelregistry.Result{RequestID: id, Status: channelregistry.RequestPending, Proposal: p}); err != nil {
+		t.Fatal(err)
+	}
+	st := decode[ChannelProposalRequestResponse](t, ps.do("GET", "/api/channel-proposals/requests/"+id, "", ""))
+	if st.Status != channelregistry.RequestPending || !st.BuiltIn {
+		t.Fatalf("request status for a built-in name = %+v", st)
+	}
+
+	// Without the file (an older ingestor) nothing is marked.
+	if err := os.Remove(ps.queue.BuiltinNamesPath()); err != nil {
+		t.Fatal(err)
+	}
+	list = decode[ChannelProposalListResponse](t, ps.do("GET", "/api/admin/channel-proposals", "", strongTestKey))
+	for _, p := range list.Proposals {
+		if p.BuiltIn {
+			t.Fatalf("%s marked built in without a names file", p.Name)
+		}
+	}
+}
+
+// The submit body is exactly one JSON object with known fields.
+func TestChannelProposalSubmitRejectsTrailingDataAndUnknownFields(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	for _, body := range []string{
+		`{"name":"#a"} {"name":"#b"}`,
+		`{"name":"#a"}garbage`,
+		`{"name":"#a","extra":1}`,
+	} {
+		if w := ps.do("POST", "/api/channel-proposals", body, ""); w.Code != http.StatusBadRequest {
+			t.Errorf("body %s = %d, want 400", body, w.Code)
+		}
+	}
+	if w := ps.do("POST", "/api/channel-proposals", "{\"name\":\"#ok\"}\n", ""); w.Code != http.StatusAccepted {
+		t.Fatalf("trailing whitespace must stay accepted: %d %s", w.Code, w.Body)
+	}
+}
+
+// Invisible formatting characters are rejected at the API edge too.
+func TestChannelProposalSubmitRejectsInvisibleCharacters(t *testing.T) {
+	ps := newProposalServer(t, strongTestKey, enabledConfig(nil), true)
+	for _, name := range []string{`#a\u200bb`, `#\ufeffab`, `#a\u00adb`, `#a\udb40\udc61b`, `#a\u2028b`} {
+		w := ps.do("POST", "/api/channel-proposals", `{"name":"`+name+`"}`, "")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("name %s = %d, want 400", name, w.Code)
+		}
+	}
+	if pending, _ := ps.queue.Pending(); len(pending) != 0 {
+		t.Fatalf("queued %d command(s) for invalid names", len(pending))
 	}
 }

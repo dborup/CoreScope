@@ -1999,7 +1999,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${c.channel_hash}">
+            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${escapeHtml(c.channel_hash)}">
               <span class="search-result-type">Channel</span>${escapeHtml(c.name)}</div>`;
           }
         }

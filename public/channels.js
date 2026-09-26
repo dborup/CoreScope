@@ -1667,19 +1667,25 @@
     }
 
     // Tick relative timestamps every 1s — iterates channels array, updates DOM text only
-    timeAgoTimer = setInterval(function () {
-      var now = Date.now();
-      for (var i = 0; i < channels.length; i++) {
-        var ch = channels[i];
-        if (!ch.lastActivityMs) continue;
-        var text = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
-        var el = document.querySelector('.ch-item-time[data-channel-hash="' + ch.hash + '"]');
-        if (el) el.textContent = text;
-        // #1367: mobile rows live in a flat list; update those too.
-        var rowEl = document.querySelector('.ch-row[data-hash="' + ch.hash + '"] .ch-row-time');
-        if (rowEl) rowEl.textContent = text;
-      }
-    }, 1000);
+    timeAgoTimer = setInterval(function () { tickChannelTimes(channels, Date.now()); }, 1000);
+  }
+
+  // Updates the relative "last activity" text of every rendered channel row.
+  // ch.hash is the channel name for hashtag channels, and shared channel
+  // names may contain quotes or backslashes, so it is CSS.escape'd before it
+  // goes into a selector (unescaped, a '"' throws and stops the loop).
+  function tickChannelTimes(list, now) {
+    for (var i = 0; i < list.length; i++) {
+      var ch = list[i];
+      if (!ch.lastActivityMs) continue;
+      var text = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
+      var sel = CSS.escape(String(ch.hash));
+      var el = document.querySelector('.ch-item-time[data-channel-hash="' + sel + '"]');
+      if (el) el.textContent = text;
+      // #1367: mobile rows live in a flat list; update those too.
+      var rowEl = document.querySelector('.ch-row[data-hash="' + sel + '"] .ch-row-time');
+      if (rowEl) rowEl.textContent = text;
+    }
   }
 
   var timeAgoTimer = null;
@@ -1979,10 +1985,14 @@
   }
   function renderKnownChannelRow(entry) {
     // entry: {channel, description, region, regionName, key?}
+    // The catalogue comes from a third-party URL: every field is escaped.
+    function escCatalogue(v) {
+      return String(v).replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
+    }
     var chName = String(entry.channel || '').toLowerCase();
-    var safeName = chName.replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
-    var desc = String(entry.description || '').replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
-    var region = String(entry.region || '').toUpperCase();
+    var safeName = escCatalogue(chName);
+    var desc = escCatalogue(entry.description || '');
+    var region = escCatalogue(String(entry.region || '').toUpperCase());
     return '' +
       '<div class="ch-channel ch-channel-catalogue" data-known-channel="' + safeName + '">' +
         '<div class="ch-channel-info">' +
@@ -2427,6 +2437,9 @@
   window._channelsRefreshMessagesForTest = refreshMessages;
   window._channelsMergeWsAppendedIntoRestForTest = mergeWsAppendedIntoRest;
   window._channelsLoadChannelsForTest = loadChannels;
+  window._channelsRenderChannelRowForTest = renderChannelRow;
+  window._channelsTickChannelTimesForTest = tickChannelTimes;
+  window._channelsRenderKnownChannelRowForTest = renderKnownChannelRow;
   window._channelsBeginMessageRequestForTest = beginMessageRequest;
   window._channelsIsStaleMessageRequestForTest = isStaleMessageRequest;
   window._channelsReconcileSelectionForTest = reconcileSelectionAfterChannelRefresh;

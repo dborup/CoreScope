@@ -73,4 +73,8 @@ type RequestStatus struct {
 	Status   string    `json:"status"`
 	Proposal *Proposal `json:"proposal,omitempty"`
 	Error    string    `json:"error,omitempty"`
+	// CompletedAt is when the ingestor wrote the result (Unix ms; 0 while
+	// queued). Not part of the API response: the server uses it to tell a
+	// result it has not seen yet from one it is merely asked about again.
+	CompletedAt int64 `json:"-"`
 }

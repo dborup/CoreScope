@@ -61,7 +61,7 @@ CoreScope computes the hash of each name and matches incoming packets to identif
 
 When the administrator enables `channelProposals` (see [Configuration](configuration.md#shared-channel-suggestions)), the **Add Channel** dialog gets a **Suggest a Shared Channel** section. Anyone can suggest a public hashtag channel there. Only the name is sent, never a key, and the name is case-sensitive: `#MeshCore` and `#meshcore` are different channels.
 
-Names can be at most 31 bytes including the `#`. That is the firmware's limit (the name is stored in a 32-byte field with a terminating NUL). Any language or emoji is fine; control characters and text-direction overrides are refused.
+Names can be at most 31 bytes including the `#`. That is the firmware's limit (the name is stored in a 32-byte field with a terminating NUL). Any language or emoji is fine; control characters, line breaks, text-direction overrides and other invisible formatting characters (such as zero-width spaces or soft hyphens) are refused. The firmware itself only limits the length; the character rule is CoreScope's own, so that two different channels can never look the same. Emoji built with the zero-width joiner or variation selectors are allowed.
 
 An administrator reviews suggestions at `#/channels?view=proposals`:
 
@@ -70,13 +70,19 @@ An administrator reviews suggestions at `#/channels?view=proposals`:
 
 Approved channels are decrypted by the ingestor from then on and appear for everyone under **Network** with a **Shared** label, even before they carry any messages. Shared channels have no remove button for a regular visitor, because they are not stored in your browser.
 
+A rejected name stays rejected: suggesting it again shows the earlier rejection instead of starting a new review, until the rejection is deleted by retention (`channelProposals.retentionDays`, 30 days by default, counted from the review). After that it can be suggested again.
+
+### Built-in names
+
+CoreScope already decrypts about 320 common hashtag channels out of the box (the rainbow table `channel-rainbow.json`, for example `#test`, `#chat` and `#general`), plus any names in `hashChannels` or `channelKeys`. Suggesting or approving one of these changes nothing, and removing it does not stop it from being decrypted. The review dialog labels such suggestions **Built in: already decrypted**, the Remove confirmation says the channel keeps being decrypted, and a visitor who suggests one is told so.
+
 ### Revoking an approved channel
 
 An administrator can undo a previous approval from the same **Pending / Approved / Rejected / Revoked** review dialog: switch to the **Approved** tab and click **Remove** on a channel. A confirmation prompt names the channel before anything happens — nothing is sent until you confirm.
 
 Removing a channel:
 
-- Stops the ingestor from decrypting new traffic on it (unless the administrator also has it configured directly via `channelKeys`/`hashChannels` in `config.json`, in which case that key keeps working — see [Configuration](configuration.md#channel-decryption)).
+- Stops the ingestor from decrypting new traffic on it (unless it is a [built-in name](#built-in-names) — in the rainbow table or configured via `channelKeys`/`hashChannels` in `config.json` — in which case that key keeps working; see [Configuration](configuration.md#channel-decryption)).
 - Takes it out of everyone's **Network** section going forward.
 - Does **not** delete or hide any messages that were already decoded and shown while it was approved — those stay on the Channels page exactly as before. Revoking only affects future traffic.
 

@@ -481,10 +481,10 @@ func TestChannelProposalRevokeOfNonApprovedProducesConflict(t *testing.T) {
 	rejectedID := f.run(f.enqueue(channelregistry.OpSubmit, "#WillReject")).Proposal.ID
 	f.run(f.enqueue(channelregistry.OpReject, rejectedID))
 
-	if st := f.run(f.enqueue(channelregistry.OpRevoke, pendingID)); st.Status != channelregistry.RequestError || st.Error != "suggestion was already pending" {
+	if st := f.run(f.enqueue(channelregistry.OpRevoke, pendingID)); st.Status != channelregistry.RequestError || st.Error != "suggestion is not approved (it is pending)" {
 		t.Fatalf("revoke pending = %+v", st)
 	}
-	if st := f.run(f.enqueue(channelregistry.OpRevoke, rejectedID)); st.Status != channelregistry.RequestError || st.Error != "suggestion was already rejected" {
+	if st := f.run(f.enqueue(channelregistry.OpRevoke, rejectedID)); st.Status != channelregistry.RequestError || st.Error != "suggestion is not approved (it is rejected)" {
 		t.Fatalf("revoke rejected = %+v", st)
 	}
 	if st := f.run(f.enqueue(channelregistry.OpRevoke, "ffffffffffffffff")); st.Status != channelregistry.RequestError || st.Error != errProposalNotFound.Error() {
@@ -673,5 +673,123 @@ func TestChannelProposalRevokeRetention(t *testing.T) {
 	}
 	if got := strings.Join(names, ","); got != "#newRevoked,#stillApproved" {
 		t.Fatalf("kept = %s, want #newRevoked,#stillApproved", got)
+	}
+}
+
+// A rejected name stays blocked: re-suggesting it reports the earlier
+// rejection instead of opening a new pending suggestion, until retention
+// (retentionDays, 30 by default) removes the rejected row. Only a revoked
+// name may be suggested again straight away.
+func TestChannelProposalRejectedNameBlockedUntilRetention(t *testing.T) {
+	f := newProposalFixture(t, &channelregistry.Config{RetentionDays: 30})
+	id := f.run(f.enqueue(channelregistry.OpSubmit, "#Spam")).Proposal.ID
+	if st := f.run(f.enqueue(channelregistry.OpReject, id)); st.Status != channelregistry.RequestRejected {
+		t.Fatalf("reject = %+v", st)
+	}
+	again := f.run(f.enqueue(channelregistry.OpSubmit, "#Spam"))
+	if again.Status != channelregistry.RequestRejected || again.Proposal == nil || again.Proposal.ID != id {
+		t.Fatalf("re-suggesting a rejected name = %+v, want the earlier rejection", again)
+	}
+	if n := f.count("status = 'pending'"); n != 0 {
+		t.Fatalf("re-suggestion opened %d pending row(s)", n)
+	}
+	if n := f.count("1=1"); n != 1 {
+		t.Fatalf("rows = %d, want 1", n)
+	}
+
+	// 29 days later it is still blocked; after 31 days retention frees it.
+	f.clock = f.clock.Add(29 * 24 * time.Hour)
+	f.runner.Prune(context.Background())
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#Spam")); st.Status != channelregistry.RequestRejected {
+		t.Fatalf("day 29 re-suggestion = %+v, want still rejected", st)
+	}
+	f.clock = f.clock.Add(2 * 24 * time.Hour)
+	f.runner.Prune(context.Background())
+	fresh := f.run(f.enqueue(channelregistry.OpSubmit, "#Spam"))
+	if fresh.Status != channelregistry.RequestPending || fresh.Proposal == nil || fresh.Proposal.ID == id {
+		t.Fatalf("after retention re-suggestion = %+v, want a new pending suggestion", fresh)
+	}
+}
+
+// The ingestor never trusts the queue file: an invisible formatting
+// character is rejected here too, with the user-facing message.
+func TestChannelProposalIngestorRejectsInvisibleCharacters(t *testing.T) {
+	f := newProposalFixture(t, nil)
+	for _, name := range []string{"#a\u200bb", "#\ufeffab", "#ab\u00adc", "#a\U000e0061b", "#a\u2028b"} {
+		st := f.run(f.enqueue(channelregistry.OpSubmit, name))
+		if st.Status != channelregistry.RequestError ||
+			(st.Error != channelregistry.ErrNameInvisible.Error() && st.Error != channelregistry.ErrNameControl.Error()) {
+			t.Errorf("submit %q = %+v, want the name error", name, st)
+		}
+	}
+	if n := f.count("1=1"); n != 0 {
+		t.Fatalf("rows = %d, want 0", n)
+	}
+	ok := f.run(f.enqueue(channelregistry.OpSubmit, "#\U0001f3f3\ufe0f\u200d\U0001f308"))
+	if ok.Status != channelregistry.RequestPending {
+		t.Fatalf("emoji with ZWJ and VS16 = %+v", ok)
+	}
+}
+
+// The ingestor publishes the hashtag names its config-derived layer already
+// decrypts, at startup and again after every reload, so the server can mark
+// them as built in. It rewrites the file only when that layer changed.
+func TestChannelProposalPublishesBuiltinNames(t *testing.T) {
+	f := newProposalFixture(t, nil)
+	f.keys.setBase(map[string]string{"Public": "8b3387e9c5cdea6ac9e5edbaa115cd72", "#test": deriveHashtagChannelKey("#test")})
+	f.keys.AddApproved("#Approved")
+	f.runner.RunOnce(context.Background())
+	names, err := f.runner.queue.ReadBuiltinNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || !names["#test"] {
+		t.Fatalf("builtin names = %v, want only #test (approved names are not built in)", names)
+	}
+
+	// Unchanged base: no rewrite on later ticks.
+	if err := os.Remove(f.runner.queue.BuiltinNamesPath()); err != nil {
+		t.Fatal(err)
+	}
+	f.runner.RunOnce(context.Background())
+	if _, err := os.Stat(f.runner.queue.BuiltinNamesPath()); !os.IsNotExist(err) {
+		t.Fatalf("file rewritten although the base layer did not change: %v", err)
+	}
+
+	// A reload (setBase) publishes the new set on the next tick.
+	f.keys.setBase(map[string]string{"#chat": deriveHashtagChannelKey("#chat"), "#Approved": "00112233445566778899aabbccddeeff"})
+	f.runner.RunOnce(context.Background())
+	names, err = f.runner.queue.ReadBuiltinNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || !names["#chat"] || !names["#Approved"] {
+		t.Fatalf("after reload builtin names = %v", names)
+	}
+}
+
+// The real rainbow table ships common names; they are published as built in.
+func TestChannelProposalBuiltinNamesIncludeRainbowTable(t *testing.T) {
+	rainbow := filepath.Join("..", "..", "channel-rainbow.json")
+	if _, err := os.Stat(rainbow); err != nil {
+		t.Skipf("rainbow table not found: %v", err)
+	}
+	t.Setenv("CHANNEL_KEYS_PATH", rainbow)
+	configPath := writeTestConfig(t, nil, nil)
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newProposalFixture(t, nil)
+	f.keys.setBase(loadChannelKeys(cfg, configPath))
+	f.runner.RunOnce(context.Background())
+	names, err := f.runner.queue.ReadBuiltinNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"#test", "#chat", "#general"} {
+		if !names[n] {
+			t.Errorf("%s from channel-rainbow.json must be published as built in (%d names)", n, len(names))
+		}
 	}
 }

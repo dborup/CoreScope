@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -30,7 +32,8 @@ import (
 )
 
 // approvedCacheTTL bounds how stale GET /api/channels' approvedChannels can
-// be. A request-status read that observes an approval invalidates it early.
+// be. A request-status read that observes an approval or revocation the
+// cached snapshot may predate invalidates it early (see noteDecision).
 const approvedCacheTTL = 10 * time.Second
 
 // maxProposalBodyBytes caps the POST body; a name is at most 31 bytes.
@@ -51,16 +54,42 @@ type ChannelProposalAcceptedResponse struct {
 	RequestID string `json:"requestId"`
 }
 
+// AdminChannelProposal is one row of GET /api/admin/channel-proposals.
+type AdminChannelProposal struct {
+	channelregistry.Proposal
+	// BuiltIn: the ingestor already decrypts this exact name through its
+	// config-derived keys (built-in, rainbow table, hashChannels,
+	// channelKeys), so approving it adds nothing and revoking it does not
+	// stop decryption.
+	BuiltIn bool `json:"builtIn,omitempty"`
+}
+
+// ChannelProposalRequestResponse is GET /api/channel-proposals/requests/{id}.
+type ChannelProposalRequestResponse struct {
+	channelregistry.RequestStatus
+	// BuiltIn: see AdminChannelProposal.BuiltIn; set for the proposal's name.
+	BuiltIn bool `json:"builtIn,omitempty"`
+}
+
 // ChannelProposalListResponse is GET /api/admin/channel-proposals.
 type ChannelProposalListResponse struct {
-	Proposals []channelregistry.Proposal `json:"proposals"`
+	Proposals []AdminChannelProposal `json:"proposals"`
 	// Enabled reports whether public submissions are currently open.
 	Enabled bool `json:"enabled"`
 }
 
 type approvedSnapshot struct {
 	channels []ApprovedChannel
+	builtAt  time.Time // when the list was last read successfully
 	expires  time.Time
+}
+
+// builtinNamesCache is the last parsed builtin names file, keyed by its
+// modification time and size so an unchanged file is not parsed again.
+type builtinNamesCache struct {
+	mod   time.Time
+	size  int64
+	names map[string]bool
 }
 
 type channelProposalService struct {
@@ -75,6 +104,9 @@ type channelProposalService struct {
 
 	approvedMu sync.Mutex
 	approved   *approvedSnapshot
+
+	builtinMu sync.Mutex
+	builtin   *builtinNamesCache
 }
 
 func newChannelProposalService(cfg *Config, db *sql.DB, queueDir string) *channelProposalService {
@@ -165,7 +197,7 @@ func (p *channelProposalService) approvedChannels(ctx context.Context) []Approve
 			for i, n := range names {
 				chans[i] = ApprovedChannel{Name: n, Hash: n}
 			}
-			p.approved = &approvedSnapshot{channels: chans, expires: now.Add(approvedCacheTTL)}
+			p.approved = &approvedSnapshot{channels: chans, builtAt: now, expires: now.Add(approvedCacheTTL)}
 		case p.approved == nil:
 			log.Printf("[channel-proposals] listing approved channels failed: %v", err)
 			return nil
@@ -183,10 +215,52 @@ func (p *channelProposalService) approvedChannels(ctx context.Context) []Approve
 	return out
 }
 
-func (p *channelProposalService) invalidateApproved() {
+// noteDecision invalidates the approved snapshot early for an approval or
+// revocation result that completed after the snapshot was read, so the
+// deciding admin sees the change without waiting out approvedCacheTTL. Anyone
+// can poll a request id, so an older result, or the same result polled again
+// once the list has been re-read, leaves the cache alone. Clock skew between
+// the ingestor and the server only shifts this by the skew; the TTL still
+// bounds staleness either way.
+func (p *channelProposalService) noteDecision(st channelregistry.RequestStatus) {
+	if st.Status != channelregistry.RequestApproved && st.Status != channelregistry.RequestRevoked {
+		return
+	}
 	p.approvedMu.Lock()
-	p.approved = nil
-	p.approvedMu.Unlock()
+	defer p.approvedMu.Unlock()
+	if p.approved != nil && st.CompletedAt > p.approved.builtAt.UnixMilli() {
+		p.approved = nil
+	}
+}
+
+// builtinNames returns the hashtag names the ingestor already decrypts
+// through its config-derived keys, from the file it publishes in the queue
+// directory. One stat per call; the file is parsed again only when it
+// changed, and a bad version is logged once, not on every poll. A missing or
+// unreadable file means none are known.
+func (p *channelProposalService) builtinNames() map[string]bool {
+	if p == nil || p.queue == nil {
+		return nil
+	}
+	info, err := os.Stat(p.queue.BuiltinNamesPath())
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[channel-proposals] reading built-in channel names failed: %v", err)
+		}
+		return nil
+	}
+	p.builtinMu.Lock()
+	defer p.builtinMu.Unlock()
+	if c := p.builtin; c != nil && c.mod.Equal(info.ModTime()) && c.size == info.Size() {
+		return c.names
+	}
+	names, err := p.queue.ReadBuiltinNames()
+	if err != nil {
+		log.Printf("[channel-proposals] reading built-in channel names failed: %v", err)
+		names = nil
+	}
+	p.builtin = &builtinNamesCache{mod: info.ModTime(), size: info.Size(), names: names}
+	return names
 }
 
 func noStore(w http.ResponseWriter) {
@@ -212,7 +286,7 @@ func (s *Server) handleChannelProposalSubmit(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var body ChannelProposalSubmitRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxProposalBodyBytes)).Decode(&body); err != nil {
+	if err := decodeSingleJSONObject(http.MaxBytesReader(w, r.Body, maxProposalBodyBytes), &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -236,6 +310,20 @@ func (s *Server) handleChannelProposalSubmit(w http.ResponseWriter, r *http.Requ
 	if !s.enqueueProposalCommand(w, p, cmd) {
 		p.refundSubmission()
 	}
+}
+
+// decodeSingleJSONObject decodes exactly one JSON value with only known
+// fields into v; trailing data other than whitespace is an error.
+func decodeSingleJSONObject(r io.Reader, v interface{}) error {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("unexpected data after the JSON body")
+	}
+	return nil
 }
 
 // enqueueProposalCommand writes cmd and answers 202, or answers the error.
@@ -283,13 +371,12 @@ func (s *Server) handleChannelProposalRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "could not read the request status")
 		return
 	}
-	// Both an approval and a revocation change the approvedChannels list;
-	// invalidate the same single cached snapshot early for either so a
-	// caller does not have to wait out approvedCacheTTL to see the result.
-	if st.Status == channelregistry.RequestApproved || st.Status == channelregistry.RequestRevoked {
-		p.invalidateApproved()
+	p.noteDecision(st)
+	resp := ChannelProposalRequestResponse{RequestStatus: st}
+	if st.Proposal != nil {
+		resp.BuiltIn = p.builtinNames()[st.Proposal.Name]
 	}
-	writeJSON(w, st)
+	writeJSON(w, resp)
 }
 
 // GET /api/admin/channel-proposals?status=pending|approved|rejected|revoked
@@ -301,7 +388,7 @@ func (s *Server) handleAdminChannelProposals(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "status must be pending, approved, rejected or revoked")
 		return
 	}
-	resp := ChannelProposalListResponse{Proposals: []channelregistry.Proposal{}, Enabled: p.enabled}
+	resp := ChannelProposalListResponse{Proposals: []AdminChannelProposal{}, Enabled: p.enabled}
 	if p.db != nil {
 		limit := p.limits.MaxPending + p.limits.MaxApproved + p.limits.MaxQueuedRequests
 		list, err := channelregistry.ListProposals(r.Context(), p.db, status, limit)
@@ -310,7 +397,10 @@ func (s *Server) handleAdminChannelProposals(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "could not list suggestions")
 			return
 		}
-		resp.Proposals = list
+		builtin := p.builtinNames()
+		for _, pr := range list {
+			resp.Proposals = append(resp.Proposals, AdminChannelProposal{Proposal: pr, BuiltIn: builtin[pr.Name]})
+		}
 	}
 	writeJSON(w, resp)
 }

@@ -81,3 +81,72 @@ func TestConfigLimitsDefaultsAndOverrides(t *testing.T) {
 		t.Fatal("enabled config must request submissions")
 	}
 }
+
+// Invisible formatting characters (Unicode category Cf) and the line/paragraph
+// separators make two different channels look identical or break the layout,
+// so they are rejected. This is our own presentation rule: the firmware only
+// limits the length. ZWJ and variation selectors stay allowed for emoji.
+func TestNormalizeNameRejectsInvisibleFormatCharacters(t *testing.T) {
+	cases := []struct {
+		name string
+		r    string
+		want error
+	}{
+		{"soft hyphen U+00AD", "\u00ad", ErrNameInvisible},
+		{"Arabic number sign U+0600", "\u0600", ErrNameInvisible},
+		{"Mongolian vowel separator U+180E", "\u180e", ErrNameInvisible},
+		{"zero width space U+200B", "\u200b", ErrNameInvisible},
+		{"zero width non-joiner U+200C", "\u200c", ErrNameInvisible},
+		{"word joiner U+2060", "\u2060", ErrNameInvisible},
+		{"invisible times U+2062", "\u2062", ErrNameInvisible},
+		{"BOM / ZWNBSP U+FEFF", "\ufeff", ErrNameInvisible},
+		{"interlinear annotation U+FFF9", "\ufff9", ErrNameInvisible},
+		{"language tag U+E0001", "\U000e0001", ErrNameInvisible},
+		{"tag space U+E0020", "\U000e0020", ErrNameInvisible},
+		{"tag latin small a U+E0061", "\U000e0061", ErrNameInvisible},
+		{"cancel tag U+E007F", "\U000e007f", ErrNameInvisible},
+		{"line separator U+2028", "\u2028", ErrNameControl},
+		{"paragraph separator U+2029", "\u2029", ErrNameControl},
+		// Bidi controls are Cf too; they keep their more specific error.
+		{"right-to-left override U+202E", "\u202e", ErrNameControl},
+		{"left-to-right mark U+200E", "\u200e", ErrNameControl},
+	}
+	for _, c := range cases {
+		inputs := []string{"#a" + c.r + "b", "#" + c.r + "ab", "#ab" + c.r}
+		if c.r == "\u2028" || c.r == "\u2029" {
+			// Trailing separators are whitespace and are trimmed like any
+			// other trailing whitespace (hashChannels does the same).
+			inputs = inputs[:2]
+		}
+		for _, in := range inputs {
+			got, err := NormalizeName(in)
+			if !errors.Is(err, c.want) {
+				t.Errorf("%s: NormalizeName(%q) = %q, %v; want %v", c.name, in, got, err, c.want)
+			}
+		}
+	}
+}
+
+func TestNormalizeNameTrimsTrailingLineSeparator(t *testing.T) {
+	if got, err := NormalizeName("#ab\u2028"); err != nil || got != "#ab" {
+		t.Fatalf("NormalizeName(trailing U+2028) = %q, %v; want \"#ab\"", got, err)
+	}
+}
+
+func TestNormalizeNameAllowsEmojiJoinersAndVariationSelectors(t *testing.T) {
+	for _, in := range []string{
+		"#\U0001f3f3\ufe0f\u200d\U0001f308",       // rainbow flag: VS16 + ZWJ
+		"#\u2764\ufe0f",                           // red heart: VS16
+		"#\u2764\ufe0e",                           // text-style heart: VS15
+		"#\U0001f469\u200d\U0001f4bb",             // woman technologist: ZWJ
+		"#a\ufe00b",                               // VS1
+		"#\u845b\U000e0100",                       // ideographic variation selector VS17
+		"#\U0001f441\ufe0f\u200d\U0001f5e8\ufe0f", // eye in speech bubble
+		"#mesh\u200dcore",                         // a bare ZWJ between letters is still allowed
+	} {
+		got, err := NormalizeName(in)
+		if err != nil || got != in {
+			t.Errorf("NormalizeName(%q) = %q, %v; want it unchanged", in, got, err)
+		}
+	}
+}
