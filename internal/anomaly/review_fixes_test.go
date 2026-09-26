@@ -147,6 +147,63 @@ func TestRefinedCandidateReplacesOnlyWhenItWouldSignal(t *testing.T) {
 	}
 }
 
+// The gate on the refined candidate is the signal decision itself: the same
+// Chance, compared with MaxChance exactly as evaluate compares it. The ring
+// is the alternating 310s/330s train at P=320s (tol exactly 10s), where no
+// seed explains two gaps and only the refined period 320s meets the
+// criteria. At MaxChance equal to its Chance the refined chain is the
+// estimate and signals; one ulp below, or with Chance just under twice
+// MaxChance, it is not taken and nothing signals, so the seeds' estimate
+// stays (a looser gate, e.g. Chance/2, would take it as a hypothesis that
+// cannot signal).
+func TestRefinedCandidateGateIsTheSignalChance(t *testing.T) {
+	const period = 320 * time.Second
+	ring := func(r *PeriodicRule) *periodicState {
+		offsets := make([]time.Duration, 32)
+		for i := range offsets {
+			offsets[i] = time.Duration(i) * period
+			if i%2 == 1 {
+				offsets[i] -= 10 * time.Second
+			}
+		}
+		p := ringOf(r, offsets...)
+		p.evaluated = uint64(p.n)
+		return p
+	}
+	r := experimentalPeriodic()
+	r.JitterAbs, r.JitterRel, r.MaxJitterFraction = 0, 1.0/32, 1
+	var sc periodicScratch
+	p := ring(&r)
+	ref := p.chainFor(int64(period), &r, &sc)
+	chance := p.chance(ref, &r)
+	if ref.tol != int64(10*time.Second) || !ref.meets(&r) || ref.gaps != 31 || !(chance > 0 && chance < 1) {
+		t.Fatalf("fixture: refined chain %+v chance %g", ref, chance)
+	}
+	for _, c := range []struct {
+		name      string
+		maxChance float64
+		want      bool
+	}{
+		{"Chance equal to MaxChance", chance, true},
+		{"Chance one ulp above MaxChance", math.Nextafter(chance, 0), false},
+		{"Chance just below twice MaxChance", chance * 0.51, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r
+			r.MaxChance = c.maxChance
+			p := ring(&r)
+			est := p.estimate(&r, &sc)
+			if got := est.period == int64(period); got != c.want {
+				t.Fatalf("estimate %+v: refined 320s taken=%v, want %v", est, got, c.want)
+			}
+			p = ring(&r)
+			if _, ok := p.evaluate(p.at(p.n-1), &r, &sc); ok != c.want {
+				t.Fatalf("evaluate signalled=%v, want %v", ok, c.want)
+			}
+		})
+	}
+}
+
 // ringOf returns a periodic state holding pulses at the given offsets from t0.
 func ringOf(r *PeriodicRule, offsets ...time.Duration) *periodicState {
 	p := newPeriodicState(r.HistoryLen)

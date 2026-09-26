@@ -558,9 +558,12 @@ func (p *periodicState) chance(c chainInfo, r *PeriodicRule) float64 {
 // searchCells is the number of candidate periods the search may report per
 // pulse, each one cell of the union bound: a seed g/k for each of the
 // recentGaps newest gaps and k = 1..MaxMissing+1, at most one refined period
-// per seed, and the phase refinement of the best seed. (A kept hypothesis
+// per seed, and the phase refinement of the best seed. A kept hypothesis
 // reports only when the search does not run, with at most MaxMissing+1
-// periods: itself and its multiples.)
+// periods (itself and its multiples), so the strict union bound per pulse is
+// searchCells + (MaxMissing+1) cells. Those MaxMissing+1 are left out: the
+// kept branch predates the refined cells and was never charged, and they
+// add less than 1/32 of searchCells (about 3 %) to the bound.
 //
 // Each cell spends one gap on its fit: chance() uses pg^(gaps-1). For a seed
 // that is the gap it is taken from. A refined period lies in the common
