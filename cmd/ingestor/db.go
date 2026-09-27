@@ -1791,7 +1791,7 @@ func (s *Store) RefreshPlannerStats(analysisLimit int) bool {
 // The trade is a one-time ANALYZE early in startup, and it is not cheap on a
 // cold page cache. Observed on staging at 9.4 GB: 3m43.9s, against the 2.0s the
 // same statement takes warm. For those 3m44s it holds the store's single write
-// connection (SetMaxOpenConns(1), db.go:142), so ingest stalls and buffers: the
+// connection (SetMaxOpenConns(1) in OpenStore), so ingest stalls and buffers: the
 // observations table took zero rows for four minutes and then 1027 in the minute
 // the ANALYZE finished, against about 130 a minute either side, with nothing
 // dropped. Hence the warning below, so an operator watching a first deploy can
@@ -1801,8 +1801,11 @@ func (s *Store) RefreshPlannerStats(analysisLimit int) bool {
 // ticker would pay exactly the same 3m44s two minutes later; this only moves it
 // earlier, where it overlaps the startup burst the ingest buffer is already
 // sized for.
+//
+// A negative analysisLimit disables it without a word: the warning is only
+// true when an ANALYZE follows it.
 func (s *Store) EnsurePlannerStats(analysisLimit int) bool {
-	if s.hasPlannerStats() {
+	if analysisLimit < 0 || s.hasPlannerStats() {
 		return false
 	}
 	log.Printf("[analyze] this database has no planner statistics; building them now. " +

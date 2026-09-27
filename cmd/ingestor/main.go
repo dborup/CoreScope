@@ -327,9 +327,16 @@ func main() {
 	// DB) is absorbed by IngestBuffer instead of delaying start-up. Cancelled
 	// on shutdown so store.Close() does not wait for it; it resumes on the
 	// next start.
+	//
+	// It shares its start with the one-off planner-statistics build (#2058,
+	// issue #100): both hold the single writer for one long statement, so
+	// they run one after the other, statistics first, each behind a drain of
+	// the ingest buffer, never back to back. Why that order, and where the
+	// other startup tickers fall: planner_stats_startup.go.
+	analysisLimit := cfg.AnalysisLimit()
 	routeMaskCtx, stopRouteMaskBackfill := context.WithCancel(context.Background())
 	defer stopRouteMaskBackfill()
-	store.StartRouteMaskBackfill(routeMaskCtx)
+	startupWritersDone := store.startPlannerStatsThenRouteMaskBackfill(routeMaskCtx, analysisLimit, ingestBuffer.Pending)
 
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
@@ -412,40 +419,23 @@ func main() {
 	}()
 	log.Printf("[db] WAL checkpoint scheduled every 1h")
 
-	// Daily planner statistics refresh (#2058), in two parts.
+	// Daily planner statistics refresh (#2058).
 	//
-	// The routine refresh is staggered 2 minutes past startup for the same reason
-	// as the checkpoint above: it takes the write lock, and by then the initial
-	// ingest burst has passed, so it also sees the rows that burst added.
-	//
-	// The build in front of it deliberately does compete with that burst, because
-	// a database with no statistics at all has nothing better to offer the queries
-	// arriving in those 2 minutes. It only runs once per database; see
-	// Store.EnsurePlannerStats, which also carries what that costs.
+	// The one-off build for a database that has never been analyzed runs in
+	// the startup sequence above (Store.EnsurePlannerStats carries what it
+	// costs). The routine refresh is staggered 2 minutes past the point that
+	// sequence hands over, so it never lands on the startup ANALYZE or the
+	// backfill's index build, and so it also sees the rows the startup burst
+	// added. On a first start it re-runs the build two minutes later, warm.
 	//
 	// Bounded by analysis_limit either way, so neither grows with the file the way
 	// an unbounded ANALYZE does: 2.0s against 242.9s on a 9.4 GB database, both
 	// timed warm. Cold, on a first start, it is 3m43.9s.
-	{
-		analysisLimit := cfg.AnalysisLimit()
-		if analysisLimit < 0 {
-			log.Printf("[analyze] planner statistics refresh disabled (db.analysisLimit=%d)", analysisLimit)
-		} else {
-			analyzeTicker := time.NewTicker(24 * time.Hour)
-			go func() {
-				// Before the stagger, and only on a database that has never been
-				// analyzed: the stagger is a 2 minute window in which the first
-				// query would otherwise run on no statistics at all. A restart
-				// finds sqlite_stat1 already in the file and skips this.
-				store.EnsurePlannerStats(analysisLimit)
-				time.Sleep(2 * time.Minute)
-				store.RefreshPlannerStats(analysisLimit)
-				for range analyzeTicker.C {
-					store.RefreshPlannerStats(analysisLimit)
-				}
-			}()
-			log.Printf("[analyze] planner statistics refresh scheduled every 24h (analysis_limit=%d)", analysisLimit)
-		}
+	stopPlannerStatsRefresh, plannerStatsEnabled := store.schedulePlannerStatsRefresh(analysisLimit, startupWritersDone, 2*time.Minute, 24*time.Hour)
+	if plannerStatsEnabled {
+		log.Printf("[analyze] planner statistics refresh scheduled every 24h (analysis_limit=%d)", analysisLimit)
+	} else {
+		log.Printf("[analyze] planner statistics build and refresh disabled (db.analysisLimit=%d)", analysisLimit)
 	}
 
 	// Daily neighbor_edges retention (#1287 — moved from cmd/server).
@@ -545,6 +535,7 @@ func main() {
 	statsTicker.Stop()
 	pruneQueueTicker.Stop()
 	walCheckpointTicker.Stop()
+	stopPlannerStatsRefresh()
 	stopWatchdog()
 	store.LogStats() // final stats on shutdown
 	for _, c := range clients {

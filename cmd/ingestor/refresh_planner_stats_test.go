@@ -57,7 +57,7 @@ func TestRefreshPlannerStatsAppliesTheLimit_Issue2058(t *testing.T) {
 	s.RefreshPlannerStats(250)
 
 	// analysis_limit is per connection. The store runs SetMaxOpenConns(1)
-	// (db.go:142), which is the only reason setting it through Exec is sound
+	// (in OpenStore), which is the only reason setting it through Exec is sound
 	// here: on a multi-connection pool the pragma could land on a connection
 	// the ANALYZE never uses, and the limit would silently not apply.
 	var limit int

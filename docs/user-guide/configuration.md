@@ -110,6 +110,7 @@ How long (in hours) before a node is marked degraded or silent:
 |-------|---------|-------------|
 | `db.vacuumOnStartup` | `false` | Run a one-time full `VACUUM` on startup to enable incremental auto-vacuum (blocks for minutes on large DBs) |
 | `db.incrementalVacuumPages` | `1024` | Free pages returned to the OS after each retention reaper cycle |
+| `db.analysisLimit` | `10000` | Index rows per index for the ingestor's bounded `ANALYZE` (planner statistics). Negative disables it. See [Database](database.md#planner-statistics-analyze) |
 
 See [Database](database.md) for details on SQLite auto-vacuum, WAL, and manual maintenance.
 See [#919](https://github.com/Kpa-clawbot/CoreScope/issues/919) for background.
