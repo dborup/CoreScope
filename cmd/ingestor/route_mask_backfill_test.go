@@ -306,7 +306,10 @@ func TestMain_StartsRouteMaskBackfillAfterBufferReady(t *testing.T) {
 	s := string(src)
 	subscribe := strings.Index(s, "c.Subscribe(")
 	ready := strings.Index(s, "ingestBuffer.Ready()")
-	start := strings.Index(s, "store.StartRouteMaskBackfill(")
+	// Since issue #100 main starts the backfill through the startup sequence
+	// that runs the one-off ANALYZE first (planner_stats_startup.go; the
+	// sequence itself is pinned in planner_stats_startup_test.go).
+	start := strings.Index(s, "store.startPlannerStatsThenRouteMaskBackfill(")
 	shutdown := strings.Index(s, `log.Println("Shutting down...")`)
 	stop := strings.LastIndex(s, "stopRouteMaskBackfill()")
 	disconnect := strings.LastIndex(s, "c.Disconnect(5000)")
@@ -314,7 +317,7 @@ func TestMain_StartsRouteMaskBackfillAfterBufferReady(t *testing.T) {
 		t.Fatalf("markers not found: subscribe=%d ready=%d start=%d shutdown=%d stop=%d disconnect=%d", subscribe, ready, start, shutdown, stop, disconnect)
 	}
 	if !(subscribe < ready && ready < start) {
-		t.Errorf("StartRouteMaskBackfill must come after MQTT subscribe and ingestBuffer.Ready()")
+		t.Errorf("the route_mask backfill (via startPlannerStatsThenRouteMaskBackfill) must start after MQTT subscribe and ingestBuffer.Ready()")
 	}
 	if !(shutdown < stop && stop < disconnect) {
 		t.Errorf("shutdown must cancel the route_mask backfill before disconnecting MQTT clients")
