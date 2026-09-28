@@ -100,6 +100,9 @@ type DB struct {
 	channelsCacheKey string
 	channelsCacheRes []map[string]interface{}
 	channelsCacheExp time.Time
+	// channelsPinFallbacks counts GetChannels queries that fell back to the
+	// unpinned SQL because channelHashIndex was not usable; the first is logged.
+	channelsPinFallbacks atomic.Int64
 }
 
 // isV3, hasResolvedPath, hasObsRawHex, hasScopeName, hasDefaultScope,
@@ -3005,6 +3008,87 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	return strongestName, sumLat / sumWeight, sumLon / sumWeight, len(contributors), spread, true
 }
 
+// channelHashIndex is the ingestor's partial index
+// transmissions(channel_hash) WHERE payload_type = 5 (cmd/ingestor/db.go).
+const channelHashIndex = "idx_tx_channel_hash"
+
+// channelsSQL is GetChannels' query: every decrypted channel (payload_type 5,
+// channel_hash set and not enc_*) with its message count, last activity and
+// the decoded_json of its newest message. regionPlaceholder is "" for all
+// regions, else one "?" per region code; v3 picks the observer join.
+//
+// pinned adds INDEXED BY channelHashIndex to both transmissions references:
+// the outer scan and the correlated sample subquery (issue #100). That is
+// the plan SQLite chooses itself once ANALYZE statistics exist - the outer
+// scan walks the index in channel_hash order, so GROUP BY needs no temp
+// B-tree, and each sample lookup is a channel_hash=? search. Neither binary
+// runs ANALYZE (on a 5 GB database it holds the write lock for ~65 s, PR
+// #106), and without statistics SQLite takes idx_transmissions_payload_type
+// for the outer scan, and for the subquery too when the payload_type index is
+// the newer one, which then visits every GRP_TXT row once per channel.
+//
+// The partial index is only usable when the WHERE clause itself contains its
+// predicate "payload_type = 5", so the payload_type index cannot be avoided
+// with a unary + here (the nodeAdvertScanSQL technique): "+payload_type = 5"
+// no longer implies the index predicate and SQLite falls back to full table
+// scans. Pinning changes the plan only; rows, order and values are those of
+// the unpinned query (TestGetChannels_PinnedMatchesUnpinned).
+func channelsSQL(v3 bool, regionPlaceholder string, pinned bool) string {
+	hint := ""
+	if pinned {
+		hint = " INDEXED BY " + channelHashIndex
+	}
+	if regionPlaceholder == "" {
+		return fmt.Sprintf(`SELECT channel_hash,
+				COUNT(*) AS msg_count,
+				MAX(first_seen) AS last_activity,
+				(SELECT t2.decoded_json FROM transmissions t2%[1]s
+				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+			FROM transmissions t%[1]s
+			WHERE payload_type = 5
+			AND channel_hash IS NOT NULL
+			AND channel_hash NOT LIKE 'enc_%%'
+			GROUP BY channel_hash
+			ORDER BY last_activity DESC`, hint)
+	}
+	if v3 {
+		return fmt.Sprintf(`SELECT t.channel_hash,
+				COUNT(*) AS msg_count,
+				MAX(t.first_seen) AS last_activity,
+				(SELECT t2.decoded_json FROM transmissions t2%[1]s
+				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+			FROM transmissions t%[1]s
+			JOIN observations o ON o.transmission_id = t.id
+			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE t.payload_type = 5
+			AND t.channel_hash IS NOT NULL
+			AND t.channel_hash NOT LIKE 'enc_%%'
+			AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%[2]s)
+			GROUP BY t.channel_hash
+			ORDER BY last_activity DESC`, hint, regionPlaceholder)
+	}
+	return fmt.Sprintf(`SELECT t.channel_hash,
+			COUNT(*) AS msg_count,
+			MAX(t.first_seen) AS last_activity,
+			(SELECT t2.decoded_json FROM transmissions t2%[1]s
+			 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+			 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+		FROM transmissions t%[1]s
+		JOIN observations o ON o.transmission_id = t.id
+		WHERE t.payload_type = 5
+		AND t.channel_hash IS NOT NULL
+		AND t.channel_hash NOT LIKE 'enc_%%'
+		AND EXISTS (
+			SELECT 1 FROM observers obs
+			WHERE obs.id = o.observer_id
+			AND UPPER(TRIM(obs.iata)) IN (%[2]s)
+		)
+		GROUP BY t.channel_hash
+		ORDER BY last_activity DESC`, hint, regionPlaceholder)
+}
+
 // GetChannels returns channel list from GRP_TXT packets.
 // Queries transmissions directly (not a VIEW) to avoid observation-level
 // duplicates that could cause stale lastMessage when an older message has
@@ -3025,69 +3109,27 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 	db.channelsCacheMu.Unlock()
 
 	regionCodes := normalizeRegionCodes(regionParam)
-
-	var querySQL string
+	regionPlaceholder := ""
 	args := make([]interface{}, 0, len(regionCodes))
-
 	if len(regionCodes) > 0 {
 		placeholders := make([]string, len(regionCodes))
 		for i, code := range regionCodes {
 			placeholders[i] = "?"
 			args = append(args, code)
 		}
-		regionPlaceholder := strings.Join(placeholders, ",")
-		if db.isV3() {
-			querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity,
-					(SELECT t2.decoded_json FROM transmissions t2
-					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
-				WHERE t.payload_type = 5
-				AND t.channel_hash IS NOT NULL
-				AND t.channel_hash NOT LIKE 'enc_%%'
-				AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
-		} else {
-			querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity,
-					(SELECT t2.decoded_json FROM transmissions t2
-					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				WHERE t.payload_type = 5
-				AND t.channel_hash IS NOT NULL
-				AND t.channel_hash NOT LIKE 'enc_%%'
-				AND EXISTS (
-					SELECT 1 FROM observers obs
-					WHERE obs.id = o.observer_id
-					AND UPPER(TRIM(obs.iata)) IN (%s)
-				)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
-		}
-	} else {
-		querySQL = `SELECT channel_hash,
-				COUNT(*) AS msg_count,
-				MAX(first_seen) AS last_activity,
-				(SELECT t2.decoded_json FROM transmissions t2
-				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-			FROM transmissions t
-			WHERE payload_type = 5
-			AND channel_hash IS NOT NULL
-			AND channel_hash NOT LIKE 'enc_%%'
-			GROUP BY channel_hash
-			ORDER BY last_activity DESC`
+		regionPlaceholder = strings.Join(placeholders, ",")
 	}
 
-	rows, err := db.conn.Query(querySQL, args...)
+	// Pinned to channelHashIndex first; INDEXED BY fails at prepare time
+	// (before any row is read) when that index is missing or unusable, and
+	// then the unpinned query - the pre-pinning SQL - runs instead.
+	rows, err := db.conn.Query(channelsSQL(db.isV3(), regionPlaceholder, true), args...)
+	if err != nil {
+		if db.channelsPinFallbacks.Add(1) == 1 {
+			log.Printf("[db] GetChannels: %s not usable (%v); using the unpinned query", channelHashIndex, err)
+		}
+		rows, err = db.conn.Query(channelsSQL(db.isV3(), regionPlaceholder, false), args...)
+	}
 	if err != nil {
 		return nil, err
 	}
