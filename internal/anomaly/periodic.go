@@ -373,23 +373,25 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 	// alone would rank higher, and until a refined period would signal it
 	// changes nothing.
 	//
-	// A seed outside [MinPeriod, MaxPeriod] is measured only for its
-	// refinement (see seedInReach); it is never the estimate itself.
+	// Every seed in [MinPeriod, MaxPeriod] is measured. A seed outside it is
+	// measured only for its refinement (see seedInReach) and is never the
+	// estimate itself.
 	var bestRef chainInfo
 	seen, seenRef := sc.seen[:0], sc.seenRef[:0]
 	for i := p.n - 1; i >= 1 && i >= p.n-recentGaps; i-- {
 		g := p.at(i) - p.at(i-1)
 		for k := 1; k <= maxK; k++ {
-			if !seedInReach(g, k, r) {
+			cand := g / int64(k)
+			inRange := cand >= minP && cand <= maxP
+			if !inRange && !seedInReach(g, k, r) {
 				continue
 			}
-			cand := g / int64(k)
 			if slices.Contains(seen, cand) {
 				continue
 			}
 			seen = append(seen, cand)
 			c, ref := p.chainRefined(cand, r, sc)
-			if cand >= minP && cand <= maxP && c.gaps > 0 && (best.gaps == 0 || c.preferred(best, r)) {
+			if inRange && c.gaps > 0 && (best.gaps == 0 || c.preferred(best, r)) {
 				best = c
 			}
 			if ref != cand && !slices.Contains(seenRef, ref) && !slices.Contains(seen, ref) {
@@ -427,18 +429,20 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 	return best
 }
 
-// seedInReach reports whether the seed g/k is worth measuring: whether some
-// period P in [MinPeriod, MaxPeriod] may explain gap g as k periods
-// (|g - k*P| <= tol(P)). A seed outside the range can still be refined into
-// it by chainRefined: gaps of 294s, 306s... with tol 6s and range
-// [299s, 301s] give only out-of-range seeds, which refine to 300s.
+// seedInReach reports whether some period P in [MinPeriod, MaxPeriod] may
+// explain gap g as k periods (|g - k*P| <= tol(P)), so that the seed g/k is
+// worth measuring even when it lies outside the range: chainRefined can
+// refine it into the range (gaps of 294s, 306s... with tol 6s and range
+// [299s, 301s] give only out-of-range seeds, which refine to 300s).
 //
-// The P nearest g/k are the range ends, and k*P - tol(P) never decreases in
-// P (tol grows by at most JitterRel*dP, JitterRel <= 0.25 < k), so such a P
-// exists only if k*MinPeriod - tol(MinPeriod) <= g <= k*MaxPeriod +
-// tol(MaxPeriod). It admits at most one seed per gap and k, so there are
-// still at most recentGaps*(MaxMissing+1) seeds, as searchCells charges and
-// periodicWorkBound counts.
+// The test is necessary, not sufficient. k*P + tol(P) increases with P, and
+// so does k*P - tol(P): from P to P+1, tolNanos grows by at most 1ns (its
+// JitterRel*P by at most 0.25 before truncation) while k*P grows by k >= 1.
+// So an in-range P can explain g only if
+// k*MinPeriod - tol(MinPeriod) <= g <= k*MaxPeriod + tol(MaxPeriod).
+// estimate() measures at most one seed per gap and k either way, so there
+// are still at most recentGaps*(MaxMissing+1) seeds, as searchCells charges
+// and periodicWorkBound counts.
 func seedInReach(g int64, k int, r *PeriodicRule) bool {
 	minP, maxP := int64(r.MinPeriod), int64(r.MaxPeriod)
 	return g >= int64(k)*minP-tolNanos(r, minP) && g <= int64(k)*maxP+tolNanos(r, maxP)

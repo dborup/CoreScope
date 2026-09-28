@@ -15,50 +15,59 @@ import (
 // A period range narrower than the tolerance: gaps alternate 294s and 306s,
 // so every seed g/k lies outside [299s, 301s], yet 300s explains every gap
 // within 6s and meets every criterion. The seeds must still be refined into
-// the range instead of being dropped before refinement.
+// the range instead of being dropped before refinement, with an absolute and
+// with a relative tolerance.
 func TestPeriodicNarrowRangeFindsPeriodBehindOutOfRangeSeeds(t *testing.T) {
-	rule := experimentalPeriodic()
-	rule.MinPeriod, rule.MaxPeriod = 299*time.Second, 301*time.Second
-	rule.JitterAbs, rule.JitterRel, rule.MaxJitterFraction = 6*time.Second, 0, 1
-	cfg := Config{Limits: experimentalLimits(), Expected: ExpectedPolicy{Mode: ExpectedInclude}, Periodic: []PeriodicRule{rule}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	const pulses = 32
-	offs := make([]time.Duration, pulses)
-	var events []Event
-	for i := range offs {
-		offs[i] = time.Duration(i) * 5 * time.Minute
-		if i%2 == 1 {
-			offs[i] -= 6 * time.Second
-		}
-		events = append(events, relayEvent(t, fmt.Sprintf("narrow-%02d", i), at(offs[i]), 1, 2))
-	}
-
-	// The fixture is valid: 300s explains the whole chain, meets the
-	// criteria and passes MaxChance, and no seed g/k is in range.
-	p := ringOf(&rule, offs...)
-	p.evaluated = pulses
-	var sc periodicScratch
-	ideal := p.chainFor(int64(300*time.Second), &rule, &sc)
-	if ideal.gaps != pulses-1 || !ideal.meets(&rule) || p.chance(ideal, &rule) > rule.MaxChance {
-		t.Fatalf("invalid repro: ideal=%+v chance=%g", ideal, p.chance(ideal, &rule))
-	}
-	for _, g := range []time.Duration{294 * time.Second, 306 * time.Second} {
-		for k := 1; k <= rule.MaxMissing+1; k++ {
-			if s := g / time.Duration(k); s >= rule.MinPeriod && s <= rule.MaxPeriod {
-				t.Fatalf("invalid repro: seed %v/%d = %v is in range", g, k, s)
+	for _, j := range []struct {
+		name string
+		abs  time.Duration
+		rel  float64
+	}{{"absolute 6s", 6 * time.Second, 0}, {"relative 2%", 0, 0.02}} {
+		t.Run(j.name, func(t *testing.T) {
+			rule := experimentalPeriodic()
+			rule.MinPeriod, rule.MaxPeriod = 299*time.Second, 301*time.Second
+			rule.JitterAbs, rule.JitterRel, rule.MaxJitterFraction = j.abs, j.rel, 1
+			cfg := Config{Limits: experimentalLimits(), Expected: ExpectedPolicy{Mode: ExpectedInclude}, Periodic: []PeriodicRule{rule}}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
 			}
-		}
-	}
+			const pulses = 32
+			offs := make([]time.Duration, pulses)
+			var events []Event
+			for i := range offs {
+				offs[i] = time.Duration(i) * 5 * time.Minute
+				if i%2 == 1 {
+					offs[i] -= 6 * time.Second
+				}
+				events = append(events, relayEvent(t, fmt.Sprintf("narrow-%02d", i), at(offs[i]), 1, 2))
+			}
 
-	a := filter(run(t, newDet(t, cfg), events), rule.Name, StateActive)
-	if len(a) == 0 {
-		t.Fatal("5m train with gaps 294s/306s was not detected with MinPeriod=299s, MaxPeriod=301s, tolerance=6s")
-	}
-	ev := a[0].Periodic
-	if ev == nil || ev.Period != 5*time.Minute {
-		t.Fatalf("detected period %+v, want 5m0s", ev)
+			// The fixture is valid: 300s explains the whole chain, meets the
+			// criteria and passes MaxChance, and no seed g/k is in range.
+			p := ringOf(&rule, offs...)
+			p.evaluated = pulses
+			var sc periodicScratch
+			ideal := p.chainFor(int64(300*time.Second), &rule, &sc)
+			if ideal.gaps != pulses-1 || !ideal.meets(&rule) || p.chance(ideal, &rule) > rule.MaxChance {
+				t.Fatalf("invalid repro: ideal=%+v chance=%g", ideal, p.chance(ideal, &rule))
+			}
+			for _, g := range []time.Duration{294 * time.Second, 306 * time.Second} {
+				for k := 1; k <= rule.MaxMissing+1; k++ {
+					if s := g / time.Duration(k); s >= rule.MinPeriod && s <= rule.MaxPeriod {
+						t.Fatalf("invalid repro: seed %v/%d = %v is in range", g, k, s)
+					}
+				}
+			}
+
+			a := filter(run(t, newDet(t, cfg), events), rule.Name, StateActive)
+			if len(a) == 0 {
+				t.Fatal("5m train with gaps 294s/306s was not detected with MinPeriod=299s, MaxPeriod=301s")
+			}
+			ev := a[0].Periodic
+			if ev == nil || ev.Period != 5*time.Minute {
+				t.Fatalf("detected period %+v, want 5m0s", ev)
+			}
+		})
 	}
 }
 
@@ -117,8 +126,8 @@ func TestPeriodicBurstTrafficLabel(t *testing.T) {
 }
 
 // seedInReach keeps every seed g/k for which some period in range explains g
-// as k periods with its own tolerance, under absolute and relative jitter,
-// and its bounds are tight.
+// as k periods with its own tolerance, under absolute, relative and combined
+// jitter, at realistic magnitudes (sampled).
 func TestSeedInReachKeepsEverySeedAPeriodInRangeExplains(t *testing.T) {
 	rng := rand.New(rand.NewSource(94))
 	checked := 0
@@ -149,10 +158,6 @@ func TestSeedInReachKeepsEverySeedAPeriodInRangeExplains(t *testing.T) {
 		if !seedInReach(g, k, &r) {
 			t.Fatalf("trial %d: %v explains gap %v as %d periods (tol %v), but the seed is dropped; rule %v..%v abs %v rel %g",
 				trial, time.Duration(per), time.Duration(g), k, time.Duration(tol), r.MinPeriod, r.MaxPeriod, r.JitterAbs, r.JitterRel)
-		}
-		lo, hi := int64(k)*minP-tolNanos(&r, minP), int64(k)*maxP+tolNanos(&r, maxP)
-		if !seedInReach(lo, k, &r) || !seedInReach(hi, k, &r) || seedInReach(lo-1, k, &r) || seedInReach(hi+1, k, &r) {
-			t.Fatalf("trial %d: reach of k=%d is not exactly [%v, %v]", trial, k, time.Duration(lo), time.Duration(hi))
 		}
 	}
 	if checked < 19000 {
@@ -187,6 +192,75 @@ func TestPeriodicOutOfRangeSeedIsNeverReported(t *testing.T) {
 		for _, c := range run(t, newDet(t, cfg), evs) {
 			if c.Periodic != nil && (c.Periodic.Period < rule.MinPeriod || c.Periodic.Period > rule.MaxPeriod) {
 				t.Fatalf("%v: reported period %v outside [%v, %v]", step, c.Periodic.Period, rule.MinPeriod, rule.MaxPeriod)
+			}
+		}
+	}
+}
+
+// The same, exhaustively over small integer periods, where the truncation of
+// tolNanos and the rounding of explain matter most: every gap that some
+// period in range explains as k periods is in reach.
+func TestSeedInReachIsSoundExhaustively(t *testing.T) {
+	checked := 0
+	for minP := int64(2); minP <= 40; minP++ {
+		for width := int64(1); width <= 12; width++ {
+			for _, abs := range []int64{0, 1, 2, 3} {
+				for _, rel := range []float64{0, 0.1, 0.13, 0.25} {
+					r := PeriodicRule{MinPeriod: time.Duration(minP), MaxPeriod: time.Duration(minP + width),
+						JitterAbs: time.Duration(abs), JitterRel: rel}
+					for k := 1; k <= maxMissingLimit+1; k++ {
+						for per := minP; per <= minP+width; per++ {
+							tol := tolNanos(&r, per)
+							for g := int64(k)*per - tol; g <= int64(k)*per+tol; g++ {
+								if kk, _ := explain(g, per, tol, k); kk != k {
+									continue
+								}
+								checked++
+								if !seedInReach(g, k, &r) {
+									t.Fatalf("period %d explains gap %d as %d periods (tol %d) but the seed is dropped; range %d..%d abs %d rel %g",
+										per, g, k, tol, minP, minP+width, abs, rel)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if checked < 100000 {
+		t.Fatalf("only %d cases checked", checked)
+	}
+}
+
+// Every seed in range is measured, also where seedInReach alone would drop
+// it: with a 1ns tolerance the gap 3*60s+2ns gives the in-range seed 60s
+// (floor of g/3), beyond k*MaxPeriod+tol. That seed explains the three
+// newest gaps with full coverage and must stay the estimate.
+func TestPeriodicInRangeSeedIsAlwaysMeasured(t *testing.T) {
+	r := experimentalPeriodic()
+	r.MinPeriod, r.MaxPeriod = 30*time.Second, time.Minute
+	r.JitterAbs, r.JitterRel = 1, 0
+	cfg := Config{Limits: experimentalLimits(), Expected: ExpectedPolicy{Mode: ExpectedInclude}, Periodic: []PeriodicRule{r}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	const m = time.Minute
+	g0 := 3*m + 2
+	if seedInReach(int64(g0), 3, &r) {
+		t.Fatal("fixture: seedInReach alone keeps the seed")
+	}
+	p := ringOf(&r, 0, g0, g0+m-1, g0+2*m, g0+3*m-1)
+	p.evaluated = uint64(p.n)
+	var sc periodicScratch
+	est := p.estimate(&r, &sc)
+	if est.period != int64(m) || est.gaps != 3 || est.coverage != 1 {
+		t.Fatalf("estimate %v over %d gaps (coverage %g), want 1m0s over 3 (coverage 1)", time.Duration(est.period), est.gaps, est.coverage)
+	}
+	for i := p.n - 1; i >= 1; i-- {
+		g := p.at(i) - p.at(i-1)
+		for k := 1; k <= r.MaxMissing+1; k++ {
+			if s := g / int64(k); s >= int64(r.MinPeriod) && s <= int64(r.MaxPeriod) && !slices.Contains(sc.seen, s) {
+				t.Fatalf("in-range seed %v (gap %v / %d) was not measured", time.Duration(s), time.Duration(g), k)
 			}
 		}
 	}
