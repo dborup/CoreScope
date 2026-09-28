@@ -102,6 +102,16 @@ func countFloodAdverts(entries []floodAdvertEntry, now time.Time, windowHours fl
 // directly, so there is no mutable package state to race on.
 const floodAdvertRowCap = 50000
 
+// floodAdvertCountSQL is CountFloodAdvertsForNode's query. The unary + on
+// payload_type keeps it off idx_transmissions_payload_type, as in
+// nodeAdvertScanSQL: without ANALYZE statistics SQLite otherwise takes that
+// index whenever it is newer than idx_transmissions_from_pubkey and visits
+// every ADVERT in the database instead of one node's rows (issue #100). For an
+// INTEGER column "+payload_type = ?" matches exactly the rows
+// "payload_type = ?" does.
+// Parameters: pubkey, payload type, route type, first_seen floor, row cap.
+const floodAdvertCountSQL = "SELECT COALESCE(first_seen, ''), COALESCE(route_type, -1), COALESCE(hash, '') FROM transmissions WHERE from_pubkey = ? AND +payload_type = ? AND route_type = ? AND first_seen >= ? ORDER BY id DESC LIMIT ?"
+
 func (db *DB) CountFloodAdvertsForNode(pubkey string, windowHours float64, rowCap int) (int, error) {
 	return db.countFloodAdvertsForNodeAt(pubkey, windowHours, rowCap, time.Now())
 }
@@ -111,9 +121,7 @@ func (db *DB) CountFloodAdvertsForNode(pubkey string, windowHours float64, rowCa
 // (GetNodeAdvertRoutes).
 func (db *DB) countFloodAdvertsForNodeAt(pubkey string, windowHours float64, rowCap int, now time.Time) (int, error) {
 	floor := advertDateFloor(now, windowHours)
-	rows, err := db.conn.Query(
-		"SELECT COALESCE(first_seen, ''), COALESCE(route_type, -1), COALESCE(hash, '') FROM transmissions WHERE from_pubkey = ? AND payload_type = ? AND route_type = ? AND first_seen >= ? ORDER BY id DESC LIMIT ?",
-		pubkey, payloadTypeAdvert, advertRouteTypeFlood, floor, rowCap)
+	rows, err := db.conn.Query(floodAdvertCountSQL, pubkey, payloadTypeAdvert, advertRouteTypeFlood, floor, rowCap)
 	if err != nil {
 		return 0, err
 	}
