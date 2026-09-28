@@ -619,6 +619,76 @@ test('normalizeName keeps emoji with ZWJ and variation selectors', () => {
   }
 });
 
+// ── Trim parity with internal/channelregistry.NormalizeName (#99 follow-up) ──
+// JS's native String.prototype.trim() and Go's strings.TrimSpace do not agree
+// on which runes are whitespace: trim() also strips U+FEFF (BOM), and does
+// not strip U+0085 (NEL) — TrimSpace is the other way around. normalizeName
+// must trim exactly what the server trims, so the two sides reject/accept
+// the same inputs. The pinned list below matches the one independently
+// enumerated in internal/channelregistry/name_test.go
+// (TestGoSpaceCodepointsParity) via unicode.IsSpace over the full rune
+// range. The Go test catches a change in Go's own Unicode White_Space
+// table; this JS constant only catches a change to this list itself
+// (assert.deepStrictEqual below just checks it still matches the runtime
+// GO_SPACE_CODEPOINTS shipped in channel-proposals.js). The two lists are
+// kept in sync by hand — update both together.
+const GO_SPACE_CODEPOINTS = [
+  0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0,
+  0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+  0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000
+];
+
+test('GO_SPACE_CODEPOINTS matches the pinned Go unicode.IsSpace enumeration', () => {
+  // CP.GO_SPACE_CODEPOINTS is an Array from the vm context's own realm, so
+  // compare values (JSON round-trip), not object/constructor identity.
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(CP.GO_SPACE_CODEPOINTS)), GO_SPACE_CODEPOINTS);
+});
+
+test('normalizeName rejects a leading/trailing U+FEFF as invisible instead of silently trimming it', () => {
+  // Go's TrimSpace does NOT strip U+FEFF, so the server sees it, decides it
+  // is Cf, and rejects with ErrNameInvisible. The frontend must match: not
+  // trim it away and submit a name the user never typed.
+  for (const input of ['\uFEFFtest', 'test\uFEFF', '\uFEFF\uFEFFtest\uFEFF']) {
+    const r = CP.normalizeName(input);
+    assert.ok(r.error && !r.name, `${JSON.stringify(input)} should be rejected, got ${JSON.stringify(r)}`);
+    assert.match(r.error, /invisible/, JSON.stringify(input));
+  }
+});
+
+test('normalizeName trims a leading/trailing U+0085 (NEL) and accepts the result', () => {
+  // Go's TrimSpace DOES strip U+0085 (unicode.IsSpace), so the server sees
+  // "#test" and accepts it. JS's native trim() does not touch U+0085, which
+  // used to leave it in CONTROL_RE range and get the frontend to reject a
+  // name the server would have accepted.
+  for (const input of ['test\u0085', '\u0085test', '\u0085test\u0085']) {
+    const r = CP.normalizeName(input);
+    assert.strictEqual(r.error, undefined, `${JSON.stringify(input)}: ${r.error}`);
+    assert.strictEqual(r.name, '#test', JSON.stringify(input));
+  }
+});
+
+test('normalizeName trims every codepoint Go treats as whitespace, and only those', () => {
+  for (const cp of GO_SPACE_CODEPOINTS) {
+    const c = String.fromCodePoint(cp);
+    const input = c + 'test' + c;
+    const r = CP.normalizeName(input);
+    assert.strictEqual(r.error, undefined, `U+${cp.toString(16).toUpperCase()}: ${r.error}`);
+    assert.strictEqual(r.name, '#test', `U+${cp.toString(16).toUpperCase()}`);
+  }
+  // trimGoSpace itself: no more, no less than the pinned list.
+  assert.strictEqual(CP.trimGoSpace('  \t\u3000hello\u3000\t  '), 'hello');
+  assert.strictEqual(CP.trimGoSpace('\uFEFFhello\uFEFF'), '\uFEFFhello\uFEFF', 'U+FEFF must not be trimmed');
+  assert.strictEqual(CP.trimGoSpace('\u0085hello\u0085'), 'hello', 'U+0085 must be trimmed');
+});
+
+test('normalizeName still rejects U+FEFF / U+200B in the middle of a name (unchanged behavior)', () => {
+  for (const input of ['#mid\uFEFFdle', '#mid\u200Bdle']) {
+    const r = CP.normalizeName(input);
+    assert.ok(r.error && !r.name, `${JSON.stringify(input)} should be rejected, got ${JSON.stringify(r)}`);
+    assert.match(r.error, /invisible/, JSON.stringify(input));
+  }
+});
+
 // ── Remove confirmation escaping (mutant M21) ────────────────────────────
 // The dialog is built with the DOM API (no HTML strings with data), so the
 // name must arrive as text in the title and as a plain attribute value on

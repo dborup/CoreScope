@@ -40,8 +40,38 @@
     return encodeURIComponent(s).replace(/%[0-9A-F]{2}/gi, 'x').length;
   }
 
+  // The exact set of runes Go's unicode.IsSpace treats as whitespace (and
+  // therefore what strings.TrimSpace trims), enumerated from the Go standard
+  // library rather than guessed — not the same set as JS's native
+  // String.prototype.trim(), which also strips U+FEFF (BOM) and does not
+  // strip U+0085 (NEL). internal/channelregistry/name_test.go
+  // (TestGoSpaceCodepointsParity) independently re-enumerates the same rune
+  // range with unicode.IsSpace against the same fixed list. The Go test
+  // catches a change in Go's own Unicode White_Space table; this JS list
+  // only catches drift from its own JS-side test copy. The two lists are
+  // kept in sync by hand — update both together. Regenerate with:
+  //   for r := rune(0); r <= 0x10FFFF; r++ { if unicode.IsSpace(r) { ... } }
+  var GO_SPACE_CODEPOINTS = [
+    0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0,
+    0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+    0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000
+  ];
+  var GO_SPACE_RE = (function () {
+    var chars = GO_SPACE_CODEPOINTS.map(function (cp) {
+      return '\\u' + ('000' + cp.toString(16).toUpperCase()).slice(-4);
+    }).join('');
+    return new RegExp('^[' + chars + ']+|[' + chars + ']+$', 'g');
+  })();
+
+  // Mirrors Go's strings.TrimSpace exactly (trims only GO_SPACE_CODEPOINTS
+  // from both ends), unlike JS's native String.prototype.trim() — see
+  // GO_SPACE_CODEPOINTS above for why the sets differ.
+  function trimGoSpace(s) {
+    return s.replace(GO_SPACE_RE, '');
+  }
+
   function normalizeName(raw) {
-    var s = String(raw == null ? '' : raw).trim();
+    var s = trimGoSpace(String(raw == null ? '' : raw));
     if (s.charAt(0) !== '#') s = '#' + s;
     var body = s.slice(1);
     if (!body) return { error: 'Enter a channel name.' };
@@ -662,6 +692,8 @@
     MAX_NAME_BYTES: MAX_NAME_BYTES,
     MAX_POLL_ATTEMPTS: MAX_POLL_ATTEMPTS,
     FILTERS: FILTERS,
+    GO_SPACE_CODEPOINTS: GO_SPACE_CODEPOINTS,
+    trimGoSpace: trimGoSpace,
     normalizeName: normalizeName,
     mergeApprovedChannels: mergeApprovedChannels,
     pollDelay: pollDelay,
