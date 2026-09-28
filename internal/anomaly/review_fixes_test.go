@@ -88,7 +88,12 @@ func TestRefinementDoesNotHideAMeetingSeedChain(t *testing.T) {
 // MaxChance exists. The gaps are two trains from an independent Monte Carlo
 // (rule: JitterAbs 1s, JitterRel 0.03, MaxChance 1e-9); without the Chance
 // condition the first signalled 27 pulses late and the second never.
-// ad3ab30f's signals are the reference.
+// ad3ab30f's signals are the reference, except that train 1240 now also
+// signals at gap 69: since refinement ranges use each period's own
+// tolerance, the train, broken by the 187.5s gap at 58, is found again as
+// 172.48s over 12 pulses (median residual 2.561s <= 0.5*5.174s, Chance
+// 1.1e-11), where the seed-tolerance range only reached 171.75s, whose
+// residual 2.84s fails MaxJitterFraction.
 func TestRefinedCandidateReplacesOnlyWhenItWouldSignal(t *testing.T) {
 	for _, c := range []struct {
 		name               string
@@ -122,7 +127,7 @@ func TestRefinedCandidateReplacesOnlyWhenItWouldSignal(t *testing.T) {
 			174342474654, 169534334907, 175681725697, 173915952191, 187517102381, 174359296774,
 			169014698377, 174123854812, 175505387461, 175828494557, 173758510591, 168915340027,
 			171752353392, 167303471723, 175039029128, 174776307324,
-		}, 57, 1, 57},
+		}, 57, 2, 69},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := experimentalPeriodic()
@@ -141,7 +146,7 @@ func TestRefinedCandidateReplacesOnlyWhenItWouldSignal(t *testing.T) {
 				}
 			}
 			if first != c.first || count != c.count || last != c.last {
-				t.Fatalf("signals first=%d count=%d last=%d, want %d %d %d (as on ad3ab30f)", first, count, last, c.first, c.count, c.last)
+				t.Fatalf("signals first=%d count=%d last=%d, want %d %d %d", first, count, last, c.first, c.count, c.last)
 			}
 		})
 	}

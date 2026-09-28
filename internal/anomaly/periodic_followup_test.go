@@ -317,3 +317,182 @@ func TestPeriodicRelativeJitterRefinesWithTheCandidateTolerance(t *testing.T) {
 		t.Fatalf("detected %v (tolerance %v, support %d), whose chain explains %d gaps", ev.Period, ev.Tolerance, ev.Support, c.gaps)
 	}
 }
+
+// oldAbsRange is the refinement range chainRefined used before periodRange,
+// for one gap g as k periods with tolerance tol (then always the seed's):
+// [ceil((g-tol)/k), floor((g+tol)/k)], with no lower end while g-tol <= 0.
+func oldAbsRange(g, k, tol int64) (lo, hi int64) {
+	lo, hi = 1, (g+tol)/k
+	if g-tol > 0 {
+		lo = max(lo, (g-tol+k-1)/k)
+	}
+	return lo, hi
+}
+
+// With absolute jitter only, periodRange gives exactly the integers of the
+// old computation: exhaustively over small gaps and tolerances, and sampled
+// at nanosecond magnitudes up to the largest gaps a rule can bridge.
+func TestPeriodRangeWithAbsoluteJitterIsTheOldRange(t *testing.T) {
+	check := func(g, k, abs int64) {
+		r := PeriodicRule{JitterAbs: time.Duration(abs)}
+		lo, hi := periodRange(g, k, &r)
+		if olo, ohi := oldAbsRange(g, k, abs); lo != olo || hi != ohi {
+			t.Fatalf("g=%d k=%d JitterAbs=%d: periodRange [%d, %d], old range [%d, %d]", g, k, abs, lo, hi, olo, ohi)
+		}
+	}
+	for g := int64(1); g <= 2000; g++ {
+		for k := int64(1); k <= maxMissingLimit+1; k++ {
+			for abs := int64(0); abs <= 40; abs++ {
+				check(g, k, abs)
+			}
+		}
+	}
+	rng := rand.New(rand.NewSource(108))
+	for i := 0; i < 200000; i++ {
+		k := 1 + rng.Int63n(maxMissingLimit+1)
+		g := 1 + rng.Int63n(k*int64(maxWindow))
+		check(g, k, rng.Int63n(int64(maxWindow/2)))
+	}
+}
+
+// With relative (and combined) jitter, periodRange is exactly the set of P
+// with |g - k*P| <= tol(P): by brute force over small integers, and by its
+// defining ends at nanosecond magnitudes.
+func TestPeriodRangeIsExactlyThePeriodsThatExplainTheGap(t *testing.T) {
+	for _, abs := range []int64{0, 1, 3, 7} {
+		for _, rel := range []float64{0.01, 0.1, 0.13, 0.25} {
+			r := PeriodicRule{JitterAbs: time.Duration(abs), JitterRel: rel}
+			for k := int64(1); k <= maxMissingLimit+1; k++ {
+				for g := int64(1); g <= 600; g++ {
+					lo, hi := periodRange(g, k, &r)
+					for per := int64(1); per <= g+abs+1; per++ {
+						d := g - k*per
+						in := max(d, -d) <= tolNanos(&r, per)
+						if in != (per >= lo && per <= hi) {
+							t.Fatalf("abs=%d rel=%g k=%d g=%d: P=%d explains=%v, but periodRange is [%d, %d]", abs, rel, k, g, per, in, lo, hi)
+						}
+					}
+				}
+			}
+		}
+	}
+	rng := rand.New(rand.NewSource(1081))
+	for i := 0; i < 200000; i++ {
+		r := PeriodicRule{JitterAbs: time.Duration(rng.Int63n(int64(10 * time.Second))), JitterRel: 0.25 * rng.Float64()}
+		k := 1 + rng.Int63n(maxMissingLimit+1)
+		g := int64(time.Second) + rng.Int63n(k*int64(maxWindow))
+		lo, hi := periodRange(g, k, &r)
+		f := func(per int64) int64 { return k*per - tolNanos(&r, per) }
+		h := func(per int64) int64 { return k*per + tolNanos(&r, per) }
+		if lo > hi || f(hi) > g || f(hi+1) <= g || h(lo) < g || (lo > 1 && h(lo-1) >= g) {
+			t.Fatalf("abs=%v rel=%g k=%d g=%d: [%d, %d] are not the exact ends", r.JitterAbs, r.JitterRel, k, g, lo, hi)
+		}
+	}
+}
+
+// The refined period is clamped into the part of the common range that lies
+// in [MinPeriod, MaxPeriod]. Both trains have a true period of 300.98s in
+// the range [299s, 301s], residuals of 0.90..0.99 tol and two of three gaps
+// long, so their phase estimate (mean gap) lies beyond MaxPeriod. The common
+// range straddles MaxPeriod: clamped only into the common range, the refined
+// period would be above 301s and rejected, although the periods from its
+// lower end up to 301s explain every gap.
+func TestPeriodicRefinementIsClampedIntoTheSearchRange(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		abs    time.Duration
+		rel    float64
+		period int64
+		gaps   []int64
+	}{
+		{"relative 2%", 0, 0.02, 300983680322, []int64{
+			295433727560, 295081034588, 306545473781, 306861519212, 306631836381, 306839668100,
+			295481269048, 306684537919, 306797954449, 306605636817, 306836785762, 306717842243,
+			295064704066, 306841202094, 306918734081, 306475916213, 306738216837, 306599618627,
+			295439541190, 306701648665, 306655004215, 295172194564, 295422882548, 306816575831,
+		}},
+		{"absolute 6s", 6 * time.Second, 0, 300983815273, []int64{
+			306831828975, 306822681220, 295457880758, 306702249706, 306592244168, 306845246623,
+			295130477268, 306753857882, 306756812033, 306408553938, 295364746775, 306677382170,
+			306511141502, 306590311144, 295567381355, 306481296874, 306868730214, 306614050442,
+			295348035963, 306797789043, 306408756668, 295272100140, 295171304764, 306667020981,
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := experimentalPeriodic()
+			r.MinPeriod, r.MaxPeriod = 299*time.Second, 301*time.Second
+			r.JitterAbs, r.JitterRel, r.MaxJitterFraction = c.abs, c.rel, 1
+			if err := (&Config{Limits: experimentalLimits(), Expected: ExpectedPolicy{Mode: ExpectedInclude}, Periodic: []PeriodicRule{r}}).Validate(); err != nil {
+				t.Fatal(err)
+			}
+			// fixture: the true period explains the train and would signal,
+			// while the mean gap is above MaxPeriod
+			offs := []time.Duration{0}
+			var sum int64
+			for _, g := range c.gaps {
+				offs = append(offs, offs[len(offs)-1]+time.Duration(g))
+				sum += g
+			}
+			ring := ringOf(&r, offs...)
+			ring.evaluated = uint64(len(offs))
+			var sc periodicScratch
+			ideal := ring.chainFor(c.period, &r, &sc)
+			if ideal.gaps != len(c.gaps) || !ideal.meets(&r) || ring.chance(ideal, &r) > r.MaxChance || sum/int64(len(c.gaps)) <= int64(r.MaxPeriod) {
+				t.Fatalf("invalid fixture: ideal=%+v chance=%g mean gap %v", ideal, ring.chance(ideal, &r), time.Duration(sum/int64(len(c.gaps))))
+			}
+
+			p := newPeriodicState(r.HistoryLen)
+			cur := t0.UnixNano()
+			for i, g := range c.gaps {
+				cur += g
+				s, ok := p.observe(cur, TrafficUnclassified, &r, &sc)
+				if !ok {
+					continue
+				}
+				per := int64(s.ev.Period)
+				if per < int64(r.MinPeriod) || per > int64(r.MaxPeriod) || max(per-c.period, c.period-per) > tolNanos(&r, c.period) {
+					t.Fatalf("gap %d: signalled %v, want a period in range within tol of %v", i, s.ev.Period, time.Duration(c.period))
+				}
+				return
+			}
+			t.Fatalf("no signal over %d gaps; %v and periods up to 301s explain every gap", len(c.gaps), time.Duration(c.period))
+		})
+	}
+}
+
+// The periodRange memo is never stale: one scratch answers interleaved
+// queries for different gaps, multiples, rules (the Detector shares its
+// scratch between rules) and pulse numbers that share a slot, always with
+// periodRange's result.
+func TestRangeMemoIsNeverStale(t *testing.T) {
+	rules := []PeriodicRule{
+		{JitterAbs: 5 * time.Second, JitterRel: 0.02},
+		{JitterAbs: 1 * time.Second, JitterRel: 0.02},
+		{JitterAbs: 5 * time.Second, JitterRel: 0.03},
+		{JitterAbs: 6 * time.Second},
+	}
+	gaps := []int64{int64(294 * time.Second), int64(300 * time.Second), int64(306 * time.Second), int64(600 * time.Second), int64(887 * time.Second)}
+	rng := rand.New(rand.NewSource(1082))
+	var sc periodicScratch
+	hits := 0
+	for i := 0; i < 200000; i++ {
+		r := &rules[rng.Intn(len(rules))]
+		g, k := gaps[rng.Intn(len(gaps))], int64(1+rng.Intn(maxMissingLimit+1))
+		pulse := uint64(rng.Intn(3 * recentGaps))
+		if sc.ranges != nil && r.JitterRel != 0 {
+			if m := sc.ranges[int(pulse%recentGaps)*(maxMissingLimit+1)+int(k-1)]; m.g == g && m.abs == int64(r.JitterAbs) && m.rel == r.JitterRel {
+				hits++
+			}
+		}
+		lo, hi := sc.memoRange(pulse, g, k, r)
+		if wlo, whi := periodRange(g, k, r); lo != wlo || hi != whi {
+			t.Fatalf("query %d: memo [%d, %d], periodRange [%d, %d] (g=%d k=%d rule %+v pulse %d)", i, lo, hi, wlo, whi, g, k, *r, pulse)
+		}
+	}
+	if hits < 1000 || hits > 199000 {
+		t.Fatalf("fixture: %d memo hits of 200000 queries; want both hits and misses", hits)
+	}
+	if len(sc.ranges) != recentGaps*(maxMissingLimit+1) {
+		t.Fatalf("memo holds %d entries, want the fixed %d", len(sc.ranges), recentGaps*(maxMissingLimit+1))
+	}
+}

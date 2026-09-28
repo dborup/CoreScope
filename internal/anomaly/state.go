@@ -15,17 +15,21 @@ type episode struct {
 	endedAt         int64
 	hot             uint32
 	version         uint32 // bumped on every change; invalidates old deadlines
-	// label and cov summarize the hot signals of the episode, so that
-	// time-driven and eviction transitions carry the same traffic label and
-	// coverage flags as the transitions that opened it.
+	// label, cov and low summarize the hot signals of the episode, so that
+	// time-driven and eviction transitions, and a reopen, carry the same
+	// traffic label, coverage flags and low confidence as the transitions
+	// that opened it.
 	label    TrafficLabel
 	labelSet bool
 	cov      CoverageFlags
+	low      bool // some hot signal came from incomplete (censored) evidence
 }
 
-// note merges one hot signal's label and coverage into the episode.
-func (ep *episode) note(l TrafficLabel, c CoverageFlags) {
+// note merges one hot signal's label, coverage and incomplete-evidence flag
+// into the episode.
+func (ep *episode) note(l TrafficLabel, c CoverageFlags, low bool) {
 	ep.cov |= c
+	ep.low = ep.low || low
 	if !ep.labelSet {
 		ep.label, ep.labelSet = l, true
 		return
@@ -41,6 +45,7 @@ type transition struct {
 	summary  *EpisodeSummary
 	label    TrafficLabel
 	cov      CoverageFlags
+	low      bool
 }
 
 func (ep *episode) summary() *EpisodeSummary {
@@ -55,7 +60,7 @@ func (ep *episode) move(to State, r Reason, at int64, out []transition, withSumm
 	if !legalTransition(ep.state, to, r) {
 		panic("anomaly: illegal state transition " + ep.state.String() + "->" + to.String() + " (" + r.String() + ")")
 	}
-	tr := transition{from: ep.state, to: to, reason: r, at: at, start: ep.start, label: ep.label, cov: ep.cov}
+	tr := transition{from: ep.state, to: to, reason: r, at: at, start: ep.start, label: ep.label, cov: ep.cov, low: ep.low}
 	if withSummary {
 		tr.summary = ep.summary()
 	}

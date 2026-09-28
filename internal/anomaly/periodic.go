@@ -99,6 +99,7 @@ func classFlags(c TrafficClass) pulseFlags {
 // buffers per key.
 type periodicScratch struct {
 	resid, med, seen, seenRef []int64
+	ranges                    []rangeMemo // see memoRange
 	// work counters (chains measured, gaps visited), for bound tests and
 	// benchmarks
 	chains, steps uint64
@@ -454,8 +455,9 @@ func seedInReach(g int64, k int, r *PeriodicRule) bool {
 // A single gap fixes P only to within tol/k. When the jitter of neighbouring
 // gaps cancels (gaps of 294s, 306s, 294s... around 300s with tol 6s) no seed
 // taken from one gap explains the next one, so no chain forms. Every period
-// in the intersection of the ranges [(g-tol)/k, (g+tol)/k] of the newest gaps
-// explains all of them. In the same pass as the chain, over the recentGaps
+// in the intersection of the ranges of the newest gaps (periodRange: the P
+// with |g - k*P| <= tol(P), each with its own tolerance) explains all of
+// them. In the same pass as the chain, over the recentGaps
 // newest gaps (the window the seeds come from) and with the multiples k the
 // seed assigns them, chainRefined intersects those ranges. If the common
 // range covers at least two gaps and more than the seed's chain, it also
@@ -496,14 +498,12 @@ func (p *periodicState) chainRefined(seed int64, r *PeriodicRule, sc *periodicSc
 		}
 		if inRange {
 			k := max((g+seed/2)/seed, 1)
-			l, h := lo, min(hi, (g+c.tol)/k)
-			if g-c.tol > 0 {
-				l = max(l, (g-c.tol+k-1)/k)
-			}
-			if k > int64(maxK) || l > h {
+			if k > int64(maxK) {
+				inRange = false
+			} else if gl, gh := sc.memoRange(p.evaluated-uint64(p.n-1-i), g, k, r); max(lo, gl) > min(hi, gh) {
 				inRange = false
 			} else {
-				lo, hi = l, h
+				lo, hi = max(lo, gl), min(hi, gh)
 				n++
 				span += g
 				slots += k
@@ -520,14 +520,83 @@ func (p *periodicState) chainRefined(seed int64, r *PeriodicRule, sc *periodicSc
 	if n < 2 || n <= c.gaps {
 		return c, seed
 	}
+	// Every period in the common range explains its n gaps with its own
+	// tolerance. ref is the phase estimate clamped into the part of that
+	// range inside [MinPeriod, MaxPeriod] (a train whose estimate lies just
+	// beyond MaxPeriod may still have periods in range that explain it).
+	// The recount keeps ref only when it explains more of the newest gaps
+	// than the seed's chain.
+	lo, hi = max(lo, int64(r.MinPeriod)), min(hi, int64(r.MaxPeriod))
+	if lo > hi {
+		return c, seed
+	}
 	ref := min(max(span/slots, lo), hi)
-	// The range uses the seed's tolerance, but the tolerance grows with the
-	// period (JitterRel): keep ref only if, with its own tolerance, it
-	// explains more of the newest gaps than the seed does.
-	if ref < int64(r.MinPeriod) || ref > int64(r.MaxPeriod) || p.recentExplained(ref, r, sc) <= c.gaps {
+	if p.recentExplained(ref, r, sc) <= c.gaps {
 		return c, seed
 	}
 	return c, ref
+}
+
+// periodRange returns the periods P that explain gap g as k periods with
+// their own tolerance, |g - k*P| <= tol(P), as [lo, hi] (empty if lo > hi).
+// Both k*P - tol(P) and k*P + tol(P) never decrease in P (see seedInReach),
+// so these P form one range: hi is the last P with k*P - tol(P) <= g, lo the
+// first with k*P + tol(P) >= g.
+//
+// Without JitterRel, tol is JitterAbs and the ends are exact integer
+// divisions. With JitterRel, the ends of the relative part, g/(k+JitterRel)
+// and g/(k-JitterRel), are estimated in floating point and then stepped to
+// the exact ends under tolNanos's truncation (a few steps at most).
+func periodRange(g, k int64, r *PeriodicRule) (lo, hi int64) {
+	abs := int64(r.JitterAbs)
+	lo, hi = max((g-abs+k-1)/k, 1), (g+abs)/k
+	if r.JitterRel == 0 {
+		return lo, hi
+	}
+	lo = max(min(lo, int64(float64(g)/(float64(k)+r.JitterRel))), 1)
+	hi = max(hi, int64(float64(g)/(float64(k)-r.JitterRel)))
+	for (hi+1)*k-tolNanos(r, hi+1) <= g {
+		hi++
+	}
+	for hi >= 1 && hi*k-tolNanos(r, hi) > g {
+		hi--
+	}
+	for lo > 1 && (lo-1)*k+tolNanos(r, lo-1) >= g {
+		lo--
+	}
+	for lo <= hi && lo*k+tolNanos(r, lo) < g {
+		lo++
+	}
+	return lo, hi
+}
+
+// rangeMemo is one cached periodRange result, with every input it depends on.
+type rangeMemo struct {
+	g, abs, lo, hi int64
+	rel            float64
+}
+
+// memoRange is periodRange for the gap ending at the key's pulse number
+// pulse. The seeds of one search mostly assign the same multiple k to the
+// same gap, and the next pulses' searches see that gap again, so with
+// JitterRel the result is cached in one slot per (pulse mod recentGaps, k):
+// at most recentGaps*(maxMissingLimit+1) entries, allocated once per
+// Detector. The slot fixes k, and an entry is used only when g, JitterAbs
+// and JitterRel match too, so it is never stale, whichever rule, key or ring
+// asks.
+func (sc *periodicScratch) memoRange(pulse uint64, g, k int64, r *PeriodicRule) (lo, hi int64) {
+	if r.JitterRel == 0 {
+		return periodRange(g, k, r) // two integer divisions: not worth a lookup
+	}
+	if sc.ranges == nil {
+		sc.ranges = make([]rangeMemo, recentGaps*(maxMissingLimit+1))
+	}
+	m := &sc.ranges[int(pulse%recentGaps)*(maxMissingLimit+1)+int(k-1)]
+	if m.g != g || m.abs != int64(r.JitterAbs) || m.rel != r.JitterRel {
+		m.lo, m.hi = periodRange(g, k, r)
+		m.g, m.abs, m.rel = g, int64(r.JitterAbs), r.JitterRel
+	}
+	return m.lo, m.hi
 }
 
 // recentExplained counts the consecutive newest gaps, at most recentGaps,

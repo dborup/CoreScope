@@ -703,7 +703,7 @@ func (d *Detector) params(tb *keyTable, slot int) (*StateParams, string, Kind) {
 func (d *Detector) hot(tb *keyTable, k *keyState, slot int, p *StateParams, ctx emitCtx) {
 	ep := &k.eps[slot]
 	d.trBuf = ep.onHot(ctx.at, p, d.trBuf[:0])
-	ep.note(ctx.label, ctx.coverage)
+	ep.note(ctx.label, ctx.coverage, ctx.ns != nil && ctx.ns.Censored)
 	d.emit(tb, k, slot, d.trBuf, ctx)
 	d.schedule(tb, k, slot, p)
 }
@@ -766,15 +766,17 @@ func (d *Detector) emit(tb *keyTable, k *keyState, slot int, trs []transition, c
 			if ctx.ns != nil {
 				ev := *ctx.ns
 				c.NewStream = &ev
-				if ev.Censored {
-					c.Confidence = ConfidenceLow
-				}
 			}
 			if ctx.per != nil {
 				ev := *ctx.per
 				ev.Alternatives = append([]PeriodAlternative(nil), ctx.per.Alternatives...)
 				c.Periodic = &ev
 			}
+		}
+		// censored evidence is never a certain new stream: its signal, and
+		// every other transition of its episode, are low confidence
+		if tr.low || ctx.ns != nil && ctx.ns.Censored {
+			c.Confidence = ConfidenceLow
 		}
 		c.Suppressed = d.cfg.Expected.Mode == ExpectedSuppress && c.Traffic == LabelExpected
 		d.push(c)
