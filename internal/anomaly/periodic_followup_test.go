@@ -265,3 +265,55 @@ func TestPeriodicInRangeSeedIsAlwaysMeasured(t *testing.T) {
 		}
 	}
 }
+
+// Relative jitter: the refinement must use the tolerance of the period it
+// refines to, not the seed's. JitterRel 2% gives tol(300s) = 6s; gaps repeat
+// 305.95s, 305.95s, 294.05s, which 300s explains within 5.95s. With the
+// seed's tolerance, the low seed's range (tol 5.881s) is empty, and the high
+// seed's range (tol 6.119s) reaches 300.169s, which misses the 294.05s gaps
+// with its own tolerance, so no seed refined to a period that explains the
+// train and it was never detected.
+func TestPeriodicRelativeJitterRefinesWithTheCandidateTolerance(t *testing.T) {
+	rule := experimentalPeriodic()
+	rule.JitterAbs, rule.JitterRel, rule.MaxJitterFraction = 0, 0.02, 1
+	cfg := Config{Limits: experimentalLimits(), Expected: ExpectedPolicy{Mode: ExpectedInclude}, Periodic: []PeriodicRule{rule}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	hi, lo := 305950*time.Millisecond, 294050*time.Millisecond
+	offs := []time.Duration{0}
+	for i := 1; i < 32; i++ {
+		g := hi
+		if i%3 == 0 {
+			g = lo
+		}
+		offs = append(offs, offs[i-1]+g)
+	}
+	p := ringOf(&rule, offs...)
+	p.evaluated = uint64(len(offs))
+	var sc periodicScratch
+	ideal := p.chainFor(int64(300*time.Second), &rule, &sc)
+	if ideal.gaps != len(offs)-1 || !ideal.meets(&rule) || p.chance(ideal, &rule) > rule.MaxChance {
+		t.Fatalf("invalid repro: ideal=%+v chance=%g", ideal, p.chance(ideal, &rule))
+	}
+
+	var events []Event
+	for i, o := range offs {
+		events = append(events, relayEvent(t, fmt.Sprintf("rel-%02d", i), at(o), 1, 2))
+	}
+	a := filter(run(t, newDet(t, cfg), events), rule.Name, StateActive)
+	if len(a) == 0 {
+		t.Fatal("train with gaps 305.95s, 305.95s, 294.05s was not detected; 300s explains every gap with JitterRel 2%")
+	}
+	ev := a[0].Periodic
+	if ev == nil {
+		t.Fatal("activation without periodic evidence")
+	}
+	// the detected period explains every gap of the chain with its own
+	// tolerance, and is within that tolerance of 300s
+	c := p.chainFor(int64(ev.Period), &rule, &sc)
+	if c.gaps < int(ev.Support)-1 || ev.Tolerance != time.Duration(tolNanos(&rule, int64(ev.Period))) ||
+		(ev.Period-300*time.Second).Abs() > ev.Tolerance {
+		t.Fatalf("detected %v (tolerance %v, support %d), whose chain explains %d gaps", ev.Period, ev.Tolerance, ev.Support, c.gaps)
+	}
+}
