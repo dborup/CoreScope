@@ -1336,12 +1336,20 @@ Messages for a specific channel.
       "repeats":          number,           // dedup count
       "observers":        [string],         // observer names
       "hops":             number,
-      "snr":              number | null
+      "snr":              number | null,
+      "observedPathHashSizes": [number]     // sorted unique relayed path widths (1–3)
     }
   ],
   "total": number                           // total deduplicated messages
 }
 ```
+
+`observedPathHashSizes` aggregates evidence from the message's observations.
+It contains only hash widths encoded by non-empty relayed wire paths. Direct
+zero-hop copies provide no hash-size evidence and do not add a value. More than
+one value means different widths were observed for the same deduplicated
+message; the field describes those observations, not the sender's permanent
+configuration.
 
 ---
 
@@ -2336,6 +2344,7 @@ Broadcast on every new packet ingestion.
 | `data.packet`             |         | ✓          |        |             |
 | `data.observation_count`  |         | ✓          |        |             |
 | `data.path_json`          | ✓       |            |        |             |
+| `data.observed_path_hash_sizes` |       |            |        | ✓           |
 | (any)                     |         |            | ✓ (*)  |             |
 
 (*) `app.js` passes all messages to registered `wsListeners` and uses them only for cache invalidation.
@@ -2379,6 +2388,7 @@ A transmission/packet as stored in memory and returned by most endpoints:
   "snr":               number | null,
   "rssi":              number | null,
   "path_json":         string | null,       // JSON-stringified hop array
+  "observed_path_hash_sizes": [number] | undefined, // sorted unique relayed path widths (1–3)
   "direction":         string | null,
   "score":             number | null,
   "observations":      [Observation] | undefined  // stripped by default on list endpoints
