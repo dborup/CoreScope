@@ -243,7 +243,35 @@ func TestPeriodicEvidenceJSONIsCanonical(t *testing.T) {
 // unchanged; only the documented Chance values changed: rounded to
 // ChanceDigits, then multiplied by 97/49 (searchCells of the fixture rule)
 // when the union bound began to charge the refined candidates.
+//
+// Since then one documented field changed as well: the censored new-stream
+// episode below keeps ConfidenceLow on its quiet end (it was route_observed,
+// losing the confidence the episode opened with). The test maps that one
+// field back before hashing, so the hash is unchanged and any other change
+// to the golden still fails.
 const goldenWithoutChance = "2538014b83e1976a614da59c3db2eeb8d403ba76de63f3f58d55aad221eaf959"
+
+const censoredQuietEndEpisode = "7771b1680b2f2d77043ed1601a6e2dbb"
+
+// unlowerCensoredQuietEnd checks that the one documented confidence change is
+// in the golden and restores the value the hash was taken with.
+func unlowerCensoredQuietEnd(t *testing.T, v interface{}) {
+	t.Helper()
+	found := 0
+	for _, x := range v.(map[string]interface{})["Candidates"].([]interface{}) {
+		c := x.(map[string]interface{})
+		if c["EventID"] == censoredQuietEndEpisode && c["Reason"] == "quiet" {
+			if c["Confidence"] != "low" {
+				t.Fatalf("episode %s ends with confidence %v, want low", censoredQuietEndEpisode, c["Confidence"])
+			}
+			c["Confidence"] = "route_observed"
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("%d quiet ends of episode %s in the golden, want 1", found, censoredQuietEndEpisode)
+	}
+}
 
 func stripChance(v interface{}) interface{} {
 	switch x := v.(type) {
@@ -299,7 +327,9 @@ func TestGoldenChangedOnlyInTheDocumentedChanceValues(t *testing.T) {
 	if len(chances) != 4 || n["9.09399e-8"] != 2 || n["0.000478992"] != 2 {
 		t.Fatalf("golden Chance values %v, want 9.09399e-8 x2 and 0.000478992 x2", chances)
 	}
-	b, err := json.Marshal(stripChance(decode()))
+	v := stripChance(decode())
+	unlowerCensoredQuietEnd(t, v)
+	b, err := json.Marshal(v)
 	if err != nil {
 		t.Fatal(err)
 	}

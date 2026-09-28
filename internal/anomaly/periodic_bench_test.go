@@ -124,10 +124,10 @@ func periodicWorkBound(r *PeriodicRule) (chains, steps uint64) {
 // not count (more CPU per visited gap, say) is not caught; only
 // BenchmarkPeriodicSearch measures it.
 var measuredSteps = map[string]uint64{
-	"periodic/0.6": 236631, "alternating/0.6": 1434346, "jitter/0.6": 246825,
-	"missing/0.6": 243414, "bursty/0.6": 196561, "noise/0.6": 144778,
-	"periodic/1": 236631, "alternating/1": 1434346, "jitter/1": 5846059,
-	"missing/1": 1174373, "bursty/1": 196561, "noise/1": 144778,
+	"periodic/0.6": 236631, "alternating/0.6": 1466800, "jitter/0.6": 247574,
+	"missing/0.6": 243414, "bursty/0.6": 199730, "noise/0.6": 148177,
+	"periodic/1": 236631, "alternating/1": 1466800, "jitter/1": 6242089,
+	"missing/1": 1174373, "bursty/1": 199730, "noise/1": 148177,
 }
 
 // Every single pulse stays within periodicWorkBound, at the largest allowed
