@@ -116,28 +116,50 @@ func periodicWorkBound(r *PeriodicRule) (chains, steps uint64) {
 	return chains, chains*uint64(r.HistoryLen-1) + seeds*recentGaps
 }
 
-// measuredSteps is the total number of gaps visited by the search over the
-// deterministic runs of TestPeriodicSearchWorkIsBounded (4*maxHistoryLen
-// pulses per shape). The test allows 25% above it, so a change that makes
-// the search visit markedly more chains or gaps fails here even though it
-// stays within the loose analytic periodicWorkBound. Work these counters do
-// not count (more CPU per visited gap, say) is not caught; only
-// BenchmarkPeriodicSearch measures it.
-var measuredSteps = map[string]uint64{
-	"periodic/0.6": 236631, "alternating/0.6": 1466800, "jitter/0.6": 247574,
-	"missing/0.6": 243414, "bursty/0.6": 199730, "noise/0.6": 148177,
-	"periodic/1": 236631, "alternating/1": 1466800, "jitter/1": 6242089,
-	"missing/1": 1174373, "bursty/1": 199730, "noise/1": 148177,
+// workGuardRules are the rules TestPeriodicSearchWorkIsBounded runs: the
+// fixture rule of BenchmarkPeriodicSearch's "fixture/..." cases, and the
+// largest allowed ring and MaxMissing ("max"), also where no chain ever meets
+// the criteria ("worst").
+var workGuardRules = []struct {
+	name string
+	rule PeriodicRule
+}{
+	{"fixture", experimentalPeriodic()},
+	{"max", maxPeriodicRule()},
+	{"worst", worstPeriodicRule()},
 }
 
-// Every single pulse stays within periodicWorkBound, at the largest allowed
-// ring and MaxMissing, for every traffic shape, including the configuration
-// where no chain ever meets the criteria and the search runs on every pulse;
-// and the total work stays within 25% of measuredSteps.
+// measuredSteps is the total number of gaps visited by the search over the
+// deterministic runs of TestPeriodicSearchWorkIsBounded (4*maxHistoryLen
+// pulses per rule and shape). The test allows 25% either way. More means the
+// search visits markedly more chains or gaps, even though it may stay within
+// the loose analytic periodicWorkBound. Less means it visits markedly fewer:
+// lost search coverage (a range or seed dropped too early, say), unless it
+// is a deliberate optimization, which then updates these values.
+//
+// The counters count visited gaps only. Work per visited gap is not caught:
+// removing the periodRange memo, for example, leaves every count unchanged
+// (TestRangeMemoIsNeverStale covers the memo), and only
+// BenchmarkPeriodicSearch measures the CPU.
+var measuredSteps = map[string]uint64{
+	"fixture/periodic": 33289, "fixture/alternating": 104271, "fixture/jitter": 54979,
+	"fixture/missing": 34850, "fixture/bursty": 82025, "fixture/noise": 67588,
+	"max/periodic": 236631, "max/alternating": 1466835, "max/jitter": 247953,
+	"max/missing": 243414, "max/bursty": 199882, "max/noise": 147811,
+	"worst/periodic": 236631, "worst/alternating": 1466835, "worst/jitter": 6434483,
+	"worst/missing": 1174373, "worst/bursty": 199882, "worst/noise": 147811,
+}
+
+// Every single pulse stays within periodicWorkBound, for every guard rule and
+// traffic shape, including the configuration where no chain ever meets the
+// criteria and the search runs on every pulse; and the total work stays
+// within 25% of measuredSteps, either way.
 func TestPeriodicSearchWorkIsBounded(t *testing.T) {
-	for _, r := range []PeriodicRule{maxPeriodicRule(), worstPeriodicRule()} {
+	for _, g := range workGuardRules {
+		r := g.rule
 		maxChains, maxSteps := periodicWorkBound(&r)
 		for _, shape := range benchShapes {
+			key := g.name + "/" + shape
 			f := newPulseFeeder([]PeriodicRule{r}, shape)
 			var peakC, peakS uint64
 			for i := 0; i < 4*maxHistoryLen; i++ {
@@ -145,17 +167,20 @@ func TestPeriodicSearchWorkIsBounded(t *testing.T) {
 				f.feed(1)
 				dc, ds := f.sc.chains-c0, f.sc.steps-s0
 				if dc > maxChains || ds > maxSteps {
-					t.Fatalf("%s MinCoverage=%g: pulse %d did %d chains and %d steps, bound %d and %d",
-						shape, r.MinCoverage, i, dc, ds, maxChains, maxSteps)
+					t.Fatalf("%s: pulse %d did %d chains and %d steps, bound %d and %d", key, i, dc, ds, maxChains, maxSteps)
 				}
 				peakC, peakS = max(peakC, dc), max(peakS, ds)
 			}
-			key := fmt.Sprintf("%s/%g", shape, r.MinCoverage)
-			if m, ok := measuredSteps[key]; !ok || f.sc.steps > m+m/4 {
-				t.Errorf("%s: %d steps in total, measured %d (+25%% allowed)", key, f.sc.steps, m)
+			switch m, ok := measuredSteps[key]; {
+			case !ok:
+				t.Errorf("%s: %d steps in total, no measuredSteps entry", key, f.sc.steps)
+			case f.sc.steps > m+m/4:
+				t.Errorf("%s: %d steps in total, more than measured %d +25%%: the search does markedly more work", key, f.sc.steps, m)
+			case f.sc.steps < m-m/4:
+				t.Errorf("%s: %d steps in total, less than measured %d -25%%: the search visits markedly fewer gaps, which means lost search coverage; if this is a deliberate optimization, update measuredSteps", key, f.sc.steps, m)
 			}
-			t.Logf("%-11s MinCoverage=%g: peak %d chains (bound %d), %d steps (bound %d), total %d steps",
-				shape, r.MinCoverage, peakC, maxChains, peakS, maxSteps, f.sc.steps)
+			t.Logf("%-19s peak %d chains (bound %d), %d steps (bound %d), total %d steps",
+				key, peakC, maxChains, peakS, maxSteps, f.sc.steps)
 		}
 	}
 }
