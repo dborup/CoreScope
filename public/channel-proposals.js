@@ -44,9 +44,12 @@
   // therefore what strings.TrimSpace trims), enumerated from the Go standard
   // library rather than guessed — not the same set as JS's native
   // String.prototype.trim(), which also strips U+FEFF (BOM) and does not
-  // strip U+0085 (NEL). internal/channelregistry/name_test.go re-enumerates
-  // the same rune range with unicode.IsSpace and pins it to this same list,
-  // so a change on either side fails a test. Regenerate with:
+  // strip U+0085 (NEL). internal/channelregistry/name_test.go
+  // (TestGoSpaceCodepointsParity) independently re-enumerates the same rune
+  // range with unicode.IsSpace against the same fixed list. The Go test
+  // catches a change in Go's own Unicode White_Space table; this JS list
+  // only catches drift from its own JS-side test copy. The two lists are
+  // kept in sync by hand — update both together. Regenerate with:
   //   for r := rune(0); r <= 0x10FFFF; r++ { if unicode.IsSpace(r) { ... } }
   var GO_SPACE_CODEPOINTS = [
     0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0,

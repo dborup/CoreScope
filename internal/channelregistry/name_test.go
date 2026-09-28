@@ -141,8 +141,11 @@ func TestNormalizeNameTrimsTrailingLineSeparator(t *testing.T) {
 // list, GO_SPACE_CODEPOINTS, to trim leading/trailing whitespace the same
 // way the server does (#99 follow-up: the frontend previously used JS's
 // native String.prototype.trim(), which disagrees with TrimSpace on U+FEFF
-// and U+0085). If the Go standard library's White_Space table ever changes,
-// or the JS list drifts from this one, this test fails — regenerate the want
+// and U+0085). This test only catches a change in Go's own Unicode
+// White_Space table against the want slice below; it cannot see the JS
+// list, so JS-side drift is caught only by the matching test in
+// test-channel-proposals.js. The two lists are kept in sync by hand —
+// update both together. If the Go stdlib table changes, regenerate the want
 // slice (and the JS copy) with:
 //
 //	for r := rune(0); r <= 0x10FFFF; r++ { if unicode.IsSpace(r) { fmt.Printf("0x%04X, ", r) } }

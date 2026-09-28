@@ -619,16 +619,19 @@ test('normalizeName keeps emoji with ZWJ and variation selectors', () => {
   }
 });
 
-// \u2500\u2500 Trim parity with internal/channelregistry.NormalizeName (#99 follow-up) \u2500\u2500
+// ── Trim parity with internal/channelregistry.NormalizeName (#99 follow-up) ──
 // JS's native String.prototype.trim() and Go's strings.TrimSpace do not agree
 // on which runes are whitespace: trim() also strips U+FEFF (BOM), and does
-// not strip U+0085 (NEL) \u2014 TrimSpace is the other way around. normalizeName
+// not strip U+0085 (NEL) — TrimSpace is the other way around. normalizeName
 // must trim exactly what the server trims, so the two sides reject/accept
-// the same inputs. The pinned list below is re-enumerated independently in
-// internal/channelregistry/name_test.go (TestGoSpaceCodepointsParity) via
-// unicode.IsSpace over the full rune range, so a drift on either side (a Go
-// stdlib Unicode table update, or an edit to one list but not the other)
-// fails a test.
+// the same inputs. The pinned list below matches the one independently
+// enumerated in internal/channelregistry/name_test.go
+// (TestGoSpaceCodepointsParity) via unicode.IsSpace over the full rune
+// range. The Go test catches a change in Go's own Unicode White_Space
+// table; this JS constant only catches a change to this list itself
+// (assert.deepStrictEqual below just checks it still matches the runtime
+// GO_SPACE_CODEPOINTS shipped in channel-proposals.js). The two lists are
+// kept in sync by hand — update both together.
 const GO_SPACE_CODEPOINTS = [
   0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0,
   0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
