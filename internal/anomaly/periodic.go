@@ -321,7 +321,7 @@ func (p *periodicState) evaluate(now int64, r *PeriodicRule, sc *periodicScratch
 		p.alts = p.alternatives(best, r, sc)
 	}
 	// traffic label and burst sizes over the chain's pulses
-	var total, exp, mon uint64
+	var total, exp, anyExp, mon uint64
 	events := 0
 	for i := p.n - 1 - best.gaps; i < p.n; i++ {
 		fl := p.flagAt(i)
@@ -329,10 +329,18 @@ func (p *periodicState) evaluate(now int64, r *PeriodicRule, sc *periodicScratch
 		if fl&pulseAllExpected != 0 {
 			exp++
 		}
+		if fl&pulseAnyExpected != 0 {
+			anyExp++
+		}
 		if fl&pulseAnyMonitored != 0 {
 			mon++
 		}
 		events += int(p.countAt(i))
+	}
+	label := labelFromCounts(total, exp, mon)
+	if label == LabelUnclassified && anyExp > 0 {
+		// a burst merged expected and unclassified events
+		label = LabelMixed
 	}
 	ev := PeriodicEvidence{
 		Period:       time.Duration(best.period),
@@ -345,7 +353,7 @@ func (p *periodicState) evaluate(now int64, r *PeriodicRule, sc *periodicScratch
 		SufficientAt: time.Unix(0, p.sufficientAt).UTC(),
 		Alternatives: append([]PeriodAlternative(nil), p.alts...),
 	}
-	return periodicSignal{ev: ev, label: labelFromCounts(total, exp, mon)}, true
+	return periodicSignal{ev: ev, label: label}, true
 }
 
 // estimate searches candidate periods derived from recent gaps.
@@ -364,21 +372,24 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 	// strictly outranks it. So the search never returns a chain the seeds
 	// alone would rank higher, and until a refined period would signal it
 	// changes nothing.
+	//
+	// A seed outside [MinPeriod, MaxPeriod] is measured only for its
+	// refinement (see seedInReach); it is never the estimate itself.
 	var bestRef chainInfo
 	seen, seenRef := sc.seen[:0], sc.seenRef[:0]
 	for i := p.n - 1; i >= 1 && i >= p.n-recentGaps; i-- {
 		g := p.at(i) - p.at(i-1)
 		for k := 1; k <= maxK; k++ {
-			cand := g / int64(k)
-			if cand < minP || cand > maxP {
+			if !seedInReach(g, k, r) {
 				continue
 			}
+			cand := g / int64(k)
 			if slices.Contains(seen, cand) {
 				continue
 			}
 			seen = append(seen, cand)
 			c, ref := p.chainRefined(cand, r, sc)
-			if c.gaps > 0 && (best.gaps == 0 || c.preferred(best, r)) {
+			if cand >= minP && cand <= maxP && c.gaps > 0 && (best.gaps == 0 || c.preferred(best, r)) {
 				best = c
 			}
 			if ref != cand && !slices.Contains(seenRef, ref) && !slices.Contains(seen, ref) {
@@ -414,6 +425,23 @@ func (p *periodicState) estimate(r *PeriodicRule, sc *periodicScratch) chainInfo
 		best = bestRef
 	}
 	return best
+}
+
+// seedInReach reports whether the seed g/k is worth measuring: whether some
+// period P in [MinPeriod, MaxPeriod] may explain gap g as k periods
+// (|g - k*P| <= tol(P)). A seed outside the range can still be refined into
+// it by chainRefined: gaps of 294s, 306s... with tol 6s and range
+// [299s, 301s] give only out-of-range seeds, which refine to 300s.
+//
+// The P nearest g/k are the range ends, and k*P - tol(P) never decreases in
+// P (tol grows by at most JitterRel*dP, JitterRel <= 0.25 < k), so such a P
+// exists only if k*MinPeriod - tol(MinPeriod) <= g <= k*MaxPeriod +
+// tol(MaxPeriod). It admits at most one seed per gap and k, so there are
+// still at most recentGaps*(MaxMissing+1) seeds, as searchCells charges and
+// periodicWorkBound counts.
+func seedInReach(g int64, k int, r *PeriodicRule) bool {
+	minP, maxP := int64(r.MinPeriod), int64(r.MaxPeriod)
+	return g >= int64(k)*minP-tolNanos(r, minP) && g <= int64(k)*maxP+tolNanos(r, maxP)
 }
 
 // chainRefined measures seed's chain exactly as chainFor does and returns it

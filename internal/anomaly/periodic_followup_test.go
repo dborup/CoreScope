@@ -2,6 +2,8 @@ package anomaly
 
 import (
 	"fmt"
+	"math/rand"
+	"slices"
 	"testing"
 	"time"
 )
@@ -111,5 +113,81 @@ func TestPeriodicBurstTrafficLabel(t *testing.T) {
 				t.Fatalf("traffic label %v, want %v", a.Traffic, c.want)
 			}
 		})
+	}
+}
+
+// seedInReach keeps every seed g/k for which some period in range explains g
+// as k periods with its own tolerance, under absolute and relative jitter,
+// and its bounds are tight.
+func TestSeedInReachKeepsEverySeedAPeriodInRangeExplains(t *testing.T) {
+	rng := rand.New(rand.NewSource(94))
+	checked := 0
+	for trial := 0; trial < 20000; trial++ {
+		r := experimentalPeriodic()
+		r.MinPeriod = time.Duration(30+rng.Intn(7200)) * time.Second
+		r.MaxPeriod = r.MinPeriod + time.Duration(1+rng.Int63n(int64(2*r.MinPeriod)))
+		r.JitterAbs, r.JitterRel = 0, 0
+		switch trial % 3 {
+		case 0:
+			r.JitterAbs = time.Duration(1 + rng.Int63n(int64(r.MinPeriod/4)))
+		case 1:
+			r.JitterRel = 0.25 * (1 - rng.Float64())
+		default:
+			r.JitterAbs, r.JitterRel = time.Duration(1+rng.Int63n(int64(r.MinPeriod/8))), 0.25*rng.Float64()
+		}
+		minP, maxP := int64(r.MinPeriod), int64(r.MaxPeriod)
+		k := 1 + rng.Intn(maxMissingLimit+1)
+		// periods and residuals at the edges are where a bound that is off
+		// (or uses the wrong period's tolerance) drops a seed
+		per := []int64{minP, maxP, minP + rng.Int63n(maxP-minP+1)}[rng.Intn(3)]
+		tol := tolNanos(&r, per)
+		g := []int64{int64(k)*per - tol, int64(k)*per + tol, int64(k)*per - tol + rng.Int63n(2*tol+1)}[rng.Intn(3)]
+		if kk, _ := explain(g, per, tol, k); kk != k {
+			continue // tol >= per/2: another k explains g
+		}
+		checked++
+		if !seedInReach(g, k, &r) {
+			t.Fatalf("trial %d: %v explains gap %v as %d periods (tol %v), but the seed is dropped; rule %v..%v abs %v rel %g",
+				trial, time.Duration(per), time.Duration(g), k, time.Duration(tol), r.MinPeriod, r.MaxPeriod, r.JitterAbs, r.JitterRel)
+		}
+		lo, hi := int64(k)*minP-tolNanos(&r, minP), int64(k)*maxP+tolNanos(&r, maxP)
+		if !seedInReach(lo, k, &r) || !seedInReach(hi, k, &r) || seedInReach(lo-1, k, &r) || seedInReach(hi+1, k, &r) {
+			t.Fatalf("trial %d: reach of k=%d is not exactly [%v, %v]", trial, k, time.Duration(lo), time.Duration(hi))
+		}
+	}
+	if checked < 19000 {
+		t.Fatalf("only %d of 20000 trials checked", checked)
+	}
+}
+
+// A seed outside the range is measured for its refinement but never
+// reported: a steady 294s or 306s train is measured (its seed is in the
+// seed pool) and never yields a period outside [299s, 301s].
+func TestPeriodicOutOfRangeSeedIsNeverReported(t *testing.T) {
+	rule := experimentalPeriodic()
+	rule.MinPeriod, rule.MaxPeriod = 299*time.Second, 301*time.Second
+	rule.JitterAbs, rule.JitterRel, rule.MaxJitterFraction = 6*time.Second, 0, 1
+	cfg := Config{Limits: experimentalLimits(), Expected: ExpectedPolicy{Mode: ExpectedInclude}, Periodic: []PeriodicRule{rule}}
+	for _, step := range []time.Duration{294 * time.Second, 306 * time.Second} {
+		offs := make([]time.Duration, 32)
+		for i := range offs {
+			offs[i] = time.Duration(i) * step
+		}
+		p := ringOf(&rule, offs...)
+		p.evaluated = uint64(len(offs))
+		var sc periodicScratch
+		est := p.estimate(&rule, &sc)
+		if !slices.Contains(sc.seen, int64(step)) {
+			t.Fatalf("%v: fixture: the out-of-range seed was not measured (seeds %v)", step, sc.seen)
+		}
+		if est.gaps > 0 && (est.period < int64(rule.MinPeriod) || est.period > int64(rule.MaxPeriod)) {
+			t.Fatalf("%v: estimate %v is outside the range", step, time.Duration(est.period))
+		}
+		evs := series(t, "steady", t0, len(offs), step, nil, 1, 2)
+		for _, c := range run(t, newDet(t, cfg), evs) {
+			if c.Periodic != nil && (c.Periodic.Period < rule.MinPeriod || c.Periodic.Period > rule.MaxPeriod) {
+				t.Fatalf("%v: reported period %v outside [%v, %v]", step, c.Periodic.Period, rule.MinPeriod, rule.MaxPeriod)
+			}
+		}
 	}
 }
