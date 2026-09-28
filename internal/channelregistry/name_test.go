@@ -2,8 +2,10 @@ package channelregistry
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func TestNormalizeNameAcceptsAndPreservesCase(t *testing.T) {
@@ -130,6 +132,59 @@ func TestNormalizeNameRejectsInvisibleFormatCharacters(t *testing.T) {
 func TestNormalizeNameTrimsTrailingLineSeparator(t *testing.T) {
 	if got, err := NormalizeName("#ab\u2028"); err != nil || got != "#ab" {
 		t.Fatalf("NormalizeName(trailing U+2028) = %q, %v; want \"#ab\"", got, err)
+	}
+}
+
+// TestGoSpaceCodepointsParity pins the exact set of runes unicode.IsSpace
+// (and therefore strings.TrimSpace, which NormalizeName uses) treats as
+// whitespace. public/channel-proposals.js keeps its own copy of this same
+// list, GO_SPACE_CODEPOINTS, to trim leading/trailing whitespace the same
+// way the server does (#99 follow-up: the frontend previously used JS's
+// native String.prototype.trim(), which disagrees with TrimSpace on U+FEFF
+// and U+0085). If the Go standard library's White_Space table ever changes,
+// or the JS list drifts from this one, this test fails — regenerate the want
+// slice (and the JS copy) with:
+//
+//	for r := rune(0); r <= 0x10FFFF; r++ { if unicode.IsSpace(r) { fmt.Printf("0x%04X, ", r) } }
+func TestGoSpaceCodepointsParity(t *testing.T) {
+	want := []rune{
+		0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0,
+		0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+		0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+	}
+	var got []rune
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if unicode.IsSpace(r) {
+			got = append(got, r)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unicode.IsSpace enumeration changed:\n got  = %#v\n want = %#v\nupdate this test AND GO_SPACE_CODEPOINTS in public/channel-proposals.js together", got, want)
+	}
+}
+
+func TestNormalizeNameTrimsU0085LikeGoTrimSpace(t *testing.T) {
+	// U+0085 (NEL) is unicode.IsSpace but not JS's native trim() set; make
+	// sure the Go side (the authority) does trim and accept it, matching the
+	// new JS behavior added for parity.
+	for _, in := range []string{"test\u0085", "\u0085test", "\u0085test\u0085"} {
+		got, err := NormalizeName(in)
+		if err != nil || got != "#test" {
+			t.Errorf("NormalizeName(%q) = %q, %v; want \"#test\", nil", in, got, err)
+		}
+	}
+}
+
+func TestNormalizeNameRejectsLeadingTrailingFEFF(t *testing.T) {
+	// U+FEFF (BOM/ZWNBSP) is JS's native trim() set but not unicode.IsSpace;
+	// TrimSpace leaves it in place, so it hits the invisible-format check.
+	// Built with string(rune(0xFEFF)) rather than a source-code escape so the
+	// byte order mark can't end up as literal source bytes.
+	bom := string(rune(0xFEFF))
+	for _, in := range []string{bom + "test", "test" + bom, bom + bom + "test" + bom} {
+		if _, err := NormalizeName(in); !errors.Is(err, ErrNameInvisible) {
+			t.Errorf("NormalizeName(%q) error = %v; want ErrNameInvisible", in, err)
+		}
 	}
 }
 
