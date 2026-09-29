@@ -59,6 +59,7 @@ node test-issue-1883-redirect-history.js
 node test-issue-1890-og-url.js
 node test-traces.js
 node test-live-multibyte-filter.js
+node test-issue-125-live-toggles-wiring.js
 node test-issue-2052-touch-target-css.js
 node test-channel-proposals.js
 node test-packet-detail-channel-xss.js
