@@ -96,7 +96,40 @@ func (s *PacketStore) OnChunkLoaded(fn func(rowsThisChunk, totalRows int)) {
 func (s *PacketStore) chunkedLoadInit() {
 	s.chunkInitOnce.Do(func() {
 		s.firstChunkReady = make(chan struct{})
+		s.startupLoadDone = make(chan struct{})
 	})
+}
+
+// StartupLoadDone returns a channel closed once RunStartupLoad has
+// returned (#116): LoadChunked AND the background fill loader have
+// terminated, whether they succeeded or not, so nothing more is loaded
+// from SQLite at start-up. LoadComplete() is not a substitute: it flips at
+// the end of the hot window, before the background fill starts. Nor is
+// backgroundLoadDone, which stays false on a failed fill (health
+// semantics, #1690) -- a failure must still wake the recomputers.
+func (s *PacketStore) StartupLoadDone() <-chan struct{} {
+	s.chunkedLoadInit()
+	return s.startupLoadDone
+}
+
+// signalStartupLoadDone closes StartupLoadDone exactly once. Before
+// closing it drops what was computed from the partial store and is read
+// by the post-load recomputes or later requests: the hash-size info cache
+// (15 s TTL), the clock-skew recompute throttle (30 s) and the
+// region/window analytics TTL caches.
+func (s *PacketStore) signalStartupLoadDone() {
+	s.chunkedLoadInit()
+	if !s.startupLoadSignaled.CompareAndSwap(false, true) {
+		return
+	}
+	s.hashSizeInfoMu.Lock()
+	s.hashSizeInfoCache = nil
+	s.hashSizeInfoMu.Unlock()
+	if s.clockSkew != nil {
+		s.clockSkew.Invalidate()
+	}
+	s.invalidateCachesFor(cacheInvalidation{eviction: true})
+	close(s.startupLoadDone)
 }
 
 func (s *PacketStore) signalFirstChunk() {
@@ -162,6 +195,7 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 //   - hotStartupHours > 0 success: terminal state is whatever
 //     loadBackgroundChunks set (done=true on full coverage,
 //     failed=true on partial / chunk errors — see #1690).
+//   - on every path: StartupLoadDone() is closed (#116).
 //
 // Issue #1809 root cause: previously main.go spawned loadBackgroundChunks
 // at FirstChunkReady while LoadChunked was still merging the remainder
@@ -172,6 +206,8 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 // parallelism while ensuring oldestLoaded has a valid floor when the
 // bg loader starts.
 func (s *PacketStore) RunStartupLoad(chunkSize int) error {
+	// #116: runs last (deferred first), on every return path.
+	defer s.signalStartupLoadDone()
 	// #89: once this returns, on every path (including a failed or partial
 	// background fill), nothing more is loaded at start-up; parked
 	// route_mask changes for transmissions still missing can be dropped.

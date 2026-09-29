@@ -509,6 +509,12 @@ type PacketStore struct {
 	chunkInitOnce      sync.Once
 	firstChunkReady    chan struct{}
 	firstChunkSignaled atomic.Bool
+	// startupLoadDone is closed once RunStartupLoad returns, on every
+	// path: hot window AND background fill have terminated, successfully
+	// or not (#116). Separate from backgroundLoadDone, which also means
+	// "coverage reached" for health reporting. See StartupLoadDone.
+	startupLoadDone     chan struct{}
+	startupLoadSignaled atomic.Bool
 	loadComplete       atomic.Bool
 	loadProgressRows   atomic.Int64
 	chunkCBMu          sync.Mutex
@@ -4698,6 +4704,20 @@ func (s *PacketStore) TriggerDistanceIndexBuild() {
 		s.buildDistanceIndex()
 		obsAtBuild := s.totalObs
 		s.mu.Unlock()
+
+		// #116: the distance snapshot (and any region/area result) was
+		// computed from the index as it was before this build. Refresh
+		// before reporting the index built, so the handler never goes
+		// from 202 to serving that older snapshot for up to an interval.
+		s.cacheMu.Lock()
+		s.distCache = make(map[string]*cachedResult)
+		s.cacheMu.Unlock()
+		s.analyticsRecomputerMu.RLock()
+		rc := s.recompDistance
+		s.analyticsRecomputerMu.RUnlock()
+		if rc != nil {
+			rc.RecomputeNow()
+		}
 
 		s.distLazyMu.Lock()
 		s.distLazyBuilding = false
