@@ -18,11 +18,15 @@ import (
 // The guard parses this package's non-test sources and walks every function
 // that uses distLazyMu statement by statement, tracking whether distLazyMu
 // may be held (the union over branches). While it may be held, it rejects a
-// .mu.Lock() / .mu.RLock() call and a call to any PacketStore method that
-// takes s.mu, directly or through other PacketStore methods on the same
-// receiver. Calls in go statements and function literals are not inherited:
-// they run on another goroutine or later. Function literals are checked as
-// functions of their own.
+// .mu.Lock() / .mu.RLock() call and a call x.m() on a plain identifier x
+// where m is a PacketStore method that takes s.mu, directly or through other
+// PacketStore methods on the same receiver (a method of a field, such as
+// s.distDataGen.Load(), is not one). The same applies to a call deferred
+// after defer distLazyMu.Unlock(), which runs before that unlock. Calls in
+// go statements and function literals are not inherited: they run on another
+// goroutine or later. Function literals are checked as functions of their
+// own. Not seen: s.mu taken inside a function literal that a distLazyMu
+// holder calls, by a package-level function, or through a method value.
 func TestDistLazyMuNeverHeldWhileTakingStoreMu(t *testing.T) {
 	names, err := filepath.Glob("*.go")
 	if err != nil {
@@ -122,6 +126,35 @@ func (s *PacketStore) okOtherOrder() {
 	s.distLazyMu.Unlock()
 	s.mu.Unlock()
 }
+func (s *PacketStore) Load() {
+	s.mu.Lock()
+	s.mu.Unlock()
+}
+func (s *PacketStore) viaNamesake() {
+	s.distLazyMu.Lock()
+	s.Load()
+	s.distLazyMu.Unlock()
+}
+func (s *PacketStore) viaDeferAfterUnlockDefer() {
+	s.distLazyMu.Lock()
+	defer s.distLazyMu.Unlock()
+	defer s.reads()
+}
+func (s *PacketStore) okDeferBeforeUnlockDefer() {
+	defer s.reads()
+	s.distLazyMu.Lock()
+	defer s.distLazyMu.Unlock()
+}
+func (s *PacketStore) okDeferThenExplicitUnlock() {
+	s.distLazyMu.Lock()
+	defer s.reads()
+	s.distLazyMu.Unlock()
+}
+func (s *PacketStore) okFieldMethod() {
+	s.distLazyMu.Lock()
+	_ = s.distDataGen.Load()
+	s.distLazyMu.Unlock()
+}
 func (s *PacketStore) loopHeldAcrossIterations() {
 	for i := 0; i < 2; i++ {
 		s.mu.RLock()
@@ -144,6 +177,8 @@ func (s *PacketStore) loopHeldAcrossIterations() {
 	want := map[string]int{
 		"direct": 1, "viaMethod": 1, "reads": 0, "okEarlyReturn": 0,
 		"okGoroutine": 0, "okOtherOrder": 0, "loopHeldAcrossIterations": 1,
+		"Load": 0, "viaNamesake": 1, "okFieldMethod": 0,
+		"viaDeferAfterUnlockDefer": 1, "okDeferBeforeUnlockDefer": 0, "okDeferThenExplicitUnlock": 0,
 	}
 	for name, n := range want {
 		if got[name] != n {
@@ -291,6 +326,9 @@ type lockOrderWalker struct {
 	// branchHeld collects the state at break/continue/goto, which leave
 	// the enclosing statement list; loops and switches merge it.
 	branchHeld bool
+	// deferredUnlock: defer distLazyMu.Unlock() was registered, so a call
+	// deferred later runs before that unlock (LIFO), with the lock held.
+	deferredUnlock bool
 }
 
 // block walks stmts with distLazyMu possibly held on entry. It returns
@@ -373,6 +411,11 @@ func (w *lockOrderWalker) stmt(s ast.Stmt, held bool) (bool, bool) {
 		// the lock held until then, which is what "held" already says.
 		for _, a := range s.Call.Args {
 			held = w.expr(a, held)
+		}
+		if callOn(s.Call, "distLazyMu", "Unlock") {
+			w.deferredUnlock = true
+		} else if held && w.deferredUnlock {
+			w.check(s.Call)
 		}
 		return held, false
 	case *ast.ExprStmt:
@@ -466,15 +509,27 @@ func (w *lockOrderWalker) expr(n ast.Node, held bool) bool {
 			held = true
 		case callOn(call, "distLazyMu", "Unlock"):
 			held = false
-		case held && callOn(call, "mu", "Lock", "RLock"):
-			w.report(call, "takes "+exprString(call.Fun))
 		case held:
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && w.takers[sel.Sel.Name] {
-				w.report(call, "calls "+sel.Sel.Name+", which takes s.mu")
-			}
+			w.check(call)
 		}
 	})
 	return held
+}
+
+// check reports call if it takes s.mu; the caller knows distLazyMu may be
+// held when it runs.
+func (w *lockOrderWalker) check(call *ast.CallExpr) {
+	if callOn(call, "mu", "Lock", "RLock") {
+		w.report(call, "takes "+exprString(call.Fun))
+		return
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !w.takers[sel.Sel.Name] {
+		return
+	}
+	if _, onIdent := sel.X.(*ast.Ident); onIdent {
+		w.report(call, "calls "+sel.Sel.Name+", which takes s.mu")
+	}
 }
 
 func (w *lockOrderWalker) report(call *ast.CallExpr, what string) {

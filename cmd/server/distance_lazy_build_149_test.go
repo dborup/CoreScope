@@ -86,13 +86,20 @@ func distBuildGoroutines() string {
 // reason in the goroutine header) and the method names passed as frame.
 // Re-verify it when changing the Go version or renaming those methods.
 func distBuildParked(waitReason, frame string) bool {
+	return distBuildParkedCount(waitReason, frame) > 0
+}
+
+// distBuildParkedCount counts the goroutines distBuildParked matches; a
+// waitReason of "sync." matches any mutex wait.
+func distBuildParkedCount(waitReason, frame string) int {
+	n := 0
 	for _, g := range strings.Split(distBuildGoroutines(), "\n\n") {
 		header, _, _ := strings.Cut(g, "\n")
 		if strings.Contains(header, "["+waitReason) && strings.Contains(g, frame) {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 const (
@@ -353,6 +360,52 @@ func TestDistanceBuild149_BuildingIsSetBeforeTheBuildGoroutineRuns(t *testing.T)
 	})
 }
 
+// Triggers on the debounce path read totalObs after releasing distLazyMu and
+// re-check the gate before they start a build. When a rebuild is due and many
+// of them get past the first check together, exactly one starts it.
+func TestDistanceBuild149_DebouncedRebuildStartsOnce(t *testing.T) {
+	runDistBuildChild(t, func(t *testing.T) {
+		store := newDistBuildStore(t)
+		var builds atomic.Int32
+		release := make(chan struct{})
+		store.distanceBuildHook = func() {
+			if builds.Add(1) > 1 {
+				<-release // hold every rebuild until all triggers returned
+			}
+		}
+		baseline := runtime.NumGoroutine()
+		store.TriggerDistanceIndexBuild()
+		distBuildWaitCurrent(t, store)
+		store.distLazyMu.Lock()
+		store.distLazyLastBuilt = time.Now().Add(-6 * time.Minute) // rebuild due
+		store.distLazyMu.Unlock()
+
+		// Park every trigger behind a held write lock, then let them all go.
+		const N = 16
+		store.mu.Lock()
+		var wg sync.WaitGroup
+		wg.Add(N)
+		for i := 0; i < N; i++ {
+			go func() {
+				defer wg.Done()
+				store.TriggerDistanceIndexBuild()
+			}()
+		}
+		distBuildWait(t, "every trigger to wait for a lock", func() bool {
+			return distBuildParkedCount("sync.", triggerFrame) == N
+		})
+		store.mu.Unlock()
+		wg.Wait()
+		close(release)
+
+		distBuildWaitCurrent(t, store)
+		distBuildSettle(baseline)
+		if n := builds.Load(); n != 2 {
+			t.Fatalf("builds = %d, want 2 (the first build and one debounced rebuild for %d triggers)", n, N)
+		}
+	})
+}
+
 // Many concurrent triggers during the first build start exactly one build, and
 // triggers after it are debounced.
 func TestDistanceBuild149_ConcurrentTriggersStartOneBuild(t *testing.T) {
@@ -452,10 +505,17 @@ func TestDistanceBuild149_HandlerContractAndLoadInvalidation(t *testing.T) {
 
 // The debounce policy is unchanged: once a build completed, a trigger only
 // rebuilds when Δobs since that build reached 5 % or 5 minutes have passed.
+// While a debounced rebuild runs, the index reports not built, so the
+// handler answers 202 as for any other build.
 func TestDistanceBuild149_DebounceUnchanged(t *testing.T) {
 	store := newDistBuildStore(t)
 	var builds atomic.Int32
-	store.distanceBuildHook = func() { builds.Add(1) }
+	var hold sync.Mutex // held by the test to keep a rebuild in flight
+	store.distanceBuildHook = func() {
+		builds.Add(1)
+		hold.Lock()
+		hold.Unlock()
+	}
 	store.TriggerDistanceIndexBuild()
 	distBuildWaitCurrent(t, store)
 
@@ -483,7 +543,13 @@ func TestDistanceBuild149_DebounceUnchanged(t *testing.T) {
 		store.mu.Unlock()
 
 		before := builds.Load()
+		hold.Lock()
 		store.TriggerDistanceIndexBuild()
+		built := store.DistanceIndexBuilt()
+		hold.Unlock()
+		if built == c.rebuilds {
+			t.Errorf("%s: DistanceIndexBuilt() = %v right after the trigger, want %v", c.name, built, !c.rebuilds)
+		}
 		distBuildWaitCurrent(t, store)
 		want := before
 		if c.rebuilds {
