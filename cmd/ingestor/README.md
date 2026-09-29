@@ -91,6 +91,7 @@ The ingestor reads these fields from the existing `config.json`:
   - `username` / `password` — auth credentials
   - `topics` — array of topic patterns to subscribe
   - `iataFilter` — optional regional filter
+  - `clientId` — optional MQTT client ID, used verbatim; must be unique among the broker's concurrent clients. When omitted, each start generates `corescope-<name>-<8 random hex>` (broker host if the name is empty), kept across reconnects. Strict MQTT 3.1 brokers accept at most 23 characters: set a short `clientId` for those.
 - `mqtt` — legacy single-broker config (auto-converted to `mqttSources`)
 - `dbPath` — SQLite DB path (default: `data/meshcore.db`)
 

@@ -142,6 +142,7 @@ func main() {
 		}
 
 		opts := buildMQTTOpts(source)
+		clientID := opts.ClientID
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
 
@@ -159,7 +160,7 @@ func main() {
 		status := RegisterSourceStatus(tag, source.Broker)
 
 		opts.SetOnConnectHandler(func(c mqtt.Client) {
-			log.Printf("MQTT [%s] connected to %s", tag, source.Broker)
+			log.Print(mqttConnectedLogLine(tag, source.Broker, clientID))
 			status.MarkConnect(time.Now())
 			// PR #1216 r1 item 2: clear the stale LastMessageUnix from
 			// before the outage so the watchdog doesn't immediately scream
@@ -547,7 +548,10 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		// (paho default 30s actually — making this explicit so it can't
 		// drift, and so operators reading the code know it's intentional
 		// per the #1335 RCA).
-		SetKeepAlive(30 * time.Second)
+		SetKeepAlive(30 * time.Second).
+		// #118: explicit ID, generated once per client when not configured;
+		// paho reuses it on every reconnect. See mqtt_client_id.go.
+		SetClientID(mqttClientID(source))
 
 	opts.SetConnectionAttemptHandler(func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
 		// Look up the per-source liveness state (registered in main) so we

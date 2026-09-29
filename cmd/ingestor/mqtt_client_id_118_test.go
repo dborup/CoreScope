@@ -97,13 +97,23 @@ func (failingReader) Read([]byte) (int, error) { return 0, errors.New("entropy u
 // Should crypto/rand ever fail, the ID is still non-empty and still differs
 // between constructions instead of collapsing to a shared value.
 func TestMQTTClientIDRandomFailureStillUnique_118(t *testing.T) {
-	old := clientIDRandom
+	old, oldNow := clientIDRandom, clientIDNow
 	clientIDRandom = failingReader{}
-	defer func() { clientIDRandom = old }()
+	frozen := time.Unix(1790000000, 0)
+	clientIDNow = func() time.Time { return frozen } // a coarse clock: one reading
+	defer func() { clientIDRandom, clientIDNow = old, oldNow }()
 	a := buildMQTTOpts(MQTTSource{Name: "local", Broker: "tcp://h:1883"}).ClientID
-	b := buildMQTTOpts(MQTTSource{Name: "local", Broker: "tcp://h:1883"}).ClientID
-	if !regexp.MustCompile(`^corescope-local-[0-9a-f]{8}$`).MatchString(a) || a == b {
-		t.Fatalf("with crypto/rand failing: %q and %q", a, b)
+	if !regexp.MustCompile(`^corescope-local-[0-9a-f]{8}$`).MatchString(a) {
+		t.Fatalf("with crypto/rand failing: %q", a)
+	}
+	// back-to-back constructions (same clock reading on coarse clocks) differ
+	seen := map[string]bool{a: true}
+	for i := 0; i < 2000; i++ {
+		id := mqttClientID(MQTTSource{Name: "local"})
+		if seen[id] {
+			t.Fatalf("with crypto/rand failing, construction %d repeated %q", i, id)
+		}
+		seen[id] = true
 	}
 }
 

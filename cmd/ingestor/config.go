@@ -25,6 +25,10 @@ type MQTTSource struct {
 	IATAFilter         []string `json:"iataFilter,omitempty"`
 	ConnectTimeoutSec  int      `json:"connectTimeoutSec,omitempty"`
 	Region             string   `json:"region,omitempty"`
+	// ClientID is the MQTT client ID, used verbatim; it must be unique among
+	// the broker's concurrent clients. Empty: generated per client (#118,
+	// see mqtt_client_id.go).
+	ClientID string `json:"clientId,omitempty"`
 }
 
 // ConnectTimeoutOrDefault returns the per-source connect timeout in seconds,
