@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -4307,11 +4308,10 @@ func (s *PacketStore) buildPathHopIndex() {
 // resolved relay attribution, leaving relay counts and transported scopes
 // empty after each cold load until live ingestion refilled them (#1904).
 //
-// Only transmissions still in s.packets are carried over. This matters:
-// eviction's removeTxFromPathHopIndex strips raw hops only (it derives them
-// from txGetParsedPath), so evicted transmissions linger in prev under their
-// resolved keys. Filtering them here is what keeps the index bounded by the
-// eviction policy instead of turning that gap into a permanent leak.
+// Only transmissions still in s.packets are carried over. Eviction removes
+// raw and resolved keys itself (evictFromPathHopIndex, #115); this check is
+// the defence that keeps a rebuild from reintroducing anything a previous
+// index still held for a transmission that is gone.
 //
 // Cost is O(entries in prev) with one reused scratch map, and it runs only
 // where buildPathHopIndex already runs — cold load and background-fill
@@ -4456,8 +4456,9 @@ func relayMetrics(times []int64, now int64) (count1h, count24h int, lastRelayed 
 	return
 }
 
-// removeTxFromPathHopIndex removes a transmission from all its raw path-hop index entries.
-// Resolved pubkey entries are cleaned up via removeFromResolvedPubkeyIndex.
+// removeTxFromPathHopIndex removes a transmission from the keys of its raw
+// path hops. Used when a transmission's best raw path changes; its resolved
+// keys stay. Eviction removes both in one batch (evictFromPathHopIndex).
 func removeTxFromPathHopIndex(idx map[string][]*StoreTx, tx *StoreTx) {
 	hops := txGetParsedPath(tx)
 	if len(hops) == 0 {
@@ -4515,17 +4516,45 @@ func (s *PacketStore) invalidateRelayStatsCache() {
 	s.relayStatsCacheMu.Unlock()
 }
 
-// removeTxFromSlice removes tx from idx[key] by ID, deleting the key if empty.
+// removeTxFromSlice removes every occurrence of tx (by ID) from idx[key],
+// deleting the key if empty. slices.DeleteFunc zeroes the discarded tail, so
+// the backing array does not keep the removed transmission alive.
 func removeTxFromSlice(idx map[string][]*StoreTx, key string, tx *StoreTx) {
-	list := idx[key]
-	for i, t := range list {
-		if t.ID == tx.ID {
-			idx[key] = append(list[:i], list[i+1:]...)
-			break
-		}
-	}
-	if len(idx[key]) == 0 {
+	list := slices.DeleteFunc(idx[key], func(t *StoreTx) bool { return t.ID == tx.ID })
+	if len(list) == 0 {
 		delete(idx, key)
+		return
+	}
+	idx[key] = list
+}
+
+// evictFromPathHopIndex removes the evicted transmissions from every
+// byPathHop bucket (#115). A transmission is in its raw hop keys and, via
+// indexResolvedPathHops, in resolved full-pubkey keys, once per observation
+// that resolved it. The resolved pubkeys are kept nowhere per transmission
+// (#800 keeps only a hash-only membership index, and they can come from
+// path_json reconstruction as well as resolved_path), so one pass over all
+// buckets per eviction batch is the only complete way. Empty buckets are
+// deleted and the discarded tail of each compacted bucket is zeroed, so no
+// backing array keeps an evicted transmission alive.
+//
+// Cost: O(total byPathHop entries) with one map lookup each, once per
+// eviction batch, under the write lock eviction already holds; the same
+// shape as compactDistIndex. BenchmarkEvictPathHops_115 measures it.
+func evictFromPathHopIndex(idx map[string][]*StoreTx, evicted map[*StoreTx]bool) {
+	if len(evicted) == 0 {
+		return
+	}
+	for key, list := range idx {
+		kept := slices.DeleteFunc(list, func(tx *StoreTx) bool { return evicted[tx] })
+		if len(kept) == len(list) {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(idx, key)
+		} else {
+			idx[key] = kept
+		}
 	}
 }
 
@@ -4957,6 +4986,10 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 
 	// Build sets of evicted IDs for batch removal from secondary indexes
 	evictedTxIDs := make(map[int]struct{}, cutoffIdx)
+	evictedTxSet := make(map[*StoreTx]bool, cutoffIdx)
+	for _, tx := range evicting {
+		evictedTxSet[tx] = true
+	}
 	evictedObsIDs := make(map[int]struct{}, cutoffIdx*2)
 	// Track which observer IDs and payload types need filtering
 	affectedObservers := make(map[string]struct{})
@@ -5031,9 +5064,10 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 
 		// Remove from subpath index
 		removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx)
-		// Remove from path-hop index
-		removeTxFromPathHopIndex(s.byPathHop, tx)
 	}
+	// Remove from the path-hop index: raw AND resolved keys, all duplicates,
+	// in one pass per batch (#115). See evictFromPathHopIndex.
+	evictFromPathHopIndex(s.byPathHop, evictedTxSet)
 	s.invalidateRelayStatsCache()
 
 	// Batch-remove from byObserver: single pass per affected observer slice
@@ -5085,10 +5119,6 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	}
 
 	// Remove from distance indexes — filter out records referencing evicted txs
-	evictedTxSet := make(map[*StoreTx]bool, cutoffIdx)
-	for _, tx := range evicting {
-		evictedTxSet[tx] = true
-	}
 	s.compactDistIndex(evictedTxSet)
 
 	// Trim packets slice

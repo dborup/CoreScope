@@ -71,13 +71,20 @@ func countIn(idx map[string][]*StoreTx, tx *StoreTx) int {
 
 func assertEvictedGone115(t *testing.T, store *PacketStore, old, young []*StoreTx, wantYoungRefs int) {
 	t.Helper()
+	assertEvictedGone115Partial(t, store, old, young, wantYoungRefs)
+	if _, ok := store.byPathHop[evict115Only]; ok {
+		t.Errorf("bucket %q held only evicted transmissions but was not deleted", evict115Only[:8])
+	}
+}
+
+// assertEvictedGone115Partial is assertEvictedGone115 for a pass that
+// evicted only some of the transmissions sharing evict115Only.
+func assertEvictedGone115Partial(t *testing.T, store *PacketStore, old, young []*StoreTx, wantYoungRefs int) {
+	t.Helper()
 	for _, tx := range old {
 		if n := countIn(store.byPathHop, tx); n != 0 {
 			t.Fatalf("evicted tx %d is still in byPathHop %d times", tx.ID, n)
 		}
-	}
-	if _, ok := store.byPathHop[evict115Only]; ok {
-		t.Errorf("bucket %q held only evicted transmissions but was not deleted", evict115Only[:8])
 	}
 	for _, tx := range young {
 		if n := countIn(store.byPathHop, tx); n != wantYoungRefs {
@@ -135,7 +142,7 @@ func TestMemoryEvictionRemovesResolvedPathHops_115(t *testing.T) {
 	if n == 0 {
 		t.Fatal("fixture: memory eviction evicted nothing")
 	}
-	assertEvictedGone115(t, store, before[:n], nil, 0)
+	assertEvictedGone115Partial(t, store, before[:n], nil, 0)
 	for _, tx := range before[n : len(before)/2] { // older half not evicted: all 9 refs
 		if got := countIn(store.byPathHop, tx); got != 3+3*2 {
 			t.Fatalf("surviving tx %d has %d entries, want 9", tx.ID, got)
