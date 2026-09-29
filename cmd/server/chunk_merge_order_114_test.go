@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"math/rand"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -200,4 +202,131 @@ func TestRepeatedChunkMergesKeepOrder_114(t *testing.T) {
 	}
 	assertSortedByFirstSeen(t, s)
 	assertEveryPacketIndexedOnce(t, s, 9)
+}
+
+func txsAt(prefix string, secs ...int) []*StoreTx {
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	out := make([]*StoreTx, len(secs))
+	for i, s := range secs {
+		out[i] = &StoreTx{ID: len(prefix)*1000000 + i, Hash: prefix + strconv.Itoa(i), FirstSeen: base.Add(time.Duration(s) * time.Second).Format(time.RFC3339)}
+	}
+	return out
+}
+
+func TestMergeByFirstSeenRandomRuns_114(t *testing.T) {
+	rng := rand.New(rand.NewSource(114))
+	for trial := 0; trial < 2000; trial++ {
+		a := make([]int, rng.Intn(40))
+		b := make([]int, rng.Intn(40))
+		for i := range a {
+			a[i] = rng.Intn(60) // few distinct values: many ties
+		}
+		for i := range b {
+			b[i] = rng.Intn(60)
+		}
+		sort.Ints(a)
+		sort.Ints(b)
+		ex, in := txsAt("e", a...), txsAt("i", b...)
+		exCopy, inCopy := append([]*StoreTx(nil), ex...), append([]*StoreTx(nil), in...)
+		got := mergeByFirstSeen(ex, in)
+		if !sort.SliceIsSorted(got, func(i, j int) bool { return got[i].FirstSeen < got[j].FirstSeen }) {
+			t.Fatalf("trial %d: merged run out of order", trial)
+		}
+		if len(got) != len(ex)+len(in) {
+			t.Fatalf("trial %d: %d entries, want %d", trial, len(got), len(ex)+len(in))
+		}
+		seen := map[*StoreTx]int{}
+		for _, tx := range got {
+			seen[tx]++
+		}
+		for _, tx := range append(append([]*StoreTx(nil), ex...), in...) {
+			if seen[tx] != 1 {
+				t.Fatalf("trial %d: %s appears %d times", trial, tx.Hash, seen[tx])
+			}
+		}
+		for i := range ex {
+			if ex[i] != exCopy[i] {
+				t.Fatal("existing run modified")
+			}
+		}
+		for i := range in {
+			if in[i] != inCopy[i] {
+				t.Fatal("incoming run modified")
+			}
+		}
+	}
+}
+
+// The merge must never degrade into a comparison sort of the whole store
+// under the write lock: it compares O(log n) times to find where the chunk
+// starts, then at most once per entry of the overlapping part.
+func TestMergeByFirstSeenComparisonBound_114(t *testing.T) {
+	const n, chunk = 200000, 2000
+	secs := make([]int, n)
+	for i := range secs {
+		secs[i] = i * 10
+	}
+	existing := txsAt("e", secs...)
+	for _, c := range []struct {
+		name    string
+		start   int // incoming first_seen offset, seconds
+		overlap int // existing entries at or after the chunk start
+	}{
+		{"chunk older than the store", -chunk*10 - 5, n},
+		{"chunk overlaps the last 1% of the store", (n - n/100) * 10, n / 100},
+		{"chunk newer than the store", n*10 + 5, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			in := make([]int, chunk)
+			for i := range in {
+				in[i] = c.start + i*5
+			}
+			incoming := txsAt("i", in...)
+			cmp := 0
+			got := mergeSortedRuns(existing, incoming, func(a, b *StoreTx) bool { cmp++; return a.FirstSeen < b.FirstSeen })
+			if len(got) != n+chunk {
+				t.Fatalf("%d entries", len(got))
+			}
+			bound := 20 + min(c.overlap, chunk*2) + chunk // log2(200000) < 18
+			if c.overlap == n {
+				bound = 20 + chunk + 1
+			}
+			if cmp > bound {
+				t.Fatalf("%d comparisons, bound %d (a full sort would be ~%d)", cmp, bound, (n+chunk)*18)
+			}
+		})
+	}
+}
+
+// BenchmarkMergeChunkUnderLock_114 merges a one-day chunk (20k) into a
+// production-shaped store (500k) whose newest 5% overlaps the chunk by
+// first_seen; "fullSort" is what sorting the whole store would cost instead.
+func BenchmarkMergeChunkUnderLock_114(b *testing.B) {
+	const n, chunk = 500000, 20000
+	secs := make([]int, n)
+	for i := range secs {
+		secs[i] = i * 2
+	}
+	existing := txsAt("e", secs...)
+	in := make([]int, chunk)
+	for i := range in {
+		in[i] = (n-n/20)*2 + i*5 + 1
+	}
+	incoming := txsAt("i", in...)
+	b.Run("merge", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			mergeByFirstSeen(existing, incoming)
+		}
+	})
+	b.Run("prepend(old,unordered)", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = append(append(make([]*StoreTx, 0, n+chunk), incoming...), existing...)
+		}
+	})
+	b.Run("fullSort", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			all := append(append(make([]*StoreTx, 0, n+chunk), incoming...), existing...)
+			sort.SliceStable(all, func(x, y int) bool { return all[x].FirstSeen < all[y].FirstSeen })
+		}
+	})
 }
