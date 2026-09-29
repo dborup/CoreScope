@@ -791,6 +791,14 @@
   }
   window.buildPacketsQuery = buildPacketsQuery;
 
+  // Show the Clear button whenever any filter (URL-backed or not) is active.
+  function updateClearFiltersVisibility() {
+    var cb = document.getElementById('clearFiltersBtn');
+    if (!cb) return;
+    var active = !!(filters.hash || filters.node || filters.observer || filters.channel || filters.type || filters._filterExpr || filters.myNodes) || !!RegionFilter.getRegionParam() || savedTimeWindowMin !== DEFAULT_TIME_WINDOW;
+    cb.style.display = active ? '' : 'none';
+  }
+
   function updatePacketsUrl() {
     // Preserve any subpath after /packets (e.g. #/packets/<hash>).
     var cur = String(location.hash || '');
@@ -800,12 +808,7 @@
     // Don't double-encode filters.hash when it's already the path segment.
     var skipHash = !!(filters.hash && subpath === '/' + filters.hash);
     history.replaceState(null, '', '#/packets' + subpath + buildPacketsQuery(savedTimeWindowMin, RegionFilter.getRegionParam(), skipHash));
-    // Update clear-filters button visibility
-    var cb = document.getElementById('clearFiltersBtn');
-    if (cb) {
-      var active = !!(filters.hash || filters.node || filters.observer || filters.channel || filters.type || filters._filterExpr || filters.myNodes) || !!RegionFilter.getRegionParam() || savedTimeWindowMin !== DEFAULT_TIME_WINDOW;
-      cb.style.display = active ? '' : 'none';
-    }
+    updateClearFiltersVisibility();
   }
 
   let filtersBuilt = false;
@@ -1845,9 +1848,9 @@
       if (filters.type) localStorage.setItem('meshcore-type-filter', filters.type); else localStorage.removeItem('meshcore-type-filter');
       buildTypeMenu();
       updateTypeTrigger();
-      // Type is not in the URL, but updatePacketsUrl() also shows the Clear
-      // button, which must be reachable with only a type selected (#121).
-      updatePacketsUrl();
+      // Type is not in the URL, so leave the hash alone (updatePacketsUrl()
+      // would drop ?obs=/?viewPath=); only refresh the Clear button (#121).
+      updateClearFiltersVisibility();
       renderTableRows();
     });
 

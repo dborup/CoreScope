@@ -49,8 +49,12 @@ function extractFilterSection() {
   const end = SRC.indexOf(');', blockEnd(SRC, clear)) + 2;
   return SRC.slice(start, end);
 }
-const SECTION = extractFunction('buildPacketsQuery') + '\n' + extractFunction('updatePacketsUrl') +
-  '\n' + extractFilterSection();
+// updateClearFiltersVisibility() is optional here so the URL-preservation tests
+// below can also run (and fail) against a revision that lacks it.
+const VISIBILITY = SRC.includes('function updateClearFiltersVisibility(')
+  ? extractFunction('updateClearFiltersVisibility') + '\n' : '';
+const SECTION = extractFunction('buildPacketsQuery') + '\n' + VISIBILITY +
+  extractFunction('updatePacketsUrl') + '\n' + extractFilterSection();
 
 // ---- a minimal DOM ---------------------------------------------------------
 
@@ -238,6 +242,26 @@ test('Clear is reachable with only a type selected (button shown), hidden again 
   p.clear();
   assert.strictEqual(p.$('clearFiltersBtn').style.display, 'none', 'hidden after Clear');
 });
+
+// Picking a type must not rewrite the URL: type is not a URL parameter, so
+// updatePacketsUrl() (which rebuilds the query from filters only) would drop
+// ?obs= and ?viewPath= from #/packets/<hash>?... deep links.
+for (const q of ['?obs=123', '?obs=123&viewPath=1']) {
+  test('type pick keeps ' + q + ' in the URL and shows Clear', () => {
+    const st = newState();
+    const p = mount(st, {});
+    // user is on a packet detail deep link (set after mount, as clicking a row does)
+    st.location.hash = '#/packets/abcd1234' + q;
+    p.pickType('4');
+    assert.strictEqual(st.location.hash, '#/packets/abcd1234' + q, 'URL ' + st.location.hash);
+    assert(/obs=123/.test(st.location.hash), 'obs kept');
+    if (q.includes('viewPath')) assert(/viewPath=1/.test(st.location.hash), 'viewPath kept');
+    assert.strictEqual(p.$('clearFiltersBtn').style.display, '', 'Clear visible');
+    p.pickType('4'); // deselect -> no filter -> hidden again, URL still untouched
+    assert.strictEqual(st.location.hash, '#/packets/abcd1234' + q, 'URL after deselect');
+    assert.strictEqual(p.$('clearFiltersBtn').style.display, 'none', 'Clear hidden again');
+  });
+}
 
 test('the other filters are still reset by Clear', () => {
   const st = newState();

@@ -130,18 +130,23 @@ function extractClearHandler() {
 /**
  * Extract updatePacketsUrl function body
  */
-function extractUpdatePacketsUrl() {
-  const src = fs.readFileSync(__dirname + '/public/packets.js', 'utf-8');
-  const marker = 'function updatePacketsUrl()';
+function extractFunctionSource(src, marker) {
   const idx = src.indexOf(marker);
-  assert(idx !== -1, 'updatePacketsUrl not found');
+  assert(idx !== -1, marker + ' not found');
   const fnStart = src.indexOf('{', idx);
   let depth = 0, fnEnd = -1;
   for (let i = fnStart; i < src.length; i++) {
     if (src[i] === '{') depth++;
     else if (src[i] === '}') { depth--; if (depth === 0) { fnEnd = i; break; } }
   }
-  return src.substring(fnStart + 1, fnEnd);
+  return src.substring(idx, fnEnd + 1);
+}
+function extractUpdatePacketsUrl() {
+  const src = fs.readFileSync(__dirname + '/public/packets.js', 'utf-8');
+  const body = extractFunctionSource(src, 'function updatePacketsUrl()');
+  // updatePacketsUrl() delegates button visibility to updateClearFiltersVisibility()
+  const vis = extractFunctionSource(src, 'function updateClearFiltersVisibility()');
+  return vis + '\n' + body.substring(body.indexOf('{') + 1, body.length - 1);
 }
 
 // Since #121 the handler empties the closure selection Sets and rebuilds
