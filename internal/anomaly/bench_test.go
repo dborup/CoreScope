@@ -89,34 +89,51 @@ func heapInUse() uint64 {
 
 // BenchmarkBytesPerStream reports steady-state heap per stream with full
 // 1/5/15/60-minute windows (4 entries each) and optionally periodicity.
+//
+// B/stream is one heap measurement per sub-benchmark, taken outside the b.N
+// loop and reused when the framework calls the sub-benchmark again with a
+// larger b.N; nothing is timed, so ns/op means nothing here. (Measuring inside
+// the b.N loop with the timer stopped never finished: the timed work was ~0,
+// so the framework kept raising b.N and repeated the whole measurement b.N
+// times.)
 func BenchmarkBytesPerStream(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000} {
 		for _, per := range []bool{false, true} {
+			var perStream float64
+			measured := false
 			b.Run(fmt.Sprintf("streams=%d/periodic=%v", n, per), func(b *testing.B) {
-				for it := 0; it < b.N; it++ {
-					b.StopTimer()
-					before := heapInUse()
-					d, _ := New(benchConfig(2*n, per, false))
-					clock := t0
-					id := 0
-					for r := 0; r < 4; r++ {
-						for s := 0; s < n; s++ {
-							clock = clock.Add(time.Millisecond)
-							d.Observe(streamEvent(id, s, clock))
-							id++
-						}
-					}
-					// the dedup set is bounded separately (MaxDedupIDs); drop it so
-					// only per-stream state is measured
-					d.dedup, d.dedupLog, d.dedupHead = map[TxID]int64{}, nil, 0
-					after := heapInUse()
-					b.ReportMetric(float64(after-before)/float64(n), "B/stream")
-					runtime.KeepAlive(d)
-					b.StartTimer()
+				b.StopTimer()
+				if !measured {
+					perStream, measured = bytesPerStream(n, per), true
 				}
+				for range b.N {
+				}
+				b.ReportMetric(perStream, "B/stream")
 			})
 		}
 	}
+}
+
+// bytesPerStream is the heap growth per stream of a Detector that has seen
+// four events on each of n streams, without its dedup set.
+func bytesPerStream(n int, per bool) float64 {
+	before := heapInUse()
+	d, _ := New(benchConfig(2*n, per, false))
+	clock := t0
+	id := 0
+	for r := 0; r < 4; r++ {
+		for s := 0; s < n; s++ {
+			clock = clock.Add(time.Millisecond)
+			d.Observe(streamEvent(id, s, clock))
+			id++
+		}
+	}
+	// the dedup set is bounded separately (MaxDedupIDs); drop it so only
+	// per-stream state is measured
+	d.dedup, d.dedupLog, d.dedupHead = map[TxID]int64{}, nil, 0
+	after := heapInUse()
+	runtime.KeepAlive(d)
+	return float64(after-before) / float64(n)
 }
 
 // zipf picks streams with a skewed distribution.
