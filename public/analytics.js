@@ -35,6 +35,29 @@
   function _stopForeignTrafficRefresh() {
     if (_foreignTrafficRefreshTimer) { clearInterval(_foreignTrafficRefreshTimer); _foreignTrafficRefreshTimer = null; }
   }
+  // #120 — the distance tab's lazy index answers 202 {status:"building"}
+  // until it is built. The tab shows a building state and retries on the
+  // server's interval. Every render, tab switch away and destroy() bumps
+  // _distanceGen, so a response or retry from an older render can never
+  // write into a newer render, another tab or a left page, and at most one
+  // retry timer exists.
+  var _distanceRetryTimer = null;
+  var _distanceGen = 0;
+  function _leaveDistanceTab() {
+    _distanceGen++;
+    if (_distanceRetryTimer) { clearTimeout(_distanceRetryTimer); _distanceRetryTimer = null; }
+  }
+  function _distanceIsBuilding(data) {
+    return !!(data && data.status === 'building' && !data.summary);
+  }
+  // Retry-After header (passed on by api()), else the body's
+  // retry_after_seconds, else 5s; clamped to 1..30s.
+  function _distanceRetryDelayMs(data) {
+    var s = Number(data && data.retryAfterSeconds);
+    if (!(isFinite(s) && s > 0)) s = Number(data && data.retry_after_seconds);
+    if (!(isFinite(s) && s > 0)) s = 5;
+    return Math.min(Math.max(s, 1), 30) * 1000;
+  }
   var _wardrivingRefreshTimer = null;
   function _stopWardrivingRefresh() {
     if (_wardrivingRefreshTimer) { clearInterval(_wardrivingRefreshTimer); _wardrivingRefreshTimer = null; }
@@ -196,6 +219,7 @@
       if (_currentTab !== 'foreign-traffic') _stopForeignTrafficRefresh();
       if (_currentTab !== 'wardriving') _stopWardrivingRefresh();
       if (_currentTab !== 'areas') _stopAreasRefresh();
+      if (_currentTab !== 'distance') _leaveDistanceTab();
       _updateAnalyticsUrl();
       renderTab(_currentTab);
     });
@@ -2977,10 +3001,25 @@
   // === REPEATER METRICS BLOCK END (test harness slices the renderer block to here) ===
 
   async function renderDistanceTab(el) {
+    // A new render supersedes any earlier one and its pending retry (#120).
+    _leaveDistanceTab();
+    const gen = _distanceGen;
     try {
       const rqs = RegionFilter.regionQueryString();
       const sep = rqs ? '?' + rqs.slice(1) : '';
       const data = await api('/analytics/distance' + sep, { ttl: CLIENT_TTL.analyticsRF });
+      if (gen !== _distanceGen) return;   // re-rendered, switched tab or left meanwhile
+      if (_distanceIsBuilding(data)) {
+        const ms = _distanceRetryDelayMs(data);
+        el.innerHTML = '<div class="text-center text-muted" id="distanceBuilding" role="status" style="padding:40px">' +
+          'Building the distance index…' +
+          '<div style="font-size:12px;margin-top:8px">This runs once after the server starts. Retrying in ' + Math.round(ms / 1000) + 's.</div></div>';
+        _distanceRetryTimer = setTimeout(function () {
+          _distanceRetryTimer = null;
+          if (gen === _distanceGen) renderDistanceTab(el);
+        }, ms);
+        return;
+      }
       const s = data.summary;
       let html = `<div class="analytics-grid">
         <div class="stat-card"><div class="stat-value">${s.totalHops.toLocaleString()}</div><div class="stat-label">Total Hops Analyzed</div></div>
@@ -3057,11 +3096,12 @@
         });
       });
     } catch (e) {
+      if (gen !== _distanceGen) return;
       el.innerHTML = `<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load distance analytics: ${esc(e.message)}</div>`;
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
@@ -3084,6 +3124,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsStopWardrivingRefresh = _stopWardrivingRefresh;
     window._analyticsRenderAreasTab = renderAreasTab;
     window._analyticsRenderDistanceTab = renderDistanceTab;
+    window._analyticsLeaveDistanceTab = _leaveDistanceTab;
     window._analyticsStopAreasRefresh = _stopAreasRefresh;
     window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
     window._analyticsComputeRepeatersNeverRelayingScope = computeRepeatersNeverRelayingScope;

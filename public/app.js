@@ -190,7 +190,19 @@ async function api(path, { ttl = 0, bust = false } = {}) {
         _apiPerf.log.push({ path, ms: Math.round(ms), time: Date.now() });
         if (_apiPerf.log.length > 200) _apiPerf.log.shift();
         if (ms > 500) console.warn(`[SLOW API] ${path} took ${Math.round(ms)}ms`);
-        if (ttl > 0) _apiCache.set(path, { data, expires: Date.now() + ttl });
+        if (res.status === 202) {
+          // #120: 202 Accepted is "not ready yet" (the lazy distance index
+          // answers {status:"building"} until it is built), never data to
+          // keep: caching it would serve the placeholder back for the whole
+          // TTL. A valid Retry-After travels to the caller as a
+          // non-enumerable property, so the JSON body itself is unchanged.
+          const ra = parseInt(res.headers.get('Retry-After'), 10);
+          if (data && typeof data === 'object' && isFinite(ra) && ra > 0) {
+            Object.defineProperty(data, 'retryAfterSeconds', { value: ra, enumerable: false });
+          }
+        } else if (ttl > 0) {
+          _apiCache.set(path, { data, expires: Date.now() + ttl });
+        }
         return data;
       }
     } finally {
