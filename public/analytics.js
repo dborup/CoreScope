@@ -3083,6 +3083,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsRenderWardrivingTab = renderWardrivingTab;
     window._analyticsStopWardrivingRefresh = _stopWardrivingRefresh;
     window._analyticsRenderAreasTab = renderAreasTab;
+    window._analyticsRenderDistanceTab = renderDistanceTab;
     window._analyticsStopAreasRefresh = _stopAreasRefresh;
     window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
     window._analyticsComputeRepeatersNeverRelayingScope = computeRepeatersNeverRelayingScope;
