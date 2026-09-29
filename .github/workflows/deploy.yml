@@ -162,6 +162,7 @@ jobs:
           node test-channel-issue-1101.js
           node test-observer-iata-1188.js
           node test-pull-to-reconnect-1091.js
+          node test-issue-111-drawer-version.js
           node test-channel-fluid-layout.js
           node test-issue-1279-p2-code-filter.js
           node test-area-filter.js
@@ -551,6 +552,7 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-path-inspector-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1206-resize-observer-leak-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-nav-drawer-1064-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-111-drawer-version-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-audio-live-1297-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-audio-lab-1297-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-channel-decrypt-e2e.js 2>&1 | tee -a e2e-output.txt
