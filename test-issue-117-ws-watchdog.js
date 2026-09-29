@@ -146,11 +146,10 @@ function makeBox(opts) {
     stepWall(ms) { clock.wall += ms; },
     setHidden(h) { doc.hidden = h; for (const fn of docListeners.visibilitychange || []) fn({}); },
     online() { for (const fn of winListeners.online || []) fn({}); },
+    // pending timers whose callback is connectWS itself (the reconnect)
     pendingReconnects() {
-      // timers that would construct a socket: run a dry copy is overkill;
-      // count by probing each pending timer's source for connectWS.
       let n = 0;
-      for (const t of timers.values()) if (/connectWS/.test(String(t.fn)) || t.fn.name === 'connectWS') n++;
+      for (const t of timers.values()) if (t.fn === ctx.connectWS) n++;
       return n;
     },
   };
@@ -301,6 +300,19 @@ test('resume and the watchdog during a pending reconnect do not add a socket', (
   assert.strictEqual(b.sockets.length, 2);
   assert.strictEqual(b.live().length, 1);
   assert.strictEqual(b.pendingReconnects(), 0);
+});
+
+test('a pull during the reconnect delay cancels the pending reconnect', () => {
+  const b = booted({ reconnectMs: 5000 });
+  const s = b.current(); s.open();
+  s.serverClose();
+  b.advance(1000);
+  b.ctx.window.pullReconnect();
+  assert.strictEqual(b.pendingReconnects(), 0, 'the reconnect scheduled by onclose is still pending');
+  b.current().open();
+  b.advance(10000);
+  assert.strictEqual(b.sockets.length, 2, b.sockets.length + ' sockets: the old reconnect replaced the pulled socket');
+  assert.strictEqual(b.live().length, 1);
 });
 
 test('pull-to-reconnect on a socket that is not open leaves one socket', () => {
