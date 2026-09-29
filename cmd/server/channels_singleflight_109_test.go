@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -160,7 +162,7 @@ func TestDifferentRegionsAreNeverMixed_109(t *testing.T) {
 	q := &queryCounter{want: 32}
 	db.channelsQueryHook = q.hook
 	res, errs := callConcurrently(32, func(i int) (interface{}, error) {
-		r := regions[i%len(regions)]
+		r := regions[(i/2)%len(regions)] // every region with both kinds
 		if i%2 == 0 {
 			ch, err := db.GetChannels(r)
 			return [2]interface{}{r, ch}, err
@@ -265,4 +267,65 @@ func TestSecondCacheCheckInsideTheFlight_109(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The region comes from a query parameter, so the cache must stay bounded
+// however many distinct regions callers send.
+func TestChannelListCacheIsBounded_109(t *testing.T) {
+	var c channelListCache
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		key := channelsRegionKey(strings.Repeat("X", 1+i%5) + strconv.Itoa(i))
+		c.put(key, &channelListEntry{expires: now.Add(channelListTTL)}, now)
+		if len(c.entries) > channelListMaxKeys {
+			t.Fatalf("cache grew to %d entries", len(c.entries))
+		}
+	}
+	// expired entries go first: a fresh key replaces an expired one, not a live one
+	c.reset()
+	for i := 0; i < channelListMaxKeys; i++ {
+		exp := now.Add(channelListTTL)
+		if i == 7 {
+			exp = now.Add(-time.Second)
+		}
+		c.put(strconv.Itoa(i), &channelListEntry{expires: exp}, now)
+	}
+	c.put("new", &channelListEntry{expires: now.Add(channelListTTL)}, now)
+	if _, ok := c.entries["7"]; ok {
+		t.Error("the expired entry survived")
+	}
+	if len(c.entries) != channelListMaxKeys {
+		t.Errorf("%d entries, want %d", len(c.entries), channelListMaxKeys)
+	}
+}
+
+func TestChannelsRegionKey_109(t *testing.T) {
+	for in, want := range map[string]string{
+		"": "", "all": "", " aar ": "AAR", "cph,AAR,aar": "AAR,CPH", "AAR, ,CPH": "AAR,CPH",
+	} {
+		if got := channelsRegionKey(in); got != want {
+			t.Errorf("channelsRegionKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// BenchmarkColdConcurrentGetChannels_109: 16 callers hit a cold (reset)
+// cache for one region at once; reports the real queries per round.
+func BenchmarkColdConcurrentGetChannels_109(b *testing.B) {
+	db := pinTestDB(b, true, false)
+	pinTestSeed(b, db, true, 20000, 109)
+	var queries atomic.Int64
+	db.channelsQueryHook = func(string, string) error { queries.Add(1); return nil }
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.channelsCache.reset()
+		db.encChannelsCache.reset()
+		callConcurrently(16, func(j int) (interface{}, error) {
+			if j%2 == 0 {
+				return db.GetChannels("AAR")
+			}
+			return db.GetEncryptedChannels("AAR")
+		})
+	}
+	b.ReportMetric(float64(queries.Load())/float64(b.N), "queries/round")
 }

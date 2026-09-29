@@ -95,11 +95,11 @@ type DB struct {
 	routeMaskStatus    RouteMaskBackfillStatus
 	routeMaskStatusExp time.Time
 
-	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
-	channelsCacheMu  sync.Mutex
-	channelsCacheKey string
-	channelsCacheRes []map[string]interface{}
-	channelsCacheExp time.Time
+	// Channel list caches (60s TTL, #762): keyed by normalized region, with
+	// concurrent misses coalesced into one query per key (#109). See
+	// channels_list_cache.go.
+	channelsCache    channelListCache
+	encChannelsCache channelListCache
 	// channelsPinFallbacks counts GetChannels queries that fell back to the
 	// unpinned SQL because channelHashIndex was not usable; the first is logged.
 	channelsPinFallbacks atomic.Int64
@@ -109,6 +109,13 @@ type DB struct {
 	// (GetChannels) or "encrypted" (GetEncryptedChannels).
 	channelsMissHook  func(kind, region string)
 	channelsQueryHook func(kind, region string) error
+}
+
+// channelListEntry is one cached GetChannels / GetEncryptedChannels result.
+// Never modified after it is stored (see channelListCache).
+type channelListEntry struct {
+	channels []map[string]interface{}
+	expires  time.Time
 }
 
 // isV3, hasResolvedPath, hasObsRawHex, hasScopeName, hasDefaultScope,
@@ -3104,20 +3111,19 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
-
-	// Check cache (60s TTL)
-	db.channelsCacheMu.Lock()
-	if db.channelsCacheRes != nil && db.channelsCacheKey == regionParam && time.Now().Before(db.channelsCacheExp) {
-		res := db.channelsCacheRes
-		db.channelsCacheMu.Unlock()
-		return res, nil
+	key := channelsRegionKey(regionParam)
+	e, err := db.channelsCache.load(key, db.channelsMissFunc("channels", key), func() (*channelListEntry, error) {
+		return db.queryChannels(key)
+	})
+	if err != nil {
+		return nil, err
 	}
-	db.channelsCacheMu.Unlock()
-	if db.channelsMissHook != nil {
-		db.channelsMissHook("channels", regionParam)
-	}
+	return e.channels, nil
+}
 
-	regionCodes := normalizeRegionCodes(regionParam)
+// queryChannels runs the GetChannels query for a normalized region key.
+func (db *DB) queryChannels(key string) (*channelListEntry, error) {
+	regionCodes := normalizeRegionCodes(key)
 	regionPlaceholder := ""
 	args := make([]interface{}, 0, len(regionCodes))
 	if len(regionCodes) > 0 {
@@ -3130,7 +3136,7 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 	}
 
 	if db.channelsQueryHook != nil {
-		if err := db.channelsQueryHook("channels", regionParam); err != nil {
+		if err := db.channelsQueryHook("channels", key); err != nil {
 			return nil, err
 		}
 	}
@@ -3186,14 +3192,15 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 		})
 	}
 
-	// Store in cache (60s TTL)
-	db.channelsCacheMu.Lock()
-	db.channelsCacheRes = channels
-	db.channelsCacheKey = regionParam
-	db.channelsCacheExp = time.Now().Add(60 * time.Second)
-	db.channelsCacheMu.Unlock()
+	return &channelListEntry{channels: channels}, nil
+}
 
-	return channels, nil
+// channelsMissFunc returns the channelsMissHook call for one lookup, or nil.
+func (db *DB) channelsMissFunc(kind, key string) func() {
+	if db.channelsMissHook == nil {
+		return nil
+	}
+	return func() { db.channelsMissHook(kind, key) }
 }
 
 // GetEncryptedChannels returns channels where all messages are undecryptable (no key).
@@ -3203,10 +3210,20 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
-	if db.channelsMissHook != nil {
-		db.channelsMissHook("encrypted", regionParam)
+	key := channelsRegionKey(regionParam)
+	e, err := db.encChannelsCache.load(key, db.channelsMissFunc("encrypted", key), func() (*channelListEntry, error) {
+		return db.queryEncryptedChannels(key)
+	})
+	if err != nil {
+		return nil, err
 	}
-	regionCodes := normalizeRegionCodes(regionParam)
+	return e.channels, nil
+}
+
+// queryEncryptedChannels runs the GetEncryptedChannels query for a
+// normalized region key.
+func (db *DB) queryEncryptedChannels(key string) (*channelListEntry, error) {
+	regionCodes := normalizeRegionCodes(key)
 
 	var querySQL string
 	args := make([]interface{}, 0, len(regionCodes))
@@ -3258,7 +3275,7 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 	}
 
 	if db.channelsQueryHook != nil {
-		if err := db.channelsQueryHook("encrypted", regionParam); err != nil {
+		if err := db.channelsQueryHook("encrypted", key); err != nil {
 			return nil, err
 		}
 	}
@@ -3287,7 +3304,7 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			"encrypted":    true,
 		})
 	}
-	return channels, nil
+	return &channelListEntry{channels: channels}, nil
 }
 
 // GetChannelMessages returns messages for a specific channel.

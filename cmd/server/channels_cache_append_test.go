@@ -91,11 +91,8 @@ func insertChannelTx(t *testing.T, db *DB, hash, channelHash, decodedJSON string
 }
 
 func resetDBChannelsCache(db *DB) {
-	db.channelsCacheMu.Lock()
-	db.channelsCacheRes = nil
-	db.channelsCacheKey = ""
-	db.channelsCacheExp = time.Time{}
-	db.channelsCacheMu.Unlock()
+	db.channelsCache.reset()
+	db.encChannelsCache.reset()
 }
 
 // TestChannelsCacheAppend_DBPath drives GET /api/channels through the real
@@ -153,9 +150,10 @@ func TestChannelsCacheAppend_DBPath(t *testing.T) {
 			}
 		}
 
-		db.channelsCacheMu.Lock()
-		final := db.channelsCacheRes
-		db.channelsCacheMu.Unlock()
+		var final []map[string]interface{}
+		if e, ok := db.channelsCache.get("", time.Now()); ok {
+			final = e.channels
+		}
 		if cap(final) != cap(cached) || len(final) != len(cached) {
 			t.Fatalf("cache slice header changed unexpectedly: before cap=%d len=%d, after cap=%d len=%d (cache may have expired/refreshed — this test assumes it didn't)", cap(cached), len(cached), cap(final), len(final))
 		}
