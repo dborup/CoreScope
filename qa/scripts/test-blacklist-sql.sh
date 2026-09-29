@@ -264,6 +264,17 @@ SQL
 # Record this exec's argv, then run the real command from FAKE_REAL_PATH.
 name=${0##*/}
 { printf '%s' "$name"; printf ' %q' "$@"; printf '\n'; } >>"$FAKE_ARGV_LOG"
+# With FAKE_CLOCK (a file holding the time in milliseconds), `date +%s` reads
+# that clock and `sleep N` advances it instead of waiting, so a run can start
+# at any point within a second, deterministically.
+if [ -n "${FAKE_CLOCK:-}" ]; then
+    case $name:$* in
+        date:+%s) ms=$(<"$FAKE_CLOCK"); echo $((ms / 1000)); exit 0 ;;
+        sleep:[0-9]*) [[ $1 =~ ^[0-9]+$ ]] || { echo "logexec: fake sleep takes whole seconds: $1" >&2; exit 2; }
+            ms=$(<"$FAKE_CLOCK"); echo $((ms + $1 * 1000)) >"$FAKE_CLOCK"; exit 0 ;;
+        date:*|sleep:*) echo "logexec: fake clock does not support: $name $*" >&2; exit 2 ;;
+    esac
+fi
 set -f; IFS=:
 for d in $FAKE_REAL_PATH; do
     if [ -x "$d/$name" ] && [ ! -d "$d/$name" ]; then exec "$d/$name" "$@"; fi
@@ -359,6 +370,12 @@ if [ "$path" = "$url" ]; then printf '000'; exit 7; fi
 
 hits_file="$FAKE_STATE/hits.${path//[^a-z]/_}"
 hits=0; [ -f "$hits_file" ] && hits=$(<"$hits_file"); hits=$((hits + 1)); echo "$hits" >"$hits_file"
+# On the fake clock every request takes FAKE_CLOCK_CALL_MS; clock.log records
+# when each one started.
+if [ -n "${FAKE_CLOCK:-}" ]; then
+    ms=$(<"$FAKE_CLOCK"); echo "$ms $path" >>"$FAKE_STATE/clock.log"
+    echo $((ms + ${FAKE_CLOCK_CALL_MS:-0})) >"$FAKE_CLOCK"
+fi
 if [ -n "${FAKE_SIGNAL_ON:-}" ] && [ "$path" = "$FAKE_SIGNAL_ON" ] && [ "$hits" = "${FAKE_SIGNAL_NTH:-1}" ]; then
     kill -s "$FAKE_SIGNAL" "$(<"$FAKE_STATE/script.pid")"
 fi
@@ -516,7 +533,7 @@ FAKE
             unset TARGET_DB_PATH ADMIN_API_TOKEN TARGET_CONTAINER_DB_PATH TARGET_HOST_DB_PATH \
                   FAKE_CONTAINER_SQLITE FAKE_SIGNAL_ON FAKE_SIGNAL FAKE_SIGNAL_NTH FAKE_LEAK \
                   FAKE_DETAIL_LEAK FAKE_LIST_CODE FAKE_TOPO FAKE_TOPO_503 FAKE_TOPO_LEAK \
-                  FAKE_SSH_FAIL_CMD FAKE_SSH_FAIL_FROM
+                  FAKE_SSH_FAIL_CMD FAKE_SSH_FAIL_FROM FAKE_CLOCK FAKE_CLOCK_START_MS FAKE_CLOCK_CALL_MS
             export TEST_NODE_PUBKEY="$PK_A" TARGET_SSH_HOST="stub-host" TARGET_SSH_KEY="/nonexistent/key" \
                    TARGET_CONFIG_PATH="$FAKE_CONFIG" TARGET_CONTAINER="$FAKE_CONTAINER" \
                    CURL_TIMEOUT=2 RESTART_WAIT_S=4 TMPDIR="$FAKE_TMPDIR" \
@@ -524,6 +541,11 @@ FAKE
             while [ $# -gt 0 ] && [ "$1" != -- ]; do kv=$1; export "${kv?}"; shift; done
             [ "${1:-}" = -- ] && shift
             wrap=("$@")
+            # FAKE_CLOCK_START_MS=<epoch ms> runs the script on the fake clock.
+            if [ -n "${FAKE_CLOCK_START_MS:-}" ]; then
+                echo "$FAKE_CLOCK_START_MS" >"$FAKE_STATE/clock.ms"
+                export FAKE_CLOCK="$FAKE_STATE/clock.ms"
+            fi
             export PATH="$SHIM_DIR:$ORIG_PATH"
             # Optional kernel-level evidence (Linux): strace every execve of the
             # run, including anything the PATH shims cannot see.
@@ -860,7 +882,14 @@ FAKE
         common_after "topology $v"
     done
     # Warm-up 503s after the restart are waited out; a 503 that never ends fails.
-    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=2
+    # On the fake clock every request takes 50ms and the topology wait starts
+    # 50ms before a whole second (three requests after the start), so the
+    # whole-second deadline leaves the shortest window, as when a real run
+    # starts late in a second (CI run 36250468641 flaked on this).
+    CLOCK_LATE=(FAKE_CLOCK_START_MS=1790000000800 FAKE_CLOCK_CALL_MS=50)
+    first_topo_ms() { awk '$2 == "/api/analytics/topology" { print $1 % 1000; exit }' "$FAKE_STATE/clock.log"; }
+    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=2 "${CLOCK_LATE[@]}"
+    assert_eq   "topology warm-up then 200: fixture starts the wait at .950s" "950" "$(first_topo_ms)"
     assert_eq   "topology warm-up then 200: passes" "0" "$RUN_RC"
     assert_true "topology warm-up then 200: clean" contains "$RUN_OUT" "✅ topology clean"
     run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=999
