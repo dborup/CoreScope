@@ -3506,9 +3506,10 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	defer rows.Close()
 
 	type msg struct {
-		Data        map[string]interface{}
-		Repeats     int
-		LatestEpoch int64 // max observation timestamp (unix seconds) — issue #1366
+		Data             map[string]interface{}
+		Repeats          int
+		LatestEpoch      int64 // max observation timestamp (unix seconds) — issue #1366
+		PathHashSizeMask uint8
 	}
 	msgMap := make(map[int]*msg, len(pageIDs))
 
@@ -3582,8 +3583,11 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			observerName = obsID.String
 		}
 
+		pathHashSizeMask := observedPathHashSizeMask(nullStrVal(pathJSON))
 		if existing, ok := msgMap[txID]; ok {
 			existing.Repeats++
+			existing.PathHashSizeMask |= pathHashSizeMask
+			existing.Data["observedPathHashSizes"] = observedPathHashSizes(existing.PathHashSizeMask)
 			if obsTs.Valid && obsTs.Int64 > existing.LatestEpoch {
 				existing.LatestEpoch = obsTs.Int64
 			}
@@ -3638,23 +3642,25 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		}
 		m := &msg{
 			Data: map[string]interface{}{
-				"sender":              displaySender,
-				"text":                displayText,
-				"timestamp":           nullStr(fs),
-				"first_seen":          nullStr(fs),
-				"sender_timestamp":    senderTs,
-				"packetId":            pktID,
-				"packetHash":          nullStr(pktHash),
-				"repeats":             1,
-				"observers":           []string{},
-				"hops":                hops,
-				"snr":                 nullFloat(snr),
-				"scope":               nullStr(scopeName),
-				"routeType":           nullInt(routeType),
-				"entryPrefix":         entryPrefix,
-				"entryObserverPubkey": entryObserverPubkey,
+				"sender":                displaySender,
+				"text":                  displayText,
+				"timestamp":             nullStr(fs),
+				"first_seen":            nullStr(fs),
+				"sender_timestamp":      senderTs,
+				"packetId":              pktID,
+				"packetHash":            nullStr(pktHash),
+				"repeats":               1,
+				"observers":             []string{},
+				"hops":                  hops,
+				"snr":                   nullFloat(snr),
+				"scope":                 nullStr(scopeName),
+				"routeType":             nullInt(routeType),
+				"entryPrefix":           entryPrefix,
+				"entryObserverPubkey":   entryObserverPubkey,
+				"observedPathHashSizes": observedPathHashSizes(pathHashSizeMask),
 			},
-			Repeats: 1,
+			Repeats:          1,
+			PathHashSizeMask: pathHashSizeMask,
 		}
 		if obsTs.Valid {
 			m.LatestEpoch = obsTs.Int64
