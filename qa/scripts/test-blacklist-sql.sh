@@ -882,20 +882,31 @@ FAKE
         common_after "topology $v"
     done
     # Warm-up 503s after the restart are waited out; a 503 that never ends fails.
-    # On the fake clock every request takes 50ms and the topology wait starts
-    # 50ms before a whole second (three requests after the start), so the
-    # whole-second deadline leaves the shortest window, as when a real run
-    # starts late in a second (CI run 36250468641 flaked on this).
-    CLOCK_LATE=(FAKE_CLOCK_START_MS=1790000000800 FAKE_CLOCK_CALL_MS=50)
+    # Both run on a fake clock where every request takes 50ms. The deadline is
+    # whole seconds ($(date +%s) + RESTART_WAIT_S), so it leaves between
+    # RESTART_WAIT_S-1 and RESTART_WAIT_S seconds, least when the wait starts
+    # late in a second. Two 503s need the retry decided about 3.1s after the
+    # wait starts; RESTART_WAIT_S=4 lost it from a start at .900s on (CI run
+    # 36250468641 flaked on this), so these cases use 5. Each case starts the
+    # topology wait (three requests after the run starts) at .950s and at .000s;
+    # a fixture guard checks that.
     first_topo_ms() { awk '$2 == "/api/analytics/topology" { print $1 % 1000; exit }' "$FAKE_STATE/clock.log"; }
-    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=2 "${CLOCK_LATE[@]}"
-    assert_eq   "topology warm-up then 200: fixture starts the wait at .950s" "950" "$(first_topo_ms)"
-    assert_eq   "topology warm-up then 200: passes" "0" "$RUN_RC"
-    assert_true "topology warm-up then 200: clean" contains "$RUN_OUT" "✅ topology clean"
-    run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=999
-    assert_eq   "topology stuck warming up: fails" "1" "$RUN_RC"
-    assert_true "topology stuck warming up: classified" contains "$RUN_OUT" "/api/analytics/topology HTTP 503"
-    common_after "topology stuck warming up"
+    topo_requests() { awk '$2 == "/api/analytics/topology" { n++ } END { print n + 0 }' "$FAKE_STATE/clock.log"; }
+    for clock in 1790000000800:950 1790000000850:000; do
+        at=${clock#*:}
+        CLOCK=(RESTART_WAIT_S=5 FAKE_CLOCK_START_MS="${clock%:*}" FAKE_CLOCK_CALL_MS=50)
+        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=2 "${CLOCK[@]}"
+        assert_eq   "topology warm-up then 200 (wait from .$at): fixture" "$((10#$at))" "$(first_topo_ms)"
+        assert_eq   "topology warm-up then 200 (wait from .$at): passes" "0" "$RUN_RC"
+        assert_true "topology warm-up then 200 (wait from .$at): clean" contains "$RUN_OUT" "✅ topology clean"
+        assert_eq   "topology warm-up then 200 (wait from .$at): two 503s, then 200" "3" "$(topo_requests)"
+        run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO_503=999 "${CLOCK[@]}"
+        assert_eq   "topology stuck warming up (wait from .$at): fixture" "$((10#$at))" "$(first_topo_ms)"
+        assert_eq   "topology stuck warming up (wait from .$at): fails" "1" "$RUN_RC"
+        assert_true "topology stuck warming up (wait from .$at): classified" contains "$RUN_OUT" "/api/analytics/topology HTTP 503"
+        assert_true "topology stuck warming up (wait from .$at): retried before giving up" test "$(topo_requests)" -ge 2
+        common_after "topology stuck warming up (wait from .$at)"
+    done
     # Arrays the server nulls out after filtering are a valid, clean shape.
     run_full TARGET_HOST_DB_PATH="$HOST_DB_PATH" FAKE_TOPO=nulls
     assert_eq   "topology null arrays: clean" "0" "$RUN_RC"
