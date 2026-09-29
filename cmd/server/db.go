@@ -103,6 +103,12 @@ type DB struct {
 	// channelsPinFallbacks counts GetChannels queries that fell back to the
 	// unpinned SQL because channelHashIndex was not usable; the first is logged.
 	channelsPinFallbacks atomic.Int64
+	// Test seams (#109), nil in production. channelsMissHook runs after a
+	// cache miss, before the query is built; channelsQueryHook runs right
+	// before the query executes, once per real query. kind is "channels"
+	// (GetChannels) or "encrypted" (GetEncryptedChannels).
+	channelsMissHook  func(kind, region string)
+	channelsQueryHook func(kind, region string) error
 }
 
 // isV3, hasResolvedPath, hasObsRawHex, hasScopeName, hasDefaultScope,
@@ -3107,6 +3113,9 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 		return res, nil
 	}
 	db.channelsCacheMu.Unlock()
+	if db.channelsMissHook != nil {
+		db.channelsMissHook("channels", regionParam)
+	}
 
 	regionCodes := normalizeRegionCodes(regionParam)
 	regionPlaceholder := ""
@@ -3120,6 +3129,11 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 		regionPlaceholder = strings.Join(placeholders, ",")
 	}
 
+	if db.channelsQueryHook != nil {
+		if err := db.channelsQueryHook("channels", regionParam); err != nil {
+			return nil, err
+		}
+	}
 	// Pinned to channelHashIndex first; INDEXED BY fails at prepare time
 	// (before any row is read) when that index is missing or unusable, and
 	// then the unpinned query - the pre-pinning SQL - runs instead.
@@ -3189,6 +3203,9 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
+	if db.channelsMissHook != nil {
+		db.channelsMissHook("encrypted", regionParam)
+	}
 	regionCodes := normalizeRegionCodes(regionParam)
 
 	var querySQL string
@@ -3240,6 +3257,11 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			ORDER BY last_activity DESC`
 	}
 
+	if db.channelsQueryHook != nil {
+		if err := db.channelsQueryHook("encrypted", regionParam); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := db.conn.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
