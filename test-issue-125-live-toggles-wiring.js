@@ -37,7 +37,8 @@ function fn(name) {
 }
 
 test('init() calls wireLiveControls() before its first await', () => {
-  const init = fn('init');
+  // full-line comments may mention "await"; only code counts
+  const init = fn('init').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
   const wire = init.indexOf('wireLiveControls();');
   const firstAwait = init.search(/\bawait\b/);
   assert(wire !== -1, 'init() does not call wireLiveControls()');

@@ -42,7 +42,7 @@ const TOGGLES = [
   { id: 'liveRealisticToggle', key: 'live-realistic-propagation', dflt: false },
   { id: 'liveColorHashToggle', key: 'meshcore-color-packets-by-hash', dflt: true },
   { id: 'liveFavoritesToggle', key: 'live-favorites-only', dflt: false },
-  { id: 'liveForeignToggle', key: 'live-highlight-foreign', dflt: false },
+  { id: 'liveForeignToggle', key: 'live-highlight-foreign', dflt: true },
   { id: 'liveMatrixToggle', key: 'live-matrix-mode', dflt: false },
   { id: 'liveMatrixRainToggle', key: 'live-matrix-rain', dflt: false },
 ];
