@@ -683,6 +683,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 	// Global observer IATA whitelist: if configured, drop messages from observers
 	// in non-whitelisted IATA regions. Applies to ALL message types (status + packets).
 	if len(parts) > 1 && !cfg.IsObserverIATAAllowed(parts[1]) {
+		// Not silently (#110): a throttled, bounded warning per region.
+		cfg.warnIATADrop(tag, parts[1], time.Now())
 		return
 	}
 
