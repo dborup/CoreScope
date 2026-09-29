@@ -110,6 +110,7 @@ node test-network-digest-tool.js
 node test-position-gaps-tool.js
 node test-gps-sanity-tool.js
 node test-map-scope-filter.js
+node test-issue-111-drawer-version.js
 
 echo ""
 echo "═══════════════════════════════════════"
