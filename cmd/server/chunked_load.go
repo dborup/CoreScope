@@ -637,6 +637,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				}
 			}
 
+			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
 			tx.obsKeys[dk] = true
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {

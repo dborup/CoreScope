@@ -1937,6 +1937,18 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .ch-bot-message .ch-msg-bubble { border-style: dashed; font-style: italic; }
 .ch-encrypted-text { font-size: 11px; color: var(--text-muted); }
 .ch-msg-meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.ch-path-hash-badge {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--badge-radius);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  vertical-align: baseline;
+}
 .ch-analyze-link { color: var(--link-color); text-decoration: none; margin-left: 8px; }
 .ch-analyze-link:hover { text-decoration: underline; }
 .ch-scroll-btn {

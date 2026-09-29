@@ -22,6 +22,17 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 	total := len(store.packets)
 	store.mu.RUnlock()
 
+	// Keep evidence only for hashes that actually collide during this one
+	// migration run. The legacy migration retains duplicate in-memory rows, so
+	// a later batch must also update ghosts created by an earlier collision.
+	// This registry is bounded by collision members and is discarded when the
+	// migration returns.
+	type collisionEvidence struct {
+		mask    uint8
+		members map[*StoreTx]struct{}
+	}
+	collisionEvidenceByHash := make(map[string]*collisionEvidence)
+
 	migrated := 0
 	for offset := 0; offset < total; offset += batchSize {
 		end := offset + batchSize
@@ -52,6 +63,12 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 		if len(updates) == 0 {
 			continue
 		}
+		// A UNIQUE collision merges DB observations into one survivor, while
+		// this legacy migration intentionally keeps its existing in-memory
+		// cardinality/index behaviour. Track the survivor IDs so the observed
+		// path-width evidence can nevertheless be made consistent across every
+		// same-content in-memory row after the existing update loop.
+		collisionSurvivors := make(map[string][]int)
 
 		// Write batch to DB in a single transaction.
 		dbTx, err := store.db.conn.Begin()
@@ -75,6 +92,7 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 				if err2 := dbTx.QueryRow("SELECT id FROM transmissions WHERE hash = ?", u.newHash).Scan(&survID); err2 == nil {
 					dbTx.Exec("UPDATE observations SET transmission_id = ? WHERE transmission_id = ?", survID, u.tx.ID)
 					dbTx.Exec("DELETE FROM transmissions WHERE id = ?", u.tx.ID)
+					collisionSurvivors[u.newHash] = append(collisionSurvivors[u.newHash], survID)
 					u.newHash = "" // mark for in-memory removal only
 				}
 			}
@@ -103,6 +121,32 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 			} else {
 				u.tx.Hash = u.newHash
 				store.byHash[u.newHash] = u.tx
+			}
+		}
+		for newHash, survivorIDs := range collisionSurvivors {
+			evidence := collisionEvidenceByHash[newHash]
+			if evidence == nil {
+				evidence = &collisionEvidence{members: make(map[*StoreTx]struct{})}
+				collisionEvidenceByHash[newHash] = evidence
+			}
+			addMember := func(tx *StoreTx) {
+				if tx == nil {
+					return
+				}
+				evidence.mask |= tx.pathHashSizeMask
+				evidence.members[tx] = struct{}{}
+			}
+			for _, u := range updates {
+				if u.newHash == newHash {
+					addMember(u.tx)
+				}
+			}
+			for _, survivorID := range survivorIDs {
+				addMember(store.byTxID[survivorID])
+			}
+			addMember(store.byHash[newHash])
+			for member := range evidence.members {
+				member.pathHashSizeMask |= evidence.mask
 			}
 		}
 		store.mu.Unlock()

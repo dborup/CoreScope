@@ -64,8 +64,14 @@ type StoreTx struct {
 	// bytes on 64-bit, see TestStoreTxLayoutFitsRouteMaskInPadding).
 	routeMask      uint8
 	routeMaskKnown bool
-	decodedOnce    sync.Once              // guards parsedDecoded
-	parsedDecoded  map[string]interface{} // cached json.Unmarshal of DecodedJSON
+	// pathHashSizeMask aggregates observation.path_json evidence without
+	// relying on transmissions.raw_hex, whose first-ingested frame is not a
+	// stable description when one content hash is heard on multiple routes.
+	// Bits 0..2 mean an observed 1-, 2-, or 3-byte hop width respectively.
+	// It consumes existing alignment padding so StoreTx remains 320 bytes.
+	pathHashSizeMask uint8
+	decodedOnce      sync.Once              // guards parsedDecoded
+	parsedDecoded    map[string]interface{} // cached json.Unmarshal of DecodedJSON
 	// Dedup map: "observerID|pathJSON" → true for O(1) duplicate checks
 	obsKeys     map[string]bool
 	observerSet map[string]bool // unique observer IDs (for UniqueObserverCount)
@@ -1028,6 +1034,7 @@ func (s *PacketStore) Load() error {
 				}
 			}
 
+			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
 			tx.obsKeys[dk] = true
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
@@ -1336,6 +1343,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
 			}
 
+			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
 			tx.obsKeys[dk] = true
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
@@ -2966,6 +2974,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			}
 
 			tx.Observations = append(tx.Observations, obs)
+			tx.mergeObservedPathHashSize(r.pathJSON)
 			tx.obsKeys[dk] = true
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
 				tx.observerSet[obs.ObserverID] = true
@@ -3074,6 +3083,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				"direction":         strOrNil(obs.Direction),
 				"observation_count": tx.ObservationCount,
 				"scope_name":        strOrNil(tx.ScopeName),
+			}
+			if tx.PayloadType != nil && *tx.PayloadType == PayloadGRP_TXT {
+				pkt["observed_path_hash_sizes"] = tx.observedPathHashSizes()
 			}
 			// Same entry-point area resolution as the REST channel message
 			// list (annotateMessageAreas), applied live so a message
@@ -3326,6 +3338,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		}
 
 		tx.Observations = append(tx.Observations, obs)
+		tx.mergeObservedPathHashSize(r.pathJSON)
 		tx.obsKeys[dk] = true
 		if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
 			tx.observerSet[obs.ObserverID] = true
@@ -3383,6 +3396,9 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			"direction":         strOrNil(obs.Direction),
 			"observation_count": tx.ObservationCount,
 			"scope_name":        strOrNil(tx.ScopeName),
+		}
+		if tx.PayloadType != nil && *tx.PayloadType == PayloadGRP_TXT {
+			pkt["observed_path_hash_sizes"] = tx.observedPathHashSizes()
 		}
 		// Same live entry-point area resolution as IngestNewFromDB above --
 		// see the comment there.
@@ -4072,6 +4088,12 @@ func txToMap(tx *StoreTx, includeObservations ...bool) map[string]interface{} {
 		"path_json":         strOrNil(tx.PathJSON),
 		"direction":         strOrNil(tx.Direction),
 		"scope_name":        strOrNil(tx.ScopeName),
+	}
+	// Locally decrypted channel messages are loaded through /api/packets,
+	// not /api/channels/{hash}/messages. Carry the same aggregate evidence on
+	// that packet shape so both flows render the same observed-path label.
+	if tx.PayloadType != nil && *tx.PayloadType == PayloadGRP_TXT {
+		m["observed_path_hash_sizes"] = tx.observedPathHashSizes()
 	}
 	// Include parsed path array to match Node.js output shape
 	if hops := txGetParsedPath(tx); len(hops) > 0 {
@@ -5829,20 +5851,21 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 
 			entry := &msgEntry{
 				Data: map[string]interface{}{
-					"sender":           displaySender,
-					"text":             displayText,
-					"timestamp":        strOrNil(displayTs),
-					"first_seen":       strOrNil(tx.FirstSeen),
-					"sender_timestamp": senderTs,
-					"packetId":         tx.ID,
-					"packetHash":       strOrNil(tx.Hash),
-					"repeats":          1,
-					"observers":        observers,
-					"hops":             hops,
-					"snr":              snrVal,
-					"scope":            strOrNil(tx.ScopeName),
-					"routeType":        intPtrOrNil(tx.RouteType),
-					"entryPrefix":      pathFirstHop(tx.PathJSON),
+					"sender":                displaySender,
+					"text":                  displayText,
+					"timestamp":             strOrNil(displayTs),
+					"first_seen":            strOrNil(tx.FirstSeen),
+					"sender_timestamp":      senderTs,
+					"packetId":              tx.ID,
+					"packetHash":            strOrNil(tx.Hash),
+					"repeats":               1,
+					"observers":             observers,
+					"hops":                  hops,
+					"snr":                   snrVal,
+					"scope":                 strOrNil(tx.ScopeName),
+					"routeType":             intPtrOrNil(tx.RouteType),
+					"entryPrefix":           pathFirstHop(tx.PathJSON),
+					"observedPathHashSizes": tx.observedPathHashSizes(),
 				},
 				Repeats:   1,
 				Observers: observers,
