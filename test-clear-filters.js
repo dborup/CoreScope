@@ -144,6 +144,17 @@ function extractUpdatePacketsUrl() {
   return src.substring(fnStart + 1, fnEnd);
 }
 
+// Since #121 the handler empties the closure selection Sets and rebuilds
+// both menus through the multi-select helpers in the same scope.
+const MENU_PARAMS = ['selectedObservers', 'buildObserverMenu', 'updateObsTrigger',
+  'selectedTypes', 'buildTypeMenu', 'updateTypeTrigger'];
+function menuStubs() {
+  const s = { selectedObservers: new Set(['obs1']), selectedTypes: new Set(['4']), rebuilt: [] };
+  s.args = [s.selectedObservers, () => s.rebuilt.push('observerMenu'), () => s.rebuilt.push('observerTrigger'),
+    s.selectedTypes, () => s.rebuilt.push('typeMenu'), () => s.rebuilt.push('typeTrigger')];
+  return s;
+}
+
 const clearBody = extractClearHandler();
 const updateUrlBody = extractUpdatePacketsUrl();
 
@@ -163,14 +174,15 @@ test('clear handler resets all filter keys to undefined/null/false', () => {
   // Build a function with the handler body and needed locals in scope
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW', '_observerFilterSet',
-    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets',
+    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets', ...MENU_PARAMS,
     `${clearBody}; return { savedTimeWindowMin, _observerFilterSet };`
   );
 
   const result = fn(
     filters, savedTimeWindowMin, DEFAULT_TIME_WINDOW, _observerFilterSet,
     ctx.localStorage, ctx.document, ctx.RegionFilter,
-    () => {}, () => {} // stubs for updatePacketsUrl and loadPackets
+    () => {}, () => {}, // stubs for updatePacketsUrl and loadPackets
+    ...menuStubs().args
   );
 
   assert.strictEqual(filters.hash, undefined, 'hash not cleared');
@@ -194,13 +206,13 @@ test('clear handler resets savedTimeWindowMin to DEFAULT_TIME_WINDOW', () => {
   // The handler assigns to savedTimeWindowMin — we need to check the returned value
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW', '_observerFilterSet',
-    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets',
+    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets', ...MENU_PARAMS,
     `${clearBody}; return { savedTimeWindowMin };`
   );
   const result = fn(
     filters, 120, DEFAULT_TIME_WINDOW, _observerFilterSet,
     ctx.localStorage, ctx.document, ctx.RegionFilter,
-    () => {}, () => {}
+    () => {}, () => {}, ...menuStubs().args
   );
 
   assert.strictEqual(result.savedTimeWindowMin, 15, 'savedTimeWindowMin not reset to default');
@@ -213,10 +225,10 @@ test('clear handler resets fTimeWindow dropdown value', () => {
   const filters = { myNodes: false };
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW', '_observerFilterSet',
-    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets',
+    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets', ...MENU_PARAMS,
     `${clearBody}; return { savedTimeWindowMin };`
   );
-  fn(filters, 120, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {});
+  fn(filters, 120, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {}, ...menuStubs().args);
   assert.strictEqual(elements['fTimeWindow'].value, '15', 'fTimeWindow DOM not reset');
 });
 
@@ -227,25 +239,27 @@ test('clear handler clears observer and type localStorage', () => {
   const filters = { myNodes: false };
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW', '_observerFilterSet',
-    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets',
+    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets', ...MENU_PARAMS,
     `${clearBody};`
   );
-  fn(filters, 15, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {});
+  fn(filters, 15, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {}, ...menuStubs().args);
   assert.strictEqual(ctx.localStorage.getItem('meshcore-observer-filter'), null);
   assert.strictEqual(ctx.localStorage.getItem('meshcore-type-filter'), null);
 });
 
-test('clear handler unchecks observer/type multi-select checkboxes', () => {
-  const { ctx, checkboxes } = makeSandbox();
+test('clear handler empties the observer/type selections and rebuilds both menus', () => {
+  const { ctx } = makeSandbox();
   const filters = { myNodes: false };
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW', '_observerFilterSet',
-    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets',
+    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets', ...MENU_PARAMS,
     `${clearBody};`
   );
-  fn(filters, 15, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {});
-  for (const cb of checkboxes['observerMenu']) assert.strictEqual(cb.checked, false, 'observer checkbox still checked');
-  for (const cb of checkboxes['typeMenu']) assert.strictEqual(cb.checked, false, 'type checkbox still checked');
+  const m = menuStubs();
+  fn(filters, 15, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {}, ...m.args);
+  assert.strictEqual(m.selectedObservers.size, 0, 'observer selection not emptied');
+  assert.strictEqual(m.selectedTypes.size, 0, 'type selection not emptied');
+  assert.deepStrictEqual(m.rebuilt, ['observerMenu', 'observerTrigger', 'typeMenu', 'typeTrigger']);
 });
 
 test('clear handler resets RegionFilter', () => {
@@ -254,10 +268,10 @@ test('clear handler resets RegionFilter', () => {
   const filters = { myNodes: false };
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW', '_observerFilterSet',
-    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets',
+    'localStorage', 'document', 'RegionFilter', 'updatePacketsUrl', 'loadPackets', ...MENU_PARAMS,
     `${clearBody};`
   );
-  fn(filters, 15, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {});
+  fn(filters, 15, 15, null, ctx.localStorage, ctx.document, ctx.RegionFilter, () => {}, () => {}, ...menuStubs().args);
   assert.deepStrictEqual(regionState.selected, [], 'RegionFilter not cleared');
 });
 
@@ -269,11 +283,11 @@ test('updatePacketsUrl shows clear button when time window != default', () => {
   const DEFAULT_TIME_WINDOW = 15;
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW',
-    'document', 'history', 'RegionFilter', 'buildPacketsQuery',
+    'document', 'history', 'RegionFilter', 'buildPacketsQuery', 'location',
     updateUrlBody
   );
   fn(filters, savedTimeWindowMin, DEFAULT_TIME_WINDOW,
-    ctx.document, ctx.history, ctx.RegionFilter, () => '');
+    ctx.document, ctx.history, ctx.RegionFilter, () => '', ctx.location);
   assert.strictEqual(elements['clearFiltersBtn'].style.display, '', 'clear button should be visible when time window != default');
 });
 
@@ -283,10 +297,10 @@ test('updatePacketsUrl hides clear button when all filters default', () => {
   const filters = {};
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW',
-    'document', 'history', 'RegionFilter', 'buildPacketsQuery',
+    'document', 'history', 'RegionFilter', 'buildPacketsQuery', 'location',
     updateUrlBody
   );
-  fn(filters, 15, 15, ctx.document, ctx.history, ctx.RegionFilter, () => '');
+  fn(filters, 15, 15, ctx.document, ctx.history, ctx.RegionFilter, () => '', ctx.location);
   assert.strictEqual(elements['clearFiltersBtn'].style.display, 'none', 'clear button should be hidden');
 });
 

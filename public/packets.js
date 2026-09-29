@@ -1845,6 +1845,9 @@
       if (filters.type) localStorage.setItem('meshcore-type-filter', filters.type); else localStorage.removeItem('meshcore-type-filter');
       buildTypeMenu();
       updateTypeTrigger();
+      // Type is not in the URL, but updatePacketsUrl() also shows the Clear
+      // button, which must be reachable with only a type selected (#121).
+      updatePacketsUrl();
       renderTableRows();
     });
 
@@ -1951,15 +1954,15 @@
       document.getElementById('fChannel').value = '';
       document.getElementById('fMyNodes').classList.remove('active');
 
-      // Reset observer multi-select
-      var obMenu = document.getElementById('observerMenu');
-      if (obMenu) obMenu.querySelectorAll('input[type=checkbox]').forEach(function(cb) { cb.checked = false; });
-      document.getElementById('observerTrigger').textContent = 'All Observers ▾';
-
-      // Reset type multi-select
-      var typeMenu = document.getElementById('typeMenu');
-      if (typeMenu) typeMenu.querySelectorAll('input[type=checkbox]').forEach(function(cb) { cb.checked = false; });
-      document.getElementById('typeTrigger').textContent = 'All Types ▾';
+      // Reset observer and type multi-selects (#121): empty the selection
+      // Sets, not only the checkboxes, or the next pick adds to the old
+      // selection; rebuilding the menus checks "All Observers"/"All Types".
+      selectedObservers.clear();
+      buildObserverMenu();
+      updateObsTrigger();
+      selectedTypes.clear();
+      buildTypeMenu();
+      updateTypeTrigger();
 
       // Reset time window to default
       savedTimeWindowMin = DEFAULT_TIME_WINDOW;

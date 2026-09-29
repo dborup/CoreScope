@@ -12,6 +12,7 @@ echo "── Unit Tests ──"
 node test-packet-filter.js
 node test-packet-filter-ux.js
 node test-issue-121-clear-filters-selection.js
+node test-clear-filters.js
 node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js

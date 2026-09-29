@@ -139,6 +139,7 @@ jobs:
           node test-packet-filter.js
           node test-packet-filter-time.js
           node test-issue-121-clear-filters-selection.js
+          node test-clear-filters.js
           node test-confidence-indicator.js
           node test-1659-analytics-warmup.js
           node test-app-api-inflight-cleanup-rejection.js
