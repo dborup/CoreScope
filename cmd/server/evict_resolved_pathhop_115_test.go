@@ -18,9 +18,11 @@ import (
 // counts, transported scopes, retained memory) until the next full rebuild.
 
 const (
-	evict115PK1  = "a3f19c2b7d4e5081aa22bb33cc44dd55ee66ff778899000112233445566778899"
-	evict115PK2  = "b7002211ffeeddccbbaa99887766554433221100aabbccddeeff001122334455"
-	evict115Only = "c0ffee00112233445566778899aabbccddeeff00112233445566778899aabbcc" // only old txs
+	// Resolved pubkeys start with the hop they resolve (the ingestor's
+	// prefixIndex maps a hop prefix to the pubkeys that start with it).
+	evict115PK1  = "aaf19c2b7d4e5081aa22bb33cc44dd55ee66ff778899000112233445566778899"
+	evict115PK2  = "bb002211ffeeddccbbaa99887766554433221100aabbccddeeff001122334455"
+	evict115Only = "ccffee00112233445566778899aabbccddeeff00112233445566778899aabbcc" // only old txs
 )
 
 // evict115Store builds count transmissions (raw path aa,bb,cc), half of them
@@ -124,6 +126,24 @@ func TestEvictRemovesRawAndResolvedPathHops_115(t *testing.T) {
 	}
 }
 
+// A transmission is also indexed under pubkeys resolved from an observation
+// whose path differs from the display path (tx.PathJSON); those go too.
+func TestEvictRemovesResolvedKeysOfOtherObservationPaths_115(t *testing.T) {
+	store, old, young := evict115Store(t, 40, true)
+	const otherPK = "dd00112233445566778899aabbccddeeff00112233445566778899aabbccddee"
+	tx := old[0]
+	tx.Observations = append(tx.Observations, &StoreObs{ID: 900001, TransmissionID: tx.ID, PathJSON: `["dd"]`})
+	store.indexResolvedPathHops(tx, []string{otherPK}, map[string]bool{})
+	if countIn(store.byPathHop, tx) != 3+3*2+1 {
+		t.Fatal("fixture: other-path resolved key not indexed")
+	}
+	store.EvictStale()
+	assertEvictedGone115(t, store, old, young, young115Refs)
+	if _, ok := store.byPathHop[otherPK]; ok {
+		t.Fatal("the bucket of a pubkey resolved from another observation's path survived")
+	}
+}
+
 func TestRunEvictionRemovesResolvedPathHops_115(t *testing.T) {
 	store, old, young := evict115Store(t, 40, true)
 	if got := store.RunEviction(); got != len(old) {
@@ -204,16 +224,18 @@ func TestRelayStatsConcurrentWithEviction_115(t *testing.T) {
 	assertEvictedGone115(t, store, old, young, young115Refs)
 }
 
-// BenchmarkEvictPathHops_115 evicts a realistic batch (1% of the store,
-// the oldest) from a store of n transmissions with 3 raw 1-byte hops and
-// 2 resolved hops each (two observations, so 4 resolved entries).
+// BenchmarkEvictPathHops_115 evicts the oldest transmissions from a store
+// of n with 3 raw 1-byte hops and 2 resolved hops each (two observations,
+// so 4 resolved entries): a large batch (1% of the store) and a typical
+// one-minute batch (0.01%; eviction runs every minute over 168 h).
 func BenchmarkEvictPathHops_115(b *testing.B) {
 	prev := log.Writer()
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(prev)
-	for _, n := range []int{20000, 100000} {
-		b.Run(fmt.Sprintf("txs=%d", n), func(b *testing.B) {
-			batch := n / 100
+	for _, c := range []struct{ n, per10k int }{{20000, 100}, {100000, 100}, {20000, 1}, {100000, 1}} {
+		n := c.n
+		b.Run(fmt.Sprintf("txs=%d/batch=%d", n, n*c.per10k/10000), func(b *testing.B) {
+			batch := n * c.per10k / 10000
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				store := evict115BenchStore(n)
@@ -234,15 +256,18 @@ func mustParseRFC3339(s string) time.Time {
 	return t
 }
 
-// evict115BenchStore: transmissions one second apart, 3 raw hops drawn
-// from 256 one-byte prefixes, 2 resolved keys drawn from 2000 relays.
+// evict115BenchStore: transmissions one second apart, 3 raw one-byte hops,
+// 2 of them resolved to one of 4000 relays whose pubkey starts with the hop.
 func evict115BenchStore(n int) *PacketStore {
 	start := time.Now().UTC().Add(-time.Duration(n+10) * time.Second)
 	store := makeTestStore(0, start, 0)
 	store.byPathHop = make(map[string][]*StoreTx)
 	hopsSeen := map[string]bool{}
 	for i := 0; i < n; i++ {
-		h1, h2, h3 := i%256, (i*7+3)%256, (i*13+5)%256
+		// hops 1 and 2 resolve to relays r1 and r2 (4000 relays in all, each
+		// starting with its hop prefix), hop 3 stays unresolved.
+		r1, r2 := i%2000, 2000+(5000+i*31)%2000
+		h1, h2, h3 := r1%256, r2%256, (i*13+5)%256
 		tx := &StoreTx{
 			ID:        i + 1,
 			Hash:      fmt.Sprintf("bench%07d", i),
@@ -253,7 +278,8 @@ func evict115BenchStore(n int) *PacketStore {
 		store.byHash[tx.Hash] = tx
 		store.byTxID[tx.ID] = tx
 		addTxToPathHopIndex(store.byPathHop, tx)
-		pks := []string{fmt.Sprintf("%064x", i%2000), fmt.Sprintf("%064x", 5000+(i*31)%2000)}
+		// resolved pubkeys start with the hop they resolve
+		pks := []string{fmt.Sprintf("%02x%062x", h1, r1), fmt.Sprintf("%02x%062x", h2, r2)}
 		store.indexResolvedPathHops(tx, pks, hopsSeen)
 		store.indexResolvedPathHops(tx, pks, hopsSeen)
 	}

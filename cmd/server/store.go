@@ -4529,23 +4529,53 @@ func removeTxFromSlice(idx map[string][]*StoreTx, key string, tx *StoreTx) {
 }
 
 // evictFromPathHopIndex removes the evicted transmissions from every
-// byPathHop bucket (#115). A transmission is in its raw hop keys and, via
-// indexResolvedPathHops, in resolved full-pubkey keys, once per observation
-// that resolved it. The resolved pubkeys are kept nowhere per transmission
-// (#800 keeps only a hash-only membership index, and they can come from
-// path_json reconstruction as well as resolved_path), so one pass over all
-// buckets per eviction batch is the only complete way. Empty buckets are
-// deleted and the discarded tail of each compacted bucket is zeroed, so no
-// backing array keeps an evicted transmission alive.
+// byPathHop bucket they can be in (#115). A transmission is in its raw hop
+// keys and, via indexResolvedPathHops, in resolved full-pubkey keys, once
+// per observation that resolved it. The resolved pubkeys are kept nowhere
+// per transmission (#800 keeps only a hash-only membership index, and they
+// can come from path_json reconstruction as well as resolved_path), but
+// each one resolves a hop of one of the transmission's observed paths, so
+// it starts with that hop's prefix. Only buckets whose key starts
+// (case-insensitively) with a hop of an evicted transmission are swept;
+// every duplicate there is removed. Empty buckets are deleted and the
+// discarded tail of each compacted bucket is zeroed, so no backing array
+// keeps an evicted transmission alive.
 //
-// Cost: O(total byPathHop entries) with one map lookup each, once per
-// eviction batch, under the write lock eviction already holds; the same
-// shape as compactDistIndex. BenchmarkEvictPathHops_115 measures it.
+// Cost, under the write lock eviction already holds: one short-prefix
+// lookup per key, plus a sweep of the candidate buckets only. A minute's
+// eviction batch touches few prefixes; a batch spanning every 1-byte
+// prefix sweeps everything, the same shape as compactDistIndex.
+// BenchmarkEvictPathHops_115 measures both.
 func evictFromPathHopIndex(idx map[string][]*StoreTx, evicted map[*StoreTx]bool) {
 	if len(evicted) == 0 {
 		return
 	}
+	prefixes := make(map[string]bool)
+	var lens []int
+	addHops := func(hops []string) {
+		for _, h := range hops {
+			h = strings.ToLower(h)
+			if h == "" || prefixes[h] {
+				continue
+			}
+			prefixes[h] = true
+			if !slices.Contains(lens, len(h)) {
+				lens = append(lens, len(h))
+			}
+		}
+	}
+	for tx := range evicted {
+		addHops(txGetParsedPath(tx))
+		for _, obs := range tx.Observations {
+			if obs != nil && obs.PathJSON != "" && obs.PathJSON != tx.PathJSON {
+				addHops(parsePathJSON(obs.PathJSON))
+			}
+		}
+	}
 	for key, list := range idx {
+		if !hasEvictedHopPrefix(key, prefixes, lens) {
+			continue
+		}
 		kept := slices.DeleteFunc(list, func(tx *StoreTx) bool { return evicted[tx] })
 		if len(kept) == len(list) {
 			continue
@@ -4556,6 +4586,17 @@ func evictFromPathHopIndex(idx map[string][]*StoreTx, evicted map[*StoreTx]bool)
 			idx[key] = kept
 		}
 	}
+}
+
+// hasEvictedHopPrefix reports whether key starts, case-insensitively, with
+// one of prefixes (all lowercase, of the lengths in lens).
+func hasEvictedHopPrefix(key string, prefixes map[string]bool, lens []int) bool {
+	for _, n := range lens {
+		if len(key) >= n && prefixes[strings.ToLower(key[:n])] {
+			return true
+		}
+	}
+	return false
 }
 
 // updateDistanceIndexForTxs removes old distance records for the given
