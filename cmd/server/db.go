@@ -95,14 +95,45 @@ type DB struct {
 	routeMaskStatus    RouteMaskBackfillStatus
 	routeMaskStatusExp time.Time
 
-	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
-	channelsCacheMu  sync.Mutex
-	channelsCacheKey string
-	channelsCacheRes []map[string]interface{}
-	channelsCacheExp time.Time
+	// Channel list caches (60s TTL, #762): keyed by normalized region, with
+	// concurrent misses coalesced into one query per key (#109). See
+	// channels_list_cache.go.
+	channelsCache    channelListCache
+	encChannelsCache channelListCache
 	// channelsPinFallbacks counts GetChannels queries that fell back to the
 	// unpinned SQL because channelHashIndex was not usable; the first is logged.
 	channelsPinFallbacks atomic.Int64
+	// Test seams (#109), nil in production. channelsMissHook runs after a
+	// cache miss, before the query is built; channelsQueryHook runs right
+	// before the query executes, once per real query. kind is "channels"
+	// (GetChannels) or "encrypted" (GetEncryptedChannels).
+	channelsMissHook  func(kind, region string)
+	channelsQueryHook func(kind, region string) error
+	// channelsRowsHook wraps the result rows of each real query, so a test
+	// can fail the iteration part-way.
+	channelsRowsHook func(kind string, rows channelRows) channelRows
+}
+
+// channelRows is the part of *sql.Rows the channel list scans use.
+type channelRows interface {
+	Next() bool
+	Scan(dest ...interface{}) error
+	Err() error
+}
+
+// channelsRows returns rows, wrapped by channelsRowsHook when a test set it.
+func (db *DB) channelsRows(kind string, rows *sql.Rows) channelRows {
+	if db.channelsRowsHook == nil {
+		return rows
+	}
+	return db.channelsRowsHook(kind, rows)
+}
+
+// channelListEntry is one cached GetChannels / GetEncryptedChannels result.
+// Never modified after it is stored (see channelListCache).
+type channelListEntry struct {
+	channels []map[string]interface{}
+	expires  time.Time
 }
 
 // isV3, hasResolvedPath, hasObsRawHex, hasScopeName, hasDefaultScope,
@@ -3098,17 +3129,19 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
-
-	// Check cache (60s TTL)
-	db.channelsCacheMu.Lock()
-	if db.channelsCacheRes != nil && db.channelsCacheKey == regionParam && time.Now().Before(db.channelsCacheExp) {
-		res := db.channelsCacheRes
-		db.channelsCacheMu.Unlock()
-		return res, nil
+	key := channelsRegionKey(regionParam)
+	e, err := db.channelsCache.load(key, db.channelsMissFunc("channels", key), func() (*channelListEntry, error) {
+		return db.queryChannels(key)
+	})
+	if err != nil {
+		return nil, err
 	}
-	db.channelsCacheMu.Unlock()
+	return e.channels, nil
+}
 
-	regionCodes := normalizeRegionCodes(regionParam)
+// queryChannels runs the GetChannels query for a normalized region key.
+func (db *DB) queryChannels(key string) (*channelListEntry, error) {
+	regionCodes := normalizeRegionCodes(key)
 	regionPlaceholder := ""
 	args := make([]interface{}, 0, len(regionCodes))
 	if len(regionCodes) > 0 {
@@ -3120,6 +3153,11 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 		regionPlaceholder = strings.Join(placeholders, ",")
 	}
 
+	if db.channelsQueryHook != nil {
+		if err := db.channelsQueryHook("channels", key); err != nil {
+			return nil, err
+		}
+	}
 	// Pinned to channelHashIndex first; INDEXED BY fails at prepare time
 	// (before any row is read) when that index is missing or unusable, and
 	// then the unpinned query - the pre-pinning SQL - runs instead.
@@ -3134,12 +3172,13 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	it := db.channelsRows("channels", rows)
 
 	channels := make([]map[string]interface{}, 0)
-	for rows.Next() {
+	for it.Next() {
 		var chHash, lastActivity, sampleJSON sql.NullString
 		var msgCount int
-		if err := rows.Scan(&chHash, &msgCount, &lastActivity, &sampleJSON); err != nil {
+		if err := it.Scan(&chHash, &msgCount, &lastActivity, &sampleJSON); err != nil {
 			continue
 		}
 		channelName := nullStr(chHash)
@@ -3171,15 +3210,21 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 			"messageCount": msgCount, "lastActivity": nullStr(lastActivity),
 		})
 	}
+	// A step that fails part-way ends the loop like the last row does; the
+	// truncated list must not be returned (and cached) as a success.
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
 
-	// Store in cache (60s TTL)
-	db.channelsCacheMu.Lock()
-	db.channelsCacheRes = channels
-	db.channelsCacheKey = regionParam
-	db.channelsCacheExp = time.Now().Add(60 * time.Second)
-	db.channelsCacheMu.Unlock()
+	return &channelListEntry{channels: channels}, nil
+}
 
-	return channels, nil
+// channelsMissFunc returns the channelsMissHook call for one lookup, or nil.
+func (db *DB) channelsMissFunc(kind, key string) func() {
+	if db.channelsMissHook == nil {
+		return nil
+	}
+	return func() { db.channelsMissHook(kind, key) }
 }
 
 // GetEncryptedChannels returns channels where all messages are undecryptable (no key).
@@ -3189,7 +3234,20 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
-	regionCodes := normalizeRegionCodes(regionParam)
+	key := channelsRegionKey(regionParam)
+	e, err := db.encChannelsCache.load(key, db.channelsMissFunc("encrypted", key), func() (*channelListEntry, error) {
+		return db.queryEncryptedChannels(key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.channels, nil
+}
+
+// queryEncryptedChannels runs the GetEncryptedChannels query for a
+// normalized region key.
+func (db *DB) queryEncryptedChannels(key string) (*channelListEntry, error) {
+	regionCodes := normalizeRegionCodes(key)
 
 	var querySQL string
 	args := make([]interface{}, 0, len(regionCodes))
@@ -3240,17 +3298,23 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			ORDER BY last_activity DESC`
 	}
 
+	if db.channelsQueryHook != nil {
+		if err := db.channelsQueryHook("encrypted", key); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := db.conn.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	it := db.channelsRows("encrypted", rows)
 
 	channels := make([]map[string]interface{}, 0)
-	for rows.Next() {
+	for it.Next() {
 		var chHash, lastActivity sql.NullString
 		var msgCount int
-		if err := rows.Scan(&chHash, &msgCount, &lastActivity); err != nil {
+		if err := it.Scan(&chHash, &msgCount, &lastActivity); err != nil {
 			continue
 		}
 		fullHash := nullStrVal(chHash) // e.g. "enc_3A"
@@ -3265,7 +3329,10 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			"encrypted":    true,
 		})
 	}
-	return channels, nil
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
+	return &channelListEntry{channels: channels}, nil
 }
 
 // GetChannelMessages returns messages for a specific channel.
