@@ -309,6 +309,76 @@ func TestChannelsRegionKey_109(t *testing.T) {
 	}
 }
 
+// failingRows passes `ok` rows through, then stops as a failed SQLite step
+// does: Next returns false and Err reports the failure.
+type failingRows struct {
+	channelRows
+	ok  int
+	err error
+}
+
+func (r *failingRows) Next() bool {
+	if r.ok == 0 {
+		return false
+	}
+	r.ok--
+	return r.channelRows.Next()
+}
+
+func (r *failingRows) Err() error {
+	if r.ok == 0 {
+		return r.err
+	}
+	return r.channelRows.Err()
+}
+
+// A failure part-way through the rows must fail the call, not return (and
+// cache for the TTL) the truncated list as a success.
+func TestChannelRowsErrorIsNotCachedAsSuccess_109(t *testing.T) {
+	for _, kind := range []string{"channels", "encrypted"} {
+		t.Run(kind, func(t *testing.T) {
+			db := singleflightDB(t)
+			call := func() ([]map[string]interface{}, error) {
+				if kind == "channels" {
+					return db.GetChannels("")
+				}
+				return db.GetEncryptedChannels("")
+			}
+			full, err := call()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(full) < 2 {
+				t.Fatalf("fixture gives %d rows, need at least 2 to truncate", len(full))
+			}
+			db.channelsCache.reset()
+			db.encChannelsCache.reset()
+
+			q := &queryCounter{want: 1}
+			db.channelsQueryHook = q.hook
+			boom := errors.New("injected step failure")
+			db.channelsRowsHook = func(_ string, rows channelRows) channelRows {
+				return &failingRows{channelRows: rows, ok: 1, err: boom}
+			}
+			res, err := call()
+			if !errors.Is(err, boom) {
+				t.Fatalf("iteration failed after 1 of %d rows: got %d rows, err %v; want the step error", len(full), len(res), err)
+			}
+			db.channelsRowsHook = nil
+			res, err = call()
+			if err != nil {
+				t.Fatalf("after the failed iteration: %v", err)
+			}
+			if got := q.count(kind); got != 2 {
+				t.Fatalf("%d queries after a failed and a fresh call, want 2: the truncated list was cached", got)
+			}
+			if !reflect.DeepEqual(res, full) {
+				t.Fatalf("after the failed iteration: %d rows, want the full %d", len(res), len(full))
+			}
+		})
+	}
+}
+
 // BenchmarkColdConcurrentGetChannels_109: 16 callers hit a cold (reset)
 // cache for one region at once; reports the real queries per round.
 func BenchmarkColdConcurrentGetChannels_109(b *testing.B) {

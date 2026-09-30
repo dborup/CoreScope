@@ -109,6 +109,24 @@ type DB struct {
 	// (GetChannels) or "encrypted" (GetEncryptedChannels).
 	channelsMissHook  func(kind, region string)
 	channelsQueryHook func(kind, region string) error
+	// channelsRowsHook wraps the result rows of each real query, so a test
+	// can fail the iteration part-way.
+	channelsRowsHook func(kind string, rows channelRows) channelRows
+}
+
+// channelRows is the part of *sql.Rows the channel list scans use.
+type channelRows interface {
+	Next() bool
+	Scan(dest ...interface{}) error
+	Err() error
+}
+
+// channelsRows returns rows, wrapped by channelsRowsHook when a test set it.
+func (db *DB) channelsRows(kind string, rows *sql.Rows) channelRows {
+	if db.channelsRowsHook == nil {
+		return rows
+	}
+	return db.channelsRowsHook(kind, rows)
 }
 
 // channelListEntry is one cached GetChannels / GetEncryptedChannels result.
@@ -3154,12 +3172,13 @@ func (db *DB) queryChannels(key string) (*channelListEntry, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	it := db.channelsRows("channels", rows)
 
 	channels := make([]map[string]interface{}, 0)
-	for rows.Next() {
+	for it.Next() {
 		var chHash, lastActivity, sampleJSON sql.NullString
 		var msgCount int
-		if err := rows.Scan(&chHash, &msgCount, &lastActivity, &sampleJSON); err != nil {
+		if err := it.Scan(&chHash, &msgCount, &lastActivity, &sampleJSON); err != nil {
 			continue
 		}
 		channelName := nullStr(chHash)
@@ -3190,6 +3209,11 @@ func (db *DB) queryChannels(key string) (*channelListEntry, error) {
 			"lastMessage": lastMessage, "lastSender": lastSender,
 			"messageCount": msgCount, "lastActivity": nullStr(lastActivity),
 		})
+	}
+	// A step that fails part-way ends the loop like the last row does; the
+	// truncated list must not be returned (and cached) as a success.
+	if err := it.Err(); err != nil {
+		return nil, err
 	}
 
 	return &channelListEntry{channels: channels}, nil
@@ -3284,12 +3308,13 @@ func (db *DB) queryEncryptedChannels(key string) (*channelListEntry, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	it := db.channelsRows("encrypted", rows)
 
 	channels := make([]map[string]interface{}, 0)
-	for rows.Next() {
+	for it.Next() {
 		var chHash, lastActivity sql.NullString
 		var msgCount int
-		if err := rows.Scan(&chHash, &msgCount, &lastActivity); err != nil {
+		if err := it.Scan(&chHash, &msgCount, &lastActivity); err != nil {
 			continue
 		}
 		fullHash := nullStrVal(chHash) // e.g. "enc_3A"
@@ -3303,6 +3328,9 @@ func (db *DB) queryEncryptedChannels(key string) (*channelListEntry, error) {
 			"lastActivity": nullStr(lastActivity),
 			"encrypted":    true,
 		})
+	}
+	if err := it.Err(); err != nil {
+		return nil, err
 	}
 	return &channelListEntry{channels: channels}, nil
 }
