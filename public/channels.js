@@ -7,6 +7,97 @@
   let messages = [];
   let wsHandler = null;
 
+  var OBSERVED_PATH_HASH_TOOLTIP = 'Path hash size observed in one or more relayed wire paths for this message. Direct zero-hop copies do not provide hash-size evidence. This does not prove the sender’s permanent configuration.';
+
+  // Normalize the two API spellings at the browser boundary.  Only the three
+  // MeshCore path-hash widths are evidence; direct/zero-hop and malformed
+  // values intentionally collapse to an empty set (no badge).
+  function normalizeObservedPathHashSizes(source) {
+    var values = [];
+    if (Array.isArray(source)) {
+      values = source;
+    } else if (source && typeof source === 'object') {
+      if (Array.isArray(source.observedPathHashSizes)) values = values.concat(source.observedPathHashSizes);
+      if (Array.isArray(source.observed_path_hash_sizes)) values = values.concat(source.observed_path_hash_sizes);
+    }
+
+    var seen = new Set();
+    for (var i = 0; i < values.length; i++) {
+      var value = values[i];
+      if (typeof value !== 'number' && typeof value !== 'string') continue;
+      var text = String(value).trim();
+      if (!/^[123]$/.test(text)) continue;
+      seen.add(Number(text));
+    }
+    return Array.from(seen).sort(function (a, b) { return a - b; });
+  }
+
+  function unionObservedPathHashSizes() {
+    var seen = new Set();
+    for (var i = 0; i < arguments.length; i++) {
+      var sizes = normalizeObservedPathHashSizes(arguments[i]);
+      for (var j = 0; j < sizes.length; j++) seen.add(sizes[j]);
+    }
+    return Array.from(seen).sort(function (a, b) { return a - b; });
+  }
+
+  function withObservedPathHashSizes(message, extraEvidence) {
+    if (!message || typeof message !== 'object') return message;
+    var sizes = unionObservedPathHashSizes(message, extraEvidence);
+    if (!sizes.length) return message;
+    var copy = Object.assign({}, message);
+    copy.observedPathHashSizes = sizes;
+    return copy;
+  }
+
+  function renderObservedPathHashBadge(message) {
+    var sizes = normalizeObservedPathHashSizes(message);
+    if (!sizes.length) return '';
+    var label = sizes.length === 1
+      ? 'Observed path hash: ' + sizes[0] + '-byte'
+      : 'Mixed path hashes: ' + sizes.join('/') + '-byte';
+    return '<span class="ch-path-hash-badge" title="' + escapeHtml(OBSERVED_PATH_HASH_TOOLTIP) + '">' + escapeHtml(label) + '</span>';
+  }
+
+  // Client-decrypted messages are cached with their plaintext.  A later API
+  // response can carry new path evidence for the same transmission without
+  // changing its candidate count or first_seen timestamp, so fold that
+  // metadata into the cached row before the delta-fetch early return.  Keep
+  // the cached row canonical: replacing it with the packet candidate would
+  // discard the locally decrypted sender/text.
+  function reconcileCandidateEvidenceIntoCache(cachedMsgs, candidates) {
+    if (!Array.isArray(cachedMsgs) || !cachedMsgs.length || !Array.isArray(candidates)) {
+      return { messages: cachedMsgs, changed: false };
+    }
+
+    var evidenceByHash = new Map();
+    for (var i = 0; i < candidates.length; i++) {
+      var packet = candidates[i] && candidates[i].packet;
+      var packetHash = packet && packet.hash;
+      if (!packetHash) continue;
+      evidenceByHash.set(
+        packetHash,
+        unionObservedPathHashSizes(evidenceByHash.get(packetHash), packet));
+    }
+
+    var merged = cachedMsgs;
+    var changed = false;
+    for (var j = 0; j < cachedMsgs.length; j++) {
+      var cachedMessage = cachedMsgs[j];
+      var candidateEvidence = cachedMessage && evidenceByHash.get(cachedMessage.packetHash);
+      if (!candidateEvidence || !candidateEvidence.length) continue;
+      var before = normalizeObservedPathHashSizes(cachedMessage);
+      var after = unionObservedPathHashSizes(before, candidateEvidence);
+      if (before.length === after.length && before.every(function (size, index) { return size === after[index]; })) {
+        continue;
+      }
+      if (!changed) merged = cachedMsgs.slice();
+      merged[j] = withObservedPathHashSizes(cachedMessage, candidateEvidence);
+      changed = true;
+    }
+    return { messages: merged, changed: changed };
+  }
+
   // #1498: messages appended via the live WebSocket are stamped with
   // _fromWS so a subsequent REST replacement (selectChannel /
   // refreshMessages) can merge them in instead of stomping them.
@@ -33,11 +124,36 @@
   var MAX_WS_SURVIVOR_MS = 5 * 60 * 1000; // 5 minutes
   function mergeWsAppendedIntoRest(currentMsgs, restMsgs) {
     if (!Array.isArray(restMsgs)) return [];
-    if (!Array.isArray(currentMsgs) || currentMsgs.length === 0) return restMsgs.slice();
+    if (!Array.isArray(currentMsgs)) currentMsgs = [];
+    var currentEvidenceByHash = new Map();
+    for (var c = 0; c < currentMsgs.length; c++) {
+      var current = currentMsgs[c];
+      if (!current || !current.packetHash) continue;
+      currentEvidenceByHash.set(
+        current.packetHash,
+        unionObservedPathHashSizes(currentEvidenceByHash.get(current.packetHash), current));
+    }
+
+    var restEvidenceByHash = new Map();
+    for (var r = 0; r < restMsgs.length; r++) {
+      var restItem = restMsgs[r];
+      if (!restItem || !restItem.packetHash) continue;
+      restEvidenceByHash.set(
+        restItem.packetHash,
+        unionObservedPathHashSizes(restEvidenceByHash.get(restItem.packetHash), restItem));
+    }
+
+    // slice() deliberately preserves the caller's Array realm.  Besides
+    // keeping this helper transparent to consumers, it avoids surprising
+    // prototype changes when exercised through the VM-based unit harness.
+    var mergedRest = restMsgs.slice();
     var restHashes = new Set();
     for (var i = 0; i < restMsgs.length; i++) {
       var h = restMsgs[i] && restMsgs[i].packetHash;
       if (h) restHashes.add(h);
+      mergedRest[i] = withObservedPathHashSizes(
+        restMsgs[i],
+        h ? unionObservedPathHashSizes(currentEvidenceByHash.get(h), restEvidenceByHash.get(h)) : null);
     }
     var now = Date.now();
     var survivors = [];
@@ -49,11 +165,11 @@
       // If packetHash present and REST contains it, REST wins (drop).
       if (m.packetHash && restHashes.has(m.packetHash)) continue;
       // Hash absent OR not in REST → preserve.
-      survivors.push(m);
+      survivors.push(withObservedPathHashSizes(m));
     }
     // Always return a fresh array — never alias restMsgs — so callers
     // can mutate freely without leaking changes back to the input.
-    return survivors.length ? restMsgs.concat(survivors) : restMsgs.slice();
+    return survivors.length ? mergedRest.concat(survivors) : mergedRest;
   }
   let autoScroll = true;
   let nodeCache = {};
@@ -608,6 +724,9 @@
 
     // M5: Delta fetch — only decrypt packets newer than lastTs
     if (!needFullDecrypt && cachedMsgs.length > 0 && lastTs) {
+      var reconciledCache = reconcileCandidateEvidenceIntoCache(cachedMsgs, candidates);
+      cachedMsgs = reconciledCache.messages;
+
       // Filter candidates to only those newer than cached lastTimestamp
       var newCandidates = candidates.filter(function (c) {
         var ts = c.packet.first_seen || c.packet.timestamp || '';
@@ -615,13 +734,20 @@
       });
 
       if (newCandidates.length === 0) {
-        // Nothing new — return cache as-is
+        // Nothing new to decrypt. Persist only when the API enriched the
+        // evidence so legacy caches gain the badge on this render.
+        if (reconciledCache.changed) {
+          ChannelDecrypt.setCache(cacheKey, cachedMsgs, lastTs, totalCandidates);
+        }
         return { messages: cachedMsgs, fromCache: true };
       }
 
       // Decrypt only new candidates
       var newDecrypted = await decryptCandidates(keyBytes, newCandidates);
       if (newDecrypted.wrongKey) {
+        if (reconciledCache.changed) {
+          ChannelDecrypt.setCache(cacheKey, cachedMsgs, lastTs, totalCandidates);
+        }
         return { messages: cachedMsgs, wrongKey: true };
       }
 
@@ -691,6 +817,7 @@
           observers: c.packet.observer_name ? [c.packet.observer_name] : [],
           scope: c.packet.scope_name || null,
           routeType: c.packet.route_type ?? null,
+          observedPathHashSizes: normalizeObservedPathHashSizes(c.packet),
           repeats: 1,
           botReply: pingBotReply(text, d.path_len || 0, c.packet.snr || null, alreadyDecObserver)
         });
@@ -711,6 +838,7 @@
           observers: c.packet.observer_name ? [c.packet.observer_name] : [],
           scope: c.packet.scope_name || null,
           routeType: c.packet.route_type ?? null,
+          observedPathHashSizes: normalizeObservedPathHashSizes(c.packet),
           repeats: 1,
           botReply: pingBotReply(result.message, 0, c.packet.snr || null, decObserver)
         });
@@ -727,17 +855,29 @@
 
   /** Merge cached and new messages, deduplicate by packetHash, sort chronologically. */
   function deduplicateAndMerge(cached, newMsgs) {
-    var seen = {};
+    var seen = new Map();
     var merged = [];
     // Add cached first
     for (var i = 0; i < cached.length; i++) {
       var key = cached[i].packetHash || ('idx:' + i);
-      if (!seen[key]) { seen[key] = true; merged.push(cached[i]); }
+      if (!seen.has(key)) {
+        seen.set(key, merged.length);
+        merged.push(withObservedPathHashSizes(cached[i]));
+      } else {
+        var cachedIndex = seen.get(key);
+        merged[cachedIndex] = withObservedPathHashSizes(merged[cachedIndex], cached[i]);
+      }
     }
     // Add new
     for (var j = 0; j < newMsgs.length; j++) {
       var key2 = newMsgs[j].packetHash || ('new:' + j);
-      if (!seen[key2]) { seen[key2] = true; merged.push(newMsgs[j]); }
+      if (!seen.has(key2)) {
+        seen.set(key2, merged.length);
+        merged.push(withObservedPathHashSizes(newMsgs[j]));
+      } else {
+        var existingIndex = seen.get(key2);
+        merged[existingIndex] = withObservedPathHashSizes(merged[existingIndex], newMsgs[j]);
+      }
     }
     merged.sort(function (a, b) {
       var ta = a.timestamp || '';
@@ -1477,6 +1617,10 @@
         var observer = m.data?.packet?.observer_name || m.data?.observer || null;
         var scope = m.data?.scope_name || m.data?.packet?.scope_name || null;
         var routeType = m.data?.route_type ?? m.data?.packet?.route_type ?? null;
+        var observedPathHashSizes = unionObservedPathHashSizes(
+          m.data,
+          m.data?.packet,
+          payload);
         // Same path[0]-resolved area as the REST message list (server-side
         // resolveEntryPointArea, see store.go) -- already computed at
         // broadcast time, just read it here.
@@ -1515,6 +1659,7 @@
             if (observer && existing.observers && existing.observers.indexOf(observer) === -1) {
               existing.observers.push(observer);
             }
+            existing.observedPathHashSizes = unionObservedPathHashSizes(existing, observedPathHashSizes);
             // #1498 round-1 finding #2: a WS-arriving observer update on a
             // REST-loaded message must be stamped so the next REST tick
             // doesn't stomp it. Without this, the new observer disappears.
@@ -1536,6 +1681,7 @@
               scope: scope,
               routeType: routeType,
               area: area,
+              observedPathHashSizes: observedPathHashSizes,
               botReply: pingBotReply(displayText, wsHops, snr, observer),
               // #1498: mark as WS-pushed so a later REST replacement
               // (selectChannel / refreshMessages) can merge instead of
@@ -2305,11 +2451,23 @@
       // last element of `messages` is the newest item — same convention
       // for REST and for the merged array. _getLastId remains correct.
       var _getLastId = function (arr) { var m = arr.length ? arr[arr.length - 1] : null; return m ? (m.id || m.packetId || m.timestamp || '') : ''; };
-      if (newMsgs.length === messages.length && _getLastId(newMsgs) === _getLastId(messages)) return;
+      // Merge before change detection: a delayed REST row can have the same
+      // ID/count as the live row while carrying less path-hash evidence.
+      // Comparing the merged evidence prevents REST from erasing it without
+      // forcing a needless re-render on every later poll.
+      var mergedMessages = mergeWsAppendedIntoRest(messages, newMsgs);
+      var _getEvidenceSignature = function (arr) {
+        return arr.map(function (m) {
+          return String((m && m.packetHash) || '') + ':' + normalizeObservedPathHashSizes(m).join(',');
+        }).join('|');
+      };
+      if (mergedMessages.length === messages.length &&
+          _getLastId(mergedMessages) === _getLastId(messages) &&
+          _getEvidenceSignature(mergedMessages) === _getEvidenceSignature(messages)) return;
       var prevLen = messages.length;
       // #1498: merge WS-pushed messages so a refresh that races a live
       // packet doesn't wipe it.
-      messages = mergeWsAppendedIntoRest(messages, newMsgs);
+      messages = mergedMessages;
       renderMessages();
       if (wasAtBottom) scrollToBottom();
       else {
@@ -2372,6 +2530,7 @@
       // (unique_prefix) to a positioned node; omitted otherwise, not
       // guessed.
       if (msg.area) meta.push(`area: ${escapeHtml(msg.area)}`);
+      const pathHashBadgeHtml = renderObservedPathHashBadge(msg);
 
       const safeId = btoa(encodeURIComponent(sender));
 
@@ -2410,7 +2569,7 @@
         <div class="ch-msg-content ch-message-content">
           <div class="ch-msg-sender ch-message-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
           <div class="ch-msg-bubble ch-message-bubble">${displayText}</div>
-          <div class="ch-msg-meta ch-message-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a> · <button type="button" class="ch-analyze-link" data-view-path="${escapeHtml(msg.packetHash)}" style="background:none;border:none;padding:0;cursor:pointer;font:inherit">View path →</button>` : ''}</div>
+          <div class="ch-msg-meta ch-message-meta">${pathHashBadgeHtml}${pathHashBadgeHtml && meta.length ? ' · ' : ''}${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${escapeHtml(msg.packetHash)}" class="ch-analyze-link">View packet →</a> · <button type="button" class="ch-analyze-link" data-view-path="${escapeHtml(msg.packetHash)}" style="background:none;border:none;padding:0;cursor:pointer;font:inherit">View path →</button>` : ''}</div>
         </div>
       </div>${botReplyHtml}`;
     }).join('');
@@ -2436,6 +2595,10 @@
   window._channelsSelectChannelForTest = selectChannel;
   window._channelsRefreshMessagesForTest = refreshMessages;
   window._channelsMergeWsAppendedIntoRestForTest = mergeWsAppendedIntoRest;
+  window._channelsNormalizeObservedPathHashSizesForTest = normalizeObservedPathHashSizes;
+  window._channelsUnionObservedPathHashSizesForTest = unionObservedPathHashSizes;
+  window._channelsRenderObservedPathHashBadgeForTest = renderObservedPathHashBadge;
+  window._channelsDeduplicateAndMergeForTest = deduplicateAndMerge;
   window._channelsLoadChannelsForTest = loadChannels;
   window._channelsRenderChannelRowForTest = renderChannelRow;
   window._channelsTickChannelTimesForTest = tickChannelTimes;
