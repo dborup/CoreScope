@@ -105,6 +105,7 @@ func distBuildParkedCount(waitReason, frame string) int {
 const (
 	triggerFrame       = ".(*PacketStore).TriggerDistanceIndexBuild("
 	loaderFrame        = ".(*PacketStore).loadBackgroundChunks("
+	buildFrame         = ".(*PacketStore).runDistanceIndexBuild("
 	indexBuildsCreator = "github.com/corescope/server.(*PacketStore).startBackgroundIndexBuilds"
 )
 
@@ -286,6 +287,116 @@ func TestDistanceBuild149_LoadAfterBuildSnapshotRebuildsOnce(t *testing.T) {
 	})
 }
 
+// The build is already waiting for s.mu when the load completion takes it and
+// bumps the generation. The build must read the generation inside its own s.mu
+// section: a value read before it predates the bump, and would force a
+// redundant rebuild.
+func TestDistanceBuild149_LoadHoldsMuWhileBuildQueuedNoExtraBuild(t *testing.T) {
+	runDistBuildChild(t, func(t *testing.T) {
+		store := newDistBuildStore(t)
+		gate := installDistBuildGate(store)
+		baseline := runtime.NumGoroutine()
+
+		store.TriggerDistanceIndexBuild()
+		distBuildWaitClosed(t, "the build to reach distanceBuildHook", gate.entered)
+
+		// Queue the load completion as a writer behind a held read lock, then
+		// queue the build behind the load completion.
+		store.mu.RLock()
+		loaderDone := make(chan struct{})
+		go func() {
+			defer close(loaderDone)
+			store.loadBackgroundChunks()
+		}()
+		distBuildWait(t, "the load completion to queue for s.mu.Lock", func() bool {
+			return distBuildParked("sync.RWMutex.Lock", loaderFrame)
+		})
+		close(gate.release)
+		distBuildWait(t, "the build to queue behind the load completion", func() bool {
+			return distBuildParkedCount("sync.", buildFrame) == 1
+		})
+		store.mu.RUnlock()
+		distBuildWaitClosed(t, "the load completion to finish", loaderDone)
+
+		distBuildWaitCurrent(t, store)
+		distBuildSettle(baseline)
+		if n := gate.builds.Load(); n != 1 {
+			t.Fatalf("builds = %d, want 1: the build took s.mu after the load completed", n)
+		}
+	})
+}
+
+// A build whose dataset went stale during its first pass runs a second pass.
+// When that pass starts, distLazyBuilding is still true, so triggers during it
+// start no build of their own, and the index built by the first pass does not
+// count as built.
+func TestDistanceBuild149_TriggersDuringStaleRepassStartNoBuild(t *testing.T) {
+	runDistBuildChild(t, func(t *testing.T) {
+		store := newDistBuildStore(t)
+		var builds atomic.Int32
+		entered1, release1 := make(chan struct{}), make(chan struct{})
+		entered2, release2 := make(chan struct{}), make(chan struct{})
+		store.distanceBuildHook = func() {
+			switch builds.Add(1) {
+			case 1:
+				close(entered1)
+				<-release1
+			case 2:
+				close(entered2)
+				<-release2
+			}
+		}
+		baseline := runtime.NumGoroutine()
+
+		store.TriggerDistanceIndexBuild()
+		distBuildWaitClosed(t, "pass 1 to reach distanceBuildHook", entered1)
+		// Park pass 1 before its bookkeeping (it needs distLazyMu), once it
+		// has read the dataset, and complete the load behind its snapshot.
+		store.distLazyMu.Lock()
+		close(release1)
+		distBuildWait(t, "pass 1 to read the dataset", func() bool {
+			store.mu.RLock()
+			defer store.mu.RUnlock()
+			return store.distHops != nil
+		})
+		// If the completion itself takes distLazyMu (allowed: s.mu →
+		// distLazyMu), let both go; it bumps the generation first either way.
+		loaderDone := make(chan struct{})
+		go func() {
+			defer close(loaderDone)
+			store.loadBackgroundChunks()
+		}()
+		distBuildWait(t, "the load completion to finish or wait for distLazyMu", func() bool {
+			select {
+			case <-loaderDone:
+				return true
+			default:
+				return distBuildParked("sync.Mutex.Lock", loaderFrame)
+			}
+		})
+		store.distLazyMu.Unlock()
+		distBuildWaitClosed(t, "the load completion to finish", loaderDone)
+		distBuildWaitClosed(t, "the stale second pass to reach distanceBuildHook", entered2)
+
+		building, built := store.DistanceIndexBuilding(), store.DistanceIndexBuilt()
+		for i := 0; i < 8; i++ {
+			store.TriggerDistanceIndexBuild()
+		}
+		close(release2)
+		distBuildWaitCurrent(t, store)
+		distBuildSettle(baseline)
+		if !building {
+			t.Error("DistanceIndexBuilding() = false during the stale second pass")
+		}
+		if built {
+			t.Error("DistanceIndexBuilt() = true during the stale second pass: the first pass's index predates the load")
+		}
+		if n := builds.Load(); n != 2 {
+			t.Fatalf("builds = %d, want 2 (pass 1 and one second pass; triggers during the second pass must not start another)", n)
+		}
+	})
+}
+
 // Deadlock reproduction: a trigger on the debounce path holds distLazyMu and
 // waits for s.mu.RLock while the load completion holds s.mu.Lock and waits for
 // distLazyMu. Before #149 both blocked forever and the child timed out with
@@ -406,6 +517,49 @@ func TestDistanceBuild149_DebouncedRebuildStartsOnce(t *testing.T) {
 	})
 }
 
+// A debounced trigger re-checks the gate in its second section: when a build
+// finished while it read totalObs, its own rebuild is redundant.
+func TestDistanceBuild149_DebouncedTriggerSkipsWhenABuildFinishedMeanwhile(t *testing.T) {
+	runDistBuildChild(t, func(t *testing.T) {
+		store := newDistBuildStore(t)
+		var builds atomic.Int32
+		store.distanceBuildHook = func() { builds.Add(1) }
+		baseline := runtime.NumGoroutine()
+		store.TriggerDistanceIndexBuild()
+		distBuildWaitCurrent(t, store)
+		store.distLazyMu.Lock()
+		store.distLazyLastBuilt = store.distLazyLastBuilt.Add(-6 * time.Minute) // rebuild due
+		store.distLazyMu.Unlock()
+
+		// Park the trigger in its s.mu read, after its first section ...
+		store.mu.Lock()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			store.TriggerDistanceIndexBuild()
+		}()
+		distBuildWait(t, "the trigger to wait for s.mu.RLock", func() bool {
+			return distBuildParked("sync.RWMutex.RLock", triggerFrame)
+		})
+		// ... then at its second section (s.mu → distLazyMu is allowed).
+		store.distLazyMu.Lock()
+		store.mu.Unlock()
+		distBuildWait(t, "the trigger to wait for distLazyMu", func() bool {
+			return distBuildParked("sync.Mutex.Lock", triggerFrame)
+		})
+		// A build completes in between: this is what runDistanceIndexBuild records.
+		store.distLazyLastBuilt = time.Now()
+		store.distLazyMu.Unlock()
+		distBuildWaitClosed(t, "the trigger to return", done)
+
+		distBuildWaitCurrent(t, store)
+		distBuildSettle(baseline)
+		if n := builds.Load(); n != 1 {
+			t.Fatalf("builds = %d, want 1: a build finished between the trigger's sections, so its rebuild is redundant", n)
+		}
+	})
+}
+
 // Many concurrent triggers during the first build start exactly one build, and
 // triggers after it are debounced.
 func TestDistanceBuild149_ConcurrentTriggersStartOneBuild(t *testing.T) {
@@ -518,6 +672,19 @@ func TestDistanceBuild149_DebounceUnchanged(t *testing.T) {
 	}
 	store.TriggerDistanceIndexBuild()
 	distBuildWaitCurrent(t, store)
+	lastObsIs := func(when string, want int) {
+		t.Helper()
+		store.distLazyMu.Lock()
+		got := store.distLazyLastObs
+		store.distLazyMu.Unlock()
+		if got != want {
+			t.Errorf("%s: distLazyLastObs = %d, want totalObs %d: a build records the observation count it read", when, got, want)
+		}
+	}
+	store.mu.RLock()
+	loadedObs := store.totalObs
+	store.mu.RUnlock()
+	lastObsIs("after the first build", loadedObs)
 
 	cases := []struct {
 		name     string
@@ -557,6 +724,31 @@ func TestDistanceBuild149_DebounceUnchanged(t *testing.T) {
 		}
 		if got := builds.Load(); got != want {
 			t.Errorf("%s: builds %d → %d, want %d", c.name, before, got, want)
+		}
+		if c.rebuilds {
+			lastObsIs(c.name, c.curObs)
+		}
+	}
+}
+
+// The debounce boundaries are master's: its suppression condition was
+// elapsed < 5 min && Δobs < 5 %, so exactly 5 minutes or exactly 5 % rebuilds.
+func TestDistanceBuild149_RebuildDueBoundaries(t *testing.T) {
+	cases := []struct {
+		elapsed         time.Duration
+		lastObs, curObs int
+		want            bool
+	}{
+		{5 * time.Minute, 1000, 1000, true},
+		{5*time.Minute - time.Nanosecond, 1000, 1000, false},
+		{0, 1000, 1050, true},
+		{0, 1000, 1049, false},
+		{0, 1000, 900, false}, // fewer observations (eviction)
+		{0, 0, 1000, false},   // no Δobs baseline
+	}
+	for _, c := range cases {
+		if got := distanceRebuildDue(c.elapsed, c.lastObs, c.curObs); got != c.want {
+			t.Errorf("distanceRebuildDue(%v, %d, %d) = %v, want %v", c.elapsed, c.lastObs, c.curObs, got, c.want)
 		}
 	}
 }

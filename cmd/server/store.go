@@ -327,9 +327,10 @@ type PacketStore struct {
 	// completed; distLazyBuiltGen is the distDataGen that build read, so the
 	// index is current only while the two match (#149).
 	//
-	// Lock order (#149): s.mu is never acquired while distLazyMu is held.
-	// The background-load completion holds s.mu when it invalidates the
-	// index, so the reverse order deadlocks against it.
+	// Lock order (#149): s.mu is never acquired (Lock or RLock) while
+	// distLazyMu is held. The other nesting, distLazyMu taken while s.mu is
+	// held, is allowed; a path that does it, as the background-load
+	// completion used to, deadlocks against any distLazyMu → s.mu path.
 	distLazyMu        sync.Mutex
 	distLazyBuilt     bool
 	distLazyBuilding  bool
@@ -1683,8 +1684,10 @@ func (s *PacketStore) loadBackgroundChunks() {
 	// /api/analytics/distance request, not at background-load
 	// completion. Bumping the generation makes an index built from the
 	// smaller dataset stale, so the next request rebuilds it, and a build
-	// in flight that already read it builds once more (#149). No
-	// distLazyMu here: see the lock-order note on the gate fields.
+	// in flight that already read it builds once more (#149). Taking
+	// distLazyMu here would be allowed (s.mu → distLazyMu; only the reverse
+	// is forbidden, see the gate fields); the atomic generation just makes
+	// it unnecessary.
 	s.distDataGen.Add(1)
 	s.mu.Unlock()
 	// #1008 review m3: flip the ready flags after the synchronous
@@ -4739,6 +4742,12 @@ func (s *PacketStore) runDistanceIndexBuild() {
 
 		s.mu.Lock()
 		s.buildDistanceIndex()
+		// Keep this read inside the s.mu section of the build: the load
+		// completion bumps the generation under s.mu, so here it matches the
+		// data just read. Read after the Unlock, a load completing in between
+		// would count as seen by an index built without it (a lost
+		// invalidation); read before the Lock, a load the build did see
+		// would force a redundant rebuild.
 		gen := s.distDataGen.Load()
 		obs := s.totalObs
 		s.mu.Unlock()

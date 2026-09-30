@@ -12,8 +12,9 @@ import (
 )
 
 // Issue #149 lock-order rule: s.mu (Lock or RLock) is never acquired while
-// distLazyMu is held. The background-load completion takes s.mu first, so any
-// distLazyMu → s.mu path deadlocks against it.
+// distLazyMu is held. The other nesting, distLazyMu taken while s.mu is held,
+// stays allowed; a distLazyMu → s.mu path deadlocks against any path that
+// uses it (the pre-#149 background-load completion did).
 //
 // The guard parses this package's non-test sources and walks every function
 // that uses distLazyMu statement by statement, tracking whether distLazyMu
@@ -78,7 +79,7 @@ func TestDistLazyMuNeverHeldWhileTakingStoreMu(t *testing.T) {
 		t.Fatalf("TriggerDistanceIndexBuild was not checked (checked: %v): the guard no longer sees the distance-build gate", checked)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("s.mu is taken while distLazyMu may be held (lock-order deadlock with the background-load completion, #149):\n  %s",
+		t.Fatalf("s.mu is taken while distLazyMu may be held (lock-order rule, #149):\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }
