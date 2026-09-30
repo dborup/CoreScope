@@ -226,6 +226,99 @@ const settle = (page, ms) => page.waitForTimeout(ms || 400);
     } finally { await ctx.close(); }
   });
 
+  // #123 review round: leaving the map with an open route must not run the
+  // route view's delayed invalidateSize on the removed map (it threw
+  // "Cannot read properties of undefined (reading '_leaflet_pos')").
+  const ROUTE = [
+    { pubkey: 'aa00aa00aa00aa00', name: 'Origin', role: 'companion', lat: 55.60, lon: 12.50, isOrigin: true },
+    { pubkey: 'bb11bb11bb11bb11', name: 'Relay', role: 'repeater', lat: 55.70, lon: 12.60, resolved: true },
+    { pubkey: 'cc22cc22cc22cc22', name: 'Dest', role: 'repeater', lat: 55.80, lon: 12.40, resolved: true, isDest: true },
+  ];
+  for (const [label, w, h] of [['desktop', 1440, 900], ['tablet', 1024, 768]]) {
+    await step(`${label} ${w}x${h}: leaving the map with an open route, the route view's delayed invalidateSize is inert`, async () => {
+      const { ctx, page } = await newPage(browser, errors, { width: w, height: h });
+      const errsBefore = errors.length;
+      try {
+        await page.goto(BASE + '/#/map?route=1');
+        await mapLoaded(page);
+        await page.evaluate((positions) => {
+          window.MeshRouteView.render(window.__mc_map, window.__mc_routeLayer, positions, { timestamp: Date.now() });
+        }, ROUTE);
+        await page.waitForSelector('.mc-rt-sidebar');
+        await settle(page, 700); // the render's own timers run on the live map
+        await page.evaluate(() => { location.hash = '#/packets'; });
+        await page.waitForSelector('#pktTable', { state: 'attached' });
+        await settle(page, 800);
+        assert(errors.length === errsBefore, errors.slice(errsBefore).join(' | '));
+      } finally { await ctx.close(); }
+    });
+  }
+
+  // #123 review round: destroy() must drop the tile-provider listener and the
+  // theme MutationObserver of its mount. Counts only map.js's own callbacks
+  // (they call _syncDarkTiles; live.js has its own tile listener).
+  await step('six mounts leave one tile-provider listener and one theme observer; theme switches hit one map', async () => {
+    const { ctx, page } = await newPage(browser, errors);
+    await page.addInitScript(() => {
+      const own = (fn) => typeof fn === 'function' && /_syncDarkTiles/.test(String(fn));
+      const live = new Set();
+      const add = window.addEventListener, rem = window.removeEventListener;
+      window.addEventListener = function (type, fn, o) {
+        if (type === 'mc-tile-provider-changed' && own(fn)) live.add(fn);
+        return add.call(this, type, fn, o);
+      };
+      window.removeEventListener = function (type, fn, o) {
+        if (type === 'mc-tile-provider-changed') live.delete(fn);
+        return rem.call(this, type, fn, o);
+      };
+      const MO = window.MutationObserver, observing = new Set();
+      window.MutationObserver = class extends MO {
+        constructor(cb) { super(cb); this.__own = own(cb); }
+        observe(t, o) { if (this.__own) observing.add(this); return super.observe(t, o); }
+        disconnect() { observing.delete(this); return super.disconnect(); }
+      };
+      window.__t123 = { listeners: () => live.size, observers: () => observing.size };
+    });
+    try {
+      const mountMap = async () => {
+        await page.evaluate(() => { location.hash = '#/map'; });
+        await mapLoaded(page);
+      };
+      const leave = async () => {
+        await page.evaluate(() => { location.hash = '#/packets'; });
+        await page.waitForSelector('#pktTable', { state: 'attached' });
+      };
+      // setUrl calls caused by two theme switches and one provider change
+      const setUrlCalls = () => page.evaluate(async () => {
+        const proto = L.TileLayer.prototype, orig = proto.setUrl;
+        let n = 0;
+        proto.setUrl = function () { n++; return orig.apply(this, arguments); };
+        const tick = () => new Promise((r) => setTimeout(r, 50));
+        const root = document.documentElement, before = root.getAttribute('data-theme');
+        root.setAttribute('data-theme', 'dark'); await tick();
+        root.setAttribute('data-theme', 'light'); await tick();
+        window.dispatchEvent(new CustomEvent('mc-tile-provider-changed', { detail: {} })); await tick();
+        if (before == null) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', before);
+        await tick();
+        proto.setUrl = orig;
+        return n;
+      });
+      await page.goto(BASE + '/#/packets');
+      await page.waitForSelector('#pktTable', { state: 'attached' });
+      await mountMap();
+      const one = await setUrlCalls();
+      for (let i = 0; i < 5; i++) { await leave(); await mountMap(); }
+      const counts = await page.evaluate(() => ({ l: window.__t123.listeners(), o: window.__t123.observers() }));
+      const six = await setUrlCalls();
+      assert(counts.l === 1, counts.l + ' map tile-provider listeners after 6 mounts, want 1');
+      assert(counts.o === 1, counts.o + ' map theme observers after 6 mounts, want 1');
+      assert(one > 0 && six === one, 'theme and provider changes caused ' + six + ' setUrl calls after 6 mounts, ' + one + ' after 1');
+      await leave();
+      const after = await page.evaluate(() => ({ l: window.__t123.listeners(), o: window.__t123.observers() }));
+      assert(after.l === 0 && after.o === 0, 'after leaving: ' + after.l + ' listeners, ' + after.o + ' observers, want 0');
+    } finally { await ctx.close(); }
+  });
+
   await step('no page errors, console errors or unhandled rejections overall', async () => {
     assert(errors.length === 0, errors.slice(0, 5).join(' | '));
   });

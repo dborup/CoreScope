@@ -13,6 +13,24 @@
 (function () {
   'use strict';
 
+  // #123: map.js destroy() removes the map when the page is left, and Leaflet
+  // fires 'unload' on it. A timer scheduled before that (e.g. the teardown
+  // invalidateSize below) must not touch the removed map: Leaflet throws
+  // "Cannot read properties of undefined (reading '_leaflet_pos')".
+  var watchedMaps = new WeakSet(), removedMaps = new WeakSet();
+  function watchMapRemoval(mapRef) {
+    if (!mapRef || typeof mapRef.once !== 'function' || watchedMaps.has(mapRef)) return;
+    watchedMaps.add(mapRef);
+    mapRef.once('unload', function () { removedMaps.add(mapRef); });
+  }
+  // mapTimeout is setTimeout for callbacks that touch mapRef: inert once the
+  // map has been removed.
+  function mapTimeout(mapRef, fn, ms) {
+    return setTimeout(function () {
+      if (mapRef && !removedMaps.has(mapRef)) fn();
+    }, ms);
+  }
+
   function haversineKm(a, b) {
     if (a == null || b == null || a.lat == null || b.lat == null) return null;
     var R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -503,7 +521,7 @@
         // caret-left when expanded). Replaces prior ▶/◀ Misc-Symbols chars. // EMOJI-OK: comment
         collapseBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' +
           (collapsed ? 'ph-caret-right' : 'ph-caret-left') + '"/></svg>';
-        setTimeout(function () { if (mapRef && mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
+        mapTimeout(mapRef, function () { if (mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
       });
     }
     // Collapsed-state click-to-expand on the vertical "ROUTE" label
@@ -516,7 +534,7 @@
             collapseBtn.setAttribute('aria-label', 'Collapse route panel');
             collapseBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-left"/></svg>';
           }
-          setTimeout(function () { if (mapRef && mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
+          mapTimeout(mapRef, function () { if (mapRef.invalidateSize) mapRef.invalidateSize(); }, 280);
         }
       });
     }
@@ -560,7 +578,7 @@
         document.body.classList.toggle('mc-rt-mobile-sheet-expanded', expanded);
         handle.setAttribute('aria-expanded', String(expanded));
         // Force map to recompute size + re-fit after sheet animation settles
-        setTimeout(function () {
+        mapTimeout(mapRef, function () {
           try {
             if (mapRef && typeof mapRef.invalidateSize === 'function') mapRef.invalidateSize();
             // Re-fit to current positions so the route stays centered as the
@@ -1043,7 +1061,7 @@
         location.hash = '#/map';
         // Leaflet cached width while sidebar was open — force re-measure.
         if (mapRef && typeof mapRef.invalidateSize === 'function') {
-          setTimeout(function () { mapRef.invalidateSize(); }, 50);
+          mapTimeout(mapRef, function () { mapRef.invalidateSize(); }, 50);
         }
       });
     }
@@ -1053,6 +1071,7 @@
 
   function render(mapRef, layer, positions, opts) {
     if (!positions || !positions.length) return;
+    watchMapRemoval(mapRef);
     opts = opts || {};
     var total = positions.length;
 
@@ -1113,7 +1132,7 @@
         // re-measure so markers/tiles re-render at full width.
         if (mapRef && typeof mapRef.invalidateSize === 'function') {
           // Wait a tick for CSS to recompute (left:320px → unset).
-          setTimeout(function () { mapRef.invalidateSize(); }, 50);
+          mapTimeout(mapRef, function () { mapRef.invalidateSize(); }, 50);
         }
       }
     }
@@ -1370,16 +1389,16 @@
     // (Function declared but `sidebar` ref deferred until after buildSidebar.)
     function exposeRespider() {
       if (typeof sidebar !== 'undefined' && sidebar) {
-        sidebar._respider = function () { setTimeout(spiderFanMarkers, 200); };
+        sidebar._respider = function () { mapTimeout(mapRef, spiderFanMarkers, 200); };
       }
     }
     // Run spider after Leaflet finishes projecting + on zoom only (pan
     // shouldn't re-cluster since relative positions don't change).
-    setTimeout(spiderFanMarkers, 400);
+    mapTimeout(mapRef, spiderFanMarkers, 400);
     var _spiderDebounce = null;
     mapRef.on('zoomend', function () {
       if (_spiderDebounce) clearTimeout(_spiderDebounce);
-      _spiderDebounce = setTimeout(spiderFanMarkers, 250);
+      _spiderDebounce = mapTimeout(mapRef, spiderFanMarkers, 250);
     });
 
     // Sidebar
@@ -1492,7 +1511,7 @@
       var _resizeRefitTimer = null;
       function onResize() {
         if (_resizeRefitTimer) clearTimeout(_resizeRefitTimer);
-        _resizeRefitTimer = setTimeout(refit, 200);
+        _resizeRefitTimer = mapTimeout(mapRef, refit, 200);
       }
       window.__mc_routeResizeRefit = onResize;
       window.addEventListener('resize', onResize);

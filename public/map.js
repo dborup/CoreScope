@@ -40,6 +40,8 @@
   const mapTimers = new Set(); // pending mapTimeout() ids, cleared by destroy()
   let areaNodesHandler = null;   // AreaFilter listeners, removed by destroy()
   let areaOutlineHandler = null;
+  let mapThemeObs = null;        // theme observer and tile-provider listener
+  let tileProviderHandler = null; // of this mount, removed by destroy()
 
   // Returns alive(): true while the mount that called mapToken() is current.
   function mapToken() {
@@ -406,19 +408,20 @@
       window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
     }
 
-    const _mapThemeObs = new MutationObserver(function () {
+    mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       _syncDarkTiles(dark);
     });
-    _mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     // #1420 — re-render when the user picks a different dark provider in the customizer.
-    window.addEventListener('mc-tile-provider-changed', function (e) {
+    tileProviderHandler = function (e) {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       if (e && e.detail && e.detail.type && e.detail.type !== (dark ? 'dark' : 'light')) return;
       _syncDarkTiles(dark);
-    });
+    };
+    window.addEventListener('mc-tile-provider-changed', tileProviderHandler);
 
     // #1689 r1 (adv #4): live re-render when the customizer "hide 1-byte
     // path hops" toggle flips. Before this listener the toggle only took
@@ -2567,6 +2570,12 @@
     if (areaNodesHandler) AreaFilter.offChange(areaNodesHandler);
     if (areaOutlineHandler) AreaFilter.offChange(areaOutlineHandler);
     areaNodesHandler = areaOutlineHandler = null;
+    // #123: one theme observer and tile-provider listener per mount; before
+    // this every mount added both for good, and each kept setting URLs on
+    // its removed map's tile layer.
+    if (mapThemeObs) mapThemeObs.disconnect();
+    if (tileProviderHandler) window.removeEventListener('mc-tile-provider-changed', tileProviderHandler);
+    mapThemeObs = tileProviderHandler = null;
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     // #1771 review fix: invalidate the Important Links overlay's in-flight
