@@ -171,6 +171,63 @@
     // can mutate freely without leaking changes back to the input.
     return survivors.length ? mergedRest.concat(survivors) : mergedRest;
   }
+
+  // #152: loadChannels() replaces `channels` with the server snapshot, which
+  // knows nothing about state that only lives in this tab: unread counts,
+  // the user's PSK marks and labels, the preview of user:* rows, and live
+  // activity the WS path applied while the request was in flight.
+  // mergeWsAppendedIntoRest() above does this job for `messages` (#1498);
+  // this is its counterpart for `channels`.
+  //
+  // Which activity is newer is decided by a local sequence, never by
+  // comparing times: the WS path stamps a row with ++wsActivitySeq, and
+  // loadChannels() samples wsActivitySeq when its request starts. A
+  // browser Date.now() and the server's lastActivity come from different
+  // clocks, so comparing them depends on clock skew.
+  var wsActivitySeq = 0;
+
+  // user:* rows exist only in this browser (mergeUserChannels() creates them
+  // from stored keys with a placeholder preview), so their activity always
+  // comes from the previous list.
+  function isClientOnlyChannel(ch) {
+    return typeof ch.hash === 'string' && ch.hash.indexOf('user:') === 0;
+  }
+
+  // Carries client-only state from prevChannels onto freshChannels by hash.
+  // Only enriches rows freshChannels already contains: carrying a missing
+  // row over would resurrect channels the region filter just excluded.
+  // Returns a fresh array of fresh objects; never aliases or mutates input.
+  function mergeClientChannelState(freshChannels, prevChannels, seqAtRequestStart) {
+    if (!Array.isArray(freshChannels)) return [];
+    var prevByHash = new Map();
+    if (Array.isArray(prevChannels)) {
+      for (var i = 0; i < prevChannels.length; i++) {
+        var p = prevChannels[i];
+        if (p && p.hash != null) prevByHash.set(p.hash, p);
+      }
+    }
+    return freshChannels.map(function (c) {
+      var out = Object.assign({}, c);
+      var prev = out.hash != null ? prevByHash.get(out.hash) : undefined;
+      if (!prev) return out;
+      // Carried when present, including an explicit 0: undefined is not "read".
+      if (Object.prototype.hasOwnProperty.call(prev, 'unread')) out.unread = prev.unread;
+      if (prev.userAdded === true) out.userAdded = true;
+      // A label mergeUserChannels() just read from storage wins over the old one.
+      if (prev.userLabel && !out.userLabel) out.userLabel = prev.userLabel;
+      var newerLive = typeof prev._wsSeq === 'number' && prev._wsSeq > seqAtRequestStart;
+      if (newerLive || isClientOnlyChannel(out)) {
+        // Moved together: a sender without its message reads as another message.
+        out.lastActivityMs = prev.lastActivityMs;
+        out.lastSender = prev.lastSender;
+        out.lastMessage = prev.lastMessage;
+        out.messageCount = prev.messageCount;
+        if (typeof prev._wsSeq === 'number') out._wsSeq = prev._wsSeq;
+      }
+      return out;
+    });
+  }
+
   let autoScroll = true;
   let nodeCache = {};
   let selectedNode = null;
@@ -1046,10 +1103,9 @@
         view: _initUrlParams.get('view'),
         onApproved: function () {
           invalidateApiCache('/channels');
-          loadChannels(true).then(function () {
-            mergeUserChannels();
-            renderChannelList();
-          });
+          // loadChannels() merges the user's PSK rows itself (#152), before
+          // it reconciles the selection.
+          loadChannels(true);
         }
       });
     }
@@ -1311,11 +1367,11 @@
     loadObserverRegions();
     loadChannels().then(async function () {
       // Also load user-added encrypted channels into the sidebar.
-      // mergeUserChannels() mutates `channels` (marks userAdded, appends
-      // PSK-only entries) AFTER loadChannels() already rendered — so we
-      // MUST re-render here, otherwise the My Channels section never
-      // appears on first load when the route has no specific channel
-      // hash (regression caught by test-channel-issue-1111-e2e.js, case 2).
+      // Since #152 a successful loadChannels() has already merged and
+      // rendered them, so this is an idempotent re-render there. It stays
+      // for the failure path: when /channels fails, loadChannels() merges
+      // nothing, and this is what still lists My Channels (the section
+      // test-channel-issue-1111-e2e.js case 2 requires on first load).
       mergeUserChannels();
       renderChannelList();
       if (routeParam) await selectChannel(routeParam);
@@ -1636,6 +1692,7 @@
           ch.lastActivityMs = Date.now();
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
+          ch._wsSeq = ++wsActivitySeq; // #152: see mergeClientChannelState()
           channelListDirty = true;
         } else if (isFirstObservation) {
           // New channel we haven't seen
@@ -1646,6 +1703,7 @@
             lastActivityMs: Date.now(),
             lastSender: sender,
             lastMessage: truncate(displayText, 100),
+            _wsSeq: ++wsActivitySeq,
           });
           channelListDirty = true;
         }
@@ -1854,6 +1912,8 @@
   }
 
   async function loadChannels(silent) {
+    // #152: WS activity stamped after this point is newer than the snapshot.
+    const seqAtRequestStart = wsActivitySeq;
     try {
       const rp = RegionFilter.getRegionParam();
       var showEnc = localStorage.getItem('channels-show-encrypted') === 'true';
@@ -1862,15 +1922,24 @@
       if (showEnc) params.push('includeEncrypted=true');
       const qs = params.length ? '?' + params.join('&') : '';
       const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
-      channels = (data.channels || []).map(ch => {
-        ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
-        return ch;
-      });
+      const prevChannels = channels;
+      // Copies: api() hands the same cached objects back on a TTL hit, and
+      // mergeUserChannels() below mutates rows.
+      channels = (data.channels || []).map(ch => Object.assign({}, ch, {
+        lastActivityMs: ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0
+      }));
       // Approved shared channels are listed for everyone, even before they
       // carry traffic.
       if (window.ChannelProposals) {
         channels = window.ChannelProposals.mergeApprovedChannels(channels, data.approvedChannels);
       }
+      // #152: re-derive the user's PSK rows from storage, then carry the
+      // tab's own state over from the previous list. mergeUserChannels()
+      // must run first so its user:* rows get their unread and preview back,
+      // and both must run before reconcileSelectionAfterChannelRefresh(),
+      // which closes the conversation when selectedHash is not listed.
+      if (typeof ChannelDecrypt !== 'undefined' && ChannelDecrypt) mergeUserChannels();
+      channels = mergeClientChannelState(channels, prevChannels, seqAtRequestStart);
       channels.sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
@@ -2595,6 +2664,7 @@
   window._channelsSelectChannelForTest = selectChannel;
   window._channelsRefreshMessagesForTest = refreshMessages;
   window._channelsMergeWsAppendedIntoRestForTest = mergeWsAppendedIntoRest;
+  window._channelsMergeClientChannelStateForTest = mergeClientChannelState;
   window._channelsNormalizeObservedPathHashSizesForTest = normalizeObservedPathHashSizes;
   window._channelsUnionObservedPathHashSizesForTest = unionObservedPathHashSizes;
   window._channelsRenderObservedPathHashBadgeForTest = renderObservedPathHashBadge;

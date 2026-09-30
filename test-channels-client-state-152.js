@@ -344,6 +344,13 @@ async function test(name, fn) {
     assert.ok(h.elements.chList.innerHTML.indexOf('Team') !== -1, 'PSK label rendered');
   });
 
+  await test('a label re-read from storage wins over the previous list\'s label', async () => {
+    const { h } = await openPskConversation();
+    h.setState({ channels: [Object.assign({}, h.row('public')), pskRow({ userLabel: 'Old name' })] });
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(h.row(PSK_HASH).userLabel, 'Team', 'storage label must win (got ' + h.row(PSK_HASH).userLabel + ')');
+  });
+
   await test('unread and preview on a user:* row survive a refresh (explicit 0 on a server row kept)', async () => {
     const { h } = await openPskConversation();
     h.setState({
@@ -486,10 +493,31 @@ async function test(name, fn) {
     assert.strictEqual(newer[0].messageCount, 99, 'moved together with its message');
     assert.strictEqual(newer[0].lastSender, 'X');
     assert.strictEqual(newer[0].lastActivityMs, 999999);
-    assert.deepStrictEqual(merge(null, prev, 0), []);
+    const none = merge(null, prev, 0);
+    assert.ok(Array.isArray(none) && none.length === 0, 'non-array fresh → []');
     const noPrev = merge(fresh, null, 0);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(noPrev)), JSON.parse(freshCopy));
     assert.notStrictEqual(noPrev[0], fresh[0]);
+  });
+
+  // init() keeps its own mergeUserChannels()/render after loadChannels():
+  // a no-op after a successful load, but the only thing that lists My
+  // Channels when /channels fails.
+  await test('init(): My Channels still listed when /channels fails', async () => {
+    const h = makeHarness();
+    h.storeKey(PSK_NAME, PSK_KEY, 'Team');
+    h.respondChannels = () => Promise.reject(new Error('offline'));
+    await h.init();
+    assert.ok(h.row(PSK_HASH) && h.row(PSK_HASH).userAdded === true, 'PSK row listed');
+    assert.ok(/ch-section-mychannels/.test(h.elements.chList.innerHTML), 'My Channels rendered');
+  });
+
+  await test('init(): a successful load lists each PSK row exactly once', async () => {
+    const h = makeHarness();
+    h.storeKey(PSK_NAME, PSK_KEY, 'Team');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    assert.strictEqual(h.state().channels.filter((c) => c.hash === PSK_HASH).length, 1);
   });
 
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');

@@ -85,6 +85,12 @@ async function runViewport(browser, vp) {
       const h = document.querySelector('#chHeader .ch-header-text');
       return h && h.textContent.indexOf(label) !== -1;
     }, PSK_LABEL, { timeout: 10000 });
+    // Let the decrypt pass finish so the pane snapshot below is final.
+    await page.waitForFunction(() => {
+      const m = document.getElementById('chMessages');
+      return m && !m.querySelector('.ch-loading') && m.textContent.indexOf('Decrypting') === -1;
+    }, null, { timeout: 15000 });
+    await page.waitForTimeout(500);
     const s = await conversationState(page);
     assert(s.rowPresent && s.rowSelected, 'PSK row must be listed and selected, got ' + JSON.stringify(s));
     if (vp.mobile === false) assert(s.rowInMyChannels, 'PSK row must be in My Channels');
@@ -99,7 +105,7 @@ async function runViewport(browser, vp) {
       assert(s.urlHash === before.urlHash, 'URL must stay on the PSK channel, got ' + s.urlHash);
       assert(s.header.indexOf(PSK_LABEL) !== -1, 'header must still name the PSK channel, got ' + JSON.stringify(s.header));
       assert(s.messagesText.indexOf('Choose a channel') === -1, 'conversation must not close, got ' + JSON.stringify(s.messagesText.slice(0, 120)));
-      assert(s.messagesText === before.messagesText, 'message pane must be unchanged');
+      assert(s.messagesText === before.messagesText, 'message pane must be unchanged: ' + JSON.stringify([before.messagesText.slice(0,120), s.messagesText.slice(0,120)]));
       assert(s.rowPresent && s.rowSelected, 'PSK row must stay listed and selected, got ' + JSON.stringify(s));
       if (vp.mobile === false) {
         assert(s.rowInMyChannels, 'My Channels must still contain the PSK row');
