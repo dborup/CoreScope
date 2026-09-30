@@ -53,8 +53,8 @@ func TestMQTTSourceTagHasNoCredentials_118(t *testing.T) {
 	assertNoCredentials(t, "tag for an unparseable broker", got)
 }
 
-// captureLog collects the standard logger's output for the test.
-func captureLog(t *testing.T) *bytes.Buffer {
+// captureLog118 collects the standard logger's output for the test.
+func captureLog118(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	prevOut, prevFlags := log.Writer(), log.Flags()
@@ -75,7 +75,7 @@ func TestMQTTLogLinesHaveNoCredentials_118(t *testing.T) {
 		credUser + ":" + credPass + "@" + addr,
 	} {
 		t.Run(broker[:3], func(t *testing.T) {
-			buf := captureLog(t)
+			buf := captureLog118(t)
 			src := MQTTSource{Broker: broker}
 			tag, logBroker := mqttSourceTag(src), brokerForLog(src.Broker)
 			opts := buildMQTTOpts(src).SetConnectTimeout(time.Second)
