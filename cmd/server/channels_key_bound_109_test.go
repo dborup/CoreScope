@@ -3,6 +3,7 @@ package main
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -50,6 +51,44 @@ func TestChannelListCacheKeyLengthIsBounded_109(t *testing.T) {
 		}
 		if _, ok := c.entries["AAR"]; !ok {
 			t.Errorf("%s: a short key is not stored as itself", name)
+		}
+	}
+}
+
+// Only the cache and the flight use the bounded key: the query itself must
+// still get the full normalized region, or a long region parameter would be
+// looked up as the region "sha256:…" and cache an empty list.
+func TestChannelListLongKeyQueriesFullRegion_109(t *testing.T) {
+	db := singleflightDB(t)
+	var mu sync.Mutex
+	got := map[string][]string{}
+	db.channelsQueryHook = func(kind, region string) error {
+		mu.Lock()
+		got[kind] = append(got[kind], region)
+		mu.Unlock()
+		return nil
+	}
+	many := make([]string, 300)
+	for i := range many {
+		many[i] = "r" + strconv.Itoa(i)
+	}
+	param := strings.Join(many, ",")
+	want := channelsRegionKey(param)
+	if len(want) <= channelListMaxKeyBytes {
+		t.Fatalf("test region key is %d bytes, want more than %d", len(want), channelListMaxKeyBytes)
+	}
+	if _, err := db.GetChannels(param); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetEncryptedChannels(param); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"channels", "encrypted"} {
+		if len(got[kind]) != 1 {
+			t.Fatalf("%s: %d queries, want 1", kind, len(got[kind]))
+		}
+		if got[kind][0] != want {
+			t.Errorf("%s: query got region %.40q…, want the full normalized key %.40q…", kind, got[kind][0], want)
 		}
 	}
 }

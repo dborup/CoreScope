@@ -40,8 +40,9 @@ const (
 	channelListTTL     = 60 * time.Second
 	channelListMaxKeys = 64
 	// channelListMaxKeyBytes caps a stored key. A longer one becomes
-	// "sha256:" + 64 hex digits (71 bytes); no normalized region key
-	// contains ':', so a digest never equals a short key.
+	// "sha256:" + 64 hex digits (71 bytes). Normalized region codes are
+	// upper-case (normalizeRegionCodes), so no short key starts with the
+	// lower-case "sha256:" and a digest never equals a short key.
 	channelListMaxKeyBytes = 256
 )
 
