@@ -527,10 +527,10 @@ type PacketStore struct {
 	// "coverage reached" for health reporting. See StartupLoadDone.
 	startupLoadDone     chan struct{}
 	startupLoadSignaled atomic.Bool
-	loadComplete       atomic.Bool
-	loadProgressRows   atomic.Int64
-	chunkCBMu          sync.Mutex
-	chunkCallbacks     []func(rowsThisChunk, totalRows int)
+	loadComplete        atomic.Bool
+	loadProgressRows    atomic.Int64
+	chunkCBMu           sync.Mutex
+	chunkCallbacks      []func(rowsThisChunk, totalRows int)
 
 	// Eviction config and stats
 	retentionHours  float64        // 0 = unlimited
