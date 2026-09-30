@@ -138,8 +138,11 @@ jobs:
           set -e
           node test-packet-filter.js
           node test-packet-filter-time.js
+          node test-issue-121-clear-filters-selection.js
+          node test-clear-filters.js
           node test-confidence-indicator.js
           node test-1659-analytics-warmup.js
+          node test-issue-120-distance-building.js
           node test-app-api-inflight-cleanup-rejection.js
           node test-channels-merge-1498-unit.js
           node test-channels-observed-path-hash-size.js
@@ -159,6 +162,8 @@ jobs:
           node test-channel-issue-1101.js
           node test-observer-iata-1188.js
           node test-pull-to-reconnect-1091.js
+          node test-issue-117-ws-watchdog.js
+          node test-issue-111-drawer-version.js
           node test-channel-fluid-layout.js
           node test-issue-1279-p2-code-filter.js
           node test-area-filter.js
@@ -187,6 +192,8 @@ jobs:
           node test-issue-1509-nav-active-bg.js
           node test-issue-1509-detect-preset.js
           node test-live.js
+          node test-issue-124-rx-coverage-viewport.js
+          node test-issue-125-live-toggles-wiring.js
           node test-coverage-gate.js
           node test-node-reach-coverage.js
           node test-reach-rank.js
@@ -475,6 +482,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-channel-issue-1111-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-map-modal-fluid-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-map-nodes-pagination-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-123-map-lifecycle-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-observer-iata-1188-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1639-observers-sort-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1758-ng-filter-rerenders-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -503,6 +511,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1128-multi-viewport-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1136-live-region-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-live-multibyte-only-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-125-live-toggles-early-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1150-404-state-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1146-path-link-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-issue-1705-subpath-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -546,6 +555,7 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-path-inspector-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1206-resize-observer-leak-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-nav-drawer-1064-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-111-drawer-version-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-audio-live-1297-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-audio-lab-1297-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-channel-decrypt-e2e.js 2>&1 | tee -a e2e-output.txt

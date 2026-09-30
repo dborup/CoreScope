@@ -11,10 +11,13 @@ echo ""
 echo "── Unit Tests ──"
 node test-packet-filter.js
 node test-packet-filter-ux.js
+node test-issue-121-clear-filters-selection.js
+node test-clear-filters.js
 node test-aging.js
 node test-issue-1065-gesture-hints-gates.js
 node test-frontend-helpers.js
 node test-app-api-inflight-cleanup-rejection.js
+node test-issue-120-distance-building.js
 node test-privacy-page.js
 node test-nav-dynamic-link-lifecycle.js
 node test-nav-first-load-fit.js
@@ -59,6 +62,8 @@ node test-issue-1883-redirect-history.js
 node test-issue-1890-og-url.js
 node test-traces.js
 node test-live-multibyte-filter.js
+node test-issue-124-rx-coverage-viewport.js
+node test-issue-125-live-toggles-wiring.js
 node test-issue-2052-touch-target-css.js
 node test-channel-proposals.js
 node test-packet-detail-channel-xss.js
@@ -110,6 +115,8 @@ node test-network-digest-tool.js
 node test-position-gaps-tool.js
 node test-gps-sanity-tool.js
 node test-map-scope-filter.js
+node test-issue-117-ws-watchdog.js
+node test-issue-111-drawer-version.js
 
 echo ""
 echo "═══════════════════════════════════════"

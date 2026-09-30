@@ -19,6 +19,7 @@ type Hub struct {
 	upgrader       websocket.Upgrader
 	allowedOrigins []string   // exact-match allowlist for /ws CheckOrigin (see SetAllowedOrigins)
 	limits         *wsLimiter // #1794: per-IP caps and deny list; nil allows everything
+	pingInterval   time.Duration // writePump tick: protocol ping + app heartbeat (#117)
 }
 
 // SetAllowedOrigins configures the exact-match origin allowlist consulted by
@@ -74,6 +75,15 @@ func (h *Hub) checkOrigin(r *http.Request) bool {
 	return false
 }
 
+// wsHeartbeat is written to every client on each ping tick (#117). Browser
+// JS never sees protocol ping frames, so without a frame the page receives a
+// quiet mesh and a silently dead (half-open) socket look the same to it.
+// public/app.js matches these exact bytes (WS_HEARTBEAT) and drops a socket
+// that has been silent for WS_STALE_MS; ws_heartbeat_117_test.go keeps the
+// two in step. Tabs still running an app.js from before this change treat
+// it as an ordinary message of an unknown type (see the #117 PR).
+var wsHeartbeat = []byte(`{"type":"heartbeat"}`)
+
 // Client is a single WebSocket connection.
 type Client struct {
 	conn     *websocket.Conn
@@ -109,7 +119,8 @@ func (h *Hub) ConfigureLimits(maxConnsPerIP, upgradesPerMin int, trustedProxies,
 
 func NewHub() *Hub {
 	h := &Hub{
-		clients: make(map[*Client]bool),
+		clients:      make(map[*Client]bool),
+		pingInterval: 30 * time.Second,
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -214,7 +225,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Register(client)
 
-	go client.writePump()
+	go client.writePump(h.pingInterval)
 	go client.readPump(h)
 }
 
@@ -248,8 +259,8 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-func (c *Client) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
+func (c *Client) writePump(pingInterval time.Duration) {
+	ticker := time.NewTicker(pingInterval)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
@@ -268,6 +279,10 @@ func (c *Client) writePump() {
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// #117: same tick, same (only) writer goroutine; see wsHeartbeat.
+			if err := c.conn.WriteMessage(websocket.TextMessage, wsHeartbeat); err != nil {
 				return
 			}
 		}

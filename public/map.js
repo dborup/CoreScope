@@ -29,6 +29,37 @@
   let topRoutesGeneration = 0;
   let userHasMoved = false;
   let controlsCollapsed = false;
+  // #123: lifecycle token. Bumped by every init() and destroy(), so work a
+  // mount started (a response, a timer) can tell it is stale and do nothing.
+  // A bare `if (map)` is not enough: after a quick return it sees the NEXT
+  // mount's map.
+  let mapGeneration = 0;
+  // #123: newest loadNodes() request of this mount; older ones never render.
+  let nodesLoadGeneration = 0;
+  let nodesLoadPromise = null;
+  const mapTimers = new Set(); // pending mapTimeout() ids, cleared by destroy()
+  let areaNodesHandler = null;   // AreaFilter listeners, removed by destroy()
+  let areaOutlineHandler = null;
+  let mapThemeObs = null;        // theme observer and tile-provider listener
+  let tileProviderHandler = null; // of this mount, removed by destroy()
+
+  // Returns alive(): true while the mount that called mapToken() is current.
+  function mapToken() {
+    const gen = mapGeneration;
+    return function alive() { return gen === mapGeneration; };
+  }
+
+  // setTimeout scoped to the current mount: cleared by destroy() and never
+  // runs on a later mount's map.
+  function mapTimeout(fn, ms) {
+    const alive = mapToken();
+    const id = setTimeout(function () {
+      mapTimers.delete(id);
+      if (alive() && map) fn();
+    }, ms);
+    mapTimers.add(id);
+    return id;
+  }
 
   // Safe escape — falls back to identity if app.js hasn't loaded yet.
   // Escape untrusted strings (mesh-advertised node names) before HTML interpolation
@@ -176,6 +207,8 @@
   }
 
   async function init(container) {
+    mapGeneration++;
+    const alive = mapToken();
     container.innerHTML = `
       <div id="map-wrap" style="position:relative;width:100%;height:100%;display:flex;">
         <div id="leaflet-map" style="flex:1 1 0%;height:100%;"></div>
@@ -291,6 +324,8 @@
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') defaultZoom = mapCfg.zoom;
     } catch {}
+    // #123: the page was left (or left and re-entered) during the fetch.
+    if (!alive()) return;
     let initCenter = defaultCenter;
     let initZoom = defaultZoom;
     // Check URL query params first (from packet detail links). #1709: shared
@@ -373,19 +408,20 @@
       window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
     }
 
-    const _mapThemeObs = new MutationObserver(function () {
+    mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       _syncDarkTiles(dark);
     });
-    _mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     // #1420 — re-render when the user picks a different dark provider in the customizer.
-    window.addEventListener('mc-tile-provider-changed', function (e) {
+    tileProviderHandler = function (e) {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       if (e && e.detail && e.detail.type && e.detail.type !== (dark ? 'dark' : 'light')) return;
       _syncDarkTiles(dark);
-    });
+    };
+    window.addEventListener('mc-tile-provider-changed', tileProviderHandler);
 
     // #1689 r1 (adv #4): live re-render when the customizer "hide 1-byte
     // path hops" toggle flips. Before this listener the toggle only took
@@ -443,7 +479,7 @@
     }
 
     // Fix map size on SPA load
-    setTimeout(() => map.invalidateSize(), 100);
+    mapTimeout(() => map.invalidateSize(), 100);
 
     // Controls toggle
     const toggleBtn = document.getElementById('mapControlsToggle');
@@ -607,7 +643,7 @@
     document.getElementById('mcConfiguredScopeFilter').addEventListener('change', e => { filters.configuredScope = e.target.value; localStorage.setItem('meshcore-map-configured-scope-filter', filters.configuredScope); renderMarkers(); });
 
     AreaFilter.init(document.getElementById('mapAreaFilter'));
-    AreaFilter.onChange(function () { loadNodes(); });
+    areaNodesHandler = AreaFilter.onChange(function () { loadNodes(); });
 
     // Status filter buttons
     document.querySelectorAll('#mcStatusFilter .btn').forEach(btn => {
@@ -636,6 +672,7 @@
     (async function () {
       try {
         const gf = await api('/config/geo-filter', { ttl: 3600 });
+        if (!alive()) return;
         if (!gf || !gf.polygon || gf.polygon.length < 3) return;
         const geoColor = getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim() || '#3b82f6';
         const latlngs = gf.polygon.map(function (p) { return [p[0], p[1]]; });
@@ -707,7 +744,10 @@
         }
         return null;
       }
+      var refreshGen = 0;
       async function refresh() {
+        if (!alive() || !map) return;
+        var gen = ++refreshGen;
         var label = document.getElementById('mcSelectedAreaLabel');
         var checkbox = document.getElementById('mcSelectedArea');
         if (selectedAreaLayer) { map.removeLayer(selectedAreaLayer); selectedAreaLayer = null; }
@@ -717,6 +757,8 @@
           return;
         }
         var areas = await fetchAreaPolygons();
+        // #123: only the newest refresh of the current mount draws.
+        if (!alive() || !map || gen !== refreshGen) return;
         var entry = areas.find(function (a) { return a.key === key; });
         var latlngs = entry && latLngsFor(entry);
         if (!latlngs) {
@@ -740,7 +782,7 @@
           if (e.target.checked) { selectedAreaLayer.addTo(map); } else { map.removeLayer(selectedAreaLayer); }
         });
       }
-      AreaFilter.onChange(refresh);
+      areaOutlineHandler = AreaFilter.onChange(refresh);
       refresh();
     })();
 
@@ -752,6 +794,7 @@
     });
 
     loadNodes().then(() => {
+      if (!alive()) return;
       // Check for a wardriving GPS trail (via sessionStorage) — see
       // drawGPSTrail. Distinct from map-route-hops: these are raw shared
       // coordinates, not mesh hop keys needing node resolution.
@@ -822,6 +865,7 @@
     // (unique_prefix vs multi-byte vs gps_preference vs affinity scoring).
     // Falls back to naive nodes.filter() scan if the API is unreachable.
     let serverResolved = null;
+    const alive = mapToken();
     try {
       const hopList = (hopKeys || []).join(',');
       const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(hopList);
@@ -833,6 +877,8 @@
     } catch (e) {
       console.warn('resolve-hops API call failed, falling back to local nodes scan', e);
     }
+    // #123: the map this route was requested for is gone.
+    if (!alive() || !map) return;
     // Hide default markers so only the route is visible
     if (markerLayer) map.removeLayer(markerLayer);
     if (clusterGroup) map.removeLayer(clusterGroup);
@@ -1266,6 +1312,7 @@
 
     // Resolve canonical hops via /api/resolve-hops + naive fallback.
     let serverResolved = null;
+    const alive = mapToken();
     try {
       const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(canonicalPath.join(','));
       const resp = await fetch(apiUrl, { cache: 'no-cache' });
@@ -1274,6 +1321,7 @@
         serverResolved = json && json.resolved ? json.resolved : null;
       }
     } catch (e) {}
+    if (!alive() || !map) return; // #123
 
     const raw = canonicalPath.map(hop => {
       const hopLower = String(hop).toLowerCase();
@@ -1374,6 +1422,7 @@
   // the packets-page 'View on map' button would have set in sessionStorage.
   // Without an obs param, the first observation is used.
   async function loadRouteFromDeepLink() {
+    const alive = mapToken();
     try {
       const hash = location.hash || '';
       const qs = hash.split('?')[1];
@@ -1393,6 +1442,7 @@
         return;
       }
       const data = await resp.json();
+      if (!alive()) return; // #123
       const pkt = data.packet || data;
       const observations = data.observations || pkt.observations || [];
       if (!observations.length) return;
@@ -1605,6 +1655,7 @@
           } catch (_) {}
         }
       }
+      if (!alive()) return; // #123: left during the channel lookups
       if (allPaths.length === 0) {
         // Polish review (doshi #1423): operator clicked a ?packet=<hash> URL
         // but every observation had an empty path. Previously this bailed
@@ -1651,13 +1702,16 @@
   // deployment's current estimate), the URL alone is enough to
   // reproduce the view -- share/bookmark/reload all just work.
   async function loadEstimatedNodesFromDeepLink() {
+    const alive = mapToken();
     try {
       const resp = await fetch('/api/analytics/areas');
+      if (!alive()) return; // #123
       if (!resp.ok) {
         console.warn('[deep-link] /api/analytics/areas returned ' + resp.status);
         return;
       }
       const data = await resp.json();
+      if (!alive()) return;
       const points = (data && Array.isArray(data.estimatedNodes)) ? data.estimatedNodes : [];
       drawEstimatedNodes(points);
     } catch (e) {
@@ -1665,20 +1719,37 @@
     }
   }
 
-  async function loadNodes() {
+  // #123: every call is a new request generation; only the newest request
+  // of the current mount renders. A superseded call resolves when the newest
+  // one does, so callers chaining on loadNodes() still see loaded nodes.
+  function loadNodes() {
+    const p = loadNodesRequest(++nodesLoadGeneration, mapToken());
+    nodesLoadPromise = p;
+    return p;
+  }
+
+  async function loadNodesRequest(req, alive) {
+    const current = () => alive() && req === nodesLoadGeneration && !!map;
+    const stale = () => (alive() ? nodesLoadPromise : undefined);
+    if (!map) return;
     try {
       // Load regions from config + observed IATAs
-      try { REGION_NAMES = await api('/config/regions', { ttl: 3600 }); } catch {}
+      let regions = REGION_NAMES;
+      try { regions = await api('/config/regions', { ttl: 3600 }); } catch {}
+      if (!current()) return stale();
+      REGION_NAMES = regions;
 
       const aqs = AreaFilter.areaQueryString();
       // Paginate past the server's per-request node cap (listLimits.nodesMax)
       // so actively-relaying repeaters that last advertised hours ago still
       // appear instead of being truncated by the top-N window. See fetchAllNodes.
       const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
-      nodes = data.nodes || [];
+      if (!current()) return stale();
 
       // Load observers for jump buttons + map markers
       const obsData = await api('/observers', { ttl: CLIENT_TTL.observers });
+      if (!current()) return stale();
+      nodes = data.nodes || [];
       observers = obsData.observers || [];
 
       buildRoleChecks(data.counts || {});
@@ -1709,7 +1780,7 @@
         if (targetNode && targetNode.lat && targetNode.lon) {
           map.setView([targetNode.lat, targetNode.lon], 14);
           // Delay popup open slightly — Leaflet needs the map to settle after setView
-          setTimeout(() => {
+          mapTimeout(() => {
             let found = false;
             const findIn = function (layer) {
               if (found || !layer || !layer.eachLayer) return;
@@ -1748,12 +1819,14 @@
       // Don't fitBounds on initial load — respect the Bay Area default or saved view
       // Only fitBounds on subsequent data refreshes if user hasn't manually panned
     } catch (e) {
+      if (!current()) return stale();
       console.error('Map load error:', e);
     } finally {
       // Always signal data-loaded — even on error — so E2E tests can proceed.
-      // Otherwise an api() failure leaves the test waiting forever.
+      // Otherwise an api() failure leaves the test waiting forever. Only the
+      // current request signals it (#123).
       var mapContainer = document.getElementById('leaflet-map');
-      if (mapContainer) mapContainer.setAttribute('data-loaded', 'true');
+      if (mapContainer && current()) mapContainer.setAttribute('data-loaded', 'true');
     }
   }
 
@@ -2252,33 +2325,39 @@
   async function selectReferenceNode(pubkey, name) {
     selectedReferenceNode = pubkey;
     neighborPubkeys = new Set();
+    // #123: fill a local set and publish it only if this mount and this
+    // selection are still current when the lookups return.
+    const alive = mapToken();
+    const found = new Set();
     try {
       // Use affinity-based neighbor API (server-side disambiguation) instead of
       // client-side path walking which fails on hash collisions (#484)
       const data = await api('/nodes/' + pubkey + '/neighbors?min_count=3');
       for (const n of (data.neighbors || [])) {
-        if (n.pubkey) neighborPubkeys.add(n.pubkey);
+        if (n.pubkey) found.add(n.pubkey);
         // For ambiguous edges, include all candidates (better to show extra than miss)
-        if (n.candidates) n.candidates.forEach(function(c) { if (c.pubkey) neighborPubkeys.add(c.pubkey); });
+        if (n.candidates) n.candidates.forEach(function(c) { if (c.pubkey) found.add(c.pubkey); });
       }
       // If affinity data is insufficient, fall back to client-side path walking
-      if (neighborPubkeys.size === 0) {
+      if (found.size === 0) {
         const pathData = await api('/nodes/' + pubkey + '/paths');
         const paths = pathData.paths || [];
         for (const p of paths) {
           const hops = p.hops || [];
           for (var i = 0; i < hops.length; i++) {
             if (hops[i].pubkey === pubkey) {
-              if (i > 0 && hops[i - 1].pubkey) neighborPubkeys.add(hops[i - 1].pubkey);
-              if (i < hops.length - 1 && hops[i + 1].pubkey) neighborPubkeys.add(hops[i + 1].pubkey);
+              if (i > 0 && hops[i - 1].pubkey) found.add(hops[i - 1].pubkey);
+              if (i < hops.length - 1 && hops[i + 1].pubkey) found.add(hops[i + 1].pubkey);
             }
           }
         }
       }
     } catch (e) {
       console.warn('Failed to fetch neighbors for', pubkey, ':', e);
-      neighborPubkeys = new Set();
+      found.clear();
     }
+    if (!alive() || selectedReferenceNode !== pubkey) return;
+    neighborPubkeys = found;
     // Update sidebar UI
     const refEl = document.getElementById('mcNeighborRef');
     const refNameEl = document.getElementById('mcNeighborRefName');
@@ -2366,6 +2445,10 @@
     var input = document.getElementById('mapPiInput');
     var btn = document.getElementById('mapPiSubmit');
     if (!pane || !toggle) return;
+    // #123: loadNodes() calls this on every reload; wire each mount's pane
+    // only once or one click toggles it several times.
+    if (pane.dataset.wired === 'true') return;
+    pane.dataset.wired = 'true';
 
     toggle.addEventListener('click', function () {
       pane.classList.toggle('expanded');
@@ -2373,7 +2456,7 @@
       toggle.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' +
         (pane.classList.contains('expanded') ? 'ph-caret-right' : 'ph-caret-left') + '"/></svg>';
       // Invalidate map size after transition.
-      setTimeout(function () { if (map) map.invalidateSize(); }, 220);
+      mapTimeout(function () { map.invalidateSize(); }, 220);
     });
 
     if (btn && input) {
@@ -2390,7 +2473,7 @@
       pane.classList.add('expanded');
       toggle.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-right"/></svg>';
       input.value = prefixParam;
-      setTimeout(function () { if (map) map.invalidateSize(); }, 220);
+      mapTimeout(function () { map.invalidateSize(); }, 220);
       mapPiSubmit(prefixParam);
     }
   }
@@ -2478,6 +2561,21 @@
   }
 
   function destroy() {
+    // #123: make every pending response and timer of this mount inert.
+    mapGeneration++;
+    mapTimers.forEach(clearTimeout);
+    mapTimers.clear();
+    clearTimeout(_zoomResizeTimer);
+    nodesLoadPromise = null;
+    if (areaNodesHandler) AreaFilter.offChange(areaNodesHandler);
+    if (areaOutlineHandler) AreaFilter.offChange(areaOutlineHandler);
+    areaNodesHandler = areaOutlineHandler = null;
+    // #123: one theme observer and tile-provider listener per mount; before
+    // this every mount added both for good, and each kept setting URLs on
+    // its removed map's tile layer.
+    if (mapThemeObs) mapThemeObs.disconnect();
+    if (tileProviderHandler) window.removeEventListener('mc-tile-provider-changed', tileProviderHandler);
+    mapThemeObs = tileProviderHandler = null;
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     // #1771 review fix: invalidate the Important Links overlay's in-flight
@@ -2547,9 +2645,11 @@
     clearAffinityOverlay();
     // Fetch debug data — requires API key stored in localStorage
     var apiKey = localStorage.getItem('meshcore-api-key') || '';
+    var alive = mapToken();
     fetch('/api/debug/affinity', { headers: { 'X-API-Key': apiKey } })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (data) {
+        if (!alive()) return; // #123
         affinityData = data;
         renderAffinityOverlay();
       })
