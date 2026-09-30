@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"slices"
 	"sort"
 	"strings"
@@ -22,6 +24,8 @@ import (
 //   - Bounded: at most channelListMaxKeys entries. The region comes from a
 //     query parameter, so the key space is caller-controlled; when full,
 //     expired entries are dropped first, then the one closest to expiry.
+//     A key longer than channelListMaxKeyBytes is stored (and used as the
+//     flight key) as its SHA-256 digest, so each stored key is small too.
 //
 // A stored entry is never modified. Its channels slice is shared by every
 // caller, so callers must not write into it (handleChannels appends with a
@@ -35,7 +39,20 @@ type channelListCache struct {
 const (
 	channelListTTL     = 60 * time.Second
 	channelListMaxKeys = 64
+	// channelListMaxKeyBytes caps a stored key. A longer one becomes
+	// "sha256:" + 64 hex digits (71 bytes); no normalized region key
+	// contains ':', so a digest never equals a short key.
+	channelListMaxKeyBytes = 256
 )
+
+// channelListStoreKey is the key the cache and the flight use for key.
+func channelListStoreKey(key string) string {
+	if len(key) <= channelListMaxKeyBytes {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // channelsRegionKey is the cache and flight key for a region parameter: the
 // normalized codes (normalizeRegionCodes), sorted and de-duplicated. The
@@ -96,6 +113,7 @@ func (c *channelListCache) reset() {
 // query shared by every concurrent caller of key. missed runs after the
 // first cache check fails (a test seam; nil in production).
 func (c *channelListCache) load(key string, missed func(), query func() (*channelListEntry, error)) (*channelListEntry, error) {
+	key = channelListStoreKey(key)
 	if e, ok := c.get(key, time.Now()); ok {
 		return e, nil
 	}
