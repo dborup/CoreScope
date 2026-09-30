@@ -1,0 +1,497 @@
+/**
+ * #152 — loadChannels() must keep client-only channel state across a
+ * channel-list refresh.
+ *
+ * loadChannels() replaced `channels` with the server snapshot and carried
+ * nothing across. Every refresh (region change, show-encrypted toggle,
+ * shared-channel approval) therefore:
+ *   - closed an open PSK conversation (a user:* hash is never in the server
+ *     snapshot, so reconcileSelectionAfterChannelRefresh() evicted it,
+ *     emptied `messages` and rewrote the URL to #/channels);
+ *   - dropped the My Channels section and the user's labels;
+ *   - reset unread badges and the sidebar preview of user:* rows.
+ *
+ * These tests load the real channels.js (plus channel-decrypt.js and
+ * channel-proposals.js) in a vm sandbox and drive the real loadChannels(),
+ * the real WS path and the real init() handlers through the existing test
+ * hooks. Nothing here re-implements production logic.
+ *
+ * Usage: node test-channels-client-state-152.js
+ */
+'use strict';
+
+const vm = require('vm');
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+const { webcrypto } = require('crypto');
+
+const RealDate = Date;
+const HOUR = 60 * 60 * 1000;
+const PSK_NAME = 'psk:0badc0de';
+const PSK_HASH = 'user:' + PSK_NAME;
+const PSK_KEY = '0badc0de0badc0de0badc0de0badc0de';
+
+// A Date whose "now" is shifted by skewMs, to simulate a browser clock that
+// runs ahead of (skewMs > 0) or behind (skewMs < 0) the server clock.
+function makeSkewedDate(skewMs) {
+  function SkewedDate() {
+    const args = Array.prototype.slice.call(arguments);
+    if (!(this instanceof SkewedDate)) return new RealDate(RealDate.now() + skewMs).toString();
+    if (args.length === 0) return new RealDate(RealDate.now() + skewMs);
+    return new (Function.prototype.bind.apply(RealDate, [null].concat(args)))();
+  }
+  SkewedDate.now = () => RealDate.now() + skewMs;
+  SkewedDate.parse = RealDate.parse;
+  SkewedDate.UTC = RealDate.UTC;
+  SkewedDate.prototype = RealDate.prototype;
+  return SkewedDate;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+async function flush(n) {
+  for (let i = 0; i < (n || 20); i++) await new Promise((r) => setImmediate(r));
+}
+
+function makeHarness(opts) {
+  opts = opts || {};
+  const storage = {};
+  const elements = {};
+  function makeFakeEl(id) {
+    return {
+      id: id || '', innerHTML: '', textContent: '', value: '', scrollTop: 0,
+      scrollHeight: 0, clientHeight: 0,
+      style: {}, dataset: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+      addEventListener() {}, removeEventListener() {},
+      querySelector() { return makeFakeEl(); },
+      querySelectorAll() { return []; },
+      getAttribute() { return null; }, setAttribute() {}, removeAttribute() {},
+      getBoundingClientRect() { return { width: 240, height: 0, top: 0, left: 0, right: 0, bottom: 0 }; },
+      appendChild() {}, removeChild() {}, remove() {},
+      focus() {}, blur() {},
+      checked: false,
+    };
+  }
+  function el(id) {
+    if (!elements[id]) elements[id] = makeFakeEl(id);
+    return elements[id];
+  }
+
+  const historyCalls = [];
+  const windowListeners = {};
+  const h = {
+    elements,
+    historyCalls,
+    regionChange: null,
+    approvedCallback: null,
+    // Each /channels request is answered by h.respondChannels(path); tests
+    // replace it to return a deferred promise when they need a request in
+    // flight.
+    respondChannels: () => Promise.resolve({ channels: [] }),
+    channelRequests: [],
+  };
+
+  const ctx = {
+    window: {
+      addEventListener(type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); },
+      removeEventListener() {},
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    },
+    document: {
+      readyState: 'complete',
+      documentElement: { getAttribute: () => null, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } } },
+      createElement: () => makeFakeEl(),
+      head: { appendChild() {} },
+      body: { appendChild() {}, removeChild() {}, contains() { return false; } },
+      getElementById: el,
+      addEventListener() {}, removeEventListener() {},
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    },
+    console,
+    Date: makeSkewedDate(opts.skewMs || 0),
+    Math, Array, Object, String, Number, JSON, RegExp, Error, TypeError, Set, Map, Promise,
+    parseInt, parseFloat, isNaN, isFinite,
+    encodeURIComponent, decodeURIComponent,
+    setTimeout: (fn) => { Promise.resolve().then(fn); return 0; },
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+    performance: { now: () => RealDate.now() },
+    localStorage: {
+      getItem: (k) => Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null,
+      setItem: (k, v) => { storage[k] = String(v); },
+      removeItem: (k) => { delete storage[k]; },
+    },
+    location: { hash: '' },
+    history: { replaceState(_s, _t, url) { historyCalls.push(url); }, pushState() {} },
+    crypto: webcrypto,
+    TextEncoder, TextDecoder,
+    Uint8Array, Uint16Array, Uint32Array, Int8Array, Int16Array, Int32Array, ArrayBuffer,
+    URLSearchParams,
+    CustomEvent: class CustomEvent {},
+    MutationObserver: class MutationObserver { observe() {} disconnect() {} },
+    requestAnimationFrame: (cb) => { Promise.resolve().then(cb); return 0; },
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    addEventListener() {}, dispatchEvent() {},
+    getHashParams: () => new URLSearchParams(),
+    btoa: (s) => Buffer.from(String(s), 'binary').toString('base64'),
+    atob: (s) => Buffer.from(String(s), 'base64').toString('binary'),
+  };
+  ctx.self = ctx;
+  ctx.globalThis = ctx;
+
+  // app.js / roles.js stubs.
+  ctx.onWS = () => {};
+  ctx.offWS = () => {};
+  ctx.debouncedOnWS = (fn) => fn;
+  ctx.debounce = (fn) => fn;
+  ctx.invalidateApiCache = () => {};
+  ctx.api = (p) => {
+    if (p.indexOf('/channels') === 0 && p.indexOf('/messages') === -1) {
+      h.channelRequests.push(p);
+      return h.respondChannels(p);
+    }
+    if (p.indexOf('/observers') === 0) return Promise.resolve({ observers: [] });
+    return Promise.resolve({ messages: [], packets: [], channels: [] });
+  };
+  ctx.CLIENT_TTL = { channels: 15000, observers: 120000, channelMessages: 10000, nodeDetail: 10000 };
+  ctx.escapeHtml = (s) => String(s == null ? '' : s);
+  ctx.truncate = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n) : s; };
+  ctx.formatHashHex = (x) => String(x);
+  ctx.formatSecondsAgo = () => '';
+  ctx.timeAgo = () => '';
+  ctx.payloadTypeName = () => 'GRP_TXT';
+  ctx.ROLE_EMOJI = {};
+  ctx.ROLE_LABELS = {};
+  ctx.RegionFilter = {
+    init() {},
+    onChange(fn) { h.regionChange = fn; return fn; },
+    offChange() {},
+    getRegionParam() { return h.regionParam || ''; },
+    getSelected() { return null; },
+  };
+  ctx.ChannelColors = { get() { return null; }, remove() {} };
+  ctx.ChannelColorPicker = { open() {} };
+  let pageMod = null;
+  ctx.registerPage = (name, mod) => { if (name === 'channels') pageMod = mod; };
+
+  vm.createContext(ctx);
+  function load(file) {
+    const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    vm.runInContext(src, ctx, { filename: file });
+    for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+  }
+  load('public/vendor/aes-ecb.js');
+  load('public/channel-decrypt.js');
+  load('public/channel-proposals.js');
+  // Capture the onApproved callback init() hands to ChannelProposals.mount
+  // without letting mount() touch the DOM or start polling. The pure
+  // mergeApprovedChannels() stays the real one.
+  ctx.window.ChannelProposals.mount = (mountOpts) => { h.approvedCallback = mountOpts && mountOpts.onApproved; };
+  ctx.window.ChannelProposals.unmount = () => {};
+  load('public/channels.js');
+
+  h.ctx = ctx;
+  h.w = ctx.window;
+  h.page = pageMod;
+  h.showEncryptedChanged = () => (windowListeners['mc-channels-show-encrypted-changed'] || []).forEach((fn) => fn({}));
+  h.state = () => ctx.window._channelsGetStateForTest();
+  h.setState = (s) => ctx.window._channelsSetStateForTest(s);
+  h.row = (hash) => h.state().channels.find((c) => c.hash === hash);
+  h.storeKey = (name, key, label) => ctx.window.ChannelDecrypt.storeKey(name, key, label);
+  h.removeKey = (name) => ctx.window.ChannelDecrypt.removeKey(name);
+  h.init = async () => {
+    await pageMod.init(el('page'), null);
+    await flush();
+    historyCalls.length = 0;
+  };
+  // A live CHAN message through the real WS path.
+  h.liveMessage = (channel, sender, text, hash) => {
+    ctx.window._channelsProcessWSBatchForTest([{
+      type: 'message',
+      data: { hash: hash || ('pkt-' + channel + '-' + text), decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: { channel, sender, text: sender + ': ' + text } } },
+    }], null);
+  };
+  return h;
+}
+
+function serverChannel(hash, extra) {
+  return Object.assign({
+    hash,
+    name: hash,
+    messageCount: 10,
+    lastActivity: new RealDate(RealDate.now() - 60000).toISOString(),
+    lastSender: 'Server',
+    lastMessage: 'from server',
+  }, extra || {});
+}
+
+function pskRow(extra) {
+  return Object.assign({
+    hash: PSK_HASH,
+    name: PSK_NAME,
+    userLabel: 'Team',
+    messageCount: 3,
+    lastActivityMs: RealDate.now() - 5000,
+    lastSender: 'Bob',
+    lastMessage: 'decrypted preview',
+    encrypted: true,
+    userAdded: true,
+  }, extra || {});
+}
+
+// A harness with the page initialised, a stored PSK key and an open PSK
+// conversation — the state a user is in when they hit the bug.
+async function openPskConversation(opts) {
+  const h = makeHarness(opts);
+  h.storeKey(PSK_NAME, PSK_KEY, 'Team');
+  h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+  await h.init();
+  const messages = [
+    { sender: 'Alice', text: 'first', timestamp: '2026-01-01T00:00:00Z', packetHash: 'm1' },
+    { sender: 'Bob', text: 'second', timestamp: '2026-01-01T00:01:00Z', packetHash: 'm2' },
+  ];
+  h.setState({
+    channels: [Object.assign({}, h.row('public')), pskRow()],
+    messages,
+    selectedHash: PSK_HASH,
+  });
+  return { h, messages };
+}
+
+function assertConversationOpen(h, messages, label) {
+  const s = h.state();
+  assert.strictEqual(s.selectedHash, PSK_HASH, label + ': PSK selection must survive');
+  assert.strictEqual(s.messages.length, messages.length, label + ': messages must survive');
+  assert.strictEqual(s.messages[0].text, 'first', label + ': messages must be the same conversation');
+  assert.ok(!h.historyCalls.includes('#/channels'), label + ': URL must not be rewritten to #/channels (got ' + JSON.stringify(h.historyCalls) + ')');
+  const row = h.row(PSK_HASH);
+  assert.ok(row && row.userAdded === true, label + ': PSK row must stay in My Channels');
+  assert.ok(/ch-section-mychannels/.test(h.elements.chList.innerHTML), label + ': rendered list must contain My Channels');
+}
+
+let passed = 0, failed = 0;
+async function test(name, fn) {
+  try { await fn(); passed++; console.log('  ✅ ' + name); }
+  catch (e) { failed++; console.log('  ❌ ' + name + ': ' + (e && e.message)); }
+}
+
+(async () => {
+  console.log('\n=== #152 loadChannels keeps client-only state ===');
+
+  await test('open PSK conversation survives a silent loadChannels() refresh', async () => {
+    const { h, messages } = await openPskConversation();
+    await h.w._channelsLoadChannelsForTest(true);
+    assertConversationOpen(h, messages, 'loadChannels');
+  });
+
+  await test('open PSK conversation survives a region change (RegionFilter.onChange handler)', async () => {
+    const { h, messages } = await openPskConversation();
+    h.regionParam = 'CPH';
+    assert.strictEqual(typeof h.regionChange, 'function', 'init() must register a region handler');
+    h.regionChange();
+    await flush();
+    assert.ok(h.channelRequests[h.channelRequests.length - 1].indexOf('region=CPH') !== -1, 'region change must refetch with the region');
+    assertConversationOpen(h, messages, 'region change');
+  });
+
+  await test('open PSK conversation survives the show-encrypted toggle', async () => {
+    const { h, messages } = await openPskConversation();
+    h.ctx.localStorage.setItem('channels-show-encrypted', 'true');
+    h.showEncryptedChanged();
+    await flush();
+    assert.ok(h.channelRequests[h.channelRequests.length - 1].indexOf('includeEncrypted=true') !== -1, 'toggle must refetch with includeEncrypted');
+    assertConversationOpen(h, messages, 'show-encrypted');
+  });
+
+  await test('shared-channel approval (onApproved) keeps the open PSK conversation, one PSK row', async () => {
+    const { h, messages } = await openPskConversation();
+    h.respondChannels = () => Promise.resolve({
+      channels: [serverChannel('public')],
+      approvedChannels: [{ hash: '#shared', name: '#shared' }],
+    });
+    assert.strictEqual(typeof h.approvedCallback, 'function', 'init() must mount ChannelProposals with onApproved');
+    const before = h.channelRequests.length;
+    h.approvedCallback();
+    await flush();
+    assert.strictEqual(h.channelRequests.length, before + 1, 'approval must refetch the channel list exactly once');
+    assertConversationOpen(h, messages, 'onApproved');
+    assert.ok(h.row('#shared') && h.row('#shared').shared === true, 'approved channel must be listed');
+    assert.strictEqual(h.state().channels.filter((c) => c.hash === PSK_HASH).length, 1, 'PSK row must appear exactly once');
+  });
+
+  await test('My Channels rows and labels survive a refresh (user:* row and key-matched server row)', async () => {
+    const h = makeHarness();
+    h.storeKey(PSK_NAME, PSK_KEY, 'Team');
+    h.storeKey('#ops', 'aa'.repeat(16), 'Ops room');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public'), serverChannel('#ops', { name: '#ops' })] });
+    await h.init();
+    await h.w._channelsLoadChannelsForTest(true);
+    const psk = h.row(PSK_HASH);
+    const ops = h.row('#ops');
+    assert.ok(psk && psk.userAdded === true && psk.userLabel === 'Team', 'user:* row keeps userAdded + label');
+    assert.ok(ops && ops.userAdded === true && ops.userLabel === 'Ops room', 'server row matched by a stored key keeps userAdded + label');
+    assert.ok(!h.row('public').userAdded, 'unrelated server row is not marked userAdded');
+    assert.ok(/ch-section-mychannels/.test(h.elements.chList.innerHTML), 'My Channels rendered');
+    assert.ok(h.elements.chList.innerHTML.indexOf('Team') !== -1, 'PSK label rendered');
+  });
+
+  await test('unread and preview on a user:* row survive a refresh (explicit 0 on a server row kept)', async () => {
+    const { h } = await openPskConversation();
+    h.setState({
+      channels: [Object.assign({}, h.row('public'), { unread: 0 }), pskRow({ unread: 4 })],
+      selectedHash: null,
+      messages: [],
+    });
+    await h.w._channelsLoadChannelsForTest(true);
+    const psk = h.row(PSK_HASH);
+    assert.strictEqual(psk.unread, 4, 'user:* unread kept (got ' + psk.unread + ')');
+    assert.strictEqual(psk.lastMessage, 'decrypted preview', 'user:* preview kept (got ' + psk.lastMessage + ')');
+    assert.strictEqual(psk.lastSender, 'Bob', 'user:* preview sender kept');
+    assert.strictEqual(psk.messageCount, 3, 'user:* messageCount kept');
+    const pub = h.row('public');
+    assert.ok(Object.prototype.hasOwnProperty.call(pub, 'unread') && pub.unread === 0, 'explicit unread: 0 kept on a server row');
+    assert.ok(/data-unread-channel="user:psk:0badc0de"/.test(h.elements.chList.innerHTML), 'unread badge rendered for the user:* row');
+  });
+
+  await test('unread on a server row survives a refresh', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    h.setState({ channels: [Object.assign({}, h.row('public'), { unread: 7 })] });
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(h.row('public').unread, 7);
+  });
+
+  await test('a server channel the new snapshot omits (region filter) does not come back', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public'), serverChannel('#far')] });
+    await h.init();
+    h.setState({ channels: h.state().channels.map((c) => Object.assign({}, c, { unread: 2 })) });
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(h.row('#far'), undefined, 'omitted row must not be resurrected');
+    assert.deepStrictEqual(h.state().channels.map((c) => c.hash), ['public']);
+  });
+
+  await test('a user:* row whose key was removed does not come back', async () => {
+    const { h } = await openPskConversation();
+    h.setState({ selectedHash: null, messages: [] });
+    h.removeKey(PSK_NAME);
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(h.row(PSK_HASH), undefined, 'removed PSK row must not be resurrected from the previous list');
+  });
+
+  for (const skew of [HOUR, -HOUR]) {
+    const label = skew > 0 ? 'browser clock 1h ahead' : 'browser clock 1h behind';
+
+    await test('WS update during an in-flight request wins (' + label + ')', async () => {
+      const h = makeHarness({ skewMs: skew });
+      h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public', { messageCount: 10, lastMessage: 'old snapshot' })] });
+      await h.init();
+      const pending = deferred();
+      h.respondChannels = () => pending.promise;
+      const load = h.w._channelsLoadChannelsForTest(true);
+      await flush();
+      h.liveMessage('public', 'Carol', 'live during flight');
+      const liveRow = Object.assign({}, h.row('public'));
+      // The snapshot was taken on the server before the live packet arrived.
+      pending.resolve({ channels: [serverChannel('public', {
+        messageCount: 10,
+        lastActivity: new RealDate(RealDate.now() - 1000).toISOString(),
+        lastSender: 'Server',
+        lastMessage: 'snapshot',
+      })] });
+      await load;
+      const row = h.row('public');
+      assert.strictEqual(row.lastMessage, 'live during flight', 'live message kept (got ' + row.lastMessage + ')');
+      assert.strictEqual(row.lastSender, 'Carol', 'live sender kept with its message');
+      assert.strictEqual(row.lastActivityMs, liveRow.lastActivityMs, 'live activity time kept with its message');
+      assert.strictEqual(row.messageCount, 11, 'live messageCount kept with its message');
+    });
+
+    await test('a stale client row does not override a newer snapshot (' + label + ')', async () => {
+      const h = makeHarness({ skewMs: skew });
+      h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public', { messageCount: 10 })] });
+      await h.init();
+      // Live update BEFORE the refresh starts: the snapshot already has it
+      // plus a newer message.
+      h.liveMessage('public', 'Carol', 'older live');
+      h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public', {
+        messageCount: 12,
+        lastActivity: new RealDate(RealDate.now() - 1000).toISOString(),
+        lastSender: 'Dave',
+        lastMessage: 'newer snapshot',
+      })] });
+      await h.w._channelsLoadChannelsForTest(true);
+      const row = h.row('public');
+      assert.strictEqual(row.lastMessage, 'newer snapshot', 'snapshot message wins (got ' + row.lastMessage + ')');
+      assert.strictEqual(row.lastSender, 'Dave', 'snapshot sender wins');
+      assert.strictEqual(row.messageCount, 12, 'snapshot count wins');
+    });
+  }
+
+  await test('loadChannels() does not mutate the api() payload (shared with the api cache)', async () => {
+    const h = makeHarness();
+    h.storeKey('#ops', 'aa'.repeat(16), 'Ops room');
+    const payload = { channels: [serverChannel('#ops', { name: '#ops' })] };
+    const snapshot = JSON.stringify(payload);
+    h.respondChannels = () => Promise.resolve(payload);
+    await h.init();
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(JSON.stringify(payload), snapshot, 'api payload must be left untouched');
+    assert.notStrictEqual(h.row('#ops'), payload.channels[0], 'channels must not alias the payload rows');
+  });
+
+  await test('mergeClientChannelState: pure, carries by hash, never resurrects, never mutates inputs', async () => {
+    const h = makeHarness();
+    const merge = h.w._channelsMergeClientChannelStateForTest;
+    assert.strictEqual(typeof merge, 'function', '_channelsMergeClientChannelStateForTest must be exported');
+    const deepFreeze = (o) => { Object.values(o).forEach((v) => { if (v && typeof v === 'object') deepFreeze(v); }); return Object.freeze(o); };
+    const fresh = deepFreeze([
+      { hash: 'public', name: 'public', lastActivityMs: 100, lastMessage: 'fresh', lastSender: 'S', messageCount: 5 },
+      { hash: PSK_HASH, name: PSK_NAME, lastActivityMs: 0, lastMessage: 'Encrypted — click to decrypt', lastSender: '', messageCount: 0, userAdded: true, userLabel: '' },
+    ]);
+    const prev = deepFreeze([
+      { hash: 'public', unread: 0, userAdded: true, userLabel: 'Pub', lastActivityMs: 999999, lastMessage: 'stale', lastSender: 'X', messageCount: 99, _wsSeq: 3 },
+      { hash: PSK_HASH, unread: 2, userAdded: true, userLabel: 'Team', lastActivityMs: 50, lastMessage: 'preview', lastSender: 'B', messageCount: 1 },
+      { hash: 'gone', unread: 9 },
+    ]);
+    const freshCopy = JSON.stringify(fresh);
+    const prevCopy = JSON.stringify(prev);
+    const out = merge(fresh, prev, 3);
+    assert.strictEqual(JSON.stringify(fresh), freshCopy, 'fresh input untouched');
+    assert.strictEqual(JSON.stringify(prev), prevCopy, 'prev input untouched');
+    assert.notStrictEqual(out, fresh);
+    out.forEach((o, i) => { assert.notStrictEqual(o, fresh[i], 'rows must be copies'); assert.notStrictEqual(o, prev[i]); });
+    assert.deepStrictEqual(out.map((o) => o.hash), ['public', PSK_HASH], 'no resurrected rows, fresh order kept');
+    assert.strictEqual(out[0].unread, 0, 'explicit 0 carried');
+    assert.strictEqual(out[0].userAdded, true);
+    assert.strictEqual(out[0].userLabel, 'Pub');
+    assert.strictEqual(out[0].lastMessage, 'fresh', 'stamp not newer than request start → snapshot activity wins');
+    assert.strictEqual(out[0].messageCount, 5);
+    assert.strictEqual(out[1].unread, 2);
+    assert.strictEqual(out[1].userLabel, 'Team');
+    assert.strictEqual(out[1].lastMessage, 'preview', 'client-only row keeps its preview');
+    const newer = merge(fresh, prev, 2);
+    assert.strictEqual(newer[0].lastMessage, 'stale', 'stamp newer than request start → live activity wins');
+    assert.strictEqual(newer[0].messageCount, 99, 'moved together with its message');
+    assert.strictEqual(newer[0].lastSender, 'X');
+    assert.strictEqual(newer[0].lastActivityMs, 999999);
+    assert.deepStrictEqual(merge(null, prev, 0), []);
+    const noPrev = merge(fresh, null, 0);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(noPrev)), JSON.parse(freshCopy));
+    assert.notStrictEqual(noPrev[0], fresh[0]);
+  });
+
+  console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
+  process.exit(failed > 0 ? 1 : 0);
+})().catch((e) => { console.error('FATAL:', e); process.exit(1); });

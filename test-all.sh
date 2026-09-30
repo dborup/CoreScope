@@ -102,6 +102,7 @@ node test-node-analytics-hop-chart.js
 node test-analytics-hop-depth-ui.js
 node test-channels-ping-bot-reply.js
 node test-channels-observed-path-hash-size.js
+node test-channels-client-state-152.js
 node test-packet-path-map.js
 node test-area-nodes-map.js
 node test-ping-scores.js

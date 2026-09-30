@@ -146,6 +146,7 @@ jobs:
           node test-app-api-inflight-cleanup-rejection.js
           node test-channels-merge-1498-unit.js
           node test-channels-observed-path-hash-size.js
+          node test-channels-client-state-152.js
           node test-issue-1518-home-url.js
           node test-channel-decrypt-insecure-context.js
           node test-live-region-filter.js
@@ -480,6 +481,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-filter-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-channel-issue-1087-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-channel-issue-1111-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-channels-client-state-152-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-map-modal-fluid-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-map-nodes-pagination-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-123-map-lifecycle-e2e.js 2>&1 | tee -a e2e-output.txt
