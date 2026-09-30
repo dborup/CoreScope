@@ -160,6 +160,35 @@
   white-space: nowrap;
 }
 
+/* ── Footer: running version (#111) ────────────────────────────────────── */
+.nav-drawer-footer {
+  flex-shrink: 0; /* the list above scrolls; the footer stays at the bottom */
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.nav-drawer-version {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--nav-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+}
+
+.nav-drawer-version:hover,
+.nav-drawer-version:focus-visible {
+  color: var(--nav-text);
+  text-decoration: underline;
+}
+
+.nav-drawer-version:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .nav-drawer-item,
   .nav-drawer-close {

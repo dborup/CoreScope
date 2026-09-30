@@ -71,6 +71,14 @@ type Config struct {
 	obsIATAWhitelistCached map[string]bool
 	obsIATAWhitelistOnce   sync.Once
 
+	// IATAWarnIntervalSec is how often a region dropped by
+	// ObserverIATAWhitelist is re-logged while it keeps arriving (#110).
+	// 0 or less means the default, 6 hours. See iata_drop_warn.go.
+	IATAWarnIntervalSec int `json:"iataWarnIntervalSec,omitempty"`
+
+	// iataDropWarn is the bounded per-region throttle for that warning.
+	iataDropWarn iataDropThrottle
+
 	// ObserverBlacklist is a list of observer public keys to drop at ingest.
 	// Messages from blacklisted observers are silently discarded — no DB writes,
 	// no UpsertObserver, no observations, no metrics.

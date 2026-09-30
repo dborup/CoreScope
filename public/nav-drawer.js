@@ -39,6 +39,7 @@
   var wired = false;
   var drawerEl = null;
   var backdropEl = null;
+  var versionEl = null;
   var dragging = false;
   var startX = 0;
   var startY = 0;
@@ -89,6 +90,44 @@
   function phIconHTML(name) {
     return '<svg class="ph-icon" aria-hidden="true" focusable="false">' +
            '<use href="/icons/phosphor-sprite.svg#ph-' + name + '"></use></svg>';
+  }
+
+  // ── Version footer (#111) ───────────────────────────────────────────────
+  // GET /api/health reports {version, commit, buildTime}; the server fills
+  // any it cannot resolve with "unknown". Fetched on the first open that
+  // passes the width gate (never at page load: the drawer may never open,
+  // and cannot at <= NARROW_MAX), then cached for the page lifetime --
+  // failures included -- so re-opening adds no requests. Values are written
+  // with textContent / title only.
+  var RELEASES_URL = 'https://github.com/dborup/CoreScope/releases';
+  var versionRequested = false;
+
+  function healthField(h, k) {
+    var v = h && h[k];
+    if (typeof v !== 'string') return '';
+    v = v.trim();
+    return (v && v.toLowerCase() !== 'unknown') ? v : '';
+  }
+
+  function applyVersion(el, h) {
+    var version = healthField(h, 'version');
+    if (!version) return; // keep the neutral "CoreScope" label
+    el.textContent = 'CoreScope ' + version;
+    var bits = [];
+    var commit = healthField(h, 'commit');
+    var built = healthField(h, 'buildTime');
+    if (commit) bits.push('commit ' + commit);
+    if (built) bits.push('built ' + built);
+    if (bits.length) el.title = bits.join(' \u00B7 ');
+  }
+
+  function requestVersion() {
+    if (versionRequested || !versionEl || typeof fetch !== 'function') return;
+    versionRequested = true;
+    var el = versionEl;
+    fetch('/api/health', { headers: { Accept: 'application/json' } })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (h) { applyVersion(el, h); }, function () { /* neutral label */ });
   }
 
   var EDGE_PX = 44;          // pointerdown must start within left N px (drawer trigger zone)
@@ -203,6 +242,19 @@
     renderRoutes(list);
     drawerEl.appendChild(list);
 
+    var footer = document.createElement('div');
+    footer.className = 'nav-drawer-footer';
+    var ver = document.createElement('a');
+    ver.className = 'nav-drawer-version';
+    ver.setAttribute('data-nav-drawer-version', '');
+    ver.setAttribute('href', RELEASES_URL);
+    ver.setAttribute('target', '_blank');
+    ver.setAttribute('rel', 'noopener noreferrer');
+    ver.textContent = 'CoreScope';
+    footer.appendChild(ver);
+    drawerEl.appendChild(footer);
+    versionEl = ver;
+
     document.body.appendChild(backdropEl);
     document.body.appendChild(drawerEl);
 
@@ -229,6 +281,7 @@
   function open() {
     buildDom();
     if (!isWide()) return; // Option A
+    requestVersion(); // #111: first open only
     if (!drawerWidth) drawerWidth = drawerEl.getBoundingClientRect().width || 320;
     // Capture the previously-focused element BEFORE we move focus, so close()
     // can restore it. Guard against opening twice (don't overwrite on re-open).
