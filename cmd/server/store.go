@@ -1125,8 +1125,9 @@ func (s *PacketStore) Load() error {
 // write lock, builds local data structures, then merges them into the store
 // under s.mu.Lock(). It is the building block for the background loader.
 //
-// The chunk is assumed to be older than the data already in the store, so
-// localPackets are prepended to s.packets.
+// Chunks are windowed on last_seen, so a chunk is older than the store by
+// last_seen but can overlap it by first_seen. localPackets are merged into
+// s.packets by first_seen (mergeByFirstSeen, #114).
 //
 // byPayloadType is updated here incrementally. byPathHop, spIndex, and
 // distHops are NOT updated here — the caller (loadBackgroundChunks) rebuilds
@@ -1404,6 +1405,12 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	if len(localPackets) == 0 {
 		return nil
 	}
+	// The query orders by first_seen already; sorting the (one-window)
+	// chunk here, outside the lock, makes the merge below rely on nothing
+	// but this function.
+	if !sort.SliceIsSorted(localPackets, func(i, j int) bool { return localPackets[i].FirstSeen < localPackets[j].FirstSeen }) {
+		sort.SliceStable(localPackets, func(i, j int) bool { return localPackets[i].FirstSeen < localPackets[j].FirstSeen })
+	}
 
 	// PR #1187 r3 MUST-FIX 1: index↔slice consistency.
 	//
@@ -1520,7 +1527,11 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// critical section. After this point the new state is fully visible;
 	// before it readers see the old slice (which is still fully indexed).
 	s.mu.Lock()
-	s.packets = append(localPackets, s.packets...)
+	// Merge, not prepend: eviction walks s.packets from the head and stops
+	// at the first in-window transmission, so it must stay ordered by
+	// first_seen (#114). O(len(s.packets) + len(localPackets)), like the
+	// copy the prepend made; no comparison sort under the lock.
+	s.packets = mergeByFirstSeen(s.packets, localPackets)
 	s.totalObs += localTotalObs
 	s.trackedBytes += localTrackedBytes
 	if localMaxTxID > s.maxTxID {
@@ -1537,6 +1548,41 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			coldLoadAmbiguousHopsSkipped)
 	}
 	return nil
+}
+
+// mergeByFirstSeen merges two runs that are each ordered by FirstSeen ASC
+// into a new slice ordered by FirstSeen ASC (#114). Existing entries older
+// than the first incoming one are copied as a block (found by binary
+// search), the overlap is merged linearly, and the rest is copied, so the
+// work is O(len(existing) + len(incoming)) with O(log n + overlap)
+// comparisons. On equal timestamps the incoming entry goes first, as the
+// old prepend did. Neither input is modified.
+func mergeByFirstSeen(existing, incoming []*StoreTx) []*StoreTx {
+	return mergeSortedRuns(existing, incoming, func(a, b *StoreTx) bool { return a.FirstSeen < b.FirstSeen })
+}
+
+// mergeSortedRuns is mergeByFirstSeen with the order as a parameter (tests
+// count comparisons through it).
+func mergeSortedRuns(existing, incoming []*StoreTx, less func(a, b *StoreTx) bool) []*StoreTx {
+	out := make([]*StoreTx, 0, len(existing)+len(incoming))
+	if len(incoming) == 0 {
+		return append(out, existing...)
+	}
+	// existing[:i] is strictly older than every incoming entry.
+	i := sort.Search(len(existing), func(k int) bool { return !less(existing[k], incoming[0]) })
+	out = append(out, existing[:i]...)
+	j := 0
+	for i < len(existing) && j < len(incoming) {
+		if less(existing[i], incoming[j]) {
+			out = append(out, existing[i])
+			i++
+		} else {
+			out = append(out, incoming[j])
+			j++
+		}
+	}
+	out = append(out, incoming[j:]...)
+	return append(out, existing[i:]...)
 }
 
 // loadBackgroundChunks fills the remaining retentionHours window by loading
