@@ -99,20 +99,43 @@ func clientIDSuffix() string {
 }
 
 // mqttConnectedLogLine is the "connected" log line. The broker URL is logged
-// without its user-info part, so credentials or device tokens embedded in
-// it never reach the log.
+// without user-info, query or fragment (brokerForLog), so credentials or
+// device tokens embedded in it never reach the log.
 func mqttConnectedLogLine(tag, broker, clientID string) string {
 	return "MQTT [" + tag + "] connected to " + brokerForLog(broker) + " as client " + clientID
 }
 
+// mqttSourceTag is a source's tag in logs and the liveness/status
+// registries: its name or, for an unnamed source, the broker without
+// credentials (brokerForLog).
+func mqttSourceTag(source MQTTSource) string {
+	if source.Name != "" {
+		return source.Name
+	}
+	return brokerForLog(source.Broker)
+}
+
+// brokerForLog returns broker without user-info, query or fragment, so
+// credentials or tokens embedded in it never reach a log. A broker without
+// a scheme is read as tcp://, as paho's AddBroker does.
 func brokerForLog(broker string) string {
+	if !strings.Contains(broker, "://") {
+		broker = "tcp://" + broker
+	}
 	u, err := url.Parse(broker)
-	if err != nil || u.User == nil {
-		if i := strings.LastIndex(broker, "@"); i >= 0 && err != nil {
-			return broker[i+1:]
+	if err != nil {
+		// Unparseable: keep only what follows the last '@' (the host part)
+		// and cut any query or fragment.
+		if i := strings.LastIndex(broker, "@"); i >= 0 {
+			broker = broker[i+1:]
+		}
+		if i := strings.IndexAny(broker, "?#"); i >= 0 {
+			broker = broker[:i]
 		}
 		return broker
 	}
 	u.User = nil
+	u.RawQuery, u.ForceQuery = "", false
+	u.Fragment, u.RawFragment = "", ""
 	return u.String()
 }

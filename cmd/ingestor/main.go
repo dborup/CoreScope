@@ -136,10 +136,8 @@ func main() {
 	var clients []mqtt.Client
 	connectedCount := 0
 	for _, source := range sources {
-		tag := source.Name
-		if tag == "" {
-			tag = source.Broker
-		}
+		tag := mqttSourceTag(source)
+		logBroker := brokerForLog(source.Broker)
 
 		opts := buildMQTTOpts(source)
 		clientID := opts.ClientID
@@ -151,7 +149,7 @@ func main() {
 		// is wired below once the client exists.
 		liveness := &SourceLivenessState{
 			Tag:    tag,
-			Broker: source.Broker,
+			Broker: logBroker, // the watchdog logs it
 		}
 
 		// #1043: per-source status registry. Idempotent — repeated
@@ -183,12 +181,12 @@ func main() {
 		})
 
 		opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-			log.Printf("MQTT [%s] disconnected from %s: %v", tag, source.Broker, err)
+			log.Printf("MQTT [%s] disconnected from %s: %v", tag, logBroker, err)
 			status.MarkDisconnect(time.Now(), err)
 		})
 
 		opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
-			log.Printf("MQTT [%s] reconnecting to %s", tag, source.Broker)
+			log.Printf("MQTT [%s] reconnecting to %s", tag, logBroker)
 		})
 
 		// Capture source for closure
@@ -528,10 +526,7 @@ func main() {
 // #1212 (prod outage on 2026-05-15 where the disconnect was logged but no
 // reconnect activity was ever visible).
 func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
-	tag := source.Name
-	if tag == "" {
-		tag = source.Broker
-	}
+	tag := mqttSourceTag(source)
 	opts := mqtt.NewClientOptions().
 		AddBroker(source.Broker).
 		SetAutoReconnect(true).
@@ -564,7 +559,7 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		if s != nil {
 			attempt = atomic.AddInt64(&s.AttemptCount, 1)
 		}
-		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, broker.String())
+		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, brokerForLog(broker.String()))
 		return tlsCfg
 	})
 
