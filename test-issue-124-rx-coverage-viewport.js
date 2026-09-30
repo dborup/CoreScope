@@ -241,6 +241,46 @@ function assertView(env, want, tag) {
     assert(!/OLD/.test(board.innerHTML), 'the old leaderboard rendered into the new page');
   });
 
+  await test('12. after a remount with a saved view (the new map exists at once), the old extent and coverage responses are ignored', async () => {
+    const saved = { 'rx-coverage-view': JSON.stringify({ lat: 56.1, lng: 9.9, zoom: 10 }) };
+    const env = makeEnv({ hash: '#/rx-coverage?rx=abcdef', storage: saved });
+    // record what lands on each coverage layer
+    const layers = [];
+    env.sandbox.L.layerGroup = () => {
+      const l = { cleared: 0, added: 0, addTo() { return l; }, clearLayers() { l.cleared++; } };
+      layers.push(l);
+      return l;
+    };
+    env.sandbox.L.polygon = () => {
+      const pg = { addTo(l) { l.added++; return pg; }, bindTooltip() { return pg; } };
+      return pg;
+    };
+    await mount(env, null);
+    assert.strictEqual(env.maps.length, 1, 'the saved view should create the first map without a config fetch');
+    env.runTimers();          // old mount: settle timer -> observer extent request
+    env.maps[0].fire('moveend'); // old mount: coverage request
+    assert(env.pending.some((p) => /bbox=-90,-180,90,180.*rx=abcdef/.test(p.url)), 'no old extent request pending');
+    assert(env.pending.some((p) => /^\/api\/rx-coverage\?bbox=0,0,1,1/.test(p.url)), 'no old coverage request pending');
+
+    env.page().destroy();
+    env.location.hash = '#/rx-coverage';
+    env.page().init({ innerHTML: '' });
+    await flush();
+    assert.strictEqual(env.maps.length, 2, 'the remount should create its map at once from the saved view');
+    const newMap = env.maps[1], newLayer = layers[1];
+    assert(newLayer, 'the remount has no coverage layer');
+
+    // the old mount's extent response arrives while the new map exists
+    assert(env.respond(/bbox=-90,-180,90,180.*rx=abcdef/, { features: [{ geometry: { coordinates: [[[10, 55], [11, 56]]] } }] }));
+    await flush();
+    assert.strictEqual(newMap.fits.length, 0, 'the old observer extent fitted the new map');
+
+    // the old mount's coverage response arrives while the new layer exists
+    assert(env.respond(/^\/api\/rx-coverage\?bbox=0,0,1,1/, { features: [{ properties: {}, geometry: { coordinates: [[[10, 55], [11, 56], [10, 56]]] } }] }));
+    await flush();
+    assert.strictEqual(newLayer.cleared + newLayer.added, 0, 'the old coverage response was drawn on the new layer (cleared ' + newLayer.cleared + ', added ' + newLayer.added + ')');
+  });
+
   await test('11. coverage filtering and leaderboard requests are unchanged', async () => {
     const env = makeEnv({ hash: '#/rx-coverage?days=14' });
     await mount(env, { center: [55.68, 12.57], zoom: 9 });
