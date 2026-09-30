@@ -77,11 +77,13 @@ func TestMQTTClientIDLongNameIsCapped_118(t *testing.T) {
 }
 
 // Same source, same process or not: every construction is a new client and
-// gets its own ID.
+// gets its own ID. The suffix is 32 random bits, so n constructions collide
+// with probability about n²/2³³: 200 keeps that near 5e-6 (5000, used
+// before, failed about one run in 350).
 func TestMQTTClientIDUniqueAcrossConstructions_118(t *testing.T) {
 	seen := map[string]bool{}
 	src := MQTTSource{Name: "local", Broker: "mqtt://localhost:1883"}
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < 200; i++ {
 		id := buildMQTTOpts(src).ClientID
 		if seen[id] {
 			t.Fatalf("duplicate client id %q after %d constructions", id, i)
