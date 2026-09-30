@@ -135,59 +135,12 @@ func main() {
 	// Connect to each MQTT source
 	var clients []mqtt.Client
 	connectedCount := 0
-	for _, source := range sources {
-		tag := mqttSourceTag(source)
-		logBroker := brokerForLog(source.Broker)
-
-		opts := buildMQTTOpts(source)
-		clientID := opts.ClientID
+	tags := mqttSourceTags(sources)
+	for i, source := range sources {
+		tag := tags[i]
+		opts, status, liveness := prepareMQTTSource(source, tag)
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
-
-		// Pre-allocate the liveness pointer so OnConnect can reset its
-		// stale-message clock on reconnect (PR #1216 r1 item 2). IsConnectedFn
-		// is wired below once the client exists.
-		liveness := &SourceLivenessState{
-			Tag:    tag,
-			Broker: logBroker, // the watchdog logs it
-		}
-
-		// #1043: per-source status registry. Idempotent — repeated
-		// registration across reconnects returns the same state so
-		// counters accumulate across the process lifetime.
-		status := RegisterSourceStatus(tag, source.Broker)
-
-		opts.SetOnConnectHandler(func(c mqtt.Client) {
-			log.Print(mqttConnectedLogLine(tag, source.Broker, clientID))
-			status.MarkConnect(time.Now())
-			// PR #1216 r1 item 2: clear the stale LastMessageUnix from
-			// before the outage so the watchdog doesn't immediately scream
-			// "stalled for 2h". Also restarts the cold-start grace window
-			// and clears the alert cooldown so a fresh stall edge can fire.
-			liveness.MarkReconnected(time.Now())
-			topics := source.Topics
-			if len(topics) == 0 {
-				topics = []string{"meshcore/#"}
-			}
-			for _, t := range topics {
-				token := c.Subscribe(t, 0, nil)
-				token.Wait()
-				if token.Error() != nil {
-					log.Printf("MQTT [%s] subscribe error for %s: %v", tag, t, token.Error())
-				} else {
-					log.Printf("MQTT [%s] subscribed to %s", tag, t)
-				}
-			}
-		})
-
-		opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-			log.Printf("MQTT [%s] disconnected from %s: %v", tag, logBroker, err)
-			status.MarkDisconnect(time.Now(), err)
-		})
-
-		opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
-			log.Printf("MQTT [%s] reconnecting to %s", tag, logBroker)
-		})
 
 		// Capture source for closure
 		src := source
@@ -235,7 +188,7 @@ func main() {
 			continue
 		}
 		if token.Error() != nil {
-			log.Printf("MQTT [%s] connection failed (non-fatal): %v", tag, token.Error())
+			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error()))
 			// BL1 fix: Disconnect to stop Paho's internal retry goroutines.
 			// With ConnectRetry=true, Connect() spawns background goroutines
 			// that leak if the client is simply discarded.

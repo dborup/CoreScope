@@ -246,9 +246,14 @@ func (b *idBroker) serve(c net.Conn) {
 		if err != nil {
 			return
 		}
-		switch p.(type) {
+		switch p := p.(type) {
 		case *packets.PingreqPacket:
 			packets.NewControlPacket(packets.Pingresp).Write(c)
+		case *packets.SubscribePacket:
+			ack := packets.NewControlPacket(packets.Suback).(*packets.SubackPacket)
+			ack.MessageID = p.MessageID
+			ack.ReturnCodes = make([]byte, len(p.Topics))
+			ack.Write(c)
 		case *packets.DisconnectPacket:
 			return
 		}

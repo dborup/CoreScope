@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,14 +54,32 @@ func TestMQTTSourceTagHasNoCredentials_118(t *testing.T) {
 	assertNoCredentials(t, "tag for an unparseable broker", got)
 }
 
+// logBuf118 is a log sink safe to read while paho's goroutines log.
+type logBuf118 struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuf118) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuf118) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // captureLog118 collects the standard logger's output for the test.
-func captureLog118(t *testing.T) *bytes.Buffer {
+func captureLog118(t *testing.T) *logBuf118 {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &logBuf118{}
 	prevOut, prevFlags := log.Writer(), log.Flags()
-	log.SetOutput(&buf)
+	log.SetOutput(buf)
 	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
-	return &buf
+	return buf
 }
 
 // A real connect through buildMQTTOpts to a loopback broker, for an unnamed
@@ -100,13 +119,21 @@ func TestMQTTLogLinesHaveNoCredentials_118(t *testing.T) {
 	}
 }
 
-// main() wires the tag and the logged broker; it cannot run in a test, so
-// its source is checked: no log call there may take a raw X.Broker
-// argument, the tag must come from mqttSourceTag, and the liveness state
-// (whose Broker the watchdog logs) must get the log-safe broker.
+// main() and prepareMQTTSource wire the tag and the logged broker. A quick
+// static check of both: no log call or RegisterSourceStatus may take a raw
+// X.Broker argument, the tag must not be a raw broker, and the liveness
+// state (whose Broker the watchdog logs) must get the log-safe broker. It only sees direct uses;
+// TestMQTTSourceWiringLeaksNoCredentials_118 runs the handlers.
 func TestMainLogsNoRawBroker_118(t *testing.T) {
+	for _, file := range []string{"main.go", "mqtt_source.go"} {
+		checkNoRawBrokerLogged118(t, file)
+	}
+}
+
+func checkNoRawBrokerLogged118(t *testing.T, file string) {
+	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	f, err := parser.ParseFile(fset, file, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +144,13 @@ func TestMainLogsNoRawBroker_118(t *testing.T) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "RegisterSourceStatus" {
+				for _, a := range n.Args {
+					if isBroker(a) {
+						t.Errorf("%s: status registry given a raw broker URL; the stats file publishes it", fset.Position(a.Pos()))
+					}
+				}
+			}
 			if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
 				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "log" {
 					for _, a := range n.Args {

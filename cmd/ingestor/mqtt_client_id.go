@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/meshcore-analyzer/brokerurl"
 )
 
 // MQTT client IDs (#118).
@@ -52,7 +55,9 @@ func mqttClientID(source MQTTSource) string {
 	}
 	base := sanitizeClientIDPart(source.Name)
 	if base == "" {
-		if u, err := url.Parse(source.Broker); err == nil {
+		// the stripped broker: url.Parse alone may take a user name for
+		// the host (see brokerForLog)
+		if u, err := url.Parse(brokerForLog(source.Broker)); err == nil {
 			base = sanitizeClientIDPart(u.Hostname())
 		}
 	}
@@ -105,9 +110,10 @@ func mqttConnectedLogLine(tag, broker, clientID string) string {
 	return "MQTT [" + tag + "] connected to " + brokerForLog(broker) + " as client " + clientID
 }
 
-// mqttSourceTag is a source's tag in logs and the liveness/status
-// registries: its name or, for an unnamed source, the broker without
-// credentials (brokerForLog).
+// mqttSourceTag is the base of a source's tag in logs and the
+// liveness/status registries: its name or, for an unnamed source, the
+// broker without credentials (brokerForLog). mqttSourceTags makes the tags
+// of a whole configuration unique.
 func mqttSourceTag(source MQTTSource) string {
 	if source.Name != "" {
 		return source.Name
@@ -115,27 +121,52 @@ func mqttSourceTag(source MQTTSource) string {
 	return brokerForLog(source.Broker)
 }
 
-// brokerForLog returns broker without user-info, query or fragment, so
-// credentials or tokens embedded in it never reach a log. A broker without
-// a scheme is read as tcp://, as paho's AddBroker does.
+// mqttSourceTags returns the tag of every source. Unnamed sources on the
+// same broker (say, with different credentials) would share one tag: the
+// second would lose watchdog tracking and the two would share status
+// counters. So an unnamed source whose tag is taken, by any named source or
+// an earlier unnamed one, gets " (2)", " (3)", … A duplicate Name is left as
+// it is: that is a configuration error, reported by registerLivenessOrSkip.
+func mqttSourceTags(sources []MQTTSource) []string {
+	used := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		if s.Name != "" {
+			used[s.Name] = true
+		}
+	}
+	tags := make([]string, len(sources))
+	for i, s := range sources {
+		tag := mqttSourceTag(s)
+		if s.Name == "" {
+			base := tag
+			for n := 2; used[tag]; n++ {
+				tag = base + " (" + strconv.Itoa(n) + ")"
+			}
+			used[tag] = true
+		}
+		tags[i] = tag
+	}
+	return tags
+}
+
+// brokerForLog returns broker without user-info, query or fragment
+// (brokerurl.Strip), so credentials or tokens embedded in it never reach a
+// log, the stats file or a client ID. A broker without a scheme is read as
+// tcp://, as paho's AddBroker does.
 func brokerForLog(broker string) string {
 	if !strings.Contains(broker, "://") {
 		broker = "tcp://" + broker
 	}
-	u, err := url.Parse(broker)
-	if err != nil {
-		// Unparseable: keep only what follows the last '@' (the host part)
-		// and cut any query or fragment.
-		if i := strings.LastIndex(broker, "@"); i >= 0 {
-			broker = broker[i+1:]
-		}
-		if i := strings.IndexAny(broker, "?#"); i >= 0 {
-			broker = broker[:i]
-		}
-		return broker
+	s, _ := brokerurl.Strip(broker)
+	return s
+}
+
+// errForLog is err's text with any broker URL or user-info it quotes
+// masked (brokerurl.MaskText). paho's errors normally quote none, but
+// they reach the log and the stats file.
+func errForLog(err error) string {
+	if err == nil {
+		return "<nil>"
 	}
-	u.User = nil
-	u.RawQuery, u.ForceQuery = "", false
-	u.Fragment, u.RawFragment = "", ""
-	return u.String()
+	return brokerurl.MaskText(err.Error())
 }

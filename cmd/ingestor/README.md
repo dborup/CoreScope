@@ -59,6 +59,11 @@ the Perf page so operators can self-diagnose write-volume anomalies.
 
 The writer uses `O_NOFOLLOW | O_CREAT | O_TRUNC` mode `0o600`, so a
 pre-planted symlink at the path cannot be used to clobber an arbitrary file.
+It forces `0o600` on a stale tmp file too, and gives up for one it does not
+own. Broker URLs in the file (per-source `broker`, `name` and `lastError`,
+and the source tags) carry no user-info, query or fragment, as in the log;
+the server masks them once more before serving `/api/mqtt/status` and
+`/api/healthz`.
 
 **Security note:** the default lives in `/tmp`, which is world-writable on
 most hosts (sticky bit only protects deletion, not creation). On
@@ -86,7 +91,7 @@ the corescope user can write to.
 The ingestor reads these fields from the existing `config.json`:
 
 - `mqttSources[]` — array of MQTT broker connections
-  - `name` — display name for logging
+  - `name` — display name for logging. Without one the source is tagged with its broker minus credentials, plus ` (2)`, ` (3)`, … when another source already has that tag
   - `broker` — MQTT URL (`mqtt://`, `mqtts://`)
   - `username` / `password` — auth credentials
   - `topics` — array of topic patterns to subscribe

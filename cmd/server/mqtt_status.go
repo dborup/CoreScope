@@ -3,92 +3,79 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"os"
-	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/meshcore-analyzer/brokerurl"
 )
 
-// mqttBrokerSchemes is the set of broker URL schemes whose embedded
-// `user:pass@host` credentials we want to redact. We URL-parse for these
-// (defense vs. passwords containing `@`); other strings fall through to
-// the legacy regex pass for embedded user:pass occurrences in free-form
-// error strings.
-var mqttBrokerSchemes = map[string]bool{
-	"mqtt": true, "mqtts": true, "tcp": true, "ssl": true, "ws": true, "wss": true,
+// maskBrokerURL returns a broker URL fit for the public /api/mqtt/status:
+// all user-info (a lone user name or token too) becomes "****", and the
+// query and fragment are dropped, also without a scheme and for URLs that
+// url.Parse rejects (brokerurl.Mask). The ingestor already strips its
+// brokers (#118); this is the second layer, for any ingestor version.
+// `mqtt://user:secret@host:1883` -> `mqtt://****@host:1883`.
+func maskBrokerURL(s string) string { return brokerurl.Mask(s) }
+
+// maskBrokerText masks every broker URL or user-info in free text, such as
+// an error message (brokerurl.MaskText).
+func maskBrokerText(s string) string { return brokerurl.MaskText(s) }
+
+// maskSourceName masks a source name or tag. An older ingestor tagged an
+// unnamed source with its raw broker, so a name holding "@" or "://" is
+// masked as one broker URL (Mask, which also covers whitespace in a
+// password); other names are returned as they are.
+func maskSourceName(s string) string {
+	if strings.Contains(s, "@") || strings.Contains(s, "://") {
+		return brokerurl.Mask(s)
+	}
+	return s
 }
 
-// mqttBrokerURLRe locates a broker URL (with credentials) embedded inside
-// a larger free-form string — e.g. an error message that quotes the
-// failing broker. Each match is fed through url.Parse + redaction. We
-// match greedily up through the LAST `@` followed by a host-shaped token
-// so passwords containing `@` are not truncated (#1682 adversarial r1).
-//
-// Go's RE2 has no lookahead; we capture the host tail and emit it
-// unchanged in the replacement.
-var mqttBrokerURLRe = regexp.MustCompile(`(?i)(?:mqtt|mqtts|tcp|ssl|ws|wss)://[^\s]*`)
-
-// maskBrokerURL returns the broker URL with any inline password redacted.
-// `mqtt://user:secret@host:1883` -> `mqtt://user:****@host:1883`.
-// `mqtt://user:p@ss@host` -> `mqtt://user:****@host` (password with `@`).
-// URLs without inline credentials are returned unchanged.
-//
-// Primary strategy: url.Parse — handles passwords with `@`, `:`, etc.
-// Fallback: regex sweep for free-form strings (e.g. error messages that
-// quote a URL fragment but aren't standalone-parseable).
-func maskBrokerURL(s string) string {
-	if s == "" {
-		return s
-	}
-	// Fast path: the whole string is the broker URL.
-	if masked, ok := redactBrokerURL(s); ok {
-		return masked
-	}
-	// Fallback: free-form string (e.g. error message) containing a URL.
-	// Find embedded broker URLs and redact each in-place.
-	return mqttBrokerURLRe.ReplaceAllStringFunc(s, func(m string) string {
-		if out, ok := redactBrokerURL(m); ok {
-			return out
-		}
+// maskLivenessKeys masks the keys (source tags) of the ingestor's liveness
+// map (maskSourceName) for the public /api/healthz: an older ingestor
+// tagged an unnamed source with its raw broker (#118). Keys that masking leaves unchanged
+// keep their name; a masked key that coincides with another gets " (2)",
+// " (3)", … so no entry is lost. Called on a cache refresh only.
+func maskLivenessKeys(m map[string]SourceLivenessSnapshot) map[string]SourceLivenessSnapshot {
+	if len(m) == 0 {
 		return m
-	})
-}
-
-// redactBrokerURL parses s as a URL and, if it has an mqtt-family scheme
-// with userinfo containing a password, returns the URL with the password
-// replaced by `****`. Returns ok=false when s is not such a URL.
-func redactBrokerURL(s string) (string, bool) {
-	u, err := url.Parse(s)
-	if err != nil || u.Scheme == "" || u.User == nil {
-		return s, false
 	}
-	if !mqttBrokerSchemes[strings.ToLower(u.Scheme)] {
-		return s, false
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	if _, hasPass := u.User.Password(); !hasPass {
-		return s, false
+	sort.Strings(keys)
+	out := make(map[string]SourceLivenessSnapshot, len(m))
+	var masked []string
+	for _, k := range keys {
+		if maskSourceName(k) == k {
+			out[k] = m[k]
+		} else {
+			masked = append(masked, k)
+		}
 	}
-	// Re-assemble manually rather than via url.UserPassword + u.String()
-	// because the latter percent-encodes the `*` mask token into `%2A`,
-	// defeating the user-visible redaction marker. We only need to swap
-	// the userinfo segment of the original string.
-	hostAndAfter := s
-	if idx := strings.LastIndex(s, "@"); idx >= 0 {
-		hostAndAfter = s[idx+1:]
+	for _, k := range masked {
+		base := maskSourceName(k)
+		key := base
+		for n := 2; ; n++ {
+			if _, taken := out[key]; !taken {
+				break
+			}
+			key = base + " (" + strconv.Itoa(n) + ")"
+		}
+		out[key] = m[k]
 	}
-	// Preserve original scheme casing (url.Parse lowercases u.Scheme).
-	schemeEnd := strings.Index(s, "://")
-	if schemeEnd < 0 {
-		return s, false
-	}
-	return s[:schemeEnd] + "://" + u.User.Username() + ":****@" + hostAndAfter, true
+	return out
 }
 
 // MqttSourceStatus is the per-MQTT-source status row surfaced via
 // /api/mqtt/status. Mirrors the on-disk shape the ingestor publishes
 // (cmd/ingestor SourceStatusSnapshot) but with the broker URL credentials
-// redacted before serving — operators must not see the broker password
-// in the API response (#1043 acceptance criterion).
+// redacted before serving — the endpoint needs no API key, so nobody may
+// see a broker password or token in the response (#1043, #118).
 type MqttSourceStatus struct {
 	Name               string `json:"name"`
 	Broker             string `json:"broker"`
@@ -141,7 +128,7 @@ type ingestorMqttStatusEnvelope struct {
 }
 
 // handleMqttStatus serves GET /api/mqtt/status. Reads the ingestor stats
-// file, masks broker-URL passwords, and returns the per-source status
+// file, masks broker-URL credentials, and returns the per-source status
 // list. Returns an empty list (200 OK) when the stats file is missing
 // or unparseable — the UI panel renders a "no data yet" state.
 func (s *Server) handleMqttStatus(w http.ResponseWriter, r *http.Request) {
@@ -162,9 +149,11 @@ func (s *Server) handleMqttStatus(w http.ResponseWriter, r *http.Request) {
 	resp.WatchdogLogDropCount = env.WatchdogLogDropCount
 	for _, src := range env.SourceStatuses {
 		src.Broker = maskBrokerURL(src.Broker)
-		// Broker libraries occasionally quote the failing URL in the
-		// error string — redact there too as defense-in-depth.
-		src.LastError = maskBrokerURL(src.LastError)
+		// An older ingestor tagged an unnamed source with its raw
+		// broker, and broker libraries occasionally quote the failing
+		// URL in the error string — mask both (#118).
+		src.Name = maskSourceName(src.Name)
+		src.LastError = maskBrokerText(src.LastError)
 		resp.Sources = append(resp.Sources, src)
 	}
 	writeJSON(w, resp)

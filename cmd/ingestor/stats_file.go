@@ -143,6 +143,13 @@ func writeStatsAtomic(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
+	// The mode above applies only to a new file. A stale tmp keeps its
+	// own, and the rename would publish it, so force 0o600; that fails
+	// for a tmp another user planted, and nothing is written (#118).
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
 	if _, err := f.Write(b); err != nil {
 		f.Close()
 		os.Remove(tmp)

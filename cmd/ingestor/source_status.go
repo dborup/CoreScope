@@ -37,7 +37,7 @@ type SourceStatusSnapshot struct {
 // slots = 2.4KB/source — fine.
 type sourceStatusState struct {
 	name   string
-	broker string // raw broker URL — server-side handler masks the password
+	broker string // without credentials (brokerForLog); published in the stats file
 
 	connected          atomic.Bool
 	lastConnectUnix    atomic.Int64
@@ -79,7 +79,7 @@ func (s *sourceStatusState) MarkDisconnect(now time.Time, err error) {
 	s.disconnectCount.Add(1)
 	if err != nil {
 		s.errMu.Lock()
-		s.lastError = err.Error()
+		s.lastError = errForLog(err)
 		s.errMu.Unlock()
 	}
 }
@@ -137,8 +137,8 @@ func (s *sourceStatusState) snapshot(now time.Time) SourceStatusSnapshot {
 }
 
 // sourceStatusRegistry holds one sourceStatusState per source. Keyed by
-// tag (which is the source Name, or the Broker URL if the operator left
-// the name blank).
+// tag (mqttSourceTags: the source Name, or the credential-free broker if
+// the operator left the name blank).
 var (
 	sourceStatusRegistryMu sync.RWMutex
 	sourceStatusRegistry   = map[string]*sourceStatusState{}
@@ -147,14 +147,16 @@ var (
 // RegisterSourceStatus creates (or returns the existing) state for the
 // given source. Safe for cold-start use; idempotent — re-registering the
 // same tag returns the existing state so counters aren't reset across
-// reconnects.
+// reconnects. The broker is stored without credentials (brokerForLog),
+// whatever the caller passes: the stats file that carries it is served by
+// the public /api/mqtt/status (#118).
 func RegisterSourceStatus(tag, broker string) *sourceStatusState {
 	sourceStatusRegistryMu.Lock()
 	defer sourceStatusRegistryMu.Unlock()
 	if s, ok := sourceStatusRegistry[tag]; ok {
 		return s
 	}
-	s := &sourceStatusState{name: tag, broker: broker}
+	s := &sourceStatusState{name: tag, broker: brokerForLog(broker)}
 	sourceStatusRegistry[tag] = s
 	return s
 }

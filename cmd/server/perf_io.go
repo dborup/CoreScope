@@ -405,6 +405,7 @@ func readIngestorSourceLiveness() map[string]SourceLivenessSnapshot {
 		sourceLivenessCache.mtime = time.Time{}
 		return nil
 	}
+	st.SourceLiveness = maskLivenessKeys(st.SourceLiveness) // public via /api/healthz (#118)
 	sourceLivenessCache.path = path
 	sourceLivenessCache.value = st.SourceLiveness
 	sourceLivenessCache.cachedAt = now
