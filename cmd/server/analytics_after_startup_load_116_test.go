@@ -459,3 +459,43 @@ func TestDistanceSnapshotRefreshedBeforeReady_116(t *testing.T) {
 		t.Fatal("the distance snapshot at ready does not match the built index")
 	}
 }
+
+// Region- and area-keyed distance results bypass the snapshot and live in
+// the distance TTL cache. One computed from the index as it was before a
+// build must not be served once that build reports the index built, so
+// the build drops the cache before it flips DistanceIndexBuilt.
+func TestDistanceBuildDropsRegionAreaCache_116(t *testing.T) {
+	store := newDistBuildStore(t)
+	store.config = &Config{Areas: map[string]AreaEntry{
+		"BAY": {Label: "Bay", Polygon: [][2]float64{{36.0, -124.0}, {39.0, -124.0}, {39.0, -120.0}, {36.0, -120.0}}},
+	}}
+	gate := installDistBuildGate(store)
+	store.TriggerDistanceIndexBuild()
+	distBuildWaitClosed(t, "the build to reach distanceBuildHook", gate.entered)
+
+	// The build is held before it reads the dataset, so these come from
+	// the index as it was before it (nothing indexed yet).
+	keys := [][2]string{{"SJC", ""}, {"", "BAY"}, {"SJC", "BAY"}}
+	old := make(map[[2]string]map[string]interface{}, len(keys))
+	for _, k := range keys {
+		old[k] = store.GetAnalyticsDistance(k[0], k[1])
+		if again := store.GetAnalyticsDistance(k[0], k[1]); reflect.ValueOf(again).Pointer() != reflect.ValueOf(old[k]).Pointer() {
+			t.Fatalf("fixture: %v was not served from the TTL cache", k)
+		}
+	}
+	close(gate.release)
+	distBuildWaitCurrent(t, store)
+
+	for _, k := range keys {
+		got := store.GetAnalyticsDistance(k[0], k[1])
+		want := store.computeAnalyticsDistance(k[0], k[1])
+		if reflect.DeepEqual(old[k], want) {
+			t.Fatalf("fixture: %v gives the same result before and after the build", k)
+		}
+		if reflect.ValueOf(got).Pointer() == reflect.ValueOf(old[k]).Pointer() {
+			t.Errorf("%v: served the result cached from the pre-build index after the index reported built", k)
+		} else if !reflect.DeepEqual(got, want) {
+			t.Errorf("%v: result after ready does not match the built index", k)
+		}
+	}
+}
