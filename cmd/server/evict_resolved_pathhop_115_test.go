@@ -143,6 +143,27 @@ func TestEvictRemovesResolvedKeysOfOtherObservationPaths_115(t *testing.T) {
 	}
 }
 
+// A byPathHop index built before #158 can hold the same transmission several
+// times in one resolved bucket (once per observation). Eviction must drop
+// every occurrence, and delete a bucket that ends up empty.
+func TestEvictRemovesDuplicateResolvedEntries_115(t *testing.T) {
+	store, old, young := evict115Store(t, 40, true)
+	dup := old[0]
+	before := countIn(store.byPathHop, dup)
+	for _, key := range []string{evict115Only, evict115PK1} { // one emptied, one shared with survivors
+		for i := 0; i < 2; i++ {
+			store.byPathHop[key] = append(store.byPathHop[key], dup)
+		}
+	}
+	if n := countIn(store.byPathHop, dup); n != before+4 {
+		t.Fatalf("fixture: legacy duplicates not in place, tx indexed %d times", n)
+	}
+	if got := store.EvictStale(); got != len(old) {
+		t.Fatalf("evicted %d, want %d", got, len(old))
+	}
+	assertEvictedGone115(t, store, old, young, young115Refs)
+}
+
 func TestRunEvictionRemovesResolvedPathHops_115(t *testing.T) {
 	store, old, young := evict115Store(t, 40, true)
 	if got := store.RunEviction(); got != len(old) {
