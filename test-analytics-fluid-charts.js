@@ -90,7 +90,24 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const tmp = path.join(os.tmpdir(),
       `1058-harness-${wrapperWidth}-${viewportWidth}.html`);
     fs.writeFileSync(tmp, harnessHTML(wrapperWidth));
-    await page.goto('file://' + tmp, { waitUntil: 'domcontentloaded' });
+    await page.goto('file://' + tmp, { waitUntil: 'load' });
+    await waitForStyles();
+  }
+
+  // #148: DOMContentLoaded does not wait for style.css, and unstyled
+  // cards stack in one column. Wait until the stylesheet is attached,
+  // then for two frames so layout reflects it, before measuring. This
+  // waits on the stylesheet itself, not on the properties under test.
+  async function waitForStyles() {
+    try {
+      await page.waitForFunction(() => {
+        const link = document.querySelector('link[rel="stylesheet"]');
+        return !!(link && link.sheet);
+      }, null, { timeout: 15000 });
+    } catch (e) {
+      throw new Error('style.css was not applied: ' + e.message);
+    }
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
   }
 
   // Helper: count distinct column-x-positions of chart cards.
@@ -214,8 +231,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       document.getElementById('wrap').style.width = '760px';
     });
     await page.setViewportSize({ width: 768, height: 900 });
-    // Give the browser a frame to recompute layout.
-    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    // Same wait as after a load: styles applied, then two frames so the
+    // layout is recomputed for the new width.
+    await waitForStyles();
     const colsNarrow = await colCount();
     assert(colsNarrow === 1,
       `expected layout to reflow to 1 column after shrink; got ${colsNarrow}`);
