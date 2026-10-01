@@ -87,6 +87,15 @@ async function flush(n) {
   for (let i = 0; i < (n || 20); i++) await new Promise((r) => setImmediate(r));
 }
 
+// Flushes until cond() holds or ~2s of real time pass. For steps that wait
+// on Web Crypto (computeChannelHash), whose digest runs off the event loop
+// and can outlast a fixed number of flushes on a busy machine.
+async function settle(cond, ms) {
+  const deadline = RealDate.now() + (ms || 2000);
+  while (!cond() && RealDate.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+  return cond();
+}
+
 function makeHarness(opts) {
   opts = opts || {};
   const storage = {};
@@ -1111,14 +1120,13 @@ async function test(name, fn) {
     const decryptA = deferred();
     h.respondPackets = () => decryptA.promise;
     const selectA = h.w._channelsSelectChannelForTest(HASH);
-    await flush(300);
+    assert.ok(await settle(() => h.packetsRequests.length === 1), 'precondition: decrypt A is in flight');
 
     const decryptB = deferred();
     h.respondPackets = () => decryptB.promise;
     h.regionParam = 'SJC';
     h.regionChange(); // re-runs selectChannel for the encrypted selection (F1)
-    await flush(300);
-    assert.strictEqual(h.packetsRequests.length, 2, 'precondition: decrypt B is in flight');
+    assert.ok(await settle(() => h.packetsRequests.length === 2), 'precondition: decrypt B is in flight (got ' + h.packetsRequests.length + ' fetches)');
 
     decryptA.resolve({ packets: [] }); // A is superseded and finishes first
     await selectA;
@@ -1129,6 +1137,7 @@ async function test(name, fn) {
     await h.w._channelsLoadChannelsForTest(true);
     await flush(300);
     decryptB.resolve({ packets: [] });
+    await settle(() => h.state().messages.length > 0);
     await flush(300);
 
     assert.strictEqual(h.state().selectedHash, NAME, 'selection must have remapped');
