@@ -17,6 +17,9 @@
  * Pure file:// harness — does not require the Go server.
  *
  * Usage: node test-analytics-fluid-charts.js
+ *
+ * FLUID_CHARTS_CSS_DELAY_MS=<ms> holds style.css back that long on every
+ * load, as a slow runner would (#148).
  */
 'use strict';
 const { chromium } = require('playwright');
@@ -69,6 +72,14 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   });
   const ctx = await browser.newContext();
+  // #148: on a slow runner style.css can apply after DOMContentLoaded.
+  // cssDelayMs holds it back that long, so a test can reproduce that.
+  const envCssDelayMs = Number(process.env.FLUID_CHARTS_CSS_DELAY_MS) || 0;
+  let cssDelayMs = envCssDelayMs;
+  await ctx.route((url) => url.href === cssHref, async (route) => {
+    if (cssDelayMs > 0) await new Promise((r) => setTimeout(r, cssDelayMs));
+    await route.continue();
+  });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
 
@@ -118,6 +129,21 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const o = await overflow();
     assert(o.scrollW <= o.clientW + 1,
       `horizontal overflow: scrollW=${o.scrollW} clientW=${o.clientW}`);
+  });
+
+  // --- #148: measure only once style.css applies ------------------------
+  // Same case as above with style.css held back for a second. Unstyled
+  // cards stack in one column, so a measurement taken before the
+  // stylesheet applies reads 1 column.
+  await step('viewport 1440 / wrapper 1300px with style.css held back 1s → side-by-side (≥2 cols)', async () => {
+    cssDelayMs = Math.max(envCssDelayMs, 1000);
+    try {
+      await load(1300, 1440);
+    } finally {
+      cssDelayMs = envCssDelayMs;
+    }
+    const cols = await colCount();
+    assert(cols >= 2, `expected ≥2 columns at wrapper 1300px; got ${cols}`);
   });
 
   // --- Viewport 1080: medium width — must not overflow ------------------
