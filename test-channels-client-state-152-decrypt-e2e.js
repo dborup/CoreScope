@@ -305,10 +305,16 @@ async function stopProcess(proc) {
   clearTimeout(t);
 }
 
-async function waitFor(what, fn, timeoutMs) {
+// Nit (#153 review round 3): when `proc` is given, stop polling the moment
+// it exits instead of burning out the full timeout in 200ms retries against
+// a process that is already dead.
+async function waitFor(what, fn, timeoutMs, proc) {
   const deadline = Date.now() + (timeoutMs || TIMEOUT);
   let last;
   while (Date.now() < deadline) {
+    if (proc && proc.exitCode !== null) {
+      throw new Error(what + ': process "' + proc.label + '" exited early (code ' + proc.exitCode + '), see ' + proc.logFile);
+    }
     try { const v = await fn(); if (v) return v; } catch (e) { last = e; }
     await new Promise((r) => setTimeout(r, 200));
   }
@@ -384,9 +390,8 @@ async function migrateFixture(dbPath, dir) {
   const ingestor = startProcess('ingestor', INGESTOR_BIN, ['-config', ingestorConfig], dir);
   try {
     await waitFor('ingestor migration + MQTT subscription', () => {
-      if (ingestor.exitCode !== null) throw new Error('ingestor exited: see ' + ingestor.logFile);
       return logHas(ingestor, /MQTT \[e2e\] subscribed/);
-    });
+    }, undefined, ingestor);
   } finally {
     await stopProcess(ingestor);
     broker.close();
@@ -636,30 +641,38 @@ async function main() {
   const port = await freePort();
   const base = 'http://127.0.0.1:' + port;
 
+  // Nit (#153 review round 3): a thrown error here (e.g. the server never
+  // comes up) previously left `failed` at 0 — no step() had run yet — so the
+  // `finally` below deleted `dir` anyway, and the FATAL message from the
+  // outer catch then pointed at log files that no longer existed. Track a
+  // fatal separately so its logs are kept too, then re-throw unchanged.
+  let fatal = null;
   try {
     const server = startProcess('server', SERVER_BIN,
       ['-port', String(port), '-db', dbPath, '-public', PUBLIC_DIR, '-config-dir', serverDir],
       dir);
     await waitFor('server health', async () => {
-      if (server.exitCode !== null) throw new Error('server exited early: see ' + server.logFile);
       const res = await fetch(base + '/api/healthz');
       return res.ok;
-    });
+    }, undefined, server);
     await waitFor('server reports SJC and SFO regions', async () => {
       const res = await fetch(base + '/api/config/regions');
       const regions = await res.json();
       return 'SJC' in regions && 'SFO' in regions;
-    });
+    }, undefined, server);
 
     console.log('\n=== #152 decrypt-race E2E against ' + base + ' ===');
     await runViewport(browser, { name: 'desktop', width: 1280, height: 800 }, base, seed);
     await runViewport(browser, { name: 'mobile', width: 390, height: 844 }, base, seed);
+  } catch (e) {
+    fatal = e;
   } finally {
     await browser.close().catch(() => {});
     for (const proc of Array.from(children)) await stopProcess(proc);
-    if (failed) console.error('logs kept in ' + dir);
+    if (failed || fatal) console.error('logs kept in ' + dir);
     else fs.rmSync(dir, { recursive: true, force: true });
   }
+  if (fatal) throw fatal;
 
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
