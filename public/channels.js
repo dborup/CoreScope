@@ -236,14 +236,15 @@
   let observerIataById = {};
   let observerIataByName = {};
   let messageRequestId = 0;
-  // N1 (#152 follow-up): true while a decryptAndRender() fetch for the
-  // current selection is in flight (set/cleared around that one call).
-  // Lets reconcileSelectionAfterChannelRefresh() know, when it remaps a
-  // user:* selection mid-decrypt, that it must restart loading for the
-  // remapped hash — otherwise the in-flight request's own staleness check
-  // discards its result once selectedHash changes, and nothing else ever
-  // re-fetches, leaving the pane stuck on "Decrypting messages…".
-  let messageLoadPending = false;
+  // N1 (#152 follow-up): the id of the selectChannel() request whose load is
+  // still running (0 when none). Lets reconcileSelectionAfterChannelRefresh()
+  // know, when it remaps a user:* selection mid-load, that it must restart
+  // loading for the remapped hash — otherwise the in-flight request's own
+  // staleness check discards its result once selectedHash changes, and
+  // nothing else ever re-fetches, leaving the pane stuck on "Decrypting
+  // messages…". R4-3: an id rather than a boolean, so a superseded request
+  // finishing can't clear the flag of the request that replaced it.
+  let messageLoadPending = 0;
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
 
   function getSelectedRegionsSnapshot() {
@@ -332,11 +333,11 @@
         // stuck on "Decrypting messages…" forever. Restart loading for the
         // remapped hash in that case. A quiet remap (no decrypt in flight)
         // still leaves messages untouched, as before.
-        var hadPendingDecrypt = messageLoadPending;
+        var hadPendingLoad = messageLoadPending !== 0 && messageLoadPending === messageRequestId;
         selectedHash = remapped.hash;
         history.replaceState(null, '', `#/channels/${encodeURIComponent(selectedHash)}`);
         renderChannelList();
-        if (hadPendingDecrypt) selectChannel(selectedHash);
+        if (hadPendingLoad) selectChannel(selectedHash);
         return false;
       }
     }
@@ -2423,8 +2424,21 @@
   }
 
   async function selectChannel(hash, decryptOpts) {
-    const rp = RegionFilter.getRegionParam() || '';
-    const request = beginMessageRequest(hash, rp);
+    const request = beginMessageRequest(hash, RegionFilter.getRegionParam() || '');
+    // R4-3: mark this request's load as pending before its first await
+    // (computeChannelHash), so a remap at any point of it restarts loading.
+    // Only the request that owns the flag may clear it.
+    messageLoadPending = request.id;
+    try {
+      return await loadSelectedChannel(request, decryptOpts);
+    } finally {
+      if (messageLoadPending === request.id) messageLoadPending = 0;
+    }
+  }
+
+  async function loadSelectedChannel(request, decryptOpts) {
+    const hash = request.hash;
+    const rp = request.regionParam;
     // #1498: clear messages BEFORE flipping selectedHash so any WS-pushed
     // messages from the previously-viewed channel can't survive into the
     // new channel's view via mergeWsAppendedIntoRest(). Messages don't
@@ -2450,52 +2464,46 @@
 
     // Shared helper: fetch, decrypt, and render messages for a channel key (M5: cache-first)
     async function decryptAndRender(keyHex, channelHashByte, channelName) {
+      // R4-3: callers reach this after awaiting computeChannelHash; a
+      // superseded request must not paint over the current one's view.
+      if (isStaleMessageRequest(request)) return { stale: true };
       msgEl.innerHTML = '<div class="ch-loading">Decrypting messages…</div>';
-      // N1 (#152 follow-up): mark a decrypt as pending for the current
-      // selection so reconcileSelectionAfterChannelRefresh() can tell, when
-      // it remaps a selection mid-decrypt, that it must restart loading for
-      // the remapped hash instead of leaving the pane stuck on this message.
-      messageLoadPending = true;
-      try {
-        var result = await fetchAndDecryptChannel(keyHex, channelHashByte, channelName, {
-          onCacheHit: function (cachedMsgs) {
-            // M5: Render cached messages immediately while delta fetch runs.
-            // #1498 round-1 finding #4: this site is a REST replacement
-            // path too — it must merge any WS-pushed messages instead of
-            // stomping them, same as the other two sites below.
-            messages = mergeWsAppendedIntoRest(messages, cachedMsgs || []);
-            if (messages.length > 0) {
-              header.querySelector('.ch-header-text').textContent = name + ' — ' + messages.length + ' messages (cached)';
-              renderMessages();
-              scrollToBottom();
-            }
-          },
-          // N2 (#152 follow-up): a superseded request must not persist its
-          // evidence into the (now region-scoped) decrypt cache.
-          isStale: function () { return isStaleMessageRequest(request); }
-        });
-        if (isStaleMessageRequest(request)) return { stale: true };
-        if (result.wrongKey) {
-          msgEl.innerHTML = '<div class="ch-empty ch-wrong-key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Key does not match — no messages could be decrypted</div>';
-          return { wrongKey: true, messageCount: 0 };
-        }
-        if (result.error) {
-          msgEl.innerHTML = '<div class="ch-empty">' + escapeHtml(result.error) + '</div>';
-          return { error: result.error, messageCount: 0 };
-        }
-        // #1498: merge WS-pushed messages that landed during the decrypt fetch.
-        messages = mergeWsAppendedIntoRest(messages, result.messages || []);
-        if (messages.length === 0) {
-          msgEl.innerHTML = '<div class="ch-empty">No encrypted messages found for this channel</div>';
-        } else {
-          header.querySelector('.ch-header-text').textContent = `${name} — ${messages.length} messages (decrypted)`;
-          renderMessages();
-          scrollToBottom();
-        }
-        return { messageCount: messages.length };
-      } finally {
-        messageLoadPending = false;
+      var result = await fetchAndDecryptChannel(keyHex, channelHashByte, channelName, {
+        onCacheHit: function (cachedMsgs) {
+          // M5: Render cached messages immediately while delta fetch runs.
+          // #1498 round-1 finding #4: this site is a REST replacement
+          // path too — it must merge any WS-pushed messages instead of
+          // stomping them, same as the other two sites below.
+          messages = mergeWsAppendedIntoRest(messages, cachedMsgs || []);
+          if (messages.length > 0) {
+            header.querySelector('.ch-header-text').textContent = name + ' — ' + messages.length + ' messages (cached)';
+            renderMessages();
+            scrollToBottom();
+          }
+        },
+        // N2 (#152 follow-up): a superseded request must not persist its
+        // evidence into the (now region-scoped) decrypt cache.
+        isStale: function () { return isStaleMessageRequest(request); }
+      });
+      if (isStaleMessageRequest(request)) return { stale: true };
+      if (result.wrongKey) {
+        msgEl.innerHTML = '<div class="ch-empty ch-wrong-key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Key does not match — no messages could be decrypted</div>';
+        return { wrongKey: true, messageCount: 0 };
       }
+      if (result.error) {
+        msgEl.innerHTML = '<div class="ch-empty">' + escapeHtml(result.error) + '</div>';
+        return { error: result.error, messageCount: 0 };
+      }
+      // #1498: merge WS-pushed messages that landed during the decrypt fetch.
+      messages = mergeWsAppendedIntoRest(messages, result.messages || []);
+      if (messages.length === 0) {
+        msgEl.innerHTML = '<div class="ch-empty">No encrypted messages found for this channel</div>';
+      } else {
+        header.querySelector('.ch-header-text').textContent = `${name} — ${messages.length} messages (decrypted)`;
+        renderMessages();
+        scrollToBottom();
+      }
+      return { messageCount: messages.length };
     }
 
     // Client-side decryption path (#725 M2)

@@ -1092,6 +1092,115 @@ async function test(name, fn) {
     assert.ok(reloaded.CD.getCache('written-later'), 'the migration must not run again on the next page load');
   });
 
+  // ── R4-3 (#153 review round 4, P3): the N1 "a load is pending" flag was
+  // one shared boolean, set only inside decryptAndRender(). A superseded
+  // decrypt cleared it in its finally while a newer one was still running
+  // (S1), and a remap during selectChannel()'s first await (S2) saw no
+  // flag at all. A superseded selectChannel() also still painted
+  // "Decrypting messages…" over a newer request's view (S3).
+  await test('R4-3 S1: decrypt A, region switch starts decrypt B, A ends, then a remap — the pane must not hang', async () => {
+    const h = makeHarness();
+    const KEY = 'a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7';
+    const NAME = '#r4s1';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'R4 S1');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    const msg = encryptChannelMessage(KEY, 'Alice', 's1 remapped message');
+
+    const decryptA = deferred();
+    h.respondPackets = () => decryptA.promise;
+    const selectA = h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+
+    const decryptB = deferred();
+    h.respondPackets = () => decryptB.promise;
+    h.regionParam = 'SJC';
+    h.regionChange(); // re-runs selectChannel for the encrypted selection (F1)
+    await flush(300);
+    assert.strictEqual(h.packetsRequests.length, 2, 'precondition: decrypt B is in flight');
+
+    decryptA.resolve({ packets: [] }); // A is superseded and finishes first
+    await selectA;
+    await flush(300);
+
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-s1', '2026-01-01T00:00:00Z', msg)] });
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel(NAME, { name: NAME })] });
+    await h.w._channelsLoadChannelsForTest(true);
+    await flush(300);
+    decryptB.resolve({ packets: [] });
+    await flush(300);
+
+    assert.strictEqual(h.state().selectedHash, NAME, 'selection must have remapped');
+    assert.ok(!/Decrypting/.test(h.elements.chMessages.innerHTML), 'pane must not hang on "Decrypting…" (got ' + h.elements.chMessages.innerHTML.slice(0, 120) + ')');
+    const texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('s1 remapped message') !== -1, 'the remapped channel must load (got ' + JSON.stringify(texts) + ')');
+  });
+
+  await test('R4-3 S2: a remap before computeChannelHash resolves restarts loading', async () => {
+    const h = makeHarness();
+    const KEY = 'b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8';
+    const NAME = '#r4s2';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'R4 S2');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    const msg = encryptChannelMessage(KEY, 'Bob', 's2 remapped message');
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-s2', '2026-01-01T00:00:00Z', msg)] });
+
+    const hashReady = deferred();
+    h.w.ChannelDecrypt.computeChannelHash = () => hashReady.promise;
+    const select = h.w._channelsSelectChannelForTest(HASH);
+    await flush(50);
+    assert.strictEqual(h.packetsRequests.length, 0, 'precondition: still waiting for computeChannelHash');
+
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel(NAME, { name: NAME })] });
+    await h.w._channelsLoadChannelsForTest(true);
+    hashReady.resolve(msg.channelHash);
+    await select;
+    await flush(300);
+
+    assert.strictEqual(h.state().selectedHash, NAME, 'selection must have remapped');
+    assert.ok(!/Decrypting/.test(h.elements.chMessages.innerHTML), 'pane must not hang on "Decrypting…" (got ' + h.elements.chMessages.innerHTML.slice(0, 120) + ')');
+    const texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('s2 remapped message') !== -1, 'the remapped channel must load (got ' + JSON.stringify(texts) + ')');
+  });
+
+  await test('R4-3 S3: a region switch that reveals a same-named channel mid-decrypt is not overwritten by a late "Decrypting…"', async () => {
+    const h = makeHarness();
+    const KEY = 'c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9';
+    const NAME = '#r4s3';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'R4 S3');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    const realApi = h.ctx.api;
+    h.ctx.api = (p, o) => (p.indexOf('/channels/' + encodeURIComponent(NAME) + '/messages') === 0
+      ? Promise.resolve({ messages: [{ id: 1, sender: 'Srv', text: 's3 server message', timestamp: '2026-01-01T00:00:00Z', packetHash: 'srv1' }] })
+      : realApi(p, o));
+
+    const hashReady = deferred();
+    h.w.ChannelDecrypt.computeChannelHash = () => hashReady.promise;
+    const select = h.w._channelsSelectChannelForTest(HASH);
+    await flush(50);
+
+    // SJC lists #r4s3 as a server channel: reconcile remaps the selection,
+    // and the region handler refreshes it over REST.
+    h.regionParam = 'SJC';
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel(NAME, { name: NAME })] });
+    h.regionChange();
+    await flush(300);
+    assert.strictEqual(h.state().selectedHash, NAME, 'precondition: selection remapped');
+    assert.ok(h.state().messages.some((m) => m.text === 's3 server message'), 'precondition: REST refresh rendered the server channel');
+
+    hashReady.resolve(encryptChannelMessage(KEY, 'x', 'y').channelHash);
+    await select;
+    await flush(300);
+    assert.ok(!/Decrypting/.test(h.elements.chMessages.innerHTML),
+      'a superseded selectChannel must not paint "Decrypting…" over the current view (got ' + h.elements.chMessages.innerHTML.slice(0, 120) + ')');
+    assert.ok(h.state().messages.some((m) => m.text === 's3 server message'), 'the current view must keep its messages');
+  });
+
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });
