@@ -69,8 +69,8 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
-const { chromium } = require('playwright');
+// node:sqlite and playwright are required where they're used, so the unit
+// suite can load this file's process helpers without either.
 
 const ROOT = __dirname;
 const SERVER_BIN = path.resolve(process.env.CORESCOPE_SERVER_BIN || path.join(ROOT, 'corescope-server'));
@@ -170,6 +170,7 @@ function computeContentHash16(rawPacket) {
  * Returns { keyHex, channelName, hash, sjc: {sender,text}, sfo: {sender,text} }
  */
 function seedEncryptedChannel(dbPath) {
+  const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(dbPath);
   try {
     // Avoid colliding with any GRP_TXT channelHash byte already present in
@@ -296,8 +297,18 @@ function startProcess(label, bin, args, dir) {
   return proc;
 }
 
+// A child killed by a signal (SIGKILL, SIGSEGV, ...) exits with exitCode
+// null and signalCode set, so both must be checked.
+function hasExited(proc) {
+  return proc.exitCode !== null || proc.signalCode !== null;
+}
+
+function exitDescription(proc) {
+  return proc.signalCode !== null ? 'signal ' + proc.signalCode : 'code ' + proc.exitCode;
+}
+
 async function stopProcess(proc) {
-  if (!proc || proc.exitCode !== null) return;
+  if (!proc || hasExited(proc)) return;
   const exited = new Promise((r) => proc.once('exit', r));
   proc.kill('SIGTERM');
   const t = setTimeout(() => proc.kill('SIGKILL'), 5000);
@@ -312,8 +323,8 @@ async function waitFor(what, fn, timeoutMs, proc) {
   const deadline = Date.now() + (timeoutMs || TIMEOUT);
   let last;
   while (Date.now() < deadline) {
-    if (proc && proc.exitCode !== null) {
-      throw new Error(what + ': process "' + proc.label + '" exited early (code ' + proc.exitCode + '), see ' + proc.logFile);
+    if (proc && hasExited(proc)) {
+      throw new Error(what + ': process "' + proc.label + '" exited early (' + exitDescription(proc) + '), see ' + proc.logFile);
     }
     try { const v = await fn(); if (v) return v; } catch (e) { last = e; }
     await new Promise((r) => setTimeout(r, 200));
@@ -619,6 +630,7 @@ async function main() {
     }
   }
 
+  const { chromium } = require('playwright');
   let browser;
   const launchArgs = { headless: true, args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'] };
   try {
@@ -721,4 +733,5 @@ if (require.main === module) {
 module.exports = {
   seedEncryptedChannel, channelHashByteFor, buildPlaintext, encryptECB, computeMac,
   buildRawPacket, computeContentHash16,
+  startProcess, stopProcess, waitFor,
 };

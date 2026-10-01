@@ -1261,6 +1261,71 @@ async function test(name, fn) {
     await nextSelect;
   });
 
+  // ── R4-5 (#153 review round 4, nits).
+  await test('R4-5: region order does not change the decrypt cache key (SJC,SFO and SFO,SJC share one entry)', async () => {
+    const h = makeHarness();
+    const KEY = 'ebebebebebebebebebebebebebebebeb';
+    const NAME = 'psk:r4sort';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'R4 Sort');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    const msg = encryptChannelMessage(KEY, 'Alice', 'sorted message');
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-sort', '2026-01-01T00:00:00Z', msg)] });
+    for (const region of ['SJC,SFO', 'SFO,SJC']) {
+      h.regionParam = region;
+      await h.w._channelsSelectChannelForTest(HASH);
+    }
+    assert.deepStrictEqual(decryptCacheKeys(h).filter((k) => k.indexOf(NAME + '|') === 0), [NAME + '|SFO,SJC'],
+      'both orders must map to the one sorted key (got ' + JSON.stringify(decryptCacheKeys(h)) + ')');
+  });
+
+  // The decrypt E2E's process helpers: a child killed by a signal has
+  // exitCode null and signalCode set, so checking exitCode alone missed a
+  // SIGKILL/SIGSEGV — waitFor() polled out its whole timeout and
+  // stopProcess() waited forever for an 'exit' that had already fired.
+  const e2eHarness = require('./test-channels-client-state-152-decrypt-e2e.js');
+  const os = require('os');
+  function spawnSleeper(dir) {
+    return e2eHarness.startProcess('sleeper', process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], dir);
+  }
+  function within(ms, p, what) {
+    let t;
+    return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what + ' did not settle within ' + ms + 'ms')), ms); })])
+      .finally(() => clearTimeout(t));
+  }
+  async function killedBySignal(dir, sig) {
+    const proc = spawnSleeper(dir);
+    const exited = new Promise((r) => proc.once('exit', r));
+    proc.kill(sig);
+    await exited;
+    assert.strictEqual(proc.exitCode, null, 'precondition: a signal-killed child has no exit code');
+    assert.strictEqual(proc.signalCode, sig, 'precondition: signalCode is set');
+    return proc;
+  }
+
+  await test('R4-5: the decrypt E2E\'s waitFor() stops at once when its process dies from SIGKILL or SIGSEGV', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r4-waitfor-'));
+    try {
+      for (const sig of ['SIGKILL', 'SIGSEGV']) {
+        const proc = await killedBySignal(dir, sig);
+        const started = RealDate.now();
+        await assert.rejects(within(3000, e2eHarness.waitFor('never', () => false, 10000, proc), 'waitFor'),
+          (e) => /exited early/.test(e.message) && e.message.indexOf(sig) !== -1,
+          'waitFor must reject naming ' + sig + ' instead of polling out its timeout');
+        assert.ok(RealDate.now() - started < 1000, 'waitFor must notice the dead process at once');
+      }
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  await test('R4-5: the decrypt E2E\'s stopProcess() returns at once for a process a signal already killed', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r4-stop-'));
+    try {
+      const proc = await killedBySignal(dir, 'SIGKILL');
+      await within(3000, e2eHarness.stopProcess(proc), 'stopProcess');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });
