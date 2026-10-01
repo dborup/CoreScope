@@ -28,6 +28,12 @@
  * showing just the SFO message (not stuck "Decrypting...", not the stale
  * SJC-region message) with the conversation still open on the same hash.
  *
+ * #153 review round 3 adds a further step after the decrypt has fully
+ * settled: switching to OAK (no observer saw either seeded packet) must
+ * show an empty pane, not a lingering SJC/SFO message from the decrypt
+ * cache (N2 — the cache was keyed by channel name alone, with no region
+ * component).
+ *
  * Runs at desktop (1280x800) and mobile (390x844) viewports.
  *
  * Seeding: no sqlite3 CLI is available in this environment, so this file
@@ -410,6 +416,29 @@ async function selectOnlyRegion(page, code) {
   await Promise.all([response, click]);
 }
 
+// Toggles an already-selected region pill back off (multi-select: clicking
+// a selected pill removes it). Used to get back to a clean single-selection
+// state before selectOnlyRegion's next clean click, instead of ending up
+// with a combined "SFO,OAK" selection.
+async function deselectRegion(page, code) {
+  const pill = page.locator('#chRegionFilter [data-region="' + code + '"]');
+  await pill.waitFor({ state: 'attached', timeout: 8000 });
+  // Deselecting the only selected region goes back to "All regions" — a
+  // null selection. loadChannels() then queries with no `region=` param,
+  // which the client's own TTL cache (CLIENT_TTL.channels) may already hold
+  // from the very first page load, so no new network request is guaranteed
+  // to fire here — wait for the pill UI to reflect the toggle instead.
+  await pill.click({ timeout: 2000 }).catch(() => pill.evaluate((el) => el.click()));
+  // Deselecting the one selected region goes back to "All regions", which
+  // re-renders EVERY pill (including the one just clicked) as checked — so
+  // "this pill is now unchecked" is never true here. Wait for the "__all__"
+  // pill to become the active one instead.
+  await page.waitForFunction(() => {
+    const el = document.querySelector('#chRegionFilter [data-region="__all__"]');
+    return el && el.classList.contains('region-pill-active');
+  }, null, { timeout: 8000 });
+}
+
 function messagePaneState(page) {
   return page.evaluate(() => {
     const msgEl = document.getElementById('chMessages');
@@ -502,6 +531,28 @@ async function runViewport(browser, vp, base, seed) {
     ok(s.urlHash === '#/channels/' + encodeURIComponent(seed.hash), 'URL must stay on the PSK channel, got ' + s.urlHash);
     ok(s.text.indexOf('Choose a channel') === -1, 'conversation must not have closed');
     ok(s.rowSelectedHash === seed.hash, 'the PSK row must still be selected, got ' + s.rowSelectedHash);
+  });
+
+  // N2 (#153 review round 3): the decrypt cache was keyed by channel name
+  // alone, so a region with zero traffic for this channel — switched to
+  // well AFTER the earlier decrypt has fully settled, no race involved —
+  // could still show a previous region's cached messages. OAK has no
+  // observer for either seeded packet.
+  await step(vp.name + ': switching to a region with no traffic for this channel shows an empty pane, not a stale one', async () => {
+    // Region pills are multi-select: deselect SFO first so the OAK click
+    // below is a clean single-region switch, not an accumulated "SFO,OAK".
+    await deselectRegion(page, 'SFO');
+    await selectOnlyRegion(page, 'OAK');
+    await page.waitForFunction(() => {
+      const m = document.getElementById('chMessages');
+      return m && !m.querySelector('.ch-loading') && !/Decrypting/.test(m.textContent);
+    }, null, { timeout: 15000 });
+    const s = await messagePaneState(page);
+    ok(s.text.indexOf(seed.sfo.text) === -1,
+      'OAK (no traffic) must not show the SFO-region cached message, got: ' + JSON.stringify(s.text.slice(0, 200)));
+    ok(s.text.indexOf(seed.sjc.text) === -1,
+      'OAK (no traffic) must not show the SJC-region cached message, got: ' + JSON.stringify(s.text.slice(0, 200)));
+    ok(s.urlHash === '#/channels/' + encodeURIComponent(seed.hash), 'URL must stay on the PSK channel, got ' + s.urlHash);
   });
 
   await step(vp.name + ': no uncaught page errors', async () => {

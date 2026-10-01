@@ -383,6 +383,11 @@ window.ChannelDecrypt = (function () {
 
   // Cache with lastTimestamp and count (used by channels.js via getCache/setCache)
   var MAX_CACHED_MESSAGES = 1000;
+  // N2 (#152 follow-up): keys are now region-scoped ("<channel>|<region>"),
+  // so one channel can occupy several entries. Cap the number of distinct
+  // entries so visiting many region combinations over time can't grow this
+  // localStorage blob unboundedly; evict the least-recently-written ones.
+  var MAX_CACHE_KEYS = 50;
 
   function setCache(key, messages, lastTimestamp, totalCount) {
     try {
@@ -398,6 +403,11 @@ window.ChannelDecrypt = (function () {
         count: totalCount || toStore.length,
         ts: Date.now()
       };
+      var keys = Object.keys(cache);
+      if (keys.length > MAX_CACHE_KEYS) {
+        keys.sort(function (a, b) { return (cache[a].ts || 0) - (cache[b].ts || 0); });
+        for (var i = 0; i < keys.length - MAX_CACHE_KEYS; i++) delete cache[keys[i]];
+      }
       localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
     } catch (e) { /* quota */ }
   }

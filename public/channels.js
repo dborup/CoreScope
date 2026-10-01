@@ -811,8 +811,23 @@
     opts = opts || {};
     var keyBytes = ChannelDecrypt.hexToBytes(keyHex);
 
+    // N2 (#152 follow-up): the cache must be region-scoped. A channel's
+    // decrypted message set depends on which observers the current region
+    // filter includes, so a cache entry primed under one region (e.g. "All"
+    // or SJC) must never answer a fetch for a different region (e.g. OAK or
+    // MRY) — region order doesn't matter, so sort for a stable key.
+    var rp = RegionFilter.getRegionParam();
+    var regionKey = rp ? rp.split(',').filter(Boolean).sort().join(',') : '';
+    var cacheKey = (channelName || String(channelHashByte)) + '|' + regionKey;
+    // A stale request (superseded by a newer one, or no longer the current
+    // selection/region by the time a write below would happen) must not
+    // persist its possibly-incomplete evidence into the cache.
+    function setCacheIfFresh(key, msgs, ts, count) {
+      if (opts.isStale && opts.isStale()) return;
+      ChannelDecrypt.setCache(key, msgs, ts, count);
+    }
+
     // M5: Check cache first — serve cached messages immediately
-    var cacheKey = channelName || String(channelHashByte);
     var cached = ChannelDecrypt.getCache(cacheKey);
     var cachedMsgs = cached ? cached.messages : [];
     var lastTs = cached ? cached.lastTimestamp : '';
@@ -825,7 +840,6 @@
     }
 
     // Fetch packets from API — get all payload_type=5 (GRP_TXT/CHAN)
-    var rp = RegionFilter.getRegionParam();
     var qs = (rp ? '&region=' + encodeURIComponent(rp) : '');
     var data;
     try {
@@ -872,7 +886,7 @@
         // Nothing new to decrypt. Persist only when the API enriched the
         // evidence so legacy caches gain the badge on this render.
         if (reconciledCache.changed) {
-          ChannelDecrypt.setCache(cacheKey, cachedMsgs, lastTs, totalCandidates);
+          setCacheIfFresh(cacheKey, cachedMsgs, lastTs, totalCandidates);
         }
         return { messages: cachedMsgs, fromCache: true };
       }
@@ -881,7 +895,7 @@
       var newDecrypted = await decryptCandidates(keyBytes, newCandidates);
       if (newDecrypted.wrongKey) {
         if (reconciledCache.changed) {
-          ChannelDecrypt.setCache(cacheKey, cachedMsgs, lastTs, totalCandidates);
+          setCacheIfFresh(cacheKey, cachedMsgs, lastTs, totalCandidates);
         }
         return { messages: cachedMsgs, wrongKey: true };
       }
@@ -889,12 +903,15 @@
       // Merge: cached + new, deduplicate by packetHash, sort chronologically
       var merged = deduplicateAndMerge(cachedMsgs, newDecrypted.messages);
       var newLastTs = merged.length ? merged[merged.length - 1].timestamp : lastTs;
-      ChannelDecrypt.setCache(cacheKey, merged, newLastTs, totalCandidates);
+      setCacheIfFresh(cacheKey, merged, newLastTs, totalCandidates);
       return { messages: merged, deltaCount: newDecrypted.messages.length };
     }
 
     if (candidates.length === 0) {
-      return { messages: cachedMsgs, empty: true };
+      // N2 (#152 follow-up): zero candidates for the current (region-scoped)
+      // fetch must render as empty, never leftover content from a stale or
+      // foreign-region cache entry.
+      return { messages: [], empty: true };
     }
 
     // Full decrypt
@@ -913,7 +930,7 @@
 
     // M5: Cache results
     var newLastTimestamp = decrypted.length ? decrypted[decrypted.length - 1].timestamp : '';
-    ChannelDecrypt.setCache(cacheKey, decrypted, newLastTimestamp, totalCandidates);
+    setCacheIfFresh(cacheKey, decrypted, newLastTimestamp, totalCandidates);
 
     return { messages: decrypted };
   }
@@ -2452,7 +2469,10 @@
               renderMessages();
               scrollToBottom();
             }
-          }
+          },
+          // N2 (#152 follow-up): a superseded request must not persist its
+          // evidence into the (now region-scoped) decrypt cache.
+          isStale: function () { return isStaleMessageRequest(request); }
         });
         if (isStaleMessageRequest(request)) return { stale: true };
         if (result.wrongKey) {

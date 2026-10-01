@@ -801,6 +801,121 @@ async function test(name, fn) {
     assert.strictEqual(h.state().messages.length, 1, 'messages must not be cleared by a quiet remap (got ' + JSON.stringify(h.state().messages) + ')');
   });
 
+  // ── N2 (#153 review round 3, P3): the client-side decrypt cache must be
+  // region-scoped. The cache key was the channel name alone, so a cache
+  // entry primed under one region answered a fetch for a different region.
+  await test('N2: the decrypt cache is region-scoped — a different region never shows another region\'s cached messages', async () => {
+    const h = makeHarness();
+    const KEY = 'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2';
+    const NAME = 'psk:n2test';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'N2 Team');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+
+    const sjcMsg = encryptChannelMessage(KEY, 'Alice', 'sjc message');
+    const sfoMsg = encryptChannelMessage(KEY, 'Bob', 'sfo message');
+
+    // Region "All" (no filter): the decrypt fetch sees both packets.
+    h.respondPackets = () => Promise.resolve({ packets: [
+      encryptedPacket('pkt-sjc', '2026-01-01T00:00:00Z', sjcMsg),
+      encryptedPacket('pkt-sfo', '2026-01-01T00:01:00Z', sfoMsg),
+    ] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    let texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('sjc message') !== -1 && texts.indexOf('sfo message') !== -1 && texts.length === 2,
+      'All region must see both messages (got ' + JSON.stringify(texts) + ')');
+
+    // Switch to OAK: no observer there saw either packet (0 candidates).
+    h.regionParam = 'OAK';
+    h.respondPackets = () => Promise.resolve({ packets: [] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    texts = h.state().messages.map((m) => m.text);
+    assert.strictEqual(texts.length, 0, 'OAK region (0 candidates) must show an empty list, not the All-region cache (got ' + JSON.stringify(texts) + ')');
+  });
+
+  await test('N2: a same-candidate-count delta fetch in a different region does not show the old region\'s message', async () => {
+    const h = makeHarness();
+    const KEY = 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2';
+    const NAME = 'psk:n2delta';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'N2 Delta');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+
+    const sjcMsg = encryptChannelMessage(KEY, 'Alice', 'sjc-only message');
+    const mryMsg = encryptChannelMessage(KEY, 'Carol', 'mry-only message');
+
+    h.regionParam = 'SJC';
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-sjc', '2026-01-01T00:00:00Z', sjcMsg)] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    assert.ok(h.state().messages.some((m) => m.text === 'sjc-only message'), 'precondition: SJC message cached');
+
+    // MRY: exactly one candidate too (same count as the SJC cache), but an
+    // older timestamp — if the cache weren't region-scoped, the delta path
+    // would see "0 new candidates since lastTs" and return SJC's cached
+    // message instead of MRY's own.
+    h.regionParam = 'MRY';
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-mry', '2025-01-01T00:00:00Z', mryMsg)] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    const texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('mry-only message') !== -1, 'MRY must show its own message (got ' + JSON.stringify(texts) + ')');
+    assert.ok(texts.indexOf('sjc-only message') === -1, 'MRY must not show the SJC-region cached message (got ' + JSON.stringify(texts) + ')');
+  });
+
+  await test('N2: a stale (superseded) decrypt does not write its evidence into the cache', async () => {
+    const h = makeHarness();
+    const KEY = 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3';
+    const NAME = 'psk:n2stale';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'N2 Stale');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+
+    const staleMsg = encryptChannelMessage(KEY, 'Alice', 'stale message');
+    const realMsg = encryptChannelMessage(KEY, 'Bob', 'real message');
+
+    const pending = deferred();
+    h.respondPackets = () => pending.promise; // first decrypt stays in flight
+    const select1 = h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+
+    // Supersede it before it resolves (e.g. a second region switch). Zero
+    // candidates — this leg never touches the cache either way, so it can't
+    // mask the thing under test.
+    h.respondPackets = () => Promise.resolve({ packets: [] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+
+    // The first (now-stale) fetch resolves with one real decryptable
+    // candidate. If the isStale guard were missing, this would write
+    // { messages: [stale message], count: 1, lastTimestamp: T } to the
+    // cache.
+    pending.resolve({ packets: [encryptedPacket('pkt-stale', '2020-01-01T00:00:00Z', staleMsg)] });
+    await select1;
+    await flush(300);
+
+    // A later select sees exactly ONE candidate too (same count a poisoned
+    // cache entry would hold) with the SAME timestamp as the stale one —
+    // not a different message rendered via onCacheHit, but specifically the
+    // delta path's own "0 candidates newer than lastTs" short-circuit
+    // (fetchAndDecryptChannel, the `newCandidates.length === 0` branch),
+    // which trusts the cache's count/lastTs and returns its cached messages
+    // outright. That only reaches the real candidate instead of the stale
+    // one if the cache was never poisoned in the first place (cachedCount
+    // stays 0, so this fetch takes the full-decrypt path instead of delta).
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-real', '2020-01-01T00:00:00Z', realMsg)] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    const texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('stale message') === -1, 'a stale decrypt must not have poisoned the cache (got ' + JSON.stringify(texts) + ')');
+    assert.ok(texts.indexOf('real message') !== -1, 'the real candidate must be decrypted and shown (got ' + JSON.stringify(texts) + ')');
+  });
+
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });
