@@ -711,6 +711,34 @@ async function test(name, fn) {
     assert.strictEqual(h.state().channels.filter((c) => c.hash === PSK_HASH).length, 1);
   });
 
+  // ── Nit: a brand-new WS-pushed channel row must be _wsSeq-stamped like an
+  // existing row is, or its freshly-live activity loses to a concurrent,
+  // older snapshot once mergeClientChannelState() can no longer tell it's
+  // newer than the request.
+  await test('a live message for a brand-new channel is _wsSeq-stamped and wins over a concurrent older snapshot', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    const pending = deferred();
+    h.respondChannels = () => pending.promise;
+    const load = h.w._channelsLoadChannelsForTest(true);
+    await flush();
+    assert.strictEqual(h.row('brandnew'), undefined, 'precondition: channel does not exist yet');
+    h.liveMessage('brandnew', 'Carol', 'hello');
+    assert.ok(h.row('brandnew'), 'WS path must create the row immediately');
+    pending.resolve({ channels: [serverChannel('brandnew', {
+      messageCount: 1,
+      lastActivity: new RealDate(RealDate.now() - 100000).toISOString(),
+      lastSender: 'Old',
+      lastMessage: 'stale snapshot',
+    })] });
+    await load;
+    const row = h.row('brandnew');
+    assert.strictEqual(row.lastMessage, 'hello', 'live message must win over an older concurrent snapshot (got ' + row.lastMessage + ')');
+    assert.strictEqual(row.lastSender, 'Carol');
+    assert.strictEqual(row.messageCount, 1);
+  });
+
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });
