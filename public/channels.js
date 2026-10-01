@@ -307,6 +307,22 @@
 
   function reconcileSelectionAfterChannelRefresh() {
     if (!selectedHash || channels.some(ch => ch.hash === selectedHash)) return false;
+    // F3 (#152 follow-up): a PSK whose name collides with a server-known or
+    // newly-approved shared channel is matched by name in mergeUserChannels()
+    // instead of getting its own user:* row, so the user:* hash this
+    // conversation opened under disappears from the fresh list even though
+    // the conversation is still live. Remap to the row mergeUserChannels()
+    // annotated instead of closing the conversation.
+    if (selectedHash.indexOf('user:') === 0) {
+      var pskName = selectedHash.substring(5);
+      var remapped = channels.find(function (ch) { return ch.userAdded === true && ch.name === pskName; });
+      if (remapped) {
+        selectedHash = remapped.hash;
+        history.replaceState(null, '', `#/channels/${encodeURIComponent(selectedHash)}`);
+        renderChannelList();
+        return false;
+      }
+    }
     selectedHash = null;
     messages = [];
     history.replaceState(null, '', '#/channels');

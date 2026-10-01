@@ -632,6 +632,65 @@ async function test(name, fn) {
     assert.ok(!/ch-section-mychannels/.test(h.elements.chList.innerHTML) || !/Ops room/.test(h.elements.chList.innerHTML), 'My Channels must not show the removed label');
   });
 
+  // ── F3: a PSK whose name collides with a server-known or newly-approved
+  // shared channel is matched by name in mergeUserChannels() instead of
+  // getting its own user:* row, so the user:* hash the conversation opened
+  // under disappears from the fresh list even though the conversation is
+  // still live. reconcileSelectionAfterChannelRefresh() must remap to the
+  // row mergeUserChannels() annotated instead of closing the conversation.
+  await test('F3 (region variant): a PSK is remapped, not closed, when a region switch reveals a same-named server channel', async () => {
+    const h = makeHarness();
+    const NAME = '#chat';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, 'aa'.repeat(16), 'Chat');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    h.setState({ selectedHash: HASH, messages: [{ sender: 'Alice', text: 'hello', timestamp: '2026-01-01T00:00:00Z', packetHash: 'm1' }] });
+    assert.ok(h.row(HASH), 'precondition: user:* row exists before the refresh');
+
+    // The new region's snapshot already knows about #chat as a real server
+    // channel — mergeUserChannels() will name-match it instead of creating
+    // a user:#chat row. Drive loadChannels() directly (what the region
+    // handler calls first) rather than the full region-change handler: a
+    // same-named match isn't `encrypted`, so the handler's own follow-up
+    // would fall through to refreshMessages(), which legitimately clears
+    // messages when the new region has none over REST — a separate,
+    // unrelated behavior this test isn't about.
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel(NAME, { name: NAME })] });
+    await h.w._channelsLoadChannelsForTest(true);
+
+    assert.strictEqual(h.row(HASH), undefined, 'the user:* hash must no longer exist (name-matched instead)');
+    const remapped = h.row(NAME);
+    assert.ok(remapped && remapped.userAdded === true, 'the name-matched row must carry userAdded');
+    assert.strictEqual(h.state().selectedHash, NAME, 'selection must remap to the matched row, not close (got ' + h.state().selectedHash + ')');
+    assert.strictEqual(h.state().messages.length, 1, 'messages must not be cleared by the remap');
+    assert.ok(!h.historyCalls.includes('#/channels'), 'must not route back to #/channels (got ' + JSON.stringify(h.historyCalls) + ')');
+    assert.ok(h.historyCalls[h.historyCalls.length - 1].indexOf(encodeURIComponent(NAME)) !== -1, 'URL must be updated to the matched row (got ' + JSON.stringify(h.historyCalls) + ')');
+  });
+
+  await test('F3 (approval variant): a PSK is remapped, not closed, when approving a shared channel with the same name', async () => {
+    const h = makeHarness();
+    const NAME = '#chat';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, 'bb'.repeat(16), 'Chat');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    h.setState({ messages: [{ sender: 'Alice', text: 'hello', timestamp: '2026-01-01T00:00:00Z', packetHash: 'm1' }] });
+
+    h.respondChannels = () => Promise.resolve({ channels: [], approvedChannels: [{ hash: NAME, name: NAME }] });
+    assert.strictEqual(typeof h.approvedCallback, 'function', 'init() must mount ChannelProposals with onApproved');
+    h.approvedCallback();
+    await flush(300);
+
+    assert.strictEqual(h.row(HASH), undefined, 'the user:* hash must no longer exist (name-matched instead)');
+    const remapped = h.row(NAME);
+    assert.ok(remapped && remapped.userAdded === true, 'the name-matched row must carry userAdded');
+    assert.strictEqual(h.state().selectedHash, NAME, 'selection must remap on approval too (got ' + h.state().selectedHash + ')');
+    assert.strictEqual(h.state().messages.length, 1, 'messages must not be cleared by the remap');
+  });
+
   // init() keeps its own mergeUserChannels()/render after loadChannels():
   // a no-op after a successful load, but the only thing that lists My
   // Channels when /channels fails.
