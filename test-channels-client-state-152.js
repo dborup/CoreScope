@@ -578,12 +578,17 @@ async function test(name, fn) {
     out.forEach((o, i) => { assert.notStrictEqual(o, fresh[i], 'rows must be copies'); assert.notStrictEqual(o, prev[i]); });
     assert.deepStrictEqual(out.map((o) => o.hash), ['public', PSK_HASH], 'no resurrected rows, fresh order kept');
     assert.strictEqual(out[0].unread, 0, 'explicit 0 carried');
-    assert.strictEqual(out[0].userAdded, true);
-    assert.strictEqual(out[0].userLabel, 'Pub');
+    // F2 (#152 follow-up): userAdded/userLabel are NOT carried from prev —
+    // mergeUserChannels() (run before this, on the same fresh list) is the
+    // sole source now, so storage stays authoritative. A stale prev value
+    // (here simulating an in-memory row a remove-handler forgot to clear)
+    // must never leak onto the merged row.
+    assert.strictEqual(out[0].userAdded, undefined, 'userAdded must not be carried from prev');
+    assert.strictEqual(out[0].userLabel, undefined, 'userLabel must not be carried from prev');
     assert.strictEqual(out[0].lastMessage, 'fresh', 'stamp not newer than request start → snapshot activity wins');
     assert.strictEqual(out[0].messageCount, 5);
     assert.strictEqual(out[1].unread, 2);
-    assert.strictEqual(out[1].userLabel, 'Team');
+    assert.strictEqual(out[1].userLabel, '', 'fresh already set this (by mergeUserChannels in the real pipeline); merge must not override it from prev');
     assert.strictEqual(out[1].lastMessage, 'preview', 'client-only row keeps its preview');
     const newer = merge(fresh, prev, 2);
     assert.strictEqual(newer[0].lastMessage, 'stale', 'stamp newer than request start → live activity wins');
@@ -595,6 +600,36 @@ async function test(name, fn) {
     const noPrev = merge(fresh, null, 0);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(noPrev)), JSON.parse(freshCopy));
     assert.notStrictEqual(noPrev[0], fresh[0]);
+  });
+
+  // ── F2: storage must be authoritative for userAdded/userLabel. A removed
+  // key's label must not resurrect across refreshes (regression for the
+  // remove-handler leaving ch.userLabel set, and mergeClientChannelState
+  // carrying it forward from the in-memory previous list).
+  await test('F2: a removed key\'s label and My Channels row do not resurrect across two refreshes', async () => {
+    const h = makeHarness();
+    h.storeKey('#ops', 'aa'.repeat(16), 'Ops room');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('#ops', { name: '#ops' })] });
+    await h.init();
+    const ops = h.row('#ops');
+    assert.ok(ops && ops.userAdded === true && ops.userLabel === 'Ops room', 'precondition: key+label present');
+
+    // Remove the key through the same handler the UI uses (server-known
+    // channel branch: unmark userAdded, keep the row). removeUserChannelKey
+    // itself calls ChannelDecrypt.removeKey(), so don't double-remove.
+    h.w._channelsRemoveKeyHandlerForTest('#ops');
+
+    const afterRemove = h.row('#ops');
+    assert.strictEqual(afterRemove.userAdded, false, 'userAdded cleared immediately by the remove handler');
+    assert.ok(!afterRemove.userLabel, 'userLabel must be cleared immediately by the remove handler (got ' + JSON.stringify(afterRemove.userLabel) + ')');
+
+    for (let i = 0; i < 2; i++) {
+      await h.w._channelsLoadChannelsForTest(true);
+      const row = h.row('#ops');
+      assert.ok(!row.userLabel, 'refresh ' + (i + 1) + ': label must not resurrect (got ' + JSON.stringify(row.userLabel) + ')');
+      assert.notStrictEqual(row.userAdded, true, 'refresh ' + (i + 1) + ': My Channels membership must not resurrect');
+    }
+    assert.ok(!/ch-section-mychannels/.test(h.elements.chList.innerHTML) || !/Ops room/.test(h.elements.chList.innerHTML), 'My Channels must not show the removed label');
   });
 
   // init() keeps its own mergeUserChannels()/render after loadChannels():

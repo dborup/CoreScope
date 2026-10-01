@@ -212,9 +212,11 @@
       if (!prev) return out;
       // Carried when present, including an explicit 0: undefined is not "read".
       if (Object.prototype.hasOwnProperty.call(prev, 'unread')) out.unread = prev.unread;
-      if (prev.userAdded === true) out.userAdded = true;
-      // A label mergeUserChannels() just read from storage wins over the old one.
-      if (prev.userLabel && !out.userLabel) out.userLabel = prev.userLabel;
+      // userAdded/userLabel are NOT carried from prev (F2, #152 follow-up):
+      // mergeUserChannels() runs before this, on the same fresh list, and
+      // re-derives both from storage on every load, so storage stays the
+      // single source of truth. Carrying a stale prev value let a removed
+      // key's label (and a stale userAdded) resurrect across a refresh.
       var newerLive = typeof prev._wsSeq === 'number' && prev._wsSeq > seqAtRequestStart;
       if (newerLive || isClientOnlyChannel(out)) {
         // Moved together: a sender without its message reads as another message.
@@ -726,6 +728,49 @@
         });
       }
     }
+  }
+
+  // Removes a user-stored channel key (and its label) and updates the
+  // channel list/selection to match. Extracted from the remove-button click
+  // handler so it's directly testable; the handler still owns the confirm()
+  // gate.
+  function removeUserChannelKey(channelHash) {
+    if (!channelHash) return;
+    var ch = channels.find(function (c) { return c.hash === channelHash; });
+    var chName = channelHash.startsWith('user:')
+      ? channelHash.substring(5)
+      : (ch && ch.name) || channelHash;
+    ChannelDecrypt.removeKey(chName);
+    if (channelHash.startsWith('user:')) {
+      // Pure user-added channel — drop from the list entirely.
+      channels = channels.filter(function (c) { return c.hash !== channelHash; });
+      if (selectedHash === channelHash) {
+        selectedHash = null;
+        messages = [];
+        history.replaceState(null, '', '#/channels');
+        var msgEl2 = document.getElementById('chMessages');
+        if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
+        var header2 = document.getElementById('chHeader');
+        if (header2) header2.querySelector('.ch-header-text').textContent = 'Select a channel';
+      }
+    } else if (ch) {
+      // Server-known channel: keep the row, just unmark as user-added so
+      // the close button disappears until they re-add a key. // EMOJI-OK: prior glyph reference
+      ch.userAdded = false;
+      // F2 (#152 follow-up): also clear the label now. mergeClientChannelState()
+      // no longer carries userLabel from the previous list either way, but
+      // clearing it here means the UI stops showing it immediately instead
+      // of waiting for the next channel-list refresh.
+      delete ch.userLabel;
+      // If this was the selected channel, clear decrypted messages since
+      // the key is gone — they can't be re-decrypted without re-adding it.
+      if (selectedHash === channelHash) {
+        messages = [];
+        var msgEl2 = document.getElementById('chMessages');
+        if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Key removed — add a key to decrypt messages</div>';
+      }
+    }
+    renderChannelList();
   }
 
   // Fetch and decrypt GRP_TXT packets client-side (M5: delta fetch + cache)
@@ -1498,37 +1543,12 @@
         // The localStorage key is the channel name. For user:-prefixed entries
         // strip the prefix; for server-known channels look up the channel
         // object so we use its display name (the hash itself isn't the key).
-        var ch = channels.find(function (c) { return c.hash === channelHash; });
-        var chName = channelHash.startsWith('user:')
+        var confirmCh = channels.find(function (c) { return c.hash === channelHash; });
+        var confirmName = channelHash.startsWith('user:')
           ? channelHash.substring(5)
-          : (ch && ch.name) || channelHash;
-        if (!confirm('Remove channel "' + chName + '"?\n\nThis will permanently remove the key from this browser and clear cached messages. You will need to re-enter the key to decrypt this channel again.')) return;
-        ChannelDecrypt.removeKey(chName);
-        if (channelHash.startsWith('user:')) {
-          // Pure user-added channel — drop from the list entirely.
-          channels = channels.filter(function (c) { return c.hash !== channelHash; });
-          if (selectedHash === channelHash) {
-            selectedHash = null;
-            messages = [];
-            history.replaceState(null, '', '#/channels');
-            var msgEl2 = document.getElementById('chMessages');
-            if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
-            var header2 = document.getElementById('chHeader');
-            if (header2) header2.querySelector('.ch-header-text').textContent = 'Select a channel';
-          }
-        } else if (ch) {
-          // Server-known channel: keep the row, just unmark as user-added so
-          // the close button disappears until they re-add a key. // EMOJI-OK: prior glyph reference
-          ch.userAdded = false;
-          // If this was the selected channel, clear decrypted messages since
-          // the key is gone — they can't be re-decrypted without re-adding it.
-          if (selectedHash === channelHash) {
-            messages = [];
-            var msgEl2 = document.getElementById('chMessages');
-            if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Key removed — add a key to decrypt messages</div>';
-          }
-        }
-        renderChannelList();
+          : (confirmCh && confirmCh.name) || channelHash;
+        if (!confirm('Remove channel "' + confirmName + '"?\n\nThis will permanently remove the key from this browser and clear cached messages. You will need to re-enter the key to decrypt this channel again.')) return;
+        removeUserChannelKey(channelHash);
         return;
       }
       // Color clear button — remove color without opening picker (#681)
@@ -2690,6 +2710,7 @@
   window._channelsBeginMessageRequestForTest = beginMessageRequest;
   window._channelsIsStaleMessageRequestForTest = isStaleMessageRequest;
   window._channelsReconcileSelectionForTest = reconcileSelectionAfterChannelRefresh;
+  window._channelsRemoveKeyHandlerForTest = removeUserChannelKey;
   window._channelsGetStateForTest = function () {
     return { channels: channels, messages: messages, selectedHash: selectedHash };
   };
