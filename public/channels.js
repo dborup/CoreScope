@@ -236,6 +236,14 @@
   let observerIataById = {};
   let observerIataByName = {};
   let messageRequestId = 0;
+  // N1 (#152 follow-up): true while a decryptAndRender() fetch for the
+  // current selection is in flight (set/cleared around that one call).
+  // Lets reconcileSelectionAfterChannelRefresh() know, when it remaps a
+  // user:* selection mid-decrypt, that it must restart loading for the
+  // remapped hash — otherwise the in-flight request's own staleness check
+  // discards its result once selectedHash changes, and nothing else ever
+  // re-fetches, leaving the pane stuck on "Decrypting messages…".
+  let messageLoadPending = false;
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
 
   function getSelectedRegionsSnapshot() {
@@ -317,9 +325,18 @@
       var pskName = selectedHash.substring(5);
       var remapped = channels.find(function (ch) { return ch.userAdded === true && ch.name === pskName; });
       if (remapped) {
+        // N1 (#152 follow-up): if a decrypt for the old hash was still in
+        // flight at the moment of this remap, it will discard its own
+        // result (isStaleMessageRequest() sees selectedHash change under
+        // it) and nothing else ever restarts the fetch — the pane would be
+        // stuck on "Decrypting messages…" forever. Restart loading for the
+        // remapped hash in that case. A quiet remap (no decrypt in flight)
+        // still leaves messages untouched, as before.
+        var hadPendingDecrypt = messageLoadPending;
         selectedHash = remapped.hash;
         history.replaceState(null, '', `#/channels/${encodeURIComponent(selectedHash)}`);
         renderChannelList();
+        if (hadPendingDecrypt) selectChannel(selectedHash);
         return false;
       }
     }
@@ -2417,39 +2434,48 @@
     // Shared helper: fetch, decrypt, and render messages for a channel key (M5: cache-first)
     async function decryptAndRender(keyHex, channelHashByte, channelName) {
       msgEl.innerHTML = '<div class="ch-loading">Decrypting messages…</div>';
-      var result = await fetchAndDecryptChannel(keyHex, channelHashByte, channelName, {
-        onCacheHit: function (cachedMsgs) {
-          // M5: Render cached messages immediately while delta fetch runs.
-          // #1498 round-1 finding #4: this site is a REST replacement
-          // path too — it must merge any WS-pushed messages instead of
-          // stomping them, same as the other two sites below.
-          messages = mergeWsAppendedIntoRest(messages, cachedMsgs || []);
-          if (messages.length > 0) {
-            header.querySelector('.ch-header-text').textContent = name + ' — ' + messages.length + ' messages (cached)';
-            renderMessages();
-            scrollToBottom();
+      // N1 (#152 follow-up): mark a decrypt as pending for the current
+      // selection so reconcileSelectionAfterChannelRefresh() can tell, when
+      // it remaps a selection mid-decrypt, that it must restart loading for
+      // the remapped hash instead of leaving the pane stuck on this message.
+      messageLoadPending = true;
+      try {
+        var result = await fetchAndDecryptChannel(keyHex, channelHashByte, channelName, {
+          onCacheHit: function (cachedMsgs) {
+            // M5: Render cached messages immediately while delta fetch runs.
+            // #1498 round-1 finding #4: this site is a REST replacement
+            // path too — it must merge any WS-pushed messages instead of
+            // stomping them, same as the other two sites below.
+            messages = mergeWsAppendedIntoRest(messages, cachedMsgs || []);
+            if (messages.length > 0) {
+              header.querySelector('.ch-header-text').textContent = name + ' — ' + messages.length + ' messages (cached)';
+              renderMessages();
+              scrollToBottom();
+            }
           }
+        });
+        if (isStaleMessageRequest(request)) return { stale: true };
+        if (result.wrongKey) {
+          msgEl.innerHTML = '<div class="ch-empty ch-wrong-key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Key does not match — no messages could be decrypted</div>';
+          return { wrongKey: true, messageCount: 0 };
         }
-      });
-      if (isStaleMessageRequest(request)) return { stale: true };
-      if (result.wrongKey) {
-        msgEl.innerHTML = '<div class="ch-empty ch-wrong-key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg> Key does not match — no messages could be decrypted</div>';
-        return { wrongKey: true, messageCount: 0 };
+        if (result.error) {
+          msgEl.innerHTML = '<div class="ch-empty">' + escapeHtml(result.error) + '</div>';
+          return { error: result.error, messageCount: 0 };
+        }
+        // #1498: merge WS-pushed messages that landed during the decrypt fetch.
+        messages = mergeWsAppendedIntoRest(messages, result.messages || []);
+        if (messages.length === 0) {
+          msgEl.innerHTML = '<div class="ch-empty">No encrypted messages found for this channel</div>';
+        } else {
+          header.querySelector('.ch-header-text').textContent = `${name} — ${messages.length} messages (decrypted)`;
+          renderMessages();
+          scrollToBottom();
+        }
+        return { messageCount: messages.length };
+      } finally {
+        messageLoadPending = false;
       }
-      if (result.error) {
-        msgEl.innerHTML = '<div class="ch-empty">' + escapeHtml(result.error) + '</div>';
-        return { error: result.error, messageCount: 0 };
-      }
-      // #1498: merge WS-pushed messages that landed during the decrypt fetch.
-      messages = mergeWsAppendedIntoRest(messages, result.messages || []);
-      if (messages.length === 0) {
-        msgEl.innerHTML = '<div class="ch-empty">No encrypted messages found for this channel</div>';
-      } else {
-        header.querySelector('.ch-header-text').textContent = `${name} — ${messages.length} messages (decrypted)`;
-        renderMessages();
-        scrollToBottom();
-      }
-      return { messageCount: messages.length };
     }
 
     // Client-side decryption path (#725 M2)

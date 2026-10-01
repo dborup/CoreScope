@@ -739,6 +739,68 @@ async function test(name, fn) {
     assert.strictEqual(row.messageCount, 1);
   });
 
+  // ── N1 (#153 review round 3, P3): a remap that happens while a decrypt is
+  // still in flight must restart loading for the remapped channel, not
+  // leave the pane stuck on "Decrypting messages…". The in-flight request's
+  // own staleness check (isStaleMessageRequest — selectedHash changed under
+  // it) silently discards its result once reconcile remaps the selection,
+  // and nothing else used to restart the fetch.
+  await test('N1: a remap mid-decrypt restarts loading for the remapped channel', async () => {
+    const h = makeHarness();
+    const KEY = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1';
+    const NAME = '#n1chat';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'N1 Chat');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+
+    const msg = encryptChannelMessage(KEY, 'Alice', 'remapped channel message');
+
+    const pending = deferred();
+    h.respondPackets = () => pending.promise;
+    const select = h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    assert.ok(/Decrypting/.test(h.elements.chMessages.innerHTML), 'pane must show "Decrypting…" while the fetch is in flight');
+
+    // #n1chat becomes server-known (e.g. approved) in the next refresh —
+    // mergeUserChannels() name-matches it instead of keeping a user:* row,
+    // so reconcile remaps the open selection to it mid-decrypt.
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-remap', '2026-01-01T00:00:00Z', msg)] });
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel(NAME, { name: NAME })] });
+    await h.w._channelsLoadChannelsForTest(true);
+    await flush(300);
+
+    // The original (now-stale) fetch finally resolves too; it must not
+    // clobber the remapped channel's freshly-loaded view.
+    pending.resolve({ packets: [] });
+    await select;
+    await flush(300);
+
+    assert.strictEqual(h.state().selectedHash, NAME, 'selection must have remapped to the server-known hash');
+    const msgEl = h.elements.chMessages;
+    assert.ok(!/Decrypting/.test(msgEl.innerHTML), 'pane must not be stuck on "Decrypting…" (got ' + msgEl.innerHTML.slice(0, 200) + ')');
+    const texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('remapped channel message') !== -1, 'the remapped channel must actually load its messages (got ' + JSON.stringify(texts) + ')');
+  });
+
+  await test('N1: a quiet remap (no decrypt in flight) still leaves messages untouched', async () => {
+    // Regression guard for the F3 (round 2) invariant: only restart loading
+    // when a decrypt was genuinely pending at remap time.
+    const h = makeHarness();
+    const NAME = '#n1quiet';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, 'cc'.repeat(16), 'Quiet');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    h.setState({ selectedHash: HASH, messages: [{ sender: 'Alice', text: 'already loaded', timestamp: '2026-01-01T00:00:00Z', packetHash: 'm1' }] });
+
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel(NAME, { name: NAME })] });
+    await h.w._channelsLoadChannelsForTest(true);
+
+    assert.strictEqual(h.state().selectedHash, NAME, 'selection must remap');
+    assert.strictEqual(h.state().messages.length, 1, 'messages must not be cleared by a quiet remap (got ' + JSON.stringify(h.state().messages) + ')');
+  });
+
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });
