@@ -275,6 +275,45 @@ function cacheEntry(text, ts) {
   };
 }
 
+// channel-decrypt.js alone, over a localStorage that enforces a quota the
+// way browsers do: a setItem() that would push the total stored characters
+// past `quota` throws QuotaExceededError and leaves the old value in place.
+function makeDecryptSandbox(opts) {
+  opts = opts || {};
+  const sb = { storage: Object.assign({}, opts.storage || {}), quota: opts.quota || Infinity };
+  sb.used = (exceptKey) => Object.keys(sb.storage).reduce((n, k) => n + (k === exceptKey ? 0 : k.length + sb.storage[k].length), 0);
+  const ctx = {
+    localStorage: {
+      getItem: (k) => Object.prototype.hasOwnProperty.call(sb.storage, k) ? sb.storage[k] : null,
+      setItem: (k, v) => {
+        v = String(v);
+        if (sb.used(k) + k.length + v.length > sb.quota) {
+          const e = new Error('The quota has been exceeded.');
+          e.name = 'QuotaExceededError';
+          throw e;
+        }
+        sb.storage[k] = v;
+      },
+      removeItem: (k) => { delete sb.storage[k]; },
+    },
+    console, Date, JSON, Math, String, Number, Object, Array, RegExp, Error, Promise, parseInt,
+    crypto: webcrypto, TextEncoder, TextDecoder, Uint8Array,
+  };
+  ctx.window = ctx;
+  ctx.self = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public/channel-decrypt.js'), 'utf8'), ctx, { filename: 'public/channel-decrypt.js' });
+  sb.CD = ctx.ChannelDecrypt;
+  sb.raw = () => sb.storage[DECRYPT_CACHE_KEY] || '';
+  sb.keys = () => Object.keys(JSON.parse(sb.raw() || '{}'));
+  return sb;
+}
+// One cached message whose text is `chars` long, so a cache entry
+// serialises to roughly that many characters.
+function bigMessages(chars, tag) {
+  return [{ sender: 'S', text: tag + ':' + 'x'.repeat(chars), timestamp: '2026-01-01T00:00:00Z', packetHash: 'h-' + tag }];
+}
+
 function serverChannel(hash, extra) {
   return Object.assign({
     hash,
@@ -984,6 +1023,73 @@ async function test(name, fn) {
     assert.deepStrictEqual(decryptCacheKeys(h).filter((k) => k.indexOf(NAME) === 0), [],
       'Remove must clear every cached region of the channel (got ' + JSON.stringify(decryptCacheKeys(h)) + ')');
     assert.ok(!/plaintext-r4ui/.test(rawDecryptCache(h)), 'no decrypted plaintext may remain in localStorage after Remove');
+  });
+
+  // ── R4-2 (#153 review round 4, P3): the decrypt cache was only capped by
+  // entry count. One entry can be ~365 KiB (1000 messages) against a
+  // ~5.2M-character localStorage quota, so a full cache made storeKey() and
+  // the labels fail silently. It is now kept under a fixed character budget,
+  // evicting the least recently used entries.
+  await test('R4-2: the decrypt cache stays under its 1.5M-character budget, evicting least recently written entries first', async () => {
+    const sb = makeDecryptSandbox();
+    for (let i = 1; i <= 5; i++) sb.CD.setCache('budget|' + i, bigMessages(400000, 'b' + i), 'ts', 1);
+    assert.ok(sb.raw().length <= 1500000, 'cache blob must stay within 1.5M characters (got ' + sb.raw().length + ')');
+    assert.deepStrictEqual(sb.keys().sort(), ['budget|3', 'budget|4', 'budget|5'],
+      'the oldest entries must be evicted first, the newest kept (got ' + JSON.stringify(sb.keys()) + ')');
+    assert.ok(/b5:/.test(sb.CD.getCache('budget|5').messages[0].text), 'the entry just written must be readable');
+  });
+
+  await test('R4-2: a recently read entry outlives an older unread one', async () => {
+    const sb = makeDecryptSandbox();
+    for (let i = 1; i <= 3; i++) sb.CD.setCache('lru|' + i, bigMessages(400000, 'l' + i), 'ts', 1);
+    assert.ok(sb.CD.getCache('lru|1'), 'precondition: lru|1 cached');
+    sb.CD.setCache('lru|4', bigMessages(400000, 'l4'), 'ts', 1);
+    assert.deepStrictEqual(sb.keys().sort(), ['lru|1', 'lru|3', 'lru|4'],
+      'lru|2 (oldest use) must go, not the just-read lru|1 (got ' + JSON.stringify(sb.keys()) + ')');
+  });
+
+  await test('R4-2: a QuotaExceededError evicts and retries, and an entry that can never fit leaves a valid blob', async () => {
+    const sb = makeDecryptSandbox({ quota: 1000000 });
+    for (let i = 1; i <= 3; i++) sb.CD.setCache('quota|' + i, bigMessages(300000, 'q' + i), 'ts', 1);
+    assert.deepStrictEqual(sb.keys().sort(), ['quota|1', 'quota|2', 'quota|3'], 'precondition: 900K fits the quota');
+    sb.CD.setCache('quota|4', bigMessages(300000, 'q4'), 'ts', 1);
+    assert.deepStrictEqual(sb.keys().sort(), ['quota|2', 'quota|3', 'quota|4'],
+      'a quota failure must evict the oldest entry and retry (got ' + JSON.stringify(sb.keys()) + ')');
+
+    sb.CD.setCache('quota|huge', bigMessages(1100000, 'qh'), 'ts', 1);
+    const raw = sb.storage[DECRYPT_CACHE_KEY];
+    if (raw !== undefined) assert.doesNotThrow(() => JSON.parse(raw), 'the cache blob must never be left half-written');
+    assert.strictEqual(sb.CD.getCache('quota|huge'), null, 'an entry larger than the quota is not cached');
+  });
+
+  await test('R4-2: storeKey and labels still save when the decrypt cache has filled the quota', async () => {
+    const sb = makeDecryptSandbox();
+    for (let i = 1; i <= 3; i++) sb.CD.setCache('full|' + i, bigMessages(300000, 'f' + i), 'ts', 1);
+    sb.quota = sb.used() + 10; // localStorage is now full
+    const KEY = '0123456789abcdef0123456789abcdef';
+    sb.CD.storeKey('psk:quotakey', KEY, 'Quota Label');
+    assert.strictEqual(sb.CD.getKeys()['psk:quotakey'], KEY, 'the key must be saved, evicting decrypt cache to make room');
+    assert.strictEqual(sb.CD.getLabel('psk:quotakey'), 'Quota Label', 'the label must be saved too');
+    sb.CD.saveLabel('psk:quotakey', 'Renamed ' + 'L'.repeat(200));
+    assert.strictEqual(sb.CD.getLabel('psk:quotakey'), 'Renamed ' + 'L'.repeat(200), 'a later label change must also make room');
+    assert.ok(sb.keys().length < 3, 'room must come from the decrypt cache (got ' + JSON.stringify(sb.keys()) + ')');
+  });
+
+  await test('R4-2: pre-N2 cache entries (no "|" region part) are dropped once, on first use after upgrade', async () => {
+    const legacy = {};
+    legacy['#oldchan'] = cacheEntry('pre-N2 plaintext');
+    legacy['psk:legacy'] = cacheEntry('pre-N2 psk plaintext');
+    legacy['psk:legacy|SJC'] = cacheEntry('region-scoped text');
+    const sb = makeDecryptSandbox({ storage: { [DECRYPT_CACHE_KEY]: JSON.stringify(legacy) } });
+    assert.strictEqual(sb.CD.getCache('psk:legacy|SJC').messages[0].text, 'region-scoped text', 'region-scoped entries survive');
+    assert.deepStrictEqual(sb.keys(), ['psk:legacy|SJC'], 'pre-N2 entries must be dropped (got ' + JSON.stringify(sb.keys()) + ')');
+    assert.ok(!/pre-N2/.test(sb.raw()), 'no pre-N2 plaintext may remain');
+
+    // Only once: an entry written after the migration (the old public
+    // setCache/cacheMessages API still accepts any key) survives a reload.
+    sb.CD.setCache('written-later', [{ text: 'kept' }], 'ts', 1);
+    const reloaded = makeDecryptSandbox({ storage: sb.storage });
+    assert.ok(reloaded.CD.getCache('written-later'), 'the migration must not run again on the next page load');
   });
 
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
