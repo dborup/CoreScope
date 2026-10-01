@@ -235,17 +235,11 @@ func (s *PacketStore) computeRepeaterUsefulnessScoreMap() map[string]float64 {
 		return out
 	}
 	denom := float64(totalNonAdvert)
+	seen := make(map[*StoreTx]struct{}, 64)
 	for key, list := range s.byPathHop {
-		relayed := 0
-		for _, tx := range list {
-			if tx == nil {
-				continue
-			}
-			if tx.PayloadType != nil && *tx.PayloadType == payloadTypeAdvert {
-				continue
-			}
-			relayed++
-		}
+		seen = boundedScratch(seen)
+		// Distinct transmissions, matching the denominator (#158).
+		relayed := countDistinctNonAdvert(list, seen)
 		if relayed == 0 {
 			continue
 		}

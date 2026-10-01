@@ -11,10 +11,9 @@ import (
 
 // Issue #115: eviction must remove a transmission from every byPathHop
 // bucket it is in. indexResolvedPathHops puts it under resolved full-pubkey
-// keys as well as its raw wire hops, and several observations of one
-// transmission legitimately add it to the same resolved key more than once.
-// removeTxFromPathHopIndex derived its keys from the raw path only and
-// removed one occurrence, so evicted transmissions stayed reachable (relay
+// keys as well as its raw wire hops (once per key since #158, however many
+// observations resolve it). removeTxFromPathHopIndex derived its keys from
+// the raw path only, so evicted transmissions stayed reachable (relay
 // counts, transported scopes, retained memory) until the next full rebuild.
 
 const (
@@ -27,7 +26,7 @@ const (
 
 // evict115Store builds count transmissions (raw path aa,bb,cc), half of them
 // older than the 24h retention, indexed through the real byPathHop helpers:
-// raw hops, and resolved hops from two observations (duplicates).
+// raw hops, and resolved hops from two observations.
 func evict115Store(t testing.TB, count int, resolvedIndex bool) (*PacketStore, []*StoreTx, []*StoreTx) {
 	t.Helper()
 	now := time.Now().UTC()
@@ -52,7 +51,7 @@ func evict115Store(t testing.TB, count int, resolvedIndex bool) (*PacketStore, [
 		if i < count/2 {
 			pks = append(pks, evict115Only)
 		}
-		for obs := 0; obs < 2; obs++ { // two observations -> duplicate entries
+		for obs := 0; obs < 2; obs++ { // two observations, one entry per key (#158)
 			store.indexResolvedPathHops(tx, pks, hopsSeen)
 		}
 	}
@@ -108,15 +107,15 @@ func assertEvictedGone115Partial(t *testing.T, store *PacketStore, old, young []
 	}
 }
 
-// Survivors: 3 raw keys once each, 2 resolved keys twice each.
-const young115Refs = 3 + 2*2
+// Survivors: 3 raw keys and 2 resolved keys, once each (#158).
+const young115Refs = 3 + 2
 
 func TestEvictRemovesRawAndResolvedPathHops_115(t *testing.T) {
 	for _, mode := range []bool{true, false} {
 		t.Run(fmt.Sprintf("useResolvedPathIndex=%v", mode), func(t *testing.T) {
 			store, old, young := evict115Store(t, 40, mode)
-			if n := countIn(store.byPathHop, old[0]); n != 3+3*2 {
-				t.Fatalf("fixture: old tx indexed %d times, want %d", n, 3+3*2)
+			if n := countIn(store.byPathHop, old[0]); n != 3+3 {
+				t.Fatalf("fixture: old tx indexed %d times, want %d", n, 3+3)
 			}
 			if got := store.EvictStale(); got != len(old) {
 				t.Fatalf("evicted %d, want %d", got, len(old))
@@ -134,7 +133,7 @@ func TestEvictRemovesResolvedKeysOfOtherObservationPaths_115(t *testing.T) {
 	tx := old[0]
 	tx.Observations = append(tx.Observations, &StoreObs{ID: 900001, TransmissionID: tx.ID, PathJSON: `["dd"]`})
 	store.indexResolvedPathHops(tx, []string{otherPK}, map[string]bool{})
-	if countIn(store.byPathHop, tx) != 3+3*2+1 {
+	if countIn(store.byPathHop, tx) != 3+3+1 {
 		t.Fatal("fixture: other-path resolved key not indexed")
 	}
 	store.EvictStale()
@@ -163,9 +162,9 @@ func TestMemoryEvictionRemovesResolvedPathHops_115(t *testing.T) {
 		t.Fatal("fixture: memory eviction evicted nothing")
 	}
 	assertEvictedGone115Partial(t, store, before[:n], nil, 0)
-	for _, tx := range before[n : len(before)/2] { // older half not evicted: all 9 refs
-		if got := countIn(store.byPathHop, tx); got != 3+3*2 {
-			t.Fatalf("surviving tx %d has %d entries, want 9", tx.ID, got)
+	for _, tx := range before[n : len(before)/2] { // older half not evicted: all 6 refs
+		if got := countIn(store.byPathHop, tx); got != 3+3 {
+			t.Fatalf("surviving tx %d has %d entries, want 6", tx.ID, got)
 		}
 	}
 }
@@ -226,7 +225,7 @@ func TestRelayStatsConcurrentWithEviction_115(t *testing.T) {
 
 // BenchmarkEvictPathHops_115 evicts the oldest transmissions from a store
 // of n with 3 raw 1-byte hops and 2 resolved hops each (two observations,
-// so 4 resolved entries): a large batch (1% of the store) and a typical
+// 2 resolved entries since #158): a large batch (1% of the store) and a typical
 // one-minute batch (0.01%; eviction runs every minute over 168 h).
 func BenchmarkEvictPathHops_115(b *testing.B) {
 	prev := log.Writer()

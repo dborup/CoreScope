@@ -369,6 +369,77 @@ func TestTrafficShareCountsDistinctTransmissions_158(t *testing.T) {
 	}
 }
 
+// The per-transmission record behind the dedupe holds one hash per relay key
+// of a live transmission: it does not grow with observations, and eviction
+// removes it together with the transmission's byPathHop entries (#115).
+func TestPathHopResolvedRecordBounded_158(t *testing.T) {
+	store, old, young := evict115Store(t, 40, true)
+	hopsSeen := map[string]bool{}
+	for _, tx := range young {
+		for k := 0; k < lateObs158; k++ {
+			store.indexResolvedPathHops(tx, []string{evict115PK1, evict115PK2}, hopsSeen)
+		}
+	}
+	if got := len(store.pathHopResolved); got != len(old)+len(young) {
+		t.Fatalf("record holds %d transmissions, want %d", got, len(old)+len(young))
+	}
+	for _, tx := range young {
+		if got := len(store.pathHopResolved[tx]); got != 2 {
+			t.Fatalf("tx %d record holds %d keys after %d observations, want 2", tx.ID, got, 2+lateObs158)
+		}
+	}
+	store.EvictStale()
+	for _, tx := range old {
+		if _, ok := store.pathHopResolved[tx]; ok {
+			t.Fatalf("evicted tx %d is still in the indexed-key record", tx.ID)
+		}
+	}
+	if got := len(store.pathHopResolved); got != len(young) {
+		t.Fatalf("record holds %d transmissions after eviction, want %d", got, len(young))
+	}
+	assertEvictedGone115(t, store, old, young, young115Refs)
+}
+
+// A rebuild keeps the record of live transmissions (their resolved entries
+// are carried over), so observations after it still add nothing; it drops
+// the record of transmissions that are no longer in the store.
+func TestPathHopResolvedRecordAcrossRebuild_158(t *testing.T) {
+	store, _, young := evict115Store(t, 40, true)
+	gone := store.packets[0]
+	store.packets = store.packets[1:]
+	delete(store.byTxID, gone.ID)
+	delete(store.byHash, gone.Hash)
+	store.buildPathHopIndex()
+	if _, ok := store.pathHopResolved[gone]; ok {
+		t.Fatal("rebuild kept the record of a transmission no longer in the store")
+	}
+	hopsSeen := map[string]bool{}
+	for _, tx := range young {
+		store.indexResolvedPathHops(tx, []string{evict115PK1, evict115PK2}, hopsSeen)
+		if n := countIn(store.byPathHop, tx); n != young115Refs {
+			t.Fatalf("tx %d has %d entries after a rebuild and another observation, want %d", tx.ID, n, young115Refs)
+		}
+	}
+}
+
+// Restart: Load indexes every persisted observation and rebuilds the index;
+// a live observation after that must not add the transmission again.
+func TestPathHopIndexOncePerTx_AfterLoad_158(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.conn.Close()
+	seed158(t, db, observerCount158)
+	base := time.Now().UTC().Add(-30 * time.Minute)
+	insertTx158(t, db, 0, base)
+	for o := 1; o < observerCount158; o++ {
+		insertObs158(t, db, 0, o, base.Add(time.Duration(o)*time.Second), true)
+	}
+	store := loadedStore158(t, db)
+	since := maxObsID158(t, db)
+	insertObs158(t, db, 0, observerCount158, base.Add(time.Minute), false)
+	store.IngestNewObservations(since, 100)
+	assertOncePerRelay158(t, store, 0)
+}
+
 // duplicateFullKeyEntries158 reproduces the pre-#158 index shape: every
 // transmission in a full-pubkey bucket is present `extra` more times.
 func duplicateFullKeyEntries158(store *PacketStore, extra int) {
