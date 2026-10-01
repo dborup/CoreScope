@@ -240,3 +240,109 @@ func TestIngestLivenessKeepsChosenNames_118(t *testing.T) {
 		}
 	}
 }
+
+// healthzLiveness118 serves /api/healthz and returns the raw body and its
+// ingest_liveness as key -> lastReceiptUnix.
+func healthzLiveness118(t *testing.T) (string, map[string]int64) {
+	t.Helper()
+	resetSourceLivenessCache()
+	t.Cleanup(resetSourceLivenessCache)
+	readiness.Store(1)
+	t.Cleanup(func() { readiness.Store(0) })
+	rec := httptest.NewRecorder()
+	(&Server{store: &PacketStore{}}).handleHealthz(rec, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/healthz: status %d", rec.Code)
+	}
+	var resp struct {
+		IngestLiveness map[string]struct {
+			LastReceiptUnix int64 `json:"lastReceiptUnix"`
+		} `json:"ingest_liveness"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]int64, len(resp.IngestLiveness))
+	for k, v := range resp.IngestLiveness {
+		got[k] = v.LastReceiptUnix
+	}
+	return rec.Body.String(), got
+}
+
+func assertLiveness118(t *testing.T, got, want map[string]int64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("ingest_liveness = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if r, ok := got[k]; !ok || r != v {
+			t.Errorf("ingest_liveness[%q] = %d (present %v), want %d (all: %v)", k, r, ok, v, got)
+		}
+	}
+}
+
+// #118 R1: an ingestor built 2026-06-07..06-12 wrote source_liveness
+// without source_statuses. There is then no raw-broker list, and a raw
+// broker without a scheme as tag must still not reach /api/healthz.
+func TestHealthzMasksBrokerTagsWithoutStatuses_118(t *testing.T) {
+	liveness := map[string]any{
+		"user:secret@host:1883": map[string]int64{"lastReceiptUnix": 1},
+		"mqtt://u:p@h:1883":     map[string]int64{"lastReceiptUnix": 2},
+		"feed":                  map[string]int64{"lastReceiptUnix": 3},
+	}
+	for name, stats := range map[string]map[string]any{
+		"no source_statuses":    {"source_liveness": liveness},
+		"empty source_statuses": {"source_liveness": liveness, "source_statuses": []any{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeStats118(t, stats)
+			body, got := healthzLiveness118(t)
+			for _, bad := range []string{"secret", "u:p", "user:"} {
+				if strings.Contains(body, bad) {
+					t.Errorf("/api/healthz leaks %q: %s", bad, body)
+				}
+			}
+			assertLiveness118(t, got, map[string]int64{"****@host:1883": 1, "mqtt://****@h:1883": 2, "feed": 3})
+		})
+	}
+}
+
+// With source_statuses present the raw-broker list decides, as before: a
+// name the operator chose keeps its '@'.
+func TestHealthzKeepsChosenNamesWithStatuses_118(t *testing.T) {
+	writeStats118(t, map[string]any{
+		"source_statuses": []map[string]string{
+			{"name": "obs@north", "broker": "tcp://north:1883"},
+			{"name": "", "broker": "user:secret@host:1883"},
+		},
+		"source_liveness": map[string]any{
+			"user:secret@host:1883": map[string]int64{"lastReceiptUnix": 1},
+			"mqtt://u:p@h:1883":     map[string]int64{"lastReceiptUnix": 2},
+			"obs@north":             map[string]int64{"lastReceiptUnix": 3},
+		},
+	})
+	body, got := healthzLiveness118(t)
+	for _, bad := range []string{"secret", "u:p", "user:"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("/api/healthz leaks %q: %s", bad, body)
+		}
+	}
+	assertLiveness118(t, got, map[string]int64{"****@host:1883": 1, "mqtt://****@h:1883": 2, "obs@north": 3})
+}
+
+// Without source_statuses, tags that mask to the same value each keep an
+// entry, with " (2)", " (3)".
+func TestHealthzMaskedTagCollisionsWithoutStatuses_118(t *testing.T) {
+	writeStats118(t, map[string]any{"source_liveness": map[string]any{
+		"user:secret@host:1883":  map[string]int64{"lastReceiptUnix": 1},
+		"other:secret@host:1883": map[string]int64{"lastReceiptUnix": 2},
+		"tok3n@host:1883":        map[string]int64{"lastReceiptUnix": 3},
+	}})
+	body, got := healthzLiveness118(t)
+	assertNoSecrets118(t, "/api/healthz", body)
+	if strings.Contains(body, "other:") || strings.Contains(body, "user:") {
+		t.Errorf("/api/healthz leaks a user name: %s", body)
+	}
+	// Sorted order of the raw tags decides the suffixes.
+	assertLiveness118(t, got, map[string]int64{"****@host:1883": 2, "****@host:1883 (2)": 3, "****@host:1883 (3)": 1})
+}
