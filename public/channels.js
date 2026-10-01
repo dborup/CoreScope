@@ -815,10 +815,10 @@
     // decrypted message set depends on which observers the current region
     // filter includes, so a cache entry primed under one region (e.g. "All"
     // or SJC) must never answer a fetch for a different region (e.g. OAK or
-    // MRY) — region order doesn't matter, so sort for a stable key.
+    // MRY). ChannelDecrypt owns the key format so removeKey() can clear
+    // every region of a channel.
     var rp = RegionFilter.getRegionParam();
-    var regionKey = rp ? rp.split(',').filter(Boolean).sort().join(',') : '';
-    var cacheKey = (channelName || String(channelHashByte)) + '|' + regionKey;
+    var cacheKey = ChannelDecrypt.channelCacheKey(channelName || String(channelHashByte), rp);
     // A stale request (superseded by a newer one, or no longer the current
     // selection/region by the time a write below would happen) must not
     // persist its possibly-incomplete evidence into the cache.

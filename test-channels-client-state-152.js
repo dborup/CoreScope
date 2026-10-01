@@ -260,6 +260,21 @@ function makeHarness(opts) {
   return h;
 }
 
+// The decrypt cache exactly as channel-decrypt.js persisted it.
+const DECRYPT_CACHE_KEY = 'corescope_channel_cache';
+function rawDecryptCache(h) {
+  return h.ctx.localStorage.getItem(DECRYPT_CACHE_KEY) || '';
+}
+function decryptCacheKeys(h) {
+  return Object.keys(JSON.parse(rawDecryptCache(h) || '{}'));
+}
+function cacheEntry(text, ts) {
+  return {
+    messages: [{ sender: 'Alice', text, timestamp: ts || '2026-01-01T00:00:00Z', packetHash: 'p-' + text }],
+    lastTimestamp: ts || '2026-01-01T00:00:00Z', count: 1, ts: 1,
+  };
+}
+
 function serverChannel(hash, extra) {
   return Object.assign({
     hash,
@@ -914,6 +929,61 @@ async function test(name, fn) {
     const texts = h.state().messages.map((m) => m.text);
     assert.ok(texts.indexOf('stale message') === -1, 'a stale decrypt must not have poisoned the cache (got ' + JSON.stringify(texts) + ')');
     assert.ok(texts.indexOf('real message') !== -1, 'the real candidate must be decrypted and shown (got ' + JSON.stringify(texts) + ')');
+  });
+
+  // ── R4-1 (#153 review round 4, P2): N2 made the decrypt cache keys
+  // region-scoped ("<channel>|<regions>"), but removeKey() still only
+  // deleted cache["<channel>"], so removing a key left the channel's
+  // decrypted plaintext in localStorage under every region it was viewed in.
+  await test('R4-1: removeKey drops every region-scoped cache entry and the pre-N2 one, keeping a prefix-sharing channel', async () => {
+    const h = makeHarness();
+    const NAME = 'psk:r4rm';
+    const OTHER = 'psk:r4rmx'; // "psk:r4rm" is a prefix of this name
+    h.storeKey(NAME, 'd4'.repeat(16), 'R4 Remove');
+    h.storeKey(OTHER, 'e5'.repeat(16), 'R4 Other');
+    const blob = {};
+    blob[NAME] = cacheEntry('legacy secret');
+    blob[NAME + '|'] = cacheEntry('all-regions secret');
+    blob[NAME + '|SJC'] = cacheEntry('sjc secret');
+    blob[NAME + '|SFO,SJC'] = cacheEntry('sfo-sjc secret');
+    blob[OTHER + '|SJC'] = cacheEntry('other channel text');
+    h.ctx.localStorage.setItem(DECRYPT_CACHE_KEY, JSON.stringify(blob));
+
+    h.removeKey(NAME);
+
+    const keys = decryptCacheKeys(h);
+    assert.deepStrictEqual(keys.filter((k) => k === NAME || k.indexOf(NAME + '|') === 0), [],
+      'no cache entry for the removed channel may survive (got ' + JSON.stringify(keys) + ')');
+    assert.ok(!/secret/.test(rawDecryptCache(h)), 'no plaintext of the removed channel may stay in localStorage');
+    assert.ok(keys.indexOf(OTHER + '|SJC') !== -1, 'a channel whose name merely shares the prefix must keep its cache (got ' + JSON.stringify(keys) + ')');
+    assert.strictEqual(h.w.ChannelDecrypt.getCache(OTHER + '|SJC').messages[0].text, 'other channel text');
+  });
+
+  await test('R4-1: removing a PSK through the channel list clears the plaintext cached by real decrypts in several regions', async () => {
+    const h = makeHarness();
+    const KEY = 'f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6';
+    const NAME = 'psk:r4ui';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'R4 UI');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+
+    const msg = encryptChannelMessage(KEY, 'Alice', 'plaintext-r4ui');
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-r4ui', '2026-01-01T00:00:00Z', msg)] });
+    for (const region of ['SJC', 'SFO,SJC', '']) {
+      h.regionParam = region;
+      await h.w._channelsSelectChannelForTest(HASH);
+      await flush(300);
+    }
+    assert.strictEqual(decryptCacheKeys(h).filter((k) => k.indexOf(NAME + '|') === 0).length, 3,
+      'precondition: three region-scoped entries cached (got ' + JSON.stringify(decryptCacheKeys(h)) + ')');
+    assert.ok(/plaintext-r4ui/.test(rawDecryptCache(h)), 'precondition: plaintext is cached');
+
+    h.w._channelsRemoveKeyHandlerForTest(HASH);
+
+    assert.deepStrictEqual(decryptCacheKeys(h).filter((k) => k.indexOf(NAME) === 0), [],
+      'Remove must clear every cached region of the channel (got ' + JSON.stringify(decryptCacheKeys(h)) + ')');
+    assert.ok(!/plaintext-r4ui/.test(rawDecryptCache(h)), 'no decrypted plaintext may remain in localStorage after Remove');
   });
 
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');

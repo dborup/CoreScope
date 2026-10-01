@@ -354,11 +354,28 @@ window.ChannelDecrypt = (function () {
     try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)); } catch (e) { /* quota */ }
   }
 
-  /** Remove cached messages for a specific channel (by name or hash). */
+  // N2 (#152 follow-up): decrypted messages are cached per channel AND per
+  // region selection, as "<channel>|<sorted regions>" ("<channel>|" for all
+  // regions). Region order doesn't change which observers are included, so
+  // it must not change the key either.
+  var CACHE_REGION_SEP = '|';
+
+  function channelCacheKey(channelName, regionParam) {
+    var regions = regionParam ? String(regionParam).split(',').filter(Boolean).sort().join(',') : '';
+    return channelName + CACHE_REGION_SEP + regions;
+  }
+
+  /**
+   * Remove every cached message set of a channel (by name or hash): each
+   * region-scoped "<channel>|<regions>" entry plus a pre-N2 "<channel>" one.
+   */
   function clearChannelCache(channelKey) {
     try {
       var cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
-      delete cache[channelKey];
+      var prefix = channelKey + CACHE_REGION_SEP;
+      Object.keys(cache).forEach(function (k) {
+        if (k === channelKey || k.indexOf(prefix) === 0) delete cache[k];
+      });
       localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
     } catch (e) { /* quota */ }
   }
@@ -438,6 +455,7 @@ window.ChannelDecrypt = (function () {
     saveLabel: saveLabel,
     getLabel: getLabel,
     getLabels: getLabels,
+    channelCacheKey: channelCacheKey,
     clearChannelCache: clearChannelCache,
     cacheMessages: cacheMessages,
     getCachedMessages: getCachedMessages,

@@ -560,6 +560,39 @@ async function runViewport(browser, vp, base, seed) {
     ok(s.urlHash === '#/channels/' + encodeURIComponent(seed.hash), 'URL must stay on the PSK channel, got ' + s.urlHash);
   });
 
+  // R4-1 (#153 review round 4, P2): the decrypt cache is region-scoped
+  // ("<channel>|<regions>") since N2, but Remove still only cleared the bare
+  // "<channel>" entry, leaving the decrypted plaintext in localStorage.
+  await step(vp.name + ': Remove leaves no decrypted plaintext for the channel in localStorage', async () => {
+    const before = await page.evaluate(() => JSON.stringify(Object.assign({}, localStorage)));
+    ok(before.indexOf(seed.sfo.text) !== -1,
+      'precondition: the SFO decrypt must have cached its plaintext before Remove (localStorage keys: ' +
+      JSON.stringify(await page.evaluate(() => Object.keys(localStorage))) + ')');
+    const btn = page.locator('#chList [data-remove-channel="' + seed.hash + '"]');
+    if (await btn.count()) {
+      page.once('dialog', (d) => d.accept());
+      await btn.click({ timeout: 2000 });
+    } else {
+      // The mobile channel list (.ch-row) has no Remove button yet — a known
+      // gap outside this PR's scope. Call the handler that button invokes
+      // after its confirm(), so mobile still covers what Remove clears.
+      ok(vp.width < 640, 'desktop must render a Remove button for the PSK row');
+      await page.evaluate((hash) => window._channelsRemoveKeyHandlerForTest(hash), seed.hash);
+    }
+    await page.waitForFunction((hash) => !document.querySelector('#chList [data-hash="' + hash + '"]'),
+      seed.hash, { timeout: 8000 });
+    const after = await page.evaluate(() => Object.assign({}, localStorage));
+    for (const k of Object.keys(after)) {
+      for (const text of [seed.sjc.text, seed.sfo.text]) {
+        ok(String(after[k]).indexOf(text) === -1,
+          'localStorage["' + k + '"] still holds plaintext "' + text + '" after Remove: ' + String(after[k]).slice(0, 200));
+      }
+    }
+    const cacheKeys = Object.keys(JSON.parse(after.corescope_channel_cache || '{}'));
+    ok(!cacheKeys.some((k) => k === seed.channelName || k.indexOf(seed.channelName + '|') === 0),
+      'no decrypt-cache entry for ' + seed.channelName + ' may survive Remove, got ' + JSON.stringify(cacheKeys));
+  });
+
   await step(vp.name + ': no uncaught page errors', async () => {
     // "L is not defined" is Leaflet (public/index.html loads it from
     // unpkg.com) failing to load because this test's sandbox has no
