@@ -24,7 +24,36 @@ const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { webcrypto } = require('crypto');
+const nodeCrypto = require('crypto');
+const { webcrypto } = nodeCrypto;
+
+// Encrypts a channel message exactly the way internal/channel/channel.go /
+// public/channel-decrypt.js expect it (see that file's header comment):
+// AES-128-ECB(timestamp(4 LE) + flags(1) + "sender: message" + 0x00, padded
+// to a block boundary) plus an HMAC-SHA256(key + 16 zero bytes) MAC
+// truncated to 2 bytes. Node's built-in `crypto` implements plain AES-128
+// and HMAC-SHA256, so this round-trips through the real (decrypt-only)
+// public/vendor/aes-ecb.js the way a real radio-encrypted packet would.
+function encryptChannelMessage(keyHex, sender, text) {
+  const keyBytes = Buffer.from(keyHex, 'hex');
+  const body = Buffer.from(sender + ': ' + text, 'utf8');
+  const header = Buffer.alloc(5);
+  header.writeUInt32LE(Math.floor(Date.now() / 1000) >>> 0, 0);
+  let plaintext = Buffer.concat([header, body, Buffer.from([0])]);
+  const pad = (16 - (plaintext.length % 16)) % 16;
+  if (pad) plaintext = Buffer.concat([plaintext, Buffer.alloc(pad)]);
+  const cipher = nodeCrypto.createCipheriv('aes-128-ecb', keyBytes, null);
+  cipher.setAutoPadding(false);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const secret = Buffer.concat([keyBytes, Buffer.alloc(16)]);
+  const mac = nodeCrypto.createHmac('sha256', secret).update(ciphertext).digest().slice(0, 2).toString('hex');
+  const channelHash = nodeCrypto.createHash('sha256').update(keyBytes).digest()[0];
+  return { encryptedData: ciphertext.toString('hex'), mac, channelHash };
+}
+
+function encryptedPacket(hash, firstSeen, enc) {
+  return { hash, first_seen: firstSeen, decoded_json: { type: 'GRP_TXT', encryptedData: enc.encryptedData, mac: enc.mac, channelHash: enc.channelHash } };
+}
 
 const RealDate = Date;
 const HOUR = 60 * 60 * 1000;
@@ -95,6 +124,10 @@ function makeHarness(opts) {
     // flight.
     respondChannels: () => Promise.resolve({ channels: [] }),
     channelRequests: [],
+    // Each /packets request (the client-side decrypt fetch) is answered by
+    // h.respondPackets(path); tests replace it to control decrypt timing.
+    respondPackets: () => Promise.resolve({ packets: [] }),
+    packetsRequests: [],
   };
 
   const ctx = {
@@ -158,6 +191,10 @@ function makeHarness(opts) {
     if (p.indexOf('/channels') === 0 && p.indexOf('/messages') === -1) {
       h.channelRequests.push(p);
       return h.respondChannels(p);
+    }
+    if (p.indexOf('/packets') === 0) {
+      h.packetsRequests.push(p);
+      return h.respondPackets(p);
     }
     if (p.indexOf('/observers') === 0) return Promise.resolve({ observers: [] });
     return Promise.resolve({ messages: [], packets: [], channels: [] });
@@ -294,13 +331,73 @@ async function test(name, fn) {
   });
 
   await test('open PSK conversation survives a region change (RegionFilter.onChange handler)', async () => {
-    const { h, messages } = await openPskConversation();
+    const { h } = await openPskConversation();
     h.regionParam = 'CPH';
     assert.strictEqual(typeof h.regionChange, 'function', 'init() must register a region handler');
     h.regionChange();
     await flush();
     assert.ok(h.channelRequests[h.channelRequests.length - 1].indexOf('region=CPH') !== -1, 'region change must refetch with the region');
-    assertConversationOpen(h, messages, 'region change');
+    // F1 (#152 follow-up): an encrypted/PSK selection now re-runs
+    // selectChannel() for the new region (see below) instead of just
+    // refreshMessages() — which has no REST messages to refetch for it — so
+    // unlike a plain server channel its messages are freshly re-decrypted
+    // for the new region (empty here, since the harness's default /packets
+    // response has none), not carried over verbatim. The conversation
+    // itself — selection, URL, My Channels membership — still survives.
+    const s = h.state();
+    assert.strictEqual(s.selectedHash, PSK_HASH, 'region change: PSK selection must survive');
+    assert.ok(!h.historyCalls.includes('#/channels'), 'region change: URL must not be rewritten to #/channels (got ' + JSON.stringify(h.historyCalls) + ')');
+    const row = h.row(PSK_HASH);
+    assert.ok(row && row.userAdded === true, 'region change: PSK row must stay in My Channels');
+    assert.ok(/ch-section-mychannels/.test(h.elements.chList.innerHTML), 'region change: rendered list must contain My Channels');
+  });
+
+  // ── F1: a region switch mid-decrypt must restart decryption, not strand
+  // the pane on "Decrypting messages…" or leave it showing the previous
+  // region's messages. refreshMessages() has nothing to refetch for an
+  // encrypted row (no REST messages exist), so it must hand off to
+  // selectChannel() instead of silently returning.
+  await test('F1: region switch mid-decrypt restarts decryption for the new region', async () => {
+    const h = makeHarness();
+    const KEY = 'f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1';
+    const NAME = 'psk:f1test';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'F1 Team');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+
+    const oldMsg = encryptChannelMessage(KEY, 'Alice', 'old region message');
+    const newMsg = encryptChannelMessage(KEY, 'Bob', 'new region message');
+
+    const pending = deferred();
+    h.respondPackets = () => pending.promise;
+    const select = h.w._channelsSelectChannelForTest(HASH);
+    // selectChannel() awaits ChannelDecrypt.computeChannelHash() (a real
+    // crypto.subtle.digest call) before it even reaches the decrypt-and-set
+    // "Decrypting…" step, which takes more ticks than a plain microtask
+    // flush — give it a generous margin.
+    await flush(300);
+    assert.ok(/Decrypting/.test(h.elements.chMessages.innerHTML), 'pane must show "Decrypting…" while the fetch is in flight');
+
+    // Region changes while the first decrypt's /packets fetch is still
+    // pending. The region handler's loadChannels() + its own /packets
+    // fetch (for the new region) resolve before the stale one does.
+    h.regionParam = 'CPH';
+    h.respondPackets = () => Promise.resolve({ packets: [encryptedPacket('pkt-new', '2026-01-01T00:01:00Z', newMsg)] });
+    h.regionChange();
+    await flush(300);
+
+    // The original (stale) fetch finally resolves, for the OLD region.
+    pending.resolve({ packets: [encryptedPacket('pkt-old', '2026-01-01T00:00:00Z', oldMsg)] });
+    await select;
+    await flush(300);
+
+    const msgEl = h.elements.chMessages;
+    assert.ok(!/Decrypting/.test(msgEl.innerHTML), 'pane must not be stuck on "Decrypting…" (got ' + msgEl.innerHTML.slice(0, 200) + ')');
+    const texts = h.state().messages.map((m) => m.text);
+    assert.ok(texts.indexOf('new region message') !== -1, 'new-region message must be shown (got ' + JSON.stringify(texts) + ')');
+    assert.ok(texts.indexOf('old region message') === -1, 'stale old-region message must not be shown (got ' + JSON.stringify(texts) + ')');
+    assert.strictEqual(h.state().selectedHash, HASH, 'conversation must stay open on the same PSK');
   });
 
   await test('open PSK conversation survives the show-encrypted toggle', async () => {

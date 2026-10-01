@@ -1071,6 +1071,20 @@
     regionChangeHandler = RegionFilter.onChange(function () {
       loadChannels(true).then(async function () {
         if (!selectedHash) return;
+        var selCh = channels.find(function (c) { return c.hash === selectedHash; });
+        if (selCh && selCh.encrypted) {
+          // F1 (#152 follow-up): an encrypted (user:* or key-matched) row has
+          // no REST messages for refreshMessages() to refetch — it used to
+          // just return, which left an in-flight decrypt stuck on
+          // "Decrypting messages…" once its own staleness check discarded
+          // the result (the region changed under it), and left a finished
+          // decrypt showing the previous region's messages. Re-run the
+          // selection instead: it redoes the key lookup and decrypt fetch
+          // for the new region without closing the conversation
+          // (selectedHash/URL stay put).
+          await selectChannel(selectedHash);
+          return;
+        }
         await refreshMessages({ regionSwitch: true, forceNoCache: true });
       });
     });
