@@ -1210,6 +1210,57 @@ async function test(name, fn) {
     assert.ok(h.state().messages.some((m) => m.text === 's3 server message'), 'the current view must keep its messages');
   });
 
+  // ── R4-4 (#153 review round 4, P3): when the current region's fetch finds
+  // zero candidates, N2 rendered an empty pane but left that region's cache
+  // entry in place, so the next visit flashed the outdated history (via
+  // onCacheHit) before its own fetch answered.
+  await test('R4-4: zero candidates in the same region drop that region\'s cache entry (a stale request leaves it)', async () => {
+    const h = makeHarness();
+    const KEY = 'dadadadadadadadadadadadadadadada';
+    const NAME = 'psk:r4zero';
+    const HASH = 'user:' + NAME;
+    h.storeKey(NAME, KEY, 'R4 Zero');
+    h.respondChannels = () => Promise.resolve({ channels: [] });
+    await h.init();
+    h.regionParam = 'SJC';
+    const msg = encryptChannelMessage(KEY, 'Alice', 'aged-out message');
+
+    const withMessage = () => Promise.resolve({ packets: [encryptedPacket('pkt-zero', '2026-01-01T00:00:00Z', msg)] });
+    h.respondPackets = withMessage;
+    await h.w._channelsSelectChannelForTest(HASH);
+    assert.ok(h.w.ChannelDecrypt.getCache(NAME + '|SJC'), 'precondition: SJC entry cached');
+
+    // A superseded request answering "zero candidates" must not drop the
+    // entry the current request owns.
+    const staleFetch = deferred();
+    h.respondPackets = () => staleFetch.promise;
+    const staleSelect = h.w._channelsSelectChannelForTest(HASH);
+    assert.ok(await settle(() => h.packetsRequests.length === 2), 'precondition: the soon-stale fetch is in flight');
+    h.respondPackets = withMessage;
+    await h.w._channelsSelectChannelForTest(HASH);
+    staleFetch.resolve({ packets: [] });
+    await staleSelect;
+    await flush(300);
+    assert.ok(h.w.ChannelDecrypt.getCache(NAME + '|SJC'), 'a stale zero-candidate response must leave the cache alone');
+
+    // The current request finds nothing any more (the packets aged out).
+    h.respondPackets = () => Promise.resolve({ packets: [] });
+    await h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    assert.strictEqual(h.state().messages.length, 0, 'zero candidates render an empty pane (got ' + JSON.stringify(h.state().messages.map((m) => m.text)) + ')');
+    assert.strictEqual(h.w.ChannelDecrypt.getCache(NAME + '|SJC'), null, 'the region\'s cache entry must be dropped');
+
+    // Next visit: nothing outdated may flash while the fetch is in flight.
+    const nextFetch = deferred();
+    h.respondPackets = () => nextFetch.promise;
+    const nextSelect = h.w._channelsSelectChannelForTest(HASH);
+    await flush(300);
+    assert.ok(!/aged-out message/.test(h.elements.chMessages.innerHTML) && h.state().messages.length === 0,
+      'the next visit must not flash the outdated history (got ' + JSON.stringify(h.state().messages.map((m) => m.text)) + ')');
+    nextFetch.resolve({ packets: [] });
+    await nextSelect;
+  });
+
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });

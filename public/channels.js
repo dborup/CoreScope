@@ -911,7 +911,10 @@
     if (candidates.length === 0) {
       // N2 (#152 follow-up): zero candidates for the current (region-scoped)
       // fetch must render as empty, never leftover content from a stale or
-      // foreign-region cache entry.
+      // foreign-region cache entry. R4-4: drop this region's entry too, so
+      // the next visit doesn't flash the outdated history before its fetch
+      // answers — unless a newer request owns the cache by now.
+      if (cached && !(opts.isStale && opts.isStale())) ChannelDecrypt.deleteCache(cacheKey);
       return { messages: [], empty: true };
     }
 

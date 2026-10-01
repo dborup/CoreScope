@@ -511,6 +511,15 @@ window.ChannelDecrypt = (function () {
     writeCacheBlob(cache);
   }
 
+  /** Remove one cache entry, e.g. one region of a channel. */
+  function deleteCache(key) {
+    ensureCacheMigrated();
+    var cache = readCacheBlob();
+    if (!Object.prototype.hasOwnProperty.call(cache, key)) return;
+    delete cache[key];
+    writeCacheBlob(cache);
+  }
+
   function cacheMessages(channelHash, messages) {
     ensureCacheMigrated();
     var cache = readCacheBlob();
@@ -573,6 +582,7 @@ window.ChannelDecrypt = (function () {
     getCachedMessages: getCachedMessages,
     setCache: setCache,
     getCache: getCache,
+    deleteCache: deleteCache,
     buildKeyMap: buildKeyMap,
     tryDecryptLive: tryDecryptLive
   };
