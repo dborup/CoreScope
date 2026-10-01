@@ -405,7 +405,12 @@ func readIngestorSourceLiveness() map[string]SourceLivenessSnapshot {
 		sourceLivenessCache.mtime = time.Time{}
 		return nil
 	}
-	st.SourceLiveness = maskLivenessKeys(st.SourceLiveness) // public via /api/healthz (#118)
+	// public via /api/healthz: keys that are a raw broker get masked (#118)
+	var statuses ingestorMqttStatusEnvelope
+	// data parsed into st, so only a type mismatch can fail here, and
+	// json still fills the other fields (Broker among them) then.
+	_ = json.Unmarshal(data, &statuses)
+	st.SourceLiveness = maskLivenessKeys(st.SourceLiveness, rawBrokerSet(statuses.SourceStatuses))
 	sourceLivenessCache.path = path
 	sourceLivenessCache.value = st.SourceLiveness
 	sourceLivenessCache.cachedAt = now

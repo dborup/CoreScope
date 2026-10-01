@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -137,16 +138,26 @@ func statsFilePath() string {
 func writeStatsAtomic(path string, b []byte) error {
 	tmp := path + ".tmp"
 	// O_NOFOLLOW: if tmp is a pre-existing symlink, openat fails with ELOOP
-	// instead of clobbering the symlink target. O_TRUNC zeroes existing
-	// regular-file content. 0o600 — no need for world-readable.
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|oNoFollow, 0o600)
+	// instead of clobbering the symlink target. 0o600 — no need for
+	// world-readable.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|oNoFollow, 0o600)
 	if err != nil {
 		return err
 	}
 	// The mode above applies only to a new file. A stale tmp keeps its
-	// own, and the rename would publish it, so force 0o600; that fails
-	// for a tmp another user planted, and nothing is written (#118).
+	// owner and mode, and the rename would publish both. One that belongs
+	// to another user is refused before anything is changed: root's chmod
+	// would succeed on it, and its owner may still hold it open. Ours gets
+	// 0o600 and loses its old content (#118).
+	if err := checkStatsTmpOwner(f); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Truncate(0); err != nil {
 		f.Close()
 		return err
 	}
@@ -162,6 +173,23 @@ func writeStatsAtomic(path string, b []byte) error {
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
+	}
+	return nil
+}
+
+// statsFileEUID is the user the stats tmp file must belong to; swapped in
+// tests to model a file owned by someone else.
+var statsFileEUID = os.Geteuid
+
+// checkStatsTmpOwner fails when f belongs to a user other than
+// statsFileEUID. Where files have no Unix owner (Windows) it passes.
+func checkStatsTmpOwner(f *os.File) error {
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
+		return fmt.Errorf("%s belongs to uid %d, not %d", f.Name(), uid, statsFileEUID())
 	}
 	return nil
 }

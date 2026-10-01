@@ -135,7 +135,7 @@ func TestMQTTConnectedLogLine_118(t *testing.T) {
 			t.Fatalf("log line leaks %q: %s", bad, line)
 		}
 	}
-	for _, want := range []string{"MQTT [feed]", "broker.example:8883", "as client corescope-feed-0a1b2c3d"} {
+	for _, want := range []string{"MQTT [feed] connected to mqtts://****@broker.example:8883 as client corescope-feed-0a1b2c3d"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log line %q misses %q", line, want)
 		}

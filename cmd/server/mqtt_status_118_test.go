@@ -41,6 +41,8 @@ func TestMaskBrokerURLStripsAllCredentials_118(t *testing.T) {
 		{"tcp://dev-user:1234?abc@host", "tcp://****@host"},
 		{"dev-user:sec://ret@host", "****@host"}, // "://" inside the password
 		{"MQTTS://dev-user:secret@host:8883/x?abc", "MQTTS://****@host:8883/x"},
+		{"mqtt://u:p@broker:1883", "mqtt://****@broker:1883"},
+		{"wss://host/mqtt?u=me@x.org", "wss://****@x.org"}, // the '@' in the query: cut, and marked as cut
 		// unchanged
 		{"mqtt://broker.example.com:1883", "mqtt://broker.example.com:1883"},
 		{"wss://broker.example.com/mqtt", "wss://broker.example.com/mqtt"},
@@ -160,20 +162,81 @@ func TestIngestLivenessKeysHaveNoCredentials_118(t *testing.T) {
 	}
 }
 
-// A name is masked as one broker URL, so whitespace in a password is
-// covered without a scheme too; ordinary names are left alone.
+// A name is masked only when it is a raw broker URL: one of the stats
+// file's raw brokers (an older ingestor tagged an unnamed source with it),
+// or one holding "://". Whitespace in a password is covered then, also
+// without a scheme; names the operator chose are left alone, '@' or not.
 func TestMaskSourceName_118(t *testing.T) {
+	raw := map[string]bool{"dev-user:sec ret@host:1883": true}
 	for _, c := range []struct{ in, want string }{
 		{"dev-user:sec ret@host:1883", "****@host:1883"},
 		{"tcp://dev-user:sec ret@host:1883", "tcp://****@host:1883"},
 		{"tcp://host:1883 (2)", "tcp://host:1883 (2)"},
+		{"tcp://****@host:1883 (2)", "tcp://****@host:1883 (2)"},
+		{"obs@north", "obs@north"},
+		{"Feed @ CPH", "Feed @ CPH"},
 		{"Local Feed #1", "Local Feed #1"},
 		{"feed", "feed"},
 	} {
-		got := maskSourceName(c.in)
+		got := maskSourceName(c.in, raw)
 		assertNoSecrets118(t, "maskSourceName("+c.in+")", got)
 		if got != c.want {
 			t.Errorf("maskSourceName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// #118 round 3: names the operator chose are served as they are, and no
+// longer collide into " (2)"; a raw broker as name is still masked.
+func TestMqttStatusKeepsChosenNames_118(t *testing.T) {
+	writeStats118(t, map[string]any{"source_statuses": []map[string]string{
+		{"name": "obs@north", "broker": "tcp://north:1883"},
+		{"name": "obs@south", "broker": "tcp://south:1883"},
+		{"name": "Feed @ CPH", "broker": "tcp://cph:1883"},
+		{"name": "dev-user:secret@host:1883", "broker": "dev-user:secret@host:1883"},
+		{"name": "tcp://tok3n@host", "broker": "tcp://tok3n@host"},
+	}})
+	rec := httptest.NewRecorder()
+	(&Server{}).handleMqttStatus(rec, httptest.NewRequest(http.MethodGet, "/api/mqtt/status", nil))
+	assertNoSecrets118(t, "/api/mqtt/status", rec.Body.String())
+	var resp MqttStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, s := range resp.Sources {
+		names = append(names, s.Name)
+	}
+	want := []string{"obs@north", "obs@south", "Feed @ CPH", "****@host:1883", "tcp://****@host"}
+	if strings.Join(names, "|") != strings.Join(want, "|") {
+		t.Errorf("names\n got %q\nwant %q", names, want)
+	}
+}
+
+func TestIngestLivenessKeepsChosenNames_118(t *testing.T) {
+	resetSourceLivenessCache()
+	t.Cleanup(resetSourceLivenessCache)
+	writeStats118(t, map[string]any{
+		"source_statuses": []map[string]string{
+			{"name": "obs@north", "broker": "tcp://north:1883"},
+			{"name": "dev-user:secret@host:1883", "broker": "dev-user:secret@host:1883"},
+		},
+		"source_liveness": map[string]any{
+			"obs@north":                 map[string]int64{"lastReceiptUnix": 1},
+			"obs@south":                 map[string]int64{"lastReceiptUnix": 2},
+			"Feed @ CPH":                map[string]int64{"lastReceiptUnix": 3},
+			"dev-user:secret@host:1883": map[string]int64{"lastReceiptUnix": 4},
+			"tcp://tok3n@host:1883":     map[string]int64{"lastReceiptUnix": 5},
+		},
+	})
+	got := readIngestorSourceLiveness()
+	want := map[string]int64{"obs@north": 1, "obs@south": 2, "Feed @ CPH": 3, "****@host:1883": 4, "tcp://****@host:1883": 5}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k].LastReceiptUnix != v {
+			t.Errorf("key %q: got %v, want lastReceiptUnix %d (all: %v)", k, got[k], v, got)
 		}
 	}
 }

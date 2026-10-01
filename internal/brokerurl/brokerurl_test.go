@@ -17,55 +17,59 @@ func assertClean(t *testing.T, what, s string) {
 	}
 }
 
-func TestStrip(t *testing.T) {
-	for _, c := range []struct {
-		in, want string
-		userinfo bool
-	}{
-		{"tcp://dev-user:secret@host:1883", "tcp://host:1883", true},
-		{"dev-user:secret@host:1883", "host:1883", true},
-		{"tcp://tok3n@host", "tcp://host", true},
-		{"wss://host/mqtt?token=abc", "wss://host/mqtt", false},
-		{"wss://host/mqtt#frag", "wss://host/mqtt", false},
-		{"wss://host/mqtt?#", "wss://host/mqtt", false},
-		{"tcp://dev-user:p%zz@host", "tcp://host", true},
-		// unescaped '/', '?' or '#' in the password: url.Parse ends the
-		// authority there, so only "everything after the last '@'" is safe
-		{"tcp://dev-user:2024/secret@host:1883", "tcp://host:1883", true},
-		{"tcp://dev-user:1234?abc@host", "tcp://host", true},
-		{"tcp://dev-user:1234#abc@host", "tcp://host", true},
-		{"tcp://dev-user:p@ss@secret@host:1883", "tcp://host:1883", true},
-		// "://" inside the password is not a scheme
-		{"dev-user:sec://ret@host", "host", true},
-		{"MQTTS://dev-user:secret@[::1]:8883/x?abc", "MQTTS://[::1]:8883/x", true},
-		// nothing to strip
-		{"mqtt://broker.example.com:1883", "mqtt://broker.example.com:1883", false},
-		{"wss://broker.example.com/mqtt", "wss://broker.example.com/mqtt", false},
-		{"host:1883", "host:1883", false},
-		{"", "", false},
-	} {
-		got, userinfo := Strip(c.in)
-		assertClean(t, "Strip("+c.in+")", got)
-		if got != c.want || userinfo != c.userinfo {
-			t.Errorf("Strip(%q) = %q, %v; want %q, %v", c.in, got, userinfo, c.want, c.userinfo)
-		}
-	}
-}
-
 func TestMask(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
+		{"tcp://dev-user:secret@host:1883", "tcp://****@host:1883"},
 		{"mqtt://dev-user:secret@host:1883", "mqtt://****@host:1883"},
+		{"mqtt://u:p@broker:1883", "mqtt://****@broker:1883"},
 		{"dev-user:secret@host:1883", "****@host:1883"},
 		{"tcp://tok3n@host", "tcp://****@host"},
-		{"tcp://dev-user:1234?abc@host", "tcp://****@host"},
 		{"wss://host/mqtt?token=abc", "wss://host/mqtt"},
+		{"wss://host/mqtt#frag", "wss://host/mqtt"},
+		{"wss://host/mqtt?#", "wss://host/mqtt"},
+		{"tcp://dev-user:p%zz@host", "tcp://****@host"},
+		// unescaped '/', '?' or '#' in the password: url.Parse ends the
+		// authority there, so only "everything after the last '@'" is safe
+		{"tcp://dev-user:2024/secret@host:1883", "tcp://****@host:1883"},
+		{"tcp://dev-user:1234?abc@host", "tcp://****@host"},
+		{"tcp://dev-user:1234#abc@host", "tcp://****@host"},
+		{"tcp://dev-user:p@ss@secret@host:1883", "tcp://****@host:1883"},
+		// an '@' in the query: what follows it is shown, marked as cut
+		{"wss://host/mqtt?u=me@x.org", "wss://****@x.org"},
+		// "://" inside the password is not a scheme
+		{"dev-user:sec://ret@host", "****@host"},
+		{"MQTTS://dev-user:secret@[::1]:8883/x?abc", "MQTTS://****@[::1]:8883/x"},
+		// nothing to mask
 		{"mqtt://broker.example.com:1883", "mqtt://broker.example.com:1883"},
+		{"wss://broker.example.com/mqtt", "wss://broker.example.com/mqtt"},
+		{"host:1883", "host:1883"},
 		{"", ""},
 	} {
 		got := Mask(c.in)
 		assertClean(t, "Mask("+c.in+")", got)
 		if got != c.want {
 			t.Errorf("Mask(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Secrets lists exactly what Mask removes, for literal masking elsewhere.
+func TestSecrets(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"tcp://dev-user:secret@host:1883", []string{"dev-user:secret"}},
+		{"wss://host/mqtt?token=abc#frag", []string{"token=abc", "frag"}},
+		{"dev-user:1234?abc@host?x=1", []string{"dev-user:1234?abc", "x=1"}},
+		{"tcp://@host", nil},
+		{"wss://host/mqtt?#", nil},
+		{"mqtt://host:1883", nil},
+		{"", nil},
+	} {
+		got := Secrets(c.in)
+		if strings.Join(got, "|") != strings.Join(c.want, "|") || len(got) != len(c.want) {
+			t.Errorf("Secrets(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -95,13 +99,9 @@ func TestMaskText(t *testing.T) {
 	}
 }
 
-// Idempotent: the server may mask what the ingestor already stripped.
-func TestStripAndMaskAreIdempotent(t *testing.T) {
-	for _, in := range []string{"tcp://dev-user:secret@host:1883", "tcp://dev-user:1234?abc@host", "wss://host/mqtt?token=abc"} {
-		once, _ := Strip(in)
-		if twice, _ := Strip(once); twice != once {
-			t.Errorf("Strip not idempotent for %q: %q then %q", in, once, twice)
-		}
+// Idempotent: the server masks what the ingestor already masked.
+func TestMaskIsIdempotent(t *testing.T) {
+	for _, in := range []string{"tcp://dev-user:secret@host:1883", "tcp://dev-user:1234?abc@host", "wss://host/mqtt?token=abc", "wss://host/mqtt?u=me@x.org"} {
 		m := Mask(in)
 		if Mask(m) != m || MaskText(m) != m {
 			t.Errorf("Mask not idempotent for %q: %q then %q / %q", in, m, Mask(m), MaskText(m))

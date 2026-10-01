@@ -46,9 +46,10 @@ func TestSourceStatus_BasicLifecycle(t *testing.T) {
 	// #118: this used to pin a raw passthrough ("server masks"). The
 	// stats file carrying it is served by the public /api/mqtt/status
 	// and is readable on disk, and the server's masking was incomplete,
-	// so the ingestor now stores the broker without user-info, query or
-	// fragment (brokerForLog); the server masks again as a second layer.
-	if snap.Broker != "mqtt://broker.example.com:1883/" {
+	// so the ingestor now stores the broker with user-info masked and
+	// without query or fragment (brokerForLog); the server masks again as
+	// a second layer.
+	if snap.Broker != "mqtt://****@broker.example.com:1883/" {
 		t.Errorf("Broker = %q, want it without credentials", snap.Broker)
 	}
 

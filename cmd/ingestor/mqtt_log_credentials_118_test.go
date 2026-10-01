@@ -36,9 +36,9 @@ func assertNoCredentials(t *testing.T, what, s string) {
 
 func TestMQTTSourceTagHasNoCredentials_118(t *testing.T) {
 	for _, tc := range []struct{ name, broker, want string }{
-		{"", "tcp://" + credUser + ":" + credPass + "@broker.example:1883", "tcp://broker.example:1883"},
-		{"", credUser + ":" + credPass + "@broker.example:1883", "tcp://broker.example:1883"},
-		{"", "wss://" + credUser + ":" + credPass + "@broker.example/mqtt?password=" + credPass, "wss://broker.example/mqtt"},
+		{"", "tcp://" + credUser + ":" + credPass + "@broker.example:1883", "tcp://****@broker.example:1883"},
+		{"", credUser + ":" + credPass + "@broker.example:1883", "tcp://****@broker.example:1883"},
+		{"", "wss://" + credUser + ":" + credPass + "@broker.example/mqtt?password=" + credPass, "wss://****@broker.example/mqtt"},
 		{"", "tcp://broker.example:1883", "tcp://broker.example:1883"},
 		{"", "broker.example:1883", "tcp://broker.example:1883"},
 		{"feed", "tcp://" + credUser + ":" + credPass + "@broker.example:1883", "feed"},

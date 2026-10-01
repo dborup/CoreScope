@@ -57,13 +57,16 @@ a `procIO` block sampled from `/proc/self/io` (read/write/cancelled bytes per
 second + syscall counts). The server reads this file and surfaces the data on
 the Perf page so operators can self-diagnose write-volume anomalies.
 
-The writer uses `O_NOFOLLOW | O_CREAT | O_TRUNC` mode `0o600`, so a
-pre-planted symlink at the path cannot be used to clobber an arbitrary file.
-It forces `0o600` on a stale tmp file too, and gives up for one it does not
-own. Broker URLs in the file (per-source `broker`, `name` and `lastError`,
-and the source tags) carry no user-info, query or fragment, as in the log;
-the server masks them once more before serving `/api/mqtt/status` and
-`/api/healthz`.
+The writer uses `O_NOFOLLOW | O_CREAT` mode `0o600`, so a pre-planted
+symlink at the path cannot be used to clobber an arbitrary file. A stale tmp
+file that belongs to another user is refused before anything is changed, also
+when the ingestor runs as root (as in Docker), where `chmod` alone would
+succeed; one of its own is forced to `0o600` and truncated. Broker URLs in the
+file (per-source `broker`, `name` and `lastError`, and the source tags) have
+their user-info replaced by `****` and carry no query or fragment, as in the
+log; a `lastError` also has the source's configured user name, password and
+URL user-info and query masked where it quotes them. The server masks once
+more before serving `/api/mqtt/status` and `/api/healthz`.
 
 **Security note:** the default lives in `/tmp`, which is world-writable on
 most hosts (sticky bit only protects deletion, not creation). On
@@ -91,7 +94,7 @@ the corescope user can write to.
 The ingestor reads these fields from the existing `config.json`:
 
 - `mqttSources[]` — array of MQTT broker connections
-  - `name` — display name for logging. Without one the source is tagged with its broker minus credentials, plus ` (2)`, ` (3)`, … when another source already has that tag
+  - `name` — display name for logging. Without one the source is tagged with its broker, credentials masked as `****`, plus ` (2)`, ` (3)`, … when another source already has that tag
   - `broker` — MQTT URL (`mqtt://`, `mqtts://`)
   - `username` / `password` — auth credentials
   - `topics` — array of topic patterns to subscribe

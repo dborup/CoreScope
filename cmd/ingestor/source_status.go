@@ -37,7 +37,7 @@ type SourceStatusSnapshot struct {
 // slots = 2.4KB/source — fine.
 type sourceStatusState struct {
 	name   string
-	broker string // without credentials (brokerForLog); published in the stats file
+	broker string // credentials masked (brokerForLog); published in the stats file
 
 	connected          atomic.Bool
 	lastConnectUnix    atomic.Int64
@@ -72,14 +72,15 @@ func (s *sourceStatusState) MarkConnect(now time.Time) {
 	s.errMu.Unlock()
 }
 
-// MarkDisconnect records the broker dropping the connection.
-func (s *sourceStatusState) MarkDisconnect(now time.Time, err error) {
+// MarkDisconnect records the broker dropping the connection. The error is
+// stored with the source's secrets masked (errForLog).
+func (s *sourceStatusState) MarkDisconnect(now time.Time, err error, secrets ...string) {
 	s.connected.Store(false)
 	s.lastDisconnectUnix.Store(now.Unix())
 	s.disconnectCount.Add(1)
 	if err != nil {
 		s.errMu.Lock()
-		s.lastError = errForLog(err)
+		s.lastError = errForLog(err, secrets...)
 		s.errMu.Unlock()
 	}
 }
@@ -147,7 +148,7 @@ var (
 // RegisterSourceStatus creates (or returns the existing) state for the
 // given source. Safe for cold-start use; idempotent — re-registering the
 // same tag returns the existing state so counters aren't reset across
-// reconnects. The broker is stored without credentials (brokerForLog),
+// reconnects. The broker is stored with credentials masked (brokerForLog),
 // whatever the caller passes: the stats file that carries it is served by
 // the public /api/mqtt/status (#118).
 func RegisterSourceStatus(tag, broker string) *sourceStatusState {

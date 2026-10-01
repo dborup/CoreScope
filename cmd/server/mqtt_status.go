@@ -14,7 +14,7 @@ import (
 // maskBrokerURL returns a broker URL fit for the public /api/mqtt/status:
 // all user-info (a lone user name or token too) becomes "****", and the
 // query and fragment are dropped, also without a scheme and for URLs that
-// url.Parse rejects (brokerurl.Mask). The ingestor already strips its
+// url.Parse rejects (brokerurl.Mask). The ingestor already masks its
 // brokers (#118); this is the second layer, for any ingestor version.
 // `mqtt://user:secret@host:1883` -> `mqtt://****@host:1883`.
 func maskBrokerURL(s string) string { return brokerurl.Mask(s) }
@@ -23,23 +23,38 @@ func maskBrokerURL(s string) string { return brokerurl.Mask(s) }
 // an error message (brokerurl.MaskText).
 func maskBrokerText(s string) string { return brokerurl.MaskText(s) }
 
-// maskSourceName masks a source name or tag. An older ingestor tagged an
-// unnamed source with its raw broker, so a name holding "@" or "://" is
-// masked as one broker URL (Mask, which also covers whitespace in a
-// password); other names are returned as they are.
-func maskSourceName(s string) string {
-	if strings.Contains(s, "@") || strings.Contains(s, "://") {
+// maskSourceName masks a source name or tag that is a raw broker URL: an
+// older ingestor tagged an unnamed source with its raw broker. That is a
+// name among rawBrokers (the brokers in the stats file's source_statuses)
+// or one holding "://"; it is masked as one broker URL (Mask, which also
+// covers whitespace in a password). Names the operator chose, such as
+// "obs@north" or "Feed @ CPH", are returned as they are (#118).
+func maskSourceName(s string, rawBrokers map[string]bool) string {
+	if rawBrokers[s] || strings.Contains(s, "://") {
 		return brokerurl.Mask(s)
 	}
 	return s
 }
 
+// rawBrokerSet returns the non-empty brokers of statuses as the stats file
+// holds them, for maskSourceName.
+func rawBrokerSet(statuses []MqttSourceStatus) map[string]bool {
+	set := make(map[string]bool, len(statuses))
+	for _, s := range statuses {
+		if s.Broker != "" {
+			set[s.Broker] = true
+		}
+	}
+	return set
+}
+
 // maskLivenessKeys masks the keys (source tags) of the ingestor's liveness
 // map (maskSourceName) for the public /api/healthz: an older ingestor
-// tagged an unnamed source with its raw broker (#118). Keys that masking leaves unchanged
-// keep their name; a masked key that coincides with another gets " (2)",
-// " (3)", … so no entry is lost. Called on a cache refresh only.
-func maskLivenessKeys(m map[string]SourceLivenessSnapshot) map[string]SourceLivenessSnapshot {
+// tagged an unnamed source with its raw broker (#118). Keys that masking
+// leaves unchanged keep their name; a masked key that coincides with
+// another gets " (2)", " (3)", … so no entry is lost. Called on a cache
+// refresh only.
+func maskLivenessKeys(m map[string]SourceLivenessSnapshot, rawBrokers map[string]bool) map[string]SourceLivenessSnapshot {
 	if len(m) == 0 {
 		return m
 	}
@@ -51,14 +66,14 @@ func maskLivenessKeys(m map[string]SourceLivenessSnapshot) map[string]SourceLive
 	out := make(map[string]SourceLivenessSnapshot, len(m))
 	var masked []string
 	for _, k := range keys {
-		if maskSourceName(k) == k {
+		if maskSourceName(k, rawBrokers) == k {
 			out[k] = m[k]
 		} else {
 			masked = append(masked, k)
 		}
 	}
 	for _, k := range masked {
-		base := maskSourceName(k)
+		base := maskSourceName(k, rawBrokers)
 		key := base
 		for n := 2; ; n++ {
 			if _, taken := out[key]; !taken {
@@ -147,12 +162,13 @@ func (s *Server) handleMqttStatus(w http.ResponseWriter, r *http.Request) {
 	resp.WatchdogLastTickUnix = env.WatchdogLastTickUnix
 	resp.WatchdogPanicCount = env.WatchdogPanicCount
 	resp.WatchdogLogDropCount = env.WatchdogLogDropCount
+	rawBrokers := rawBrokerSet(env.SourceStatuses)
 	for _, src := range env.SourceStatuses {
-		src.Broker = maskBrokerURL(src.Broker)
 		// An older ingestor tagged an unnamed source with its raw
 		// broker, and broker libraries occasionally quote the failing
 		// URL in the error string — mask both (#118).
-		src.Name = maskSourceName(src.Name)
+		src.Name = maskSourceName(src.Name, rawBrokers)
+		src.Broker = maskBrokerURL(src.Broker)
 		src.LastError = maskBrokerText(src.LastError)
 		resp.Sources = append(resp.Sources, src)
 	}

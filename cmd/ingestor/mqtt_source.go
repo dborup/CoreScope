@@ -15,6 +15,7 @@ import (
 // handler needs the store and ingest buffer, so main() sets it.
 func prepareMQTTSource(source MQTTSource, tag string) (*mqtt.ClientOptions, *sourceStatusState, *SourceLivenessState) {
 	logBroker := brokerForLog(source.Broker)
+	secrets := mqttSourceSecrets(source)
 	opts := buildMQTTOpts(source)
 	clientID := opts.ClientID
 
@@ -28,7 +29,7 @@ func prepareMQTTSource(source MQTTSource, tag string) (*mqtt.ClientOptions, *sou
 	// #1043: per-source status registry. Idempotent — repeated
 	// registration across reconnects returns the same state so
 	// counters accumulate across the process lifetime. It is published
-	// in the stats file, so it gets the stripped broker (#118).
+	// in the stats file, so it gets the masked broker (#118).
 	status := RegisterSourceStatus(tag, logBroker)
 
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
@@ -55,8 +56,8 @@ func prepareMQTTSource(source MQTTSource, tag string) (*mqtt.ClientOptions, *sou
 	})
 
 	opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-		log.Printf("MQTT [%s] disconnected from %s: %s", tag, logBroker, errForLog(err))
-		status.MarkDisconnect(time.Now(), err)
+		log.Printf("MQTT [%s] disconnected from %s: %s", tag, logBroker, errForLog(err, secrets...))
+		status.MarkDisconnect(time.Now(), err, secrets...)
 	})
 
 	opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {

@@ -18,23 +18,34 @@ import (
 )
 
 // Marker replaces removed user-info in Mask and MaskText, so a reader can
-// tell credentials were present.
+// tell credentials were present, and that a host shown after it may be
+// only what followed an '@' in the path or query.
 const Marker = "****"
 
-// Strip returns s without user-info, query and fragment, and whether it had
-// user-info. A scheme ("tcp://") is kept when it is a valid URL scheme.
-func Strip(s string) (string, bool) {
-	scheme, rest, userinfo := split(s)
-	return join(scheme, rest), userinfo
-}
-
-// Mask is Strip with Marker+"@" in place of removed user-info.
+// Mask returns s with its user-info replaced by Marker and without query
+// and fragment. A scheme ("tcp://") is kept when it is a valid URL scheme.
 func Mask(s string) string {
-	scheme, rest, userinfo := split(s)
-	if userinfo {
+	p := split(s)
+	rest := p.rest
+	if p.hasUserinfo {
 		rest = Marker + "@" + rest
 	}
-	return join(scheme, rest)
+	return join(p.scheme, rest)
+}
+
+// Secrets returns what Mask removes from s, so that a caller can mask the
+// same values where they appear without a URL around them (say, a query
+// token quoted in an error): the user-info, the query and the fragment,
+// each only when non-empty.
+func Secrets(s string) []string {
+	p := split(s)
+	var out []string
+	for _, v := range []string{p.userinfo, p.query, p.fragment} {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // urlUserinfoRe matches a URL with user-info in free text: from the start of
@@ -71,18 +82,33 @@ func maskSpan(m string) string {
 	return Mask(m)
 }
 
-func split(s string) (scheme, rest string, userinfo bool) {
-	rest = s
+// parts is a broker URL as Mask reads it.
+type parts struct {
+	scheme      string
+	userinfo    string // everything before the last '@'
+	hasUserinfo bool   // an '@' was present, even with empty user-info
+	rest        string // host, port and path
+	query       string // without '?'
+	fragment    string // without '#'
+}
+
+func split(s string) parts {
+	var p parts
+	rest := s
 	if i := strings.Index(rest, "://"); i > 0 && validScheme(rest[:i]) {
-		scheme, rest = rest[:i], rest[i+len("://"):]
+		p.scheme, rest = rest[:i], rest[i+len("://"):]
 	}
 	if i := strings.LastIndex(rest, "@"); i >= 0 {
-		rest, userinfo = rest[i+1:], true
+		p.userinfo, p.hasUserinfo, rest = rest[:i], true, rest[i+1:]
 	}
-	if i := strings.IndexAny(rest, "?#"); i >= 0 {
-		rest = rest[:i]
+	if i := strings.IndexByte(rest, '#'); i >= 0 {
+		rest, p.fragment = rest[:i], rest[i+1:]
 	}
-	return scheme, rest, userinfo
+	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		rest, p.query = rest[:i], rest[i+1:]
+	}
+	p.rest = rest
+	return p
 }
 
 func join(scheme, rest string) string {

@@ -33,13 +33,13 @@ func assertNoSecretParts118(t *testing.T, what, s string) {
 // url.Parse, so the password (or its first part) used to be logged.
 func TestBrokerForLogAmbiguousPassword_118(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
-		{"tcp://" + credUser + ":2024/" + credPass + "@host:1883", "tcp://host:1883"},
-		{"tcp://" + credUser + ":1234?abc@host", "tcp://host"},
-		{"tcp://" + credUser + ":1234#abc@host", "tcp://host"},
-		{credUser + ":" + credPass + "@host:1883", "tcp://host:1883"},
-		{"tcp://tok3n@host", "tcp://host"},
+		{"tcp://" + credUser + ":2024/" + credPass + "@host:1883", "tcp://****@host:1883"},
+		{"tcp://" + credUser + ":1234?abc@host", "tcp://****@host"},
+		{"tcp://" + credUser + ":1234#abc@host", "tcp://****@host"},
+		{credUser + ":" + credPass + "@host:1883", "tcp://****@host:1883"},
+		{"tcp://tok3n@host", "tcp://****@host"},
 		{"wss://host/mqtt?token=abc", "wss://host/mqtt"},
-		{"tcp://" + credUser + ":p%zz@host", "tcp://host"},
+		{"tcp://" + credUser + ":p%zz@host", "tcp://****@host"},
 	} {
 		got := brokerForLog(c.in)
 		assertNoSecretParts118(t, "brokerForLog("+c.in+")", got)
@@ -74,7 +74,7 @@ func TestMQTTSourceTagsAreUnique_118(t *testing.T) {
 		{Name: "feed", Broker: "tcp://x:1883"},
 	}
 	got := mqttSourceTags(sources)
-	want := []string{"tcp://host:1883", "tcp://host:1883 (2)", "feed", "tcp://host:1883 (4)", "tcp://host:1883 (3)", "tcp://other:1883", "feed"}
+	want := []string{"tcp://****@host:1883", "tcp://****@host:1883 (2)", "feed", "tcp://host:1883", "tcp://host:1883 (3)", "tcp://other:1883", "feed"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("tags\n got %q\nwant %q", got, want)
 	}
@@ -108,8 +108,8 @@ func TestSourceStatusHoldsNoCredentials_118(t *testing.T) {
 	snap := s.snapshot(time.Now())
 	b, _ := json.Marshal(snap)
 	assertNoSecretParts118(t, "status snapshot", string(b))
-	if snap.Broker != "tcp://host" {
-		t.Errorf("Broker = %q, want tcp://host", snap.Broker)
+	if snap.Broker != "tcp://****@host" {
+		t.Errorf("Broker = %q, want tcp://****@host", snap.Broker)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestMQTTSourceWiringLeaksNoCredentials_118(t *testing.T) {
 			})
 
 			out := buf.String()
-			for _, want := range []string{"connected to", "disconnected from", "reconnecting to", "subscribed to"} {
+			for _, want := range []string{"connected to tcp://****@" + addr, "disconnected from tcp://****@" + addr, "reconnecting to tcp://****@" + addr, "subscribed to"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("no %q line in:\n%s", want, out)
 				}
@@ -218,7 +218,7 @@ func TestStatsFileHasNoCredentials_118(t *testing.T) {
 		return err == nil && strings.Contains(string(raw), "source_statuses")
 	})
 	assertNoSecretParts118(t, "stats file", string(raw))
-	for _, want := range []string{`"tcp://host:1883"`, `"tcp://host:1883 (2)"`} {
+	for _, want := range []string{`"tcp://****@host:1883"`, `"tcp://****@host:1883 (2)"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("stats file misses %s: %s", want, raw)
 		}
