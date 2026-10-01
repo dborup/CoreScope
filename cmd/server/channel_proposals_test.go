@@ -384,9 +384,7 @@ func TestChannelsListDoesNotMutateCaches(t *testing.T) {
 	// capacity, so pad the decrypted channels until it does.
 	var cached []map[string]interface{}
 	for i := 0; ; i++ {
-		db.channelsCacheMu.Lock()
-		db.channelsCacheRes = nil
-		db.channelsCacheMu.Unlock()
+		db.channelsCache.reset()
 		var err error
 		if cached, err = db.GetChannels(""); err != nil {
 			t.Fatal(err)

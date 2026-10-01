@@ -320,24 +320,35 @@ type PacketStore struct {
 	// overwritten. Incremented only under s.mu.RLock, read under s.mu.Lock.
 	distSnapReaders atomic.Int64
 
-	// Lazy-build gate for the distance index (#1011). distLazyBuilt is
-	// true once the first /api/analytics/distance request has completed
-	// its build (or a debounced rebuild). distLazyBuilding is true
-	// while a build is currently running — concurrent requests in this
-	// window receive 202 + Retry-After rather than racing N parallel
-	// O(n²) computations. distLazyOnce serialises the first build;
-	// reset by the background loader (Load() chunked merge) and by the
-	// debounced-rebuild policy so subsequent rebuilds can re-fire.
+	// Lazy-build gate for the distance index (#1011), guarded by
+	// distLazyMu. distLazyBuilding is true from the trigger that starts a
+	// build until that build has read the current dataset — concurrent
+	// requests in this window receive 202 + Retry-After rather than racing
+	// N parallel O(n²) computations. distLazyBuilt is true once a build has
+	// completed; distLazyBuiltGen is the distDataGen that build read, so the
+	// index is current only while the two match (#149).
+	//
+	// Lock order (#149): s.mu is never acquired (Lock or RLock) while
+	// distLazyMu is held. The other nesting, distLazyMu taken while s.mu is
+	// held, is allowed; a path that does it, as the background-load
+	// completion used to, deadlocks against any distLazyMu → s.mu path.
 	distLazyMu        sync.Mutex
-	distLazyOnce      sync.Once
 	distLazyBuilt     bool
 	distLazyBuilding  bool
+	distLazyBuiltGen  uint64
 	distLazyLastBuilt time.Time
 	distLazyLastObs   int // totalObs at last build, for Δobs debounce
-	// distanceBuildHook, if non-nil, runs at the start of the lazy build
-	// goroutine (after distLazyBuilding is set, before any lock is held). Tests
-	// use it to hold the build open so concurrent requests deterministically
-	// observe the "building" window; nil (and zero overhead) in production.
+	// distDataGen counts dataset changes that the incremental distance
+	// maintenance does not cover — today only the background chunk load's
+	// completion. Written under s.mu.Lock, so a build reads a value that
+	// matches its snapshot; atomic, so the gate can compare it under
+	// distLazyMu without taking s.mu.
+	distDataGen atomic.Uint64
+	// distanceBuildHook, if non-nil, runs at the start of each build pass
+	// (after distLazyBuilding is set, before any lock is held). Tests use it
+	// to hold the build open so concurrent requests deterministically
+	// observe the "building" window, and to count builds; nil (and zero
+	// overhead) in production.
 	distanceBuildHook func()
 
 	// Cached GetNodeHashSizeInfo result — recomputed at most once every 15s
@@ -510,10 +521,16 @@ type PacketStore struct {
 	chunkInitOnce      sync.Once
 	firstChunkReady    chan struct{}
 	firstChunkSignaled atomic.Bool
-	loadComplete       atomic.Bool
-	loadProgressRows   atomic.Int64
-	chunkCBMu          sync.Mutex
-	chunkCallbacks     []func(rowsThisChunk, totalRows int)
+	// startupLoadDone is closed once RunStartupLoad returns, on every
+	// path: hot window AND background fill have terminated, successfully
+	// or not (#116). Separate from backgroundLoadDone, which also means
+	// "coverage reached" for health reporting. See StartupLoadDone.
+	startupLoadDone     chan struct{}
+	startupLoadSignaled atomic.Bool
+	loadComplete        atomic.Bool
+	loadProgressRows    atomic.Int64
+	chunkCBMu           sync.Mutex
+	chunkCallbacks      []func(rowsThisChunk, totalRows int)
 
 	// Eviction config and stats
 	retentionHours  float64        // 0 = unlimited
@@ -1718,13 +1735,13 @@ func (s *PacketStore) loadBackgroundChunks() {
 	s.buildPathHopIndex()
 	// Distance index is now lazy (#1011) — built on first
 	// /api/analytics/distance request, not at background-load
-	// completion. If a previous request already triggered the build,
-	// invalidate the gate so the next request rebuilds against the
-	// fuller dataset.
-	s.distLazyMu.Lock()
-	s.distLazyBuilt = false
-	s.distLazyOnce = sync.Once{}
-	s.distLazyMu.Unlock()
+	// completion. Bumping the generation makes an index built from the
+	// smaller dataset stale, so the next request rebuilds it, and a build
+	// in flight that already read it builds once more (#149). Taking
+	// distLazyMu here would be allowed (s.mu → distLazyMu; only the reverse
+	// is forbidden, see the gate fields); the atomic generation just makes
+	// it unnecessary.
+	s.distDataGen.Add(1)
 	s.mu.Unlock()
 	// #1008 review m3: flip the ready flags after the synchronous
 	// rebuild for symmetry with startBackgroundIndexBuilds. Safe
@@ -4745,12 +4762,21 @@ func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
 }
 
 // DistanceIndexBuilt reports whether the distance analytics index has
-// been constructed. Used by tests and /api/perf to verify the lazy
-// build invariant from issue #1011 (eager Load() build removed).
+// been built from the current dataset: false before the first build, and
+// after the background load completed until a build has read the fuller
+// dataset. Used by the /api/analytics/distance handler and by tests to
+// verify the lazy build invariant from issue #1011 (eager Load() build
+// removed).
 func (s *PacketStore) DistanceIndexBuilt() bool {
 	s.distLazyMu.Lock()
 	defer s.distLazyMu.Unlock()
-	return s.distLazyBuilt
+	return s.distIndexCurrentLocked()
+}
+
+// distIndexCurrentLocked reports whether a completed build read the
+// current dataset. Caller holds distLazyMu.
+func (s *PacketStore) distIndexCurrentLocked() bool {
+	return s.distLazyBuilt && s.distLazyBuiltGen == s.distDataGen.Load()
 }
 
 // DistanceIndexBuilding reports whether a lazy distance-index build
@@ -4765,63 +4791,115 @@ func (s *PacketStore) DistanceIndexBuilding() bool {
 
 // TriggerDistanceIndexBuild kicks off a lazy build of the distance
 // index in a background goroutine if one is not already running and
-// the debounce policy permits. Returns immediately. Idempotent:
-// concurrent callers see only one build, gated by sync.Once.
+// the debounce policy permits. Returns immediately. Concurrent callers
+// start at most one build: distLazyBuilding is set under distLazyMu
+// before the goroutine starts.
 //
-// Debounce policy (#1011 triage Fix path): rebuild if Δobs > 5% since
-// the last build OR at most once per 5 minutes — whichever is more
-// restrictive. The first-ever build always runs.
+// A missing or stale index (see distDataGen) always builds. Debounce
+// policy for a current index (#1011 triage Fix path): rebuild only if
+// Δobs ≥ 5% since the last build or 5 minutes have passed.
+//
+// totalObs lives under s.mu, which must not be taken while distLazyMu is
+// held (#149), so the debounce path reads it between two distLazyMu
+// sections and re-checks the gate before it starts a build.
 func (s *PacketStore) TriggerDistanceIndexBuild() {
 	s.distLazyMu.Lock()
 	if s.distLazyBuilding {
 		s.distLazyMu.Unlock()
 		return
 	}
-	// Debounce: if a build has already completed, suppress re-trigger
-	// unless Δobs > 5% or >5min has elapsed.
-	if s.distLazyBuilt {
-		s.mu.RLock()
-		curObs := s.totalObs
-		s.mu.RUnlock()
-		elapsed := time.Since(s.distLazyLastBuilt)
-		deltaPct := 0.0
-		if s.distLazyLastObs > 0 {
-			deltaPct = float64(curObs-s.distLazyLastObs) / float64(s.distLazyLastObs)
-		}
-		if elapsed < 5*time.Minute && deltaPct < 0.05 {
-			s.distLazyMu.Unlock()
-			return
-		}
-		// Reset the gate so a new build can fire.
-		s.distLazyOnce = sync.Once{}
-		s.distLazyBuilt = false
+	if !s.distIndexCurrentLocked() {
+		s.startDistanceBuildLocked()
+		s.distLazyMu.Unlock()
+		return
 	}
+	lastBuilt, lastObs := s.distLazyLastBuilt, s.distLazyLastObs
 	s.distLazyMu.Unlock()
 
-	// Fire-and-forget; sync.Once collapses concurrent goroutines into
-	// a single build. The Once is reset above (under the mutex) before
-	// each rebuild cycle.
-	go s.distLazyOnce.Do(func() {
-		s.distLazyMu.Lock()
-		s.distLazyBuilding = true
-		s.distLazyMu.Unlock()
+	s.mu.RLock()
+	curObs := s.totalObs
+	s.mu.RUnlock()
+	if !distanceRebuildDue(time.Since(lastBuilt), lastObs, curObs) {
+		return
+	}
 
+	s.distLazyMu.Lock()
+	// While distLazyMu was released another trigger may have started a
+	// build, or a build may have finished; either makes this one redundant.
+	if !s.distLazyBuilding && s.distLazyLastBuilt.Equal(lastBuilt) {
+		s.startDistanceBuildLocked()
+	}
+	s.distLazyMu.Unlock()
+}
+
+// distanceRebuildDue applies the debounce policy to a current index that
+// was built elapsed ago from lastObs observations, now that there are
+// curObs.
+func distanceRebuildDue(elapsed time.Duration, lastObs, curObs int) bool {
+	if elapsed >= 5*time.Minute {
+		return true
+	}
+	return lastObs > 0 && float64(curObs-lastObs)/float64(lastObs) >= 0.05
+}
+
+// startDistanceBuildLocked marks a build in flight and starts it. Caller
+// holds distLazyMu. Clearing distLazyBuilt keeps the handler answering
+// 202 for the whole build, a debounced rebuild included (#1011).
+func (s *PacketStore) startDistanceBuildLocked() {
+	s.distLazyBuilding = true
+	s.distLazyBuilt = false
+	go s.runDistanceIndexBuild()
+}
+
+// runDistanceIndexBuild builds the distance index and records the
+// dataset generation it read. If the background load completed after
+// that read, the new index is already stale and it builds once more;
+// distLazyBuilding stays true until a pass has read the current dataset.
+// s.mu and distLazyMu are never held together.
+func (s *PacketStore) runDistanceIndexBuild() {
+	for {
 		if s.distanceBuildHook != nil {
 			s.distanceBuildHook() // test seam: hold the build window open
 		}
 
 		s.mu.Lock()
 		s.buildDistanceIndex()
-		obsAtBuild := s.totalObs
+		// Keep this read inside the s.mu section of the build: the load
+		// completion bumps the generation under s.mu, so here it matches the
+		// data just read. Read after the Unlock, a load completing in between
+		// would count as seen by an index built without it (a lost
+		// invalidation); read before the Lock, a load the build did see
+		// would force a redundant rebuild.
+		gen := s.distDataGen.Load()
+		obs := s.totalObs
 		s.mu.Unlock()
 
+		// #116: the distance snapshot (and any region/area result) was
+		// computed from the index as it was before this build. Refresh
+		// before reporting the index built, so the handler never goes
+		// from 202 to serving that older snapshot for up to an interval.
+		s.cacheMu.Lock()
+		s.distCache = make(map[string]*cachedResult)
+		s.cacheMu.Unlock()
+		s.analyticsRecomputerMu.RLock()
+		rc := s.recompDistance
+		s.analyticsRecomputerMu.RUnlock()
+		if rc != nil {
+			rc.RecomputeNow()
+		}
+
 		s.distLazyMu.Lock()
-		s.distLazyBuilding = false
 		s.distLazyBuilt = true
+		s.distLazyBuiltGen = gen
 		s.distLazyLastBuilt = time.Now()
-		s.distLazyLastObs = obsAtBuild
+		s.distLazyLastObs = obs
+		stale := gen != s.distDataGen.Load()
+		s.distLazyBuilding = stale
 		s.distLazyMu.Unlock()
-	})
+		if !stale {
+			return
+		}
+	}
 }
 
 // buildDistanceIndex precomputes haversine distances for all packets.

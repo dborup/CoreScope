@@ -82,11 +82,11 @@ func TestAnalyticsRF_AfterFirstPassReturns200(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 	store := NewPacketStore(db, nil)
-	// #1688 r1: the warmup gate now ALSO requires LoadComplete() to be
-	// true before first-pass-done flips (munger #5). Tests that don't
-	// exercise the chunked loader must flip it manually to model a
-	// production server that has finished cold-loading.
-	store.loadComplete.Store(true)
+	// #1688 r1 / #116: the warmup gate only opens on a pass that starts
+	// after the startup load terminated (munger #5). Tests that don't run
+	// RunStartupLoad signal it manually to model a production server that
+	// has finished loading (hot window and background fill).
+	store.signalStartupLoadDone()
 
 	stop := store.StartAnalyticsRecomputers(50 * time.Millisecond)
 	defer stop()
