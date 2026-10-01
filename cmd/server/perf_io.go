@@ -410,7 +410,7 @@ func readIngestorSourceLiveness() map[string]SourceLivenessSnapshot {
 	// data parsed into st, so only a type mismatch can fail here, and
 	// json still fills the other fields (Broker among them) then.
 	_ = json.Unmarshal(data, &statuses)
-	st.SourceLiveness = maskLivenessKeys(st.SourceLiveness, rawBrokerSet(statuses.SourceStatuses))
+	st.SourceLiveness = maskLivenessKeys(st.SourceLiveness, rawBrokerSet(statuses.SourceStatuses), len(statuses.SourceStatuses) > 0)
 	sourceLivenessCache.path = path
 	sourceLivenessCache.value = st.SourceLiveness
 	sourceLivenessCache.cachedAt = now

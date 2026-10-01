@@ -54,9 +54,22 @@ func rawBrokerSet(statuses []MqttSourceStatus) map[string]bool {
 // leaves unchanged keep their name; a masked key that coincides with
 // another gets " (2)", " (3)", … so no entry is lost. Called on a cache
 // refresh only.
-func maskLivenessKeys(m map[string]SourceLivenessSnapshot, rawBrokers map[string]bool) map[string]SourceLivenessSnapshot {
+//
+// haveStatuses reports whether the stats file had source_statuses. An
+// ingestor built 2026-06-07..06-12 wrote source_liveness without them, so
+// rawBrokers is empty and a raw broker without a scheme
+// ("user:pass@host:1883") would pass maskSourceName. Without statuses,
+// every key holding '@' is therefore masked as a broker URL; a name the
+// operator chose with an '@' loses what precedes it then.
+func maskLivenessKeys(m map[string]SourceLivenessSnapshot, rawBrokers map[string]bool, haveStatuses bool) map[string]SourceLivenessSnapshot {
 	if len(m) == 0 {
 		return m
+	}
+	mask := func(k string) string {
+		if !haveStatuses && strings.Contains(k, "@") {
+			return brokerurl.Mask(k)
+		}
+		return maskSourceName(k, rawBrokers)
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -66,14 +79,14 @@ func maskLivenessKeys(m map[string]SourceLivenessSnapshot, rawBrokers map[string
 	out := make(map[string]SourceLivenessSnapshot, len(m))
 	var masked []string
 	for _, k := range keys {
-		if maskSourceName(k, rawBrokers) == k {
+		if mask(k) == k {
 			out[k] = m[k]
 		} else {
 			masked = append(masked, k)
 		}
 	}
 	for _, k := range masked {
-		base := maskSourceName(k, rawBrokers)
+		base := mask(k)
 		key := base
 		for n := 2; ; n++ {
 			if _, taken := out[key]; !taken {
