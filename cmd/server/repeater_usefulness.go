@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -46,7 +47,7 @@ func (s *PacketStore) GetRepeaterUsefulnessScore(pubkey string) float64 {
 	}
 
 	// Numerator: the distinct non-advert transmissions this repeater relayed.
-	relayed := countDistinctNonAdvert(s.byPathHop[key], nil)
+	relayed, _ := countDistinctNonAdvert(s.byPathHop[key], nil)
 
 	score := float64(relayed) / float64(totalNonAdvert)
 	if score < 0 {
@@ -62,39 +63,49 @@ func (s *PacketStore) GetRepeaterUsefulnessScore(pubkey string) float64 {
 // transmissions in list, a byPathHop bucket. The index holds a transmission
 // once per key (#158); counting distinct transmissions keeps traffic share
 // a fraction of transmissions even if a bucket ever held duplicates, since
-// the denominator counts each transmission once. seen is caller-owned
-// scratch, cleared here; nil allocates one sized for list.
+// the denominator counts each transmission once. ids is caller-owned
+// scratch (may be nil), returned for reuse.
 //
-// Cost: O(len(list)) map operations.
-func countDistinctNonAdvert(list []*StoreTx, seen map[*StoreTx]struct{}) int {
-	if seen == nil {
-		seen = make(map[*StoreTx]struct{}, len(list))
-	} else {
-		clear(seen)
-	}
-	n := 0
+// Cost: O(len(list)) with no allocation once ids has grown. Buckets are
+// appended in ingest order, so their IDs are usually strictly increasing,
+// which already proves them distinct; only otherwise (background chunks
+// load older transmissions after newer ones) are the IDs sorted,
+// O(n log n) on a flat slice. A map per bucket was measured ~10x slower
+// on the bulk pass (BenchmarkTrafficShareScoreMap_158).
+func countDistinctNonAdvert(list []*StoreTx, ids []int) (int, []int) {
+	ids = ids[:0]
+	ascending := true
 	for _, tx := range list {
 		if tx == nil || (tx.PayloadType != nil && *tx.PayloadType == payloadTypeAdvert) {
 			continue
 		}
-		if _, dup := seen[tx]; dup {
-			continue
+		if n := len(ids); n > 0 && tx.ID <= ids[n-1] {
+			ascending = false
 		}
-		seen[tx] = struct{}{}
-		n++
+		ids = append(ids, tx.ID)
 	}
-	return n
+	if ascending || len(ids) < 2 {
+		return len(ids), ids
+	}
+	slices.Sort(ids)
+	n := 1
+	for i := 1; i < len(ids); i++ {
+		if ids[i] != ids[i-1] {
+			n++
+		}
+	}
+	return n, ids
 }
 
-// boundedScratch returns seen for reuse by countDistinctNonAdvert, or a
-// fresh small map once it has grown large: clear() costs the map's
-// capacity, so a scratch map that once held a big bucket must not be
-// cleared again for every small bucket after it.
-func boundedScratch(seen map[*StoreTx]struct{}) map[*StoreTx]struct{} {
-	if len(seen) > 1024 {
-		return make(map[*StoreTx]struct{}, 64)
+// countNonAdvert returns the number of non-advert entries in list.
+func countNonAdvert(list []*StoreTx) int {
+	n := 0
+	for _, tx := range list {
+		if tx != nil && (tx.PayloadType == nil || *tx.PayloadType != payloadTypeAdvert) {
+			n++
+		}
 	}
-	return seen
+	return n
 }
 
 // RepeaterNodeStats bundles relay-activity and usefulness data for a single node.
@@ -130,12 +141,12 @@ func (s *PacketStore) GetRepeaterNodeStatsBatch(pubkeys []string, windowHours fl
 	}
 
 	snaps := make(map[string]nodeSnap, len(pubkeys))
-	seen := make(map[*StoreTx]struct{})
+	var ids []int
 	for _, pk := range pubkeys {
 		key := strings.ToLower(pk)
 		entries := s.collectRelayEntriesLocked(key)
-		seen = boundedScratch(seen)
-		relayed := countDistinctNonAdvert(s.byPathHop[key], seen)
+		var relayed int
+		relayed, ids = countDistinctNonAdvert(s.byPathHop[key], ids)
 		snaps[pk] = nodeSnap{entries: entries, relayed: relayed}
 	}
 

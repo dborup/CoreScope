@@ -235,11 +235,20 @@ func (s *PacketStore) computeRepeaterUsefulnessScoreMap() map[string]float64 {
 		return out
 	}
 	denom := float64(totalNonAdvert)
-	seen := make(map[*StoreTx]struct{}, 64)
+	var ids []int
 	for key, list := range s.byPathHop {
-		seen = boundedScratch(seen)
-		// Distinct transmissions, matching the denominator (#158).
-		relayed := countDistinctNonAdvert(list, seen)
+		// Distinct transmissions, matching the denominator (#158). Only
+		// full-pubkey keys (the resolved hops, and the only keys a
+		// repeater's score is read under) can hold a transmission more
+		// than once; raw hop buckets get one entry per transmission from
+		// addTxToPathHopIndex and are counted directly, which keeps this
+		// pass near its previous cost (BenchmarkTrafficShareScoreMap_158).
+		var relayed int
+		if len(key) == 64 {
+			relayed, ids = countDistinctNonAdvert(list, ids)
+		} else {
+			relayed = countNonAdvert(list)
+		}
 		if relayed == 0 {
 			continue
 		}

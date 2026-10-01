@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -440,6 +441,34 @@ func TestPathHopIndexOncePerTx_AfterLoad_158(t *testing.T) {
 	assertOncePerRelay158(t, store, 0)
 }
 
+func TestCountDistinctNonAdvert_158(t *testing.T) {
+	pt, advert := 2, payloadTypeAdvert
+	tx := func(id int) *StoreTx { return &StoreTx{ID: id, PayloadType: &pt} }
+	t1, t2, t3 := tx(1), tx(2), tx(3)
+	ad := &StoreTx{ID: 4, PayloadType: &advert}
+	cases := []struct {
+		name string
+		list []*StoreTx
+		want int
+	}{
+		{"empty", nil, 0},
+		{"ascending", []*StoreTx{t1, t2, t3}, 3},
+		{"descending (chunk load order)", []*StoreTx{t3, t2, t1}, 3},
+		{"adjacent duplicate", []*StoreTx{t1, t1}, 1},
+		{"ascending then duplicate", []*StoreTx{t1, t2, t3, t3}, 3},
+		{"interleaved duplicates", []*StoreTx{t1, t2, t1, t3, t2}, 3},
+		{"adverts and nils skipped", []*StoreTx{nil, ad, t2, ad, nil, t2}, 1},
+	}
+	var ids []int
+	for _, c := range cases {
+		var got int
+		got, ids = countDistinctNonAdvert(c.list, ids)
+		if got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
 // duplicateFullKeyEntries158 reproduces the pre-#158 index shape: every
 // transmission in a full-pubkey bucket is present `extra` more times.
 func duplicateFullKeyEntries158(store *PacketStore, extra int) {
@@ -628,10 +657,24 @@ func BenchmarkIngestNewObservations_158(b *testing.B) {
 
 // BenchmarkTrafficShareScoreMap_158 measures the bulk traffic-share pass
 // (cache-miss path of GetRepeaterUsefulnessScoreMap) on realistic sizes.
+// order=reversed reverses every bucket, as when background chunks load
+// older transmissions after newer ones: no bucket is in ascending ID order.
 func BenchmarkTrafficShareScoreMap_158(b *testing.B) {
-	for _, n := range []int{20000, 100000} {
-		b.Run(fmt.Sprintf("txs=%d", n), func(b *testing.B) {
-			store, _ := lateObsBenchStore158(n)
+	for _, c := range []struct {
+		n        int
+		reversed bool
+	}{{20000, false}, {100000, false}, {20000, true}, {100000, true}} {
+		order := "ingest"
+		if c.reversed {
+			order = "reversed"
+		}
+		b.Run(fmt.Sprintf("txs=%d/order=%s", c.n, order), func(b *testing.B) {
+			store, _ := lateObsBenchStore158(c.n)
+			if c.reversed {
+				for _, list := range store.byPathHop {
+					slices.Reverse(list)
+				}
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
