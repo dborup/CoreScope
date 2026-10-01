@@ -60,6 +60,12 @@ func TestErrForLogMasksKnownSecrets_118(t *testing.T) {
 			t.Errorf("errForLog(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
+	// longest first: a user name that is also the start of the URL's
+	// user-info must not leave the password behind
+	both := mqttSourceSecrets(MQTTSource{Broker: "tcp://" + credUser + ":" + credPass + "@host", Username: credUser})
+	if got := errForLog(errors.New("auth "+credUser+":"+credPass), both...); got != "auth ****" {
+		t.Errorf("user name before user-info: %q, want %q", got, "auth ****")
+	}
 	// only non-empty values: an empty one would mask between every rune
 	if got := errForLog(errors.New("EOF"), mqttSourceSecrets(MQTTSource{Broker: "tcp://host?"})...); got != "EOF" {
 		t.Errorf("no secrets: %q", got)
@@ -105,6 +111,22 @@ func TestWriteStatsAtomicRefusesForeignTmp_118(t *testing.T) {
 	t.Cleanup(func() { statsFileEUID = old })
 	statsFileEUID = func() int { return os.Geteuid() + 1 } // the tmp is someone else's
 	assertForeignTmpRefused118(t, func(string) {})
+}
+
+// A stale tmp file of our own loses its old content: without O_TRUNC the
+// file is truncated after the owner check, and a longer stale file must
+// not leave a tail behind the new JSON.
+func TestWriteStatsAtomicTruncatesOwnStaleTmp_118(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+	if err := os.WriteFile(path+".tmp", []byte(strings.Repeat("stale ", 100)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStatsAtomic(path, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != `{}` {
+		t.Fatalf("stats file %q, %v; want {}", b, err)
+	}
 }
 
 // The same with a real foreign owner, which needs root to set up.
