@@ -211,6 +211,38 @@ if (pillRuleMatch) {
 const inlineHardcoded = /color:\s*#1a1a1a/.test(mapSrc);
 assert(!inlineHardcoded, 'public/map.js does not hardcode color:#1a1a1a on .mc-pill inline style');
 
+console.log('\n=== #1407 G: ROLE_COLORS follows the preset delivered by body[data-cb-preset] ===');
+// Regression: since #1449 customize-v2 removes the documentElement
+// --mc-role-* write while a preset is active, so the preset colour only exists
+// on <body> (style.css rule). ROLE_COLORS must resolve through <body>, otherwise
+// JS consumers (map, analytics, live) keep the Wong default under a CB preset.
+{
+  const genv = makeSandbox();
+  const deutBlock = styleSrc.match(/body\[data-cb-preset="deut"\]\s*\{([^}]*)\}/);
+  const wongRepeater = '#D55E00';
+  genv.sandbox.getComputedStyle = function (el) {
+    return {
+      getPropertyValue: function (k) {
+        if (el === genv.body && genv.body.getAttribute('data-cb-preset') === 'deut' && deutBlock) {
+          const m = deutBlock[1].match(new RegExp(k + ':\\s*(#[0-9a-fA-F]{6})'));
+          if (m) return m[1];
+        }
+        // <body> inherits :root; nothing is written inline on documentElement.
+        return k === '--mc-role-repeater' ? wongRepeater : '';
+      }
+    };
+  };
+  vm.createContext(genv.sandbox);
+  vm.runInContext(rolesSrc, genv.sandbox);
+  assert(!!deutBlock, 'style.css has a body[data-cb-preset="deut"] block');
+  assert(String(genv.sandbox.window.ROLE_COLORS.repeater).toLowerCase() === '#d55e00',
+    'no preset: ROLE_COLORS.repeater is the :root Wong default');
+  genv.body.setAttribute('data-cb-preset', 'deut');
+  const viaBody = String(genv.sandbox.window.ROLE_COLORS.repeater).toLowerCase();
+  assert(viaBody === '#fe6100',
+    'preset deut active via body[data-cb-preset] only: ROLE_COLORS.repeater === #FE6100 (got ' + viaBody + ')');
+}
+
 console.log('\n=== Summary ===');
 console.log('  passed: ' + passed);
 console.log('  failed: ' + failed);

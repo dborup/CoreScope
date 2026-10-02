@@ -32,7 +32,11 @@
       if (typeof document === 'undefined' || !document.documentElement) return fallback;
       var v = '';
       if (typeof getComputedStyle === 'function') {
-        v = getComputedStyle(document.documentElement).getPropertyValue(name);
+        // Resolve on <body>, not documentElement: an active CB preset delivers
+        // its colours through body[data-cb-preset="X"] (style.css), and since
+        // #1449 customize-v2 no longer mirrors them onto documentElement.
+        // <body> inherits every :root value, so non-preset reads are unchanged.
+        v = getComputedStyle(document.body || document.documentElement).getPropertyValue(name);
       }
       if (!v && document.documentElement.style && typeof document.documentElement.style.getPropertyValue === 'function') {
         v = document.documentElement.style.getPropertyValue(name);
