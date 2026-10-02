@@ -1182,6 +1182,9 @@
         localStorage.setItem('live-matrix-mode', matrixMode);
         applyMatrixTheme(matrixMode);
         syncHeatToggleToMatrix(matrixMode);
+        // Matrix ON hid the heat layer; OFF brings it back as Heat is set.
+        // During init applyLiveControlEffects() (re)builds it after loadNodes().
+        if (!matrixMode && heatEnabled) showHeatMap();
       } },
       { id: 'liveMatrixRainToggle', restore: () => matrixRain, onChange: (v) => {
         matrixRain = v;
@@ -1202,7 +1205,8 @@
   }
 
   // Matrix mode owns the heat map: while it is on, the heat layer is hidden
-  // and its toggle unchecked and disabled. Safe before the map exists.
+  // and its toggle unchecked and disabled. When it is off, the toggle shows
+  // the Heat setting again (#150). Safe before the map exists.
   function syncHeatToggleToMatrix(on) {
     const ht = document.getElementById('liveHeatToggle');
     if (on) {
@@ -1210,6 +1214,7 @@
       if (ht) { ht.checked = false; ht.disabled = true; }
     } else if (ht) {
       ht.disabled = false; // recover from stale state
+      ht.checked = heatEnabled;
     }
   }
 

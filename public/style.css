@@ -5101,7 +5101,9 @@ td[data-filter-field] { cursor: context-menu; }
   justify-content: space-between;
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-2, var(--surface));
+  /* nav-drawer.css paints the title and close button with --nav-text(-muted),
+     so the header sits on the nav colours in every theme (#150). */
+  background: var(--nav-bg2);
 }
 .nav-drawer-title {
   font-weight: 700;

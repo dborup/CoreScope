@@ -8,7 +8,7 @@
   "observerIATAWhitelist": [],
   "_comment_observerIATAWhitelist": "Global IATA region whitelist. When non-empty, only observers whose IATA code (from MQTT topic) matches are processed. Case-insensitive. Empty = allow all. Unlike per-source iataFilter, this applies across all MQTT sources. A dropped region is logged by the ingestor as one '[region-filter] dropping region \"XYZ\"' line, repeated at most every iataWarnIntervalSec while it keeps arriving.",
   "iataWarnIntervalSec": 21600,
-  "_comment_iataWarnIntervalSec": "Optional (ingestor). Seconds between repeated '[region-filter]' warnings for a region dropped by observerIATAWhitelist. Default 21600 (6h); 0 or omitted = default. At most 512 regions are tracked individually (region codes come from the MQTT topic, so this is bounded); beyond that, drops share one overflow warning with the same interval.",
+  "_comment_iataWarnIntervalSec": "Optional (ingestor). Seconds between repeated '[region-filter]' warnings for a region dropped by observerIATAWhitelist. Default 21600 (6h); 0 or omitted = default; maximum 86400 (24h), larger values are capped. At most 512 regions are tracked individually (region codes come from the MQTT topic, so this is bounded); beyond that, drops share one overflow warning with the same interval.",
   "retention": {
     "nodeDays": 7,
     "observerDays": 14,

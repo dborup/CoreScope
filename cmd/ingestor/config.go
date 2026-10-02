@@ -73,7 +73,8 @@ type Config struct {
 
 	// IATAWarnIntervalSec is how often a region dropped by
 	// ObserverIATAWhitelist is re-logged while it keeps arriving (#110).
-	// 0 or less means the default, 6 hours. See iata_drop_warn.go.
+	// 0 or less means the default, 6 hours; larger than 86400 (24 hours)
+	// is capped at 86400. See iata_drop_warn.go.
 	IATAWarnIntervalSec int `json:"iataWarnIntervalSec,omitempty"`
 
 	// iataDropWarn is the bounded per-region throttle for that warning.

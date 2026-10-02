@@ -273,6 +273,70 @@ async function edgeSwipe(page, x0, y0, x1, y1, steps) {
 
   await wideCtx.close();
 
+  // (k) #150: the header title (and close button) must be readable on the
+  // header background in both themes. The light theme used to paint the
+  // header with --surface-2 (white) under the white --nav-text title.
+  for (const theme of ['light', 'dark']) {
+    await step(`(k) ${theme} theme: header title ≥ 4.5:1 and close button ≥ 3:1 on the header background`, async () => {
+      const ctx = await browser.newContext({ viewport: { width: 1024, height: 800 }, colorScheme: theme });
+      const p = await ctx.newPage();
+      p.setDefaultTimeout(10000);
+      await p.addInitScript((t) => { try { localStorage.setItem('meshcore-theme', t); } catch (_) {} }, theme);
+      try {
+        await p.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+        await p.waitForFunction(() => !!(window.__navDrawer && window.__navDrawer.open));
+        await p.evaluate(() => window.__navDrawer.open());
+        await p.waitForSelector('[data-nav-drawer] .nav-drawer-title', { state: 'visible' });
+        const r = await p.evaluate(() => {
+          function rgba(s) {
+            const m = /rgba?\(([^)]+)\)/.exec(s);
+            if (!m) throw new Error('unparsed colour ' + s);
+            const v = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+            return { r: v[0], g: v[1], b: v[2], a: v.length > 3 ? v[3] : 1 };
+          }
+          // opaque colour under el: its own background composited over its
+          // ancestors' (stopping at the first opaque one)
+          function backdrop(el) {
+            const layers = [];
+            for (let n = el; n; n = n.parentElement) {
+              const c = rgba(getComputedStyle(n).backgroundColor);
+              if (c.a > 0) layers.push(c);
+              if (c.a >= 1) break;
+            }
+            let out = { r: 255, g: 255, b: 255 };
+            for (let i = layers.length - 1; i >= 0; i--) {
+              const c = layers[i];
+              out = { r: c.r * c.a + out.r * (1 - c.a), g: c.g * c.a + out.g * (1 - c.a), b: c.b * c.a + out.b * (1 - c.a) };
+            }
+            return out;
+          }
+          function lum(c) {
+            const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+            return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+          }
+          function ratio(fg, bg) {
+            const a = lum(fg), b = lum(bg);
+            return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+          }
+          const header = document.querySelector('[data-nav-drawer] .nav-drawer-header');
+          const title = header.querySelector('.nav-drawer-title');
+          const close = header.querySelector('.nav-drawer-close');
+          const bg = backdrop(header);
+          return {
+            theme: document.documentElement.getAttribute('data-theme'),
+            bg: getComputedStyle(header).backgroundColor,
+            title: getComputedStyle(title).color,
+            titleRatio: ratio(rgba(getComputedStyle(title).color), bg),
+            closeRatio: ratio(rgba(getComputedStyle(close).color), backdrop(close)),
+          };
+        });
+        assert(r.theme === theme, 'data-theme is ' + r.theme + ', want ' + theme);
+        assert(r.titleRatio >= 4.5, `title ${r.title} on header ${r.bg}: ${r.titleRatio.toFixed(2)}:1 < 4.5:1`);
+        assert(r.closeRatio >= 3, `close button on header ${r.bg}: ${r.closeRatio.toFixed(2)}:1 < 3:1`);
+      } finally { await ctx.close(); }
+    });
+  }
+
   // ── Narrow viewport (Option A): drawer disabled ──
   const narrowCtx = await browser.newContext({ viewport: { width: 360, height: 800 } });
   const narrow = await narrowCtx.newPage();
