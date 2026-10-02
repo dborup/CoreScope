@@ -1042,8 +1042,8 @@ function makeSandbox(apiImpl) {
       };
 
       await ctx.window.PacketPathMap.open('deadbeef');
-      assert.ok(tooltips.some((t) => t.includes('📡') && t.includes('RepeaterA')), 'expected a repeater icon on RepeaterA, got: ' + JSON.stringify(tooltips));
-      assert.ok(tooltips.some((t) => t.includes('🏠') && t.includes('RoomObserver')), 'expected a room icon on RoomObserver, got: ' + JSON.stringify(tooltips));
+      assert.ok(tooltips.some((t) => t.includes('#ph-broadcast') && t.includes('RepeaterA')), 'expected a repeater icon on RepeaterA, got: ' + JSON.stringify(tooltips));
+      assert.ok(tooltips.some((t) => t.includes('#ph-house-line') && t.includes('RoomObserver')), 'expected a room icon on RoomObserver, got: ' + JSON.stringify(tooltips));
       passed++;
       console.log('  ✅ nodes with a known role get a role icon in their tooltip');
     } catch (e) { failed++; console.log('  ❌ nodes with a known role get a role icon in their tooltip: ' + e.message); }

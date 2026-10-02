@@ -94,12 +94,18 @@
   // markers stay circleMarker dots throughout (a role-specific shape
   // would clash with the color/dash coding already carrying primary,
   // approx, and observer meaning).
+  // Phosphor sprite icons, not emoji (#1648 lint gate); same glyphs as
+  // observer-detail.js's directNeighborRoleIcon.
+  function phIcon(name) {
+    return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg> ';
+  }
+
   function roleIcon(role) {
     switch (role) {
-      case 'repeater': return '📡 ';
-      case 'room': return '🏠 ';
-      case 'client': return '📱 ';
-      case 'sensor': return '🌡️ ';
+      case 'repeater': return phIcon('broadcast');
+      case 'room': return phIcon('house-line');
+      case 'client': return phIcon('radio');
+      case 'sensor': return phIcon('thermometer');
       default: return '';
     }
   }
@@ -412,7 +418,7 @@
         radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
       })
         .addTo(map)
-        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
+        .bindTooltip(phIcon('flag') + 'First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
     }
 
     try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }
