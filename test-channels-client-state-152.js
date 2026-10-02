@@ -311,6 +311,10 @@ function makeDecryptSandbox(opts) {
   ctx.window = ctx;
   ctx.self = ctx;
   vm.createContext(ctx);
+  // lateStorage: the module loads before localStorage exists.
+  const storageApi = ctx.localStorage;
+  if (opts.lateStorage) delete ctx.localStorage;
+  sb.attachStorage = () => { ctx.localStorage = storageApi; };
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'public/channel-decrypt.js'), 'utf8'), ctx, { filename: 'public/channel-decrypt.js' });
   sb.CD = ctx.ChannelDecrypt;
   sb.raw = () => sb.storage[DECRYPT_CACHE_KEY] || '';
@@ -1166,6 +1170,40 @@ async function test(name, fn) {
       assert.ok(reloaded.CD.getCache(sb.CD.channelCacheKey('written-later', '')), 'the migration must not run again on the next page load');
     });
   }
+
+  // #163 item 5: the cleanup ran lazily, on the first cache read or write,
+  // so old-format plaintext stayed in localStorage until the channels page
+  // happened to use the cache. It now runs when ChannelDecrypt initialises.
+  const OLD_BLOB = () => JSON.stringify({
+    '#oldchan': cacheEntry('PLAIN pre-153'),
+    'psk:legacy|SJC': cacheEntry('PLAIN 153'),
+  });
+
+  for (const marker of [undefined, '2']) {
+    await test('#163 item 5: loading the module drops old-format cache entries without any cache use (version marker ' + marker + ')', async () => {
+      const storage = { [DECRYPT_CACHE_KEY]: OLD_BLOB() };
+      if (marker !== undefined) storage.corescope_channel_cache_v = marker;
+      const sb = makeDecryptSandbox({ storage });
+      // No getCache()/setCache()/clearChannelCache() call: only the load.
+      assert.ok(!/PLAIN/.test(sb.raw()), 'old plaintext must be gone right after load (got ' + sb.raw().slice(0, 100) + ')');
+      assert.strictEqual(sb.storage.corescope_channel_cache_v, '3', 'the version marker must be set');
+    });
+  }
+
+  await test('#163 item 5: a current-format cache survives the load', async () => {
+    const key = makeDecryptSandbox().CD.channelCacheKey('psk:keep', 'SJC');
+    const sb = makeDecryptSandbox({ storage: { corescope_channel_cache_v: '3', [DECRYPT_CACHE_KEY]: JSON.stringify({ [key]: cacheEntry('KEEP') }) } });
+    assert.deepStrictEqual(sb.keys(), [key], 'a version-3 cache must be left alone by the load');
+    assert.strictEqual(sb.CD.getCache(key).messages[0].text, 'KEEP');
+  });
+
+  await test('#163 item 5: the lazy call stays as a fallback when localStorage was not available at load', async () => {
+    const sb = makeDecryptSandbox({ lateStorage: true, storage: { [DECRYPT_CACHE_KEY]: OLD_BLOB() } });
+    assert.ok(/PLAIN/.test(sb.raw()), 'precondition: nothing could be cleaned at load');
+    sb.attachStorage();
+    assert.strictEqual(sb.CD.getCache('psk:legacy|SJC'), null, 'the first cache use must not serve an old-format entry');
+    assert.ok(!/PLAIN/.test(sb.raw()), 'the first cache use must drop the old plaintext (got ' + sb.raw().slice(0, 100) + ')');
+  });
 
   // ── R4-3 (#153 review round 4, P3): the N1 "a load is pending" flag was
   // one shared boolean, set only inside decryptAndRender(). A superseded

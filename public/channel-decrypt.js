@@ -554,6 +554,11 @@ window.ChannelDecrypt = (function () {
     return entry;
   }
 
+  // #163: drop old-format cache entries (and their plaintext) when the module
+  // loads, not on the first cache use. The calls in the cache functions stay
+  // as the fallback for a localStorage that wasn't available yet.
+  ensureCacheMigrated();
+
   return {
     deriveKey: deriveKey,
     decrypt: decrypt,
