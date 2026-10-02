@@ -103,19 +103,19 @@ async function runTests() {
 
   // Store a key and some cached messages
   CD.storeKey('#TestChannel', 'deadbeefdeadbeefdeadbeefdeadbeef');
-  CD.setCache('#TestChannel', [{ sender: 'A', text: 'hello', timestamp: '2026-01-01T00:00:00Z', packetHash: 'h1' }], '2026-01-01T00:00:00Z', 1);
+  CD.setCache(CD.channelCacheKey('#TestChannel', ''), [{ sender: 'A', text: 'hello', timestamp: '2026-01-01T00:00:00Z', packetHash: 'h1' }], '2026-01-01T00:00:00Z', 1);
 
   // Verify they exist
   var storedKeys = CD.getStoredKeys();
   assert(storedKeys['#TestChannel'] === 'deadbeefdeadbeefdeadbeefdeadbeef', 'Key exists before removal');
-  var cachedBefore = CD.getCache('#TestChannel');
+  var cachedBefore = CD.getCache(CD.channelCacheKey('#TestChannel', ''));
   assert(cachedBefore && cachedBefore.messages.length === 1, 'Cache exists before removal');
 
   // Remove the key (also clears cache)
   CD.removeKey('#TestChannel');
   var storedAfter = CD.getStoredKeys();
   assert(!storedAfter['#TestChannel'], 'Key cleared after removal');
-  var cachedAfter = CD.getCache('#TestChannel');
+  var cachedAfter = CD.getCache(CD.channelCacheKey('#TestChannel', ''));
   assert(!cachedAfter, 'Cache cleared after removal');
 
   console.log('\n=== M5: Cache operations ===');
@@ -144,10 +144,12 @@ async function runTests() {
   assert(deltaCache.count === 1, 'Delta cache count correct');
 
   // Test: clearChannelCache
-  CD.setCache('clearthis', [{ sender: 'X', text: 'y' }], 'ts', 1);
-  assert(CD.getCache('clearthis') !== null, 'Cache exists before clear');
+  // The key is the real one (#153/#163): "<channel>|<regions>".
+  var clearKey = CD.channelCacheKey('clearthis', '');
+  CD.setCache(clearKey, [{ sender: 'X', text: 'y' }], 'ts', 1);
+  assert(CD.getCache(clearKey) !== null, 'Cache exists before clear');
   CD.clearChannelCache('clearthis');
-  assert(CD.getCache('clearthis') === null, 'Cache cleared by clearChannelCache');
+  assert(CD.getCache(clearKey) === null, 'Cache cleared by clearChannelCache');
 
   console.log('\n=== Results ===');
   console.log('Passed: ' + passed + ', Failed: ' + failed);
