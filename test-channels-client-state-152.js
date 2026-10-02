@@ -1129,6 +1129,18 @@ async function test(name, fn) {
     assert.strictEqual(CD.channelCacheKey('psk:r4sort', 'SJC'), 'psk:r4sort|SJC', 'a name without "|" or "%" keeps its key');
   });
 
+  // #163 item 4: cacheMessages()/getCachedMessages() wrote and read bare
+  // "<channel>" keys, outside the "<channel>|<regions>" format. Nothing
+  // called them; any caller has to go through channelCacheKey().
+  await test('#163 item 4: the unused bare-name cacheMessages/getCachedMessages API is gone', async () => {
+    const { CD } = makeDecryptSandbox();
+    assert.strictEqual(CD.cacheMessages, undefined, 'cacheMessages must not be exported');
+    assert.strictEqual(CD.getCachedMessages, undefined, 'getCachedMessages must not be exported');
+    assert.strictEqual(typeof CD.channelCacheKey, 'function', 'channelCacheKey stays the way to build a key');
+    assert.strictEqual(typeof CD.setCache, 'function');
+    assert.strictEqual(typeof CD.getCache, 'function');
+  });
+
   // Every cache blob written before the key format settled is dropped once:
   // pre-#153 entries are keyed by the bare channel name, #153's by the
   // unescaped "<name>|<regions>", and the two can't be told apart for a name

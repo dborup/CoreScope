@@ -529,18 +529,6 @@ window.ChannelDecrypt = (function () {
     writeCacheBlob(cache);
   }
 
-  function cacheMessages(channelHash, messages) {
-    ensureCacheMigrated();
-    var cache = readCacheBlob();
-    cache[channelHash] = { messages: messages, ts: Date.now(), at: nextCacheUse() };
-    writeCacheBlob(cache);
-  }
-
-  function getCachedMessages(channelHash) {
-    var entry = getCache(channelHash);
-    return entry ? entry.messages : null;
-  }
-
   function setCache(key, messages, lastTimestamp, totalCount) {
     ensureCacheMigrated();
     // Enforce cache size limit: only keep most recent MAX_CACHED_MESSAGES
@@ -587,8 +575,6 @@ window.ChannelDecrypt = (function () {
     getLabels: getLabels,
     channelCacheKey: channelCacheKey,
     clearChannelCache: clearChannelCache,
-    cacheMessages: cacheMessages,
-    getCachedMessages: getCachedMessages,
     setCache: setCache,
     getCache: getCache,
     deleteCache: deleteCache,
