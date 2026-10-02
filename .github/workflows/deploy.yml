@@ -194,6 +194,7 @@ jobs:
           node test-issue-1509-detect-preset.js
           node test-live.js
           node test-issue-124-rx-coverage-viewport.js
+          node test-rx-coverage-escape.js
           node test-issue-125-live-toggles-wiring.js
           node test-coverage-gate.js
           node test-node-reach-coverage.js
