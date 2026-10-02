@@ -18,6 +18,7 @@ import (
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
 	regionutil "github.com/meshcore-analyzer/regions"
+	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
 
@@ -112,6 +113,13 @@ type DB struct {
 	// channelsRowsHook wraps the result rows of each real query, so a test
 	// can fail the iteration part-way.
 	channelsRowsHook func(kind string, rows channelRows) channelRows
+
+	// Region-membership cache for GetNodes (see nodes_region_cache.go).
+	nodeRegionCacheMu   sync.Mutex
+	nodeRegionCache     map[string]*nodeRegionEntry
+	nodeRegionSF        singleflight.Group
+	nodeRegionFullMu    sync.Mutex
+	nodeRegionQueryHook func()
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.
@@ -1126,30 +1134,13 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 		}
 	}
 
-	if region != "" {
-		codes := normalizeRegionCodes(region)
-		if len(codes) > 0 {
-			placeholders := make([]string, len(codes))
-			regionArgs := make([]interface{}, len(codes))
-			for i, c := range codes {
-				placeholders[i] = "?"
-				regionArgs[i] = c
-			}
-			joinCond := "obs.rowid = o.observer_idx"
-			if !db.isV3() {
-				joinCond = "obs.id = o.observer_id"
-			}
-			subq := fmt.Sprintf(`public_key IN (
-				SELECT DISTINCT JSON_EXTRACT(t.decoded_json, '$.pubKey')
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				JOIN observers obs ON %s
-				WHERE t.payload_type = 4
-				AND UPPER(TRIM(obs.iata)) IN (%s)
-			)`, joinCond, strings.Join(placeholders, ","))
-			where = append(where, subq)
-			args = append(args, regionArgs...)
+	if codes := normalizeRegionCodes(region); len(codes) > 0 {
+		keysJSON, err := db.nodeRegionKeysJSON(codes)
+		if err != nil {
+			return nil, 0, nil, err
 		}
+		where = append(where, "public_key IN (SELECT value FROM json_each(?))")
+		args = append(args, keysJSON)
 	}
 
 	w := ""
