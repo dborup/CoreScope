@@ -114,8 +114,9 @@ function fakeEl(id) {
 }
 
 // The analytics page on a server whose rf/topology/channels answer 503 +
-// Retry-After: 5 until warmMs on the fake clock.
-function pageEnv(warmMs) {
+// Retry-After: 5 until warmMs on the fake clock, each response after
+// latencyMs (0: at once).
+function pageEnv(warmMs, latencyMs) {
   const clock = fakeClock();
   const els = {};
   const el = (id) => els[id] || (els[id] = fakeEl(id));
@@ -127,17 +128,20 @@ function pageEnv(warmMs) {
   });
   const fetchImpl = async (url) => {
     fetchLog.push(url);
+    if (latencyMs) await new Promise((r) => clock.setTimeout(r, latencyMs));
     if (/\/api\/analytics\/(rf|topology|channels)\b/.test(url) && clock.now() < warmMs) {
       return respond(503, { error: 'analytics warming up', retry_after_s: 5 }, '5');
     }
-    if (/\/api\/analytics\/rf\b/.test(url)) return respond(200, WARM_RF);
+    if (/\/api\/analytics\/rf\b/.test(url)) {
+      return respond(200, Object.assign({}, WARM_RF, /region=CPH/.test(url) ? { totalTransmissions: 8765 } : {}));
+    }
     if (/\/api\/analytics\/topology\b/.test(url)) return respond(200, WARM_TOPO);
     if (/\/api\/analytics\/channels\b/.test(url)) return respond(200, WARM_CHAN);
     if (/relay-airtime-share/.test(url)) return respond(200, { rows: [] });
     return respond(200, {});
   };
   class FakeDate extends Date { static now() { return 1790000000000 + clock.now(); } }
-  let regionCb = null;
+  let regionCb = null, region = '';
   const pages = {};
   const ctx = {
     window: { addEventListener() {}, removeEventListener() {}, dispatchEvent() {} },
@@ -157,7 +161,7 @@ function pageEnv(warmMs) {
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
     timeAgo: () => 'x ago', initTabBar() {}, makeColumnsResizable() {},
     onWS() {}, offWS() {}, connectWS() {}, invalidateApiCache() {}, IATA_COORDS_GEO: {},
-    RegionFilter: { init() {}, onChange: (fn) => { regionCb = fn; }, regionQueryString: () => '' },
+    RegionFilter: { init() {}, onChange: (fn) => { regionCb = fn; }, regionQueryString: () => region },
     AreaFilter: { init() {}, onChange() {}, areaQueryString: () => '' },
   };
   vm.createContext(ctx);
@@ -169,7 +173,7 @@ function pageEnv(warmMs) {
   load('public/analytics.js');
   return {
     clock, el, page: pages.analytics,
-    regionChanged: () => regionCb(),
+    regionChanged: (r) => { region = r ? '&region=' + r : ''; regionCb(); },
     analyticsFetches: () => fetchLog.filter((u) => /\/api\/analytics\/(rf|topology|channels)\b/.test(u)).length,
   };
 }
@@ -392,6 +396,19 @@ function pageEnv(warmMs) {
     }
     assert.ok(maxTimers <= 1, maxTimers + ' retry timers pending at once');
     assert.strictEqual(content.dataWrites(), 1, 'the data was rendered ' + content.dataWrites() + ' times (the superseded load rendered too)');
+  });
+
+  await test('a slow response of a superseded load does not render over the newer one', async () => {
+    const env = pageEnv(0, 3000);
+    env.page.init(env.el('app'));               // all regions: answers at 3 s
+    const content = env.el('analyticsContent');
+    await env.clock.advance(1000);
+    env.regionChanged('CPH');                   // region CPH: answers at 4 s
+    await env.clock.advance(2500);
+    assert.strictEqual(content.dataWrites(), 0, 'the superseded all-regions load rendered: ' + content.innerHTML.slice(0, 120));
+    await env.clock.advance(2000);
+    assert.strictEqual(content.dataWrites(), 1, 'the CPH load did not render once: ' + content.dataWrites());
+    assert.ok(/8,765|8765/.test(content.innerHTML), 'not the CPH data: ' + content.innerHTML.slice(0, 200));
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
