@@ -799,15 +799,35 @@
     cb.style.display = active ? '' : 'none';
   }
 
-  function updatePacketsUrl() {
-    // Preserve any subpath after /packets (e.g. #/packets/<hash>).
+  // The only writer of #/packets... (#147). Filter params come from
+  // buildPacketsQuery; the packet-detail params it does not own are added
+  // after them: ?obs= (selected observation) while a detail subpath is open,
+  // and ?viewPath=1 only while its View Path modal is open on that same
+  // packet, so the URL keeps describing what is shown.
+  // detail (optional): { subpath: '/<hash|id>' or '', obs: id or null } when
+  // the caller changes the selection; without it the current subpath and
+  // ?obs= are kept (filter changes, Clear Filters, cold load).
+  function updatePacketsUrl(detail) {
     var cur = String(location.hash || '');
-    var subpath = '';
+    var qIdx = cur.indexOf('?');
+    var curParams = qIdx < 0 ? [] : cur.slice(qIdx + 1).split('&');
     var m = cur.match(/^#\/packets(\/[^?]*)?/);
-    if (m && m[1]) subpath = m[1];
+    var curSubpath = (m && m[1]) || '';
+    var subpath = detail ? detail.subpath : curSubpath;
     // Don't double-encode filters.hash when it's already the path segment.
     var skipHash = !!(filters.hash && subpath === '/' + filters.hash);
-    history.replaceState(null, '', '#/packets' + subpath + buildPacketsQuery(savedTimeWindowMin, RegionFilter.getRegionParam(), skipHash));
+    var query = buildPacketsQuery(savedTimeWindowMin, RegionFilter.getRegionParam(), skipHash);
+    var keep = [];
+    if (subpath) {
+      if (detail) {
+        if (detail.obs) keep.push('obs=' + encodeURIComponent(detail.obs));
+      } else {
+        keep = curParams.filter(function (p) { return /^obs=./.test(p); });
+      }
+      if (subpath === curSubpath && curParams.indexOf('viewPath=1') !== -1 && document.getElementById('packetPathModal')) keep.push('viewPath=1');
+    }
+    if (keep.length) query += (query ? '&' : '?') + keep.join('&');
+    history.replaceState(null, '', '#/packets' + subpath + query);
     updateClearFiltersVisibility();
   }
 
@@ -1095,13 +1115,6 @@
         try { renderTableRows(); } catch (e) { console.warn('[packets] hide-1byte re-render failed', e); }
       });
     }
-    // Parse ?obs=OBSERVER_ID from routeParam
-    if (routeParam && routeParam.includes('?')) {
-      const qIdx = routeParam.indexOf('?');
-      const qs = new URLSearchParams(routeParam.substring(qIdx));
-      directObsId = qs.get('obs');
-      routeParam = routeParam.substring(0, qIdx);
-    }
     // Detect route param type: "id/123" for direct packet, short hex for hash, long hex for node
     if (routeParam) {
       if (routeParam.startsWith('id/')) {
@@ -1125,6 +1138,10 @@
     if (_urlRegion) _pendingUrlRegion = _urlRegion;
     var _urlHash = _initUrlParams.get('hash');
     if (_urlHash) filters.hash = _urlHash;
+    // ?obs=<observation id> on #/packets/<hash> selects that observation in
+    // the auto-opened detail below (#147: it used to be parsed from
+    // routeParam, which never carries the query).
+    directObsId = _initUrlParams.get('obs');
     // Shareable "View Path" link (?viewPath=1) -- packet-path-map.js's
     // "Copy link" button builds #/packets/<hash>?viewPath=1, so a shared
     // link reopens the exact same modal instead of leaving the recipient
@@ -1848,8 +1865,8 @@
       if (filters.type) localStorage.setItem('meshcore-type-filter', filters.type); else localStorage.removeItem('meshcore-type-filter');
       buildTypeMenu();
       updateTypeTrigger();
-      // Type is not in the URL, so leave the hash alone (updatePacketsUrl()
-      // would drop ?obs=/?viewPath=); only refresh the Clear button (#121).
+      // Type is not in the URL, so leave the hash alone; only refresh the
+      // Clear button (#121).
       updateClearFiltersVisibility();
       renderTableRows();
     });
@@ -3131,12 +3148,7 @@
   async function selectPacket(id, hash, prefetchedData, obsRowId) {
     selectedId = id;
     selectedObservationId = obsRowId || null;
-    const obsParam = selectedObservationId ? `?obs=${selectedObservationId}` : '';
-    if (hash) {
-      history.replaceState(null, '', `#/packets/${hash}${obsParam}`);
-    } else {
-      history.replaceState(null, '', `#/packets/${id}${obsParam}`);
-    }
+    updatePacketsUrl({ subpath: '/' + (hash || id), obs: selectedObservationId });
     renderTableRows();
     const isMobileNow = window.innerWidth <= 640;
     // #1168 review note: this branch is intentionally narrower than nodes.js /
@@ -3169,7 +3181,7 @@
         onClose: function () {
           selectedId = null;
           selectedObservationId = null;
-          history.replaceState(null, '', '#/packets');
+          updatePacketsUrl({ subpath: '', obs: null });
           renderTableRows();
         }
       });
@@ -3559,9 +3571,7 @@
         const obsId = row.dataset.obsId;
         selectedObservationId = obsId;
         // Update URL hash to reflect selected observation (deep linking)
-        const pktHash = pkt.hash || pkt.id;
-        const obsParam = obsId ? `?obs=${obsId}` : '';
-        history.replaceState(null, '', `#/packets/${pktHash}${obsParam}`);
+        updatePacketsUrl({ subpath: '/' + (pkt.hash || pkt.id), obs: obsId });
         renderDetail(panel, data, obsId);
       });
     });

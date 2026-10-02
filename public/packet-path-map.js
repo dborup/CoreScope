@@ -80,9 +80,26 @@
     if (e.key === 'Escape') close();
   }
 
+  // A #/packets/<hash>?…&viewPath=1 URL describes this modal as open (#147).
+  // Once it closes, drop that one param (the others stay verbatim) so a
+  // refresh or a copied address-bar link does not reopen it.
+  function dropViewPathParam() {
+    if (typeof history === 'undefined' || !history.replaceState) return;
+    var h = String(location.hash || '');
+    var q = h.indexOf('?');
+    if (q < 0 || h.indexOf('#/packets/') !== 0) return;
+    var params = h.slice(q + 1).split('&');
+    var kept = params.filter(function (p) { return p !== 'viewPath=1'; });
+    if (kept.length === params.length) return;
+    history.replaceState(null, '', h.slice(0, q) + (kept.length ? '?' + kept.join('&') : ''));
+  }
+
   function close() {
     var overlay = document.getElementById('packetPathModal');
-    if (overlay) overlay.remove();
+    if (overlay) {
+      overlay.remove();
+      dropViewPathParam();
+    }
     if (activeMap) {
       try { activeMap.remove(); } catch (e) { /* already gone */ }
       activeMap = null;

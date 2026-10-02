@@ -49,12 +49,17 @@ async function currentObs(page) {
 
 async function stubDetail(context, hash) {
   await context.route((url) => url.pathname === '/api/packets/' + hash, async (route) => {
-    const upstream = await context.request.fetch(route.request());
-    const data = await upstream.json();
-    const base = (data.observations && data.observations[0]) || {};
-    const extra = Object.assign({}, base, { id: Number(SYN_OBS), observer_name: 'e2e-147-observer', snr: -3.5, rssi: -111 });
-    data.observations = (data.observations || []).concat([extra]);
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+    try {
+      const upstream = await context.request.fetch(route.request());
+      const data = await upstream.json();
+      const base = (data.observations && data.observations[0]) || {};
+      const extra = Object.assign({}, base, { id: Number(SYN_OBS), observer_name: 'e2e-147-observer', snr: -3.5, rssi: -111 });
+      data.observations = (data.observations || []).concat([extra]);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+    } catch (_) {
+      // A refetch still in flight when the context closes; nothing to answer.
+      try { await route.abort(); } catch (__) { /* already closed */ }
+    }
   });
 }
 
@@ -144,6 +149,7 @@ async function setTimeWindow(page, value) {
         assert(p.q.obs === SYN_OBS, 'obs dropped when the modal closed: ' + p.hash);
       });
     }
+    await context.unrouteAll({ behavior: 'ignoreErrors' });
     await context.close();
   }
 
