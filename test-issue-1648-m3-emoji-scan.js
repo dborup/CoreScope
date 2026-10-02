@@ -68,6 +68,15 @@ const ALLOW_SUBSTRINGS = [
   '// PATH_SYMBOLS_LEGEND',
   '// the ✕ disappears',
   '// userAdded so the',
+  // channels.js ping bot (2026-07-23, after the M3 sweep). The 🏓 is message
+  // *content* — the text of the CoreScopeBot reply, like the emoji in the
+  // home.js prose above — not UI chrome.
+  "text: '🏓 pong! '",
+  // channels.js ping-bot message avatar: still the 🤖 glyph because the sprite
+  // has no robot symbol yet. Known exception, matched narrowly so any other
+  // avatar/icon emoji still fails. TODO: add ph-robot to phosphor-sprite.svg,
+  // swap the avatar and drop this entry.
+  '>🤖</div>',
 ];
 
 function scanFile(rel) {
