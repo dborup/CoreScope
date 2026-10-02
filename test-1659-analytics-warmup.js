@@ -61,6 +61,119 @@ function makeCtx(fetchImpl) {
   return ctx;
 }
 
+// ---------------------------------------------------------------- #172
+
+// A fake clock: setTimeout only queues; advance(ms) runs what is due, in
+// time order, then lets the promise chains settle.
+function fakeClock() {
+  let now = 0, nextId = 1;
+  const timers = new Map();
+  const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
+  return {
+    now: () => now,
+    setTimeout: (fn, ms) => { const id = nextId++; timers.set(id, { fn, at: now + (Number(ms) || 0) }); return id; },
+    clearTimeout: (id) => { timers.delete(id); },
+    pending: () => [...timers.values()],
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        let next = null;
+        for (const [id, t] of timers) if (t.at <= end && (!next || t.at < next[1].at)) next = [id, t];
+        if (!next) break;
+        timers.delete(next[0]);
+        now = Math.max(now, next[1].at);
+        next[1].fn();
+        await flush();
+      }
+      now = end;
+      await flush();
+    },
+  };
+}
+
+const WARM_RF = {
+  totalTransmissions: 4321, totalPackets: 1234, packetsPerHour: [{ hour: '2026-10-02T12:00:00Z', count: 5 }],
+  snr: { avg: 5, min: -10, max: 12 }, rssi: { avg: -90, min: -120, max: -40 },
+  avgPacketSize: 40, minPacketSize: 10, maxPacketSize: 200, timeSpanHours: 24, payloadTypes: [],
+};
+const WARM_TOPO = { uniqueNodes: 42, avgHops: 1.5, maxHops: 5, hopDistribution: [] };
+const WARM_CHAN = { activeChannels: 3, decryptable: 1 };
+
+function fakeEl(id) {
+  let html = '', dataWrites = 0;
+  return {
+    id, value: '', style: {}, dataset: {}, parentElement: null,
+    get innerHTML() { return html; },
+    set innerHTML(v) { html = String(v); if (/Total Transmissions/.test(html)) dataWrites++; },
+    dataWrites: () => dataWrites,
+    classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
+    addEventListener() {}, removeEventListener() {},
+    querySelector: () => null, querySelectorAll: () => [],
+    appendChild: (c) => c, insertBefore: (c) => c, setAttribute() {}, getAttribute: () => null,
+  };
+}
+
+// The analytics page on a server whose rf/topology/channels answer 503 +
+// Retry-After: 5 until warmMs on the fake clock.
+function pageEnv(warmMs) {
+  const clock = fakeClock();
+  const els = {};
+  const el = (id) => els[id] || (els[id] = fakeEl(id));
+  const fetchLog = [];
+  const respond = (status, body, retryAfter) => ({
+    ok: status >= 200 && status < 300, status,
+    headers: { get: (k) => (String(k).toLowerCase() === 'retry-after' ? retryAfter || null : null) },
+    json: async () => JSON.parse(JSON.stringify(body)),
+  });
+  const fetchImpl = async (url) => {
+    fetchLog.push(url);
+    if (/\/api\/analytics\/(rf|topology|channels)\b/.test(url) && clock.now() < warmMs) {
+      return respond(503, { error: 'analytics warming up', retry_after_s: 5 }, '5');
+    }
+    if (/\/api\/analytics\/rf\b/.test(url)) return respond(200, WARM_RF);
+    if (/\/api\/analytics\/topology\b/.test(url)) return respond(200, WARM_TOPO);
+    if (/\/api\/analytics\/channels\b/.test(url)) return respond(200, WARM_CHAN);
+    if (/relay-airtime-share/.test(url)) return respond(200, { rows: [] });
+    return respond(200, {});
+  };
+  class FakeDate extends Date { static now() { return 1790000000000 + clock.now(); } }
+  let regionCb = null;
+  const pages = {};
+  const ctx = {
+    window: { addEventListener() {}, removeEventListener() {}, dispatchEvent() {} },
+    document: {
+      readyState: 'complete', body: { appendChild() {} }, head: { appendChild() {} },
+      createElement: () => fakeEl(''), getElementById: el, addEventListener() {},
+      querySelectorAll: () => [], querySelector: () => null, documentElement: fakeEl('html'),
+    },
+    console: { log() {}, warn() {}, error: console.error }, Date: FakeDate, Infinity, Math, Array, Object, String, Number,
+    JSON, RegExp, Error, TypeError, parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: () => 0, clearInterval() {},
+    requestAnimationFrame: () => 0, cancelAnimationFrame() {},
+    fetch: fetchImpl, performance: { now: () => clock.now() },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    location: { hash: '#/analytics' }, history: { replaceState() {} },
+    CustomEvent: class CustomEvent {}, Map, Set, Promise, URLSearchParams,
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    timeAgo: () => 'x ago', initTabBar() {}, makeColumnsResizable() {},
+    onWS() {}, offWS() {}, connectWS() {}, invalidateApiCache() {}, IATA_COORDS_GEO: {},
+    RegionFilter: { init() {}, onChange: (fn) => { regionCb = fn; }, regionQueryString: () => '' },
+    AreaFilter: { init() {}, onChange() {}, areaQueryString: () => '' },
+  };
+  vm.createContext(ctx);
+  const load = (f) => { vm.runInContext(fs.readFileSync(f, 'utf8'), ctx); for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k]; };
+  load('public/payload-labels.js');
+  load('public/roles.js');
+  try { load('public/app.js'); } catch (e) { /* DOM-only tail */ }
+  ctx.registerPage = (name, obj) => { pages[name] = obj; };   // app.js defines its own
+  load('public/analytics.js');
+  return {
+    clock, el, page: pages.analytics,
+    regionChanged: () => regionCb(),
+    analyticsFetches: () => fetchLog.filter((u) => /\/api\/analytics\/(rf|topology|channels)\b/.test(u)).length,
+  };
+}
+
 (async () => {
   console.log('\n=== #1659: api() retries on 503 with Retry-After ===');
 
@@ -210,6 +323,75 @@ function makeCtx(fetchImpl) {
     assert.ok(events.includes(true),
       'banner must have been visible during retries (events=' + JSON.stringify(events) + ')');
     assert.strictEqual(events[events.length - 1], false, 'banner must end hidden');
+  });
+
+  console.log('\n=== #172: the analytics page outlasts the server warm-up ===');
+
+  // The server answers 503 + Retry-After: 5 on rf/topology/channels until
+  // its background load is done, for up to its 60 s force-open
+  // (cmd/server/analytics_warmup_1659.go). These run the REAL app.js api()
+  // and the REAL analytics page in one vm, with a fake fetch and a fake
+  // clock that drives setTimeout and Date.now.
+
+  await test('a warm-up longer than 30 s ends with data and never shows an error', async () => {
+    const env = pageEnv(45000);
+    env.page.init(env.el('app'));
+    const content = env.el('analyticsContent');
+    let sawLoading = false;
+    for (let t = 0; t < 60; t++) {
+      await env.clock.advance(1000);
+      assert.ok(!/Failed to load/.test(content.innerHTML), 'error shown at ' + env.clock.now() + ' ms: ' + content.innerHTML);
+      if (env.clock.now() < 45000 && /still loading/i.test(content.innerHTML)) sawLoading = true;
+    }
+    assert.ok(sawLoading, 'no "still loading" state while the server warmed up');
+    assert.ok(/Total Transmissions/.test(content.innerHTML) && /4,321|4321/.test(content.innerHTML),
+      'no data after the warm-up: ' + content.innerHTML.slice(0, 200));
+  });
+
+  await test('a permanent 503 keeps retrying past the 60 s force-open, then shows the error', async () => {
+    const env = pageEnv(Infinity);
+    env.page.init(env.el('app'));
+    const content = env.el('analyticsContent');
+    let errorAt = null;
+    for (let t = 0; t < 200 && errorAt === null; t++) {
+      await env.clock.advance(1000);
+      if (/Failed to load/.test(content.innerHTML)) errorAt = env.clock.now();
+    }
+    assert.ok(errorAt !== null, 'no error after 200 s of 503s: the retry loop is unbounded');
+    assert.ok(errorAt >= 90000, 'gave up after ' + errorAt + ' ms, before the 90 s floor (server force-open is 60 s)');
+    assert.ok(errorAt <= 125000, 'gave up only after ' + errorAt + ' ms, past the 120 s cap');
+    const before = env.analyticsFetches();
+    await env.clock.advance(60000);
+    assert.strictEqual(env.analyticsFetches(), before, 'still fetching after giving up');
+  });
+
+  await test('leaving the page during the warm-up stops the retries and writes nothing', async () => {
+    const env = pageEnv(45000);
+    env.page.init(env.el('app'));
+    const content = env.el('analyticsContent');
+    await env.clock.advance(12000);
+    env.page.destroy();
+    const fetches = env.analyticsFetches();
+    const html = content.innerHTML;
+    for (let t = 0; t < 150; t++) await env.clock.advance(1000);
+    assert.strictEqual(env.analyticsFetches(), fetches, 'warm-up fetches after destroy()');
+    assert.strictEqual(content.innerHTML, html, 'the left page was written after destroy()');
+    assert.strictEqual(env.clock.pending().length, 0, 'retry timers left after destroy(): ' + env.clock.pending().length);
+  });
+
+  await test('a new load during the warm-up replaces the old one: one retry timer, one render', async () => {
+    const env = pageEnv(45000);
+    env.page.init(env.el('app'));
+    const content = env.el('analyticsContent');
+    await env.clock.advance(7000);
+    env.regionChanged();   // e.g. a region filter change starts a new load
+    let maxTimers = 0;
+    for (let t = 0; t < 60; t++) {
+      await env.clock.advance(1000);
+      maxTimers = Math.max(maxTimers, env.clock.pending().length);
+    }
+    assert.ok(maxTimers <= 1, maxTimers + ' retry timers pending at once');
+    assert.strictEqual(content.dataWrites(), 1, 'the data was rendered ' + content.dataWrites() + ' times (the superseded load rendered too)');
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
