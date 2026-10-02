@@ -37,6 +37,7 @@ jobs:
   go-test:
     name: "✅ Go Build & Test"
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -249,10 +250,15 @@ jobs:
           npx eslint public/*.js
 
       - name: Verify proto syntax
+        timeout-minutes: 5
         run: |
           set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
+          # Bounded apt: retry transient mirror errors, give up on a stalled
+          # connection after 30s instead of hanging (#156).
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y protobuf-compiler
+          command -v protoc >/dev/null || { echo "::error::protoc not found after install"; exit 1; }
           for proto in proto/*.proto; do
             echo "  ✓ $(basename "$proto")"
             protoc --proto_path=proto --descriptor_set_out=/dev/null "$proto"
