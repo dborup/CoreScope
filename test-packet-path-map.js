@@ -142,7 +142,10 @@ function makeSandbox(apiImpl) {
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
-    location: { origin: 'https://stg.meshview.dk' },
+    location: { origin: 'https://stg.meshview.dk', hash: '' },
+    // Records replaceState() so the #147 tests can see the address bar.
+    history: { replaceState(_s, _t, url) { ctx.__replaced.push(url); ctx.location.hash = url; } },
+    __replaced: [],
   };
   ctx.window.copyToClipboard = (text, onDone) => { ctx.__copiedText = text; if (onDone) onDone(); };
   vm.createContext(ctx);
@@ -1194,6 +1197,33 @@ function makeSandbox(apiImpl) {
       console.log('  ✅ shades each touched area on the map: polygon when drawn, rectangle fallback for bbox-only areas, both non-interactive');
     } catch (e) { failed++; console.log('  ❌ shades each touched area on the map: polygon when drawn, rectangle fallback for bbox-only areas, both non-interactive: ' + e.message); }
   })();
+
+  // #147: ?viewPath=1 on a #/packets/<hash> URL describes this open modal.
+  // Closing it drops that one param (others verbatim) so a refresh or a
+  // copied address-bar link does not reopen a modal that is no longer shown.
+  async function viewPathCase(name, startHash, act, expectHash, expectWrites) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = startHash;
+      await act(ctx);
+      assert.strictEqual(ctx.location.hash, expectHash);
+      assert.strictEqual(ctx.__replaced.length, expectWrites, 'replaceState calls: ' + JSON.stringify(ctx.__replaced));
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  await viewPathCase('close() drops ?viewPath=1 from a #/packets/<hash> URL, keeping the other params (#147)',
+    '#/packets/deadbeef?timeWindow=60&obs=123&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); ctx.window.PacketPathMap.close(); },
+    '#/packets/deadbeef?timeWindow=60&obs=123', 1);
+  await viewPathCase('open() on a cold-loaded ?viewPath=1 link keeps it while the modal is shown (#147)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); },
+    '#/packets/deadbeef?obs=123&viewPath=1', 0);
+  await viewPathCase('close() leaves non-packets pages (e.g. analytics distance) untouched (#147)',
+    '#/analytics?tab=distance&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); ctx.window.PacketPathMap.close(); },
+    '#/analytics?tab=distance&viewPath=1', 0);
 
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);
