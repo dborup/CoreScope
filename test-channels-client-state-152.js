@@ -1210,6 +1210,120 @@ async function test(name, fn) {
     assert.ok(h.state().messages.some((m) => m.text === 's3 server message'), 'the current view must keep its messages');
   });
 
+  // ── #163 item 1: selectChannel() walks every stored key for an encrypted
+  // channel, awaiting computeChannelHash once per key, and then paints the
+  // #781 "no decryption key" lock text. Nothing checked whether the request
+  // was still current, so the lock text landed on top of a newer request's
+  // view — the same late-write pattern R4-3 S3 fixed for "Decrypting…".
+  const LOCK_TEXT = /no decryption key is configured/;
+  const msgBelongsTo = (h, text) => h.state().messages.some((m) => m.text === text);
+
+  async function encryptedChannelHarness(storedKeys) {
+    const h = makeHarness();
+    for (let i = 0; i < storedKeys; i++) h.storeKey('psk:i163k' + i, (i + 1).toString(16).repeat(32), 'K' + i);
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    h.setState({
+      channels: [
+        Object.assign({}, h.row('public')),
+        serverChannel('42', { encrypted: true, name: 'Encrypted 42' }),
+      ],
+    });
+    const realApi = h.ctx.api;
+    h.ctx.api = (p, o) => (p.indexOf('/channels/public/messages') === 0
+      ? Promise.resolve({ messages: [{ id: 1, sender: 'Srv', text: 'i163 public message', timestamp: '2026-01-01T00:00:00Z', packetHash: 'srv-public' }] })
+      : realApi(p, o));
+    // computeChannelHash is slow: each stored key's call stays pending
+    // until the test releases it, and none of them matches channel 42.
+    h.hashCalls = [];
+    h.w.ChannelDecrypt.computeChannelHash = () => { const d = deferred(); h.hashCalls.push(d); return d.promise; };
+    return h;
+  }
+
+  // Releases A's computeChannelHash calls as they appear (none matches),
+  // until A's selectChannel() has returned.
+  async function releaseKeyLoop(h, selection) {
+    let done = false;
+    selection.then(() => { done = true; }, () => { done = true; });
+    let released = 0;
+    for (let i = 0; i < 200 && !done; i++) {
+      while (released < h.hashCalls.length) h.hashCalls[released++].resolve(250);
+      await flush(5);
+    }
+    assert.ok(done, 'the superseded selectChannel() must return');
+    await flush(100);
+  }
+
+  await test('#163 item 1: the lock text of a superseded encrypted selection does not overwrite the newer channel\'s view', async () => {
+    const h = await encryptedChannelHarness(3);
+    const selectA = h.w._channelsSelectChannelForTest('42');
+    assert.ok(await settle(() => h.hashCalls.length === 1), 'precondition: A is awaiting its first computeChannelHash');
+
+    await h.w._channelsSelectChannelForTest('public');
+    await flush(50);
+    assert.strictEqual(h.state().selectedHash, 'public', 'precondition: B is selected');
+    assert.ok(msgBelongsTo(h, 'i163 public message'), 'precondition: B\'s messages are rendered');
+    assert.ok(!LOCK_TEXT.test(h.elements.chMessages.innerHTML), 'precondition: no lock text yet');
+
+    await releaseKeyLoop(h, selectA);
+
+    assert.ok(!LOCK_TEXT.test(h.elements.chMessages.innerHTML),
+      'the lock text of the superseded request must not be painted over B (got ' + h.elements.chMessages.innerHTML.slice(0, 160) + ')');
+    assert.strictEqual(h.state().selectedHash, 'public', 'B must stay selected');
+    assert.ok(msgBelongsTo(h, 'i163 public message'), 'B\'s messages must be intact');
+  });
+
+  await test('#163 item 1: a superseded encrypted selection stops walking the stored keys', async () => {
+    const h = await encryptedChannelHarness(4);
+    // Only the first call is slow; any further call is counted and answered.
+    let calls = 0;
+    const first = deferred();
+    h.w.ChannelDecrypt.computeChannelHash = () => (++calls === 1 ? first.promise : Promise.resolve(250));
+    const selectA = h.w._channelsSelectChannelForTest('42');
+    assert.ok(await settle(() => calls === 1), 'precondition: A awaits the first key');
+    await h.w._channelsSelectChannelForTest('public');
+    first.resolve(250);
+    await selectA;
+    await flush(100);
+    assert.strictEqual(calls, 1, 'A must not hash the remaining keys once it is superseded (got ' + calls + ' calls)');
+  });
+
+  await test('#163 item 1: a region change while the key loop runs keeps the lock text off the pane', async () => {
+    const h = await encryptedChannelHarness(2);
+    const selectA = h.w._channelsSelectChannelForTest('42');
+    assert.ok(await settle(() => h.hashCalls.length === 1), 'precondition: A awaits the first key');
+    // The region changes under A, which makes A stale; the pane now shows
+    // something else.
+    h.regionParam = 'SJC';
+    h.elements.chMessages.innerHTML = '<div class="i163-region-view">region view</div>';
+    await releaseKeyLoop(h, selectA);
+    assert.ok(/i163-region-view/.test(h.elements.chMessages.innerHTML),
+      'a request superseded by a region change must not touch the pane (got ' + h.elements.chMessages.innerHTML.slice(0, 160) + ')');
+  });
+
+  await test('#163 item 1: a failed encrypted-ness lookup of a superseded deep link does not paint "Loading messages…" over the newer view', async () => {
+    const h = await encryptedChannelHarness(0);
+    // A deep link to a '#'-named channel that is not in the loaded list
+    // starts a /channels?includeEncrypted lookup; it fails after the user
+    // has moved on to another channel.
+    let failLookup;
+    const lookup = new Promise((_resolve, reject) => { failLookup = reject; });
+    h.respondChannels = () => lookup;
+    const selectA = h.w._channelsSelectChannelForTest('#i163deep');
+    assert.ok(await settle(() => h.channelRequests.some((p) => p.indexOf('includeEncrypted=true') !== -1)), 'precondition: the lookup is in flight');
+
+    await h.w._channelsSelectChannelForTest('public');
+    await flush(50);
+    assert.ok(msgBelongsTo(h, 'i163 public message'), 'precondition: B\'s messages are rendered');
+
+    h.elements.chMessages.innerHTML = '<div class="i163-b-view">B view</div>';
+    failLookup(new Error('lookup failed'));
+    await selectA;
+    await flush(100);
+    assert.ok(/i163-b-view/.test(h.elements.chMessages.innerHTML),
+      'a superseded request must not paint over B after its lookup fails (got ' + h.elements.chMessages.innerHTML.slice(0, 160) + ')');
+  });
+
   // ── R4-4 (#153 review round 4, P3): when the current region's fetch finds
   // zero candidates, N2 rendered an empty pane but left that region's cache
   // entry in place, so the next visit flashed the outdated history (via
