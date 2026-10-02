@@ -11,6 +11,11 @@
   // coverage and leaderboard responses, the settle timer, move handlers)
   // captures it and does nothing once a newer mount or a destroy happened.
   var generation = 0;
+  // Request sequence per data stream (#150): a coverage or leaderboard
+  // response renders only if no newer request of its kind has started since,
+  // so a slow response for an earlier days (or rx, or viewport) cannot
+  // overwrite newer data.
+  var coverageSeq = 0, boardSeq = 0;
 
   // Initial viewport (#124), first valid one wins: explicit URL lat/lon/zoom,
   // this page's own saved view, /api/config/map, then this offline fallback
@@ -22,6 +27,8 @@
   var MIN_ZOOM = 1, MAX_ZOOM = 19;
 
   function isLive(gen) { return !destroyed && gen === generation; }
+  function isLatestCoverage(gen, seq) { return isLive(gen) && seq === coverageSeq; }
+  function isLatestBoard(gen, seq) { return isLive(gen) && seq === boardSeq; }
 
   // validView returns {lat, lon, zoom} when all three are present, numeric and
   // in range; anything invalid, partial or out of range gives null.
@@ -124,12 +131,12 @@
 
   function drawCoverage() {
     if (!map || destroyed) return;
-    var gen = generation;
+    var gen = generation, seq = ++coverageSeq;
     var b = map.getBounds();
     var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(',');
     var url = '/api/rx-coverage?bbox=' + bbox + '&z=' + map.getZoom() + '&days=' + days + (selectedRx ? '&rx=' + encodeURIComponent(selectedRx) : '');
     fetch(url).then(function (r) { return r.json(); }).then(function (fc) {
-      if (!isLive(gen) || !covLayer) return;
+      if (!isLatestCoverage(gen, seq) || !covLayer) return;
       covLayer.clearLayers();
       (fc.features || []).forEach(function (f) {
         var ring = (f.geometry.coordinates[0] || []).map(function (c) { return [c[1], c[0]]; });
@@ -251,11 +258,11 @@
   }
 
   function loadBoard() {
-    var gen = generation;
+    var gen = generation, seq = ++boardSeq;
     fetch('/api/rx-leaderboard?days=' + days + '&limit=25').then(function (r) { return r.json(); })
-      .then(function (d) { if (!isLive(gen)) return; boardCache = d.observers || []; renderBoard(); })
+      .then(function (d) { if (!isLatestBoard(gen, seq)) return; boardCache = d.observers || []; renderBoard(); })
       .catch(function (e) {
-        if (!isLive(gen)) return;
+        if (!isLatestBoard(gen, seq)) return;
         console.warn('rx-coverage: leaderboard fetch failed', e);
         var el = document.getElementById('rxBoard');
         if (el) el.innerHTML = '<div class="muted" style="color:var(--text-muted);font-size:13px">Could not load mobile observers.</div>';
