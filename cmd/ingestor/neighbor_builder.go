@@ -79,24 +79,35 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	if err := s.RefreshNeighborGraph(); err != nil {
 		log.Printf("[neighbor-build] initial neighbor-graph refresh error: %v", err)
 	}
-	var wuErr error
+	//
+	// Each call reads at most neighborBuilderMaxBatch observations, so the
+	// loop ends when a call read fewer than that (caught up), not when it
+	// produced few edges (PR #190 review). Every row read is newer than the
+	// watermark, so a call that persists an edge moves the watermark; a full
+	// batch with no edge cannot, and the next call would read the same rows.
+	caughtUp := false
 	for {
-		n, err := s.buildAndPersistNeighborEdges()
+		b, err := s.buildNeighborEdges()
 		if err != nil {
 			log.Printf("[neighbor-build] initial build error: %v", err)
-			wuErr = err
 			break
 		}
-		wuTotal += n
-		if n < neighborBuilderMaxBatch {
+		wuTotal += b.edges
+		if b.caughtUp() {
+			caughtUp = true
+			break
+		}
+		if b.edges == 0 {
+			log.Printf("[neighbor-build] initial build cannot move past its watermark: %d observations yielded no edge; neighbor_edges stays incomplete and the resolved_path backfill waits", b.scanned)
 			break
 		}
 	}
 	log.Printf("[neighbor-build] initial build: %d edges upserted in %s", wuTotal, time.Since(wuStart))
 	// Publish the graph with the edges the warm-up just persisted (#188):
 	// the snapshot primed above predates them, and on a fresh or restored DB
-	// it is empty. If the warm-up failed, the first successful tick does it.
-	if wuErr == nil {
+	// it is empty. Only a build that caught up publishes a post-build graph;
+	// otherwise the first tick that catches up does it.
+	if caughtUp {
 		if err := s.refreshBuiltNeighborGraph(); err != nil {
 			log.Printf("[neighbor-build] post-build neighbor-graph refresh error: %v", err)
 		}
@@ -116,13 +127,15 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 				if err := s.RefreshPrefixIndex(); err != nil {
 					log.Printf("[neighbor-build] prefix-index refresh error: %v", err)
 				}
-				n, err := s.buildAndPersistNeighborEdges()
+				b, err := s.buildNeighborEdges()
+				n := b.edges
 				// Refresh the neighbor-graph snapshot after the edges
 				// build (#1560) so the context-aware resolver picks up
 				// newly persisted adjacencies on the next ingest. After a
-				// successful build it is a post-build snapshot (#188).
+				// successful build that caught up, it is a post-build
+				// snapshot (#188).
 				refresh := s.RefreshNeighborGraph
-				if err == nil {
+				if err == nil && b.caughtUp() {
 					refresh = s.refreshBuiltNeighborGraph
 				}
 				if grErr := refresh(); grErr != nil {
@@ -152,10 +165,30 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	}
 }
 
-// buildAndPersistNeighborEdges scans transmissions + observations,
+// neighborEdgesBuild reports one buildNeighborEdges call.
+type neighborEdgesBuild struct {
+	edges   int // edge rows upserted
+	scanned int // observation rows read, at most neighborBuilderMaxBatch
+}
+
+// caughtUp reports whether the scan read every observation newer than the
+// watermark it started from: it read fewer rows than the cap.
+func (b neighborEdgesBuild) caughtUp() bool {
+	return b.scanned < neighborBuilderMaxBatch
+}
+
+// buildAndPersistNeighborEdges is buildNeighborEdges reporting only the
+// number of edge upserts.
+func (s *Store) buildAndPersistNeighborEdges() (int, error) {
+	b, err := s.buildNeighborEdges()
+	return b.edges, err
+}
+
+// buildNeighborEdges scans transmissions + observations,
 // extracts edge candidates (originator↔first-hop on ADVERTs;
 // observer↔last-hop on all packet types) and upserts them into
-// neighbor_edges. Returns count of attempted upserts.
+// neighbor_edges. It reports the edge upserts and the observation rows
+// read; fewer rows than neighborBuilderMaxBatch means it caught up.
 //
 // Watermark / delta semantics (#1339): the builder derives a watermark
 // from MAX(neighbor_edges.last_seen). On an empty edges table (fresh
@@ -176,10 +209,11 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 // SELECT of (lowered) pubkey prefixes from nodes. Prefixes with
 // multiple candidates are skipped (matches the conservative
 // resolution rule in cmd/server/extractEdgesFromObs).
-func (s *Store) buildAndPersistNeighborEdges() (int, error) {
+func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
+	var b neighborEdgesBuild
 	prefixIdx, err := buildPrefixIndex(s.db)
 	if err != nil {
-		return 0, fmt.Errorf("build prefix index: %w", err)
+		return b, fmt.Errorf("build prefix index: %w", err)
 	}
 
 	// Derive the watermark from the existing edges table. RFC3339
@@ -188,7 +222,7 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 	// query and the parse return zero → full warm-up scan.
 	var watermarkRFC sql.NullString
 	if err := s.db.QueryRow(`SELECT MAX(last_seen) FROM neighbor_edges`).Scan(&watermarkRFC); err != nil {
-		return 0, fmt.Errorf("read watermark: %w", err)
+		return b, fmt.Errorf("read watermark: %w", err)
 	}
 	var watermarkEpoch int64
 	if watermarkRFC.Valid && watermarkRFC.String != "" {
@@ -211,12 +245,13 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 	ORDER BY o.timestamp
 	LIMIT ?`, watermarkEpoch, neighborBuilderMaxBatch)
 	if err != nil {
-		return 0, fmt.Errorf("scan observations: %w", err)
+		return b, fmt.Errorf("scan observations: %w", err)
 	}
 	defer rows.Close()
 
 	var edges []edgeRow
 	for rows.Next() {
+		b.scanned++
 		var payloadType sql.NullInt64
 		var decodedJSON, fromPubkey, pathJSON, observerID string
 		var epochTs int64
@@ -289,7 +324,7 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 	}
 
 	if len(edges) == 0 {
-		return 0, nil
+		return b, nil
 	}
 
 	// Wrap the whole edge-persist tx under writer-perf instrumentation
@@ -319,9 +354,10 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return b, err
 	}
-	return inserted, nil
+	b.edges = inserted
+	return b, nil
 }
 
 // canonEdge orders the pair so node_a <= node_b (matches the existing

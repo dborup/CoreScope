@@ -116,7 +116,7 @@ See [#919](https://github.com/Kpa-clawbot/CoreScope/issues/919) for background.
 
 ### Resolved-path backfill (ingestor)
 
-Once per ingestor start, observations stored with `resolved_path = NULL` are resolved again in small batches. The pass waits for the first neighbour-edge build. The server sees the new values after its next restart.
+Once per ingestor start, observations stored with `resolved_path = NULL` are resolved again in small batches. The pass waits until the neighbour-edge build has caught up with the stored observations. The server sees the new values after its next restart.
 
 | Field | Default | Description |
 |-------|---------|-------------|

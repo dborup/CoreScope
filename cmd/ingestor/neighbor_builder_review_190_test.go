@@ -110,8 +110,17 @@ func TestResolvedPathBackfill_WaitsWhileEdgeBuildCannotCatchUp_190(t *testing.T)
 	ids := seedObservations190(t, store, 0, repeatPath190(`["c3"]`, neighborBuilderMaxBatch))
 	seedObservations190(t, store, int64(neighborBuilderMaxBatch), []string{`["c355"]`})
 
-	stop := store.StartNeighborEdgesBuilder(time.Hour)
+	// Ticks every 100 ms: a tick that has not caught up must not publish a
+	// post-build graph either.
+	stop := store.StartNeighborEdgesBuilder(100 * time.Millisecond)
 	defer stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if built, _ := store.neighborGraph.buildState(); built {
+			t.Fatal("a post-build graph was published although no build caught up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if _, err := store.RunResolvedPathBackfill(context.Background(), defaultResolvedPathBackfillBatchSize, 0); err == nil {
 		t.Fatal("the pass ran although the edge build has not caught up with the observations")
 	}

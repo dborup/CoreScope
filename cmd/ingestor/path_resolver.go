@@ -97,8 +97,8 @@ func (g *NeighborGraph) empty() bool {
 // path. atomic.Value lets the 60s rebuild publish without a read-side
 // lock.
 //
-// It also records whether a snapshot loaded after a successful
-// neighbor_edges build has been published (storeBuilt). Before that, the
+// It also records whether a snapshot loaded after a neighbor_edges build
+// that succeeded and caught up has been published (storeBuilt). Before that, the
 // snapshot may predate the edges the warm-up build derives; the
 // resolved_path backfill waits for it (#188, PR #190 review).
 type neighborGraphHolder struct {
@@ -120,7 +120,7 @@ func (h *neighborGraphHolder) store(g *NeighborGraph) {
 	h.v.Store(g)
 }
 
-// storeBuilt publishes g, loaded after a successful neighbor_edges build,
+// storeBuilt publishes g, loaded after a neighbor_edges build that caught up,
 // and wakes everyone waiting on buildState's channel.
 func (h *neighborGraphHolder) storeBuilt(g *NeighborGraph) {
 	h.store(g)
@@ -275,7 +275,7 @@ func (s *Store) RefreshNeighborGraph() error {
 }
 
 // refreshBuiltNeighborGraph is RefreshNeighborGraph for a caller that has
-// just completed a successful buildAndPersistNeighborEdges: it marks the
+// just completed a buildNeighborEdges that caught up: it marks the
 // snapshot as post-build (neighborGraphHolder.storeBuilt).
 func (s *Store) refreshBuiltNeighborGraph() error {
 	g, err := loadNeighborGraph(s.db)

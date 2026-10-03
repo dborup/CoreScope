@@ -17,7 +17,8 @@ import (
 // ingest is drained before the index is primed (main.go).
 //
 // The pass needs a prefix index and a neighbour graph loaded after a
-// successful neighbor_edges build, with at least one edge
+// neighbor_edges build that succeeded and caught up with the observations
+// (neighborEdgesBuild.caughtUp), with at least one edge
 // (resolvedPathBackfillReady). On anything less it would resolve only
 // unique prefixes and still move the watermark past every row, so it does
 // not start, and a batch whose snapshot is not usable writes nothing. The
@@ -114,8 +115,8 @@ func (s *Store) resolvedPathBackfillWatermark() (int64, error) {
 }
 
 // errResolvedPathBackfillNotReady: no prefix index, or no neighbour graph
-// from a successful edge build, or that graph has no edge.
-var errResolvedPathBackfillNotReady = errors.New("prefix index or neighbour graph not ready (no successful neighbour-edge build yet, or no edges)")
+// from an edge build that caught up, or that graph has no edge.
+var errResolvedPathBackfillNotReady = errors.New("prefix index or neighbour graph not ready (no neighbour-edge build has caught up yet, or no edges)")
 
 // resolvedPathBackfillReady reports whether the pass can run on this index
 // and graph.
@@ -125,7 +126,7 @@ func (s *Store) resolvedPathBackfillReady(idx prefixIndex, graph *NeighborGraph)
 }
 
 // StartResolvedPathBackfill runs one backfill pass in the background. Until
-// a neighbour graph from a successful edge build with at least one edge is
+// a neighbour graph from an edge build that caught up, with at least one edge, is
 // published (StartNeighborEdgesBuilder), it waits and retries on each new
 // post-build graph. The returned stop function cancels the pass and waits for
 // it; the watermark of the last committed batch is kept.
