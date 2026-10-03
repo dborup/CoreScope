@@ -186,6 +186,53 @@ run test-a11y-1716-rf-range-btn-active.js
 run test-issue-1705-subpath-contrast.js
 run test-a11y-axe-routes-coverage.js
 
+# Green unit tests that no runner registered before (#174 inventory)
+run test-1108-region-hide-nodes.js
+run test-a11y-1715-dark-role-swatches.js
+run test-analytics-distance-view-path.js
+run test-analytics-wardriving-tab.js
+run test-anl1-tooltip-render.js
+run test-channel-color-picker.js
+run test-channel-decrypt-ecb.js
+run test-channel-decrypt-m345.js
+run test-channel-live-decrypt-userprefix.js
+run test-channel-live-decrypt.js
+run test-color-picker-ux.js
+run test-compare-flood-filter.js
+run test-compare-overlap.js
+run test-embed-mode-1369.js
+run test-geofilter-draft.js
+run test-hash-color.js
+run test-issue-1166-first-seen-column.js
+run test-issue-1189-composed-cell.js
+run test-issue-1189-live-iata-badge.js
+run test-issue-1415-packets-layout.js
+run test-issue-1488-marker-stroke-vars.js
+run test-issue-1496-reset-all-complete.js
+run test-issue-1563-aggregate-and-inflight.js
+run test-issue-1574-live-map-max-nodes.js
+run test-issue-1606-pagination.js
+run test-issue-1644-redesign.js
+run test-issue-1648-followup-phosphor-leaks.js
+run test-issue-1648-m5-emoji-scan.js
+run test-issue-1668-m2-contrast.js
+run test-issue-1825-observer-node-cross-links.js
+run test-issue-1836-crossnav-case-normalization.js
+run test-issue-1843-node-qr-quiet-zone.js
+run test-live-dt-cap-1524.js
+run test-live-legend-helper.js
+run test-node-reach-coverage-debounce.js
+run test-observer-detail-view-path.js
+run test-observer-naive-clock-1478.js
+run test-path-inspector.js
+run test-payload-labels-content.js
+run test-payload-labels-namespace.js
+run test-perf-anomaly.js
+run test-perf-render-1258.js
+run test-pull-to-reconnect.js
+run test-rx-coverage-config-race.js
+run test-slideover-1056-rowsel-strict.js
+
 # test-all.sh self-test (#174)
 run test-test-all.js
 
