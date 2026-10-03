@@ -24,12 +24,23 @@ type Config struct {
 	// Enabled opens public submissions. It only takes effect when a strong
 	// admin apiKey is configured too. Approved channels stay active and
 	// visible when this is later turned off.
-	Enabled            *bool `json:"enabled,omitempty"`
-	MaxPending         int   `json:"maxPending,omitempty"`
-	MaxApproved        int   `json:"maxApproved,omitempty"`
-	MaxQueuedRequests  int   `json:"maxQueuedRequests,omitempty"`
-	RetentionDays      int   `json:"retentionDays,omitempty"`
-	SubmissionsPerHour int   `json:"submissionsPerHour,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
+	// AutoApprove approves only brand-new names at submission time. It has no
+	// effect unless public submissions are enabled; existing pending, rejected
+	// and revoked rows are never auto-approved.
+	AutoApprove        bool `json:"autoApprove,omitempty"`
+	MaxPending         int  `json:"maxPending,omitempty"`
+	MaxApproved        int  `json:"maxApproved,omitempty"`
+	MaxQueuedRequests  int  `json:"maxQueuedRequests,omitempty"`
+	RetentionDays      int  `json:"retentionDays,omitempty"`
+	SubmissionsPerHour int  `json:"submissionsPerHour,omitempty"`
+}
+
+// AutoApprovalRequested reports whether new public suggestions should be
+// approved immediately. The server still requires a strong admin API key
+// before it accepts any public submission.
+func (c *Config) AutoApprovalRequested() bool {
+	return c.SubmissionsRequested() && c.AutoApprove
 }
 
 // Limits are the resolved limits, with defaults applied.
