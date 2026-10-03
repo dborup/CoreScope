@@ -1835,7 +1835,10 @@
     var modalClosingLine = null;
 
     _gfModalMap = L.map(mapDiv, { zoomControl: true });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    // #7: resolve through the shared helper so the CARTO Basemaps API key
+    // (map.tiles.providers.carto.key) is applied here too. The modal is
+    // opened by user action, long after /api/config/client has landed.
+    L.tileLayer(window.MC_getCartoTileUrl('/light_all/{z}/{x}/{y}{r}.png'), {
       attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
     }).addTo(_gfModalMap);
 
@@ -2044,7 +2047,8 @@
     if (!mapEl || typeof L === 'undefined') return;
 
     _gfMap = L.map(mapEl, { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    // #7: same shared-helper resolution as the geo-filter modal above.
+    L.tileLayer(window.MC_getCartoTileUrl('/light_all/{z}/{x}/{y}{r}.png'), {
       attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
     }).addTo(_gfMap);
 

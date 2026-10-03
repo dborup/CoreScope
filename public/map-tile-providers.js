@@ -28,7 +28,145 @@
 
   var _cfg = null;
 
-  var _getCartoBase = function() { return (_cfg && _cfg.providers && _cfg.providers.carto && _cfg.providers.carto.domain) ? 'https://{s}.' + _cfg.providers.carto.domain + '.cartocdn.com' : 'https://{s}.basemaps.cartocdn.com'; };
+  // `domain` is the CARTO *enterprise subdomain* label only — the documented
+  // form is 'mycompany' for https://{s}.mycompany.cartocdn.com. It is
+  // concatenated straight into the host, so an unvalidated value escapes the
+  // host entirely: 'evil.com/x?a=b' yields
+  //   https://{s}.evil.com/x?a=b.cartocdn.com/dark_all/...
+  // whose host is {s}.evil.com — and with a key configured the ?key= suffix
+  // is then sent to THAT host. A '?' or '#' in the value also smuggles a
+  // query/fragment ahead of our own suffix, producing a second '?'.
+  // So: accept dot-separated DNS labels only, and ignore anything else
+  // (falling back to the public base) rather than build a broken or
+  // key-leaking URL. Trimmed, because a stray space would fail the same way.
+  //
+  // This is URL/misconfiguration hardening, not an authorization boundary:
+  // `domain` comes from the operator's own config.json, so the point is that
+  // a typo or a copy-pasted full URL degrades to the public base instead of
+  // silently retargeting tile requests (and the key) at another host.
+  //
+  // Lengths follow DNS: each label at most 63 characters, and the whole value
+  // capped so the final host stays inside the 253-character limit —
+  // "a." + <domain> + ".cartocdn.com" is len + 15.
+  var _CARTO_LABEL_RE  = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+  var _CARTO_LABEL_MAX = 63;
+  var _CARTO_DOMAIN_MAX = 238;
+  var _isValidCartoDomain = function(d) {
+    if (d.length > _CARTO_DOMAIN_MAX) return false;
+    var labels = d.split('.');
+    for (var i = 0; i < labels.length; i++) {
+      var l = labels[i];
+      // Rejects empty labels, which also covers a leading/trailing dot
+      // and any '..' run.
+      if (!l || l.length > _CARTO_LABEL_MAX || !_CARTO_LABEL_RE.test(l)) return false;
+    }
+    return true;
+  };
+  var _warnedDomain = false;
+  var _getCartoDomain = function() {
+    var d = (_cfg && _cfg.providers && _cfg.providers.carto) ? _cfg.providers.carto.domain : null;
+    if (typeof d !== 'string') return '';
+    d = d.trim();
+    if (!d) return '';                    // unset/blank is normal — no warning
+    if (!_isValidCartoDomain(d)) {
+      if (!_warnedDomain && typeof console !== 'undefined' && console.warn) {
+        _warnedDomain = true;
+        // The rejected value is deliberately NOT echoed: it is operator input
+        // of unknown provenance and this line can end up in shared logs or a
+        // screenshot. The expected form is enough to fix the config.
+        console.warn('[tiles] ignoring invalid carto.domain; expected dot-separated enterprise subdomain labels such as "mycompany"');
+      }
+      return '';
+    }
+    return d;
+  };
+
+  var _getCartoBase = function() {
+    var d = _getCartoDomain();
+    return d ? 'https://{s}.' + d + '.cartocdn.com' : 'https://{s}.basemaps.cartocdn.com';
+  };
+
+  // CARTO Basemaps API key (#7). From August 2026 CARTO requires a key on
+  // raster basemap requests; keyless tiles come back watermarked
+  // ("API KEY REQUIRED — carto.com/basemapsapikey"). Never hardcode a key
+  // here — it comes from map.tiles.providers.carto.key, which the server
+  // hands to the browser via MC_MAP_CFG. The field name matches upstream
+  // (Kpa-clawbot/CoreScope#1919) so one config works on both.
+  var _getCartoKey = function() {
+    var k = (_cfg && _cfg.providers && _cfg.providers.carto) ? _cfg.providers.carto.key : null;
+    return (typeof k === 'string' && k.trim()) ? k.trim() : '';
+  };
+
+  // Single source of truth for the key querystring, so no style has to
+  // repeat (or drift on) the "?key=" spelling and encoding. Returns the
+  // suffix or an empty string — never a bare "?".
+  var _getCartoKeySuffix = function() {
+    var k = _getCartoKey();
+    return k ? '?key=' + encodeURIComponent(k) : '';
+  };
+
+  // MC_getCartoTileUrl — the ONE place a CARTO tile URL is built, for the
+  // registry styles AND for every CARTO layer outside this file
+  // (roles.js TILE_DARK/TILE_LIGHT, customize-v2.js' two geo-filter maps,
+  // geofilter-builder.html). Anything that hardcodes
+  // basemaps.cartocdn.com instead of calling this will silently miss the
+  // API key and render watermarked tiles.
+  //
+  // Takes a tile PATH only ('/dark_all/{z}/{x}/{y}{r}.png'), never a
+  // complete URL: the base (incl. the enterprise `domain` override) and
+  // the key querystring are this function's business, and accepting a
+  // full URL would let a caller smuggle in its own host or querystring
+  // and defeat the single-source-of-truth guarantee.
+  //
+  // Resolved on every call, never cached: MC_MAP_CFG arrives
+  // asynchronously (roles.js' /api/config/client fetch), so an early
+  // caller gets the keyless URL and a later caller — or the same caller
+  // re-reading after `mc-tile-provider-changed` — gets the keyed one.
+  window.MC_getCartoTileUrl = function(path) {
+    if (typeof path !== 'string' || path.charAt(0) !== '/') {
+      throw new TypeError('MC_getCartoTileUrl expects a tile path starting with "/", got: ' + String(path));
+    }
+    if (path.indexOf('://') >= 0 || path.indexOf('?') >= 0 || path.indexOf('#') >= 0) {
+      throw new TypeError('MC_getCartoTileUrl expects a bare tile path (no scheme, query or fragment), got: ' + path);
+    }
+    return _getCartoBase() + path + _getCartoKeySuffix();
+  };
+
+  // Lazy wrapper for the registry: styles declare only their own path and
+  // the URL is resolved at read time, so config landing later still applies.
+  var _cartoUrl = function(path) {
+    return function() { return window.MC_getCartoTileUrl(path); };
+  };
+
+  // MC_whenTileConfigReady — run cb once the server config has SETTLED, so a
+  // tile layer is never added to a map (and therefore never fires a request)
+  // while the CARTO key is still unknown. Resolving the key late is not
+  // enough on its own: Leaflet starts fetching the moment a layer is added,
+  // so a keyless first paint would still hit CARTO and get watermarked tiles
+  // into the browser cache before setUrl() could swap them.
+  //
+  // Waits for SETTLE, not fulfilment, and handles both arms defensively via
+  // then(run, run). In the normal CoreScope flow that rejection arm never
+  // fires: roles.js ends its /api/config/client chain with a .catch, so a
+  // failed fetch is handled there and MeshConfigReady settles FULFILLED with
+  // the fallback config. then(run, run) is there for alternative callers,
+  // tests and older builds whose promise may genuinely reject — in which
+  // case the caller must still get its (keyless) layer rather than an empty
+  // map forever. No timeout and no polling: the promise is the only signal,
+  // so there is no timing race to lose.
+  //
+  // If MeshConfigReady does not exist at all (standalone pages, older
+  // builds, unit tests) cb runs SYNCHRONOUSLY, preserving the exact
+  // pre-#7 ordering for those callers.
+  window.MC_whenTileConfigReady = function(cb) {
+    if (typeof cb !== 'function') return;
+    var p = (typeof window !== 'undefined') ? window.MeshConfigReady : null;
+    if (!p || typeof p.then !== 'function') { cb(); return; }
+    var done = false;
+    var run = function() { if (done) return; done = true; cb(); };
+    try { p.then(run, run); } catch (_) { run(); }
+  };
+
   var _getStamenUrl = function() { return 'https://tiles.stadiamaps.com/tiles/stamen_toner_lite/{z}/{x}/{y}{r}.png' + ((_cfg && _cfg.providers && _cfg.providers.stamen && _cfg.providers.stamen.token) ? '?api_key=' + encodeURIComponent(_cfg.providers.stamen.token) : ''); };
   var _getOsmUrl = function() {
     if (_cfg && _cfg.providers && _cfg.providers.osm && _cfg.providers.osm.provider && _cfg.providers.osm.token) {
@@ -42,11 +180,11 @@
   };
 
   var BASE_STYLES = {
-    'carto-dark': { provider: 'carto', label: 'Carto Dark', url: function() { return _getCartoBase() + '/dark_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
-    'carto-light': { provider: 'carto', label: 'Carto Positron', url: function() { return _getCartoBase() + '/light_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
-    'carto-voyager': { provider: 'carto', label: 'Carto Voyager', url: function() { return _getCartoBase() + '/rastertiles/voyager/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
-    'carto-voyager-dark': { provider: 'carto', label: 'Carto Voyager', url: function() { return _getCartoBase() + '/rastertiles/voyager/{z}/{x}/{y}{r}.png'; }, invertFilter: INVERT_CSS, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
-    'positron-dark': { provider: 'carto', label: 'Carto Positron', url: function() { return _getCartoBase() + '/light_all/{z}/{x}/{y}{r}.png'; }, invertFilter: INVERT_CSS, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
+    'carto-dark': { provider: 'carto', label: 'Carto Dark', url: _cartoUrl('/dark_all/{z}/{x}/{y}{r}.png'), invertFilter: null, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
+    'carto-light': { provider: 'carto', label: 'Carto Positron', url: _cartoUrl('/light_all/{z}/{x}/{y}{r}.png'), invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
+    'carto-voyager': { provider: 'carto', label: 'Carto Voyager', url: _cartoUrl('/rastertiles/voyager/{z}/{x}/{y}{r}.png'), invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
+    'carto-voyager-dark': { provider: 'carto', label: 'Carto Voyager', url: _cartoUrl('/rastertiles/voyager/{z}/{x}/{y}{r}.png'), invertFilter: INVERT_CSS, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
+    'positron-dark': { provider: 'carto', label: 'Carto Positron', url: _cartoUrl('/light_all/{z}/{x}/{y}{r}.png'), invertFilter: INVERT_CSS, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
     'osm-standard': { provider: 'osm', label: 'OSM Standard', url: _getOsmUrl, invertFilter: null, type: 'light', attribution: '© OpenStreetMap contributors, Maps © Mapbox/Thunderforest/MapTiler', maxZoom: 18 },
     'osm-dark': { provider: 'osm', label: 'OSM Standard', url: _getOsmUrl, invertFilter: INVERT_CSS, type: 'dark', attribution: '© OpenStreetMap contributors, Maps © Mapbox/Thunderforest/MapTiler', maxZoom: 18 },
     'opentopomap': { provider: 'opentopomap', label: 'OpenTopoMap', url: function() { return 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'; }, invertFilter: null, type: 'light', attribution: 'Map data: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="https://viewfinderpanoramas.org">SRTM</a> | Map style: © <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)', maxZoom: 17 },
@@ -66,6 +204,24 @@
   window.MC_initTileRegistry = function(fromAsync) {
     _cfg = (typeof window !== 'undefined' && window.MC_MAP_CFG && window.MC_MAP_CFG.tiles) ? window.MC_MAP_CFG.tiles : null;
 
+    // CARTO gating (#7) — unchanged from before the API-key work, and
+    // deliberately independent of the key:
+    //   - carto.enabled === false  → the CARTO styles are not registered, so
+    //                                they leave the main map and the layer
+    //                                picker. It does NOT disable CARTO
+    //                                everywhere: the geo-filter maps in
+    //                                customize-v2.js and the standalone
+    //                                geofilter-builder call
+    //                                MC_getCartoTileUrl directly and still
+    //                                render CARTO (and still need a key).
+    //   - key missing/empty        → the styles stay registered and keep the
+    //                                pre-key, keyless behaviour, which CARTO
+    //                                now serves watermarked. Set carto.key
+    //                                to clear the watermark.
+    //   - key non-empty            → every CARTO URL is authenticated.
+    // Registration is not used as a key-enforcement mechanism: the key
+    // question is answered by MC_getCartoTileUrl, which every CARTO surface
+    // now goes through.
     var HAS_CARTO = !_cfg || !_cfg.providers || !_cfg.providers.carto || _cfg.providers.carto.enabled !== false;
     var HAS_OSM = _cfg && _cfg.providers && _cfg.providers.osm && _cfg.providers.osm.enabled;
     var HAS_OPENTOPOMAP = _cfg && _cfg.providers && _cfg.providers.opentopomap && _cfg.providers.opentopomap.enabled;
