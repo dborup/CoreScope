@@ -63,10 +63,12 @@ When the administrator enables `channelProposals` (see [Configuration](configura
 
 Names can be at most 31 bytes including the `#`. That is the firmware's limit (the name is stored in a 32-byte field with a terminating NUL). Any language or emoji is fine; control characters, line breaks, text-direction overrides and other invisible formatting characters (such as zero-width spaces or soft hyphens) are refused. The firmware itself only limits the length; the character rule is CoreScope's own, so that two different channels can never look the same. Emoji built with the zero-width joiner or variation selectors are allowed.
 
-An administrator reviews suggestions at `#/channels?view=proposals`:
+By default, an administrator reviews suggestions at `#/channels?view=proposals`:
 
 1. Enter the `apiKey`. It is kept only in the tab's memory and is forgotten on reload or with **Lock**.
 2. Approve or reject each pending suggestion.
+
+If the operator enables `channelProposals.autoApprove`, a brand-new valid name is approved as soon as the ingestor processes its submission. Suggestions already pending, rejected or revoked are not auto-approved. See [Configuration](configuration.md#shared-channel-suggestions) for the limits and retention caveat.
 
 Approved channels are decrypted by the ingestor from then on and appear for everyone under **Network** with a **Shared** label, even before they carry any messages. Shared channels have no remove button for a regular visitor, because they are not stored in your browser.
 

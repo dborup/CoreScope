@@ -135,11 +135,12 @@ See [Channels](channels.md) for details.
 
 ### Shared channel suggestions
 
-`channelProposals` lets visitors suggest public hashtag channels that an administrator approves for everyone. The server and the ingestor read the same block.
+`channelProposals` lets visitors suggest public hashtag channels for everyone. By default an administrator approves them; operators can opt into automatic approval of new names. The server and the ingestor read the same block.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Opens public suggestions. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). |
+| `autoApprove` | `false` | When `enabled` is true, the ingestor immediately approves *brand-new* valid names. Existing pending, rejected and revoked names are never auto-approved. Changing this policy requires an ingestor restart. |
 | `maxPending` | `100` | Suggestions waiting for review. Further suggestions are refused until some are reviewed. |
 | `maxApproved` | `128` | Shared channels that can be approved. |
 | `maxQueuedRequests` | `256` | Requests waiting for the ingestor in the queue directory next to the database. |
@@ -147,6 +148,8 @@ See [Channels](channels.md) for details.
 | `submissionsPerHour` | `20` | Global limit on new suggestions per hour. It is global rather than per visitor, because behind a reverse proxy every visitor can share one address. |
 
 Approved channels stay decrypted and listed when `enabled` is later set to `false`, and survive restarts and `SIGHUP` reloads. A key configured in `channelKeys` for the same name takes priority, and so does the rainbow table (`channel-rainbow.json`): approving or revoking one of those built-in names changes nothing, and the review dialog marks them (see [Channels](channels.md#built-in-names)).
+
+Auto-approval uses the same name validation, global submission rate limit, queue and `maxApproved` cap as manual approval. At capacity, a new suggestion fails rather than becoming an unapproved row. Be careful on a public instance: visitors can fill the approved-channel allowance. Rejected and revoked names remain protected from automatic re-approval while their rows exist. Retention eventually removes these rows, so an old name can be proposed as new again; a permanent blocklist is not provided. Turning off `autoApprove` affects new submissions only and does not revoke already approved channels.
 
 An administrator can also revoke a previously approved channel (see [Channels](channels.md#revoking-an-approved-channel)) — this undoes the decryption going forward but never deletes or hides messages already decoded while it was approved. A revoked row is retained and pruned by the same `retentionDays` rule as a rejected one (counted from when it was revoked, not when it was first submitted); an approved row is still never pruned. Revoking introduces no new configuration of its own — it reuses the `maxPending`/`maxApproved`/`retentionDays`/`submissionsPerHour` limits above.
 

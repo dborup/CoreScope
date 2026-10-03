@@ -112,6 +112,10 @@ type DB struct {
 	// channelsRowsHook wraps the result rows of each real query, so a test
 	// can fail the iteration part-way.
 	channelsRowsHook func(kind string, rows channelRows) channelRows
+	// schemaProbeHook (#184), nil in production, runs at the start of every
+	// detectSchema pass. A non-nil error makes the pass give up the way a
+	// failed PRAGMA table_info does: no flag is set.
+	schemaProbeHook func() error
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.
@@ -151,6 +155,26 @@ func (db *DB) hasDefaultScopeConfirmedAt() bool { return db.hasDefaultScopeConfi
 func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsFlag.get() }
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
 func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
+
+// ingestCols is one reading of the optional-column flags an ingest query
+// depends on. A caller takes ONE snapshot and uses it for both the SELECT
+// list and the Scan destinations: the flags are atomics that the schema
+// healer (or main.go's forceTrue) may latch between two reads, and a query
+// built with one answer scanned with the other fails Scan with the wrong
+// destination count -- an error the ingest loops swallow, silently dropping
+// the row (#158 follow-up).
+type ingestCols struct {
+	obsRawHex, resolvedPath, scopeName, routeMask bool
+}
+
+func (db *DB) ingestCols() ingestCols {
+	return ingestCols{
+		obsRawHex:    db.hasObsRawHex(),
+		resolvedPath: db.hasResolvedPath(),
+		scopeName:    db.hasScopeName(),
+		routeMask:    db.hasRouteMask(),
+	}
+}
 
 // OpenDB opens a read-only SQLite connection with WAL mode.
 func OpenDB(path string) (*DB, error) {
@@ -231,6 +255,11 @@ func (db *DB) Close() error {
 
 // detectSchema checks if the observations table uses v3 schema (observer_idx).
 func (db *DB) detectSchema() {
+	if db.schemaProbeHook != nil {
+		if err := db.schemaProbeHook(); err != nil {
+			return
+		}
+	}
 	rows, err := db.conn.Query("PRAGMA table_info(observations)")
 	if err != nil {
 		return

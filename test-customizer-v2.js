@@ -164,7 +164,9 @@ test('accepts valid opacity', () => {
 console.log('\ncomputeEffective:');
 test('returns server defaults when overrides is {}', () => {
   const { api } = loadCustomizer();
-  const defaults = { theme: { accent: '#aaa', text: '#bbb' }, nodeColors: { repeater: '#ccc' } };
+  // The server config carries `home` since #525; without it computeEffective
+  // fills in DEFAULT_HOME.
+  const defaults = { theme: { accent: '#aaa', text: '#bbb' }, nodeColors: { repeater: '#ccc' }, home: { heroTitle: 'Mesh' } };
   const result = api.computeEffective(defaults, {});
   assert.deepStrictEqual(result, defaults);
 });
