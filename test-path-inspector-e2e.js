@@ -1,87 +1,131 @@
-// E2E tests for Path Inspector (spec §5 — Playwright).
-// Run: npx playwright test test-path-inspector-e2e.js
-// Requires: running server on BASE_URL (default http://localhost:3000).
+/**
+ * E2E (Path Inspector spec §2.7 / §2.8, ported for #189): the Path Inspector
+ * side pane on the map page, and the Tools landing.
+ *
+ * Previously an @playwright/test spec; that runner is not a dependency, so it
+ * never ran. This port uses the plain `playwright` API like the other
+ * *-e2e.js files and keeps the cases nothing else in CI covers:
+ *   1. #mapSidePane is visible and collapsed on load; the toggle expands it;
+ *   2. submitting prefixes in the pane renders a candidate table;
+ *   3. "Show on Map" draws the candidate route (an .mc-rt-edge path) and
+ *      enters route view;
+ *   4. the Tools landing links to the Path Inspector and to Trace.
+ *
+ * Dropped from the old spec, covered elsewhere in CI:
+ *   - standalone deep link ?prefixes= auto-fills and runs →
+ *     test-path-inspector-coverage-e2e.js ("deep link ?prefixes=2c …");
+ *   - #/traces/<hash> → #/tools/trace/<hash> → test-issue-1883-redirect-history.js;
+ *   - "switching candidate clears prior polyline" asserted nothing.
+ *
+ * The old spec used the fixed prefixes 2c,a1, which have no candidates in
+ * the CI fixture. The test now asks /api/paths/inspect for a two-hop pair
+ * of repeater prefixes that does (bounded search).
+ *
+ * Usage: BASE_URL=http://localhost:13581 node test-path-inspector-e2e.js
+ */
 'use strict';
+const { chromium } = require('playwright');
 
-const { test, expect } = require('@playwright/test');
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
+const BASE = process.env.BASE_URL || 'http://localhost:13581';
+const MAX_PROBES = 400; // bounded /api/paths/inspect calls for the pair search
 
-test.describe('Path Inspector — Map Side Pane (spec §2.7)', () => {
-  test('side pane present and collapsed by default', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/map`);
-    const pane = page.locator('#mapSidePane');
-    await expect(pane).toBeVisible();
-    await expect(pane).not.toHaveClass(/expanded/);
-  });
+let passed = 0, failed = 0;
+async function step(name, fn) {
+  try { await fn(); passed++; console.log('  ✓ ' + name); }
+  catch (e) { failed++; console.error('  ✗ ' + name + ': ' + e.message); }
+}
+function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
-  test('click toggle expands the pane', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/map`);
-    await page.click('#mapPaneToggle');
-    const pane = page.locator('#mapSidePane');
-    await expect(pane).toHaveClass(/expanded/);
-  });
-
-  test('submit valid prefixes renders candidates within 1s', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/map`);
-    await page.click('#mapPaneToggle');
-    await page.fill('#mapPiInput', '2c,a1,f4');
-    await page.click('#mapPiSubmit');
-    // Wait for results or error (both indicate API round-trip complete).
-    await expect(page.locator('#mapPiResults table, #mapPiResults .no-results, #mapPiError')).toBeVisible({ timeout: 1000 });
-  });
-
-  test('Show on Map button draws polyline on map', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/map`);
-    await page.click('#mapPaneToggle');
-    await page.fill('#mapPiInput', '2c,a1');
-    await page.click('#mapPiSubmit');
-    // Wait for results.
-    const btn = page.locator('#mapPiResults button[data-idx="0"]');
-    await btn.waitFor({ timeout: 2000 });
-    await btn.click();
-    // Check that route layer has SVG polyline paths drawn.
-    const svg = page.locator('#leaflet-map .leaflet-overlay-pane svg path');
-    await expect(svg.first()).toBeVisible({ timeout: 2000 });
-  });
-
-  test('switching candidate clears prior polyline', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/map`);
-    await page.click('#mapPaneToggle');
-    await page.fill('#mapPiInput', '2c,a1');
-    await page.click('#mapPiSubmit');
-    const btn0 = page.locator('#mapPiResults button[data-idx="0"]');
-    await btn0.waitFor({ timeout: 2000 });
-    await btn0.click();
-    // Click second candidate if available.
-    const btn1 = page.locator('#mapPiResults button[data-idx="1"]');
-    if (await btn1.isVisible()) {
-      await btn1.click();
-      // Prior route should be cleared — only one polyline group visible.
+// A pair of 1-byte repeater prefixes with at least one candidate path.
+async function findCandidatePair(request) {
+  const nodes = await (await request.get(BASE + '/api/nodes?role=repeater&limit=500')).json();
+  const prefixes = [...new Set((nodes.nodes || []).map((n) => n.public_key.slice(0, 2).toLowerCase()))].sort();
+  let probes = 0;
+  for (const a of prefixes) {
+    for (const b of prefixes) {
+      if (a === b) continue;
+      if (++probes > MAX_PROBES) return null;
+      const res = await request.post(BASE + '/api/paths/inspect', { data: { prefixes: [a, b] } });
+      if (!res.ok()) continue;
+      const body = await res.json();
+      if (body.candidates && body.candidates.length) return { prefixes: a + ',' + b, count: body.candidates.length };
     }
-  });
-});
+  }
+  return null;
+}
 
-test.describe('Path Inspector — Standalone Page', () => {
-  test('deep link auto-fills and runs', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/tools/path-inspector?prefixes=2c,a1,f4`);
-    const input = page.locator('#path-inspector-input');
-    await expect(input).toHaveValue('2c,a1,f4');
-    // Should auto-submit and show results or error.
-    await expect(page.locator('#path-inspector-results table, #path-inspector-results .no-results, #path-inspector-error')).toBeVisible({ timeout: 2000 });
-  });
+(async () => {
+  const requireChromium = process.env.CHROMIUM_REQUIRE === '1';
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      executablePath: process.env.CHROMIUM_PATH || undefined,
+      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    });
+  } catch (err) {
+    if (requireChromium) {
+      console.error('test-path-inspector-e2e.js: FAIL — Chromium required but unavailable: ' + err.message);
+      process.exit(1);
+    }
+    console.log('test-path-inspector-e2e.js: SKIP (Chromium unavailable: ' + err.message.split('\n')[0] + ')');
+    process.exit(0);
+  }
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const page = await ctx.newPage();
+  page.setDefaultTimeout(15000);
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
 
-  test('old #/traces/<hash> redirects to #/tools/trace/<hash>', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/traces/abc123`);
-    await page.waitForTimeout(500);
-    expect(page.url()).toContain('#/tools/trace/abc123');
-  });
-});
+  console.log('\n=== Path Inspector map pane + Tools landing E2E against ' + BASE + ' ===');
+  try {
+    const pair = await findCandidatePair(ctx.request);
 
-test.describe('Path Inspector — Tools Landing (spec §2.8)', () => {
-  test('Tools nav shows landing with both entries', async ({ page }) => {
-    await page.goto(`${BASE_URL}/#/tools`);
-    await expect(page.locator('.tools-landing')).toBeVisible();
-    await expect(page.locator('a[href="#/tools/path-inspector"]')).toBeVisible();
-    await expect(page.locator('a[href*="#/tools/trace"]')).toBeVisible();
-  });
-});
+    await page.goto(BASE + '/#/map', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#mapSidePane', { state: 'visible' });
+
+    await step('side pane is visible and collapsed on load', async () => {
+      const cls = await page.getAttribute('#mapSidePane', 'class');
+      assert(!/\bexpanded\b/.test(cls), 'pane should start collapsed, class="' + cls + '"');
+    });
+
+    await step('clicking the toggle expands the pane', async () => {
+      await page.click('#mapPaneToggle');
+      await page.waitForFunction(() => document.getElementById('mapSidePane').classList.contains('expanded'));
+      assert(await page.isVisible('#mapPiInput'), '#mapPiInput not visible in the expanded pane');
+    });
+
+    await step('submitting prefixes renders a candidate table' + (pair ? ' (' + pair.prefixes + ')' : ''), async () => {
+      assert(pair, 'no repeater prefix pair with candidates found in ' + MAX_PROBES + ' probes');
+      await page.fill('#mapPiInput', pair.prefixes);
+      await page.click('#mapPiSubmit');
+      await page.waitForSelector('#mapPiResults .path-inspector-table');
+      const err = ((await page.textContent('#mapPiError')) || '').trim();
+      assert(!err, 'unexpected error: ' + err);
+      const rows = await page.locator('#mapPiResults button[data-idx]').count();
+      assert(rows === pair.count, 'rendered ' + rows + ' candidates, API returned ' + pair.count);
+    });
+
+    await step('"Show on Map" draws the candidate route', async () => {
+      assert(pair, 'no candidate to show');
+      await page.click('#mapPiResults button[data-idx="0"]');
+      await page.waitForSelector('#leaflet-map .leaflet-overlay-pane path.mc-rt-edge', { state: 'visible' });
+      assert(await page.evaluate(() => document.body.classList.contains('mc-route-active')), 'route view not active');
+    });
+
+    await step('Tools landing links to the Path Inspector and to Trace', async () => {
+      await page.goto(BASE + '/#/tools', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.tools-landing', { state: 'visible' });
+      assert(await page.isVisible('.tools-landing a[href="#/tools/path-inspector"]'), 'Path Inspector entry missing');
+      assert(await page.isVisible('.tools-landing a[href^="#/tools/trace"]'), 'Trace entry missing');
+    });
+
+    await step('no page errors', async () => {
+      assert(errors.length === 0, errors.join(' | '));
+    });
+  } finally {
+    await browser.close();
+  }
+  console.log('\ntest-path-inspector-e2e.js: ' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });

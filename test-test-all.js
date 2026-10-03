@@ -135,7 +135,6 @@ const KNOWN_UNREGISTERED = {
   'test-touch-targets.js': 'red in Chromium: expects 48px targets, CSS has 44px',
   // E2E
   'test-issue-1522-trace-url-sync-e2e.js': 'needs @playwright/test (not a dependency)',
-  'test-path-inspector-e2e.js': 'needs @playwright/test (not a dependency)',
   'test-rx-coverage-mobile-nav-e2e.js': 'skips while clientRxCoverage is off (the default)',
 };
 
