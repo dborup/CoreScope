@@ -54,7 +54,11 @@ type StoreTx struct {
 	PathJSON            string
 	Direction           string
 	LatestSeen          string // max observation timestamp (or FirstSeen if no observations)
-	UniqueObserverCount int    // cached count of distinct observer IDs
+	UniqueObserverCount int32  // cached count of distinct observer IDs
+	// chargedBytes is what trackedBytes was last charged for this tx
+	// (observations and resolved relay hops excluded). It takes the 4 bytes
+	// UniqueObserverCount gave up, so StoreTx stays 320 bytes.
+	chargedBytes uint32
 	// Cached parsed fields (set once, read many)
 	parsedPath []string // cached parsePathJSON result
 	pathParsed bool     // whether parsedPath has been set
@@ -1836,6 +1840,13 @@ func pickBestObservation(tx *StoreTx) {
 	tx.Direction = best.Direction
 	tx.pathParsed = false // invalidate cached parsed path
 }
+
+// SCAFFOLDING (tests-first commit): inert on purpose. The accounting tests
+// compile against these and fail on their assertions; the next commit gives
+// them their behaviour.
+func rechargeTx(tx *StoreTx) int64 { return 0 }
+
+func resolvedRelayBytes(n int) int64 { return 0 }
 
 func pathLen(pathJSON string) int {
 	if pathJSON == "" {
