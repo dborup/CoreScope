@@ -10,6 +10,8 @@
  *   1. Missing observer coordinates must not become a (0, 0) anchor.
  *   2. A hop the server resolved (resolved_path) keeps the server's node; the
  *      client heuristic must not overwrite it under the same observer.
+ *   3. The incremental path (WS/poll) resolves the same prefix separately for
+ *      each observer instead of reusing another observer's bare-key entry.
  *
  * Run: node test-issue-165-hop-resolution-per-observer.js
  */
@@ -163,6 +165,33 @@ test('incremental path: resolveIncomingHops keeps the server node too', async ()
   const entry = T._hopCacheGet('ef:OBS-A');
   assert(entry && entry.pubkey === FAR.public_key,
     'ef:OBS-A must be the server node FAR-AWAY; got ' + (entry && entry.name));
+});
+
+section('#165 defect 3: the incremental path resolves per observer');
+
+// OBS-A is next to NEAR-ONE, OBS-B next to FAR-AWAY. The same 1-byte prefix
+// heard by each must resolve to that observer's neighbour.
+const OBS_B = { id: 'OBS-B', lat: 50.88, lon: 5.50 };
+function livePacket(id, obs) { return { id, hash: 'live' + id, observer_id: obs, path_json: '["ef"]' }; }
+
+test('same prefix from observer A, then B, via resolveIncomingHops: each gets its own name', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A, OBS_B]);
+  await T.resolveIncomingHops([livePacket(1, 'OBS-A')]);
+  await T.resolveIncomingHops([livePacket(2, 'OBS-B')]);
+  const a = T._hopCacheGet('ef:OBS-A');
+  const b = T._hopCacheGet('ef:OBS-B');
+  assert(a && a.name === 'NEAR-ONE', 'ef:OBS-A is NEAR-ONE; got ' + (a && a.name));
+  assert(b && b.name === 'FAR-AWAY', 'ef:OBS-B is resolved for B (FAR-AWAY); got ' + (b ? b.name : 'no entry'));
+  const html = T.renderPath(['ef'], 'OBS-B');
+  assert(/FAR-AWAY/.test(html) && !/NEAR-ONE/.test(html), 'B does not inherit A\'s name: ' + html);
+});
+
+test('one incremental batch with both observers resolves each separately', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A, OBS_B]);
+  await T.resolveHopsForPackets([livePacket(1, 'OBS-A')]); // initial load saw only A
+  await T.resolveIncomingHops([livePacket(2, 'OBS-A'), livePacket(3, 'OBS-B')]);
+  const b = T._hopCacheGet('ef:OBS-B');
+  assert(b && b.name === 'FAR-AWAY', 'ef:OBS-B is resolved for B; got ' + (b ? b.name : 'no entry'));
 });
 
 (async () => {
