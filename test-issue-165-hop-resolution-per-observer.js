@@ -12,6 +12,8 @@
  *      client heuristic must not overwrite it under the same observer.
  *   3. The incremental path (WS/poll) resolves the same prefix separately for
  *      each observer instead of reusing another observer's bare-key entry.
+ *   B. The hop:observer cache is bounded (AGENTS.md: no unbounded maps) and is
+ *      cleared at the page's existing reset point, destroy().
  *
  * Run: node test-issue-165-hop-resolution-per-observer.js
  */
@@ -192,6 +194,41 @@ test('one incremental batch with both observers resolves each separately', async
   await T.resolveIncomingHops([livePacket(2, 'OBS-A'), livePacket(3, 'OBS-B')]);
   const b = T._hopCacheGet('ef:OBS-B');
   assert(b && b.name === 'FAR-AWAY', 'ef:OBS-B is resolved for B; got ' + (b ? b.name : 'no entry'));
+});
+
+section('#165 B: the hop cache is bounded');
+
+test('the cache never holds more than HOP_CACHE_MAX entries', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A]);
+  const max = T.HOP_CACHE_MAX;
+  assert(Number.isInteger(max) && max > 0, 'HOP_CACHE_MAX is a positive integer; got ' + max);
+  // Distinct 3-byte prefixes no node has: each writes hop:OBS-A and hop.
+  const hops = [];
+  for (let i = 0; hops.length < max; i++) hops.push((0x100000 + i).toString(16));
+  await T.resolveHops(hops, 'OBS-A');
+  assert(T._hopCacheSize() <= max, 'size ' + T._hopCacheSize() + ' exceeds the cap ' + max);
+});
+
+test('eviction drops the oldest entries and keeps the newest', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A, OBS_B]);
+  const max = T.HOP_CACHE_MAX;
+  await T.resolveHops(['ef'], 'OBS-A'); // oldest
+  const hops = [];
+  for (let i = 0; hops.length < max; i++) hops.push((0x100000 + i).toString(16));
+  await T.resolveHops(hops, 'OBS-B');
+  await T.resolveHops(['ef'], 'OBS-B'); // newest
+  assert(T._hopCacheGet('ef:OBS-A') === undefined, 'the oldest entry (ef:OBS-A) was evicted');
+  const b = T._hopCacheGet('ef:OBS-B');
+  assert(b && b.name === 'FAR-AWAY', 'the newest entry (ef:OBS-B) is kept; got ' + (b ? b.name : 'no entry'));
+  assert(T._hopCacheSize() <= max, 'size ' + T._hopCacheSize() + ' exceeds the cap ' + max);
+});
+
+test('destroy() empties the cache', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A]);
+  await T.resolveHops(['ef'], 'OBS-A');
+  assert(T._hopCacheSize() > 0, 'precondition: the cache has entries');
+  T._destroy();
+  assert(T._hopCacheSize() === 0, 'destroy() leaves ' + T._hopCacheSize() + ' entries');
 });
 
 (async () => {
