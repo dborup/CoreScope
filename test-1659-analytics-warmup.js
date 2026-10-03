@@ -103,6 +103,10 @@ const WARM_RF = {
 };
 const WARM_TOPO = { uniqueNodes: 42, avgHops: 1.5, maxHops: 5, hopDistribution: [] };
 const WARM_CHAN = { activeChannels: 3, decryptable: 1 };
+// #172 r2: real responses of the CI fixture server for the five shared
+// endpoints, arrays cut to two items, names and keys anonymised. The
+// tab tests need every tab's real shape, not just the overview's.
+const REAL = JSON.parse(fs.readFileSync('test-fixtures/analytics-tabs-172.json', 'utf8'));
 
 function fakeEl(id) {
   let html = '', dataWrites = 0;
@@ -124,10 +128,11 @@ function fakeEl(id) {
 // The analytics page on a server whose rf/topology/channels answer 503 +
 // Retry-After: 5 until warmMs on the fake clock, each response after
 // latencyMs (0: at once). opts.status and opts.retryAfter replace the
-// 503 and its Retry-After value.
+// 503 and its Retry-After value; opts.realData answers with REAL.
 function pageEnv(warmMs, latencyMs, opts) {
   const errStatus = (opts && opts.status) || 503;
   const errRetryAfter = opts && 'retryAfter' in opts ? opts.retryAfter : '5';
+  const realData = !!(opts && opts.realData);
   const clock = fakeClock();
   const els = {};
   const el = (id) => els[id] || (els[id] = fakeEl(id));
@@ -142,6 +147,11 @@ function pageEnv(warmMs, latencyMs, opts) {
     if (latencyMs) await new Promise((r) => clock.setTimeout(r, latencyMs));
     if (/\/api\/analytics\/(rf|topology|channels)\b/.test(url) && clock.now() < warmMs) {
       return respond(errStatus, { error: 'analytics warming up', retry_after_s: 5 }, errRetryAfter);
+    }
+    if (realData) {
+      const m = /\/api\/analytics\/(rf|topology|channels|hash-sizes|hash-collisions)\b/.exec(url);
+      const key = m && { rf: 'rfData', topology: 'topoData', channels: 'chanData', 'hash-sizes': 'hashData', 'hash-collisions': 'collisionData' }[m[1]];
+      if (key) return respond(200, REAL[key]);
     }
     if (/\/api\/analytics\/rf\b/.test(url)) {
       return respond(200, Object.assign({}, WARM_RF, /region=CPH/.test(url) ? { totalTransmissions: 8765 } : {}));
@@ -534,10 +544,13 @@ function pageEnv(warmMs, latencyMs, opts) {
 
   // These six tabs render from the shared load (_analyticsData). The other
   // tabs fetch their own data and are covered by the browser check.
-  const DATA_TABS = ['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions'];
-  for (const tab of DATA_TABS) {
+  const DATA_TABS = {
+    overview: /Total Transmissions/, rf: /SNR Distribution/, topology: /Hop Count Distribution/,
+    channels: /Channel Activity/, hashsizes: /Hash Size Distribution/, collisions: /hashMatrixTitle/,
+  };
+  for (const [tab, marker] of Object.entries(DATA_TABS)) {
     await test('clicking "' + tab + '" during the warm-up shows the loading state, then that tab\'s data', async () => {
-      const env = pageEnv(45000);
+      const env = pageEnv(45000, 0, { realData: true });
       env.page.init(env.el('app'));
       const content = env.el('analyticsContent');
       await env.clock.advance(6000);
@@ -554,7 +567,7 @@ function pageEnv(warmMs, latencyMs, opts) {
       const late = unexpectedRejections.splice(before);
       assert.strictEqual(late.length, 0, 'rendering threw: ' + late.map((e) => e && e.message).join('; '));
       assert.ok(!/still loading|Failed to load/i.test(content.innerHTML), 'not rendered after the warm-up: ' + content.innerHTML.slice(0, 200));
-      if (tab === 'overview') assert.ok(/Total Transmissions/.test(content.innerHTML), 'not the overview');
+      assert.ok(marker.test(content.innerHTML), 'not the ' + tab + ' tab: ' + content.innerHTML.slice(0, 200));
       if (tab !== 'overview') assert.ok(!/Total Transmissions/.test(content.innerHTML), 'the overview was rendered instead of ' + tab);
     });
   }
