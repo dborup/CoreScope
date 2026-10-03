@@ -132,6 +132,11 @@ func (s *Store) RunResolvedPathBackfill(ctx context.Context, batchSize int, paus
 	if batchSize <= 0 {
 		batchSize = defaultResolvedPathBackfillBatchSize
 	}
+	// Without the index and graph every row would stay NULL while the
+	// watermark moved past it for good.
+	if s.prefixIdx.load() == nil || s.neighborGraph.load() == nil {
+		return res, fmt.Errorf("prefix index or neighbour graph not primed")
+	}
 	if err := ensureResolvedPathBackfillState(s.db); err != nil {
 		return res, fmt.Errorf("ensure state table: %w", err)
 	}

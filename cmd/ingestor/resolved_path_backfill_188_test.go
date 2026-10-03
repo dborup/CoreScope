@@ -333,3 +333,25 @@ func TestResolvedPathBackfillSettings_Defaults_188(t *testing.T) {
 		t.Fatal("disabled config still enabled")
 	}
 }
+
+// A pass that started before the prefix index and graph were primed would
+// move the watermark past rows it could not resolve, and they would never be
+// retried. It must refuse to run and leave the watermark alone.
+func TestResolvedPathBackfill_RefusesBeforePriming_188(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	ids := seedNullRows188(t, store, 5)
+	if _, err := store.RunResolvedPathBackfill(context.Background(), 10, 0); err == nil {
+		t.Fatal("the pass ran with no prefix index")
+	}
+	var n int
+	store.db.QueryRow(`SELECT COUNT(*) FROM resolved_path_backfill_state`).Scan(&n)
+	if n != 0 {
+		t.Fatal("the unprimed pass persisted a watermark")
+	}
+	primeIndexAndGraph188(t, store)
+	res, err := store.RunResolvedPathBackfill(context.Background(), 10, 0)
+	if err != nil || res.Resolved != len(ids) {
+		t.Fatalf("pass after priming = %+v, %v; want %d resolved", res, err, len(ids))
+	}
+}
