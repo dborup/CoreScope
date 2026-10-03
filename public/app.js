@@ -150,8 +150,11 @@ async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
       return cached.data;
     }
   }
-  // Deduplicate in-flight requests
-  if (_inflight.has(path)) return _inflight.get(path);
+  // Deduplicate in-flight requests. #172: per retry503 too, so a caller
+  // that retries 503s itself never waits on the retry loop below, and a
+  // default caller never gets a 503 that loop would have ridden out.
+  const inflightKey = retry503 ? path : path + '\n#no-retry503';
+  if (_inflight.has(inflightKey)) return _inflight.get(inflightKey);
   const promise = (async () => {
     // Issue #1659: 503 with Retry-After indicates server-side warm-up
     // (analytics recomputer first-pass, index build, etc.). Retry with
@@ -222,14 +225,14 @@ async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
       if (notified) _warmupNotify_1659(false);
     }
   })();
-  _inflight.set(path, promise);
+  _inflight.set(inflightKey, promise);
   // `.finally()` returns its own derived promise that mirrors `promise`'s
   // outcome; discarding it uncaught leaves the real caller's rejection
   // (delivered via the returned `promise` below, unaffected by this)
   // duplicated as a second, unobserved rejection on this derived one.
   // The `.catch()` here only silences that duplicate -- it does not
   // touch `promise` itself or its resolution to callers.
-  promise.finally(() => _inflight.delete(path)).catch(() => {});
+  promise.finally(() => _inflight.delete(inflightKey)).catch(() => {});
   return promise;
 }
 
