@@ -1076,12 +1076,24 @@
     }
     if (!needsInit) return;
     await ensureHopResolver();
-    for (const p of packets) {
-      const rp = getResolvedPath(p);
-      if (!rp) continue;
-      const hops = getParsedPath(p);
-      const resolved = HopResolver.resolveFromServer(hops, rp);
-      Object.assign(hopNameCache, resolved);
+    for (const p of packets) cacheServerResolvedPath(p);
+  }
+
+  // #165 — store the server's resolved_path entries under the bare key AND
+  // under hop:observer. renderHop() and resolveHops() both look at the
+  // per-observer key first, so a server answer stored only under the bare key
+  // was re-resolved by the client heuristic and replaced. Writing it where
+  // the readers look makes the server win without resolveHops() needing to
+  // know which packet a prefix came from. Hops the server left null are not
+  // written, so the client still resolves them and can show the ambiguity.
+  // Caller must have initialised HopResolver.
+  function cacheServerResolvedPath(p) {
+    const rp = getResolvedPath(p);
+    if (!rp) return;
+    const resolved = HopResolver.resolveFromServer(getParsedPath(p), rp);
+    for (const h of Object.keys(resolved)) {
+      hopNameCache[h] = resolved[h];
+      if (p.observer_id) hopNameCache[hopCacheKey(h, String(p.observer_id))] = resolved[h];
     }
   }
 
@@ -1090,12 +1102,8 @@
   function resolveIncomingHops(pkts) {
     const newHops = new Set();
     for (const p of pkts) {
-      const rp = getResolvedPath(p);
       const hops = getParsedPath(p);
-      if (rp && rp.length === hops.length && window.HopResolver && HopResolver.ready()) {
-        const resolved = HopResolver.resolveFromServer(hops, rp);
-        Object.assign(hopNameCache, resolved);
-      }
+      if (window.HopResolver && HopResolver.ready()) cacheServerResolvedPath(p);
       try { hops.forEach(h => { if (!(h in hopNameCache)) newHops.add(h); }); } catch {}
     }
     return newHops.size ? resolveHopsForPackets(pkts) : Promise.resolve();
