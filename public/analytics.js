@@ -255,11 +255,15 @@
     const _ap = new URLSearchParams(hashParams);
     // Every mount starts from the URL, falling back to Overview: the tab
     // selected before leaving the page must not survive into this mount (#183).
+    // The button is found by comparing data-tab, never by building a selector
+    // from the URL: a quote in ?tab= threw here, and a crafted value matched a
+    // real button while _currentTab took the arbitrary string (#193).
     const urlTab = _ap.get('tab');
-    const urlTabBtn = urlTab && analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
+    const tabBtns = Array.from(analyticsTabs.querySelectorAll('.tab-btn'));
+    const urlTabBtn = urlTab ? tabBtns.find(b => b.dataset.tab === urlTab) : null;
     _currentTab = urlTabBtn ? urlTab : 'overview';
-    const activeBtn = urlTabBtn || analyticsTabs.querySelector('[data-tab="overview"]');
-    analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    const activeBtn = urlTabBtn || tabBtns.find(b => b.dataset.tab === 'overview');
+    tabBtns.forEach(b => b.classList.remove('active'));
     if (activeBtn) activeBtn.classList.add('active');
     // #749 — restore time window from URL.
     const urlWindow = _ap.get('window');
@@ -327,10 +331,13 @@
   var _themeRefreshHandler = null;
   let _currentTab = 'overview';
 
-  // Filter fragments ("&region=…", "&area=…", "&window=…") all start with
-  // '&'; turn their concatenation into the path's query string (#179).
+  // Append a query fragment to a path (#179, #193). The filter fragments
+  // ("&region=…", "&area=…", "&window=…") start with '&'; '?…' and a bare
+  // 'a=1' are taken too, and an empty fragment (or a lone '&' / '?') leaves
+  // the path as it is. The separator is '&' when the path already has a '?'.
   function withQuery(path, frag) {
-    return frag ? path + '?' + frag.slice(1) : path;
+    const q = frag ? String(frag).replace(/^[?&]/, '') : '';
+    return q ? path + (path.indexOf('?') < 0 ? '?' : '&') + q : path;
   }
 
   async function loadAnalytics(startedAt) {
@@ -3151,6 +3158,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // Expose for testing
   if (typeof window !== 'undefined') {
     window._analyticsAssignTableIds = assignAnalyticsTableIds;
+    window._analyticsWithQuery = withQuery;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
     window._analyticsLoadChannelSort = loadChannelSort;

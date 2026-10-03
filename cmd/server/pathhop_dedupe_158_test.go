@@ -91,16 +91,13 @@ func insertTx158(t testing.TB, db *DB, i int, firstSeen time.Time) int {
 }
 
 // insertObs158 inserts one observation of transmission i through its path,
-// heard by observer obsIdx. persisted controls resolved_path (the ingestor
-// path) vs NULL (resolved fresh by the server on ingest).
-func insertObs158(t testing.TB, db *DB, i, obsIdx int, ts time.Time, persisted bool) {
+// heard by observer obsIdx, the way the ingestor writes it: with its
+// resolved_path in the same row (#1547). Load and live ingest both index
+// that resolved_path (indexObservationRelayHops).
+func insertObs158(t testing.TB, db *DB, i, obsIdx int, ts time.Time) {
 	t.Helper()
-	var rp any
-	if persisted {
-		rp = resolvedJSON158(paths158[i])
-	}
 	exec158(t, db, `INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp, resolved_path)
-		VALUES (?, ?, 5, -90, ?, ?, ?)`, i+1, obsIdx, rawHopsJSON158(paths158[i]), ts.Unix(), rp)
+		VALUES (?, ?, 5, -90, ?, ?, ?)`, i+1, obsIdx, rawHopsJSON158(paths158[i]), ts.Unix(), resolvedJSON158(paths158[i]))
 }
 
 func maxObsID158(t testing.TB, db *DB) int {
@@ -162,7 +159,7 @@ func TestPathHopIndexOncePerTx_LateObservations_158(t *testing.T) {
 
 	now := time.Now().UTC().Add(-10 * time.Minute)
 	insertTx158(t, db, 0, now)
-	insertObs158(t, db, 0, 1, now, false)
+	insertObs158(t, db, 0, 1, now)
 	store.IngestNewFromDB(0, 100)
 	for _, r := range paths158[0] {
 		if n := countTxIn158(store, relays158[r], store.byTxID[1]); n != 1 {
@@ -172,7 +169,7 @@ func TestPathHopIndexOncePerTx_LateObservations_158(t *testing.T) {
 
 	for k := 1; k <= lateObs158; k++ {
 		since := maxObsID158(t, db)
-		insertObs158(t, db, 0, 1+k, now.Add(time.Duration(k)*time.Second), false)
+		insertObs158(t, db, 0, 1+k, now.Add(time.Duration(k)*time.Second))
 		store.IngestNewObservations(since, 100)
 	}
 	assertOncePerRelay158(t, store, 0)
@@ -189,7 +186,7 @@ func TestPathHopIndexOncePerTx_LiveIngestBatch_158(t *testing.T) {
 	now := time.Now().UTC().Add(-10 * time.Minute)
 	insertTx158(t, db, 0, now)
 	for o := 1; o <= observerCount158; o++ {
-		insertObs158(t, db, 0, o, now.Add(time.Duration(o)*time.Second), false)
+		insertObs158(t, db, 0, o, now.Add(time.Duration(o)*time.Second))
 	}
 	store.IngestNewFromDB(0, 100)
 	assertOncePerRelay158(t, store, 0)
@@ -255,7 +252,7 @@ func TestTrafficShareStableAcrossLateObservations_158(t *testing.T) {
 	for i := range paths158 {
 		insertTx158(t, loadDB, i, base.Add(time.Duration(i)*time.Second))
 		for o := 1; o <= observerCount158; o++ {
-			insertObs158(t, loadDB, i, o, base.Add(time.Duration(i*100+o)*time.Second), true)
+			insertObs158(t, loadDB, i, o, base.Add(time.Duration(i*100+o)*time.Second))
 		}
 	}
 	loaded := loadedStore158(t, loadDB)
@@ -270,7 +267,7 @@ func TestTrafficShareStableAcrossLateObservations_158(t *testing.T) {
 	live := loadedStore158(t, liveDB)
 	for i := range paths158 {
 		insertTx158(t, liveDB, i, base.Add(time.Duration(i)*time.Second))
-		insertObs158(t, liveDB, i, 1, base.Add(time.Duration(i*100+1)*time.Second), false)
+		insertObs158(t, liveDB, i, 1, base.Add(time.Duration(i*100+1)*time.Second))
 	}
 	live.IngestNewFromDB(0, 1000)
 	afterIngest := shares158(t, live)
@@ -281,7 +278,7 @@ func TestTrafficShareStableAcrossLateObservations_158(t *testing.T) {
 		for i := range paths158 {
 			for k := 0; k < lateObs158/2; k++ {
 				o := 2 + round*(lateObs158/2) + k
-				insertObs158(t, liveDB, i, o, base.Add(time.Duration(i*100+o)*time.Second), false)
+				insertObs158(t, liveDB, i, o, base.Add(time.Duration(i*100+o)*time.Second))
 			}
 		}
 		live.IngestNewObservations(since, 10000)
@@ -310,7 +307,7 @@ func TestPathHopIndexSizeBoundedByTransmissions_158(t *testing.T) {
 	base := time.Now().UTC().Add(-30 * time.Minute)
 	for i := range paths158 {
 		insertTx158(t, db, i, base.Add(time.Duration(i)*time.Second))
-		insertObs158(t, db, i, 1, base.Add(time.Duration(i*100+1)*time.Second), false)
+		insertObs158(t, db, i, 1, base.Add(time.Duration(i*100+1)*time.Second))
 	}
 	store.IngestNewFromDB(0, 1000)
 	entries := func() int {
@@ -326,7 +323,7 @@ func TestPathHopIndexSizeBoundedByTransmissions_158(t *testing.T) {
 	for o := 2; o <= observerCount158; o++ {
 		since := maxObsID158(t, db)
 		for i := range paths158 {
-			insertObs158(t, db, i, o, base.Add(time.Duration(i*100+o)*time.Second), false)
+			insertObs158(t, db, i, o, base.Add(time.Duration(i*100+o)*time.Second))
 		}
 		store.IngestNewObservations(since, 10000)
 		if got := entries(); got != want {
@@ -432,11 +429,11 @@ func TestPathHopIndexOncePerTx_AfterLoad_158(t *testing.T) {
 	base := time.Now().UTC().Add(-30 * time.Minute)
 	insertTx158(t, db, 0, base)
 	for o := 1; o < observerCount158; o++ {
-		insertObs158(t, db, 0, o, base.Add(time.Duration(o)*time.Second), true)
+		insertObs158(t, db, 0, o, base.Add(time.Duration(o)*time.Second))
 	}
 	store := loadedStore158(t, db)
 	since := maxObsID158(t, db)
-	insertObs158(t, db, 0, observerCount158, base.Add(time.Minute), false)
+	insertObs158(t, db, 0, observerCount158, base.Add(time.Minute))
 	store.IngestNewObservations(since, 100)
 	assertOncePerRelay158(t, store, 0)
 }
@@ -497,7 +494,7 @@ func TestPathHopConsumersIgnoreDuplicateEntries_158(t *testing.T) {
 	for i := range paths158 {
 		insertTx158(t, db, i, base.Add(time.Duration(i)*time.Second))
 		for o := 1; o <= 2; o++ {
-			insertObs158(t, db, i, o, base.Add(time.Duration(i*100+o)*time.Second), true)
+			insertObs158(t, db, i, o, base.Add(time.Duration(i*100+o)*time.Second))
 		}
 	}
 	store := loadedStore158(t, db)
@@ -637,7 +634,7 @@ func BenchmarkIngestNewObservations_158(b *testing.B) {
 	base := time.Now().UTC().Add(-30 * time.Minute)
 	for i := range paths158 {
 		insertTx158(b, db, i, base.Add(time.Duration(i)*time.Second))
-		insertObs158(b, db, i, 1, base.Add(time.Duration(i*1000+1)*time.Second), false)
+		insertObs158(b, db, i, 1, base.Add(time.Duration(i*1000+1)*time.Second))
 	}
 	store := loadedStore158(b, db)
 	store.IngestNewFromDB(0, 1000)
@@ -648,7 +645,7 @@ func BenchmarkIngestNewObservations_158(b *testing.B) {
 		o := 2 + it%(observers-1)
 		since := maxObsID158(b, db)
 		for i := range paths158 {
-			insertObs158(b, db, i, o, base.Add(time.Duration(i*1000+o)*time.Second), false)
+			insertObs158(b, db, i, o, base.Add(time.Duration(i*1000+o)*time.Second))
 		}
 		b.StartTimer()
 		store.IngestNewObservations(since, 10000)
