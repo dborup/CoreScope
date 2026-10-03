@@ -253,15 +253,14 @@
     // Deep-link: #/analytics?tab=collisions&window=7d
     const hashParams = location.hash.split('?')[1] || '';
     const _ap = new URLSearchParams(hashParams);
+    // Every mount starts from the URL, falling back to Overview: the tab
+    // selected before leaving the page must not survive into this mount (#183).
     const urlTab = _ap.get('tab');
-    if (urlTab) {
-      const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
-      if (tabBtn) {
-        analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        tabBtn.classList.add('active');
-        _currentTab = urlTab;
-      }
-    }
+    const urlTabBtn = urlTab && analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
+    _currentTab = urlTabBtn ? urlTab : 'overview';
+    const activeBtn = urlTabBtn || analyticsTabs.querySelector('[data-tab="overview"]');
+    analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    if (activeBtn) activeBtn.classList.add('active');
     // #749 — restore time window from URL.
     const urlWindow = _ap.get('window');
     if (urlWindow) {
@@ -328,6 +327,12 @@
   var _themeRefreshHandler = null;
   let _currentTab = 'overview';
 
+  // Filter fragments ("&region=…", "&area=…", "&window=…") all start with
+  // '&'; turn their concatenation into the path's query string (#179).
+  function withQuery(path, frag) {
+    return frag ? path + '?' + frag.slice(1) : path;
+  }
+
   async function loadAnalytics(startedAt) {
     _cancelLoadRetry();
     const gen = _loadGen;
@@ -344,23 +349,20 @@
       const twVal = twEl ? twEl.value : '';
       const tws = twVal ? '&window=' + encodeURIComponent(twVal) : '';
       // hash-sizes / hash-collisions: region + area, no window
-      const baseQS = (rqs + aqs).slice(1);
-      const sepBase = baseQS ? '?' + baseQS : '';
+      const baseQ = rqs + aqs;
       // rf / topology: region + area + window
-      const windowedQS = (rqs + aqs + tws).slice(1);
-      const sepWin = windowedQS ? '?' + windowedQS : '';
+      const windowedQ = rqs + aqs + tws;
       // channels: region + window (no area per original PR intent)
-      const chanQS = (rqs + tws).slice(1);
-      const sepChan = chanQS ? '?' + chanQS : '';
+      const chanQ = rqs + tws;
       // This load retries 503s itself (retry503:false), see _loadGen.
       const opts = { ttl: CLIENT_TTL.analyticsRF, retry503: false };
       const [hashData, rfData, topoData, chanData, collisionData, airtimeData] = await Promise.all([
-        api('/analytics/hash-sizes' + sepBase, opts),
-        api('/analytics/rf' + sepWin, opts),
-        api('/analytics/topology' + sepWin, opts),
-        api('/analytics/channels' + sepChan, opts),
-        api('/analytics/hash-collisions' + sepBase, opts),
-        api('/analytics/relay-airtime-share' + sepWin, { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
+        api(withQuery('/analytics/hash-sizes', baseQ), opts),
+        api(withQuery('/analytics/rf', windowedQ), opts),
+        api(withQuery('/analytics/topology', windowedQ), opts),
+        api(withQuery('/analytics/channels', chanQ), opts),
+        api(withQuery('/analytics/hash-collisions', baseQ), opts),
+        api(withQuery('/analytics/relay-airtime-share', windowedQ), { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
       ]);
       if (gen !== _loadGen) return;
       _analyticsData = { hashData, rfData, topoData, chanData, collisionData, airtimeData };
@@ -3050,8 +3052,7 @@
     const gen = _distanceGen;
     try {
       const rqs = RegionFilter.regionQueryString();
-      const sep = rqs ? '?' + rqs.slice(1) : '';
-      const data = await api('/analytics/distance' + sep, { ttl: CLIENT_TTL.analyticsRF });
+      const data = await api(withQuery('/analytics/distance', rqs), { ttl: CLIENT_TTL.analyticsRF });
       if (gen !== _distanceGen) return;   // re-rendered, switched tab or left meanwhile
       if (_distanceIsBuilding(data)) {
         const ms = _retryAfterDelayMs(data);
@@ -3232,10 +3233,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
     // Load data
     const rqs = RegionFilter.regionQueryString();
-    const sep = rqs ? '?' + rqs.slice(1) : '';
     let graphData;
     try {
-      graphData = await api('/analytics/neighbor-graph' + sep + (sep ? '&' : '?') + 'min_count=1&min_score=0', { ttl: CLIENT_TTL.analyticsRF });
+      graphData = await api(withQuery('/analytics/neighbor-graph', rqs + '&min_count=1&min_score=0'), { ttl: CLIENT_TTL.analyticsRF });
     } catch (e) {
       el.innerHTML = `<div class="analytics-card"><p class="text-muted">Failed to load neighbor graph: ${esc(e.message)}</p></div>`;
       return;
@@ -3714,7 +3714,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         // #1270: fetch CONFIGURED-hash-size counts so the Network Overview
         // tells the operational story (matching Hash Stats "By Repeaters"),
         // not just a math-only count of unique pubkey slices.
-        api('/analytics/hash-sizes' + rq, { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
+        api(withQuery('/analytics/hash-sizes', rq), { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
       ]);
     } catch (e) {
       el.innerHTML = `<div class="text-muted" role="alert" style="padding:40px">Failed to load: ${esc(e.message)}</div>`;
