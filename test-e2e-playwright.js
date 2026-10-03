@@ -45,6 +45,28 @@ async function gotoPackets(page) {
   await page.waitForSelector('table tbody tr[data-hash]', { timeout: 15000 });
 }
 
+// Waits until the channels page has rendered its /api/channels list and the
+// channel count has stopped changing. channels.js sets its WS test hooks
+// synchronously in init(), before loadChannels() resolves, so a test that
+// snapshots the list as soon as the hook exists can see 0 channels and then
+// the full list one evaluate later, whatever its WS message did.
+async function waitForChannelListSettled(page, { timeout = 10000, stableMs = 300 } = {}) {
+  const deadline = Date.now() + timeout;
+  let last = -1;
+  let since = Date.now();
+  for (;;) {
+    const count = await page.evaluate(() => {
+      const list = document.getElementById('chList');
+      if (!list || list.querySelector('.ch-loading') || typeof window._channelsGetStateForTest !== 'function') return -1;
+      return window._channelsGetStateForTest().channels.length;
+    });
+    if (count !== last) { last = count; since = Date.now(); }
+    if (count > 0 && Date.now() - since >= stableMs) return count;
+    if (Date.now() > deadline) throw new Error(`channel list did not settle within ${timeout}ms (last count ${count})`);
+    await page.waitForTimeout(50);
+  }
+}
+
 async function run() {
   console.log('Launching Chromium...');
   const browser = await chromium.launch({
@@ -2296,6 +2318,9 @@ async function run() {
     await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
     // Wait for the channels init() to mount and expose the test hook.
     await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+    // The hook exists before /api/channels has answered; snapshot only the
+    // loaded list, or the count can jump from 0 between before and after.
+    await waitForChannelListSettled(page);
 
     // Snapshot starting state so we can compare deltas.
     const before = await page.evaluate(() => {
@@ -2336,6 +2361,9 @@ async function run() {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+    // Same as above: route the message into the loaded list, not one that
+    // loadChannels() replaces a moment later.
+    await waitForChannelListSettled(page);
 
     const sentinel = '__test_chan_1468_' + Date.now();
     const before = await page.evaluate((name) => {
