@@ -372,6 +372,36 @@ func TestLateObservationIndexesLikeLoad_NullResolvedPath_158(t *testing.T) {
 	}
 }
 
+// decodePersistedRelayPath is what the live ingest paths call before taking
+// s.mu. A NULL/empty column must stay distinguishable from a persisted path
+// whose hops are all null: the first takes the path_json fallback, the
+// second is indexed as given (nothing).
+func TestDecodePersistedRelayPath_158(t *testing.T) {
+	for _, c := range []struct {
+		name, in string
+		want     persistedRelayPath
+	}{
+		{"NULL column", "", persistedRelayPath{}},
+		{"all hops null", `[null,null]`, persistedRelayPath{present: true}},
+		{"partly resolved", `["` + shareA1 + `",null,"` + shareB2 + `"]`, persistedRelayPath{pubkeys: []string{shareA1, shareB2}, present: true}},
+		{"empty list", `[]`, persistedRelayPath{present: true}},
+		{"corrupt json", `[`, persistedRelayPath{present: true}},
+		{"non-string hop", `[1,"` + shareA1 + `"]`, persistedRelayPath{present: true}},
+		{"empty string hop", `["","` + shareB2 + `"]`, persistedRelayPath{pubkeys: []string{shareB2}, present: true}},
+	} {
+		got := decodePersistedRelayPath(c.in)
+		if got.present != c.want.present || strings.Join(got.pubkeys, ",") != strings.Join(c.want.pubkeys, ",") {
+			t.Errorf("%s: decodePersistedRelayPath(%q) = %+v, want %+v", c.name, c.in, got, c.want)
+		}
+		// Oracle: the two functions the decode replaces.
+		if c.in != "" {
+			if o := extractResolvedPubkeys(unmarshalResolvedPath(c.in)); strings.Join(o, ",") != strings.Join(got.pubkeys, ",") {
+				t.Errorf("%s: %q decodes to %v, old extractResolvedPubkeys(unmarshalResolvedPath) gives %v", c.name, c.in, got.pubkeys, o)
+			}
+		}
+	}
+}
+
 // BenchmarkIngestNewFromDB_158 drives the real live ingest (SQL scan +
 // index + broadcast build) of a batch of 20 new transmissions with 11
 // observations each, as the ingestor writes them (resolved_path set).

@@ -655,7 +655,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 			// Same relay-hop indexing as Load and live ingest (see
 			// indexObservationRelayHops). relayPM is passed in from
 			// LoadChunked (fetched before any chunk cursor opened).
-			s.indexObservationRelayHops(tx, nullStrVal(resolvedPathStr), obsPJ, obsIDStr, relayPM, hopsSeen, coldLoadAmbiguousHopsSkipped)
+			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, coldLoadAmbiguousHopsSkipped)
 
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)

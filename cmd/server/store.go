@@ -1043,7 +1043,7 @@ func (s *PacketStore) Load() error {
 			}
 
 			// Decode-window: feed the relay-hop indexes, don't store on struct.
-			s.indexObservationRelayHops(tx, nullStrVal(resolvedPathStr), obsPJ, obsIDStr, relayPM, hopsSeen, &coldLoadAmbiguousHopsSkipped)
+			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, &coldLoadAmbiguousHopsSkipped)
 
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
@@ -1878,6 +1878,45 @@ func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen 
 	s.addToResolvedPubkeyIndex(tx.ID, pks)
 }
 
+// persistedRelayPath is a decoded observations.resolved_path column value.
+// present distinguishes a persisted (possibly all-null) path from a NULL
+// column, which takes the path_json fallback in indexObservationRelayHops.
+type persistedRelayPath struct {
+	pubkeys []string
+	present bool
+}
+
+// decodePersistedRelayPath decodes a resolved_path column value. It is pure
+// and takes no lock: the live ingest paths call it while scanning rows,
+// before s.mu is taken, so the JSON work does not extend the critical
+// section (#158 follow-up).
+//
+// The result equals extractResolvedPubkeys(unmarshalResolvedPath(s)). It
+// decodes straight into []string (a JSON null becomes "", which is what
+// extractResolvedPubkeys drops) and compacts in place, saving the *string
+// allocated per hop and the second slice on a path that runs once per
+// observation.
+func decodePersistedRelayPath(resolvedPath string) persistedRelayPath {
+	if resolvedPath == "" {
+		return persistedRelayPath{}
+	}
+	var hops []string
+	if json.Unmarshal([]byte(resolvedPath), &hops) != nil {
+		return persistedRelayPath{present: true} // as unmarshalResolvedPath: corrupt means no hops
+	}
+	n := 0
+	for _, h := range hops {
+		if h != "" {
+			hops[n] = h
+			n++
+		}
+	}
+	if n == 0 {
+		return persistedRelayPath{present: true}
+	}
+	return persistedRelayPath{pubkeys: hops[:n], present: true}
+}
+
 // indexObservationRelayHops feeds the relay-hop indexes from one stored
 // observation. Every path that materializes an observation (Load,
 // scanAndMergeChunk, IngestNewFromDB, IngestNewObservations) goes through
@@ -1893,10 +1932,12 @@ func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen 
 // traffic share counted live transmissions for more relays than loaded
 // ones and its sum rose with uptime (#158 follow-up).
 //
-// skipped counts ambiguous cold-load hops (may be nil). Must hold s.mu.
-func (s *PacketStore) indexObservationRelayHops(tx *StoreTx, resolvedPath, pathJSON, observerID string, relayPM *prefixMap, hopsSeen map[string]bool, skipped *int) {
-	if resolvedPath != "" {
-		s.indexResolvedPathHops(tx, extractResolvedPubkeys(unmarshalResolvedPath(resolvedPath)), hopsSeen)
+// persisted is the decoded resolved_path (decodePersistedRelayPath), taken
+// outside the lock by the live paths. skipped counts ambiguous cold-load
+// hops (may be nil). Must hold s.mu.
+func (s *PacketStore) indexObservationRelayHops(tx *StoreTx, persisted persistedRelayPath, pathJSON, observerID string, relayPM *prefixMap, hopsSeen map[string]bool, skipped *int) {
+	if persisted.present {
+		s.indexResolvedPathHops(tx, persisted.pubkeys, hopsSeen)
 		return
 	}
 	if relayPM == nil || pathJSON == "" || pathJSON == "[]" {
@@ -2881,7 +2922,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		obsID                                                              *int
 		observerID, observerName, observerIATA, direction, pathJSON, obsTS string
 		obsRawHex                                                          string
-		resolvedPath                                                       string
+		resolvedPath                                                       persistedRelayPath
 		scopeName                                                          string
 		routeMask                                                          sql.NullInt64
 		snr, rssi                                                          *float64
@@ -2948,7 +2989,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			pathJSON:     nullStrVal(pathJSON),
 			obsTS:        nullStrVal(obsTimestamp),
 			obsRawHex:    nullStrVal(obsRawHex),
-			resolvedPath: nullStrVal(resolvedPath),
+			resolvedPath: decodePersistedRelayPath(nullStrVal(resolvedPath)), // outside s.mu
 			scopeName:    nullStrVal(scopeName),
 			routeMask:    routeMask,
 			snr:          nullFloatPtr(snrVal),
@@ -3332,7 +3373,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		score        *int
 		pathJSON     string
 		rawHex       string
-		resolvedPath string
+		resolvedPath persistedRelayPath
 		timestamp    string
 		routeMask    sql.NullInt64
 	}
@@ -3374,7 +3415,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			score:        nullIntPtr(score),
 			pathJSON:     nullStrVal(pathJSON),
 			rawHex:       nullStrVal(obsRawHex),
-			resolvedPath: nullStrVal(resolvedPath),
+			resolvedPath: decodePersistedRelayPath(nullStrVal(resolvedPath)), // outside s.mu
 			timestamp:    nullStrVal(ts),
 			routeMask:    routeMask,
 		})
