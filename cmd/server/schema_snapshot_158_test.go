@@ -14,8 +14,10 @@ import (
 // swallowed and the row is silently skipped. One snapshot per call keeps
 // query and Scan consistent.
 //
-// The hook flips the flag after the query ran and before the rows are
-// scanned, which is the window the bug lives in.
+// The hooks flip the flag in the two windows a regression could use: after
+// the query ran and before the rows are scanned (a Scan built from a fresh
+// read), and after the snapshot and before the query is built (a SELECT
+// built from a fresh read).
 
 func TestIngestSchemaFlagFlipBetweenQueryAndScan_158(t *testing.T) {
 	type flagCase struct {
@@ -30,69 +32,82 @@ func TestIngestSchemaFlagFlipBetweenQueryAndScan_158(t *testing.T) {
 	}
 	base := time.Now().UTC().Add(-30 * time.Minute)
 
+	// The flag flips either right after the ingestCols snapshot (a query
+	// built from a fresh flag read would not match the Scan) or between the
+	// query and the Scan (a Scan built from a fresh read would not match).
+	setFlip := func(store *PacketStore, at string, flip func()) {
+		if at == "after_cols" {
+			store.ingestAfterColsHook = flip
+		} else {
+			store.ingestAfterQueryHook = flip
+		}
+	}
+
 	for _, c := range cases {
-		for _, start := range []bool{true, false} {
-			dir := "true_to_false"
-			if !start {
-				dir = "false_to_true"
-			}
-
-			t.Run("IngestNewFromDB/"+c.name+"/"+dir, func(t *testing.T) {
-				db := setupTestDB(t)
-				defer db.conn.Close()
-				seedShareGrowth(t, db)
-				ensureColumn158(t, db, c.table, c.name)
-				store := loadedStore158(t, db)
-				for i := 0; i < 3; i++ {
-					insertShareTx(t, db, i, base.Add(time.Duration(i)*time.Second))
-					insertShareObs(t, db, i, 1, base.Add(time.Duration(i*10+1)*time.Second))
+		for _, at := range []string{"after_cols", "after_query"} {
+			for _, start := range []bool{true, false} {
+				dir := at + "/true_to_false"
+				if !start {
+					dir = at + "/false_to_true"
 				}
-				f := c.flag(db)
-				f.v.Store(start)
-				store.ingestAfterQueryHook = func() { f.v.Store(!start) }
 
-				store.IngestNewFromDB(0, 100)
-
-				store.mu.RLock()
-				defer store.mu.RUnlock()
-				for id := 1; id <= 3; id++ {
-					if store.byTxID[id] == nil {
-						t.Errorf("tx %d skipped: %s flag flipped %s between query and scan", id, c.name, dir)
+				t.Run("IngestNewFromDB/"+c.name+"/"+dir, func(t *testing.T) {
+					db := setupTestDB(t)
+					defer db.conn.Close()
+					seedShareGrowth(t, db)
+					ensureColumn158(t, db, c.table, c.name)
+					store := loadedStore158(t, db)
+					for i := 0; i < 3; i++ {
+						insertShareTx(t, db, i, base.Add(time.Duration(i)*time.Second))
+						insertShareObs(t, db, i, 1, base.Add(time.Duration(i*10+1)*time.Second))
 					}
-				}
-			})
+					f := c.flag(db)
+					f.v.Store(start)
+					setFlip(store, at, func() { f.v.Store(!start) })
 
-			if c.name == "scope_name" {
-				continue // IngestNewObservations does not select it
-			}
-			t.Run("IngestNewObservations/"+c.name+"/"+dir, func(t *testing.T) {
-				db := setupTestDB(t)
-				defer db.conn.Close()
-				seedShareGrowth(t, db)
-				ensureColumn158(t, db, c.table, c.name)
-				for i := 0; i < 3; i++ {
-					insertShareTx(t, db, i, base.Add(time.Duration(i)*time.Second))
-					insertShareObs(t, db, i, 1, base.Add(time.Duration(i*10+1)*time.Second))
-				}
-				store := loadedStore158(t, db)
-				since := maxObsID158(t, db)
-				for i := 0; i < 3; i++ {
-					insertShareObsPath(t, db, i, 2, `["A1","B2"]`, `["`+shareA1+`","`+shareB2+`"]`, base.Add(time.Duration(i*10+2)*time.Second))
-				}
-				f := c.flag(db)
-				f.v.Store(start)
-				store.ingestAfterQueryHook = func() { f.v.Store(!start) }
+					store.IngestNewFromDB(0, 100)
 
-				store.IngestNewObservations(since, 100)
-
-				store.mu.RLock()
-				defer store.mu.RUnlock()
-				for id := 1; id <= 3; id++ {
-					if n := len(store.byTxID[id].Observations); n != 2 {
-						t.Errorf("tx %d has %d observations, want 2: row skipped when %s flag flipped %s between query and scan", id, n, c.name, dir)
+					store.mu.RLock()
+					defer store.mu.RUnlock()
+					for id := 1; id <= 3; id++ {
+						if store.byTxID[id] == nil {
+							t.Errorf("tx %d skipped: %s flag flipped (%s)", id, c.name, dir)
+						}
 					}
+				})
+
+				if c.name == "scope_name" {
+					continue // IngestNewObservations does not select it
 				}
-			})
+				t.Run("IngestNewObservations/"+c.name+"/"+dir, func(t *testing.T) {
+					db := setupTestDB(t)
+					defer db.conn.Close()
+					seedShareGrowth(t, db)
+					ensureColumn158(t, db, c.table, c.name)
+					for i := 0; i < 3; i++ {
+						insertShareTx(t, db, i, base.Add(time.Duration(i)*time.Second))
+						insertShareObs(t, db, i, 1, base.Add(time.Duration(i*10+1)*time.Second))
+					}
+					store := loadedStore158(t, db)
+					since := maxObsID158(t, db)
+					for i := 0; i < 3; i++ {
+						insertShareObsPath(t, db, i, 2, `["A1","B2"]`, `["`+shareA1+`","`+shareB2+`"]`, base.Add(time.Duration(i*10+2)*time.Second))
+					}
+					f := c.flag(db)
+					f.v.Store(start)
+					setFlip(store, at, func() { f.v.Store(!start) })
+
+					store.IngestNewObservations(since, 100)
+
+					store.mu.RLock()
+					defer store.mu.RUnlock()
+					for id := 1; id <= 3; id++ {
+						if n := len(store.byTxID[id].Observations); n != 2 {
+							t.Errorf("tx %d has %d observations, want 2: row skipped when %s flag flipped (%s)", id, n, c.name, dir)
+						}
+					}
+				})
+			}
 		}
 	}
 }

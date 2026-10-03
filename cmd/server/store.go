@@ -588,6 +588,11 @@ type PacketStore struct {
 	// its rows are scanned. Test-only: flips an optional-column schema flag
 	// between query construction and Scan (#158 follow-up).
 	ingestAfterQueryHook func()
+	// ingestAfterColsHook, if non-nil, runs in the same two functions right
+	// after the ingestCols snapshot and before the query is built. Test-only:
+	// flips a flag so a query built from a fresh flag read instead of the
+	// snapshot is caught too.
+	ingestAfterColsHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -1863,8 +1868,9 @@ func pathFirstHop(pathJSON string) string {
 // Caller contract:
 //   - Must hold s.mu write lock (addToByNode / addToResolvedPubkeyIndex /
 //     addResolvedPubkeysToPathHopIndex all mutate store state).
-//   - pks should be the output of extractResolvedPubkeys (no nils, no
-//     empties); the helper is a no-op when pks is empty.
+//   - pks should be the output of extractResolvedPubkeys, or the pubkeys
+//     of decodePersistedRelayPath (both drop nils and empties); the helper
+//     is a no-op when pks is empty.
 //   - hopsSeen is a reusable scratch map; addResolvedPubkeysToPathHopIndex
 //     clear()s it on entry.
 //   - Safe to call once per observation: every index it feeds is
@@ -2867,6 +2873,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	// each path itself for the live broadcast.
 	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
 	cols := s.db.ingestCols()
+	if s.ingestAfterColsHook != nil {
+		s.ingestAfterColsHook()
+	}
 	var querySQL string
 	obsRHCol := ""
 	if cols.obsRawHex {
@@ -3321,6 +3330,9 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 
 	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
 	cols := s.db.ingestCols()
+	if s.ingestAfterColsHook != nil {
+		s.ingestAfterColsHook()
+	}
 	var querySQL string
 	obsRHCol2 := ""
 	if cols.obsRawHex {
