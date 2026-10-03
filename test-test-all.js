@@ -130,7 +130,6 @@ test('test-all.sh registers itself through this test', () => {
 // test past the check below: register it instead.
 const KNOWN_UNREGISTERED = {
   // red unit tests (stale after intended UI changes)
-  'test-channel-colors.js': 'red: expects 4px border + tint, #675 changed it to 3px',
   'test-channel-ux-followup.js': 'red: copy text changed by the Phosphor migration',
   'test-channel-ux-round2.js': 'red: expects the 📤 glyph, now #ph-share-network',
   'test-drag-manager.js': 'red: removeAttribute mock does not update dataset (#1567)',

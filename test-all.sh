@@ -237,6 +237,9 @@ run test-map-clustering.js
 run test-panel-corner.js
 run test-customizer-v2.js
 
+# Repaired orphans (#189)
+run test-channel-colors.js
+
 # test-all.sh self-test (#174)
 run test-test-all.js
 
