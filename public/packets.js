@@ -1162,9 +1162,11 @@
     }
     if (!uncertain) return body;
     const label = uncertain + ' of ' + filtered.length + ' hops have more than one candidate';
-    return body + ' <span class="hop-path-warn status-warn" title="' + escapeHtml(label) +
+    // #165 — first, not last: the list's path cell clips overflow, and the
+    // long paths that overflow are the ones the warning matters most for.
+    return '<span class="hop-path-warn status-warn" title="' + escapeHtml(label) +
       '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
-      uncertain + '</span>';
+      uncertain + '</span>' + body;
   }
 
   let directPacketId = null;
@@ -2700,7 +2702,8 @@
       // is past the host's right edge.
       for (var j = 0; j < children.length; j++) {
         var ch = children[j];
-        if (ch.classList.contains('arrow')) continue;
+        // #165 — the path's ambiguity summary is not a hop.
+        if (ch.classList.contains('arrow') || ch.classList.contains('hop-path-warn')) continue;
         var r = ch.getBoundingClientRect();
         if (r.left >= hostRight || r.right > hostRight + 0.5) hidden++;
       }

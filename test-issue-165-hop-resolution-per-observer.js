@@ -257,12 +257,13 @@ test('the summary indicator comes before the hops, so overflow cannot clip it', 
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
   await T.resolveHops(['ef', 'c1'], 'OBS-A');
   const html = T.renderPath(['c1', 'ef'], 'OBS-A', { summary: true });
-  const warn = html.indexOf('hop-path-warn'), firstHop = html.indexOf('class="hop');
+  const warn = html.indexOf('hop-path-warn'), firstHop = html.search(/class="hop[ "]/);
   assert(warn !== -1, 'the summary indicator is rendered: ' + html);
   assert(warn < firstHop, 'the indicator precedes the first hop: ' + html);
   const detail = T.renderPath(['c1', 'ef'], 'OBS-A');
-  assert(detail.indexOf('hop-path-warn') === -1 && /hop-conflict-btn/.test(detail),
-    'the detail form keeps per-hop badges and no summary');
+  // (Per-hop badge rendering itself is covered in test-issue-165-hop-ambiguity-badge.js.)
+  assert(detail.indexOf('hop-path-warn') === -1 && /hop-ambiguous/.test(detail),
+    'the detail form has no path summary and keeps the per-hop ambiguity: ' + detail);
 });
 
 test('the overflow pill counts hops only, not the summary indicator', async () => {
