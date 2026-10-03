@@ -133,7 +133,6 @@ const KNOWN_UNREGISTERED = {
   'test-packets.js': 'red on 1 assertion: collapsed group caret is #ph-caret-up, a real bug (#189); register once packets.js is fixed',
   // need something CI's unit job does not have
   'test-marker-outline-weight.js': 'needs @playwright/test (not a dependency) and a server',
-  'test-table-sort.js': 'needs jsdom (not a dependency)',
   'test-touch-targets.js': 'red in Chromium: expects 48px targets, CSS has 44px',
   // E2E
   'test-channel-modal-e2e.js': 'red: Add button text and sidebar sections changed',
