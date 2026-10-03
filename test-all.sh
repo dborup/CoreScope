@@ -243,6 +243,7 @@ run test-channel-ux-followup.js
 run test-channel-ux-round2.js
 run test-drag-manager.js
 run test-fluid-scaffolding.js
+run test-hop-resolver-affinity.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js
