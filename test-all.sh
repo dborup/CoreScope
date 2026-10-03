@@ -144,6 +144,7 @@ run test-issue-111-drawer-version.js
 run test-packet-filter-time.js
 run test-confidence-indicator.js
 run test-1659-analytics-warmup.js
+run test-analytics-tab-state-and-query.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js
