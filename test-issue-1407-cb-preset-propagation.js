@@ -243,6 +243,29 @@ console.log('\n=== #1407 G: ROLE_COLORS follows the preset delivered by body[dat
     'preset deut active via body[data-cb-preset] only: ROLE_COLORS.repeater === #FE6100 (got ' + viaBody + ')');
 }
 
+console.log('\n=== #1407 H: ROLE_COLORS falls back to documentElement while <body> is null ===');
+// Review nit from #178: roles.js loads in <head>, where document.body is still
+// null. _readCssVar must then resolve on documentElement, not hand null to
+// getComputedStyle (which throws in browsers) and drop to the hardcoded default.
+{
+  const henv = makeSandbox();
+  henv.sandbox.document.body = null;
+  const rootOnly = '#123456'; // differs from the Wong default, so a fallback shows
+  henv.sandbox.getComputedStyle = function (el) {
+    if (!el) throw new TypeError("getComputedStyle: parameter 1 is not of type 'Element'");
+    return {
+      getPropertyValue: function (k) {
+        return el === henv.root && k === '--mc-role-repeater' ? rootOnly : '';
+      }
+    };
+  };
+  vm.createContext(henv.sandbox);
+  vm.runInContext(rolesSrc, henv.sandbox);
+  const got = String(henv.sandbox.window.ROLE_COLORS.repeater).toLowerCase();
+  assert(got === rootOnly,
+    'document.body null: ROLE_COLORS.repeater resolves on documentElement (got ' + got + ')');
+}
+
 console.log('\n=== Summary ===');
 console.log('  passed: ' + passed);
 console.log('  failed: ' + failed);

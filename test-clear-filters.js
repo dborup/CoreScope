@@ -143,7 +143,9 @@ function extractFunctionSource(src, marker) {
 }
 function extractUpdatePacketsUrl() {
   const src = fs.readFileSync(__dirname + '/public/packets.js', 'utf-8');
-  const body = extractFunctionSource(src, 'function updatePacketsUrl()');
+  // #147: updatePacketsUrl(detail) takes an optional detail argument; the
+  // tests below leave it undefined (the plain filter-change call).
+  const body = extractFunctionSource(src, 'function updatePacketsUrl(');
   // updatePacketsUrl() delegates button visibility to updateClearFiltersVisibility()
   const vis = extractFunctionSource(src, 'function updateClearFiltersVisibility()');
   return vis + '\n' + body.substring(body.indexOf('{') + 1, body.length - 1);
@@ -288,7 +290,7 @@ test('updatePacketsUrl shows clear button when time window != default', () => {
   const DEFAULT_TIME_WINDOW = 15;
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW',
-    'document', 'history', 'RegionFilter', 'buildPacketsQuery', 'location',
+    'document', 'history', 'RegionFilter', 'buildPacketsQuery', 'location', 'detail',
     updateUrlBody
   );
   fn(filters, savedTimeWindowMin, DEFAULT_TIME_WINDOW,
@@ -302,7 +304,7 @@ test('updatePacketsUrl hides clear button when all filters default', () => {
   const filters = {};
   const fn = new Function(
     'filters', 'savedTimeWindowMin', 'DEFAULT_TIME_WINDOW',
-    'document', 'history', 'RegionFilter', 'buildPacketsQuery', 'location',
+    'document', 'history', 'RegionFilter', 'buildPacketsQuery', 'location', 'detail',
     updateUrlBody
   );
   fn(filters, 15, 15, ctx.document, ctx.history, ctx.RegionFilter, () => '', ctx.location);

@@ -128,9 +128,20 @@ function makeSandbox(apiImpl) {
       };
       return search(body);
     },
-    addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
-    removeEventListener(type, fn) { if (docListeners[type]) docListeners[type] = docListeners[type].filter(f => f !== fn); },
+    // docLog: the live document listeners with their capture flag (#167 r2:
+    // the modal's Escape handler must run in the capture phase).
+    addEventListener(type, fn, opts) {
+      (docListeners[type] = docListeners[type] || []).push(fn);
+      docLog.push({ type, fn, capture: opts === true || !!(opts && opts.capture) });
+    },
+    removeEventListener(type, fn, opts) {
+      if (docListeners[type]) docListeners[type] = docListeners[type].filter(f => f !== fn);
+      const capture = opts === true || !!(opts && opts.capture);
+      const i = docLog.findIndex(r => r.type === type && r.fn === fn && r.capture === capture);
+      if (i !== -1) docLog.splice(i, 1);
+    },
   };
+  const docLog = [];
 
   const ctx = {
     window: {}, document: doc, console, Math, String, JSON, Promise, Error,
@@ -142,7 +153,11 @@ function makeSandbox(apiImpl) {
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
-    location: { origin: 'https://stg.meshview.dk' },
+    location: { origin: 'https://stg.meshview.dk', hash: '' },
+    // Records replaceState() so the #147 tests can see the address bar.
+    history: { replaceState(_s, _t, url) { ctx.__replaced.push(url); ctx.location.hash = url; } },
+    __replaced: [],
+    __docLog: docLog,
   };
   ctx.window.copyToClipboard = (text, onDone) => { ctx.__copiedText = text; if (onDone) onDone(); };
   vm.createContext(ctx);
@@ -1051,6 +1066,54 @@ function makeSandbox(apiImpl) {
 
   await (async () => {
     try {
+      // #174 (review of #177): every role icon and the first-to-hear flag
+      // are decorative sprite icons, hidden from screen readers.
+      const first = {
+        hops: 2,
+        points: [{ publicKey: 'pk3', name: 'SensorC', lat: 56.2, lon: 10.2, role: 'sensor' }],
+        observer: { name: 'FirstObs', lat: 56.3, lon: 10.3, role: 'client' },
+      };
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk1', name: 'RepeaterA', lat: 56.0, lon: 10.0, role: 'repeater' }],
+            observer: { name: 'RoomObserver', lat: 56.1, lon: 10.1, role: 'room' },
+          },
+          first,
+        ],
+        first,
+      }));
+
+      const tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const icon = (name) => '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg> ';
+      for (const [name, glyph] of [['RepeaterA', 'broadcast'], ['RoomObserver', 'house-line'], ['SensorC', 'thermometer'], ['FirstObs', 'radio']]) {
+        assert.ok(tooltips.some((t) => t.startsWith(icon(glyph)) && t.includes(name)),
+          'expected ' + name + ' to start with an aria-hidden #ph-' + glyph + ' icon, got: ' + JSON.stringify(tooltips));
+      }
+      const flag = tooltips.filter((t) => t.includes('First to hear it: FirstObs'));
+      assert.strictEqual(flag.length, 1, 'expected one first-to-hear tooltip, got: ' + JSON.stringify(tooltips));
+      assert.ok(flag[0].startsWith(icon('flag') + 'First to hear it: FirstObs (2 hops)'),
+        'expected the first-to-hear tooltip to start with an aria-hidden #ph-flag icon, got: ' + flag[0]);
+      const svgs = tooltips.join('').match(/<svg\b[^>]*>/g) || [];
+      assert.ok(svgs.length >= 5, 'expected at least 5 icons, got ' + svgs.length);
+      assert.deepStrictEqual(svgs.filter((t) => !/\baria-hidden="true"/.test(t)), [], 'every tooltip icon must be aria-hidden');
+      passed++;
+      console.log('  ✅ role icons and the first-to-hear flag render as aria-hidden sprite icons');
+    } catch (e) { failed++; console.log('  ❌ role icons and the first-to-hear flag render as aria-hidden sprite icons: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
       // A marker with a publicKey should register a click handler that
       // navigates to #/nodes/{pubkey} (closing the modal first); one
       // without a publicKey should register no click handler at all.
@@ -1194,6 +1257,76 @@ function makeSandbox(apiImpl) {
       console.log('  ✅ shades each touched area on the map: polygon when drawn, rectangle fallback for bbox-only areas, both non-interactive');
     } catch (e) { failed++; console.log('  ❌ shades each touched area on the map: polygon when drawn, rectangle fallback for bbox-only areas, both non-interactive: ' + e.message); }
   })();
+
+  // #147: ?viewPath=1 on a #/packets/<hash> URL describes this open modal.
+  // Closing it drops that one param (others verbatim) so a refresh or a
+  // copied address-bar link does not reopen a modal that is no longer shown.
+  async function viewPathCase(name, startHash, act, expectHash, expectWrites) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = startHash;
+      await act(ctx);
+      assert.strictEqual(ctx.location.hash, expectHash);
+      assert.strictEqual(ctx.__replaced.length, expectWrites, 'replaceState calls: ' + JSON.stringify(ctx.__replaced));
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  await viewPathCase('close() drops ?viewPath=1 from a #/packets/<hash> URL, keeping the other params (#147)',
+    '#/packets/deadbeef?timeWindow=60&obs=123&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); ctx.window.PacketPathMap.close(); },
+    '#/packets/deadbeef?timeWindow=60&obs=123', 1);
+  await viewPathCase('open() on a cold-loaded ?viewPath=1 link keeps it while the modal is shown (#147)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); },
+    '#/packets/deadbeef?obs=123&viewPath=1', 0);
+  await viewPathCase('close() leaves non-packets pages (e.g. analytics distance) untouched (#147)',
+    '#/analytics?tab=distance&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); ctx.window.PacketPathMap.close(); },
+    '#/analytics?tab=distance&viewPath=1', 0);
+  // #167 r2: open() replaces a modal that is already open. That is not a
+  // close, so it must not drop ?viewPath=1 (open() used to call close()).
+  await viewPathCase('open() while the modal is already open keeps ?viewPath=1 (#167 r2)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => {
+      await ctx.window.PacketPathMap.open('deadbeef');
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert(ctx.document.getElementById('packetPathModal'), 'modal not open after the second open()');
+    },
+    '#/packets/deadbeef?obs=123&viewPath=1', 0);
+
+  // #167 r2: packets.js writes ?viewPath=1 while the modal is open on the
+  // packet of the #/packets/<hash> subpath, so the overlay names its packet.
+  await viewPathCase('the open modal records its packet hash (data-hash) (#167 r2)',
+    '#/packets/deadbeef',
+    async (ctx) => {
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      assert.strictEqual(overlay && overlay.dataset.hash, 'deadbeef');
+    },
+    '#/packets/deadbeef', 0);
+
+  // #167 r2: Escape closes only the top layer. The modal's Escape handler
+  // runs in the capture phase and stops the event, so the packets detail
+  // pane's and the SlideOver's own Escape handlers (bubble phase on
+  // document) do not close as well. A second Escape reaches them.
+  await viewPathCase('Escape closes only the modal: capture-phase handler stops the event (#167 r2)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => {
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const keys = ctx.__docLog.filter(r => r.type === 'keydown');
+      assert.strictEqual(keys.length, 1, 'keydown listeners: ' + keys.length);
+      assert.strictEqual(keys[0].capture, true, 'Escape handler is not in the capture phase');
+      let stopped = 0;
+      keys[0].fn({ key: 'Escape', stopPropagation() { stopped++; } });
+      assert.strictEqual(stopped, 1, 'Escape was not stopped');
+      assert.strictEqual(ctx.document.getElementById('packetPathModal'), null, 'modal still open');
+      assert.strictEqual(ctx.__docLog.filter(r => r.type === 'keydown').length, 0, 'keydown listener left behind');
+      let stoppedAfter = 0;
+      keys[0].fn({ key: 'Escape', stopPropagation() { stoppedAfter++; } });
+      assert.strictEqual(stoppedAfter, 0, 'a stray handler call with no modal open swallowed Escape');
+    },
+    '#/packets/deadbeef?obs=123', 1);
 
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);

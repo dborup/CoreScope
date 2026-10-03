@@ -18,7 +18,9 @@
  *      (20 > 5, so the cap actually runs);
  *   4. the engine goes back to sleep (isAnimating false);
  *   5. the fading polylines are drawn on the animations pane: with
- *      preferCanvas:true Leaflet adds a renderer canvas to that pane.
+ *      preferCanvas:true Leaflet adds one renderer canvas per pane, so the
+ *      burst may add a renderer canvas to the animations pane and to no
+ *      other pane (a fade line without `pane:` lands on overlayPane).
  *
  * Headless Chromium may throttle requestAnimationFrame, so the drain is
  * driven by awaiting rAF from inside the page (as in
@@ -36,9 +38,11 @@ const { chromium } = require('playwright');
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const BURST = 20;          // > the recentPaths cap of 5
 const PATH_CAP = 5;
-// One animation takes ~660ms at 1x. The bound is generous for slow CI
-// runners and the instrumented frontend; the measured time is logged.
-const DRAIN_TIMEOUT_MS = 5000;
+// One animation takes ~660ms at 1x; the burst runs in parallel, so the queue
+// drains in ~0.7s locally and in CI. 2.5s leaves headroom for the instrumented
+// frontend (10/10 local runs well below it) and still catches a stalled or
+// serialised engine. The measured time is logged.
+const DRAIN_TIMEOUT_MS = 2500;
 const VIEWPORTS = [
   { name: 'desktop', viewport: { width: 1400, height: 900 } },
   { name: 'mobile', viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true },
@@ -74,6 +78,17 @@ async function runViewport(browser, vp) {
       const z = await page.evaluate(() => getComputedStyle(document.querySelector('#liveMap .leaflet-animations-pane')).zIndex);
       assert(z === '625', 'animations pane z-index is ' + z + ', want 625');
     });
+
+    // Leaflet canvas renderers per pane (the engine's own canvas has no class).
+    const rendererCanvases = () => page.evaluate(() => {
+      const out = {};
+      document.querySelectorAll('#liveMap .leaflet-pane > canvas.leaflet-zoom-animated:not(.leaflet-heatmap-layer)').forEach((c) => {
+        const pane = (c.parentElement.className.match(/leaflet-([\w-]+)-pane/) || [])[1] || '?';
+        out[pane] = (out[pane] || 0) + 1;
+      });
+      return out;
+    });
+    const renderersBefore = await rendererCanvases();
 
     const queued = await page.evaluate((count) => {
       for (let i = 0; i < count; i++) {
@@ -119,9 +134,12 @@ async function runViewport(browser, vp) {
       assert(asleep, 'isAnimating stayed true after the queue drained');
     });
 
-    await step(vp.name + ': the fading polylines render on the animations pane', async () => {
-      const n = await page.locator('#liveMap .leaflet-animations-pane > canvas.leaflet-zoom-animated').count();
-      assert(n >= 1, 'no Leaflet renderer canvas on .leaflet-animations-pane — the fades went to another pane');
+    await step(vp.name + ': the fading polylines render on the animations pane only', async () => {
+      const after = await rendererCanvases();
+      const seen = 'before ' + JSON.stringify(renderersBefore) + ', after ' + JSON.stringify(after);
+      assert((after.animations || 0) === 1, 'want exactly one Leaflet renderer canvas on .leaflet-animations-pane — ' + seen);
+      const grew = Object.keys(after).filter((pane) => pane !== 'animations' && after[pane] > (renderersBefore[pane] || 0));
+      assert(grew.length === 0, 'the burst added a renderer canvas to ' + grew.join(', ') + ' — a fade line left the animations pane; ' + seen);
     });
 
     await step(vp.name + ': no page errors', async () => {

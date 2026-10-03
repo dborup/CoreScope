@@ -50,13 +50,39 @@
   function _distanceIsBuilding(data) {
     return !!(data && data.status === 'building' && !data.summary);
   }
-  // Retry-After header (passed on by api()), else the body's
-  // retry_after_seconds, else 5s; clamped to 1..30s.
-  function _distanceRetryDelayMs(data) {
+  // Retry-After header (passed on by api() on a 202 body or a 503 error),
+  // else the body's retry_after_seconds, else 5s; clamped to 1..30s.
+  function _retryAfterDelayMs(data) {
     var s = Number(data && data.retryAfterSeconds);
     if (!(isFinite(s) && s > 0)) s = Number(data && data.retry_after_seconds);
     if (!(isFinite(s) && s > 0)) s = 5;
     return Math.min(Math.max(s, 1), 30) * 1000;
+  }
+  // #172 — rf/topology/channels answer 503 + Retry-After while the server
+  // warms up after a restart (#1659), for up to its 60s force-open. The
+  // page shows a "still loading" state and retries on the server's
+  // interval until ANALYTICS_WARMUP_MAX_MS has passed since the load
+  // began, and only then shows the error. Like the distance tab (#120),
+  // every load and destroy() bump _loadGen, so a response or retry from an
+  // older load never renders, and at most one retry timer exists.
+  var ANALYTICS_WARMUP_MAX_MS = 120000;
+  var _loadRetryTimer = null;
+  var _loadGen = 0;
+  // #172: the tabs that render from that load's _analyticsData. Until it
+  // has data, they show the load's status instead (a click during the
+  // warm-up threw a TypeError), and the status is written only while one
+  // of them is shown, never over a tab that fetches its own data.
+  var LOAD_TABS = new Set(['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions']);
+  var LOADING_HTML = '<div class="text-center text-muted" style="padding:40px">Loading analytics…</div>';
+  var _loadStatusHtml = LOADING_HTML;
+  function _showLoadStatus(html) {
+    _loadStatusHtml = html;
+    var el = LOAD_TABS.has(_currentTab) && document.getElementById('analyticsContent');
+    if (el) el.innerHTML = html;
+  }
+  function _cancelLoadRetry() {
+    _loadGen++;
+    if (_loadRetryTimer) { clearTimeout(_loadRetryTimer); _loadRetryTimer = null; }
   }
   var _wardrivingRefreshTimer = null;
   function _stopWardrivingRefresh() {
@@ -173,7 +199,7 @@
           </div>
         </div>
         <div id="analyticsContent" class="analytics-content" aria-live="polite">
-          <div class="text-center text-muted" style="padding:40px">Loading analytics…</div>
+          ${LOADING_HTML}
         </div>
       </div>`;
 
@@ -302,7 +328,10 @@
   var _themeRefreshHandler = null;
   let _currentTab = 'overview';
 
-  async function loadAnalytics() {
+  async function loadAnalytics(startedAt) {
+    _cancelLoadRetry();
+    const gen = _loadGen;
+    if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
     try {
       _analyticsData = {};
       const rqs = RegionFilter.regionQueryString(); // "&region=..." or ""
@@ -323,19 +352,33 @@
       // channels: region + window (no area per original PR intent)
       const chanQS = (rqs + tws).slice(1);
       const sepChan = chanQS ? '?' + chanQS : '';
+      // This load retries 503s itself (retry503:false), see _loadGen.
+      const opts = { ttl: CLIENT_TTL.analyticsRF, retry503: false };
       const [hashData, rfData, topoData, chanData, collisionData, airtimeData] = await Promise.all([
-        api('/analytics/hash-sizes' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/rf' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/topology' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/channels' + sepChan, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/hash-collisions' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
+        api('/analytics/hash-sizes' + sepBase, opts),
+        api('/analytics/rf' + sepWin, opts),
+        api('/analytics/topology' + sepWin, opts),
+        api('/analytics/channels' + sepChan, opts),
+        api('/analytics/hash-collisions' + sepBase, opts),
         api('/analytics/relay-airtime-share' + sepWin, { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
       ]);
+      if (gen !== _loadGen) return;
       _analyticsData = { hashData, rfData, topoData, chanData, collisionData, airtimeData };
       renderTab(_currentTab);
     } catch (e) {
-      document.getElementById('analyticsContent').innerHTML =
-        `<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${e.message}</div>`;
+      if (gen !== _loadGen) return;
+      const ms = _retryAfterDelayMs(e);
+      if (e && e.status === 503 && Date.now() - startedAt + ms <= ANALYTICS_WARMUP_MAX_MS) {
+        _showLoadStatus('<div class="text-center text-muted" role="status" aria-live="polite" style="padding:40px">' +
+          'Analytics are still loading on the server after a restart.' +
+          '<div style="font-size:12px;margin-top:8px">Retrying in ' + Math.round(ms / 1000) + 's.</div></div>');
+        _loadRetryTimer = setTimeout(function () {
+          _loadRetryTimer = null;
+          if (gen === _loadGen) loadAnalytics(startedAt);
+        }, ms);
+        return;
+      }
+      _showLoadStatus(`<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${esc(e && e.message)}</div>`);
     }
   }
 
@@ -356,6 +399,7 @@
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
       case 'rf': renderRF(el, d.rfData); break;
@@ -3010,7 +3054,7 @@
       const data = await api('/analytics/distance' + sep, { ttl: CLIENT_TTL.analyticsRF });
       if (gen !== _distanceGen) return;   // re-rendered, switched tab or left meanwhile
       if (_distanceIsBuilding(data)) {
-        const ms = _distanceRetryDelayMs(data);
+        const ms = _retryAfterDelayMs(data);
         el.innerHTML = '<div class="text-center text-muted" id="distanceBuilding" role="status" style="padding:40px">' +
           'Building the distance index…' +
           '<div style="font-size:12px;margin-top:8px">This runs once after the server starts. Retrying in ' + Math.round(ms / 1000) + 's.</div></div>';
@@ -3101,7 +3145,7 @@
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {

@@ -13,7 +13,7 @@ import (
 )
 
 // setupTestDB creates an in-memory SQLite database with the v3 schema.
-func setupTestDB(t *testing.T) *DB {
+func setupTestDB(t testing.TB) *DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
