@@ -3151,6 +3151,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // Expose for testing
   if (typeof window !== 'undefined') {
     window._analyticsAssignTableIds = assignAnalyticsTableIds;
+    window._analyticsWithQuery = withQuery;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
     window._analyticsLoadChannelSort = loadChannelSort;
