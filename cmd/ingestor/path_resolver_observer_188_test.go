@@ -119,7 +119,8 @@ func TestObserverAnchor_TwoNeighborCandidatesStayNil_188(t *testing.T) {
 
 // The observer anchor only holds for flood routing: a DIRECT packet's path is
 // the remaining planned route (each forwarder strips itself from the front,
-// firmware Mesh.cpp removeSelfFromPath), and a TRACE path carries SNR bytes.
+// firmware Mesh.cpp removeSelfFromPath). TRACE is always DIRECT; its hops are
+// the planned route the decoder takes from the payload.
 func TestObserverAnchor_DirectRouteIsNotAnchored_188(t *testing.T) {
 	idx := idx188(allNodes188...)
 	g := graph188([2]string{obs188, c3a})

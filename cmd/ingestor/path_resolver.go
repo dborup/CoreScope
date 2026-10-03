@@ -288,15 +288,19 @@ func (s *Store) refreshBuiltNeighborGraph() error {
 
 // Observer anchor (#188)
 //
-// Firmware basis (MeshCore src/): a flood forwarder appends its own hash
-// before it retransmits (Mesh.cpp routeRecvPacket: copyHashTo(&path[n*sz])),
-// and an observer logs a packet on reception, before its own routing step
-// (Dispatcher.cpp: logRx(pkt, ...) runs before processRecvPacket). So the
-// last hash of a FLOOD path an observer reports is the node it heard the
-// packet from: a direct neighbour of the observer. This does not hold for
-// DIRECT routes (the path is the remaining planned route and each forwarder
-// strips itself from the front, Mesh.cpp removeSelfFromPath), nor for TRACE
-// (the path carries SNR bytes), so only flood route types are anchored.
+// Firmware basis (MeshCore src/, line numbers at a366955): a flood forwarder
+// appends its own hash before it retransmits (Mesh.cpp:344-356
+// routeRecvPacket, copyHashTo at :349), and an observer logs a packet on
+// reception, before its own routing step (Dispatcher.cpp:238 logRx runs
+// before processRecvPacket at :246/:256). So the last hash of a FLOOD path
+// an observer reports is the node it heard the packet from: a direct
+// neighbour of the observer. This does not hold for DIRECT routes: the path
+// is the remaining planned route, and each forwarder strips itself from the
+// front (Mesh.cpp:89, removeSelfFromPath at :334). TRACE is DIRECT too
+// (sendFlood refuses it, Mesh.cpp:638). Its header path carries SNR bytes
+// (Mesh.cpp:60-61), and the decoder replaces the hops with the planned route
+// from the payload (decoder.go, TRACE branch). So only flood route types are
+// anchored.
 //
 // Observer identity: the observer is the <observer_id> segment of the MQTT
 // topic meshcore/<iata>/<observer_id>/packets, which is the observer node's
