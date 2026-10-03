@@ -131,7 +131,6 @@ test('test-all.sh registers itself through this test', () => {
 const KNOWN_UNREGISTERED = {
   // red unit tests (stale after intended UI changes)
   'test-packets.js': 'red on 1 assertion: collapsed group caret is #ph-caret-up, a real bug (#189); register once packets.js is fixed',
-  'test-perf-disk-io-1120.js': 'red: ⚠️ is #ph-warning; anomaly detector reworked (#1593)',
   // need something CI's unit job does not have
   'test-marker-outline-weight.js': 'needs @playwright/test (not a dependency) and a server',
   'test-table-sort.js': 'needs jsdom (not a dependency)',
