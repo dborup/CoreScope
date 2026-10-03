@@ -7,9 +7,14 @@
  * filter change and on Clear Filters.
  *
  * Decision under test: ?obs= travels with the detail subpath; ?viewPath=1
- * describes the open View Path modal, so it is kept only while that modal
- * (#packetPathModal) is open. (Closing the modal drops it from the address
- * bar: see test-packet-path-map.js.)
+ * describes the open View Path modal, so it is in the URL exactly while that
+ * modal (#packetPathModal) is open on the packet of the subpath, also when
+ * it was opened with the detail's View Path button (#167 round 2). Closing
+ * the modal drops it from the address bar: see test-packet-path-map.js.
+ *
+ * Route guard (#167 round 2): updatePacketsUrl() writes only while the route
+ * is the packets list (#/packets…); the standalone #/packet/<id> page has its
+ * own writer, updatePacketPageUrl(), for #/packet/<id>?obs=<id>.
  *
  * Runs the REAL buildPacketsQuery / updateClearFiltersVisibility /
  * updatePacketsUrl and the real Clear Filters handler body from
@@ -53,10 +58,13 @@ const URL_FUNCS = [
   'function buildPacketsQuery(',
   'function updateClearFiltersVisibility()',
   'function updatePacketsUrl(',
-].map((m) => extractBlock(PACKETS_SRC, m, true)).join('\n');
+  'function updatePacketPageUrl(',
+// A missing function fails the tests that call it, not the whole file.
+].map((m) => (PACKETS_SRC.indexOf(m) === -1 ? '' : extractBlock(PACKETS_SRC, m, true))).join('\n');
 const CLEAR_BODY = extractBlock(PACKETS_SRC, "if (clearBtn) clearBtn.addEventListener('click', function()", false);
 
-// opts.modalOpen: a #packetPathModal overlay is in the DOM.
+// opts.modalOpen: a #packetPathModal overlay is in the DOM, open on packet
+// 'abc123' (true) or on the given hash (string).
 function makeSandbox(startHash, opts) {
   opts = opts || {};
   const urls = [];
@@ -65,7 +73,9 @@ function makeSandbox(startHash, opts) {
     'packetFilterInput', 'packetFilterError', 'packetFilterCount']) {
     els[id] = { id, value: '', style: { display: 'none' }, classList: { add() {}, remove() {} } };
   }
-  if (opts.modalOpen) els.packetPathModal = { id: 'packetPathModal' };
+  if (opts.modalOpen) {
+    els.packetPathModal = { id: 'packetPathModal', dataset: { hash: typeof opts.modalOpen === 'string' ? opts.modalOpen : 'abc123' } };
+  }
   const store = {};
   const ctx = {
     console, URLSearchParams, encodeURIComponent, decodeURIComponent,
@@ -106,6 +116,7 @@ function makeSandbox(startHash, opts) {
       return ctx.location.hash;
     },
     clear() { vm.runInContext('__clearFilters()', ctx); return ctx.location.hash; },
+    pageUrl(obs) { ctx.__obs = obs; vm.runInContext('updatePacketPageUrl(__obs)', ctx); return ctx.location.hash; },
     query(tw, region, skipHash) { return ctx.buildPacketsQuery(tw, region, skipHash); },
   };
 }
@@ -152,11 +163,20 @@ test('viewPath: dropped once the modal is closed (URL describes what is shown), 
   assert.strictEqual(s.update(), DETAIL + '?observer=OBS1&obs=123');
 });
 
-test('viewPath: never invented when the URL did not have it', () => {
-  const s = makeSandbox(DETAIL + '?obs=123', { modalOpen: true });
+test('viewPath: written while the modal is open on this packet (View Path button) (#167 r2)', () => {
+  // The button opens the modal, then calls updatePacketsUrl().
+  const s = makeSandbox(DETAIL + '?timeWindow=60&obs=123', { modalOpen: 'abc123' });
+  s.set("filters.hash = 'abc123'; savedTimeWindowMin = 60");
+  assert.strictEqual(s.update(), DETAIL + '?timeWindow=60&obs=123&viewPath=1');
+  assert.strictEqual(s.update(), DETAIL + '?timeWindow=60&obs=123&viewPath=1', 'not idempotent');
+});
+
+test('viewPath: never written for a modal open on another packet', () => {
+  const s = makeSandbox(DETAIL + '?obs=123', { modalOpen: 'ffee01' });
   s.set("filters.hash = 'abc123'");
   assert.strictEqual(countParam(s.update(), 'viewPath'), 0);
 });
+
 
 // ---- Every filter type keeps ?obs= (and updates its own param) ----
 
@@ -289,13 +309,65 @@ test('closing the detail drops subpath and detail params, keeps the filters', ()
   assert.strictEqual(s.update({ subpath: '', obs: null }), '#/packets?timeWindow=60&observer=OBS1');
 });
 
-// ---- One place: updatePacketsUrl() is the only #/packets hash writer ----
+// ---- Route guard (#167 r2): the list URL is written only on #/packets ----
+// On the standalone #/packet/<id> page an observation click used to rewrite
+// the address bar to #/packets/<hash>?<list filters>&obs=… while the
+// standalone page stayed on screen. A detail teardown after the route has
+// changed (e.g. a SlideOver closed on the way to another page) must not
+// rewrite the new page's URL either.
 
-test('updatePacketsUrl() is the only history.replaceState() writer in packets.js', () => {
+test('route guard: no list-URL write on the standalone #/packet/<id> page', () => {
+  const s = makeSandbox('#/packet/abc123?obs=7');
+  s.set("filters.observer = 'OBS1'; savedTimeWindowMin = 60");
+  assert.strictEqual(s.update({ subpath: '/abc123', obs: '9' }), '#/packet/abc123?obs=7');
+  assert.strictEqual(s.update(), '#/packet/abc123?obs=7');
+  assert.strictEqual(s.urls.length, 0, 'replaceState called: ' + JSON.stringify(s.urls));
+});
+
+test('route guard: no list-URL write once another page is shown (#/nodes)', () => {
+  const s = makeSandbox('#/nodes/abcdef');
+  s.set("filters.observer = 'OBS1'");
+  assert.strictEqual(s.update({ subpath: '', obs: null }), '#/nodes/abcdef');
+  assert.strictEqual(s.urls.length, 0, 'replaceState called: ' + JSON.stringify(s.urls));
+});
+
+test('route guard: the default route (empty hash) is the packets list and is written', () => {
+  const s = makeSandbox('');
+  s.set("filters.observer = 'OBS1'");
+  assert.strictEqual(s.update(), '#/packets?observer=OBS1');
+});
+
+// ---- Standalone page writer: #/packet/<id>?obs=<id> (#167 r2) ----
+// The router strips the query before resolving #/packet/<id>, so ?obs= fits
+// its format; the standalone page reads it back on load.
+
+test('standalone page: an observation click writes #/packet/<id>?obs=<id>', () => {
+  const s = makeSandbox('#/packet/abc123');
+  assert.strictEqual(s.pageUrl('7'), '#/packet/abc123?obs=7');
+  assert.strictEqual(s.pageUrl('9'), '#/packet/abc123?obs=9');
+  assert.strictEqual(s.pageUrl(null), '#/packet/abc123');
+});
+
+test('standalone page: other params stay, ?obs= is encoded and appears once', () => {
+  const s = makeSandbox('#/packet/42?obs=1&embed=1');
+  assert.strictEqual(s.pageUrl('a b'), '#/packet/42?embed=1&obs=a%20b');
+});
+
+test('standalone page writer leaves the packets list URL alone', () => {
+  const s = makeSandbox(DETAIL + '?timeWindow=60&obs=1');
+  assert.strictEqual(s.pageUrl('7'), DETAIL + '?timeWindow=60&obs=1');
+  assert.strictEqual(s.urls.length, 0, 'replaceState called: ' + JSON.stringify(s.urls));
+});
+
+// ---- Two writers, each for its own route ----
+
+test('history.replaceState() in packets.js only in updatePacketsUrl() and updatePacketPageUrl()', () => {
   const writes = PACKETS_SRC.match(/history\.replaceState\(/g) || [];
-  assert.strictEqual(writes.length, 1, 'expected 1 replaceState call (in updatePacketsUrl), got ' + writes.length);
-  const fn = extractBlock(PACKETS_SRC, 'function updatePacketsUrl(', true);
-  assert(/history\.replaceState\(/.test(fn), 'the writer is not inside updatePacketsUrl()');
+  assert.strictEqual(writes.length, 2, 'expected 2 replaceState calls, got ' + writes.length);
+  for (const marker of ['function updatePacketsUrl(', 'function updatePacketPageUrl(']) {
+    const fn = extractBlock(PACKETS_SRC, marker, true);
+    assert.strictEqual((fn.match(/history\.replaceState\(/g) || []).length, 1, 'no writer inside ' + marker);
+  }
 });
 
 test('buildPacketsQuery() is called only from updatePacketsUrl() (every caller covered)', () => {
