@@ -130,8 +130,6 @@ test('test-all.sh registers itself through this test', () => {
 // test past the check below: register it instead.
 const KNOWN_UNREGISTERED = {
   // red unit tests (stale after intended UI changes)
-  'test-issue-1470-card-bg-contrast.js': 'red: indexOf matches a style.css comment',
-  'test-issue-1646-compare-polish.js': 'red: font-size parser reads a comment',
   'test-packets.js': 'red: 13 emoji assertions after the Phosphor migration',
   'test-perf-disk-io-1120.js': 'red: ⚠️ is #ph-warning; anomaly detector reworked (#1593)',
   // need something CI's unit job does not have
