@@ -12,7 +12,9 @@ import (
 // (every tx and observation is charged and recharged), live ingest of new
 // transmissions and of new observations on known ones, and an eviction pass.
 // They use production entry points only, so they also run on master for the
-// "before" numbers (see the PR for the interleaved comparison).
+// "before" numbers (see the PR for the interleaved comparison). The three
+// DB-backed ingest benchmarks spend most of their time in SQLite, so the two
+// pure-Go ones at the end isolate the accounting itself.
 
 const bench113Tx = 20000
 
@@ -117,5 +119,41 @@ func BenchmarkTrackedBytes_Evict_113(b *testing.B) {
 		if n := s.RunEviction(); n != bench113Tx/2 {
 			b.Fatalf("evicted %d, want %d", n, bench113Tx/2)
 		}
+	}
+}
+
+// Adding relays to a tx that already has records: the steady state (the same
+// relays again, nothing appended) and the growth case (a fresh tx each time,
+// three new keys). Runs on master too; there it does no accounting.
+func BenchmarkAddResolvedPubkeys_Steady_113(b *testing.B) {
+	s := &PacketStore{byPathHop: map[string][]*StoreTx{}, pathHopResolved: map[*StoreTx][]uint64{}}
+	tx := &StoreTx{ID: 1, PathJSON: `["aa","bb","cc"]`}
+	keys := []string{acct113PK(1), acct113PK(2), acct113PK(3)}
+	hops := map[string]bool{}
+	s.addResolvedPubkeysToPathHopIndex(tx, keys, hops)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.addResolvedPubkeysToPathHopIndex(tx, keys, hops)
+	}
+}
+
+func BenchmarkAddResolvedPubkeys_Grow_113(b *testing.B) {
+	s := &PacketStore{byPathHop: map[string][]*StoreTx{}, pathHopResolved: map[*StoreTx][]uint64{}}
+	keys := []string{acct113PK(1), acct113PK(2), acct113PK(3)}
+	hops := map[string]bool{}
+	txs := make([]*StoreTx, 1024)
+	for i := range txs {
+		txs[i] = &StoreTx{ID: i, PathJSON: `["aa","bb","cc"]`}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tx := txs[i%len(txs)]
+		if i%len(txs) == 0 {
+			clear(s.pathHopResolved)
+			clear(s.byPathHop)
+		}
+		s.addResolvedPubkeysToPathHopIndex(tx, keys, hops)
 	}
 }
