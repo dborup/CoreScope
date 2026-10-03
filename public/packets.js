@@ -1004,11 +1004,21 @@
   // end of the path. The IATA route is dead weight: measured on the live
   // deployment, none of the 42 observers has its code in /api/iata-coords, so
   // nodeInRegion() always returns null. lat/lon is reported directly and works.
+  // #165 — /api/observers sends lat/lon as null when no node location is
+  // known, and Number(null) is 0. Only a pair of real numbers is an anchor;
+  // (0, 0) means "no fix" here, as on the server and in HopResolver.
+  function coordOrNull(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
   function observerPosition(observerId) {
     const o = observerId && observerMap ? observerMap.get(observerId) : null;
-    const lat = o && Number.isFinite(Number(o.lat)) ? Number(o.lat) : null;
-    const lon = o && Number.isFinite(Number(o.lon)) ? Number(o.lon) : null;
-    return (lat === null || lon === null) ? [null, null] : [lat, lon];
+    const lat = o ? coordOrNull(o.lat) : null;
+    const lon = o ? coordOrNull(o.lon) : null;
+    if (lat === null || lon === null || (lat === 0 && lon === 0)) return [null, null];
+    return [lat, lon];
   }
 
   function hopCacheKey(h, observerId) {
