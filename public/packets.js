@@ -1069,8 +1069,14 @@
     }
     // ensureHopResolver() is idempotent and awaited once inside resolveHops;
     // the resolve itself is local computation, so the loop costs no requests.
+    // #165 — but it is CPU: ~42 groups on a 30K load took one ~220 ms block.
+    // Yield to the event loop between groups so input and paint get through.
+    let first = true;
     for (const [obs, set] of groups) {
-      if (set.size) await resolveHops([...set], obs || undefined);
+      if (!set.size) continue;
+      if (!first) await new Promise(r => setTimeout(r, 0));
+      first = false;
+      await resolveHops([...set], obs || undefined);
     }
   }
 
