@@ -117,16 +117,24 @@ test2('drawAnimatedLine renderFades() has null guard', () => {
   assert.ok(fadeBody.includes('!pathsLayer'), 'renderFades() missing pathsLayer null guard');
 });
 
-test2('pulseNode animatePulse() has null guard', () => {
-  const pulseStart = src2.indexOf('function animatePulse(now)');
+// #1521 replaced the per-node animatePulse()/ghostPulse() rAF loops with
+// the activePulses/activeGhosts queues drained by renderAnimations(); the
+// guards now live at pulseNode() entry and in renderAnimations().
+test2('pulseNode() has null guard', () => {
+  const pulseStart = src2.indexOf('function pulseNode(');
+  assert.ok(pulseStart >= 0, 'pulseNode() not found');
   const pulseBody = src2.substring(pulseStart, pulseStart + 200);
-  assert.ok(pulseBody.includes('!animLayer'), 'animatePulse() missing animLayer null guard');
+  assert.ok(pulseBody.includes('!animLayer || !nodesLayer'), 'pulseNode() missing animLayer/nodesLayer null guard');
 });
 
-test2('ghostPulse has null guard', () => {
-  const ghostStart = src2.indexOf('function ghostPulse(now)');
-  const ghostBody = src2.substring(ghostStart, ghostStart + 200);
-  assert.ok(ghostBody.includes('!animLayer'), 'ghostPulse() missing animLayer null guard');
+test2('renderAnimations() has null guards for canvas and ghost expiry', () => {
+  const renderStart = src2.indexOf('function renderAnimations(now)');
+  assert.ok(renderStart >= 0, 'renderAnimations() not found');
+  const renderEnd = src2.indexOf('// Render Pulses', renderStart);
+  assert.ok(renderEnd > renderStart, 'renderAnimations() pulse section not found');
+  const renderBody = src2.substring(renderStart, renderEnd);
+  assert.ok(renderBody.includes('if (!animCtx) return;'), 'renderAnimations() missing animCtx null guard');
+  assert.ok(renderBody.includes('animLayer && animLayer.hasLayer(g.marker)'), 'renderAnimations() ghost expiry missing animLayer null guard');
 });
 
 console.log(`\n${p2} passed, ${f2} failed\n`);
