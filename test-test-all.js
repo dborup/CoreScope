@@ -132,7 +132,7 @@ const KNOWN_UNREGISTERED = {
   // red unit tests (stale after intended UI changes)
   'test-packets.js': 'red on 1 assertion: collapsed group caret is #ph-caret-up, a real bug (#189); register once packets.js is fixed',
   // need something CI's unit job does not have
-  'test-touch-targets.js': 'red in Chromium: expects 48px targets, CSS has 44px',
+  'test-touch-targets.js': 'red in Chromium: 48px (upstream #2078) vs 44px (#85) is pending a decision (#189); harness also stale',
   // E2E
   'test-rx-coverage-mobile-nav-e2e.js': 'skips while clientRxCoverage is off (the default)',
 };
