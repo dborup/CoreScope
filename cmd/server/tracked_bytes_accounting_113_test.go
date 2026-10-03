@@ -25,99 +25,6 @@ import (
 // charge is stale. Master charged a tx before pickBestObservation gave it a
 // path and never charged resolved relay hops, then re-estimated at eviction.
 
-// acct113PK is a 64-hex relay pubkey from a fixed pool.
-func acct113PK(k int) string {
-	return fmt.Sprintf("%02x", k%256) + strings.Repeat("c4", 31)
-}
-
-func acct113Hop(i, h, j int) string { return fmt.Sprintf("%02x", (i*7+h*13+j)%256) }
-
-// acct113CreateDB writes n transmissions with 1..4 observations each. The
-// observations of one transmission carry paths of different lengths (the
-// longest wins pickBestObservation, after the tx was created) and a
-// resolved_path of full pubkeys. oldUntil of them are 3 days old, the rest
-// one hour.
-func acct113CreateDB(tb testing.TB, dbPath string, n, oldUntil int) {
-	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		tb.Fatal(err)
-	}
-	defer conn.Close()
-	for _, q := range []string{
-		`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, raw_hex TEXT, hash TEXT, first_seen TEXT,
-			route_type INTEGER, payload_type INTEGER, payload_version INTEGER, decoded_json TEXT)`,
-		`CREATE TABLE observations (id INTEGER PRIMARY KEY, transmission_id INTEGER, observer_id TEXT,
-			observer_name TEXT, direction TEXT, snr REAL, rssi REAL, score INTEGER, path_json TEXT,
-			timestamp TEXT, raw_hex TEXT, resolved_path TEXT)`,
-		`CREATE TABLE observers (rowid INTEGER PRIMARY KEY, id TEXT, name TEXT, iata TEXT)`,
-		`CREATE TABLE nodes (pubkey TEXT PRIMARY KEY, name TEXT, role TEXT, lat REAL, lon REAL,
-			last_seen TEXT, first_seen TEXT, frequency REAL)`,
-		`CREATE TABLE schema_version (version INTEGER)`,
-		`INSERT INTO schema_version (version) VALUES (1)`,
-		`CREATE INDEX idx_tx_first_seen ON transmissions(first_seen)`,
-	} {
-		if _, err := conn.Exec(q); err != nil {
-			tb.Fatalf("setup: %v\n%s", err, q)
-		}
-	}
-	names := []string{"Alpha", "Bravo", "Charlie", "Delta"}
-	for j, name := range names {
-		if _, err := conn.Exec(`INSERT INTO observers (rowid, id, name, iata) VALUES (?, ?, ?, 'TST')`, j+1, fmt.Sprintf("obs%d", j), name); err != nil {
-			tb.Fatal(err)
-		}
-	}
-	if _, err := conn.Exec("BEGIN"); err != nil {
-		tb.Fatal(err)
-	}
-	now := time.Now().UTC()
-	obsID := 0
-	for i := 1; i <= n; i++ {
-		ts := now.Add(-time.Hour + time.Duration(i)*time.Second)
-		if i <= oldUntil {
-			ts = now.Add(-72*time.Hour + time.Duration(i)*time.Second)
-		}
-		decoded := fmt.Sprintf(`{"type":"GRP_TXT","channel":"#test","text":"message number %d with some body text","sender":"node%d"}`, i, i%50)
-		if _, err := conn.Exec(`INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json)
-			VALUES (?, ?, ?, ?, 1, 5, 1, ?)`, i, fmt.Sprintf("1500%036d", i), fmt.Sprintf("h%06d", i), ts.Format(time.RFC3339), decoded); err != nil {
-			tb.Fatal(err)
-		}
-		for j := 0; j < 1+i%4; j++ {
-			obsID++
-			hops := 1 + (i+j)%5
-			path := make([]string, hops)
-			resolved := make([]string, hops)
-			for h := range path {
-				path[h] = acct113Hop(i, h, j)
-				resolved[h] = acct113PK(i + h*7)
-			}
-			pj, _ := json.Marshal(path)
-			rj, _ := json.Marshal(resolved)
-			if _, err := conn.Exec(`INSERT INTO observations (id, transmission_id, observer_id, observer_name, direction, snr, rssi, score, path_json, timestamp, resolved_path)
-				VALUES (?, ?, ?, ?, 'RX', -5.0, -90.0, 5, ?, ?, ?)`,
-				obsID, i, fmt.Sprintf("obs%d", j), names[j], string(pj), ts.Format(time.RFC3339), string(rj)); err != nil {
-				tb.Fatal(err)
-			}
-		}
-	}
-	if _, err := conn.Exec("COMMIT"); err != nil {
-		tb.Fatal(err)
-	}
-}
-
-func acct113Load(tb testing.TB, dbPath string) *PacketStore {
-	tb.Helper()
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	store := NewPacketStore(db, &PacketStoreConfig{})
-	if err := store.Load(); err != nil {
-		tb.Fatal(err)
-	}
-	return store
-}
-
 // acct113Sum is what trackedBytes must equal: the charges of the live store.
 func acct113Sum(s *PacketStore) (sum int64, stale int) {
 	for _, tx := range s.packets {
@@ -381,7 +288,10 @@ func TestTrackedBytes_MixedSequenceDoesNotDrift_113(t *testing.T) {
 		}
 	}
 	store.mu.Lock()
-	store.retentionHours = 0.0001
+	for _, tx := range store.packets { // live tx carry timestamps from the future
+		tx.FirstSeen = now.Add(-100 * time.Hour).Format(time.RFC3339)
+	}
+	store.retentionHours = 24
 	store.mu.Unlock()
 	store.RunEviction()
 	if store.trackedBytes != 0 || len(store.packets) != 0 {
@@ -398,7 +308,12 @@ func TestMemoryEviction_CrossesHighAndReachesLow_113(t *testing.T) {
 	acct113Check(t, store, "after Load")
 
 	tracked := store.trackedBytes
-	store.maxMemoryMB = int(float64(tracked) * 0.9 / 1048576)
+	// Just below the tracked size: one pass needs about 15-24% of the store,
+	// under the 25% safety cap.
+	store.maxMemoryMB = int(tracked / 1048576)
+	if store.maxMemoryMB < 4 {
+		t.Fatalf("setup: only %d bytes tracked; the store is too small for the watermark arithmetic", tracked)
+	}
 	high := int64(store.maxMemoryMB) * 1048576
 	low := int64(float64(high) * 0.85)
 	if tracked <= high {
@@ -419,31 +334,38 @@ func TestMemoryEviction_CrossesHighAndReachesLow_113(t *testing.T) {
 }
 
 // The cold-load budget is the estimate of a typical tx; it must stay in line
-// with what the store really charges for one.
+// with what the store really charges for a tx of that shape: 64-byte hash,
+// 200-byte decoded JSON, a 3-hop path, three observations with a 30-byte
+// observer ID and name, a 60-byte path and a 25-byte timestamp, and the
+// typical number of resolved relays.
 func TestEstimateStoreTxBytesTypical_TracksTheRealCharge_113(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "acct.db")
-	acct113CreateDB(t, dbPath, 400, 0)
-	store := acct113Load(t, dbPath)
-	var total int64
-	obs := 0
-	for _, tx := range store.packets {
-		total += int64(tx.chargedBytes) + resolvedRelayBytes(len(store.pathHopResolved[tx]))
-		for _, o := range tx.Observations {
-			total += estimateStoreObsBytes(o)
-			obs++
-		}
+	const numObs = 3
+	rep := func(c string, n int) string { return strings.Repeat(c, n) }
+	tx := &StoreTx{
+		ID: 1, Hash: rep("h", 64), DecodedJSON: rep("d", 200), PathJSON: `["aa","bb","cc"]` + rep(" ", 24),
+		obsKeys: map[string]bool{}, observerSet: map[string]bool{},
 	}
-	perTx := float64(total) / float64(len(store.packets))
-	avgObs := int(float64(obs)/float64(len(store.packets)) + 0.5)
-	typical := float64(estimateStoreTxBytesTypical(avgObs))
-	if typical < perTx*0.8 || typical > perTx*1.25 {
-		t.Errorf("estimateStoreTxBytesTypical(%d) = %.0f, the store charges %.0f per tx: more than 20-25%% apart", avgObs, typical, perTx)
+	tx.PathJSON = tx.PathJSON[:40]
+	total := rechargeTx(tx)
+	for i := 0; i < numObs; i++ {
+		total += estimateStoreObsBytes(&StoreObs{
+			ObserverID: rep("o", 30), ObserverName: rep("n", 30), PathJSON: rep("p", 60), Timestamp: rep("t", 25),
+		})
+	}
+	total += resolvedRelayBytes(typicalResolvedRelays)
+	typical := float64(estimateStoreTxBytesTypical(numObs))
+	if typical < float64(total)*0.9 || typical > float64(total)*1.1 {
+		t.Errorf("estimateStoreTxBytesTypical(%d) = %.0f, a tx of that shape is charged %d: more than 10%% apart", numObs, typical, total)
+	}
+	if got := len(txGetParsedPath(tx)); got != 3 {
+		t.Fatalf("setup: the typical tx has %d hops, want 3", got)
 	}
 }
 
 // trackedBytes against the real heap after a GC, on a store loaded through
-// Load(). The store's own maps and slices are what trackedBytes is meant to
-// bound; the ratio must be close to 1 (master: well under half).
+// Load() with the decode cache filled the way analytics fill it. The store's
+// own maps and slices are what trackedBytes is meant to bound; the ratio
+// must be close to 1 (master: 0.6-0.7 on the same data).
 func TestTrackedBytesTracksTheHeap_113(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates a 20k-transmission store")
@@ -461,14 +383,17 @@ func TestTrackedBytesTracksTheHeap_113(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatal(err)
 	}
+	for _, tx := range store.packets { // what analytics do: the decode cache is charged up front
+		tx.ParsedDecoded()
+	}
 	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
 	heap := int64(m1.HeapAlloc) - int64(m0.HeapAlloc)
 	ratio := float64(store.trackedBytes) / float64(heap)
 	t.Logf("trackedBytes = %.1f MB, heap growth = %.1f MB, ratio = %.2f", float64(store.trackedBytes)/1048576, float64(heap)/1048576, ratio)
-	if ratio < 0.8 || ratio > 1.3 {
-		t.Errorf("trackedBytes is %.2f of the real heap growth, want 0.8-1.3", ratio)
+	if ratio < 0.85 || ratio > 1.15 {
+		t.Errorf("trackedBytes is %.2f of the real heap growth, want 0.85-1.15", ratio)
 	}
 	runtime.KeepAlive(store)
 }
