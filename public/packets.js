@@ -4254,6 +4254,7 @@
       resolveHopsForPackets,
       resolveIncomingHops,
       cacheResolvedPaths,
+      _finalizePathOverflow,
       HOP_CACHE_MAX,
       _hopCacheGet: hopCacheGet,
       _hopCacheSize: function() { return hopNameCache.size; },

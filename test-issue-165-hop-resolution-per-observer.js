@@ -17,6 +17,8 @@
  *   C. Resolving per observer costs more than one global resolve, so
  *      resolveHopsForPackets() yields to the event loop between observer
  *      groups instead of blocking the page for the whole initial load.
+ *   UI. The list's one-per-path ambiguity indicator stays visible when the
+ *      path overflows its cell, and is not counted as a hidden hop.
  *
  * Run: node test-issue-165-hop-resolution-per-observer.js
  */
@@ -247,6 +249,34 @@ test('a timer runs between two observer groups', async () => {
   assert(seenAt !== null && seenAt > before && seenAt < after,
     'the timer should fire after the first group and before the last (cache sizes: before ' + before +
     ', at timer ' + seenAt + ', after ' + after + ')');
+});
+
+section('#165 UI: the list summary survives a clipped path cell');
+
+test('the summary indicator comes before the hops, so overflow cannot clip it', async () => {
+  const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
+  await T.resolveHops(['ef', 'c1'], 'OBS-A');
+  const html = T.renderPath(['c1', 'ef'], 'OBS-A', { summary: true });
+  const warn = html.indexOf('hop-path-warn'), firstHop = html.indexOf('class="hop');
+  assert(warn !== -1, 'the summary indicator is rendered: ' + html);
+  assert(warn < firstHop, 'the indicator precedes the first hop: ' + html);
+  const detail = T.renderPath(['c1', 'ef'], 'OBS-A');
+  assert(detail.indexOf('hop-path-warn') === -1 && /hop-conflict-btn/.test(detail),
+    'the detail form keeps per-hop badges and no summary');
+});
+
+test('the overflow pill counts hops only, not the summary indicator', async () => {
+  const T = loadPackets([FAR], []);
+  // Fake .path-hops host 100px wide: [warn past the edge] [hop inside] [arrow] [hop past the edge].
+  const el = (cls, left, right) => ({ classList: { contains: c => cls.split(' ').includes(c) }, getBoundingClientRect: () => ({ left, right }) });
+  const appended = [];
+  const host = {
+    dataset: {}, children: [el('hop-path-warn status-warn', 120, 140), el('hop', 0, 50), el('arrow', 50, 60), el('hop', 60, 160)],
+    querySelector: () => null, getBoundingClientRect: () => ({ right: 100 }), appendChild: c => appended.push(c),
+  };
+  T._finalizePathOverflow({ querySelectorAll: () => [host] });
+  assert(appended.length === 1 && appended[0].textContent === '+1',
+    'expected one "+1" pill for the one clipped hop; got ' + JSON.stringify(appended.map(a => a.textContent)));
 });
 
 (async () => {
