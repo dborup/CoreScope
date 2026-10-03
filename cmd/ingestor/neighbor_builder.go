@@ -79,10 +79,12 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	if err := s.RefreshNeighborGraph(); err != nil {
 		log.Printf("[neighbor-build] initial neighbor-graph refresh error: %v", err)
 	}
+	var wuErr error
 	for {
 		n, err := s.buildAndPersistNeighborEdges()
 		if err != nil {
 			log.Printf("[neighbor-build] initial build error: %v", err)
+			wuErr = err
 			break
 		}
 		wuTotal += n
@@ -91,6 +93,14 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 		}
 	}
 	log.Printf("[neighbor-build] initial build: %d edges upserted in %s", wuTotal, time.Since(wuStart))
+	// Publish the graph with the edges the warm-up just persisted (#188):
+	// the snapshot primed above predates them, and on a fresh or restored DB
+	// it is empty. If the warm-up failed, the first successful tick does it.
+	if wuErr == nil {
+		if err := s.refreshBuiltNeighborGraph(); err != nil {
+			log.Printf("[neighbor-build] post-build neighbor-graph refresh error: %v", err)
+		}
+	}
 
 	var stopOnce sync.Once
 	go func() {
@@ -109,8 +119,13 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 				n, err := s.buildAndPersistNeighborEdges()
 				// Refresh the neighbor-graph snapshot after the edges
 				// build (#1560) so the context-aware resolver picks up
-				// newly persisted adjacencies on the next ingest.
-				if grErr := s.RefreshNeighborGraph(); grErr != nil {
+				// newly persisted adjacencies on the next ingest. After a
+				// successful build it is a post-build snapshot (#188).
+				refresh := s.RefreshNeighborGraph
+				if err == nil {
+					refresh = s.refreshBuiltNeighborGraph
+				}
+				if grErr := refresh(); grErr != nil {
 					log.Printf("[neighbor-build] neighbor-graph refresh error: %v", grErr)
 				}
 				dur := time.Since(start)

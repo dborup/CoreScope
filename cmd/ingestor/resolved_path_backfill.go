@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -14,6 +15,14 @@ import (
 // Those rows come from the resolver before #188 (no observer anchor,
 // companions in the index) and from the start-up window in which buffered
 // ingest is drained before the index is primed (main.go).
+//
+// The pass needs a prefix index and a neighbour graph loaded after a
+// successful neighbor_edges build, with at least one edge
+// (resolvedPathBackfillReady). On anything less it would resolve only
+// unique prefixes and still move the watermark past every row, so it does
+// not start, and a batch whose snapshot is not usable writes nothing. The
+// background pass waits for the next post-build graph and then resumes from
+// the persisted watermark.
 //
 // One pass per ingestor start covers observation ids in (watermark, ceiling],
 // where ceiling is MAX(observations.id) when the pass starts and watermark is
@@ -101,10 +110,22 @@ func (s *Store) resolvedPathBackfillWatermark() (int64, error) {
 	return w, err
 }
 
-// StartResolvedPathBackfill runs one backfill pass in the background. Call it
-// after the prefix index and neighbour graph are primed
-// (StartNeighborEdgesBuilder). The returned stop function cancels the pass and
-// waits for it; the watermark of the last committed batch is kept.
+// errResolvedPathBackfillNotReady: no prefix index, or no neighbour graph
+// from a successful edge build, or that graph has no edge.
+var errResolvedPathBackfillNotReady = errors.New("prefix index or neighbour graph not ready (no successful neighbour-edge build yet, or no edges)")
+
+// resolvedPathBackfillReady reports whether the pass can run on this index
+// and graph.
+func (s *Store) resolvedPathBackfillReady(idx prefixIndex, graph *NeighborGraph) bool {
+	built, _ := s.neighborGraph.buildState()
+	return built && len(idx) > 0 && !graph.empty()
+}
+
+// StartResolvedPathBackfill runs one backfill pass in the background. Until
+// a neighbour graph from a successful edge build with at least one edge is
+// published (StartNeighborEdgesBuilder), it waits and retries on each new
+// post-build graph. The returned stop function cancels the pass and waits for
+// it; the watermark of the last committed batch is kept.
 func (s *Store) StartResolvedPathBackfill(batchSize int, pause time.Duration) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -115,8 +136,26 @@ func (s *Store) StartResolvedPathBackfill(batchSize int, pause time.Duration) fu
 				log.Printf("[%s] panic recovered: %v", resolvedPathBackfillComponent, r)
 			}
 		}()
-		if _, err := s.RunResolvedPathBackfill(ctx, batchSize, pause); err != nil && ctx.Err() == nil {
-			log.Printf("[%s] error: %v", resolvedPathBackfillComponent, err)
+		for logged := false; ; {
+			// Take the wake-up channel before the readiness check, so a
+			// graph published in between is not missed.
+			_, next := s.neighborGraph.buildState()
+			_, err := s.RunResolvedPathBackfill(ctx, batchSize, pause)
+			if !errors.Is(err, errResolvedPathBackfillNotReady) {
+				if err != nil && ctx.Err() == nil {
+					log.Printf("[%s] error: %v", resolvedPathBackfillComponent, err)
+				}
+				return
+			}
+			if !logged {
+				log.Printf("[%s] waiting: %v", resolvedPathBackfillComponent, err)
+				logged = true
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-next:
+			}
 		}
 	}()
 	return func() {
@@ -132,10 +171,10 @@ func (s *Store) RunResolvedPathBackfill(ctx context.Context, batchSize int, paus
 	if batchSize <= 0 {
 		batchSize = defaultResolvedPathBackfillBatchSize
 	}
-	// Without the index and graph every row would stay NULL while the
-	// watermark moved past it for good.
-	if s.prefixIdx.load() == nil || s.neighborGraph.load() == nil {
-		return res, fmt.Errorf("prefix index or neighbour graph not primed")
+	// Without a usable index and graph most rows would stay NULL while the
+	// watermark moved past them for good.
+	if !s.resolvedPathBackfillReady(s.prefixIdx.load(), s.neighborGraph.load()) {
+		return res, errResolvedPathBackfillNotReady
 	}
 	if err := ensureResolvedPathBackfillState(s.db); err != nil {
 		return res, fmt.Errorf("ensure state table: %w", err)
@@ -200,6 +239,13 @@ type resolvedPathBackfillRow struct {
 // rows, and persists the new watermark.
 func (s *Store) resolvedPathBackfillBatch(ctx context.Context, after, ceiling int64, limit int) (resolvedPathBatch, error) {
 	var b resolvedPathBatch
+	// The pass checked readiness when it started; check the snapshot this
+	// batch uses as well, and write nothing (not even the watermark) if it
+	// is not usable.
+	graph, idx := s.neighborGraph.load(), s.prefixIdx.load()
+	if !s.resolvedPathBackfillReady(idx, graph) {
+		return b, errResolvedPathBackfillNotReady
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT o.id, COALESCE(o.path_json, ''), o.resolved_path IS NULL,
 			COALESCE(t.route_type, -1), COALESCE(t.payload_type, -1), COALESCE(t.from_pubkey, ''), COALESCE(obs.id, '')
 		FROM observations o
@@ -232,7 +278,6 @@ func (s *Store) resolvedPathBackfillBatch(ctx context.Context, after, ceiling in
 
 	// Resolve outside any lock, with the same inputs InsertTransmission uses
 	// (fromPubkey only for ADVERTs, as buildPacketData sets it).
-	graph, idx := s.neighborGraph.load(), s.prefixIdx.load()
 	type update struct {
 		id int64
 		rp string

@@ -38,12 +38,18 @@ func backfillFixture188(t *testing.T, path string, seed bool) *Store {
 	return store
 }
 
+// primeIndexAndGraph188 does what StartNeighborEdgesBuilder's warm-up does
+// before the backfill may run: prime the index, build neighbor_edges, and
+// publish the post-build graph.
 func primeIndexAndGraph188(t *testing.T, store *Store) {
 	t.Helper()
 	if err := store.RefreshPrefixIndex(); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RefreshNeighborGraph(); err != nil {
+	if _, err := store.buildAndPersistNeighborEdges(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.refreshBuiltNeighborGraph(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -477,9 +483,14 @@ func TestResolvedPathBackfill_StartWaitsForFirstEdgeBuild_188(t *testing.T) {
 	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
 	defer store.Close()
 	clearEdges188(t, store)
+	// An edge persisted earlier, so the pre-build graph is not empty: only
+	// the missing build holds the pass back.
+	if _, err := store.db.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count, last_seen) VALUES (?, ?, 5, '2026-05-01T00:00:00Z')`, a1a, b2a); err != nil {
+		t.Fatal(err)
+	}
 	ids := seedNullRows188(t, store, 10)
 	seedEdgeSourceRow188(t, store)
-	// The state before the warm-up build: index and an (empty) graph loaded.
+	// The state before the warm-up build: index and graph loaded.
 	if err := store.RefreshPrefixIndex(); err != nil {
 		t.Fatal(err)
 	}
@@ -504,4 +515,30 @@ func TestResolvedPathBackfill_StartWaitsForFirstEdgeBuild_188(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	wantAllResolvedTo188(t, store, ids, c3a)
+}
+
+func TestResolvedPathBackfillReady_188(t *testing.T) {
+	idx := idx188(c3a, c3b)
+	g := graph188([2]string{obs188, c3a})
+	store := &Store{}
+	if store.resolvedPathBackfillReady(idx, g) {
+		t.Fatal("ready before any post-build graph was published")
+	}
+	store.neighborGraph.storeBuilt(g)
+	for _, c := range []struct {
+		name  string
+		idx   prefixIndex
+		graph *NeighborGraph
+		want  bool
+	}{
+		{"index and graph", idx, g, true},
+		{"nil index", nil, g, false},
+		{"empty index", prefixIndex{}, g, false},
+		{"nil graph", idx, nil, false},
+		{"empty graph", idx, NewNeighborGraph(), false},
+	} {
+		if got := store.resolvedPathBackfillReady(c.idx, c.graph); got != c.want {
+			t.Errorf("%s: ready = %v, want %v", c.name, got, c.want)
+		}
+	}
 }

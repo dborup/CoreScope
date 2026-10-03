@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -87,11 +88,25 @@ func (g *NeighborGraph) IsAdjacent(a, b string) bool {
 	return present
 }
 
+// empty reports whether the graph has no edge.
+func (g *NeighborGraph) empty() bool {
+	return g == nil || len(g.adj) == 0
+}
+
 // neighborGraphHolder caches the graph for the InsertTransmission hot
 // path. atomic.Value lets the 60s rebuild publish without a read-side
 // lock.
+//
+// It also records whether a snapshot loaded after a successful
+// neighbor_edges build has been published (storeBuilt). Before that, the
+// snapshot may predate the edges the warm-up build derives; the
+// resolved_path backfill waits for it (#188, PR #190 review).
 type neighborGraphHolder struct {
 	v atomic.Value // holds *NeighborGraph
+
+	mu    sync.Mutex
+	built bool          // a post-build snapshot has been published
+	next  chan struct{} // closed when the next post-build snapshot is published
 }
 
 func (h *neighborGraphHolder) load() *NeighborGraph {
@@ -103,6 +118,30 @@ func (h *neighborGraphHolder) load() *NeighborGraph {
 
 func (h *neighborGraphHolder) store(g *NeighborGraph) {
 	h.v.Store(g)
+}
+
+// storeBuilt publishes g, loaded after a successful neighbor_edges build,
+// and wakes everyone waiting on buildState's channel.
+func (h *neighborGraphHolder) storeBuilt(g *NeighborGraph) {
+	h.store(g)
+	h.mu.Lock()
+	h.built = true
+	if h.next != nil {
+		close(h.next)
+		h.next = nil
+	}
+	h.mu.Unlock()
+}
+
+// buildState reports whether a post-build snapshot has been published, and
+// returns a channel that is closed when the next one is.
+func (h *neighborGraphHolder) buildState() (built bool, next <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.next == nil {
+		h.next = make(chan struct{})
+	}
+	return h.built, h.next
 }
 
 // loadNeighborGraph reads neighbor_edges and returns an in-memory
@@ -222,6 +261,18 @@ func (s *Store) RefreshNeighborGraph() error {
 		return err
 	}
 	s.neighborGraph.store(g)
+	return nil
+}
+
+// refreshBuiltNeighborGraph is RefreshNeighborGraph for a caller that has
+// just completed a successful buildAndPersistNeighborEdges: it marks the
+// snapshot as post-build (neighborGraphHolder.storeBuilt).
+func (s *Store) refreshBuiltNeighborGraph() error {
+	g, err := loadNeighborGraph(s.db)
+	if err != nil {
+		return err
+	}
+	s.neighborGraph.storeBuilt(g)
 	return nil
 }
 
