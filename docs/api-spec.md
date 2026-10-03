@@ -492,7 +492,19 @@ claimed-nodes lookups do not.
     "hash_size":     number | null,
     "hash_size_inconsistent": boolean,
     "hash_sizes_seen": [number] | undefined,
-    "flood_advert_count_7d": number   // route_type 1 only (see below)
+    "flood_advert_count_7d": number,   // route_type 1 only (see below)
+    "neighbor_estimate": {           // see Neighbor estimate below
+      "status": "estimated" | "insufficient" | "ambiguous" | "unavailable",
+      "method": "neighbor_cluster_v1",
+      "contributor_count": number,
+      "candidate_count": number,
+      "spread_km": number,
+      "lat": number,                 // estimated only; otherwise omitted
+      "lon": number,                 // estimated only; otherwise omitted
+      "oldest_seen": string (ISO),   // omitted if no valid contributor timestamps
+      "newest_seen": string (ISO),
+      "unknown_freshness_count": number
+    }
   },
   "recentAdverts": [Packet],  // last 20 packets for this node, newest ingest first;
                               // with include=advertRoutes ADVERT rows also carry route_class
@@ -514,6 +526,39 @@ claimed-nodes lookups do not.
 ```
 
 Where `Packet` is a transmission object (see [Packet Object](#packet-object)).
+
+#### Neighbor estimate
+
+`node.neighbor_estimate` describes heuristic evidence sufficiency, not a
+calibrated positioning confidence. Only `estimated` supplies coordinates.
+`insufficient` means the selected group has fewer than two contributors;
+`ambiguous` means a disjoint group has similar support; `unavailable` means
+there is no usable estimate. An abstention must not be plotted using stale
+legacy coordinates. Reported `node.lat` / `node.lon` remain unchanged.
+
+`candidate_count` is the valid positioned candidate pool (at most 20) after
+excluding candidates whose capped, age-adjusted weight is below 10% of the
+strongest candidate's weight; it is not the total graph degree. Excluded links
+also do not count toward the minimum of two contributors. `contributor_count`
+counts the selected group's neighbors; it does not count independently verified
+radio sources. `spread_km` is the
+largest pairwise separation of selected neighbors, **not an error radius**.
+`oldest_seen` and `newest_seen` summarize their valid stored edge `last_seen`
+timestamps; they are not GPS-fix timestamps or the entire observation window.
+`unknown_freshness_count` includes missing or implausibly future timestamps.
+Unknown freshness uses a 0.25 weight multiplier. The evidence floor is relative,
+so similarly old links may still support an estimate; status is not proof of a
+current position. Consumers should retain the sighting dates and freshness
+caveat when presenting the result.
+For an ambiguous/unavailable result no group is selected, so contributor and
+spread fields are zero rather than a confidence statement.
+
+For compatibility, `estimated_lat`, `estimated_lon`,
+`estimated_contributor_count`, and (when reported GPS exists)
+`estimated_distance_km` remain on the node only when the status is `estimated`.
+That distance compares the estimate to the reported coordinates; it is not
+validated error. See the [node guide](user-guide/nodes.md#approximate-area-neighbor-estimate)
+for the algorithm's limits and a separate, leakage-free validation procedure.
 
 #### Advert route classes
 

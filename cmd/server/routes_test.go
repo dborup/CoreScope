@@ -344,15 +344,15 @@ func TestNodeDetailEndpoint(t *testing.T) {
 }
 
 // TestNodeDetail_NoRealFix_IncludesEstimatedPosition covers a node with no
-// GPS fix that has a positioned neighbor -- the detail endpoint should fall
-// back to the same neighbor-centroid estimate Position-Fix Coverage Gaps and
-// View Path's approx markers already use, so the node's page can still show
-// a (dashed/approximate) map instead of nothing.
+// GPS fix that has a coherent positioned pair. A single neighbor is no
+// longer sufficient for a node position (legacy path proxies are separate).
 func TestNodeDetail_NoRealFix_IncludesEstimatedPosition(t *testing.T) {
 	srv, router := setupTestServer(t)
 	srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
 		VALUES ('nofix00000000001', 'NoFixNode', 'repeater', NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)`)
 	srv.db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('nofix00000000001', 'aabbccdd11223344', 5)`)
+	srv.db.conn.Exec(`INSERT INTO nodes (public_key,name,lat,lon) VALUES ('secondnear','Second',37.51,-122.01)`)
+	srv.db.conn.Exec(`INSERT INTO neighbor_edges (node_a,node_b,count) VALUES ('nofix00000000001','secondnear',5)`)
 
 	req := httptest.NewRequest("GET", "/api/nodes/nofix00000000001", nil)
 	w := httptest.NewRecorder()
@@ -373,8 +373,12 @@ func TestNodeDetail_NoRealFix_IncludesEstimatedPosition(t *testing.T) {
 	if node["estimated_lat"] == nil || node["estimated_lon"] == nil {
 		t.Fatalf("expected estimated_lat/estimated_lon to be set, got node=%+v", node)
 	}
-	if cc, _ := node["estimated_contributor_count"].(float64); cc < 1 {
-		t.Errorf("expected estimated_contributor_count >= 1, got %v", node["estimated_contributor_count"])
+	if cc, _ := node["estimated_contributor_count"].(float64); cc != 2 {
+		t.Errorf("expected estimated_contributor_count = 2, got %v", node["estimated_contributor_count"])
+	}
+	meta := node["neighbor_estimate"].(map[string]interface{})
+	if meta["status"] != "estimated" || meta["method"] != "neighbor_cluster_v1" || meta["lat"] != node["estimated_lat"] {
+		t.Fatalf("bad estimate metadata: %+v", meta)
 	}
 }
 
@@ -388,6 +392,8 @@ func TestNodeDetail_ZeroZeroFix_IncludesEstimatedPosition(t *testing.T) {
 	srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
 		VALUES ('zerofix0000000001', 'ZeroFixNode', 'repeater', 0, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)`)
 	srv.db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('zerofix0000000001', 'aabbccdd11223344', 5)`)
+	srv.db.conn.Exec(`INSERT INTO nodes (public_key,name,lat,lon) VALUES ('secondnear','Second',37.51,-122.01)`)
+	srv.db.conn.Exec(`INSERT INTO neighbor_edges (node_a,node_b,count) VALUES ('zerofix0000000001','secondnear',5)`)
 
 	req := httptest.NewRequest("GET", "/api/nodes/zerofix0000000001", nil)
 	w := httptest.NewRecorder()
@@ -439,6 +445,8 @@ func TestNodeDetail_RealFixWithNeighbors_IncludesBothPositions(t *testing.T) {
 	srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
 		VALUES ('farneighbor00000001', 'FarNeighbor', 'repeater', 40.0, -122.0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)`)
 	srv.db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('aabbccdd11223344', 'farneighbor00000001', 5)`)
+	srv.db.conn.Exec(`INSERT INTO nodes (public_key,name,lat,lon) VALUES ('secondnear','Second',40.01,-122.01)`)
+	srv.db.conn.Exec(`INSERT INTO neighbor_edges (node_a,node_b,count) VALUES ('aabbccdd11223344','secondnear',5)`)
 
 	req := httptest.NewRequest("GET", "/api/nodes/aabbccdd11223344", nil)
 	w := httptest.NewRecorder()

@@ -696,6 +696,81 @@
     return nodeData;
   }
 
+  // Shared by the full node page and side pane. This is an evidence summary,
+  // not a calibrated confidence interval or a GPS fix. Keep all API values
+  // behind validation before using them in either HTML or Leaflet.
+  function neighborEstimateView(n) {
+    function number(value) {
+      if (typeof value !== 'number' && typeof value !== 'string') return null;
+      if (typeof value === 'string' && !value.trim()) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    function count(value) {
+      const parsed = number(value);
+      return parsed != null && Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+    }
+    function date(value) {
+      if (typeof value !== 'string' || !value.trim()) return null;
+      const parsed = new Date(value);
+      return Number.isFinite(parsed.getTime()) ? parsed.toISOString().replace('.000Z', 'Z') : null;
+    }
+    const typed = n.neighbor_estimate != null;
+    const evidence = typed ? n.neighbor_estimate : {};
+    let status = typed ? evidence.status : 'estimated';
+    if (!['estimated', 'insufficient', 'ambiguous', 'unavailable'].includes(status)) status = 'unavailable';
+    const lat = number(typed ? evidence.lat : n.estimated_lat);
+    const lon = number(typed ? evidence.lon : n.estimated_lon);
+    const contributors = count(typed ? evidence.contributor_count : n.estimated_contributor_count);
+    const candidates = count(evidence.candidate_count);
+    const validPosition = lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+    if (!typed && n.estimated_lat == null && n.estimated_lon == null) return { visible: false, hasPosition: false, html: '' };
+    if (status === 'estimated' && (contributors != null && contributors < 2)) status = 'insufficient';
+    if (status === 'estimated' && (!validPosition || (typed && contributors == null))) status = 'unavailable';
+    const messages = {
+      insufficient: 'Insufficient neighbor evidence for a position. At least two supported neighbors are needed.',
+      ambiguous: 'Conflicting neighbor groups; no position shown.',
+      unavailable: 'Neighbor estimate unavailable.',
+    };
+    if (status !== 'estimated') {
+      return { visible: true, status: status, hasPosition: false, html: '<span class="text-muted">' + (messages[status] || messages.unavailable) + '</span>' };
+    }
+    const details = [];
+    if (typed) {
+      details.push(contributors + (candidates != null && candidates >= contributors ? ' of ' + candidates + ' candidate neighbors' : ' neighbors'));
+      const spread = number(evidence.spread_km);
+      if (spread != null && spread >= 0) details.push('Neighbor spread: ' + spread.toFixed(1) + ' km (not a location error radius)');
+      const oldest = date(evidence.oldest_seen), newest = date(evidence.newest_seen);
+      if (oldest && newest && oldest <= newest) details.push('Neighbor links last seen: ' + oldest + ' – ' + newest);
+      else if (newest) details.push('Newest neighbor link sighting: ' + newest);
+      const unknown = count(evidence.unknown_freshness_count);
+      if (unknown > 0) details.push(unknown + ' neighbor' + (unknown === 1 ? ' has' : 's have') + ' unknown freshness');
+    } else {
+      details.push('Legacy estimate; evidence quality unavailable');
+    }
+    const reportedLat = number(n.lat), reportedLon = number(n.lon), distance = number(n.estimated_distance_km);
+    if (reportedLat != null && reportedLon != null && Math.abs(reportedLat) <= 90 && Math.abs(reportedLon) <= 180 &&
+        !(reportedLat === 0 && reportedLon === 0) && distance != null && distance >= 0) {
+      details.push(distance.toFixed(1) + ' km from reported position (not an error bound)');
+    }
+    details.push('Neighbor-based approximation, not triangulation; accuracy is not field-validated.');
+    return {
+      visible: true, status: status, hasPosition: true, lat: lat, lon: lon,
+      html: '~' + lat.toFixed(2) + ', ~' + lon.toFixed(2) + '<br><span class="text-muted" style="font-size:11px">' + details.map(escapeHtml).join('<br>') + '</span>',
+    };
+  }
+
+  function addNeighborEstimateMarker(map, n, estimate) {
+    // A fixed-size point symbol, deliberately not an uncertainty/range circle.
+    const popup = escapeHtml(n.name || n.public_key.slice(0, 12)) + '<br>Approximate area<br>' + estimate.html;
+    L.circleMarker([estimate.lat, estimate.lon], {
+      radius: 8, color: getComputedStyle(document.documentElement).getPropertyValue('--surface-0'),
+      weight: 2, fillColor: getComputedStyle(document.documentElement).getPropertyValue('--accent'),
+      fillOpacity: 0.5, dashArray: '5,4',
+    }).addTo(map).bindPopup(popup);
+    return [estimate.lat, estimate.lon];
+  }
+
   async function loadFullNode(pubkey) {
     const body = document.getElementById('nodeFullBody');
     const viewSeq = ++detailViewSeq;
@@ -714,12 +789,8 @@
       // real fix either -- otherwise it'd plot a bogus marker off the
       // coast of Africa instead of falling back to the estimate below.
       const hasLoc = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-      // Neighbor-centroid estimate (same technique Position-Fix Coverage
-      // Gaps, View Path's approx markers, and Suspicious GPS Positions
-      // use). Shown alongside a real fix too, not just as a fallback when
-      // one's missing -- lets a node flagged by Suspicious GPS Positions
-      // be visually cross-checked against its own claimed position.
-      const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+      const estimate = neighborEstimateView(n);
+      const hasEstLoc = estimate.hasPosition;
 
       // Health stats
       const h = healthData || {};
@@ -830,7 +901,7 @@
           <tr><td>Packets Today</td><td>${stats.packetsToday || 0}</td></tr>
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
-          ${hasEstLoc ? `<tr><td>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></td><td>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></td></tr>` : ''}
+          ${estimate.visible ? `<tr class="neighbor-estimate"><td>${hasEstLoc ? 'Approximate area' : 'Neighbor estimate'}</td><td>${estimate.html}</td></tr>` : ''}
           <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ') + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>' : ''}</td></tr>
         </table>
 
@@ -898,22 +969,13 @@
             bounds.push([n.lat, n.lon]);
           }
           if (hasEstLoc) {
-            // Dashed pin, same convention as area-nodes-map.js -- this
-            // position is an estimate, not a reported GPS fix.
-            var estPopup = escapeHtml(n.name || n.public_key.slice(0, 12)) + ' (estimated position' +
-              (hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix') + ')';
-            L.circleMarker([n.estimated_lat, n.estimated_lon], {
-              radius: 8, color: getComputedStyle(document.documentElement).getPropertyValue('--surface-0') || '#fff',
-              weight: 2, fillColor: getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#3b82f6',
-              fillOpacity: 0.5, dashArray: '5,4',
-            }).addTo(detailMap).bindPopup(estPopup);
-            bounds.push([n.estimated_lat, n.estimated_lon]);
+            bounds.push(addNeighborEstimateMarker(detailMap, n, estimate));
           }
           if (hasLoc && hasEstLoc) {
             L.polyline(bounds, { color: getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#888', weight: 2, dashArray: '4,4', opacity: 0.6 }).addTo(detailMap);
             detailMap.fitBounds(bounds, { padding: [30, 30] });
           } else {
-            detailMap.setView(bounds[0], 13);
+            detailMap.setView(bounds[0], hasLoc ? 13 : 10);
           }
           resizeDetailMapAfterLayout();
         } catch {}
@@ -1823,7 +1885,8 @@
     // Same "real fix" convention and estimate-alongside-real-fix behavior
     // as loadFullNode above -- see its comments.
     const hasLoc = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-    const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+    const estimate = neighborEstimateView(n);
+    const hasEstLoc = estimate.hasPosition;
     const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
 
     // Status calculation via shared helper
@@ -1866,7 +1929,7 @@
             <dt>Packets Today</dt><dd>${stats.packetsToday || 0}</dd>
             ${stats.avgHops ? `<dt>Avg Hops</dt><dd>${stats.avgHops}</dd>` : ''}
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
-            ${hasEstLoc ? `<dt>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></dt><dd>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></dd>` : ''}
+            ${estimate.visible ? `<dt>${hasEstLoc ? 'Approximate area' : 'Neighbor estimate'}</dt><dd class="neighbor-estimate">${estimate.html}</dd>` : ''}
           </dl>
         </div>
 
@@ -1918,20 +1981,13 @@
           panelBounds.push([n.lat, n.lon]);
         }
         if (hasEstLoc) {
-          var panelEstPopup = escapeHtml(n.name || n.public_key.slice(0, 12)) + ' (estimated position' +
-            (hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix') + ')';
-          L.circleMarker([n.estimated_lat, n.estimated_lon], {
-            radius: 8, color: getComputedStyle(document.documentElement).getPropertyValue('--surface-0') || '#fff',
-            weight: 2, fillColor: getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#3b82f6',
-            fillOpacity: 0.5, dashArray: '5,4',
-          }).addTo(detailMap).bindPopup(panelEstPopup);
-          panelBounds.push([n.estimated_lat, n.estimated_lon]);
+          panelBounds.push(addNeighborEstimateMarker(detailMap, n, estimate));
         }
         if (hasLoc && hasEstLoc) {
           L.polyline(panelBounds, { color: getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#888', weight: 2, dashArray: '4,4', opacity: 0.6 }).addTo(detailMap);
           detailMap.fitBounds(panelBounds, { padding: [30, 30] });
         } else {
-          detailMap.setView(panelBounds[0], 13);
+          detailMap.setView(panelBounds[0], hasLoc ? 13 : 10);
         }
         resizeDetailMapAfterLayout();
       } catch {}
@@ -2053,6 +2109,7 @@
   });
 
   // Test hooks
+  window._nodesNeighborEstimateView = neighborEstimateView;
   window._nodesIsAdvertMessage = isAdvertMessage;
   window._nodesGetAllNodes = function() { return _allNodes; };
   window._nodesSetAllNodes = function(n) { _allNodes = n; };

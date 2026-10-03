@@ -969,7 +969,7 @@ func TestGetPacketPath_FallsBackToSingleNeighborPosition(t *testing.T) {
 
 // TestGetPacketPath_FallsBackToWeightedNeighborCentroid covers a hop
 // with TWO positioned neighbors of different edge strength: the
-// approximate position must be a count-weighted average of both real
+// approximate position must be a bounded-count-weighted average of both real
 // positions -- not just the stronger neighbor's exact coordinates --
 // since each neighbor's own GPS is precise even though the hop's
 // position relative to them isn't.
@@ -983,8 +983,8 @@ func TestGetPacketPath_FallsBackToWeightedNeighborCentroid(t *testing.T) {
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES ('pkghost', 'GhostRepeater', 'repeater')`)
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkanchor', 'AnchorRepeater', 'repeater', 55.5, 9.5)`)
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('pkweak', 'WeakRepeater', 'repeater', 60.0, 15.0)`)
-	// pkanchor is a 10x stronger edge than pkweak -- weighted centroid:
-	// lat = (55.5*10 + 60.0*1) / 11 = 55.90909..., lon = (9.5*10 + 15.0*1) / 11 = 10.0
+	// Lifetime counts now receive bounded logarithmic weights, not 10:1
+	// physical influence. With filtering disabled both still contribute.
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkanchor', 'pkghost', 10)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('pkghost', 'pkweak', 1)`)
 
@@ -1013,7 +1013,9 @@ func TestGetPacketPath_FallsBackToWeightedNeighborCentroid(t *testing.T) {
 	if p.Lat == nil || p.Lon == nil {
 		t.Fatalf("Lat/Lon = %v/%v, want a computed centroid, not nil", p.Lat, p.Lon)
 	}
-	const wantLat, wantLon = 55.90909090909091, 10.0
+	// Golden values for w(10)=1+log(11)/log(21), w(1)=1+log(2)/log(21).
+	// Unknown freshness scales both equally, so cancels in the centroid.
+	const wantLat, wantLon = 57.33217355999426, 11.739323239992985
 	const epsilon = 1e-9
 	if diff := *p.Lat - wantLat; diff > epsilon || diff < -epsilon {
 		t.Errorf("Lat = %v, want weighted centroid %v (not AnchorRepeater's exact 55.5, since WeakRepeater also has a real position)", *p.Lat, wantLat)

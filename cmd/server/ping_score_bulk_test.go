@@ -579,8 +579,8 @@ func TestNearestPositionedNeighborsBulk_MatchesSingleItem(t *testing.T) {
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('targeta', 'nba1', 9)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('nba2', 'targeta', 4)`)
 
-	// Target B: strongest neighbor close by, a second neighbor far enough
-	// away that a tight maxEdgeKm excludes it.
+	// Target B: two distant singleton neighborhoods. Under bounded weights
+	// their support is similar enough to abstain, not anchor on count 8.
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('nbb1', 'NbB1', 'repeater', 40.0, 10.0)`)
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon) VALUES ('nbb2', 'NbB2', 'repeater', 60.0, 30.0)`)
 	db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count) VALUES ('targetb', 'nbb1', 8)`)
@@ -595,7 +595,7 @@ func TestNearestPositionedNeighborsBulk_MatchesSingleItem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, pk := range []string{"targeta", "targetb"} {
+	for _, pk := range []string{"targeta"} {
 		wantName, wantLat, wantLon, wantCount, wantSpread, wantOK := db.nearestPositionedNeighbor(pk, maxEdgeKm)
 		if !wantOK {
 			t.Fatalf("single-item nearestPositionedNeighbor(%s) returned ok=false unexpectedly", pk)
@@ -617,10 +617,11 @@ func TestNearestPositionedNeighborsBulk_MatchesSingleItem(t *testing.T) {
 		t.Fatalf("single-item nearestPositionedNeighbor(targetc) returned ok=true unexpectedly")
 	}
 
-	// Confirm the geo-filter actually did something in this fixture (else
-	// the test wouldn't be exercising what it claims to).
-	if bulk["targetb"].ContributorCount != 1 {
-		t.Errorf("bulk[targetb].ContributorCount = %d, want 1 -- nbb2 should be dropped by the 50km geo-filter", bulk["targetb"].ContributorCount)
+	if _, ok := bulk["targetb"]; ok {
+		t.Error("ambiguous targetb must not get a bulk proxy")
+	}
+	if _, _, _, _, _, ok := db.nearestPositionedNeighbor("targetb", maxEdgeKm); ok {
+		t.Error("ambiguous targetb must not get a single proxy")
 	}
 }
 

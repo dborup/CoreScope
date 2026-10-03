@@ -2868,68 +2868,30 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	return buildPacketPathResponseFromReduction(hash, red.txID, red.first, red.best, nodeByPK, nodeByName, neighborLookup), nil
 }
 
-// EstimateMaxEdgeKm is the geo-sanity threshold nearestPositionedNeighbor's
-// callers pass -- deliberately much tighter than Config.NeighborMaxEdgeKm()
-// (500km, default), which governs a different, coarser question (see
-// nearestPositionedNeighbor's doc comment for the real-world case that
-// motivated this). Genuine LoRa RF adjacency rarely exceeds a few tens of
-// km, so 30km errs toward excluding a real-but-unusually-long neighbor
-// link over including an MQTT-bridge artifact that happens to have
-// accumulated a large edge count.
+// EstimateMaxEdgeKm is an initial neighborhood-selection heuristic, distinct
+// from Config.NeighborMaxEdgeKm's general graph filter. It is neither an RF
+// range guarantee nor an error radius; selected neighbors may span 2x this.
 const EstimateMaxEdgeKm = 30.0
 
-// nearestPositionedNeighbor estimates pubkey's position from its
-// neighbor_edges neighbors that themselves have a real, known position,
-// for use as an approximate stand-in when pubkey has none of its own --
-// e.g. a node that's never advertised a GPS fix, but is almost
-// certainly physically near wherever its neighbors are. Weighted by
-// each edge's observation count (a neighbor seen relaying to/from
-// pubkey many times pulls the estimate harder than one seen once), so
-// with several positioned neighbors this settles somewhere among them
-// rather than collapsing onto a single neighbor's exact coordinates --
-// each neighbor's OWN position is a real, precise fix; only pubkey's
-// position relative to them is unknown, so more of them narrows it
-// down. With exactly one positioned neighbor this is identical to
-// using that neighbor's position outright.
-//
-// contributorCount is how many positioned neighbors fed the estimate,
-// and spreadKm is the widest distance between any two of them (0 when
-// there's only one) -- together a rough confidence signal callers can
-// use to size an "uncertainty" marker: more contributors that broadly
-// agree (small spread) means a tighter estimate than a single neighbor
-// or several that disagree (large spread).
-//
-// maxEdgeKm geo-sanity-filters the candidate pool before averaging:
-// neighbor_edges isn't purely RF adjacency -- it also carries
-// observer↔last-hop edges (cmd/ingestor/neighbor_builder.go), and an
-// MQTT-bridged remote observer can be genuinely hundreds of km from a
-// repeater it merely "heard" over the bridge, not next to it. Anchored
-// on the single highest-weight (most-observed) candidate as the most
-// trustworthy data point, any other candidate further than maxEdgeKm
-// from it is dropped before the centroid/spread math runs -- otherwise
-// one rare distant outlier both skews the estimate and inflates
-// spreadKm into something like "800km", which reads as "this whole
-// estimate is garbage" when in practice the real local neighbors
-// dominate by weight.
-//
-// Callers pass EstimateMaxEdgeKm, NOT Config.NeighborMaxEdgeKm() (500km) --
-// that default is tuned for deciding which edges are implausible enough to
-// exclude from the general-purpose NeighborGraph entirely, a much coarser
-// question than "is this specific candidate close enough to trust for a
-// single-point position estimate". A real case (dborup, #Bornholm test
-// repeater) showed why 500km is far too loose here: the correct anchor
-// (DK_Bornholm_Olsker, on the island) had a Swedish MQTT-bridge neighbor
-// 177km away with a MASSIVE accumulated count (6403, vs the anchor's
-// 11917) -- big enough on its own to drag the weighted centroid out into
-// the sea between Bornholm and Sweden. Genuine LoRa RF range rarely
-// exceeds a few tens of km even with favorable terrain, so a much tighter
-// cap catches this class of bug. maxEdgeKm <= 0 disables the filter.
-//
-// Returns ok=false when pubkey has no neighbor with a position at all.
+// nearestPositionedNeighbor wraps the shared neighbor-position estimator
+// for legacy approximate path/analytics consumers. A clear singleton keeps
+// its historical path proxy, but an ambiguous result never does. Node detail
+// uses neighborPositionEstimate directly and requires status "estimated".
+// spreadKm measures neighbor separation, not uncertainty in the target.
+// maxEdgeKm<=0 disables geographic filtering, not bounded count/freshness
+// weighting. Candidate SQL remains top-20 lifetime counts before GPS filtering:
+// many unpositioned or stale high-count neighbors can still mask better ones.
 func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name string, lat, lon float64, contributorCount int, spreadKm float64, ok bool) {
+	r := db.neighborPositionEstimate(pubkey, maxEdgeKm, time.Now())
+	e := r.Legacy
+	return e.Name, e.Lat, e.Lon, e.ContributorCount, e.SpreadKm, r.LegacyOK
+}
+
+func (db *DB) neighborPositionEstimate(pubkey string, maxEdgeKm float64, now time.Time) neighborPositionResult {
+	unavailable := estimateNeighborPosition(nil, maxEdgeKm, now)
 	pk := strings.ToLower(strings.TrimSpace(pubkey))
 	if pk == "" {
-		return "", 0, 0, 0, 0, false
+		return unavailable
 	}
 	// Secondary sort `neighbor ASC` is a deterministic tie-break for
 	// candidates with exactly equal count -- previously undefined (whichever
@@ -2939,29 +2901,29 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	// a tie. This determinizes it; it does not preserve any order that was
 	// ever guaranteed before. Both queries must stay in lockstep here.
 	rows, err := db.conn.Query(`
-		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor, count
+		SELECT CASE WHEN node_a = ? THEN node_b ELSE node_a END AS neighbor, count, last_seen
 		FROM neighbor_edges
 		WHERE node_a = ? OR node_b = ?
 		ORDER BY count DESC, neighbor ASC
 		LIMIT 20`, pk, pk, pk)
 	if err != nil {
-		return "", 0, 0, 0, 0, false
+		return unavailable
 	}
-	type candidate struct {
-		pubkey string
-		weight float64
-	}
-	var candidates []candidate
+	var candidates []neighborPositionCandidate
 	for rows.Next() {
 		var neighborPK string
 		var count float64
-		if rows.Scan(&neighborPK, &count) == nil {
-			candidates = append(candidates, candidate{pubkey: neighborPK, weight: count})
+		var lastSeen sql.NullString
+		if rows.Scan(&neighborPK, &count, &lastSeen) != nil {
+			rows.Close()
+			return unavailable
 		}
+		candidates = append(candidates, neighborPositionCandidate{Pubkey: neighborPK, Count: count, LastSeen: parseTimestamp(lastSeen.String)})
 	}
+	iterationErr := rows.Err()
 	rows.Close()
-	if len(candidates) == 0 {
-		return "", 0, 0, 0, 0, false
+	if iterationErr != nil || len(candidates) == 0 {
+		return unavailable
 	}
 
 	placeholders := make([]byte, 0, len(candidates)*2)
@@ -2971,7 +2933,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 			placeholders = append(placeholders, ',')
 		}
 		placeholders = append(placeholders, '?')
-		args[i] = c.pubkey
+		args[i] = c.Pubkey
 	}
 	type posInfo struct {
 		name     string
@@ -2979,73 +2941,35 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	}
 	posByPK := make(map[string]posInfo, len(candidates))
 	nodeRows, err := db.conn.Query(
-		"SELECT public_key, name, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", args...)
-	if err == nil {
-		for nodeRows.Next() {
-			var candPK string
-			var candName sql.NullString
-			var candLat, candLon float64
-			if nodeRows.Scan(&candPK, &candName, &candLat, &candLon) == nil {
-				posByPK[candPK] = posInfo{name: candName.String, lat: candLat, lon: candLon}
-			}
+		"SELECT public_key, name, lat, lon FROM nodes WHERE public_key IN ("+string(placeholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND NOT (lat = 0 AND lon = 0)", args...)
+	if err != nil {
+		return unavailable
+	}
+	for nodeRows.Next() {
+		var candPK string
+		var candName sql.NullString
+		var candLat, candLon float64
+		if nodeRows.Scan(&candPK, &candName, &candLat, &candLon) != nil {
+			nodeRows.Close()
+			return unavailable
 		}
-		nodeRows.Close()
+		posByPK[candPK] = posInfo{name: candName.String, lat: candLat, lon: candLon}
 	}
-
-	// candidates is count-DESC ordered, so the first resolved contributor
-	// is the strongest (most-observed) -- both the geo-sanity anchor
-	// below and, for the returned name, the presumed most trustworthy.
-	type weighted struct {
-		posInfo
-		weight float64
+	iterationErr = nodeRows.Err()
+	nodeRows.Close()
+	if iterationErr != nil {
+		return unavailable
 	}
-	var contributors []weighted
+	var contributors []neighborPositionCandidate
 	for _, c := range candidates {
-		p, found := posByPK[c.pubkey]
+		p, found := posByPK[c.Pubkey]
 		if !found {
 			continue
 		}
-		w := c.weight
-		if w <= 0 {
-			w = 1
-		}
-		contributors = append(contributors, weighted{posInfo: p, weight: w})
+		c.Name, c.Lat, c.Lon = p.name, p.lat, p.lon
+		contributors = append(contributors, c)
 	}
-	if len(contributors) == 0 {
-		return "", 0, 0, 0, 0, false
-	}
-
-	if maxEdgeKm > 0 && len(contributors) > 1 {
-		anchor := contributors[0]
-		filtered := contributors[:1:1] // anchor always survives (distance to itself is 0)
-		for _, c := range contributors[1:] {
-			if haversineKm(anchor.lat, anchor.lon, c.lat, c.lon) <= maxEdgeKm {
-				filtered = append(filtered, c)
-			}
-		}
-		contributors = filtered
-	}
-
-	var sumLat, sumLon, sumWeight float64
-	var strongestName string
-	for _, c := range contributors {
-		sumLat += c.lat * c.weight
-		sumLon += c.lon * c.weight
-		sumWeight += c.weight
-		if strongestName == "" {
-			strongestName = c.name
-		}
-	}
-	var spread float64
-	for i := 0; i < len(contributors); i++ {
-		for j := i + 1; j < len(contributors); j++ {
-			d := haversineKm(contributors[i].lat, contributors[i].lon, contributors[j].lat, contributors[j].lon)
-			if d > spread {
-				spread = d
-			}
-		}
-	}
-	return strongestName, sumLat / sumWeight, sumLon / sumWeight, len(contributors), spread, true
+	return estimateNeighborPosition(contributors, maxEdgeKm, now)
 }
 
 // channelHashIndex is the ingestor's partial index
