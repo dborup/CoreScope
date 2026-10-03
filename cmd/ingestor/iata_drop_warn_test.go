@@ -251,6 +251,48 @@ func TestIATADropThrottleOldestTracksStaggeredEntries(t *testing.T) {
 	}
 }
 
+// A sweep that frees only part of the table must leave oldest at the
+// oldest entry it kept (#172). Left at the swept entries' time, oldest
+// stays expired, and every later drop on the refilled table sweeps the
+// whole table again although nothing can expire before the kept entries
+// do.
+func TestIATADropThrottleNoResweepAfterPartialSweep(t *testing.T) {
+	var th iataDropThrottle
+	iv := time.Hour
+	half := iataWarnMaxTracked / 2
+	fillIATA(t, &th, "A", half, t0IATA, iv)
+	fillIATA(t, &th, "B", iataWarnMaxTracked-half, t0IATA.Add(30*time.Minute), iv)
+
+	// +1h: a partial sweep frees the A half; refill to the cap
+	if w, o := th.shouldWarn("N1", t0IATA.Add(time.Hour), iv); !w || o {
+		t.Fatalf("+1h: warn=%v overflow=%v, want an own slot (A entries expired)", w, o)
+	}
+	fillIATA(t, &th, "C", half-1, t0IATA.Add(time.Hour), iv)
+	if len(th.last) != iataWarnMaxTracked || th.sweeps != 1 {
+		t.Fatalf("after the refill: %d entries after %d sweeps, want %d after 1", len(th.last), th.sweeps, iataWarnMaxTracked)
+	}
+
+	// +1h..+1h29m: the oldest kept entry (+30m) has not expired, so new
+	// regions overflow without another sweep
+	for i := 0; i < 100; i++ {
+		at := t0IATA.Add(time.Hour + time.Duration(i)*17*time.Second)
+		if _, o := th.shouldWarn(fmt.Sprintf("X%04d", i), at, iv); !o {
+			t.Fatalf("X%04d at %v: own slot in a full table of fresh entries", i, at.Sub(t0IATA))
+		}
+	}
+	if th.sweeps != 1 {
+		t.Fatalf("%d sweeps before +1h30m, want 1: oldest was not refreshed after the partial sweep", th.sweeps)
+	}
+
+	// +1h30m: the B half expires; the next new region sweeps once more
+	if w, o := th.shouldWarn("N2", t0IATA.Add(90*time.Minute), iv); !w || o {
+		t.Fatalf("+1h30m: warn=%v overflow=%v, want an own slot (B entries expired)", w, o)
+	}
+	if th.sweeps != 2 {
+		t.Fatalf("+1h30m: %d sweeps, want 2", th.sweeps)
+	}
+}
+
 // A drop can carry an earlier time than the current oldest entry (the
 // caller takes the time before the lock). oldest must drop to it, or that
 // entry outlives its interval in a full table.
