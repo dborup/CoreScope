@@ -241,6 +241,7 @@ run test-customizer-v2.js
 run test-channel-colors.js
 run test-channel-ux-followup.js
 run test-channel-ux-round2.js
+run test-drag-manager.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js
