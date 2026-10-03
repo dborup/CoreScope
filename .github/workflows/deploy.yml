@@ -194,6 +194,7 @@ jobs:
           node test-issue-1509-detect-preset.js
           node test-live.js
           node test-issue-124-rx-coverage-viewport.js
+          node test-rx-coverage-escape.js
           node test-issue-125-live-toggles-wiring.js
           node test-coverage-gate.js
           node test-node-reach-coverage.js
@@ -540,6 +541,7 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1510-live-nav-pin-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-live-fullscreen-1572-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1599-replay-freeze-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-pr-1490-live-map-gpu-animations-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m1-icons-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m2-icons-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m3-icons-e2e.js 2>&1 | tee -a e2e-output.txt
