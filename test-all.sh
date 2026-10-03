@@ -234,6 +234,7 @@ run test-rx-coverage-config-race.js
 run test-slideover-1056-rowsel-strict.js
 run test-map-clustering.js
 run test-panel-corner.js
+run test-customizer-v2.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js

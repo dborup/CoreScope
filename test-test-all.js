@@ -133,7 +133,6 @@ const KNOWN_UNREGISTERED = {
   'test-channel-colors.js': 'red: expects 4px border + tint, #675 changed it to 3px',
   'test-channel-ux-followup.js': 'red: copy text changed by the Phosphor migration',
   'test-channel-ux-round2.js': 'red: expects the 📤 glyph, now #ph-share-network',
-  'test-customizer-v2.js': 'red: computeEffective adds home defaults since #525',
   'test-drag-manager.js': 'red: removeAttribute mock does not update dataset (#1567)',
   'test-fluid-scaffolding.js': 'red: reads only the first :root block',
   'test-hop-resolver-affinity.js': 'red: fixture geometry wrong since #874',
