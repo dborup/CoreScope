@@ -114,6 +114,16 @@ How long (in hours) before a node is marked degraded or silent:
 See [Database](database.md) for details on SQLite auto-vacuum, WAL, and manual maintenance.
 See [#919](https://github.com/Kpa-clawbot/CoreScope/issues/919) for background.
 
+### Resolved-path backfill (ingestor)
+
+Once per ingestor start, observations stored with `resolved_path = NULL` are resolved again in small batches. The pass waits for the first neighbour-edge build. The server sees the new values after its next restart.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `resolvedPathBackfill.disabled` | `false` | Skip the pass |
+| `resolvedPathBackfill.batchSize` | `500` | Rows per batch; `0` means the default |
+| `resolvedPathBackfill.pauseMs` | `250` | Milliseconds between batches; `0` means the default, so the pause cannot be turned off (minimum `1`) |
+
 ## Channel decryption
 
 | Field | Description |

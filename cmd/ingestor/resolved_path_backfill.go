@@ -52,7 +52,10 @@ const (
 	defaultResolvedPathBackfillPause     = 250 * time.Millisecond
 )
 
-// ResolvedPathBackfillConfig is the "resolvedPathBackfill" config block.
+// ResolvedPathBackfillConfig is the "resolvedPathBackfill" config block
+// (documented in config.example.json). For BatchSize and PauseMs, 0 or a
+// negative value means the default, so the pause cannot be turned off; the
+// smallest pause is 1 ms.
 type ResolvedPathBackfillConfig struct {
 	Disabled  bool `json:"disabled,omitempty"`
 	BatchSize int  `json:"batchSize,omitempty"` // rows per batch; default 500

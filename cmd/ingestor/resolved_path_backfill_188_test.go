@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -539,6 +541,58 @@ func TestResolvedPathBackfillReady_188(t *testing.T) {
 	} {
 		if got := store.resolvedPathBackfillReady(c.idx, c.graph); got != c.want {
 			t.Errorf("%s: ready = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// PR #190 review, finding 2: 0 (or a negative value) means "default" for
+// both numbers, so pauseMs cannot turn the pause off; the smallest pause is
+// 1 ms. config.example.json documents exactly this.
+func TestResolvedPathBackfillSettings_ZeroMeansDefault_188(t *testing.T) {
+	for _, c := range []struct {
+		cfg       ResolvedPathBackfillConfig
+		wantBatch int
+		wantPause time.Duration
+	}{
+		{ResolvedPathBackfillConfig{BatchSize: 0, PauseMs: 0}, 500, 250 * time.Millisecond},
+		{ResolvedPathBackfillConfig{BatchSize: -1, PauseMs: -1}, 500, 250 * time.Millisecond},
+		{ResolvedPathBackfillConfig{BatchSize: 1, PauseMs: 1}, 1, time.Millisecond},
+	} {
+		cfg := Config{ResolvedPathBackfill: &c.cfg}
+		if on, b, p := cfg.ResolvedPathBackfillSettings(); !on || b != c.wantBatch || p != c.wantPause {
+			t.Errorf("%+v: settings = %v, %d, %s; want true, %d, %s", c.cfg, on, b, p, c.wantBatch, c.wantPause)
+		}
+	}
+}
+
+// config.example.json documents the resolvedPathBackfill block with its
+// defaults.
+func TestConfigExample_ResolvedPathBackfill_188(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ResolvedPathBackfill == nil {
+		t.Fatal("config.example.json has no resolvedPathBackfill block")
+	}
+	if on, b, p := cfg.ResolvedPathBackfillSettings(); !on || b != defaultResolvedPathBackfillBatchSize || p != defaultResolvedPathBackfillPause {
+		t.Fatalf("example settings = %v, %d, %s; want the defaults", on, b, p)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(raw["resolvedPathBackfill"], &block); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"disabled", "batchSize", "pauseMs", "_comment"} {
+		if _, ok := block[k]; !ok {
+			t.Errorf("resolvedPathBackfill in config.example.json lacks %q", k)
 		}
 	}
 }
