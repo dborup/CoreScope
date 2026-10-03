@@ -32,6 +32,7 @@ run test-packet-filter.js
 run test-packet-filter-ux.js
 run test-issue-121-clear-filters-selection.js
 run test-clear-filters.js
+run test-issue-147-packets-url-detail-params.js
 run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
