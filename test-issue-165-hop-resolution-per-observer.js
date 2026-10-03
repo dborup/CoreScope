@@ -8,6 +8,8 @@
  * loaded into a vm sandbox (no copies of production code):
  *
  *   1. Missing observer coordinates must not become a (0, 0) anchor.
+ *   2. A hop the server resolved (resolved_path) keeps the server's node; the
+ *      client heuristic must not overwrite it under the same observer.
  *
  * Run: node test-issue-165-hop-resolution-per-observer.js
  */
@@ -19,6 +21,7 @@ const vm = require('vm');
 let passed = 0, failed = 0;
 const pending = [];
 function test(name, fn) { pending.push({ name, fn }); }
+function section(title) { pending.push({ title }); }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
 function escapeHtml(s) {
@@ -68,7 +71,7 @@ const FAR = { public_key: 'efbf0eeacc', name: 'FAR-AWAY', role: 'repeater', lat:
 const NULL_ISLAND = { public_key: 'ef00000011', name: 'NULL-ISLAND', role: 'repeater', lat: 0.2, lon: 0.2 };
 const NEAR = { public_key: 'ef0069c0aa', name: 'NEAR-ONE', role: 'repeater', lat: 51.08, lon: 3.78 };
 
-console.log('\n=== #165 defect 1: missing observer coordinates are not (0, 0) ===');
+section('#165 defect 1: missing observer coordinates are not (0, 0)');
 
 test('observerPosition() returns [null, null] for null coordinates', async () => {
   const T = loadPackets([FAR, NULL_ISLAND], [{ id: 'OBS-NULL', lat: null, lon: null }]);
@@ -109,8 +112,62 @@ test('an observer without coordinates does not steer the candidate choice', asyn
     'with no anchor the resolver keeps candidate order (FAR-AWAY); got ' + (entry && entry.name));
 });
 
+section('#165 defect 2: the server resolved_path wins over the heuristic');
+
+// OBS-A sits next to NEAR-ONE, so the client heuristic picks NEAR-ONE for
+// "ef". The server, which has the neighbour graph, says FAR-AWAY. "c1" is
+// left unresolved by the server (null) and has two candidates: that one is
+// genuinely uncertain and must still be shown as such.
+const C1A = { public_key: 'c1aaaa0001', name: 'C1-ALPHA', role: 'repeater', lat: 51.10, lon: 3.70 };
+const C1B = { public_key: 'c1bbbb0002', name: 'C1-BRAVO', role: 'repeater', lat: 51.12, lon: 3.72 };
+const OBS_A = { id: 'OBS-A', lat: 51.21, lon: 3.44 };
+function serverPacket() {
+  return { id: 1, hash: 'h1', observer_id: 'OBS-A', path_json: '["ef","c1"]',
+    resolved_path: JSON.stringify([FAR.public_key, null]) };
+}
+
+test('initial load: cacheResolvedPaths + resolveHopsForPackets keep the server node', async () => {
+  const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
+  // Precondition: without the server's answer the heuristic picks NEAR-ONE,
+  // so this test can only pass if the server's entry is the one kept.
+  const T0 = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
+  await T0.resolveHops(['ef'], 'OBS-A');
+  assert(T0._hopCacheGet('ef:OBS-A').name === 'NEAR-ONE', 'precondition: heuristic picks NEAR-ONE');
+
+  const pkt = serverPacket();
+  await T.cacheResolvedPaths([pkt]);
+  await T.resolveHopsForPackets([pkt]);
+  const entry = T._hopCacheGet('ef:OBS-A');
+  assert(entry && entry.pubkey === FAR.public_key,
+    'ef:OBS-A must be the server node FAR-AWAY; got ' + (entry && entry.name));
+  const html = T.renderPath(['ef'], 'OBS-A');
+  assert(/FAR-AWAY/.test(html) && !/NEAR-ONE/.test(html), 'the rendered hop shows FAR-AWAY: ' + html);
+});
+
+test('a hop the server left unresolved is still resolved and flagged', async () => {
+  const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
+  const pkt = serverPacket();
+  await T.cacheResolvedPaths([pkt]);
+  await T.resolveHopsForPackets([pkt]);
+  const c1 = T._hopCacheGet('c1:OBS-A');
+  assert(c1 && c1.ambiguous, 'c1 (server null) is client-resolved and ambiguous');
+  const list = T.renderPath(['ef', 'c1'], 'OBS-A', { summary: true });
+  const m = list.match(/hop-path-warn[^>]*>[\s\S]*?<\/svg>(\d+)<\/span>/);
+  assert(m && m[1] === '1', 'the list summary counts exactly the one uncertain hop (c1); got ' + (m ? m[1] : 'no summary'));
+});
+
+test('incremental path: resolveIncomingHops keeps the server node too', async () => {
+  const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
+  await T.resolveHops(['00'], 'OBS-A'); // HopResolver ready, as after the initial load
+  await T.resolveIncomingHops([serverPacket()]);
+  const entry = T._hopCacheGet('ef:OBS-A');
+  assert(entry && entry.pubkey === FAR.public_key,
+    'ef:OBS-A must be the server node FAR-AWAY; got ' + (entry && entry.name));
+});
+
 (async () => {
   for (const t of pending) {
+    if (t.title) { console.log('\n=== ' + t.title.trim() + ' ==='); continue; }
     try { await t.fn(); passed++; console.log('  ✅ ' + t.name); }
     catch (e) { failed++; console.log('  ❌ ' + t.name + ': ' + e.message); }
   }
