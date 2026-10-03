@@ -280,6 +280,21 @@ test('the overflow pill counts hops only, not the summary indicator', async () =
     'expected one "+1" pill for the one clipped hop; got ' + JSON.stringify(appended.map(a => a.textContent)));
 });
 
+test('the +N popover lists the hops, not the summary indicator (upstream 2557894d)', async () => {
+  const T = loadPackets([FAR], []);
+  assert(typeof T._pathPopoverHtml === 'function', '_pathPopoverHtml is exposed');
+  const kid = (cls, html) => ({ classList: { contains: c => cls.split(' ').includes(c) }, outerHTML: html });
+  const host = { children: [
+    kid('hop-path-warn status-warn', '<span class="hop-path-warn status-warn">!2</span>'),
+    kid('hop hop-named', '<a class="hop hop-named">A</a>'), kid('arrow', '<span class="arrow">→</span>'),
+    kid('hop hop-named', '<a class="hop hop-named">B</a>'), kid('path-overflow-pill', '<span class="path-overflow-pill">+1</span>'),
+  ] };
+  const html = T._pathPopoverHtml(host);
+  assert(!/hop-path-warn/.test(html), 'the summary indicator is left out: ' + html);
+  assert(!/path-overflow-pill/.test(html), 'the pill is left out: ' + html);
+  assert(/>A</.test(html) && />B</.test(html) && /arrow/.test(html), 'hops and arrows are listed: ' + html);
+});
+
 (async () => {
   for (const t of pending) {
     if (t.title) { console.log('\n=== ' + t.title.trim() + ' ==='); continue; }

@@ -1210,9 +1210,10 @@
     const label = uncertain + ' of ' + filtered.length + ' hops have more than one candidate';
     // #165 — first, not last: the list's path cell clips overflow, and the
     // long paths that overflow are the ones the warning matters most for.
-    return '<span class="hop-path-warn status-warn" title="' + escapeHtml(label) +
+    const warn = '<span class="hop-path-warn status-warn" title="' + escapeHtml(label) +
       '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
-      uncertain + '</span>' + body;
+      uncertain + '</span>';
+    return warn + body;
   }
 
   let directPacketId = null;
@@ -2806,6 +2807,19 @@
     }
   }
 
+  // Popover body for a .path-hops host: clone all children except the pill
+  // and (#165, upstream 2557894d) the path's ambiguity summary, preserving
+  // rendered chips/arrows.
+  function _pathPopoverHtml(host) {
+    var inner = '<div class="path-popover-title">Full path (' + (host.children.length) + ' items)</div><div>';
+    var kids = Array.prototype.slice.call(host.children);
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].classList.contains('path-overflow-pill') || kids[i].classList.contains('hop-path-warn')) continue;
+      inner += kids[i].outerHTML;
+    }
+    return inner + '</div>';
+  }
+
   // Delegated click for path overflow pills — show popover of full path.
   function _wirePathOverflowPopover() {
     if (window.__pathOverflowWired) return;
@@ -2829,15 +2843,7 @@
       dismiss();
       var pop = document.createElement('div');
       pop.className = 'path-popover';
-      // Clone all children except the pill, preserving rendered chips/arrows.
-      var inner = '<div class="path-popover-title">Full path (' + (host.children.length) + ' items)</div><div>';
-      var kids = Array.prototype.slice.call(host.children);
-      for (var i = 0; i < kids.length; i++) {
-        if (kids[i].classList.contains('path-overflow-pill')) continue;
-        inner += kids[i].outerHTML;
-      }
-      inner += '</div>';
-      pop.innerHTML = inner;
+      pop.innerHTML = _pathPopoverHtml(host);
       document.body.appendChild(pop);
       var r = pill.getBoundingClientRect();
       // #1128 (Bug 2): position below by default, but flip ABOVE when there
@@ -4300,6 +4306,7 @@
       resolveIncomingHops,
       cacheResolvedPaths,
       _finalizePathOverflow,
+      _pathPopoverHtml,
       HOP_CACHE_MAX,
       _hopCacheGet: hopCacheGet,
       _hopCacheSize: function() { return hopNameCache.size; },

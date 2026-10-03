@@ -190,6 +190,14 @@ console.log('\n=== #2097: the list summarises, the detail pane does not ===');
     'the detail pane calls renderPath without summary, so it keeps per-hop badges');
   assert(/hop-path-warn/.test(src),
     'the summarised form emits a single per-path indicator');
+  // Upstream 2557894d: .path-hops clips at its edge. Trailing the hops, the
+  // indicator was what got clipped, so it leads the path, and the +N popover
+  // leaves it out of the hop list.
+  assert(/return warn \+ body;/.test(src),
+    'the indicator leads the path, so the edge clips hops, never the indicator');
+  const seg = (src.match(/function _pathPopoverHtml\(host\) \{[\s\S]*?\n  \}/) || [''])[0];
+  assert(/hop-path-warn/.test(seg),
+    'the +N popover leaves the indicator out of the hop list');
 }
 
 console.log('\n=== #2097: the observer position anchors the pick ===');
