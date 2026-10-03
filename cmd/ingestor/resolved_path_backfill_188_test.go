@@ -596,3 +596,35 @@ func TestConfigExample_ResolvedPathBackfill_188(t *testing.T) {
 		}
 	}
 }
+
+// If the warm-up build fails, no post-build graph is published, and the
+// first successful tick publishes it instead. Here the warm-up fails because
+// neighbor_edges is missing; the table comes back before the next tick.
+func TestNeighborEdgesBuilder_TickPublishesBuiltGraphAfterFailedWarmUp_188(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	if _, err := store.db.Exec(`ALTER TABLE neighbor_edges RENAME TO neighbor_edges_away`); err != nil {
+		t.Fatal(err)
+	}
+	stop := store.StartNeighborEdgesBuilder(50 * time.Millisecond)
+	defer stop()
+	if built, _ := store.neighborGraph.buildState(); built {
+		t.Fatal("a failed warm-up build published a post-build graph")
+	}
+	if _, err := store.db.Exec(`ALTER TABLE neighbor_edges_away RENAME TO neighbor_edges`); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if built, _ := store.neighborGraph.buildState(); built {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no tick published a post-build graph")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !store.neighborGraph.load().IsAdjacent(obs188, c3a) {
+		t.Fatal("the published graph lacks the persisted edge")
+	}
+}
