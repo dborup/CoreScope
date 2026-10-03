@@ -130,7 +130,6 @@ test('test-all.sh registers itself through this test', () => {
 // test past the check below: register it instead.
 const KNOWN_UNREGISTERED = {
   // red unit tests (stale after intended UI changes)
-  'test-fluid-scaffolding.js': 'red: reads only the first :root block',
   'test-hop-resolver-affinity.js': 'red: fixture geometry wrong since #874',
   'test-issue-1470-card-bg-contrast.js': 'red: indexOf matches a style.css comment',
   'test-issue-1646-compare-polish.js': 'red: font-size parser reads a comment',
