@@ -2146,29 +2146,21 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WARN CountFloodAdvertsForNode(%s): %v", pubkey, err)
 	}
 
-	// Every node gets an approximate position cross-check via the same
-	// neighbor-centroid estimate (and geo-sanity filter) that backs
-	// Position-Fix Coverage Gaps, View Path's approx markers, and
-	// Suspicious GPS Positions. For a node with no real fix this FILLS IN
-	// a position (see the "real fix" convention note below); for a node
-	// that already reports one, this lets the detail page show both side
-	// by side, and a distance between them, so a node flagged by
-	// Suspicious GPS Positions can be visually cross-checked here instead
-	// of just trusting the flag.
-	//
-	// Same "real fix" convention as
-	// GetNodesForAreaAnalytics/GetNodesForScopeAdoption: lat/lon both
-	// present AND non-zero -- some nodes advertise (0,0) as a "no GPS lock
-	// yet" sentinel rather than omitting lat/lon entirely, and without this
-	// check those nodes never got an estimate (nor a good real map either,
-	// since (0,0) plots off the coast of Africa).
+	// Compute a neighbor-only cross-check without consulting the target's
+	// reported position. Unlike legacy single-neighbor path proxies, node
+	// detail emits coordinates only for a supported multi-neighbor group.
+	// Metadata makes abstention and unknown edge freshness explicit. Neither
+	// neighbor spread nor distance from the reported fix is an error bound.
 	nodeLat, hasLat := node["lat"].(float64)
 	nodeLon, hasLon := node["lon"].(float64)
-	hasRealFix := hasLat && hasLon && !(nodeLat == 0 && nodeLon == 0)
-	if _, lat, lon, contributorCount, _, ok := s.db.nearestPositionedNeighbor(pubkey, EstimateMaxEdgeKm); ok {
+	hasRealFix := hasLat && hasLon && validNeighborPosition(nodeLat, nodeLon)
+	estimate := s.db.neighborPositionEstimate(pubkey, EstimateMaxEdgeKm, time.Now()).Estimate
+	node["neighbor_estimate"] = estimate
+	if estimate.Status == "estimated" {
+		lat, lon := *estimate.Lat, *estimate.Lon
 		node["estimated_lat"] = lat
 		node["estimated_lon"] = lon
-		node["estimated_contributor_count"] = contributorCount
+		node["estimated_contributor_count"] = estimate.ContributorCount
 		if hasRealFix {
 			node["estimated_distance_km"] = haversineKm(nodeLat, nodeLon, lat, lon)
 		}

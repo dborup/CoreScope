@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // This file holds additive, read-only bulk-query helpers for Ping Scores
@@ -108,10 +109,11 @@ func (db *DB) observationFingerprintsBulk(txIDs []int64) (map[int64]observationF
 // previously-undefined ordering; it does not preserve any order that was
 // ever guaranteed before.
 //
-// A pubkey with no result (no edges, or no positioned contributor within
-// maxEdgeKm of the strongest one) is simply absent from the returned map,
-// exactly matching nearestPositionedNeighbor's ok=false -- not a
-// zero-value entry.
+// Candidates feed the same capped-count/freshness cluster estimator as the
+// single-item wrapper, using one clock snapshot for the entire batch. A pubkey
+// with no result (no valid positioned evidence, or competing groups) is absent
+// from the map, matching nearestPositionedNeighbor's ok=false. A clear singleton
+// remains a legacy approximate path proxy, not a supported node position.
 //
 // The candidate-position lookup inside each chunk (nodes matching the up-
 // to-20-per-target neighbor pubkeys the ranked query returned) has its own
@@ -119,6 +121,7 @@ func (db *DB) observationFingerprintsBulk(txIDs []int64) (map[int64]observationF
 // single 499-target chunk can produce up to 499*20 = 9980 distinct
 // candidate pubkeys, far past the 499-bind-parameter budget for one query.
 func (db *DB) nearestPositionedNeighborsBulk(pubkeys []string, maxEdgeKm float64) (map[string]neighborEstimate, error) {
+	now := time.Now()
 	result := make(map[string]neighborEstimate, len(pubkeys))
 	if len(pubkeys) == 0 {
 		return result, nil
@@ -143,7 +146,7 @@ func (db *DB) nearestPositionedNeighborsBulk(pubkeys []string, maxEdgeKm float64
 		if end > len(unique) {
 			end = len(unique)
 		}
-		if err := db.nearestPositionedNeighborsChunk(unique[i:end], maxEdgeKm, result); err != nil {
+		if err := db.nearestPositionedNeighborsChunk(unique[i:end], maxEdgeKm, result, now); err != nil {
 			return nil, err
 		}
 	}
@@ -152,7 +155,7 @@ func (db *DB) nearestPositionedNeighborsBulk(pubkeys []string, maxEdgeKm float64
 
 // nearestPositionedNeighborsChunk resolves one chunk (<=499 targets) of
 // nearestPositionedNeighborsBulk, writing results directly into result.
-func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float64, result map[string]neighborEstimate) error {
+func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float64, result map[string]neighborEstimate, now time.Time) error {
 	placeholders := make([]byte, 0, len(targets)*4)
 	args := make([]interface{}, len(targets))
 	for i, pk := range targets {
@@ -167,22 +170,18 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 		edges AS (
 			SELECT t.pk AS target,
 				CASE WHEN ne.node_a = t.pk THEN ne.node_b ELSE ne.node_a END AS neighbor,
-				ne.count AS count
+				ne.count AS count, ne.last_seen AS last_seen
 			FROM neighbor_edges ne
 			JOIN targets t ON (ne.node_a = t.pk OR ne.node_b = t.pk)
 		),
 		ranked AS (
-			SELECT target, neighbor, count,
+			SELECT target, neighbor, count, last_seen,
 				ROW_NUMBER() OVER (PARTITION BY target ORDER BY count DESC, neighbor ASC) AS rn
 			FROM edges
 		)
-		SELECT target, neighbor, count FROM ranked WHERE rn <= 20 ORDER BY target, rn`
+		SELECT target, neighbor, count, last_seen FROM ranked WHERE rn <= 20 ORDER BY target, rn`
 
-	type candidate struct {
-		pubkey string
-		weight float64
-	}
-	candidatesByTarget := make(map[string][]candidate, len(targets))
+	candidatesByTarget := make(map[string][]neighborPositionCandidate, len(targets))
 
 	rows, err := db.conn.Query(query, args...)
 	if err != nil {
@@ -193,10 +192,11 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 		for rows.Next() {
 			var target, neighbor string
 			var count float64
-			if err := rows.Scan(&target, &neighbor, &count); err != nil {
+			var lastSeen sql.NullString
+			if err := rows.Scan(&target, &neighbor, &count, &lastSeen); err != nil {
 				return fmt.Errorf("neighbor estimate bulk scan: %w", err)
 			}
-			candidatesByTarget[target] = append(candidatesByTarget[target], candidate{pubkey: neighbor, weight: count})
+			candidatesByTarget[target] = append(candidatesByTarget[target], neighborPositionCandidate{Pubkey: neighbor, Count: count, LastSeen: parseTimestamp(lastSeen.String)})
 		}
 		return rows.Err()
 	}()
@@ -210,7 +210,7 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 	candidatePubkeySet := make(map[string]bool)
 	for _, cs := range candidatesByTarget {
 		for _, c := range cs {
-			candidatePubkeySet[c.pubkey] = true
+			candidatePubkeySet[c.Pubkey] = true
 		}
 	}
 	candidatePubkeys := make([]string, 0, len(candidatePubkeySet))
@@ -245,7 +245,7 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 			nodeArgs[j] = pk
 		}
 		nodeRows, err := db.conn.Query(
-			"SELECT public_key, name, lat, lon FROM nodes WHERE public_key IN ("+string(nodePlaceholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0", nodeArgs...)
+			"SELECT public_key, name, lat, lon FROM nodes WHERE public_key IN ("+string(nodePlaceholders)+") AND lat IS NOT NULL AND lon IS NOT NULL AND NOT (lat = 0 AND lon = 0)", nodeArgs...)
 		if err != nil {
 			return fmt.Errorf("neighbor estimate bulk node query: %w", err)
 		}
@@ -267,64 +267,18 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 		}
 	}
 
-	type weighted struct {
-		posInfo
-		weight float64
-	}
 	for target, candidates := range candidatesByTarget {
-		var contributors []weighted
+		var contributors []neighborPositionCandidate
 		for _, c := range candidates {
-			p, found := posByPK[c.pubkey]
+			p, found := posByPK[c.Pubkey]
 			if !found {
 				continue
 			}
-			w := c.weight
-			if w <= 0 {
-				w = 1
-			}
-			contributors = append(contributors, weighted{posInfo: p, weight: w})
+			c.Name, c.Lat, c.Lon = p.name, p.lat, p.lon
+			contributors = append(contributors, c)
 		}
-		if len(contributors) == 0 {
-			continue
-		}
-
-		// candidates is count-DESC ordered (via the ORDER BY target, rn
-		// clause above, mirroring rn's PARTITION BY target ORDER BY count
-		// DESC), so the first resolved contributor is the strongest --
-		// both the geo-sanity anchor below and the returned name.
-		if maxEdgeKm > 0 && len(contributors) > 1 {
-			anchor := contributors[0]
-			filtered := contributors[:1:1] // anchor always survives (distance to itself is 0)
-			for _, c := range contributors[1:] {
-				if haversineKm(anchor.lat, anchor.lon, c.lat, c.lon) <= maxEdgeKm {
-					filtered = append(filtered, c)
-				}
-			}
-			contributors = filtered
-		}
-
-		var sumLat, sumLon, sumWeight float64
-		var strongestName string
-		for _, c := range contributors {
-			sumLat += c.lat * c.weight
-			sumLon += c.lon * c.weight
-			sumWeight += c.weight
-			if strongestName == "" {
-				strongestName = c.name
-			}
-		}
-		var spread float64
-		for i := 0; i < len(contributors); i++ {
-			for j := i + 1; j < len(contributors); j++ {
-				d := haversineKm(contributors[i].lat, contributors[i].lon, contributors[j].lat, contributors[j].lon)
-				if d > spread {
-					spread = d
-				}
-			}
-		}
-		result[target] = neighborEstimate{
-			Name: strongestName, Lat: sumLat / sumWeight, Lon: sumLon / sumWeight,
-			ContributorCount: len(contributors), SpreadKm: spread,
+		if estimate := estimateNeighborPosition(contributors, maxEdgeKm, now); estimate.LegacyOK {
+			result[target] = estimate.Legacy
 		}
 	}
 	return nil

@@ -226,6 +226,25 @@ func openAPIRef(name string) *openAPISchema {
 	return &openAPISchema{Ref: "#/components/schemas/" + name}
 }
 
+func neighborPositionEstimateSchema() *openAPISchema {
+	return &openAPISchema{
+		Type:        "object",
+		Description: "Node-detail evidence status from a bounded neighbor-cluster heuristic, not triangulation or a calibrated confidence probability. Positions are emitted only for an unambiguous group with at least two contributors. Initial parameters: 30 km seed radius, count capped at 20 with logarithmic weight in [1,2], seven-day age half-life, unknown freshness weight 0.25, minimum effective weight 10% of the strongest candidate, competing disjoint group support ratio 0.8. The relative weight floor is not an absolute freshness guarantee. Candidate selection still uses the top 20 lifetime edge counts before position filtering. Persisted edges have no source-independence or prefix-confidence metadata.",
+		Properties: map[string]*openAPISchema{
+			"status":                  {Type: "string", Enum: []string{"estimated", "insufficient", "ambiguous", "unavailable"}},
+			"method":                  {Type: "string", Enum: []string{"neighbor_cluster_v1"}},
+			"contributor_count":       {Type: "integer", Description: "Distinct positioned neighbors contributing to the selected group; zero when no group was selected."},
+			"candidate_count":         {Type: "integer", Description: "Valid distinct positioned candidates considered, at most 20."},
+			"spread_km":               {Type: "number", Description: "Maximum distance between selected neighbors, not a positional error radius or uncertainty bound."},
+			"lat":                     {Type: "number", Description: "Estimated latitude, present only when status is estimated."},
+			"lon":                     {Type: "number", Description: "Estimated longitude, present only when status is estimated."},
+			"newest_seen":             {Type: "string", Description: "Newest known contributor edge timestamp, RFC3339 UTC; omitted when all timestamps are unknown."},
+			"oldest_seen":             {Type: "string", Description: "Oldest known contributor edge timestamp, RFC3339 UTC; omitted when all timestamps are unknown."},
+			"unknown_freshness_count": {Type: "integer", Description: "Selected contributors whose edge timestamp is absent, invalid, or more than five minutes in the future."},
+		},
+	}
+}
+
 // nodeAdvertRouteSchemas documents the #2073 node-detail advert route fields
 // (port of upstream Kpa-clawbot/CoreScope#2073).
 func nodeAdvertRouteSchemas() map[string]*openAPISchema {
@@ -309,7 +328,8 @@ func componentSchemas() map[string]interface{} {
 				"role":                        str("Node role (e.g. repeater, room, client, sensor)."),
 				"lat":                         map[string]interface{}{"type": "number", "nullable": true},
 				"lon":                         map[string]interface{}{"type": "number", "nullable": true},
-				"estimated_lat":               map[string]interface{}{"type": "number", "nullable": true, "description": "Node detail endpoint only: an approximate position from the same neighbor-centroid estimate (geo-sanity-filtered via Config.NeighborMaxEdgeKm) that backs Position-Fix Coverage Gaps, View Path's approx markers, and Suspicious GPS Positions. Present whenever the node has a trustworthy neighbor cluster to estimate from, regardless of whether it also has a real (lat/lon) fix -- lets the detail page show both side by side to visually cross-check a node flagged by Suspicious GPS Positions."},
+				"neighbor_estimate":           neighborPositionEstimateSchema(),
+				"estimated_lat":               &openAPISchema{Type: "number", Description: "Node detail only: legacy alias of neighbor_estimate.lat, present only when status is estimated (at least two contributors, no similarly supported disjoint competing group). A heuristic cross-check, not a measured position. The 30 km seed radius is not an error bound."},
 				"estimated_lon":               map[string]interface{}{"type": "number", "nullable": true, "description": "Paired with estimated_lat."},
 				"estimated_contributor_count": map[string]interface{}{"type": "integer", "description": "Number of positioned neighbors the estimated_lat/estimated_lon centroid was averaged from. Present only alongside estimated_lat/estimated_lon."},
 				"estimated_distance_km":       map[string]interface{}{"type": "number", "description": "Distance between the node's own reported lat/lon and estimated_lat/estimated_lon. Present only when the node has BOTH a real fix and an estimate -- absent when either is missing."},
