@@ -799,16 +799,30 @@
     cb.style.display = active ? '' : 'none';
   }
 
-  // The only writer of #/packets... (#147). Filter params come from
-  // buildPacketsQuery; the packet-detail params it does not own are added
-  // after them: ?obs= (selected observation) while a detail subpath is open,
-  // and ?viewPath=1 only while its View Path modal is open on that same
-  // packet, so the URL keeps describing what is shown.
+  // The only writer of the packets list URL #/packets… in packets.js (#147).
+  // Filter params come from buildPacketsQuery; the packet-detail params it
+  // does not own are added after them: ?obs= (selected observation) while a
+  // detail subpath is open, and ?viewPath=1 while the View Path modal is open
+  // on that packet (cold-loaded link or the detail's View Path button), so
+  // the URL keeps describing what is shown.
+  // It writes only while the packets list is the route (#167): not on the
+  // standalone #/packet/<id> page (see updatePacketPageUrl) and not after a
+  // detail teardown that runs once another page is shown.
+  // Other writers of this hash, outside packets.js:
+  // - packet-path-map.js dropViewPathParam(): removes only viewPath=1 when
+  //   the modal closes; obs and the filter params stay verbatim.
+  // - touch-gestures.js row-action overlay: navigates (location.hash) to
+  //   #/packets?hash=<hash> or #/packets/<hash>, a new list query or a new
+  //   selection. That re-runs init(), whose cold-load call here writes the
+  //   restored filters back; the previous packet's ?obs= does not apply.
   // detail (optional): { subpath: '/<hash|id>' or '', obs: id or null } when
   // the caller changes the selection; without it the current subpath and
   // ?obs= are kept (filter changes, Clear Filters, cold load).
   function updatePacketsUrl(detail) {
     var cur = String(location.hash || '');
+    // The packets list route: #/packets, #/packets/…, #/packets?…, or no
+    // route at all (the router's default page).
+    if (cur !== '' && cur !== '#/' && !/^#\/packets(?:[/?]|$)/.test(cur)) return;
     var qIdx = cur.indexOf('?');
     var curParams = qIdx < 0 ? [] : cur.slice(qIdx + 1).split('&');
     var m = cur.match(/^#\/packets(\/[^?]*)?/);
@@ -824,11 +838,23 @@
       } else {
         keep = curParams.filter(function (p) { return /^obs=./.test(p); });
       }
-      if (subpath === curSubpath && curParams.indexOf('viewPath=1') !== -1 && document.getElementById('packetPathModal')) keep.push('viewPath=1');
+      var pathModal = document.getElementById('packetPathModal');
+      if (pathModal && subpath === '/' + pathModal.dataset.hash) keep.push('viewPath=1');
     }
     if (keep.length) query += (query ? '&' : '?') + keep.join('&');
     history.replaceState(null, '', '#/packets' + subpath + query);
     updateClearFiltersVisibility();
+  }
+
+  // The standalone page's URL, #/packet/<id>?obs=<id> (#167): the router
+  // strips the query before resolving the route, and the page reads ?obs=
+  // back on load. Writes only on that route; other params stay verbatim.
+  function updatePacketPageUrl(obs) {
+    var m = String(location.hash || '').match(/^(#\/packet\/[^?]+)(?:\?(.*))?$/);
+    if (!m) return;
+    var params = (m[2] ? m[2].split('&') : []).filter(function (p) { return p && !/^obs=/.test(p); });
+    if (obs) params.push('obs=' + encodeURIComponent(obs));
+    history.replaceState(null, '', m[1] + (params.length ? '?' + params.join('&') : ''));
   }
 
   let filtersBuilt = false;
@@ -3570,8 +3596,11 @@
       row.addEventListener('click', () => {
         const obsId = row.dataset.obsId;
         selectedObservationId = obsId;
-        // Update URL hash to reflect selected observation (deep linking)
+        // Update URL hash to reflect selected observation (deep linking).
+        // This detail renders on the packets list and on the standalone
+        // #/packet/<id> page; each writer only writes on its own route.
         updatePacketsUrl({ subpath: '/' + (pkt.hash || pkt.id), obs: obsId });
+        updatePacketPageUrl(obsId);
         renderDetail(panel, data, obsId);
       });
     });
@@ -3585,6 +3614,9 @@
     if (viewPathBtn) {
       viewPathBtn.addEventListener('click', () => {
         if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);
+        // The modal is in the DOM now: add ?viewPath=1 like a shared link
+        // has it, so a reload reopens it (#167). Closing drops it again.
+        updatePacketsUrl();
       });
     }
 
@@ -4193,7 +4225,10 @@
         container.innerHTML = `<div style="margin-bottom:16px"><a href="#/packets" style="color:var(--link-color);text-decoration:none">← Back to packets</a></div>`;
         const detail = document.createElement('div');
         container.appendChild(detail);
-        await renderDetail(detail, data);
+        // #/packet/<id>?obs=<id> selects that observation (#167); without
+        // it the first one, not one left over from the packets list.
+        selectedObservationId = getHashParams().get('obs');
+        await renderDetail(detail, data, selectedObservationId);
         app.innerHTML = '';
         app.appendChild(container);
       } catch (e) {
