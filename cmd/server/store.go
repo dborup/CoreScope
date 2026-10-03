@@ -925,11 +925,14 @@ func (s *PacketStore) Load() error {
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
-	// Relay-hop fallback inputs. When resolved_path is empty (always, on
-	// live, since #1287 the ingestor persists relay data as neighbor_edges
-	// instead) we re-resolve relay hops from path_json using the prefix
-	// map. PR #1643 R1 munger #1: cold load resolves ONLY when the prefix
-	// is unique (no affinity tiebreak against ≤168h-old observations,
+	// Relay-hop inputs. The ingestor persists observations.resolved_path
+	// (#1547) with its conservative resolver (#1560), so a persisted value
+	// feeds indexResolvedPathHops. It is NULL when the ingestor could not
+	// resolve the path (a large share of observations, see #184); then we
+	// re-resolve relay hops from path_json using the prefix map, into
+	// byNode only (indexObservationRelayHops). PR #1643 R1 munger #1: cold
+	// load resolves ONLY when the prefix is unique (no affinity tiebreak
+	// against ≤168h-old observations,
 	// which would silently mis-attribute hops). Fetched BEFORE opening
 	// the rows cursor below: getCachedNodesAndPM issues its own DB query,
 	// which would deadlock against the still-open cursor on a single-
@@ -1226,11 +1229,12 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
-	// Relay-hop fallback inputs. observations.resolved_path is NULL on
-	// every live deployment (since #1287 the ingestor persists relay data
-	// as aggregate neighbor_edges, not per-observation resolved_path), so
-	// for this background-loaded older window we re-resolve relay hops
-	// from the persisted path_json using the prefix map. PR #1643 R1
+	// Relay-hop inputs. A persisted observations.resolved_path (#1547,
+	// conservative resolver #1560) feeds indexResolvedPathHops; where it is
+	// NULL (the ingestor could not resolve the path, a large share of
+	// observations, see #184) this background-loaded older window
+	// re-resolves relay hops from the persisted path_json using the prefix
+	// map, into byNode only (indexObservationRelayHops). PR #1643 R1
 	// munger #1: cold load resolves ONLY when the prefix is unique
 	// (affinity-tier resolution against ≤168h-old observations would
 	// silently mis-attribute hops). Fetched BEFORE opening the rows
