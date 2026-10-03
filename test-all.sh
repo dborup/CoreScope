@@ -140,6 +140,52 @@ run test-map-scope-filter.js
 run test-issue-117-ws-watchdog.js
 run test-issue-111-drawer-version.js
 
+# Previously run only by the JS unit step in deploy.yml (#174)
+run test-packet-filter-time.js
+run test-confidence-indicator.js
+run test-1659-analytics-warmup.js
+run test-channels-merge-1498-unit.js
+run test-issue-1518-home-url.js
+run test-live-region-filter.js
+run test-issue-1136-observer-iata-map.js
+run test-channel-issue-1101.js
+run test-observer-iata-1188.js
+run test-pull-to-reconnect-1091.js
+run test-issue-1279-p2-code-filter.js
+run test-area-filter.js
+run test-issue-1293-marker-shapes.js
+run test-issue-1356-map-a11y.js
+run test-issue-1360-pill-letter-count.js
+run test-issue-1364-pill-no-clamp.js
+run test-issue-1375-scope-stats-fetch.js
+run test-issue-1361-cb-presets.js
+run test-issue-1407-cb-preset-propagation.js
+run test-issue-1412-customizer-no-override.js
+run test-issue-1846-observers-width.js
+run test-issue-1562-observers-summary.js
+run test-issue-1509-nav-active-bg.js
+run test-issue-1509-detect-preset.js
+run test-live.js
+run test-coverage-gate.js
+run test-node-reach-coverage.js
+run test-reach-rank.js
+run test-issue-1107-live-layout.js
+run test-issue-1619-feed-detail-card-draggable.js
+run test-xss-escape-sinks.js
+run test-preflight-xss-gate.js
+run test-issue-1648-m4-emoji-scan.js
+run test-issue-1753-copy-url-slash.js
+run test-issue-1668-m3-typography.js
+run test-mqtt-status-panel.js
+run test-issue-1697-mqtt-mobile-e2e.js
+run test-warmup-banner.js
+run test-issue-1633-hide-1byte-hops.js
+run test-issue-1668-m4-per-route.js
+run test-a11y-axe-1668-selftest.js
+run test-a11y-1716-rf-range-btn-active.js
+run test-issue-1705-subpath-contrast.js
+run test-a11y-axe-routes-coverage.js
+
 # test-all.sh self-test (#174)
 run test-test-all.js
 
