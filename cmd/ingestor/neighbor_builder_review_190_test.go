@@ -157,7 +157,7 @@ func TestNeighborEdgesBuilder_ObserverEdgeOnlyForFloodRoutes_190(t *testing.T) {
 		path  string
 	}{
 		{routeFlood188, `["c355"]`},          // flood: observer heard c3a
-		{routeTransportFlood188, `["c355"]`}, // transport flood: same edge
+		{routeTransportFlood188, `["a111"]`}, // transport flood: observer heard a1a
 		{routeDirect188, `["c366"]`},         // DIRECT: c3b is the route's far end
 		{3, `["a111","b233"]`},               // TRANSPORT_DIRECT: b2a is the far end
 	} {
@@ -178,8 +178,10 @@ func TestNeighborEdgesBuilder_ObserverEdgeOnlyForFloodRoutes_190(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !g.IsAdjacent(obs188, c3a) {
-		t.Fatal("no observer<->last-hop edge from the flood observations")
+	for _, pk := range []string{c3a, a1a} {
+		if !g.IsAdjacent(obs188, pk) {
+			t.Errorf("no observer<->%s edge from a flood observation", pk[:4])
+		}
 	}
 	for _, pk := range []string{c3b, b2a} {
 		if g.IsAdjacent(obs188, pk) {
