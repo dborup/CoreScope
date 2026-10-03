@@ -761,7 +761,19 @@
   if (isMobile && savedTimeWindowMin > 180) savedTimeWindowMin = 15;
   let totalCount = 0;
   let expandedHashes = new Set();
-  let hopNameCache = {};
+  // #165 — resolved hop names, keyed by hop and by hop:observer. The
+  // per-observer keys grow with every observer that hears a prefix, so the
+  // cache is bounded: past HOP_CACHE_MAX the oldest entries are evicted
+  // (Map keeps insertion order), and destroy() clears it.
+  const HOP_CACHE_MAX = 20000;
+  let hopNameCache = new Map();
+  function hopCacheHas(k) { return hopNameCache.has(k); }
+  function hopCacheGet(k) { return hopNameCache.get(k); }
+  function hopCacheSet(k, v) {
+    hopNameCache.delete(k); // a rewrite counts as new, for eviction order
+    hopNameCache.set(k, v);
+    if (hopNameCache.size > HOP_CACHE_MAX) hopNameCache.delete(hopNameCache.keys().next().value);
+  }
   let _tableSortInstance = null;
   let _packetSortColumn = null;
   let _packetSortDirection = 'desc';
@@ -1032,16 +1044,16 @@
   // is how a repeater 126 km outside the observer's region ended up displayed
   // as a certainty.
   async function resolveHops(hops, observerId) {
-    const unknown = hops.filter(h => !(hopCacheKey(h, observerId) in hopNameCache));
+    const unknown = hops.filter(h => !hopCacheHas(hopCacheKey(h, observerId)));
     if (!unknown.length) return;
     await ensureHopResolver();
     const [obsLat, obsLon] = observerPosition(observerId);
     const resolved = HopResolver.resolve(unknown, null, null, obsLat, obsLon, observerId) || {};
     for (const h of unknown) {
       const entry = resolved[h] || null;
-      hopNameCache[hopCacheKey(h, observerId)] = entry;
+      hopCacheSet(hopCacheKey(h, observerId), entry);
       // Bare key as a fallback for any render that has no observer in hand.
-      if (!(h in hopNameCache)) hopNameCache[h] = entry;
+      if (!hopCacheHas(h)) hopCacheSet(h, entry);
     }
   }
 
@@ -1092,8 +1104,8 @@
     if (!rp) return;
     const resolved = HopResolver.resolveFromServer(getParsedPath(p), rp);
     for (const h of Object.keys(resolved)) {
-      hopNameCache[h] = resolved[h];
-      if (p.observer_id) hopNameCache[hopCacheKey(h, String(p.observer_id))] = resolved[h];
+      hopCacheSet(h, resolved[h]);
+      if (p.observer_id) hopCacheSet(hopCacheKey(h, String(p.observer_id)), resolved[h]);
     }
   }
 
@@ -1106,7 +1118,7 @@
     for (const p of pkts) {
       if (window.HopResolver && HopResolver.ready()) cacheServerResolvedPath(p);
       const obs = p.observer_id ? String(p.observer_id) : undefined;
-      try { if (getParsedPath(p).some(h => !(hopCacheKey(h, obs) in hopNameCache))) missing = true; } catch {}
+      try { if (getParsedPath(p).some(h => !hopCacheHas(hopCacheKey(h, obs)))) missing = true; } catch {}
     }
     return missing ? resolveHopsForPackets(pkts) : Promise.resolve();
   }
@@ -1114,7 +1126,7 @@
   function renderHop(h, observerId, opts) {
     // Use per-packet cache key if observer context available (ambiguous hops differ by region)
     const cacheKey = hopCacheKey(h, observerId);
-    const entry = hopNameCache[cacheKey] || hopNameCache[h];
+    const entry = hopCacheGet(cacheKey) || hopCacheGet(h);
     return HopDisplay.renderHop(h, entry, Object.assign({ hexMode: showHexHashes }, opts || {}));
   }
 
@@ -1139,7 +1151,7 @@
 
     let uncertain = 0;
     for (const h of filtered) {
-      const entry = hopNameCache[hopCacheKey(h, observerId)] || hopNameCache[h];
+      const entry = hopCacheGet(hopCacheKey(h, observerId)) || hopCacheGet(h);
       if (entry && entry.ambiguous) uncertain++;
     }
     if (!uncertain) return body;
@@ -1490,7 +1502,7 @@
     filtersBuilt = false;
     delete filters.node;
     expandedHashes = new Set();
-    hopNameCache = {};
+    hopNameCache = new Map();
     totalCount = 0;
     observers = [];
     observerMap = new Map();
@@ -3434,8 +3446,8 @@
         }
         if (resolved) {
           for (const [k, v] of Object.entries(resolved)) {
-            hopNameCache[k] = v;
-            if (pkt.observer_id) hopNameCache[k + ':' + pkt.observer_id] = v;
+            hopCacheSet(k, v);
+            if (pkt.observer_id) hopCacheSet(hopCacheKey(k, String(pkt.observer_id)), v);
           }
         }
       } catch {}
@@ -3806,7 +3818,7 @@
       for (let i = 0; i < pathHops.length; i++) {
         const hopOff = off + i * hashSize;
         const hex = String(pathHops[i] || '').toUpperCase();
-        const hopHtml = HopDisplay.renderHop(hex, hopNameCache[hex]);
+        const hopHtml = HopDisplay.renderHop(hex, hopCacheGet(hex));
         const label = `Hop ${i} — ${hopHtml}`;
         rows += fieldRow(hopOff, label, hex, '');
       }
@@ -4236,8 +4248,9 @@
       resolveHopsForPackets,
       resolveIncomingHops,
       cacheResolvedPaths,
-      _hopCacheGet: function(k) { return hopNameCache[k]; },
-      _hopCacheSize: function() { return Object.keys(hopNameCache).length; },
+      HOP_CACHE_MAX,
+      _hopCacheGet: hopCacheGet,
+      _hopCacheSize: function() { return hopNameCache.size; },
       _destroy: destroy,
       _getRowCount,
       _cumulativeRowOffsets,

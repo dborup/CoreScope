@@ -128,7 +128,8 @@ console.log('\n=== #2097: packets.js never resolves a hop without its observer =
     'multi-packet call sites group their hops by observer');
 
   // renderHop reads the per-observer key; something has to write it.
-  assert(/hopNameCache\[hopCacheKey\(h, observerId\)\] = entry/.test(src),
+  // #165: the cache is a bounded Map written through hopCacheSet().
+  assert(/hopCacheSet\(hopCacheKey\(h, observerId\), entry\)/.test(src),
     'resolveHops writes the per-observer cache key that renderHop reads');
 }
 
