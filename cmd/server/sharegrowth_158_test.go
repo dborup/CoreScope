@@ -238,6 +238,140 @@ func TestLiveIngestIndexesLikeLoad_NullResolvedPath_158(t *testing.T) {
 	}
 }
 
+// insertShareObsPath inserts one observation with an explicit path and
+// persisted resolved_path (rp == "" writes NULL), the shape of an
+// observation another observer reports later through different relays.
+func insertShareObsPath(t testing.TB, db *DB, i, obsIdx int, path, rp string, ts time.Time) {
+	t.Helper()
+	var rpArg any
+	if rp != "" {
+		rpArg = rp
+	}
+	exec158(t, db, `INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp, resolved_path)
+		VALUES (?, ?, 5, -90, ?, ?, ?)`, i+1, obsIdx, path, ts.Unix(), rpArg)
+}
+
+// A late observation from ANOTHER observer can carry a persisted
+// resolved_path with relays the first observation did not have. The first
+// observation of the late-observation case above reuses the same path, so
+// there is nothing new to index; here the late observation brings a relay
+// (B2 for even transmissions, A1 for odd ones) that only its resolved_path
+// names. IngestNewObservations must index it exactly as Load does, or live
+// traffic share drifts from the loaded one (mutant: ignore resolved_path
+// and index "" instead).
+func TestTrafficShareLiveMatchesLoad_LateObserverNewRelay_158(t *testing.T) {
+	base := time.Now().UTC().Add(-30 * time.Minute)
+	first := func(t *testing.T, db *DB, i int) {
+		insertShareObs(t, db, i, 1, base.Add(time.Duration(i*10+1)*time.Second))
+	}
+	late := func(t *testing.T, db *DB, i int) {
+		// Observer 2 heard it through A1 and B2: whichever relay the first
+		// observation lacked is new here.
+		insertShareObsPath(t, db, i, 2, `["A1","B2"]`, `["`+shareA1+`","`+shareB2+`"]`, base.Add(time.Duration(i*10+2)*time.Second))
+	}
+
+	loadDB := setupTestDB(t)
+	defer loadDB.conn.Close()
+	seedShareGrowth(t, loadDB)
+	for i := 0; i < shareTxs; i++ {
+		insertShareTx(t, loadDB, i, base.Add(time.Duration(i)*time.Second))
+		first(t, loadDB, i)
+		late(t, loadDB, i)
+	}
+	loaded := loadedStore158(t, loadDB)
+	loadShares, loadSum := shareSnapshot(loaded)
+	if math.Abs(loadShares[shareA1]-1.0) > 1e-9 || math.Abs(loadShares[shareB2]-1.0) > 1e-9 {
+		t.Fatalf("fixture: after load A1=%v B2=%v, want 1.0 each (every tx passes both through some observation)", loadShares[shareA1], loadShares[shareB2])
+	}
+
+	db := setupTestDB(t)
+	defer db.conn.Close()
+	seedShareGrowth(t, db)
+	store := loadedStore158(t, db)
+	for i := 0; i < shareTxs; i++ {
+		insertShareTx(t, db, i, base.Add(time.Duration(i)*time.Second))
+		first(t, db, i)
+	}
+	store.IngestNewFromDB(0, 1000)
+	since := maxObsID158(t, db)
+	for i := 0; i < shareTxs; i++ {
+		late(t, db, i)
+	}
+	store.IngestNewObservations(since, 1000)
+
+	got, sum := shareSnapshot(store)
+	for _, pk := range shareKeys {
+		if math.Abs(got[pk]-loadShares[pk]) > 1e-9 {
+			t.Errorf("traffic share of %s… = %.3f live, %.3f after load of the same rows", pk[:6], got[pk], loadShares[pk])
+		}
+	}
+	if math.Abs(sum-loadSum) > 1e-9 {
+		t.Errorf("sum of traffic shares = %.3f live, %.3f after load of the same rows", sum, loadSum)
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	for _, pk := range shareKeys {
+		if g, w := len(store.byPathHop[pk]), len(loaded.byPathHop[pk]); g != w {
+			t.Errorf("byPathHop[%s…] holds %d transmissions live, %d after load", pk[:6], g, w)
+		}
+	}
+}
+
+// The same NULL case as TestLiveIngestIndexesLikeLoad_NullResolvedPath_158,
+// for a late observation of a transmission already in the store: an
+// observation the ingestor could not resolve must be re-resolved on unique
+// prefixes into byNode only, never into byPathHop, exactly as Load does.
+func TestLateObservationIndexesLikeLoad_NullResolvedPath_158(t *testing.T) {
+	base := time.Now().UTC().Add(-30 * time.Minute)
+	type view struct{ pathHopA1, pathHopB2, byNodeA1, byNodeB2 bool }
+	snapshot := func(store *PacketStore) view {
+		store.mu.RLock()
+		defer store.mu.RUnlock()
+		tx := store.byTxID[1]
+		if tx == nil {
+			t.Fatal("tx 1 not in store")
+		}
+		return view{
+			pathHopA1: countTxInLocked(store.byPathHop[shareA1], tx) > 0,
+			pathHopB2: countTxInLocked(store.byPathHop[shareB2], tx) > 0,
+			byNodeA1:  countTxInLocked(store.byNode[shareA1], tx) > 0,
+			byNodeB2:  countTxInLocked(store.byNode[shareB2], tx) > 0,
+		}
+	}
+	// First observation: resolved by the ingestor (A1). Late observation
+	// from the other observer: NULL, path through the unique B2.
+	insertFirst := func(t *testing.T, db *DB) {
+		insertShareTx(t, db, 0, base)
+		insertShareObsPath(t, db, 0, 1, `["A1"]`, `["`+shareA1+`"]`, base.Add(time.Second))
+	}
+	insertLate := func(t *testing.T, db *DB) {
+		insertShareObsPath(t, db, 0, 2, `["B2"]`, "", base.Add(2*time.Second))
+	}
+
+	loadDB := setupTestDB(t)
+	defer loadDB.conn.Close()
+	seedShareGrowth(t, loadDB)
+	insertFirst(t, loadDB)
+	insertLate(t, loadDB)
+	want := snapshot(loadedStore158(t, loadDB))
+	if want != (view{pathHopA1: true, byNodeA1: true, byNodeB2: true}) {
+		t.Fatalf("fixture: after load %+v, want byPathHop only under A1 and byNode under A1 and B2", want)
+	}
+
+	liveDB := setupTestDB(t)
+	defer liveDB.conn.Close()
+	seedShareGrowth(t, liveDB)
+	live := loadedStore158(t, liveDB)
+	insertFirst(t, liveDB)
+	live.IngestNewFromDB(0, 100)
+	since := maxObsID158(t, liveDB)
+	insertLate(t, liveDB)
+	live.IngestNewObservations(since, 100)
+	if got := snapshot(live); got != want {
+		t.Errorf("late observation indexed %+v, load of the same rows %+v", got, want)
+	}
+}
+
 // BenchmarkIngestNewFromDB_158 drives the real live ingest (SQL scan +
 // index + broadcast build) of a batch of 20 new transmissions with 11
 // observations each, as the ingestor writes them (resolved_path set).
