@@ -2,6 +2,8 @@
  *
  * #179: the Prefix Tool fetched `/analytics/hash-sizes&region=…` (no `?`)
  *       whenever a region or area filter was active, and got the SPA HTML.
+ * #183: leaving #/analytics and coming back without ?tab= marked Overview
+ *       active but rendered the tab selected before leaving.
  *
  * Runs the REAL app.js api() and the REAL analytics page in one vm with a
  * fake fetch and a small fake DOM whose tab buttons come from the markup
@@ -25,6 +27,7 @@ const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) =
 
 // Real responses of the CI fixture server for the shared endpoints (#172).
 const REAL = JSON.parse(fs.readFileSync('test-fixtures/analytics-tabs-172.json', 'utf8'));
+const MARKERS = { overview: /Total Transmissions/, topology: /Per-Observer Reachability/ };
 
 function fakeClassList(initial) {
   const s = new Set(initial);
@@ -209,6 +212,39 @@ function pageEnv() {
     const env2 = pageEnv();
     await env2.mount('#/analytics?tab=distance');
     assert.ok(env2.fetchLog.includes('/api/analytics/distance'), env2.fetchLog.join(', '));
+  });
+
+  console.log('\n=== #183: tab state across leave and return ===');
+
+  await test('select Topology, leave, return without ?tab=: button and content are Overview', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics');
+    await env.clickTab('topology');
+    assert.ok(MARKERS.topology.test(env.content()), 'Topology did not render on click');
+    env.destroy();
+    await env.mount('#/analytics');
+    assert.deepStrictEqual(env.activeTabs(), ['overview'], 'active button');
+    assert.ok(MARKERS.overview.test(env.content()), 'content is not Overview: ' + env.content().slice(0, 200));
+    assert.ok(!MARKERS.topology.test(env.content()), 'content is still Topology');
+  });
+
+  await test('select Topology, leave, return with ?tab=topology: button and content are Topology', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics');
+    await env.clickTab('topology');
+    env.destroy();
+    await env.mount('#/analytics?tab=topology');
+    assert.deepStrictEqual(env.activeTabs(), ['topology'], 'active button');
+    assert.ok(MARKERS.topology.test(env.content()), 'content is not Topology: ' + env.content().slice(0, 200));
+  });
+
+  await test('select Topology, then (without destroy) mount with an unknown ?tab=: Overview', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics');
+    await env.clickTab('topology');
+    await env.mount('#/analytics?tab=no-such-tab');
+    assert.deepStrictEqual(env.activeTabs(), ['overview'], 'active button');
+    assert.ok(MARKERS.overview.test(env.content()), 'content is not Overview: ' + env.content().slice(0, 200));
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');

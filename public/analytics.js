@@ -253,15 +253,14 @@
     // Deep-link: #/analytics?tab=collisions&window=7d
     const hashParams = location.hash.split('?')[1] || '';
     const _ap = new URLSearchParams(hashParams);
+    // Every mount starts from the URL, falling back to Overview: the tab
+    // selected before leaving the page must not survive into this mount (#183).
     const urlTab = _ap.get('tab');
-    if (urlTab) {
-      const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
-      if (tabBtn) {
-        analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        tabBtn.classList.add('active');
-        _currentTab = urlTab;
-      }
-    }
+    const urlTabBtn = urlTab && analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
+    _currentTab = urlTabBtn ? urlTab : 'overview';
+    const activeBtn = urlTabBtn || analyticsTabs.querySelector('[data-tab="overview"]');
+    analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    if (activeBtn) activeBtn.classList.add('active');
     // #749 — restore time window from URL.
     const urlWindow = _ap.get('window');
     if (urlWindow) {
