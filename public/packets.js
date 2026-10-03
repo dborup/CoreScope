@@ -765,7 +765,7 @@
   // per-observer keys grow with every observer that hears a prefix, so the
   // cache is bounded: past HOP_CACHE_MAX the oldest entries are evicted
   // (Map keeps insertion order), and destroy() clears it.
-  const HOP_CACHE_MAX = 20000;
+  const HOP_CACHE_MAX = 50000;
   let hopNameCache = new Map();
   function hopCacheHas(k) { return hopNameCache.has(k); }
   function hopCacheGet(k) { return hopNameCache.get(k); }
