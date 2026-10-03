@@ -385,6 +385,14 @@ type PacketStore struct {
 	usefulnessAxesRecompMu      sync.Mutex
 	usefulnessAxesRecompStarted bool
 
+	// pathHopResolved records, per transmission, the hashes of the resolved
+	// pubkey keys addResolvedPubkeysToPathHopIndex has put it under in
+	// byPathHop, so further observations through the same relays do not
+	// append it again. At most one hash per relay key per live transmission:
+	// evictStaleInternal deletes evicted entries and retainResolvedPathHops
+	// drops anything no longer in s.packets.
+	pathHopResolved map[*StoreTx][]uint64
+
 	// Precomputed distinct advert pubkey count (refcounted for eviction correctness).
 	// Updated incrementally during Load/Ingest/Evict — avoids JSON parsing in GetPerfStoreStats.
 	advertPubkeys map[string]int // pubkey → number of advert packets referencing it
@@ -706,6 +714,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		spIndex:              make(map[string]int, 4096),
 		spTxIndex:            make(map[string][]*StoreTx, 4096),
 		advertPubkeys:        make(map[string]int),
+		pathHopResolved:      make(map[*StoreTx][]uint64),
 		clockSkew:            NewClockSkewEngine(),
 		useResolvedPathIndex: true,
 		areaNodeCache:        make(map[string]map[string]bool),
@@ -1789,6 +1798,10 @@ func pathLen(pathJSON string) int {
 //     empties); the helper is a no-op when pks is empty.
 //   - hopsSeen is a reusable scratch map; addResolvedPubkeysToPathHopIndex
 //     clear()s it on entry.
+//   - Safe to call once per observation: every index it feeds is
+//     idempotent per (transmission, pubkey) — byNode via nodeHashes, the
+//     resolved index via its forward-list check, byPathHop via
+//     pathHopResolved.
 func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen map[string]bool) {
 	if len(pks) == 0 {
 		return
@@ -4246,18 +4259,26 @@ func (s *PacketStore) buildPathHopIndex() {
 // after s.byPathHop has been rebuilt from raw hops.
 func (s *PacketStore) retainResolvedPathHops(prev map[string][]*StoreTx) int {
 	if len(prev) == 0 {
+		// No resolved entries anywhere, so nothing is recorded as indexed.
+		clear(s.pathHopResolved)
 		return 0
 	}
 	live := make(map[*StoreTx]struct{}, len(s.packets))
 	for _, tx := range s.packets {
 		live[tx] = struct{}{}
 	}
+	// Keep the per-transmission record in step with what is carried over
+	// below: entries of transmissions that are gone are not.
+	for tx := range s.pathHopResolved {
+		if _, ok := live[tx]; !ok {
+			delete(s.pathHopResolved, tx)
+		}
+	}
 
 	// Reused across keys (cleared per key) so a large index does not churn
 	// one map allocation per key. Guards against both a key that the raw
-	// pass already produced and repeated appends of the same tx in prev —
-	// indexResolvedPathHops dedups within a call, not across the several
-	// observations of one transmission.
+	// pass already produced and repeated appends of the same tx in prev
+	// (an index built before the resolved append became idempotent).
 	seen := make(map[*StoreTx]struct{}, 16)
 	retained := 0
 	for key, list := range prev {
@@ -4399,11 +4420,20 @@ func removeTxFromPathHopIndex(idx map[string][]*StoreTx, tx *StoreTx) {
 }
 
 // addResolvedPubkeysToPathHopIndex appends tx into byPathHop under each
-// resolved pubkey key that isn't already present as a raw hop. Mutating
-// byPathHop here MUST be paired with invalidateRelayStatsCache so the
-// cached batch relay stats don't go stale for up to relayStatsCacheTTL.
-// hopsSeen is a scratch map the caller can reuse across calls (it will
-// be cleared on entry).
+// resolved pubkey key that isn't already present as a raw hop and that tx
+// has not been appended under before. It is called once per observation,
+// and the observations of one transmission usually resolve to the same
+// relays: the per-transmission record in s.pathHopResolved keeps the index
+// at one entry per (key, transmission), so per-key counts are distinct
+// transmissions. Mutating byPathHop here MUST be paired with
+// invalidateRelayStatsCache so the cached batch relay stats don't go stale
+// for up to relayStatsCacheTTL. hopsSeen is a scratch map the caller can
+// reuse across calls (it will be cleared on entry).
+//
+// Cost per call: one hash per pubkey and a scan of the transmission's own
+// record (one hash per distinct relay key, a handful); a repeat observation
+// through known relays allocates nothing and leaves byPathHop, and so the
+// relay-stats cache, untouched.
 //
 // Must be called with s.mu held.
 func (s *PacketStore) addResolvedPubkeysToPathHopIndex(tx *StoreTx, pubkeys []string, hopsSeen map[string]bool) bool {
@@ -4414,19 +4444,44 @@ func (s *PacketStore) addResolvedPubkeysToPathHopIndex(tx *StoreTx, pubkeys []st
 	for _, hop := range txGetParsedPath(tx) {
 		hopsSeen[strings.ToLower(hop)] = true
 	}
-	mutated := false
+	if s.pathHopResolved == nil {
+		s.pathHopResolved = make(map[*StoreTx][]uint64)
+	}
+	indexed := s.pathHopResolved[tx]
+	before := len(indexed)
 	for _, pk := range pubkeys {
-		if !hopsSeen[pk] {
-			hopsSeen[pk] = true
-			s.byPathHop[pk] = append(s.byPathHop[pk], tx)
-			mutated = true
+		if hopsSeen[pk] {
+			continue
 		}
+		hopsSeen[pk] = true
+		h := pathHopKeyHash(pk)
+		if slices.Contains(indexed, h) {
+			continue
+		}
+		indexed = append(indexed, h)
+		s.byPathHop[pk] = append(s.byPathHop[pk], tx)
 	}
+	if len(indexed) == before {
+		return false
+	}
+	s.pathHopResolved[tx] = indexed
 	// Mutating byPathHop invalidates the batch relay-stats cache (#1164).
-	if mutated {
-		s.invalidateRelayStatsCache()
+	s.invalidateRelayStatsCache()
+	return true
+}
+
+// pathHopKeyHash is 64-bit FNV-1a over a byPathHop key, without the
+// allocations of hash/fnv. It identifies a key within one transmission's
+// pathHopResolved record only: a collision would need two distinct relay
+// pubkeys of the same transmission to hash alike, and would at worst leave
+// that transmission out of one bucket — it can never inflate a count.
+func pathHopKeyHash(key string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= 1099511628211
 	}
-	return mutated
+	return h
 }
 
 // invalidateRelayStatsCache drops the cached batch relay-stats result so
@@ -4938,6 +4993,9 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	for _, tx := range evicting {
 		delete(s.byHash, tx.Hash)
 		delete(s.byTxID, tx.ID)
+		// Its record of indexed resolved keys goes with it, so the record
+		// stays bounded by the live transmissions.
+		delete(s.pathHopResolved, tx)
 		evictedTxIDs[tx.ID] = struct{}{}
 		evictedBytes += tx.accountedBytes
 
