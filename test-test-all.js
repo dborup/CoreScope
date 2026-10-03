@@ -140,7 +140,6 @@ const KNOWN_UNREGISTERED = {
   'test-issue-1470-card-bg-contrast.js': 'red: indexOf matches a style.css comment',
   'test-issue-1646-compare-polish.js': 'red: font-size parser reads a comment',
   'test-packets.js': 'red: 13 emoji assertions after the Phosphor migration',
-  'test-panel-corner.js': 'red: sandbox does not load payload-labels.js (#1799)',
   'test-perf-disk-io-1120.js': 'red: ⚠️ is #ph-warning; anomaly detector reworked (#1593)',
   // need something CI's unit job does not have
   'test-marker-outline-weight.js': 'needs @playwright/test (not a dependency) and a server',
