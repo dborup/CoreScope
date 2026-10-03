@@ -1099,14 +1099,16 @@
 
   // Incremental path (WS/poll): pre-populate from server-side resolved_path,
   // then fall back to the client resolver for the remaining hops.
+  // #165 — "already resolved" means resolved for THIS packet's observer. A
+  // bare-key check let a second observer reuse the first one's pick.
   function resolveIncomingHops(pkts) {
-    const newHops = new Set();
+    let missing = false;
     for (const p of pkts) {
-      const hops = getParsedPath(p);
       if (window.HopResolver && HopResolver.ready()) cacheServerResolvedPath(p);
-      try { hops.forEach(h => { if (!(h in hopNameCache)) newHops.add(h); }); } catch {}
+      const obs = p.observer_id ? String(p.observer_id) : undefined;
+      try { if (getParsedPath(p).some(h => !(hopCacheKey(h, obs) in hopNameCache))) missing = true; } catch {}
     }
-    return newHops.size ? resolveHopsForPackets(pkts) : Promise.resolve();
+    return missing ? resolveHopsForPackets(pkts) : Promise.resolve();
   }
 
   function renderHop(h, observerId, opts) {
