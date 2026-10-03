@@ -68,6 +68,18 @@
   var ANALYTICS_WARMUP_MAX_MS = 120000;
   var _loadRetryTimer = null;
   var _loadGen = 0;
+  // #172: the tabs that render from that load's _analyticsData. Until it
+  // has data, they show the load's status instead (a click during the
+  // warm-up threw a TypeError), and the status is written only while one
+  // of them is shown, never over a tab that fetches its own data.
+  var LOAD_TABS = new Set(['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions']);
+  var LOADING_HTML = '<div class="text-center text-muted" style="padding:40px">Loading analytics…</div>';
+  var _loadStatusHtml = LOADING_HTML;
+  function _showLoadStatus(html) {
+    _loadStatusHtml = html;
+    var el = LOAD_TABS.has(_currentTab) && document.getElementById('analyticsContent');
+    if (el) el.innerHTML = html;
+  }
   function _cancelLoadRetry() {
     _loadGen++;
     if (_loadRetryTimer) { clearTimeout(_loadRetryTimer); _loadRetryTimer = null; }
@@ -187,7 +199,7 @@
           </div>
         </div>
         <div id="analyticsContent" class="analytics-content" aria-live="polite">
-          <div class="text-center text-muted" style="padding:40px">Loading analytics…</div>
+          ${LOADING_HTML}
         </div>
       </div>`;
 
@@ -319,7 +331,7 @@
   async function loadAnalytics(startedAt) {
     _cancelLoadRetry();
     const gen = _loadGen;
-    if (startedAt === undefined) startedAt = Date.now();
+    if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
     try {
       _analyticsData = {};
       const rqs = RegionFilter.regionQueryString(); // "&region=..." or ""
@@ -355,20 +367,18 @@
       renderTab(_currentTab);
     } catch (e) {
       if (gen !== _loadGen) return;
-      const el = document.getElementById('analyticsContent');
       const ms = _retryAfterDelayMs(e);
       if (e && e.status === 503 && Date.now() - startedAt + ms <= ANALYTICS_WARMUP_MAX_MS) {
-        if (el) el.innerHTML = '<div class="text-center text-muted" role="status" aria-live="polite" style="padding:40px">' +
+        _showLoadStatus('<div class="text-center text-muted" role="status" aria-live="polite" style="padding:40px">' +
           'Analytics are still loading on the server after a restart.' +
-          '<div style="font-size:12px;margin-top:8px">Retrying in ' + Math.round(ms / 1000) + 's.</div></div>';
+          '<div style="font-size:12px;margin-top:8px">Retrying in ' + Math.round(ms / 1000) + 's.</div></div>');
         _loadRetryTimer = setTimeout(function () {
           _loadRetryTimer = null;
           if (gen === _loadGen) loadAnalytics(startedAt);
         }, ms);
         return;
       }
-      if (el) el.innerHTML =
-        `<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${esc(e && e.message)}</div>`;
+      _showLoadStatus(`<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${esc(e && e.message)}</div>`);
     }
   }
 
@@ -389,6 +399,7 @@
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
       case 'rf': renderRF(el, d.rfData); break;
