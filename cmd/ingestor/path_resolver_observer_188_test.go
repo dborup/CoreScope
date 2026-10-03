@@ -319,3 +319,41 @@ func TestInsertTransmission_ObserverAnchorResolvesLastHop_188(t *testing.T) {
 	}
 	wantPath188(t, unmarshalResolvedPathLocal(rp.String), "", c3a)
 }
+
+// PR #190 review, finding 4: an observer cannot hear its own transmission,
+// so in a flood path it reports it is never the last hop. Both chains must
+// leave that hop nil rather than name the observer. obs188 is the only node
+// with the 1-byte prefix "0b".
+func TestObserverAnchor_ObserverIsNeverItsOwnLastHop_188(t *testing.T) {
+	idx := idx188(allNodes188...)
+	g := graph188([2]string{obs188, c3a})
+
+	// The unique prefix names the observer: the forward chain alone would
+	// resolve it.
+	got := resolveObservationPath([]string{"0b"}, "", obs188, routeFlood188, g, idx)
+	wantPath188(t, got, "")
+	got = resolveObservationPath([]string{"0B"}, "", strings.ToUpper(obs188), routeTransportFlood188, g, idx)
+	wantPath188(t, got, "")
+
+	// The backward walk must not anchor hop 0 on the observer named as the
+	// last hop either.
+	got = resolveObservationPath([]string{"c3", "0b"}, "", obs188, routeFlood188, g, idx)
+	wantPath188(t, got, "", "")
+
+	// DIRECT routes are unchanged: there the observer is the next hop, at
+	// the front of the remaining route (firmware Mesh.cpp:89).
+	got = resolveObservationPath([]string{"0b"}, "", obs188, routeDirect188, g, idx)
+	wantPath188(t, got, obs188)
+}
+
+// The exclusion is for the last hop only. An observer logs every packet it
+// receives before de-duplication (firmware Dispatcher.cpp logRx before
+// processRecvPacket), so it can report the echo of a flood it forwarded
+// itself, with its own hash earlier in the path.
+func TestObserverAnchor_ObserverMayBeAnEarlierHop_188(t *testing.T) {
+	obsTwin := "0b77000000000000000000000000000000000000000000000000000000000077" // shares "0b" with obs188
+	idx := idx188(append([]string{obsTwin}, allNodes188...)...)
+	g := graph188([2]string{obs188, c3a})
+	got := resolveObservationPath([]string{"0b", "c3"}, "", obs188, routeFlood188, g, idx)
+	wantPath188(t, got, obs188, c3a)
+}
