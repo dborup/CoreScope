@@ -131,3 +131,69 @@ func TestResolvedPathBackfill_WaitsWhileEdgeBuildCannotCatchUp_190(t *testing.T)
 		t.Fatal("a row was resolved on an incomplete graph")
 	}
 }
+
+// PR #190, second review (P2-2): the observer <-> last-hop edge holds only
+// for flood routes. A DIRECT path is the remaining planned route: each
+// forwarder matches itself at the front and strips itself
+// (firmware Mesh.cpp:89, removeSelfFromPath :334-342), and only flood
+// forwarders append their hash (routeRecvPacket :346-350). So the last hop
+// of a DIRECT path is the destination end of the route, not the node the
+// observer heard.
+func TestNeighborEdgesBuilder_ObserverEdgeOnlyForFloodRoutes_190(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	clearEdges188(t, store)
+	for _, pk := range []string{a1a, b2a} {
+		if _, err := store.db.Exec(`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater')`, pk, pk[:4]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var obsIdx int64
+	if err := store.db.QueryRow(`SELECT rowid FROM observers WHERE id = ?`, strings.ToUpper(obs188)).Scan(&obsIdx); err != nil {
+		t.Fatal(err)
+	}
+	for i, o := range []struct {
+		route int
+		path  string
+	}{
+		{routeFlood188, `["c355"]`},          // flood: observer heard c3a
+		{routeTransportFlood188, `["c355"]`}, // transport flood: same edge
+		{routeDirect188, `["c366"]`},         // DIRECT: c3b is the route's far end
+		{3, `["a111","b233"]`},               // TRANSPORT_DIRECT: b2a is the far end
+	} {
+		res, err := store.db.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json) VALUES ('00', ?, '2026-06-01T00:00:00Z', ?, 5, '{}')`,
+			fmt.Sprintf("h190-route-%d", i), o.route)
+		if err != nil {
+			t.Fatal(err)
+		}
+		txID, _ := res.LastInsertId()
+		if _, err := store.db.Exec(`INSERT INTO observations (transmission_id, observer_idx, path_json, timestamp) VALUES (?, ?, ?, ?)`, txID, obsIdx, o.path, ts190+int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.buildAndPersistNeighborEdges(); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadNeighborGraph(store.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.IsAdjacent(obs188, c3a) {
+		t.Fatal("no observer<->last-hop edge from the flood observations")
+	}
+	for _, pk := range []string{c3b, b2a} {
+		if g.IsAdjacent(obs188, pk) {
+			t.Errorf("observer<->%s edge built from a DIRECT path", pk[:4])
+		}
+	}
+	// A DIRECT route's consecutive hops are still neighbours.
+	if !g.IsAdjacent(a1a, b2a) {
+		t.Fatal("the interior edge of the DIRECT route is gone")
+	}
+
+	// The effect on the flood resolver: with only the flood edge, the
+	// ambiguous last hop "c3" of a flood path resolves to c3a. A false
+	// DIRECT edge to c3b would leave it nil.
+	got := resolveObservationPath([]string{"c3"}, "", obs188, routeFlood188, g, idx188(c3a, c3b, a1a, b2a))
+	wantPath188(t, got, c3a)
+}
