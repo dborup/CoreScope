@@ -1215,10 +1215,14 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// the ingestor now. Per #1560: use the context-aware resolver so
 	// 1-byte prefix collisions are disambiguated via NeighborGraph
 	// adjacency (anchored on from_pubkey for ADVERTs, previous hop
-	// otherwise). Empty resolved JSON → NULL via nilIfEmpty.
-	resolved := resolvePathWithContext(
+	// otherwise). Per #188: flood paths are also walked backwards from the
+	// observer, whose neighbour the last hop is. Empty resolved JSON → NULL
+	// via nilIfEmpty.
+	resolved := resolveObservationPath(
 		parsePathArray(data.PathJSON),
 		strings.ToLower(data.FromPubkey),
+		data.ObserverID,
+		data.RouteType,
 		s.neighborGraph.load(),
 		s.prefixIdx.load(),
 	)
