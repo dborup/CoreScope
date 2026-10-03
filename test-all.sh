@@ -232,6 +232,7 @@ run test-perf-render-1258.js
 run test-pull-to-reconnect.js
 run test-rx-coverage-config-race.js
 run test-slideover-1056-rowsel-strict.js
+run test-map-clustering.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js

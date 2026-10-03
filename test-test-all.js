@@ -139,7 +139,6 @@ const KNOWN_UNREGISTERED = {
   'test-hop-resolver-affinity.js': 'red: fixture geometry wrong since #874',
   'test-issue-1470-card-bg-contrast.js': 'red: indexOf matches a style.css comment',
   'test-issue-1646-compare-polish.js': 'red: font-size parser reads a comment',
-  'test-map-clustering.js': 'red: pills read R3/C2/M1 since #1360',
   'test-packets.js': 'red: 13 emoji assertions after the Phosphor migration',
   'test-panel-corner.js': 'red: sandbox does not load payload-labels.js (#1799)',
   'test-perf-disk-io-1120.js': 'red: ⚠️ is #ph-warning; anomaly detector reworked (#1593)',
