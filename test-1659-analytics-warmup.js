@@ -20,10 +20,13 @@ const assert = require('assert');
 // Some tests intentionally cause api() to throw; the inflight tracker
 // inside app.js may surface that as an unhandled rejection a tick later
 // even after the test has caught it. Swallow them — they're expected
-// for the "cap retries" test path.
+// for the "cap retries" test path. Any other unhandled rejection (e.g. a
+// TypeError from an analytics tab rendered without data, #172) is kept
+// so the test that caused it can fail on it.
+const unexpectedRejections = [];
 process.on('unhandledRejection', (e) => {
   if (e && /API \d+/.test(e.message || '')) return;
-  throw e;
+  unexpectedRejections.push(e);
 });
 
 let passed = 0, failed = 0;
@@ -34,7 +37,7 @@ function test(name, fn) {
     .catch(e => { failed++; console.log('  ❌ ' + name + ': ' + (e && e.message || e)); });
 }
 
-function makeCtx(fetchImpl) {
+function makeCtx(fetchImpl, clock) {
   const ctx = {
     console, Date, Math, Promise, Error, isFinite, parseInt, JSON,
     performance: { now: () => 0 },
@@ -46,6 +49,8 @@ function makeCtx(fetchImpl) {
     clearInterval: () => {},
     Map, Set,
   };
+  // #172: with a fake clock, backoff sleeps only run when it advances.
+  if (clock) { ctx.setTimeout = clock.setTimeout; ctx.clearTimeout = clock.clearTimeout; }
   vm.createContext(ctx);
   // Provide the no-op fetch('/api/config/cache') hit that app.js makes
   // on module load by returning a thenable that ignores.
@@ -101,13 +106,16 @@ const WARM_CHAN = { activeChannels: 3, decryptable: 1 };
 
 function fakeEl(id) {
   let html = '', dataWrites = 0;
+  const listeners = {};
   return {
     id, value: '', style: {}, dataset: {}, parentElement: null,
     get innerHTML() { return html; },
     set innerHTML(v) { html = String(v); if (/Total Transmissions/.test(html)) dataWrites++; },
     dataWrites: () => dataWrites,
     classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
-    addEventListener() {}, removeEventListener() {},
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); }, removeEventListener() {},
+    dispatch(type, ev) { for (const fn of listeners[type] || []) fn(ev); },
+    contains: () => true,
     querySelector: () => null, querySelectorAll: () => [],
     appendChild: (c) => c, insertBefore: (c) => c, setAttribute() {}, getAttribute: () => null,
   };
@@ -115,8 +123,11 @@ function fakeEl(id) {
 
 // The analytics page on a server whose rf/topology/channels answer 503 +
 // Retry-After: 5 until warmMs on the fake clock, each response after
-// latencyMs (0: at once).
-function pageEnv(warmMs, latencyMs) {
+// latencyMs (0: at once). opts.status and opts.retryAfter replace the
+// 503 and its Retry-After value.
+function pageEnv(warmMs, latencyMs, opts) {
+  const errStatus = (opts && opts.status) || 503;
+  const errRetryAfter = opts && 'retryAfter' in opts ? opts.retryAfter : '5';
   const clock = fakeClock();
   const els = {};
   const el = (id) => els[id] || (els[id] = fakeEl(id));
@@ -130,7 +141,7 @@ function pageEnv(warmMs, latencyMs) {
     fetchLog.push(url);
     if (latencyMs) await new Promise((r) => clock.setTimeout(r, latencyMs));
     if (/\/api\/analytics\/(rf|topology|channels)\b/.test(url) && clock.now() < warmMs) {
-      return respond(503, { error: 'analytics warming up', retry_after_s: 5 }, '5');
+      return respond(errStatus, { error: 'analytics warming up', retry_after_s: 5 }, errRetryAfter);
     }
     if (/\/api\/analytics\/rf\b/.test(url)) {
       return respond(200, Object.assign({}, WARM_RF, /region=CPH/.test(url) ? { totalTransmissions: 8765 } : {}));
@@ -174,6 +185,11 @@ function pageEnv(warmMs, latencyMs) {
   return {
     clock, el, page: pages.analytics,
     regionChanged: (r) => { region = r ? '&region=' + r : ''; regionCb(); },
+    // A click on the analytics tab button for `tab`, as the browser sends it.
+    clickTab: (tab) => {
+      const btn = { dataset: { tab }, classList: { add() {}, remove() {} }, setAttribute() {} };
+      el('analyticsTabs').dispatch('click', { target: { closest: () => btn } });
+    },
     analyticsFetches: () => fetchLog.filter((u) => /\/api\/analytics\/(rf|topology|channels)\b/.test(u)).length,
   };
 }
@@ -410,6 +426,160 @@ function pageEnv(warmMs, latencyMs) {
     assert.strictEqual(content.dataWrites(), 1, 'the CPH load did not render once: ' + content.dataWrites());
     assert.ok(/8,765|8765/.test(content.innerHTML), 'not the CPH data: ' + content.innerHTML.slice(0, 200));
   });
+
+  console.log('\n=== #172 r2: in-flight sharing respects retry503 ===');
+
+  // One request per path is shared while in flight, but a retry503:false
+  // caller (analytics.js) and a default caller want different promises:
+  // the first must see the 503 at once, the second must ride out the
+  // warm-up. rf answers 503 + Retry-After: 5 until 10 s on the fake clock.
+  function inflightEnv() {
+    const clock = fakeClock();
+    let rfFetches = 0;
+    const ctx = makeCtx(async (url) => {
+      if (!/analytics\/rf/.test(url || '')) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) };
+      }
+      rfFetches++;
+      if (clock.now() < 10000) {
+        return { ok: false, status: 503, headers: { get: (k) => (k.toLowerCase() === 'retry-after' ? '5' : null) }, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ totalPackets: 7 }) };
+    }, clock);
+    const track = (p) => {
+      const r = { settled: false, value: undefined, error: undefined };
+      p.then((v) => { r.settled = true; r.value = v; }, (e) => { r.settled = true; r.error = e; });
+      return r;
+    };
+    return { clock, ctx, track, rfFetches: () => rfFetches };
+  }
+
+  await test('a default caller does not join a retry503:false request and gets the data', async () => {
+    const env = inflightEnv();
+    const noRetry = env.track(env.ctx.api('/analytics/rf', { retry503: false }));
+    const dflt = env.track(env.ctx.api('/analytics/rf'));
+    await env.clock.advance(1000);
+    assert.ok(noRetry.settled && noRetry.error && noRetry.error.status === 503,
+      'the retry503:false caller did not get the 503 at once');
+    assert.ok(!dflt.settled, 'the default caller settled after 1 s: ' + (dflt.error ? dflt.error.message : JSON.stringify(dflt.value)));
+    await env.clock.advance(30000);
+    assert.ok(dflt.settled && !dflt.error, 'the default caller failed: ' + (dflt.error && dflt.error.message));
+    assert.deepStrictEqual(dflt.value, { totalPackets: 7 });
+  });
+
+  await test('a retry503:false caller does not join a retrying request and gets the 503 at once', async () => {
+    const env = inflightEnv();
+    const dflt = env.track(env.ctx.api('/analytics/rf'));
+    await env.clock.advance(100);                          // the default call is now sleeping on Retry-After
+    const noRetry = env.track(env.ctx.api('/analytics/rf', { retry503: false }));
+    await env.clock.advance(100);
+    assert.ok(noRetry.settled, 'the retry503:false caller is waiting on the retrying request');
+    assert.ok(noRetry.error && noRetry.error.status === 503, 'not a 503 error: ' + (noRetry.error && noRetry.error.message));
+    await env.clock.advance(30000);
+    assert.ok(dflt.settled && !dflt.error, 'the default caller failed: ' + (dflt.error && dflt.error.message));
+  });
+
+  await test('callers with the same retry503 still share one request', async () => {
+    const env = inflightEnv();
+    await env.clock.advance(10000);                        // warm: one 200
+    const a = env.ctx.api('/analytics/rf', { retry503: false });
+    const b = env.ctx.api('/analytics/rf', { retry503: false });
+    const c = env.ctx.api('/analytics/rf');
+    const d = env.ctx.api('/analytics/rf');
+    await env.clock.advance(100);
+    await Promise.all([a, b, c, d]);
+    assert.strictEqual(env.rfFetches(), 2, 'expected one fetch per retry503 value, got ' + env.rfFetches());
+  });
+
+  console.log('\n=== #172 r2: what the analytics page does with an error ===');
+
+  for (const status of [500, 404]) {
+    await test('a ' + status + ' shows the error at once and is not retried', async () => {
+      const env = pageEnv(Infinity, 0, { status, retryAfter: null });
+      env.page.init(env.el('app'));
+      const content = env.el('analyticsContent');
+      await env.clock.advance(1000);
+      assert.ok(/Failed to load/.test(content.innerHTML), 'no error after 1 s: ' + content.innerHTML.slice(0, 200));
+      assert.ok(!/still loading/i.test(content.innerHTML), 'a ' + status + ' is shown as "still loading"');
+      const fetches = env.analyticsFetches();
+      await env.clock.advance(130000);
+      assert.strictEqual(env.analyticsFetches(), fetches, 'a ' + status + ' was retried');
+      assert.strictEqual(env.clock.pending().length, 0, 'retry timers pending after a ' + status);
+    });
+  }
+
+  // The retry follows the server's Retry-After, clamped to 1..30 s, and the
+  // status line says so (role="status", not an alert).
+  for (const [ra, wantMs] of [['1', 1000], ['12', 12000], ['60', 30000], ['abc', 5000]]) {
+    await test('a 503 with Retry-After: ' + ra + ' retries after ' + wantMs / 1000 + ' s', async () => {
+      const env = pageEnv(Infinity, 0, { retryAfter: ra });
+      env.page.init(env.el('app'));
+      const content = env.el('analyticsContent');
+      await env.clock.advance(1);
+      const timers = env.clock.pending();
+      assert.strictEqual(timers.length, 1, timers.length + ' timers pending after the first 503');
+      assert.strictEqual(timers[0].at - env.clock.now(), wantMs, 'retry timer');
+      assert.ok(/role="status"/.test(content.innerHTML), 'the loading state is not role="status": ' + content.innerHTML.slice(0, 200));
+      assert.ok(!/role="alert"/.test(content.innerHTML), 'the loading state is an alert');
+      assert.ok(content.innerHTML.includes('Retrying in ' + wantMs / 1000 + 's'), 'status text: ' + content.innerHTML.slice(0, 300));
+      const fetches = env.analyticsFetches();
+      await env.clock.advance(wantMs - 1);
+      assert.strictEqual(env.analyticsFetches(), fetches, 'retried before ' + wantMs + ' ms');
+      await env.clock.advance(1);
+      assert.ok(env.analyticsFetches() > fetches, 'not retried at ' + wantMs + ' ms');
+    });
+  }
+
+  console.log('\n=== #172 r2: tab clicks while the analytics are still loading ===');
+
+  // These six tabs render from the shared load (_analyticsData). The other
+  // tabs fetch their own data and are covered by the browser check.
+  const DATA_TABS = ['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions'];
+  for (const tab of DATA_TABS) {
+    await test('clicking "' + tab + '" during the warm-up shows the loading state, then that tab\'s data', async () => {
+      const env = pageEnv(45000);
+      env.page.init(env.el('app'));
+      const content = env.el('analyticsContent');
+      await env.clock.advance(6000);
+      const before = unexpectedRejections.length;
+      env.clickTab(tab);
+      await env.clock.advance(100);
+      const errs = unexpectedRejections.splice(before);
+      assert.strictEqual(errs.length, 0, 'the click threw: ' + errs.map((e) => e && e.message).join('; '));
+      assert.ok(/still loading/i.test(content.innerHTML) && /role="status"/.test(content.innerHTML),
+        'no loading state after the click: ' + content.innerHTML.slice(0, 200));
+      await env.clock.advance(15000);                      // a retry while the tab is shown
+      assert.ok(/still loading/i.test(content.innerHTML), 'loading state lost on a retry: ' + content.innerHTML.slice(0, 200));
+      await env.clock.advance(40000);
+      const late = unexpectedRejections.splice(before);
+      assert.strictEqual(late.length, 0, 'rendering threw: ' + late.map((e) => e && e.message).join('; '));
+      assert.ok(!/still loading|Failed to load/i.test(content.innerHTML), 'not rendered after the warm-up: ' + content.innerHTML.slice(0, 200));
+      if (tab === 'overview') assert.ok(/Total Transmissions/.test(content.innerHTML), 'not the overview');
+      if (tab !== 'overview') assert.ok(!/Total Transmissions/.test(content.innerHTML), 'the overview was rendered instead of ' + tab);
+    });
+  }
+
+  await test('a tab that fetches its own data is not overwritten by the loading state', async () => {
+    const env = pageEnv(45000);
+    env.page.init(env.el('app'));
+    const content = env.el('analyticsContent');
+    await env.clock.advance(6000);
+    // Route patterns fetches its own data; a click makes it the current
+    // tab. What it renders in this fake DOM does not matter: a marker
+    // stands in for it, and the warm-up retries must leave it alone.
+    const before = unexpectedRejections.length;
+    env.clickTab('subpaths');
+    await env.clock.advance(100);
+    unexpectedRejections.splice(before);
+    content.innerHTML = '<div id="own-tab">own data</div>';
+    await env.clock.advance(20000);       // several 503 retries
+    assert.ok(/own-tab/.test(content.innerHTML), 'the loading state replaced the selected tab: ' + content.innerHTML.slice(0, 200));
+  });
+
+  if (unexpectedRejections.length) {
+    failed++;
+    console.log('  ❌ unexpected unhandled rejections: ' + unexpectedRejections.map((e) => e && e.message).join('; '));
+  }
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
   if (failed > 0) process.exit(1);
