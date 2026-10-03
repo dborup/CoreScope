@@ -1094,8 +1094,7 @@
               const isThis = h.pubkey && h.pubkey.toLowerCase() === currentPubkey;
               if (window.HopDisplay) {
                 const entry = { name: h.name, pubkey: h.pubkey, ambiguous: h.ambiguous, conflicts: h.conflicts, totalGlobal: h.totalGlobal, totalRegional: h.totalRegional, globalFallback: h.globalFallback, unreliable: h.unreliable };
-                const html = HopDisplay.renderHop(h.prefix, entry);
-                return isThis ? html.replace('class="', 'class="hop-current ') : html;
+                return HopDisplay.renderHop(h.prefix, entry, isThis ? { className: 'hop-current' } : undefined);
               }
               const name = escapeHtml(h.name || h.prefix);
               const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}"${isThis ? ' class="hop-current"' : ''}>${name}</a>` : `<span>${name}</span>`;

@@ -87,7 +87,9 @@ window.HopDisplay = (function() {
     const unreliableBadge = unreliable
       ? ' <button class="hop-unreliable-btn status-warn" aria-label="Unreliable name resolution" title="Unreliable name resolution — this hash\u2192name match is geographically inconsistent with the surrounding path hops. The repeater itself may be fine; this specific hop assignment is uncertain."><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg></button>'
       : '';
-    const warnBadge = conflictBadge + unreliableBadge;
+    // #165 (port of upstream 2099) — opts.badge === false renders the name without its badge, for the
+    // packets list, which summarises per path instead of per hop.
+    const warnBadge = opts.badge === false ? '' : (conflictBadge + unreliableBadge);
 
     const cls = [
       'hop',
@@ -95,12 +97,22 @@ window.HopDisplay = (function() {
       ambiguous ? 'hop-ambiguous' : '',
       unreliable ? 'hop-unreliable' : '',
       globalFallback ? 'hop-global-fallback' : '',
+      // #165 — callers mark the pill itself (e.g. nodes.js 'hop-current').
+      // Patching the first class="" of the returned HTML would hit the
+      // .hop-group wrapper whenever the hop carries a badge.
+      opts.className || '',
     ].filter(Boolean).join(' ');
 
-    if (opts.link !== false) {
-      return `<a class="${cls} hop-link" href="#/nodes/${encodeURIComponent(pubkey)}" title="${escapeHtml(title)}" data-hop-link="true">${display}</a>${warnBadge}`;
-    }
-    return `<span class="${cls}" title="${escapeHtml(title)}">${display}</span>${warnBadge}`;
+    const pill = opts.link !== false
+      ? `<a class="${cls} hop-link" href="#/nodes/${encodeURIComponent(pubkey)}" title="${escapeHtml(title)}" data-hop-link="true">${display}</a>`
+      : `<span class="${cls}" title="${escapeHtml(title)}">${display}</span>`;
+
+    // #165 (port of upstream 2099) — a badge is a sibling of its pill, so in "A [8] → B [6]" nothing
+    // said which name the 8 belonged to. Wrapping the pair keeps them together
+    // and puts the separator clearly outside. Only when there is a badge:
+    // wrapping every hop would change the layout of every path for nothing.
+    if (!warnBadge) return pill;
+    return `<span class="hop-group">${pill}${warnBadge}</span>`;
   }
 
   /**
