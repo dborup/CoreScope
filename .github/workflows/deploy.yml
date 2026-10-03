@@ -518,6 +518,13 @@ jobs:
           BASE_URL=http://localhost:13581 node test-live-dedup.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-nodes-export-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-show-neighbors.js 2>&1 | tee -a e2e-output.txt
+          # Root E2Es without a runner until #174. They do not use the fixture
+          # server: the two contrast gates render static markup, and the other two
+          # serve their own pages.
+          CHROMIUM_REQUIRE=1 node test-a11y-1705-subpath-hop-prefix-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-a11y-1719-contrast-root-causes-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-nodes-favorite-rerender-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-packet-trace-alignment-e2e.js 2>&1 | tee -a e2e-output.txt
 
       # #1616: slide-over focus-restore flake-gate. Runs the slide-over
       # E2E 20 consecutive times against the SAME backend instance so
