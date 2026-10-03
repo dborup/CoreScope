@@ -608,6 +608,8 @@ The in-memory packet store grows with retained packets. Configure retention limi
 }
 ```
 
+`packetStore.maxMemoryMB` bounds the store **and the caches that belong to it** — the decoded-packet cache, the path indexes, the resolved relay entries and the per-packet index entries, not just the stored rows. It is enforced in two places: the startup load stops at the budget, and the store evicts oldest-first when it exceeds it, down to 85% of it. Leaving it unset means no limit. Actual usage is on `/api/perf` as `packetStore.trackedMB`, next to `maxMB`.
+
 ### Database locked errors
 
 SQLite doesn't support concurrent writers well. Ensure only one CoreScope instance accesses the database file. If running multiple containers, each needs its own database.
