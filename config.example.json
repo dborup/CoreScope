@@ -8,7 +8,7 @@
   "observerIATAWhitelist": [],
   "_comment_observerIATAWhitelist": "Global IATA region whitelist. When non-empty, only observers whose IATA code (from MQTT topic) matches are processed. Case-insensitive. Empty = allow all. Unlike per-source iataFilter, this applies across all MQTT sources. A dropped region is logged by the ingestor as one '[region-filter] dropping region \"XYZ\"' line, repeated at most every iataWarnIntervalSec while it keeps arriving.",
   "iataWarnIntervalSec": 21600,
-  "_comment_iataWarnIntervalSec": "Optional (ingestor). Seconds between repeated '[region-filter]' warnings for a region dropped by observerIATAWhitelist. Default 21600 (6h); 0 or omitted = default. At most 512 regions are tracked individually (region codes come from the MQTT topic, so this is bounded); beyond that, drops share one overflow warning with the same interval.",
+  "_comment_iataWarnIntervalSec": "Optional (ingestor). Seconds between repeated '[region-filter]' warnings for a region dropped by observerIATAWhitelist. Default 21600 (6h); 0 or omitted = default; maximum 86400 (24h), larger values are capped. At most 512 regions are tracked individually (region codes come from the MQTT topic, so this is bounded); beyond that, drops share one overflow warning with the same interval.",
   "retention": {
     "nodeDays": 7,
     "observerDays": 14,
@@ -372,7 +372,7 @@
     "criticalMv": 3000,
     "_comment": "Voltage cutoffs (millivolts) for the per-node battery trend chart on /node-analytics. Latest sample below lowMv shows the node as ⚠️ Low; below criticalMv shows 🪫 Critical. Both default to 3300 / 3000 if omitted. Source data: observer_metrics.battery_mv populated from observer status messages; only nodes that are themselves observers (matching pubkey ↔ observer id) yield a series. Issue #663."
   },
-  "_comment_mqttSources": "Each source connects to an MQTT broker. Supported schemes: mqtt:// (plain TCP), mqtts:// (TLS), ws:// (WebSocket), wss:// (WebSocket TLS). topics: what to subscribe to. iataFilter: only ingest packets from these regions (optional). region: default IATA region for this source — used when packet/topic doesn't specify one (optional, priority: payload > topic > this field).",
+  "_comment_mqttSources": "Each source connects to an MQTT broker. Supported schemes: mqtt:// (plain TCP), mqtts:// (TLS), ws:// (WebSocket), wss:// (WebSocket TLS). topics: what to subscribe to. iataFilter: only ingest packets from these regions (optional). region: default IATA region for this source — used when packet/topic doesn't specify one (optional, priority: payload > topic > this field). clientId: MQTT client ID, used verbatim (optional; must be unique among the broker's concurrent clients, and at most 23 characters of [0-9A-Za-z] for strict MQTT 3.1 brokers). When omitted, each ingestor start generates corescope-<name>-<8 random hex>, so copies of this file never share an ID — do not add a fixed clientId here.",
   "compression": {
     "gzip": false,
     "websocket": false,

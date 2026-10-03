@@ -25,6 +25,10 @@ type MQTTSource struct {
 	IATAFilter         []string `json:"iataFilter,omitempty"`
 	ConnectTimeoutSec  int      `json:"connectTimeoutSec,omitempty"`
 	Region             string   `json:"region,omitempty"`
+	// ClientID is the MQTT client ID, used verbatim; it must be unique among
+	// the broker's concurrent clients. Empty: generated per client (#118,
+	// see mqtt_client_id.go).
+	ClientID string `json:"clientId,omitempty"`
 }
 
 // ConnectTimeoutOrDefault returns the per-source connect timeout in seconds,
@@ -73,7 +77,8 @@ type Config struct {
 
 	// IATAWarnIntervalSec is how often a region dropped by
 	// ObserverIATAWhitelist is re-logged while it keeps arriving (#110).
-	// 0 or less means the default, 6 hours. See iata_drop_warn.go.
+	// 0 or less means the default, 6 hours; larger than 86400 (24 hours)
+	// is capped at 86400. See iata_drop_warn.go.
 	IATAWarnIntervalSec int `json:"iataWarnIntervalSec,omitempty"`
 
 	// iataDropWarn is the bounded per-region throttle for that warning.

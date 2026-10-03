@@ -76,30 +76,65 @@
 
   var activeMap = null;
 
+  // Registered in the capture phase while the modal is open: Escape closes
+  // only this top layer. Stopping it keeps the layers below (the packets
+  // detail pane, a SlideOver), whose Escape handlers listen on document in
+  // the bubble phase, open until the next Escape (#167).
   function onKeydown(e) {
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape' && document.getElementById('packetPathModal')) {
+      e.stopPropagation();
+      close();
+    }
   }
 
-  function close() {
+  // A #/packets/<hash>?…&viewPath=1 URL describes this modal as open (#147).
+  // Once it closes, drop that one param (the others stay verbatim) so a
+  // refresh or a copied address-bar link does not reopen it. This writes the
+  // hash next to packets.js's updatePacketsUrl(), which adds ?viewPath=1 while
+  // the modal is open on the packet of the #/packets/<hash> subpath.
+  function dropViewPathParam() {
+    if (typeof history === 'undefined' || !history.replaceState) return;
+    var h = String(location.hash || '');
+    var q = h.indexOf('?');
+    if (q < 0 || h.indexOf('#/packets/') !== 0) return;
+    var params = h.slice(q + 1).split('&');
+    var kept = params.filter(function (p) { return p !== 'viewPath=1'; });
+    if (kept.length === params.length) return;
+    history.replaceState(null, '', h.slice(0, q) + (kept.length ? '?' + kept.join('&') : ''));
+  }
+
+  // Removes the modal; true when one was open.
+  function removeModal() {
     var overlay = document.getElementById('packetPathModal');
     if (overlay) overlay.remove();
     if (activeMap) {
       try { activeMap.remove(); } catch (e) { /* already gone */ }
       activeMap = null;
     }
-    document.removeEventListener('keydown', onKeydown);
+    document.removeEventListener('keydown', onKeydown, true);
+    return !!overlay;
+  }
+
+  function close() {
+    if (removeModal()) dropViewPathParam();
   }
 
   // A short prefix marking a node's role in tooltips -- purely a label,
   // markers stay circleMarker dots throughout (a role-specific shape
   // would clash with the color/dash coding already carrying primary,
   // approx, and observer meaning).
+  // Phosphor sprite icons, not emoji (#1648 lint gate); same glyphs as
+  // observer-detail.js's directNeighborRoleIcon.
+  function phIcon(name) {
+    return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg> ';
+  }
+
   function roleIcon(role) {
     switch (role) {
-      case 'repeater': return '📡 ';
-      case 'room': return '🏠 ';
-      case 'client': return '📱 ';
-      case 'sensor': return '🌡️ ';
+      case 'repeater': return phIcon('broadcast');
+      case 'room': return phIcon('house-line');
+      case 'client': return phIcon('radio');
+      case 'sensor': return phIcon('thermometer');
       default: return '';
     }
   }
@@ -137,11 +172,15 @@
   }
 
   async function open(hash) {
-    close(); // in case one's already open
+    // In case one's already open. Replacing it is not a close, so a
+    // ?viewPath=1 in the URL stays (#167).
+    removeModal();
 
     var overlay = document.createElement('div');
     overlay.id = 'packetPathModal';
     overlay.className = 'modal-overlay';
+    // The packet shown, for packets.js's ?viewPath=1 (#167).
+    overlay.dataset.hash = hash;
     overlay.innerHTML =
       '<div class="modal" style="max-width:min(92vw,700px);padding:16px">' +
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
@@ -167,7 +206,7 @@
     overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
     var closeBtn = document.getElementById('packetPathClose');
     if (closeBtn) closeBtn.addEventListener('click', close);
-    document.addEventListener('keydown', onKeydown);
+    document.addEventListener('keydown', onKeydown, true);
 
     // Shareable link: #/packets/<hash>?viewPath=1 -- packets.js's init()
     // (public/packets.js) checks for viewPath=1 and re-opens this exact
@@ -412,7 +451,7 @@
         radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
       })
         .addTo(map)
-        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
+        .bindTooltip(phIcon('flag') + 'First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
     }
 
     try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }

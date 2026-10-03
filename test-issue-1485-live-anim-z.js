@@ -79,14 +79,25 @@ console.log('\n=== #1485 live anim z-order C: per-shape inheritance ===');
 
 // At least one polyline/circleMarker addTo(animLayer) call exists — we're
 // trusting Leaflet pane inheritance from the LayerGroup parent. Sanity
-// check that the four animLayer / pathsLayer addTo sites still exist
+// check that the animLayer / pathsLayer addTo sites still exist
 // (regression detector if someone moves circles to the default pane).
+// animLayer hosts 2 since #1521 (ghost markers + matrix char markers):
+// the pulseNode() rings moved off animLayer into the canvas engine,
+// whose pane is checked below.
 const animAddTo = (liveSrc.match(/\.addTo\(animLayer\)/g) || []).length;
 const pathsAddTo = (liveSrc.match(/\.addTo\(pathsLayer\)/g) || []).length;
-assert(animAddTo >= 3,
-  'animLayer still hosts >=3 .addTo() animation shapes (got ' + animAddTo + ')');
+assert(animAddTo >= 2,
+  'animLayer still hosts >=2 .addTo() animation shapes (got ' + animAddTo + ')');
 assert(pathsAddTo >= 3,
   'pathsLayer still hosts >=3 .addTo() trail shapes (got ' + pathsAddTo + ')');
+
+// The canvas engine (in-flight packets + pulse rings since #1521) draws
+// on 'animationsPane', which must also sit above markerPane (600).
+const canvasZ = liveSrc.match(
+  /getPane\(\s*['"]animationsPane['"]\s*\)\.style\.zIndex\s*=\s*['"]?(\d+)/
+);
+assert(!!canvasZ && parseInt(canvasZ[1], 10) > 600,
+  'animationsPane (canvas pulses) z-index > markerPane 600 (got ' + (canvasZ ? canvasZ[1] : 'none') + ')');
 
 console.log('\n=== Summary ===');
 console.log('  Passed: ' + passed);

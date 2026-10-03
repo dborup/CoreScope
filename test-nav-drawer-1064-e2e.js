@@ -273,6 +273,97 @@ async function edgeSwipe(page, x0, y0, x1, y1, steps) {
 
   await wideCtx.close();
 
+  // (k) #150, #172: the header title and the close button must be readable
+  // (4.5:1) on the header background in both themes and with every
+  // customizer preset. The light theme used to paint the header with
+  // --surface-2 (white) under the white --nav-text title (#150), and the
+  // close button's --nav-text-muted fell below 4.5:1 on --nav-bg2 in the
+  // forest, sunset and mono presets (#172).
+  for (const theme of ['light', 'dark']) {
+    const ctx = await browser.newContext({ viewport: { width: 1024, height: 800 }, colorScheme: theme });
+    const p = await ctx.newPage();
+    p.setDefaultTimeout(10000);
+    await p.addInitScript((t) => { try { localStorage.setItem('meshcore-theme', t); localStorage.removeItem('cs-theme-overrides'); } catch (_) {} }, theme);
+    let presets = [];
+    await step(`(k) ${theme} theme: list the customizer presets`, async () => {
+      await p.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+      await p.waitForFunction(() => !!(window.__navDrawer && window.__navDrawer.open && window._customizerV2 && window._customizerV2.initDone));
+      await p.click('#customizeToggle');
+      await p.waitForSelector('.cust-overlay:not(.hidden)');
+      const tabBtn = await p.$('.cust-tab[data-tab="theme"]');
+      if (tabBtn) await tabBtn.click();
+      presets = await p.$$eval('.cust-preset-btn[data-preset]', (els) => els.map((e) => e.getAttribute('data-preset')));
+      for (const id of ['default', 'forest', 'sunset', 'mono']) assert(presets.includes(id), 'preset ' + id + ' missing: ' + presets.join(','));
+    });
+    for (const id of presets) {
+      await step(`(k) ${theme} / ${id}: header title and close button ≥ 4.5:1 on the header background`, async () => {
+        await p.$eval(`.cust-preset-btn[data-preset="${id}"]`, (b) => b.click());
+        // the preset is applied: --nav-bg2 is the preset's (default: no overrides)
+        await p.waitForFunction((t) => {
+          const raw = localStorage.getItem('cs-theme-overrides');
+          if (!raw) return true;
+          const o = JSON.parse(raw);
+          const want = ((t === 'dark' ? o.themeDark : o.theme) || {}).navBg2;
+          const got = getComputedStyle(document.documentElement).getPropertyValue('--nav-bg2').trim();
+          return !want || got.toLowerCase() === want.toLowerCase();
+        }, theme);
+        await p.evaluate(() => window.__navDrawer.open());
+        await p.waitForSelector('[data-nav-drawer] .nav-drawer-title', { state: 'visible' });
+        // measure the settled colours, not a colour transition's midpoint
+        await p.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'));
+        const r = await p.evaluate(() => {
+          function rgba(s) {
+            const m = /rgba?\(([^)]+)\)/.exec(s);
+            if (!m) throw new Error('unparsed colour ' + s);
+            const v = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+            return { r: v[0], g: v[1], b: v[2], a: v.length > 3 ? v[3] : 1 };
+          }
+          // opaque colour under el: its own background composited over its
+          // ancestors' (stopping at the first opaque one)
+          function backdrop(el) {
+            const layers = [];
+            for (let n = el; n; n = n.parentElement) {
+              const c = rgba(getComputedStyle(n).backgroundColor);
+              if (c.a > 0) layers.push(c);
+              if (c.a >= 1) break;
+            }
+            let out = { r: 255, g: 255, b: 255 };
+            for (let i = layers.length - 1; i >= 0; i--) {
+              const c = layers[i];
+              out = { r: c.r * c.a + out.r * (1 - c.a), g: c.g * c.a + out.g * (1 - c.a), b: c.b * c.a + out.b * (1 - c.a) };
+            }
+            return out;
+          }
+          function lum(c) {
+            const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+            return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+          }
+          function ratio(fg, bg) {
+            const a = lum(fg), b = lum(bg);
+            return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+          }
+          const header = document.querySelector('[data-nav-drawer] .nav-drawer-header');
+          const title = header.querySelector('.nav-drawer-title');
+          const close = header.querySelector('.nav-drawer-close');
+          const bg = backdrop(header);
+          return {
+            theme: document.documentElement.getAttribute('data-theme'),
+            bg: getComputedStyle(header).backgroundColor,
+            title: getComputedStyle(title).color,
+            close: getComputedStyle(close).color,
+            titleRatio: ratio(rgba(getComputedStyle(title).color), bg),
+            closeRatio: ratio(rgba(getComputedStyle(close).color), backdrop(close)),
+          };
+        });
+        await p.evaluate(() => window.__navDrawer.close());
+        assert(r.theme === theme, 'data-theme is ' + r.theme + ', want ' + theme);
+        assert(r.titleRatio >= 4.5, `title ${r.title} on header ${r.bg}: ${r.titleRatio.toFixed(2)}:1 < 4.5:1`);
+        assert(r.closeRatio >= 4.5, `close button ${r.close} on header ${r.bg}: ${r.closeRatio.toFixed(2)}:1 < 4.5:1`);
+      });
+    }
+    await ctx.close();
+  }
+
   // ── Narrow viewport (Option A): drawer disabled ──
   const narrowCtx = await browser.newContext({ viewport: { width: 360, height: 800 } });
   const narrow = await narrowCtx.newPage();

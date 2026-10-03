@@ -21,6 +21,14 @@
  * shows its canvas. Finally three SPA round trips leave one listener per
  * toggle (one click writes once).
  *
+ * #150 follow-ups: with Matrix and Heat saved ON, Matrix switched OFF during
+ * init leaves the Heat checkbox, the heat layer and the saved setting in
+ * agreement (also for Matrix OFF after init, and for Heat saved OFF). And
+ * leaving Live while init is still awaiting loadNodes(), then coming back,
+ * leaves one listener per toggle on the new mount: before #135 the old
+ * init's continuation wired the new mount's toggles a second time (2
+ * listeners on 8 of 9 toggles, one click wrote localStorage twice).
+ *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-125-live-toggles-early-e2e.js
  */
 'use strict';
@@ -46,7 +54,9 @@ const TOGGLES = [
   { id: 'liveMatrixToggle', key: 'live-matrix-mode', dflt: false },
   { id: 'liveMatrixRainToggle', key: 'live-matrix-rain', dflt: false },
 ];
-const KEYS = TOGGLES.map((t) => t.key);
+// All nine wired toggles (#150): Multibyte (#88) has its own E2E above.
+const ALL_TOGGLES = TOGGLES.concat([{ id: 'liveMultibyteToggle', key: 'live-multibyte-only', dflt: false }]);
+const KEYS = ALL_TOGGLES.map((t) => t.key);
 
 // A context whose first page load starts from `seed` ({key: 'true'|'false'};
 // other toggle keys removed), counting writes per key and recording errors.
@@ -234,6 +244,100 @@ const loadLive = (page) => () => page.goto(BASE + '/#/live', { waitUntil: 'domco
       st = await readState(page);
       assert(!st.matrixTheme, 'matrix theme still applied after switching Matrix off');
       assert(!st.t.liveHeatToggle.disabled, 'Heat still disabled after switching Matrix off');
+    } finally { await ctx.close(); }
+  });
+
+  await step('#150: Matrix and Heat saved ON, Matrix clicked OFF during init: Heat checked, enabled and its layer shown', async () => {
+    const { ctx, page } = await newLivePage(browser, errors, { 'live-matrix-mode': 'true', 'meshcore-live-heatmap': 'true' });
+    try {
+      await withInitHeld(page, loadLive(page), async (p) => {
+        await clickDuringInit(p, 'liveMatrixToggle');
+        const st = await readState(p);
+        assert(st.t.liveHeatToggle.checked === true && st.t.liveHeatToggle.disabled === false,
+          'Matrix OFF during init: Heat must be checked and enabled (checked=' + st.t.liveHeatToggle.checked + ', disabled=' + st.t.liveHeatToggle.disabled + ')');
+      });
+      let st = await readState(page);
+      assert(st.heatLayer, 'heat layer missing after init although Heat is saved ON and Matrix is OFF');
+      assert(st.t.liveHeatToggle.checked === true, 'Heat checkbox unchecked while the heat layer is shown');
+      assert(st.t.liveHeatToggle.stored === 'true', 'Heat setting changed (stored=' + st.t.liveHeatToggle.stored + ')');
+      // after init: Matrix ON hides the layer; Matrix OFF brings Heat back as saved
+      await page.evaluate(() => document.getElementById('liveMatrixToggle').click());
+      st = await readState(page);
+      assert(!st.heatLayer && !st.t.liveHeatToggle.checked && st.t.liveHeatToggle.disabled, 'Matrix ON after init: Heat must be hidden, unchecked and disabled');
+      await page.evaluate(() => document.getElementById('liveMatrixToggle').click());
+      st = await readState(page);
+      assert(st.t.liveHeatToggle.checked === true && !st.t.liveHeatToggle.disabled, 'Matrix OFF after init: Heat must be checked and enabled again (checked=' + st.t.liveHeatToggle.checked + ')');
+      assert(st.heatLayer, 'Matrix OFF after init: Heat is checked but its layer is not shown');
+      assert(st.t.liveHeatToggle.stored === 'true', 'Heat setting changed by Matrix (stored=' + st.t.liveHeatToggle.stored + ')');
+    } finally { await ctx.close(); }
+  });
+
+  await step('#150: Matrix ON and Heat OFF saved, Matrix clicked OFF during init: Heat stays unchecked with no layer', async () => {
+    const { ctx, page } = await newLivePage(browser, errors, { 'live-matrix-mode': 'true', 'meshcore-live-heatmap': 'false' });
+    try {
+      await withInitHeld(page, loadLive(page), async (p) => {
+        await clickDuringInit(p, 'liveMatrixToggle');
+        const st = await readState(p);
+        assert(st.t.liveHeatToggle.checked === false && st.t.liveHeatToggle.disabled === false,
+          'Matrix OFF during init with Heat saved OFF: Heat must be unchecked and enabled (checked=' + st.t.liveHeatToggle.checked + ', disabled=' + st.t.liveHeatToggle.disabled + ')');
+      });
+      const st = await readState(page);
+      assert(!st.heatLayer, 'heat layer shown although Heat is saved OFF');
+      assert(st.t.liveHeatToggle.checked === false, 'Heat checkbox checked although Heat is saved OFF');
+    } finally { await ctx.close(); }
+  });
+
+  await step('#150 (#135 regression): leaving Live while init awaits loadNodes() and coming back keeps one listener per toggle', async () => {
+    const { ctx, page } = await newLivePage(browser, errors, {});
+    // this scenario's own errors: the abandoned init's continuation is not
+    // what this step checks (listed, not asserted)
+    const ownErrors = [];
+    page.on('pageerror', (e) => ownErrors.push(e.message));
+    try {
+      await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#pktTable', { state: 'attached' });
+      await page.waitForLoadState('networkidle');
+      // hold the first Live loadNodes() request: init is then past its first
+      // await and stuck in its second one
+      let armed = true, release, hit;
+      const released = new Promise((r) => { release = r; });
+      const intercepted = new Promise((r) => { hit = r; });
+      await page.route(/\/api\/nodes\?limit=/, async (route) => {
+        if (!armed) return route.continue();
+        armed = false;
+        hit();
+        await released;
+        await route.continue().catch((e) => { if (!page.isClosed()) throw e; });
+      });
+      try {
+        await page.evaluate(() => { location.hash = '#/live'; });
+        let timer;
+        await Promise.race([intercepted, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(
+          'Live init never requested /api/nodes within 15s; the hold point this test relies on has moved')), 15000); })]);
+        clearTimeout(timer);
+        assert(!(await page.evaluate(() => !!window._liveWSHandler())), 'Live finished init while held');
+        await page.evaluate(() => { location.hash = '#/packets'; });
+        await page.waitForSelector('#pktTable', { state: 'attached' });
+        await page.evaluate(() => { location.hash = '#/live'; });
+        await page.locator('#liveHeatToggle').waitFor({ state: 'attached' });
+      } finally {
+        // api() shares the in-flight request, so the old and the new init
+        // both continue when it is answered (the old one first)
+        release();
+      }
+      await page.waitForFunction(() => !!window._liveWSHandler(), null, { timeout: 15000 });
+      await page.waitForLoadState('networkidle');
+      await page.waitForTimeout(500);
+      const doubled = [];
+      for (const t of ALL_TOGGLES) {
+        const before = (await readState(page)).writes[t.key] || 0;
+        await page.evaluate((id) => document.getElementById(id).click(), t.id);
+        const after = (await page.evaluate(() => Object.assign({}, window.__t125Writes)))[t.key] || 0;
+        if (after - before !== 1) doubled.push(t.id + '=' + (after - before));
+      }
+      assert(doubled.length === 0, 'one click wrote localStorage more or less than once on ' + doubled.length + ' of ' +
+        ALL_TOGGLES.length + ' toggles: ' + doubled.join(', ') + (ownErrors.length ? ' (page errors: ' + ownErrors.slice(0, 3).join(' | ') + ')' : ''));
+      if (ownErrors.length) console.log('    note: page errors from the abandoned init: ' + ownErrors.slice(0, 3).join(' | '));
     } finally { await ctx.close(); }
   });
 

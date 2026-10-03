@@ -138,7 +138,7 @@ fetch('/api/config/cache').then(r => r.json()).then(cfg => {
     if (k in CLIENT_TTL && typeof v === 'number') CLIENT_TTL[k] = v * 1000;
   }
 }).catch(() => {});
-async function api(path, { ttl = 0, bust = false } = {}) {
+async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
   const t0 = performance.now();
   if (!bust && ttl > 0) {
     const cached = _apiCache.get(path);
@@ -150,8 +150,11 @@ async function api(path, { ttl = 0, bust = false } = {}) {
       return cached.data;
     }
   }
-  // Deduplicate in-flight requests
-  if (_inflight.has(path)) return _inflight.get(path);
+  // Deduplicate in-flight requests. #172: per retry503 too, so a caller
+  // that retries 503s itself never waits on the retry loop below, and a
+  // default caller never gets a 503 that loop would have ridden out.
+  const inflightKey = retry503 ? path : path + '\n#no-retry503';
+  if (_inflight.has(inflightKey)) return _inflight.get(inflightKey);
   const promise = (async () => {
     // Issue #1659: 503 with Retry-After indicates server-side warm-up
     // (analytics recomputer first-pass, index build, etc.). Retry with
@@ -166,6 +169,11 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     // per attempt, decremented at most once) and exhausted-retries
     // threw without decrementing at all — banner stuck across three
     // analytics endpoints, multiplied.
+    //
+    // #172: retry503:false skips this loop for a caller that retries on
+    // its own (analytics.js outlasts the server's 60s warm-up and cancels
+    // its retries on navigation). Every error carries the HTTP status, and
+    // a 503's valid Retry-After as retryAfterSeconds.
     let attempt = 0;
     let delay = 1000;
     const maxAttempts = 6;
@@ -173,7 +181,7 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     try {
       while (true) {
         const res = await fetch('/api' + path);
-        if (res.status === 503 && attempt < maxAttempts) {
+        if (res.status === 503 && retry503 && attempt < maxAttempts) {
           const ra = parseInt(res.headers.get('Retry-After'), 10);
           const wait = isFinite(ra) && ra > 0 ? ra * 1000 : delay;
           if (!notified) { _warmupNotify_1659(true); notified = true; }
@@ -182,7 +190,13 @@ async function api(path, { ttl = 0, bust = false } = {}) {
           attempt++;
           continue;
         }
-        if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+        if (!res.ok) {
+          const err = new Error(`API ${res.status}: ${path}`);
+          err.status = res.status;
+          const ra = parseInt(res.headers.get('Retry-After'), 10);
+          if (res.status === 503 && isFinite(ra) && ra > 0) err.retryAfterSeconds = ra;
+          throw err;
+        }
         const data = await res.json();
         const ms = performance.now() - t0;
         _apiPerf.calls++;
@@ -211,14 +225,14 @@ async function api(path, { ttl = 0, bust = false } = {}) {
       if (notified) _warmupNotify_1659(false);
     }
   })();
-  _inflight.set(path, promise);
+  _inflight.set(inflightKey, promise);
   // `.finally()` returns its own derived promise that mirrors `promise`'s
   // outcome; discarding it uncaught leaves the real caller's rejection
   // (delivered via the returned `promise` below, unaffected by this)
   // duplicated as a second, unobserved rejection on this derived one.
   // The `.catch()` here only silences that duplicate -- it does not
   // touch `promise` itself or its resolution to callers.
-  promise.finally(() => _inflight.delete(path)).catch(() => {});
+  promise.finally(() => _inflight.delete(inflightKey)).catch(() => {});
   return promise;
 }
 
