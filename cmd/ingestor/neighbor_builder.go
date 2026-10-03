@@ -336,11 +336,11 @@ func parsePathArray(s string) []string {
 // considered ambiguous and skipped during resolution.
 type prefixIndex map[string][]string
 
-// buildPrefixIndex reads nodes.public_key and builds the prefix → pubkey
-// map. We index every 1-byte (2 hex char) prefix length the firmware
-// uses (1, 2, 3, 4, 6, 8). Memory cost is O(nodes × len(prefixLens)).
+// buildPrefixIndex reads the relay nodes (isRelayRole) and builds the
+// prefix → pubkey map. We index every 1-byte (2 hex char) prefix length the
+// firmware uses (1, 2, 3, 4, 6, 8). Memory cost is O(nodes × len(prefixLens)).
 func buildPrefixIndex(db *sql.DB) (prefixIndex, error) {
-	rows, err := db.Query(`SELECT public_key FROM nodes`)
+	rows, err := db.Query(`SELECT public_key, COALESCE(role, '') FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
@@ -348,8 +348,11 @@ func buildPrefixIndex(db *sql.DB) (prefixIndex, error) {
 	idx := make(prefixIndex, 1024)
 	var prefixLens = []int{1 * 2, 2 * 2, 3 * 2, 4 * 2, 6 * 2, 8 * 2}
 	for rows.Next() {
-		var pk string
-		if err := rows.Scan(&pk); err != nil {
+		var pk, role string
+		if err := rows.Scan(&pk, &role); err != nil {
+			continue
+		}
+		if !isRelayRole(role) {
 			continue
 		}
 		pkLower := strings.ToLower(pk)
@@ -362,6 +365,23 @@ func buildPrefixIndex(db *sql.DB) (prefixIndex, error) {
 		}
 	}
 	return idx, nil
+}
+
+// isRelayRole reports whether a node of this role can appear as a hop in a
+// path (#188). It is the server's canAppearInPath (cmd/server/store.go),
+// duplicated because the two binaries share no package for it; the test
+// cases mirror the server's TestCanAppearInPath.
+//
+// Firmware: repeaters and room servers forward unless disable_fwd is set
+// (examples/simple_repeater and simple_room_server MyMesh::allowPacketForward).
+// Companions and sensors ship with forwarding off (companion_radio
+// NodePrefs.h repeat.disable_fwd = 1; simple_sensor SensorMesh.cpp
+// disable_fwd = true) and can only opt in, so a hop through an opted-in
+// companion stays unresolved, or resolves to the one relay that shares its
+// prefix. That is the server's trade-off too.
+func isRelayRole(role string) bool {
+	r := strings.ToLower(role)
+	return strings.Contains(r, "repeater") || strings.Contains(r, "room_server") || r == "room"
 }
 
 // resolvePrefix returns the single resolved pubkey if exactly one
