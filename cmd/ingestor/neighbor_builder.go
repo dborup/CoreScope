@@ -186,7 +186,7 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 
 // buildNeighborEdges scans transmissions + observations,
 // extracts edge candidates (originator↔first-hop on ADVERTs;
-// observer↔last-hop on all packet types) and upserts them into
+// observer↔last-hop on flood routes) and upserts them into
 // neighbor_edges. It reports the edge upserts and the observation rows
 // read; fewer rows than neighborBuilderMaxBatch means it caught up.
 //
@@ -233,6 +233,7 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 
 	rows, err := s.db.Query(`SELECT
 		t.payload_type,
+		COALESCE(t.route_type, -1),
 		t.decoded_json,
 		COALESCE(t.from_pubkey, ''),
 		COALESCE(o.path_json, ''),
@@ -253,9 +254,10 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 	for rows.Next() {
 		b.scanned++
 		var payloadType sql.NullInt64
+		var routeType int
 		var decodedJSON, fromPubkey, pathJSON, observerID string
 		var epochTs int64
-		if err := rows.Scan(&payloadType, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
+		if err := rows.Scan(&payloadType, &routeType, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
 			continue
 		}
 		fromNode := strings.ToLower(fromPubkey)
@@ -278,7 +280,14 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 				edges = append(edges, canonEdge(fromNode, resolved, ts))
 			}
 		}
-		if observerPK != "" {
+		// The last hop is the node the observer heard only on a flood
+		// route: flood forwarders append their hash (MeshCore Mesh.cpp:346-350
+		// routeRecvPacket, at a366955). A DIRECT path is the remaining
+		// planned route, from which each forwarder strips itself at the
+		// front (Mesh.cpp:89, removeSelfFromPath :334-342), so its last hop
+		// is the route's far end (PR #190 review). Unknown route types are
+		// skipped too.
+		if observerPK != "" && isFloodRoute(routeType) {
 			last := path[len(path)-1]
 			if resolved, ok := resolvePrefix(prefixIdx, last); ok && resolved != observerPK {
 				edges = append(edges, canonEdge(observerPK, resolved, ts))
