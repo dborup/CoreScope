@@ -1818,6 +1818,7 @@ console.log('\n=== nodes.js: WS handler runtime behavior ===');
           style: {}, dataset: {},
           classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
           addEventListener() {},
+          contains() { return false; }, // nodes.js renderRows() asks tbody.contains(document.activeElement) (#1616)
           querySelectorAll() { return []; },
           querySelector() { return null; },
           getAttribute() { return null; },
@@ -5248,16 +5249,20 @@ console.log('\n=== app.js: favorites ===');
   test('favStar returns filled star for favorite', () => {
     ctx.localStorage.setItem('meshcore-favorites', '["pk1"]');
     const html = ctx.favStar('pk1');
-    assert.ok(html.includes('★'));
-    assert.ok(html.includes('on'));
+    // Phosphor migration (#1648 M2): the glyph is now an SVG sprite reference.
+    assert.ok(html.includes('#ph-star-fill'));
+    assert.ok(/class="fav-star[^"]* on"/.test(html));
+    assert.ok(html.includes('aria-pressed="true"'));
     assert.ok(html.includes('Remove from favorites'));
   });
 
   test('favStar returns empty star for non-favorite', () => {
     ctx.localStorage.setItem('meshcore-favorites', '[]');
     const html = ctx.favStar('pk1');
-    assert.ok(html.includes('☆'));
-    assert.ok(!html.includes(' on'));
+    assert.ok(html.includes('#ph-star"'));
+    assert.ok(!html.includes('#ph-star-fill'));
+    assert.ok(!/class="fav-star[^"]* on"/.test(html));
+    assert.ok(html.includes('aria-pressed="false"'));
     assert.ok(html.includes('Add to favorites'));
   });
 
