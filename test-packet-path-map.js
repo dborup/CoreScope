@@ -1066,6 +1066,54 @@ function makeSandbox(apiImpl) {
 
   await (async () => {
     try {
+      // #174 (review of #177): every role icon and the first-to-hear flag
+      // are decorative sprite icons, hidden from screen readers.
+      const first = {
+        hops: 2,
+        points: [{ publicKey: 'pk3', name: 'SensorC', lat: 56.2, lon: 10.2, role: 'sensor' }],
+        observer: { name: 'FirstObs', lat: 56.3, lon: 10.3, role: 'client' },
+      };
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk1', name: 'RepeaterA', lat: 56.0, lon: 10.0, role: 'repeater' }],
+            observer: { name: 'RoomObserver', lat: 56.1, lon: 10.1, role: 'room' },
+          },
+          first,
+        ],
+        first,
+      }));
+
+      const tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const icon = (name) => '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg> ';
+      for (const [name, glyph] of [['RepeaterA', 'broadcast'], ['RoomObserver', 'house-line'], ['SensorC', 'thermometer'], ['FirstObs', 'radio']]) {
+        assert.ok(tooltips.some((t) => t.startsWith(icon(glyph)) && t.includes(name)),
+          'expected ' + name + ' to start with an aria-hidden #ph-' + glyph + ' icon, got: ' + JSON.stringify(tooltips));
+      }
+      const flag = tooltips.filter((t) => t.includes('First to hear it: FirstObs'));
+      assert.strictEqual(flag.length, 1, 'expected one first-to-hear tooltip, got: ' + JSON.stringify(tooltips));
+      assert.ok(flag[0].startsWith(icon('flag') + 'First to hear it: FirstObs (2 hops)'),
+        'expected the first-to-hear tooltip to start with an aria-hidden #ph-flag icon, got: ' + flag[0]);
+      const svgs = tooltips.join('').match(/<svg\b[^>]*>/g) || [];
+      assert.ok(svgs.length >= 5, 'expected at least 5 icons, got ' + svgs.length);
+      assert.deepStrictEqual(svgs.filter((t) => !/\baria-hidden="true"/.test(t)), [], 'every tooltip icon must be aria-hidden');
+      passed++;
+      console.log('  ✅ role icons and the first-to-hear flag render as aria-hidden sprite icons');
+    } catch (e) { failed++; console.log('  ❌ role icons and the first-to-hear flag render as aria-hidden sprite icons: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
       // A marker with a publicKey should register a click handler that
       // navigates to #/nodes/{pubkey} (closing the modal first); one
       // without a publicKey should register no click handler at all.
