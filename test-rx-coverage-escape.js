@@ -1,5 +1,6 @@
 /* test-rx-coverage-escape.js — the RX coverage leaderboard must HTML-escape
- * observer names and pubkeys (XSS guard, #14 / #170).
+ * observer names and pubkeys, and the hex tooltip must escape node names and
+ * prefixes (XSS guard, #14 / #170 / #174).
  *
  * Loads the REAL public/rx-coverage.js in a vm (like
  * test-issue-124-rx-coverage-viewport.js) with the real escapeHtml from
@@ -25,13 +26,15 @@ async function test(name, fn) {
 }
 const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 
-// Mounts the page and renders the leaderboard from `observers`.
-// Returns the #rxBoard innerHTML and the sandbox's escapeHtml.
-async function renderBoard(observers, hash) {
+// Mounts the real page in a vm. Map timers are collected, not run, and every
+// bound tooltip is recorded.
+async function mountPage(hash) {
   const pending = [];
+  const timers = [];
+  const tooltips = [];
   const els = {};
   const el = () => ({ innerHTML: '', addEventListener() {}, querySelectorAll: () => [], dataset: {} });
-  const layer = () => ({ addTo() { return this; }, clearLayers() {}, bindTooltip() { return this; } });
+  const layer = () => ({ addTo() { return this; }, clearLayers() {}, bindTooltip(t) { tooltips.push(t); return this; } });
   const location = { hash: hash || '#/rx-coverage' };
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
@@ -42,10 +45,12 @@ async function renderBoard(observers, hash) {
     history: { replaceState: (_s, _t, url) => { location.hash = url; } },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
-    L: { map: () => ({ setView() { return this; }, on() { return this; }, invalidateSize() {}, remove() {} }),
+    L: { map: () => ({ setView() { return this; }, on() { return this; }, invalidateSize() {}, remove() {},
+      getZoom: () => 12, getCenter: () => ({ lat: 56, lng: 10 }),
+      getBounds: () => ({ getSouth: () => 55, getWest: () => 9, getNorth: () => 57, getEast: () => 11 }) }),
       tileLayer: () => layer(), layerGroup: () => layer(), polygon: () => layer() },
     debounce: (fn) => fn,
-    setTimeout: () => 0,
+    setTimeout: (fn) => { timers.push(fn); return 0; },
     clearTimeout: () => {},
     fetch: (url) => new Promise((resolve, reject) => { pending.push({ url, resolve, reject }); }),
   };
@@ -58,11 +63,37 @@ async function renderBoard(observers, hash) {
 
   page.init({ innerHTML: '' });
   await flush();
-  const i = pending.findIndex((p) => /^\/api\/rx-leaderboard\?/.test(p.url));
-  assert(i >= 0, 'the page did not request /api/rx-leaderboard');
-  pending.splice(i, 1)[0].resolve({ ok: true, json: async () => ({ observers }) });
+  const answer = (re, body) => {
+    const i = pending.findIndex((p) => re.test(p.url));
+    assert(i >= 0, 'the page did not request ' + re);
+    pending.splice(i, 1)[0].resolve({ ok: true, json: async () => body });
+  };
+  return { sandbox, timers, tooltips, answer, esc: sandbox.escapeHtml };
+}
+
+// Renders the leaderboard from `observers`.
+// Returns the #rxBoard innerHTML and the sandbox's escapeHtml.
+async function renderBoard(observers, hash) {
+  const { sandbox, answer, esc } = await mountPage(hash);
+  answer(/^\/api\/rx-leaderboard\?/, { observers });
   await flush();
-  return { html: sandbox.document.getElementById('rxBoard').innerHTML, esc: sandbox.escapeHtml };
+  return { html: sandbox.document.getElementById('rxBoard').innerHTML, esc };
+}
+
+// Draws one coverage hex whose properties.nodes are `nodes` and returns its
+// tooltip HTML (built by the real coverageNodesHtml / coverageNodeRow).
+async function renderHexTooltip(nodes) {
+  const { timers, tooltips, answer, esc } = await mountPage('#/rx-coverage?lat=56&lon=10&zoom=12');
+  answer(/^\/api\/rx-leaderboard\?/, { observers: [] });
+  await flush();
+  timers.splice(0).forEach((fn) => fn()); // createMap's deferred first drawCoverage()
+  answer(/^\/api\/rx-coverage\?/, { features: [{
+    geometry: { coordinates: [[[10, 56], [10.01, 56], [10.01, 56.01], [10, 56]]] },
+    properties: { count: nodes.length, has_sig: true, best_snr: -3, nodes },
+  }] });
+  await flush();
+  assert.strictEqual(tooltips.length, 1, 'expected one hex tooltip, got ' + tooltips.length);
+  return { html: tooltips[0], esc };
 }
 
 // Strictly parses every leaderboard data row: the opening tag must consist of
@@ -172,6 +203,23 @@ const obs = (pubkey, name, n) => ({ pubkey, name, score: n, cells: n, nodes: n, 
     assert.strictEqual(r.attrs.role, 'button');
     assert.strictEqual(r.attrs.tabindex, '0');
     assert.strictEqual(r.attrs['aria-pressed'], 'false');
+  });
+
+  await test('5. hex tooltip: hostile node names and prefixes are escaped (coverageNodeRow)', async () => {
+    const nodes = HOSTILE_NAMES.map((nm, i) => ({ prefix: 'ab' + i, name: nm, snr: -4 - i, count: i + 1 }))
+      .concat([{ prefix: '"><img src=x onerror=alert(1)>', name: '', snr: null, count: 1 }]);
+    const { html, esc } = await renderHexTooltip(nodes);
+    assert(!/<script|<img|<svg/i.test(html), 'raw tag injected into the hex tooltip: ' + html);
+    assertNoBareAmp(html);
+    // Each row: <span>label</span>; the label is the escaped name, or the
+    // escaped prefix in <code> when the name is unresolved.
+    const labels = [...html.matchAll(/<div style="display:flex[^"]*"><span>([\s\S]*?)<\/span><span /g)].map((m) => m[1]);
+    assert.deepStrictEqual(labels, HOSTILE_NAMES.map((nm) => esc(nm))
+      .concat(['<code>' + esc('"><img src=x onerror=alert(1)>') + '</code>']));
+    assert(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), '<script> name not rendered as &lt;script&gt;');
+    assert(html.includes('O&#39;Brien&#39;s van'), "' not rendered as &#39;");
+    assert(html.includes('Tom &amp; Jerry'), '& not rendered as &amp;');
+    assert(html.includes('7 nodes heard here'), 'tooltip header missing: ' + html);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
