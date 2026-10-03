@@ -355,3 +355,153 @@ func TestResolvedPathBackfill_RefusesBeforePriming_188(t *testing.T) {
 		t.Fatalf("pass after priming = %+v, %v; want %d resolved", res, err, len(ids))
 	}
 }
+
+// PR #190 review, finding 1: the pass must use a neighbour graph loaded after
+// a real neighbor_edges build, and must not move its watermark over rows it
+// failed to resolve because the graph was empty.
+
+// clearEdges188 empties neighbor_edges: a fresh or restored DB, or one whose
+// edges were pruned.
+func clearEdges188(t *testing.T, store *Store) {
+	t.Helper()
+	if _, err := store.db.Exec(`DELETE FROM neighbor_edges`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedEdgeSourceRow188 adds an observation with the 2-byte path ["c355"].
+// It names c3a uniquely, so a neighbor_edges build derives the edge
+// observer <-> c3a from it, and that edge resolves the 1-byte ["c3"] rows.
+func seedEdgeSourceRow188(t *testing.T, store *Store) {
+	t.Helper()
+	var obsIdx int64
+	if err := store.db.QueryRow(`SELECT rowid FROM observers WHERE id = ?`, strings.ToUpper(obs188)).Scan(&obsIdx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := store.db.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json) VALUES ('00', 'h188-edge-source', '2026-06-01T00:00:00Z', 1, 5, '{}')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID, _ := res.LastInsertId()
+	if _, err := store.db.Exec(`INSERT INTO observations (transmission_id, observer_idx, path_json, timestamp) VALUES (?, ?, '["c355"]', 1780272000)`, txID, obsIdx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// backfillWatermarkOrZero188 is the persisted watermark, or 0 when the pass
+// never created its state table.
+func backfillWatermarkOrZero188(t *testing.T, store *Store) int64 {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resolved_path_backfill_state'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		return 0
+	}
+	return persistedWatermark188(t, store)
+}
+
+func wantAllResolvedTo188(t *testing.T, store *Store, ids []int64, want string) {
+	t.Helper()
+	for _, id := range ids {
+		rp := resolvedPathOf188(t, store, id)
+		if !rp.Valid {
+			t.Fatalf("row %d is still NULL", id)
+		}
+		wantPath188(t, unmarshalResolvedPathLocal(rp.String), want)
+	}
+}
+
+// main.go starts the pass right after StartNeighborEdgesBuilder returns. The
+// graph the pass uses must be the one loaded after the builder's warm-up
+// build, not the snapshot loaded before it: on a DB with empty
+// neighbor_edges that snapshot is empty.
+func TestResolvedPathBackfill_UsesGraphFromFirstEdgeBuild_188(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	clearEdges188(t, store)
+	ids := seedNullRows188(t, store, 10)
+	seedEdgeSourceRow188(t, store)
+
+	stop := store.StartNeighborEdgesBuilder(time.Hour)
+	defer stop()
+	if _, err := store.RunResolvedPathBackfill(context.Background(), 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	wantAllResolvedTo188(t, store, ids, c3a)
+}
+
+// A neighbour edge build that finds no edges leaves an empty graph. A pass on
+// it resolves only unique prefixes, so it must refuse to run and keep its
+// watermark; once a build finds edges, the same rows resolve.
+func TestResolvedPathBackfill_EmptyGraphKeepsWatermark_188(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	clearEdges188(t, store)
+	ids := seedNullRows188(t, store, 5) // "c3" is ambiguous: the build derives no edge from it
+
+	stop := store.StartNeighborEdgesBuilder(time.Hour)
+	if _, err := store.RunResolvedPathBackfill(context.Background(), 10, 0); err == nil {
+		t.Fatal("the pass ran on an empty neighbour graph")
+	}
+	// A batch on its own must not commit a watermark either.
+	if err := ensureResolvedPathBackfillState(store.db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.resolvedPathBackfillBatch(context.Background(), 0, ids[len(ids)-1], 10); err == nil {
+		t.Fatal("a batch ran on an empty neighbour graph")
+	}
+	if w := backfillWatermarkOrZero188(t, store); w != 0 {
+		t.Fatalf("watermark moved to %d on an empty graph", w)
+	}
+	stop()
+
+	// Edges appear (here inserted directly; normally a later build derives them).
+	if _, err := store.db.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count, last_seen) VALUES (?, ?, 5, '2026-06-01T00:00:00Z')`, obs188, c3a); err != nil {
+		t.Fatal(err)
+	}
+	stop = store.StartNeighborEdgesBuilder(time.Hour)
+	defer stop()
+	res, err := store.RunResolvedPathBackfill(context.Background(), 10, 0)
+	if err != nil || res.Resolved != len(ids) {
+		t.Fatalf("pass after the edges appeared = %+v, %v; want %d resolved", res, err, len(ids))
+	}
+	wantAllResolvedTo188(t, store, ids, c3a)
+}
+
+// The background pass started before the first edge build (the order is a
+// caller's choice, and #141 rewrites main.go) waits for that build instead of
+// running on the snapshot it finds, then runs.
+func TestResolvedPathBackfill_StartWaitsForFirstEdgeBuild_188(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	clearEdges188(t, store)
+	ids := seedNullRows188(t, store, 10)
+	seedEdgeSourceRow188(t, store)
+	// The state before the warm-up build: index and an (empty) graph loaded.
+	if err := store.RefreshPrefixIndex(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RefreshNeighborGraph(); err != nil {
+		t.Fatal(err)
+	}
+
+	stopBackfill := store.StartResolvedPathBackfill(100, time.Millisecond)
+	defer stopBackfill()
+	time.Sleep(200 * time.Millisecond)
+	if w := backfillWatermarkOrZero188(t, store); w != 0 {
+		t.Fatalf("the pass committed watermark %d before the first edge build", w)
+	}
+
+	stopBuilder := store.StartNeighborEdgesBuilder(time.Hour)
+	defer stopBuilder()
+	deadline := time.Now().Add(5 * time.Second)
+	for !resolvedPathOf188(t, store, ids[len(ids)-1]).Valid {
+		if time.Now().After(deadline) {
+			t.Fatal("the pass did not run after the first edge build")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	wantAllResolvedTo188(t, store, ids, c3a)
+}
