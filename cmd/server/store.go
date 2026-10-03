@@ -5093,9 +5093,11 @@ const (
 	// under after insertion (see resolvedRelayBytes). Calibrated on this
 	// branch with TestTrackedBytesVsHeap_Measure_113: the marginal heap of a
 	// store with 1, 1.9 and 4 resolved keys per tx is 195, 264 and 449 B per
-	// tx, i.e. about 110 B per pathHopResolved record plus 85 B per key.
-	perResolvedRelayBytes  = 88  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeHashes entry and resolved-pubkey index entry
-	perResolvedRecordBytes = 112 // pathHopResolved map entry: key, slice header, bucket share, first backing array
+	// tx at 100k transmissions and 275, 355 and 592 B at 500k (map growth
+	// steps), i.e. 110-170 B per pathHopResolved record plus 85-105 B per
+	// key. These are the midpoints.
+	perResolvedRelayBytes  = 96  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeHashes entry and resolved-pubkey index entry
+	perResolvedRecordBytes = 140 // pathHopResolved map entry: key, slice header, bucket share, first backing array
 
 	// A typical tx is resolved to this many distinct relays. Used by
 	// estimateStoreTxBytesTypical only.
