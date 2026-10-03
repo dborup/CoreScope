@@ -76,6 +76,7 @@ node test-issue-1418-edge-weights.js
 node test-issue-1418-cb-preset-ramp.js
 node test-issue-1418-spider-fan.js
 node test-issue-1418-deeplink-hops-channels.js
+node test-issue-165-hop-ambiguity-badge.js
 node test-issue-1418-polish-review.js
 node test-issue-1420-tile-providers.js
 node test-issue-1614-tile-url-function.js
