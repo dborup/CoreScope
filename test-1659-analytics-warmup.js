@@ -128,7 +128,8 @@ function fakeEl(id) {
 // The analytics page on a server whose rf/topology/channels answer 503 +
 // Retry-After: 5 until warmMs on the fake clock, each response after
 // latencyMs (0: at once). opts.status and opts.retryAfter replace the
-// 503 and its Retry-After value; opts.realData answers with REAL.
+// 503 and its Retry-After value; opts.realData answers with REAL. The
+// tabs that fetch their own data get a small answer of their own (OWN_TABS).
 function pageEnv(warmMs, latencyMs, opts) {
   const errStatus = (opts && opts.status) || 503;
   const errRetryAfter = opts && 'retryAfter' in opts ? opts.retryAfter : '5';
@@ -159,13 +160,19 @@ function pageEnv(warmMs, latencyMs, opts) {
     if (/\/api\/analytics\/topology\b/.test(url)) return respond(200, WARM_TOPO);
     if (/\/api\/analytics\/channels\b/.test(url)) return respond(200, WARM_CHAN);
     if (/relay-airtime-share/.test(url)) return respond(200, { rows: [] });
+    for (const t of Object.values(OWN_TABS)) for (const [re, body] of t.responses) if (re.test(url)) return respond(200, body);
     return respond(200, {});
   };
   class FakeDate extends Date { static now() { return 1790000000000 + clock.now(); } }
   let regionCb = null, region = '';
   const pages = {};
+  const winListeners = {};
   const ctx = {
-    window: { addEventListener() {}, removeEventListener() {}, dispatchEvent() {} },
+    window: {
+      addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
+      removeEventListener(type, fn) { winListeners[type] = (winListeners[type] || []).filter((f) => f !== fn); },
+      dispatchEvent() {},
+    },
     document: {
       readyState: 'complete', body: { appendChild() {} }, head: { appendChild() {} },
       createElement: () => fakeEl(''), getElementById: el, addEventListener() {},
@@ -201,8 +208,36 @@ function pageEnv(warmMs, latencyMs, opts) {
       el('analyticsTabs').dispatch('click', { target: { closest: () => btn } });
     },
     analyticsFetches: () => fetchLog.filter((u) => /\/api\/analytics\/(rf|topology|channels)\b/.test(u)).length,
+    fetchesOf: (re) => fetchLog.filter((u) => re.test(u)).length,
+    // What app.js's theme debounce dispatches on window (#1925).
+    themeRefresh: () => { for (const fn of winListeners['theme-refresh'] || []) fn(); },
+    themeListeners: () => (winListeners['theme-refresh'] || []).length,
   };
 }
+
+// #172 r3: three tabs that fetch their own data, each with the endpoint it
+// fetches, a small answer for it and a marker that only its own render
+// function writes.
+const OWN_TABS = {
+  subpaths: {
+    fetches: /\/api\/analytics\/subpaths-bulk\b/,
+    responses: [[/\/api\/analytics\/subpaths-bulk\b/, { results: [0, 1, 2, 3].map(() => ({ subpaths: [], totalPaths: 0 })) }]],
+    marker: /Route Pattern Analysis/,
+  },
+  roles: {
+    fetches: /\/api\/analytics\/roles\b/,
+    responses: [[/\/api\/analytics\/roles\b/, { totalNodes: 3, roles: [{ role: 'repeater', nodeCount: 3, okCount: 3 }] }]],
+    marker: /data-role="repeater"/,
+  },
+  nodes: {
+    fetches: /\/api\/nodes\/bulk-health\b/,
+    responses: [
+      [/\/api\/nodes\/bulk-health\b/, [{ public_key: 'aa'.repeat(32), stats: { totalTransmissions: 9, avgSnr: 4 }, observers: [] }]],
+      [/\/api\/nodes\?/, { nodes: [{ public_key: 'aa'.repeat(32), name: 'Node A', role: 'repeater' }], total: 1, counts: { repeater: 1 } }],
+    ],
+    marker: /Node A/,
+  },
+};
 
 (async () => {
   console.log('\n=== #1659: api() retries on 503 with Retry-After ===');
@@ -437,6 +472,19 @@ function pageEnv(warmMs, latencyMs, opts) {
     assert.ok(/8,765|8765/.test(content.innerHTML), 'not the CPH data: ' + content.innerHTML.slice(0, 200));
   });
 
+  await test('a slow error of a superseded load is not shown during the newer one', async () => {
+    // rf answers 500 until 3.5 s, every response after 3 s.
+    const env = pageEnv(3500, 3000, { status: 500, retryAfter: null });
+    env.page.init(env.el('app'));               // all regions: the 500 at 3 s
+    const content = env.el('analyticsContent');
+    await env.clock.advance(1000);
+    env.regionChanged('CPH');                   // region CPH: the data at 4 s
+    await env.clock.advance(2500);
+    assert.ok(!/Failed to load/.test(content.innerHTML), 'the superseded load showed its error: ' + content.innerHTML.slice(0, 200));
+    await env.clock.advance(1000);
+    assert.ok(/8,765|8765/.test(content.innerHTML), 'not the CPH data: ' + content.innerHTML.slice(0, 200));
+  });
+
   console.log('\n=== #172 r2: in-flight sharing respects retry503 ===');
 
   // One request per path is shared while in flight, but a retry503:false
@@ -572,22 +620,72 @@ function pageEnv(warmMs, latencyMs, opts) {
     });
   }
 
-  await test('a tab that fetches its own data is not overwritten by the loading state', async () => {
-    const env = pageEnv(45000);
+  // #172 r3: the tab's OWN render function must run during the warm-up
+  // (its fetch goes out and its output is shown), and the load's 503
+  // retries must then leave that output alone.
+  for (const [tab, own] of Object.entries(OWN_TABS)) {
+    await test('clicking "' + tab + '" during the warm-up renders that tab, and the retries leave it alone', async () => {
+      const env = pageEnv(45000);
+      env.page.init(env.el('app'));
+      const content = env.el('analyticsContent');
+      await env.clock.advance(6000);
+      assert.ok(/still loading/i.test(content.innerHTML), 'not in the warm-up: ' + content.innerHTML.slice(0, 200));
+      const before = unexpectedRejections.length;
+      env.clickTab(tab);
+      await env.clock.advance(100);
+      const errs = unexpectedRejections.splice(before);
+      assert.strictEqual(errs.length, 0, 'the click threw: ' + errs.map((e) => e && e.message).join('; '));
+      assert.ok(env.fetchesOf(own.fetches) > 0, 'the ' + tab + ' tab did not fetch its own data');
+      assert.ok(own.marker.test(content.innerHTML), 'the ' + tab + ' tab was not rendered: ' + content.innerHTML.slice(0, 200));
+      assert.ok(!/still loading|Loading analytics/i.test(content.innerHTML), 'the load status is shown on ' + tab);
+      await env.clock.advance(20000);       // several 503 retries
+      assert.ok(own.marker.test(content.innerHTML), 'the loading state replaced the ' + tab + ' tab: ' + content.innerHTML.slice(0, 200));
+    });
+  }
+
+  console.log('\n=== #172 r3: a new load starts from "Loading", and theme-refresh during a load ===');
+
+  await test('after a failed load, a data tab clicked during the next load shows "Loading", not the old error', async () => {
+    // rf answers 500 until 5 s, every response after 3 s.
+    const env = pageEnv(5000, 3000, { status: 500, retryAfter: null, realData: true });
     env.page.init(env.el('app'));
     const content = env.el('analyticsContent');
-    await env.clock.advance(6000);
-    // Route patterns fetches its own data; a click makes it the current
-    // tab. What it renders in this fake DOM does not matter: a marker
-    // stands in for it, and the warm-up retries must leave it alone.
-    const before = unexpectedRejections.length;
-    env.clickTab('subpaths');
+    await env.clock.advance(4000);
+    assert.ok(/Failed to load/.test(content.innerHTML), 'no error from the first load: ' + content.innerHTML.slice(0, 200));
+    env.regionChanged('CPH');               // a new load; its answers come at 9 s
+    await env.clock.advance(2000);
+    env.clickTab('rf');
     await env.clock.advance(100);
-    unexpectedRejections.splice(before);
-    content.innerHTML = '<div id="own-tab">own data</div>';
-    await env.clock.advance(20000);       // several 503 retries
-    assert.ok(/own-tab/.test(content.innerHTML), 'the loading state replaced the selected tab: ' + content.innerHTML.slice(0, 200));
+    assert.ok(!/Failed to load/.test(content.innerHTML), 'the old error is shown during the new load: ' + content.innerHTML.slice(0, 200));
+    assert.ok(/Loading analytics/.test(content.innerHTML), 'no loading state during the new load: ' + content.innerHTML.slice(0, 200));
+    await env.clock.advance(3000);
+    assert.ok(/SNR Distribution/.test(content.innerHTML), 'the new load did not render the rf tab: ' + content.innerHTML.slice(0, 200));
   });
+
+  for (const tab of ['overview', 'rf']) {
+    await test('theme-refresh on "' + tab + '" during the warm-up keeps the loading state, then the data renders', async () => {
+      const env = pageEnv(45000, 0, { realData: true });
+      env.page.init(env.el('app'));
+      const content = env.el('analyticsContent');
+      assert.strictEqual(env.themeListeners(), 1, 'the page did not listen for theme-refresh');
+      await env.clock.advance(6000);
+      if (tab !== 'overview') env.clickTab(tab);
+      await env.clock.advance(100);
+      const before = unexpectedRejections.length;
+      env.themeRefresh();
+      await env.clock.advance(100);
+      const errs = unexpectedRejections.splice(before);
+      assert.strictEqual(errs.length, 0, 'theme-refresh threw: ' + errs.map((e) => e && e.message).join('; '));
+      assert.ok(/still loading/i.test(content.innerHTML) && /role="status"/.test(content.innerHTML),
+        'no loading state after theme-refresh: ' + content.innerHTML.slice(0, 200));
+      await env.clock.advance(45000);
+      env.themeRefresh();                   // once more, now with data
+      await env.clock.advance(100);
+      const late = unexpectedRejections.splice(before);
+      assert.strictEqual(late.length, 0, 'rendering threw: ' + late.map((e) => e && e.message).join('; '));
+      assert.ok(DATA_TABS[tab].test(content.innerHTML), 'not the ' + tab + ' data: ' + content.innerHTML.slice(0, 200));
+    });
+  }
 
   if (unexpectedRejections.length) {
     failed++;
