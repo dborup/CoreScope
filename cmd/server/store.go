@@ -583,6 +583,11 @@ type PacketStore struct {
 	// (e.g. RefreshRouteMaskChanges). Test-only (#89 route_mask_changes
 	// watermark placement).
 	loadScannedRowHook func()
+	// ingestAfterQueryHook, if non-nil, runs in IngestNewFromDB and
+	// IngestNewObservations right after the SQL query succeeded and before
+	// its rows are scanned. Test-only: flips an optional-column schema flag
+	// between query construction and Scan (#158 follow-up).
+	ingestAfterQueryHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -2815,23 +2820,25 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	// ingestor's persisted resolution, exactly as Load feeds them
 	// (indexObservationRelayHops, #158 follow-up). The server still resolves
 	// each path itself for the live broadcast.
+	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
+	cols := s.db.ingestCols()
 	var querySQL string
 	obsRHCol := ""
-	if s.db.hasObsRawHex() {
+	if cols.obsRawHex {
 		obsRHCol = ", o.raw_hex"
 	}
 	rpCol := ""
-	if s.db.hasResolvedPath() {
+	if cols.resolvedPath {
 		rpCol = ", o.resolved_path"
 	}
 	// #1751: scope_name is on the transmission row; append as the last column.
 	scopeNameCol := ""
-	if s.db.hasScopeName() {
+	if cols.scopeName {
 		scopeNameCol = ", t.scope_name"
 	}
 	// #89: route_mask follows scope_name as the last optional column.
 	routeMaskCol := ""
-	if s.db.hasRouteMask() {
+	if cols.routeMask {
 		routeMaskCol = ", t.route_mask"
 	}
 	if s.db.isV3() {
@@ -2862,6 +2869,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		return nil, sinceID
 	}
 	defer rows.Close()
+	if s.ingestAfterQueryHook != nil {
+		s.ingestAfterQueryHook()
+	}
 
 	// Scan into temp structures
 	type tempRow struct {
@@ -2899,16 +2909,16 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			&payloadVersion, &decodedJSON,
 			&obsIDVal, &observerID, &observerName, &observerIATA, &direction,
 			&snrVal, &rssiVal, &scoreVal, &pathJSON, &obsTimestamp}
-		if s.db.hasObsRawHex() {
+		if cols.obsRawHex {
 			scanArgs2 = append(scanArgs2, &obsRawHex)
 		}
-		if s.db.hasResolvedPath() {
+		if cols.resolvedPath {
 			scanArgs2 = append(scanArgs2, &resolvedPath)
 		}
-		if s.db.hasScopeName() {
+		if cols.scopeName {
 			scanArgs2 = append(scanArgs2, &scopeName)
 		}
-		if s.db.hasRouteMask() {
+		if cols.routeMask {
 			scanArgs2 = append(scanArgs2, &routeMask)
 		}
 		if err := rows.Scan(scanArgs2...); err != nil {
@@ -3264,20 +3274,22 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		limit = 500
 	}
 
+	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
+	cols := s.db.ingestCols()
 	var querySQL string
 	obsRHCol2 := ""
-	if s.db.hasObsRawHex() {
+	if cols.obsRawHex {
 		obsRHCol2 = ", o.raw_hex"
 	}
 	// resolved_path feeds the relay-hop indexes as in Load (#158 follow-up).
 	rpCol2 := ""
-	if s.db.hasResolvedPath() {
+	if cols.resolvedPath {
 		rpCol2 = ", o.resolved_path"
 	}
 	// #89: the transmission's current route_mask rides along with each new
 	// observation so the live view converges with a cold load.
 	routeMaskCol2, routeMaskJoin2 := "", ""
-	if s.db.hasRouteMask() {
+	if cols.routeMask {
 		routeMaskCol2 = ", t.route_mask"
 		routeMaskJoin2 = "\n\t\t\tLEFT JOIN transmissions t ON t.id = o.transmission_id"
 	}
@@ -3305,6 +3317,9 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		return nil
 	}
 	defer rows.Close()
+	if s.ingestAfterQueryHook != nil {
+		s.ingestAfterQueryHook()
+	}
 
 	type obsRow struct {
 		obsID        int
@@ -3334,13 +3349,13 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 
 		scanArgs3 := []interface{}{&oid, &txID, &observerID, &observerName, &observerIATA, &direction,
 			&snr, &rssi, &score, &pathJSON, &ts}
-		if s.db.hasObsRawHex() {
+		if cols.obsRawHex {
 			scanArgs3 = append(scanArgs3, &obsRawHex)
 		}
-		if s.db.hasResolvedPath() {
+		if cols.resolvedPath {
 			scanArgs3 = append(scanArgs3, &resolvedPath)
 		}
-		if s.db.hasRouteMask() {
+		if cols.routeMask {
 			scanArgs3 = append(scanArgs3, &routeMask)
 		}
 		if err := rows.Scan(scanArgs3...); err != nil {
