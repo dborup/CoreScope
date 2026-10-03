@@ -226,6 +226,13 @@ func resolveHopWithContext(hop string, anchor string, graph *NeighborGraph, idx 
 // node. Returns a `[]*string` shape compatible with
 // marshalResolvedPath (and the all-nil clobber-guard from PR #1548).
 func resolvePathWithContext(hops []string, fromPubkey string, graph *NeighborGraph, idx prefixIndex) []*string {
+	return resolvePathForward(hops, fromPubkey, "", graph, idx)
+}
+
+// resolvePathForward is the forward walk of resolvePathWithContext. notLast
+// (lower-case), when set, is not a candidate for the last hop (#188: the
+// observer of a flood path, see resolveObservationPath).
+func resolvePathForward(hops []string, fromPubkey, notLast string, graph *NeighborGraph, idx prefixIndex) []*string {
 	if len(hops) == 0 {
 		return nil
 	}
@@ -234,11 +241,14 @@ func resolvePathWithContext(hops []string, fromPubkey string, graph *NeighborGra
 		return out
 	}
 	prevAnchor := strings.ToLower(fromPubkey)
-	seen := make(map[string]struct{}, len(hops)+1)
+	seen := make(map[string]struct{}, len(hops)+2)
 	if prevAnchor != "" {
 		seen[prevAnchor] = struct{}{}
 	}
 	for i, hop := range hops {
+		if notLast != "" && i == len(hops)-1 {
+			seen[notLast] = struct{}{}
+		}
 		r := resolveHopWithContext(hop, prevAnchor, graph, idx, seen)
 		out[i] = r
 		if r != nil {
@@ -307,13 +317,22 @@ func isFloodRoute(routeType int) bool {
 
 // resolveObservationPath resolves one observation's hops for
 // observations.resolved_path. It runs the forward chain from fromPubkey
-// (resolvePathWithContext); for a flood packet whose forward chain left a
-// hop nil, it also runs a backward chain from the observer and merges the
-// two (mergeForwardBackward). Both chains use resolveHopWithContext, so a
-// hop resolves only to a unique candidate: no geo, GPS or count tie-break.
+// (resolvePathForward, the walk behind resolvePathWithContext); for a flood
+// packet whose forward chain left a hop nil, it also runs a backward chain
+// from the observer and merges the two (mergeForwardBackward). Both chains
+// use resolveHopWithContext, so a hop resolves only to a unique candidate:
+// no geo, GPS or count tie-break.
+//
+// In a flood path, the observer is never the last hop: a radio does not
+// receive its own transmission. Both chains leave that hop nil rather than
+// name the observer, even when its prefix is unique (PR #190 review).
 func resolveObservationPath(hops []string, fromPubkey, observer string, routeType int, graph *NeighborGraph, idx prefixIndex) []*string {
-	fwd := resolvePathWithContext(hops, fromPubkey, graph, idx)
-	if graph == nil || idx == nil || observer == "" || !isFloodRoute(routeType) || !hasNil(fwd) {
+	if !isFloodRoute(routeType) {
+		return resolvePathWithContext(hops, fromPubkey, graph, idx)
+	}
+	observer = strings.ToLower(observer)
+	fwd := resolvePathForward(hops, fromPubkey, observer, graph, idx)
+	if graph == nil || idx == nil || observer == "" || !hasNil(fwd) {
 		return fwd
 	}
 	return mergeForwardBackward(fwd, resolvePathBackward(hops, fromPubkey, observer, graph, idx))
@@ -323,15 +342,25 @@ func resolveObservationPath(hops []string, fromPubkey, observer string, routeTyp
 // anchored on the observer, each earlier hop on the hop after it; a hop that
 // does not resolve breaks the chain, as in the forward walk. fromPubkey and
 // already resolved hops are excluded from later candidate pools.
+//
+// The observer (lower-case) is excluded from the last hop only. It stays a
+// candidate for earlier hops: it logs a packet before de-duplication
+// (Dispatcher.cpp logRx runs before processRecvPacket), so it can report the
+// echo of a flood it forwarded itself.
 func resolvePathBackward(hops []string, fromPubkey, observer string, graph *NeighborGraph, idx prefixIndex) []*string {
 	out := make([]*string, len(hops))
-	anchor := strings.ToLower(observer)
-	seen := make(map[string]struct{}, len(hops)+1)
+	anchor := observer
+	seen := make(map[string]struct{}, len(hops)+2)
 	if fp := strings.ToLower(fromPubkey); fp != "" {
 		seen[fp] = struct{}{}
 	}
+	_, observerSeen := seen[observer]
+	seen[observer] = struct{}{}
 	for i := len(hops) - 1; i >= 0; i-- {
 		r := resolveHopWithContext(hops[i], anchor, graph, idx, seen)
+		if i == len(hops)-1 && !observerSeen {
+			delete(seen, observer)
+		}
 		out[i] = r
 		if r != nil {
 			seen[*r] = struct{}{}
