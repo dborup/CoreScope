@@ -156,6 +156,26 @@ func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsF
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
 func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
 
+// ingestCols is one reading of the optional-column flags an ingest query
+// depends on. A caller takes ONE snapshot and uses it for both the SELECT
+// list and the Scan destinations: the flags are atomics that the schema
+// healer (or main.go's forceTrue) may latch between two reads, and a query
+// built with one answer scanned with the other fails Scan with the wrong
+// destination count -- an error the ingest loops swallow, silently dropping
+// the row (#158 follow-up).
+type ingestCols struct {
+	obsRawHex, resolvedPath, scopeName, routeMask bool
+}
+
+func (db *DB) ingestCols() ingestCols {
+	return ingestCols{
+		obsRawHex:    db.hasObsRawHex(),
+		resolvedPath: db.hasResolvedPath(),
+		scopeName:    db.hasScopeName(),
+		routeMask:    db.hasRouteMask(),
+	}
+}
+
 // OpenDB opens a read-only SQLite connection with WAL mode.
 func OpenDB(path string) (*DB, error) {
 	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", path)

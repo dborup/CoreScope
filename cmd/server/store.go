@@ -583,6 +583,16 @@ type PacketStore struct {
 	// (e.g. RefreshRouteMaskChanges). Test-only (#89 route_mask_changes
 	// watermark placement).
 	loadScannedRowHook func()
+	// ingestAfterQueryHook, if non-nil, runs in IngestNewFromDB and
+	// IngestNewObservations right after the SQL query succeeded and before
+	// its rows are scanned. Test-only: flips an optional-column schema flag
+	// between query construction and Scan (#158 follow-up).
+	ingestAfterQueryHook func()
+	// ingestAfterColsHook, if non-nil, runs in the same two functions right
+	// after the ingestCols snapshot and before the query is built. Test-only:
+	// flips a flag so a query built from a fresh flag read instead of the
+	// snapshot is caught too.
+	ingestAfterColsHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -920,11 +930,14 @@ func (s *PacketStore) Load() error {
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
-	// Relay-hop fallback inputs. When resolved_path is empty (always, on
-	// live, since #1287 the ingestor persists relay data as neighbor_edges
-	// instead) we re-resolve relay hops from path_json using the prefix
-	// map. PR #1643 R1 munger #1: cold load resolves ONLY when the prefix
-	// is unique (no affinity tiebreak against ≤168h-old observations,
+	// Relay-hop inputs. The ingestor persists observations.resolved_path
+	// (#1547) with its conservative resolver (#1560), so a persisted value
+	// feeds indexResolvedPathHops. It is NULL when the ingestor could not
+	// resolve the path (a large share of observations, see #184); then we
+	// re-resolve relay hops from path_json using the prefix map, into
+	// byNode only (indexObservationRelayHops). PR #1643 R1 munger #1: cold
+	// load resolves ONLY when the prefix is unique (no affinity tiebreak
+	// against ≤168h-old observations,
 	// which would silently mis-attribute hops). Fetched BEFORE opening
 	// the rows cursor below: getCachedNodesAndPM issues its own DB query,
 	// which would deadlock against the still-open cursor on a single-
@@ -1037,29 +1050,8 @@ func (s *PacketStore) Load() error {
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
 			}
 
-			// Decode-window: extract resolved pubkeys for index, don't store on struct.
-			rpStr := nullStrVal(resolvedPathStr)
-			if rpStr != "" {
-				rp := unmarshalResolvedPath(rpStr)
-				pks := extractResolvedPubkeys(rp)
-				// Single point of truth — see indexResolvedPathHops doc + #1558.
-				s.indexResolvedPathHops(tx, pks, hopsSeen)
-			} else if relayPM != nil && obsPJ != "" && obsPJ != "[]" {
-				// resolved_path not persisted — reconstruct relay hops from
-				// path_json so relay-node analytics history survives a restart.
-				// Index into byNode ONLY: the resolved_path / path-hop indexes
-				// (indexResolvedPathHops) are cross-checked by handleNodePaths
-				// against the persisted resolved_path column, which is NULL
-				// here — populating them would make that SQL confirmation fail
-				// and wrongly drop the tx from paths-through (#1352). byNode is
-				// what the node-analytics activity timeline reads.
-				// PR #1643 R1 munger #1: gate on unique_prefix only — ambiguous
-				// hops are silently dropped (skipped counter logged at end).
-				rp := resolvePathForObsColdLoad(obsPJ, obsIDStr, tx, relayPM, &coldLoadAmbiguousHopsSkipped)
-				for _, pk := range extractResolvedPubkeys(rp) {
-					s.addToByNode(tx, pk)
-				}
-			}
+			// Decode-window: feed the relay-hop indexes, don't store on struct.
+			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, &coldLoadAmbiguousHopsSkipped)
 
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
@@ -1242,11 +1234,12 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
-	// Relay-hop fallback inputs. observations.resolved_path is NULL on
-	// every live deployment (since #1287 the ingestor persists relay data
-	// as aggregate neighbor_edges, not per-observation resolved_path), so
-	// for this background-loaded older window we re-resolve relay hops
-	// from the persisted path_json using the prefix map. PR #1643 R1
+	// Relay-hop inputs. A persisted observations.resolved_path (#1547,
+	// conservative resolver #1560) feeds indexResolvedPathHops; where it is
+	// NULL (the ingestor could not resolve the path, a large share of
+	// observations, see #184) this background-loaded older window
+	// re-resolves relay hops from the persisted path_json using the prefix
+	// map, into byNode only (indexObservationRelayHops). PR #1643 R1
 	// munger #1: cold load resolves ONLY when the prefix is unique
 	// (affinity-tier resolution against ≤168h-old observations would
 	// silently mis-attribute hops). Fetched BEFORE opening the rows
@@ -1875,8 +1868,9 @@ func pathFirstHop(pathJSON string) string {
 // Caller contract:
 //   - Must hold s.mu write lock (addToByNode / addToResolvedPubkeyIndex /
 //     addResolvedPubkeysToPathHopIndex all mutate store state).
-//   - pks should be the output of extractResolvedPubkeys (no nils, no
-//     empties); the helper is a no-op when pks is empty.
+//   - pks should be the output of extractResolvedPubkeys, or the pubkeys
+//     of decodePersistedRelayPath (both drop nils and empties); the helper
+//     is a no-op when pks is empty.
 //   - hopsSeen is a reusable scratch map; addResolvedPubkeysToPathHopIndex
 //     clear()s it on entry.
 //   - Safe to call once per observation: every index it feeds is
@@ -1892,6 +1886,76 @@ func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen 
 	}
 	s.addResolvedPubkeysToPathHopIndex(tx, pks, hopsSeen)
 	s.addToResolvedPubkeyIndex(tx.ID, pks)
+}
+
+// persistedRelayPath is a decoded observations.resolved_path column value.
+// present distinguishes a persisted (possibly all-null) path from a NULL
+// column, which takes the path_json fallback in indexObservationRelayHops.
+type persistedRelayPath struct {
+	pubkeys []string
+	present bool
+}
+
+// decodePersistedRelayPath decodes a resolved_path column value. It is pure
+// and takes no lock: the live ingest paths call it while scanning rows,
+// before s.mu is taken, so the JSON work does not extend the critical
+// section (#158 follow-up).
+//
+// The result equals extractResolvedPubkeys(unmarshalResolvedPath(s)). It
+// decodes straight into []string (a JSON null becomes "", which is what
+// extractResolvedPubkeys drops) and compacts in place, saving the *string
+// allocated per hop and the second slice on a path that runs once per
+// observation.
+func decodePersistedRelayPath(resolvedPath string) persistedRelayPath {
+	if resolvedPath == "" {
+		return persistedRelayPath{}
+	}
+	var hops []string
+	if json.Unmarshal([]byte(resolvedPath), &hops) != nil {
+		return persistedRelayPath{present: true} // as unmarshalResolvedPath: corrupt means no hops
+	}
+	n := 0
+	for _, h := range hops {
+		if h != "" {
+			hops[n] = h
+			n++
+		}
+	}
+	if n == 0 {
+		return persistedRelayPath{present: true}
+	}
+	return persistedRelayPath{pubkeys: hops[:n], present: true}
+}
+
+// indexObservationRelayHops feeds the relay-hop indexes from one stored
+// observation. Every path that materializes an observation (Load,
+// scanAndMergeChunk, IngestNewFromDB, IngestNewObservations) goes through
+// it, so a transmission is indexed under the same relays whether it was
+// loaded at startup or ingested live. The ingestor persists resolved_path
+// in the same row it inserts (#1547) and leaves a hop null when the prefix
+// is ambiguous (#1560); those pubkeys go to indexResolvedPathHops. Without
+// a persisted resolved_path, path_json is re-resolved on unique prefixes
+// only and fed to byNode only (#1352, PR #1643).
+//
+// Live ingest used to index the server's own resolution instead, which
+// always picks a candidate and can pick a different one per observer, so
+// traffic share counted live transmissions for more relays than loaded
+// ones and its sum rose with uptime (#158 follow-up).
+//
+// persisted is the decoded resolved_path (decodePersistedRelayPath), taken
+// outside the lock by the live paths. skipped counts ambiguous cold-load
+// hops (may be nil). Must hold s.mu.
+func (s *PacketStore) indexObservationRelayHops(tx *StoreTx, persisted persistedRelayPath, pathJSON, observerID string, relayPM *prefixMap, hopsSeen map[string]bool, skipped *int) {
+	if persisted.present {
+		s.indexResolvedPathHops(tx, persisted.pubkeys, hopsSeen)
+		return
+	}
+	if relayPM == nil || pathJSON == "" || pathJSON == "[]" {
+		return
+	}
+	for _, pk := range extractResolvedPubkeys(resolvePathForObsColdLoad(pathJSON, observerID, tx, relayPM, skipped)) {
+		s.addToByNode(tx, pk)
+	}
 }
 
 // indexByNode extracts pubkeys from decoded_json and indexes the transmission.
@@ -2803,29 +2867,39 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		limit = 100
 	}
 
-	// NOTE: The SQL query intentionally does NOT select resolved_path from the DB.
-	// New ingests always resolve fresh using the current prefix map and neighbor graph.
-	// On restart, Load() handles reading persisted resolved_path values. (review item #7)
+	// resolved_path is selected so the relay-hop indexes are fed from the
+	// ingestor's persisted resolution, exactly as Load feeds them
+	// (indexObservationRelayHops, #158 follow-up). The server still resolves
+	// each path itself for the live broadcast.
+	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
+	cols := s.db.ingestCols()
+	if s.ingestAfterColsHook != nil {
+		s.ingestAfterColsHook()
+	}
 	var querySQL string
 	obsRHCol := ""
-	if s.db.hasObsRawHex() {
+	if cols.obsRawHex {
 		obsRHCol = ", o.raw_hex"
+	}
+	rpCol := ""
+	if cols.resolvedPath {
+		rpCol = ", o.resolved_path"
 	}
 	// #1751: scope_name is on the transmission row; append as the last column.
 	scopeNameCol := ""
-	if s.db.hasScopeName() {
+	if cols.scopeName {
 		scopeNameCol = ", t.scope_name"
 	}
 	// #89: route_mask follows scope_name as the last optional column.
 	routeMaskCol := ""
-	if s.db.hasRouteMask() {
+	if cols.routeMask {
 		routeMaskCol = ", t.route_mask"
 	}
 	if s.db.isV3() {
 		querySQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol + scopeNameCol + routeMaskCol + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -2835,7 +2909,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		querySQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol + scopeNameCol + routeMaskCol + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.id = o.observer_id
@@ -2849,6 +2923,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		return nil, sinceID
 	}
 	defer rows.Close()
+	if s.ingestAfterQueryHook != nil {
+		s.ingestAfterQueryHook()
+	}
 
 	// Scan into temp structures
 	type tempRow struct {
@@ -2858,6 +2935,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		obsID                                                              *int
 		observerID, observerName, observerIATA, direction, pathJSON, obsTS string
 		obsRawHex                                                          string
+		resolvedPath                                                       persistedRelayPath
 		scopeName                                                          string
 		routeMask                                                          sql.NullInt64
 		snr, rssi                                                          *float64
@@ -2877,6 +2955,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		var snrVal, rssiVal sql.NullFloat64
 		var scoreVal sql.NullInt64
 		var obsRawHex sql.NullString
+		var resolvedPath sql.NullString
 		var scopeName sql.NullString
 		var routeMask sql.NullInt64
 
@@ -2884,13 +2963,16 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			&payloadVersion, &decodedJSON,
 			&obsIDVal, &observerID, &observerName, &observerIATA, &direction,
 			&snrVal, &rssiVal, &scoreVal, &pathJSON, &obsTimestamp}
-		if s.db.hasObsRawHex() {
+		if cols.obsRawHex {
 			scanArgs2 = append(scanArgs2, &obsRawHex)
 		}
-		if s.db.hasScopeName() {
+		if cols.resolvedPath {
+			scanArgs2 = append(scanArgs2, &resolvedPath)
+		}
+		if cols.scopeName {
 			scanArgs2 = append(scanArgs2, &scopeName)
 		}
-		if s.db.hasRouteMask() {
+		if cols.routeMask {
 			scanArgs2 = append(scanArgs2, &routeMask)
 		}
 		if err := rows.Scan(scanArgs2...); err != nil {
@@ -2920,6 +3002,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			pathJSON:     nullStrVal(pathJSON),
 			obsTS:        nullStrVal(obsTimestamp),
 			obsRawHex:    nullStrVal(obsRawHex),
+			resolvedPath: decodePersistedRelayPath(nullStrVal(resolvedPath)), // outside s.mu
 			scopeName:    nullStrVal(scopeName),
 			routeMask:    routeMask,
 			snr:          nullFloatPtr(snrVal),
@@ -3032,15 +3115,14 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				Timestamp:      normalizeTimestamp(r.obsTS),
 			}
 
-			// Resolve path at ingest time using neighbor graph — decode-window discipline:
-			// decode once, feed consumers, never store on struct.
-			var resolvedPubkeys []string
+			// Relay-hop indexes: same input as Load (#158 follow-up).
+			// Decode-window discipline: decode once, feed consumers, never
+			// store on struct.
+			s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.observerID, cachedPM, hopsSeen, nil)
+			// The live broadcast still shows the server's own resolution.
 			var rpForBroadcast []*string
 			if r.pathJSON != "" && r.pathJSON != "[]" && cachedPM != nil {
 				rpForBroadcast = resolvePathForObs(r.pathJSON, r.observerID, tx, cachedPM, cachedGraph)
-				resolvedPubkeys = extractResolvedPubkeys(rpForBroadcast)
-				// Single point of truth — see indexResolvedPathHops doc + #1558.
-				s.indexResolvedPathHops(tx, resolvedPubkeys, hopsSeen)
 			}
 			// Stash rpForBroadcast for later broadcast/persist (keyed by obs ID)
 			if rpForBroadcast != nil {
@@ -3246,21 +3328,31 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		limit = 500
 	}
 
+	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
+	cols := s.db.ingestCols()
+	if s.ingestAfterColsHook != nil {
+		s.ingestAfterColsHook()
+	}
 	var querySQL string
 	obsRHCol2 := ""
-	if s.db.hasObsRawHex() {
+	if cols.obsRawHex {
 		obsRHCol2 = ", o.raw_hex"
+	}
+	// resolved_path feeds the relay-hop indexes as in Load (#158 follow-up).
+	rpCol2 := ""
+	if cols.resolvedPath {
+		rpCol2 = ", o.resolved_path"
 	}
 	// #89: the transmission's current route_mask rides along with each new
 	// observation so the live view converges with a cold load.
 	routeMaskCol2, routeMaskJoin2 := "", ""
-	if s.db.hasRouteMask() {
+	if cols.routeMask {
 		routeMaskCol2 = ", t.route_mask"
 		routeMaskJoin2 = "\n\t\t\tLEFT JOIN transmissions t ON t.id = o.transmission_id"
 	}
 	if s.db.isV3() {
 		querySQL = `SELECT o.id, o.transmission_id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol2 + routeMaskCol2 + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol2 + rpCol2 + routeMaskCol2 + `
 			FROM observations o
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx` + routeMaskJoin2 + `
 			WHERE o.id > ?
@@ -3268,7 +3360,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			LIMIT ?`
 	} else {
 		querySQL = `SELECT o.id, o.transmission_id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol2 + routeMaskCol2 + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol2 + rpCol2 + routeMaskCol2 + `
 			FROM observations o
 			LEFT JOIN observers obs ON obs.id = o.observer_id` + routeMaskJoin2 + `
 			WHERE o.id > ?
@@ -3282,6 +3374,9 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		return nil
 	}
 	defer rows.Close()
+	if s.ingestAfterQueryHook != nil {
+		s.ingestAfterQueryHook()
+	}
 
 	type obsRow struct {
 		obsID        int
@@ -3294,6 +3389,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		score        *int
 		pathJSON     string
 		rawHex       string
+		resolvedPath persistedRelayPath
 		timestamp    string
 		routeMask    sql.NullInt64
 	}
@@ -3305,14 +3401,18 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		var snr, rssi sql.NullFloat64
 		var score sql.NullInt64
 		var obsRawHex sql.NullString
+		var resolvedPath sql.NullString
 		var routeMask sql.NullInt64
 
 		scanArgs3 := []interface{}{&oid, &txID, &observerID, &observerName, &observerIATA, &direction,
 			&snr, &rssi, &score, &pathJSON, &ts}
-		if s.db.hasObsRawHex() {
+		if cols.obsRawHex {
 			scanArgs3 = append(scanArgs3, &obsRawHex)
 		}
-		if s.db.hasRouteMask() {
+		if cols.resolvedPath {
+			scanArgs3 = append(scanArgs3, &resolvedPath)
+		}
+		if cols.routeMask {
 			scanArgs3 = append(scanArgs3, &routeMask)
 		}
 		if err := rows.Scan(scanArgs3...); err != nil {
@@ -3331,6 +3431,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			score:        nullIntPtr(score),
 			pathJSON:     nullStrVal(pathJSON),
 			rawHex:       nullStrVal(obsRawHex),
+			resolvedPath: decodePersistedRelayPath(nullStrVal(resolvedPath)), // outside s.mu
 			timestamp:    nullStrVal(ts),
 			routeMask:    routeMask,
 		})
@@ -3395,16 +3496,13 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			Timestamp: normalizeTimestamp(r.timestamp),
 		}
 
-		// Resolve path at ingest time for late-arriving observations (review item #2).
+		// Relay-hop indexes: same input as Load (#158 follow-up).
 		// Decode-window discipline: decode, feed consumers, don't store on struct.
+		s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.observerID, pm, hopsSeen, nil)
+		// The live broadcast still shows the server's own resolution (review item #2).
 		var obsResolvedPath []*string
-		if r.pathJSON != "" && r.pathJSON != "[]" {
-			if pm != nil {
-				obsResolvedPath = resolvePathForObs(r.pathJSON, r.observerID, tx, pm, graphRef)
-				pks := extractResolvedPubkeys(obsResolvedPath)
-				// Single point of truth — see indexResolvedPathHops doc + #1558.
-				s.indexResolvedPathHops(tx, pks, hopsSeen)
-			}
+		if r.pathJSON != "" && r.pathJSON != "[]" && pm != nil {
+			obsResolvedPath = resolvePathForObs(r.pathJSON, r.observerID, tx, pm, graphRef)
 		}
 		// Stash for broadcast/persist
 		if obsResolvedPath != nil {
