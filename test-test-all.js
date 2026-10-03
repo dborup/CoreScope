@@ -130,8 +130,6 @@ test('test-all.sh registers itself through this test', () => {
 // test past the check below: register it instead.
 const KNOWN_UNREGISTERED = {
   // red unit tests (stale after intended UI changes)
-  'test-channel-ux-followup.js': 'red: copy text changed by the Phosphor migration',
-  'test-channel-ux-round2.js': 'red: expects the 📤 glyph, now #ph-share-network',
   'test-drag-manager.js': 'red: removeAttribute mock does not update dataset (#1567)',
   'test-fluid-scaffolding.js': 'red: reads only the first :root block',
   'test-hop-resolver-affinity.js': 'red: fixture geometry wrong since #874',
