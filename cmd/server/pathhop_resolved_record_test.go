@@ -156,3 +156,26 @@ func TestCountDistinctNonAdvert_PathHopDedupe(t *testing.T) {
 		}
 	}
 }
+
+// When the index being rebuilt holds no resolved entries at all, nothing is
+// indexed under any resolved key any more, so the record must not claim
+// otherwise: the next observation has to put the transmission back.
+func TestPathHopResolvedRecordClearedWithEmptyIndex_PathHopDedupe(t *testing.T) {
+	store, _, young := phdRecordStore(40)
+	store.byPathHop = make(map[string][]*StoreTx) // nothing carried over
+
+	store.mu.Lock()
+	store.buildPathHopIndex()
+	store.mu.Unlock()
+
+	if got := len(store.pathHopResolved); got != 0 {
+		t.Fatalf("record still holds %d transmissions after a rebuild from an empty index", got)
+	}
+	hopsSeen := map[string]bool{}
+	for _, tx := range young {
+		store.indexResolvedPathHops(tx, []string{phdRecordKey1, phdRecordKey2}, hopsSeen)
+		if n := phdEntriesOf(store, tx); n != phdRecordRefsPerTx {
+			t.Fatalf("tx %d has %d entries after the rebuild and another observation, want %d", tx.ID, n, phdRecordRefsPerTx)
+		}
+	}
+}
