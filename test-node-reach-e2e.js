@@ -65,9 +65,13 @@ async function getJson(page, url) {
       if (!href || !href.startsWith('#/nodes/')) throw new Error('neighbour link malformed: ' + href);
     }
 
-    // Map must render whenever at least one link has GPS (no swallowed failure).
-    if (reach.links.some(l => l.lat != null && l.lon != null)) {
-      await page.waitForSelector('#nqMap .leaflet-container', { timeout: 10000 });
+    // Map must render whenever the node and at least one link have GPS (no
+    // swallowed failure). node-reach.js only builds the map when the node
+    // itself has a location. L.map('nqMap') puts .leaflet-container on #nqMap
+    // itself, so the selector is a compound one, not a descendant one.
+    if (reach.node.lat != null && reach.links.some(l => l.lat != null && l.lon != null)) {
+      await page.waitForSelector('#nqMap.leaflet-container', { timeout: 10000 });
+      await page.waitForSelector('#nqMap .leaflet-map-pane', { state: 'attached', timeout: 10000 });
     }
   }
 

@@ -529,6 +529,7 @@ jobs:
           # Root E2Es repaired or ported to plain playwright in #189.
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-live-pulse-ring-weight-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channel-modal-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-node-reach-e2e.js 2>&1 | tee -a e2e-output.txt
 
       # #1616: slide-over focus-restore flake-gate. Runs the slide-over
       # E2E 20 consecutive times against the SAME backend instance so
