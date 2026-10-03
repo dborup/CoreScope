@@ -1371,7 +1371,7 @@ A proposal:
 
 In `GET /api/admin/channel-proposals` each proposal may also carry `"builtIn": true` (see [Built-in names](#built-in-names)).
 
-State machine: `pending` → `approved` or `rejected` (admin decision); `approved` → `revoked` (admin revoke, see below); `revoked` → `pending` by suggesting the same name again (never auto-approved — see POST /api/channel-proposals). `rejected` is terminal: suggesting a rejected name again reports the earlier rejection and does not reopen it, until retention deletes the rejected row `channelProposals.retentionDays` (default 30) days after the review; from then on the name can be suggested afresh. This keeps a rejected name from being pushed back into the review queue over and over.
+State machine: a new name becomes `pending` by default, or `approved` immediately if `channelProposals.autoApprove` is enabled. An administrator can move `pending` → `approved` or `rejected`; `approved` → `revoked` (see below); `revoked` → `pending` by suggesting the same name again (never auto-approved). An existing `pending` or `rejected` name is never auto-approved by another suggestion. `rejected` is terminal: suggesting a rejected name again reports the earlier rejection and does not reopen it, until retention deletes the rejected row `channelProposals.retentionDays` (default 30) days after the review; from then on the name can be suggested afresh. This keeps a rejected name from being pushed back into the review queue over and over while its row is retained.
 
 ### Built-in names
 
