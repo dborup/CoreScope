@@ -237,6 +237,18 @@ run test-map-clustering.js
 run test-panel-corner.js
 run test-customizer-v2.js
 
+# Repaired orphans (#189)
+run test-channel-colors.js
+run test-channel-ux-followup.js
+run test-channel-ux-round2.js
+run test-drag-manager.js
+run test-fluid-scaffolding.js
+run test-hop-resolver-affinity.js
+run test-issue-1470-card-bg-contrast.js
+run test-issue-1646-compare-polish.js
+run test-perf-disk-io-1120.js
+run test-table-sort.js
+
 # test-all.sh self-test (#174)
 run test-test-all.js
 

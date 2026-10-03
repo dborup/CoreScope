@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 /* Coverage E2E for public/path-inspector.js (#1297 B5).
  *
- * The existing test-path-inspector-e2e.js uses @playwright/test runner
- * which is not wired into CI's `e2e-test` step (CI runs raw
- * `node test-…-e2e.js`). This file uses the plain chromium-launch
- * pattern compatible with CI and exercises the standalone tools page
- * surface end-to-end:
+ * test-path-inspector-e2e.js covers the map side pane and the Tools
+ * landing (ported from @playwright/test in #189). This file uses the
+ * plain chromium-launch pattern compatible with CI and exercises the
+ * standalone tools page surface end-to-end:
  *
  *   - navigate to /#/tools/path-inspector
  *   - assert page chrome renders (input, submit btn, help text)
