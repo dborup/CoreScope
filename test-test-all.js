@@ -8,6 +8,8 @@
  *    swapped for small fixture files.
  * 2. File list: every entry exists, appears once and runs without a server
  *    or a browser (E2E files belong in the Playwright step of deploy.yml).
+ * 3. Registry: every root test-*.js runs in test-all.sh or deploy.yml, or is
+ *    listed in KNOWN_UNREGISTERED with a reason. New files cannot go unrun.
  */
 'use strict';
 
@@ -121,6 +123,53 @@ test('no registered file needs a browser or a server (E2E belongs in deploy.yml)
 
 test('test-all.sh registers itself through this test', () => {
   assert(files.includes('test-test-all.js'));
+});
+
+// Root test files that no runner runs yet, with the reason. Fix one, register
+// it, and delete its entry here. Do not add a file to this list to get a new
+// test past the check below: register it instead.
+const KNOWN_UNREGISTERED = {
+  // red unit tests (stale after intended UI changes)
+  'test-channel-colors.js': 'red: expects 4px border + tint, #675 changed it to 3px',
+  'test-channel-ux-followup.js': 'red: copy text changed by the Phosphor migration',
+  'test-channel-ux-round2.js': 'red: expects the 📤 glyph, now #ph-share-network',
+  'test-customizer-v2.js': 'red: computeEffective adds home defaults since #525',
+  'test-drag-manager.js': 'red: removeAttribute mock does not update dataset (#1567)',
+  'test-fluid-scaffolding.js': 'red: reads only the first :root block',
+  'test-hop-resolver-affinity.js': 'red: fixture geometry wrong since #874',
+  'test-issue-1470-card-bg-contrast.js': 'red: indexOf matches a style.css comment',
+  'test-issue-1646-compare-polish.js': 'red: font-size parser reads a comment',
+  'test-map-clustering.js': 'red: pills read R3/C2/M1 since #1360',
+  'test-packets.js': 'red: 13 emoji assertions after the Phosphor migration',
+  'test-panel-corner.js': 'red: sandbox does not load payload-labels.js (#1799)',
+  'test-perf-disk-io-1120.js': 'red: ⚠️ is #ph-warning; anomaly detector reworked (#1593)',
+  // need something CI's unit job does not have
+  'test-marker-outline-weight.js': 'needs @playwright/test (not a dependency) and a server',
+  'test-table-sort.js': 'needs jsdom (not a dependency)',
+  'test-touch-targets.js': 'red in Chromium: expects 48px targets, CSS has 44px',
+  // E2E
+  'test-channel-modal-e2e.js': 'red: Add button text and sidebar sections changed',
+  'test-issue-1522-trace-url-sync-e2e.js': 'needs @playwright/test (not a dependency)',
+  'test-node-reach-e2e.js': 'red: #nqMap .leaflet-container never visible',
+  'test-path-inspector-e2e.js': 'needs @playwright/test (not a dependency)',
+  'test-rx-coverage-mobile-nav-e2e.js': 'skips while clientRxCoverage is off (the default)',
+};
+
+console.log('root test registry');
+const deploy = fs.readFileSync(path.join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
+const inDeploy = new Set([...deploy.matchAll(/\bnode (test-[\w.-]+\.js)\b/g)].map((m) => m[1]));
+const runSomewhere = (f) => files.includes(f) || inDeploy.has(f);
+const rootTests = fs.readdirSync(ROOT).filter((f) => /^test-.*\.js$/.test(f));
+
+test('every root test-*.js runs in test-all.sh or deploy.yml', () => {
+  const orphans = rootTests.filter((f) => !runSomewhere(f) && !(f in KNOWN_UNREGISTERED));
+  assert.deepStrictEqual(orphans, [], orphans.join(', ') + ' run nowhere: add `run <file>` to ' +
+    'test-all.sh (unit) or a line to the Playwright step in deploy.yml (E2E)');
+});
+
+test('KNOWN_UNREGISTERED has no stale entries', () => {
+  const stale = Object.keys(KNOWN_UNREGISTERED).filter((f) => !rootTests.includes(f) || runSomewhere(f));
+  assert.deepStrictEqual(stale, [], stale.join(', ') + ': deleted or now registered, remove from KNOWN_UNREGISTERED');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
