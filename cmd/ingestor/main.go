@@ -135,60 +135,12 @@ func main() {
 	// Connect to each MQTT source
 	var clients []mqtt.Client
 	connectedCount := 0
-	for _, source := range sources {
-		tag := source.Name
-		if tag == "" {
-			tag = source.Broker
-		}
-
-		opts := buildMQTTOpts(source)
+	tags := mqttSourceTags(sources)
+	for i, source := range sources {
+		tag := tags[i]
+		opts, status, liveness := prepareMQTTSource(source, tag)
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
-
-		// Pre-allocate the liveness pointer so OnConnect can reset its
-		// stale-message clock on reconnect (PR #1216 r1 item 2). IsConnectedFn
-		// is wired below once the client exists.
-		liveness := &SourceLivenessState{
-			Tag:    tag,
-			Broker: source.Broker,
-		}
-
-		// #1043: per-source status registry. Idempotent — repeated
-		// registration across reconnects returns the same state so
-		// counters accumulate across the process lifetime.
-		status := RegisterSourceStatus(tag, source.Broker)
-
-		opts.SetOnConnectHandler(func(c mqtt.Client) {
-			log.Printf("MQTT [%s] connected to %s", tag, source.Broker)
-			status.MarkConnect(time.Now())
-			// PR #1216 r1 item 2: clear the stale LastMessageUnix from
-			// before the outage so the watchdog doesn't immediately scream
-			// "stalled for 2h". Also restarts the cold-start grace window
-			// and clears the alert cooldown so a fresh stall edge can fire.
-			liveness.MarkReconnected(time.Now())
-			topics := source.Topics
-			if len(topics) == 0 {
-				topics = []string{"meshcore/#"}
-			}
-			for _, t := range topics {
-				token := c.Subscribe(t, 0, nil)
-				token.Wait()
-				if token.Error() != nil {
-					log.Printf("MQTT [%s] subscribe error for %s: %v", tag, t, token.Error())
-				} else {
-					log.Printf("MQTT [%s] subscribed to %s", tag, t)
-				}
-			}
-		})
-
-		opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-			log.Printf("MQTT [%s] disconnected from %s: %v", tag, source.Broker, err)
-			status.MarkDisconnect(time.Now(), err)
-		})
-
-		opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
-			log.Printf("MQTT [%s] reconnecting to %s", tag, source.Broker)
-		})
 
 		// Capture source for closure
 		src := source
@@ -236,7 +188,7 @@ func main() {
 			continue
 		}
 		if token.Error() != nil {
-			log.Printf("MQTT [%s] connection failed (non-fatal): %v", tag, token.Error())
+			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), mqttSourceSecrets(source)...))
 			// BL1 fix: Disconnect to stop Paho's internal retry goroutines.
 			// With ConnectRetry=true, Connect() spawns background goroutines
 			// that leak if the client is simply discarded.
@@ -527,10 +479,7 @@ func main() {
 // #1212 (prod outage on 2026-05-15 where the disconnect was logged but no
 // reconnect activity was ever visible).
 func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
-	tag := source.Name
-	if tag == "" {
-		tag = source.Broker
-	}
+	tag := mqttSourceTag(source)
 	opts := mqtt.NewClientOptions().
 		AddBroker(source.Broker).
 		SetAutoReconnect(true).
@@ -547,7 +496,10 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		// (paho default 30s actually — making this explicit so it can't
 		// drift, and so operators reading the code know it's intentional
 		// per the #1335 RCA).
-		SetKeepAlive(30 * time.Second)
+		SetKeepAlive(30 * time.Second).
+		// #118: explicit ID, generated once per client when not configured;
+		// paho reuses it on every reconnect. See mqtt_client_id.go.
+		SetClientID(mqttClientID(source))
 
 	opts.SetConnectionAttemptHandler(func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
 		// Look up the per-source liveness state (registered in main) so we
@@ -560,7 +512,7 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		if s != nil {
 			attempt = atomic.AddInt64(&s.AttemptCount, 1)
 		}
-		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, broker.String())
+		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, brokerForLog(broker.String()))
 		return tlsCfg
 	})
 
