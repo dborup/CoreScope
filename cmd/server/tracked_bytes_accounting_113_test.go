@@ -214,6 +214,79 @@ func TestTrackedBytes_ResolvedRelaysAreChargedIncrementally_164(t *testing.T) {
 	acct113Check(t, store, "after a rebuild that clears the records")
 }
 
+// A record whose tx is not (or no longer) in s.packets is dropped by a
+// rebuild; its charge must go with it. loadChunk indexes a batch's resolved
+// relays before the batch is published into s.packets, so the window exists.
+func TestTrackedBytes_RebuildCreditsRecordsOfTxNotInTheStore_164(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "acct.db")
+	acct113CreateDB(t, dbPath, 40, 0)
+	store := acct113Load(t, dbPath)
+
+	ghost := &StoreTx{ID: 99999, Hash: "ghost", PathJSON: `["aa"]`, obsKeys: map[string]bool{}, observerSet: map[string]bool{}}
+	hops := map[string]bool{}
+	store.mu.Lock()
+	before := store.trackedBytes
+	store.addResolvedPubkeysToPathHopIndex(ghost, []string{acct113PK(210), acct113PK(211)}, hops)
+	charged := store.trackedBytes - before
+	store.mu.Unlock()
+	if charged != resolvedRelayBytes(2) {
+		t.Fatalf("the ghost's two relays were charged %d, want %d", charged, resolvedRelayBytes(2))
+	}
+
+	store.mu.Lock()
+	store.buildPathHopIndex()
+	store.mu.Unlock()
+	if _, ok := store.pathHopResolved[ghost]; ok {
+		t.Fatal("setup: the rebuild kept the record of a tx that is not in the store")
+	}
+	if store.trackedBytes != before {
+		t.Errorf("after the rebuild trackedBytes=%d, want %d: the dropped record's charge stayed", store.trackedBytes, before)
+	}
+	acct113Check(t, store, "after dropping a record of a tx outside the store")
+}
+
+// The candidates evictionCandidateTxIDs hands out (the batch it prefetches
+// resolved pubkeys for) must be exactly the tx the pass then evicts, for a
+// memory-triggered pass as for a retention pass.
+func TestEvictionCandidatesMatchWhatIsEvicted_113(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "acct.db")
+	acct113CreateDB(t, dbPath, 3000, 0)
+	store := acct113Load(t, dbPath)
+	store.maxMemoryMB = int(store.trackedBytes / 1048576)
+
+	store.mu.Lock()
+	candidates := map[int]bool{}
+	for _, id := range store.evictionCandidateTxIDs() {
+		candidates[id] = true
+	}
+	live := map[int]bool{}
+	for _, tx := range store.packets {
+		live[tx.ID] = true
+	}
+	store.mu.Unlock()
+	if len(candidates) == 0 {
+		t.Fatal("setup: no eviction candidates")
+	}
+	store.RunEviction()
+	evicted := map[int]bool{}
+	store.mu.RLock()
+	for _, tx := range store.packets {
+		delete(live, tx.ID)
+	}
+	store.mu.RUnlock()
+	for id := range live {
+		evicted[id] = true
+	}
+	if len(evicted) != len(candidates) {
+		t.Fatalf("%d candidates, %d evicted", len(candidates), len(evicted))
+	}
+	for id := range evicted {
+		if !candidates[id] {
+			t.Fatalf("tx %d was evicted but was not a candidate", id)
+		}
+	}
+}
+
 // Insert, extra observations, path changes, resolved relays and eviction in a
 // deterministic mix: the invariant holds after every step, and an emptied
 // store is exactly zero.
