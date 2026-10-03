@@ -107,6 +107,10 @@ type Config struct {
 	// (internal/channelregistry). Approved channels are always loaded into
 	// the channel keys, whether or not new submissions are enabled.
 	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
+	// ResolvedPathBackfill tunes the start-up re-resolution of NULL
+	// observations.resolved_path rows (#188, resolved_path_backfill.go).
+	ResolvedPathBackfill *ResolvedPathBackfillConfig `json:"resolvedPathBackfill,omitempty"`
 }
 
 // NeighborEdgesDaysOrDefault returns the configured pruning window or 5.
