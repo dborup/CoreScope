@@ -112,6 +112,10 @@ type DB struct {
 	// channelsRowsHook wraps the result rows of each real query, so a test
 	// can fail the iteration part-way.
 	channelsRowsHook func(kind string, rows channelRows) channelRows
+	// schemaProbeHook (#184), nil in production, runs at the start of every
+	// detectSchema pass. A non-nil error makes the pass give up the way a
+	// failed PRAGMA table_info does: no flag is set.
+	schemaProbeHook func() error
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.
@@ -231,6 +235,11 @@ func (db *DB) Close() error {
 
 // detectSchema checks if the observations table uses v3 schema (observer_idx).
 func (db *DB) detectSchema() {
+	if db.schemaProbeHook != nil {
+		if err := db.schemaProbeHook(); err != nil {
+			return
+		}
+	}
 	rows, err := db.conn.Query("PRAGMA table_info(observations)")
 	if err != nil {
 		return
