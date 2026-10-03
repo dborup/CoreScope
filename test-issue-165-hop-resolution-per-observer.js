@@ -14,6 +14,9 @@
  *      each observer instead of reusing another observer's bare-key entry.
  *   B. The hop:observer cache is bounded (AGENTS.md: no unbounded maps) and is
  *      cleared at the page's existing reset point, destroy().
+ *   C. Resolving per observer costs more than one global resolve, so
+ *      resolveHopsForPackets() yields to the event loop between observer
+ *      groups instead of blocking the page for the whole initial load.
  *
  * Run: node test-issue-165-hop-resolution-per-observer.js
  */
@@ -229,6 +232,21 @@ test('destroy() empties the cache', async () => {
   assert(T._hopCacheSize() > 0, 'precondition: the cache has entries');
   T._destroy();
   assert(T._hopCacheSize() === 0, 'destroy() leaves ' + T._hopCacheSize() + ' entries');
+});
+
+section('#165 C: resolveHopsForPackets does not block for the whole load');
+
+test('a timer runs between two observer groups', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A, OBS_B]);
+  await T.resolveHops(['00'], 'OBS-A'); // HopResolver ready, as after the first render
+  const before = T._hopCacheSize();
+  let seenAt = null;
+  setTimeout(() => { seenAt = T._hopCacheSize(); }, 0);
+  await T.resolveHopsForPackets([livePacket(1, 'OBS-A'), livePacket(2, 'OBS-B')]);
+  const after = T._hopCacheSize();
+  assert(seenAt !== null && seenAt > before && seenAt < after,
+    'the timer should fire after the first group and before the last (cache sizes: before ' + before +
+    ', at timer ' + seenAt + ', after ' + after + ')');
 });
 
 (async () => {
