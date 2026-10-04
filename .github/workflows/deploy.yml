@@ -477,6 +477,8 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1224-channels-mobile-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1367-channels-chat-app-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-2052-touch-target-e2e.js 2>&1 | tee -a e2e-output.txt
+          # Standalone harness (no server): loads public/style.css into Chromium.
+          CHROMIUM_REQUIRE=1 node test-touch-targets.js 2>&1 | tee -a e2e-output.txt
           # Starts its own ingestor + server on a temp copy of the fixture.
           CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channel-proposals-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1236-map-mobile-e2e.js 2>&1 | tee -a e2e-output.txt
