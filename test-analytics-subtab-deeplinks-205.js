@@ -169,7 +169,8 @@ function pageEnv(opts) {
     localStorage: storage(),
     sessionStorage: storage(opts.session),
     location: { hash: '#/analytics' },
-    history: { replaceState(_s, _t, url) { hashLog.push(url); ctx.location.hash = url; } },
+    // state is kept as a structured clone, like the real history.state.
+    history: { state: null, replaceState(st, _t, url) { ctx.history.state = st == null ? null : JSON.parse(JSON.stringify(st)); hashLog.push(url); ctx.location.hash = url; } },
     CustomEvent: class CustomEvent {}, Map, Set, Promise, URLSearchParams,
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
     timeAgo: () => 'x ago', initTabBar() {}, makeColumnsResizable() {},
@@ -209,6 +210,21 @@ function pageEnv(opts) {
       await flush();
     },
     initError: () => initError,
+    // History entries (#208): the current one as { hash, state }; a new
+    // entry (a link, location.hash = …) has no state; Back/Forward brings
+    // an entry back with the state it had when it was left.
+    entry: () => ({ hash: ctx.location.hash, state: ctx.history.state == null ? null : JSON.parse(JSON.stringify(ctx.history.state)) }),
+    async visit(hash) {
+      page.destroy();
+      ctx.history.state = null;
+      await this.mount(hash);
+    },
+    async traverse(entry) {
+      page.destroy();
+      ctx.history.state = entry.state == null ? null : JSON.parse(JSON.stringify(entry.state));
+      await this.mount(entry.hash);
+    },
+    historyState: () => ctx.history.state,
     destroy: () => page.destroy(),
     hash: () => ctx.location.hash,
     params: () => Object.fromEntries(new URLSearchParams(ctx.location.hash.split('?')[1] || '')),
@@ -228,6 +244,7 @@ function pageEnv(opts) {
     },
     activeScopesWindows: () => activeOf('data-win'),
     activeWardrivingWindows: () => activeOf('data-wdwin'),
+    activeMbFilters: () => activeOf('data-mb-filter'),
     clickSubtab: async (key) => {
       const bar = content().querySelector('#scopesSubtabs');
       assert.ok(bar, 'no #scopesSubtabs');
@@ -254,6 +271,7 @@ function pageEnv(opts) {
     globalWindow: () => el('analyticsTimeWindow').value,
     content: () => content().innerHTML,
     resolveViewParam: ctx._analyticsResolveViewParam,
+    renderMultiByteAdopters: ctx._analyticsRenderMultiByteAdopters,
   };
 }
 
@@ -475,6 +493,26 @@ function pageEnv(opts) {
     assert.strictEqual(env.hash(), '#/analytics?tab=scopes');
   });
 
+  // #208 item 7: Hash Issues' section= is a one-shot scroll anchor and is
+  // dropped when leaving the tab. bytes= is its remembered byte size: it has
+  // no stored fallback, and #1914 pins that a tab round-trip keeps it.
+  await test('switching from Hash Issues to another tab drops section=, keeps bytes= and window=', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=collisions&bytes=2&section=hashMatrixSection&window=24h');
+    assert.strictEqual(env.initError(), null, 'init() threw');
+    assert.strictEqual(env.params().bytes, '2', 'precondition: bytes= kept on Hash Issues');
+    await env.clickTab('topology');
+    assert.strictEqual(env.hash(), '#/analytics?tab=topology&bytes=2&window=24h');
+  });
+
+  await test('a Hash Issues → Hash Stats → Hash Issues round-trip keeps bytes= (#1914)', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=collisions&bytes=2');
+    await env.clickTab('hashsizes');
+    await env.clickTab('collisions');
+    assert.strictEqual(env.params().bytes, '2', 'bytes= lost: ' + env.hash());
+  });
+
   console.log('\n=== #205: Wardriving window (wdwin=) ===');
 
   for (const w of ['1h', '24h', '7d']) {
@@ -528,6 +566,169 @@ function pageEnv(opts) {
     await env.clickTab('wardriving');
     assert.deepStrictEqual(env.activeWardrivingWindows(), ['24h']);
     assert.strictEqual(env.hash(), '#/analytics?tab=wardriving');
+  });
+
+  // #208 item 5: a default view leaves its key out of the URL, and a missing
+  // key falls back to sessionStorage. Back/Forward to an entry whose view
+  // was the default must restore that default, not the value a later entry
+  // stored; a new entry without the key still gets the stored value.
+  console.log('\n=== #208: Back/Forward to an entry in its default view ===');
+
+  await test('Scopes: Back to a default-view entry shows the default, Forward the later view', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=scopes&sub=regions&swin=7d');
+    assert.deepStrictEqual(env.activeSubtabs(), ['regions'], 'precondition');
+    const e2 = env.entry();
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeSubtabs(), ['overview'], 'Back: sub-tab');
+    assert.deepStrictEqual(env.visiblePanels(), ['overview'], 'Back: panel');
+    assert.deepStrictEqual(env.activeScopesWindows(), ['24h', '24h'], 'Back: window');
+    assert.strictEqual(env.hash(), '#/analytics?tab=scopes', 'Back: URL');
+    assert.strictEqual(env.session.scopes_subtab, 'overview', 'Back: stored sub-tab');
+    await env.traverse(e2);
+    assert.deepStrictEqual(env.activeSubtabs(), ['regions'], 'Forward: sub-tab');
+    assert.deepStrictEqual(env.activeScopesWindows(), ['7d', '7d'], 'Forward: window');
+  });
+
+  await test('Scopes: an entry clicked back to its default is restored as the default', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    await env.clickSubtab('hygiene');
+    await env.clickSubtab('overview');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=scopes&sub=regions');
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeSubtabs(), ['overview']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=scopes');
+  });
+
+  await test('Scopes: a new entry without sub= still opens the stored sub-tab', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    await env.visit('#/analytics?tab=scopes&sub=regions');
+    await env.visit('#/analytics?tab=scopes');
+    assert.deepStrictEqual(env.activeSubtabs(), ['regions']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=scopes&sub=regions');
+  });
+
+  await test('Wardriving: Back to a default-view entry shows 24h', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=wardriving');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=wardriving&wdwin=1h');
+    assert.deepStrictEqual(env.activeWardrivingWindows(), ['1h'], 'precondition');
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeWardrivingWindows(), ['24h']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=wardriving');
+  });
+
+  await test('an entry from another page (Back from Nodes) keeps its own view', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=scopes&sub=hopdepth');
+    await env.visit('#/nodes');
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeSubtabs(), ['overview']);
+  });
+
+  await test('a tab switch inside an entry still brings back the stored view', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes&sub=hopdepth');
+    await env.clickTab('topology');
+    await env.clickTab('scopes');
+    assert.deepStrictEqual(env.activeSubtabs(), ['hopdepth']);
+  });
+
+  for (const st of [{ analyticsView: { sub: 'x"]', swin: '__proto__' } }, { analyticsView: 'hopdepth' }, { analyticsView: { sub: 7 } }, 'junk', 42]) {
+    await test('a foreign or garbled entry state ' + JSON.stringify(st) + ' never reaches the view, no exception', async () => {
+      const env = pageEnv({ session: { scopes_subtab: 'regions' } });
+      await env.traverse({ hash: '#/analytics?tab=scopes', state: st });
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      const sub = env.activeSubtabs();
+      assert.ok(sub.length === 1 && ['overview', 'regions'].includes(sub[0]), 'sub-tab ' + JSON.stringify(sub));
+    });
+  }
+
+  await test('other keys in history.state are kept', async () => {
+    const env = pageEnv();
+    await env.traverse({ hash: '#/analytics?tab=scopes&sub=regions', state: { other: 'kept' } });
+    assert.strictEqual(env.historyState() && env.historyState().other, 'kept', JSON.stringify(env.historyState()));
+  });
+
+  // #208 item 6: the Hash Stats multi-byte adopters filter (All / Confirmed
+  // / Suspected / Unknown) is deep-linked as mbf=. URL only: it had no
+  // stored state before, so a plain visit still opens on All.
+  console.log('\n=== #208: Hash Stats multi-byte adopters filter (mbf=) ===');
+
+  // Each adopter's status as the card derives it: its capability row by
+  // pubkey, else unknown.
+  const capStatus = {};
+  REAL.hashData.multiByteCapability.forEach((c) => { capStatus[c.pubkey] = c.status; });
+  const ADOPTERS = REAL.hashData.multiByteNodes.map((n) => ({ name: n.name, status: capStatus[n.pubkey] || 'unknown' }));
+  await test('precondition: the fixture has multi-byte adopters', async () => {
+    assert.ok(ADOPTERS.length > 0, 'no multiByteNodes in the fixture');
+  });
+
+  for (const f of ['all', 'confirmed', 'suspected', 'unknown']) {
+    await test('#/analytics?tab=hashsizes&mbf=' + f + ' selects ' + f + ' and filters the table', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&mbf=' + f);
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      assert.deepStrictEqual(env.activeMbFilters(), [f], 'active filter button');
+      for (const a of ADOPTERS) {
+        const shown = f === 'all' || a.status === f;
+        assert.strictEqual(env.content().indexOf('<strong>' + a.name + '</strong>') >= 0, shown, a.name + ' (' + a.status + ')' + (shown ? ' missing' : ' shown'));
+      }
+      const none = !ADOPTERS.some((a) => f === 'all' || a.status === f);
+      assert.strictEqual(env.content().indexOf('No adopters match this filter.') >= 0, none, 'empty-filter message');
+      assert.strictEqual(env.hash(), f === 'all' ? '#/analytics?tab=hashsizes' : '#/analytics?tab=hashsizes&mbf=' + f, 'URL not canonical');
+    });
+  }
+
+  for (const value of ['', 'x"]', 'x"],[data-mb-filter="unknown', '__proto__', 'constructor', 'Confirmed', ' confirmed', '<img src=x onerror=alert(1)>']) {
+    await test('?mbf=' + JSON.stringify(value) + ' falls back to All, no exception', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&mbf=' + encodeURIComponent(value));
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      assert.deepStrictEqual(env.activeMbFilters(), ['all']);
+      assert.strictEqual(env.hash(), '#/analytics?tab=hashsizes');
+      assert.ok(env.content().indexOf('onerror') < 0, 'URL value reached the markup');
+    });
+  }
+
+  await test('#/analytics?tab=hashsizes is left as it is and opens on All', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes');
+    assert.deepStrictEqual(env.activeMbFilters(), ['all']);
+    assert.deepStrictEqual(env.hashLog.filter((h) => h !== '#/analytics?tab=hashsizes'), [], 'URL rewritten');
+  });
+
+  await test('mbf= is URL only: nothing stored, a later plain visit opens on All', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbf=confirmed');
+    assert.deepStrictEqual(Object.keys(env.session), [], 'sessionStorage written: ' + JSON.stringify(env.session));
+    env.destroy();
+    await env.mount('#/analytics?tab=hashsizes');
+    assert.deepStrictEqual(env.activeMbFilters(), ['all']);
+  });
+
+  await test('switching from Hash Stats to another tab drops mbf=', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbf=confirmed&window=24h');
+    await env.clickTab('topology');
+    assert.strictEqual(env.hash(), '#/analytics?tab=topology&window=24h');
+  });
+
+  await test('renderMultiByteAdopters(nodes, caps, filter) marks the filter active; an unknown one is All', async () => {
+    const env = pageEnv();
+    const nodes = REAL.hashData.multiByteNodes, caps = REAL.hashData.multiByteCapability;
+    const active = (html) => (html.match(/<button class="tab-btn active" data-mb-filter="([^"]*)"/g) || []).map((m) => m.replace(/.*="([^"]*)"$/, '$1'));
+    assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps, 'unknown')), ['unknown']);
+    assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps, 'bogus')), ['all']);
+    assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps)), ['all']);
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');

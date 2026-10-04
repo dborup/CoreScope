@@ -138,7 +138,8 @@ func main() {
 	tags := mqttSourceTags(sources)
 	for i, source := range sources {
 		tag := tags[i]
-		opts, status, liveness := prepareMQTTSource(source, tag)
+		setup := prepareMQTTSource(source, tag)
+		opts, status, liveness := setup.opts, setup.status, setup.liveness
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
 
@@ -161,15 +162,15 @@ func main() {
 		// Wire IsConnectedFn now that the client exists, then register.
 		// Registration BEFORE Connect so the attempt counter is available
 		// to OnConnectAttempt on the very first dial.
-		liveness.IsConnectedFn = client.IsConnected
-		// #1335: wire force-reconnect so the watchdog can drop a
-		// half-open TCP socket and re-dial when paho.IsConnected==true
-		// but no messages have flowed past the stall threshold. Throttled
-		// per source by the watchdog itself (forceReconnectThrottle).
-		// Captured-by-value `client` is the same pointer used everywhere
-		// else for this source. See buildForceReconnectFn for why this is
-		// NOT simply "Disconnect(250) then Connect()".
-		liveness.ForceReconnectFn = buildForceReconnectFn(client, tag)
+		// #1335: attachClient also wires force-reconnect so the watchdog
+		// can drop a half-open TCP socket and re-dial when
+		// paho.IsConnected==true but no messages have flowed past the
+		// stall threshold. Throttled per source by the watchdog itself
+		// (forceReconnectThrottle). Captured-by-value `client` is the same
+		// pointer used everywhere else for this source. See
+		// buildForceReconnectFn for why this is NOT simply
+		// "Disconnect(250) then Connect()".
+		setup.attachClient(client)
 		// PR #1216 r2 item 3: tag collisions used to log.Fatalf, which
 		// killed the entire ingestor over one config typo and recreated
 		// the #1212 total-ingest-stop class this PR exists to prevent.
@@ -188,7 +189,7 @@ func main() {
 			continue
 		}
 		if token.Error() != nil {
-			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), mqttSourceSecrets(source)...))
+			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), setup.secrets...))
 			// BL1 fix: Disconnect to stop Paho's internal retry goroutines.
 			// With ConnectRetry=true, Connect() spawns background goroutines
 			// that leak if the client is simply discarded.
@@ -568,10 +569,27 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 // Disconnect then Connect; Disconnecting() does not need to wait on any
 // in-flight retry loop from status connected, so it completes well within
 // the 250ms quiesce) from "paho is already retrying on its own" (must NOT
-// call Disconnect; Connect() alone is a safe no-op per paho when a retry is
-// already under way, and properly starts a fresh attempt on the rare
-// occasion status has actually settled to disconnected).
-func buildForceReconnectFn(client mqtt.Client, tag string) func() {
+// call Disconnect).
+//
+// What Connect() then does depends on paho's status (paho.mqtt.golang
+// v1.5.0, client.go Connect and status.go Connecting):
+//   - reconnecting (AutoReconnect loop): a no-op that returns a success token;
+//   - connecting (the initial ConnectRetry loop) or disconnecting: an error
+//     token, errStatusMustBeDisconnected;
+//   - disconnected (paho gave up): starts a fresh attempt.
+//
+// For that status error, IsConnected() tells whether paho reports a retry
+// pending. In connecting it does (ConnectRetry keeps retrying), so the line
+// is info, not a failure (#102). In disconnecting it reflects paho's
+// willReconnect flag, which is sticky after any earlier auto-reconnect and is
+// left set by a Disconnect(), so there it is a strong hint, not a guarantee.
+// The info line therefore keeps paho's error and claims no more than paho
+// reports. With IsConnected() false the error is logged as a failure.
+//
+// Either line logs the error with secrets (mqttSourceSecrets) masked
+// (errForLog): paho's errors may quote the broker URL. The classification
+// reads the raw error, whose text it compares.
+func buildForceReconnectFn(client mqtt.Client, tag string, secrets ...string) func() {
 	return func() {
 		if client.IsConnectionOpen() {
 			client.Disconnect(250)
@@ -581,10 +599,35 @@ func buildForceReconnectFn(client mqtt.Client, tag string) func() {
 		// retrying, treated as a safe no-op" success case — only a genuine
 		// fresh connection attempt leaves the token pending in the
 		// background, and we must not block this call on that.
-		if token := client.Connect(); token.Error() != nil {
-			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %v", tag, token.Error())
+		err := client.Connect().Error()
+		switch {
+		case err == nil:
+		case connectRetryInProgress(client, err):
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect: Connect() returned %s; paho reports a retry pending (IsConnected=true), not starting a new attempt", tag, errForLog(err, secrets...))
+		default:
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %s", tag, errForLog(err, secrets...))
 		}
 	}
+}
+
+// pahoErrStatusMustBeDisconnected is the text of paho's unexported
+// errStatusMustBeDisconnected (paho.mqtt.golang v1.5.0 status.go), which
+// Connect() returns when status is connecting or disconnecting. The paho
+// test TestForceReconnect_RealPaho_InitialRetryLoopIsNotAConnectFailure_102
+// fails if an upgrade changes it.
+const pahoErrStatusMustBeDisconnected = "status can only transition to connecting from disconnected"
+
+// connectRetryInProgress reports whether a Connect() error is paho's status
+// error while paho reports a retry pending (#102). buildMQTTOpts sets
+// ConnectRetry and AutoReconnect, so IsConnected() is true in status
+// connecting (the initial retry loop keeps going) and in disconnecting when
+// paho's willReconnect flag is set. That flag is sticky: an earlier
+// auto-reconnect sets it, a successful reconnect never clears it, and a
+// Disconnect() from connected or reconnecting leaves it alone. In
+// disconnecting a true result is therefore a strong hint that a retry
+// follows, not a guarantee.
+func connectRetryInProgress(client mqtt.Client, err error) bool {
+	return err.Error() == pahoErrStatusMustBeDisconnected && client.IsConnected()
 }
 
 func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string, regionKeys map[string][]byte, cfg *Config) {

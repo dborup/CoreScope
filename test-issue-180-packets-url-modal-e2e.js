@@ -11,7 +11,8 @@
  *
  * - Item 4 (1400 px): with the View Path modal open, Escape in a layer opened
  *   over it (global search via Ctrl+K, the nav More menu) closes that layer,
- *   not the modal; the next Escape closes the modal.
+ *   not the modal; the next Escape closes the modal. Escape with focus on
+ *   the modal's own close or copy-link button closes it (#208).
  *
  * - Item 5 (800 and 1400 px): Back from a packet whose View Path modal is
  *   open closes the modal, and Forward onto that history entry (which still
@@ -153,6 +154,19 @@ function detailPaneOpen(page) {
       assert(/[?&]viewPath=1(&|$)/.test(h), 'viewPath dropped although the modal is open: ' + h);
       await secondEscapeClosesModal();
     });
+
+    // #208 item 4: the modal's own controls are not a layer above it.
+    for (const id of ['packetPathClose', 'packetPathCopyLink']) {
+      await step(`desktop (1400): Escape with focus inside the View Path modal (#${id}) closes it`, async () => {
+        await openModal();
+        await page.focus('#' + id);
+        await waitFor(page, (i) => document.activeElement && document.activeElement.id === i, 'focus did not move into the modal', id);
+        await page.keyboard.press('Escape');
+        await page.waitForSelector('#packetPathModal', { state: 'detached', timeout: 5000 })
+          .catch(() => { throw new Error('Escape with focus inside the modal did not close it'); });
+        await waitFor(page, () => !/viewPath=/.test(location.hash), 'viewPath still in URL after the modal closed');
+      });
+    }
 
     await step('desktop (1400): Escape in the nav More menu over the View Path modal closes the menu, not the modal', async () => {
       await openModal();

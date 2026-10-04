@@ -348,11 +348,19 @@
   var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene'], dflt: 'overview' };
   var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
   var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  // #208 — Hash Stats' multi-byte adopters filter. URL only (no storageKey):
+  // it had no stored state before, so a plain visit still opens on All.
+  var HASHSTATS_MB_FILTER = { param: 'mbf', allowed: ['all', 'confirmed', 'suspected', 'unknown'], dflt: 'all' };
 
   // The hash keys each tab owns; _updateAnalyticsUrl drops them when
-  // another tab is selected.
+  // another tab is selected. Hash Issues' bytes= is deliberately not listed:
+  // it has no stored fallback, so it stays in the URL across a tab switch
+  // and a return to Hash Issues keeps the chosen byte size (#1914, #208).
+  // Its section= is a one-shot scroll anchor and is dropped.
   var TAB_URL_PARAMS = {
     'rf-health': ['range', 'observer', 'from', 'to'],
+    collisions: ['section'],
+    hashsizes: [HASHSTATS_MB_FILTER.param],
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
     wardriving: [WARDRIVING_WINDOW.param],
   };
@@ -370,20 +378,58 @@
     try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(key) : null; } catch (e) { return null; }
   }
 
+  // #208 — the view each history entry showed is recorded in its
+  // history.state, so Back/Forward to an entry whose view was a default (its
+  // key left out of the URL) restores that default, not the value a later
+  // entry stored. A new entry (a link, location.hash = …) has no record and
+  // still gets the stored value. Only specs with a storageKey are recorded:
+  // for the others a missing key already means the default. A tab switch
+  // writes a null state (_updateAnalyticsUrl), so a tab clicked back within
+  // the same entry also gets the stored value, as before.
+  var ENTRY_VIEW_KEY = 'analyticsView';
+
+  // The current entry's record, as { param: value } with string values only.
+  function _entryView() {
+    var out = {};
+    try {
+      var st = typeof history !== 'undefined' ? history.state : null;
+      var v = st && typeof st === 'object' ? st[ENTRY_VIEW_KEY] : null;
+      if (!v || typeof v !== 'object') return null;
+      Object.keys(v).forEach(function (k) { if (typeof v[k] === 'string') out[k] = v[k]; });
+    } catch (e) { return null; }
+    return out;
+  }
+
+  // history.state with the record replaced; other keys are kept.
+  function _stateWithEntryView(view) {
+    var out = {};
+    var st = typeof history !== 'undefined' ? history.state : null;
+    if (st && typeof st === 'object') Object.keys(st).forEach(function (k) { out[k] = st[k]; });
+    out[ENTRY_VIEW_KEY] = view;
+    return out;
+  }
+
   // Stores the values and writes them to the hash in one go. A default is
   // left out, so a tab in its default view keeps the URL it had before #205.
+  // A spec without a storageKey lives in the URL only.
   function _writeViewParams(specs, values) {
     var updates = {};
+    var view = _entryView() || {};
+    var viewChanged = false;
     specs.forEach(function (spec, i) {
-      try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+      if (spec.storageKey) {
+        try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+        if (view[spec.param] !== values[i]) { view[spec.param] = values[i]; viewChanged = true; }
+      }
       updates[spec.param] = values[i] === spec.dflt ? '' : values[i];
     });
     if (!window.URLState) return;
     // replaceState can throw (Safari throttles it); the view has already
     // changed by then, so a failed URL sync must not break the tab (#1914).
+    // It only runs when the URL or the entry's record changes.
     try {
       var newHash = URLState.updateHashParams(updates, location.hash);
-      if (newHash !== location.hash) history.replaceState(null, '', newHash);
+      if (newHash !== location.hash || viewChanged) history.replaceState(_stateWithEntryView(view), '', newHash);
     } catch (e) { /* URL sync is best effort */ }
   }
 
@@ -392,11 +438,16 @@
   // Read on render: resolve every value of the tab from the same hash first,
   // then store them and write them back. Writing one value rebuilds the
   // hash, which drops an empty key ("?sub=") the next read would still see.
+  // Without a URL value, the entry's own record (#208) comes before the
+  // stored value.
   function restoreViewParams(specs) {
     var hash = typeof location !== 'undefined' ? String(location.hash || '') : '';
     var params = new URLSearchParams(hash.split('?')[1] || '');
+    var entry = _entryView();
     var values = specs.map(function (spec) {
-      return resolveViewParam(params.get(spec.param), _sessionGet(spec.storageKey), spec.allowed, spec.dflt);
+      var fallback = null;
+      if (spec.storageKey) fallback = entry && Object.prototype.hasOwnProperty.call(entry, spec.param) ? entry[spec.param] : _sessionGet(spec.storageKey);
+      return resolveViewParam(params.get(spec.param), fallback, spec.allowed, spec.dflt);
     });
     _writeViewParams(specs, values);
     return values;
@@ -1489,6 +1540,7 @@
 
   // ===================== HASH SIZES (original) =====================
   function renderHashSizes(el, data) {
+    const mbFilter = restoreViewParams([HASHSTATS_MB_FILTER])[0];   // ?mbf= (#208)
     const d = data.distribution;
     const total = data.total;
     const pct = (n) => total ? (n / total * 100).toFixed(1) : '0';
@@ -1538,7 +1590,7 @@
         </div>
       </div>
 
-      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [])}
+      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [], mbFilter)}
 
       <div class="analytics-row">
         <div class="analytics-card flex-1">
@@ -1562,7 +1614,10 @@
     `;
   }
 
-  function renderMultiByteAdopters(nodes, caps) {
+  // filter: the initially selected filter (All when missing or unknown).
+  function renderMultiByteAdopters(nodes, caps, filter) {
+    var initialFilter = HASHSTATS_MB_FILTER.allowed.indexOf(filter) >= 0 ? filter : HASHSTATS_MB_FILTER.dflt;
+    var mbBtnClass = function (f) { return f === initialFilter ? 'tab-btn active' : 'tab-btn'; };
     // Merge capability status into adopter nodes
     var capByPubkey = {};
     (caps || []).forEach(function(c) { capByPubkey[c.pubkey] = c; });
@@ -1627,20 +1682,20 @@
           '<strong>Unknown</strong> = no multi-byte evidence yet.</p>' +
         '</div>' +
         '<div style="display:flex;gap:4px;flex-wrap:wrap" id="mbCapFilters">' +
-          '<button class="tab-btn active" data-mb-filter="all">All (' + rows.length + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
+          '<button class="' + mbBtnClass('all') + '" data-mb-filter="all">All (' + rows.length + ')</button>' +
+          '<button class="' + mbBtnClass('confirmed') + '" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
+          '<button class="' + mbBtnClass('suspected') + '" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
+          '<button class="' + mbBtnClass('unknown') + '" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
         '</div>' +
       '</div>' +
-      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, 'all') + '</div>' +
+      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, initialFilter) + '</div>' +
     '</div></div>';
 
     // Use setTimeout for event delegation on the stable section container
     setTimeout(function() {
       var section = document.getElementById('mbAdoptersSection');
       if (!section) return;
-      var currentFilter = 'all';
+      var currentFilter = initialFilter;
 
       section.addEventListener('click', function handler(e) {
         var btn = e.target.closest('[data-mb-filter]');
@@ -1652,6 +1707,7 @@
           // Replace only the table content, not the whole section
           var wrap = section.querySelector('#mbAdoptersTableWrap');
           if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter);
+          setViewParam(HASHSTATS_MB_FILTER, currentFilter);
           return;
         }
         var th = e.target.closest('[data-sort]');
