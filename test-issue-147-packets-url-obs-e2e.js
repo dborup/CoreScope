@@ -257,9 +257,8 @@ async function setTimeWindow(page, value) {
       await page.goto(`${DETAIL}?timeWindow=60&obs=${SYN_OBS}`, { waitUntil: 'load' });
       assert(await currentObs(page) === SYN_OBS, 'observation not selected in the SlideOver');
       assert(await slideOverOpen(), 'detail did not open in a SlideOver');
-      // A real click on the backdrop (left of the panel). The panel's ×
-      // sits under the fixed top nav at this width, so a real click on it
-      // hits the nav instead (pre-existing layout issue, not #147).
+      // A real click on the backdrop (left of the panel). A click on ×
+      // is covered by test-issue-180-packets-url-modal-e2e.js (#180).
       await page.click('.slide-over-backdrop', { position: { x: 40, y: 450 } });
       await waitHash(page, () => !location.hash.startsWith('#/packets/'), 'detail subpath still in URL after the SlideOver closed');
       const p = await hashParams(page);

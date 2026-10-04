@@ -5,6 +5,10 @@
  *   leaves the detail, so the URL is the list and a reload shows the same
  *   unfiltered list (the subpath used to set the hash filter again).
  *
+ * - Item 3 (641, 800, 1023 px): the SlideOver's close button is the topmost
+ *   element at its centre (it used to sit under the sticky .top-nav), is at
+ *   least 48×48, and a real click on it closes the SlideOver.
+ *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js
  */
 'use strict';
@@ -103,6 +107,30 @@ function detailPaneOpen(page) {
       assert(!(await clearShown(page)), 'Clear button back after reload');
       assert(!(await detailPaneOpen(page)), 'detail pane open after reload');
       assert(await page.evaluate(() => document.getElementById('fHash').value === ''), 'hash filter input filled after reload');
+    });
+    await context.close();
+  }
+
+  // ---- Item 3: SlideOver × above the top nav (641–1023 px) ----
+  for (const width of [641, 800, 1023]) {
+    const { context, page } = await newPage({ viewport: { width, height: 900 } });
+    await step(`tablet (${width}): the SlideOver × is topmost, 48×48, and a real click closes it`, async () => {
+      await fresh(page, DETAIL);
+      await page.waitForSelector('.slide-over-panel [data-view-path]', { timeout: 15000 });
+      // Past the 200 ms slideInRight animation.
+      await page.waitForTimeout(400);
+      const x = await page.evaluate(() => {
+        const btn = document.querySelector('.slide-over-panel .slide-over-close');
+        const r = btn.getBoundingClientRect();
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return { w: r.width, h: r.height, onTop: btn.contains(top), top: top ? (top.className && top.className.baseVal !== undefined ? top.className.baseVal : top.className) || top.tagName : null };
+      });
+      assert(x.onTop, 'the element at the × centre is "' + x.top + '", not the close button');
+      assert(x.w >= 48 && x.h >= 48, 'close button is ' + x.w + '×' + x.h + ', expected at least 48×48');
+      await page.click('.slide-over-panel .slide-over-close', { timeout: 3000 });
+      await waitFor(page, () => !window.SlideOver.isOpen(), 'the SlideOver is still open after a click on ×');
+      const h = await page.evaluate(() => location.hash);
+      assert(h.startsWith('#/packets') && !h.startsWith('#/packets/'), 'URL after closing the SlideOver: ' + h);
     });
     await context.close();
   }

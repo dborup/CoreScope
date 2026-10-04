@@ -1355,8 +1355,12 @@ img.brand-logo {
  * body.style.overflow capture-and-restore string approach which
  * corrupted overflow under last-writer-wins races. */
 body.scroll-locked { overflow: hidden; }
+/* #180: the SlideOver is a modal dialog (role=dialog, aria-modal, focus
+ * trap), so it stacks on the modal tokens, above the sticky .top-nav (1100).
+ * At 1000/1001 the panel's header and close button sat under the nav at
+ * 641–1023 px, and a click on × landed on the nav. */
 .slide-over-backdrop {
-  position: fixed; inset: 0; z-index: 1000;
+  position: fixed; inset: 0; z-index: var(--z-modal-backdrop);
   background: rgba(0, 0, 0, 0.5);
   cursor: pointer;
 }
@@ -1364,7 +1368,7 @@ body.scroll-locked { overflow: hidden; }
 .slide-over-panel {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: min(480px, 90vw);
-  z-index: 1001;
+  z-index: var(--z-modal);
   background: var(--detail-bg, var(--card-bg, #1f2937));
   color: var(--text, inherit);
   border-left: 1px solid var(--border);
@@ -1392,7 +1396,7 @@ body.scroll-locked { overflow: hidden; }
   color: var(--text-muted, #94a3b8);
   padding: 4px 8px; border-radius: 4px;
   /* WCAG 2.5.5 / Apple HIG — 48px tap target on touch devices. */
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .slide-over-close:hover { color: var(--text, inherit); background: var(--row-hover); }
