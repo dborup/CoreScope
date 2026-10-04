@@ -3701,31 +3701,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	pathHopMutated := false
 	for txID, tx := range updatedTxs {
 		if tx.PathJSON != oldPaths[txID] {
-			// Path changed — remove old subpaths, add new ones.
-			oldHops := parsePathJSON(oldPaths[txID])
-			if len(oldHops) >= 2 {
-				// Temporarily set parsedPath to old hops for removal.
-				saved, savedFlag := tx.parsedPath, tx.pathParsed
-				tx.parsedPath, tx.pathParsed = oldHops, true
-				if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-					s.spTotalPaths--
-				}
-				tx.parsedPath, tx.pathParsed = saved, savedFlag
-			}
-			// Remove old path-hop index entries using old hops.
-			// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
-			if len(oldHops) > 0 {
-				saved, savedFlag := tx.parsedPath, tx.pathParsed
-				tx.parsedPath, tx.pathParsed = oldHops, true
-				removeTxFromPathHopIndex(s.byPathHop, tx)
-				tx.parsedPath, tx.pathParsed = saved, savedFlag
-			}
-			// pickBestObservation already set pathParsed=false so
-			// addTxToSubpathIndex will re-parse the new path.
-			if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-				s.spTotalPaths++
-			}
-			addTxToPathHopIndex(s.byPathHop, tx)
+			s.reindexTxPath(tx, oldPaths[txID])
 			// #1164: coalesce — one invalidate after the loop, not per-tx.
 			pathHopMutated = true
 		}
@@ -3767,6 +3743,38 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	_ = graphRef
 
 	return broadcastMaps
+}
+
+// reindexTxPath moves tx in the subpath and path-hop indexes after its best
+// path changed from oldPath to tx.PathJSON (pickBestObservation, which also
+// cleared tx.pathParsed). The caller invalidates the relay-stats cache once for
+// a batch. Must hold s.mu for writing.
+func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
+	// Path changed — remove old subpaths, add new ones.
+	oldHops := parsePathJSON(oldPath)
+	if len(oldHops) >= 2 {
+		// Temporarily set parsedPath to old hops for removal.
+		saved, savedFlag := tx.parsedPath, tx.pathParsed
+		tx.parsedPath, tx.pathParsed = oldHops, true
+		if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+			s.spTotalPaths--
+		}
+		tx.parsedPath, tx.pathParsed = saved, savedFlag
+	}
+	// Remove old path-hop index entries using old hops.
+	// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
+	if len(oldHops) > 0 {
+		saved, savedFlag := tx.parsedPath, tx.pathParsed
+		tx.parsedPath, tx.pathParsed = oldHops, true
+		removeTxFromPathHopIndex(s.byPathHop, tx)
+		tx.parsedPath, tx.pathParsed = saved, savedFlag
+	}
+	// pickBestObservation already set pathParsed=false so
+	// addTxToSubpathIndex will re-parse the new path.
+	if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+		s.spTotalPaths++
+	}
+	addTxToPathHopIndex(s.byPathHop, tx)
 }
 
 // MaxTransmissionID returns the highest transmission ID in the store.
