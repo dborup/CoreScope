@@ -139,6 +139,21 @@ const NOT_FOUND = {
     assert.ok(!/Node not found/.test(v.html), 'must not dead-end on "Node not found"');
   });
 
+  // #208 item 2: the same date is also in the explanation sentence, so the
+  // row itself is asserted, as a <dt>/<dd> pair, not just the date text.
+  await test('inactive node: the "Last advert" row carries the last advert date', async () => {
+    const v = view(PK, NOT_FOUND);
+    const pairs = {};
+    const re = /<dt>([^<]*)<\/dt><dd[^>]*>([\s\S]*?)<\/dd>/g;
+    let m;
+    while ((m = re.exec(v.html))) pairs[m[1]] = m[2];
+    assert.ok('Last advert' in pairs, 'no "Last advert" row; rows: ' + Object.keys(pairs).join(', '));
+    assert.ok(pairs['Last advert'].indexOf(ctx.formatAbsoluteTimestamp('2026-09-24T15:35:00Z')) !== -1,
+      '"Last advert" row does not show the inactive last_seen: ' + pairs['Last advert']);
+    assert.ok(pairs['Last upload as observer'].indexOf(ctx.formatAbsoluteTimestamp('2026-10-04T04:23:00Z')) !== -1,
+      '"Last upload as observer" row does not show the observer last_seen');
+  });
+
   await test('inactive observer: links to its observer page and back to Nodes', async () => {
     const v = view(PK, NOT_FOUND);
     assert.ok(v.html.indexOf('href="#/observers/' + encodeURIComponent(OBS_ID) + '"') !== -1, 'observer link missing');

@@ -17,6 +17,7 @@ const { chromium } = require('playwright');
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const INACTIVE_OBS = '0D3B3F382173A49EB0E3BB01AB2EA9B28601D9039E4BD52C55B91A8000CC092D';
 const OBS_ONLY = '424419FDF9DD9D206A5A917979E56E843DE78E890359C70B9F59B7E2CF2CE392';
+let inactiveLastSeen = null;   // inactive_nodes.last_seen, from the precondition step
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -37,6 +38,12 @@ async function settledNodePage(page) {
       title: title ? title.textContent.trim() : '',
       text: body ? body.textContent : '',
       hrefs: body ? Array.from(body.querySelectorAll('a[href]')).map(a => a.getAttribute('href')) : [],
+      // The card's <dt>/<dd> rows, label → text (#208 item 2).
+      rows: body ? Array.from(body.querySelectorAll('dt')).reduce((o, dt) => {
+        const dd = dt.nextElementSibling;
+        o[dt.textContent.trim()] = dd && dd.tagName === 'DD' ? dd.textContent.trim() : null;
+        return o;
+      }, {}) : {},
     };
   });
 }
@@ -61,6 +68,7 @@ async function settledNodePage(page) {
     assert(body.inactive_node && body.inactive_node.name === 'Inactive Observer E2E',
       'inactive_node missing (seed-199 applied?): ' + JSON.stringify(body));
     assert(body.observer && body.observer.id === INACTIVE_OBS, 'observer missing: ' + JSON.stringify(body));
+    inactiveLastSeen = body.inactive_node.last_seen;
   });
 
   await step('observer detail → "View node detail" explains the inactive node', async () => {
@@ -75,6 +83,11 @@ async function settledNodePage(page) {
     assert(r.text.indexOf('Inactive Observer E2E') !== -1, 'inactive name missing');
     assert(/repeater/i.test(r.text), 'inactive role missing');
     assert(r.title.indexOf('Inactive Observer E2E') !== -1, 'title should name the device: ' + r.title);
+    // #208 item 2: the row itself, with the inactive row's last advert date.
+    const lastAdvert = r.rows['Last advert'];
+    assert(lastAdvert, '"Last advert" row missing: ' + JSON.stringify(r.rows));
+    const want = await page.evaluate((iso) => formatAbsoluteTimestamp(iso), inactiveLastSeen);
+    assert(lastAdvert === want, '"Last advert" row shows ' + JSON.stringify(lastAdvert) + ', want ' + JSON.stringify(want));
     assert(r.hrefs.indexOf('#/observers/' + encodeURIComponent(INACTIVE_OBS)) !== -1, 'observer link missing: ' + r.hrefs);
     assert(r.hrefs.indexOf('#/nodes') !== -1, 'Back to Nodes link missing');
   });
