@@ -59,9 +59,15 @@ func TestSecrets(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"tcp://dev-user:secret@host:1883", []string{"dev-user:secret"}},
-		{"wss://host/mqtt?token=abc#frag", []string{"token=abc", "frag"}},
-		{"dev-user:1234?abc@host?x=1", []string{"dev-user:1234?abc", "x=1"}},
+		{"tcp://dev-user:secret@host:1883", []string{"dev-user:secret", "dev-user", "secret"}},
+		{"wss://host/mqtt?token=abc#frag", []string{"token=abc", "abc", "frag"}},
+		{"dev-user:1234?abc@host?x=1", []string{"dev-user:1234?abc", "dev-user", "1234?abc", "x=1", "1"}},
+		// #159: each part raw and URL-decoded, without duplicates
+		{"tcp://dev-user:p%40ss@host", []string{"dev-user:p%40ss", "dev-user:p@ss", "dev-user", "p%40ss", "p@ss"}},
+		{"wss://host/?a=x+y%21&b&c=", []string{"a=x+y%21&b&c=", "a=x+y!&b&c=", "a=x y!&b&c=", "x+y%21", "x+y!", "x y!", "b"}},
+		{"wss://host/#access_token=xyz&state=1", []string{"access_token=xyz&state=1", "xyz", "1"}},
+		{"tcp://:pw@host", []string{":pw", "pw"}},
+		{"tcp://u%zz@host", []string{"u%zz"}}, // a bad escape has no decoded form
 		{"tcp://@host", nil},
 		{"wss://host/mqtt?#", nil},
 		{"mqtt://host:1883", nil},
@@ -105,6 +111,70 @@ func TestMaskIsIdempotent(t *testing.T) {
 		m := Mask(in)
 		if Mask(m) != m || MaskText(m) != m {
 			t.Errorf("Mask not idempotent for %q: %q then %q / %q", in, m, Mask(m), MaskText(m))
+		}
+	}
+}
+
+// #159: MaskSecrets masks every part of a broker URL's credentials that
+// appears in free text, raw or decoded, in one pass over merged match
+// intervals, so overlapping secrets leave no residue, and it leaves
+// values shorter than MinSecretLen alone.
+func TestMaskSecrets_159(t *testing.T) {
+	for _, c := range []struct {
+		name, in string
+		secrets  []string
+		want     string
+	}{
+		{"user and password alone", "bad password hunter2 for dev-user",
+			Secrets("tcp://dev-user:hunter2@host"), "bad password **** for ****"},
+		{"decoded password", "auth p@ss rejected",
+			Secrets("tcp://dev-user:p%40ss@host"), "auth **** rejected"},
+		{"raw password", "auth p%40ss rejected",
+			Secrets("tcp://dev-user:p%40ss@host"), "auth **** rejected"},
+		{"query value alone", "token abc123 expired",
+			Secrets("wss://host/mqtt?token=abc123"), "token **** expired"},
+		{"query value decoded", "token a b/c! expired",
+			Secrets("wss://host/mqtt?token=a+b%2Fc%21"), "token **** expired"},
+		{"fragment value", "bad token xyz789",
+			Secrets("wss://host/#access_token=xyz789"), "bad token ****"},
+		{"overlapping secrets", "abcdef", []string{"abcd", "cdef"}, "****"},
+		{"overlap inside text", "x abcdef y", []string{"cdef", "abcd"}, "x **** y"},
+		{"one secret contains another", "user:pass", []string{"user", "user:pass", "pass"}, "****"},
+		{"a secret overlapping itself", "aaaa", []string{"aaa"}, "****"},
+		{"adjacent matches", "abcdef", []string{"abc", "def"}, "****"},
+		{"separate matches", "abc-def", []string{"abc", "def"}, "****-****"},
+		{"short values untouched", "uptime 1h, pw ok, queue u2",
+			Secrets("tcp://u:pw@host?x=1"), "uptime 1h, pw ok, queue u2"},
+		{"short values in a longer secret", "auth u:pw failed",
+			Secrets("tcp://u:pw@host"), "auth **** failed"},
+		{"length counts runes", "pæs æø", []string{"pæs", "æø"}, "**** æø"},
+		{"no secrets", "EOF", nil, "EOF"},
+		{"empty secret", "EOF", []string{""}, "EOF"},
+		{"marker is not re-scanned", "x abc y", []string{"abc", "***"}, "x **** y"},
+	} {
+		got := MaskSecrets(c.in, c.secrets...)
+		if got != c.want {
+			t.Errorf("%s: MaskSecrets(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// What a caller logs, MaskText(MaskSecrets(...)), keeps nothing of a
+// decoded password with an '@' in it: MaskText alone would read "p@ss" as
+// user-info and show "ss".
+func TestMaskSecretsThenMaskTextLeavesNoResidue_159(t *testing.T) {
+	got := MaskText(MaskSecrets("auth p@ss rejected", Secrets("tcp://dev-user:p%40ss@host")...))
+	if got != "auth **** rejected" {
+		t.Errorf("got %q, want %q", got, "auth **** rejected")
+	}
+}
+
+// No change to Mask: what MaskSecrets adds is for free text only, and a
+// full URL masked by both is still masked as before.
+func TestMaskSecretsKeepsMaskOutput_159(t *testing.T) {
+	for _, in := range []string{"tcp://dev-user:secret@host:1883", "wss://host/mqtt?token=abc", "tcp://dev-user:p%40ss@host"} {
+		if got := MaskText(MaskSecrets(Mask(in), Secrets(in)...)); got != Mask(in) {
+			t.Errorf("%q: %q, want %q", in, got, Mask(in))
 		}
 	}
 }
