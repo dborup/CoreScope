@@ -29,7 +29,7 @@ const Marker = "****"
 // Mask returns s with its user-info replaced by Marker and without query
 // and fragment. A scheme ("tcp://") is kept when it is a valid URL scheme.
 func Mask(s string) string {
-	p := split(s)
+	p := split(s, false)
 	rest := p.rest
 	if p.hasUserinfo {
 		rest = Marker + "@" + rest
@@ -43,24 +43,22 @@ func Mask(s string) string {
 // user-info and, when it has a ':', the user name before it and the
 // password after it; the query and each of its values; the fragment and
 // each of its values. A value is what follows the first '=' of an
-// '&'-separated part, or the whole part when it has no '='. Each comes
-// raw and, where it differs, %-decoded as in a path and as in a query
-// ('+' as space). Empty values and duplicates are left out.
+// '&'-separated part, or the whole part when it has no '='.
+//
+// s is read twice: as Mask reads it, with the user-info ending at the
+// last '@', and as RFC 3986 does, with the user-info ending at the last
+// '@' before the first '/', '?' or '#'. Either can be the one a library
+// quoting a part used, and each hides parts from the other: an '@' in the
+// query moves Mask's user-info past the password, and an unescaped '/' in
+// the password moves RFC 3986's past it.
+//
+// Each part comes raw and, where it differs and is valid UTF-8, %-decoded
+// as in a path and as in a query ('+' as space). Only one layer is
+// decoded and nothing is re-encoded, so a value decoded twice, or quoted
+// %-encoded when it was configured raw, is not listed; inside a URL,
+// MaskText still masks it. Empty values and duplicates are left out.
 func Secrets(s string) []string {
-	p := split(s)
-	var raw []string
-	if p.userinfo != "" {
-		raw = append(raw, p.userinfo)
-		if user, pass, ok := strings.Cut(p.userinfo, ":"); ok {
-			raw = append(raw, user, pass)
-		}
-	}
-	for _, v := range []string{p.query, p.fragment} {
-		if v != "" {
-			raw = append(raw, v)
-			raw = append(raw, values(v)...)
-		}
-	}
+	raw := append(split(s, false).secretParts(), split(s, true).secretParts()...)
 	var out []string
 	seen := map[string]bool{"": true}
 	for _, v := range raw {
@@ -69,6 +67,25 @@ func Secrets(s string) []string {
 				seen[d] = true
 				out = append(out, d)
 			}
+		}
+	}
+	return out
+}
+
+// secretParts returns p's user-info, user name and password, query,
+// fragment and their values, raw.
+func (p parts) secretParts() []string {
+	var out []string
+	if p.userinfo != "" {
+		out = append(out, p.userinfo)
+		if user, pass, ok := strings.Cut(p.userinfo, ":"); ok {
+			out = append(out, user, pass)
+		}
+	}
+	for _, v := range []string{p.query, p.fragment} {
+		if v != "" {
+			out = append(out, v)
+			out = append(out, values(v)...)
 		}
 	}
 	return out
@@ -87,14 +104,15 @@ func values(q string) []string {
 	return out
 }
 
-// decoded returns v and its %-decoded forms; a bad escape has none.
+// decoded returns v and its %-decoded forms. A bad escape has none, and a
+// form that is not valid UTF-8 is dropped: "%A6abc" decodes to a stray
+// continuation byte that matches inside a rune of other text.
 func decoded(v string) []string {
 	out := []string{v}
-	if d, err := url.PathUnescape(v); err == nil {
-		out = append(out, d)
-	}
-	if d, err := url.QueryUnescape(v); err == nil {
-		out = append(out, d)
+	for _, unescape := range []func(string) (string, error){url.PathUnescape, url.QueryUnescape} {
+		if d, err := unescape(v); err == nil && utf8.ValidString(d) {
+			out = append(out, d)
+		}
 	}
 	return out
 }
@@ -183,7 +201,7 @@ func maskSpan(m string) string {
 	return Mask(m)
 }
 
-// parts is a broker URL as Mask reads it.
+// parts is a broker URL as split reads it.
 type parts struct {
 	scheme      string
 	userinfo    string // everything before the last '@'
@@ -193,13 +211,20 @@ type parts struct {
 	fragment    string // without '#'
 }
 
-func split(s string) parts {
+// split reads s as Mask does, with the user-info ending at the last '@',
+// or, with authority set, as RFC 3986 does, with the user-info ending at
+// the last '@' before the first '/', '?' or '#' (see Secrets).
+func split(s string, authority bool) parts {
 	var p parts
 	rest := s
 	if i := strings.Index(rest, "://"); i > 0 && validScheme(rest[:i]) {
 		p.scheme, rest = rest[:i], rest[i+len("://"):]
 	}
-	if i := strings.LastIndex(rest, "@"); i >= 0 {
+	end := len(rest)
+	if i := strings.IndexAny(rest, "/?#"); authority && i >= 0 {
+		end = i
+	}
+	if i := strings.LastIndex(rest[:end], "@"); i >= 0 {
 		p.userinfo, p.hasUserinfo, rest = rest[:i], true, rest[i+1:]
 	}
 	if i := strings.IndexByte(rest, '#'); i >= 0 {
