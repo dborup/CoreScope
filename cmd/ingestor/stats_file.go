@@ -138,18 +138,34 @@ func statsFilePath() string {
 func writeStatsAtomic(path string, b []byte) error {
 	tmp := path + ".tmp"
 	// O_NOFOLLOW: if tmp is a pre-existing symlink, openat fails with ELOOP
-	// instead of clobbering the symlink target. 0o600 — no need for
-	// world-readable.
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|oNoFollow, 0o600)
+	// instead of clobbering the symlink target. O_NONBLOCK: a FIFO without
+	// a reader fails with ENXIO instead of blocking the writer, and its
+	// stop, forever (#161); regular-file I/O ignores the flag. 0o600 — no
+	// need for world-readable.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|oNoFollow|oNonBlock, 0o600)
 	if err != nil {
+		if fi, lerr := os.Lstat(tmp); lerr == nil && !fi.Mode().IsRegular() {
+			return fmt.Errorf("%v: %w", errStatsTmpNotRegular(tmp, fi.Mode()), err)
+		}
 		return err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	// Only a regular file may be published: a FIFO that has a reader, or
+	// a device, opens fine (#161).
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return errStatsTmpNotRegular(tmp, fi.Mode())
 	}
 	// The mode above applies only to a new file. A stale tmp keeps its
 	// owner and mode, and the rename would publish both. One that belongs
 	// to another user is refused before anything is changed: root's chmod
 	// would succeed on it, and its owner may still hold it open. Ours gets
 	// 0o600 and loses its old content (#118).
-	if err := checkStatsTmpOwner(f); err != nil {
+	if err := checkStatsTmpOwner(tmp, fi); err != nil {
 		f.Close()
 		return err
 	}
@@ -181,17 +197,63 @@ func writeStatsAtomic(path string, b []byte) error {
 // tests to model a file owned by someone else.
 var statsFileEUID = os.Geteuid
 
-// checkStatsTmpOwner fails when f belongs to a user other than
-// statsFileEUID. Where files have no Unix owner (Windows) it passes.
-func checkStatsTmpOwner(f *os.File) error {
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
+// checkStatsTmpOwner fails when the tmp file (name, fi from its open
+// descriptor) belongs to a user other than statsFileEUID. Where files have
+// no Unix owner (Windows) it passes.
+func checkStatsTmpOwner(name string, fi os.FileInfo) error {
 	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
-		return fmt.Errorf("%s belongs to uid %d, not %d", f.Name(), uid, statsFileEUID())
+		// The ingestor cannot fix this itself; say what the operator must
+		// do (#160).
+		return fmt.Errorf("%s belongs to uid %d, not %d; remove %s or fix its owner", name, uid, statsFileEUID(), name)
 	}
 	return nil
+}
+
+// errStatsTmpNotRegular is the error for a stats tmp path that holds
+// something other than a regular file, such as a FIFO or a directory.
+// It is left in place for the operator to remove (#161).
+func errStatsTmpNotRegular(tmp string, mode os.FileMode) error {
+	return fmt.Errorf("%s is not a regular file (mode %v); remove it", tmp, mode)
+}
+
+// statsWriteErrLogEvery is how often a failure that persists is logged
+// again. The writer ticks every second (#160).
+const statsWriteErrLogEvery = time.Minute
+
+// statsWriteLog rate-limits the writer's failure log (#160): the first
+// failure is logged at once, a persisting one at most once per `every`
+// with the count of failures in between, and the first success after a
+// failure once. Successes otherwise log nothing. Owned by the writer
+// goroutine; not safe for concurrent use.
+type statsWriteLog struct {
+	every      time.Duration
+	logf       func(format string, args ...any)
+	failing    bool
+	lastLog    time.Time
+	failures   int64 // since the last success
+	suppressed int64 // since the last failure line
+}
+
+func (l *statsWriteLog) failed(path string, err error, now time.Time) {
+	l.failures++
+	if l.failing && now.Sub(l.lastLog) < l.every {
+		l.suppressed++
+		return
+	}
+	if l.suppressed > 0 {
+		l.logf("[stats-file] write %s: %v (%d more failed writes since the last report)", path, err, l.suppressed)
+	} else {
+		l.logf("[stats-file] write %s: %v", path, err)
+	}
+	l.failing, l.lastLog, l.suppressed = true, now, 0
+}
+
+func (l *statsWriteLog) succeeded(path string) {
+	if !l.failing {
+		return
+	}
+	l.logf("[stats-file] write %s: ok again after %d failed writes", path, l.failures)
+	l.failing, l.failures, l.suppressed = false, 0, 0
 }
 
 // procIOSnapshot is the raw counter snapshot used to compute per-second rates
@@ -267,7 +329,8 @@ func procIORate(prev, cur procIOSnapshot, stamp string) *PerfIOSample {
 
 // StartStatsFileWriter writes the current stats snapshot to disk every
 // `interval` so the server can serve them at /api/perf/write-sources.
-// Failures are logged once-per-interval and never fatal.
+// Failures are never fatal; they are logged rate-limited (statsWriteLog,
+// #160).
 //
 // The stats file path is resolved via statsFilePath() once at writer-loop
 // start; the env var (CORESCOPE_INGESTOR_STATS) is only re-read on process
@@ -300,6 +363,7 @@ func StartStatsFileWriter(s *Store, interval time.Duration) (stop func()) {
 		// The buffer grows once and stays.
 		var buf bytes.Buffer
 		enc := json.NewEncoder(&buf)
+		writeLog := statsWriteLog{every: statsWriteErrLogEvery, logf: log.Printf}
 		for {
 			select {
 			case <-quit:
@@ -349,7 +413,9 @@ func StartStatsFileWriter(s *Store, interval time.Duration) (stop func()) {
 				b = b[:n-1]
 			}
 			if err := writeStatsAtomic(path, b); err != nil {
-				log.Printf("[stats-file] write %s: %v", path, err)
+				writeLog.failed(path, err, tickAt)
+			} else {
+				writeLog.succeeded(path)
 			}
 		}
 	}()

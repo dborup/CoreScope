@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/meshcore-analyzer/brokerurl"
 )
@@ -143,6 +144,26 @@ type MqttStatusResponse struct {
 	// 0 / omitted: no drops OR older ingestor build that predates
 	// newAsyncEmit.
 	WatchdogLogDropCount int64 `json:"watchdogLogDropCount,omitempty"`
+	// Stale (#160) is true when sampleAt is older than
+	// IngestorStatsStaleThreshold (the rule /api/perf/io applies to the
+	// same file) or cannot be parsed: the ingestor is down or cannot
+	// write its stats file, and the rows are frozen. False without a
+	// stats file; sampleAt is then empty and there are no rows.
+	Stale bool `json:"stale"`
+	// SampleAgeSec (#160) is the age of sampleAt in whole seconds when
+	// the response was built. Omitted when there is no readable sampleAt.
+	SampleAgeSec *int64 `json:"sampleAgeSec,omitempty"`
+}
+
+// mqttStatusStaleness returns Stale and SampleAgeSec for a sampleAt stamp
+// read from the stats file at now.
+func mqttStatusStaleness(stamp string, now time.Time) (stale bool, ageSec *int64) {
+	ts, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		return true, nil
+	}
+	age := int64(now.Sub(ts) / time.Second)
+	return ingestorStatsStale(ts, now), &age
 }
 
 // ingestorMqttStatusEnvelope is the partial shape the server decodes from
@@ -172,6 +193,7 @@ func (s *Server) handleMqttStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.SampleAt = env.SampledAt
+	resp.Stale, resp.SampleAgeSec = mqttStatusStaleness(env.SampledAt, time.Now())
 	resp.WatchdogLastTickUnix = env.WatchdogLastTickUnix
 	resp.WatchdogPanicCount = env.WatchdogPanicCount
 	resp.WatchdogLogDropCount = env.WatchdogLogDropCount

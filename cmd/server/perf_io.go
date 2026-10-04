@@ -162,6 +162,14 @@ func (s *Server) handlePerfIO(w http.ResponseWriter, r *http.Request) {
 // #1167 must-fix #1: serving stale procIO as live disguises a dead ingestor.
 const IngestorStatsStaleThreshold = 5 * time.Second
 
+// ingestorStatsStale reports whether an ingestor stats snapshot sampled at
+// ts is too old at now to pass for live data. It is the one staleness rule
+// for readers of the stats file: /api/perf/io drops such a sample, and
+// /api/mqtt/status marks it stale (#160).
+func ingestorStatsStale(ts, now time.Time) bool {
+	return now.Sub(ts) > IngestorStatsStaleThreshold
+}
+
 // ingestorIOPeek is the minimal subset of IngestorStats that
 // readIngestorIOSample actually needs. Decoding into this instead of the
 // full IngestorStats avoids allocating BackfillUpdates (a map) and the
@@ -201,7 +209,7 @@ func readIngestorIOSample() *PerfIOSample {
 		// file (writer wedged) MUST still drop after the threshold.
 		if s.SampledAt != "" {
 			if ts, err := time.Parse(time.RFC3339, s.SampledAt); err == nil {
-				if time.Since(ts) > IngestorStatsStaleThreshold {
+				if ingestorStatsStale(ts, time.Now()) {
 					return nil
 				}
 			}
@@ -233,7 +241,7 @@ func readIngestorIOSample() *PerfIOSample {
 	if err != nil {
 		return nil
 	}
-	if time.Since(ts) > IngestorStatsStaleThreshold {
+	if ingestorStatsStale(ts, time.Now()) {
 		return nil
 	}
 

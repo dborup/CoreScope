@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -126,5 +128,45 @@ func TestWriteStatsAtomicForeignTmpErrorNamesTheFix_160(t *testing.T) {
 	}
 	if want := "remove " + path + ".tmp or fix its owner"; !strings.Contains(err.Error(), want) {
 		t.Fatalf("error %q lacks the hint %q", err, want)
+	}
+}
+
+// A failure that persists is logged at most once per interval, with the
+// failures in between counted; recovery is logged once, and a success
+// without a failure before it logs nothing (#160).
+func TestStatsWriteLogAtMostOncePerInterval_160(t *testing.T) {
+	var lines []string
+	l := statsWriteLog{every: time.Minute, logf: func(f string, a ...any) {
+		lines = append(lines, fmt.Sprintf(f, a...))
+	}}
+	errTmp := errors.New("x.tmp belongs to uid 1, not 2; remove x.tmp or fix its owner")
+	t0 := time.Unix(1_700_000_000, 0)
+
+	l.succeeded("x")           // healthy start: silent
+	for s := 0; s < 150; s++ { // 2.5 minutes of 1 Hz failures
+		l.failed("x", errTmp, t0.Add(time.Duration(s)*time.Second))
+	}
+	want := []string{
+		"[stats-file] write x: " + errTmp.Error(),
+		"[stats-file] write x: " + errTmp.Error() + " (59 more failed writes since the last report)",
+		"[stats-file] write x: " + errTmp.Error() + " (59 more failed writes since the last report)",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("failure lines:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
+	}
+
+	lines = nil
+	l.succeeded("x")
+	l.succeeded("x")
+	if len(lines) != 1 || lines[0] != "[stats-file] write x: ok again after 150 failed writes" {
+		t.Fatalf("recovery lines %q", lines)
+	}
+
+	// A new failure after recovery is logged at once, counted afresh.
+	lines = nil
+	l.failed("x", errTmp, t0.Add(151*time.Second))
+	l.succeeded("x")
+	if len(lines) != 2 || !strings.HasSuffix(lines[1], "ok again after 1 failed writes") {
+		t.Fatalf("second episode lines %q", lines)
 	}
 }
