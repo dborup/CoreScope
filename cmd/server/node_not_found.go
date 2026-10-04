@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 // nodeNotFoundResponse is the 404 body of GET /api/nodes/{pubkey} (#199).
@@ -93,12 +95,47 @@ func (s *Server) lookupMissingNode(ctx context.Context, pubkey string) (nodeNotF
 	return resp, nil
 }
 
+// missingNodeLogEvery bounds the log of failed missing-node lookups (#208):
+// the first failure is logged at once, later ones at most once per interval.
+const missingNodeLogEvery = 10 * time.Minute
+
+// missingNodeLookupLog throttles that log. The zero value is ready.
+type missingNodeLookupLog struct {
+	mu         sync.Mutex
+	last       time.Time
+	suppressed int
+}
+
+// note reports whether a failure at now is logged and, if so, how many
+// failures were suppressed since the previous logged one.
+func (l *missingNodeLookupLog) note(now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.last.IsZero() && now.Sub(l.last) < missingNodeLogEvery {
+		l.suppressed++
+		return false, 0
+	}
+	n := l.suppressed
+	l.last, l.suppressed = now, 0
+	return true, n
+}
+
 // writeNodeNotFound answers a node-detail miss. A failed lookup falls back to
 // the bare 404: it only enriches the error and must not turn it into a 500.
+// The failure is logged, throttled, so a broken lookup (e.g. schema drift on
+// inactive_nodes) does not pass for a plain miss (#208). A request its client
+// cancelled is not a broken lookup and is not logged. The requested key is
+// left out of the line: it is client input and adds nothing to the error.
 func (s *Server) writeNodeNotFound(w http.ResponseWriter, r *http.Request, pubkey string) {
 	resp, err := s.lookupMissingNode(r.Context(), pubkey)
 	if err != nil {
 		resp = nodeNotFoundResponse{Error: "Not found"}
+		if r.Context().Err() == nil {
+			if logIt, suppressed := s.missingNodeLog.note(time.Now()); logIt {
+				log.Printf("[routes] missing-node lookup failed, answering a bare 404: %v (%d more suppressed since the last report; next report in %v at the earliest)",
+					err, suppressed, missingNodeLogEvery)
+			}
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
