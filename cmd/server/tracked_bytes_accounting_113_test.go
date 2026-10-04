@@ -214,6 +214,123 @@ func TestTrackedBytes_ResolvedRelaysAreChargedIncrementally_164(t *testing.T) {
 	acct113Check(t, store, "after a rebuild that clears the records")
 }
 
+// acct113StartupStore loads a store the way production starts: RunStartupLoad
+// (LoadChunked, then, with hotStartupHours > 0, the loadChunk background fill)
+// and not Load(). The accounting must hold on that path as well.
+func acct113StartupStore(t *testing.T, dbPath string, hotStartupHours float64) *PacketStore {
+	t.Helper()
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewPacketStore(db, &PacketStoreConfig{RetentionHours: 168, HotStartupHours: hotStartupHours})
+	if err := store.RunStartupLoad(100); err != nil {
+		t.Fatal(err)
+	}
+	if !store.WaitIndexesReady(30 * time.Second) {
+		t.Fatal("background index builds did not finish")
+	}
+	return store
+}
+
+func TestTrackedBytes_LoadChunkedChargesPathAndResolvedRelays_113(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "acct.db")
+	acct113CreateDB(t, dbPath, 400, 0)
+	store := acct113StartupStore(t, dbPath, 0)
+	if len(store.packets) != 400 || len(store.pathHopResolved) == 0 {
+		t.Fatalf("setup: %d packets, %d resolved records; want 400 and some records", len(store.packets), len(store.pathHopResolved))
+	}
+	acct113Check(t, store, "after LoadChunked")
+}
+
+// A hot window through LoadChunked, then the older rows through loadChunk (the
+// background fill): both halves must be charged, and the merge must not
+// double-charge or lose a resolved record.
+func TestTrackedBytes_BackgroundFillChargesPathAndResolvedRelays_113(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "acct.db")
+	acct113CreateDB(t, dbPath, 400, 200) // 200 rows 3 days old, 200 rows 1 hour old
+	store := acct113StartupStore(t, dbPath, 2)
+	if len(store.packets) != 400 {
+		t.Fatalf("setup: %d packets in memory after the startup load, want 400 (hot window plus background fill)", len(store.packets))
+	}
+	if len(store.pathHopResolved) == 0 {
+		t.Fatal("setup: no resolved records")
+	}
+	acct113Check(t, store, "after LoadChunked and the loadChunk background fill")
+
+	store.retentionHours = 24
+	if n := store.RunEviction(); n != 200 {
+		t.Fatalf("evicted %d tx, want the 200 old ones", n)
+	}
+	acct113Check(t, store, "after evicting the background-filled half")
+}
+
+// The estimate terms are pinned one by one, not only through the tolerance of
+// the heap ratio: every observation string, the dedup key, and the allowance
+// per resolved record and per key.
+func TestEstimateStoreObsBytes_CountsEveryTerm_113(t *testing.T) {
+	newObs := func() *StoreObs {
+		return &StoreObs{
+			ObserverID: strings.Repeat("a", 3), ObserverName: strings.Repeat("b", 5), ObserverIATA: strings.Repeat("c", 7),
+			Direction: strings.Repeat("d", 11), RawHex: strings.Repeat("e", 13), Timestamp: strings.Repeat("f", 17),
+			PathJSON: strings.Repeat("g", 19),
+		}
+	}
+	obs := newObs()
+	want := int64(storeObsBaseBytes+numIndexesPerObs*indexEntryBytes) +
+		3 + 5 + 7 + 11 + 13 + 17 + 19 + // every string field, once
+		int64(obsKeyEntryBytes) + 3 + 19 // the dedup key: observer ID + path
+	if got := estimateStoreObsBytes(obs); got != want {
+		t.Errorf("estimateStoreObsBytes = %d, want %d", got, want)
+	}
+	// Each string must move the estimate by exactly its length.
+	for name, set := range map[string]func(o *StoreObs){
+		"ObserverName": func(o *StoreObs) { o.ObserverName += "x" },
+		"ObserverIATA": func(o *StoreObs) { o.ObserverIATA += "x" },
+		"Direction":    func(o *StoreObs) { o.Direction += "x" },
+		"RawHex":       func(o *StoreObs) { o.RawHex += "x" },
+		"Timestamp":    func(o *StoreObs) { o.Timestamp += "x" },
+	} {
+		longer := newObs()
+		set(longer)
+		if d := estimateStoreObsBytes(longer) - estimateStoreObsBytes(obs); d != 1 {
+			t.Errorf("one more byte of %s moved the estimate by %d, want 1", name, d)
+		}
+	}
+	// ObserverID and PathJSON are charged twice: as the field and in the dedup key.
+	for name, set := range map[string]func(o *StoreObs){
+		"ObserverID": func(o *StoreObs) { o.ObserverID += "x" },
+		"PathJSON":   func(o *StoreObs) { o.PathJSON += "x" },
+	} {
+		longer := newObs()
+		set(longer)
+		if d := estimateStoreObsBytes(longer) - estimateStoreObsBytes(obs); d != 2 {
+			t.Errorf("one more byte of %s moved the estimate by %d, want 2 (field and dedup key)", name, d)
+		}
+	}
+}
+
+func TestResolvedRelayBytes_AllowanceHasARecordAndAKeyPart_164(t *testing.T) {
+	if resolvedRelayBytes(0) != 0 || resolvedRelayBytes(-1) != 0 {
+		t.Fatal("a tx without a record is charged nothing")
+	}
+	perKey := resolvedRelayBytes(2) - resolvedRelayBytes(1)
+	record := resolvedRelayBytes(1) - perKey
+	for n := 1; n <= 6; n++ {
+		if want := record + int64(n)*perKey; resolvedRelayBytes(n) != want {
+			t.Errorf("resolvedRelayBytes(%d) = %d, want one record (%d) plus %d keys of %d = %d", n, resolvedRelayBytes(n), record, n, perKey, want)
+		}
+	}
+	// Physical floors: a key costs at least a byPathHop slot and a hash (16),
+	// a record at least its map key and slice header (8 + 24).
+	if perKey < 16 {
+		t.Errorf("a resolved key is charged %d bytes, less than a byPathHop slot plus a hash (16)", perKey)
+	}
+	if record < 32 {
+		t.Errorf("a pathHopResolved record is charged %d bytes, less than its map key plus slice header (32)", record)
+	}
+}
+
 // A record whose tx is not (or no longer) in s.packets is dropped by a
 // rebuild; its charge must go with it. loadChunk indexes a batch's resolved
 // relays before the batch is published into s.packets, so the window exists.
