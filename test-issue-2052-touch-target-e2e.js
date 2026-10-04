@@ -5,18 +5,23 @@
  * measures what the browser actually renders, in the real responsive DOM:
  *
  *  - Desktop 1440x900 (sectioned .ch-item list): the share and remove actions
- *    of a user-added channel are at least 44x44 CSS px, visible, not clipped
+ *    of a user-added channel are at least 48x48 CSS px, visible, not clipped
  *    by any overflow container, hit at their centre, not overlapping each
  *    other or the row's other parts, reachable by keyboard with focus-visible,
  *    keep their ARIA/title contract, and do their job without side effects
  *    (share opens the modal, remove asks for confirmation, which is dismissed).
  *  - Mobile 390x844 touch (flat .ch-row list, #1367): the list renders no
  *    share/remove actions at all, every visible tap target in the channel
- *    sidebar is at least 44x44, and tapping a row opens the channel.
- *  - Tablet 768x1024 touch: characterization only. The sidebar is narrower
- *    than a channel row there, so the actions are clipped. That is a known,
- *    separate layout issue (also on master); this step logs the measurement
- *    and does not gate.
+ *    sidebar is at least 44x44 (WCAG_MIN: other sidebar controls, e.g. the
+ *    coarse-pointer .region-pill, are outside #2052 and still 44), and
+ *    tapping a row opens the channel.
+ *  - 768-1330 px (the narrow sectioned sidebar; 768 with touch): share and
+ *    remove are at least 48x48, visible, unclipped, hit at their centre and
+ *    do not overlap. Before upstream PR 2078 the remove action was clipped
+ *    here; user-added rows now let their controls wrap.
+ *
+ * 48 is the house preference for these controls (upstream PR 2078 settled
+ * #2052 on 48; WCAG 2.5.5 asks for 44).
  *
  * The user-added channel comes from a saved key in localStorage, the same
  * state a returning user has; no DOM is injected. No sleeps or retries: each
@@ -34,7 +39,8 @@ const CHANNEL = '#tt2052probe';
 const HASH = 'user:' + CHANNEL;
 const SHARE = `#chList [data-share-channel="${HASH}"]`;
 const REMOVE = `#chList [data-remove-channel="${HASH}"]`;
-const MIN = 44;
+const MIN = 48;
+const WCAG_MIN = 44;
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -115,6 +121,22 @@ function overlaps(a, b) {
   return !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
 }
 
+// Share and remove: at least MIN square, visible, unclipped, hit at their
+// centre, and not on top of each other.
+async function assertActionTargets(page) {
+  const found = {};
+  for (const [name, sel] of [['share', SHARE], ['remove', REMOVE]]) {
+    const m = await measure(page, sel);
+    assert(m, name + ' action not rendered');
+    assert(m.w >= MIN && m.h >= MIN, `${name} renders ${m.w.toFixed(1)}x${m.h.toFixed(1)}, below ${MIN}x${MIN}`);
+    assert(m.visible, name + ' is not visible');
+    assert(m.clippedBy.length === 0, name + ' is clipped by ' + m.clippedBy.join(', '));
+    assert(m.hit, `${name} centre hits "${m.hitOn}", not the control`);
+    found[name] = m;
+  }
+  assert(!overlaps(found.share, found.remove), 'share and remove overlap');
+}
+
 async function main() {
   let browser;
   try {
@@ -140,15 +162,8 @@ async function main() {
   try {
     await dp.waitForSelector(REMOVE, { state: 'visible' });
 
-    await step('desktop 1440x900: share and remove are at least 44x44, visible, unclipped and hit at their centre', async () => {
-      for (const [name, sel] of [['share', SHARE], ['remove', REMOVE]]) {
-        const m = await measure(dp, sel);
-        assert(m, name + ' action not rendered');
-        assert(m.w >= MIN && m.h >= MIN, `${name} renders ${m.w.toFixed(1)}x${m.h.toFixed(1)}, below ${MIN}x${MIN}`);
-        assert(m.visible, name + ' is not visible');
-        assert(m.clippedBy.length === 0, name + ' is clipped by ' + m.clippedBy.join(', '));
-        assert(m.hit, `${name} centre hits "${m.hitOn}", not the control`);
-      }
+    await step(`desktop 1440x900: share and remove are at least ${MIN}x${MIN}, visible, unclipped and hit at their centre`, async () => {
+      await assertActionTargets(dp);
     });
 
     await step('desktop: actions do not overlap each other or the rest of the row, and the page has no horizontal overflow', async () => {
@@ -214,20 +229,20 @@ async function main() {
     // asserts which layout it is.
     await mp.waitForSelector(`#chList [data-hash="${HASH}"]`, { state: 'visible' });
 
-    await step('mobile 390x844: the list renders no share/remove actions, and every visible tap target is at least 44x44', async () => {
-      const r = await mp.evaluate((hash) => ({
+    await step(`mobile 390x844: the list renders no share/remove actions, and every visible tap target is at least ${WCAG_MIN}x${WCAG_MIN}`, async () => {
+      const r = await mp.evaluate(([hash, min]) => ({
         mobileRow: !!document.querySelector(`#chList .ch-row[data-hash="${hash}"]`),
         actions: document.querySelectorAll('#chList .ch-icon-btn, #chList [data-share-channel], #chList [data-remove-channel]').length,
         desktopRows: document.querySelectorAll('#chList .ch-item').length,
         small: [...document.querySelectorAll('.ch-sidebar button, .ch-sidebar a[href], .ch-sidebar [role="button"], .ch-sidebar [tabindex="0"]')]
           .filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0 && getComputedStyle(e).visibility === 'visible'; })
           .map((e) => { const b = e.getBoundingClientRect(); return { name: e.id || String(e.className).split(' ')[0] || e.tagName, w: +b.width.toFixed(1), h: +b.height.toFixed(1) }; })
-          .filter((t) => t.w < 44 || t.h < 44),
+          .filter((t) => t.w < min || t.h < min),
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      }), HASH);
+      }), [HASH, WCAG_MIN]);
       assert(r.mobileRow, 'the channel is not rendered as a mobile .ch-row');
       assert(r.actions === 0 && r.desktopRows === 0, `mobile list renders desktop actions (actions=${r.actions}, .ch-item rows=${r.desktopRows})`);
-      assert(r.small.length === 0, 'mobile tap targets below 44x44: ' + JSON.stringify(r.small));
+      assert(r.small.length === 0, `mobile tap targets below ${WCAG_MIN}x${WCAG_MIN}: ` + JSON.stringify(r.small));
       assert(r.overflow <= 0, 'mobile page overflows horizontally by ' + r.overflow + 'px');
     });
 
@@ -240,18 +255,17 @@ async function main() {
     await mob.ctx.close();
   }
 
-  // ── Tablet: characterization of the known clipping (not gating) ──────────
-  const tab = await openChannels(browser, errors, { viewport: { width: 768, height: 1024 }, hasTouch: true });
-  try {
-    await tab.page.waitForSelector(REMOVE, { state: 'attached' });
-    await step('tablet 768x1024: characterization only (known, separate layout issue)', async () => {
-      const share = await measure(tab.page, SHARE), remove = await measure(tab.page, REMOVE);
-      assert(share && remove, 'tablet actions not rendered');
-      const fmt = (n, m) => `${n} ${m.w.toFixed(0)}x${m.h.toFixed(0)} hit=${m.hit ? 'yes' : 'no (' + m.hitOn + ')'} clipped=${m.clippedBy.join('; ') || 'no'}`;
-      console.log('    KNOWN LIMITATION (tracked separately, not fixed here): ' + fmt('share', share) + ' | ' + fmt('remove', remove));
-    });
-  } finally {
-    await tab.ctx.close();
+  // ── Narrow sectioned sidebar: 768 (touch) to 1330 px ─────────────────────
+  for (const width of [768, 1024, 1180, 1330]) {
+    const narrow = await openChannels(browser, errors, { viewport: { width, height: 1024 }, hasTouch: width === 768 });
+    try {
+      await narrow.page.waitForSelector(REMOVE, { state: 'visible' });
+      await step(`${width}x1024: share and remove are at least ${MIN}x${MIN}, unclipped, hit at their centre and do not overlap`, async () => {
+        await assertActionTargets(narrow.page);
+      });
+    } finally {
+      await narrow.ctx.close();
+    }
   }
 
   await step('no page errors, console errors or unhandled rejections', async () => {

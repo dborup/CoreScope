@@ -10,9 +10,12 @@
  * specific selectors such as `#chList .ch-icon-btn` count too; an earlier
  * version matched only the exact selector text and missed a 32px override.
  * Every min-width/min-height declared for these controls must be at least
- * 44px. Pseudo-class rules (:hover, :active, :focus, ...) are skipped because
- * they do not set target dimensions. The base .nav-btn and .ch-icon-btn rules
- * must also keep touch-action: manipulation.
+ * MIN (48px, the house preference; upstream PR 2078 settled #2052 on 48), and
+ * each control must declare both somewhere, so dropping the 48px group rule
+ * cannot pass silently. Pseudo-class rules (:hover, :active, :focus, ...) are
+ * skipped because they do not set target dimensions. Every rule naming
+ * .nav-btn or .ch-icon-btn that sets touch-action must use manipulation, and
+ * at least one must set it.
  */
 'use strict';
 
@@ -24,6 +27,7 @@ const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
 const CONTROLS = ['.nav-btn', '.ch-icon-btn', '.ch-share-btn', '.ch-remove-btn'];
+const MIN = 48;
 
 // The innermost { } blocks are the style rules, also inside @media.
 function rules() {
@@ -54,6 +58,7 @@ function declared(body, property) {
 
 const violations = [];
 const seen = new Set();
+const sized = new Set();
 let checked = 0;
 for (const rule of rules()) {
   for (const selector of rule.selectors) {
@@ -63,8 +68,9 @@ for (const rule of rules()) {
     for (const property of ['min-width', 'min-height']) {
       for (const value of declared(rule.body, property)) {
         checked++;
+        sized.add(control + ' ' + property);
         const px = /^(\d+(?:\.\d+)?)px$/.exec(value);
-        if (!px || Number(px[1]) < 44) violations.push(`${selector} { ${property}: ${value} }`);
+        if (!px || Number(px[1]) < MIN) violations.push(`${selector} { ${property}: ${value} }`);
       }
     }
   }
@@ -72,8 +78,10 @@ for (const rule of rules()) {
 
 assert.deepStrictEqual(CONTROLS.filter((c) => !seen.has(c)), [], 'every compact control must have at least one rule');
 assert(checked > 0, 'no min-width/min-height declarations found for the compact controls');
-assert.deepStrictEqual(violations, [], 'compact controls must not declare a touch target below 44px:\n  ' + violations.join('\n  '));
-console.log(`PASS ${checked} min-width/min-height declarations for ${CONTROLS.join(', ')} are all >= 44px`);
+const unsized = CONTROLS.flatMap((c) => ['min-width', 'min-height'].map((p) => c + ' ' + p)).filter((k) => !sized.has(k));
+assert.deepStrictEqual(unsized, [], 'every compact control must declare min-width and min-height');
+assert.deepStrictEqual(violations, [], `compact controls must not declare a touch target below ${MIN}px:\n  ` + violations.join('\n  '));
+console.log(`PASS ${checked} min-width/min-height declarations for ${CONTROLS.join(', ')} are all >= ${MIN}px`);
 
 for (const base of ['.nav-btn', '.ch-icon-btn']) {
   const values = rules()
