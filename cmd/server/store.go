@@ -54,7 +54,11 @@ type StoreTx struct {
 	PathJSON            string
 	Direction           string
 	LatestSeen          string // max observation timestamp (or FirstSeen if no observations)
-	UniqueObserverCount int    // cached count of distinct observer IDs
+	UniqueObserverCount int32  // cached count of distinct observer IDs
+	// chargedBytes is what trackedBytes was last charged for this tx
+	// (observations and resolved relay hops excluded). It takes the 4 bytes
+	// UniqueObserverCount gave up, so StoreTx stays 320 bytes.
+	chargedBytes uint32
 	// Cached parsed fields (set once, read many)
 	parsedPath []string // cached parsePathJSON result
 	pathParsed bool     // whether parsedPath has been set
@@ -1022,7 +1026,7 @@ func (s *PacketStore) Load() error {
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
@@ -1086,6 +1090,7 @@ func (s *PacketStore) Load() error {
 	// now that pickBestObservation has propagated the best path.
 	for _, tx := range s.packets {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 		s.indexByNode(tx)
 	}
 
@@ -1338,7 +1343,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			if txID > localMaxTxID {
 				localMaxTxID = txID
 			}
-			localTrackedBytes += estimateStoreTxBytes(tx)
+			localTrackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
@@ -1420,6 +1425,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// Pick best observation for each local packet before merging.
 	for _, tx := range localPackets {
 		pickBestObservation(tx)
+		localTrackedBytes += rechargeTx(tx)
 	}
 
 	if len(localPackets) == 0 {
@@ -1828,6 +1834,45 @@ func pickBestObservation(tx *StoreTx) {
 	tx.PathJSON = best.PathJSON
 	tx.Direction = best.Direction
 	tx.pathParsed = false // invalidate cached parsed path
+}
+
+// rechargeTx re-estimates tx and returns the change since it was last
+// charged, for the caller to add to trackedBytes (#113). A tx is first
+// charged when it is created, before its observations are merged, so its
+// path costs (byPathHop, spTxIndex) are unknown then: call it again once
+// pickBestObservation has set the path. Eviction subtracts what was charged
+// (chargedBytes, see txChargedBytes) and never re-estimates, so the total
+// stays exact however often the path changed in between.
+//
+// It reads and writes only tx, so it is safe on a tx that is not yet shared
+// (loadChunk charges its local batch outside s.mu); otherwise call it with
+// s.mu held.
+func rechargeTx(tx *StoreTx) int64 {
+	est := estimateStoreTxBytes(tx)
+	if est > math.MaxUint32 { // far beyond any real tx; keeps the uint32 field honest
+		est = math.MaxUint32
+	}
+	d := est - int64(tx.chargedBytes)
+	tx.chargedBytes = uint32(est)
+	return d
+}
+
+// resolvedRelayBytes is the memory a tx holds for n distinct resolved relay
+// keys (#164): per key a byPathHop slot, a hash in pathHopResolved and the
+// other per-key index entries indexResolvedPathHops adds, plus the
+// pathHopResolved map entry once. It is a function of n alone, so the charge
+// can be re-derived from len(s.pathHopResolved[tx]) at eviction.
+func resolvedRelayBytes(n int) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return perResolvedRecordBytes + int64(n)*perResolvedRelayBytes
+}
+
+// txChargedBytes is everything trackedBytes currently holds for tx, observations
+// excluded. Must be called with s.mu held.
+func (s *PacketStore) txChargedBytes(tx *StoreTx) int64 {
+	return int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx]))
 }
 
 func pathLen(pathJSON string) int {
@@ -3081,7 +3126,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 
 			if _, exists := broadcastTxs[r.txID]; !exists {
 				broadcastTxs[r.txID] = tx
@@ -3158,6 +3203,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	// Pick best observation for new transmissions
 	for _, tx := range broadcastTxs {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 	}
 
 	// Incrementally update precomputed subpath index with new transmissions
@@ -3605,6 +3651,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	}
 	for _, tx := range updatedTxs {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 	}
 	pathHopMutated := false
 	for txID, tx := range updatedTxs {
@@ -4518,6 +4565,9 @@ func (s *PacketStore) buildPathHopIndex() {
 func (s *PacketStore) retainResolvedPathHops(prev map[string][]*StoreTx) int {
 	if len(prev) == 0 {
 		// No resolved entries anywhere, so nothing is recorded as indexed.
+		for _, indexed := range s.pathHopResolved {
+			s.trackedBytes -= resolvedRelayBytes(len(indexed))
+		}
 		clear(s.pathHopResolved)
 		return 0
 	}
@@ -4527,8 +4577,9 @@ func (s *PacketStore) retainResolvedPathHops(prev map[string][]*StoreTx) int {
 	}
 	// Keep the per-transmission record in step with what is carried over
 	// below: entries of transmissions that are gone are not (#158).
-	for tx := range s.pathHopResolved {
+	for tx, indexed := range s.pathHopResolved {
 		if _, ok := live[tx]; !ok {
+			s.trackedBytes -= resolvedRelayBytes(len(indexed))
 			delete(s.pathHopResolved, tx)
 		}
 	}
@@ -4724,6 +4775,10 @@ func (s *PacketStore) addResolvedPubkeysToPathHopIndex(tx *StoreTx, pubkeys []st
 		return false
 	}
 	s.pathHopResolved[tx] = indexed
+	// Charge the new keys (#164): one byPathHop slot and one hash each, plus
+	// the map entry the first time. Eviction derives the same total back from
+	// len(indexed), see txChargedBytes.
+	s.trackedBytes += resolvedRelayBytes(len(indexed)) - resolvedRelayBytes(before)
 	// Mutating byPathHop invalidates the batch relay-stats cache (#1164).
 	s.invalidateRelayStatsCache()
 	return true
@@ -5118,6 +5173,33 @@ const (
 
 	// Per subpath entry in spTxIndex: string key + slice append + pointer
 	perSubpathEntryBytes = 40
+
+	// ParsedDecoded caches json.Unmarshal of DecodedJSON as a
+	// map[string]interface{}, about 4x the JSON length. Analytics touch
+	// every tx, so it is charged up front rather than when the cache fills
+	// (charging in ParsedDecoded() would write trackedBytes from read paths
+	// that do not hold s.mu).
+	decodedCacheFactor = 4
+
+	// Per obs: the tx.obsKeys dedup entry. The "observerID|pathJSON" key is
+	// built by concatenation, so its bytes (added per obs in
+	// estimateStoreObsBytes) are a separate allocation from the obs fields;
+	// this is the string header, the bucket slot and the bool.
+	obsKeyEntryBytes = 16 + indexEntryBytes + 1
+
+	// Resolved relay hops (#164), charged per distinct key a tx is indexed
+	// under after insertion (see resolvedRelayBytes). Calibrated on this
+	// branch with TestTrackedBytesVsHeap_Measure_113: the marginal heap of a
+	// store with 1, 1.9 and 4 resolved keys per tx is 195, 264 and 449 B per
+	// tx at 100k transmissions and 275, 355 and 592 B at 500k (map growth
+	// steps), i.e. 110-170 B per pathHopResolved record plus 85-105 B per
+	// key. These are the midpoints.
+	perResolvedRelayBytes  = 96  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeHashes entry and resolved-pubkey index entry
+	perResolvedRecordBytes = 140 // pathHopResolved map entry: key, slice header, bucket share, first backing array
+
+	// A typical tx is resolved to this many distinct relays. Used by
+	// estimateStoreTxBytesTypical only.
+	typicalResolvedRelays = 3
 )
 
 // estimateStoreTxBytes returns the estimated memory cost of a StoreTx (excluding observations).
@@ -5126,6 +5208,7 @@ func estimateStoreTxBytes(tx *StoreTx) int64 {
 	base := int64(storeTxBaseBytes)
 	base += int64(len(tx.RawHex) + len(tx.Hash) + len(tx.DecodedJSON) + len(tx.PathJSON))
 	base += int64(numIndexesPerTx * indexEntryBytes)
+	base += int64(decodedCacheFactor * len(tx.DecodedJSON))
 
 	// Per-tx maps: obsKeys + observerSet
 	base += perTxMapsBytes
@@ -5150,13 +5233,16 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 	// Typical tx: ~64 byte hash, ~200 byte decoded JSON, ~40 byte path, 3 hops
 	base := int64(storeTxBaseBytes) + 64 + 200 + 40
 	base += int64(numIndexesPerTx * indexEntryBytes)
+	base += decodedCacheFactor * 200
 	base += perTxMapsBytes
 	hops := int64(3)
 	base += hops * perPathHopBytes
 	base += (hops * (hops - 1) / 2) * perSubpathEntryBytes
+	base += resolvedRelayBytes(typicalResolvedRelays)
 	// Add observation costs
-	obsBase := int64(storeObsBaseBytes) + 30 + 30 + 60 // observer ID + name + path
+	obsBase := int64(storeObsBaseBytes) + 30 + 30 + 60 + 25 // observer ID + name + path + timestamp
 	obsBase += int64(numIndexesPerObs * indexEntryBytes)
+	obsBase += obsKeyEntryBytes + 30 + 60 // dedup key: observer ID + path
 	// No per-obs ResolvedPath overhead (#800)
 	base += int64(numObs) * obsBase
 	return base
@@ -5166,8 +5252,10 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 // ResolvedPath membership index overhead is tracked separately.
 func estimateStoreObsBytes(obs *StoreObs) int64 {
 	base := int64(storeObsBaseBytes)
-	base += int64(len(obs.PathJSON) + len(obs.ObserverID))
+	base += int64(len(obs.PathJSON) + len(obs.ObserverID) + len(obs.ObserverName) +
+		len(obs.ObserverIATA) + len(obs.Direction) + len(obs.RawHex) + len(obs.Timestamp))
 	base += int64(numIndexesPerObs * indexEntryBytes)
+	base += int64(obsKeyEntryBytes + len(obs.ObserverID) + len(obs.PathJSON))
 	// ResolvedPath field removed (#800) — no per-obs RP overhead
 	return base
 }
@@ -5224,7 +5312,7 @@ func (s *PacketStore) evictionCandidateTxIDs() []int {
 			memCutoff := cutoffIdx
 			for memCutoff < len(s.packets) && (s.trackedBytes-bytesToEvict) > lowWatermark {
 				tx := s.packets[memCutoff]
-				bytesToEvict += estimateStoreTxBytes(tx)
+				bytesToEvict += s.txChargedBytes(tx)
 				for _, obs := range tx.Observations {
 					bytesToEvict += estimateStoreObsBytes(obs)
 				}
@@ -5293,7 +5381,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			memCutoff := cutoffIdx
 			for memCutoff < len(s.packets) && (s.trackedBytes-bytesToEvict) > lowWatermark {
 				tx := s.packets[memCutoff]
-				bytesToEvict += estimateStoreTxBytes(tx)
+				bytesToEvict += s.txChargedBytes(tx)
 				for _, obs := range tx.Observations {
 					bytesToEvict += estimateStoreObsBytes(obs)
 				}
@@ -5342,7 +5430,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 		delete(s.byHash, tx.Hash)
 		delete(s.byTxID, tx.ID)
 		evictedTxIDs[tx.ID] = struct{}{}
-		evictedBytes += estimateStoreTxBytes(tx)
+		evictedBytes += s.txChargedBytes(tx)
 
 		for _, obs := range tx.Observations {
 			delete(s.byObsID, obs.ID)

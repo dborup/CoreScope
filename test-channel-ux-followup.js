@@ -44,8 +44,12 @@ assert(!/\$\{ch\.messageCount\s*\|\|\s*0\}\s*packets/.test(chSrc),
 console.log('\n=== Fix 3: privacy footer wording ===');
 assert(!/Clear browser data to remove stored keys/.test(chSrc),
   'old "Clear browser data to remove stored keys" copy is gone');
-assert(/Use\s+✕\s+to remove individual channels/.test(chSrc),
-  'new copy points at the ✕ button for individual key removal');
+// b812a98a (#1648 M3) swapped the ✕ glyph for the #ph-x sprite and reworded
+// the hint to "close button"; the remove button must still be that X icon.
+assert(/Use the close button to remove individual channels/.test(chSrc),
+  'new copy points at the close (X) button for individual key removal');
+assert(/iconBtn\(\s*'ch-remove-btn'[^)]*'<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-x"\/><\/svg>'/.test(chSrc),
+  "the remove button the copy points at renders the #ph-x close icon");
 
 console.log('\n=== Fix 4: Share/reshare affordance on user-added rows ===');
 // Source-level: data attribute and helper exist. Behavior-level checks
