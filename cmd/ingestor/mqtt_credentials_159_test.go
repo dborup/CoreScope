@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -78,5 +79,30 @@ func TestAttachClientWiresSecretsToForceReconnect_159(t *testing.T) {
 		if strings.Contains(out, bad) {
 			t.Errorf("log leaks %q: %s", bad, out)
 		}
+	}
+}
+
+// main() is not unit-testable, so this pins its share of the wiring: the
+// watchdog is attached through the source's setup (attachClient, which
+// carries the secrets) before the first Connect(), and the initial
+// connect error is logged with the same secrets. A rewrite or merge of
+// the connect loop must keep both (review of round 1, F7).
+func TestMainWiresSourceSecrets_159(t *testing.T) {
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	prepare := strings.Index(s, "setup := prepareMQTTSource(source, tag)")
+	attach := strings.Index(s, "setup.attachClient(client)")
+	connect := strings.Index(s, "token := client.Connect()")
+	if prepare < 0 || attach < 0 || connect < 0 || !(prepare < attach && attach < connect) {
+		t.Errorf("main() must prepare the source, attachClient, then Connect(): prepare=%d attach=%d connect=%d", prepare, attach, connect)
+	}
+	if !strings.Contains(s, "errForLog(token.Error(), setup.secrets...)") {
+		t.Error("main() must log the initial connect error with the source's secrets")
+	}
+	if strings.Contains(s, "ForceReconnectFn = ") {
+		t.Error("main() wires ForceReconnectFn itself; use attachClient, which passes the secrets")
 	}
 }
