@@ -78,9 +78,9 @@ function makeSkewedDate(skewMs) {
 }
 
 function deferred() {
-  let resolve;
-  const promise = new Promise((r) => { resolve = r; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 async function flush(n) {
@@ -107,7 +107,9 @@ function makeHarness(opts) {
       style: {}, dataset: {},
       classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
       addEventListener() {}, removeEventListener() {},
-      querySelector() { return makeFakeEl(); },
+      // One child per selector, so a test can read what the page wrote to
+      // e.g. #chHeader .ch-header-text.
+      querySelector(sel) { this._q = this._q || {}; return this._q[sel] || (this._q[sel] = makeFakeEl()); },
       querySelectorAll() { return []; },
       getAttribute() { return null; }, setAttribute() {}, removeAttribute() {},
       getBoundingClientRect() { return { width: 240, height: 0, top: 0, left: 0, right: 0, bottom: 0 }; },
@@ -143,7 +145,9 @@ function makeHarness(opts) {
     window: {
       addEventListener(type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); },
       removeEventListener() {},
-      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      // opts.mobile: the (max-width: 767px) query matches, so
+      // renderChannelList() uses the #1367 mobile rows (#155).
+      matchMedia: () => ({ matches: !!opts.mobile, addEventListener() {}, removeEventListener() {} }),
     },
     document: {
       readyState: 'complete',
@@ -193,7 +197,9 @@ function makeHarness(opts) {
   // app.js / roles.js stubs.
   ctx.onWS = () => {};
   ctx.offWS = () => {};
-  ctx.debouncedOnWS = (fn) => fn;
+  // h.wsHandler: the batch handler init() registers (the real one, with the
+  // live PSK decrypt and the unread bump), called without the debounce.
+  ctx.debouncedOnWS = (fn) => { h.wsHandler = fn; return fn; };
   ctx.debounce = (fn) => fn;
   ctx.invalidateApiCache = () => {};
   ctx.api = (p) => {
@@ -1542,6 +1548,178 @@ async function test(name, fn) {
       const proc = await killedBySignal(dir, 'SIGKILL');
       await within(3000, e2eHarness.stopProcess(proc), 'stopProcess');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // ── #154: overlapping loadChannels() — only the newest request renders ──
+  console.log('\n=== #154 overlapping loadChannels(): the newest request wins ===');
+
+  // A /channels responder that parks every request on its own deferred,
+  // keyed by request order, so a test decides which response lands first.
+  function parkChannelRequests(h) {
+    const parked = [];
+    h.respondChannels = (p) => { const d = deferred(); parked.push({ path: p, d }); return d.promise; };
+    return parked;
+  }
+  function listedHashes(h) { return h.state().channels.map((c) => c.hash); }
+
+  await test('#154: an older region response that lands last does not replace the newer region\'s list', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    const before = h.channelRequests.length;
+    const parked = parkChannelRequests(h);
+    h.regionParam = 'SJC';
+    h.regionChange();
+    h.regionParam = 'SFO';
+    h.regionChange();
+    await flush();
+    assert.strictEqual(h.channelRequests.length - before, 2, 'one /channels request per region change (got ' + (h.channelRequests.length - before) + ')');
+    assert.ok(/region=SJC/.test(parked[0].path) && /region=SFO/.test(parked[1].path), 'requests are SJC then SFO');
+    parked[1].d.resolve({ channels: [serverChannel('#sfo')] });
+    await flush();
+    assert.deepStrictEqual(listedHashes(h), ['#sfo'], 'the SFO list renders');
+    parked[0].d.resolve({ channels: [serverChannel('#sjc')] });
+    await flush();
+    assert.deepStrictEqual(listedHashes(h), ['#sfo'], 'the late SJC response must not replace the SFO list (got ' + JSON.stringify(listedHashes(h)) + ')');
+    assert.ok(/#sfo/.test(h.elements.chList.innerHTML) && !/#sjc/.test(h.elements.chList.innerHTML), 'the rendered list stays SFO');
+    assert.strictEqual(h.channelRequests.length - before, 2, 'no extra /channels request');
+  });
+
+  await test('#154: a dropped older response does not reconcile (close) the selection the newer list contains', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    const parked = parkChannelRequests(h);
+    const older = h.w._channelsLoadChannelsForTest(true);
+    const newer = h.w._channelsLoadChannelsForTest(true);
+    parked[1].d.resolve({ channels: [serverChannel('#sfo')] });
+    await newer;
+    const msgs = [{ sender: 'A', text: 'kept', timestamp: '2026-01-01T00:00:00Z', packetHash: 'k1' }];
+    h.setState({ selectedHash: '#sfo', messages: msgs });
+    h.historyCalls.length = 0;
+    parked[0].d.resolve({ channels: [serverChannel('#sjc')] });
+    await older;
+    const s = h.state();
+    assert.strictEqual(s.selectedHash, '#sfo', 'selection must survive the dropped response (got ' + s.selectedHash + ')');
+    assert.strictEqual(s.messages.length, 1, 'messages must survive the dropped response');
+    assert.ok(!h.historyCalls.includes('#/channels'), 'URL must not be rewritten (got ' + JSON.stringify(h.historyCalls) + ')');
+  });
+
+  await test('#154: a dropped older failure does not paint "Failed to load channels" over the newer list', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    const parked = parkChannelRequests(h);
+    const older = h.w._channelsLoadChannelsForTest(false);
+    const newer = h.w._channelsLoadChannelsForTest(true);
+    parked[1].d.resolve({ channels: [serverChannel('#sfo')] });
+    await newer;
+    parked[0].d.promise.catch(() => {});
+    parked[0].d.reject(new Error('offline'));
+    await older;
+    assert.ok(!/Failed to load channels/.test(h.elements.chList.innerHTML), 'stale failure must not replace the list');
+    assert.ok(/#sfo/.test(h.elements.chList.innerHTML), 'the newer list stays rendered');
+  });
+
+  await test('#154: a dropped call resolves only after the newest list rendered (init deep link opens with the right row)', async () => {
+    const h = makeHarness();
+    const parked = parkChannelRequests(h);
+    const page = h.elements.page || (h.elements.page = h.ctx.document.getElementById('page'));
+    const initDone = h.page.init(page, 'sfo-room');
+    await flush();
+    h.regionParam = 'SFO';
+    h.regionChange();
+    await flush();
+    // The first (unfiltered) response lands first, but a newer request is
+    // already running, so it is dropped; the deep link must wait for the
+    // SFO list, which is the one that has the room.
+    parked[0].d.resolve({ channels: [serverChannel('public')] });
+    await flush();
+    parked[1].d.resolve({ channels: [serverChannel('sfo-room', { messageCount: 7 })] });
+    await initDone;
+    await flush();
+    const header = h.elements.chHeader.querySelector('.ch-header-text').textContent;
+    assert.strictEqual(h.state().selectedHash, 'sfo-room', 'deep link selected');
+    assert.strictEqual(header, 'sfo-room — 7 messages', 'deep link opened against the SFO list (got ' + JSON.stringify(header) + ')');
+    assert.deepStrictEqual(listedHashes(h), ['sfo-room'], 'the SFO list renders');
+  });
+
+  await test('#154: the #152 client-state merge still applies to the request that renders (WS update during it wins)', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public', { messageCount: 10, lastMessage: 'old snapshot' })] });
+    await h.init();
+    h.setState({ channels: [Object.assign({}, h.row('public'), { unread: 2 })] });
+    const parked = parkChannelRequests(h);
+    const older = h.w._channelsLoadChannelsForTest(true);
+    const newer = h.w._channelsLoadChannelsForTest(true);
+    await flush();
+    h.liveMessage('public', 'Carol', 'live during flight');
+    const snapshot = { channels: [serverChannel('public', { messageCount: 10, lastSender: 'Server', lastMessage: 'snapshot' })] };
+    parked[1].d.resolve(snapshot);
+    await newer;
+    parked[0].d.resolve(snapshot);
+    await older;
+    const row = h.row('public');
+    assert.strictEqual(row.lastMessage, 'live during flight', 'live message kept (got ' + row.lastMessage + ')');
+    assert.strictEqual(row.messageCount, 11, 'live count kept with its message');
+    assert.strictEqual(row.unread, 2, 'unread carried');
+  });
+
+  // ── #155: mobile channel rows show the unread badge ──
+  console.log('\n=== #155 mobile rows show the unread badge ===');
+
+  // The rendered #1367 mobile row for `hash` (one <button class="ch-row">).
+  function mobileRow(h, hash) {
+    const html = h.elements.chList.innerHTML;
+    const rows = html.split('<button type="button" class="ch-row').slice(1);
+    return rows.find((r) => r.indexOf('data-hash="' + hash + '"') !== -1) || null;
+  }
+
+  await test('#155: a mobile row shows the unread badge (count, 99+ cap, title, aria-label); none at 0', async () => {
+    const h = makeHarness({ mobile: true });
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('a'), serverChannel('b'), serverChannel('c')] });
+    await h.init();
+    h.setState({ channels: h.state().channels.map((c) => Object.assign({}, c, { unread: { a: 3, b: 150, c: 0 }[c.hash] })) });
+    await h.w._channelsLoadChannelsForTest(true);
+    const a = mobileRow(h, 'a'), b = mobileRow(h, 'b'), c = mobileRow(h, 'c');
+    assert.ok(a && b && c, 'mobile rows rendered (got ' + h.elements.chList.innerHTML.slice(0, 120) + ')');
+    assert.ok(a.indexOf('<span class="ch-unread-badge" data-unread-channel="a" title="3 new" aria-label="3 unread">3</span>') !== -1, 'badge "3" on row a (got ' + a + ')');
+    assert.ok(b.indexOf('<span class="ch-unread-badge" data-unread-channel="b" title="150 new" aria-label="150 unread">99+</span>') !== -1, 'badge capped at 99+ on row b');
+    assert.ok(c.indexOf('ch-unread-badge') === -1, 'no badge at unread 0');
+    assert.ok(/<div class="ch-row-line1">.*ch-row-time.*ch-unread-badge.*<\/div>/.test(a), 'badge sits in line 1 after the time');
+  });
+
+  await test('#155: the desktop badge markup is unchanged', async () => {
+    const h = makeHarness();
+    await h.init();
+    const row = (n) => h.w._channelsRenderChannelRowForTest(Object.assign(serverChannel('a'), { unread: n }));
+    assert.ok(row(3).indexOf('<span class="ch-item-name">a</span> <span class="ch-unread-badge" data-unread-channel="a" title="3 new" aria-label="3 unread">3</span>') !== -1, 'desktop badge "3"');
+    assert.ok(row(150).indexOf(' <span class="ch-unread-badge" data-unread-channel="a" title="150 new" aria-label="150 unread">99+</span>') !== -1, 'desktop badge 99+');
+    assert.ok(row(0).indexOf('ch-unread-badge') === -1, 'no desktop badge at 0');
+  });
+
+  await test('#155: on mobile a live-decrypted message for a closed channel adds and bumps the badge; opening clears it', async () => {
+    const h = makeHarness({ mobile: true });
+    h.storeKey(PSK_NAME, PSK_KEY, 'Team');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    assert.strictEqual(typeof h.wsHandler, 'function', 'init() registers the live WS handler');
+    h.setState({ selectedHash: 'public' });
+    let n = 0;
+    const live = (text) => {
+      const enc = encryptChannelMessage(PSK_KEY, 'Bob', text);
+      h.wsHandler([{ type: 'packet', data: { id: ++n, hash: 'live-' + n, decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: { type: 'GRP_TXT', channelHash: enc.channelHash, encryptedData: enc.encryptedData, mac: enc.mac } } } }]);
+    };
+    assert.ok(mobileRow(h, PSK_HASH) && mobileRow(h, PSK_HASH).indexOf('ch-unread-badge') === -1, 'no badge before live traffic');
+    live('one');
+    assert.ok(await settle(() => (h.row(PSK_HASH).unread || 0) === 1), 'unread bumped to 1');
+    assert.ok(mobileRow(h, PSK_HASH).indexOf('aria-label="1 unread">1</span>') !== -1, 'mobile badge shows 1 (got ' + mobileRow(h, PSK_HASH) + ')');
+    live('two');
+    assert.ok(await settle(() => (h.row(PSK_HASH).unread || 0) === 2), 'unread bumped to 2');
+    assert.ok(mobileRow(h, PSK_HASH).indexOf('aria-label="2 unread">2</span>') !== -1, 'mobile badge updates to 2');
+    await h.w._channelsSelectChannelForTest(PSK_HASH);
+    assert.strictEqual(h.row(PSK_HASH).unread, 0, 'opening clears unread');
+    assert.ok(mobileRow(h, PSK_HASH).indexOf('ch-unread-badge') === -1, 'opening clears the mobile badge');
   });
 
   console.log('\n=== Results: ' + passed + ' passed, ' + failed + ' failed ===');
