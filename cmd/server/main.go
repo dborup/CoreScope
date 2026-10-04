@@ -285,11 +285,6 @@ func main() {
 	// all live in the ingestor; the server only reads the snapshot and
 	// then refreshes it via the recompNeighborGraph slot every 60s.
 	dbPath = database.path
-	// Optimization only, not required for correctness: hasResolvedPath()
-	// self-heals on its own via a PRAGMA re-probe if this weren't here --
-	// AssertReady above already guarantees the column exists, so skip
-	// even that first probe.
-	database.hasResolvedPathFlag.forceTrue()
 
 	// WaitGroup for background init steps that gate /api/healthz readiness.
 	var initWg sync.WaitGroup
@@ -342,6 +337,7 @@ func main() {
 			store.mu.Lock()
 			for j := i; j < end && j < len(store.packets); j++ {
 				pickBestObservation(store.packets[j])
+				store.trackedBytes += rechargeTx(store.packets[j])
 			}
 			store.mu.Unlock()
 			if end < totalPackets {

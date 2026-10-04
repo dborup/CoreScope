@@ -147,6 +147,8 @@ function loadLiveModule(ctx) {
   ctx.globalThis = ctx;
 
   vm.createContext(ctx);
+  // index.html loads payload-labels.js before live.js, which throws without it (#1799).
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'payload-labels.js'), 'utf8'), ctx);
   vm.runInContext(src, ctx, { timeout: 3000 });
   return ctx.window._panelCorner;
 }

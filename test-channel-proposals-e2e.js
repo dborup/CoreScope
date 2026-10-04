@@ -38,6 +38,7 @@ const FIXTURE_DB = path.resolve(process.env.FIXTURE_DB || path.join(ROOT, 'test-
 const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(ROOT, 'public'));
 const API_KEY = 'e2e-proposals-admin-key-0123456789';
 const NAME = '#E2eShared' + Date.now().toString(36).slice(-6); // unique, case preserved, < 31 bytes
+const AUTO_NAME = '#E2eAuto' + Date.now().toString(36).slice(-6);
 const TIMEOUT = 20000;
 
 let passed = 0;
@@ -199,12 +200,15 @@ async function main() {
   fs.copyFileSync(FIXTURE_DB, env.db);
   fs.mkdirSync(env.serverDir);
   const proposals = { enabled: true };
-  fs.writeFileSync(env.ingestorConfig, JSON.stringify({
-    dbPath: env.db,
-    mqttSources: [{ name: 'e2e', broker: 'mqtt://127.0.0.1:' + broker.port, topics: ['meshcore/#'], connectTimeoutSec: 5 }],
-    channelProposals: proposals,
-  }));
-  fs.writeFileSync(path.join(env.serverDir, 'config.json'), JSON.stringify({ apiKey: API_KEY, channelProposals: proposals }));
+  function writeConfigs() {
+    fs.writeFileSync(env.ingestorConfig, JSON.stringify({
+      dbPath: env.db,
+      mqttSources: [{ name: 'e2e', broker: 'mqtt://127.0.0.1:' + broker.port, topics: ['meshcore/#'], connectTimeoutSec: 5 }],
+      channelProposals: proposals,
+    }));
+    fs.writeFileSync(path.join(env.serverDir, 'config.json'), JSON.stringify({ apiKey: API_KEY, channelProposals: proposals }));
+  }
+  writeConfigs();
 
   let stack;
   const pageErrors = [];
@@ -450,6 +454,36 @@ async function main() {
       const approvedRes = await fetch(env.base + '/api/admin/channel-proposals?status=approved', { headers: { 'X-API-Key': API_KEY } });
       const approvedNames = ((await approvedRes.json()).proposals || []).map((p) => p.name);
       assert.ok(!approvedNames.includes(NAME), 'resuggestion must never be auto-approved');
+    });
+
+    await step('autoApprove config takes effect after restart without approving old pending suggestions', async () => {
+      await stopProcess(stack.server);
+      await stopProcess(stack.ingestor);
+      proposals.autoApprove = true;
+      writeConfigs();
+      stack = await startStack(env);
+      const pendingRes = await fetch(env.base + '/api/admin/channel-proposals?status=pending', { headers: { 'X-API-Key': API_KEY } });
+      const pendingNames = ((await pendingRes.json()).proposals || []).map((p) => p.name);
+      assert.ok(pendingNames.includes(NAME), 'old pending suggestion was auto-approved on restart');
+    });
+
+    await step('autoApprove shares a new browser suggestion without admin action', async () => {
+      await pageA.goto(env.base + '/#/channels');
+      if (!(await pageA.isVisible('#chAddChannelModal'))) await pageA.click('#chAddChannelBtn');
+      await pageA.fill('#chSuggestName', AUTO_NAME.slice(1));
+      await pageA.click('#chSuggestBtn');
+      await pageA.waitForFunction((n) => {
+        const s = document.getElementById('chSuggestStatus');
+        return s && s.textContent.includes(n) && /already shared with everyone/.test(s.textContent);
+      }, AUTO_NAME);
+      await waitFor('auto-approved key activation', () => logHas(stack.ingestor, new RegExp('approved "' + AUTO_NAME + '" — added to channel keys')));
+      await pageB.goto(env.base + '/#/channels');
+      await pageB.reload();
+      await pageB.waitForSelector(`#chList .ch-item[data-hash="${AUTO_NAME}"][data-shared="true"]`);
+      const pendingRes = await fetch(env.base + '/api/admin/channel-proposals?status=pending', { headers: { 'X-API-Key': API_KEY } });
+      const pendingNames = ((await pendingRes.json()).proposals || []).map((p) => p.name);
+      assert.ok(pendingNames.includes(NAME), 'old pending suggestion changed when a new name was auto-approved');
+      assert.ok(!pendingNames.includes(AUTO_NAME), 'new auto-approved suggestion remains pending');
     });
 
     await step('no uncaught page errors', async () => {

@@ -629,7 +629,7 @@ func TestChannelProposalResubmitAfterRevokeLandsPendingWithSameID(t *testing.T) 
 		t.Fatalf("listing before replay: %v, %v", pending, err)
 	}
 	replayCmd := channelregistry.Command{RequestID: resubmitReqID, Op: channelregistry.OpSubmit, Name: "#Resuggest", CreatedAt: f.clock.UnixMilli()}
-	replayed, err := f.store.submitChannelProposal(context.Background(), replayCmd, 100, f.clock.UnixMilli())
+	replayed, err := f.store.submitChannelProposal(context.Background(), replayCmd, 100, 128, false, f.clock.UnixMilli())
 	if err != nil {
 		t.Fatalf("replayed resubmit: %v", err)
 	}
@@ -638,6 +638,106 @@ func TestChannelProposalResubmitAfterRevokeLandsPendingWithSameID(t *testing.T) 
 	}
 	if n := f.count("1=1"); n != 1 {
 		t.Fatalf("rows after replayed resubmit = %d, want 1 (still idempotent)", n)
+	}
+}
+
+func TestChannelProposalAutoApproveNewNamesOnly(t *testing.T) {
+	enabled := true
+	f := newProposalFixture(t, &channelregistry.Config{Enabled: &enabled, AutoApprove: true})
+	ctx := context.Background()
+
+	// An existing pending suggestion stays pending when the policy is enabled.
+	f.runner.autoApprove = false
+	pending := f.run(f.enqueue(channelregistry.OpSubmit, "#Pending"))
+	f.runner.autoApprove = true
+	if dup := f.run(f.enqueue(channelregistry.OpSubmit, "#Pending")); dup.Status != channelregistry.RequestPending || dup.Proposal.ID != pending.Proposal.ID {
+		t.Fatalf("existing pending suggestion changed: %+v", dup)
+	}
+
+	requestID := f.enqueue(channelregistry.OpSubmit, "#Auto")
+	cmds, err := f.runner.queue.Pending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cmd channelregistry.Command
+	for _, queued := range cmds {
+		if queued.Command.RequestID == requestID {
+			cmd = queued.Command
+			break
+		}
+	}
+	if cmd.RequestID == "" {
+		t.Fatal("auto-approval command not queued")
+	}
+	// Simulate a crash after DB commit but before result and key publication.
+	first := f.runner.apply(ctx, cmd)
+	if first.Status != channelregistry.RequestApproved || first.Proposal == nil || first.Proposal.ReviewedAt == nil {
+		t.Fatalf("auto-approval = %+v", first)
+	}
+	if _, ok := f.keys.Channels()["#Auto"]; ok {
+		t.Fatal("apply must not publish the key before RunOnce")
+	}
+	replay := f.run(requestID)
+	if replay.Status != channelregistry.RequestApproved || replay.Proposal.ID != first.Proposal.ID || f.count("name = '#Auto'") != 1 {
+		t.Fatalf("replayed auto-approval = %+v", replay)
+	}
+	if f.keys.Channels()["#Auto"] == "" {
+		t.Fatal("approved channel key not activated")
+	}
+	if dup := f.run(f.enqueue(channelregistry.OpSubmit, "#Auto")); dup.Status != channelregistry.RequestApproved || dup.Proposal.ID != first.Proposal.ID {
+		t.Fatalf("duplicate approved suggestion = %+v", dup)
+	}
+	if st := f.run(f.enqueue(channelregistry.OpRevoke, first.Proposal.ID)); st.Status != channelregistry.RequestRevoked {
+		t.Fatalf("revoke = %+v", st)
+	}
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#Auto")); st.Status != channelregistry.RequestPending || st.Proposal.ID != first.Proposal.ID {
+		t.Fatalf("revoked name was auto-approved: %+v", st)
+	}
+	if f.keys.Channels()["#Auto"] != "" {
+		t.Fatal("revoked name was reactivated")
+	}
+	if st := f.run(f.enqueue(channelregistry.OpReject, pending.Proposal.ID)); st.Status != channelregistry.RequestRejected {
+		t.Fatalf("reject = %+v", st)
+	}
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#Pending")); st.Status != channelregistry.RequestRejected || st.Proposal.ID != pending.Proposal.ID {
+		t.Fatalf("rejected name was auto-approved: %+v", st)
+	}
+}
+
+func TestChannelProposalAutoApproveRespectsLimits(t *testing.T) {
+	enabled := true
+	f := newProposalFixture(t, &channelregistry.Config{Enabled: &enabled, AutoApprove: true, MaxApproved: 1, MaxPending: 1})
+	// A full manual review queue must not block an approval that never uses
+	// a pending slot.
+	f.runner.autoApprove = false
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#Pending")); st.Status != channelregistry.RequestPending {
+		t.Fatalf("pending setup = %+v", st)
+	}
+	f.runner.autoApprove = true
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#First")); st.Status != channelregistry.RequestApproved {
+		t.Fatalf("first auto-approval = %+v", st)
+	}
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#Second")); st.Status != channelregistry.RequestError || st.Error != errTooManyApproved.Error() {
+		t.Fatalf("approved limit = %+v", st)
+	}
+	if f.count("1=1") != 2 || f.keys.Channels()["#Second"] != "" {
+		t.Fatal("approved limit still inserted or activated second suggestion")
+	}
+	if st := f.run(f.enqueue(channelregistry.OpSubmit, "#"+strings.Repeat("x", 40))); st.Status != channelregistry.RequestError || st.Error != channelregistry.ErrNameTooLong.Error() {
+		t.Fatalf("invalid auto-approval name = %+v", st)
+	}
+}
+
+func TestChannelProposalAutoApproveRequiresEnabled(t *testing.T) {
+	disabled := false
+	for _, cfg := range []*channelregistry.Config{{AutoApprove: true}, {Enabled: &disabled, AutoApprove: true}} {
+		f := newProposalFixture(t, cfg)
+		if st := f.run(f.enqueue(channelregistry.OpSubmit, "#Manual")); st.Status != channelregistry.RequestPending {
+			t.Fatalf("autoApprove without enabled = %+v", st)
+		}
+		if f.keys.Channels()["#Manual"] != "" {
+			t.Fatal("disabled submissions activated a key")
+		}
 	}
 }
 

@@ -304,7 +304,16 @@ func TestMain_StartsRouteMaskBackfillAfterBufferReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(src)
-	subscribe := strings.Index(s, "c.Subscribe(")
+	// #118: the OnConnect handler that subscribes is installed by
+	// prepareMQTTSource, called from main's connect loop.
+	wiring, err := os.ReadFile("mqtt_source.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wiring), "c.Subscribe(") {
+		t.Fatal("prepareMQTTSource no longer subscribes")
+	}
+	subscribe := strings.Index(s, "prepareMQTTSource(")
 	ready := strings.Index(s, "ingestBuffer.Ready()")
 	start := strings.Index(s, "store.StartRouteMaskBackfill(")
 	shutdown := strings.Index(s, `log.Println("Shutting down...")`)

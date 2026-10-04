@@ -103,7 +103,7 @@ function mount(state, filters) {
     getElementById: (id) => elements[id] || (elements[id] = makeEl(id)),
     createElement: (tag) => makeEl('_' + tag),
   };
-  const calls = { loadPackets: 0, renderTableRows: 0 };
+  const calls = { loadPackets: 0, renderTableRows: 0, closeDetailPanel: 0 };
   const sandbox = {
     document,
     location: state.location,
@@ -124,6 +124,9 @@ function mount(state, filters) {
     debounce: (fn) => fn,
     loadPackets: () => { calls.loadPackets++; },
     renderTableRows: () => { calls.renderTableRows++; },
+    // #180: Clear Filters also closes the packet detail.
+    closeDetailPanel: () => { calls.closeDetailPanel++; },
+    selectedObservationId: null,
     filters,
     observers: [{ id: 'obsA', name: 'Alpha' }, { id: 'obsB', name: 'Bravo' }, { id: 'obsC', name: 'Charlie' }],
     SHORT_BY_ID: { 0: 'REQ', 4: 'ADVERT', 5: 'GRP_TXT', 9: 'TRACE' },

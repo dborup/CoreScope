@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -87,11 +88,25 @@ func (g *NeighborGraph) IsAdjacent(a, b string) bool {
 	return present
 }
 
+// empty reports whether the graph has no edge.
+func (g *NeighborGraph) empty() bool {
+	return g == nil || len(g.adj) == 0
+}
+
 // neighborGraphHolder caches the graph for the InsertTransmission hot
 // path. atomic.Value lets the 60s rebuild publish without a read-side
 // lock.
+//
+// It also records whether a snapshot loaded after a neighbor_edges build
+// that succeeded and caught up has been published (storeBuilt). Before that, the
+// snapshot may predate the edges the warm-up build derives; the
+// resolved_path backfill waits for it (#188, PR #190 review).
 type neighborGraphHolder struct {
 	v atomic.Value // holds *NeighborGraph
+
+	mu    sync.Mutex
+	built bool          // a post-build snapshot has been published
+	next  chan struct{} // closed when the next post-build snapshot is published
 }
 
 func (h *neighborGraphHolder) load() *NeighborGraph {
@@ -103,6 +118,30 @@ func (h *neighborGraphHolder) load() *NeighborGraph {
 
 func (h *neighborGraphHolder) store(g *NeighborGraph) {
 	h.v.Store(g)
+}
+
+// storeBuilt publishes g, loaded after a neighbor_edges build that caught up,
+// and wakes everyone waiting on buildState's channel.
+func (h *neighborGraphHolder) storeBuilt(g *NeighborGraph) {
+	h.store(g)
+	h.mu.Lock()
+	h.built = true
+	if h.next != nil {
+		close(h.next)
+		h.next = nil
+	}
+	h.mu.Unlock()
+}
+
+// buildState reports whether a post-build snapshot has been published, and
+// returns a channel that is closed when the next one is.
+func (h *neighborGraphHolder) buildState() (built bool, next <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.next == nil {
+		h.next = make(chan struct{})
+	}
+	return h.built, h.next
 }
 
 // loadNeighborGraph reads neighbor_edges and returns an in-memory
@@ -134,12 +173,13 @@ func loadNeighborGraph(db *sql.DB) (*NeighborGraph, error) {
 // does not revisit a node).
 //
 // Behavior matrix:
-//   len(candidates) | anchor       | graph | result
-//   0               | —            | —     | nil
-//   1               | —            | —     | candidates[0]
-//   >1              | "" or no graph|—     | nil
-//   >1              | non-empty    | set   | unique adjacent candidate
-//                                            (or nil if 0 or >1 survive)
+//
+//	len(candidates) | anchor       | graph | result
+//	0               | —            | —     | nil
+//	1               | —            | —     | candidates[0]
+//	>1              | "" or no graph|—     | nil
+//	>1              | non-empty    | set   | unique adjacent candidate
+//	                                         (or nil if 0 or >1 survive)
 func resolveHopWithContext(hop string, anchor string, graph *NeighborGraph, idx prefixIndex, exclude map[string]struct{}) *string {
 	if idx == nil {
 		return nil
@@ -186,6 +226,13 @@ func resolveHopWithContext(hop string, anchor string, graph *NeighborGraph, idx 
 // node. Returns a `[]*string` shape compatible with
 // marshalResolvedPath (and the all-nil clobber-guard from PR #1548).
 func resolvePathWithContext(hops []string, fromPubkey string, graph *NeighborGraph, idx prefixIndex) []*string {
+	return resolvePathForward(hops, fromPubkey, "", graph, idx)
+}
+
+// resolvePathForward is the forward walk of resolvePathWithContext. notLast
+// (lower-case), when set, is not a candidate for the last hop (#188: the
+// observer of a flood path, see resolveObservationPath).
+func resolvePathForward(hops []string, fromPubkey, notLast string, graph *NeighborGraph, idx prefixIndex) []*string {
 	if len(hops) == 0 {
 		return nil
 	}
@@ -194,11 +241,14 @@ func resolvePathWithContext(hops []string, fromPubkey string, graph *NeighborGra
 		return out
 	}
 	prevAnchor := strings.ToLower(fromPubkey)
-	seen := make(map[string]struct{}, len(hops)+1)
+	seen := make(map[string]struct{}, len(hops)+2)
 	if prevAnchor != "" {
 		seen[prevAnchor] = struct{}{}
 	}
 	for i, hop := range hops {
+		if notLast != "" && i == len(hops)-1 {
+			seen[notLast] = struct{}{}
+		}
 		r := resolveHopWithContext(hop, prevAnchor, graph, idx, seen)
 		out[i] = r
 		if r != nil {
@@ -222,4 +272,144 @@ func (s *Store) RefreshNeighborGraph() error {
 	}
 	s.neighborGraph.store(g)
 	return nil
+}
+
+// refreshBuiltNeighborGraph is RefreshNeighborGraph for a caller that has
+// just completed a buildNeighborEdges that caught up: it marks the
+// snapshot as post-build (neighborGraphHolder.storeBuilt).
+func (s *Store) refreshBuiltNeighborGraph() error {
+	g, err := loadNeighborGraph(s.db)
+	if err != nil {
+		return err
+	}
+	s.neighborGraph.storeBuilt(g)
+	return nil
+}
+
+// Observer anchor (#188)
+//
+// Firmware basis (MeshCore src/, line numbers at a366955): a flood forwarder
+// appends its own hash before it retransmits (Mesh.cpp:344-356
+// routeRecvPacket, copyHashTo at :349), and an observer logs a packet on
+// reception, before its own routing step (Dispatcher.cpp:238 logRx runs
+// before processRecvPacket at :246/:256). So the last hash of a FLOOD path
+// an observer reports is the node it heard the packet from: a direct
+// neighbour of the observer. This does not hold for DIRECT routes: the path
+// is the remaining planned route, and each forwarder strips itself from the
+// front (Mesh.cpp:89, removeSelfFromPath at :334). TRACE is DIRECT too
+// (sendFlood refuses it, Mesh.cpp:638). Its header path carries SNR bytes
+// (Mesh.cpp:60-61), and the decoder replaces the hops with the planned route
+// from the payload (decoder.go, TRACE branch). So only flood route types are
+// anchored.
+//
+// Observer identity: the observer is the <observer_id> segment of the MQTT
+// topic meshcore/<iata>/<observer_id>/packets, which is the observer node's
+// pubkey. The neighbour builder writes observer<->last-hop edges keyed by
+// that id lower-cased (neighbor_builder.go), and NeighborGraph lower-cases
+// on lookup, so an id that is not a node (e.g. "companion") has no edges and
+// anchors nothing.
+
+// Route types (MeshCore src/Packet.h ROUTE_TYPE_*).
+const (
+	routeTypeTransportFlood = 0
+	routeTypeFlood          = 1
+)
+
+func isFloodRoute(routeType int) bool {
+	return routeType == routeTypeTransportFlood || routeType == routeTypeFlood
+}
+
+// resolveObservationPath resolves one observation's hops for
+// observations.resolved_path. It runs the forward chain from fromPubkey
+// (resolvePathForward, the walk behind resolvePathWithContext); for a flood
+// packet whose forward chain left a hop nil, it also runs a backward chain
+// from the observer and merges the two (mergeForwardBackward). Both chains
+// use resolveHopWithContext, so a hop resolves only to a unique candidate:
+// no geo, GPS or count tie-break.
+//
+// In a flood path, the observer is never the last hop: a radio does not
+// receive its own transmission. Both chains leave that hop nil rather than
+// name the observer, even when its prefix is unique (PR #190 review).
+func resolveObservationPath(hops []string, fromPubkey, observer string, routeType int, graph *NeighborGraph, idx prefixIndex) []*string {
+	if !isFloodRoute(routeType) {
+		return resolvePathWithContext(hops, fromPubkey, graph, idx)
+	}
+	observer = strings.ToLower(observer)
+	fwd := resolvePathForward(hops, fromPubkey, observer, graph, idx)
+	if graph == nil || idx == nil || observer == "" || !hasNil(fwd) {
+		return fwd
+	}
+	return mergeForwardBackward(fwd, resolvePathBackward(hops, fromPubkey, observer, graph, idx))
+}
+
+// resolvePathBackward walks the hops from last to first. The last hop is
+// anchored on the observer, each earlier hop on the hop after it; a hop that
+// does not resolve breaks the chain, as in the forward walk. fromPubkey and
+// already resolved hops are excluded from later candidate pools.
+//
+// The observer (lower-case) is excluded from the last hop only. It stays a
+// candidate for earlier hops: it logs a packet before de-duplication
+// (Dispatcher.cpp logRx runs before processRecvPacket), so it can report the
+// echo of a flood it forwarded itself.
+func resolvePathBackward(hops []string, fromPubkey, observer string, graph *NeighborGraph, idx prefixIndex) []*string {
+	out := make([]*string, len(hops))
+	anchor := observer
+	seen := make(map[string]struct{}, len(hops)+2)
+	if fp := strings.ToLower(fromPubkey); fp != "" {
+		seen[fp] = struct{}{}
+	}
+	_, observerSeen := seen[observer]
+	seen[observer] = struct{}{}
+	for i := len(hops) - 1; i >= 0; i-- {
+		r := resolveHopWithContext(hops[i], anchor, graph, idx, seen)
+		if i == len(hops)-1 && !observerSeen {
+			delete(seen, observer)
+		}
+		out[i] = r
+		if r != nil {
+			seen[*r] = struct{}{}
+			anchor = *r
+		} else {
+			anchor = ""
+		}
+	}
+	return out
+}
+
+// mergeForwardBackward combines the two chains. A hop keeps the forward
+// result when there is one and takes the backward result otherwise. The two
+// must never contradict each other in one row: if they resolve a hop to
+// different nodes, or the merge would put one node at two positions, the
+// backward evidence is dropped for the whole row and fwd is returned as is.
+func mergeForwardBackward(fwd, bwd []*string) []*string {
+	out := make([]*string, len(fwd))
+	seen := make(map[string]struct{}, len(fwd))
+	for i, f := range fwd {
+		b := bwd[i]
+		if f != nil && b != nil && *f != *b {
+			return fwd
+		}
+		r := f
+		if r == nil {
+			r = b
+		}
+		if r == nil {
+			continue
+		}
+		if _, dup := seen[*r]; dup {
+			return fwd
+		}
+		seen[*r] = struct{}{}
+		out[i] = r
+	}
+	return out
+}
+
+func hasNil(rp []*string) bool {
+	for _, p := range rp {
+		if p == nil {
+			return true
+		}
+	}
+	return false
 }

@@ -137,8 +137,17 @@ func waitForServerSchema(ctx context.Context, db *sql.DB, p schemaWaitPolicy, cl
 // then re-reads the optional-column flags OpenDB detected before the wait,
 // because on a pre-#93 database the route_mask column only appears while
 // the server waits (detectSchema only ever sets flags).
+//
+// #184: AssertReady requires observations.resolved_path, so once it passes
+// the flag is set here, before main.go starts the start-up load. The re-probe
+// alone is not enough: detectSchema gives up silently when its PRAGMA fails,
+// and a false flag makes the load index the hot window without byPathHop.
 func waitForDBSchema(ctx context.Context, db *DB, p schemaWaitPolicy, clk schemaWaitClock, logf func(string, ...interface{})) (int, error) {
-	return waitForDBSchemaWith(ctx, db, func() error { return dbschema.AssertReady(db.conn) }, p, clk, logf)
+	attempts, err := waitForDBSchemaWith(ctx, db, func() error { return dbschema.AssertReady(db.conn) }, p, clk, logf)
+	if err == nil {
+		db.hasResolvedPathFlag.forceTrue()
+	}
+	return attempts, err
 }
 
 func waitForDBSchemaWith(ctx context.Context, db *DB, check func() error, p schemaWaitPolicy, clk schemaWaitClock, logf func(string, ...interface{})) (int, error) {
