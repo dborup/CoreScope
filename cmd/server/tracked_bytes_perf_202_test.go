@@ -89,6 +89,7 @@ func TestPerf_FallbackChargeVsHeap_202(t *testing.T) {
 func TestPerf_HashMigrateMerge_202(t *testing.T) {
 	runs := perf202Runs(t)
 	var migrate []time.Duration
+	packets := 0
 	for i := 0; i < runs; i++ {
 		db := setupTestDBv2(t)
 		tx, err := db.conn.Begin()
@@ -120,10 +121,11 @@ func TestPerf_HashMigrateMerge_202(t *testing.T) {
 		t0 := time.Now()
 		migrateContentHashesAsync(store, 500, 0)
 		migrate = append(migrate, time.Since(t0))
-		if len(store.packets) != 2000 {
-			t.Fatalf("%d packets after the migration, want 2000", len(store.packets))
-		}
+		// Master leaves the 2000 ghosts in memory; since #215 the duplicates
+		// are merged (1000 remain). Printed, not asserted, so the same file
+		// compiles and runs against both.
+		packets = len(store.packets)
 		db.conn.Close()
 	}
-	fmt.Printf("RESULT hash-migrate-merge-2000 median_ns=%d\n", perf202Median(migrate).Nanoseconds())
+	fmt.Printf("RESULT hash-migrate-merge-2000 median_ns=%d packets_after=%d\n", perf202Median(migrate).Nanoseconds(), packets)
 }

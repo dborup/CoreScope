@@ -137,6 +137,8 @@ func hm215Open(t testing.TB, d *hm215DB) *PacketStore {
 }
 
 // hm215Snapshot is the part of the store a leftover would show up in.
+// spTotalPaths is left out on purpose: eviction never decrements it (master
+// behaviour, unrelated to this change), so it cannot return to a baseline.
 type hm215Snapshot struct {
 	Packets       int
 	TrackedBytes  int64
@@ -152,7 +154,6 @@ type hm215Snapshot struct {
 	ResolvedIdx   int
 	TotalObs      int
 	AdvertKeys    map[string]int
-	SpTotalPaths  int
 }
 
 func hm215Snap(s *PacketStore) hm215Snapshot {
@@ -165,7 +166,7 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 		ByObsID: len(s.byObsID), ByTxID: len(s.byTxID), ByHash: len(s.byHash),
 		PathHopRecs: len(s.pathHopResolved), FallbackRecs: len(s.fallbackByNode),
 		ResolvedIdx: len(s.resolvedPubkeyIndex), TotalObs: s.totalObs,
-		AdvertKeys: map[string]int{}, SpTotalPaths: s.spTotalPaths,
+		AdvertKeys: map[string]int{},
 	}
 	for pk, list := range s.byNode {
 		for _, tx := range list {
@@ -242,8 +243,8 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 			if len(s.packets) != 5 || len(s.byTxID) != 5 || len(s.byHash) != 5 {
 				t.Fatalf("packets/byTxID/byHash = %d/%d/%d, want 5 each", len(s.packets), len(s.byTxID), len(s.byHash))
 			}
-			if got := len(s.byPayloadType[4]); got != 4 {
-				t.Errorf("byPayloadType[ADVERT] holds %d transmissions, want 4", got)
+			if got := len(s.byPayloadType[4]); got != 5 {
+				t.Errorf("byPayloadType[ADVERT] holds %d transmissions, want 5 (ballast, 2 merged groups, 2 singles)", got)
 			}
 			seen := map[string]int{}
 			for _, tx := range s.packets {
@@ -308,6 +309,17 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 						t.Errorf("nodeHashes[%s...] still holds the old hash %s", pk[:4], h)
 					}
 				}
+			}
+			// The subpath total follows the merge: it counts transmissions with a
+			// path of 2+ hops, and a merged-away duplicate no longer counts.
+			multiHop := 0
+			for _, tx := range s.packets {
+				if len(txGetParsedPath(tx)) >= 2 {
+					multiHop++
+				}
+			}
+			if s.spTotalPaths != multiHop {
+				t.Errorf("spTotalPaths = %d, want %d (transmissions with 2+ hop paths)", s.spTotalPaths, multiHop)
 			}
 			// Every observation of the DB survives, except the 4 identical
 			// (obs0, ["aa"]) ones that merge into 1 per group.

@@ -633,7 +633,8 @@ func main() {
 	// process. The server reads the results via the periodic
 	// recompNeighborGraph / fetchResolvedPathForObs paths.
 
-	// Migrate old content hashes in background (one-time, idempotent).
+	// Rehash content hashes in memory in the background (idempotent). The DB
+	// rewrite is the ingestor's (#215); the server never writes.
 	go migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {

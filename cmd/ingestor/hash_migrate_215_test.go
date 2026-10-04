@@ -210,6 +210,10 @@ func TestContentHashMigration_ConvergesInTheIngestor_215(t *testing.T) {
 			if got := hm215Count(t, db, `SELECT COUNT(*) FROM route_mask_changes WHERE transmission_id NOT IN (SELECT id FROM transmissions)`); got != 0 {
 				t.Errorf("%d route_mask_changes rows name a deleted transmission", got)
 			}
+			// A running server that holds the survivor learns the grown mask.
+			if got := hm215Count(t, db, `SELECT COALESCE(MAX(route_mask), 0) FROM route_mask_changes WHERE transmission_id = 11`); got != 7 {
+				t.Errorf("route_mask_changes announces mask %d for the survivor, want 7", got)
+			}
 		})
 	}
 }
