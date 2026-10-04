@@ -105,6 +105,64 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     }
   });
 
+  // #2052: exercise the actual controls in both pointer modes, not just
+  // standalone CSS samples. Mobile channels use rows without inline icons;
+  // the packets navbar supplies the visible .nav-btn mirrors on phones.
+  for (const width of [375, 390, 768, 1280]) {
+    await step(`viewport ${width}: 48px controls fit and respond to clicks`, async () => {
+      const mobile = width < 768;
+      const touchContext = await browser.newContext({
+        viewport: { width, height: 900 }, hasTouch: mobile, isMobile: mobile,
+      });
+      const target = await touchContext.newPage();
+      try {
+        await target.addInitScript(() => localStorage.setItem('corescope_channel_keys',
+          JSON.stringify({ Touch2052: '00112233445566778899aabbccddeeff' })));
+        await target.goto(BASE + (mobile ? '/#/packets' : '/#/channels'),
+          { waitUntil: 'domcontentloaded' });
+        const action = mobile ? '.filter-toggle-btn-mirror' : '[data-share-channel]';
+        await target.waitForSelector(action);
+        await target.evaluate(() => document.fonts.ready);
+        // Mobile page-actions rebuilds the mirror while packets initializes.
+        // Query and measure in one browser turn so a detached selector snapshot
+        // cannot look like missing controls. Bad dimensions still fail below.
+        const controlsHandle = await target.waitForFunction(({ mobile, action }) => {
+          if (mobile && !document.querySelector('#pktLeft[data-loaded="true"] #pktPauseBtn')) return false;
+          const els = Array.from(document.querySelectorAll('.top-nav .nav-btn, #chList .ch-icon-btn'))
+            .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+          if (!els.length || !els.some(el => el.matches(action))) return false;
+          return els.map(el => {
+              const r = el.getBoundingClientRect();
+              const container = el.closest('.top-nav, .ch-item').getBoundingClientRect();
+              return { name: el.id || el.getAttribute('aria-label'), w: r.width, h: r.height,
+                fits: r.left >= container.left - 1 && r.right <= container.right + 1
+                  && r.top >= container.top - 1 && r.bottom <= container.bottom + 1 };
+            });
+        }, { mobile, action }, { timeout: 8000 });
+        const controls = await controlsHandle.jsonValue();
+        await controlsHandle.dispose();
+        assert(controls.length > 0, 'expected visible navbar or channel controls');
+        for (const control of controls) {
+          assert(control.w >= 48 && control.h >= 48,
+            `${control.name}: expected >=48x48, got ${control.w}x${control.h}`);
+          assert(control.fits, `${control.name}: clipped outside its navbar/channel row`);
+        }
+        assert(await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
+          'controls caused horizontal overflow');
+        await target.locator(action).click();
+        if (mobile) {
+          await target.waitForSelector('.filter-bar.filters-expanded');
+        } else {
+          await target.waitForSelector('#chShareModal:not(.hidden)');
+          assert((await target.inputValue('#chShareKey')) === '00112233445566778899aabbccddeeff',
+            'Share must open the selected channel key');
+        }
+      } finally {
+        await touchContext.close();
+      }
+    });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   await browser.close();
   process.exit(failed ? 1 : 0);

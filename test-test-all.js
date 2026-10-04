@@ -143,7 +143,6 @@ const KNOWN_UNREGISTERED = {
   // need something CI's unit job does not have
   'test-marker-outline-weight.js': 'needs @playwright/test (not a dependency) and a server',
   'test-table-sort.js': 'needs jsdom (not a dependency)',
-  'test-touch-targets.js': 'red in Chromium: expects 48px targets, CSS has 44px',
   // E2E
   'test-channel-modal-e2e.js': 'red: Add button text and sidebar sections changed',
   'test-issue-1522-trace-url-sync-e2e.js': 'needs @playwright/test (not a dependency)',
