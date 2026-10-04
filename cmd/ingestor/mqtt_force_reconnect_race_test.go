@@ -25,13 +25,15 @@ func (t *fakeToken) WaitTimeout(time.Duration) bool { return true }
 func (t *fakeToken) Done() <-chan struct{}          { ch := make(chan struct{}); close(ch); return ch }
 func (t *fakeToken) Error() error                   { return t.err }
 
-// fakeClient implements mqtt.Client, recording calls to the three methods
+// fakeClient implements mqtt.Client, recording calls to the methods
 // buildForceReconnectFn actually uses (IsConnectionOpen, Disconnect,
-// Connect). Every other method panics — buildForceReconnectFn must never
+// Connect; IsConnected after a Connect() error, #102). Every other method
+// panics — buildForceReconnectFn must never
 // touch subscriptions, publishes, or options, so a call there indicates the
 // fix drifted from its intended scope.
 type fakeClient struct {
 	isConnectionOpen bool
+	isConnected      bool
 	connectErr       error
 
 	disconnectCalled bool
@@ -39,7 +41,7 @@ type fakeClient struct {
 	callOrder        []string
 }
 
-func (c *fakeClient) IsConnected() bool { panic("not used by buildForceReconnectFn") }
+func (c *fakeClient) IsConnected() bool { return c.isConnected }
 func (c *fakeClient) IsConnectionOpen() bool {
 	c.callOrder = append(c.callOrder, "IsConnectionOpen")
 	return c.isConnectionOpen
@@ -126,7 +128,8 @@ func TestBuildForceReconnectFn_SkipsDisconnectWhenAlreadyRetrying(t *testing.T) 
 // class this whole bug hinged on — Connect() called while paho's status is
 // transitionally "disconnecting"). The old code discarded the returned token
 // entirely; the fix must surface it via log output instead of silently
-// dropping it.
+// dropping it. IsConnected()==false: no reconnect is pending, so it is a
+// genuine failure (#102 logs it as info only while paho is retrying).
 func TestBuildForceReconnectFn_LogsConnectError(t *testing.T) {
 	c := &fakeClient{isConnectionOpen: false, connectErr: errors.New("status can only transition to connecting from disconnected")}
 	fn := buildForceReconnectFn(c, "erroring-source")
