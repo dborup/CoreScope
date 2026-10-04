@@ -1,0 +1,141 @@
+/**
+ * E2E (#96): optional "Hide CONTROL packets" checkbox on the packets page.
+ *
+ * Against the e2e fixture (4 CONTROL packets, all older than the default
+ * time window, so every step opens #/packets?timeWindow=525600):
+ * - default: the checkbox is unchecked and CONTROL packets are listed;
+ * - checking it hides exactly the CONTROL packets, without a new
+ *   /api/packets request, and puts hideControl=1 in the address bar;
+ * - the choice survives a reload, checked and explicitly unchecked;
+ * - hideControl in the URL wins over the saved choice;
+ * - a direct link to one CONTROL packet still opens it while the filter is on;
+ * - at a phone width the checkbox is reachable through the Filters toggle.
+ *
+ * Usage: BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js
+ */
+'use strict';
+const { chromium } = require('playwright');
+
+const BASE = process.env.BASE_URL || 'http://localhost:13581';
+const LIST = BASE + '/#/packets?timeWindow=525600';
+const PREF_KEY = 'meshcore-hide-control';
+const CONTROL = 11;
+
+let passed = 0, failed = 0;
+async function step(name, fn) {
+  try { await fn(); passed++; console.log('  ✓ ' + name); }
+  catch (e) { failed++; console.error('  ✗ ' + name + ': ' + e.message); }
+}
+function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
+
+// Load url as a new document (goto alone may be a same-document hash change).
+async function open(page, url) {
+  await page.goto('about:blank');
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#fHideControl', { state: 'attached', timeout: 15000 });
+  await page.waitForSelector('table tbody tr[data-hash]', { timeout: 15000 });
+}
+
+// The packet count the list header shows, "(N)".
+async function shownCount(page) {
+  const txt = await page.textContent('#pktLeft .count');
+  const m = /\((\d+)\)/.exec(txt || '');
+  if (!m) throw new Error('no count in list header: ' + txt);
+  return Number(m[1]);
+}
+
+async function hashQuery(page) {
+  return page.evaluate(() => Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || '')));
+}
+
+(async () => {
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  let packetsRequests = 0;
+  page.on('request', (r) => { if (/\/api\/packets\?/.test(r.url())) packetsRequests++; });
+
+  // Ground truth from the API: the CONTROL packets of the fixture.
+  const api = await (await page.request.get(BASE + '/api/packets?limit=50000&groupByHash=true')).json();
+  const all = api.packets || [];
+  const controls = all.filter((p) => p.payload_type === CONTROL);
+  console.log(`fixture: ${all.length} grouped packets, ${controls.length} CONTROL`);
+
+  let countAll = 0;
+
+  await step('no saved choice: checkbox unchecked, CONTROL packets listed', async () => {
+    assert(controls.length > 0, 'the e2e fixture has no CONTROL packet');
+    await open(page, LIST);
+    assert(!(await page.isChecked('#fHideControl')), 'checkbox is checked by default');
+    countAll = await shownCount(page);
+    assert(countAll === all.length, `list shows ${countAll}, API has ${all.length}`);
+    const q = await hashQuery(page);
+    assert(!('hideControl' in q), 'hideControl in the URL by default: ' + JSON.stringify(q));
+  });
+
+  await step('checking it hides exactly the CONTROL packets, without a new API request', async () => {
+    const before = packetsRequests;
+    await page.check('#fHideControl');
+    await page.waitForFunction((n) => {
+      const m = /\((\d+)\)/.exec(document.querySelector('#pktLeft .count')?.textContent || '');
+      return m && Number(m[1]) === n;
+    }, countAll - controls.length, { timeout: 5000 });
+    assert(packetsRequests === before, `toggling made ${packetsRequests - before} /api/packets request(s)`);
+    const q = await hashQuery(page);
+    assert(q.hideControl === '1', 'hideControl=1 not in the URL: ' + JSON.stringify(q));
+    const shownHashes = await page.$$eval('table tbody tr[data-hash]', (rows) => rows.map((r) => r.dataset.hash));
+    for (const c of controls) assert(!shownHashes.includes(c.hash), 'CONTROL packet ' + c.hash + ' still listed');
+  });
+
+  await step('the checked choice survives a reload (URL without the param)', async () => {
+    await open(page, LIST);
+    assert(await page.isChecked('#fHideControl'), 'checkbox not checked after reload');
+    assert((await shownCount(page)) === countAll - controls.length, 'CONTROL packets listed after reload');
+    const q = await hashQuery(page);
+    assert(q.hideControl === '1', 'restored choice not written to the URL: ' + JSON.stringify(q));
+  });
+
+  await step('a direct link to a CONTROL packet still opens it while the filter is on', async () => {
+    const target = controls[0].hash;
+    await page.goto('about:blank');
+    await page.goto(BASE + '/#/packets/' + target + '?timeWindow=525600', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(`table tbody tr[data-hash="${target}"]`, { timeout: 15000 });
+    await page.waitForFunction((h) => (document.getElementById('pktRight')?.textContent || '').includes(h), target, { timeout: 15000 });
+    assert(await page.evaluate((k) => localStorage.getItem(k), PREF_KEY) === '1', 'the saved choice changed');
+  });
+
+  await step('unchecking shows them again, and the unchecked choice survives a reload', async () => {
+    await open(page, LIST);
+    await page.uncheck('#fHideControl');
+    await page.waitForFunction((n) => {
+      const m = /\((\d+)\)/.exec(document.querySelector('#pktLeft .count')?.textContent || '');
+      return m && Number(m[1]) === n;
+    }, countAll, { timeout: 5000 });
+    assert(await page.evaluate((k) => localStorage.getItem(k), PREF_KEY) === '0', 'explicit unchecked choice not saved as "0"');
+    await open(page, LIST);
+    assert(!(await page.isChecked('#fHideControl')), 'checkbox checked after reload');
+    assert((await shownCount(page)) === countAll, 'CONTROL packets hidden after reload');
+  });
+
+  await step('hideControl=1 in the URL wins over a saved unchecked choice', async () => {
+    await open(page, LIST + '&hideControl=1');
+    assert(await page.isChecked('#fHideControl'), 'URL hideControl=1 did not check the box');
+    assert((await shownCount(page)) === countAll - controls.length, 'CONTROL packets listed with hideControl=1');
+  });
+
+  await step('phone width: the checkbox is reachable through the Filters toggle and fits the screen', async () => {
+    const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    const p = await phone.newPage();
+    await p.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+    await p.waitForSelector('#fHideControl', { state: 'attached', timeout: 15000 });
+    if (!(await p.isVisible('#fHideControl'))) await p.click('#filterToggleBtn');
+    await p.waitForSelector('#fHideControl', { state: 'visible', timeout: 5000 });
+    const box = await p.locator('label:has(#fHideControl)').boundingBox();
+    assert(box && box.x >= 0 && box.x + box.width <= 390, 'checkbox label does not fit the 390 px screen: ' + JSON.stringify(box));
+    await phone.close();
+  });
+
+  await browser.close();
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });
