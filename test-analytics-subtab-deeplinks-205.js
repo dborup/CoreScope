@@ -475,6 +475,17 @@ function pageEnv(opts) {
     assert.strictEqual(env.hash(), '#/analytics?tab=scopes');
   });
 
+  // #208 item 7: Hash Issues owns bytes= and section= (the byte-size
+  // selector and its section links) like Scopes owns sub=/swin=.
+  await test('switching from Hash Issues to another tab drops bytes= and section=, keeps window=', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=collisions&bytes=2&section=hashMatrixSection&window=24h');
+    assert.strictEqual(env.initError(), null, 'init() threw');
+    assert.strictEqual(env.params().bytes, '2', 'precondition: bytes= kept on Hash Issues');
+    await env.clickTab('topology');
+    assert.strictEqual(env.hash(), '#/analytics?tab=topology&window=24h');
+  });
+
   console.log('\n=== #205: Wardriving window (wdwin=) ===');
 
   for (const w of ['1h', '24h', '7d']) {
