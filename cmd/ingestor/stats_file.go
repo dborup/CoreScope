@@ -260,7 +260,10 @@ type statsWriteLog struct {
 func (l *statsWriteLog) failed(path string, err error, now time.Time) {
 	l.failures++
 	l.failing = true
-	if !l.lastLog.IsZero() && now.Sub(l.lastLog) < l.every {
+	// A negative difference is a wall-clock step back, not "inside the
+	// interval": it counts as an interval passed, so a step cannot
+	// silence a persisting failure.
+	if d := now.Sub(l.lastLog); !l.lastLog.IsZero() && d >= 0 && d < l.every {
 		l.suppressed++
 		return
 	}
@@ -441,7 +444,9 @@ func StartStatsFileWriter(s *Store, interval time.Duration) (stop func()) {
 				b = b[:n-1]
 			}
 			if err := writeStatsAtomic(path, b); err != nil {
-				writeLog.failed(path, err, tickAt)
+				// time.Now(), not tickAt: UTC() drops the monotonic
+				// reading the limiter's interval relies on.
+				writeLog.failed(path, err, time.Now())
 			} else {
 				writeLog.succeeded(path)
 			}
