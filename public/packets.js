@@ -816,8 +816,9 @@
   //   selection. That re-runs init(), whose cold-load call here writes the
   //   restored filters back; the previous packet's ?obs= does not apply.
   // detail (optional): { subpath: '/<hash|id>' or '', obs: id or null } when
-  // the caller changes the selection; without it the current subpath and
-  // ?obs= are kept (filter changes, Clear Filters, cold load).
+  // the caller changes the selection or closes the detail (Clear Filters,
+  // #180); without it the current subpath and ?obs= are kept (filter
+  // changes, cold load).
   function updatePacketsUrl(detail) {
     var cur = String(location.hash || '');
     // The packets list route: #/packets, #/packets/…, #/packets?…, or no
@@ -941,8 +942,11 @@
       panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + '<span>Select a packet to view details</span>';
       var layout = panel.closest('.split-layout');
       if (layout) layout.classList.add('detail-collapsed');
+      // Re-render only to drop a row's selection highlight (#180: Clear
+      // Filters closes the detail and reloads the rows itself).
+      var wasSelected = selectedId !== null;
       selectedId = null;
-      renderTableRows();
+      if (wasSelected) renderTableRows();
     }
   }
 
@@ -2019,8 +2023,14 @@
       // Reset region filter
       RegionFilter.setSelected([]);
 
+      // Clear also leaves the packet detail (#180): a #/packets/<hash>
+      // subpath sets filters.hash again on load, so after Clear the URL is
+      // the list and the detail it named is closed.
+      selectedObservationId = null;
+      closeDetailPanel();
+
       // Update URL and reload
-      updatePacketsUrl();
+      updatePacketsUrl({ subpath: '', obs: null });
       loadPackets();
     });
     // Show clear button if page loaded with active filters (e.g. from URL params)

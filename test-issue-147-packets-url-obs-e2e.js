@@ -1,7 +1,7 @@
 /**
  * E2E (#147): a packet-detail deep link #/packets/<hash>?obs=<id> keeps its
- * selected observation in the address bar on cold load, on filter changes
- * and on Clear Filters, and reopening the copied URL in a new tab selects the
+ * selected observation in the address bar on cold load and on filter changes
+ * (Clear Filters leaves the detail, #180), and reopening the copied URL in a new tab selects the
  * same observation. ?viewPath=1 is in the URL while the View Path modal is
  * open, also when the detail's View Path button opened it, and is dropped
  * when it closes.
@@ -159,12 +159,14 @@ async function setTimeWindow(page, value) {
         await tab.close();
       });
 
-      await step('desktop: Clear Filters removes ?timeWindow=, keeps the detail and ?obs=', async () => {
+      // #180 decision: Clear Filters also leaves the detail (its subpath
+      // would set the hash filter again on reload), so ?obs= goes with it.
+      await step('desktop: Clear Filters removes ?timeWindow= and the detail (subpath, ?obs=) (#180)', async () => {
         await page.click('#clearFiltersBtn');
         await waitHash(page, () => !/timeWindow=/.test(location.hash), 'timeWindow still in URL after Clear');
-        const { q, hash: h } = await hashParams(page);
-        assert(h.startsWith('#/packets/' + hash), 'detail subpath lost: ' + h);
-        assert(q.obs === SYN_OBS, 'obs dropped by Clear Filters: ' + h);
+        const { hash: h } = await hashParams(page);
+        assert(h === '#/packets', 'URL after Clear: ' + h);
+        assert(!(await detailPaneOpen(page)), 'detail pane still open after Clear');
       });
 
       await step('desktop: Escape closes only the View Path modal (drops viewPath, keeps detail + obs); a second Escape closes the detail', async () => {
