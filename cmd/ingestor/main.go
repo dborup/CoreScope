@@ -440,6 +440,13 @@ func main() {
 	defer stopNeighborBuilder()
 	log.Printf("[neighbor-build] enabled (interval=%s)", NeighborEdgesBuilderInterval)
 
+	// #188: re-resolve NULL resolved_path rows now that the prefix index
+	// and neighbour graph are primed (StartNeighborEdgesBuilder above).
+	if enabled, batch, pause := cfg.ResolvedPathBackfillSettings(); enabled {
+		stopResolvedPathBackfill := store.StartResolvedPathBackfill(batch, pause)
+		defer stopResolvedPathBackfill()
+	}
+
 	// #1212: per-source stall watchdog. Detects "silently dead" sources
 	// where the client reports connected but no messages have flowed. Logs
 	// a WARN line every minute for any source silent for >5m. Scan every
