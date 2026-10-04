@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -207,5 +208,31 @@ func TestNodeDetail404CancelledLookupIsNotLogged(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "missing-node lookup failed") {
 		t.Errorf("cancelled request logged as a lookup failure: %s", buf.String())
+	}
+}
+
+// The throttle logs the first failure, suppresses the rest inside the
+// interval and reports how many it suppressed with the next logged one.
+func TestMissingNodeLookupLogThrottle(t *testing.T) {
+	var l missingNodeLookupLog
+	t0 := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	steps := []struct {
+		at             time.Duration
+		log            bool
+		wantSuppressed int
+	}{
+		{0, true, 0},
+		{time.Second, false, 0},
+		{missingNodeLogEvery - time.Second, false, 0},
+		{missingNodeLogEvery, true, 2},
+		{missingNodeLogEvery + time.Minute, false, 0},
+		{3 * missingNodeLogEvery, true, 1},
+		{5 * missingNodeLogEvery, true, 0},
+	}
+	for i, s := range steps {
+		logIt, suppressed := l.note(t0.Add(s.at))
+		if logIt != s.log || suppressed != s.wantSuppressed {
+			t.Errorf("step %d (+%v): note()=(%v, %d), want (%v, %d)", i, s.at, logIt, suppressed, s.log, s.wantSuppressed)
+		}
 	}
 }
