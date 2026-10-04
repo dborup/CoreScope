@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,6 +141,8 @@ func statsFilePath() string {
 //     fails loudly.
 func writeStatsAtomic(path string, b []byte) error {
 	tmp := path + ".tmp"
+	// fail wraps a failed step: the error names the tmp once (#160).
+	fail := func(op string, err error) error { return newStatsWriteError(tmp, op, err) }
 	// O_NOFOLLOW: if tmp is a pre-existing symlink, openat fails with ELOOP
 	// instead of clobbering the symlink target. O_NONBLOCK: a FIFO without
 	// a reader fails with ENXIO instead of blocking the writer, and its
@@ -145,29 +150,32 @@ func writeStatsAtomic(path string, b []byte) error {
 	// need for world-readable.
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|oNoFollow|oNonBlock, 0o600)
 	if err != nil {
+		e := newStatsWriteError(tmp, "open", err)
 		if fi, lerr := os.Lstat(tmp); lerr == nil {
 			if !fi.Mode().IsRegular() {
-				return fmt.Errorf("%v: %w", errStatsTmpNotRegular(tmp, fi.Mode()), err)
-			}
-			// The usual #160 case: a 0600 tmp left by another service
-			// user, which a non-root ingestor cannot even open, so the
-			// owner check below never runs. Give the hint here too.
-			if errors.Is(err, os.ErrPermission) {
-				return fmt.Errorf("%w; %s", err, statsTmpPermissionHint(tmp, fi))
+				e.setNotRegular(fi.Mode())
+			} else if errors.Is(err, os.ErrPermission) {
+				// The usual #160 case: a 0600 tmp left by another
+				// service user, which a non-root ingestor cannot even
+				// open, so the owner check below never runs. Give the
+				// hint here too.
+				e.setPermissionHint(fi)
 			}
 		}
-		return err
+		return e
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return err
+		return fail("stat", err)
 	}
 	// Only a regular file may be published: a FIFO that has a reader, or
 	// a device, opens fine (#161).
 	if !fi.Mode().IsRegular() {
 		f.Close()
-		return errStatsTmpNotRegular(tmp, fi.Mode())
+		e := newStatsWriteError(tmp, "", nil)
+		e.setNotRegular(fi.Mode())
+		return e
 	}
 	// The mode above applies only to a new file. A stale tmp keeps its
 	// owner and mode, and the rename would publish both. One that belongs
@@ -180,26 +188,90 @@ func writeStatsAtomic(path string, b []byte) error {
 	}
 	if err := f.Chmod(0o600); err != nil {
 		f.Close()
-		return err
+		return fail("chmod", err)
 	}
 	if err := f.Truncate(0); err != nil {
 		f.Close()
-		return err
+		return fail("truncate", err)
 	}
 	if _, err := f.Write(b); err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return err
+		return fail("write", err)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
-		return err
+		return fail("close", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
-		return err
+		return fail("rename to "+filepath.Base(path), err)
 	}
 	return nil
+}
+
+// statsWriteError is a failed stats write (#160). Its message names the
+// tmp path once, at the start, then the failed step with its cause, what
+// is wrong with the tmp, and what the operator must do, e.g.
+//
+//	/tmp/x.json.tmp: open: permission denied; owned by uid 1001, ingestor uid 1000; remove it or fix its owner
+//
+// Unwrap gives the cause (an errno where there is one), so errors.Is
+// works as on the bare error.
+type statsWriteError struct {
+	tmp    string
+	op     string // the failed step, "" for a refusal after a check
+	err    error  // the step's cause, without the path it names
+	detail string // what is wrong with the tmp
+	hint   string // what the operator must do
+}
+
+func newStatsWriteError(tmp, op string, err error) *statsWriteError {
+	var pe *fs.PathError
+	var le *os.LinkError
+	switch {
+	case errors.As(err, &pe):
+		err = pe.Err
+	case errors.As(err, &le):
+		err = le.Err
+	}
+	return &statsWriteError{tmp: tmp, op: op, err: err}
+}
+
+func (e *statsWriteError) Error() string {
+	parts := make([]string, 0, 3)
+	if e.op != "" && e.err != nil {
+		parts = append(parts, e.op+": "+e.err.Error())
+	}
+	for _, s := range []string{e.detail, e.hint} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return e.tmp + ": " + strings.Join(parts, "; ")
+}
+
+func (e *statsWriteError) Unwrap() error { return e.err }
+
+// setNotRegular marks a tmp path that holds something other than a
+// regular file, such as a FIFO or a directory. It is left in place for the
+// operator to remove (#161).
+func (e *statsWriteError) setNotRegular(mode os.FileMode) {
+	e.detail = fmt.Sprintf("not a regular file (mode %v)", mode)
+	e.hint = "remove it"
+}
+
+// setPermissionHint says what the operator must do about a regular tmp
+// (fi from Lstat) the ingestor may not open: fix the owner when it is
+// someone else's, else its permissions (#160).
+func (e *statsWriteError) setPermissionHint(fi os.FileInfo) {
+	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
+		e.detail = fmt.Sprintf("owned by uid %d, ingestor uid %d", uid, statsFileEUID())
+		e.hint = "remove it or fix its owner"
+		return
+	}
+	e.detail = fmt.Sprintf("mode %v", fi.Mode())
+	e.hint = "remove it or fix its permissions"
 }
 
 // statsFileEUID is the user the stats tmp file must belong to; swapped in
@@ -208,31 +280,16 @@ var statsFileEUID = os.Geteuid
 
 // checkStatsTmpOwner fails when the tmp file (name, fi from its open
 // descriptor) belongs to a user other than statsFileEUID. Where files have
-// no Unix owner (Windows) it passes.
+// no Unix owner (Windows) it passes. The ingestor cannot fix this itself;
+// the error says what the operator must do (#160).
 func checkStatsTmpOwner(name string, fi os.FileInfo) error {
 	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
-		// The ingestor cannot fix this itself; say what the operator must
-		// do (#160).
-		return fmt.Errorf("%s belongs to uid %d, not %d; remove %s or fix its owner", name, uid, statsFileEUID(), name)
+		e := newStatsWriteError(name, "", nil)
+		e.detail = fmt.Sprintf("owned by uid %d, ingestor uid %d", uid, statsFileEUID())
+		e.hint = "remove it or fix its owner"
+		return e
 	}
 	return nil
-}
-
-// statsTmpPermissionHint says what the operator must do about a regular
-// tmp (fi from Lstat) the ingestor may not open: fix the owner when it is
-// someone else's, else its permissions (#160).
-func statsTmpPermissionHint(name string, fi os.FileInfo) string {
-	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
-		return fmt.Sprintf("remove %s or fix its owner (owned by uid %d, ingestor uid %d)", name, uid, statsFileEUID())
-	}
-	return fmt.Sprintf("remove %s or fix its permissions (mode %v)", name, fi.Mode())
-}
-
-// errStatsTmpNotRegular is the error for a stats tmp path that holds
-// something other than a regular file, such as a FIFO or a directory.
-// It is left in place for the operator to remove (#161).
-func errStatsTmpNotRegular(tmp string, mode os.FileMode) error {
-	return fmt.Errorf("%s is not a regular file (mode %v); remove it", tmp, mode)
 }
 
 // statsWriteErrLogEvery is how often a failure that persists is logged
@@ -267,10 +324,17 @@ func (l *statsWriteLog) failed(path string, err error, now time.Time) {
 		l.suppressed++
 		return
 	}
+	// A statsWriteError names the tmp, so the line does not name the
+	// path again (#160).
+	what := path + ": " + err.Error()
+	var we *statsWriteError
+	if errors.As(err, &we) {
+		what = "failed: " + err.Error()
+	}
 	if l.suppressed > 0 {
-		l.logf("[stats-file] write %s: %v (%d more failed writes since the last report)", path, err, l.suppressed)
+		l.logf("[stats-file] write %s (%d more failed writes since the last report)", what, l.suppressed)
 	} else {
-		l.logf("[stats-file] write %s: %v", path, err)
+		l.logf("[stats-file] write %s", what)
 	}
 	l.reported, l.lastLog, l.suppressed = true, now, 0
 }
