@@ -126,8 +126,9 @@ func TestWriteStatsAtomicForeignTmpErrorNamesTheFix_160(t *testing.T) {
 	if err == nil {
 		t.Fatal("foreign tmp accepted")
 	}
-	if want := "remove " + path + ".tmp or fix its owner"; !strings.Contains(err.Error(), want) {
-		t.Fatalf("error %q lacks the hint %q", err, want)
+	// The tmp path leads the message (F4), so the hint says "remove it".
+	if want := "remove it or fix its owner"; !strings.HasPrefix(err.Error(), path+".tmp: ") || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q lacks the tmp path or the hint %q", err, want)
 	}
 }
 
