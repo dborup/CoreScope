@@ -106,3 +106,24 @@ func TestMainWiresSourceSecrets_159(t *testing.T) {
 		t.Error("main() wires ForceReconnectFn itself; use attachClient, which passes the secrets")
 	}
 }
+
+// #210 split the force-reconnect log into a retry-pending info line and a
+// failure line; both log the error with the source's secrets masked. paho's
+// status error never quotes the URL, so a configured password that occurs
+// in its text stands in for one that would. The classification reads the
+// raw error: masked first, it would no longer match paho's text and the
+// line would be logged as a failure.
+func TestBuildForceReconnectFnMasksRetryPendingLine_159(t *testing.T) {
+	src := MQTTSource{Broker: "tcp://host:1883", Password: "transition"}
+	c := &fakeClient{isConnected: true, connectErr: errors.New(pahoErrStatusMustBeDisconnected)}
+	logs := captureLog118(t)
+	buildForceReconnectFn(c, "retry-source", mqttSourceSecrets(src)...)()
+	out := logs.String()
+	const want = "MQTT [retry-source] WATCHDOG force-reconnect: Connect() returned status can only **** to connecting from disconnected; paho reports a retry pending"
+	if !strings.Contains(out, want) {
+		t.Errorf("log %q, want it to contain %q", out, want)
+	}
+	if strings.Contains(out, "transition") || strings.Contains(out, connectFailedLine102) {
+		t.Errorf("retry-pending line unmasked or logged as a failure:\n%s", out)
+	}
+}
