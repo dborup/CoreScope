@@ -13,13 +13,17 @@
 package brokerurl
 
 import (
+	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Marker replaces removed user-info in Mask and MaskText, so a reader can
 // tell credentials were present, and that a host shown after it may be
-// only what followed an '@' in the path or query.
+// only what followed an '@' in the path or query. MaskSecrets replaces
+// each masked span with it too.
 const Marker = "****"
 
 // Mask returns s with its user-info replaced by Marker and without query
@@ -33,19 +37,116 @@ func Mask(s string) string {
 	return join(p.scheme, rest)
 }
 
-// Secrets returns what Mask removes from s, so that a caller can mask the
-// same values where they appear without a URL around them (say, a query
-// token quoted in an error): the user-info, the query and the fragment,
-// each only when non-empty.
+// Secrets returns what Mask removes from s, and its parts, so that a
+// caller can mask them where they appear without a URL around them (say,
+// a password or a query token quoted in an error; see MaskSecrets): the
+// user-info and, when it has a ':', the user name before it and the
+// password after it; the query and each of its values; the fragment and
+// each of its values. A value is what follows the first '=' of an
+// '&'-separated part, or the whole part when it has no '='. Each comes
+// raw and, where it differs, %-decoded as in a path and as in a query
+// ('+' as space). Empty values and duplicates are left out.
 func Secrets(s string) []string {
 	p := split(s)
-	var out []string
-	for _, v := range []string{p.userinfo, p.query, p.fragment} {
+	var raw []string
+	if p.userinfo != "" {
+		raw = append(raw, p.userinfo)
+		if user, pass, ok := strings.Cut(p.userinfo, ":"); ok {
+			raw = append(raw, user, pass)
+		}
+	}
+	for _, v := range []string{p.query, p.fragment} {
 		if v != "" {
-			out = append(out, v)
+			raw = append(raw, v)
+			raw = append(raw, values(v)...)
+		}
+	}
+	var out []string
+	seen := map[string]bool{"": true}
+	for _, v := range raw {
+		for _, d := range decoded(v) {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
 		}
 	}
 	return out
+}
+
+// values returns the value of each '&'-separated part of a query or
+// fragment.
+func values(q string) []string {
+	var out []string
+	for _, part := range strings.Split(q, "&") {
+		if _, v, ok := strings.Cut(part, "="); ok {
+			part = v
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+// decoded returns v and its %-decoded forms; a bad escape has none.
+func decoded(v string) []string {
+	out := []string{v}
+	if d, err := url.PathUnescape(v); err == nil {
+		out = append(out, d)
+	}
+	if d, err := url.QueryUnescape(v); err == nil {
+		out = append(out, d)
+	}
+	return out
+}
+
+// MinSecretLen is the length in runes below which MaskSecrets leaves a
+// secret alone. A one- or two-character user name or password would mask
+// that substring all over unrelated text, and the free text is all
+// MaskSecrets sees: a URL that holds such a value is still masked whole
+// by Mask and MaskText, and a longer secret containing it (such as the
+// user-info "u:pw") still is by MaskSecrets.
+const MinSecretLen = 3
+
+// MaskSecrets replaces every occurrence in s of each of secrets (Secrets,
+// or values a caller knows, such as a configured password) by Marker. It
+// collects the match intervals of all secrets, including overlapping
+// matches of one secret, merges those that overlap or touch, and replaces
+// each merged interval once, so overlapping secrets leave no residue
+// ("abcd" and "cdef" turn "abcdef" into one Marker) and a Marker is never
+// matched again. Secrets shorter than MinSecretLen are skipped.
+func MaskSecrets(s string, secrets ...string) string {
+	type span struct{ start, end int }
+	var spans []span
+	for _, v := range secrets {
+		if utf8.RuneCountInString(v) < MinSecretLen {
+			continue
+		}
+		for i := 0; ; {
+			j := strings.Index(s[i:], v)
+			if j < 0 {
+				break
+			}
+			spans = append(spans, span{i + j, i + j + len(v)})
+			i += j + 1
+		}
+	}
+	if len(spans) == 0 {
+		return s
+	}
+	sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+	var b strings.Builder
+	last := 0
+	for k := 0; k < len(spans); {
+		start, end := spans[k].start, spans[k].end
+		for k++; k < len(spans) && spans[k].start <= end; k++ {
+			end = max(end, spans[k].end)
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(Marker)
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // urlUserinfoRe matches a URL with user-info in free text: from the start of
