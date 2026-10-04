@@ -132,13 +132,16 @@ func TestNewAsyncEmit_EmitAfterStopDoesNotPanic_103(t *testing.T) {
 	}
 }
 
-// #103: emits racing stop neither panic nor race (run with -race).
+// #103: emits racing stop neither panic nor race (run with -race). Every
+// emitter is already emitting when stop runs and keeps going until after it
+// has returned.
 func TestNewAsyncEmit_ConcurrentEmitDuringStop_103(t *testing.T) {
 	emit, stop := newAsyncEmit(func(...any) {})
-	start := make(chan struct{})
+	stopped := make(chan struct{})
 	panics := make(chan any, 8)
-	var wg sync.WaitGroup
+	var running, wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
+		running.Add(1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -147,14 +150,24 @@ func TestNewAsyncEmit_ConcurrentEmitDuringStop_103(t *testing.T) {
 					panics <- r
 				}
 			}()
-			<-start
-			for i := 0; i < 2000; i++ {
-				emit("line", i)
+			emit("first line")
+			running.Done()
+			for {
+				select {
+				case <-stopped:
+					for i := 0; i < 100; i++ {
+						emit("after stop", i)
+					}
+					return
+				default:
+					emit("line")
+				}
 			}
 		}()
 	}
-	close(start)
+	running.Wait()
 	stop()
+	close(stopped)
 	wg.Wait()
 	close(panics)
 	for r := range panics {
