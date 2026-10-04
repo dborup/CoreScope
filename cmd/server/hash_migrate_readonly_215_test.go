@@ -24,6 +24,10 @@ import (
 
 const hm215Observers = 4
 
+// Relay paths: hop i of an observation is the first byte of resolved pubkey i
+// (acct113PK(k) starts with byte k), as the store assumes when it sweeps
+// byPathHop by hop prefix.
+
 // hm215Raw is a distinct, decodable raw packet per key. ComputeContentHash
 // differs for every key, and never equals the "stale-*" hashes below.
 func hm215Raw(key int) string {
@@ -84,7 +88,11 @@ func (d *hm215DB) ballast(t testing.TB) {
 	raw := hm215Raw(250)
 	ts := hm215Time(-time.Hour)
 	d.tx(t, 1000, raw, ComputeContentHash(raw), ts, 4, hm215Advert(acct113PK(240)))
-	d.observation(t, 1000, 0, `["05","0b"]`, fmt.Sprintf(`[%q,%q]`, acct113PK(5), acct113PK(17)), ts)
+	// PK(18) is also the relay of the second row of every stale group, which
+	// the survivor (the first row) does not have: removing that row leaves the
+	// ballast alone in byNode[PK(18)], and its nodeHashes entry must then hold
+	// the ballast's hash only.
+	d.observation(t, 1000, 0, `["05","11","12"]`, fmt.Sprintf(`[%q,%q,%q]`, acct113PK(5), acct113PK(17), acct113PK(18)), ts)
 	d.observation(t, 1000, 1, `["aa"]`, "", ts) // fallback relay
 }
 
@@ -109,14 +117,21 @@ func (d *hm215DB) stale(t testing.TB, groups, dups, singles int) {
 			ts := hm215Time(old + time.Duration(order)*time.Second)
 			d.tx(t, id, raw, fmt.Sprintf("stale-%d-%d", g, k), ts, 4, hm215Advert(pk))
 			d.observation(t, id, 0, `["aa"]`, "", ts) // same in every row: fallback relay
-			d.observation(t, id, k, fmt.Sprintf(`["05","%02x"]`, 16+k), fmt.Sprintf(`[%q,%q]`, acct113PK(5), acct113PK(16+k)), ts)
+			path, resolved := fmt.Sprintf(`["05","%02x"]`, 16+k), fmt.Sprintf(`[%q,%q]`, acct113PK(5), acct113PK(16+k))
+			if k == dups {
+				// The last row has the longest path: once its observations
+				// move to the survivor, the survivor's best path changes.
+				path = fmt.Sprintf(`["05","%02x","11"]`, 16+k)
+				resolved = fmt.Sprintf(`[%q,%q,%q]`, acct113PK(5), acct113PK(16+k), acct113PK(17))
+			}
+			d.observation(t, id, k, path, resolved, ts)
 		}
 	}
 	for s := 1; s <= singles; s++ {
 		id := 500 + s
 		ts := hm215Time(old + time.Duration(s)*time.Second)
 		d.tx(t, id, hm215Raw(100+s), fmt.Sprintf("stale-single-%d", s), ts, 4, hm215Advert(acct113PK(200+s)))
-		d.observation(t, id, s, `["05","0b"]`, fmt.Sprintf(`[%q,%q]`, acct113PK(5), acct113PK(30+s)), ts)
+		d.observation(t, id, s, fmt.Sprintf(`["05","%02x"]`, 30+s), fmt.Sprintf(`[%q,%q]`, acct113PK(5), acct113PK(30+s)), ts)
 	}
 }
 
@@ -157,6 +172,9 @@ type hm215Snapshot struct {
 	ResolvedIdx   int
 	TotalObs      int
 	AdvertKeys    map[string]int
+	ByPathHop     map[string]int
+	SpIndex       map[string]int
+	SpTxIndex     map[string]int
 }
 
 func hm215Snap(s *PacketStore) hm215Snapshot {
@@ -170,6 +188,7 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 		PathHopRecs: len(s.pathHopResolved), FallbackRecs: len(s.fallbackByNode),
 		ResolvedIdx: len(s.resolvedPubkeyIndex), TotalObs: s.totalObs,
 		AdvertKeys: map[string]int{},
+		ByPathHop:  map[string]int{}, SpIndex: map[string]int{}, SpTxIndex: map[string]int{},
 	}
 	for pk, list := range s.byNode {
 		for _, tx := range list {
@@ -191,6 +210,15 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 	}
 	for pk, n := range s.advertPubkeys {
 		sn.AdvertKeys[pk] = n
+	}
+	for k, list := range s.byPathHop {
+		sn.ByPathHop[k] = len(list)
+	}
+	for k, n := range s.spIndex {
+		sn.SpIndex[k] = n
+	}
+	for k, list := range s.spTxIndex {
+		sn.SpTxIndex[k] = len(list)
 	}
 	return sn
 }

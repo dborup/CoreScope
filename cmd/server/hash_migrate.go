@@ -184,7 +184,9 @@ func (s *PacketStore) rekeyNodeHashes(renames map[string]string) {
 // moveObservations moves loser's observations to winner, dropping the ones
 // winner already has (same observer and path). The observations keep their
 // place in byObsID and byObserver and their charge; a dropped one is credited
-// here. The index entries of loser itself are removed by finishHashMerge.
+// here. loser keeps its observations list until finishHashMerge has removed it
+// from the path-hop index, which reads it; the index entries of loser itself
+// are removed there.
 func (s *PacketStore) moveObservations(winner, loser *StoreTx, m *hashMerge) {
 	if winner.obsKeys == nil {
 		winner.obsKeys = make(map[string]bool)
@@ -222,8 +224,6 @@ func (s *PacketStore) moveObservations(winner, loser *StoreTx, m *hashMerge) {
 		winner.routeMask |= loser.routeMask
 		winner.routeMaskKnown = true
 	}
-	loser.Observations = nil
-	loser.ObservationCount = 0
 }
 
 // hashMerge collects what one batch of collisions removed and touched.
@@ -278,7 +278,15 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 			affectedPayloadTypes[*l.PayloadType] = struct{}{}
 		}
 	}
+	// The resolved relay keys of a duplicate in byPathHop are found through the
+	// hops of its observed paths, so it must still hold its observations here:
+	// they were moved, not detached. A duplicate that was itself a survivor
+	// earlier in the batch holds the ones it took over too.
 	evictFromPathHopIndex(s.byPathHop, m.loserSet)
+	for _, l := range m.losers {
+		l.Observations = nil
+		l.ObservationCount = 0
+	}
 	s.removeTxsFromByNode(m.loserSet)
 	for pt := range affectedPayloadTypes {
 		kept := slices.DeleteFunc(s.byPayloadType[pt], func(t *StoreTx) bool { return m.loserSet[t] })
