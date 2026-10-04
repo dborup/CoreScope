@@ -731,6 +731,90 @@ function pageEnv(opts) {
     assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps)), ['all']);
   });
 
+  // #226: the adopters table's sort is deep-linked as mbsort= (column) and
+  // mbdir= (asc|desc), URL only like mbf=. Without mbsort= the table keeps the
+  // server's order; an unknown value is the default, never markup.
+  console.log('\n=== #226: Hash Stats multi-byte adopters sort (mbsort=, mbdir=) ===');
+
+  // The adopter names in the order the table shows them.
+  const adopterOrder = (env) => {
+    const html = env.content();
+    const start = html.indexOf('id="mbAdoptersTable"');
+    const out = [];
+    const re = /<td><strong>([^<]*)<\/strong><\/td>/g;
+    re.lastIndex = start < 0 ? html.length : start;
+    let m;
+    while ((m = re.exec(html)) && m.index < html.indexOf('</table>', start)) out.push(m[1]);
+    return out;
+  };
+  const byPackets = REAL.hashData.multiByteNodes.slice().sort((a, b) => a.packets - b.packets).map((n) => n.name);
+  const byLastSeen = REAL.hashData.multiByteNodes.slice().sort((a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen)).map((n) => n.name);
+  const serverOrder = REAL.hashData.multiByteNodes.map((n) => n.name);
+
+  await test('precondition: the fixture adopters differ in Adverts and Last Seen, and the server order is not ascending by Adverts', async () => {
+    assert.ok(serverOrder.length >= 2, 'fewer than two adopters');
+    assert.notDeepStrictEqual(byPackets, serverOrder, 'server order already ascending by Adverts');
+  });
+
+  for (const [query, want] of [
+    ['mbsort=packets', byPackets],
+    ['mbsort=packets&mbdir=desc', byPackets.slice().reverse()],
+    ['mbsort=lastSeen', byLastSeen],
+    ['mbsort=lastSeen&mbdir=desc', byLastSeen.slice().reverse()],
+  ]) {
+    await test('#/analytics?tab=hashsizes&' + query + ' sorts the table, URL unchanged', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&' + query);
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      assert.deepStrictEqual(adopterOrder(env), want);
+      assert.strictEqual(env.hash(), '#/analytics?tab=hashsizes&' + query, 'URL not canonical');
+    });
+  }
+
+  await test('mbsort= and mbf= together: filtered and sorted, both kept', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbf=confirmed&mbsort=packets&mbdir=desc');
+    assert.deepStrictEqual(env.activeMbFilters(), ['confirmed']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=hashsizes&mbf=confirmed&mbsort=packets&mbdir=desc');
+  });
+
+  for (const value of ['', 'Packets', 'x"]', 'x"],[data-sort="name', '__proto__', 'constructor', 'none', '<img src=x onerror=alert(1)>']) {
+    await test('?mbsort=' + JSON.stringify(value) + ' keeps the server order, canonical URL, no exception', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&mbsort=' + encodeURIComponent(value) + '&mbdir=desc');
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      assert.deepStrictEqual(adopterOrder(env), serverOrder);
+      assert.strictEqual(env.hash(), '#/analytics?tab=hashsizes', 'URL not canonical');
+      assert.ok(env.content().indexOf('onerror') < 0, 'URL value reached the markup');
+    });
+  }
+
+  for (const value of ['', 'DESC', 'down', '__proto__', '<img src=x onerror=alert(1)>']) {
+    await test('?mbdir=' + JSON.stringify(value) + ' is ascending, dropped from the URL', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&mbsort=packets&mbdir=' + encodeURIComponent(value));
+      assert.deepStrictEqual(adopterOrder(env), byPackets);
+      assert.strictEqual(env.hash(), '#/analytics?tab=hashsizes&mbsort=packets');
+      assert.ok(env.content().indexOf('onerror') < 0, 'URL value reached the markup');
+    });
+  }
+
+  await test('mbsort=/mbdir= are URL only: nothing stored, a later plain visit keeps the server order', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbsort=packets&mbdir=desc');
+    assert.deepStrictEqual(Object.keys(env.session), [], 'sessionStorage written: ' + JSON.stringify(env.session));
+    env.destroy();
+    await env.mount('#/analytics?tab=hashsizes');
+    assert.deepStrictEqual(adopterOrder(env), serverOrder);
+  });
+
+  await test('switching from Hash Stats to another tab drops mbsort= and mbdir=', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbf=confirmed&mbsort=packets&mbdir=desc&window=24h');
+    await env.clickTab('topology');
+    assert.strictEqual(env.hash(), '#/analytics?tab=topology&window=24h');
+  });
+
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
   if (failed > 0) process.exit(1);
 })();
