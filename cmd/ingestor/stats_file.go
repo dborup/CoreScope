@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -144,8 +145,16 @@ func writeStatsAtomic(path string, b []byte) error {
 	// need for world-readable.
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|oNoFollow|oNonBlock, 0o600)
 	if err != nil {
-		if fi, lerr := os.Lstat(tmp); lerr == nil && !fi.Mode().IsRegular() {
-			return fmt.Errorf("%v: %w", errStatsTmpNotRegular(tmp, fi.Mode()), err)
+		if fi, lerr := os.Lstat(tmp); lerr == nil {
+			if !fi.Mode().IsRegular() {
+				return fmt.Errorf("%v: %w", errStatsTmpNotRegular(tmp, fi.Mode()), err)
+			}
+			// The usual #160 case: a 0600 tmp left by another service
+			// user, which a non-root ingestor cannot even open, so the
+			// owner check below never runs. Give the hint here too.
+			if errors.Is(err, os.ErrPermission) {
+				return fmt.Errorf("%w; %s", err, statsTmpPermissionHint(tmp, fi))
+			}
 		}
 		return err
 	}
@@ -207,6 +216,16 @@ func checkStatsTmpOwner(name string, fi os.FileInfo) error {
 		return fmt.Errorf("%s belongs to uid %d, not %d; remove %s or fix its owner", name, uid, statsFileEUID(), name)
 	}
 	return nil
+}
+
+// statsTmpPermissionHint says what the operator must do about a regular
+// tmp (fi from Lstat) the ingestor may not open: fix the owner when it is
+// someone else's, else its permissions (#160).
+func statsTmpPermissionHint(name string, fi os.FileInfo) string {
+	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
+		return fmt.Sprintf("remove %s or fix its owner (owned by uid %d, ingestor uid %d)", name, uid, statsFileEUID())
+	}
+	return fmt.Sprintf("remove %s or fix its permissions (mode %v)", name, fi.Mode())
 }
 
 // errStatsTmpNotRegular is the error for a stats tmp path that holds
