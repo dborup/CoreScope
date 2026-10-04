@@ -1337,7 +1337,8 @@ Messages for a specific channel.
       "observers":        [string],         // observer names
       "hops":             number,
       "snr":              number | null,
-      "observedPathHashSizes": [number]     // sorted unique relayed path widths (1–3)
+      "observedPathHashSizes": [number],    // sorted unique relayed path widths (1–3)
+      "senderPathHashSize": number          // 0 if unknown, otherwise header width (1–3)
     }
   ],
   "total": number                           // total deduplicated messages
@@ -1350,6 +1351,12 @@ zero-hop copies provide no hash-size evidence and do not add a value. More than
 one value means different widths were observed for the same deduplicated
 message; the field describes those observations, not the sender's permanent
 configuration.
+
+`senderPathHashSize` is read from the transmission's raw frame header, not
+inferred from its observations. A flood can encode this width even when no
+relay has forwarded it. A direct zero-hop marker, unsupported payload header,
+or malformed frame yields 0 (unknown). This value describes that particular
+frame, not the sender's permanent configuration.
 
 ---
 

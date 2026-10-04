@@ -76,6 +76,7 @@ const ctx = {
   fetch: () => Promise.resolve({ json: () => Promise.resolve({}) }),
   btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
   registerPage: noop,
+  senderPathHashSize: (rawHex) => rawHex === '59C0' ? 3 : null,
 };
 vm.createContext(ctx);
 // Expose the cache fetch helper only inside this VM so the regression can
@@ -89,11 +90,12 @@ vm.runInContext(channelsSource, ctx);
 const normalize = ctx.window._channelsNormalizeObservedPathHashSizesForTest;
 const union = ctx.window._channelsUnionObservedPathHashSizesForTest;
 const badge = ctx.window._channelsRenderObservedPathHashBadgeForTest;
+const senderBadge = ctx.window._channelsRenderSenderPathHashBadgeForTest;
 const merge = ctx.window._channelsMergeWsAppendedIntoRestForTest;
 const dedup = ctx.window._channelsDeduplicateAndMergeForTest;
 const fetchAndDecrypt = ctx.window._channelsFetchAndDecryptChannelForTest;
 
-for (const [name, fn] of Object.entries({ normalize, union, badge, merge, dedup, fetchAndDecrypt })) {
+for (const [name, fn] of Object.entries({ normalize, union, badge, senderBadge, merge, dedup, fetchAndDecrypt })) {
   if (typeof fn !== 'function') {
     console.error('FATAL: missing channels.js test export: ' + name);
     process.exit(2);
@@ -155,6 +157,20 @@ test('unknown evidence renders no badge and cannot inject markup', () => {
   assert.strictEqual(badge({ observedPathHashSizes: ['<img src=x onerror=alert(1)>'] }), '');
 });
 
+test('sender badge uses only a valid encoded width', () => {
+  assert.match(senderBadge({ senderPathHashSize: 2 }), />Sent with: 2-byte</);
+  assert.strictEqual(senderBadge({ senderPathHashSize: 0 }), '');
+  assert.strictEqual(senderBadge({ senderPathHashSize: '<img src=x onerror=alert(1)>' }), '');
+});
+
+test('REST refresh retains a sender width from the matching live message', () => {
+  const current = [{ packetHash: 'sender', senderPathHashSize: 3, _fromWS: true, _wsAt: Date.now() }];
+  const rest = [{ packetHash: 'sender', text: 'REST' }];
+  const out = merge(current, rest);
+  assert.strictEqual(out[0].senderPathHashSize, 3);
+  assert.strictEqual(rest[0].senderPathHashSize, undefined);
+});
+
 test('REST refresh unions a matching WS message instead of erasing its evidence', () => {
   const current = [{
     packetHash: 'same',
@@ -211,6 +227,7 @@ test('delta cache absorbs later evidence for the same packet without re-decrypti
     packets: [{
       hash: 'same-packet',
       first_seen: timestamp,
+      raw_hex: '59C0',
       observed_path_hash_sizes: [2],
       decoded_json: { type: 'CHAN', channel: '#test', sender: 'API sender', text: 'API text' },
     }],
@@ -220,9 +237,11 @@ test('delta cache absorbs later evidence for the same packet without re-decrypti
   assert.strictEqual(result.fromCache, true);
   assert.strictEqual(result.messages[0].text, 'Keep this decrypted text', 'cached plaintext is preserved');
   assert.deepStrictEqual(plain(result.messages[0].observedPathHashSizes), [2]);
+  assert.strictEqual(result.messages[0].senderPathHashSize, 3);
   assert.strictEqual(decryptCalls, 0, 'same timestamp is not decrypted again');
   assert.ok(stored, 'enriched legacy cache is persisted');
   assert.deepStrictEqual(stored.messages[0].observedPathHashSizes, [2]);
+  assert.strictEqual(stored.messages[0].senderPathHashSize, 3);
   assert.strictEqual(stored.count, 1);
 });
 

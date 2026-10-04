@@ -12,6 +12,20 @@ function payloadTypeColor(n) { return PAYLOAD_COLORS[n] || 'unknown'; }
 function isTransportRoute(rt) { return rt === 0 || rt === 3; }
 /** Byte offset of path_len in raw_hex: 5 for transport routes (4 bytes of next/last hop codes precede it), 1 otherwise. */
 function getPathLenOffset(routeType) { return isTransportRoute(routeType) ? 5 : 1; }
+/** Sender-selected path-hash width in this frame, or null when not encoded. */
+function senderPathHashSize(rawHex) {
+  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
+  const header = parseInt(rawHex.slice(0, 2), 16);
+  if (((header >> 2) & 0x0F) === 9) return null; // TRACE path bytes are SNR
+  const route = header & 0x03;
+  const offset = getPathLenOffset(route) * 2;
+  const pathHex = rawHex.slice(offset, offset + 2);
+  if (!/^[0-9a-f]{2}$/i.test(pathHex)) return null;
+  const pathByte = parseInt(pathHex, 16);
+  if (pathByte === 0 && (route === 2 || route === 3)) return null;
+  const size = (pathByte >> 6) + 1;
+  return size <= 3 ? size : null;
+}
 /**
  * scopeName is optional (callers that don't pass it get the original
  * unscoped "T" badge). Pass a packet's scope_name to also surface the
