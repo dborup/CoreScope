@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +22,8 @@ func hm215Raw(key int) string {
 	return fmt.Sprintf("0A00D69FD7A5A7475DB07337749AE61FA53A4788E9%02X", key)
 }
 
-// hm215Reopen opens the DB at path, lets fn seed it, and reopens it so the
-// migration, scheduled by OpenStore, runs over what fn wrote. The migration is
+// hm215Reopen opens the DB at path, lets fn seed it, and reopens it and starts
+// the migration over what fn wrote. The migration is
 // recorded as done on the first open, so its record is dropped before fn runs:
 // the seeded DB then looks like one written by an ingestor from before the
 // migration existed.
@@ -41,6 +45,7 @@ func hm215Reopen(t *testing.T, path string, fn func(db *sql.DB)) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.StartContentHashMigration(context.Background())
 	s.WaitForAsyncMigrations()
 	t.Cleanup(func() { s.Close() })
 	return s
@@ -265,5 +270,100 @@ func TestInsertWritesTheCurrentContentHash_215(t *testing.T) {
 	}
 	if want := ComputeContentHash(raw); hash != want || strings.HasPrefix(hash, "stale") {
 		t.Fatalf("inserted hash = %s, want %s", hash, want)
+	}
+}
+
+// Perf check, not a pass/fail test: with CORESCOPE_PERF_215=<runs> it times
+// migrateContentHashes over 2000 stale rows in 1000 colliding pairs (the shape
+// of the server's TestPerf_HashMigrateMerge_202) and over 5000 stale rows that
+// do not collide (TestPerf_HashMigrateRehash_215), printing one RESULT line each.
+func TestPerf_ContentHashMigration_215(t *testing.T) {
+	runs, _ := strconv.Atoi(os.Getenv("CORESCOPE_PERF_215"))
+	if runs <= 0 {
+		t.Skip("set CORESCOPE_PERF_215=<runs> to measure")
+	}
+	measure := func(name string, rows int, paired bool) {
+		var times []time.Duration
+		for r := 0; r < runs; r++ {
+			s := newTestStore(t)
+			db := s.db
+			hm215Exec(t, db, `INSERT OR IGNORE INTO observers (id, name, first_seen, last_seen) VALUES ('o1', 'O1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+			o1 := hm215Count(t, db, `SELECT rowid FROM observers WHERE id = 'o1'`)
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for id := 1; id <= rows; id++ {
+				key := id
+				if paired {
+					key = (id + 1) / 2
+				}
+				if _, err := tx.Exec(`INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, decoded_json, last_seen, route_mask)
+					VALUES (?, ?, ?, '2026-01-01T00:00:00Z', 1, 4, '{}', ?, 1)`, id, fmt.Sprintf("0A00D69FD7A5A7475DB07337749AE61FA53A4788%04X", key), fmt.Sprintf("old-%d", id), id); err != nil {
+					t.Fatal(err)
+				}
+				for k := 0; k < 2; k++ {
+					if _, err := tx.Exec(`INSERT INTO observations (transmission_id, observer_idx, direction, path_json, timestamp) VALUES (?, ?, 'RX', ?, 1767225600)`,
+						id, o1, fmt.Sprintf(`["%02X","%02X"]`, id%256, k)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			oldBatch, oldYield := contentHashMigrationBatchSize, contentHashMigrationYield
+			contentHashMigrationBatchSize, contentHashMigrationYield = 500, 0
+			t0 := time.Now()
+			if err := s.migrateContentHashes(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			times = append(times, time.Since(t0))
+			contentHashMigrationBatchSize, contentHashMigrationYield = oldBatch, oldYield
+			if got := hm215Count(t, db, `SELECT COUNT(*) FROM transmissions`); paired && got != rows/2 || !paired && got != rows {
+				t.Fatalf("%s: %d transmissions after the migration", name, got)
+			}
+		}
+		sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+		fmt.Printf("RESULT %s median_ns=%d\n", name, times[len(times)/2].Nanoseconds())
+	}
+	measure("ingestor-hash-migrate-merge-2000", 2000, true)
+	measure("ingestor-hash-migrate-rehash-5000", 5000, false)
+}
+
+// OpenStore does not start the migration: callers that seed their own rows
+// (tests, tools) would have them rehashed under them. main starts it, once the
+// ingest buffer is draining, and cancels it on shutdown, like the route_mask
+// backfill.
+func TestContentHashMigration_StartsAfterBufferReady_215(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "start.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.WaitForAsyncMigrations()
+	if hm215Count(t, s.db, `SELECT COUNT(*) FROM _async_migrations WHERE name LIKE '%content_hash%'`) != 0 {
+		t.Error("OpenStore scheduled the content-hash migration")
+	}
+
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := string(src)
+	ready := strings.Index(m, "ingestBuffer.Ready()")
+	start := strings.Index(m, "store.StartContentHashMigration(")
+	shutdown := strings.Index(m, `log.Println("Shutting down...")`)
+	stop := strings.LastIndex(m, "stopContentHashMigration()")
+	disconnect := strings.LastIndex(m, "c.Disconnect(5000)")
+	if ready < 0 || start < 0 || shutdown < 0 || stop < 0 || disconnect < 0 {
+		t.Fatalf("markers not found: ready=%d start=%d shutdown=%d stop=%d disconnect=%d", ready, start, shutdown, stop, disconnect)
+	}
+	if !(ready < start) {
+		t.Errorf("StartContentHashMigration must come after ingestBuffer.Ready()")
+	}
+	if !(shutdown < stop && stop < disconnect) {
+		t.Errorf("shutdown must cancel the content-hash migration before disconnecting MQTT clients")
 	}
 }

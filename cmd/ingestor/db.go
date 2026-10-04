@@ -214,15 +214,6 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 		log.Printf("[migration/async] scheduling tx_last_seen_backfill_v1 failed: %v", err)
 	}
 
-	// #215: rehash rows written before the current content-hash formula and
-	// merge the duplicates that creates. A full-table read plus writes in
-	// bounded batches, once (it is recorded as done), so it runs async; the
-	// server only rehashes in memory what it loaded before this finished.
-	// PREFLIGHT: async=true reason="full-table scan of transmissions.raw_hex (hash recompute) with batched writes; must not block ingestor boot"
-	if err := s.RunAsyncMigration(context.Background(), contentHashMigration, s.migrateContentHashes); err != nil {
-		log.Printf("[migration/async] scheduling %s failed: %v", contentHashMigration, err)
-	}
-
 	return s, nil
 }
 

@@ -129,3 +129,47 @@ func TestPerf_HashMigrateMerge_202(t *testing.T) {
 	}
 	fmt.Printf("RESULT hash-migrate-merge-2000 median_ns=%d packets_after=%d\n", perf202Median(migrate).Nanoseconds(), packets)
 }
+
+// Hash migration of 5000 transmissions that all carry a stale hash and do not
+// collide, each indexed under three node keys (#215). It measures the rename of
+// the nodeHashes keys that the migration now does per batch. Compiles against
+// master too (where the migration also writes the DB, on this in-memory
+// handle).
+func TestPerf_HashMigrateRehash_215(t *testing.T) {
+	runs := perf202Runs(t)
+	var migrate []time.Duration
+	for i := 0; i < runs; i++ {
+		db := setupTestDBv2(t)
+		tx, err := db.conn.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for id := 1; id <= 5000; id++ {
+			raw := fmt.Sprintf("0A00D69FD7A5A7475DB07337749AE61FA53A4788%04X", id)
+			decoded := fmt.Sprintf(`{"type":"ADVERT","pubKey":"%064x","destPubKey":"%064x","srcPubKey":"%064x"}`, id%800, (id+1)%800, (id+2)%800)
+			if _, err := tx.Exec(`INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+				VALUES (?, ?, ?, '2026-01-01T00:00:00Z', 1, 4, ?)`, id, raw, fmt.Sprintf("old-%d", id), decoded); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(`INSERT INTO observations (id, transmission_id, observer_id, observer_name, path_json, timestamp)
+				VALUES (?, ?, 'observer', 'Observer', '["AA","BB"]', ?)`, id, id, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		store := NewPacketStore(db, nil)
+		if err := store.Load(); err != nil {
+			t.Fatal(err)
+		}
+		t0 := time.Now()
+		migrateContentHashesAsync(store, 500, 0)
+		migrate = append(migrate, time.Since(t0))
+		if len(store.packets) != 5000 {
+			t.Fatalf("%d packets after the migration, want 5000", len(store.packets))
+		}
+		db.conn.Close()
+	}
+	fmt.Printf("RESULT hash-migrate-rehash-5000 median_ns=%d\n", perf202Median(migrate).Nanoseconds())
+}

@@ -283,6 +283,13 @@ func main() {
 	defer stopRouteMaskBackfill()
 	store.StartRouteMaskBackfill(routeMaskCtx)
 
+	// #215: rehash rows older than the current content-hash formula and merge
+	// the duplicates that creates, once (it is recorded as done). Same
+	// placement and shutdown as the route_mask backfill above.
+	contentHashCtx, stopContentHashMigration := context.WithCancel(context.Background())
+	defer stopContentHashMigration()
+	store.StartContentHashMigration(contentHashCtx)
+
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
 	go func() {
@@ -460,6 +467,7 @@ func main() {
 
 	log.Println("Shutting down...")
 	stopRouteMaskBackfill()
+	stopContentHashMigration()
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {

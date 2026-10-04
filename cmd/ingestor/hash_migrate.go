@@ -42,6 +42,19 @@ import (
 // is never re-run.
 const contentHashMigration = "content_hash_formula_v1"
 
+// StartContentHashMigration schedules the migration. Like the route_mask
+// backfill it is started by main once the ingest buffer is draining, not by
+// OpenStore: it scans the whole of transmissions and writes in batches, which
+// the buffer absorbs, and OpenStore callers (tests, tools) that seed their own
+// rows must not have them rehashed under them. Cancelled on shutdown; a
+// migration that did not finish resumes at the next start.
+func (s *Store) StartContentHashMigration(ctx context.Context) {
+	// PREFLIGHT: async=true reason="full-table scan of transmissions.raw_hex (hash recompute) with batched writes; must not block ingestor boot"
+	if err := s.RunAsyncMigration(ctx, contentHashMigration, s.migrateContentHashes); err != nil {
+		log.Printf("[hash-migrate] scheduling %s failed: %v", contentHashMigration, err)
+	}
+}
+
 // Package vars, not consts, so tests can drive the multi-batch loop with a few
 // rows.
 var (

@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -199,6 +202,110 @@ func hm215Migrate(s *PacketStore, batch int) string {
 	defer log.SetOutput(prev)
 	migrateContentHashesAsync(s, batch, 0)
 	return buf.String()
+}
+
+// stmtLog records every statement a connection prepares or every transaction it
+// begins. database/sql falls back to Prepare/Begin for a driver connection that
+// implements nothing else, so wrapping driver.Conn sees all of them.
+type stmtLog struct {
+	mu    sync.Mutex
+	stmts []string
+}
+
+func (l *stmtLog) add(q string) {
+	l.mu.Lock()
+	l.stmts = append(l.stmts, q)
+	l.mu.Unlock()
+}
+
+func (l *stmtLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.stmts...)
+}
+
+type recordingConn struct {
+	driver.Conn
+	log *stmtLog
+}
+
+func (c *recordingConn) Prepare(q string) (driver.Stmt, error) {
+	c.log.add(q)
+	return c.Conn.Prepare(q)
+}
+
+func (c *recordingConn) Begin() (driver.Tx, error) { //nolint:staticcheck // the fallback database/sql uses
+	c.log.add("BEGIN")
+	return c.Conn.Begin() //nolint:staticcheck
+}
+
+type recordingConnector struct {
+	drv driver.Driver
+	dsn string
+	log *stmtLog
+}
+
+func (c *recordingConnector) Connect(context.Context) (driver.Conn, error) {
+	conn, err := c.drv.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingConn{Conn: conn, log: c.log}, nil
+}
+
+func (c *recordingConnector) Driver() driver.Driver { return c.drv }
+
+// hm215OpenRecording opens the store the way the server does (mode=ro, same
+// DSN as OpenDB) on a connection that records every statement.
+func hm215OpenRecording(t testing.TB, d *hm215DB) (*PacketStore, *stmtLog) {
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", d.path)
+	probe, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drv := probe.Driver()
+	probe.Close()
+	rec := &stmtLog{}
+	conn := sql.OpenDB(&recordingConnector{drv: drv, dsn: dsn, log: rec})
+	conn.SetMaxOpenConns(4)
+	t.Cleanup(func() { conn.Close() })
+	db := &DB{conn: conn, path: d.path, schemaHealerStop: make(chan struct{})}
+	db.detectSchema()
+	store := NewPacketStore(db, &PacketStoreConfig{})
+	leak202SeedNodes(store, true)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !store.WaitIndexesReady(30 * time.Second) {
+		t.Fatal("background index builds did not finish")
+	}
+	return store, rec
+}
+
+// A probe on a connection that records statements, not only a log line: the
+// migration may run reads, but it must not prepare a single write statement or
+// begin a transaction, whether or not the read-only handle would reject it.
+func TestHashMigrate_IssuesNoWriteStatements_215(t *testing.T) {
+	d := hm215Create(t)
+	d.ballast(t)
+	d.stale(t, 2, 3, 2)
+	s, rec := hm215OpenRecording(t, d)
+	loaded := len(rec.all())
+	if loaded == 0 {
+		t.Fatal("setup: the probe recorded no statements from the load, so it would see nothing of the migration either")
+	}
+	hm215Migrate(s, 2)
+	if len(s.byHash) != 5 {
+		t.Fatalf("setup: the migration did not run: %d transmissions by hash, want 5", len(s.byHash))
+	}
+	for _, q := range rec.all() {
+		head := strings.ToUpper(strings.TrimSpace(q))
+		if strings.HasPrefix(head, "SELECT") || strings.HasPrefix(head, "PRAGMA") || strings.HasPrefix(head, "WITH") {
+			continue
+		}
+		t.Errorf("the server prepared a non-read statement: %q", q)
+	}
 }
 
 // The migration must not try to write: no statement may fail on the mode=ro
