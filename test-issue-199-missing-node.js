@@ -131,7 +131,10 @@ const NOT_FOUND = {
     const v = view(PK, NOT_FOUND);
     assert.ok(v, 'expected a view for an inactive node');
     assert.ok(/No advert heard since/.test(v.html), 'missing "No advert heard since"');
-    assert.ok(/this device is inactive/.test(v.html), 'missing "this device is inactive"');
+    // #208 item 3: the card states the record, not the device: an observer
+    // can be uploading right now while its node row is still inactive.
+    assert.ok(/No advert heard since .+; this node is listed as inactive\./.test(v.html), 'missing "this node is listed as inactive"');
+    assert.ok(!/this device is inactive/.test(v.html), 'must not claim the device is inactive');
     assert.ok(v.html.indexOf(ctx.formatAbsoluteTimestamp('2026-09-24T15:35:00Z')) !== -1, 'last advert date not shown');
     assert.ok(v.html.indexOf('Quiet Repeater') !== -1, 'inactive name missing');
     assert.ok(/repeater/i.test(v.html.replace('Quiet Repeater', '')), 'role missing');
@@ -165,7 +168,7 @@ const NOT_FOUND = {
     assert.ok(v, 'expected a view for an observer-only device');
     assert.ok(/no node record/i.test(v.html), 'missing "no node record" explanation');
     assert.ok(/no advert from it has been heard/i.test(v.html), 'explanation must say why: no advert heard');
-    assert.ok(!/this device is inactive/.test(v.html), 'observer-only must not claim an inactive row');
+    assert.ok(!/inactive/.test(v.html), 'observer-only must not claim an inactive row');
     assert.ok(v.html.indexOf('Quiet Observer') !== -1, 'observer name missing');
     assert.ok(v.html.indexOf('href="#/observers/' + encodeURIComponent(OBS_ID) + '"') !== -1, 'observer link missing');
   });

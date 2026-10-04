@@ -4,8 +4,8 @@
  *
  * Needs test-fixtures/seed-199-inactive-observer.sql applied to the fixture:
  *   - observer 0D3B3F38... has its node row only in inactive_nodes, so the
- *     node page explains "No advert heard since <date>; this device is
- *     inactive" with the inactive row's name and role;
+ *     node page explains "No advert heard since <date>; this node is listed
+ *     as inactive" with the inactive row's name and role;
  *   - observer 424419FD... has no node record at all, so the node page says
  *     so and links back to the observer.
  *
@@ -79,7 +79,8 @@ async function settledNodePage(page) {
     await page.waitForFunction(() => location.hash.indexOf('#/nodes/') === 0);
     const r = await settledNodePage(page);
     assert(r.text.indexOf('Node not found') === -1, 'dead-ended on "Node not found": ' + r.text.slice(0, 200));
-    assert(/No advert heard since .+; this device is inactive/.test(r.text), 'missing inactive explanation: ' + r.text.slice(0, 300));
+    assert(/No advert heard since .+; this node is listed as inactive\./.test(r.text), 'missing inactive explanation: ' + r.text.slice(0, 300));
+    assert(r.text.indexOf('this device is inactive') === -1, 'card claims the device is inactive (#208)');
     assert(r.text.indexOf('Inactive Observer E2E') !== -1, 'inactive name missing');
     assert(/repeater/i.test(r.text), 'inactive role missing');
     assert(r.title.indexOf('Inactive Observer E2E') !== -1, 'title should name the device: ' + r.title);
