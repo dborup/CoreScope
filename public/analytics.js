@@ -348,12 +348,16 @@
   var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene'], dflt: 'overview' };
   var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
   var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  // #208 — Hash Stats' multi-byte adopters filter. URL only (no storageKey):
+  // it had no stored state before, so a plain visit still opens on All.
+  var HASHSTATS_MB_FILTER = { param: 'mbf', allowed: ['all', 'confirmed', 'suspected', 'unknown'], dflt: 'all' };
 
   // The hash keys each tab owns; _updateAnalyticsUrl drops them when
   // another tab is selected.
   var TAB_URL_PARAMS = {
     'rf-health': ['range', 'observer', 'from', 'to'],
     collisions: ['bytes', 'section'],
+    hashsizes: [HASHSTATS_MB_FILTER.param],
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
     wardriving: [WARDRIVING_WINDOW.param],
   };
@@ -373,10 +377,13 @@
 
   // Stores the values and writes them to the hash in one go. A default is
   // left out, so a tab in its default view keeps the URL it had before #205.
+  // A spec without a storageKey lives in the URL only.
   function _writeViewParams(specs, values) {
     var updates = {};
     specs.forEach(function (spec, i) {
-      try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+      if (spec.storageKey) {
+        try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+      }
       updates[spec.param] = values[i] === spec.dflt ? '' : values[i];
     });
     if (!window.URLState) return;
@@ -397,7 +404,7 @@
     var hash = typeof location !== 'undefined' ? String(location.hash || '') : '';
     var params = new URLSearchParams(hash.split('?')[1] || '');
     var values = specs.map(function (spec) {
-      return resolveViewParam(params.get(spec.param), _sessionGet(spec.storageKey), spec.allowed, spec.dflt);
+      return resolveViewParam(params.get(spec.param), spec.storageKey ? _sessionGet(spec.storageKey) : null, spec.allowed, spec.dflt);
     });
     _writeViewParams(specs, values);
     return values;
@@ -1490,6 +1497,7 @@
 
   // ===================== HASH SIZES (original) =====================
   function renderHashSizes(el, data) {
+    const mbFilter = restoreViewParams([HASHSTATS_MB_FILTER])[0];   // ?mbf= (#208)
     const d = data.distribution;
     const total = data.total;
     const pct = (n) => total ? (n / total * 100).toFixed(1) : '0';
@@ -1539,7 +1547,7 @@
         </div>
       </div>
 
-      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [])}
+      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [], mbFilter)}
 
       <div class="analytics-row">
         <div class="analytics-card flex-1">
@@ -1563,7 +1571,10 @@
     `;
   }
 
-  function renderMultiByteAdopters(nodes, caps) {
+  // filter: the initially selected filter (All when missing or unknown).
+  function renderMultiByteAdopters(nodes, caps, filter) {
+    var initialFilter = HASHSTATS_MB_FILTER.allowed.indexOf(filter) >= 0 ? filter : HASHSTATS_MB_FILTER.dflt;
+    var mbBtnClass = function (f) { return f === initialFilter ? 'tab-btn active' : 'tab-btn'; };
     // Merge capability status into adopter nodes
     var capByPubkey = {};
     (caps || []).forEach(function(c) { capByPubkey[c.pubkey] = c; });
@@ -1628,20 +1639,20 @@
           '<strong>Unknown</strong> = no multi-byte evidence yet.</p>' +
         '</div>' +
         '<div style="display:flex;gap:4px;flex-wrap:wrap" id="mbCapFilters">' +
-          '<button class="tab-btn active" data-mb-filter="all">All (' + rows.length + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
+          '<button class="' + mbBtnClass('all') + '" data-mb-filter="all">All (' + rows.length + ')</button>' +
+          '<button class="' + mbBtnClass('confirmed') + '" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
+          '<button class="' + mbBtnClass('suspected') + '" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
+          '<button class="' + mbBtnClass('unknown') + '" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
         '</div>' +
       '</div>' +
-      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, 'all') + '</div>' +
+      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, initialFilter) + '</div>' +
     '</div></div>';
 
     // Use setTimeout for event delegation on the stable section container
     setTimeout(function() {
       var section = document.getElementById('mbAdoptersSection');
       if (!section) return;
-      var currentFilter = 'all';
+      var currentFilter = initialFilter;
 
       section.addEventListener('click', function handler(e) {
         var btn = e.target.closest('[data-mb-filter]');
@@ -1653,6 +1664,7 @@
           // Replace only the table content, not the whole section
           var wrap = section.querySelector('#mbAdoptersTableWrap');
           if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter);
+          setViewParam(HASHSTATS_MB_FILTER, currentFilter);
           return;
         }
         var th = e.target.closest('[data-sort]');

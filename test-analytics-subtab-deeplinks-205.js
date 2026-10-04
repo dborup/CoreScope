@@ -548,10 +548,13 @@ function pageEnv(opts) {
   // stored state before, so a plain visit still opens on All.
   console.log('\n=== #208: Hash Stats multi-byte adopters filter (mbf=) ===');
 
-  const ADOPTERS = REAL.hashData.multiByteNodes.map((n) => n.name);
-  await test('precondition: the fixture has confirmed multi-byte adopters only', async () => {
+  // Each adopter's status as the card derives it: its capability row by
+  // pubkey, else unknown.
+  const capStatus = {};
+  REAL.hashData.multiByteCapability.forEach((c) => { capStatus[c.pubkey] = c.status; });
+  const ADOPTERS = REAL.hashData.multiByteNodes.map((n) => ({ name: n.name, status: capStatus[n.pubkey] || 'unknown' }));
+  await test('precondition: the fixture has multi-byte adopters', async () => {
     assert.ok(ADOPTERS.length > 0, 'no multiByteNodes in the fixture');
-    assert.ok(REAL.hashData.multiByteCapability.every((c) => c.status === 'confirmed'), 'fixture statuses changed');
   });
 
   for (const f of ['all', 'confirmed', 'suspected', 'unknown']) {
@@ -560,9 +563,12 @@ function pageEnv(opts) {
       await env.mount('#/analytics?tab=hashsizes&mbf=' + f);
       assert.strictEqual(env.initError(), null, 'init() threw');
       assert.deepStrictEqual(env.activeMbFilters(), [f], 'active filter button');
-      const shown = f === 'all' || f === 'confirmed';
-      for (const name of ADOPTERS) assert.strictEqual(env.content().indexOf('<strong>' + name + '</strong>') >= 0, shown, name + (shown ? ' missing' : ' shown'));
-      assert.strictEqual(env.content().indexOf('No adopters match this filter.') >= 0, !shown, 'empty-filter message');
+      for (const a of ADOPTERS) {
+        const shown = f === 'all' || a.status === f;
+        assert.strictEqual(env.content().indexOf('<strong>' + a.name + '</strong>') >= 0, shown, a.name + ' (' + a.status + ')' + (shown ? ' missing' : ' shown'));
+      }
+      const none = !ADOPTERS.some((a) => f === 'all' || a.status === f);
+      assert.strictEqual(env.content().indexOf('No adopters match this filter.') >= 0, none, 'empty-filter message');
       assert.strictEqual(env.hash(), f === 'all' ? '#/analytics?tab=hashsizes' : '#/analytics?tab=hashsizes&mbf=' + f, 'URL not canonical');
     });
   }
