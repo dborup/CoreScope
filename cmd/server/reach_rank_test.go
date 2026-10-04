@@ -953,6 +953,25 @@ func TestReachRank_ExpiredSnapshotAlwaysRefreshes(t *testing.T) {
 			t.Fatalf("round %d: expired snapshot never refreshed", round)
 		}
 	}
+	awaitDegreeRefresh(t, srv)
+}
+
+// awaitDegreeRefresh waits for the singleflight snapshot refresh a test may
+// have left running (#224). A caller that read the expired snapshot just
+// before the refresh published can register one more refresh before the
+// test's callers return. That refresh runs after the test, finds the
+// snapshot cleared by resetReachState's cleanup, and calls
+// onDegreeSnapshotLoad, unsynchronised with the next test that swaps the
+// hook. Joining the key here waits for it (or, with none left, runs one that
+// returns the fresh snapshot without a load); the receive orders its end
+// before the test returns.
+func awaitDegreeRefresh(t *testing.T, srv *Server) {
+	t.Helper()
+	select {
+	case <-srv.refreshDegreeSnapshot(context.Background()):
+	case <-time.After(10 * time.Second):
+		t.Fatal("snapshot refresh still running 10s after the test")
+	}
 }
 
 // A caller that queued behind a failing rebuild must not start another load
