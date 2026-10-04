@@ -170,3 +170,57 @@ func TestStatsWriteLogAtMostOncePerInterval_160(t *testing.T) {
 		t.Fatalf("second episode lines %q", lines)
 	}
 }
+
+// writeUnopenableStatsTmp plants a regular tmp the ingestor cannot open for
+// writing (0400), the way a 0600 tmp of another service user looks to a
+// non-root ingestor: open(2) fails with EACCES before any owner check.
+func writeUnopenableStatsTmp(t *testing.T) (path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix file owners")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a 0400 file for writing")
+	}
+	path = filepath.Join(t.TempDir(), "stats.json")
+	if err := os.WriteFile(path+".tmp", nil, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// PR #216 review, F1: the usual #160 case is a foreign 0600 tmp and a non-root
+// ingestor, where open itself fails with EACCES. The hint must be there too,
+// with the owner the Lstat finds.
+func TestWriteStatsAtomicUnopenableForeignTmpNamesTheFix_160(t *testing.T) {
+	path := writeUnopenableStatsTmp(t)
+	old := statsFileEUID
+	t.Cleanup(func() { statsFileEUID = old })
+	statsFileEUID = func() int { return os.Geteuid() + 1 } // the tmp is someone else's
+
+	err := writeStatsAtomic(path, []byte(`{}`))
+	if err == nil {
+		t.Fatal("unopenable tmp accepted")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("error %q does not wrap the permission error", err)
+	}
+	for _, want := range []string{"or fix its owner", fmt.Sprintf("uid %d", os.Geteuid()), fmt.Sprintf("uid %d", os.Geteuid()+1)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
+// An unopenable tmp of the ingestor's own user is a mode problem, not an
+// owner one; the hint says so.
+func TestWriteStatsAtomicUnopenableOwnTmpNamesTheFix_160(t *testing.T) {
+	path := writeUnopenableStatsTmp(t)
+	err := writeStatsAtomic(path, []byte(`{}`))
+	if err == nil {
+		t.Fatal("unopenable tmp accepted")
+	}
+	if !strings.Contains(err.Error(), "or fix its permissions") || strings.Contains(err.Error(), "owner") {
+		t.Errorf("error %q: want the permissions hint, not the owner one", err)
+	}
+}
