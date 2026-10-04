@@ -10,6 +10,7 @@
  * - a hostile ?sub= falls back to Overview without a page error;
  * - the default view keeps the URL it had before (#/analytics?tab=scopes),
  *   and switching to another tab drops the keys;
+ * - Back/Forward to an entry in its default view shows that view (#208);
  * - Hash Stats' multi-byte adopters filter is deep-linked as ?mbf= (#208).
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-205-analytics-subtab-deeplinks-e2e.js
@@ -58,6 +59,13 @@ async function waitScopes(page, sub) {
 
 async function expectScopes(page, sub, win) {
   await waitScopes(page, sub);
+  // The window buttons render with the panel's data, after the sub-tab.
+  if (win) {
+    await page.waitForFunction((w) => {
+      const a = Array.from(document.querySelectorAll('[id^="scopes-panel-"] [data-win].active')).filter((b) => b.offsetParent !== null);
+      return a.length === 1 && a[0].dataset.win === w;
+    }, win, { timeout: 8000 }).catch(() => {});
+  }
   const v = await scopesView(page);
   assert(JSON.stringify(v.active) === JSON.stringify([sub]), 'active sub-tab ' + JSON.stringify(v.active));
   assert(JSON.stringify(v.visible) === JSON.stringify([sub]), 'visible panel ' + JSON.stringify(v.visible));
@@ -191,6 +199,56 @@ async function coldLoad(page, path) {
     await page.click('[data-wdwin="1h"]');
     await page.waitForSelector('[data-wdwin="1h"].active');
     assert(await hash(page) === '#/analytics?tab=wardriving&wdwin=1h', 'after 1h: ' + await hash(page));
+  });
+
+  // #208 item 5: Back/Forward to an entry whose view was the default (no
+  // key in its URL) shows that default, not the value a later entry stored.
+  await step('Back to a default-view Scopes entry shows Overview, Forward the later Regions', async () => {
+    const ctx2 = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
+    await ctx2.addInitScript(() => {
+      window.addEventListener('theme-refresh', () => { window.__themeRefreshed = true; }, { once: true });
+    });
+    const p2 = await ctx2.newPage();
+    p2.on('pageerror', (e) => { pageErrors.push(e.message); console.error('[pageerror]', e.message); });
+    try {
+      await p2.goto(BASE + '/#/analytics?tab=scopes', { waitUntil: 'load' });
+      await p2.waitForFunction(() => window.__themeRefreshed, null, { timeout: 8000 }).catch(() => {});
+      await expectScopes(p2, 'overview', '24h');
+      await p2.evaluate(() => { location.hash = '#/analytics?tab=scopes&sub=regions&swin=7d'; });
+      await expectScopes(p2, 'regions');
+      assert(await p2.evaluate(() => sessionStorage.getItem('scopes_subtab')) === 'regions', 'precondition: Regions stored');
+      await p2.goBack();
+      await p2.waitForFunction(() => location.hash.indexOf('sub=regions') < 0, null, { timeout: 5000 }).catch(() => {});
+      await expectScopes(p2, 'overview', '24h');
+      assert(await hash(p2) === '#/analytics?tab=scopes', 'after Back: ' + await hash(p2));
+      await p2.goForward();
+      await expectScopes(p2, 'regions');   // Regions has no window buttons
+      assert(await hash(p2) === '#/analytics?tab=scopes&sub=regions&swin=7d', 'after Forward: ' + await hash(p2));
+      // A new entry without sub= still opens the stored sub-tab.
+      await p2.evaluate(() => { location.hash = '#/nodes'; });
+      await p2.waitForFunction(() => !document.getElementById('scopesSubtabs'));
+      await p2.evaluate(() => { location.hash = '#/analytics?tab=scopes'; });
+      await expectScopes(p2, 'regions');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  await step('Back to a default-view Wardriving entry shows 24h', async () => {
+    const ctx2 = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
+    const p2 = await ctx2.newPage();
+    try {
+      await p2.goto(BASE + '/#/analytics?tab=wardriving', { waitUntil: 'load' });
+      await p2.waitForSelector('[data-wdwin="24h"].active');
+      await p2.evaluate(() => { location.hash = '#/analytics?tab=wardriving&wdwin=1h'; });
+      await p2.waitForSelector('[data-wdwin="1h"].active');
+      await p2.goBack();
+      await p2.waitForSelector('[data-wdwin="24h"].active', { timeout: 8000 })
+        .catch(async () => { throw new Error('24h not active after Back; hash ' + await hash(p2)); });
+      assert(await hash(p2) === '#/analytics?tab=wardriving', 'after Back: ' + await hash(p2));
+    } finally {
+      await ctx2.close();
+    }
   });
 
   // #208 item 6: Hash Stats' multi-byte adopters filter as mbf=.
