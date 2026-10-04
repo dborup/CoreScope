@@ -149,6 +149,7 @@ const NOT_FOUND = {
     const v = view(PK, { error: 'Not found', observer: NOT_FOUND.observer });
     assert.ok(v, 'expected a view for an observer-only device');
     assert.ok(/no node record/i.test(v.html), 'missing "no node record" explanation');
+    assert.ok(/no advert from it has been heard/i.test(v.html), 'explanation must say why: no advert heard');
     assert.ok(!/this device is inactive/.test(v.html), 'observer-only must not claim an inactive row');
     assert.ok(v.html.indexOf('Quiet Observer') !== -1, 'observer name missing');
     assert.ok(v.html.indexOf('href="#/observers/' + encodeURIComponent(OBS_ID) + '"') !== -1, 'observer link missing');

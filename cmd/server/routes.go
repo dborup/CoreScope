@@ -2038,7 +2038,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if node == nil {
-		writeError(w, 404, "Not found")
+		s.writeNodeNotFound(w, r, pubkey)
 		return
 	}
 	// Hide the node when its name matches an operator-configured prefix
