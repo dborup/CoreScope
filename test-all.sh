@@ -125,6 +125,7 @@ run test-node-analytics-hop-chart.js
 run test-analytics-hop-depth-ui.js
 run test-channels-ping-bot-reply.js
 run test-channels-observed-path-hash-size.js
+run test-channels-client-state-152.js
 run test-packet-path-map.js
 run test-area-nodes-map.js
 run test-ping-scores.js
