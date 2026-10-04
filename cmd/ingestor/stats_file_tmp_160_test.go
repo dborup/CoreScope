@@ -162,12 +162,54 @@ func TestStatsWriteLogAtMostOncePerInterval_160(t *testing.T) {
 		t.Fatalf("recovery lines %q", lines)
 	}
 
-	// A new failure after recovery is logged at once, counted afresh.
+	// A new failure inside the interval of the last failure line (120 s)
+	// is counted, not logged, and its recovery is not logged either; the
+	// next failure line, an interval after the last one, reports it.
 	lines = nil
 	l.failed("x", errTmp, t0.Add(151*time.Second))
 	l.succeeded("x")
-	if len(lines) != 2 || !strings.HasSuffix(lines[1], "ok again after 1 failed writes") {
-		t.Fatalf("second episode lines %q", lines)
+	if len(lines) != 0 {
+		t.Fatalf("episode inside the interval logged %q", lines)
+	}
+	l.failed("x", errTmp, t0.Add(181*time.Second))
+	l.succeeded("x")
+	want = []string{
+		"[stats-file] write x: " + errTmp.Error() + " (1 more failed writes since the last report)",
+		"[stats-file] write x: ok again after 1 failed writes",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("second episode lines:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// PR #216 review, F2: a failure that alternates with successes (flapping)
+// is rate-limited too. At 1 Hz, 120 s gave 120 lines (a failure line and an
+// "ok again" line every time); now the failure line and the recovery line
+// each come at most once per interval, and the failures in between are
+// counted.
+func TestStatsWriteLogFlappingAtMostOncePerInterval_160(t *testing.T) {
+	var lines []string
+	l := statsWriteLog{every: time.Minute, logf: func(f string, a ...any) {
+		lines = append(lines, fmt.Sprintf(f, a...))
+	}}
+	errTmp := errors.New("x.tmp: broken")
+	t0 := time.Unix(1_700_000_000, 0)
+	for s := 0; s < 120; s++ {
+		at := t0.Add(time.Duration(s) * time.Second)
+		if s%2 == 0 {
+			l.failed("x", errTmp, at)
+		} else {
+			l.succeeded("x")
+		}
+	}
+	want := []string{
+		"[stats-file] write x: " + errTmp.Error(),
+		"[stats-file] write x: ok again after 1 failed writes",
+		"[stats-file] write x: " + errTmp.Error() + " (29 more failed writes since the last report)",
+		"[stats-file] write x: ok again after 1 failed writes",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("%d lines:\n%s\nwant:\n%s", len(lines), strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
 }
 
