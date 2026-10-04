@@ -205,6 +205,7 @@ run test-embed-mode-1369.js
 run test-geofilter-draft.js
 run test-hash-color.js
 run test-issue-1166-first-seen-column.js
+run test-issue-199-missing-node.js
 run test-issue-1189-composed-cell.js
 run test-issue-1189-live-iata-badge.js
 run test-issue-1415-packets-layout.js

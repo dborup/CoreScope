@@ -696,6 +696,51 @@
     return nodeData;
   }
 
+  /**
+   * #199: the node page for a key with no nodes row. The 404 body of
+   * /api/nodes/{pubkey} carries the key's inactive_nodes row (retired after
+   * retention.nodeDays without an advert) and/or its observer row. Returns
+   * { title, html } explaining that state, or null when the instance knows
+   * nothing about the key (the generic "Node not found" then stays).
+   */
+  function missingNodeView(pubkey, notFound) {
+    const inactive = notFound && notFound.inactive_node;
+    const observer = notFound && notFound.observer;
+    if (!inactive && !observer) return null;
+    const name = (inactive && inactive.name) || (observer && observer.name) || '';
+    const when = (iso) => '<span title="' + escapeHtml(timeAgo(iso)) + '">' + escapeHtml(formatAbsoluteTimestamp(iso)) + '</span>';
+    const rows = [];
+    let headline, explanation;
+    if (inactive) {
+      headline = 'Inactive node';
+      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this device is inactive. ' +
+        'Nodes without an advert inside the retention window are moved off the node list until they advertise again.';
+      rows.push(['Name', escapeHtml(inactive.name || '—')], ['Role', escapeHtml(inactive.role || '—')], ['Last advert', when(inactive.last_seen)]);
+    } else {
+      headline = 'No node record';
+      explanation = 'This device uploads as an observer, but no advert from it has been heard here, so it has no node record.';
+      rows.push(['Name', escapeHtml(observer.name || '—')]);
+    }
+    if (observer) rows.push(['Last upload as observer', when(observer.last_seen)]);
+    const observerLink = observer
+      ? '<a href="#/observers/' + encodeURIComponent(observer.id) + '" class="btn-primary" style="text-decoration:none;padding:6px 14px">View observer →</a>'
+      : '';
+    const html =
+      '<div class="node-full-card" style="padding:24px;margin:16px auto;max-width:560px">' +
+        '<div style="font-size:18px;font-weight:600;margin-bottom:8px;text-align:center">' + headline + '</div>' +
+        '<div class="mono" style="font-size:11px;color:var(--text-muted);word-break:break-all;margin-bottom:12px;text-align:center">' + escapeHtml(pubkey || '') + '</div>' +
+        '<p style="color:var(--text-muted);margin:0 0 12px">' + explanation + '</p>' +
+        '<dl style="margin:0 0 16px;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
+          rows.map(r => '<dt>' + r[0] + '</dt><dd style="margin:0">' + r[1] + '</dd>').join('') +
+        '</dl>' +
+        '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">' +
+          observerLink +
+          '<a href="#/nodes" class="btn-primary" style="text-decoration:none;padding:6px 14px">← Back to Nodes</a>' +
+        '</div>' +
+      '</div>';
+    return { title: name || (pubkey || '').slice(0, 12) + '…', html };
+  }
+
   async function loadFullNode(pubkey) {
     const body = document.getElementById('nodeFullBody');
     const viewSeq = ++detailViewSeq;
@@ -1131,6 +1176,13 @@
       const msg = (e && e.message) || '';
       const is404 = /\b404\b/.test(msg) || /not\s*found/i.test(msg);
       const titleEl = document.querySelector('.node-full-title');
+      const missing = is404 ? missingNodeView(pubkey, e && e.body) : null;
+      if (missing) {
+        if (titleEl) titleEl.textContent = missing.title;
+        removeDetailMap();
+        body.innerHTML = missing.html;
+        return;
+      }
       if (titleEl) {
         titleEl.textContent = is404
           ? 'Node not found — ' + (pubkey || '').slice(0, 12) + '…'
@@ -2054,6 +2106,7 @@
 
   // Test hooks
   window._nodesIsAdvertMessage = isAdvertMessage;
+  window._nodesMissingNodeView = missingNodeView;
   window._nodesGetAllNodes = function() { return _allNodes; };
   window._nodesSetAllNodes = function(n) { _allNodes = n; };
   window._nodesGetFiltered = function() { return nodes; };

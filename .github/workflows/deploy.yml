@@ -369,6 +369,11 @@ jobs:
         # (#89). See the file header for the rows and expected classes.
         run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-2073-route-adverts.sql
 
+      - name: Seed an inactive observer node for #199 E2E
+        # Also after the migration: the fixture has no inactive_nodes table
+        # until corescope-migrate creates it.
+        run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-199-inactive-observer.sql
+
       - name: Start Go server with fixture DB
         run: |
           fuser -k 13581/tcp 2>/dev/null || true
@@ -439,6 +444,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-live-multibyte-only-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-125-live-toggles-early-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1150-404-state-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-199-inactive-observer-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1146-path-link-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-issue-1705-subpath-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1147-section-order-e2e.js 2>&1 | tee -a e2e-output.txt
