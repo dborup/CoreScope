@@ -128,7 +128,8 @@ func TestBuildForceReconnectFn_SkipsDisconnectWhenAlreadyRetrying(t *testing.T) 
 // class this whole bug hinged on — Connect() called while paho's status is
 // transitionally "disconnecting"). The old code discarded the returned token
 // entirely; the fix must surface it via log output instead of silently
-// dropping it.
+// dropping it. IsConnected()==false: no reconnect is pending, so it is a
+// genuine failure (#102 logs it as info only while paho is retrying).
 func TestBuildForceReconnectFn_LogsConnectError(t *testing.T) {
 	c := &fakeClient{isConnectionOpen: false, connectErr: errors.New("status can only transition to connecting from disconnected")}
 	fn := buildForceReconnectFn(c, "erroring-source")
