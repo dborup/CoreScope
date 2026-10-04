@@ -17,6 +17,9 @@
  *   open closes the modal, and Forward onto that history entry (which still
  *   says viewPath=1) does not reopen it; the URL then drops viewPath.
  *
+ * - Item 6 (390 px): Escape closes the mobile detail sheet; with the View
+ *   Path modal open over it, the first Escape closes only the modal.
+ *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js
  */
 'use strict';
@@ -213,6 +216,35 @@ function detailPaneOpen(page) {
       await waitFor(page, () => !window.SlideOver.isOpen(), 'the SlideOver is still open after a click on ×');
       const h = await page.evaluate(() => location.hash);
       assert(h.startsWith('#/packets') && !h.startsWith('#/packets/'), 'URL after closing the SlideOver: ' + h);
+    });
+    await context.close();
+  }
+
+  // ---- Item 6: Escape closes the mobile detail sheet (≤640 px) ----
+  {
+    const { context, page } = await newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    const sheetOpen = () => page.evaluate(() => {
+      const s = document.getElementById('mobileDetailSheet');
+      return !!s && s.classList.contains('open') && getComputedStyle(s).display !== 'none';
+    });
+    await step('mobile (390): Escape closes the packet detail sheet', async () => {
+      await fresh(page, DETAIL);
+      await page.waitForSelector('#mobileDetailSheet.open [data-view-path]', { timeout: 15000 });
+      assert(await sheetOpen(), 'detail sheet not shown');
+      await page.keyboard.press('Escape');
+      await waitFor(page, () => !document.getElementById('mobileDetailSheet').classList.contains('open'), 'Escape did not close the detail sheet');
+    });
+    await step('mobile (390): with View Path open over the sheet, the first Escape closes only the modal, the next the sheet', async () => {
+      await fresh(page, DETAIL);
+      await page.waitForSelector('#mobileDetailSheet.open [data-view-path]', { timeout: 15000 });
+      await page.click('#mobileDetailSheet [data-view-path]');
+      await page.waitForSelector('#packetPathModal');
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('#packetPathModal', { state: 'detached', timeout: 5000 })
+        .catch(() => { throw new Error('the first Escape did not close the modal'); });
+      assert(await sheetOpen(), 'the first Escape also closed the detail sheet');
+      await page.keyboard.press('Escape');
+      await waitFor(page, () => !document.getElementById('mobileDetailSheet').classList.contains('open'), 'the second Escape did not close the detail sheet');
     });
     await context.close();
   }

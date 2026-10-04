@@ -938,6 +938,10 @@
   }
 
   function closeDetailPanel() {
+    // The ≤640 px bottom sheet as well: Escape used to reset only the
+    // desktop pane and never closed the sheet (#180).
+    var sheet = document.getElementById('mobileDetailSheet');
+    if (sheet) sheet.classList.remove('open');
     var panel = document.getElementById('pktRight');
     if (panel) {
       panel.classList.add('empty');

@@ -3,6 +3,8 @@
  * closeDetailPanel() in public/packets.js closes the packet detail. Clear
  * Filters calls it (#180 item 2: Clear leaves the detail), so with no row
  * selected it must not re-render the rows: Clear reloads them itself.
+ * Escape calls it too, and at ≤640 px it must close the mobile bottom sheet
+ * (#180 item 6: it only reset the desktop pane).
  *
  * Runs the REAL closeDetailPanel() from public/packets.js inside a
  * vm.createContext sandbox with a small fake DOM.
@@ -48,10 +50,12 @@ function makeEl(id, classes) {
   };
 }
 
-// opts.pane: the desktop pane is open (not .empty); opts.selectedId.
+// opts.pane: the desktop pane is open (not .empty); opts.selectedId;
+// opts.sheet: the mobile sheet exists ('open' or 'closed').
 function makeSandbox(opts) {
   opts = opts || {};
   const els = { pktRight: makeEl('pktRight', opts.pane ? [] : ['empty']) };
+  if (opts.sheet) els.mobileDetailSheet = makeEl('mobileDetailSheet', ['mobile-detail-sheet'].concat(opts.sheet === 'open' ? ['open'] : []));
   const ctx = {
     document: { getElementById: (id) => els[id] || null },
     PANEL_CLOSE_HTML: '<button class="panel-close-btn"></button>',
@@ -81,6 +85,20 @@ test('no row selected (e.g. Clear Filters on the list): no extra render', () => 
   const s = makeSandbox({ pane: false, selectedId: null });
   s.close();
   assert.strictEqual(s.ctx.__renders, 0, 'rows re-rendered with nothing selected');
+});
+
+test('≤640 px: closes the open mobile detail sheet and clears the selection (#180 item 6)', () => {
+  const s = makeSandbox({ pane: false, selectedId: 42, sheet: 'open' });
+  s.close();
+  assert(!s.els.mobileDetailSheet.classList.contains('open'), 'mobile sheet still open');
+  assert.strictEqual(s.selectedId(), null);
+  assert.strictEqual(s.ctx.__renders, 1, 'selection highlight not re-rendered');
+});
+
+test('no mobile sheet in the DOM (desktop, or never opened): no error', () => {
+  const s = makeSandbox({ pane: true, selectedId: 1 });
+  s.close();
+  assert(s.els.pktRight.classList.contains('empty'));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
