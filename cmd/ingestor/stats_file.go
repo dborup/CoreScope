@@ -239,23 +239,28 @@ func errStatsTmpNotRegular(tmp string, mode os.FileMode) error {
 // again. The writer ticks every second (#160).
 const statsWriteErrLogEvery = time.Minute
 
-// statsWriteLog rate-limits the writer's failure log (#160): the first
-// failure is logged at once, a persisting one at most once per `every`
-// with the count of failures in between, and the first success after a
-// failure once. Successes otherwise log nothing. Owned by the writer
-// goroutine; not safe for concurrent use.
+// statsWriteLog rate-limits the writer's failure log (#160): a failure
+// line is logged at most once per `every`, the first one at once, with the
+// count of failures since the last failure line. The first success after a
+// logged failure line is logged once ("ok again"); a failure episode that
+// fell inside the interval, and so was not logged, is not either, which
+// keeps a flapping failure to one failure line and one recovery line per
+// interval. Successes otherwise log nothing. Owned by the writer goroutine;
+// not safe for concurrent use.
 type statsWriteLog struct {
 	every      time.Duration
 	logf       func(format string, args ...any)
-	failing    bool
-	lastLog    time.Time
-	failures   int64 // since the last success
-	suppressed int64 // since the last failure line
+	failing    bool      // a failure since the last success
+	reported   bool      // and a failure line was logged for it
+	lastLog    time.Time // the last failure line
+	failures   int64     // since the last success
+	suppressed int64     // not reported since the last failure or recovery line
 }
 
 func (l *statsWriteLog) failed(path string, err error, now time.Time) {
 	l.failures++
-	if l.failing && now.Sub(l.lastLog) < l.every {
+	l.failing = true
+	if !l.lastLog.IsZero() && now.Sub(l.lastLog) < l.every {
 		l.suppressed++
 		return
 	}
@@ -264,15 +269,19 @@ func (l *statsWriteLog) failed(path string, err error, now time.Time) {
 	} else {
 		l.logf("[stats-file] write %s: %v", path, err)
 	}
-	l.failing, l.lastLog, l.suppressed = true, now, 0
+	l.reported, l.lastLog, l.suppressed = true, now, 0
 }
 
 func (l *statsWriteLog) succeeded(path string) {
 	if !l.failing {
 		return
 	}
-	l.logf("[stats-file] write %s: ok again after %d failed writes", path, l.failures)
-	l.failing, l.failures, l.suppressed = false, 0, 0
+	if l.reported {
+		// The recovery line reports the whole episode.
+		l.logf("[stats-file] write %s: ok again after %d failed writes", path, l.failures)
+		l.suppressed = 0
+	}
+	l.failing, l.reported, l.failures = false, false, 0
 }
 
 // procIOSnapshot is the raw counter snapshot used to compute per-second rates
