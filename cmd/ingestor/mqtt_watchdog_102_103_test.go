@@ -20,7 +20,10 @@ import (
 
 const (
 	connectFailedLine102 = "WATCHDOG force-reconnect Connect() failed"
-	retryInProgress102   = "retry already in progress"
+	retryPending102      = "paho reports a retry pending"
+	// retryPendingErr102 is the start of the retry-pending line: the line keeps
+	// paho's error, because IsConnected() is a hint and not a guarantee.
+	retryPendingErr102 = "WATCHDOG force-reconnect: Connect() returned " + pahoErrStatusMustBeDisconnected + "; " + retryPending102
 )
 
 // newNeverConnectedTestClient builds the client as main does, against a
@@ -44,8 +47,8 @@ func newNeverConnectedTestClient(t *testing.T, b *forceReconnectTestBroker, tag 
 // #102: five triggers during the initial ConnectRetry loop (the #29 review
 // measured 5/5). Connect() returns paho's errStatusMustBeDisconnected each
 // time; paho keeps retrying, so this is not a failure. The client must not
-// log "Connect() failed", must log that a retry is in progress, and paho's
-// loop must keep going and connect once the broker is up.
+// log "Connect() failed", must log paho's error with the retry it reports
+// pending, and paho's loop must keep going and connect once the broker is up.
 func TestForceReconnect_RealPaho_InitialRetryLoopIsNotAConnectFailure_102(t *testing.T) {
 	b := newForceReconnectTestBroker(t)
 	logs := captureLog118(t)
@@ -62,8 +65,8 @@ func TestForceReconnect_RealPaho_InitialRetryLoopIsNotAConnectFailure_102(t *tes
 	if n := strings.Count(logs.String(), connectFailedLine102); n != 0 {
 		t.Errorf("%d %q lines while paho was in its initial retry loop:\n%s", n, connectFailedLine102, logs)
 	}
-	if n := strings.Count(logs.String(), retryInProgress102); n != 5 {
-		t.Errorf("%d %q lines, want 5:\n%s", n, retryInProgress102, logs)
+	if n := strings.Count(logs.String(), retryPendingErr102); n != 5 {
+		t.Errorf("%d %q lines, want 5:\n%s", n, retryPendingErr102, logs)
 	}
 
 	n, _ := b.counts()
@@ -93,8 +96,61 @@ func TestForceReconnect_RealPaho_ConnectErrorWhileDisconnectingIsLogged_102(t *t
 	if n := strings.Count(logs.String(), connectFailedLine102); n != 1 {
 		t.Errorf("%d %q lines, want 1:\n%s", n, connectFailedLine102, logs)
 	}
-	if n := strings.Count(logs.String(), retryInProgress102); n != 0 {
-		t.Errorf("a Connect() error with no retry pending was logged as %q:\n%s", retryInProgress102, logs)
+	if n := strings.Count(logs.String(), retryPending102); n != 0 {
+		t.Errorf("a Connect() error with no retry pending was logged as %q:\n%s", retryPending102, logs)
+	}
+}
+
+// #102 review F1: IsConnected() in status disconnecting reflects paho's
+// willReconnect, which a Disconnect() leaves set. Here paho is reconnecting
+// after a connection loss (willReconnect=true) when Disconnect() runs; status
+// is then disconnecting, IsConnected() stays true, and Connect() returns
+// errStatusMustBeDisconnected, yet no retry follows: paho ends disconnected.
+// So the retry-pending line must keep paho's error and must not claim more.
+func TestForceReconnect_RealPaho_DisconnectWhileReconnectingKeepsConnectError_102(t *testing.T) {
+	b := newForceReconnectTestBroker(t)
+	logs := captureLog118(t)
+	// A 3s cap keeps paho's sleep between attempts (1s, then 2s) far above
+	// the 5ms polling below, so the disconnecting window cannot be missed.
+	opts := buildMQTTOpts(MQTTSource{Broker: b.url(), Name: "force-reconnect-sticky"}).
+		SetConnectTimeout(500 * time.Millisecond).
+		SetWriteTimeout(500 * time.Millisecond).
+		SetMaxReconnectInterval(3 * time.Second)
+	client := mqtt.NewClient(opts)
+	client.Connect()
+	t.Cleanup(func() { client.Disconnect(0) })
+	if !pollUntil(forceReconnectTestDeadline, client.IsConnectionOpen) {
+		t.Fatal("test setup: client never connected to the test broker")
+	}
+
+	// Connection lost: paho's AutoReconnect loop starts (willReconnect=true)
+	// and sleeps after its first failed attempt.
+	n, _ := b.counts()
+	b.goDown()
+	waitForConnects(t, b, n, "test setup: paho's reconnect loop")
+
+	// Disconnect() moves reconnecting to disconnecting and waits for the
+	// loop's sleep to end; willReconnect stays true. Connect() is a no-op
+	// probe here: a success token while reconnecting, the status error once
+	// disconnecting.
+	client.Disconnect(0)
+	if !pollUntil(time.Second, func() bool { return client.Connect().Error() != nil }) {
+		t.Fatal("test setup: paho never reached status disconnecting")
+	}
+	if !client.IsConnected() || client.IsConnectionOpen() {
+		t.Fatalf("test setup: IsConnected=%v IsConnectionOpen=%v, want true/false (disconnecting, willReconnect set)", client.IsConnected(), client.IsConnectionOpen())
+	}
+
+	buildForceReconnectFn(client, "force-reconnect-sticky")()
+	if n := strings.Count(logs.String(), retryPendingErr102); n != 1 {
+		t.Errorf("%d %q lines, want 1 (the line must keep paho's error):\n%s", n, retryPendingErr102, logs)
+	}
+
+	// The reported retry never comes: with the broker back up, paho still
+	// ends disconnected rather than connected.
+	b.goUp()
+	if !pollUntil(forceReconnectTestDeadline, func() bool { return !client.IsConnected() }) {
+		t.Fatal("paho did not settle to disconnected after Disconnect(); the scenario no longer shows that IsConnected() is only a hint")
 	}
 }
 
@@ -107,8 +163,8 @@ func TestBuildForceReconnectFn_OtherConnectErrorIsLogged_102(t *testing.T) {
 	if n := strings.Count(logs.String(), connectFailedLine102+": network unreachable"); n != 1 {
 		t.Errorf("Connect() error not logged as a failure:\n%s", logs)
 	}
-	if strings.Count(logs.String(), retryInProgress102) != 0 {
-		t.Errorf("an unrelated Connect() error was logged as %q:\n%s", retryInProgress102, logs)
+	if strings.Count(logs.String(), retryPending102) != 0 {
+		t.Errorf("an unrelated Connect() error was logged as %q:\n%s", retryPending102, logs)
 	}
 }
 
@@ -132,10 +188,36 @@ func TestNewAsyncEmit_EmitAfterStopDoesNotPanic_103(t *testing.T) {
 	}
 }
 
+// #103 review F2: a line dropped after stop is not a "queue full" drop, so it
+// must not count in watchdogLogDropCount.
+func TestNewAsyncEmit_EmitAfterStopIsNotCountedAsDrop_103(t *testing.T) {
+	emit, stop := newAsyncEmit(func(...any) {})
+	stop()
+	before := WatchdogLogDropCount()
+	for i := 0; i < asyncEmitQueueSize+10; i++ {
+		emit("after stop", i)
+	}
+	if got := WatchdogLogDropCount() - before; got != 0 {
+		t.Fatalf("emit after stop counted %d drops in watchdogLogDropCount, want 0", got)
+	}
+}
+
 // #103: emits racing stop neither panic nor race (run with -race). Every
 // emitter is already emitting when stop runs and keeps going until after it
-// has returned.
+// has returned. A single round can miss a narrow window in stop (review F3:
+// a stop that closes the queue before it marks itself stopped panics in
+// about half the rounds without -race and fewer with it), so it runs many.
 func TestNewAsyncEmit_ConcurrentEmitDuringStop_103(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		if r := concurrentEmitDuringStopRound(); r != nil {
+			t.Fatalf("round %d: emit racing stop panicked: %v", round, r)
+		}
+	}
+}
+
+// concurrentEmitDuringStopRound runs one round of
+// TestNewAsyncEmit_ConcurrentEmitDuringStop_103 and returns the first panic.
+func concurrentEmitDuringStopRound() any {
 	emit, stop := newAsyncEmit(func(...any) {})
 	stopped := make(chan struct{})
 	panics := make(chan any, 8)
@@ -170,9 +252,7 @@ func TestNewAsyncEmit_ConcurrentEmitDuringStop_103(t *testing.T) {
 	close(stopped)
 	wg.Wait()
 	close(panics)
-	for r := range panics {
-		t.Fatalf("emit racing stop panicked: %v", r)
-	}
+	return <-panics
 }
 
 // #103, the scenario from the issue: the production watchdog fires a

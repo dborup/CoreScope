@@ -573,13 +573,17 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 // What Connect() then does depends on paho's status (paho.mqtt.golang
 // v1.5.0, client.go Connect and status.go Connecting):
 //   - reconnecting (AutoReconnect loop): a no-op that returns a success token;
-//   - connecting (the initial ConnectRetry loop) or disconnecting with a
-//     reconnect pending: an error token, errStatusMustBeDisconnected, while
-//     paho's own loop keeps retrying. Logged as info, not as a failure (#102);
+//   - connecting (the initial ConnectRetry loop) or disconnecting: an error
+//     token, errStatusMustBeDisconnected;
 //   - disconnected (paho gave up): starts a fresh attempt.
 //
-// The same status error with no retry pending (disconnecting after a
-// Disconnect) is a genuine failure and is logged as one.
+// For that status error, IsConnected() tells whether paho reports a retry
+// pending. In connecting it does (ConnectRetry keeps retrying), so the line
+// is info, not a failure (#102). In disconnecting it reflects paho's
+// willReconnect flag, which is sticky after any earlier auto-reconnect and is
+// left set by a Disconnect(), so there it is a strong hint, not a guarantee.
+// The info line therefore keeps paho's error and claims no more than paho
+// reports. With IsConnected() false the error is logged as a failure.
 func buildForceReconnectFn(client mqtt.Client, tag string) func() {
 	return func() {
 		if client.IsConnectionOpen() {
@@ -594,7 +598,7 @@ func buildForceReconnectFn(client mqtt.Client, tag string) func() {
 		switch {
 		case err == nil:
 		case connectRetryInProgress(client, err):
-			log.Printf("MQTT [%s] WATCHDOG force-reconnect: retry already in progress in paho, no new attempt needed", tag)
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect: Connect() returned %v; paho reports a retry pending (IsConnected=true), not starting a new attempt", tag, err)
 		default:
 			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %v", tag, err)
 		}
@@ -608,10 +612,15 @@ func buildForceReconnectFn(client mqtt.Client, tag string) func() {
 // fails if an upgrade changes it.
 const pahoErrStatusMustBeDisconnected = "status can only transition to connecting from disconnected"
 
-// connectRetryInProgress reports whether a Connect() error only means paho is
-// already retrying (#102). IsConnected() is true in status connecting only
-// with ConnectRetry, and in disconnecting only when a reconnect will follow;
-// buildMQTTOpts sets ConnectRetry and AutoReconnect.
+// connectRetryInProgress reports whether a Connect() error is paho's status
+// error while paho reports a retry pending (#102). buildMQTTOpts sets
+// ConnectRetry and AutoReconnect, so IsConnected() is true in status
+// connecting (the initial retry loop keeps going) and in disconnecting when
+// paho's willReconnect flag is set. That flag is sticky: an earlier
+// auto-reconnect sets it, a successful reconnect never clears it, and a
+// Disconnect() from connected or reconnecting leaves it alone. In
+// disconnecting a true result is therefore a strong hint that a retry
+// follows, not a guarantee.
 func connectRetryInProgress(client mqtt.Client, err error) bool {
 	return err.Error() == pahoErrStatusMustBeDisconnected && client.IsConnected()
 }
