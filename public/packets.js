@@ -717,6 +717,24 @@
   let filters = {};
   { const o = localStorage.getItem('meshcore-observer-filter'); if (o) filters.observer = o;
     const t = localStorage.getItem('meshcore-type-filter'); if (t) filters.type = t; }
+  // #96 — opt-in "Hide CONTROL packets" display filter, unchecked by default.
+  // Display only: CONTROL packets are still fetched and kept (also live ones),
+  // so unchecking shows them again without a reload, and a pinned hash (a
+  // direct link to one packet) bypasses it like every other client filter.
+  // Saved as '1' or '0' so an explicit unchecked choice survives a reload.
+  const PAYLOAD_TYPE_CONTROL = 11;
+  const HIDE_CONTROL_KEY = 'meshcore-hide-control';
+  // The URL value ('1' or '0') wins over the saved choice; default off.
+  function readHideControlPref(urlValue, stored) {
+    if (urlValue === '1') return true;
+    if (urlValue === '0') return false;
+    return stored === '1';
+  }
+  // One pass, order kept; the same array when off (no copy on the default path).
+  function filterHiddenControl(list, hide) {
+    return hide ? list.filter(p => p.payload_type !== PAYLOAD_TYPE_CONTROL) : list;
+  }
+  let hideControl = readHideControlPref(null, localStorage.getItem(HIDE_CONTROL_KEY));
   let wsHandler = null;
   let packetsPaused = false;
   let pauseBuffer = [];
@@ -779,6 +797,7 @@
     if (filters.observer) parts.push('observer=' + encodeURIComponent(filters.observer));
     if (filters.channel) parts.push('channel=' + encodeURIComponent(filters.channel));
     if (filters._filterExpr) parts.push('filter=' + encodeURIComponent(filters._filterExpr));
+    if (hideControl) parts.push('hideControl=1'); // #96; off (default) is omitted
     // Sort state (#749) — encode as 'col[:asc]'; default 'time:desc' is omitted.
     if (_packetSortColumn) {
       var sortDefault = _packetSortColumn === 'time' && _packetSortDirection === 'desc';
@@ -1199,6 +1218,9 @@
     if (_urlChannel) filters.channel = _urlChannel;
     var _urlFilterExpr = _initUrlParams.get('filter');
     if (_urlFilterExpr) filters._filterExpr = _urlFilterExpr;
+    // #96 — ?hideControl=1|0 wins over the saved choice for this view; only
+    // the checkbox changes the saved choice.
+    hideControl = readHideControlPref(_initUrlParams.get('hideControl'), localStorage.getItem(HIDE_CONTROL_KEY));
     // #749 — restore sort state from URL (overrides localStorage).
     var _urlSort = _initUrlParams.get('sort');
     if (_urlSort && window.URLState) {
@@ -1671,6 +1693,7 @@
         <div class="filter-group filter-group-toggles">
           <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
           <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg> My Nodes</button>
+          <label class="filter-checkbox" title="Hide CONTROL packets (node discovery) from the list and from live updates. Nothing is discarded; direct links to a packet still open it."><input type="checkbox" id="fHideControl"${hideControl ? ' checked' : ''}> Hide CONTROL packets</label>
           <select id="fTimeWindow" class="filter-select" aria-label="Time window filter">
             <option value="15">Last 15 min</option>
             <option value="30">Last 30 min</option>
@@ -2064,6 +2087,13 @@
       filters.myNodes = !filters.myNodes;
       this.classList.toggle('active', filters.myNodes);
       loadPackets();
+    });
+    // #96 — re-filters the loaded packets; no new request.
+    document.getElementById('fHideControl').addEventListener('change', function () {
+      hideControl = this.checked;
+      localStorage.setItem(HIDE_CONTROL_KEY, hideControl ? '1' : '0');
+      updatePacketsUrl();
+      renderTableRows();
     });
 
     // Observation sort dropdown
@@ -2980,6 +3010,10 @@
       const types = filters.type.split(',').map(Number);
       displayPackets = displayPackets.filter(p => types.includes(p.payload_type));
     }
+    // #96 — Hide CONTROL packets (display only; a pinned hash bypasses it).
+    const beforeHideControl = displayPackets.length;
+    if (!hashOnly) displayPackets = filterHiddenControl(displayPackets, hideControl);
+    const controlHidden = displayPackets.length < beforeHideControl;
     displayPackets = applyObserverFilter(displayPackets, filters, groupByHash, hashOnly);
 
     // Packet Filter Language
@@ -3007,7 +3041,7 @@
       _lastVisibleEnd = -1;
       detachVScrollListener();
       const colCount = _getColCount();
-      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : 'No packets found') + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : controlHidden ? 'No packets found (CONTROL packets are hidden)' : 'No packets found') + '</td></tr>';
       // Restore scroll position after DOM rebuild (#431)
       if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
       return;
@@ -4219,6 +4253,8 @@
       _calcVisibleRange,
       buildPacketsParams,
       applyObserverFilter,
+      readHideControlPref,
+      filterHiddenControl,
       buildReplayPackets,
       renderTableRows,
       _setPackets: function(p) { packets = p; },

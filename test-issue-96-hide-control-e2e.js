@@ -67,6 +67,8 @@ async function hashQuery(page) {
     assert(controls.length > 0, 'the e2e fixture has no CONTROL packet');
     await open(page, LIST);
     assert(!(await page.isChecked('#fHideControl')), 'checkbox is checked by default');
+    const box = await page.locator('#fHideControl').boundingBox();
+    assert(box && box.width <= 24 && box.height <= 24, 'the checkbox is drawn as a text-input box: ' + JSON.stringify(box));
     countAll = await shownCount(page);
     assert(countAll === all.length, `list shows ${countAll}, API has ${all.length}`);
     const q = await hashQuery(page);
@@ -128,10 +130,21 @@ async function hashQuery(page) {
     const p = await phone.newPage();
     await p.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
     await p.waitForSelector('#fHideControl', { state: 'attached', timeout: 15000 });
-    if (!(await p.isVisible('#fHideControl'))) await p.click('#filterToggleBtn');
+    if (!(await p.isVisible('#fHideControl'))) {
+      // On mobile the in-page Filters button is replaced by a navbar mirror
+      // (mobile-page-actions.js); the in-page one is the fallback.
+      const toggle = (await p.$('.filter-toggle-btn-mirror')) ? '.filter-toggle-btn-mirror' : '#filterToggleBtn';
+      await p.click(toggle);
+    }
     await p.waitForSelector('#fHideControl', { state: 'visible', timeout: 5000 });
     const box = await p.locator('label:has(#fHideControl)').boundingBox();
     assert(box && box.x >= 0 && box.x + box.width <= 390, 'checkbox label does not fit the 390 px screen: ' + JSON.stringify(box));
+    const input = await p.locator('#fHideControl').boundingBox();
+    // The label, not the box, is the 44 px touch target.
+    assert(input && input.width <= 24 && input.height <= 24, 'the checkbox is drawn as a text-input box: ' + JSON.stringify(input));
+    assert(box.height >= 44, 'the label is not a 44 px touch target: ' + JSON.stringify(box));
+    await p.check('#fHideControl');
+    assert(await p.evaluate((k) => localStorage.getItem(k), PREF_KEY) === '1', 'checking it at phone width did not save the choice');
     await phone.close();
   });
 

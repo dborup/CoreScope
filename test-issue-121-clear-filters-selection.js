@@ -136,6 +136,7 @@ function mount(state, filters) {
     _rebuildObserverMenu: null,
     _packetSortColumn: null,
     _packetSortDirection: 'desc',
+    hideControl: false, // #96 closure state read by buildPacketsQuery
   };
   sandbox.observerMap = new Map(sandbox.observers.map((o) => [o.id, o]));
   vm.createContext(sandbox);
