@@ -311,6 +311,10 @@ function makeDecryptSandbox(opts) {
   ctx.window = ctx;
   ctx.self = ctx;
   vm.createContext(ctx);
+  // lateStorage: the module loads before localStorage exists.
+  const storageApi = ctx.localStorage;
+  if (opts.lateStorage) delete ctx.localStorage;
+  sb.attachStorage = () => { ctx.localStorage = storageApi; };
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'public/channel-decrypt.js'), 'utf8'), ctx, { filename: 'public/channel-decrypt.js' });
   sb.CD = ctx.ChannelDecrypt;
   sb.raw = () => sb.storage[DECRYPT_CACHE_KEY] || '';
@@ -983,14 +987,16 @@ async function test(name, fn) {
   // region-scoped ("<channel>|<regions>"), but removeKey() still only
   // deleted cache["<channel>"], so removing a key left the channel's
   // decrypted plaintext in localStorage under every region it was viewed in.
-  await test('R4-1: removeKey drops every region-scoped cache entry and the pre-N2 one, keeping a prefix-sharing channel', async () => {
+  await test('R4-1: removeKey drops every region-scoped cache entry, keeping a prefix-sharing channel', async () => {
     const h = makeHarness();
     const NAME = 'psk:r4rm';
     const OTHER = 'psk:r4rmx'; // "psk:r4rm" is a prefix of this name
     h.storeKey(NAME, 'd4'.repeat(16), 'R4 Remove');
     h.storeKey(OTHER, 'e5'.repeat(16), 'R4 Other');
+    // Entries of the current key format; the older formats are dropped by
+    // the version migration (see the #163 item 2 tests), not by removeKey.
+    h.ctx.localStorage.setItem('corescope_channel_cache_v', '3');
     const blob = {};
-    blob[NAME] = cacheEntry('legacy secret');
     blob[NAME + '|'] = cacheEntry('all-regions secret');
     blob[NAME + '|SJC'] = cacheEntry('sjc secret');
     blob[NAME + '|SFO,SJC'] = cacheEntry('sfo-sjc secret');
@@ -1000,7 +1006,7 @@ async function test(name, fn) {
     h.removeKey(NAME);
 
     const keys = decryptCacheKeys(h);
-    assert.deepStrictEqual(keys.filter((k) => k === NAME || k.indexOf(NAME + '|') === 0), [],
+    assert.deepStrictEqual(keys.filter((k) => k.indexOf(NAME + '|') === 0), [],
       'no cache entry for the removed channel may survive (got ' + JSON.stringify(keys) + ')');
     assert.ok(!/secret/.test(rawDecryptCache(h)), 'no plaintext of the removed channel may stay in localStorage');
     assert.ok(keys.indexOf(OTHER + '|SJC') !== -1, 'a channel whose name merely shares the prefix must keep its cache (got ' + JSON.stringify(keys) + ')');
@@ -1084,21 +1090,119 @@ async function test(name, fn) {
     assert.ok(sb.keys().length < 3, 'room must come from the decrypt cache (got ' + JSON.stringify(sb.keys()) + ')');
   });
 
-  await test('R4-2: pre-N2 cache entries (no "|" region part) are dropped once, on first use after upgrade', async () => {
-    const legacy = {};
-    legacy['#oldchan'] = cacheEntry('pre-N2 plaintext');
-    legacy['psk:legacy'] = cacheEntry('pre-N2 psk plaintext');
-    legacy['psk:legacy|SJC'] = cacheEntry('region-scoped text');
-    const sb = makeDecryptSandbox({ storage: { [DECRYPT_CACHE_KEY]: JSON.stringify(legacy) } });
-    assert.strictEqual(sb.CD.getCache('psk:legacy|SJC').messages[0].text, 'region-scoped text', 'region-scoped entries survive');
-    assert.deepStrictEqual(sb.keys(), ['psk:legacy|SJC'], 'pre-N2 entries must be dropped (got ' + JSON.stringify(sb.keys()) + ')');
-    assert.ok(!/pre-N2/.test(sb.raw()), 'no pre-N2 plaintext may remain');
+  // #163 item 2: cache keys are "<channel>|<regions>", but a channel name may
+  // contain '|' itself, so clearing "#a" also cleared "#a|b" and the two
+  // channels' entries could be confused. The channel part now has '|' (and
+  // '%', which escapes it) percent-encoded, so the first '|' of a key is
+  // always the separator.
+  await test('#163 item 2: removing channel "#a" leaves the cache of channel "#a|b" intact', async () => {
+    const sb = makeDecryptSandbox();
+    const CD = sb.CD;
+    const keysOf = { a: [CD.channelCacheKey('#a', ''), CD.channelCacheKey('#a', 'SJC')], ab: [CD.channelCacheKey('#a|b', ''), CD.channelCacheKey('#a|b', 'SJC')] };
+    keysOf.a.concat(keysOf.ab).forEach((k) => CD.setCache(k, [{ text: 'plain ' + k }], 'ts', 1));
+    assert.strictEqual(new Set(keysOf.a.concat(keysOf.ab)).size, 4, 'every (channel, region) pair needs its own key');
 
-    // Only once: an entry written after the migration (the old public
-    // setCache/cacheMessages API still accepts any key) survives a reload.
-    sb.CD.setCache('written-later', [{ text: 'kept' }], 'ts', 1);
-    const reloaded = makeDecryptSandbox({ storage: sb.storage });
-    assert.ok(reloaded.CD.getCache('written-later'), 'the migration must not run again on the next page load');
+    CD.clearChannelCache('#a');
+    keysOf.a.forEach((k) => assert.strictEqual(CD.getCache(k), null, '#a\'s entry ' + k + ' must be cleared'));
+    keysOf.ab.forEach((k) => assert.ok(CD.getCache(k), '#a|b\'s entry ' + k + ' must survive (left: ' + JSON.stringify(sb.keys()) + ')'));
+
+    CD.clearChannelCache('#a|b');
+    assert.deepStrictEqual(sb.keys(), [], 'clearing #a|b removes its own entries (left: ' + JSON.stringify(sb.keys()) + ')');
+  });
+
+  await test('#163 item 2: removeKey("#a") clears only that channel\'s decrypt cache', async () => {
+    const sb = makeDecryptSandbox();
+    const CD = sb.CD;
+    CD.storeKey('#a', '0123456789abcdef0123456789abcdef', 'A');
+    CD.storeKey('#a|b', 'fedcba9876543210fedcba9876543210', 'AB');
+    CD.setCache(CD.channelCacheKey('#a', 'SJC'), [{ text: 'a' }], 'ts', 1);
+    CD.setCache(CD.channelCacheKey('#a|b', ''), [{ text: 'ab' }], 'ts', 1);
+    CD.removeKey('#a');
+    assert.strictEqual(CD.getCache(CD.channelCacheKey('#a', 'SJC')), null, '#a\'s cache goes with its key');
+    assert.ok(CD.getCache(CD.channelCacheKey('#a|b', '')), '#a|b\'s cache must stay');
+    assert.ok(CD.getKeys()['#a|b'], '#a|b\'s key must stay');
+  });
+
+  await test('#163 item 2: the escaping is injective — "a|b" and "a%7Cb" are different channels', async () => {
+    const { CD } = makeDecryptSandbox();
+    const names = ['a', 'a|b', 'a%7Cb', 'a%', 'a%25', 'a|', '|', '%7C', 'a|b|c'];
+    const keys = names.map((n) => CD.channelCacheKey(n, ''));
+    assert.strictEqual(new Set(keys).size, names.length, 'distinct channels must have distinct keys (got ' + JSON.stringify(keys) + ')');
+    keys.forEach((k, i) => assert.strictEqual(k.indexOf('|'), k.length - 1, 'the only "|" of ' + JSON.stringify(names[i]) + '\'s key is the separator (got ' + k + ')'));
+    assert.strictEqual(CD.channelCacheKey('#a', 'SFO,SJC'), CD.channelCacheKey('#a', 'SJC,SFO'), 'region order still does not matter');
+    assert.strictEqual(CD.channelCacheKey('psk:r4sort', 'SJC'), 'psk:r4sort|SJC', 'a name without "|" or "%" keeps its key');
+  });
+
+  // #163 item 4: cacheMessages()/getCachedMessages() wrote and read bare
+  // "<channel>" keys, outside the "<channel>|<regions>" format. Nothing
+  // called them; any caller has to go through channelCacheKey().
+  await test('#163 item 4: the unused bare-name cacheMessages/getCachedMessages API is gone', async () => {
+    const { CD } = makeDecryptSandbox();
+    assert.strictEqual(CD.cacheMessages, undefined, 'cacheMessages must not be exported');
+    assert.strictEqual(CD.getCachedMessages, undefined, 'getCachedMessages must not be exported');
+    assert.strictEqual(typeof CD.channelCacheKey, 'function', 'channelCacheKey stays the way to build a key');
+    assert.strictEqual(typeof CD.setCache, 'function');
+    assert.strictEqual(typeof CD.getCache, 'function');
+  });
+
+  // Every cache blob written before the key format settled is dropped once:
+  // pre-#153 entries are keyed by the bare channel name, #153's by the
+  // unescaped "<name>|<regions>", and the two can't be told apart for a name
+  // containing '|'. It is only a cache, and none of them may keep plaintext.
+  for (const marker of [undefined, '2']) {
+    await test('#163 item 2: cache entries of the pre-#153 and #153 key formats are dropped once (version marker ' + marker + ')', async () => {
+      const old = {};
+      old['#oldchan'] = cacheEntry('PLAIN pre-153 bare name');
+      old['#a|b'] = cacheEntry('PLAIN pre-153 name with pipe');
+      old['psk:legacy|SJC'] = cacheEntry('PLAIN 153 region key');
+      old['#a|b|'] = cacheEntry('PLAIN 153 pipe name');
+      old['#a|b|SJC'] = cacheEntry('PLAIN 153 pipe name region');
+      const storage = { [DECRYPT_CACHE_KEY]: JSON.stringify(old) };
+      if (marker !== undefined) storage.corescope_channel_cache_v = marker;
+      const sb = makeDecryptSandbox({ storage });
+      assert.strictEqual(sb.CD.getCache('psk:legacy|SJC'), null, 'an old-format entry must not be served');
+      assert.deepStrictEqual(sb.keys(), [], 'old-format entries must be dropped (got ' + JSON.stringify(sb.keys()) + ')');
+      assert.ok(!/PLAIN/.test(sb.raw()), 'no old plaintext may remain');
+
+      // Only once: an entry written after the migration survives a reload.
+      sb.CD.setCache(sb.CD.channelCacheKey('written-later', ''), [{ text: 'kept' }], 'ts', 1);
+      const reloaded = makeDecryptSandbox({ storage: sb.storage });
+      assert.ok(reloaded.CD.getCache(sb.CD.channelCacheKey('written-later', '')), 'the migration must not run again on the next page load');
+    });
+  }
+
+  // #163 item 5: the cleanup ran lazily, on the first cache read or write,
+  // so old-format plaintext stayed in localStorage until the channels page
+  // happened to use the cache. It now runs when ChannelDecrypt initialises.
+  const OLD_BLOB = () => JSON.stringify({
+    '#oldchan': cacheEntry('PLAIN pre-153'),
+    'psk:legacy|SJC': cacheEntry('PLAIN 153'),
+  });
+
+  for (const marker of [undefined, '2']) {
+    await test('#163 item 5: loading the module drops old-format cache entries without any cache use (version marker ' + marker + ')', async () => {
+      const storage = { [DECRYPT_CACHE_KEY]: OLD_BLOB() };
+      if (marker !== undefined) storage.corescope_channel_cache_v = marker;
+      const sb = makeDecryptSandbox({ storage });
+      // No getCache()/setCache()/clearChannelCache() call: only the load.
+      assert.ok(!/PLAIN/.test(sb.raw()), 'old plaintext must be gone right after load (got ' + sb.raw().slice(0, 100) + ')');
+      assert.strictEqual(sb.storage.corescope_channel_cache_v, '3', 'the version marker must be set');
+    });
+  }
+
+  await test('#163 item 5: a current-format cache survives the load', async () => {
+    const key = makeDecryptSandbox().CD.channelCacheKey('psk:keep', 'SJC');
+    const sb = makeDecryptSandbox({ storage: { corescope_channel_cache_v: '3', [DECRYPT_CACHE_KEY]: JSON.stringify({ [key]: cacheEntry('KEEP') }) } });
+    assert.deepStrictEqual(sb.keys(), [key], 'a version-3 cache must be left alone by the load');
+    assert.strictEqual(sb.CD.getCache(key).messages[0].text, 'KEEP');
+  });
+
+  await test('#163 item 5: the lazy call stays as a fallback when localStorage was not available at load', async () => {
+    const sb = makeDecryptSandbox({ lateStorage: true, storage: { [DECRYPT_CACHE_KEY]: OLD_BLOB() } });
+    assert.ok(/PLAIN/.test(sb.raw()), 'precondition: nothing could be cleaned at load');
+    sb.attachStorage();
+    assert.strictEqual(sb.CD.getCache('psk:legacy|SJC'), null, 'the first cache use must not serve an old-format entry');
+    assert.ok(!/PLAIN/.test(sb.raw()), 'the first cache use must drop the old plaintext (got ' + sb.raw().slice(0, 100) + ')');
   });
 
   // ── R4-3 (#153 review round 4, P3): the N1 "a load is pending" flag was
@@ -1208,6 +1312,120 @@ async function test(name, fn) {
     assert.ok(!/Decrypting/.test(h.elements.chMessages.innerHTML),
       'a superseded selectChannel must not paint "Decrypting…" over the current view (got ' + h.elements.chMessages.innerHTML.slice(0, 120) + ')');
     assert.ok(h.state().messages.some((m) => m.text === 's3 server message'), 'the current view must keep its messages');
+  });
+
+  // ── #163 item 1: selectChannel() walks every stored key for an encrypted
+  // channel, awaiting computeChannelHash once per key, and then paints the
+  // #781 "no decryption key" lock text. Nothing checked whether the request
+  // was still current, so the lock text landed on top of a newer request's
+  // view — the same late-write pattern R4-3 S3 fixed for "Decrypting…".
+  const LOCK_TEXT = /no decryption key is configured/;
+  const msgBelongsTo = (h, text) => h.state().messages.some((m) => m.text === text);
+
+  async function encryptedChannelHarness(storedKeys) {
+    const h = makeHarness();
+    for (let i = 0; i < storedKeys; i++) h.storeKey('psk:i163k' + i, (i + 1).toString(16).repeat(32), 'K' + i);
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    h.setState({
+      channels: [
+        Object.assign({}, h.row('public')),
+        serverChannel('42', { encrypted: true, name: 'Encrypted 42' }),
+      ],
+    });
+    const realApi = h.ctx.api;
+    h.ctx.api = (p, o) => (p.indexOf('/channels/public/messages') === 0
+      ? Promise.resolve({ messages: [{ id: 1, sender: 'Srv', text: 'i163 public message', timestamp: '2026-01-01T00:00:00Z', packetHash: 'srv-public' }] })
+      : realApi(p, o));
+    // computeChannelHash is slow: each stored key's call stays pending
+    // until the test releases it, and none of them matches channel 42.
+    h.hashCalls = [];
+    h.w.ChannelDecrypt.computeChannelHash = () => { const d = deferred(); h.hashCalls.push(d); return d.promise; };
+    return h;
+  }
+
+  // Releases A's computeChannelHash calls as they appear (none matches),
+  // until A's selectChannel() has returned.
+  async function releaseKeyLoop(h, selection) {
+    let done = false;
+    selection.then(() => { done = true; }, () => { done = true; });
+    let released = 0;
+    for (let i = 0; i < 200 && !done; i++) {
+      while (released < h.hashCalls.length) h.hashCalls[released++].resolve(250);
+      await flush(5);
+    }
+    assert.ok(done, 'the superseded selectChannel() must return');
+    await flush(100);
+  }
+
+  await test('#163 item 1: the lock text of a superseded encrypted selection does not overwrite the newer channel\'s view', async () => {
+    const h = await encryptedChannelHarness(3);
+    const selectA = h.w._channelsSelectChannelForTest('42');
+    assert.ok(await settle(() => h.hashCalls.length === 1), 'precondition: A is awaiting its first computeChannelHash');
+
+    await h.w._channelsSelectChannelForTest('public');
+    await flush(50);
+    assert.strictEqual(h.state().selectedHash, 'public', 'precondition: B is selected');
+    assert.ok(msgBelongsTo(h, 'i163 public message'), 'precondition: B\'s messages are rendered');
+    assert.ok(!LOCK_TEXT.test(h.elements.chMessages.innerHTML), 'precondition: no lock text yet');
+
+    await releaseKeyLoop(h, selectA);
+
+    assert.ok(!LOCK_TEXT.test(h.elements.chMessages.innerHTML),
+      'the lock text of the superseded request must not be painted over B (got ' + h.elements.chMessages.innerHTML.slice(0, 160) + ')');
+    assert.strictEqual(h.state().selectedHash, 'public', 'B must stay selected');
+    assert.ok(msgBelongsTo(h, 'i163 public message'), 'B\'s messages must be intact');
+  });
+
+  await test('#163 item 1: a superseded encrypted selection stops walking the stored keys', async () => {
+    const h = await encryptedChannelHarness(4);
+    // Only the first call is slow; any further call is counted and answered.
+    let calls = 0;
+    const first = deferred();
+    h.w.ChannelDecrypt.computeChannelHash = () => (++calls === 1 ? first.promise : Promise.resolve(250));
+    const selectA = h.w._channelsSelectChannelForTest('42');
+    assert.ok(await settle(() => calls === 1), 'precondition: A awaits the first key');
+    await h.w._channelsSelectChannelForTest('public');
+    first.resolve(250);
+    await selectA;
+    await flush(100);
+    assert.strictEqual(calls, 1, 'A must not hash the remaining keys once it is superseded (got ' + calls + ' calls)');
+  });
+
+  await test('#163 item 1: a region change while the key loop runs keeps the lock text off the pane', async () => {
+    const h = await encryptedChannelHarness(2);
+    const selectA = h.w._channelsSelectChannelForTest('42');
+    assert.ok(await settle(() => h.hashCalls.length === 1), 'precondition: A awaits the first key');
+    // The region changes under A, which makes A stale; the pane now shows
+    // something else.
+    h.regionParam = 'SJC';
+    h.elements.chMessages.innerHTML = '<div class="i163-region-view">region view</div>';
+    await releaseKeyLoop(h, selectA);
+    assert.ok(/i163-region-view/.test(h.elements.chMessages.innerHTML),
+      'a request superseded by a region change must not touch the pane (got ' + h.elements.chMessages.innerHTML.slice(0, 160) + ')');
+  });
+
+  await test('#163 item 1: a failed encrypted-ness lookup of a superseded deep link does not paint "Loading messages…" over the newer view', async () => {
+    const h = await encryptedChannelHarness(0);
+    // A deep link to a '#'-named channel that is not in the loaded list
+    // starts a /channels?includeEncrypted lookup; it fails after the user
+    // has moved on to another channel.
+    let failLookup;
+    const lookup = new Promise((_resolve, reject) => { failLookup = reject; });
+    h.respondChannels = () => lookup;
+    const selectA = h.w._channelsSelectChannelForTest('#i163deep');
+    assert.ok(await settle(() => h.channelRequests.some((p) => p.indexOf('includeEncrypted=true') !== -1)), 'precondition: the lookup is in flight');
+
+    await h.w._channelsSelectChannelForTest('public');
+    await flush(50);
+    assert.ok(msgBelongsTo(h, 'i163 public message'), 'precondition: B\'s messages are rendered');
+
+    h.elements.chMessages.innerHTML = '<div class="i163-b-view">B view</div>';
+    failLookup(new Error('lookup failed'));
+    await selectA;
+    await flush(100);
+    assert.ok(/i163-b-view/.test(h.elements.chMessages.innerHTML),
+      'a superseded request must not paint over B after its lookup fails (got ' + h.elements.chMessages.innerHTML.slice(0, 160) + ')');
   });
 
   // ── R4-4 (#153 review round 4, P3): when the current region's fetch finds

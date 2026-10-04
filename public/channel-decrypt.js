@@ -358,11 +358,20 @@ window.ChannelDecrypt = (function () {
   // region selection, as "<channel>|<sorted regions>" ("<channel>|" for all
   // regions). Region order doesn't change which observers are included, so
   // it must not change the key either.
+  //
+  // #163: a channel name may contain '|', which would make the key (and
+  // clearChannelCache()'s prefix match) ambiguous. The channel part therefore
+  // has '%' and '|' percent-encoded, so the first '|' of a key is always the
+  // separator. Names without either character keep their plain key.
   var CACHE_REGION_SEP = '|';
+
+  function encodeChannelPart(channelName) {
+    return String(channelName).replace(/[%|]/g, encodeURIComponent);
+  }
 
   function channelCacheKey(channelName, regionParam) {
     var regions = regionParam ? String(regionParam).split(',').filter(Boolean).sort().join(',') : '';
-    return channelName + CACHE_REGION_SEP + regions;
+    return encodeChannelPart(channelName) + CACHE_REGION_SEP + regions;
   }
 
   // ---- Message cache (localStorage) ----
@@ -383,9 +392,10 @@ window.ChannelDecrypt = (function () {
   // with the keys and labels. Keep the whole blob under this many
   // characters, least recently used entries going first.
   var CACHE_BUDGET_CHARS = 1500000;
-  // Set once the pre-N2 entries (keyed by channel name alone) are dropped.
+  // Set once the cache blob of an earlier key format is dropped. 2: the
+  // unescaped "<channel>|<regions>" keys of #153; 3 (#163): escaped keys.
   var CACHE_VERSION_KEY = 'corescope_channel_cache_v';
-  var CACHE_VERSION = '2';
+  var CACHE_VERSION = '3';
 
   var _cacheMigrated = false;
   var _cacheUseSeq = 0;
@@ -412,21 +422,19 @@ window.ChannelDecrypt = (function () {
     } catch (e) { return {}; }
   }
 
-  // Drop the pre-N2 entries once: they are keyed by channel name alone, so
-  // nothing reads them any more, and removeKey() of a later version would
-  // have no reason to look for them.
+  // Drop the whole cache blob once when its key format is older than
+  // CACHE_VERSION. Pre-#153 entries are keyed by the bare channel name and
+  // #153's by the unescaped "<channel>|<regions>"; for a name containing '|'
+  // the two can't be told apart from the current keys, and nothing reads
+  // them any more. It is only a cache, so dropping all of it is simpler than
+  // rewriting it, and leaves no old plaintext behind.
   function ensureCacheMigrated() {
     if (_cacheMigrated) return;
     _cacheMigrated = true;
     try {
       if (localStorage.getItem(CACHE_VERSION_KEY) === CACHE_VERSION) return;
-    } catch (e) { return; }
-    var cache = readCacheBlob();
-    var legacy = Object.keys(cache).filter(function (k) { return k.indexOf(CACHE_REGION_SEP) === -1; });
-    if (legacy.length) {
-      legacy.forEach(function (k) { delete cache[k]; });
-      writeCacheBlob(cache);
-    }
+      localStorage.removeItem(CACHE_KEY);
+    } catch (e) { _cacheMigrated = false; return; /* storage unavailable: retried on next use */ }
     try { localStorage.setItem(CACHE_VERSION_KEY, CACHE_VERSION); } catch (e) { /* retried next load */ }
   }
 
@@ -499,14 +507,15 @@ window.ChannelDecrypt = (function () {
 
   /**
    * Remove every cached message set of a channel (by name or hash): each
-   * region-scoped "<channel>|<regions>" entry plus a pre-N2 "<channel>" one.
+   * region-scoped "<channel>|<regions>" entry, and nothing of any other
+   * channel (see encodeChannelPart()).
    */
   function clearChannelCache(channelKey) {
     ensureCacheMigrated();
     var cache = readCacheBlob();
-    var prefix = channelKey + CACHE_REGION_SEP;
+    var prefix = encodeChannelPart(channelKey) + CACHE_REGION_SEP;
     Object.keys(cache).forEach(function (k) {
-      if (k === channelKey || k.indexOf(prefix) === 0) delete cache[k];
+      if (k.indexOf(prefix) === 0) delete cache[k];
     });
     writeCacheBlob(cache);
   }
@@ -518,18 +527,6 @@ window.ChannelDecrypt = (function () {
     if (!Object.prototype.hasOwnProperty.call(cache, key)) return;
     delete cache[key];
     writeCacheBlob(cache);
-  }
-
-  function cacheMessages(channelHash, messages) {
-    ensureCacheMigrated();
-    var cache = readCacheBlob();
-    cache[channelHash] = { messages: messages, ts: Date.now(), at: nextCacheUse() };
-    writeCacheBlob(cache);
-  }
-
-  function getCachedMessages(channelHash) {
-    var entry = getCache(channelHash);
-    return entry ? entry.messages : null;
   }
 
   function setCache(key, messages, lastTimestamp, totalCount) {
@@ -557,6 +554,11 @@ window.ChannelDecrypt = (function () {
     return entry;
   }
 
+  // #163: drop old-format cache entries (and their plaintext) when the module
+  // loads, not on the first cache use. The calls in the cache functions stay
+  // as the fallback for a localStorage that wasn't available yet.
+  ensureCacheMigrated();
+
   return {
     deriveKey: deriveKey,
     decrypt: decrypt,
@@ -578,8 +580,6 @@ window.ChannelDecrypt = (function () {
     getLabels: getLabels,
     channelCacheKey: channelCacheKey,
     clearChannelCache: clearChannelCache,
-    cacheMessages: cacheMessages,
-    getCachedMessages: getCachedMessages,
     setCache: setCache,
     getCache: getCache,
     deleteCache: deleteCache,

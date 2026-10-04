@@ -2533,6 +2533,8 @@
         var kh = storedKeys[kn];
         var kb = ChannelDecrypt.hexToBytes(kh);
         var hb = await ChannelDecrypt.computeChannelHash(kb);
+        // #163: a newer request owns the pane; stop hashing keys for it.
+        if (isStaleMessageRequest(request)) return;
         if (String(hb) === String(hash) || String(ch.hash) === String(hb)) {
           await decryptAndRender(kh, hb, kn);
           return;
@@ -2577,6 +2579,9 @@
       }
     }
 
+    // #163: the encrypted-ness lookup above falls through here when it
+    // fails, which can be after a newer request took over the pane.
+    if (isStaleMessageRequest(request)) return;
     msgEl.innerHTML = '<div class="ch-loading">Loading messages…</div>';
 
     try {
