@@ -61,7 +61,17 @@ func TestSecrets(t *testing.T) {
 	}{
 		{"tcp://dev-user:secret@host:1883", []string{"dev-user:secret", "dev-user", "secret"}},
 		{"wss://host/mqtt?token=abc#frag", []string{"token=abc", "abc", "frag"}},
-		{"dev-user:1234?abc@host?x=1", []string{"dev-user:1234?abc", "dev-user", "1234?abc", "x=1", "1"}},
+		{"dev-user:1234?abc@host?x=1", []string{"dev-user:1234?abc", "dev-user", "1234?abc", "x=1", "1", "abc@host?x=1"}},
+		// an '@' in the query: the parts are also read with the user-info
+		// ending inside the authority, so the password and the query
+		// values are listed on their own too
+		{"tcp://dev-user:hunter2@broker.example:1883?mail=a@b", []string{
+			"dev-user:hunter2@broker.example:1883?mail=a", "dev-user", "hunter2@broker.example:1883?mail=a",
+			"dev-user:hunter2", "hunter2", "mail=a@b", "a@b"}},
+		{"tcp://h?token=abc123&mail=a@b", []string{"h?token=abc123&mail=a", "token=abc123&mail=a@b", "abc123", "a@b"}},
+		{"wss://h/p@x#k=fragsecret", []string{"h/p", "k=fragsecret", "fragsecret"}},
+		// a decoded form that is not valid UTF-8 is left out
+		{"tcp://u1x:%A6abc@h", []string{"u1x:%A6abc", "u1x", "%A6abc"}},
 		// #159: each part raw and URL-decoded, without duplicates
 		{"tcp://dev-user:p%40ss@host", []string{"dev-user:p%40ss", "dev-user:p@ss", "dev-user", "p%40ss", "p@ss"}},
 		{"wss://host/?a=x+y%21&b&c=", []string{"a=x+y%21&b&c=", "a=x+y!&b&c=", "a=x y!&b&c=", "x+y%21", "x+y!", "x y!", "b"}},
@@ -135,6 +145,12 @@ func TestMaskSecrets_159(t *testing.T) {
 			Secrets("wss://host/mqtt?token=abc123"), "token **** expired"},
 		{"query value decoded", "token a b/c! expired",
 			Secrets("wss://host/mqtt?token=a+b%2Fc%21"), "token **** expired"},
+		{"password with an '@' in the query", "bad password hunter2",
+			Secrets("tcp://dev-user:hunter2@broker.example:1883?mail=a@b"), "bad password ****"},
+		{"query value with an '@' later", "token abc123 expired",
+			Secrets("tcp://h?token=abc123&mail=a@b"), "token **** expired"},
+		{"no match inside a rune", "user æabc here",
+			Secrets("tcp://u1x:%A6abc@h"), "user æabc here"},
 		{"fragment value", "bad token xyz789",
 			Secrets("wss://host/#access_token=xyz789"), "bad token ****"},
 		{"overlapping secrets", "abcdef", []string{"abcd", "cdef"}, "****"},

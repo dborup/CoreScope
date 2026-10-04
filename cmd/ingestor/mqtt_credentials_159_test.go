@@ -14,6 +14,10 @@ func TestErrForLogMasksSecretParts_159(t *testing.T) {
 		{"tcp://dev-user:hunter2@host", "bad password hunter2 for dev-user", "bad password **** for ****"},
 		{"tcp://dev-user:p%40ss@host", "auth p@ss rejected", "auth **** rejected"},
 		{"wss://host/mqtt?token=abc123", "token abc123 expired", "token **** expired"},
+		// an '@' later in the URL does not hide the password or the query
+		// values (review of round 1, F1)
+		{"tcp://dev-user:hunter2@broker.example:1883?mail=a@b", "bad password hunter2", "bad password ****"},
+		{"tcp://h?token=abc123&mail=a@b", "token abc123 expired", "token **** expired"},
 		// short values are left alone in free text; the URL itself is
 		// still masked by MaskText
 		{"tcp://u:pw@host", "uptime 1h, pw ok: tcp://u:pw@host refused", "uptime 1h, pw ok: tcp://****@host refused"},
@@ -43,6 +47,34 @@ func TestBuildForceReconnectFnMasksConnectError_159(t *testing.T) {
 		t.Errorf("log %q, want it to contain %q", out, want)
 	}
 	for _, bad := range []string{credUser, credPass, "abc123", "token="} {
+		if strings.Contains(out, bad) {
+			t.Errorf("log leaks %q: %s", bad, out)
+		}
+	}
+}
+
+// The per-source setup main() uses computes the source's secrets once and
+// wires the watchdog to the client with them, so a forced reconnect's
+// Connect() error is logged masked (review of round 1, F6 and F7).
+func TestAttachClientWiresSecretsToForceReconnect_159(t *testing.T) {
+	src := MQTTSource{Name: "feed", Broker: "wss://" + credUser + ":" + credPass + "@host/mqtt?token=abc123", Password: "cfg-pass"}
+	setup := prepareMQTTSource(src, "feed")
+	if got, want := strings.Join(setup.secrets, "|"), strings.Join(mqttSourceSecrets(src), "|"); got != want {
+		t.Errorf("secrets %q, want %q", got, want)
+	}
+	c := &fakeClient{connectErr: errors.New(`dial "` + src.Broker + `": cfg-pass refused; token abc123 rejected for ` + credUser)}
+	setup.attachClient(c)
+	if setup.liveness.IsConnectedFn == nil || setup.liveness.ForceReconnectFn == nil {
+		t.Fatal("attachClient left the watchdog unwired")
+	}
+	buf := captureLog118(t)
+	setup.liveness.ForceReconnectFn()
+	out := buf.String()
+	const want = `MQTT [feed] WATCHDOG force-reconnect Connect() failed: dial "wss://****@host/mqtt **** refused; token **** rejected for ****`
+	if !strings.Contains(out, want) {
+		t.Errorf("log %q, want it to contain %q", out, want)
+	}
+	for _, bad := range []string{credUser, credPass, "abc123", "cfg-pass"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("log leaks %q: %s", bad, out)
 		}

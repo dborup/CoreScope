@@ -79,7 +79,8 @@ func TestDisconnectErrorMasksKnownSecrets_118(t *testing.T) {
 	t.Cleanup(resetSourceStatusRegistry)
 	buf := captureLog118(t)
 	src := MQTTSource{Name: "feed", Broker: "wss://host/mqtt?token=abc", Password: "cfg-pass"}
-	opts, status, _ := prepareMQTTSource(src, "feed")
+	setup := prepareMQTTSource(src, "feed")
+	opts, status := setup.opts, setup.status
 	opts.OnConnectionLost(nil, errors.New("dial host/mqtt?token=abc: cfg-pass rejected"))
 	const want = "dial host/mqtt?****: **** rejected"
 	if got := status.snapshot(time.Now()).LastError; got != want {
