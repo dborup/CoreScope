@@ -56,6 +56,15 @@ async function openChannelsPage(ctx) {
 
 function rowSelector(hash) { return '#chList [data-hash="' + hash + '"]'; }
 
+// Opens a channel by clicking its name, not the row: page.click() aims at
+// the row's centre, and where a desktop My Channels row wraps (font
+// metrics; the unread badge makes it wider) the centre is the Share button.
+async function openChannel(page, hash) {
+  const sel = rowSelector(hash);
+  await page.click(sel + ' .ch-item-name, ' + sel + ' .ch-row-name');
+  await page.waitForFunction((h) => location.hash === '#/channels/' + encodeURIComponent(h), hash);
+}
+
 async function runRace(browser, vp) {
   const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
   // Hold back exactly the SJC-only list; every other request goes through.
@@ -169,8 +178,7 @@ async function runUnread(browser, vp) {
     await page.click('#chPskAddBtn');
     await page.waitForFunction((hash) => location.hash === '#/channels/' + encodeURIComponent(hash), PSK_HASH, { timeout: 10000 });
     await backToListIfMobile(page, vp);
-    await page.click(rowSelector('#test'));
-    await page.waitForFunction(() => location.hash === '#/channels/' + encodeURIComponent('#test'));
+    await openChannel(page, '#test');
     await backToListIfMobile(page, vp);
     assert(pageSocket, 'the page opened its WebSocket');
     const s = await badgeState(page);
@@ -197,8 +205,7 @@ async function runUnread(browser, vp) {
   });
 
   await step(vp.name + ': #155 opening the PSK channel clears the badge', async () => {
-    await page.click(rowSelector(PSK_HASH));
-    await page.waitForFunction((hash) => location.hash === '#/channels/' + encodeURIComponent(hash), PSK_HASH);
+    await openChannel(page, PSK_HASH);
     await backToListIfMobile(page, vp);
     const s = await badgeState(page);
     assert(s.row && s.badge === null, 'badge cleared, got ' + JSON.stringify(s));
