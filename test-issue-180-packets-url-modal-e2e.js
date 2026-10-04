@@ -90,17 +90,21 @@ function detailPaneOpen(page) {
       await waitFor(page, () => /\(1\)/.test(document.querySelector('#pktLeft .count').textContent), 'detail URL did not filter the list to 1 packet');
       assert(await clearShown(page), 'Clear button hidden on the filtered detail URL');
 
-      await page.click('#clearFiltersBtn');
-      await waitFor(page, () => location.hash === '#/packets', 'URL after Clear is not #/packets');
-      await waitFor(page, () => !/\(1\)/.test(document.querySelector('#pktLeft .count').textContent), 'list still filtered to 1 packet after Clear');
+      // The fixture's packets may have aged out of the default 15 min window
+      // that Clear restores, so compare what Clear showed with what the
+      // reload shows rather than expecting a number of rows.
+      const listLoaded = () => page.waitForResponse((r) => /\/api\/packets\?/.test(r.url()), { timeout: 15000 });
+      await Promise.all([listLoaded(), page.click('#clearFiltersBtn')]);
+      await page.waitForTimeout(500);
+      let h = await page.evaluate(() => location.hash);
+      assert(h === '#/packets', 'URL after Clear: ' + h);
       const shown = await listCount(page);
-      assert(shown > 1, 'list after Clear shows ' + shown + ' packets');
       assert(!(await clearShown(page)), 'Clear button still visible after Clear');
       assert(!(await detailPaneOpen(page)), 'detail pane still open after Clear');
 
-      await page.reload({ waitUntil: 'load' });
-      await page.waitForSelector('#pktTable tbody tr[data-hash]', { timeout: 15000 });
-      const h = await page.evaluate(() => location.hash);
+      await Promise.all([listLoaded(), page.reload({ waitUntil: 'load' })]);
+      await page.waitForTimeout(500);
+      h = await page.evaluate(() => location.hash);
       assert(h === '#/packets', 'URL after reload: ' + h);
       const reloaded = await listCount(page);
       assert(reloaded === shown, 'reload shows ' + reloaded + ' packets, Clear showed ' + shown);
