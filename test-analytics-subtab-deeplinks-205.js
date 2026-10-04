@@ -169,7 +169,8 @@ function pageEnv(opts) {
     localStorage: storage(),
     sessionStorage: storage(opts.session),
     location: { hash: '#/analytics' },
-    history: { replaceState(_s, _t, url) { hashLog.push(url); ctx.location.hash = url; } },
+    // state is kept as a structured clone, like the real history.state.
+    history: { state: null, replaceState(st, _t, url) { ctx.history.state = st == null ? null : JSON.parse(JSON.stringify(st)); hashLog.push(url); ctx.location.hash = url; } },
     CustomEvent: class CustomEvent {}, Map, Set, Promise, URLSearchParams,
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
     timeAgo: () => 'x ago', initTabBar() {}, makeColumnsResizable() {},
@@ -209,6 +210,21 @@ function pageEnv(opts) {
       await flush();
     },
     initError: () => initError,
+    // History entries (#208): the current one as { hash, state }; a new
+    // entry (a link, location.hash = …) has no state; Back/Forward brings
+    // an entry back with the state it had when it was left.
+    entry: () => ({ hash: ctx.location.hash, state: ctx.history.state == null ? null : JSON.parse(JSON.stringify(ctx.history.state)) }),
+    async visit(hash) {
+      page.destroy();
+      ctx.history.state = null;
+      await this.mount(hash);
+    },
+    async traverse(entry) {
+      page.destroy();
+      ctx.history.state = entry.state == null ? null : JSON.parse(JSON.stringify(entry.state));
+      await this.mount(entry.hash);
+    },
+    historyState: () => ctx.history.state,
     destroy: () => page.destroy(),
     hash: () => ctx.location.hash,
     params: () => Object.fromEntries(new URLSearchParams(ctx.location.hash.split('?')[1] || '')),
@@ -541,6 +557,96 @@ function pageEnv(opts) {
     await env.clickTab('wardriving');
     assert.deepStrictEqual(env.activeWardrivingWindows(), ['24h']);
     assert.strictEqual(env.hash(), '#/analytics?tab=wardriving');
+  });
+
+  // #208 item 5: a default view leaves its key out of the URL, and a missing
+  // key falls back to sessionStorage. Back/Forward to an entry whose view
+  // was the default must restore that default, not the value a later entry
+  // stored; a new entry without the key still gets the stored value.
+  console.log('\n=== #208: Back/Forward to an entry in its default view ===');
+
+  await test('Scopes: Back to a default-view entry shows the default, Forward the later view', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=scopes&sub=regions&swin=7d');
+    assert.deepStrictEqual(env.activeSubtabs(), ['regions'], 'precondition');
+    const e2 = env.entry();
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeSubtabs(), ['overview'], 'Back: sub-tab');
+    assert.deepStrictEqual(env.visiblePanels(), ['overview'], 'Back: panel');
+    assert.deepStrictEqual(env.activeScopesWindows(), ['24h', '24h'], 'Back: window');
+    assert.strictEqual(env.hash(), '#/analytics?tab=scopes', 'Back: URL');
+    assert.strictEqual(env.session.scopes_subtab, 'overview', 'Back: stored sub-tab');
+    await env.traverse(e2);
+    assert.deepStrictEqual(env.activeSubtabs(), ['regions'], 'Forward: sub-tab');
+    assert.deepStrictEqual(env.activeScopesWindows(), ['7d', '7d'], 'Forward: window');
+  });
+
+  await test('Scopes: an entry clicked back to its default is restored as the default', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    await env.clickSubtab('hygiene');
+    await env.clickSubtab('overview');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=scopes&sub=regions');
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeSubtabs(), ['overview']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=scopes');
+  });
+
+  await test('Scopes: a new entry without sub= still opens the stored sub-tab', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    await env.visit('#/analytics?tab=scopes&sub=regions');
+    await env.visit('#/analytics?tab=scopes');
+    assert.deepStrictEqual(env.activeSubtabs(), ['regions']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=scopes&sub=regions');
+  });
+
+  await test('Wardriving: Back to a default-view entry shows 24h', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=wardriving');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=wardriving&wdwin=1h');
+    assert.deepStrictEqual(env.activeWardrivingWindows(), ['1h'], 'precondition');
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeWardrivingWindows(), ['24h']);
+    assert.strictEqual(env.hash(), '#/analytics?tab=wardriving');
+  });
+
+  await test('an entry from another page (Back from Nodes) keeps its own view', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes');
+    const e1 = env.entry();
+    await env.visit('#/analytics?tab=scopes&sub=hopdepth');
+    await env.visit('#/nodes');
+    await env.traverse(e1);
+    assert.deepStrictEqual(env.activeSubtabs(), ['overview']);
+  });
+
+  await test('a tab switch inside an entry still brings back the stored view', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes&sub=hopdepth');
+    await env.clickTab('topology');
+    await env.clickTab('scopes');
+    assert.deepStrictEqual(env.activeSubtabs(), ['hopdepth']);
+  });
+
+  for (const st of [{ analyticsView: { sub: 'x"]', swin: '__proto__' } }, { analyticsView: 'hopdepth' }, { analyticsView: { sub: 7 } }, 'junk', 42]) {
+    await test('a foreign or garbled entry state ' + JSON.stringify(st) + ' never reaches the view, no exception', async () => {
+      const env = pageEnv({ session: { scopes_subtab: 'regions' } });
+      await env.traverse({ hash: '#/analytics?tab=scopes', state: st });
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      const sub = env.activeSubtabs();
+      assert.ok(sub.length === 1 && ['overview', 'regions'].includes(sub[0]), 'sub-tab ' + JSON.stringify(sub));
+    });
+  }
+
+  await test('other keys in history.state are kept', async () => {
+    const env = pageEnv();
+    await env.traverse({ hash: '#/analytics?tab=scopes&sub=regions', state: { other: 'kept' } });
+    assert.strictEqual(env.historyState() && env.historyState().other, 'kept', JSON.stringify(env.historyState()));
   });
 
   // #208 item 6: the Hash Stats multi-byte adopters filter (All / Confirmed
