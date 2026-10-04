@@ -56,7 +56,7 @@ test('draws highlighted branch(es) on top of the others', () => {
 });
 
 test('handles Escape key and click-outside to close, matching other CoreScope modals', () => {
-  assert.ok(/e\.key === 'Escape'/.test(src));
+  assert.ok(/e\.key [!=]== 'Escape'/.test(src));
   assert.ok(/e\.target === overlay/.test(src));
 });
 
@@ -107,6 +107,7 @@ function makeSandbox(apiImpl) {
       get textContent() { return this._text || ''; },
       appendChild(child) { this.children.push(child); child._parent = this; return child; },
       remove() { if (this._parent) this._parent.children = this._parent.children.filter(c => c !== this); },
+      contains(node) { for (let n = node; n; n = n._parent || n.parentElement) if (n === this) return true; return false; },
       addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
       removeEventListener(type, fn) { if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(f => f !== fn); },
       querySelector() { return null; },
@@ -128,6 +129,8 @@ function makeSandbox(apiImpl) {
       };
       return search(body);
     },
+    // #180: the topmost element at a point; a test sets __topAt.
+    elementFromPoint() { return ctx.__topAt || null; },
     // docLog: the live document listeners with their capture flag (#167 r2:
     // the modal's Escape handler must run in the capture phase).
     addEventListener(type, fn, opts) {
@@ -149,7 +152,8 @@ function makeSandbox(apiImpl) {
     // Returns the variable name itself (not a real color) so tests can
     // assert two markers use DIFFERENT css vars without caring what the
     // actual theme color is.
-    getComputedStyle: () => ({ getPropertyValue: (name) => name }),
+    // position: an element's own _pos (#180 layer test), else static.
+    getComputedStyle: (el) => ({ getPropertyValue: (name) => name, position: (el && el._pos) || 'static' }),
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
@@ -1327,6 +1331,59 @@ function makeSandbox(apiImpl) {
       assert.strictEqual(stoppedAfter, 0, 'a stray handler call with no modal open swallowed Escape');
     },
     '#/packets/deadbeef?obs=123', 1);
+
+  // #180: Escape is the top layer's. A layer opened over the modal later
+  // (global search via Ctrl+K, a nav menu, the More sheet, a filter popover)
+  // holds focus and has its own Escape handler: the modal leaves the event
+  // alone then. Focus on the page, in the sticky top nav, or in the detail
+  // surface the modal opened over (SlideOver, mobile sheet) still closes it.
+  // fakeFocus: a focused element inside a chain of ancestors; each entry is
+  // { pos, cls } from the element itself outwards.
+  function fakeFocus(chain) {
+    let parent = null;
+    const nodes = chain.slice().reverse().map((c) => {
+      const n = {
+        _pos: c.pos || 'static', parentElement: parent, _cls: c.cls || '',
+        matches(sel) { return sel.split(',').some((x) => x.trim() === '.' + this._cls); },
+        contains(other) { for (let o = other; o; o = o.parentElement) if (o === this) return true; return false; },
+        getBoundingClientRect: () => ({ left: 10, top: 10, width: 20, height: 20 }),
+      };
+      parent = n;
+      return n;
+    });
+    return nodes[nodes.length - 1];
+  }
+  async function escapeCase(name, chain, topIs, expectClosed) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = '#/packets/deadbeef?obs=1&viewPath=1';
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      const target = fakeFocus(chain);
+      ctx.__topAt = topIs === 'target' ? target : topIs === 'modal' ? overlay.children[0] || overlay : null;
+      const key = ctx.__docLog.find(r => r.type === 'keydown');
+      let stopped = 0;
+      key.fn({ key: 'Escape', target, stopPropagation() { stopped++; } });
+      const open = !!ctx.document.getElementById('packetPathModal');
+      assert.strictEqual(!open, expectClosed, expectClosed ? 'modal still open' : 'modal closed');
+      assert.strictEqual(stopped, expectClosed ? 1 : 0, 'stopPropagation calls: ' + stopped);
+      assert.strictEqual(ctx.location.hash, expectClosed ? '#/packets/deadbeef?obs=1' : '#/packets/deadbeef?obs=1&viewPath=1');
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  await escapeCase('Escape in the global search drawn over the modal is left to the search (#180)',
+    [{}, { pos: 'fixed', cls: 'search-overlay' }], 'target', false);
+  await escapeCase('Escape in a fixed nav menu / More sheet drawn over the modal is left to it (#180)',
+    [{}, { cls: 'nav-more-wrap' }, { pos: 'fixed', cls: 'nav-more-menu' }], 'target', false);
+  await escapeCase('Escape with focus on a control covered by the modal (e.g. the View Path button) closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'search-overlay' }], 'modal', true);
+  await escapeCase('Escape with focus in the SlideOver the modal opened over closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'slide-over-panel' }], 'target', true);
+  await escapeCase('Escape with focus in the mobile sheet the modal opened over closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'mobile-detail-sheet' }], 'target', true);
+  await escapeCase('Escape with focus in the sticky top nav (no floating layer) closes the modal (#180)',
+    [{}, { pos: 'sticky', cls: 'top-nav' }], 'target', true);
 
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);

@@ -80,11 +80,30 @@
   // only this top layer. Stopping it keeps the layers below (the packets
   // detail pane, a SlideOver), whose Escape handlers listen on document in
   // the bubble phase, open until the next Escape (#167).
+  // A layer opened over the modal afterwards (the global search via Ctrl+K,
+  // a nav menu, the More sheet, a filter popover) holds focus, and Escape is
+  // that layer's: the event is left alone then (#180).
   function onKeydown(e) {
-    if (e.key === 'Escape' && document.getElementById('packetPathModal')) {
-      e.stopPropagation();
-      close();
-    }
+    var overlay = document.getElementById('packetPathModal');
+    if (e.key !== 'Escape' || !overlay || focusInLayerAbove(overlay, e.target)) return;
+    e.stopPropagation();
+    close();
+  }
+
+  // True when el, the focused element, is in a floating layer drawn over the
+  // modal: outside it, inside a position:fixed ancestor other than the
+  // packets detail surfaces the modal opens over (SlideOver, mobile sheet),
+  // and topmost at its own centre, i.e. not under the modal's backdrop. The
+  // sticky top nav and the page are not floating layers, so Escape with focus
+  // there still closes the modal.
+  function focusInLayerAbove(overlay, el) {
+    if (!el || !el.getBoundingClientRect || overlay.contains(el)) return false;
+    var layer = el;
+    while (layer && layer !== document.body && getComputedStyle(layer).position !== 'fixed') layer = layer.parentElement;
+    if (!layer || layer === document.body || layer.matches('.slide-over-panel, .mobile-detail-sheet')) return false;
+    var r = el.getBoundingClientRect();
+    var top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!top && layer.contains(top);
   }
 
   // A #/packets/<hash>?…&viewPath=1 URL describes this modal as open (#147).

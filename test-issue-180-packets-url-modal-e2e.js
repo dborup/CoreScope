@@ -9,6 +9,10 @@
  *   element at its centre (it used to sit under the sticky .top-nav), is at
  *   least 48×48, and a real click on it closes the SlideOver.
  *
+ * - Item 4 (1400 px): with the View Path modal open, Escape in a layer opened
+ *   over it (global search via Ctrl+K, the nav More menu) closes that layer,
+ *   not the modal; the next Escape closes the modal.
+ *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js
  */
 'use strict';
@@ -111,6 +115,46 @@ function detailPaneOpen(page) {
       assert(!(await clearShown(page)), 'Clear button back after reload');
       assert(!(await detailPaneOpen(page)), 'detail pane open after reload');
       assert(await page.evaluate(() => document.getElementById('fHash').value === ''), 'hash filter input filled after reload');
+    });
+    await context.close();
+  }
+
+  // ---- Item 4: Escape in a layer over the View Path modal (desktop) ----
+  {
+    const { context, page } = await newPage({ viewport: { width: 1400, height: 900 } });
+    const modalOpen = () => page.evaluate(() => !!document.getElementById('packetPathModal'));
+    async function openModal() {
+      await fresh(page, `${DETAIL}?viewPath=1`);
+      await page.waitForSelector('#packetPathModal');
+      await page.waitForSelector('#pktRight [data-view-path]', { timeout: 15000 });
+    }
+    async function secondEscapeClosesModal() {
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('#packetPathModal', { state: 'detached', timeout: 5000 })
+        .catch(() => { throw new Error('the next Escape did not close the modal'); });
+      await waitFor(page, () => !/viewPath=/.test(location.hash), 'viewPath still in URL after the modal closed');
+    }
+
+    await step('desktop (1400): Escape in the global search (Ctrl+K) over the View Path modal closes the search, not the modal', async () => {
+      await openModal();
+      await page.keyboard.press('Control+k');
+      await waitFor(page, () => !document.getElementById('searchOverlay').classList.contains('hidden') && document.activeElement && document.activeElement.id === 'searchInput', 'search did not open with focus in its input');
+      await page.keyboard.press('Escape');
+      await waitFor(page, () => document.getElementById('searchOverlay').classList.contains('hidden'), 'Escape did not close the search');
+      assert(await modalOpen(), 'Escape in the search closed the View Path modal underneath');
+      const h = await page.evaluate(() => location.hash);
+      assert(/[?&]viewPath=1(&|$)/.test(h), 'viewPath dropped although the modal is open: ' + h);
+      await secondEscapeClosesModal();
+    });
+
+    await step('desktop (1400): Escape in the nav More menu over the View Path modal closes the menu, not the modal', async () => {
+      await openModal();
+      await page.click('#navMoreBtn');
+      await waitFor(page, () => document.getElementById('navMoreMenu').classList.contains('open') && document.getElementById('navMoreMenu').contains(document.activeElement), 'More menu did not open with focus in it');
+      await page.keyboard.press('Escape');
+      await waitFor(page, () => !document.getElementById('navMoreMenu').classList.contains('open'), 'Escape did not close the More menu');
+      assert(await modalOpen(), 'Escape in the More menu closed the View Path modal underneath');
+      await secondEscapeClosesModal();
     });
     await context.close();
   }
