@@ -93,7 +93,6 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 					dbTx.Exec("UPDATE observations SET transmission_id = ? WHERE transmission_id = ?", survID, u.tx.ID)
 					dbTx.Exec("DELETE FROM transmissions WHERE id = ?", u.tx.ID)
 					collisionSurvivors[u.newHash] = append(collisionSurvivors[u.newHash], survID)
-					u.newHash = "" // mark for in-memory removal only
 				}
 			}
 		}
@@ -106,22 +105,18 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 
 		// Update in-memory index under write lock.
 		store.mu.Lock()
+		// A merged duplicate stays in memory with its own observations (see
+		// collisionSurvivors above): the DB rows were re-parented, the
+		// in-memory ones are not, so trackedBytes keeps charging each
+		// observation to the one tx that holds it and eviction credits it
+		// once (#202). Copying them to the survivor here would credit them
+		// twice, as each of the two txs is evicted. A fix that removes the
+		// duplicate must move them (see
+		// TestHashMigrationMerge_EvictionCreditsEveryObservationOnce_202).
 		for _, u := range updates {
 			delete(store.byHash, u.oldHash)
-			if u.newHash == "" {
-				// Merged duplicate — remove from packets slice and indexes.
-				delete(store.byTxID, u.tx.ID)
-				// Move observations to survivor if present.
-				if surv := store.byHash[ComputeContentHash(u.tx.RawHex)]; surv != nil {
-					for _, obs := range u.tx.Observations {
-						surv.Observations = append(surv.Observations, obs)
-						surv.ObservationCount++
-					}
-				}
-			} else {
-				u.tx.Hash = u.newHash
-				store.byHash[u.newHash] = u.tx
-			}
+			u.tx.Hash = u.newHash
+			store.byHash[u.newHash] = u.tx
 		}
 		for newHash, survivorIDs := range collisionSurvivors {
 			evidence := collisionEvidenceByHash[newHash]
