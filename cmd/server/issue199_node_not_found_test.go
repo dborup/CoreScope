@@ -1,0 +1,155 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gorilla/mux"
+)
+
+// #199: a 404 from /api/nodes/{pubkey} carries what the instance still knows
+// about the key -- its inactive_nodes row and/or its observer row -- so the
+// node page can explain the state instead of dead-ending on "Node not found".
+
+const (
+	issue199InactiveObs = "b199000000000000000000000000000000000000000000000000000000000001"
+	issue199ObsOnly     = "b199000000000000000000000000000000000000000000000000000000000002"
+	issue199Unknown     = "b199000000000000000000000000000000000000000000000000000000000003"
+)
+
+// Decoded locally (not via the server's types) so the contract is pinned by
+// its JSON field names.
+type issue199Inactive struct {
+	PublicKey string `json:"public_key"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	LastSeen  string `json:"last_seen"`
+}
+
+type issue199Observer struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	LastSeen string `json:"last_seen"`
+}
+
+func issue199Get(t *testing.T, router *mux.Router, pubkey string) (int, map[string]json.RawMessage) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/nodes/"+pubkey, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode %q: %v", w.Body.String(), err)
+	}
+	return w.Code, body
+}
+
+func issue199Seed(t *testing.T, srv *Server) {
+	t.Helper()
+	ensureInactiveNodesTable(t, srv)
+	if _, err := srv.db.conn.Exec(`INSERT INTO inactive_nodes (public_key, name, role, last_seen, first_seen) VALUES (?, 'Quiet Repeater', 'repeater', '2026-09-24T15:35:00Z', '2026-09-11T00:00:00Z')`, issue199InactiveObs); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []struct{ id, name string }{
+		{strings.ToUpper(issue199InactiveObs), "Quiet Observer"},
+		{strings.ToUpper(issue199ObsOnly), "Listener Only"},
+	} {
+		if _, err := srv.db.conn.Exec(`INSERT INTO observers (id, name, last_seen, first_seen) VALUES (?, ?, '2026-10-04T04:23:00Z', '2026-09-11T00:00:00Z')`, o.id, o.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestNodeDetail404CarriesInactiveNodeAndObserver(t *testing.T) {
+	srv, router := setupTestServer(t)
+	issue199Seed(t, srv)
+
+	code, body := issue199Get(t, router, issue199InactiveObs)
+	if code != 404 {
+		t.Fatalf("status=%d, want 404 (the node is not in nodes)", code)
+	}
+	var inactive issue199Inactive
+	if err := json.Unmarshal(body["inactive_node"], &inactive); err != nil {
+		t.Fatalf("inactive_node missing or malformed: %v (body %v)", err, body)
+	}
+	if inactive.PublicKey != issue199InactiveObs || inactive.Name != "Quiet Repeater" || inactive.Role != "repeater" || inactive.LastSeen != "2026-09-24T15:35:00Z" {
+		t.Errorf("inactive_node=%+v", inactive)
+	}
+	var obs issue199Observer
+	if err := json.Unmarshal(body["observer"], &obs); err != nil {
+		t.Fatalf("observer missing or malformed: %v (body %v)", err, body)
+	}
+	if obs.ID != strings.ToUpper(issue199InactiveObs) || obs.Name != "Quiet Observer" || obs.LastSeen != "2026-10-04T04:23:00Z" {
+		t.Errorf("observer=%+v", obs)
+	}
+
+	// Upper-case path (as an observer id) finds the same rows.
+	if _, body := issue199Get(t, router, strings.ToUpper(issue199InactiveObs)); body["inactive_node"] == nil {
+		t.Error("upper-case pubkey did not find the inactive_nodes row")
+	}
+}
+
+func TestNodeDetail404ObserverWithoutNodeRecord(t *testing.T) {
+	srv, router := setupTestServer(t)
+	issue199Seed(t, srv)
+
+	code, body := issue199Get(t, router, issue199ObsOnly)
+	if code != 404 {
+		t.Fatalf("status=%d, want 404", code)
+	}
+	if body["inactive_node"] != nil {
+		t.Errorf("unexpected inactive_node: %s", body["inactive_node"])
+	}
+	var obs issue199Observer
+	if err := json.Unmarshal(body["observer"], &obs); err != nil || obs.Name != "Listener Only" {
+		t.Errorf("observer=%+v err=%v", obs, err)
+	}
+}
+
+func TestNodeDetail404UnknownStaysBare(t *testing.T) {
+	srv, router := setupTestServer(t)
+	issue199Seed(t, srv)
+
+	code, body := issue199Get(t, router, issue199Unknown)
+	if code != 404 || len(body) != 1 || body["error"] == nil {
+		t.Errorf("status=%d body=%v, want 404 with only an error field", code, body)
+	}
+}
+
+// Without an inactive_nodes table (minimal schemas) the observer still counts.
+func TestNodeDetail404WithoutInactiveTable(t *testing.T) {
+	srv, router := setupTestServer(t)
+	if _, err := srv.db.conn.Exec(`INSERT INTO observers (id, name, last_seen) VALUES (?, 'Listener Only', '2026-10-04T04:23:00Z')`, strings.ToUpper(issue199ObsOnly)); err != nil {
+		t.Fatal(err)
+	}
+	code, body := issue199Get(t, router, issue199ObsOnly)
+	if code != 404 || body["observer"] == nil || body["inactive_node"] != nil {
+		t.Errorf("status=%d body=%v", code, body)
+	}
+}
+
+// Blacklisted or hidden identities get the bare 404: nothing about the rows leaks.
+func TestNodeDetail404HiddenIdentityStaysBare(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*Server)
+	}{
+		{"node blacklist", func(s *Server) { s.cfg.SetNodeBlacklist([]string{issue199InactiveObs}) }},
+		{"observer blacklist", func(s *Server) { s.cfg.ObserverBlacklist = []string{strings.ToUpper(issue199InactiveObs)} }},
+		{"hidden inactive name", func(s *Server) { s.cfg.SetHiddenNamePrefixes([]string{"Quiet Rep"}) }},
+		{"hidden observer name", func(s *Server) { s.cfg.SetHiddenNamePrefixes([]string{"Quiet Obs"}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, router := setupTestServer(t)
+			issue199Seed(t, srv)
+			tc.setup(srv)
+			code, body := issue199Get(t, router, issue199InactiveObs)
+			if code != 404 || len(body) != 1 || body["error"] == nil {
+				t.Errorf("status=%d body=%v, want bare 404", code, body)
+			}
+		})
+	}
+}
