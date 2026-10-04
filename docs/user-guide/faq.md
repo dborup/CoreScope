@@ -39,7 +39,7 @@ Faded markers indicate **stale** nodes — they haven't been heard recently. The
 
 ## 8. Can I run CoreScope without MQTT?
 
-Yes. You can POST packets directly to the `/api/packets` endpoint using the API key. However, MQTT is the standard way to ingest data from mesh observers.
+No. Packets are ingested only through MQTT: observers publish to a broker and the ingestor (`cmd/ingestor`) subscribes, decodes and writes them to the database. The web server is read-only; it serves the UI and the REST API from that database and cannot ingest packets itself.
 
 ## 9. How do I change the map's default location?
 

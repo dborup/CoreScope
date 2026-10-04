@@ -1,0 +1,246 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/mux"
+)
+
+// POST /api/packets (#223) inserted into transmissions, observers and
+// observations on the server's mode=ro handle (#1283), so every call failed
+// with a 500 carrying the raw SQLite error. It was removed: ingest goes
+// through MQTT and cmd/ingestor. These tests pin what is left.
+
+const removedPostAPIKey = "test-secret-key-strong-enough"
+
+// removedPostPacketBody is a valid FLOOD/ADVERT body that the old handler
+// accepted (it decoded, then failed on the INSERT).
+const removedPostPacketBody = `{"hex":"110011223344556677889900AABBCCDD","observer":"obs1","snr":5.5,"rssi":-72}`
+
+// readOnlyPacketServer seeds a file DB, opens it the way main.go does
+// (OpenDB, mode=ro) and registers the API routes with a valid API key.
+func readOnlyPacketServer(t *testing.T) (dbPath string, router *mux.Router) {
+	t.Helper()
+	dbPath = filepath.Join(t.TempDir(), "ro.db")
+	now := time.Now().UTC()
+	seedTestDBRows(t, dbPath, 3, 2, func(i int) (string, int64) {
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		return ts.Format(time.RFC3339), ts.Unix()
+	})
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.conn.Close() })
+	srv := NewServer(db, &Config{Port: 3000, APIKey: removedPostAPIKey}, NewHub())
+	router = mux.NewRouter()
+	srv.RegisterRoutes(router)
+	return dbPath, router
+}
+
+// packetTableCounts reads the row counts of the tables the old handler wrote,
+// through a separate connection.
+func packetTableCounts(t *testing.T, dbPath string) map[string]int {
+	t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	out := map[string]int{}
+	for _, table := range []string{"transmissions", "observations", "observers"} {
+		var n int
+		if err := conn.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		out[table] = n
+	}
+	return out
+}
+
+func postRemovedPacket(router http.Handler) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/api/packets", strings.NewReader(removedPostPacketBody))
+	req.Header.Set("X-API-Key", removedPostAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// On the API router, POST /api/packets now hits the GET route's path with the
+// wrong method: gorilla/mux answers 405 before any handler or DB access. A
+// valid key and a decodable body make no difference, and the read-only DB is
+// left untouched.
+func TestPostPacketsRemovedReturns405OnReadOnlyDB(t *testing.T) {
+	dbPath, router := readOnlyPacketServer(t)
+	before := packetTableCounts(t, dbPath)
+
+	w := postRemovedPacket(router)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/packets: want 405, got %d (body: %q)", w.Code, w.Body.String())
+	}
+	if body := strings.ToLower(w.Body.String()); strings.Contains(body, "sqlite") || strings.Contains(body, "readonly") || strings.Contains(body, "insert") {
+		t.Errorf("response leaks database error text: %q", w.Body.String())
+	}
+	if after := packetTableCounts(t, dbPath); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("packet tables changed: before %v, after %v", before, after)
+	}
+}
+
+// The other /api/packets routes keep their registration. Matching does not
+// run handlers, so this pins only the routing, not handler output.
+func TestPacketsRoutesSurviveRemoval(t *testing.T) {
+	_, router := readOnlyPacketServer(t)
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/api/packets"},
+		{"GET", "/api/packets/timestamps"},
+		{"POST", "/api/packets/observations"},
+		{"GET", "/api/packets/abc123"},
+		{"GET", "/api/packets/abc123/path"},
+		{"POST", "/api/decode"},
+	} {
+		var m mux.RouteMatch
+		if !router.Match(httptest.NewRequest(c.method, c.path, nil), &m) || m.MatchErr != nil {
+			t.Errorf("%s %s: no longer routed (err %v)", c.method, c.path, m.MatchErr)
+		}
+	}
+}
+
+// The served OpenAPI spec keeps GET /api/packets and drops the POST.
+func TestOpenAPISpecHasNoPostPackets(t *testing.T) {
+	_, router := readOnlyPacketServer(t)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/spec", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/spec: want 200, got %d", w.Code)
+	}
+	var spec struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
+		t.Fatal(err)
+	}
+	ops := spec.Paths["/api/packets"]
+	if _, ok := ops["get"]; !ok {
+		t.Errorf("/api/packets lost its get operation: %v", ops)
+	}
+	if _, ok := ops["post"]; ok {
+		t.Errorf("/api/packets still documents a post operation")
+	}
+}
+
+// The served spec is built by walking the router, so a description left in
+// routeDescriptions for a removed route (like "POST /api/packets") never
+// shows up there and would rot silently. Every description must name a
+// registered method and path.
+func TestOpenAPIDescriptionsHaveRoutes(t *testing.T) {
+	_, router := readOnlyPacketServer(t)
+	registered := map[string]bool{}
+	router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		path, err := route.GetPathTemplate()
+		if err != nil {
+			return nil
+		}
+		methods, _ := route.GetMethods()
+		for _, m := range methods {
+			registered[m+" "+path] = true
+		}
+		return nil
+	})
+	for key := range routeDescriptions() {
+		if !registered[key] {
+			t.Errorf("routeDescriptions has %q, but no such route is registered", key)
+		}
+	}
+}
+
+// main.go mounts a catch-all SPA handler after the API routes. With it in
+// place, gorilla/mux lets the catch-all win over the method mismatch, so a
+// POST to the removed endpoint is served index.html like any other unmatched
+// path (pre-existing fallback behaviour, not specific to #223). Pin that it
+// is the SPA page, not JSON, and that nothing is written.
+func TestPostPacketsRemovedFallsThroughToSPAInProductionRouter(t *testing.T) {
+	dbPath, router := readOnlyPacketServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	router.PathPrefix("/").Handler(wsOrStatic(NewHub(), spaHandler(dir, http.FileServer(http.Dir(dir)))))
+	before := packetTableCounts(t, dbPath)
+
+	w := postRemovedPacket(router)
+	if w.Code != http.StatusOK || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") || w.Body.String() != "<html>SPA</html>" {
+		t.Fatalf("POST /api/packets with SPA fallback: want 200 text/html index.html, got %d %q %q",
+			w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+	if after := packetTableCounts(t, dbPath); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("packet tables changed: before %v, after %v", before, after)
+	}
+}
+
+// packetTableInsertPattern matches an INSERT or REPLACE into one of the
+// ingestor-owned packet tables, quoted or not, across line breaks.
+var packetTableInsertPattern = regexp.MustCompile("(?i)\\b(INSERT\\s+(OR\\s+\\w+\\s+)?INTO|REPLACE\\s+INTO)\\s+[\"`\\[]?(transmissions|observations|observers|dropped_packets)[\"`\\]]?\\b")
+
+// TestServerHasNoPacketTableInserts forbids INSERT into the packet tables in
+// every non-test cmd/server source file, with no exceptions. The documented
+// write exceptions do not touch these tables: ping_score_history.go writes
+// its own history database and backup.go only runs VACUUM INTO.
+func TestServerHasNoPacketTableInserts(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var violations []string
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, loc := range packetTableInsertPattern.FindAllIndex(b, -1) {
+			line := 1 + strings.Count(string(b[:loc[0]]), "\n")
+			violations = append(violations, fmt.Sprintf("%s:%d: %s", name, line, strings.Join(strings.Fields(string(b[loc[0]:loc[1]])), " ")))
+		}
+	}
+	if len(violations) > 0 {
+		t.Errorf("cmd/server inserts into the packet tables; ingest belongs in cmd/ingestor (#223, #1283):\n  %s", strings.Join(violations, "\n  "))
+	}
+}
+
+// The guard must match the statements the removed handler issued.
+func TestPacketTableInsertPatternIsSensitive(t *testing.T) {
+	for _, s := range []string{
+		"INSERT INTO transmissions (hash, raw_hex) VALUES (?, ?)",
+		"INSERT OR IGNORE INTO observers (id, name, last_seen, first_seen) VALUES (?, ?, ?, ?)",
+		"INSERT INTO observations (transmission_id, observer_idx) VALUES (?, ?)",
+		"insert into\n\t\"observations\" (x) values (1)",
+		"REPLACE INTO dropped_packets (id) VALUES (1)",
+	} {
+		if !packetTableInsertPattern.MatchString(s) {
+			t.Errorf("must match %q", s)
+		}
+	}
+	for _, s := range []string{
+		"INSERT INTO ping_score_history_entries (a) VALUES (1)",
+		"SELECT COUNT(*) FROM observations",
+		"INSERT INTO observations_archive (a) VALUES (1)",
+		"tx_inserted",
+	} {
+		if packetTableInsertPattern.MatchString(s) {
+			t.Errorf("must not match %q", s)
+		}
+	}
+}

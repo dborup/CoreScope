@@ -184,30 +184,6 @@ message PacketDetailResponse {
   repeated Observation observations = 5;
 }
 
-// POST /api/packets — ingest a raw packet.
-message PacketIngestRequest {
-  // Raw hex-encoded packet (required).
-  string hex = 1;
-  // Observer device ID.
-  optional string observer = 2;
-  // Signal-to-noise ratio (dB).
-  optional double snr = 3;
-  // Received signal strength (dBm).
-  optional double rssi = 4;
-  // IATA region code.
-  optional string region = 5;
-  // Pre-computed content hash.
-  optional string hash = 6;
-}
-
-// POST /api/packets — response.
-message PacketIngestResponse {
-  // Observation or transmission ID.
-  int64 id = 1;
-  // Full structured decode result.
-  DecodedResult decoded = 2;
-}
-
 // POST /api/decode — decode without storing.
 message DecodeRequest {
   // Raw hex-encoded packet (required).
