@@ -58,6 +58,9 @@ type Server struct {
 	// miss moves through handleStats. Nil in production.
 	statsHook func(stage string)
 
+	// Throttles the log of failed GET /api/nodes/{pubkey} 404 lookups (#208).
+	missingNodeLog missingNodeLookupLog
+
 	// Shared channel proposals; built lazily from cfg/db (tests may preset).
 	proposals     *channelProposalService
 	proposalsOnce sync.Once
