@@ -635,7 +635,13 @@ func main() {
 
 	// Rehash content hashes in memory in the background (idempotent). The DB
 	// rewrite is the ingestor's (#215); the server never writes.
-	go migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
+	// It walks a snapshot of s.packets taken when it starts, so it waits for the
+	// whole startup load: LoadChunked and the background fill, not just the
+	// first chunk the HTTP listener binds after (#215).
+	go func() {
+		<-store.StartupLoadDone()
+		migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
+	}()
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[server] %v", err)

@@ -29,11 +29,18 @@ import (
 //     applies the same rule, so a server that has not restarted yet and one
 //     that has agree on which row stays;
 //   - the duplicate's observations move to it. An observation the survivor
-//     already has (same observer and path, which idx_observations_dedup
-//     rejects) is dropped instead;
-//   - last_seen becomes the later of the two, route_mask the union, and
-//     first_seen stays the survivor's. A grown route_mask is logged in
-//     route_mask_changes for running servers;
+//     already has (same observer and path, which idx_observations_dedup rejects)
+//     is dropped instead, and the survivor's copy wins, as it does when ingest
+//     meets a repeat reception. The earlier copy could win only by copying every
+//     observation column, the optional ones (resolved_path, raw_hex) included,
+//     over the survivor's row, and by the same in the server's in-memory
+//     observation; what is lost is the dropped copy's SNR, RSSI and time (same
+//     observer, same path), while the transmission keeps the
+//     earliest first_seen;
+//   - the survivor takes the earliest first_seen, the later last_seen and the
+//     union of route_mask (a grown mask is logged in route_mask_changes for
+//     running servers), and every nullable column it has no value for (scope_name,
+//     channel_hash, from_pubkey, ...) from the duplicate; a value it has stays;
 //   - rows hung off the duplicate follow the survivor (ping_triggers), or go
 //     with it when the survivor already has one (route_mask_changes);
 //   - the duplicate row is deleted.
@@ -83,9 +90,19 @@ func (s *Store) migrateContentHashes(ctx context.Context, d *sql.DB) error {
 		pingTriggers:     tableExists(d, "ping_triggers"),
 		routeMaskChanges: tableExists(d, "route_mask_changes"),
 	}
+	fill, err := fillableColumns(d)
+	if err != nil {
+		return fmt.Errorf("columns: %w", err)
+	}
+	ex.fillCols = fill
 	var scanned, rehashed, merged int64
 	var lastID int64
 	for {
+		// A cancel (shutdown) is an error, not a normal end: the run must be
+		// recorded as unfinished so the next start resumes it.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		stale, next, n, err := scanStaleContentHashes(ctx, d, lastID, contentHashMigrationBatchSize)
 		if err != nil {
 			return fmt.Errorf("scan: %w", err)
@@ -133,6 +150,33 @@ func tableExists(d *sql.DB, name string) bool {
 type hashMigrationTables struct {
 	pingTriggers     bool
 	routeMaskChanges bool
+	// fillCols are the nullable transmissions columns a merge fills from the
+	// duplicate when the survivor has none: every one the migration does not
+	// merge by its own rule.
+	fillCols []string
+}
+
+// fillableColumns lists the nullable columns of transmissions a merge fills
+// with COALESCE. Read from the table, so a column added later is covered.
+func fillableColumns(d *sql.DB) ([]string, error) {
+	rows, err := d.Query(`SELECT name FROM pragma_table_info('transmissions') WHERE "notnull" = 0 AND pk = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		switch name {
+		case "first_seen", "last_seen", "route_mask", "created_at", "hash", "raw_hex":
+			continue // merged by their own rule, or never differ
+		}
+		cols = append(cols, name)
+	}
+	return cols, rows.Err()
 }
 
 // scanStaleContentHashes reads the next batch of rows after afterID and returns
@@ -252,11 +296,17 @@ func mergeTransmissions(ctx context.Context, tx *sql.Tx, winner, loser int64, ex
 	if err := tx.QueryRowContext(ctx, `SELECT route_mask FROM transmissions WHERE id = ?`, winner).Scan(&oldMask); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE transmissions SET
-			last_seen = MAX(last_seen, (SELECT last_seen FROM transmissions WHERE id = ?)),
-			route_mask = CASE WHEN route_mask IS NULL AND (SELECT route_mask FROM transmissions WHERE id = ?) IS NULL THEN NULL
-				ELSE COALESCE(route_mask, 0) | COALESCE((SELECT route_mask FROM transmissions WHERE id = ?), 0) END
-		WHERE id = ?`, loser, loser, loser, winner); err != nil {
+	set := "first_seen = MIN(first_seen, (SELECT first_seen FROM transmissions WHERE id = ?)),\n" +
+		"last_seen = MAX(last_seen, (SELECT last_seen FROM transmissions WHERE id = ?)),\n" +
+		"route_mask = CASE WHEN route_mask IS NULL AND (SELECT route_mask FROM transmissions WHERE id = ?) IS NULL THEN NULL\n" +
+		"ELSE COALESCE(route_mask, 0) | COALESCE((SELECT route_mask FROM transmissions WHERE id = ?), 0) END"
+	args := []interface{}{loser, loser, loser, loser}
+	for _, col := range ex.fillCols {
+		set += fmt.Sprintf(",\n\"%s\" = COALESCE(\"%s\", (SELECT \"%s\" FROM transmissions WHERE id = ?))", col, col, col)
+		args = append(args, loser)
+	}
+	args = append(args, winner)
+	if _, err := tx.ExecContext(ctx, "UPDATE transmissions SET "+set+" WHERE id = ?", args...); err != nil {
 		return err
 	}
 

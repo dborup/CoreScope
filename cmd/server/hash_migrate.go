@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -24,6 +25,16 @@ import (
 // has, same observer and path, is dropped, as the DB's dedup index drops it),
 // and the duplicate leaves every index.
 //
+// A merge keeps what the duplicate knew, as the ingestor does: the earliest
+// first_seen (the survivor stays where it is in s.packets and the byPayloadType
+// and byNode lists it is in, which are then put back in order), and the scope and
+// route type the survivor has no value for. decoded_json and payload_type are not
+// filled in memory: the content hash includes the payload type and the payload,
+// so the duplicates agree on them, and filling would change the survivor's
+// charge and its index membership. Observations that collide on observer and
+// path keep the survivor's copy (see the ingestor); the earliest first_seen is
+// what carries the earliest time.
+//
 // Relay indexes are the one thing not carried over. A merged observation's
 // resolved relays are not re-derived for the survivor (that needs resolved_path
 // from the DB, and the survivor is not re-indexed in memory); they come back at
@@ -31,8 +42,9 @@ import (
 // attributed to nothing, where before the merge they were attributed to a
 // ghost transmission that counted the same packet twice.
 
-// hashRekeySweeps counts the passes over the whole of nodeHashes that renaming
-// keys needed. Test observability only: the targeted rename does none.
+// hashRekeySweeps counts the passes over all of nodeHashes or byNode that a
+// batch needed. Test observability only: with the resolved-pubkey index on, the
+// keys of a transmission are found through the transmission and none is needed.
 var hashRekeySweeps atomic.Int64
 
 type hashUpdate struct {
@@ -118,20 +130,20 @@ func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate) (rehashed, m
 	// The batch was chosen under a read lock: drop what changed since
 	// (eviction, a concurrent rehash).
 	live := updates[:0]
-	renames := make(map[string]string, len(updates))
 	for _, u := range updates {
 		if s.byTxID[u.tx.ID] != u.tx || u.tx.Hash != u.oldHash {
 			continue
 		}
 		live = append(live, u)
-		renames[u.oldHash] = u.newHash
 	}
 	if len(live) == 0 {
 		return 0, 0
 	}
-	s.rekeyNodeHashes(renames)
+	keys := &nodeKeyFinder{s: s}
+	s.rekeyNodeHashes(live, keys)
 
 	m := newHashMerge()
+	m.keys = keys
 	for _, u := range live {
 		tx := u.tx
 		if s.byHash[u.oldHash] == tx {
@@ -160,17 +172,81 @@ func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate) (rehashed, m
 	return len(live), merged
 }
 
+// nodeKeyFinder finds the pubkeys a transmission is indexed under in byNode and
+// nodeHashes without walking those indexes. A transmission is indexed under its
+// decoded pubkeys, the relays the path_json fallback resolved (recorded in
+// fallbackByNode) and the relays its observations' resolved_path names; the
+// last are recorded only as hashes, in the resolved-pubkey index, so they are
+// mapped back to pubkeys through the pubkeys nodeHashes holds. That map costs
+// one pass over the keys of nodeHashes (the nodes, not their transmissions),
+// built on first use and only when a transmission of the batch has resolved
+// relays.
+type nodeKeyFinder struct {
+	s      *PacketStore
+	byHash map[uint64][]string
+}
+
+// usable reports whether the keys can be found this way. With the
+// resolved-pubkey index off nothing records a transmission's resolved relays.
+func (f *nodeKeyFinder) usable() bool { return f.s.useResolvedPathIndex }
+
+// keys returns the pubkeys tx is indexed under. Must hold s.mu.
+func (f *nodeKeyFinder) keys(tx *StoreTx) []string {
+	var out []string
+	if decoded := tx.ParsedDecoded(); decoded != nil {
+		for _, field := range [...]string{"pubKey", "destPubKey", "srcPubKey"} {
+			if v, ok := decoded[field].(string); ok && v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	out = append(out, f.s.fallbackByNode[tx]...)
+	if rev := f.s.resolvedPubkeyReverse[tx.ID]; len(rev) > 0 {
+		if f.byHash == nil {
+			f.byHash = make(map[uint64][]string, len(f.s.nodeHashes))
+			for pk := range f.s.nodeHashes {
+				h := resolvedPubkeyHash(pk)
+				f.byHash[h] = append(f.byHash[h], pk)
+			}
+		}
+		for _, h := range rev {
+			out = append(out, f.byHash[h]...)
+		}
+	}
+	return out
+}
+
 // rekeyNodeHashes renames the hash keys of s.nodeHashes. nodeHashes[pubkey] is
 // the set of hashes of the transmissions byNode[pubkey] holds; a transmission
 // that changes hash must change its key in every set it is in, or a later
 // observation of it is indexed a second time and eviction, which removes the
 // key by the transmission's current hash, leaves the old one behind.
 //
-// The pubkeys a transmission is indexed under are not recorded per
-// transmission (resolved relays are only ever read back from the DB), so this
-// walks the whole index once per batch, a lookup per entry and no allocation
-// for the entries that do not change.
-func (s *PacketStore) rekeyNodeHashes(renames map[string]string) {
+// The keys of each transmission are found through the transmission
+// (nodeKeyFinder), so a batch costs what the batch holds. Only with the
+// resolved-pubkey index off, where a transmission's resolved relays are
+// recorded nowhere, does it fall back to one pass over all of nodeHashes.
+func (s *PacketStore) rekeyNodeHashes(updates []hashUpdate, keys *nodeKeyFinder) {
+	if !keys.usable() {
+		renames := make(map[string]string, len(updates))
+		for _, u := range updates {
+			renames[u.oldHash] = u.newHash
+		}
+		s.rekeyNodeHashesSweep(renames)
+		return
+	}
+	for _, u := range updates {
+		for _, pk := range keys.keys(u.tx) {
+			if hashes := s.nodeHashes[pk]; hashes[u.oldHash] {
+				delete(hashes, u.oldHash)
+				hashes[u.newHash] = true
+			}
+		}
+	}
+}
+
+// rekeyNodeHashesSweep is the fallback: one pass over all of nodeHashes.
+func (s *PacketStore) rekeyNodeHashesSweep(renames map[string]string) {
 	hashRekeySweeps.Add(1)
 	var moved []string
 	for _, hashes := range s.nodeHashes {
@@ -225,6 +301,16 @@ func (s *PacketStore) moveObservations(winner, loser *StoreTx, m *hashMerge) {
 	if loser.LatestSeen > winner.LatestSeen {
 		winner.LatestSeen = loser.LatestSeen
 	}
+	if loser.FirstSeen != "" && loser.FirstSeen < winner.FirstSeen {
+		winner.FirstSeen = loser.FirstSeen
+		m.firstSeenMoved[winner] = struct{}{}
+	}
+	if winner.ScopeName == "" {
+		winner.ScopeName = loser.ScopeName
+	}
+	if winner.RouteType == nil {
+		winner.RouteType = loser.RouteType
+	}
 	winner.pathHashSizeMask |= loser.pathHashSizeMask
 	if loser.routeMaskKnown {
 		winner.routeMask |= loser.routeMask
@@ -239,6 +325,8 @@ type hashMerge struct {
 	winners          map[*StoreTx]string // survivor → its best path before the first merge
 	dropped          map[int]struct{}    // observation ids dropped as duplicates
 	droppedObservers map[string]struct{}
+	firstSeenMoved   map[*StoreTx]struct{} // survivors that took an earlier first_seen
+	keys             *nodeKeyFinder
 }
 
 func newHashMerge() *hashMerge {
@@ -247,6 +335,7 @@ func newHashMerge() *hashMerge {
 		winners:          make(map[*StoreTx]string),
 		dropped:          make(map[int]struct{}),
 		droppedObservers: make(map[string]struct{}),
+		firstSeenMoved:   make(map[*StoreTx]struct{}),
 	}
 }
 
@@ -269,6 +358,17 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 		return 0
 	}
 	affectedPayloadTypes := make(map[int]struct{})
+	// The pubkeys the duplicates are indexed under, read before their records
+	// (fallback relays, resolved-pubkey index) are removed below.
+	var nodePks map[string]struct{}
+	if m.keys != nil && m.keys.usable() {
+		nodePks = make(map[string]struct{})
+		for _, l := range m.losers {
+			for _, pk := range m.keys.keys(l) {
+				nodePks[pk] = struct{}{}
+			}
+		}
+	}
 	for _, l := range m.losers {
 		delete(s.byTxID, l.ID)
 		// Observations moved or were credited above: this is the tx alone.
@@ -293,7 +393,7 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 		l.Observations = nil
 		l.ObservationCount = 0
 	}
-	s.removeTxsFromByNode(m.loserSet)
+	s.removeTxsFromByNode(m.loserSet, nodePks)
 	for pt := range affectedPayloadTypes {
 		kept := slices.DeleteFunc(s.byPayloadType[pt], func(t *StoreTx) bool { return m.loserSet[t] })
 		if len(kept) == 0 {
@@ -315,6 +415,7 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 	}
 	s.compactDistIndex(m.loserSet)
 	s.packets = slices.DeleteFunc(s.packets, func(t *StoreTx) bool { return m.loserSet[t] })
+	s.reorderAfterFirstSeenMoved(m)
 
 	// A survivor now holds observations it did not have: its best one may be a
 	// different path, which moves it in the path-derived indexes, and its
@@ -344,14 +445,16 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 	return len(m.losers)
 }
 
-// removeTxsFromByNode removes the given transmissions from every byNode list
+// removeTxsFromByNode removes the given transmissions from the byNode lists
 // and rebuilds nodeHashes for each list it changed, from the transmissions the
 // list still holds: a duplicate and its survivor share one hash after the
 // merge, so the key cannot be deleted by hash without also dropping the
-// survivor's, and a key the duplicate alone held must go. One pass over the
-// lists, which only does work for lists that contain a removed transmission.
-func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool) {
-	for pk, list := range s.byNode {
+// survivor's, and a key the duplicate alone held must go. pks are the pubkeys
+// the transmissions are indexed under (nodeKeyFinder); nil means unknown, and
+// every list is looked at.
+func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool, pks map[string]struct{}) {
+	one := func(pk string) {
+		list := s.byNode[pk]
 		hit := false
 		for _, t := range list {
 			if remove[t] {
@@ -360,13 +463,13 @@ func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool) {
 			}
 		}
 		if !hit {
-			continue
+			return
 		}
 		kept := slices.DeleteFunc(list, func(t *StoreTx) bool { return remove[t] })
 		if len(kept) == 0 {
 			delete(s.byNode, pk)
 			delete(s.nodeHashes, pk)
-			continue
+			return
 		}
 		s.byNode[pk] = kept
 		hashes := make(map[string]bool, len(kept))
@@ -374,5 +477,52 @@ func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool) {
 			hashes[t.Hash] = true
 		}
 		s.nodeHashes[pk] = hashes
+	}
+	if pks != nil {
+		for pk := range pks {
+			one(pk)
+		}
+		return
+	}
+	hashRekeySweeps.Add(1)
+	for pk := range s.byNode {
+		one(pk)
+	}
+}
+
+// reorderAfterFirstSeenMoved puts the lists that are ordered by first_seen back
+// in order after a survivor took an earlier one: s.packets (eviction cuts from
+// its head), the byPayloadType lists and the byNode lists the survivor is in.
+// Stable, so equal times keep their load order. Only runs when it happened.
+func (s *PacketStore) reorderAfterFirstSeenMoved(m *hashMerge) {
+	if len(m.firstSeenMoved) == 0 {
+		return
+	}
+	byFirstSeen := func(a, b *StoreTx) int { return strings.Compare(a.FirstSeen, b.FirstSeen) }
+	slices.SortStableFunc(s.packets, byFirstSeen)
+	types := make(map[int]struct{})
+	pks := make(map[string]struct{})
+	for w := range m.firstSeenMoved {
+		if w.PayloadType != nil {
+			types[*w.PayloadType] = struct{}{}
+		}
+		if m.keys != nil && m.keys.usable() {
+			for _, pk := range m.keys.keys(w) {
+				pks[pk] = struct{}{}
+			}
+		}
+	}
+	for pt := range types {
+		slices.SortStableFunc(s.byPayloadType[pt], byFirstSeen)
+	}
+	if m.keys != nil && m.keys.usable() {
+		for pk := range pks {
+			slices.SortStableFunc(s.byNode[pk], byFirstSeen)
+		}
+		return
+	}
+	hashRekeySweeps.Add(1)
+	for _, list := range s.byNode {
+		slices.SortStableFunc(list, byFirstSeen)
 	}
 }
