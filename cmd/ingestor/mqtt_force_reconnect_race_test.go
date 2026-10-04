@@ -25,13 +25,15 @@ func (t *fakeToken) WaitTimeout(time.Duration) bool { return true }
 func (t *fakeToken) Done() <-chan struct{}          { ch := make(chan struct{}); close(ch); return ch }
 func (t *fakeToken) Error() error                   { return t.err }
 
-// fakeClient implements mqtt.Client, recording calls to the three methods
+// fakeClient implements mqtt.Client, recording calls to the methods
 // buildForceReconnectFn actually uses (IsConnectionOpen, Disconnect,
-// Connect). Every other method panics — buildForceReconnectFn must never
+// Connect; IsConnected after a Connect() error, #102). Every other method
+// panics — buildForceReconnectFn must never
 // touch subscriptions, publishes, or options, so a call there indicates the
 // fix drifted from its intended scope.
 type fakeClient struct {
 	isConnectionOpen bool
+	isConnected      bool
 	connectErr       error
 
 	disconnectCalled bool
@@ -39,7 +41,7 @@ type fakeClient struct {
 	callOrder        []string
 }
 
-func (c *fakeClient) IsConnected() bool { panic("not used by buildForceReconnectFn") }
+func (c *fakeClient) IsConnected() bool { return c.isConnected }
 func (c *fakeClient) IsConnectionOpen() bool {
 	c.callOrder = append(c.callOrder, "IsConnectionOpen")
 	return c.isConnectionOpen
