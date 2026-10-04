@@ -150,33 +150,49 @@ func tableExists(d *sql.DB, name string) bool {
 type hashMigrationTables struct {
 	pingTriggers     bool
 	routeMaskChanges bool
-	// fillCols are the nullable transmissions columns a merge fills from the
-	// duplicate when the survivor has none: every one the migration does not
-	// merge by its own rule.
+	// fillCols are the columns of fillColumns the table has: a merge fills them
+	// from the duplicate when the survivor's value is NULL.
 	fillCols []string
 }
 
-// fillableColumns lists the nullable columns of transmissions a merge fills
-// with COALESCE. Read from the table, so a column added later is covered.
+// fillColumns are the nullable columns of transmissions a merge fills with
+// COALESCE: the ones that describe the packet and are NULL only because the
+// row that was ingested first did not have the value (an older schema, a copy
+// that was not transport-scoped). It is an allow-list on purpose: a nullable
+// column added later may use NULL for "pending" (a backfill that has not run
+// yet), and filling it from a duplicate would pass that off as a value. A new
+// column that should be filled is added here, with a test.
+var fillColumns = []string{
+	"route_type", "payload_type", "payload_version", "decoded_json",
+	"from_pubkey", "channel_hash", "scope_name",
+}
+
+// fillableColumns returns the columns of fillColumns that transmissions has, in
+// the order of fillColumns: an older schema lacks some of them.
 func fillableColumns(d *sql.DB) ([]string, error) {
-	rows, err := d.Query(`SELECT name FROM pragma_table_info('transmissions') WHERE "notnull" = 0 AND pk = 0`)
+	rows, err := d.Query(`SELECT name FROM pragma_table_info('transmissions')`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var cols []string
+	have := make(map[string]bool)
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		switch name {
-		case "first_seen", "last_seen", "route_mask", "created_at", "hash", "raw_hex":
-			continue // merged by their own rule, or never differ
-		}
-		cols = append(cols, name)
+		have[name] = true
 	}
-	return cols, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var cols []string
+	for _, c := range fillColumns {
+		if have[c] {
+			cols = append(cols, c)
+		}
+	}
+	return cols, nil
 }
 
 // scanStaleContentHashes reads the next batch of rows after afterID and returns

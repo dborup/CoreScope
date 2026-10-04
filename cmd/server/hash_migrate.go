@@ -35,6 +35,28 @@ import (
 // path keep the survivor's copy (see the ingestor); the earliest first_seen is
 // what carries the earliest time.
 //
+// Scope fill. The ingestor fills a NULL scope_name and keeps a value, "" (a
+// transport-scoped packet whose region is unknown) included. In memory NULL
+// and "" are both "" (nullStrVal), and StoreTx has no spare byte for a flag
+// (it stays 320 bytes), so a survivor whose ScopeName is "" is filled from the
+// duplicate. The two agree for a NULL survivor, the usual one: a row written
+// before scope_name existed, merged with the same packet heard since. They
+// differ for a survivor with "" and a duplicate with a region, which needs the
+// same packet heard twice, once with a region key configured that matched its
+// transport code and once without (the keys were changed in between). There
+// the DB keeps "" and memory shows the region until the server reloads, which
+// the deploy plan requires after the migration anyway. Filling is the more
+// informative of the two and is never wrong about a region that was matched.
+//
+// Known gap. A reception stored on a row that the in-memory merge has already
+// removed is not picked up until the server reloads: IngestNewObservations
+// finds no transmission for it, and the poller's cursor moves on. It happens in
+// the window between this pass and the ingestor's batch for that row, so the
+// server must be restarted once after the ingestor's migration is done (see
+// the PR's deploy plan). A bounded loser-to-survivor id alias would close it,
+// but it has to live until the ingestor finishes, which the read-only server
+// cannot see, so it is left out.
+//
 // Relay indexes are the one thing not carried over. A merged observation's
 // resolved relays are not re-derived for the survivor (that needs resolved_path
 // from the DB, and the survivor is not re-indexed in memory); they come back at
@@ -46,6 +68,22 @@ import (
 // batch needed. Test observability only: with the resolved-pubkey index on, the
 // keys of a transmission are found through the transmission and none is needed.
 var hashRekeySweeps atomic.Int64
+
+// lockHold accumulates how long the migration held the store's write lock, one
+// sample per batch (NEW-1 of the #215 review: a batch that merges costs time
+// that grows with the store, and staging should be able to read it off the log).
+type lockHold struct {
+	max, total time.Duration
+	batches    int
+}
+
+func (h *lockHold) record(d time.Duration) {
+	h.max = max(h.max, d)
+	h.total += d
+	h.batches++
+}
+
+func millis(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 type hashUpdate struct {
 	tx      *StoreTx
@@ -75,6 +113,7 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 		batchSize = 1
 	}
 	rehashed, merged := 0, 0
+	var hold lockHold
 	indexesReady := false
 	for offset := 0; offset < len(snapshot); offset += batchSize {
 		end := min(offset+batchSize, len(snapshot))
@@ -94,7 +133,9 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 			indexesReady = true
 		}
 		store.mu.Lock()
+		held := time.Now()
 		r, m := store.applyContentHashUpdates(updates)
+		hold.record(time.Since(held))
 		store.mu.Unlock()
 		rehashed += r
 		merged += m
@@ -104,7 +145,8 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 	}
 
 	if rehashed > 0 {
-		log.Printf("[hash-migrate] Rehashed %d transmissions in memory to the current formula, merged %d duplicates", rehashed, merged)
+		log.Printf("[hash-migrate] Rehashed %d transmissions in memory to the current formula, merged %d duplicates; max write-lock hold %.1f ms over %d batches (total %.1f ms)",
+			rehashed, merged, millis(hold.max), hold.batches, millis(hold.total))
 	}
 }
 
@@ -305,6 +347,11 @@ func (s *PacketStore) moveObservations(winner, loser *StoreTx, m *hashMerge) {
 		winner.FirstSeen = loser.FirstSeen
 		m.firstSeenMoved[winner] = struct{}{}
 	}
+	// The ingestor's COALESCE fills a NULL scope_name and keeps any value, ""
+	// (transport-scoped, region unknown) included. StoreTx.ScopeName cannot tell
+	// the two apart (nullStrVal reads NULL as ""), and StoreTx has no padding left
+	// for a flag, so this fills on "": see "Scope fill"
+	// in the file header.
 	if winner.ScopeName == "" {
 		winner.ScopeName = loser.ScopeName
 	}
