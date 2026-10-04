@@ -60,6 +60,11 @@ func (s *Store) StartContentHashMigration(ctx context.Context) {
 var (
 	contentHashMigrationBatchSize = 2000
 	contentHashMigrationYield     = 20 * time.Millisecond
+
+	// contentHashMigrationHook is a test seam, nil in production. It is called
+	// after a batch was scanned and before it is rewritten ("scanned"), and
+	// after the rewrite ("batch"); n is the number of rows scanned so far.
+	contentHashMigrationHook func(stage string, n int)
 )
 
 type staleContentHash struct {
@@ -90,6 +95,9 @@ func (s *Store) migrateContentHashes(ctx context.Context, d *sql.DB) error {
 		}
 		scanned += int64(n)
 		lastID = next
+		if h := contentHashMigrationHook; h != nil {
+			h("scanned", int(scanned))
+		}
 		if len(stale) > 0 {
 			r, m, err := s.rewriteContentHashes(ctx, d, stale, ex)
 			if err != nil {
@@ -97,6 +105,9 @@ func (s *Store) migrateContentHashes(ctx context.Context, d *sql.DB) error {
 			}
 			rehashed += r
 			merged += m
+		}
+		if h := contentHashMigrationHook; h != nil {
+			h("batch", int(scanned))
 		}
 		select {
 		case <-ctx.Done():

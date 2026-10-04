@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -117,6 +118,10 @@ func (d *hm215DB) stale(t testing.TB, groups, dups, singles int) {
 			ts := hm215Time(old + time.Duration(order)*time.Second)
 			d.tx(t, id, raw, fmt.Sprintf("stale-%d-%d", g, k), ts, 4, hm215Advert(pk))
 			d.observation(t, id, 0, `["aa"]`, "", ts) // same in every row: fallback relay
+			// Observer 0 again, with a path of its own: not a duplicate of the
+			// one above or of the other rows' (the dedup key is observer AND
+			// path), so the merge must keep every one of them.
+			d.observation(t, id, 0, fmt.Sprintf(`["%02x"]`, 32+k), "", ts)
 			path, resolved := fmt.Sprintf(`["05","%02x"]`, 16+k), fmt.Sprintf(`[%q,%q]`, acct113PK(5), acct113PK(16+k))
 			if k == dups {
 				// The last row has the longest path: once its observations
@@ -135,7 +140,11 @@ func (d *hm215DB) stale(t testing.TB, groups, dups, singles int) {
 	}
 }
 
-func hm215Open(t testing.TB, d *hm215DB) *PacketStore {
+func hm215Open(t testing.TB, d *hm215DB) *PacketStore { return hm215OpenIdx(t, d, true) }
+
+// hm215OpenIdx opens the store with the resolved-pubkey index on or off (the
+// feature flag; off is the conservative path).
+func hm215OpenIdx(t testing.TB, d *hm215DB, resolvedIndex bool) *PacketStore {
 	t.Helper()
 	db, err := OpenDB(d.path)
 	if err != nil {
@@ -143,6 +152,7 @@ func hm215Open(t testing.TB, d *hm215DB) *PacketStore {
 	}
 	cfg := &PacketStoreConfig{}
 	store := NewPacketStore(db, cfg)
+	store.useResolvedPathIndex = resolvedIndex
 	leak202SeedNodes(store, true) // hop "aa" resolves to a unique node
 	if err := store.Load(); err != nil {
 		t.Fatal(err)
@@ -401,8 +411,10 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 				if tx == nil || tx.ID != g*10+1 {
 					t.Fatalf("group %d survivor = %v, want the lowest id %d", g, tx, g*10+1)
 				}
-				// Per row: (obs0,["aa"]) is shared, plus one own observation.
-				if want := 1 + 3; len(tx.Observations) != want || tx.ObservationCount != want {
+				// (obs0,["aa"]) is shared by the 3 rows; each row has one
+				// observation of its own observer and one of observer 0 with a
+				// path of its own.
+				if want := 1 + 3 + 3; len(tx.Observations) != want || tx.ObservationCount != want {
 					t.Errorf("group %d survivor holds %d observations (count %d), want %d", g, len(tx.Observations), tx.ObservationCount, want)
 				}
 				keys := map[string]bool{}
@@ -458,7 +470,7 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 			}
 			// Every observation of the DB survives, except the 4 identical
 			// (obs0, ["aa"]) ones that merge into 1 per group.
-			if want := 2 /*ballast*/ + 2*(1+3) + 2; s.totalObs != want {
+			if want := 2 /*ballast*/ + 2*(1+3+3) + 2; s.totalObs != want {
 				t.Errorf("totalObs = %d, want %d", s.totalObs, want)
 			}
 			if n := len(s.byObsID); n != s.totalObs {
@@ -502,38 +514,188 @@ func TestHashMigrate_AccountingIsExactAfterTheMerge_215(t *testing.T) {
 // at zero, and a leftover (a node key, a relay record, an advert refcount)
 // shows up as a difference.
 func TestHashMigrate_EvictionReturnsToBaseline_215(t *testing.T) {
-	for _, batch := range []int{1, 3, 1000} {
-		t.Run(fmt.Sprintf("batch%d", batch), func(t *testing.T) {
-			base := hm215Create(t)
-			base.ballast(t)
-			baseline := hm215Open(t, base)
-			want := hm215Snap(baseline)
+	for _, resolvedIndex := range []bool{true, false} {
+		for _, batch := range []int{1, 3, 1000} {
+			t.Run(fmt.Sprintf("resolvedIndex=%v/batch%d", resolvedIndex, batch), func(t *testing.T) {
+				base := hm215Create(t)
+				base.ballast(t)
+				baseline := hm215OpenIdx(t, base, resolvedIndex)
+				want := hm215Snap(baseline)
 
-			d := hm215Create(t)
-			d.ballast(t)
-			d.stale(t, 3, 3, 3)
-			s := hm215Open(t, d)
-			hm215Migrate(s, batch)
-			s.mu.Lock()
-			s.retentionHours = 24 // the stale rows are 3 days old; the ballast is an hour old
-			s.mu.Unlock()
-			if n := s.RunEviction(); n != 3+3 {
-				t.Fatalf("evicted %d transmissions, want the 3 merged groups and 3 singles (6)", n)
-			}
-			acct113Check(t, s, "after evicting the migrated rows")
-			got := hm215Snap(s)
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("store after migrate+evict differs from a store that never had the rows:\n got  %+v\n want %+v", got, want)
-			}
-			s.mu.RLock()
-			defer s.mu.RUnlock()
-			if got.TrackedBytes != want.TrackedBytes {
-				t.Errorf("trackedBytes = %d, want exactly the baseline %d (drift %d)", got.TrackedBytes, want.TrackedBytes, got.TrackedBytes-want.TrackedBytes)
-			}
-			if len(s.fallbackByNode) != len(baseline.fallbackByNode) {
-				t.Errorf("fallbackByNode holds %d records, baseline %d", len(s.fallbackByNode), len(baseline.fallbackByNode))
-			}
-		})
+				d := hm215Create(t)
+				d.ballast(t)
+				d.stale(t, 3, 3, 3)
+				s := hm215OpenIdx(t, d, resolvedIndex)
+				hm215Migrate(s, batch)
+				s.mu.Lock()
+				s.retentionHours = 24 // the stale rows are 3 days old; the ballast is an hour old
+				s.mu.Unlock()
+				if n := s.RunEviction(); n != 3+3 {
+					t.Fatalf("evicted %d transmissions, want the 3 merged groups and 3 singles (6)", n)
+				}
+				acct113Check(t, s, "after evicting the migrated rows")
+				got := hm215Snap(s)
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("store after migrate+evict differs from a store that never had the rows:\n got  %+v\n want %+v", got, want)
+				}
+				s.mu.RLock()
+				defer s.mu.RUnlock()
+				if got.TrackedBytes != want.TrackedBytes {
+					t.Errorf("trackedBytes = %d, want exactly the baseline %d (drift %d)", got.TrackedBytes, want.TrackedBytes, got.TrackedBytes-want.TrackedBytes)
+				}
+				if len(s.fallbackByNode) != len(baseline.fallbackByNode) {
+					t.Errorf("fallbackByNode holds %d records, baseline %d", len(s.fallbackByNode), len(baseline.fallbackByNode))
+				}
+			})
+		}
+	}
+}
+
+// Renaming the nodeHashes keys of a batch must cost what the batch holds, not
+// what the whole index holds: with the resolved-pubkey index on, the keys of a
+// transmission are found through the transmission (its decoded pubkeys, its
+// fallback relays, its resolved relays), and no pass over all of nodeHashes
+// runs under the store's write lock (#215 review, N2).
+func TestHashMigrate_RenameDoesNotWalkTheWholeIndex_215(t *testing.T) {
+	d := hm215Create(t)
+	d.ballast(t)
+	d.stale(t, 3, 3, 3)
+	s := hm215Open(t, d)
+	before := hashRekeySweeps.Load()
+	hm215Migrate(s, 2)
+	if n := hashRekeySweeps.Load() - before; n != 0 {
+		t.Errorf("the rename walked the whole of nodeHashes %d times, want 0 with the resolved-pubkey index on", n)
+	}
+	// With the index off the relays of a transmission are not recorded
+	// anywhere, so the one pass per batch stays as the fallback.
+	d2 := hm215Create(t)
+	d2.ballast(t)
+	d2.stale(t, 1, 3, 0)
+	s2 := hm215OpenIdx(t, d2, false)
+	before = hashRekeySweeps.Load()
+	hm215Migrate(s2, 100)
+	if n := hashRekeySweeps.Load() - before; n == 0 {
+		t.Error("with the resolved-pubkey index off no pass ran: the relay keys would be left under the old hash")
+	}
+}
+
+// A merge keeps what the duplicate knew: the earliest first_seen (the survivor
+// stays where it is in s.packets, so the slice has to be put back in order) and
+// the columns the survivor has no value for. The survivor's own values stay.
+func TestHashMigrate_MergeKeepsEarliestFirstSeenAndFillsNulls_215(t *testing.T) {
+	d := hm215Create(t)
+	if _, err := d.conn.Exec(`ALTER TABLE transmissions ADD COLUMN scope_name TEXT`); err != nil {
+		t.Fatal(err)
+	}
+	d.ballast(t)
+	raw := hm215Raw(7)
+	t0 := time.Now().UTC().Add(-72 * time.Hour)
+	at := func(s int) string { return t0.Add(time.Duration(s) * time.Second).Format(time.RFC3339) }
+	// 50 is the survivor (lowest id) with the LATER first_seen and no scope;
+	// 51 is the duplicate with the earlier one and a scope. A bystander (52)
+	// sits between the two in time.
+	d.tx(t, 50, raw, "stale-r-50", at(30), 4, hm215Advert(acct113PK(210)))
+	d.tx(t, 51, raw, "stale-r-51", at(10), 4, hm215Advert(acct113PK(210)))
+	d.tx(t, 52, hm215Raw(8), "stale-r-52", at(20), 4, hm215Advert(acct113PK(211)))
+	if _, err := d.conn.Exec(`UPDATE transmissions SET scope_name = '#x' WHERE id = 51`); err != nil {
+		t.Fatal(err)
+	}
+	// Another pair where the survivor has its own scope.
+	raw2 := hm215Raw(9)
+	d.tx(t, 60, raw2, "stale-r-60", at(40), 4, hm215Advert(acct113PK(212)))
+	d.tx(t, 61, raw2, "stale-r-61", at(41), 4, hm215Advert(acct113PK(212)))
+	if _, err := d.conn.Exec(`UPDATE transmissions SET scope_name = CASE id WHEN 60 THEN '#keep' ELSE '#other' END WHERE id IN (60, 61)`); err != nil {
+		t.Fatal(err)
+	}
+	s := hm215Open(t, d)
+	hm215Migrate(s, 2)
+
+	s.mu.RLock()
+	w := s.byTxID[50]
+	if w == nil || s.byTxID[51] != nil {
+		s.mu.RUnlock()
+		t.Fatal("tx 50 must survive and 51 be merged into it")
+	}
+	if w.FirstSeen != at(10) {
+		t.Errorf("survivor first_seen = %s, want the duplicate's earlier %s", w.FirstSeen, at(10))
+	}
+	if w.ScopeName != "#x" {
+		t.Errorf("survivor scope = %q, want %q filled from the duplicate", w.ScopeName, "#x")
+	}
+	if s.byTxID[60].ScopeName != "#keep" {
+		t.Errorf("tx 60 scope = %q, want its own %q kept", s.byTxID[60].ScopeName, "#keep")
+	}
+	for i := 1; i < len(s.packets); i++ {
+		if s.packets[i-1].FirstSeen > s.packets[i].FirstSeen {
+			t.Errorf("s.packets is not sorted by first_seen at %d: %s > %s (eviction cuts from the head)", i, s.packets[i-1].FirstSeen, s.packets[i].FirstSeen)
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	// Eviction cuts from the head by first_seen, so it reaches all of them.
+	s.mu.Lock()
+	s.retentionHours = 24
+	s.mu.Unlock()
+	if n := s.RunEviction(); n != 3 {
+		t.Errorf("retention evicted %d transmissions, want the survivors of both pairs and the bystander (3)", n)
+	}
+	acct113Check(t, s, "after retention")
+}
+
+// The batch was chosen under a read lock: what was evicted or rehashed since is
+// dropped when it is applied under the write lock, not resurrected.
+func TestHashMigrate_BatchRechecksUnderTheWriteLock_215(t *testing.T) {
+	d := hm215Create(t)
+	d.ballast(t)
+	d.stale(t, 2, 3, 2)
+	s := hm215Open(t, d)
+	s.mu.RLock()
+	updates := staleContentHashes(s, s.packets)
+	s.mu.RUnlock()
+	if len(updates) == 0 {
+		t.Fatal("setup: nothing stale")
+	}
+	// Eviction removes every stale row (they are 3 days old).
+	s.mu.Lock()
+	s.retentionHours = 24
+	s.mu.Unlock()
+	if n := s.RunEviction(); n != 2*3+2 {
+		t.Fatalf("setup: evicted %d, want all %d stale rows", n, 2*3+2)
+	}
+	s.mu.Lock()
+	r, m := s.applyContentHashUpdates(updates)
+	s.mu.Unlock()
+	if r != 0 || m != 0 {
+		t.Errorf("applied %d rehashes and %d merges for transmissions that are gone", r, m)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.byHash) != 1 || len(s.byTxID) != 1 || len(s.packets) != 1 {
+		t.Errorf("byHash/byTxID/packets = %d/%d/%d after applying a stale batch, want only the ballast", len(s.byHash), len(s.byTxID), len(s.packets))
+	}
+}
+
+// The in-memory pass walks a snapshot of s.packets taken when it starts, so
+// main must start it after the whole startup load (every chunk, the background
+// fill included): in production it started right after the first chunk and saw
+// almost none of the store (#215 review, N3).
+func TestMain_StartsHashMigrationAfterStartupLoad_215(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := string(src)
+	done := strings.Index(m, "<-store.StartupLoadDone()")
+	start := strings.Index(m, "migrateContentHashesAsync(store")
+	if done < 0 || start < 0 {
+		t.Fatalf("markers not found: StartupLoadDone wait=%d, migrateContentHashesAsync=%d", done, start)
+	}
+	if !(done < start) {
+		t.Error("migrateContentHashesAsync must start after <-store.StartupLoadDone()")
+	}
+	if strings.Contains(m[:done], "go migrateContentHashesAsync(") {
+		t.Error("the migration is also started before the startup load has finished")
 	}
 }
 

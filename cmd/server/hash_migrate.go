@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,10 @@ import (
 // the next load, when the DB holds the merged row. Until then they are
 // attributed to nothing, where before the merge they were attributed to a
 // ghost transmission that counted the same packet twice.
+
+// hashRekeySweeps counts the passes over the whole of nodeHashes that renaming
+// keys needed. Test observability only: the targeted rename does none.
+var hashRekeySweeps atomic.Int64
 
 type hashUpdate struct {
 	tx      *StoreTx
@@ -166,6 +171,7 @@ func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate) (rehashed, m
 // walks the whole index once per batch, a lookup per entry and no allocation
 // for the entries that do not change.
 func (s *PacketStore) rekeyNodeHashes(renames map[string]string) {
+	hashRekeySweeps.Add(1)
 	var moved []string
 	for _, hashes := range s.nodeHashes {
 		moved = moved[:0]

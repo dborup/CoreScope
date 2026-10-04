@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,12 +23,11 @@ func hm215Raw(key int) string {
 	return fmt.Sprintf("0A00D69FD7A5A7475DB07337749AE61FA53A4788E9%02X", key)
 }
 
-// hm215Reopen opens the DB at path, lets fn seed it, and reopens it and starts
-// the migration over what fn wrote. The migration is
-// recorded as done on the first open, so its record is dropped before fn runs:
-// the seeded DB then looks like one written by an ingestor from before the
-// migration existed.
-func hm215Reopen(t *testing.T, path string, fn func(db *sql.DB)) *Store {
+// hm215Prepare opens the DB at path, drops the migration's record, lets fn seed
+// it, and reopens it WITHOUT starting the migration. The record is dropped
+// because it is marked done on the first open: the seeded DB then looks like one
+// written by an ingestor from before the migration existed.
+func hm215Prepare(t *testing.T, path string, fn func(db *sql.DB)) *Store {
 	t.Helper()
 	s, err := OpenStore(path)
 	if err != nil {
@@ -45,9 +45,16 @@ func hm215Reopen(t *testing.T, path string, fn func(db *sql.DB)) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// hm215Reopen is hm215Prepare followed by running the migration to the end.
+func hm215Reopen(t *testing.T, path string, fn func(db *sql.DB)) *Store {
+	t.Helper()
+	s := hm215Prepare(t, path, fn)
 	s.StartContentHashMigration(context.Background())
 	s.WaitForAsyncMigrations()
-	t.Cleanup(func() { s.Close() })
 	return s
 }
 
@@ -270,6 +277,231 @@ func TestInsertWritesTheCurrentContentHash_215(t *testing.T) {
 	}
 	if want := ComputeContentHash(raw); hash != want || strings.HasPrefix(hash, "stale") {
 		t.Fatalf("inserted hash = %s, want %s", hash, want)
+	}
+}
+
+// hm215Dump is the migrated state in a comparable form: the rows and their
+// foreign rows, without the autoincrement ids and clock values that differ
+// between two runs of the same data.
+func hm215Dump(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var b strings.Builder
+	dump := func(title, q string) {
+		b.WriteString("== " + title + "\n")
+		rows, err := db.Query(q)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, q)
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		for rows.Next() {
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintln(&b, vals...)
+		}
+	}
+	dump("transmissions", `SELECT id, raw_hex, hash, first_seen, last_seen, COALESCE(route_mask, -1), COALESCE(scope_name, ''), COALESCE(channel_hash, ''), COALESCE(from_pubkey, '') FROM transmissions ORDER BY id`)
+	dump("observations", `SELECT transmission_id, observer_idx, COALESCE(path_json, ''), timestamp, COALESCE(snr, 0) FROM observations ORDER BY transmission_id, observer_idx, COALESCE(path_json, ''), timestamp`)
+	dump("ping_triggers", `SELECT tx_id, hash FROM ping_triggers ORDER BY tx_id`)
+	dump("route_mask_changes", `SELECT transmission_id, route_mask FROM route_mask_changes ORDER BY transmission_id, route_mask`)
+	return b.String()
+}
+
+func hm215Status(t *testing.T, s *Store) string {
+	t.Helper()
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM _async_migrations WHERE name = ?`, contentHashMigration).Scan(&status); err != nil {
+		t.Fatalf("migration is not recorded: %v", err)
+	}
+	return status
+}
+
+// A run that is stopped half way (a deploy restart) must not be recorded as
+// done, and the restarted run must end in exactly the state an uninterrupted run
+// ends in. The migration deletes rows, so a stop that was recorded as done would
+// leave the rest unconverted for good.
+func TestContentHashMigration_InterruptedRunResumesToTheSameState_215(t *testing.T) {
+	oldBatch, oldYield := contentHashMigrationBatchSize, contentHashMigrationYield
+	contentHashMigrationBatchSize, contentHashMigrationYield = 1, 0
+	t.Cleanup(func() { contentHashMigrationBatchSize, contentHashMigrationYield = oldBatch, oldYield })
+
+	ref, _ := hm215Open(t)
+	want := hm215Dump(t, ref.db)
+
+	path := filepath.Join(t.TempDir(), "interrupted.db")
+	s := hm215Prepare(t, path, func(db *sql.DB) { hm215Seed(t, db) })
+	seeded := hm215Count(t, s.db, `SELECT COUNT(*) FROM transmissions WHERE hash LIKE 'stale-%'`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Stop after the fourth row was scanned: rows 11, 12, 13 and 20 are done,
+	// 30 is still stale.
+	contentHashMigrationHook = func(stage string, n int) {
+		if stage == "batch" && n == 4 {
+			cancel()
+		}
+	}
+	t.Cleanup(func() { contentHashMigrationHook = nil })
+	s.StartContentHashMigration(ctx)
+	s.WaitForAsyncMigrations()
+	contentHashMigrationHook = nil
+
+	if got := hm215Status(t, s); got == "done" {
+		t.Fatal("a run that was cancelled half way is recorded as done: the rest is never converted")
+	}
+	left := hm215Count(t, s.db, `SELECT COUNT(*) FROM transmissions WHERE hash LIKE 'stale-%'`)
+	if left == 0 || left >= seeded {
+		t.Fatalf("setup: %d of %d stale rows left, the cancel did not land half way", left, seeded)
+	}
+	if got := hm215Count(t, s.db, `SELECT COUNT(*) FROM pragma_foreign_key_check`); got != 0 {
+		t.Errorf("foreign_key_check reports %d violations at the cancel point", got)
+	}
+	if got := hm215Count(t, s.db, `SELECT COUNT(*) FROM observations WHERE transmission_id NOT IN (SELECT id FROM transmissions)`); got != 0 {
+		t.Errorf("%d orphan observations at the cancel point", got)
+	}
+
+	s.StartContentHashMigration(context.Background())
+	s.WaitForAsyncMigrations()
+	if got := hm215Status(t, s); got != "done" {
+		t.Fatalf("restarted run status = %q, want done", got)
+	}
+	if got := hm215Count(t, s.db, `SELECT COUNT(*) FROM transmissions WHERE hash LIKE 'stale-%'`); got != 0 {
+		t.Errorf("%d stale rows left after the restart", got)
+	}
+	if got := hm215Dump(t, s.db); got != want {
+		t.Errorf("the restarted run ends in a different state than an uninterrupted one:\n got:\n%s\n want:\n%s", got, want)
+	}
+}
+
+// A row the scan saw can be gone (retention) or changed by the time its batch
+// runs, because the scan is outside writerMu. Neither may fail the migration.
+func TestContentHashMigration_RowsChangedSinceTheScanAreSkipped_215(t *testing.T) {
+	oldBatch, oldYield := contentHashMigrationBatchSize, contentHashMigrationYield
+	contentHashMigrationBatchSize, contentHashMigrationYield = 1000, 0
+	t.Cleanup(func() { contentHashMigrationBatchSize, contentHashMigrationYield = oldBatch, oldYield })
+
+	path := filepath.Join(t.TempDir(), "race.db")
+	s := hm215Prepare(t, path, func(db *sql.DB) { hm215Seed(t, db) })
+	fired := false
+	contentHashMigrationHook = func(stage string, n int) {
+		if stage != "scanned" || fired {
+			return
+		}
+		fired = true
+		// Retention removes row 30 and something rewrites the hash of row 11
+		// after the scan and before the batch.
+		hm215Exec(t, s.db, `DELETE FROM observations WHERE transmission_id = 30`)
+		hm215Exec(t, s.db, `DELETE FROM transmissions WHERE id = 30`)
+		hm215Exec(t, s.db, `UPDATE transmissions SET hash = 'changed-11' WHERE id = 11`)
+	}
+	t.Cleanup(func() { contentHashMigrationHook = nil })
+	s.StartContentHashMigration(context.Background())
+	s.WaitForAsyncMigrations()
+	contentHashMigrationHook = nil
+
+	if got := hm215Status(t, s); got != "done" {
+		t.Fatalf("status = %q: a row that changed since the scan failed the migration", got)
+	}
+	if got := hm215Count(t, s.db, `SELECT COUNT(*) FROM transmissions WHERE id = 30`); got != 0 {
+		t.Errorf("deleted row 30 is back")
+	}
+	var hash string
+	if err := s.db.QueryRow(`SELECT hash FROM transmissions WHERE id = 11`).Scan(&hash); err != nil || hash != "changed-11" {
+		t.Errorf("row 11 hash = %q (%v): a row whose hash changed since the scan must be left for the next run, not rewritten from stale data", hash, err)
+	}
+	// The next run picks the skipped row up.
+	if err := s.migrateContentHashes(context.Background(), s.db); err != nil {
+		t.Fatal(err)
+	}
+	if got := hm215Count(t, s.db, `SELECT COUNT(*) FROM transmissions WHERE hash NOT LIKE '________________'`); got != 0 {
+		t.Errorf("%d rows still carry a non-current hash after the next run", got)
+	}
+}
+
+// A stop at shutdown is not a failure: it resumes at the next start, and the log
+// must not read like one during a deploy restart. A real failure still does.
+func TestAsyncMigration_CancelIsLoggedAsResumable_215(t *testing.T) {
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	s := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.RunAsyncMigration(ctx, "cancel_probe_v1", func(ctx context.Context, d *sql.DB) error { return ctx.Err() }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunAsyncMigration(context.Background(), "failure_probe_v1", func(ctx context.Context, d *sql.DB) error { return fmt.Errorf("boom") }); err != nil {
+		t.Fatal(err)
+	}
+	s.WaitForAsyncMigrations()
+	out := buf.String()
+	if !strings.Contains(out, `"cancel_probe_v1" cancelled (will resume)`) {
+		t.Errorf("a cancelled migration is not logged as resumable:\n%s", out)
+	}
+	if strings.Contains(out, `"cancel_probe_v1" FAILED`) {
+		t.Errorf("a cancelled migration is logged as FAILED:\n%s", out)
+	}
+	if !strings.Contains(out, `"failure_probe_v1" FAILED: boom`) {
+		t.Errorf("a real failure is no longer logged as FAILED:\n%s", out)
+	}
+	if got, _ := s.AsyncMigrationStatus("cancel_probe_v1"); got == "done" {
+		t.Error("a cancelled migration is recorded as done")
+	}
+}
+
+// Rows that merge keep what the duplicate knew: the earliest first_seen and
+// every column the survivor has no value for. The survivor's own non-null values
+// stay. A dropped observation (same observer and path) keeps the survivor's
+// copy, as ingest does for a repeat reception.
+func TestContentHashMigration_MergeKeepsEarliestFirstSeenAndFillsNulls_215(t *testing.T) {
+	s := hm215Reopen(t, filepath.Join(t.TempDir(), "rpi3.db"), func(db *sql.DB) {
+		hm215Exec(t, db, `INSERT OR IGNORE INTO observers (id, name, first_seen, last_seen) VALUES ('o1', 'O1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+		o1 := hm215Count(t, db, `SELECT rowid FROM observers WHERE id = 'o1'`)
+		ins := func(id int, raw, hash, first string, scope, channel, from interface{}) {
+			hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, decoded_json, last_seen, route_mask, scope_name, channel_hash, from_pubkey)
+				VALUES (?, ?, ?, ?, 1, 4, '{}', 1, 1, ?, ?, ?)`, id, raw, hash, first, scope, channel, from)
+		}
+		// Pair 1: the survivor (lowest id, later first_seen) has nothing set.
+		ins(50, hm215Raw(5), "stale-r-50", "2026-01-02T00:00:00Z", nil, nil, nil)
+		ins(51, hm215Raw(5), "stale-r-51", "2026-01-01T00:00:00Z", "#x", "ch", "pk")
+		// Pair 2: the survivor has its own values; the duplicate's differ.
+		ins(60, hm215Raw(6), "stale-r-60", "2026-01-01T00:00:00Z", "#keep", "keepch", "keeppk")
+		ins(61, hm215Raw(6), "stale-r-61", "2026-01-02T00:00:00Z", "#other", "otherch", "otherpk")
+		// The same observation in both rows of pair 1: the survivor's copy
+		// (SNR -10, later) stays although the duplicate's (SNR 5) is earlier.
+		hm215Exec(t, db, `INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, path_json, timestamp) VALUES (50, ?, 'RX', -10.0, -100, '["aa"]', 1767312000)`, o1)
+		hm215Exec(t, db, `INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, path_json, timestamp) VALUES (51, ?, 'RX', 5.0, -60, '["aa"]', 1767225600)`, o1)
+	})
+	type row struct{ first, scope, channel, from string }
+	get := func(id int) row {
+		var r row
+		if err := s.db.QueryRow(`SELECT first_seen, COALESCE(scope_name, ''), COALESCE(channel_hash, ''), COALESCE(from_pubkey, '') FROM transmissions WHERE id = ?`, id).Scan(&r.first, &r.scope, &r.channel, &r.from); err != nil {
+			t.Fatalf("tx %d: %v", id, err)
+		}
+		return r
+	}
+	if got, want := get(50), (row{"2026-01-01T00:00:00Z", "#x", "ch", "pk"}); got != want {
+		t.Errorf("survivor 50 = %+v, want the earliest first_seen and the duplicate's values for what it lacked: %+v", got, want)
+	}
+	if got, want := get(60), (row{"2026-01-01T00:00:00Z", "#keep", "keepch", "keeppk"}); got != want {
+		t.Errorf("survivor 60 = %+v, want its own non-null values kept: %+v", got, want)
+	}
+	for _, id := range []int{51, 61} {
+		if hm215Count(t, s.db, `SELECT COUNT(*) FROM transmissions WHERE id = ?`, id) != 0 {
+			t.Errorf("duplicate %d was not deleted", id)
+		}
+	}
+	var snr float64
+	if err := s.db.QueryRow(`SELECT snr FROM observations WHERE transmission_id = 50`).Scan(&snr); err != nil || snr != -10.0 {
+		t.Errorf("the surviving observation has SNR %v (%v), want the survivor's own -10 (documented rule)", snr, err)
 	}
 }
 
