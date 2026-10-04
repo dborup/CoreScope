@@ -26,9 +26,23 @@ const { chromium, devices } = require('playwright');
 const REPO = __dirname;
 const CSS = fs.readFileSync(path.join(REPO, 'public/style.css'), 'utf8');
 
-// Selectors we claim to make 48x48. Each entry: [selector, tag, classes,
-// optional inner-html]. Tag matters because some rules are scoped to
-// `button.ch-item` and some only apply to specific input[type=...].
+// All listed button surfaces use the shared 48px house minimum (#2052).
+const DEFAULT_MIN = 48;
+
+// Each entry: [selector, tag, classes, optional inner-html].
+// Tag matters because some rules are scoped to `button.ch-item` and some only
+// apply to specific input[type=...].
+//
+// Not listed, and why:
+//   .compare-btn      the Compare CTA was removed in #1646 (see style.css)
+//   .ch-back-btn      display:none outside the mobile channels layout, so a
+//                     standalone element in this harness measures 0x0
+//   .filter-toggle-btn  hidden on mobile since #1461 (`.filter-bar >
+//                     .filter-toggle-btn`, display:none !important); the
+//                     control actually shown is the navbar mirror, which
+//                     mobile-page-actions.js builds with class "nav-btn
+//                     filter-toggle-btn-mirror mpa-btn-pill", so the .nav-btn
+//                     entry below already measures it
 const BUTTON_SELECTORS = [
   ['.btn',                   'button', 'btn'],
   ['.btn-icon',              'button', 'btn-icon'],
@@ -42,14 +56,11 @@ const BUTTON_SELECTORS = [
   ['button.ch-item',         'button', 'ch-item'],
   ['.btn-link',              'button', 'btn-link'],
   ['.col-toggle-btn',        'button', 'col-toggle-btn'],
-  ['.filter-toggle-btn',     'button', 'filter-toggle-btn'],
   ['.ch-add-channel-btn',    'button', 'ch-add-channel-btn'],
-  ['.ch-back-btn',           'button', 'ch-back-btn'],
   ['.ch-modal-btn-secondary','button', 'ch-modal-btn-secondary'],
   ['.ch-scroll-btn',         'button', 'ch-scroll-btn'],
   ['.chooser-btn',           'button', 'chooser-btn'],
   ['.clock-filter-btn',      'button', 'clock-filter-btn'],
-  ['.compare-btn',           'button', 'compare-btn'],
   ['.copy-link-btn',         'button', 'copy-link-btn'],
   ['.alab-btn',              'button', 'alab-btn'],
 ];
@@ -111,9 +122,9 @@ async function run() {
   } catch (err) {
     // Allow the test to be skipped on hosts where Chromium cannot launch
     // (e.g. some musl-libc dev boxes). CI uses standard glibc Ubuntu runners
-    // where this path is never taken. Set TOUCH_TARGETS_REQUIRE=1 to force
+    // where this path is never taken. Set TOUCH_TARGETS_REQUIRE=1 or CHROMIUM_REQUIRE=1 to force
     // a hard failure even when Chromium is unavailable.
-    if (process.env.TOUCH_TARGETS_REQUIRE === '1') throw err;
+    if (process.env.TOUCH_TARGETS_REQUIRE === '1' || process.env.CHROMIUM_REQUIRE === '1') throw err;
     console.log(`test-touch-targets.js: SKIP (Chromium unavailable: ${err.message.split('\n')[0]})`);
     process.exit(0);
   }
@@ -149,11 +160,12 @@ async function run() {
       const cs = getComputedStyle(el);
       return { w: r.width, h: r.height, mh: cs.minHeight, mw: cs.minWidth };
     });
-    const okH = dim.h >= 48;
-    const okW = dim.w >= 48;
-    record(`${selector}: rendered ${dim.w.toFixed(1)}x${dim.h.toFixed(1)} (min ${dim.mw}/${dim.mh})`,
+    const min = DEFAULT_MIN;
+    const okH = dim.h >= min;
+    const okW = dim.w >= min;
+    record(`${selector}: rendered ${dim.w.toFixed(1)}x${dim.h.toFixed(1)} (min ${dim.mw}/${dim.mh}, required ${min})`,
            okH && okW,
-           `expected >=48x48, got ${dim.w}x${dim.h}`);
+           `expected >=${min}x${min}, got ${dim.w}x${dim.h}`);
   }
 
   // --- Form controls: rendered height must be at least 48 CSS px.

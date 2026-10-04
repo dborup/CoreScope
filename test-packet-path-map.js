@@ -28,8 +28,8 @@ function test(name, fn) {
 
 console.log('\n=== packet-path-map.js: string-contract checks ===');
 
-test('exports window.PacketPathMap.{open,close}', () => {
-  assert.ok(/window\.PacketPathMap\s*=\s*\{\s*open:\s*open,\s*close:\s*close\s*\}/.test(src));
+test('exports window.PacketPathMap.{open,close,restore}', () => {
+  assert.ok(/window\.PacketPathMap\s*=\s*\{\s*open:\s*open,\s*close:\s*close,\s*restore:\s*restore\s*\}/.test(src));
 });
 
 test('fetches via the shared api() helper, not a raw fetch (picks up auth/base-URL handling)', () => {
@@ -56,7 +56,7 @@ test('draws highlighted branch(es) on top of the others', () => {
 });
 
 test('handles Escape key and click-outside to close, matching other CoreScope modals', () => {
-  assert.ok(/e\.key === 'Escape'/.test(src));
+  assert.ok(/e\.key [!=]== 'Escape'/.test(src));
   assert.ok(/e\.target === overlay/.test(src));
 });
 
@@ -107,6 +107,7 @@ function makeSandbox(apiImpl) {
       get textContent() { return this._text || ''; },
       appendChild(child) { this.children.push(child); child._parent = this; return child; },
       remove() { if (this._parent) this._parent.children = this._parent.children.filter(c => c !== this); },
+      contains(node) { for (let n = node; n; n = n._parent || n.parentElement) if (n === this) return true; return false; },
       addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
       removeEventListener(type, fn) { if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(f => f !== fn); },
       querySelector() { return null; },
@@ -128,21 +129,62 @@ function makeSandbox(apiImpl) {
       };
       return search(body);
     },
-    addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
-    removeEventListener(type, fn) { if (docListeners[type]) docListeners[type] = docListeners[type].filter(f => f !== fn); },
+    // #180: the topmost element at a point; a test sets __topAt.
+    elementFromPoint() { return ctx.__topAt || null; },
+    // docLog: the live document listeners with their capture flag (#167 r2:
+    // the modal's Escape handler must run in the capture phase).
+    addEventListener(type, fn, opts) {
+      (docListeners[type] = docListeners[type] || []).push(fn);
+      docLog.push({ type, fn, capture: opts === true || !!(opts && opts.capture) });
+    },
+    removeEventListener(type, fn, opts) {
+      if (docListeners[type]) docListeners[type] = docListeners[type].filter(f => f !== fn);
+      const capture = opts === true || !!(opts && opts.capture);
+      const i = docLog.findIndex(r => r.type === type && r.fn === fn && r.capture === capture);
+      if (i !== -1) docLog.splice(i, 1);
+    },
   };
+  const docLog = [];
 
+  // #180: the modal listens for hashchange on window while it is open.
+  const winListeners = {};
+  const win = {
+    addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { if (winListeners[type]) winListeners[type] = winListeners[type].filter(f => f !== fn); },
+  };
   const ctx = {
-    window: {}, document: doc, console, Math, String, JSON, Promise, Error,
+    window: win, document: doc, console, Math, String, JSON, Promise, Error, Date,
     setTimeout, clearTimeout,
     // Returns the variable name itself (not a real color) so tests can
     // assert two markers use DIFFERENT css vars without caring what the
     // actual theme color is.
-    getComputedStyle: () => ({ getPropertyValue: (name) => name }),
+    // position: an element's own _pos (#180 layer test), else static.
+    getComputedStyle: (el) => ({ getPropertyValue: (name) => name, position: (el && el._pos) || 'static' }),
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
-    location: { origin: 'https://stg.meshview.dk' },
+    location: { origin: 'https://stg.meshview.dk', hash: '' },
+    // Records replaceState() so the #147 tests can see the address bar. A
+    // call without a URL changes only the entry's state (#180), not the
+    // address bar, so it is not in __replaced.
+    history: {
+      state: null,
+      replaceState(state, _t, url) {
+        ctx.history.state = state;
+        if (url === undefined) return;
+        ctx.__replaced.push(url); ctx.location.hash = url;
+      },
+    },
+    __replaced: [],
+    __docLog: docLog,
+    __winListeners: winListeners,
+    // #180: a navigation (Back/Forward, a nav link): the new entry's hash and
+    // state, then the window's hashchange listeners.
+    __navigate(hash, state) {
+      ctx.location.hash = hash;
+      ctx.history.state = state === undefined ? null : state;
+      (winListeners.hashchange || []).slice().forEach(fn => fn({}));
+    },
   };
   ctx.window.copyToClipboard = (text, onDone) => { ctx.__copiedText = text; if (onDone) onDone(); };
   vm.createContext(ctx);
@@ -1042,11 +1084,59 @@ function makeSandbox(apiImpl) {
       };
 
       await ctx.window.PacketPathMap.open('deadbeef');
-      assert.ok(tooltips.some((t) => t.includes('📡') && t.includes('RepeaterA')), 'expected a repeater icon on RepeaterA, got: ' + JSON.stringify(tooltips));
-      assert.ok(tooltips.some((t) => t.includes('🏠') && t.includes('RoomObserver')), 'expected a room icon on RoomObserver, got: ' + JSON.stringify(tooltips));
+      assert.ok(tooltips.some((t) => t.includes('#ph-broadcast') && t.includes('RepeaterA')), 'expected a repeater icon on RepeaterA, got: ' + JSON.stringify(tooltips));
+      assert.ok(tooltips.some((t) => t.includes('#ph-house-line') && t.includes('RoomObserver')), 'expected a room icon on RoomObserver, got: ' + JSON.stringify(tooltips));
       passed++;
       console.log('  ✅ nodes with a known role get a role icon in their tooltip');
     } catch (e) { failed++; console.log('  ❌ nodes with a known role get a role icon in their tooltip: ' + e.message); }
+  })();
+
+  await (async () => {
+    try {
+      // #174 (review of #177): every role icon and the first-to-hear flag
+      // are decorative sprite icons, hidden from screen readers.
+      const first = {
+        hops: 2,
+        points: [{ publicKey: 'pk3', name: 'SensorC', lat: 56.2, lon: 10.2, role: 'sensor' }],
+        observer: { name: 'FirstObs', lat: 56.3, lon: 10.3, role: 'client' },
+      };
+      const ctx = makeSandbox(() => Promise.resolve({
+        hash: 'deadbeef',
+        branches: [
+          {
+            hops: 1,
+            points: [{ publicKey: 'pk1', name: 'RepeaterA', lat: 56.0, lon: 10.0, role: 'repeater' }],
+            observer: { name: 'RoomObserver', lat: 56.1, lon: 10.1, role: 'room' },
+          },
+          first,
+        ],
+        first,
+      }));
+
+      const tooltips = [];
+      ctx.L = {
+        map: () => ({ setView() { return this; }, fitBounds() {}, invalidateSize() {}, remove() {} }),
+        tileLayer: () => ({ addTo() { return this; } }),
+        circleMarker: () => ({ addTo() { return this; }, bindTooltip(t) { tooltips.push(t); return this; }, on() { return this; } }),
+        polyline: () => ({ addTo() { return this; } }),
+      };
+
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const icon = (name) => '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg> ';
+      for (const [name, glyph] of [['RepeaterA', 'broadcast'], ['RoomObserver', 'house-line'], ['SensorC', 'thermometer'], ['FirstObs', 'radio']]) {
+        assert.ok(tooltips.some((t) => t.startsWith(icon(glyph)) && t.includes(name)),
+          'expected ' + name + ' to start with an aria-hidden #ph-' + glyph + ' icon, got: ' + JSON.stringify(tooltips));
+      }
+      const flag = tooltips.filter((t) => t.includes('First to hear it: FirstObs'));
+      assert.strictEqual(flag.length, 1, 'expected one first-to-hear tooltip, got: ' + JSON.stringify(tooltips));
+      assert.ok(flag[0].startsWith(icon('flag') + 'First to hear it: FirstObs (2 hops)'),
+        'expected the first-to-hear tooltip to start with an aria-hidden #ph-flag icon, got: ' + flag[0]);
+      const svgs = tooltips.join('').match(/<svg\b[^>]*>/g) || [];
+      assert.ok(svgs.length >= 5, 'expected at least 5 icons, got ' + svgs.length);
+      assert.deepStrictEqual(svgs.filter((t) => !/\baria-hidden="true"/.test(t)), [], 'every tooltip icon must be aria-hidden');
+      passed++;
+      console.log('  ✅ role icons and the first-to-hear flag render as aria-hidden sprite icons');
+    } catch (e) { failed++; console.log('  ❌ role icons and the first-to-hear flag render as aria-hidden sprite icons: ' + e.message); }
   })();
 
   await (async () => {
@@ -1194,6 +1284,228 @@ function makeSandbox(apiImpl) {
       console.log('  ✅ shades each touched area on the map: polygon when drawn, rectangle fallback for bbox-only areas, both non-interactive');
     } catch (e) { failed++; console.log('  ❌ shades each touched area on the map: polygon when drawn, rectangle fallback for bbox-only areas, both non-interactive: ' + e.message); }
   })();
+
+  // #147: ?viewPath=1 on a #/packets/<hash> URL describes this open modal.
+  // Closing it drops that one param (others verbatim) so a refresh or a
+  // copied address-bar link does not reopen a modal that is no longer shown.
+  async function viewPathCase(name, startHash, act, expectHash, expectWrites) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = startHash;
+      await act(ctx);
+      assert.strictEqual(ctx.location.hash, expectHash);
+      assert.strictEqual(ctx.__replaced.length, expectWrites, 'replaceState calls: ' + JSON.stringify(ctx.__replaced));
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  await viewPathCase('close() drops ?viewPath=1 from a #/packets/<hash> URL, keeping the other params (#147)',
+    '#/packets/deadbeef?timeWindow=60&obs=123&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); ctx.window.PacketPathMap.close(); },
+    '#/packets/deadbeef?timeWindow=60&obs=123', 1);
+  await viewPathCase('open() on a cold-loaded ?viewPath=1 link keeps it while the modal is shown (#147)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); },
+    '#/packets/deadbeef?obs=123&viewPath=1', 0);
+  await viewPathCase('close() leaves non-packets pages (e.g. analytics distance) untouched (#147)',
+    '#/analytics?tab=distance&viewPath=1',
+    async (ctx) => { await ctx.window.PacketPathMap.open('deadbeef'); ctx.window.PacketPathMap.close(); },
+    '#/analytics?tab=distance&viewPath=1', 0);
+  // #167 r2: open() replaces a modal that is already open. That is not a
+  // close, so it must not drop ?viewPath=1 (open() used to call close()).
+  await viewPathCase('open() while the modal is already open keeps ?viewPath=1 (#167 r2)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => {
+      await ctx.window.PacketPathMap.open('deadbeef');
+      await ctx.window.PacketPathMap.open('deadbeef');
+      assert(ctx.document.getElementById('packetPathModal'), 'modal not open after the second open()');
+    },
+    '#/packets/deadbeef?obs=123&viewPath=1', 0);
+
+  // #167 r2: packets.js writes ?viewPath=1 while the modal is open on the
+  // packet of the #/packets/<hash> subpath, so the overlay names its packet.
+  await viewPathCase('the open modal records its packet hash (data-hash) (#167 r2)',
+    '#/packets/deadbeef',
+    async (ctx) => {
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      assert.strictEqual(overlay && overlay.dataset.hash, 'deadbeef');
+    },
+    '#/packets/deadbeef', 0);
+
+  // #167 r2: Escape closes only the top layer. The modal's Escape handler
+  // runs in the capture phase and stops the event, so the packets detail
+  // pane's and the SlideOver's own Escape handlers (bubble phase on
+  // document) do not close as well. A second Escape reaches them.
+  await viewPathCase('Escape closes only the modal: capture-phase handler stops the event (#167 r2)',
+    '#/packets/deadbeef?obs=123&viewPath=1',
+    async (ctx) => {
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const keys = ctx.__docLog.filter(r => r.type === 'keydown');
+      assert.strictEqual(keys.length, 1, 'keydown listeners: ' + keys.length);
+      assert.strictEqual(keys[0].capture, true, 'Escape handler is not in the capture phase');
+      let stopped = 0;
+      keys[0].fn({ key: 'Escape', stopPropagation() { stopped++; } });
+      assert.strictEqual(stopped, 1, 'Escape was not stopped');
+      assert.strictEqual(ctx.document.getElementById('packetPathModal'), null, 'modal still open');
+      assert.strictEqual(ctx.__docLog.filter(r => r.type === 'keydown').length, 0, 'keydown listener left behind');
+      let stoppedAfter = 0;
+      keys[0].fn({ key: 'Escape', stopPropagation() { stoppedAfter++; } });
+      assert.strictEqual(stoppedAfter, 0, 'a stray handler call with no modal open swallowed Escape');
+    },
+    '#/packets/deadbeef?obs=123', 1);
+
+  // #180: Escape is the top layer's. A layer opened over the modal later
+  // (global search via Ctrl+K, a nav menu, the More sheet, a filter popover)
+  // holds focus and has its own Escape handler: the modal leaves the event
+  // alone then. Focus on the page, in the sticky top nav, or in the detail
+  // surface the modal opened over (SlideOver, mobile sheet) still closes it.
+  // fakeFocus: a focused element inside a chain of ancestors; each entry is
+  // { pos, cls } from the element itself outwards.
+  function fakeFocus(chain) {
+    let parent = null;
+    const nodes = chain.slice().reverse().map((c) => {
+      const n = {
+        _pos: c.pos || 'static', parentElement: parent, _cls: c.cls || '',
+        matches(sel) { return sel.split(',').some((x) => x.trim() === '.' + this._cls); },
+        contains(other) { for (let o = other; o; o = o.parentElement) if (o === this) return true; return false; },
+        getBoundingClientRect: () => ({ left: 10, top: 10, width: 20, height: 20 }),
+      };
+      parent = n;
+      return n;
+    });
+    return nodes[nodes.length - 1];
+  }
+  async function escapeCase(name, chain, topIs, expectClosed) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = '#/packets/deadbeef?obs=1&viewPath=1';
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      const target = fakeFocus(chain);
+      ctx.__topAt = topIs === 'target' ? target : topIs === 'modal' ? overlay.children[0] || overlay : null;
+      const key = ctx.__docLog.find(r => r.type === 'keydown');
+      let stopped = 0;
+      key.fn({ key: 'Escape', target, stopPropagation() { stopped++; } });
+      const open = !!ctx.document.getElementById('packetPathModal');
+      assert.strictEqual(!open, expectClosed, expectClosed ? 'modal still open' : 'modal closed');
+      assert.strictEqual(stopped, expectClosed ? 1 : 0, 'stopPropagation calls: ' + stopped);
+      assert.strictEqual(ctx.location.hash, expectClosed ? '#/packets/deadbeef?obs=1' : '#/packets/deadbeef?obs=1&viewPath=1');
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  await escapeCase('Escape in the global search drawn over the modal is left to the search (#180)',
+    [{}, { pos: 'fixed', cls: 'search-overlay' }], 'target', false);
+  await escapeCase('Escape in a fixed nav menu / More sheet drawn over the modal is left to it (#180)',
+    [{}, { cls: 'nav-more-wrap' }, { pos: 'fixed', cls: 'nav-more-menu' }], 'target', false);
+  await escapeCase('Escape with focus on a control covered by the modal (e.g. the View Path button) closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'search-overlay' }], 'modal', true);
+  await escapeCase('Escape with focus in the SlideOver the modal opened over closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'slide-over-panel' }], 'target', true);
+  await escapeCase('Escape with focus in the mobile sheet the modal opened over closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'mobile-detail-sheet' }], 'target', true);
+  await escapeCase('Escape with focus in the sticky top nav (no floating layer) closes the modal (#180)',
+    [{}, { pos: 'sticky', cls: 'top-nav' }], 'target', true);
+
+  // #180: the modal closes on a route change, and Back/Forward onto the
+  // #/packets/<hash>?…&viewPath=1 entry it was closed away from does not
+  // reopen it. A new link to the same URL (an entry without that state)
+  // and a reload of an entry whose modal was open still do.
+  const ENTRY = '#/packets/deadbeef?obs=1&viewPath=1';
+  async function routeCase(name, fn) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = ENTRY;
+      ctx.history.state = { other: 'kept' };
+      await fn(ctx);
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  const isOpen = (ctx) => !!ctx.document.getElementById('packetPathModal');
+  const hashListeners = (ctx) => (ctx.__winListeners.hashchange || []).length;
+
+  await routeCase('open() on a #/packets/<hash> entry marks it in history.state, keeping other state, without a URL write (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.ok(ctx.history.state.packetPathModal, 'entry not marked: ' + JSON.stringify(ctx.history.state));
+    assert.strictEqual(ctx.history.state.other, 'kept');
+    assert.strictEqual(ctx.__replaced.length, 0, 'URL written: ' + JSON.stringify(ctx.__replaced));
+    assert.strictEqual(hashListeners(ctx), 1, 'no hashchange listener while open');
+  });
+  await routeCase('open() on another page (e.g. #/analytics) does not mark the entry (#180)', async (ctx) => {
+    ctx.location.hash = '#/analytics?tab=distance';
+    ctx.history.state = null;
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.strictEqual(ctx.history.state, null);
+  });
+  await routeCase('a route change (Back to #/nodes) closes the modal and writes no URL (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/nodes', null);
+    assert.ok(!isOpen(ctx), 'modal still open over #/nodes');
+    assert.strictEqual(ctx.location.hash, '#/nodes');
+    assert.strictEqual(ctx.__replaced.length, 0, 'URL written: ' + JSON.stringify(ctx.__replaced));
+    assert.strictEqual(hashListeners(ctx), 0, 'hashchange listener left behind');
+  });
+  await routeCase('a hashchange that keeps the path (query only) keeps the modal (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/packets/deadbeef?obs=2&viewPath=1', ctx.history.state);
+    assert.ok(isOpen(ctx), 'modal closed by a query-only hashchange');
+  });
+  await routeCase('Forward onto the entry whose modal closed on route change: restore() does not reopen it (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, entryState);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false);
+    assert.ok(!isOpen(ctx), 'modal reopened from history');
+  });
+  await routeCase('a modal closed with Escape while another route is shown is not reopened by Back/Forward (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    // A route switch without a hashchange event (replaceState-based).
+    ctx.location.hash = '#/nodes';
+    ctx.history.state = null;
+    ctx.__docLog.find(r => r.type === 'keydown').fn({ key: 'Escape', stopPropagation() {} });
+    assert.ok(!isOpen(ctx), 'Escape did not close the modal');
+    assert.strictEqual(ctx.location.hash, '#/nodes', 'the other route\'s URL was rewritten');
+    ctx.__navigate(ENTRY, entryState);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false);
+    assert.ok(!isOpen(ctx), 'modal reopened from history');
+  });
+  await routeCase('restore() on a new link to the same URL (entry without state) opens the modal (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, null);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), true);
+    assert.ok(isOpen(ctx), 'a fresh link did not open the modal');
+  });
+  await routeCase('restore() on a reload of an entry whose modal was open reopens it (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    ctx.window.PacketPathMap.close();
+    // A reload: same entry state, a new document (fresh module, no list).
+    const ctx2 = makeSandbox(() => Promise.reject(new Error('boom')));
+    ctx2.location.hash = ENTRY;
+    ctx2.history.state = entryState;
+    assert.strictEqual(ctx2.window.PacketPathMap.restore('deadbeef'), true);
+    assert.ok(isOpen(ctx2), 'reload did not reopen the modal');
+  });
+  await routeCase('the closed-entry list is bounded: the oldest entry is forgotten after 50 newer ones (#180)', async (ctx) => {
+    const states = [];
+    for (let i = 0; i < 51; i++) {
+      ctx.__navigate(ENTRY, null);
+      await ctx.window.PacketPathMap.open('deadbeef');
+      states.push(ctx.history.state);
+      ctx.__navigate('#/nodes', null);
+    }
+    ctx.__navigate(ENTRY, states[1]);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false, 'entry 2 of 51 forgotten too early');
+    ctx.window.PacketPathMap.close();
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, states[0]);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), true, 'the oldest of 51 entries is still remembered');
+  });
 
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);

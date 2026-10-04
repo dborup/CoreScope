@@ -26,8 +26,9 @@ func TestNeighborEdgesBuilderUpsertsFromObservations(t *testing.T) {
 	defer store.Close()
 
 	// Seed two nodes whose pubkey prefixes will be used as hops.
+	// Hop nodes need a relay role: the prefix index holds relays only (#188).
 	if _, err := store.db.Exec(
-		`INSERT INTO nodes (public_key, name) VALUES (?, ?), (?, ?)`,
+		`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater'), (?, ?, 'repeater')`,
 		"aaaaaaaaaa", "from-node",
 		"bbbbbbbbbb", "first-hop",
 	); err != nil {
@@ -101,8 +102,9 @@ func TestNeighborEdgesBuilderInteriorHopEdges(t *testing.T) {
 	defer store.Close()
 
 	// Three repeaters along the path, each with a unique 2-hex prefix.
+	// Hop nodes need a relay role: the prefix index holds relays only (#188).
 	if _, err := store.db.Exec(
-		`INSERT INTO nodes (public_key, name) VALUES (?, ?), (?, ?), (?, ?)`,
+		`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater'), (?, ?, 'repeater'), (?, ?, 'repeater')`,
 		"bbbbbbbbbb", "hop-b",
 		"cccccccccc", "hop-c",
 		"dddddddddd", "hop-d",
@@ -182,8 +184,9 @@ func TestNeighborEdgesBuilderInteriorHopEdges_ExcludesOneByte(t *testing.T) {
 
 	// Same three repeaters as the sibling test, but referenced by their
 	// 1-byte (2-hex-char) prefixes below instead of 2-byte.
+	// Hop nodes need a relay role: the prefix index holds relays only (#188).
 	if _, err := store.db.Exec(
-		`INSERT INTO nodes (public_key, name) VALUES (?, ?), (?, ?), (?, ?)`,
+		`INSERT INTO nodes (public_key, name, role) VALUES (?, ?, 'repeater'), (?, ?, 'repeater'), (?, ?, 'repeater')`,
 		"bbbbbbbbbb", "hop-b",
 		"cccccccccc", "hop-c",
 		"dddddddddd", "hop-d",

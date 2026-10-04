@@ -90,8 +90,10 @@ async function run() {
   assert(chSrc.includes('ch-user-added'),
     'renderChannelList emits ch-user-added marker for keyed channels');
   // Distinct icon
-  assert(chSrc.includes('🔓'),
-    'user-added rows use a distinct unlocked icon (🔓) from server-encrypted (🔒)');
+  // The 🔓/🔒 glyphs were migrated to Phosphor sprite icons (#1648 M2):
+  // user-added → ph-lock-open, server-encrypted → ph-lock.
+  assert(/const badgeIcon = isUserAdded \?[^;]*#ph-lock-open"[^;]*: \(isEncrypted \?[^;]*#ph-lock"/.test(chSrc),
+    'user-added rows use a distinct unlocked icon (ph-lock-open) from server-encrypted (ph-lock)');
 
   // addUserChannel accepts label
   assert(/addUserChannel\s*\(\s*val\s*,\s*\w*label/i.test(chSrc) ||

@@ -33,6 +33,10 @@ const (
 	iataWarnMaxKeyLen = 32
 	// defaultIATAWarnIntervalSec is the default re-log interval (6h).
 	defaultIATAWarnIntervalSec = 6 * 60 * 60
+	// maxIATAWarnIntervalSec caps the configured interval (24h). A larger
+	// value buys nothing for a warning meant to stay visible, and a huge one
+	// overflows time.Duration into a negative interval that logs every drop.
+	maxIATAWarnIntervalSec = 24 * 60 * 60
 )
 
 // iataDropThrottle is the per-Config throttle state. The zero value is ready.
@@ -47,10 +51,14 @@ type iataDropThrottle struct {
 	sweeps int // full-table sweeps, for tests
 }
 
-// IATAWarnInterval returns how often a dropped region is re-logged.
+// IATAWarnInterval returns how often a dropped region is re-logged:
+// iataWarnIntervalSec capped at 24 hours, or the default for 0 or less.
 func (c *Config) IATAWarnInterval() time.Duration {
 	if c == nil || c.IATAWarnIntervalSec <= 0 {
 		return defaultIATAWarnIntervalSec * time.Second
+	}
+	if c.IATAWarnIntervalSec > maxIATAWarnIntervalSec {
+		return maxIATAWarnIntervalSec * time.Second
 	}
 	return time.Duration(c.IATAWarnIntervalSec) * time.Second
 }

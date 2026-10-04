@@ -1215,10 +1215,14 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// the ingestor now. Per #1560: use the context-aware resolver so
 	// 1-byte prefix collisions are disambiguated via NeighborGraph
 	// adjacency (anchored on from_pubkey for ADVERTs, previous hop
-	// otherwise). Empty resolved JSON → NULL via nilIfEmpty.
-	resolved := resolvePathWithContext(
+	// otherwise). Per #188: flood paths are also walked backwards from the
+	// observer, whose neighbour the last hop is. Empty resolved JSON → NULL
+	// via nilIfEmpty.
+	resolved := resolveObservationPath(
 		parsePathArray(data.PathJSON),
 		strings.ToLower(data.FromPubkey),
+		data.ObserverID,
+		data.RouteType,
 		s.neighborGraph.load(),
 		s.prefixIdx.load(),
 	)
@@ -1895,6 +1899,16 @@ func (s *Store) LogStats() {
 	)
 }
 
+// staleNodesWhere selects the nodes MoveStaleNodes retires: no advert in
+// nodeDays (?1 = cutoff), unless the pubkey is an observer seen since the
+// cutoff (#199). An observer never hears its own adverts, so an online
+// observer can go nodeDays without one reaching another observer. last_seen
+// stays the last advert. Observer ids arrive upper-case from the MQTT topic
+// and node keys are lower-case, hence lower() on both sides; NULL ids are
+// skipped because a single NULL makes NOT IN false for every node.
+const staleNodesWhere = `last_seen < ?1 AND lower(public_key) NOT IN (
+	SELECT lower(id) FROM observers WHERE id IS NOT NULL AND last_seen >= ?1)`
+
 // MoveStaleNodes moves nodes not seen in nodeDays to the inactive_nodes table.
 // Returns the number of nodes moved.
 func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
@@ -1905,11 +1919,11 @@ func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE last_seen < ?`, cutoff)
+	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE `+staleNodesWhere, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("insert inactive: %w", err)
 	}
-	result, err := tx.Exec(`DELETE FROM nodes WHERE last_seen < ?`, cutoff)
+	result, err := tx.Exec(`DELETE FROM nodes WHERE `+staleNodesWhere, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("delete stale: %w", err)
 	}

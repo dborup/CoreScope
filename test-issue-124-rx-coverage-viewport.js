@@ -11,7 +11,9 @@
  * through. Only `rx-coverage-view` is read or written, never the main map's
  * `map-view`. days/rx stay in the URL as the viewport changes, an
  * observer-only rx= link still fits that observer, and delayed responses
- * never touch a destroyed or replaced page.
+ * never touch a destroyed or replaced page. A slow response for an earlier
+ * days, observer or All never overwrites newer data or moves the map
+ * (#150, #172).
  */
 'use strict';
 const vm = require('vm');
@@ -279,6 +281,118 @@ function assertView(env, want, tag) {
     assert(env.respond(/^\/api\/rx-coverage\?bbox=0,0,1,1/, { features: [{ properties: {}, geometry: { coordinates: [[[10, 55], [11, 56], [10, 56]]] } }] }));
     await flush();
     assert.strictEqual(newLayer.cleared + newLayer.added, 0, 'the old coverage response was drawn on the new layer (cleared ' + newLayer.cleared + ', added ' + newLayer.added + ')');
+  });
+
+  await test('13. #150: switching days quickly, the older days response cannot overwrite the newer data', async () => {
+    const env = makeEnv({ storage: { 'rx-coverage-view': JSON.stringify({ lat: 56.1, lng: 9.9, zoom: 10 }) } });
+    const layers = [];
+    env.sandbox.L.layerGroup = () => {
+      const l = { cleared: 0, polys: [], addTo() { return l; }, clearLayers() { l.cleared++; l.polys = []; } };
+      layers.push(l);
+      return l;
+    };
+    env.sandbox.L.polygon = (ring) => {
+      const pg = { addTo(l) { l.polys.push(ring); return pg; }, bindTooltip() { return pg; } };
+      return pg;
+    };
+    // the days bar: record its click handler
+    const bar = env.sandbox.document.getElementById('rxDays');
+    bar.addEventListener = (ev, fn) => { if (ev === 'click') bar.onclick = fn; };
+    const pickDays = (d) => bar.onclick({ target: { closest: () => ({ dataset: { days: String(d) } }) } });
+    const feature = (lat) => ({ features: [{ properties: {}, geometry: { coordinates: [[[10, lat], [11, lat], [10, lat + 1]]] } }] });
+    const observers = (name) => ({ observers: [{ pubkey: name.toLowerCase(), name, score: 1, cells: 1, nodes: 1, receptions: 1 }] });
+
+    await mount(env, null);
+    env.runTimers(); // first coverage request (days=7)
+    assert(env.pending.some((p) => /rx-leaderboard\?days=7&/.test(p.url)), 'no days=7 leaderboard request');
+    assert(env.pending.some((p) => /rx-coverage\?bbox=.*&days=7$/.test(p.url)), 'no days=7 coverage request');
+
+    pickDays(30);
+    assert(env.pending.some((p) => /rx-leaderboard\?days=30&/.test(p.url)), 'no days=30 leaderboard request');
+    assert(env.pending.some((p) => /rx-coverage\?bbox=.*&days=30$/.test(p.url)), 'no days=30 coverage request');
+
+    // the newer (days=30) responses arrive first
+    const board = env.sandbox.document.getElementById('rxBoard');
+    assert(env.respond(/rx-leaderboard\?days=30&/, observers('NEWER')));
+    assert(env.respond(/rx-coverage\?bbox=.*&days=30$/, feature(60)));
+    await flush();
+    const layer = layers[0];
+    assert(/NEWER/.test(board.innerHTML), 'the days=30 leaderboard did not render');
+    assert(layer.polys.length === 1 && layer.polys[0][0][0] === 60, 'the days=30 coverage did not render: ' + JSON.stringify(layer.polys));
+
+    // then the slow days=7 responses are released
+    assert(env.respond(/rx-leaderboard\?days=7&/, observers('OLDER')));
+    assert(env.respond(/rx-coverage\?bbox=.*&days=7$/, feature(50)));
+    await flush();
+    assert(/NEWER/.test(board.innerHTML) && !/OLDER/.test(board.innerHTML), 'the older days=7 leaderboard replaced the days=30 one');
+    assert(layer.polys.length === 1 && layer.polys[0][0][0] === 60, 'the older days=7 coverage replaced the days=30 one: ' + JSON.stringify(layer.polys));
+
+    // a late failure of an older leaderboard request does not replace it either
+    pickDays(14);
+    pickDays(1);
+    assert(env.respond(/rx-leaderboard\?days=1&/, observers('NEWEST')));
+    await flush();
+    assert(env.failFetch(/rx-leaderboard\?days=14&/));
+    await flush();
+    assert(/NEWEST/.test(board.innerHTML), 'a failed older leaderboard request replaced the newest one: ' + board.innerHTML);
+  });
+
+  // #172: an observer-only link fits that observer once the map settles;
+  // the extent request for it (days=7) stays pending. The page's days bar,
+  // All button and leaderboard rows are wired so the tests can click them.
+  const extent = (lat) => ({ features: [{ geometry: { coordinates: [[[10, lat], [11, lat + 1]]] } }] });
+  async function startFit() {
+    const env = makeEnv({ hash: '#/rx-coverage?rx=abcdef' });
+    const bar = env.sandbox.document.getElementById('rxDays');
+    bar.addEventListener = (ev, fn) => { if (ev === 'click') bar.onclick = fn; };
+    env.pickDays = (d) => bar.onclick({ target: { closest: () => ({ dataset: { days: String(d) } }) } });
+    const all = env.sandbox.document.getElementById('rxAll');
+    all.addEventListener = (ev, fn) => { if (ev === 'click') env.clickAll = fn; };
+    const rows = ['abcdef', 'bbbbbb'].map((rx) => {
+      const r = { dataset: { rx, name: rx }, addEventListener(ev, fn) { if (ev === 'click') r.click = fn; } };
+      return r;
+    });
+    env.sandbox.document.getElementById('rxBoard').querySelectorAll = (sel) => (/rxb-row/.test(sel) ? rows : []);
+    env.clickRow = (rx) => rows.find((r) => r.dataset.rx === rx).click();
+    await mount(env, { center: [55.68, 12.57], zoom: 9 });
+    env.runTimers();
+    // the leaderboard renders, which wires All and the rows
+    const obs = (pubkey) => ({ pubkey, name: pubkey, score: 1, cells: 1, nodes: 1, receptions: 1 });
+    assert(env.respond(/rx-leaderboard/, { observers: [obs('abcdef'), obs('bbbbbb')] }), 'no leaderboard request');
+    await flush();
+    assert(env.pending.some((p) => /bbox=-90,-180,90,180.*days=7&rx=abcdef/.test(p.url)), 'no days=7 extent request for the observer');
+    return env;
+  }
+
+  await test('14a. #172: a pending observer fit is dropped when days changes', async () => {
+    const env = await startFit();
+    env.pickDays(30);
+    assert(env.respond(/bbox=-90,-180,90,180.*days=7&rx=abcdef/, extent(55)));
+    await flush();
+    assert.strictEqual(env.maps[0].fits.length, 0, 'the stale days=7 extent moved the map after the switch to days=30');
+  });
+
+  await test('14b. #172: a pending observer fit is dropped when All is picked', async () => {
+    const env = await startFit();
+    assert(typeof env.clickAll === 'function', 'All was not wired');
+    env.clickAll();
+    assert(env.respond(/bbox=-90,-180,90,180.*rx=abcdef/, extent(55)));
+    await flush();
+    assert.strictEqual(env.maps[0].fits.length, 0, 'the stale observer extent moved the map after All');
+  });
+
+  await test('14c. #172: a pending observer fit is dropped when another observer is picked; the newer one fits', async () => {
+    const env = await startFit();
+    env.clickRow('bbbbbb');
+    await flush();
+    assert(env.pending.some((p) => /bbox=-90,-180,90,180.*rx=bbbbbb/.test(p.url)), 'no extent request for the new observer');
+    assert(env.respond(/bbox=-90,-180,90,180.*rx=abcdef/, extent(55)));
+    await flush();
+    assert.strictEqual(env.maps[0].fits.length, 0, 'the stale abcdef extent moved the map after picking bbbbbb');
+    assert(env.respond(/bbox=-90,-180,90,180.*rx=bbbbbb/, extent(60)));
+    await flush();
+    assert.strictEqual(env.maps[0].fits.length, 1, 'the bbbbbb extent did not fit the map');
+    assert.strictEqual(env.maps[0].fits[0][0][0], 60, 'fitted to the wrong extent: ' + JSON.stringify(env.maps[0].fits));
   });
 
   await test('11. coverage filtering and leaderboard requests are unchanged', async () => {

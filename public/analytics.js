@@ -50,13 +50,39 @@
   function _distanceIsBuilding(data) {
     return !!(data && data.status === 'building' && !data.summary);
   }
-  // Retry-After header (passed on by api()), else the body's
-  // retry_after_seconds, else 5s; clamped to 1..30s.
-  function _distanceRetryDelayMs(data) {
+  // Retry-After header (passed on by api() on a 202 body or a 503 error),
+  // else the body's retry_after_seconds, else 5s; clamped to 1..30s.
+  function _retryAfterDelayMs(data) {
     var s = Number(data && data.retryAfterSeconds);
     if (!(isFinite(s) && s > 0)) s = Number(data && data.retry_after_seconds);
     if (!(isFinite(s) && s > 0)) s = 5;
     return Math.min(Math.max(s, 1), 30) * 1000;
+  }
+  // #172 — rf/topology/channels answer 503 + Retry-After while the server
+  // warms up after a restart (#1659), for up to its 60s force-open. The
+  // page shows a "still loading" state and retries on the server's
+  // interval until ANALYTICS_WARMUP_MAX_MS has passed since the load
+  // began, and only then shows the error. Like the distance tab (#120),
+  // every load and destroy() bump _loadGen, so a response or retry from an
+  // older load never renders, and at most one retry timer exists.
+  var ANALYTICS_WARMUP_MAX_MS = 120000;
+  var _loadRetryTimer = null;
+  var _loadGen = 0;
+  // #172: the tabs that render from that load's _analyticsData. Until it
+  // has data, they show the load's status instead (a click during the
+  // warm-up threw a TypeError), and the status is written only while one
+  // of them is shown, never over a tab that fetches its own data.
+  var LOAD_TABS = new Set(['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions']);
+  var LOADING_HTML = '<div class="text-center text-muted" style="padding:40px">Loading analytics…</div>';
+  var _loadStatusHtml = LOADING_HTML;
+  function _showLoadStatus(html) {
+    _loadStatusHtml = html;
+    var el = LOAD_TABS.has(_currentTab) && document.getElementById('analyticsContent');
+    if (el) el.innerHTML = html;
+  }
+  function _cancelLoadRetry() {
+    _loadGen++;
+    if (_loadRetryTimer) { clearTimeout(_loadRetryTimer); _loadRetryTimer = null; }
   }
   var _wardrivingRefreshTimer = null;
   function _stopWardrivingRefresh() {
@@ -173,7 +199,7 @@
           </div>
         </div>
         <div id="analyticsContent" class="analytics-content" aria-live="polite">
-          <div class="text-center text-muted" style="padding:40px">Loading analytics…</div>
+          ${LOADING_HTML}
         </div>
       </div>`;
 
@@ -197,11 +223,11 @@
         window: twElNow && twElNow.value ? twElNow.value : ''
       };
       // Drop any subview-specific keys that don't belong to the active tab
-      // so switching tabs gives a clean URL. (rf-health uses 'range', 'observer', 'from', 'to')
-      if (_currentTab !== 'rf-health') {
-        var cleared = ['range', 'observer', 'from', 'to'];
-        for (var i = 0; i < cleared.length; i++) updates[cleared[i]] = '';
-      }
+      // so switching tabs gives a clean URL.
+      Object.keys(TAB_URL_PARAMS).forEach(function (t) {
+        if (t === _currentTab) return;
+        TAB_URL_PARAMS[t].forEach(function (k) { updates[k] = ''; });
+      });
       var newHash = URLState.updateHashParams(updates, location.hash);
       if (newHash !== location.hash) history.replaceState(null, '', newHash);
     }
@@ -227,15 +253,18 @@
     // Deep-link: #/analytics?tab=collisions&window=7d
     const hashParams = location.hash.split('?')[1] || '';
     const _ap = new URLSearchParams(hashParams);
+    // Every mount starts from the URL, falling back to Overview: the tab
+    // selected before leaving the page must not survive into this mount (#183).
+    // The button is found by comparing data-tab, never by building a selector
+    // from the URL: a quote in ?tab= threw here, and a crafted value matched a
+    // real button while _currentTab took the arbitrary string (#193).
     const urlTab = _ap.get('tab');
-    if (urlTab) {
-      const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
-      if (tabBtn) {
-        analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        tabBtn.classList.add('active');
-        _currentTab = urlTab;
-      }
-    }
+    const tabBtns = Array.from(analyticsTabs.querySelectorAll('.tab-btn'));
+    const urlTabBtn = urlTab ? tabBtns.find(b => b.dataset.tab === urlTab) : null;
+    _currentTab = urlTabBtn ? urlTab : 'overview';
+    const activeBtn = urlTabBtn || tabBtns.find(b => b.dataset.tab === 'overview');
+    tabBtns.forEach(b => b.classList.remove('active'));
+    if (activeBtn) activeBtn.classList.add('active');
     // #749 — restore time window from URL.
     const urlWindow = _ap.get('window');
     if (urlWindow) {
@@ -302,7 +331,81 @@
   var _themeRefreshHandler = null;
   let _currentTab = 'overview';
 
-  async function loadAnalytics() {
+  // Append a query fragment to a path (#179, #193). The filter fragments
+  // ("&region=…", "&area=…", "&window=…") start with '&'; '?…' and a bare
+  // 'a=1' are taken too, and an empty fragment (or a lone '&' / '?') leaves
+  // the path as it is. The separator is '&' when the path already has a '?'.
+  function withQuery(path, frag) {
+    const q = frag ? String(frag).replace(/^[?&]/, '') : '';
+    return q ? path + (path.indexOf('?') < 0 ? '?' : '&') + q : path;
+  }
+
+  // #205 — a tab's inner view state (Scopes sub-tab and window, Wardriving
+  // window) lives in the hash next to ?tab=, with sessionStorage as the
+  // fallback for a plain visit of the tab. ?window= is the global time
+  // picker above the tab bar (other values, and it drives the shared
+  // loads), so each tab window gets a key of its own.
+  var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene'], dflt: 'overview' };
+  var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+
+  // The hash keys each tab owns; _updateAnalyticsUrl drops them when
+  // another tab is selected.
+  var TAB_URL_PARAMS = {
+    'rf-health': ['range', 'observer', 'from', 'to'],
+    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
+    wardriving: [WARDRIVING_WINDOW.param],
+  };
+
+  // A value from the URL wins; an unknown one falls back to the default,
+  // not to the stored value. Values are only compared with ===, never put
+  // in a selector or markup (#193/#194). Without a URL value, the stored
+  // value is used while it is still a known one.
+  function resolveViewParam(urlValue, storedValue, allowed, dflt) {
+    if (urlValue != null) return allowed.indexOf(urlValue) >= 0 ? urlValue : dflt;
+    return storedValue != null && allowed.indexOf(storedValue) >= 0 ? storedValue : dflt;
+  }
+
+  function _sessionGet(key) {
+    try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(key) : null; } catch (e) { return null; }
+  }
+
+  // Stores the values and writes them to the hash in one go. A default is
+  // left out, so a tab in its default view keeps the URL it had before #205.
+  function _writeViewParams(specs, values) {
+    var updates = {};
+    specs.forEach(function (spec, i) {
+      try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+      updates[spec.param] = values[i] === spec.dflt ? '' : values[i];
+    });
+    if (!window.URLState) return;
+    // replaceState can throw (Safari throttles it); the view has already
+    // changed by then, so a failed URL sync must not break the tab (#1914).
+    try {
+      var newHash = URLState.updateHashParams(updates, location.hash);
+      if (newHash !== location.hash) history.replaceState(null, '', newHash);
+    } catch (e) { /* URL sync is best effort */ }
+  }
+
+  function setViewParam(spec, value) { _writeViewParams([spec], [value]); }
+
+  // Read on render: resolve every value of the tab from the same hash first,
+  // then store them and write them back. Writing one value rebuilds the
+  // hash, which drops an empty key ("?sub=") the next read would still see.
+  function restoreViewParams(specs) {
+    var hash = typeof location !== 'undefined' ? String(location.hash || '') : '';
+    var params = new URLSearchParams(hash.split('?')[1] || '');
+    var values = specs.map(function (spec) {
+      return resolveViewParam(params.get(spec.param), _sessionGet(spec.storageKey), spec.allowed, spec.dflt);
+    });
+    _writeViewParams(specs, values);
+    return values;
+  }
+
+  async function loadAnalytics(startedAt) {
+    _cancelLoadRetry();
+    const gen = _loadGen;
+    if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
     try {
       _analyticsData = {};
       const rqs = RegionFilter.regionQueryString(); // "&region=..." or ""
@@ -315,27 +418,38 @@
       const twVal = twEl ? twEl.value : '';
       const tws = twVal ? '&window=' + encodeURIComponent(twVal) : '';
       // hash-sizes / hash-collisions: region + area, no window
-      const baseQS = (rqs + aqs).slice(1);
-      const sepBase = baseQS ? '?' + baseQS : '';
+      const baseQ = rqs + aqs;
       // rf / topology: region + area + window
-      const windowedQS = (rqs + aqs + tws).slice(1);
-      const sepWin = windowedQS ? '?' + windowedQS : '';
+      const windowedQ = rqs + aqs + tws;
       // channels: region + window (no area per original PR intent)
-      const chanQS = (rqs + tws).slice(1);
-      const sepChan = chanQS ? '?' + chanQS : '';
+      const chanQ = rqs + tws;
+      // This load retries 503s itself (retry503:false), see _loadGen.
+      const opts = { ttl: CLIENT_TTL.analyticsRF, retry503: false };
       const [hashData, rfData, topoData, chanData, collisionData, airtimeData] = await Promise.all([
-        api('/analytics/hash-sizes' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/rf' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/topology' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/channels' + sepChan, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/hash-collisions' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/relay-airtime-share' + sepWin, { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
+        api(withQuery('/analytics/hash-sizes', baseQ), opts),
+        api(withQuery('/analytics/rf', windowedQ), opts),
+        api(withQuery('/analytics/topology', windowedQ), opts),
+        api(withQuery('/analytics/channels', chanQ), opts),
+        api(withQuery('/analytics/hash-collisions', baseQ), opts),
+        api(withQuery('/analytics/relay-airtime-share', windowedQ), { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
       ]);
+      if (gen !== _loadGen) return;
       _analyticsData = { hashData, rfData, topoData, chanData, collisionData, airtimeData };
       renderTab(_currentTab);
     } catch (e) {
-      document.getElementById('analyticsContent').innerHTML =
-        `<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${e.message}</div>`;
+      if (gen !== _loadGen) return;
+      const ms = _retryAfterDelayMs(e);
+      if (e && e.status === 503 && Date.now() - startedAt + ms <= ANALYTICS_WARMUP_MAX_MS) {
+        _showLoadStatus('<div class="text-center text-muted" role="status" aria-live="polite" style="padding:40px">' +
+          'Analytics are still loading on the server after a restart.' +
+          '<div style="font-size:12px;margin-top:8px">Retrying in ' + Math.round(ms / 1000) + 's.</div></div>');
+        _loadRetryTimer = setTimeout(function () {
+          _loadRetryTimer = null;
+          if (gen === _loadGen) loadAnalytics(startedAt);
+        }, ms);
+        return;
+      }
+      _showLoadStatus(`<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${esc(e && e.message)}</div>`);
     }
   }
 
@@ -356,6 +470,7 @@
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
       case 'rf': renderRF(el, d.rfData); break;
@@ -3006,11 +3121,10 @@
     const gen = _distanceGen;
     try {
       const rqs = RegionFilter.regionQueryString();
-      const sep = rqs ? '?' + rqs.slice(1) : '';
-      const data = await api('/analytics/distance' + sep, { ttl: CLIENT_TTL.analyticsRF });
+      const data = await api(withQuery('/analytics/distance', rqs), { ttl: CLIENT_TTL.analyticsRF });
       if (gen !== _distanceGen) return;   // re-rendered, switched tab or left meanwhile
       if (_distanceIsBuilding(data)) {
-        const ms = _distanceRetryDelayMs(data);
+        const ms = _retryAfterDelayMs(data);
         el.innerHTML = '<div class="text-center text-muted" id="distanceBuilding" role="status" style="padding:40px">' +
           'Building the distance index…' +
           '<div style="font-size:12px;margin-top:8px">This runs once after the server starts. Retrying in ' + Math.round(ms / 1000) + 's.</div></div>';
@@ -3101,11 +3215,13 @@
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
     window._analyticsAssignTableIds = assignAnalyticsTableIds;
+    window._analyticsWithQuery = withQuery;
+    window._analyticsResolveViewParam = resolveViewParam;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
     window._analyticsLoadChannelSort = loadChannelSort;
@@ -3188,10 +3304,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
     // Load data
     const rqs = RegionFilter.regionQueryString();
-    const sep = rqs ? '?' + rqs.slice(1) : '';
     let graphData;
     try {
-      graphData = await api('/analytics/neighbor-graph' + sep + (sep ? '&' : '?') + 'min_count=1&min_score=0', { ttl: CLIENT_TTL.analyticsRF });
+      graphData = await api(withQuery('/analytics/neighbor-graph', rqs + '&min_count=1&min_score=0'), { ttl: CLIENT_TTL.analyticsRF });
     } catch (e) {
       el.innerHTML = `<div class="analytics-card"><p class="text-muted">Failed to load neighbor graph: ${esc(e.message)}</p></div>`;
       return;
@@ -3670,7 +3785,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         // #1270: fetch CONFIGURED-hash-size counts so the Network Overview
         // tells the operational story (matching Hash Stats "By Repeaters"),
         // not just a math-only count of unique pubkey slices.
-        api('/analytics/hash-sizes' + rq, { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
+        api(withQuery('/analytics/hash-sizes', rq), { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
       ]);
     } catch (e) {
       el.innerHTML = `<div class="text-muted" role="alert" style="padding:40px">Failed to load: ${esc(e.message)}</div>`;
@@ -4903,8 +5018,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
   // ===================== SCOPES =====================
   async function renderScopesTab(el) {
-    var winKey = 'scopes_window';
-    var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
+    // Both views are deep-linked: ?sub= and ?swin= (#205).
+    var scopesView = restoreViewParams([SCOPES_SUBTAB, SCOPES_WINDOW]);
+    var selectedSubtab = scopesView[0];
+    var selectedWindow = scopesView[1];
 
     // #1852: the tab grew to stacked sections (windowed adoption stats,
     // all-time region breakdowns, all-time node/repeater hygiene lists) —
@@ -4918,8 +5035,6 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     // windowed panel gets its own copy of the picker buttons rather than
     // one shared control above the sub-tab bar — every button still
     // drives the same selectedWindow/load(), see the click listener below.
-    var subtabKey = 'scopes_subtab';
-    var selectedSubtab = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(subtabKey)) || 'overview';
 
     // Role/text/geo filter for the "Nodes Without a Default Scope" section
     // below. Lives at this scope (not inside updateData) so it survives
@@ -5006,9 +5121,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           var btn = e.target.closest('[data-subtab]');
           if (!btn) return;
           selectedSubtab = btn.dataset.subtab;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(subtabKey, selectedSubtab);
+          setViewParam(SCOPES_SUBTAB, selectedSubtab);
           subtabsEl.querySelectorAll('[data-subtab]').forEach(function(b) { b.classList.toggle('active', b.dataset.subtab === selectedSubtab); });
-          ['overview', 'hopdepth', 'regions', 'hygiene'].forEach(function(key) {
+          SCOPES_SUBTAB.allowed.forEach(function(key) {
             var panel = document.getElementById('scopes-panel-' + key);
             if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
           });
@@ -5019,7 +5134,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       el.querySelectorAll('[data-win]').forEach(function(btn) {
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.win;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(winKey, selectedWindow);
+          setViewParam(SCOPES_WINDOW, selectedWindow);
           el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === selectedWindow); });
           load(selectedWindow);
         });
@@ -6324,8 +6439,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // and which observer stations — fixed, known locations — actually
   // heard the traffic (Coverage).
   async function renderWardrivingTab(el) {
-    var winKey = 'wardriving_window';
-    var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
+    var selectedWindow = restoreViewParams([WARDRIVING_WINDOW])[0];   // ?wdwin= (#205)
 
     function pct(n, total) {
       if (!total) return '—';
@@ -6607,7 +6721,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       el.querySelectorAll('[data-wdwin]').forEach(function(btn) {
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.wdwin;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(winKey, selectedWindow);
+          setViewParam(WARDRIVING_WINDOW, selectedWindow);
           load(selectedWindow);
         });
       });

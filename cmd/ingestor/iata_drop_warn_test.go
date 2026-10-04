@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,43 @@ func TestIATAWarnIntervalDefaultAndConfigured(t *testing.T) {
 	var nilCfg *Config
 	if got := nilCfg.IATAWarnInterval(); got != 6*time.Hour {
 		t.Errorf("nil config interval %v", got)
+	}
+}
+
+// A huge configured interval must not overflow time.Duration (int64
+// nanoseconds) into a negative interval, which would log every drop: the
+// flood the throttle exists to prevent (#150). It is capped at 24 hours.
+func TestIATAWarnIntervalClampsHugeValues(t *testing.T) {
+	var huge int64 = 1e10 // seconds; 1e19 ns overflows int64
+	for _, sec := range []int{int(huge), math.MaxInt, 24*60*60 + 1, 365 * 24 * 60 * 60} {
+		if got := (&Config{IATAWarnIntervalSec: sec}).IATAWarnInterval(); got != 24*time.Hour {
+			t.Errorf("iataWarnIntervalSec=%d: interval %v, want the 24h cap", sec, got)
+		}
+	}
+	if got := (&Config{IATAWarnIntervalSec: 24 * 60 * 60}).IATAWarnInterval(); got != 24*time.Hour {
+		t.Errorf("exactly 24h: interval %v", got)
+	}
+	if got := (&Config{IATAWarnIntervalSec: 24*60*60 - 1}).IATAWarnInterval(); got != 24*time.Hour-time.Second {
+		t.Errorf("just under the cap: interval %v", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"observerIATAWhitelist":["ARN"],"iataWarnIntervalSec":10000000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.IATAWarnInterval(); got != 24*time.Hour {
+		t.Fatalf("iataWarnIntervalSec=10000000000 from JSON: interval %v, want 24h", got)
+	}
+	// and the throttle built on it still suppresses a repeat
+	if w, _ := cfg.iataDropWarn.shouldWarn("GOT", t0IATA, cfg.IATAWarnInterval()); !w {
+		t.Fatal("first drop not logged")
+	}
+	if w, _ := cfg.iataDropWarn.shouldWarn("GOT", t0IATA.Add(time.Minute), cfg.IATAWarnInterval()); w {
+		t.Error("a repeat a minute later was logged again")
 	}
 }
 
@@ -156,6 +194,127 @@ func TestIATADropThrottleSweepsAreAmortized(t *testing.T) {
 	th.shouldWarn("LATE", now.Add(2*iv), iv)
 	if th.sweeps > 2 || len(th.last) != 1 {
 		t.Fatalf("sweeps=%d entries=%d after expiry", th.sweeps, len(th.last))
+	}
+}
+
+// fillIATA tracks n new codes with the given prefix at ts; each must get its
+// own slot.
+func fillIATA(t *testing.T, th *iataDropThrottle, prefix string, n int, ts time.Time, iv time.Duration) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if w, o := th.shouldWarn(fmt.Sprintf("%s%04d", prefix, i), ts, iv); !w || o {
+			t.Fatalf("%s%04d at %v: warn=%v overflow=%v, want an own slot", prefix, i, ts.Sub(t0IATA), w, o)
+		}
+	}
+}
+
+// oldest is a lower bound on the oldest tracked time (#150). With entries
+// of different ages it must follow the oldest one still tracked: too high
+// and an expired slot is not reclaimed (a new region falls into the shared
+// overflow throttle), too low and a full table of fresh entries is swept
+// on every drop.
+func TestIATADropThrottleOldestTracksStaggeredEntries(t *testing.T) {
+	var th iataDropThrottle
+	iv := time.Hour
+	half := iataWarnMaxTracked / 2
+	fillIATA(t, &th, "A", half, t0IATA, iv)
+	fillIATA(t, &th, "B", iataWarnMaxTracked-half, t0IATA.Add(30*time.Minute), iv)
+
+	// full of fresh entries: overflow, and no sweep (nothing can be expired)
+	if w, o := th.shouldWarn("EARLY", t0IATA.Add(40*time.Minute), iv); !w || !o {
+		t.Fatalf("full table at +40m: warn=%v overflow=%v, want the overflow warning", w, o)
+	}
+	if th.sweeps != 0 {
+		t.Fatalf("%d sweeps before any entry could expire", th.sweeps)
+	}
+
+	// +1h: the A half has expired; a new region reclaims a slot
+	if w, o := th.shouldWarn("N1", t0IATA.Add(time.Hour), iv); !w || o {
+		t.Fatalf("+1h: warn=%v overflow=%v, want an own slot (A entries expired)", w, o)
+	}
+	if len(th.last) != iataWarnMaxTracked-half+1 || th.sweeps != 1 {
+		t.Fatalf("+1h: %d entries after %d sweeps, want %d after 1", len(th.last), th.sweeps, iataWarnMaxTracked-half+1)
+	}
+	// refill to the cap with entries at +1h
+	fillIATA(t, &th, "C", half-1, t0IATA.Add(time.Hour), iv)
+
+	// +1h30m: the B half (+30m) has expired now and must be reclaimed,
+	// although every entry swept at +1h is gone and the newest are fresh
+	if w, o := th.shouldWarn("N2", t0IATA.Add(90*time.Minute), iv); !w || o {
+		t.Fatalf("+1h30m: warn=%v overflow=%v, want an own slot (B entries expired)", w, o)
+	}
+	if _, ok := th.last["B0000"]; ok {
+		t.Error("expired B entries were not reclaimed at +1h30m")
+	}
+	if len(th.last) != half+1 || th.sweeps != 2 {
+		t.Fatalf("+1h30m: %d entries after %d sweeps, want %d after 2", len(th.last), th.sweeps, half+1)
+	}
+}
+
+// A sweep that frees only part of the table must leave oldest at the
+// oldest entry it kept (#172). Left at the swept entries' time, oldest
+// stays expired, and every later drop on the refilled table sweeps the
+// whole table again although nothing can expire before the kept entries
+// do.
+func TestIATADropThrottleNoResweepAfterPartialSweep(t *testing.T) {
+	var th iataDropThrottle
+	iv := time.Hour
+	half := iataWarnMaxTracked / 2
+	fillIATA(t, &th, "A", half, t0IATA, iv)
+	fillIATA(t, &th, "B", iataWarnMaxTracked-half, t0IATA.Add(30*time.Minute), iv)
+
+	// +1h: a partial sweep frees the A half; refill to the cap
+	if w, o := th.shouldWarn("N1", t0IATA.Add(time.Hour), iv); !w || o {
+		t.Fatalf("+1h: warn=%v overflow=%v, want an own slot (A entries expired)", w, o)
+	}
+	fillIATA(t, &th, "C", half-1, t0IATA.Add(time.Hour), iv)
+	if len(th.last) != iataWarnMaxTracked || th.sweeps != 1 {
+		t.Fatalf("after the refill: %d entries after %d sweeps, want %d after 1", len(th.last), th.sweeps, iataWarnMaxTracked)
+	}
+
+	// +1h..+1h29m: the oldest kept entry (+30m) has not expired, so new
+	// regions overflow without another sweep
+	for i := 0; i < 100; i++ {
+		at := t0IATA.Add(time.Hour + time.Duration(i)*17*time.Second)
+		if _, o := th.shouldWarn(fmt.Sprintf("X%04d", i), at, iv); !o {
+			t.Fatalf("X%04d at %v: own slot in a full table of fresh entries", i, at.Sub(t0IATA))
+		}
+	}
+	if th.sweeps != 1 {
+		t.Fatalf("%d sweeps before +1h30m, want 1: oldest was not refreshed after the partial sweep", th.sweeps)
+	}
+
+	// +1h30m: the B half expires; the next new region sweeps once more
+	if w, o := th.shouldWarn("N2", t0IATA.Add(90*time.Minute), iv); !w || o {
+		t.Fatalf("+1h30m: warn=%v overflow=%v, want an own slot (B entries expired)", w, o)
+	}
+	if th.sweeps != 2 {
+		t.Fatalf("+1h30m: %d sweeps, want 2", th.sweeps)
+	}
+}
+
+// A drop can carry an earlier time than the current oldest entry (the
+// caller takes the time before the lock). oldest must drop to it, or that
+// entry outlives its interval in a full table.
+func TestIATADropThrottleOldestFollowsAnEarlierDrop(t *testing.T) {
+	var th iataDropThrottle
+	iv := time.Hour
+	fillIATA(t, &th, "A", iataWarnMaxTracked, t0IATA, iv)
+	// +1h: everything expired; sweep, keep only LATE (taken at +1h)
+	if w, o := th.shouldWarn("LATE", t0IATA.Add(time.Hour), iv); !w || o {
+		t.Fatalf("+1h: warn=%v overflow=%v", w, o)
+	}
+	// a drop stamped +50m arrives after it
+	if w, o := th.shouldWarn("EARLIER", t0IATA.Add(50*time.Minute), iv); !w || o {
+		t.Fatalf("out-of-order drop: warn=%v overflow=%v", w, o)
+	}
+	fillIATA(t, &th, "F", iataWarnMaxTracked-2, t0IATA.Add(time.Hour), iv)
+	// +1h50m: EARLIER has expired and must free its slot
+	if w, o := th.shouldWarn("NEW", t0IATA.Add(110*time.Minute), iv); !w || o {
+		t.Fatalf("+1h50m: warn=%v overflow=%v, want EARLIER's expired slot", w, o)
+	}
+	if _, ok := th.last["EARLIER"]; ok {
+		t.Error("EARLIER outlived its interval in a full table")
 	}
 }
 
