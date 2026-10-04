@@ -266,3 +266,33 @@ func TestWriteStatsAtomicUnopenableOwnTmpNamesTheFix_160(t *testing.T) {
 		t.Errorf("error %q: want the permissions hint, not the owner one", err)
 	}
 }
+
+// PR #216 review, F3: a backward wall-clock step must not silence a
+// persisting failure. The limiter compared now with the last failure line,
+// and a negative difference counted as "inside the interval", so after a
+// 1 h step back nothing was logged for an hour. A step back now counts as
+// an interval passed (the writer also passes a monotonic time.Now()).
+func TestStatsWriteLogBackwardClockStepStillLogs_160(t *testing.T) {
+	var lines []string
+	l := statsWriteLog{every: time.Minute, logf: func(f string, a ...any) {
+		lines = append(lines, fmt.Sprintf(f, a...))
+	}}
+	errTmp := errors.New("x.tmp: broken")
+	t0 := time.Unix(1_700_000_000, 0)
+	for s := 0; s < 10; s++ {
+		l.failed("x", errTmp, t0.Add(time.Duration(s)*time.Second))
+	}
+	back := t0.Add(-time.Hour) // the wall clock steps back 1 h
+	for s := 0; s < 180; s++ {
+		l.failed("x", errTmp, back.Add(time.Duration(s)*time.Second))
+	}
+	want := []string{
+		"[stats-file] write x: " + errTmp.Error(),
+		"[stats-file] write x: " + errTmp.Error() + " (9 more failed writes since the last report)",
+		"[stats-file] write x: " + errTmp.Error() + " (59 more failed writes since the last report)",
+		"[stats-file] write x: " + errTmp.Error() + " (59 more failed writes since the last report)",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("%d lines:\n%s\nwant:\n%s", len(lines), strings.Join(lines, "\n"), strings.Join(want, "\n"))
+	}
+}
