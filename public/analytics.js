@@ -353,10 +353,13 @@
   var HASHSTATS_MB_FILTER = { param: 'mbf', allowed: ['all', 'confirmed', 'suspected', 'unknown'], dflt: 'all' };
 
   // The hash keys each tab owns; _updateAnalyticsUrl drops them when
-  // another tab is selected.
+  // another tab is selected. Hash Issues' bytes= is deliberately not listed:
+  // it has no stored fallback, so it stays in the URL across a tab switch
+  // and a return to Hash Issues keeps the chosen byte size (#1914, #208).
+  // Its section= is a one-shot scroll anchor and is dropped.
   var TAB_URL_PARAMS = {
     'rf-health': ['range', 'observer', 'from', 'to'],
-    collisions: ['bytes', 'section'],
+    collisions: ['section'],
     hashsizes: [HASHSTATS_MB_FILTER.param],
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
     wardriving: [WARDRIVING_WINDOW.param],
