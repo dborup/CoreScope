@@ -228,6 +228,7 @@ function pageEnv(opts) {
     },
     activeScopesWindows: () => activeOf('data-win'),
     activeWardrivingWindows: () => activeOf('data-wdwin'),
+    activeMbFilters: () => activeOf('data-mb-filter'),
     clickSubtab: async (key) => {
       const bar = content().querySelector('#scopesSubtabs');
       assert.ok(bar, 'no #scopesSubtabs');
@@ -254,6 +255,7 @@ function pageEnv(opts) {
     globalWindow: () => el('analyticsTimeWindow').value,
     content: () => content().innerHTML,
     resolveViewParam: ctx._analyticsResolveViewParam,
+    renderMultiByteAdopters: ctx._analyticsRenderMultiByteAdopters,
   };
 }
 
@@ -539,6 +541,73 @@ function pageEnv(opts) {
     await env.clickTab('wardriving');
     assert.deepStrictEqual(env.activeWardrivingWindows(), ['24h']);
     assert.strictEqual(env.hash(), '#/analytics?tab=wardriving');
+  });
+
+  // #208 item 6: the Hash Stats multi-byte adopters filter (All / Confirmed
+  // / Suspected / Unknown) is deep-linked as mbf=. URL only: it had no
+  // stored state before, so a plain visit still opens on All.
+  console.log('\n=== #208: Hash Stats multi-byte adopters filter (mbf=) ===');
+
+  const ADOPTERS = REAL.hashData.multiByteNodes.map((n) => n.name);
+  await test('precondition: the fixture has confirmed multi-byte adopters only', async () => {
+    assert.ok(ADOPTERS.length > 0, 'no multiByteNodes in the fixture');
+    assert.ok(REAL.hashData.multiByteCapability.every((c) => c.status === 'confirmed'), 'fixture statuses changed');
+  });
+
+  for (const f of ['all', 'confirmed', 'suspected', 'unknown']) {
+    await test('#/analytics?tab=hashsizes&mbf=' + f + ' selects ' + f + ' and filters the table', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&mbf=' + f);
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      assert.deepStrictEqual(env.activeMbFilters(), [f], 'active filter button');
+      const shown = f === 'all' || f === 'confirmed';
+      for (const name of ADOPTERS) assert.strictEqual(env.content().indexOf('<strong>' + name + '</strong>') >= 0, shown, name + (shown ? ' missing' : ' shown'));
+      assert.strictEqual(env.content().indexOf('No adopters match this filter.') >= 0, !shown, 'empty-filter message');
+      assert.strictEqual(env.hash(), f === 'all' ? '#/analytics?tab=hashsizes' : '#/analytics?tab=hashsizes&mbf=' + f, 'URL not canonical');
+    });
+  }
+
+  for (const value of ['', 'x"]', 'x"],[data-mb-filter="unknown', '__proto__', 'constructor', 'Confirmed', ' confirmed', '<img src=x onerror=alert(1)>']) {
+    await test('?mbf=' + JSON.stringify(value) + ' falls back to All, no exception', async () => {
+      const env = pageEnv();
+      await env.mount('#/analytics?tab=hashsizes&mbf=' + encodeURIComponent(value));
+      assert.strictEqual(env.initError(), null, 'init() threw');
+      assert.deepStrictEqual(env.activeMbFilters(), ['all']);
+      assert.strictEqual(env.hash(), '#/analytics?tab=hashsizes');
+      assert.ok(env.content().indexOf('onerror') < 0, 'URL value reached the markup');
+    });
+  }
+
+  await test('#/analytics?tab=hashsizes is left as it is and opens on All', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes');
+    assert.deepStrictEqual(env.activeMbFilters(), ['all']);
+    assert.deepStrictEqual(env.hashLog.filter((h) => h !== '#/analytics?tab=hashsizes'), [], 'URL rewritten');
+  });
+
+  await test('mbf= is URL only: nothing stored, a later plain visit opens on All', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbf=confirmed');
+    assert.deepStrictEqual(Object.keys(env.session), [], 'sessionStorage written: ' + JSON.stringify(env.session));
+    env.destroy();
+    await env.mount('#/analytics?tab=hashsizes');
+    assert.deepStrictEqual(env.activeMbFilters(), ['all']);
+  });
+
+  await test('switching from Hash Stats to another tab drops mbf=', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=hashsizes&mbf=confirmed&window=24h');
+    await env.clickTab('topology');
+    assert.strictEqual(env.hash(), '#/analytics?tab=topology&window=24h');
+  });
+
+  await test('renderMultiByteAdopters(nodes, caps, filter) marks the filter active; an unknown one is All', async () => {
+    const env = pageEnv();
+    const nodes = REAL.hashData.multiByteNodes, caps = REAL.hashData.multiByteCapability;
+    const active = (html) => (html.match(/<button class="tab-btn active" data-mb-filter="([^"]*)"/g) || []).map((m) => m.replace(/.*="([^"]*)"$/, '$1'));
+    assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps, 'unknown')), ['unknown']);
+    assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps, 'bogus')), ['all']);
+    assert.deepStrictEqual(active(env.renderMultiByteAdopters(nodes, caps)), ['all']);
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
