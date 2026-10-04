@@ -493,15 +493,24 @@ function pageEnv(opts) {
     assert.strictEqual(env.hash(), '#/analytics?tab=scopes');
   });
 
-  // #208 item 7: Hash Issues owns bytes= and section= (the byte-size
-  // selector and its section links) like Scopes owns sub=/swin=.
-  await test('switching from Hash Issues to another tab drops bytes= and section=, keeps window=', async () => {
+  // #208 item 7: Hash Issues' section= is a one-shot scroll anchor and is
+  // dropped when leaving the tab. bytes= is its remembered byte size: it has
+  // no stored fallback, and #1914 pins that a tab round-trip keeps it.
+  await test('switching from Hash Issues to another tab drops section=, keeps bytes= and window=', async () => {
     const env = pageEnv();
     await env.mount('#/analytics?tab=collisions&bytes=2&section=hashMatrixSection&window=24h');
     assert.strictEqual(env.initError(), null, 'init() threw');
     assert.strictEqual(env.params().bytes, '2', 'precondition: bytes= kept on Hash Issues');
     await env.clickTab('topology');
-    assert.strictEqual(env.hash(), '#/analytics?tab=topology&window=24h');
+    assert.strictEqual(env.hash(), '#/analytics?tab=topology&bytes=2&window=24h');
+  });
+
+  await test('a Hash Issues → Hash Stats → Hash Issues round-trip keeps bytes= (#1914)', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=collisions&bytes=2');
+    await env.clickTab('hashsizes');
+    await env.clickTab('collisions');
+    assert.strictEqual(env.params().bytes, '2', 'bytes= lost: ' + env.hash());
   });
 
   console.log('\n=== #205: Wardriving window (wdwin=) ===');
