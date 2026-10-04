@@ -70,7 +70,9 @@ async function hashQuery(page) {
     const box = await page.locator('#fHideControl').boundingBox();
     assert(box && box.width <= 24 && box.height <= 24, 'the checkbox is drawn as a text-input box: ' + JSON.stringify(box));
     countAll = await shownCount(page);
-    assert(countAll === all.length, `list shows ${countAll}, API has ${all.length}`);
+    // Earlier E2E steps in the same CI job can add packets to the server, so
+    // the list may hold more than the snapshot above, never fewer.
+    assert(countAll >= all.length, `list shows ${countAll}, API had ${all.length}`);
     const q = await hashQuery(page);
     assert(!('hideControl' in q), 'hideControl in the URL by default: ' + JSON.stringify(q));
   });
