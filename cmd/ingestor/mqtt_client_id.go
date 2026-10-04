@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"io"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -165,7 +164,8 @@ func brokerForLog(broker string) string {
 
 // mqttSourceSecrets returns the non-empty secrets of a source: its
 // password and user name, and the user-info, query and fragment of its
-// broker URL as configured (brokerurl.Secrets).
+// broker URL as configured, with their parts, raw and decoded
+// (brokerurl.Secrets).
 func mqttSourceSecrets(source MQTTSource) []string {
 	var out []string
 	for _, v := range append([]string{source.Password, source.Username}, brokerurl.Secrets(source.Broker)...) {
@@ -176,22 +176,16 @@ func mqttSourceSecrets(source MQTTSource) []string {
 	return out
 }
 
-// errForLog is err's text with each of secrets (mqttSourceSecrets) replaced
-// by "****", longest first, and then any broker URL or user-info it quotes
-// masked (brokerurl.MaskText): MaskText only spots URL-shaped text, so a
-// query token or a password quoted on its own would pass it. paho's errors
-// normally quote none, but they reach the log and the stats file.
+// errForLog is err's text with each of secrets (mqttSourceSecrets) masked
+// by "****" in one pass over merged matches, skipping values too short to
+// tell from other text (brokerurl.MaskSecrets), and then any broker URL or
+// user-info it quotes masked (brokerurl.MaskText): MaskText only spots
+// URL-shaped text, so a query token or a password quoted on its own would
+// pass it. paho's errors normally quote none, but they reach the log and
+// the stats file.
 func errForLog(err error, secrets ...string) string {
 	if err == nil {
 		return "<nil>"
 	}
-	s := err.Error()
-	sorted := append([]string(nil), secrets...)
-	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
-	for _, v := range sorted {
-		if v != "" {
-			s = strings.ReplaceAll(s, v, brokerurl.Marker)
-		}
-	}
-	return brokerurl.MaskText(s)
+	return brokerurl.MaskText(brokerurl.MaskSecrets(err.Error(), secrets...))
 }

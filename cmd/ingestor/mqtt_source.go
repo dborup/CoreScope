@@ -7,13 +7,17 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-// prepareMQTTSource is main()'s per-source setup up to the client itself:
-// the paho options with the connect, connection-lost and reconnecting
-// handlers, the source's status-registry entry and its liveness state
-// (IsConnectedFn and ForceReconnectFn are wired by the caller once the
-// client exists; registration is left to the caller too). The message
-// handler needs the store and ingest buffer, so main() sets it.
-func prepareMQTTSource(source MQTTSource, tag string) (*mqtt.ClientOptions, *sourceStatusState, *SourceLivenessState) {
+// mqttSourceSetup is main()'s per-source setup up to the client itself.
+type mqttSourceSetup struct {
+	opts     *mqtt.ClientOptions  // with the connect, connection-lost and reconnecting handlers
+	status   *sourceStatusState   // the source's status-registry entry
+	liveness *SourceLivenessState // wired to the client by attachClient; registration is left to the caller
+	secrets  []string             // mqttSourceSecrets, for every error the source logs
+}
+
+// prepareMQTTSource builds a source's mqttSourceSetup. The message handler
+// needs the store and ingest buffer, so main() sets it.
+func prepareMQTTSource(source MQTTSource, tag string) *mqttSourceSetup {
 	logBroker := brokerForLog(source.Broker)
 	secrets := mqttSourceSecrets(source)
 	opts := buildMQTTOpts(source)
@@ -64,5 +68,13 @@ func prepareMQTTSource(source MQTTSource, tag string) (*mqtt.ClientOptions, *sou
 		log.Printf("MQTT [%s] reconnecting to %s", tag, logBroker)
 	})
 
-	return opts, status, liveness
+	return &mqttSourceSetup{opts: opts, status: status, liveness: liveness, secrets: secrets}
+}
+
+// attachClient wires the source's liveness state to its client once that
+// exists: the watchdog's connected check and its forced reconnect, which
+// logs Connect()'s error with the source's secrets masked.
+func (s *mqttSourceSetup) attachClient(client mqtt.Client) {
+	s.liveness.IsConnectedFn = client.IsConnected
+	s.liveness.ForceReconnectFn = buildForceReconnectFn(client, s.liveness.Tag, s.secrets...)
 }

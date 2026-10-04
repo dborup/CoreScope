@@ -138,7 +138,8 @@ func main() {
 	tags := mqttSourceTags(sources)
 	for i, source := range sources {
 		tag := tags[i]
-		opts, status, liveness := prepareMQTTSource(source, tag)
+		setup := prepareMQTTSource(source, tag)
+		opts, status, liveness := setup.opts, setup.status, setup.liveness
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
 
@@ -161,15 +162,15 @@ func main() {
 		// Wire IsConnectedFn now that the client exists, then register.
 		// Registration BEFORE Connect so the attempt counter is available
 		// to OnConnectAttempt on the very first dial.
-		liveness.IsConnectedFn = client.IsConnected
-		// #1335: wire force-reconnect so the watchdog can drop a
-		// half-open TCP socket and re-dial when paho.IsConnected==true
-		// but no messages have flowed past the stall threshold. Throttled
-		// per source by the watchdog itself (forceReconnectThrottle).
-		// Captured-by-value `client` is the same pointer used everywhere
-		// else for this source. See buildForceReconnectFn for why this is
-		// NOT simply "Disconnect(250) then Connect()".
-		liveness.ForceReconnectFn = buildForceReconnectFn(client, tag)
+		// #1335: attachClient also wires force-reconnect so the watchdog
+		// can drop a half-open TCP socket and re-dial when
+		// paho.IsConnected==true but no messages have flowed past the
+		// stall threshold. Throttled per source by the watchdog itself
+		// (forceReconnectThrottle). Captured-by-value `client` is the same
+		// pointer used everywhere else for this source. See
+		// buildForceReconnectFn for why this is NOT simply
+		// "Disconnect(250) then Connect()".
+		setup.attachClient(client)
 		// PR #1216 r2 item 3: tag collisions used to log.Fatalf, which
 		// killed the entire ingestor over one config typo and recreated
 		// the #1212 total-ingest-stop class this PR exists to prevent.
@@ -188,7 +189,7 @@ func main() {
 			continue
 		}
 		if token.Error() != nil {
-			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), mqttSourceSecrets(source)...))
+			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), setup.secrets...))
 			// BL1 fix: Disconnect to stop Paho's internal retry goroutines.
 			// With ConnectRetry=true, Connect() spawns background goroutines
 			// that leak if the client is simply discarded.
@@ -592,7 +593,11 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 // left set by a Disconnect(), so there it is a strong hint, not a guarantee.
 // The info line therefore keeps paho's error and claims no more than paho
 // reports. With IsConnected() false the error is logged as a failure.
-func buildForceReconnectFn(client mqtt.Client, tag string) func() {
+//
+// Either line logs the error with secrets (mqttSourceSecrets) masked
+// (errForLog): paho's errors may quote the broker URL. The classification
+// reads the raw error, whose text it compares.
+func buildForceReconnectFn(client mqtt.Client, tag string, secrets ...string) func() {
 	return func() {
 		if client.IsConnectionOpen() {
 			client.Disconnect(250)
@@ -606,9 +611,9 @@ func buildForceReconnectFn(client mqtt.Client, tag string) func() {
 		switch {
 		case err == nil:
 		case connectRetryInProgress(client, err):
-			log.Printf("MQTT [%s] WATCHDOG force-reconnect: Connect() returned %v; paho reports a retry pending (IsConnected=true), not starting a new attempt", tag, err)
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect: Connect() returned %s; paho reports a retry pending (IsConnected=true), not starting a new attempt", tag, errForLog(err, secrets...))
 		default:
-			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %v", tag, err)
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %s", tag, errForLog(err, secrets...))
 		}
 	}
 }
