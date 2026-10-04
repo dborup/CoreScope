@@ -843,7 +843,9 @@
       if (pathModal && subpath === '/' + pathModal.dataset.hash) keep.push('viewPath=1');
     }
     if (keep.length) query += (query ? '&' : '?') + keep.join('&');
-    history.replaceState(null, '', '#/packets' + subpath + query);
+    // Keeps the entry's history.state: packet-path-map.js marks the entry
+    // its modal opened on there (#180).
+    history.replaceState(history.state, '', '#/packets' + subpath + query);
     updateClearFiltersVisibility();
   }
 
@@ -1177,11 +1179,13 @@
     // link reopens the exact same modal instead of leaving the recipient
     // on the plain packet detail page. Independent of the packets-list
     // rendering below (the modal fetches its own data), so it's safe to
-    // fire immediately.
+    // fire immediately. restore() skips a history entry whose modal was
+    // closed on another page (#180); the cold-load updatePacketsUrl() below
+    // then drops ?viewPath=1, as the modal is not open.
     var _urlViewPath = _initUrlParams.get('viewPath');
     if (_urlViewPath === '1') {
       var _viewPathHash = directPacketHash || filters.hash;
-      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.open(_viewPathHash);
+      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.restore(_viewPathHash);
     }
     var _urlNode = _initUrlParams.get('node');
     if (_urlNode) { filters.node = _urlNode; filters.nodeName = _urlNode.slice(0, 8); }

@@ -82,7 +82,7 @@ function makeSandbox(startHash, opts) {
     console, URLSearchParams, encodeURIComponent, decodeURIComponent,
     String, Number, Array, Object, RegExp, JSON, Math, Set, Map, Error,
     location: { hash: startHash },
-    history: { replaceState(_s, _t, url) { urls.push(url); ctx.location.hash = url; } },
+    history: { state: opts.state === undefined ? null : opts.state, replaceState(st, _t, url) { urls.push(url); ctx.history.state = st; ctx.location.hash = url; } },
     document: { getElementById: (id) => els[id] || null },
     localStorage: {
       getItem: (k) => (k in store ? store[k] : null),
@@ -324,6 +324,23 @@ test('closing the detail drops subpath and detail params, keeps the filters', ()
   const s = makeSandbox(DETAIL + '?timeWindow=60&observer=OBS1&obs=1');
   s.set("filters.observer = 'OBS1'; savedTimeWindowMin = 60");
   assert.strictEqual(s.update({ subpath: '', obs: null }), '#/packets?timeWindow=60&observer=OBS1');
+});
+
+// ---- history.state survives every list-URL write (#180) ----
+// packet-path-map.js marks the #/packets/<hash> entry its modal opened on
+// in history.state, so Back/Forward onto it after the modal was closed on
+// another page does not reopen it. The writes here must not wipe the mark.
+
+test('updatePacketsUrl() keeps the entry\'s history.state (filter change, selection, Clear) (#180)', () => {
+  const mark = { packetPathModal: 'e1' };
+  const s = makeSandbox(DETAIL + '?obs=123&viewPath=1', { modalOpen: true, state: mark });
+  s.set("filters.observer = 'OBS1'");
+  s.update();
+  assert.strictEqual(s.ctx.history.state, mark, 'filter change dropped the state');
+  s.update({ subpath: '/abc123', obs: '7' });
+  assert.strictEqual(s.ctx.history.state, mark, 'selection dropped the state');
+  s.clear();
+  assert.strictEqual(s.ctx.history.state, mark, 'Clear dropped the state');
 });
 
 // ---- Route guard (#167 r2): the list URL is written only on #/packets ----

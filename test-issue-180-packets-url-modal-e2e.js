@@ -13,6 +13,10 @@
  *   over it (global search via Ctrl+K, the nav More menu) closes that layer,
  *   not the modal; the next Escape closes the modal.
  *
+ * - Item 5 (800 and 1400 px): Back from a packet whose View Path modal is
+ *   open closes the modal, and Forward onto that history entry (which still
+ *   says viewPath=1) does not reopen it; the URL then drops viewPath.
+ *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js
  */
 'use strict';
@@ -155,6 +159,36 @@ function detailPaneOpen(page) {
       await waitFor(page, () => !document.getElementById('navMoreMenu').classList.contains('open'), 'Escape did not close the More menu');
       assert(await modalOpen(), 'Escape in the More menu closed the View Path modal underneath');
       await secondEscapeClosesModal();
+    });
+    await context.close();
+  }
+
+  // ---- Item 5: Back/Forward and a closed View Path modal ----
+  for (const vp of [
+    { label: 'tablet (800)', width: 800, btn: '.slide-over-panel [data-view-path]' },
+    { label: 'desktop (1400)', width: 1400, btn: '#pktRight [data-view-path]' },
+  ]) {
+    const { context, page } = await newPage({ viewport: { width: vp.width, height: 900 } });
+    await step(`${vp.label}: Back closes the View Path modal; Forward does not reopen it and drops viewPath`, async () => {
+      await fresh(page, `${BASE}/#/nodes`);
+      await page.evaluate((h) => { location.hash = '#/packets/' + h; }, hash);
+      await page.waitForSelector(vp.btn, { timeout: 15000 });
+      await page.waitForTimeout(400);
+      await page.click(vp.btn);
+      await page.waitForSelector('#packetPathModal');
+      await waitFor(page, () => /^#\/packets\/[^?]+\?(.*&)?viewPath=1(&|$)/.test(location.hash), 'viewPath=1 not written by the View Path button');
+
+      await page.evaluate(() => history.back());
+      await waitFor(page, () => location.hash.startsWith('#/nodes'), 'Back did not go to #/nodes');
+      await page.waitForSelector('#packetPathModal', { state: 'detached', timeout: 5000 })
+        .catch(() => { throw new Error('the View Path modal stayed open over #/nodes after Back'); });
+
+      await page.evaluate(() => history.forward());
+      await waitFor(page, () => location.hash.startsWith('#/packets/'), 'Forward did not return to the packet');
+      await page.waitForSelector(vp.btn, { timeout: 15000 });
+      await page.waitForTimeout(1000);
+      assert(!(await page.evaluate(() => !!document.getElementById('packetPathModal'))), 'Forward reopened the closed View Path modal');
+      await waitFor(page, () => !/viewPath=/.test(location.hash), 'viewPath=1 still in the URL with no modal open');
     });
     await context.close();
   }

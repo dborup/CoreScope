@@ -28,8 +28,8 @@ function test(name, fn) {
 
 console.log('\n=== packet-path-map.js: string-contract checks ===');
 
-test('exports window.PacketPathMap.{open,close}', () => {
-  assert.ok(/window\.PacketPathMap\s*=\s*\{\s*open:\s*open,\s*close:\s*close\s*\}/.test(src));
+test('exports window.PacketPathMap.{open,close,restore}', () => {
+  assert.ok(/window\.PacketPathMap\s*=\s*\{\s*open:\s*open,\s*close:\s*close,\s*restore:\s*restore\s*\}/.test(src));
 });
 
 test('fetches via the shared api() helper, not a raw fetch (picks up auth/base-URL handling)', () => {
@@ -146,8 +146,14 @@ function makeSandbox(apiImpl) {
   };
   const docLog = [];
 
+  // #180: the modal listens for hashchange on window while it is open.
+  const winListeners = {};
+  const win = {
+    addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { if (winListeners[type]) winListeners[type] = winListeners[type].filter(f => f !== fn); },
+  };
   const ctx = {
-    window: {}, document: doc, console, Math, String, JSON, Promise, Error,
+    window: win, document: doc, console, Math, String, JSON, Promise, Error, Date,
     setTimeout, clearTimeout,
     // Returns the variable name itself (not a real color) so tests can
     // assert two markers use DIFFERENT css vars without caring what the
@@ -158,10 +164,27 @@ function makeSandbox(apiImpl) {
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
     location: { origin: 'https://stg.meshview.dk', hash: '' },
-    // Records replaceState() so the #147 tests can see the address bar.
-    history: { replaceState(_s, _t, url) { ctx.__replaced.push(url); ctx.location.hash = url; } },
+    // Records replaceState() so the #147 tests can see the address bar. A
+    // call without a URL changes only the entry's state (#180), not the
+    // address bar, so it is not in __replaced.
+    history: {
+      state: null,
+      replaceState(state, _t, url) {
+        ctx.history.state = state;
+        if (url === undefined) return;
+        ctx.__replaced.push(url); ctx.location.hash = url;
+      },
+    },
     __replaced: [],
     __docLog: docLog,
+    __winListeners: winListeners,
+    // #180: a navigation (Back/Forward, a nav link): the new entry's hash and
+    // state, then the window's hashchange listeners.
+    __navigate(hash, state) {
+      ctx.location.hash = hash;
+      ctx.history.state = state === undefined ? null : state;
+      (winListeners.hashchange || []).slice().forEach(fn => fn({}));
+    },
   };
   ctx.window.copyToClipboard = (text, onDone) => { ctx.__copiedText = text; if (onDone) onDone(); };
   vm.createContext(ctx);
@@ -1384,6 +1407,105 @@ function makeSandbox(apiImpl) {
     [{}, { pos: 'fixed', cls: 'mobile-detail-sheet' }], 'target', true);
   await escapeCase('Escape with focus in the sticky top nav (no floating layer) closes the modal (#180)',
     [{}, { pos: 'sticky', cls: 'top-nav' }], 'target', true);
+
+  // #180: the modal closes on a route change, and Back/Forward onto the
+  // #/packets/<hash>?…&viewPath=1 entry it was closed away from does not
+  // reopen it. A new link to the same URL (an entry without that state)
+  // and a reload of an entry whose modal was open still do.
+  const ENTRY = '#/packets/deadbeef?obs=1&viewPath=1';
+  async function routeCase(name, fn) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = ENTRY;
+      ctx.history.state = { other: 'kept' };
+      await fn(ctx);
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  const isOpen = (ctx) => !!ctx.document.getElementById('packetPathModal');
+  const hashListeners = (ctx) => (ctx.__winListeners.hashchange || []).length;
+
+  await routeCase('open() on a #/packets/<hash> entry marks it in history.state, keeping other state, without a URL write (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.ok(ctx.history.state.packetPathModal, 'entry not marked: ' + JSON.stringify(ctx.history.state));
+    assert.strictEqual(ctx.history.state.other, 'kept');
+    assert.strictEqual(ctx.__replaced.length, 0, 'URL written: ' + JSON.stringify(ctx.__replaced));
+    assert.strictEqual(hashListeners(ctx), 1, 'no hashchange listener while open');
+  });
+  await routeCase('open() on another page (e.g. #/analytics) does not mark the entry (#180)', async (ctx) => {
+    ctx.location.hash = '#/analytics?tab=distance';
+    ctx.history.state = null;
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.strictEqual(ctx.history.state, null);
+  });
+  await routeCase('a route change (Back to #/nodes) closes the modal and writes no URL (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/nodes', null);
+    assert.ok(!isOpen(ctx), 'modal still open over #/nodes');
+    assert.strictEqual(ctx.location.hash, '#/nodes');
+    assert.strictEqual(ctx.__replaced.length, 0, 'URL written: ' + JSON.stringify(ctx.__replaced));
+    assert.strictEqual(hashListeners(ctx), 0, 'hashchange listener left behind');
+  });
+  await routeCase('a hashchange that keeps the path (query only) keeps the modal (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/packets/deadbeef?obs=2&viewPath=1', ctx.history.state);
+    assert.ok(isOpen(ctx), 'modal closed by a query-only hashchange');
+  });
+  await routeCase('Forward onto the entry whose modal closed on route change: restore() does not reopen it (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, entryState);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false);
+    assert.ok(!isOpen(ctx), 'modal reopened from history');
+  });
+  await routeCase('a modal closed with Escape while another route is shown is not reopened by Back/Forward (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    // A route switch without a hashchange event (replaceState-based).
+    ctx.location.hash = '#/nodes';
+    ctx.history.state = null;
+    ctx.__docLog.find(r => r.type === 'keydown').fn({ key: 'Escape', stopPropagation() {} });
+    assert.ok(!isOpen(ctx), 'Escape did not close the modal');
+    assert.strictEqual(ctx.location.hash, '#/nodes', 'the other route\'s URL was rewritten');
+    ctx.__navigate(ENTRY, entryState);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false);
+    assert.ok(!isOpen(ctx), 'modal reopened from history');
+  });
+  await routeCase('restore() on a new link to the same URL (entry without state) opens the modal (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, null);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), true);
+    assert.ok(isOpen(ctx), 'a fresh link did not open the modal');
+  });
+  await routeCase('restore() on a reload of an entry whose modal was open reopens it (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    ctx.window.PacketPathMap.close();
+    // A reload: same entry state, a new document (fresh module, no list).
+    const ctx2 = makeSandbox(() => Promise.reject(new Error('boom')));
+    ctx2.location.hash = ENTRY;
+    ctx2.history.state = entryState;
+    assert.strictEqual(ctx2.window.PacketPathMap.restore('deadbeef'), true);
+    assert.ok(isOpen(ctx2), 'reload did not reopen the modal');
+  });
+  await routeCase('the closed-entry list is bounded: the oldest entry is forgotten after 50 newer ones (#180)', async (ctx) => {
+    const states = [];
+    for (let i = 0; i < 51; i++) {
+      ctx.__navigate(ENTRY, null);
+      await ctx.window.PacketPathMap.open('deadbeef');
+      states.push(ctx.history.state);
+      ctx.__navigate('#/nodes', null);
+    }
+    ctx.__navigate(ENTRY, states[1]);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false, 'entry 2 of 51 forgotten too early');
+    ctx.window.PacketPathMap.close();
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, states[0]);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), true, 'the oldest of 51 entries is still remembered');
+  });
 
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);
