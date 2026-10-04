@@ -9,7 +9,8 @@
  * - a URL value wins over the sessionStorage one;
  * - a hostile ?sub= falls back to Overview without a page error;
  * - the default view keeps the URL it had before (#/analytics?tab=scopes),
- *   and switching to another tab drops the keys.
+ *   and switching to another tab drops the keys;
+ * - Hash Stats' multi-byte adopters filter is deep-linked as ?mbf= (#208).
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-205-analytics-subtab-deeplinks-e2e.js
  */
@@ -190,6 +191,61 @@ async function coldLoad(page, path) {
     await page.click('[data-wdwin="1h"]');
     await page.waitForSelector('[data-wdwin="1h"].active');
     assert(await hash(page) === '#/analytics?tab=wardriving&wdwin=1h', 'after 1h: ' + await hash(page));
+  });
+
+  // #208 item 6: Hash Stats' multi-byte adopters filter as mbf=.
+  const mbActive = (p) => p.evaluate(() => Array.from(document.querySelectorAll('#mbCapFilters [data-mb-filter].active')).map((b) => b.dataset.mbFilter));
+  async function expectMb(p, f) {
+    try {
+      await p.waitForFunction((want) => {
+        const a = Array.from(document.querySelectorAll('#mbCapFilters [data-mb-filter].active'));
+        return a.length === 1 && a[0].dataset.mbFilter === want;
+      }, f, { timeout: 15000 });
+    } catch (_) {
+      throw new Error('filter ' + f + ' not active; active ' + JSON.stringify(await mbActive(p)) + ', hash ' + await hash(p));
+    }
+  }
+  // The card wires its click handler 100 ms after it renders.
+  async function clickMb(p, f) {
+    await p.waitForTimeout(300);
+    await p.click('#mbCapFilters [data-mb-filter="' + f + '"]');
+    await expectMb(p, f);
+  }
+
+  await step('cold load #/analytics?tab=hashsizes&mbf=confirmed selects Confirmed, URL unchanged', async () => {
+    await coldLoad(page, '#/analytics?tab=hashsizes&mbf=confirmed');
+    await expectMb(page, 'confirmed');
+    assert(await page.locator('#mbAdoptersTable tbody tr').count() > 0, 'no confirmed adopters in the table (fixture?)');
+    assert(await hash(page) === '#/analytics?tab=hashsizes&mbf=confirmed', 'hash ' + await hash(page));
+  });
+
+  await step('clicking a filter writes mbf=, reload keeps it, All drops it', async () => {
+    await clickMb(page, 'unknown');
+    await page.waitForFunction(() => location.hash === '#/analytics?tab=hashsizes&mbf=unknown', null, { timeout: 5000 })
+      .catch(async () => { throw new Error('after Unknown: ' + await hash(page)); });
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__themeRefreshed, null, { timeout: 8000 }).catch(() => {});
+    await expectMb(page, 'unknown');
+    await clickMb(page, 'all');
+    await page.waitForFunction(() => location.hash === '#/analytics?tab=hashsizes', null, { timeout: 5000 })
+      .catch(async () => { throw new Error('after All: ' + await hash(page)); });
+    assert(await page.evaluate(() => Object.keys(sessionStorage).filter((k) => /mb/i.test(k)).length === 0), 'filter stored in sessionStorage');
+  });
+
+  await step('switching from Hash Stats to another tab drops mbf=', async () => {
+    await clickMb(page, 'confirmed');
+    await page.waitForFunction(() => location.hash === '#/analytics?tab=hashsizes&mbf=confirmed', null, { timeout: 5000 });
+    await page.click('#analyticsTabs [data-tab="topology"]');
+    await page.waitForFunction(() => location.hash === '#/analytics?tab=topology', null, { timeout: 5000 })
+      .catch(async () => { throw new Error('after the tab switch: ' + await hash(page)); });
+  });
+
+  await step('a hostile ?mbf= falls back to All without a page error', async () => {
+    const before = pageErrors.length;
+    await coldLoad(page, '#/analytics?tab=hashsizes&mbf=' + encodeURIComponent('x"],[data-mb-filter="unknown'));
+    await expectMb(page, 'all');
+    assert(await hash(page) === '#/analytics?tab=hashsizes', 'hash not canonical: ' + await hash(page));
+    assert(pageErrors.length === before, 'page errors: ' + pageErrors.slice(before).join(' | '));
   });
 
   await browser.close();
