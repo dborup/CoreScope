@@ -353,6 +353,7 @@
   // another tab is selected.
   var TAB_URL_PARAMS = {
     'rf-health': ['range', 'observer', 'from', 'to'],
+    collisions: ['bytes', 'section'],
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
     wardriving: [WARDRIVING_WINDOW.param],
   };
