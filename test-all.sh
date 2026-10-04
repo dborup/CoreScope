@@ -144,6 +144,7 @@ run test-issue-111-drawer-version.js
 
 # Previously run only by the JS unit step in deploy.yml (#174)
 run test-packet-filter-time.js
+run test-packets.js
 run test-confidence-indicator.js
 run test-1659-analytics-warmup.js
 run test-analytics-tab-state-and-query.js
