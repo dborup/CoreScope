@@ -816,8 +816,9 @@
   //   selection. That re-runs init(), whose cold-load call here writes the
   //   restored filters back; the previous packet's ?obs= does not apply.
   // detail (optional): { subpath: '/<hash|id>' or '', obs: id or null } when
-  // the caller changes the selection; without it the current subpath and
-  // ?obs= are kept (filter changes, Clear Filters, cold load).
+  // the caller changes the selection or closes the detail (Clear Filters,
+  // #180); without it the current subpath and ?obs= are kept (filter
+  // changes, cold load).
   function updatePacketsUrl(detail) {
     var cur = String(location.hash || '');
     // The packets list route: #/packets, #/packets/…, #/packets?…, or no
@@ -842,7 +843,9 @@
       if (pathModal && subpath === '/' + pathModal.dataset.hash) keep.push('viewPath=1');
     }
     if (keep.length) query += (query ? '&' : '?') + keep.join('&');
-    history.replaceState(null, '', '#/packets' + subpath + query);
+    // Keeps the entry's history.state: packet-path-map.js marks the entry
+    // its modal opened on there (#180).
+    history.replaceState(history.state, '', '#/packets' + subpath + query);
     updateClearFiltersVisibility();
   }
 
@@ -935,14 +938,21 @@
   }
 
   function closeDetailPanel() {
+    // The ≤640 px bottom sheet as well: Escape used to reset only the
+    // desktop pane and never closed the sheet (#180).
+    var sheet = document.getElementById('mobileDetailSheet');
+    if (sheet) sheet.classList.remove('open');
     var panel = document.getElementById('pktRight');
     if (panel) {
       panel.classList.add('empty');
       panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + '<span>Select a packet to view details</span>';
       var layout = panel.closest('.split-layout');
       if (layout) layout.classList.add('detail-collapsed');
+      // Re-render only to drop a row's selection highlight (#180: Clear
+      // Filters closes the detail and reloads the rows itself).
+      var wasSelected = selectedId !== null;
       selectedId = null;
-      renderTableRows();
+      if (wasSelected) renderTableRows();
     }
   }
 
@@ -1173,11 +1183,13 @@
     // link reopens the exact same modal instead of leaving the recipient
     // on the plain packet detail page. Independent of the packets-list
     // rendering below (the modal fetches its own data), so it's safe to
-    // fire immediately.
+    // fire immediately. restore() skips a history entry whose modal was
+    // closed on another page (#180); the cold-load updatePacketsUrl() below
+    // then drops ?viewPath=1, as the modal is not open.
     var _urlViewPath = _initUrlParams.get('viewPath');
     if (_urlViewPath === '1') {
       var _viewPathHash = directPacketHash || filters.hash;
-      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.open(_viewPathHash);
+      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.restore(_viewPathHash);
     }
     var _urlNode = _initUrlParams.get('node');
     if (_urlNode) { filters.node = _urlNode; filters.nodeName = _urlNode.slice(0, 8); }
@@ -2019,8 +2031,14 @@
       // Reset region filter
       RegionFilter.setSelected([]);
 
+      // Clear also leaves the packet detail (#180): a #/packets/<hash>
+      // subpath sets filters.hash again on load, so after Clear the URL is
+      // the list and the detail it named is closed.
+      selectedObservationId = null;
+      closeDetailPanel();
+
       // Update URL and reload
-      updatePacketsUrl();
+      updatePacketsUrl({ subpath: '', obs: null });
       loadPackets();
     });
     // Show clear button if page loaded with active filters (e.g. from URL params)

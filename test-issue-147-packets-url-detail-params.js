@@ -3,8 +3,9 @@
  * updatePacketsUrl() rebuilds #/packets/<hash>?… from buildPacketsQuery(),
  * which only knows filter params. The packet-detail params it does not own,
  * ?obs= (selected observation) and ?viewPath=1 (View Path modal), must
- * survive: on cold load (init() calls it to show the Clear button), on every
- * filter change and on Clear Filters.
+ * survive: on cold load (init() calls it to show the Clear button) and on
+ * every filter change. Clear Filters leaves the detail, so it drops them with
+ * the subpath (#180).
  *
  * Decision under test: ?obs= travels with the detail subpath; ?viewPath=1
  * describes the open View Path modal, so it is in the URL exactly while that
@@ -81,7 +82,7 @@ function makeSandbox(startHash, opts) {
     console, URLSearchParams, encodeURIComponent, decodeURIComponent,
     String, Number, Array, Object, RegExp, JSON, Math, Set, Map, Error,
     location: { hash: startHash },
-    history: { replaceState(_s, _t, url) { urls.push(url); ctx.location.hash = url; } },
+    history: { state: opts.state === undefined ? null : opts.state, replaceState(st, _t, url) { urls.push(url); ctx.history.state = st; ctx.location.hash = url; } },
     document: { getElementById: (id) => els[id] || null },
     localStorage: {
       getItem: (k) => (k in store ? store[k] : null),
@@ -105,6 +106,8 @@ function makeSandbox(startHash, opts) {
     'var _observerFilterSet = null; var selectedObservers = new Set(); var selectedTypes = new Set();\n' +
     'function buildObserverMenu() {} function updateObsTrigger() {} function buildTypeMenu() {}\n' +
     'function updateTypeTrigger() {} function loadPackets() {}\n' +
+    // #180: Clear Filters closes the detail; record that it did.
+    'var selectedObservationId = null; var __detailClosed = 0; function closeDetailPanel() { __detailClosed++; }\n' +
     URL_FUNCS + '\nfunction __clearFilters() {' + CLEAR_BODY + '}',
     ctx, { filename: 'packets.js (#147 extract)' });
   return {
@@ -231,19 +234,33 @@ test('list view (#/packets, no detail) gets no ?obs=', () => {
   assert.strictEqual(s.update(), '#/packets?observer=OBS1');
 });
 
-// ---- Clear Filters (#121/#132): filter params go, detail subpath + obs stay ----
+// ---- Clear Filters (#121/#132): filter params go ----
+// #180 decision: Clear also leaves the detail. A #/packets/<hash> subpath
+// sets filters.hash again on load, so a Clear that kept it was undone by a
+// reload. Clear closes the detail and writes the list URL #/packets?….
 
-test('Clear Filters on a detail URL removes filter params, keeps subpath and ?obs=', () => {
+test('Clear Filters on a detail URL removes filter params and the detail (subpath, ?obs=) (#180)', () => {
   const s = makeSandbox(DETAIL + '?timeWindow=60&region=EU&observer=OBS1&obs=123');
-  s.set("filters.hash = 'abc123'; filters.observer = 'OBS1'; savedTimeWindowMin = 60; __region = ['EU']");
-  assert.strictEqual(s.clear(), DETAIL + '?obs=123');
+  s.set("filters.hash = 'abc123'; filters.observer = 'OBS1'; savedTimeWindowMin = 60; __region = ['EU']; selectedObservationId = '123'");
+  assert.strictEqual(s.clear(), '#/packets');
   assert.strictEqual(s.els.clearFiltersBtn.style.display, 'none', 'Clear button still visible after clearing');
+  assert.strictEqual(s.ctx.__detailClosed, 1, 'Clear did not close the detail');
+  assert.strictEqual(s.ctx.selectedObservationId, null, 'selected observation kept');
 });
 
-test('Clear Filters on a detail URL drops viewPath=1 when the modal is closed', () => {
+test('Clear Filters on a detail URL also drops viewPath=1 (#180)', () => {
   const s = makeSandbox(DETAIL + '?observer=OBS1&obs=123&viewPath=1', { modalOpen: false });
   s.set("filters.observer = 'OBS1'");
-  assert.strictEqual(s.clear(), DETAIL + '?obs=123');
+  assert.strictEqual(s.clear(), '#/packets');
+});
+
+test('Clear Filters keeps the default-route form: no hash filter left for a reload to re-apply (#180)', () => {
+  // The reload of what Clear wrote must not filter: no subpath, no ?hash=.
+  const s = makeSandbox(DETAIL + '?obs=123');
+  s.set("filters.hash = 'abc123'");
+  const h = s.clear();
+  assert(!/^#\/packets\//.test(h), 'detail subpath kept: ' + h);
+  assert.strictEqual(params(h).get('hash'), null, 'hash filter in the URL: ' + h);
 });
 
 test('Clear Filters on the list view still yields bare #/packets', () => {
@@ -307,6 +324,23 @@ test('closing the detail drops subpath and detail params, keeps the filters', ()
   const s = makeSandbox(DETAIL + '?timeWindow=60&observer=OBS1&obs=1');
   s.set("filters.observer = 'OBS1'; savedTimeWindowMin = 60");
   assert.strictEqual(s.update({ subpath: '', obs: null }), '#/packets?timeWindow=60&observer=OBS1');
+});
+
+// ---- history.state survives every list-URL write (#180) ----
+// packet-path-map.js marks the #/packets/<hash> entry its modal opened on
+// in history.state, so Back/Forward onto it after the modal was closed on
+// another page does not reopen it. The writes here must not wipe the mark.
+
+test('updatePacketsUrl() keeps the entry\'s history.state (filter change, selection, Clear) (#180)', () => {
+  const mark = { packetPathModal: 'e1' };
+  const s = makeSandbox(DETAIL + '?obs=123&viewPath=1', { modalOpen: true, state: mark });
+  s.set("filters.observer = 'OBS1'");
+  s.update();
+  assert.strictEqual(s.ctx.history.state, mark, 'filter change dropped the state');
+  s.update({ subpath: '/abc123', obs: '7' });
+  assert.strictEqual(s.ctx.history.state, mark, 'selection dropped the state');
+  s.clear();
+  assert.strictEqual(s.ctx.history.state, mark, 'Clear dropped the state');
 });
 
 // ---- Route guard (#167 r2): the list URL is written only on #/packets ----
