@@ -63,6 +63,7 @@ const BUTTON_SELECTORS = [
   ['.clock-filter-btn',      'button', 'clock-filter-btn'],
   ['.copy-link-btn',         'button', 'copy-link-btn'],
   ['.alab-btn',              'button', 'alab-btn'],
+  ['.fav-star',              'button', 'fav-star'],
 ];
 
 // Form controls. min-WIDTH is not enforced on these (text fields legitimately
