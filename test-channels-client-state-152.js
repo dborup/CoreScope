@@ -257,7 +257,10 @@ function makeHarness(opts) {
     ctx.window.setTimeout = ctx.setTimeout;
     ctx.window.clearTimeout = ctx.clearTimeout;
   } else {
-    ctx.window.ChannelProposals.mount = (mountOpts) => { h.approvedCallback = mountOpts && mountOpts.onApproved; };
+    ctx.window.ChannelProposals.mount = (mountOpts) => {
+      h.approvedCallback = mountOpts && mountOpts.onApproved;
+      h.revokedCallback = mountOpts && mountOpts.onRevoked; // #251
+    };
     ctx.window.ChannelProposals.unmount = () => {};
   }
   load('public/channels.js');
@@ -509,6 +512,59 @@ async function test(name, fn) {
     assert.strictEqual(h.state().channels.filter((c) => c.hash === PSK_HASH).length, 1, 'PSK row must appear exactly once');
   });
 
+  // #251 review: a stored CHAN transmission that arrives again over the live
+  // WebSocket (a new observer or path) must not bring a hidden channel's row
+  // back. The server names the hidden channels in /channels; live updates
+  // for other channels, and for the channel once it is listed again, still
+  // work. The packet is the server's real `type: "packet"` envelope.
+  await test('a live CHAN packet does not re-create the row of a hidden channel (#251)', async () => {
+    const h = makeHarness();
+    const live = (channel, n) => h.w._channelsProcessWSBatchForTest([{
+      type: 'packet',
+      data: { id: n, hash: 'old-chan-' + channel + n, decoded: { header: { payloadTypeName: 'GRP_TXT' },
+        payload: { type: 'CHAN', channel, sender: 'alice', text: 'alice: hello' } } },
+    }], null);
+    h.respondChannels = () => Promise.resolve({
+      channels: [serverChannel('public'), serverChannel('#helloworld')],
+      approvedChannels: [{ name: '#helloworld', hash: '#helloworld' }],
+    });
+    await h.init();
+    // The revoke: /channels leaves it out and names it as hidden.
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')], hiddenChannels: ['#helloworld'] });
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(h.row('#helloworld'), undefined, 'precondition: hidden after the refresh');
+    live('#helloworld', 1);
+    assert.strictEqual(h.row('#helloworld'), undefined, 'a live observation must not re-create the hidden row');
+    live('#brandnew', 2);
+    assert.ok(h.row('#brandnew'), 'other new channels still appear live');
+    // Approved again: /channels lists it and no longer names it as hidden.
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public'), serverChannel('#helloworld')] });
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.ok(h.row('#helloworld'), 'listed again once approved');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.w._channelsLoadChannelsForTest(true);
+    live('#helloworld', 3);
+    assert.ok(h.row('#helloworld'), 'with no hidden channels named, a live message lists the channel as before');
+  });
+
+  // #251: an admin revoke reloads the list in that tab (once), so the
+  // revoked channel leaves it without waiting for the next periodic load.
+  await test('shared-channel revoke (onRevoked) refetches the channel list once and drops the channel (#251)', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({
+      channels: [serverChannel('public'), serverChannel('#helloworld')],
+      approvedChannels: [{ hash: '#helloworld', name: '#helloworld' }],
+    });
+    await h.init();
+    assert.strictEqual(typeof h.revokedCallback, 'function', 'init() must mount ChannelProposals with onRevoked');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    const before = h.channelRequests.length;
+    h.revokedCallback('#helloworld');
+    await flush();
+    assert.strictEqual(h.channelRequests.length, before + 1, 'revoke must refetch the channel list exactly once');
+    assert.strictEqual(h.row('#helloworld'), undefined, 'the revoked channel must be gone');
+  });
+
   // #232: with auto-approve on, the suggest poller sees `approved` and must
   // refresh this tab's list through the same onApproved path as the admin
   // decision, keeping the open PSK conversation and the unread counts.
@@ -610,6 +666,26 @@ async function test(name, fn) {
     h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
     await h.w._channelsLoadChannelsForTest(true);
     assert.strictEqual(h.row('#far'), undefined, 'omitted row must not be resurrected');
+    assert.deepStrictEqual(h.state().channels.map((c) => c.hash), ['public']);
+  });
+
+  // #251: the server leaves a revoked shared channel out of /channels. The
+  // refresh must not carry it over from the previous list, and a
+  // conversation open on it closes through the existing reconcile step.
+  await test('a revoked shared channel disappears at the next refresh and closes its open conversation (#251)', async () => {
+    const h = makeHarness();
+    h.respondChannels = () => Promise.resolve({
+      channels: [serverChannel('public'), serverChannel('#helloworld', { messageCount: 1 })],
+      approvedChannels: [{ name: '#helloworld', hash: '#helloworld' }],
+    });
+    await h.init();
+    assert.ok(h.row('#helloworld'), 'precondition: the shared channel is listed');
+    h.setState({ selectedHash: '#helloworld' });
+    // After the revoke the server answers without it (and approvedChannels is empty).
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.w._channelsLoadChannelsForTest(true);
+    assert.strictEqual(h.row('#helloworld'), undefined, 'the revoked channel must leave the list');
+    assert.strictEqual(h.state().selectedHash, null, 'the open conversation on it is closed');
     assert.deepStrictEqual(h.state().channels.map((c) => c.hash), ['public']);
   });
 

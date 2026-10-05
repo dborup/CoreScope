@@ -235,6 +235,9 @@
 
   // ── Suggest form (a section of the Add Channel modal) ─────────────────
   var BUILTIN_NOTE = 'This site already decrypts it through its built-in channel list, so sharing it changes nothing.';
+  // #251: hashtag keys come from the exact name (sha256 of "#name"), so a
+  // different case is a different channel; the server only points it out.
+  var NEAR_DUP_NOTE = 'Hashtag keys are derived from the exact name, so these are different channels with different keys.';
 
   // Plain text for the suggest form's status line (shown with textContent).
   function suggestMessage(st, fallbackName) {
@@ -443,8 +446,16 @@
       ? '<span class="ch-proposals-builtin" title="' + esc(BUILTIN_NOTE) + '">Built in: already decrypted</span>'
       : '';
     return '<li class="ch-proposals-item" data-proposal-id="' + esc(p.id) + '"' + (p.builtIn === true ? ' data-builtin="true"' : '') + '>' +
-      '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' + builtin +
+      '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' + builtin + renderNearDuplicate(p) +
       '<span class="ch-proposals-meta">' + when + '</span></div>' + actions + '</li>';
+  }
+
+  // Other proposals / built-in names that differ from p only by letter case.
+  function renderNearDuplicate(p) {
+    var names = Array.isArray(p.nearDuplicateOf) ? p.nearDuplicateOf.filter(function (n) { return typeof n === 'string' && n; }) : [];
+    if (!names.length) return '';
+    return '<span class="ch-proposals-neardup" title="' + esc(NEAR_DUP_NOTE) + '">Same name in different case: ' +
+      names.map(function (n) { return esc(n); }).join(', ') + '</span>';
   }
 
   // ── Remove (revoke) confirmation layer, nested inside the admin dialog ──
@@ -562,6 +573,9 @@
       adminStatus(name + ' was rejected.', 'success');
     } else if (st.status === 'revoked') {
       adminStatus(name + ' was removed and is no longer shared.', 'success');
+      // #251: the server now leaves a revoked channel out of the list, so
+      // refresh it here instead of waiting for the next periodic reload.
+      if (typeof state.onRevoked === 'function') state.onRevoked(name);
     } else {
       adminStatus(st.error || 'The decision could not be applied.', 'error');
     }
@@ -663,13 +677,14 @@
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
-  // mount({root, suggestSection, view, onApproved}) is called from the
+  // mount({root, suggestSection, view, onApproved, onRevoked}) is called from the
   // Channels page init; unmount() from its destroy, which also stops polling.
   function mount(opts) {
     unmount();
     state = {
       root: opts.root,
       onApproved: opts.onApproved,
+      onRevoked: opts.onRevoked,
       notifiedApprovals: new Set(),
       cleanups: [],
       adminFilter: 'pending'

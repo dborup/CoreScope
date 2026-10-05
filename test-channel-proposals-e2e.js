@@ -26,7 +26,7 @@
 'use strict';
 
 const assert = require('assert');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const net = require('net');
 const os = require('os');
@@ -374,6 +374,14 @@ async function main() {
       await pageMobile.waitForSelector(row + ' .ch-proposals-state[data-state="approved"]');
     });
 
+    await step('history: a decoded message is stored on the shared channel (#251)', async () => {
+      // What the ingestor stores for a decrypted GRP_TXT. The channel keeps
+      // this message after the revoke below, so a hidden channel is only
+      // hidden from the list, never emptied.
+      const sql = "INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash) VALUES ('EEFF', 'e2e251history0001', '2024-01-01T00:00:00Z', 1, 5, '{\"type\":\"CHAN\",\"channel\":\"" + NAME + "\",\"text\":\"alice: hello\",\"sender\":\"alice\"}', '" + NAME + "')";
+      execFileSync('sqlite3', [env.db, sql]);
+    });
+
     await step('restart: the approval survives restarting ingestor and server', async () => {
       await stopProcess(stack.server);
       await stopProcess(stack.ingestor);
@@ -383,6 +391,8 @@ async function main() {
       const body = await res.json();
       const names = (body.approvedChannels || []).map((c) => c.name);
       assert.ok(names.includes(NAME), 'approvedChannels after restart: ' + JSON.stringify(names));
+      const listed = (body.channels || []).find((c) => c.name === NAME);
+      assert.ok(listed && listed.messageCount === 1, 'the shared channel is listed with its stored message: ' + JSON.stringify(listed));
     });
 
     await step('admin: revoke the approved channel — Escape cancels the confirm layer only, keeping the admin dialog open', async () => {
@@ -427,6 +437,14 @@ async function main() {
       await pageB.waitForFunction((sel) => !document.querySelector(sel), row);
     });
 
+    await step('#251: the revoked channel leaves GET /api/channels although its message is stored', async () => {
+      const body = await (await fetch(env.base + '/api/channels')).json();
+      assert.ok(!(body.channels || []).some((c) => c.name === NAME), 'a revoked channel must not be listed: ' + JSON.stringify(body.channels));
+      assert.ok(!(body.approvedChannels || []).some((c) => c.name === NAME));
+      const msgs = await (await fetch(env.base + '/api/channels/' + encodeURIComponent(NAME) + '/messages')).json();
+      assert.strictEqual(msgs.total, 1, 'nothing is deleted: the history stays readable');
+    });
+
     await step('restart after revoke: the revoked channel stays gone', async () => {
       await stopProcess(stack.server);
       await stopProcess(stack.ingestor);
@@ -441,6 +459,7 @@ async function main() {
       const body = await res.json();
       const names = (body.approvedChannels || []).map((c) => c.name);
       assert.ok(!names.includes(NAME), 'a revoked channel reappeared after restart: ' + JSON.stringify(names));
+      assert.ok(!(body.channels || []).some((c) => c.name === NAME), 'a revoked channel with stored history reappeared after restart (#251)');
     });
 
     await step('re-suggesting the same name after revoke lands as pending, never auto-approved', async () => {
@@ -459,6 +478,10 @@ async function main() {
       const approvedRes = await fetch(env.base + '/api/admin/channel-proposals?status=approved', { headers: { 'X-API-Key': API_KEY } });
       const approvedNames = ((await approvedRes.json()).proposals || []).map((p) => p.name);
       assert.ok(!approvedNames.includes(NAME), 'resuggestion must never be auto-approved');
+      // #251 review: a pending re-suggestion does not bring the channel back
+      // into the list; only an approval does.
+      const listed = await (await fetch(env.base + '/api/channels')).json();
+      assert.ok(!(listed.channels || []).some((c) => c.name === NAME), 'a pending re-suggestion must not list the channel again');
     });
 
     await step('autoApprove config takes effect after restart without approving old pending suggestions', async () => {
