@@ -14,9 +14,10 @@
  *
  * Runs the real app.js in a vm sandbox against a minimal fake table DOM. A
  * cell's scrollWidth is its content width; like a real auto-layout table, a
- * header whose th carries a width reports at least that width. So a re-measure
- * that keeps the provisional widths, or drops a width the page's markup set on
- * a th, is caught.
+ * header whose th carries a width reports at least that width, and a shown
+ * resize handle adds the 4px it sticks out. So a re-measure that keeps the
+ * provisional widths, drops a width the page's markup set on a th, or counts
+ * the handles that the first measure did not have, is caught.
  *
  * Usage: node test-issue-258-column-widths.js
  */
@@ -86,21 +87,41 @@ const CONTAINER_W = 1000;
 const pct = (s) => parseFloat(s);
 
 function cell(w, colSpan) { return { scrollWidth: w, colSpan: colSpan || 1, style: {}, dataset: {} }; }
+// A cell TableResponsive hid (class col-hidden, display:none): it has no width
+// unless its hiding is lifted (TableResponsive.unhidden) while measuring.
+function hiddenCell(w) {
+  return { colSpan: 1, style: {}, dataset: {}, table: null,
+    get scrollWidth() { return this.table && this.table.__unhidden ? w : 0; } };
+}
+// Stand-in for packets.js's TableResponsive.unhidden(table, fn); the real one
+// is tested in test-packets.js.
+const unhiddenCalls = [];
+ctx.window.TableResponsive = {
+  unhidden(table, fn) {
+    unhiddenCalls.push(table);
+    table.__unhidden = true;
+    try { return fn(); } finally { table.__unhidden = false; }
+  },
+};
 function row(widths) { return { children: widths.map((w) => cell(w)) }; }
 function spanRow(w, span) { return { children: [cell(w, span)] }; }
 
 // headers: content width of each header cell; authored: inline th widths the
-// page's own markup sets (e.g. observers' style="width:32px").
-function makeTable(id, headers, rows, authored) {
+// page's own markup sets (e.g. observers' style="width:32px"); hidden: header
+// cells TableResponsive hid.
+function makeTable(id, headers, rows, authored, hidden) {
   const ths = headers.map((w, i) => {
     const th = {
       style: { width: (authored && authored[i]) || '' }, dataset: {}, handles: [],
       appendChild(h) { this.handles.push(h); },
       get scrollWidth() {
+        if (hidden && hidden[i] && !table.__unhidden) return 0;
         // An auto-layout cell is at least as wide as the width it was given.
         const sw = this.style.width || '';
         const given = /%$/.test(sw) ? pct(sw) / 100 * CONTAINER_W : /px$/.test(sw) ? parseFloat(sw) : 0;
-        return Math.max(w, given);
+        // A shown resize handle sticks out 4px past the th (right: -4px).
+        const handleOut = this.handles.some((h) => h.style.display !== 'none') ? 4 : 0;
+        return Math.max(w, given) + handleOut;
       },
       get offsetWidth() { return pct(this.style.width || '0') / 100 * CONTAINER_W; },
     };
@@ -116,8 +137,9 @@ function makeTable(id, headers, rows, authored) {
     querySelector: (sel) => (sel === 'thead' ? thead : sel === 'tbody' ? tbody : null),
     querySelectorAll: (sel) => (sel === 'td, th'
       ? ths.concat(...tbody.rows.map((r) => r.children))
-      : []),
+      : sel === '.col-resize-handle' ? [].concat(...ths.map((th) => th.handles)) : []),
   };
+  rows.forEach((r) => r.children.forEach((c) => { if ('table' in c) c.table = table; }));
   tables['#' + id] = table;
   return { table, ths, tbody, widths: () => ths.map((th) => pct(th.style.width)) };
 }
@@ -251,6 +273,24 @@ test('a th width set by the page markup counts in the first measure and again in
   t.tbody.rows = dataRows(10);
   mo.fire();
   assert(close(t.widths(), r.widths()), 're-measure with the authored width: ' + JSON.stringify(t.widths()) + ' vs ' + JSON.stringify(r.widths()));
+});
+
+test('columns TableResponsive hid are measured as if shown, as at the first measure', () => {
+  // A re-measure runs before TableResponsive.register()'s own observer has
+  // marked the new cells; the measure lifts the hiding so header and rows agree.
+  const rows = Array.from({ length: 10 }, () => ({ children: [cell(20), hiddenCell(80), cell(100), cell(300)] }));
+  const t = makeTable('responsive', HEADERS, rows, null, [false, true, false, false]);
+  makeColumnsResizable('#responsive', 'k-responsive');
+  assert(close(t.widths(), REF), 'hidden column measured like a shown one: ' + JSON.stringify(t.widths()) + ' vs ' + JSON.stringify(REF));
+  assert(unhiddenCalls.includes(t.table), 'measured inside TableResponsive.unhidden');
+  // The re-measure too.
+  const e = makeTable('responsive-later', HEADERS, [spanRow(1200, 4)], null, [false, true, false, false]);
+  makeColumnsResizable('#responsive-later', 'k-responsive-later');
+  const [mo] = observersOf(e);
+  e.tbody.rows = Array.from({ length: 10 }, () => ({ children: [cell(20), hiddenCell(80), cell(100), cell(300)] }));
+  e.tbody.rows.forEach((r) => { r.children[1].table = e.table; });
+  mo.fire();
+  assert(close(e.widths(), REF), 're-measured with the hiding lifted: ' + JSON.stringify(e.widths()));
 });
 
 console.log('\n=== #258 makeColumnsResizable: saved widths ===');

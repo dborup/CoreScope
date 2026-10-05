@@ -16,7 +16,8 @@
  * At 1200 px (window then 24 h) and 900 px (3 h, the widest at <=1024 px), for
  * an effective age of 20 and 120 min:
  *   - the default window renders no usable rows (so the deferred path is tested);
- *   - after widening the window Details is >= 15% of the table, expand <= 10%;
+ *   - after widening the window Details is >= 15% of the table, expand <= 10%,
+ *     and every column has the share a page opened with that window gets;
  *   - every on-screen advert link in Details shows >= 12 px of its name, and the
  *     pinned long name ("KN6PLV-BrkOxfLA-Yebes") shows at least half of it;
  *   - later window changes keep the widths (one re-measure, no per-render work).
@@ -107,7 +108,7 @@ async function fixtureAgeMin(request) {
   return (Date.now() - t) / 60000;
 }
 
-async function openAged(browser, vp, ageMin, init) {
+async function openAged(browser, vp, ageMin, init, route) {
   const ctx = await browser.newContext({ viewport: { width: vp.w, height: vp.h } });
   if (init) await ctx.addInitScript(init.fn, init.arg);
   const page = await ctx.newPage();
@@ -116,7 +117,7 @@ async function openAged(browser, vp, ageMin, init) {
   const offsetMin = Math.max(0, ageMin - await fixtureAgeMin(page.request));
   await page.clock.install({ time: Date.now() + offsetMin * 60000 });
   await page.clock.resume();
-  await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+  await page.goto(BASE + '/#/packets' + (route || ''), { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#pktTable[data-resizable]', { state: 'attached', timeout: 12000 });
   // The first load has finished once the body shows rows or the empty state.
   await page.waitForFunction(() => {
@@ -159,6 +160,20 @@ async function shot(page, name) {
         assert(d >= MIN_DETAILS_SHARE, `Details is ${after.detailsW}px of ${after.tableW}px (${(d * 100).toFixed(1)}%); first render had ${first.detailsW}px`);
         assert(x <= MAX_EXPAND_SHARE, `expand is ${after.expandW}px of ${after.tableW}px (${(x * 100).toFixed(1)}%)`);
         await shot(page, `${vp.w}-age${age}`);
+      });
+
+      await step(`${tag} the widths equal those of a page opened with that window right away`, async () => {
+        // The columns must not depend on what the first render had: measured
+        // later from the same rows, they come out as a direct first measure.
+        const direct = await openAged(browser, vp, age, null, '?timeWindow=' + vp.wide);
+        try {
+          await direct.page.waitForFunction(() => document.querySelectorAll('#pktBody tr[data-hash]').length > 20, null, { timeout: 10000 });
+          const d = await direct.page.evaluate(measure, PINNED_ADVERT_ROW);
+          const pctOf = (ws) => ws.map((w) => Math.round(parseFloat(w) * 10) / 10);
+          const a = pctOf(after.thWidths), b = pctOf(d.thWidths);
+          const off = a.map((x, i) => Math.abs(x - b[i])).reduce((m, x) => Math.max(m, x), 0);
+          assert(off <= 1, `column % differ by up to ${off}: deferred ${JSON.stringify(a)} vs direct ${JSON.stringify(b)}`);
+        } finally { await direct.ctx.close(); }
       });
 
       await step(`${tag} advert names in Details show text, not only the icon`, async () => {
