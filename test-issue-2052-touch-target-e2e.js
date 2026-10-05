@@ -21,6 +21,11 @@
  *    remove are at least 48x48, visible, unclipped, hit at their centre and
  *    do not overlap. Before upstream PR 2078 the remove action was clipped
  *    here; user-added rows now let their controls wrap.
+ *  - The add-channel dialog's primary buttons (#249): at 320, 390, 640 and
+ *    768 px with touch each is at least 48x48, unclipped, hit at its centre
+ *    with a centred label, and inside a dialog that does not scroll
+ *    sideways. At 1440 px without touch they keep their 32 px height: the
+ *    change is touch-only, like the #630 coarse-pointer block.
  *
  * 48 is the house preference for these controls (upstream PR 2078 settled
  * #2052 on 48; WCAG 2.5.5 asks for 44).
@@ -140,6 +145,34 @@ async function assertActionTargets(page) {
   const share = await assertTarget(page, SHARE, 'share');
   const remove = await assertTarget(page, REMOVE, 'remove');
   assert(!overlaps(share, remove), 'share and remove overlap');
+}
+
+// #249: the add-channel dialog's primary buttons.
+const DIALOG_BUTTONS = ['#chGenerateBtn', '#chPskAddBtn', '#chHashtagBtn'];
+
+async function openAddChannelDialog(page) {
+  await page.click('#chAddChannelBtn');
+  await page.waitForSelector('#chModalClose', { state: 'visible' });
+}
+
+// Where a button sits in the dialog, with the button scrolled into view: its
+// label's offset from the centre, and whether it is inside the dialog.
+function dialogPlacement(page, selector) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    el.scrollIntoView({ block: 'center' });
+    const b = el.getBoundingClientRect();
+    const m = el.closest('.ch-modal').getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const t = range.getBoundingClientRect();
+    return {
+      h: b.height,
+      dx: (t.left + t.width / 2) - (b.left + b.width / 2),
+      dy: (t.top + t.height / 2) - (b.top + b.height / 2),
+      inside: b.left >= m.left && b.right <= m.right,
+    };
+  }, selector);
 }
 
 function horizontalOverflow(page) {
@@ -314,6 +347,44 @@ async function main() {
     } finally {
       await narrow.ctx.close();
     }
+  }
+
+  // ── Add-channel dialog buttons (#249) ────────────────────────────────────
+  for (const [width, height] of [[320, 640], [390, 844], [640, 900], [768, 1024]]) {
+    const dlg = await openChannels(browser, errors, { viewport: { width, height }, hasTouch: true, isMobile: true });
+    try {
+      await step(`${width}x${height} touch: the add-channel dialog's buttons are at least ${MIN}x${MIN}, unclipped, hit at their centre with a centred label, and the dialog does not scroll sideways (#249)`, async () => {
+        await openAddChannelDialog(dlg.page);
+        for (const sel of DIALOG_BUTTONS) {
+          const p = await dialogPlacement(dlg.page, sel);
+          await assertTarget(dlg.page, sel, sel);
+          assert(Math.abs(p.dx) <= 1 && Math.abs(p.dy) <= 1, `${sel} label is off centre by ${p.dx.toFixed(1)}/${p.dy.toFixed(1)}px`);
+          assert(p.inside, sel + ' sticks out of the dialog');
+        }
+        const r = await dlg.page.evaluate(() => {
+          const m = document.querySelector('#chAddChannelModal .ch-modal');
+          return { dialog: m.scrollWidth - m.clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+        });
+        assert(r.dialog <= 0, 'the dialog scrolls horizontally by ' + r.dialog + 'px');
+        assert(r.page <= 0, 'the page overflows horizontally by ' + r.page + 'px');
+      });
+    } finally {
+      await dlg.ctx.close();
+    }
+  }
+
+  const deskDlg = await openChannels(browser, errors, { viewport: { width: 1440, height: 900 } });
+  try {
+    await step('desktop 1440x900: the add-channel dialog\'s buttons keep their 32 px height (#249 is touch-only)', async () => {
+      await openAddChannelDialog(deskDlg.page);
+      for (const sel of DIALOG_BUTTONS) {
+        const p = await dialogPlacement(deskDlg.page, sel);
+        assert(Math.abs(p.h - 32) < 0.5, `${sel} is ${p.h.toFixed(1)}px tall on desktop, expected 32`);
+        assert(p.inside, sel + ' sticks out of the dialog');
+      }
+    });
+  } finally {
+    await deskDlg.ctx.close();
   }
 
   await step('no page errors, console errors or unhandled rejections', async () => {
