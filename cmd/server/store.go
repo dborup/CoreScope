@@ -309,6 +309,10 @@ type PacketStore struct {
 	// indexReadyCh / maybeCloseIndexReadyCh in index_ready_1008.go.
 	indexReadyChMu sync.Mutex
 	indexReadyChan chan struct{}
+	// subpathBuildGate, nil in production, runs at the start of the
+	// background subpath index build that Load() starts. A test sets it
+	// before Load() to hold the not-ready window open (#227).
+	subpathBuildGate func()
 	// Precomputed distance analytics: hop distances and path totals.
 	// Built LAZILY on first /api/analytics/distance request (#1011) —
 	// previously eager in Load() at startup, which was O(n²) work for
