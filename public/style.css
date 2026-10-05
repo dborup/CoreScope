@@ -1737,6 +1737,13 @@ body.scroll-locked { overflow: hidden; }
   }
 }
 
+/* #249: the add-channel dialog's primary buttons were 32 px tall next to
+   their 48 px inputs. Touch only, like the #630 coarse-pointer block;
+   desktop keeps them at 32 px. */
+@media (pointer: coarse) {
+  #chGenerateBtn, #chPskAddBtn, #chHashtagBtn { min-height: 48px; }
+}
+
 
 /* === Map Controls Panel === */
 .map-controls {
