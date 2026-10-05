@@ -2860,6 +2860,14 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
   margin-bottom: 12px; border: 1px solid var(--border);
 }
 .node-full-card h4 { margin: 0 0 10px; font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; }
+/* #254: the Affinity Debug heading is a disclosure button. It keeps the h4
+ * look and spans the heading, so the whole row toggles as before. */
+.node-full-card h4 .affinity-debug-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  margin: 0; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; text-align: start;
+}
+@media (pointer: coarse) { .node-full-card h4 .affinity-debug-toggle { min-height: 48px; } }
 .node-activity-list { display: flex; flex-direction: column; gap: 6px; }
 .node-activity-item {
   display: flex; gap: 8px; font-size: 13px; padding: 6px 0;

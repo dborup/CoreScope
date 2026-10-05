@@ -82,7 +82,7 @@ function attr(tag, name) {
   return m ? (m[1] === undefined ? '' : m[1]) : null;
 }
 function caretsIn(html) {
-  return (html.match(/#ph-caret-[a-z]+/g) || []).map((s) => s.slice(1));
+  return (html.match(/#ph-caret-[a-z]+/g) || []).map((s) => s.slice('#ph-'.length));
 }
 
 // A minimal DOM for the rendered card: the toggle button, its .toggle-icon and
