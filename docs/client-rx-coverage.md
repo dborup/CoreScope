@@ -25,12 +25,52 @@ Coverage is **off by default**. To turn it on:
    publish **only** under its own pubkey (e.g. an EMQX ACL keyed on the connected client's identity).
    This is the trust boundary, not an optimization — see [Trust](#trust). The ingestor already
    subscribes under `meshcore/#`.
-3. Optionally set `retention.clientRxDays` to bound the coverage tables (see
+3. **If you read more than one broker: name the ones that enforce that ACL** in
+   `clientRxCoverage.sources` — see [Restricting which MQTT sources may contribute](#restricting-which-mqtt-sources-may-contribute).
+4. Optionally set `retention.clientRxDays` to bound the coverage tables (see
    [Storage](#storage--client_receptions-ingestor-owned)).
-4. Point your users at [corescope-rx](https://github.com/efiten/corescope-rx) and they start
+5. Point your users at [corescope-rx](https://github.com/efiten/corescope-rx) and they start
    contributing. Results show on each node's Reach page (coverage toggle) and the `#/rx-coverage`
    dashboard. **Warn them first that their contribution is world-readable and a per-observer view can
    reconstruct their movements — see [Privacy](#privacy--contributor-location-is-public).**
+
+## Restricting which MQTT sources may contribute
+
+`clientRxCoverage.sources` is an **optional** allowlist of `mqttSources[].name` values. When it is set
+and non-empty, the ingestor handles `meshcore/client/...` **only** for messages that arrived on a
+listed source; a message from any other source is dropped before any write — no `client_receptions`
+row, no `client_observers` row, and (as always for this namespace) no observer row either. When the
+option is absent or empty, every source is accepted, which is the default and unchanged behaviour.
+
+```json
+"mqttSources": [
+  { "name": "device-auth", "broker": "mqtts://…" },
+  { "name": "legacy",      "broker": "mqtts://…" }
+],
+"clientRxCoverage": { "enabled": true, "sources": ["device-auth"] }
+```
+
+**Why this matters on a multi-broker deployment.** Coverage is only as trustworthy as the broker ACL
+that binds `meshcore/client/{PUBLIC_KEY}/packets` to the publisher holding that key (see
+[Trust](#trust)). An instance often reads several brokers with *different* authentication: one that
+binds the topic to a per-device identity, and a legacy username/password broker where many accounts
+may write `meshcore/#`. Without this option, enabling coverage trusts the weakest of them — any
+account on the legacy broker could inject coverage under any companion pubkey, with any GPS position.
+The allowlist keeps the namespace on the sources that actually enforce the binding, while the legacy
+broker keeps contributing ordinary observer traffic as before.
+
+Notes:
+
+- Matching is on the configured source **name**, trimmed and case-insensitive. A source with no `name`
+  can never be listed, so it is rejected whenever an allowlist is set.
+- A name that matches no configured source is logged once at startup — the allowlist would otherwise
+  silently drop all coverage from that (mistyped) name.
+- Drops are logged per source, throttled and capped at a fixed number of lines, so a busy unlisted
+  broker cannot flood the log.
+- The option gates only the client namespace. The observer blacklist and every other ingest rule stay
+  in force whatever the source.
+- Unlike `clientRxCoverage.enabled`, which both processes read, `sources` concerns the ingest write
+  path only — the read endpoints are gated by `enabled` alone. Restart the ingestor after changing it.
 
 The rest of this document is the MQTT payload contract the companion app implements.
 
@@ -172,6 +212,9 @@ Server/ingestor-side defense-in-depth (these reduce blast radius but do **not** 
 
 - The ingestor rejects any topic pubkey that is not lowercase hex before writing, and never falls back
   to a payload-supplied id (`cmd/ingestor/client_reception.go`, #2/#10).
+- `clientRxCoverage.sources` narrows the namespace to the brokers that enforce the ACL, so one weak
+  source among several cannot inject coverage (see
+  [Restricting which MQTT sources may contribute](#restricting-which-mqtt-sources-may-contribute)).
 - A blacklisted operator cannot contribute via the client topic (the blacklist is enforced before the
   coverage write, #1).
 - The frontend HTML-escapes the pubkey it renders, so a junk pubkey can't inject markup (#14).
