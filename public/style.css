@@ -2614,8 +2614,6 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 
 /* === Grouped Packet Rows === */
 .group-header { cursor: pointer; font-weight: 600; }
-.group-header td:first-child::before { content: '▶ '; font-size: 10px; color: var(--link-color); transition: transform 0.15s; display: inline-block; }
-.group-header.expanded td:first-child::before { content: '▼ '; }
 .group-header:hover { background: var(--row-hover); }
 .group-child { font-size: 12px; }
 .group-child td { padding-left: 20px; }
