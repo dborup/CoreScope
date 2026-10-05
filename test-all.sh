@@ -33,6 +33,7 @@ run test-packet-filter-ux.js
 run test-issue-121-clear-filters-selection.js
 run test-clear-filters.js
 run test-issue-147-packets-url-detail-params.js
+run test-issue-96-hide-control.js
 run test-issue-180-packets-detail-close.js
 run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
@@ -56,6 +57,7 @@ run test-top-routes-overlay.js
 run test-important-links-byte-filter.js
 run test-url-state.js
 run test-node-adverts.js
+run test-issue-254-affinity-debug-toggle.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js

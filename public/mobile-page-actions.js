@@ -7,6 +7,9 @@
   const SLOT_ID = 'navPageActions';
 
   function isMobile() { return window.innerWidth <= MOBILE_BP; }
+  // #254: packets.js renders a group row as select-hash under this breakpoint,
+  // where the #1461 #7 redirect below makes activating it select.
+  window.MobilePageActions = { isMobile: isMobile };
 
   function ensureSlot() {
     let slot = document.getElementById(SLOT_ID);
