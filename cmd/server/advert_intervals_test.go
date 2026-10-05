@@ -327,6 +327,27 @@ func TestEstimateAdvertInterval_TooFewSamples(t *testing.T) {
 	aiCheck(t, estimateAdvertInterval(dup, advertIntervalFlood), 0, advertConfidenceNone, 3, 0)
 }
 
+// status tells the UI why there is no estimate, so it does not repeat the
+// minimum of 3 adverts (review F6 on #247).
+func TestEstimateAdvertInterval_Status(t *testing.T) {
+	cases := []struct {
+		at   []float64
+		want string
+	}{
+		{nil, advertIntervalNoneObserved},
+		{[]float64{0}, advertIntervalTooFew},
+		{[]float64{0, 1}, advertIntervalTooFew},
+		{[]float64{0, 0, 0}, advertIntervalIrregular},
+		{[]float64{0, 10, 47, 50, 121, 143}, advertIntervalIrregular},
+		{[]float64{0, 1, 2}, advertIntervalEstimated},
+	}
+	for _, c := range cases {
+		if got := estimateAdvertInterval(aiSeries(time.Hour*12, c.at...), advertIntervalFlood); got.Status != c.want {
+			t.Errorf("%v: status = %q, want %q (%+v)", c.at, got.Status, c.want, got)
+		}
+	}
+}
+
 // Irregular adverts (a companion advertising by hand) have no interval.
 func TestEstimateAdvertInterval_Irregular(t *testing.T) {
 	s := aiSeries(time.Hour, 0, 10, 47, 50, 121, 143)
@@ -529,6 +550,9 @@ func TestNodeDetail_AdvertIntervals(t *testing.T) {
 	}
 	aiCheck(t, body.Intervals.Flood, 12*3600, advertConfidenceHigh, 7, 6)
 	aiCheck(t, body.Intervals.ZeroHop, 7200, advertConfidenceMedium, 6, 5)
+	if body.Intervals.Flood.Status != advertIntervalEstimated || body.Intervals.ZeroHop.Status != advertIntervalEstimated {
+		t.Fatalf("status flood/zero_hop = %q/%q, want estimated", body.Intervals.Flood.Status, body.Intervals.ZeroHop.Status)
+	}
 	if body.Intervals.Window != nodeAdvertRouteLimit {
 		t.Fatalf("window = %d", body.Intervals.Window)
 	}

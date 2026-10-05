@@ -53,6 +53,15 @@ const (
 	advertConfidenceNone   = "none"
 )
 
+// AdvertIntervalEstimate.Status: why there is an estimate or not, so the UI
+// does not repeat the server's rules.
+const (
+	advertIntervalEstimated    = "estimated"     // interval_s is set
+	advertIntervalNoneObserved = "none_observed" // no adverts of the class
+	advertIntervalTooFew       = "too_few"       // under advertIntervalMinSamples adverts
+	advertIntervalIrregular    = "irregular"     // enough adverts, no interval fits
+)
+
 const (
 	// advertIntervalMinSamples is the fewest adverts (two gaps) estimated.
 	advertIntervalMinSamples = 3
@@ -82,11 +91,14 @@ type AdvertIntervalEstimate struct {
 	// RawIntervalS is the median before snapping.
 	RawIntervalS *int64 `json:"raw_interval_s"`
 	Snapped      bool   `json:"snapped"`
-	// Samples is the number of adverts used, GapsUsed the gaps between them
-	// that fit a whole multiple of the interval.
-	Samples    int     `json:"samples"`
-	GapsUsed   int     `json:"gaps_used"`
-	Confidence string  `json:"confidence"`
+	// Samples is the number of adverts used (after a raised setting, those
+	// since the change), GapsUsed the gaps between them that fit a whole
+	// multiple of the interval.
+	Samples    int    `json:"samples"`
+	GapsUsed   int    `json:"gaps_used"`
+	Confidence string `json:"confidence"`
+	// Status is advertIntervalEstimated, NoneObserved, TooFew or Irregular.
+	Status     string  `json:"status"`
 	LastAdvert *string `json:"last_advert"`
 }
 
@@ -174,7 +186,7 @@ func advertIntervalCandidateOK(c float64, class advertIntervalClass) bool {
 // The candidate search is O(gaps^2) with gaps < nodeAdvertRouteLimit, run
 // at most once per raised setting found.
 func estimateAdvertInterval(samples []advertIntervalSample, class advertIntervalClass) AdvertIntervalEstimate {
-	est := AdvertIntervalEstimate{Samples: len(samples), Confidence: advertConfidenceNone}
+	est := AdvertIntervalEstimate{Samples: len(samples), Confidence: advertConfidenceNone, Status: advertIntervalNoneObserved}
 	if len(samples) == 0 {
 		return est
 	}
@@ -188,8 +200,10 @@ func estimateAdvertInterval(samples []advertIntervalSample, class advertInterval
 	last := s[len(s)-1].heard.UTC().Format(time.RFC3339)
 	est.LastAdvert = &last
 	if len(s) < advertIntervalMinSamples {
+		est.Status = advertIntervalTooFew
 		return est
 	}
+	est.Status = advertIntervalIrregular
 
 	gaps, from := advertGaps(s)
 	best, start := advertIntervalCandidate(gaps, class), 0
@@ -230,6 +244,7 @@ func estimateAdvertInterval(samples []advertIntervalSample, class advertInterval
 	raw := int64(math.Round(interval))
 	snapped, ok := snapAdvertInterval(interval, class)
 	est.RawIntervalS, est.IntervalS, est.Snapped, est.GapsUsed = &raw, &snapped, ok, used
+	est.Status = advertIntervalEstimated
 	ratio := float64(used) / float64(used+irregular)
 	switch {
 	case used >= 6 && ratio >= 0.75:

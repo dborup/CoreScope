@@ -113,7 +113,7 @@
   // #245: estimated advert intervals (advertIntervals, docs/api-spec.md).
   // Flood in hours and zero-hop in minutes, the units of the firmware's
   // flood.advert.interval and advert.interval settings.
-  var INTERVAL_TIP = 'Estimated from the gaps between the newest adverts of each class (the Flood and Zero-hop tabs), using the sender\'s own timestamps when its clock is plausible. The median gap is taken; gaps of 2-4x it count as missed adverts, shorter ones (manual adverts, reboots) are ignored. Snapped to the values the firmware allows: flood.advert.interval 3-168 h, advert.interval 60-240 min in 2-minute steps.';
+  var INTERVAL_TIP = 'Estimated from the gaps between the newest adverts of each class (the Flood and Zero-hop tabs), using the sender\'s own timestamps when its clock is plausible. The interval is a gap that repeats and that the firmware timer can run at; gaps of 2-4x it count as missed adverts, shorter ones (manual adverts, reboots) are ignored. When the newest gaps are all the same multiple, the interval was raised and only the adverts since then are used. Snapped to the values the firmware allows: flood.advert.interval 3-168 h; advert.interval 60-240 min in 2-minute steps, or 2 min on an untouched new install.';
   var INTERVAL_CLASSES = [
     { key: 'flood', label: 'flood', unit: 3600, unitLabel: 'h', range: '3–168 h', none: 'none observed' },
     { key: 'zero_hop', label: 'zero-hop', unit: 60, unitLabel: 'min', range: '60–240 min', none: 'none observed (off, or no observer in direct range)' }
@@ -125,19 +125,23 @@
     return (Math.round(v * 10) / 10) + ' ' + c.unitLabel;
   }
 
+  // The wording follows the server's status (estimated, none_observed,
+  // too_few, irregular); an unknown status is no estimate.
   function intervalRow(e, c) {
     e = e || {};
     var n = num(e.samples);
     var seconds = Number(e.interval_s);
     var label = 'Estimated ' + c.label + ' interval';
     var text;
-    if (e.interval_s != null && seconds > 0 && e.confidence !== 'none') {
+    if (e.status === 'estimated' && e.interval_s != null && seconds > 0) {
       var notes = [n + ' advert' + (n === 1 ? '' : 's'), esc(e.confidence) + ' confidence'];
       if (!e.snapped) notes.push('outside the settable ' + c.range);
       text = ' ≈ ' + fmtInterval(seconds, c) + ' (' + notes.join(', ') + ')';
     } else {
       label += ':';
-      text = ' ' + (n === 0 ? c.none : n < 3 ? 'not enough adverts yet (' + n + ' heard)' : 'irregular (' + n + ' adverts, no repeating gap)');
+      text = ' ' + (e.status === 'too_few' ? 'not enough adverts yet (' + n + ' heard)'
+        : e.status === 'none_observed' || !n ? c.none
+        : 'irregular (' + n + ' adverts, no repeating gap)');
     }
     return '<span class="node-adverts-interval-row" data-advert-interval="' + c.key + '"><strong>' + label + '</strong>' + text + '</span>';
   }

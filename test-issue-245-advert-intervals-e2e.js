@@ -80,13 +80,13 @@ const ZH_NONE = 'Estimated zero-hop interval: none observed (off, or no observer
     assert(!r.plain, 'plain detail must not carry advertIntervals');
     const b = r.both, f = r.floodOnly;
     assert(b && b.window === 20, 'window: ' + JSON.stringify(b));
-    assert(b.flood.interval_s === 43200 && b.flood.snapped && b.flood.samples === 10 && b.flood.gaps_used === 7 && b.flood.confidence === 'high',
+    assert(b.flood.interval_s === 43200 && b.flood.snapped && b.flood.samples === 10 && b.flood.gaps_used === 7 && b.flood.confidence === 'high' && b.flood.status === 'estimated',
       'flood (2x and 3x gaps, one manual advert): ' + JSON.stringify(b.flood));
     assert(b.zero_hop.interval_s === 7200 && b.zero_hop.samples === 6 && b.zero_hop.gaps_used === 5 && b.zero_hop.confidence === 'medium',
       'zero-hop: ' + JSON.stringify(b.zero_hop));
     assert(f.flood.interval_s === 86400 && f.flood.gaps_used === 7 && f.flood.confidence === 'high',
       'flood with a sender clock reset: ' + JSON.stringify(f.flood));
-    assert(f.zero_hop.samples === 0 && f.zero_hop.interval_s === null && f.zero_hop.confidence === 'none' && f.zero_hop.last_advert === null,
+    assert(f.zero_hop.samples === 0 && f.zero_hop.interval_s === null && f.zero_hop.confidence === 'none' && f.zero_hop.status === 'none_observed' && f.zero_hop.last_advert === null,
       'no zero-hop: ' + JSON.stringify(f.zero_hop));
   });
 
@@ -96,7 +96,7 @@ const ZH_NONE = 'Estimated zero-hop interval: none observed (off, or no observer
     assert(s.flood === FLOOD_12H, 'flood: ' + s.flood);
     assert(s.zero_hop === ZH_120, 'zero-hop: ' + s.zero_hop);
     assert(s.afterCounts, 'below the 24h / 7d counts');
-    assert(/median/.test(s.tip) && /3-168 h/.test(s.tip), 'tooltip explains the method: ' + s.tip);
+    assert(/a gap that repeats/.test(s.tip) && /3-168 h/.test(s.tip) && /2 min on an untouched new install/.test(s.tip), 'tooltip explains the method: ' + s.tip);
     await shot(page, 'full-both-light', full);
   });
 
