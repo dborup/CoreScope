@@ -2285,10 +2285,8 @@ function readSavedColumnWidths(storageKey, colCount) {
 }
 
 // Max content width per column (header + rows), measured in auto layout without
-// wrapping. Clears the widths the columns already have, so a re-measure is not
-// fed by the previous one.
+// wrapping.
 function measureColumnWidths(table, ths, rows) {
-  ths.forEach(th => { th.style.width = ''; });
   table.style.tableLayout = 'auto';
   table.style.width = 'auto';
   // Remove wrapping temporarily so we get true content width
@@ -2388,6 +2386,7 @@ function makeColumnsResizable(tableSelector, storageKey) {
   }
 
   const tbody = table.querySelector('tbody');
+  const authoredWidths = ths.map(th => th.style.width);
   const rows = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
   applyMeasuredColumnWidths(table, ths, rows);
   addResizeHandles();
@@ -2403,6 +2402,9 @@ function makeColumnsResizable(tableSelector, storageKey) {
       const rowsNow = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
       if (rowsNow.length < COL_MEASURE_MIN_ROWS) return;
       filled.disconnect();
+      // Measure as the first time: the widths the page itself gave the header
+      // cells, not the provisional ones.
+      ths.forEach((th, i) => { th.style.width = authoredWidths[i]; });
       applyMeasuredColumnWidths(table, ths, rowsNow);
     });
     filled.observe(tbody, { childList: true });
