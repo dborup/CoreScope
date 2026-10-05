@@ -14,8 +14,9 @@
  *
  * Runs the real app.js in a vm sandbox against a minimal fake table DOM. A
  * cell's scrollWidth is its content width; like a real auto-layout table, a
- * header whose th still carries a width reports at least that width, so a
- * re-measure that forgets to clear the old widths is caught.
+ * header whose th carries a width reports at least that width. So a re-measure
+ * that keeps the provisional widths, or drops a width the page's markup set on
+ * a th, is caught.
  *
  * Usage: node test-issue-258-column-widths.js
  */
@@ -88,15 +89,17 @@ function cell(w, colSpan) { return { scrollWidth: w, colSpan: colSpan || 1, styl
 function row(widths) { return { children: widths.map((w) => cell(w)) }; }
 function spanRow(w, span) { return { children: [cell(w, span)] }; }
 
-// headers: content width of each header cell.
-function makeTable(id, headers, rows) {
-  const ths = headers.map((w) => {
+// headers: content width of each header cell; authored: inline th widths the
+// page's own markup sets (e.g. observers' style="width:32px").
+function makeTable(id, headers, rows, authored) {
+  const ths = headers.map((w, i) => {
     const th = {
-      style: {}, dataset: {}, handles: [],
+      style: { width: (authored && authored[i]) || '' }, dataset: {}, handles: [],
       appendChild(h) { this.handles.push(h); },
       get scrollWidth() {
         // An auto-layout cell is at least as wide as the width it was given.
-        const given = /%$/.test(this.style.width || '') ? pct(this.style.width) / 100 * CONTAINER_W : 0;
+        const sw = this.style.width || '';
+        const given = /%$/.test(sw) ? pct(sw) / 100 * CONTAINER_W : /px$/.test(sw) ? parseFloat(sw) : 0;
         return Math.max(w, given);
       },
       get offsetWidth() { return pct(this.style.width || '0') / 100 * CONTAINER_W; },
@@ -158,6 +161,13 @@ test('a row whose cell count differs from the header is not measured', () => {
   assert(close(t.widths(), REF), JSON.stringify(t.widths()) + ' vs ' + JSON.stringify(REF));
 });
 
+test('a row with a colspan cell is not measured even when its cell count matches the header', () => {
+  const odd = { children: [cell(900, 2), cell(900), cell(900), cell(900)] };
+  const t = makeTable('oddspan', HEADERS, [odd].concat(dataRows(10)));
+  makeColumnsResizable('#oddspan', 'k-oddspan');
+  assert(close(t.widths(), REF), JSON.stringify(t.widths()) + ' vs ' + JSON.stringify(REF));
+});
+
 test('a full first body is measured once and gets no observer (no per-render work)', () => {
   assert.strictEqual(observersOf(ref).length, 0, 'no MutationObserver for a table measured from enough rows');
   const t = makeTable('full', HEADERS, [spanRow(1200, 4)].concat(dataRows(5)));
@@ -215,7 +225,7 @@ test('a near-empty first body (2 rows) is provisional; 4 rows are not enough, 6 
   assert.strictEqual(mo.connected, false);
 });
 
-test('a re-measure is not fed by the provisional widths (th widths are cleared first)', () => {
+test('a re-measure is not fed by the provisional widths', () => {
   // Provisional widths from a header-only measure give "time" ~22%; the rows
   // need less. A re-measure that keeps the old th widths would keep ~22%.
   const t = makeTable('feedback', [10, 200, 30, 50], [spanRow(1200, 4)]);
@@ -228,6 +238,19 @@ test('a re-measure is not fed by the provisional widths (th widths are cleared f
   const r = makeTable('feedback-ref', [10, 200, 30, 50], dataRows(10, [20, 80, 100, 600]));
   makeColumnsResizable('#feedback-ref', 'k-feedback-ref');
   assert(close(after, r.widths()), 'same as a first measure of those rows: ' + JSON.stringify(after) + ' vs ' + JSON.stringify(r.widths()) + ' (provisional ' + JSON.stringify(before) + ')');
+});
+
+test('a th width set by the page markup counts in the first measure and again in the re-measure', () => {
+  const authored = ['60px', '', '', ''];
+  const r = makeTable('authored-ref', HEADERS, dataRows(10), authored);
+  makeColumnsResizable('#authored-ref', 'k-authored-ref');
+  assert(r.widths()[0] > REF[0] + 2, 'the 60px header widens column 0 as before: ' + JSON.stringify(r.widths()));
+  const t = makeTable('authored', HEADERS, [spanRow(1200, 4)], authored);
+  makeColumnsResizable('#authored', 'k-authored');
+  const [mo] = observersOf(t);
+  t.tbody.rows = dataRows(10);
+  mo.fire();
+  assert(close(t.widths(), r.widths()), 're-measure with the authored width: ' + JSON.stringify(t.widths()) + ' vs ' + JSON.stringify(r.widths()));
 });
 
 console.log('\n=== #258 makeColumnsResizable: saved widths ===');
