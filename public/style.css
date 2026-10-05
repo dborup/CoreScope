@@ -1058,6 +1058,12 @@ img.brand-logo {
 }
 .sort-help:hover .sort-help-tip { display: block; }
 .filter-bar .btn:hover { background: var(--row-hover); }
+/* #96 — "Hide CONTROL packets" checkbox in the packets filter bar. */
+.filter-bar .filter-checkbox { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text); white-space: nowrap; cursor: pointer; }
+.filter-bar .filter-checkbox input[type="checkbox"] { /* not the text-input box above */
+  width: 16px; height: 16px; min-width: 0; min-height: 0; padding: 0; margin: 0; cursor: pointer; accent-color: var(--accent);
+}
+@media (pointer: coarse) { .filter-bar .filter-checkbox { min-height: 44px; } } /* the label is the touch target */
 .filter-bar .btn.active { background: var(--accent-strong); color: var(--text-on-accent); border-color: var(--accent-strong); }
 .filter-bar .col-toggle-btn { height: 34px; min-height: 34px; }
 
