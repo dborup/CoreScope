@@ -2285,23 +2285,35 @@ function readSavedColumnWidths(storageKey, colCount) {
 }
 
 // Max content width per column (header + rows), measured in auto layout without
-// wrapping.
+// wrapping. TableResponsive's column hiding is lifted while measuring: the first
+// measure runs before TableResponsive.register(), and a re-measure (#258) runs
+// before it has marked the newly rendered cells, so without that the header and
+// the rows would disagree on which columns exist.
 function measureColumnWidths(table, ths, rows) {
-  table.style.tableLayout = 'auto';
-  table.style.width = 'auto';
-  // Remove wrapping temporarily so we get true content width
-  const cells = table.querySelectorAll('td, th');
-  cells.forEach(c => { c.dataset.origWs = c.style.whiteSpace || ''; c.style.whiteSpace = 'nowrap'; });
-  const widths = ths.map((th, i) => {
-    let maxW = th.scrollWidth;
-    rows.forEach(row => {
-      const td = row.children[i];
-      if (td) maxW = Math.max(maxW, td.scrollWidth);
+  const tr = window.TableResponsive;
+  const measure = () => {
+    table.style.tableLayout = 'auto';
+    table.style.width = 'auto';
+    // The resize handles stick out of their th (right: -4px), which would add
+    // to its scrollWidth; the first measure runs before they exist.
+    const handles = table.querySelectorAll('.col-resize-handle');
+    handles.forEach(h => { h.style.display = 'none'; });
+    // Remove wrapping temporarily so we get true content width
+    const cells = table.querySelectorAll('td, th');
+    cells.forEach(c => { c.dataset.origWs = c.style.whiteSpace || ''; c.style.whiteSpace = 'nowrap'; });
+    const widths = ths.map((th, i) => {
+      let maxW = th.scrollWidth;
+      rows.forEach(row => {
+        const td = row.children[i];
+        if (td) maxW = Math.max(maxW, td.scrollWidth);
+      });
+      return maxW + 4; // small padding buffer
     });
-    return maxW + 4; // small padding buffer
-  });
-  cells.forEach(c => { c.style.whiteSpace = c.dataset.origWs || ''; delete c.dataset.origWs; });
-  return widths;
+    cells.forEach(c => { c.style.whiteSpace = c.dataset.origWs || ''; delete c.dataset.origWs; });
+    handles.forEach(h => { h.style.display = ''; });
+    return widths;
+  };
+  return tr && typeof tr.unhidden === 'function' ? tr.unhidden(table, measure) : measure();
 }
 
 // Fit measured widths to the container: if the total is too wide, squish the
