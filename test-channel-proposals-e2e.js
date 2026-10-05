@@ -10,6 +10,8 @@
  *   admin  opens #/channels?view=proposals, unlocks with the apiKey, approves
  *   B      a fresh session that never interacted: the approved channel is
  *          listed as a shared channel (no traffic, no remove control)
+ *   A      with autoApprove on, its suggestion is listed on the same page
+ *          without a reload, keeping an open PSK conversation (#232)
  *   mobile the shared channel and the suggest/admin UI at 390x844
  *
  * and finally restarts both processes to check the approval persists.
@@ -39,6 +41,9 @@ const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(ROOT, 'publi
 const API_KEY = 'e2e-proposals-admin-key-0123456789';
 const NAME = '#E2eShared' + Date.now().toString(36).slice(-6); // unique, case preserved, < 31 bytes
 const AUTO_NAME = '#E2eAuto' + Date.now().toString(36).slice(-6);
+const PSK_KEY = '0232c0de0232c0de0232c0de0232c0de';
+const PSK_HASH = 'user:psk:0232c0de';
+const PSK_LABEL = 'Issue232 Team';
 const TIMEOUT = 20000;
 
 let passed = 0;
@@ -467,15 +472,63 @@ async function main() {
       assert.ok(pendingNames.includes(NAME), 'old pending suggestion was auto-approved on restart');
     });
 
-    await step('autoApprove shares a new browser suggestion without admin action', async () => {
+    await step('autoApprove: A opens a PSK conversation before suggesting', async () => {
       await pageA.goto(env.base + '/#/channels');
-      if (!(await pageA.isVisible('#chAddChannelModal'))) await pageA.click('#chAddChannelBtn');
+      await pageA.reload();
+      await pageA.click('#chAddChannelBtn');
+      await pageA.fill('#chPskKey', PSK_KEY);
+      await pageA.fill('#chPskName', PSK_LABEL);
+      await pageA.click('#chPskAddBtn');
+      await pageA.waitForFunction((h) => location.hash === '#/channels/' + encodeURIComponent(h), PSK_HASH);
+      await pageA.waitForFunction((l) => {
+        const h = document.querySelector('#chHeader .ch-header-text');
+        return h && h.textContent.includes(l);
+      }, PSK_LABEL);
+    });
+
+    await step('autoApprove shares a new browser suggestion without admin action', async () => {
+      let channelRequests = 0;
+      pageA.on('request', (r) => { if (new URL(r.url()).pathname === '/api/channels') channelRequests++; });
+      // onApproved starts with invalidateApiCache('/channels'), its only
+      // caller with that prefix. api() coalesces identical in-flight
+      // requests, so a doubled refresh would not show as a second request.
+      await pageA.evaluate(() => {
+        const orig = window.invalidateApiCache;
+        window.__channelRefreshes = 0;
+        window.invalidateApiCache = function (prefix) {
+          if (prefix === '/channels') window.__channelRefreshes++;
+          return orig.apply(this, arguments);
+        };
+      });
+      await pageA.click('#chAddChannelBtn');
+      await pageA.waitForSelector('#chSuggestSection:not([hidden]) #chSuggestName');
       await pageA.fill('#chSuggestName', AUTO_NAME.slice(1));
       await pageA.click('#chSuggestBtn');
       await pageA.waitForFunction((n) => {
         const s = document.getElementById('chSuggestStatus');
         return s && s.textContent.includes(n) && /already shared with everyone/.test(s.textContent);
       }, AUTO_NAME);
+      // #232: the suggesting tab lists it on the same page, without a reload,
+      // and keeps its open PSK conversation. One /channels request per approval.
+      await pageA.waitForSelector(`#chList .ch-item[data-hash="${AUTO_NAME}"][data-shared="true"]`, { state: 'attached' });
+      const conv = await pageA.evaluate((h) => {
+        const header = document.querySelector('#chHeader .ch-header-text');
+        const row = document.querySelector('#chList [data-hash="' + h + '"]');
+        return {
+          urlHash: location.hash,
+          header: header ? header.textContent : '',
+          rowSelected: !!row && (row.getAttribute('aria-selected') === 'true' || row.classList.contains('selected')),
+          inMyChannels: !!document.querySelector('#chList .ch-section-mychannels [data-hash="' + h + '"]'),
+        };
+      }, PSK_HASH);
+      assert.strictEqual(conv.urlHash, '#/channels/' + encodeURIComponent(PSK_HASH), 'the PSK conversation must stay open');
+      assert.ok(conv.header.includes(PSK_LABEL), 'header must still name the PSK channel: ' + JSON.stringify(conv.header));
+      assert.ok(conv.rowSelected && conv.inMyChannels, 'PSK row must stay selected in My Channels: ' + JSON.stringify(conv));
+      // An absence needs an observation window: a second refresh would follow
+      // within the next poll interval (1s).
+      await pageA.waitForTimeout(1500);
+      assert.strictEqual(channelRequests, 1, '/api/channels requests after the suggestion');
+      assert.strictEqual(await pageA.evaluate(() => window.__channelRefreshes), 1, 'channel-list refreshes after the suggestion');
       await waitFor('auto-approved key activation', () => logHas(stack.ingestor, new RegExp('approved "' + AUTO_NAME + '" — added to channel keys')));
       await pageB.goto(env.base + '/#/channels');
       await pageB.reload();

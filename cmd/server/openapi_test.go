@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/mux"
 )
 
 func TestOpenAPISpecEndpoint(t *testing.T) {
@@ -139,4 +141,27 @@ func TestExtractPathParams(t *testing.T) {
 	}
 }
 
-
+// The served spec is built by walking the router, so a description left in
+// routeDescriptions for a removed route (like "POST /api/packets") never
+// shows up there and would rot silently. Every description must name a
+// registered method and path.
+func TestOpenAPIDescriptionsHaveRoutes(t *testing.T) {
+	_, router := setupTestServer(t)
+	registered := map[string]bool{}
+	router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		path, err := route.GetPathTemplate()
+		if err != nil {
+			return nil
+		}
+		methods, _ := route.GetMethods()
+		for _, m := range methods {
+			registered[m+" "+path] = true
+		}
+		return nil
+	})
+	for key := range routeDescriptions() {
+		if !registered[key] {
+			t.Errorf("routeDescriptions has %q, but no such route is registered", key)
+		}
+	}
+}

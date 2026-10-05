@@ -472,7 +472,8 @@ function flush() {
   return p;
 }
 
-function loadWithDom(fetchImpl) {
+function loadWithDom(fetchImpl, opts) {
+  opts = opts || {};
   const { doc } = buildMiniDom();
   const fetchCalls = [];
   const fakeFetch = (url, opts) => {
@@ -492,8 +493,8 @@ function loadWithDom(fetchImpl) {
   ctx.location = location;
   ctx.history = history;
   ctx.fetch = fakeFetch;
-  ctx.setTimeout = setTimeout;
-  ctx.clearTimeout = clearTimeout;
+  ctx.setTimeout = opts.setTimeout || setTimeout;
+  ctx.clearTimeout = opts.clearTimeout || clearTimeout;
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx, { filename: SRC_PATH });
   return { CP: ctx.ChannelProposals, document: doc, fetchCalls };
@@ -596,6 +597,118 @@ function fireDocKeydown(env, evt) {
   // through the document-level listener registry buildMiniDom exposes.
   (env.document.__events.keydown || []).slice().forEach((fn) => fn(evt));
 }
+
+// ── #232: an approval reported by the suggest poller refreshes the list ──
+// Polls fire on the next macrotask instead of after 1s/1.5s/….
+const fastTimers = { setTimeout: (fn) => setImmediate(fn), clearTimeout: (id) => clearImmediate(id) };
+
+// Mount with a suggest section and an onApproved spy; statusFor(requestId,
+// pollIndex) answers each status request.
+async function mountSuggest(statusFor, extraRoute) {
+  const polls = {};
+  const approved = [];
+  const env = loadWithDom((url, o) => {
+    const method = (o && o.method) || 'GET';
+    if (/\/channel-proposals\/config$/.test(url)) return { status: 200, body: { enabled: true } };
+    if (method === 'POST' && /\/api\/channel-proposals$/.test(url)) {
+      const name = JSON.parse(o.body).name;
+      return { status: 202, body: { requestId: 'req-' + name.slice(1) } };
+    }
+    const m = /\/requests\/([^/?]+)$/.exec(url);
+    if (m) {
+      const id = decodeURIComponent(m[1]);
+      polls[id] = (polls[id] || 0) + 1;
+      return { status: 200, body: statusFor(id, polls[id]) };
+    }
+    if (extraRoute) { const r = extraRoute(url, method); if (r) return r; }
+    return { status: 404, body: { error: 'unexpected ' + method + ' ' + url } };
+  }, fastTimers);
+  const section = env.document.createElement('section');
+  section.setAttribute('hidden', '');
+  env.document.body.appendChild(section);
+  env.CP.mount({ root: env.document.body, suggestSection: section, onApproved: (name) => approved.push(name) });
+  await flush();
+  assert.ok(section.querySelector('#chSuggestForm'), 'the suggest form must render when suggestions are enabled');
+  env.approved = approved;
+  env.suggest = async (name) => {
+    section.querySelector('#chSuggestName').value = name;
+    section.querySelector('#chSuggestForm')._listeners.submit[0]({ preventDefault() {} });
+    await flush();
+  };
+  env.suggestStatus = () => section.querySelector('#chSuggestStatus');
+  return env;
+}
+
+function proposal(id, name, status, reviewedAt) {
+  const p = { id, name, status, createdAt: 1 };
+  if (reviewedAt) p.reviewedAt = reviewedAt;
+  return p;
+}
+
+test('suggest poller: an auto-approved suggestion calls onApproved exactly once (#232)', async () => {
+  const env = await mountSuggest((id, n) => n === 1
+    ? { status: 'queued' }
+    : { status: 'approved', proposal: proposal('a1', '#AutoShared', 'approved', 50) });
+  await env.suggest('AutoShared');
+  assert.match(env.suggestStatus().textContent, /#AutoShared is already shared with everyone/);
+  assert.deepStrictEqual(env.approved, ['#AutoShared'], 'onApproved must run once, with the channel name');
+  // The poller stopped at the final status: nothing else is polled or refreshed.
+  await flush();
+  assert.strictEqual(env.fetchCalls.filter((c) => /\/requests\//.test(c.url)).length, 2);
+  assert.deepStrictEqual(env.approved, ['#AutoShared']);
+});
+
+test('suggest poller: pending, rejected and failed suggestions do not call onApproved (#232)', async () => {
+  const final = {
+    'req-Waiting': { status: 'pending', proposal: proposal('p1', '#Waiting', 'pending') },
+    'req-Refused': { status: 'rejected', proposal: proposal('p2', '#Refused', 'rejected', 7) },
+    'req-Broken': { status: 'error', error: 'capacity reached' },
+  };
+  const env = await mountSuggest((id) => final[id]);
+  for (const name of ['Waiting', 'Refused', 'Broken']) await env.suggest(name);
+  assert.match(env.suggestStatus().textContent, /capacity reached/);
+  assert.deepStrictEqual(env.approved, []);
+});
+
+test('admin decision and suggest poller reporting the same approval refresh only once (#232)', async () => {
+  const P = proposal('dddddddddddddddd', '#Both', 'approved', 99);
+  const env = await mountSuggest(
+    (id) => ({ status: 'approved', proposal: id === 'req-Other' ? proposal('eeeeeeeeeeeeeeee', '#Other', 'approved', 99) : P }),
+    (url, method) => {
+      if (method === 'POST' && /\/approve$/.test(url)) return { status: 202, body: { requestId: 'req-admin' } };
+      if (/\/admin\/channel-proposals\?/.test(url)) return { status: 200, body: { proposals: [proposal(P.id, P.name, 'pending')], enabled: true } };
+      return null;
+    });
+  // Admin approves #Both in this tab …
+  env.CP.openAdmin();
+  env.document.getElementById('chProposalsKey').value = 'strong-enough-admin-key-012345';
+  const overlay = env.document.getElementById('chProposalsAdmin');
+  overlay._listeners.submit[0]({ target: env.document.getElementById('chProposalsKeyForm'), preventDefault() {} });
+  await flush();
+  const approveBtn = env.document.getElementById('chProposalsList').querySelector('[data-proposals-decide="approve"]');
+  overlay._listeners.click[0]({ target: approveBtn, preventDefault() {} });
+  await flush();
+  assert.match(env.document.getElementById('chProposalsStatus').textContent, /#Both is now shared/);
+  assert.deepStrictEqual(env.approved, ['#Both'], 'the admin path refreshes once');
+  // … and the suggest poller reports the very same approval.
+  await env.suggest('Both');
+  assert.match(env.suggestStatus().textContent, /#Both is already shared/);
+  assert.deepStrictEqual(env.approved, ['#Both'], 'the same approval must not refresh the list a second time');
+  // A different approval still refreshes.
+  await env.suggest('Other');
+  assert.deepStrictEqual(env.approved, ['#Both', '#Other']);
+});
+
+test('a proposal approved again after a revoke refreshes again (#232)', async () => {
+  let reviewedAt = 10;
+  const env = await mountSuggest(() => ({ status: 'approved', proposal: proposal('ffffffffffffffff', '#Again', 'approved', reviewedAt) }));
+  await env.suggest('Again');
+  await env.suggest('Again');
+  assert.deepStrictEqual(env.approved, ['#Again'], 're-reading the same approval is not a new one');
+  reviewedAt = 20; // revoked, re-proposed and approved again: same id, new decision
+  await env.suggest('Again');
+  assert.deepStrictEqual(env.approved, ['#Again', '#Again']);
+});
 
 // ── Invisible formatting characters (PR #99 review, finding 3) ───────────
 test('normalizeName rejects invisible format characters (Cf) and line separators', () => {

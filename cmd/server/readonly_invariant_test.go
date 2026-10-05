@@ -205,39 +205,45 @@ func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
 }
 
 // txTableWritePattern matches DML against the ingestor-owned packet tables
-// (transmissions, observations) and the tables hung off them, in the shapes
-// nodeTableWritePattern covers.
+// (transmissions, observations, observers, dropped_packets) and the tables
+// hung off them, in the shapes nodeTableWritePattern covers.
 func txTableWritePattern(verb string) *regexp.Regexp {
-	const table = "[\"`\\[]?(transmissions|observations|ping_triggers|route_mask_changes)[\"`\\]]?"
+	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes)[\"`\\]]?"
 	return regexp.MustCompile(`(?i)` + verb + `\s+` + table + `\b`)
 }
 
-// TestServerHasNoPacketTableWrites enforces #215: the content-hash migration
-// used to UPDATE transmissions/observations and DELETE transmissions from the
-// server's mode=ro handle. Every statement failed, was logged as a collision,
-// and was retried at every start. cmd/server/ may not rewrite the packet
-// tables; that is the ingestor's job (cmd/ingestor/hash_migrate.go).
+// packetTableWritePatterns are the statements TestServerHasNoPacketTableWrites
+// forbids in every server source file.
+func packetTableWritePatterns() []*regexp.Regexp {
+	return []*regexp.Regexp{
+		txTableWritePattern(`INSERT\s+(OR\s+\w+\s+)?INTO`),
+		txTableWritePattern(`UPDATE(\s+OR\s+\w+)?`),
+		txTableWritePattern(`DELETE\s+FROM`),
+		txTableWritePattern(`REPLACE\s+INTO`),
+	}
+}
+
+// TestServerHasNoPacketTableWrites keeps cmd/server/ off the packet tables;
+// writing them is the ingestor's job (#1283).
+//   - #215: the content-hash migration UPDATEd transmissions/observations and
+//     DELETEd transmissions from the server's mode=ro handle. Every statement
+//     failed, was logged as a collision, and was retried at every start. It
+//     now lives in cmd/ingestor/hash_migrate.go.
+//   - #223: POST /api/packets INSERTed into transmissions, observers and
+//     observations on the same handle and answered 500. It was removed.
 //
-// UPDATE, DELETE and REPLACE are forbidden in every server source file. The
-// hash migration files (hash_migrate*.go) may not issue any statement at all:
-// no INSERT either, and no transaction or Exec on the connection.
-//
-// Known gap, outside this change: handlePostPacket (routes.go) INSERTs into
-// transmissions/observations on the same read-only handle. It is not part of
-// the hash migration and is left alone here; INSERT is therefore only
-// checked in the migration files.
+// INSERT, UPDATE, DELETE and REPLACE on these tables are forbidden in every
+// server source file, with no exceptions: the documented write exceptions
+// (ping_score_history.go, its own database; backup.go, VACUUM INTO) do not
+// touch them. The hash migration files (hash_migrate*.go) may not issue any
+// statement at all: no transaction or Exec on the connection either.
 func TestServerHasNoPacketTableWrites(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	everywhere := []*regexp.Regexp{
-		txTableWritePattern(`UPDATE(\s+OR\s+\w+)?`),
-		txTableWritePattern(`DELETE\s+FROM`),
-		txTableWritePattern(`REPLACE\s+INTO`),
-	}
+	everywhere := packetTableWritePatterns()
 	migrationOnly := []*regexp.Regexp{
-		txTableWritePattern(`INSERT\s+(OR\s+\w+\s+)?INTO`),
 		regexp.MustCompile(`\.conn\.(Begin|BeginTx|Exec|ExecContext|Prepare|PrepareContext)\s*\(`),
 	}
 	var violations []string
@@ -255,38 +261,55 @@ func TestServerHasNoPacketTableWrites(t *testing.T) {
 			patterns = append(append([]*regexp.Regexp{}, everywhere...), migrationOnly...)
 		}
 		for _, p := range patterns {
-			if loc := p.FindIndex(b); loc != nil {
+			for _, loc := range p.FindAllIndex(b, -1) {
 				line := 1 + strings.Count(string(b[:loc[0]]), "\n")
-				violations = append(violations, fmt.Sprintf("%s:%d: %s", name, line, p.String()))
+				violations = append(violations, fmt.Sprintf("%s:%d: %s", name, line, strings.Join(strings.Fields(string(b[loc[0]:loc[1]])), " ")))
 			}
 		}
 	}
 	if len(violations) > 0 {
-		t.Errorf("cmd/server/ writes the packet tables (#215):\n  %s", strings.Join(violations, "\n  "))
+		t.Errorf("cmd/server/ writes the packet tables; that belongs in cmd/ingestor (#215, #223, #1283):\n  %s", strings.Join(violations, "\n  "))
 	}
 }
 
 // TestServerHasNoPacketTableWritesIsSensitive keeps the guard honest: it must
-// match the statements the old migration issued.
+// match the statements the old migration (#215) and the removed POST
+// handler (#223) issued, and must not match reads or look-alike tables.
 func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
+	matches := func(stmt string) bool {
+		for _, p := range packetTableWritePatterns() {
+			if p.MatchString(stmt) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, stmt := range []string{
 		`UPDATE transmissions SET hash = ? WHERE id = ?`,
 		`UPDATE observations SET transmission_id = ? WHERE transmission_id = ?`,
 		`DELETE FROM transmissions WHERE id = ?`,
 		`update "observations" set x = 1`,
 		`UPDATE OR IGNORE observations SET transmission_id = 1`,
+		`INSERT INTO transmissions (hash, raw_hex) VALUES (?, ?)`,
+		`INSERT OR IGNORE INTO observers (id, name, last_seen, first_seen) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO observations (transmission_id, observer_idx) VALUES (?, ?)`,
+		"insert into\n\t\"observations\" (x) values (1)",
+		`REPLACE INTO dropped_packets (id) VALUES (1)`,
+		`DELETE FROM route_mask_changes`,
 	} {
-		matched := false
-		for _, p := range []*regexp.Regexp{
-			txTableWritePattern(`UPDATE(\s+OR\s+\w+)?`),
-			txTableWritePattern(`DELETE\s+FROM`),
-		} {
-			if p.MatchString(stmt) {
-				matched = true
-			}
-		}
-		if !matched {
+		if !matches(stmt) {
 			t.Errorf("the guard does not match %q", stmt)
+		}
+	}
+	for _, stmt := range []string{
+		`INSERT INTO ping_score_history_entries (a) VALUES (1)`,
+		`SELECT COUNT(*) FROM observations`,
+		`INSERT INTO observations_archive (a) VALUES (1)`,
+		`INSERT INTO observer_neighbors (a) VALUES (1)`,
+		`tx_inserted`,
+	} {
+		if matches(stmt) {
+			t.Errorf("the guard must not match %q", stmt)
 		}
 	}
 }

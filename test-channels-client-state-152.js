@@ -106,7 +106,10 @@ function makeHarness(opts) {
       scrollHeight: 0, clientHeight: 0,
       style: {}, dataset: {},
       classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
-      addEventListener() {}, removeEventListener() {},
+      // Recorded so a test can fire a handler the page registered (#232:
+      // the suggest form's submit).
+      addEventListener(type, fn) { this._listeners = this._listeners || {}; (this._listeners[type] = this._listeners[type] || []).push(fn); },
+      removeEventListener() {},
       // One child per selector, so a test can read what the page wrote to
       // e.g. #chHeader .ch-header-text.
       querySelector(sel) { this._q = this._q || {}; return this._q[sel] || (this._q[sel] = makeFakeEl()); },
@@ -169,7 +172,7 @@ function makeHarness(opts) {
     clearTimeout: () => {},
     setInterval: () => 0,
     clearInterval: () => {},
-    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+    fetch: opts.fetch || (() => Promise.resolve({ ok: true, json: () => Promise.resolve({}) })),
     performance: { now: () => RealDate.now() },
     localStorage: {
       getItem: (k) => Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null,
@@ -247,8 +250,16 @@ function makeHarness(opts) {
   // Capture the onApproved callback init() hands to ChannelProposals.mount
   // without letting mount() touch the DOM or start polling. The pure
   // mergeApprovedChannels() stays the real one.
-  ctx.window.ChannelProposals.mount = (mountOpts) => { h.approvedCallback = mountOpts && mountOpts.onApproved; };
-  ctx.window.ChannelProposals.unmount = () => {};
+  // opts.realProposals keeps the real mount() (#232), which then talks to
+  // opts.fetch.
+  if (opts.realProposals) {
+    // createPoller() binds window.setTimeout: give it the harness timers.
+    ctx.window.setTimeout = ctx.setTimeout;
+    ctx.window.clearTimeout = ctx.clearTimeout;
+  } else {
+    ctx.window.ChannelProposals.mount = (mountOpts) => { h.approvedCallback = mountOpts && mountOpts.onApproved; };
+    ctx.window.ChannelProposals.unmount = () => {};
+  }
   load('public/channels.js');
 
   h.ctx = ctx;
@@ -496,6 +507,49 @@ async function test(name, fn) {
     assertConversationOpen(h, messages, 'onApproved');
     assert.ok(h.row('#shared') && h.row('#shared').shared === true, 'approved channel must be listed');
     assert.strictEqual(h.state().channels.filter((c) => c.hash === PSK_HASH).length, 1, 'PSK row must appear exactly once');
+  });
+
+  // #232: with auto-approve on, the suggest poller sees `approved` and must
+  // refresh this tab's list through the same onApproved path as the admin
+  // decision, keeping the open PSK conversation and the unread counts.
+  await test('#232: an auto-approved suggestion lists the channel in the suggesting tab, once, keeping the PSK conversation and unread', async () => {
+    const statusPolls = [];
+    const fetch = (url, o) => {
+      const method = (o && o.method) || 'GET';
+      let body;
+      if (/\/channel-proposals\/config$/.test(url)) body = { enabled: true };
+      else if (method === 'POST' && /\/api\/channel-proposals$/.test(url)) body = { requestId: 'req-auto' };
+      else if (/\/channel-proposals\/requests\/req-auto$/.test(url)) {
+        statusPolls.push(url);
+        body = statusPolls.length === 1
+          ? { status: 'queued' }
+          : { status: 'approved', proposal: { id: 'req-auto', name: '#AutoShared', status: 'approved', createdAt: 1, reviewedAt: 2 } };
+      } else body = {};
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)) });
+    };
+    const { h, messages } = await openPskConversation({ realProposals: true, fetch });
+    h.setState({ channels: [Object.assign({}, h.row('public'), { unread: 3 }), pskRow({ unread: 4 })] });
+    h.respondChannels = () => Promise.resolve({
+      channels: [serverChannel('public')],
+      approvedChannels: [{ hash: '#AutoShared', name: '#AutoShared' }],
+    });
+    const section = h.elements.chSuggestSection;
+    const form = section && section.querySelector('#chSuggestForm');
+    assert.ok(form && form._listeners && form._listeners.submit, 'init() must mount the real suggest form');
+    const before = h.channelRequests.length;
+    section.querySelector('#chSuggestName').value = 'AutoShared';
+    form._listeners.submit[0]({ preventDefault() {} });
+    await flush(50);
+    assert.strictEqual(statusPolls.length, 2, 'polled queued → approved');
+    assert.match(section.querySelector('#chSuggestStatus').textContent, /#AutoShared is already shared with everyone/);
+    assert.ok(h.row('#AutoShared') && h.row('#AutoShared').shared === true, 'auto-approved channel must be listed without a reload');
+    assert.ok(/data-hash="#AutoShared"/.test(h.elements.chList.innerHTML), 'auto-approved channel must be rendered');
+    assert.strictEqual(h.channelRequests.length, before + 1, 'exactly one /channels request per approval');
+    assertConversationOpen(h, messages, 'auto-approve');
+    assert.strictEqual(h.row('public').unread, 3, 'server row unread kept');
+    assert.strictEqual(h.row(PSK_HASH).unread, 4, 'PSK row unread kept');
+    await flush(50);
+    assert.strictEqual(h.channelRequests.length, before + 1, 'no second refresh afterwards');
   });
 
   await test('My Channels rows and labels survive a refresh (user:* row and key-matched server row)', async () => {
