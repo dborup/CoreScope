@@ -2221,37 +2221,48 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		inIndex    bool
 	}
 	checks := make([]candidateCheck, len(candidates))
+	// Membership set for the queried pubkey, built once. The previous
+	// per-candidate scan of the index list was O(candidates × list length).
+	var indexedForTarget map[int]struct{}
+	if s.store.useResolvedPathIndex {
+		ids := s.store.resolvedPubkeyIndex[resolvedPubkeyHash(lowerPK)]
+		indexedForTarget = make(map[int]struct{}, len(ids))
+		for _, id := range ids {
+			indexedForTarget[id] = struct{}{}
+		}
+	}
 	for i, tx := range candidates {
 		cc := candidateCheck{tx: tx}
 		if !s.store.useResolvedPathIndex {
 			cc.inIndex = true // flag off — keep all
 		} else if _, hasRev := s.store.resolvedPubkeyReverse[tx.ID]; !hasRev {
 			cc.inIndex = true // no indexed pubkeys — keep (conservative)
-		} else {
-			h := resolvedPubkeyHash(lowerPK)
-			for _, id := range s.store.resolvedPubkeyIndex[h] {
-				if id == tx.ID {
-					cc.hasReverse = true // needs SQL confirmation
-					break
-				}
-			}
-			// If not in index at all, it's a definite no
+		} else if _, ok := indexedForTarget[tx.ID]; ok {
+			cc.hasReverse = true // hash-index hit; exact pubkey confirmed below
 		}
+		// If not in index at all, it's a definite no
 		checks[i] = cc
 	}
 	s.store.mu.RUnlock()
 
-	// Now run SQL checks outside the lock for candidates that need confirmation.
-	confirmedBySQL := make(map[int]bool)
+	// Candidates admitted by the hash index (hasReverse) used to be confirmed
+	// one by one with confirmResolvedPathContains — a SQL query per candidate
+	// that scans every observation row of the tx. For a busy node that is
+	// thousands of sequential queries and dominated /paths CPU (~43% of a
+	// 60 s profile). The confirmation only guards against hash collisions
+	// and a stale index; for every candidate that has a canonical persisted
+	// resolved_path, membership is decided again below from that exact path
+	// (resolvedPK == lowerPK), which gives the same answer. So defer the SQL
+	// check to the few candidates with no canonical path at all, where the
+	// legacy fallback still needs confirmedBySQL.
+	needsConfirm := make(map[int]bool)
 	filtered := candidates[:0]
 	for _, cc := range checks {
 		if cc.inIndex {
 			filtered = append(filtered, cc.tx)
 		} else if cc.hasReverse {
-			if s.store.confirmResolvedPathContains(cc.tx.ID, lowerPK) {
-				filtered = append(filtered, cc.tx)
-				confirmedBySQL[cc.tx.ID] = true
-			}
+			filtered = append(filtered, cc.tx)
+			needsConfirm[cc.tx.ID] = true
 		}
 		// else: not in index → exclude
 	}
@@ -2276,6 +2287,27 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		if rp := s.store.fetchResolvedPathForTxBest(tx); rp != nil {
 			canonicalRP[tx.ID] = rp
 		}
+	}
+
+	// Deferred exact-pubkey confirmation (see needsConfirm above): only for
+	// hash-index candidates that have no canonical resolved_path, because
+	// those are the ones decided by the legacy fallback arm, which consumes
+	// confirmedBySQL.
+	confirmedBySQL := make(map[int]bool)
+	if len(needsConfirm) > 0 {
+		kept := candidates[:0]
+		for _, tx := range candidates {
+			if needsConfirm[tx.ID] {
+				if _, hasCanonical := canonicalRP[tx.ID]; !hasCanonical {
+					if !s.store.confirmResolvedPathContains(tx.ID, lowerPK) {
+						continue
+					}
+					confirmedBySQL[tx.ID] = true
+				}
+			}
+			kept = append(kept, tx)
+		}
+		candidates = kept
 	}
 
 	// Re-acquire read lock for the aggregation phase that reads store data.
