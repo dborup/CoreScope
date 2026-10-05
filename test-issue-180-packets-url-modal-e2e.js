@@ -49,11 +49,6 @@ async function fresh(page, url) {
   await page.reload({ waitUntil: 'load' });
 }
 
-// The "Latest Packets (N)" count, once the list has rendered.
-async function listCount(page) {
-  await page.waitForSelector('#pktLeft .count', { timeout: 15000 });
-  return page.evaluate(() => Number((document.querySelector('#pktLeft .count').textContent.match(/\d+/) || [])[0]));
-}
 function clearShown(page) {
   return page.evaluate(() => {
     const b = document.getElementById('clearFiltersBtn');
@@ -102,25 +97,45 @@ function detailPaneOpen(page) {
       await waitFor(page, () => /\(1\)/.test(document.querySelector('#pktLeft .count').textContent), 'detail URL did not filter the list to 1 packet');
       assert(await clearShown(page), 'Clear button hidden on the filtered detail URL');
 
-      // The fixture's packets may have aged out of the default 15 min window
-      // that Clear restores, so compare what Clear showed with what the
-      // reload shows rather than expecting a number of rows.
       const listLoaded = () => page.waitForResponse((r) => /\/api\/packets\?/.test(r.url()), { timeout: 15000 });
       await Promise.all([listLoaded(), page.click('#clearFiltersBtn')]);
       await page.waitForTimeout(500);
       let h = await page.evaluate(() => location.hash);
+      // These three assertions are what Clear itself must do, and are the
+      // ones a "Clear keeps ?timeWindow= / keeps the detail" mutant breaks:
+      // the bare list URL, no detail pane, the saved window back at default.
       assert(h === '#/packets', 'URL after Clear: ' + h);
-      const shown = await listCount(page);
       assert(!(await clearShown(page)), 'Clear button still visible after Clear');
       assert(!(await detailPaneOpen(page)), 'detail pane still open after Clear');
+
+      // #271: comparing row COUNTS at the default 15-min window across two
+      // renders (Clear's in-SPA list, then a full reload) is a race against
+      // the fixture's age — the CI fixture ages while the job runs, and a
+      // packet can cross the 15-min boundary in the gap between the two
+      // fetches (same class of problem #252 fixed for the Details test).
+      // Pin a wide window (24h; the widest option, same as #252) for the
+      // list-identity check below, and compare the actual set of packet
+      // hashes rather than a count, so the comparison cannot depend on how
+      // old the fixture is.
+      await Promise.all([listLoaded(), page.evaluate(() => {
+        const sel = document.getElementById('fTimeWindow');
+        sel.value = '1440';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      })]);
+      await page.waitForTimeout(500);
+      const hashSet = async () => {
+        await page.waitForSelector('#pktLeft .count', { timeout: 15000 });
+        return page.evaluate(() => Array.from(document.querySelectorAll('#pktBody > tr:not(.group-child)')).map((tr) => tr.dataset.hash).sort());
+      };
+      const shown = await hashSet();
+      assert(shown.length > 0, 'no rows to compare at the pinned 24h window');
 
       await Promise.all([listLoaded(), page.reload({ waitUntil: 'load' })]);
       await page.waitForTimeout(500);
       h = await page.evaluate(() => location.hash);
-      assert(h === '#/packets', 'URL after reload: ' + h);
-      const reloaded = await listCount(page);
-      assert(reloaded === shown, 'reload shows ' + reloaded + ' packets, Clear showed ' + shown);
-      assert(!(await clearShown(page)), 'Clear button back after reload');
+      assert(h === '#/packets?timeWindow=1440', 'URL after reload: ' + h);
+      const reloaded = await hashSet();
+      assert(JSON.stringify(reloaded) === JSON.stringify(shown), 'reload shows ' + JSON.stringify(reloaded) + ', pinned-window Clear state showed ' + JSON.stringify(shown));
       assert(!(await detailPaneOpen(page)), 'detail pane open after reload');
       assert(await page.evaluate(() => document.getElementById('fHash').value === ''), 'hash filter input filled after reload');
     });
