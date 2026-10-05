@@ -28,6 +28,27 @@ async function step(name, fn) {
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
+// The sidebar header strip: at most two rows (title + Add, then the region
+// filter), every control inside it, and the channel list starting below it.
+async function assertHeaderStrip(page) {
+  const r = await page.evaluate(() => {
+    const sidebar = document.querySelector('.ch-sidebar');
+    const header = sidebar && sidebar.querySelector('.ch-sidebar-header');
+    if (!header) return null;
+    const h = header.getBoundingClientRect();
+    const listTop = document.getElementById('chList').getBoundingClientRect().top;
+    const outside = [...header.querySelectorAll('.ch-sidebar-title, button')]
+      .map((e) => ({ name: e.id || String(e.className).split(' ')[0] || e.tagName, b: e.getBoundingClientRect() }))
+      .filter((c) => c.b.width > 0 && (c.b.top < h.top - 0.5 || c.b.bottom > h.bottom + 0.5 || c.b.left < h.left - 0.5 || c.b.right > h.right + 0.5))
+      .map((c) => c.name + ' ' + Math.round(c.b.top) + '-' + Math.round(c.b.bottom));
+    return { height: Math.round(h.height), top: Math.round(h.top), bottom: Math.round(h.bottom), listTop: Math.round(listTop), outside };
+  });
+  assert(r !== null, 'sidebar header not found');
+  assert(r.height <= 120, 'sidebar header must be \u2264120px on mobile, got ' + r.height + 'px');
+  assert(r.outside.length === 0, 'controls stick out of the header (' + r.top + '-' + r.bottom + '): ' + r.outside.join(', '));
+  assert(r.listTop >= r.bottom - 0.5, 'channel list starts at ' + r.listTop + 'px, above the header bottom ' + r.bottom + 'px');
+}
+
 async function run() {
   const launchOpts = { args: ['--no-sandbox'] };
   if (process.env.CHROMIUM_PATH) launchOpts.executablePath = process.env.CHROMIUM_PATH;
@@ -47,24 +68,7 @@ async function run() {
   }, { timeout: 15000 });
   await page.waitForTimeout(300);
 
-  await step('header strip is \u2264120px, holds all its controls, and the list starts below it', async () => {
-    const r = await page.evaluate(() => {
-      const sidebar = document.querySelector('.ch-sidebar');
-      const header = sidebar && sidebar.querySelector('.ch-sidebar-header');
-      if (!header) return null;
-      const h = header.getBoundingClientRect();
-      const listTop = document.getElementById('chList').getBoundingClientRect().top;
-      const outside = [...header.querySelectorAll('.ch-sidebar-title, button')]
-        .map((e) => ({ name: e.id || String(e.className).split(' ')[0] || e.tagName, b: e.getBoundingClientRect() }))
-        .filter((c) => c.b.width > 0 && (c.b.top < h.top - 0.5 || c.b.bottom > h.bottom + 0.5 || c.b.left < h.left - 0.5 || c.b.right > h.right + 0.5))
-        .map((c) => c.name + ' ' + Math.round(c.b.top) + '-' + Math.round(c.b.bottom));
-      return { height: Math.round(h.height), top: Math.round(h.top), bottom: Math.round(h.bottom), listTop: Math.round(listTop), outside };
-    });
-    assert(r !== null, 'sidebar header not found');
-    assert(r.height <= 120, 'sidebar header must be \u2264120px on mobile, got ' + r.height + 'px');
-    assert(r.outside.length === 0, 'controls stick out of the header (' + r.top + '-' + r.bottom + '): ' + r.outside.join(', '));
-    assert(r.listTop >= r.bottom - 0.5, 'channel list starts at ' + r.listTop + 'px, above the header bottom ' + r.bottom + 'px');
-  });
+  await step('header strip is \u2264120px, holds all its controls, and the list starts below it', () => assertHeaderStrip(page));
 
   await step('"+ Add Channel" is a compact chip, not full-width hero', async () => {
     const ratio = await page.evaluate(() => {
@@ -108,6 +112,17 @@ async function run() {
       'empty-state height ' + data.h + 'px is ' + Math.round(pct * 100) +
       '% of viewport (' + data.vh + 'px) \u2014 must be <40%');
   });
+
+  // #235: on a touch phone the region pills and + Add are 48px tall, so the
+  // strip is two 48px rows; it must still hold them without the list
+  // covering any.
+  const touchCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const tp = await touchCtx.newPage();
+  await tp.goto(BASE + '/#/channels', { waitUntil: 'domcontentloaded' });
+  await tp.waitForSelector('#chList .ch-row', { timeout: 15000 });
+  await tp.waitForSelector('#chRegionFilter .region-pill, #chRegionFilter .region-dropdown-trigger', { timeout: 15000 });
+  await step('touch 390x844: header strip is \u2264120px, holds all its controls, and the list starts below it', () => assertHeaderStrip(tp));
+  await touchCtx.close();
 
   // Desktop guard: at 1024x800 the sidebar must remain side-by-side with main
   // (layout flex-direction stays row), not stacked. This protects the desktop
