@@ -2436,8 +2436,13 @@
     const _grpChanStyle = window.ChannelColors ? window.ChannelColors.getRowStyle(_grpDecoded.type || groupTypeName, _grpDecoded.channel) : '';
     const _grpHashStripe = _hashStripeStyle(p.hash);
     const _grpStyle = _grpHashStripe + _grpChanStyle;
-    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
-          <td class="col-expand" style="text-align:center;cursor:pointer">${isSingle ? '' : (isExpanded ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-up"/></svg>')}</td>
+    // #189: disclosure caret, right when collapsed and down when expanded, as in
+    // channels.js, network-digest.js, analytics.js and route-view.js. The row that
+    // toggles reports its state in aria-expanded; a single-observation row cannot
+    // expand, so it has neither.
+    const _grpCaret = isSingle ? '' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-' + (isExpanded ? 'down' : 'right') + '"/></svg>';
+    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${isSingle ? '' : ' aria-expanded="' + isExpanded + '"'}${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
+          <td class="col-expand" style="text-align:center;cursor:pointer">${_grpCaret}</td>
           <td class="col-region">${groupRegion ? `<span class="badge-region">${groupRegion}</span>` : '—'}</td>
           <td class="col-time">${renderTimestampCell(p.latest)}</td>
           <td class="mono col-hash" data-filter-field="hash" data-filter-value="${escapeHtml(p.hash || '')}">${truncate(p.hash || '—', 8)}</td>
