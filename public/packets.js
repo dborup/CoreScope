@@ -3516,8 +3516,12 @@
       } catch {}
     }
 
-    // Parse hash size from path byte
-    const hashSize = senderPathHashSize(pkt.raw_hex);
+    // Sender-selected hash width from the path byte. Read it from the SAME
+    // frame the rest of the panel describes (the selected observation's
+    // raw_hex, see buildFieldTable's argument below) -- observations of one
+    // transmission can carry different route types, so the original frame's
+    // header would otherwise contradict the byte breakdown.
+    const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);
 
     const size = effectivePkt.raw_hex ? Math.floor(effectivePkt.raw_hex.length / 2) : (pkt.raw_hex ? Math.floor(pkt.raw_hex.length / 2) : 0);
     const typeName = payloadTypeName(pkt.payload_type);
@@ -3870,12 +3874,26 @@
     // Path length byte is at current offset (byte 1 for non-transport, byte 5 for transport)
     const pathLenOffset = off;
     const pathByte0 = parseInt(buf.slice(off * 2, off * 2 + 2), 16);
-    const hashSizeVal = isNaN(pathByte0) ? '?' : ((pathByte0 >> 6) + 1);
     const hashCountVal = isNaN(pathByte0) ? '?' : (pathByte0 & 0x3F);
     const encodedHashSize = senderPathHashSize(buf);
-    const pathDescription = encodedHashSize == null
-      ? `hash_count=${hashCountVal} (no encoded hash size)`
-      : `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;
+    // senderPathHashSize collapses every "no width here" case to null. This is
+    // the byte breakdown, so say WHICH one it is instead of dropping the bits
+    // on the floor: path bytes that are not hops at all (TRACE carries SNR),
+    // a width field of 0b11 (there is no 4-byte width -- the backend evidence
+    // model only knows 1/2/3, see observed_path_hash_sizes.go), or
+    // sendZeroHop's 0x00 direct marker, which encodes no width by design.
+    const headerByte = parseInt(buf.slice(0, 2), 16);
+    const pathBytesAreHops = !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) !== 9;
+    let pathDescription;
+    if (encodedHashSize != null) {
+      pathDescription = `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;
+    } else if (!pathBytesAreHops) {
+      pathDescription = `hash_count=${hashCountVal} (TRACE: path bytes are SNR, not a hash width)`;
+    } else if (!isNaN(pathByte0) && (pathByte0 >> 6) === 3) {
+      pathDescription = `hash_count=${hashCountVal} (width bits 7-6 = 3: not a valid hash size, 1-3 bytes only)`;
+    } else {
+      pathDescription = `hash_count=${hashCountVal} (no encoded hash size)`;
+    }
     rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), pathDescription);
     off += 1;
 

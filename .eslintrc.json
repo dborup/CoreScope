@@ -270,6 +270,7 @@
     "routeLayer": "readonly",
     "routeTypeName": "readonly",
     "scopeCellHtml": "readonly",
+    "senderPathHashSize": "readonly",
     "setupPullToReconnect": "readonly",
     "syncBadgeColors": "readonly",
     "timeAgo": "readonly",

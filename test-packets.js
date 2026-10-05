@@ -1025,21 +1025,45 @@ console.log('\n=== packets.js: buildFieldTable ===');
     assert(result.includes('cdcdcdcd'), 'should show the legacy field\'s truncated pubkey hex, got: ' + result);
   });
 
-  test('buildFieldTable hash_size calculation', () => {
-    // Path byte 0xC0 → bits 7-6 = 3 → hash_size = 4, but hash_count = 0
-    // Since #653: when hashCount == 0, shows "hash_count=0 (direct advert)" instead of hash_size
-    const pkt = { raw_hex: '00C0', route_type: 1, payload_type: 0 };
-    const decoded = {};
-    const result = api.buildFieldTable(pkt, decoded, [], []);
-    assert(result.includes('hash_count=0 (direct advert)'));
+  // PR #212 replaced the "direct advert" wording: the path byte encodes the
+  // sender's width even with zero relay hops, so a flood's width is reported
+  // and only the cases that genuinely carry no width stay unknown. The byte
+  // breakdown must still say WHICH case it is, not just "unknown".
+  test('buildFieldTable reports a zero-hop flood width instead of "direct advert"', () => {
+    // header 0x01 = route 1 (FLOOD), payload 0 (ADVERT); path byte 0x40 →
+    // bits 7-6 = 1 → hash_size 2, hash_count = 0.
+    const pkt = { raw_hex: '0140', route_type: 1, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_size=2 bytes, hash_count=0'),
+      'zero-hop flood must keep its encoded width, got: ' + result);
+    assert(!result.includes('direct advert'), 'stale "direct advert" wording resurfaced');
   });
 
-  test('buildFieldTable hash_size shown when hash_count > 0', () => {
-    // Path byte 0xC1 → bits 7-6 = 3 → hash_size = 4, hash_count = 1
-    const pkt = { raw_hex: '00C1aabbccdd', route_type: 1, payload_type: 0 };
-    const decoded = {};
-    const result = api.buildFieldTable(pkt, decoded, [], []);
-    assert(result.includes('hash_size=4'));
+  test('buildFieldTable marks a 0b11 width field as invalid rather than hiding it', () => {
+    // Path byte 0xC1 → bits 7-6 = 3, which is no width at all: the evidence
+    // model (cmd/server/observed_path_hash_sizes.go) knows only 1/2/3 bytes.
+    const pkt = { raw_hex: '01C1aabbccdd', route_type: 1, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=1'), 'hop count lost, got: ' + result);
+    assert(result.includes('width bits 7-6 = 3'), 'invalid width field not explained, got: ' + result);
+    assert(!result.includes('hash_size=4'), 'a 4-byte hash size must not be claimed');
+  });
+
+  test('buildFieldTable keeps the direct zero-hop marker distinct from an invalid width', () => {
+    // header 0x02 = route 2 (DIRECT), path byte 0x00 = sendZeroHop's marker.
+    const pkt = { raw_hex: '0200', route_type: 2, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=0 (no encoded hash size)'),
+      'direct zero-hop marker description drifted, got: ' + result);
+  });
+
+  test('buildFieldTable does not read a hash width out of TRACE SNR bytes', () => {
+    // header 0x25 = payload 9 (TRACE), route 1. Its path bytes are SNR
+    // readings (internal/packetpath/route.go PathBytesAreHops), not hops.
+    const pkt = { raw_hex: '2541aabbccdd', route_type: 1, payload_type: 9 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('TRACE: path bytes are SNR'), 'TRACE path bytes mislabelled, got: ' + result);
+    assert(!result.includes('hash_size='), 'TRACE must not claim a hash size');
   });
 
   test('buildFieldTable handles empty raw_hex', () => {
@@ -1616,6 +1640,29 @@ console.log('\n=== packets.js: scroll position preserved across renderTableRows 
 
     // scrollTop must be preserved (not reset to 0)
     assert.strictEqual(pktLeftScrollTop, 500, 'scrollTop should be preserved after renderTableRows, got ' + pktLeftScrollTop);
+  });
+}
+
+// ===== packets.js: detail Hash Size source (PR #212 review) =====
+console.log('\n=== packets.js: detail Hash Size reads the selected observation ===');
+{
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+
+  // Behavioural coverage lives in
+  // test-packet-detail-sender-hash-size-obs-e2e.js, which only runs in the
+  // Playwright job. This is the fast guard: observations of one transmission
+  // carry their own frames, so the "Hash Size" summary and the byte table
+  // below it must read the SAME raw_hex, or the panel contradicts itself.
+  test('renderDetail derives Hash Size from the selected observation, not the original frame', () => {
+    assert.ok(src.includes('const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);'),
+      'the Hash Size summary must use the effective observation\'s frame');
+    assert.ok(!/const hashSize = senderPathHashSize\(pkt\.raw_hex\)/.test(src),
+      'reading the original transmission reintroduces the observation mismatch');
+  });
+
+  test('the byte table is built from the same frame the summary reads', () => {
+    assert.ok(src.includes('buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt,'),
+      'buildFieldTable must receive the effective observation');
   });
 }
 

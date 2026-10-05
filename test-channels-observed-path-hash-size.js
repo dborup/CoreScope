@@ -13,6 +13,32 @@ const fs = require('fs');
 const assert = require('assert');
 
 const noop = () => {};
+
+// Lift named top-level function declarations out of public/app.js and run them
+// in their own context. app.js' load-time side effects (router, theme, WS)
+// need a full DOM sandbox that this suite does not build, and the alternative
+// -- stubbing the helper -- lets the test and the shipped rule diverge.
+function loadAppHelper(wanted, names) {
+  const source = fs.readFileSync('public/app.js', 'utf8');
+  let extracted = '';
+  for (const name of names) {
+    const start = source.search(new RegExp('^function ' + name + '\\s*\\(', 'm'));
+    if (start < 0) throw new Error('public/app.js no longer declares function ' + name);
+    const open = source.indexOf('{', start);
+    let depth = 0, end = -1;
+    for (let i = open; i < source.length; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}' && --depth === 0) { end = i + 1; break; }
+    }
+    if (end < 0) throw new Error('unbalanced braces reading ' + name + ' from public/app.js');
+    extracted += source.slice(start, end) + '\n';
+  }
+  const helperCtx = { parseInt, RegExp, Number, String, Math };
+  vm.createContext(helperCtx);
+  vm.runInContext(extracted + 'this.__helper = ' + wanted + ';', helperCtx);
+  if (typeof helperCtx.__helper !== 'function') throw new Error('failed to extract ' + wanted);
+  return helperCtx.__helper;
+}
 const fakeEl = {
   addEventListener: noop,
   querySelector: () => fakeEl,
@@ -76,7 +102,12 @@ const ctx = {
   fetch: () => Promise.resolve({ json: () => Promise.resolve({}) }),
   btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
   registerPage: noop,
-  senderPathHashSize: (rawHex) => rawHex === '59C0' ? 3 : null,
+  // The REAL app.js helper, not a hand-rolled stub: a stub silently drifts
+  // from the shipped header rule (an earlier revision of this file faked
+  // '59C0' -> 3, a width the real helper reports as unknown), so the merge
+  // assertions below would have passed against a contract nothing ships.
+  senderPathHashSize: loadAppHelper('senderPathHashSize',
+    ['isTransportRoute', 'getPathLenOffset', 'senderPathHashSize']),
 };
 vm.createContext(ctx);
 // Expose the cache fetch helper only inside this VM so the regression can
@@ -228,7 +259,7 @@ test('delta cache absorbs later evidence for the same packet without re-decrypti
     packets: [{
       hash: 'same-packet',
       first_seen: timestamp,
-      raw_hex: '59C0',
+      raw_hex: '1580DEADBEEF', // flood header, path byte 0x80 -> 3-byte width
       observed_path_hash_sizes: [2],
       decoded_json: { type: 'CHAN', channel: '#test', sender: 'API sender', text: 'API text' },
     }],
