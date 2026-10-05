@@ -90,6 +90,7 @@ func TestPostPacketsRemovedReturns405OnReadOnlyDB(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /api/packets: want 405, got %d (body: %q)", w.Code, w.Body.String())
 	}
+	assertAllowSet(t, w.Header().Get("Allow"), "GET", "HEAD")
 	if body := strings.ToLower(w.Body.String()); strings.Contains(body, "sqlite") || strings.Contains(body, "readonly") || strings.Contains(body, "insert") {
 		t.Errorf("response leaks database error text: %q", w.Body.String())
 	}
@@ -162,9 +163,7 @@ func TestPostPacketsRemovedFallsThroughToSPAInProductionRouter(t *testing.T) {
 		t.Fatalf("POST /api/packets: want 405, got %d %q %q",
 			w.Code, w.Header().Get("Content-Type"), w.Body.String())
 	}
-	if allow := w.Header().Get("Allow"); !strings.Contains(allow, "GET") {
-		t.Errorf("want Allow header containing GET, got %q", allow)
-	}
+	assertAllowSet(t, w.Header().Get("Allow"), "GET", "HEAD")
 	if !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 		t.Errorf("want application/json content-type, got %q", w.Header().Get("Content-Type"))
 	}
