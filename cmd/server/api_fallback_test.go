@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -244,10 +247,12 @@ func openAPIOperations(t *testing.T, router http.Handler) map[string][]string {
 }
 
 // HEAD on a known /api route must keep succeeding (it was 200 on master,
-// via the SPA). Every documented GET route answers HEAD with GET's status
-// and headers; net/http drops the body. A documented path without GET
-// answers HEAD with 405 and the exact Allow set. Runs over a real listener
-// so the HEAD body suppression is net/http's, as in production.
+// via the SPA). Every documented path answers HEAD with the status and
+// headers GET gets, and no body; where GET itself is 405 (no GET route for
+// that URL), HEAD is 405 with the exact Allow set. Some analytics endpoints
+// answer 202 until a background compute finishes, so HEAD is compared with
+// the GET just before and just after it. Runs over a real listener so the
+// HEAD body suppression is net/http's, as in production.
 func TestAPIFallbackHeadMatchesGetForEveryOpenAPIRoute(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	router := productionStyleRouter(t, srv)
@@ -265,48 +270,68 @@ func TestAPIFallbackHeadMatchesGetForEveryOpenAPIRoute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, path, err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		if method == "HEAD" && len(body) != 0 {
-			t.Errorf("HEAD %s: got a %d-byte body", path, len(body))
-		}
 		return resp
+	}
+	// http.Client never surfaces a HEAD body, so read the raw bytes after
+	// the header block to prove the server sends none.
+	rawHeadBody := func(path string) int {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", ts.Listener.Addr().String(), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		fmt.Fprintf(conn, "HEAD %s HTTP/1.0\r\nHost: test\r\n\r\n", path)
+		raw, err := io.ReadAll(conn)
+		if err != nil {
+			t.Fatalf("HEAD %s (raw): %v", path, err)
+		}
+		i := bytes.Index(raw, []byte("\r\n\r\n"))
+		if i < 0 {
+			t.Fatalf("HEAD %s (raw): no header terminator in %q", path, raw)
+		}
+		return len(raw) - (i + 4)
 	}
 
 	ops := openAPIOperations(t, router)
-	checked := 0
+	served := 0
 	for path, methods := range ops {
-		hasGet := false
-		for _, m := range methods {
-			if m == "GET" {
-				hasGet = true
-			}
-		}
+		before := do("GET", path)
 		head := do("HEAD", path)
-		if !hasGet {
+		after := do("GET", path)
+
+		if before.StatusCode == http.StatusMethodNotAllowed {
 			if head.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("HEAD %s (no GET route): want 405, got %d", path, head.StatusCode)
+				t.Errorf("HEAD %s (GET is 405): want 405, got %d", path, head.StatusCode)
 			}
 			assertAllowSet(t, head.Header.Get("Allow"), methods...)
 			continue
 		}
-		get := do("GET", path)
-		if head.StatusCode == http.StatusMethodNotAllowed {
-			t.Errorf("HEAD %s: got 405 (Allow %q), want GET's status %d", path, head.Header.Get("Allow"), get.StatusCode)
-			continue
+		get := before
+		if head.StatusCode != before.StatusCode {
+			get = after
 		}
 		if head.StatusCode != get.StatusCode {
-			t.Errorf("HEAD %s: status %d, GET status %d", path, head.StatusCode, get.StatusCode)
+			t.Errorf("HEAD %s: status %d (Allow %q), GET status %d then %d",
+				path, head.StatusCode, head.Header.Get("Allow"), before.StatusCode, after.StatusCode)
+			continue
 		}
 		for _, h := range []string{"Content-Type", "Cache-Control", "Allow"} {
 			if hv, gv := head.Header.Get(h), get.Header.Get(h); hv != gv {
 				t.Errorf("HEAD %s: %s %q, GET %s %q", path, h, hv, h, gv)
 			}
 		}
-		checked++
+		if n := rawHeadBody(path); n != 0 {
+			t.Errorf("HEAD %s: server sent a %d-byte body", path, n)
+		}
+		served++
 	}
-	if checked < 20 {
-		t.Fatalf("only checked %d GET routes with HEAD, expected at least 20", checked)
+	t.Logf("HEAD served like GET on %d of %d documented paths; the rest have no GET route (405)", served, len(ops))
+	if served < 20 {
+		t.Fatalf("only %d documented paths served HEAD like GET, expected at least 20", served)
 	}
 }
 

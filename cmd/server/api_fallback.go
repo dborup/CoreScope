@@ -24,15 +24,27 @@ import (
 // main.go registers /ws and the SPA catch-all (registered after
 // RegisterRoutes returns). Every caller of RegisterRoutes — main.go and
 // every test's setupTestServer — gets the fallback for free.
+//
+// Bare /api is an API path too, so it gets its own exact-path route;
+// PathPrefix("/api") would also swallow SPA paths like /api-docs.
 func registerAPIFallback(router *mux.Router) {
-	router.PathPrefix("/api/").HandlerFunc(apiFallbackHandler(router))
+	h := apiFallbackHandler(router)
+	router.Path("/api").HandlerFunc(h)
+	router.PathPrefix("/api/").HandlerFunc(h)
 }
 
-// apiFallbackHandler responds 405 with an Allow header if the request path
-// matches a known /api route under a different method, otherwise 404. Both
-// use the existing writeError JSON shape.
+// apiFallbackHandler serves HEAD through the GET route for the same path,
+// otherwise responds 405 with an Allow header if the request path matches a
+// known /api route under a different method, otherwise 404. Both errors use
+// the existing writeError JSON shape.
 func apiFallbackHandler(router *mux.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			if h, getReq := getRouteHandler(router, r); h != nil {
+				h.ServeHTTP(w, getReq)
+				return
+			}
+		}
 		if allowed := allowedMethodsForPath(router, r); len(allowed) > 0 {
 			w.Header().Set("Allow", strings.Join(allowed, ", "))
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -73,10 +85,37 @@ func allowedMethodsForPath(router *mux.Router, r *http.Request) []string {
 		}
 		return nil
 	})
+	if seen[http.MethodGet] {
+		// Every GET route also answers HEAD, via apiFallbackHandler.
+		seen[http.MethodHead] = true
+	}
 	out := make([]string, 0, len(seen))
 	for m := range seen {
 		out = append(out, m)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// getRouteHandler returns the handler of the route a GET to r's URL would
+// reach, and that GET request with the route's path variables set, or nil if
+// only this fallback matches. gorilla/mux's .Methods("GET") does not match
+// HEAD, so HEAD on a known route lands here; RFC 9110 §9.3.2 wants it served
+// like GET. The handler runs as GET, and net/http drops the body because the
+// connection's request is HEAD. The router middleware has already run around
+// this fallback, so the route's own handler is called directly, not
+// match.Handler or router.ServeHTTP: that would run the middleware twice and
+// could re-enter this fallback.
+func getRouteHandler(router *mux.Router, r *http.Request) (http.Handler, *http.Request) {
+	getReq := r.Clone(r.Context())
+	getReq.Method = http.MethodGet
+	var match mux.RouteMatch
+	if !router.Match(getReq, &match) || match.MatchErr != nil {
+		return nil, nil
+	}
+	if _, err := match.Route.GetMethods(); err != nil {
+		// A route without .Methods(): this fallback, so no GET route exists.
+		return nil, nil
+	}
+	return match.Route.GetHandler(), mux.SetURLVars(getReq, match.Vars)
 }
