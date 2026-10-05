@@ -524,9 +524,10 @@ Where `AdvertIntervalEstimate` is:
   "interval_s":     number | null,  // estimate in seconds, snapped when "snapped"; null when confidence is none
   "raw_interval_s": number | null,  // the median before snapping
   "snapped":        boolean,
-  "samples":        number,         // adverts used
+  "samples":        number,         // adverts used (after a raised interval: those since the change)
   "gaps_used":      number,         // gaps between them that fit 1-4x the interval
   "confidence":     "high" | "medium" | "low" | "none",
+  "status":         "estimated" | "none_observed" | "too_few" | "irregular",
   "last_advert":    string (ISO) | null  // first_seen of the newest advert in the class
 }
 ```
@@ -596,12 +597,26 @@ The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
   it is taken from `first_seen`. A sender clock that is wrong by a steady
   offset is still used; a jump or reset is not.
 - **The interval.** It must be seen directly, within 10 %, in at least two
-  gaps and a quarter of them. It may not be shorter than the class's timer
-  allows. Of those candidates, the one that explains the most gaps as 1–4×
-  itself wins.
+  gaps and a quarter of them. It must be an interval the class's timer can
+  run at, within 10 %: flood 3 h or more; zero-hop the 2 min new-install
+  default or 60 min or more (so manual `advert.zerohop` every 10–30 min is
+  irregular). Of those candidates, the one that explains the most gaps as
+  1–4× itself wins.
   - A gap of k× the interval counts as k−1 missed adverts.
-  - Shorter gaps are dropped: manual adverts and reboots, and the zero-hop
-    gap that a flood advert's timer reset makes irregular.
+  - Shorter gaps are dropped and count neither way: manual adverts and
+    reboots.
+  - Longer gaps that are no multiple are *irregular* and lower the
+    confidence. One is the zero-hop gap across a flood advert: the flood
+    advert re-arms the zero-hop timer, so that gap is between one and two
+    zero-hop intervals.
+- **A raised interval.** A new interval of 2–4× the old one fits every new
+  gap as missed adverts of the old one. When the newest 3 gaps that fit the
+  interval are all the same multiple k > 1, that is read as a raised
+  setting: the estimate is redone on the adverts since the newest gap at the
+  old interval, and `samples` counts those. Two in a row, or different
+  multiples, stay missed adverts. A lowered interval needs no special case:
+  the new one explains the old gaps as multiples once it is seen in a
+  quarter of the gaps.
 - **The value.** It is the median of gap/k over the fitting gaps (`raw_interval_s`).
   It is snapped to the nearest settable value when it lies within 10 % of
   the settable range (`snapped`).
@@ -611,6 +626,13 @@ The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
   - `low`: anything less.
   - `none`: fewer than 3 adverts, or no interval seen twice. `interval_s`
     is then `null`.
+- **Status.** `estimated` when `interval_s` is set, `none_observed` with no
+  adverts of the class, `too_few` under 3 adverts, `irregular` otherwise.
+  The UI words the row from it.
+- **Known limitation: sparse coverage.** When the interval itself is never
+  heard twice in a row (a distant node heard every second or third time),
+  it is no candidate, and a multiple of it is reported: a 47 h flood heard
+  94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
 - **No zero-hop adverts.** A zero-hop advert is only recorded when an
   observer hears the node directly. "None observed" can therefore mean that
   the interval is 0 (off), or that no observer is in direct range.
