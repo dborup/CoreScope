@@ -2,8 +2,11 @@
  * E2E (#1224): Channels page mobile UX overhaul.
  *
  * At 375x800 viewport the channels page must:
- *  - Render a header strip above the channel list ≤60px tall (page title +
- *    Add chip + region filter chip + analytics overflow) in ONE row.
+ *  - Render a compact header strip above the channel list: at most two rows
+ *    (title + Add chip, then the region filter; ≤120px since #235 made the
+ *    controls 48px), with every control inside the strip and the list
+ *    starting below it. The strip used to be capped at 56px, which kept it
+ *    under the old ≤60px bound while the list was drawn over the pills.
  *  - Render "+ Add Channel" as a compact chip — NOT a full-width hero (the
  *    add control must be narrower than 65% of the sidebar width).
  *  - Render channel rows where the channel name has computed-width > 150px
@@ -44,15 +47,23 @@ async function run() {
   }, { timeout: 15000 });
   await page.waitForTimeout(300);
 
-  await step('header strip above channel list is \u226460px tall on mobile', async () => {
-    const headerH = await page.evaluate(() => {
+  await step('header strip is \u2264120px, holds all its controls, and the list starts below it', async () => {
+    const r = await page.evaluate(() => {
       const sidebar = document.querySelector('.ch-sidebar');
       const header = sidebar && sidebar.querySelector('.ch-sidebar-header');
       if (!header) return null;
-      return Math.round(header.getBoundingClientRect().height);
+      const h = header.getBoundingClientRect();
+      const listTop = document.getElementById('chList').getBoundingClientRect().top;
+      const outside = [...header.querySelectorAll('.ch-sidebar-title, button')]
+        .map((e) => ({ name: e.id || String(e.className).split(' ')[0] || e.tagName, b: e.getBoundingClientRect() }))
+        .filter((c) => c.b.width > 0 && (c.b.top < h.top - 0.5 || c.b.bottom > h.bottom + 0.5 || c.b.left < h.left - 0.5 || c.b.right > h.right + 0.5))
+        .map((c) => c.name + ' ' + Math.round(c.b.top) + '-' + Math.round(c.b.bottom));
+      return { height: Math.round(h.height), top: Math.round(h.top), bottom: Math.round(h.bottom), listTop: Math.round(listTop), outside };
     });
-    assert(headerH !== null, 'sidebar header not found');
-    assert(headerH <= 60, 'sidebar header must be \u226460px on mobile, got ' + headerH + 'px');
+    assert(r !== null, 'sidebar header not found');
+    assert(r.height <= 120, 'sidebar header must be \u2264120px on mobile, got ' + r.height + 'px');
+    assert(r.outside.length === 0, 'controls stick out of the header (' + r.top + '-' + r.bottom + '): ' + r.outside.join(', '));
+    assert(r.listTop >= r.bottom - 0.5, 'channel list starts at ' + r.listTop + 'px, above the header bottom ' + r.bottom + 'px');
   });
 
   await step('"+ Add Channel" is a compact chip, not full-width hero', async () => {
