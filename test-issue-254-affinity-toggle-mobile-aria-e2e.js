@@ -13,8 +13,9 @@
  *    the "Seed grouped-packet row for #1486" step in deploy.yml):
  *    - 1400 px: the #189 toggle, data-action="toggle-select" with aria-expanded;
  *    - 390 px (touch): mobile-page-actions.js (#1461 #7) makes activation
- *      select, so the row is select-hash without aria-expanded, and a tap or
- *      Enter opens the detail sheet instead of expanding the group;
+ *      select, so the row is select-hash without aria-expanded, and a tap,
+ *      Enter or Space (#259 item 4) opens the detail sheet instead of
+ *      expanding the group;
  *    - resizing 1400 → 390 → 1400 re-renders the row for each side.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-254-affinity-toggle-mobile-aria-e2e.js
@@ -287,6 +288,22 @@ async function openPackets(page) {
       }, null, { timeout: 8000 });
       const s = await rowState(page);
       assert(s && !s.expanded && s.children === 0, 'Enter did not expand the group: ' + JSON.stringify(s));
+    });
+
+    // #259 (4): the row handler treats Enter and Space the same
+    // (packets.js, the keydown branch); the original #254 E2E only pressed
+    // Enter, so a mutant that dropped Space went unnoticed here.
+    await step('390 px: Space on the focused row selects too, it does not expand', async () => {
+      await page.evaluate(() => { const s = document.getElementById('mobileDetailSheet'); if (s) s.classList.remove('open'); });
+      await page.focus(ROW);
+      await page.keyboard.press('Space');
+      await page.waitForFunction(() => {
+        const s = document.getElementById('mobileDetailSheet');
+        return !!s && s.classList.contains('open');
+      }, null, { timeout: 8000 });
+      const s = await rowState(page);
+      assert(s && !s.expanded && s.children === 0, 'Space did not expand the group: ' + JSON.stringify(s));
+      assert(isMobileRow(s), 'still the mobile row after Space: ' + JSON.stringify(s));
     });
     await ctx.close();
   }
