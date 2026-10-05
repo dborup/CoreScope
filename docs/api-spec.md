@@ -467,10 +467,10 @@ Node detail page data.
 
 | Param     | Type   | Description |
 |-----------|--------|-------------|
-| `include` | string | Opt-in extras, comma-separated (may also repeat). `advertRoutes` adds `recentAdvertsByRoute`, `advertCounts` and `route_class` on the `recentAdverts` ADVERT rows (see [Advert route classes](#advert-route-classes)). Unknown values are ignored. |
+| `include` | string | Opt-in extras, comma-separated (may also repeat). `advertRoutes` adds `recentAdvertsByRoute`, `advertCounts`, `advertIntervals` and `route_class` on the `recentAdverts` ADVERT rows (see [Advert route classes](#advert-route-classes) and [Estimated advert intervals](#estimated-advert-intervals)). Unknown values are ignored. |
 
 Without `include=advertRoutes` the response is exactly the pre-#2073 one:
-no `recentAdvertsByRoute`, no `advertCounts`, no `route_class`. The breakdown
+no `recentAdvertsByRoute`, no `advertCounts`, no `advertIntervals`, no `route_class`. The breakdown
 scans all of the node's ADVERT rows, so only the node page (full view and
 side panel) asks for it; the packets, live, channels and route views and the
 claimed-nodes lookups do not.
@@ -508,7 +508,27 @@ claimed-nodes lookups do not.
     "7d":  { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
     "truncated": boolean,     // more adverts than the 50,000-row cap in the 7d floor
     "route_mask_backfill": { "status": "pending" | "backfilling" | "complete", "remaining": number | null }
+  },
+  "advertIntervals": {        // include=advertRoutes only; absent when the identity is hidden
+    "window": 20,             // most adverts per class considered
+    "flood":    AdvertIntervalEstimate,
+    "zero_hop": AdvertIntervalEstimate
   }
+}
+```
+
+Where `AdvertIntervalEstimate` is:
+
+```jsonc
+{
+  "interval_s":     number | null,  // estimate in seconds, snapped when "snapped"; null when confidence is none
+  "raw_interval_s": number | null,  // the median before snapping
+  "snapped":        boolean,
+  "samples":        number,         // adverts used (after a raised interval: those since the change)
+  "gaps_used":      number,         // gaps between them that fit 1-4x the interval
+  "confidence":     "high" | "medium" | "low" | "none",
+  "status":         "estimated" | "none_observed" | "too_few" | "irregular",
+  "last_advert":    string (ISO) | null  // first_seen of the newest advert in the class
 }
 ```
 
@@ -556,6 +576,68 @@ whether that fallback is still in use (anything but `complete`: provisional).
   is never cached: it is counted on every request (a request that scanned
   the node for the breakdown itself takes the identical number from that
   scan).
+
+#### Estimated advert intervals
+
+`advertIntervals` (#245) estimates how often the node sends flood and
+zero-hop adverts, from the gaps between the adverts listed in
+`recentAdvertsByRoute.flood` and `.zero_hop` (so at most 20 per class, and no
+extra query). Mixed and unknown adverts are not used.
+
+The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
+
+| Class | Setting | Allowed values | Default |
+|-------|---------|----------------|---------|
+| `flood` | `flood.advert.interval` (hours) | 0 = off, 3–168 | 47 h on repeaters and room servers, off on sensors |
+| `zero_hop` | `advert.interval` (minutes, stored / 2) | 0 = off, 60–240, even minutes | 2 min on an untouched new install, off after the first saved setting |
+
+- **Gaps.** A gap is taken from the adverts' own (sender) timestamps
+  when both are plausible: not ahead of `first_seen` by more than 10 min,
+  positive, and within max(10 min, 10 %) of the `first_seen` gap. Otherwise
+  it is taken from `first_seen`. A sender clock that is wrong by a steady
+  offset is still used; a jump or reset is not.
+- **The interval.** It must be seen directly, within 10 %, in at least two
+  gaps and a quarter of them. It must be an interval the class's timer can
+  run at, within 10 %: flood 3 h or more; zero-hop the 2 min new-install
+  default or 60 min or more (so manual `advert.zerohop` every 10–30 min is
+  irregular). Of those candidates, the one that explains the most gaps as
+  1–4× itself wins.
+  - A gap of k× the interval counts as k−1 missed adverts.
+  - Shorter gaps are dropped and count neither way: manual adverts and
+    reboots.
+  - Longer gaps that are no multiple are *irregular* and lower the
+    confidence. One is the zero-hop gap across a flood advert: the flood
+    advert re-arms the zero-hop timer, so that gap is between one and two
+    zero-hop intervals.
+- **A raised interval.** A new interval of 2–4× the old one fits every new
+  gap as missed adverts of the old one. When the newest 3 gaps that fit the
+  interval are all the same multiple k > 1, that is read as a raised
+  setting: the estimate is redone on the adverts since the newest gap at the
+  old interval, and `samples` counts those. Two in a row, or different
+  multiples, stay missed adverts. A lowered interval needs no special case:
+  the new one explains the old gaps as multiples once it is seen in a
+  quarter of the gaps.
+- **The value.** It is the median of gap/k over the fitting gaps (`raw_interval_s`).
+  It is snapped to the nearest settable value when it lies within 10 % of
+  the settable range (`snapped`).
+- **Confidence.**
+  - `high`: ≥ 6 fitting gaps, and ≥ 75 % of the gaps that are not short fit.
+  - `medium`: ≥ 3 fitting gaps and ≥ 50 %.
+  - `low`: anything less.
+  - `none`: fewer than 3 adverts, or no interval seen twice. `interval_s`
+    is then `null`.
+- **Status.** `estimated` when `interval_s` is set, `none_observed` with no
+  adverts of the class, `too_few` under 3 adverts, `irregular` otherwise.
+  The UI words the row from it.
+- **Known limitation: sparse coverage.** When the interval itself is never
+  heard twice in a row (a distant node heard every second or third time),
+  it is no candidate, and a multiple of it is reported: a 47 h flood heard
+  94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
+- **No zero-hop adverts.** A zero-hop advert is only recorded when an
+  observer hears the node directly. "None observed" can therefore mean that
+  the interval is 0 (off), or that no observer is in direct range.
+- **Visibility and caching.** The field is cached and hidden together with
+  `recentAdvertsByRoute`.
 
 ### Response `404`
 

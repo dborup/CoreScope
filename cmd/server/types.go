@@ -860,6 +860,8 @@ type NodeDetailResponse struct {
 	// #2073: omitted when the identity is hidden (identityHidden, #68).
 	RecentAdvertsByRoute *NodeAdvertsByRoute `json:"recentAdvertsByRoute,omitempty"`
 	AdvertCounts         *NodeAdvertCounts   `json:"advertCounts,omitempty"`
+	// #245: estimated flood / zero-hop advert intervals, same opt-in.
+	AdvertIntervals *NodeAdvertIntervals `json:"advertIntervals,omitempty"`
 }
 
 // NodeAdvertRow is one transmission row on node detail: the /api/packets
