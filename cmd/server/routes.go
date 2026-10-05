@@ -2023,6 +2023,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		if res, err := s.nodeAdvertRoutes(pubkey, time.Now()); err == nil {
 			resp.RecentAdvertsByRoute = &res.byRoute
 			resp.AdvertCounts = &res.counts
+			resp.AdvertIntervals = &res.intervals
 			floodFromScan = res.floodAdvertCount7d
 		} else {
 			log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, err)
@@ -3316,7 +3317,13 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 				channels = append(channels[:len(channels):len(channels)], encrypted...)
 			}
 		}
-		writeJSON(w, ChannelListResponse{Channels: channels, ApprovedChannels: s.channelProposals().approvedChannels(r.Context())})
+		// #251: a revoked shared channel leaves the list; its messages stay
+		// stored and readable. Without a database there are no proposals, so
+		// the in-memory branch below has nothing to hide.
+		props := s.channelProposals()
+		resp := ChannelListResponse{Channels: channels, ApprovedChannels: props.approvedChannels(r.Context())}
+		props.hideRevoked(r.Context(), &resp)
+		writeJSON(w, resp)
 		return
 	}
 	if s.store != nil {

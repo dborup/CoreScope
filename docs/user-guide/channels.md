@@ -85,10 +85,12 @@ An administrator can undo a previous approval from the same **Pending / Approved
 Removing a channel:
 
 - Stops the ingestor from decrypting new traffic on it (unless it is a [built-in name](#built-in-names) — in the rainbow table or configured via `channelKeys`/`hashChannels` in `config.json` — in which case that key keeps working; see [Configuration](configuration.md#channel-decryption)).
-- Takes it out of everyone's **Network** section going forward.
-- Does **not** delete or hide any messages that were already decoded and shown while it was approved — those stay on the Channels page exactly as before. Revoking only affects future traffic.
+- Takes it out of everyone's **Network** section and out of the channel list, even if messages were already decoded while it was approved. The channel page reloads its list when it opens, when you change the region or the encrypted toggle, and in the tab where the administrator removed the channel; there is no periodic reload. Another tab that has the channel open keeps showing it until its list reloads (for example after a page reload), and a conversation open on it closes then.
+- Does **not** delete any message that was already decoded — the history stays stored and comes back with the channel if the name is approved again. A [built-in name](#built-in-names) is never hidden, because its key keeps decrypting.
 
-A removed channel shows up under the **Revoked** tab. Suggesting the same name again later starts a fresh review from **Pending** — it is never auto-approved just because it was approved before.
+Letter case matters: `#HelloWorld` and `#helloworld` are different channels with different keys, so they are separate suggestions. When a suggestion differs from another one (or from a built-in name) only by case, the review dialog says "Same name in different case" so the administrator can decide.
+
+A removed channel shows up under the **Revoked** tab. Suggesting the same name again later starts a fresh review from **Pending** — it is never auto-approved just because it was approved before. The channel stays out of the list while that suggestion is pending and if you reject it; only **Approve** lists it again, with its history. The analytics page still counts messages of removed channels (counts only, no text), and a removed channel's history stays readable by its name.
 
 The local **Add Channel** tools (PSK channels, **Monitor Hashtag Channel**) are unchanged and still only affect your browser.
 

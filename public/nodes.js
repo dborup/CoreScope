@@ -942,7 +942,7 @@
         </table>
 
         <div class="node-full-card" id="node-packets">
-          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts }, {
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts, advertIntervals: nodeData.advertIntervals }, {
             variant: 'full', idPrefix: 'nodeFullAdverts', tab: NodeAdverts.parseTab(location.hash),
             timestampHtml: renderNodeTimestampHtml, hashSizeInconsistent: !!n.hash_size_inconsistent,
           })}
@@ -1975,7 +1975,7 @@
         </div>
 
         <div class="node-detail-section" id="node-pane-adverts">
-          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts }, {
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts, advertIntervals: data.advertIntervals }, {
             variant: 'pane', idPrefix: 'nodePaneAdverts', tab: NodeAdverts.parseTab(location.hash),
             timestampHtml: renderNodeTimestampHtml, roleColor: roleColor,
           })}
