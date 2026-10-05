@@ -276,9 +276,10 @@ func TestRevokedSetIsServedFromTheSnapshot(t *testing.T) {
 func TestVisibleChannelsIsNoOpWithoutRevokedNames(t *testing.T) {
 	ps := newRevokeFixture(t)
 	in := []map[string]interface{}{{"name": "#a"}, {"name": "#b"}}
-	out := ps.svc.visibleChannels(context.Background(), in)
-	if !reflect.DeepEqual(in, out) || &in[0] != &out[0] {
-		t.Fatalf("expected the same slice back, got %v", out)
+	resp := ChannelListResponse{Channels: in}
+	ps.svc.hideRevoked(context.Background(), &resp)
+	if !reflect.DeepEqual(in, resp.Channels) || &in[0] != &resp.Channels[0] {
+		t.Fatalf("expected the same slice back, got %v", resp.Channels)
 	}
 }
 
@@ -378,8 +379,10 @@ func BenchmarkVisibleChannels(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if out := p.visibleChannels(ctx, chans); len(out) != 4999 {
-			b.Fatalf("len = %d", len(out))
+		resp := ChannelListResponse{Channels: chans}
+		p.hideRevoked(ctx, &resp)
+		if len(resp.Channels) != 4999 {
+			b.Fatalf("len = %d", len(resp.Channels))
 		}
 	}
 }

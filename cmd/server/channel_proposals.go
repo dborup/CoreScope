@@ -274,24 +274,27 @@ func (p *channelProposalService) hiddenNames(approved, revoked []string) map[str
 	return hidden
 }
 
-// visibleChannels drops the channels whose proposal was revoked (#251). The
-// messages stay in the database and readable per channel; only the list
+// hideRevoked drops the channels whose proposal was revoked from resp (#251).
+// The messages stay in the database and readable per channel; only the list
 // leaves them out, and the list returns when the proposal is approved again.
-// With nothing revoked the input is returned as is; otherwise a new slice is
-// built, because chans is a cache's slice that must not be modified. O(len).
-func (p *channelProposalService) visibleChannels(ctx context.Context, chans []map[string]interface{}) []map[string]interface{} {
+// With nothing revoked resp is left as is; otherwise resp.Channels becomes a
+// filtered copy, because the slice it came in with is a cache's and must not
+// be modified. O(len).
+func (p *channelProposalService) hideRevoked(ctx context.Context, resp *ChannelListResponse) {
 	snap := p.snapshot(ctx)
 	if snap == nil || len(snap.hidden) == 0 {
-		return chans
+		return
 	}
-	out := make([]map[string]interface{}, 0, len(chans))
-	for _, ch := range chans {
+	out := append(resp.Channels[:0:0], resp.Channels...) // copy, then compact in place
+	kept := 0
+	for _, ch := range out {
 		if name, _ := ch["name"].(string); snap.hidden[name] {
 			continue
 		}
-		out = append(out, ch)
+		out[kept] = ch
+		kept++
 	}
-	return out
+	resp.Channels = out[:kept]
 }
 
 // approvedChannels returns the approved channels for GET /api/channels from a

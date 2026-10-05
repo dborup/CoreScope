@@ -3320,7 +3320,9 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		// stored and readable. Without a database there are no proposals, so
 		// the in-memory branch below has nothing to hide.
 		props := s.channelProposals()
-		writeJSON(w, ChannelListResponse{Channels: props.visibleChannels(r.Context(), channels), ApprovedChannels: props.approvedChannels(r.Context())})
+		resp := ChannelListResponse{Channels: channels, ApprovedChannels: props.approvedChannels(r.Context())}
+		props.hideRevoked(r.Context(), &resp)
+		writeJSON(w, resp)
 		return
 	}
 	if s.store != nil {
