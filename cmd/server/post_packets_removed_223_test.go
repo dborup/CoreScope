@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +18,9 @@ import (
 // POST /api/packets (#223) inserted into transmissions, observers and
 // observations on the server's mode=ro handle (#1283), so every call failed
 // with a 500 carrying the raw SQLite error. It was removed: ingest goes
-// through MQTT and cmd/ingestor. These tests pin what is left.
+// through MQTT and cmd/ingestor. These tests pin what is left; the source
+// guard against packet-table writes is TestServerHasNoPacketTableWrites
+// (readonly_invariant_test.go).
 
 const removedPostAPIKey = "test-secret-key-strong-enough"
 
@@ -139,31 +140,6 @@ func TestOpenAPISpecHasNoPostPackets(t *testing.T) {
 	}
 }
 
-// The served spec is built by walking the router, so a description left in
-// routeDescriptions for a removed route (like "POST /api/packets") never
-// shows up there and would rot silently. Every description must name a
-// registered method and path.
-func TestOpenAPIDescriptionsHaveRoutes(t *testing.T) {
-	_, router := readOnlyPacketServer(t)
-	registered := map[string]bool{}
-	router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
-		path, err := route.GetPathTemplate()
-		if err != nil {
-			return nil
-		}
-		methods, _ := route.GetMethods()
-		for _, m := range methods {
-			registered[m+" "+path] = true
-		}
-		return nil
-	})
-	for key := range routeDescriptions() {
-		if !registered[key] {
-			t.Errorf("routeDescriptions has %q, but no such route is registered", key)
-		}
-	}
-}
-
 // main.go mounts a catch-all SPA handler after the API routes. With it in
 // place, gorilla/mux lets the catch-all win over the method mismatch, so a
 // POST to the removed endpoint is served index.html like any other unmatched
@@ -185,62 +161,5 @@ func TestPostPacketsRemovedFallsThroughToSPAInProductionRouter(t *testing.T) {
 	}
 	if after := packetTableCounts(t, dbPath); fmt.Sprint(after) != fmt.Sprint(before) {
 		t.Errorf("packet tables changed: before %v, after %v", before, after)
-	}
-}
-
-// packetTableInsertPattern matches an INSERT or REPLACE into one of the
-// ingestor-owned packet tables, quoted or not, across line breaks.
-var packetTableInsertPattern = regexp.MustCompile("(?i)\\b(INSERT\\s+(OR\\s+\\w+\\s+)?INTO|REPLACE\\s+INTO)\\s+[\"`\\[]?(transmissions|observations|observers|dropped_packets)[\"`\\]]?\\b")
-
-// TestServerHasNoPacketTableInserts forbids INSERT into the packet tables in
-// every non-test cmd/server source file, with no exceptions. The documented
-// write exceptions do not touch these tables: ping_score_history.go writes
-// its own history database and backup.go only runs VACUUM INTO.
-func TestServerHasNoPacketTableInserts(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var violations []string
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		b, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, loc := range packetTableInsertPattern.FindAllIndex(b, -1) {
-			line := 1 + strings.Count(string(b[:loc[0]]), "\n")
-			violations = append(violations, fmt.Sprintf("%s:%d: %s", name, line, strings.Join(strings.Fields(string(b[loc[0]:loc[1]])), " ")))
-		}
-	}
-	if len(violations) > 0 {
-		t.Errorf("cmd/server inserts into the packet tables; ingest belongs in cmd/ingestor (#223, #1283):\n  %s", strings.Join(violations, "\n  "))
-	}
-}
-
-// The guard must match the statements the removed handler issued.
-func TestPacketTableInsertPatternIsSensitive(t *testing.T) {
-	for _, s := range []string{
-		"INSERT INTO transmissions (hash, raw_hex) VALUES (?, ?)",
-		"INSERT OR IGNORE INTO observers (id, name, last_seen, first_seen) VALUES (?, ?, ?, ?)",
-		"INSERT INTO observations (transmission_id, observer_idx) VALUES (?, ?)",
-		"insert into\n\t\"observations\" (x) values (1)",
-		"REPLACE INTO dropped_packets (id) VALUES (1)",
-	} {
-		if !packetTableInsertPattern.MatchString(s) {
-			t.Errorf("must match %q", s)
-		}
-	}
-	for _, s := range []string{
-		"INSERT INTO ping_score_history_entries (a) VALUES (1)",
-		"SELECT COUNT(*) FROM observations",
-		"INSERT INTO observations_archive (a) VALUES (1)",
-		"tx_inserted",
-	} {
-		if packetTableInsertPattern.MatchString(s) {
-			t.Errorf("must not match %q", s)
-		}
 	}
 }

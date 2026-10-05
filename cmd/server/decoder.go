@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -718,15 +717,6 @@ func ComputeContentHash(rawHex string) string {
 
 	h := sha256.Sum256(toHash)
 	return hex.EncodeToString(h[:])[:16]
-}
-
-// PayloadJSON serializes the payload to JSON for DB storage.
-func PayloadJSON(p *Payload) string {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
 }
 
 // ValidateAdvert checks decoded advert data before DB insertion.
