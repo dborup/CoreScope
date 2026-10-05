@@ -5,7 +5,7 @@ package meshcore.v1;
 option go_package = "github.com/corescope/proto/v1";
 
 // ─── Decoded Packet Structure ──────────────────────────────────────────────────
-// Returned by POST /api/decode, POST /api/packets, and WS broadcast.
+// Returned by POST /api/decode and WS broadcast.
 // See firmware source (firmware/docs/packet_format.md) for authoritative format.
 
 // Full decoded result: header + path + payload.
