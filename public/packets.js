@@ -715,8 +715,11 @@
   function _hashStripeStyle(hash) { return _isColorByHash() && hash && window.HashColor ? 'border-left:4px solid ' + HashColor.hashToHsl(hash, _currentTheme()) + ';' : ''; }
   let groupByHash = true;
   let filters = {};
-  { const o = localStorage.getItem('meshcore-observer-filter'); if (o) filters.observer = o;
-    const t = localStorage.getItem('meshcore-type-filter'); if (t) filters.type = t; }
+  // Storage can throw (blocked, private mode); the filters then start empty.
+  try {
+    const o = localStorage.getItem('meshcore-observer-filter'); if (o) filters.observer = o;
+    const t = localStorage.getItem('meshcore-type-filter'); if (t) filters.type = t;
+  } catch (e) { /* storage unavailable */ }
   // #96 — opt-in "Hide CONTROL packets" display filter, unchecked by default.
   // Display only: CONTROL packets are still fetched and kept (also live ones),
   // so unchecking shows them again without a reload, and a pinned hash (a
@@ -730,11 +733,40 @@
     if (urlValue === '0') return false;
     return stored === '1';
   }
+  // The saved choice, or null when storage throws (blocked, private mode).
+  function readStoredHideControl() {
+    try { return localStorage.getItem(HIDE_CONTROL_KEY); } catch (e) { return null; }
+  }
+  // Saves the choice; false when storage throws (quota, blocked). Best effort:
+  // the checkbox still works for this view.
+  function saveHideControlPref(hide) {
+    try { localStorage.setItem(HIDE_CONTROL_KEY, hide ? '1' : '0'); return true; } catch (e) { return false; }
+  }
   // One pass, order kept; the same array when off (no copy on the default path).
   function filterHiddenControl(list, hide) {
     return hide ? list.filter(p => p.payload_type !== PAYLOAD_TYPE_CONTROL) : list;
   }
-  let hideControl = readHideControlPref(null, localStorage.getItem(HIDE_CONTROL_KEY));
+  // Whether hiding CONTROL is what emptied the list: some CONTROL packet from
+  // before the CONTROL pass gets through the filters after it (laterFilters).
+  // Called only for an empty list, and runs the CONTROL packets only.
+  function controlHidingEmptiedList(beforeHide, laterFilters) {
+    const hidden = beforeHide.filter(p => p.payload_type === PAYLOAD_TYPE_CONTROL);
+    return hidden.length > 0 && laterFilters(hidden).length > 0;
+  }
+  // The checkbox's change: re-filters the loaded packets, no new request. The
+  // save comes first but cannot stop the filter or the URL update (#211).
+  function setHideControl(hide) {
+    hideControl = hide;
+    if (saveHideControlPref(hide)) savedHideControl = hide;
+    updatePacketsUrl();
+    renderTableRows();
+  }
+  // hideControl is what this view shows; savedHideControl is the saved choice
+  // as far as this page knows (it changes only when a save succeeds).
+  // buildPacketsQuery reads both, so a test sandbox that extracts it must
+  // declare both (test-issue-121/147-…, test-issue-96-hide-control.js).
+  let savedHideControl = readHideControlPref(null, readStoredHideControl());
+  let hideControl = savedHideControl;
   let wsHandler = null;
   let packetsPaused = false;
   let pauseBuffer = [];
@@ -797,7 +829,11 @@
     if (filters.observer) parts.push('observer=' + encodeURIComponent(filters.observer));
     if (filters.channel) parts.push('channel=' + encodeURIComponent(filters.channel));
     if (filters._filterExpr) parts.push('filter=' + encodeURIComponent(filters._filterExpr));
-    if (hideControl) parts.push('hideControl=1'); // #96; off (default) is omitted
+    // #96: hideControl=1 while on. Off is the default and is omitted, except
+    // while the saved choice is on: an explicit hideControl=0 then stays, so a
+    // reload of this URL still shows CONTROL (#211).
+    if (hideControl) parts.push('hideControl=1');
+    else if (savedHideControl) parts.push('hideControl=0');
     // Sort state (#749) — encode as 'col[:asc]'; default 'time:desc' is omitted.
     if (_packetSortColumn) {
       var sortDefault = _packetSortColumn === 'time' && _packetSortDirection === 'desc';
@@ -1220,7 +1256,9 @@
     if (_urlFilterExpr) filters._filterExpr = _urlFilterExpr;
     // #96 — ?hideControl=1|0 wins over the saved choice for this view; only
     // the checkbox changes the saved choice.
-    hideControl = readHideControlPref(_initUrlParams.get('hideControl'), localStorage.getItem(HIDE_CONTROL_KEY));
+    var _storedHideControl = readStoredHideControl();
+    savedHideControl = readHideControlPref(null, _storedHideControl);
+    hideControl = readHideControlPref(_initUrlParams.get('hideControl'), _storedHideControl);
     // #749 — restore sort state from URL (overrides localStorage).
     var _urlSort = _initUrlParams.get('sort');
     if (_urlSort && window.URLState) {
@@ -2089,12 +2127,7 @@
       loadPackets();
     });
     // #96 — re-filters the loaded packets; no new request.
-    document.getElementById('fHideControl').addEventListener('change', function () {
-      hideControl = this.checked;
-      localStorage.setItem(HIDE_CONTROL_KEY, hideControl ? '1' : '0');
-      updatePacketsUrl();
-      renderTableRows();
-    });
+    document.getElementById('fHideControl').addEventListener('change', function () { setHideControl(this.checked); });
 
     // Observation sort dropdown
     const obsSortSel = document.getElementById('fObsSort');
@@ -3011,9 +3044,9 @@
       displayPackets = displayPackets.filter(p => types.includes(p.payload_type));
     }
     // #96 — Hide CONTROL packets (display only; a pinned hash bypasses it).
-    const beforeHideControl = displayPackets.length;
+    const beforeHideControl = displayPackets;
     if (!hashOnly) displayPackets = filterHiddenControl(displayPackets, hideControl);
-    const controlHidden = displayPackets.length < beforeHideControl;
+    const controlHidden = displayPackets.length < beforeHideControl.length;
     displayPackets = applyObserverFilter(displayPackets, filters, groupByHash, hashOnly);
 
     // Packet Filter Language
@@ -3041,7 +3074,13 @@
       _lastVisibleEnd = -1;
       detachVScrollListener();
       const colCount = _getColCount();
-      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : controlHidden ? 'No packets found (CONTROL packets are hidden)' : 'No packets found') + '</td></tr>';
+      // #211: name CONTROL only when hiding it emptied the list, i.e. a CONTROL
+      // packet would get through the filters below the CONTROL pass.
+      const emptiedByControl = controlHidden && controlHidingEmptiedList(beforeHideControl, (list) => {
+        list = applyObserverFilter(list, filters, groupByHash, hashOnly);
+        return filters._packetFilter ? list.filter(filters._packetFilter) : list;
+      });
+      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : emptiedByControl ? 'No packets found (CONTROL packets are hidden)' : 'No packets found') + '</td></tr>';
       // Restore scroll position after DOM rebuild (#431)
       if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
       return;
