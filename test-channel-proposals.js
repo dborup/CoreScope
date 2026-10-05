@@ -869,6 +869,55 @@ test('admin dialog: the Remove confirmation shows a markup name as text and warn
   assert.match(confirmDlg.textContent, /keeps decrypting it through its built-in channel list/);
 });
 
+// ── #251: a revoked channel leaves the channel list ──────────────────────
+test('renderAdminRow shows case near-duplicates as escaped text and omits the note otherwise (#251)', () => {
+  const html = CP.renderAdminRow({ id: 'aaaaaaaaaaaaaaaa', name: '#HelloWorld', status: 'pending', createdAt: 1,
+    nearDuplicateOf: ['#helloworld', '#<b>x</b>'] });
+  assert.match(html, /class="ch-proposals-neardup"/);
+  assert.match(html, /Same name in different case: #helloworld, #&lt;b&gt;x&lt;\/b&gt;/);
+  assert.ok(!/<b>x/.test(html), 'a near-duplicate name must be escaped');
+  for (const none of [undefined, [], null, [42, '']]) {
+    const plain = CP.renderAdminRow({ id: 'bbbbbbbbbbbbbbbb', name: '#Mine', status: 'pending', createdAt: 1, nearDuplicateOf: none });
+    assert.ok(!/ch-proposals-neardup/.test(plain), 'no note without a near-duplicate: ' + JSON.stringify(none));
+  }
+});
+
+// Revoking from the admin dialog refreshes the channel list (the server now
+// leaves a revoked channel out of it); approve and reject do not.
+async function decideAndCollect(op, resultStatus) {
+  const revoked = [];
+  const env = loadWithDom((url) => {
+    if (/\/(approve|reject|revoke)$/.test(url)) return { status: 202, body: { requestId: '0123456789abcdef' } };
+    if (/\/requests\//.test(url)) return { status: 200, body: { status: resultStatus, proposal: { id: 'bbbbbbbbbbbbbbbb', name: '#Shared', status: resultStatus, reviewedAt: 9 } } };
+    return { status: 200, body: { proposals: [{ id: 'bbbbbbbbbbbbbbbb', name: '#Shared', status: op === 'revoke' ? 'approved' : 'pending', createdAt: 1, reviewedAt: 2 }], enabled: true } };
+  }, fastTimers);
+  env.CP.mount({ root: env.document.body, onRevoked: (name) => revoked.push(name) });
+  env.CP.openAdmin();
+  env.document.getElementById('chProposalsKey').value = 'strong-enough-admin-key-012345';
+  const overlay = env.document.getElementById('chProposalsAdmin');
+  overlay._listeners.submit[0]({ target: env.document.getElementById('chProposalsKeyForm'), preventDefault() {} });
+  await flush();
+  const btn = env.document.getElementById('chProposalsList').querySelector('[data-proposals-decide="' + op + '"]');
+  env.document.activeElement = btn;
+  overlay._listeners.click[0]({ target: btn, preventDefault() {} });
+  if (op === 'revoke') {
+    const confirmBtn = env.document.getElementById('chProposalsConfirm').querySelectorAll('button')[1];
+    overlay._listeners.click[0]({ target: confirmBtn, preventDefault() {} });
+  }
+  await flush();
+  await flush();
+  return revoked;
+}
+
+test('admin revoke calls onRevoked once with the channel name (#251)', async () => {
+  assert.deepStrictEqual(await decideAndCollect('revoke', 'revoked'), ['#Shared']);
+});
+
+test('admin approve and reject do not call onRevoked (#251)', async () => {
+  assert.deepStrictEqual(await decideAndCollect('approve', 'approved'), []);
+  assert.deepStrictEqual(await decideAndCollect('reject', 'rejected'), []);
+});
+
 (async () => {
   for (const t of tests) {
     try {

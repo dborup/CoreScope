@@ -162,6 +162,83 @@ test('escaping: node-controlled text never reaches the HTML raw', () => {
   assert.ok(html.includes('&lt;script&gt;'));
 });
 
+// #245: estimated flood / zero-hop advert intervals under the counts.
+const est = (over) => Object.assign({ interval_s: null, raw_interval_s: null, snapped: false, samples: 0, gaps_used: 0, confidence: 'none', status: 'none_observed', last_advert: null },
+  over && over.interval_s != null && !('status' in over) ? { status: 'estimated' } : {}, over || {});
+const intervals = (flood, zh) => ({ window: 20, flood: flood, zero_hop: zh });
+function intervalRows(html) {
+  const out = {};
+  const re = /<span class="node-adverts-interval-row" data-advert-interval="([a-z_]+)">([\s\S]*?)<\/span>(?=<span class="node-adverts-interval-row"|<\/div>)/g;
+  let m;
+  while ((m = re.exec(html))) out[m[1]] = m[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  return out;
+}
+
+test('intervals: both classes shown, flood in hours and zero-hop in minutes', () => {
+  const d = detail({ advertIntervals: intervals(
+    est({ interval_s: 43200, raw_interval_s: 43195, snapped: true, samples: 10, gaps_used: 7, confidence: 'high', last_advert: '2026-09-25T10:00:00Z' }),
+    est({ interval_s: 7200, raw_interval_s: 7203, snapped: true, samples: 6, gaps_used: 5, confidence: 'medium', last_advert: '2026-09-25T11:00:00Z' })) });
+  const html = NA.render(d, opts());
+  const rows = intervalRows(html);
+  assert.strictEqual(rows.flood, 'Estimated flood interval ≈ 12 h (10 adverts, high confidence)');
+  assert.strictEqual(rows.zero_hop, 'Estimated zero-hop interval ≈ 120 min (6 adverts, medium confidence)');
+  assert.ok(html.indexOf('node-adverts-intervals') > html.indexOf('node-adverts-counts'), 'below the counts');
+  assert.ok(html.indexOf('node-adverts-intervals') < html.indexOf('node-adverts-tabs'), 'above the tabs');
+  const tip = (html.match(/class="node-adverts-intervals" title="([^"]*)"/) || [])[1] || '';
+  assert.ok(/a gap that repeats/.test(tip), 'tooltip explains the candidate interval: ' + tip);
+  assert.ok(/raised/.test(tip), 'tooltip explains a raised interval: ' + tip);
+  assert.ok(/2 min on an untouched new install/.test(tip), 'tooltip names the 2-minute new-install default: ' + tip);
+  assert.ok(!/median gap is taken/.test(tip), 'no stale median wording');
+  const pane = intervalRows(NA.render(d, opts({ variant: 'pane' })));
+  assert.strictEqual(pane.flood, rows.flood, 'side panel shows the same');
+});
+
+test('intervals: no zero-hop adverts reads as off or out of direct range', () => {
+  const rows = intervalRows(NA.render(detail({ advertIntervals: intervals(
+    est({ interval_s: 169200, snapped: true, samples: 14, gaps_used: 12, confidence: 'high' }), est()) }), opts()));
+  assert.strictEqual(rows.flood, 'Estimated flood interval ≈ 47 h (14 adverts, high confidence)');
+  assert.strictEqual(rows.zero_hop, 'Estimated zero-hop interval: none observed (off, or no observer in direct range)');
+  const noFlood = intervalRows(NA.render(detail({ advertIntervals: intervals(est(), est()) }), opts()));
+  assert.strictEqual(noFlood.flood, 'Estimated flood interval: none observed');
+});
+
+test('intervals: too few, irregular, low confidence, 2-minute default and unsnapped values', () => {
+  const rows = (f, z) => intervalRows(NA.render(detail({ advertIntervals: intervals(f, z) }), opts()));
+  let r = rows(est({ samples: 2, status: 'too_few', last_advert: 'x' }), est({ samples: 1, status: 'too_few', last_advert: 'x' }));
+  assert.strictEqual(r.flood, 'Estimated flood interval: not enough adverts yet (2 heard)');
+  assert.strictEqual(r.zero_hop, 'Estimated zero-hop interval: not enough adverts yet (1 heard)');
+  r = rows(est({ samples: 6, status: 'irregular', last_advert: 'x' }), est({ interval_s: 120, snapped: true, samples: 30, gaps_used: 20, confidence: 'high' }));
+  assert.strictEqual(r.flood, 'Estimated flood interval: irregular (6 adverts, no repeating gap)');
+  assert.strictEqual(r.zero_hop, 'Estimated zero-hop interval ≈ 2 min (30 adverts, high confidence)');
+  r = rows(est({ interval_s: 9000, raw_interval_s: 9000, samples: 3, gaps_used: 2, confidence: 'low' }),
+    est({ interval_s: 3000, raw_interval_s: 3000, samples: 4, gaps_used: 3, confidence: 'medium' }));
+  assert.strictEqual(r.flood, 'Estimated flood interval ≈ 2.5 h (3 adverts, low confidence, outside the settable 3–168 h)');
+  assert.strictEqual(r.zero_hop, 'Estimated zero-hop interval ≈ 50 min (4 adverts, medium confidence, outside the settable 60–240 min)');
+});
+
+test('intervals: the server status decides the wording, not a client-side minimum', () => {
+  const rows = (f, z) => intervalRows(NA.render(detail({ advertIntervals: intervals(f, z) }), opts()));
+  const r = rows(est({ samples: 5, status: 'too_few', last_advert: 'x' }), est({ samples: 2, status: 'irregular', last_advert: 'x' }));
+  assert.strictEqual(r.flood, 'Estimated flood interval: not enough adverts yet (5 heard)');
+  assert.strictEqual(r.zero_hop, 'Estimated zero-hop interval: irregular (2 adverts, no repeating gap)');
+  const unknown = rows(est({ samples: 4, status: 'something-new', last_advert: 'x' }), est({ samples: 0 }));
+  assert.strictEqual(unknown.flood, 'Estimated flood interval: irregular (4 adverts, no repeating gap)', 'an unknown status is no estimate');
+  assert.strictEqual(unknown.zero_hop, 'Estimated zero-hop interval: none observed (off, or no observer in direct range)');
+  const notEstimated = rows(est({ interval_s: 43200, samples: 9, confidence: 'high', status: 'irregular' }), est());
+  assert.strictEqual(notEstimated.flood, 'Estimated flood interval: irregular (9 adverts, no repeating gap)', 'interval_s only counts with status estimated');
+});
+
+test('intervals: absent without the field, values escaped', () => {
+  assert.ok(!NA.render(detail(), opts()).includes('node-adverts-intervals'), 'older server / hidden identity: no block');
+  assert.ok(!NA.render(detail({ advertIntervals: null }), opts()).includes('node-adverts-intervals'));
+  const html = NA.render(detail({ advertIntervals: intervals(
+    est({ interval_s: 43200, snapped: true, samples: '<b>9</b>', gaps_used: 7, confidence: '<svg onload=alert(2)>' }),
+    { interval_s: '<img src=x onerror=alert(1)>', samples: 0, confidence: 'high' }) }), opts());
+  assert.ok(!html.includes('<img src=x') && !html.includes('<svg onload') && !html.includes('<b>9'), 'nothing raw: ' + html);
+  assert.ok(html.includes('&lt;svg onload=alert(2)&gt; confidence'), 'confidence rendered escaped');
+  assert.ok(intervalRows(html).zero_hop.includes('none observed'), 'a non-numeric interval is no estimate');
+});
+
 test('existing badges and signal readouts are kept', () => {
   const r = row(8, 'flood', { observation_count: 3, snr: 7.5, rssi: -91, observer_name: 'ObsA', raw_hex: '11c1' });
   const d = detail({ recentAdverts: [r] });

@@ -121,6 +121,16 @@ const PAD_SELECTORS = [
     '<button class="region-dropdown-trigger" data-pad="live-region">x</button></div></div>'],
 ];
 
+// #249: the add-channel dialog's primary buttons, in their real dialog rows
+// (from channels.js) next to their 48 px inputs, with their real labels.
+// Entry: [id, row classes, row markup before the button, label].
+const DIALOG_BUTTONS = [
+  ['chGenerateBtn', 'ch-modal-row', '<input type="text" class="ch-modal-input">', 'Generate &amp; Show QR'],
+  ['chPskAddBtn', 'ch-modal-row', '<input type="text" class="ch-modal-input">', 'Add'],
+  ['chHashtagBtn', 'ch-modal-row ch-hashtag-row',
+    '<span class="ch-hashtag-prefix" aria-hidden="true">#</span><input type="text" class="ch-modal-input">', 'Monitor'],
+];
+
 function wrap(wrapper, html) {
   return wrapper ? wrapper.replace('{}', html) : html;
 }
@@ -140,6 +150,10 @@ function buildSampleHtml() {
     })
     .join('\n      ');
   const pads = PAD_SELECTORS.map(([, html]) => html).join('\n      ');
+  const dialog = '<div class="modal ch-modal" role="document">' + DIALOG_BUTTONS
+    .map(([id, rowCls, before, label]) => `<section class="ch-modal-section"><div class="${rowCls}">${before}` +
+      `<button type="button" id="${id}" class="btn-primary">${label}</button></div></section>`)
+    .join('') + '</div>';
 
   // .sort-help sample mirrors the markup the JS produces (post-fix):
   // tabindex="0" so :focus-within can fire on touch tap.
@@ -153,6 +167,7 @@ function buildSampleHtml() {
     ${buttons}
     ${fields}
     ${pads}
+    ${dialog}
     <span class="sort-help" id="sortHelp" tabindex="0" role="button" aria-label="Sort help">ⓘ
       <span class="sort-help-tip">Tip body</span>
     </span>
@@ -239,6 +254,27 @@ async function run() {
     record(`${name}: tap pad ${dim.w.toFixed(1)}x${dim.h.toFixed(1)}`,
            dim.w >= DEFAULT_MIN && dim.h >= DEFAULT_MIN,
            `expected >=${DEFAULT_MIN}x${DEFAULT_MIN}, got ${dim.w}x${dim.h}`);
+  }
+
+  // #249: each dialog button is at least 48 px tall, centres its label and
+  // stays inside the dialog.
+  for (const [id] of DIALOG_BUTTONS) {
+    const d = await page.$eval('#' + id, (el) => {
+      const b = el.getBoundingClientRect();
+      const m = el.closest('.ch-modal').getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const t = range.getBoundingClientRect();
+      return {
+        w: b.width, h: b.height,
+        dx: (t.left + t.width / 2) - (b.left + b.width / 2),
+        dy: (t.top + t.height / 2) - (b.top + b.height / 2),
+        inside: b.left >= m.left && b.right <= m.right,
+      };
+    });
+    record(`#${id} (add-channel dialog): rendered ${d.w.toFixed(1)}x${d.h.toFixed(1)}, label offset ${d.dx.toFixed(1)}/${d.dy.toFixed(1)}`,
+           d.w >= DEFAULT_MIN && d.h >= DEFAULT_MIN && Math.abs(d.dx) <= 1 && Math.abs(d.dy) <= 1 && d.inside,
+           `expected >=${DEFAULT_MIN}x${DEFAULT_MIN}, label centred within 1px and inside the dialog, got ${JSON.stringify(d)}`);
   }
 
   // #239 F2: the hit area keeps the text cursor it had as an inline style
