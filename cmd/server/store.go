@@ -310,6 +310,10 @@ type PacketStore struct {
 	// indexReadyCh / maybeCloseIndexReadyCh in index_ready_1008.go.
 	indexReadyChMu sync.Mutex
 	indexReadyChan chan struct{}
+	// subpathBuildGate, nil in production, runs at the start of the
+	// background subpath index build that Load() starts. A test sets it
+	// before Load() to hold the not-ready window open (#227).
+	subpathBuildGate func()
 	// Precomputed distance analytics: hop distances and path totals.
 	// Built LAZILY on first /api/analytics/distance request (#1011) —
 	// previously eager in Load() at startup, which was O(n²) work for
@@ -430,6 +434,15 @@ type PacketStore struct {
 	// transmission: evictStaleInternal deletes evicted entries and
 	// retainResolvedPathHops drops anything no longer in s.packets.
 	pathHopResolved map[*StoreTx][]uint64
+
+	// fallbackByNode records, per transmission, the relay pubkeys the
+	// path_json fallback (indexObservationRelayHops) put it under in byNode
+	// and nodeHashes, and nothing else. Without a persisted resolved_path
+	// there is no other record of them, so eviction reads them here to remove
+	// the entries and to credit what addFallbackRelay charged (#202). At most
+	// one entry per (relay, live transmission): evictStaleInternal deletes
+	// evicted transmissions' records.
+	fallbackByNode map[*StoreTx][]string
 
 	// Precomputed distinct advert pubkey count (refcounted for eviction correctness).
 	// Updated incrementally during Load/Ingest/Evict — avoids JSON parsing in GetPerfStoreStats.
@@ -774,6 +787,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		spTxIndex:            make(map[string][]*StoreTx, 4096),
 		advertPubkeys:        make(map[string]int),
 		pathHopResolved:      make(map[*StoreTx][]uint64),
+		fallbackByNode:       make(map[*StoreTx][]string),
 		clockSkew:            NewClockSkewEngine(),
 		useResolvedPathIndex: true,
 		areaNodeCache:        make(map[string]map[string]bool),
@@ -1542,7 +1556,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			// nodes keep their analytics history across a restart without
 			// polluting the resolved_path/path-hop indexes (#1352).
 			for _, pk := range localByNodePKsByTx[tx.ID] {
-				s.addToByNode(tx, pk)
+				s.addFallbackRelay(tx, pk)
 			}
 		}
 		s.mu.Unlock()
@@ -1870,10 +1884,22 @@ func resolvedRelayBytes(n int) int64 {
 	return perResolvedRecordBytes + int64(n)*perResolvedRelayBytes
 }
 
+// fallbackRelayBytes is the memory a tx holds for n relays the path_json
+// fallback indexed it under (#202): per relay a byNode slot, a nodeHashes
+// entry and the pubkey in the record, plus the fallbackByNode map entry once.
+// Like resolvedRelayBytes it is a function of n alone, so eviction re-derives
+// the charge from len(s.fallbackByNode[tx]).
+func fallbackRelayBytes(n int) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return perFallbackRecordBytes + int64(n)*perFallbackRelayBytes
+}
+
 // txChargedBytes is everything trackedBytes currently holds for tx, observations
 // excluded. Must be called with s.mu held.
 func (s *PacketStore) txChargedBytes(tx *StoreTx) int64 {
-	return int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx]))
+	return int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx])) + fallbackRelayBytes(len(s.fallbackByNode[tx]))
 }
 
 func pathLen(pathJSON string) int {
@@ -2000,7 +2026,7 @@ func (s *PacketStore) indexObservationRelayHops(tx *StoreTx, persisted persisted
 		return
 	}
 	for _, pk := range extractResolvedPubkeys(resolvePathForObsColdLoad(pathJSON, observerID, tx, relayPM, skipped)) {
-		s.addToByNode(tx, pk)
+		s.addFallbackRelay(tx, pk)
 	}
 }
 
@@ -2033,16 +2059,39 @@ func (s *PacketStore) indexByNode(tx *StoreTx) bool {
 // addToByNode adds tx to byNode[pubkey] with dedup via nodeHashes.
 // Returns true if this is a genuinely new node (pubkey not seen before).
 func (s *PacketStore) addToByNode(tx *StoreTx, pubkey string) bool {
-	isNew := s.nodeHashes[pubkey] == nil
+	isNew, _ := s.indexByNodeKey(tx, pubkey)
+	return isNew
+}
+
+// indexByNodeKey is addToByNode that also reports whether it added an entry
+// (false: tx was already indexed under pubkey).
+func (s *PacketStore) indexByNodeKey(tx *StoreTx, pubkey string) (isNew, added bool) {
+	isNew = s.nodeHashes[pubkey] == nil
 	if isNew {
 		s.nodeHashes[pubkey] = make(map[string]bool)
 	}
 	if s.nodeHashes[pubkey][tx.Hash] {
-		return false
+		return false, false
 	}
 	s.nodeHashes[pubkey][tx.Hash] = true
 	s.byNode[pubkey] = append(s.byNode[pubkey], tx)
-	return isNew
+	return isNew, true
+}
+
+// addFallbackRelay indexes tx under a relay the path_json fallback resolved,
+// in byNode only (#1352), and charges and records what that added (#202). A
+// relay tx is already indexed under (a decoded pubkey, or a resolved relay,
+// which has its own allowance) adds nothing and costs nothing. Must hold s.mu.
+func (s *PacketStore) addFallbackRelay(tx *StoreTx, pubkey string) {
+	if _, added := s.indexByNodeKey(tx, pubkey); !added {
+		return
+	}
+	if s.fallbackByNode == nil {
+		s.fallbackByNode = make(map[*StoreTx][]string)
+	}
+	before := len(s.fallbackByNode[tx])
+	s.fallbackByNode[tx] = append(s.fallbackByNode[tx], pubkey)
+	s.trackedBytes += fallbackRelayBytes(before+1) - fallbackRelayBytes(before)
 }
 
 // trackAdvertPubkey increments the advertPubkeys refcount for ADVERT packets.
@@ -3657,31 +3706,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	pathHopMutated := false
 	for txID, tx := range updatedTxs {
 		if tx.PathJSON != oldPaths[txID] {
-			// Path changed — remove old subpaths, add new ones.
-			oldHops := parsePathJSON(oldPaths[txID])
-			if len(oldHops) >= 2 {
-				// Temporarily set parsedPath to old hops for removal.
-				saved, savedFlag := tx.parsedPath, tx.pathParsed
-				tx.parsedPath, tx.pathParsed = oldHops, true
-				if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-					s.spTotalPaths--
-				}
-				tx.parsedPath, tx.pathParsed = saved, savedFlag
-			}
-			// Remove old path-hop index entries using old hops.
-			// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
-			if len(oldHops) > 0 {
-				saved, savedFlag := tx.parsedPath, tx.pathParsed
-				tx.parsedPath, tx.pathParsed = oldHops, true
-				removeTxFromPathHopIndex(s.byPathHop, tx)
-				tx.parsedPath, tx.pathParsed = saved, savedFlag
-			}
-			// pickBestObservation already set pathParsed=false so
-			// addTxToSubpathIndex will re-parse the new path.
-			if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-				s.spTotalPaths++
-			}
-			addTxToPathHopIndex(s.byPathHop, tx)
+			s.reindexTxPath(tx, oldPaths[txID])
 			// #1164: coalesce — one invalidate after the loop, not per-tx.
 			pathHopMutated = true
 		}
@@ -3723,6 +3748,38 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	_ = graphRef
 
 	return broadcastMaps
+}
+
+// reindexTxPath moves tx in the subpath and path-hop indexes after its best
+// path changed from oldPath to tx.PathJSON (pickBestObservation, which also
+// cleared tx.pathParsed). The caller invalidates the relay-stats cache once for
+// a batch. Must hold s.mu for writing.
+func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
+	// Path changed — remove old subpaths, add new ones.
+	oldHops := parsePathJSON(oldPath)
+	if len(oldHops) >= 2 {
+		// Temporarily set parsedPath to old hops for removal.
+		saved, savedFlag := tx.parsedPath, tx.pathParsed
+		tx.parsedPath, tx.pathParsed = oldHops, true
+		if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+			s.spTotalPaths--
+		}
+		tx.parsedPath, tx.pathParsed = saved, savedFlag
+	}
+	// Remove old path-hop index entries using old hops.
+	// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
+	if len(oldHops) > 0 {
+		saved, savedFlag := tx.parsedPath, tx.pathParsed
+		tx.parsedPath, tx.pathParsed = oldHops, true
+		removeTxFromPathHopIndex(s.byPathHop, tx)
+		tx.parsedPath, tx.pathParsed = saved, savedFlag
+	}
+	// pickBestObservation already set pathParsed=false so
+	// addTxToSubpathIndex will re-parse the new path.
+	if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+		s.spTotalPaths++
+	}
+	addTxToPathHopIndex(s.byPathHop, tx)
 }
 
 // MaxTransmissionID returns the highest transmission ID in the store.
@@ -5198,6 +5255,16 @@ const (
 	perResolvedRelayBytes  = 96  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeHashes entry and resolved-pubkey index entry
 	perResolvedRecordBytes = 140 // pathHopResolved map entry: key, slice header, bucket share, first backing array
 
+	// path_json fallback relays (#202), charged per distinct relay a tx is
+	// indexed under by addFallbackRelay. Not measured on its own: derived from
+	// the resolved allowance above by dropping what the fallback does not
+	// create (the byPathHop slot, the pathHopResolved hash and the
+	// resolved-pubkey index entry) and keeping the byNode slot, the nodeHashes
+	// entry and, in place of the hash, the 16-byte pubkey string header in the
+	// record; the record is that of pathHopResolved.
+	perFallbackRelayBytes  = 80  // byNode slot + nodeHashes entry + pubkey header in fallbackByNode (append growth)
+	perFallbackRecordBytes = 140 // fallbackByNode map entry: key, slice header, bucket share, first backing array
+
 	// A typical tx is resolved to this many distinct relays. Used by
 	// estimateStoreTxBytesTypical only.
 	typicalResolvedRelays = 3
@@ -5487,6 +5554,23 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			affectedNodes[pk] = struct{}{}
 			evictedFromNode[pk] = true
 		}
+		// ...and the relays the path_json fallback indexed it under, which no
+		// resolved_path names (#202). The record is deleted here; its charge
+		// was taken in txChargedBytes above.
+		for _, pk := range s.fallbackByNode[tx] {
+			if evictedFromNode[pk] {
+				continue
+			}
+			if hashes, ok := s.nodeHashes[pk]; ok {
+				delete(hashes, tx.Hash)
+				if len(hashes) == 0 {
+					delete(s.nodeHashes, pk)
+				}
+			}
+			affectedNodes[pk] = struct{}{}
+			evictedFromNode[pk] = true
+		}
+		delete(s.fallbackByNode, tx)
 
 		// Remove from resolved pubkey index
 		s.removeFromResolvedPubkeyIndex(tx.ID)

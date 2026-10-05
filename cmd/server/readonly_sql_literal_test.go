@@ -25,14 +25,14 @@ var writeSQLPattern = regexp.MustCompile(`(?is)\b(INSERT\s+(OR\s+\w+\s+)?INTO|RE
 //     shared one.
 //   - backup.go: VACUUM INTO writes a snapshot file, not the database.
 //   - openapi.go: prose mentioning VACUUM INTO.
-//   - hash_migrate.go, routes.go: pre-existing writes to the shared
-//     database, tracked separately.
+//
+// hash_migrate.go had 3 until the content-hash migration moved to the
+// ingestor (#215); routes.go had 3 until POST /api/packets was removed
+// (#223).
 var knownServerWriteSQL = map[string]int{
 	"backup.go":             1,
-	"hash_migrate.go":       3,
 	"openapi.go":            1,
 	"ping_score_history.go": 15,
-	"routes.go":             3,
 }
 
 // TestServerSourceHasNoNewWriteSQL guards the read-only server contract

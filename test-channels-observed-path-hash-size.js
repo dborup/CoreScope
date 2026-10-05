@@ -217,6 +217,7 @@ test('delta cache absorbs later evidence for the same packet without re-decrypti
 
   ctx.ChannelDecrypt = {
     hexToBytes: () => new Uint8Array(16),
+    channelCacheKey: (name, regionParam) => name + '|' + (regionParam || ''),
     getCache: () => ({ messages: [legacyMessage], lastTimestamp: timestamp, count: 1 }),
     setCache: (key, messages, lastTimestamp, count) => {
       stored = { key, messages: plain(messages), lastTimestamp, count };
@@ -258,6 +259,7 @@ test('delta cache unions richer evidence without replacing cached plaintext', as
 
   ctx.ChannelDecrypt = {
     hexToBytes: () => new Uint8Array(16),
+    channelCacheKey: (name, regionParam) => name + '|' + (regionParam || ''),
     getCache: () => ({ messages: [cachedMessage], lastTimestamp: timestamp, count: 1 }),
     setCache: (key, messages, lastTimestamp, count) => {
       stored = { key, messages: plain(messages), lastTimestamp, count };

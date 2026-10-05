@@ -823,11 +823,6 @@ type PacketDetailResponse struct {
 	Observations     []ObservationResp `json:"observations,omitempty"`
 }
 
-type PacketIngestResponse struct {
-	ID      int64       `json:"id"`
-	Decoded interface{} `json:"decoded"`
-}
-
 type DecodeResponse struct {
 	Decoded interface{} `json:"decoded"`
 }
@@ -865,6 +860,8 @@ type NodeDetailResponse struct {
 	// #2073: omitted when the identity is hidden (identityHidden, #68).
 	RecentAdvertsByRoute *NodeAdvertsByRoute `json:"recentAdvertsByRoute,omitempty"`
 	AdvertCounts         *NodeAdvertCounts   `json:"advertCounts,omitempty"`
+	// #245: estimated flood / zero-hop advert intervals, same opt-in.
+	AdvertIntervals *NodeAdvertIntervals `json:"advertIntervals,omitempty"`
 }
 
 // NodeAdvertRow is one transmission row on node detail: the /api/packets
@@ -1469,6 +1466,11 @@ type ChannelListResponse struct {
 	// ApprovedChannels are the shared hashtag channels an administrator
 	// approved, listed even before they carry any traffic. Omitted when empty.
 	ApprovedChannels []ApprovedChannel `json:"approvedChannels,omitempty"`
+	// HiddenChannels names the channels with stored messages that are left out
+	// of Channels because their shared-channel proposal is not approved (#251).
+	// The page uses it so a live message does not bring such a row back.
+	// Omitted when nothing is hidden.
+	HiddenChannels []string `json:"hiddenChannels,omitempty"`
 }
 
 // ApprovedChannel is one shared hashtag channel. Hash equals Name: decrypted

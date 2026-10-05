@@ -33,6 +33,7 @@ run test-packet-filter-ux.js
 run test-issue-121-clear-filters-selection.js
 run test-clear-filters.js
 run test-issue-147-packets-url-detail-params.js
+run test-issue-96-hide-control.js
 run test-issue-180-packets-detail-close.js
 run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
@@ -56,6 +57,7 @@ run test-top-routes-overlay.js
 run test-important-links-byte-filter.js
 run test-url-state.js
 run test-node-adverts.js
+run test-issue-254-affinity-debug-toggle.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -125,6 +127,7 @@ run test-node-analytics-hop-chart.js
 run test-analytics-hop-depth-ui.js
 run test-channels-ping-bot-reply.js
 run test-channels-observed-path-hash-size.js
+run test-channels-client-state-152.js
 run test-packet-path-map.js
 run test-area-nodes-map.js
 run test-ping-scores.js
@@ -143,10 +146,12 @@ run test-issue-111-drawer-version.js
 
 # Previously run only by the JS unit step in deploy.yml (#174)
 run test-packet-filter-time.js
+run test-packets.js
 run test-confidence-indicator.js
 run test-1659-analytics-warmup.js
 run test-analytics-tab-state-and-query.js
 run test-analytics-subtab-deeplinks-205.js
+run test-hash-stats-sort-226.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js

@@ -10,6 +10,9 @@
  *   POST /api/admin/channel-proposals/{id}/revoke      → 202 {requestId} or 409 (not approved, nothing queued) (X-API-Key)
  *   GET  /api/channels → approvedChannels: [{name, hash}]
  *
+ * An `approved` result from either poller calls the page's onApproved once
+ * per approval, which refreshes the channel list.
+ *
  * The admin key lives only in this module's memory (never localStorage,
  * sessionStorage or the URL) until "Lock" or a page reload.
  *
@@ -232,6 +235,9 @@
 
   // ── Suggest form (a section of the Add Channel modal) ─────────────────
   var BUILTIN_NOTE = 'This site already decrypts it through its built-in channel list, so sharing it changes nothing.';
+  // #251: hashtag keys come from the exact name (sha256 of "#name"), so a
+  // different case is a different channel; the server only points it out.
+  var NEAR_DUP_NOTE = 'Hashtag keys are derived from the exact name, so these are different channels with different keys.';
 
   // Plain text for the suggest form's status line (shown with textContent).
   function suggestMessage(st, fallbackName) {
@@ -440,8 +446,16 @@
       ? '<span class="ch-proposals-builtin" title="' + esc(BUILTIN_NOTE) + '">Built in: already decrypted</span>'
       : '';
     return '<li class="ch-proposals-item" data-proposal-id="' + esc(p.id) + '"' + (p.builtIn === true ? ' data-builtin="true"' : '') + '>' +
-      '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' + builtin +
+      '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' + builtin + renderNearDuplicate(p) +
       '<span class="ch-proposals-meta">' + when + '</span></div>' + actions + '</li>';
+  }
+
+  // Other proposals / built-in names that differ from p only by letter case.
+  function renderNearDuplicate(p) {
+    var names = Array.isArray(p.nearDuplicateOf) ? p.nearDuplicateOf.filter(function (n) { return typeof n === 'string' && n; }) : [];
+    if (!names.length) return '';
+    return '<span class="ch-proposals-neardup" title="' + esc(NEAR_DUP_NOTE) + '">Same name in different case: ' +
+      names.map(function (n) { return esc(n); }).join(', ') + '</span>';
   }
 
   // ── Remove (revoke) confirmation layer, nested inside the admin dialog ──
@@ -530,17 +544,38 @@
     });
   }
 
+  // Refresh the channel list once per approval. The admin decision and the
+  // suggest poller (auto-approval, #232) can both report the same one; a
+  // proposal approved again after a revoke keeps its id but gets a new
+  // reviewedAt, so that counts as a new approval.
+  var MAX_NOTIFIED_APPROVALS = 64;
+  function notifyApproved(st, fallbackName) {
+    if (!state || typeof state.onApproved !== 'function') return;
+    var p = st && st.proposal;
+    var name = (p && p.name) || fallbackName || '';
+    var key = p && p.id ? p.id + '@' + (p.reviewedAt || '') : name;
+    if (key) {
+      if (state.notifiedApprovals.has(key)) return;
+      if (state.notifiedApprovals.size >= MAX_NOTIFIED_APPROVALS) state.notifiedApprovals.clear();
+      state.notifiedApprovals.add(key);
+    }
+    state.onApproved(name);
+  }
+
   function onAdminDecision(st) {
     if (!state) return;
     if (st.status === 'queued') return;
     var name = (st.proposal && st.proposal.name) || (state.adminPending && state.adminPending.name) || 'The channel';
     if (st.status === 'approved') {
       adminStatus(name + ' is now shared with everyone.', 'success');
-      if (typeof state.onApproved === 'function') state.onApproved(name);
+      notifyApproved(st, name);
     } else if (st.status === 'rejected') {
       adminStatus(name + ' was rejected.', 'success');
     } else if (st.status === 'revoked') {
       adminStatus(name + ' was removed and is no longer shared.', 'success');
+      // #251: the server now leaves a revoked channel out of the list, so
+      // refresh it here instead of waiting for the next periodic reload.
+      if (typeof state.onRevoked === 'function') state.onRevoked(name);
     } else {
       adminStatus(st.error || 'The decision could not be applied.', 'error');
     }
@@ -642,20 +677,25 @@
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
-  // mount({root, suggestSection, view, onApproved}) is called from the
+  // mount({root, suggestSection, view, onApproved, onRevoked}) is called from the
   // Channels page init; unmount() from its destroy, which also stops polling.
   function mount(opts) {
     unmount();
     state = {
       root: opts.root,
       onApproved: opts.onApproved,
+      onRevoked: opts.onRevoked,
+      notifiedApprovals: new Set(),
       cleanups: [],
       adminFilter: 'pending'
     };
     state.suggestPoller = createPoller({
       fetchStatus: statusOf,
       onUpdate: function (st) {
-        if (state && state.suggestShow) state.suggestShow(suggestMessage(st, state.suggestName));
+        if (!state) return;
+        if (state.suggestShow) state.suggestShow(suggestMessage(st, state.suggestName));
+        // Auto-approved (or already shared): list it in this tab now (#232).
+        if (st && st.status === 'approved') notifyApproved(st, state.suggestName);
       },
       onGiveUp: function () {
         if (state && state.suggestShow) state.suggestShow({ text: 'Your suggestion is still being processed. Check back later.', kind: 'info' });

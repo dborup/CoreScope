@@ -136,8 +136,12 @@ if (renderRowSrc) {
   // automatically — no hand-rolled duplicate of the psk:* rule.
   const helperSrc = extractFn(chSrc, 'function channelDisplayName(ch');
   assert(helperSrc, 'extracted channelDisplayName source for behavior sandbox');
+  // #155: the unread badge is a shared helper too; eval the real one.
+  const badgeSrc = extractFn(chSrc, 'function renderUnreadBadge(ch)');
+  assert(badgeSrc, 'extracted renderUnreadBadge source for behavior sandbox');
   vm.createContext(sandbox);
   vm.runInContext('const PRIVATE_CHANNEL_LABEL = "Private Channel";\n' + helperSrc, sandbox);
+  vm.runInContext(badgeSrc, sandbox);
   vm.runInContext(renderRowSrc, sandbox);
   const userRow = sandbox.renderChannelRow({
     hash: 'user:Crew',

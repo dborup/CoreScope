@@ -548,6 +548,38 @@
 
   // ─── End neighbor helpers ─────────────────────────────────────────────────
 
+  // #254: the Affinity Debug card (only shown with debugAffinity). Its heading is
+  // a disclosure button, with caret-right when collapsed and caret-down when
+  // expanded (#189), and aria-expanded on the button follows the body. The click
+  // is handled by onFullBodyClick, delegated from #nodeFullBody.
+  function affinityDebugCaretHtml(expanded) {
+    return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-' + (expanded ? 'down' : 'right') + '"/></svg>';
+  }
+
+  function renderAffinityDebugCard() {
+    return `<div class="node-full-card" id="node-affinity-debug" style="display:none">
+          <h4><button type="button" class="affinity-debug-toggle" aria-expanded="false" aria-controls="affinityDebugBody"><span class="toggle-icon">${affinityDebugCaretHtml(false)}</span> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Affinity Debug</button></h4>
+          <div class="affinity-debug-body" id="affinityDebugBody" hidden>
+            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
+          </div>
+        </div>`;
+  }
+
+  function toggleAffinityDebug(btn) {
+    const expanded = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', String(expanded));
+    const body = btn.ownerDocument.getElementById(btn.getAttribute('aria-controls'));
+    if (body) body.hidden = !expanded;
+    const icon = btn.querySelector('.toggle-icon');
+    if (icon) icon.innerHTML = affinityDebugCaretHtml(expanded);
+    return expanded;
+  }
+
+  function onFullBodyClick(e) {
+    const btn = e.target.closest && e.target.closest('.affinity-debug-toggle');
+    if (btn) toggleAffinityDebug(btn);
+  }
+
   let directNode = null; // set when navigating directly to #/nodes/:pubkey
 
   let regionChangeHandler = null;
@@ -570,6 +602,9 @@
         </div>
       </div>`;
       document.getElementById('nodeBackBtn').addEventListener('click', () => { location.hash = '#/nodes'; });
+      // Wired once here: loadFullNode re-renders the body (theme-refresh) and
+      // would stack listeners.
+      document.getElementById('nodeFullBody').addEventListener('click', onFullBodyClick);
       loadFullNode(directNode);
       // Escape to go back to nodes list
       document.addEventListener('keydown', function nodesEsc(e) {
@@ -713,7 +748,9 @@
     let headline, explanation;
     if (inactive) {
       headline = 'Inactive node';
-      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this device is inactive. ' +
+      // The record, not the device (#208): an observer can be uploading now
+      // while its node row is still in inactive_nodes.
+      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this node is listed as inactive. ' +
         'Nodes without an advert inside the retention window are moved off the node list until they advertise again.';
       rows.push(['Name', escapeHtml(inactive.name || '—')], ['Role', escapeHtml(inactive.role || '—')], ['Last advert', when(inactive.last_seen)]);
     } else {
@@ -880,7 +917,7 @@
         </table>
 
         <div class="node-full-card" id="node-packets">
-          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts }, {
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts, advertIntervals: nodeData.advertIntervals }, {
             variant: 'full', idPrefix: 'nodeFullAdverts', tab: NodeAdverts.parseTab(location.hash),
             timestampHtml: renderNodeTimestampHtml, hashSizeInconsistent: !!n.hash_size_inconsistent,
           })}
@@ -914,12 +951,7 @@
           <div id="fullNeighborsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading neighbors…</div></div>
         </div>
 
-        <div class="node-full-card" id="node-affinity-debug" style="display:none">
-          <h4 style="cursor:pointer" onclick="var body=this.parentElement.querySelector('.affinity-debug-body'); var hidden=body.style.display==='none'; body.style.display=hidden?'block':'none'; this.querySelector('.toggle-icon').innerHTML=body.style.display==='none'?'<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>':'<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-up"/></svg>'"><span class="toggle-icon"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg></span> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Affinity Debug</h4>
-          <div class="affinity-debug-body" style="display:none">
-            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
-          </div>
-        </div>
+        ${renderAffinityDebugCard()}
 
         <div class="node-full-card" id="fullPathsSection">
           <h4>Paths Through This Node</h4>
@@ -1923,7 +1955,7 @@
         </div>
 
         <div class="node-detail-section" id="node-pane-adverts">
-          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts }, {
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts, advertIntervals: data.advertIntervals }, {
             variant: 'pane', idPrefix: 'nodePaneAdverts', tab: NodeAdverts.parseTab(location.hash),
             timestampHtml: renderNodeTimestampHtml, roleColor: roleColor,
           })}
@@ -2146,6 +2178,9 @@
   window._nodesRenderNodeTimestampText = renderNodeTimestampText;
   window._nodesGetStatusInfo = getStatusInfo;
   window._nodesGetStatusTooltip = getStatusTooltip;
+  window._nodesRenderAffinityDebugCard = renderAffinityDebugCard;
+  window._nodesToggleAffinityDebug = toggleAffinityDebug;
+  window._nodesOnFullBodyClick = onFullBodyClick;
 
   // #862: Expose search filter logic for testing
   window._nodesMatchesSearch = function(node, query) {

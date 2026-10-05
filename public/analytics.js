@@ -348,11 +348,23 @@
   var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene'], dflt: 'overview' };
   var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
   var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  // #208 — Hash Stats' multi-byte adopters filter. URL only (no storageKey):
+  // it had no stored state before, so a plain visit still opens on All.
+  var HASHSTATS_MB_FILTER = { param: 'mbf', allowed: ['all', 'confirmed', 'suspected', 'unknown'], dflt: 'all' };
+  // #226 — the adopters table's sort column and direction, URL only like mbf=.
+  // 'none' keeps the server's order.
+  var HASHSTATS_MB_SORT = { param: 'mbsort', allowed: ['none', 'name', 'role', 'status', 'hashSize', 'packets', 'lastSeen'], dflt: 'none' };
+  var HASHSTATS_MB_DIR = { param: 'mbdir', allowed: ['asc', 'desc'], dflt: 'asc' };
 
   // The hash keys each tab owns; _updateAnalyticsUrl drops them when
-  // another tab is selected.
+  // another tab is selected. Hash Issues' bytes= is deliberately not listed:
+  // it has no stored fallback, so it stays in the URL across a tab switch
+  // and a return to Hash Issues keeps the chosen byte size (#1914, #208).
+  // Its section= is a one-shot scroll anchor and is dropped.
   var TAB_URL_PARAMS = {
     'rf-health': ['range', 'observer', 'from', 'to'],
+    collisions: ['section'],
+    hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
     wardriving: [WARDRIVING_WINDOW.param],
   };
@@ -370,20 +382,58 @@
     try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(key) : null; } catch (e) { return null; }
   }
 
+  // #208 — the view each history entry showed is recorded in its
+  // history.state, so Back/Forward to an entry whose view was a default (its
+  // key left out of the URL) restores that default, not the value a later
+  // entry stored. A new entry (a link, location.hash = …) has no record and
+  // still gets the stored value. Only specs with a storageKey are recorded:
+  // for the others a missing key already means the default. A tab switch
+  // writes a null state (_updateAnalyticsUrl), so a tab clicked back within
+  // the same entry also gets the stored value, as before.
+  var ENTRY_VIEW_KEY = 'analyticsView';
+
+  // The current entry's record, as { param: value } with string values only.
+  function _entryView() {
+    var out = {};
+    try {
+      var st = typeof history !== 'undefined' ? history.state : null;
+      var v = st && typeof st === 'object' ? st[ENTRY_VIEW_KEY] : null;
+      if (!v || typeof v !== 'object') return null;
+      Object.keys(v).forEach(function (k) { if (typeof v[k] === 'string') out[k] = v[k]; });
+    } catch (e) { return null; }
+    return out;
+  }
+
+  // history.state with the record replaced; other keys are kept.
+  function _stateWithEntryView(view) {
+    var out = {};
+    var st = typeof history !== 'undefined' ? history.state : null;
+    if (st && typeof st === 'object') Object.keys(st).forEach(function (k) { out[k] = st[k]; });
+    out[ENTRY_VIEW_KEY] = view;
+    return out;
+  }
+
   // Stores the values and writes them to the hash in one go. A default is
   // left out, so a tab in its default view keeps the URL it had before #205.
+  // A spec without a storageKey lives in the URL only.
   function _writeViewParams(specs, values) {
     var updates = {};
+    var view = _entryView() || {};
+    var viewChanged = false;
     specs.forEach(function (spec, i) {
-      try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+      if (spec.storageKey) {
+        try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+        if (view[spec.param] !== values[i]) { view[spec.param] = values[i]; viewChanged = true; }
+      }
       updates[spec.param] = values[i] === spec.dflt ? '' : values[i];
     });
     if (!window.URLState) return;
     // replaceState can throw (Safari throttles it); the view has already
     // changed by then, so a failed URL sync must not break the tab (#1914).
+    // It only runs when the URL or the entry's record changes.
     try {
       var newHash = URLState.updateHashParams(updates, location.hash);
-      if (newHash !== location.hash) history.replaceState(null, '', newHash);
+      if (newHash !== location.hash || viewChanged) history.replaceState(_stateWithEntryView(view), '', newHash);
     } catch (e) { /* URL sync is best effort */ }
   }
 
@@ -392,11 +442,16 @@
   // Read on render: resolve every value of the tab from the same hash first,
   // then store them and write them back. Writing one value rebuilds the
   // hash, which drops an empty key ("?sub=") the next read would still see.
+  // Without a URL value, the entry's own record (#208) comes before the
+  // stored value.
   function restoreViewParams(specs) {
     var hash = typeof location !== 'undefined' ? String(location.hash || '') : '';
     var params = new URLSearchParams(hash.split('?')[1] || '');
+    var entry = _entryView();
     var values = specs.map(function (spec) {
-      return resolveViewParam(params.get(spec.param), _sessionGet(spec.storageKey), spec.allowed, spec.dflt);
+      var fallback = null;
+      if (spec.storageKey) fallback = entry && Object.prototype.hasOwnProperty.call(entry, spec.param) ? entry[spec.param] : _sessionGet(spec.storageKey);
+      return resolveViewParam(params.get(spec.param), fallback, spec.allowed, spec.dflt);
     });
     _writeViewParams(specs, values);
     return values;
@@ -1489,6 +1544,10 @@
 
   // ===================== HASH SIZES (original) =====================
   function renderHashSizes(el, data) {
+    // ?mbf= (#208), ?mbsort= and ?mbdir= (#226)
+    const [mbFilter, mbSortCol, mbSortDir] = restoreViewParams([HASHSTATS_MB_FILTER, HASHSTATS_MB_SORT, HASHSTATS_MB_DIR]);
+    const mbSort = { col: mbSortCol, dir: mbSortCol === HASHSTATS_MB_SORT.dflt ? HASHSTATS_MB_DIR.dflt : mbSortDir };
+    if (mbSort.dir !== mbSortDir) setViewParam(HASHSTATS_MB_DIR, mbSort.dir);   // no direction without a column
     const d = data.distribution;
     const total = data.total;
     const pct = (n) => total ? (n / total * 100).toFixed(1) : '0';
@@ -1538,7 +1597,7 @@
         </div>
       </div>
 
-      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [])}
+      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [], mbFilter, mbSort)}
 
       <div class="analytics-row">
         <div class="analytics-card flex-1">
@@ -1562,7 +1621,54 @@
     `;
   }
 
-  function renderMultiByteAdopters(nodes, caps) {
+  // #226 — the value an adopter row sorts by in a column: a lower-case string
+  // for Node and Role, a number otherwise. Last Seen is the timestamp (NaN when
+  // missing or unparseable), not the "5m ago" text the cell shows.
+  var MB_STATUS_WEIGHT = { confirmed: 0, suspected: 1, unknown: 2 };
+  function mbAdopterSortValue(r, col) {
+    switch (col) {
+      case 'name': return String(r.name || '').toLowerCase();
+      case 'role': return String(r.role || 'unknown').toLowerCase();
+      case 'status': return Object.prototype.hasOwnProperty.call(MB_STATUS_WEIGHT, r.status) ? MB_STATUS_WEIGHT[r.status] : MB_STATUS_WEIGHT.unknown;
+      case 'hashSize': return Number(r.hashSize);
+      case 'packets': return Number(r.packets);
+      case 'lastSeen': return r.lastSeen ? Date.parse(r.lastSeen) : NaN;
+    }
+    return 0;
+  }
+
+  // The rows in sort order; without a known column, as given. A missing value
+  // (NaN) is last in both directions, and ties keep the given order.
+  function sortMbAdopterRows(rows, sort) {
+    var col = sort && sort.col;
+    if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return rows;
+    var sign = sort.dir === 'desc' ? -1 : 1;
+    return rows.map(function (r, i) { return { r: r, i: i, v: mbAdopterSortValue(r, col) }; })
+      .sort(function (a, b) {
+        var an = typeof a.v === 'number' && isNaN(a.v), bn = typeof b.v === 'number' && isNaN(b.v);
+        if (an || bn) return an === bn ? a.i - b.i : (an ? 1 : -1);
+        if (a.v < b.v) return -sign;
+        if (a.v > b.v) return sign;
+        return a.i - b.i;
+      })
+      .map(function (x) { return x.r; });
+  }
+
+  // Clicking the sorted column flips its direction; another column starts
+  // ascending.
+  function nextMbSort(sort, col) {
+    if (sort && sort.col === col) return { col: col, dir: sort.dir === 'asc' ? 'desc' : 'asc' };
+    return { col: col, dir: 'asc' };
+  }
+
+  // filter: the initially selected filter (All when missing or unknown).
+  // sort: the initial { col, dir } (the server's order when missing or unknown).
+  function renderMultiByteAdopters(nodes, caps, filter, sort) {
+    var initialFilter = HASHSTATS_MB_FILTER.allowed.indexOf(filter) >= 0 ? filter : HASHSTATS_MB_FILTER.dflt;
+    var initialSort = sort && HASHSTATS_MB_SORT.allowed.indexOf(sort.col) >= 0
+      ? { col: sort.col, dir: sort.dir === 'desc' ? 'desc' : 'asc' }
+      : { col: HASHSTATS_MB_SORT.dflt, dir: HASHSTATS_MB_DIR.dflt };
+    var mbBtnClass = function (f) { return f === initialFilter ? 'tab-btn active' : 'tab-btn'; };
     // Merge capability status into adopter nodes
     var capByPubkey = {};
     (caps || []).forEach(function(c) { capByPubkey[c.pubkey] = c; });
@@ -1585,17 +1691,24 @@
     var counts = { confirmed: 0, suspected: 0, unknown: 0 };
     rows.forEach(function(r) { counts[r.status] = (counts[r.status] || 0) + 1; });
 
-    function buildTableContent(rows, filter) {
-      var filtered = filter === 'all' ? rows : rows.filter(function(r) { return r.status === filter; });
+    var sortCols = [
+      { key: 'name', label: 'Node' }, { key: 'role', label: 'Role' }, { key: 'status', label: 'Status' },
+      { key: 'hashSize', label: 'Hash Size' }, { key: 'packets', label: 'Adverts' }, { key: 'lastSeen', label: 'Last Seen' },
+    ];
+    // The keys are the fixed ones above, never a value from the URL.
+    function theadHtml(sort) {
+      return '<thead><tr>' + sortCols.map(function (c) {
+        var active = c.key === sort.col;
+        return '<th scope="col" class="sortable' + (active ? ' sort-active' : '') + '" data-sort="' + c.key + '"' +
+          (active ? ' aria-sort="' + (sort.dir === 'asc' ? 'ascending' : 'descending') + '"' : '') + '>' +
+          c.label + channelSortArrow(c.key, sort.col, sort.dir) + '</th>';
+      }).join('') + '</tr></thead>';
+    }
+
+    function buildTableContent(rows, filter, sort) {
+      var filtered = sortMbAdopterRows(filter === 'all' ? rows : rows.filter(function(r) { return r.status === filter; }), sort);
       return (filtered.length ? '<table class="analytics-table" id="mbAdoptersTable" style="margin-top:12px">' +
-          '<thead><tr>' +
-            '<th scope="col" data-sort="name">Node</th>' +
-            '<th scope="col" data-sort="role">Role</th>' +
-            '<th scope="col" data-sort="status">Status</th>' +
-            '<th scope="col" data-sort="hashSize">Hash Size</th>' +
-            '<th scope="col" data-sort="packets">Adverts</th>' +
-            '<th scope="col" data-sort="lastSeen">Last Seen</th>' +
-          '</tr></thead>' +
+          theadHtml(sort) +
           '<tbody>' +
             filtered.map(function(r) {
               var roleColor = (window.ROLE_COLORS || {})[r.role] || '#6b7280';
@@ -1627,20 +1740,21 @@
           '<strong>Unknown</strong> = no multi-byte evidence yet.</p>' +
         '</div>' +
         '<div style="display:flex;gap:4px;flex-wrap:wrap" id="mbCapFilters">' +
-          '<button class="tab-btn active" data-mb-filter="all">All (' + rows.length + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
+          '<button class="' + mbBtnClass('all') + '" data-mb-filter="all">All (' + rows.length + ')</button>' +
+          '<button class="' + mbBtnClass('confirmed') + '" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
+          '<button class="' + mbBtnClass('suspected') + '" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
+          '<button class="' + mbBtnClass('unknown') + '" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
         '</div>' +
       '</div>' +
-      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, 'all') + '</div>' +
+      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, initialFilter, initialSort) + '</div>' +
     '</div></div>';
 
     // Use setTimeout for event delegation on the stable section container
     setTimeout(function() {
       var section = document.getElementById('mbAdoptersSection');
       if (!section) return;
-      var currentFilter = 'all';
+      var currentFilter = initialFilter;
+      var currentSort = initialSort;
 
       section.addEventListener('click', function handler(e) {
         var btn = e.target.closest('[data-mb-filter]');
@@ -1651,30 +1765,21 @@
           buttons.forEach(function(b) { b.classList.toggle('active', b.dataset.mbFilter === currentFilter); });
           // Replace only the table content, not the whole section
           var wrap = section.querySelector('#mbAdoptersTableWrap');
-          if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter);
+          if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          setViewParam(HASHSTATS_MB_FILTER, currentFilter);
           return;
         }
+        // #226: a header click re-renders the table (the same path as a
+        // filter click) in the new order, so the sort survives the next
+        // filter click and the header shows it.
         var th = e.target.closest('[data-sort]');
         if (th) {
-          var tbody = section.querySelector('tbody');
-          if (!tbody) return;
-          var sortRows = Array.from(tbody.querySelectorAll('tr'));
           var col = th.dataset.sort;
-          var colIdx = { name: 0, status: 1, hashSize: 2, packets: 3, lastSeen: 4 };
-          var statusWeight = { 'confirmed': 0, 'suspected': 1, 'unknown': 2 };
-          sortRows.sort(function(a, b) {
-            var va = a.children[colIdx[col]] ? a.children[colIdx[col]].textContent.trim() : '';
-            var vb = b.children[colIdx[col]] ? b.children[colIdx[col]].textContent.trim() : '';
-            if (col === 'status') {
-              va = statusWeight[va.toLowerCase().split(' ').pop()] !== undefined ? statusWeight[va.toLowerCase().split(' ').pop()] : 2;
-              vb = statusWeight[vb.toLowerCase().split(' ').pop()] !== undefined ? statusWeight[vb.toLowerCase().split(' ').pop()] : 2;
-            }
-            if (col === 'hashSize' || col === 'packets') { va = parseInt(va) || 0; vb = parseInt(vb) || 0; }
-            if (va < vb) return -1;
-            if (va > vb) return 1;
-            return 0;
-          });
-          sortRows.forEach(function(r) { tbody.appendChild(r); });
+          if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return;
+          currentSort = nextMbSort(currentSort, col);
+          var sortWrap = section.querySelector('#mbAdoptersTableWrap');
+          if (sortWrap) sortWrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          _writeViewParams([HASHSTATS_MB_SORT, HASHSTATS_MB_DIR], [currentSort.col, currentSort.dir]);
         }
       });
     }, 100);
