@@ -22,19 +22,15 @@ import (
 // method, must get a JSON error, never the SPA's 200 index.html. These
 // tests build the router the same two ways production code does:
 //   - setupTestServer: RegisterRoutes only (what most other _test.go files use)
-//   - productionStyleRouter below: RegisterRoutes + /ws + the SPA catch-all,
-//     matching main.go's actual composition order.
+//   - productionStyleRouter below: newHTTPRouter, the RegisterRoutes + /ws +
+//     SPA catch-all composition main.go serves, with a stub index.html.
 func productionStyleRouter(t *testing.T, srv *Server) *mux.Router {
 	t.Helper()
-	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
-	router.HandleFunc("/ws", NewHub().ServeWS)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	router.PathPrefix("/").Handler(wsOrStatic(NewHub(), spaHandler(dir, http.FileServer(http.Dir(dir)))))
-	return router
+	return newHTTPRouter(srv, NewHub(), dir)
 }
 
 func TestAPIFallbackUnknownPathReturns404JSON(t *testing.T) {
@@ -364,5 +360,54 @@ func TestAPIFallbackPrefixSiblingsStillReachSPA(t *testing.T) {
 		if w.Code != http.StatusOK || w.Body.String() != "<html>SPA</html>" {
 			t.Errorf("GET %s: want 200 SPA page, got %d %q", path, w.Code, w.Body.String())
 		}
+	}
+}
+
+// The router main.go serves must not register any /api route after the
+// fallback: mux tries routes in order and the fallback matches every method
+// and path under /api, so such a route would be dead with no error.
+func TestProductionRouterHasNoShadowedAPIRoutes(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	router := productionStyleRouter(t, srv)
+
+	// The guard is only meaningful if the fallback is there and is the last
+	// /api route.
+	var last string
+	router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		if tmpl, err := route.GetPathTemplate(); err == nil && (tmpl == "/api" || strings.HasPrefix(tmpl, "/api/")) {
+			last = route.GetName()
+		}
+		return nil
+	})
+	if last != apiFallbackRouteName {
+		t.Fatalf("last /api route in the production router is %q, want the fallback %q", last, apiFallbackRouteName)
+	}
+	if shadowed := apiRoutesShadowedByFallback(router); len(shadowed) > 0 {
+		t.Errorf("/api routes registered after the fallback are unreachable: %v", shadowed)
+	}
+}
+
+// The guard itself: a late /api route is reported and really is dead;
+// a late non-/api route that merely starts with "api" is not reported.
+func TestAPIRoutesShadowedByFallbackReportsLateRoutes(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+	late := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("late")) }
+	router.HandleFunc("/api/late", late).Methods("GET")
+	router.HandleFunc("/api/late/{id}", late)
+	router.HandleFunc("/apiary-late", late)
+
+	got := apiRoutesShadowedByFallback(router)
+	if strings.Join(got, " ") != "/api/late /api/late/{id}" {
+		t.Errorf("shadowed routes: got %v, want [/api/late /api/late/{id}]", got)
+	}
+
+	// The fallback answers instead of the late handler (with a 405 that
+	// names GET, since it sees the late route's method).
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/late", nil))
+	if w.Code == http.StatusOK || w.Body.String() == "late" {
+		t.Errorf("GET /api/late: the late handler ran (%d %q); the fallback should shadow it", w.Code, w.Body.String())
 	}
 }

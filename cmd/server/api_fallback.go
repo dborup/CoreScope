@@ -29,9 +29,16 @@ import (
 // PathPrefix("/api") would also swallow SPA paths like /api-docs.
 func registerAPIFallback(router *mux.Router) {
 	h := apiFallbackHandler(router)
-	router.Path("/api").HandlerFunc(h)
-	router.PathPrefix("/api/").HandlerFunc(h)
+	router.Path("/api").HandlerFunc(h).Name(apiFallbackRootRouteName)
+	router.PathPrefix("/api/").HandlerFunc(h).Name(apiFallbackRouteName)
 }
+
+// Route names of the two fallback routes, so apiRoutesShadowedByFallback
+// can find them.
+const (
+	apiFallbackRootRouteName = "api-fallback-root"
+	apiFallbackRouteName     = "api-fallback"
+)
 
 // apiFallbackHandler serves HEAD through the GET route for the same path,
 // otherwise responds 405 with an Allow header if the request path matches a
@@ -118,4 +125,29 @@ func getRouteHandler(router *mux.Router, r *http.Request) (http.Handler, *http.R
 		return nil, nil
 	}
 	return match.Route.GetHandler(), mux.SetURLVars(getReq, match.Vars)
+}
+
+// apiRoutesShadowedByFallback returns the path template of every /api route
+// registered after the API fallback. mux tries routes in registration order
+// and the fallback matches every method and path under /api, so such a
+// route is never reached. main checks the production router at startup;
+// TestProductionRouterHasNoShadowedAPIRoutes checks newHTTPRouter.
+func apiRoutesShadowedByFallback(router *mux.Router) []string {
+	var shadowed []string
+	fallbackSeen := false
+	router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		switch route.GetName() {
+		case apiFallbackRootRouteName, apiFallbackRouteName:
+			fallbackSeen = true
+			return nil
+		}
+		if !fallbackSeen {
+			return nil
+		}
+		if tmpl, err := route.GetPathTemplate(); err == nil && (tmpl == "/api" || strings.HasPrefix(tmpl, "/api/")) {
+			shadowed = append(shadowed, tmpl)
+		}
+		return nil
+	})
+	return shadowed
 }
