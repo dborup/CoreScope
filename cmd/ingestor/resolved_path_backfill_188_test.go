@@ -318,8 +318,8 @@ func TestResolvedPathBackfill_StopKeepsWatermark_188(t *testing.T) {
 // (#267): about three quarters of a batch's hold is the WAL fsync in COMMIT,
 // whose latency depends on the runner's disk, not on this code. Resolution
 // costs about 1 ms per batch, so moving it into the transaction did not trip
-// the timing check either. The hold is logged here, and
-// BenchmarkResolvedPathBackfillBatch reports it.
+// the timing check either. BenchmarkResolvedPathBackfillBatch reports the
+// hold. The hold logged here also includes the probe's triggers.
 func TestResolvedPathBackfill_WriteHoldUnderBudget_188(t *testing.T) {
 	const rows, batchSize = 5000, defaultResolvedPathBackfillBatchSize
 	probe := watchBackfillWrites267(t)
@@ -337,7 +337,7 @@ func TestResolvedPathBackfill_WriteHoldUnderBudget_188(t *testing.T) {
 	if res.Resolved != rows || res.Batches != rows/batchSize {
 		t.Fatalf("pass = %+v, want %d resolved in %d batches", res, rows, rows/batchSize)
 	}
-	t.Logf("max write hold per %d-row batch: %s", batchSize, res.MaxHold)
+	t.Logf("max write hold per %d-row batch: %s (with the probe's triggers)", batchSize, res.MaxHold)
 
 	if n := writerStatsAgg.get(resolvedPathBackfillComponent).snapshot().Count - txBefore; n != int64(res.Batches) {
 		t.Fatalf("%d write transactions for %d batches, want one per batch", n, res.Batches)
