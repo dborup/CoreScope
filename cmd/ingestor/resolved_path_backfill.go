@@ -229,6 +229,11 @@ func (s *Store) RunResolvedPathBackfill(ctx context.Context, batchSize int, paus
 	return res, nil
 }
 
+// resolvedPathBackfillResolve is the resolver a batch calls. It is a
+// variable so the #267 test can check that no batch resolves while it holds
+// the write transaction.
+var resolvedPathBackfillResolve = resolveObservationPath
+
 type resolvedPathBackfillRow struct {
 	id          int64
 	pathJSON    string
@@ -299,7 +304,7 @@ func (s *Store) resolvedPathBackfillBatch(ctx context.Context, after, ceiling in
 		if r.payloadType == int(payloadADVERT) {
 			from = strings.ToLower(r.fromPubkey)
 		}
-		if rp := marshalResolvedPath(resolveObservationPath(hops, from, r.observerID, r.routeType, graph, idx)); rp != "" {
+		if rp := marshalResolvedPath(resolvedPathBackfillResolve(hops, from, r.observerID, r.routeType, graph, idx)); rp != "" {
 			updates = append(updates, update{r.id, rp})
 		}
 	}
