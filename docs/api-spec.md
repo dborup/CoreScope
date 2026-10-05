@@ -1255,24 +1255,41 @@ List decoded channels with message counts.
   // before they carry traffic. Omitted when there are none. hash == name.
   "approvedChannels"?: [
     { "name": string, "hash": string }
-  ]
+  ],
+  // Channels with stored messages left out of `channels` because their
+  // proposal is not approved (see below). Omitted when none.
+  "hiddenChannels"?: string[]
 }
 ```
 
-**Revoked channels are left out of `channels`.** A channel whose shared-channel
-suggestion was revoked (see [revoke](#post-apiadminchannel-proposalsidrevoke))
-does not appear in the list even though its decoded messages are still stored.
-It is shown again, with its history, once the suggestion is approved again. The
-exception is a name the ingestor also decrypts through its built-in/config list
-(built-in keys, rainbow table, `hashChannels`, `channelKeys`): revoking does not
-stop that traffic, so such a channel is never hidden. When the ingestor's
-`builtin-channels.json` is missing or unreadable, nothing is hidden. Nothing is
-deleted: `GET /api/channels/:hash/messages` still returns the history of a
-hidden channel. The decision uses the same 10 s snapshot as `approvedChannels`
-(dropped early when a revoke or approve result is read), so there is no
-per-request query of the proposals table. Revoked proposals are removed by
-retention (`channelProposals.retentionDays` after the revoke); a hidden channel
-whose messages are still stored then appears again.
+**Revoked channels are left out of `channels`.** A channel with stored messages
+whose shared-channel proposal is **not approved** — revoked (see
+[revoke](#post-apiadminchannel-proposalsidrevoke)), suggested again and
+pending, or that re-suggestion rejected — does not appear in the list. Only
+approving the proposal lists it again, with its history. Such a name has stored
+messages only because it was decrypted earlier (approved, or through the
+config), so a pending or rejected proposal never hides a channel that was never
+decrypted. The exception is a name the ingestor also decrypts through its
+built-in/config list (built-in keys, rainbow table, `hashChannels`,
+`channelKeys`): that traffic keeps being decrypted, so such a channel is never
+hidden. When the ingestor's `builtin-channels.json` is missing or unreadable,
+nothing is hidden. Nothing is deleted: `GET /api/channels/:hash/messages` still
+returns the history of a hidden channel.
+
+`hiddenChannels` (`string[]`, omitted when empty) names the channels that were
+left out this way. The Channels page uses it so a live WebSocket packet for a
+stored message does not create the list row again.
+
+The decision is read once per 10 s snapshot (the one behind `approvedChannels`,
+dropped early when an approve or revoke result is read), per channel that has
+stored messages, so there is no per-request query of the proposals table and no
+row cap. Proposals that are not approved are removed by retention
+(`channelProposals.retentionDays` after the review); a hidden channel whose
+messages are still stored then appears again.
+
+`GET /api/analytics/channels` is not filtered: it still lists revoked channels
+with their message and sender counts (no message text). Hiding is a list-level
+measure, not a confidentiality control: the history stays readable by name.
 
 ---
 
@@ -1422,7 +1439,7 @@ Missing or wrong key: `401`. No key configured, or a weak one: `403`.
 
 There is a real race between the `409` check and the ingestor actually applying the command: another admin could approve, reject or revoke the same proposal in between. The ingestor re-validates the status from scratch when it applies the command and is the true source of truth; the synchronous `409` here is only a best-effort fast-fail for the common case, not a guarantee. When the race is lost, the request ends with status `error` and an error such as `suggestion is not approved (it is pending)`.
 
-**Historical messages are kept, the channel leaves the list.** Revoking a channel removes its decryption key going forward and takes the channel out of `GET /api/channels` (unless the name is a [built-in name](#built-in-names), which keeps decrypting and is never hidden). Messages the ingestor already decoded and stored while the channel was approved are **not deleted**: `GET /api/channels/:hash/messages` still returns them, and the channel returns to the list with its history if the suggestion is approved again (suggest the name again, then approve). The server stays read-only: it only filters the list. A re-suggested name is `pending`, not `revoked`, so it reappears in the list at that point, before it is approved.
+**Historical messages are kept, the channel leaves the list.** Revoking a channel removes its decryption key going forward and takes the channel out of `GET /api/channels` (unless the name is a [built-in name](#built-in-names), which keeps decrypting and is never hidden). Messages the ingestor already decoded and stored while the channel was approved are **not deleted**: `GET /api/channels/:hash/messages` still returns them, and the channel returns to the list with its history if the suggestion is approved again (suggest the name again, then approve). The server stays read-only: it only filters the list. The channel stays hidden while the name is re-suggested and pending, and after the administrator rejects that re-suggestion; to hide it again after an approval, revoke it again. A rejected re-suggestion therefore does not bring the channel back.
 
 **Retention.** A revoked proposal's row is not deleted at revoke time — only its status changes, keeping `reviewedAt` as the audit timestamp of when it was revoked. It is removed later by the same retention sweep that prunes rejected proposals, once `reviewedAt` is older than `channelProposals.retentionDays` (see [Configuration](user-guide/configuration.md#shared-channel-suggestions)). Approved rows are still never pruned.
 

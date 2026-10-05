@@ -478,6 +478,10 @@ async function main() {
       const approvedRes = await fetch(env.base + '/api/admin/channel-proposals?status=approved', { headers: { 'X-API-Key': API_KEY } });
       const approvedNames = ((await approvedRes.json()).proposals || []).map((p) => p.name);
       assert.ok(!approvedNames.includes(NAME), 'resuggestion must never be auto-approved');
+      // #251 review: a pending re-suggestion does not bring the channel back
+      // into the list; only an approval does.
+      const listed = await (await fetch(env.base + '/api/channels')).json();
+      assert.ok(!(listed.channels || []).some((c) => c.name === NAME), 'a pending re-suggestion must not list the channel again');
     });
 
     await step('autoApprove config takes effect after restart without approving old pending suggestions', async () => {

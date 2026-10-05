@@ -53,13 +53,48 @@ func ListApprovedNames(ctx context.Context, db *sql.DB, limit int) ([]string, er
 	return out, rows.Err()
 }
 
-// ListRevokedNames returns the names of revoked proposals, most recently
-// revoked first. A missing table yields an empty result. The server hides
-// these channels from GET /api/channels (#251).
-func ListRevokedNames(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
+// ListNotApprovedChannelsWithTraffic returns the names of proposals that are
+// not approved (pending, rejected or revoked) and whose channel has decoded
+// messages stored; these are the channels GET /api/channels leaves out unless
+// the ingestor decrypts the name through its config (#251).
+//
+// The decision is read per channel that can appear in the list, not from a
+// capped list of proposal rows: the result is a subset of the distinct
+// channel_hash values GetChannels already returns in full, so it needs no
+// limit and an old revoked proposal never drops out behind newer ones. A
+// proposal without stored traffic has no list entry to hide and is skipped.
+// A missing proposals table yields an empty result.
+func ListNotApprovedChannelsWithTraffic(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT name FROM channel_proposals WHERE status = 'revoked'
-		 ORDER BY reviewed_at DESC, id LIMIT ?`, clampLimit(limit))
+		`SELECT p.name FROM channel_proposals p
+		 WHERE p.status <> 'approved'
+		   AND EXISTS (SELECT 1 FROM transmissions t
+		               WHERE t.payload_type = 5 AND t.channel_hash = p.name)`)
+	if err != nil {
+		if IsMissingTable(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// ListAllNames returns every proposal name regardless of status, newest
+// first, capped at limit (MaxListed at most). The admin list uses it to spot
+// names that differ only by letter case without depending on the rows it
+// returns. A missing table yields an empty result.
+func ListAllNames(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT name FROM channel_proposals ORDER BY created_at DESC, id LIMIT ?`, clampLimit(limit))
 	if err != nil {
 		if IsMissingTable(err) {
 			return nil, nil

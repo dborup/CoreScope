@@ -1464,6 +1464,11 @@ type ChannelListResponse struct {
 	// ApprovedChannels are the shared hashtag channels an administrator
 	// approved, listed even before they carry any traffic. Omitted when empty.
 	ApprovedChannels []ApprovedChannel `json:"approvedChannels,omitempty"`
+	// HiddenChannels names the channels with stored messages that are left out
+	// of Channels because their shared-channel proposal is not approved (#251).
+	// The page uses it so a live message does not bring such a row back.
+	// Omitted when nothing is hidden.
+	HiddenChannels []string `json:"hiddenChannels,omitempty"`
 }
 
 // ApprovedChannel is one shared hashtag channel. Hash equals Name: decrypted

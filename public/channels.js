@@ -3,6 +3,10 @@
 
 (function () {
   let channels = [];
+  // #251: channels the server leaves out of /channels because their shared
+  // channel was revoked (names from its `hiddenChannels`). A live packet for
+  // one of them must not create a list row again; replaced on every load.
+  let hiddenChannelNames = new Set();
   let selectedHash = null;
   let messages = [];
   let wsHandler = null;
@@ -1782,8 +1786,8 @@
           ch.lastMessage = truncate(displayText, 100);
           ch._wsSeq = ++wsActivitySeq; // #152: see mergeClientChannelState()
           channelListDirty = true;
-        } else if (isFirstObservation) {
-          // New channel we haven't seen
+        } else if (isFirstObservation && !hiddenChannelNames.has(channelKey)) {
+          // New channel we haven't seen (not one the server hides, #251)
           channels.push({
             hash: channelKey,
             name: channelName,
@@ -2035,6 +2039,7 @@
       // list that actually renders.
       if (requestId !== channelsRequestId) return latestChannelsLoad;
       const prevChannels = channels;
+      hiddenChannelNames = new Set(Array.isArray(data.hiddenChannels) ? data.hiddenChannels : []);
       // Copies: api() hands the same cached objects back on a TTL hit, and
       // mergeUserChannels() below mutates rows.
       channels = (data.channels || []).map(ch => Object.assign({}, ch, {
