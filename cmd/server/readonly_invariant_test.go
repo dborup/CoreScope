@@ -203,3 +203,90 @@ func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
 	}
 	return regexp.MustCompile(expr)
 }
+
+// txTableWritePattern matches DML against the ingestor-owned packet tables
+// (transmissions, observations) and the tables hung off them, in the shapes
+// nodeTableWritePattern covers.
+func txTableWritePattern(verb string) *regexp.Regexp {
+	const table = "[\"`\\[]?(transmissions|observations|ping_triggers|route_mask_changes)[\"`\\]]?"
+	return regexp.MustCompile(`(?i)` + verb + `\s+` + table + `\b`)
+}
+
+// TestServerHasNoPacketTableWrites enforces #215: the content-hash migration
+// used to UPDATE transmissions/observations and DELETE transmissions from the
+// server's mode=ro handle. Every statement failed, was logged as a collision,
+// and was retried at every start. cmd/server/ may not rewrite the packet
+// tables; that is the ingestor's job (cmd/ingestor/hash_migrate.go).
+//
+// UPDATE, DELETE and REPLACE are forbidden in every server source file. The
+// hash migration files (hash_migrate*.go) may not issue any statement at all:
+// no INSERT either, and no transaction or Exec on the connection.
+//
+// Known gap, outside this change: handlePostPacket (routes.go) INSERTs into
+// transmissions/observations on the same read-only handle. It is not part of
+// the hash migration and is left alone here; INSERT is therefore only
+// checked in the migration files.
+func TestServerHasNoPacketTableWrites(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	everywhere := []*regexp.Regexp{
+		txTableWritePattern(`UPDATE(\s+OR\s+\w+)?`),
+		txTableWritePattern(`DELETE\s+FROM`),
+		txTableWritePattern(`REPLACE\s+INTO`),
+	}
+	migrationOnly := []*regexp.Regexp{
+		txTableWritePattern(`INSERT\s+(OR\s+\w+\s+)?INTO`),
+		regexp.MustCompile(`\.conn\.(Begin|BeginTx|Exec|ExecContext|Prepare|PrepareContext)\s*\(`),
+	}
+	var violations []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(".", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		patterns := everywhere
+		if strings.HasPrefix(name, "hash_migrate") {
+			patterns = append(append([]*regexp.Regexp{}, everywhere...), migrationOnly...)
+		}
+		for _, p := range patterns {
+			if loc := p.FindIndex(b); loc != nil {
+				line := 1 + strings.Count(string(b[:loc[0]]), "\n")
+				violations = append(violations, fmt.Sprintf("%s:%d: %s", name, line, p.String()))
+			}
+		}
+	}
+	if len(violations) > 0 {
+		t.Errorf("cmd/server/ writes the packet tables (#215):\n  %s", strings.Join(violations, "\n  "))
+	}
+}
+
+// TestServerHasNoPacketTableWritesIsSensitive keeps the guard honest: it must
+// match the statements the old migration issued.
+func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
+	for _, stmt := range []string{
+		`UPDATE transmissions SET hash = ? WHERE id = ?`,
+		`UPDATE observations SET transmission_id = ? WHERE transmission_id = ?`,
+		`DELETE FROM transmissions WHERE id = ?`,
+		`update "observations" set x = 1`,
+		`UPDATE OR IGNORE observations SET transmission_id = 1`,
+	} {
+		matched := false
+		for _, p := range []*regexp.Regexp{
+			txTableWritePattern(`UPDATE(\s+OR\s+\w+)?`),
+			txTableWritePattern(`DELETE\s+FROM`),
+		} {
+			if p.MatchString(stmt) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("the guard does not match %q", stmt)
+		}
+	}
+}

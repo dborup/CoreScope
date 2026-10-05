@@ -129,10 +129,6 @@ test('test-all.sh registers itself through this test', () => {
 // it, and delete its entry here. Do not add a file to this list to get a new
 // test past the check below: register it instead.
 const KNOWN_UNREGISTERED = {
-  // red unit tests (stale after intended UI changes)
-  'test-packets.js': 'red on 1 assertion: collapsed group caret is #ph-caret-up, a real bug (#189); register once packets.js is fixed',
-  // need something CI's unit job does not have
-  // E2E
   'test-rx-coverage-mobile-nav-e2e.js': 'skips while clientRxCoverage is off (the default)',
 };
 

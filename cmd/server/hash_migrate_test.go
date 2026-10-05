@@ -41,13 +41,15 @@ func TestMigrateContentHashesAsync(t *testing.T) {
 		t.Error("new hash should be in index")
 	}
 
+	// The server never writes (#215): the DB keeps the stale hash until the
+	// ingestor's migration rewrites it.
 	var dbHash string
 	err = db.conn.QueryRow("SELECT hash FROM transmissions WHERE raw_hex = ?", rawHex).Scan(&dbHash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dbHash != correctHash {
-		t.Errorf("DB hash = %s, want %s", dbHash, correctHash)
+	if dbHash != wrongHash {
+		t.Errorf("DB hash = %s, want the stale %s: the server must not write", dbHash, wrongHash)
 	}
 }
 
@@ -78,7 +80,7 @@ func TestMigrateContentHashesAsync_NoOp(t *testing.T) {
 	}
 }
 
-func TestMigrateContentHashesAsync_CollisionUnionsObservedPathHashSizesWithoutChangingLegacyIndexes(t *testing.T) {
+func TestMigrateContentHashesAsync_CollisionUnionsObservedPathHashSizesAndMerges(t *testing.T) {
 	db := setupTestDBv2(t)
 	store := NewPacketStore(db, nil)
 
@@ -124,32 +126,31 @@ func TestMigrateContentHashesAsync_CollisionUnionsObservedPathHashSizesWithoutCh
 			authoritative.observedPathHashSizes(), wantSizes)
 	}
 
-	// Characterize, do not silently fix, the pre-existing duplicate-migration
-	// index bug. A separate change must remove the deleted row from every
-	// PacketStore index and re-parent its observations atomically.
-	if len(store.packets) != 2 || len(store.byPayloadType[PayloadGRP_TXT]) != 2 {
-		t.Fatalf("legacy in-memory cardinality changed: packets/payload = %d/%d, want 2/2",
+	// The duplicate is merged in memory (#215): one transmission remains, the
+	// lowest id, holding both observations.
+	if len(store.packets) != 1 || len(store.byPayloadType[PayloadGRP_TXT]) != 1 {
+		t.Fatalf("in-memory cardinality: packets/payload = %d/%d, want 1/1",
 			len(store.packets), len(store.byPayloadType[PayloadGRP_TXT]))
 	}
-	if got := store.QueryPackets(PacketQuery{Limit: 10}).Total; got != 2 {
-		t.Fatalf("legacy QueryPackets cardinality changed: got %d, want 2", got)
+	if got := store.QueryPackets(PacketQuery{Limit: 10}).Total; got != 1 {
+		t.Fatalf("QueryPackets cardinality: got %d, want 1", got)
 	}
-	if store.byTxID[2] == nil || store.byTxID[2].Observations[0].TransmissionID != 2 {
-		t.Fatal("legacy duplicate/observation ownership changed unexpectedly")
+	if store.byTxID[2] != nil || store.byTxID[1] == nil || len(store.byTxID[1].Observations) != 2 {
+		t.Fatal("the lowest id must survive with both observations")
+	}
+	for _, o := range store.byTxID[1].Observations {
+		if o.TransmissionID != 1 {
+			t.Fatalf("observation %d still names tx %d", o.ID, o.TransmissionID)
+		}
 	}
 
-	var txCount, canonicalObservationCount int
+	// ...and the DB is left to the ingestor: the server wrote nothing.
+	var txCount int
 	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM transmissions WHERE raw_hex = ?`, rawHex).Scan(&txCount); err != nil {
 		t.Fatal(err)
 	}
-	if txCount != 1 {
-		t.Fatalf("DB transmission rows = %d, want 1 after duplicate merge", txCount)
-	}
-	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM observations WHERE transmission_id = 1`).Scan(&canonicalObservationCount); err != nil {
-		t.Fatal(err)
-	}
-	if canonicalObservationCount != 2 {
-		t.Fatalf("DB canonical observations = %d, want 2 after duplicate merge", canonicalObservationCount)
+	if txCount != 2 {
+		t.Fatalf("DB transmission rows = %d, want the 2 the ingestor has not merged yet", txCount)
 	}
 }
 
@@ -194,8 +195,11 @@ func TestMigrateContentHashesAsync_CollisionIncludesAlreadyCurrentSurvivorEviden
 	if got := store.byHash[correctHash].observedPathHashSizes(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("authoritative observed path hash sizes = %v, want %v", got, want)
 	}
-	if len(store.packets) != 2 || store.QueryPackets(PacketQuery{Limit: 10}).Total != 2 {
-		t.Fatal("legacy in-memory duplicate cardinality changed unexpectedly")
+	if len(store.packets) != 1 || store.QueryPackets(PacketQuery{Limit: 10}).Total != 1 {
+		t.Fatal("the duplicate was not merged into the already-current survivor")
+	}
+	if store.byHash[correctHash].ID != 1 {
+		t.Fatalf("survivor = tx %d, want the already-current tx 1 (lowest id)", store.byHash[correctHash].ID)
 	}
 }
 
@@ -245,34 +249,24 @@ func TestMigrateContentHashesAsync_CollisionCarriesEvidenceAcrossBatches(t *test
 		t.Fatalf("authoritative observed path hash sizes = %v, want %v", got, want)
 	}
 
-	// Keep characterizing the separate legacy index bug rather than hiding it
-	// inside this evidence-only feature change.
-	if len(store.packets) != 3 || len(store.byPayloadType[PayloadGRP_TXT]) != 3 {
-		t.Fatalf("legacy in-memory cardinality changed: packets/payload = %d/%d, want 3/3",
+	// Three rows, one per batch, all merge into the lowest id, in memory.
+	if len(store.packets) != 1 || len(store.byPayloadType[PayloadGRP_TXT]) != 1 {
+		t.Fatalf("in-memory cardinality: packets/payload = %d/%d, want 1/1",
 			len(store.packets), len(store.byPayloadType[PayloadGRP_TXT]))
 	}
-	if got := store.QueryPackets(PacketQuery{Limit: 10}).Total; got != 3 {
-		t.Fatalf("legacy QueryPackets cardinality changed: got %d, want 3", got)
+	if got := store.QueryPackets(PacketQuery{Limit: 10}).Total; got != 1 {
+		t.Fatalf("QueryPackets cardinality: got %d, want 1", got)
 	}
-	for _, duplicateID := range []int{2, 3} {
-		duplicate := store.byTxID[duplicateID]
-		if duplicate == nil || len(duplicate.Observations) != 1 ||
-			duplicate.Observations[0].TransmissionID != duplicateID {
-			t.Fatalf("legacy duplicate %d observation ownership changed unexpectedly", duplicateID)
-		}
+	if survivor := store.byTxID[1]; survivor == nil || len(survivor.Observations) != 3 {
+		t.Fatal("the lowest id must survive with all three observations")
 	}
 
-	var txCount, canonicalObservationCount int
+	// The DB is the ingestor's: all three rows are still there.
+	var txCount int
 	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM transmissions WHERE raw_hex = ?`, rawHex).Scan(&txCount); err != nil {
 		t.Fatal(err)
 	}
-	if txCount != 1 {
-		t.Fatalf("DB transmission rows = %d, want 1 after duplicate merges", txCount)
-	}
-	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM observations WHERE transmission_id = 1`).Scan(&canonicalObservationCount); err != nil {
-		t.Fatal(err)
-	}
-	if canonicalObservationCount != 3 {
-		t.Fatalf("DB canonical observations = %d, want 3 after duplicate merges", canonicalObservationCount)
+	if txCount != 3 {
+		t.Fatalf("DB transmission rows = %d, want the 3 the ingestor has not merged yet", txCount)
 	}
 }

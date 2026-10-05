@@ -53,7 +53,9 @@ func leak202TxCharge(t *testing.T, s *PacketStore, id int) int64 {
 }
 
 // A hash migration that merges two duplicate transmissions must credit each
-// observation exactly once when the store later evicts them.
+// observation exactly once when the store later evicts them. The merge moves
+// the duplicate's observations to the survivor (#215), so the survivor holds
+// all five and the one transmission is evicted.
 func TestHashMigrationMerge_EvictionCreditsEveryObservationOnce_202(t *testing.T) {
 	db := setupTestDBv2(t)
 	store := NewPacketStore(db, nil)
@@ -92,22 +94,19 @@ func TestHashMigrationMerge_EvictionCreditsEveryObservationOnce_202(t *testing.T
 	if !store.WaitIndexesReady(30 * time.Second) {
 		t.Fatal("background index builds did not finish")
 	}
-	ballast := leak202TxCharge(t, store, 900)
-
 	migrateContentHashesAsync(store, 1, 0)
 	if !store.hashMigrationComplete.Load() {
 		t.Fatal("hash migration did not complete")
 	}
-	var dbTx int
-	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM transmissions WHERE raw_hex = ?`, rawHex).Scan(&dbTx); err != nil {
-		t.Fatal(err)
+	if len(store.packets) != 2 {
+		t.Fatalf("setup: %d transmissions after the merge, want the survivor and the ballast", len(store.packets))
 	}
-	if dbTx != 1 {
-		t.Fatalf("setup: %d duplicate rows left in the DB, want the merge to leave 1", dbTx)
-	}
+	// Measured after the migration: the ballast's stored hash is not the
+	// current formula either, so it is rehashed too, and its charge follows the
+	// hash length (#215).
+	ballast := leak202TxCharge(t, store, 900)
 
-	// Whatever the merge did in memory, trackedBytes must still equal what the
-	// store holds, before anything is evicted.
+	// trackedBytes must equal what the store holds, before anything is evicted.
 	if got, want := store.trackedBytes, leak202LiveCharge(store); got != want {
 		t.Fatalf("after the merge trackedBytes = %d, live charges sum to %d (drift %d)", got, want, got-want)
 	}

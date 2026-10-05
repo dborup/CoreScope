@@ -171,12 +171,80 @@
     // can mutate freely without leaking changes back to the input.
     return survivors.length ? mergedRest.concat(survivors) : mergedRest;
   }
+
+  // #152: loadChannels() replaces `channels` with the server snapshot, which
+  // knows nothing about state that only lives in this tab: unread counts,
+  // the user's PSK marks and labels, the preview of user:* rows, and live
+  // activity the WS path applied while the request was in flight.
+  // mergeWsAppendedIntoRest() above does this job for `messages` (#1498);
+  // this is its counterpart for `channels`.
+  //
+  // Which activity is newer is decided by a local sequence, never by
+  // comparing times: the WS path stamps a row with ++wsActivitySeq, and
+  // loadChannels() samples wsActivitySeq when its request starts. A
+  // browser Date.now() and the server's lastActivity come from different
+  // clocks, so comparing them depends on clock skew.
+  var wsActivitySeq = 0;
+
+  // user:* rows exist only in this browser (mergeUserChannels() creates them
+  // from stored keys with a placeholder preview), so their activity always
+  // comes from the previous list.
+  function isClientOnlyChannel(ch) {
+    return typeof ch.hash === 'string' && ch.hash.indexOf('user:') === 0;
+  }
+
+  // Carries client-only state from prevChannels onto freshChannels by hash.
+  // Only enriches rows freshChannels already contains: carrying a missing
+  // row over would resurrect channels the region filter just excluded.
+  // Returns a fresh array of fresh objects; never aliases or mutates input.
+  function mergeClientChannelState(freshChannels, prevChannels, seqAtRequestStart) {
+    if (!Array.isArray(freshChannels)) return [];
+    var prevByHash = new Map();
+    if (Array.isArray(prevChannels)) {
+      for (var i = 0; i < prevChannels.length; i++) {
+        var p = prevChannels[i];
+        if (p && p.hash != null) prevByHash.set(p.hash, p);
+      }
+    }
+    return freshChannels.map(function (c) {
+      var out = Object.assign({}, c);
+      var prev = out.hash != null ? prevByHash.get(out.hash) : undefined;
+      if (!prev) return out;
+      // Carried when present, including an explicit 0: undefined is not "read".
+      if (Object.prototype.hasOwnProperty.call(prev, 'unread')) out.unread = prev.unread;
+      // userAdded/userLabel are NOT carried from prev (F2, #152 follow-up):
+      // mergeUserChannels() runs before this, on the same fresh list, and
+      // re-derives both from storage on every load, so storage stays the
+      // single source of truth. Carrying a stale prev value let a removed
+      // key's label (and a stale userAdded) resurrect across a refresh.
+      var newerLive = typeof prev._wsSeq === 'number' && prev._wsSeq > seqAtRequestStart;
+      if (newerLive || isClientOnlyChannel(out)) {
+        // Moved together: a sender without its message reads as another message.
+        out.lastActivityMs = prev.lastActivityMs;
+        out.lastSender = prev.lastSender;
+        out.lastMessage = prev.lastMessage;
+        out.messageCount = prev.messageCount;
+        if (typeof prev._wsSeq === 'number') out._wsSeq = prev._wsSeq;
+      }
+      return out;
+    });
+  }
+
   let autoScroll = true;
   let nodeCache = {};
   let selectedNode = null;
   let observerIataById = {};
   let observerIataByName = {};
   let messageRequestId = 0;
+  // N1 (#152 follow-up): the id of the selectChannel() request whose load is
+  // still running (0 when none). Lets reconcileSelectionAfterChannelRefresh()
+  // know, when it remaps a user:* selection mid-load, that it must restart
+  // loading for the remapped hash — otherwise the in-flight request's own
+  // staleness check discards its result once selectedHash changes, and
+  // nothing else ever re-fetches, leaving the pane stuck on "Decrypting
+  // messages…". R4-3: an id rather than a boolean, so a superseded request
+  // finishing can't clear the flag of the request that replaced it.
+  let messageLoadPending = 0;
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
 
   function getSelectedRegionsSnapshot() {
@@ -248,6 +316,31 @@
 
   function reconcileSelectionAfterChannelRefresh() {
     if (!selectedHash || channels.some(ch => ch.hash === selectedHash)) return false;
+    // F3 (#152 follow-up): a PSK whose name collides with a server-known or
+    // newly-approved shared channel is matched by name in mergeUserChannels()
+    // instead of getting its own user:* row, so the user:* hash this
+    // conversation opened under disappears from the fresh list even though
+    // the conversation is still live. Remap to the row mergeUserChannels()
+    // annotated instead of closing the conversation.
+    if (selectedHash.indexOf('user:') === 0) {
+      var pskName = selectedHash.substring(5);
+      var remapped = channels.find(function (ch) { return ch.userAdded === true && ch.name === pskName; });
+      if (remapped) {
+        // N1 (#152 follow-up): if a decrypt for the old hash was still in
+        // flight at the moment of this remap, it will discard its own
+        // result (isStaleMessageRequest() sees selectedHash change under
+        // it) and nothing else ever restarts the fetch — the pane would be
+        // stuck on "Decrypting messages…" forever. Restart loading for the
+        // remapped hash in that case. A quiet remap (no decrypt in flight)
+        // still leaves messages untouched, as before.
+        var hadPendingLoad = messageLoadPending !== 0 && messageLoadPending === messageRequestId;
+        selectedHash = remapped.hash;
+        history.replaceState(null, '', `#/channels/${encodeURIComponent(selectedHash)}`);
+        renderChannelList();
+        if (hadPendingLoad) selectChannel(selectedHash);
+        return false;
+      }
+    }
     selectedHash = null;
     messages = [];
     history.replaceState(null, '', '#/channels');
@@ -671,13 +764,71 @@
     }
   }
 
+  // Removes a user-stored channel key (and its label) and updates the
+  // channel list/selection to match. Extracted from the remove-button click
+  // handler so it's directly testable; the handler still owns the confirm()
+  // gate.
+  function removeUserChannelKey(channelHash) {
+    if (!channelHash) return;
+    var ch = channels.find(function (c) { return c.hash === channelHash; });
+    var chName = channelHash.startsWith('user:')
+      ? channelHash.substring(5)
+      : (ch && ch.name) || channelHash;
+    ChannelDecrypt.removeKey(chName);
+    if (channelHash.startsWith('user:')) {
+      // Pure user-added channel — drop from the list entirely.
+      channels = channels.filter(function (c) { return c.hash !== channelHash; });
+      if (selectedHash === channelHash) {
+        selectedHash = null;
+        messages = [];
+        history.replaceState(null, '', '#/channels');
+        var msgEl2 = document.getElementById('chMessages');
+        if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
+        var header2 = document.getElementById('chHeader');
+        if (header2) header2.querySelector('.ch-header-text').textContent = 'Select a channel';
+      }
+    } else if (ch) {
+      // Server-known channel: keep the row, just unmark as user-added so
+      // the close button disappears until they re-add a key. // EMOJI-OK: prior glyph reference
+      ch.userAdded = false;
+      // F2 (#152 follow-up): also clear the label now. mergeClientChannelState()
+      // no longer carries userLabel from the previous list either way, but
+      // clearing it here means the UI stops showing it immediately instead
+      // of waiting for the next channel-list refresh.
+      delete ch.userLabel;
+      // If this was the selected channel, clear decrypted messages since
+      // the key is gone — they can't be re-decrypted without re-adding it.
+      if (selectedHash === channelHash) {
+        messages = [];
+        var msgEl2 = document.getElementById('chMessages');
+        if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Key removed — add a key to decrypt messages</div>';
+      }
+    }
+    renderChannelList();
+  }
+
   // Fetch and decrypt GRP_TXT packets client-side (M5: delta fetch + cache)
   async function fetchAndDecryptChannel(keyHex, channelHashByte, channelName, opts) {
     opts = opts || {};
     var keyBytes = ChannelDecrypt.hexToBytes(keyHex);
 
+    // N2 (#152 follow-up): the cache must be region-scoped. A channel's
+    // decrypted message set depends on which observers the current region
+    // filter includes, so a cache entry primed under one region (e.g. "All"
+    // or SJC) must never answer a fetch for a different region (e.g. OAK or
+    // MRY). ChannelDecrypt owns the key format so removeKey() can clear
+    // every region of a channel.
+    var rp = RegionFilter.getRegionParam();
+    var cacheKey = ChannelDecrypt.channelCacheKey(channelName || String(channelHashByte), rp);
+    // A stale request (superseded by a newer one, or no longer the current
+    // selection/region by the time a write below would happen) must not
+    // persist its possibly-incomplete evidence into the cache.
+    function setCacheIfFresh(key, msgs, ts, count) {
+      if (opts.isStale && opts.isStale()) return;
+      ChannelDecrypt.setCache(key, msgs, ts, count);
+    }
+
     // M5: Check cache first — serve cached messages immediately
-    var cacheKey = channelName || String(channelHashByte);
     var cached = ChannelDecrypt.getCache(cacheKey);
     var cachedMsgs = cached ? cached.messages : [];
     var lastTs = cached ? cached.lastTimestamp : '';
@@ -690,7 +841,6 @@
     }
 
     // Fetch packets from API — get all payload_type=5 (GRP_TXT/CHAN)
-    var rp = RegionFilter.getRegionParam();
     var qs = (rp ? '&region=' + encodeURIComponent(rp) : '');
     var data;
     try {
@@ -737,7 +887,7 @@
         // Nothing new to decrypt. Persist only when the API enriched the
         // evidence so legacy caches gain the badge on this render.
         if (reconciledCache.changed) {
-          ChannelDecrypt.setCache(cacheKey, cachedMsgs, lastTs, totalCandidates);
+          setCacheIfFresh(cacheKey, cachedMsgs, lastTs, totalCandidates);
         }
         return { messages: cachedMsgs, fromCache: true };
       }
@@ -746,7 +896,7 @@
       var newDecrypted = await decryptCandidates(keyBytes, newCandidates);
       if (newDecrypted.wrongKey) {
         if (reconciledCache.changed) {
-          ChannelDecrypt.setCache(cacheKey, cachedMsgs, lastTs, totalCandidates);
+          setCacheIfFresh(cacheKey, cachedMsgs, lastTs, totalCandidates);
         }
         return { messages: cachedMsgs, wrongKey: true };
       }
@@ -754,12 +904,18 @@
       // Merge: cached + new, deduplicate by packetHash, sort chronologically
       var merged = deduplicateAndMerge(cachedMsgs, newDecrypted.messages);
       var newLastTs = merged.length ? merged[merged.length - 1].timestamp : lastTs;
-      ChannelDecrypt.setCache(cacheKey, merged, newLastTs, totalCandidates);
+      setCacheIfFresh(cacheKey, merged, newLastTs, totalCandidates);
       return { messages: merged, deltaCount: newDecrypted.messages.length };
     }
 
     if (candidates.length === 0) {
-      return { messages: cachedMsgs, empty: true };
+      // N2 (#152 follow-up): zero candidates for the current (region-scoped)
+      // fetch must render as empty, never leftover content from a stale or
+      // foreign-region cache entry. R4-4: drop this region's entry too, so
+      // the next visit doesn't flash the outdated history before its fetch
+      // answers — unless a newer request owns the cache by now.
+      if (cached && !(opts.isStale && opts.isStale())) ChannelDecrypt.deleteCache(cacheKey);
+      return { messages: [], empty: true };
     }
 
     // Full decrypt
@@ -778,7 +934,7 @@
 
     // M5: Cache results
     var newLastTimestamp = decrypted.length ? decrypted[decrypted.length - 1].timestamp : '';
-    ChannelDecrypt.setCache(cacheKey, decrypted, newLastTimestamp, totalCandidates);
+    setCacheIfFresh(cacheKey, decrypted, newLastTimestamp, totalCandidates);
 
     return { messages: decrypted };
   }
@@ -1014,6 +1170,20 @@
     regionChangeHandler = RegionFilter.onChange(function () {
       loadChannels(true).then(async function () {
         if (!selectedHash) return;
+        var selCh = channels.find(function (c) { return c.hash === selectedHash; });
+        if (selCh && selCh.encrypted) {
+          // F1 (#152 follow-up): an encrypted (user:* or key-matched) row has
+          // no REST messages for refreshMessages() to refetch — it used to
+          // just return, which left an in-flight decrypt stuck on
+          // "Decrypting messages…" once its own staleness check discarded
+          // the result (the region changed under it), and left a finished
+          // decrypt showing the previous region's messages. Re-run the
+          // selection instead: it redoes the key lookup and decrypt fetch
+          // for the new region without closing the conversation
+          // (selectedHash/URL stay put).
+          await selectChannel(selectedHash);
+          return;
+        }
         await refreshMessages({ regionSwitch: true, forceNoCache: true });
       });
     });
@@ -1046,10 +1216,9 @@
         view: _initUrlParams.get('view'),
         onApproved: function () {
           invalidateApiCache('/channels');
-          loadChannels(true).then(function () {
-            mergeUserChannels();
-            renderChannelList();
-          });
+          // loadChannels() merges the user's PSK rows itself (#152), before
+          // it reconciles the selection.
+          loadChannels(true);
         }
       });
     }
@@ -1311,11 +1480,11 @@
     loadObserverRegions();
     loadChannels().then(async function () {
       // Also load user-added encrypted channels into the sidebar.
-      // mergeUserChannels() mutates `channels` (marks userAdded, appends
-      // PSK-only entries) AFTER loadChannels() already rendered — so we
-      // MUST re-render here, otherwise the My Channels section never
-      // appears on first load when the route has no specific channel
-      // hash (regression caught by test-channel-issue-1111-e2e.js, case 2).
+      // Since #152 a successful loadChannels() has already merged and
+      // rendered them, so this is an idempotent re-render there. It stays
+      // for the failure path: when /channels fails, loadChannels() merges
+      // nothing, and this is what still lists My Channels (the section
+      // test-channel-issue-1111-e2e.js case 2 requires on first load).
       mergeUserChannels();
       renderChannelList();
       if (routeParam) await selectChannel(routeParam);
@@ -1428,37 +1597,12 @@
         // The localStorage key is the channel name. For user:-prefixed entries
         // strip the prefix; for server-known channels look up the channel
         // object so we use its display name (the hash itself isn't the key).
-        var ch = channels.find(function (c) { return c.hash === channelHash; });
-        var chName = channelHash.startsWith('user:')
+        var confirmCh = channels.find(function (c) { return c.hash === channelHash; });
+        var confirmName = channelHash.startsWith('user:')
           ? channelHash.substring(5)
-          : (ch && ch.name) || channelHash;
-        if (!confirm('Remove channel "' + chName + '"?\n\nThis will permanently remove the key from this browser and clear cached messages. You will need to re-enter the key to decrypt this channel again.')) return;
-        ChannelDecrypt.removeKey(chName);
-        if (channelHash.startsWith('user:')) {
-          // Pure user-added channel — drop from the list entirely.
-          channels = channels.filter(function (c) { return c.hash !== channelHash; });
-          if (selectedHash === channelHash) {
-            selectedHash = null;
-            messages = [];
-            history.replaceState(null, '', '#/channels');
-            var msgEl2 = document.getElementById('chMessages');
-            if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
-            var header2 = document.getElementById('chHeader');
-            if (header2) header2.querySelector('.ch-header-text').textContent = 'Select a channel';
-          }
-        } else if (ch) {
-          // Server-known channel: keep the row, just unmark as user-added so
-          // the close button disappears until they re-add a key. // EMOJI-OK: prior glyph reference
-          ch.userAdded = false;
-          // If this was the selected channel, clear decrypted messages since
-          // the key is gone — they can't be re-decrypted without re-adding it.
-          if (selectedHash === channelHash) {
-            messages = [];
-            var msgEl2 = document.getElementById('chMessages');
-            if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Key removed — add a key to decrypt messages</div>';
-          }
-        }
-        renderChannelList();
+          : (confirmCh && confirmCh.name) || channelHash;
+        if (!confirm('Remove channel "' + confirmName + '"?\n\nThis will permanently remove the key from this browser and clear cached messages. You will need to re-enter the key to decrypt this channel again.')) return;
+        removeUserChannelKey(channelHash);
         return;
       }
       // Color clear button — remove color without opening picker (#681)
@@ -1636,6 +1780,7 @@
           ch.lastActivityMs = Date.now();
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
+          ch._wsSeq = ++wsActivitySeq; // #152: see mergeClientChannelState()
           channelListDirty = true;
         } else if (isFirstObservation) {
           // New channel we haven't seen
@@ -1646,6 +1791,7 @@
             lastActivityMs: Date.now(),
             lastSender: sender,
             lastMessage: truncate(displayText, 100),
+            _wsSeq: ++wsActivitySeq,
           });
           channelListDirty = true;
         }
@@ -1853,7 +1999,21 @@
     if (panel) panel.remove();
   }
 
-  async function loadChannels(silent) {
+  // #154: overlapping loadChannels() calls (region changes, the
+  // show-encrypted toggle, approval, init()) can answer out of order. Only
+  // the newest request renders; an older response is dropped without a
+  // render or a reconcile. Same idea as messageRequestId above.
+  let channelsRequestId = 0;
+  let latestChannelsLoad = null;
+
+  function loadChannels(silent) {
+    latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent);
+    return latestChannelsLoad;
+  }
+
+  async function loadChannelsFor(requestId, silent) {
+    // #152: WS activity stamped after this point is newer than the snapshot.
+    const seqAtRequestStart = wsActivitySeq;
     try {
       const rp = RegionFilter.getRegionParam();
       var showEnc = localStorage.getItem('channels-show-encrypted') === 'true';
@@ -1862,19 +2022,33 @@
       if (showEnc) params.push('includeEncrypted=true');
       const qs = params.length ? '?' + params.join('&') : '';
       const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
-      channels = (data.channels || []).map(ch => {
-        ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
-        return ch;
-      });
+      // #154: a newer request owns the list. Resolve when it is done, so a
+      // caller's follow-up (init()'s deep link, the region handler) sees the
+      // list that actually renders.
+      if (requestId !== channelsRequestId) return latestChannelsLoad;
+      const prevChannels = channels;
+      // Copies: api() hands the same cached objects back on a TTL hit, and
+      // mergeUserChannels() below mutates rows.
+      channels = (data.channels || []).map(ch => Object.assign({}, ch, {
+        lastActivityMs: ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0
+      }));
       // Approved shared channels are listed for everyone, even before they
       // carry traffic.
       if (window.ChannelProposals) {
         channels = window.ChannelProposals.mergeApprovedChannels(channels, data.approvedChannels);
       }
+      // #152: re-derive the user's PSK rows from storage, then carry the
+      // tab's own state over from the previous list. mergeUserChannels()
+      // must run first so its user:* rows get their unread and preview back,
+      // and both must run before reconcileSelectionAfterChannelRefresh(),
+      // which closes the conversation when selectedHash is not listed.
+      if (typeof ChannelDecrypt !== 'undefined' && ChannelDecrypt) mergeUserChannels();
+      channels = mergeClientChannelState(channels, prevChannels, seqAtRequestStart);
       channels.sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
     } catch (e) {
+      if (requestId !== channelsRequestId) return latestChannelsLoad;
       if (!silent) {
         const el = document.getElementById('chList');
         if (el) el.innerHTML = `<div class="ch-empty">Failed to load channels</div>`;
@@ -1903,6 +2077,13 @@
     if (name) return name;
     if (fallback) return fallback;
     return 'Channel ' + (typeof formatHashHex === 'function' ? formatHashHex(ch.hash) : ch.hash);
+  }
+
+  // Unread badge for a channel row, desktop and mobile (#1029, #155).
+  function renderUnreadBadge(ch) {
+    if (!(ch.unread && ch.unread > 0)) return '';
+    const count = escapeHtml(String(ch.unread));
+    return '<span class="ch-unread-badge" data-unread-channel="' + escapeHtml(ch.hash) + '" title="' + count + ' new" aria-label="' + count + ' unread">' + (ch.unread > 99 ? '99+' : count) + '</span>';
   }
 
   // #1034 PR1: render a single channel row (used by all sidebar sections).
@@ -1970,15 +2151,13 @@
       : '';
     const userBadge = isUserAdded ? ' <span class="ch-user-badge" title="You added this key" aria-label="Your key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-key"/></svg></span>' : '';
     const sharedBadge = isShared ? ' <span class="ch-shared-badge" title="Shared channel approved for everyone on this site">Shared</span>' : '';
-    const unreadBadge = (ch.unread && ch.unread > 0)
-      ? ' <span class="ch-unread-badge" data-unread-channel="' + escapeHtml(ch.hash) + '" title="' + ch.unread + ' new" aria-label="' + ch.unread + ' unread">' + (ch.unread > 99 ? '99+' : ch.unread) + '</span>'
-      : '';
+    const unreadBadge = renderUnreadBadge(ch);
 
     return `<button class="ch-item${sel}${encClass}" data-hash="${escapeHtml(ch.hash)}"${borderStyle} type="button" role="option" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}"${isEncrypted ? ' data-encrypted="true"' : ''}${managesLocalKey ? ' data-user-added="true"' : ''}${isShared ? ' data-shared="true"' : ''}>
       <div class="ch-badge" style="background:${color}" aria-hidden="true">${badgeIcon ? badgeIcon : escapeHtml(abbr)}</div>
       <div class="ch-item-body">
         <div class="ch-item-top">
-          <span class="ch-item-name">${escapeHtml(name)}</span>${sharedBadge}${userBadge}${unreadBadge}
+          <span class="ch-item-name">${escapeHtml(name)}</span>${sharedBadge}${userBadge}${unreadBadge ? ' ' + unreadBadge : ''}
           <span class="ch-color-dot" data-channel="${escapeHtml(ch.hash)}"${dotStyle} title="Change channel color" aria-label="Change color for ${escapeHtml(name)}"></span>${chColor ? '<span class="ch-color-clear" data-channel="' + escapeHtml(ch.hash) + '" title="Clear color" aria-label="Clear color for ' + escapeHtml(name) + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></span>' : ''}
           <span class="ch-item-time" data-channel-hash="${escapeHtml(ch.hash)}">${time}</span>${shareBtn}${removeBtn}
         </div>
@@ -2038,6 +2217,7 @@
         '<div class="ch-row-line1">' +
           '<span class="ch-row-name">' + escapeHtml(name) + '</span>' +
           '<span class="ch-row-time">' + escapeHtml(time) + '</span>' +
+          renderUnreadBadge(ch) +
         '</div>' +
         '<div class="ch-row-preview">' + escapeHtml(preview) + '</div>' +
       '</div>' +
@@ -2270,8 +2450,21 @@
   }
 
   async function selectChannel(hash, decryptOpts) {
-    const rp = RegionFilter.getRegionParam() || '';
-    const request = beginMessageRequest(hash, rp);
+    const request = beginMessageRequest(hash, RegionFilter.getRegionParam() || '');
+    // R4-3: mark this request's load as pending before its first await
+    // (computeChannelHash), so a remap at any point of it restarts loading.
+    // Only the request that owns the flag may clear it.
+    messageLoadPending = request.id;
+    try {
+      return await loadSelectedChannel(request, decryptOpts);
+    } finally {
+      if (messageLoadPending === request.id) messageLoadPending = 0;
+    }
+  }
+
+  async function loadSelectedChannel(request, decryptOpts) {
+    const hash = request.hash;
+    const rp = request.regionParam;
     // #1498: clear messages BEFORE flipping selectedHash so any WS-pushed
     // messages from the previously-viewed channel can't survive into the
     // new channel's view via mergeWsAppendedIntoRest(). Messages don't
@@ -2297,6 +2490,9 @@
 
     // Shared helper: fetch, decrypt, and render messages for a channel key (M5: cache-first)
     async function decryptAndRender(keyHex, channelHashByte, channelName) {
+      // R4-3: callers reach this after awaiting computeChannelHash; a
+      // superseded request must not paint over the current one's view.
+      if (isStaleMessageRequest(request)) return { stale: true };
       msgEl.innerHTML = '<div class="ch-loading">Decrypting messages…</div>';
       var result = await fetchAndDecryptChannel(keyHex, channelHashByte, channelName, {
         onCacheHit: function (cachedMsgs) {
@@ -2310,7 +2506,10 @@
             renderMessages();
             scrollToBottom();
           }
-        }
+        },
+        // N2 (#152 follow-up): a superseded request must not persist its
+        // evidence into the (now region-scoped) decrypt cache.
+        isStale: function () { return isStaleMessageRequest(request); }
       });
       if (isStaleMessageRequest(request)) return { stale: true };
       if (result.wrongKey) {
@@ -2357,6 +2556,8 @@
         var kh = storedKeys[kn];
         var kb = ChannelDecrypt.hexToBytes(kh);
         var hb = await ChannelDecrypt.computeChannelHash(kb);
+        // #163: a newer request owns the pane; stop hashing keys for it.
+        if (isStaleMessageRequest(request)) return;
         if (String(hb) === String(hash) || String(ch.hash) === String(hb)) {
           await decryptAndRender(kh, hb, kn);
           return;
@@ -2401,6 +2602,9 @@
       }
     }
 
+    // #163: the encrypted-ness lookup above falls through here when it
+    // fails, which can be after a newer request took over the pane.
+    if (isStaleMessageRequest(request)) return;
     msgEl.innerHTML = '<div class="ch-loading">Loading messages…</div>';
 
     try {
@@ -2595,6 +2799,7 @@
   window._channelsSelectChannelForTest = selectChannel;
   window._channelsRefreshMessagesForTest = refreshMessages;
   window._channelsMergeWsAppendedIntoRestForTest = mergeWsAppendedIntoRest;
+  window._channelsMergeClientChannelStateForTest = mergeClientChannelState;
   window._channelsNormalizeObservedPathHashSizesForTest = normalizeObservedPathHashSizes;
   window._channelsUnionObservedPathHashSizesForTest = unionObservedPathHashSizes;
   window._channelsRenderObservedPathHashBadgeForTest = renderObservedPathHashBadge;
@@ -2606,6 +2811,7 @@
   window._channelsBeginMessageRequestForTest = beginMessageRequest;
   window._channelsIsStaleMessageRequestForTest = isStaleMessageRequest;
   window._channelsReconcileSelectionForTest = reconcileSelectionAfterChannelRefresh;
+  window._channelsRemoveKeyHandlerForTest = removeUserChannelKey;
   window._channelsGetStateForTest = function () {
     return { channels: channels, messages: messages, selectedHash: selectedHash };
   };
