@@ -582,6 +582,15 @@
 
   let directNode = null; // set when navigating directly to #/nodes/:pubkey
 
+  // #259: the full-screen node view's Escape-to-go-back handler. Module level
+  // so every init() registers the same reference and destroy() can remove it.
+  function _nodesEsc(e) {
+    if (e.key === 'Escape') {
+      document.removeEventListener('keydown', _nodesEsc);
+      location.hash = '#/nodes';
+    }
+  }
+
   let regionChangeHandler = null;
 
   function init(app, routeParam) {
@@ -606,13 +615,12 @@
       // would stack listeners.
       document.getElementById('nodeFullBody').addEventListener('click', onFullBodyClick);
       loadFullNode(directNode);
-      // Escape to go back to nodes list
-      document.addEventListener('keydown', function nodesEsc(e) {
-        if (e.key === 'Escape') {
-          document.removeEventListener('keydown', nodesEsc);
-          location.hash = '#/nodes';
-        }
-      });
+      // Escape to go back to nodes list. #259: one listener, not one per visit.
+      // It used to be a fresh closure per init() that only unhooked itself when
+      // Escape fired, so node A -> B -> C stacked three and one Escape wrote the
+      // same hash three times. _nodesEsc is a stable module-level reference, so
+      // a repeat add is a DOM no-op, and destroy() takes it off again.
+      document.addEventListener('keydown', _nodesEsc);
       return;
     }
 
@@ -1250,6 +1258,9 @@
   function destroy() {
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
+    // #259: the full-screen view's Escape handler is document-level, so it
+    // outlives the page's DOM unless it is removed here.
+    document.removeEventListener('keydown', _nodesEsc);
     closeDetailView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
