@@ -31,6 +31,27 @@ func aiSeries(interval time.Duration, at ...float64) []advertIntervalSample {
 	return out
 }
 
+// aiGaps builds samples from aiBase separated by the given gaps, oldest
+// first, the sender clock as in aiSeries.
+func aiGaps(gaps ...time.Duration) []advertIntervalSample {
+	heard := aiBase
+	out := []advertIntervalSample{{senderTS: heard.Unix() - 2, heard: heard}}
+	for _, g := range gaps {
+		heard = heard.Add(g)
+		out = append(out, advertIntervalSample{senderTS: heard.Unix() - 2, heard: heard})
+	}
+	return out
+}
+
+// aiRepeat is n copies of gap.
+func aiRepeat(gap time.Duration, n int) []time.Duration {
+	out := make([]time.Duration, n)
+	for i := range out {
+		out[i] = gap
+	}
+	return out
+}
+
 func aiInts(from, to int) []float64 {
 	var out []float64
 	for i := from; i <= to; i++ {
@@ -135,6 +156,58 @@ func TestEstimateAdvertInterval_MultipleLimit(t *testing.T) {
 	// A 5x gap instead: 7 of the 8 gaps fit.
 	s = aiSeries(12*time.Hour, 0, 1, 2, 3, 8, 9, 10, 11, 12)
 	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 12*3600, advertConfidenceHigh, 9, 7)
+}
+
+// A raised setting: the new interval is 2-4x the old one, so the old one
+// explains every new gap as missed adverts. A run of gaps at the same
+// multiple is the setting, not adverts missed in a row: once the newest 3
+// are, the estimate uses the adverts since the newest gap at the old
+// interval. Setting either interval re-arms its timer at once
+// (src/helpers/CommonCLI.cpp:491-492, 500-501), so the gap at the change is
+// between the new interval and the new plus the old one.
+func TestEstimateAdvertInterval_RaisedInterval(t *testing.T) {
+	H, M := time.Hour, time.Minute
+	series := func(parts ...[]time.Duration) []advertIntervalSample {
+		var gaps []time.Duration
+		for _, p := range parts {
+			gaps = append(gaps, p...)
+		}
+		return aiGaps(gaps...)
+	}
+	cases := []struct {
+		name     string
+		class    advertIntervalClass
+		s        []advertIntervalSample
+		interval int64
+		conf     string
+		samples  int
+		gaps     int
+	}{
+		// 10 adverts 12 h apart, then 10 more 24 h apart.
+		{"flood 12 h -> 24 h", advertIntervalFlood, series(aiRepeat(12*H, 9), aiRepeat(24*H, 10)), 24 * 3600, advertConfidenceHigh, 11, 10},
+		{"flood 12 h -> 47 h", advertIntervalFlood, series(aiRepeat(12*H, 9), aiRepeat(47*H, 10)), 47 * 3600, advertConfidenceHigh, 11, 10},
+		{"flood 24 h -> 47 h", advertIntervalFlood, series(aiRepeat(24*H, 9), aiRepeat(47*H, 10)), 47 * 3600, advertConfidenceHigh, 11, 10},
+		{"zero-hop 60 -> 120 min", advertIntervalZeroHop, series(aiRepeat(60*M, 9), aiRepeat(120*M, 10)), 120 * 60, advertConfidenceHigh, 11, 10},
+		{"zero-hop 120 -> 240 min", advertIntervalZeroHop, series(aiRepeat(120*M, 9), aiRepeat(240*M, 10)), 240 * 60, advertConfidenceHigh, 11, 10},
+		// The timer re-armed when set: the gap at the change is 24 h + 6 h,
+		// irregular for both intervals.
+		{"flood 12 h -> 24 h, re-armed when set", advertIntervalFlood, series(aiRepeat(12*H, 9), []time.Duration{30 * H}, aiRepeat(24*H, 9)), 24 * 3600, advertConfidenceHigh, 11, 9},
+		// A missed advert (48 h) and a manual one (10 h + 14 h) after the
+		// change: the newest 3 gaps that fit 12 h are still all 2x it.
+		{"flood 12 h -> 24 h, missed and manual adverts", advertIntervalFlood, series(aiRepeat(12*H, 9), []time.Duration{24 * H, 24 * H, 48 * H, 24 * H, 10 * H, 14 * H, 24 * H, 24 * H}), 24 * 3600, advertConfidenceHigh, 9, 6},
+		// Three in a row at 2x: estimated from those three.
+		{"flood 12 h -> 24 h, 3 new gaps", advertIntervalFlood, series(aiRepeat(12*H, 16), aiRepeat(24*H, 3)), 24 * 3600, advertConfidenceMedium, 4, 3},
+		// Two in a row are as likely two missed adverts: the interval stays.
+		{"flood 12 h, last 2 gaps 2x", advertIntervalFlood, series(aiRepeat(12*H, 17), aiRepeat(24*H, 2)), 12 * 3600, advertConfidenceHigh, 20, 19},
+		// Lowered (47 h -> 12 h): 12 h explains the old 47 h gaps as 4x
+		// once it is a candidate, as before.
+		{"flood 47 h -> 12 h", advertIntervalFlood, series(aiRepeat(47*H, 14), aiRepeat(12*H, 5)), 12 * 3600, advertConfidenceHigh, 20, 19},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			aiCheck(t, estimateAdvertInterval(c.s, c.class), c.interval, c.conf, c.samples, c.gaps)
+		})
+	}
 }
 
 // A candidate must be seen directly in a quarter of the gaps, not only
