@@ -7,8 +7,9 @@
  * -> C left three live listeners on `document` and one Escape then wrote the
  * same hash three times.
  *
- * This test drives the real nodes.js in a vm sandbox with a counting
- * document.addEventListener / removeEventListener, runs the router's
+ * This test drives the real nodes.js in a vm sandbox whose
+ * document.addEventListener / removeEventListener record the live listeners and
+ * deduplicate on (type, handler) exactly as the DOM does. It runs the router's
  * destroy/init cycle for three node pages and asserts:
  * - at most one document `keydown` listener survives;
  * - Escape writes location.hash exactly once;
@@ -65,7 +66,13 @@ function loadNodes() {
       createElement: () => el('created'),
       head: { appendChild: noop },
       getElementById: (id) => el(id),
-      addEventListener: (type, fn) => { docListeners.push({ type, fn }); },
+      // Deduplicated on (type, fn) exactly as the DOM does, so a stable
+      // handler reference registered twice counts once — the test measures
+      // real listener count, not add() calls.
+      addEventListener: (type, fn) => {
+        if (docListeners.some((l) => l.type === type && l.fn === fn)) return;
+        docListeners.push({ type, fn });
+      },
       removeEventListener: (type, fn) => {
         const i = docListeners.findIndex((l) => l.type === type && l.fn === fn);
         if (i >= 0) docListeners.splice(i, 1);
