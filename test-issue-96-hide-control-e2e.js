@@ -10,6 +10,11 @@
  * - hideControl in the URL wins over the saved choice;
  * - a direct link to one CONTROL packet still opens it while the filter is on;
  * - at a phone width the checkbox is reachable through the Filters toggle.
+ * #211 review:
+ * - an explicit hideControl=0 over a saved "1" survives the page's own URL
+ *   rewrite and a reload;
+ * - the empty-list note names CONTROL only when hiding CONTROL emptied it;
+ * - a localStorage.setItem that throws does not stop the checkbox.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js
  */
@@ -42,6 +47,15 @@ async function shownCount(page) {
   const m = /\((\d+)\)/.exec(txt || '');
   if (!m) throw new Error('no count in list header: ' + txt);
   return Number(m[1]);
+}
+
+// Load url as a new document and wait for the empty-list row.
+async function openEmpty(page, url) {
+  await page.goto('about:blank');
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#fHideControl', { state: 'attached', timeout: 15000 });
+  await page.waitForFunction(() => /No packets/.test(document.querySelector('#pktBody td')?.textContent || ''), null, { timeout: 15000 });
+  return (await page.textContent('#pktBody td')).trim();
 }
 
 async function hashQuery(page) {
@@ -125,6 +139,54 @@ async function hashQuery(page) {
     await open(page, LIST + '&hideControl=1');
     assert(await page.isChecked('#fHideControl'), 'URL hideControl=1 did not check the box');
     assert((await shownCount(page)) === countAll - controls.length, 'CONTROL packets listed with hideControl=1');
+  });
+
+  await step('#211: an explicit hideControl=0 over a saved "1" survives the URL rewrite and a reload', async () => {
+    await page.evaluate((k) => localStorage.setItem(k, '1'), PREF_KEY);
+    await open(page, LIST + '&hideControl=0');
+    assert(!(await page.isChecked('#fHideControl')), 'URL hideControl=0 did not uncheck the box');
+    assert((await shownCount(page)) === countAll, 'CONTROL packets hidden with hideControl=0');
+    // renderLeft() rewrites the URL on load; the override must still be there.
+    let q = await hashQuery(page);
+    assert(q.hideControl === '0', 'hideControl=0 dropped by the URL rewrite: ' + JSON.stringify(q));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('table tbody tr[data-hash]', { timeout: 15000 });
+    assert(!(await page.isChecked('#fHideControl')), 'the saved "1" won after a reload of the same URL');
+    assert((await shownCount(page)) === countAll, 'CONTROL packets hidden after a reload of the same URL');
+    q = await hashQuery(page);
+    assert(q.hideControl === '0', 'hideControl=0 lost after the reload: ' + JSON.stringify(q));
+    assert(await page.evaluate((k) => localStorage.getItem(k), PREF_KEY) === '1', 'the URL override changed the saved choice');
+  });
+
+  await step('#211: the empty-list note names CONTROL only when hiding CONTROL emptied the list', async () => {
+    const onlyControl = await openEmpty(page, LIST + '&hideControl=1&filter=' + encodeURIComponent('type == CONTROL'));
+    assert(onlyControl === 'No packets found (CONTROL packets are hidden)', 'expression matching only CONTROL: ' + onlyControl);
+    const nothing = await openEmpty(page, LIST + '&hideControl=1&filter=' + encodeURIComponent('snr > 999'));
+    assert(nothing === 'No packets found', 'expression matching nothing blamed CONTROL: ' + nothing);
+  });
+
+  await step('#211: a localStorage.setItem that throws does not stop the checkbox', async () => {
+    const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await ctx2.addInitScript((k) => {
+      const orig = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === k) throw new DOMException('quota exceeded', 'QuotaExceededError');
+        return orig.call(this, key, value);
+      };
+    }, PREF_KEY);
+    const p = await ctx2.newPage();
+    const errors = [];
+    p.on('pageerror', (e) => errors.push(e.message));
+    await open(p, LIST);
+    await p.check('#fHideControl');
+    await p.waitForFunction((n) => {
+      const m = /\((\d+)\)/.exec(document.querySelector('#pktLeft .count')?.textContent || '');
+      return m && Number(m[1]) === n;
+    }, countAll - controls.length, { timeout: 5000 });
+    const q = await hashQuery(p);
+    assert(q.hideControl === '1', 'hideControl=1 not in the URL: ' + JSON.stringify(q));
+    assert(!errors.some((m) => /quota/i.test(m)), 'the storage error escaped the handler: ' + errors.join(' | '));
+    await ctx2.close();
   });
 
   await step('phone width: the checkbox is reachable through the Filters toggle and fits the screen', async () => {
