@@ -428,6 +428,13 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// OpenAPI spec + Swagger UI
 	r.HandleFunc("/api/spec", s.handleOpenAPISpec).Methods("GET")
 	r.HandleFunc("/api/docs", s.handleSwaggerUI).Methods("GET")
+
+	// JSON 404/405 fallback for unmatched /api/* requests (#233). Must be
+	// the LAST route registered here: every real /api/* route above gets
+	// first try at matching, and this only catches what none of them did.
+	// See registerAPIFallback's doc comment (api_fallback.go) for why this
+	// has to sit here rather than relying on mux's default 404 handling.
+	registerAPIFallback(r)
 }
 
 // noStoreAPIMiddleware sets Cache-Control: no-store on every response

@@ -946,7 +946,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 		"openapi": "3.0.3",
 		"info": map[string]interface{}{
 			"title":       "CoreScope API",
-			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics.",
+			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233).",
 			"version":     version,
 			"license": map[string]interface{}{
 				"name": "MIT",
