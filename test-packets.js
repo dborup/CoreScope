@@ -39,6 +39,13 @@ function phIcon(name) {
   return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg>';
 }
 
+// The contents of a packet row's expand cell.
+function expandCell(rowHtml) {
+  const m = /<td class="col-expand"[^>]*>([\s\S]*?)<\/td>/.exec(rowHtml);
+  assert(m, 'row has an expand cell');
+  return m[1];
+}
+
 // Build a browser-like sandbox with all deps packets.js needs
 function makeSandbox() {
   const registeredPages = {};
@@ -1153,15 +1160,43 @@ console.log('\n=== packets.js: buildGroupRowHtml ===');
     assert(!result.includes(phIcon('caret-down')), 'collapsed group does not show the expanded caret');
   });
 
-  // KNOWN BUG #189. Before 30627454 (#1648 M2, emoji to Phosphor sprites) a
-  // collapsed group showed ▶ and an expanded one ▼. The migration mapped ▶ to
-  // #ph-caret-up, so a collapsed group now points up. The right-pointing sprite
-  // is #ph-caret-right, which is also what the other collapsed disclosures use
-  // (analytics.js, #ptOverviewChevron). public/packets.js is not fixed yet; when
-  // it is, this assertion starts to pass, knownBug() reports that, and the run
-  // goes red until the call below is turned into a plain test().
-  knownBug('#189', 'buildGroupRowHtml shows a right-pointing caret on a collapsed group', () => {
-    assert(api.buildGroupRowHtml(collapsedGroup).includes(phIcon('caret-right')), 'collapsed group shows a right caret');
+  // #189: before 30627454 (#1648 M2, emoji to Phosphor sprites) a collapsed
+  // group showed ▶ and an expanded one ▼. The migration mapped ▶ to
+  // #ph-caret-up, so a collapsed group pointed up. The disclosure convention in
+  // the front end is caret-right when collapsed and caret-down when expanded
+  // (channels.js, network-digest.js, analytics.js #ptOverviewChevron,
+  // route-view.js paths chevron).
+  test('buildGroupRowHtml shows a right-pointing caret on a collapsed group', () => {
+    const cell = expandCell(api.buildGroupRowHtml(collapsedGroup));
+    assert(cell.includes(phIcon('caret-right')), 'collapsed group shows a right caret');
+    assert(!cell.includes(phIcon('caret-up')), 'collapsed group does not point up');
+    assert(!cell.includes(phIcon('caret-down')), 'collapsed group does not show the expanded caret');
+  });
+
+  test('buildGroupRowHtml shows a down-pointing caret on an expanded group', () => {
+    api._setExpanded(collapsedGroup.hash, true);
+    try {
+      const cell = expandCell(api.buildGroupRowHtml(collapsedGroup));
+      assert(cell.includes(phIcon('caret-down')), 'expanded group shows a down caret');
+      assert(!cell.includes(phIcon('caret-right')), 'expanded group does not show the collapsed caret');
+      assert(!cell.includes(phIcon('caret-up')), 'expanded group does not point up');
+    } finally { api._setExpanded(collapsedGroup.hash, false); }
+  });
+
+  test('buildGroupRowHtml: the group toggle row reports its state in aria-expanded', () => {
+    const header = (html) => /<tr class="group-header[^>]*>/.exec(html)[0];
+    assert(header(api.buildGroupRowHtml(collapsedGroup)).includes('aria-expanded="false"'), 'collapsed: aria-expanded=false');
+    api._setExpanded(collapsedGroup.hash, true);
+    try {
+      assert(header(api.buildGroupRowHtml(collapsedGroup)).includes('aria-expanded="true"'), 'expanded: aria-expanded=true');
+    } finally { api._setExpanded(collapsedGroup.hash, false); }
+  });
+
+  test('buildGroupRowHtml: a single-observation row has no caret and no aria-expanded', () => {
+    const single = Object.assign({}, collapsedGroup, { hash: 'single1', count: 1 });
+    const html = api.buildGroupRowHtml(single);
+    assert(!html.includes('aria-expanded'), 'a row that cannot expand does not claim a state');
+    assert(!/#ph-caret-/.test(expandCell(html)), 'no caret in the expand cell');
   });
 
   test('buildGroupRowHtml shows observation count badge', () => {

@@ -54,6 +54,26 @@ func writeStatsAtomicOrRelease(t *testing.T, path, fifo string) error {
 	}
 }
 
+// stopStatsWriterOrRelease calls a stats writer's stop. If it blocks for
+// 3s, the FIFO gets a reader so the writer can end, and the test fails. It
+// reports with t.Error, so it may also run as a cleanup.
+func stopStatsWriterOrRelease(t *testing.T, stop func(), fifo string) {
+	t.Helper()
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		r := openFIFOReader(t, fifo)
+		defer r.Close()
+		select {
+		case <-stopped:
+		case <-time.After(3 * time.Second):
+		}
+		t.Error("stop hung: the writer is blocked on the FIFO")
+	}
+}
+
 // assertNotRegularRefused checks the error and that nothing was published.
 func assertNotRegularRefused(t *testing.T, err error, path string) {
 	t.Helper()
@@ -98,17 +118,5 @@ func TestStatsFileWriterStopsWithFIFOAtTmp_161(t *testing.T) {
 	stop := StartStatsFileWriter(store, 5*time.Millisecond)
 
 	time.Sleep(100 * time.Millisecond) // several ticks against the FIFO
-	stopped := make(chan struct{})
-	go func() { stop(); close(stopped) }()
-	select {
-	case <-stopped:
-	case <-time.After(3 * time.Second):
-		r := openFIFOReader(t, fifo)
-		defer r.Close()
-		select {
-		case <-stopped:
-		case <-time.After(3 * time.Second):
-		}
-		t.Fatal("stop hung: the writer is blocked on the FIFO")
-	}
+	stopStatsWriterOrRelease(t, stop, fifo)
 }

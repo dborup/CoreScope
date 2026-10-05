@@ -103,6 +103,7 @@ function makeSandbox(startHash, opts) {
   vm.runInContext(
     'var filters = {}; var savedTimeWindowMin = 15; var DEFAULT_TIME_WINDOW = 15;\n' +
     "var _packetSortColumn = null; var _packetSortDirection = 'desc';\n" +
+    "var hideControl = false; var savedHideControl = false;\n" + // #96/#211 closure state read by buildPacketsQuery
     'var _observerFilterSet = null; var selectedObservers = new Set(); var selectedTypes = new Set();\n' +
     'function buildObserverMenu() {} function updateObsTrigger() {} function buildTypeMenu() {}\n' +
     'function updateTypeTrigger() {} function loadPackets() {}\n' +
