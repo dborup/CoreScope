@@ -1999,7 +1999,19 @@
     if (panel) panel.remove();
   }
 
-  async function loadChannels(silent) {
+  // #154: overlapping loadChannels() calls (region changes, the
+  // show-encrypted toggle, approval, init()) can answer out of order. Only
+  // the newest request renders; an older response is dropped without a
+  // render or a reconcile. Same idea as messageRequestId above.
+  let channelsRequestId = 0;
+  let latestChannelsLoad = null;
+
+  function loadChannels(silent) {
+    latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent);
+    return latestChannelsLoad;
+  }
+
+  async function loadChannelsFor(requestId, silent) {
     // #152: WS activity stamped after this point is newer than the snapshot.
     const seqAtRequestStart = wsActivitySeq;
     try {
@@ -2010,6 +2022,10 @@
       if (showEnc) params.push('includeEncrypted=true');
       const qs = params.length ? '?' + params.join('&') : '';
       const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
+      // #154: a newer request owns the list. Resolve when it is done, so a
+      // caller's follow-up (init()'s deep link, the region handler) sees the
+      // list that actually renders.
+      if (requestId !== channelsRequestId) return latestChannelsLoad;
       const prevChannels = channels;
       // Copies: api() hands the same cached objects back on a TTL hit, and
       // mergeUserChannels() below mutates rows.
@@ -2032,6 +2048,7 @@
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
     } catch (e) {
+      if (requestId !== channelsRequestId) return latestChannelsLoad;
       if (!silent) {
         const el = document.getElementById('chList');
         if (el) el.innerHTML = `<div class="ch-empty">Failed to load channels</div>`;
@@ -2060,6 +2077,13 @@
     if (name) return name;
     if (fallback) return fallback;
     return 'Channel ' + (typeof formatHashHex === 'function' ? formatHashHex(ch.hash) : ch.hash);
+  }
+
+  // Unread badge for a channel row, desktop and mobile (#1029, #155).
+  function renderUnreadBadge(ch) {
+    if (!(ch.unread && ch.unread > 0)) return '';
+    const count = escapeHtml(String(ch.unread));
+    return '<span class="ch-unread-badge" data-unread-channel="' + escapeHtml(ch.hash) + '" title="' + count + ' new" aria-label="' + count + ' unread">' + (ch.unread > 99 ? '99+' : count) + '</span>';
   }
 
   // #1034 PR1: render a single channel row (used by all sidebar sections).
@@ -2127,15 +2151,13 @@
       : '';
     const userBadge = isUserAdded ? ' <span class="ch-user-badge" title="You added this key" aria-label="Your key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-key"/></svg></span>' : '';
     const sharedBadge = isShared ? ' <span class="ch-shared-badge" title="Shared channel approved for everyone on this site">Shared</span>' : '';
-    const unreadBadge = (ch.unread && ch.unread > 0)
-      ? ' <span class="ch-unread-badge" data-unread-channel="' + escapeHtml(ch.hash) + '" title="' + ch.unread + ' new" aria-label="' + ch.unread + ' unread">' + (ch.unread > 99 ? '99+' : ch.unread) + '</span>'
-      : '';
+    const unreadBadge = renderUnreadBadge(ch);
 
     return `<button class="ch-item${sel}${encClass}" data-hash="${escapeHtml(ch.hash)}"${borderStyle} type="button" role="option" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}"${isEncrypted ? ' data-encrypted="true"' : ''}${managesLocalKey ? ' data-user-added="true"' : ''}${isShared ? ' data-shared="true"' : ''}>
       <div class="ch-badge" style="background:${color}" aria-hidden="true">${badgeIcon ? badgeIcon : escapeHtml(abbr)}</div>
       <div class="ch-item-body">
         <div class="ch-item-top">
-          <span class="ch-item-name">${escapeHtml(name)}</span>${sharedBadge}${userBadge}${unreadBadge}
+          <span class="ch-item-name">${escapeHtml(name)}</span>${sharedBadge}${userBadge}${unreadBadge ? ' ' + unreadBadge : ''}
           <span class="ch-color-dot" data-channel="${escapeHtml(ch.hash)}"${dotStyle} title="Change channel color" aria-label="Change color for ${escapeHtml(name)}"></span>${chColor ? '<span class="ch-color-clear" data-channel="' + escapeHtml(ch.hash) + '" title="Clear color" aria-label="Clear color for ' + escapeHtml(name) + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></span>' : ''}
           <span class="ch-item-time" data-channel-hash="${escapeHtml(ch.hash)}">${time}</span>${shareBtn}${removeBtn}
         </div>
@@ -2195,6 +2217,7 @@
         '<div class="ch-row-line1">' +
           '<span class="ch-row-name">' + escapeHtml(name) + '</span>' +
           '<span class="ch-row-time">' + escapeHtml(time) + '</span>' +
+          renderUnreadBadge(ch) +
         '</div>' +
         '<div class="ch-row-preview">' + escapeHtml(preview) + '</div>' +
       '</div>' +
