@@ -13,6 +13,9 @@
  *    (the row must not be clipped by oversized inline action buttons).
  *  - Render the "Select a channel" empty state container occupying < 40% of
  *    the viewport height (no desktop-thinking empty state on mobile).
+ *  - With more than 4 regions (mocked; the fixture has 4), open the region
+ *    dropdown's menu inside the viewport at 320-640px touch, every option
+ *    hit at its centre (#239).
  *
  * Run: BASE_URL=http://localhost:13581 node test-issue-1224-channels-mobile-ux-e2e.js
  */
@@ -123,6 +126,45 @@ async function run() {
   await tp.waitForSelector('#chRegionFilter .region-pill, #chRegionFilter .region-dropdown-trigger', { timeout: 15000 });
   await step('touch 390x844: header strip is \u2264120px, holds all its controls, and the list starts below it', () => assertHeaderStrip(tp));
   await touchCtx.close();
+
+  // #239 F1: with more than 4 regions RegionFilter renders a dropdown, whose
+  // trigger order: 1 puts at the right edge of the strip. Its menu must open
+  // inside the viewport, with every option hit at its centre. The fixture
+  // has 4 regions (pills), so the regions are mocked.
+  const SIX_REGIONS = {
+    SJC: 'San Jose', SFO: 'San Francisco', OAK: 'Oakland',
+    MRY: 'Monterey', SMF: 'Sacramento', LAX: 'Los Angeles',
+  };
+  for (const width of [320, 360, 390, 430, 640]) {
+    const dctx = await browser.newContext({ viewport: { width, height: 844 }, hasTouch: true, isMobile: true });
+    const dp = await dctx.newPage();
+    await dp.route('**/api/config/regions', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(SIX_REGIONS) }));
+    await dp.goto(BASE + '/#/channels', { waitUntil: 'domcontentloaded' });
+    await dp.waitForSelector('#chList .ch-row', { timeout: 15000 });
+    await dp.waitForSelector('#chRegionFilter .region-dropdown-trigger', { timeout: 15000 });
+    await step('touch ' + width + 'x844, 6 regions: header strip holds its controls', () => assertHeaderStrip(dp));
+    await step('touch ' + width + 'x844, 6 regions: the region menu opens on-screen, every option hit at its centre', async () => {
+      await dp.tap('#chRegionFilter .region-dropdown-trigger');
+      await dp.waitForSelector('#chRegionFilter .region-dropdown-menu:not([hidden])', { timeout: 5000 });
+      const r = await dp.evaluate(() => {
+        const vw = document.documentElement.clientWidth;
+        const menu = document.querySelector('#chRegionFilter .region-dropdown-menu');
+        const m = menu.getBoundingClientRect();
+        const items = [...menu.querySelectorAll('.region-dropdown-item')].map((el) => {
+          const b = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+          return { text: el.textContent.trim(), left: Math.round(b.left), right: Math.round(b.right), hit: !!hit && el.contains(hit) };
+        });
+        return { vw, left: Math.round(m.left), right: Math.round(m.right), items, overflow: document.documentElement.scrollWidth - vw };
+      });
+      assert(r.items.length === 7, 'expected All + 6 options, got ' + r.items.length);
+      assert(r.left >= 0 && r.right <= r.vw, 'menu ' + r.left + '-' + r.right + 'px is outside the ' + r.vw + 'px viewport');
+      const missed = r.items.filter((i) => !i.hit).map((i) => i.text + ' (' + i.left + '-' + i.right + ')');
+      assert(missed.length === 0, missed.length + ' of ' + r.items.length + ' options not hit at their centre: ' + missed.join(', '));
+      assert(r.overflow <= 0, 'horizontal page overflow ' + r.overflow + 'px with the menu open');
+    });
+    await dctx.close();
+  }
 
   // Desktop guard: at 1024x800 the sidebar must remain side-by-side with main
   // (layout flex-direction stays row), not stacked. This protects the desktop

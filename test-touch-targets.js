@@ -110,7 +110,8 @@ const FIELD_SELECTORS = [
   ['.filter-bar select',     'select', '', '<option>x</option>', null, '<div class="filter-bar filters-expanded">{}</div>'],
   ['.ch-proposals-toolbar button', 'button', '', 'x', null, '<div class="ch-proposals-toolbar">{}</div>'],
   ['.ch-proposals-actions button', 'button', '', 'x', null, '<div class="ch-proposals-actions">{}</div>'],
-  ['.live-node-filter-hitarea', 'label', 'live-node-filter-hitarea', 'x'],
+  // In its real context: .live-toggles label must not override it (#239 F2).
+  ['.live-toggles .live-node-filter-hitarea', 'label', 'live-node-filter-hitarea', 'x', null, '<div class="live-toggles"><div class="live-node-filter-wrap">{}</div></div>'],
 ];
 
 // Invisible ::after tap pads that give a compact control its hit area.
@@ -239,6 +240,25 @@ async function run() {
            dim.w >= DEFAULT_MIN && dim.h >= DEFAULT_MIN,
            `expected >=${DEFAULT_MIN}x${DEFAULT_MIN}, got ${dim.w}x${dim.h}`);
   }
+
+  // #239 F2: the hit area keeps the text cursor it had as an inline style
+  // before #235; .live-toggles label (cursor: pointer) must not win over it.
+  const hitCursor = await page.$eval('.live-toggles .live-node-filter-hitarea', (el) => getComputedStyle(el).cursor);
+  record(`.live-toggles .live-node-filter-hitarea: cursor ${hitCursor}`, hitCursor === 'text',
+         `expected cursor text, got ${hitCursor}`);
+
+  // #239 F3: a 48px region pill centres its label.
+  const pillIdx = BUTTON_SELECTORS.findIndex(([sel]) => sel === '.region-pill');
+  const pill = await page.$eval(`[data-btn="${pillIdx}"]`, (el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const t = range.getBoundingClientRect();
+    const b = el.getBoundingClientRect();
+    return { offset: (t.left + t.width / 2) - (b.left + b.width / 2), width: b.width };
+  });
+  record(`.region-pill: label centred (offset ${pill.offset.toFixed(1)}px in a ${pill.width.toFixed(1)}px pill)`,
+         Math.abs(pill.offset) <= 1,
+         `expected the label centred within 1px, got offset ${pill.offset}`);
 
   // The coarse-pointer and <=640px rules above only apply if the harness
   // really is a phone.
