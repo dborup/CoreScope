@@ -2023,6 +2023,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		if res, err := s.nodeAdvertRoutes(pubkey, time.Now()); err == nil {
 			resp.RecentAdvertsByRoute = &res.byRoute
 			resp.AdvertCounts = &res.counts
+			resp.AdvertIntervals = &res.intervals
 			floodFromScan = res.floodAdvertCount7d
 		} else {
 			log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, err)

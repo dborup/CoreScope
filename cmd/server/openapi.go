@@ -86,9 +86,9 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/nodes/search":         {Summary: "Search nodes", Description: "Search nodes by name or public key prefix.", Tag: "nodes", QueryParams: []paramMeta{{Name: "q", Description: "Search query", Type: "string", Required: true}}},
 		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for all nodes in one call.", Tag: "nodes"},
 		"GET /api/nodes/network-status": {Summary: "Network status summary", Description: "Returns counts of active, stale, and offline nodes.", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}": {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema). recentAdverts is the chronological list; with include=advertRoutes, recentAdvertsByRoute and advertCounts (#2073) split the node's adverts into flood / zero_hop / mixed and the ADVERT rows of recentAdverts carry route_class. A 404 for a key with no nodes row (#199) is {error, inactive_node?, observer?}: inactive_node {public_key, name, role, last_seen, first_seen} is the inactive_nodes row when retention retired the node (no advert in retention.nodeDays; last_seen is the last advert), observer {id, name, last_seen} is the observers row when the key uploads as an observer. Both are omitted for an unknown key and for a blacklisted or hidden identity.", Tag: "nodes", Response: schemaRef("NodeDetailResponse"),
+		"GET /api/nodes/{pubkey}": {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema). recentAdverts is the chronological list; with include=advertRoutes, recentAdvertsByRoute and advertCounts (#2073) split the node's adverts into flood / zero_hop / mixed, advertIntervals (#245) estimates the flood and zero-hop advert intervals, and the ADVERT rows of recentAdverts carry route_class. A 404 for a key with no nodes row (#199) is {error, inactive_node?, observer?}: inactive_node {public_key, name, role, last_seen, first_seen} is the inactive_nodes row when retention retired the node (no advert in retention.nodeDays; last_seen is the last advert), observer {id, name, last_seen} is the observers row when the key uploads as an observer. Both are omitted for an unknown key and for a blacklisted or hidden identity.", Tag: "nodes", Response: schemaRef("NodeDetailResponse"),
 			QueryParams: []paramMeta{
-				{Name: "include", Description: "Opt-in extras, comma-separated (the parameter may also repeat). advertRoutes (#2073): adds recentAdvertsByRoute, advertCounts and route_class on the recentAdverts ADVERT rows. That costs a scan of all the node's ADVERT rows (cached per node for up to 30 s), so only the node page asks for it; without it the response has neither field and no route_class. Unknown values are ignored. Hidden identities never get the extras.", Type: "string"},
+				{Name: "include", Description: "Opt-in extras, comma-separated (the parameter may also repeat). advertRoutes (#2073): adds recentAdvertsByRoute, advertCounts, advertIntervals (#245) and route_class on the recentAdverts ADVERT rows. That costs a scan of all the node's ADVERT rows (cached per node for up to 30 s), so only the node page asks for it; without it the response has neither field and no route_class. Unknown values are ignored. Hidden identities never get the extras.", Type: "string"},
 			}},
 		"GET /api/nodes/{pubkey}/clock-skew": {Summary: "Get node clock skew", Description: "Per-node clock-skew analysis derived from ADVERT advert-timestamps vs observation times, calibrated per observer (see ClockSkewEngine). samples is the full per-advert time series in chronological order (sparkline data) by default. Fase 5.2b's sample_limit trims that array before it's sent to the client — it only reduces JSON serialization/payload/client-decoding cost, not the server-side computation or allocation that already produced the full samples slice.", Tag: "nodes",
 			QueryParams: []paramMeta{
@@ -259,6 +259,28 @@ func nodeAdvertRouteSchemas() map[string]*openAPISchema {
 			Type:       "object",
 			Properties: map[string]*openAPISchema{"flood": count, "zero_hop": count, "mixed": count, "unknown": count},
 		},
+		"NodeAdvertIntervals": {
+			Type:        "object",
+			Description: "Node detail with include=advertRoutes only (#245): the node's estimated flood and zero-hop advert intervals, from the gaps between the adverts listed in recentAdvertsByRoute.flood / .zero_hop (mixed and unknown adverts are not used). A gap uses the adverts' own (sender) timestamps when both are plausible - not ahead of first_seen by more than 10 min, positive, and within max(10 min, 10 %) of the first_seen gap - else first_seen. The interval must be seen directly in at least two gaps and a quarter of them; gaps of 2-4x it count as missed adverts, shorter gaps (manual adverts, reboots) are dropped. It is the median of the fitting gaps, snapped to the firmware's settable values: flood.advert.interval whole hours 3-168, advert.interval even minutes 60-240 or the 2-minute new-install default. No zero-hop adverts can mean the node's zero-hop interval is 0 (off) or that no observer hears it directly. Absent without include=advertRoutes and when the node's identity is hidden; cached with recentAdvertsByRoute.",
+			Properties: map[string]*openAPISchema{
+				"window":   {Type: "integer", Description: "Most adverts per class considered (the recentAdvertsByRoute limit, 20)."},
+				"flood":    openAPIRef("AdvertIntervalEstimate"),
+				"zero_hop": openAPIRef("AdvertIntervalEstimate"),
+			},
+		},
+		"AdvertIntervalEstimate": {
+			Type:        "object",
+			Description: "One route class of NodeAdvertIntervals.",
+			Properties: map[string]*openAPISchema{
+				"interval_s":     {Type: "integer", Nullable: true, Description: "Estimated interval in seconds, snapped when snapped is true; null when confidence is none."},
+				"raw_interval_s": {Type: "integer", Nullable: true, Description: "The median before snapping; null when confidence is none."},
+				"snapped":        {Type: "boolean", Description: "true when the estimate is within 10 % of the firmware's settable range and interval_s is the nearest settable value."},
+				"samples":        count,
+				"gaps_used":      {Type: "integer", Minimum: &zero, Description: "Gaps between the samples that fit 1-4x the interval."},
+				"confidence":     {Type: "string", Enum: []string{advertConfidenceHigh, advertConfidenceMedium, advertConfidenceLow, advertConfidenceNone}, Description: "high: >= 6 fitting gaps and >= 75 % of the non-short gaps fit; medium: >= 3 and >= 50 %; low: fewer; none: under 3 adverts or no interval seen at least twice."},
+				"last_advert":    {Type: "string", Nullable: true, Description: "RFC3339 first_seen of the newest advert in the class; null when there is none."},
+			},
+		},
 		"RouteMaskBackfillStatus": {
 			Type:        "object",
 			Description: "The ingestor's transmissions.route_mask backfill (#89). Until complete, rows without a mask are classified by their first-inserted route_type, so route classes are provisional.",
@@ -356,6 +378,7 @@ func componentSchemas() map[string]interface{} {
 				"recentAdverts":        map[string]interface{}{"type": "array", "items": schemaRef("NodeAdvert"), "description": "Up to 20 most recent transmissions from this node (newest ingest first, #1345), all route classes together."},
 				"recentAdvertsByRoute": openAPIRef("NodeAdvertsByRoute"),
 				"advertCounts":         openAPIRef("NodeAdvertCounts"),
+				"advertIntervals":      openAPIRef("NodeAdvertIntervals"),
 			},
 		},
 		"NodeAdvert": map[string]interface{}{
