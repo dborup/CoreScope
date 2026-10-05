@@ -1214,6 +1214,8 @@
         root: app,
         suggestSection: document.getElementById('chSuggestSection'),
         view: _initUrlParams.get('view'),
+        // Called once per approval, from the admin decision or, with
+        // auto-approval, from the suggest form's poller (#232).
         onApproved: function () {
           invalidateApiCache('/channels');
           // loadChannels() merges the user's PSK rows itself (#152), before
