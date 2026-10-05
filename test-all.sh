@@ -57,6 +57,7 @@ run test-top-routes-overlay.js
 run test-important-links-byte-filter.js
 run test-url-state.js
 run test-node-adverts.js
+run test-issue-254-affinity-debug-toggle.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js

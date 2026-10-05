@@ -1198,6 +1198,94 @@ console.log('\n=== packets.js: buildGroupRowHtml ===');
     assert(!html.includes('aria-expanded'), 'a row that cannot expand does not claim a state');
     assert(!/#ph-caret-/.test(expandCell(html)), 'no caret in the expand cell');
   });
+}
+
+// #254: under the mobile breakpoint mobile-page-actions.js (#1461 #7) hides the
+// expand column and turns a click on a group row into select-hash, so the row
+// selects instead of expanding. There the row must not announce aria-expanded,
+// and its action is select-hash for every activation (tap, Enter, Space).
+// Above the breakpoint the row stays the #189 toggle.
+console.log('\n=== packets.js: group row action and aria-expanded by viewport (#254) ===');
+{
+  const ctx = loadPacketsSandbox();
+  loadInCtx(ctx, 'public/mobile-page-actions.js');
+  const api = ctx._packetsTestAPI;
+  const group = {
+    hash: 'mob254', count: 3, latest: '2024-01-01T00:00:00Z',
+    observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]',
+    observation_count: 3, observer_count: 2
+  };
+  const header = (html) => /<tr [^>]*>/.exec(html)[0];
+  const atWidth = (w, fn) => {
+    const prev = ctx.window.innerWidth;
+    ctx.window.innerWidth = w;
+    try { return fn(); } finally { ctx.window.innerWidth = prev; }
+  };
+
+  test('#254: at 390 px a group row selects and carries no aria-expanded', () => atWidth(390, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="select-hash"'), 'mobile group row selects: ' + tr);
+    assert(!tr.includes('aria-expanded'), 'a row that selects does not announce an expanded state: ' + tr);
+  }));
+
+  test('#254: at 390 px an expanded group row still carries no aria-expanded', () => atWidth(390, () => {
+    api._setExpanded(group.hash, true);
+    try {
+      const tr = header(api.buildGroupRowHtml(group));
+      assert(tr.includes('data-action="select-hash"'), 'mobile group row selects');
+      assert(!tr.includes('aria-expanded'), 'no aria-expanded on mobile, expanded or not');
+    } finally { api._setExpanded(group.hash, false); }
+  }));
+
+  test('#254: at the 600 px breakpoint the row is still the mobile one', () => atWidth(600, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="select-hash"') && !tr.includes('aria-expanded'), tr);
+  }));
+
+  test('#254: at 1400 px the group row is the #189 toggle with aria-expanded', () => atWidth(1400, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="toggle-select"'), 'desktop group row toggles: ' + tr);
+    assert(tr.includes('aria-expanded="false"'), 'desktop collapsed row: aria-expanded=false');
+    api._setExpanded(group.hash, true);
+    try {
+      assert(header(api.buildGroupRowHtml(group)).includes('aria-expanded="true"'), 'desktop expanded row: aria-expanded=true');
+    } finally { api._setExpanded(group.hash, false); }
+  }));
+
+  test('#254: at 601 px the group row toggles', () => atWidth(601, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="toggle-select"') && tr.includes('aria-expanded="false"'), tr);
+  }));
+
+  test('#254: a single-observation row is select-hash without aria-expanded at both widths', () => {
+    const single = Object.assign({}, group, { hash: 'single254', count: 1 });
+    for (const w of [390, 1400]) atWidth(w, () => {
+      const tr = header(api.buildGroupRowHtml(single));
+      assert(tr.includes('data-action="select-hash"') && !tr.includes('aria-expanded'), w + ' px: ' + tr);
+    });
+  });
+}
+
+// Without mobile-page-actions.js there is no #1461 #7 redirect, so a group row
+// toggles at any width.
+console.log('\n=== packets.js: group row without mobile-page-actions.js (#254) ===');
+{
+  const ctx = loadPacketsSandbox();
+  const api = ctx._packetsTestAPI;
+  ctx.window.innerWidth = 390;
+  test('#254: no redirect module loaded, so the row toggles even at 390 px', () => {
+    const tr = /<tr [^>]*>/.exec(api.buildGroupRowHtml({
+      hash: 'nompa', count: 2, latest: '2024-01-01T00:00:00Z', observer_id: null, raw_hex: 'aabb',
+      payload_type: 0, route_type: 0, decoded_json: '{}', path_json: '[]', observation_count: 2, observer_count: 1
+    }))[0];
+    assert(tr.includes('data-action="toggle-select"') && tr.includes('aria-expanded="false"'), tr);
+  });
+}
+
+{
+  const ctx = loadPacketsSandbox();
+  const api = ctx._packetsTestAPI;
 
   test('buildGroupRowHtml shows observation count badge', () => {
     const p = {
