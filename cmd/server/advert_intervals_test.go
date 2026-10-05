@@ -126,6 +126,26 @@ func TestEstimateAdvertInterval_LongOutage(t *testing.T) {
 	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 12*3600, advertConfidenceHigh, 10, 8)
 }
 
+// A gap of up to 4x the interval is missed adverts (three in a row); a
+// longer one is an outage and irregular.
+func TestEstimateAdvertInterval_MultipleLimit(t *testing.T) {
+	// 12 h with one 4x gap: all 8 gaps fit.
+	s := aiSeries(12*time.Hour, 0, 1, 2, 3, 7, 8, 9, 10, 11)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 12*3600, advertConfidenceHigh, 9, 8)
+	// A 5x gap instead: 7 of the 8 gaps fit.
+	s = aiSeries(12*time.Hour, 0, 1, 2, 3, 8, 9, 10, 11, 12)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 12*3600, advertConfidenceHigh, 9, 7)
+}
+
+// A candidate must be seen directly in a quarter of the gaps, not only
+// twice. Two manual adverts that each split a 12 h gap into 4 h + 8 h make
+// 4 h a gap seen twice that explains every gap (4, 8 and 12 h are 1-3x
+// 4 h), but 2 of 10 gaps is under a quarter, so 12 h stays.
+func TestEstimateAdvertInterval_CandidateQuarter(t *testing.T) {
+	s := aiSeries(12*time.Hour, 0, 1, 4.0/3, 2, 3, 4, 13.0/3, 5, 6, 7, 8)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 12*3600, advertConfidenceHigh, 11, 6)
+}
+
 // Sender clock: preferred when plausible, first_seen otherwise.
 func TestEstimateAdvertInterval_SenderClock(t *testing.T) {
 	// first_seen jitters by up to 20 min (late uploads); the sender's
