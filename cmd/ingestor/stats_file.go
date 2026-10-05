@@ -186,6 +186,16 @@ func writeStatsAtomic(path string, b []byte) error {
 		f.Close()
 		return err
 	}
+	// A hard link is a second name for another file, which the chmod,
+	// truncate and rename below would change and publish. It is left in
+	// place for the operator (#228).
+	if n, ok := fileLinkCount(fi); ok && n > 1 {
+		f.Close()
+		e := newStatsWriteError(tmp, "", nil)
+		e.detail = fmt.Sprintf("hard-linked (nlink %d)", n)
+		e.hint = "remove it"
+		return e
+	}
 	if err := f.Chmod(0o600); err != nil {
 		f.Close()
 		return fail("chmod", err)
@@ -265,9 +275,7 @@ func (e *statsWriteError) setNotRegular(mode os.FileMode) {
 // (fi from Lstat) the ingestor may not open: fix the owner when it is
 // someone else's, else its permissions (#160).
 func (e *statsWriteError) setPermissionHint(fi os.FileInfo) {
-	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
-		e.detail = fmt.Sprintf("owned by uid %d, ingestor uid %d", uid, statsFileEUID())
-		e.hint = "remove it or fix its owner"
+	if e.setForeignOwner(fi) {
 		return
 	}
 	e.detail = fmt.Sprintf("mode %v", fi.Mode())
@@ -283,13 +291,23 @@ var statsFileEUID = os.Geteuid
 // no Unix owner (Windows) it passes. The ingestor cannot fix this itself;
 // the error says what the operator must do (#160).
 func checkStatsTmpOwner(name string, fi os.FileInfo) error {
-	if uid, ok := fileOwnerUID(fi); ok && uid != statsFileEUID() {
-		e := newStatsWriteError(name, "", nil)
-		e.detail = fmt.Sprintf("owned by uid %d, ingestor uid %d", uid, statsFileEUID())
-		e.hint = "remove it or fix its owner"
+	if e := newStatsWriteError(name, "", nil); e.setForeignOwner(fi) {
 		return e
 	}
 	return nil
+}
+
+// setForeignOwner marks a tmp (fi) that belongs to a user other than
+// statsFileEUID, and reports whether it does. Where files have no Unix
+// owner (Windows) it does not (#160).
+func (e *statsWriteError) setForeignOwner(fi os.FileInfo) bool {
+	uid, ok := fileOwnerUID(fi)
+	if !ok || uid == statsFileEUID() {
+		return false
+	}
+	e.detail = fmt.Sprintf("owned by uid %d, ingestor uid %d", uid, statsFileEUID())
+	e.hint = "remove it or fix its owner"
+	return true
 }
 
 // statsWriteErrLogEvery is how often a failure that persists is logged
