@@ -897,7 +897,7 @@ img.brand-logo {
 .theme-toggle {
   display: inline-flex; align-items: center; cursor: pointer;
   padding: 0; margin: 0; border: none; background: none;
-  min-width: 44px; min-height: 44px; justify-content: center;
+  min-width: 48px; min-height: 48px; justify-content: center;
 }
 .theme-toggle input[type="checkbox"] {
   position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
@@ -1725,13 +1725,13 @@ body.scroll-locked { overflow: hidden; }
 .modal > .modal-close:not(.ch-modal-close):hover { background: var(--row-hover, rgba(0,0,0,0.05)); }
 
 /* #1648 M6 (M5 CDP carry-forward): mobile touch-target. The 4px/10px
-   padding above produces an ~24px hit area, below WCAG's 44×44 minimum.
-   Bump on ≤640px so dismiss is reliably tappable on phones. Applies to
-   both the generic .modal-close and the channel-modal close. */
+   padding above produces an ~24px hit area, below the 48×48 house minimum
+   (#2052, #235). Bump on ≤640px so dismiss is reliably tappable on phones.
+   Applies to both the generic .modal-close and the channel-modal close. */
 @media (max-width: 640px) {
   .modal > .modal-close:not(.ch-modal-close),
   .ch-modal-close {
-    min-width: 44px; min-height: 44px;
+    min-width: 48px; min-height: 48px;
     display: inline-flex; align-items: center; justify-content: center;
     padding: 8px 12px;
   }
@@ -1919,7 +1919,7 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   display: none; background: none; border: none; font-size: 22px; cursor: pointer;
   color: var(--text); padding: 8px 12px; border-radius: 4px;
   align-items: center; justify-content: center;
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   -webkit-tap-highlight-color: rgba(0,0,0,.08);
   touch-action: manipulation;
 }
@@ -2476,8 +2476,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
      icon-only row actions, smaller empty state. */
   .ch-sidebar-header {
     padding: 6px 10px; gap: 6px;
-    max-height: 56px;
   }
+  /* #235: with 48px touch targets the region pills cannot share a row with
+     the title and + Add at phone width. Keep title and + Add on the first
+     row and give the pills the second. The old max-height: 56px cap only
+     hid the overflow: the list was drawn over the lower half of the pills. */
+  .ch-sidebar-header .ch-header-region { order: 1; }
   .ch-sidebar-title { font-size: 14px; }
   .ch-sidebar-title .ch-icon { font-size: 16px; }
   .ch-add-channel-btn { padding: 4px 8px; font-size: 12px; }
@@ -2486,6 +2490,9 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .ch-header-region .region-filter-bar { padding: 0; gap: 4px; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
+  /* #239: order: 1 puts the dropdown trigger (more than 4 regions) at the
+     right edge of the strip, so its menu opens leftwards from there. */
+  .ch-header-region .region-dropdown-menu { left: auto; right: 0; }
 
   /* Channel list row: name must dominate. Below 768px channels.js renders
      the flat .ch-row list (#1367), which has no inline share/remove
@@ -2732,9 +2739,9 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   backdrop-filter: blur(12px);
   color: var(--text) !important;
   border-color: var(--border) !important;
-  width: 44px !important;
-  height: 44px !important;
-  line-height: 44px !important;
+  width: 48px !important;
+  height: 48px !important;
+  line-height: 48px !important;
   font-size: 20px !important;
 }
 .leaflet-control-zoom a:hover {
@@ -2836,7 +2843,7 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
     min-height: 36px;
     font-size: 14px;
   }
-  .ch-avatar.ch-tappable { min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
+  .ch-avatar.ch-tappable { min-width: 48px; min-height: 48px; width: 48px; height: 48px; }
   /* #1253: trim .badge-iata h-padding + margin-left on narrow viewports so
    * the observer cell + IATA pill fits within a 375px viewport. Without this
    * the badge right edge overflows by ~1.25px at 375px (same class of fix
@@ -3332,8 +3339,8 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .home-footer,
 .home-favorites { max-width: 1200px; }
 
-/* #40 — Increase suggest-claim touch target to ≥44px */
-.suggest-claim { min-height: 44px; min-width: 44px; padding: 10px 14px; display: inline-flex; align-items: center; justify-content: center; }
+/* #40, #235 — suggest-claim touch target at the 48px house minimum */
+.suggest-claim { min-height: 48px; min-width: 48px; padding: 10px 14px; display: inline-flex; align-items: center; justify-content: center; }
 
 /* #41 — Lower My Nodes grid minimum to prevent overflow on 375-640px */
 .my-nodes-grid { max-width: 1200px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
@@ -3577,7 +3584,7 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .area-dropdown-item.area-item-active { color: var(--accent); font-weight: 600; }
 .region-filter-container { margin: 0; padding: 0; display: inline-flex; align-items: center; }
 .region-pill {
-  display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 16px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px 12px; border-radius: 16px;
   font-size: 12px; font-weight: 500; cursor: pointer; border: 1.5px solid var(--border);
   background: transparent; color: var(--text-muted); transition: all 0.15s; white-space: nowrap;
   flex-shrink: 0;
@@ -4462,7 +4469,7 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 /* === #630 — Mobile Accessibility Fixes === */
 
-/* #630-1: Touch targets — minimum 44px on touch devices */
+/* #630-1: Touch targets — 48px house minimum on touch devices (#2052, #235) */
 @media (pointer: coarse) {
   .filter-bar .btn,
   .filter-group .btn,
@@ -4476,16 +4483,16 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .analytics-time-range button,
   .detail-back-btn,
   .filter-toggle-btn {
-    min-height: 44px;
-    min-width: 44px;
+    min-height: 48px;
+    min-width: 48px;
   }
   .filter-bar input,
   .filter-bar select {
-    height: 44px;
+    height: 48px;
   }
   .region-dropdown-trigger,
   .multi-select-trigger {
-    height: 44px;
+    height: 48px;
   }
 }
 
@@ -5372,7 +5379,7 @@ body { touch-action: pan-y; }
 .ch-back {
   display: none; background: none; border: 0; cursor: pointer;
   color: var(--text); font-size: 24px; line-height: 1;
-  min-width: 40px; min-height: 40px; padding: 0 8px;
+  min-width: 48px; min-height: 48px; padding: 0 8px;
   border-radius: 6px;
   align-items: center; justify-content: center;
   -webkit-tap-highlight-color: rgba(0,0,0,.08);
