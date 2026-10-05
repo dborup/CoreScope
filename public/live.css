@@ -994,8 +994,9 @@ body.live-fullscreen #liveFullscreenToggle:hover,
 
 /* #1110 Live page node filter — match toolbar control sizing & theme */
 .live-node-filter-wrap { position: relative; display: inline-flex; align-items: center; }
-/* The label around the compact input is its 48px hit area (#235). */
-.live-node-filter-hitarea { display: inline-flex; align-items: center; min-height: 48px; cursor: text; }
+/* The label around the compact input is its 48px hit area (#235). Scoped
+   to .live-toggles so it wins over .live-toggles label (cursor: pointer). */
+.live-toggles .live-node-filter-hitarea { display: inline-flex; align-items: center; min-height: 48px; cursor: text; }
 input.live-node-filter-input {
   box-sizing: border-box;
   height: 30px;

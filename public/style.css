@@ -2490,6 +2490,9 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .ch-header-region .region-filter-bar { padding: 0; gap: 4px; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
+  /* #239: order: 1 puts the dropdown trigger (more than 4 regions) at the
+     right edge of the strip, so its menu opens leftwards from there. */
+  .ch-header-region .region-dropdown-menu { left: auto; right: 0; }
 
   /* Channel list row: name must dominate. Below 768px channels.js renders
      the flat .ch-row list (#1367), which has no inline share/remove
@@ -3583,7 +3586,7 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .area-dropdown-item.area-item-active { color: var(--accent); font-weight: 600; }
 .region-filter-container { margin: 0; padding: 0; display: inline-flex; align-items: center; }
 .region-pill {
-  display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 16px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px 12px; border-radius: 16px;
   font-size: 12px; font-weight: 500; cursor: pointer; border: 1.5px solid var(--border);
   background: transparent; color: var(--text-muted); transition: all 0.15s; white-space: nowrap;
   flex-shrink: 0;
