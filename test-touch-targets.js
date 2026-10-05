@@ -24,25 +24,31 @@ const assert = require('assert');
 const { chromium, devices } = require('playwright');
 
 const REPO = __dirname;
-const CSS = fs.readFileSync(path.join(REPO, 'public/style.css'), 'utf8');
+// Every local stylesheet, in the order index.html links them, so the
+// cascade matches the app (home.css restyles .suggest-claim, live.css and
+// channel-proposals.css carry their own controls).
+const SHEETS = [...fs.readFileSync(path.join(REPO, 'public/index.html'), 'utf8')
+  .matchAll(/<link rel="stylesheet" href="([\w.-]+\.css)\?v=__BUST__">/g)].map((m) => m[1]);
+const CSS = SHEETS.map((f) => fs.readFileSync(path.join(REPO, 'public', f), 'utf8')).join('\n');
 
 // All listed button surfaces use the shared 48px house minimum (#2052).
 const DEFAULT_MIN = 48;
 
-// Each entry: [selector, tag, classes, optional inner-html].
+// Each entry: [selector, tag, classes, optional wrapper]. The wrapper is
+// markup around the control, with {} where the control goes, for rules that
+// only apply inside a parent (`.modal > .modal-close`, `.filter-bar .btn`).
 // Tag matters because some rules are scoped to `button.ch-item` and some only
 // apply to specific input[type=...].
 //
+// The harness is an iPhone 13 (390 px wide, coarse pointer), so the
+// `@media (max-width: 640px)` and `@media (pointer: coarse)` rules apply.
+//
 // Not listed, and why:
 //   .compare-btn      the Compare CTA was removed in #1646 (see style.css)
-//   .ch-back-btn      display:none outside the mobile channels layout, so a
-//                     standalone element in this harness measures 0x0
-//   .filter-toggle-btn  hidden on mobile since #1461 (`.filter-bar >
-//                     .filter-toggle-btn`, display:none !important); the
-//                     control actually shown is the navbar mirror, which
-//                     mobile-page-actions.js builds with class "nav-btn
-//                     filter-toggle-btn-mirror mpa-btn-pill", so the .nav-btn
-//                     entry below already measures it
+//   .ch-back-btn      no markup renders it since #1367; the channel header's
+//                     back button is .ch-back, listed below
+//   .feed-show-btn, .legend-toggle-btn  live.css hides both at <=640px
+//                     (display:none !important), the width this harness has
 const BUTTON_SELECTORS = [
   ['.btn',                   'button', 'btn'],
   ['.btn-icon',              'button', 'btn-icon'],
@@ -64,10 +70,30 @@ const BUTTON_SELECTORS = [
   ['.copy-link-btn',         'button', 'copy-link-btn'],
   ['.alab-btn',              'button', 'alab-btn'],
   ['.fav-star',              'button', 'fav-star'],
+  // #235: the controls that were still 44 px (40 px for .ch-back).
+  ['.theme-toggle',          'label',  'theme-toggle'],
+  ['.modal > .modal-close',  'button', 'modal-close', '<div class="modal">{}</div>'],
+  ['.ch-modal-close',        'button', 'modal-close ch-modal-close', '<div class="modal ch-modal">{}</div>'],
+  ['.ch-back',               'button', 'ch-back', '<div class="ch-layout ch-detail-open">{}</div>'],
+  ['.ch-avatar.ch-tappable', 'div',    'ch-avatar ch-tappable'],
+  ['.suggest-claim',         'button', 'suggest-claim'],
+  ['.detail-back-btn',       'button', 'detail-back-btn'],
+  ['.filter-toggle-btn',     'button', 'filter-toggle-btn'],
+  ['.filter-bar .btn',       'button', 'btn', '<div class="filter-bar filters-expanded">{}</div>'],
+  ['.filter-group .btn',     'button', 'btn', '<div class="filter-group">{}</div>'],
+  ['.tab-btn',               'button', 'tab-btn'],
+  ['.region-pill',           'button', 'region-pill'],
+  ['.region-dropdown-trigger','button', 'region-dropdown-trigger'],
+  ['.multi-select-trigger',  'button', 'multi-select-trigger'],
+  ['.node-count-pill',       'span',   'node-count-pill'],
+  ['.analytics-time-range button', 'button', '', '<div class="analytics-time-range">{}</div>'],
+  ['.leaflet-control-zoom a','a',      '', '<div class="leaflet-bar leaflet-control leaflet-control-zoom">{}</div>'],
+  ['.live-leaflet-toggle a', 'a',      '', '<div class="leaflet-bar leaflet-control live-leaflet-toggle">{}</div>'],
 ];
 
-// Form controls. min-WIDTH is not enforced on these (text fields legitimately
-// span a wide column); we only require min-height: 48px.
+// Form controls and text buttons that only set a height. min-WIDTH is not
+// enforced on these (text fields legitimately span a wide column); we only
+// require min-height: 48px. Entry: [selector, tag, classes, inner, attrs, wrapper].
 const FIELD_SELECTORS = [
   ['select',                 'select', '',                 '<option>x</option>'],
   ['input[type=text]',       'input',  '', null, { type: 'text' }],
@@ -79,32 +105,53 @@ const FIELD_SELECTORS = [
   ['input[type=url]',        'input',  '', null, { type: 'url' }],
   ['input[type=date]',       'input',  '', null, { type: 'date' }],
   ['input[type=time]',       'input',  '', null, { type: 'time' }],
+  // #235
+  ['.filter-bar input',      'input',  '', null, { type: 'text' }, '<div class="filter-bar filters-expanded">{}</div>'],
+  ['.filter-bar select',     'select', '', '<option>x</option>', null, '<div class="filter-bar filters-expanded">{}</div>'],
+  ['.ch-proposals-toolbar button', 'button', '', 'x', null, '<div class="ch-proposals-toolbar">{}</div>'],
+  ['.ch-proposals-actions button', 'button', '', 'x', null, '<div class="ch-proposals-actions">{}</div>'],
+  ['.live-node-filter-hitarea', 'label', 'live-node-filter-hitarea', 'x'],
 ];
+
+// Invisible ::after tap pads that give a compact control its hit area.
+// Entry: [name, control markup with data-pad on the padded element].
+const PAD_SELECTORS = [
+  ['live region dropdown ::after', '<div class="live-controls-body"><div class="live-region-filter-container">' +
+    '<button class="region-dropdown-trigger" data-pad="live-region">x</button></div></div>'],
+];
+
+function wrap(wrapper, html) {
+  return wrapper ? wrapper.replace('{}', html) : html;
+}
 
 function buildSampleHtml() {
   const buttons = BUTTON_SELECTORS
-    .map(([_, tag, cls]) => `<${tag} class="${cls}" data-sel="${cls}">x</${tag}>`)
+    .map(([_, tag, cls, wrapper], i) => wrap(wrapper, `<${tag} class="${cls}" data-btn="${i}">x</${tag}>`))
     .join('\n      ');
   const fields = FIELD_SELECTORS
-    .map(([sel, tag, cls, inner, attrs]) => {
+    .map(([sel, tag, cls, inner, attrs, wrapper], i) => {
       const attrStr = attrs
         ? Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(' ')
         : '';
-      const open = `<${tag} ${attrStr} data-sel="${sel.replace(/[\[\]=]/g, '_')}">`;
+      const open = `<${tag} class="${cls}" ${attrStr} data-field="${i}">`;
       const close = tag === 'input' ? '' : `${inner || ''}</${tag}>`;
-      return open + close;
+      return wrap(wrapper, open + close);
     })
     .join('\n      ');
+  const pads = PAD_SELECTORS.map(([, html]) => html).join('\n      ');
 
   // .sort-help sample mirrors the markup the JS produces (post-fix):
   // tabindex="0" so :focus-within can fire on touch tap.
   return `<!doctype html>
 <html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>${CSS}</style>
+<style>/* leaflet.css (CDN, not loaded here) makes the bar links blocks */ .leaflet-bar a { display: block; }</style>
 </head><body>
   <div id="harness" style="padding: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
     ${buttons}
     ${fields}
+    ${pads}
     <span class="sort-help" id="sortHelp" tabindex="0" role="button" aria-label="Sort help">ⓘ
       <span class="sort-help-tip">Tip body</span>
     </span>
@@ -155,8 +202,8 @@ async function run() {
   }
 
   // --- Buttons: rendered hit area must be at least 48x48 CSS px.
-  for (const [selector, , cls] of BUTTON_SELECTORS) {
-    const dim = await page.$eval(`[data-sel="${cls}"]`, (el) => {
+  for (const [i, [selector]] of BUTTON_SELECTORS.entries()) {
+    const dim = await page.$eval(`[data-btn="${i}"]`, (el) => {
       const r = el.getBoundingClientRect();
       const cs = getComputedStyle(el);
       return { w: r.width, h: r.height, mh: cs.minHeight, mw: cs.minWidth };
@@ -170,9 +217,8 @@ async function run() {
   }
 
   // --- Form controls: rendered height must be at least 48 CSS px.
-  for (const [selector, , , , attrs] of FIELD_SELECTORS) {
-    const dataKey = selector.replace(/[\[\]=]/g, '_');
-    const dim = await page.$eval(`[data-sel="${dataKey}"]`, (el) => {
+  for (const [i, [selector]] of FIELD_SELECTORS.entries()) {
+    const dim = await page.$eval(`[data-field="${i}"]`, (el) => {
       const r = el.getBoundingClientRect();
       const cs = getComputedStyle(el);
       return { h: r.height, mh: cs.minHeight };
@@ -181,6 +227,24 @@ async function run() {
            dim.h >= 48,
            `expected height >=48, got ${dim.h}`);
   }
+
+  // --- Tap pads: the ::after box must be at least 48x48.
+  for (const [name, html] of PAD_SELECTORS) {
+    const key = html.match(/data-pad="([^"]+)"/)[1];
+    const dim = await page.$eval(`[data-pad="${key}"]`, (el) => {
+      const cs = getComputedStyle(el, '::after');
+      return { w: parseFloat(cs.width), h: parseFloat(cs.height) };
+    });
+    record(`${name}: tap pad ${dim.w.toFixed(1)}x${dim.h.toFixed(1)}`,
+           dim.w >= DEFAULT_MIN && dim.h >= DEFAULT_MIN,
+           `expected >=${DEFAULT_MIN}x${DEFAULT_MIN}, got ${dim.w}x${dim.h}`);
+  }
+
+  // The coarse-pointer and <=640px rules above only apply if the harness
+  // really is a phone.
+  const env = await page.evaluate(() => ({ coarse: matchMedia('(pointer: coarse)').matches, narrow: matchMedia('(max-width: 640px)').matches }));
+  record('iPhone context matches (pointer: coarse) and (max-width: 640px)', env.coarse && env.narrow,
+         `expected both true, got ${JSON.stringify(env)}`);
 
   // --- MAJOR-1 verification: .sort-help is keyboard/tap focusable AND the
   // tooltip becomes visible on focus (tap-to-reveal works without hover).

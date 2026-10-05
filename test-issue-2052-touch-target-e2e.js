@@ -12,9 +12,11 @@
  *    (share opens the modal, remove asks for confirmation, which is dismissed).
  *  - Mobile 390x844 touch (flat .ch-row list, #1367): the list renders no
  *    share/remove actions at all, every visible tap target in the channel
- *    sidebar is at least 44x44 (WCAG_MIN: other sidebar controls, e.g. the
- *    coarse-pointer .region-pill, are outside #2052 and still 44), and
- *    tapping a row opens the channel.
+ *    sidebar is at least 48x48 (the coarse-pointer .region-pill included,
+ *    #235), and tapping a row opens the channel. In the open channel the
+ *    header's back button and every sender avatar, and in the add-channel
+ *    dialog the close button, are at least 48x48 with no horizontal
+ *    overflow (#235).
  *  - 768-1330 px (the narrow sectioned sidebar; 768 with touch): share and
  *    remove are at least 48x48, visible, unclipped, hit at their centre and
  *    do not overlap. Before upstream PR 2078 the remove action was clipped
@@ -40,7 +42,8 @@ const HASH = 'user:' + CHANNEL;
 const SHARE = `#chList [data-share-channel="${HASH}"]`;
 const REMOVE = `#chList [data-remove-channel="${HASH}"]`;
 const MIN = 48;
-const WCAG_MIN = 44;
+// A server channel the E2E fixture has messages in, so sender avatars render.
+const MSG_CHANNEL = '#test';
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -121,20 +124,26 @@ function overlaps(a, b) {
   return !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
 }
 
-// Share and remove: at least MIN square, visible, unclipped, hit at their
-// centre, and not on top of each other.
+// One control: at least MIN square, visible, unclipped and hit at its centre.
+async function assertTarget(page, selector, name) {
+  const m = await measure(page, selector);
+  assert(m, name + ' not rendered');
+  assert(m.w >= MIN && m.h >= MIN, `${name} renders ${m.w.toFixed(1)}x${m.h.toFixed(1)}, below ${MIN}x${MIN}`);
+  assert(m.visible, name + ' is not visible');
+  assert(m.clippedBy.length === 0, name + ' is clipped by ' + m.clippedBy.join(', '));
+  assert(m.hit, `${name} centre hits "${m.hitOn}", not the control`);
+  return m;
+}
+
+// Share and remove: each a full target, and not on top of each other.
 async function assertActionTargets(page) {
-  const found = {};
-  for (const [name, sel] of [['share', SHARE], ['remove', REMOVE]]) {
-    const m = await measure(page, sel);
-    assert(m, name + ' action not rendered');
-    assert(m.w >= MIN && m.h >= MIN, `${name} renders ${m.w.toFixed(1)}x${m.h.toFixed(1)}, below ${MIN}x${MIN}`);
-    assert(m.visible, name + ' is not visible');
-    assert(m.clippedBy.length === 0, name + ' is clipped by ' + m.clippedBy.join(', '));
-    assert(m.hit, `${name} centre hits "${m.hitOn}", not the control`);
-    found[name] = m;
-  }
-  assert(!overlaps(found.share, found.remove), 'share and remove overlap');
+  const share = await assertTarget(page, SHARE, 'share');
+  const remove = await assertTarget(page, REMOVE, 'remove');
+  assert(!overlaps(share, remove), 'share and remove overlap');
+}
+
+function horizontalOverflow(page) {
+  return page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 }
 
 async function main() {
@@ -229,7 +238,7 @@ async function main() {
     // asserts which layout it is.
     await mp.waitForSelector(`#chList [data-hash="${HASH}"]`, { state: 'visible' });
 
-    await step(`mobile 390x844: the list renders no share/remove actions, and every visible tap target is at least ${WCAG_MIN}x${WCAG_MIN}`, async () => {
+    await step(`mobile 390x844: the list renders no share/remove actions, and every visible tap target is at least ${MIN}x${MIN}`, async () => {
       const r = await mp.evaluate(([hash, min]) => ({
         mobileRow: !!document.querySelector(`#chList .ch-row[data-hash="${hash}"]`),
         actions: document.querySelectorAll('#chList .ch-icon-btn, #chList [data-share-channel], #chList [data-remove-channel]').length,
@@ -239,10 +248,10 @@ async function main() {
           .map((e) => { const b = e.getBoundingClientRect(); return { name: e.id || String(e.className).split(' ')[0] || e.tagName, w: +b.width.toFixed(1), h: +b.height.toFixed(1) }; })
           .filter((t) => t.w < min || t.h < min),
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      }), [HASH, WCAG_MIN]);
+      }), [HASH, MIN]);
       assert(r.mobileRow, 'the channel is not rendered as a mobile .ch-row');
       assert(r.actions === 0 && r.desktopRows === 0, `mobile list renders desktop actions (actions=${r.actions}, .ch-item rows=${r.desktopRows})`);
-      assert(r.small.length === 0, `mobile tap targets below ${WCAG_MIN}x${WCAG_MIN}: ` + JSON.stringify(r.small));
+      assert(r.small.length === 0, `mobile tap targets below ${MIN}x${MIN}: ` + JSON.stringify(r.small));
       assert(r.overflow <= 0, 'mobile page overflows horizontally by ' + r.overflow + 'px');
     });
 
@@ -250,6 +259,45 @@ async function main() {
       await mp.tap(`#chList [data-hash="${HASH}"]`);
       await mp.waitForFunction((h) => location.hash.includes('/channels/') &&
         (location.hash.includes(encodeURIComponent(h)) || location.hash.includes(h)), HASH);
+    });
+
+    await step(`mobile: the open channel's back button is at least ${MIN}x${MIN}, unclipped and hit at its centre (#235)`, async () => {
+      await mp.waitForSelector('#chHeader .ch-back', { state: 'visible' });
+      await assertTarget(mp, '#chHeader .ch-back', 'back button');
+      const overflow = await horizontalOverflow(mp);
+      assert(overflow <= 0, 'channel view overflows horizontally by ' + overflow + 'px');
+    });
+
+    await step(`mobile: in a channel with messages every sender avatar is at least ${MIN}x${MIN}, and nothing overflows horizontally (#235)`, async () => {
+      await mp.tap('#chHeader .ch-back');
+      await mp.tap(`#chList [data-hash="${MSG_CHANNEL}"]`);
+      await mp.waitForSelector('#chMessages .ch-avatar.ch-tappable', { state: 'visible' });
+      const r = await mp.evaluate((min) => {
+        const msgs = document.getElementById('chMessages');
+        const avatars = [...msgs.querySelectorAll('.ch-avatar.ch-tappable')].map((e) => e.getBoundingClientRect());
+        return {
+          count: avatars.length,
+          small: avatars.filter((b) => b.width < min || b.height < min).map((b) => b.width.toFixed(1) + 'x' + b.height.toFixed(1)),
+          msgsOverflow: msgs.scrollWidth - msgs.clientWidth,
+        };
+      }, MIN);
+      assert(r.count > 0, 'no sender avatars rendered in ' + MSG_CHANNEL);
+      assert(r.small.length === 0, `${r.small.length} of ${r.count} avatars below ${MIN}x${MIN}: ` + r.small.slice(0, 5).join(', '));
+      assert(r.msgsOverflow <= 0, 'message list overflows horizontally by ' + r.msgsOverflow + 'px');
+      await assertTarget(mp, '#chHeader .ch-back', 'back button');
+      const overflow = await horizontalOverflow(mp);
+      assert(overflow <= 0, 'channel view overflows horizontally by ' + overflow + 'px');
+    });
+
+    await step(`mobile: the add-channel dialog's close button is at least ${MIN}x${MIN} and hit at its centre, and the page does not overflow (#235)`, async () => {
+      await mp.tap('#chHeader .ch-back');
+      await mp.tap('#chAddChannelBtn');
+      await mp.waitForSelector('#chModalClose', { state: 'visible' });
+      await assertTarget(mp, '#chModalClose', 'dialog close');
+      const overflow = await horizontalOverflow(mp);
+      assert(overflow <= 0, 'page with the dialog open overflows horizontally by ' + overflow + 'px');
+      await mp.tap('#chModalClose');
+      await mp.waitForFunction(() => document.getElementById('chAddChannelModal').classList.contains('hidden'));
     });
   } finally {
     await mob.ctx.close();
