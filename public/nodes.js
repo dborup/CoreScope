@@ -591,6 +591,23 @@
     }
   }
 
+  // #259: the list view's Escape-to-close-the-detail-panel handler, same class
+  // of leak. It used to be a fresh closure registered inside renderLeft(), and
+  // renderLeft() runs on every load of the list -- a visit, a region change, a
+  // filter change -- so the listeners stacked and were never removed. Module
+  // level means a repeat add is a DOM no-op and destroy() can take it off.
+  function _nodesPanelEsc(e) {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('nodesRight');
+    if (!panel || panel.classList.contains('empty')) return;
+    closeDetailView();
+    panel.classList.add('empty');
+    panel.innerHTML = '<span>Select a node to view details</span>';
+    selectedKey = null;
+    history.replaceState(null, '', '#/nodes');
+    renderRows();
+  }
+
   let regionChangeHandler = null;
 
   function init(app, routeParam) {
@@ -1258,9 +1275,11 @@
   function destroy() {
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
-    // #259: the full-screen view's Escape handler is document-level, so it
-    // outlives the page's DOM unless it is removed here.
+    // #259: both Escape handlers are document-level, so they outlive the
+    // page's DOM unless they are removed here -- _nodesEsc for the
+    // full-screen view, _nodesPanelEsc for the list view.
     document.removeEventListener('keydown', _nodesEsc);
+    document.removeEventListener('keydown', _nodesPanelEsc);
     closeDetailView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
@@ -1675,20 +1694,10 @@
       tbody.addEventListener('keydown', handler);
     }
 
-    // Escape to close node detail panel
-    document.addEventListener('keydown', function nodesPanelEsc(e) {
-      if (e.key === 'Escape') {
-        const panel = document.getElementById('nodesRight');
-        if (panel && !panel.classList.contains('empty')) {
-          closeDetailView();
-          panel.classList.add('empty');
-          panel.innerHTML = '<span>Select a node to view details</span>';
-          selectedKey = null;
-          history.replaceState(null, '', '#/nodes');
-          renderRows();
-        }
-      }
-    });
+    // Escape to close node detail panel. #259: one listener, not one per
+    // render -- _nodesPanelEsc is a stable module-level reference, so this add
+    // is a no-op on every render after the first, and destroy() removes it.
+    document.addEventListener('keydown', _nodesPanelEsc);
 
     // #630: Close button for node detail panel (important for mobile full-screen overlay)
     document.getElementById('nodesRight').addEventListener('click', function(e) {
