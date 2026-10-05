@@ -14,6 +14,11 @@
  * - 390 px: no child rows, no expanded class, no aria-expanded;
  * - back at 1400 px: the children and the expanded state are back.
  *
+ * The touch block at the end checks the other direction: at 390 px an expanded
+ * group renders exactly like a collapsed one, so "activating the row did not
+ * expand it" is read off expandedHashes through packets.js's test hook and
+ * confirmed by resizing back over the breakpoint.
+ *
  * Runs against the fixture's seeded 3-observation group (see the "Seed
  * grouped-packet row for #1486" step in deploy.yml).
  *
@@ -59,6 +64,11 @@ async function rowState(page) {
       visibleChildren: kids.filter((k) => k.getClientRects().length > 0).length,
       expandCellVisible: !!expandCell && expandCell.getClientRects().length > 0,
       carets: expandCell ? [...expandCell.querySelectorAll('use')].map((u) => (u.getAttribute('href') || '').split('#')[1]) : [],
+      // At <= 600 px a hash in expandedHashes renders exactly like a collapsed
+      // row, so "did not expand" has to be read off the set, not the DOM.
+      // 'NO-HOOK' if packets.js's test hook is gone, so its absence fails.
+      inExpandedHashes: window._packetsTestAPI && typeof window._packetsTestAPI._isExpanded === 'function'
+        ? window._packetsTestAPI._isExpanded(hash) : 'NO-HOOK',
     };
   }, [ROW, SEED_HASH]);
 }
@@ -116,6 +126,7 @@ async function run(browser, theme) {
     assert(s.children === 0, 'the child rows are not rendered at all: ' + JSON.stringify(s));
     assert(!s.expandedClass, 'the row does not claim to be expanded: ' + JSON.stringify(s));
     assert(s.aria === null, 'and it announces no expanded state (#255)');
+    assert(s.inExpandedHashes === true, 'the expansion is kept in state, not cleared: ' + JSON.stringify(s));
     assert(!s.expandCellVisible, 'the expand column is hidden at 390 px, as before');
     await shot(page, '390-after-resize-' + theme);
   });
@@ -153,9 +164,14 @@ async function run(browser, theme) {
   await run(browser, 'light');
   await run(browser, 'dark');
 
-  // A touch context that starts at 390 px: the same group deep-linked and
-  // expanded by the URL must not render children there either. Reaching the
-  // row by hash keeps the state out of a desktop render entirely.
+  // A touch context that starts at 390 px, reached by ?hash= so the group is
+  // never rendered at desktop width first: activating the row must select it,
+  // and must neither render children nor put the hash into expandedHashes.
+  //
+  // ?hash= only filters -- it does not expand anything. The #866 deep link
+  // that *does* expand before the first render is #/packets/<hash>?obs=<id>;
+  // the first-render-at-narrow-width case it produces is covered by the
+  // test-packets.js unit cases, which seed expandedHashes and render at 390 px.
   {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
@@ -172,7 +188,20 @@ async function run(browser, theme) {
       }, null, { timeout: 8000 });
       const s = await rowState(page);
       assert(s.visibleChildren === 0 && !s.expandedClass, 'no children after a tap: ' + JSON.stringify(s));
+      assert(s.inExpandedHashes === false, 'the tap did not expand the group: ' + JSON.stringify(s));
       await shot(page, '390-touch-sheet');
+    });
+
+    // The same conclusion at the render level, without the hook: an expansion
+    // the tap made invisibly would be on screen as soon as the layout crosses
+    // back over the breakpoint.
+    await step('390 px touch -> 1400 px: the group is still collapsed', async () => {
+      await page.evaluate(() => { const s = document.getElementById('mobileDetailSheet'); if (s) s.classList.remove('open'); });
+      await page.setViewportSize({ width: 1400, height: 900 });
+      const s = await waitRow(page, 'desktop');
+      assert(s.aria === 'false', 'aria-expanded="false" over the breakpoint: ' + JSON.stringify(s));
+      assert(!s.expandedClass && s.children === 0, 'no children appeared: ' + JSON.stringify(s));
+      assert(s.inExpandedHashes === false, 'and nothing entered expandedHashes: ' + JSON.stringify(s));
     });
     await ctx.close();
   }

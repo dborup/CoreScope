@@ -4350,6 +4350,11 @@
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },
       _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
+      // #259: at <= 600 px groupIsExpandedInView() renders a hash that *is* in
+      // expandedHashes exactly like a collapsed row, so the DOM alone can no
+      // longer tell "did not expand" from "expanded invisibly". The mobile E2E
+      // assertions read the set itself through this.
+      _isExpanded: function(hash) { return expandedHashes.has(hash); },
       _setDisplayGrouped: function(on) { _displayGrouped = !!on; },
     };
   }
