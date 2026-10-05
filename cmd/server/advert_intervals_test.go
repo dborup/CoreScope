@@ -212,17 +212,20 @@ func TestEstimateAdvertInterval_RaisedInterval(t *testing.T) {
 	}
 }
 
-// The zero-hop timer runs at 2 min (an untouched new install) or 60-240
-// min, nothing between (src/helpers/CommonCLI.cpp:160-165, 496-505), so a
+// Candidates are intervals the class's timer can run at. The zero-hop
+// timer runs at 2 min (an untouched new install) or 60-240 min, nothing
+// between (src/helpers/CommonCLI.cpp:160-165, 496-505), so a
 // zero-hop candidate is 2 min or at least 54 min (60 less the tolerance).
 // Manual advert.zerohop every 10-30 min is irregular, not "12 min".
-func TestEstimateAdvertInterval_ZeroHopCandidates(t *testing.T) {
+func TestEstimateAdvertInterval_TimerCandidates(t *testing.T) {
 	M := time.Minute
 	manual := aiGaps(12*M, 12*M, 24*M, 36*M, 12*M, 30*M)
 	aiCheck(t, estimateAdvertInterval(manual, advertIntervalZeroHop), 0, advertConfidenceNone, 7, 0)
 	aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(50*M, 8)...), advertIntervalZeroHop), 0, advertConfidenceNone, 9, 0)
 	aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(2*M, 19)...), advertIntervalZeroHop), 120, advertConfidenceHigh, 20, 19)
 	aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(55*M, 8)...), advertIntervalZeroHop), 3600, advertConfidenceHigh, 9, 8)
+	// Flood stays at 3 h or more: hourly manual flood adverts are irregular.
+	aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(60*M, 8)...), advertIntervalFlood), 0, advertConfidenceNone, 9, 0)
 }
 
 // Known limitation (review F2 on #247): when coverage is so sparse that the

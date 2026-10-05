@@ -138,14 +138,15 @@ func advertIntervalSamples(rows NodeAdvertRows) []advertIntervalSample {
 	return out
 }
 
-// advertIntervalFloorS is the shortest interval the class's timer can run
-// at, less the tolerance: shorter gaps are never a candidate interval (a
-// burst of manual adverts).
-func advertIntervalFloorS(class advertIntervalClass) float64 {
+// advertIntervalCandidateOK is whether the class's timer can run at about
+// c seconds (within the tolerance): flood 3 h or more, zero-hop the 2 min
+// new-install default or 60 min or more. Other gaps are never a candidate
+// interval (a burst of manual adverts, advert.zerohop every 10-30 min).
+func advertIntervalCandidateOK(c float64, class advertIntervalClass) bool {
 	if class == advertIntervalZeroHop {
-		return 120 * (1 - advertIntervalTol)
+		return math.Abs(c-120) <= advertIntervalTol*120 || c >= 3600*(1-advertIntervalTol)
 	}
-	return 3 * 3600 * (1 - advertIntervalTol)
+	return c >= 3*3600*(1-advertIntervalTol)
 }
 
 // estimateAdvertInterval estimates one class's interval:
@@ -154,8 +155,8 @@ func advertIntervalFloorS(class advertIntervalClass) float64 {
 //     first_seen by more than advertClockSlackS - and its gap is positive
 //     and agrees with first_seen's (a clock jump does not); else first_seen.
 //  2. A candidate interval is a gap seen directly (within the tolerance) in
-//     at least two gaps and a quarter of them, and not shorter than the
-//     class's timer allows. The one explaining the most gaps as 1-4 x
+//     at least two gaps and a quarter of them, and one the class's timer
+//     can run at (advertIntervalCandidateOK). The one explaining the most gaps as 1-4 x
 //     itself wins (ties: the longer, fewer missed adverts). k x interval
 //     is k - 1 missed adverts; shorter gaps are extra adverts, dropped.
 //  3. A raised setting: a new interval of 2-4x the old one is explained by
@@ -269,7 +270,7 @@ func advertGaps(s []advertIntervalSample) (gaps []float64, from []int) {
 func advertIntervalCandidate(gaps []float64, class advertIntervalClass) float64 {
 	best, bestExplained := 0.0, 0
 	for _, c := range gaps {
-		if c < advertIntervalFloorS(class) {
+		if !advertIntervalCandidateOK(c, class) {
 			continue
 		}
 		direct, explained := 0, 0
