@@ -111,7 +111,13 @@ func checkClientRxSources(cfg *Config, sources []MQTTSource) []string {
 			unknown = append(unknown, want)
 		}
 	}
-	log.Printf("[client-rx] coverage restricted to %d MQTT source(s): %s", len(allow), strings.Join(allow, ", "))
+	state := ""
+	if !cfg.ClientRxCoverageEnabled() {
+		// The allowlist is inert while the feature is off; say so rather than
+		// implying coverage is being ingested from the listed sources.
+		state = " (clientRxCoverage.enabled is false, so no coverage is ingested at all)"
+	}
+	log.Printf("[client-rx] coverage restricted to %d MQTT source(s): %s%s", len(allow), strings.Join(allow, ", "), state)
 	if len(unknown) > 0 {
 		log.Printf("[client-rx] WARNING: %d clientRxCoverage.sources name(s) match no configured mqttSources[].name: %s — coverage will never be accepted for those names; check the spelling",
 			len(unknown), strings.Join(unknown, ", "))

@@ -255,6 +255,21 @@ func TestCheckClientRxSourcesUnknownName(t *testing.T) {
 	if !strings.Contains(out, "typo-broker") {
 		t.Fatalf("the warning must name the unknown entry:\n%s", out)
 	}
+	if strings.Contains(out, "enabled is false") {
+		t.Fatalf("coverage is enabled here, the boot line must not say otherwise:\n%s", out)
+	}
+}
+
+// TestCheckClientRxSourcesDisabledSaysSo: an allowlist set while the feature is
+// off is inert, and the boot line must not imply coverage is being ingested.
+func TestCheckClientRxSourcesDisabledSaysSo(t *testing.T) {
+	cfg := &Config{ClientRxCoverage: &ClientRxCoverageConfig{Enabled: false, Sources: []string{"device-auth"}}}
+
+	out := captureLog(t, func() { checkClientRxSources(cfg, []MQTTSource{{Name: "device-auth"}}) })
+
+	if !strings.Contains(out, "enabled is false") {
+		t.Fatalf("expected the boot line to flag the disabled feature:\n%s", out)
+	}
 }
 
 // TestCheckClientRxSourcesSilentWithoutAllowlist: no allowlist ⇒ nothing to
