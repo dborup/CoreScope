@@ -53,6 +53,31 @@ func ListApprovedNames(ctx context.Context, db *sql.DB, limit int) ([]string, er
 	return out, rows.Err()
 }
 
+// ListRevokedNames returns the names of revoked proposals, most recently
+// revoked first. A missing table yields an empty result. The server hides
+// these channels from GET /api/channels (#251).
+func ListRevokedNames(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT name FROM channel_proposals WHERE status = 'revoked'
+		 ORDER BY reviewed_at DESC, id LIMIT ?`, clampLimit(limit))
+	if err != nil {
+		if IsMissingTable(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
 // ListProposals returns proposals, newest first, optionally filtered by
 // status ("" for all). A missing table yields an empty result.
 func ListProposals(ctx context.Context, db *sql.DB, status string, limit int) ([]Proposal, error) {

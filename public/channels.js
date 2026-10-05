@@ -1216,12 +1216,10 @@
         view: _initUrlParams.get('view'),
         // Called once per approval, from the admin decision or, with
         // auto-approval, from the suggest form's poller (#232).
-        onApproved: function () {
-          invalidateApiCache('/channels');
-          // loadChannels() merges the user's PSK rows itself (#152), before
-          // it reconciles the selection.
-          loadChannels(true);
-        }
+        onApproved: refreshChannelList,
+        // #251: the server leaves a revoked channel out of /channels; reload
+        // so the list (and an open conversation on it) follows at once.
+        onRevoked: refreshChannelList
       });
     }
     if (modalEl) {
@@ -2011,6 +2009,14 @@
   function loadChannels(silent) {
     latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent);
     return latestChannelsLoad;
+  }
+
+  // Reload the list after a shared channel was approved (#232) or revoked
+  // (#251). loadChannels() merges the user's PSK rows itself (#152), before
+  // it reconciles the selection.
+  function refreshChannelList() {
+    invalidateApiCache('/channels');
+    loadChannels(true);
   }
 
   async function loadChannelsFor(requestId, silent) {

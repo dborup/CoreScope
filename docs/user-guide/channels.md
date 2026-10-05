@@ -85,8 +85,10 @@ An administrator can undo a previous approval from the same **Pending / Approved
 Removing a channel:
 
 - Stops the ingestor from decrypting new traffic on it (unless it is a [built-in name](#built-in-names) — in the rainbow table or configured via `channelKeys`/`hashChannels` in `config.json` — in which case that key keeps working; see [Configuration](configuration.md#channel-decryption)).
-- Takes it out of everyone's **Network** section going forward.
-- Does **not** delete or hide any messages that were already decoded and shown while it was approved — those stay on the Channels page exactly as before. Revoking only affects future traffic.
+- Takes it out of everyone's **Network** section and out of the channel list, even if messages were already decoded while it was approved. A conversation that is open on it closes at the next list refresh (within about 15 seconds; at once in the tab where the administrator removed it).
+- Does **not** delete any message that was already decoded — the history stays stored and comes back with the channel if the name is approved again. A [built-in name](#built-in-names) is never hidden, because its key keeps decrypting.
+
+Letter case matters: `#HelloWorld` and `#helloworld` are different channels with different keys, so they are separate suggestions. When a suggestion differs from another one (or from a built-in name) only by case, the review dialog says "Same name in different case" so the administrator can decide.
 
 A removed channel shows up under the **Revoked** tab. Suggesting the same name again later starts a fresh review from **Pending** — it is never auto-approved just because it was approved before.
 

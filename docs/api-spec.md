@@ -1259,6 +1259,21 @@ List decoded channels with message counts.
 }
 ```
 
+**Revoked channels are left out of `channels`.** A channel whose shared-channel
+suggestion was revoked (see [revoke](#post-apiadminchannel-proposalsidrevoke))
+does not appear in the list even though its decoded messages are still stored.
+It is shown again, with its history, once the suggestion is approved again. The
+exception is a name the ingestor also decrypts through its built-in/config list
+(built-in keys, rainbow table, `hashChannels`, `channelKeys`): revoking does not
+stop that traffic, so such a channel is never hidden. When the ingestor's
+`builtin-channels.json` is missing or unreadable, nothing is hidden. Nothing is
+deleted: `GET /api/channels/:hash/messages` still returns the history of a
+hidden channel. The decision uses the same 10 s snapshot as `approvedChannels`
+(dropped early when a revoke or approve result is read), so there is no
+per-request query of the proposals table. Revoked proposals are removed by
+retention (`channelProposals.retentionDays` after the revoke); a hidden channel
+whose messages are still stored then appears again.
+
 ---
 
 ## GET /api/channels/:hash/messages
@@ -1372,8 +1387,17 @@ A duplicate suggestion reports the existing proposal and its status (for a rejec
 Requires `X-API-Key`. Optional `?status=pending|approved|rejected|revoked`. Newest first, bounded.
 
 ```jsonc
-{ "proposals": [Proposal & { "builtIn"?: true }], "enabled": boolean }
+{ "proposals": [Proposal & { "builtIn"?: true, "nearDuplicateOf"?: string[] }], "enabled": boolean }
 ```
+
+**Letter case in names.** A hashtag channel's key is the first 16 bytes of
+`sha256("#name")` of the exact name (MeshCore `docs/companion_protocol.md`, "Hashtag
+Channels"; the meshcore-open app's `derivePskFromHashtag` does not change case),
+so `#HelloWorld` and `#helloworld` are different channels with different keys.
+They are therefore separate proposals and are never merged. `nearDuplicateOf`
+lists the other proposal names (any status, also outside the `status` filter)
+and built-in names that differ from this one only by letter case, sorted; it is
+omitted when there are none. It is a hint for the administrator.
 
 ## POST /api/admin/channel-proposals/:id/approve and /reject
 
@@ -1398,7 +1422,7 @@ Missing or wrong key: `401`. No key configured, or a weak one: `403`.
 
 There is a real race between the `409` check and the ingestor actually applying the command: another admin could approve, reject or revoke the same proposal in between. The ingestor re-validates the status from scratch when it applies the command and is the true source of truth; the synchronous `409` here is only a best-effort fast-fail for the common case, not a guarantee. When the race is lost, the request ends with status `error` and an error such as `suggestion is not approved (it is pending)`.
 
-**Historical messages are not affected.** Revoking a channel only removes its decryption key going forward — messages the ingestor already decoded and stored while the channel was approved stay exactly as they are and remain visible on the Channels page. There is no mechanism (and none is planned as part of this) to hide or delete previously-decoded messages when a channel is revoked.
+**Historical messages are kept, the channel leaves the list.** Revoking a channel removes its decryption key going forward and takes the channel out of `GET /api/channels` (unless the name is a [built-in name](#built-in-names), which keeps decrypting and is never hidden). Messages the ingestor already decoded and stored while the channel was approved are **not deleted**: `GET /api/channels/:hash/messages` still returns them, and the channel returns to the list with its history if the suggestion is approved again (suggest the name again, then approve). The server stays read-only: it only filters the list. A re-suggested name is `pending`, not `revoked`, so it reappears in the list at that point, before it is approved.
 
 **Retention.** A revoked proposal's row is not deleted at revoke time — only its status changes, keeping `reviewedAt` as the audit timestamp of when it was revoked. It is removed later by the same retention sweep that prunes rejected proposals, once `reviewedAt` is older than `channelProposals.retentionDays` (see [Configuration](user-guide/configuration.md#shared-channel-suggestions)). Approved rows are still never pruned.
 

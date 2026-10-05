@@ -102,6 +102,34 @@ func TestChannelProposalSubmitDuplicatesAndCase(t *testing.T) {
 	}
 }
 
+// #251: letter case is part of a hashtag channel's identity. The key is the
+// first 16 bytes of sha256 of the exact name (firmware docs/companion_protocol.md,
+// "Hashtag Channels": sha256("#test")), so a different case derives a different
+// key. That is why #HelloWorld and #helloworld stay separate proposals instead
+// of being normalised into one.
+func TestHashtagKeyDerivationIsCaseSensitive(t *testing.T) {
+	if got := deriveHashtagChannelKey("#test"); got != "9cd8fcf22a47333b591d96a2b848b73f" {
+		t.Fatalf("#test key = %s, want the firmware-documented 9cd8fcf22a47333b591d96a2b848b73f", got)
+	}
+	if deriveHashtagChannelKey("#HelloWorld") == deriveHashtagChannelKey("#helloworld") {
+		t.Fatal("different case must derive a different key")
+	}
+
+	f := newProposalFixture(t, nil)
+	a := f.run(f.enqueue(channelregistry.OpSubmit, "#HelloWorld"))
+	b := f.run(f.enqueue(channelregistry.OpSubmit, "#helloworld"))
+	if a.Proposal == nil || b.Proposal == nil || a.Proposal.ID == b.Proposal.ID ||
+		a.Proposal.Name != "#HelloWorld" || b.Proposal.Name != "#helloworld" {
+		t.Fatalf("case variants must be two proposals with their names unchanged: %+v %+v", a, b)
+	}
+	f.run(f.enqueue(channelregistry.OpApprove, a.Proposal.ID))
+	f.run(f.enqueue(channelregistry.OpApprove, b.Proposal.ID))
+	keys := f.keys.Channels()
+	if keys["#HelloWorld"] == "" || keys["#helloworld"] == "" || keys["#HelloWorld"] == keys["#helloworld"] {
+		t.Fatalf("both case variants need their own key: %q %q", keys["#HelloWorld"], keys["#helloworld"])
+	}
+}
+
 func TestChannelProposalLimits(t *testing.T) {
 	f := newProposalFixture(t, &channelregistry.Config{MaxPending: 2, MaxApproved: 1})
 	a := f.run(f.enqueue(channelregistry.OpSubmit, "#a")).Proposal.ID
