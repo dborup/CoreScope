@@ -24,6 +24,8 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +64,12 @@ type AdminChannelProposal struct {
 	// channelKeys), so approving it adds nothing and revoking it does not
 	// stop decryption.
 	BuiltIn bool `json:"builtIn,omitempty"`
+	// NearDuplicateOf lists the other proposal names and built-in names that
+	// differ from this one only by letter case (#251). Hashtag keys are
+	// derived from the exact bytes of the name, so "#HelloWorld" and
+	// "#helloworld" are different channels (different keys) and stay separate
+	// proposals; this is a hint for the administrator, not a merge.
+	NearDuplicateOf []string `json:"nearDuplicateOf,omitempty"`
 }
 
 // ChannelProposalRequestResponse is GET /api/channel-proposals/requests/{id}.
@@ -80,8 +88,13 @@ type ChannelProposalListResponse struct {
 
 type approvedSnapshot struct {
 	channels []ApprovedChannel
-	builtAt  time.Time // when the list was last read successfully
-	expires  time.Time
+	// hidden holds the names GET /api/channels leaves out (#251): channels
+	// with stored messages whose proposal is not approved (revoked, rejected
+	// or suggested again) and that the ingestor does not decrypt through its
+	// config-derived keys. Built once per refresh and never mutated after.
+	hidden  map[string]bool
+	builtAt time.Time // when the list was last read successfully
+	expires time.Time
 }
 
 // builtinNamesCache is the last parsed builtin names file, keyed by its
@@ -90,6 +103,7 @@ type builtinNamesCache struct {
 	mod   time.Time
 	size  int64
 	names map[string]bool
+	ok    bool // the file parsed; false means the set is unknown
 }
 
 type channelProposalService struct {
@@ -179,10 +193,11 @@ func (p *channelProposalService) refundSubmission() {
 	}
 }
 
-// approvedChannels returns the approved channels for GET /api/channels from a
-// short-lived cache. It returns a fresh slice the caller may keep; the cached
-// one is never handed out or mutated.
-func (p *channelProposalService) approvedChannels(ctx context.Context) []ApprovedChannel {
+// snapshot returns the current approved/hidden snapshot, refreshing it when
+// the TTL ran out. The snapshot is immutable once built: callers may read it
+// after the lock is released but must never write to it. nil means no
+// database or no snapshot could be read yet.
+func (p *channelProposalService) snapshot(ctx context.Context) *approvedSnapshot {
 	if p == nil || p.db == nil {
 		return nil
 	}
@@ -190,14 +205,19 @@ func (p *channelProposalService) approvedChannels(ctx context.Context) []Approve
 	defer p.approvedMu.Unlock()
 	now := p.now()
 	if p.approved == nil || now.After(p.approved.expires) {
-		names, err := channelregistry.ListApprovedNames(ctx, p.db, channelregistry.MaxListed)
+		names, notApproved, err := p.readProposalNames(ctx)
 		switch {
 		case err == nil:
 			chans := make([]ApprovedChannel, len(names))
 			for i, n := range names {
 				chans[i] = ApprovedChannel{Name: n, Hash: n}
 			}
-			p.approved = &approvedSnapshot{channels: chans, builtAt: now, expires: now.Add(approvedCacheTTL)}
+			p.approved = &approvedSnapshot{
+				channels: chans,
+				hidden:   p.hiddenNames(notApproved),
+				builtAt:  now,
+				expires:  now.Add(approvedCacheTTL),
+			}
 		case p.approved == nil:
 			log.Printf("[channel-proposals] listing approved channels failed: %v", err)
 			return nil
@@ -207,11 +227,94 @@ func (p *channelProposalService) approvedChannels(ctx context.Context) []Approve
 			p.approved.expires = now.Add(approvedCacheTTL)
 		}
 	}
-	if len(p.approved.channels) == 0 {
+	return p.approved
+}
+
+// readProposalNames reads the approved names and the not-approved channels
+// that have stored traffic (two read-only queries; one refresh per
+// approvedCacheTTL at most).
+func (p *channelProposalService) readProposalNames(ctx context.Context) (approved, notApproved []string, err error) {
+	if approved, err = channelregistry.ListApprovedNames(ctx, p.db, channelregistry.MaxListed); err != nil {
+		return nil, nil, err
+	}
+	if notApproved, err = channelregistry.ListNotApprovedChannelsWithTraffic(ctx, p.db); err != nil {
+		return nil, nil, err
+	}
+	return approved, notApproved, nil
+}
+
+// hiddenNames returns the channels GET /api/channels must leave out, from the
+// names of not-approved proposals that have stored traffic. Only a channel
+// that was decrypted at some point has stored traffic, so such a name was
+// approved or config-decrypted before; revoking, rejecting a re-suggestion or
+// a re-suggestion that is still pending all keep it hidden, and only an
+// approval lists it again. Exceptions:
+//   - a name the ingestor decrypts through its config-derived keys (built-in,
+//     rainbow table, hashChannels, channelKeys) is never hidden, whatever its
+//     proposal says, because that traffic keeps being decrypted;
+//   - when the ingestor's names file is missing or unreadable nothing is
+//     hidden: a channel is only hidden once it is known not to be one of
+//     those.
+func (p *channelProposalService) hiddenNames(notApproved []string) map[string]bool {
+	if len(notApproved) == 0 {
 		return nil
 	}
-	out := make([]ApprovedChannel, len(p.approved.channels))
-	copy(out, p.approved.channels)
+	builtin, ok := p.loadBuiltinNames()
+	if !ok {
+		return nil
+	}
+	hidden := make(map[string]bool, len(notApproved))
+	for _, n := range notApproved {
+		if !builtin[n] {
+			hidden[n] = true
+		}
+	}
+	if len(hidden) == 0 {
+		return nil
+	}
+	return hidden
+}
+
+// hideRevoked drops the channels whose proposal is not approved from resp
+// (#251) and names them in resp.HiddenChannels so the page can keep live
+// updates from re-creating their rows.
+// The messages stay in the database and readable per channel; only the list
+// leaves them out, and the list returns when the proposal is approved again.
+// With nothing revoked resp is left as is; otherwise resp.Channels becomes a
+// filtered copy, because the slice it came in with is a cache's and must not
+// be modified. O(len).
+func (p *channelProposalService) hideRevoked(ctx context.Context, resp *ChannelListResponse) {
+	snap := p.snapshot(ctx)
+	if snap == nil || len(snap.hidden) == 0 {
+		return
+	}
+	out := append(resp.Channels[:0:0], resp.Channels...) // copy, then compact in place
+	kept := 0
+	for _, ch := range out {
+		if name, _ := ch["name"].(string); snap.hidden[name] {
+			continue
+		}
+		out[kept] = ch
+		kept++
+	}
+	resp.Channels = out[:kept]
+	resp.HiddenChannels = make([]string, 0, len(snap.hidden))
+	for name := range snap.hidden {
+		resp.HiddenChannels = append(resp.HiddenChannels, name)
+	}
+	sort.Strings(resp.HiddenChannels)
+}
+
+// approvedChannels returns the approved channels for GET /api/channels from a
+// short-lived cache. It returns a fresh slice the caller may keep; the cached
+// one is never handed out or mutated.
+func (p *channelProposalService) approvedChannels(ctx context.Context) []ApprovedChannel {
+	snap := p.snapshot(ctx)
+	if snap == nil || len(snap.channels) == 0 {
+		return nil
+	}
+	out := make([]ApprovedChannel, len(snap.channels))
+	copy(out, snap.channels)
 	return out
 }
 
@@ -239,28 +342,35 @@ func (p *channelProposalService) noteDecision(st channelregistry.RequestStatus) 
 // changed, and a bad version is logged once, not on every poll. A missing or
 // unreadable file means none are known.
 func (p *channelProposalService) builtinNames() map[string]bool {
+	names, _ := p.loadBuiltinNames()
+	return names
+}
+
+// loadBuiltinNames is builtinNames plus whether the set is known: ok is
+// false for a missing or unreadable file, where "no names" would be a guess.
+func (p *channelProposalService) loadBuiltinNames() (names map[string]bool, ok bool) {
 	if p == nil || p.queue == nil {
-		return nil
+		return nil, false
 	}
 	info, err := os.Stat(p.queue.BuiltinNamesPath())
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("[channel-proposals] reading built-in channel names failed: %v", err)
 		}
-		return nil
+		return nil, false
 	}
 	p.builtinMu.Lock()
 	defer p.builtinMu.Unlock()
 	if c := p.builtin; c != nil && c.mod.Equal(info.ModTime()) && c.size == info.Size() {
-		return c.names
+		return c.names, c.ok
 	}
-	names, err := p.queue.ReadBuiltinNames()
+	names, err = p.queue.ReadBuiltinNames()
 	if err != nil {
 		log.Printf("[channel-proposals] reading built-in channel names failed: %v", err)
 		names = nil
 	}
-	p.builtin = &builtinNamesCache{mod: info.ModTime(), size: info.Size(), names: names}
-	return names
+	p.builtin = &builtinNamesCache{mod: info.ModTime(), size: info.Size(), names: names, ok: err == nil}
+	return names, err == nil
 }
 
 func noStore(w http.ResponseWriter) {
@@ -397,12 +507,65 @@ func (s *Server) handleAdminChannelProposals(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "could not list suggestions")
 			return
 		}
+		// The near-duplicate hint must see a proposal in another status than
+		// the one being viewed, so it reads every name separately; the rows
+		// above keep the status filter in SQL (before the limit).
+		names, err := channelregistry.ListAllNames(r.Context(), p.db, channelregistry.MaxListed)
+		if err != nil {
+			log.Printf("[channel-proposals] admin name list failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "could not list suggestions")
+			return
+		}
 		builtin := p.builtinNames()
+		byFold := caseFoldIndex(names, builtin)
 		for _, pr := range list {
-			resp.Proposals = append(resp.Proposals, AdminChannelProposal{Proposal: pr, BuiltIn: builtin[pr.Name]})
+			resp.Proposals = append(resp.Proposals, AdminChannelProposal{
+				Proposal:        pr,
+				BuiltIn:         builtin[pr.Name],
+				NearDuplicateOf: nearDuplicates(byFold, pr.Name),
+			})
 		}
 	}
 	writeJSON(w, resp)
+}
+
+// caseFoldIndex groups every proposal name and built-in name by its lower-case
+// form, each distinct name once.
+func caseFoldIndex(names []string, builtin map[string]bool) map[string][]string {
+	seen := make(map[string]bool, len(names)+len(builtin))
+	idx := make(map[string][]string, len(names)+len(builtin))
+	add := func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		k := strings.ToLower(name)
+		idx[k] = append(idx[k], name)
+	}
+	for _, n := range names {
+		add(n)
+	}
+	for n := range builtin {
+		add(n)
+	}
+	return idx
+}
+
+// nearDuplicates returns the other names in idx that differ from name only by
+// letter case, sorted; nil when there are none.
+func nearDuplicates(idx map[string][]string, name string) []string {
+	group := idx[strings.ToLower(name)]
+	if len(group) < 2 {
+		return nil
+	}
+	out := make([]string, 0, len(group)-1)
+	for _, n := range group {
+		if n != name {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // loadAdminProposal validates id and loads the proposal, writing the

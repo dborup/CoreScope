@@ -3,6 +3,10 @@
 
 (function () {
   let channels = [];
+  // #251: channels the server leaves out of /channels because their shared
+  // channel was revoked (names from its `hiddenChannels`). A live packet for
+  // one of them must not create a list row again; replaced on every load.
+  let hiddenChannelNames = new Set();
   let selectedHash = null;
   let messages = [];
   let wsHandler = null;
@@ -1216,13 +1220,10 @@
         view: _initUrlParams.get('view'),
         // Called once per approval, from the admin decision or, with
         // auto-approval, from the suggest form's poller (#232).
-        onApproved: function () {
-          invalidateApiCache('/channels');
-          // loadChannels() merges the user's PSK rows itself (#152), before
-          // it reconciles the selection. bust: a /channels request already
-          // in flight may predate the approval (#243).
-          loadChannels(true, { bust: true });
-        }
+        onApproved: refreshChannelList,
+        // #251: the server leaves a revoked channel out of /channels; reload
+        // so the list (and an open conversation on it) follows at once.
+        onRevoked: refreshChannelList
       });
     }
     if (modalEl) {
@@ -1785,8 +1786,8 @@
           ch.lastMessage = truncate(displayText, 100);
           ch._wsSeq = ++wsActivitySeq; // #152: see mergeClientChannelState()
           channelListDirty = true;
-        } else if (isFirstObservation) {
-          // New channel we haven't seen
+        } else if (isFirstObservation && !hiddenChannelNames.has(channelKey)) {
+          // New channel we haven't seen (not one the server hides, #251)
           channels.push({
             hash: channelKey,
             name: channelName,
@@ -2015,6 +2016,15 @@
     return latestChannelsLoad;
   }
 
+  // Reload the list after a shared channel was approved (#232) or revoked
+  // (#251). loadChannels() merges the user's PSK rows itself (#152), before
+  // it reconciles the selection. bust: a /channels request already in
+  // flight may predate the approval or revocation (#243).
+  function refreshChannelList() {
+    invalidateApiCache('/channels');
+    loadChannels(true, { bust: true });
+  }
+
   async function loadChannelsFor(requestId, silent, bust) {
     // #152: WS activity stamped after this point is newer than the snapshot.
     const seqAtRequestStart = wsActivitySeq;
@@ -2031,6 +2041,7 @@
       // list that actually renders.
       if (requestId !== channelsRequestId) return latestChannelsLoad;
       const prevChannels = channels;
+      hiddenChannelNames = new Set(Array.isArray(data.hiddenChannels) ? data.hiddenChannels : []);
       // Copies: api() hands the same cached objects back on a TTL hit, and
       // mergeUserChannels() below mutates rows.
       channels = (data.channels || []).map(ch => Object.assign({}, ch, {

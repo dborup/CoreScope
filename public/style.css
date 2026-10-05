@@ -1737,6 +1737,13 @@ body.scroll-locked { overflow: hidden; }
   }
 }
 
+/* #249: the add-channel dialog's primary buttons were 32 px tall next to
+   their 48 px inputs. Touch only, like the #630 coarse-pointer block;
+   desktop keeps them at 32 px. */
+@media (pointer: coarse) {
+  #chGenerateBtn, #chPskAddBtn, #chHashtagBtn { min-height: 48px; }
+}
+
 
 /* === Map Controls Panel === */
 .map-controls {
@@ -2888,6 +2895,8 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 .node-adverts-counts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); }
 .node-adverts-count-row strong { margin-right: 4px; color: var(--text); }
 .node-adverts-note { margin: 0 0 8px; font-size: 12px; }
+.node-adverts-intervals { display: flex; flex-direction: column; gap: 2px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); cursor: help; }
+.node-adverts-interval-row strong { margin-right: 4px; color: var(--text); }
 .node-adverts-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
 .node-adverts-tabs .tab-btn { padding: 4px 10px; }
 .node-adverts-empty { font-size: 13px; }
