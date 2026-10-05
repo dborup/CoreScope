@@ -63,6 +63,10 @@ const (
 	// advertIntervalMaxMultiple is the longest run of missed adverts a gap
 	// may stand for (k - 1).
 	advertIntervalMaxMultiple = 4
+	// advertIntervalRaisedRun is how many of the newest gaps in a row at the
+	// same multiple of the interval read as a raised setting rather than
+	// adverts missed in a row.
+	advertIntervalRaisedRun = 3
 	// advertClockSlackS is how far the sender clock may be ahead of
 	// first_seen, and the least disagreement between a sender gap and the
 	// first_seen gap that rejects the sender gap (else 10 % of the gap).
@@ -154,10 +158,20 @@ func advertIntervalFloorS(class advertIntervalClass) float64 {
 //     class's timer allows. The one explaining the most gaps as 1-4 x
 //     itself wins (ties: the longer, fewer missed adverts). k x interval
 //     is k - 1 missed adverts; shorter gaps are extra adverts, dropped.
-//  3. The interval is the median of gap/k over the gaps it explains, then
+//  3. A raised setting: a new interval of 2-4x the old one is explained by
+//     the old one as missed adverts in every gap. When the newest
+//     advertIntervalRaisedRun gaps are all the same multiple k > 1, that is
+//     the setting, not adverts missed in a row: only the adverts since the
+//     newest gap at the old interval are used, and step 2 runs on them.
+//     Setting an interval re-arms its timer at once
+//     (src/helpers/CommonCLI.cpp:491-492, 500-501). A lowered setting needs
+//     nothing: the new interval explains the old gaps as multiples once it
+//     is a candidate.
+//  4. The interval is the median of gap/k over the gaps it explains, then
 //     snapped to the firmware's values (snapAdvertInterval).
 //
-// The candidate search is O(gaps^2) with gaps < nodeAdvertRouteLimit.
+// The candidate search is O(gaps^2) with gaps < nodeAdvertRouteLimit, run
+// at most once per raised setting found.
 func estimateAdvertInterval(samples []advertIntervalSample, class advertIntervalClass) AdvertIntervalEstimate {
 	est := AdvertIntervalEstimate{Samples: len(samples), Confidence: advertConfidenceNone}
 	if len(samples) == 0 {
@@ -176,32 +190,21 @@ func estimateAdvertInterval(samples []advertIntervalSample, class advertInterval
 		return est
 	}
 
-	gaps := advertGaps(s)
-	best, bestExplained := 0.0, 0
-	for _, c := range gaps {
-		if c < advertIntervalFloorS(class) {
-			continue
+	gaps, from := advertGaps(s)
+	best, start := advertIntervalCandidate(gaps, class), 0
+	for best > 0 {
+		cut := advertIntervalRaised(gaps, best)
+		if cut == 0 {
+			break
 		}
-		direct, explained := 0, 0
-		for _, g := range gaps {
-			k := advertGapMultiple(g, c)
-			if k == 1 {
-				direct++
-			}
-			if k > 0 {
-				explained++
-			}
-		}
-		if direct < 2 || direct*4 < len(gaps) {
-			continue
-		}
-		if explained > bestExplained || (explained == bestExplained && c > best) {
-			best, bestExplained = c, explained
-		}
+		start = from[cut]
+		gaps, from = gaps[cut:], from[cut:]
+		best = advertIntervalCandidate(gaps, class)
 	}
 	if best == 0 {
 		return est
 	}
+	est.Samples = len(s) - start
 
 	var units []float64
 	for _, g := range gaps {
@@ -239,12 +242,13 @@ func estimateAdvertInterval(samples []advertIntervalSample, class advertInterval
 }
 
 // advertGaps is the positive gaps in seconds between consecutive samples
-// (sorted by heard), each from the sender's clock when it is plausible.
-func advertGaps(s []advertIntervalSample) []float64 {
+// (sorted by heard), each from the sender's clock when it is plausible, and
+// for each gap the index of the sample it starts at.
+func advertGaps(s []advertIntervalSample) (gaps []float64, from []int) {
 	plausible := func(a advertIntervalSample) bool {
 		return a.senderTS > 0 && a.senderTS <= a.heard.Unix()+advertClockSlackS
 	}
-	gaps := make([]float64, 0, len(s)-1)
+	gaps, from = make([]float64, 0, len(s)-1), make([]int, 0, len(s)-1)
 	for i := 1; i < len(s); i++ {
 		g := s[i].heard.Sub(s[i-1].heard).Seconds()
 		if plausible(s[i]) && plausible(s[i-1]) {
@@ -254,10 +258,62 @@ func advertGaps(s []advertIntervalSample) []float64 {
 			}
 		}
 		if g > 0 {
-			gaps = append(gaps, g)
+			gaps, from = append(gaps, g), append(from, i-1)
 		}
 	}
-	return gaps
+	return gaps, from
+}
+
+// advertIntervalCandidate picks the interval candidate (step 2 of
+// estimateAdvertInterval), or 0 when no gap qualifies.
+func advertIntervalCandidate(gaps []float64, class advertIntervalClass) float64 {
+	best, bestExplained := 0.0, 0
+	for _, c := range gaps {
+		if c < advertIntervalFloorS(class) {
+			continue
+		}
+		direct, explained := 0, 0
+		for _, g := range gaps {
+			k := advertGapMultiple(g, c)
+			if k == 1 {
+				direct++
+			}
+			if k > 0 {
+				explained++
+			}
+		}
+		if direct < 2 || direct*4 < len(gaps) {
+			continue
+		}
+		if explained > bestExplained || (explained == bestExplained && c > best) {
+			best, bestExplained = c, explained
+		}
+	}
+	return best
+}
+
+// advertIntervalRaised spots a raised setting (step 3 of
+// estimateAdvertInterval): the newest advertIntervalRaisedRun gaps that are
+// a multiple of interval are all the same k > 1. Gaps that are no multiple
+// (extra adverts, the gap at the change) are skipped. It returns the index
+// of the first gap after the newest one at interval itself, where the new
+// setting starts, or 0 when there is no such run.
+func advertIntervalRaised(gaps []float64, interval float64) int {
+	run, runK := 0, 0
+	for i := len(gaps) - 1; i >= 0; i-- {
+		k := advertGapMultiple(gaps[i], interval)
+		switch {
+		case k == 0:
+		case run < advertIntervalRaisedRun:
+			if k == 1 || (runK > 0 && k != runK) {
+				return 0
+			}
+			run, runK = run+1, k
+		case k == 1:
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // advertGapMultiple is k when gap is k x interval within the tolerance

@@ -199,6 +199,8 @@ func TestEstimateAdvertInterval_RaisedInterval(t *testing.T) {
 		{"flood 12 h -> 24 h, 3 new gaps", advertIntervalFlood, series(aiRepeat(12*H, 16), aiRepeat(24*H, 3)), 24 * 3600, advertConfidenceMedium, 4, 3},
 		// Two in a row are as likely two missed adverts: the interval stays.
 		{"flood 12 h, last 2 gaps 2x", advertIntervalFlood, series(aiRepeat(12*H, 17), aiRepeat(24*H, 2)), 12 * 3600, advertConfidenceHigh, 20, 19},
+		// Different multiples in a row are missed adverts, not a setting.
+		{"flood 12 h, last 3 gaps 2x 3x 2x", advertIntervalFlood, series(aiRepeat(12*H, 10), []time.Duration{24 * H, 36 * H, 24 * H}), 12 * 3600, advertConfidenceHigh, 14, 13},
 		// Lowered (47 h -> 12 h): 12 h explains the old 47 h gaps as 4x
 		// once it is a candidate, as before.
 		{"flood 47 h -> 12 h", advertIntervalFlood, series(aiRepeat(47*H, 14), aiRepeat(12*H, 5)), 12 * 3600, advertConfidenceHigh, 20, 19},
