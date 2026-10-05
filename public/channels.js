@@ -1219,8 +1219,9 @@
         onApproved: function () {
           invalidateApiCache('/channels');
           // loadChannels() merges the user's PSK rows itself (#152), before
-          // it reconciles the selection.
-          loadChannels(true);
+          // it reconciles the selection. bust: a /channels request already
+          // in flight may predate the approval (#243).
+          loadChannels(true, { bust: true });
         }
       });
     }
@@ -2008,12 +2009,13 @@
   let channelsRequestId = 0;
   let latestChannelsLoad = null;
 
-  function loadChannels(silent) {
-    latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent);
+  // opts.bust: fetch fresh data even if the same request is in flight.
+  function loadChannels(silent, opts) {
+    latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent, !!(opts && opts.bust));
     return latestChannelsLoad;
   }
 
-  async function loadChannelsFor(requestId, silent) {
+  async function loadChannelsFor(requestId, silent, bust) {
     // #152: WS activity stamped after this point is newer than the snapshot.
     const seqAtRequestStart = wsActivitySeq;
     try {
@@ -2023,7 +2025,7 @@
       if (rp) params.push('region=' + encodeURIComponent(rp));
       if (showEnc) params.push('includeEncrypted=true');
       const qs = params.length ? '?' + params.join('&') : '';
-      const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
+      const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels, bust: bust });
       // #154: a newer request owns the list. Resolve when it is done, so a
       // caller's follow-up (init()'s deep link, the region handler) sees the
       // list that actually renders.

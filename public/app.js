@@ -154,7 +154,10 @@ async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
   // that retries 503s itself never waits on the retry loop below, and a
   // default caller never gets a 503 that loop would have ridden out.
   const inflightKey = retry503 ? path : path + '\n#no-retry503';
-  if (_inflight.has(inflightKey)) return _inflight.get(inflightKey);
+  // #243: an explicit refresh (bust) never joins an in-flight request, which
+  // may have been answered before the change the caller wants to see. It
+  // takes the in-flight slot instead, so later callers join the newer one.
+  if (!bust && _inflight.has(inflightKey)) return _inflight.get(inflightKey);
   const promise = (async () => {
     // Issue #1659: 503 with Retry-After indicates server-side warm-up
     // (analytics recomputer first-pass, index build, etc.). Retry with
@@ -217,7 +220,9 @@ async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
           if (data && typeof data === 'object' && isFinite(ra) && ra > 0) {
             Object.defineProperty(data, 'retryAfterSeconds', { value: ra, enumerable: false });
           }
-        } else if (ttl > 0) {
+        } else if (ttl > 0 && _inflight.get(inflightKey) === promise) {
+          // #243: a request a bust has superseded keeps its late answer out
+          // of the cache, where it would replace the newer data.
           _apiCache.set(path, { data, expires: Date.now() + ttl });
         }
         return data;
@@ -235,7 +240,11 @@ async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
   // duplicated as a second, unobserved rejection on this derived one.
   // The `.catch()` here only silences that duplicate -- it does not
   // touch `promise` itself or its resolution to callers.
-  promise.finally(() => _inflight.delete(inflightKey)).catch(() => {});
+  // #243: remove the entry only while it is still this request's; a bust
+  // may have taken the slot over.
+  promise.finally(() => {
+    if (_inflight.get(inflightKey) === promise) _inflight.delete(inflightKey);
+  }).catch(() => {});
   return promise;
 }
 
