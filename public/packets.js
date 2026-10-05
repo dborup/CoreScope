@@ -2404,6 +2404,29 @@
     }
   }
 
+  // #254: mobile-page-actions.js owns the mobile breakpoint and the #1461 #7
+  // redirect of a group-row click to select-hash. Without it nothing redirects.
+  function groupRowSelectsOnActivate() {
+    return !!(window.MobilePageActions && window.MobilePageActions.isMobile());
+  }
+
+  // A group row's action and aria-expanded depend on that breakpoint, so a
+  // resize that crosses it (e.g. a phone rotating) re-renders the visible rows.
+  let _groupRowsSelect = false;
+  let _groupRowModeTimer = null;
+  function _onGroupRowModeResize() {
+    clearTimeout(_groupRowModeTimer);
+    _groupRowModeTimer = setTimeout(() => {
+      const selects = groupRowSelectsOnActivate();
+      if (selects === _groupRowsSelect) return;
+      _groupRowsSelect = selects;
+      if (!_displayGrouped) return;
+      _lastVisibleStart = -1;
+      _lastVisibleEnd = -1;
+      renderVisibleRows();
+    }, 150);
+  }
+
   // Build HTML for a single grouped packet row
   function buildGroupRowHtml(p, entryIdx = -1) {
     const isExpanded = expandedHashes.has(p.hash);
@@ -2440,8 +2463,12 @@
     // channels.js, network-digest.js, analytics.js and route-view.js. The row that
     // toggles reports its state in aria-expanded; a single-observation row cannot
     // expand, so it has neither.
+    // #254: under the mobile breakpoint activating a group row selects it (#1461
+    // #7, the expand column is hidden there), so the row is select-hash and
+    // claims no expanded state.
+    const _grpToggles = !isSingle && !groupRowSelectsOnActivate();
     const _grpCaret = isSingle ? '' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-' + (isExpanded ? 'down' : 'right') + '"/></svg>';
-    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${isSingle ? '' : ' aria-expanded="' + isExpanded + '"'}${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
+    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${_grpToggles ? 'toggle-select' : 'select-hash'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_grpToggles ? ' aria-expanded="' + isExpanded + '"' : ''}${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
           <td class="col-expand" style="text-align:center;cursor:pointer">${_grpCaret}</td>
           <td class="col-region">${groupRegion ? `<span class="badge-region">${groupRegion}</span>` : '—'}</td>
           <td class="col-time">${renderTimestampCell(p.latest)}</td>
@@ -4257,6 +4284,8 @@
       _themeRefreshHandler = () => { if (typeof renderTableRows === 'function') renderTableRows(); };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
       window.addEventListener('storage', _onStorageChange);
+      _groupRowsSelect = groupRowSelectsOnActivate();
+      window.addEventListener('resize', _onGroupRowModeResize);
       var result = init(app, routeParam);
       // Install channel color picker on packets table (M2, #271)
       if (window.ChannelColorPicker) window.ChannelColorPicker.installPacketsTable();
@@ -4265,6 +4294,8 @@
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
       window.removeEventListener('storage', _onStorageChange);
+      window.removeEventListener('resize', _onGroupRowModeResize);
+      clearTimeout(_groupRowModeTimer);
       return destroy();
     }
   });
