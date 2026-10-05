@@ -111,12 +111,16 @@ func WatchdogLogDropCount() int64 {
 // watchdogLogDropCount and returns immediately rather than waiting for
 // the drain goroutine to catch up.
 //
-// stop closes the queue (no further sends may be attempted after
-// calling stop — see runLivenessWatchdog's shutdown ordering) and blocks
-// until the drain goroutine has flushed everything already queued.
+// stop closes the queue and blocks until the drain goroutine has flushed
+// everything already queued. emit after stop is a no-op (#103): the
+// force-reconnect goroutine (maybeForceReconnect) is not joined at
+// shutdown and can emit "reconnect attempt issued" after stop. The mutex
+// only orders emit against the close; nothing blocks while holding it.
 func newAsyncEmit(realEmit func(...any)) (emit func(...any), stop func()) {
 	queue := make(chan []any, asyncEmitQueueSize)
 	drained := make(chan struct{})
+	var mu sync.Mutex
+	stopped := false
 	go func() {
 		defer close(drained)
 		for args := range queue {
@@ -124,6 +128,11 @@ func newAsyncEmit(realEmit func(...any)) (emit func(...any), stop func()) {
 		}
 	}()
 	emit = func(args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
+			return
+		}
 		select {
 		case queue <- args:
 		default:
@@ -131,7 +140,10 @@ func newAsyncEmit(realEmit func(...any)) (emit func(...any), stop func()) {
 		}
 	}
 	stop = func() {
+		mu.Lock()
+		stopped = true
 		close(queue)
+		mu.Unlock()
 		<-drained
 	}
 	return emit, stop
@@ -672,7 +684,8 @@ func maybeForceReconnect(s *SourceLivenessState, now time.Time, emit func(...any
 	// client.Disconnect(250) which blocks up to 250ms, then
 	// client.Connect() which can block on the connect timeout. The
 	// watchdog goroutine must not stall a per-tick scan over a single
-	// slow source.
+	// slow source. Shutdown does not wait for it, so its emit may come
+	// after the watchdog stopped; newAsyncEmit drops that line (#103).
 	go func() {
 		s.ForceReconnectFn()
 		emit(fmt.Sprintf("MQTT [%s] WATCHDOG reconnect attempt issued", s.Tag))

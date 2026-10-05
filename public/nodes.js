@@ -713,7 +713,9 @@
     let headline, explanation;
     if (inactive) {
       headline = 'Inactive node';
-      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this device is inactive. ' +
+      // The record, not the device (#208): an observer can be uploading now
+      // while its node row is still in inactive_nodes.
+      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this node is listed as inactive. ' +
         'Nodes without an advert inside the retention window are moved off the node list until they advertise again.';
       rows.push(['Name', escapeHtml(inactive.name || '—')], ['Role', escapeHtml(inactive.role || '—')], ['Last advert', when(inactive.last_seen)]);
     } else {

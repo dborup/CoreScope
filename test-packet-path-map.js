@@ -1408,6 +1408,36 @@ function makeSandbox(apiImpl) {
   await escapeCase('Escape with focus in the sticky top nav (no floating layer) closes the modal (#180)',
     [{}, { pos: 'sticky', cls: 'top-nav' }], 'target', true);
 
+  // #208 item 4: focus inside the modal itself (its close or copy-link
+  // button) is not a layer above it. The .modal-overlay is position:fixed and
+  // topmost at the button, so without the overlay.contains() check the walk
+  // would take the modal for a layer drawn over it and leave Escape alone.
+  await (async () => {
+    const name = 'Escape with focus inside the modal (its close button) closes the modal (#208)';
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = '#/packets/deadbeef?obs=1&viewPath=1';
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      const btn = ctx.document.getElementById('packetPathClose');
+      assert.ok(overlay && btn && overlay.contains(btn), 'close button not inside the modal');
+      overlay._pos = 'fixed';
+      overlay.parentElement = ctx.document.body;
+      overlay.matches = () => false;
+      btn.parentElement = overlay;
+      btn.getBoundingClientRect = () => ({ left: 10, top: 10, width: 20, height: 20 });
+      ctx.__topAt = btn;
+      const key = ctx.__docLog.find(r => r.type === 'keydown');
+      let stopped = 0;
+      key.fn({ key: 'Escape', target: btn, stopPropagation() { stopped++; } });
+      assert.ok(!ctx.document.getElementById('packetPathModal'), 'modal still open');
+      assert.strictEqual(stopped, 1, 'stopPropagation calls: ' + stopped);
+      assert.strictEqual(ctx.location.hash, '#/packets/deadbeef?obs=1');
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  })();
+
   // #180: the modal closes on a route change, and Back/Forward onto the
   // #/packets/<hash>?…&viewPath=1 entry it was closed away from does not
   // reopen it. A new link to the same URL (an entry without that state)

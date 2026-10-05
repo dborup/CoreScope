@@ -135,7 +135,8 @@ func TestMQTTSourceWiringLeaksNoCredentials_118(t *testing.T) {
 			buf := captureLog118(t)
 			src := MQTTSource{Broker: broker, Topics: []string{"meshcore/#"}}
 			tag := mqttSourceTags([]MQTTSource{src})[0]
-			opts, _, liveness := prepareMQTTSource(src, tag)
+			setup := prepareMQTTSource(src, tag)
+			opts, liveness := setup.opts, setup.liveness
 			opts.SetConnectTimeout(time.Second).
 				SetMaxReconnectInterval(100 * time.Millisecond).
 				SetConnectRetryInterval(50 * time.Millisecond)
@@ -200,7 +201,8 @@ func TestStatsFileHasNoCredentials_118(t *testing.T) {
 		{Broker: "tcp://tok3n@host:1883"},
 	}
 	for i, tag := range mqttSourceTags(sources) {
-		_, status, liveness := prepareMQTTSource(sources[i], tag)
+		setup := prepareMQTTSource(sources[i], tag)
+		status, liveness := setup.status, setup.liveness
 		status.MarkDisconnect(time.Now(), errors.New("connect "+sources[i].Broker+" refused"))
 		registerLivenessOrSkip(liveness)
 	}

@@ -126,6 +126,7 @@ run test-node-analytics-hop-chart.js
 run test-analytics-hop-depth-ui.js
 run test-channels-ping-bot-reply.js
 run test-channels-observed-path-hash-size.js
+run test-channels-client-state-152.js
 run test-packet-path-map.js
 run test-area-nodes-map.js
 run test-ping-scores.js
@@ -144,10 +145,12 @@ run test-issue-111-drawer-version.js
 
 # Previously run only by the JS unit step in deploy.yml (#174)
 run test-packet-filter-time.js
+run test-packets.js
 run test-confidence-indicator.js
 run test-1659-analytics-warmup.js
 run test-analytics-tab-state-and-query.js
 run test-analytics-subtab-deeplinks-205.js
+run test-hash-stats-sort-226.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js
