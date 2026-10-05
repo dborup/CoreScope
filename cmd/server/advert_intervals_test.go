@@ -212,6 +212,20 @@ func TestEstimateAdvertInterval_RaisedInterval(t *testing.T) {
 	}
 }
 
+// Known limitation (review F2 on #247): when coverage is so sparse that the
+// interval itself is never heard twice in a row, it is no candidate and a
+// multiple of it is estimated. A 47 h flood heard only 2x and 3x apart
+// reads as 94 h or 141 h, with the other multiple's gaps irregular.
+// Treating gaps that share a divisor as its multiples would instead read a
+// 24 h series with a few 36 h gaps as 12 h; this pins the current reading.
+func TestEstimateAdvertInterval_SparseCoverage(t *testing.T) {
+	H := time.Hour
+	s := aiGaps(94*H, 141*H, 94*H, 141*H, 94*H, 141*H, 94*H)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 94*3600, advertConfidenceMedium, 8, 4)
+	s = aiGaps(94*H, 141*H, 47*H, 94*H, 141*H, 94*H, 141*H)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalFlood), 141*3600, advertConfidenceMedium, 8, 3)
+}
+
 // A candidate must be seen directly in a quarter of the gaps, not only
 // twice. Two manual adverts that each split a 12 h gap into 4 h + 8 h make
 // 4 h a gap seen twice that explains every gap (4, 8 and 12 h are 1-3x
