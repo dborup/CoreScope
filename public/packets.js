@@ -4298,6 +4298,7 @@
       renderTableRows,
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },
+      _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
     };
   }
 
