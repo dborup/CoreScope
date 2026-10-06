@@ -224,6 +224,10 @@ type RetentionConfig struct {
 	// PacketDays is the retention window for transmissions (#1283).
 	// Ownership moved from cmd/server to cmd/ingestor; 0 disables.
 	PacketDays int `json:"packetDays"`
+	// ChannelDays keeps channel messages (GRP_TXT) and their observations
+	// until they are this many days old, when longer than PacketDays (#296).
+	// 0, or a value not longer than PacketDays, leaves them on PacketDays.
+	ChannelDays int `json:"channelDays"`
 	// ClientRxDays is the retention window (by rx_at) for mobile client-RX
 	// coverage rows in client_receptions / client_observers; 0 disables. Bounds
 	// the table the opt-in coverage feature would otherwise grow without limit.
@@ -235,6 +239,15 @@ type RetentionConfig struct {
 func (c *Config) PacketDaysOrZero() int {
 	if c.Retention != nil && c.Retention.PacketDays > 0 {
 		return c.Retention.PacketDays
+	}
+	return 0
+}
+
+// ChannelDaysOrZero returns the configured retention.channelDays or 0
+// (channel messages follow packetDays) if not set.
+func (c *Config) ChannelDaysOrZero() int {
+	if c.Retention != nil && c.Retention.ChannelDays > 0 {
+		return c.Retention.ChannelDays
 	}
 	return 0
 }

@@ -96,6 +96,12 @@ type Store struct {
 	sampleIntervalSec int
 	backfillWg        sync.WaitGroup
 
+	// pruneMu serialises the channelDays prunes of PruneTransmissions.
+	// packetPruneFloor is the packet cutoff of the last completed one (""
+	// before the first), where the next one starts its walk (#296).
+	pruneMu          sync.Mutex
+	packetPruneFloor string
+
 	// prefixIdx holds the prefix → pubkey index used by the
 	// resolved_path writer (#1547). Rebuilt on startup and once per
 	// neighbor-edges builder tick (60s).

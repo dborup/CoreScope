@@ -239,14 +239,11 @@ func main() {
 	// Packet (transmissions) retention: previously lived in cmd/server,
 	// moved to ingestor in #1283 to eliminate cross-process write
 	// contention (SQLITE_BUSY). 0 = disabled.
-	packetDays := cfg.PacketDaysOrZero()
-	if packetDays > 0 {
-		if n, err := store.PruneOldPackets(packetDays); err != nil {
-			log.Printf("[prune] error: %v", err)
-		} else if n > 0 {
-			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
-		}
+	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
+	if packetDays > 0 && channelDays > 0 && channelDays <= packetDays {
+		log.Printf("[prune] retention.channelDays=%d has no effect: it is not longer than packetDays=%d", channelDays, packetDays)
 	}
+	runTransmissionRetention(store, cfg, "startup")
 	// #89: route_mask_changes rows of transmissions deleted by any path.
 	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
 		log.Printf("[prune] route_mask_changes error: %v", err)
@@ -333,9 +330,7 @@ func main() {
 		packetRetentionTicker = time.NewTicker(24 * time.Hour)
 		go func() {
 			for range packetRetentionTicker.C {
-				if n, err := store.PruneOldPackets(packetDays); err != nil {
-					log.Printf("[prune] error: %v", err)
-				} else if n > 0 {
+				if r := runTransmissionRetention(store, cfg, "daily"); r.Packets+r.ChannelMessages > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
 				}
 				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
@@ -344,6 +339,9 @@ func main() {
 			}
 		}()
 		log.Printf("[prune] auto-prune enabled: packets older than %d days will be removed daily", packetDays)
+		if channelDays > packetDays {
+			log.Printf("[prune] channel messages are kept until they are %d days old", channelDays)
+		}
 	}
 
 	// Daily ticker for client-RX coverage retention (#1727).
@@ -487,6 +485,24 @@ func main() {
 		c.Disconnect(5000) // 5s to allow in-flight messages to drain
 	}
 	log.Println("Done.")
+}
+
+// runTransmissionRetention runs one transmission retention pass
+// (retention.packetDays, #1283; retention.channelDays, #296) and logs what it
+// removed. when names the pass in the log ("startup", "daily").
+func runTransmissionRetention(store *Store, cfg *Config, when string) PruneResult {
+	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
+	r, err := store.PruneTransmissions(packetDays, channelDays)
+	if err != nil {
+		log.Printf("[prune] error: %v", err)
+	}
+	if r.Packets > 0 {
+		log.Printf("[prune] %s pruned %d transmissions older than %d days", when, r.Packets, packetDays)
+	}
+	if r.ChannelMessages > 0 {
+		log.Printf("[prune] %s pruned %d channel messages older than %d days", when, r.ChannelMessages, channelDays)
+	}
+	return r
 }
 
 // buildMQTTOpts creates MQTT client options for a source with bounded reconnect

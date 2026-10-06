@@ -126,6 +126,7 @@ The container reads `config.json` from the directory mounted at `/app/data`. [co
 | `packetStore.maxMemoryMB` | Estimated in-memory packet-store budget; total process memory also includes other allocations. |
 | `packetStore.retentionHours` | Packet history retained in memory. |
 | `retention.packetDays` | Packet retention in SQLite, managed by the ingestor. |
+| `retention.channelDays` | Optional longer SQLite retention for channel messages, managed by the ingestor. Takes effect only when greater than `retention.packetDays`; `0` = channel messages follow `packetDays`. |
 | `apiKey` | Key for protected administration endpoints. Omit it to leave those endpoints disabled; use a unique strong key if you enable them. |
 
 The standard container starts the server on internal port `3000` with database `/app/data/meshcore.db`; change the host-facing Docker port mapping to choose a different external port. If you set `DISABLE_CADDY=true`, publish internal port `3000` instead of `80` and let your own reverse proxy handle HTTP/HTTPS.
