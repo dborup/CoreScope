@@ -201,3 +201,133 @@ func TestContentHashMigration_MergeKeepsFillColumnsNullWhenBothUnknown_287(t *te
 		t.Fatalf("a both-NULL fill column was given a value: scope=%v channel=%v from=%v; want all NULL", scope, channel, from)
 	}
 }
+
+// hm287Mask reads a transmission's route_mask.
+func hm287Mask(t *testing.T, db *sql.DB, id int) sql.NullInt64 {
+	t.Helper()
+	var m sql.NullInt64
+	if err := db.QueryRow(`SELECT route_mask FROM transmissions WHERE id = ?`, id).Scan(&m); err != nil {
+		t.Fatalf("transmission %d: %v", id, err)
+	}
+	return m
+}
+
+// The inline recompute must read the surviving observation headers. The only
+// DIRECT evidence is an observation of the not-yet-computed survivor whose
+// header is DIRECT (its route_type is FLOOD, and the loser's computed mask and
+// route_type are FLOOD too). The merged mask is non-NULL, so the backfill never
+// gets a second chance: a merge that skips or misreads the observation scan
+// leaves FLOOD for good. Kills reviewer mutants MX2 (no observation scan), MX3
+// (scan the loser's observations, empty after the move) and MX4
+// (routeMaskBitFromHeader returns 0).
+func TestContentHashMigration_MergeRecomputesBitFromSurvivingObservationHeader_287(t *testing.T) {
+	s := hm215Reopen(t, filepath.Join(t.TempDir(), "rm287-header.db"), func(db *sql.DB) {
+		o1, o2 := hm287Observers(t, db)
+		// Survivor (lowest id): NULL, route_type FLOOD, heard once as FLOOD and
+		// once as DIRECT.
+		hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+			VALUES (100, ?, 'stale-rm-100', '2026-01-01T00:00:00Z', 1, 1, 4, '{}', NULL)`, hm215Raw(10))
+		// Loser: computed FLOOD, route_type FLOOD.
+		hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+			VALUES (101, ?, 'stale-rm-101', '2026-01-01T00:00:00Z', 1, 1, 4, '{}', ?)`, hm215Raw(10), hm287FloodBit)
+		hm287InsObs(t, db, 100, o1, `["aa"]`, hm287FloodFrame)
+		hm287InsObs(t, db, 100, o2, `["bb"]`, hm287DirectFrame) // the only DIRECT evidence
+		hm287InsObs(t, db, 101, o1, `["cc"]`, hm287FloodFrame)
+	})
+
+	want := hm287DirectBit | hm287FloodBit
+	if merged := hm287Mask(t, s.db, 100); !merged.Valid || merged.Int64 != want {
+		t.Fatalf("merged route_mask = %v, want DIRECT|FLOOD = %04b (DIRECT from the surviving observation header)", merged, want)
+	}
+	if err := s.backfillTxRouteMask(context.Background(), s.db); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if final := hm287Mask(t, s.db, 100); !final.Valid || final.Int64 != want {
+		t.Fatalf("route_mask after backfill = %v, want DIRECT|FLOOD = %04b", final, want)
+	}
+}
+
+// The inline recompute must read the loser's route_type, not only the
+// survivor's. The only DIRECT evidence is the not-yet-computed loser's
+// route_type: its one observation has no stored frame (raw_hex NULL), and the
+// survivor is computed FLOOD with a FLOOD observation. Master's
+// COALESCE(route_mask, 0) merge ends at FLOOD here too. Kills reviewer mutant
+// MX1 (read only the winner's route_type).
+func TestContentHashMigration_MergeRecomputesBitFromLoserRouteType_287(t *testing.T) {
+	s := hm215Reopen(t, filepath.Join(t.TempDir(), "rm287-loser-rt.db"), func(db *sql.DB) {
+		o1, o2 := hm287Observers(t, db)
+		// Survivor (lowest id): computed FLOOD, route_type FLOOD.
+		hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+			VALUES (110, ?, 'stale-rm-110', '2026-01-01T00:00:00Z', 1, 1, 4, '{}', ?)`, hm215Raw(11), hm287FloodBit)
+		// Loser: NULL, heard as DIRECT; its observation kept no raw_hex.
+		hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+			VALUES (111, ?, 'stale-rm-111', '2026-01-01T00:00:00Z', 1, 2, 4, '{}', NULL)`, hm215Raw(11))
+		hm287InsObs(t, db, 110, o1, `["aa"]`, hm287FloodFrame)
+		hm215Obs(t, db, 111, o2, `["bb"]`)
+	})
+
+	want := hm287DirectBit | hm287FloodBit
+	if merged := hm287Mask(t, s.db, 110); !merged.Valid || merged.Int64 != want {
+		t.Fatalf("merged route_mask = %v, want DIRECT|FLOOD = %04b (DIRECT from the loser's route_type)", merged, want)
+	}
+	if err := s.backfillTxRouteMask(context.Background(), s.db); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if final := hm287Mask(t, s.db, 110); !final.Valid || final.Int64 != want {
+		t.Fatalf("route_mask after backfill = %v, want DIRECT|FLOOD = %04b", final, want)
+	}
+}
+
+// Both sides NULL: the merge writes a known mask instead of leaving NULL, and an
+// uncomputed survivor that the merge gives a mask (even 0) logs exactly one
+// route_mask_changes row. With evidence the mask is the recomputed union; with
+// none it is a known 0, which the backfill leaves alone (it would have written 0
+// too) and live ingest still grows. Kills the mutant that leaves a both-NULL
+// merge NULL (deferring to the backfill as master did) and the mutant that logs
+// a change row only when the survivor's mask was already known.
+func TestContentHashMigration_MergeBothRouteMasksUnknown_287(t *testing.T) {
+	cases := []struct {
+		name          string
+		survivorRT    interface{}
+		loserRT       interface{}
+		survivorFrame string // "" = no observation
+		loserFrame    string
+		want          int64
+	}{
+		{"with evidence", 1, 2, hm287FloodFrame, hm287DirectFrame, hm287DirectBit | hm287FloodBit},
+		{"without evidence", nil, nil, "", "", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := hm215Reopen(t, filepath.Join(t.TempDir(), "rm287-both-null.db"), func(db *sql.DB) {
+				o1, o2 := hm287Observers(t, db)
+				hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+					VALUES (120, ?, 'stale-rm-120', '2026-01-01T00:00:00Z', 1, ?, 4, '{}', NULL)`, hm215Raw(12), tc.survivorRT)
+				hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+					VALUES (121, ?, 'stale-rm-121', '2026-01-01T00:00:00Z', 1, ?, 4, '{}', NULL)`, hm215Raw(12), tc.loserRT)
+				if tc.survivorFrame != "" {
+					hm287InsObs(t, db, 120, o1, `["aa"]`, tc.survivorFrame)
+				}
+				if tc.loserFrame != "" {
+					hm287InsObs(t, db, 121, o2, `["bb"]`, tc.loserFrame)
+				}
+			})
+
+			if merged := hm287Mask(t, s.db, 120); !merged.Valid || merged.Int64 != tc.want {
+				t.Fatalf("merged route_mask = %v, want known %04b written by the merge", merged, tc.want)
+			}
+			if n := hm215Count(t, s.db, `SELECT COUNT(*) FROM route_mask_changes WHERE transmission_id = 120`); n != 1 {
+				t.Fatalf("route_mask_changes rows for the survivor = %d, want 1", n)
+			}
+			if got := hm215Count(t, s.db, `SELECT route_mask FROM route_mask_changes WHERE transmission_id = 120`); int64(got) != tc.want {
+				t.Fatalf("route_mask_changes announces %d, want %d", got, tc.want)
+			}
+			if err := s.backfillTxRouteMask(context.Background(), s.db); err != nil {
+				t.Fatalf("backfill: %v", err)
+			}
+			if final := hm287Mask(t, s.db, 120); !final.Valid || final.Int64 != tc.want {
+				t.Fatalf("route_mask after backfill = %v, want %04b", final, tc.want)
+			}
+		})
+	}
+}
