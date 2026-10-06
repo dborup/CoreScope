@@ -59,6 +59,32 @@ func reloadConfirmStore(t *testing.T, srv *Server) *PacketStore {
 	return store
 }
 
+// lruHasTx reports whether any observation of txID has a resolved-path LRU
+// entry, i.e. whether a handler read the tx's canonical path.
+func lruHasTx(store *PacketStore, txID int) bool {
+	store.mu.RLock()
+	tx := store.byTxID[txID]
+	store.mu.RUnlock()
+	if tx == nil {
+		return false
+	}
+	store.lruMu.RLock()
+	defer store.lruMu.RUnlock()
+	for _, obs := range tx.Observations {
+		if _, ok := store.apiResolvedPathLRU[obs.ID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func resetLRU(store *PacketStore) {
+	store.lruMu.Lock()
+	defer store.lruMu.Unlock()
+	store.apiResolvedPathLRU = make(map[int]resolvedPathLRUEntry, lruMaxSize)
+	store.lruOrder = store.lruOrder[:0]
+}
+
 type confirmPathsResp struct {
 	Paths              []json.RawMessage `json:"paths"`
 	TotalTransmissions int               `json:"totalTransmissions"`
@@ -152,5 +178,42 @@ func TestNodePaths_NoCanonicalPathStillConfirmedBySQL(t *testing.T) {
 	}
 	if q := store.confirmResolvedPathQueries.Load(); q != 1 {
 		t.Errorf("confirmResolvedPathContains ran %d times, want exactly 1 (the tx without a canonical path)", q)
+	}
+}
+
+// #277 point 2. Since #246 a candidate admitted by the hash index costs a
+// canonical-path fetch, and an LRU entry, even when its stored path turns out
+// not to contain the target. That stays cheap only because prefix collisions,
+// the usual reason a /paths candidate does not belong to the node, are dropped
+// by the index check before any fetch; only hash collisions and stale index
+// entries get as far as the fetch. This pins that order for both endpoints.
+func TestNodePaths_PrefixCollisionsExcludedBeforeCanonicalFetch(t *testing.T) {
+	srv, router := setupTestServer(t)
+	ownID := seedConfirmTx(t, srv, "collide_own", `["aa","bb"]`, `["`+confirmTestTarget+`","eeff00112233aabb"]`)
+	var otherIDs []int
+	for i := 0; i < 10; i++ {
+		// Same first-hop prefix as the target, resolved to another node.
+		otherIDs = append(otherIDs, seedConfirmTx(t, srv, fmt.Sprintf("collide_other_%02d", i),
+			`["aa","bb"]`, `["aacafe0000000000","eeff00112233aabb"]`))
+	}
+	store := reloadConfirmStore(t, srv)
+
+	for _, ep := range []string{"paths", "hop_analytics"} {
+		resetLRU(store)
+		body := nodeEndpointBody(t, router, ep)
+		if !strings.Contains(body, "collide_own") {
+			t.Errorf("%s: the target's own tx is missing", ep)
+		}
+		if !lruHasTx(store, ownID) {
+			t.Errorf("%s: the target's own tx was decided without its canonical path", ep)
+		}
+		for i, id := range otherIDs {
+			if strings.Contains(body, fmt.Sprintf("collide_other_%02d", i)) {
+				t.Errorf("%s: prefix-colliding tx %d attributed to the target", ep, id)
+			}
+			if lruHasTx(store, id) {
+				t.Errorf("%s: prefix-colliding tx %d reached the canonical-path fetch (LRU entry for a tx that is not the node's)", ep, id)
+			}
+		}
 	}
 }
