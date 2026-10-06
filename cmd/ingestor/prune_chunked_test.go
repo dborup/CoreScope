@@ -290,3 +290,44 @@ func TestPruneAgedTransmissionIDsUsesFirstSeenIndex(t *testing.T) {
 		}
 	}
 }
+
+// TestPruneOldPacketsDeletesChannelMessagesAfterPacketDays pins the behaviour
+// #296 starts from: retention.packetDays prunes every transmission by age, so
+// a channel message (GRP_TXT, payload_type 5) and its observations go after
+// packetDays exactly like an advert does.
+func TestPruneOldPacketsDeletesChannelMessagesAfterPacketDays(t *testing.T) {
+	store := openPruneStore(t, "prune-channel-today.db")
+	ts := time.Now().UTC().AddDate(0, 0, -30).Format(time.RFC3339)
+	for i, payloadType := range []int{5, 4} {
+		res, err := store.db.Exec(
+			`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json)
+			 VALUES ('AA', ?, ?, 0, ?, 1, '{}')`,
+			fmt.Sprintf("today-%d", i), ts, payloadType,
+		)
+		if err != nil {
+			t.Fatalf("seed tx: %v", err)
+		}
+		txID, _ := res.LastInsertId()
+		if _, err := store.db.Exec(
+			`INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp)
+			 VALUES (?, 1, 'rx', 1.0, -100, 0, '[]', ?)`,
+			txID, time.Now().Unix(),
+		); err != nil {
+			t.Fatalf("seed obs: %v", err)
+		}
+	}
+
+	n, err := store.PruneOldPackets(14)
+	if err != nil {
+		t.Fatalf("PruneOldPackets: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected the channel message and the advert pruned, got %d", n)
+	}
+	if remaining := countRows(t, store, "transmissions"); remaining != 0 {
+		t.Fatalf("expected no transmissions left, %d remain", remaining)
+	}
+	if remaining := countRows(t, store, "observations"); remaining != 0 {
+		t.Fatalf("expected no observations left, %d remain", remaining)
+	}
+}
