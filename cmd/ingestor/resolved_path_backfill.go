@@ -238,7 +238,7 @@ type resolvedPathBackfillRow struct {
 	id          int64
 	pathJSON    string
 	isNull      bool
-	routeType   int
+	routeType   int // the observation's own (observationRouteType), -1 unknown
 	payloadType int
 	fromPubkey  string
 	observerID  string
@@ -256,7 +256,8 @@ func (s *Store) resolvedPathBackfillBatch(ctx context.Context, after, ceiling in
 		return b, errResolvedPathBackfillNotReady
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT o.id, COALESCE(o.path_json, ''), o.resolved_path IS NULL,
-			COALESCE(t.route_type, -1), COALESCE(t.payload_type, -1), COALESCE(t.from_pubkey, ''), COALESCE(obs.id, '')
+			COALESCE(substr(o.raw_hex, 1, 2), ''), COALESCE(t.route_type, -1), t.route_mask,
+			COALESCE(t.payload_type, -1), COALESCE(t.from_pubkey, ''), COALESCE(obs.id, '')
 		FROM observations o
 		JOIN transmissions t ON t.id = o.transmission_id
 		LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -269,10 +270,14 @@ func (s *Store) resolvedPathBackfillBatch(ctx context.Context, after, ceiling in
 	batch := make([]resolvedPathBackfillRow, 0, limit)
 	for rows.Next() {
 		var r resolvedPathBackfillRow
-		if err := rows.Scan(&r.id, &r.pathJSON, &r.isNull, &r.routeType, &r.payloadType, &r.fromPubkey, &r.observerID); err != nil {
+		var header string
+		var txRoute int
+		var mask sql.NullInt64
+		if err := rows.Scan(&r.id, &r.pathJSON, &r.isNull, &header, &txRoute, &mask, &r.payloadType, &r.fromPubkey, &r.observerID); err != nil {
 			rows.Close()
 			return b, fmt.Errorf("scan batch: %w", err)
 		}
+		r.routeType = observationRouteType(header, txRoute, mask)
 		batch = append(batch, r)
 	}
 	rows.Close()
