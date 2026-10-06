@@ -120,7 +120,12 @@ func TestNodePaths_NoPerCandidateSQLConfirm(t *testing.T) {
 // contain the queried pubkey (hash collision, or an index entry made stale by
 // a later resolved_path overwrite) must still be excluded — now by the
 // canonical-path check instead of the SQL pre-filter.
-func TestNodePaths_StaleIndexEntryStillExcluded(t *testing.T) {
+//
+// The exclusion assertions are regression guards: they held before #246 too,
+// when the SQL pre-filter did the excluding. What tells before from after is
+// how the decision is made: no confirmation query, and the tx's canonical path
+// was read (it has an LRU entry; the SQL pre-filter dropped it unread).
+func TestNodePaths_StaleIndexEntryExcludedWithoutSQLConfirm(t *testing.T) {
 	srv, router := setupTestServer(t)
 	staleID := seedConfirmTx(t, srv, "confirm_stale_hash",
 		`["aa","bb"]`, `["aacafe0000000000","eeff00112233aabb"]`)
@@ -139,6 +144,10 @@ func TestNodePaths_StaleIndexEntryStillExcluded(t *testing.T) {
 	if strings.Contains(w.Body.String(), "confirm_stale_hash") {
 		t.Error("tx whose resolved_path does not contain the target leaked into /paths via a stale index entry")
 	}
+	if !lruHasTx(store, staleID) {
+		t.Error("/paths excluded the stale-index tx without reading its canonical resolved_path")
+	}
+	resetLRU(store)
 
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/nodes/"+confirmTestTarget+"/hop_analytics", nil))
@@ -148,6 +157,9 @@ func TestNodePaths_StaleIndexEntryStillExcluded(t *testing.T) {
 	if strings.Contains(w.Body.String(), "confirm_stale_hash") {
 		t.Error("tx whose resolved_path does not contain the target leaked into /hop_analytics via a stale index entry")
 	}
+	if !lruHasTx(store, staleID) {
+		t.Error("/hop_analytics excluded the stale-index tx without reading its canonical resolved_path")
+	}
 	if q := store.confirmResolvedPathQueries.Load(); q != 0 {
 		t.Errorf("confirmResolvedPathContains ran %d times, want 0", q)
 	}
@@ -156,7 +168,11 @@ func TestNodePaths_StaleIndexEntryStillExcluded(t *testing.T) {
 // Candidates with no canonical resolved_path are decided by the legacy
 // fallback arm, which still relies on the SQL confirmation. That behaviour is
 // preserved: the query runs (once) and a NULL resolved_path does not confirm.
-func TestNodePaths_NoCanonicalPathStillConfirmedBySQL(t *testing.T) {
+//
+// Only the query count tells this apart from the code before #246, which ran
+// the same query for every candidate: the exclusion assertion held then too,
+// and the response is identical by design. The count is the behaviour pinned.
+func TestNodePaths_NoCanonicalPathConfirmedBySQLExactlyOnce(t *testing.T) {
 	srv, router := setupTestServer(t)
 	nullID := seedConfirmTx(t, srv, "confirm_nullrp_hash", `["aa","bb"]`, "")
 	store := reloadConfirmStore(t, srv)
