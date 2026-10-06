@@ -9619,12 +9619,19 @@ func (s *PacketStore) computeHashCollisions(region, area string) map[string]inte
 
 		// Sort: local first, then regional, distant, incomplete
 		classOrder := map[string]int{"local": 0, "regional": 1, "distant": 2, "incomplete": 3, "unknown": 4}
+		// #321: prefixMap iteration order is random, so entries tied on both
+		// class and Appearances came out in a different order on each call.
+		// The prefix is the map key the entry was built from, so it is unique
+		// and makes the order total.
 		sort.Slice(collisions, func(i, j int) bool {
 			oi, oj := classOrder[collisions[i].Classification], classOrder[collisions[j].Classification]
 			if oi != oj {
 				return oi < oj
 			}
-			return collisions[i].Appearances > collisions[j].Appearances
+			if collisions[i].Appearances != collisions[j].Appearances {
+				return collisions[i].Appearances > collisions[j].Appearances
+			}
+			return collisions[i].Prefix < collisions[j].Prefix
 		})
 
 		// Stats
@@ -10403,8 +10410,15 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
 			})
 		}
+		// #321: observerStats iteration order is random, so observers tied
+		// on packetCount came out in a different order on each call. The
+		// observer_id is the map key the row was built from, so it is unique
+		// and makes the order total (sibling of GetSubpathDetail/#273).
 		sort.Slice(observerRows, func(i, j int) bool {
-			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+			if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
+				return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+			}
+			return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
 		})
 
 		var avgSnr *float64
@@ -10571,8 +10585,15 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			"can_relay": canRelay,
 		})
 	}
+	// #321: observerStats iteration order is random, so observers tied on
+	// packetCount came out in a different order on each call. The observer_id
+	// is the map key the row was built from, so it is unique and makes the
+	// order total (sibling of GetSubpathDetail/#273).
 	sort.Slice(observerRows, func(i, j int) bool {
-		return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+		if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
+			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+		}
+		return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
 	})
 
 	var avgSnr *float64
