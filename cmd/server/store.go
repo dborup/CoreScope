@@ -450,14 +450,14 @@ type PacketStore struct {
 
 	// Resolved path membership index: xxhash → []txID (forward) and txID → []hashes (reverse).
 	// Replaces per-StoreTx/StoreObs ResolvedPath []*string field (#800).
-	resolvedPubkeyIndex           map[uint64][]int  // hash(pubkey) → []txID
-	resolvedPubkeyReverse         map[int][]uint64  // txID → []hashes indexed under
-	useResolvedPathIndex          bool              // feature flag (default true, off path = conservative)
-	maxResolvedPubkeyIndexEntries int               // hard cap for size warning (0 = use default 5M)
-	apiResolvedPathLRU            map[int][]*string // obsID → resolved path (LRU cache for API)
-	lruOrder                      []int             // FIFO order for LRU eviction
-	lruMu                         sync.RWMutex      // guards apiResolvedPathLRU + lruOrder
-	lruClock                      func() time.Time  // test hook for LRU entry age; nil = time.Now
+	resolvedPubkeyIndex           map[uint64][]int             // hash(pubkey) → []txID
+	resolvedPubkeyReverse         map[int][]uint64             // txID → []hashes indexed under
+	useResolvedPathIndex          bool                         // feature flag (default true, off path = conservative)
+	maxResolvedPubkeyIndexEntries int                          // hard cap for size warning (0 = use default 5M)
+	apiResolvedPathLRU            map[int]resolvedPathLRUEntry // obsID → resolved path (LRU cache for API, entries expire after resolvedPathLRUTTL)
+	lruOrder                      []int                        // FIFO order for LRU eviction
+	lruMu                         sync.RWMutex                 // guards apiResolvedPathLRU + lruOrder
+	lruClock                      func() time.Time             // test hook for LRU entry age; nil = time.Now
 
 	// confirmResolvedPathQueries counts SQL round-trips made by
 	// confirmResolvedPathContains. Each one scans the tx's observation rows,

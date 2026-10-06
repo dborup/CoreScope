@@ -74,3 +74,66 @@ func TestNodePaths_RewrittenResolvedPathNotServedFromStaleLRU(t *testing.T) {
 		}
 	}
 }
+
+// The bound is a trade-off, not an invalidation: inside resolvedPathLRUTTL the
+// cached path is still served without touching SQLite. This pins that the
+// cache keeps doing its job (a TTL of 0, or a lookup that ignores the entry,
+// would make every /paths candidate a primary-key read again).
+func TestNodePaths_ResolvedPathLRUServesCachedEntryWithinTTL(t *testing.T) {
+	srv, router := setupTestServer(t)
+	const hash = "lru_within_ttl_hash"
+	txID := seedConfirmTx(t, srv, hash, `["aa","bb"]`, `["`+confirmTestTarget+`","eeff00112233aabb"]`)
+	store := reloadConfirmStore(t, srv)
+	advance := fakeLRUClock(store)
+
+	if !strings.Contains(nodeEndpointBody(t, router, "paths"), hash) {
+		t.Fatal("tx missing before the rewrite (setup)")
+	}
+	rewriteStoredResolvedPath(t, srv, txID, `["aacafe0000000000","eeff00112233aabb"]`)
+	advance(resolvedPathLRUTTL - time.Second)
+
+	if !strings.Contains(nodeEndpointBody(t, router, "paths"), hash) {
+		t.Error("cached resolved_path was re-read before resolvedPathLRUTTL elapsed")
+	}
+	advance(2 * time.Second)
+	if strings.Contains(nodeEndpointBody(t, router, "paths"), hash) {
+		t.Error("cached resolved_path still served after resolvedPathLRUTTL elapsed")
+	}
+}
+
+func TestResolvedPathLRU_ExpiryAndInPlaceRefresh(t *testing.T) {
+	store := &PacketStore{}
+	store.initResolvedPathIndex()
+	advance := fakeLRUClock(store)
+	a, b := "aa", "bb"
+
+	store.lruMu.Lock()
+	store.lruPut(7, []*string{&a})
+	store.lruMu.Unlock()
+	if rp, ok := store.lruGet(7, store.lruNow()); !ok || *rp[0] != "aa" {
+		t.Fatalf("fresh entry not served: ok=%v", ok)
+	}
+
+	advance(resolvedPathLRUTTL + time.Nanosecond)
+	if _, ok := store.lruGet(7, store.lruNow()); ok {
+		t.Fatal("entry older than resolvedPathLRUTTL served")
+	}
+
+	// A re-read after expiry must replace the value and restart its age,
+	// without a second FIFO slot for the same id.
+	store.lruMu.Lock()
+	store.lruPut(7, []*string{&b})
+	store.lruMu.Unlock()
+	if rp, ok := store.lruGet(7, store.lruNow()); !ok || *rp[0] != "bb" {
+		t.Fatalf("refreshed entry not served with the new value: ok=%v", ok)
+	}
+	if n := len(store.lruOrder); n != 1 {
+		t.Errorf("lruOrder has %d slots for one id, want 1", n)
+	}
+
+	// Wall clock stepped back: an entry stored "in the future" is expired
+	// rather than living for the size of the step plus the TTL.
+	if _, ok := store.lruGet(7, store.lruNow()-int64(time.Second)); ok {
+		t.Error("entry served to a lookup whose clock is behind its store time")
+	}
+}
