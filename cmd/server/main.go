@@ -365,25 +365,7 @@ func main() {
 	srv := NewServer(database, cfg, hub)
 	srv.configDir = configDir
 	srv.store = store
-	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
-
-	// WebSocket endpoint
-	router.HandleFunc("/ws", hub.ServeWS)
-
-	// Static files + SPA fallback
-	absPublic, _ := filepath.Abs(publicDir)
-	if _, err := os.Stat(absPublic); err == nil {
-		fs := http.FileServer(http.Dir(absPublic))
-		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs)))
-		log.Printf("[static] serving %s", absPublic)
-	} else {
-		log.Printf("[static] directory %s not found — API-only mode", absPublic)
-		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/</p></body></html>`))
-		})
-	}
+	router := newHTTPRouter(srv, hub, publicDir)
 
 	// Start SQLite poller for WebSocket broadcast
 	poller := NewPoller(database, hub, time.Duration(pollMs)*time.Millisecond)
@@ -526,6 +508,12 @@ func main() {
 	_ = cfg.IncrementalVacuumPages() // kept reachable for config validation; not used here
 	_ = cfg.NeighborMaxAgeDays()     // ditto — owned by ingestor now
 
+	// Every route is registered by now. An /api route added after the
+	// API fallback would never be reached (#233).
+	if shadowed := apiRoutesShadowedByFallback(router); len(shadowed) > 0 {
+		log.Fatalf("[server] /api routes registered after the API fallback are unreachable: %v (register them in RegisterRoutes)", shadowed)
+	}
+
 	// Graceful shutdown
 	var handler http.Handler = router
 	if cfg.GZipEnabled() {
@@ -646,6 +634,35 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[server] %v", err)
 	}
+}
+
+// newHTTPRouter builds the production router: the API routes (ending in the
+// /api fallback, see registerAPIFallback), the WebSocket endpoint and the
+// static/SPA catch-all, in that order. Add new /api routes inside
+// RegisterRoutes: one added to this router afterwards is shadowed by the
+// fallback, which apiRoutesShadowedByFallback reports, at startup in main
+// and in TestProductionRouterHasNoShadowedAPIRoutes.
+func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+
+	// WebSocket endpoint
+	router.HandleFunc("/ws", hub.ServeWS)
+
+	// Static files + SPA fallback
+	absPublic, _ := filepath.Abs(publicDir)
+	if _, err := os.Stat(absPublic); err == nil {
+		fs := http.FileServer(http.Dir(absPublic))
+		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs)))
+		log.Printf("[static] serving %s", absPublic)
+	} else {
+		log.Printf("[static] directory %s not found — API-only mode", absPublic)
+		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/</p></body></html>`))
+		})
+	}
+	return router
 }
 
 // spaHandler serves static files, falling back to index.html for SPA routes.
