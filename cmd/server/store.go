@@ -5133,6 +5133,59 @@ func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
 	s.distPaths = paths[:n]
 }
 
+// refreshDistIndexHashes brings the Hash of every distance record back in line
+// with its transmission's current content hash, and returns how many records
+// it changed. Must be called with s.mu held (Lock).
+//
+// The records carry a copy of the hash rather than reading tx.Hash, because
+// computeAnalyticsDistance walks a snapshot of them without s.mu while ingest
+// mutates the transmissions. So the in-memory content-hash migration (#215),
+// the one thing that rewrites tx.Hash, leaves the old hash behind in every
+// record of a transmission it rehashed without the merge recomputing it: with
+// no collision at all, or with a collision whose survivor was already the
+// earliest row and kept its path, neither of the conditions in finishHashMerge
+// fires (#303). /api/analytics/distance serves that hash in topPaths[].hash
+// and in the hop pairs, where it links to the packet.
+//
+// One pass, no rebuild: the migration calls this once when it is done, not per
+// batch. Nothing is written when nothing is stale, which is the case for a
+// store the ingestor has already converged and for an index the lazy build has
+// not produced yet.
+func (s *PacketStore) refreshDistIndexHashes() int {
+	stale := 0
+	for i := range s.distHops {
+		if tx := s.distHops[i].tx; tx != nil && s.distHops[i].Hash != tx.Hash {
+			stale++
+		}
+	}
+	for i := range s.distPaths {
+		if tx := s.distPaths[i].tx; tx != nil && s.distPaths[i].Hash != tx.Hash {
+			stale++
+		}
+	}
+	if stale == 0 {
+		return 0
+	}
+	// A pinned computeAnalyticsDistance snapshot shares this backing array, so
+	// write into fresh slices instead of through it (as compactDistIndex does).
+	hops, paths := s.distHops, s.distPaths
+	if s.distSnapReaders.Load() != 0 {
+		hops, paths = slices.Clone(hops), slices.Clone(paths)
+	}
+	for i := range hops {
+		if tx := hops[i].tx; tx != nil {
+			hops[i].Hash = tx.Hash
+		}
+	}
+	for i := range paths {
+		if tx := paths[i].tx; tx != nil {
+			paths[i].Hash = tx.Hash
+		}
+	}
+	s.distHops, s.distPaths = hops, paths
+	return stale
+}
+
 // DistanceIndexBuilt reports whether the distance analytics index has
 // been built from the current dataset: false before the first build, and
 // after the background load completed until a build has read the fuller
