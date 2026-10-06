@@ -78,7 +78,7 @@ func TestPingRecordDistanceSurvivesKnownIATAFallback(t *testing.T) {
 			if _, err := fx.srv.db.conn.Exec(statement); err != nil {
 				t.Fatal(err)
 			}
-			path, err := fx.srv.db.GetPacketPath(before.FarthestPing.Hash, EstimateMaxEdgeKm)
+			path, err := fx.srv.db.testPacketPath(before.FarthestPing.Hash, EstimateMaxEdgeKm)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -153,7 +153,7 @@ func TestPingRecordArchivesSurviveRetentionAndRestart(t *testing.T) {
 	if !reflect.DeepEqual(old, restarted.pathArchives["allTime.farthestPing"]) {
 		t.Fatal("restart lost archived positions")
 	}
-	live, err := fx.srv.db.GetPacketPath(old.Hash, EstimateMaxEdgeKm)
+	live, err := fx.srv.db.testPacketPath(old.Hash, EstimateMaxEdgeKm)
 	if err != nil || len(live.Branches) != 0 {
 		t.Fatal("fixture did not lose live path")
 	}

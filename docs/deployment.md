@@ -211,7 +211,11 @@ paths. Estimate-dependent tools and map views display an operator-disabled
 notice instead of suggesting that no neighbor evidence exists. Areas retains
 reported-position density, bridge nodes, and the unpositioned-node count.
 Reported GPS, ordinary neighbor graphs, and independent IATA/name-based
-fallbacks are unchanged. No stored data is deleted or rewritten.
+fallbacks are unchanged. No stored data is deleted or rewritten: Ping Scores
+path archives captured while estimates were enabled keep their recorded
+approximate geometry and capture time, and the background history refresh
+does not rewrite them while the policy is off, so the original evidence
+reappears as soon as the setting is turned back on.
 
 The effective setting is published through `/api/config/client`. Browser
 preferences and deep links cannot enable it against the server policy. A

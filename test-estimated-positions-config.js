@@ -40,6 +40,16 @@ async function run() {
   await unavailable.ctx.window.MeshConfigReady;
   assert.strictEqual(unavailable.ctx.window.EstimatedPositions.enabled(), true, 'failed config retains legacy default; backend remains authoritative');
 
+  // The disabled notice must read as the muted explanatory note it sits
+  // beside (Areas -> Position-Fix Coverage Gaps), not as body copy. The
+  // size comes from a class in public/style.css, never an inline literal.
+  const notice = off.ctx.window.EstimatedPositions.disabledNoticeHTML;
+  assert.ok(/class="[^"]*\bestimated-positions-note\b/.test(notice), 'disabled notice carries the muted-note class');
+  assert.ok(!/font-size/.test(notice), 'disabled notice must not hardcode a font size inline');
+  const noticeRule = fs.readFileSync('public/style.css', 'utf8').match(/\.estimated-positions-note\s*\{[^}]*\}/);
+  assert.ok(noticeRule, '.estimated-positions-note is defined in public/style.css');
+  assert.ok(/font-size:\s*0\.85em/.test(noticeRule[0]), 'disabled notice matches the 0.85em muted notes beside it');
+
   for (const [file, tool, prefix] of [
     ['position-gaps.js', 'PositionGapsTool', 'position-gaps'],
     ['gps-sanity.js', 'GPSSanityTool', 'gps-sanity']

@@ -84,7 +84,9 @@ When disabled:
   and reported coordinates but omit neighbor-derived coordinates and their
   approximation metadata. Endpoint distances depending on removed estimates
   are omitted; distances between reported endpoints remain valid. Saved
-  source archives are not modified.
+  source archives are not modified -- neither by a request nor by the
+  background Ping Scores history refresh -- so re-enabling the policy serves
+  the original archived geometry again.
 - `/api/analytics/areas` returns `estimatedPositionsEnabled: false` alongside
   `density`, `bridgeNodes`, and `unpositionedTotal`. It omits uncomputed
   `positionGaps`, `estimatedNodes`, and `unpositionedNoNeighborFix` rather than

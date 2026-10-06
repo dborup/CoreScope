@@ -193,7 +193,7 @@ func routeDescriptions() map[string]routeMeta {
 			Response: schemaRef("PacketPathResponse")},
 		"GET /api/iata-coords":       {Summary: "Get IATA airport coordinates", Description: "Returns lat/lon for known airport codes (used for observer positioning).", Tag: "config"},
 		"GET /api/audio-lab/buckets": {Summary: "Audio lab frequency buckets", Description: "Returns frequency bucket data for audio analysis.", Tag: "analytics"},
-		"GET /api/ping-scores": {Summary: "Ping-score highscore board", Description: "Global (not scoped by region/area) records and leaderboards derived from every ping-bot-triggering channel message ever seen: farthest reach, most hops, widest simultaneous spread, fastest full spread, and most airtime-efficient ping, plus which relay nodes and which observers appear most often. Computed from the same GetPacketPath + LoRa-airtime-estimate logic behind /api/packets/{hash}/path and refreshed on a background interval, so it may lag the very latest ping by a few minutes. Fields are omitted (not zero) until at least one qualifying ping has been recorded.", Tag: "packets",
+		"GET /api/ping-scores": {Summary: "Ping-score highscore board", Description: "Global (not scoped by region/area) records and leaderboards derived from every ping-bot-triggering channel message ever seen: farthest reach, most hops, widest simultaneous spread, fastest full spread, and most airtime-efficient ping, plus which relay nodes and which observers appear most often. Computed from the same getPacketPath + LoRa-airtime-estimate logic behind /api/packets/{hash}/path and refreshed on a background interval, so it may lag the very latest ping by a few minutes. Fields are omitted (not zero) until at least one qualifying ping has been recorded.", Tag: "packets",
 			Response: schemaRef("PingScoresResponse")},
 		"GET /api/ping-scores/{hash}/path": {Summary: "Get a displayed ping record's saved path", Description: "Returns coherent live or archived path evidence for the current record slot. Archived capture time describes saved geometry, not necessarily the transmission time. Old expired observations cannot be reconstructed. Superseded slot/hash pairs return 404; invalid slots return 400. Current identity privacy rules apply to both sources; unavailable and initializing responses omit path.", Tag: "packets",
 			QueryParams: []paramMeta{{Name: "record", Description: "allTime.<kind> or thisWeek.<kind>; kind is farthestPing, mostHopsPing, widestSpreadPing, fastestSpreadPing or mostEfficientPing", Type: "string", Required: true}},
@@ -508,7 +508,7 @@ func componentSchemas() map[string]interface{} {
 			"type":        "object",
 			"description": "The station that produced a given branch's observation of a packet path, positioned from its own self-advertised GPS when known (same source as /api/observers), else its configured IATA code, else a weighted centroid of its positioned neighbors (see approx).",
 			"properties": map[string]interface{}{
-				"publicKey":           str("Observer's mesh pubkey, when it has one (some bridge-type observers publish under a device name instead -- see the name-match fallback in GetPacketPath). Empty otherwise."),
+				"publicKey":           str("Observer's mesh pubkey, when it has one (some bridge-type observers publish under a device name instead -- see the name-match fallback in getPacketPath). Empty otherwise."),
 				"name":                str("Observer display name."),
 				"iata":                str("Observer's configured IATA airport code, when set."),
 				"role":                str("Observer's own node role (e.g. repeater, room), when it's known as a mesh node itself -- not just an MQTT/API listener."),
@@ -562,7 +562,7 @@ func componentSchemas() map[string]interface{} {
 		}},
 		"PingScore": map[string]interface{}{
 			"type":        "object",
-			"description": "One ping's computed highscore-relevant stats, derived from the same GetPacketPath + airtime-annotation logic behind /api/packets/{hash}/path.",
+			"description": "One ping's computed highscore-relevant stats, derived from the same getPacketPath + airtime-annotation logic behind /api/packets/{hash}/path.",
 			"properties": map[string]interface{}{
 				"hash":               str("The winning ping's hash; use /api/ping-scores/{hash}/path with its record slot for saved View Path evidence."),
 				"sender":             str("Display name of whoever sent the ping, when resolvable from the channel message."),

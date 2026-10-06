@@ -681,7 +681,7 @@
       return estimatedPositionsEnabled && (!response || response.estimatedPositionsEnabled !== false);
     },
     disabledMessage: 'Estimated positions are disabled by the instance operator.',
-    disabledNoticeHTML: '<p class="text-muted" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
+    disabledNoticeHTML: '<p class="text-muted estimated-positions-note" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
   };
 
   // ─── Fetch server overrides ───

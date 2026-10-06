@@ -1065,7 +1065,7 @@ func ensureTransmissionsLastSeenColumn(rw *sql.DB, logf Logger) error {
 // Deliberately just a detection index, not the computed stats themselves:
 // tx_id/hash/channel_hash/sender/first_seen are cheap to write once at
 // ingest time, while farthest/deepest/spread/airtime are derived from the
-// SAME GetPacketPath + airtime-annotation logic View Path already uses,
+// SAME getPacketPath + airtime-annotation logic View Path already uses,
 // recomputed periodically by the server's ping-scores recomputer
 // (cmd/server/ping_scores.go) rather than persisted here -- so a later
 // observation of an old ping (e.g. a station that only just relayed it

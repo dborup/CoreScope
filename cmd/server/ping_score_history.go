@@ -260,7 +260,7 @@ type PingScoreHistoryIntegrity struct {
 	DetectedAt string // RFC3339
 
 	// Relevant to "initial-backfill-incomplete" (a later phase populates
-	// these once GetPacketPathsBulk exists; Phase 4A only provides the
+	// these once getPacketPathsBulk exists; Phase 4A only provides the
 	// storage for them).
 	TotalTriggers          int
 	ScoredCount            int

@@ -3742,7 +3742,7 @@ func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
 // AirtimeRelayCount: the LoRa Time-on-Air x distinct-relay-count estimate
 // for this packet's whole flood (same formula as the Relay Airtime Share
 // analytics metric, issue #1768), looked up from the in-memory
-// PacketStore via the transmission ID GetPacketPath captured. Left
+// PacketStore via the transmission ID getPacketPath captured. Left
 // unset -- not a guessed zero -- when the store is unavailable (DB-only
 // mode) or this transmission has been evicted from memory.
 func (s *Server) annotatePacketPathAirtime(resp *PacketPathResponse) {
@@ -3767,7 +3767,7 @@ func (s *Server) annotatePacketPathAirtime(resp *PacketPathResponse) {
 // configured area any point or observer on the path falls in, deduped and
 // alphabetized, uncapped (unlike annotateBotReplyTouchedAreas's capped
 // pong-reply list -- the map view has room to show the full set). Unlike
-// that function, no DB round-trip is needed: GetPacketPath already
+// that function, no DB round-trip is needed: getPacketPath already
 // resolved every position (including the neighbor-centroid approximation
 // fallback), so this just reads the lat/lon already on the response.
 func (s *Server) annotatePacketPathTouchedAreas(resp *PacketPathResponse) {

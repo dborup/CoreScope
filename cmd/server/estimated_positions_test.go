@@ -384,3 +384,164 @@ func TestEstimatedPositionsPingMetricsIndependent(t *testing.T) {
 		t.Fatalf("position policy changed real Ping metrics: %s vs %s", mustJSON(t, scores[0]), mustJSON(t, scores[1]))
 	}
 }
+
+// seedEstimatedPositionsArchiveFixture captures one Ping Scores record
+// archive whose route really does carry neighbor-estimated geometry: the
+// relay hop has no GPS of its own, so a positioned neighbor supplies an
+// approximate stand-in that ends up inside the persisted path_json.
+func seedEstimatedPositionsArchiveFixture(t *testing.T) (*engineFixture, *PingScoresSnapshot) {
+	t.Helper()
+	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 100, RetentionDuration: 30 * 24 * time.Hour})
+	ts := fx.clock.Now().Add(-time.Hour)
+	id := seedPingTrigger(t, fx.srv, "estarchive0001", "#test", "sender", ts.UTC().Format(time.RFC3339))
+	seedPingObservation(t, fx.srv, id, "pingobsa", 9, `[]`, `[]`, ts.Unix())
+	seedPingObservation(t, fx.srv, id, "pingobsb", 7, `["aa"]`, `["relay"]`, ts.Unix()+10)
+	seedPingObservation(t, fx.srv, id, "pingobsc", 5, `["aa","bb"]`, `["relay","relay2"]`, ts.Unix()+20)
+	if _, err := fx.srv.db.conn.Exec(`INSERT INTO neighbor_edges(node_a,node_b,count) VALUES('relay','pingobsa',10)`); err != nil {
+		t.Fatal(err)
+	}
+	settleEntry(t, fx)
+	snap, err := fx.engine.QuickSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, ok := snap.pathArchives["allTime.farthestPing"]
+	if !ok {
+		t.Fatal("farthest archive not captured")
+	}
+	approx := false
+	for _, b := range archive.Path.Branches {
+		for _, p := range b.Points {
+			if p.Approx && p.Lat != nil {
+				approx = true
+			}
+		}
+	}
+	if !approx {
+		t.Fatalf("fixture captured no estimate geometry: %s", mustJSON(t, archive))
+	}
+	return fx, snap
+}
+
+// Issue #315 point 5 and the PR's own promise: the operator policy filters
+// request-owned copies. A disabled cycle must NOT rewrite the persisted
+// archive -- once the raw observations expire, the recorded estimate
+// geometry would be gone for good, and CapturedAt would be bumped without
+// any new evidence.
+func TestEstimatedPositionsDisabledCycleKeepsArchives(t *testing.T) {
+	fx, _ := seedEstimatedPositionsArchiveFixture(t)
+	before, err := fx.store.LoadPathArchives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) == 0 {
+		t.Fatal("nothing persisted to protect")
+	}
+	beforeJSON := mustJSON(t, before)
+	// Report one record rather than all ten slots of the same path.
+	report := func(label string, got map[string]PingScorePathArchive) string {
+		return label + "=" + mustJSON(t, got["allTime.farthestPing"])
+	}
+
+	off := NewServer(fx.srv.db, disabledEstimatedPositionsConfig(), nil)
+	offEngine, err := newPingScoreHistoryEngine(off, fx.store, fx.clock.Now, fx.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.clock.Advance(time.Hour)
+	snap, err := offEngine.Cycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := fx.store.LoadPathArchives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustJSON(t, after) != beforeJSON {
+		t.Fatalf("disabled cycle rewrote persisted archives:\n%s\n%s", report("before", before), report("after ", after))
+	}
+	if mustJSON(t, snap.pathArchives) != beforeJSON {
+		t.Fatalf("disabled cycle published rewritten archives:\n%s\n%s", report("before", before), report("after ", snap.pathArchives))
+	}
+
+	// The request copy must still be stripped: preserving the archive is
+	// not a licence to serve estimates while the policy is off.
+	off.pingScores.Store(snap)
+	w := httptest.NewRecorder()
+	r := mux.SetURLVars(httptest.NewRequest("GET", "/api/ping-scores/estarchive0001/path?record=allTime.farthestPing", nil), map[string]string{"hash": "estarchive0001"})
+	off.handlePingScorePath(w, r)
+	var resp PingScorePathResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || resp.Path == nil {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	for _, b := range resp.Path.Branches {
+		for _, p := range b.Points {
+			if p.Approx || (p.Lat != nil && p.PublicKey == "relay") {
+				t.Fatalf("disabled response leaked estimate geometry: %+v", p)
+			}
+		}
+	}
+	if mustJSON(t, fx.engine.pathArchives) == "" || mustJSON(t, snap.pathArchives) != beforeJSON {
+		t.Fatal("response filtering mutated the shared archive")
+	}
+
+	// Restoring the policy must hand back the original evidence, not a
+	// stripped reconstruction.
+	onEngine, err := newPingScoreHistoryEngine(fx.srv, fx.store, fx.clock.Now, fx.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.clock.Advance(time.Hour)
+	onSnap, err := onEngine.Cycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := fx.store.LoadPathArchives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustJSON(t, restored) != beforeJSON {
+		t.Fatalf("re-enabling rewrote archives:\n%s\n%s", report("before", before), report("after ", restored))
+	}
+	if mustJSON(t, onSnap.pathArchives) != beforeJSON {
+		t.Fatalf("re-enabled snapshot lost original evidence:\n%s\n%s", report("before", before), report("after ", onSnap.pathArchives))
+	}
+}
+
+// The archive guard above must not freeze archives: a real change to the
+// route still has to be recaptured while the policy is off.
+func TestEstimatedPositionsDisabledCycleStillRecordsRealChanges(t *testing.T) {
+	fx, _ := seedEstimatedPositionsArchiveFixture(t)
+	before, err := fx.store.LoadPathArchives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A hop that was only known by pubkey now has a real node row, so the
+	// recorded route genuinely differs from the capture.
+	if _, err := fx.srv.db.conn.Exec(`INSERT INTO nodes(public_key,name) VALUES('relay','Relay One')`); err != nil {
+		t.Fatal(err)
+	}
+	off := NewServer(fx.srv.db, disabledEstimatedPositionsConfig(), nil)
+	offEngine, err := newPingScoreHistoryEngine(off, fx.store, fx.clock.Now, fx.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.clock.Advance(time.Hour)
+	if _, err := offEngine.Cycle(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := fx.store.LoadPathArchives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, next := before["allTime.farthestPing"], after["allTime.farthestPing"]
+	if next.Path.Branches[0].Points[0].Name != "Relay One" {
+		t.Fatalf("real route change was not recaptured: %s", mustJSON(t, next))
+	}
+	if next.CapturedAt == old.CapturedAt {
+		t.Fatalf("recaptured evidence kept the old capture time: %s", next.CapturedAt)
+	}
+}
