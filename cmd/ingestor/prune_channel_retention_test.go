@@ -288,10 +288,11 @@ func TestRetentionChannelDaysConfig(t *testing.T) {
 // writerMu, ~250ms a day on a staging-sized fixture
 // (TestPruneTransmissionsChannelDaysTiming). A completed run therefore
 // records its packet cutoff, and the next run in the process starts there.
-// first_seen is the ingest time (#1370), so no non-channel row below a
-// completed run's cutoff can appear afterwards; the planted row below shows
-// that the second run really does not look below the floor, and a new Store
-// (a restart) starts from the bottom again.
+// The planted row is written straight to SQLite, past InsertTransmission and
+// so past the floor's record of backdated writes
+// (TestPruneTransmissionsPrunesBackdatedInsertBelowFloor), which shows that the
+// second run really does not look below the floor; a new Store (a restart)
+// starts from the bottom again.
 func TestPruneTransmissionsDailyRunStartsAtPreviousCutoff(t *testing.T) {
 	path := t.TempDir() + "/prune-floor.db"
 	store, err := OpenStore(path)
@@ -313,7 +314,8 @@ func TestPruneTransmissionsDailyRunStartsAtPreviousCutoff(t *testing.T) {
 		t.Fatalf("floor = %q, want the run's packet cutoff in [%q, %q]", f, before, after)
 	}
 
-	// Below the floor, so outside the next run's walk.
+	// Below the floor and not written by the ingest path, so outside the next
+	// run's walk.
 	seedRetentionTx(t, store, "planted-20d", intPtr(4), 20, 1)
 	got, err := store.PruneTransmissions(14, 90)
 	if err != nil {
@@ -338,5 +340,102 @@ func TestPruneTransmissionsDailyRunStartsAtPreviousCutoff(t *testing.T) {
 	}
 	if have := remainingHashes(t, restarted); !equalStrings(have, []string{"chan-30d"}) {
 		t.Fatalf("remaining = %v, want [chan-30d]", have)
+	}
+}
+
+// ingestRetentionPacket writes one observation of hash through the real
+// ingest path (InsertTransmission), received ageDays ago.
+func ingestRetentionPacket(t *testing.T, store *Store, hash string, payloadType, ageDays int) {
+	t.Helper()
+	if _, err := store.InsertTransmission(&PacketData{
+		RawHex:      "AA",
+		Timestamp:   time.Now().UTC().AddDate(0, 0, -ageDays).Format(time.RFC3339),
+		Hash:        hash,
+		PayloadType: payloadType,
+		DecodedJSON: "{}",
+	}); err != nil {
+		t.Fatalf("ingest %s: %v", hash, err)
+	}
+}
+
+// TestPruneTransmissionsPrunesBackdatedInsertBelowFloor is the review case of
+// #296 (F1): first_seen is the observer's receive time, not the ingest time.
+// resolveRxTime accepts an envelope timestamp up to 30 days old, so a
+// buffered upload or a lagging observer clock lands a non-channel row below a
+// completed run's floor. The next run must still prune it, as
+// PruneOldPackets would.
+func TestPruneTransmissionsPrunesBackdatedInsertBelowFloor(t *testing.T) {
+	store := openPruneStore(t, "prune-floor-backdated.db")
+	seedRetentionTx(t, store, "chan-30d", intPtr(payloadTypeGrpTxt), 30, 1)
+	if _, err := store.PruneTransmissions(14, 90); err != nil {
+		t.Fatalf("first PruneTransmissions: %v", err)
+	}
+
+	ingestRetentionPacket(t, store, "late-advert-20d", 4, 20)
+	ingestRetentionPacket(t, store, "fresh-advert", 4, 0)
+	got, err := store.PruneTransmissions(14, 90)
+	if err != nil {
+		t.Fatalf("second PruneTransmissions: %v", err)
+	}
+	if got.Packets != 1 {
+		t.Fatalf("second run pruned %d packets, want the late 20-day advert", got.Packets)
+	}
+	if have := remainingHashes(t, store); !equalStrings(have, []string{"chan-30d", "fresh-advert"}) {
+		t.Fatalf("remaining = %v, want [chan-30d fresh-advert]", have)
+	}
+}
+
+// TestPruneTransmissionsPrunesLoweredFirstSeenBelowFloor covers the other
+// ingest write of first_seen: a later observation with an earlier receive
+// time lowers an existing transmission's first_seen (stmtUpdateTxFirstSeen).
+// When that moves a non-channel row below the floor, the next run must still
+// prune it.
+func TestPruneTransmissionsPrunesLoweredFirstSeenBelowFloor(t *testing.T) {
+	store := openPruneStore(t, "prune-floor-lowered.db")
+	ingestRetentionPacket(t, store, "advert", 4, 0)
+	if _, err := store.PruneTransmissions(14, 90); err != nil {
+		t.Fatalf("first PruneTransmissions: %v", err)
+	}
+
+	// A second observer uploads the same advert, received 20 days ago.
+	ingestRetentionPacket(t, store, "advert", 4, 20)
+	got, err := store.PruneTransmissions(14, 90)
+	if err != nil {
+		t.Fatalf("second PruneTransmissions: %v", err)
+	}
+	if got.Packets != 1 || countRows(t, store, "transmissions") != 0 {
+		t.Fatalf("second run pruned %d packets, kept %v; want the advert whose first_seen moved 20 days back",
+			got.Packets, remainingHashes(t, store))
+	}
+}
+
+// TestPruneTransmissionsFailedRunKeepsBackdatedInsert pins that a failed run
+// does not lose a backdated write: the next completed run still starts at or
+// below it.
+func TestPruneTransmissionsFailedRunKeepsBackdatedInsert(t *testing.T) {
+	store := openPruneStore(t, "prune-floor-failed.db")
+	if _, err := store.PruneTransmissions(14, 90); err != nil {
+		t.Fatalf("first PruneTransmissions: %v", err)
+	}
+	ingestRetentionPacket(t, store, "late-advert-20d", 4, 20)
+
+	// Make every prune batch fail at its route_mask_changes delete.
+	if _, err := store.db.Exec(`ALTER TABLE route_mask_changes RENAME TO route_mask_changes_off`); err != nil {
+		t.Fatalf("hide route_mask_changes: %v", err)
+	}
+	if _, err := store.PruneTransmissions(14, 90); err == nil {
+		t.Fatalf("PruneTransmissions without route_mask_changes succeeded, want an error")
+	}
+	if _, err := store.db.Exec(`ALTER TABLE route_mask_changes_off RENAME TO route_mask_changes`); err != nil {
+		t.Fatalf("restore route_mask_changes: %v", err)
+	}
+
+	got, err := store.PruneTransmissions(14, 90)
+	if err != nil {
+		t.Fatalf("PruneTransmissions after the failure: %v", err)
+	}
+	if got.Packets != 1 || countRows(t, store, "transmissions") != 0 {
+		t.Fatalf("run after a failed one pruned %d packets, kept %v; want the late 20-day advert",
+			got.Packets, remainingHashes(t, store))
 	}
 }
