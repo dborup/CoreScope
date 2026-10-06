@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -456,24 +457,107 @@ func TestGetRouteHandlerSelfDispatchGuardReturnsNilForUnknownPath(t *testing.T) 
 	}
 }
 
-// #281 N4: the API-only banner (served by newHTTPRouter when the static
-// directory doesn't exist) must point at an endpoint that actually
-// resolves. It used to say "/api/", which #233 turned into a JSON 404.
-func TestAPIOnlyBannerPointsToExistingEndpoint(t *testing.T) {
+// apiOnlyBannerBody builds the production router with a missing public dir
+// (the only mode that renders the API-only banner) and returns the banner
+// body served for GET /, plus the router itself.
+func apiOnlyBannerBody(t *testing.T) (*mux.Router, string) {
+	t.Helper()
 	srv, _ := setupTestServer(t)
 	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
 	router := newHTTPRouter(srv, NewHub(), missingDir)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
-	body := w.Body.String()
-	if !strings.Contains(body, "/api/docs") {
-		t.Fatalf("API-only banner does not mention /api/docs: %q", body)
+	return router, w.Body.String()
+}
+
+// bannerAPIPath matches an /api... path advertised in the banner text.
+var bannerAPIPath = regexp.MustCompile(`/api[A-Za-z0-9/_-]*`)
+
+// #300 F1: the API-only banner must name an endpoint that works with no
+// outbound internet. /api/docs is a Swagger UI shell whose CSS and JS load
+// only from an external CDN (openapi.go), so an API-only deployment without
+// egress renders it blank. /api/spec is the raw OpenAPI JSON, served
+// in-process, so it is the offline-safe pointer the banner must name.
+func TestAPIOnlyBannerNamesOfflineSpecEndpoint(t *testing.T) {
+	_, body := apiOnlyBannerBody(t)
+	if !strings.Contains(body, "/api/spec") {
+		t.Fatalf("API-only banner does not name the offline-safe /api/spec: %q", body)
+	}
+}
+
+// #281 N4 / #300 F2: the API-only banner (served by newHTTPRouter when the
+// static directory doesn't exist) must point at endpoints that actually
+// resolve. It used to say "/api/", which #233 turned into a JSON 404.
+//
+// F2 makes the test strict: instead of checking a literal string and then
+// GETting that same literal, it extracts every /api path the banner actually
+// advertises and GETs each one, asserting 200. A banner that only mentions a
+// working path in passing while pointing somewhere broken can no longer pass.
+func TestAPIOnlyBannerPointsToExistingEndpoint(t *testing.T) {
+	router, body := apiOnlyBannerBody(t)
+
+	paths := bannerAPIPath.FindAllString(body, -1)
+	if len(paths) == 0 {
+		t.Fatalf("API-only banner advertises no /api path: %q", body)
+	}
+	for _, p := range paths {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", p, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("banner advertises %q, but GET %q returned %d (want 200); banner=%q", p, p, w.Code, body)
+		}
+	}
+}
+
+// #300 F3: allowedMethodsForPath must also cover a method-bearing route
+// registered at exactly "/api", not only under the "/api/" prefix, so a
+// wrong method on bare /api answers 405 + Allow the same way it does one
+// level down. Latent today: the production router registers no real
+// method-bearing route at bare /api (only the fallback, which carries no
+// .Methods() and so contributes nothing), so this builds a router with a
+// POST-only /api route ahead of the fallback to exercise the path.
+func TestAllowedMethodsForBareAPIRoute(t *testing.T) {
+	router := mux.NewRouter()
+	router.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}).Methods("POST")
+	registerAPIFallback(router)
+
+	// Wrong method on bare /api: 405 naming the real route's method.
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api with a POST-only route: want 405, got %d", w.Code)
+	}
+	if allow := w.Header().Get("Allow"); allow != "POST" {
+		t.Fatalf("GET /api: want Allow: POST, got %q", allow)
 	}
 
+	// The real route is still reachable under its own method.
 	w2 := httptest.NewRecorder()
-	router.ServeHTTP(w2, httptest.NewRequest("GET", "/api/docs", nil))
-	if w2.Code != http.StatusOK {
-		t.Fatalf("GET /api/docs: want 200, got %d", w2.Code)
+	router.ServeHTTP(w2, httptest.NewRequest("POST", "/api", nil))
+	if w2.Code != http.StatusTeapot {
+		t.Fatalf("POST /api: want 418 (real route reached), got %d", w2.Code)
+	}
+}
+
+// #300 F3 (no-route branch): with no real method-bearing route at bare /api
+// — the actual production shape, where only the fallback sits there — any
+// method on /api answers 404 with no Allow header, never a spurious 405.
+func TestBareAPIWithoutRealRouteIs404(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router) // registers the fallback at the end, no real /api route
+
+	for _, method := range []string{"GET", "POST", "DELETE"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(method, "/api", nil))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s /api with no real route: want 404, got %d", method, w.Code)
+		}
+		if allow := w.Header().Get("Allow"); allow != "" {
+			t.Fatalf("%s /api: want no Allow header, got %q", method, allow)
+		}
 	}
 }
