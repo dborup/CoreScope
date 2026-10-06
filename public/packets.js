@@ -3534,10 +3534,12 @@
       } catch {}
     }
 
-    // Parse hash size from path byte
-    const plOff = getPathLenOffset(pkt.route_type);
-    const rawPathByte = pkt.raw_hex ? parseInt(pkt.raw_hex.slice(plOff * 2, plOff * 2 + 2), 16) : NaN;
-    const hashSize = (isNaN(rawPathByte) || (rawPathByte & 0x3F) === 0) ? null : ((rawPathByte >> 6) + 1);
+    // Sender-selected hash width from the path byte. Read it from the SAME
+    // frame the rest of the panel describes (the selected observation's
+    // raw_hex, see buildFieldTable's argument below) -- observations of one
+    // transmission can carry different route types, so the original frame's
+    // header would otherwise contradict the byte breakdown.
+    const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);
 
     const size = effectivePkt.raw_hex ? Math.floor(effectivePkt.raw_hex.length / 2) : (pkt.raw_hex ? Math.floor(pkt.raw_hex.length / 2) : 0);
     const typeName = payloadTypeName(pkt.payload_type);
@@ -3890,9 +3892,27 @@
     // Path length byte is at current offset (byte 1 for non-transport, byte 5 for transport)
     const pathLenOffset = off;
     const pathByte0 = parseInt(buf.slice(off * 2, off * 2 + 2), 16);
-    const hashSizeVal = isNaN(pathByte0) ? '?' : ((pathByte0 >> 6) + 1);
     const hashCountVal = isNaN(pathByte0) ? '?' : (pathByte0 & 0x3F);
-    rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), hashCountVal === 0 ? `hash_count=0 (direct advert)` : `hash_size=${hashSizeVal} byte${hashSizeVal !== 1 ? 's' : ''}, hash_count=${hashCountVal}`);
+    const encodedHashSize = senderPathHashSize(buf);
+    // senderPathHashSize collapses every "no width here" case to null. This is
+    // the byte breakdown, so say WHICH one it is instead of dropping the bits
+    // on the floor: path bytes that are not hops at all (TRACE carries SNR),
+    // a width field of 0b11 (there is no 4-byte width -- the backend evidence
+    // model only knows 1/2/3, see observed_path_hash_sizes.go), or
+    // sendZeroHop's 0x00 direct marker, which encodes no width by design.
+    const headerByte = parseInt(buf.slice(0, 2), 16);
+    const pathBytesAreHops = !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) !== 9;
+    let pathDescription;
+    if (encodedHashSize != null) {
+      pathDescription = `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;
+    } else if (!pathBytesAreHops) {
+      pathDescription = `hash_count=${hashCountVal} (TRACE: path bytes are SNR, not a hash width)`;
+    } else if (!isNaN(pathByte0) && (pathByte0 >> 6) === 3) {
+      pathDescription = `hash_count=${hashCountVal} (width bits 7-6 = 3: not a valid hash size, 1-3 bytes only)`;
+    } else {
+      pathDescription = `hash_count=${hashCountVal} (no encoded hash size)`;
+    }
+    rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), pathDescription);
     off += 1;
 
     // Path — render hops from path_json (what this observation reported).
@@ -3924,7 +3944,7 @@
     rows += sectionRow('Payload — ' + payloadTypeName(pkt.payload_type), 'section-payload');
 
     if (decoded.type === 'ADVERT') {
-      if (hashCountVal !== 0) rows += fieldRow(pathLenOffset, 'Advertised Hash Size', hashSizeVal + ' byte' + (hashSizeVal !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(pathLenOffset * 2, pathLenOffset * 2 + 2) || '??') + ' — bits 7-6 = ' + (hashSizeVal - 1));
+      if (encodedHashSize != null) rows += fieldRow(pathLenOffset, 'Advertised Hash Size', encodedHashSize + ' byte' + (encodedHashSize !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(pathLenOffset * 2, pathLenOffset * 2 + 2) || '??') + ' — bits 7-6 = ' + (encodedHashSize - 1));
       rows += fieldRow(off, 'Public Key (32B)', truncate(decoded.pubKey || '', 24), '');
       rows += fieldRow(off + 32, 'Timestamp (4B)', decoded.timestampISO || '', 'Unix: ' + (decoded.timestamp || ''));
       rows += fieldRow(off + 36, 'Signature (64B)', truncate(decoded.signature || '', 24), '');

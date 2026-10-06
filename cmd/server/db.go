@@ -17,6 +17,7 @@ import (
 
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
+	"github.com/meshcore-analyzer/packetpath"
 	regionutil "github.com/meshcore-analyzer/regions"
 	_ "modernc.org/sqlite"
 )
@@ -3579,7 +3580,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	}
 	var obsSQL string
 	if db.isV3() {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				obs.id, obs.name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -3587,7 +3588,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
 			ORDER BY o.id ASC`
 	} else {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -3635,12 +3636,12 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 
 	for rows.Next() {
 		var pktID, txID int
-		var pktHash, dj, fs, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
+		var pktHash, dj, fs, rawHexHead, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
 		var snr sql.NullFloat64
 		var obsTs sql.NullInt64
 		var routeType sql.NullInt64
 		var scopeName sql.NullString
-		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
+		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &rawHexHead, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
 		if db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
@@ -3754,6 +3755,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				"entryPrefix":           entryPrefix,
 				"entryObserverPubkey":   entryObserverPubkey,
 				"observedPathHashSizes": observedPathHashSizes(pathHashSizeMask),
+				"senderPathHashSize":    packetpath.SenderHashSize(rawHexHead.String),
 			},
 			Repeats:          1,
 			PathHashSizeMask: pathHashSizeMask,

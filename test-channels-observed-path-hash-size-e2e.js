@@ -9,7 +9,7 @@
 const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
-const TOOLTIP = 'Path hash size observed in one or more relayed wire paths for this message. Direct zero-hop copies do not provide hash-size evidence. This does not prove the sender’s permanent configuration.';
+const TOOLTIP = 'Path hash size encoded in the sender’s packet header';
 
 let passed = 0;
 let failed = 0;
@@ -65,28 +65,42 @@ function assert(condition, message) {
     repeats: 1,
   };
 
-  await step('single known size renders the exact conservative badge and tooltip', async () => {
-    await render([{ ...baseMessage, observedPathHashSizes: [2] }]);
+  await step('sender size replaces the observed-path label', async () => {
+    await render([{ ...baseMessage, observedPathHashSizes: [1], senderPathHashSize: 2 }]);
     const badge = page.locator('.ch-path-hash-badge');
     assert(await badge.count() === 1, 'expected one badge');
-    assert(await badge.textContent() === 'Observed path hash: 2-byte', 'wrong single-size label');
+    assert(await badge.textContent() === 'Sent with: 2-byte', 'wrong sender-size label');
     assert(await badge.getAttribute('title') === TOOLTIP, 'tooltip wording drifted');
   });
 
-  await step('mixed evidence is sorted and unknown evidence has no badge', async () => {
+  await step('zero-hop flood has a sender label while direct zero-hop does not', async () => {
+    const sizes = await page.evaluate(() => [
+      senderPathHashSize('1540DEADBEEF'), senderPathHashSize('1600DEADBEEF'),
+    ]);
+    assert(JSON.stringify(sizes) === '[2,null]', 'header rule disagrees with zero-hop contract');
     await render([
-      { ...baseMessage, packetHash: 'mixed', observed_path_hash_sizes: [3, 1, 2] },
+      { ...baseMessage, packetHash: 'flood-zero', senderPathHashSize: sizes[0] },
+      { ...baseMessage, packetHash: 'direct-zero', senderPathHashSize: sizes[1] },
+    ]);
+    assert(await page.locator('.ch-path-hash-badge').count() === 1, 'direct marker rendered a badge');
+    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Sent with: 2-byte', 'flood width hidden');
+  });
+
+  await step('mixed observed evidence stays internal; unknown sender size has no badge', async () => {
+    await render([
+      { ...baseMessage, packetHash: 'mixed', observed_path_hash_sizes: [3, 1, 2], senderPathHashSize: 3 },
       { ...baseMessage, packetHash: 'unknown', observedPathHashSizes: [] },
     ]);
     const badges = page.locator('.ch-path-hash-badge');
     assert(await badges.count() === 1, 'unknown message must not render a badge');
-    assert(await badges.first().textContent() === 'Mixed path hashes: 1/2/3-byte', 'wrong mixed label');
+    assert(await badges.first().textContent() === 'Sent with: 3-byte', 'wrong sender label');
   });
 
   await step('untrusted evidence cannot create markup or attributes', async () => {
     await render([{
       ...baseMessage,
       observedPathHashSizes: ['<img src=x onerror="window.__hashSizePwned=1">'],
+      senderPathHashSize: '<img src=x onerror="window.__hashSizePwned=1">',
     }]);
     assert(await page.locator('.ch-path-hash-badge').count() === 0, 'malformed evidence rendered a badge');
     assert(await page.locator('#chMessages img').count() === 0, 'evidence injected an image');
@@ -100,7 +114,8 @@ function assert(condition, message) {
         type: 'packet',
         data: {
           hash: 'client-decrypted-hash',
-          packet: { observed_path_hash_sizes: [3] },
+          raw_hex: '1580DEADBEEF',
+          packet: { observed_path_hash_sizes: [3], raw_hex: '1580DEADBEEF' },
           decoded: {
             header: { payloadTypeName: 'GRP_TXT' },
             payload: {
@@ -117,7 +132,8 @@ function assert(condition, message) {
     const message = state.messages.find((item) => item.packetHash === 'client-decrypted-hash');
     assert(message, 'client-decrypted WS message was not appended');
     assert(JSON.stringify(message.observedPathHashSizes) === '[3]', 'WS evidence was not normalized');
-    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Observed path hash: 3-byte', 'WS badge missing');
+    assert(message.senderPathHashSize === 3, 'WS sender size missing');
+    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Sent with: 3-byte', 'WS badge missing');
   });
 
   await step('duplicate WS observations union their known sizes', async () => {
@@ -129,6 +145,7 @@ function assert(condition, message) {
           hash: 'ws-union-hash',
           observer: observer,
           observed_path_hash_sizes: [size],
+          raw_hex: '1540DEADBEEF',
           decoded: { payload: { channel: '#hash-evidence', sender: 'UnionNode', text: 'same' } },
         },
       });
@@ -140,7 +157,7 @@ function assert(condition, message) {
       return item && item.observedPathHashSizes;
     });
     assert(JSON.stringify(sizes) === '[1,2]', 'duplicate observations did not union: ' + JSON.stringify(sizes));
-    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Mixed path hashes: 1/2-byte', 'mixed WS badge missing');
+    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Sent with: 2-byte', 'WS sender badge missing');
   });
 
   await step('delayed REST refresh cannot overwrite richer WS evidence', async () => {
@@ -148,6 +165,7 @@ function assert(condition, message) {
       ...baseMessage,
       packetHash: 'refresh-union-hash',
       observedPathHashSizes: [2, 3],
+      senderPathHashSize: 2,
       _fromWS: true,
       _wsAt: Date.now(),
     }]);
@@ -176,12 +194,12 @@ function assert(condition, message) {
       }
     });
     assert(JSON.stringify(result) === '[1,2,3]', 'REST refresh lost WS evidence: ' + JSON.stringify(result));
-    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Mixed path hashes: 1/2/3-byte', 'refresh badge missing');
+    assert(await page.locator('.ch-path-hash-badge').textContent() === 'Sent with: 2-byte', 'refresh badge missing');
   });
 
   await step('badge remains visible without horizontal overflow at 375px', async () => {
     await page.setViewportSize({ width: 375, height: 740 });
-    await render([{ ...baseMessage, observedPathHashSizes: [1, 2, 3] }]);
+    await render([{ ...baseMessage, observedPathHashSizes: [1, 2, 3], senderPathHashSize: 2 }]);
     const metrics = await page.locator('.ch-path-hash-badge').evaluate((el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/mbcapqueue"
+	"github.com/meshcore-analyzer/packetpath"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -6490,6 +6491,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 					"routeType":             intPtrOrNil(tx.RouteType),
 					"entryPrefix":           pathFirstHop(tx.PathJSON),
 					"observedPathHashSizes": tx.observedPathHashSizes(),
+					"senderPathHashSize":    packetpath.SenderHashSize(tx.RawHex),
 				},
 				Repeats:   1,
 				Observers: observers,
