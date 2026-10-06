@@ -389,7 +389,7 @@ func TestEstimatedPositionsPingMetricsIndependent(t *testing.T) {
 // archive whose route really does carry neighbor-estimated geometry: the
 // relay hop has no GPS of its own, so a positioned neighbor supplies an
 // approximate stand-in that ends up inside the persisted path_json.
-func seedEstimatedPositionsArchiveFixture(t *testing.T) (*engineFixture, *PingScoresSnapshot) {
+func seedEstimatedPositionsArchiveFixture(t *testing.T) *engineFixture {
 	t.Helper()
 	fx := setupEngineFixture(t, pingScoreHistoryEngineConfig{SettleDebounce: time.Minute, DeepSweepBatchSize: 100, RetentionDuration: 30 * 24 * time.Hour})
 	ts := fx.clock.Now().Add(-time.Hour)
@@ -420,7 +420,7 @@ func seedEstimatedPositionsArchiveFixture(t *testing.T) (*engineFixture, *PingSc
 	if !approx {
 		t.Fatalf("fixture captured no estimate geometry: %s", mustJSON(t, archive))
 	}
-	return fx, snap
+	return fx
 }
 
 // Issue #315 point 5 and the PR's own promise: the operator policy filters
@@ -429,7 +429,7 @@ func seedEstimatedPositionsArchiveFixture(t *testing.T) (*engineFixture, *PingSc
 // geometry would be gone for good, and CapturedAt would be bumped without
 // any new evidence.
 func TestEstimatedPositionsDisabledCycleKeepsArchives(t *testing.T) {
-	fx, _ := seedEstimatedPositionsArchiveFixture(t)
+	fx := seedEstimatedPositionsArchiveFixture(t)
 	before, err := fx.store.LoadPathArchives()
 	if err != nil {
 		t.Fatal(err)
@@ -484,8 +484,8 @@ func TestEstimatedPositionsDisabledCycleKeepsArchives(t *testing.T) {
 			}
 		}
 	}
-	if mustJSON(t, fx.engine.pathArchives) == "" || mustJSON(t, snap.pathArchives) != beforeJSON {
-		t.Fatal("response filtering mutated the shared archive")
+	if mustJSON(t, snap.pathArchives) != beforeJSON {
+		t.Fatalf("response filtering mutated the shared archive:\n%s\n%s", report("before", before), report("after ", snap.pathArchives))
 	}
 
 	// Restoring the policy must hand back the original evidence, not a
@@ -514,7 +514,7 @@ func TestEstimatedPositionsDisabledCycleKeepsArchives(t *testing.T) {
 // The archive guard above must not freeze archives: a real change to the
 // route still has to be recaptured while the policy is off.
 func TestEstimatedPositionsDisabledCycleStillRecordsRealChanges(t *testing.T) {
-	fx, _ := seedEstimatedPositionsArchiveFixture(t)
+	fx := seedEstimatedPositionsArchiveFixture(t)
 	before, err := fx.store.LoadPathArchives()
 	if err != nil {
 		t.Fatal(err)
