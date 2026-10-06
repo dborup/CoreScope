@@ -204,6 +204,15 @@ func TestEstimateAdvertInterval_RaisedInterval(t *testing.T) {
 		// Lowered (47 h -> 12 h): 12 h explains the old 47 h gaps as 4x
 		// once it is a candidate, as before.
 		{"flood 47 h -> 12 h", advertIntervalFlood, series(aiRepeat(47*H, 14), aiRepeat(12*H, 5)), 12 * 3600, advertConfidenceHigh, 20, 19},
+		// A gap at the interval itself among the newest 3 that fit breaks
+		// the run (review N1 on #247): 24, 12, 24, 24 h is missed adverts
+		// on 12 h, not a raised setting since the 12 h gap.
+		{"flood 12 h, last 4 gaps 2x 1x 2x 2x", advertIntervalFlood, series(aiRepeat(12*H, 12), []time.Duration{24 * H, 12 * H, 24 * H, 24 * H}), 12 * 3600, advertConfidenceHigh, 17, 16},
+		// Raised twice (review N2 on #247): the cut repeats on the adverts
+		// since the first change until no run is left, so the estimate is
+		// the final setting, not the one in between.
+		{"zero-hop 60 -> 120 -> 240 min", advertIntervalZeroHop, series(aiRepeat(60*M, 6), aiRepeat(120*M, 6), aiRepeat(240*M, 6)), 240 * 60, advertConfidenceHigh, 7, 6},
+		{"flood 12 h -> 24 h -> 47 h", advertIntervalFlood, series(aiRepeat(12*H, 6), aiRepeat(24*H, 6), aiRepeat(47*H, 6)), 47 * 3600, advertConfidenceHigh, 7, 6},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -226,6 +235,77 @@ func TestEstimateAdvertInterval_TimerCandidates(t *testing.T) {
 	aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(55*M, 8)...), advertIntervalZeroHop), 3600, advertConfidenceHigh, 9, 8)
 	// Flood stays at 3 h or more: hourly manual flood adverts are irregular.
 	aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(60*M, 8)...), advertIntervalFlood), 0, advertConfidenceNone, 9, 0)
+}
+
+// The zero-hop 2 min candidate band is 120 s +- 10 % (review N5 on #247),
+// the same tolerance the snap uses: gaps of 108-132 s give the 2 min
+// default, gaps just outside it are no timer interval. The other edges:
+// zero-hop 54 min (60 less 10 %), flood 2.7 h (3 h less 10 %).
+func TestEstimateAdvertInterval_CandidateBandEdges(t *testing.T) {
+	S, M := time.Second, time.Minute
+	for _, c := range []struct {
+		gap  time.Duration
+		want int64
+		conf string
+		gaps int
+	}{
+		{108 * S, 120, advertConfidenceHigh, 19},
+		{132 * S, 120, advertConfidenceHigh, 19},
+		{107 * S, 0, advertConfidenceNone, 0},
+		{133 * S, 0, advertConfidenceNone, 0},
+	} {
+		t.Run(c.gap.String(), func(t *testing.T) {
+			aiCheck(t, estimateAdvertInterval(aiGaps(aiRepeat(c.gap, 19)...), advertIntervalZeroHop), c.want, c.conf, 20, c.gaps)
+		})
+	}
+	for _, c := range []struct {
+		class advertIntervalClass
+		s     float64
+		want  bool
+	}{
+		{advertIntervalZeroHop, 108, true},
+		{advertIntervalZeroHop, 132, true},
+		{advertIntervalZeroHop, 107, false},
+		{advertIntervalZeroHop, 133, false},
+		{advertIntervalZeroHop, (54 * M).Seconds(), true},
+		{advertIntervalZeroHop, (54 * M).Seconds() - 1, false},
+		{advertIntervalFlood, 2.7 * 3600, true},
+		{advertIntervalFlood, 2.7*3600 - 1, false},
+	} {
+		if got := advertIntervalCandidateOK(c.s, c.class); got != c.want {
+			t.Errorf("advertIntervalCandidateOK(%v s, class %d) = %v, want %v", c.s, c.class, got, c.want)
+		}
+	}
+}
+
+// Known trade-off of the raised-interval rule (review N3 on #247): with an
+// unchanged interval, when the newest 3 heard gaps are the same multiple k
+// (every 2nd or 3rd advert lost), the estimate is k x at medium confidence
+// on 4 adverts, until the next gap at the interval itself breaks the run.
+// docs/api-spec.md documents it next to the sparse-coverage limitation.
+func TestEstimateAdvertInterval_FalseChange(t *testing.T) {
+	H, M := time.Hour, time.Minute
+	cases := []struct {
+		name     string
+		class    advertIntervalClass
+		gaps     []time.Duration
+		interval int64
+	}{
+		{"zero-hop 60 min, last 3 gaps 2x", advertIntervalZeroHop, append(aiRepeat(60*M, 10), aiRepeat(120*M, 3)...), 120 * 60},
+		{"flood 47 h, last 3 gaps 2x", advertIntervalFlood, append(aiRepeat(47*H, 10), aiRepeat(94*H, 3)...), 94 * 3600},
+		{"zero-hop 120 min, last 3 gaps 3x", advertIntervalZeroHop, append(aiRepeat(120*M, 10), aiRepeat(360*M, 3)...), 360 * 60},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			aiCheck(t, estimateAdvertInterval(aiGaps(c.gaps...), c.class), c.interval, advertConfidenceMedium, 4, 3)
+		})
+	}
+	// A gap that fits no multiple (an outage over 4x) does not break the run.
+	s := aiGaps(append(aiRepeat(60*M, 10), 120*M, 120*M, 300*M, 120*M)...)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalZeroHop), 120*60, advertConfidenceMedium, 5, 3)
+	// One more gap at the interval itself ends it.
+	s = aiGaps(append(append(aiRepeat(60*M, 10), aiRepeat(120*M, 3)...), 60*M)...)
+	aiCheck(t, estimateAdvertInterval(s, advertIntervalZeroHop), 3600, advertConfidenceHigh, 15, 14)
 }
 
 // Known limitation (review F2 on #247): when coverage is so sparse that the
@@ -384,7 +464,7 @@ func TestEstimateAdvertInterval_ConfidenceTiers(t *testing.T) {
 	}
 }
 
-// The interval is the median of the fitting gaps, not their mean: one late
+// The interval is the median of gap/k over the fitting gaps, not their mean: one late
 // first_seen (no sender clock) moves a mean, not the median.
 func TestEstimateAdvertInterval_MedianNotMean(t *testing.T) {
 	s := aiSeries(12*time.Hour, aiInts(0, 7)...)
@@ -557,3 +637,4 @@ func TestNodeDetail_AdvertIntervals(t *testing.T) {
 		t.Fatalf("window = %d", body.Intervals.Window)
 	}
 }
+
