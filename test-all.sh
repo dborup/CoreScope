@@ -40,6 +40,7 @@ run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
 run test-app-api-inflight-cleanup-rejection.js
 run test-app-api-bust-inflight-243.js
+run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
 run test-nav-dynamic-link-lifecycle.js
