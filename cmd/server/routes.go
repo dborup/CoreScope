@@ -303,6 +303,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
 	r.HandleFunc("/api/ping-scores", s.handlePingScores).Methods("GET")
+	r.HandleFunc("/api/ping-scores/{hash}/path", s.handlePingScorePath).Methods("GET")
 	r.HandleFunc("/api/analytics/areas", s.handleAreaAnalytics).Methods("GET")
 	r.HandleFunc("/api/analytics/gps-sanity", s.handleGPSSanity).Methods("GET")
 	r.Handle("/api/config/geo-filter", s.requireAPIKey(http.HandlerFunc(s.handlePutConfigGeoFilter))).Methods("PUT")

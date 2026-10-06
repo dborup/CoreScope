@@ -247,13 +247,28 @@ func TestPruneAgedTransmissionIDsUsesFirstSeenIndex(t *testing.T) {
 	seedAgedTransmissions(t, store, 20, 2, 10)
 
 	cutoff := time.Now().UTC().AddDate(0, 0, -5).Format(time.RFC3339)
-	for name, q := range map[string]string{
-		"batch subquery":            pruneAgedTransmissionIDs,
-		"observations delete":       pruneObservationsBatch,
-		"route_mask_changes delete": pruneRouteMaskChangesBatch,
-		"transmissions delete":      pruneTransmissionsBatch,
+	type planCase struct {
+		q    string
+		args []any
+	}
+	cases := map[string]planCase{}
+	for prefix, b := range map[string]struct {
+		stmts pruneBatchStatements
+		args  []any
+	}{
+		"":         {pruneAgedBatch, []any{cutoff}},
+		"packets ": {pruneAgedPacketBatch, []any{"", cutoff}}, // #296, cursored
+		"channel ": {pruneAgedChannelBatch, []any{cutoff}},    // #296
 	} {
-		rows, err := store.db.Query("EXPLAIN QUERY PLAN "+q, cutoff, pruneBatchTransmissions)
+		args := append(b.args, pruneBatchTransmissions)
+		cases[prefix+"batch subquery"] = planCase{b.stmts.ids, args}
+		cases[prefix+"observations delete"] = planCase{b.stmts.observations, args}
+		cases[prefix+"route_mask_changes delete"] = planCase{b.stmts.routeMaskChanges, args}
+		cases[prefix+"transmissions delete"] = planCase{b.stmts.transmissions, args}
+	}
+	cases["packets cursor"] = planCase{pruneAgedPacketBatch.newest, []any{"", cutoff, pruneBatchTransmissions}}
+	for name, c := range cases {
+		rows, err := store.db.Query("EXPLAIN QUERY PLAN "+c.q, c.args...)
 		if err != nil {
 			t.Fatalf("%s: EXPLAIN QUERY PLAN: %v", name, err)
 		}
@@ -285,8 +300,49 @@ func TestPruneAgedTransmissionIDsUsesFirstSeenIndex(t *testing.T) {
 		}
 		// #89: the change rows of a batch are found through their index,
 		// not by scanning the change log.
-		if name == "route_mask_changes delete" && (!strings.Contains(plan, "idx_route_mask_changes_tx") || strings.Contains(plan, "SCAN route_mask_changes")) {
+		if strings.HasSuffix(name, "route_mask_changes delete") && (!strings.Contains(plan, "idx_route_mask_changes_tx") || strings.Contains(plan, "SCAN route_mask_changes")) {
 			t.Errorf("%s: plan does not delete through idx_route_mask_changes_tx: %s", name, plan)
 		}
+	}
+}
+
+// TestPruneOldPacketsDeletesChannelMessagesAfterPacketDays pins the behaviour
+// #296 starts from: retention.packetDays prunes every transmission by age, so
+// a channel message (GRP_TXT, payload_type 5) and its observations go after
+// packetDays exactly like an advert does.
+func TestPruneOldPacketsDeletesChannelMessagesAfterPacketDays(t *testing.T) {
+	store := openPruneStore(t, "prune-channel-today.db")
+	ts := time.Now().UTC().AddDate(0, 0, -30).Format(time.RFC3339)
+	for i, payloadType := range []int{5, 4} {
+		res, err := store.db.Exec(
+			`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json)
+			 VALUES ('AA', ?, ?, 0, ?, 1, '{}')`,
+			fmt.Sprintf("today-%d", i), ts, payloadType,
+		)
+		if err != nil {
+			t.Fatalf("seed tx: %v", err)
+		}
+		txID, _ := res.LastInsertId()
+		if _, err := store.db.Exec(
+			`INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp)
+			 VALUES (?, 1, 'rx', 1.0, -100, 0, '[]', ?)`,
+			txID, time.Now().Unix(),
+		); err != nil {
+			t.Fatalf("seed obs: %v", err)
+		}
+	}
+
+	n, err := store.PruneOldPackets(14)
+	if err != nil {
+		t.Fatalf("PruneOldPackets: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected the channel message and the advert pruned, got %d", n)
+	}
+	if remaining := countRows(t, store, "transmissions"); remaining != 0 {
+		t.Fatalf("expected no transmissions left, %d remain", remaining)
+	}
+	if remaining := countRows(t, store, "observations"); remaining != 0 {
+		t.Fatalf("expected no observations left, %d remain", remaining)
 	}
 }

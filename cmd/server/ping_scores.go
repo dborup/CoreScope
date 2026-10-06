@@ -66,6 +66,10 @@ type PingScore struct {
 	relayPubkeys []string
 	firstPubkey  string
 	firstName    string
+
+	// A retained distance may use older landmark evidence than today's
+	// earliest observation. Never use this origin for first-hearer credit.
+	distanceFirstPubkey string
 }
 
 // PingLeaderboardEntry is one row of a leaderboard ranking.
@@ -78,6 +82,11 @@ type PingLeaderboardEntry struct {
 // PingScoresSnapshot is the full cached ping-score board: current records
 // plus leaderboards, global (not scoped by region/area).
 type PingScoresSnapshot struct {
+	// Only the displayed record slots have a bounded durable path archive.
+	// Published together with these scores and immutable thereafter; HTTP
+	// handlers must copy before applying live visibility rules.
+	pathArchives map[string]PingScorePathArchive
+
 	GeneratedAt string `json:"generatedAt"`
 	TotalPings  int    `json:"totalPings"`
 
@@ -261,6 +270,7 @@ func (s *Server) buildPingScoreFromPath(trigger pingTriggerRow, resp *PacketPath
 	if resp.First != nil && resp.First.Observer != nil {
 		score.firstPubkey = resp.First.Observer.PublicKey
 		score.firstName = resp.First.Observer.Name
+		score.distanceFirstPubkey = score.firstPubkey
 	}
 	return score
 }

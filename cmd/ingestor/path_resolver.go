@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 // Context-aware hop resolver — full restore of pre-#1289 hop
@@ -317,6 +319,30 @@ const (
 
 func isFloodRoute(routeType int) bool {
 	return routeType == routeTypeTransportFlood || routeType == routeTypeFlood
+}
+
+// observationRouteType is the route type of one observation for the batch
+// readers (resolved-path backfill, neighbour builder). One transmission row
+// covers DIRECT and FLOOD receptions of the same payload, because the content
+// hash does not cover the header route bits (MeshCore src/Packet.cpp
+// calculatePacketHash), so t.route_type (txRoute) is only the type of the
+// first reception (#289).
+//
+//  1. header is the observation's own frame header (the first two hex
+//     characters of observations.raw_hex): when it parses, its route bits win.
+//  2. Without a header, a route_mask holding both FLOOD and DIRECT means the
+//     type is unknown: -1, so no observer anchor and no observer edge
+//     (under-attribute rather than mis-attribute).
+//  3. Otherwise txRoute, as before #289 (rows written before #881 store no
+//     frame; route_mask is NULL until the #89 backfill reaches the row).
+func observationRouteType(header string, txRoute int, mask sql.NullInt64) int {
+	if rt, ok := packetpath.RouteTypeFromRawHex(header); ok {
+		return rt
+	}
+	if mask.Valid && mask.Int64&packetpath.RouteMaskFlood != 0 && mask.Int64&packetpath.RouteMaskDirect != 0 {
+		return -1
+	}
+	return txRoute
 }
 
 // resolveObservationPath resolves one observation's hops for

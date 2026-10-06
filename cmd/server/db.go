@@ -2190,6 +2190,10 @@ type PacketPathObserver struct {
 	Approx              bool     `json:"approx,omitempty"`
 	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
 	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
+	// Internal scoring evidence only: airport coordinates are a display
+	// fallback, not proof that an observer's own GPS still exists. Kept out
+	// of the wire/archive shape so existing packet-path clients are unchanged.
+	iataFallback bool
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -2740,6 +2744,7 @@ func buildPacketPathResponseFromReduction(
 				if coord, ok := iataCoords[obs.IATA]; ok {
 					lat, lon := coord.Lat, coord.Lon
 					obs.Lat, obs.Lon = &lat, &lon
+					obs.iataFallback = true
 				}
 			}
 			if obs.Lat == nil && b.observerPubkey != "" {

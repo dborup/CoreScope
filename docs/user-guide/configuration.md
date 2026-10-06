@@ -97,6 +97,21 @@ How long (in hours) before a node is marked degraded or silent:
 |-------|---------|-------------|
 | `retention.nodeDays` | `7` | Nodes not seen in N days move to inactive |
 | `retention.packetDays` | `30` | Packets older than N days are deleted daily |
+| `retention.channelDays` | `0` | Channel messages (GRP_TXT) and their observations are kept until they are N days old instead of `packetDays`. Takes effect only when `packetDays` is set and `channelDays` is larger; `0` = channel messages follow `packetDays` |
+
+`retention.channelDays` lets an instance keep a short `packetDays` to bound the
+database while keeping chat history longer. Channel messages are a small share
+of all traffic, so the extra rows are cheap. The ingestor prunes at startup and
+then daily, and logs both prunes separately, for example
+`[prune] startup pruned 120 channel messages older than 90 days`. A value that
+is not larger than `packetDays` has no effect, and the ingestor logs that at
+startup.
+
+The server's in-memory packet store window (`packetStore.retentionHours`) is
+independent of both settings. The Channels page reads the full history from the
+database (`/api/channels`, `/api/channels/{hash}/messages`), so messages kept by
+`channelDays` stay visible there even when they are older than the in-memory
+window.
 
 > **Note:** Lowering retention does **not** immediately shrink the database file.
 > SQLite marks deleted pages as free but does not return them to the filesystem
