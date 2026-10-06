@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,8 +92,13 @@ func TestNodePaths_ResolvedPathLRUServesCachedEntryWithinTTL(t *testing.T) {
 		t.Fatal("tx missing before the rewrite (setup)")
 	}
 	rewriteStoredResolvedPath(t, srv, txID, `["aacafe0000000000","eeff00112233aabb"]`)
-	advance(resolvedPathLRUTTL - time.Second)
 
+	// An entry must live long enough to absorb repeated dashboard requests.
+	advance(30 * time.Second)
+	if !strings.Contains(nodeEndpointBody(t, router, "paths"), hash) {
+		t.Fatal("cached resolved_path was re-read after 30 s; the LRU no longer saves repeat reads")
+	}
+	advance(resolvedPathLRUTTL - 31*time.Second)
 	if !strings.Contains(nodeEndpointBody(t, router, "paths"), hash) {
 		t.Error("cached resolved_path was re-read before resolvedPathLRUTTL elapsed")
 	}
@@ -131,9 +138,52 @@ func TestResolvedPathLRU_ExpiryAndInPlaceRefresh(t *testing.T) {
 		t.Errorf("lruOrder has %d slots for one id, want 1", n)
 	}
 
-	// Wall clock stepped back: an entry stored "in the future" is expired
-	// rather than living for the size of the step plus the TTL.
-	if _, ok := store.lruGet(7, store.lruNow()-int64(time.Second)); ok {
-		t.Error("entry served to a lookup whose clock is behind its store time")
+	// /paths reads the clock once per request, so a lookup's now can be
+	// older than an entry stored meanwhile: that entry is fresh.
+	if _, ok := store.lruGet(7, store.lruNow()-int64(time.Second)); !ok {
+		t.Error("entry stored after the lookup's clock read was treated as expired")
+	}
+}
+
+func TestResolvedPathLRU_DefaultClockIsMonotonic(t *testing.T) {
+	store := &PacketStore{}
+	a := store.lruNow()
+	time.Sleep(time.Millisecond)
+	if b := store.lruNow(); b <= a || b > int64(time.Hour) {
+		t.Errorf("lruNow went %d -> %d; want an increasing offset from lruEpoch", a, b)
+	}
+}
+
+// Entry ages cost a clock read, which is not free on every host (about 30 ns
+// per read on a kvm-clock VM, against 15 ns for the whole cache hit). /paths
+// and /hop_analytics look up one entry per candidate, so they read the clock
+// once per request. A warm request with many candidates must read it once.
+func TestNodePaths_WarmRequestReadsLRUClockOnce(t *testing.T) {
+	srv, router := setupTestServer(t)
+	for i := 0; i < 20; i++ {
+		seedConfirmTx(t, srv, fmt.Sprintf("lru_clock_%02d", i), `["aa","bb"]`, `["`+confirmTestTarget+`","eeff00112233aabb"]`)
+	}
+	store := reloadConfirmStore(t, srv)
+	var reads atomic.Int64
+	base := time.Now()
+	store.lruClock = func() time.Time { reads.Add(1); return base }
+
+	for _, ep := range []string{"paths", "hop_analytics"} {
+		nodeEndpointBody(t, router, ep) // warm
+		reads.Store(0)
+		body := nodeEndpointBody(t, router, ep)
+		// /paths groups identical paths (one sample hash per group), so
+		// count rows/occurrences rather than look for each hash.
+		if ep == "paths" {
+			var resp confirmPathsResp
+			if err := json.Unmarshal([]byte(body), &resp); err != nil || resp.TotalTransmissions < 20 {
+				t.Fatalf("paths: totalTransmissions = %d (err %v), want >= 20 (setup)", resp.TotalTransmissions, err)
+			}
+		} else if strings.Count(body, "lru_clock_") < 20 {
+			t.Fatalf("%s: seeded txs missing (setup)", ep)
+		}
+		if n := reads.Load(); n != 1 {
+			t.Errorf("%s: warm request read the LRU clock %d times for 20+ candidates, want 1", ep, n)
+		}
 	}
 }

@@ -10747,8 +10747,9 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 	}
 
 	packets := make([]HopAnalyticsPacket, 0, len(confirmed))
+	lruNow := s.lruNow()
 	for _, tx := range confirmed {
-		rp := s.fetchResolvedPathForTxBest(tx)
+		rp := s.fetchResolvedPathForTxBestAt(tx, lruNow)
 		if rp == nil {
 			continue
 		}
