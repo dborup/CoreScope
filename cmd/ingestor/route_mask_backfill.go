@@ -111,6 +111,17 @@ func createRouteMaskPendingIndex(ctx context.Context, d *sql.DB) error {
 	return nil
 }
 
+// routeMaskBitFromHeader returns the #89 route-mask bit of an observation's
+// raw_hex header prefix (its first two hex chars), or 0 when the prefix is
+// missing or does not parse. Shared by the route_mask backfill and the
+// hash-merge inline recompute (#287) so both read a frame header the same way.
+func routeMaskBitFromHeader(header string) int64 {
+	if rt, ok := packetpath.RouteTypeFromRawHex(header); ok {
+		return packetpath.RouteMaskBit(rt)
+	}
+	return 0
+}
+
 // backfillTxRouteMaskBatch fills up to limit NULL rows in one write
 // transaction and returns how many it updated. It holds writerMu like
 // InsertTransmission, so a live observation is either fully visible to the
@@ -177,9 +188,7 @@ func (s *Store) backfillTxRouteMaskBatch(ctx context.Context, d *sql.DB, limit i
 		}
 		// Unparseable or truncated frames contribute nothing; they never stop
 		// the backfill.
-		if rt, ok := packetpath.RouteTypeFromRawHex(header.String); ok {
-			masks[id] |= packetpath.RouteMaskBit(rt)
-		}
+		masks[id] |= routeMaskBitFromHeader(header.String)
 	}
 	if err := orows.Err(); err != nil {
 		orows.Close()
