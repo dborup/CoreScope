@@ -120,13 +120,12 @@ vm.runInContext(channelsSource, ctx);
 
 const normalize = ctx.window._channelsNormalizeObservedPathHashSizesForTest;
 const union = ctx.window._channelsUnionObservedPathHashSizesForTest;
-const badge = ctx.window._channelsRenderObservedPathHashBadgeForTest;
 const senderBadge = ctx.window._channelsRenderSenderPathHashBadgeForTest;
 const merge = ctx.window._channelsMergeWsAppendedIntoRestForTest;
 const dedup = ctx.window._channelsDeduplicateAndMergeForTest;
 const fetchAndDecrypt = ctx.window._channelsFetchAndDecryptChannelForTest;
 
-for (const [name, fn] of Object.entries({ normalize, union, badge, senderBadge, merge, dedup, fetchAndDecrypt })) {
+for (const [name, fn] of Object.entries({ normalize, union, senderBadge, merge, dedup, fetchAndDecrypt })) {
   if (typeof fn !== 'function') {
     console.error('FATAL: missing channels.js test export: ' + name);
     process.exit(2);
@@ -171,22 +170,10 @@ test('unions evidence without mutating either input', () => {
   assert.deepStrictEqual(b.observed_path_hash_sizes, [2, 1]);
 });
 
-test('single evidence badge has exact label and conservative tooltip', () => {
-  const html = badge({ observedPathHashSizes: [2] });
-  assert.match(html, />Observed path hash: 2-byte</);
-  assert.match(html, /title="Path hash size observed in one or more relayed wire paths for this message\. Direct zero-hop copies do not provide hash-size evidence\. This does not prove the sender’s permanent configuration\."/);
-});
-
-test('mixed evidence badge is sorted and compact', () => {
-  const html = badge({ observed_path_hash_sizes: [3, 1, 2] });
-  assert.match(html, />Mixed path hashes: 1\/2\/3-byte</);
-  assert.ok(!html.includes('undefined'));
-});
-
-test('unknown evidence renders no badge and cannot inject markup', () => {
-  assert.strictEqual(badge({}), '');
-  assert.strictEqual(badge({ observedPathHashSizes: ['<img src=x onerror=alert(1)>'] }), '');
-});
+// #282 (8): renderObservedPathHashBadge() (the "Observed path hash" badge) was
+// removed from channels.js -- no shipped code rendered it, only this test did.
+// Its evidence normalization (including the injection-shaped rejection its badge
+// test used to assert) is still covered by the normalize/union cases above.
 
 test('sender badge uses only a valid encoded width', () => {
   assert.match(senderBadge({ senderPathHashSize: 2 }), />Sent with: 2-byte</);

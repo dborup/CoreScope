@@ -11,8 +11,6 @@
   let messages = [];
   let wsHandler = null;
 
-  var OBSERVED_PATH_HASH_TOOLTIP = 'Path hash size observed in one or more relayed wire paths for this message. Direct zero-hop copies do not provide hash-size evidence. This does not prove the sender’s permanent configuration.';
-
   // Normalize the two API spellings at the browser boundary.  Only the three
   // MeshCore path-hash widths are evidence; direct/zero-hop and malformed
   // values intentionally collapse to an empty set (no badge).
@@ -57,14 +55,12 @@
     return copy;
   }
 
-  function renderObservedPathHashBadge(message) {
-    var sizes = normalizeObservedPathHashSizes(message);
-    if (!sizes.length) return '';
-    var label = sizes.length === 1
-      ? 'Observed path hash: ' + sizes[0] + '-byte'
-      : 'Mixed path hashes: ' + sizes.join('/') + '-byte';
-    return '<span class="ch-path-hash-badge" title="' + escapeHtml(OBSERVED_PATH_HASH_TOOLTIP) + '">' + escapeHtml(label) + '</span>';
-  }
+  // #282 (8): renderObservedPathHashBadge() + OBSERVED_PATH_HASH_TOOLTIP used to
+  // live here, but the only remaining reader was the test export -- no shipped
+  // code rendered the "Observed path hash" badge (renderSenderPathHashBadge is
+  // the one wired into renderMessages). Removed with its test so a dead helper
+  // cannot drift. normalizeObservedPathHashSizes() stays: the union/merge path
+  // and the sender badge still use it.
 
   // The header records the sender's choice even before a flood has relayed.
   // Observation-path evidence is retained internally, but is not the label.
@@ -2852,7 +2848,6 @@
   window._channelsMergeClientChannelStateForTest = mergeClientChannelState;
   window._channelsNormalizeObservedPathHashSizesForTest = normalizeObservedPathHashSizes;
   window._channelsUnionObservedPathHashSizesForTest = unionObservedPathHashSizes;
-  window._channelsRenderObservedPathHashBadgeForTest = renderObservedPathHashBadge;
   window._channelsRenderSenderPathHashBadgeForTest = renderSenderPathHashBadge;
   window._channelsDeduplicateAndMergeForTest = deduplicateAndMerge;
   window._channelsLoadChannelsForTest = loadChannels;

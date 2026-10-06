@@ -147,17 +147,24 @@ and `src/Packet.h`):
 - `path` — exactly `hop_count * hash_size` bytes. `path_length` must describe the bytes that are
   actually present; a byte count larger than the remaining buffer is rejected (dropped, not
   partially read).
-- `payload` — omit entirely for non-adverts. A partially kept payload is tolerated too (it is simply
-  reported as undecodable), but there is no reason to send one.
+- `payload` — omit entirely for non-adverts. A partially kept payload is tolerated too: the coverage
+  row is the same one the fully minimised packet writes, keyed on `path[last]`. There is no reason to
+  send one, and a remnant can still leak. A group payload is channel hash (1 byte) + cipher MAC
+  (2 bytes) + ciphertext ([firmware `docs/payloads.md`](https://github.com/meshcore-dev/MeshCore/blob/main/docs/payloads.md),
+  "Group text message"), so only a remnant *shorter* than that 3-byte envelope is reported as
+  undecodable — keep 3 bytes or more and the channel hash and the MAC are published.
 
 **Adverts are the exception: send them whole.** For a 0-hop advert the heard key *is* the
 advertiser's pubkey, and that lives in the advert payload — a minimised 0-hop advert carries nothing
-attributable and is dropped. A *relayed* advert follows the normal path rule, so it survives
+attributable and is dropped. Truncating the payload to just the 32-byte pubkey does not help either:
+an advert payload is pubkey (32) + timestamp (4) + signature (64), and all 100 bytes must be present
+before the pubkey is read back. A *relayed* advert follows the normal path rule, so it survives
 minimisation, but there is no benefit in special-casing it client-side.
 
 What minimisation does **not** change: `DIRECT`/`TRANSPORT_DIRECT` paths and `TRACE` packets stay
 unattributable, and 1-byte path hashes stay excluded. Dropping the payload never widens what is
-recorded. Pinned by `TestHandleClientPacketMinimised*` in `cmd/ingestor/client_rx_minimised_test.go`.
+recorded. Pinned by `TestHandleClientPacketMinimised*` and
+`TestHandleClientPacketPartialPayloadTolerated` in `cmd/ingestor/client_rx_minimised_test.go`.
 
 ## Capture HARD RULE — only what was heard directly
 

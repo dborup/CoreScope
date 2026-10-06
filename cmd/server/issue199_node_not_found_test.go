@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"log"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -167,18 +165,16 @@ func TestNodeDetail404LookupErrorIsLoggedOnce(t *testing.T) {
 	if _, err := srv.db.conn.Exec(`CREATE TABLE inactive_nodes (public_key TEXT PRIMARY KEY, name TEXT)`); err != nil {
 		t.Fatal(err)
 	}
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(prev)
-
-	for i := 0; i < 3; i++ {
-		code, body := issue199Get(t, router, issue199Unknown)
-		if code != 404 || len(body) != 1 || body["error"] == nil {
-			t.Fatalf("request %d: status=%d body=%v, want the bare 404", i, code, body)
+	// The capture is locked (#310): the server's background goroutines keep
+	// logging into whatever writer is installed.
+	out := captureLog(func() {
+		for i := 0; i < 3; i++ {
+			code, body := issue199Get(t, router, issue199Unknown)
+			if code != 404 || len(body) != 1 || body["error"] == nil {
+				t.Fatalf("request %d: status=%d body=%v, want the bare 404", i, code, body)
+			}
 		}
-	}
-	out := buf.String()
+	})
 	if n := strings.Count(out, "missing-node lookup failed"); n != 1 {
 		t.Fatalf("logged %d lookup failures for 3 requests, want 1; log:\n%s", n, out)
 	}
@@ -193,21 +189,20 @@ func TestNodeDetail404LookupErrorIsLoggedOnce(t *testing.T) {
 // A request cancelled by its client is not a broken lookup: nothing logged.
 func TestNodeDetail404CancelledLookupIsNotLogged(t *testing.T) {
 	srv, _ := setupTestServer(t)
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := httptest.NewRequest("GET", "/api/nodes/"+issue199Unknown, nil).WithContext(ctx)
-	w := httptest.NewRecorder()
-	srv.writeNodeNotFound(w, req, issue199Unknown)
-	if w.Code != 404 {
-		t.Fatalf("status=%d, want 404", w.Code)
-	}
-	if strings.Contains(buf.String(), "missing-node lookup failed") {
-		t.Errorf("cancelled request logged as a lookup failure: %s", buf.String())
+	// The capture is locked (#310): the server's background goroutines keep
+	// logging into whatever writer is installed.
+	out := captureLog(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req := httptest.NewRequest("GET", "/api/nodes/"+issue199Unknown, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		srv.writeNodeNotFound(w, req, issue199Unknown)
+		if w.Code != 404 {
+			t.Fatalf("status=%d, want 404", w.Code)
+		}
+	})
+	if strings.Contains(out, "missing-node lookup failed") {
+		t.Errorf("cancelled request logged as a lookup failure: %s", out)
 	}
 }
 

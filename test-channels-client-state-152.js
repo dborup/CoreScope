@@ -1969,6 +1969,72 @@ async function test(name, fn) {
     assert.ok(h.row('#shared') && h.row('#shared').shared === true, 'the approved channel is listed');
   });
 
+  // ── #279 (N1 of the #263 round-2 review): pin the revoke path's bust ──
+  //
+  // `onApproved` and `onRevoked` both wire to refreshChannelList(), so the
+  // revoke path's bust was only pinned *transitively*: a change that
+  // re-splits the two hooks and gives `onRevoked` its own non-busting
+  // `invalidateApiCache('/channels'); loadChannels(true)` survived every
+  // unit suite. These two tests drive the revoke path directly.
+  const BEFORE_REVOKE = { channels: [serverChannel('public'), serverChannel('#shared')], approvedChannels: [{ hash: '#shared', name: '#shared' }] };
+  const AFTER_REVOKE = { channels: [serverChannel('public')] };
+
+  // A region change is in flight (its answer was made before the revoke)
+  // when the revoke asks for a refresh. newestFirst picks which answer
+  // lands first.
+  async function revokeDuringRegionLoad(newestFirst) {
+    const h = makeHarness();
+    const fetches = useRealApi(h);
+    const initDone = h.init();
+    await flush();
+    fetches[0].answer(BEFORE_REVOKE);
+    await initDone;
+    assert.ok(h.row('#shared'), 'precondition: the shared channel is listed');
+    h.regionParam = 'SJC';
+    h.regionChange();
+    await flush();
+    assert.strictEqual(fetches.length, 2, 'the region change fetches');
+    h.revokedCallback('#shared');
+    await flush();
+    // Every request made after the revoke sees the channel gone.
+    const answers = fetches.slice(1).map((f, i) => () => f.answer(i === 0 ? BEFORE_REVOKE : AFTER_REVOKE));
+    (newestFirst ? answers.reverse() : answers).forEach((answer) => answer());
+    await flush();
+    return { h, fetches };
+  }
+
+  for (const newestFirst of [true, false]) {
+    await test('#279: revoke while a /channels request is in flight drops the channel (' + (newestFirst ? 'older answer lands last' : 'older answer lands first') + ')', async () => {
+      const { h, fetches } = await revokeDuringRegionLoad(newestFirst);
+      assert.strictEqual(h.row('#shared'), undefined,
+        'the revoked channel must leave the list (got ' + JSON.stringify(listedHashes(h)) + ')');
+      assert.ok(!/data-hash="#shared"/.test(h.elements.chList.innerHTML), 'the revoked channel must not be rendered');
+      assert.strictEqual(fetches.length, 3, 'one request for the region change, one for the revoke');
+      assert.ok(/region=SJC/.test(fetches[1].url) && /region=SJC/.test(fetches[2].url), 'both requests are for the current region');
+      // The answer the list now shows is also what the TTL cache holds, so
+      // the next refresh within the TTL keeps it gone without a request.
+      await h.w._channelsLoadChannelsForTest(true);
+      assert.strictEqual(fetches.length, 3, 'served from the cache');
+      assert.strictEqual(h.row('#shared'), undefined,
+        'the cached list still has the channel gone (got ' + JSON.stringify(listedHashes(h)) + ')');
+    });
+  }
+
+  await test('#279: revoke with nothing in flight makes exactly one /channels request', async () => {
+    const h = makeHarness();
+    const fetches = useRealApi(h);
+    const initDone = h.init();
+    await flush();
+    fetches[0].answer(BEFORE_REVOKE);
+    await initDone;
+    h.revokedCallback('#shared');
+    await flush();
+    assert.strictEqual(fetches.length, 2, 'exactly one request for the revoke (got ' + (fetches.length - 1) + ')');
+    fetches[1].answer(AFTER_REVOKE);
+    await flush();
+    assert.strictEqual(h.row('#shared'), undefined, 'the revoked channel is gone');
+  });
+
   // ── #155: mobile channel rows show the unread badge ──
   console.log('\n=== #155 mobile rows show the unread badge ===');
 

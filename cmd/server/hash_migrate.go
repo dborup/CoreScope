@@ -147,7 +147,40 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 	if rehashed > 0 {
 		log.Printf("[hash-migrate] Rehashed %d transmissions in memory to the current formula, merged %d duplicates; max write-lock hold %.1f ms over %d batches (total %.1f ms)",
 			rehashed, merged, millis(hold.max), hold.batches, millis(hold.total))
+		refreshDistIndexHashesAfterMigration(store)
 	}
+}
+
+// refreshDistIndexHashesAfterMigration repairs the content hash the distance
+// records carry, once the whole migration is done (#303).
+//
+// The records are recomputed during the migration only for a merge survivor
+// whose path or first_seen moved (#288). A transmission that was rehashed
+// without a collision, and a survivor that was already the earliest row and
+// kept its path, keep the old hash in distHops/distPaths until the next full
+// build, and /api/analytics/distance serves it.
+//
+// One pass over the index for the whole migration, not per batch: the hash the
+// records carry is wrong only between the rehash and this call, nothing reads
+// it off a record except the distance analytics, and it is not worth a linear
+// pass per batch. The index is usually not even built yet while the migration
+// runs (it is lazy), and then the pass finds nothing and writes nothing.
+func refreshDistIndexHashesAfterMigration(store *PacketStore) {
+	started := time.Now()
+	store.mu.Lock()
+	refreshed := store.refreshDistIndexHashes()
+	records := len(store.distHops) + len(store.distPaths)
+	store.mu.Unlock()
+	held := time.Since(started)
+	if refreshed == 0 {
+		return
+	}
+	// The hash is part of the cached distance analytics (topPaths[].hash and
+	// the hop pairs), so the caches built from the old one must go. eviction
+	// clears them without the rate limit, as the merge already does.
+	store.invalidateCachesFor(cacheInvalidation{eviction: true})
+	log.Printf("[hash-migrate] Refreshed the content hash of %d of %d distance index records in %.1f ms",
+		refreshed, records, millis(held))
 }
 
 // staleContentHashes returns the transmissions of batch whose hash differs from

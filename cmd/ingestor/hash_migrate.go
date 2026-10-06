@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 // Content-hash migration (#215).
@@ -38,9 +40,18 @@ import (
 //     observer, same path), while the transmission keeps the
 //     earliest first_seen;
 //   - the survivor takes the earliest first_seen, the later last_seen and the
-//     union of route_mask (a grown mask is logged in route_mask_changes for
-//     running servers), and every nullable column it has no value for (scope_name,
-//     channel_hash, from_pubkey, ...) from the duplicate; a value it has stays;
+//     route_mask union (a grown mask is logged in route_mask_changes for running
+//     servers). A NULL route_mask is "not computed yet", not "no routes": when
+//     either side is NULL the merge cannot take a plain OR, so it recomputes the
+//     mask inline (#287) from both sides' stored masks (keeping a bit no
+//     surviving observation can rebuild) plus the #89 lower bound the backfill
+//     would produce (route_type and the surviving observation headers). The
+//     result is non-NULL, so the backfill leaves it alone and the change is
+//     logged like any grown mask, except that a survivor whose mask was NULL
+//     always logs one row, even for a known 0 (one per both-NULL merge on a
+//     pre-#89 DB); and every nullable column it has no value for
+//     (scope_name, channel_hash, from_pubkey, ...) from the duplicate; a value
+//     it has stays;
 //   - rows hung off the duplicate follow the survivor (ping_triggers), or go
 //     with it when the survivor already has one (route_mask_changes);
 //   - the duplicate row is deleted.
@@ -308,15 +319,47 @@ func mergeTransmissions(ctx context.Context, tx *sql.Tx, winner, loser int64, ex
 		return err
 	}
 
-	var oldMask sql.NullInt64
+	var oldMask, loserMask sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `SELECT route_mask FROM transmissions WHERE id = ?`, winner).Scan(&oldMask); err != nil {
 		return err
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT route_mask FROM transmissions WHERE id = ?`, loser).Scan(&loserMask); err != nil {
+		return err
+	}
+	// A NULL route_mask means "not computed yet", not "no routes".
+	var mergedMask int64
+	if oldMask.Valid && loserMask.Valid {
+		// Both computed: each stored mask already encodes that side's route_type
+		// and every observation it ever held, so their OR is the exact union.
+		mergedMask = oldMask.Int64 | loserMask.Int64
+	} else {
+		// At least one side was never computed. Leaving the result non-NULL via
+		// COALESCE(route_mask, 0) would make the backfill skip the row and lose
+		// the uncomputed side's bits for good (#287). Setting it back to NULL and
+		// deferring to the backfill instead would lose a bit the computed side
+		// stored but no surviving observation can rebuild (an observation
+		// idx_observations_dedup dropped in the move above, or a frame a later
+		// reception overwrote). So recompute inline, in this transaction: keep
+		// every bit either side stored, then OR the #89 lower bound the backfill
+		// would produce (both sides' route_type plus the surviving observation
+		// headers). The result is non-NULL, so the backfill leaves the row alone
+		// and the route_mask_changes row below tells running servers.
+		m, err := recomputeMergedRouteMask(ctx, tx, winner, loser)
+		if err != nil {
+			return err
+		}
+		if oldMask.Valid {
+			m |= oldMask.Int64
+		}
+		if loserMask.Valid {
+			m |= loserMask.Int64
+		}
+		mergedMask = m
+	}
 	set := "first_seen = MIN(first_seen, (SELECT first_seen FROM transmissions WHERE id = ?)),\n" +
 		"last_seen = MAX(last_seen, (SELECT last_seen FROM transmissions WHERE id = ?)),\n" +
-		"route_mask = CASE WHEN route_mask IS NULL AND (SELECT route_mask FROM transmissions WHERE id = ?) IS NULL THEN NULL\n" +
-		"ELSE COALESCE(route_mask, 0) | COALESCE((SELECT route_mask FROM transmissions WHERE id = ?), 0) END"
-	args := []interface{}{loser, loser, loser, loser}
+		"route_mask = ?"
+	args := []interface{}{loser, loser, mergedMask}
 	for _, col := range ex.fillCols {
 		set += fmt.Sprintf(",\n\"%s\" = COALESCE(\"%s\", (SELECT \"%s\" FROM transmissions WHERE id = ?))", col, col, col)
 		args = append(args, loser)
@@ -340,19 +383,53 @@ func mergeTransmissions(ctx context.Context, tx *sql.Tx, winner, loser int64, ex
 		if _, err := tx.ExecContext(ctx, `DELETE FROM route_mask_changes WHERE transmission_id = ?`, loser); err != nil {
 			return err
 		}
-		var newMask sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT route_mask FROM transmissions WHERE id = ?`, winner).Scan(&newMask); err != nil {
-			return err
-		}
-		if newMask.Valid && (!oldMask.Valid || newMask.Int64 != oldMask.Int64) {
+		if !oldMask.Valid || mergedMask != oldMask.Int64 {
 			// Same record InsertTransmission leaves when an observation adds a
 			// route bit: servers that hold the survivor pick up the full mask.
+			// The merged mask is always known now, so an uncomputed survivor
+			// (oldMask NULL) that the merge gives a mask is announced too.
 			if _, err := tx.ExecContext(ctx, `INSERT INTO route_mask_changes (transmission_id, route_mask, created_at) VALUES (?, ?, ?)`,
-				winner, newMask.Int64, time.Now().Unix()); err != nil {
+				winner, mergedMask, time.Now().Unix()); err != nil {
 				return err
 			}
 		}
 	}
 	_, err := tx.ExecContext(ctx, `DELETE FROM transmissions WHERE id = ?`, loser)
 	return err
+}
+
+// recomputeMergedRouteMask rebuilds the #89 route-mask lower bound for a merged
+// transmission whose mask cannot be a plain OR because a side was never
+// computed. It mirrors backfillTxRouteMaskBatch for the one merged row: the bit
+// of each side's stored route_type (the survivor keeps its own route_type or
+// takes the loser's, and a route the survivor was never heard on still matters,
+// so both are ORed) plus the header bit of every observation now parented on the
+// winner (the move above already folded in the loser's surviving observations).
+// The caller ORs in both stored masks, so a bit either side recorded from a
+// frame that no surviving observation can rebuild is kept too. Unlike the
+// backfill it runs once per merge, so a per-row read is fine.
+func recomputeMergedRouteMask(ctx context.Context, tx *sql.Tx, winner, loser int64) (int64, error) {
+	var mask int64
+	for _, id := range [...]int64{winner, loser} {
+		var routeType sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT route_type FROM transmissions WHERE id = ?`, id).Scan(&routeType); err != nil {
+			return 0, err
+		}
+		if routeType.Valid {
+			mask |= packetpath.RouteMaskBit(int(routeType.Int64))
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT substr(raw_hex, 1, 2) FROM observations WHERE transmission_id = ? AND raw_hex IS NOT NULL`, winner)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var header sql.NullString
+		if err := rows.Scan(&header); err != nil {
+			return 0, err
+		}
+		mask |= routeMaskBitFromHeader(header.String)
+	}
+	return mask, rows.Err()
 }

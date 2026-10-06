@@ -8,8 +8,13 @@
  * 2. Widths are not locked from an (almost) empty body. With fewer than
  *    COL_MEASURE_MIN_ROWS usable rows the table gets provisional widths and the
  *    columns are measured again ONCE, when enough rows arrive -- unless the user
- *    has saved widths by then. A table measured from a full body gets no
- *    observer at all, so there is no per-render work.
+ *    has saved widths by then. What governs the one-shot MutationObserver is the
+ *    usable-row count of the FIRST render, not which page the table belongs to:
+ *    a table whose first body already has >= COL_MEASURE_MIN_ROWS usable rows
+ *    gets no observer (no per-render work), but any table -- analytics included
+ *    -- whose first render has fewer than that (e.g. an analytics tab with < 5
+ *    data rows) does create the one-shot observer. (#282 (5): an earlier claim
+ *    that analytics tables "never create an observer" was wrong on that count.)
  * 3. Saved widths (localStorage) are applied as before, without measuring.
  *
  * Runs the real app.js in a vm sandbox against a minimal fake table DOM. A

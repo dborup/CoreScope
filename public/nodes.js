@@ -705,9 +705,17 @@
       const advertMsgs = msgs.filter(isAdvertMessage);
       if (!advertMsgs.length) return;
 
+      // #279: invalidateApiCache() clears only the TTL cache, so a plain
+      // loadNodes(true) could still join a /nodes request that was already
+      // in flight -- one the server may have answered before this advert
+      // arrived, leaving the node that just advertised out of the list.
+      // Same shape as the #243 /channels bug, and the same call-site fix:
+      // bust never joins an in-flight request and takes its slot, so a
+      // later plain load joins this newer one. A refresh that fetches
+      // nothing (the in-place branch below) is unaffected.
       if (!_allNodes) {
         invalidateApiCache('/nodes');
-        loadNodes(true);
+        loadNodes(true, { bust: true });
         return;
       }
 
@@ -735,7 +743,7 @@
         _fleetSkew = null;
         invalidateApiCache('/nodes');
       }
-      loadNodes(true);
+      loadNodes(true, { bust: true });  // #279, as above
     }, 5000);
   }
 
@@ -1436,7 +1444,8 @@
     return ' <span class="dup-name-badge" title="' + escapeHtml(title) + '">(' + keys.length + ')</span>';
   }
 
-  async function loadNodes(refreshOnly) {
+  // opts.bust: fetch fresh pages even if the same request is in flight (#279).
+  async function loadNodes(refreshOnly, opts) {
     try {
       // Fetch all nodes via pagination loop — server clamps /api/nodes ?limit
       // to 500 (PR #1540 / v3.8.3 DoS guard), so a single fetch silently
@@ -1461,7 +1470,7 @@
         const nodesBody = document.getElementById('nodesBody');
         while (offset < SAFETY_CAP) {
           baseParams.set('offset', String(offset));
-          const data = await api('/nodes?' + baseParams, { ttl: CLIENT_TTL.nodeList });
+          const data = await api('/nodes?' + baseParams, { ttl: CLIENT_TTL.nodeList, bust: !!(opts && opts.bust) });
           if (!data || !Array.isArray(data.nodes)) break;
           accumulated.push.apply(accumulated, data.nodes);
           counts = data.counts || counts || {};
