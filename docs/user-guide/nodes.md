@@ -65,10 +65,12 @@ Click the node name in the detail pane to open the **full node page** with compl
 
 ### Approximate area (neighbor estimate)
 
-An **Approximate area** is a heuristic position inferred from neighboring nodes
-with reported coordinates. It is not triangulation, a GPS fix, or a measurement
-of the node's location. Accuracy has not been field-validated. A reported GPS
-position is displayed separately and is never replaced by the estimate.
+The **neighbor evidence area** shows the extent of supported neighboring nodes
+with reported coordinates. The target **may be outside it**: this is not a
+confidence region, radio-range boundary, triangulation, or GPS measurement.
+Accuracy has not been field-validated. A reported GPS position keeps its own pin
+and is never replaced by the estimate. Direct RSSI or four receivers are not
+required; route/neighbor evidence is the basis.
 
 The estimate considers a bounded pool of up to 20 positioned neighbor candidates.
 It scores geographic groups using their combined support rather than choosing
@@ -88,8 +90,9 @@ for usable positions and freshness. Busy links without coordinates or with old
 sightings can therefore keep better candidates outside the pool. Improving that
 candidate selection is a separate follow-up, not an accuracy claim of this change.
 
-- **Approximate area:** at least two contributors support the selected group.
-  The displayed point is a weighted center, not proof the node lies there.
+- **Neighbor evidence area:** a polygon joining the outer supported contributors.
+  Two or collinear positions show an evidence **line**, not an invented area.
+  Coincident positions cannot provide geometry. No weighted-center pin is drawn.
 - **Insufficient neighbor evidence:** the selected group contains fewer than two
   contributors, so no estimated position marker is shown.
 - **Conflicting neighbor groups:** geographically separate groups have similar
@@ -104,16 +107,19 @@ sighting dates summarize contributors' stored `last_seen` values, not the dates
 of every observation or when their GPS was measured. Missing or implausible
 future timestamps are flagged as unknown freshness. The distance from a reported
 position is a comparison between two points, not a measured positioning error.
-The map uses a fixed-size dashed symbol, not an uncertainty circle.
+The map uses a dashed hull/line, never an uncertainty circle or a guessed radius.
+Hidden/blacklisted contributors and hidden observer aliases are excluded from
+node-detail geometry; a failed visibility lookup abstains. Geometry is bounded
+to 20 contributors and handles local antimeridian crossings.
 
 This is a **relative** evidence rule, not an absolute freshness guarantee. Two
 similarly old links can still support an estimate; read the displayed dates.
 Neither an `estimated` status nor a pair of neighbors proves the node's current
 position.
 
-Clients connected to an older server can show a **Legacy estimate; evidence
-quality unavailable** fallback when coordinates exist but metadata does not.
-Known single-neighbor legacy estimates are withheld. The conservative display
+Clients connected to an older server show a **Legacy estimate; evidence
+quality unavailable** explanation, without plotting its centroid as a precise
+point or inventing an area. The conservative display
 rules above apply to node detail; other legacy approximate path proxies are not
 claimed to have the same evidence sufficiency.
 

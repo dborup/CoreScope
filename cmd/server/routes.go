@@ -2154,7 +2154,23 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	nodeLat, hasLat := node["lat"].(float64)
 	nodeLon, hasLon := node["lon"].(float64)
 	hasRealFix := hasLat && hasLon && validNeighborPosition(nodeLat, nodeLon)
-	estimate := s.db.neighborPositionEstimate(pubkey, EstimateMaxEdgeKm, time.Now()).Estimate
+	estimate := s.db.neighborPositionEstimate(pubkey, EstimateMaxEdgeKm, time.Now(), func(candidates []neighborPositionCandidate) ([]neighborPositionCandidate, error) {
+		keys := make([]string, len(candidates))
+		for i, c := range candidates {
+			keys[i] = c.Pubkey
+		}
+		names, err := s.hiddenIdentityNames(r.Context(), keys)
+		if err != nil {
+			return nil, err
+		}
+		visible := candidates[:0]
+		for _, c := range candidates {
+			if !identityHidden(s.cfg, c.Pubkey, names[strings.ToLower(c.Pubkey)]...) {
+				visible = append(visible, c)
+			}
+		}
+		return visible, nil
+	}).Estimate
 	node["neighbor_estimate"] = estimate
 	if estimate.Status == "estimated" {
 		lat, lon := *estimate.Lat, *estimate.Lon

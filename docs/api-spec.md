@@ -503,7 +503,11 @@ claimed-nodes lookups do not.
       "lon": number,                 // estimated only; otherwise omitted
       "oldest_seen": string (ISO),   // omitted if no valid contributor timestamps
       "newest_seen": string (ISO),
-      "unknown_freshness_count": number
+      "unknown_freshness_count": number,
+      "area": {                     // optional; contributor geometry, NOT target uncertainty
+        "kind": "polygon" | "line",
+        "vertices": [{"lat": number, "lon": number}] // at most 20; longitudes -180..180
+      }
     }
   },
   "recentAdverts": [Packet],  // last 20 packets for this node, newest ingest first;
@@ -535,6 +539,23 @@ calibrated positioning confidence. Only `estimated` supplies coordinates.
 `ambiguous` means a disjoint group has similar support; `unavailable` means
 there is no usable estimate. An abstention must not be plotted using stale
 legacy coordinates. Reported `node.lat` / `node.lon` remain unchanged.
+
+`area` is the convex hull of the selected visible contributors, or a line
+for two/collinear positions. Coincident positions provide no geometry. It is
+**not** a calibrated confidence region, coverage boundary, or a guarantee
+that the target lies inside: the node may be outside. Polygon edges use a
+local longitude unwrap across the antimeridian; consumers must do the same
+when plotting. Coordinates contain no contributor names or public keys.
+No geometry is returned on abstention or visibility lookup failure. Node
+detail excludes hidden/blacklisted identities (including observer aliases)
+before estimating, with one bounded bulk visibility lookup. Legacy path
+proxy consumers retain their previous filtering contract, so their centroids
+can differ under privacy exclusions. No RSSI or minimum observer count is
+required: this is neighbor evidence, not triangulation.
+
+The node UI plots only this geometry, not the compatibility centroid point;
+older API responses without geometry explain its absence rather than inventing
+an uncertainty radius. The real reported GPS pin remains unchanged.
 
 `candidate_count` is the valid positioned candidate pool (at most 20) after
 excluding candidates whose capped, age-adjusted weight is below 10% of the

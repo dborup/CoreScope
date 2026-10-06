@@ -2887,7 +2887,7 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	return e.Name, e.Lat, e.Lon, e.ContributorCount, e.SpreadKm, r.LegacyOK
 }
 
-func (db *DB) neighborPositionEstimate(pubkey string, maxEdgeKm float64, now time.Time) neighborPositionResult {
+func (db *DB) neighborPositionEstimate(pubkey string, maxEdgeKm float64, now time.Time, filter ...func([]neighborPositionCandidate) ([]neighborPositionCandidate, error)) neighborPositionResult {
 	unavailable := estimateNeighborPosition(nil, maxEdgeKm, now)
 	pk := strings.ToLower(strings.TrimSpace(pubkey))
 	if pk == "" {
@@ -2924,6 +2924,12 @@ func (db *DB) neighborPositionEstimate(pubkey string, maxEdgeKm float64, now tim
 	rows.Close()
 	if iterationErr != nil || len(candidates) == 0 {
 		return unavailable
+	}
+	if len(filter) > 0 && filter[0] != nil {
+		candidates, err = filter[0](candidates)
+		if err != nil || len(candidates) == 0 {
+			return unavailable
+		}
 	}
 
 	placeholders := make([]byte, 0, len(candidates)*2)

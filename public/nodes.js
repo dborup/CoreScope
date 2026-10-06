@@ -754,21 +754,53 @@
       details.push(distance.toFixed(1) + ' km from reported position (not an error bound)');
     }
     details.push('Neighbor-based approximation, not triangulation; accuracy is not field-validated.');
+    const area = typed && evidence.area;
+    let vertices = [];
+    if (area && ['polygon', 'line'].includes(area.kind) && Array.isArray(area.vertices) && area.vertices.length >= (area.kind === 'polygon' ? 3 : 2) && area.vertices.length <= 20) {
+      vertices = area.vertices.map(p => [number(p && p.lat), number(p && p.lon)]);
+      if (vertices.some(p => p[0] == null || p[1] == null || Math.abs(p[0]) > 90 || Math.abs(p[1]) > 180)) vertices = [];
+      if (vertices.length) {
+        const reference = vertices[0][1];
+        vertices = vertices.map(p => [p[0], reference + ((p[1] - reference + 540) % 360) - 180]);
+        const longitudes = vertices.map(p => p[1]);
+        if (Math.max(...longitudes) - Math.min(...longitudes) >= 180) vertices = [];
+        if (vertices.length) {
+          const unique = new Set(vertices.map(p => p.join(',')));
+          if (unique.size < (area.kind === 'polygon' ? 3 : 2)) vertices = [];
+          else if (area.kind === 'polygon') {
+            const twiceArea = vertices.reduce((sum, p, i) => { const q = vertices[(i + 1) % vertices.length]; return sum + p[1] * q[0] - q[1] * p[0]; }, 0);
+            if (Math.abs(twiceArea) < 1e-10) vertices = [];
+          }
+        }
+      }
+    }
+    const hasArea = vertices.length > 0;
+    details.unshift(hasArea ? (area.kind === 'line' ? 'Neighbor evidence line; no area can be inferred.' : 'Neighbor evidence area.') : 'Insufficient geometry to show a neighbor evidence area.');
+    details.push('The node may be outside this geometry; it is not a confidence region or radio-range boundary.');
     return {
-      visible: true, status: status, hasPosition: true, lat: lat, lon: lon,
-      html: '~' + lat.toFixed(2) + ', ~' + lon.toFixed(2) + '<br><span class="text-muted" style="font-size:11px">' + details.map(escapeHtml).join('<br>') + '</span>',
+      visible: true, status: status, hasPosition: hasArea, kind: hasArea ? area.kind : null, vertices: vertices,
+      html: '<span class="text-muted" style="font-size:11px">' + details.map(escapeHtml).join('<br>') + '</span>',
     };
   }
 
   function addNeighborEstimateMarker(map, n, estimate) {
-    // A fixed-size point symbol, deliberately not an uncertainty/range circle.
-    const popup = escapeHtml(n.name || n.public_key.slice(0, 12)) + '<br>Approximate area<br>' + estimate.html;
-    L.circleMarker([estimate.lat, estimate.lon], {
-      radius: 8, color: getComputedStyle(document.documentElement).getPropertyValue('--surface-0'),
-      weight: 2, fillColor: getComputedStyle(document.documentElement).getPropertyValue('--accent'),
-      fillOpacity: 0.5, dashArray: '5,4',
+    const popup = escapeHtml(n.name || n.public_key.slice(0, 12)) + '<br>Neighbor evidence geometry<br>' + estimate.html;
+    const shape = estimate.kind === 'polygon' ? L.polygon : L.polyline;
+    shape(estimate.vertices, {
+      color: getComputedStyle(document.documentElement).getPropertyValue('--accent'),
+      weight: 2, fillOpacity: 0.15, dashArray: '5,4',
     }).addTo(map).bindPopup(popup);
-    return [estimate.lat, estimate.lon];
+    return estimate.vertices;
+  }
+
+  function nodeMapReportedPosition(n, estimate) {
+    let lon = Number(n.lon);
+    if (estimate.hasPosition) {
+      const reference = estimate.vertices[0][1];
+      if (lon - reference > 180) lon -= 360;
+      else if (lon - reference < -180) lon += 360;
+    }
+    return [Number(n.lat), lon];
   }
 
   async function loadFullNode(pubkey) {
@@ -901,7 +933,7 @@
           <tr><td>Packets Today</td><td>${stats.packetsToday || 0}</td></tr>
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
-          ${estimate.visible ? `<tr class="neighbor-estimate"><td>${hasEstLoc ? 'Approximate area' : 'Neighbor estimate'}</td><td>${estimate.html}</td></tr>` : ''}
+          ${estimate.visible ? `<tr class="neighbor-estimate"><td>${hasEstLoc ? 'Neighbor evidence' : 'Neighbor estimate'}</td><td>${estimate.html}</td></tr>` : ''}
           <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ') + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>' : ''}</td></tr>
         </table>
 
@@ -955,24 +987,22 @@
 
         <div class="node-full-card skew-detail-section" id="node-clock-skew" style="display:none"></div>`;
 
-      // Map -- shows the real fix (solid pin), the neighbor estimate
-      // (dashed pin), or both at once (connected by a dashed line, fit to
-      // include both) so a node flagged by Suspicious GPS Positions can be
-      // visually cross-checked against its own claimed position.
+      // Reported GPS remains a pin. Neighbor evidence is a hull or line,
+      // never a precise target pin or an invented uncertainty radius.
       if (hasLoc || hasEstLoc) {
         try {
           detailMap = L.map('nodeFullMap', { zoomControl: true, attributionControl: false });
           _applyTilesToNodeMap(detailMap);
           var bounds = [];
           if (hasLoc) {
-            L.marker([n.lat, n.lon]).addTo(detailMap).bindPopup(escapeHtml(n.name || n.public_key.slice(0, 12)));
-            bounds.push([n.lat, n.lon]);
+            const reported = nodeMapReportedPosition(n, estimate);
+            L.marker(reported).addTo(detailMap).bindPopup(escapeHtml(n.name || n.public_key.slice(0, 12)));
+            bounds.push(reported);
           }
           if (hasEstLoc) {
-            bounds.push(addNeighborEstimateMarker(detailMap, n, estimate));
+            bounds.push(...addNeighborEstimateMarker(detailMap, n, estimate));
           }
-          if (hasLoc && hasEstLoc) {
-            L.polyline(bounds, { color: getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#888', weight: 2, dashArray: '4,4', opacity: 0.6 }).addTo(detailMap);
+          if (hasEstLoc) {
             detailMap.fitBounds(bounds, { padding: [30, 30] });
           } else {
             detailMap.setView(bounds[0], hasLoc ? 13 : 10);
@@ -1929,7 +1959,7 @@
             <dt>Packets Today</dt><dd>${stats.packetsToday || 0}</dd>
             ${stats.avgHops ? `<dt>Avg Hops</dt><dd>${stats.avgHops}</dd>` : ''}
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
-            ${estimate.visible ? `<dt>${hasEstLoc ? 'Approximate area' : 'Neighbor estimate'}</dt><dd class="neighbor-estimate">${estimate.html}</dd>` : ''}
+            ${estimate.visible ? `<dt>${hasEstLoc ? 'Neighbor evidence' : 'Neighbor estimate'}</dt><dd class="neighbor-estimate">${estimate.html}</dd>` : ''}
           </dl>
         </div>
 
@@ -1970,21 +2000,21 @@
       </div>`;
     bindNodeAdverts(document.getElementById('node-pane-adverts'));
 
-    // Init map -- same real+estimate side-by-side treatment as loadFullNode.
+    // Same reported-GPS pin plus neighbor evidence geometry as loadFullNode.
     if (hasLoc || hasEstLoc) {
       try {
         detailMap = L.map('nodeMap', { zoomControl: false, attributionControl: false });
         _applyTilesToNodeMap(detailMap);
         var panelBounds = [];
         if (hasLoc) {
-          L.marker([n.lat, n.lon]).addTo(detailMap).bindPopup(escapeHtml(n.name || n.public_key.slice(0, 12)));
-          panelBounds.push([n.lat, n.lon]);
+          const reported = nodeMapReportedPosition(n, estimate);
+          L.marker(reported).addTo(detailMap).bindPopup(escapeHtml(n.name || n.public_key.slice(0, 12)));
+          panelBounds.push(reported);
         }
         if (hasEstLoc) {
-          panelBounds.push(addNeighborEstimateMarker(detailMap, n, estimate));
+          panelBounds.push(...addNeighborEstimateMarker(detailMap, n, estimate));
         }
-        if (hasLoc && hasEstLoc) {
-          L.polyline(panelBounds, { color: getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#888', weight: 2, dashArray: '4,4', opacity: 0.6 }).addTo(detailMap);
+        if (hasEstLoc) {
           detailMap.fitBounds(panelBounds, { padding: [30, 30] });
         } else {
           detailMap.setView(panelBounds[0], hasLoc ? 13 : 10);

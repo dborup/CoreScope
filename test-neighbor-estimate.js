@@ -18,6 +18,7 @@ function node(estimate = {}) {
     contributor_count: 3, candidate_count: 5, spread_km: 4.1234,
     oldest_seen: '2026-01-01T10:00:00Z', newest_seen: '2026-01-03T10:00:00Z',
     unknown_freshness_count: 0, ...estimate,
+    area: estimate.area === undefined ? { kind: 'polygon', vertices: [{lat:55,lon:12},{lat:55.1,lon:12},{lat:55,lon:12.1}] } : estimate.area,
   } };
 }
 test('no data remains absent on old APIs', () => {
@@ -26,8 +27,8 @@ test('no data remains absent on old APIs', () => {
 test('supported estimate is approximate and explains the limits', () => {
   const result = view(node());
   assert.equal(result.hasPosition, true);
-  assert.equal(result.lat, 55.123456);
-  assert.match(result.html, /~55\.12, ~12\.65/);
+  assert.equal(result.kind, 'polygon');
+  assert.match(result.html, /Neighbor evidence area/);
   assert.doesNotMatch(result.html, /55\.12345/);
   assert.match(result.html, /3 of 5 candidate neighbors/);
   assert.match(result.html, /4\.1 km/);
@@ -39,7 +40,7 @@ test('supported estimate is approximate and explains the limits', () => {
 test('strings are converted at the boundary, including zero coordinates', () => {
   const result = view(node({ lat: '0', lon: '12.1', contributor_count: '2', candidate_count: '3', spread_km: '0' }));
   assert.equal(result.hasPosition, true);
-  assert.equal(result.lat, 0);
+  assert.equal(result.vertices.length, 3);
   assert.match(result.html, /2 of 3/);
   assert.match(result.html, /0\.0 km/);
 });
@@ -74,12 +75,25 @@ test('unknown freshness is explicit and dates describe link sightings', () => {
   assert.match(result.html, /Neighbor links last seen/);
   assert.match(result.html, /1 neighbor has unknown freshness/);
 });
-test('legacy coordinates work with an explicit evidence caveat', () => {
+test('legacy coordinates alone never make a precise-looking point', () => {
   const result = view({ estimated_lat: '55.1', estimated_lon: '12.2' });
-  assert.equal(result.hasPosition, true);
+  assert.equal(result.hasPosition, false);
   assert.match(result.html, /Legacy estimate/);
   assert.match(result.html, /evidence quality unavailable/);
   assert.doesNotMatch(result.html, /spread|last seen/i);
+});
+test('missing, oversized or invalid geometry abstains without inventing a point', () => {
+  for (const area of [null, {kind:'polygon',vertices:[{lat:55,lon:12}]}, {kind:'polygon',vertices:Array(21).fill({lat:55,lon:12})}, {kind:'line',vertices:[{lat:91,lon:12},{lat:55,lon:12}]}]) {
+    const result=view(node({area}));
+    assert.equal(result.hasPosition,false);
+    assert.doesNotMatch(result.html,/~55/);
+  }
+});
+test('dateline evidence is unwrapped locally rather than spanning Greenwich', () => {
+  const result=view(node({area:{kind:'line',vertices:[{lat:10,lon:179.9},{lat:10.1,lon:-179.9}]}}));
+  assert.equal(result.kind,'line');
+  assert.ok(Math.abs(result.vertices[1][1]-result.vertices[0][1])<1);
+  assert.match(result.html,/no area can be inferred/);
 });
 test('legacy single-neighbor and invalid coordinate estimates are withheld', () => {
   assert.equal(view({ estimated_lat: 55, estimated_lon: 12, estimated_contributor_count: 1 }).hasPosition, false);

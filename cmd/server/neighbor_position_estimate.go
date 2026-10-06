@@ -17,16 +17,93 @@ const neighborPositionMinimumRelativeWeight = 0.1
 // accuracy. SpreadKm is the maximum separation of contributing neighbors;
 // it is NOT an error radius. Persisted edges have no source/prefix confidence.
 type NeighborPositionEstimate struct {
-	Status                string   `json:"status"`
-	Method                string   `json:"method"`
-	ContributorCount      int      `json:"contributor_count"`
-	CandidateCount        int      `json:"candidate_count"`
-	SpreadKm              float64  `json:"spread_km"`
-	Lat                   *float64 `json:"lat,omitempty"`
-	Lon                   *float64 `json:"lon,omitempty"`
-	NewestSeen            string   `json:"newest_seen,omitempty"`
-	OldestSeen            string   `json:"oldest_seen,omitempty"`
-	UnknownFreshnessCount int      `json:"unknown_freshness_count"`
+	Status                string                `json:"status"`
+	Method                string                `json:"method"`
+	ContributorCount      int                   `json:"contributor_count"`
+	CandidateCount        int                   `json:"candidate_count"`
+	SpreadKm              float64               `json:"spread_km"`
+	Lat                   *float64              `json:"lat,omitempty"`
+	Lon                   *float64              `json:"lon,omitempty"`
+	NewestSeen            string                `json:"newest_seen,omitempty"`
+	OldestSeen            string                `json:"oldest_seen,omitempty"`
+	UnknownFreshnessCount int                   `json:"unknown_freshness_count"`
+	Area                  *NeighborEvidenceArea `json:"area,omitempty"`
+}
+
+// NeighborEvidenceArea is the contributor geometry, not a target confidence
+// region: the node may lie outside it. Vertices contain no identity metadata.
+type NeighborEvidenceArea struct {
+	Kind     string                   `json:"kind"`
+	Vertices []NeighborEvidenceVertex `json:"vertices"`
+}
+type NeighborEvidenceVertex struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
+func neighborEvidenceArea(points []NeighborEvidenceVertex) *NeighborEvidenceArea {
+	if len(points) < 2 || len(points) > neighborPositionCandidateLimit {
+		return nil
+	}
+	ref := points[0].Lon
+	ps := append([]NeighborEvidenceVertex(nil), points...)
+	for i := range ps {
+		if ps[i].Lon-ref > 180 {
+			ps[i].Lon -= 360
+		} else if ps[i].Lon-ref < -180 {
+			ps[i].Lon += 360
+		}
+	}
+	sort.Slice(ps, func(i, j int) bool {
+		if ps[i].Lon != ps[j].Lon {
+			return ps[i].Lon < ps[j].Lon
+		}
+		return ps[i].Lat < ps[j].Lat
+	})
+	// Do not invent a global polygon when local longitude unwrapping is ambiguous.
+	if ps[len(ps)-1].Lon-ps[0].Lon >= 180 {
+		return nil
+	}
+	unique := ps[:0]
+	for _, p := range ps {
+		if len(unique) == 0 || p != unique[len(unique)-1] {
+			unique = append(unique, p)
+		}
+	}
+	if len(unique) < 2 {
+		return nil
+	}
+	cross := func(a, b, c NeighborEvidenceVertex) float64 {
+		return (b.Lon-a.Lon)*(c.Lat-a.Lat) - (b.Lat-a.Lat)*(c.Lon-a.Lon)
+	}
+	hull := make([]NeighborEvidenceVertex, 0, len(unique)*2)
+	for _, p := range unique {
+		for len(hull) >= 2 && cross(hull[len(hull)-2], hull[len(hull)-1], p) <= 1e-12 {
+			hull = hull[:len(hull)-1]
+		}
+		hull = append(hull, p)
+	}
+	lower := len(hull)
+	for i := len(unique) - 2; i >= 0; i-- {
+		p := unique[i]
+		for len(hull) > lower && cross(hull[len(hull)-2], hull[len(hull)-1], p) <= 1e-12 {
+			hull = hull[:len(hull)-1]
+		}
+		hull = append(hull, p)
+	}
+	hull = hull[:len(hull)-1]
+	kind := "polygon"
+	if len(hull) == 2 {
+		kind = "line"
+	}
+	for i := range hull {
+		if hull[i].Lon > 180 {
+			hull[i].Lon -= 360
+		} else if hull[i].Lon < -180 {
+			hull[i].Lon += 360
+		}
+	}
+	return &NeighborEvidenceArea{Kind: kind, Vertices: hull}
 }
 
 type neighborPositionCandidate struct {
@@ -161,6 +238,7 @@ func estimateNeighborPosition(input []neighborPositionCandidate, maxEdgeKm float
 	var latSum, lonSum, totalWeight, spread float64
 	var newest, oldest time.Time
 	name := ""
+	var areaPoints []NeighborEvidenceVertex
 	// Unwrap longitudes around a selected contributor to avoid averaging
 	// +179.9 and -179.9 into Greenwich. This remains a heuristic centroid.
 	referenceLon := candidates[best].Lon
@@ -171,6 +249,7 @@ func estimateNeighborPosition(input []neighborPositionCandidate, maxEdgeKm float
 		if name == "" {
 			name = c.Name
 		}
+		areaPoints = append(areaPoints, NeighborEvidenceVertex{Lat: c.Lat, Lon: c.Lon})
 		latSum += c.Lat * weights[i]
 		delta := math.Mod(c.Lon-referenceLon+540, 360) - 180
 		lonSum += (referenceLon + delta) * weights[i]
@@ -213,5 +292,6 @@ func estimateNeighborPosition(input []neighborPositionCandidate, maxEdgeKm float
 	}
 	r.Estimate.Status = "estimated"
 	r.Estimate.Lat, r.Estimate.Lon = &lat, &lon
+	r.Estimate.Area = neighborEvidenceArea(areaPoints)
 	return r
 }

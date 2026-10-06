@@ -218,6 +218,7 @@ type openAPISchema struct {
 	Enum        []string                  `json:"enum,omitempty"`
 	Nullable    bool                      `json:"nullable,omitempty"`
 	Minimum     *int                      `json:"minimum,omitempty"`
+	MaxItems    *int                      `json:"maxItems,omitempty"`
 	Items       *openAPISchema            `json:"items,omitempty"`
 	Properties  map[string]*openAPISchema `json:"properties,omitempty"`
 }
@@ -227,6 +228,7 @@ func openAPIRef(name string) *openAPISchema {
 }
 
 func neighborPositionEstimateSchema() *openAPISchema {
+	maxVertices := neighborPositionCandidateLimit
 	return &openAPISchema{
 		Type:        "object",
 		Description: "Node-detail evidence status from a bounded neighbor-cluster heuristic, not triangulation or a calibrated confidence probability. Positions are emitted only for an unambiguous group with at least two contributors. Initial parameters: 30 km seed radius, count capped at 20 with logarithmic weight in [1,2], seven-day age half-life, unknown freshness weight 0.25, minimum effective weight 10% of the strongest candidate, competing disjoint group support ratio 0.8. The relative weight floor is not an absolute freshness guarantee. Candidate selection still uses the top 20 lifetime edge counts before position filtering. Persisted edges have no source-independence or prefix-confidence metadata.",
@@ -241,6 +243,10 @@ func neighborPositionEstimateSchema() *openAPISchema {
 			"newest_seen":             {Type: "string", Description: "Newest known contributor edge timestamp, RFC3339 UTC; omitted when all timestamps are unknown."},
 			"oldest_seen":             {Type: "string", Description: "Oldest known contributor edge timestamp, RFC3339 UTC; omitted when all timestamps are unknown."},
 			"unknown_freshness_count": {Type: "integer", Description: "Selected contributors whose edge timestamp is absent, invalid, or more than five minutes in the future."},
+			"area": {Type: "object", Description: "Optional hull/line of visible supported neighbors, not a target confidence region: the node may lie outside. Absent on insufficient geometry or visibility lookup failure. Local antimeridian unwrap required when plotting.", Properties: map[string]*openAPISchema{
+				"kind":     {Type: "string", Enum: []string{"polygon", "line"}},
+				"vertices": {Type: "array", MaxItems: &maxVertices, Description: "At most 20 vertices, coordinates only; longitude -180..180. A polygon needs at least three non-collinear positions; a line needs two distinct positions.", Items: &openAPISchema{Type: "object", Properties: map[string]*openAPISchema{"lat": {Type: "number"}, "lon": {Type: "number"}}}},
+			}},
 		},
 	}
 }
