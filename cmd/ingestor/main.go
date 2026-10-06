@@ -490,7 +490,12 @@ func main() {
 // channelDaysNoEffect returns the startup warning for a retention.channelDays
 // that is set but changes nothing (#296), or "" when it applies or is unset.
 func channelDaysNoEffect(packetDays, channelDays int) string {
-	if packetDays > 0 && channelDays > 0 && channelDays <= packetDays {
+	switch {
+	case channelDays <= 0:
+		return ""
+	case packetDays <= 0:
+		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: packetDays is 0, so no transmissions are pruned", channelDays)
+	case channelDays <= packetDays:
 		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: it is not longer than packetDays=%d", channelDays, packetDays)
 	}
 	return ""
