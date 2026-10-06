@@ -149,7 +149,7 @@ func TestOpenAPISpecHasNoPostPackets(t *testing.T) {
 // not the SPA page. See api_fallback_test.go for the general-purpose
 // coverage; this test keeps the #223/#231 read-only-DB angle (nothing
 // written) on this specific endpoint.
-func TestPostPacketsRemovedFallsThroughToSPAInProductionRouter(t *testing.T) {
+func TestPostPacketsRemovedReturns405NotSPAInProductionRouter(t *testing.T) {
 	dbPath, router := readOnlyPacketServer(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0o644); err != nil {
