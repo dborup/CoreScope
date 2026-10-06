@@ -234,11 +234,16 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 }
 
 func hm215Migrate(s *PacketStore, batch int) string {
+	return hm215CaptureLog(func() { migrateContentHashesAsync(s, batch, 0) })
+}
+
+// hm215CaptureLog returns what the standard logger printed while fn ran.
+func hm215CaptureLog(fn func()) string {
 	var buf bytes.Buffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
-	migrateContentHashesAsync(s, batch, 0)
+	fn()
 	return buf.String()
 }
 
