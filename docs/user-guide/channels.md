@@ -92,6 +92,10 @@ Letter case matters: `#HelloWorld` and `#helloworld` are different channels with
 
 A removed channel shows up under the **Revoked** tab. Suggesting the same name again later starts a fresh review from **Pending** — it is never auto-approved just because it was approved before. The channel stays out of the list while that suggestion is pending and if you reject it; only **Approve** lists it again, with its history. The analytics page still counts messages of removed channels (counts only, no text), and a removed channel's history stays readable by its name.
 
+The hidden set is the same for every region, and another open tab keeps the set it last loaded until its list reloads — also after you approve a channel again, so live messages do not bring its row back in that tab until then.
+
+Because the rule is "not approved" rather than "was approved before", a pending suggestion can also take out a channel you never reviewed: one whose messages were decrypted through a `channelKeys`/`hashChannels` entry you have since removed from `config.json`. Such a channel is listed until someone suggests its name. Nothing is deleted, its history stays readable, a name your configuration still decrypts is never hidden, and you see the suggestion under **Pending** — approving it lists the channel again.
+
 The local **Add Channel** tools (PSK channels, **Monitor Hashtag Channel**) are unchanged and still only affect your browser.
 
 ## Region filter

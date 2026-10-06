@@ -204,8 +204,7 @@ function makeHarness(opts) {
   // live PSK decrypt and the unread bump), called without the debounce.
   ctx.debouncedOnWS = (fn) => { h.wsHandler = fn; return fn; };
   ctx.debounce = (fn) => fn;
-  ctx.invalidateApiCache = () => {};
-  ctx.api = (p) => {
+  const fetchApi = (p) => {
     if (p.indexOf('/channels') === 0 && p.indexOf('/messages') === -1) {
       h.channelRequests.push(p);
       return h.respondChannels(p);
@@ -217,6 +216,38 @@ function makeHarness(opts) {
     if (p.indexOf('/observers') === 0) return Promise.resolve({ observers: [] });
     return Promise.resolve({ messages: [], packets: [], channels: [] });
   };
+  // #276: opts.apiTtlCache gives the harness the per-path TTL cache the real
+  // api() has (public/app.js), including bust and the prefix-wide
+  // invalidateApiCache(). Without it a page that forgets to invalidate the
+  // cache looks correct here, because every call reaches the responder; the
+  // browser would serve a stale list for up to CLIENT_TTL.channels.
+  const apiCache = new Map();
+  h.apiCacheKeys = () => Array.from(apiCache.keys());
+  h.apiCacheHits = 0;
+  if (opts.apiTtlCache) {
+    ctx.invalidateApiCache = (prefix) => {
+      for (const key of Array.from(apiCache.keys())) {
+        if (key.startsWith(prefix || '')) apiCache.delete(key);
+      }
+    };
+    ctx.api = async (p, o) => {
+      const ttl = (o && o.ttl) || 0;
+      const bust = !!(o && o.bust);
+      if (!bust && ttl > 0) {
+        const cached = apiCache.get(p);
+        if (cached && RealDate.now() < cached.expires) {
+          h.apiCacheHits++;
+          return cached.data;
+        }
+      }
+      const data = await fetchApi(p, o);
+      if (ttl > 0) apiCache.set(p, { data, expires: RealDate.now() + ttl });
+      return data;
+    };
+  } else {
+    ctx.invalidateApiCache = () => {};
+    ctx.api = fetchApi;
+  }
   ctx.CLIENT_TTL = { channels: 15000, observers: 120000, channelMessages: 10000, nodeDetail: 10000 };
   ctx.escapeHtml = (s) => String(s == null ? '' : s);
   ctx.truncate = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n) : s; };
@@ -345,6 +376,11 @@ function makeDecryptSandbox(opts) {
 // serialises to roughly that many characters.
 function bigMessages(chars, tag) {
   return [{ sender: 'S', text: tag + ':' + 'x'.repeat(chars), timestamp: '2026-01-01T00:00:00Z', packetHash: 'h-' + tag }];
+}
+
+// The /channels entries of the harness TTL cache (#276), in insertion order.
+function channelCacheKeys(h) {
+  return h.apiCacheKeys().filter((k) => k.indexOf('/channels') === 0);
 }
 
 function serverChannel(hash, extra) {
@@ -563,6 +599,56 @@ async function test(name, fn) {
     await flush();
     assert.strictEqual(h.channelRequests.length, before + 1, 'revoke must refetch the channel list exactly once');
     assert.strictEqual(h.row('#helloworld'), undefined, 'the revoked channel must be gone');
+  });
+
+  // #276 (4): refreshChannelList() must drop the whole /channels prefix from
+  // the client cache, not only bust the one request it makes. Both the
+  // revoke (#251) and the approval (#232) path go through it, and the cached
+  // entry for every other region / encrypted variant of /channels — and for
+  // /channels/<hash>/messages — would otherwise keep answering from the 15 s
+  // TTL. Needs the harness TTL cache (apiTtlCache): without it every call
+  // reaches the responder and a missing invalidateApiCache('/channels') is
+  // invisible.
+  await test('#276: after a revoke, a region switch back must not serve the pre-revoke list from the client cache (#251)', async () => {
+    const h = makeHarness({ apiTtlCache: true });
+    const withChannel = { channels: [serverChannel('public'), serverChannel('#helloworld')], approvedChannels: [{ hash: '#helloworld', name: '#helloworld' }] };
+    h.respondChannels = () => Promise.resolve(withChannel);
+    await h.init();
+    assert.ok(h.row('#helloworld'), 'precondition: listed in the all-regions view');
+    // A second /channels variant gets its own cache entry.
+    h.regionParam = 'CPH';
+    h.regionChange();
+    await flush();
+    assert.deepStrictEqual(channelCacheKeys(h), ['/channels', '/channels?region=CPH'], 'both /channels variants are cached');
+    // The admin revoke in this tab.
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')], hiddenChannels: ['#helloworld'] });
+    h.revokedCallback('#helloworld');
+    await flush();
+    assert.strictEqual(h.row('#helloworld'), undefined, 'precondition: gone right after the revoke');
+    // Back to all regions, within the 15 s TTL and without a bust.
+    h.regionParam = '';
+    h.regionChange();
+    await flush();
+    assert.strictEqual(h.row('#helloworld'), undefined, 'a revoked channel must not come back from the client cache on a region switch');
+    assert.ok(!channelCacheKeys(h).includes('/channels') || h.apiCacheHits === 0, 'the pre-revoke /channels entry must not be served (cache hits: ' + h.apiCacheHits + ')');
+  });
+
+  await test('#276: after an approval, a region switch back must not serve the pre-approval list from the client cache (#232)', async () => {
+    const h = makeHarness({ apiTtlCache: true });
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public')] });
+    await h.init();
+    h.regionParam = 'CPH';
+    h.regionChange();
+    await flush();
+    assert.deepStrictEqual(channelCacheKeys(h), ['/channels', '/channels?region=CPH'], 'both /channels variants are cached');
+    h.respondChannels = () => Promise.resolve({ channels: [serverChannel('public'), serverChannel('#helloworld')], approvedChannels: [{ hash: '#helloworld', name: '#helloworld' }] });
+    h.approvedCallback('#helloworld');
+    await flush();
+    assert.ok(h.row('#helloworld'), 'precondition: listed right after the approval');
+    h.regionParam = '';
+    h.regionChange();
+    await flush();
+    assert.ok(h.row('#helloworld'), 'an approved channel must still be listed after a region switch, not hidden again by the client cache');
   });
 
   // #232: with auto-approve on, the suggest poller sees `approved` and must
