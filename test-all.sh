@@ -60,6 +60,7 @@ run test-url-state.js
 run test-node-adverts.js
 run test-issue-254-affinity-debug-toggle.js
 run test-issue-258-column-widths.js
+run test-issue-259-nodes-esc-listener.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js

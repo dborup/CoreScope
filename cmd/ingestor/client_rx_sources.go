@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -91,24 +92,29 @@ func (c *Config) warnClientRxSourceDrop(tag, name string, now time.Time) {
 // checkClientRxSources reports, once at startup, every clientRxCoverage.sources
 // entry that matches no configured mqttSources[].name — an allowlist of names
 // that can never match would silently drop all coverage. It also logs the
-// effective restriction so the gate is visible in the boot log. Returns the
+// effective restriction so the gate is visible in the boot log, and warns when
+// one entry matches more than one configured source (#278). Returns the
 // unknown names (nil when there is no allowlist or every name matches).
 func checkClientRxSources(cfg *Config, sources []MQTTSource) []string {
 	allow := cfg.ClientRxCoverageSources()
 	if len(allow) == 0 {
 		return nil
 	}
-	var unknown []string
+	var unknown, ambiguous []string
 	for _, want := range allow {
-		found := false
+		var matched []string
 		for _, src := range sources {
 			if strings.EqualFold(strings.TrimSpace(src.Name), want) {
-				found = true
-				break
+				matched = append(matched, fmt.Sprintf("%q", src.Name))
 			}
 		}
-		if !found {
+		switch {
+		case len(matched) == 0:
 			unknown = append(unknown, want)
+		case len(matched) > 1:
+			// mqttSources[].name is not required to be unique and matching is
+			// case-insensitive, so one entry can admit several brokers (#278).
+			ambiguous = append(ambiguous, fmt.Sprintf("%s matches %d sources (%s)", want, len(matched), strings.Join(matched, ", ")))
 		}
 	}
 	state := ""
@@ -121,6 +127,10 @@ func checkClientRxSources(cfg *Config, sources []MQTTSource) []string {
 	if len(unknown) > 0 {
 		log.Printf("[client-rx] WARNING: %d clientRxCoverage.sources name(s) match no configured mqttSources[].name: %s — coverage will never be accepted for those names; check the spelling",
 			len(unknown), strings.Join(unknown, ", "))
+	}
+	if len(ambiguous) > 0 {
+		log.Printf("[client-rx] WARNING: clientRxCoverage.sources name(s) match more than one configured mqttSources[].name (case-insensitive): %s — coverage is accepted from every one of them; give each source a unique name",
+			strings.Join(ambiguous, "; "))
 	}
 	return unknown
 }

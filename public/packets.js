@@ -2428,6 +2428,18 @@
     return !!(window.MobilePageActions && window.MobilePageActions.isMobile());
   }
 
+  // #259: a group expanded on desktop used to keep its child rows after the
+  // layout crossed to the mobile mode, where the expand column is hidden and
+  // the row only selects — nothing was left to collapse it with (the dead end
+  // upstream #1461 #7 describes). The hash stays in expandedHashes, so the
+  // children come back on desktop and a phone rotation does not throw the
+  // state away; it is only the rendered slice that leaves them out. This also
+  // covers the first render at a narrow width, e.g. the #866 deep link
+  // #/packets/<hash>/<obs>, which expands the hash before any render.
+  function groupIsExpandedInView(hash) {
+    return expandedHashes.has(hash) && !groupRowSelectsOnActivate();
+  }
+
   // A group row's action and aria-expanded depend on that breakpoint, so a
   // resize that crosses it (e.g. a phone rotating) re-renders the visible rows.
   let _groupRowsSelect = false;
@@ -2439,6 +2451,9 @@
       if (selects === _groupRowsSelect) return;
       _groupRowsSelect = selects;
       if (!_displayGrouped) return;
+      // #259: crossing the breakpoint changes how many DOM rows an expanded
+      // group produces, so the cached per-entry counts are stale.
+      _invalidateRowCounts();
       _lastVisibleStart = -1;
       _lastVisibleEnd = -1;
       renderVisibleRows();
@@ -2447,7 +2462,7 @@
 
   // Build HTML for a single grouped packet row
   function buildGroupRowHtml(p, entryIdx = -1) {
-    const isExpanded = expandedHashes.has(p.hash);
+    const isExpanded = groupIsExpandedInView(p.hash);
     let headerObserverId = p.observer_id;
     let headerPathJson = p.path_json;
     if (_observerFilterSet && p._children?.length) {
@@ -2593,7 +2608,7 @@
   // Used by both row counting and renderVisibleRows to avoid divergence (#424).
   function _getRowCount(p) {
     if (!_displayGrouped) return 1;
-    if (!expandedHashes.has(p.hash) || !p._children) return 1;
+    if (!groupIsExpandedInView(p.hash) || !p._children) return 1;
     let childCount = p._children.length;
     if (_observerFilterSet) {
       childCount = p._children.filter(c => _observerFilterSet.has(String(c.observer_id))).length;
@@ -4373,6 +4388,12 @@
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },
       _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
+      // #259: at <= 600 px groupIsExpandedInView() renders a hash that *is* in
+      // expandedHashes exactly like a collapsed row, so the DOM alone can no
+      // longer tell "did not expand" from "expanded invisibly". The mobile E2E
+      // assertions read the set itself through this.
+      _isExpanded: function(hash) { return expandedHashes.has(hash); },
+      _setDisplayGrouped: function(on) { _displayGrouped = !!on; },
     };
   }
 

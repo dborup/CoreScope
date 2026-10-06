@@ -636,6 +636,15 @@ The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
   heard twice in a row (a distant node heard every second or third time),
   it is no candidate, and a multiple of it is reported: a 47 h flood heard
   94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
+- **Known trade-off: false change.** The raised-interval rule can read an
+  unchanged interval as raised. When the newest 3 heard gaps are all the
+  same multiple k (every 2nd or 3rd advert lost), the result is k× at
+  medium confidence on 4 adverts: 60 min reads as 120 min, 47 h as 94 h,
+  and 120 min with 3× gaps as 360 min. Gaps that fit no multiple (an
+  outage over 4×, a reboot advert between the 2× gaps) do not break the
+  run. The next gap heard at the interval itself does, and the estimate
+  returns to the interval. The opposite choice kept a raised interval at the
+  old value, at high confidence, for weeks (review F1 on #247).
 - **No zero-hop adverts.** A zero-hop advert is only recorded when an
   observer hears the node directly. "None observed" can therefore mean that
   the interval is 0 (off), or that no observer is in direct range.
@@ -1363,7 +1372,13 @@ returns the history of a hidden channel.
 
 `hiddenChannels` (`string[]`, omitted when empty) names the channels that were
 left out this way. The Channels page uses it so a live WebSocket packet for a
-stored message does not create the list row again.
+stored message does not create the list row again. It only names channels that
+have stored messages, so an unreviewed suggestion is never published here.
+
+`hiddenChannels` is global and not filtered by `region`: a region request
+returns the same set, and another open tab keeps the set it last loaded —
+including after a re-approval, where live messages do not re-create the row in
+that tab until its list reloads.
 
 The decision is read once per 10 s snapshot (the one behind `approvedChannels`,
 dropped early when an approve or revoke result is read), per channel that has
@@ -1375,6 +1390,18 @@ messages are still stored then appears again.
 `GET /api/analytics/channels` is not filtered: it still lists revoked channels
 with their message and sender counts (no message text). Hiding is a list-level
 measure, not a confidentiality control: the history stays readable by name.
+
+**Known limit: a suggestion can hide a name no administrator acted on.** The
+rule is "not approved", not "was approved before", so a channel whose stored
+messages were decrypted through the config, and whose name the ingestor no
+longer decrypts (removed from `hashChannels`/`channelKeys`, or past the
+4096-name cap of `builtin-channels.json`), is left out of the list while a
+suggestion for that name is pending. Distinguishing the two would need a
+history marker that survives a re-suggestion — `reviewed_at` is reset when a
+revoked proposal is suggested again, which is what makes a resubmission
+idempotent — so the trade-off is kept: it is list-level only, the history stays
+readable, a name the ingestor still decrypts is never hidden, the suggestion is
+in the administrator's pending queue, and approving it lists the channel again.
 
 ---
 

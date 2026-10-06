@@ -526,3 +526,190 @@ func BenchmarkHideRevoked(b *testing.B) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// #276: follow-ups to the round-2 review of #257.
+// ---------------------------------------------------------------------------
+
+// addChannelTrafficAt stores one decoded message on a channel with an
+// explicit timestamp, so the order GetChannels returns (last_activity DESC)
+// is deterministic and a test can place a channel in the middle of the list.
+func (ps *proposalServer) addChannelTrafficAt(name, firstSeen string) {
+	ps.t.Helper()
+	hash := fmt.Sprintf("%x", name) // unique per name
+	if _, err := ps.srv.db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('EEFF', ?, ?, 1, 5, ?, ?)`,
+		hash, firstSeen, `{"type":"CHAN","channel":"`+name+`","text":"alice: hello","sender":"alice"}`, name); err != nil {
+		ps.t.Fatal(err)
+	}
+	ps.srv.db.channelsCache.reset()
+}
+
+// hiddenNamesFromList returns the hiddenChannels field of GET /api/channels.
+func (ps *proposalServer) hiddenNamesFromList(query string) []string {
+	ps.t.Helper()
+	w := ps.do("GET", "/api/channels"+query, "", "")
+	if w.Code != 200 {
+		ps.t.Fatalf("GET /api/channels%s = %d: %s", query, w.Code, w.Body)
+	}
+	return decode[ChannelListResponse](ps.t, w).HiddenChannels
+}
+
+// cachedChannelNames returns the names in GetChannels' cached slice, in order.
+func (ps *proposalServer) cachedChannelNames() []string {
+	ps.t.Helper()
+	cached, err := ps.srv.db.GetChannels("")
+	if err != nil {
+		ps.t.Fatal(err)
+	}
+	names := make([]string, len(cached))
+	for i, ch := range cached {
+		names[i] = fmt.Sprint(ch["name"])
+	}
+	return names
+}
+
+// #276 (3), privacy-relevant: hiddenChannels is on the public GET
+// /api/channels, while proposals themselves are only visible through the
+// authenticated admin route. The EXISTS (… transmissions …) clause is what
+// keeps a proposal that has no stored traffic out of the field: without it
+// every pending suggestion — a name anyone can submit — would be published
+// there. Nothing in the list changes either way, so only this assertion
+// catches it (mutant G1: the EXISTS clause dropped).
+func TestHiddenChannelsNeverNamesAProposalWithoutTraffic(t *testing.T) {
+	ps := newRevokeFixture(t)
+	// One real hidden channel, so hiddenChannels is populated at all.
+	ps.addChannelTraffic("#helloworld")
+	ps.insert("aaaaaaaaaaaaaaaa", "#helloworld", channelregistry.StatusRevoked)
+	// Proposals without stored traffic, in every not-approved status. The
+	// pending one is the privacy case: an unreviewed suggestion.
+	ps.insert("bbbbbbbbbbbbbbbb", "#pendingsecret", channelregistry.StatusPending)
+	ps.insert("cccccccccccccccc", "#rejectedsecret", channelregistry.StatusRejected)
+	ps.insert("dddddddddddddddd", "#revokednotraffic", channelregistry.StatusRevoked)
+	ps.expireApproved()
+
+	got := ps.hiddenNamesFromList("")
+	if !reflect.DeepEqual(got, []string{"#helloworld"}) {
+		t.Fatalf("hiddenChannels = %v, want only the channel that has stored traffic ([#helloworld])", got)
+	}
+	for _, name := range []string{"#pendingsecret", "#rejectedsecret", "#revokednotraffic"} {
+		if containsName(got, name) {
+			t.Fatalf("%s has no stored traffic and must never be published in hiddenChannels: %v", name, got)
+		}
+	}
+	// Same on ?includeEncrypted=true, the other path into hideRevoked.
+	if got := ps.hiddenNamesFromList("?includeEncrypted=true"); !reflect.DeepEqual(got, []string{"#helloworld"}) {
+		t.Fatalf("hiddenChannels with includeEncrypted = %v", got)
+	}
+	// The names were never listed either, so hiding them would be pointless
+	// as well as public.
+	if listed := ps.listedNames(""); containsName(listed, "#pendingsecret") {
+		t.Fatalf("precondition: a proposal without traffic is not in the list anyway: %v", listed)
+	}
+}
+
+// #276 (2): on the default request (no includeEncrypted) hideRevoked receives
+// GetChannels' cached slice itself — handleChannels only copies on the
+// includeEncrypted path, which is the only path
+// TestRevokedFilterDoesNotMutateCacheAndKeepsEncrypted covers. Compacting in
+// place there corrupts the shared cache for every later request (mutant G2:
+// `out := resp.Channels`).
+func TestPlainChannelListRequestDoesNotMutateTheCachedSlice(t *testing.T) {
+	ps := newRevokeFixture(t)
+	// Distinct timestamps: GetChannels orders by last_activity DESC, so the
+	// hidden channel sits in the middle and compacting in place would shift
+	// the channels after it over it.
+	ps.addChannelTrafficAt("#zulu", "2024-03-03T00:00:00Z")
+	ps.addChannelTrafficAt("#helloworld", "2024-02-02T00:00:00Z")
+	ps.addChannelTrafficAt("#alpha", "2024-01-01T00:00:00Z")
+	ps.insert("aaaaaaaaaaaaaaaa", "#helloworld", channelregistry.StatusRevoked)
+	ps.expireApproved()
+
+	before := ps.cachedChannelNames()
+	idx := -1
+	for i, n := range before {
+		if n == "#helloworld" {
+			idx = i
+		}
+	}
+	if idx < 0 || idx >= len(before)-1 {
+		t.Fatalf("precondition: the hidden channel must sit before the last cached entry so an in-place compaction is detectable, cache = %v", before)
+	}
+
+	for i := 0; i < 3; i++ {
+		got := ps.listedNames("")
+		if containsName(got, "#helloworld") {
+			t.Fatalf("request %d: revoked channel listed: %v", i, got)
+		}
+		if !containsName(got, "#zulu") || !containsName(got, "#alpha") {
+			t.Fatalf("request %d: the other channels must stay listed: %v", i, got)
+		}
+	}
+
+	after := ps.cachedChannelNames()
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("the plain request altered GetChannels' cached slice:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// #276 (1) / round-2 finding 1, semantics pinned deliberately: a name with
+// stored traffic that the ingestor no longer decrypts through its config (an
+// operator removed it from hashChannels/channelKeys, or it is past the
+// 4096-name cap of builtin-channels.json) is hidden by an anonymous pending
+// suggestion, before any administrator acted on it.
+//
+// This is kept, not fixed, and the trade-off is documented in
+// docs/api-spec.md and docs/user-guide/channels.md. "Hide only names that
+// were ever approved" needs a marker that survives a re-suggestion, and the
+// obvious candidate does not exist: submitChannelProposal resurrects a
+// revoked row with `reviewed_at = NULL` (that reset is what makes a
+// resubmission idempotent), so a reviewed_at rule cannot tell a fresh
+// suggestion from a re-suggestion after a revoke — it would re-open the hole
+// #257 round 2 closed, where anyone could unhide a revoked channel by
+// suggesting the name again. A new history column is an ingestor-side schema
+// change, out of scope here, and cmd/server stays read-only.
+//
+// What bounds the trade-off: the effect is list-level only (the history stays
+// readable), it needs stored traffic for that exact name, a name the ingestor
+// still decrypts through its config is never hidden, the administrator sees
+// the suggestion in the pending queue, and one Approve lists the channel
+// again.
+func TestAnonymousPendingSuggestionHidesAHistoricalConfigChannel(t *testing.T) {
+	ps := newRevokeFixture(t) // the ingestor publishes #chat as a config name
+	ps.addChannelTraffic("#oldcfg")
+	ps.addChannelTraffic("#chat")
+	ps.expireApproved()
+	if got := ps.listedNames(""); !containsName(got, "#oldcfg") || !containsName(got, "#chat") {
+		t.Fatalf("precondition: both channels are listed without any proposal: %v", got)
+	}
+
+	// An anonymous suggestion the administrator has not reviewed: this is the
+	// row submitChannelProposal inserts for an unknown name with
+	// autoApprove off.
+	ps.insert("aaaaaaaaaaaaaaaa", "#oldcfg", channelregistry.StatusPending)
+	// The same for a name the ingestor still decrypts through its config.
+	ps.insert("bbbbbbbbbbbbbbbb", "#chat", channelregistry.StatusPending)
+	ps.expireApproved()
+
+	got := ps.listedNames("")
+	if containsName(got, "#oldcfg") {
+		t.Fatalf("documented trade-off: a pending suggestion hides a name the ingestor no longer decrypts: %v", got)
+	}
+	if !containsName(got, "#chat") {
+		t.Fatalf("a config-decrypted name must never be hidden, whatever its proposal says: %v", got)
+	}
+	if hidden := ps.hiddenNamesFromList(""); !reflect.DeepEqual(hidden, []string{"#oldcfg"}) {
+		t.Fatalf("hiddenChannels = %v, want [#oldcfg]", hidden)
+	}
+	// The history is untouched and still readable by name.
+	w := ps.do("GET", "/api/channels/%23oldcfg/messages", "", "")
+	if w.Code != 200 || decode[ChannelMessagesResponse](t, w).Total != 1 {
+		t.Fatalf("the history of a hidden channel must stay readable: %d %s", w.Code, w.Body)
+	}
+	// One administrator action undoes it.
+	ps.setStatus("aaaaaaaaaaaaaaaa", channelregistry.StatusApproved)
+	ps.expireApproved()
+	if got := ps.listedNames(""); !containsName(got, "#oldcfg") {
+		t.Fatalf("approving the suggestion must list the channel again: %v", got)
+	}
+}

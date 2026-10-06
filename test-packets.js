@@ -1330,6 +1330,101 @@ console.log('\n=== packets.js: group row action and aria-expanded by viewport (#
   });
 }
 
+// #259 (1): a group expanded on desktop must not leave visible child rows behind
+// when the layout flips to the mobile mode, where the expand column is hidden
+// and the row only selects — there would be no way to collapse it again. The
+// hash stays in expandedHashes, so the children come back on desktop; the
+// rendered row is the collapsed one while the mobile mode is active.
+console.log('\n=== packets.js: an expanded group across the mobile breakpoint (#259) ===');
+{
+  const ctx = loadPacketsSandbox();
+  loadInCtx(ctx, 'public/mobile-page-actions.js');
+  const api = ctx._packetsTestAPI;
+  const mkChild = (id, obs) => ({
+    id, observer_id: obs, hash: 'grp259', raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]', timestamp: '2024-01-01T00:00:00Z'
+  });
+  const group = {
+    hash: 'grp259', count: 3, latest: '2024-01-01T00:00:00Z',
+    observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]',
+    observation_count: 3, observer_count: 3,
+    _children: [mkChild(1, '1'), mkChild(2, '2'), mkChild(3, '3')]
+  };
+  const header = (html) => /<tr [^>]*>/.exec(html)[0];
+  const rowClass = (html) => (/<tr class="([^"]*)"/.exec(header(html)) || [, ''])[1];
+  const childRows = (html) => (html.match(/<tr class="group-child"/g) || []).length;
+  const atWidth = (w, fn) => {
+    const prev = ctx.window.innerWidth;
+    ctx.window.innerWidth = w;
+    try { return fn(); } finally { ctx.window.innerWidth = prev; }
+  };
+
+  // _getRowCount only counts children in grouped mode; the hook lets the
+  // sandbox say so. Guarded so this file still runs against a tree without it.
+  if (typeof api._setDisplayGrouped === 'function') api._setDisplayGrouped(true);
+  api._setExpanded(group.hash, true);
+
+  test('#259: at 1400 px the expanded group renders its children (#248 unchanged)', () => atWidth(1400, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert.strictEqual(childRows(html), 3, 'three child rows: ' + childRows(html));
+    assert(/\bexpanded\b/.test(rowClass(html)), 'the row is marked expanded: ' + rowClass(html));
+    assert(header(html).includes('aria-expanded="true"'), header(html));
+    assert(expandCell(html).includes(phIcon('caret-down')), 'down caret while expanded');
+  }));
+
+  test('#259: at 390 px the same expanded group renders no child rows', () => atWidth(390, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert.strictEqual(childRows(html), 0, 'no visible children on mobile, got ' + childRows(html));
+  }));
+
+  test('#259: at 390 px the row does not claim the expanded class or caret', () => atWidth(390, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert(!/\bexpanded\b/.test(rowClass(html)), 'no expanded class on mobile: ' + rowClass(html));
+    assert(header(html).includes('data-action="select-hash"'), header(html));
+    assert(!header(html).includes('aria-expanded'), 'still no aria-expanded on mobile');
+    assert(!expandCell(html).includes(phIcon('caret-down')), 'no down caret on mobile');
+  }));
+
+  test('#259: _getRowCount matches the rendered rows on both sides of the breakpoint', () => {
+    atWidth(390, () => {
+      assert.strictEqual(api._getRowCount(group), 1, 'mobile: the group is one row');
+    });
+    atWidth(1400, () => {
+      assert.strictEqual(api._getRowCount(group), 4, 'desktop: the group plus three children');
+    });
+  });
+
+  test('#259: 600 px hides the children and 601 px shows them again', () => {
+    atWidth(600, () => {
+      assert.strictEqual(childRows(api.buildGroupRowHtml(group)), 0, 'at the breakpoint the children are hidden');
+    });
+    atWidth(601, () => {
+      assert.strictEqual(childRows(api.buildGroupRowHtml(group)), 3, 'just above it they are back');
+    });
+  });
+
+  test('#259: the expansion survives 1400 -> 390 -> 1400, it is not cleared', () => {
+    atWidth(390, () => { api.buildGroupRowHtml(group); });
+    atWidth(1400, () => {
+      const html = api.buildGroupRowHtml(group);
+      assert.strictEqual(childRows(html), 3, 'the children are back on desktop: ' + childRows(html));
+      assert(header(html).includes('aria-expanded="true"'), 'and the state is still expanded');
+    });
+  });
+
+  test('#259: a collapsed group is unaffected at either width', () => {
+    api._setExpanded(group.hash, false);
+    try {
+      for (const w of [390, 1400]) atWidth(w, () => {
+        const html = api.buildGroupRowHtml(group);
+        assert.strictEqual(childRows(html), 0, w + ' px: a collapsed group has no children');
+        assert(!/\bexpanded\b/.test(rowClass(html)), w + ' px: ' + rowClass(html));
+      });
+    } finally { api._setExpanded(group.hash, true); }
+  });
+}
+
 // Without mobile-page-actions.js there is no #1461 #7 redirect, so a group row
 // toggles at any width.
 console.log('\n=== packets.js: group row without mobile-page-actions.js (#254) ===');

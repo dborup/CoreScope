@@ -65,6 +65,9 @@ Notes:
   can never be listed, so it is rejected whenever an allowlist is set.
 - A name that matches no configured source is logged once at startup — the allowlist would otherwise
   silently drop all coverage from that (mistyped) name.
+- Source names are not required to be unique, so a name that matches more than one configured source
+  (for example `auth` and `Auth`) admits all of them; that is also logged once at startup. Give each
+  source a unique name.
 - Drops are logged per source, throttled and capped at a fixed number of lines, so a busy unlisted
   broker cannot flood the log.
 - The option gates only the client namespace. The observer blacklist and every other ingest rule stay
@@ -251,3 +254,10 @@ on-device signing) — not required for the MVP, tracked as a follow-up.
 
 Hardcoded initially, tracked for the customizer per AGENTS.md rule 8: hex resolution per zoom
 (`zoomToHexRes`), colour SNR thresholds (`coverageColorVar`), and any `rx_at` max-age validation.
+
+The source-allowlist drop warning ([Restricting which MQTT sources may
+contribute](#restricting-which-mqtt-sources-may-contribute)) is also hardcoded, in
+`cmd/ingestor/client_rx_sources.go`: the re-log interval per source (`clientRxSourceWarnInterval`,
+10 minutes) and the per-source line cap for the lifetime of the process (`clientRxSourceWarnMax`,
+10 lines). These are ingestor settings, so they would become config keys rather than customizer
+controls.
