@@ -11352,8 +11352,13 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for path, count := range parentPaths {
 		topParents = append(topParents, map[string]interface{}{"path": path, "count": count})
 	}
+	// #273: parentPaths iteration order is random; ties break on the path so
+	// the order and the top-15 cut are stable (sibling of rankSubpaths/#256).
 	sort.Slice(topParents, func(i, j int) bool {
-		return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		if topParents[i]["count"].(int) != topParents[j]["count"].(int) {
+			return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		}
+		return topParents[i]["path"].(string) < topParents[j]["path"].(string)
 	})
 	if len(topParents) > 15 {
 		topParents = topParents[:15]
@@ -11363,8 +11368,13 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for name, count := range observers {
 		topObs = append(topObs, map[string]interface{}{"name": name, "count": count})
 	}
+	// #273: observers iteration order is random; ties break on the name so
+	// the order and the top-10 cut are stable.
 	sort.Slice(topObs, func(i, j int) bool {
-		return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		if topObs[i]["count"].(int) != topObs[j]["count"].(int) {
+			return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		}
+		return topObs[i]["name"].(string) < topObs[j]["name"].(string)
 	})
 	if len(topObs) > 10 {
 		topObs = topObs[:10]
