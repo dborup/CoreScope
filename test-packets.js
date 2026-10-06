@@ -1073,6 +1073,30 @@ console.log('\n=== packets.js: buildFieldTable ===');
     assert(result.includes('field-table'));
     assert(result.includes('0B') || result.includes('0 bytes') || result.includes('??'));
   });
+
+  // #282 (7): the Path Length row must read ONE offset source. The byte it
+  // prints comes from `off` (derived from pkt.route_type); the width label used
+  // to come from senderPathHashSize(buf), which independently re-derives the
+  // offset from the raw_hex header byte. A transport route whose stored
+  // route_type disagrees with its on-wire header route bits splits the two: they
+  // point at different bytes. The fix reads the width from the byte it prints,
+  // so the value and its hash_size label always describe the same byte 5.
+  test('buildFieldTable reads the transport path-length width from the byte it prints (#282 one offset source)', () => {
+    // route_type 0 = TRANSPORT_FLOOD → path length at byte 5. Header byte 0x15:
+    // route bits 1 (FLOOD → byte-1 offset), path-type 5 (hops). Byte 1 = 0x40
+    // (width bits 1 → 2 bytes), byte 5 = 0x80 (width bits 2 → 3 bytes). The row
+    // prints byte 5 (0x80), so its label must say hash_size=3 — not 2, which is
+    // byte 1's width reached via the second (header-derived) offset.
+    const pkt = { raw_hex: '1540aabbcc80', route_type: 0, payload_type: 5 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    const m = /<td>Path Length<\/td><td class="mono">([^<]*)<\/td><td class="text-muted">([^<]*)<\/td>/.exec(result);
+    assert(m, 'has a Path Length row, got: ' + result);
+    assert.strictEqual(m[1], '0x80', 'prints the byte at the route_type offset (byte 5), got: ' + m[1]);
+    assert(/hash_size=3 bytes?\b/.test(m[2]),
+      'width must be read from the printed byte (0x80 → 3 bytes), got: ' + m[2]);
+    assert(!/hash_size=2\b/.test(m[2]),
+      'must not read byte 1 (0x40 → 2 bytes) via a second offset source, got: ' + m[2]);
+  });
 }
 
 console.log('\n=== packets.js: _getRowCount ===');
