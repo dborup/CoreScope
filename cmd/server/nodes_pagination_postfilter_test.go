@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -151,27 +149,26 @@ func TestHandleNodes_PostFilterCompensationLoopLogsOnExhaustion(t *testing.T) {
 	}
 	srv.cfg.SetHiddenNamePrefixes([]string{"🚫"})
 
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(prev)
-
-	req := httptest.NewRequest("GET", "/api/nodes?limit=1&offset=0", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Nodes []map[string]interface{} `json:"nodes"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v body=%s", err, w.Body.String())
-	}
-	if len(resp.Nodes) != 0 {
-		t.Errorf("expected 0 nodes (RealNode is beyond the 50-iteration cap), got %d: %+v", len(resp.Nodes), resp.Nodes)
-	}
-	if !strings.Contains(buf.String(), "maxIterations") {
-		t.Errorf("expected a log breadcrumb mentioning maxIterations when the compensation loop is exhausted, got log output: %q", buf.String())
+	// The capture is locked (#310): the store's background goroutines keep
+	// logging into whatever writer is installed.
+	out := captureLog(func() {
+		req := httptest.NewRequest("GET", "/api/nodes?limit=1&offset=0", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		var resp struct {
+			Nodes []map[string]interface{} `json:"nodes"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v body=%s", err, w.Body.String())
+		}
+		if len(resp.Nodes) != 0 {
+			t.Errorf("expected 0 nodes (RealNode is beyond the 50-iteration cap), got %d: %+v", len(resp.Nodes), resp.Nodes)
+		}
+	})
+	if !strings.Contains(out, "maxIterations") {
+		t.Errorf("expected a log breadcrumb mentioning maxIterations when the compensation loop is exhausted, got log output: %q", out)
 	}
 }
