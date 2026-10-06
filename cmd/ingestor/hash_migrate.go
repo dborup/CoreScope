@@ -47,7 +47,9 @@ import (
 //     surviving observation can rebuild) plus the #89 lower bound the backfill
 //     would produce (route_type and the surviving observation headers). The
 //     result is non-NULL, so the backfill leaves it alone and the change is
-//     logged like any grown mask; and every nullable column it has no value for
+//     logged like any grown mask, except that a survivor whose mask was NULL
+//     always logs one row, even for a known 0 (one per both-NULL merge on a
+//     pre-#89 DB); and every nullable column it has no value for
 //     (scope_name, channel_hash, from_pubkey, ...) from the duplicate; a value
 //     it has stays;
 //   - rows hung off the duplicate follow the survivor (ping_triggers), or go
