@@ -39,7 +39,10 @@ import (
 //     earliest first_seen;
 //   - the survivor takes the earliest first_seen, the later last_seen and the
 //     union of route_mask (a grown mask is logged in route_mask_changes for
-//     running servers), and every nullable column it has no value for (scope_name,
+//     running servers), unless either side is NULL: a NULL route_mask is "not
+//     computed yet", so the union stays NULL and the route_mask backfill
+//     recomputes it from the merged observations (#287); and every nullable
+//     column it has no value for (scope_name,
 //     channel_hash, from_pubkey, ...) from the duplicate; a value it has stays;
 //   - rows hung off the duplicate follow the survivor (ping_triggers), or go
 //     with it when the survivor already has one (route_mask_changes);
@@ -314,8 +317,15 @@ func mergeTransmissions(ctx context.Context, tx *sql.Tx, winner, loser int64, ex
 	}
 	set := "first_seen = MIN(first_seen, (SELECT first_seen FROM transmissions WHERE id = ?)),\n" +
 		"last_seen = MAX(last_seen, (SELECT last_seen FROM transmissions WHERE id = ?)),\n" +
-		"route_mask = CASE WHEN route_mask IS NULL AND (SELECT route_mask FROM transmissions WHERE id = ?) IS NULL THEN NULL\n" +
-		"ELSE COALESCE(route_mask, 0) | COALESCE((SELECT route_mask FROM transmissions WHERE id = ?), 0) END"
+		// A NULL route_mask means "not computed yet", not "no routes". If either
+		// side is NULL the union is unknown, so keep it NULL: a non-NULL result
+		// would be skipped by the route_mask backfill, losing the uncomputed
+		// side's bits for good (#287). The backfill recomputes the mask from the
+		// survivor's full set of observations, which now holds both sides'. Both
+		// sides are non-NULL in the ELSE branch, so a plain OR is exact; a
+		// COALESCE(...,0) there would reintroduce the bug.
+		"route_mask = CASE WHEN route_mask IS NULL OR (SELECT route_mask FROM transmissions WHERE id = ?) IS NULL THEN NULL\n" +
+		"ELSE route_mask | (SELECT route_mask FROM transmissions WHERE id = ?) END"
 	args := []interface{}{loser, loser, loser, loser}
 	for _, col := range ex.fillCols {
 		set += fmt.Sprintf(",\n\"%s\" = COALESCE(\"%s\", (SELECT \"%s\" FROM transmissions WHERE id = ?))", col, col, col)
