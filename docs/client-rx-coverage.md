@@ -122,6 +122,40 @@ Payload — meshcoretomqtt-compatible packet, plus a `gps` object:
 - Subscription: the ingestor's default subscription (`meshcore/#`) already covers this topic. Sources
   configured with an explicit topic list must add `meshcore/client/+/packets`.
 
+### Minimised `raw` — a packet with the payload removed
+
+An uploader that does not want to republish message content may send a **minimised raw packet**: the
+on-wire bytes truncated after the path, with the payload cut off. This is accepted — coverage reads
+only the fields the [HARD RULE](#capture-hard-rule--only-what-was-heard-directly) needs, so the
+payload is never required for a non-advert. A minimised `raw` must still be a valid prefix of the
+packet (field sizes per
+[firmware `docs/packet_format.md`](https://github.com/meshcore-dev/MeshCore/blob/main/docs/packet_format.md)
+and `src/Packet.h`):
+
+```
+[header][transport_codes (4 bytes, ROUTE_TYPE_TRANSPORT_* only)][path_length][path]
+```
+
+- `header` — 1 byte: route type (bits 0-1), payload type (bits 2-5), payload version (bits 6-7).
+- `transport_codes` — the full 4 bytes, and **only** for `TRANSPORT_FLOOD`/`TRANSPORT_DIRECT`.
+  Dropping them shifts every following byte, so the packet is mis-framed — at best it is rejected,
+  at worst it is attributed to the wrong hash.
+- `path_length` — 1 byte: hop count in bits 0-5, hash size − 1 in bits 6-7.
+- `path` — exactly `hop_count * hash_size` bytes. `path_length` must describe the bytes that are
+  actually present; a byte count larger than the remaining buffer is rejected (dropped, not
+  partially read).
+- `payload` — omit entirely for non-adverts. A partially kept payload is tolerated too (it is simply
+  reported as undecodable), but there is no reason to send one.
+
+**Adverts are the exception: send them whole.** For a 0-hop advert the heard key *is* the
+advertiser's pubkey, and that lives in the advert payload — a minimised 0-hop advert carries nothing
+attributable and is dropped. A *relayed* advert follows the normal path rule, so it survives
+minimisation, but there is no benefit in special-casing it client-side.
+
+What minimisation does **not** change: `DIRECT`/`TRANSPORT_DIRECT` paths and `TRACE` packets stay
+unattributable, and 1-byte path hashes stay excluded. Dropping the payload never widens what is
+recorded. Pinned by `TestHandleClientPacketMinimised*` in `cmd/ingestor/client_rx_minimised_test.go`.
+
 ## Capture HARD RULE — only what was heard directly
 
 The app and ingestor record **only the node the companion physically received**, never upstream
