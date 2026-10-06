@@ -107,7 +107,7 @@ const ctx = {
   // '59C0' -> 3, a width the real helper reports as unknown), so the merge
   // assertions below would have passed against a contract nothing ships.
   senderPathHashSize: loadAppHelper('senderPathHashSize',
-    ['isTransportRoute', 'getPathLenOffset', 'senderPathHashSize']),
+    ['isTransportRoute', 'getPathLenOffset', 'pathHashSizeFromByte', 'senderPathHashSize']),
 };
 vm.createContext(ctx);
 // Expose the cache fetch helper only inside this VM so the regression can

@@ -257,6 +257,7 @@
     "pad3": "readonly",
     "pages": "readonly",
     "parseViewportHash": "readonly",
+    "pathHashSizeFromByte": "readonly",
     "payloadTypeColor": "readonly",
     "payloadTypeName": "readonly",
     "process": "readonly",
