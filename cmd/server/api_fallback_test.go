@@ -411,3 +411,69 @@ func TestAPIRoutesShadowedByFallbackReportsLateRoutes(t *testing.T) {
 		t.Errorf("GET /api/late: the late handler ran (%d %q); the fallback should shadow it", w.Code, w.Body.String())
 	}
 }
+
+// #281 N1: apiRoutesShadowedByFallback must flag a path template of
+// exactly "/api", not only ones under the "/api/" prefix.
+// TestAPIRoutesShadowedByFallbackReportsLateRoutes above only registers
+// late routes under the prefix, so it never exercises the `tmpl == "/api"`
+// arm; dropping that arm still leaves the suite green.
+func TestAPIRoutesShadowedByFallbackReportsLateBareAPIRoute(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+	late := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("late")) }
+	router.HandleFunc("/api", late)
+
+	got := apiRoutesShadowedByFallback(router)
+	if strings.Join(got, " ") != "/api" {
+		t.Errorf("shadowed routes: got %v, want [/api]", got)
+	}
+
+	// The fallback answers instead of the late handler.
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api", nil))
+	if w.Code == http.StatusOK || w.Body.String() == "late" {
+		t.Errorf("GET /api: the late handler ran (%d %q); the fallback should shadow it", w.Code, w.Body.String())
+	}
+}
+
+// #281 N2: getRouteHandler's self-dispatch guard must return a nil handler
+// when the only route a GET to the URL would reach is the fallback itself
+// (no real /api route matches), rather than returning the fallback's own
+// handler. Nothing in the HTTP-level test suite distinguishes the guard
+// being present from it being absent: the recursive call it would otherwise
+// allow carries Method: GET, lands back on the same 404/405 computation,
+// and produces byte-identical output. This test calls getRouteHandler
+// directly to pin the guard itself.
+func TestGetRouteHandlerSelfDispatchGuardReturnsNilForUnknownPath(t *testing.T) {
+	router := mux.NewRouter()
+	registerAPIFallback(router)
+
+	r := httptest.NewRequest(http.MethodHead, "/api/this-path-does-not-exist", nil)
+	h, got := getRouteHandler(router, r)
+	if h != nil || got != nil {
+		t.Fatalf("getRouteHandler: want (nil, nil) when only the fallback matches, got (%v, %v)", h, got)
+	}
+}
+
+// #281 N4: the API-only banner (served by newHTTPRouter when the static
+// directory doesn't exist) must point at an endpoint that actually
+// resolves. It used to say "/api/", which #233 turned into a JSON 404.
+func TestAPIOnlyBannerPointsToExistingEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+	router := newHTTPRouter(srv, NewHub(), missingDir)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, "/api/docs") {
+		t.Fatalf("API-only banner does not mention /api/docs: %q", body)
+	}
+
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, httptest.NewRequest("GET", "/api/docs", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("GET /api/docs: want 200, got %d", w2.Code)
+	}
+}
