@@ -64,6 +64,18 @@ function node(pubKey, name) {
 const KEY_A = 'a'.repeat(64);
 const KEY_B = 'b'.repeat(64);
 
+// nodes.js paginates /api/nodes at 500 per page (the #1540 server clamp) and
+// stops on the first short page, so a full page is what makes it ask for a
+// second one.
+const PAGE_SIZE = 500;
+function fullPage() {
+  const out = [];
+  for (let i = 0; i < PAGE_SIZE; i++) {
+    out.push(node(('c' + i.toString(16)).padStart(64, '0'), 'Page1-' + i));
+  }
+  return out;
+}
+
 function el(id) {
   return {
     id, innerHTML: '', textContent: '', value: '', scrollTop: 0,
@@ -137,9 +149,20 @@ function makeHarness() {
   load('public/app.js');
 
   // Everything nodes.js reaches for that is not under test.
-  const h = { ctx, parked, els, regionParam: '', wsHandler: null, pageMod: null };
-  ctx.RegionFilter = { init() {}, onChange() { return () => {}; }, offChange() {}, getRegionParam: () => h.regionParam };
-  ctx.AreaFilter = { init() {}, onChange() { return () => {}; }, offChange() {}, getAreaParam: () => '' };
+  const h = {
+    ctx, parked, els, regionParam: '',
+    wsHandler: null, regionChange: null, areaChange: null, pageMod: null,
+  };
+  // Capture the filter callbacks too: they are the ordinary, non-WS entry
+  // into loadNodes(), so they are how a test drives a plain load.
+  ctx.RegionFilter = {
+    init() {}, offChange() {}, getRegionParam: () => h.regionParam,
+    onChange(fn) { h.regionChange = fn; return () => {}; },
+  };
+  ctx.AreaFilter = {
+    init() {}, offChange() {}, getAreaParam: () => '',
+    onChange(fn) { h.areaChange = fn; return () => {}; },
+  };
   ctx.onWS = () => {};
   ctx.offWS = () => {};
   // Capture the advert handler instead of debouncing it for 5s.
@@ -159,6 +182,9 @@ function makeHarness() {
   load('public/nodes.js');
 
   h.fetchesFor = (p) => parked.filter((f) => f.url.indexOf('/api' + p) === 0);
+  // `offset` is the last query parameter nodes.js sets, so an exact tail
+  // match cannot be confused with `limit=500`.
+  h.fetchesAtOffset = (off) => parked.filter((f) => f.url.endsWith('offset=' + off));
   // app.js's `api` / `CLIENT_TTL` are top-level lexical bindings of the
   // sandbox script, not properties of its global object, so reach them the
   // way nodes.js does -- from inside the context.
@@ -269,6 +295,82 @@ async function test(name, fn) {
     after[1].answer({ nodes: [node(KEY_B, 'Bravo')], counts: {}, total: 1 });
     const data = await joined;
     assert.deepStrictEqual(data.nodes.map((n) => n.name), ['Bravo'], 'it got the refresh answer');
+  });
+
+  // The bust must apply to *every* page, not just the first. With a >500-node
+  // deployment the refresh walks the pagination loop a second time, and a
+  // bust that only covered `offset=0` would let the refresh's page 2 join the
+  // superseded load's page 2 and inherit its pre-advert content.
+  await test('the bust applies to every page of a multi-page list, not just offset=0', async () => {
+    const h = makeHarness();
+    h.init();
+    await flush();
+    assert.strictEqual(h.fetchesAtOffset(0).length, 1, 'the initial load asked for page 1');
+
+    h.wsHandler([advertFor(KEY_B)]);
+    await flush();
+    const page1 = h.fetchesAtOffset(0);
+    assert.strictEqual(page1.length, 2, 'the refresh busted page 1 (got ' + page1.length + ')');
+
+    // The superseded load gets a full page first, so it walks on to page 2
+    // and parks that request before the refresh reaches the same offset.
+    page1[0].answer({ nodes: fullPage(), counts: {}, total: 1000 });
+    await flush();
+    assert.strictEqual(h.fetchesAtOffset(PAGE_SIZE).length, 1,
+      'the superseded load asked for page 2 (got ' + h.fetchesAtOffset(PAGE_SIZE).length + ')');
+
+    page1[1].answer({ nodes: fullPage(), counts: {}, total: 1000 });
+    await flush();
+    const page2 = h.fetchesAtOffset(PAGE_SIZE);
+    assert.strictEqual(page2.length, 2,
+      'the refresh must bust page 2 as well instead of joining the superseded load\'s page 2 (got ' +
+      page2.length + ')');
+
+    // Pre-advert page 2 lands first; the refresh's own page 2 lands last and
+    // is the only one that carries the node that just advertised.
+    page2[0].answer({ nodes: [node(KEY_A, 'Alpha')], counts: {}, total: 1000 });
+    await flush();
+    page2[1].answer({ nodes: [node(KEY_A, 'Alpha'), node(KEY_B, 'Bravo')], counts: {}, total: 1000 });
+    await flush();
+
+    const keys = (h.allNodes() || []).map((n) => n.public_key);
+    assert.ok(keys.indexOf(KEY_B) !== -1,
+      'the advertising node must arrive on the refresh\'s own page 2 (list holds ' + keys.length + ' nodes)');
+    assert.strictEqual(keys.length, PAGE_SIZE + 2, 'both pages were accumulated');
+  });
+
+  // Guard: the bust is for the WS refresh only. Ordinary loads -- a region or
+  // area switch, a tab click, a search -- must still coalesce onto an
+  // in-flight /nodes request, or every one of them becomes its own fetch.
+  await test('plain loadNodes() calls outside the WS handler still coalesce', async () => {
+    const h = makeHarness();
+    h.init();
+    await flush();
+    assert.strictEqual(typeof h.regionChange, 'function', 'init() must register a RegionFilter.onChange handler');
+    assert.strictEqual(h.fetchesFor('/nodes?').length, 1, 'the initial load is in flight');
+
+    // Two region changes back onto the same (empty) region param: each one
+    // drops _allNodes and re-runs loadNodes() with no opts.
+    h.regionChange();
+    await flush();
+    h.regionChange();
+    await flush();
+
+    assert.strictEqual(h.fetchesFor('/nodes?').length, 1,
+      'plain loads must join the in-flight request, not fetch again (got ' +
+      h.fetchesFor('/nodes?').length + ')');
+
+    h.fetchesFor('/nodes?')[0].answer({ nodes: [node(KEY_A, 'Alpha')], counts: {}, total: 1 });
+    await flush();
+    assert.deepStrictEqual(h.names(), ['Alpha'], 'the shared answer rendered');
+
+    // And the WS refresh is still the exception: it busts even though the
+    // plain loads above did not.
+    const before = h.fetchesFor('/nodes?').length;
+    h.wsHandler([advertFor(KEY_B)]);
+    await flush();
+    assert.strictEqual(h.fetchesFor('/nodes?').length - before, 1,
+      'the advert refresh still fetches (got ' + (h.fetchesFor('/nodes?').length - before) + ')');
   });
 
   // Guard: an advert that only updates a node already in the list is
