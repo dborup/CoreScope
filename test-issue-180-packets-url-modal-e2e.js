@@ -101,43 +101,74 @@ function detailPaneOpen(page) {
       await Promise.all([listLoaded(), page.click('#clearFiltersBtn')]);
       await page.waitForTimeout(500);
       let h = await page.evaluate(() => location.hash);
-      // These three assertions are what Clear itself must do, and are the
-      // ones a "Clear keeps ?timeWindow= / keeps the detail" mutant breaks:
-      // the bare list URL, no detail pane, the saved window back at default.
+      // What Clear itself must do, asserted right after the click: the bare
+      // list URL, the Clear button gone and the detail pane closed. These are
+      // what a "Clear keeps ?timeWindow=" or "Clear keeps the detail" mutant
+      // breaks. (The window reset to the default is not visible here beyond
+      // Clear being hidden; it is asserted across the reload below.)
       assert(h === '#/packets', 'URL after Clear: ' + h);
       assert(!(await clearShown(page)), 'Clear button still visible after Clear');
       assert(!(await detailPaneOpen(page)), 'detail pane still open after Clear');
 
-      // #271: comparing row COUNTS at the default 15-min window across two
-      // renders (Clear's in-SPA list, then a full reload) is a race against
-      // the fixture's age — the CI fixture ages while the job runs, and a
-      // packet can cross the 15-min boundary in the gap between the two
-      // fetches (same class of problem #252 fixed for the Details test).
-      // Pin a wide window (24h; the widest option, same as #252) for the
-      // list-identity check below, and compare the actual set of packet
-      // hashes rather than a count, so the comparison cannot depend on how
-      // old the fixture is.
+      // Reloading the URL Clear wrote must give Clear's own state back —
+      // that is the "a reload shows the same list" half of this step, and the
+      // one a mutant where Clear's default no longer matches the default a
+      // cold load restores breaks. Compare STATE (URL, Clear button, the
+      // saved window, the detail pane, the hash input), all of which are
+      // clock-independent; the list contents are compared separately below at
+      // a pinned window, because row counts at the default window are not
+      // (#271).
+      const windowValue = () => page.evaluate(() => document.getElementById('fTimeWindow').value);
+      const twAfterClear = await windowValue();
+      await Promise.all([listLoaded(), page.reload({ waitUntil: 'load' })]);
+      await page.waitForTimeout(500);
+      h = await page.evaluate(() => location.hash);
+      assert(h === '#/packets', 'URL after reloading the Clear state: ' + h);
+      assert(!(await clearShown(page)), 'Clear button back after reload');
+      const twAfterReload = await windowValue();
+      assert(twAfterReload === twAfterClear, 'time window after reload ' + twAfterReload + ', after Clear ' + twAfterClear);
+      assert(!(await detailPaneOpen(page)), 'detail pane open after reloading the Clear state');
+      assert(await page.evaluate(() => document.getElementById('fHash').value === ''), 'hash filter input filled after reload');
+
+      // #271: the list-contents half of this step used to compare row COUNTS
+      // at the default 15-min window across two renders (Clear's in-SPA list,
+      // then a full reload). Both compute `since = now - 15min` from the
+      // browser's live clock, so a fixture packet can cross that boundary in
+      // the real-time gap between the two fetches, and the CI fixture ages
+      // while the job runs (same class of problem #252 fixed for the Details
+      // test). Pin a wide window (24h; the widest option, same as #252) and
+      // compare the "Latest Packets (N)" total — the whole filtered set —
+      // plus the hashes of the rows actually rendered, so the comparison
+      // cannot depend on how old the fixture is.
       await Promise.all([listLoaded(), page.evaluate(() => {
         const sel = document.getElementById('fTimeWindow');
         sel.value = '1440';
         sel.dispatchEvent(new Event('change', { bubbles: true }));
       })]);
       await page.waitForTimeout(500);
-      const hashSet = async () => {
+      // The table is virtualised, so only a window of rows is in the DOM at
+      // any time: `total` is the full filtered count, `hashes` is what is
+      // rendered. The two #vscroll-* spacer rows carry no data-hash and are
+      // dropped, so an empty table cannot pass as "a set of hashes".
+      const listState = async () => {
         await page.waitForSelector('#pktLeft .count', { timeout: 15000 });
-        return page.evaluate(() => Array.from(document.querySelectorAll('#pktBody > tr:not(.group-child)')).map((tr) => tr.dataset.hash).sort());
+        return page.evaluate(() => ({
+          total: Number((document.querySelector('#pktLeft .count').textContent.match(/\d+/) || [])[0]),
+          hashes: Array.from(document.querySelectorAll('#pktBody > tr:not(.group-child)')).map((tr) => tr.dataset.hash).filter(Boolean).sort(),
+        }));
       };
-      const shown = await hashSet();
-      assert(shown.length > 0, 'no rows to compare at the pinned 24h window');
+      const shown = await listState();
+      assert(shown.total > 0, 'no packets in the pinned 24h window');
+      assert(shown.hashes.length > 0, 'no rendered rows with a hash to compare at the pinned 24h window');
 
       await Promise.all([listLoaded(), page.reload({ waitUntil: 'load' })]);
       await page.waitForTimeout(500);
       h = await page.evaluate(() => location.hash);
-      assert(h === '#/packets?timeWindow=1440', 'URL after reload: ' + h);
-      const reloaded = await hashSet();
-      assert(JSON.stringify(reloaded) === JSON.stringify(shown), 'reload shows ' + JSON.stringify(reloaded) + ', pinned-window Clear state showed ' + JSON.stringify(shown));
-      assert(!(await detailPaneOpen(page)), 'detail pane open after reload');
-      assert(await page.evaluate(() => document.getElementById('fHash').value === ''), 'hash filter input filled after reload');
+      assert(h === '#/packets?timeWindow=1440', 'URL after reloading the pinned window: ' + h);
+      const reloaded = await listState();
+      assert(reloaded.total === shown.total, 'reload shows ' + reloaded.total + ' packets at the pinned window, before the reload it showed ' + shown.total);
+      assert(JSON.stringify(reloaded.hashes) === JSON.stringify(shown.hashes), 'reload renders ' + JSON.stringify(reloaded.hashes) + ' at the pinned window, before the reload it rendered ' + JSON.stringify(shown.hashes));
+      assert(!(await detailPaneOpen(page)), 'detail pane open after reloading the pinned window');
     });
     await context.close();
   }
