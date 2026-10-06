@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -638,3 +639,39 @@ func TestNodeDetail_AdvertIntervals(t *testing.T) {
 	}
 }
 
+// The docs describe what the estimator does (review N3 and N5 on #247): the
+// value is the median of gap/k, not of the raw fitting gaps, and the
+// false-change trade-off pinned by _FalseChange sits next to the
+// sparse-coverage limitation in docs/api-spec.md.
+func TestAdvertIntervals_DocsMatchCode(t *testing.T) {
+	schemas := asMap(t, asMap(t, fetchSpec(t)["components"], "components")["schemas"], "schemas")
+	desc := fmt.Sprint(asMap(t, schemas["NodeAdvertIntervals"], "NodeAdvertIntervals")["description"])
+	if !strings.Contains(desc, "median of gap/k") || strings.Contains(desc, "median of the fitting gaps") {
+		t.Errorf("OpenAPI NodeAdvertIntervals must say the median of gap/k: %s", desc)
+	}
+
+	raw, err := os.ReadFile("../../docs/api-spec.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	start := strings.Index(doc, "#### Estimated advert intervals")
+	if start < 0 {
+		t.Fatal("docs/api-spec.md: no Estimated advert intervals section")
+	}
+	section := doc[start:]
+	if end := strings.Index(section[1:], "\n#"); end >= 0 {
+		section = section[:end+1]
+	}
+	sparse := strings.Index(section, "**Known limitation: sparse coverage.**")
+	falseChange := strings.Index(section, "**Known trade-off: false change.**")
+	if sparse < 0 || falseChange < 0 {
+		t.Fatalf("docs/api-spec.md must document sparse coverage and the false change (sparse %d, false change %d)", sparse, falseChange)
+	}
+	// The examples are the _FalseChange cases.
+	for _, want := range []string{"60 min reads as 120 min", "47 h as 94 h", "120 min with 3× gaps as 360 min", "medium confidence on 4 adverts"} {
+		if !strings.Contains(section[falseChange:], want) {
+			t.Errorf("false-change limitation lacks %q", want)
+		}
+	}
+}
