@@ -153,6 +153,7 @@ func (s *PacketStore) confirmResolvedPathContains(txID int, pubkey string) bool 
 	if s.db == nil || s.db.conn == nil {
 		return true
 	}
+	s.confirmResolvedPathQueries.Add(1)
 	// Use INSTR with surrounding quotes for exact match — avoids LIKE escape issues.
 	// resolved_path format: ["pubkey1","pubkey2",...]
 	needle := `"` + strings.ToLower(pubkey) + `"`

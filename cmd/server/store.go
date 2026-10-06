@@ -457,6 +457,12 @@ type PacketStore struct {
 	lruOrder                      []int             // FIFO order for LRU eviction
 	lruMu                         sync.RWMutex      // guards apiResolvedPathLRU + lruOrder
 
+	// confirmResolvedPathQueries counts SQL round-trips made by
+	// confirmResolvedPathContains. Each one scans the tx's observation rows,
+	// so tests use it to pin that /paths and /hop_analytics no longer issue
+	// one per candidate transmission.
+	confirmResolvedPathQueries atomic.Uint64
+
 	// Persisted neighbor graph for hop resolution at ingest time.
 	// Accessed via atomic.Pointer because async rebuilds (path_inspect.go
 	// ensureNeighborGraph) and ingest-time readers race on the pointer
@@ -1901,7 +1907,27 @@ func (s *PacketStore) txChargedBytes(tx *StoreTx) int64 {
 	return int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx])) + fallbackRelayBytes(len(s.fallbackByNode[tx]))
 }
 
+// pathLen returns the number of hops in a JSON-encoded path array (0 for an
+// empty or invalid input).
+//
+// It runs once per observation of every candidate transmission in
+// /api/nodes/{pk}/paths and /hop_analytics (via fetchResolvedPathForTxBest),
+// i.e. hundreds of thousands of times per request, so it must not allocate.
+// The common shape — an array of plain ASCII strings such as ["aa","bb"] — is
+// counted with a single byte scan. Anything outside that restricted grammar
+// (escapes, non-ASCII or control bytes, nested values, numbers, null,
+// trailing data, malformed input) falls back to pathLenSlow, which keeps the
+// original json.Unmarshal semantics exactly.
 func pathLen(pathJSON string) int {
+	if n, ok := pathLenFast(pathJSON); ok {
+		return n
+	}
+	return pathLenSlow(pathJSON)
+}
+
+// pathLenSlow is the reference implementation: parse the whole array and
+// count it. Kept as the fallback for inputs pathLenFast does not recognise.
+func pathLenSlow(pathJSON string) int {
 	if pathJSON == "" {
 		return 0
 	}
@@ -1910,6 +1936,79 @@ func pathLen(pathJSON string) int {
 		return 0
 	}
 	return len(hops)
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// pathLenFast counts the elements of a JSON array of simple strings without
+// allocating. ok is false when s is anything other than
+//
+//	ws* "[" ws* ( "]" | str ( ws* "," ws* str )* ws* "]" ) ws*
+//
+// where str is a double-quoted run of printable ASCII (0x20-0x7e) with no
+// backslash. For every input it accepts, the count equals what
+// json.Unmarshal into []interface{} would give.
+func pathLenFast(s string) (n int, ok bool) {
+	l := len(s)
+	i := 0
+	for i < l && isJSONSpace(s[i]) {
+		i++
+	}
+	if i == l || s[i] != '[' {
+		return 0, false
+	}
+	i++
+	for i < l && isJSONSpace(s[i]) {
+		i++
+	}
+	if i < l && s[i] == ']' {
+		i++
+		for i < l && isJSONSpace(s[i]) {
+			i++
+		}
+		return 0, i == l
+	}
+	count := 0
+	for {
+		if i >= l || s[i] != '"' {
+			return 0, false
+		}
+		i++
+		for i < l && s[i] != '"' {
+			if c := s[i]; c < 0x20 || c >= 0x7f || c == '\\' {
+				return 0, false
+			}
+			i++
+		}
+		if i >= l {
+			return 0, false
+		}
+		i++ // closing quote
+		count++
+		for i < l && isJSONSpace(s[i]) {
+			i++
+		}
+		if i >= l {
+			return 0, false
+		}
+		switch s[i] {
+		case ',':
+			i++
+			for i < l && isJSONSpace(s[i]) {
+				i++
+			}
+		case ']':
+			i++
+			for i < l && isJSONSpace(s[i]) {
+				i++
+			}
+			return count, i == l
+		default:
+			return 0, false
+		}
+	}
 }
 
 // pathFirstHop returns path[0] (the entry-point repeater's hex prefix), or
@@ -10530,30 +10629,36 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 		inIndex    bool
 	}
 	checks := make([]candidateCheck, len(candidates))
+	// Built once instead of scanning the index list for every candidate.
+	var indexedForTarget map[int]struct{}
+	if s.useResolvedPathIndex {
+		ids := s.resolvedPubkeyIndex[resolvedPubkeyHash(lowerPK)]
+		indexedForTarget = make(map[int]struct{}, len(ids))
+		for _, id := range ids {
+			indexedForTarget[id] = struct{}{}
+		}
+	}
 	for i, tx := range candidates {
 		cc := candidateCheck{tx: tx}
 		if !s.useResolvedPathIndex {
 			cc.inIndex = true
 		} else if _, hasRev := s.resolvedPubkeyReverse[tx.ID]; !hasRev {
 			cc.inIndex = true
-		} else {
-			h := resolvedPubkeyHash(lowerPK)
-			for _, id := range s.resolvedPubkeyIndex[h] {
-				if id == tx.ID {
-					cc.hasReverse = true
-					break
-				}
-			}
+		} else if _, ok := indexedForTarget[tx.ID]; ok {
+			cc.hasReverse = true
 		}
 		checks[i] = cc
 	}
 	s.mu.RUnlock()
 
+	// No per-candidate confirmResolvedPathContains SQL query here: the loop
+	// below already decides membership from the canonical resolved_path
+	// (rp == nil / idx < 0 → skip), which also rejects hash collisions and
+	// stale index entries. The query only scanned every observation row of
+	// each candidate tx to reach the same conclusion.
 	confirmed := candidates[:0]
 	for _, cc := range checks {
-		if cc.inIndex {
-			confirmed = append(confirmed, cc.tx)
-		} else if cc.hasReverse && s.confirmResolvedPathContains(cc.tx.ID, lowerPK) {
+		if cc.inIndex || cc.hasReverse {
 			confirmed = append(confirmed, cc.tx)
 		}
 	}

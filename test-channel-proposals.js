@@ -603,8 +603,8 @@ function fireDocKeydown(env, evt) {
 const fastTimers = { setTimeout: (fn) => setImmediate(fn), clearTimeout: (id) => clearImmediate(id) };
 
 // Mount with a suggest section and an onApproved spy; statusFor(requestId,
-// pollIndex) answers each status request.
-async function mountSuggest(statusFor, extraRoute) {
+// pollIndex) answers each status request. timers defaults to fastTimers.
+async function mountSuggest(statusFor, extraRoute, timers) {
   const polls = {};
   const approved = [];
   const env = loadWithDom((url, o) => {
@@ -622,7 +622,7 @@ async function mountSuggest(statusFor, extraRoute) {
     }
     if (extraRoute) { const r = extraRoute(url, method); if (r) return r; }
     return { status: 404, body: { error: 'unexpected ' + method + ' ' + url } };
-  }, fastTimers);
+  }, timers || fastTimers);
   const section = env.document.createElement('section');
   section.setAttribute('hidden', '');
   env.document.body.appendChild(section);
@@ -708,6 +708,22 @@ test('a proposal approved again after a revoke refreshes again (#232)', async ()
   reviewedAt = 20; // revoked, re-proposed and approved again: same id, new decision
   await env.suggest('Again');
   assert.deepStrictEqual(env.approved, ['#Again', '#Again']);
+});
+
+// #243: leaving the Channels page must stop the suggest poller, or it keeps
+// polling a queued suggestion's status after the page is gone.
+test('unmount() cancels the suggest poller: no poll stays scheduled, no status request afterwards (#243)', async () => {
+  const timers = fakeTimers();
+  const env = await mountSuggest(() => ({ status: 'queued' }), null, timers);
+  await env.suggest('StillQueued');
+  assert.strictEqual(timers.size(), 1, 'a queued suggestion schedules a status poll');
+  const polls = () => env.fetchCalls.filter((c) => /\/requests\//.test(c.url)).length;
+  const before = polls();
+  env.CP.unmount();
+  assert.strictEqual(timers.size(), 0, 'unmount() must clear the scheduled poll');
+  while (await timers.fireNext()) { /* run whatever is still scheduled */ }
+  await flush();
+  assert.strictEqual(polls(), before, 'no status request after unmount()');
 });
 
 // ── Invisible formatting characters (PR #99 review, finding 3) ───────────

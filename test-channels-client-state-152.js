@@ -1795,6 +1795,94 @@ async function test(name, fn) {
     assert.strictEqual(row.unread, 2, 'unread carried');
   });
 
+  // ── #243: an approval refresh must not join an older in-flight request ──
+  console.log('\n=== #243 an approval refresh does not join an in-flight /channels request ===');
+
+  // Puts the real app.js api() (in-flight dedup, TTL cache, bust) in front
+  // of /channels. app.js runs in its own small sandbox with a stubbed fetch;
+  // every /channels fetch is parked on its own deferred, so a test decides
+  // the order in which the server's answers land.
+  function useRealApi(h) {
+    const fetches = [];
+    const app = {
+      window: { addEventListener() {}, dispatchEvent() {} },
+      document: { readyState: 'complete', getElementById: () => null, addEventListener() {}, querySelectorAll: () => [], querySelector: () => null, createElement: () => ({ style: {} }), head: { appendChild() {} } },
+      console, Date: RealDate, Promise, Map, Set, JSON, Math, Error, TypeError, Array, Object, String, Number, RegExp,
+      parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+      setTimeout: (fn) => setTimeout(fn, 0), clearTimeout() {}, setInterval: () => 1, clearInterval() {},
+      performance: { now: () => RealDate.now() },
+      location: { hash: '' }, addEventListener() {}, dispatchEvent() {},
+      fetch(url) {
+        if (url.indexOf('/api/channels') !== 0) return Promise.resolve({ ok: true, status: 200, json: async () => ({}), headers: { get: () => null } });
+        const d = deferred();
+        fetches.push({ url, answer: (body) => d.resolve({ ok: true, status: 200, json: async () => body, headers: { get: () => null } }) });
+        return d.promise;
+      },
+    };
+    vm.createContext(app);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'app.js'), 'utf8'), app, { filename: 'public/app.js' });
+    const stubApi = h.ctx.api;
+    h.ctx.api = (p, o) => (p.indexOf('/channels') === 0 && p.indexOf('/messages') === -1 ? app.api(p, o) : stubApi(p, o));
+    h.ctx.invalidateApiCache = app.invalidateApiCache;
+    return fetches;
+  }
+  const BEFORE_APPROVAL = { channels: [serverChannel('public')] };
+  const AFTER_APPROVAL = { channels: [serverChannel('public')], approvedChannels: [{ hash: '#shared', name: '#shared' }] };
+
+  // A region change is in flight (its answer was made before the approval)
+  // when the approval asks for a refresh. newestFirst picks which answer
+  // lands first.
+  async function approvalDuringRegionLoad(newestFirst) {
+    const h = makeHarness();
+    const fetches = useRealApi(h);
+    const initDone = h.init();
+    await flush();
+    fetches[0].answer(BEFORE_APPROVAL);
+    await initDone;
+    h.regionParam = 'SJC';
+    h.regionChange();
+    await flush();
+    assert.strictEqual(fetches.length, 2, 'the region change fetches');
+    h.approvedCallback();
+    await flush();
+    // Every request made after the approval sees the approved channel.
+    const answers = fetches.slice(1).map((f, i) => () => f.answer(i === 0 ? BEFORE_APPROVAL : AFTER_APPROVAL));
+    (newestFirst ? answers.reverse() : answers).forEach((answer) => answer());
+    await flush();
+    return { h, fetches };
+  }
+
+  for (const newestFirst of [true, false]) {
+    await test('#243: approval while a /channels request is in flight lists the approved channel (' + (newestFirst ? 'older answer lands last' : 'older answer lands first') + ')', async () => {
+      const { h, fetches } = await approvalDuringRegionLoad(newestFirst);
+      assert.ok(h.row('#shared') && h.row('#shared').shared === true,
+        'the approved channel must be listed (got ' + JSON.stringify(listedHashes(h)) + ')');
+      assert.ok(/data-hash="#shared"/.test(h.elements.chList.innerHTML), 'the approved channel must be rendered');
+      assert.strictEqual(fetches.length, 3, 'one request for the region change, one for the approval');
+      assert.ok(/region=SJC/.test(fetches[1].url) && /region=SJC/.test(fetches[2].url), 'both requests are for the current region');
+      // The answer the list now shows is also what the TTL cache holds, so
+      // the next refresh within the TTL keeps the channel without a request.
+      await h.w._channelsLoadChannelsForTest(true);
+      assert.strictEqual(fetches.length, 3, 'served from the cache');
+      assert.ok(h.row('#shared'), 'the cached list still has the approved channel (got ' + JSON.stringify(listedHashes(h)) + ')');
+    });
+  }
+
+  await test('#243: approval with nothing in flight makes exactly one /channels request', async () => {
+    const h = makeHarness();
+    const fetches = useRealApi(h);
+    const initDone = h.init();
+    await flush();
+    fetches[0].answer(BEFORE_APPROVAL);
+    await initDone;
+    h.approvedCallback();
+    await flush();
+    assert.strictEqual(fetches.length, 2, 'exactly one request for the approval (got ' + (fetches.length - 1) + ')');
+    fetches[1].answer(AFTER_APPROVAL);
+    await flush();
+    assert.ok(h.row('#shared') && h.row('#shared').shared === true, 'the approved channel is listed');
+  });
+
   // ── #155: mobile channel rows show the unread badge ──
   console.log('\n=== #155 mobile rows show the unread badge ===');
 

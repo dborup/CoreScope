@@ -99,7 +99,10 @@ They return `total` (the unfiltered/filtered count before pagination).
 ```
 
 - `400` — Bad request (missing/invalid params)
-- `404` — Resource not found
+- `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
+- `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
+
+`HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
 
 ---
 

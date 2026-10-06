@@ -74,6 +74,10 @@ func main() {
 
 	sources := cfg.ResolvedSources()
 
+	// #265: surface a clientRxCoverage.sources entry that matches no configured
+	// source once, at boot, instead of silently dropping all coverage.
+	checkClientRxSources(cfg, sources)
+
 	store, err := OpenStoreWithInterval(cfg.DBPath, cfg.MetricsSampleInterval())
 	if err != nil {
 		log.Fatalf("db: %v", err)
@@ -673,6 +677,17 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			return
 		}
 		if cfg.ClientRxCoverageEnabled() && len(parts) >= 4 && parts[3] == "packets" {
+			// Optional per-source allowlist (#265). Trust in this topic is the
+			// broker's binding of the topic pubkey to the publisher, which not
+			// every configured source necessarily provides; when the operator
+			// names the sources that do, coverage from any other source is
+			// dropped here — before any client_receptions / client_observers
+			// write — with a throttled, bounded warning. No allowlist ⇒ every
+			// source is accepted, as before.
+			if !cfg.ClientRxSourceAllowed(source.Name) {
+				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
+				return
+			}
 			handleClientPacket(store, tag, parts[2], msg, channelKeys)
 		}
 		return

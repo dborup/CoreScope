@@ -90,6 +90,7 @@ func TestPostPacketsRemovedReturns405OnReadOnlyDB(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /api/packets: want 405, got %d (body: %q)", w.Code, w.Body.String())
 	}
+	assertAllowSet(t, w.Header().Get("Allow"), "GET", "HEAD")
 	if body := strings.ToLower(w.Body.String()); strings.Contains(body, "sqlite") || strings.Contains(body, "readonly") || strings.Contains(body, "insert") {
 		t.Errorf("response leaks database error text: %q", w.Body.String())
 	}
@@ -140,11 +141,14 @@ func TestOpenAPISpecHasNoPostPackets(t *testing.T) {
 	}
 }
 
-// main.go mounts a catch-all SPA handler after the API routes. With it in
-// place, gorilla/mux lets the catch-all win over the method mismatch, so a
-// POST to the removed endpoint is served index.html like any other unmatched
-// path (pre-existing fallback behaviour, not specific to #223). Pin that it
-// is the SPA page, not JSON, and that nothing is written.
+// main.go mounts a catch-all SPA handler after the API routes. Before #233,
+// gorilla/mux let that catch-all win over the method mismatch, so a POST to
+// the removed endpoint was served index.html like any other unmatched path.
+// #233 adds a JSON /api/ fallback (registerAPIFallback, api_fallback.go)
+// ahead of the SPA catch-all, so this now pins 405 with an Allow header,
+// not the SPA page. See api_fallback_test.go for the general-purpose
+// coverage; this test keeps the #223/#231 read-only-DB angle (nothing
+// written) on this specific endpoint.
 func TestPostPacketsRemovedFallsThroughToSPAInProductionRouter(t *testing.T) {
 	dbPath, router := readOnlyPacketServer(t)
 	dir := t.TempDir()
@@ -155,9 +159,13 @@ func TestPostPacketsRemovedFallsThroughToSPAInProductionRouter(t *testing.T) {
 	before := packetTableCounts(t, dbPath)
 
 	w := postRemovedPacket(router)
-	if w.Code != http.StatusOK || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") || w.Body.String() != "<html>SPA</html>" {
-		t.Fatalf("POST /api/packets with SPA fallback: want 200 text/html index.html, got %d %q %q",
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/packets: want 405, got %d %q %q",
 			w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+	assertAllowSet(t, w.Header().Get("Allow"), "GET", "HEAD")
+	if !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("want application/json content-type, got %q", w.Header().Get("Content-Type"))
 	}
 	if after := packetTableCounts(t, dbPath); fmt.Sprint(after) != fmt.Sprint(before) {
 		t.Errorf("packet tables changed: before %v, after %v", before, after)
