@@ -145,12 +145,45 @@ func TestResolvedPathLRU_ExpiryAndInPlaceRefresh(t *testing.T) {
 	}
 }
 
-func TestResolvedPathLRU_DefaultClockIsMonotonic(t *testing.T) {
+// Every staleness test installs lruClock, so this is the only test of the
+// production clock. Its unit must be nanoseconds: lruGet compares ages with
+// int64(resolvedPathLRUTTL), so a clock in ms or µs would stretch the 60 s
+// TTL to days or hours while the hooked tests stay green.
+func TestResolvedPathLRU_DefaultClockIsMonotonicNanoseconds(t *testing.T) {
 	store := &PacketStore{}
+	start := time.Now()
 	a := store.lruNow()
 	time.Sleep(time.Millisecond)
-	if b := store.lruNow(); b <= a || b > int64(time.Hour) {
+	b := store.lruNow()
+	outer := time.Since(start)
+	if b <= a || b > int64(time.Hour) {
 		t.Errorf("lruNow went %d -> %d; want an increasing offset from lruEpoch", a, b)
+	}
+	// [a, b] lies inside [start, start+outer] on the same monotonic clock.
+	if d := b - a; d < int64(time.Millisecond) || d > int64(outer) {
+		t.Errorf("lruNow advanced %d across a 1 ms sleep (outer interval %d ns); want nanoseconds", d, outer.Nanoseconds())
+	}
+}
+
+// lruClock stands in for time.Now, so the hook and the default clock must
+// measure in the same domain: installing the hook while entries exist must
+// neither expire nor revive them.
+func TestResolvedPathLRU_ClockHookSharesDefaultClockDomain(t *testing.T) {
+	store := &PacketStore{}
+	store.initResolvedPathIndex()
+	a := "aa"
+
+	store.lruMu.Lock()
+	store.lruPut(7, []*string{&a}) // stored on the default clock
+	store.lruMu.Unlock()
+
+	store.lruClock = time.Now
+	if _, ok := store.lruGet(7, store.lruNow()); !ok {
+		t.Fatal("entry stored on the default clock expired once lruClock = time.Now was installed")
+	}
+	store.lruClock = func() time.Time { return time.Now().Add(resolvedPathLRUTTL + time.Second) }
+	if _, ok := store.lruGet(7, store.lruNow()); ok {
+		t.Error("entry stored on the default clock still served after the hook moved past resolvedPathLRUTTL")
 	}
 }
 
