@@ -1124,6 +1124,45 @@ console.log('\n=== packets.js: buildFlatRowHtml ===');
   });
 }
 
+// #258: makeColumnsResizable() (app.js) measures inside TableResponsive.unhidden,
+// so a re-measure sees the columns as the first measure did, before register().
+console.log('\n=== packets.js: TableResponsive.unhidden (#258) ===');
+{
+  const ctx = loadPacketsSandbox();
+  const TR = ctx.window.TableResponsive;
+  const el = (classes) => {
+    const set = new Set(classes);
+    return { style: { display: '' }, classList: { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) } };
+  };
+  const makeTable = () => {
+    const els = [el(['col-observer', 'col-hidden']), el(['col-observer', 'col-hidden']), el(['col-time']), el(['col-hidden-pill']), el(['col-hidden-pill', 'col-rehide-pill'])];
+    els[3].style.display = 'inline-block';
+    return {
+      els,
+      querySelectorAll: (sel) => els.filter((e) => e.classList.contains(sel.replace(/^\./, ''))),
+    };
+  };
+  const state = (t) => t.els.map((e) => ['col-hidden', 'col-hidden-pill'].filter((c) => e.classList.contains(c)).join('+') + ':' + e.style.display);
+
+  test('#258: unhidden lifts col-hidden and hides the pills only while fn runs', () => {
+    assert.strictEqual(typeof TR.unhidden, 'function', 'TableResponsive.unhidden is exported');
+    const t = makeTable();
+    const before = state(t);
+    let during = null;
+    const out = TR.unhidden(t, () => { during = state(t); return 42; });
+    assert.strictEqual(out, 42, 'returns what fn returns');
+    assert.deepStrictEqual(during, [':', ':', ':', 'col-hidden-pill:none', 'col-hidden-pill:none'], 'during: ' + JSON.stringify(during));
+    assert.deepStrictEqual(state(t), before, 'restored: ' + JSON.stringify(state(t)));
+  });
+
+  test('#258: unhidden restores the hiding when fn throws', () => {
+    const t = makeTable();
+    const before = state(t);
+    assert.throws(() => TR.unhidden(t, () => { throw new Error('boom'); }), /boom/);
+    assert.deepStrictEqual(state(t), before);
+  });
+}
+
 console.log('\n=== packets.js: buildGroupRowHtml ===');
 {
   const ctx = loadPacketsSandbox();

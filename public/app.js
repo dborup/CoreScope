@@ -2254,60 +2254,63 @@ function initTabBar(container, onChange) {
   });
 }
 
+// #258: columns are measured from at most COL_MEASURE_MAX_ROWS body rows. A body
+// with fewer than COL_MEASURE_MIN_ROWS usable rows only gives provisional widths.
+const COL_MEASURE_MAX_ROWS = 30;
+const COL_MEASURE_MIN_ROWS = 5;
+
 /**
- * Make table columns resizable with drag handles. Widths saved to localStorage.
- * Call after table is in DOM. Re-call safe (idempotent per table).
- * @param {string} tableSelector - CSS selector for the table
- * @param {string} storageKey - localStorage key for persisted widths
+ * #258: the body rows a column measurement can use, i.e. rows with exactly one
+ * cell per header cell. A row that spans columns (a virtual-scroll spacer, "No
+ * packets found", a group-detail row) belongs to no single column; measured by
+ * index, it used to inflate column 0.
  */
-function makeColumnsResizable(tableSelector, storageKey) {
-  const table = document.querySelector(tableSelector);
-  if (!table) return;
-  const thead = table.querySelector('thead');
-  if (!thead) return;
-  const ths = Array.from(thead.querySelectorAll('tr:first-child th'));
-  if (ths.length < 2) return;
-
-  if (table.dataset.resizable) return;
-  table.dataset.resizable = '1';
-  table.style.tableLayout = 'fixed';
-
-  const containerW = table.parentElement.clientWidth;
-  const saved = localStorage.getItem(storageKey);
-  let widths;
-
-  if (saved) {
-    try { widths = JSON.parse(saved); } catch { widths = null; }
-    // Validate: must be array of correct length with values summing to ~100 (percentages)
-    if (widths && Array.isArray(widths) && widths.length === ths.length) {
-      const sum = widths.reduce((s, w) => s + w, 0);
-      if (sum > 90 && sum < 110) {
-        // Saved percentages — apply directly
-        table.style.tableLayout = 'fixed';
-        table.style.width = '100%';
-        ths.forEach((th, i) => { th.style.width = widths[i] + '%'; });
-        // Skip measurement, jump to adding handles
-        addResizeHandles();
-        return;
-      }
+function columnMeasureRows(tbody, colCount, limit) {
+  const out = [];
+  if (!tbody) return out;
+  for (const row of tbody.rows) {
+    const cells = row.children;
+    if (cells.length !== colCount) continue;
+    let spans = false;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].colSpan > 1) { spans = true; break; }
     }
-    widths = null; // Force remeasure
+    if (spans) continue;
+    out.push(row);
+    if (out.length >= limit) break;
   }
+  return out;
+}
 
-  if (!widths) {
-    // Measure actual max content width per column by scanning visible rows
-    const tbody = table.querySelector('tbody');
-    const rows = tbody ? Array.from(tbody.querySelectorAll('tr')).slice(0, 30) : [];
+/** Saved column widths (percentages) for storageKey, or null if none are valid. */
+function readSavedColumnWidths(storageKey, colCount) {
+  const saved = localStorage.getItem(storageKey);
+  if (!saved) return null;
+  let widths;
+  try { widths = JSON.parse(saved); } catch { return null; }
+  if (!Array.isArray(widths) || widths.length !== colCount) return null;
+  const sum = widths.reduce((s, w) => s + w, 0);
+  return sum > 90 && sum < 110 ? widths : null;
+}
 
-    // Temporarily set auto layout to measure
+// Max content width per column (header + rows), measured in auto layout without
+// wrapping. TableResponsive's column hiding is lifted while measuring: the first
+// measure runs before TableResponsive.register(), and a re-measure (#258) runs
+// before it has marked the newly rendered cells, so without that the header and
+// the rows would disagree on which columns exist.
+function measureColumnWidths(table, ths, rows) {
+  const tr = window.TableResponsive;
+  const measure = () => {
     table.style.tableLayout = 'auto';
     table.style.width = 'auto';
-    // Remove nowrap temporarily so we get true content width
+    // The resize handles stick out of their th (right: -4px), which would add
+    // to its scrollWidth; the first measure runs before they exist.
+    const handles = table.querySelectorAll('.col-resize-handle');
+    handles.forEach(h => { h.style.display = 'none'; });
+    // Remove wrapping temporarily so we get true content width
     const cells = table.querySelectorAll('td, th');
     cells.forEach(c => { c.dataset.origWs = c.style.whiteSpace || ''; c.style.whiteSpace = 'nowrap'; });
-
-    // Measure each column's max content width across header + rows
-    widths = ths.map((th, i) => {
+    const widths = ths.map((th, i) => {
       let maxW = th.scrollWidth;
       rows.forEach(row => {
         const td = row.children[i];
@@ -2315,11 +2318,16 @@ function makeColumnsResizable(tableSelector, storageKey) {
       });
       return maxW + 4; // small padding buffer
     });
-
     cells.forEach(c => { c.style.whiteSpace = c.dataset.origWs || ''; delete c.dataset.origWs; });
-  }
+    handles.forEach(h => { h.style.display = ''; });
+    return widths;
+  };
+  return tr && typeof tr.unhidden === 'function' ? tr.unhidden(table, measure) : measure();
+}
 
-  // Now fit to container: if total > container, squish widest first
+// Fit measured widths to the container: if the total is too wide, squish the
+// widest columns first; if there is room left, give it to the 2 widest.
+function fitColumnWidths(widths, containerW) {
   const totalNeeded = widths.reduce((s, w) => s + w, 0);
   const finalWidths = [...widths];
 
@@ -2357,12 +2365,71 @@ function makeColumnsResizable(tableSelector, storageKey) {
     const topTotal = topN.reduce((s, x) => s + x.w, 0);
     topN.forEach(x => { finalWidths[x.i] += Math.round(surplus * (x.w / topTotal)); });
   }
+  return finalWidths;
+}
 
+// Measure the columns from `rows` and set them as percentages of the table.
+function applyMeasuredColumnWidths(table, ths, rows) {
+  const containerW = table.parentElement.clientWidth;
+  const finalWidths = fitColumnWidths(measureColumnWidths(table, ths, rows), containerW);
   table.style.width = '100%';
   const totalFinal = finalWidths.reduce((s, w) => s + w, 0);
   ths.forEach((th, i) => { th.style.width = (finalWidths[i] / totalFinal * 100) + '%'; });
+}
 
+/**
+ * Make table columns resizable with drag handles. Widths saved to localStorage.
+ * Call after table is in DOM. Re-call safe (idempotent per table).
+ * Without saved widths the columns are measured from the header and the first
+ * body rows; if the body has too few rows for that, once more when it fills (#258).
+ * @param {string} tableSelector - CSS selector for the table
+ * @param {string} storageKey - localStorage key for persisted widths
+ */
+function makeColumnsResizable(tableSelector, storageKey) {
+  const table = document.querySelector(tableSelector);
+  if (!table) return;
+  const thead = table.querySelector('thead');
+  if (!thead) return;
+  const ths = Array.from(thead.querySelectorAll('tr:first-child th'));
+  if (ths.length < 2) return;
+
+  if (table.dataset.resizable) return;
+  table.dataset.resizable = '1';
+  table.style.tableLayout = 'fixed';
+
+  const saved = readSavedColumnWidths(storageKey, ths.length);
+  if (saved) {
+    // Saved percentages — apply directly, no measurement
+    table.style.width = '100%';
+    ths.forEach((th, i) => { th.style.width = saved[i] + '%'; });
+    addResizeHandles();
+    return;
+  }
+
+  const tbody = table.querySelector('tbody');
+  const authoredWidths = ths.map(th => th.style.width);
+  const rows = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
+  applyMeasuredColumnWidths(table, ths, rows);
   addResizeHandles();
+
+  // #258: an (almost) empty first render, e.g. a quiet packets time window,
+  // only gives provisional widths. Measure once more when real rows arrive,
+  // unless the user has saved widths by then. Until then each body render costs
+  // a cheap guard; after the re-measure the observer is gone.
+  if (tbody && rows.length < COL_MEASURE_MIN_ROWS && typeof MutationObserver === 'function') {
+    const filled = new MutationObserver(() => {
+      if (!table.isConnected || readSavedColumnWidths(storageKey, ths.length)) { filled.disconnect(); return; }
+      if (tbody.rows.length < COL_MEASURE_MIN_ROWS) return;
+      const rowsNow = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
+      if (rowsNow.length < COL_MEASURE_MIN_ROWS) return;
+      filled.disconnect();
+      // Measure as the first time: the widths the page itself gave the header
+      // cells, not the provisional ones.
+      ths.forEach((th, i) => { th.style.width = authoredWidths[i]; });
+      applyMeasuredColumnWidths(table, ths, rowsNow);
+    });
+    filled.observe(tbody, { childList: true });
+  }
 
   function addResizeHandles() {
   // Add resize handles

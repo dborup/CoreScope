@@ -32,6 +32,24 @@
     if (pill) pill.remove();
   }
 
+  // #258: run fn with this module's column hiding lifted -- no col-hidden on
+  // any cell and no pill -- and put it back afterwards. makeColumnsResizable()
+  // (app.js) measures inside it, so a re-measure sees the columns as the first
+  // measure did, before register(); other CSS that hides a column still applies.
+  function unhidden(table, fn) {
+    const hidden = Array.from(table.querySelectorAll('.' + HIDDEN_CLASS));
+    const pills = Array.from(table.querySelectorAll('.' + PILL_CLASS));
+    const pillDisplay = pills.map(p => p.style.display);
+    hidden.forEach(el => el.classList.remove(HIDDEN_CLASS));
+    pills.forEach(p => { p.style.display = 'none'; });
+    try {
+      return fn();
+    } finally {
+      hidden.forEach(el => el.classList.add(HIDDEN_CLASS));
+      pills.forEach((p, i) => { p.style.display = pillDisplay[i]; });
+    }
+  }
+
   function colIndexCells(table, idx) {
     // Return the <td> at column index `idx` for every body row.
     const out = [];
@@ -221,7 +239,7 @@
     }, 120);
   });
 
-  window.TableResponsive = { apply, register, sweep: sweepDetached };
+  window.TableResponsive = { apply, register, sweep: sweepDetached, unhidden };
 })();
 
 /* === #1056 AC#4: SlideOver — narrow-viewport row-detail overlay ============

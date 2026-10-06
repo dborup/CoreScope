@@ -43,19 +43,18 @@ const VIEWPORTS = [
 ];
 
 // #244: open with the widest selectable time window, not the default 15 min.
-// makeColumnsResizable() (app.js) sizes the columns ONCE, from the rows of the
-// first render, and later time-window changes keep those widths. With the
-// default window those rows depend on the fixture age: in CI the window holds
-// only a few packets ~13 min after freshen-fixture.sh, and none after 15 min;
-// the expand column then gets ~43% of the table and Details ~5% (64px at
-// 1200px), and advert names wrap onto the clamped-away 2nd line. The newest
-// rows of a 24 h window (3 h at <=1024px, where longer windows are disabled)
-// are the same ones for the whole e2e job (150 min timeout), so the measured
-// layout no longer depends on the fixture age.
+// makeColumnsResizable() (app.js) sizes the columns from the rows of the first
+// render; since #258 a (nearly) empty first render is measured again once real
+// rows arrive (test-issue-258-column-widths-e2e.js covers that). With the
+// default window the first rows depend on the fixture age (a few packets ~13
+// min after freshen-fixture.sh, none after 15 min). The newest rows of a 24 h
+// window (3 h at <=1024px, where longer windows are disabled) are the same ones
+// for the whole e2e job (150 min timeout), so this test measures one layout
+// regardless of the fixture age.
 const pinnedWindowMin = (vp) => (vp.w > 1024 ? 1440 : 180);
-// A fixture advert with a long name ("KN6PLV-BrkOxfLA-Yebes", 21 chars) that
-// is wider than its Details clip at every viewport here; it renders near the
-// top of the list.
+// A fixture advert with a long name ("KN6PLV-BrkOxfLA-Yebes", 21 chars); it
+// renders near the top of the list. It is wider than its Details clip on
+// mobile; at 900/1200px Details is wide enough to show it (#258).
 const PINNED_ADVERT_ROW = 'e8b09a35ac87fa5c';
 // Enough of a name to read and click: about two characters.
 const MIN_VISIBLE_LINK_PX = 12;
@@ -194,13 +193,22 @@ function measureRows() {
         return checked;
       });
       assert(res.length > 0, 'no on-screen advert link in Details to check');
-      // The pinned long-name row must be among them and be cut by the clip,
-      // so the test cannot pass without exercising a long advert name.
+      // The pinned long-name row must be among them, so the test cannot pass
+      // without exercising a long advert name. On mobile its clip is narrow and
+      // the name must be cut by it (the clamped-link case). Wider, Details is
+      // sized from the real rows (#258), so the name may fit; it must then show
+      // at least half of itself, not just the icon.
       const pinned = res.find(r => r.row === PINNED_ADVERT_ROW);
       assert(pinned, `pinned advert row ${PINNED_ADVERT_ROW} is not on screen; checked: ` +
         JSON.stringify(res.map(r => [r.row, r.text])));
-      assert(pinned.truncated,
-        'pinned advert name fits its Details clip -- long names are not exercised: ' + JSON.stringify(pinned));
+      if (vp.w <= 640) {
+        assert(pinned.truncated,
+          'pinned advert name fits its mobile Details clip -- the clamped long name is not exercised: ' + JSON.stringify(pinned));
+      } else {
+        const nameW = pinned.frags.reduce((s, r) => s + (r.right - r.left), 0);
+        assert(pinned.visibleW >= nameW / 2,
+          `pinned long advert name shows ${pinned.visibleW}px of ${Math.round(nameW)}px in Details: ` + JSON.stringify(pinned));
+      }
       const hidden = res.filter(r => !(r.visibleW >= MIN_VISIBLE_LINK_PX));
       assert(hidden.length === 0, `${hidden.length}/${res.length} advert links show < ${MIN_VISIBLE_LINK_PX}px ` +
         'of their name in the one-line Details clip: ' + JSON.stringify(hidden.slice(0, 3)));
