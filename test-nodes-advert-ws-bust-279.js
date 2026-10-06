@@ -159,6 +159,11 @@ function makeHarness() {
   load('public/nodes.js');
 
   h.fetchesFor = (p) => parked.filter((f) => f.url.indexOf('/api' + p) === 0);
+  // app.js's `api` / `CLIENT_TTL` are top-level lexical bindings of the
+  // sandbox script, not properties of its global object, so reach them the
+  // way nodes.js does -- from inside the context.
+  h.apiCall = (p) => vm.runInContext(
+    'api(' + JSON.stringify(p) + ', { ttl: CLIENT_TTL.nodeList })', ctx);
   h.allNodes = () => ctx.window._nodesGetAllNodes();
   h.names = () => (h.allNodes() || []).map((n) => n.name).sort();
   h.setAllNodes = (n) => ctx.window._nodesSetAllNodes(n);
@@ -257,8 +262,7 @@ async function test(name, fn) {
     const after = h.fetchesFor('/nodes?');
     assert.strictEqual(after.length, 2, 'the refresh fetched (got ' + after.length + ')');
     // A region change with the same (empty) region param re-runs the load.
-    h.ctx.window._nodesSetAllNodes(null);
-    const joined = h.ctx.api(after[1].url.slice('/api'.length), { ttl: h.ctx.CLIENT_TTL.nodeList });
+    const joined = h.apiCall(after[1].url.slice('/api'.length));
     await flush();
     assert.strictEqual(h.fetchesFor('/nodes?').length, 2,
       'a later plain load must join the refresh request (got ' + h.fetchesFor('/nodes?').length + ')');
