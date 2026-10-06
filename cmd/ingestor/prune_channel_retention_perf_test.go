@@ -14,7 +14,9 @@ import (
 // kept channel messages). It logs wall time and the longest writer hold for
 // today's PruneOldPackets and for PruneTransmissions, each run three ways: the
 // first run, the next day's prune (one more day ages out), and a run with
-// nothing to delete. Opt-in, as seeding takes tens of seconds:
+// nothing to delete. PruneTransmissions then runs once more after the ingest
+// path wrote a 20-day-old advert, which lowers its floor to that row. Opt-in,
+// as seeding takes tens of seconds:
 //
 //	CORESCOPE_PRUNE_PERF=1 go test -run TestPruneTransmissionsChannelDaysTiming -v .
 func TestPruneTransmissionsChannelDaysTiming(t *testing.T) {
@@ -89,5 +91,7 @@ func TestPruneTransmissionsChannelDaysTiming(t *testing.T) {
 			days := step.days
 			run(t, store, step.label, func() (PruneResult, error) { return store.PruneTransmissions(days, 90) })
 		}
+		ingestRetentionPacket(t, store, "perf-late-advert", 4, 20)
+		run(t, store, "after a 20-day insert (13, 90)", func() (PruneResult, error) { return store.PruneTransmissions(13, 90) })
 	})
 }

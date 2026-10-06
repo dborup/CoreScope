@@ -134,9 +134,14 @@ type PruneResult struct {
 // the packet cutoff, under writerMu. The first run in a process starts at the
 // bottom; the startup prune runs before ingest opens, so that one long walk
 // stalls nothing. A completed run records its packet cutoff as the floor of
-// the next, so the daily run walks one day, not channelDays. That is safe
-// because first_seen is the ingest time (#1370): no non-channel row appears
-// below a cutoff that has already been pruned.
+// the next, so the daily run walks one day, not channelDays.
+//
+// first_seen is not the ingest time: it is the observer's receive time,
+// which resolveRxTime accepts up to 30 days old, and a later observation can
+// lower it. So a row can be written below a completed run's cutoff. The
+// ingest path records the lowest first_seen it writes (noteFirstSeen), and
+// each run starts at that or the floor, whichever is lower. A failed run
+// keeps its start as the floor, so nothing it took is lost.
 func (s *Store) PruneTransmissions(packetDays, channelDays int) (PruneResult, error) {
 	var r PruneResult
 	if channelDays <= packetDays || packetDays <= 0 {
@@ -152,13 +157,18 @@ func (s *Store) PruneTransmissions(packetDays, channelDays int) (PruneResult, er
 
 	// Packets first: afterwards everything below packetCutoff is a channel
 	// message, which is what keeps the channel prune's walk dense.
-	lower := s.packetPruneFloor
+	start := s.packetPruneFloor
+	if low := s.takeFirstSeenLow(); low != "" && low < start {
+		start = low
+	}
+	lower := start
 	n, err := s.pruneBatches("prune_packets", pruneAgedPacketBatch, &lower, packetCutoff)
 	r.Packets = n
 	if n > 0 {
 		log.Printf("[prune] deleted %d transmissions older than %d days (channel messages kept %d days)", n, packetDays, channelDays)
 	}
 	if err != nil {
+		s.packetPruneFloor = start
 		return r, err
 	}
 	s.packetPruneFloor = packetCutoff
@@ -168,6 +178,26 @@ func (s *Store) PruneTransmissions(packetDays, channelDays int) (PruneResult, er
 		log.Printf("[prune] deleted %d channel messages older than %d days", n, channelDays)
 	}
 	return r, err
+}
+
+// noteFirstSeen records a first_seen value InsertTransmission wrote, for the
+// next PruneTransmissions run to start at or below.
+func (s *Store) noteFirstSeen(ts string) {
+	s.firstSeenLowMu.Lock()
+	if s.firstSeenLow == "" || ts < s.firstSeenLow {
+		s.firstSeenLow = ts
+	}
+	s.firstSeenLowMu.Unlock()
+}
+
+// takeFirstSeenLow returns the lowest first_seen written since the last call
+// ("" for none) and starts a new record.
+func (s *Store) takeFirstSeenLow() string {
+	s.firstSeenLowMu.Lock()
+	defer s.firstSeenLowMu.Unlock()
+	low := s.firstSeenLow
+	s.firstSeenLow = ""
+	return low
 }
 
 // pruneBatches deletes the transmissions stmts.ids selects, with their child

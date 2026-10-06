@@ -101,6 +101,12 @@ type Store struct {
 	// before the first), where the next one starts its walk (#296).
 	pruneMu          sync.Mutex
 	packetPruneFloor string
+	// firstSeenLow is the lowest first_seen InsertTransmission has written
+	// since PruneTransmissions last took it ("" for none), so a backdated
+	// row below packetPruneFloor is still walked (#296). A leaf lock: the
+	// ingest path takes it under writerMu, never under pruneMu's long hold.
+	firstSeenLowMu sync.Mutex
+	firstSeenLow   string
 
 	// prefixIdx holds the prefix → pubkey index used by the
 	// resolved_path writer (#1547). Rebuilt on startup and once per
@@ -1158,6 +1164,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		txID = existingID
 		if rxTime < existingFirstSeen {
 			_, _ = s.stmtUpdateTxFirstSeen.Exec(rxTime, txID)
+			s.noteFirstSeen(rxTime)
 		}
 	} else {
 		// New transmission
@@ -1177,6 +1184,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		}
 		txID, _ = result.LastInsertId()
 		s.Stats.TransmissionsInserted.Add(1)
+		s.noteFirstSeen(rxTime)
 
 		// Ping-score detection: only for a brand-new CHAN transmission
 		// (payload_type 5), never re-checked on a repeat observation of
