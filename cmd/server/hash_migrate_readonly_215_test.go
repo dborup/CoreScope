@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -239,15 +238,9 @@ func hm215Migrate(s *PacketStore, batch int) string {
 // hm215CaptureLog returns what the standard logger printed while fn ran. The
 // buffer is locked: the index builders that Load() starts log their last line
 // after the ready flag WaitIndexesReady waits for, so one can still be writing
-// when the capture is read (#301).
-func hm215CaptureLog(fn func()) string {
-	buf := newSyncBuffer()
-	prev := log.Writer()
-	log.SetOutput(buf)
-	defer log.SetOutput(prev)
-	fn()
-	return buf.String()
-}
+// when the capture is read (#301). Since #310 every cmd/server capture shares
+// that one helper.
+func hm215CaptureLog(fn func()) string { return captureLog(fn) }
 
 // stmtLog records every statement a connection prepares or every transaction it
 // begins. database/sql falls back to Prepare/Begin for a driver connection that

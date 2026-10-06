@@ -233,7 +233,9 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 
 	rows, err := s.db.Query(`SELECT
 		t.payload_type,
+		COALESCE(substr(o.raw_hex, 1, 2), ''),
 		COALESCE(t.route_type, -1),
+		t.route_mask,
 		t.decoded_json,
 		COALESCE(t.from_pubkey, ''),
 		COALESCE(o.path_json, ''),
@@ -253,13 +255,14 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 	var edges []edgeRow
 	for rows.Next() {
 		b.scanned++
-		var payloadType sql.NullInt64
-		var routeType int
-		var decodedJSON, fromPubkey, pathJSON, observerID string
+		var payloadType, routeMask sql.NullInt64
+		var txRoute int
+		var header, decodedJSON, fromPubkey, pathJSON, observerID string
 		var epochTs int64
-		if err := rows.Scan(&payloadType, &routeType, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
+		if err := rows.Scan(&payloadType, &header, &txRoute, &routeMask, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
 			continue
 		}
+		routeType := observationRouteType(header, txRoute, routeMask)
 		fromNode := strings.ToLower(fromPubkey)
 		if fromNode == "" {
 			fromNode = strings.ToLower(extractPubkeyFromAdvertJSON(decodedJSON))
@@ -285,8 +288,9 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 		// routeRecvPacket, at a366955). A DIRECT path is the remaining
 		// planned route, from which each forwarder strips itself at the
 		// front (Mesh.cpp:89, removeSelfFromPath :334-342), so its last hop
-		// is the route's far end (PR #190 review). Unknown route types are
-		// skipped too.
+		// is the route's far end (PR #190 review). The route type is the
+		// observation's own (observationRouteType, #289); unknown route
+		// types are skipped too.
 		if observerPK != "" && isFloodRoute(routeType) {
 			last := path[len(path)-1]
 			if resolved, ok := resolvePrefix(prefixIdx, last); ok && resolved != observerPK {

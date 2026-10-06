@@ -22,8 +22,8 @@
  *     pinned long name ("KN6PLV-BrkOxfLA-Yebes") shows at least half of it;
  *   - later window changes keep the widths (one re-measure, no per-render work).
  * Also: saved widths (meshcore-pkt-col-widths) are applied unchanged, and a
- * resize handle still resizes and saves (Details is the last column, so the
- * Path handle is dragged left, which gives the room to the columns after it).
+ * resize handle still resizes and saves: the Time handle is dragged right,
+ * which widens Time and takes the room from the columns after it.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-258-column-widths-e2e.js
  * SCREENSHOT_DIR=<dir> also saves screenshots.
