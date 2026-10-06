@@ -146,6 +146,7 @@ func pingScoreHistoryEntryFromScore(
 	e.RelayCount = score.RelayCount
 	e.RelayPubkeysJSON = marshalRelayPubkeysJSON(score.relayPubkeys)
 	e.FirstPubkey = score.firstPubkey
+	e.DistanceFirstPubkey = score.distanceFirstPubkey
 	return e
 }
 
@@ -164,7 +165,8 @@ func pingScoreHistoryEntryFromScore(
 // for the full rationale):
 //   - score != nil ("a successful computation") replaces every path fact
 //     (StationCount, DeepestHops, DeepestPubkey, FarthestKm, FarthestPubkey,
-//     SpreadSeconds, RelayPubkeysJSON, FirstPubkey) with this cycle's
+//     SpreadSeconds, RelayPubkeysJSON, FirstPubkey, DistanceFirstPubkey)
+//     with this cycle's
 //     values, and clears Unscorable AND PermanentlyUnreconstructable (see
 //     the score != nil branch below for why the latter is a defensive
 //     clear, not an expected-to-fire code path).
@@ -218,6 +220,7 @@ func mergePingScoreHistoryEntry(
 		merged.FarthestPubkey = score.FarthestPubkey
 		merged.SpreadSeconds = score.SpreadSeconds
 		merged.FirstPubkey = score.firstPubkey
+		merged.DistanceFirstPubkey = score.distanceFirstPubkey
 		merged.RelayPubkeysJSON = marshalRelayPubkeysJSON(score.relayPubkeys)
 
 		airtimeAlreadyLocked := existing.AirtimeMs != nil && *existing.AirtimeMs > 0
@@ -276,20 +279,26 @@ func materializePingScoreFromHistoryEntry(e PingScoreHistoryEntry) (*PingScore, 
 		return nil, fmt.Errorf("materialize tx_id=%d: %w", e.TxID, err)
 	}
 	score := &PingScore{
-		Hash:           e.Hash,
-		Sender:         e.Sender,
-		ChannelHash:    e.ChannelHash,
-		Timestamp:      e.Timestamp,
-		StationCount:   e.StationCount,
-		DeepestHops:    e.DeepestHops,
-		DeepestPubkey:  e.DeepestPubkey,
-		FarthestKm:     e.FarthestKm,
-		FarthestPubkey: e.FarthestPubkey,
-		SpreadSeconds:  e.SpreadSeconds,
-		AirtimeMs:      e.AirtimeMs,
-		RelayCount:     e.RelayCount,
-		relayPubkeys:   relayPubkeys,
-		firstPubkey:    e.FirstPubkey,
+		Hash:                e.Hash,
+		Sender:              e.Sender,
+		ChannelHash:         e.ChannelHash,
+		Timestamp:           e.Timestamp,
+		StationCount:        e.StationCount,
+		DeepestHops:         e.DeepestHops,
+		DeepestPubkey:       e.DeepestPubkey,
+		FarthestKm:          e.FarthestKm,
+		FarthestPubkey:      e.FarthestPubkey,
+		SpreadSeconds:       e.SpreadSeconds,
+		AirtimeMs:           e.AirtimeMs,
+		RelayCount:          e.RelayCount,
+		relayPubkeys:        relayPubkeys,
+		firstPubkey:         e.FirstPubkey,
+		distanceFirstPubkey: e.DistanceFirstPubkey,
+	}
+	if score.distanceFirstPubkey == "" {
+		// A v1/v2 history row had only one origin fact, so its stored
+		// first station was also the origin used for its distance.
+		score.distanceFirstPubkey = e.FirstPubkey
 	}
 	if e.FarthestKm != nil && e.AirtimeMs != nil && *e.AirtimeMs > 0 {
 		kmPerSec := *e.FarthestKm / (*e.AirtimeMs / 1000.0)

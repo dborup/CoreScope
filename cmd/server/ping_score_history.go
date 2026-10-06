@@ -52,7 +52,9 @@ import (
 // PingScoreHistoryEntry.PermanentlyUnreconstructable) and the new
 // ping_score_history_gaps table (see PingScoreHistoryGap) -- both purely
 // additive, see applyPingScoreHistoryV2.
-const pingScoreHistorySchemaVersion = 2
+// v3 adds bounded displayed-record path archives and a nullable distance
+// origin fact in this sidecar. It does not alter or scan the main DB.
+const pingScoreHistorySchemaVersion = 3
 
 // PingScoreHistoryStore owns the separate, server-only SQLite connection to
 // ping_scores_history.db. Not safe for concurrent use from multiple
@@ -91,12 +93,16 @@ type PingScoreHistoryEntry struct {
 	RelayCount       int
 	RelayPubkeysJSON string
 	FirstPubkey      string
-	Unscorable       bool
-	FingerprintCount int64
-	FingerprintMaxID int64
-	StableSince      string
-	Settled          bool
-	DataPruned       bool
+	// DistanceFirstPubkey is the landmark behind FarthestKm, independent
+	// of FirstPubkey's actual earliest-hearer credit. Empty means legacy
+	// metadata: materialization falls back to FirstPubkey.
+	DistanceFirstPubkey string
+	Unscorable          bool
+	FingerprintCount    int64
+	FingerprintMaxID    int64
+	StableSince         string
+	Settled             bool
+	DataPruned          bool
 
 	// PermanentlyUnreconstructable is true only once a REAL deep-sweep
 	// attempt (not an age estimate) has actually proven, this tx_id had
@@ -550,6 +556,7 @@ type pingScoreHistoryMigration struct {
 var pingScoreHistoryMigrations = []pingScoreHistoryMigration{
 	{toVersion: 1, apply: applyPingScoreHistoryV1},
 	{toVersion: 2, apply: applyPingScoreHistoryV2},
+	{toVersion: 3, apply: applyPingScoreHistoryV3},
 }
 
 func (s *PingScoreHistoryStore) migrateFrom(fromVersion int) error {
@@ -710,10 +717,10 @@ const pingScoreHistoryUpsertSQL = `
 INSERT INTO ping_score_history_entries (
 	tx_id, hash, sender, channel_hash, timestamp, station_count, deepest_hops,
 	deepest_pubkey, farthest_km, farthest_pubkey, spread_seconds, airtime_ms,
-	relay_count, relay_pubkeys_json, first_pubkey, unscorable,
+	relay_count, relay_pubkeys_json, first_pubkey, distance_first_pubkey, unscorable,
 	fingerprint_count, fingerprint_max_id, stable_since, settled, data_pruned,
 	permanently_unreconstructable, last_deep_swept_at, computed_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(tx_id) DO UPDATE SET
 	hash=excluded.hash, sender=excluded.sender, channel_hash=excluded.channel_hash,
 	timestamp=excluded.timestamp, station_count=excluded.station_count,
@@ -721,7 +728,7 @@ ON CONFLICT(tx_id) DO UPDATE SET
 	farthest_km=excluded.farthest_km, farthest_pubkey=excluded.farthest_pubkey,
 	spread_seconds=excluded.spread_seconds, airtime_ms=excluded.airtime_ms,
 	relay_count=excluded.relay_count, relay_pubkeys_json=excluded.relay_pubkeys_json,
-	first_pubkey=excluded.first_pubkey, unscorable=excluded.unscorable,
+	first_pubkey=excluded.first_pubkey, distance_first_pubkey=excluded.distance_first_pubkey, unscorable=excluded.unscorable,
 	fingerprint_count=excluded.fingerprint_count, fingerprint_max_id=excluded.fingerprint_max_id,
 	stable_since=excluded.stable_since, settled=excluded.settled, data_pruned=excluded.data_pruned,
 	permanently_unreconstructable=excluded.permanently_unreconstructable,
@@ -759,8 +766,9 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndIntegrity(upserts []PingScoreHist
 // delete, and up to three optional metadata writes -- an integrity record,
 // a gap record, and the one-time history-initialized marker -- all as ONE
 // SQL transaction: either everything lands, or (on any error) NONE of it
-// does -- the deferred Rollback is a no-op after a successful Commit, and
-// fires on every error path before this function returns.
+// does. Statement failures use deferred Rollback; a final Commit failure
+// additionally clears SQLite's still-open transaction on the sole pooled
+// connection before this function returns.
 //
 // This exists (Phase 4D, extended in the fix-round-2 review of a1c3022d)
 // because none of these metadata writes are safe to persist as a SEPARATE
@@ -784,10 +792,17 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndIntegrity(upserts []PingScoreHist
 //     value is an RFC3339 timestamp to record under the `_meta` key
 //     'history_initialized_at'.
 func (s *PingScoreHistoryStore) UpsertDeleteAndMetadata(upserts []PingScoreHistoryEntry, deleteTxIDs []int64, integrity *PingScoreHistoryIntegrity, gap *PingScoreHistoryGap, historyInitializedAt *string) error {
+	return s.upsertDeleteMetadataAndArchives(upserts, deleteTxIDs, integrity, gap, historyInitializedAt, nil)
+}
+
+// A non-nil archives map replaces the complete bounded displayed-slot set
+// in the very same transaction as this cycle's scores. A nil map preserves
+// the set (legacy callers, or an unchanged path archive set).
+func (s *PingScoreHistoryStore) upsertDeleteMetadataAndArchives(upserts []PingScoreHistoryEntry, deleteTxIDs []int64, integrity *PingScoreHistoryIntegrity, gap *PingScoreHistoryGap, historyInitializedAt *string, archives map[string]PingScorePathArchive) error {
 	if s.readOnly {
 		return fmt.Errorf("ping score history store: read-only (on-disk schema is newer than this code understands)")
 	}
-	if len(upserts) == 0 && len(deleteTxIDs) == 0 && integrity == nil && gap == nil && historyInitializedAt == nil {
+	if len(upserts) == 0 && len(deleteTxIDs) == 0 && integrity == nil && gap == nil && historyInitializedAt == nil && archives == nil {
 		return nil
 	}
 
@@ -809,7 +824,7 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndMetadata(upserts []PingScoreHisto
 				e.StationCount, e.DeepestHops, nullableString(e.DeepestPubkey),
 				nullableFloat(e.FarthestKm), nullableString(e.FarthestPubkey), nullableFloat(e.SpreadSeconds),
 				nullableFloat(e.AirtimeMs), e.RelayCount, nullableString(e.RelayPubkeysJSON),
-				nullableString(e.FirstPubkey), boolToInt(e.Unscorable),
+				nullableString(e.FirstPubkey), nullableString(e.DistanceFirstPubkey), boolToInt(e.Unscorable),
 				e.FingerprintCount, e.FingerprintMaxID, nullableString(e.StableSince),
 				boolToInt(e.Settled), boolToInt(e.DataPruned), boolToInt(e.PermanentlyUnreconstructable),
 				nullableString(e.LastDeepSweptAt), e.ComputedAt,
@@ -892,7 +907,24 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndMetadata(upserts []PingScoreHisto
 		}
 	}
 
+	if err := writePingScorePathArchives(tx, archives); err != nil {
+		return fmt.Errorf("ping score history store: record path archives: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
+		// database/sql marks a Tx done before asking SQLite to COMMIT.
+		// SQLite can leave the transaction open when COMMIT fails (for
+		// example on a deferred constraint), so tx.Rollback's deferred
+		// call would then be an ErrTxDone no-op. This single-owner pool
+		// has exactly one connection: explicitly clear that transaction
+		// before any later read/write can see its uncommitted candidate.
+		if _, rollbackErr := s.conn.Exec(`ROLLBACK`); rollbackErr != nil {
+			// A lost/automatically rolled-back connection may report that
+			// there is no active transaction. Retiring the pool is safe in
+			// either case and prevents a genuinely poisoned connection
+			// from being used for a subsequent publication.
+			s.conn.Close()
+			return fmt.Errorf("ping score history store: commit: %w; rollback cleanup: %v", err, rollbackErr)
+		}
 		return fmt.Errorf("ping score history store: commit: %w", err)
 	}
 	return nil
@@ -903,14 +935,27 @@ func (s *PingScoreHistoryStore) UpsertDeleteAndMetadata(upserts []PingScoreHisto
 // future column from a newer schema version) never changes what this
 // specific code version reads.
 func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
-	rows, err := s.conn.Query(`
+	distanceOriginColumn := "distance_first_pubkey"
+	if s.readOnly {
+		// A future-version file may have the old-compatible score table
+		// without this optional column. Stay physically read-only and
+		// retain its legacy origin semantics rather than migrating it.
+		var present int
+		if err := s.conn.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('ping_score_history_entries') WHERE name='distance_first_pubkey'`).Scan(&present); err != nil {
+			return nil, fmt.Errorf("ping score history store: inspect distance origin column: %w", err)
+		}
+		if present == 0 {
+			distanceOriginColumn = "NULL"
+		}
+	}
+	rows, err := s.conn.Query(fmt.Sprintf(`
 		SELECT tx_id, hash, sender, channel_hash, timestamp, station_count, deepest_hops,
 			deepest_pubkey, farthest_km, farthest_pubkey, spread_seconds, airtime_ms,
-			relay_count, relay_pubkeys_json, first_pubkey, unscorable,
+			relay_count, relay_pubkeys_json, first_pubkey, %s, unscorable,
 			fingerprint_count, fingerprint_max_id, stable_since, settled, data_pruned,
 			permanently_unreconstructable, last_deep_swept_at, computed_at
 		FROM ping_score_history_entries
-		ORDER BY tx_id`)
+		ORDER BY tx_id`, distanceOriginColumn))
 	if err != nil {
 		return nil, fmt.Errorf("ping score history store: load all: %w", err)
 	}
@@ -919,7 +964,7 @@ func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
 	var out []PingScoreHistoryEntry
 	for rows.Next() {
 		var e PingScoreHistoryEntry
-		var sender, channelHash, deepestPubkey, farthestPubkey, relayPubkeysJSON, firstPubkey sql.NullString
+		var sender, channelHash, deepestPubkey, farthestPubkey, relayPubkeysJSON, firstPubkey, distanceFirstPubkey sql.NullString
 		var stableSince, lastDeepSweptAt sql.NullString
 		var farthestKm, spreadSeconds, airtimeMs sql.NullFloat64
 		var relayCount sql.NullInt64
@@ -927,7 +972,7 @@ func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
 		if err := rows.Scan(
 			&e.TxID, &e.Hash, &sender, &channelHash, &e.Timestamp, &e.StationCount, &e.DeepestHops,
 			&deepestPubkey, &farthestKm, &farthestPubkey, &spreadSeconds, &airtimeMs,
-			&relayCount, &relayPubkeysJSON, &firstPubkey, &unscorable,
+			&relayCount, &relayPubkeysJSON, &firstPubkey, &distanceFirstPubkey, &unscorable,
 			&e.FingerprintCount, &e.FingerprintMaxID, &stableSince, &settled, &dataPruned,
 			&permanentlyUnreconstructable, &lastDeepSweptAt, &e.ComputedAt,
 		); err != nil {
@@ -939,6 +984,7 @@ func (s *PingScoreHistoryStore) LoadAll() ([]PingScoreHistoryEntry, error) {
 		e.FarthestPubkey = farthestPubkey.String
 		e.RelayPubkeysJSON = relayPubkeysJSON.String
 		e.FirstPubkey = firstPubkey.String
+		e.DistanceFirstPubkey = distanceFirstPubkey.String
 		e.StableSince = stableSince.String
 		e.LastDeepSweptAt = lastDeepSweptAt.String
 		if farthestKm.Valid {
