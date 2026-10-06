@@ -457,7 +457,7 @@ type PacketStore struct {
 	apiResolvedPathLRU            map[int]resolvedPathLRUEntry // obsID → resolved path (LRU cache for API, entries expire after resolvedPathLRUTTL)
 	lruOrder                      []int                        // FIFO order for LRU eviction
 	lruMu                         sync.RWMutex                 // guards apiResolvedPathLRU + lruOrder
-	lruClock                      func() time.Time             // test hook for LRU entry age; nil = time.Now
+	lruClock                      func() time.Time             // test hook standing in for time.Now in lruNow; nil = time.Since(lruEpoch), monotonic
 
 	// confirmResolvedPathQueries counts SQL round-trips made by
 	// confirmResolvedPathContains. Each one scans the tx's observation rows,

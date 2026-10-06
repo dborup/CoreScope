@@ -320,11 +320,12 @@ type resolvedPathLRUEntry struct {
 // entry ages are immune to wall-clock steps and cost one clock read.
 var lruEpoch = time.Now()
 
-// lruNow is the LRU clock in nanoseconds (monotonic; the lruClock test hook
-// replaces it).
+// lruNow is the LRU clock: nanoseconds since lruEpoch. The lruClock test hook
+// stands in for time.Now and is measured from the same epoch, so installing it
+// while entries exist keeps their ages.
 func (s *PacketStore) lruNow() int64 {
 	if s.lruClock != nil {
-		return s.lruClock().UnixNano()
+		return int64(s.lruClock().Sub(lruEpoch))
 	}
 	return int64(time.Since(lruEpoch))
 }
