@@ -32,6 +32,24 @@
     if (pill) pill.remove();
   }
 
+  // #258: run fn with this module's column hiding lifted -- no col-hidden on
+  // any cell and no pill -- and put it back afterwards. makeColumnsResizable()
+  // (app.js) measures inside it, so a re-measure sees the columns as the first
+  // measure did, before register(); other CSS that hides a column still applies.
+  function unhidden(table, fn) {
+    const hidden = Array.from(table.querySelectorAll('.' + HIDDEN_CLASS));
+    const pills = Array.from(table.querySelectorAll('.' + PILL_CLASS));
+    const pillDisplay = pills.map(p => p.style.display);
+    hidden.forEach(el => el.classList.remove(HIDDEN_CLASS));
+    pills.forEach(p => { p.style.display = 'none'; });
+    try {
+      return fn();
+    } finally {
+      hidden.forEach(el => el.classList.add(HIDDEN_CLASS));
+      pills.forEach((p, i) => { p.style.display = pillDisplay[i]; });
+    }
+  }
+
   function colIndexCells(table, idx) {
     // Return the <td> at column index `idx` for every body row.
     const out = [];
@@ -221,7 +239,7 @@
     }, 120);
   });
 
-  window.TableResponsive = { apply, register, sweep: sweepDetached };
+  window.TableResponsive = { apply, register, sweep: sweepDetached, unhidden };
 })();
 
 /* === #1056 AC#4: SlideOver — narrow-viewport row-detail overlay ============
@@ -2410,6 +2428,18 @@
     return !!(window.MobilePageActions && window.MobilePageActions.isMobile());
   }
 
+  // #259: a group expanded on desktop used to keep its child rows after the
+  // layout crossed to the mobile mode, where the expand column is hidden and
+  // the row only selects — nothing was left to collapse it with (the dead end
+  // upstream #1461 #7 describes). The hash stays in expandedHashes, so the
+  // children come back on desktop and a phone rotation does not throw the
+  // state away; it is only the rendered slice that leaves them out. This also
+  // covers the first render at a narrow width, e.g. the #866 deep link
+  // #/packets/<hash>/<obs>, which expands the hash before any render.
+  function groupIsExpandedInView(hash) {
+    return expandedHashes.has(hash) && !groupRowSelectsOnActivate();
+  }
+
   // A group row's action and aria-expanded depend on that breakpoint, so a
   // resize that crosses it (e.g. a phone rotating) re-renders the visible rows.
   let _groupRowsSelect = false;
@@ -2421,6 +2451,9 @@
       if (selects === _groupRowsSelect) return;
       _groupRowsSelect = selects;
       if (!_displayGrouped) return;
+      // #259: crossing the breakpoint changes how many DOM rows an expanded
+      // group produces, so the cached per-entry counts are stale.
+      _invalidateRowCounts();
       _lastVisibleStart = -1;
       _lastVisibleEnd = -1;
       renderVisibleRows();
@@ -2429,7 +2462,7 @@
 
   // Build HTML for a single grouped packet row
   function buildGroupRowHtml(p, entryIdx = -1) {
-    const isExpanded = expandedHashes.has(p.hash);
+    const isExpanded = groupIsExpandedInView(p.hash);
     let headerObserverId = p.observer_id;
     let headerPathJson = p.path_json;
     if (_observerFilterSet && p._children?.length) {
@@ -2575,7 +2608,7 @@
   // Used by both row counting and renderVisibleRows to avoid divergence (#424).
   function _getRowCount(p) {
     if (!_displayGrouped) return 1;
-    if (!expandedHashes.has(p.hash) || !p._children) return 1;
+    if (!groupIsExpandedInView(p.hash) || !p._children) return 1;
     let childCount = p._children.length;
     if (_observerFilterSet) {
       childCount = p._children.filter(c => _observerFilterSet.has(String(c.observer_id))).length;
@@ -3516,10 +3549,12 @@
       } catch {}
     }
 
-    // Parse hash size from path byte
-    const plOff = getPathLenOffset(pkt.route_type);
-    const rawPathByte = pkt.raw_hex ? parseInt(pkt.raw_hex.slice(plOff * 2, plOff * 2 + 2), 16) : NaN;
-    const hashSize = (isNaN(rawPathByte) || (rawPathByte & 0x3F) === 0) ? null : ((rawPathByte >> 6) + 1);
+    // Sender-selected hash width from the path byte. Read it from the SAME
+    // frame the rest of the panel describes (the selected observation's
+    // raw_hex, see buildFieldTable's argument below) -- observations of one
+    // transmission can carry different route types, so the original frame's
+    // header would otherwise contradict the byte breakdown.
+    const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);
 
     const size = effectivePkt.raw_hex ? Math.floor(effectivePkt.raw_hex.length / 2) : (pkt.raw_hex ? Math.floor(pkt.raw_hex.length / 2) : 0);
     const typeName = payloadTypeName(pkt.payload_type);
@@ -3872,9 +3907,27 @@
     // Path length byte is at current offset (byte 1 for non-transport, byte 5 for transport)
     const pathLenOffset = off;
     const pathByte0 = parseInt(buf.slice(off * 2, off * 2 + 2), 16);
-    const hashSizeVal = isNaN(pathByte0) ? '?' : ((pathByte0 >> 6) + 1);
     const hashCountVal = isNaN(pathByte0) ? '?' : (pathByte0 & 0x3F);
-    rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), hashCountVal === 0 ? `hash_count=0 (direct advert)` : `hash_size=${hashSizeVal} byte${hashSizeVal !== 1 ? 's' : ''}, hash_count=${hashCountVal}`);
+    const encodedHashSize = senderPathHashSize(buf);
+    // senderPathHashSize collapses every "no width here" case to null. This is
+    // the byte breakdown, so say WHICH one it is instead of dropping the bits
+    // on the floor: path bytes that are not hops at all (TRACE carries SNR),
+    // a width field of 0b11 (there is no 4-byte width -- the backend evidence
+    // model only knows 1/2/3, see observed_path_hash_sizes.go), or
+    // sendZeroHop's 0x00 direct marker, which encodes no width by design.
+    const headerByte = parseInt(buf.slice(0, 2), 16);
+    const pathBytesAreHops = !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) !== 9;
+    let pathDescription;
+    if (encodedHashSize != null) {
+      pathDescription = `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;
+    } else if (!pathBytesAreHops) {
+      pathDescription = `hash_count=${hashCountVal} (TRACE: path bytes are SNR, not a hash width)`;
+    } else if (!isNaN(pathByte0) && (pathByte0 >> 6) === 3) {
+      pathDescription = `hash_count=${hashCountVal} (width bits 7-6 = 3: not a valid hash size, 1-3 bytes only)`;
+    } else {
+      pathDescription = `hash_count=${hashCountVal} (no encoded hash size)`;
+    }
+    rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), pathDescription);
     off += 1;
 
     // Path — render hops from path_json (what this observation reported).
@@ -3906,7 +3959,7 @@
     rows += sectionRow('Payload — ' + payloadTypeName(pkt.payload_type), 'section-payload');
 
     if (decoded.type === 'ADVERT') {
-      if (hashCountVal !== 0) rows += fieldRow(pathLenOffset, 'Advertised Hash Size', hashSizeVal + ' byte' + (hashSizeVal !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(pathLenOffset * 2, pathLenOffset * 2 + 2) || '??') + ' — bits 7-6 = ' + (hashSizeVal - 1));
+      if (encodedHashSize != null) rows += fieldRow(pathLenOffset, 'Advertised Hash Size', encodedHashSize + ' byte' + (encodedHashSize !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(pathLenOffset * 2, pathLenOffset * 2 + 2) || '??') + ' — bits 7-6 = ' + (encodedHashSize - 1));
       rows += fieldRow(off, 'Public Key (32B)', truncate(decoded.pubKey || '', 24), '');
       rows += fieldRow(off + 32, 'Timestamp (4B)', decoded.timestampISO || '', 'Unix: ' + (decoded.timestamp || ''));
       rows += fieldRow(off + 36, 'Signature (64B)', truncate(decoded.signature || '', 24), '');
@@ -4335,6 +4388,12 @@
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },
       _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
+      // #259: at <= 600 px groupIsExpandedInView() renders a hash that *is* in
+      // expandedHashes exactly like a collapsed row, so the DOM alone can no
+      // longer tell "did not expand" from "expanded invisibly". The mobile E2E
+      // assertions read the set itself through this.
+      _isExpanded: function(hash) { return expandedHashes.has(hash); },
+      _setDisplayGrouped: function(on) { _displayGrouped = !!on; },
     };
   }
 

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/mbcapqueue"
+	"github.com/meshcore-analyzer/packetpath"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -676,7 +677,14 @@ func dedupeHopsByPair(hops []distHopRecord, limit int) []map[string]interface{} 
 	for k, v := range pairMap {
 		pairs = append(pairs, pairEntry{k, v})
 	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].agg.best.Dist > pairs[j].agg.best.Dist })
+	// #256: pairMap iteration order is random; break distance ties on the
+	// pair key so the order (and which tied pairs make the limit) is stable.
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].agg.best.Dist != pairs[j].agg.best.Dist {
+			return pairs[i].agg.best.Dist > pairs[j].agg.best.Dist
+		}
+		return pairs[i].key < pairs[j].key
+	})
 	result := make([]map[string]interface{}, 0, min(limit, len(pairs)))
 	for i, pe := range pairs {
 		if i >= limit {
@@ -6490,6 +6498,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 					"routeType":             intPtrOrNil(tx.RouteType),
 					"entryPrefix":           pathFirstHop(tx.PathJSON),
 					"observedPathHashSizes": tx.observedPathHashSizes(),
+					"senderPathHashSize":    packetpath.SenderHashSize(tx.RawHex),
 				},
 				Repeats:   1,
 				Observers: observers,
@@ -6766,8 +6775,14 @@ func (s *PacketStore) computeAnalyticsChannels(region, area string, window TimeW
 			"lastActivity": c.LastActivity, "encrypted": c.Encrypted,
 		})
 	}
+	// #256: channelMap iteration order is random; ties break on the channel
+	// hash (the map key) so equal counts keep one order across recomputes.
 	sort.Slice(channelList, func(i, j int) bool {
-		return channelList[i]["messages"].(int) > channelList[j]["messages"].(int)
+		mi, mj := channelList[i]["messages"].(int), channelList[j]["messages"].(int)
+		if mi != mj {
+			return mi > mj
+		}
+		return channelList[i]["hash"].(string) < channelList[j]["hash"].(string)
 	})
 
 	// Top senders
@@ -6779,7 +6794,12 @@ func (s *PacketStore) computeAnalyticsChannels(region, area string, window TimeW
 	for n, c := range senderCounts {
 		senderList = append(senderList, senderEntry{n, c})
 	}
-	sort.Slice(senderList, func(i, j int) bool { return senderList[i].count > senderList[j].count })
+	sort.Slice(senderList, func(i, j int) bool {
+		if senderList[i].count != senderList[j].count {
+			return senderList[i].count > senderList[j].count
+		}
+		return senderList[i].name < senderList[j].name
+	})
 	topSenders := make([]map[string]interface{}, 0)
 	for i, e := range senderList {
 		if i >= 15 {
@@ -6800,7 +6820,12 @@ func (s *PacketStore) computeAnalyticsChannels(region, area string, window TimeW
 			tlList = append(tlList, tlEntry{parts[0], parts[1], count})
 		}
 	}
-	sort.Slice(tlList, func(i, j int) bool { return tlList[i].hour < tlList[j].hour })
+	sort.Slice(tlList, func(i, j int) bool {
+		if tlList[i].hour != tlList[j].hour {
+			return tlList[i].hour < tlList[j].hour
+		}
+		return tlList[i].channel < tlList[j].channel
+	})
 	channelTimeline := make([]map[string]interface{}, 0, len(tlList))
 	for _, e := range tlList {
 		channelTimeline = append(channelTimeline, map[string]interface{}{
@@ -7237,7 +7262,13 @@ func (s *PacketStore) computeAnalyticsRF(region, area string, window TimeWindow)
 		}
 		payloadTypes = append(payloadTypes, ptEntry{Type: t, Name: name, Count: c})
 	}
-	sort.Slice(payloadTypes, func(i, j int) bool { return payloadTypes[i].Count > payloadTypes[j].Count })
+	// #256: built from maps; ties break on the map key for a stable order.
+	sort.Slice(payloadTypes, func(i, j int) bool {
+		if payloadTypes[i].Count != payloadTypes[j].Count {
+			return payloadTypes[i].Count > payloadTypes[j].Count
+		}
+		return payloadTypes[i].Type < payloadTypes[j].Type
+	})
 
 	// SNR by type
 	type snrTypeEntry struct {
@@ -7259,7 +7290,12 @@ func (s *PacketStore) computeAnalyticsRF(region, area string, window TimeWindow)
 			Min: minF64(d.vals), Max: maxF64(d.vals),
 		})
 	}
-	sort.Slice(snrByTypeArr, func(i, j int) bool { return snrByTypeArr[i].Count > snrByTypeArr[j].Count })
+	sort.Slice(snrByTypeArr, func(i, j int) bool {
+		if snrByTypeArr[i].Count != snrByTypeArr[j].Count {
+			return snrByTypeArr[i].Count > snrByTypeArr[j].Count
+		}
+		return snrByTypeArr[i].Name < snrByTypeArr[j].Name
+	})
 
 	// Signal over time
 	type sigTimeEntry struct {
@@ -8271,7 +8307,17 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 	for h, c := range hopFreq {
 		freqList = append(freqList, freqEntry{h, c})
 	}
-	sort.Slice(freqList, func(i, j int) bool { return freqList[i].count > freqList[j].count })
+	// #256: hopFreq/pairFreq iteration order is random; ties break on the
+	// hop (pair) key so the order and the top-N cut are stable.
+	byCountThenHop := func(list []freqEntry) func(i, j int) bool {
+		return func(i, j int) bool {
+			if list[i].count != list[j].count {
+				return list[i].count > list[j].count
+			}
+			return list[i].hop < list[j].hop
+		}
+	}
+	sort.Slice(freqList, byCountThenHop(freqList))
 	topRepeaters := make([]map[string]interface{}, 0)
 	for i, e := range freqList {
 		if i >= 20 {
@@ -8291,7 +8337,7 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 	for p, c := range pairFreq {
 		pairList = append(pairList, freqEntry{p, c})
 	}
-	sort.Slice(pairList, func(i, j int) bool { return pairList[i].count > pairList[j].count })
+	sort.Slice(pairList, byCountThenHop(pairList))
 	topPairs := make([]map[string]interface{}, 0)
 	for i, e := range pairList {
 		if i >= 15 {
@@ -8342,6 +8388,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		}
 		observers = append(observers, map[string]interface{}{"id": id, "name": n})
 	}
+	// #256: built from a map with no sort; the first entry is the frontend's
+	// default observer tab, so give it a stable order.
+	sort.Slice(observers, func(i, j int) bool {
+		return observers[i]["id"].(string) < observers[j]["id"].(string)
+	})
 
 	// Per-observer reachability
 	perObserverReach := map[string]interface{}{}
@@ -8373,7 +8424,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		rings := make([]map[string]interface{}, 0)
 		for dist, nodeList := range byDist {
 			sort.Slice(nodeList, func(i, j int) bool {
-				return nodeList[i]["count"].(int) > nodeList[j]["count"].(int)
+				ci, cj := nodeList[i]["count"].(int), nodeList[j]["count"].(int)
+				if ci != cj {
+					return ci > cj
+				}
+				return nodeList[i]["hop"].(string) < nodeList[j]["hop"].(string)
 			})
 			rings = append(rings, map[string]interface{}{"hops": dist, "nodes": nodeList})
 		}
@@ -8399,7 +8454,10 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 				"observer_id": obsID, "observer_name": obsName,
 				"minDist": data.minDist, "count": data.count,
 			})
-			if bp, ok := bestPath[hop]; !ok || data.minDist < bp["minDist"].(int) {
+			// #256: perObserver iteration order is random; among observers
+			// tied on minDist report the lowest observer id.
+			if bp, ok := bestPath[hop]; !ok || data.minDist < bp["minDist"].(int) ||
+				(data.minDist == bp["minDist"].(int) && obsID < bp["observer_id"].(string)) {
 				bestPath[hop] = map[string]interface{}{
 					"minDist": data.minDist, "observer_id": obsID, "observer_name": obsName,
 				}
@@ -8414,7 +8472,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 			continue
 		}
 		sort.Slice(obs, func(i, j int) bool {
-			return obs[i]["minDist"].(int) < obs[j]["minDist"].(int)
+			di, dj := obs[i]["minDist"].(int), obs[j]["minDist"].(int)
+			if di != dj {
+				return di < dj
+			}
+			return obs[i]["observer_id"].(string) < obs[j]["observer_id"].(string)
 		})
 		r := resolveHop(hop)
 		entry := map[string]interface{}{
@@ -8427,8 +8489,12 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		multiObsNodes = append(multiObsNodes, entry)
 	}
 	sort.Slice(multiObsNodes, func(i, j int) bool {
-		return len(multiObsNodes[i]["observers"].([]map[string]interface{})) >
-			len(multiObsNodes[j]["observers"].([]map[string]interface{}))
+		ni := len(multiObsNodes[i]["observers"].([]map[string]interface{}))
+		nj := len(multiObsNodes[j]["observers"].([]map[string]interface{}))
+		if ni != nj {
+			return ni > nj
+		}
+		return multiObsNodes[i]["hop"].(string) < multiObsNodes[j]["hop"].(string)
 	})
 	if len(multiObsNodes) > 50 {
 		multiObsNodes = multiObsNodes[:50]
@@ -8450,7 +8516,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		bestPathList = append(bestPathList, entry)
 	}
 	sort.Slice(bestPathList, func(i, j int) bool {
-		return bestPathList[i]["minDist"].(int) < bestPathList[j]["minDist"].(int)
+		di, dj := bestPathList[i]["minDist"].(int), bestPathList[j]["minDist"].(int)
+		if di != dj {
+			return di < dj
+		}
+		return bestPathList[i]["hop"].(string) < bestPathList[j]["hop"].(string)
 	})
 	if len(bestPathList) > 50 {
 		bestPathList = bestPathList[:50]
@@ -9153,8 +9223,14 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 	for hex, data := range uniqueHops {
 		hopList = append(hopList, hopEntry{hex, data})
 	}
+	// #256: uniqueHops iteration order is random; ties break on the hop hex
+	// so the order and the top-50 cut are stable.
 	sort.Slice(hopList, func(i, j int) bool {
-		return hopList[i].data["count"].(int) > hopList[j].data["count"].(int)
+		ci, cj := hopList[i].data["count"].(int), hopList[j].data["count"].(int)
+		if ci != cj {
+			return ci > cj
+		}
+		return hopList[i].hex < hopList[j].hex
 	})
 	topHops := make([]map[string]interface{}, 0)
 	for i, e := range hopList {
@@ -9187,8 +9263,14 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 			})
 		}
 	}
+	// #256: byNode iteration order is random; ties break on pubkey so the
+	// adopters table's default ("server order") is the same on every recompute.
 	sort.Slice(multiByteNodes, func(i, j int) bool {
-		return multiByteNodes[i]["packets"].(int) > multiByteNodes[j]["packets"].(int)
+		pi, pj := multiByteNodes[i]["packets"].(int), multiByteNodes[j]["packets"].(int)
+		if pi != pj {
+			return pi > pj
+		}
+		return multiByteNodes[i]["pubkey"].(string) < multiByteNodes[j]["pubkey"].(string)
 	})
 
 	// Distribution by repeaters: count unique REPEATER nodes per hash size
@@ -11080,7 +11162,14 @@ func (s *PacketStore) rankSubpaths(counts map[string]*subpathAccum, totalPaths, 
 	for path, data := range counts {
 		ranked = append(ranked, subpathEntry{path, data.count, data.raw})
 	}
-	sort.Slice(ranked, func(i, j int) bool { return ranked[i].count > ranked[j].count })
+	// #256: counts iteration order is random; ties break on the path so the
+	// order and the limit cut are stable.
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].count != ranked[j].count {
+			return ranked[i].count > ranked[j].count
+		}
+		return ranked[i].path < ranked[j].path
+	})
 	if len(ranked) > limit {
 		ranked = ranked[:limit]
 	}

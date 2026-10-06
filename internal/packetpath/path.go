@@ -52,6 +52,42 @@ func DecodePathFromRawHex(rawHex string) ([]string, error) {
 	return hops, nil
 }
 
+// SenderHashSize reads the width chosen for this frame from the path byte.
+// Floods encode the width even with zero relay hops. A direct 0x00 path byte
+// is sendZeroHop's marker and carries no width; TRACE path bytes are SNR.
+// Zero means the width cannot be established from the supplied header.
+func SenderHashSize(rawHex string) int {
+	header, ok := pathHeaderByte(rawHex, 0)
+	if !ok || !PathBytesAreHops(header>>2&0x0f) {
+		return 0
+	}
+	route := RouteTypeFromHeader(header)
+	offset := 1
+	if IsTransportRoute(route) {
+		offset += 4
+	}
+	pathByte, ok := pathHeaderByte(rawHex, offset)
+	if !ok || pathByte>>6 == 3 {
+		return 0
+	}
+	if pathByte == 0 && (route == RouteDirect || route == RouteTransportDirect) {
+		return 0
+	}
+	return int(pathByte>>6) + 1
+}
+
+func pathHeaderByte(rawHex string, offset int) (byte, bool) {
+	start := offset * 2
+	if len(rawHex) < start+2 {
+		return 0, false
+	}
+	var b [1]byte
+	if _, err := hex.Decode(b[:], []byte(rawHex[start:start+2])); err != nil {
+		return 0, false
+	}
+	return b[0], true
+}
+
 // DecodeHopsForPayload returns the header path hops only when the payload type's
 // header bytes are actually route hops (i.e. PathBytesAreHops(payloadType) is true).
 // For TRACE packets it returns (nil, ErrPayloadHasNoHeaderHops) so the caller is

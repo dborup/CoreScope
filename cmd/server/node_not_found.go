@@ -45,8 +45,9 @@ type observerRef struct {
 }
 
 // lookupMissingNode builds the 404 body for a pubkey that has no nodes row:
-// two read-only primary-key-sized lookups, run only on that 404 path. The
-// visibility rule is identityHidden, applied to both names found here.
+// two read-only lookups, run only on that 404 path. The visibility rule is
+// identityHidden, applied to every name found here -- the inactive node's and
+// one per observer alias of the key (#286).
 func (s *Server) lookupMissingNode(ctx context.Context, pubkey string) (nodeNotFoundResponse, error) {
 	resp := nodeNotFoundResponse{Error: "Not found"}
 	if s.db == nil || s.db.conn == nil {
@@ -70,29 +71,58 @@ func (s *Server) lookupMissingNode(ctx context.Context, pubkey string) (nodeNotF
 		}
 	}
 
-	// Observer ids arrive raw from the MQTT topic in any case; the table is
-	// small, and this runs once per missing-node page view.
-	var o observerRef
-	err = s.db.conn.QueryRowContext(ctx, `SELECT id, COALESCE(name, ''), COALESCE(last_seen, '')
-		FROM observers WHERE lower(id) = ? ORDER BY last_seen DESC LIMIT 1`, pk).Scan(&o.ID, &o.Name, &o.LastSeen)
-	switch {
-	case err == nil:
-		resp.Observer = &o
-	case !errors.Is(err, sql.ErrNoRows):
+	// Observer ids arrive raw from the MQTT topic in any case, so one pubkey
+	// can hold several rows that differ only in letter case. Every row is
+	// read, not just the newest: all their names feed the visibility check
+	// below, so a hidden name on an older alias still hides the identity
+	// (#286). The newest row is the one returned, by the same ordering, with
+	// the id as a tie-break so a tie is answered deterministically. The table
+	// is small, aliases of one key are a handful, and this runs once per
+	// missing-node page view.
+	observerNames, observer, err := s.missingNodeObservers(ctx, pk)
+	if err != nil {
 		return resp, err
 	}
+	resp.Observer = observer
 
-	var names []string
+	names := observerNames
 	if resp.InactiveNode != nil {
 		names = append(names, resp.InactiveNode.Name)
-	}
-	if resp.Observer != nil {
-		names = append(names, resp.Observer.Name)
 	}
 	if identityHidden(s.cfg, pk, names...) {
 		return nodeNotFoundResponse{Error: "Not found"}, nil
 	}
 	return resp, nil
+}
+
+// missingNodeObservers returns the names of every observers row whose id is
+// pk ignoring case, plus the newest of those rows, or nil when the pubkey
+// never uploaded as an observer (#286).
+func (s *Server) missingNodeObservers(ctx context.Context, pk string) ([]string, *observerRef, error) {
+	rows, err := s.db.conn.QueryContext(ctx, `SELECT id, COALESCE(name, ''), COALESCE(last_seen, '')
+		FROM observers WHERE lower(id) = ? ORDER BY last_seen DESC, id`, pk)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var (
+		names  []string
+		newest *observerRef
+	)
+	for rows.Next() {
+		var o observerRef
+		if err := rows.Scan(&o.ID, &o.Name, &o.LastSeen); err != nil {
+			return nil, nil, err
+		}
+		names = append(names, o.Name)
+		if newest == nil {
+			newest = &o
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return names, newest, nil
 }
 
 // missingNodeLogEvery bounds the log of failed missing-node lookups (#208):

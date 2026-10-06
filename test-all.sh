@@ -39,6 +39,7 @@ run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
 run test-app-api-inflight-cleanup-rejection.js
+run test-app-api-bust-inflight-243.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
 run test-nav-dynamic-link-lifecycle.js
@@ -58,6 +59,8 @@ run test-important-links-byte-filter.js
 run test-url-state.js
 run test-node-adverts.js
 run test-issue-254-affinity-debug-toggle.js
+run test-issue-258-column-widths.js
+run test-issue-259-nodes-esc-listener.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js

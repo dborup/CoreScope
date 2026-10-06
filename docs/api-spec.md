@@ -99,7 +99,10 @@ They return `total` (the unfiltered/filtered count before pagination).
 ```
 
 - `400` — Bad request (missing/invalid params)
-- `404` — Resource not found
+- `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
+- `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
+
+`HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
 
 ---
 
@@ -633,6 +636,15 @@ The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
   heard twice in a row (a distant node heard every second or third time),
   it is no candidate, and a multiple of it is reported: a 47 h flood heard
   94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
+- **Known trade-off: false change.** The raised-interval rule can read an
+  unchanged interval as raised. When the newest 3 heard gaps are all the
+  same multiple k (every 2nd or 3rd advert lost), the result is k× at
+  medium confidence on 4 adverts: 60 min reads as 120 min, 47 h as 94 h,
+  and 120 min with 3× gaps as 360 min. Gaps that fit no multiple (an
+  outage over 4×, a reboot advert between the 2× gaps) do not break the
+  run. The next gap heard at the interval itself does, and the estimate
+  returns to the interval. The opposite choice kept a raised interval at the
+  old value, at high confidence, for weeks (review F1 on #247).
 - **No zero-hop adverts.** A zero-hop advert is only recorded when an
   observer hears the node directly. "None observed" can therefore mean that
   the interval is 0 (off), or that no observer is in direct range.
@@ -1408,7 +1420,8 @@ Messages for a specific channel.
       "observers":        [string],         // observer names
       "hops":             number,
       "snr":              number | null,
-      "observedPathHashSizes": [number]     // sorted unique relayed path widths (1–3)
+      "observedPathHashSizes": [number],    // sorted unique relayed path widths (1–3)
+      "senderPathHashSize": number          // 0 if unknown, otherwise header width (1–3)
     }
   ],
   "total": number                           // total deduplicated messages
@@ -1421,6 +1434,12 @@ zero-hop copies provide no hash-size evidence and do not add a value. More than
 one value means different widths were observed for the same deduplicated
 message; the field describes those observations, not the sender's permanent
 configuration.
+
+`senderPathHashSize` is read from the transmission's raw frame header, not
+inferred from its observations. A flood can encode this width even when no
+relay has forwarded it. A direct zero-hop marker, unsupported payload header,
+or malformed frame yields 0 (unknown). This value describes that particular
+frame, not the sender's permanent configuration.
 
 ---
 

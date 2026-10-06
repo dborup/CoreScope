@@ -155,6 +155,45 @@ test('collapsed shows exactly one caret, caret-right', () => {
   assert.deepStrictEqual(caretsIn(html), ['caret-right'], 'no other caret in the card');
 });
 
+// #259 (3): the cases above all exercise renderAffinityDebugCard() in isolation,
+// so they stay green if the loadFullNode template keeps the old inline-onclick
+// card and the renderer is merely exported. The review of #255 showed that
+// mutant passing 9/9 here while only the E2E caught it. These three read the
+// source so the fast layer catches it too.
+console.log('\n=== #259 the node page actually uses the renderer ===');
+
+const SRC = fs.readFileSync('public/nodes.js', 'utf8');
+const CARD_ID = 'id="node-affinity-debug"';
+
+test('#259: the loadFullNode template interpolates ${renderAffinityDebugCard()}', () => {
+  assert(
+    SRC.includes('${renderAffinityDebugCard()}'),
+    'public/nodes.js must render the card through the renderer, not inline markup'
+  );
+});
+
+test('#259: the card markup lives only in renderAffinityDebugCard()', () => {
+  const n = SRC.split(CARD_ID).length - 1;
+  assert.strictEqual(n, 1, 'exactly one ' + CARD_ID + ' in public/nodes.js, found ' + n);
+  const body = /function renderAffinityDebugCard\(\)\s*\{[\s\S]*?\n  \}/.exec(SRC);
+  assert(body, 'renderAffinityDebugCard() is defined in public/nodes.js');
+  assert(body[0].includes(CARD_ID), 'that one occurrence is the renderer\'s own');
+});
+
+test('#259: no inline on*= handler in the Affinity Debug card source', () => {
+  // A window around every occurrence of the card id, so a reinstated inline
+  // onclick on the heading is caught wherever in the file it sits.
+  let from = 0, i;
+  while ((i = SRC.indexOf(CARD_ID, from)) !== -1) {
+    const window_ = SRC.slice(Math.max(0, i - 200), i + 800);
+    const handlers = window_.match(/\son[a-z]+\s*=\s*["'`]/gi);
+    assert(!handlers, 'inline handler(s) near ' + CARD_ID + ': ' + JSON.stringify(handlers));
+    from = i + CARD_ID.length;
+  }
+  const affinityOnclick = /onclick="[^"]*affinity/i.exec(SRC);
+  assert(!affinityOnclick, 'inline affinity handler: ' + (affinityOnclick && affinityOnclick[0]));
+});
+
 console.log('\n=== #254 Affinity Debug card: toggle ===');
 
 test('the toggle opens the body: aria-expanded true, caret-down', () => {

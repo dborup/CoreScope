@@ -1115,13 +1115,19 @@ func TestPerfMiddlewareSlowQuery(t *testing.T) {
 	srv.store = store
 
 	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
 
-	// Add a slow handler
+	// Add a slow handler. Must be registered before RegisterRoutes: since
+	// #233, RegisterRoutes ends with a catch-all PathPrefix("/api/") (any
+	// method) to turn unmatched /api/* requests into JSON 404/405 instead
+	// of falling through to the SPA. gorilla/mux matches in registration
+	// order, so a route added after RegisterRoutes returns would be
+	// shadowed by that catch-all.
 	router.HandleFunc("/api/test-slow", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(110 * time.Millisecond)
 		writeJSON(w, map[string]string{"ok": "true"})
 	}).Methods("GET")
+
+	srv.RegisterRoutes(router)
 
 	req := httptest.NewRequest("GET", "/api/test-slow", nil)
 	w := httptest.NewRecorder()

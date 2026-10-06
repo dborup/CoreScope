@@ -13,8 +13,11 @@
  *    the "Seed grouped-packet row for #1486" step in deploy.yml):
  *    - 1400 px: the #189 toggle, data-action="toggle-select" with aria-expanded;
  *    - 390 px (touch): mobile-page-actions.js (#1461 #7) makes activation
- *      select, so the row is select-hash without aria-expanded, and a tap or
- *      Enter opens the detail sheet instead of expanding the group;
+ *      select, so the row is select-hash without aria-expanded, and a tap,
+ *      Enter or Space (#259 item 4) opens the detail sheet instead of
+ *      expanding the group -- checked both through expandedHashes (the test
+ *      hook, because at 390 px an expanded group renders exactly like a
+ *      collapsed one) and by resizing back to 1400 px;
  *    - resizing 1400 → 390 → 1400 re-renders the row for each side.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-254-affinity-toggle-mobile-aria-e2e.js
@@ -126,17 +129,33 @@ async function affinityCard(browser, theme) {
 
 // --- 2. Packets group rows ---------------------------------------------------
 
+// #259: since groupIsExpandedInView(), a hash in expandedHashes renders
+// exactly like a collapsed row at <= 600 px -- no `expanded` class, no child
+// rows. The DOM therefore cannot distinguish "did not expand" from "expanded
+// invisibly", so the mobile steps below read expandedHashes itself through
+// packets.js's test hook. `inExpandedHashes` is the string 'NO-HOOK' if the
+// hook is gone, so a missing hook fails the assertion instead of passing it.
 async function rowState(page) {
   return page.evaluate(([sel, hash]) => {
     const tr = document.querySelector(sel);
     if (!tr) return null;
+    const api = window._packetsTestAPI;
     return {
       action: tr.getAttribute('data-action'),
       aria: tr.getAttribute('aria-expanded'),
       expanded: tr.classList.contains('expanded'),
       children: document.querySelectorAll('#pktBody tr.group-child[data-parent-hash="' + hash + '"]').length,
+      inExpandedHashes: api && typeof api._isExpanded === 'function' ? api._isExpanded(hash) : 'NO-HOOK',
     };
   }, [ROW, SEED_HASH]);
+}
+
+// "Activating the row selected it and did not expand the group": nothing
+// visible, and nothing in expandedHashes either.
+function assertNotExpanded(s, what) {
+  assert(s, what + ': no row');
+  assert(!s.expanded && s.children === 0, what + ' left no expansion on screen: ' + JSON.stringify(s));
+  assert(s.inExpandedHashes === false, what + ' did not expand the group: ' + JSON.stringify(s));
 }
 
 const isDesktopRow = (s) => !!s && s.action === 'toggle-select' && s.aria === 'false';
@@ -271,7 +290,7 @@ async function openPackets(page) {
         return !!s && s.classList.contains('open');
       }, null, { timeout: 8000 });
       const s = await rowState(page);
-      assert(s && !s.expanded && s.children === 0, 'the group did not expand: ' + JSON.stringify(s));
+      assertNotExpanded(s, 'the tap');
       assert(isMobileRow(s), 'still the mobile row after the re-render: ' + JSON.stringify(s));
       await shot(page, 'packets-390-sheet');
       await page.click('#mobileSheetClose').catch(() => {});
@@ -286,7 +305,35 @@ async function openPackets(page) {
         return !!s && s.classList.contains('open');
       }, null, { timeout: 8000 });
       const s = await rowState(page);
-      assert(s && !s.expanded && s.children === 0, 'Enter did not expand the group: ' + JSON.stringify(s));
+      assertNotExpanded(s, 'Enter');
+    });
+
+    // #259 (4): the row handler treats Enter and Space the same
+    // (packets.js, the keydown branch); the original #254 E2E only pressed
+    // Enter, so a mutant that dropped Space went unnoticed here.
+    await step('390 px: Space on the focused row selects too, it does not expand', async () => {
+      await page.evaluate(() => { const s = document.getElementById('mobileDetailSheet'); if (s) s.classList.remove('open'); });
+      await page.focus(ROW);
+      await page.keyboard.press('Space');
+      await page.waitForFunction(() => {
+        const s = document.getElementById('mobileDetailSheet');
+        return !!s && s.classList.contains('open');
+      }, null, { timeout: 8000 });
+      const s = await rowState(page);
+      assertNotExpanded(s, 'Space');
+      assert(isMobileRow(s), 'still the mobile row after Space: ' + JSON.stringify(s));
+    });
+
+    // The same conclusion at the render level, independently of the hook: a
+    // group that one of the three activations above expanded silently shows up
+    // as soon as the layout goes back over the breakpoint -- which is what a
+    // user rotating the phone to landscape would see.
+    await step('back at 1400 px the group is still collapsed, so nothing expanded it', async () => {
+      await page.evaluate(() => { const s = document.getElementById('mobileDetailSheet'); if (s) s.classList.remove('open'); });
+      await page.setViewportSize({ width: 1400, height: 900 });
+      const s = await waitRow(page, isDesktopRow, 'desktop');
+      assert(!s.expanded && s.children === 0, 'no child rows came back: ' + JSON.stringify(s));
+      assert(s.inExpandedHashes === false, 'and the hash never entered expandedHashes: ' + JSON.stringify(s));
     });
     await ctx.close();
   }

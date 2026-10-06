@@ -48,9 +48,12 @@
   function withObservedPathHashSizes(message, extraEvidence) {
     if (!message || typeof message !== 'object') return message;
     var sizes = unionObservedPathHashSizes(message, extraEvidence);
-    if (!sizes.length) return message;
+    var extraSenderSize = Number(extraEvidence && extraEvidence.senderPathHashSize);
+    var needsSenderSize = !message.senderPathHashSize && (extraSenderSize === 1 || extraSenderSize === 2 || extraSenderSize === 3);
+    if (!sizes.length && !needsSenderSize) return message;
     var copy = Object.assign({}, message);
-    copy.observedPathHashSizes = sizes;
+    if (sizes.length) copy.observedPathHashSizes = sizes;
+    if (needsSenderSize) copy.senderPathHashSize = extraSenderSize;
     return copy;
   }
 
@@ -61,6 +64,18 @@
       ? 'Observed path hash: ' + sizes[0] + '-byte'
       : 'Mixed path hashes: ' + sizes.join('/') + '-byte';
     return '<span class="ch-path-hash-badge" title="' + escapeHtml(OBSERVED_PATH_HASH_TOOLTIP) + '">' + escapeHtml(label) + '</span>';
+  }
+
+  // The header records the sender's choice even before a flood has relayed.
+  // Observation-path evidence is retained internally, but is not the label.
+  function renderSenderPathHashBadge(message) {
+    var size = Number(message && message.senderPathHashSize);
+    if (size !== 1 && size !== 2 && size !== 3) return '';
+    return '<span class="ch-path-hash-badge" title="Path hash size encoded in the sender’s packet header">Sent with: ' + size + '-byte</span>';
+  }
+
+  function senderSizeFromRawHex(rawHex) {
+    return typeof senderPathHashSize === 'function' ? senderPathHashSize(rawHex) : null;
   }
 
   // Client-decrypted messages are cached with their plaintext.  A later API
@@ -75,6 +90,7 @@
     }
 
     var evidenceByHash = new Map();
+    var senderByHash = new Map();
     for (var i = 0; i < candidates.length; i++) {
       var packet = candidates[i] && candidates[i].packet;
       var packetHash = packet && packet.hash;
@@ -82,6 +98,8 @@
       evidenceByHash.set(
         packetHash,
         unionObservedPathHashSizes(evidenceByHash.get(packetHash), packet));
+      var size = senderSizeFromRawHex(packet.raw_hex);
+      if (size && !senderByHash.has(packetHash)) senderByHash.set(packetHash, size);
     }
 
     var merged = cachedMsgs;
@@ -89,14 +107,19 @@
     for (var j = 0; j < cachedMsgs.length; j++) {
       var cachedMessage = cachedMsgs[j];
       var candidateEvidence = cachedMessage && evidenceByHash.get(cachedMessage.packetHash);
-      if (!candidateEvidence || !candidateEvidence.length) continue;
+      var candidateSenderSize = cachedMessage && senderByHash.get(cachedMessage.packetHash);
+      if ((!candidateEvidence || !candidateEvidence.length) && !candidateSenderSize) continue;
       var before = normalizeObservedPathHashSizes(cachedMessage);
       var after = unionObservedPathHashSizes(before, candidateEvidence);
-      if (before.length === after.length && before.every(function (size, index) { return size === after[index]; })) {
+      if (before.length === after.length && before.every(function (size, index) { return size === after[index]; }) &&
+          (!candidateSenderSize || cachedMessage.senderPathHashSize)) {
         continue;
       }
       if (!changed) merged = cachedMsgs.slice();
-      merged[j] = withObservedPathHashSizes(cachedMessage, candidateEvidence);
+      merged[j] = withObservedPathHashSizes(cachedMessage, {
+        observedPathHashSizes: candidateEvidence,
+        senderPathHashSize: candidateSenderSize,
+      });
       changed = true;
     }
     return { messages: merged, changed: changed };
@@ -130,12 +153,16 @@
     if (!Array.isArray(restMsgs)) return [];
     if (!Array.isArray(currentMsgs)) currentMsgs = [];
     var currentEvidenceByHash = new Map();
+    var currentSenderByHash = new Map();
     for (var c = 0; c < currentMsgs.length; c++) {
       var current = currentMsgs[c];
       if (!current || !current.packetHash) continue;
       currentEvidenceByHash.set(
         current.packetHash,
         unionObservedPathHashSizes(currentEvidenceByHash.get(current.packetHash), current));
+      if (current.senderPathHashSize && !currentSenderByHash.has(current.packetHash)) {
+        currentSenderByHash.set(current.packetHash, current.senderPathHashSize);
+      }
     }
 
     var restEvidenceByHash = new Map();
@@ -157,7 +184,10 @@
       if (h) restHashes.add(h);
       mergedRest[i] = withObservedPathHashSizes(
         restMsgs[i],
-        h ? unionObservedPathHashSizes(currentEvidenceByHash.get(h), restEvidenceByHash.get(h)) : null);
+        h ? {
+          observedPathHashSizes: unionObservedPathHashSizes(currentEvidenceByHash.get(h), restEvidenceByHash.get(h)),
+          senderPathHashSize: currentSenderByHash.get(h),
+        } : null);
     }
     var now = Date.now();
     var survivors = [];
@@ -978,6 +1008,7 @@
           scope: c.packet.scope_name || null,
           routeType: c.packet.route_type ?? null,
           observedPathHashSizes: normalizeObservedPathHashSizes(c.packet),
+          senderPathHashSize: senderSizeFromRawHex(c.packet.raw_hex),
           repeats: 1,
           botReply: pingBotReply(text, d.path_len || 0, c.packet.snr || null, alreadyDecObserver)
         });
@@ -999,6 +1030,7 @@
           scope: c.packet.scope_name || null,
           routeType: c.packet.route_type ?? null,
           observedPathHashSizes: normalizeObservedPathHashSizes(c.packet),
+          senderPathHashSize: senderSizeFromRawHex(c.packet.raw_hex),
           repeats: 1,
           botReply: pingBotReply(result.message, 0, c.packet.snr || null, decObserver)
         });
@@ -1769,6 +1801,7 @@
           m.data,
           m.data?.packet,
           payload);
+        var senderSize = senderSizeFromRawHex(m.data?.raw_hex ?? m.data?.packet?.raw_hex);
         // Same path[0]-resolved area as the REST message list (server-side
         // resolveEntryPointArea, see store.go) -- already computed at
         // broadcast time, just read it here.
@@ -1805,6 +1838,7 @@
           // Deduplicate by packet hash — same message seen by multiple observers
           var existing = pktHash ? messages.find(function (msg) { return msg.packetHash === pktHash; }) : null;
           if (existing) {
+            if (!existing.senderPathHashSize && senderSize) existing.senderPathHashSize = senderSize;
             existing.repeats = (existing.repeats || 1) + 1;
             if (observer && existing.observers && existing.observers.indexOf(observer) === -1) {
               existing.observers.push(observer);
@@ -1832,6 +1866,7 @@
               routeType: routeType,
               area: area,
               observedPathHashSizes: observedPathHashSizes,
+              senderPathHashSize: senderSize,
               botReply: pingBotReply(displayText, wsHops, snr, observer),
               // #1498: mark as WS-pushed so a later REST replacement
               // (selectChannel / refreshMessages) can merge instead of
@@ -2010,20 +2045,22 @@
   let channelsRequestId = 0;
   let latestChannelsLoad = null;
 
-  function loadChannels(silent) {
-    latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent);
+  // opts.bust: fetch fresh data even if the same request is in flight.
+  function loadChannels(silent, opts) {
+    latestChannelsLoad = loadChannelsFor(++channelsRequestId, silent, !!(opts && opts.bust));
     return latestChannelsLoad;
   }
 
   // Reload the list after a shared channel was approved (#232) or revoked
   // (#251). loadChannels() merges the user's PSK rows itself (#152), before
-  // it reconciles the selection.
+  // it reconciles the selection. bust: a /channels request already in
+  // flight may predate the approval or revocation (#243).
   function refreshChannelList() {
     invalidateApiCache('/channels');
-    loadChannels(true);
+    loadChannels(true, { bust: true });
   }
 
-  async function loadChannelsFor(requestId, silent) {
+  async function loadChannelsFor(requestId, silent, bust) {
     // #152: WS activity stamped after this point is newer than the snapshot.
     const seqAtRequestStart = wsActivitySeq;
     try {
@@ -2033,7 +2070,7 @@
       if (rp) params.push('region=' + encodeURIComponent(rp));
       if (showEnc) params.push('includeEncrypted=true');
       const qs = params.length ? '?' + params.join('&') : '';
-      const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
+      const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels, bust: bust });
       // #154: a newer request owns the list. Resolve when it is done, so a
       // caller's follow-up (init()'s deep link, the region handler) sees the
       // list that actually renders.
@@ -2747,7 +2784,7 @@
       // (unique_prefix) to a positioned node; omitted otherwise, not
       // guessed.
       if (msg.area) meta.push(`area: ${escapeHtml(msg.area)}`);
-      const pathHashBadgeHtml = renderObservedPathHashBadge(msg);
+      const pathHashBadgeHtml = renderSenderPathHashBadge(msg);
 
       const safeId = btoa(encodeURIComponent(sender));
 
@@ -2816,6 +2853,7 @@
   window._channelsNormalizeObservedPathHashSizesForTest = normalizeObservedPathHashSizes;
   window._channelsUnionObservedPathHashSizesForTest = unionObservedPathHashSizes;
   window._channelsRenderObservedPathHashBadgeForTest = renderObservedPathHashBadge;
+  window._channelsRenderSenderPathHashBadgeForTest = renderSenderPathHashBadge;
   window._channelsDeduplicateAndMergeForTest = deduplicateAndMerge;
   window._channelsLoadChannelsForTest = loadChannels;
   window._channelsRenderChannelRowForTest = renderChannelRow;

@@ -1025,21 +1025,45 @@ console.log('\n=== packets.js: buildFieldTable ===');
     assert(result.includes('cdcdcdcd'), 'should show the legacy field\'s truncated pubkey hex, got: ' + result);
   });
 
-  test('buildFieldTable hash_size calculation', () => {
-    // Path byte 0xC0 → bits 7-6 = 3 → hash_size = 4, but hash_count = 0
-    // Since #653: when hashCount == 0, shows "hash_count=0 (direct advert)" instead of hash_size
-    const pkt = { raw_hex: '00C0', route_type: 1, payload_type: 0 };
-    const decoded = {};
-    const result = api.buildFieldTable(pkt, decoded, [], []);
-    assert(result.includes('hash_count=0 (direct advert)'));
+  // PR #212 replaced the "direct advert" wording: the path byte encodes the
+  // sender's width even with zero relay hops, so a flood's width is reported
+  // and only the cases that genuinely carry no width stay unknown. The byte
+  // breakdown must still say WHICH case it is, not just "unknown".
+  test('buildFieldTable reports a zero-hop flood width instead of "direct advert"', () => {
+    // header 0x01 = route 1 (FLOOD), payload 0 (ADVERT); path byte 0x40 →
+    // bits 7-6 = 1 → hash_size 2, hash_count = 0.
+    const pkt = { raw_hex: '0140', route_type: 1, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_size=2 bytes, hash_count=0'),
+      'zero-hop flood must keep its encoded width, got: ' + result);
+    assert(!result.includes('direct advert'), 'stale "direct advert" wording resurfaced');
   });
 
-  test('buildFieldTable hash_size shown when hash_count > 0', () => {
-    // Path byte 0xC1 → bits 7-6 = 3 → hash_size = 4, hash_count = 1
-    const pkt = { raw_hex: '00C1aabbccdd', route_type: 1, payload_type: 0 };
-    const decoded = {};
-    const result = api.buildFieldTable(pkt, decoded, [], []);
-    assert(result.includes('hash_size=4'));
+  test('buildFieldTable marks a 0b11 width field as invalid rather than hiding it', () => {
+    // Path byte 0xC1 → bits 7-6 = 3, which is no width at all: the evidence
+    // model (cmd/server/observed_path_hash_sizes.go) knows only 1/2/3 bytes.
+    const pkt = { raw_hex: '01C1aabbccdd', route_type: 1, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=1'), 'hop count lost, got: ' + result);
+    assert(result.includes('width bits 7-6 = 3'), 'invalid width field not explained, got: ' + result);
+    assert(!result.includes('hash_size=4'), 'a 4-byte hash size must not be claimed');
+  });
+
+  test('buildFieldTable keeps the direct zero-hop marker distinct from an invalid width', () => {
+    // header 0x02 = route 2 (DIRECT), path byte 0x00 = sendZeroHop's marker.
+    const pkt = { raw_hex: '0200', route_type: 2, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=0 (no encoded hash size)'),
+      'direct zero-hop marker description drifted, got: ' + result);
+  });
+
+  test('buildFieldTable does not read a hash width out of TRACE SNR bytes', () => {
+    // header 0x25 = payload 9 (TRACE), route 1. Its path bytes are SNR
+    // readings (internal/packetpath/route.go PathBytesAreHops), not hops.
+    const pkt = { raw_hex: '2541aabbccdd', route_type: 1, payload_type: 9 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('TRACE: path bytes are SNR'), 'TRACE path bytes mislabelled, got: ' + result);
+    assert(!result.includes('hash_size='), 'TRACE must not claim a hash size');
   });
 
   test('buildFieldTable handles empty raw_hex', () => {
@@ -1121,6 +1145,45 @@ console.log('\n=== packets.js: buildFlatRowHtml ===');
     };
     const result = api.buildFlatRowHtml(p);
     assert(result.includes('data-entry-idx="-1"'));
+  });
+}
+
+// #258: makeColumnsResizable() (app.js) measures inside TableResponsive.unhidden,
+// so a re-measure sees the columns as the first measure did, before register().
+console.log('\n=== packets.js: TableResponsive.unhidden (#258) ===');
+{
+  const ctx = loadPacketsSandbox();
+  const TR = ctx.window.TableResponsive;
+  const el = (classes) => {
+    const set = new Set(classes);
+    return { style: { display: '' }, classList: { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) } };
+  };
+  const makeTable = () => {
+    const els = [el(['col-observer', 'col-hidden']), el(['col-observer', 'col-hidden']), el(['col-time']), el(['col-hidden-pill']), el(['col-hidden-pill', 'col-rehide-pill'])];
+    els[3].style.display = 'inline-block';
+    return {
+      els,
+      querySelectorAll: (sel) => els.filter((e) => e.classList.contains(sel.replace(/^\./, ''))),
+    };
+  };
+  const state = (t) => t.els.map((e) => ['col-hidden', 'col-hidden-pill'].filter((c) => e.classList.contains(c)).join('+') + ':' + e.style.display);
+
+  test('#258: unhidden lifts col-hidden and hides the pills only while fn runs', () => {
+    assert.strictEqual(typeof TR.unhidden, 'function', 'TableResponsive.unhidden is exported');
+    const t = makeTable();
+    const before = state(t);
+    let during = null;
+    const out = TR.unhidden(t, () => { during = state(t); return 42; });
+    assert.strictEqual(out, 42, 'returns what fn returns');
+    assert.deepStrictEqual(during, [':', ':', ':', 'col-hidden-pill:none', 'col-hidden-pill:none'], 'during: ' + JSON.stringify(during));
+    assert.deepStrictEqual(state(t), before, 'restored: ' + JSON.stringify(state(t)));
+  });
+
+  test('#258: unhidden restores the hiding when fn throws', () => {
+    const t = makeTable();
+    const before = state(t);
+    assert.throws(() => TR.unhidden(t, () => { throw new Error('boom'); }), /boom/);
+    assert.deepStrictEqual(state(t), before);
   });
 }
 
@@ -1264,6 +1327,101 @@ console.log('\n=== packets.js: group row action and aria-expanded by viewport (#
       const tr = header(api.buildGroupRowHtml(single));
       assert(tr.includes('data-action="select-hash"') && !tr.includes('aria-expanded'), w + ' px: ' + tr);
     });
+  });
+}
+
+// #259 (1): a group expanded on desktop must not leave visible child rows behind
+// when the layout flips to the mobile mode, where the expand column is hidden
+// and the row only selects — there would be no way to collapse it again. The
+// hash stays in expandedHashes, so the children come back on desktop; the
+// rendered row is the collapsed one while the mobile mode is active.
+console.log('\n=== packets.js: an expanded group across the mobile breakpoint (#259) ===');
+{
+  const ctx = loadPacketsSandbox();
+  loadInCtx(ctx, 'public/mobile-page-actions.js');
+  const api = ctx._packetsTestAPI;
+  const mkChild = (id, obs) => ({
+    id, observer_id: obs, hash: 'grp259', raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]', timestamp: '2024-01-01T00:00:00Z'
+  });
+  const group = {
+    hash: 'grp259', count: 3, latest: '2024-01-01T00:00:00Z',
+    observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]',
+    observation_count: 3, observer_count: 3,
+    _children: [mkChild(1, '1'), mkChild(2, '2'), mkChild(3, '3')]
+  };
+  const header = (html) => /<tr [^>]*>/.exec(html)[0];
+  const rowClass = (html) => (/<tr class="([^"]*)"/.exec(header(html)) || [, ''])[1];
+  const childRows = (html) => (html.match(/<tr class="group-child"/g) || []).length;
+  const atWidth = (w, fn) => {
+    const prev = ctx.window.innerWidth;
+    ctx.window.innerWidth = w;
+    try { return fn(); } finally { ctx.window.innerWidth = prev; }
+  };
+
+  // _getRowCount only counts children in grouped mode; the hook lets the
+  // sandbox say so. Guarded so this file still runs against a tree without it.
+  if (typeof api._setDisplayGrouped === 'function') api._setDisplayGrouped(true);
+  api._setExpanded(group.hash, true);
+
+  test('#259: at 1400 px the expanded group renders its children (#248 unchanged)', () => atWidth(1400, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert.strictEqual(childRows(html), 3, 'three child rows: ' + childRows(html));
+    assert(/\bexpanded\b/.test(rowClass(html)), 'the row is marked expanded: ' + rowClass(html));
+    assert(header(html).includes('aria-expanded="true"'), header(html));
+    assert(expandCell(html).includes(phIcon('caret-down')), 'down caret while expanded');
+  }));
+
+  test('#259: at 390 px the same expanded group renders no child rows', () => atWidth(390, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert.strictEqual(childRows(html), 0, 'no visible children on mobile, got ' + childRows(html));
+  }));
+
+  test('#259: at 390 px the row does not claim the expanded class or caret', () => atWidth(390, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert(!/\bexpanded\b/.test(rowClass(html)), 'no expanded class on mobile: ' + rowClass(html));
+    assert(header(html).includes('data-action="select-hash"'), header(html));
+    assert(!header(html).includes('aria-expanded'), 'still no aria-expanded on mobile');
+    assert(!expandCell(html).includes(phIcon('caret-down')), 'no down caret on mobile');
+  }));
+
+  test('#259: _getRowCount matches the rendered rows on both sides of the breakpoint', () => {
+    atWidth(390, () => {
+      assert.strictEqual(api._getRowCount(group), 1, 'mobile: the group is one row');
+    });
+    atWidth(1400, () => {
+      assert.strictEqual(api._getRowCount(group), 4, 'desktop: the group plus three children');
+    });
+  });
+
+  test('#259: 600 px hides the children and 601 px shows them again', () => {
+    atWidth(600, () => {
+      assert.strictEqual(childRows(api.buildGroupRowHtml(group)), 0, 'at the breakpoint the children are hidden');
+    });
+    atWidth(601, () => {
+      assert.strictEqual(childRows(api.buildGroupRowHtml(group)), 3, 'just above it they are back');
+    });
+  });
+
+  test('#259: the expansion survives 1400 -> 390 -> 1400, it is not cleared', () => {
+    atWidth(390, () => { api.buildGroupRowHtml(group); });
+    atWidth(1400, () => {
+      const html = api.buildGroupRowHtml(group);
+      assert.strictEqual(childRows(html), 3, 'the children are back on desktop: ' + childRows(html));
+      assert(header(html).includes('aria-expanded="true"'), 'and the state is still expanded');
+    });
+  });
+
+  test('#259: a collapsed group is unaffected at either width', () => {
+    api._setExpanded(group.hash, false);
+    try {
+      for (const w of [390, 1400]) atWidth(w, () => {
+        const html = api.buildGroupRowHtml(group);
+        assert.strictEqual(childRows(html), 0, w + ' px: a collapsed group has no children');
+        assert(!/\bexpanded\b/.test(rowClass(html)), w + ' px: ' + rowClass(html));
+      });
+    } finally { api._setExpanded(group.hash, true); }
   });
 }
 
@@ -1616,6 +1774,29 @@ console.log('\n=== packets.js: scroll position preserved across renderTableRows 
 
     // scrollTop must be preserved (not reset to 0)
     assert.strictEqual(pktLeftScrollTop, 500, 'scrollTop should be preserved after renderTableRows, got ' + pktLeftScrollTop);
+  });
+}
+
+// ===== packets.js: detail Hash Size source (PR #212 review) =====
+console.log('\n=== packets.js: detail Hash Size reads the selected observation ===');
+{
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+
+  // Behavioural coverage lives in
+  // test-packet-detail-sender-hash-size-obs-e2e.js, which only runs in the
+  // Playwright job. This is the fast guard: observations of one transmission
+  // carry their own frames, so the "Hash Size" summary and the byte table
+  // below it must read the SAME raw_hex, or the panel contradicts itself.
+  test('renderDetail derives Hash Size from the selected observation, not the original frame', () => {
+    assert.ok(src.includes('const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);'),
+      'the Hash Size summary must use the effective observation\'s frame');
+    assert.ok(!/const hashSize = senderPathHashSize\(pkt\.raw_hex\)/.test(src),
+      'reading the original transmission reintroduces the observation mismatch');
+  });
+
+  test('the byte table is built from the same frame the summary reads', () => {
+    assert.ok(src.includes('buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt,'),
+      'buildFieldTable must receive the effective observation');
   });
 }
 
