@@ -282,6 +282,28 @@ func TestRetentionChannelDaysConfig(t *testing.T) {
 	}
 }
 
+// TestChannelDaysNoEffectWarning pins the startup warning for a channelDays
+// that changes nothing: not longer than packetDays, or packetDays 0, where
+// nothing is pruned at all (review F2 of #296). An unset channelDays, or one
+// that applies, logs nothing.
+func TestChannelDaysNoEffectWarning(t *testing.T) {
+	for _, c := range []struct {
+		packetDays, channelDays int
+		want                    string
+	}{
+		{14, 7, "[prune] retention.channelDays=7 has no effect: it is not longer than packetDays=14"},
+		{14, 14, "[prune] retention.channelDays=14 has no effect: it is not longer than packetDays=14"},
+		{0, 90, "[prune] retention.channelDays=90 has no effect: packetDays is 0, so no transmissions are pruned"},
+		{14, 90, ""},
+		{14, 0, ""},
+		{0, 0, ""},
+	} {
+		if got := channelDaysNoEffect(c.packetDays, c.channelDays); got != c.want {
+			t.Errorf("channelDaysNoEffect(%d, %d) = %q, want %q", c.packetDays, c.channelDays, got, c.want)
+		}
+	}
+}
+
 // TestPruneTransmissionsDailyRunStartsAtPreviousCutoff pins the walk bound of
 // the repeated (daily) prune. Its packet prune steps over every kept channel
 // message it walks; without a floor every run would walk all of them under

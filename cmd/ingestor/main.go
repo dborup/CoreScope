@@ -240,8 +240,8 @@ func main() {
 	// moved to ingestor in #1283 to eliminate cross-process write
 	// contention (SQLITE_BUSY). 0 = disabled.
 	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
-	if packetDays > 0 && channelDays > 0 && channelDays <= packetDays {
-		log.Printf("[prune] retention.channelDays=%d has no effect: it is not longer than packetDays=%d", channelDays, packetDays)
+	if msg := channelDaysNoEffect(packetDays, channelDays); msg != "" {
+		log.Print(msg)
 	}
 	runTransmissionRetention(store, cfg, "startup")
 	// #89: route_mask_changes rows of transmissions deleted by any path.
@@ -485,6 +485,15 @@ func main() {
 		c.Disconnect(5000) // 5s to allow in-flight messages to drain
 	}
 	log.Println("Done.")
+}
+
+// channelDaysNoEffect returns the startup warning for a retention.channelDays
+// that is set but changes nothing (#296), or "" when it applies or is unset.
+func channelDaysNoEffect(packetDays, channelDays int) string {
+	if packetDays > 0 && channelDays > 0 && channelDays <= packetDays {
+		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: it is not longer than packetDays=%d", channelDays, packetDays)
+	}
+	return ""
 }
 
 // runTransmissionRetention runs one transmission retention pass
