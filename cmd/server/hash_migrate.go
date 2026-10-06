@@ -467,21 +467,25 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 	// A survivor now holds observations it did not have: its best one may be a
 	// different path, which moves it in the path-derived indexes, and its
 	// charge follows. A survivor that was itself merged into another one later
-	// in the batch is gone.
-	var changed []*StoreTx
+	// in the batch is gone. The distance records carry the path and first_seen
+	// (time and hour bucket), so a change of either recomputes them (#288).
+	var distChanged []*StoreTx
 	for w, oldPath := range m.winners {
 		if m.loserSet[w] {
 			continue
 		}
 		pickBestObservation(w)
 		s.trackedBytes += rechargeTx(w)
-		if w.PathJSON != oldPath {
+		pathChanged := w.PathJSON != oldPath
+		if pathChanged {
 			s.reindexTxPath(w, oldPath)
-			changed = append(changed, w)
+		}
+		if _, moved := m.firstSeenMoved[w]; pathChanged || moved {
+			distChanged = append(distChanged, w)
 		}
 	}
-	if len(changed) > 0 {
-		s.updateDistanceIndexForTxs(changed)
+	if len(distChanged) > 0 {
+		s.updateDistanceIndexForTxs(distChanged)
 	}
 
 	s.invalidateRelayStatsCache()
