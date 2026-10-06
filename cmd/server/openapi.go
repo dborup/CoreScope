@@ -37,7 +37,7 @@ func routeDescriptions() map[string]routeMeta {
 	return map[string]routeMeta{
 		// Config
 		"GET /api/config/cache":      {Summary: "Get cache configuration", Tag: "config"},
-		"GET /api/config/client":     {Summary: "Get client configuration", Tag: "config"},
+		"GET /api/config/client":     {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
 		"GET /api/config/regions":    {Summary: "Get configured regions", Tag: "config"},
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
@@ -669,8 +669,9 @@ func componentSchemas() map[string]interface{} {
 		},
 		"AreaAnalyticsResponse": map[string]interface{}{
 			"type":        "object",
-			"description": "Node density/health, cross-area bridge nodes, and position-fix coverage per configured Area (the drawn-polygon regions from the meshguide.dk sync, distinct from hashRegion scope adoption). Empty when no Areas are configured.",
+			"description": "Node density/health, cross-area bridge nodes, and position-fix coverage per configured Area. When estimatedPositions.enabled is false, returns estimatedPositionsEnabled:false and real density/bridgeNodes/unpositionedTotal only; positionGaps, estimatedNodes, and unpositionedNoNeighborFix are omitted because they were not evaluated.",
 			"properties": map[string]interface{}{
+				"estimatedPositionsEnabled": &openAPISchema{Type: "boolean", Description: "Present as false only when neighbor-derived position estimation is disabled by the operator."},
 				"density":                   map[string]interface{}{"type": "array", "items": schemaRef("AreaDensity")},
 				"bridgeNodes":               map[string]interface{}{"type": "array", "items": schemaRef("AreaBridgeNode"), "description": "Top cross-area bridge nodes, ranked by how many other areas they reach."},
 				"positionGaps":              map[string]interface{}{"type": "array", "items": schemaRef("AreaPositionGap")},
@@ -696,11 +697,12 @@ func componentSchemas() map[string]interface{} {
 		},
 		"GPSSanityResponse": map[string]interface{}{
 			"type":        "object",
-			"description": "Nodes whose self-reported GPS disagrees with a trusted cluster of their own RF neighbors.",
+			"description": "Nodes whose self-reported GPS disagrees with a trusted cluster of their own RF neighbors. When estimatedPositions.enabled is false, returns only estimatedPositionsEnabled:false; nodes, totalRealGps and evaluated are omitted, not reported as zero.",
 			"properties": map[string]interface{}{
-				"nodes":        map[string]interface{}{"type": "array", "items": schemaRef("SuspiciousGPSNode"), "description": "Flagged nodes, sorted worst (largest distanceKm) first."},
-				"totalRealGps": map[string]interface{}{"type": "integer", "description": "Every node with a real (non-zero) GPS fix -- the population this check ran over."},
-				"evaluated":    map[string]interface{}{"type": "integer", "description": "The subset of totalRealGps that had a trustworthy neighbor cluster to compare against."},
+				"estimatedPositionsEnabled": &openAPISchema{Type: "boolean", Description: "Present as false only when neighbor-derived position estimation is disabled by the operator."},
+				"nodes":                     map[string]interface{}{"type": "array", "items": schemaRef("SuspiciousGPSNode"), "description": "Flagged nodes, sorted worst (largest distanceKm) first."},
+				"totalRealGps":              map[string]interface{}{"type": "integer", "description": "Every node with a real (non-zero) GPS fix -- the population this check ran over."},
+				"evaluated":                 map[string]interface{}{"type": "integer", "description": "The subset of totalRealGps that had a trustworthy neighbor cluster to compare against."},
 			},
 		},
 		"AllObserverNeighborsEntry": map[string]interface{}{

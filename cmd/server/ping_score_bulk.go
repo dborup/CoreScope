@@ -360,6 +360,10 @@ func (db *DB) nearestPositionedNeighborsChunk(targets []string, maxEdgeKm float6
 // matching GetPacketPath's own contract of returning an empty-Branches
 // response rather than erroring for an unknown hash.
 func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string]*PacketPathResponse, error) {
+	return db.getPacketPathsBulk(hashes, maxEdgeKm, true)
+}
+
+func (db *DB) getPacketPathsBulk(hashes []string, maxEdgeKm float64, estimatesEnabled bool) (map[string]*PacketPathResponse, error) {
 	// result is created and the empty-input check runs BEFORE the
 	// hasResolvedPath schema check on purpose: an empty request should
 	// short-circuit to an empty, error-free result without touching the
@@ -489,18 +493,23 @@ func (db *DB) GetPacketPathsBulk(hashes []string, maxEdgeKm float64) (map[string
 	}
 
 	fallbackSet := make(map[string]bool)
-	for _, red := range reductions {
-		for pk := range collectPacketPathFallbackCandidates(red.first, red.best, nodeByPK, nodeByName) {
-			fallbackSet[pk] = true
+	if estimatesEnabled {
+		for _, red := range reductions {
+			for pk := range collectPacketPathFallbackCandidates(red.first, red.best, nodeByPK, nodeByName) {
+				fallbackSet[pk] = true
+			}
 		}
 	}
 	fallbackList := make([]string, 0, len(fallbackSet))
 	for pk := range fallbackSet {
 		fallbackList = append(fallbackList, pk)
 	}
-	estimates, err := db.nearestPositionedNeighborsBulk(fallbackList, maxEdgeKm)
-	if err != nil {
-		return nil, fmt.Errorf("packet path bulk neighbor estimate: %w", err)
+	var estimates map[string]neighborEstimate
+	if estimatesEnabled {
+		estimates, err = db.nearestPositionedNeighborsBulk(fallbackList, maxEdgeKm)
+		if err != nil {
+			return nil, fmt.Errorf("packet path bulk neighbor estimate: %w", err)
+		}
 	}
 	neighborLookup := func(pk string) (neighborEstimate, bool) {
 		e, ok := estimates[pk]

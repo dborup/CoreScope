@@ -673,8 +673,20 @@
     flasher: 'https://flasher.meshcore.io/'
   };
 
+  // One operator-owned policy for every estimated-position surface. Local
+  // preferences and deep links cannot enable it; older servers default on.
+  var estimatedPositionsEnabled = true;
+  window.EstimatedPositions = {
+    enabled: function (response) {
+      return estimatedPositionsEnabled && (!response || response.estimatedPositionsEnabled !== false);
+    },
+    disabledMessage: 'Estimated positions are disabled by the instance operator.',
+    disabledNoticeHTML: '<p class="text-muted" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
+  };
+
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
+    estimatedPositionsEnabled = !cfg.estimatedPositions || cfg.estimatedPositions.enabled !== false;
     window.MC_CLIENT_RX_COVERAGE = cfg.clientRxCoverage === true;
     // Coverage is opt-in: the nav link is NOT in static HTML (so the default-off
     // nav matches upstream and the nav-overflow tests). Inject it after Analytics

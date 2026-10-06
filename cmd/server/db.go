@@ -2816,6 +2816,12 @@ func buildPacketPathResponseFromReduction(
 }
 
 func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse, error) {
+	return db.getPacketPath(hash, maxEdgeKm, true)
+}
+
+// getPacketPath takes the caller's immutable operator policy explicitly;
+// shared DB handles never hold mutable instance configuration.
+func (db *DB) getPacketPath(hash string, maxEdgeKm float64, estimatesEnabled bool) (*PacketPathResponse, error) {
 	if !db.hasResolvedPath() {
 		return nil, fmt.Errorf("resolved_path not available on this server")
 	}
@@ -2884,6 +2890,9 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	nodeByName, _ := db.resolveNodesByName(names) // discarded for the same reason as above
 
 	neighborLookup := func(pk string) (neighborEstimate, bool) {
+		if !estimatesEnabled {
+			return neighborEstimate{}, false
+		}
 		_, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(pk, maxEdgeKm)
 		if !ok {
 			return neighborEstimate{}, false

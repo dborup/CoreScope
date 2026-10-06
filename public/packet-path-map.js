@@ -237,7 +237,8 @@
   // renders as a hollow, dashed marker instead of a solid one, never
   // mistaken for a real fix.
   function chainForBranch(b) {
-    var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null; });
+    var estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+    var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null && (estimatesEnabled || !p.approx); });
     var chain = located.map(function (p, hi) {
       return {
         lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx,
@@ -245,7 +246,7 @@
         publicKey: p.publicKey,
       };
     });
-    if (b.observer && b.observer.lat != null && b.observer.lon != null) {
+    if (b.observer && b.observer.lat != null && b.observer.lon != null && (estimatesEnabled || !b.observer.approx)) {
       var observerLabel = b.hops + ' hop' + (b.hops === 1 ? '' : 's');
       if (typeof b.secondsAfterFirst === 'number') observerLabel += ', ' + formatElapsed(b.secondsAfterFirst);
       if (typeof b.distanceFromFirstKm === 'number' && b.distanceFromFirstKm > 0) observerLabel += ', ' + b.distanceFromFirstKm.toFixed(1) + ' km away';
@@ -287,11 +288,12 @@
         '<h3 style="margin:0 0 4px;padding-right:48px">Relay Path</h3>' +
         '<p class="text-muted" style="margin:0 0 8px;font-size:12px">How far and how wide this packet spread. Click a marker to open that node\'s detail page.</p>' +
         '<p id="packetPathArchiveNote" class="text-muted" style="display:none;margin:0 0 10px;font-size:12px"></p>' +
+        '<p id="packetPathEstimatePolicy" class="text-muted" style="display:none;margin:0 0 10px;font-size:12px"></p>' +
         '<div id="packetPathLegend" style="display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin:0 0 10px;font-size:11px;color:var(--text-muted)">' +
           '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:2px;background:var(--accent)"></span><span id="packetPathPrimaryLegendLabel">farthest-traveled route</span></span>' +
           '<span id="packetPathDeepestLegendItem" style="display:none;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:2px;background:var(--status-purple)"></span>deepest (most hops) route</span>' +
           '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:2px;background:var(--text-muted)"></span>other station</span>' +
-          '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:9px;height:9px;border:2px dashed var(--text-muted);border-radius:50%;box-sizing:border-box"></span>approximate position</span>' +
+          '<span id="packetPathApproxLegend" style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:9px;height:9px;border:2px dashed var(--text-muted);border-radius:50%;box-sizing:border-box"></span>approximate position</span>' +
           '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:9px;height:9px;border:2px solid var(--status-green);border-radius:50%;box-sizing:border-box"></span>first to hear it</span>' +
         '</div>' +
         '<div id="packetPathControls"></div>' +
@@ -350,6 +352,7 @@
     var data;
     try {
       data = historical ? await options.loadPath(hash) : await api('/packets/' + encodeURIComponent(hash) + '/path');
+      if (window.MeshConfigReady) await window.MeshConfigReady;
     } catch (e) {
       if (!isCurrent()) return;
       if (historical) withoutMap('Failed to load path: ' + e.message, true);
@@ -357,6 +360,16 @@
       return;
     }
     if (!isCurrent()) return;
+
+    if (window.EstimatedPositions?.enabled() === false) {
+      var approxLegend = document.getElementById('packetPathApproxLegend');
+      if (approxLegend) approxLegend.style.display = 'none';
+      var estimatePolicy = document.getElementById('packetPathEstimatePolicy');
+      if (estimatePolicy) {
+        estimatePolicy.style.display = 'block';
+        estimatePolicy.textContent = window.EstimatedPositions.disabledMessage;
+      }
+    }
 
     if (historical) {
       if (data && data.status === 'initializing') {

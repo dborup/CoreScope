@@ -47,7 +47,7 @@ func (s *Server) handlePingScorePath(w http.ResponseWriter, r *http.Request) {
 		result.Status, result.CapturedAt = "archived", a.CapturedAt
 	} else if s.db != nil {
 		var err error
-		path, err = s.db.GetPacketPath(score.Hash, EstimateMaxEdgeKm)
+		path, err = s.db.getPacketPath(score.Hash, EstimateMaxEdgeKm, s.estimatedPositionsEnabled())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not load ping record path")
 			return
@@ -73,6 +73,9 @@ func (s *Server) handlePingScorePath(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(data, &visible); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read ping record path")
 		return
+	}
+	if !s.estimatedPositionsEnabled() {
+		stripEstimatedPositions(&visible)
 	}
 	filtered, err := s.filterPingScorePath(r.Context(), &visible)
 	if err != nil {

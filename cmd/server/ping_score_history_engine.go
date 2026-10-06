@@ -424,7 +424,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	}
 	var pathResults map[string]*PacketPathResponse
 	if len(hashesList) > 0 {
-		pathResults, err = e.server.db.GetPacketPathsBulk(hashesList, e.config.MaxEdgeKm)
+		pathResults, err = e.server.db.getPacketPathsBulk(hashesList, e.config.MaxEdgeKm, e.server.estimatedPositionsEnabled())
 		if err != nil {
 			return nil, fmt.Errorf("ping score history cycle: bulk path query: %w", err)
 		}

@@ -750,7 +750,8 @@
   async function fetchNodeDetail(pubkey) {
     const [nodeData, healthData] = await Promise.all([
       api('/nodes/' + encodeURIComponent(pubkey) + '?include=advertRoutes', { ttl: CLIENT_TTL.nodeDetail }),
-      api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null)
+      api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null),
+      window.MeshConfigReady
     ]);
     nodeData.healthData = healthData;
     return nodeData;
@@ -826,7 +827,8 @@
       // use). Shown alongside a real fix too, not just as a fallback when
       // one's missing -- lets a node flagged by Suspicious GPS Positions
       // be visually cross-checked against its own claimed position.
-      const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+      const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+      const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
 
       // Health stats
       const h = healthData || {};
@@ -938,6 +940,7 @@
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
           ${hasEstLoc ? `<tr><td>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></td><td>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></td></tr>` : ''}
+          ${!estimatesEnabled ? `<tr><td>Position estimates</td><td>${window.EstimatedPositions.disabledNoticeHTML}</td></tr>` : ''}
           <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ') + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>' : ''}</td></tr>
         </table>
 
@@ -1927,7 +1930,8 @@
     // Same "real fix" convention and estimate-alongside-real-fix behavior
     // as loadFullNode above -- see its comments.
     const hasLoc = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-    const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+    const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+    const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
     const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
 
     // Status calculation via shared helper
@@ -1971,6 +1975,7 @@
             ${stats.avgHops ? `<dt>Avg Hops</dt><dd>${stats.avgHops}</dd>` : ''}
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
             ${hasEstLoc ? `<dt>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></dt><dd>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></dd>` : ''}
+            ${!estimatesEnabled ? `<dt>Position estimates</dt><dd>${window.EstimatedPositions.disabledNoticeHTML}</dd>` : ''}
           </dl>
         </div>
 

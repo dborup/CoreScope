@@ -224,7 +224,7 @@ func (e *pingScoreHistoryEngine) pathsForRecords(snap *PingScoresSnapshot, paths
 	}
 	if len(missing) > 0 {
 		// At most ten distinct displayed hashes, in one existing bulk helper.
-		extra, err := e.server.db.GetPacketPathsBulk(missing, e.config.MaxEdgeKm)
+		extra, err := e.server.db.getPacketPathsBulk(missing, e.config.MaxEdgeKm, e.server.estimatedPositionsEnabled())
 		if err != nil {
 			return nil, false, fmt.Errorf("record path capture: %w", err)
 		}

@@ -11,6 +11,7 @@
 ## Table of Contents
 
 - [Conventions](#conventions)
+- [Estimated-position policy](#estimated-position-policy)
 - [GET /api/stats](#get-apistats)
 - [GET /api/health](#get-apihealth)
 - [GET /api/perf](#get-apiperf)
@@ -65,6 +66,36 @@
 - [Area Filter](#area-filter)
 
 ---
+
+## Estimated-position policy
+
+`config.json` accepts `estimatedPositions: { "enabled": false }`. Missing
+section or field defaults to `true`. This is a server-startup policy, not a
+request parameter or a browser preference. Restart the server to change it.
+`GET /api/config/client` always publishes the effective value as
+`estimatedPositions: { "enabled": <boolean> }`.
+
+When disabled:
+
+- Node detail omits `estimated_lat`, `estimated_lon`,
+  `estimated_contributor_count`, and `estimated_distance_km`. Reported
+  `lat`/`lon` are unchanged.
+- Packet paths and saved Ping Scores path responses retain route identities
+  and reported coordinates but omit neighbor-derived coordinates and their
+  approximation metadata. Endpoint distances depending on removed estimates
+  are omitted; distances between reported endpoints remain valid. Saved
+  source archives are not modified.
+- `/api/analytics/areas` returns `estimatedPositionsEnabled: false` alongside
+  `density`, `bridgeNodes`, and `unpositionedTotal`. It omits uncomputed
+  `positionGaps`, `estimatedNodes`, and `unpositionedNoNeighborFix` rather than
+  claiming zero gaps or no neighbor evidence.
+- `/api/analytics/gps-sanity` returns only
+  `{ "estimatedPositionsEnabled": false }`, without running the estimator.
+
+Enabled analytics retain their existing response shapes. API clients must
+distinguish disabled computation from an enabled, empty result. The policy
+does not disable ordinary neighbor graphs or independent IATA/name-based
+position fallbacks. No query parameter can override the server setting.
 
 ## GET /api/ping-scores/:hash/path
 
@@ -2338,7 +2369,8 @@ Client-side configuration values.
   "wsReconnectMs":      number | null,
   "cacheInvalidateMs":  number | null,
   "externalUrls":       object | null,
-  "propagationBufferMs": number          // default: 5000
+  "propagationBufferMs": number,         // default: 5000
+  "estimatedPositions": { "enabled": boolean } // default: true; operator policy
 }
 ```
 
