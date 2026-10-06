@@ -636,6 +636,15 @@ The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
   heard twice in a row (a distant node heard every second or third time),
   it is no candidate, and a multiple of it is reported: a 47 h flood heard
   94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
+- **Known trade-off: false change.** The raised-interval rule can read an
+  unchanged interval as raised. When the newest 3 heard gaps are all the
+  same multiple k (every 2nd or 3rd advert lost), the result is k× at
+  medium confidence on 4 adverts: 60 min reads as 120 min, 47 h as 94 h,
+  and 120 min with 3× gaps as 360 min. Gaps that fit no multiple (an
+  outage over 4×, a reboot advert between the 2× gaps) do not break the
+  run. The next gap heard at the interval itself does, and the estimate
+  returns to the interval. The opposite choice kept a raised interval at the
+  old value, at high confidence, for weeks (review F1 on #247).
 - **No zero-hop adverts.** A zero-hop advert is only recorded when an
   observer hears the node directly. "None observed" can therefore mean that
   the interval is 0 (off), or that no observer is in direct range.
