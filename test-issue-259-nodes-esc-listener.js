@@ -290,6 +290,30 @@ test('one Escape closes the list view\'s detail panel exactly once', async () =>
     'one panel close, got ' + JSON.stringify(s.replaceStateWrites));
 });
 
+// #282 (3): _nodesPanelEsc's "only act while a detail panel is open" guard
+// (`if (!panel || panel.classList.contains('empty')) return;`) had no test, so
+// mutant ND (dropping the guard) survived. With the panel left .empty -- the
+// list's cold state -- Escape must do nothing: no closeDetailView(), no
+// history.replaceState, no re-render. Without the guard Escape would write
+// '#/nodes' and re-render even though no panel is open.
+test('Escape does nothing while the list view\'s detail panel is still empty (guard, kills ND)', async () => {
+  const s = loadNodes();
+  s.page.init(s.app, null);
+  await settle();
+  assert.deepStrictEqual(s.errors, [], 'the list view rendered without errors');
+  // The panel is seeded .empty (the real markup's panel-right empty) and never
+  // opened here, so the guard must short-circuit.
+  assert.strictEqual(s.panel.classList.contains('empty'), true, 'panel starts empty');
+  s.replaceStateWrites.length = 0;
+  s.hashWrites.length = 0;
+  s.pressEscape();
+  assert.deepStrictEqual(s.replaceStateWrites, [],
+    'Escape must not close/navigate while the panel is empty: ' + JSON.stringify(s.replaceStateWrites));
+  assert.deepStrictEqual(s.hashWrites, [],
+    'Escape must not write the hash while the panel is empty: ' + JSON.stringify(s.hashWrites));
+  assert.strictEqual(s.panel.classList.contains('empty'), true, 'panel stays empty');
+});
+
 test('destroy() removes the list view\'s Escape listener', async () => {
   const s = loadNodes();
   s.page.init(s.app, null);

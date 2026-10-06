@@ -1182,6 +1182,18 @@
 
   let directObsId = null;
 
+  // #282 (1): the packets list view's Escape-to-close-the-detail-panel handler.
+  // It used to be a fresh `pktEsc` closure registered inside renderLeft(), the
+  // same leak class as nodes.js' #259 nodesPanelEsc: renderLeft() runs on every
+  // visit to #/packets, so each one stacked another live `keydown` listener on
+  // document that destroy() never took off. Module level means a repeat add is
+  // a DOM no-op (at most one listener) and destroy() can remove it.
+  function _pktEsc(e) {
+    if (e.key === 'Escape') {
+      closeDetailPanel();
+    }
+  }
+
   function removeAllByopOverlays() {
     document.querySelectorAll('.byop-overlay').forEach(function (el) { el.remove(); });
   }
@@ -1525,6 +1537,9 @@
     if (_docActionHandler) { document.removeEventListener('click', _docActionHandler); _docActionHandler = null; }
     if (_docMenuCloseHandler) { document.removeEventListener('click', _docMenuCloseHandler); _docMenuCloseHandler = null; }
     if (_docColMenuCloseHandler) { document.removeEventListener('click', _docColMenuCloseHandler); _docColMenuCloseHandler = null; }
+    // #282 (1): drop the module-level Escape handler so a destroyed packets page
+    // leaves no live document keydown listener (and never stacks across visits).
+    document.removeEventListener('keydown', _pktEsc);
     removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
@@ -2377,12 +2392,10 @@
       pktBody.addEventListener('keydown', handler);
     }
 
-    // Escape to close packet detail panel
-    document.addEventListener('keydown', function pktEsc(e) {
-      if (e.key === 'Escape') {
-        closeDetailPanel();
-      }
-    });
+    // Escape to close packet detail panel. #282 (1): one listener per page, not
+    // one per renderLeft() -- _pktEsc is a stable module-level reference, so a
+    // repeat add is a DOM no-op, and destroy() takes it off again.
+    document.addEventListener('keydown', _pktEsc);
 
     renderTableRows();
     makeColumnsResizable('#pktTable', 'meshcore-pkt-col-widths');
@@ -2435,7 +2448,7 @@
   // children come back on desktop and a phone rotation does not throw the
   // state away; it is only the rendered slice that leaves them out. This also
   // covers the first render at a narrow width, e.g. the #866 deep link
-  // #/packets/<hash>/<obs>, which expands the hash before any render.
+  // #/packets/<hash>?obs=<id>, which expands the hash before any render.
   function groupIsExpandedInView(hash) {
     return expandedHashes.has(hash) && !groupRowSelectsOnActivate();
   }
@@ -3908,15 +3921,24 @@
     const pathLenOffset = off;
     const pathByte0 = parseInt(buf.slice(off * 2, off * 2 + 2), 16);
     const hashCountVal = isNaN(pathByte0) ? '?' : (pathByte0 & 0x3F);
-    const encodedHashSize = senderPathHashSize(buf);
-    // senderPathHashSize collapses every "no width here" case to null. This is
-    // the byte breakdown, so say WHICH one it is instead of dropping the bits
-    // on the floor: path bytes that are not hops at all (TRACE carries SNR),
-    // a width field of 0b11 (there is no 4-byte width -- the backend evidence
-    // model only knows 1/2/3, see observed_path_hash_sizes.go), or
-    // sendZeroHop's 0x00 direct marker, which encodes no width by design.
     const headerByte = parseInt(buf.slice(0, 2), 16);
     const pathBytesAreHops = !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) !== 9;
+    // #282 (7): derive the encoded hash size from the SAME path-length byte this
+    // row shows (pathByte0 at offset `off`, taken from pkt.route_type) rather
+    // than calling senderPathHashSize(buf), which independently re-derives the
+    // offset from the raw_hex header byte. For a well-formed frame the two
+    // offsets agree, but one source means the printed byte and its hash_size
+    // label can never describe different bytes -- including a transport route
+    // (path length at byte 5) whose stored route_type and on-wire header route
+    // bits might disagree. The width semantics are senderPathHashSize's own:
+    // null for a non-hop path (TRACE carries SNR), for a 0b11 width field (there
+    // is no 4-byte width -- the backend evidence model only knows 1/2/3, see
+    // observed_path_hash_sizes.go), and for sendZeroHop's 0x00 direct marker.
+    let encodedHashSize = null;
+    if (pathBytesAreHops && !isNaN(pathByte0) && (pathByte0 >> 6) !== 3 &&
+        !(pathByte0 === 0 && (pkt.route_type === 2 || pkt.route_type === 3))) {
+      encodedHashSize = (pathByte0 >> 6) + 1;
+    }
     let pathDescription;
     if (encodedHashSize != null) {
       pathDescription = `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;
