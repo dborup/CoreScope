@@ -95,11 +95,12 @@ func defaultPingScoreHistoryEngineConfig() pingScoreHistoryEngineConfig {
 // and PingScoreHistoryStore's own documented contracts (see their doc
 // comments). Not registered on *Server or driven from main.go yet.
 type pingScoreHistoryEngine struct {
-	server *Server
-	store  *PingScoreHistoryStore
-	index  *pingScoreHistoryIndex
-	now    func() time.Time
-	config pingScoreHistoryEngineConfig
+	server       *Server
+	store        *PingScoreHistoryStore
+	index        *pingScoreHistoryIndex
+	now          func() time.Time
+	config       pingScoreHistoryEngineConfig
+	pathArchives map[string]PingScorePathArchive
 }
 
 // newPingScoreHistoryEngine constructs an engine against an ALREADY-OPEN
@@ -181,13 +182,18 @@ func newPingScoreHistoryEngine(server *Server, store *PingScoreHistoryStore, now
 	if _, _, err := store.HistoryInitializedAt(); err != nil {
 		return nil, fmt.Errorf("ping score history engine: init: load history-initialized marker: %w", err)
 	}
+	archives, err := store.LoadPathArchives()
+	if err != nil {
+		return nil, fmt.Errorf("ping score history engine: init: load path archives: %w", err)
+	}
 
 	return &pingScoreHistoryEngine{
-		server: server,
-		store:  store,
-		index:  newPingScoreHistoryIndex(entries),
-		now:    now,
-		config: config,
+		server:       server,
+		store:        store,
+		index:        newPingScoreHistoryIndex(entries),
+		now:          now,
+		config:       config,
+		pathArchives: archives,
 	}, nil
 }
 
@@ -462,6 +468,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		trigger := triggerByID[txID]
 		existing, _ := candidateIndex.Get(txID)
 		score := e.server.buildPingScoreFromPath(trigger, pathResultFor(trigger.hash))
+		score = preservePingDistanceWithoutGPS(existing, score, pathResultFor(trigger.hash))
 		state := PingScoreHistoryEntryState{
 			StableSince: nowStr, Settled: false,
 			DataPruned: existing.DataPruned, LastDeepSweptAt: existing.LastDeepSweptAt,
@@ -537,6 +544,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		trigger := triggerByID[entry.TxID]
 		existing, _ := candidateIndex.Get(entry.TxID)
 		score := e.server.buildPingScoreFromPath(trigger, pathResultFor(trigger.hash))
+		score = preservePingDistanceWithoutGPS(existing, score, pathResultFor(trigger.hash))
 		fp := fingerprintOf(entry.TxID)
 		fingerprintChanged := fp.Count != existing.FingerprintCount || fp.MaxID != existing.FingerprintMaxID
 
@@ -564,6 +572,15 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ping score history cycle: build snapshot: %w", err)
 	}
+	attempted := make(map[string]bool, len(hashesList))
+	for _, h := range hashesList {
+		attempted[strings.ToLower(h)] = true
+	}
+	archives, archivesChanged, err := e.pathsForRecords(snapshot, pathResults, attempted, now)
+	if err != nil {
+		return nil, fmt.Errorf("ping score history cycle: %w", err)
+	}
+	snapshot.pathArchives = archives
 
 	// Bootstrap-integrity: computed ONLY on the genuine first bootstrap
 	// (isGenuineBootstrap, captured at the very top of this function,
@@ -625,7 +642,11 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 
 	// --- 9. UpsertAndDelete (via UpsertDeleteAndMetadata) in one
 	// persistent transaction ---
-	if err := e.store.UpsertDeleteAndMetadata(upserts, plan.ToDelete, integrity, gap, historyInitializedAt); err != nil {
+	var archiveWrites map[string]PingScorePathArchive
+	if archivesChanged {
+		archiveWrites = archives
+	}
+	if err := e.store.upsertDeleteMetadataAndArchives(upserts, plan.ToDelete, integrity, gap, historyInitializedAt, archiveWrites); err != nil {
 		return nil, fmt.Errorf("ping score history cycle: persist: %w", err)
 	}
 
@@ -634,6 +655,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		candidateIndex.Delete(txID)
 	}
 	e.index = candidateIndex
+	e.pathArchives = archives
 
 	// --- 11. return the candidate snapshot ---
 	return snapshot, nil
@@ -697,6 +719,12 @@ func (e *pingScoreHistoryEngine) QuickSnapshot() (*PingScoresSnapshot, error) {
 	snapshot, err := e.server.buildPingScoresSnapshotFromHistory(triggers, e.index.Entries(), e.now())
 	if err != nil {
 		return nil, fmt.Errorf("ping score history quick snapshot: %w", err)
+	}
+	snapshot.pathArchives = make(map[string]PingScorePathArchive)
+	for key, score := range pingScoreRecordSlots(snapshot) {
+		if a, ok := e.pathArchives[key]; ok && a.Hash == score.Hash && a.Timestamp == score.Timestamp && pingPathMatchesRecord(key, score, &a.Path) {
+			snapshot.pathArchives[key] = a
+		}
 	}
 	return snapshot, nil
 }

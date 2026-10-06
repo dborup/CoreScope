@@ -153,7 +153,7 @@ function makeSandbox(apiImpl) {
     removeEventListener(type, fn) { if (winListeners[type]) winListeners[type] = winListeners[type].filter(f => f !== fn); },
   };
   const ctx = {
-    window: win, document: doc, console, Math, String, JSON, Promise, Error, Date,
+    window: win, document: doc, console, Math, String, JSON, Promise, Error, Date, URLSearchParams,
     setTimeout, clearTimeout,
     // Returns the variable name itself (not a real color) so tests can
     // assert two markers use DIFFERENT css vars without caring what the
@@ -193,6 +193,178 @@ function makeSandbox(apiImpl) {
 }
 
 (async () => {
+  async function historyCase(name, fn) {
+    try { await fn(); passed++; console.log('  ✅ ' + name); }
+    catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  function installHistoryLeaflet(ctx) {
+    const counts = { maps: 0, removed: 0, invalidated: 0 };
+    const map = { setView() { return this; }, fitBounds(_, options) { counts.fitOptions = options; }, invalidateSize() { counts.invalidated++; }, remove() { counts.removed++; } };
+    const layer = () => ({ addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } });
+    ctx.L = { map() { counts.maps++; return map; }, tileLayer: layer, circleMarker: layer, polyline: layer };
+    return counts;
+  }
+  const archivedPath = { hash: 'historic', branches: [{ hops: 0, points: [], observer: { name: 'Saved station', lat: 56, lon: 10 } }] };
+  const pingOptions = (loadPath) => ({ loadPath, routePrefix: '#/ping-scores/', routeQueryKey: 'record', shareURL: 'https://stg.meshview.dk/#/ping-scores/historic?viewPath=1&record=allTime.farthestPing' });
+
+  await historyCase('ping archive loader renders a saved-time disclaimer and copies a ping-specific URL', async () => {
+    const ctx = makeSandbox(() => { throw new Error('ordinary packet API must not be used'); });
+    const counts = installHistoryLeaflet(ctx);
+    ctx.location.hash = '#/ping-scores/historic?viewPath=1&record=allTime.farthestPing';
+    let requested;
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async h => {
+      requested = h;
+      return { status: 'archived', capturedAt: '2026-10-06T08:00:00Z', path: archivedPath };
+    }));
+    assert.strictEqual(requested, 'historic');
+    assert.strictEqual(counts.maps, 1);
+    assert.strictEqual(counts.fitOptions.animate, false, 'historical initial bounds must not animate after navigation');
+    const note = ctx.document.getElementById('packetPathArchiveNote');
+    assert.ok(note.textContent.includes('2026-10-06 08:00:00 UTC'));
+    assert.ok(note.textContent.includes('not necessarily when the packet was sent'));
+    ctx.document.getElementById('packetPathCopyLink')._listeners.click[0]();
+    assert.strictEqual(ctx.__copiedText, pingOptions().shareURL);
+    ctx.window.PacketPathMap.close();
+    assert.strictEqual(ctx.location.hash, '#/ping-scores/historic?record=allTime.farthestPing');
+    assert.strictEqual(counts.removed, 1);
+  });
+
+  await historyCase('expired, unpositioned, private, and oversized records explain unavailable maps without an empty map box', async () => {
+    const messages = { raw_data_expired_before_capture: 'expired before', no_coordinates: 'known positions', privacy_filtered: 'privacy settings', archive_too_large: 'size limit', record_evidence_unavailable: 'no longer reproduce this record' };
+    for (const [reason, expected] of Object.entries(messages)) {
+      const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+      const counts = installHistoryLeaflet(ctx);
+      await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'unavailable', reason })));
+      assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes(expected), reason);
+      assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none', reason);
+      assert.strictEqual(ctx.document.getElementById('packetPathLegend').style.display, 'none', reason);
+      assert.strictEqual(counts.maps, 0, reason);
+      ctx.window.PacketPathMap.close();
+    }
+  });
+
+  await historyCase('initializing history is not confused with expired history or a network failure', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'initializing' })));
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('initializing'));
+    assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none');
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => { throw new Error('network offline'); }));
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('Failed to load path: network offline'));
+    assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none');
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('a live ping path renders normally without pretending to be an archive', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const counts = installHistoryLeaflet(ctx);
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'live', path: archivedPath })));
+    assert.strictEqual(counts.maps, 1);
+    assert.strictEqual(ctx.document.getElementById('packetPathArchiveNote').textContent, '');
+    assert.ok(ctx.document.getElementById('packetPathModal').innerHTML.includes('id="packetPathArchiveNote" class="text-muted" style="display:none;'));
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('ping Back/Forward entries use the same closed-entry lifecycle as ordinary packet links', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const url = '#/ping-scores/historic?viewPath=1&record=allTime.farthestPing';
+    const opts = pingOptions(async () => ({ status: 'unavailable', reason: 'no_coordinates' }));
+    ctx.location.hash = url;
+    await ctx.window.PacketPathMap.open('historic', opts);
+    const state = ctx.history.state;
+    assert.ok(state.packetPathModal, 'ping history entry must be tagged');
+    ctx.__navigate('#/ping-scores');
+    assert.ok(!ctx.document.getElementById('packetPathModal'));
+    ctx.__navigate(url, state);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', opts), false);
+    ctx.__navigate(url, null);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', opts), true);
+    await Promise.resolve();
+    const escape = ctx.__docLog.find(e => e.type === 'keydown').fn;
+    escape({ key: 'Escape', stopPropagation() {} });
+    assert.ok(!ctx.document.getElementById('packetPathModal'));
+    assert.strictEqual(ctx.location.hash, '#/ping-scores/historic?record=allTime.farthestPing');
+  });
+
+  await historyCase('late path responses cannot create a map in a replacement or closed modal', async () => {
+    let resolve;
+    const ctx = makeSandbox(() => Promise.resolve({ hash: 'new', branches: [] }));
+    const counts = installHistoryLeaflet(ctx);
+    const old = ctx.window.PacketPathMap.open('historic', pingOptions(() => new Promise(r => { resolve = r; })));
+    await ctx.window.PacketPathMap.open('new');
+    resolve({ status: 'archived', capturedAt: '2026-10-06T08:00:00Z', path: archivedPath });
+    await old;
+    assert.strictEqual(counts.maps, 0);
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('no observations'));
+    const closed = ctx.window.PacketPathMap.open('historic', pingOptions(() => new Promise(r => { resolve = r; })));
+    ctx.window.PacketPathMap.close();
+    resolve({ status: 'live', path: archivedPath });
+    await closed;
+    assert.strictEqual(counts.maps, 0);
+  });
+
+  await historyCase('Back between two slots for the same hash preserves the incoming record URL and restores the correct map', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const urlA = '#/ping-scores/historic?viewPath=1&record=allTime.farthestPing';
+    const urlB = '#/ping-scores/historic?viewPath=1&record=thisWeek.farthestPing';
+    const options = pingOptions(async () => ({ status: 'unavailable', reason: 'no_coordinates' }));
+    ctx.location.hash = urlA;
+    await ctx.window.PacketPathMap.open('historic', options);
+    const stateA = ctx.history.state;
+    // A card click uses pushState then open(), not a hashchange: replacing
+    // A with B must not tag the incoming A entry as closed on a later Back.
+    ctx.location.hash = urlB;
+    ctx.history.state = null;
+    await ctx.window.PacketPathMap.open('historic', options);
+    const stateB = ctx.history.state;
+    ctx.location.hash = urlA;
+    ctx.history.state = stateA;
+    ctx.window.PacketPathMap.close(); // app.navigate() destroys before init().
+    assert.strictEqual(ctx.location.hash, urlA, 'closing departing B changed incoming A URL');
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', options), true, 'incoming A was wrongly marked closed');
+    await Promise.resolve();
+    ctx.__navigate(urlB, stateB);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', options), false, 'the departing B entry retains the established closed-entry semantics');
+  });
+
+  await historyCase('a scheduled resize does not use a map after the modal was destroyed', async () => {
+    const ctx = makeSandbox(() => Promise.resolve(archivedPath));
+    const counts = installHistoryLeaflet(ctx);
+    const timers = [];
+    ctx.setTimeout = fn => { timers.push(fn); };
+    await ctx.window.PacketPathMap.open('historic');
+    assert.strictEqual(counts.maps, 1);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(counts.fitOptions, 'animate'), false, 'ordinary packet animation defaults must not change');
+    ctx.window.PacketPathMap.close();
+    timers.forEach(fn => fn());
+    assert.strictEqual(counts.invalidated, 0);
+  });
+
+  await historyCase('initializing history can be retried without refreshing the board or using the ordinary packet endpoint', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const counts = installHistoryLeaflet(ctx);
+    let calls = 0;
+    const options = pingOptions(async () => ++calls === 1 ? { status: 'initializing' } : { status: 'live', path: archivedPath });
+    await ctx.window.PacketPathMap.open('historic', options);
+    const retry = ctx.document.getElementById('packetPathRetry');
+    assert.strictEqual(retry.style.display, 'inline-block');
+    await retry._listeners.click[0]();
+    assert.strictEqual(calls, 2);
+    assert.strictEqual(counts.maps, 1);
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('invalid history envelopes and unknown reasons never render a misleading map or raw server text', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const counts = installHistoryLeaflet(ctx);
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'live' })));
+    assert.strictEqual(ctx.document.getElementById('packetPathStatus').textContent, 'Failed to load path: invalid history response.');
+    assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none');
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'unavailable', reason: '__proto__' })));
+    assert.strictEqual(ctx.document.getElementById('packetPathStatus').textContent, 'A historical map is not available for this record.');
+    assert.strictEqual(counts.maps, 0);
+    ctx.window.PacketPathMap.close();
+  });
+
   await (async () => {
     try {
       const ctx = makeSandbox(() => Promise.reject(new Error('network down')));

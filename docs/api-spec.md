@@ -66,6 +66,58 @@
 
 ---
 
+## GET /api/ping-scores/:hash/path
+
+Returns path evidence for a currently displayed Ping Scores record. Requires
+`record=allTime.<kind>` or `record=thisWeek.<kind>`, where `<kind>` is one of
+`farthestPing`, `mostHopsPing`, `widestSpreadPing`, `fastestSpreadPing`, or
+`mostEfficientPing`. The hash must match that slot's current record.
+
+```json
+{
+  "status": "archived",
+  "capturedAt": "2026-01-15T10:05:00Z",
+  "path": {
+    "hash": "example",
+    "branches": [{ "hops": 0, "points": [], "observer": { "name": "Example", "lat": 56.0, "lon": 10.0 } }]
+  }
+}
+```
+
+`status` is `archived` (saved route geometry), `live` (currently available
+observations), `initializing` (board not published yet), or `unavailable`.
+`capturedAt` is the archive capture time, not a radio transmission timestamp.
+Unavailable responses omit `path` and include a `reason`: expired raw data
+before capture, no coordinates, privacy filtering, or archive size limits
+(`raw_data_expired_before_capture`, `no_coordinates`, `privacy_filtered`,
+`archive_too_large`). `record_evidence_unavailable` means current observations
+no longer reproduce the saved record and no matching archive exists; a
+smaller live map is not substituted. Invalid slots return 400; superseded slot/hash pairs
+return 404. A visibility lookup failure returns 500 rather than exposing data.
+
+The existing ping history sidecar stores at most ten record-slot paths, each
+limited to 256 KiB, 128 branches and 4,096 points (including `first`). Paths
+are saved atomically with record changes and restored after restart. Old
+records whose observations were already pruned cannot be reconstructed.
+Superseded records are not a permanent path archive. Packet retention and the
+main database schema are unchanged.
+
+The sidecar's additive v3 migration also adds a nullable distance-origin
+pubkey, without scanning existing rows. This keeps historical distance
+evidence separate from current first-hearer leaderboard credit. Missing
+GPS, including fallback to an IATA airport, cannot lower an established
+distance; genuine corrections with both historical endpoints positioned are
+still allowed.
+
+Archived and live paths both apply the current node/observer blacklists and
+hidden-name prefixes, including saved names and current/inactive names.
+Hidden branches are omitted entirely; hidden first observations and their
+relative measurements are removed. Approximate neighbor-centroid positions
+are omitted when a visibility policy is active because the path format does
+not identify their contributors. Touched areas are recomputed from visible
+positions and current area configuration. Existing general packet-path
+endpoints are unchanged.
+
 ## Conventions
 
 ### Types
