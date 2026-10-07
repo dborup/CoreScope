@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -663,5 +664,76 @@ func TestOpenAPIDocumentsPacketIdBackendDivergence(t *testing.T) {
 	}
 	if !strings.Contains(desc, "packetHash") {
 		t.Errorf("packetId description must point consumers to packetHash for stable correlation, got: %q", desc)
+	}
+}
+
+// TestOpenAPIDocumentsChannelMessageWireWording locks two review corrections
+// (PR #11, P3-1/P3-2): sender_timestamp is documented as an always-present key
+// that is null when unavailable, and the channel hash byte is described as the
+// cleartext start of the GRP_TXT/GRP_DATA payload envelope, not as a field of
+// every packet header (firmware Mesh::createGroupDatagram).
+func TestOpenAPIDocumentsChannelMessageWireWording(t *testing.T) {
+	cm, ok := componentSchemas()["ChannelMessage"].(map[string]interface{})
+	if !ok {
+		t.Fatal("ChannelMessage schema missing from components/schemas")
+	}
+	props, _ := cm["properties"].(map[string]interface{})
+
+	st, ok := props["sender_timestamp"].(map[string]interface{})
+	if !ok {
+		t.Fatal("sender_timestamp not documented on ChannelMessage")
+	}
+	if st["nullable"] != true {
+		t.Errorf("sender_timestamp must be nullable, got %#v", st["nullable"])
+	}
+	stDesc, _ := st["description"].(string)
+	if !strings.Contains(stDesc, "null when unavailable") {
+		t.Errorf("sender_timestamp description must say it is null when unavailable, got: %q", stDesc)
+	}
+	if strings.Contains(stDesc, "Absent") {
+		t.Errorf("sender_timestamp description must not call the key absent (it is always emitted), got: %q", stDesc)
+	}
+
+	hx, _ := props[channelHashHexKey].(map[string]interface{})
+	hxDesc, _ := hx["description"].(string)
+	if strings.Contains(hxDesc, "in the clear in every packet header") {
+		t.Errorf("%s description must not claim the byte is in every packet header", channelHashHexKey)
+	}
+	if !strings.Contains(hxDesc, "GRP_TXT/GRP_DATA payload envelope") {
+		t.Errorf("%s description must place the byte in the GRP_TXT/GRP_DATA payload envelope", channelHashHexKey)
+	}
+}
+
+// TestChannelMessagesSenderTimestampNullWhenUnavailable locks the runtime
+// behaviour the corrected sender_timestamp description documents: both
+// backends keep the key and serialize it as null when the decoded payload
+// carries no sender timestamp.
+func TestChannelMessagesSenderTimestampNullWhenUnavailable(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db)
+	insertChanTx(t, db, "C0NOTS", "chx_hash_nots", `{"type":"CHAN","channel":"#chx","text":"Alice: hello","sender":"Alice","channelHashHex":"A7"}`)
+
+	dbMsgs, _, err := db.GetChannelMessages("#chx", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewPacketStore(db, nil)
+	store.Load()
+	storeMsgs, _ := store.GetChannelMessages("#chx", 100, 0)
+
+	for name, msgs := range map[string][]map[string]interface{}{"sqlite": dbMsgs, "in-memory": storeMsgs} {
+		m := findMsg(t, msgs, "chx_hash_nots")
+		v, present := m["sender_timestamp"]
+		if !present || v != nil {
+			t.Errorf("%s: sender_timestamp = (%#v, present=%v), want present nil", name, v, present)
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		if !strings.Contains(string(b), `"sender_timestamp":null`) {
+			t.Errorf("%s: JSON must carry \"sender_timestamp\":null, got %s", name, b)
+		}
 	}
 }
