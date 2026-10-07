@@ -813,6 +813,18 @@ buckets before `coverageStart` represent unknown history rather than confirmed
 silence. A null `coverageStart` means coverage cannot be established (for
 example during startup or after a failed load).
 
+With `?include=advertIntervals`, repeater health may also return
+`advertIntervals` in the same shape as the node-detail `include=advertRoutes`
+response: `{ "window": 20, "flood": AdvertIntervalEstimate,
+"zero_hop": AdvertIntervalEstimate }`. The field is absent by default, for
+non-repeaters, and for hidden identities. The server reuses the bounded,
+per-node cached advert-route scan; this is an opt-in because a cold scan of a
+node with many adverts is comparatively expensive. `interval_s` is an
+**estimate** from at most the newest 20 distinct adverts in each route class,
+not the repeater's configured interval. Missed receptions and limited history
+can skew it. `null` plus `status` (`none_observed`, `too_few`, or `irregular`)
+means no defensible estimate, not proof the device's timer is disabled.
+
 ### Response `404`
 
 ```json

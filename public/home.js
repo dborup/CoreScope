@@ -298,7 +298,7 @@
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
-        const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+        const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health?include=advertIntervals', { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};
         const obs = h.observers || [];
@@ -319,6 +319,7 @@
         const sparkHtml = buildSparkline(h.activity24h);
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
         const preview = isRepeater ? obs.slice(0, 3) : obs;
+        const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals) : '';
 
         return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
@@ -347,6 +348,7 @@
             </div>
           </div>
           ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name">${escapeHtml(o.observer_name || o.observer_id || 'Unknown')}</span>`).join(', ')}${isRepeater && obs.length > 3 ? ` <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="View all ${obs.length} observers for ${escapeAttr(name)}">View all ${obs.length} →</button>` : ''}</div>` : ''}
+          ${cadenceHtml}
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
@@ -439,6 +441,32 @@
     };
     dialog.onclose = () => { if (trigger.isConnected) trigger.focus(); };
     dialog.showModal();
+  }
+
+  function renderMyMeshAdvertIntervals(intervals) {
+    const row = (label, estimate) => {
+      if (!estimate) return `<div class="mnc-advert-row"><strong>${label}</strong> unavailable</div>`;
+      const samples = Number(estimate.samples);
+      const seconds = Number(estimate.interval_s);
+      let value = 'unavailable';
+      if (estimate.status === 'estimated' && estimate.interval_s != null && Number.isFinite(seconds) && seconds > 0) {
+        const hours = seconds / 3600;
+        value = '≈ ' + (hours >= 1 ? Number(hours.toFixed(1)) + ' h' : Math.round(seconds / 60) + ' min');
+      } else if (estimate.status === 'too_few') {
+        value = 'not enough adverts';
+      } else if (estimate.status === 'none_observed') {
+        value = 'not observed';
+      } else if (estimate.status === 'irregular') {
+        value = 'irregular';
+      }
+      const count = Number.isInteger(samples) && samples >= 0 ? ` · ${samples} heard` : '';
+      const seen = estimate.last_advert && Number.isFinite(Date.parse(estimate.last_advert))
+        ? ' · last ' + timeAgo(estimate.last_advert) : '';
+      return `<div class="mnc-advert-row"><strong>${label}</strong> ${value}${count}${seen}</div>`;
+    };
+    return `<div class="mnc-advert-cadence" aria-label="Observed repeater advert intervals">` +
+      row('Zero-hop', intervals?.zero_hop) + row('Flood', intervals?.flood) +
+      '<div class="mnc-advert-note">Observed estimate, not configured interval · newest 20 adverts per type; missed receptions can skew it · see Node page</div></div>';
   }
 
   function buildSparkline(activity) {

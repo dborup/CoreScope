@@ -2107,6 +2107,20 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "Not found")
 			return
 		}
+		// My Mesh opts into the existing node-detail estimator on the same
+		// health request. Keep the expensive route scan/cache out of default
+		// health calls and non-repeater cards, and apply its privacy gate first.
+		if wantsNodeInclude(r, "advertIntervals") {
+			node, _ := result["node"].(map[string]interface{})
+			if role, _ := node["role"].(string); strings.EqualFold(role, "repeater") {
+				hidden, hideErr := s.isIdentityHidden(r.Context(), pubkey)
+				if hideErr == nil && !hidden {
+					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
+						result["advertIntervals"] = adverts.intervals
+					}
+				}
+			}
+		}
 		writeJSON(w, result)
 		return
 	}

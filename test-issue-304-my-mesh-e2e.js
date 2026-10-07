@@ -60,10 +60,14 @@ async function render(page, responses, width) {
       const names = Array.from({ length: 51 }, (_, i) => i === 50 ? '<img src=x onerror=alert(1)>' : `Observer ${i}`);
       names[1] = 'Very-long-observer-name-'.repeat(25);
       names[2] = '<svg onload=alert(1)>';
-      const data = Object.fromEntries(KEYS.map((key, i) => [`/nodes/${key}/health`, {
+      const data = Object.fromEntries(KEYS.map((key, i) => [`/nodes/${key}/health?include=advertIntervals`, {
         node: { name: `Repeater ${i}`, role: 'repeater' }, stats: { lastHeard: end, packetsToday: 2 },
         observers: i === 0 ? names.map(observer_name => ({ observer_name })) : i === 1 ? [{ observer_name: 'One' }] : [],
         recentPackets: [], activity24h: i === 0 ? activity() : i === 1 ? activity(false) : undefined,
+        advertIntervals: i === 0 ? {
+          zero_hop: { status: 'estimated', interval_s: 7200, samples: 5, last_advert: end, confidence: 'medium' },
+          flood: { status: 'too_few', interval_s: null, samples: 2, last_advert: end },
+        } : i === 1 ? { zero_hop: { status: 'none_observed', samples: 0 }, flood: { status: 'irregular', samples: 5 } } : undefined,
       }]));
       await render(page, data, width);
       if (process.env.SCREENSHOT_PATH && width === 1280) {
@@ -85,6 +89,10 @@ async function render(page, responses, width) {
       assert.match(await cards.nth(1).locator('.mnc-spark').innerText(), /unavailable/i);
       assert.equal(await cards.nth(2).locator('.home-spark-bar').count(), 0);
       assert.match(await cards.nth(2).locator('.mnc-spark').innerText(), /unavailable/i);
+      assert.match(await large.locator('.mnc-advert-cadence').innerText(), /Zero-hop[\s\S]*≈ 2 h[\s\S]*Flood[\s\S]*not enough adverts/i);
+      assert.match(await large.locator('.mnc-advert-cadence').innerText(), /observed estimate.*not configured/i);
+      assert.match(await cards.nth(1).locator('.mnc-advert-cadence').innerText(), /not observed[\s\S]*irregular/i);
+      assert.match(await cards.nth(2).locator('.mnc-advert-cadence').innerText(), /unavailable/i);
       const heights = await cards.evaluateAll(els => els.map(el => el.getBoundingClientRect().height));
       assert(heights[0] < 350, `repeater card too tall: ${heights[0]} at ${width}px`);
       const open = large.locator('.mnc-view-all');

@@ -54,9 +54,14 @@ const nodeDetailIncludeAdvertRoutes = "advertRoutes"
 // include=advertRoutes (the include parameter may repeat and holds a
 // comma-separated list).
 func wantsNodeAdvertRoutes(r *http.Request) bool {
+	return wantsNodeInclude(r, nodeDetailIncludeAdvertRoutes)
+}
+
+// wantsNodeInclude accepts repeated and comma-separated include values.
+func wantsNodeInclude(r *http.Request, name string) bool {
 	for _, v := range r.URL.Query()["include"] {
 		for _, item := range strings.Split(v, ",") {
-			if strings.TrimSpace(item) == nodeDetailIncludeAdvertRoutes {
+			if strings.TrimSpace(item) == name {
 				return true
 			}
 		}
