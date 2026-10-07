@@ -702,6 +702,7 @@ type PacketQuery struct {
 	Limit              int
 	Offset             int
 	Type               *int
+	ExcludeTypes       packetTypeExclusions
 	Route              *int
 	Observer           string
 	Hash               string
@@ -933,6 +934,7 @@ func parseDistinctIatasCSV(v interface{}) []string {
 func (db *DB) buildPacketWhere(q PacketQuery) ([]string, []interface{}) {
 	var where []string
 	var args []interface{}
+	where, args = q.ExcludeTypes.appendSQL(where, args, "payload_type")
 
 	if q.Type != nil {
 		where = append(where, "payload_type = ?")
@@ -977,6 +979,7 @@ func (db *DB) buildPacketWhere(q PacketQuery) ([]string, []interface{}) {
 func (db *DB) buildTransmissionWhere(q PacketQuery) ([]string, []interface{}) {
 	var where []string
 	var args []interface{}
+	where, args = q.ExcludeTypes.appendSQL(where, args, "t.payload_type")
 
 	if q.Type != nil {
 		where = append(where, "t.payload_type = ?")

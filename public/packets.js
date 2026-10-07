@@ -739,9 +739,8 @@
     const t = localStorage.getItem('meshcore-type-filter'); if (t) filters.type = t;
   } catch (e) { /* storage unavailable */ }
   // #96 — opt-in "Hide CONTROL packets" display filter, unchecked by default.
-  // Display only: CONTROL packets are still fetched and kept (also live ones),
-  // so unchecking shows them again without a reload, and a pinned hash (a
-  // direct link to one packet) bypasses it like every other client filter.
+  // Excluded from the capped server page and live cache, not deleted from
+  // storage. Unchecking refetches them; a pinned hash bypasses exclusions.
   // Saved as '1' or '0' so an explicit unchecked choice survives a reload.
   const PAYLOAD_TYPE_CONTROL = 11;
   const HIDE_CONTROL_KEY = 'meshcore-hide-control';
@@ -771,13 +770,14 @@
     const hidden = beforeHide.filter(p => p.payload_type === PAYLOAD_TYPE_CONTROL);
     return hidden.length > 0 && laterFilters(hidden).length > 0;
   }
-  // The checkbox's change: re-filters the loaded packets, no new request. The
+  // Re-filter immediately, then fetch a full matching page before the cap. The
   // save comes first but cannot stop the filter or the URL update (#211).
   function setHideControl(hide) {
     hideControl = hide;
     if (saveHideControlPref(hide)) savedHideControl = hide;
     updatePacketsUrl();
     renderTableRows();
+    loadPackets();
   }
   // hideControl is what this view shows; savedHideControl is the saved choice
   // as far as this page knows (it changes only when a save succeeds).
@@ -785,6 +785,7 @@
   // declare both (test-issue-121/147-…, test-issue-96-hide-control.js).
   let savedHideControl = readHideControlPref(null, readStoredHideControl());
   let hideControl = savedHideControl;
+  let packetLoadGeneration = 0;
   let wsHandler = null;
   let packetsPaused = false;
   let pauseBuffer = [];
@@ -1589,6 +1590,8 @@
         // When user pinned a hash, accept ONLY that exact packet — bypass all
         // other filters (window/region/type/observer/node).
         if (filters.hash) return p.hash === filters.hash;
+        // Excluded live traffic must not consume the bounded matching page.
+        if (hideControl && p.payload_type === PAYLOAD_TYPE_CONTROL) return false;
         // Respect time window filter — drop packets outside the selected window
         const windowMin = savedTimeWindowMin;
         if (windowMin > 0) {
@@ -1676,6 +1679,7 @@
   }
 
   function destroy() {
+    ++packetLoadGeneration;
     clearTimeout(_renderTimer);
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
@@ -1736,7 +1740,7 @@
   // suppresses ALL other filters (region, time window, observer, node,
   // channel). The user is asking for THAT packet regardless of saved
   // selections.
-  function buildPacketsParams({ filters, regionParam, areaParam, windowMin, groupByHash, limit }) {
+  function buildPacketsParams({ filters, hideControl = false, regionParam, areaParam, windowMin, groupByHash, limit }) {
     const params = new URLSearchParams();
     if (filters.hash) {
       params.set('hash', filters.hash);
@@ -1758,6 +1762,14 @@
     if (filters.node) params.set('node', filters.node);
     if (filters.observer) params.set('observer', filters.observer);
     if (filters.channel) params.set('channel', filters.channel);
+    // Payload types occupy four bits, including currently reserved codes.
+    // Complement the inclusion menu and union the optional CONTROL exclusion.
+    const selected = filters.type ? new Set(String(filters.type).split(',').map(Number)) : null;
+    const excluded = [];
+    for (let type = 0; type < 16; type++) {
+      if ((selected && !selected.has(type)) || (hideControl && type === PAYLOAD_TYPE_CONTROL)) excluded.push(type);
+    }
+    if (excluded.length) params.set('excludeTypes', excluded.join(','));
     if (groupByHash) {
       params.set('groupByHash', 'true');
     } else {
@@ -1767,11 +1779,19 @@
   }
 
   async function loadPackets() {
+    const generation = ++packetLoadGeneration;
+    const requestGrouped = groupByHash;
+    const container = document.getElementById('pktLeft');
+    if (container) container.setAttribute('data-loaded', 'false');
     try {
-      const selectedWindow = Number(document.getElementById('fTimeWindow')?.value);
+      // Shared URLs may use a window not present in the dropdown. Its empty
+      // value must not become Number('')=0 and silently widen a refetch.
+      const selectedWindowValue = document.getElementById('fTimeWindow')?.value;
+      const selectedWindow = selectedWindowValue ? Number(selectedWindowValue) : NaN;
       const windowMin = Number.isFinite(selectedWindow) ? selectedWindow : savedTimeWindowMin;
       const params = buildPacketsParams({
         filters,
+        hideControl,
         regionParam: RegionFilter.getRegionParam(),
         areaParam: AreaFilter.getAreaParam(),
         windowMin,
@@ -1780,13 +1800,14 @@
       });
 
       const data = await api('/packets?' + params.toString());
+      if (generation !== packetLoadGeneration) return;
       packets = data.packets || [];
       hashIndex = new Map();
       for (const p of packets) { if (p.hash) hashIndex.set(p.hash, p); }
       totalCount = data.total || packets.length;
 
       // When ungrouped, flatten observations inline (single API call, no N+1)
-      if (!groupByHash) {
+      if (!requestGrouped) {
         const flat = [];
         for (const p of packets) {
           if (p.observations && p.observations.length > 1) {
@@ -1811,12 +1832,14 @@
       // #1692 parallelisation. Hop *names* are a presentation enhancement
       // (paths render as hex prefixes until names arrive), so resolve them
       // in the background and re-render rows when done.
+      const loadedPackets = packets;
       const hopJob = (async () => {
         try {
-          await cacheResolvedPaths(packets);
-          await resolveHopsForPackets(packets);
+          await cacheResolvedPaths(loadedPackets);
+          if (generation !== packetLoadGeneration) return;
+          await resolveHopsForPackets(loadedPackets);
           // Re-render rows so resolved hop names replace hex prefixes.
-          if (filtersBuilt) renderTableRows();
+          if (generation === packetLoadGeneration && filtersBuilt) renderTableRows();
         } catch (e) {
           console.warn('[packets] background hop resolution failed:', e);
         }
@@ -1825,7 +1848,7 @@
       void hopJob;
 
       // Restore expanded group children (parallel fetch, Map lookup)
-      if (groupByHash && expandedHashes.size > 0) {
+      if (requestGrouped && expandedHashes.size > 0) {
         const expandedArr = [...expandedHashes];
         // Fetch the full packet detail (which includes per-observation rows) for each expanded hash.
         // Previously this used `/packets?hash=X&limit=20` which returned ONE aggregate row, causing
@@ -1838,6 +1861,7 @@
             .then(data => ({ hash, group, data }))
             .catch(() => ({ hash, group, data: null }));
         }));
+        if (generation !== packetLoadGeneration) return;
         for (const { hash, group, data } of results) {
           if (!group) {
             expandedHashes.delete(hash);
@@ -1859,13 +1883,14 @@
       sortPacketsArray();
       renderLeft();
     } catch (e) {
+      if (generation !== packetLoadGeneration) return;
       console.error('Failed to load packets:', e);
       const tbody = document.getElementById('pktBody');
       if (tbody) tbody.innerHTML = '<tr><td colspan="' + _getColCount() + '" class="text-center" style="padding:24px;color:var(--error,#ef4444)"><div role="alert" aria-live="polite">Failed to load packets. Please try again.</div></td></tr>';
     } finally {
       // Always signal data-loaded — even on error — so E2E tests can proceed.
       var pktContainer = document.getElementById('pktLeft') || document.getElementById('pktBody');
-      if (pktContainer) pktContainer.setAttribute('data-loaded', 'true');
+      if (generation === packetLoadGeneration && pktContainer) pktContainer.setAttribute('data-loaded', 'true');
     }
   }
 
@@ -2155,6 +2180,7 @@
       // Clear button (#121).
       updateClearFiltersVisibility();
       renderTableRows();
+      loadPackets();
     });
 
     // --- Channel filter (#812) ---
@@ -2313,7 +2339,7 @@
       this.classList.toggle('active', filters.myNodes);
       loadPackets();
     });
-    // #96 — re-filters the loaded packets; no new request.
+    // #242 — refill the capped page using server-side exclusions.
     document.getElementById('fHideControl').addEventListener('change', function () { setHideControl(this.checked); });
 
     // Observation sort dropdown
@@ -3311,7 +3337,10 @@
       detachVScrollListener();
       const colCount = _getColCount();
       // #211: name CONTROL only when hiding it emptied the list, i.e. a CONTROL
-      // packet would get through the filters below the CONTROL pass.
+      // packet would get through the filters below the CONTROL pass. Since
+      // #242 the refetch and live feed drop CONTROL before it reaches
+      // `packets`, so this fires only between the checkbox change and the
+      // refetch; a server-filtered empty list just says "No packets found".
       const emptiedByControl = controlHidden && controlHidingEmptiedList(beforeHideControl, (list) => {
         list = applyObserverFilter(list, filters, groupByHash, hashOnly);
         return filters._packetFilter ? list.filter(filters._packetFilter) : list;

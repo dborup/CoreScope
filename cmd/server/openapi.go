@@ -61,6 +61,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "sort", Description: "Sort field", Type: "string"},
 				{Name: "order", Description: "Sort order (asc/desc)", Type: "string"},
 				{Name: "type", Description: "Filter by packet type", Type: "string"},
+				{Name: "excludeTypes", Description: "Comma-separated numeric payload types 0-15 excluded before pagination and total counting (raw and grouped). At most 16 entries and 64 characters; duplicates collapse. Empty means no exclusions; NULL payload types remain. Intersects with type; exclusion wins on overlap. Invalid/repeated parameters or combination with nodes return 400; single node is supported.", Type: "string"},
 				{Name: "observer", Description: "Filter by observer ID", Type: "string"},
 				{Name: "timeRange", Description: "Time range filter (e.g. 1h, 24h, 7d)", Type: "string"},
 				{Name: "search", Description: "Full-text search", Type: "string"},

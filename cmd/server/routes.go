@@ -1263,6 +1263,15 @@ func (s *Server) handlePerfReset(w http.ResponseWriter, r *http.Request) {
 // --- Packet Handlers ---
 
 func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
+	excludeTypes, parseErr := parsePacketTypeExclusions(r.URL.Query())
+	if parseErr != nil {
+		writeError(w, 400, parseErr.Error())
+		return
+	}
+	if excludeTypes != 0 && r.URL.Query().Get("nodes") != "" {
+		writeError(w, 400, "excludeTypes is not supported with nodes; use the single node filter")
+		return
+	}
 	// Multi-node filter: comma-separated pubkeys (Node.js parity)
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
 		pubkeys := strings.Split(nodesParam, ",")
@@ -1300,6 +1309,7 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := PacketQuery{
+		ExcludeTypes:       excludeTypes,
 		Limit:              queryLimit(r, 50, s.cfg.ListLimits.PacketsMax),
 		Offset:             queryInt(r, "offset", 0),
 		Observer:           r.URL.Query().Get("observer"),

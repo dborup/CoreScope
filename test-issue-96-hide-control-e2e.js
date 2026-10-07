@@ -4,8 +4,8 @@
  * Against the e2e fixture (4 CONTROL packets, all older than the default
  * time window, so every step opens #/packets?timeWindow=525600):
  * - default: the checkbox is unchecked and CONTROL packets are listed;
- * - checking it hides exactly the CONTROL packets, without a new
- *   /api/packets request, and puts hideControl=1 in the address bar;
+ * - checking it hides exactly the CONTROL packets, refetches the capped
+ *   /api/packets page, and puts hideControl=1 in the address bar;
  * - the choice survives a reload, checked and explicitly unchecked;
  * - hideControl in the URL wins over the saved choice;
  * - a direct link to one CONTROL packet still opens it while the filter is on;
@@ -91,14 +91,15 @@ async function hashQuery(page) {
     assert(!('hideControl' in q), 'hideControl in the URL by default: ' + JSON.stringify(q));
   });
 
-  await step('checking it hides exactly the CONTROL packets, without a new API request', async () => {
+  await step('checking it hides exactly the CONTROL packets and refetches the page', async () => {
     const before = packetsRequests;
     await page.check('#fHideControl');
     await page.waitForFunction((n) => {
       const m = /\((\d+)\)/.exec(document.querySelector('#pktLeft .count')?.textContent || '');
       return m && Number(m[1]) === n;
     }, countAll - controls.length, { timeout: 5000 });
-    assert(packetsRequests === before, `toggling made ${packetsRequests - before} /api/packets request(s)`);
+    await page.waitForSelector('#pktLeft[data-loaded="true"]');
+    assert(packetsRequests === before + 1, `toggling made ${packetsRequests - before} /api/packets request(s)`);
     const q = await hashQuery(page);
     assert(q.hideControl === '1', 'hideControl=1 not in the URL: ' + JSON.stringify(q));
     const shownHashes = await page.$$eval('table tbody tr[data-hash]', (rows) => rows.map((r) => r.dataset.hash));
@@ -158,9 +159,9 @@ async function hashQuery(page) {
     assert(await page.evaluate((k) => localStorage.getItem(k), PREF_KEY) === '1', 'the URL override changed the saved choice');
   });
 
-  await step('#211: the empty-list note names CONTROL only when hiding CONTROL emptied the list', async () => {
+  await step('#242: server-filtered empty lists do not infer unseen CONTROL packets', async () => {
     const onlyControl = await openEmpty(page, LIST + '&hideControl=1&filter=' + encodeURIComponent('type == CONTROL'));
-    assert(onlyControl === 'No packets found (CONTROL packets are hidden)', 'expression matching only CONTROL: ' + onlyControl);
+    assert(onlyControl === 'No packets found', 'server-filtered list has no evidence of hidden matches: ' + onlyControl);
     const nothing = await openEmpty(page, LIST + '&hideControl=1&filter=' + encodeURIComponent('snr > 999'));
     assert(nothing === 'No packets found', 'expression matching nothing blamed CONTROL: ' + nothing);
   });
