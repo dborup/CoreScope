@@ -388,8 +388,15 @@ func (a *nodeAnalyticsAccumulator) finalizeDisplayArrays() (
 			LastSeen:     o.last,
 		})
 	}
+	// #321: obsDetail iteration order is random, so observers tied on
+	// PacketCount came out in a different order on each call. ObserverID is
+	// the map key the entry was built from, so it is unique and makes the
+	// order total (sibling of rankSubpaths/#256 and GetSubpathDetail/#273).
 	sort.Slice(observerCoverage, func(i, j int) bool {
-		return observerCoverage[i].PacketCount > observerCoverage[j].PacketCount
+		if observerCoverage[i].PacketCount != observerCoverage[j].PacketCount {
+			return observerCoverage[i].PacketCount > observerCoverage[j].PacketCount
+		}
+		return observerCoverage[i].ObserverID.(string) < observerCoverage[j].ObserverID.(string)
 	})
 
 	hopDistribution = make([]HopDistEntry, 0)
@@ -406,8 +413,14 @@ func (a *nodeAnalyticsAccumulator) finalizeDisplayArrays() (
 			MessageCount: pm.count, LastContact: pm.lastContact,
 		})
 	}
+	// #321: peerDetail iteration order is random and this list is capped at
+	// 20, so with ties at the cut-off it was random *which* peers the client
+	// showed, not just their order. PeerKey is the map key, so it is unique.
 	sort.Slice(peerInteractions, func(i, j int) bool {
-		return peerInteractions[i].MessageCount > peerInteractions[j].MessageCount
+		if peerInteractions[i].MessageCount != peerInteractions[j].MessageCount {
+			return peerInteractions[i].MessageCount > peerInteractions[j].MessageCount
+		}
+		return peerInteractions[i].PeerKey < peerInteractions[j].PeerKey
 	})
 	if len(peerInteractions) > 20 {
 		peerInteractions = peerInteractions[:20]
