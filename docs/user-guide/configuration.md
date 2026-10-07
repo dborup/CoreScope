@@ -98,6 +98,10 @@ How long (in hours) before a node is marked degraded or silent:
 | `retention.nodeDays` | `7` | Nodes not seen in N days move to inactive |
 | `retention.packetDays` | `30` | Packets older than N days are deleted daily |
 | `retention.channelDays` | `0` | Channel messages (GRP_TXT) and their observations are kept until they are N days old instead of `packetDays`. Takes effect only when `packetDays` is set and `channelDays` is larger; `0` = channel messages follow `packetDays` |
+| `retention.inactiveNodeDays` | `0` | Rows in `inactive_nodes` whose last advert is older than N days are deleted, unless the node has come back or is an observer still uploading. `0` = keep forever |
+| `retention.nodeChangeDays` | `0` | Node Changes history (`node_changes`) older than N days is deleted. `0` = keep forever |
+| `retention.pingTriggerDays` | `0` | Ping Scores triggers (`ping_triggers`, which hold sender names) first seen more than N days ago are deleted. `0` = keep forever |
+| `retention.observerPurgeDays` | `0` | Observers already marked inactive by `observerDays` and not seen in N days are deleted, once no packet, metric or dropped-packet row references them. `0` = keep forever |
 
 `retention.channelDays` lets an instance keep a short `packetDays` to bound the
 database while keeping chat history longer. Channel messages are a small share
@@ -112,6 +116,25 @@ independent of both settings. The Channels page reads the full history from the
 database (`/api/channels`, `/api/channels/{hash}/messages`), so messages kept by
 `channelDays` stay visible there even when they are older than the in-memory
 window.
+
+The four opt-in settings (`inactiveNodeDays`, `nodeChangeDays`,
+`pingTriggerDays`, `observerPurgeDays`) cover the tables nothing else prunes, so
+an instance can honour a fixed retention period for node and observer data. The
+ingestor applies them at startup and then daily, in small batches, and logs
+each count, for example `[prune] deleted 12 node_changes older than 30 days`.
+Leaving them unset keeps today's behaviour.
+
+- A node deleted by `inactiveNodeDays` that adverts again later counts as a new
+  node: it shows in New Nodes, and Node Changes records no return. Set it above
+  `nodeDays`.
+- `pingTriggerDays` counts from when the ping was first seen, not from when its
+  packet was pruned. Ping Scores keeps a ping in its all-time records after
+  `packetDays` has removed the packet, and drops it, with its sender name, once
+  the trigger is deleted. So `pingTriggerDays` also bounds those records.
+- `observerPurgeDays` deletes an observer only after its packets, metrics and
+  dropped packets have aged out, so set it above `observerDays`, `packetDays`
+  (and `channelDays`) and `metricsDays`; below those, an observer waits until
+  that data is gone. The observer's current neighbour list is deleted with it.
 
 > **Note:** Lowering retention does **not** immediately shrink the database file.
 > SQLite marks deleted pages as free but does not return them to the filesystem
