@@ -274,8 +274,8 @@ func main() {
 	// unset (the default) = nothing deleted.
 	tableRetention := cfg.TableRetention()
 	if r := tableRetention; r.Enabled() {
-		log.Printf("[prune] table retention enabled (0 = off): inactiveNodeDays=%d nodeChangeDays=%d pingTriggerDays=%d observerPurgeDays=%d",
-			r.InactiveNodeDays, r.NodeChangeDays, r.PingTriggerDays, r.ObserverPurgeDays)
+		log.Printf("[prune] table retention enabled (0 = off): inactiveNodeDays=%d nodeChangeDays=%d observerPurgeDays=%d",
+			r.InactiveNodeDays, r.NodeChangeDays, r.ObserverPurgeDays)
 	}
 	runTableRetention(store, tableRetention, "startup")
 

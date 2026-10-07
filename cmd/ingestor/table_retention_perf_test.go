@@ -18,8 +18,8 @@ import (
 // lines each emits (default 500 ms threshold) while a probe writer stands in
 // for MQTT ingest. Fixture: 365 days of history; 3M transmissions (30k a day
 // for the last 100 days) with four observations each; 20k inactive_nodes
-// (2k of them nodes that came back), 500k node_changes, 50k ping_triggers,
-// 600 observers (300 soft-deleted, half of those still with metrics) with
+// (2k of them nodes that came back), 500k node_changes, 50k ping_triggers
+// (which no retention deletes; the test fails if one goes), 600 observers (300 soft-deleted, half of those still with metrics) with
 // metrics and neighbour rows. The windows are 30 days, the operator's
 // setting. Three passes, as in production order (transmissions and metrics
 // first, then the table retention): the first run after enabling (335 days
@@ -78,7 +78,7 @@ func TestTableRetentionTiming(t *testing.T) {
 	}
 	tables := func(days int) step {
 		return step{"#329 table retention", func() error {
-			runTableRetention(store, TableRetention{InactiveNodeDays: days, NodeChangeDays: days, PingTriggerDays: days, ObserverPurgeDays: days}, "perf")
+			runTableRetention(store, TableRetention{InactiveNodeDays: days, NodeChangeDays: days, ObserverPurgeDays: days}, "perf")
 			if strings.Contains(logBuf.String(), "table retention error") {
 				return fmt.Errorf("%s", logBuf.String())
 			}
@@ -86,7 +86,7 @@ func TestTableRetentionTiming(t *testing.T) {
 		}}
 	}
 	components := []string{"prune_packets", "prune_metrics", "prune_observers",
-		"prune_inactive_nodes", "prune_node_changes", "prune_ping_triggers", "purge_observers"}
+		"prune_inactive_nodes", "prune_node_changes", "purge_observers"}
 
 	for _, pass := range []struct {
 		name string
@@ -117,6 +117,9 @@ func TestTableRetentionTiming(t *testing.T) {
 			for _, tbl := range []string{"transmissions", "inactive_nodes", "node_changes", "ping_triggers", "observers"} {
 				if d := counts[tbl] - countRows(t, store, tbl); d > 0 {
 					deleted = append(deleted, fmt.Sprintf("%s=%d", tbl, d))
+					if tbl == "ping_triggers" {
+						t.Errorf("%s %s deleted %d ping_triggers; want none", pass.name, st.label, d)
+					}
 				}
 			}
 			slow := strings.Count(logBuf.String(), "[db-slow-writer]")

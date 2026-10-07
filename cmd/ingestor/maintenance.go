@@ -278,10 +278,36 @@ func (s *Store) PruneOrphanRouteMaskChanges() (int64, error) {
 	if batch <= 0 {
 		batch = 1000
 	}
-	total, err := s.deleteInKeyRanges("prune_route_mask_changes", "route_mask_changes", "id",
-		`NOT EXISTS (SELECT 1 FROM transmissions t WHERE t.id = route_mask_changes.transmission_id)`, batch)
-	if err != nil {
-		return total, err
+	var total, after int64
+	for {
+		var examined, deleted int64
+		err := s.WriterTx("prune_route_mask_changes", func(tx *sql.Tx) error {
+			var last sql.NullInt64
+			if err := tx.QueryRow(`SELECT MAX(id), COUNT(*) FROM (
+				SELECT id FROM route_mask_changes WHERE id > ? ORDER BY id LIMIT ?)`,
+				after, batch).Scan(&last, &examined); err != nil {
+				return fmt.Errorf("scan route_mask_changes: %w", err)
+			}
+			if examined == 0 {
+				return nil
+			}
+			res, err := tx.Exec(`DELETE FROM route_mask_changes WHERE id > ? AND id <= ?
+				AND NOT EXISTS (SELECT 1 FROM transmissions t WHERE t.id = route_mask_changes.transmission_id)`,
+				after, last.Int64)
+			if err != nil {
+				return fmt.Errorf("prune orphan route_mask_changes: %w", err)
+			}
+			deleted, _ = res.RowsAffected()
+			after = last.Int64
+			return nil
+		})
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+		if examined < int64(batch) {
+			break
+		}
 	}
 	if total > 0 {
 		log.Printf("[prune] deleted %d route_mask_changes rows of deleted transmissions", total)

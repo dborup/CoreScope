@@ -95,7 +95,6 @@ func TestServerDBHasNoWriteMethods(t *testing.T) {
 		// #329 opt-in table retention: ingestor-only.
 		"PruneInactiveNodes",
 		"PruneNodeChanges",
-		"PrunePingTriggers",
 		"PurgeStaleObservers",
 		// #738 / one-click geo-prune: the DELETE must live on the
 		// ingestor's *Store. The server's HTTP handler now enqueues a

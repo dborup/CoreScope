@@ -4,21 +4,21 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"math"
 	"strings"
 	"time"
 )
 
 // Opt-in retention for the tables nothing else prunes (#329): inactive_nodes,
-// node_changes, ping_triggers and soft-deleted observers. Each window is in
-// days and 0 disables it, so an instance that sets none keeps every row, as
-// before. Like pruneBatches, every delete runs in bounded WriterTx batches, so
-// ingest waits for at most one batch.
+// node_changes and soft-deleted observers. Each window is in days and 0
+// disables it, so an instance that sets none keeps every row, as before. Like
+// pruneBatches, every delete runs in bounded WriterTx batches, so ingest waits
+// for at most one batch. ping_triggers is deliberately left out and kept
+// forever: the all-time Ping Scores records join it with the history sidecar
+// (#349, #241), and an entry leaves them once its trigger is gone.
 
-// retentionBatchRows bounds the rows one table-retention transaction deletes
-// (or, for ping_triggers, examines). These rows are small and their indexes
-// few, so a batch is a few milliseconds. A var so tests can exercise several
-// batches.
+// retentionBatchRows bounds the rows one table-retention transaction deletes.
+// These rows are small and their indexes few, so a batch is a few
+// milliseconds. A var so tests can exercise several batches.
 var retentionBatchRows = 1000
 
 // deleteInBatches runs del, a DELETE whose last parameter is the batch LIMIT,
@@ -43,44 +43,6 @@ func (s *Store) deleteInBatches(tag, del string, args ...any) (int64, error) {
 		}
 		total += n
 		if n < int64(retentionBatchRows) {
-			return total, nil
-		}
-	}
-}
-
-// deleteInKeyRanges walks table in ascending order of its integer key, batch
-// keys per WriterTx (tagged tag), and deletes the rows of each range that
-// match cond (args are cond's parameters). Each transaction's work is bounded
-// by batch however sparse the matches are, which suits a cond no index
-// serves. Returns the rows deleted; on error, those of the committed ranges.
-func (s *Store) deleteInKeyRanges(tag, table, key, cond string, batch int, args ...any) (int64, error) {
-	scan := fmt.Sprintf(`SELECT MAX(%[2]s), COUNT(*) FROM (SELECT %[2]s FROM %[1]s WHERE %[2]s > ? ORDER BY %[2]s LIMIT ?)`, table, key)
-	del := fmt.Sprintf(`DELETE FROM %s WHERE %s > ? AND %[2]s <= ? AND (%s)`, table, key, cond)
-	var total int64
-	after := int64(math.MinInt64) // below every key: ids can be 0 or negative
-	for {
-		var examined, deleted int64
-		err := s.WriterTx(tag, func(tx *sql.Tx) error {
-			var last sql.NullInt64
-			if err := tx.QueryRow(scan, after, batch).Scan(&last, &examined); err != nil {
-				return fmt.Errorf("scan %s: %w", table, err)
-			}
-			if examined == 0 {
-				return nil
-			}
-			res, err := tx.Exec(del, append([]any{after, last.Int64}, args...)...)
-			if err != nil {
-				return fmt.Errorf("prune %s: %w", table, err)
-			}
-			deleted, _ = res.RowsAffected()
-			after = last.Int64
-			return nil
-		})
-		if err != nil {
-			return total, err
-		}
-		total += deleted
-		if examined < int64(batch) {
 			return total, nil
 		}
 	}
@@ -135,32 +97,6 @@ func (s *Store) PruneNodeChanges(days int) (int64, error) {
 		retentionCutoff(days))
 	if n > 0 {
 		log.Printf("[prune] deleted %d node_changes older than %d days", n, days)
-	}
-	return n, err
-}
-
-// PrunePingTriggers deletes ping_triggers rows first seen more than days ago
-// (retention.pingTriggerDays, #329); days <= 0 disables it.
-//
-// The window is its own and does not follow the transmission prune. The
-// server's Ping Scores history keeps an entry only while its trigger row
-// exists (planPingScoreHistoryReconcile deletes the rest), and an entry is
-// marked data_pruned exactly when its transmission is gone. Deleting the
-// triggers of pruned transmissions would therefore drop every data_pruned
-// entry from the all-time records at once; with its own window an entry
-// renders until its trigger is pingTriggerDays old, and its sender name then
-// leaves both the trigger and the history entry.
-//
-// No index covers first_seen, so the table is walked by tx_id
-// (deleteInKeyRanges): one primary-key range per transaction.
-func (s *Store) PrunePingTriggers(days int) (int64, error) {
-	if days <= 0 {
-		return 0, nil
-	}
-	n, err := s.deleteInKeyRanges("prune_ping_triggers", "ping_triggers", "tx_id",
-		"first_seen < ?", retentionBatchRows, retentionCutoff(days))
-	if n > 0 {
-		log.Printf("[prune] deleted %d ping_triggers older than %d days", n, days)
 	}
 	return n, err
 }
@@ -272,7 +208,6 @@ func runTableRetention(store *Store, r TableRetention, when string) {
 	}{
 		{r.InactiveNodeDays, store.PruneInactiveNodes},
 		{r.NodeChangeDays, store.PruneNodeChanges},
-		{r.PingTriggerDays, store.PrunePingTriggers},
 		{r.ObserverPurgeDays, store.PurgeStaleObservers},
 	} {
 		if _, err := p.prune(p.days); err != nil {
