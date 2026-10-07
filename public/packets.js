@@ -3639,13 +3639,12 @@
     return '';
   }
 
-  // Detail-meta "Hash Size" row for the sender-selected width (null = not
-  // encoded, no row). #353: a 1-byte width renders the shared warning (app.js).
+  // Detail-meta "Hash Size" row for the sender-selected width. #353: a 1-byte
+  // width renders the shared warning (app.js). The helper renders '' for
+  // anything but 1/2/3 (null = not encoded), and then there is no row at all.
   function hashSizeDetailHtml(hashSize) {
-    if (!hashSize) return '';
-    return '<dt>Hash Size</dt><dd>' +
-      renderPathHashSize(hashSize, hashSize + ' byte' + (hashSize !== 1 ? 's' : ''), { block: 'detail-hash-size' }) +
-      '</dd>';
+    const size = renderPathHashSize(hashSize, hashSize + ' byte' + (hashSize !== 1 ? 's' : ''), { block: 'detail-hash-size' });
+    return size ? '<dt>Hash Size</dt><dd>' + size + '</dd>' : '';
   }
 
   async function renderDetail(panel, data, chosenObsId) {

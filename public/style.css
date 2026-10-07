@@ -242,9 +242,12 @@
   --success: var(--palette-green-700, #15803d);
   --warning: #b45309;
   --danger: var(--palette-red-600, #dc2626);
-  /* #353 — 1-byte path hash warning (renderPathHashSize in app.js). Follows
-     --danger in both themes; themeable via the customizer (pathHashWarn). */
-  --path-hash-warn: var(--danger);
+  /* #353 — 1-byte path hash warning (renderPathHashSize in app.js);
+     themeable via the customizer (pathHashWarn). One stop darker than
+     --danger on light: #dc2626 on --content-bg #f4f5f7 is 4.43:1 (fails AA
+     for this 13px text); #b91c1c is 5.93:1 there and 6.47:1 on white. The
+     dark blocks below set it back to --danger. */
+  --path-hash-warn: var(--palette-red-700, #b91c1c);
   --link-color: var(--palette-blue-600);
   --accent-bg: rgba(59, 130, 246, 0.12);
   --accent-border: rgba(59, 130, 246, 0.25);
@@ -417,6 +420,8 @@
     --success: var(--palette-green-400, #4ade80);
     --warning: #fcd34d;
     --danger:  var(--palette-red-400, #f87171);
+    /* #353 — #f87171: 6.82:1 on surface-0, 5.48:1 on surface-2/detail-bg. */
+    --path-hash-warn: var(--danger);
     --surface-0: #0f0f23;
     --surface-1: #1a1a2e;
     --surface-2: #232340;
@@ -475,6 +480,8 @@
   --success: var(--palette-green-400, #4ade80);
   --warning: #fcd34d;
   --danger:  var(--palette-red-400, #f87171);
+  /* #353 — see the media block above. */
+  --path-hash-warn: var(--danger);
   --surface-0: #0f0f23;
   --surface-1: #1a1a2e;
   --surface-2: #232340;
