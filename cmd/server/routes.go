@@ -2102,7 +2102,7 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.store != nil {
-		result, err := s.store.GetNodeHealth(pubkey)
+		result, err := s.store.GetNodeHealth(pubkey, time.Now().UTC())
 		if err != nil || result == nil {
 			writeError(w, 404, "Not found")
 			return
