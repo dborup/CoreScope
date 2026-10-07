@@ -181,6 +181,11 @@ func TestDecodeBodyLimitFitsLargestDecodableFrame(t *testing.T) {
 	if maxDecodeBodyBytes < 4*largest {
 		t.Errorf("cap %d leaves less than 4x headroom over the largest legitimate body (%d)", maxDecodeBodyBytes, largest)
 	}
+	// Headroom is bounded on both sides: a cap orders of magnitude above what
+	// any client can legitimately send is not a bound worth having.
+	if maxDecodeBodyBytes > 32*largest {
+		t.Errorf("cap %d is more than 32x the largest legitimate body (%d) — too loose to bound anything", maxDecodeBodyBytes, largest)
+	}
 }
 
 func TestDecodeNormalRequestUnchanged(t *testing.T) {
@@ -313,6 +318,9 @@ func TestBatchObservationsHashLimitPreserved(t *testing.T) {
 		}
 		if maxBatchObservationsBodyBytes < 4*len(body) {
 			t.Errorf("cap %d leaves less than 4x headroom over a full 200-hash body (%d)", maxBatchObservationsBodyBytes, len(body))
+		}
+		if maxBatchObservationsBodyBytes > 64*len(body) {
+			t.Errorf("cap %d is more than 64x a full 200-hash body (%d) — too loose to bound anything", maxBatchObservationsBodyBytes, len(body))
 		}
 		w := postBody(router, "/api/packets/observations", body)
 		if w.Code != http.StatusOK {
