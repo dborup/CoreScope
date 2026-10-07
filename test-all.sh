@@ -160,6 +160,7 @@ run test-1659-analytics-warmup.js
 run test-analytics-tab-state-and-query.js
 run test-analytics-subtab-deeplinks-205.js
 run test-hash-stats-sort-226.js
+run test-analytics-sorting-236.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js
