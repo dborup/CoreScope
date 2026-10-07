@@ -1399,8 +1399,9 @@ func (s *Server) handleBatchObservations(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Hashes []string `json:"hashes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
+	// #334: cap the body in bytes before parsing it. maxHashes below is a
+	// cardinality limit that only applies once the JSON is already decoded.
+	if !decodeLimitedJSONBody(w, r, maxBatchObservationsBodyBytes, &body) {
 		return
 	}
 	const maxHashes = 200
@@ -1538,8 +1539,8 @@ func (s *Server) handleDecode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Hex string `json:"hex"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
+	// #334: cap the body in bytes before parsing it.
+	if !decodeLimitedJSONBody(w, r, maxDecodeBodyBytes, &body) {
 		return
 	}
 	hexStr := strings.TrimSpace(body.Hex)

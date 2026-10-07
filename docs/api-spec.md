@@ -29,6 +29,7 @@
 - [GET /api/packets](#get-apipackets)
 - [GET /api/packets/timestamps](#get-apipacketstimestamps)
 - [GET /api/packets/:id](#get-apipacketsid)
+- [POST /api/packets/observations](#post-apipacketsobservations)
 - [POST /api/decode](#post-apidecode)
 - [GET /api/observers](#get-apiobservers)
 - [GET /api/observers/:id](#get-apiobserversid)
@@ -186,8 +187,32 @@ They return `total` (the unfiltered/filtered count before pagination).
 - `400` — Bad request (missing/invalid params)
 - `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
 - `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
+- `413` — Request body over that endpoint's byte cap
 
 `HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
+
+#### Request-body byte caps
+
+Every endpoint that takes a request body caps it **in bytes, before the body is
+parsed**, and answers `413` with the error shape above when the cap is exceeded:
+
+| Endpoint | Cap |
+|---|---|
+| `POST /api/decode` | 4096 bytes |
+| `POST /api/packets/observations` | 65536 bytes |
+| `POST /api/path-inspect` | 4096 bytes |
+| `POST /api/channel-proposals` | 1024 bytes |
+
+The cap is on bytes received, not on the parsed value, so it does not depend on
+the body's shape: a body whose bulk sits in an unknown field, or in a string the
+endpoint never reads, is rejected the same way. It also does not depend on
+`Content-Length` — a chunked request that declares no length, or one that
+understates it, is cut off at the same byte count. The caps are enforced by the
+application itself, not by a reverse proxy in front of it.
+
+Caps are deliberately well above anything a legitimate client sends (see each
+endpoint below), so a per-endpoint semantic limit — such as the 200-hash limit
+on `POST /api/packets/observations` — is what a real client meets first.
 
 ---
 
@@ -1304,6 +1329,12 @@ Decode a raw packet without storing it.
 }
 ```
 
+Capped at **4096 bytes** before parsing (see
+[Request-body byte caps](#request-body-byte-caps)). The largest frame the decoder
+can accept is 1 header + 4 transport codes + 1 path-length byte +
+`MAX_PATH_SIZE` (64) path bytes + `MAX_PACKET_PAYLOAD` (184) payload bytes =
+254 bytes, i.e. 508 hex characters, i.e. a ~520-byte body — roughly 7x headroom.
+
 ### Response `200`
 
 ```jsonc
@@ -1320,6 +1351,62 @@ Decode a raw packet without storing it.
 
 ```json
 { "error": "hex is required" }
+```
+
+### Response `413`
+
+```json
+{ "error": "request body too large (max 4096 bytes)" }
+```
+
+---
+
+## POST /api/packets/observations
+
+Return the stored observations for several packets in one call. Used by the
+packets table when a non-observer sort needs the child observations of the
+groups it is about to render.
+
+### Request Body
+
+```jsonc
+{
+  "hashes": string[]         // required — content hashes, at most 200
+}
+```
+
+Capped at **65536 bytes** before parsing (see
+[Request-body byte caps](#request-body-byte-caps)). A full 200-hash request
+serializes to ~3.8 KB, so the byte cap leaves roughly 17x headroom and the
+200-hash limit below is what a client actually meets first.
+
+### Response `200`
+
+```jsonc
+{
+  "results": {
+    "<hash>": [ Observation, ... ]   // one entry per requested hash
+  }
+}
+```
+
+An empty `hashes` array returns `{"results": {}}`. A hash with no stored
+observations gets an empty array.
+
+### Response `400`
+
+```json
+{ "error": "too many hashes (max 200)" }
+```
+
+```json
+{ "error": "invalid JSON body" }
+```
+
+### Response `413`
+
+```json
+{ "error": "request body too large (max 65536 bytes)" }
 ```
 
 ---
