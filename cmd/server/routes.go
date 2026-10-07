@@ -2299,8 +2299,9 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 	// resolved_path (older data / async backfill incomplete); in that case
 	// there's no canonical answer to be consistent with.
 	canonicalRP := make(map[int][]*string, len(candidates))
+	lruNow := s.store.lruNow()
 	for _, tx := range candidates {
-		if rp := s.store.fetchResolvedPathForTxBest(tx); rp != nil {
+		if rp := s.store.fetchResolvedPathForTxBestAt(tx, lruNow); rp != nil {
 			canonicalRP[tx.ID] = rp
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"hash/fnv"
 	"log"
 	"strings"
+	"time"
 )
 
 // resolvedPubkeyHash computes a fast 64-bit hash for membership index keying.
@@ -200,17 +201,21 @@ func (s *PacketStore) fetchResolvedPathsForTx(txID int) map[int][]*string {
 // fetchResolvedPathForObs fetches resolved_path for a single observation,
 // using the LRU cache.
 func (s *PacketStore) fetchResolvedPathForObs(obsID int) []*string {
+	return s.fetchResolvedPathForObsAt(obsID, s.lruNow())
+}
+
+// fetchResolvedPathForObsAt is fetchResolvedPathForObs with the LRU clock
+// read by the caller (lruNow), so a loop over many candidates reads it once.
+func (s *PacketStore) fetchResolvedPathForObsAt(obsID int, now int64) []*string {
 	if s.db == nil || s.db.conn == nil {
 		return nil
 	}
 
 	// Check LRU cache first
 	s.lruMu.RLock()
-	if s.apiResolvedPathLRU != nil {
-		if entry, ok := s.apiResolvedPathLRU[obsID]; ok {
-			s.lruMu.RUnlock()
-			return entry
-		}
+	if rp, ok := s.lruGet(obsID, now); ok {
+		s.lruMu.RUnlock()
+		return rp
 	}
 	s.lruMu.RUnlock()
 
@@ -241,6 +246,14 @@ func (s *PacketStore) fetchResolvedPathForObs(obsID int) []*string {
 // #810 by checking all observations and falling back to the longest sibling
 // that has a stored path.
 func (s *PacketStore) fetchResolvedPathForTxBest(tx *StoreTx) []*string {
+	return s.fetchResolvedPathForTxBestAt(tx, s.lruNow())
+}
+
+// fetchResolvedPathForTxBestAt is fetchResolvedPathForTxBest with the LRU
+// clock read by the caller. /paths and /hop_analytics call it once per
+// candidate; reading the clock once per request keeps a cache hit as cheap as
+// it was before entries had an age (#277).
+func (s *PacketStore) fetchResolvedPathForTxBestAt(tx *StoreTx, now int64) []*string {
 	if tx == nil || len(tx.Observations) == 0 {
 		return nil
 	}
@@ -253,7 +266,7 @@ func (s *PacketStore) fetchResolvedPathForTxBest(tx *StoreTx) []*string {
 			longestLen = l
 		}
 	}
-	if rp := s.fetchResolvedPathForObs(longest.ID); rp != nil {
+	if rp := s.fetchResolvedPathForObsAt(longest.ID, now); rp != nil {
 		return rp
 	}
 	// Fallback: longest-path obs has no stored resolved_path. Query all
@@ -291,12 +304,54 @@ func (s *PacketStore) fetchResolvedPathForTxBest(tx *StoreTx) []*string {
 
 const lruMaxSize = 10000
 
-// lruPut adds an entry. Must be called under s.lruMu write lock.
+// resolvedPathLRUTTL bounds how long a cached resolved_path is served without
+// re-reading the row (#277). The ingestor's observation upsert can replace a
+// stored resolved_path in place (same row id), and the server's poll loop only
+// reads new ids, so it cannot invalidate the entry when that happens. An
+// expired entry is a cache miss: the next lookup costs one primary-key read.
+const resolvedPathLRUTTL = 60 * time.Second
+
+type resolvedPathLRUEntry struct {
+	rp       []*string
+	storedAt int64 // lruNow() at insert or refresh
+}
+
+// lruEpoch anchors lruNow. time.Since reads the monotonic clock only, so
+// entry ages are immune to wall-clock steps and cost one clock read.
+var lruEpoch = time.Now()
+
+// lruNow is the LRU clock: nanoseconds since lruEpoch. The lruClock test hook
+// stands in for time.Now and is measured from the same epoch, so installing it
+// while entries exist keeps their ages.
+func (s *PacketStore) lruNow() int64 {
+	if s.lruClock != nil {
+		return int64(s.lruClock().Sub(lruEpoch))
+	}
+	return int64(time.Since(lruEpoch))
+}
+
+// lruGet returns the cached path unless the entry is older than
+// resolvedPathLRUTTL at now. now may be read before the lookup (once per
+// request), so an entry stored after it is fresh. Must be called under
+// s.lruMu (read or write).
+func (s *PacketStore) lruGet(obsID int, now int64) ([]*string, bool) {
+	e, ok := s.apiResolvedPathLRU[obsID]
+	if !ok || now-e.storedAt > int64(resolvedPathLRUTTL) {
+		return nil, false
+	}
+	return e.rp, true
+}
+
+// lruPut adds an entry, or refreshes an existing one in place (keeping its
+// FIFO slot, so lruOrder gets no duplicate). Must be called under s.lruMu
+// write lock.
 func (s *PacketStore) lruPut(obsID int, rp []*string) {
 	if s.apiResolvedPathLRU == nil {
 		return
 	}
+	entry := resolvedPathLRUEntry{rp: rp, storedAt: s.lruNow()}
 	if _, exists := s.apiResolvedPathLRU[obsID]; exists {
+		s.apiResolvedPathLRU[obsID] = entry
 		return
 	}
 	// Compact lruOrder if stale entries exceed 50% of capacity.
@@ -322,7 +377,7 @@ func (s *PacketStore) lruPut(obsID int, rp []*string) {
 			// stale entry — skip and continue
 		}
 	}
-	s.apiResolvedPathLRU[obsID] = rp
+	s.apiResolvedPathLRU[obsID] = entry
 	s.lruOrder = append(s.lruOrder, obsID)
 }
 
@@ -411,7 +466,7 @@ func (s *PacketStore) resolvedPubkeysForEvictionBatch(txIDs []int) map[int][]str
 func (s *PacketStore) initResolvedPathIndex() {
 	s.resolvedPubkeyIndex = make(map[uint64][]int, 4096)
 	s.resolvedPubkeyReverse = make(map[int][]uint64, 4096)
-	s.apiResolvedPathLRU = make(map[int][]*string, lruMaxSize)
+	s.apiResolvedPathLRU = make(map[int]resolvedPathLRUEntry, lruMaxSize)
 	s.lruOrder = make([]int, 0, lruMaxSize)
 }
 
