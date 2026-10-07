@@ -1,8 +1,9 @@
 package main
 
 // Tests for the opt-in retention of the tables nothing else prunes (#329):
-// retention.inactiveNodeDays, nodeChangeDays and pingTriggerDays here, and
-// observerPurgeDays in observer_purge_test.go.
+// retention.inactiveNodeDays and nodeChangeDays here, and observerPurgeDays in
+// observer_purge_test.go. ping_triggers is deliberately not among them; see
+// TestTableRetentionLeavesPingTriggers.
 
 import (
 	"encoding/json"
@@ -55,9 +56,11 @@ func TestTableRetentionConfig(t *testing.T) {
 	}{
 		{"no retention block", `{}`, TableRetention{}},
 		{"unset", `{"retention":{"nodeDays":7,"packetDays":30}}`, TableRetention{}},
-		{"set", `{"retention":{"inactiveNodeDays":30,"nodeChangeDays":31,"pingTriggerDays":32,"observerPurgeDays":33}}`,
-			TableRetention{InactiveNodeDays: 30, NodeChangeDays: 31, PingTriggerDays: 32, ObserverPurgeDays: 33}},
-		{"negative disables", `{"retention":{"inactiveNodeDays":-1,"nodeChangeDays":-1,"pingTriggerDays":-1,"observerPurgeDays":-1}}`, TableRetention{}},
+		{"set", `{"retention":{"inactiveNodeDays":30,"nodeChangeDays":31,"observerPurgeDays":33}}`,
+			TableRetention{InactiveNodeDays: 30, NodeChangeDays: 31, ObserverPurgeDays: 33}},
+		{"negative disables", `{"retention":{"inactiveNodeDays":-1,"nodeChangeDays":-1,"observerPurgeDays":-1}}`, TableRetention{}},
+		// An earlier draft of #329 had this knob; ping_triggers is never pruned.
+		{"pingTriggerDays ignored", `{"retention":{"pingTriggerDays":30}}`, TableRetention{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -97,12 +100,23 @@ func TestConfigExampleDocumentsTableRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc, _ := raw.Retention["_comment_tableRetention"].(string)
-	for _, k := range []string{"inactiveNodeDays", "nodeChangeDays", "pingTriggerDays", "observerPurgeDays"} {
+	for _, k := range []string{"inactiveNodeDays", "nodeChangeDays", "observerPurgeDays"} {
 		if v, ok := raw.Retention[k]; !ok || v != float64(0) {
 			t.Errorf("retention.%s = %v (present %v), want 0", k, v, ok)
 		}
 		if !strings.Contains(doc, k+":") {
 			t.Errorf("retention._comment_tableRetention does not document %s", k)
+		}
+	}
+	// ping_triggers is kept forever (operator decision on #329), so neither
+	// the example nor the user guide offers a knob for it.
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "user-guide", "configuration.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"config.example.json": string(data), "configuration.md": string(guide)} {
+		if strings.Contains(text, "pingTriggerDays") {
+			t.Errorf("%s documents pingTriggerDays; ping_triggers is never pruned", name)
 		}
 	}
 }
@@ -245,7 +259,7 @@ func TestPruneNodeChangesBatches(t *testing.T) {
 	}
 }
 
-// ─── ping_triggers ─────────────────────────────────────────────────────────
+// ─── ping_triggers: never pruned ───────────────────────────────────────────
 
 func insertPingTrigger(t *testing.T, s *Store, txID int64, ageDays int) {
 	t.Helper()
@@ -253,104 +267,72 @@ func insertPingTrigger(t *testing.T, s *Store, txID int64, ageDays int) {
 		txID, fmt.Sprintf("hash%d", txID), daysAgo(ageDays))
 }
 
-func pingTriggerExists(t *testing.T, s *Store, txID int64) bool {
+// pingTriggerRows dumps every ping_triggers row, so a test can tell that none
+// was deleted or rewritten.
+func pingTriggerRows(t *testing.T, s *Store) []string {
 	t.Helper()
-	return rowExists(t, s, `SELECT 1 FROM ping_triggers WHERE tx_id = ?`, txID)
-}
-
-func TestPrunePingTriggersDeletesOldKeepsRecent(t *testing.T) {
-	store := newTestStore(t)
-	insertPingTrigger(t, store, 1, 90)
-	insertPingTrigger(t, store, 2, 20)
-
-	n, err := store.PrunePingTriggers(30)
+	rows, err := s.db.Query(`SELECT tx_id || '|' || hash || '|' || IFNULL(channel_hash, '') || '|' ||
+		IFNULL(sender, '') || '|' || first_seen FROM ping_triggers ORDER BY tx_id`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Errorf("deleted=%d, want 1", n)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, r)
 	}
-	if pingTriggerExists(t, store, 1) {
-		t.Error("90-day trigger still present, want deleted")
-	}
-	if !pingTriggerExists(t, store, 2) {
-		t.Error("20-day trigger deleted, want kept")
-	}
-}
-
-// The Ping Scores history keeps an entry only while its ping_triggers row
-// exists (planPingScoreHistoryReconcile drops the rest), and an entry is
-// marked data_pruned exactly when its transmission is gone. So the trigger
-// of a pruned transmission must survive until pingTriggerDays: following the
-// transmission prune would remove every data_pruned entry at once.
-func TestPrunePingTriggersKeepsTriggerOfPrunedTransmission(t *testing.T) {
-	store := newTestStore(t)
-	insertChanTx(t, store, "pingpruned01", "Alice: ping", "#ping")
-	var txID int64
-	if err := store.db.QueryRow(`SELECT tx_id FROM ping_triggers`).Scan(&txID); err != nil {
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, store, `UPDATE ping_triggers SET first_seen = ? WHERE tx_id = ?`, daysAgo(20), txID)
-	mustExec(t, store, `UPDATE transmissions SET first_seen = ? WHERE id = ?`, daysAgo(20), txID)
-	if n, err := store.PruneOldPackets(10); err != nil || n != 1 {
-		t.Fatalf("PruneOldPackets(10) = %d, %v; want the transmission pruned", n, err)
-	}
-
-	if _, err := store.PrunePingTriggers(30); err != nil {
-		t.Fatal(err)
-	}
-	if !pingTriggerExists(t, store, txID) {
-		t.Error("trigger of a pruned transmission, inside pingTriggerDays, was deleted; want kept (data_pruned entries need it)")
-	}
+	return out
 }
 
-// pingTriggerDays unset: the transmission prune leaves ping_triggers alone, as
-// before #329.
-func TestPruneOldPacketsLeavesPingTriggers(t *testing.T) {
-	store := newTestStore(t)
-	insertChanTx(t, store, "pingpruned02", "Bob: ping", "#ping")
-	mustExec(t, store, `UPDATE transmissions SET first_seen = ?`, daysAgo(90))
-	mustExec(t, store, `UPDATE ping_triggers SET first_seen = ?`, daysAgo(90))
-	if n, err := store.PruneOldPackets(30); err != nil || n != 1 {
-		t.Fatalf("PruneOldPackets(30) = %d, %v; want the transmission pruned", n, err)
-	}
-	runTableRetention(store, TableRetention{}, "test")
-	if got := countPingTriggers(t, store); got != 1 {
-		t.Errorf("ping_triggers = %d, want 1", got)
-	}
-}
-
-// Triggers are walked by tx_id, a batch of ids per transaction, because no
-// index covers first_seen. Old and recent rows interleave across batches.
-func TestPrunePingTriggersBatches(t *testing.T) {
-	setRetentionBatchRows(t, 2)
-	store := newTestStore(t)
-	ages := []int{90, 1, 90, 90, 1, 90, 90}
-	for i, age := range ages {
-		insertPingTrigger(t, store, int64(i+1), age)
-	}
-	ResetWriterStatsForTest()
-
-	n, err := store.PrunePingTriggers(30)
-	if err != nil {
+// ping_triggers keeps every row (operator decision on #329): the all-time Ping
+// Scores records join it with the history sidecar (#349, #241). With every
+// other retention knob set, and the transmission prune run first, no trigger
+// is deleted or changed, however old it is or whether its transmission is
+// gone. pingTriggerDays, a knob in an earlier draft of #329, is ignored.
+func TestTableRetentionLeavesPingTriggers(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"retention":{"packetDays":30,"inactiveNodeDays":30,`+
+		`"nodeChangeDays":30,"observerPurgeDays":30,"pingTriggerDays":30}}`), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if n != 5 {
-		t.Errorf("deleted=%d, want 5", n)
+	store := newTestStore(t)
+	insertChanTx(t, store, "pingpruned03", "Carol: ping", "#ping")
+	mustExec(t, store, `UPDATE transmissions SET first_seen = ? WHERE hash = 'pingpruned03'`, daysAgo(90))
+	mustExec(t, store, `UPDATE ping_triggers SET first_seen = ? WHERE hash = 'pingpruned03'`, daysAgo(90))
+	insertPingTrigger(t, store, 101, 90)
+	insertPingTrigger(t, store, 102, 1)
+	seedTableRetentionRows(t, store)
+	before := pingTriggerRows(t, store)
+	if len(before) != 3 {
+		t.Fatalf("seeded %d ping_triggers, want 3", len(before))
 	}
-	for _, id := range []int64{2, 5} {
-		if !pingTriggerExists(t, store, id) {
-			t.Errorf("recent trigger %d deleted, want kept", id)
+
+	if n, err := store.PruneOldPackets(cfg.PacketDaysOrZero()); err != nil || n != 1 {
+		t.Fatalf("PruneOldPackets = %d, %v; want the ping's transmission pruned", n, err)
+	}
+	runTableRetention(store, cfg.TableRetention(), "test")
+
+	for _, table := range []string{"inactive_nodes", "node_changes", "observers"} {
+		if got := countRows(t, store, table); got != 1 {
+			t.Errorf("%s rows = %d, want 1 (its knob is set)", table, got)
 		}
 	}
-	if got := store.WriterStatsSnapshot()["prune_ping_triggers"].Count; got != 4 {
-		t.Errorf("prune_ping_triggers transactions = %d, want 4 (7 ids in ranges of 2)", got)
+	after := pingTriggerRows(t, store)
+	if strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Errorf("ping_triggers changed by retention:\nbefore %q\nafter  %q", before, after)
 	}
 }
 
 // ─── wiring ────────────────────────────────────────────────────────────────
 
-// seedTableRetentionRows gives each of the four tables one 90-day-old row
+// seedTableRetentionRows gives each of the three tables one 90-day-old row
 // and one 1-day-old row.
 func seedTableRetentionRows(t *testing.T, s *Store) {
 	t.Helper()
@@ -358,8 +340,6 @@ func seedTableRetentionRows(t *testing.T, s *Store) {
 	insertInactiveNode(t, s, "cc02", 1)
 	insertNodeChange(t, s, "cc01", 90)
 	insertNodeChange(t, s, "cc02", 1)
-	insertPingTrigger(t, s, 1, 90)
-	insertPingTrigger(t, s, 2, 1)
 	staleObserver(t, s, "obs-cc01")
 	if err := s.UpsertObserver("obs-cc02", "obs-cc02", "LAX", nil); err != nil {
 		t.Fatal(err)
@@ -367,14 +347,14 @@ func seedTableRetentionRows(t *testing.T, s *Store) {
 	mustExec(t, s, `UPDATE observers SET inactive = 1, last_seen = ? WHERE id = 'obs-cc02'`, daysAgo(1))
 }
 
-// Every knob unset: nothing is deleted from any of the four tables.
+// Every knob unset: nothing is deleted from any of the three tables.
 func TestRunTableRetentionUnsetChangesNothing(t *testing.T) {
 	store := newTestStore(t)
 	seedTableRetentionRows(t, store)
 
 	runTableRetention(store, TableRetention{}, "test")
 
-	for _, table := range []string{"inactive_nodes", "node_changes", "ping_triggers", "observers"} {
+	for _, table := range []string{"inactive_nodes", "node_changes", "observers"} {
 		if got := countRows(t, store, table); got != 2 {
 			t.Errorf("%s rows = %d, want 2 (all knobs unset)", table, got)
 		}
@@ -389,7 +369,6 @@ func TestRunTableRetentionEachKnob(t *testing.T) {
 	}{
 		{"inactive_nodes", TableRetention{InactiveNodeDays: 30}},
 		{"node_changes", TableRetention{NodeChangeDays: 30}},
-		{"ping_triggers", TableRetention{PingTriggerDays: 30}},
 		{"observers", TableRetention{ObserverPurgeDays: 30}},
 	}
 	for _, c := range cases {
@@ -399,7 +378,7 @@ func TestRunTableRetentionEachKnob(t *testing.T) {
 
 			runTableRetention(store, c.r, "test")
 
-			for _, table := range []string{"inactive_nodes", "node_changes", "ping_triggers", "observers"} {
+			for _, table := range []string{"inactive_nodes", "node_changes", "observers"} {
 				want := 2
 				if table == c.table {
 					want = 1
@@ -409,22 +388,5 @@ func TestRunTableRetentionEachKnob(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// tx_id is a transmissions id, and those can be 0 or negative (the CI E2E
-// fixture seeds both). The walk starts below every key.
-func TestPrunePingTriggersNonPositiveTxID(t *testing.T) {
-	store := newTestStore(t)
-	insertPingTrigger(t, store, -1000000, 90)
-	insertPingTrigger(t, store, 0, 90)
-	insertPingTrigger(t, store, 1, 90)
-
-	n, err := store.PrunePingTriggers(30)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 3 || countPingTriggers(t, store) != 0 {
-		t.Errorf("deleted=%d left=%d, want 3 and 0", n, countPingTriggers(t, store))
 	}
 }
