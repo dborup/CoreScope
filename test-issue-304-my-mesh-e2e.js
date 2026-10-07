@@ -7,7 +7,9 @@ const { chromium } = require('playwright');
 
 const ROOT = path.join(__dirname, 'public');
 const ORIGIN = 'http://127.0.0.1:18740';
-const KEYS = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+const KEYS = ['a', 'b', 'c', 'd', 'e'].map(c => c.repeat(64));
+// #351 F2: a name wider than the 14ch clamp. Matches the review's repro name.
+const CLIP = 'Jackrabbit Mountain Relay North';
 const now = Date.now();
 const end = new Date(now).toISOString();
 const start = new Date(now - 24 * 3600000).toISOString();
@@ -20,8 +22,8 @@ const activity = (complete = true) => ({
   })),
 });
 
-async function render(page, responses, width) {
-  await page.setViewportSize({ width, height: 800 });
+async function render(page, responses, width, height) {
+  await page.setViewportSize({ width, height });
   await page.route('**/*', route => {
     const u = new URL(route.request().url());
     if (u.origin !== ORIGIN) return route.abort();
@@ -52,20 +54,29 @@ async function render(page, responses, width) {
 (async () => {
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   try {
-    for (const width of [1280, 390]) {
-      const context = await browser.newContext({ viewport: { width, height: 800 }, hasTouch: width < 500, isMobile: width < 500 });
+    for (const [width, height] of [[1280, 900], [375, 812]]) {
+      const context = await browser.newContext({ viewport: { width, height }, hasTouch: width < 500, isMobile: width < 500 });
       const page = await context.newPage();
       const errors = [];
       page.on('pageerror', e => errors.push(e.message));
       const names = Array.from({ length: 51 }, (_, i) => i === 50 ? '<img src=x onerror=alert(1)>' : `Observer ${i}`);
       names[1] = 'Very-long-observer-name-'.repeat(25);
       names[2] = '<svg onload=alert(1)>';
-      const data = Object.fromEntries(KEYS.map((key, i) => [`/nodes/${key}/health`, {
-        node: { name: `Repeater ${i}`, role: 'repeater' }, stats: { lastHeard: end, packetsToday: 2 },
-        observers: i === 0 ? names.map(observer_name => ({ observer_name })) : i === 1 ? [{ observer_name: 'One' }] : [],
-        recentPackets: [], activity24h: i === 0 ? activity() : i === 1 ? activity(false) : undefined,
+      // Card roles are mixed (#304): a 51-observer repeater, a 1-observer
+      // repeater, an observer-less repeater, a ≤3-observer repeater with a
+      // clipped name, and a NON-repeater with a clipped name.
+      const specs = [
+        { role: 'repeater', observers: names.map(observer_name => ({ observer_name })), activity: activity() },
+        { role: 'repeater', observers: [{ observer_name: 'One' }], activity: activity(false) },
+        { role: 'repeater', observers: [], activity: undefined },
+        { role: 'repeater', observers: [{ observer_name: CLIP }], activity: activity(false) },
+        { role: 'client', observers: [{ observer_name: CLIP }, { observer_name: 'Shorty' }], activity: activity(false) },
+      ];
+      const data = Object.fromEntries(specs.map((spec, i) => [`/nodes/${KEYS[i]}/health`, {
+        node: { name: `Node ${i}`, role: spec.role }, stats: { lastHeard: end, packetsToday: 2 },
+        observers: spec.observers, recentPackets: [], activity24h: spec.activity,
       }]));
-      await render(page, data, width);
+      await render(page, data, width, height);
       if (process.env.SCREENSHOT_PATH && width === 1280) {
         await page.screenshot({ path: process.env.SCREENSHOT_PATH, fullPage: true });
       }
@@ -73,6 +84,7 @@ async function render(page, responses, width) {
       const large = cards.nth(0);
       assert.equal(await large.locator('.mnc-observers .mnc-observer-name').count(), 3);
       assert.equal(await large.locator('.mnc-observers .mnc-observer-name').nth(1).evaluate(el => el.scrollWidth > el.clientWidth), true);
+      assert.equal(await large.locator('.mnc-observers .mnc-observer-name').nth(1).getAttribute('title'), names[1]);
       assert.equal(await large.locator('.mnc-observers svg').count(), 0);
       assert.equal(await cards.nth(1).locator('.mnc-view-all').count(), 0);
       assert.equal(await cards.nth(2).locator('.mnc-observers').count(), 0);
@@ -109,6 +121,29 @@ async function render(page, responses, width) {
         await dialog.waitFor({ state: 'visible' });
         await dialog.locator('.mnc-dialog-close').tap();
       }
+
+      // #351 F2: clipped names stay recoverable on EVERY card — a ≤3-observer
+      // repeater (card 3) and a NON-repeater (card 4), not only repeaters
+      // with >3 observers. Title tooltip (pointer/AT) + accessible dialog
+      // (keyboard/touch), and the cards stay compact.
+      for (const idx of [3, 4]) {
+        const card = cards.nth(idx);
+        const span = card.locator('.mnc-observer-name').first();
+        assert.equal(await span.evaluate(el => el.scrollWidth > el.clientWidth), true, `card ${idx} name must clip at ${width}px`);
+        assert.equal(await span.getAttribute('title'), CLIP, `card ${idx} span must carry the full name in title`);
+        assert.equal(await card.locator('.mnc-view-all').count(), 1, `card ${idx} must offer the observer dialog`);
+      }
+      assert.equal(await cards.nth(4).locator('.mnc-observer-name').count(), 2);
+      const clipBtn = cards.nth(4).locator('.mnc-view-all');
+      await clipBtn.scrollIntoViewIfNeeded();
+      await clipBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      assert((await dialog.locator('li').allInnerTexts()).includes(CLIP), 'dialog must list the full clipped name');
+      await page.keyboard.press('Escape');
+      assert.equal(await dialog.isVisible(), false);
+      const h = await cards.evaluateAll(els => els.map(el => el.getBoundingClientRect().height));
+      assert(h[3] < 350 && h[4] < 350, `clipped cards too tall: ${h[3]}, ${h[4]} at ${width}px`);
+
       assert.deepEqual(errors, []);
       await context.close();
     }

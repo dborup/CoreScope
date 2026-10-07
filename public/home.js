@@ -319,6 +319,18 @@
         const sparkHtml = buildSparkline(h.activity24h);
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
         const preview = isRepeater ? obs.slice(0, 3) : obs;
+        // #351 F2: a name wider than the 14ch clamp is clipped with an
+        // ellipsis. The full name must stay recoverable on EVERY card — not
+        // only repeaters with >3 observers. Each span carries a title (pointer
+        // + assistive tech), and the accessible dialog is offered (keyboard +
+        // touch) whenever the preview hides names (more observers than shown)
+        // or any shown name is clipped. 14 ≈ the CSS max-width: 14ch.
+        const OBS_CLAMP_CH = 14;
+        const obsFullName = o => o.observer_name || o.observer_id || 'Unknown';
+        const hiddenObservers = obs.length - preview.length;
+        const previewClipped = preview.some(o => obsFullName(o).length > OBS_CLAMP_CH);
+        const showObserverDialog = hiddenObservers > 0 || previewClipped;
+        const observerBtnText = hiddenObservers > 0 ? `View all ${obs.length} →` : 'Full names →';
 
         return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
@@ -346,7 +358,7 @@
               <div class="mnc-lbl">Avg hops</div>
             </div>
           </div>
-          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name">${escapeHtml(o.observer_name || o.observer_id || 'Unknown')}</span>`).join(', ')}${isRepeater && obs.length > 3 ? ` <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="View all ${obs.length} observers for ${escapeAttr(name)}">View all ${obs.length} →</button>` : ''}</div>` : ''}
+          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')}${showObserverDialog ? ` <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${obs.length} observer names for ${escapeAttr(name)}">${observerBtnText}</button>` : ''}</div>` : ''}
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
