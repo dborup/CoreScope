@@ -1125,7 +1125,8 @@ Paginated packet (transmission) list with filtering.
 |--------------|--------|---------|----------------------------------------------------|
 | `limit`      | number | `50`    | Page size                                          |
 | `offset`     | number | `0`     | Pagination offset                                  |
-| `type`       | string | —       | Filter by payload type (number or name)            |
+| `type`       | string | —       | Filter by numeric payload type                    |
+| `excludeTypes` | string | —     | Comma-separated numeric payload types (0–15), excluded before pagination |
 | `route`      | string | —       | Filter by route type                               |
 | `region`     | string | —       | Filter by region (IATA code substring)             |
 | `observer`   | string | —       | Filter by observer ID                              |
@@ -1137,6 +1138,24 @@ Paginated packet (transmission) list with filtering.
 | `order`      | string | `DESC`  | Sort direction: `asc` or `desc`                    |
 | `groupByHash`| string | —       | Set to `"true"` for grouped response               |
 | `expand`     | string | —       | Set to `"observations"` to include observation arrays |
+
+`excludeTypes=11` excludes CONTROL transmissions before `limit`, `offset`, and
+`total` are calculated, for both raw and `groupByHash=true` responses. It uses
+the same filtering in memory and in the SQLite fallback. It does not delete
+packets or affect WebSocket delivery or packet-detail endpoints.
+
+The list accepts at most 16 entries and 64 characters. Whitespace around entries
+is trimmed; duplicates collapse. Empty/omitted means no exclusion. Codes 0–15
+include reserved wire types; unknown/NULL stored types remain in the result.
+An overlapping `type` inclusion and exclusion returns no packets for that type.
+Malformed values, repeated `excludeTypes` parameters, and a nonempty exclusion
+combined with `nodes` return HTTP 400. Use `node` for a supported single-node
+combination. All other existing filters continue to compose normally.
+
+The Packets page refetches when its type selection or Hide CONTROL checkbox
+changes, so excluded traffic cannot fill the fetched page. Live updates are
+still filtered locally. Pinned-hash views omit these exclusions so a direct
+packet link remains visible.
 
 ### Response `200` (default)
 
