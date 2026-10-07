@@ -19,6 +19,7 @@ import (
 	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/packetpath"
 	regionutil "github.com/meshcore-analyzer/regions"
+	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
 
@@ -117,6 +118,20 @@ type DB struct {
 	// detectSchema pass. A non-nil error makes the pass give up the way a
 	// failed PRAGMA table_info does: no flag is set.
 	schemaProbeHook func() error
+
+	// Region-membership cache for GetNodes (see nodes_region_cache.go).
+	// nodeRegionUsed holds the LRU tick of each cached key and is written
+	// together with nodeRegionCache under nodeRegionCacheMu.
+	nodeRegionCacheMu sync.Mutex
+	nodeRegionCache   map[string]*nodeRegionEntry
+	nodeRegionUsed    map[string]int64
+	nodeRegionTick    int64
+	nodeRegionSF      singleflight.Group
+	nodeRegionFullMu  sync.Mutex
+	// nodeRegionQueryHook (test seam, nil in production) runs once per real
+	// membership scan, before the query; a non-nil error fails that refresh
+	// the way a failing scan does.
+	nodeRegionQueryHook func() error
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.
@@ -1170,62 +1185,18 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 		}
 	}
 
-	if region != "" {
-		codes := normalizeRegionCodes(region)
-		if len(codes) > 0 {
-			placeholders := make([]string, len(codes))
-			regionArgs := make([]interface{}, len(codes))
-			for i, c := range codes {
-				placeholders[i] = "?"
-				regionArgs[i] = c
-			}
-			joinCond := "obs.rowid = o.observer_idx"
-			if !db.isV3() {
-				joinCond = "obs.id = o.observer_id"
-			}
-			// #1143: from_pubkey is a dedicated column the ingestor fills at
-			// write time for ADVERT rows, so this lookup does not have to
-			// JSON_EXTRACT and parse decoded_json for every candidate row.
-			// Measured against a live 4.9GB database, 9 interleaved rounds so
-			// concurrent ingest cannot bias one variant: 934ms -> 835ms median
-			// (1.12x) for a single-region filter, identical result set both
-			// ways. The win is purely the avoided JSON parse — EXPLAIN QUERY
-			// PLAN is byte-identical before and after, both driving off
-			// idx_transmissions_payload_type. Despite the column being
-			// indexed, idx_transmissions_from_pubkey does not participate in
-			// this plan at all.
-			//
-			// THE TRAP, for whoever touches this next: from_pubkey is only
-			// written for ADVERTs that actually carry a pubkey — see the
-			// guard in cmd/ingestor/db.go. A NULL here drops out of IN (...)
-			// silently, so a write path that fills decoded_json but forgets
-			// from_pubkey would cost nodes from this filter with no error to
-			// notice. That is safe today only because it is measured to be:
-			// on live staging 25 of 62104 ADVERTs have NULL from_pubkey, and
-			// all 25 have no pubKey in decoded_json either — nothing is lost,
-			// because there was never a pubkey to record. A COALESCE fallback
-			// to JSON_EXTRACT was measured and rejected: it rescued 0 rows,
-			// and it parses decoded_json again for every NULL row, so one
-			// corrupt ADVERT that the backfill has not reached yet fails the
-			// whole query with "malformed JSON" (a 500 on /api/nodes?region=)
-			// exactly as the old expression did. Its speed is not the reason:
-			// on a 4.3GB synthetic DB it times within noise of from_pubkey.
-			// If you add a new write path for transmissions, populate
-			// from_pubkey there rather than reintroducing a per-row JSON parse
-			// here. nodes_region_from_pubkey_test.go locks the result set
-			// against the JSON_EXTRACT expression; TestBackfillFromPubkey_*
-			// in cmd/ingestor locks the backfill's half of the contract.
-			subq := fmt.Sprintf(`public_key IN (
-				SELECT DISTINCT t.from_pubkey
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				JOIN observers obs ON %s
-				WHERE t.payload_type = 4
-				AND UPPER(TRIM(obs.iata)) IN (%s)
-			)`, joinCond, strings.Join(placeholders, ","))
-			where = append(where, subq)
-			args = append(args, regionArgs...)
+	// The region filter is served from the bounded membership cache in
+	// nodes_region_cache.go: the IN (...) observation join is evaluated there
+	// once per region set, not twice per request (COUNT(*) and the page).
+	// #38's from_pubkey contract — and the trap that comes with it — lives
+	// with the query, in scanNodeRegionKeys.
+	if codes := normalizeRegionCodes(region); len(codes) > 0 {
+		keysJSON, err := db.nodeRegionKeysJSON(codes)
+		if err != nil {
+			return nil, 0, nil, err
 		}
+		where = append(where, "public_key IN (SELECT value FROM json_each(?))")
+		args = append(args, keysJSON)
 	}
 
 	w := ""
