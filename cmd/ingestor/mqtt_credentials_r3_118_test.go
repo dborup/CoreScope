@@ -42,13 +42,13 @@ func TestBrokerForLogMarksRemovedUserinfo_118(t *testing.T) {
 // scheme, or the configured user name and password, would pass it.
 func TestErrForLogMasksKnownSecrets_118(t *testing.T) {
 	src := MQTTSource{
-		Broker:   "wss://" + credUser + ":" + credPass + "@host/mqtt?token=abc",
+		Broker:   "wss://" + credUser + ":" + credPass + "@host/mqtt?token=" + credQuery,
 		Username: "cfg-user",
 		Password: "cfg-pass",
 	}
 	secrets := mqttSourceSecrets(src)
 	for _, c := range []struct{ in, want string }{
-		{"dial host/mqtt?token=abc: refused", "dial host/mqtt?****: refused"},
+		{"dial host/mqtt?token=" + credQuery + ": refused", "dial host/mqtt?****: refused"},
 		{"not authorized: cfg-user/cfg-pass", "not authorized: ****/****"},
 		{"auth " + credUser + ":" + credPass + " rejected", "auth **** rejected"},
 		{"connect tcp://x:y@host failed", "connect tcp://****@host failed"}, // MaskText still runs
@@ -78,14 +78,15 @@ func TestDisconnectErrorMasksKnownSecrets_118(t *testing.T) {
 	resetSourceStatusRegistry()
 	t.Cleanup(resetSourceStatusRegistry)
 	buf := captureLog118(t)
-	src := MQTTSource{Name: "feed", Broker: "wss://host/mqtt?token=abc", Password: "cfg-pass"}
-	opts, status, _ := prepareMQTTSource(src, "feed")
-	opts.OnConnectionLost(nil, errors.New("dial host/mqtt?token=abc: cfg-pass rejected"))
+	src := MQTTSource{Name: "feed", Broker: "wss://host/mqtt?token=" + credQuery, Password: "cfg-pass"}
+	setup := prepareMQTTSource(src, "feed")
+	opts, status := setup.opts, setup.status
+	opts.OnConnectionLost(nil, errors.New("dial host/mqtt?token="+credQuery+": cfg-pass rejected"))
 	const want = "dial host/mqtt?****: **** rejected"
 	if got := status.snapshot(time.Now()).LastError; got != want {
 		t.Errorf("lastError = %q, want %q", got, want)
 	}
-	if out := buf.String(); !strings.Contains(out, want) || strings.Contains(out, "abc") || strings.Contains(out, "cfg-pass") {
+	if out := buf.String(); !strings.Contains(out, want) || strings.Contains(out, credQuery) || strings.Contains(out, "cfg-pass") {
 		t.Errorf("log:\n%s", out)
 	}
 }

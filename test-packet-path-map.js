@@ -28,8 +28,8 @@ function test(name, fn) {
 
 console.log('\n=== packet-path-map.js: string-contract checks ===');
 
-test('exports window.PacketPathMap.{open,close}', () => {
-  assert.ok(/window\.PacketPathMap\s*=\s*\{\s*open:\s*open,\s*close:\s*close\s*\}/.test(src));
+test('exports window.PacketPathMap.{open,close,restore}', () => {
+  assert.ok(/window\.PacketPathMap\s*=\s*\{\s*open:\s*open,\s*close:\s*close,\s*restore:\s*restore\s*\}/.test(src));
 });
 
 test('fetches via the shared api() helper, not a raw fetch (picks up auth/base-URL handling)', () => {
@@ -56,7 +56,7 @@ test('draws highlighted branch(es) on top of the others', () => {
 });
 
 test('handles Escape key and click-outside to close, matching other CoreScope modals', () => {
-  assert.ok(/e\.key === 'Escape'/.test(src));
+  assert.ok(/e\.key [!=]== 'Escape'/.test(src));
   assert.ok(/e\.target === overlay/.test(src));
 });
 
@@ -107,6 +107,7 @@ function makeSandbox(apiImpl) {
       get textContent() { return this._text || ''; },
       appendChild(child) { this.children.push(child); child._parent = this; return child; },
       remove() { if (this._parent) this._parent.children = this._parent.children.filter(c => c !== this); },
+      contains(node) { for (let n = node; n; n = n._parent || n.parentElement) if (n === this) return true; return false; },
       addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
       removeEventListener(type, fn) { if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(f => f !== fn); },
       querySelector() { return null; },
@@ -128,6 +129,8 @@ function makeSandbox(apiImpl) {
       };
       return search(body);
     },
+    // #180: the topmost element at a point; a test sets __topAt.
+    elementFromPoint() { return ctx.__topAt || null; },
     // docLog: the live document listeners with their capture flag (#167 r2:
     // the modal's Escape handler must run in the capture phase).
     addEventListener(type, fn, opts) {
@@ -143,21 +146,45 @@ function makeSandbox(apiImpl) {
   };
   const docLog = [];
 
+  // #180: the modal listens for hashchange on window while it is open.
+  const winListeners = {};
+  const win = {
+    addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { if (winListeners[type]) winListeners[type] = winListeners[type].filter(f => f !== fn); },
+  };
   const ctx = {
-    window: {}, document: doc, console, Math, String, JSON, Promise, Error,
+    window: win, document: doc, console, Math, String, JSON, Promise, Error, Date, URLSearchParams,
     setTimeout, clearTimeout,
     // Returns the variable name itself (not a real color) so tests can
     // assert two markers use DIFFERENT css vars without caring what the
     // actual theme color is.
-    getComputedStyle: () => ({ getPropertyValue: (name) => name }),
+    // position: an element's own _pos (#180 layer test), else static.
+    getComputedStyle: (el) => ({ getPropertyValue: (name) => name, position: (el && el._pos) || 'static' }),
     escapeHtml: (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     api: apiImpl,
     L: undefined, // Leaflet deliberately absent -- these tests only cover the no-plot-data / no-Leaflet paths.
     location: { origin: 'https://stg.meshview.dk', hash: '' },
-    // Records replaceState() so the #147 tests can see the address bar.
-    history: { replaceState(_s, _t, url) { ctx.__replaced.push(url); ctx.location.hash = url; } },
+    // Records replaceState() so the #147 tests can see the address bar. A
+    // call without a URL changes only the entry's state (#180), not the
+    // address bar, so it is not in __replaced.
+    history: {
+      state: null,
+      replaceState(state, _t, url) {
+        ctx.history.state = state;
+        if (url === undefined) return;
+        ctx.__replaced.push(url); ctx.location.hash = url;
+      },
+    },
     __replaced: [],
     __docLog: docLog,
+    __winListeners: winListeners,
+    // #180: a navigation (Back/Forward, a nav link): the new entry's hash and
+    // state, then the window's hashchange listeners.
+    __navigate(hash, state) {
+      ctx.location.hash = hash;
+      ctx.history.state = state === undefined ? null : state;
+      (winListeners.hashchange || []).slice().forEach(fn => fn({}));
+    },
   };
   ctx.window.copyToClipboard = (text, onDone) => { ctx.__copiedText = text; if (onDone) onDone(); };
   vm.createContext(ctx);
@@ -166,6 +193,204 @@ function makeSandbox(apiImpl) {
 }
 
 (async () => {
+  async function historyCase(name, fn) {
+    try { await fn(); passed++; console.log('  ✅ ' + name); }
+    catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  function installHistoryLeaflet(ctx) {
+    const counts = { maps: 0, removed: 0, invalidated: 0 };
+    const map = { setView() { return this; }, fitBounds(_, options) { counts.fitOptions = options; }, invalidateSize() { counts.invalidated++; }, remove() { counts.removed++; } };
+    const layer = () => ({ addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } });
+    ctx.L = { map() { counts.maps++; return map; }, tileLayer: layer, circleMarker: layer, polyline: layer };
+    return counts;
+  }
+  const archivedPath = { hash: 'historic', branches: [{ hops: 0, points: [], observer: { name: 'Saved station', lat: 56, lon: 10 } }] };
+  const pingOptions = (loadPath) => ({ loadPath, routePrefix: '#/ping-scores/', routeQueryKey: 'record', shareURL: 'https://stg.meshview.dk/#/ping-scores/historic?viewPath=1&record=allTime.farthestPing' });
+
+  await historyCase('operator policy waits for config, hides approximate points/controls, and keeps real GPS', async () => {
+    let finishConfig;
+    const ctx = makeSandbox(async () => ({ branches: [{ hops: 2, points: [
+      { name: 'Estimated relay', lat: 56.1, lon: 10.1, approx: true },
+      { name: 'Reported relay', lat: 56.2, lon: 10.2 }
+    ], observer: { name: 'Estimated observer', lat: 56.3, lon: 10.3, approx: true } }] }));
+    ctx.fetch = () => new Promise(resolve => { finishConfig = resolve; });
+    ctx.document.querySelector = () => null;
+    ctx.document.head = { appendChild() {} };
+    vm.runInContext(fs.readFileSync('public/roles.js', 'utf8'), ctx);
+    const counts = installHistoryLeaflet(ctx);
+    const coordinates = [];
+    ctx.L.circleMarker = point => { coordinates.push(point); return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } }; };
+    const opened = ctx.window.PacketPathMap.open('policy-test');
+    await Promise.resolve();
+    assert.strictEqual(counts.maps, 0, 'no pre-config estimate map');
+    finishConfig({ json: async () => ({ estimatedPositions: { enabled: false } }) });
+    await opened;
+    assert.strictEqual(coordinates.length, 1);
+    assert.strictEqual(coordinates[0][0], 56.2, 'only reported GPS is plotted');
+    assert.strictEqual(ctx.document.getElementById('packetPathApproxLegend').style.display, 'none');
+    assert.ok(ctx.document.getElementById('packetPathEstimatePolicy').textContent.includes('disabled by the instance operator'));
+    assert.strictEqual(ctx.document.getElementById('packetPathApproxOnly'), null);
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('ping archive loader renders a saved-time disclaimer and copies a ping-specific URL', async () => {
+    const ctx = makeSandbox(() => { throw new Error('ordinary packet API must not be used'); });
+    const counts = installHistoryLeaflet(ctx);
+    ctx.location.hash = '#/ping-scores/historic?viewPath=1&record=allTime.farthestPing';
+    let requested;
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async h => {
+      requested = h;
+      return { status: 'archived', capturedAt: '2026-10-06T08:00:00Z', path: archivedPath };
+    }));
+    assert.strictEqual(requested, 'historic');
+    assert.strictEqual(counts.maps, 1);
+    assert.strictEqual(counts.fitOptions.animate, false, 'historical initial bounds must not animate after navigation');
+    const note = ctx.document.getElementById('packetPathArchiveNote');
+    assert.ok(note.textContent.includes('2026-10-06 08:00:00 UTC'));
+    assert.ok(note.textContent.includes('not necessarily when the packet was sent'));
+    ctx.document.getElementById('packetPathCopyLink')._listeners.click[0]();
+    assert.strictEqual(ctx.__copiedText, pingOptions().shareURL);
+    ctx.window.PacketPathMap.close();
+    assert.strictEqual(ctx.location.hash, '#/ping-scores/historic?record=allTime.farthestPing');
+    assert.strictEqual(counts.removed, 1);
+  });
+
+  await historyCase('expired, unpositioned, private, and oversized records explain unavailable maps without an empty map box', async () => {
+    const messages = { raw_data_expired_before_capture: 'expired before', no_coordinates: 'known positions', privacy_filtered: 'privacy settings', archive_too_large: 'size limit', record_evidence_unavailable: 'no longer reproduce this record' };
+    for (const [reason, expected] of Object.entries(messages)) {
+      const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+      const counts = installHistoryLeaflet(ctx);
+      await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'unavailable', reason })));
+      assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes(expected), reason);
+      assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none', reason);
+      assert.strictEqual(ctx.document.getElementById('packetPathLegend').style.display, 'none', reason);
+      assert.strictEqual(counts.maps, 0, reason);
+      ctx.window.PacketPathMap.close();
+    }
+  });
+
+  await historyCase('initializing history is not confused with expired history or a network failure', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'initializing' })));
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('initializing'));
+    assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none');
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => { throw new Error('network offline'); }));
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('Failed to load path: network offline'));
+    assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none');
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('a live ping path renders normally without pretending to be an archive', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const counts = installHistoryLeaflet(ctx);
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'live', path: archivedPath })));
+    assert.strictEqual(counts.maps, 1);
+    assert.strictEqual(ctx.document.getElementById('packetPathArchiveNote').textContent, '');
+    assert.ok(ctx.document.getElementById('packetPathModal').innerHTML.includes('id="packetPathArchiveNote" class="text-muted" style="display:none;'));
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('ping Back/Forward entries use the same closed-entry lifecycle as ordinary packet links', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const url = '#/ping-scores/historic?viewPath=1&record=allTime.farthestPing';
+    const opts = pingOptions(async () => ({ status: 'unavailable', reason: 'no_coordinates' }));
+    ctx.location.hash = url;
+    await ctx.window.PacketPathMap.open('historic', opts);
+    const state = ctx.history.state;
+    assert.ok(state.packetPathModal, 'ping history entry must be tagged');
+    ctx.__navigate('#/ping-scores');
+    assert.ok(!ctx.document.getElementById('packetPathModal'));
+    ctx.__navigate(url, state);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', opts), false);
+    ctx.__navigate(url, null);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', opts), true);
+    await Promise.resolve();
+    const escape = ctx.__docLog.find(e => e.type === 'keydown').fn;
+    escape({ key: 'Escape', stopPropagation() {} });
+    assert.ok(!ctx.document.getElementById('packetPathModal'));
+    assert.strictEqual(ctx.location.hash, '#/ping-scores/historic?record=allTime.farthestPing');
+  });
+
+  await historyCase('late path responses cannot create a map in a replacement or closed modal', async () => {
+    let resolve;
+    const ctx = makeSandbox(() => Promise.resolve({ hash: 'new', branches: [] }));
+    const counts = installHistoryLeaflet(ctx);
+    const old = ctx.window.PacketPathMap.open('historic', pingOptions(() => new Promise(r => { resolve = r; })));
+    await ctx.window.PacketPathMap.open('new');
+    resolve({ status: 'archived', capturedAt: '2026-10-06T08:00:00Z', path: archivedPath });
+    await old;
+    assert.strictEqual(counts.maps, 0);
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('no observations'));
+    const closed = ctx.window.PacketPathMap.open('historic', pingOptions(() => new Promise(r => { resolve = r; })));
+    ctx.window.PacketPathMap.close();
+    resolve({ status: 'live', path: archivedPath });
+    await closed;
+    assert.strictEqual(counts.maps, 0);
+  });
+
+  await historyCase('Back between two slots for the same hash preserves the incoming record URL and restores the correct map', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const urlA = '#/ping-scores/historic?viewPath=1&record=allTime.farthestPing';
+    const urlB = '#/ping-scores/historic?viewPath=1&record=thisWeek.farthestPing';
+    const options = pingOptions(async () => ({ status: 'unavailable', reason: 'no_coordinates' }));
+    ctx.location.hash = urlA;
+    await ctx.window.PacketPathMap.open('historic', options);
+    const stateA = ctx.history.state;
+    // A card click uses pushState then open(), not a hashchange: replacing
+    // A with B must not tag the incoming A entry as closed on a later Back.
+    ctx.location.hash = urlB;
+    ctx.history.state = null;
+    await ctx.window.PacketPathMap.open('historic', options);
+    const stateB = ctx.history.state;
+    ctx.location.hash = urlA;
+    ctx.history.state = stateA;
+    ctx.window.PacketPathMap.close(); // app.navigate() destroys before init().
+    assert.strictEqual(ctx.location.hash, urlA, 'closing departing B changed incoming A URL');
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', options), true, 'incoming A was wrongly marked closed');
+    await Promise.resolve();
+    ctx.__navigate(urlB, stateB);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('historic', options), false, 'the departing B entry retains the established closed-entry semantics');
+  });
+
+  await historyCase('a scheduled resize does not use a map after the modal was destroyed', async () => {
+    const ctx = makeSandbox(() => Promise.resolve(archivedPath));
+    const counts = installHistoryLeaflet(ctx);
+    const timers = [];
+    ctx.setTimeout = fn => { timers.push(fn); };
+    await ctx.window.PacketPathMap.open('historic');
+    assert.strictEqual(counts.maps, 1);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(counts.fitOptions, 'animate'), false, 'ordinary packet animation defaults must not change');
+    ctx.window.PacketPathMap.close();
+    timers.forEach(fn => fn());
+    assert.strictEqual(counts.invalidated, 0);
+  });
+
+  await historyCase('initializing history can be retried without refreshing the board or using the ordinary packet endpoint', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const counts = installHistoryLeaflet(ctx);
+    let calls = 0;
+    const options = pingOptions(async () => ++calls === 1 ? { status: 'initializing' } : { status: 'live', path: archivedPath });
+    await ctx.window.PacketPathMap.open('historic', options);
+    const retry = ctx.document.getElementById('packetPathRetry');
+    assert.strictEqual(retry.style.display, 'inline-block');
+    await retry._listeners.click[0]();
+    assert.strictEqual(calls, 2);
+    assert.strictEqual(counts.maps, 1);
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('invalid history envelopes and unknown reasons never render a misleading map or raw server text', async () => {
+    const ctx = makeSandbox(() => { throw new Error('wrong API'); });
+    const counts = installHistoryLeaflet(ctx);
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'live' })));
+    assert.strictEqual(ctx.document.getElementById('packetPathStatus').textContent, 'Failed to load path: invalid history response.');
+    assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none');
+    await ctx.window.PacketPathMap.open('historic', pingOptions(async () => ({ status: 'unavailable', reason: '__proto__' })));
+    assert.strictEqual(ctx.document.getElementById('packetPathStatus').textContent, 'A historical map is not available for this record.');
+    assert.strictEqual(counts.maps, 0);
+    ctx.window.PacketPathMap.close();
+  });
+
   await (async () => {
     try {
       const ctx = makeSandbox(() => Promise.reject(new Error('network down')));
@@ -1327,6 +1552,188 @@ function makeSandbox(apiImpl) {
       assert.strictEqual(stoppedAfter, 0, 'a stray handler call with no modal open swallowed Escape');
     },
     '#/packets/deadbeef?obs=123', 1);
+
+  // #180: Escape is the top layer's. A layer opened over the modal later
+  // (global search via Ctrl+K, a nav menu, the More sheet, a filter popover)
+  // holds focus and has its own Escape handler: the modal leaves the event
+  // alone then. Focus on the page, in the sticky top nav, or in the detail
+  // surface the modal opened over (SlideOver, mobile sheet) still closes it.
+  // fakeFocus: a focused element inside a chain of ancestors; each entry is
+  // { pos, cls } from the element itself outwards.
+  function fakeFocus(chain) {
+    let parent = null;
+    const nodes = chain.slice().reverse().map((c) => {
+      const n = {
+        _pos: c.pos || 'static', parentElement: parent, _cls: c.cls || '',
+        matches(sel) { return sel.split(',').some((x) => x.trim() === '.' + this._cls); },
+        contains(other) { for (let o = other; o; o = o.parentElement) if (o === this) return true; return false; },
+        getBoundingClientRect: () => ({ left: 10, top: 10, width: 20, height: 20 }),
+      };
+      parent = n;
+      return n;
+    });
+    return nodes[nodes.length - 1];
+  }
+  async function escapeCase(name, chain, topIs, expectClosed) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = '#/packets/deadbeef?obs=1&viewPath=1';
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      const target = fakeFocus(chain);
+      ctx.__topAt = topIs === 'target' ? target : topIs === 'modal' ? overlay.children[0] || overlay : null;
+      const key = ctx.__docLog.find(r => r.type === 'keydown');
+      let stopped = 0;
+      key.fn({ key: 'Escape', target, stopPropagation() { stopped++; } });
+      const open = !!ctx.document.getElementById('packetPathModal');
+      assert.strictEqual(!open, expectClosed, expectClosed ? 'modal still open' : 'modal closed');
+      assert.strictEqual(stopped, expectClosed ? 1 : 0, 'stopPropagation calls: ' + stopped);
+      assert.strictEqual(ctx.location.hash, expectClosed ? '#/packets/deadbeef?obs=1' : '#/packets/deadbeef?obs=1&viewPath=1');
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  await escapeCase('Escape in the global search drawn over the modal is left to the search (#180)',
+    [{}, { pos: 'fixed', cls: 'search-overlay' }], 'target', false);
+  await escapeCase('Escape in a fixed nav menu / More sheet drawn over the modal is left to it (#180)',
+    [{}, { cls: 'nav-more-wrap' }, { pos: 'fixed', cls: 'nav-more-menu' }], 'target', false);
+  await escapeCase('Escape with focus on a control covered by the modal (e.g. the View Path button) closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'search-overlay' }], 'modal', true);
+  await escapeCase('Escape with focus in the SlideOver the modal opened over closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'slide-over-panel' }], 'target', true);
+  await escapeCase('Escape with focus in the mobile sheet the modal opened over closes the modal (#180)',
+    [{}, { pos: 'fixed', cls: 'mobile-detail-sheet' }], 'target', true);
+  await escapeCase('Escape with focus in the sticky top nav (no floating layer) closes the modal (#180)',
+    [{}, { pos: 'sticky', cls: 'top-nav' }], 'target', true);
+
+  // #208 item 4: focus inside the modal itself (its close or copy-link
+  // button) is not a layer above it. The .modal-overlay is position:fixed and
+  // topmost at the button, so without the overlay.contains() check the walk
+  // would take the modal for a layer drawn over it and leave Escape alone.
+  await (async () => {
+    const name = 'Escape with focus inside the modal (its close button) closes the modal (#208)';
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = '#/packets/deadbeef?obs=1&viewPath=1';
+      await ctx.window.PacketPathMap.open('deadbeef');
+      const overlay = ctx.document.getElementById('packetPathModal');
+      const btn = ctx.document.getElementById('packetPathClose');
+      assert.ok(overlay && btn && overlay.contains(btn), 'close button not inside the modal');
+      overlay._pos = 'fixed';
+      overlay.parentElement = ctx.document.body;
+      overlay.matches = () => false;
+      btn.parentElement = overlay;
+      btn.getBoundingClientRect = () => ({ left: 10, top: 10, width: 20, height: 20 });
+      ctx.__topAt = btn;
+      const key = ctx.__docLog.find(r => r.type === 'keydown');
+      let stopped = 0;
+      key.fn({ key: 'Escape', target: btn, stopPropagation() { stopped++; } });
+      assert.ok(!ctx.document.getElementById('packetPathModal'), 'modal still open');
+      assert.strictEqual(stopped, 1, 'stopPropagation calls: ' + stopped);
+      assert.strictEqual(ctx.location.hash, '#/packets/deadbeef?obs=1');
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  })();
+
+  // #180: the modal closes on a route change, and Back/Forward onto the
+  // #/packets/<hash>?…&viewPath=1 entry it was closed away from does not
+  // reopen it. A new link to the same URL (an entry without that state)
+  // and a reload of an entry whose modal was open still do.
+  const ENTRY = '#/packets/deadbeef?obs=1&viewPath=1';
+  async function routeCase(name, fn) {
+    try {
+      const ctx = makeSandbox(() => Promise.reject(new Error('boom')));
+      ctx.location.hash = ENTRY;
+      ctx.history.state = { other: 'kept' };
+      await fn(ctx);
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  const isOpen = (ctx) => !!ctx.document.getElementById('packetPathModal');
+  const hashListeners = (ctx) => (ctx.__winListeners.hashchange || []).length;
+
+  await routeCase('open() on a #/packets/<hash> entry marks it in history.state, keeping other state, without a URL write (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.ok(ctx.history.state.packetPathModal, 'entry not marked: ' + JSON.stringify(ctx.history.state));
+    assert.strictEqual(ctx.history.state.other, 'kept');
+    assert.strictEqual(ctx.__replaced.length, 0, 'URL written: ' + JSON.stringify(ctx.__replaced));
+    assert.strictEqual(hashListeners(ctx), 1, 'no hashchange listener while open');
+  });
+  await routeCase('open() on another page (e.g. #/analytics) does not mark the entry (#180)', async (ctx) => {
+    ctx.location.hash = '#/analytics?tab=distance';
+    ctx.history.state = null;
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.strictEqual(ctx.history.state, null);
+  });
+  await routeCase('a route change (Back to #/nodes) closes the modal and writes no URL (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/nodes', null);
+    assert.ok(!isOpen(ctx), 'modal still open over #/nodes');
+    assert.strictEqual(ctx.location.hash, '#/nodes');
+    assert.strictEqual(ctx.__replaced.length, 0, 'URL written: ' + JSON.stringify(ctx.__replaced));
+    assert.strictEqual(hashListeners(ctx), 0, 'hashchange listener left behind');
+  });
+  await routeCase('a hashchange that keeps the path (query only) keeps the modal (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/packets/deadbeef?obs=2&viewPath=1', ctx.history.state);
+    assert.ok(isOpen(ctx), 'modal closed by a query-only hashchange');
+  });
+  await routeCase('Forward onto the entry whose modal closed on route change: restore() does not reopen it (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, entryState);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false);
+    assert.ok(!isOpen(ctx), 'modal reopened from history');
+  });
+  await routeCase('a modal closed with Escape while another route is shown is not reopened by Back/Forward (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    // A route switch without a hashchange event (replaceState-based).
+    ctx.location.hash = '#/nodes';
+    ctx.history.state = null;
+    ctx.__docLog.find(r => r.type === 'keydown').fn({ key: 'Escape', stopPropagation() {} });
+    assert.ok(!isOpen(ctx), 'Escape did not close the modal');
+    assert.strictEqual(ctx.location.hash, '#/nodes', 'the other route\'s URL was rewritten');
+    ctx.__navigate(ENTRY, entryState);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false);
+    assert.ok(!isOpen(ctx), 'modal reopened from history');
+  });
+  await routeCase('restore() on a new link to the same URL (entry without state) opens the modal (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, null);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), true);
+    assert.ok(isOpen(ctx), 'a fresh link did not open the modal');
+  });
+  await routeCase('restore() on a reload of an entry whose modal was open reopens it (#180)', async (ctx) => {
+    await ctx.window.PacketPathMap.open('deadbeef');
+    const entryState = ctx.history.state;
+    ctx.window.PacketPathMap.close();
+    // A reload: same entry state, a new document (fresh module, no list).
+    const ctx2 = makeSandbox(() => Promise.reject(new Error('boom')));
+    ctx2.location.hash = ENTRY;
+    ctx2.history.state = entryState;
+    assert.strictEqual(ctx2.window.PacketPathMap.restore('deadbeef'), true);
+    assert.ok(isOpen(ctx2), 'reload did not reopen the modal');
+  });
+  await routeCase('the closed-entry list is bounded: the oldest entry is forgotten after 50 newer ones (#180)', async (ctx) => {
+    const states = [];
+    for (let i = 0; i < 51; i++) {
+      ctx.__navigate(ENTRY, null);
+      await ctx.window.PacketPathMap.open('deadbeef');
+      states.push(ctx.history.state);
+      ctx.__navigate('#/nodes', null);
+    }
+    ctx.__navigate(ENTRY, states[1]);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), false, 'entry 2 of 51 forgotten too early');
+    ctx.window.PacketPathMap.close();
+    ctx.__navigate('#/nodes', null);
+    ctx.__navigate(ENTRY, states[0]);
+    assert.strictEqual(ctx.window.PacketPathMap.restore('deadbeef'), true, 'the oldest of 51 entries is still remembered');
+  });
 
   console.log('\n════════════════════════════════════════');
   console.log(`  packet-path-map.js: ${passed} passed, ${failed} failed`);

@@ -129,26 +129,6 @@ test('test-all.sh registers itself through this test', () => {
 // it, and delete its entry here. Do not add a file to this list to get a new
 // test past the check below: register it instead.
 const KNOWN_UNREGISTERED = {
-  // red unit tests (stale after intended UI changes)
-  'test-channel-colors.js': 'red: expects 4px border + tint, #675 changed it to 3px',
-  'test-channel-ux-followup.js': 'red: copy text changed by the Phosphor migration',
-  'test-channel-ux-round2.js': 'red: expects the 📤 glyph, now #ph-share-network',
-  'test-drag-manager.js': 'red: removeAttribute mock does not update dataset (#1567)',
-  'test-fluid-scaffolding.js': 'red: reads only the first :root block',
-  'test-hop-resolver-affinity.js': 'red: fixture geometry wrong since #874',
-  'test-issue-1470-card-bg-contrast.js': 'red: indexOf matches a style.css comment',
-  'test-issue-1646-compare-polish.js': 'red: font-size parser reads a comment',
-  'test-packets.js': 'red: 13 emoji assertions after the Phosphor migration',
-  'test-perf-disk-io-1120.js': 'red: ⚠️ is #ph-warning; anomaly detector reworked (#1593)',
-  // need something CI's unit job does not have
-  'test-marker-outline-weight.js': 'needs @playwright/test (not a dependency) and a server',
-  'test-table-sort.js': 'needs jsdom (not a dependency)',
-  'test-touch-targets.js': 'red in Chromium: expects 48px targets, CSS has 44px',
-  // E2E
-  'test-channel-modal-e2e.js': 'red: Add button text and sidebar sections changed',
-  'test-issue-1522-trace-url-sync-e2e.js': 'needs @playwright/test (not a dependency)',
-  'test-node-reach-e2e.js': 'red: #nqMap .leaflet-container never visible',
-  'test-path-inspector-e2e.js': 'needs @playwright/test (not a dependency)',
   'test-rx-coverage-mobile-nav-e2e.js': 'skips while clientRxCoverage is off (the default)',
 };
 

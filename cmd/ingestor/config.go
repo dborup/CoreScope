@@ -84,6 +84,10 @@ type Config struct {
 	// iataDropWarn is the bounded per-region throttle for that warning.
 	iataDropWarn iataDropThrottle
 
+	// clientRxSrcDrop is the per-source throttle for the client-RX source
+	// allowlist drop warning (#265). See client_rx_sources.go.
+	clientRxSrcDrop clientRxSourceDropThrottle
+
 	// ObserverBlacklist is a list of observer public keys to drop at ingest.
 	// Messages from blacklisted observers are silently discarded — no DB writes,
 	// no UpsertObserver, no observations, no metrics.
@@ -107,6 +111,10 @@ type Config struct {
 	// (internal/channelregistry). Approved channels are always loaded into
 	// the channel keys, whether or not new submissions are enabled.
 	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
+	// ResolvedPathBackfill tunes the start-up re-resolution of NULL
+	// observations.resolved_path rows (#188, resolved_path_backfill.go).
+	ResolvedPathBackfill *ResolvedPathBackfillConfig `json:"resolvedPathBackfill,omitempty"`
 }
 
 // NeighborEdgesDaysOrDefault returns the configured pruning window or 5.
@@ -151,12 +159,61 @@ func (f *ForeignAdvertConfig) IsDropMode() bool {
 // ClientRxCoverageConfig controls the opt-in mobile client-RX coverage feature.
 type ClientRxCoverageConfig struct {
 	Enabled bool `json:"enabled"`
+
+	// Sources optionally restricts which MQTT sources may contribute client RX
+	// coverage, by mqttSources[].name (#265). Trust in meshcore/client/... rests
+	// entirely on the broker binding the topic pubkey to the publisher, so on an
+	// instance that also reads a broker without that binding the namespace must
+	// be accepted from the trusted source only.
+	//
+	// Absent or empty (or only blank entries) means every source is accepted,
+	// which keeps the upstream-compatible default. See ClientRxSourceAllowed.
+	Sources []string `json:"sources,omitempty"`
 }
 
 // ClientRxCoverageEnabled reports whether the opt-in mobile client-RX coverage
 // feature is on. Absent/nil ⇒ off (the safe default).
 func (c *Config) ClientRxCoverageEnabled() bool {
 	return c.ClientRxCoverage != nil && c.ClientRxCoverage.Enabled
+}
+
+// ClientRxCoverageSources returns the configured client-RX source allowlist
+// with blank entries dropped. An empty result means "no restriction".
+func (c *Config) ClientRxCoverageSources() []string {
+	if c == nil || c.ClientRxCoverage == nil || len(c.ClientRxCoverage.Sources) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.ClientRxCoverage.Sources))
+	for _, name := range c.ClientRxCoverage.Sources {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// ClientRxSourceAllowed reports whether client RX coverage arriving on the MQTT
+// source called name may be handled (#265). Matching is against
+// mqttSources[].name, trimmed and case-insensitive (as elsewhere in this config).
+//
+// With no allowlist configured every source is allowed — unchanged behaviour.
+// With one configured a source that is not on it is rejected, including a source
+// with no name (which cannot be listed, so it cannot be trusted).
+//
+// The list is scanned linearly: it is bounded by the number of configured MQTT
+// sources (a handful), so a set would cost more than it saves.
+func (c *Config) ClientRxSourceAllowed(name string) bool {
+	allow := c.ClientRxCoverageSources()
+	if len(allow) == 0 {
+		return true
+	}
+	name = strings.TrimSpace(name)
+	for _, a := range allow {
+		if strings.EqualFold(a, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
@@ -167,6 +224,10 @@ type RetentionConfig struct {
 	// PacketDays is the retention window for transmissions (#1283).
 	// Ownership moved from cmd/server to cmd/ingestor; 0 disables.
 	PacketDays int `json:"packetDays"`
+	// ChannelDays keeps channel messages (GRP_TXT) and their observations
+	// until they are this many days old, when longer than PacketDays (#296).
+	// 0, or a value not longer than PacketDays, leaves them on PacketDays.
+	ChannelDays int `json:"channelDays"`
 	// ClientRxDays is the retention window (by rx_at) for mobile client-RX
 	// coverage rows in client_receptions / client_observers; 0 disables. Bounds
 	// the table the opt-in coverage feature would otherwise grow without limit.
@@ -178,6 +239,15 @@ type RetentionConfig struct {
 func (c *Config) PacketDaysOrZero() int {
 	if c.Retention != nil && c.Retention.PacketDays > 0 {
 		return c.Retention.PacketDays
+	}
+	return 0
+}
+
+// ChannelDaysOrZero returns the configured retention.channelDays or 0
+// (channel messages follow packetDays) if not set.
+func (c *Config) ChannelDaysOrZero() int {
+	if c.Retention != nil && c.Retention.ChannelDays > 0 {
+		return c.Retention.ChannelDays
 	}
 	return 0
 }

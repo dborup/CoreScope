@@ -33,10 +33,14 @@ run test-packet-filter-ux.js
 run test-issue-121-clear-filters-selection.js
 run test-clear-filters.js
 run test-issue-147-packets-url-detail-params.js
+run test-issue-96-hide-control.js
+run test-issue-180-packets-detail-close.js
 run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
 run test-app-api-inflight-cleanup-rejection.js
+run test-app-api-bust-inflight-243.js
+run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
 run test-nav-dynamic-link-lifecycle.js
@@ -55,6 +59,12 @@ run test-top-routes-overlay.js
 run test-important-links-byte-filter.js
 run test-url-state.js
 run test-node-adverts.js
+run test-issue-254-affinity-debug-toggle.js
+run test-issue-258-column-widths.js
+run test-issue-259-nodes-esc-listener.js
+run test-issue-282-pktesc-listener.js
+run test-issue-282-comment-guards.js
+run test-issue-322-comment-guards.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -126,6 +136,7 @@ run test-node-analytics-hop-chart.js
 run test-analytics-hop-depth-ui.js
 run test-channels-ping-bot-reply.js
 run test-channels-observed-path-hash-size.js
+run test-channels-client-state-152.js
 run test-packet-path-map.js
 run test-area-nodes-map.js
 run test-ping-scores.js
@@ -138,14 +149,19 @@ run test-node-changes-tool.js
 run test-network-digest-tool.js
 run test-position-gaps-tool.js
 run test-gps-sanity-tool.js
+run test-estimated-positions-config.js
 run test-map-scope-filter.js
 run test-issue-117-ws-watchdog.js
 run test-issue-111-drawer-version.js
 
 # Previously run only by the JS unit step in deploy.yml (#174)
 run test-packet-filter-time.js
+run test-packets.js
 run test-confidence-indicator.js
 run test-1659-analytics-warmup.js
+run test-analytics-tab-state-and-query.js
+run test-analytics-subtab-deeplinks-205.js
+run test-hash-stats-sort-226.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js
@@ -206,6 +222,7 @@ run test-embed-mode-1369.js
 run test-geofilter-draft.js
 run test-hash-color.js
 run test-issue-1166-first-seen-column.js
+run test-issue-199-missing-node.js
 run test-issue-1189-composed-cell.js
 run test-issue-1189-live-iata-badge.js
 run test-issue-1415-packets-layout.js
@@ -237,6 +254,18 @@ run test-slideover-1056-rowsel-strict.js
 run test-map-clustering.js
 run test-panel-corner.js
 run test-customizer-v2.js
+
+# Repaired orphans (#189)
+run test-channel-colors.js
+run test-channel-ux-followup.js
+run test-channel-ux-round2.js
+run test-drag-manager.js
+run test-fluid-scaffolding.js
+run test-hop-resolver-affinity.js
+run test-issue-1470-card-bg-contrast.js
+run test-issue-1646-compare-polish.js
+run test-perf-disk-io-1120.js
+run test-table-sort.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js

@@ -2238,6 +2238,22 @@ console.log('\n=== app.js: computeBreakdownRanges ===');
   loadInCtx(ctx, 'public/app.js');
   const computeBreakdownRanges = ctx.computeBreakdownRanges;
 
+  test('senderPathHashSize reads 0-hop flood width but not direct marker', () => {
+    assert.strictEqual(ctx.senderPathHashSize('1540DEADBEEF'), 2);
+    assert.strictEqual(ctx.senderPathHashSize('1580DEADBEEF'), 3);
+    assert.strictEqual(ctx.senderPathHashSize('1600DEADBEEF'), null);
+    // #322 (1): the direct zero-hop marker is also valid on TRANSPORT_DIRECT
+    // (route 3), where the path byte sits at offset 5 behind the transport
+    // codes. Header 0x17 = route 3, 4 transport bytes (aabbccdd), path byte
+    // 0x00. The shared width helper must treat route 3 like route 2 → null,
+    // killing the `(route === 2 || route === 3)` → `(route === 2)` mutant here.
+    assert.strictEqual(ctx.senderPathHashSize('17aabbccdd00DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('141122334440DEADBEEF'), 2);
+    assert.strictEqual(ctx.senderPathHashSize('2540DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('15C0DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('15'), null);
+  });
+
   function findRange(ranges, label) {
     return ranges.find(r => r.label === label);
   }
@@ -6134,11 +6150,25 @@ console.log('\n=== packets.js: buildFieldTable transport offsets (#765) ===');
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  const hashHelperCtx = makeSandbox();
+  loadInCtx(hashHelperCtx, 'public/roles.js');
+  loadInCtx(hashHelperCtx, 'public/app.js');
+  ftCtx.senderPathHashSize = hashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable's Path Length row now reads its width through the
+  // shared pathHashSizeFromByte() helper, so the sandbox must expose it too.
+  ftCtx.pathHashSizeFromByte = hashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable, fieldRow } = ftCtx.window._packetsTestAPI;
 
   // Helper: build a hex string with specific bytes
   function makeHex(bytes) { return bytes.map(b => b.toString(16).padStart(2, '0')).join(''); }
+
+  test('packet hex breakdown shows the encoded width for a zero-hop flood', () => {
+    const html = buildFieldTable({ raw_hex: '1540DEADBEEF', route_type: 1, payload_type: 5 }, {}, [], {});
+    assert.ok(html.includes('hash_size=2 bytes, hash_count=0'), 'flood width missing from breakdown');
+    const direct = buildFieldTable({ raw_hex: '1600DEADBEEF', route_type: 2, payload_type: 5 }, {}, [], {});
+    assert.ok(direct.includes('no encoded hash size'), 'direct marker must stay unknown');
+  });
 
   test('FLOOD (route_type=1): path_length at byte 1, no transport codes', () => {
     // header=0x05 (route_type=1, payload=1), path_length=0x41 (hash_size=2, count=1), hop=AABB
@@ -6224,6 +6254,12 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  const secondHashHelperCtx = makeSandbox();
+  loadInCtx(secondHashHelperCtx, 'public/roles.js');
+  loadInCtx(secondHashHelperCtx, 'public/app.js');
+  ftCtx.senderPathHashSize = secondHashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable now reads its width via the shared helper.
+  ftCtx.pathHashSizeFromByte = secondHashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 
@@ -6256,13 +6292,13 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
       'Public Key should be at offset 6');
   });
 
-  test('#844: hashCountVal=0 (direct advert) skips Path section', () => {
+  test('#844: zero-hop flood skips Path section but retains encoded width', () => {
     // path_len = 0x00 → hash_size=1, hash_count=0
     const raw = '1100' + '0'.repeat(200);
     const pkt = { raw_hex: raw, route_type: 1, payload_type: 0 };
     const html = buildFieldTable(pkt, {}, [], {});
-    assert.ok(!html.includes('section-path'), 'Should not render Path section for direct advert');
-    assert.ok(html.includes('direct advert'), 'Should note direct advert in path_length description');
+    assert.ok(!html.includes('section-path'), 'Should not render Path section without relay hops');
+    assert.ok(html.includes('hash_size=1 byte, hash_count=0'), 'Should retain flood width in path_length description');
   });
 }
 

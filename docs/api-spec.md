@@ -11,6 +11,7 @@
 ## Table of Contents
 
 - [Conventions](#conventions)
+- [Estimated-position policy](#estimated-position-policy)
 - [GET /api/stats](#get-apistats)
 - [GET /api/health](#get-apihealth)
 - [GET /api/perf](#get-apiperf)
@@ -28,7 +29,6 @@
 - [GET /api/packets](#get-apipackets)
 - [GET /api/packets/timestamps](#get-apipacketstimestamps)
 - [GET /api/packets/:id](#get-apipacketsid)
-- [POST /api/packets](#post-apipackets)
 - [POST /api/decode](#post-apidecode)
 - [GET /api/observers](#get-apiobservers)
 - [GET /api/observers/:id](#get-apiobserversid)
@@ -67,6 +67,90 @@
 
 ---
 
+## Estimated-position policy
+
+`config.json` accepts `estimatedPositions: { "enabled": false }`. Missing
+section or field defaults to `true`. This is a server-startup policy, not a
+request parameter or a browser preference. Restart the server to change it.
+`GET /api/config/client` always publishes the effective value as
+`estimatedPositions: { "enabled": <boolean> }`.
+
+When disabled:
+
+- Node detail omits `estimated_lat`, `estimated_lon`,
+  `estimated_contributor_count`, and `estimated_distance_km`. Reported
+  `lat`/`lon` are unchanged.
+- Packet paths and saved Ping Scores path responses retain route identities
+  and reported coordinates but omit neighbor-derived coordinates and their
+  approximation metadata. Endpoint distances depending on removed estimates
+  are omitted; distances between reported endpoints remain valid. Saved
+  source archives are not modified -- neither by a request nor by the
+  background Ping Scores history refresh -- so re-enabling the policy serves
+  the original archived geometry again.
+- `/api/analytics/areas` returns `estimatedPositionsEnabled: false` alongside
+  `density`, `bridgeNodes`, and `unpositionedTotal`. It omits uncomputed
+  `positionGaps`, `estimatedNodes`, and `unpositionedNoNeighborFix` rather than
+  claiming zero gaps or no neighbor evidence.
+- `/api/analytics/gps-sanity` returns only
+  `{ "estimatedPositionsEnabled": false }`, without running the estimator.
+
+Enabled analytics retain their existing response shapes. API clients must
+distinguish disabled computation from an enabled, empty result. The policy
+does not disable ordinary neighbor graphs or independent IATA/name-based
+position fallbacks. No query parameter can override the server setting.
+
+## GET /api/ping-scores/:hash/path
+
+Returns path evidence for a currently displayed Ping Scores record. Requires
+`record=allTime.<kind>` or `record=thisWeek.<kind>`, where `<kind>` is one of
+`farthestPing`, `mostHopsPing`, `widestSpreadPing`, `fastestSpreadPing`, or
+`mostEfficientPing`. The hash must match that slot's current record.
+
+```json
+{
+  "status": "archived",
+  "capturedAt": "2026-01-15T10:05:00Z",
+  "path": {
+    "hash": "example",
+    "branches": [{ "hops": 0, "points": [], "observer": { "name": "Example", "lat": 56.0, "lon": 10.0 } }]
+  }
+}
+```
+
+`status` is `archived` (saved route geometry), `live` (currently available
+observations), `initializing` (board not published yet), or `unavailable`.
+`capturedAt` is the archive capture time, not a radio transmission timestamp.
+Unavailable responses omit `path` and include a `reason`: expired raw data
+before capture, no coordinates, privacy filtering, or archive size limits
+(`raw_data_expired_before_capture`, `no_coordinates`, `privacy_filtered`,
+`archive_too_large`). `record_evidence_unavailable` means current observations
+no longer reproduce the saved record and no matching archive exists; a
+smaller live map is not substituted. Invalid slots return 400; superseded slot/hash pairs
+return 404. A visibility lookup failure returns 500 rather than exposing data.
+
+The existing ping history sidecar stores at most ten record-slot paths, each
+limited to 256 KiB, 128 branches and 4,096 points (including `first`). Paths
+are saved atomically with record changes and restored after restart. Old
+records whose observations were already pruned cannot be reconstructed.
+Superseded records are not a permanent path archive. Packet retention and the
+main database schema are unchanged.
+
+The sidecar's additive v3 migration also adds a nullable distance-origin
+pubkey, without scanning existing rows. This keeps historical distance
+evidence separate from current first-hearer leaderboard credit. Missing
+GPS, including fallback to an IATA airport, cannot lower an established
+distance; genuine corrections with both historical endpoints positioned are
+still allowed.
+
+Archived and live paths both apply the current node/observer blacklists and
+hidden-name prefixes, including saved names and current/inactive names.
+Hidden branches are omitted entirely; hidden first observations and their
+relative measurements are removed. Approximate neighbor-centroid positions
+are omitted when a visibility policy is active because the path format does
+not identify their contributors. Touched areas are recomputed from visible
+positions and current area configuration. Existing general packet-path
+endpoints are unchanged.
+
 ## Conventions
 
 ### Types
@@ -100,7 +184,10 @@ They return `total` (the unfiltered/filtered count before pagination).
 ```
 
 - `400` — Bad request (missing/invalid params)
-- `404` — Resource not found
+- `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
+- `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
+
+`HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
 
 ---
 
@@ -468,10 +555,10 @@ Node detail page data.
 
 | Param     | Type   | Description |
 |-----------|--------|-------------|
-| `include` | string | Opt-in extras, comma-separated (may also repeat). `advertRoutes` adds `recentAdvertsByRoute`, `advertCounts` and `route_class` on the `recentAdverts` ADVERT rows (see [Advert route classes](#advert-route-classes)). Unknown values are ignored. |
+| `include` | string | Opt-in extras, comma-separated (may also repeat). `advertRoutes` adds `recentAdvertsByRoute`, `advertCounts`, `advertIntervals` and `route_class` on the `recentAdverts` ADVERT rows (see [Advert route classes](#advert-route-classes) and [Estimated advert intervals](#estimated-advert-intervals)). Unknown values are ignored. |
 
 Without `include=advertRoutes` the response is exactly the pre-#2073 one:
-no `recentAdvertsByRoute`, no `advertCounts`, no `route_class`. The breakdown
+no `recentAdvertsByRoute`, no `advertCounts`, no `advertIntervals`, no `route_class`. The breakdown
 scans all of the node's ADVERT rows, so only the node page (full view and
 side panel) asks for it; the packets, live, channels and route views and the
 claimed-nodes lookups do not.
@@ -509,7 +596,27 @@ claimed-nodes lookups do not.
     "7d":  { "flood": number, "zero_hop": number, "mixed": number, "unknown": number },
     "truncated": boolean,     // more adverts than the 50,000-row cap in the 7d floor
     "route_mask_backfill": { "status": "pending" | "backfilling" | "complete", "remaining": number | null }
+  },
+  "advertIntervals": {        // include=advertRoutes only; absent when the identity is hidden
+    "window": 20,             // most adverts per class considered
+    "flood":    AdvertIntervalEstimate,
+    "zero_hop": AdvertIntervalEstimate
   }
+}
+```
+
+Where `AdvertIntervalEstimate` is:
+
+```jsonc
+{
+  "interval_s":     number | null,  // estimate in seconds, snapped when "snapped"; null when confidence is none
+  "raw_interval_s": number | null,  // the median before snapping
+  "snapped":        boolean,
+  "samples":        number,         // adverts used (after a raised interval: those since the change)
+  "gaps_used":      number,         // gaps between them that fit 1-4x the interval
+  "confidence":     "high" | "medium" | "low" | "none",
+  "status":         "estimated" | "none_observed" | "too_few" | "irregular",
+  "last_advert":    string (ISO) | null  // first_seen of the newest advert in the class
 }
 ```
 
@@ -557,6 +664,77 @@ whether that fallback is still in use (anything but `complete`: provisional).
   is never cached: it is counted on every request (a request that scanned
   the node for the breakdown itself takes the identical number from that
   scan).
+
+#### Estimated advert intervals
+
+`advertIntervals` (#245) estimates how often the node sends flood and
+zero-hop adverts, from the gaps between the adverts listed in
+`recentAdvertsByRoute.flood` and `.zero_hop` (so at most 20 per class, and no
+extra query). Mixed and unknown adverts are not used.
+
+The firmware settings it maps to (MeshCore `src/helpers/CommonCLI.cpp`):
+
+| Class | Setting | Allowed values | Default |
+|-------|---------|----------------|---------|
+| `flood` | `flood.advert.interval` (hours) | 0 = off, 3–168 | 47 h on repeaters and room servers, off on sensors |
+| `zero_hop` | `advert.interval` (minutes, stored / 2) | 0 = off, 60–240, even minutes | 2 min on an untouched new install, off after the first saved setting |
+
+- **Gaps.** A gap is taken from the adverts' own (sender) timestamps
+  when both are plausible: not ahead of `first_seen` by more than 10 min,
+  positive, and within max(10 min, 10 %) of the `first_seen` gap. Otherwise
+  it is taken from `first_seen`. A sender clock that is wrong by a steady
+  offset is still used; a jump or reset is not.
+- **The interval.** It must be seen directly, within 10 %, in at least two
+  gaps and a quarter of them. It must be an interval the class's timer can
+  run at, within 10 %: flood 3 h or more; zero-hop the 2 min new-install
+  default or 60 min or more (so manual `advert.zerohop` every 10–30 min is
+  irregular). Of those candidates, the one that explains the most gaps as
+  1–4× itself wins.
+  - A gap of k× the interval counts as k−1 missed adverts.
+  - Shorter gaps are dropped and count neither way: manual adverts and
+    reboots.
+  - Longer gaps that are no multiple are *irregular* and lower the
+    confidence. One is the zero-hop gap across a flood advert: the flood
+    advert re-arms the zero-hop timer, so that gap is between one and two
+    zero-hop intervals.
+- **A raised interval.** A new interval of 2–4× the old one fits every new
+  gap as missed adverts of the old one. When the newest 3 gaps that fit the
+  interval are all the same multiple k > 1, that is read as a raised
+  setting: the estimate is redone on the adverts since the newest gap at the
+  old interval, and `samples` counts those. Two in a row, or different
+  multiples, stay missed adverts. A lowered interval needs no special case:
+  the new one explains the old gaps as multiples once it is seen in a
+  quarter of the gaps.
+- **The value.** It is the median of gap/k over the fitting gaps (`raw_interval_s`).
+  It is snapped to the nearest settable value when it lies within 10 % of
+  the settable range (`snapped`).
+- **Confidence.**
+  - `high`: ≥ 6 fitting gaps, and ≥ 75 % of the gaps that are not short fit.
+  - `medium`: ≥ 3 fitting gaps and ≥ 50 %.
+  - `low`: anything less.
+  - `none`: fewer than 3 adverts, or no interval seen twice. `interval_s`
+    is then `null`.
+- **Status.** `estimated` when `interval_s` is set, `none_observed` with no
+  adverts of the class, `too_few` under 3 adverts, `irregular` otherwise.
+  The UI words the row from it.
+- **Known limitation: sparse coverage.** When the interval itself is never
+  heard twice in a row (a distant node heard every second or third time),
+  it is no candidate, and a multiple of it is reported: a 47 h flood heard
+  94 h and 141 h apart reads as 94 h or 141 h at medium confidence.
+- **Known trade-off: false change.** The raised-interval rule can read an
+  unchanged interval as raised. When the newest 3 heard gaps are all the
+  same multiple k (every 2nd or 3rd advert lost), the result is k× at
+  medium confidence on 4 adverts: 60 min reads as 120 min, 47 h as 94 h,
+  and 120 min with 3× gaps as 360 min. Gaps that fit no multiple (an
+  outage over 4×, a reboot advert between the 2× gaps) do not break the
+  run. The next gap heard at the interval itself does, and the estimate
+  returns to the interval. The opposite choice kept a raised interval at the
+  old value, at high confidence, for weeks (review F1 on #247).
+- **No zero-hop adverts.** A zero-hop advert is only recorded when an
+  observer hears the node directly. "None observed" can therefore mean that
+  the interval is 0 (off), or that no observer is in direct range.
+- **Visibility and caching.** The field is cached and hidden together with
+  `recentAdvertsByRoute`.
 
 ### Response `404`
 
@@ -1095,48 +1273,6 @@ Single packet detail with byte breakdown and observations.
 
 ---
 
-## POST /api/packets
-
-Ingest a raw packet. Requires API key.
-
-### Headers
-
-- `X-API-Key: <key>` (required if `config.apiKey` is set)
-
-### Request Body
-
-```jsonc
-{
-  "hex":      string,        // required — raw hex-encoded packet
-  "observer": string | null, // observer ID
-  "snr":      number | null,
-  "rssi":     number | null,
-  "region":   string | null, // IATA code
-  "hash":     string | null  // pre-computed content hash
-}
-```
-
-### Response `200`
-
-```jsonc
-{
-  "id":      number,         // packet/observation ID
-  "decoded": {               // full decode result
-    "header":  DecodedHeader,
-    "path":    DecodedPath,
-    "payload": object
-  }
-}
-```
-
-### Response `400`
-
-```json
-{ "error": "hex is required" }
-```
-
----
-
 ## POST /api/decode
 
 Decode a raw packet without storing it.
@@ -1298,9 +1434,59 @@ List decoded channels with message counts.
   // before they carry traffic. Omitted when there are none. hash == name.
   "approvedChannels"?: [
     { "name": string, "hash": string }
-  ]
+  ],
+  // Channels with stored messages left out of `channels` because their
+  // proposal is not approved (see below). Omitted when none.
+  "hiddenChannels"?: string[]
 }
 ```
+
+**Revoked channels are left out of `channels`.** A channel with stored messages
+whose shared-channel proposal is **not approved** — revoked (see
+[revoke](#post-apiadminchannel-proposalsidrevoke)), suggested again and
+pending, or that re-suggestion rejected — does not appear in the list. Only
+approving the proposal lists it again, with its history. Such a name has stored
+messages only because it was decrypted earlier (approved, or through the
+config), so a pending or rejected proposal never hides a channel that was never
+decrypted. The exception is a name the ingestor also decrypts through its
+built-in/config list (built-in keys, rainbow table, `hashChannels`,
+`channelKeys`): that traffic keeps being decrypted, so such a channel is never
+hidden. When the ingestor's `builtin-channels.json` is missing or unreadable,
+nothing is hidden. Nothing is deleted: `GET /api/channels/:hash/messages` still
+returns the history of a hidden channel.
+
+`hiddenChannels` (`string[]`, omitted when empty) names the channels that were
+left out this way. The Channels page uses it so a live WebSocket packet for a
+stored message does not create the list row again. It only names channels that
+have stored messages, so an unreviewed suggestion is never published here.
+
+`hiddenChannels` is global and not filtered by `region`: a region request
+returns the same set, and another open tab keeps the set it last loaded —
+including after a re-approval, where live messages do not re-create the row in
+that tab until its list reloads.
+
+The decision is read once per 10 s snapshot (the one behind `approvedChannels`,
+dropped early when an approve or revoke result is read), per channel that has
+stored messages, so there is no per-request query of the proposals table and no
+row cap. Proposals that are not approved are removed by retention
+(`channelProposals.retentionDays` after the review); a hidden channel whose
+messages are still stored then appears again.
+
+`GET /api/analytics/channels` is not filtered: it still lists revoked channels
+with their message and sender counts (no message text). Hiding is a list-level
+measure, not a confidentiality control: the history stays readable by name.
+
+**Known limit: a suggestion can hide a name no administrator acted on.** The
+rule is "not approved", not "was approved before", so a channel whose stored
+messages were decrypted through the config, and whose name the ingestor no
+longer decrypts (removed from `hashChannels`/`channelKeys`, or past the
+4096-name cap of `builtin-channels.json`), is left out of the list while a
+suggestion for that name is pending. Distinguishing the two would need a
+history marker that survives a re-suggestion — `reviewed_at` is reset when a
+revoked proposal is suggested again, which is what makes a resubmission
+idempotent — so the trade-off is kept: it is list-level only, the history stays
+readable, a name the ingestor still decrypts is never hidden, the suggestion is
+in the administrator's pending queue, and approving it lists the channel again.
 
 ---
 
@@ -1337,7 +1523,8 @@ Messages for a specific channel.
       "observers":        [string],         // observer names
       "hops":             number,
       "snr":              number | null,
-      "observedPathHashSizes": [number]     // sorted unique relayed path widths (1–3)
+      "observedPathHashSizes": [number],    // sorted unique relayed path widths (1–3)
+      "senderPathHashSize": number          // 0 if unknown, otherwise header width (1–3)
     }
   ],
   "total": number                           // total deduplicated messages
@@ -1350,6 +1537,12 @@ zero-hop copies provide no hash-size evidence and do not add a value. More than
 one value means different widths were observed for the same deduplicated
 message; the field describes those observations, not the sender's permanent
 configuration.
+
+`senderPathHashSize` is read from the transmission's raw frame header, not
+inferred from its observations. A flood can encode this width even when no
+relay has forwarded it. A direct zero-hop marker, unsupported payload header,
+or malformed frame yields 0 (unknown). This value describes that particular
+frame, not the sender's permanent configuration.
 
 ---
 
@@ -1371,7 +1564,7 @@ A proposal:
 
 In `GET /api/admin/channel-proposals` each proposal may also carry `"builtIn": true` (see [Built-in names](#built-in-names)).
 
-State machine: `pending` → `approved` or `rejected` (admin decision); `approved` → `revoked` (admin revoke, see below); `revoked` → `pending` by suggesting the same name again (never auto-approved — see POST /api/channel-proposals). `rejected` is terminal: suggesting a rejected name again reports the earlier rejection and does not reopen it, until retention deletes the rejected row `channelProposals.retentionDays` (default 30) days after the review; from then on the name can be suggested afresh. This keeps a rejected name from being pushed back into the review queue over and over.
+State machine: a new name becomes `pending` by default, or `approved` immediately if `channelProposals.autoApprove` is enabled. An administrator can move `pending` → `approved` or `rejected`; `approved` → `revoked` (see below); `revoked` → `pending` by suggesting the same name again (never auto-approved). An existing `pending` or `rejected` name is never auto-approved by another suggestion. `rejected` is terminal: suggesting a rejected name again reports the earlier rejection and does not reopen it, until retention deletes the rejected row `channelProposals.retentionDays` (default 30) days after the review; from then on the name can be suggested afresh. This keeps a rejected name from being pushed back into the review queue over and over while its row is retained.
 
 ### Built-in names
 
@@ -1415,8 +1608,17 @@ A duplicate suggestion reports the existing proposal and its status (for a rejec
 Requires `X-API-Key`. Optional `?status=pending|approved|rejected|revoked`. Newest first, bounded.
 
 ```jsonc
-{ "proposals": [Proposal & { "builtIn"?: true }], "enabled": boolean }
+{ "proposals": [Proposal & { "builtIn"?: true, "nearDuplicateOf"?: string[] }], "enabled": boolean }
 ```
+
+**Letter case in names.** A hashtag channel's key is the first 16 bytes of
+`sha256("#name")` of the exact name (MeshCore `docs/companion_protocol.md`, "Hashtag
+Channels"; the meshcore-open app's `derivePskFromHashtag` does not change case),
+so `#HelloWorld` and `#helloworld` are different channels with different keys.
+They are therefore separate proposals and are never merged. `nearDuplicateOf`
+lists the other proposal names (any status, also outside the `status` filter)
+and built-in names that differ from this one only by letter case, sorted; it is
+omitted when there are none. It is a hint for the administrator.
 
 ## POST /api/admin/channel-proposals/:id/approve and /reject
 
@@ -1441,7 +1643,7 @@ Missing or wrong key: `401`. No key configured, or a weak one: `403`.
 
 There is a real race between the `409` check and the ingestor actually applying the command: another admin could approve, reject or revoke the same proposal in between. The ingestor re-validates the status from scratch when it applies the command and is the true source of truth; the synchronous `409` here is only a best-effort fast-fail for the common case, not a guarantee. When the race is lost, the request ends with status `error` and an error such as `suggestion is not approved (it is pending)`.
 
-**Historical messages are not affected.** Revoking a channel only removes its decryption key going forward — messages the ingestor already decoded and stored while the channel was approved stay exactly as they are and remain visible on the Channels page. There is no mechanism (and none is planned as part of this) to hide or delete previously-decoded messages when a channel is revoked.
+**Historical messages are kept, the channel leaves the list.** Revoking a channel removes its decryption key going forward and takes the channel out of `GET /api/channels` (unless the name is a [built-in name](#built-in-names), which keeps decrypting and is never hidden). Messages the ingestor already decoded and stored while the channel was approved are **not deleted**: `GET /api/channels/:hash/messages` still returns them, and the channel returns to the list with its history if the suggestion is approved again (suggest the name again, then approve). The server stays read-only: it only filters the list. The channel stays hidden while the name is re-suggested and pending, and after the administrator rejects that re-suggestion; to hide it again after an approval, revoke it again. A rejected re-suggestion therefore does not bring the channel back.
 
 **Retention.** A revoked proposal's row is not deleted at revoke time — only its status changes, keeping `reviewedAt` as the audit timestamp of when it was revoked. It is removed later by the same retention sweep that prunes rejected proposals, once `reviewedAt` is older than `channelProposals.retentionDays` (see [Configuration](user-guide/configuration.md#shared-channel-suggestions)). Approved rows are still never pruned.
 
@@ -2169,7 +2371,8 @@ Client-side configuration values.
   "wsReconnectMs":      number | null,
   "cacheInvalidateMs":  number | null,
   "externalUrls":       object | null,
-  "propagationBufferMs": number          // default: 5000
+  "propagationBufferMs": number,         // default: 5000
+  "estimatedPositions": { "enabled": boolean } // default: true; operator policy
 }
 ```
 

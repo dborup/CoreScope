@@ -10,14 +10,23 @@ const assert = require('assert');
 function makePanel(id) {
   const listeners = {};
   const style = {};
-  const dataset = {};
+  let attrs = {};
+  // Like a real DOMStringMap, dataset is a live view of the data-*
+  // attributes: removeAttribute('data-dragged') clears dataset.dragged
+  // (#1567 switched clearPanel to removeAttribute).
+  const attrName = (prop) => 'data-' + String(prop).replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+  const dataset = new Proxy({}, {
+    get(_, prop) { return typeof prop === 'string' ? attrs[attrName(prop)] : undefined; },
+    set(_, prop, v) { attrs[attrName(prop)] = String(v); return true; },
+    deleteProperty(_, prop) { delete attrs[attrName(prop)]; return true; },
+    has(_, prop) { return attrName(prop) in attrs; }
+  });
   const classList = {
     _set: new Set(),
     add(c) { this._set.add(c); },
     remove(c) { this._set.delete(c); },
     contains(c) { return this._set.has(c); }
   };
-  let attrs = {};
   const header = {
     _listeners: {},
     addEventListener(ev, fn) {

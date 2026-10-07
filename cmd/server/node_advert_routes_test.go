@@ -472,7 +472,7 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 		srv, router := narServer(t)
 		srv.cfg.SetNodeBlacklist([]string{narNode})
 		_, raw := narGetNode(t, router, narNode+narIncludeQuery, 404)
-		if strings.Contains(raw, "advertCounts") || strings.Contains(raw, "h-flood") {
+		if strings.Contains(raw, "advertCounts") || strings.Contains(raw, "advertIntervals") || strings.Contains(raw, "h-flood") {
 			t.Fatalf("blacklisted node leaked: %s", raw)
 		}
 	})
@@ -488,7 +488,8 @@ func TestNodeDetail_AdvertRouteFieldsPrivacy(t *testing.T) {
 	// recentAdverts rows of a hidden identity.
 	leaked := func(body narResponse, raw string) bool {
 		return body.ByRoute != nil || body.Counts != nil || strings.Contains(raw, "advertCounts") ||
-			strings.Contains(raw, "recentAdvertsByRoute") || strings.Contains(raw, "route_class")
+			strings.Contains(raw, "recentAdvertsByRoute") || strings.Contains(raw, "route_class") ||
+			strings.Contains(raw, "advertIntervals")
 	}
 	t.Run("observer blacklist", func(t *testing.T) {
 		srv, router := narServer(t)
@@ -569,6 +570,8 @@ func TestOpenAPI_NodeAdvertRouteSchemas(t *testing.T) {
 	check("NodeAdvertsByRoute", NodeAdvertsByRoute{})
 	check("NodeAdvertCounts", NodeAdvertCounts{})
 	check("AdvertRouteCounts", AdvertRouteCounts{})
+	check("NodeAdvertIntervals", NodeAdvertIntervals{})
+	check("AdvertIntervalEstimate", AdvertIntervalEstimate{})
 	if _, ok := props("NodeAdvert")["route_class"]; !ok {
 		t.Error("NodeAdvert.route_class is emitted but not documented")
 	}

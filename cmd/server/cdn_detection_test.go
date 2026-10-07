@@ -18,8 +18,6 @@ package main
 //     next.ServeHTTP.
 
 import (
-	"bytes"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,22 +38,21 @@ func resetCDNDetectionOnce() {
 // the middleware did not silently drop the request.
 func runWithCDNMiddleware(t *testing.T, req *http.Request) (string, bool) {
 	t.Helper()
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(prev)
-
 	nextCalled := false
-	h := cdnDetectionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nextCalled = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("middleware must not block request; got status %d", w.Code)
-	}
-	return buf.String(), nextCalled
+	// The capture is locked (#310): goroutines from earlier tests keep
+	// logging into whatever writer is installed.
+	out := captureLog(func() {
+		h := cdnDetectionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			nextCalled = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("middleware must not block request; got status %d", w.Code)
+		}
+	})
+	return out, nextCalled
 }
 
 func TestCDNDetection_LogsOnCFRayHeader(t *testing.T) {
@@ -145,30 +142,29 @@ func TestCDNDetection_LogsWhenCDNHeaderAccompaniesProxyHeaders(t *testing.T) {
 func TestCDNDetection_LogsOnlyOnce(t *testing.T) {
 	resetCDNDetectionOnce()
 
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(prev)
-
 	nextCalled := 0
-	h := cdnDetectionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nextCalled++
-		w.WriteHeader(http.StatusOK)
-	}))
+	// The capture is locked (#310): goroutines from earlier tests keep
+	// logging into whatever writer is installed.
+	out := captureLog(func() {
+		h := cdnDetectionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			nextCalled++
+			w.WriteHeader(http.StatusOK)
+		}))
 
-	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest("GET", "/api/observers", nil)
-		req.Header.Set("CF-Ray", "abc123")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, req)
-	}
+		for i := 0; i < 3; i++ {
+			req := httptest.NewRequest("GET", "/api/observers", nil)
+			req.Header.Set("CF-Ray", "abc123")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+		}
+	})
 
 	if nextCalled != 3 {
 		t.Fatalf("middleware must call next on every request; got %d calls, want 3", nextCalled)
 	}
-	got := strings.Count(buf.String(), "detected request via CDN")
+	got := strings.Count(out, "detected request via CDN")
 	if got != 1 {
-		t.Errorf("expected CDN warning exactly once across multiple requests; got %d in output: %q", got, buf.String())
+		t.Errorf("expected CDN warning exactly once across multiple requests; got %d in output: %q", got, out)
 	}
 }
 
@@ -206,55 +202,39 @@ func TestCDNDetection_RecognizesAllCommonCDNHeaders(t *testing.T) {
 func TestCDNDetectionMiddlewareConcurrentFirstRequestLogsOnce(t *testing.T) {
 	resetCDNDetectionOnce()
 
-	var buf bytes.Buffer
-	var bufMu sync.Mutex
-	prev := log.Writer()
-	// log.Printf can be called concurrently; serialize writes to buf
-	// so we never race the test's own assertion read.
-	log.SetOutput(writerFunc(func(p []byte) (int, error) {
-		bufMu.Lock()
-		defer bufMu.Unlock()
-		return buf.Write(p)
-	}))
-	defer log.SetOutput(prev)
-
 	var nextCalls int64
-	h := cdnDetectionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&nextCalls, 1)
-		w.WriteHeader(http.StatusOK)
-	}))
-
 	const n = 50
-	var wg sync.WaitGroup
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest("GET", "/api/observers", nil)
-			req.Header.Set("CF-Ray", "abc123-LAX")
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
-		}()
-	}
-	wg.Wait()
+	// log.Printf is called concurrently here; the shared capture is locked
+	// (#310), so this no longer needs a buffer and mutex of its own.
+	out := captureLog(func() {
+		h := cdnDetectionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(&nextCalls, 1)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func() {
+				defer wg.Done()
+				req := httptest.NewRequest("GET", "/api/observers", nil)
+				req.Header.Set("CF-Ray", "abc123-LAX")
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, req)
+			}()
+		}
+		wg.Wait()
+	})
 
 	if got := atomic.LoadInt64(&nextCalls); got != n {
 		t.Fatalf("middleware must call next on every concurrent request; got %d, want %d", got, n)
 	}
 
-	bufMu.Lock()
-	out := buf.String()
-	bufMu.Unlock()
 	got := strings.Count(out, "detected request via CDN")
 	if got != 1 {
 		t.Errorf("expected sync.Once to admit exactly ONE warning under %d concurrent first-requests; got %d. Output:\n%s", n, got, out)
 	}
 }
-
-// writerFunc adapts a function to io.Writer.
-type writerFunc func(p []byte) (int, error)
-
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // Round-2 MAJOR finding: sync.Once only short-circuits the log.Printf,
 // not the per-request header scan. firstCDNHeader still iterates 4

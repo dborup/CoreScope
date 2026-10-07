@@ -68,7 +68,7 @@ func scanProposalRow(row *sql.Row) (channelregistry.Proposal, bool, error) {
 	return p, true, nil
 }
 
-// submitChannelProposal stores a new pending proposal, or reports the existing
+// submitChannelProposal stores a new proposal, or reports the existing
 // one for a replayed request or an already-proposed name. A rejected name
 // therefore stays blocked — re-suggesting it reports the rejection — until
 // retention (RetentionDays after the review) deletes the row; that keeps a
@@ -76,8 +76,9 @@ func scanProposalRow(row *sql.Row) (channelregistry.Proposal, bool, error) {
 // A name that was previously approved and then revoked is free to re-propose:
 // the existing row (its id, and so its identity, is kept — UNIQUE(name) means
 // it cannot become a second row) is resurrected to pending rather than left
-// revoked forever or auto-approved.
-func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.Command, maxPending int, nowMs int64) (channelregistry.Proposal, error) {
+// revoked forever or auto-approved. Auto-approval applies only to a new name,
+// atomically with its insertion, so a replay cannot change its status.
+func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.Command, maxPending, maxApproved int, autoApprove bool, nowMs int64) (channelregistry.Proposal, error) {
 	// Never trust the queue file: validate again with the shared rules.
 	name, err := channelregistry.NormalizeName(cmd.Name)
 	if err != nil {
@@ -99,12 +100,14 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 	if found && existing.Status != channelregistry.StatusRevoked {
 		return existing, nil
 	}
-	var pending int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_proposals WHERE status = 'pending'`).Scan(&pending); err != nil {
-		return channelregistry.Proposal{}, err
-	}
-	if pending >= maxPending {
-		return channelregistry.Proposal{}, errTooManyPending
+	if !autoApprove || found {
+		var pending int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_proposals WHERE status = 'pending'`).Scan(&pending); err != nil {
+			return channelregistry.Proposal{}, err
+		}
+		if pending >= maxPending {
+			return channelregistry.Proposal{}, errTooManyPending
+		}
 	}
 	created := cmd.CreatedAt
 	if created <= 0 {
@@ -138,15 +141,28 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 		}
 		return channelregistry.Proposal{ID: existing.ID, Name: name, Status: channelregistry.StatusPending, CreatedAt: created}, nil
 	}
+	status := channelregistry.StatusPending
+	var reviewedAt *int64
+	if autoApprove {
+		var approved int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_proposals WHERE status = 'approved'`).Scan(&approved); err != nil {
+			return channelregistry.Proposal{}, err
+		}
+		if approved >= maxApproved {
+			return channelregistry.Proposal{}, errTooManyApproved
+		}
+		status = channelregistry.StatusApproved
+		reviewedAt = &nowMs
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO channel_proposals (id, name, status, created_at) VALUES (?, ?, 'pending', ?)`,
-		cmd.RequestID, name, created); err != nil {
+		`INSERT INTO channel_proposals (id, name, status, created_at, reviewed_at) VALUES (?, ?, ?, ?, ?)`,
+		cmd.RequestID, name, status, created, reviewedAt); err != nil {
 		return channelregistry.Proposal{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return channelregistry.Proposal{}, err
 	}
-	return channelregistry.Proposal{ID: cmd.RequestID, Name: name, Status: channelregistry.StatusPending, CreatedAt: created}, nil
+	return channelregistry.Proposal{ID: cmd.RequestID, Name: name, Status: status, CreatedAt: created, ReviewedAt: reviewedAt}, nil
 }
 
 // reviewChannelProposal moves a proposal currently in status source to
@@ -218,11 +234,12 @@ func (s *Store) PruneChannelProposals(ctx context.Context, cutoffMs int64) (int6
 
 // channelProposalRunner drains the queue and keeps the live keys in step.
 type channelProposalRunner struct {
-	store  *Store
-	queue  *channelregistry.Queue
-	keys   *hotKeys
-	limits channelregistry.Limits
-	now    func() time.Time
+	store       *Store
+	queue       *channelregistry.Queue
+	keys        *hotKeys
+	limits      channelregistry.Limits
+	autoApprove bool
+	now         func() time.Time
 
 	// publishedBaseGen is the hotKeys base generation last written to the
 	// builtin names file; 0 means never written.
@@ -231,11 +248,12 @@ type channelProposalRunner struct {
 
 func newChannelProposalRunner(store *Store, keys *hotKeys, cfg *channelregistry.Config) *channelProposalRunner {
 	return &channelProposalRunner{
-		store:  store,
-		queue:  channelregistry.NewQueue(channelregistry.QueueDir(store.path)),
-		keys:   keys,
-		limits: cfg.Limits(),
-		now:    time.Now,
+		store:       store,
+		queue:       channelregistry.NewQueue(channelregistry.QueueDir(store.path)),
+		keys:        keys,
+		limits:      cfg.Limits(),
+		autoApprove: cfg.AutoApprovalRequested(),
+		now:         time.Now,
 	}
 }
 
@@ -269,7 +287,7 @@ func (r *channelProposalRunner) RunOnce(ctx context.Context) {
 		res := r.apply(ctx, qc.Command)
 		// Keys first: the row is committed, so the channel is approved even
 		// if writing the result fails below (it is retried next tick).
-		if qc.Command.Op == channelregistry.OpApprove && res.Status == channelregistry.RequestApproved && res.Proposal != nil {
+		if res.Status == channelregistry.RequestApproved && res.Proposal != nil {
 			if r.keys.AddApproved(res.Proposal.Name) > 0 {
 				log.Printf("[channel-proposals] approved %q — added to channel keys", res.Proposal.Name)
 			}
@@ -316,7 +334,7 @@ func (r *channelProposalRunner) apply(ctx context.Context, cmd channelregistry.C
 	)
 	switch cmd.Op {
 	case channelregistry.OpSubmit:
-		p, err = r.store.submitChannelProposal(ctx, cmd, r.limits.MaxPending, nowMs)
+		p, err = r.store.submitChannelProposal(ctx, cmd, r.limits.MaxPending, r.limits.MaxApproved, r.autoApprove, nowMs)
 	case channelregistry.OpApprove:
 		p, err = r.store.reviewChannelProposal(ctx, cmd.ProposalID, channelregistry.StatusPending, channelregistry.StatusApproved, r.limits.MaxApproved, nowMs)
 	case channelregistry.OpReject:

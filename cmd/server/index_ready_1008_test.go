@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -50,16 +51,30 @@ func TestIssue1008_PathHopIndexReadyFalseImmediatelyAfterLoad(t *testing.T) {
 
 // TestIssue1008_HandlerReturns503WhileSubpathIndexLoading asserts the
 // analytics/subpaths handler returns 503 + Retry-After: 5 + a JSON body
-// matching the triage spec while the subpath index is still building.
+// matching the triage spec while the subpath index is still building,
+// and 200 once it is built.
+//
+// The background build of the small fixture used to finish before the
+// request under CPU load, so the 503 was a race the test could lose (#227).
+// subpathBuildGate now holds the build until the 503 has been asserted.
 func TestIssue1008_HandlerReturns503WhileSubpathIndexLoading(t *testing.T) {
 	db := setupRichTestDB(t)
 	defer db.Close()
 	store := NewPacketStore(db, nil)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseBuild := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseBuild) // a failed assertion must not strand the builder
+	building := make(chan struct{})
+	store.subpathBuildGate = func() { close(building); <-release }
 	if err := store.Load(); err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	// Don't wait for the background build — we want to observe the
-	// not-ready window.
+	select {
+	case <-building: // the build has started and is held
+	case <-time.After(5 * time.Second):
+		t.Fatal("background subpath index build never started")
+	}
 	cfg := &Config{}
 	cfg.applyListLimitsDefaults()
 	srv := &Server{store: store, cfg: cfg}
@@ -80,6 +95,17 @@ func TestIssue1008_HandlerReturns503WhileSubpathIndexLoading(t *testing.T) {
 	}
 	if body["error"] != "index loading" {
 		t.Errorf(`body["error"] = %v, want "index loading"`, body["error"])
+	}
+
+	// Released, the build completes and the same request is served.
+	releaseBuild()
+	if !store.WaitIndexesReady(5 * time.Second) {
+		t.Fatal("indexes not ready within 5s of releasing the build")
+	}
+	rec = httptest.NewRecorder()
+	srv.handleAnalyticsSubpaths(rec, httptest.NewRequest("GET", "/api/analytics/subpaths?minLen=2&maxLen=4&limit=10", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status after the build = %d, want 200", rec.Code)
 	}
 }
 

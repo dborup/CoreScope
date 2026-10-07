@@ -17,8 +17,18 @@ import (
 // status registry, the stats file (which feeds the public /api/mqtt/status
 // and /api/healthz) or the client ID, whatever form the URL takes.
 
+// Password and query parts of the brokers below. They are not plain
+// numbers or short words, so a timestamp, counter or size in a checked
+// string cannot contain one by chance (#250: a stats-file number that
+// contained "1234" failed TestStatsFileHasNoCredentials_118).
+const (
+	credPassHead = "pw2024pw" // a password cut at '/'
+	credPassCut  = "zq1234zq" // a password cut at '?' or '#'
+	credQuery    = "qxabcxq"  // the rest after '?' or '#', and a token
+)
+
 // secretParts118 are the credential parts used in the brokers below.
-var secretParts118 = []string{credUser, credPass, "tok3n", "2024", "1234", "abc", "p%zz"}
+var secretParts118 = []string{credUser, credPass, "tok3n", credPassHead, credPassCut, credQuery, "p%zz"}
 
 func assertNoSecretParts118(t *testing.T, what, s string) {
 	t.Helper()
@@ -33,12 +43,12 @@ func assertNoSecretParts118(t *testing.T, what, s string) {
 // url.Parse, so the password (or its first part) used to be logged.
 func TestBrokerForLogAmbiguousPassword_118(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
-		{"tcp://" + credUser + ":2024/" + credPass + "@host:1883", "tcp://****@host:1883"},
-		{"tcp://" + credUser + ":1234?abc@host", "tcp://****@host"},
-		{"tcp://" + credUser + ":1234#abc@host", "tcp://****@host"},
+		{"tcp://" + credUser + ":" + credPassHead + "/" + credPass + "@host:1883", "tcp://****@host:1883"},
+		{"tcp://" + credUser + ":" + credPassCut + "?" + credQuery + "@host", "tcp://****@host"},
+		{"tcp://" + credUser + ":" + credPassCut + "#" + credQuery + "@host", "tcp://****@host"},
 		{credUser + ":" + credPass + "@host:1883", "tcp://****@host:1883"},
 		{"tcp://tok3n@host", "tcp://****@host"},
-		{"wss://host/mqtt?token=abc", "wss://host/mqtt"},
+		{"wss://host/mqtt?token=" + credQuery, "wss://host/mqtt"},
 		{"tcp://" + credUser + ":p%zz@host", "tcp://****@host"},
 	} {
 		got := brokerForLog(c.in)
@@ -52,7 +62,7 @@ func TestBrokerForLogAmbiguousPassword_118(t *testing.T) {
 // The generated client ID is logged ("as client …"), so its host part must
 // come from the stripped broker, not from url.Parse's idea of the host.
 func TestMQTTClientIDBaseHasNoCredentials_118(t *testing.T) {
-	id := mqttClientID(MQTTSource{Broker: "tcp://" + credUser + ":2024/" + credPass + "@host:1883"})
+	id := mqttClientID(MQTTSource{Broker: "tcp://" + credUser + ":" + credPassHead + "/" + credPass + "@host:1883"})
 	if !regexp.MustCompile(`^corescope-host-[0-9a-f]{8}$`).MatchString(id) {
 		t.Fatalf("client id %q", id)
 	}
@@ -103,8 +113,8 @@ func TestMQTTSourceTagsAreUnique_118(t *testing.T) {
 func TestSourceStatusHoldsNoCredentials_118(t *testing.T) {
 	resetSourceStatusRegistry()
 	t.Cleanup(resetSourceStatusRegistry)
-	s := RegisterSourceStatus("t", "tcp://"+credUser+":1234?abc@host")
-	s.MarkDisconnect(time.Now(), errors.New(`dial "wss://`+credUser+`:`+credPass+`@host/mqtt?token=abc": refused`))
+	s := RegisterSourceStatus("t", "tcp://"+credUser+":"+credPassCut+"?"+credQuery+"@host")
+	s.MarkDisconnect(time.Now(), errors.New(`dial "wss://`+credUser+`:`+credPass+`@host/mqtt?token=`+credQuery+`": refused`))
 	snap := s.snapshot(time.Now())
 	b, _ := json.Marshal(snap)
 	assertNoSecretParts118(t, "status snapshot", string(b))
@@ -135,7 +145,8 @@ func TestMQTTSourceWiringLeaksNoCredentials_118(t *testing.T) {
 			buf := captureLog118(t)
 			src := MQTTSource{Broker: broker, Topics: []string{"meshcore/#"}}
 			tag := mqttSourceTags([]MQTTSource{src})[0]
-			opts, _, liveness := prepareMQTTSource(src, tag)
+			setup := prepareMQTTSource(src, tag)
+			opts, liveness := setup.opts, setup.liveness
 			opts.SetConnectTimeout(time.Second).
 				SetMaxReconnectInterval(100 * time.Millisecond).
 				SetConnectRetryInterval(50 * time.Millisecond)
@@ -200,7 +211,8 @@ func TestStatsFileHasNoCredentials_118(t *testing.T) {
 		{Broker: "tcp://tok3n@host:1883"},
 	}
 	for i, tag := range mqttSourceTags(sources) {
-		_, status, liveness := prepareMQTTSource(sources[i], tag)
+		setup := prepareMQTTSource(sources[i], tag)
+		status, liveness := setup.status, setup.liveness
 		status.MarkDisconnect(time.Now(), errors.New("connect "+sources[i].Broker+" refused"))
 		registerLivenessOrSkip(liveness)
 	}

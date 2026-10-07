@@ -67,8 +67,8 @@ type pingScoreHistoryEngineConfig struct {
 	// meaning here.
 	RetentionDuration time.Duration
 
-	// MaxEdgeKm is threaded through to GetPacketPathsBulk's geo-sanity
-	// filter, matching GetPacketPath's/nearestPositionedNeighbor's own
+	// MaxEdgeKm is threaded through to getPacketPathsBulk's geo-sanity
+	// filter, matching getPacketPath's/nearestPositionedNeighbor's own
 	// existing parameter and its own documented convention: <=0
 	// deliberately DISABLES the geo-sanity filter (not an error) -- so
 	// unlike the other three fields, a non-positive MaxEdgeKm is NOT
@@ -95,11 +95,12 @@ func defaultPingScoreHistoryEngineConfig() pingScoreHistoryEngineConfig {
 // and PingScoreHistoryStore's own documented contracts (see their doc
 // comments). Not registered on *Server or driven from main.go yet.
 type pingScoreHistoryEngine struct {
-	server *Server
-	store  *PingScoreHistoryStore
-	index  *pingScoreHistoryIndex
-	now    func() time.Time
-	config pingScoreHistoryEngineConfig
+	server       *Server
+	store        *PingScoreHistoryStore
+	index        *pingScoreHistoryIndex
+	now          func() time.Time
+	config       pingScoreHistoryEngineConfig
+	pathArchives map[string]PingScorePathArchive
 }
 
 // newPingScoreHistoryEngine constructs an engine against an ALREADY-OPEN
@@ -181,13 +182,18 @@ func newPingScoreHistoryEngine(server *Server, store *PingScoreHistoryStore, now
 	if _, _, err := store.HistoryInitializedAt(); err != nil {
 		return nil, fmt.Errorf("ping score history engine: init: load history-initialized marker: %w", err)
 	}
+	archives, err := store.LoadPathArchives()
+	if err != nil {
+		return nil, fmt.Errorf("ping score history engine: init: load path archives: %w", err)
+	}
 
 	return &pingScoreHistoryEngine{
-		server: server,
-		store:  store,
-		index:  newPingScoreHistoryIndex(entries),
-		now:    now,
-		config: config,
+		server:       server,
+		store:        store,
+		index:        newPingScoreHistoryIndex(entries),
+		now:          now,
+		config:       config,
+		pathArchives: archives,
 	}, nil
 }
 
@@ -227,7 +233,7 @@ func needsFingerprintCheck(e PingScoreHistoryEntry) bool {
 //  2. plan reconciliation (planPingScoreHistoryReconcile)
 //  3. select fingerprint- and deep-sweep candidates
 //  4. observationFingerprintsBulk
-//  5. GetPacketPathsBulk
+//  5. getPacketPathsBulk
 //  6. buildPingScoreFromPath
 //  7. merge into a cloned candidate index
 //  8. history snapshot built + names enriched (buildPingScoresSnapshotFromHistory)
@@ -324,7 +330,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 			// unreconstructability") -- an Unscorable entry that has JUST
 			// crossed retention, or crossed it long ago but was never
 			// actually re-attempted, REMAINS eligible below and gets
-			// exactly one real GetPacketPathsBulk-backed attempt; only
+			// exactly one real getPacketPathsBulk-backed attempt; only
 			// THAT attempt's outcome (via maybeMarkPermanentlyUnreconstructable,
 			// called from the deep-sweep merge loop) can ever set this
 			// flag. It still settles normally (this check runs strictly
@@ -394,7 +400,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		}
 	}
 
-	// --- 5. GetPacketPathsBulk: the union of every hash needing a real
+	// --- 5. getPacketPathsBulk: the union of every hash needing a real
 	// path recompute this cycle (reconciliation + fingerprint-changed +
 	// deep-sweep) ---
 	txIDsNeedingPath := map[int64]bool{}
@@ -418,12 +424,12 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	}
 	var pathResults map[string]*PacketPathResponse
 	if len(hashesList) > 0 {
-		pathResults, err = e.server.db.GetPacketPathsBulk(hashesList, e.config.MaxEdgeKm)
+		pathResults, err = e.server.db.getPacketPathsBulk(hashesList, e.config.MaxEdgeKm, e.server.estimatedPositionsEnabled())
 		if err != nil {
 			return nil, fmt.Errorf("ping score history cycle: bulk path query: %w", err)
 		}
 	}
-	// pathResultFor normalizes the lookup key ONLY -- GetPacketPathsBulk's
+	// pathResultFor normalizes the lookup key ONLY -- getPacketPathsBulk's
 	// result map is always keyed by the lowercased hash (see its own
 	// implementation), but ping_triggers.hash (and therefore trigger.hash)
 	// may not be. This must NEVER be used to change what gets PERSISTED:
@@ -462,6 +468,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		trigger := triggerByID[txID]
 		existing, _ := candidateIndex.Get(txID)
 		score := e.server.buildPingScoreFromPath(trigger, pathResultFor(trigger.hash))
+		score = preservePingDistanceWithoutGPS(existing, score, pathResultFor(trigger.hash))
 		state := PingScoreHistoryEntryState{
 			StableSince: nowStr, Settled: false,
 			DataPruned: existing.DataPruned, LastDeepSweptAt: existing.LastDeepSweptAt,
@@ -520,7 +527,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	// Settled entry's fingerprint at all, so this is precisely where such
 	// a change becomes visible again. LastDeepSweptAt is updated
 	// unconditionally for every entry in this batch once the shared
-	// GetPacketPathsBulk call above has succeeded (Cycle is all-or-nothing,
+	// getPacketPathsBulk call above has succeeded (Cycle is all-or-nothing,
 	// so reaching this loop at all means it did) -- an empty per-hash
 	// result for one entry doesn't mean the SWEEP failed, only that this
 	// particular attempt found nothing; the rotation must still advance so
@@ -537,6 +544,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		trigger := triggerByID[entry.TxID]
 		existing, _ := candidateIndex.Get(entry.TxID)
 		score := e.server.buildPingScoreFromPath(trigger, pathResultFor(trigger.hash))
+		score = preservePingDistanceWithoutGPS(existing, score, pathResultFor(trigger.hash))
 		fp := fingerprintOf(entry.TxID)
 		fingerprintChanged := fp.Count != existing.FingerprintCount || fp.MaxID != existing.FingerprintMaxID
 
@@ -564,6 +572,15 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ping score history cycle: build snapshot: %w", err)
 	}
+	attempted := make(map[string]bool, len(hashesList))
+	for _, h := range hashesList {
+		attempted[strings.ToLower(h)] = true
+	}
+	archives, archivesChanged, err := e.pathsForRecords(snapshot, pathResults, attempted, now)
+	if err != nil {
+		return nil, fmt.Errorf("ping score history cycle: %w", err)
+	}
+	snapshot.pathArchives = archives
 
 	// Bootstrap-integrity: computed ONLY on the genuine first bootstrap
 	// (isGenuineBootstrap, captured at the very top of this function,
@@ -625,7 +642,11 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 
 	// --- 9. UpsertAndDelete (via UpsertDeleteAndMetadata) in one
 	// persistent transaction ---
-	if err := e.store.UpsertDeleteAndMetadata(upserts, plan.ToDelete, integrity, gap, historyInitializedAt); err != nil {
+	var archiveWrites map[string]PingScorePathArchive
+	if archivesChanged {
+		archiveWrites = archives
+	}
+	if err := e.store.upsertDeleteMetadataAndArchives(upserts, plan.ToDelete, integrity, gap, historyInitializedAt, archiveWrites); err != nil {
 		return nil, fmt.Errorf("ping score history cycle: persist: %w", err)
 	}
 
@@ -634,6 +655,7 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 		candidateIndex.Delete(txID)
 	}
 	e.index = candidateIndex
+	e.pathArchives = archives
 
 	// --- 11. return the candidate snapshot ---
 	return snapshot, nil
@@ -652,8 +674,8 @@ func (e *pingScoreHistoryEngine) Cycle() (*PingScoresSnapshot, error) {
 //     Cycle's own snapshot-build step already does), so display names on
 //     the returned records/leaderboards are resolved fresh, not frozen.
 //
-// Explicitly NOT done here: no per-trigger GetPacketPath calls, no
-// GetPacketPathsBulk/path-recompute of any kind, no reconciliation
+// Explicitly NOT done here: no per-trigger getPacketPath calls, no
+// getPacketPathsBulk/path-recompute of any kind, no reconciliation
 // (planPingScoreHistoryReconcile), no fingerprint or deep-sweep work, and
 // no persistence (no store write of any kind). This makes QuickSnapshot
 // CHEAPER than a full Cycle -- it skips every DB round-trip that scales
@@ -698,6 +720,12 @@ func (e *pingScoreHistoryEngine) QuickSnapshot() (*PingScoresSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ping score history quick snapshot: %w", err)
 	}
+	snapshot.pathArchives = make(map[string]PingScorePathArchive)
+	for key, score := range pingScoreRecordSlots(snapshot) {
+		if a, ok := e.pathArchives[key]; ok && a.Hash == score.Hash && a.Timestamp == score.Timestamp && pingPathMatchesRecord(key, score, &a.Path) {
+			snapshot.pathArchives[key] = a
+		}
+	}
 	return snapshot, nil
 }
 
@@ -708,7 +736,7 @@ func (e *pingScoreHistoryEngine) QuickSnapshot() (*PingScoresSnapshot, error) {
 // review of a1c3022d: "alder alene er ikke bevis for permanent
 // unreconstructability" -- age alone is not proof of permanent
 // unreconstructability). Requires ALL of:
-//   - score == nil: THIS cycle's real GetPacketPathsBulk-backed recompute
+//   - score == nil: THIS cycle's real getPacketPathsBulk-backed recompute
 //     attempt (not a prediction) found nothing.
 //   - existingEntry.Unscorable == true (the PRE-cycle state, before this
 //     merge): this tx_id has never had a successful computation, ever --

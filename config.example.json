@@ -13,8 +13,9 @@
     "nodeDays": 7,
     "observerDays": 14,
     "packetDays": 30,
+    "channelDays": 0,
     "clientRxDays": 30,
-    "_comment": "nodeDays: nodes not seen in N days moved to inactive_nodes (default 7). observerDays: observers not sending data in N days are removed (-1 = keep forever, default 14). packetDays: transmissions older than N days are deleted (0 = disabled). clientRxDays: mobile client-RX coverage rows (client_receptions/client_observers) older than N days are deleted (0 = disabled) — bounds the opt-in coverage tables (#1727). NOTE (#1283): all retention fields are consumed by the INGESTOR process. The server is read-only and never prunes."
+    "_comment": "nodeDays: nodes not seen in N days moved to inactive_nodes (default 7). observerDays: observers not sending data in N days are removed (-1 = keep forever, default 14). packetDays: transmissions older than N days are deleted (0 = disabled). channelDays: channel messages (GRP_TXT) and their observations are kept until they are N days old instead of packetDays; only takes effect when packetDays is set and channelDays is larger (0 = channel messages follow packetDays, default) (#296). The server's in-memory window (packetStore.retentionHours) is separate; channel history is read from the database. clientRxDays: mobile client-RX coverage rows (client_receptions/client_observers) older than N days are deleted (0 = disabled) — bounds the opt-in coverage tables (#1727). NOTE (#1283): all retention fields are consumed by the INGESTOR process. The server is read-only and never prunes."
   },
   "db": {
     "vacuumOnStartup": false,
@@ -25,6 +26,12 @@
     },
     "_comment": "vacuumOnStartup: run one-time full VACUUM to enable incremental auto-vacuum on existing DBs. Executed by the INGESTOR at startup, BEFORE the MQTT subscriber starts (#1283), so there is no contention with concurrent writes. Blocks ingestor startup for minutes on large DBs; requires 2x DB file size in free disk space. incrementalVacuumPages: free pages returned to OS after each retention reaper cycle (default 1024). See #919. load.chunkSize: see nested _comment (#1009).",
     "_comment_slowWriterMs": "#1340 — SQLite writer-lock log threshold (default 500). Any wrapped writer call (tagged neighbor_builder, mqtt_handler, prune_packets, prune_observers, prune_metrics, vacuum) whose hold_ms exceeds this emits a single [db-slow-writer] log line. Configured per-process via the CORESCOPE_DB_SLOW_WRITER_MS environment variable on the INGESTOR (e.g. CORESCOPE_DB_SLOW_WRITER_MS=200 for tighter alerting). Per-component wait_ms / hold_ms / contention_total histograms are surfaced via /api/perf/write-sources under .writer_perf regardless of this threshold."
+  },
+  "resolvedPathBackfill": {
+    "disabled": false,
+    "batchSize": 500,
+    "pauseMs": 250,
+    "_comment": "Optional (ingestor, #188). Once per ingestor start, re-resolves observations stored with resolved_path = NULL, from a persisted watermark up to the newest observation at the start of the pass. It waits until a neighbour-edge build has caught up with the stored observations and found at least one edge, then works in batches: each batch reads batchSize rows, resolves them outside any lock, and writes the results and the new watermark in one short write transaction, then sleeps pauseMs. Rows that still do not resolve stay NULL and are not retried. disabled: true skips the pass. batchSize: rows per batch, default 500. pauseMs: milliseconds between batches, default 250, which caps the pass at about 2,000 rows/s. For both numbers, 0 or omitted means the default, so the pause cannot be turned off; the smallest pause is 1. The server sees backfilled values only after its next restart."
   },
   "listLimits": {
     "packetsMax": 10000,
@@ -233,13 +240,14 @@
   ],
   "channelProposals": {
     "enabled": false,
+    "autoApprove": false,
     "maxPending": 100,
     "maxApproved": 128,
     "maxQueuedRequests": 256,
     "retentionDays": 30,
     "submissionsPerHour": 20
   },
-  "_comment_channelProposals": "Shared hashtag channels: visitors suggest public hashtag channels (names only, never keys) on the Channels page and an administrator approves or rejects them at #/channels?view=proposals with the apiKey. Submissions open only when enabled is true AND apiKey is strong (16+ characters, not a placeholder). Approved channels are decrypted by the ingestor and listed for everyone, even before they carry traffic; they stay active if enabled is later set to false. Limits: maxPending/maxApproved bound the table, maxQueuedRequests bounds the request queue next to the database, submissionsPerHour is a global sliding window, and rejected or unreviewed suggestions are deleted after retentionDays. Read by both server and ingestor.",
+  "_comment_channelProposals": "Shared hashtag channels: visitors suggest public hashtag channels (names only, never keys) on the Channels page. Submissions open only when enabled is true AND apiKey is strong (16+ characters, not a placeholder). By default an administrator approves or rejects suggestions at #/channels?view=proposals with the apiKey. Opt-in autoApprove immediately approves only brand-new names; existing pending, rejected and revoked names are not auto-approved. Approved channels are decrypted by the ingestor and listed for everyone, even before they carry traffic; they stay active if enabled is later set to false. Limits: maxPending/maxApproved bound the table, maxQueuedRequests bounds the request queue next to the database, submissionsPerHour is a global sliding window, and rejected or unreviewed suggestions are deleted after retentionDays. Read by both server and ingestor; changing this policy requires an ingestor restart.",
   "healthThresholds": {
     "infraDegradedHours": 24,
     "infraSilentHours": 72,
@@ -360,6 +368,10 @@
     "cacheRecomputeIntervalSeconds": 300,
     "_comment": "maxAgeDays: neighbor edges older than this many days are pruned on startup and daily. Default 5. maxEdgeKm: geo-implausibility filter — when both endpoints have GPS, edges with haversine distance > maxEdgeKm are rejected at build time to prevent disambiguator self-reinforcement on wide-geo MQTT deployments. Default 500 km (well above any plausible terrestrial LoRa hop). 0 ⇒ use default; set negative to disable the filter. Rejected count surfaces in /api/analytics/neighbor-graph stats. Issue #1228. cacheRecomputeIntervalSeconds: how often the background recomputer rebuilds the default-shape /api/analytics/neighbor-graph response (#1481 P0-1). Default 300 (5 min). Lower = fresher data, more CPU per minute. Issue #1483."
   },
+  "estimatedPositions": {
+    "enabled": true,
+    "_comment": "Operator policy for neighbor-derived position estimates. Omit this section or enabled to preserve the default (true). Set false to disable estimates in node details, packet/Ping Scores paths, maps, and estimate-dependent analytics. Reported GPS, ordinary neighbor graphs, and independent IATA/name-based fallbacks are unchanged. Requires a Go server restart and browser refresh; not reloaded by SIGHUP."
+  },
   "observersCache": {
     "ttlSeconds": 30,
     "_comment": "TTL for the default-shape /api/observers response cache (#1481 P0-3). Default 30s. Lower = fresher data, more SQL pressure on the 1.9M-row observations table. TTL-boundary refills are collapsed via singleflight so concurrent requests cause exactly one SQL fill. Issue #1483."
@@ -391,6 +403,7 @@
   "_comment_compression": "Opt-in HTTP gzip middleware + WebSocket permessage-deflate. Both default to false — enable ONLY when your upstream reverse proxy is NOT already compressing. gzip: enables the gzipMiddleware wrapper around the HTTP handler. websocket: sets gorilla websocket Upgrader.EnableCompression. level: gzip compression level 1..9 (1=BestSpeed, 9=BestCompression, default 6). minSizeBytes: advisory minimum response size below which compression would not pay off. contentTypes: MIME allow-list — only responses with these Content-Type values are compressed. Already-compressed types (image/*, video/*, audio/*, application/zip, application/x-gzip, application/pdf, application/octet-stream) are always skipped, as are responses whose handler already set Content-Encoding. Omit contentTypes to use the built-in default allow-list.",
   "clientRxCoverage": { "enabled": false },
   "_comment_clientRxCoverage": "Opt-in mobile client-RX coverage (corescope-rx companions publishing GPS-tagged receptions to meshcore/client/<pubkey>/packets). Default OFF: when disabled the ingestor writes no client_receptions, the /api/rx-coverage|rx-leaderboard|nodes/{pubkey}/rx-coverage endpoints 404, and the UI hides the Coverage dashboard + Reach overlay. Set enabled=true to turn it on. SINGLE FLAG, BOTH PROCESSES: the ingestor and server each parse this same config.json, so this one clientRxCoverage.enabled entry gates both the ingest write path and the read endpoints — set it once, not per-process. TRUST: the feature requires an ACL-capable broker binding meshcore/client/{pubkey}/packets to that publisher; without ACLs the companion GPS is spoofable (see docs/client-rx-coverage.md). Retention: see retention.clientRxDays. Companion app + setup: https://github.com/efiten/corescope-rx.",
+  "_comment_clientRxCoverage_sources": "OPTIONAL allow-list of mqttSources[].name entries that may contribute client RX coverage. Omitted or empty (the default) = every source is accepted, unchanged behaviour. Set it when this instance reads MORE THAN ONE broker and they do not all bind meshcore/client/<pubkey>/packets to the publisher holding that key: coverage is only as trustworthy as the weakest broker, so on a mixed deployment (one broker with per-device identity + one legacy username/password broker where many accounts may write meshcore/#) any account on the weak broker could otherwise inject coverage under any companion pubkey with any GPS position. Listing the trusted source names keeps the client namespace on those sources — a client message from any other source is dropped before any write (no client_receptions, no client_observers, no observer row), logged per source with throttling and a line cap. Matching is on the source name, trimmed and case-insensitive; a source with no name can never be listed. A name matching no configured source is logged once at startup. Example: \"clientRxCoverage\": { \"enabled\": true, \"sources\": [\"device-auth\"] }. See docs/client-rx-coverage.md.",
   "_comment_channelKeys": "Hex keys for decrypting channel messages. Key name = channel display name. public channel key is well-known.",
   "_comment_hashChannels": "Channel names whose keys are derived via SHA256. Key = SHA256(name)[:16]. Listed here so the ingestor can auto-derive keys.",
   "hashRegions": [
