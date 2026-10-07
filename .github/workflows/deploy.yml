@@ -457,6 +457,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1136-live-region-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-live-multibyte-only-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-125-live-toggles-early-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-220-live-filter-readiness-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1150-404-state-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-199-inactive-observer-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1146-path-link-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
