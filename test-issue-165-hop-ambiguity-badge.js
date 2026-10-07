@@ -244,5 +244,25 @@ console.log('\n=== #2097: the observer position anchors the pick ===');
     'one helper looks the observer up, used by every resolve path');
 }
 
+console.log('\n=== PR #185 review F6: one badge rule for the detail and the list ===');
+
+{
+  assert(typeof HopDisplay.conflictBadgeCount === 'function', 'HopDisplay exposes conflictBadgeCount');
+  const cases = [
+    HopResolver.resolve(['ef'], null, null, null, null, OBSERVER_ID)['ef'],
+    HopResolver.resolve(['ef'])['ef'],
+    HopResolver.resolve(['e7aa'], null, null, null, null, OBSERVER_ID)['e7aa'],
+    { name: 'X', ambiguous: true, conflicts: [{ regional: true }], globalFallback: false },
+    { name: 'Y', ambiguous: true, conflicts: [{}, {}, {}], globalFallback: true },
+    { name: 'Z', ambiguous: true, conflicts: [{}, {}], globalFallback: false },
+    null,
+  ];
+  const agree = cases.every(e => {
+    const n = typeof HopDisplay.conflictBadgeCount === 'function' ? HopDisplay.conflictBadgeCount(e) : NaN;
+    return (n > 1) === /hop-conflict-btn/.test(HopDisplay.renderHop('ef', e, {}));
+  });
+  assert(agree, 'conflictBadgeCount(entry) > 1 exactly when renderHop draws the conflict badge');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
