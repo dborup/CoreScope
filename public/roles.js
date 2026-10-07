@@ -32,7 +32,11 @@
       if (typeof document === 'undefined' || !document.documentElement) return fallback;
       var v = '';
       if (typeof getComputedStyle === 'function') {
-        v = getComputedStyle(document.documentElement).getPropertyValue(name);
+        // Resolve on <body>, not documentElement: an active CB preset delivers
+        // its colours through body[data-cb-preset="X"] (style.css), and since
+        // #1449 customize-v2 no longer mirrors them onto documentElement.
+        // <body> inherits every :root value, so non-preset reads are unchanged.
+        v = getComputedStyle(document.body || document.documentElement).getPropertyValue(name);
       }
       if (!v && document.documentElement.style && typeof document.documentElement.style.getPropertyValue === 'function') {
         v = document.documentElement.style.getPropertyValue(name);
@@ -669,8 +673,20 @@
     flasher: 'https://flasher.meshcore.io/'
   };
 
+  // One operator-owned policy for every estimated-position surface. Local
+  // preferences and deep links cannot enable it; older servers default on.
+  var estimatedPositionsEnabled = true;
+  window.EstimatedPositions = {
+    enabled: function (response) {
+      return estimatedPositionsEnabled && (!response || response.estimatedPositionsEnabled !== false);
+    },
+    disabledMessage: 'Estimated positions are disabled by the instance operator.',
+    disabledNoticeHTML: '<p class="text-muted estimated-positions-note" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
+  };
+
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
+    estimatedPositionsEnabled = !cfg.estimatedPositions || cfg.estimatedPositions.enabled !== false;
     window.MC_CLIENT_RX_COVERAGE = cfg.clientRxCoverage === true;
     // Coverage is opt-in: the nav link is NOT in static HTML (so the default-off
     // nav matches upstream and the nav-overflow tests). Inject it after Analytics

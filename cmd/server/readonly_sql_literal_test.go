@@ -18,21 +18,25 @@ import (
 var writeSQLPattern = regexp.MustCompile(`(?is)\b(INSERT\s+(OR\s+\w+\s+)?INTO|REPLACE\s+INTO|UPDATE\s+(OR\s+\w+\s+)?[\w"]+\s+SET|DELETE\s+FROM|CREATE\s+(TEMP\w*\s+|UNIQUE\s+|VIRTUAL\s+)*(TABLE|INDEX|TRIGGER|VIEW)|DROP\s+(TABLE|INDEX|TRIGGER|VIEW)|ALTER\s+TABLE|VACUUM|REINDEX|ATTACH\s+DATABASE)\b`)
 
 // knownServerWriteSQL lists the write-SQL string literals cmd/server already
-// had when this guard was added, per file. The count may only go down: a
-// new write belongs in cmd/ingestor (#1283). Lower the number here when a
-// site is removed.
+// had when this guard was added, per file. Shared-database counts may only
+// go down: a new write belongs in cmd/ingestor (#1283). The separate ping
+// history sidecar is the existing single-owner exception; its v3 additions
+// are enumerated exactly below, never a general server-write allowance.
 //   - ping_score_history.go: its own separate history database, not the
 //     shared one.
+//   - ping_score_history_paths.go: v3's CREATE/ALTER and bounded archive
+//     replacement on that same sidecar transaction (four SQL literals).
 //   - backup.go: VACUUM INTO writes a snapshot file, not the database.
 //   - openapi.go: prose mentioning VACUUM INTO.
-//   - hash_migrate.go, routes.go: pre-existing writes to the shared
-//     database, tracked separately.
+//
+// hash_migrate.go had 3 until the content-hash migration moved to the
+// ingestor (#215); routes.go had 3 until POST /api/packets was removed
+// (#223).
 var knownServerWriteSQL = map[string]int{
-	"backup.go":             1,
-	"hash_migrate.go":       3,
-	"openapi.go":            1,
-	"ping_score_history.go": 15,
-	"routes.go":             3,
+	"backup.go":                   1,
+	"openapi.go":                  1,
+	"ping_score_history.go":       15,
+	"ping_score_history_paths.go": 4,
 }
 
 // TestServerSourceHasNoNewWriteSQL guards the read-only server contract

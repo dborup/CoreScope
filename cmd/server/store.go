@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/mbcapqueue"
+	"github.com/meshcore-analyzer/packetpath"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -54,7 +55,11 @@ type StoreTx struct {
 	PathJSON            string
 	Direction           string
 	LatestSeen          string // max observation timestamp (or FirstSeen if no observations)
-	UniqueObserverCount int    // cached count of distinct observer IDs
+	UniqueObserverCount int32  // cached count of distinct observer IDs
+	// chargedBytes is what trackedBytes was last charged for this tx
+	// (observations and resolved relay hops excluded). It takes the 4 bytes
+	// UniqueObserverCount gave up, so StoreTx stays 320 bytes.
+	chargedBytes uint32
 	// Cached parsed fields (set once, read many)
 	parsedPath []string // cached parsePathJSON result
 	pathParsed bool     // whether parsedPath has been set
@@ -305,6 +310,10 @@ type PacketStore struct {
 	// indexReadyCh / maybeCloseIndexReadyCh in index_ready_1008.go.
 	indexReadyChMu sync.Mutex
 	indexReadyChan chan struct{}
+	// subpathBuildGate, nil in production, runs at the start of the
+	// background subpath index build that Load() starts. A test sets it
+	// before Load() to hold the not-ready window open (#227).
+	subpathBuildGate func()
 	// Precomputed distance analytics: hop distances and path totals.
 	// Built LAZILY on first /api/analytics/distance request (#1011) —
 	// previously eager in Load() at startup, which was O(n²) work for
@@ -418,19 +427,43 @@ type PacketStore struct {
 	usefulnessAxesRecompMu      sync.Mutex
 	usefulnessAxesRecompStarted bool
 
+	// pathHopResolved records, per transmission, the hashes of the resolved
+	// pubkey keys addResolvedPubkeysToPathHopIndex has put it under in
+	// byPathHop, so further observations through the same relays do not
+	// append it again (#158). At most one hash per relay key per live
+	// transmission: evictStaleInternal deletes evicted entries and
+	// retainResolvedPathHops drops anything no longer in s.packets.
+	pathHopResolved map[*StoreTx][]uint64
+
+	// fallbackByNode records, per transmission, the relay pubkeys the
+	// path_json fallback (indexObservationRelayHops) put it under in byNode
+	// and nodeHashes, and nothing else. Without a persisted resolved_path
+	// there is no other record of them, so eviction reads them here to remove
+	// the entries and to credit what addFallbackRelay charged (#202). At most
+	// one entry per (relay, live transmission): evictStaleInternal deletes
+	// evicted transmissions' records.
+	fallbackByNode map[*StoreTx][]string
+
 	// Precomputed distinct advert pubkey count (refcounted for eviction correctness).
 	// Updated incrementally during Load/Ingest/Evict — avoids JSON parsing in GetPerfStoreStats.
 	advertPubkeys map[string]int // pubkey → number of advert packets referencing it
 
 	// Resolved path membership index: xxhash → []txID (forward) and txID → []hashes (reverse).
 	// Replaces per-StoreTx/StoreObs ResolvedPath []*string field (#800).
-	resolvedPubkeyIndex           map[uint64][]int  // hash(pubkey) → []txID
-	resolvedPubkeyReverse         map[int][]uint64  // txID → []hashes indexed under
-	useResolvedPathIndex          bool              // feature flag (default true, off path = conservative)
-	maxResolvedPubkeyIndexEntries int               // hard cap for size warning (0 = use default 5M)
-	apiResolvedPathLRU            map[int][]*string // obsID → resolved path (LRU cache for API)
-	lruOrder                      []int             // FIFO order for LRU eviction
-	lruMu                         sync.RWMutex      // guards apiResolvedPathLRU + lruOrder
+	resolvedPubkeyIndex           map[uint64][]int             // hash(pubkey) → []txID
+	resolvedPubkeyReverse         map[int][]uint64             // txID → []hashes indexed under
+	useResolvedPathIndex          bool                         // feature flag (default true, off path = conservative)
+	maxResolvedPubkeyIndexEntries int                          // hard cap for size warning (0 = use default 5M)
+	apiResolvedPathLRU            map[int]resolvedPathLRUEntry // obsID → resolved path (LRU cache for API, entries expire after resolvedPathLRUTTL)
+	lruOrder                      []int                        // FIFO order for LRU eviction
+	lruMu                         sync.RWMutex                 // guards apiResolvedPathLRU + lruOrder
+	lruClock                      func() time.Time             // test hook standing in for time.Now in lruNow; nil = time.Since(lruEpoch), monotonic
+
+	// confirmResolvedPathQueries counts SQL round-trips made by
+	// confirmResolvedPathContains. Each one scans the tx's observation rows,
+	// so tests use it to pin that /paths and /hop_analytics no longer issue
+	// one per candidate transmission.
+	confirmResolvedPathQueries atomic.Uint64
 
 	// Persisted neighbor graph for hop resolution at ingest time.
 	// Accessed via atomic.Pointer because async rebuilds (path_inspect.go
@@ -575,6 +608,16 @@ type PacketStore struct {
 	// (e.g. RefreshRouteMaskChanges). Test-only (#89 route_mask_changes
 	// watermark placement).
 	loadScannedRowHook func()
+	// ingestAfterQueryHook, if non-nil, runs in IngestNewFromDB and
+	// IngestNewObservations right after the SQL query succeeded and before
+	// its rows are scanned. Test-only: flips an optional-column schema flag
+	// between query construction and Scan (#158 follow-up).
+	ingestAfterQueryHook func()
+	// ingestAfterColsHook, if non-nil, runs in the same two functions right
+	// after the ingestCols snapshot and before the query is built. Test-only:
+	// flips a flag so a query built from a fresh flag read instead of the
+	// snapshot is caught too.
+	ingestAfterColsHook func()
 }
 
 // Precomputed distance records for fast analytics aggregation.
@@ -635,7 +678,14 @@ func dedupeHopsByPair(hops []distHopRecord, limit int) []map[string]interface{} 
 	for k, v := range pairMap {
 		pairs = append(pairs, pairEntry{k, v})
 	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].agg.best.Dist > pairs[j].agg.best.Dist })
+	// #256: pairMap iteration order is random; break distance ties on the
+	// pair key so the order (and which tied pairs make the limit) is stable.
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].agg.best.Dist != pairs[j].agg.best.Dist {
+			return pairs[i].agg.best.Dist > pairs[j].agg.best.Dist
+		}
+		return pairs[i].key < pairs[j].key
+	})
 	result := make([]map[string]interface{}, 0, min(limit, len(pairs)))
 	for i, pe := range pairs {
 		if i >= limit {
@@ -750,6 +800,8 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		spIndex:              make(map[string]int, 4096),
 		spTxIndex:            make(map[string][]*StoreTx, 4096),
 		advertPubkeys:        make(map[string]int),
+		pathHopResolved:      make(map[*StoreTx][]uint64),
+		fallbackByNode:       make(map[*StoreTx][]string),
 		clockSkew:            NewClockSkewEngine(),
 		useResolvedPathIndex: true,
 		areaNodeCache:        make(map[string]map[string]bool),
@@ -911,11 +963,14 @@ func (s *PacketStore) Load() error {
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
-	// Relay-hop fallback inputs. When resolved_path is empty (always, on
-	// live, since #1287 the ingestor persists relay data as neighbor_edges
-	// instead) we re-resolve relay hops from path_json using the prefix
-	// map. PR #1643 R1 munger #1: cold load resolves ONLY when the prefix
-	// is unique (no affinity tiebreak against ≤168h-old observations,
+	// Relay-hop inputs. The ingestor persists observations.resolved_path
+	// (#1547) with its conservative resolver (#1560), so a persisted value
+	// feeds indexResolvedPathHops. It is NULL when the ingestor could not
+	// resolve the path (a large share of observations, see #184); then we
+	// re-resolve relay hops from path_json using the prefix map, into
+	// byNode only (indexObservationRelayHops). PR #1643 R1 munger #1: cold
+	// load resolves ONLY when the prefix is unique (no affinity tiebreak
+	// against ≤168h-old observations,
 	// which would silently mis-attribute hops). Fetched BEFORE opening
 	// the rows cursor below: getCachedNodesAndPM issues its own DB query,
 	// which would deadlock against the still-open cursor on a single-
@@ -1000,7 +1055,7 @@ func (s *PacketStore) Load() error {
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
@@ -1028,29 +1083,8 @@ func (s *PacketStore) Load() error {
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
 			}
 
-			// Decode-window: extract resolved pubkeys for index, don't store on struct.
-			rpStr := nullStrVal(resolvedPathStr)
-			if rpStr != "" {
-				rp := unmarshalResolvedPath(rpStr)
-				pks := extractResolvedPubkeys(rp)
-				// Single point of truth — see indexResolvedPathHops doc + #1558.
-				s.indexResolvedPathHops(tx, pks, hopsSeen)
-			} else if relayPM != nil && obsPJ != "" && obsPJ != "[]" {
-				// resolved_path not persisted — reconstruct relay hops from
-				// path_json so relay-node analytics history survives a restart.
-				// Index into byNode ONLY: the resolved_path / path-hop indexes
-				// (indexResolvedPathHops) are cross-checked by handleNodePaths
-				// against the persisted resolved_path column, which is NULL
-				// here — populating them would make that SQL confirmation fail
-				// and wrongly drop the tx from paths-through (#1352). byNode is
-				// what the node-analytics activity timeline reads.
-				// PR #1643 R1 munger #1: gate on unique_prefix only — ambiguous
-				// hops are silently dropped (skipped counter logged at end).
-				rp := resolvePathForObsColdLoad(obsPJ, obsIDStr, tx, relayPM, &coldLoadAmbiguousHopsSkipped)
-				for _, pk := range extractResolvedPubkeys(rp) {
-					s.addToByNode(tx, pk)
-				}
-			}
+			// Decode-window: feed the relay-hop indexes, don't store on struct.
+			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, &coldLoadAmbiguousHopsSkipped)
 
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
@@ -1085,6 +1119,7 @@ func (s *PacketStore) Load() error {
 	// now that pickBestObservation has propagated the best path.
 	for _, tx := range s.packets {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 		s.indexByNode(tx)
 	}
 
@@ -1233,11 +1268,12 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
-	// Relay-hop fallback inputs. observations.resolved_path is NULL on
-	// every live deployment (since #1287 the ingestor persists relay data
-	// as aggregate neighbor_edges, not per-observation resolved_path), so
-	// for this background-loaded older window we re-resolve relay hops
-	// from the persisted path_json using the prefix map. PR #1643 R1
+	// Relay-hop inputs. A persisted observations.resolved_path (#1547,
+	// conservative resolver #1560) feeds indexResolvedPathHops; where it is
+	// NULL (the ingestor could not resolve the path, a large share of
+	// observations, see #184) this background-loaded older window
+	// re-resolves relay hops from the persisted path_json using the prefix
+	// map, into byNode only (indexObservationRelayHops). PR #1643 R1
 	// munger #1: cold load resolves ONLY when the prefix is unique
 	// (affinity-tier resolution against ≤168h-old observations would
 	// silently mis-attribute hops). Fetched BEFORE opening the rows
@@ -1336,7 +1372,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			if txID > localMaxTxID {
 				localMaxTxID = txID
 			}
-			localTrackedBytes += estimateStoreTxBytes(tx)
+			localTrackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
@@ -1418,6 +1454,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// Pick best observation for each local packet before merging.
 	for _, tx := range localPackets {
 		pickBestObservation(tx)
+		localTrackedBytes += rechargeTx(tx)
 	}
 
 	if len(localPackets) == 0 {
@@ -1533,7 +1570,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 			// nodes keep their analytics history across a restart without
 			// polluting the resolved_path/path-hop indexes (#1352).
 			for _, pk := range localByNodePKsByTx[tx.ID] {
-				s.addToByNode(tx, pk)
+				s.addFallbackRelay(tx, pk)
 			}
 		}
 		s.mu.Unlock()
@@ -1828,7 +1865,78 @@ func pickBestObservation(tx *StoreTx) {
 	tx.pathParsed = false // invalidate cached parsed path
 }
 
+// rechargeTx re-estimates tx and returns the change since it was last
+// charged, for the caller to add to trackedBytes (#113). A tx is first
+// charged when it is created, before its observations are merged, so its
+// path costs (byPathHop, spTxIndex) are unknown then: call it again once
+// pickBestObservation has set the path. Eviction subtracts what was charged
+// (chargedBytes, see txChargedBytes) and never re-estimates, so the total
+// stays exact however often the path changed in between.
+//
+// It reads and writes only tx, so it is safe on a tx that is not yet shared
+// (loadChunk charges its local batch outside s.mu); otherwise call it with
+// s.mu held.
+func rechargeTx(tx *StoreTx) int64 {
+	est := estimateStoreTxBytes(tx)
+	if est > math.MaxUint32 { // far beyond any real tx; keeps the uint32 field honest
+		est = math.MaxUint32
+	}
+	d := est - int64(tx.chargedBytes)
+	tx.chargedBytes = uint32(est)
+	return d
+}
+
+// resolvedRelayBytes is the memory a tx holds for n distinct resolved relay
+// keys (#164): per key a byPathHop slot, a hash in pathHopResolved and the
+// other per-key index entries indexResolvedPathHops adds, plus the
+// pathHopResolved map entry once. It is a function of n alone, so the charge
+// can be re-derived from len(s.pathHopResolved[tx]) at eviction.
+func resolvedRelayBytes(n int) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return perResolvedRecordBytes + int64(n)*perResolvedRelayBytes
+}
+
+// fallbackRelayBytes is the memory a tx holds for n relays the path_json
+// fallback indexed it under (#202): per relay a byNode slot, a nodeHashes
+// entry and the pubkey in the record, plus the fallbackByNode map entry once.
+// Like resolvedRelayBytes it is a function of n alone, so eviction re-derives
+// the charge from len(s.fallbackByNode[tx]).
+func fallbackRelayBytes(n int) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return perFallbackRecordBytes + int64(n)*perFallbackRelayBytes
+}
+
+// txChargedBytes is everything trackedBytes currently holds for tx, observations
+// excluded. Must be called with s.mu held.
+func (s *PacketStore) txChargedBytes(tx *StoreTx) int64 {
+	return int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx])) + fallbackRelayBytes(len(s.fallbackByNode[tx]))
+}
+
+// pathLen returns the number of hops in a JSON-encoded path array (0 for an
+// empty or invalid input).
+//
+// It runs once per observation of every candidate transmission in
+// /api/nodes/{pk}/paths and /hop_analytics (via fetchResolvedPathForTxBest),
+// i.e. hundreds of thousands of times per request, so it must not allocate.
+// The common shape — an array of plain ASCII strings such as ["aa","bb"] — is
+// counted with a single byte scan. Anything outside that restricted grammar
+// (escapes, non-ASCII or control bytes, nested values, numbers, null,
+// trailing data, malformed input) falls back to pathLenSlow, which keeps the
+// original json.Unmarshal semantics exactly.
 func pathLen(pathJSON string) int {
+	if n, ok := pathLenFast(pathJSON); ok {
+		return n
+	}
+	return pathLenSlow(pathJSON)
+}
+
+// pathLenSlow is the reference implementation: parse the whole array and
+// count it. Kept as the fallback for inputs pathLenFast does not recognise.
+func pathLenSlow(pathJSON string) int {
 	if pathJSON == "" {
 		return 0
 	}
@@ -1837,6 +1945,79 @@ func pathLen(pathJSON string) int {
 		return 0
 	}
 	return len(hops)
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// pathLenFast counts the elements of a JSON array of simple strings without
+// allocating. ok is false when s is anything other than
+//
+//	ws* "[" ws* ( "]" | str ( ws* "," ws* str )* ws* "]" ) ws*
+//
+// where str is a double-quoted run of printable ASCII (0x20-0x7e) with no
+// backslash. For every input it accepts, the count equals what
+// json.Unmarshal into []interface{} would give.
+func pathLenFast(s string) (n int, ok bool) {
+	l := len(s)
+	i := 0
+	for i < l && isJSONSpace(s[i]) {
+		i++
+	}
+	if i == l || s[i] != '[' {
+		return 0, false
+	}
+	i++
+	for i < l && isJSONSpace(s[i]) {
+		i++
+	}
+	if i < l && s[i] == ']' {
+		i++
+		for i < l && isJSONSpace(s[i]) {
+			i++
+		}
+		return 0, i == l
+	}
+	count := 0
+	for {
+		if i >= l || s[i] != '"' {
+			return 0, false
+		}
+		i++
+		for i < l && s[i] != '"' {
+			if c := s[i]; c < 0x20 || c >= 0x7f || c == '\\' {
+				return 0, false
+			}
+			i++
+		}
+		if i >= l {
+			return 0, false
+		}
+		i++ // closing quote
+		count++
+		for i < l && isJSONSpace(s[i]) {
+			i++
+		}
+		if i >= l {
+			return 0, false
+		}
+		switch s[i] {
+		case ',':
+			i++
+			for i < l && isJSONSpace(s[i]) {
+				i++
+			}
+		case ']':
+			i++
+			for i < l && isJSONSpace(s[i]) {
+				i++
+			}
+			return count, i == l
+		default:
+			return 0, false
+		}
+	}
 }
 
 // pathFirstHop returns path[0] (the entry-point repeater's hex prefix), or
@@ -1866,10 +2047,15 @@ func pathFirstHop(pathJSON string) string {
 // Caller contract:
 //   - Must hold s.mu write lock (addToByNode / addToResolvedPubkeyIndex /
 //     addResolvedPubkeysToPathHopIndex all mutate store state).
-//   - pks should be the output of extractResolvedPubkeys (no nils, no
-//     empties); the helper is a no-op when pks is empty.
+//   - pks should be the output of extractResolvedPubkeys, or the pubkeys
+//     of decodePersistedRelayPath (both drop nils and empties); the helper
+//     is a no-op when pks is empty.
 //   - hopsSeen is a reusable scratch map; addResolvedPubkeysToPathHopIndex
 //     clear()s it on entry.
+//   - Safe to call once per observation: every index it feeds is
+//     idempotent per (transmission, pubkey) — byNode via nodeHashes,
+//     the resolved index via its forward-list check, byPathHop via
+//     pathHopResolved (#158).
 func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen map[string]bool) {
 	if len(pks) == 0 {
 		return
@@ -1879,6 +2065,76 @@ func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen 
 	}
 	s.addResolvedPubkeysToPathHopIndex(tx, pks, hopsSeen)
 	s.addToResolvedPubkeyIndex(tx.ID, pks)
+}
+
+// persistedRelayPath is a decoded observations.resolved_path column value.
+// present distinguishes a persisted (possibly all-null) path from a NULL
+// column, which takes the path_json fallback in indexObservationRelayHops.
+type persistedRelayPath struct {
+	pubkeys []string
+	present bool
+}
+
+// decodePersistedRelayPath decodes a resolved_path column value. It is pure
+// and takes no lock: the live ingest paths call it while scanning rows,
+// before s.mu is taken, so the JSON work does not extend the critical
+// section (#158 follow-up).
+//
+// The result equals extractResolvedPubkeys(unmarshalResolvedPath(s)). It
+// decodes straight into []string (a JSON null becomes "", which is what
+// extractResolvedPubkeys drops) and compacts in place, saving the *string
+// allocated per hop and the second slice on a path that runs once per
+// observation.
+func decodePersistedRelayPath(resolvedPath string) persistedRelayPath {
+	if resolvedPath == "" {
+		return persistedRelayPath{}
+	}
+	var hops []string
+	if json.Unmarshal([]byte(resolvedPath), &hops) != nil {
+		return persistedRelayPath{present: true} // as unmarshalResolvedPath: corrupt means no hops
+	}
+	n := 0
+	for _, h := range hops {
+		if h != "" {
+			hops[n] = h
+			n++
+		}
+	}
+	if n == 0 {
+		return persistedRelayPath{present: true}
+	}
+	return persistedRelayPath{pubkeys: hops[:n], present: true}
+}
+
+// indexObservationRelayHops feeds the relay-hop indexes from one stored
+// observation. Every path that materializes an observation (Load,
+// scanAndMergeChunk, IngestNewFromDB, IngestNewObservations) goes through
+// it, so a transmission is indexed under the same relays whether it was
+// loaded at startup or ingested live. The ingestor persists resolved_path
+// in the same row it inserts (#1547) and leaves a hop null when the prefix
+// is ambiguous (#1560); those pubkeys go to indexResolvedPathHops. Without
+// a persisted resolved_path, path_json is re-resolved on unique prefixes
+// only and fed to byNode only (#1352, PR #1643).
+//
+// Live ingest used to index the server's own resolution instead, which
+// always picks a candidate and can pick a different one per observer, so
+// traffic share counted live transmissions for more relays than loaded
+// ones and its sum rose with uptime (#158 follow-up).
+//
+// persisted is the decoded resolved_path (decodePersistedRelayPath), taken
+// outside the lock by the live paths. skipped counts ambiguous cold-load
+// hops (may be nil). Must hold s.mu.
+func (s *PacketStore) indexObservationRelayHops(tx *StoreTx, persisted persistedRelayPath, pathJSON, observerID string, relayPM *prefixMap, hopsSeen map[string]bool, skipped *int) {
+	if persisted.present {
+		s.indexResolvedPathHops(tx, persisted.pubkeys, hopsSeen)
+		return
+	}
+	if relayPM == nil || pathJSON == "" || pathJSON == "[]" {
+		return
+	}
+	for _, pk := range extractResolvedPubkeys(resolvePathForObsColdLoad(pathJSON, observerID, tx, relayPM, skipped)) {
+		s.addFallbackRelay(tx, pk)
+	}
 }
 
 // indexByNode extracts pubkeys from decoded_json and indexes the transmission.
@@ -1910,16 +2166,39 @@ func (s *PacketStore) indexByNode(tx *StoreTx) bool {
 // addToByNode adds tx to byNode[pubkey] with dedup via nodeHashes.
 // Returns true if this is a genuinely new node (pubkey not seen before).
 func (s *PacketStore) addToByNode(tx *StoreTx, pubkey string) bool {
-	isNew := s.nodeHashes[pubkey] == nil
+	isNew, _ := s.indexByNodeKey(tx, pubkey)
+	return isNew
+}
+
+// indexByNodeKey is addToByNode that also reports whether it added an entry
+// (false: tx was already indexed under pubkey).
+func (s *PacketStore) indexByNodeKey(tx *StoreTx, pubkey string) (isNew, added bool) {
+	isNew = s.nodeHashes[pubkey] == nil
 	if isNew {
 		s.nodeHashes[pubkey] = make(map[string]bool)
 	}
 	if s.nodeHashes[pubkey][tx.Hash] {
-		return false
+		return false, false
 	}
 	s.nodeHashes[pubkey][tx.Hash] = true
 	s.byNode[pubkey] = append(s.byNode[pubkey], tx)
-	return isNew
+	return isNew, true
+}
+
+// addFallbackRelay indexes tx under a relay the path_json fallback resolved,
+// in byNode only (#1352), and charges and records what that added (#202). A
+// relay tx is already indexed under (a decoded pubkey, or a resolved relay,
+// which has its own allowance) adds nothing and costs nothing. Must hold s.mu.
+func (s *PacketStore) addFallbackRelay(tx *StoreTx, pubkey string) {
+	if _, added := s.indexByNodeKey(tx, pubkey); !added {
+		return
+	}
+	if s.fallbackByNode == nil {
+		s.fallbackByNode = make(map[*StoreTx][]string)
+	}
+	before := len(s.fallbackByNode[tx])
+	s.fallbackByNode[tx] = append(s.fallbackByNode[tx], pubkey)
+	s.trackedBytes += fallbackRelayBytes(before+1) - fallbackRelayBytes(before)
 }
 
 // trackAdvertPubkey increments the advertPubkeys refcount for ADVERT packets.
@@ -2790,29 +3069,39 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		limit = 100
 	}
 
-	// NOTE: The SQL query intentionally does NOT select resolved_path from the DB.
-	// New ingests always resolve fresh using the current prefix map and neighbor graph.
-	// On restart, Load() handles reading persisted resolved_path values. (review item #7)
+	// resolved_path is selected so the relay-hop indexes are fed from the
+	// ingestor's persisted resolution, exactly as Load feeds them
+	// (indexObservationRelayHops, #158 follow-up). The server still resolves
+	// each path itself for the live broadcast.
+	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
+	cols := s.db.ingestCols()
+	if s.ingestAfterColsHook != nil {
+		s.ingestAfterColsHook()
+	}
 	var querySQL string
 	obsRHCol := ""
-	if s.db.hasObsRawHex() {
+	if cols.obsRawHex {
 		obsRHCol = ", o.raw_hex"
+	}
+	rpCol := ""
+	if cols.resolvedPath {
+		rpCol = ", o.resolved_path"
 	}
 	// #1751: scope_name is on the transmission row; append as the last column.
 	scopeNameCol := ""
-	if s.db.hasScopeName() {
+	if cols.scopeName {
 		scopeNameCol = ", t.scope_name"
 	}
 	// #89: route_mask follows scope_name as the last optional column.
 	routeMaskCol := ""
-	if s.db.hasRouteMask() {
+	if cols.routeMask {
 		routeMaskCol = ", t.route_mask"
 	}
 	if s.db.isV3() {
 		querySQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol + scopeNameCol + routeMaskCol + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -2822,7 +3111,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		querySQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
 				o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol + scopeNameCol + routeMaskCol + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
 			LEFT JOIN observers obs ON obs.id = o.observer_id
@@ -2836,6 +3125,9 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		return nil, sinceID
 	}
 	defer rows.Close()
+	if s.ingestAfterQueryHook != nil {
+		s.ingestAfterQueryHook()
+	}
 
 	// Scan into temp structures
 	type tempRow struct {
@@ -2845,6 +3137,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		obsID                                                              *int
 		observerID, observerName, observerIATA, direction, pathJSON, obsTS string
 		obsRawHex                                                          string
+		resolvedPath                                                       persistedRelayPath
 		scopeName                                                          string
 		routeMask                                                          sql.NullInt64
 		snr, rssi                                                          *float64
@@ -2864,6 +3157,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		var snrVal, rssiVal sql.NullFloat64
 		var scoreVal sql.NullInt64
 		var obsRawHex sql.NullString
+		var resolvedPath sql.NullString
 		var scopeName sql.NullString
 		var routeMask sql.NullInt64
 
@@ -2871,13 +3165,16 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			&payloadVersion, &decodedJSON,
 			&obsIDVal, &observerID, &observerName, &observerIATA, &direction,
 			&snrVal, &rssiVal, &scoreVal, &pathJSON, &obsTimestamp}
-		if s.db.hasObsRawHex() {
+		if cols.obsRawHex {
 			scanArgs2 = append(scanArgs2, &obsRawHex)
 		}
-		if s.db.hasScopeName() {
+		if cols.resolvedPath {
+			scanArgs2 = append(scanArgs2, &resolvedPath)
+		}
+		if cols.scopeName {
 			scanArgs2 = append(scanArgs2, &scopeName)
 		}
-		if s.db.hasRouteMask() {
+		if cols.routeMask {
 			scanArgs2 = append(scanArgs2, &routeMask)
 		}
 		if err := rows.Scan(scanArgs2...); err != nil {
@@ -2907,6 +3204,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			pathJSON:     nullStrVal(pathJSON),
 			obsTS:        nullStrVal(obsTimestamp),
 			obsRawHex:    nullStrVal(obsRawHex),
+			resolvedPath: decodePersistedRelayPath(nullStrVal(resolvedPath)), // outside s.mu
 			scopeName:    nullStrVal(scopeName),
 			routeMask:    routeMask,
 			snr:          nullFloatPtr(snrVal),
@@ -2985,7 +3283,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 
 			if _, exists := broadcastTxs[r.txID]; !exists {
 				broadcastTxs[r.txID] = tx
@@ -3019,15 +3317,14 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				Timestamp:      normalizeTimestamp(r.obsTS),
 			}
 
-			// Resolve path at ingest time using neighbor graph — decode-window discipline:
-			// decode once, feed consumers, never store on struct.
-			var resolvedPubkeys []string
+			// Relay-hop indexes: same input as Load (#158 follow-up).
+			// Decode-window discipline: decode once, feed consumers, never
+			// store on struct.
+			s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.observerID, cachedPM, hopsSeen, nil)
+			// The live broadcast still shows the server's own resolution.
 			var rpForBroadcast []*string
 			if r.pathJSON != "" && r.pathJSON != "[]" && cachedPM != nil {
 				rpForBroadcast = resolvePathForObs(r.pathJSON, r.observerID, tx, cachedPM, cachedGraph)
-				resolvedPubkeys = extractResolvedPubkeys(rpForBroadcast)
-				// Single point of truth — see indexResolvedPathHops doc + #1558.
-				s.indexResolvedPathHops(tx, resolvedPubkeys, hopsSeen)
 			}
 			// Stash rpForBroadcast for later broadcast/persist (keyed by obs ID)
 			if rpForBroadcast != nil {
@@ -3063,6 +3360,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	// Pick best observation for new transmissions
 	for _, tx := range broadcastTxs {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 	}
 
 	// Incrementally update precomputed subpath index with new transmissions
@@ -3233,21 +3531,31 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		limit = 500
 	}
 
+	// One snapshot of the optional-column flags for query AND Scan (ingestCols).
+	cols := s.db.ingestCols()
+	if s.ingestAfterColsHook != nil {
+		s.ingestAfterColsHook()
+	}
 	var querySQL string
 	obsRHCol2 := ""
-	if s.db.hasObsRawHex() {
+	if cols.obsRawHex {
 		obsRHCol2 = ", o.raw_hex"
+	}
+	// resolved_path feeds the relay-hop indexes as in Load (#158 follow-up).
+	rpCol2 := ""
+	if cols.resolvedPath {
+		rpCol2 = ", o.resolved_path"
 	}
 	// #89: the transmission's current route_mask rides along with each new
 	// observation so the live view converges with a cold load.
 	routeMaskCol2, routeMaskJoin2 := "", ""
-	if s.db.hasRouteMask() {
+	if cols.routeMask {
 		routeMaskCol2 = ", t.route_mask"
 		routeMaskJoin2 = "\n\t\t\tLEFT JOIN transmissions t ON t.id = o.transmission_id"
 	}
 	if s.db.isV3() {
 		querySQL = `SELECT o.id, o.transmission_id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol2 + routeMaskCol2 + `
+				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRHCol2 + rpCol2 + routeMaskCol2 + `
 			FROM observations o
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx` + routeMaskJoin2 + `
 			WHERE o.id > ?
@@ -3255,7 +3563,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			LIMIT ?`
 	} else {
 		querySQL = `SELECT o.id, o.transmission_id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
-				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol2 + routeMaskCol2 + `
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRHCol2 + rpCol2 + routeMaskCol2 + `
 			FROM observations o
 			LEFT JOIN observers obs ON obs.id = o.observer_id` + routeMaskJoin2 + `
 			WHERE o.id > ?
@@ -3269,6 +3577,9 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		return nil
 	}
 	defer rows.Close()
+	if s.ingestAfterQueryHook != nil {
+		s.ingestAfterQueryHook()
+	}
 
 	type obsRow struct {
 		obsID        int
@@ -3281,6 +3592,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		score        *int
 		pathJSON     string
 		rawHex       string
+		resolvedPath persistedRelayPath
 		timestamp    string
 		routeMask    sql.NullInt64
 	}
@@ -3292,14 +3604,18 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		var snr, rssi sql.NullFloat64
 		var score sql.NullInt64
 		var obsRawHex sql.NullString
+		var resolvedPath sql.NullString
 		var routeMask sql.NullInt64
 
 		scanArgs3 := []interface{}{&oid, &txID, &observerID, &observerName, &observerIATA, &direction,
 			&snr, &rssi, &score, &pathJSON, &ts}
-		if s.db.hasObsRawHex() {
+		if cols.obsRawHex {
 			scanArgs3 = append(scanArgs3, &obsRawHex)
 		}
-		if s.db.hasRouteMask() {
+		if cols.resolvedPath {
+			scanArgs3 = append(scanArgs3, &resolvedPath)
+		}
+		if cols.routeMask {
 			scanArgs3 = append(scanArgs3, &routeMask)
 		}
 		if err := rows.Scan(scanArgs3...); err != nil {
@@ -3318,6 +3634,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			score:        nullIntPtr(score),
 			pathJSON:     nullStrVal(pathJSON),
 			rawHex:       nullStrVal(obsRawHex),
+			resolvedPath: decodePersistedRelayPath(nullStrVal(resolvedPath)), // outside s.mu
 			timestamp:    nullStrVal(ts),
 			routeMask:    routeMask,
 		})
@@ -3382,16 +3699,13 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			Timestamp: normalizeTimestamp(r.timestamp),
 		}
 
-		// Resolve path at ingest time for late-arriving observations (review item #2).
+		// Relay-hop indexes: same input as Load (#158 follow-up).
 		// Decode-window discipline: decode, feed consumers, don't store on struct.
+		s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.observerID, pm, hopsSeen, nil)
+		// The live broadcast still shows the server's own resolution (review item #2).
 		var obsResolvedPath []*string
-		if r.pathJSON != "" && r.pathJSON != "[]" {
-			if pm != nil {
-				obsResolvedPath = resolvePathForObs(r.pathJSON, r.observerID, tx, pm, graphRef)
-				pks := extractResolvedPubkeys(obsResolvedPath)
-				// Single point of truth — see indexResolvedPathHops doc + #1558.
-				s.indexResolvedPathHops(tx, pks, hopsSeen)
-			}
+		if r.pathJSON != "" && r.pathJSON != "[]" && pm != nil {
+			obsResolvedPath = resolvePathForObs(r.pathJSON, r.observerID, tx, pm, graphRef)
 		}
 		// Stash for broadcast/persist
 		if obsResolvedPath != nil {
@@ -3494,35 +3808,12 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	}
 	for _, tx := range updatedTxs {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 	}
 	pathHopMutated := false
 	for txID, tx := range updatedTxs {
 		if tx.PathJSON != oldPaths[txID] {
-			// Path changed — remove old subpaths, add new ones.
-			oldHops := parsePathJSON(oldPaths[txID])
-			if len(oldHops) >= 2 {
-				// Temporarily set parsedPath to old hops for removal.
-				saved, savedFlag := tx.parsedPath, tx.pathParsed
-				tx.parsedPath, tx.pathParsed = oldHops, true
-				if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-					s.spTotalPaths--
-				}
-				tx.parsedPath, tx.pathParsed = saved, savedFlag
-			}
-			// Remove old path-hop index entries using old hops.
-			// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
-			if len(oldHops) > 0 {
-				saved, savedFlag := tx.parsedPath, tx.pathParsed
-				tx.parsedPath, tx.pathParsed = oldHops, true
-				removeTxFromPathHopIndex(s.byPathHop, tx)
-				tx.parsedPath, tx.pathParsed = saved, savedFlag
-			}
-			// pickBestObservation already set pathParsed=false so
-			// addTxToSubpathIndex will re-parse the new path.
-			if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-				s.spTotalPaths++
-			}
-			addTxToPathHopIndex(s.byPathHop, tx)
+			s.reindexTxPath(tx, oldPaths[txID])
 			// #1164: coalesce — one invalidate after the loop, not per-tx.
 			pathHopMutated = true
 		}
@@ -3564,6 +3855,38 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	_ = graphRef
 
 	return broadcastMaps
+}
+
+// reindexTxPath moves tx in the subpath and path-hop indexes after its best
+// path changed from oldPath to tx.PathJSON (pickBestObservation, which also
+// cleared tx.pathParsed). The caller invalidates the relay-stats cache once for
+// a batch. Must hold s.mu for writing.
+func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
+	// Path changed — remove old subpaths, add new ones.
+	oldHops := parsePathJSON(oldPath)
+	if len(oldHops) >= 2 {
+		// Temporarily set parsedPath to old hops for removal.
+		saved, savedFlag := tx.parsedPath, tx.pathParsed
+		tx.parsedPath, tx.pathParsed = oldHops, true
+		if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+			s.spTotalPaths--
+		}
+		tx.parsedPath, tx.pathParsed = saved, savedFlag
+	}
+	// Remove old path-hop index entries using old hops.
+	// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
+	if len(oldHops) > 0 {
+		saved, savedFlag := tx.parsedPath, tx.pathParsed
+		tx.parsedPath, tx.pathParsed = oldHops, true
+		removeTxFromPathHopIndex(s.byPathHop, tx)
+		tx.parsedPath, tx.pathParsed = saved, savedFlag
+	}
+	// pickBestObservation already set pathParsed=false so
+	// addTxToSubpathIndex will re-parse the new path.
+	if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+		s.spTotalPaths++
+	}
+	addTxToPathHopIndex(s.byPathHop, tx)
 }
 
 // MaxTransmissionID returns the highest transmission ID in the store.
@@ -4406,18 +4729,30 @@ func (s *PacketStore) buildPathHopIndex() {
 // after s.byPathHop has been rebuilt from raw hops.
 func (s *PacketStore) retainResolvedPathHops(prev map[string][]*StoreTx) int {
 	if len(prev) == 0 {
+		// No resolved entries anywhere, so nothing is recorded as indexed.
+		for _, indexed := range s.pathHopResolved {
+			s.trackedBytes -= resolvedRelayBytes(len(indexed))
+		}
+		clear(s.pathHopResolved)
 		return 0
 	}
 	live := make(map[*StoreTx]struct{}, len(s.packets))
 	for _, tx := range s.packets {
 		live[tx] = struct{}{}
 	}
+	// Keep the per-transmission record in step with what is carried over
+	// below: entries of transmissions that are gone are not (#158).
+	for tx, indexed := range s.pathHopResolved {
+		if _, ok := live[tx]; !ok {
+			s.trackedBytes -= resolvedRelayBytes(len(indexed))
+			delete(s.pathHopResolved, tx)
+		}
+	}
 
 	// Reused across keys (cleared per key) so a large index does not churn
 	// one map allocation per key. Guards against both a key that the raw
-	// pass already produced and repeated appends of the same tx in prev —
-	// indexResolvedPathHops dedups within a call, not across the several
-	// observations of one transmission.
+	// pass already produced and repeated appends of the same tx in prev
+	// (an index built before #158 made the resolved append idempotent).
 	seen := make(map[*StoreTx]struct{}, 16)
 	retained := 0
 	for key, list := range prev {
@@ -4560,11 +4895,20 @@ func removeTxFromPathHopIndex(idx map[string][]*StoreTx, tx *StoreTx) {
 }
 
 // addResolvedPubkeysToPathHopIndex appends tx into byPathHop under each
-// resolved pubkey key that isn't already present as a raw hop. Mutating
-// byPathHop here MUST be paired with invalidateRelayStatsCache so the
-// cached batch relay stats don't go stale for up to relayStatsCacheTTL.
-// hopsSeen is a scratch map the caller can reuse across calls (it will
-// be cleared on entry).
+// resolved pubkey key that isn't already present as a raw hop and that tx
+// has not been appended under before. It is called once per observation,
+// and the observations of one transmission usually resolve to the same
+// relays: the per-transmission record in s.pathHopResolved keeps the index
+// at one entry per (key, transmission), so per-key counts are distinct
+// transmissions (#158). Mutating byPathHop here MUST be paired with
+// invalidateRelayStatsCache so the cached batch relay stats don't go stale
+// for up to relayStatsCacheTTL. hopsSeen is a scratch map the caller can
+// reuse across calls (it will be cleared on entry).
+//
+// Cost per call: one hash per pubkey and a scan of the transmission's own
+// record (one hash per distinct relay key, a handful); a repeat observation
+// through known relays allocates nothing and leaves byPathHop, and so the
+// relay-stats cache, untouched.
 //
 // Must be called with s.mu held.
 func (s *PacketStore) addResolvedPubkeysToPathHopIndex(tx *StoreTx, pubkeys []string, hopsSeen map[string]bool) bool {
@@ -4575,19 +4919,48 @@ func (s *PacketStore) addResolvedPubkeysToPathHopIndex(tx *StoreTx, pubkeys []st
 	for _, hop := range txGetParsedPath(tx) {
 		hopsSeen[strings.ToLower(hop)] = true
 	}
-	mutated := false
+	if s.pathHopResolved == nil {
+		s.pathHopResolved = make(map[*StoreTx][]uint64)
+	}
+	indexed := s.pathHopResolved[tx]
+	before := len(indexed)
 	for _, pk := range pubkeys {
-		if !hopsSeen[pk] {
-			hopsSeen[pk] = true
-			s.byPathHop[pk] = append(s.byPathHop[pk], tx)
-			mutated = true
+		if hopsSeen[pk] {
+			continue
 		}
+		hopsSeen[pk] = true
+		h := pathHopKeyHash(pk)
+		if slices.Contains(indexed, h) {
+			continue
+		}
+		indexed = append(indexed, h)
+		s.byPathHop[pk] = append(s.byPathHop[pk], tx)
 	}
+	if len(indexed) == before {
+		return false
+	}
+	s.pathHopResolved[tx] = indexed
+	// Charge the new keys (#164): one byPathHop slot and one hash each, plus
+	// the map entry the first time. Eviction derives the same total back from
+	// len(indexed), see txChargedBytes.
+	s.trackedBytes += resolvedRelayBytes(len(indexed)) - resolvedRelayBytes(before)
 	// Mutating byPathHop invalidates the batch relay-stats cache (#1164).
-	if mutated {
-		s.invalidateRelayStatsCache()
+	s.invalidateRelayStatsCache()
+	return true
+}
+
+// pathHopKeyHash is 64-bit FNV-1a over a byPathHop key, without the
+// allocations of hash/fnv. It identifies a key within one transmission's
+// pathHopResolved record only: a collision would need two distinct relay
+// pubkeys of the same transmission to hash alike, and would at worst leave
+// that transmission out of one bucket — it can never inflate a count.
+func pathHopKeyHash(key string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= 1099511628211
 	}
-	return mutated
+	return h
 }
 
 // invalidateRelayStatsCache drops the cached batch relay-stats result so
@@ -4616,13 +4989,13 @@ func removeTxFromSlice(idx map[string][]*StoreTx, key string, tx *StoreTx) {
 // evictFromPathHopIndex removes the evicted transmissions from every
 // byPathHop bucket they can be in (#115). A transmission is in its raw hop
 // keys and, via indexResolvedPathHops, in resolved full-pubkey keys, once
-// per observation that resolved it. The resolved pubkeys are kept nowhere
-// per transmission (#800 keeps only a hash-only membership index, and they
-// can come from path_json reconstruction as well as resolved_path), but
-// each one resolves a hop of one of the transmission's observed paths, so
-// it starts with that hop's prefix. Only buckets whose key starts
-// (case-insensitively) with a hop of an evicted transmission are swept;
-// every duplicate there is removed. Empty buckets are deleted and the
+// each (#158). The resolved pubkey strings are kept nowhere per
+// transmission (#800 keeps only a hash-only membership index, and
+// pathHopResolved only hashes), but each one resolves a hop of one of the
+// transmission's observed paths, so it starts with that hop's prefix. Only
+// buckets whose key starts (case-insensitively) with a hop of an evicted
+// transmission are swept; any duplicate there (an index built before #158)
+// is removed too. Empty buckets are deleted and the
 // discarded tail of each compacted bucket is zeroed, so no backing array
 // keeps an evicted transmission alive.
 //
@@ -4759,6 +5132,59 @@ func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
 		clear(paths[n:len(s.distPaths)])
 	}
 	s.distPaths = paths[:n]
+}
+
+// refreshDistIndexHashes brings the Hash of every distance record back in line
+// with its transmission's current content hash, and returns how many records
+// it changed. Must be called with s.mu held (Lock).
+//
+// The records carry a copy of the hash rather than reading tx.Hash, because
+// computeAnalyticsDistance walks a snapshot of them without s.mu while ingest
+// mutates the transmissions. So the in-memory content-hash migration (#215),
+// the one thing that rewrites tx.Hash, leaves the old hash behind in every
+// record of a transmission it rehashed without the merge recomputing it: with
+// no collision at all, or with a collision whose survivor was already the
+// earliest row and kept its path, neither of the conditions in finishHashMerge
+// fires (#303). /api/analytics/distance serves that hash in topPaths[].hash
+// and in the hop pairs, where it links to the packet.
+//
+// One pass, no rebuild: the migration calls this once when it is done, not per
+// batch. Nothing is written when nothing is stale, which is the case for a
+// store the ingestor has already converged and for an index the lazy build has
+// not produced yet.
+func (s *PacketStore) refreshDistIndexHashes() int {
+	stale := 0
+	for i := range s.distHops {
+		if tx := s.distHops[i].tx; tx != nil && s.distHops[i].Hash != tx.Hash {
+			stale++
+		}
+	}
+	for i := range s.distPaths {
+		if tx := s.distPaths[i].tx; tx != nil && s.distPaths[i].Hash != tx.Hash {
+			stale++
+		}
+	}
+	if stale == 0 {
+		return 0
+	}
+	// A pinned computeAnalyticsDistance snapshot shares this backing array, so
+	// write into fresh slices instead of through it (as compactDistIndex does).
+	hops, paths := s.distHops, s.distPaths
+	if s.distSnapReaders.Load() != 0 {
+		hops, paths = slices.Clone(hops), slices.Clone(paths)
+	}
+	for i := range hops {
+		if tx := hops[i].tx; tx != nil {
+			hops[i].Hash = tx.Hash
+		}
+	}
+	for i := range paths {
+		if tx := paths[i].tx; tx != nil {
+			paths[i].Hash = tx.Hash
+		}
+	}
+	s.distHops, s.distPaths = hops, paths
+	return stale
 }
 
 // DistanceIndexBuilt reports whether the distance analytics index has
@@ -4965,6 +5391,43 @@ const (
 
 	// Per subpath entry in spTxIndex: string key + slice append + pointer
 	perSubpathEntryBytes = 40
+
+	// ParsedDecoded caches json.Unmarshal of DecodedJSON as a
+	// map[string]interface{}, about 4x the JSON length. Analytics touch
+	// every tx, so it is charged up front rather than when the cache fills
+	// (charging in ParsedDecoded() would write trackedBytes from read paths
+	// that do not hold s.mu).
+	decodedCacheFactor = 4
+
+	// Per obs: the tx.obsKeys dedup entry. The "observerID|pathJSON" key is
+	// built by concatenation, so its bytes (added per obs in
+	// estimateStoreObsBytes) are a separate allocation from the obs fields;
+	// this is the string header, the bucket slot and the bool.
+	obsKeyEntryBytes = 16 + indexEntryBytes + 1
+
+	// Resolved relay hops (#164), charged per distinct key a tx is indexed
+	// under after insertion (see resolvedRelayBytes). Calibrated on this
+	// branch with TestTrackedBytesVsHeap_Measure_113: the marginal heap of a
+	// store with 1, 1.9 and 4 resolved keys per tx is 195, 264 and 449 B per
+	// tx at 100k transmissions and 275, 355 and 592 B at 500k (map growth
+	// steps), i.e. 110-170 B per pathHopResolved record plus 85-105 B per
+	// key. These are the midpoints.
+	perResolvedRelayBytes  = 96  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeHashes entry and resolved-pubkey index entry
+	perResolvedRecordBytes = 140 // pathHopResolved map entry: key, slice header, bucket share, first backing array
+
+	// path_json fallback relays (#202), charged per distinct relay a tx is
+	// indexed under by addFallbackRelay. Not measured on its own: derived from
+	// the resolved allowance above by dropping what the fallback does not
+	// create (the byPathHop slot, the pathHopResolved hash and the
+	// resolved-pubkey index entry) and keeping the byNode slot, the nodeHashes
+	// entry and, in place of the hash, the 16-byte pubkey string header in the
+	// record; the record is that of pathHopResolved.
+	perFallbackRelayBytes  = 80  // byNode slot + nodeHashes entry + pubkey header in fallbackByNode (append growth)
+	perFallbackRecordBytes = 140 // fallbackByNode map entry: key, slice header, bucket share, first backing array
+
+	// A typical tx is resolved to this many distinct relays. Used by
+	// estimateStoreTxBytesTypical only.
+	typicalResolvedRelays = 3
 )
 
 // estimateStoreTxBytes returns the estimated memory cost of a StoreTx (excluding observations).
@@ -4973,6 +5436,7 @@ func estimateStoreTxBytes(tx *StoreTx) int64 {
 	base := int64(storeTxBaseBytes)
 	base += int64(len(tx.RawHex) + len(tx.Hash) + len(tx.DecodedJSON) + len(tx.PathJSON))
 	base += int64(numIndexesPerTx * indexEntryBytes)
+	base += int64(decodedCacheFactor * len(tx.DecodedJSON))
 
 	// Per-tx maps: obsKeys + observerSet
 	base += perTxMapsBytes
@@ -4997,13 +5461,16 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 	// Typical tx: ~64 byte hash, ~200 byte decoded JSON, ~40 byte path, 3 hops
 	base := int64(storeTxBaseBytes) + 64 + 200 + 40
 	base += int64(numIndexesPerTx * indexEntryBytes)
+	base += decodedCacheFactor * 200
 	base += perTxMapsBytes
 	hops := int64(3)
 	base += hops * perPathHopBytes
 	base += (hops * (hops - 1) / 2) * perSubpathEntryBytes
+	base += resolvedRelayBytes(typicalResolvedRelays)
 	// Add observation costs
-	obsBase := int64(storeObsBaseBytes) + 30 + 30 + 60 // observer ID + name + path
+	obsBase := int64(storeObsBaseBytes) + 30 + 30 + 60 + 25 // observer ID + name + path + timestamp
 	obsBase += int64(numIndexesPerObs * indexEntryBytes)
+	obsBase += obsKeyEntryBytes + 30 + 60 // dedup key: observer ID + path
 	// No per-obs ResolvedPath overhead (#800)
 	base += int64(numObs) * obsBase
 	return base
@@ -5013,8 +5480,10 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 // ResolvedPath membership index overhead is tracked separately.
 func estimateStoreObsBytes(obs *StoreObs) int64 {
 	base := int64(storeObsBaseBytes)
-	base += int64(len(obs.PathJSON) + len(obs.ObserverID))
+	base += int64(len(obs.PathJSON) + len(obs.ObserverID) + len(obs.ObserverName) +
+		len(obs.ObserverIATA) + len(obs.Direction) + len(obs.RawHex) + len(obs.Timestamp))
 	base += int64(numIndexesPerObs * indexEntryBytes)
+	base += int64(obsKeyEntryBytes + len(obs.ObserverID) + len(obs.PathJSON))
 	// ResolvedPath field removed (#800) — no per-obs RP overhead
 	return base
 }
@@ -5071,7 +5540,7 @@ func (s *PacketStore) evictionCandidateTxIDs() []int {
 			memCutoff := cutoffIdx
 			for memCutoff < len(s.packets) && (s.trackedBytes-bytesToEvict) > lowWatermark {
 				tx := s.packets[memCutoff]
-				bytesToEvict += estimateStoreTxBytes(tx)
+				bytesToEvict += s.txChargedBytes(tx)
 				for _, obs := range tx.Observations {
 					bytesToEvict += estimateStoreObsBytes(obs)
 				}
@@ -5140,7 +5609,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			memCutoff := cutoffIdx
 			for memCutoff < len(s.packets) && (s.trackedBytes-bytesToEvict) > lowWatermark {
 				tx := s.packets[memCutoff]
-				bytesToEvict += estimateStoreTxBytes(tx)
+				bytesToEvict += s.txChargedBytes(tx)
 				for _, obs := range tx.Observations {
 					bytesToEvict += estimateStoreObsBytes(obs)
 				}
@@ -5189,7 +5658,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 		delete(s.byHash, tx.Hash)
 		delete(s.byTxID, tx.ID)
 		evictedTxIDs[tx.ID] = struct{}{}
-		evictedBytes += estimateStoreTxBytes(tx)
+		evictedBytes += s.txChargedBytes(tx)
 
 		for _, obs := range tx.Observations {
 			delete(s.byObsID, obs.ID)
@@ -5245,6 +5714,23 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			affectedNodes[pk] = struct{}{}
 			evictedFromNode[pk] = true
 		}
+		// ...and the relays the path_json fallback indexed it under, which no
+		// resolved_path names (#202). The record is deleted here; its charge
+		// was taken in txChargedBytes above.
+		for _, pk := range s.fallbackByNode[tx] {
+			if evictedFromNode[pk] {
+				continue
+			}
+			if hashes, ok := s.nodeHashes[pk]; ok {
+				delete(hashes, tx.Hash)
+				if len(hashes) == 0 {
+					delete(s.nodeHashes, pk)
+				}
+			}
+			affectedNodes[pk] = struct{}{}
+			evictedFromNode[pk] = true
+		}
+		delete(s.fallbackByNode, tx)
 
 		// Remove from resolved pubkey index
 		s.removeFromResolvedPubkeyIndex(tx.ID)
@@ -5255,6 +5741,11 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	// Remove from the path-hop index: raw AND resolved keys, all duplicates,
 	// in one pass per batch (#115). See evictFromPathHopIndex.
 	evictFromPathHopIndex(s.byPathHop, evictedTxSet)
+	// ...and their record of indexed resolved keys (#158), so it stays
+	// bounded by the live transmissions.
+	for tx := range evictedTxSet {
+		delete(s.pathHopResolved, tx)
+	}
 	s.invalidateRelayStatsCache()
 
 	// Batch-remove from byObserver: single pass per affected observer slice
@@ -6061,6 +6552,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 					"routeType":             intPtrOrNil(tx.RouteType),
 					"entryPrefix":           pathFirstHop(tx.PathJSON),
 					"observedPathHashSizes": tx.observedPathHashSizes(),
+					"senderPathHashSize":    packetpath.SenderHashSize(tx.RawHex),
 				},
 				Repeats:   1,
 				Observers: observers,
@@ -6337,8 +6829,14 @@ func (s *PacketStore) computeAnalyticsChannels(region, area string, window TimeW
 			"lastActivity": c.LastActivity, "encrypted": c.Encrypted,
 		})
 	}
+	// #256: channelMap iteration order is random; ties break on the channel
+	// hash (the map key) so equal counts keep one order across recomputes.
 	sort.Slice(channelList, func(i, j int) bool {
-		return channelList[i]["messages"].(int) > channelList[j]["messages"].(int)
+		mi, mj := channelList[i]["messages"].(int), channelList[j]["messages"].(int)
+		if mi != mj {
+			return mi > mj
+		}
+		return channelList[i]["hash"].(string) < channelList[j]["hash"].(string)
 	})
 
 	// Top senders
@@ -6350,7 +6848,12 @@ func (s *PacketStore) computeAnalyticsChannels(region, area string, window TimeW
 	for n, c := range senderCounts {
 		senderList = append(senderList, senderEntry{n, c})
 	}
-	sort.Slice(senderList, func(i, j int) bool { return senderList[i].count > senderList[j].count })
+	sort.Slice(senderList, func(i, j int) bool {
+		if senderList[i].count != senderList[j].count {
+			return senderList[i].count > senderList[j].count
+		}
+		return senderList[i].name < senderList[j].name
+	})
 	topSenders := make([]map[string]interface{}, 0)
 	for i, e := range senderList {
 		if i >= 15 {
@@ -6371,7 +6874,12 @@ func (s *PacketStore) computeAnalyticsChannels(region, area string, window TimeW
 			tlList = append(tlList, tlEntry{parts[0], parts[1], count})
 		}
 	}
-	sort.Slice(tlList, func(i, j int) bool { return tlList[i].hour < tlList[j].hour })
+	sort.Slice(tlList, func(i, j int) bool {
+		if tlList[i].hour != tlList[j].hour {
+			return tlList[i].hour < tlList[j].hour
+		}
+		return tlList[i].channel < tlList[j].channel
+	})
 	channelTimeline := make([]map[string]interface{}, 0, len(tlList))
 	for _, e := range tlList {
 		channelTimeline = append(channelTimeline, map[string]interface{}{
@@ -6808,7 +7316,13 @@ func (s *PacketStore) computeAnalyticsRF(region, area string, window TimeWindow)
 		}
 		payloadTypes = append(payloadTypes, ptEntry{Type: t, Name: name, Count: c})
 	}
-	sort.Slice(payloadTypes, func(i, j int) bool { return payloadTypes[i].Count > payloadTypes[j].Count })
+	// #256: built from maps; ties break on the map key for a stable order.
+	sort.Slice(payloadTypes, func(i, j int) bool {
+		if payloadTypes[i].Count != payloadTypes[j].Count {
+			return payloadTypes[i].Count > payloadTypes[j].Count
+		}
+		return payloadTypes[i].Type < payloadTypes[j].Type
+	})
 
 	// SNR by type
 	type snrTypeEntry struct {
@@ -6830,7 +7344,12 @@ func (s *PacketStore) computeAnalyticsRF(region, area string, window TimeWindow)
 			Min: minF64(d.vals), Max: maxF64(d.vals),
 		})
 	}
-	sort.Slice(snrByTypeArr, func(i, j int) bool { return snrByTypeArr[i].Count > snrByTypeArr[j].Count })
+	sort.Slice(snrByTypeArr, func(i, j int) bool {
+		if snrByTypeArr[i].Count != snrByTypeArr[j].Count {
+			return snrByTypeArr[i].Count > snrByTypeArr[j].Count
+		}
+		return snrByTypeArr[i].Name < snrByTypeArr[j].Name
+	})
 
 	// Signal over time
 	type sigTimeEntry struct {
@@ -7842,7 +8361,17 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 	for h, c := range hopFreq {
 		freqList = append(freqList, freqEntry{h, c})
 	}
-	sort.Slice(freqList, func(i, j int) bool { return freqList[i].count > freqList[j].count })
+	// #256: hopFreq/pairFreq iteration order is random; ties break on the
+	// hop (pair) key so the order and the top-N cut are stable.
+	byCountThenHop := func(list []freqEntry) func(i, j int) bool {
+		return func(i, j int) bool {
+			if list[i].count != list[j].count {
+				return list[i].count > list[j].count
+			}
+			return list[i].hop < list[j].hop
+		}
+	}
+	sort.Slice(freqList, byCountThenHop(freqList))
 	topRepeaters := make([]map[string]interface{}, 0)
 	for i, e := range freqList {
 		if i >= 20 {
@@ -7862,7 +8391,7 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 	for p, c := range pairFreq {
 		pairList = append(pairList, freqEntry{p, c})
 	}
-	sort.Slice(pairList, func(i, j int) bool { return pairList[i].count > pairList[j].count })
+	sort.Slice(pairList, byCountThenHop(pairList))
 	topPairs := make([]map[string]interface{}, 0)
 	for i, e := range pairList {
 		if i >= 15 {
@@ -7913,6 +8442,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		}
 		observers = append(observers, map[string]interface{}{"id": id, "name": n})
 	}
+	// #256: built from a map with no sort; the first entry is the frontend's
+	// default observer tab, so give it a stable order.
+	sort.Slice(observers, func(i, j int) bool {
+		return observers[i]["id"].(string) < observers[j]["id"].(string)
+	})
 
 	// Per-observer reachability
 	perObserverReach := map[string]interface{}{}
@@ -7944,7 +8478,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		rings := make([]map[string]interface{}, 0)
 		for dist, nodeList := range byDist {
 			sort.Slice(nodeList, func(i, j int) bool {
-				return nodeList[i]["count"].(int) > nodeList[j]["count"].(int)
+				ci, cj := nodeList[i]["count"].(int), nodeList[j]["count"].(int)
+				if ci != cj {
+					return ci > cj
+				}
+				return nodeList[i]["hop"].(string) < nodeList[j]["hop"].(string)
 			})
 			rings = append(rings, map[string]interface{}{"hops": dist, "nodes": nodeList})
 		}
@@ -7970,7 +8508,10 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 				"observer_id": obsID, "observer_name": obsName,
 				"minDist": data.minDist, "count": data.count,
 			})
-			if bp, ok := bestPath[hop]; !ok || data.minDist < bp["minDist"].(int) {
+			// #256: perObserver iteration order is random; among observers
+			// tied on minDist report the lowest observer id.
+			if bp, ok := bestPath[hop]; !ok || data.minDist < bp["minDist"].(int) ||
+				(data.minDist == bp["minDist"].(int) && obsID < bp["observer_id"].(string)) {
 				bestPath[hop] = map[string]interface{}{
 					"minDist": data.minDist, "observer_id": obsID, "observer_name": obsName,
 				}
@@ -7985,7 +8526,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 			continue
 		}
 		sort.Slice(obs, func(i, j int) bool {
-			return obs[i]["minDist"].(int) < obs[j]["minDist"].(int)
+			di, dj := obs[i]["minDist"].(int), obs[j]["minDist"].(int)
+			if di != dj {
+				return di < dj
+			}
+			return obs[i]["observer_id"].(string) < obs[j]["observer_id"].(string)
 		})
 		r := resolveHop(hop)
 		entry := map[string]interface{}{
@@ -7998,8 +8543,12 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		multiObsNodes = append(multiObsNodes, entry)
 	}
 	sort.Slice(multiObsNodes, func(i, j int) bool {
-		return len(multiObsNodes[i]["observers"].([]map[string]interface{})) >
-			len(multiObsNodes[j]["observers"].([]map[string]interface{}))
+		ni := len(multiObsNodes[i]["observers"].([]map[string]interface{}))
+		nj := len(multiObsNodes[j]["observers"].([]map[string]interface{}))
+		if ni != nj {
+			return ni > nj
+		}
+		return multiObsNodes[i]["hop"].(string) < multiObsNodes[j]["hop"].(string)
 	})
 	if len(multiObsNodes) > 50 {
 		multiObsNodes = multiObsNodes[:50]
@@ -8021,7 +8570,11 @@ func (s *PacketStore) computeAnalyticsTopology(region, area string, window TimeW
 		bestPathList = append(bestPathList, entry)
 	}
 	sort.Slice(bestPathList, func(i, j int) bool {
-		return bestPathList[i]["minDist"].(int) < bestPathList[j]["minDist"].(int)
+		di, dj := bestPathList[i]["minDist"].(int), bestPathList[j]["minDist"].(int)
+		if di != dj {
+			return di < dj
+		}
+		return bestPathList[i]["hop"].(string) < bestPathList[j]["hop"].(string)
 	})
 	if len(bestPathList) > 50 {
 		bestPathList = bestPathList[:50]
@@ -8724,8 +9277,14 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 	for hex, data := range uniqueHops {
 		hopList = append(hopList, hopEntry{hex, data})
 	}
+	// #256: uniqueHops iteration order is random; ties break on the hop hex
+	// so the order and the top-50 cut are stable.
 	sort.Slice(hopList, func(i, j int) bool {
-		return hopList[i].data["count"].(int) > hopList[j].data["count"].(int)
+		ci, cj := hopList[i].data["count"].(int), hopList[j].data["count"].(int)
+		if ci != cj {
+			return ci > cj
+		}
+		return hopList[i].hex < hopList[j].hex
 	})
 	topHops := make([]map[string]interface{}, 0)
 	for i, e := range hopList {
@@ -8758,8 +9317,14 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 			})
 		}
 	}
+	// #256: byNode iteration order is random; ties break on pubkey so the
+	// adopters table's default ("server order") is the same on every recompute.
 	sort.Slice(multiByteNodes, func(i, j int) bool {
-		return multiByteNodes[i]["packets"].(int) > multiByteNodes[j]["packets"].(int)
+		pi, pj := multiByteNodes[i]["packets"].(int), multiByteNodes[j]["packets"].(int)
+		if pi != pj {
+			return pi > pj
+		}
+		return multiByteNodes[i]["pubkey"].(string) < multiByteNodes[j]["pubkey"].(string)
 	})
 
 	// Distribution by repeaters: count unique REPEATER nodes per hash size
@@ -9055,12 +9620,19 @@ func (s *PacketStore) computeHashCollisions(region, area string) map[string]inte
 
 		// Sort: local first, then regional, distant, incomplete
 		classOrder := map[string]int{"local": 0, "regional": 1, "distant": 2, "incomplete": 3, "unknown": 4}
+		// #321: prefixMap iteration order is random, so entries tied on both
+		// class and Appearances came out in a different order on each call.
+		// The prefix is the map key the entry was built from, so it is unique
+		// and makes the order total.
 		sort.Slice(collisions, func(i, j int) bool {
 			oi, oj := classOrder[collisions[i].Classification], classOrder[collisions[j].Classification]
 			if oi != oj {
 				return oi < oj
 			}
-			return collisions[i].Appearances > collisions[j].Appearances
+			if collisions[i].Appearances != collisions[j].Appearances {
+				return collisions[i].Appearances > collisions[j].Appearances
+			}
+			return collisions[i].Prefix < collisions[j].Prefix
 		})
 
 		// Stats
@@ -9839,8 +10411,15 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
 			})
 		}
+		// #321: observerStats iteration order is random, so observers tied
+		// on packetCount came out in a different order on each call. The
+		// observer_id is the map key the row was built from, so it is unique
+		// and makes the order total (sibling of GetSubpathDetail/#273).
 		sort.Slice(observerRows, func(i, j int) bool {
-			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+			if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
+				return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+			}
+			return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
 		})
 
 		var avgSnr *float64
@@ -10007,8 +10586,15 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			"can_relay": canRelay,
 		})
 	}
+	// #321: observerStats iteration order is random, so observers tied on
+	// packetCount came out in a different order on each call. The observer_id
+	// is the map key the row was built from, so it is unique and makes the
+	// order total (sibling of GetSubpathDetail/#273).
 	sort.Slice(observerRows, func(i, j int) bool {
-		return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+		if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
+			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+		}
+		return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
 	})
 
 	var avgSnr *float64
@@ -10200,37 +10786,44 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 		inIndex    bool
 	}
 	checks := make([]candidateCheck, len(candidates))
+	// Built once instead of scanning the index list for every candidate.
+	var indexedForTarget map[int]struct{}
+	if s.useResolvedPathIndex {
+		ids := s.resolvedPubkeyIndex[resolvedPubkeyHash(lowerPK)]
+		indexedForTarget = make(map[int]struct{}, len(ids))
+		for _, id := range ids {
+			indexedForTarget[id] = struct{}{}
+		}
+	}
 	for i, tx := range candidates {
 		cc := candidateCheck{tx: tx}
 		if !s.useResolvedPathIndex {
 			cc.inIndex = true
 		} else if _, hasRev := s.resolvedPubkeyReverse[tx.ID]; !hasRev {
 			cc.inIndex = true
-		} else {
-			h := resolvedPubkeyHash(lowerPK)
-			for _, id := range s.resolvedPubkeyIndex[h] {
-				if id == tx.ID {
-					cc.hasReverse = true
-					break
-				}
-			}
+		} else if _, ok := indexedForTarget[tx.ID]; ok {
+			cc.hasReverse = true
 		}
 		checks[i] = cc
 	}
 	s.mu.RUnlock()
 
+	// No per-candidate confirmResolvedPathContains SQL query here: the loop
+	// below already decides membership from the canonical resolved_path
+	// (rp == nil / idx < 0 → skip), which also rejects hash collisions and
+	// stale index entries. The query only scanned every observation row of
+	// each candidate tx to reach the same conclusion.
 	confirmed := candidates[:0]
 	for _, cc := range checks {
-		if cc.inIndex {
-			confirmed = append(confirmed, cc.tx)
-		} else if cc.hasReverse && s.confirmResolvedPathContains(cc.tx.ID, lowerPK) {
+		if cc.inIndex || cc.hasReverse {
 			confirmed = append(confirmed, cc.tx)
 		}
 	}
 
 	packets := make([]HopAnalyticsPacket, 0, len(confirmed))
+	lruNow := s.lruNow()
 	for _, tx := range confirmed {
-		rp := s.fetchResolvedPathForTxBest(tx)
+		rp := s.fetchResolvedPathForTxBestAt(tx, lruNow)
 		if rp == nil {
 			continue
 		}
@@ -10645,7 +11238,14 @@ func (s *PacketStore) rankSubpaths(counts map[string]*subpathAccum, totalPaths, 
 	for path, data := range counts {
 		ranked = append(ranked, subpathEntry{path, data.count, data.raw})
 	}
-	sort.Slice(ranked, func(i, j int) bool { return ranked[i].count > ranked[j].count })
+	// #256: counts iteration order is random; ties break on the path so the
+	// order and the limit cut are stable.
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].count != ranked[j].count {
+			return ranked[i].count > ranked[j].count
+		}
+		return ranked[i].path < ranked[j].path
+	})
 	if len(ranked) > limit {
 		ranked = ranked[:limit]
 	}
@@ -10775,8 +11375,13 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for path, count := range parentPaths {
 		topParents = append(topParents, map[string]interface{}{"path": path, "count": count})
 	}
+	// #273: parentPaths iteration order is random; ties break on the path so
+	// the order and the top-15 cut are stable (sibling of rankSubpaths/#256).
 	sort.Slice(topParents, func(i, j int) bool {
-		return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		if topParents[i]["count"].(int) != topParents[j]["count"].(int) {
+			return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		}
+		return topParents[i]["path"].(string) < topParents[j]["path"].(string)
 	})
 	if len(topParents) > 15 {
 		topParents = topParents[:15]
@@ -10786,8 +11391,13 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for name, count := range observers {
 		topObs = append(topObs, map[string]interface{}{"name": name, "count": count})
 	}
+	// #273: observers iteration order is random; ties break on the name so
+	// the order and the top-10 cut are stable.
 	sort.Slice(topObs, func(i, j int) bool {
-		return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		if topObs[i]["count"].(int) != topObs[j]["count"].(int) {
+			return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		}
+		return topObs[i]["name"].(string) < topObs[j]["name"].(string)
 	})
 	if len(topObs) > 10 {
 		topObs = topObs[:10]

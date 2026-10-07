@@ -90,6 +90,10 @@ func main() {
 	// Load config
 	cfg, err := LoadConfig(configDir)
 	if err != nil {
+		var invalidPolicy *invalidEstimatedPositionsConfigError
+		if errors.As(err, &invalidPolicy) {
+			log.Fatalf("[config] fatal: %v", err)
+		}
 		log.Printf("[config] warning: %v (using defaults)", err)
 	}
 
@@ -285,11 +289,6 @@ func main() {
 	// all live in the ingestor; the server only reads the snapshot and
 	// then refreshes it via the recompNeighborGraph slot every 60s.
 	dbPath = database.path
-	// Optimization only, not required for correctness: hasResolvedPath()
-	// self-heals on its own via a PRAGMA re-probe if this weren't here --
-	// AssertReady above already guarantees the column exists, so skip
-	// even that first probe.
-	database.hasResolvedPathFlag.forceTrue()
 
 	// WaitGroup for background init steps that gate /api/healthz readiness.
 	var initWg sync.WaitGroup
@@ -342,6 +341,7 @@ func main() {
 			store.mu.Lock()
 			for j := i; j < end && j < len(store.packets); j++ {
 				pickBestObservation(store.packets[j])
+				store.trackedBytes += rechargeTx(store.packets[j])
 			}
 			store.mu.Unlock()
 			if end < totalPackets {
@@ -369,25 +369,7 @@ func main() {
 	srv := NewServer(database, cfg, hub)
 	srv.configDir = configDir
 	srv.store = store
-	router := mux.NewRouter()
-	srv.RegisterRoutes(router)
-
-	// WebSocket endpoint
-	router.HandleFunc("/ws", hub.ServeWS)
-
-	// Static files + SPA fallback
-	absPublic, _ := filepath.Abs(publicDir)
-	if _, err := os.Stat(absPublic); err == nil {
-		fs := http.FileServer(http.Dir(absPublic))
-		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs)))
-		log.Printf("[static] serving %s", absPublic)
-	} else {
-		log.Printf("[static] directory %s not found — API-only mode", absPublic)
-		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/</p></body></html>`))
-		})
-	}
+	router := newHTTPRouter(srv, hub, publicDir)
 
 	// Start SQLite poller for WebSocket broadcast
 	poller := NewPoller(database, hub, time.Duration(pollMs)*time.Millisecond)
@@ -530,6 +512,12 @@ func main() {
 	_ = cfg.IncrementalVacuumPages() // kept reachable for config validation; not used here
 	_ = cfg.NeighborMaxAgeDays()     // ditto — owned by ingestor now
 
+	// Every route is registered by now. An /api route added after the
+	// API fallback would never be reached (#233).
+	if shadowed := apiRoutesShadowedByFallback(router); len(shadowed) > 0 {
+		log.Fatalf("[server] /api routes registered after the API fallback are unreachable: %v (register them in RegisterRoutes)", shadowed)
+	}
+
 	// Graceful shutdown
 	var handler http.Handler = router
 	if cfg.GZipEnabled() {
@@ -637,12 +625,48 @@ func main() {
 	// process. The server reads the results via the periodic
 	// recompNeighborGraph / fetchResolvedPathForObs paths.
 
-	// Migrate old content hashes in background (one-time, idempotent).
-	go migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
+	// Rehash content hashes in memory in the background (idempotent). The DB
+	// rewrite is the ingestor's (#215); the server never writes.
+	// It walks a snapshot of s.packets taken when it starts, so it waits for the
+	// whole startup load: LoadChunked and the background fill, not just the
+	// first chunk the HTTP listener binds after (#215).
+	go func() {
+		<-store.StartupLoadDone()
+		migrateContentHashesAsync(store, 5000, 100*time.Millisecond)
+	}()
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[server] %v", err)
 	}
+}
+
+// newHTTPRouter builds the production router: the API routes (ending in the
+// /api fallback, see registerAPIFallback), the WebSocket endpoint and the
+// static/SPA catch-all, in that order. Add new /api routes inside
+// RegisterRoutes: one added to this router afterwards is shadowed by the
+// fallback, which apiRoutesShadowedByFallback reports, at startup in main
+// and in TestProductionRouterHasNoShadowedAPIRoutes.
+func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router)
+
+	// WebSocket endpoint
+	router.HandleFunc("/ws", hub.ServeWS)
+
+	// Static files + SPA fallback
+	absPublic, _ := filepath.Abs(publicDir)
+	if _, err := os.Stat(absPublic); err == nil {
+		fs := http.FileServer(http.Dir(absPublic))
+		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs)))
+		log.Printf("[static] serving %s", absPublic)
+	} else {
+		log.Printf("[static] directory %s not found — API-only mode", absPublic)
+		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/spec (interactive docs: /api/docs, needs internet).</p></body></html>`))
+		})
+	}
+	return router
 }
 
 // spaHandler serves static files, falling back to index.html for SPA routes.

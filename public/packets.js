@@ -32,6 +32,24 @@
     if (pill) pill.remove();
   }
 
+  // #258: run fn with this module's column hiding lifted -- no col-hidden on
+  // any cell and no pill -- and put it back afterwards. makeColumnsResizable()
+  // (app.js) measures inside it, so a re-measure sees the columns as the first
+  // measure did, before register(); other CSS that hides a column still applies.
+  function unhidden(table, fn) {
+    const hidden = Array.from(table.querySelectorAll('.' + HIDDEN_CLASS));
+    const pills = Array.from(table.querySelectorAll('.' + PILL_CLASS));
+    const pillDisplay = pills.map(p => p.style.display);
+    hidden.forEach(el => el.classList.remove(HIDDEN_CLASS));
+    pills.forEach(p => { p.style.display = 'none'; });
+    try {
+      return fn();
+    } finally {
+      hidden.forEach(el => el.classList.add(HIDDEN_CLASS));
+      pills.forEach((p, i) => { p.style.display = pillDisplay[i]; });
+    }
+  }
+
   function colIndexCells(table, idx) {
     // Return the <td> at column index `idx` for every body row.
     const out = [];
@@ -221,7 +239,7 @@
     }, 120);
   });
 
-  window.TableResponsive = { apply, register, sweep: sweepDetached };
+  window.TableResponsive = { apply, register, sweep: sweepDetached, unhidden };
 })();
 
 /* === #1056 AC#4: SlideOver — narrow-viewport row-detail overlay ============
@@ -715,8 +733,58 @@
   function _hashStripeStyle(hash) { return _isColorByHash() && hash && window.HashColor ? 'border-left:4px solid ' + HashColor.hashToHsl(hash, _currentTheme()) + ';' : ''; }
   let groupByHash = true;
   let filters = {};
-  { const o = localStorage.getItem('meshcore-observer-filter'); if (o) filters.observer = o;
-    const t = localStorage.getItem('meshcore-type-filter'); if (t) filters.type = t; }
+  // Storage can throw (blocked, private mode); the filters then start empty.
+  try {
+    const o = localStorage.getItem('meshcore-observer-filter'); if (o) filters.observer = o;
+    const t = localStorage.getItem('meshcore-type-filter'); if (t) filters.type = t;
+  } catch (e) { /* storage unavailable */ }
+  // #96 — opt-in "Hide CONTROL packets" display filter, unchecked by default.
+  // Display only: CONTROL packets are still fetched and kept (also live ones),
+  // so unchecking shows them again without a reload, and a pinned hash (a
+  // direct link to one packet) bypasses it like every other client filter.
+  // Saved as '1' or '0' so an explicit unchecked choice survives a reload.
+  const PAYLOAD_TYPE_CONTROL = 11;
+  const HIDE_CONTROL_KEY = 'meshcore-hide-control';
+  // The URL value ('1' or '0') wins over the saved choice; default off.
+  function readHideControlPref(urlValue, stored) {
+    if (urlValue === '1') return true;
+    if (urlValue === '0') return false;
+    return stored === '1';
+  }
+  // The saved choice, or null when storage throws (blocked, private mode).
+  function readStoredHideControl() {
+    try { return localStorage.getItem(HIDE_CONTROL_KEY); } catch (e) { return null; }
+  }
+  // Saves the choice; false when storage throws (quota, blocked). Best effort:
+  // the checkbox still works for this view.
+  function saveHideControlPref(hide) {
+    try { localStorage.setItem(HIDE_CONTROL_KEY, hide ? '1' : '0'); return true; } catch (e) { return false; }
+  }
+  // One pass, order kept; the same array when off (no copy on the default path).
+  function filterHiddenControl(list, hide) {
+    return hide ? list.filter(p => p.payload_type !== PAYLOAD_TYPE_CONTROL) : list;
+  }
+  // Whether hiding CONTROL is what emptied the list: some CONTROL packet from
+  // before the CONTROL pass gets through the filters after it (laterFilters).
+  // Called only for an empty list, and runs the CONTROL packets only.
+  function controlHidingEmptiedList(beforeHide, laterFilters) {
+    const hidden = beforeHide.filter(p => p.payload_type === PAYLOAD_TYPE_CONTROL);
+    return hidden.length > 0 && laterFilters(hidden).length > 0;
+  }
+  // The checkbox's change: re-filters the loaded packets, no new request. The
+  // save comes first but cannot stop the filter or the URL update (#211).
+  function setHideControl(hide) {
+    hideControl = hide;
+    if (saveHideControlPref(hide)) savedHideControl = hide;
+    updatePacketsUrl();
+    renderTableRows();
+  }
+  // hideControl is what this view shows; savedHideControl is the saved choice
+  // as far as this page knows (it changes only when a save succeeds).
+  // buildPacketsQuery reads both, so a test sandbox that extracts it must
+  // declare both (test-issue-121/147-…, test-issue-96-hide-control.js).
+  let savedHideControl = readHideControlPref(null, readStoredHideControl());
+  let hideControl = savedHideControl;
   let wsHandler = null;
   let packetsPaused = false;
   let pauseBuffer = [];
@@ -779,6 +847,11 @@
     if (filters.observer) parts.push('observer=' + encodeURIComponent(filters.observer));
     if (filters.channel) parts.push('channel=' + encodeURIComponent(filters.channel));
     if (filters._filterExpr) parts.push('filter=' + encodeURIComponent(filters._filterExpr));
+    // #96: hideControl=1 while on. Off is the default and is omitted, except
+    // while the saved choice is on: an explicit hideControl=0 then stays, so a
+    // reload of this URL still shows CONTROL (#211).
+    if (hideControl) parts.push('hideControl=1');
+    else if (savedHideControl) parts.push('hideControl=0');
     // Sort state (#749) — encode as 'col[:asc]'; default 'time:desc' is omitted.
     if (_packetSortColumn) {
       var sortDefault = _packetSortColumn === 'time' && _packetSortDirection === 'desc';
@@ -799,16 +872,65 @@
     cb.style.display = active ? '' : 'none';
   }
 
-  function updatePacketsUrl() {
-    // Preserve any subpath after /packets (e.g. #/packets/<hash>).
+  // The only writer of the packets list URL #/packets… in packets.js (#147).
+  // Filter params come from buildPacketsQuery; the packet-detail params it
+  // does not own are added after them: ?obs= (selected observation) while a
+  // detail subpath is open, and ?viewPath=1 while the View Path modal is open
+  // on that packet (cold-loaded link or the detail's View Path button), so
+  // the URL keeps describing what is shown.
+  // It writes only while the packets list is the route (#167): not on the
+  // standalone #/packet/<id> page (see updatePacketPageUrl) and not after a
+  // detail teardown that runs once another page is shown.
+  // Other writers of this hash, outside packets.js:
+  // - packet-path-map.js dropViewPathParam(): removes only viewPath=1 when
+  //   the modal closes; obs and the filter params stay verbatim.
+  // - touch-gestures.js row-action overlay: navigates (location.hash) to
+  //   #/packets?hash=<hash> or #/packets/<hash>, a new list query or a new
+  //   selection. That re-runs init(), whose cold-load call here writes the
+  //   restored filters back; the previous packet's ?obs= does not apply.
+  // detail (optional): { subpath: '/<hash|id>' or '', obs: id or null } when
+  // the caller changes the selection or closes the detail (Clear Filters,
+  // #180); without it the current subpath and ?obs= are kept (filter
+  // changes, cold load).
+  function updatePacketsUrl(detail) {
     var cur = String(location.hash || '');
-    var subpath = '';
+    // The packets list route: #/packets, #/packets/…, #/packets?…, or no
+    // route at all (the router's default page).
+    if (cur !== '' && cur !== '#/' && !/^#\/packets(?:[/?]|$)/.test(cur)) return;
+    var qIdx = cur.indexOf('?');
+    var curParams = qIdx < 0 ? [] : cur.slice(qIdx + 1).split('&');
     var m = cur.match(/^#\/packets(\/[^?]*)?/);
-    if (m && m[1]) subpath = m[1];
+    var curSubpath = (m && m[1]) || '';
+    var subpath = detail ? detail.subpath : curSubpath;
     // Don't double-encode filters.hash when it's already the path segment.
     var skipHash = !!(filters.hash && subpath === '/' + filters.hash);
-    history.replaceState(null, '', '#/packets' + subpath + buildPacketsQuery(savedTimeWindowMin, RegionFilter.getRegionParam(), skipHash));
+    var query = buildPacketsQuery(savedTimeWindowMin, RegionFilter.getRegionParam(), skipHash);
+    var keep = [];
+    if (subpath) {
+      if (detail) {
+        if (detail.obs) keep.push('obs=' + encodeURIComponent(detail.obs));
+      } else {
+        keep = curParams.filter(function (p) { return /^obs=./.test(p); });
+      }
+      var pathModal = document.getElementById('packetPathModal');
+      if (pathModal && subpath === '/' + pathModal.dataset.hash) keep.push('viewPath=1');
+    }
+    if (keep.length) query += (query ? '&' : '?') + keep.join('&');
+    // Keeps the entry's history.state: packet-path-map.js marks the entry
+    // its modal opened on there (#180).
+    history.replaceState(history.state, '', '#/packets' + subpath + query);
     updateClearFiltersVisibility();
+  }
+
+  // The standalone page's URL, #/packet/<id>?obs=<id> (#167): the router
+  // strips the query before resolving the route, and the page reads ?obs=
+  // back on load. Writes only on that route; other params stay verbatim.
+  function updatePacketPageUrl(obs) {
+    var m = String(location.hash || '').match(/^(#\/packet\/[^?]+)(?:\?(.*))?$/);
+    if (!m) return;
+    var params = (m[2] ? m[2].split('&') : []).filter(function (p) { return p && !/^obs=/.test(p); });
+    if (obs) params.push('obs=' + encodeURIComponent(obs));
+    history.replaceState(null, '', m[1] + (params.length ? '?' + params.join('&') : ''));
   }
 
   let filtersBuilt = false;
@@ -889,14 +1011,21 @@
   }
 
   function closeDetailPanel() {
+    // The ≤640 px bottom sheet as well: Escape used to reset only the
+    // desktop pane and never closed the sheet (#180).
+    var sheet = document.getElementById('mobileDetailSheet');
+    if (sheet) sheet.classList.remove('open');
     var panel = document.getElementById('pktRight');
     if (panel) {
       panel.classList.add('empty');
       panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + '<span>Select a packet to view details</span>';
       var layout = panel.closest('.split-layout');
       if (layout) layout.classList.add('detail-collapsed');
+      // Re-render only to drop a row's selection highlight (#180: Clear
+      // Filters closes the detail and reloads the rows itself).
+      var wasSelected = selectedId !== null;
       selectedId = null;
-      renderTableRows();
+      if (wasSelected) renderTableRows();
     }
   }
 
@@ -1053,6 +1182,18 @@
 
   let directObsId = null;
 
+  // #282 (1): the packets list view's Escape-to-close-the-detail-panel handler.
+  // It used to be a fresh `pktEsc` closure registered inside renderLeft(), the
+  // same leak class as nodes.js' #259 nodesPanelEsc: renderLeft() runs on every
+  // visit to #/packets, so each one stacked another live `keydown` listener on
+  // document that destroy() never took off. Module level means a repeat add is
+  // a DOM no-op (at most one listener) and destroy() can remove it.
+  function _pktEsc(e) {
+    if (e.key === 'Escape') {
+      closeDetailPanel();
+    }
+  }
+
   function removeAllByopOverlays() {
     document.querySelectorAll('.byop-overlay').forEach(function (el) { el.remove(); });
   }
@@ -1095,13 +1236,6 @@
         try { renderTableRows(); } catch (e) { console.warn('[packets] hide-1byte re-render failed', e); }
       });
     }
-    // Parse ?obs=OBSERVER_ID from routeParam
-    if (routeParam && routeParam.includes('?')) {
-      const qIdx = routeParam.indexOf('?');
-      const qs = new URLSearchParams(routeParam.substring(qIdx));
-      directObsId = qs.get('obs');
-      routeParam = routeParam.substring(0, qIdx);
-    }
     // Detect route param type: "id/123" for direct packet, short hex for hash, long hex for node
     if (routeParam) {
       if (routeParam.startsWith('id/')) {
@@ -1125,16 +1259,22 @@
     if (_urlRegion) _pendingUrlRegion = _urlRegion;
     var _urlHash = _initUrlParams.get('hash');
     if (_urlHash) filters.hash = _urlHash;
+    // ?obs=<observation id> on #/packets/<hash> selects that observation in
+    // the auto-opened detail below (#147: it used to be parsed from
+    // routeParam, which never carries the query).
+    directObsId = _initUrlParams.get('obs');
     // Shareable "View Path" link (?viewPath=1) -- packet-path-map.js's
     // "Copy link" button builds #/packets/<hash>?viewPath=1, so a shared
     // link reopens the exact same modal instead of leaving the recipient
     // on the plain packet detail page. Independent of the packets-list
     // rendering below (the modal fetches its own data), so it's safe to
-    // fire immediately.
+    // fire immediately. restore() skips a history entry whose modal was
+    // closed on another page (#180); the cold-load updatePacketsUrl() below
+    // then drops ?viewPath=1, as the modal is not open.
     var _urlViewPath = _initUrlParams.get('viewPath');
     if (_urlViewPath === '1') {
       var _viewPathHash = directPacketHash || filters.hash;
-      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.open(_viewPathHash);
+      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.restore(_viewPathHash);
     }
     var _urlNode = _initUrlParams.get('node');
     if (_urlNode) { filters.node = _urlNode; filters.nodeName = _urlNode.slice(0, 8); }
@@ -1144,6 +1284,11 @@
     if (_urlChannel) filters.channel = _urlChannel;
     var _urlFilterExpr = _initUrlParams.get('filter');
     if (_urlFilterExpr) filters._filterExpr = _urlFilterExpr;
+    // #96 — ?hideControl=1|0 wins over the saved choice for this view; only
+    // the checkbox changes the saved choice.
+    var _storedHideControl = readStoredHideControl();
+    savedHideControl = readHideControlPref(null, _storedHideControl);
+    hideControl = readHideControlPref(_initUrlParams.get('hideControl'), _storedHideControl);
     // #749 — restore sort state from URL (overrides localStorage).
     var _urlSort = _initUrlParams.get('sort');
     if (_urlSort && window.URLState) {
@@ -1392,6 +1537,9 @@
     if (_docActionHandler) { document.removeEventListener('click', _docActionHandler); _docActionHandler = null; }
     if (_docMenuCloseHandler) { document.removeEventListener('click', _docMenuCloseHandler); _docMenuCloseHandler = null; }
     if (_docColMenuCloseHandler) { document.removeEventListener('click', _docColMenuCloseHandler); _docColMenuCloseHandler = null; }
+    // #282 (1): drop the module-level Escape handler so a destroyed packets page
+    // leaves no live document keydown listener (and never stacks across visits).
+    document.removeEventListener('keydown', _pktEsc);
     removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
@@ -1616,6 +1764,7 @@
         <div class="filter-group filter-group-toggles">
           <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
           <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg> My Nodes</button>
+          <label class="filter-checkbox" title="Hide CONTROL packets (node discovery) from the list and from live updates. Nothing is discarded; direct links to a packet still open it."><input type="checkbox" id="fHideControl"${hideControl ? ' checked' : ''}> Hide CONTROL packets</label>
           <select id="fTimeWindow" class="filter-select" aria-label="Time window filter">
             <option value="15">Last 15 min</option>
             <option value="30">Last 30 min</option>
@@ -1848,8 +1997,8 @@
       if (filters.type) localStorage.setItem('meshcore-type-filter', filters.type); else localStorage.removeItem('meshcore-type-filter');
       buildTypeMenu();
       updateTypeTrigger();
-      // Type is not in the URL, so leave the hash alone (updatePacketsUrl()
-      // would drop ?obs=/?viewPath=); only refresh the Clear button (#121).
+      // Type is not in the URL, so leave the hash alone; only refresh the
+      // Clear button (#121).
       updateClearFiltersVisibility();
       renderTableRows();
     });
@@ -1976,8 +2125,14 @@
       // Reset region filter
       RegionFilter.setSelected([]);
 
+      // Clear also leaves the packet detail (#180): a #/packets/<hash>
+      // subpath sets filters.hash again on load, so after Clear the URL is
+      // the list and the detail it named is closed.
+      selectedObservationId = null;
+      closeDetailPanel();
+
       // Update URL and reload
-      updatePacketsUrl();
+      updatePacketsUrl({ subpath: '', obs: null });
       loadPackets();
     });
     // Show clear button if page loaded with active filters (e.g. from URL params)
@@ -2004,6 +2159,8 @@
       this.classList.toggle('active', filters.myNodes);
       loadPackets();
     });
+    // #96 — re-filters the loaded packets; no new request.
+    document.getElementById('fHideControl').addEventListener('change', function () { setHideControl(this.checked); });
 
     // Observation sort dropdown
     const obsSortSel = document.getElementById('fObsSort');
@@ -2235,12 +2392,10 @@
       pktBody.addEventListener('keydown', handler);
     }
 
-    // Escape to close packet detail panel
-    document.addEventListener('keydown', function pktEsc(e) {
-      if (e.key === 'Escape') {
-        closeDetailPanel();
-      }
-    });
+    // Escape to close packet detail panel. #282 (1): one listener per page, not
+    // one per renderLeft() -- _pktEsc is a stable module-level reference, so a
+    // repeat add is a DOM no-op, and destroy() takes it off again.
+    document.addEventListener('keydown', _pktEsc);
 
     renderTableRows();
     makeColumnsResizable('#pktTable', 'meshcore-pkt-col-widths');
@@ -2280,9 +2435,47 @@
     }
   }
 
+  // #254: mobile-page-actions.js owns the mobile breakpoint and the #1461 #7
+  // redirect of a group-row click to select-hash. Without it nothing redirects.
+  function groupRowSelectsOnActivate() {
+    return !!(window.MobilePageActions && window.MobilePageActions.isMobile());
+  }
+
+  // #259: a group expanded on desktop used to keep its child rows after the
+  // layout crossed to the mobile mode, where the expand column is hidden and
+  // the row only selects — nothing was left to collapse it with (the dead end
+  // upstream #1461 #7 describes). The hash stays in expandedHashes, so the
+  // children come back on desktop and a phone rotation does not throw the
+  // state away; it is only the rendered slice that leaves them out. This also
+  // covers the first render at a narrow width, e.g. the #866 deep link
+  // #/packets/<hash>?obs=<id>, which expands the hash before any render.
+  function groupIsExpandedInView(hash) {
+    return expandedHashes.has(hash) && !groupRowSelectsOnActivate();
+  }
+
+  // A group row's action and aria-expanded depend on that breakpoint, so a
+  // resize that crosses it (e.g. a phone rotating) re-renders the visible rows.
+  let _groupRowsSelect = false;
+  let _groupRowModeTimer = null;
+  function _onGroupRowModeResize() {
+    clearTimeout(_groupRowModeTimer);
+    _groupRowModeTimer = setTimeout(() => {
+      const selects = groupRowSelectsOnActivate();
+      if (selects === _groupRowsSelect) return;
+      _groupRowsSelect = selects;
+      if (!_displayGrouped) return;
+      // #259: crossing the breakpoint changes how many DOM rows an expanded
+      // group produces, so the cached per-entry counts are stale.
+      _invalidateRowCounts();
+      _lastVisibleStart = -1;
+      _lastVisibleEnd = -1;
+      renderVisibleRows();
+    }, 150);
+  }
+
   // Build HTML for a single grouped packet row
   function buildGroupRowHtml(p, entryIdx = -1) {
-    const isExpanded = expandedHashes.has(p.hash);
+    const isExpanded = groupIsExpandedInView(p.hash);
     let headerObserverId = p.observer_id;
     let headerPathJson = p.path_json;
     if (_observerFilterSet && p._children?.length) {
@@ -2312,8 +2505,17 @@
     const _grpChanStyle = window.ChannelColors ? window.ChannelColors.getRowStyle(_grpDecoded.type || groupTypeName, _grpDecoded.channel) : '';
     const _grpHashStripe = _hashStripeStyle(p.hash);
     const _grpStyle = _grpHashStripe + _grpChanStyle;
-    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
-          <td class="col-expand" style="text-align:center;cursor:pointer">${isSingle ? '' : (isExpanded ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-up"/></svg>')}</td>
+    // #189: disclosure caret, right when collapsed and down when expanded, as in
+    // channels.js, network-digest.js, analytics.js and route-view.js. The row that
+    // toggles reports its state in aria-expanded; a single-observation row cannot
+    // expand, so it has neither.
+    // #254: under the mobile breakpoint activating a group row selects it (#1461
+    // #7, the expand column is hidden there), so the row is select-hash and
+    // claims no expanded state.
+    const _grpToggles = !isSingle && !groupRowSelectsOnActivate();
+    const _grpCaret = isSingle ? '' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-' + (isExpanded ? 'down' : 'right') + '"/></svg>';
+    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${_grpToggles ? 'toggle-select' : 'select-hash'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_grpToggles ? ' aria-expanded="' + isExpanded + '"' : ''}${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
+          <td class="col-expand" style="text-align:center;cursor:pointer">${_grpCaret}</td>
           <td class="col-region">${groupRegion ? `<span class="badge-region">${groupRegion}</span>` : '—'}</td>
           <td class="col-time">${renderTimestampCell(p.latest)}</td>
           <td class="mono col-hash" data-filter-field="hash" data-filter-value="${escapeHtml(p.hash || '')}">${truncate(p.hash || '—', 8)}</td>
@@ -2419,7 +2621,7 @@
   // Used by both row counting and renderVisibleRows to avoid divergence (#424).
   function _getRowCount(p) {
     if (!_displayGrouped) return 1;
-    if (!expandedHashes.has(p.hash) || !p._children) return 1;
+    if (!groupIsExpandedInView(p.hash) || !p._children) return 1;
     let childCount = p._children.length;
     if (_observerFilterSet) {
       childCount = p._children.filter(c => _observerFilterSet.has(String(c.observer_id))).length;
@@ -2919,6 +3121,10 @@
       const types = filters.type.split(',').map(Number);
       displayPackets = displayPackets.filter(p => types.includes(p.payload_type));
     }
+    // #96 — Hide CONTROL packets (display only; a pinned hash bypasses it).
+    const beforeHideControl = displayPackets;
+    if (!hashOnly) displayPackets = filterHiddenControl(displayPackets, hideControl);
+    const controlHidden = displayPackets.length < beforeHideControl.length;
     displayPackets = applyObserverFilter(displayPackets, filters, groupByHash, hashOnly);
 
     // Packet Filter Language
@@ -2946,7 +3152,13 @@
       _lastVisibleEnd = -1;
       detachVScrollListener();
       const colCount = _getColCount();
-      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : 'No packets found') + '</td></tr>';
+      // #211: name CONTROL only when hiding it emptied the list, i.e. a CONTROL
+      // packet would get through the filters below the CONTROL pass.
+      const emptiedByControl = controlHidden && controlHidingEmptiedList(beforeHideControl, (list) => {
+        list = applyObserverFilter(list, filters, groupByHash, hashOnly);
+        return filters._packetFilter ? list.filter(filters._packetFilter) : list;
+      });
+      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : emptiedByControl ? 'No packets found (CONTROL packets are hidden)' : 'No packets found') + '</td></tr>';
       // Restore scroll position after DOM rebuild (#431)
       if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
       return;
@@ -3131,12 +3343,7 @@
   async function selectPacket(id, hash, prefetchedData, obsRowId) {
     selectedId = id;
     selectedObservationId = obsRowId || null;
-    const obsParam = selectedObservationId ? `?obs=${selectedObservationId}` : '';
-    if (hash) {
-      history.replaceState(null, '', `#/packets/${hash}${obsParam}`);
-    } else {
-      history.replaceState(null, '', `#/packets/${id}${obsParam}`);
-    }
+    updatePacketsUrl({ subpath: '/' + (hash || id), obs: selectedObservationId });
     renderTableRows();
     const isMobileNow = window.innerWidth <= 640;
     // #1168 review note: this branch is intentionally narrower than nodes.js /
@@ -3169,7 +3376,7 @@
         onClose: function () {
           selectedId = null;
           selectedObservationId = null;
-          history.replaceState(null, '', '#/packets');
+          updatePacketsUrl({ subpath: '', obs: null });
           renderTableRows();
         }
       });
@@ -3355,10 +3562,12 @@
       } catch {}
     }
 
-    // Parse hash size from path byte
-    const plOff = getPathLenOffset(pkt.route_type);
-    const rawPathByte = pkt.raw_hex ? parseInt(pkt.raw_hex.slice(plOff * 2, plOff * 2 + 2), 16) : NaN;
-    const hashSize = (isNaN(rawPathByte) || (rawPathByte & 0x3F) === 0) ? null : ((rawPathByte >> 6) + 1);
+    // Sender-selected hash width from the path byte. Read it from the SAME
+    // frame the rest of the panel describes (the selected observation's
+    // raw_hex, see buildFieldTable's argument below) -- observations of one
+    // transmission can carry different route types, so the original frame's
+    // header would otherwise contradict the byte breakdown.
+    const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);
 
     const size = effectivePkt.raw_hex ? Math.floor(effectivePkt.raw_hex.length / 2) : (pkt.raw_hex ? Math.floor(pkt.raw_hex.length / 2) : 0);
     const typeName = payloadTypeName(pkt.payload_type);
@@ -3558,10 +3767,11 @@
       row.addEventListener('click', () => {
         const obsId = row.dataset.obsId;
         selectedObservationId = obsId;
-        // Update URL hash to reflect selected observation (deep linking)
-        const pktHash = pkt.hash || pkt.id;
-        const obsParam = obsId ? `?obs=${obsId}` : '';
-        history.replaceState(null, '', `#/packets/${pktHash}${obsParam}`);
+        // Update URL hash to reflect selected observation (deep linking).
+        // This detail renders on the packets list and on the standalone
+        // #/packet/<id> page; each writer only writes on its own route.
+        updatePacketsUrl({ subpath: '/' + (pkt.hash || pkt.id), obs: obsId });
+        updatePacketPageUrl(obsId);
         renderDetail(panel, data, obsId);
       });
     });
@@ -3575,6 +3785,9 @@
     if (viewPathBtn) {
       viewPathBtn.addEventListener('click', () => {
         if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);
+        // The modal is in the DOM now: add ?viewPath=1 like a shared link
+        // has it, so a reload reopens it (#167). Closing drops it again.
+        updatePacketsUrl();
       });
     }
 
@@ -3707,9 +3920,34 @@
     // Path length byte is at current offset (byte 1 for non-transport, byte 5 for transport)
     const pathLenOffset = off;
     const pathByte0 = parseInt(buf.slice(off * 2, off * 2 + 2), 16);
-    const hashSizeVal = isNaN(pathByte0) ? '?' : ((pathByte0 >> 6) + 1);
     const hashCountVal = isNaN(pathByte0) ? '?' : (pathByte0 & 0x3F);
-    rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), hashCountVal === 0 ? `hash_count=0 (direct advert)` : `hash_size=${hashSizeVal} byte${hashSizeVal !== 1 ? 's' : ''}, hash_count=${hashCountVal}`);
+    const headerByte = parseInt(buf.slice(0, 2), 16);
+    const pathBytesAreHops = !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) !== 9;
+    // #282 (7): derive the encoded hash size from the SAME path-length byte this
+    // row shows -- pathByte0 at offset `off`, taken from pkt.route_type. #322
+    // (1): the width rules themselves live in one place, pathHashSizeFromByte()
+    // in app.js, shared with senderPathHashSize(); this caller just hands it the
+    // byte it already read plus pkt.route_type. For a well-formed frame the two
+    // callers' offsets agree, but one rule means the printed byte and its
+    // hash_size label can never describe different bytes -- including a transport
+    // route (path length at byte 5) whose stored route_type and on-wire header
+    // route bits might disagree. The helper returns null for a non-hop path
+    // (TRACE carries SNR), a 0b11 width field (no 4-byte width -- the backend
+    // evidence model only knows 1/2/3, see observed_path_hash_sizes.go), and
+    // sendZeroHop's 0x00 direct marker; the branches below only pick the wording
+    // for each null case.
+    const encodedHashSize = pathHashSizeFromByte(pathByte0, pkt.route_type, headerByte);
+    let pathDescription;
+    if (encodedHashSize != null) {
+      pathDescription = `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;
+    } else if (!pathBytesAreHops) {
+      pathDescription = `hash_count=${hashCountVal} (TRACE: path bytes are SNR, not a hash width)`;
+    } else if (!isNaN(pathByte0) && (pathByte0 >> 6) === 3) {
+      pathDescription = `hash_count=${hashCountVal} (width bits 7-6 = 3: not a valid hash size, 1-3 bytes only)`;
+    } else {
+      pathDescription = `hash_count=${hashCountVal} (no encoded hash size)`;
+    }
+    rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), pathDescription);
     off += 1;
 
     // Path — render hops from path_json (what this observation reported).
@@ -3741,7 +3979,7 @@
     rows += sectionRow('Payload — ' + payloadTypeName(pkt.payload_type), 'section-payload');
 
     if (decoded.type === 'ADVERT') {
-      if (hashCountVal !== 0) rows += fieldRow(pathLenOffset, 'Advertised Hash Size', hashSizeVal + ' byte' + (hashSizeVal !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(pathLenOffset * 2, pathLenOffset * 2 + 2) || '??') + ' — bits 7-6 = ' + (hashSizeVal - 1));
+      if (encodedHashSize != null) rows += fieldRow(pathLenOffset, 'Advertised Hash Size', encodedHashSize + ' byte' + (encodedHashSize !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(pathLenOffset * 2, pathLenOffset * 2 + 2) || '??') + ' — bits 7-6 = ' + (encodedHashSize - 1));
       rows += fieldRow(off, 'Public Key (32B)', truncate(decoded.pubKey || '', 24), '');
       rows += fieldRow(off + 32, 'Timestamp (4B)', decoded.timestampISO || '', 'Unix: ' + (decoded.timestamp || ''));
       rows += fieldRow(off + 36, 'Signature (64B)', truncate(decoded.signature || '', 24), '');
@@ -4119,6 +4357,8 @@
       _themeRefreshHandler = () => { if (typeof renderTableRows === 'function') renderTableRows(); };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
       window.addEventListener('storage', _onStorageChange);
+      _groupRowsSelect = groupRowSelectsOnActivate();
+      window.addEventListener('resize', _onGroupRowModeResize);
       var result = init(app, routeParam);
       // Install channel color picker on packets table (M2, #271)
       if (window.ChannelColorPicker) window.ChannelColorPicker.installPacketsTable();
@@ -4127,6 +4367,8 @@
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
       window.removeEventListener('storage', _onStorageChange);
+      window.removeEventListener('resize', _onGroupRowModeResize);
+      clearTimeout(_groupRowModeTimer);
       return destroy();
     }
   });
@@ -4159,10 +4401,19 @@
       _calcVisibleRange,
       buildPacketsParams,
       applyObserverFilter,
+      readHideControlPref,
+      filterHiddenControl,
       buildReplayPackets,
       renderTableRows,
       _setPackets: function(p) { packets = p; },
       _setFilter: function(k, v) { filters[k] = v; },
+      _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
+      // #259: at <= 600 px groupIsExpandedInView() renders a hash that *is* in
+      // expandedHashes exactly like a collapsed row, so the DOM alone can no
+      // longer tell "did not expand" from "expanded invisibly". The mobile E2E
+      // assertions read the set itself through this.
+      _isExpanded: function(hash) { return expandedHashes.has(hash); },
+      _setDisplayGrouped: function(on) { _displayGrouped = !!on; },
     };
   }
 
@@ -4183,7 +4434,10 @@
         container.innerHTML = `<div style="margin-bottom:16px"><a href="#/packets" style="color:var(--link-color);text-decoration:none">← Back to packets</a></div>`;
         const detail = document.createElement('div');
         container.appendChild(detail);
-        await renderDetail(detail, data);
+        // #/packet/<id>?obs=<id> selects that observation (#167); without
+        // it the first one, not one left over from the packets list.
+        selectedObservationId = getHashParams().get('obs');
+        await renderDetail(detail, data, selectedObservationId);
         app.innerHTML = '';
         app.appendChild(container);
       } catch (e) {

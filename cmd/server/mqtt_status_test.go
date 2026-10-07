@@ -11,14 +11,15 @@ import (
 )
 
 // TestMqttStatus_MasksBrokerPassword (#1043) asserts the /api/mqtt/status
-// handler never leaks the broker password embedded in a mqtt:// URL.
+// handler never leaks the broker password (nor, since #118, the user
+// name) embedded in a mqtt:// URL.
 // Operators viewing the API response (or the Observers panel that
 // consumes it) must see `****` in place of the inline credential.
 //
 // Test shape: write a stub ingestor stats file with one source whose
 // broker URL contains a plaintext password, invoke the handler, assert
-// the JSON response (a) contains the username + host, (b) does NOT
-// contain the password substring.
+// the JSON response (a) contains the host, (b) does NOT contain the
+// password or user name substring.
 func TestMqttStatus_MasksBrokerPassword(t *testing.T) {
 	const password = "hunter2supersecret"
 	const rawBroker = "mqtt://obsuser:" + password + "@broker.example.com:1883"
@@ -67,8 +68,10 @@ func TestMqttStatus_MasksBrokerPassword(t *testing.T) {
 	if !strings.Contains(body, "broker.example.com") {
 		t.Errorf("response missing broker host: %s", body)
 	}
-	if !strings.Contains(body, "obsuser") {
-		t.Errorf("response missing broker username: %s", body)
+	// #118: the user name is masked too. The endpoint is public, and a
+	// user name alone is often the credential (a token).
+	if strings.Contains(body, "obsuser") {
+		t.Errorf("response leaks broker username: %s", body)
 	}
 	// Mask token must be present so operators can tell credentials were
 	// redacted vs the broker URL never having a password to begin with.
@@ -103,29 +106,31 @@ func TestMqttStatus_EmptyWhenNoStatsFile(t *testing.T) {
 
 // TestMaskBrokerURL_Patterns is a unit table-driven test for the masking
 // helper. Kept separate from the handler test so a regression in the
-// regex localizes immediately.
+// masking localizes immediately. Since #118 all user-info is masked, the
+// user name included (the endpoint is public and the user name may be the
+// credential), so the expectations are `scheme://****@host`; more forms
+// in mqtt_status_118_test.go.
 func TestMaskBrokerURL_Patterns(t *testing.T) {
 	cases := []struct {
 		name, in, want string
 	}{
 		{"plain mqtt no creds", "mqtt://broker.example.com:1883", "mqtt://broker.example.com:1883"},
-		{"mqtt with creds", "mqtt://u:secret@broker.example.com:1883", "mqtt://u:****@broker.example.com:1883"},
-		{"mqtts with creds", "mqtts://u:secret@broker.example.com:8883", "mqtts://u:****@broker.example.com:8883"},
-		{"tcp with creds", "tcp://u:p@host:1883", "tcp://u:****@host:1883"},
-		{"ssl with creds", "ssl://u:p@host:8883", "ssl://u:****@host:8883"},
-		{"ws with creds", "ws://u:p@host:8080/mqtt", "ws://u:****@host:8080/mqtt"},
-		{"wss with creds", "wss://u:p@host:443/mqtt", "wss://u:****@host:443/mqtt"},
-		{"uppercase scheme", "MQTT://u:p@host:1883", "MQTT://u:****@host:1883"},
+		{"mqtt with creds", "mqtt://u:secret@broker.example.com:1883", "mqtt://****@broker.example.com:1883"},
+		{"mqtts with creds", "mqtts://u:secret@broker.example.com:8883", "mqtts://****@broker.example.com:8883"},
+		{"tcp with creds", "tcp://u:p@host:1883", "tcp://****@host:1883"},
+		{"ssl with creds", "ssl://u:p@host:8883", "ssl://****@host:8883"},
+		{"ws with creds", "ws://u:p@host:8080/mqtt", "ws://****@host:8080/mqtt"},
+		{"wss with creds", "wss://u:p@host:443/mqtt", "wss://****@host:443/mqtt"},
+		{"uppercase scheme", "MQTT://u:p@host:1883", "MQTT://****@host:1883"},
 		{"empty", "", ""},
-		{"long password", "mqtt://obsuser:hunter2supersecretXYZ123@host:1883", "mqtt://obsuser:****@host:1883"},
+		{"long password", "mqtt://obsuser:hunter2supersecretXYZ123@host:1883", "mqtt://****@host:1883"},
 		{"no scheme bare host", "host:1883", "host:1883"},
 		// Adversarial r1 review (#1682): password contains @. The previous
 		// regex-only impl matched only up to the FIRST @, exposing "ss" as
-		// part of the path: "mqtt://user:****@ss@host". url.Parse handles
-		// this correctly because Go interprets the LAST @ as the userinfo
-		// boundary.
-		{"password with single @", "mqtt://user:p@ss@host:1883", "mqtt://user:****@host:1883"},
-		{"password with multiple @", "mqtt://user:p@ss@wo@host:1883", "mqtt://user:****@host:1883"},
+		// part of the path: "mqtt://user:****@ss@host". The LAST @ is
+		// the user-info boundary.
+		{"password with single @", "mqtt://user:p@ss@host:1883", "mqtt://****@host:1883"},
+		{"password with multiple @", "mqtt://user:p@ss@wo@host:1883", "mqtt://****@host:1883"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

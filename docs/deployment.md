@@ -184,6 +184,44 @@ See `config.example.json` in the repository for all available options including:
 - Geo-filtering
 - Map tile providers (OSM, Stamen, Carto, etc.)
 
+### Disable estimated node positions
+
+Neighbor-derived position estimates are enabled by default. To disable them
+for the entire instance, add this to `config.json`:
+
+```json
+{
+  "estimatedPositions": {
+    "enabled": false
+  }
+}
+```
+
+Omitting the section or its `enabled` field preserves existing behavior
+(`true`). Use a JSON boolean, not the string `"false"`; invalid policy types
+are rejected at startup.
+
+Restart the **Go server** after changing this setting, then refresh open
+browser tabs. The policy is fixed for the lifetime of each server instance;
+SIGHUP does not reload it. No ingestor change or database migration is needed.
+
+When disabled, the server skips neighbor-position estimation and omits its
+results from node details and packet paths, including saved Ping Scores
+paths. Estimate-dependent tools and map views display an operator-disabled
+notice instead of suggesting that no neighbor evidence exists. Areas retains
+reported-position density, bridge nodes, and the unpositioned-node count.
+Reported GPS, ordinary neighbor graphs, and independent IATA/name-based
+fallbacks are unchanged. No stored data is deleted or rewritten: Ping Scores
+path archives captured while estimates were enabled keep their recorded
+approximate geometry and capture time, and the background history refresh
+does not rewrite them while the policy is off, so the original evidence
+reappears as soon as the setting is turned back on.
+
+The effective setting is published through `/api/config/client`. Browser
+preferences and deep links cannot enable it against the server policy. A
+Customizer display preference is deferred to a later milestone and must
+remain subordinate to this operator setting.
+
 ### Reloading config changes without a restart (SIGHUP)
 
 Most `config.json` changes require a container restart to take effect. **`hashChannels`** and **`hashRegions`** are the exception — the ingestor can reload just these two settings live:
@@ -607,6 +645,8 @@ The in-memory packet store grows with retained packets. Configure retention limi
   }
 }
 ```
+
+`packetStore.maxMemoryMB` bounds the store **and the caches that belong to it** — the decoded-packet cache, the path indexes, the resolved relay entries and the per-packet index entries, not just the stored rows. It is enforced in two places: the startup load stops at the budget, and the store evicts oldest-first when it exceeds it, down to 85% of it. Leaving it unset means no limit. Actual usage is on `/api/perf` as `packetStore.trackedMB`, next to `maxMB`.
 
 ### Database locked errors
 

@@ -42,8 +42,25 @@ const VIEWPORTS = [
   { w: 375, h: 812, name: 'mobile-375' },    // repo mobile convention (#1668 M6)
 ];
 
-async function gotoPackets(page) {
-  await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+// #244: open with the widest selectable time window, not the default 15 min.
+// makeColumnsResizable() (app.js) sizes the columns from the rows of the first
+// render; since #258 a (nearly) empty first render is measured again once real
+// rows arrive (test-issue-258-column-widths-e2e.js covers that). With the
+// default window the first rows depend on the fixture age (a few packets ~13
+// min after freshen-fixture.sh, none after 15 min). The newest rows of a 24 h
+// window (3 h at <=1024px, where longer windows are disabled) are the same ones
+// for the whole e2e job (150 min timeout), so this test measures one layout
+// regardless of the fixture age.
+const pinnedWindowMin = (vp) => (vp.w > 1024 ? 1440 : 180);
+// A fixture advert with a long name ("KN6PLV-BrkOxfLA-Yebes", 21 chars); it
+// renders near the top of the list. It is wider than its Details clip on
+// mobile; at 900/1200px Details is wide enough to show it (#258).
+const PINNED_ADVERT_ROW = 'e8b09a35ac87fa5c';
+// Enough of a name to read and click: about two characters.
+const MIN_VISIBLE_LINK_PX = 12;
+
+async function gotoPackets(page, vp) {
+  await page.goto(BASE + '/#/packets?timeWindow=' + pinnedWindowMin(vp), { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#packetFilterInput', { state: 'attached', timeout: 8000 });
   await page.waitForFunction(() => !!document.querySelector('#filterUxBar'), { timeout: 8000 });
   // All time, so the fixture's long channel messages are rendered (same as #1122).
@@ -109,7 +126,7 @@ function measureRows() {
 
     let rows = [];
     await step(`[${vp.name}] navigate to /packets`, async () => {
-      await gotoPackets(page);
+      await gotoPackets(page, vp);
       rows = await page.evaluate(measureRows);
       assert(rows.length > 0, 'no packet rows rendered');
     });
@@ -136,20 +153,68 @@ function measureRows() {
     });
 
     await step(`[${vp.name}] advert links in Details stay visible and clickable`, async () => {
+      // Every advert link in a Details summary that is on screen: the part of
+      // the link inside the one-line clip (its first line fragment) must be
+      // visible and be what a click there hits. A long name that does not fit
+      // wraps; the clamp hides its 2nd+ lines, so the link's bounding box (the
+      // union of its fragments) reaches into hidden lines and the next row --
+      // probing the box centre (#244) tested a hidden spot, not the link.
       const res = await page.evaluate(() => {
-        const links = [...document.querySelectorAll('#pktBody td.col-details .col-details-clip a.hop-link')];
-        for (const a of links) {
-          const r = a.getBoundingClientRect();
-          if (r.width < 2 || r.height < 2 || r.top < 0 || r.bottom > innerHeight) continue;
-          const td = a.closest('td').getBoundingClientRect();
-          const x = Math.min(r.left + 4, td.right - 2), y = r.top + r.height / 2;
-          const hit = document.elementFromPoint(x, y);
-          return { found: true, hitIsLink: !!(hit && (hit === a || a.contains(hit))), text: a.textContent };
+        const desc = (el) => el ? {
+          tag: el.tagName,
+          cls: String(el.className && el.className.baseVal != null ? el.className.baseVal : el.className).slice(0, 60),
+          text: (el.textContent || '').trim().slice(0, 40),
+          row: el.closest('tr') ? el.closest('tr').getAttribute('data-hash') : undefined,
+        } : null;
+        const round = (r) => ({ left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) });
+        const checked = [];
+        for (const a of document.querySelectorAll('#pktBody td.col-details .col-details-clip a.hop-link')) {
+          const clip = a.closest('.col-details-clip').getBoundingClientRect();
+          // Only rows fully on screen (elementFromPoint needs the viewport).
+          if (clip.height < 2 || clip.top < 0 || clip.bottom > innerHeight) continue;
+          const frags = [...a.getClientRects()].filter(r => r.width >= 1 && r.height >= 1);
+          const out = (r) => r.bottom > clip.bottom + 0.5 || r.right > clip.right + 0.5;
+          const item = { row: a.closest('tr').getAttribute('data-hash'), text: a.textContent, clip: round(clip),
+            frags: frags.map(round), truncated: frags.some(out) };
+          // Visible part of the first fragment that intersects the clip.
+          for (const r of frags) {
+            const vis = { left: Math.max(r.left, clip.left), right: Math.min(r.right, clip.right),
+              top: Math.max(r.top, clip.top), bottom: Math.min(r.bottom, clip.bottom) };
+            if (vis.right - vis.left < 1 || vis.bottom - vis.top < 1) continue;
+            item.visibleW = Math.round(vis.right - vis.left);
+            item.point = { x: vis.left + Math.min(4, (vis.right - vis.left) / 2), y: (vis.top + vis.bottom) / 2 };
+            const hit = document.elementFromPoint(item.point.x, item.point.y);
+            item.hitIsLink = !!(hit && (hit === a || a.contains(hit)));
+            if (!item.hitIsLink) item.hit = desc(hit);
+            break;
+          }
+          checked.push(item);
         }
-        return { found: false, count: links.length };
+        return checked;
       });
-      assert(res.found, 'no visible advert link in Details to check (' + JSON.stringify(res) + ')');
-      assert(res.hitIsLink, 'advert link in Details is not hit-testable: ' + JSON.stringify(res));
+      assert(res.length > 0, 'no on-screen advert link in Details to check');
+      // The pinned long-name row must be among them, so the test cannot pass
+      // without exercising a long advert name. On mobile its clip is narrow and
+      // the name must be cut by it (the clamped-link case). Wider, Details is
+      // sized from the real rows (#258), so the name may fit; it must then show
+      // at least half of itself, not just the icon.
+      const pinned = res.find(r => r.row === PINNED_ADVERT_ROW);
+      assert(pinned, `pinned advert row ${PINNED_ADVERT_ROW} is not on screen; checked: ` +
+        JSON.stringify(res.map(r => [r.row, r.text])));
+      if (vp.w <= 640) {
+        assert(pinned.truncated,
+          'pinned advert name fits its mobile Details clip -- the clamped long name is not exercised: ' + JSON.stringify(pinned));
+      } else {
+        const nameW = pinned.frags.reduce((s, r) => s + (r.right - r.left), 0);
+        assert(pinned.visibleW >= nameW / 2,
+          `pinned long advert name shows ${pinned.visibleW}px of ${Math.round(nameW)}px in Details: ` + JSON.stringify(pinned));
+      }
+      const hidden = res.filter(r => !(r.visibleW >= MIN_VISIBLE_LINK_PX));
+      assert(hidden.length === 0, `${hidden.length}/${res.length} advert links show < ${MIN_VISIBLE_LINK_PX}px ` +
+        'of their name in the one-line Details clip: ' + JSON.stringify(hidden.slice(0, 3)));
+      const missed = res.filter(r => !r.hitIsLink);
+      assert(missed.length === 0, `${missed.length}/${res.length} advert links in Details are not hit-testable ` +
+        '(hit = element under the visible part of the link): ' + JSON.stringify(missed.slice(0, 3)));
     });
 
     await step(`[${vp.name}] full message is shown when a long row is selected`, async () => {

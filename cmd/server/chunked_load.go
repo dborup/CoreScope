@@ -487,6 +487,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	s.mu.Lock()
 	for _, tx := range s.packets {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 		s.indexByNode(tx)
 	}
 	// Restore the "s.packets sorted oldest-first by FirstSeen" invariant
@@ -621,7 +622,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
@@ -652,26 +653,10 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				Timestamp: normalizeTimestamp(nullStrVal(obsTimestamp)),
 			}
 
-			rpStr := nullStrVal(resolvedPathStr)
-			if rpStr != "" {
-				rp := unmarshalResolvedPath(rpStr)
-				pks := extractResolvedPubkeys(rp)
-				s.indexResolvedPathHops(tx, pks, hopsSeen)
-			} else if relayPM != nil && obsPJ != "" && obsPJ != "[]" {
-				// resolved_path is NULL on live (since #1287 relay data is
-				// persisted as neighbor_edges, not per-observation). Re-resolve
-				// relay-hop attribution from path_json so relay nodes keep their
-				// analytics history across a restart instead of rebuilding only
-				// from post-restart live traffic. relayPM is passed in from
-				// LoadChunked (fetched before any chunk cursor opened).
-				// byNode ONLY — see the Load() counterpart for why the
-				// resolved_path/path-hop indexes must NOT be populated here.
-				// PR #1643 R1 munger #1: unique_prefix-only gate.
-				rp := resolvePathForObsColdLoad(obsPJ, obsIDStr, tx, relayPM, coldLoadAmbiguousHopsSkipped)
-				for _, pk := range extractResolvedPubkeys(rp) {
-					s.addToByNode(tx, pk)
-				}
-			}
+			// Same relay-hop indexing as Load and live ingest (see
+			// indexObservationRelayHops). relayPM is passed in from
+			// LoadChunked (fetched before any chunk cursor opened).
+			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, coldLoadAmbiguousHopsSkipped)
 
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)

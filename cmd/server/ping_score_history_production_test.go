@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -635,19 +634,12 @@ func TestPingScoreHistoryRealPublisher_StoresIntoServerPingScoresCache(t *testin
 // et al.) and structurally by pingScoreHistorySetStatus's own signature,
 // which has no error parameter to leak through in the first place.
 func TestPingScoreHistoryRealReportError_LogsWithStablePrefix(t *testing.T) {
-	var buf bytes.Buffer
-	orig := log.Writer()
-	origFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	defer func() {
-		log.SetOutput(orig)
-		log.SetFlags(origFlags)
-	}()
-
-	pingScoreHistoryRealReportError("cycle_failed", errors.New("secret detail: /var/lib/corescope/meshcore.db"))
-
-	got := buf.String()
+	// The capture is locked (#310): goroutines from earlier tests keep
+	// logging into whatever writer is installed.
+	got := captureLog(func() {
+		log.SetFlags(0)
+		pingScoreHistoryRealReportError("cycle_failed", errors.New("secret detail: /var/lib/corescope/meshcore.db"))
+	})
 	if !strings.Contains(got, "[ping-scores-history] cycle_failed:") {
 		t.Errorf("log output = %q, want the stable [ping-scores-history] <code>: prefix", got)
 	}

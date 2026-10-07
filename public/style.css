@@ -518,10 +518,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 /* === Touch Targets === */
-/* WCAG 2.5.5 and Apple HIG use a 44x44 CSS px target; Material uses 48x48.
-   Most controls in this section use the 48x48 house preference. Compact
-   .nav-btn and .ch-icon-btn controls retain 44x44 in their component rules.
-   Targets are achieved with min-height/min-width
+/* House preference: 48x48 CSS px minimum for the controls below (#2052),
+   above WCAG 2.5.5's 44x44 minimum. Targets use min-height/min-width
    plus inline-flex centering so existing visual styling (font-size, padding,
    icon size) is preserved on desktop while the *hit area* grows for touch.
    Issue #1060.
@@ -560,6 +558,13 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   touch-action: manipulation;
 }
 
+.nav-btn {
+  min-height: 48px;
+  min-width: 48px;
+  touch-action: manipulation;
+}
+
+.ch-icon-btn,
 .ch-remove-btn,
 .ch-share-btn {
   min-height: 48px;
@@ -603,8 +608,7 @@ button.ch-item {
 }
 
 /* Additional button-like controls discovered during PR #1067 review (Issue
-   #1060 follow-up). Same 48x48 minimums + touch-action so all interactive
-   surfaces meet WCAG 2.5.5. */
+   #1060 follow-up). Same 48x48 house minimums + touch-action. */
 .btn-link,
 .col-toggle-btn,
 .filter-toggle-btn,
@@ -885,8 +889,7 @@ img.brand-logo {
 .nav-btn {
   background: none; border: 1px solid var(--border); color: var(--nav-text-muted); padding: 6px 12px;
   border-radius: 6px; cursor: pointer; font-size: 14px; transition: all .15s;
-  min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
-  touch-action: manipulation;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .nav-btn:hover { background: var(--nav-bg2); color: var(--nav-text); }
 
@@ -894,7 +897,7 @@ img.brand-logo {
 .theme-toggle {
   display: inline-flex; align-items: center; cursor: pointer;
   padding: 0; margin: 0; border: none; background: none;
-  min-width: 44px; min-height: 44px; justify-content: center;
+  min-width: 48px; min-height: 48px; justify-content: center;
 }
 .theme-toggle input[type="checkbox"] {
   position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
@@ -1055,6 +1058,12 @@ img.brand-logo {
 }
 .sort-help:hover .sort-help-tip { display: block; }
 .filter-bar .btn:hover { background: var(--row-hover); }
+/* #96 — "Hide CONTROL packets" checkbox in the packets filter bar. */
+.filter-bar .filter-checkbox { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text); white-space: nowrap; cursor: pointer; }
+.filter-bar .filter-checkbox input[type="checkbox"] { /* not the text-input box above */
+  width: 16px; height: 16px; min-width: 0; min-height: 0; padding: 0; margin: 0; cursor: pointer; accent-color: var(--accent);
+}
+@media (pointer: coarse) { .filter-bar .filter-checkbox { min-height: 44px; } } /* the label is the touch target */
 .filter-bar .btn.active { background: var(--accent-strong); color: var(--text-on-accent); border-color: var(--accent-strong); }
 .filter-bar .col-toggle-btn { height: 34px; min-height: 34px; }
 
@@ -1355,8 +1364,12 @@ img.brand-logo {
  * body.style.overflow capture-and-restore string approach which
  * corrupted overflow under last-writer-wins races. */
 body.scroll-locked { overflow: hidden; }
+/* #180: the SlideOver is a modal dialog (role=dialog, aria-modal, focus
+ * trap), so it stacks on the modal tokens, above the sticky .top-nav (1100).
+ * At 1000/1001 the panel's header and close button sat under the nav at
+ * 641–1023 px, and a click on × landed on the nav. */
 .slide-over-backdrop {
-  position: fixed; inset: 0; z-index: 1000;
+  position: fixed; inset: 0; z-index: var(--z-modal-backdrop);
   background: rgba(0, 0, 0, 0.5);
   cursor: pointer;
 }
@@ -1364,7 +1377,7 @@ body.scroll-locked { overflow: hidden; }
 .slide-over-panel {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: min(480px, 90vw);
-  z-index: 1001;
+  z-index: var(--z-modal);
   background: var(--detail-bg, var(--card-bg, #1f2937));
   color: var(--text, inherit);
   border-left: 1px solid var(--border);
@@ -1392,7 +1405,7 @@ body.scroll-locked { overflow: hidden; }
   color: var(--text-muted, #94a3b8);
   padding: 4px 8px; border-radius: 4px;
   /* WCAG 2.5.5 / Apple HIG — 48px tap target on touch devices. */
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .slide-over-close:hover { color: var(--text, inherit); background: var(--row-hover); }
@@ -1712,16 +1725,23 @@ body.scroll-locked { overflow: hidden; }
 .modal > .modal-close:not(.ch-modal-close):hover { background: var(--row-hover, rgba(0,0,0,0.05)); }
 
 /* #1648 M6 (M5 CDP carry-forward): mobile touch-target. The 4px/10px
-   padding above produces an ~24px hit area, below WCAG's 44×44 minimum.
-   Bump on ≤640px so dismiss is reliably tappable on phones. Applies to
-   both the generic .modal-close and the channel-modal close. */
+   padding above produces an ~24px hit area, below the 48×48 house minimum
+   (#2052, #235). Bump on ≤640px so dismiss is reliably tappable on phones.
+   Applies to both the generic .modal-close and the channel-modal close. */
 @media (max-width: 640px) {
   .modal > .modal-close:not(.ch-modal-close),
   .ch-modal-close {
-    min-width: 44px; min-height: 44px;
+    min-width: 48px; min-height: 48px;
     display: inline-flex; align-items: center; justify-content: center;
     padding: 8px 12px;
   }
+}
+
+/* #249: the add-channel dialog's primary buttons were 32 px tall next to
+   their 48 px inputs. Touch only, like the #630 coarse-pointer block;
+   desktop keeps them at 32 px. */
+@media (pointer: coarse) {
+  #chGenerateBtn, #chPskAddBtn, #chHashtagBtn { min-height: 48px; }
 }
 
 
@@ -1770,6 +1790,10 @@ fieldset.mc-section legend.mc-label { padding: 0; }
 
 /* === Misc === */
 .text-muted { color: var(--text-muted); }
+/* Explanatory note beside a tool's own content (e.g. the operator-disabled
+   notice in Areas -> Position-Fix Coverage Gaps): same size as the muted
+   notes it sits next to, so it does not read as body copy. */
+.estimated-positions-note { font-size: 0.85em; margin: 0 0 8px; }
 .text-center { text-align: center; }
 .mt-8 { margin-top: 8px; }
 .mb-8 { margin-bottom: 8px; }
@@ -1844,6 +1868,8 @@ button.ch-item.selected { background: var(--selected-bg); }
 }
 .ch-item-body { flex: 1; min-width: 0; }
 .ch-item-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 2px; }
+/* Keep both 48px actions inside narrow user-channel rows (#2052). */
+.ch-item.ch-user-added .ch-item-top { flex-wrap: wrap; }
 .ch-item-name { font-weight: 600; font-size: 14px; }
 .ch-item-time { font-size: 12px; font-weight: var(--fw-medium); color: var(--text-muted); white-space: nowrap; } /* #1668 M3 — was 11px/400 */
 .ch-unread-badge {
@@ -1860,13 +1886,12 @@ button.ch-item.selected { background: var(--selected-bg); }
   line-height: 1.4;
 }
 /* Shared icon button base for sidebar row controls (remove ✕, share ⤴). EMOJI-OK-COMMENT
-   WCAG 2.5.5 / Apple HIG: 44x44 CSS px minimum touch target. */
+   Inherits the shared 48x48 house minimum above. */
 .ch-icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   background: none; border: none; color: var(--text-muted);
   cursor: pointer; padding: 4px; margin-left: 2px;
-  min-width: 44px; min-height: 44px; box-sizing: border-box;
-  touch-action: manipulation;
+  box-sizing: border-box;
   opacity: 0.55; transition: opacity 0.15s, color 0.15s;
   line-height: 1; user-select: none;
 }
@@ -1905,7 +1930,7 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   display: none; background: none; border: none; font-size: 22px; cursor: pointer;
   color: var(--text); padding: 8px 12px; border-radius: 4px;
   align-items: center; justify-content: center;
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   -webkit-tap-highlight-color: rgba(0,0,0,.08);
   touch-action: manipulation;
 }
@@ -2462,8 +2487,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
      icon-only row actions, smaller empty state. */
   .ch-sidebar-header {
     padding: 6px 10px; gap: 6px;
-    max-height: 56px;
   }
+  /* #235: with 48px touch targets the region pills cannot share a row with
+     the title and + Add at phone width. Keep title and + Add on the first
+     row and give the pills the second. The old max-height: 56px cap only
+     hid the overflow: the list was drawn over the lower half of the pills. */
+  .ch-sidebar-header .ch-header-region { order: 1; }
   .ch-sidebar-title { font-size: 14px; }
   .ch-sidebar-title .ch-icon { font-size: 16px; }
   .ch-add-channel-btn { padding: 4px 8px; font-size: 12px; }
@@ -2472,11 +2501,14 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .ch-header-region .region-filter-bar { padding: 0; gap: 4px; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
+  /* #239: order: 1 puts the dropdown trigger (more than 4 regions) at the
+     right edge of the strip, so its menu opens leftwards from there. */
+  .ch-header-region .region-dropdown-menu { left: auto; right: 0; }
 
   /* Channel list row: name must dominate. Below 768px channels.js renders
      the flat .ch-row list (#1367), which has no inline share/remove
      actions, so there is no size override for .ch-icon-btn here: wherever
-     those actions render they keep the 44x44 target from the base rule. */
+     those actions render they keep the shared 48x48 house minimum. */
   #chList .ch-item { padding: 10px 12px; gap: 10px; }
   #chList .ch-item-name { flex: 1 1 auto; min-width: 0; }
   #chList .ch-item-top { gap: 6px; }
@@ -2600,8 +2632,6 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 
 /* === Grouped Packet Rows === */
 .group-header { cursor: pointer; font-weight: 600; }
-.group-header td:first-child::before { content: '▶ '; font-size: 10px; color: var(--link-color); transition: transform 0.15s; display: inline-block; }
-.group-header.expanded td:first-child::before { content: '▼ '; }
 .group-header:hover { background: var(--row-hover); }
 .group-child { font-size: 12px; }
 .group-child td { padding-left: 20px; }
@@ -2612,12 +2642,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
-/* Favorite stars — Phosphor sprite, 44×44 hit target (WCAG 2.5.5) */
+/* Favorite stars — Phosphor sprite, 48×48 hit target (the house minimum, #2052) */
 .fav-star {
   background: none; border: none; cursor: pointer;
   color: var(--text-muted); padding: 0; line-height: 1;
   transition: color .15s, transform .15s;
-  min-width: 44px; min-height: 44px;
+  min-width: 48px; min-height: 48px;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .fav-star .ph-icon { width: 22px; height: 22px; }
@@ -2720,9 +2750,9 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   backdrop-filter: blur(12px);
   color: var(--text) !important;
   border-color: var(--border) !important;
-  width: 44px !important;
-  height: 44px !important;
-  line-height: 44px !important;
+  width: 48px !important;
+  height: 48px !important;
+  line-height: 48px !important;
   font-size: 20px !important;
 }
 .leaflet-control-zoom a:hover {
@@ -2824,7 +2854,7 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
     min-height: 36px;
     font-size: 14px;
   }
-  .ch-avatar.ch-tappable { min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
+  .ch-avatar.ch-tappable { min-width: 48px; min-height: 48px; width: 48px; height: 48px; }
   /* #1253: trim .badge-iata h-padding + margin-left on narrow viewports so
    * the observer cell + IATA pill fits within a 375px viewport. Without this
    * the badge right edge overflows by ~1.25px at 375px (same class of fix
@@ -2848,6 +2878,14 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
   margin-bottom: 12px; border: 1px solid var(--border);
 }
 .node-full-card h4 { margin: 0 0 10px; font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; }
+/* #254: the Affinity Debug heading is a disclosure button. It keeps the h4
+ * look and spans the heading, so the whole row toggles as before. */
+.node-full-card h4 .affinity-debug-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  margin: 0; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; text-align: start;
+}
+@media (pointer: coarse) { .node-full-card h4 .affinity-debug-toggle { min-height: 48px; } }
 .node-activity-list { display: flex; flex-direction: column; gap: 6px; }
 .node-activity-item {
   display: flex; gap: 8px; font-size: 13px; padding: 6px 0;
@@ -2861,6 +2899,8 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 .node-adverts-counts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); }
 .node-adverts-count-row strong { margin-right: 4px; color: var(--text); }
 .node-adverts-note { margin: 0 0 8px; font-size: 12px; }
+.node-adverts-intervals { display: flex; flex-direction: column; gap: 2px; margin: 0 0 8px; font-size: 12px; color: var(--text-muted); cursor: help; }
+.node-adverts-interval-row strong { margin-right: 4px; color: var(--text); }
 .node-adverts-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
 .node-adverts-tabs .tab-btn { padding: 4px 10px; }
 .node-adverts-empty { font-size: 13px; }
@@ -3320,8 +3360,8 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .home-footer,
 .home-favorites { max-width: 1200px; }
 
-/* #40 — Increase suggest-claim touch target to ≥44px */
-.suggest-claim { min-height: 44px; min-width: 44px; padding: 10px 14px; display: inline-flex; align-items: center; justify-content: center; }
+/* #40, #235 — suggest-claim touch target at the 48px house minimum */
+.suggest-claim { min-height: 48px; min-width: 48px; padding: 10px 14px; display: inline-flex; align-items: center; justify-content: center; }
 
 /* #41 — Lower My Nodes grid minimum to prevent overflow on 375-640px */
 .my-nodes-grid { max-width: 1200px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
@@ -3565,7 +3605,7 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .area-dropdown-item.area-item-active { color: var(--accent); font-weight: 600; }
 .region-filter-container { margin: 0; padding: 0; display: inline-flex; align-items: center; }
 .region-pill {
-  display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 16px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 4px 12px; border-radius: 16px;
   font-size: 12px; font-weight: 500; cursor: pointer; border: 1.5px solid var(--border);
   background: transparent; color: var(--text-muted); transition: all 0.15s; white-space: nowrap;
   flex-shrink: 0;
@@ -4450,14 +4490,13 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 /* === #630 — Mobile Accessibility Fixes === */
 
-/* #630-1: Touch targets — minimum 44px on touch devices */
+/* #630-1: Touch targets — 48px house minimum on touch devices (#2052, #235) */
 @media (pointer: coarse) {
   .filter-bar .btn,
   .filter-group .btn,
   .tab-btn,
   .filter-bar input,
   .filter-bar select,
-  .nav-btn,
   .region-pill,
   .region-dropdown-trigger,
   .multi-select-trigger,
@@ -4465,16 +4504,16 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .analytics-time-range button,
   .detail-back-btn,
   .filter-toggle-btn {
-    min-height: 44px;
-    min-width: 44px;
+    min-height: 48px;
+    min-width: 48px;
   }
   .filter-bar input,
   .filter-bar select {
-    height: 44px;
+    height: 48px;
   }
   .region-dropdown-trigger,
   .multi-select-trigger {
-    height: 44px;
+    height: 48px;
   }
 }
 
@@ -5361,7 +5400,7 @@ body { touch-action: pan-y; }
 .ch-back {
   display: none; background: none; border: 0; cursor: pointer;
   color: var(--text); font-size: 24px; line-height: 1;
-  min-width: 40px; min-height: 40px; padding: 0 8px;
+  min-width: 48px; min-height: 48px; padding: 0 8px;
   border-radius: 6px;
   align-items: center; justify-content: center;
   -webkit-tap-highlight-color: rgba(0,0,0,.08);

@@ -16,7 +16,7 @@ import (
 
 // --- query-count instrumentation (test-only) -------------------------------
 //
-// Proves GetPacketPathsBulk/nearestPositionedNeighborsBulk genuinely batch
+// Proves getPacketPathsBulk/nearestPositionedNeighborsBulk genuinely batch
 // (query count scales with chunk count, not with hash/pubkey count) and
 // proves the VALUES-CTE parameter budget is exactly N per chunk of N
 // targets, not 2N -- by wrapping modernc.org/sqlite's real driver.Conn and
@@ -114,7 +114,7 @@ func registerCountingDriver() {
 var countingDBNameCounter int64
 
 // setupPacketPathCountingDB builds an isolated, query-counting v3-schema DB
-// covering only what GetPacketPath/GetPacketPathsBulk/
+// covering only what getPacketPath/getPacketPathsBulk/
 // nearestPositionedNeighbor/observationFingerprintsBulk touch. Deliberately
 // smaller than setupTestDB's schema and on its own driver registration,
 // since query-count instrumentation needs to intercept the actual
@@ -160,23 +160,23 @@ func setupPacketPathCountingDB(t *testing.T) *DB {
 	return db
 }
 
-// --- GetPacketPathsBulk: golden equivalence against GetPacketPath ----------
+// --- getPacketPathsBulk: golden equivalence against getPacketPath ----------
 
-// TestGetPacketPathsBulk_MatchesGetPacketPath_RichFixture is the core
+// TestGetPacketPathsBulk_MatchesgetPacketPath_RichFixture is the core
 // golden test: one DB seeded with five hashes covering First-vs-deepest-
 // branch divergence, weighted-neighbor-centroid fallback for both a hop
 // point and an observer, (0,0) null-island exclusion, ambiguous
 // name-match skipping, and observer-position source ordering (own GPS >
 // name match > IATA) -- plus one hash never inserted at all. All five are
-// requested from GetPacketPathsBulk in a single call (forcing the shared
+// requested from getPacketPathsBulk in a single call (forcing the shared
 // nodeByPK/nodeByName/neighbor-estimate resolution to run jointly across
 // all of them, exactly the risky part of this refactor) and each is
-// compared field-for-field against an independent GetPacketPath call for
+// compared field-for-field against an independent getPacketPath call for
 // that same hash. Every fixture keeps branch hop-counts distinct within a
 // hash -- resp.Branches is built from iterating a Go map, so if two
 // branches tied on Hops their relative order would be nondeterministic
 // between the single and bulk paths' independently-populated maps; that's
-// pre-existing GetPacketPath behavior, not something this phase changes,
+// pre-existing getPacketPath behavior, not something this phase changes,
 // so the fixtures simply avoid exercising it.
 func TestGetPacketPathsBulk_MatchesGetPacketPath_RichFixture(t *testing.T) {
 	db := setupTestDB(t)
@@ -250,9 +250,9 @@ func TestGetPacketPathsBulk_MatchesGetPacketPath_RichFixture(t *testing.T) {
 		"bulkfirst0000001", "bulkapprox000001", "bulknull00000001",
 		"bulkambig0000001", "bulkownpos000001", "bulkunknown0000x",
 	}
-	bulk, err := db.GetPacketPathsBulk(hashes, 500)
+	bulk, err := db.testPacketPathsBulk(hashes, 500)
 	if err != nil {
-		t.Fatalf("GetPacketPathsBulk: %v", err)
+		t.Fatalf("testPacketPathsBulk: %v", err)
 	}
 
 	if _, ok := bulk["bulkunknown0000x"]; ok {
@@ -260,16 +260,16 @@ func TestGetPacketPathsBulk_MatchesGetPacketPath_RichFixture(t *testing.T) {
 	}
 
 	for _, hash := range hashes[:5] {
-		single, err := db.GetPacketPath(hash, 500)
+		single, err := db.testPacketPath(hash, 500)
 		if err != nil {
-			t.Fatalf("GetPacketPath(%s): %v", hash, err)
+			t.Fatalf("testPacketPath(%s): %v", hash, err)
 		}
 		gotBulk, ok := bulk[hash]
 		if !ok {
 			t.Fatalf("bulk map missing %s", hash)
 		}
 		if !reflect.DeepEqual(gotBulk, single) {
-			t.Errorf("GetPacketPathsBulk(%s) != GetPacketPath(%s):\n bulk:   %+v\n single: %+v", hash, hash, dumpPacketPathResponse(gotBulk), dumpPacketPathResponse(single))
+			t.Errorf("testPacketPathsBulk(%s) != testPacketPath(%s):\n bulk:   %+v\n single: %+v", hash, hash, dumpPacketPathResponse(gotBulk), dumpPacketPathResponse(single))
 		}
 	}
 }
@@ -315,9 +315,9 @@ func derefF(f *float64) interface{} {
 func TestGetPacketPathsBulk_EmptyInput(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
-	result, err := db.GetPacketPathsBulk(nil, 0)
+	result, err := db.testPacketPathsBulk(nil, 0)
 	if err != nil {
-		t.Fatalf("GetPacketPathsBulk(nil): %v", err)
+		t.Fatalf("testPacketPathsBulk(nil): %v", err)
 	}
 	if len(result) != 0 {
 		t.Errorf("result = %+v, want empty map", result)
@@ -329,9 +329,9 @@ func TestGetPacketPathsBulk_NoResolvedPath(t *testing.T) {
 	defer db.Close()
 	db.hasResolvedPathFlag.v.Store(false)
 
-	_, err := db.GetPacketPathsBulk([]string{"whatever"}, 0)
+	_, err := db.testPacketPathsBulk([]string{"whatever"}, 0)
 	if err == nil {
-		t.Fatal("GetPacketPathsBulk with hasResolvedPath=false: want error, got nil")
+		t.Fatal("testPacketPathsBulk with hasResolvedPath=false: want error, got nil")
 	}
 }
 
@@ -346,7 +346,7 @@ func TestGetPacketPathsBulk_DuplicateHashesCollapse(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 9.0, -88, '[]', 100)`)
 
-	result, err := db.GetPacketPathsBulk([]string{"bulkdup00000001", "BULKDUP00000001", "bulkdup00000001"}, 0)
+	result, err := db.testPacketPathsBulk([]string{"bulkdup00000001", "BULKDUP00000001", "bulkdup00000001"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestGetPacketPathsBulk_DuplicateHashesCollapse(t *testing.T) {
 	}
 }
 
-// --- GetPacketPathsBulk: query-count instrumentation -----------------------
+// --- getPacketPathsBulk: query-count instrumentation -----------------------
 
 // TestGetPacketPathsBulk_QueryCountIndependentOfHashCount proves the whole
 // point of Phase 4B: total query count for a batch that fits in one chunk
@@ -403,15 +403,15 @@ func TestGetPacketPathsBulk_QueryCountIndependentOfHashCount(t *testing.T) {
 
 	smallHashes := seedPacketPathFixture("small", 3)
 	resetBulkTestQueryLog()
-	if _, err := db.GetPacketPathsBulk(smallHashes, 0); err != nil {
-		t.Fatalf("GetPacketPathsBulk(small): %v", err)
+	if _, err := db.testPacketPathsBulk(smallHashes, 0); err != nil {
+		t.Fatalf("testPacketPathsBulk(small): %v", err)
 	}
 	smallCount := len(bulkTestQueryLog())
 
 	largeHashes := seedPacketPathFixture("large", 30)
 	resetBulkTestQueryLog()
-	if _, err := db.GetPacketPathsBulk(largeHashes, 0); err != nil {
-		t.Fatalf("GetPacketPathsBulk(large): %v", err)
+	if _, err := db.testPacketPathsBulk(largeHashes, 0); err != nil {
+		t.Fatalf("testPacketPathsBulk(large): %v", err)
 	}
 	largeCount := len(bulkTestQueryLog())
 
@@ -426,8 +426,8 @@ func TestGetPacketPathsBulk_QueryCountIndependentOfHashCount(t *testing.T) {
 	// concrete rather than just "not proportional".
 	resetBulkTestQueryLog()
 	for _, h := range largeHashes {
-		if _, err := db.GetPacketPath(h, 0); err != nil {
-			t.Fatalf("GetPacketPath(%s): %v", h, err)
+		if _, err := db.testPacketPath(h, 0); err != nil {
+			t.Fatalf("testPacketPath(%s): %v", h, err)
 		}
 	}
 	naiveCount := len(bulkTestQueryLog())
@@ -708,15 +708,15 @@ func TestNearestPositionedNeighborsBulk_ChunksAcrossBoundary(t *testing.T) {
 //
 // setupTestDB/setupTestDBV2 don't cover this: setupTestDB always forces
 // isV3Flag true, and setupTestDBV2's observations table has no
-// resolved_path column at all (it predates GetPacketPath entirely), so
-// GetPacketPath's own legacy-schema SQL branch has never actually been
+// resolved_path column at all (it predates getPacketPath entirely), so
+// getPacketPath's own legacy-schema SQL branch has never actually been
 // exercised by a Go test in this codebase -- a pre-existing gap, not
-// something Phase 4B changes. GetPacketPathsBulk adds a second copy of
+// something Phase 4B changes. getPacketPathsBulk adds a second copy of
 // that branching (isV3() ? v3 query : legacy query), so this test builds
 // a minimal legacy-shaped schema (observer_id/observer_name columns
 // instead of an observers table join, but WITH resolved_path present)
-// to prove the legacy query text GetPacketPathsBulk issues is at least
-// syntactically correct and produces the same result GetPacketPath would.
+// to prove the legacy query text getPacketPathsBulk issues is at least
+// syntactically correct and produces the same result getPacketPath would.
 func setupPacketPathLegacyTestDB(t *testing.T) *DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:")
@@ -764,31 +764,31 @@ func TestGetPacketPathsBulk_LegacySchemaMatchesGetPacketPath(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_id, observer_name, snr, rssi, path_json, resolved_path, timestamp)
 		VALUES (1, 'legacyobs2', 'Legacy Observer Two', 4.0, -95, '["aa","bb"]', '["pklegacy1","pklegacy2"]', 1736935260)`)
 
-	single, err := db.GetPacketPath("legacyhash000001", 0)
+	single, err := db.testPacketPath("legacyhash000001", 0)
 	if err != nil {
-		t.Fatalf("GetPacketPath: %v", err)
+		t.Fatalf("testPacketPath: %v", err)
 	}
 	if len(single.Branches) != 2 {
 		t.Fatalf("sanity check failed: single.Branches = %+v, want 2 (fixture problem, not the code under test)", single.Branches)
 	}
 
-	bulk, err := db.GetPacketPathsBulk([]string{"legacyhash000001"}, 0)
+	bulk, err := db.testPacketPathsBulk([]string{"legacyhash000001"}, 0)
 	if err != nil {
-		t.Fatalf("GetPacketPathsBulk: %v", err)
+		t.Fatalf("testPacketPathsBulk: %v", err)
 	}
 	got, ok := bulk["legacyhash000001"]
 	if !ok {
 		t.Fatal("bulk map missing legacyhash000001")
 	}
 	if !reflect.DeepEqual(got, single) {
-		t.Errorf("GetPacketPathsBulk != GetPacketPath on the legacy schema branch:\n bulk:   %+v\n single: %+v", dumpPacketPathResponse(got), dumpPacketPathResponse(single))
+		t.Errorf("testPacketPathsBulk != testPacketPath on the legacy schema branch:\n bulk:   %+v\n single: %+v", dumpPacketPathResponse(got), dumpPacketPathResponse(single))
 	}
 }
 
 // ============================================================================
 // Fix round 2 (review of commit 511438d5): chunking correctness for
 // resolveNodesByPubkey/resolveNodesByName/nearestPositionedNeighborsChunk's
-// candidate lookup, deterministic tie-breaks, and the GetPacketPathsBulk
+// candidate lookup, deterministic tie-breaks, and the getPacketPathsBulk
 // empty-input fast path.
 // ============================================================================
 
@@ -1147,7 +1147,7 @@ func TestGetPacketPath_TieBreak_SameHopsDifferentPath(t *testing.T) {
 		VALUES (1, 1, 9.0, -88, '["bb"]', '["pkTieB"]', 100)`)
 
 	for i := 0; i < 5; i++ {
-		resp, err := db.GetPacketPath("tiehops0000001", 0)
+		resp, err := db.testPacketPath("tiehops0000001", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1182,7 +1182,7 @@ func TestGetPacketPath_TieBreak_SameEarliestTimestamp(t *testing.T) {
 		VALUES (1, 2, 4.0, -95, '[]', 100)`)
 
 	for i := 0; i < 5; i++ {
-		resp, err := db.GetPacketPath("tiefirst0000001", 0)
+		resp, err := db.testPacketPath("tiefirst0000001", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1229,7 +1229,7 @@ func TestGetPacketPath_BranchSortTieBreak_MultipleBranchesSameHops(t *testing.T)
 
 	var firstOrder []string
 	for i := 0; i < 5; i++ {
-		resp, err := db.GetPacketPath("tiebranch000001", 0)
+		resp, err := db.testPacketPath("tiebranch000001", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1261,11 +1261,11 @@ func TestGetPacketPath_BranchSortTieBreak_MultipleBranchesSameHops(t *testing.T)
 	}
 }
 
-// TestGetPacketPathsBulk_MatchesGetPacketPath_WithHopsAndTimestampTies is a
+// TestGetPacketPathsBulk_MatchesgetPacketPath_WithHopsAndTimestampTies is a
 // golden-equivalence test specifically for the tie-break paths: three
 // branches tied on Hops (observer-key order) plus a First/earliest-timestamp
-// tie. GetPacketPathsBulk must resolve to the exact same PacketPathResponse
-// GetPacketPath does, byte-for-byte, proving the deterministic tie-breaks
+// tie. getPacketPathsBulk must resolve to the exact same PacketPathResponse
+// getPacketPath does, byte-for-byte, proving the deterministic tie-breaks
 // (obsID-based fold, observer-key-ascending build order, stable Hops sort)
 // are genuinely shared between the two paths and not just each
 // independently "consistent with itself".
@@ -1286,11 +1286,11 @@ func TestGetPacketPathsBulk_MatchesGetPacketPath_WithHopsAndTimestampTies(t *tes
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 3, 9.0, -88, '["aa","bb"]', 200)`)
 
-	single, err := db.GetPacketPath("tiebulk00000001", 0)
+	single, err := db.testPacketPath("tiebulk00000001", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bulk, err := db.GetPacketPathsBulk([]string{"tiebulk00000001"}, 0)
+	bulk, err := db.testPacketPathsBulk([]string{"tiebulk00000001"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1299,11 +1299,11 @@ func TestGetPacketPathsBulk_MatchesGetPacketPath_WithHopsAndTimestampTies(t *tes
 		t.Fatal("bulk map missing tiebulk00000001")
 	}
 	if !reflect.DeepEqual(got, single) {
-		t.Errorf("GetPacketPathsBulk != GetPacketPath under ties:\n bulk:   %+v\n single: %+v", dumpPacketPathResponse(got), dumpPacketPathResponse(single))
+		t.Errorf("testPacketPathsBulk != testPacketPath under ties:\n bulk:   %+v\n single: %+v", dumpPacketPathResponse(got), dumpPacketPathResponse(single))
 	}
 }
 
-// --- GetPacketPathsBulk empty-input fast path -------------------------------
+// --- getPacketPathsBulk empty-input fast path -------------------------------
 
 // TestGetPacketPathsBulk_EmptyInputSkipsSchemaCheck proves the fixed
 // ordering: an empty hashes slice returns an empty map with no error even
@@ -1317,9 +1317,9 @@ func TestGetPacketPathsBulk_EmptyInputSkipsSchemaCheck(t *testing.T) {
 	db.hasResolvedPathFlag.v.Store(false) // simulates a schema without resolved_path
 
 	resetBulkTestQueryLog()
-	result, err := db.GetPacketPathsBulk(nil, 0)
+	result, err := db.testPacketPathsBulk(nil, 0)
 	if err != nil {
-		t.Fatalf("GetPacketPathsBulk(nil) on a no-resolved_path schema: want no error, got %v", err)
+		t.Fatalf("testPacketPathsBulk(nil) on a no-resolved_path schema: want no error, got %v", err)
 	}
 	if len(result) != 0 {
 		t.Errorf("result = %+v, want empty map", result)
@@ -1331,8 +1331,8 @@ func TestGetPacketPathsBulk_EmptyInputSkipsSchemaCheck(t *testing.T) {
 	// Sanity check: a NON-empty request against the same no-resolved_path
 	// DB must still error -- the fast path is empty-input-specific, not a
 	// blanket skip of the schema check.
-	_, err = db.GetPacketPathsBulk([]string{"whatever"}, 0)
+	_, err = db.testPacketPathsBulk([]string{"whatever"}, 0)
 	if err == nil {
-		t.Fatal("GetPacketPathsBulk([]string{\"whatever\"}) on a no-resolved_path schema: want an error")
+		t.Fatal("testPacketPathsBulk([]string{\"whatever\"}) on a no-resolved_path schema: want an error")
 	}
 }

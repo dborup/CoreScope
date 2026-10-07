@@ -205,7 +205,7 @@ async function waitSettled(page, root) {
       };
     }, MIX);
     assert(r.plainKeys === 'node,recentAdverts' && !r.plainRouteClass, 'plain: ' + JSON.stringify(r));
-    assert(r.optedKeys === 'advertCounts,node,recentAdverts,recentAdvertsByRoute' && r.optedRouteClass, 'opted in: ' + JSON.stringify(r));
+    assert(r.optedKeys === 'advertCounts,advertIntervals,node,recentAdverts,recentAdvertsByRoute' && r.optedRouteClass, 'opted in: ' + JSON.stringify(r));
   });
 
   await step('mobile 390×844: no horizontal overflow, tabs usable', async () => {

@@ -273,20 +273,44 @@ async function edgeSwipe(page, x0, y0, x1, y1, steps) {
 
   await wideCtx.close();
 
-  // (k) #150: the header title (and close button) must be readable on the
-  // header background in both themes. The light theme used to paint the
-  // header with --surface-2 (white) under the white --nav-text title.
+  // (k) #150, #172: the header title and the close button must be readable
+  // (4.5:1) on the header background in both themes and with every
+  // customizer preset. The light theme used to paint the header with
+  // --surface-2 (white) under the white --nav-text title (#150), and the
+  // close button's --nav-text-muted fell below 4.5:1 on --nav-bg2 in the
+  // forest, sunset and mono presets (#172).
   for (const theme of ['light', 'dark']) {
-    await step(`(k) ${theme} theme: header title ≥ 4.5:1 and close button ≥ 3:1 on the header background`, async () => {
-      const ctx = await browser.newContext({ viewport: { width: 1024, height: 800 }, colorScheme: theme });
-      const p = await ctx.newPage();
-      p.setDefaultTimeout(10000);
-      await p.addInitScript((t) => { try { localStorage.setItem('meshcore-theme', t); } catch (_) {} }, theme);
-      try {
-        await p.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
-        await p.waitForFunction(() => !!(window.__navDrawer && window.__navDrawer.open));
+    const ctx = await browser.newContext({ viewport: { width: 1024, height: 800 }, colorScheme: theme });
+    const p = await ctx.newPage();
+    p.setDefaultTimeout(10000);
+    await p.addInitScript((t) => { try { localStorage.setItem('meshcore-theme', t); localStorage.removeItem('cs-theme-overrides'); } catch (_) {} }, theme);
+    let presets = [];
+    await step(`(k) ${theme} theme: list the customizer presets`, async () => {
+      await p.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+      await p.waitForFunction(() => !!(window.__navDrawer && window.__navDrawer.open && window._customizerV2 && window._customizerV2.initDone));
+      await p.click('#customizeToggle');
+      await p.waitForSelector('.cust-overlay:not(.hidden)');
+      const tabBtn = await p.$('.cust-tab[data-tab="theme"]');
+      if (tabBtn) await tabBtn.click();
+      presets = await p.$$eval('.cust-preset-btn[data-preset]', (els) => els.map((e) => e.getAttribute('data-preset')));
+      for (const id of ['default', 'forest', 'sunset', 'mono']) assert(presets.includes(id), 'preset ' + id + ' missing: ' + presets.join(','));
+    });
+    for (const id of presets) {
+      await step(`(k) ${theme} / ${id}: header title and close button ≥ 4.5:1 on the header background`, async () => {
+        await p.$eval(`.cust-preset-btn[data-preset="${id}"]`, (b) => b.click());
+        // the preset is applied: --nav-bg2 is the preset's (default: no overrides)
+        await p.waitForFunction((t) => {
+          const raw = localStorage.getItem('cs-theme-overrides');
+          if (!raw) return true;
+          const o = JSON.parse(raw);
+          const want = ((t === 'dark' ? o.themeDark : o.theme) || {}).navBg2;
+          const got = getComputedStyle(document.documentElement).getPropertyValue('--nav-bg2').trim();
+          return !want || got.toLowerCase() === want.toLowerCase();
+        }, theme);
         await p.evaluate(() => window.__navDrawer.open());
         await p.waitForSelector('[data-nav-drawer] .nav-drawer-title', { state: 'visible' });
+        // measure the settled colours, not a colour transition's midpoint
+        await p.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'));
         const r = await p.evaluate(() => {
           function rgba(s) {
             const m = /rgba?\(([^)]+)\)/.exec(s);
@@ -326,15 +350,18 @@ async function edgeSwipe(page, x0, y0, x1, y1, steps) {
             theme: document.documentElement.getAttribute('data-theme'),
             bg: getComputedStyle(header).backgroundColor,
             title: getComputedStyle(title).color,
+            close: getComputedStyle(close).color,
             titleRatio: ratio(rgba(getComputedStyle(title).color), bg),
             closeRatio: ratio(rgba(getComputedStyle(close).color), backdrop(close)),
           };
         });
+        await p.evaluate(() => window.__navDrawer.close());
         assert(r.theme === theme, 'data-theme is ' + r.theme + ', want ' + theme);
         assert(r.titleRatio >= 4.5, `title ${r.title} on header ${r.bg}: ${r.titleRatio.toFixed(2)}:1 < 4.5:1`);
-        assert(r.closeRatio >= 3, `close button on header ${r.bg}: ${r.closeRatio.toFixed(2)}:1 < 3:1`);
-      } finally { await ctx.close(); }
-    });
+        assert(r.closeRatio >= 4.5, `close button ${r.close} on header ${r.bg}: ${r.closeRatio.toFixed(2)}:1 < 4.5:1`);
+      });
+    }
+    await ctx.close();
   }
 
   // ── Narrow viewport (Option A): drawer disabled ──

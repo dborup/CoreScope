@@ -30,8 +30,7 @@ import (
 const pruneBatchTransmissions = 250
 
 // pruneAgedTransmissionIDs selects the next batch of transmissions older than
-// the cutoff. Both statements of a batch embed it, so they resolve the same
-// set: nothing modifies `transmissions` between them inside the transaction.
+// the cutoff.
 //
 // The ORDER BY must be satisfiable from idx_transmissions_first_seen. That
 // index carries the rowid as its tiebreaker, so "first_seen, id" is walked
@@ -44,13 +43,49 @@ const pruneBatchTransmissions = 250
 // pins the plan.
 const pruneAgedTransmissionIDs = `SELECT id FROM transmissions WHERE first_seen < ? ORDER BY first_seen, id LIMIT ?`
 
-// The statements of one prune batch. Child rows go first (no CASCADE in
-// SQLite): observations, then the batch's route_mask_changes rows (#89; via
-// idx_route_mask_changes_tx), then the transmissions themselves.
-const (
-	pruneObservationsBatch     = `DELETE FROM observations WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
-	pruneRouteMaskChangesBatch = `DELETE FROM route_mask_changes WHERE transmission_id IN (` + pruneAgedTransmissionIDs + `)`
-	pruneTransmissionsBatch    = `DELETE FROM transmissions WHERE id IN (` + pruneAgedTransmissionIDs + `)`
+// pruneAgedPacketIDs is pruneAgedTransmissionIDs without channel messages
+// (GRP_TXT, payload_type 5), for when retention.channelDays keeps them longer
+// than packetDays (#296). `IS NOT` keeps a NULL payload_type prunable.
+//
+// The payload_type test is not in idx_transmissions_first_seen, so the walk
+// steps over every kept channel message below the cutoff. The first_seen >= ?
+// lower bound is the batch cursor that keeps that walk from repeating: each
+// batch starts at the newest first_seen the previous batch deleted, instead
+// of re-walking the kept messages below it. It is inclusive because first_seen
+// ties are common (one second of traffic).
+const pruneAgedPacketIDs = `SELECT id FROM transmissions WHERE first_seen >= ? AND first_seen < ? AND payload_type IS NOT 5 ORDER BY first_seen, id LIMIT ?`
+
+// pruneAgedChannelIDs selects the next batch of channel messages older than
+// retention.channelDays. It runs after the pruneAgedPacketIDs prune, which
+// leaves only channel messages below the channel cutoff, so walking
+// idx_transmissions_first_seen finds a match at every step. The unary + keeps
+// SQLite from trading that ordered walk for idx_transmissions_payload_type (or
+// the partial idx_tx_channel_hash) plus a sort of every channel message.
+const pruneAgedChannelIDs = `SELECT id FROM transmissions WHERE first_seen < ? AND +payload_type = 5 ORDER BY first_seen, id LIMIT ?`
+
+// pruneBatchStatements are the statements of one prune batch, all built on
+// the same id subquery. Child rows go first (no CASCADE in SQLite):
+// observations, then the batch's route_mask_changes rows (#89; via
+// idx_route_mask_changes_tx), then the transmissions themselves. newest reads
+// the batch's newest first_seen for a cursored prune.
+type pruneBatchStatements struct {
+	ids, newest, observations, routeMaskChanges, transmissions string
+}
+
+func newPruneBatchStatements(ids string) pruneBatchStatements {
+	return pruneBatchStatements{
+		ids:              ids,
+		newest:           `SELECT MAX(first_seen) FROM transmissions WHERE id IN (` + ids + `)`,
+		observations:     `DELETE FROM observations WHERE transmission_id IN (` + ids + `)`,
+		routeMaskChanges: `DELETE FROM route_mask_changes WHERE transmission_id IN (` + ids + `)`,
+		transmissions:    `DELETE FROM transmissions WHERE id IN (` + ids + `)`,
+	}
+}
+
+var (
+	pruneAgedBatch        = newPruneBatchStatements(pruneAgedTransmissionIDs)
+	pruneAgedPacketBatch  = newPruneBatchStatements(pruneAgedPacketIDs)
+	pruneAgedChannelBatch = newPruneBatchStatements(pruneAgedChannelIDs)
 )
 
 // PruneOldPackets deletes transmissions (and their child observations)
@@ -73,19 +108,135 @@ func (s *Store) PruneOldPackets(days int) (int64, error) {
 		return 0, nil
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	total, err := s.pruneBatches("prune_packets", pruneAgedBatch, nil, cutoff)
+	if total > 0 {
+		log.Printf("[prune] deleted %d transmissions older than %d days", total, days)
+	}
+	return total, err
+}
 
+// PruneResult counts the transmissions one retention pass deleted.
+type PruneResult struct {
+	Packets         int64 // by retention.packetDays
+	ChannelMessages int64 // by retention.channelDays (#296)
+}
+
+// PruneTransmissions applies transmission retention: packetDays to every
+// transmission, except that channel messages are kept until channelDays when
+// channelDays is longer (#296). Observations go with their transmission, so a
+// kept message keeps its observer and region data. With channelDays 0, or
+// not longer than packetDays, it is exactly PruneOldPackets(packetDays).
+//
+// Both prunes are batched like PruneOldPackets. As there, the counts of
+// already-committed batches are returned alongside an error.
+//
+// The packet prune walks every kept channel message between its floor and
+// the packet cutoff, under writerMu. The first run in a process starts at the
+// bottom; the startup prune runs before ingest opens, so that one long walk
+// stalls nothing. A completed run records its packet cutoff as the floor of
+// the next, so the daily run walks one day, not channelDays.
+//
+// first_seen is not the ingest time: it is the observer's receive time,
+// which resolveRxTime accepts up to 30 days old, and a later observation can
+// lower it. So a row can be written below a completed run's cutoff. The
+// ingest path records the lowest first_seen it writes (noteFirstSeen), and
+// each run starts at that or the floor, whichever is lower. A failed run
+// keeps its start as the floor, so nothing it took is lost.
+func (s *Store) PruneTransmissions(packetDays, channelDays int) (PruneResult, error) {
+	var r PruneResult
+	if channelDays <= packetDays || packetDays <= 0 {
+		n, err := s.PruneOldPackets(packetDays)
+		r.Packets = n
+		return r, err
+	}
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	now := time.Now().UTC()
+	packetCutoff := now.AddDate(0, 0, -packetDays).Format(time.RFC3339)
+	channelCutoff := now.AddDate(0, 0, -channelDays).Format(time.RFC3339)
+
+	// Packets first: afterwards everything below packetCutoff is a channel
+	// message, which is what keeps the channel prune's walk dense.
+	start := s.packetPruneFloor
+	if low := s.takeFirstSeenLow(); low != "" && low < start {
+		start = low
+	}
+	lower := start
+	n, err := s.pruneBatches("prune_packets", pruneAgedPacketBatch, &lower, packetCutoff)
+	r.Packets = n
+	if n > 0 {
+		log.Printf("[prune] deleted %d transmissions older than %d days (channel messages kept %d days)", n, packetDays, channelDays)
+	}
+	if err != nil {
+		s.packetPruneFloor = start
+		return r, err
+	}
+	s.packetPruneFloor = packetCutoff
+	n, err = s.pruneBatches("prune_channel_messages", pruneAgedChannelBatch, nil, channelCutoff)
+	r.ChannelMessages = n
+	if n > 0 {
+		log.Printf("[prune] deleted %d channel messages older than %d days", n, channelDays)
+	}
+	return r, err
+}
+
+// noteFirstSeen records a first_seen value InsertTransmission wrote, for the
+// next PruneTransmissions run to start at or below.
+func (s *Store) noteFirstSeen(ts string) {
+	s.firstSeenLowMu.Lock()
+	if s.firstSeenLow == "" || ts < s.firstSeenLow {
+		s.firstSeenLow = ts
+	}
+	s.firstSeenLowMu.Unlock()
+}
+
+// takeFirstSeenLow returns the lowest first_seen written since the last call
+// ("" for none) and starts a new record.
+func (s *Store) takeFirstSeenLow() string {
+	s.firstSeenLowMu.Lock()
+	defer s.firstSeenLowMu.Unlock()
+	low := s.firstSeenLow
+	s.firstSeenLow = ""
+	return low
+}
+
+// pruneBatches deletes the transmissions stmts.ids selects, with their child
+// rows, one bounded writer transaction (tagged tag) at a time until a batch
+// comes back short. args are the ids parameters before its LIMIT. When cursor
+// is non-nil, the ids query takes *cursor as a first_seen lower bound first
+// ("" is below every timestamp), and each batch raises it to the newest
+// first_seen it deleted.
+//
+// Every statement of a batch embeds stmts.ids, so they resolve the same set:
+// nothing modifies `transmissions` between them inside the transaction.
+func (s *Store) pruneBatches(tag string, stmts pruneBatchStatements, cursor *string, args ...any) (int64, error) {
 	var total int64
 	for {
+		params := make([]any, 0, len(args)+2)
+		if cursor != nil {
+			params = append(params, *cursor)
+		}
+		params = append(append(params, args...), pruneBatchTransmissions)
+
 		var batch int64
 		// Tagged for writer-perf visibility (#1340).
-		err := s.WriterTx("prune_packets", func(tx *sql.Tx) error {
-			if _, err := tx.Exec(pruneObservationsBatch, cutoff, pruneBatchTransmissions); err != nil {
+		err := s.WriterTx(tag, func(tx *sql.Tx) error {
+			if cursor != nil {
+				var newest sql.NullString
+				if err := tx.QueryRow(stmts.newest, params...).Scan(&newest); err != nil {
+					return fmt.Errorf("prune cursor: %w", err)
+				}
+				if newest.Valid {
+					*cursor = newest.String
+				}
+			}
+			if _, err := tx.Exec(stmts.observations, params...); err != nil {
 				return fmt.Errorf("prune observations: %w", err)
 			}
-			if _, err := tx.Exec(pruneRouteMaskChangesBatch, cutoff, pruneBatchTransmissions); err != nil {
+			if _, err := tx.Exec(stmts.routeMaskChanges, params...); err != nil {
 				return fmt.Errorf("prune route_mask_changes: %w", err)
 			}
-			res, err := tx.Exec(pruneTransmissionsBatch, cutoff, pruneBatchTransmissions)
+			res, err := tx.Exec(stmts.transmissions, params...)
 			if err != nil {
 				return fmt.Errorf("prune transmissions: %w", err)
 			}
@@ -100,13 +251,9 @@ func (s *Store) PruneOldPackets(days int) (int64, error) {
 		// found fewer rows than it was allowed to take. Only a batch that came
 		// back exactly full needs another pass.
 		if batch < pruneBatchTransmissions {
-			break
+			return total, nil
 		}
 	}
-	if total > 0 {
-		log.Printf("[prune] deleted %d transmissions older than %d days", total, days)
-	}
-	return total, nil
 }
 
 // routeMaskOrphanPruneBatch bounds one orphan-prune transaction. A var so

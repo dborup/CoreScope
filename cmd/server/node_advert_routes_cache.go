@@ -36,10 +36,11 @@ const (
 )
 
 type nodeAdvertRouteEntry struct {
-	byRoute  NodeAdvertsByRoute
-	counts   NodeAdvertCounts
-	latestID int64 // the node's newest transmission id when computed
-	at       time.Time
+	byRoute   NodeAdvertsByRoute
+	counts    NodeAdvertCounts
+	intervals NodeAdvertIntervals // #245, derived from byRoute
+	latestID  int64               // the node's newest transmission id when computed
+	at        time.Time
 }
 
 // nodeAdvertRouteCache is usable as a zero value. Cached rows are shared
@@ -114,6 +115,7 @@ func (db *DB) latestTransmissionIDForNode(pubkey string) (int64, error) {
 type nodeAdvertRouteResult struct {
 	byRoute            NodeAdvertsByRoute
 	counts             NodeAdvertCounts
+	intervals          NodeAdvertIntervals
 	floodAdvertCount7d *int
 }
 
@@ -151,7 +153,7 @@ func (s *Server) nodeAdvertRoutes(pubkey string, now time.Time) (nodeAdvertRoute
 			if err != nil {
 				return nil, err
 			}
-			fresh := nodeAdvertRouteEntry{byRoute: byRoute, counts: counts, latestID: latestID, at: now}
+			fresh := nodeAdvertRouteEntry{byRoute: byRoute, counts: counts, intervals: nodeAdvertIntervals(byRoute), latestID: latestID, at: now}
 			c.put(pubkey, fresh, now)
 			return nodeAdvertRouteScan{entry: fresh, flood7d: flood7d}, nil
 		})
@@ -164,7 +166,7 @@ func (s *Server) nodeAdvertRoutes(pubkey string, now time.Time) (nodeAdvertRoute
 			res.floodAdvertCount7d = &scan.flood7d
 		}
 	}
-	res.byRoute, res.counts = e.byRoute, e.counts
+	res.byRoute, res.counts, res.intervals = e.byRoute, e.counts, e.intervals
 	res.counts.RouteMaskBackfill = s.db.routeMaskBackfillStatus()
 	return res, nil
 }

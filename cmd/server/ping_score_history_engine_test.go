@@ -443,7 +443,7 @@ func TestCycle_DeepSweepPathChange(t *testing.T) {
 	before := *entry1.FarthestKm
 
 	// Move pingobsb far away -- doesn't touch observations/transmissions
-	// at all, so the fingerprint stays unchanged, but GetPacketPathsBulk's
+	// at all, so the fingerprint stays unchanged, but getPacketPathsBulk's
 	// recomputed distance must differ.
 	if _, err := fx.srv.db.conn.Exec(`UPDATE nodes SET lat = 10.0, lon = 10.0 WHERE public_key = 'pingobsb'`); err != nil {
 		t.Fatal(err)
@@ -467,7 +467,7 @@ func TestCycle_DeepSweepPathChange(t *testing.T) {
 // setupSettledPingWithGoneData settles one ping, then deletes its
 // underlying observations/transmission rows (simulating the ingestor
 // having pruned the raw packet past its retention window) -- so a
-// subsequent deep-sweep's GetPacketPathsBulk call finds nothing for it,
+// subsequent deep-sweep's getPacketPathsBulk call finds nothing for it,
 // while ping_triggers (and the history entry) still has the row.
 func setupSettledPingWithGoneData(t *testing.T, fx *engineFixture, hash, firstSeen string) int64 {
 	t.Helper()
@@ -1030,7 +1030,7 @@ func TestCycle_BulkPathQueryFailure_LeavesEverythingUnchanged(t *testing.T) {
 	// fingerprint check (ToCompute path) -- query #1 = fetchPingTriggers,
 	// query #2 = observationFingerprintsBulk for this new tx_id's
 	// fingerprint (needed so the fresh entry's persisted fingerprint is
-	// accurate -- see Cycle's doc comment), query #3 = GetPacketPathsBulk.
+	// accurate -- see Cycle's doc comment), query #3 = getPacketPathsBulk.
 	seedFaultTrigger(t, fx, 1, "faultbulk00001")
 	before := captureEngineState(t, fx)
 
@@ -1241,7 +1241,7 @@ func TestCycle_YoungUnscorableEntry_StillDeepSweptAfterSettle(t *testing.T) {
 // the central regression test for the fix-round-3 review: age alone must
 // NEVER exclude an entry from deep-sweep. It proves an Unscorable entry
 // keeps getting REAL sweeps (LastDeepSweptAt advancing, a real
-// GetPacketPathsBulk-backed attempt) for as long as it takes to cross
+// getPacketPathsBulk-backed attempt) for as long as it takes to cross
 // retention, that crossing retention with an empty result sets
 // PermanentlyUnreconstructable ATOMICALLY on that same cycle, and that the
 // cycle immediately after does NOT get yet another real sweep.
@@ -1308,7 +1308,7 @@ func TestCycle_EntryCrossingRetention_GetsExactlyOneRealSweepThenFlagged(t *test
 
 // TestCycle_AfterFlagSet_NoFurtherPathQueryIssued proves the exclusion at
 // the query level: once evidence has actually been gathered (not merely
-// once retention has passed), a later cycle issues NO GetPacketPathsBulk
+// once retention has passed), a later cycle issues NO getPacketPathsBulk
 // call carrying this entry's hash, even though it's the ONLY entry that
 // would otherwise be deep-sweep eligible.
 func TestCycle_AfterFlagSet_NoFurtherPathQueryIssued(t *testing.T) {
@@ -1430,7 +1430,7 @@ func TestCycle_DeepSweepQueryFailureDuringEvidenceGathering_NoFlagNoGapChange(t 
 	}
 
 	// This cycle's query order: #1 fetchPingTriggers, #2 observationFingerprintsBulk
-	// (for the deep-sweep-eligible entry), #3 GetPacketPathsBulk -- fail
+	// (for the deep-sweep-eligible entry), #3 getPacketPathsBulk -- fail
 	// exactly the bulk path fetch, matching TestCycle_BulkPathQueryFailure_LeavesEverythingUnchanged's
 	// own established pattern.
 	resetBulkTestQueryLog()
@@ -2276,7 +2276,7 @@ func TestCycle_UnchangedPermanentPopulation_NoGapWriteAcrossCycles(t *testing.T)
 // --- Fix 3: hash normalization at bulk-result lookup ------------------------
 
 // seedMixedCaseTrigger inserts a transmission with hash stored LOWERCASE
-// (the only form GetPacketPath/GetPacketPathsBulk's `t.hash = LOWER(?)`
+// (the only form getPacketPath/getPacketPathsBulk's `t.hash = LOWER(?)`
 // queries can ever match -- both callsites lowercase their query input,
 // so a mixed-case-STORED transmissions.hash could never be found at all,
 // mixed case or not) paired with a ping_triggers row whose hash is a
@@ -2317,7 +2317,7 @@ func TestCycle_MixedCaseTriggerHashScoredCorrectly(t *testing.T) {
 		t.Fatal("index missing entry for mixed-case hash trigger")
 	}
 	if entry.Unscorable {
-		t.Error("Unscorable = true, want false -- GetPacketPathsBulk's result must be found despite hash casing")
+		t.Error("Unscorable = true, want false -- testPacketPathsBulk's result must be found despite hash casing")
 	}
 	if entry.StationCount != 2 {
 		t.Errorf("StationCount = %d, want 2", entry.StationCount)
@@ -2582,7 +2582,7 @@ func TestCycle_ZeroRetentionDuration_DisablesDataPrunedAndBootstrapIntegrity(t *
 // ============================================================================
 // Fase 5B (production-wiring design, approved v5): QuickSnapshot -- a
 // read-only, synchronous snapshot built from whatever is ALREADY
-// persisted plus a fresh trigger fetch, with no GetPacketPathsBulk,
+// persisted plus a fresh trigger fetch, with no getPacketPathsBulk,
 // reconciliation, or persistence. Isolated tests only -- no worker,
 // healthz, or main.go wiring in this phase.
 // ============================================================================

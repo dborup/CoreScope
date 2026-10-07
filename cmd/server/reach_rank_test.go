@@ -929,6 +929,10 @@ func TestReachRank_ExpiredSnapshotAlwaysRefreshes(t *testing.T) {
 	a, b := pk64("a1"), pk64("b2")
 	db := newReachRankDB(t, []rankTestNode{{a, "A"}, {b, "B"}}, nil, star(a, b))
 	srv := newReachRankServer(t, db, &Config{})
+	// LIFO: this join runs before resetReachState's cleanup clears the
+	// snapshot, and unlike a tail call it also runs when a round below fails,
+	// so a failing run cannot leave a stray refresh behind (#234 review).
+	t.Cleanup(func() { awaitDegreeRefresh(t, srv) })
 	if _, err := srv.getDegreeSnapshot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -945,6 +949,7 @@ func TestReachRank_ExpiredSnapshotAlwaysRefreshes(t *testing.T) {
 				defer wg.Done()
 				for publishedSnap(srv) == expired && time.Now().Before(deadline) {
 					srv.getDegreeSnapshot(context.Background())
+					time.Sleep(degreeHammerPause)
 				}
 			}()
 		}
@@ -952,6 +957,38 @@ func TestReachRank_ExpiredSnapshotAlwaysRefreshes(t *testing.T) {
 		if publishedSnap(srv) == expired {
 			t.Fatalf("round %d: expired snapshot never refreshed", round)
 		}
+	}
+}
+
+// degreeHammerPause is how long each caller in
+// TestReachRank_ExpiredSnapshotAlwaysRefreshes waits between requests. Without
+// it the 16 callers spin, and on a loaded host they take every available P
+// from the one goroutine the round is actually waiting for: the singleflight
+// refresh. The delay then lands inside loadDegreeSnapshot (measured: a 276 ms
+// round, 272 ms of it in the load, with all 16 callers parked on the
+// singleflight group mutex and the refresh parked mid-query), and a round can
+// miss its deadline with nothing wrong in production (#237). The pause leaves
+// 16 callers hitting the stale snapshot continuously in every round — ~30k
+// requests per process, over 100 per round — while cutting the round-duration
+// tail several-fold, so the deadline measures the liveness property and not
+// the test's own CPU contention.
+const degreeHammerPause = 100 * time.Microsecond
+
+// awaitDegreeRefresh waits for the singleflight snapshot refresh a test may
+// have left running (#224). A caller that read the expired snapshot just
+// before the refresh published can register one more refresh before the
+// test's callers return. That refresh runs after the test, finds the
+// snapshot cleared by resetReachState's cleanup, and calls
+// onDegreeSnapshotLoad, unsynchronised with the next test that swaps the
+// hook. Joining the key here waits for it (or, with none left, runs one that
+// returns the fresh snapshot without a load); the receive orders its end
+// before the test returns.
+func awaitDegreeRefresh(t *testing.T, srv *Server) {
+	t.Helper()
+	select {
+	case <-srv.refreshDegreeSnapshot(context.Background()):
+	case <-time.After(10 * time.Second):
+		t.Fatal("snapshot refresh still running 10s after the test")
 	}
 }
 

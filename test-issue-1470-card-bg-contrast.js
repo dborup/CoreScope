@@ -22,6 +22,9 @@ const assert = require('assert');
 
 const ROOT = __dirname;
 function read(rel) { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); }
+// style.css with comments removed: e2212f50 (#1627) added a comment that
+// mentions [data-theme="dark"] above the real block, and indexOf landed on it.
+function readCss() { return read('public/style.css').replace(/\/\*[\s\S]*?\*\//g, ''); }
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -34,7 +37,7 @@ function test(name, fn) {
 console.log('\n── #1470 CSS: --card-bg dark-mode variable ──');
 
 test('@media dark block sets --card-bg to var(--surface-2)', () => {
-  const css = read('public/style.css');
+  const css = readCss();
   // Find the @media (prefers-color-scheme: dark) block
   const mediaIdx = css.indexOf('@media (prefers-color-scheme: dark)');
   assert.ok(mediaIdx !== -1, '@media dark block not found');
@@ -46,7 +49,7 @@ test('@media dark block sets --card-bg to var(--surface-2)', () => {
 });
 
 test('[data-theme="dark"] block sets --card-bg to var(--surface-2)', () => {
-  const css = read('public/style.css');
+  const css = readCss();
   const themeIdx = css.indexOf('[data-theme="dark"]');
   assert.ok(themeIdx !== -1, '[data-theme="dark"] block not found');
   const themeBlock = css.slice(themeIdx, themeIdx + 2000);
@@ -57,7 +60,7 @@ test('[data-theme="dark"] block sets --card-bg to var(--surface-2)', () => {
 });
 
 test('light-mode block keeps --card-bg as var(--surface-1)', () => {
-  const css = read('public/style.css');
+  const css = readCss();
   // Light mode block ends before the @media dark block
   const mediaIdx = css.indexOf('@media (prefers-color-scheme: dark)');
   const lightBlock = css.slice(0, mediaIdx);

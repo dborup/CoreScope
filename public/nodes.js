@@ -548,7 +548,65 @@
 
   // ─── End neighbor helpers ─────────────────────────────────────────────────
 
+  // #254: the Affinity Debug card (only shown with debugAffinity). Its heading is
+  // a disclosure button, with caret-right when collapsed and caret-down when
+  // expanded (#189), and aria-expanded on the button follows the body. The click
+  // is handled by onFullBodyClick, delegated from #nodeFullBody.
+  function affinityDebugCaretHtml(expanded) {
+    return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-' + (expanded ? 'down' : 'right') + '"/></svg>';
+  }
+
+  function renderAffinityDebugCard() {
+    return `<div class="node-full-card" id="node-affinity-debug" style="display:none">
+          <h4><button type="button" class="affinity-debug-toggle" aria-expanded="false" aria-controls="affinityDebugBody"><span class="toggle-icon">${affinityDebugCaretHtml(false)}</span> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Affinity Debug</button></h4>
+          <div class="affinity-debug-body" id="affinityDebugBody" hidden>
+            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
+          </div>
+        </div>`;
+  }
+
+  function toggleAffinityDebug(btn) {
+    const expanded = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', String(expanded));
+    const body = btn.ownerDocument.getElementById(btn.getAttribute('aria-controls'));
+    if (body) body.hidden = !expanded;
+    const icon = btn.querySelector('.toggle-icon');
+    if (icon) icon.innerHTML = affinityDebugCaretHtml(expanded);
+    return expanded;
+  }
+
+  function onFullBodyClick(e) {
+    const btn = e.target.closest && e.target.closest('.affinity-debug-toggle');
+    if (btn) toggleAffinityDebug(btn);
+  }
+
   let directNode = null; // set when navigating directly to #/nodes/:pubkey
+
+  // #259: the full-screen node view's Escape-to-go-back handler. Module level
+  // so every init() registers the same reference and destroy() can remove it.
+  function _nodesEsc(e) {
+    if (e.key === 'Escape') {
+      document.removeEventListener('keydown', _nodesEsc);
+      location.hash = '#/nodes';
+    }
+  }
+
+  // #259: the list view's Escape-to-close-the-detail-panel handler, same class
+  // of leak. It used to be a fresh closure registered inside renderLeft(), and
+  // renderLeft() runs on every load of the list -- a visit, a region change, a
+  // filter change -- so the listeners stacked and were never removed. Module
+  // level means a repeat add is a DOM no-op and destroy() can take it off.
+  function _nodesPanelEsc(e) {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('nodesRight');
+    if (!panel || panel.classList.contains('empty')) return;
+    closeDetailView();
+    panel.classList.add('empty');
+    panel.innerHTML = '<span>Select a node to view details</span>';
+    selectedKey = null;
+    history.replaceState(null, '', '#/nodes');
+    renderRows();
+  }
 
   let regionChangeHandler = null;
 
@@ -570,14 +628,16 @@
         </div>
       </div>`;
       document.getElementById('nodeBackBtn').addEventListener('click', () => { location.hash = '#/nodes'; });
+      // Wired once here: loadFullNode re-renders the body (theme-refresh) and
+      // would stack listeners.
+      document.getElementById('nodeFullBody').addEventListener('click', onFullBodyClick);
       loadFullNode(directNode);
-      // Escape to go back to nodes list
-      document.addEventListener('keydown', function nodesEsc(e) {
-        if (e.key === 'Escape') {
-          document.removeEventListener('keydown', nodesEsc);
-          location.hash = '#/nodes';
-        }
-      });
+      // Escape to go back to nodes list. #259: one listener, not one per visit.
+      // It used to be a fresh closure per init() that only unhooked itself when
+      // Escape fired, so node A -> B -> C stacked three and one Escape wrote the
+      // same hash three times. _nodesEsc is a stable module-level reference, so
+      // a repeat add is a DOM no-op, and destroy() takes it off again.
+      document.addEventListener('keydown', _nodesEsc);
       return;
     }
 
@@ -645,9 +705,17 @@
       const advertMsgs = msgs.filter(isAdvertMessage);
       if (!advertMsgs.length) return;
 
+      // #279: invalidateApiCache() clears only the TTL cache, so a plain
+      // loadNodes(true) could still join a /nodes request that was already
+      // in flight -- one the server may have answered before this advert
+      // arrived, leaving the node that just advertised out of the list.
+      // Same shape as the #243 /channels bug, and the same call-site fix:
+      // bust never joins an in-flight request and takes its slot, so a
+      // later plain load joins this newer one. A refresh that fetches
+      // nothing (the in-place branch below) is unaffected.
       if (!_allNodes) {
         invalidateApiCache('/nodes');
-        loadNodes(true);
+        loadNodes(true, { bust: true });
         return;
       }
 
@@ -675,7 +743,7 @@
         _fleetSkew = null;
         invalidateApiCache('/nodes');
       }
-      loadNodes(true);
+      loadNodes(true, { bust: true });  // #279, as above
     }, 5000);
   }
 
@@ -690,10 +758,58 @@
   async function fetchNodeDetail(pubkey) {
     const [nodeData, healthData] = await Promise.all([
       api('/nodes/' + encodeURIComponent(pubkey) + '?include=advertRoutes', { ttl: CLIENT_TTL.nodeDetail }),
-      api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null)
+      api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeDetail }).catch(() => null),
+      window.MeshConfigReady
     ]);
     nodeData.healthData = healthData;
     return nodeData;
+  }
+
+  /**
+   * #199: the node page for a key with no nodes row. The 404 body of
+   * /api/nodes/{pubkey} carries the key's inactive_nodes row (retired after
+   * retention.nodeDays without an advert) and/or its observer row. Returns
+   * { title, html } explaining that state, or null when the instance knows
+   * nothing about the key (the generic "Node not found" then stays).
+   */
+  function missingNodeView(pubkey, notFound) {
+    const inactive = notFound && notFound.inactive_node;
+    const observer = notFound && notFound.observer;
+    if (!inactive && !observer) return null;
+    const name = (inactive && inactive.name) || (observer && observer.name) || '';
+    const when = (iso) => '<span title="' + escapeHtml(timeAgo(iso)) + '">' + escapeHtml(formatAbsoluteTimestamp(iso)) + '</span>';
+    const rows = [];
+    let headline, explanation;
+    if (inactive) {
+      headline = 'Inactive node';
+      // The record, not the device (#208): an observer can be uploading now
+      // while its node row is still in inactive_nodes.
+      explanation = 'No advert heard since ' + when(inactive.last_seen) + '; this node is listed as inactive. ' +
+        'Nodes without an advert inside the retention window are moved off the node list until they advertise again.';
+      rows.push(['Name', escapeHtml(inactive.name || '—')], ['Role', escapeHtml(inactive.role || '—')], ['Last advert', when(inactive.last_seen)]);
+    } else {
+      headline = 'No node record';
+      explanation = 'This device uploads as an observer, but no advert from it has been heard here, so it has no node record.';
+      rows.push(['Name', escapeHtml(observer.name || '—')]);
+    }
+    if (observer) rows.push(['Last upload as observer', when(observer.last_seen)]);
+    const observerLink = observer
+      ? '<a href="#/observers/' + encodeURIComponent(observer.id) + '" class="btn-primary" style="text-decoration:none;padding:6px 14px">View observer →</a>'
+      : '';
+    const html =
+      '<div class="node-full-card" style="padding:24px;margin:16px auto;max-width:560px">' +
+        '<div style="font-size:18px;font-weight:600;margin-bottom:8px;text-align:center">' + headline + '</div>' +
+        '<div class="mono" style="font-size:11px;color:var(--text-muted);word-break:break-all;margin-bottom:12px;text-align:center">' + escapeHtml(pubkey || '') + '</div>' +
+        '<p style="color:var(--text-muted);margin:0 0 12px">' + explanation + '</p>' +
+        '<dl style="margin:0 0 16px;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
+          rows.map(r => '<dt>' + r[0] + '</dt><dd style="margin:0">' + r[1] + '</dd>').join('') +
+        '</dl>' +
+        '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">' +
+          observerLink +
+          '<a href="#/nodes" class="btn-primary" style="text-decoration:none;padding:6px 14px">← Back to Nodes</a>' +
+        '</div>' +
+      '</div>';
+    return { title: name || (pubkey || '').slice(0, 12) + '…', html };
   }
 
   async function loadFullNode(pubkey) {
@@ -719,7 +835,8 @@
       // use). Shown alongside a real fix too, not just as a fallback when
       // one's missing -- lets a node flagged by Suspicious GPS Positions
       // be visually cross-checked against its own claimed position.
-      const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+      const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+      const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
 
       // Health stats
       const h = healthData || {};
@@ -831,11 +948,12 @@
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
           ${hasEstLoc ? `<tr><td>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></td><td>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></td></tr>` : ''}
+          ${!estimatesEnabled ? `<tr><td>Position estimates</td><td>${window.EstimatedPositions.disabledNoticeHTML}</td></tr>` : ''}
           <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ') + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>' : ''}</td></tr>
         </table>
 
         <div class="node-full-card" id="node-packets">
-          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts }, {
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: nodeData.recentAdvertsByRoute, advertCounts: nodeData.advertCounts, advertIntervals: nodeData.advertIntervals }, {
             variant: 'full', idPrefix: 'nodeFullAdverts', tab: NodeAdverts.parseTab(location.hash),
             timestampHtml: renderNodeTimestampHtml, hashSizeInconsistent: !!n.hash_size_inconsistent,
           })}
@@ -869,12 +987,7 @@
           <div id="fullNeighborsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading neighbors…</div></div>
         </div>
 
-        <div class="node-full-card" id="node-affinity-debug" style="display:none">
-          <h4 style="cursor:pointer" onclick="var body=this.parentElement.querySelector('.affinity-debug-body'); var hidden=body.style.display==='none'; body.style.display=hidden?'block':'none'; this.querySelector('.toggle-icon').innerHTML=body.style.display==='none'?'<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>':'<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-up"/></svg>'"><span class="toggle-icon"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg></span> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Affinity Debug</h4>
-          <div class="affinity-debug-body" style="display:none">
-            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
-          </div>
-        </div>
+        ${renderAffinityDebugCard()}
 
         <div class="node-full-card" id="fullPathsSection">
           <h4>Paths Through This Node</h4>
@@ -1131,6 +1244,13 @@
       const msg = (e && e.message) || '';
       const is404 = /\b404\b/.test(msg) || /not\s*found/i.test(msg);
       const titleEl = document.querySelector('.node-full-title');
+      const missing = is404 ? missingNodeView(pubkey, e && e.body) : null;
+      if (missing) {
+        if (titleEl) titleEl.textContent = missing.title;
+        removeDetailMap();
+        body.innerHTML = missing.html;
+        return;
+      }
       if (titleEl) {
         titleEl.textContent = is404
           ? 'Node not found — ' + (pubkey || '').slice(0, 12) + '…'
@@ -1166,6 +1286,11 @@
   function destroy() {
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
+    // #259: both Escape handlers are document-level, so they outlive the
+    // page's DOM unless they are removed here -- _nodesEsc for the
+    // full-screen view, _nodesPanelEsc for the list view.
+    document.removeEventListener('keydown', _nodesEsc);
+    document.removeEventListener('keydown', _nodesPanelEsc);
     closeDetailView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
@@ -1319,7 +1444,8 @@
     return ' <span class="dup-name-badge" title="' + escapeHtml(title) + '">(' + keys.length + ')</span>';
   }
 
-  async function loadNodes(refreshOnly) {
+  // opts.bust: fetch fresh pages even if the same request is in flight (#279).
+  async function loadNodes(refreshOnly, opts) {
     try {
       // Fetch all nodes via pagination loop — server clamps /api/nodes ?limit
       // to 500 (PR #1540 / v3.8.3 DoS guard), so a single fetch silently
@@ -1344,7 +1470,7 @@
         const nodesBody = document.getElementById('nodesBody');
         while (offset < SAFETY_CAP) {
           baseParams.set('offset', String(offset));
-          const data = await api('/nodes?' + baseParams, { ttl: CLIENT_TTL.nodeList });
+          const data = await api('/nodes?' + baseParams, { ttl: CLIENT_TTL.nodeList, bust: !!(opts && opts.bust) });
           if (!data || !Array.isArray(data.nodes)) break;
           accumulated.push.apply(accumulated, data.nodes);
           counts = data.counts || counts || {};
@@ -1580,20 +1706,10 @@
       tbody.addEventListener('keydown', handler);
     }
 
-    // Escape to close node detail panel
-    document.addEventListener('keydown', function nodesPanelEsc(e) {
-      if (e.key === 'Escape') {
-        const panel = document.getElementById('nodesRight');
-        if (panel && !panel.classList.contains('empty')) {
-          closeDetailView();
-          panel.classList.add('empty');
-          panel.innerHTML = '<span>Select a node to view details</span>';
-          selectedKey = null;
-          history.replaceState(null, '', '#/nodes');
-          renderRows();
-        }
-      }
-    });
+    // Escape to close node detail panel. #259: one listener, not one per
+    // render -- _nodesPanelEsc is a stable module-level reference, so this add
+    // is a no-op on every render after the first, and destroy() removes it.
+    document.addEventListener('keydown', _nodesPanelEsc);
 
     // #630: Close button for node detail panel (important for mobile full-screen overlay)
     document.getElementById('nodesRight').addEventListener('click', function(e) {
@@ -1823,7 +1939,8 @@
     // Same "real fix" convention and estimate-alongside-real-fix behavior
     // as loadFullNode above -- see its comments.
     const hasLoc = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-    const hasEstLoc = n.estimated_lat != null && n.estimated_lon != null;
+    const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+    const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
     const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
 
     // Status calculation via shared helper
@@ -1867,11 +1984,12 @@
             ${stats.avgHops ? `<dt>Avg Hops</dt><dd>${stats.avgHops}</dd>` : ''}
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
             ${hasEstLoc ? `<dt>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></dt><dd>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></dd>` : ''}
+            ${!estimatesEnabled ? `<dt>Position estimates</dt><dd>${window.EstimatedPositions.disabledNoticeHTML}</dd>` : ''}
           </dl>
         </div>
 
         <div class="node-detail-section" id="node-pane-adverts">
-          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts }, {
+          ${NodeAdverts.render({ recentAdverts: adverts, recentAdvertsByRoute: data.recentAdvertsByRoute, advertCounts: data.advertCounts, advertIntervals: data.advertIntervals }, {
             variant: 'pane', idPrefix: 'nodePaneAdverts', tab: NodeAdverts.parseTab(location.hash),
             timestampHtml: renderNodeTimestampHtml, roleColor: roleColor,
           })}
@@ -2054,6 +2172,7 @@
 
   // Test hooks
   window._nodesIsAdvertMessage = isAdvertMessage;
+  window._nodesMissingNodeView = missingNodeView;
   window._nodesGetAllNodes = function() { return _allNodes; };
   window._nodesSetAllNodes = function(n) { _allNodes = n; };
   window._nodesGetFiltered = function() { return nodes; };
@@ -2093,6 +2212,9 @@
   window._nodesRenderNodeTimestampText = renderNodeTimestampText;
   window._nodesGetStatusInfo = getStatusInfo;
   window._nodesGetStatusTooltip = getStatusTooltip;
+  window._nodesRenderAffinityDebugCard = renderAffinityDebugCard;
+  window._nodesToggleAffinityDebug = toggleAffinityDebug;
+  window._nodesOnFullBodyClick = onFullBodyClick;
 
   // #862: Expose search filter logic for testing
   window._nodesMatchesSearch = function(node, query) {

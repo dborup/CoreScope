@@ -20,7 +20,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/geofilter"
-	"github.com/meshcore-analyzer/packetpath"
 	"github.com/meshcore-analyzer/prunequeue"
 	regionutil "github.com/meshcore-analyzer/regions"
 	"golang.org/x/sync/singleflight"
@@ -57,6 +56,9 @@ type Server struct {
 	// Test-only hook called with "stats-miss" and "stats-build" as a cache
 	// miss moves through handleStats. Nil in production.
 	statsHook func(stage string)
+
+	// Throttles the log of failed GET /api/nodes/{pubkey} 404 lookups (#208).
+	missingNodeLog missingNodeLookupLog
 
 	// Shared channel proposals; built lazily from cfg/db (tests may preset).
 	proposals     *channelProposalService
@@ -159,6 +161,9 @@ type Server struct {
 	gpsSanityMu       sync.Mutex
 	gpsSanityCache    *GPSSanityResponse
 	gpsSanityCachedAt time.Time
+
+	// Copied once by NewServer; zero value preserves default-on behavior.
+	estimatedPositionsDisabled bool
 }
 
 // PerfStats tracks request performance.
@@ -199,6 +204,8 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		version:   resolveVersion(),
 		commit:    resolveCommit(),
 		buildTime: resolveBuildTime(),
+
+		estimatedPositionsDisabled: !cfg.estimatedPositionsEnabled(),
 	}
 }
 
@@ -301,6 +308,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
 	r.HandleFunc("/api/ping-scores", s.handlePingScores).Methods("GET")
+	r.HandleFunc("/api/ping-scores/{hash}/path", s.handlePingScorePath).Methods("GET")
 	r.HandleFunc("/api/analytics/areas", s.handleAreaAnalytics).Methods("GET")
 	r.HandleFunc("/api/analytics/gps-sanity", s.handleGPSSanity).Methods("GET")
 	r.Handle("/api/config/geo-filter", s.requireAPIKey(http.HandlerFunc(s.handlePutConfigGeoFilter))).Methods("PUT")
@@ -345,7 +353,6 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/packets/timestamps", s.handlePacketTimestamps).Methods("GET")
 	r.HandleFunc("/api/packets/{id}", s.handlePacketDetail).Methods("GET")
 	r.HandleFunc("/api/packets", s.handlePackets).Methods("GET")
-	r.Handle("/api/packets", s.requireAPIKey(http.HandlerFunc(s.handlePostPacket))).Methods("POST")
 
 	// Decode endpoint
 	r.HandleFunc("/api/decode", s.handleDecode).Methods("POST")
@@ -427,6 +434,13 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// OpenAPI spec + Swagger UI
 	r.HandleFunc("/api/spec", s.handleOpenAPISpec).Methods("GET")
 	r.HandleFunc("/api/docs", s.handleSwaggerUI).Methods("GET")
+
+	// JSON 404/405 fallback for unmatched /api/* requests (#233). Must be
+	// the LAST route registered here: every real /api/* route above gets
+	// first try at matching, and this only catches what none of them did.
+	// See registerAPIFallback's doc comment (api_fallback.go) for why this
+	// has to sit here rather than relying on mux's default 404 handling.
+	registerAPIFallback(r)
 }
 
 // noStoreAPIMiddleware sets Cache-Control: no-store on every response
@@ -579,6 +593,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
 		GeoFilter:           s.getGeoFilter(),
 		Privacy:             privacy,
+		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},
 	})
 }
 
@@ -650,13 +665,13 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 	if s.areaAnalyticsCache != nil && time.Since(s.areaAnalyticsCachedAt) < areaAnalyticsTTL {
 		cached := s.areaAnalyticsCache
 		s.areaAnalyticsMu.Unlock()
-		writeJSON(w, cached)
+		s.writeAreaAnalytics(w, cached)
 		return
 	}
 	s.areaAnalyticsMu.Unlock()
 
 	if s.cfg == nil || len(s.cfg.Areas) == 0 {
-		writeJSON(w, &AreaAnalyticsResponse{})
+		s.writeAreaAnalytics(w, &AreaAnalyticsResponse{})
 		return
 	}
 
@@ -671,15 +686,13 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 		graph = s.store.graph.Load()
 	}
 
-	positionGaps, noNeighborFix, estimatedNodes := computeAreaPositionGaps(s.db, positioned, unpositioned, s.cfg.Areas, EstimateMaxEdgeKm)
-
 	resp := &AreaAnalyticsResponse{
-		Density:                   computeAreaDensity(positioned, s.cfg.Areas, s.cfg.GetHealthThresholds()),
-		BridgeNodes:               computeAreaBridgeNodes(positioned, s.cfg.Areas, graph),
-		PositionGaps:              positionGaps,
-		UnpositionedTotal:         len(unpositioned),
-		UnpositionedNoNeighborFix: noNeighborFix,
-		EstimatedNodes:            estimatedNodes,
+		Density:           computeAreaDensity(positioned, s.cfg.Areas, s.cfg.GetHealthThresholds()),
+		BridgeNodes:       computeAreaBridgeNodes(positioned, s.cfg.Areas, graph),
+		UnpositionedTotal: len(unpositioned),
+	}
+	if s.estimatedPositionsEnabled() {
+		resp.PositionGaps, resp.UnpositionedNoNeighborFix, resp.EstimatedNodes = computeAreaPositionGaps(s.db, positioned, unpositioned, s.cfg.Areas, EstimateMaxEdgeKm)
 	}
 
 	s.areaAnalyticsMu.Lock()
@@ -687,7 +700,7 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 	s.areaAnalyticsCachedAt = time.Now()
 	s.areaAnalyticsMu.Unlock()
 
-	writeJSON(w, resp)
+	s.writeAreaAnalytics(w, resp)
 }
 
 // handleGPSSanity serves computeSuspiciousGPSPositions' cross-check of
@@ -698,6 +711,10 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 // whole positioned population on every request otherwise.
 func (s *Server) handleGPSSanity(w http.ResponseWriter, r *http.Request) {
 	const gpsSanityTTL = 30 * time.Second
+	if !s.estimatedPositionsEnabled() {
+		writeJSON(w, EstimatedPositionsDisabledResponse{})
+		return
+	}
 
 	s.gpsSanityMu.Lock()
 	if s.gpsSanityCache != nil && time.Since(s.gpsSanityCachedAt) < gpsSanityTTL {
@@ -1534,110 +1551,6 @@ func (s *Server) handleDecode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handlePostPacket(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Hex      string   `json:"hex"`
-		Observer *string  `json:"observer"`
-		Snr      *float64 `json:"snr"`
-		Rssi     *float64 `json:"rssi"`
-		Region   *string  `json:"region"`
-		Hash     *string  `json:"hash"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
-		return
-	}
-	hexStr := strings.TrimSpace(body.Hex)
-	if hexStr == "" {
-		writeError(w, 400, "hex is required")
-		return
-	}
-	decoded, err := DecodePacket(hexStr, false)
-	if err != nil {
-		writeError(w, 400, err.Error())
-		return
-	}
-
-	contentHash := ComputeContentHash(hexStr)
-	pathJSON := "[]"
-	// For TRACE packets, path_json must be the payload-decoded route hops
-	// (decoded.Path.Hops), NOT the raw_hex header bytes which are SNR values.
-	// For all other packet types, derive path from raw_hex (#886).
-	if !packetpath.PathBytesAreHops(byte(decoded.Header.PayloadType)) {
-		if len(decoded.Path.Hops) > 0 {
-			if pj, e := json.Marshal(decoded.Path.Hops); e == nil {
-				pathJSON = string(pj)
-			}
-		}
-	} else if hops, err := packetpath.DecodePathFromRawHex(hexStr); err == nil && len(hops) > 0 {
-		if pj, e := json.Marshal(hops); e == nil {
-			pathJSON = string(pj)
-		}
-	}
-	decodedJSON := PayloadJSON(&decoded.Payload)
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	nowEpoch := time.Now().Unix()
-
-	var snr, rssi interface{}
-	if body.Snr != nil {
-		snr = *body.Snr
-	}
-	if body.Rssi != nil {
-		rssi = *body.Rssi
-	}
-
-	// v3 schema (cmd/ingestor/db.go:251-303): transmissions no longer carries
-	// path_json (it lives on observations now), observations uses observer_idx
-	// INTEGER (FK observers.rowid) and timestamp INTEGER (unix epoch).
-	// Fix for #1196 — pre-fix code wrote v2 column names and silently
-	// swallowed the observations insert error.
-	res, dbErr := s.db.conn.Exec(`INSERT INTO transmissions (hash, raw_hex, route_type, payload_type, payload_version, decoded_json, first_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		contentHash, strings.ToUpper(hexStr), decoded.Header.RouteType, decoded.Header.PayloadType,
-		decoded.Header.PayloadVersion, decodedJSON, now)
-	if dbErr != nil {
-		writeError(w, 500, "transmission insert: "+dbErr.Error())
-		return
-	}
-	insertedID, _ := res.LastInsertId()
-
-	// Resolve observer string → observers.rowid. INSERT OR IGNORE then SELECT
-	// mirrors the ingestor's resolver (cmd/ingestor/db.go:778,799,906).
-	var observerIdx interface{}
-	if body.Observer != nil && *body.Observer != "" {
-		obsID := *body.Observer
-		if _, err := s.db.conn.Exec(
-			`INSERT OR IGNORE INTO observers (id, name, last_seen, first_seen) VALUES (?, ?, ?, ?)`,
-			obsID, obsID, now, now); err != nil {
-			writeError(w, 500, "observer upsert: "+err.Error())
-			return
-		}
-		var rowid int64
-		if err := s.db.conn.QueryRow(`SELECT rowid FROM observers WHERE id = ?`, obsID).Scan(&rowid); err != nil {
-			writeError(w, 500, "observer lookup: "+err.Error())
-			return
-		}
-		observerIdx = rowid
-	}
-
-	if _, obsErr := s.db.conn.Exec(
-		`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-		insertedID, observerIdx, snr, rssi, pathJSON, nowEpoch); obsErr != nil {
-		writeError(w, 500, "observation insert: "+obsErr.Error())
-		return
-	}
-
-	writeJSON(w, PacketIngestResponse{
-		ID: insertedID,
-		Decoded: map[string]interface{}{
-			"header":  decoded.Header,
-			"path":    decoded.Path,
-			"payload": decoded.Payload,
-		},
-	})
-}
-
 // --- Node Handlers ---
 
 // nodeListPostFilters bundles the filters handleNodes applies AFTER
@@ -2038,7 +1951,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if node == nil {
-		writeError(w, 404, "Not found")
+		s.writeNodeNotFound(w, r, pubkey)
 		return
 	}
 	// Hide the node when its name matches an operator-configured prefix
@@ -2126,6 +2039,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		if res, err := s.nodeAdvertRoutes(pubkey, time.Now()); err == nil {
 			resp.RecentAdvertsByRoute = &res.byRoute
 			resp.AdvertCounts = &res.counts
+			resp.AdvertIntervals = &res.intervals
 			floodFromScan = res.floodAdvertCount7d
 		} else {
 			log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, err)
@@ -2165,7 +2079,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	nodeLat, hasLat := node["lat"].(float64)
 	nodeLon, hasLon := node["lon"].(float64)
 	hasRealFix := hasLat && hasLon && !(nodeLat == 0 && nodeLon == 0)
-	if _, lat, lon, contributorCount, _, ok := s.db.nearestPositionedNeighbor(pubkey, EstimateMaxEdgeKm); ok {
+	if _, lat, lon, contributorCount, _, ok := s.estimateNodePosition(pubkey); ok {
 		node["estimated_lat"] = lat
 		node["estimated_lon"] = lon
 		node["estimated_contributor_count"] = contributorCount
@@ -2323,37 +2237,48 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		inIndex    bool
 	}
 	checks := make([]candidateCheck, len(candidates))
+	// Membership set for the queried pubkey, built once. The previous
+	// per-candidate scan of the index list was O(candidates × list length).
+	var indexedForTarget map[int]struct{}
+	if s.store.useResolvedPathIndex {
+		ids := s.store.resolvedPubkeyIndex[resolvedPubkeyHash(lowerPK)]
+		indexedForTarget = make(map[int]struct{}, len(ids))
+		for _, id := range ids {
+			indexedForTarget[id] = struct{}{}
+		}
+	}
 	for i, tx := range candidates {
 		cc := candidateCheck{tx: tx}
 		if !s.store.useResolvedPathIndex {
 			cc.inIndex = true // flag off — keep all
 		} else if _, hasRev := s.store.resolvedPubkeyReverse[tx.ID]; !hasRev {
 			cc.inIndex = true // no indexed pubkeys — keep (conservative)
-		} else {
-			h := resolvedPubkeyHash(lowerPK)
-			for _, id := range s.store.resolvedPubkeyIndex[h] {
-				if id == tx.ID {
-					cc.hasReverse = true // needs SQL confirmation
-					break
-				}
-			}
-			// If not in index at all, it's a definite no
+		} else if _, ok := indexedForTarget[tx.ID]; ok {
+			cc.hasReverse = true // hash-index hit; exact pubkey confirmed below
 		}
+		// If not in index at all, it's a definite no
 		checks[i] = cc
 	}
 	s.store.mu.RUnlock()
 
-	// Now run SQL checks outside the lock for candidates that need confirmation.
-	confirmedBySQL := make(map[int]bool)
+	// Candidates admitted by the hash index (hasReverse) used to be confirmed
+	// one by one with confirmResolvedPathContains — a SQL query per candidate
+	// that scans every observation row of the tx. For a busy node that is
+	// thousands of sequential queries and dominated /paths CPU (~43% of a
+	// 60 s profile). The confirmation only guards against hash collisions
+	// and a stale index; for every candidate that has a canonical persisted
+	// resolved_path, membership is decided again below from that exact path
+	// (resolvedPK == lowerPK), which gives the same answer. So defer the SQL
+	// check to the few candidates with no canonical path at all, where the
+	// legacy fallback still needs confirmedBySQL.
+	needsConfirm := make(map[int]bool)
 	filtered := candidates[:0]
 	for _, cc := range checks {
 		if cc.inIndex {
 			filtered = append(filtered, cc.tx)
 		} else if cc.hasReverse {
-			if s.store.confirmResolvedPathContains(cc.tx.ID, lowerPK) {
-				filtered = append(filtered, cc.tx)
-				confirmedBySQL[cc.tx.ID] = true
-			}
+			filtered = append(filtered, cc.tx)
+			needsConfirm[cc.tx.ID] = true
 		}
 		// else: not in index → exclude
 	}
@@ -2374,10 +2299,32 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 	// resolved_path (older data / async backfill incomplete); in that case
 	// there's no canonical answer to be consistent with.
 	canonicalRP := make(map[int][]*string, len(candidates))
+	lruNow := s.store.lruNow()
 	for _, tx := range candidates {
-		if rp := s.store.fetchResolvedPathForTxBest(tx); rp != nil {
+		if rp := s.store.fetchResolvedPathForTxBestAt(tx, lruNow); rp != nil {
 			canonicalRP[tx.ID] = rp
 		}
+	}
+
+	// Deferred exact-pubkey confirmation (see needsConfirm above): only for
+	// hash-index candidates that have no canonical resolved_path, because
+	// those are the ones decided by the legacy fallback arm, which consumes
+	// confirmedBySQL.
+	confirmedBySQL := make(map[int]bool)
+	if len(needsConfirm) > 0 {
+		kept := candidates[:0]
+		for _, tx := range candidates {
+			if needsConfirm[tx.ID] {
+				if _, hasCanonical := canonicalRP[tx.ID]; !hasCanonical {
+					if !s.store.confirmResolvedPathContains(tx.ID, lowerPK) {
+						continue
+					}
+					confirmedBySQL[tx.ID] = true
+				}
+			}
+			kept = append(kept, tx)
+		}
+		candidates = kept
 	}
 
 	// Re-acquire read lock for the aggregation phase that reads store data.
@@ -3419,7 +3366,13 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 				channels = append(channels[:len(channels):len(channels)], encrypted...)
 			}
 		}
-		writeJSON(w, ChannelListResponse{Channels: channels, ApprovedChannels: s.channelProposals().approvedChannels(r.Context())})
+		// #251: a revoked shared channel leaves the list; its messages stay
+		// stored and readable. Without a database there are no proposals, so
+		// the in-memory branch below has nothing to hide.
+		props := s.channelProposals()
+		resp := ChannelListResponse{Channels: channels, ApprovedChannels: props.approvedChannels(r.Context())}
+		props.hideRevoked(r.Context(), &resp)
+		writeJSON(w, resp)
 		return
 	}
 	if s.store != nil {
@@ -3776,7 +3729,7 @@ func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, PacketPathResponse{Hash: hash, Branches: []PacketPathBranch{}})
 		return
 	}
-	resp, err := s.db.GetPacketPath(hash, EstimateMaxEdgeKm)
+	resp, err := s.db.getPacketPath(hash, EstimateMaxEdgeKm, s.estimatedPositionsEnabled())
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -3790,7 +3743,7 @@ func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
 // AirtimeRelayCount: the LoRa Time-on-Air x distinct-relay-count estimate
 // for this packet's whole flood (same formula as the Relay Airtime Share
 // analytics metric, issue #1768), looked up from the in-memory
-// PacketStore via the transmission ID GetPacketPath captured. Left
+// PacketStore via the transmission ID getPacketPath captured. Left
 // unset -- not a guessed zero -- when the store is unavailable (DB-only
 // mode) or this transmission has been evicted from memory.
 func (s *Server) annotatePacketPathAirtime(resp *PacketPathResponse) {
@@ -3815,7 +3768,7 @@ func (s *Server) annotatePacketPathAirtime(resp *PacketPathResponse) {
 // configured area any point or observer on the path falls in, deduped and
 // alphabetized, uncapped (unlike annotateBotReplyTouchedAreas's capped
 // pong-reply list -- the map view has room to show the full set). Unlike
-// that function, no DB round-trip is needed: GetPacketPath already
+// that function, no DB round-trip is needed: getPacketPath already
 // resolved every position (including the neighbor-centroid approximation
 // fallback), so this just reads the lat/lon already on the response.
 func (s *Server) annotatePacketPathTouchedAreas(resp *PacketPathResponse) {

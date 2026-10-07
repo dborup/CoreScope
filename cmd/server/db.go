@@ -17,6 +17,7 @@ import (
 
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
+	"github.com/meshcore-analyzer/packetpath"
 	regionutil "github.com/meshcore-analyzer/regions"
 	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
@@ -113,10 +114,15 @@ type DB struct {
 	// channelsRowsHook wraps the result rows of each real query, so a test
 	// can fail the iteration part-way.
 	channelsRowsHook func(kind string, rows channelRows) channelRows
+	// schemaProbeHook (#184), nil in production, runs at the start of every
+	// detectSchema pass. A non-nil error makes the pass give up the way a
+	// failed PRAGMA table_info does: no flag is set.
+	schemaProbeHook func() error
 
 	// Region-membership cache for GetNodes (see nodes_region_cache.go).
 	nodeRegionCacheMu   sync.Mutex
 	nodeRegionCache     map[string]*nodeRegionEntry
+	nodeRegionLRU       int64
 	nodeRegionSF        singleflight.Group
 	nodeRegionFullMu    sync.Mutex
 	nodeRegionQueryHook func()
@@ -159,6 +165,26 @@ func (db *DB) hasDefaultScopeConfirmedAt() bool { return db.hasDefaultScopeConfi
 func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsFlag.get() }
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
 func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
+
+// ingestCols is one reading of the optional-column flags an ingest query
+// depends on. A caller takes ONE snapshot and uses it for both the SELECT
+// list and the Scan destinations: the flags are atomics that the schema
+// healer (or main.go's forceTrue) may latch between two reads, and a query
+// built with one answer scanned with the other fails Scan with the wrong
+// destination count -- an error the ingest loops swallow, silently dropping
+// the row (#158 follow-up).
+type ingestCols struct {
+	obsRawHex, resolvedPath, scopeName, routeMask bool
+}
+
+func (db *DB) ingestCols() ingestCols {
+	return ingestCols{
+		obsRawHex:    db.hasObsRawHex(),
+		resolvedPath: db.hasResolvedPath(),
+		scopeName:    db.hasScopeName(),
+		routeMask:    db.hasRouteMask(),
+	}
+}
 
 // OpenDB opens a read-only SQLite connection with WAL mode.
 func OpenDB(path string) (*DB, error) {
@@ -239,6 +265,11 @@ func (db *DB) Close() error {
 
 // detectSchema checks if the observations table uses v3 schema (observer_idx).
 func (db *DB) detectSchema() {
+	if db.schemaProbeHook != nil {
+		if err := db.schemaProbeHook(); err != nil {
+			return
+		}
+	}
 	rows, err := db.conn.Query("PRAGMA table_info(observations)")
 	if err != nil {
 		return
@@ -1134,6 +1165,11 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 		}
 	}
 
+	// The region filter is served from the bounded membership cache in
+	// nodes_region_cache.go: the IN (...) observation join is evaluated there
+	// once per region set, not twice per request (COUNT(*) and the page).
+	// #38's from_pubkey contract — and the trap that comes with it — lives
+	// with the query, in scanNodeRegionKeys.
 	if codes := normalizeRegionCodes(region); len(codes) > 0 {
 		keysJSON, err := db.nodeRegionKeysJSON(codes)
 		if err != nil {
@@ -2129,7 +2165,7 @@ type PacketPathPoint struct {
 }
 
 // PacketPathObserver is the station that produced a given branch's
-// observation of a packet (see GetPacketPath), positioned from its own
+// observation of a packet (see getPacketPath), positioned from its own
 // self-advertised GPS (the same source /api/observers uses) when known,
 // falling back to its configured IATA code, and finally its strongest
 // neighbor_edges neighbor's position (Approx=true), otherwise -- not a
@@ -2151,6 +2187,10 @@ type PacketPathObserver struct {
 	Approx              bool     `json:"approx,omitempty"`
 	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
 	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
+	// Internal scoring evidence only: airport coordinates are a display
+	// fallback, not proof that an observer's own GPS still exists. Kept out
+	// of the wire/archive shape so existing packet-path clients are unchanged.
+	iataFallback bool
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -2233,7 +2273,7 @@ type PacketPathResponse struct {
 	TxID int64 `json:"-"`
 }
 
-// GetPacketPath resolves every distinct station that observed a packet to
+// getPacketPath resolves every distinct station that observed a packet to
 // its own branch: hop count and (where resolvable) relay names/positions
 // in path order, plus that station's own position. A station can hear a
 // packet more than once as flood copies arrive via different routes; only
@@ -2247,8 +2287,8 @@ type PacketPathResponse struct {
 // geo-sanity filter for the Approx position fallback (see its doc
 // comment) -- pass Config.NeighborMaxEdgeKm().
 // obsBranch is one candidate branch of a packet's path: the deepest-hop
-// observation attributed to a single observer. Shared by GetPacketPath
-// (built from one hash's rows) and GetPacketPathsBulk (built the same way,
+// observation attributed to a single observer. Shared by getPacketPath
+// (built from one hash's rows) and getPacketPathsBulk (built the same way,
 // per hash, from a multi-hash result set) via parsePacketPathObsRow so the
 // two can never parse a row differently.
 type obsBranch struct {
@@ -2274,8 +2314,8 @@ type packetPathNodeInfo struct {
 
 // packetPathReduction accumulates one hash's observation rows into the
 // deepest-hop branch per observer (best) and the single earliest-arriving
-// branch overall (first), exactly as GetPacketPath's original inline loop
-// did. GetPacketPathsBulk keeps one packetPathReduction per hash while
+// branch overall (first), exactly as getPacketPath's original inline loop
+// did. getPacketPathsBulk keeps one packetPathReduction per hash while
 // scanning a combined multi-hash result set.
 type packetPathReduction struct {
 	best    map[string]*obsBranch
@@ -2293,8 +2333,8 @@ func newPacketPathReduction() *packetPathReduction {
 // (observations.id), and "earliest wins" ties on equal timestamp the same
 // way. obsID is a real, stable, monotonically-assigned DB identity (unlike
 // scan order, which the query planner is free to vary between the
-// single-hash query GetPacketPath issues and the multi-hash query
-// GetPacketPathsBulk issues) -- so both paths pick the identical branch on
+// single-hash query getPacketPath issues and the multi-hash query
+// getPacketPathsBulk issues) -- so both paths pick the identical branch on
 // a tie regardless of any difference in how their rows happen to arrive.
 // This determinizes previously-undefined behavior; it does not preserve
 // any order that was ever guaranteed before.
@@ -2312,7 +2352,7 @@ func (r *packetPathReduction) fold(key string, branch *obsBranch, tsValid bool, 
 }
 
 // parsePacketPathObsRow parses one row of the packet-path observations/
-// transmissions join (GetPacketPath and GetPacketPathsBulk use the same
+// transmissions join (getPacketPath and getPacketPathsBulk use the same
 // column order, bulk with one leading `hash` column and both with a
 // trailing `o.id` column) into an obsBranch and its best-map key. ok is
 // false for rows that can't contribute a branch -- missing/unparsable
@@ -2479,15 +2519,15 @@ func dedupPacketPathStrings(ss []string) []string {
 // (0,0) sentinel position the same way GetNodesForScopeAdoption and
 // geofilter.PassesFilter do. Input is deduped and chunked at
 // packetPathNodeLookupChunkSize bind parameters per query -- the caller may
-// pass an arbitrarily large pubkey set (e.g. GetPacketPathsBulk's whole-batch
+// pass an arbitrarily large pubkey set (e.g. getPacketPathsBulk's whole-batch
 // union). If any chunk's query or scan fails, the entire call fails --
 // (nil, error), never a partial map, even though earlier chunks may have
 // already resolved cleanly; there is no cross-chunk aggregation logic
 // needed beyond that abort, since each pubkey is confined to exactly one
 // chunk (dedup happens before chunking) and therefore writes exactly one
-// map entry regardless of chunk order. Shared by GetPacketPath (which
+// map entry regardless of chunk order. Shared by getPacketPath (which
 // discards the error, preserving its existing tolerant-on-query-failure
-// behavior unchanged) and GetPacketPathsBulk (which propagates it, per the
+// behavior unchanged) and getPacketPathsBulk (which propagates it, per the
 // bulk helpers' explicit-error contract).
 func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeInfo, error) {
 	nodeByPK := make(map[string]packetPathNodeInfo, len(pubkeys))
@@ -2551,8 +2591,8 @@ func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeI
 // unique name to exactly one chunk, but the logic doesn't rely on that) is
 // still detected correctly rather than only within its own chunk. Any
 // chunk's query/scan failure fails the entire call -- (nil, error), never a
-// partial map. Shared by GetPacketPath (discards the error, preserving
-// existing behavior) and GetPacketPathsBulk (propagates it).
+// partial map. Shared by getPacketPath (discards the error, preserving
+// existing behavior) and getPacketPathsBulk (propagates it).
 func (db *DB) resolveNodesByName(names []string) (map[string]packetPathNodeInfo, error) {
 	nodeByName := make(map[string]packetPathNodeInfo, len(names))
 	if len(names) == 0 {
@@ -2623,10 +2663,10 @@ type neighborEstimate struct {
 // hash, given already-resolved node position maps and a neighbor-estimate
 // lookup. This is the single shared implementation of branch assembly,
 // hop-point/observer position resolution, DistanceFromFirstKm, and sort
-// order -- used identically by GetPacketPath (single hash, maps resolved
+// order -- used identically by getPacketPath (single hash, maps resolved
 // via a per-hash query, neighborLookup calling nearestPositionedNeighbor
 // directly on demand, unchanged from before this refactor) and
-// GetPacketPathsBulk (many hashes, maps resolved via one batched query
+// getPacketPathsBulk (many hashes, maps resolved via one batched query
 // across the whole request, neighborLookup reading a pre-fetched map so no
 // per-point query happens here). Changing this function changes both paths
 // identically -- they cannot silently diverge.
@@ -2701,6 +2741,7 @@ func buildPacketPathResponseFromReduction(
 				if coord, ok := iataCoords[obs.IATA]; ok {
 					lat, lon := coord.Lat, coord.Lon
 					obs.Lat, obs.Lon = &lat, &lon
+					obs.iataFallback = true
 				}
 			}
 			if obs.Lat == nil && b.observerPubkey != "" {
@@ -2771,7 +2812,11 @@ func buildPacketPathResponseFromReduction(
 	return resp
 }
 
-func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse, error) {
+// getPacketPath takes the caller's immutable operator policy explicitly;
+// shared DB handles never hold mutable instance configuration. There is
+// deliberately no always-estimating exported wrapper: a caller that did
+// not state a policy would bypass the operator's #315 setting.
+func (db *DB) getPacketPath(hash string, maxEdgeKm float64, estimatesEnabled bool) (*PacketPathResponse, error) {
 	if !db.hasResolvedPath() {
 		return nil, fmt.Errorf("resolved_path not available on this server")
 	}
@@ -2826,9 +2871,9 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	for pk := range pubkeySet {
 		pubkeys = append(pubkeys, pk)
 	}
-	// Error discarded here on purpose -- preserves GetPacketPath's existing
+	// Error discarded here on purpose -- preserves getPacketPath's existing
 	// tolerant-on-query-failure behavior (a failed lookup just leaves
-	// positions unresolved, same as before this refactor). GetPacketPathsBulk
+	// positions unresolved, same as before this refactor). getPacketPathsBulk
 	// propagates this same helper's error instead; see its own call site.
 	nodeByPK, _ := db.resolveNodesByPubkey(pubkeys)
 
@@ -2840,6 +2885,9 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	nodeByName, _ := db.resolveNodesByName(names) // discarded for the same reason as above
 
 	neighborLookup := func(pk string) (neighborEstimate, bool) {
+		if !estimatesEnabled {
+			return neighborEstimate{}, false
+		}
 		_, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(pk, maxEdgeKm)
 		if !ok {
 			return neighborEstimate{}, false
@@ -3541,7 +3589,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	}
 	var obsSQL string
 	if db.isV3() {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				obs.id, obs.name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -3549,7 +3597,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
 			ORDER BY o.id ASC`
 	} else {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -3588,7 +3636,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		// reply text -- the same farthest-from-first-hearer distance View
 		// Path shows on its map, computed here as a cheap position-only
 		// pass (no neighbor-centroid approximation) rather than reusing
-		// GetPacketPath's heavier per-branch query for every ping.
+		// getPacketPath's heavier per-branch query for every ping.
 		observerPubkeys map[string]bool
 		firstPubkey     string
 		firstTS         int64
@@ -3597,12 +3645,12 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 
 	for rows.Next() {
 		var pktID, txID int
-		var pktHash, dj, fs, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
+		var pktHash, dj, fs, rawHexHead, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
 		var snr sql.NullFloat64
 		var obsTs sql.NullInt64
 		var routeType sql.NullInt64
 		var scopeName sql.NullString
-		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
+		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &rawHexHead, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
 		if db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
@@ -3716,6 +3764,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				"entryPrefix":           entryPrefix,
 				"entryObserverPubkey":   entryObserverPubkey,
 				"observedPathHashSizes": observedPathHashSizes(pathHashSizeMask),
+				"senderPathHashSize":    packetpath.SenderHashSize(rawHexHead.String),
 			},
 			Repeats:          1,
 			PathHashSizeMask: pathHashSizeMask,
@@ -3770,7 +3819,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		// Bulk-resolve observer positions too, for the "spread up to Nkm"
 		// part of the reply -- only for pings that could possibly show one
 		// (a first-hearer plus at least one other distinct station), and
-		// deliberately WITHOUT GetPacketPath's neighbor-centroid fallback
+		// deliberately WITHOUT getPacketPath's neighbor-centroid fallback
 		// for unpositioned stations: that's a per-node query each, too
 		// expensive to run for every ping on a page of channel messages.
 		// A station missing its own GPS fix just doesn't contribute here.
@@ -3805,7 +3854,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 					var pk string
 					var lat, lon sql.NullFloat64
 					// (0,0) is the ocean off Ghana, not a real fix -- same
-					// exclusion GetPacketPath applies.
+					// exclusion getPacketPath applies.
 					if posRows.Scan(&pk, &lat, &lon) == nil && lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
 						posByPK[pk] = [2]float64{lat.Float64, lon.Float64}
 					}
@@ -5667,7 +5716,7 @@ func (db *DB) gpsByPubkeysExact(pubkeys []string) map[string][2]float64 {
 				continue
 			}
 			// (0,0) is the ocean off Ghana, not a real fix -- same
-			// exclusion GetPacketPath/packetSpreadStats apply.
+			// exclusion getPacketPath/packetSpreadStats apply.
 			if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
 				result[pk] = [2]float64{lat.Float64, lon.Float64}
 			}

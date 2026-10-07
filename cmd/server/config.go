@@ -149,6 +149,10 @@ type Config struct {
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
 
+	// EstimatedPositions is an operator-side startup policy. Missing means
+	// enabled for compatibility; changes require a server restart.
+	EstimatedPositions *EstimatedPositionsConfig `json:"estimatedPositions,omitempty"`
+
 	// ChannelProposals configures publicly suggested hashtag channels
 	// (internal/channelregistry). Submissions open only when enabled AND a
 	// strong apiKey is set; the same block is read by the ingestor.
@@ -612,6 +616,9 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
+		}
+		if err := validateEstimatedPositionsConfig(data); err != nil {
+			return nil, fmt.Errorf("config %s: %w", p, err)
 		}
 		if err := json.Unmarshal(data, cfg); err != nil {
 			continue

@@ -106,7 +106,16 @@
     if (contentEl) contentEl.innerHTML = '<p class="text-muted">Loading…</p>';
     if (statusEl) statusEl.textContent = '';
     api('/analytics/areas', { ttl: 30000 })
-      .then(function (data) {
+      .then(async function (data) {
+        if (window.MeshConfigReady) await window.MeshConfigReady;
+        if (!container) return;
+        if (window.EstimatedPositions?.enabled(data) === false) {
+          areaRows = [];
+          estimatedRows = [];
+          if (statusEl) statusEl.textContent = '';
+          if (contentEl) contentEl.innerHTML = window.EstimatedPositions.disabledNoticeHTML;
+          return;
+        }
         areaRows = (data && Array.isArray(data.positionGaps)) ? data.positionGaps : [];
         estimatedRows = (data && Array.isArray(data.estimatedNodes)) ? data.estimatedNodes : [];
         unpositionedTotal = (data && data.unpositionedTotal) || 0;

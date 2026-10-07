@@ -101,6 +101,7 @@ jobs:
           set -e -o pipefail
           (cd internal/channelregistry && go test ./...)
           (cd internal/dbschema && go test ./...)
+          (cd internal/brokerurl && go test ./...)
 
       # internal/anomaly is its own module (not wired into any binary), so the
       # server/ingestor steps above do not reach it. No -fuzz and no -bench:
@@ -134,94 +135,12 @@ jobs:
           node scripts/check-css-vars.js
           node scripts/test-check-css-vars.js
 
-      - name: Run JS unit tests (packet-filter)
+      - name: Run JS unit tests (test-all.sh)
+        # One list: test-all.sh runs every unit file and prints a summary of
+        # the failed ones; the step fails if any file fails (#174).
         run: |
-          set -e
-          node test-packet-filter.js
-          node test-packet-filter-time.js
-          node test-issue-121-clear-filters-selection.js
-          node test-clear-filters.js
-          node test-confidence-indicator.js
-          node test-1659-analytics-warmup.js
-          node test-issue-120-distance-building.js
-          node test-app-api-inflight-cleanup-rejection.js
-          node test-channels-merge-1498-unit.js
-          node test-channels-observed-path-hash-size.js
-          node test-issue-1518-home-url.js
-          node test-channel-decrypt-insecure-context.js
-          node test-live-region-filter.js
-          node test-issue-2052-touch-target-css.js
-          node test-channel-proposals.js
-          node test-packet-detail-channel-xss.js
-          node test-channels-name-escaping.js
-          node test-issue-1136-observer-iata-map.js
-          node test-channel-qr.js
-          node test-channel-qr-wiring.js
-          node test-channel-modal-ux.js
-          node test-channel-issue-1087.js
-          node test-issue-1409-no-encrypted-flood.js
-          node test-channel-issue-1101.js
-          node test-observer-iata-1188.js
-          node test-pull-to-reconnect-1091.js
-          node test-issue-117-ws-watchdog.js
-          node test-issue-111-drawer-version.js
-          node test-channel-fluid-layout.js
-          node test-issue-1279-p2-code-filter.js
-          node test-area-filter.js
-          node test-issue-1293-marker-shapes.js
-          node test-issue-1356-map-a11y.js
-          node test-issue-1360-pill-letter-count.js
-          node test-issue-1364-pill-no-clamp.js
-          node test-issue-1890-og-url.js
-          node test-issue-1375-scope-stats-fetch.js
-          node test-issue-1361-cb-presets.js
-          node test-issue-1380-cb-sim-overlay.js
-          node test-issue-1380-cb-reset-button.js
-          node test-issue-1407-cb-preset-propagation.js
-          node test-issue-1412-customizer-no-override.js
-          node test-issue-1418-raw-hex-extraction.js
-          node test-issue-1418-edge-weights.js
-          node test-issue-1418-cb-preset-ramp.js
-          node test-issue-1418-spider-fan.js
-          node test-issue-1418-deeplink-hops-channels.js
-          node test-issue-1418-polish-review.js
-          node test-issue-1420-tile-providers.js
-          node test-issue-1614-tile-url-function.js
-          node test-issue-1438-marker-css-vars.js
-          node test-issue-1846-observers-width.js
-          node test-issue-1562-observers-summary.js
-          node test-issue-1509-nav-active-bg.js
-          node test-issue-1509-detect-preset.js
-          node test-live.js
-          node test-issue-124-rx-coverage-viewport.js
-          node test-issue-125-live-toggles-wiring.js
-          node test-coverage-gate.js
-          node test-node-reach-coverage.js
-          node test-reach-rank.js
-          node test-node-adverts.js
-          node test-issue-1107-live-layout.js
-          node test-issue-1833-legend-toggle-vcr-offset.js
-          node test-issue-1532-live-fullscreen.js
-          node test-issue-1619-feed-detail-card-draggable.js
-          node test-xss-escape-sinks.js
-          node test-preflight-xss-gate.js
-          node test-traces.js
-          node test-issue-1648-m4-emoji-scan.js
-          node test-issue-1753-copy-url-slash.js
-          node test-issue-1668-m3-typography.js
-          node test-mqtt-status-panel.js
-          node test-issue-1697-mqtt-mobile-e2e.js
-          node test-warmup-banner.js
-          node test-issue-1633-hide-1byte-hops.js
-          node test-issue-1668-m4-per-route.js
-          node test-a11y-axe-1668-selftest.js
-          node test-a11y-1716-rf-range-btn-active.js
-          node test-issue-1705-subpath-contrast.js
-          node test-analytics-table-ids-unique.js
-          node test-analytics-relay-airtime-dumbbell.js
-          node test-live-vcr-mode-contrast.js
-          node test-issue-1770-mobile-row-clamp.js
-          node test-a11y-axe-routes-coverage.js
+          node --version
+          sh test-all.sh
 
       - name: 🛡️ Preflight XSS gate — actual --diff check (PR only)
         # The fixture self-test above (test-preflight-xss-gate.js) only
@@ -450,6 +369,16 @@ jobs:
         # (#89). See the file header for the rows and expected classes.
         run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-2073-route-adverts.sql
 
+      - name: Seed an inactive observer node for #199 E2E
+        # Also after the migration: the fixture has no inactive_nodes table
+        # until corescope-migrate creates it.
+        run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-199-inactive-observer.sql
+
+      - name: Seed adverts with known gaps for #245 E2E
+        # After the migration (sets transmissions.route_mask). See the file
+        # header for the rows and the expected interval estimates.
+        run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-245-advert-intervals.sql
+
       - name: Start Go server with fixture DB
         run: |
           fuser -k 13581/tcp 2>/dev/null || true
@@ -486,6 +415,8 @@ jobs:
           BASE_URL=http://localhost:13581 node test-filter-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-channel-issue-1087-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-channel-issue-1111-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-channels-client-state-152-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channels-154-155-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-map-modal-fluid-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-map-nodes-pagination-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-123-map-lifecycle-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -509,20 +440,31 @@ jobs:
           BASE_URL=http://localhost:13581 node test-charts-fluid-1058-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-slideover-1056-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1692-packets-init-parallel-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-147-packets-url-obs-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-packet-detail-sender-hash-size-obs-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-slideover-1168-munger-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-logo-pulse-1173-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1122-packets-filter-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1122-details-row-clamp-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-258-column-widths-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1128-packets-layout-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-189-group-caret-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-254-affinity-toggle-mobile-aria-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-259-mobile-expanded-group-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1128-multi-viewport-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1136-live-region-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-live-multibyte-only-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-125-live-toggles-early-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-220-live-filter-readiness-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1150-404-state-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-199-inactive-observer-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1146-path-link-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-issue-1705-subpath-contrast-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1147-section-order-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-2073-recent-adverts-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-245-advert-intervals-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1151-orphan-separators-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1486-collapse-reopens-detail-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-logo-rebrand-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -540,6 +482,7 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1510-live-nav-pin-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-live-fullscreen-1572-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1599-replay-freeze-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-pr-1490-live-map-gpu-animations-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m1-icons-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m2-icons-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1648-m3-icons-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -548,8 +491,27 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1224-channels-mobile-ux-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1367-channels-chat-app-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-2052-touch-target-e2e.js 2>&1 | tee -a e2e-output.txt
+          # Standalone harness (no server): loads public/style.css into Chromium.
+          CHROMIUM_REQUIRE=1 node test-touch-targets.js 2>&1 | tee -a e2e-output.txt
           # Starts its own ingestor + server on a temp copy of the fixture.
           CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channel-proposals-e2e.js 2>&1 | tee -a e2e-output.txt
+          # Starts its own ingestor + server on a temp copy of the fixture; seeds client-decryptable packets itself.
+          CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channels-client-state-152-decrypt-e2e.js 2>&1 | tee -a e2e-output.txt
+          # #315 uses synthetic data and its own default/on/off Go servers.
+          # Pin the existing Leaflet runtime; browser network stays local-only.
+          leaflet_dir="$RUNNER_TEMP/corescope-315-leaflet"
+          mkdir -p "$leaflet_dir/images"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/leaflet.js -o "$leaflet_dir/leaflet.js"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/leaflet.css -o "$leaflet_dir/leaflet.css"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png -o "$leaflet_dir/images/marker-icon.png"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png -o "$leaflet_dir/images/marker-icon-2x.png"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png -o "$leaflet_dir/images/marker-shadow.png"
+          echo "db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a  $leaflet_dir/leaflet.js" | sha256sum --check
+          echo "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6  $leaflet_dir/leaflet.css" | sha256sum --check
+          echo "574c3a5cca85f4114085b6841596d62f00d7c892c7b03f28cbfa301deb1dc437  $leaflet_dir/images/marker-icon.png" | sha256sum --check
+          echo "00179c4c1ee830d3a108412ae0d294f55776cfeb085c60129a39aa6fc4ae2528  $leaflet_dir/images/marker-icon-2x.png" | sha256sum --check
+          echo "264f5c640339f042dd729062cfc04c17f8ea0f29882b538e3848ed8f10edb4da  $leaflet_dir/images/marker-shadow.png" | sha256sum --check
+          CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_MIGRATE_BIN=./corescope-migrate CORESCOPE_LEAFLET_DIR="$leaflet_dir" node test-issue-315-estimated-positions-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1236-map-mobile-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1329-map-controls-accordion-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1273-qr-overlay-height-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -574,6 +536,8 @@ jobs:
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-drag-manager-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1567-corner-clears-drag-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1306-collisions-terminology-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-205-analytics-subtab-deeplinks-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-226-hash-stats-sort-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1374-route-map-a11y-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channels-list-render-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channels-selection-flow-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -598,6 +562,19 @@ jobs:
           BASE_URL=http://localhost:13581 node test-live-dedup.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-nodes-export-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-show-neighbors.js 2>&1 | tee -a e2e-output.txt
+          # Root E2Es without a runner until #174. They do not use the fixture
+          # server: the two contrast gates render static markup, and the other two
+          # serve their own pages.
+          CHROMIUM_REQUIRE=1 node test-a11y-1705-subpath-hop-prefix-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-a11y-1719-contrast-root-causes-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-nodes-favorite-rerender-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-packet-trace-alignment-e2e.js 2>&1 | tee -a e2e-output.txt
+          # Root E2Es repaired or ported to plain playwright in #189.
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-live-pulse-ring-weight-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channel-modal-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-node-reach-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-path-inspector-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1522-trace-url-sync-e2e.js 2>&1 | tee -a e2e-output.txt
 
       # #1616: slide-over focus-restore flake-gate. Runs the slide-over
       # E2E 20 consecutive times against the SAME backend instance so
