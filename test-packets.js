@@ -1847,13 +1847,16 @@ console.log('\n=== packets.js: detail Hash Size row warns on 1-byte (#353) ===')
   const api = loadPacketsSandbox()._packetsTestAPI;
   const src = fs.readFileSync('public/packets.js', 'utf8');
 
-  test('1-byte Hash Size row gets the warn class, the warning icon and the warn tooltip', () => {
+  test('1-byte Hash Size row gets the warn class, the warning icon and the recommendation', () => {
     const html = api.hashSizeDetailHtml(1);
     assert.ok(html.startsWith('<dt>Hash Size</dt><dd>'), html);
     assert.match(html, /class="detail-hash-size detail-hash-size--warn path-hash-warn"/);
     assert.match(html, /#ph-warning/);
-    assert.match(html, /<span class="sr-only">Warning: <\/span>1 byte<\/span><\/dd>$/);
-    assert.match(html, /title="[^"]*2- or 3-byte/);
+    // #353 round 3: amber recommendation; factual value kept, recommendation
+    // in an sr-only clause so it never relies on the amber colour.
+    assert.match(html, /1 byte<span class="sr-only"> — recommended: 2- or 3-byte path hash<\/span><\/span><\/dd>$/);
+    assert.ok(!/Warning: /.test(html), 'must not read as an error');
+    assert.match(html, /title="Recommended: [^"]*2- or 3-byte/);
   });
 
   test('2- and 3-byte Hash Size rows stay neutral', () => {
@@ -1865,6 +1868,13 @@ console.log('\n=== packets.js: detail Hash Size row warns on 1-byte (#353) ===')
 
   test('no encoded width renders no Hash Size row, as before', () => {
     for (const v of [null, undefined, 0]) assert.strictEqual(api.hashSizeDetailHtml(v), '', 'for ' + v);
+  });
+
+  // #353 review (round 2, finding 2): an out-of-range width must not leave an
+  // empty <dd></dd>. The row is gated on the shared helper's output, so a size
+  // the helper rejects (e.g. 4) renders no row at all, not a blank one.
+  test('an out-of-range width renders no empty Hash Size row', () => {
+    for (const v of [4, 5, -1]) assert.strictEqual(api.hashSizeDetailHtml(v), '', 'for ' + v);
   });
 
   test('renderDetail emits the Hash Size row through hashSizeDetailHtml', () => {

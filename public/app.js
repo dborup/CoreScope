@@ -69,8 +69,16 @@ function pathHashSizeValue(size) {
  * with" badge, the packet-detail Hash Size row and the node-detail badge.
  * Returns '' unless size is 1/2/3. opts.block is the caller's BEM class (the
  * warn variant adds `${block}--warn` plus the shared `path-hash-warn`),
- * opts.cls extra leading classes, opts.title the neutral tooltip. A warning
- * carries an icon and screen-reader text so it never relies on colour alone.
+ * opts.cls extra leading classes, opts.title the neutral tooltip.
+ *
+ * Round 3 (operator decision on #353): a 1-byte hash is a *recommendation*,
+ * not an error. The variant uses the amber warning palette (--path-hash-warn
+ * -> --warning), a warning (not error) icon, and recommendation wording. So it
+ * never relies on the amber colour alone, the recommendation is also spelled
+ * out in text: a visible label when opts.recInLabel is set (the standalone
+ * node badge), otherwise an sr-only clause appended after the factual label
+ * (the inline channel badge and the packet-detail value row).
+ *
  * The setting names come from firmware/docs/faq.md 3.9.3 (companion app) and
  * 3.9.4 / cli_commands.md (repeater `path.hash.mode`); faq.md 3.9.6 is why the
  * tooltip says to switch only once most repeaters run 1.14+.
@@ -84,13 +92,15 @@ function renderPathHashSize(size, text, opts) {
   if (!isPathHashSizeWarn(n)) {
     return '<span class="' + cls + '"' + (o.title ? ' title="' + escapeHtml(o.title) + '"' : '') + '>' + label + '</span>';
   }
-  const tip = '1-byte path hash: prefixes collide often across nodes, so hops can be ambiguous. ' +
-    '2- or 3-byte is recommended. Companion: MeshCore app Settings → Experimental Settings (message path hash size). ' +
+  const tip = 'Recommended: use a 2- or 3-byte path hash. A 1-byte hash is the firmware default, but its ' +
+    'prefixes collide more often across nodes, so hops can be ambiguous. ' +
+    'Companion: MeshCore app Settings → Experimental Settings (message path hash size). ' +
     'Repeater adverts: set path.hash.mode 1 (2-byte) or 2 (3-byte). ' +
-    'Repeaters older than firmware 1.14 drop 2/3-byte packets, so switch messages once most of your mesh runs 1.14+.';
+    'Repeaters older than firmware 1.14 drop 2/3-byte packets, so switch once most of your mesh runs 1.14+.';
+  const rec = o.recInLabel ? '' : '<span class="sr-only"> — recommended: 2- or 3-byte path hash</span>';
   return '<span class="' + cls + ' ' + o.block + '--warn path-hash-warn" title="' + tip + '">' +
     '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
-    '<span class="sr-only">Warning: </span>' + label + '</span>';
+    label + rec + '</span>';
 }
 /**
  * scopeName is optional (callers that don't pass it get the original

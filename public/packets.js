@@ -3640,12 +3640,13 @@
   }
 
   // Detail-meta "Hash Size" row for the sender-selected width (null = not
-  // encoded, no row). #353: a 1-byte width renders the shared warning (app.js).
+  // encoded, no row). #353: a 1-byte width renders the shared amber
+  // recommendation (app.js). The row is gated on the helper's output, so a
+  // width the helper rejects (null/0 or an out-of-range value) renders no row
+  // at all rather than an empty <dd></dd> (#356 review round 2, finding 2).
   function hashSizeDetailHtml(hashSize) {
-    if (!hashSize) return '';
-    return '<dt>Hash Size</dt><dd>' +
-      renderPathHashSize(hashSize, hashSize + ' byte' + (hashSize !== 1 ? 's' : ''), { block: 'detail-hash-size' }) +
-      '</dd>';
+    const inner = renderPathHashSize(hashSize, hashSize + ' byte' + (hashSize !== 1 ? 's' : ''), { block: 'detail-hash-size' });
+    return inner ? '<dt>Hash Size</dt><dd>' + inner + '</dd>' : '';
   }
 
   async function renderDetail(panel, data, chosenObsId) {

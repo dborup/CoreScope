@@ -370,7 +370,8 @@ test('applyCSS writes --path-hash-warn when overridden (#353)', () => {
 test('pathHashWarn has a label, a hint and an Advanced row (#353)', () => {
   const src = fs.readFileSync('public/customize-v2.js', 'utf8');
   assert.match(src, /pathHashWarn: '1-byte Path Hash'/);
-  assert.match(src, /pathHashWarn: '[^']*1-byte path hash[^']*'/);
+  // #353 round 3: the hint describes a recommendation accent, not an error.
+  assert.match(src, /pathHashWarn: '[^']*recommend[^']*1-byte path hash[^']*'/);
   assert.match(src, /var ADVANCED_KEYS = \[[^\]]*'pathHashWarn'/);
 });
 

@@ -524,13 +524,16 @@ console.log('\n=== nodes.js: getStatusTooltip / getStatusInfo (extracted) ===');
       role: 'repeater', public_key: 'abcdef1234567890', hash_size,
       last_heard: new Date().toISOString()
     });
-    test('renderNodeBadges adds the 1-byte path hash warning badge (#353)', () => {
+    test('renderNodeBadges adds the 1-byte path hash recommendation badge (#353)', () => {
       for (const size of [1, '1']) {
         const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
         assert.match(html, /class="badge node-path-hash-badge node-path-hash-badge--warn path-hash-warn"/);
         assert.match(html, /#ph-warning/);
-        assert.match(html, /<span class="sr-only">Warning: <\/span>1-byte path hash<\/span>/);
-        assert.match(html, /title="[^"]*2- or 3-byte[^"]*path\.hash\.mode/);
+        // #353 round 3: the standalone badge shows the recommendation as its
+        // visible label (no duplicate sr-only clause); amber, not red.
+        assert.match(html, />Recommended: 2- or 3-byte path hash<\/span>/);
+        assert.ok(!/Warning: /.test(html), 'must not read as an error');
+        assert.match(html, /title="Recommended: [^"]*2- or 3-byte[^"]*path\.hash\.mode/);
         assert.ok(!html.includes('multibyte-badge'), '1-byte must not claim Multibyte');
       }
     });

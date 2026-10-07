@@ -184,14 +184,15 @@ test('sender badge uses only a valid encoded width', () => {
   assert.strictEqual(senderBadge({ senderPathHashSize: '<img src=x onerror=alert(1)>' }), '');
 });
 
-// #353: a 1-byte sender width reads as a warning; 2/3-byte stay neutral.
-test('1-byte sender badge gets the warn class, the warning icon and the warn tooltip', () => {
+// #353: a 1-byte sender width reads as an amber recommendation; 2/3-byte stay neutral.
+test('1-byte sender badge gets the warn class, the warning icon and the recommendation', () => {
   const html = senderBadge({ senderPathHashSize: 1 });
   assert.match(html, /class="ch-path-hash-badge ch-path-hash-badge--warn path-hash-warn"/);
   assert.match(html, /#ph-warning/);
   assert.match(html, /aria-hidden="true"/);
-  assert.match(html, /<span class="sr-only">Warning: <\/span>Sent with: 1-byte</);
-  assert.match(html, /title="[^"]*2- or 3-byte[^"]*Experimental Settings/);
+  assert.match(html, /Sent with: 1-byte<span class="sr-only"> — recommended: 2- or 3-byte path hash<\/span>/);
+  assert.ok(!/Warning: /.test(html), 'must not read as an error');
+  assert.match(html, /title="Recommended: [^"]*2- or 3-byte[^"]*Experimental Settings/);
 });
 
 test('2- and 3-byte sender badges stay neutral with the header tooltip', () => {

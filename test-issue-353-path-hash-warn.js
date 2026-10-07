@@ -67,16 +67,30 @@ test('missing or invalid sizes are not a warning', () => {
 
 console.log('\n=== #353 renderPathHashSize ===');
 
-test('1-byte renders the warn modifier, the shared warn class, an icon and screen-reader text', () => {
+test('1-byte renders the warn modifier, the shared warn class, an icon and a recommendation for screen readers', () => {
   const html = renderPathHashSize(1, 'Sent with: 1-byte', { block: 'ch-path-hash-badge' });
   assert.match(html, /class="ch-path-hash-badge ch-path-hash-badge--warn path-hash-warn"/);
   assert.match(html, /<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-warning"\/><\/svg>/);
-  assert.match(html, /<span class="sr-only">Warning: <\/span>Sent with: 1-byte<\/span>$/);
+  // #353 round 3: an amber recommendation, not a red error. The visible label
+  // stays factual; a sr-only clause carries the recommendation for non-sighted
+  // users and anyone who cannot perceive the amber colour.
+  assert.match(html, /Sent with: 1-byte<span class="sr-only"> — recommended: 2- or 3-byte path hash<\/span><\/span>$/);
+  assert.ok(!/Warning: /.test(html), 'must not read as an error ("Warning:")');
 });
 
-test('1-byte tooltip explains the collision risk, recommends 2/3-byte and names the firmware settings', () => {
+test('a recommendation-labelled call omits the sr-only clause to avoid repeating itself', () => {
+  // The node badge (opts.recInLabel) shows the recommendation as its visible
+  // label already, so the duplicate sr-only clause is suppressed.
+  const html = renderPathHashSize(1, 'Recommended: 2- or 3-byte path hash',
+    { block: 'node-path-hash-badge', cls: 'badge', recInLabel: true });
+  assert.match(html, />Recommended: 2- or 3-byte path hash<\/span>$/);
+  assert.ok(!html.includes('sr-only'), 'recInLabel must not add a duplicate sr-only clause');
+});
+
+test('1-byte tooltip leads with the recommendation, keeps the collision reason and names the firmware settings', () => {
   const html = renderPathHashSize(1, '1 byte', { block: 'detail-hash-size' });
   const title = (html.match(/title="([^"]*)"/) || [])[1] || '';
+  assert.match(title, /^Recommended: /);
   assert.match(title, /collide/);
   assert.match(title, /2- or 3-byte/);
   // firmware/docs/faq.md 3.9.3 (companion) and cli_commands.md (repeater)
@@ -132,8 +146,11 @@ console.log('\n=== #353 theming: --path-hash-warn ===');
   const dangerAt = css.indexOf('--danger: var(--palette-red-600');
   const rootBlock = css.slice(css.lastIndexOf('\n:root {', dangerAt), css.indexOf('\n}', dangerAt));
 
-  test(':root declares --path-hash-warn defaulting to var(--danger)', () => {
-    assert.match(rootBlock, /--path-hash-warn:\s*var\(--danger\);/);
+  test(':root declares --path-hash-warn defaulting to var(--warning)', () => {
+    // #353 round 3: 1-byte is a recommendation, so it follows the amber
+    // warning palette, not the red danger palette, in both themes.
+    assert.match(rootBlock, /--path-hash-warn:\s*var\(--warning\);/);
+    assert.ok(!/--path-hash-warn:\s*var\(--danger\)/.test(rootBlock), 'must not default to --danger');
   });
 
   test('.path-hash-warn colours its text with the variable, never a hardcoded colour', () => {

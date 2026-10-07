@@ -319,7 +319,7 @@
     cardBg: 'Detail panels, modals', contentBg: 'Content area behind cards',
     detailBg: 'Modal, packet detail, side panels', inputBg: 'Text inputs, dropdowns',
     rowStripe: 'Alternating table rows', rowHover: 'Table row hover', selectedBg: 'Selected/active rows',
-    pathHashWarn: 'Warning for a 1-byte path hash (channels, packet detail, node badge)',
+    pathHashWarn: 'Amber accent recommending a 2/3-byte over a 1-byte path hash (channels, packet detail, node badge)',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
