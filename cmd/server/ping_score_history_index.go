@@ -116,7 +116,7 @@ func (idx *pingScoreHistoryIndex) Entries() []PingScoreHistoryEntry {
 // against a fresh ping_triggers read: what a recompute cycle needs to do,
 // with no I/O performed and nothing mutated. Phase 4C only builds this
 // plan (planPingScoreHistoryReconcile); Phase 4D+ is what actually acts on
-// it (calling GetPacketPathsBulk for ToCompute, deleting ToDelete from the
+// it (calling getPacketPathsBulk for ToCompute, deleting ToDelete from the
 // store, etc).
 type pingScoreHistoryReconcilePlan struct {
 	// ToCompute is every trigger needing a fresh computation this cycle:

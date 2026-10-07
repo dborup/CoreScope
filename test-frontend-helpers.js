@@ -2242,6 +2242,12 @@ console.log('\n=== app.js: computeBreakdownRanges ===');
     assert.strictEqual(ctx.senderPathHashSize('1540DEADBEEF'), 2);
     assert.strictEqual(ctx.senderPathHashSize('1580DEADBEEF'), 3);
     assert.strictEqual(ctx.senderPathHashSize('1600DEADBEEF'), null);
+    // #322 (1): the direct zero-hop marker is also valid on TRANSPORT_DIRECT
+    // (route 3), where the path byte sits at offset 5 behind the transport
+    // codes. Header 0x17 = route 3, 4 transport bytes (aabbccdd), path byte
+    // 0x00. The shared width helper must treat route 3 like route 2 → null,
+    // killing the `(route === 2 || route === 3)` → `(route === 2)` mutant here.
+    assert.strictEqual(ctx.senderPathHashSize('17aabbccdd00DEADBEEF'), null);
     assert.strictEqual(ctx.senderPathHashSize('141122334440DEADBEEF'), 2);
     assert.strictEqual(ctx.senderPathHashSize('2540DEADBEEF'), null);
     assert.strictEqual(ctx.senderPathHashSize('15C0DEADBEEF'), null);
@@ -6148,6 +6154,9 @@ console.log('\n=== packets.js: buildFieldTable transport offsets (#765) ===');
   loadInCtx(hashHelperCtx, 'public/roles.js');
   loadInCtx(hashHelperCtx, 'public/app.js');
   ftCtx.senderPathHashSize = hashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable's Path Length row now reads its width through the
+  // shared pathHashSizeFromByte() helper, so the sandbox must expose it too.
+  ftCtx.pathHashSizeFromByte = hashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable, fieldRow } = ftCtx.window._packetsTestAPI;
 
@@ -6249,6 +6258,8 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   loadInCtx(secondHashHelperCtx, 'public/roles.js');
   loadInCtx(secondHashHelperCtx, 'public/app.js');
   ftCtx.senderPathHashSize = secondHashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable now reads its width via the shared helper.
+  ftCtx.pathHashSizeFromByte = secondHashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 

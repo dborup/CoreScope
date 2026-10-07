@@ -1203,6 +1203,10 @@
     return Math.min(0.75, 0.35 + contributorCount * 0.08);
   }
   function drawEstimatedNodes(points) {
+    if (window.EstimatedPositions?.enabled() === false) {
+      showEstimatedPositionsDisabled();
+      return;
+    }
     if (markerLayer) map.removeLayer(markerLayer);
     if (clusterGroup) map.removeLayer(clusterGroup);
     if (heatLayer) map.removeLayer(heatLayer);
@@ -1704,6 +1708,12 @@
   async function loadEstimatedNodesFromDeepLink() {
     const alive = mapToken();
     try {
+      if (window.MeshConfigReady) await window.MeshConfigReady;
+      if (!alive()) return;
+      if (window.EstimatedPositions?.enabled() === false) {
+        showEstimatedPositionsDisabled();
+        return;
+      }
       const resp = await fetch('/api/analytics/areas');
       if (!alive()) return; // #123
       if (!resp.ok) {
@@ -1712,11 +1722,29 @@
       }
       const data = await resp.json();
       if (!alive()) return;
+      if (window.EstimatedPositions?.enabled(data) === false) {
+        showEstimatedPositionsDisabled();
+        return;
+      }
       const points = (data && Array.isArray(data.estimatedNodes)) ? data.estimatedNodes : [];
       drawEstimatedNodes(points);
     } catch (e) {
       console.warn('[deep-link] estimated-nodes load failed', e);
     }
+  }
+
+  // Keep the ordinary, reported-GPS markers visible for a disabled deep link.
+  // This is not the empty-estimates state, and must not replace the base map.
+  function showEstimatedPositionsDisabled() {
+    const container = map.getContainer();
+    let label = container.querySelector('.mc-estimated-nodes-label');
+    if (!label) {
+      label = document.createElement('div');
+      label.className = 'mc-estimated-nodes-label';
+      label.style.cssText = 'position:absolute;top:10px;left:50px;right:10px;z-index:1000;background:var(--input-bg);color:var(--text);padding:4px 10px;border-radius:4px;font-size:12px';
+      container.appendChild(label);
+    }
+    label.textContent = window.EstimatedPositions.disabledMessage;
   }
 
   // #123: every call is a new request generation; only the newest request

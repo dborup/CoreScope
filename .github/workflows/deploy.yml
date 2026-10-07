@@ -496,6 +496,21 @@ jobs:
           CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channel-proposals-e2e.js 2>&1 | tee -a e2e-output.txt
           # Starts its own ingestor + server on a temp copy of the fixture; seeds client-decryptable packets itself.
           CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_INGESTOR_BIN=./corescope-ingestor FIXTURE_DB=test-fixtures/e2e-fixture.db node test-channels-client-state-152-decrypt-e2e.js 2>&1 | tee -a e2e-output.txt
+          # #315 uses synthetic data and its own default/on/off Go servers.
+          # Pin the existing Leaflet runtime; browser network stays local-only.
+          leaflet_dir="$RUNNER_TEMP/corescope-315-leaflet"
+          mkdir -p "$leaflet_dir/images"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/leaflet.js -o "$leaflet_dir/leaflet.js"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/leaflet.css -o "$leaflet_dir/leaflet.css"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png -o "$leaflet_dir/images/marker-icon.png"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png -o "$leaflet_dir/images/marker-icon-2x.png"
+          curl --fail --silent --show-error --location --retry 3 https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png -o "$leaflet_dir/images/marker-shadow.png"
+          echo "db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a  $leaflet_dir/leaflet.js" | sha256sum --check
+          echo "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6  $leaflet_dir/leaflet.css" | sha256sum --check
+          echo "574c3a5cca85f4114085b6841596d62f00d7c892c7b03f28cbfa301deb1dc437  $leaflet_dir/images/marker-icon.png" | sha256sum --check
+          echo "00179c4c1ee830d3a108412ae0d294f55776cfeb085c60129a39aa6fc4ae2528  $leaflet_dir/images/marker-icon-2x.png" | sha256sum --check
+          echo "264f5c640339f042dd729062cfc04c17f8ea0f29882b538e3848ed8f10edb4da  $leaflet_dir/images/marker-shadow.png" | sha256sum --check
+          CHROMIUM_REQUIRE=1 CORESCOPE_SERVER_BIN=./corescope-server CORESCOPE_MIGRATE_BIN=./corescope-migrate CORESCOPE_LEAFLET_DIR="$leaflet_dir" node test-issue-315-estimated-positions-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1236-map-mobile-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1329-map-controls-accordion-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1273-qr-overlay-height-e2e.js 2>&1 | tee -a e2e-output.txt

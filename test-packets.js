@@ -1057,6 +1057,23 @@ console.log('\n=== packets.js: buildFieldTable ===');
       'direct zero-hop marker description drifted, got: ' + result);
   });
 
+  // #322 (2): the zero-hop 0x00 marker is also valid on TRANSPORT_DIRECT
+  // (route 3, firmware/src/Packet.h isRouteDirect()), where the path-length byte
+  // sits at offset 5 behind the transport codes. Nothing covered route 3, so the
+  // direct-marker mutant `(route === 2 || route === 3)` → `(route === 2)`
+  // survived: it would relabel this 0x00 as hash_size=1. This case kills it.
+  test('buildFieldTable keeps the direct zero-hop marker on TRANSPORT_DIRECT (route 3, byte 5)', () => {
+    // header 0x17 = route 3 (TRANSPORT_DIRECT), path-type 5 (hops). 4 transport
+    // code bytes (aabbccdd), then path byte 0x00 at offset 5 = sendZeroHop's
+    // marker. route 3 must be treated like route 2: no encoded hash size.
+    const pkt = { raw_hex: '17aabbccdd00', route_type: 3, payload_type: 5 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=0 (no encoded hash size)'),
+      'TRANSPORT_DIRECT zero-hop marker must read as no encoded hash size, got: ' + result);
+    assert(!/hash_size=\d/.test(result),
+      'the 0x00 direct marker must not be read as a hash width on route 3, got: ' + result);
+  });
+
   test('buildFieldTable does not read a hash width out of TRACE SNR bytes', () => {
     // header 0x25 = payload 9 (TRACE), route 1. Its path bytes are SNR
     // readings (internal/packetpath/route.go PathBytesAreHops), not hops.

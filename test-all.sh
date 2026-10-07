@@ -65,6 +65,7 @@ run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
+run test-issue-322-comment-guards.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -147,6 +148,7 @@ run test-node-changes-tool.js
 run test-network-digest-tool.js
 run test-position-gaps-tool.js
 run test-gps-sanity-tool.js
+run test-estimated-positions-config.js
 run test-map-scope-filter.js
 run test-issue-117-ws-watchdog.js
 run test-issue-111-drawer-version.js

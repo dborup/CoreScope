@@ -3,9 +3,11 @@
  * not leak.
  *
  * public/packets.js registered a fresh `pktEsc` closure on `document` inside
- * renderLeft(), and renderLeft() runs on every visit to #/packets (and on every
- * filter/region change within a visit). The closure was never removed, so each
- * entry stacked one more live `keydown` listener on `document` -- the same leak
+ * renderLeft(). #322 (3): renderLeft() also runs on every filter/region change
+ * within a visit, but those later calls return at the `filtersBuilt` guard
+ * before reaching the addEventListener, so the closure was added once per VISIT
+ * to #/packets, not per filter/region change. It was never removed, so each
+ * visit stacked one more live `keydown` listener on `document` -- the same leak
  * class as nodes.js' #259 nodesEsc/nodesPanelEsc. destroy() never took it off.
  *
  * The fix makes `_pktEsc` a stable module-level reference: a repeat
@@ -18,7 +20,8 @@
  * router's init/destroy cycle for several #/packets visits and asserts:
  *  - a single visit leaves exactly one document keydown listener;
  *  - entering and leaving #/packets several times does not stack listeners;
- *  - a second render inside the same visit does not add a second listener;
+ *  - a re-render inside the same visit (a filter/region change) returns at the
+ *    `filtersBuilt` guard and so adds no second listener;
  *  - destroy() leaves no document keydown listener behind;
  *  - the listener still works on a page opened after a destroy.
  *
@@ -218,11 +221,14 @@ test('entering and leaving #/packets several times does not stack listeners', as
   assert.strictEqual(n, 1, 'at most one listener after four visits, got ' + n);
 });
 
-test('a second render inside the same visit does not add a second listener', async () => {
+test('a re-render inside the same visit returns at the filtersBuilt guard and adds no second listener', async () => {
   const s = loadPackets();
   s.page.init(s.app, null);
   await settle();
-  s.regionChange();            // a region change re-runs loadPackets() -> renderLeft()
+  // A region change re-runs loadPackets() -> renderLeft(), but renderLeft()
+  // returns at the `filtersBuilt` guard before the addEventListener, so no
+  // second listener is added even on master. This pins that early-return path.
+  s.regionChange();
   await settle();
   assert.deepStrictEqual(s.errors, [], 'both renders ran without errors');
   const n = s.keydownListeners().length;

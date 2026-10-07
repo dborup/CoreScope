@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -456,24 +457,202 @@ func TestGetRouteHandlerSelfDispatchGuardReturnsNilForUnknownPath(t *testing.T) 
 	}
 }
 
-// #281 N4: the API-only banner (served by newHTTPRouter when the static
-// directory doesn't exist) must point at an endpoint that actually
-// resolves. It used to say "/api/", which #233 turned into a JSON 404.
-func TestAPIOnlyBannerPointsToExistingEndpoint(t *testing.T) {
+// apiOnlyBannerBody builds the production router with a missing public dir
+// (the only mode that renders the API-only banner) and returns the banner
+// body served for GET /, plus the router itself.
+func apiOnlyBannerBody(t *testing.T) (*mux.Router, string) {
+	t.Helper()
 	srv, _ := setupTestServer(t)
 	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
 	router := newHTTPRouter(srv, NewHub(), missingDir)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
-	body := w.Body.String()
-	if !strings.Contains(body, "/api/docs") {
-		t.Fatalf("API-only banner does not mention /api/docs: %q", body)
+	return router, w.Body.String()
+}
+
+// bannerTag matches an HTML tag, so the banner's prose can be scanned
+// without closing tags like </p> leaking a slash-prefixed token.
+var bannerTag = regexp.MustCompile(`<[^>]*>`)
+
+// bannerReference matches any URL-ish token the banner advertises: an
+// absolute http(s) URL, or a slash-prefixed path (preceded by start,
+// whitespace, or an opening paren so the leading "/" of a path is caught but
+// the "/" inside a closing HTML tag is not). It is deliberately NOT limited
+// to "/api..." so a banner that points at /swagger, /docs, /API/spec, or an
+// external URL is still extracted and then rejected, instead of silently
+// going unchecked (#320 F1/F2). The character class keeps "."/"-"/etc. so
+// /api/spec.json is matched whole, not truncated to /api/spec.
+var bannerReference = regexp.MustCompile(`https?://[^\s<>"()]+|(?:^|[\s(])/[^\s<>"(),]*`)
+
+// bannerText strips HTML tags from a banner body, leaving only its prose.
+func bannerText(body string) string {
+	return bannerTag.ReplaceAllString(body, " ")
+}
+
+// bannerReferences returns every URL-ish token the banner's prose advertises,
+// trimmed of the leading whitespace/paren the regex captured and of trailing
+// sentence punctuation.
+func bannerReferences(body string) []string {
+	var refs []string
+	for _, m := range bannerReference.FindAllString(bannerText(body), -1) {
+		ref := strings.TrimRight(strings.TrimLeft(m, " ("), ".,;:")
+		if ref != "" {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
+// bannerPrimaryPointer returns the endpoint the banner names right after
+// "API available at ", or "" if the phrase is absent.
+func bannerPrimaryPointer(body string) string {
+	text := bannerText(body)
+	const marker = "API available at "
+	i := strings.Index(text, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimLeft(text[i+len(marker):], " (")
+	field := strings.Fields(rest)
+	if len(field) == 0 {
+		return ""
+	}
+	return strings.TrimRight(field[0], ".,;:")
+}
+
+// #300 F1: the API-only banner must name an endpoint that works with no
+// outbound internet. /api/docs is a Swagger UI shell whose CSS and JS load
+// only from an external CDN (openapi.go), so an API-only deployment without
+// egress renders it blank. /api/spec is the raw OpenAPI JSON, served
+// in-process, so it is the offline-safe pointer the banner must name.
+//
+// #320 F1: this no longer just substring-checks "/api/spec" (which a passing
+// mention satisfies even when the banner really points elsewhere). It reads
+// the *primary* pointer the banner names ("API available at <X>") and proves
+// it is a local, in-process JSON endpoint: GET <X> must be 200,
+// application/json, and must not be the banner catch-all answering itself.
+// A banner whose primary pointer is /swagger, an external URL, or the
+// CDN-backed /api/docs (text/html) therefore fails.
+func TestAPIOnlyBannerNamesOfflineSpecEndpoint(t *testing.T) {
+	router, body := apiOnlyBannerBody(t)
+
+	primary := bannerPrimaryPointer(body)
+	if primary == "" {
+		t.Fatalf("API-only banner names no primary endpoint after %q: %q", "API available at", body)
+	}
+	if !strings.HasPrefix(primary, "/") {
+		t.Fatalf("API-only banner's primary pointer %q is not a local path (needs outbound internet): %q", primary, body)
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", primary, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("banner's primary pointer %q: GET returned %d (want 200); banner=%q", primary, w.Code, body)
+	}
+	if w.Body.String() == body {
+		t.Fatalf("banner's primary pointer %q is answered only by the banner catch-all, not a real endpoint; banner=%q", primary, body)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("banner's primary pointer %q must be the offline-safe JSON spec, got Content-Type %q; banner=%q", primary, ct, body)
+	}
+}
+
+// #281 N4 / #300 F2: the API-only banner (served by newHTTPRouter when the
+// static directory doesn't exist) must point at endpoints that actually
+// resolve. It used to say "/api/", which #233 turned into a JSON 404.
+//
+// F2 makes the test strict: instead of checking a literal string and then
+// GETting that same literal, it extracts every reference the banner actually
+// advertises and GETs each one. #320 F1/F2 widen that extraction beyond
+// "/api..." tokens: any advertised token must be a local path that returns
+// 200 with a body that is NOT the banner itself. In API-only mode the
+// PathPrefix("/") banner handler answers every non-/api path with 200 and the
+// banner body, so "GET -> 200" alone cannot tell a real endpoint from the
+// catch-all; the body check closes that. A banner that points at /swagger,
+// /api/spec.json, or an external URL — while mentioning a working path only
+// in passing — can no longer pass.
+func TestAPIOnlyBannerPointsToExistingEndpoint(t *testing.T) {
+	router, body := apiOnlyBannerBody(t)
+
+	refs := bannerReferences(body)
+	if len(refs) == 0 {
+		t.Fatalf("API-only banner advertises no endpoint reference: %q", body)
+	}
+	for _, p := range refs {
+		if !strings.HasPrefix(p, "/") {
+			t.Fatalf("banner advertises %q, which needs outbound internet (not a local path); banner=%q", p, body)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", p, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("banner advertises %q, but GET %q returned %d (want 200); banner=%q", p, p, w.Code, body)
+		}
+		if w.Body.String() == body {
+			t.Fatalf("banner advertises %q, but only the banner catch-all answers it (no real endpoint); banner=%q", p, body)
+		}
+	}
+}
+
+// #300 F3: allowedMethodsForPath must also cover a method-bearing route
+// registered at exactly "/api", not only under the "/api/" prefix, so a
+// wrong method on bare /api answers 405 + Allow the same way it does one
+// level down. Latent today: the production router registers no real
+// method-bearing route at bare /api (only the fallback, which carries no
+// .Methods() and so contributes nothing), so this builds a router with a
+// POST-only /api route ahead of the fallback to exercise the path.
+func TestAllowedMethodsForBareAPIRoute(t *testing.T) {
+	router := mux.NewRouter()
+	router.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}).Methods("POST")
+	registerAPIFallback(router)
+
+	// Wrong method on bare /api: 405 naming the real route's method.
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api with a POST-only route: want 405, got %d", w.Code)
+	}
+	if allow := w.Header().Get("Allow"); allow != "POST" {
+		t.Fatalf("GET /api: want Allow: POST, got %q", allow)
+	}
+	// #320 F3: the bare-/api 405 shares writeError with /api/*, so it must
+	// carry the same JSON error shape and Content-Type, not a bare status.
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("GET /api (405): want application/json content-type, got %q (body %q)", ct, w.Body.String())
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("GET /api (405): body is not JSON: %v (body %q)", err, w.Body.String())
+	}
+	if errBody["error"] == "" {
+		t.Fatalf("GET /api (405): want a non-empty \"error\" field, got %v", errBody)
 	}
 
+	// The real route is still reachable under its own method.
 	w2 := httptest.NewRecorder()
-	router.ServeHTTP(w2, httptest.NewRequest("GET", "/api/docs", nil))
-	if w2.Code != http.StatusOK {
-		t.Fatalf("GET /api/docs: want 200, got %d", w2.Code)
+	router.ServeHTTP(w2, httptest.NewRequest("POST", "/api", nil))
+	if w2.Code != http.StatusTeapot {
+		t.Fatalf("POST /api: want 418 (real route reached), got %d", w2.Code)
+	}
+}
+
+// #300 F3 (no-route branch): with no real method-bearing route at bare /api
+// — the actual production shape, where only the fallback sits there — any
+// method on /api answers 404 with no Allow header, never a spurious 405.
+func TestBareAPIWithoutRealRouteIs404(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	router := mux.NewRouter()
+	srv.RegisterRoutes(router) // registers the fallback at the end, no real /api route
+
+	for _, method := range []string{"GET", "POST", "DELETE"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(method, "/api", nil))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s /api with no real route: want 404, got %d", method, w.Code)
+		}
+		if allow := w.Header().Get("Allow"); allow != "" {
+			t.Fatalf("%s /api: want no Allow header, got %q", method, allow)
+		}
 	}
 }

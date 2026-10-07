@@ -89,6 +89,39 @@ func (c *Config) warnClientRxSourceDrop(tag, name string, now time.Time) {
 		tag, name, clientRxSourceWarnInterval)
 }
 
+// quoteNames renders config-derived names with %q. Every value these startup
+// lines interpolate comes from the operator's config file, and an entry with an
+// embedded newline would otherwise split the line it appears in and forge a
+// further "[client-rx] …" record in the boot log (#302).
+func quoteNames(names []string) []string {
+	out := make([]string, len(names))
+	for i, name := range names {
+		out[i] = fmt.Sprintf("%q", name)
+	}
+	return out
+}
+
+// dedupeNamesFold collapses names that differ only in case, keeping the first
+// spelling. Allowlist matching is case-insensitive, so ["auth","AUTH"] is one
+// gate written twice — a plausible copy/paste — and reporting each spelling
+// separately only repeats the same clause (#302).
+func dedupeNamesFold(names []string) []string {
+	if len(names) < 2 {
+		return names
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		key := strings.ToLower(name)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
 // checkClientRxSources reports, once at startup, every clientRxCoverage.sources
 // entry that matches no configured mqttSources[].name — an allowlist of names
 // that can never match would silently drop all coverage. It also logs the
@@ -96,7 +129,7 @@ func (c *Config) warnClientRxSourceDrop(tag, name string, now time.Time) {
 // one entry matches more than one configured source (#278). Returns the
 // unknown names (nil when there is no allowlist or every name matches).
 func checkClientRxSources(cfg *Config, sources []MQTTSource) []string {
-	allow := cfg.ClientRxCoverageSources()
+	allow := dedupeNamesFold(cfg.ClientRxCoverageSources())
 	if len(allow) == 0 {
 		return nil
 	}
@@ -114,23 +147,28 @@ func checkClientRxSources(cfg *Config, sources []MQTTSource) []string {
 		case len(matched) > 1:
 			// mqttSources[].name is not required to be unique and matching is
 			// case-insensitive, so one entry can admit several brokers (#278).
-			ambiguous = append(ambiguous, fmt.Sprintf("%s matches %d sources (%s)", want, len(matched), strings.Join(matched, ", ")))
+			ambiguous = append(ambiguous, fmt.Sprintf("%q matches %d sources (%s)", want, len(matched), strings.Join(matched, ", ")))
 		}
 	}
 	state := ""
+	// Mood of the two warnings. While the feature is off the allowlist is inert,
+	// so a present-tense claim about coverage would contradict the state line
+	// logged one line above; the conditional agrees with it instead (#302).
+	accepted, neverAccepted := "is accepted", "will never be accepted"
 	if !cfg.ClientRxCoverageEnabled() {
 		// The allowlist is inert while the feature is off; say so rather than
 		// implying coverage is being ingested from the listed sources.
 		state = " (clientRxCoverage.enabled is false, so no coverage is ingested at all)"
+		accepted, neverAccepted = "would be accepted", "would never be accepted"
 	}
-	log.Printf("[client-rx] coverage restricted to %d MQTT source(s): %s%s", len(allow), strings.Join(allow, ", "), state)
+	log.Printf("[client-rx] coverage restricted to %d MQTT source(s): %s%s", len(allow), strings.Join(quoteNames(allow), ", "), state)
 	if len(unknown) > 0 {
-		log.Printf("[client-rx] WARNING: %d clientRxCoverage.sources name(s) match no configured mqttSources[].name: %s — coverage will never be accepted for those names; check the spelling",
-			len(unknown), strings.Join(unknown, ", "))
+		log.Printf("[client-rx] WARNING: %d clientRxCoverage.sources name(s) match no configured mqttSources[].name: %s — coverage %s for those names; check the spelling",
+			len(unknown), strings.Join(quoteNames(unknown), ", "), neverAccepted)
 	}
 	if len(ambiguous) > 0 {
-		log.Printf("[client-rx] WARNING: clientRxCoverage.sources name(s) match more than one configured mqttSources[].name (case-insensitive): %s — coverage is accepted from every one of them; give each source a unique name",
-			strings.Join(ambiguous, "; "))
+		log.Printf("[client-rx] WARNING: clientRxCoverage.sources name(s) match more than one configured mqttSources[].name (case-insensitive): %s — coverage %s from every one of them; give each source a unique name",
+			strings.Join(ambiguous, "; "), accepted)
 	}
 	return unknown
 }

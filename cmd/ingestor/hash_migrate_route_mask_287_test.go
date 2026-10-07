@@ -278,6 +278,42 @@ func TestContentHashMigration_MergeRecomputesBitFromLoserRouteType_287(t *testin
 	}
 }
 
+// The inline recompute must run after the move, so its observation scan sees
+// the loser's re-parented observations, not only the survivor's own. The only
+// DIRECT evidence is the header of the not-yet-computed loser's one observation,
+// which survives being re-parented (distinct observer and path): the survivor is
+// computed FLOOD with a FLOOD observation, and the loser's route_type is FLOOD.
+// Master's COALESCE(route_mask, 0) merge ends at FLOOD here too. Kills reviewer
+// mutant N2 (recompute above the UPDATE OR IGNORE observations move, #324).
+func TestContentHashMigration_MergeRecomputesBitFromLoserReparentedObservation_324(t *testing.T) {
+	s := hm215Reopen(t, filepath.Join(t.TempDir(), "rm324-loser-obs.db"), func(db *sql.DB) {
+		o1, o2 := hm287Observers(t, db)
+		// Survivor (lowest id): computed FLOOD, route_type FLOOD.
+		hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+			VALUES (130, ?, 'stale-rm-130', '2026-01-01T00:00:00Z', 1, 1, 4, '{}', ?)`, hm215Raw(13), hm287FloodBit)
+		// Loser: NULL, route_type FLOOD, heard once as DIRECT.
+		hm215Exec(t, db, `INSERT INTO transmissions (id, raw_hex, hash, first_seen, last_seen, route_type, payload_type, decoded_json, route_mask)
+			VALUES (131, ?, 'stale-rm-131', '2026-01-01T00:00:00Z', 1, 1, 4, '{}', NULL)`, hm215Raw(13))
+		hm287InsObs(t, db, 130, o1, `["aa"]`, hm287FloodFrame)
+		hm287InsObs(t, db, 131, o2, `["bb"]`, hm287DirectFrame) // the only DIRECT evidence
+	})
+
+	want := hm287DirectBit | hm287FloodBit
+	if merged := hm287Mask(t, s.db, 130); !merged.Valid || merged.Int64 != want {
+		t.Fatalf("merged route_mask = %v, want DIRECT|FLOOD = %04b (DIRECT from the loser's re-parented observation header)", merged, want)
+	}
+	// The loser's DIRECT observation survived the move onto the survivor.
+	if n := hm215Count(t, s.db, `SELECT COUNT(*) FROM observations WHERE transmission_id = 130`); n != 2 {
+		t.Fatalf("survivor holds %d observations, want 2 (its own and the loser's re-parented one)", n)
+	}
+	if err := s.backfillTxRouteMask(context.Background(), s.db); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if final := hm287Mask(t, s.db, 130); !final.Valid || final.Int64 != want {
+		t.Fatalf("route_mask after backfill = %v, want DIRECT|FLOOD = %04b", final, want)
+	}
+}
+
 // Both sides NULL: the merge writes a known mask instead of leaving NULL, and an
 // uncomputed survivor that the merge gives a mask (even 0) logs exactly one
 // route_mask_changes row. With evidence the mask is the recomputed union; with

@@ -207,6 +207,32 @@ function makeSandbox(apiImpl) {
   const archivedPath = { hash: 'historic', branches: [{ hops: 0, points: [], observer: { name: 'Saved station', lat: 56, lon: 10 } }] };
   const pingOptions = (loadPath) => ({ loadPath, routePrefix: '#/ping-scores/', routeQueryKey: 'record', shareURL: 'https://stg.meshview.dk/#/ping-scores/historic?viewPath=1&record=allTime.farthestPing' });
 
+  await historyCase('operator policy waits for config, hides approximate points/controls, and keeps real GPS', async () => {
+    let finishConfig;
+    const ctx = makeSandbox(async () => ({ branches: [{ hops: 2, points: [
+      { name: 'Estimated relay', lat: 56.1, lon: 10.1, approx: true },
+      { name: 'Reported relay', lat: 56.2, lon: 10.2 }
+    ], observer: { name: 'Estimated observer', lat: 56.3, lon: 10.3, approx: true } }] }));
+    ctx.fetch = () => new Promise(resolve => { finishConfig = resolve; });
+    ctx.document.querySelector = () => null;
+    ctx.document.head = { appendChild() {} };
+    vm.runInContext(fs.readFileSync('public/roles.js', 'utf8'), ctx);
+    const counts = installHistoryLeaflet(ctx);
+    const coordinates = [];
+    ctx.L.circleMarker = point => { coordinates.push(point); return { addTo() { return this; }, bindTooltip() { return this; }, on() { return this; } }; };
+    const opened = ctx.window.PacketPathMap.open('policy-test');
+    await Promise.resolve();
+    assert.strictEqual(counts.maps, 0, 'no pre-config estimate map');
+    finishConfig({ json: async () => ({ estimatedPositions: { enabled: false } }) });
+    await opened;
+    assert.strictEqual(coordinates.length, 1);
+    assert.strictEqual(coordinates[0][0], 56.2, 'only reported GPS is plotted');
+    assert.strictEqual(ctx.document.getElementById('packetPathApproxLegend').style.display, 'none');
+    assert.ok(ctx.document.getElementById('packetPathEstimatePolicy').textContent.includes('disabled by the instance operator'));
+    assert.strictEqual(ctx.document.getElementById('packetPathApproxOnly'), null);
+    ctx.window.PacketPathMap.close();
+  });
+
   await historyCase('ping archive loader renders a saved-time disclaimer and copies a ping-specific URL', async () => {
     const ctx = makeSandbox(() => { throw new Error('ordinary packet API must not be used'); });
     const counts = installHistoryLeaflet(ctx);

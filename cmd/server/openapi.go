@@ -37,7 +37,7 @@ func routeDescriptions() map[string]routeMeta {
 	return map[string]routeMeta{
 		// Config
 		"GET /api/config/cache":      {Summary: "Get cache configuration", Tag: "config"},
-		"GET /api/config/client":     {Summary: "Get client configuration", Tag: "config"},
+		"GET /api/config/client":     {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
 		"GET /api/config/regions":    {Summary: "Get configured regions", Tag: "config"},
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
@@ -193,7 +193,7 @@ func routeDescriptions() map[string]routeMeta {
 			Response: schemaRef("PacketPathResponse")},
 		"GET /api/iata-coords":       {Summary: "Get IATA airport coordinates", Description: "Returns lat/lon for known airport codes (used for observer positioning).", Tag: "config"},
 		"GET /api/audio-lab/buckets": {Summary: "Audio lab frequency buckets", Description: "Returns frequency bucket data for audio analysis.", Tag: "analytics"},
-		"GET /api/ping-scores": {Summary: "Ping-score highscore board", Description: "Global (not scoped by region/area) records and leaderboards derived from every ping-bot-triggering channel message ever seen: farthest reach, most hops, widest simultaneous spread, fastest full spread, and most airtime-efficient ping, plus which relay nodes and which observers appear most often. Computed from the same GetPacketPath + LoRa-airtime-estimate logic behind /api/packets/{hash}/path and refreshed on a background interval, so it may lag the very latest ping by a few minutes. Fields are omitted (not zero) until at least one qualifying ping has been recorded.", Tag: "packets",
+		"GET /api/ping-scores": {Summary: "Ping-score highscore board", Description: "Global (not scoped by region/area) records and leaderboards derived from every ping-bot-triggering channel message ever seen: farthest reach, most hops, widest simultaneous spread, fastest full spread, and most airtime-efficient ping, plus which relay nodes and which observers appear most often. Computed from the same getPacketPath + LoRa-airtime-estimate logic behind /api/packets/{hash}/path and refreshed on a background interval, so it may lag the very latest ping by a few minutes. Fields are omitted (not zero) until at least one qualifying ping has been recorded.", Tag: "packets",
 			Response: schemaRef("PingScoresResponse")},
 		"GET /api/ping-scores/{hash}/path": {Summary: "Get a displayed ping record's saved path", Description: "Returns coherent live or archived path evidence for the current record slot. Archived capture time describes saved geometry, not necessarily the transmission time. Old expired observations cannot be reconstructed. Superseded slot/hash pairs return 404; invalid slots return 400. Current identity privacy rules apply to both sources; unavailable and initializing responses omit path.", Tag: "packets",
 			QueryParams: []paramMeta{{Name: "record", Description: "allTime.<kind> or thisWeek.<kind>; kind is farthestPing, mostHopsPing, widestSpreadPing, fastestSpreadPing or mostEfficientPing", Type: "string", Required: true}},
@@ -508,7 +508,7 @@ func componentSchemas() map[string]interface{} {
 			"type":        "object",
 			"description": "The station that produced a given branch's observation of a packet path, positioned from its own self-advertised GPS when known (same source as /api/observers), else its configured IATA code, else a weighted centroid of its positioned neighbors (see approx).",
 			"properties": map[string]interface{}{
-				"publicKey":           str("Observer's mesh pubkey, when it has one (some bridge-type observers publish under a device name instead -- see the name-match fallback in GetPacketPath). Empty otherwise."),
+				"publicKey":           str("Observer's mesh pubkey, when it has one (some bridge-type observers publish under a device name instead -- see the name-match fallback in getPacketPath). Empty otherwise."),
 				"name":                str("Observer display name."),
 				"iata":                str("Observer's configured IATA airport code, when set."),
 				"role":                str("Observer's own node role (e.g. repeater, room), when it's known as a mesh node itself -- not just an MQTT/API listener."),
@@ -562,7 +562,7 @@ func componentSchemas() map[string]interface{} {
 		}},
 		"PingScore": map[string]interface{}{
 			"type":        "object",
-			"description": "One ping's computed highscore-relevant stats, derived from the same GetPacketPath + airtime-annotation logic behind /api/packets/{hash}/path.",
+			"description": "One ping's computed highscore-relevant stats, derived from the same getPacketPath + airtime-annotation logic behind /api/packets/{hash}/path.",
 			"properties": map[string]interface{}{
 				"hash":               str("The winning ping's hash; use /api/ping-scores/{hash}/path with its record slot for saved View Path evidence."),
 				"sender":             str("Display name of whoever sent the ping, when resolvable from the channel message."),
@@ -669,8 +669,9 @@ func componentSchemas() map[string]interface{} {
 		},
 		"AreaAnalyticsResponse": map[string]interface{}{
 			"type":        "object",
-			"description": "Node density/health, cross-area bridge nodes, and position-fix coverage per configured Area (the drawn-polygon regions from the meshguide.dk sync, distinct from hashRegion scope adoption). Empty when no Areas are configured.",
+			"description": "Node density/health, cross-area bridge nodes, and position-fix coverage per configured Area. When estimatedPositions.enabled is false, returns estimatedPositionsEnabled:false and real density/bridgeNodes/unpositionedTotal only; positionGaps, estimatedNodes, and unpositionedNoNeighborFix are omitted because they were not evaluated.",
 			"properties": map[string]interface{}{
+				"estimatedPositionsEnabled": &openAPISchema{Type: "boolean", Description: "Present as false only when neighbor-derived position estimation is disabled by the operator."},
 				"density":                   map[string]interface{}{"type": "array", "items": schemaRef("AreaDensity")},
 				"bridgeNodes":               map[string]interface{}{"type": "array", "items": schemaRef("AreaBridgeNode"), "description": "Top cross-area bridge nodes, ranked by how many other areas they reach."},
 				"positionGaps":              map[string]interface{}{"type": "array", "items": schemaRef("AreaPositionGap")},
@@ -696,11 +697,12 @@ func componentSchemas() map[string]interface{} {
 		},
 		"GPSSanityResponse": map[string]interface{}{
 			"type":        "object",
-			"description": "Nodes whose self-reported GPS disagrees with a trusted cluster of their own RF neighbors.",
+			"description": "Nodes whose self-reported GPS disagrees with a trusted cluster of their own RF neighbors. When estimatedPositions.enabled is false, returns only estimatedPositionsEnabled:false; nodes, totalRealGps and evaluated are omitted, not reported as zero.",
 			"properties": map[string]interface{}{
-				"nodes":        map[string]interface{}{"type": "array", "items": schemaRef("SuspiciousGPSNode"), "description": "Flagged nodes, sorted worst (largest distanceKm) first."},
-				"totalRealGps": map[string]interface{}{"type": "integer", "description": "Every node with a real (non-zero) GPS fix -- the population this check ran over."},
-				"evaluated":    map[string]interface{}{"type": "integer", "description": "The subset of totalRealGps that had a trustworthy neighbor cluster to compare against."},
+				"estimatedPositionsEnabled": &openAPISchema{Type: "boolean", Description: "Present as false only when neighbor-derived position estimation is disabled by the operator."},
+				"nodes":                     map[string]interface{}{"type": "array", "items": schemaRef("SuspiciousGPSNode"), "description": "Flagged nodes, sorted worst (largest distanceKm) first."},
+				"totalRealGps":              map[string]interface{}{"type": "integer", "description": "Every node with a real (non-zero) GPS fix -- the population this check ran over."},
+				"evaluated":                 map[string]interface{}{"type": "integer", "description": "The subset of totalRealGps that had a trustworthy neighbor cluster to compare against."},
 			},
 		},
 		"AllObserverNeighborsEntry": map[string]interface{}{

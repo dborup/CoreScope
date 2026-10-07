@@ -7157,13 +7157,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   async function _renderAreasTabBody(el) {
     try {
       var d = await api('/analytics/areas', { ttl: 30000 });
+      if (window.MeshConfigReady) await window.MeshConfigReady;
+      var estimatesEnabled = window.EstimatedPositions?.enabled(d) !== false;
       var density = (d && d.density) || [];
       var bridgeNodes = (d && d.bridgeNodes) || [];
-      var positionGaps = (d && d.positionGaps) || [];
-      var estimatedNodes = (d && d.estimatedNodes) || [];
+      var positionGaps = estimatesEnabled ? ((d && d.positionGaps) || []) : [];
+      var estimatedNodes = estimatesEnabled ? ((d && d.estimatedNodes) || []) : [];
 
       if (!density.length && !bridgeNodes.length && !positionGaps.length) {
-        el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No Areas are configured — this tab needs at least one drawn-polygon Area (meshguide.dk sync) to report on.</div>';
+        el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No Areas are configured — this tab needs at least one drawn-polygon Area (meshguide.dk sync) to report on.</div>' +
+          (estimatesEnabled ? '' : window.EstimatedPositions.disabledNoticeHTML);
         return;
       }
 
@@ -7385,7 +7388,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
       var unpositionedNote = '<p class="text-muted" style="margin:8px 0 0;font-size:0.85em">' +
         (d.unpositionedTotal || 0).toLocaleString() + ' node' + (d.unpositionedTotal === 1 ? '' : 's') + ' network-wide have no real GPS fix' +
-        (d.unpositionedNoNeighborFix ? ', of which ' + d.unpositionedNoNeighborFix.toLocaleString() + ' also have no positioned neighbor to estimate from — those can\'t be placed anywhere, not even approximately, so they\'re absent from the table above entirely.' : '.') +
+        (estimatesEnabled && d.unpositionedNoNeighborFix ? ', of which ' + d.unpositionedNoNeighborFix.toLocaleString() + ' also have no positioned neighbor to estimate from — those can\'t be placed anywhere, not even approximately, so they\'re absent from the table above entirely.' : '.') +
         '</p>';
 
       el.innerHTML =
@@ -7404,14 +7407,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             '<span>Position-Fix Coverage Gaps by Area</span>' +
             (estimatedNodes.length ? '<a href="#/map?estimatedNodes=1" id="areasViewEstimatedNodes" class="btn-link" style="font-size:12px;font-weight:400;text-decoration:none;background:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--link-color)">View Estimated Nodes on Map (' + estimatedNodes.length.toLocaleString() + ')</a>' : '') +
           '</h3>' +
-          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">How many of each area\'s nodes have an actual reported GPS position vs. how many were only placeable via a neighbor-based estimate (same technique used for View Path\'s approximate markers). Click a column header to sort by it.</p>' +
-          '<div id="areasPositionGaps">' + gapsSection.tableHtml() + '</div>' +
+          (estimatesEnabled ? '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">How many of each area\'s nodes have an actual reported GPS position vs. how many were only placeable via a neighbor-based estimate (same technique used for View Path\'s approximate markers). Click a column header to sort by it.</p>' : '') +
+          '<div id="areasPositionGaps">' + (estimatesEnabled ? gapsSection.tableHtml() : window.EstimatedPositions.disabledNoticeHTML) + '</div>' +
           unpositionedNote +
         '</div>';
 
       densitySection.attach();
       bridgeSection.attach();
-      gapsSection.attach();
+      if (estimatesEnabled) gapsSection.attach();
     } catch (e) {
       el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:20px">Failed to load area analytics: ' + esc(String(e)) + '</div>';
     }

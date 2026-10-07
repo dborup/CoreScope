@@ -90,6 +90,10 @@ func main() {
 	// Load config
 	cfg, err := LoadConfig(configDir)
 	if err != nil {
+		var invalidPolicy *invalidEstimatedPositionsConfigError
+		if errors.As(err, &invalidPolicy) {
+			log.Fatalf("[config] fatal: %v", err)
+		}
 		log.Printf("[config] warning: %v (using defaults)", err)
 	}
 
@@ -659,7 +663,7 @@ func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
 		log.Printf("[static] directory %s not found — API-only mode", absPublic)
 		router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/docs</p></body></html>`))
+			w.Write([]byte(`<!DOCTYPE html><html><body><h1>CoreScope</h1><p>Frontend not found. API available at /api/spec (interactive docs: /api/docs, needs internet).</p></body></html>`))
 		})
 	}
 	return router
