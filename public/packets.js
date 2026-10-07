@@ -3337,7 +3337,10 @@
       detachVScrollListener();
       const colCount = _getColCount();
       // #211: name CONTROL only when hiding it emptied the list, i.e. a CONTROL
-      // packet would get through the filters below the CONTROL pass.
+      // packet would get through the filters below the CONTROL pass. Since
+      // #242 the refetch and live feed drop CONTROL before it reaches
+      // `packets`, so this fires only between the checkbox change and the
+      // refetch; a server-filtered empty list just says "No packets found".
       const emptiedByControl = controlHidden && controlHidingEmptiedList(beforeHideControl, (list) => {
         list = applyObserverFilter(list, filters, groupByHash, hashOnly);
         return filters._packetFilter ? list.filter(filters._packetFilter) : list;

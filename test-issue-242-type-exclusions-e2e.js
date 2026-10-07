@@ -56,7 +56,15 @@ const fixture = [...Array.from({length: 1000}, (_, i) => packet(i + 1, 11)), pac
     await ready();
     assert.strictEqual(requests.at(-1).get('limit'), '1000');
     assert((await shown()).every(h => Number.parseInt(h, 16) <= 1000));
+    holdNext = true;
     await checkHide(true);
+    await waitForRelease();
+    // #211's hint survives only until the refetch: the loaded page was all CONTROL.
+    // textContent: column hiding may hide the message cell at this width.
+    assert.match(await page.locator('#pktBody').textContent(), /CONTROL packets are hidden/);
+    const firstRelease = release;
+    release = null;
+    firstRelease();
     await ready();
     assert.strictEqual(requests.at(-1).get('excludeTypes'), '11');
     assert.deepStrictEqual(await shown(), [hash(1001), hash(1002), hash(1003)]);
