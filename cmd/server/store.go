@@ -2347,6 +2347,9 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 
 	// Cache key covers all filter dimensions. Empty key = no filters.
 	cacheKey := q.Since + "|" + q.Until + "|" + q.Region + "|" + q.Area + "|" + q.Node + "|" + q.Hash + "|" + q.Observer + "|" + q.Channel
+	if q.ExcludeTypes != 0 {
+		cacheKey += fmt.Sprintf("|x%d", q.ExcludeTypes)
+	}
 	if q.Type != nil {
 		cacheKey += fmt.Sprintf("|t%d", *q.Type)
 	}
@@ -3455,6 +3458,14 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			},
 		}
 		if tx.DecodedJSON != "" {
+			// Raw pass-through, not the validated REST ChannelMessage
+			// contract: decoded_json is unmarshalled and broadcast
+			// verbatim, including any stored channelHashHex value, without
+			// running it through normalizeChannelHashHex/setChannelHashHex
+			// (cmd/server/channel_hash_hex.go). A malformed or lowercase
+			// stored value that REST would suppress is emitted here as-is.
+			// Consumers must not treat a WebSocket channelHashHex as
+			// pre-validated REST evidence.
 			var payload map[string]interface{}
 			if json.Unmarshal([]byte(tx.DecodedJSON), &payload) == nil {
 				decoded["payload"] = payload
@@ -3949,7 +3960,7 @@ func (s *PacketStore) MaxObservationID() int {
 // filterPackets applies PacketQuery filters to the in-memory packet list.
 func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 	// Fast path: single-key index lookups
-	if q.Hash != "" && q.Type == nil && q.Route == nil && q.Observer == "" &&
+	if q.Hash != "" && q.Type == nil && q.ExcludeTypes == 0 && q.Route == nil && q.Observer == "" &&
 		q.Region == "" && q.Area == "" && q.Node == "" && q.Channel == "" && q.Since == "" && q.Until == "" {
 		h := strings.ToLower(q.Hash)
 		tx := s.byHash[h]
@@ -3958,7 +3969,7 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 		}
 		return []*StoreTx{tx}
 	}
-	if q.Observer != "" && q.Type == nil && q.Route == nil &&
+	if q.Observer != "" && q.Type == nil && q.ExcludeTypes == 0 && q.Route == nil &&
 		q.Region == "" && q.Area == "" && q.Node == "" && q.Channel == "" && q.Hash == "" && q.Since == "" && q.Until == "" {
 		return s.transmissionsForObserver(q.Observer, nil)
 	}
@@ -4027,7 +4038,7 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 	// Determine the source slice. Use index-based source when only node
 	// filter is active and an index exists.
 	source := s.packets
-	if hasNode && !hasType && !hasRoute && q.Observer == "" &&
+	if hasNode && !hasType && q.ExcludeTypes == 0 && !hasRoute && q.Observer == "" &&
 		filterHash == "" && !hasSince && !hasUntil && q.Region == "" && q.Area == "" && filterChannel == "" {
 		if indexed, ok := s.byNode[nodePK]; ok {
 			return indexed
@@ -4040,6 +4051,9 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 			return false
 		}
 		if hasType && (tx.PayloadType == nil || *tx.PayloadType != filterType) {
+			return false
+		}
+		if q.ExcludeTypes.excludes(tx.PayloadType) {
 			return false
 		}
 		if hasRoute && (tx.RouteType == nil || *tx.RouteType != filterRoute) {
@@ -6466,6 +6480,16 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 		Sender          string      `json:"sender"`
 		SenderTimestamp interface{} `json:"sender_timestamp"`
 		PathLen         int         `json:"path_len"`
+		// ChannelHashHex is the on-wire one-byte channel hash the decoder
+		// took from the packet (see normalizeChannelHashHex). Emitted as
+		// evidence only; legacy rows without it stay absent. Typed as
+		// interface{}, not string: decoded_json is untrusted stored data,
+		// and a struct-typed string field would fail the whole Unmarshal
+		// (dropping the entire message) on a non-string stored value. The
+		// raw value is instead handed to setChannelHashHex below, which
+		// already validates it — mirroring the SQLite path in db.go, which
+		// decodes into map[string]interface{} for the same reason.
+		ChannelHashHex interface{} `json:"channelHashHex"`
 	}
 
 	grpTxts := s.byPayloadType[5]
@@ -6598,6 +6622,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 				Repeats:   1,
 				Observers: observers,
 			}
+			setChannelHashHex(entry.Data, decoded.ChannelHashHex)
 			msgMap[dedupeKey] = entry
 			msgOrder = append(msgOrder, dedupeKey)
 		}

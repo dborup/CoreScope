@@ -1548,21 +1548,30 @@
       (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // #1420 — multi-provider dark-tile picker. Light mode unchanged.
     let _liveDarkRefLayer = null;
+    // #332 — every tile URL and attribution comes from the configured
+    // dark/light provider. The old body hard-coded CARTO in three places
+    // (the light-mode url fallback, the 'carto-dark' registry fallback and
+    // the '© OpenStreetMap © CartoDB' credit), so a map on an instance
+    // configured for Esri/OpenTopoMap still fetched keyless CARTO tiles —
+    // which have been stamped "API KEY REQUIRED" since August 2026.
     function _liveResolveTile(dark) {
-      const reg = window.MC_TILE_PROVIDERS || {};
-      if (!dark) {
-        const lightId = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : null;
-        const lp = lightId ? (reg[lightId] || null) : null;
-        if (lp && lp.url) {
-          return { url: (typeof lp.url === 'function' ? lp.url() : lp.url), attribution: lp.attribution || '© OpenStreetMap © CartoDB', refUrl: null };
+      // Preferred path: the registry's single resolver. It picks the
+      // provider for this theme and invokes lazy `url` functions, so url
+      // AND attribution always come from the configured provider.
+      if (typeof window.MC_getTileSpec === 'function') {
+        const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
+        if (s && s.url) {
+          return { url: s.url, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
-        return { url: TILE_LIGHT, attribution: '© OpenStreetMap © CartoDB', refUrl: null };
       }
-      const id  = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-      const p   = reg[id] || reg['carto-dark'] || {};
+      // Legacy/partial registry: accessors without getTileSpec.
+      const reg = window.MC_TILE_PROVIDERS || {};
+      const getId = dark ? window.MC_getDarkTileProvider : window.MC_getLightTileProvider;
+      const id = (typeof getId === 'function') ? getId() : null;
+      const p = (id && reg[id]) || {};
       return {
-        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || TILE_DARK,
-        attribution: p.attribution || '© OpenStreetMap © CartoDB',
+        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || (dark ? TILE_DARK : TILE_LIGHT),
+        attribution: p.attribution || '© OpenStreetMap contributors',
         refUrl: p.refUrl || null
       };
     }

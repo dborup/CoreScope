@@ -1965,6 +1965,24 @@ async function testChannelDestinations() {
   }
 }
 
+console.log('\n=== #242 server-side type exclusions ===');
+{
+  const api = loadPacketsSandbox()._packetsTestAPI;
+  const params = (filters, hideControl = false, groupByHash = true) => api.buildPacketsParams({ filters, hideControl, groupByHash, limit: 100 });
+  test('default leaves exclusion absent', () => assert.strictEqual(params({}).get('excludeTypes'), null));
+  test('Hide CONTROL excludes only 11 in raw and grouped requests', () => {
+    for (const grouped of [false, true]) assert.strictEqual(params({}, true, grouped).get('excludeTypes'), '11');
+  });
+  test('selected types exclude their four-bit complement, union Hide CONTROL', () => {
+    assert.strictEqual(params({type: '5,11'}, true).get('excludeTypes'), '0,1,2,3,4,6,7,8,9,10,11,12,13,14,15');
+    assert.strictEqual(params({type: '5,11'}).get('excludeTypes'), '0,1,2,3,4,6,7,8,9,10,12,13,14,15');
+  });
+  test('all sixteen types impose no exclusion', () => assert.strictEqual(params({type: Array.from({length:16}, (_, i) => i).join(',')}).get('excludeTypes'), null));
+  test('invalid stored selection stays restrictive rather than broadening', () => assert.strictEqual(params({type:'invalid'}).get('excludeTypes'), Array.from({length:16}, (_, i) => i).join(',')));
+  test('duplicate selected types produce canonical exclusions', () => assert.strictEqual(params({type:'0,0,15'}).get('excludeTypes'), '1,2,3,4,5,6,7,8,9,10,11,12,13,14'));
+  test('pinned hash bypasses both exclusions', () => assert.strictEqual(params({hash:'ABC', type:'5'}, true).get('excludeTypes'), null));
+}
+
 testChannelDestinations().then(() => {
   console.log(`\n${'='.repeat(40)}`);
   console.log(`packets.js tests: ${passed} passed, ${failed} failed, ${knownBugs} known bug(s) still failing`);

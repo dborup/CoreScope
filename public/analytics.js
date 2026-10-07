@@ -2534,7 +2534,20 @@
     // Render minimap
     if (hasMap && typeof L !== 'undefined') {
       const map = L.map('subpathMap', { zoomControl: false, attributionControl: false });
-      L.tileLayer(getTileUrl(), { maxZoom: 18 }).addTo(map);
+      // #332 — go through the one shared helper (nodes.js, also used by the
+      // node-detail inset, node-reach, packet-path, area-nodes and
+      // rx-coverage maps). It resolves the configured provider for the
+      // current theme AND applies that provider's invertFilter to THIS
+      // map's own tile pane. A bare L.tileLayer(getTileUrl()) skipped the
+      // filter, so the keyless-OSM dark default (the light OSM template
+      // plus an invert filter) rendered a light basemap in a dark page.
+      if (typeof window._applyTilesToNodeMap === 'function') {
+        window._applyTilesToNodeMap(map);
+      } else {
+        // Loud, not silent: the shared tile helper is missing.
+        console.warn('subpath minimap: _applyTilesToNodeMap unavailable — using OSM fallback');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+      }
 
       const latlngs = [];
       nodesWithLoc.forEach((n, i) => {

@@ -113,6 +113,17 @@ async function findCandidatePair(request) {
       assert(await page.evaluate(() => document.body.classList.contains('mc-route-active')), 'route view not active');
     });
 
+    await step('standalone "Show on Map" navigates, consumes the handoff, and draws the route', async () => {
+      assert(pair, 'no candidate to show');
+      await page.goto(BASE + '/#/tools/path-inspector?prefixes=' + pair.prefixes, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#path-inspector-results button[data-idx="0"]');
+      await page.click('#path-inspector-results button[data-idx="0"]');
+      await page.waitForFunction(() => location.hash === '#/map');
+      await page.waitForSelector('#leaflet-map .leaflet-overlay-pane path.mc-rt-edge', { state: 'visible' });
+      assert(await page.evaluate(() => document.body.classList.contains('mc-route-active')), 'route view not active');
+      assert(await page.evaluate(() => !window._pendingPathInspectorRoute), 'pending route was not consumed');
+    });
+
     await step('Tools landing links to the Path Inspector and to Trace', async () => {
       await page.goto(BASE + '/#/tools', { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('.tools-landing', { state: 'visible' });

@@ -63,10 +63,19 @@ async function gotoPackets(page, vp) {
   await page.goto(BASE + '/#/packets?timeWindow=' + pinnedWindowMin(vp), { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#packetFilterInput', { state: 'attached', timeout: 8000 });
   await page.waitForFunction(() => !!document.querySelector('#filterUxBar'), { timeout: 8000 });
-  // All time, so the fixture's long channel messages are rendered (same as #1122).
+  // Widen to "All time" so the fixture's long channel messages are rendered
+  // (same as #1122) -- but only through the option the page really offers.
+  // Below 1025px "All time" is deliberately absent (packets.js omits the
+  // option on mobile), so assigning '0' there selects nothing and leaves the
+  // select blank. Since #242 a blank select means "keep the saved window"
+  // (15 min) rather than All time, so forcing '0' at those widths emptied the
+  // list as soon as the fixture was older than 15 minutes. The URL window
+  // pinned above already spans the whole fixture, so leave it in place there.
   await page.evaluate(() => {
     const sel = document.getElementById('fTimeWindow');
-    if (sel) { sel.value = '0'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    if (!sel || !sel.querySelector('option[value="0"]')) return;
+    sel.value = '0';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await page.waitForFunction(
     () => document.querySelectorAll('#pktBody tr[data-hash] td.col-details .col-details-clip').length > 20,

@@ -67,6 +67,7 @@ function makeSandbox(storage) {
     calls: [],
     updatePacketsUrl() { ctx.calls.push('url'); },
     renderTableRows() { ctx.calls.push('render'); },
+    loadPackets() { ctx.calls.push('load'); },
     filters: {},
     hideControl: false,
     savedHideControl: false,
@@ -212,14 +213,14 @@ console.log('\n=== #211 review, nit 1: a throwing localStorage does not stop the
     const ctx = makeSandbox(throwing);
     fn(ctx, 'set')(true);
     assert.strictEqual(ctx.hideControl, true, 'hideControl not set');
-    assert.deepStrictEqual(ctx.calls, ['url', 'render'], 'URL update and re-render must still run');
+    assert.deepStrictEqual(ctx.calls, ['url', 'render', 'load'], 'URL update, re-render and capped-page reload must still run');
   });
   test('setHideControl: saves the choice, then updates the URL, then re-renders', () => {
     const ctx = makeSandbox();
     fn(ctx, 'set')(true);
     assert.strictEqual(ctx.localStorage.getItem(ctx.__fns.key), '1');
     assert.strictEqual(ctx.savedHideControl, true);
-    assert.deepStrictEqual(ctx.calls, ['url', 'render']);
+    assert.deepStrictEqual(ctx.calls, ['url', 'render', 'load']);
   });
 }
 
