@@ -41,8 +41,10 @@ func parsePacketTypeExclusions(values url.Values) (packetTypeExclusions, error) 
 	return mask, nil
 }
 
+// Test mask first: the default (no exclusion) must not dereference every
+// tx's separately allocated PayloadType in the filter loop.
 func (mask packetTypeExclusions) excludes(typ *int) bool {
-	return typ != nil && *typ >= 0 && *typ < 16 && mask&(1<<uint(*typ)) != 0
+	return mask != 0 && typ != nil && *typ >= 0 && *typ < 16 && mask&(1<<uint(*typ)) != 0
 }
 
 // Keep unknown/NULL payload types, matching the in-memory predicate. The
