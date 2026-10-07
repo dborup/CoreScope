@@ -1230,8 +1230,24 @@
       if (rp) { needsInit = true; break; }
     }
     if (!needsInit) return;
+    const gen = hopCacheGen;
     await ensureHopResolver();
-    for (const p of packets) cacheServerResolvedPath(p);
+    // #165 — grouped rows carry resolved_path too since PR #185 F1, so this
+    // walks the whole page (up to 50K rows). Yield every 2000 rows so it is
+    // not one long main-thread block, and stop if destroy() ran meanwhile.
+    for (let i = 0; i < packets.length; i++) {
+      if (i && i % 2000 === 0) await new Promise(r => setTimeout(r, 0));
+      if (gen !== hopCacheGen) return;
+      cacheServerResolvedPath(packets[i]);
+    }
+  }
+
+  // Does k already hold exactly this server answer? A client pick of the same
+  // node that was flagged (ambiguous, unreliable, global fallback) does not
+  // count: the server's answer must replace it, or the list keeps warning.
+  function holdsServerAnswer(k, pubkey) {
+    const e = hopCacheGet(k);
+    return !!e && e.pubkey === pubkey && !e.ambiguous && !e.unreliable && !e.globalFallback;
   }
 
   // #165 — store the server's resolved_path entries under the bare key AND
@@ -1242,13 +1258,25 @@
   // know which packet a prefix came from. Hops the server left null are not
   // written, so the client still resolves them and can show the ambiguity.
   // Caller must have initialised HopResolver.
+  // PR #185 F1 — grouped rows carry resolved_path too, and most rows repeat
+  // an answer that is already cached (same prefix, observer and node). Those
+  // are skipped (holdsServerAnswer), so a 30K page does not rewrite the cache
+  // twice per hop per row.
   function cacheServerResolvedPath(p) {
     const rp = getResolvedPath(p);
     if (!rp) return;
-    const resolved = HopResolver.resolveFromServer(getParsedPath(p), rp);
+    const hops = getParsedPath(p);
+    const obs = p.observer_id ? String(p.observer_id) : '';
+    let news = false;
+    for (let i = 0; i < rp.length && !news; i++) {
+      if (rp[i] && (!holdsServerAnswer(hops[i], rp[i]) || (obs && !holdsServerAnswer(hopCacheKey(hops[i], obs), rp[i])))) news = true;
+    }
+    if (!news) return;
+    const resolved = HopResolver.resolveFromServer(hops, rp);
     for (const h of Object.keys(resolved)) {
-      hopCacheSet(h, resolved[h]);
-      if (p.observer_id) hopCacheSet(hopCacheKey(h, String(p.observer_id)), resolved[h]);
+      const v = resolved[h];
+      if (!holdsServerAnswer(h, v.pubkey)) hopCacheSet(h, v);
+      if (obs && !holdsServerAnswer(hopCacheKey(h, obs), v.pubkey)) hopCacheSet(hopCacheKey(h, obs), v);
     }
   }
 

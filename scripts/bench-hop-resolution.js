@@ -5,7 +5,9 @@
  * Times the initial-load hop resolution of the REAL public/packets.js on a
  * synthetic ~30K packet load, in a vm sandbox (network stubbed):
  *   - 2000 repeaters in three regions, 42 observers (27 with coordinates),
- *   - 0-8 hops per packet (85% 1-byte, 15% 2-byte), 30% with resolved_path.
+ *   - 0-8 hops per packet (85% 1-byte, 15% 2-byte), 30% with resolved_path
+ *     (RP_SHARE=0.95 for the share the grouped rows carry since PR #185 F1,
+ *     after #190; 80% of a resolved_path's hops are non-null either way).
  *
  * Reports the median of 7 runs of:
  *   - total time from cacheResolvedPaths() to the last resolved hop,
@@ -17,7 +19,7 @@
  * packets.js has no resolveHopsForPackets() it runs the old sequence
  * (one resolveHops() over all hops) instead.
  *
- * Usage: node scripts/bench-hop-resolution.js [publicDir]   (default: public)
+ * Usage: [RP_SHARE=0.3] node scripts/bench-hop-resolution.js [publicDir]   (default: public)
  */
 'use strict';
 const fs = require('fs');
@@ -26,6 +28,7 @@ const vm = require('vm');
 
 const PUBLIC = path.resolve(process.argv[2] || path.join(__dirname, '..', 'public'));
 const RUNS = 7;
+const RP_SHARE = Number(process.env.RP_SHARE || 0.3);
 
 // Deterministic data (mulberry32).
 function rng(a) {
@@ -54,7 +57,7 @@ const packets = Array.from({ length: 30000 }, (_, i) => {
   const len = Math.floor(r() * 9), bytes = r() < 0.85 ? 1 : 2;
   const hops = Array.from({ length: len }, () => nodes[Math.floor(r() * nodes.length)].public_key.slice(0, bytes * 2).toUpperCase());
   const p = { id: i, hash: 'h' + i, observer_id: observers[Math.floor(r() * observers.length)].id, path_json: JSON.stringify(hops) };
-  if (r() < 0.3) {
+  if (r() < RP_SHARE) {
     p.resolved_path = JSON.stringify(hops.map(h => (r() < 0.8
       ? ((nodes.find(n => n.public_key.toUpperCase().startsWith(h)) || {}).public_key || null) : null)));
   }
@@ -127,7 +130,7 @@ function load() {
   const median = a => a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)];
   console.log(JSON.stringify({
     publicDir: PUBLIC, mode: legacyMode ? 'single resolve (pre-#165)' : 'per observer (#165)',
-    packets: packets.length, observers: observers.length, nodes: nodes.length, runs: RUNS,
+    packets: packets.length, observers: observers.length, nodes: nodes.length, runs: RUNS, rp_share: RP_SHARE,
     total_ms_median: +median(times).toFixed(1), longest_block_ms_median: +median(blocks).toFixed(1),
     cache_entries: size,
   }));
