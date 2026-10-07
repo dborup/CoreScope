@@ -107,6 +107,8 @@ run test-issue-1418-edge-weights.js
 run test-issue-1418-cb-preset-ramp.js
 run test-issue-1418-spider-fan.js
 run test-issue-1418-deeplink-hops-channels.js
+run test-issue-165-hop-ambiguity-badge.js
+run test-issue-165-hop-resolution-per-observer.js
 run test-issue-1418-polish-review.js
 run test-issue-1420-tile-providers.js
 run test-issue-1614-tile-url-function.js
