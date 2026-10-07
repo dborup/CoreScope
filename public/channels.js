@@ -59,8 +59,10 @@
   // live here, but the only remaining reader was the test export -- no shipped
   // code rendered the "Observed path hash" badge (renderSenderPathHashBadge is
   // the one wired into renderMessages). Removed with its test so a dead helper
-  // cannot drift. normalizeObservedPathHashSizes() stays: the union/merge path
-  // and the sender badge still use it.
+  // cannot drift. normalizeObservedPathHashSizes() stays: the union/merge path,
+  // the cached-message merge, the packet -> message mapping and the dedup key
+  // still use it. renderSenderPathHashBadge does not -- it reads
+  // message.senderPathHashSize directly, not the observed-path list.
 
   // The header records the sender's choice even before a flood has relayed.
   // Observation-path evidence is retained internally, but is not the label.

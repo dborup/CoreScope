@@ -3924,21 +3924,19 @@
     const headerByte = parseInt(buf.slice(0, 2), 16);
     const pathBytesAreHops = !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) !== 9;
     // #282 (7): derive the encoded hash size from the SAME path-length byte this
-    // row shows (pathByte0 at offset `off`, taken from pkt.route_type) rather
-    // than calling senderPathHashSize(buf), which independently re-derives the
-    // offset from the raw_hex header byte. For a well-formed frame the two
-    // offsets agree, but one source means the printed byte and its hash_size
-    // label can never describe different bytes -- including a transport route
-    // (path length at byte 5) whose stored route_type and on-wire header route
-    // bits might disagree. The width semantics are senderPathHashSize's own:
-    // null for a non-hop path (TRACE carries SNR), for a 0b11 width field (there
-    // is no 4-byte width -- the backend evidence model only knows 1/2/3, see
-    // observed_path_hash_sizes.go), and for sendZeroHop's 0x00 direct marker.
-    let encodedHashSize = null;
-    if (pathBytesAreHops && !isNaN(pathByte0) && (pathByte0 >> 6) !== 3 &&
-        !(pathByte0 === 0 && (pkt.route_type === 2 || pkt.route_type === 3))) {
-      encodedHashSize = (pathByte0 >> 6) + 1;
-    }
+    // row shows -- pathByte0 at offset `off`, taken from pkt.route_type. #322
+    // (1): the width rules themselves live in one place, pathHashSizeFromByte()
+    // in app.js, shared with senderPathHashSize(); this caller just hands it the
+    // byte it already read plus pkt.route_type. For a well-formed frame the two
+    // callers' offsets agree, but one rule means the printed byte and its
+    // hash_size label can never describe different bytes -- including a transport
+    // route (path length at byte 5) whose stored route_type and on-wire header
+    // route bits might disagree. The helper returns null for a non-hop path
+    // (TRACE carries SNR), a 0b11 width field (no 4-byte width -- the backend
+    // evidence model only knows 1/2/3, see observed_path_hash_sizes.go), and
+    // sendZeroHop's 0x00 direct marker; the branches below only pick the wording
+    // for each null case.
+    const encodedHashSize = pathHashSizeFromByte(pathByte0, pkt.route_type, headerByte);
     let pathDescription;
     if (encodedHashSize != null) {
       pathDescription = `hash_size=${encodedHashSize} byte${encodedHashSize !== 1 ? 's' : ''}, hash_count=${hashCountVal}`;

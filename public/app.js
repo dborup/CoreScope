@@ -12,19 +12,43 @@ function payloadTypeColor(n) { return PAYLOAD_COLORS[n] || 'unknown'; }
 function isTransportRoute(rt) { return rt === 0 || rt === 3; }
 /** Byte offset of path_len in raw_hex: 5 for transport routes (4 bytes of next/last hop codes precede it), 1 otherwise. */
 function getPathLenOffset(routeType) { return isTransportRoute(routeType) ? 5 : 1; }
+/**
+ * #322 (1): the ONE implementation of the path-hash width rules. Given a
+ * path-length byte, the route it belongs to, and the frame's header byte,
+ * return the sender-selected hash width (1-3 bytes) or null when the byte
+ * encodes no width. Both senderPathHashSize() below and the packet-detail Path
+ * Length row (public/packets.js buildFieldTable) call this, so the rules live
+ * in one place (AGENTS.md: one implementation) and cannot drift. Each caller
+ * still reads its own path byte at its own offset -- senderPathHashSize derives
+ * route+offset from the header byte, the Path Length row from pkt.route_type --
+ * so there is one offset source per caller; only the width semantics are here.
+ * The rules are the firmware's (firmware/src/Packet.h getPathHashSize()/
+ * isRouteDirect(), firmware/docs/packet_format.md "path_length"):
+ *   - null for TRACE (headerByte path-type 9): those path bytes are per-hop SNR,
+ *     not a hash width (internal/packetpath/route.go PathBytesAreHops);
+ *   - null for a 0b11 width field: a 4-byte width is reserved/invalid, the
+ *     backend evidence model only knows 1/2/3 (cmd/server/observed_path_hash_sizes.go);
+ *   - null for the 0x00 zero-hop marker on a direct route (2 or 3, Packet.h
+ *     isRouteDirect(), sendZeroHop());
+ *   - otherwise (pathByte >> 6) + 1.
+ */
+function pathHashSizeFromByte(pathByte, routeType, headerByte) {
+  if (typeof pathByte !== 'number' || isNaN(pathByte)) return null;
+  if (typeof headerByte === 'number' && !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) === 9) return null; // TRACE path bytes are SNR
+  if (pathByte === 0 && (routeType === 2 || routeType === 3)) return null; // direct zero-hop marker
+  const size = (pathByte >> 6) + 1;
+  return size <= 3 ? size : null;
+}
 /** Sender-selected path-hash width in this frame, or null when not encoded. */
 function senderPathHashSize(rawHex) {
   if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
   const header = parseInt(rawHex.slice(0, 2), 16);
-  if (((header >> 2) & 0x0F) === 9) return null; // TRACE path bytes are SNR
   const route = header & 0x03;
   const offset = getPathLenOffset(route) * 2;
   const pathHex = rawHex.slice(offset, offset + 2);
   if (!/^[0-9a-f]{2}$/i.test(pathHex)) return null;
   const pathByte = parseInt(pathHex, 16);
-  if (pathByte === 0 && (route === 2 || route === 3)) return null;
-  const size = (pathByte >> 6) + 1;
-  return size <= 3 ? size : null;
+  return pathHashSizeFromByte(pathByte, route, header);
 }
 /**
  * scopeName is optional (callers that don't pass it get the original
