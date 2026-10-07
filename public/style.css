@@ -242,6 +242,9 @@
   --success: var(--palette-green-700, #15803d);
   --warning: #b45309;
   --danger: var(--palette-red-600, #dc2626);
+  /* #353 — 1-byte path hash warning (renderPathHashSize in app.js). Follows
+     --danger in both themes; themeable via the customizer (pathHashWarn). */
+  --path-hash-warn: var(--danger);
   --link-color: var(--palette-blue-600);
   --accent-bg: rgba(59, 130, 246, 0.12);
   --accent-border: rgba(59, 130, 246, 0.25);
@@ -1974,6 +1977,13 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   overflow-wrap: anywhere;
   vertical-align: baseline;
 }
+/* #353 — 1-byte path hash warning, shared by the channel "Sent with" badge,
+ * the packet-detail Hash Size row and the node badge (renderPathHashSize in
+ * public/app.js). The icon + sr-only text carry it without colour. */
+.path-hash-warn { color: var(--path-hash-warn); font-weight: 600; }
+.path-hash-warn .ph-icon { margin-right: 3px; vertical-align: -0.125em; }
+.ch-path-hash-badge--warn { border-color: var(--path-hash-warn); align-items: center; }
+.node-path-hash-badge { background: var(--surface-2); border: 1px solid var(--path-hash-warn); font-size: 10px; }
 .ch-analyze-link { color: var(--link-color); text-decoration: none; margin-left: 8px; }
 .ch-analyze-link:hover { text-decoration: underline; }
 .ch-scroll-btn {

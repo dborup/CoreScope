@@ -51,6 +51,48 @@ function senderPathHashSize(rawHex) {
   return pathHashSizeFromByte(pathByte, route, header);
 }
 /**
+ * #353: the ONE decision for "this path-hash width reads as a warning". A
+ * 1-byte hash collides often across nodes; the operator recommends 2/3-byte.
+ * The threshold is hardcoded for now (AGENTS.md rule 8: customizer later).
+ */
+function isPathHashSizeWarn(size) {
+  return pathHashSizeValue(size) === 1;
+}
+/** A 1/2/3 path-hash width from a number or numeric string, else null. */
+function pathHashSizeValue(size) {
+  if (typeof size !== 'number' && typeof size !== 'string') return null;
+  const n = Number(size);
+  return n === 1 || n === 2 || n === 3 ? n : null;
+}
+/**
+ * #353: the ONE markup for a path-hash width, shared by the channel "Sent
+ * with" badge, the packet-detail Hash Size row and the node-detail badge.
+ * Returns '' unless size is 1/2/3. opts.block is the caller's BEM class (the
+ * warn variant adds `${block}--warn` plus the shared `path-hash-warn`),
+ * opts.cls extra leading classes, opts.title the neutral tooltip. A warning
+ * carries an icon and screen-reader text so it never relies on colour alone.
+ * The setting names come from firmware/docs/faq.md 3.9.3 (companion app) and
+ * 3.9.4 / cli_commands.md (repeater `path.hash.mode`); faq.md 3.9.6 is why the
+ * tooltip says to switch only once most repeaters run 1.14+.
+ */
+function renderPathHashSize(size, text, opts) {
+  const n = pathHashSizeValue(size);
+  if (n == null) return '';
+  const o = opts || {};
+  const cls = (o.cls ? o.cls + ' ' : '') + o.block;
+  const label = escapeHtml(text);
+  if (!isPathHashSizeWarn(n)) {
+    return '<span class="' + cls + '"' + (o.title ? ' title="' + escapeHtml(o.title) + '"' : '') + '>' + label + '</span>';
+  }
+  const tip = '1-byte path hash: prefixes collide often across nodes, so hops can be ambiguous. ' +
+    '2- or 3-byte is recommended. Companion: MeshCore app Settings → Experimental Settings (message path hash size). ' +
+    'Repeater adverts: set path.hash.mode 1 (2-byte) or 2 (3-byte). ' +
+    'Repeaters older than firmware 1.14 drop 2/3-byte packets, so switch messages once most of your mesh runs 1.14+.';
+  return '<span class="' + cls + ' ' + o.block + '--warn path-hash-warn" title="' + tip + '">' +
+    '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
+    '<span class="sr-only">Warning: </span>' + label + '</span>';
+}
+/**
  * scopeName is optional (callers that don't pass it get the original
  * unscoped "T" badge). Pass a packet's scope_name to also surface the
  * region-scope state directly in the badge label (not just on hover): a

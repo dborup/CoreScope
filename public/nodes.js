@@ -334,6 +334,10 @@
     if (n.hash_size && Number(n.hash_size) >= 2) {
       html += ` <span class="badge multibyte-badge" title="Node advertises multibyte hash path (firmware Feat1/Feat2)">Multibyte: ${Number(n.hash_size)}-byte</span>`;
     }
+    // #353: a 1-byte advertised path hash collides often -- shared warning badge (app.js).
+    if (isPathHashSizeWarn(n.hash_size)) {
+      html += ' ' + renderPathHashSize(1, '1-byte path hash', { block: 'node-path-hash-badge', cls: 'badge' });
+    }
     if (n.hash_size_inconsistent) {
       html += ` <a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> variable hash size</a>`;
     }
