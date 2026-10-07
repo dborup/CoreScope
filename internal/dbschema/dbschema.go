@@ -1070,6 +1070,16 @@ func ensureTransmissionsLastSeenColumn(rw *sql.DB, logf Logger) error {
 // (cmd/server/ping_scores.go) rather than persisted here -- so a later
 // observation of an old ping (e.g. a station that only just relayed it
 // upstream) can still improve a standing record without a migration.
+// Unlike transmissions and observations, these index rows survive packet
+// retention (see PruneOldPackets and PruneTransmissions in cmd/ingestor).
+// The server joins them with computed scores in its separate
+// ping_scores_history.db, and treats this table as the authority on which
+// entries should exist: planPingScoreHistoryReconcile puts every tx_id
+// absent from a fresh ping_triggers read into its ToDelete list
+// (cmd/server/ping_score_history_index.go), and the next recompute cycle
+// erases those rows from the history file. Deleting an old trigger therefore
+// destroys that ping's all-time contribution permanently -- it does not
+// merely hide a score that stays on disk.
 func ensurePingTriggersTable(rw *sql.DB, logf Logger) error {
 	if err := ensureMigrationsTable(rw); err != nil {
 		return err
