@@ -72,7 +72,10 @@ func (s *PacketStore) nodeActivityCoverageStartLocked(now time.Time) time.Time {
 	s.bgErrMu.RLock()
 	loadCoverage := s.loadCoverageRatio
 	s.bgErrMu.RUnlock()
-	if loadCoverage < 1 {
+	// Unlimited retention with a hot-start window has no background fill and
+	// leaves loadCoverageRatio at zero. The window itself can still prove 24h
+	// coverage when it is at least 24h wide; oldestLoaded is checked below.
+	if loadCoverage < 1 && !(s.retentionHours <= 0 && s.hotStartupHours >= 24) {
 		return time.Time{}
 	}
 	coverage, err := time.Parse(time.RFC3339Nano, s.oldestLoaded)

@@ -109,6 +109,18 @@ func TestNodeActivity24hCoverageRequiresLoadedHistory(t *testing.T) {
 	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
 		t.Fatalf("90%% startup gate is not full coverage, got %v", got)
 	}
+	s.retentionHours = 0
+	s.hotStartupHours = 25
+	s.loadCoverageRatio = 0
+	if got := s.nodeActivityCoverageStartLocked(now); got.After(start) || got.IsZero() {
+		t.Fatalf("unlimited retention with a fully loaded 25h hot window must be complete, got %v", got)
+	}
+	s.hotStartupHours = 12
+	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
+		t.Fatalf("a 12h hot window cannot prove 24h coverage, got %v", got)
+	}
+	s.hotStartupHours = 0
+	s.retentionHours = 168
 	s.loadCoverageRatio = 1
 	s.maxMemoryMB = 100
 	s.packets[0].FirstSeen = start.Add(time.Hour).Format(time.RFC3339)
