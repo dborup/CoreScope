@@ -268,6 +268,17 @@ func main() {
 		}
 	}
 
+	// Opt-in retention for the tables nothing else prunes (#329): after the
+	// observer soft-delete and the metrics and transmission prunes above, so
+	// the observer purge's reference guards see what they left. Every window
+	// unset (the default) = nothing deleted.
+	tableRetention := cfg.TableRetention()
+	if r := tableRetention; r.Enabled() {
+		log.Printf("[prune] table retention enabled (0 = off): inactiveNodeDays=%d nodeChangeDays=%d observerPurgeDays=%d",
+			r.InactiveNodeDays, r.NodeChangeDays, r.ObserverPurgeDays)
+	}
+	runTableRetention(store, tableRetention, "startup")
+
 	vacuumPages := cfg.IncrementalVacuumPages()
 	store.RunIncrementalVacuum(vacuumPages)
 
@@ -308,14 +319,18 @@ func main() {
 		}
 	}()
 
-	// Daily ticker for observer retention (every 24h, staggered 90s after startup)
+	// Daily ticker for observer retention (every 24h, staggered 90s after
+	// startup), followed by the opt-in table retention (#329), whose observer
+	// purge must follow the soft-delete.
 	observerRetentionTicker := time.NewTicker(24 * time.Hour)
 	go func() {
 		time.Sleep(90 * time.Second) // stagger after metrics prune
 		store.RemoveStaleObservers(observerDays)
+		runTableRetention(store, tableRetention, "daily")
 		store.RunIncrementalVacuum(vacuumPages)
 		for range observerRetentionTicker.C {
 			store.RemoveStaleObservers(observerDays)
+			runTableRetention(store, tableRetention, "daily")
 			store.RunIncrementalVacuum(vacuumPages)
 		}
 	}()
