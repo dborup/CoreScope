@@ -89,6 +89,18 @@ const BUTTON_SELECTORS = [
   ['.analytics-time-range button', 'button', '', '<div class="analytics-time-range">{}</div>'],
   ['.leaflet-control-zoom a','a',      '', '<div class="leaflet-bar leaflet-control leaflet-control-zoom">{}</div>'],
   ['.live-leaflet-toggle a', 'a',      '', '<div class="leaflet-bar leaflet-control live-leaflet-toggle">{}</div>'],
+  // #314: the two controls the staging browser check still measured below
+  // 48 px (26 px and 18 px). Both sit in their real parent, because that is
+  // what decides the box: "Got it" is a flex item of .gesture-hint-inner, so
+  // its height is a cross-axis question, and the reveal pill is appended into
+  // a <th> of the packets table by TableResponsive.apply(). The hint wrap is
+  // position: fixed in the app; it is pinned static here so it lays out in
+  // the harness flow like every other sample.
+  ['.gesture-hint-dismiss',  'button', 'gesture-hint-dismiss',
+    '<div class="gesture-hint gesture-hint-bottom" style="position:static"><div class="gesture-hint-inner">' +
+    '<span class="gesture-hint-text">Swipe left or right to switch tabs</span>{}</div></div>'],
+  ['.col-hidden-pill',       'button', 'col-hidden-pill',
+    '<table class="data-table"><thead><tr><th>Time{}</th></tr></thead><tbody><tr><td>x</td></tr></tbody></table>'],
 ];
 
 // Form controls and text buttons that only set a height. min-WIDTH is not
