@@ -147,6 +147,7 @@ run test-node-changes-tool.js
 run test-network-digest-tool.js
 run test-position-gaps-tool.js
 run test-gps-sanity-tool.js
+run test-estimated-positions-config.js
 run test-map-scope-filter.js
 run test-issue-117-ws-watchdog.js
 run test-issue-111-drawer-version.js

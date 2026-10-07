@@ -1634,6 +1634,8 @@ type ClientConfigResponse struct {
 	// {"enabled":true}: no operator-configured text is ever sent to the
 	// frontend. See PrivacyClientConfig below and PrivacyConfig (config.go).
 	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
+
+	EstimatedPositions EstimatedPositionsClientConfig `json:"estimatedPositions"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

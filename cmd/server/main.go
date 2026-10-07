@@ -90,6 +90,10 @@ func main() {
 	// Load config
 	cfg, err := LoadConfig(configDir)
 	if err != nil {
+		var invalidPolicy *invalidEstimatedPositionsConfigError
+		if errors.As(err, &invalidPolicy) {
+			log.Fatalf("[config] fatal: %v", err)
+		}
 		log.Printf("[config] warning: %v (using defaults)", err)
 	}
 

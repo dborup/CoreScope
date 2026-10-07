@@ -99,7 +99,7 @@ type PingScoreHistoryEntryState struct {
 }
 
 // pingScoreHistoryEntryFromScore converts a trigger + freshly computed
-// score (nil when GetPacketPath/GetPacketPathsBulk produced no usable path
+// score (nil when getPacketPath/getPacketPathsBulk produced no usable path
 // this cycle -- see buildPingScoreFromPath's own nil contract) + observation
 // fingerprint + carried-through state into a brand-new PingScoreHistoryEntry
 // ready to persist. Used for a tx_id that has no existing entry yet; see

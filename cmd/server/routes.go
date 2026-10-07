@@ -161,6 +161,9 @@ type Server struct {
 	gpsSanityMu       sync.Mutex
 	gpsSanityCache    *GPSSanityResponse
 	gpsSanityCachedAt time.Time
+
+	// Copied once by NewServer; zero value preserves default-on behavior.
+	estimatedPositionsDisabled bool
 }
 
 // PerfStats tracks request performance.
@@ -201,6 +204,8 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		version:   resolveVersion(),
 		commit:    resolveCommit(),
 		buildTime: resolveBuildTime(),
+
+		estimatedPositionsDisabled: !cfg.estimatedPositionsEnabled(),
 	}
 }
 
@@ -588,6 +593,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
 		GeoFilter:           s.getGeoFilter(),
 		Privacy:             privacy,
+		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},
 	})
 }
 
@@ -659,13 +665,13 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 	if s.areaAnalyticsCache != nil && time.Since(s.areaAnalyticsCachedAt) < areaAnalyticsTTL {
 		cached := s.areaAnalyticsCache
 		s.areaAnalyticsMu.Unlock()
-		writeJSON(w, cached)
+		s.writeAreaAnalytics(w, cached)
 		return
 	}
 	s.areaAnalyticsMu.Unlock()
 
 	if s.cfg == nil || len(s.cfg.Areas) == 0 {
-		writeJSON(w, &AreaAnalyticsResponse{})
+		s.writeAreaAnalytics(w, &AreaAnalyticsResponse{})
 		return
 	}
 
@@ -680,15 +686,13 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 		graph = s.store.graph.Load()
 	}
 
-	positionGaps, noNeighborFix, estimatedNodes := computeAreaPositionGaps(s.db, positioned, unpositioned, s.cfg.Areas, EstimateMaxEdgeKm)
-
 	resp := &AreaAnalyticsResponse{
-		Density:                   computeAreaDensity(positioned, s.cfg.Areas, s.cfg.GetHealthThresholds()),
-		BridgeNodes:               computeAreaBridgeNodes(positioned, s.cfg.Areas, graph),
-		PositionGaps:              positionGaps,
-		UnpositionedTotal:         len(unpositioned),
-		UnpositionedNoNeighborFix: noNeighborFix,
-		EstimatedNodes:            estimatedNodes,
+		Density:           computeAreaDensity(positioned, s.cfg.Areas, s.cfg.GetHealthThresholds()),
+		BridgeNodes:       computeAreaBridgeNodes(positioned, s.cfg.Areas, graph),
+		UnpositionedTotal: len(unpositioned),
+	}
+	if s.estimatedPositionsEnabled() {
+		resp.PositionGaps, resp.UnpositionedNoNeighborFix, resp.EstimatedNodes = computeAreaPositionGaps(s.db, positioned, unpositioned, s.cfg.Areas, EstimateMaxEdgeKm)
 	}
 
 	s.areaAnalyticsMu.Lock()
@@ -696,7 +700,7 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 	s.areaAnalyticsCachedAt = time.Now()
 	s.areaAnalyticsMu.Unlock()
 
-	writeJSON(w, resp)
+	s.writeAreaAnalytics(w, resp)
 }
 
 // handleGPSSanity serves computeSuspiciousGPSPositions' cross-check of
@@ -707,6 +711,10 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 // whole positioned population on every request otherwise.
 func (s *Server) handleGPSSanity(w http.ResponseWriter, r *http.Request) {
 	const gpsSanityTTL = 30 * time.Second
+	if !s.estimatedPositionsEnabled() {
+		writeJSON(w, EstimatedPositionsDisabledResponse{})
+		return
+	}
 
 	s.gpsSanityMu.Lock()
 	if s.gpsSanityCache != nil && time.Since(s.gpsSanityCachedAt) < gpsSanityTTL {
@@ -2071,7 +2079,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	nodeLat, hasLat := node["lat"].(float64)
 	nodeLon, hasLon := node["lon"].(float64)
 	hasRealFix := hasLat && hasLon && !(nodeLat == 0 && nodeLon == 0)
-	if _, lat, lon, contributorCount, _, ok := s.db.nearestPositionedNeighbor(pubkey, EstimateMaxEdgeKm); ok {
+	if _, lat, lon, contributorCount, _, ok := s.estimateNodePosition(pubkey); ok {
 		node["estimated_lat"] = lat
 		node["estimated_lon"] = lon
 		node["estimated_contributor_count"] = contributorCount
@@ -3720,7 +3728,7 @@ func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, PacketPathResponse{Hash: hash, Branches: []PacketPathBranch{}})
 		return
 	}
-	resp, err := s.db.GetPacketPath(hash, EstimateMaxEdgeKm)
+	resp, err := s.db.getPacketPath(hash, EstimateMaxEdgeKm, s.estimatedPositionsEnabled())
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -3734,7 +3742,7 @@ func (s *Server) handlePacketPath(w http.ResponseWriter, r *http.Request) {
 // AirtimeRelayCount: the LoRa Time-on-Air x distinct-relay-count estimate
 // for this packet's whole flood (same formula as the Relay Airtime Share
 // analytics metric, issue #1768), looked up from the in-memory
-// PacketStore via the transmission ID GetPacketPath captured. Left
+// PacketStore via the transmission ID getPacketPath captured. Left
 // unset -- not a guessed zero -- when the store is unavailable (DB-only
 // mode) or this transmission has been evicted from memory.
 func (s *Server) annotatePacketPathAirtime(resp *PacketPathResponse) {
@@ -3759,7 +3767,7 @@ func (s *Server) annotatePacketPathAirtime(resp *PacketPathResponse) {
 // configured area any point or observer on the path falls in, deduped and
 // alphabetized, uncapped (unlike annotateBotReplyTouchedAreas's capped
 // pong-reply list -- the map view has room to show the full set). Unlike
-// that function, no DB round-trip is needed: GetPacketPath already
+// that function, no DB round-trip is needed: getPacketPath already
 // resolved every position (including the neighbor-centroid approximation
 // fallback), so this just reads the lat/lon already on the response.
 func (s *Server) annotatePacketPathTouchedAreas(resp *PacketPathResponse) {

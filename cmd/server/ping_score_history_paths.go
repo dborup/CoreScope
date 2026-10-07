@@ -212,6 +212,43 @@ func newPingScorePathArchive(key string, score *PingScore, path *PacketPathRespo
 	return PingScorePathArchive{RecordKey: key, Hash: score.Hash, Timestamp: score.Timestamp, CapturedAt: now.UTC().Format(time.RFC3339), Path: immutable}, true
 }
 
+// pingScorePathArchiveFingerprint is the comparison form of a captured
+// path: the serialization writePingScorePathArchives would store, viewed
+// through whatever filter the operator policy applies to responses.
+//
+// While estimated positions are DISABLED, freshly captured paths carry no
+// neighbor-derived geometry at all, so a byte comparison against an
+// archive captured while they were enabled always differs -- and the
+// engine would replace the stored evidence with an estimate-free copy and
+// bump its CapturedAt, destroying the recorded approximation for good once
+// the raw observations expire. The policy filters request-owned copies
+// only (issue #315 point 5), so compare both sides through the same strip
+// the response path uses: when the only difference is the estimate
+// geometry, the old capture is still the right evidence and is kept
+// untouched. Any real change to the route still differs and still
+// replaces it.
+func pingScorePathArchiveFingerprint(path *PacketPathResponse, estimatesEnabled bool) (string, bool) {
+	b, err := boundedPingPathJSON(path)
+	if err != nil {
+		return "", false
+	}
+	if estimatesEnabled {
+		return string(b), true
+	}
+	// Strip a clone, never the caller's path: old.Path is the live
+	// in-memory archive the Ping Scores snapshot still serves.
+	var clone PacketPathResponse
+	if err := json.Unmarshal(b, &clone); err != nil {
+		return "", false
+	}
+	stripEstimatedPositions(&clone)
+	stripped, err := boundedPingPathJSON(&clone)
+	if err != nil {
+		return "", false
+	}
+	return string(stripped), true
+}
+
 func (e *pingScoreHistoryEngine) pathsForRecords(snap *PingScoresSnapshot, paths map[string]*PacketPathResponse, attempted map[string]bool, now time.Time) (map[string]PingScorePathArchive, bool, error) {
 	slots := pingScoreRecordSlots(snap)
 	missing, seen := []string{}, map[string]bool{}
@@ -224,7 +261,7 @@ func (e *pingScoreHistoryEngine) pathsForRecords(snap *PingScoresSnapshot, paths
 	}
 	if len(missing) > 0 {
 		// At most ten distinct displayed hashes, in one existing bulk helper.
-		extra, err := e.server.db.GetPacketPathsBulk(missing, e.config.MaxEdgeKm)
+		extra, err := e.server.db.getPacketPathsBulk(missing, e.config.MaxEdgeKm, e.server.estimatedPositionsEnabled())
 		if err != nil {
 			return nil, false, fmt.Errorf("record path capture: %w", err)
 		}
@@ -238,6 +275,7 @@ func (e *pingScoreHistoryEngine) pathsForRecords(snap *PingScoresSnapshot, paths
 			}
 		}
 	}
+	estimatesEnabled := e.server.estimatedPositionsEnabled()
 	out := make(map[string]PingScorePathArchive, len(slots))
 	for key, score := range slots {
 		old, oldOK := e.pathArchives[key]
@@ -245,9 +283,9 @@ func (e *pingScoreHistoryEngine) pathsForRecords(snap *PingScoresSnapshot, paths
 		if next, ok := newPingScorePathArchive(key, score, paths[strings.ToLower(score.Hash)], now); ok {
 			// Identical evidence doesn't create a new capture time or DB write.
 			if oldOK {
-				a, _ := boundedPingPathJSON(&old.Path)
-				b, _ := boundedPingPathJSON(&next.Path)
-				if string(a) == string(b) {
+				a, aOK := pingScorePathArchiveFingerprint(&old.Path, estimatesEnabled)
+				b, bOK := pingScorePathArchiveFingerprint(&next.Path, estimatesEnabled)
+				if aOK && bOK && a == b {
 					next = old
 				}
 			}

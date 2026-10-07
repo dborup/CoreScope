@@ -42,7 +42,7 @@ func seedPingObservation(t *testing.T, srv *Server, txID int64, observerID strin
 }
 
 // setupPingScoresFixture seeds observers with known positions (via nodes
-// row for lat/lon lookups the same way GetPacketPath resolves them) and
+// row for lat/lon lookups the same way getPacketPath resolves them) and
 // returns the server (+ router, for handler-level tests) ready for
 // computePingScore/computeAllPingScores.
 func setupPingScoresFixture(t *testing.T) (*Server, *mux.Router) {
