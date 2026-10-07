@@ -418,6 +418,10 @@ jobs:
           BASE_URL=http://localhost:13581 node test-channels-client-state-152-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channels-154-155-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-map-modal-fluid-e2e.js 2>&1 | tee -a e2e-output.txt
+          # #332 — no map may request a tile from basemaps.cartocdn.com.
+          # No config.json here, so this exercises the built-in non-CARTO
+          # fallback (tile.openstreetmap.org) a default install resolves to.
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-332-no-carto-tiles-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-map-nodes-pagination-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-123-map-lifecycle-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-observer-iata-1188-e2e.js 2>&1 | tee -a e2e-output.txt

@@ -17,8 +17,17 @@
   var STORAGE_KEY  = 'mc-dark-tile-provider';
   var STORAGE_KEY_LIGHT = 'mc-light-tile-provider';
 
-  var DEFAULT_ID   = 'carto-dark';
-  var DEFAULT_ID_LIGHT = 'carto-light';
+  // #332 — the built-in fallback must NOT be CARTO. Since August 2026 CARTO
+  // stamps "API KEY REQUIRED" into every keyless raster tile, and this fork
+  // has no basemap-key plumbing, so an unconfigured instance that defaulted
+  // to 'carto-dark' / 'carto-light' rendered watermarked maps. OSM Standard
+  // is the keyless baseline: no token, tiles to zoom 18, and it is already
+  // the unconditional provider for the home mini-map, node-reach, packet-path
+  // and area maps — so this default introduces no new third party. Operators
+  // who want CARTO (or anything else) still set map.tiles.darkDefault /
+  // lightDefault, which keep priority over these.
+  var DEFAULT_ID   = 'osm-dark';
+  var DEFAULT_ID_LIGHT = 'osm-standard';
   var EVENT_NAME   = 'mc-tile-provider-changed';
   
   var _serverDefault = null;
@@ -39,6 +48,23 @@
       if (prov === 'mapbox') return 'https://api.mapbox.com/styles/v1/mapbox/streets-v11/tiles/256/{z}/{x}/{y}@2x?access_token=' + key;
     }
     return 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  };
+  /* #332 — credit the vendor that actually serves the tiles. osm-standard /
+   * osm-dark used to credit "Maps © Mapbox/Thunderforest/MapTiler"
+   * unconditionally; #332 makes them the default every unconfigured
+   * instance shows, and such an instance uses none of those three — its
+   * tiles come straight from the OSMF servers. Resolved the same way
+   * _getOsmUrl() picks the URL, and re-resolved on every registry init so
+   * config landing after parse time still applies. */
+  var _getOsmAttribution = function() {
+    var OSM = '© OpenStreetMap contributors';
+    if (_cfg && _cfg.providers && _cfg.providers.osm && _cfg.providers.osm.provider && _cfg.providers.osm.token) {
+      var prov = _cfg.providers.osm.provider.toLowerCase();
+      if (prov === 'thunderforest') return OSM + ', Tiles © Thunderforest';
+      if (prov === 'maptiler')      return OSM + ', Tiles © MapTiler';
+      if (prov === 'mapbox')        return OSM + ', Tiles © Mapbox';
+    }
+    return OSM;
   };
 
   var BASE_STYLES = {
@@ -73,6 +99,13 @@
     var HAS_STAMEN = _cfg && _cfg.providers && _cfg.providers.stamen && _cfg.providers.stamen.enabled && !!_cfg.providers.stamen.token;
     var HAS_ESRI = true; // Kept for backwards compatibility
 
+    // #332 — resolve the OSM credit against the configured vendor before
+    // the registry is handed out. Keeping `attribution` a plain string here
+    // means every reader (getTileSpec, the layer control, the inset-map
+    // helper, map.js/live.js legacy branches) stays unchanged.
+    BASE_STYLES['osm-standard'].attribution = _getOsmAttribution();
+    BASE_STYLES['osm-dark'].attribution     = _getOsmAttribution();
+
     REGISTRY = {};
     for (var key in BASE_STYLES) {
       var style = BASE_STYLES[key];
@@ -83,6 +116,16 @@
       if (style.provider === 'usgs' && HAS_USGS) REGISTRY[key] = style;
       if (style.provider === 'esri' && HAS_ESRI) REGISTRY[key] = style;
     }
+
+    // #332 — the fallback defaults must stay resolvable no matter how the
+    // optional providers are gated. Without this a config that disables
+    // everything leaves REGISTRY without the active id, every caller falls
+    // through to a URL of its own, and that is exactly how the hard-coded
+    // CARTO templates spread in the first place. It also keeps the default
+    // selectable in the layer picker, so a user who switches away can
+    // switch back. `enabled` still governs every other style of a provider.
+    if (!REGISTRY[DEFAULT_ID])       REGISTRY[DEFAULT_ID]       = BASE_STYLES[DEFAULT_ID];
+    if (!REGISTRY[DEFAULT_ID_LIGHT]) REGISTRY[DEFAULT_ID_LIGHT] = BASE_STYLES[DEFAULT_ID_LIGHT];
 
     // Keep the public reference in sync with the newly rebuilt REGISTRY
     window.MC_TILE_PROVIDERS = REGISTRY;
@@ -179,9 +222,38 @@
   }
 
 
+  /* #332 — getTileSpec(type): the ONE place a map resolves the active
+   * provider. `type` is 'dark' or 'light'; anything else is read as 'dark'.
+   * Returns a plain object so no caller needs to know that a style's `url`
+   * may be a lazy function, nor to carry its own fallback URL/attribution:
+   *
+   *   { id, url, attribution, refUrl, maxZoom, invertFilter }
+   *
+   * `url` is always a string template (or null if a style is malformed) and
+   * `attribution` always comes from the resolved provider — never from a
+   * hard-coded CARTO credit. Re-resolved on every call so config landing
+   * after map init still applies.
+   */
+  function getTileSpec(type) {
+    var isLight  = (type === 'light');
+    var id       = isLight ? getActiveLightId() : getActiveId();
+    var fallback = isLight ? DEFAULT_ID_LIGHT : DEFAULT_ID;
+    var p        = REGISTRY[id] || BASE_STYLES[id] || BASE_STYLES[fallback];
+    var u        = p ? (p.url || p.baseUrl) : null;
+    return {
+      id: id,
+      url: (typeof u === 'function' ? u() : u) || null,
+      attribution: (p && p.attribution) || BASE_STYLES[fallback].attribution,
+      refUrl: (p && p.refUrl) || null,
+      maxZoom: (p && p.maxZoom) || 19,
+      invertFilter: (p && p.invertFilter) || null
+    };
+  }
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
+  window.MC_LIGHT_TILE_DEFAULT          = DEFAULT_ID_LIGHT;
   window.MC_TILE_PROVIDERS              = REGISTRY; // initial ref; MC_initTileRegistry keeps this in sync
   window.MC_setDarkTileProvider         = function(id) { return setActive(id, 'dark'); };
   window.MC_setLightTileProvider        = function(id) { return setActive(id, 'light'); };
@@ -190,6 +262,7 @@
   window.MC_setServerDefaultTileProvider = setServerDefault;
   window.MC_setServerDefaultLightTileProvider = setServerDefaultLight;
   window.MC_applyTileFilter             = applyTileFilter;
+  window.MC_getTileSpec                 = getTileSpec;
 
 
   /**
