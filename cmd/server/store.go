@@ -2363,7 +2363,7 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 		cachedTxs := s.groupedCacheTxs
 		cachedTotal := s.groupedCacheTotal
 		s.groupedCacheMu.Unlock()
-		return groupedTxsToPage(cachedTxs, cachedTotal, q.Offset, q.Limit)
+		return s.groupedPageWithRP(cachedTxs, cachedTotal, q.Offset, q.Limit)
 	}
 	s.groupedCacheMu.Unlock()
 
@@ -2389,7 +2389,48 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 	s.groupedCacheExp = time.Now().Add(3 * time.Second)
 	s.groupedCacheMu.Unlock()
 
-	return groupedTxsToPage(txs, total, q.Offset, q.Limit)
+	return s.groupedPageWithRP(txs, total, q.Offset, q.Limit)
+}
+
+// groupedPageWithRP is groupedTxsToPage plus each row's resolved_path (#165).
+// The packets page resolves hop names from the grouped row, keyed by hop and
+// row observer; without the server's answer it guessed every hop and flagged
+// hops the server had resolved. The path is the one of the observation the
+// row displays (headerObservationID), not the tx's longest-resolved one, so
+// it matches the row's observer_id and path_json. Observation ids are read
+// under s.mu; the SQL runs after it is released, as one batched read per
+// page (fetchResolvedPathsForObsIDs) rather than one per row.
+func (s *PacketStore) groupedPageWithRP(txs []*StoreTx, total, offset, limit int) *PacketResult {
+	res := groupedTxsToPage(txs, total, offset, limit)
+	if len(res.Packets) == 0 {
+		return res
+	}
+	page := txs[offset : offset+len(res.Packets)]
+	ids := make([]int, len(page))
+	s.mu.RLock()
+	for i, tx := range page {
+		ids[i] = headerObservationID(tx)
+	}
+	s.mu.RUnlock()
+	rps := s.fetchResolvedPathsForObsIDs(ids)
+	for i, id := range ids {
+		if rp := rps[id]; rp != nil {
+			res.Packets[i]["resolved_path"] = rp
+		}
+	}
+	return res
+}
+
+// headerObservationID returns the id of the observation pickBestObservation
+// copied onto tx (same observer and path), or 0 when none matches.
+// Caller holds s.mu.
+func headerObservationID(tx *StoreTx) int {
+	for _, o := range tx.Observations {
+		if o != nil && o.ObserverID == tx.ObserverID && o.PathJSON == tx.PathJSON {
+			return o.ID
+		}
+	}
+	return 0
 }
 
 // pagePacketResult returns a window of a PacketResult without re-allocating the slice.
@@ -2444,7 +2485,7 @@ func groupedTxsToPage(txs []*StoreTx, total, offset, limit int) *PacketResult {
 			"rssi":              floatPtrOrNil(tx.RSSI),
 			"scope_name":        strOrNil(tx.ScopeName),
 		}
-		// resolved_path omitted for grouped view (cold path, not worth SQL round-trip)
+		// resolved_path is added by groupedPageWithRP (#165).
 		packets[i] = m
 	}
 

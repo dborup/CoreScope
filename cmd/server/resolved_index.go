@@ -11,8 +11,10 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"hash/fnv"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -196,6 +198,64 @@ func (s *PacketStore) fetchResolvedPathsForTx(txID int) map[int][]*string {
 		}
 	}
 	return result
+}
+
+// fetchResolvedPathsForObsIDs reads resolved_path for many observations in
+// one query (#165, grouped packet pages of up to 50K rows): the ids go in as
+// one JSON array parameter, so there is no bound-variable limit and one
+// statement to prepare. Values come back as the stored JSON, unparsed
+// (resolvedPathRaw), because the caller only re-encodes them. Id 0 is
+// skipped. It bypasses the LRU on purpose: a page is far larger than
+// lruMaxSize and would evict every entry other endpoints rely on.
+func (s *PacketStore) fetchResolvedPathsForObsIDs(ids []int) map[int]json.RawMessage {
+	out := make(map[int]json.RawMessage)
+	if s.db == nil || s.db.conn == nil || !s.db.hasResolvedPath() || len(ids) == 0 {
+		return out
+	}
+	var b strings.Builder
+	b.Grow(len(ids) * 8)
+	b.WriteByte('[')
+	n := 0
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if n > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.Itoa(id))
+		n++
+	}
+	b.WriteByte(']')
+	if n == 0 {
+		return out
+	}
+	rows, err := s.db.conn.Query(`SELECT o.id, o.resolved_path FROM observations o
+		WHERE o.id IN (SELECT value FROM json_each(?)) AND o.resolved_path IS NOT NULL`, b.String())
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var rpJSON sql.NullString
+		if rows.Scan(&id, &rpJSON) == nil && rpJSON.Valid {
+			if rp := resolvedPathRaw(rpJSON.String); rp != nil {
+				out[id] = rp
+			}
+		}
+	}
+	return out
+}
+
+// resolvedPathRaw returns a stored resolved_path as JSON to embed in a
+// response, or nil when it is empty or not a JSON array (an invalid
+// RawMessage would fail the whole response's encoding).
+func resolvedPathRaw(s string) json.RawMessage {
+	if len(s) < 2 || s[0] != '[' || !json.Valid([]byte(s)) {
+		return nil
+	}
+	return json.RawMessage(s)
 }
 
 // fetchResolvedPathForObs fetches resolved_path for a single observation,

@@ -793,6 +793,12 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 	if db.hasScopeName() {
 		groupedScopeCol = ", t.scope_name"
 	}
+	// #165 — the displayed observation's resolved_path. Always one column
+	// (NULL without the column), so the Scan below does not depend on it.
+	groupedRPCol := "NULL"
+	if db.hasResolvedPath() {
+		groupedRPCol = "o.resolved_path"
+	}
 	var querySQL string
 	if db.isV3() {
 		querySQL = fmt.Sprintf(`SELECT t.hash, t.first_seen, t.raw_hex, t.decoded_json, t.payload_type, t.route_type,
@@ -800,7 +806,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			COALESCE((SELECT COUNT(DISTINCT oi.observer_idx) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS observer_count,
 			COALESCE((SELECT MAX(strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', oi.timestamp, 'unixepoch')) FROM observations oi WHERE oi.transmission_id = t.id), t.first_seen) AS latest,
 			obs.id AS observer_id, obs.name AS observer_name, COALESCE(obs.iata, '') AS observer_iata,
-			o.snr, o.rssi, o.path_json,
+			o.snr, o.rssi, o.path_json, `+groupedRPCol+`,
 			COALESCE((SELECT GROUP_CONCAT(DISTINCT obi.iata) FROM observations oi JOIN observers obi ON obi.rowid = oi.observer_idx WHERE oi.transmission_id = t.id AND obi.iata IS NOT NULL AND obi.iata != ''), '') AS distinct_iatas`+groupedScopeCol+`
 		FROM transmissions t
 		LEFT JOIN observations o ON o.id = (
@@ -815,7 +821,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			COALESCE((SELECT COUNT(DISTINCT oi.observer_id) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS observer_count,
 			COALESCE((SELECT MAX(oi.timestamp) FROM observations oi WHERE oi.transmission_id = t.id), t.first_seen) AS latest,
 			o.observer_id, o.observer_name, COALESCE(obs2.iata, '') AS observer_iata,
-			o.snr, o.rssi, o.path_json,
+			o.snr, o.rssi, o.path_json, `+groupedRPCol+`,
 			COALESCE((SELECT GROUP_CONCAT(DISTINCT obi.iata) FROM observations oi JOIN observers obi ON obi.id = oi.observer_id WHERE oi.transmission_id = t.id AND obi.iata IS NOT NULL AND obi.iata != ''), '') AS distinct_iatas`+groupedScopeCol+`
 		FROM transmissions t
 		LEFT JOIN observations o ON o.id = (
@@ -838,7 +844,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 
 	packets := make([]map[string]interface{}, 0)
 	for rows.Next() {
-		var hash, firstSeen, rawHex, decodedJSON, latest, observerID, observerName, observerIATA, pathJSON, distinctIatasCSV sql.NullString
+		var hash, firstSeen, rawHex, decodedJSON, latest, observerID, observerName, observerIATA, pathJSON, resolvedPath, distinctIatasCSV sql.NullString
 		var payloadType, routeType sql.NullInt64
 		var count, observerCount int
 		var snr, rssi sql.NullFloat64
@@ -846,7 +852,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 
 		scanArgs := []interface{}{&hash, &firstSeen, &rawHex, &decodedJSON, &payloadType, &routeType,
 			&count, &observerCount, &latest,
-			&observerID, &observerName, &observerIATA, &snr, &rssi, &pathJSON, &distinctIatasCSV}
+			&observerID, &observerName, &observerIATA, &snr, &rssi, &pathJSON, &resolvedPath, &distinctIatasCSV}
 		if db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
@@ -854,7 +860,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			continue
 		}
 
-		packets = append(packets, map[string]interface{}{
+		row := map[string]interface{}{
 			"hash":              nullStr(hash),
 			"first_seen":        nullStr(firstSeen),
 			"count":             count,
@@ -873,7 +879,15 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			"snr":               nullFloat(snr),
 			"rssi":              nullFloat(rssi),
 			"scope_name":        nullStr(scopeName),
-		})
+		}
+		// #165 — the displayed observation's resolved_path, as the in-memory
+		// store sends it (groupedPageWithRP).
+		if resolvedPath.Valid {
+			if rp := resolvedPathRaw(resolvedPath.String); rp != nil {
+				row["resolved_path"] = rp
+			}
+		}
+		packets = append(packets, row)
 	}
 
 	return &PacketResult{Packets: packets, Total: total}, nil
