@@ -2976,15 +2976,17 @@
 
   // Popover body for a .path-hops host: clone all children except the pill
   // and (#165, upstream 2557894d) the path's ambiguity summary, preserving
-  // rendered chips/arrows.
+  // rendered chips/arrows. The title counts the hops listed (PR #185 F5).
   function _pathPopoverHtml(host) {
-    var inner = '<div class="path-popover-title">Full path (' + (host.children.length) + ' items)</div><div>';
+    var body = '', hops = 0;
     var kids = Array.prototype.slice.call(host.children);
     for (var i = 0; i < kids.length; i++) {
-      if (kids[i].classList.contains('path-overflow-pill') || kids[i].classList.contains('hop-path-warn')) continue;
-      inner += kids[i].outerHTML;
+      var cl = kids[i].classList;
+      if (cl.contains('path-overflow-pill') || cl.contains('hop-path-warn')) continue;
+      if (!cl.contains('arrow')) hops++;
+      body += kids[i].outerHTML;
     }
-    return inner + '</div>';
+    return '<div class="path-popover-title">Full path (' + hops + (hops === 1 ? ' hop' : ' hops') + ')</div><div>' + body + '</div>';
   }
 
   // Delegated click for path overflow pills — show popover of full path.
