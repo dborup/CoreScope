@@ -10450,6 +10450,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 
 // GetNodeHealth returns health info for a single node using in-memory data.
 func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, error) {
+	return s.getNodeHealthAt(pubkey, time.Now().UTC())
+}
+
+func (s *PacketStore) getNodeHealthAt(pubkey string, now time.Time) (map[string]interface{}, error) {
 	// Fetch node info from DB (fast single-row lookup)
 	node, err := s.db.GetNodeByPubkey(pubkey)
 	if err != nil {
@@ -10477,7 +10481,8 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 
 	packets := s.byNode[pubkey]
 	activityKey := strings.ToLower(pubkey)
-	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	todayStart := now.UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now))
 
 	var packetsToday int
 	var snrSum float64
@@ -10494,6 +10499,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	}{}
 
 	for _, pkt := range packets {
+		activity.add(pkt)
 		totalObservations += pkt.ObservationCount
 		if pkt.FirstSeen > todayStart {
 			packetsToday++
@@ -10628,6 +10634,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			AvgHops: &avgHops, LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 		},
 		"recentPackets": recentPackets,
+		"activity24h":   activity,
 	}, nil
 }
 
