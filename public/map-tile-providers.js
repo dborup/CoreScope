@@ -21,7 +21,7 @@
   // stamps "API KEY REQUIRED" into every keyless raster tile, and this fork
   // has no basemap-key plumbing, so an unconfigured instance that defaulted
   // to 'carto-dark' / 'carto-light' rendered watermarked maps. OSM Standard
-  // is the keyless baseline: no token, tiles to zoom 19, and it is already
+  // is the keyless baseline: no token, tiles to zoom 18, and it is already
   // the unconditional provider for the home mini-map, node-reach, packet-path
   // and area maps — so this default introduces no new third party. Operators
   // who want CARTO (or anything else) still set map.tiles.darkDefault /
@@ -48,6 +48,23 @@
       if (prov === 'mapbox') return 'https://api.mapbox.com/styles/v1/mapbox/streets-v11/tiles/256/{z}/{x}/{y}@2x?access_token=' + key;
     }
     return 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  };
+  /* #332 — credit the vendor that actually serves the tiles. osm-standard /
+   * osm-dark used to credit "Maps © Mapbox/Thunderforest/MapTiler"
+   * unconditionally; #332 makes them the default every unconfigured
+   * instance shows, and such an instance uses none of those three — its
+   * tiles come straight from the OSMF servers. Resolved the same way
+   * _getOsmUrl() picks the URL, and re-resolved on every registry init so
+   * config landing after parse time still applies. */
+  var _getOsmAttribution = function() {
+    var OSM = '© OpenStreetMap contributors';
+    if (_cfg && _cfg.providers && _cfg.providers.osm && _cfg.providers.osm.provider && _cfg.providers.osm.token) {
+      var prov = _cfg.providers.osm.provider.toLowerCase();
+      if (prov === 'thunderforest') return OSM + ', Tiles © Thunderforest';
+      if (prov === 'maptiler')      return OSM + ', Tiles © MapTiler';
+      if (prov === 'mapbox')        return OSM + ', Tiles © Mapbox';
+    }
+    return OSM;
   };
 
   var BASE_STYLES = {
@@ -81,6 +98,13 @@
     var HAS_USGS = _cfg && _cfg.providers && _cfg.providers.usgs && _cfg.providers.usgs.enabled;
     var HAS_STAMEN = _cfg && _cfg.providers && _cfg.providers.stamen && _cfg.providers.stamen.enabled && !!_cfg.providers.stamen.token;
     var HAS_ESRI = true; // Kept for backwards compatibility
+
+    // #332 — resolve the OSM credit against the configured vendor before
+    // the registry is handed out. Keeping `attribution` a plain string here
+    // means every reader (getTileSpec, the layer control, the inset-map
+    // helper, map.js/live.js legacy branches) stays unchanged.
+    BASE_STYLES['osm-standard'].attribution = _getOsmAttribution();
+    BASE_STYLES['osm-dark'].attribution     = _getOsmAttribution();
 
     REGISTRY = {};
     for (var key in BASE_STYLES) {
@@ -229,6 +253,7 @@
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
+  window.MC_LIGHT_TILE_DEFAULT          = DEFAULT_ID_LIGHT;
   window.MC_TILE_PROVIDERS              = REGISTRY; // initial ref; MC_initTileRegistry keeps this in sync
   window.MC_setDarkTileProvider         = function(id) { return setActive(id, 'dark'); };
   window.MC_setLightTileProvider        = function(id) { return setActive(id, 'light'); };

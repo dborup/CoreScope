@@ -1637,8 +1637,12 @@
   function _renderTileProviderSelector() {
     var reg = (typeof window !== 'undefined') && window.MC_TILE_PROVIDERS;
     if (!reg) return '';
-    var activeDark = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-    var activeLight = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : 'carto-light';
+    // #332 — the last-resort id comes from the registry's own exported
+    // defaults, never from a hard-coded 'carto-*'. CARTO is no longer the
+    // built-in default, so naming it here would have preselected a style
+    // the instance may not even have enabled.
+    var activeDark = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : window.MC_DARK_TILE_DEFAULT;
+    var activeLight = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : window.MC_LIGHT_TILE_DEFAULT;
     
     var darkIds = Object.keys(reg).filter(function(id) { return reg[id].type === 'dark'; });
     var lightIds = Object.keys(reg).filter(function(id) { return reg[id].type === 'light'; });

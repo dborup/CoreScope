@@ -8,12 +8,18 @@
  * instance configured for Esri/OpenTopoMap/OSM.
  *
  * This test drives a real browser over every surface named in the issue —
- * node detail, the main map, Live, Areas and both customizer geo-filter
- * previews — in BOTH themes, and asserts:
+ * the main map, Live, node detail, the Analytics -> Subpaths minimap, the
+ * packet-path modal, the Areas (position-gap) node map and both customizer
+ * geo-filter previews — in BOTH themes, and asserts:
  *
- *   1. zero network requests to basemaps.cartocdn.com, and
+ *   1. zero network requests to basemaps.cartocdn.com,
  *   2. at least one tile request that DOES go to the expected provider
- *      host (so "no CARTO" can't pass by the map simply never loading).
+ *      host (so "no CARTO" can't pass by the map simply never loading), and
+ *   3. that the map's tile pane carries the resolved provider's
+ *      invertFilter — present when the provider declares one, absent when
+ *      it does not. The #332 dark default (osm-dark) is the LIGHT OSM
+ *      template plus an invert filter, so a map that attaches tiles but
+ *      skips the filter renders a light basemap inside a dark page.
  *
  * Third-party tile IMAGE requests are stubbed with a 1x1 PNG at the route
  * level: the point is which URL the page asks for, not what comes back,
@@ -119,6 +125,30 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     }
   }
 
+  // The provider's own invertFilter must reach the map's tile pane — not a
+  // hard-coded expectation, so this holds for any configured provider:
+  // osm-dark declares one, esri-darkgray-labels and every light style do
+  // not. Read from the page, so a differently-configured server still
+  // asserts the right thing.
+  async function checkFilter(page, paneSelector, theme, label) {
+    const want = await page.evaluate((t) => {
+      try {
+        const s = window.MC_getTileSpec && window.MC_getTileSpec(t);
+        return (s && s.invertFilter) || '';
+      } catch (_) { return ''; }
+    }, theme);
+    const got = await page.$eval(paneSelector, (el) => getComputedStyle(el).filter);
+    const has = !!got && got !== 'none';
+    if (want) {
+      assert(has, `${label}: the resolved ${theme} provider declares invertFilter ` +
+        `"${want}" but ${paneSelector} computes filter "${got}" — an un-inverted ` +
+        `light basemap would render inside a ${theme} page`);
+    } else {
+      assert(!has, `${label}: the resolved ${theme} provider declares no invertFilter ` +
+        `but ${paneSelector} computes filter "${got}"`);
+    }
+  }
+
   for (const theme of ['dark', 'light']) {
     console.log(`── theme: ${theme} ──`);
 
@@ -128,6 +158,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await page.waitForSelector('#leaflet-map .leaflet-tile-pane', { state: 'attached', timeout: 15000 });
         await page.waitForTimeout(1500);
         check('map', tiles, { expectHost: EXPECT[theme] });
+        await checkFilter(page, '#leaflet-map .leaflet-tile-pane', theme, 'map');
       });
     });
 
@@ -137,6 +168,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await page.waitForSelector('.leaflet-tile-pane', { state: 'attached', timeout: 15000 });
         await page.waitForTimeout(1500);
         check('live', tiles, { expectHost: EXPECT[theme] });
+        await checkFilter(page, '.leaflet-tile-pane', theme, 'live');
       });
     });
 
@@ -146,19 +178,98 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await page.waitForSelector('.leaflet-tile-pane', { state: 'attached', timeout: 15000 });
         await page.waitForTimeout(1500);
         check('node detail', tiles, { expectHost: EXPECT[theme] });
+        await checkFilter(page, '.leaflet-tile-pane', theme, 'node detail');
       });
     });
 
-    await step(`[${theme}] Areas tab requests no CARTO tiles`, async () => {
+    // Analytics -> Subpaths: click route rows until one has >=2 located
+    // nodes, which is what makes renderSubpathDetail() mount #subpathMap.
+    // This minimap used L.tileLayer(getTileUrl()) with no invertFilter, so
+    // the #332 dark default rendered an un-inverted light basemap here.
+    await step(`[${theme}] Analytics → Subpaths minimap requests no CARTO tiles`, async () => {
       await withPage(theme, async (page, tiles) => {
         await page.goto(BASE + '/#/analytics', { waitUntil: 'domcontentloaded' });
-        const tab = page.locator('.tab-btn[data-tab="areas"]');
+        const tab = page.locator('.tab-btn[data-tab="subpaths"]');
         await tab.waitFor({ timeout: 15000 });
         await tab.click();
-        await page.waitForTimeout(2500);
-        // The Areas tab only mounts a map when the fixture has areas, so a
-        // tile hit is not guaranteed here — the CARTO assertion is.
-        check('areas', tiles, { requireHit: false });
+        await page.waitForSelector('tr[data-hops]', { timeout: 15000 });
+        const rows = page.locator('tr[data-hops]');
+        const total = Math.min(await rows.count(), 15);
+        assert(total > 0, 'the fixture served no subpath rows to open');
+        tiles.length = 0;
+        let mounted = false;
+        for (let i = 0; i < total && !mounted; i++) {
+          await rows.nth(i).click();
+          try {
+            await page.waitForSelector('#subpathMap .leaflet-tile-pane', { state: 'attached', timeout: 3000 });
+            mounted = true;
+          } catch (_) { /* this route has <2 located nodes — try the next */ }
+        }
+        assert(mounted, `no subpath route out of ${total} mounted #subpathMap — ` +
+          'the minimap never rendered, so this step would prove nothing');
+        await page.waitForTimeout(1500);
+        check('analytics subpath minimap', tiles, { expectHost: EXPECT[theme] });
+        await checkFilter(page, '#subpathMap .leaflet-tile-pane', theme, 'analytics subpath minimap');
+      });
+    });
+
+    // The packet-path modal, reached the way a shared link reaches it:
+    // #/packets/<hash>?viewPath=1. The hash is discovered at runtime so the
+    // step does not depend on a particular fixture row surviving a freshen.
+    await step(`[${theme}] packet-path map requests no CARTO tiles`, async () => {
+      await withPage(theme, async (page, tiles) => {
+        await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#packetsTable, .data-table', { timeout: 15000 });
+        const hash = await page.evaluate(async () => {
+          const r = await fetch('/api/packets?limit=40&timeWindow=0');
+          const d = await r.json();
+          for (const p of (d.packets || [])) {
+            if (!p.hash) continue;
+            try {
+              const pr = await fetch('/api/packets/' + encodeURIComponent(p.hash) + '/path');
+              if (!pr.ok) continue;
+              const pd = await pr.json();
+              for (const b of (pd.branches || [])) {
+                const pts = (b.points || []).filter((q) => q.lat != null && q.lon != null);
+                if (pts.length || (b.observer && b.observer.lat != null)) return p.hash;
+              }
+            } catch (_) {}
+          }
+          return null;
+        });
+        assert(hash, 'no fixture packet has a plottable relay path — cannot open the packet-path map');
+        tiles.length = 0;
+        await page.goto(BASE + '/#/packets/' + hash + '?viewPath=1', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#packetPathMapContainer .leaflet-tile-pane', { state: 'attached', timeout: 15000 });
+        await page.waitForTimeout(1500);
+        check('packet-path map', tiles, { expectHost: EXPECT[theme] });
+        await checkFilter(page, '#packetPathMapContainer .leaflet-tile-pane', theme, 'packet-path map');
+      });
+    });
+
+    // Areas. The Analytics -> Areas TAB mounts no Leaflet map at all (its
+    // position-gap rows are not clickable there), so the old step asserted
+    // nothing. The Areas map that exists is AreaNodesMap, opened from a
+    // position-gap row in the Position-Fix Coverage Gaps tool. The committed
+    // fixture has no estimated positions, so there is no row to click: drive
+    // the modal's own public entry point with synthetic points instead. The
+    // production tile-attach path is identical either way — only the markers
+    // come from the test.
+    await step(`[${theme}] Areas (position-gap) node map requests no CARTO tiles`, async () => {
+      await withPage(theme, async (page, tiles) => {
+        await page.goto(BASE + '/#/tools/position-gaps', { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(() => !!(window.AreaNodesMap && window.L), null, { timeout: 15000 });
+        tiles.length = 0;
+        await page.evaluate(() => {
+          window.AreaNodesMap.open('#332 E2E area', [
+            { name: 'A', lat: 37.5, lon: -122.3, approximated: true },
+            { name: 'B', lat: 37.9, lon: -122.1, approximated: true },
+          ]);
+        });
+        await page.waitForSelector('#areaNodesMapContainer .leaflet-tile-pane', { state: 'attached', timeout: 15000 });
+        await page.waitForTimeout(1500);
+        check('area-nodes map', tiles, { expectHost: EXPECT[theme] });
+        await checkFilter(page, '#areaNodesMapContainer .leaflet-tile-pane', theme, 'area-nodes map');
       });
     });
 

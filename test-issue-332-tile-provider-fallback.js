@@ -540,6 +540,252 @@ test('M6 the only basemaps.cartocdn.com literal under public/ is in _getCartoBas
     'hard-coded CARTO host(s) found:\n    ' + offenders.join('\n    '));
 });
 
+// ═══ M7 — analytics subpath minimap (round-2 F1) ════════════════════════
+// The Analytics -> Subpaths detail minimap used `L.tileLayer(getTileUrl())`
+// and never applied the provider's invertFilter. With the #332 dark default
+// (osm-dark = the LIGHT OSM template + an invert filter) that rendered an
+// un-inverted light basemap inside a dark page. It must go through the same
+// shared helper every other inset map uses, not a second resolver of its own.
+console.log('\n── #332 M7: analytics subpath minimap uses the shared tile helper ──');
+
+const ANALYTICS = path.join('public', 'analytics.js');
+const NODES     = path.join('public', 'nodes.js');
+const INVERT_RE = /invert\(/;
+
+// A Leaflet mock whose maps each own their own tilePane, so an assertion on
+// "this map's pane" cannot be satisfied by some other map's pane.
+function makeMapMock() {
+  const calls = [];
+  const panes = [];
+  function fakeMap() {
+    const tilePane = { style: { filter: '' } };
+    panes.push(tilePane);
+    return {
+      getPane: (n) => (n === 'tilePane' ? tilePane : null),
+      fitBounds() { return this; },
+      setView() { return this; },
+      on() { return this; },
+    };
+  }
+  const L = {
+    map() { return fakeMap(); },
+    tileLayer(url, opts) {
+      return { addTo(map) { calls.push({ url, opts, map }); return this; } };
+    },
+    circleMarker() { return { bindTooltip() { return this; }, addTo() { return this; } }; },
+    polyline()     { return { addTo() { return this; } }; },
+    marker()       { return { addTo() { return { bindPopup() {} }; } }; },
+    latLngBounds() { return { pad() { return this; } }; },
+  };
+  return { L, calls, panes };
+}
+
+const SUBPATH_DATA = {
+  nodes: [
+    { name: 'A', lat: 37.5, lon: -122.3 },
+    { name: 'B', lat: 37.9, lon: -122.1 },
+  ],
+  hops: ['33', '67'],
+  totalMatches: 26,
+  hourDistribution: new Array(24).fill(1),
+  signal: { avgSnr: 5, avgRssi: -95, samples: 3 },
+  observers: [],
+  parentPaths: [],
+  firstSeen: '2026-10-01T00:00:00Z',
+  lastSeen: '2026-10-02T00:00:00Z',
+};
+
+// Executes the PRODUCTION renderSubpathDetail() with the PRODUCTION shared
+// helper (extracted from nodes.js) on top of the real registry + roles.js.
+function runSubpathDetail(opts) {
+  const ctx = loadStack(opts);
+  const mock = makeMapMock();
+  ctx.L = mock.L;
+  // The real shared helper, exported the way nodes.js exports it.
+  vm.runInContext(
+    extractFn(NODES, '_applyTilesToNodeMap') +
+    '\nwindow._applyTilesToNodeMap = _applyTilesToNodeMap;',
+    ctx, { filename: NODES });
+  for (const k of Object.keys(ctx.window)) if (!(k in ctx)) ctx[k] = ctx.window[k];
+  // Stubs for the view helpers renderSubpathDetail() reaches for.
+  ctx.esc = (s) => String(s == null ? '' : s);
+  ctx.formatDistance = (km) => km.toFixed(1) + ' km';
+  ctx.statusGreen = () => '#0f0';
+  ctx.statusRed = () => '#f00';
+  ctx.statusYellow = () => '#ff0';
+  ctx.__panel = { innerHTML: '', classList: { remove: () => {}, add: () => {} } };
+  ctx.__data = JSON.parse(JSON.stringify(SUBPATH_DATA));
+  vm.runInContext(
+    extractFn(ANALYTICS, 'renderSubpathDetail') +
+    '\nrenderSubpathDetail(__panel, __data);',
+    ctx, { filename: ANALYTICS });
+  assert.strictEqual(mock.calls.length >= 1, true,
+    'the minimap attached no tile layer at all (' + mock.calls.length + ' calls)');
+  // The minimap is the last map created, so its pane is the last recorded one.
+  return { call: mock.calls[mock.calls.length - 1], pane: mock.panes[mock.panes.length - 1], calls: mock.calls };
+}
+
+test('M7 subpath minimap: dark + built-in default → OSM url AND the invert filter on its own pane', () => {
+  const r = runSubpathDetail({ theme: 'dark', mapCfg: CFG_EMPTY });
+  assert.ok(r.call.url.indexOf(CARTO_HOST) === -1, 'must not request CARTO tiles: ' + r.call.url);
+  assert.ok(/tile\.openstreetmap\.org/.test(r.call.url), 'expected the keyless OSM template, got ' + r.call.url);
+  assert.ok(INVERT_RE.test(r.pane.style.filter),
+    'osm-dark is the LIGHT OSM template plus an invert filter — without the filter the ' +
+    'minimap renders a light basemap in a dark page. Pane filter was ' + JSON.stringify(r.pane.style.filter));
+});
+
+test('M7 subpath minimap: light mode → the light provider and NO invert filter', () => {
+  const r = runSubpathDetail({ theme: 'light', mapCfg: CFG_EMPTY });
+  assert.ok(r.call.url.indexOf(CARTO_HOST) === -1, 'must not request CARTO tiles: ' + r.call.url);
+  assert.ok(/tile\.openstreetmap\.org/.test(r.call.url), 'got ' + r.call.url);
+  assert.strictEqual(r.pane.style.filter, '', 'a light style must not be inverted');
+});
+
+test('M7 subpath minimap: follows a configured dark provider (Esri, natively dark → no filter)', () => {
+  const r = runSubpathDetail({ theme: 'dark', mapCfg: cfgDefaults('esri-darkgray-labels', 'opentopomap') });
+  assert.ok(/server\.arcgisonline\.com/.test(r.call.url), 'expected the configured Esri url, got ' + r.call.url);
+  assert.strictEqual(r.pane.style.filter, '', 'esri-darkgray-labels is natively dark — no invert filter');
+  assert.strictEqual(r.call.opts.attribution, 'Tiles © Esri');
+});
+
+test('M7 subpath minimap: follows a configured light provider', () => {
+  const r = runSubpathDetail({ theme: 'light', mapCfg: cfgDefaults('esri-darkgray-labels', 'opentopomap') });
+  assert.ok(/tile\.opentopomap\.org/.test(r.call.url), 'expected the configured OpenTopoMap url, got ' + r.call.url);
+  assert.ok(/OpenTopoMap/.test(r.call.opts.attribution), 'got ' + r.call.opts.attribution);
+});
+
+test('M7 analytics.js has no tile resolver of its own left', () => {
+  const src = fs.readFileSync(path.join(__dirname, ANALYTICS), 'utf8');
+  const offenders = [];
+  src.split('\n').forEach((line, i) => {
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // comments explain the old shape
+    if (/L\.tileLayer\s*\(\s*(window\.)?getTileUrl\s*\(/.test(line) ||
+        /L\.tileLayer\s*\(\s*(window\.)?MC_TILE_PROVIDERS\b/.test(line)) {
+      offenders.push((i + 1) + ': ' + line.trim());
+    }
+  });
+  assert.deepStrictEqual(offenders, [],
+    'analytics.js must resolve tiles through the shared helper, not inline:\n    ' + offenders.join('\n    '));
+});
+
+// ═══ M8 — OSM attribution on the new default (round-2 F3) ══════════════
+// osm-standard / osm-dark credited "Maps © Mapbox/Thunderforest/MapTiler"
+// unconditionally. #332 promotes them to the default every unconfigured
+// instance shows, and such an instance uses none of those three vendors.
+console.log('\n── #332 M8: OSM attribution matches the vendor actually in use ──');
+
+function osmCfg(provider, token) {
+  const osm = { enabled: true };
+  if (provider) osm.provider = provider;
+  if (token) osm.token = token;
+  return { tiles: { providers: { carto: { enabled: true, domain: '' }, osm: osm } } };
+}
+
+const VENDORS = ['Mapbox', 'Thunderforest', 'MapTiler'];
+
+for (const [label, type, theme] of [['osm-standard', 'light', 'light'], ['osm-dark', 'dark', 'dark']]) {
+  test('M8 ' + label + ': keyless install credits plain OpenStreetMap only', () => {
+    const ctx = loadStack({ theme, mapCfg: CFG_EMPTY });
+    const spec = ctx.window.MC_getTileSpec(type);
+    assert.strictEqual(spec.id, label, 'expected the built-in default, got ' + spec.id);
+    assert.ok(/OpenStreetMap/.test(spec.attribution), 'got ' + spec.attribution);
+    for (const v of VENDORS) {
+      assert.ok(spec.attribution.indexOf(v) === -1,
+        'a keyless install uses no ' + v + ' service, so it must not credit one: ' + spec.attribution);
+    }
+  });
+}
+
+for (const [provider, credited] of [['maptiler', 'MapTiler'], ['thunderforest', 'Thunderforest'], ['mapbox', 'Mapbox']]) {
+  test('M8 osm with a ' + provider + ' token credits ' + credited + ' and nobody else', () => {
+    const ctx = loadStack({ theme: 'light', mapCfg: osmCfg(provider, 'tok') });
+    const spec = ctx.window.MC_getTileSpec('light');
+    assert.strictEqual(spec.id, 'osm-standard');
+    assert.ok(spec.attribution.indexOf(credited) !== -1,
+      'the configured vendor must be credited: ' + spec.attribution);
+    for (const v of VENDORS) {
+      if (v === credited) continue;
+      assert.ok(spec.attribution.indexOf(v) === -1,
+        v + ' is not in use, so it must not be credited: ' + spec.attribution);
+    }
+    assert.ok(/OpenStreetMap/.test(spec.attribution), 'OSM data credit is still required: ' + spec.attribution);
+  });
+}
+
+test('M8 osm with a provider but NO token credits plain OpenStreetMap (no tiles come from the vendor)', () => {
+  const ctx = loadStack({ theme: 'light', mapCfg: osmCfg('maptiler', '') });
+  const spec = ctx.window.MC_getTileSpec('light');
+  assert.ok(/openstreetmap\.org/.test(spec.url), 'tokenless config still uses the OSMF tiles: ' + spec.url);
+  for (const v of VENDORS) {
+    assert.ok(spec.attribution.indexOf(v) === -1, 'got ' + spec.attribution);
+  }
+});
+
+// ═══ M9 — documented zoom matches the declared maxZoom (round-2 F4) ════
+console.log('\n── #332 M9: the documented default zoom is the real one ──');
+
+test('M9 map-tile-providers.js and config.example.json document the OSM default\'s real maxZoom', () => {
+  const ctx = loadStack({ theme: 'light', mapCfg: CFG_EMPTY });
+  const real = ctx.window.MC_TILE_PROVIDERS['osm-standard'].maxZoom;
+  assert.strictEqual(ctx.window.MC_getTileSpec('light').maxZoom, real);
+
+  const js = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8');
+  const head = js.slice(0, js.indexOf('var DEFAULT_ID'));
+  const mJs = head.match(/tiles to zoom (\d+)/);
+  assert.ok(mJs, 'the #332 comment must still state the default\'s zoom ceiling');
+  assert.strictEqual(Number(mJs[1]), real,
+    'the comment says zoom ' + mJs[1] + ' but osm-standard declares maxZoom ' + real);
+
+  const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.example.json'), 'utf8'));
+  const note = cfg.map.tiles._comment_defaults;
+  const mCfg = note.match(/tiles to zoom (\d+)/);
+  assert.ok(mCfg, 'config.example.json must still document the default\'s zoom ceiling');
+  assert.strictEqual(Number(mCfg[1]), real,
+    'config.example.json says zoom ' + mCfg[1] + ' but osm-standard declares maxZoom ' + real);
+});
+
+// ═══ M10 — no CARTO id left as a frontend default (round-2 F5) ═════════
+console.log('\n── #332 M10: the tile picker has no CARTO id fallback ──');
+
+test('M10 _renderTileProviderSelector() marks no CARTO style selected when the accessors are missing', () => {
+  const ctx = makeSandbox({ theme: 'dark' });
+  ctx.esc = (s) => String(s == null ? '' : s);
+  ctx.escAttr = (s) => String(s == null ? '' : s);
+  // A registry is present (so the function does not bail), but the
+  // MC_get*TileProvider accessors are not — the branch that used to fall
+  // back to the ids 'carto-dark' / 'carto-light'.
+  ctx.window.MC_TILE_PROVIDERS = {
+    'carto-dark':   { type: 'dark',  label: 'Carto Dark' },
+    'osm-dark':     { type: 'dark',  label: 'OSM Standard' },
+    'carto-light':  { type: 'light', label: 'Carto Positron' },
+    'osm-standard': { type: 'light', label: 'OSM Standard' },
+  };
+  ctx.window.MC_DARK_TILE_DEFAULT = 'osm-dark';
+  ctx.window.MC_LIGHT_TILE_DEFAULT = 'osm-standard';
+  for (const k of Object.keys(ctx.window)) if (!(k in ctx)) ctx[k] = ctx.window[k];
+  vm.runInContext(
+    extractFn(CV2, '_renderTileProviderSelector') + '\nvar __html = _renderTileProviderSelector();',
+    ctx, { filename: CV2 });
+  const html = String(ctx.__html);
+  const selected = (html.match(/<option value="([^"]+)" selected>/g) || [])
+    .map((s) => s.match(/value="([^"]+)"/)[1]);
+  assert.ok(selected.length > 0, 'expected the picker to preselect something, got: ' + html.slice(0, 200));
+  for (const id of selected) {
+    assert.ok(!/^carto/.test(id),
+      'a CARTO style must not be the picker\'s fallback default any more, got ' + id);
+  }
+});
+
+test('M10 customize-v2.js has no hard-coded carto-* id left', () => {
+  const src = fs.readFileSync(path.join(__dirname, CV2), 'utf8');
+  const offenders = [];
+  src.split('\n').forEach((line, i) => {
+    if (/['"]carto-(dark|light)['"]/.test(line)) offenders.push((i + 1) + ': ' + line.trim());
+  });
+  assert.deepStrictEqual(offenders, [],
+    'hard-coded CARTO provider id(s) in the frontend:\n    ' + offenders.join('\n    '));
+});
+
 // ─── Summary ────────────────────────────────────────────────────────────
 console.log('\n' + (failed === 0 ? '✅' : '❌') + ' #332: ' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed === 0 ? 0 : 1);

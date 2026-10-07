@@ -94,7 +94,7 @@
   },
   "map": {
     "tiles": {
-      "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 19). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
+      "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
       "darkDefault": "osm-dark",
       "lightDefault": "osm-standard",
       "providers": {
