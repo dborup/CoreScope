@@ -5,7 +5,10 @@ package main
 // exactly, and InsertTransmission writes exactly one ping_triggers row per
 // new ping-triggering CHAN transmission.
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestIsPingTrigger(t *testing.T) {
 	cases := []struct {
@@ -73,6 +76,80 @@ func countPingTriggers(t *testing.T, s *Store) int {
 		t.Fatalf("count ping_triggers: %v", err)
 	}
 	return n
+}
+
+// Packet retention removes raw data, but the ping index must remain so
+// previously computed all-time scores can still be joined to their trigger.
+func TestPruneOldPacketsKeepsPingTriggers(t *testing.T) {
+	s := openPruneStore(t, "ping-retention.db")
+	old := time.Now().UTC().AddDate(0, 0, -40).Format(time.RFC3339)
+	fresh := time.Now().UTC().Format(time.RFC3339)
+
+	seed := func(hash, channel, sender, seen string) int64 {
+		t.Helper()
+		result, err := s.db.Exec(`INSERT INTO transmissions
+			(raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json)
+			VALUES ('AA', ?, ?, 1, 5, 1, '{}')`, hash, seen)
+		if err != nil {
+			t.Fatalf("seed transmission %s: %v", hash, err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatalf("transmission ID %s: %v", hash, err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO observations
+			(transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp)
+			VALUES (?, 1, 'rx', 1.0, -100, 0, '[]', ?)`, id, time.Now().Unix()); err != nil {
+			t.Fatalf("seed observation %s: %v", hash, err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO ping_triggers
+			(tx_id, hash, channel_hash, sender, first_seen) VALUES (?, ?, ?, ?, ?)`,
+			id, hash, channel, sender, seen); err != nil {
+			t.Fatalf("seed ping trigger %s: %v", hash, err)
+		}
+		return id
+	}
+
+	oldID := seed("old-ping", "#old", "Old sender", old)
+	freshID := seed("fresh-ping", "#fresh", "Fresh sender", fresh)
+	deleted, err := s.PruneOldPackets(30)
+	if err != nil {
+		t.Fatalf("PruneOldPackets: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted transmissions = %d, want 1", deleted)
+	}
+
+	for _, tc := range []struct {
+		id      int64
+		hash    string
+		channel string
+		sender  string
+		seen    string
+		present int
+	}{
+		{oldID, "old-ping", "#old", "Old sender", old, 0},
+		{freshID, "fresh-ping", "#fresh", "Fresh sender", fresh, 1},
+	} {
+		var txCount, obsCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM transmissions WHERE id = ?`, tc.id).Scan(&txCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE transmission_id = ?`, tc.id).Scan(&obsCount); err != nil {
+			t.Fatal(err)
+		}
+		if txCount != tc.present || obsCount != tc.present {
+			t.Errorf("tx %d: transmissions=%d observations=%d, want %d each", tc.id, txCount, obsCount, tc.present)
+		}
+		var hash, channel, sender, seen string
+		if err := s.db.QueryRow(`SELECT hash, channel_hash, sender, first_seen FROM ping_triggers WHERE tx_id = ?`, tc.id).
+			Scan(&hash, &channel, &sender, &seen); err != nil {
+			t.Fatalf("trigger for tx %d: %v", tc.id, err)
+		}
+		if hash != tc.hash || channel != tc.channel || sender != tc.sender || seen != tc.seen {
+			t.Errorf("trigger for tx %d changed: (%q, %q, %q, %q)", tc.id, hash, channel, sender, seen)
+		}
+	}
 }
 
 func TestInsertTransmission_PingTriggerRecorded(t *testing.T) {

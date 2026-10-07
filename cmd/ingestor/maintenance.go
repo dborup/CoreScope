@@ -90,6 +90,9 @@ var (
 
 // PruneOldPackets deletes transmissions (and their child observations)
 // older than `days`. Returns count of transmissions deleted.
+// It deliberately keeps ping_triggers: those rows identify old pings whose
+// raw packets are gone, while the server's separate history DB preserves
+// their computed all-time scores and marks eligible entries DataPruned.
 //
 // Owned by the ingestor per #1283: the writer process is the only one
 // allowed to hold the DB write lock; previously this lived in

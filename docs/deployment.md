@@ -567,14 +567,26 @@ docker stats corescope
 
 ### Backup
 
-All persistent data lives in `/app/data`. The critical file is the SQLite database:
+All persistent data lives in `/app/data`. Back up both `meshcore.db` and
+`ping_scores_history.db` together: the latter holds computed ping scores that
+cannot be rebuilt after the underlying packets have passed retention. Use a
+consistent SQLite backup or stop the container before copying live database
+files (including any WAL data).
 
 ```bash
-# Copy from the Docker volume
+# Copy from the Docker volume while the container is stopped
+docker stop corescope
 docker cp corescope:/app/data/meshcore.db ./backup-$(date +%Y%m%d).db
+docker cp corescope:/app/data/ping_scores_history.db ./ping-history-$(date +%Y%m%d).db
+docker start corescope
+```
 
-# Or if using a bind mount
+For a bind mount, replace the `docker cp` commands with these commands
+between `docker stop` and `docker start`:
+
+```bash
 cp ./data/meshcore.db ./backup-$(date +%Y%m%d).db
+cp ./data/ping_scores_history.db ./ping-history-$(date +%Y%m%d).db
 ```
 
 Optional files to back up:
@@ -589,6 +601,7 @@ docker stop corescope
 
 # Replace the database
 docker cp ./backup.db corescope:/app/data/meshcore.db
+docker cp ./ping-history.db corescope:/app/data/ping_scores_history.db
 
 # Restart
 docker start corescope
@@ -596,10 +609,10 @@ docker start corescope
 
 ### Automated backups
 
-```bash
-# cron: daily backup at 3 AM, keep 7 days
-0 3 * * * docker cp corescope:/app/data/meshcore.db /backups/corescope-$(date +\%Y\%m\%d).db && find /backups -name "corescope-*.db" -mtime +7 -delete
-```
+Schedule a script that takes a consistent backup of both SQLite files,
+then applies the same retention period to both backup sets. Do not schedule
+a copy of `meshcore.db` alone: old ping scores may exist only in
+`ping_scores_history.db`.
 
 ---
 
@@ -647,6 +660,25 @@ The in-memory packet store grows with retained packets. Configure retention limi
 ```
 
 `packetStore.maxMemoryMB` bounds the store **and the caches that belong to it** — the decoded-packet cache, the path indexes, the resolved relay entries and the per-packet index entries, not just the stored rows. It is enforced in two places: the startup load stops at the budget, and the store evicts oldest-first when it exceeds it, down to 85% of it. Leaving it unset means no limit. Actual usage is on `/api/perf` as `packetStore.trackedMB`, next to `maxMB`.
+
+`retention.packetDays` deletes old transmissions and their observations, but
+deliberately keeps `ping_triggers` rows in `meshcore.db`. The trigger is the
+detection index for an old ping; `ping_scores_history.db` holds its computed
+score so it can still appear in all-time results. An old trigger with no
+matching transmission is therefore expected after pruning, not an integrity
+fault. A missing trigger for a stored score, a damaged history DB, or an
+unexpectedly missing recent transmission needs investigation. For a
+read-only check on a stopped container or a consistent database snapshot:
+
+```sql
+SELECT COUNT(*) AS retained_old_ping_triggers
+FROM ping_triggers AS p
+LEFT JOIN transmissions AS t ON t.id = p.tx_id
+WHERE t.id IS NULL;
+```
+
+This count can grow over time; it is not bounded by `packetDays`. Any future
+size limit needs a separate policy for preserving all-time ping results.
 
 ### Database locked errors
 

@@ -1070,6 +1070,10 @@ func ensureTransmissionsLastSeenColumn(rw *sql.DB, logf Logger) error {
 // (cmd/server/ping_scores.go) rather than persisted here -- so a later
 // observation of an old ping (e.g. a station that only just relayed it
 // upstream) can still improve a standing record without a migration.
+// Unlike transmissions and observations, these index rows survive packet
+// retention. The server joins them with computed scores in its separate
+// ping_scores_history.db; deleting an old trigger would hide that ping's
+// all-time contribution even if its score is still in the history file.
 func ensurePingTriggersTable(rw *sql.DB, logf Logger) error {
 	if err := ensureMigrationsTable(rw); err != nil {
 		return err
