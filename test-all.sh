@@ -64,6 +64,7 @@ run test-issue-258-column-widths.js
 run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
 run test-issue-282-comment-guards.js
+run test-issue-314-chscroll-listener.js
 run test-issue-322-comment-guards.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
@@ -161,6 +162,7 @@ run test-1659-analytics-warmup.js
 run test-analytics-tab-state-and-query.js
 run test-analytics-subtab-deeplinks-205.js
 run test-hash-stats-sort-226.js
+run test-analytics-sorting-236.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js
@@ -183,6 +185,7 @@ run test-issue-1562-observers-summary.js
 run test-issue-1509-nav-active-bg.js
 run test-issue-1509-detect-preset.js
 run test-live.js
+run test-issue-220-live-filter-readiness.js
 run test-coverage-gate.js
 run test-node-reach-coverage.js
 run test-reach-rank.js
