@@ -120,8 +120,11 @@ func TestNodeActivity24hCoverageRequiresLoadedHistory(t *testing.T) {
 		t.Fatalf("a 12h hot window cannot prove 24h coverage, got %v", got)
 	}
 	s.hotStartupHours = 0
+	s.loadCoverageRatio = 1 // RunStartupLoad sets this after full synchronous loading.
+	if got := s.nodeActivityCoverageStartLocked(now); got.After(start) || got.IsZero() {
+		t.Fatalf("unlimited retention with no hot window loads full DB, got %v", got)
+	}
 	s.retentionHours = 168
-	s.loadCoverageRatio = 1
 	s.maxMemoryMB = 100
 	s.packets[0].FirstSeen = start.Add(time.Hour).Format(time.RFC3339)
 	if got := s.nodeActivityCoverageStartLocked(now); !got.After(start) {
