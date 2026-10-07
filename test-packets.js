@@ -1867,6 +1867,14 @@ console.log('\n=== packets.js: detail Hash Size row warns on 1-byte (#353) ===')
     for (const v of [null, undefined, 0]) assert.strictEqual(api.hashSizeDetailHtml(v), '', 'for ' + v);
   });
 
+  // PR #356 review F2: a width outside 1-3 must not leave an empty
+  // <dt>Hash Size</dt><dd></dd> row behind.
+  test('an out-of-range width renders no Hash Size row, never an empty one', () => {
+    for (const v of [4, 5, -1, 255, NaN, 'x']) {
+      assert.strictEqual(api.hashSizeDetailHtml(v), '', 'for ' + String(v));
+    }
+  });
+
   test('renderDetail emits the Hash Size row through hashSizeDetailHtml', () => {
     assert.ok(src.includes('${hashSizeDetailHtml(hashSize)}'),
       'the detail-meta list must use the shared #353 row helper');

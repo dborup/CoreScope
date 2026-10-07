@@ -2,7 +2,9 @@
  * #353 — browser regression: a 1-byte path hash reads as a warning in the
  * channel "Sent with" badge, the packet-detail Hash Size row and the node
  * detail badges; 2/3-byte stay neutral. Checked in the light and dark theme
- * and at a 375×812 phone viewport (no horizontal page overflow).
+ * and at a 375×812 phone viewport (no horizontal page overflow). Each warning
+ * also passes axe `color-contrast` (WCAG AA) on the surface it renders on
+ * (PR #356 review F1: --danger failed 4.43:1 on the light packet page).
  *
  * Channels use channels.js' own test hooks, packet detail a stubbed
  * /api/packets/<hash>, node detail real fixture nodes picked by hash_size.
@@ -14,6 +16,7 @@
 'use strict';
 const path = require('path');
 const { chromium } = require('playwright');
+const { AxeBuilder } = require('@axe-core/playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const SHOTS = process.env.SCREENSHOT_DIR || '';
@@ -66,13 +69,11 @@ async function readWarn(locator) {
     probe.style.color = 'var(--path-hash-warn)';
     document.body.appendChild(probe);
     const want = getComputedStyle(probe).color;
-    probe.style.color = 'var(--danger)';
-    const danger = getComputedStyle(probe).color;
     probe.remove();
     const icon = el.querySelector('svg.ph-icon use[href$="#ph-warning"]');
     const r = el.getBoundingClientRect();
     return {
-      cls: el.className, title: el.getAttribute('title') || '', color: cs.color, want, danger,
+      cls: el.className, title: el.getAttribute('title') || '', color: cs.color, want,
       iconHidden: !!icon && icon.closest('svg').getAttribute('aria-hidden') === 'true',
       iconVisible: !!icon && icon.closest('svg').getBoundingClientRect().width > 0,
       sr: (el.querySelector('.sr-only') || {}).textContent || '',
@@ -88,9 +89,19 @@ function assertWarn(w, block, where) {
   assert(w.sr === 'Warning: ', where + ': sr-only text ' + JSON.stringify(w.sr));
   assert(/2- or 3-byte/.test(w.title) && /Experimental Settings/.test(w.title) && /path\.hash\.mode/.test(w.title),
     where + ': tooltip ' + JSON.stringify(w.title));
-  assert(w.color === w.want && w.want === w.danger, where + ': colour ' + w.color + ' vs --path-hash-warn ' + w.want + ' / --danger ' + w.danger);
+  assert(w.color === w.want, where + ': colour ' + w.color + ' vs --path-hash-warn ' + w.want);
   assert(w.right <= w.vw + 0.5, where + ': warning runs off-screen (' + w.right + ' > ' + w.vw + ')');
   assert(w.overflow <= 0, where + ': page scrolls horizontally by ' + w.overflow + 'px');
+}
+// axe color-contrast on the warning element itself: no violation, and axe
+// must actually have measured it (a pass), not left it "incomplete".
+async function assertContrast(page, selector, where) {
+  const r = await new AxeBuilder({ page }).include(selector).withRules(['color-contrast']).analyze();
+  const bad = r.violations.flatMap((v) => v.nodes.map((n) => n.failureSummary || n.html));
+  assert(bad.length === 0, where + ': axe color-contrast ' + bad.join(' | '));
+  const measured = r.passes.reduce((k, v) => k + v.nodes.length, 0);
+  const unsure = r.incomplete.flatMap((v) => v.nodes.map((n) => n.failureSummary || n.html));
+  assert(measured >= 1, where + ': axe did not measure contrast (incomplete: ' + unsure.join(' | ') + ')');
 }
 
 (async () => {
@@ -155,6 +166,7 @@ function assertWarn(w, block, where) {
       assert(await warn.count() === 1, 'warn count ' + await warn.count());
       await warn.scrollIntoViewIfNeeded();
       assertWarn(await readWarn(warn), 'ch-path-hash-badge', 'channel');
+      await assertContrast(page, '.ch-path-hash-badge--warn', 'channel');
       assert(await warn.textContent() === 'Warning: Sent with: 1-byte', 'warn text ' + await warn.textContent());
       const neutral = await page.locator('.ch-path-hash-badge:not(.ch-path-hash-badge--warn)').evaluateAll((els) =>
         els.map((el) => ({ text: el.textContent, icon: !!el.querySelector('svg'), title: el.title })));
@@ -170,6 +182,7 @@ function assertWarn(w, block, where) {
       await warn.waitFor();
       await warn.scrollIntoViewIfNeeded();
       assertWarn(await readWarn(warn), 'detail-hash-size', 'packet detail');
+      await assertContrast(page, 'dl.detail-meta .detail-hash-size--warn', 'packet detail');
       assert(await warn.textContent() === 'Warning: 1 byte', 'text ' + await warn.textContent());
       await shot('packet');
     });
@@ -189,6 +202,7 @@ function assertWarn(w, block, where) {
       const warn = page.locator('.node-full-card .node-path-hash-badge--warn');
       await warn.waitFor();
       assertWarn(await readWarn(warn), 'node-path-hash-badge', 'node detail');
+      await assertContrast(page, '.node-full-card .node-path-hash-badge--warn', 'node detail');
       assert(await warn.textContent() === 'Warning: 1-byte path hash', 'text ' + await warn.textContent());
       assert(await page.locator('.node-full-card .multibyte-badge').count() === 0, '1-byte node claims Multibyte');
       await shot('node');

@@ -127,14 +127,79 @@ test('label and title are escaped', () => {
 console.log('\n=== #353 theming: --path-hash-warn ===');
 {
   const css = fs.readFileSync('public/style.css', 'utf8');
-  // The light-theme semantic :root block (the one declaring --danger); the
-  // dark blocks redefine --danger, which the variable then follows.
-  const dangerAt = css.indexOf('--danger: var(--palette-red-600');
-  const rootBlock = css.slice(css.lastIndexOf('\n:root {', dangerAt), css.indexOf('\n}', dangerAt));
 
-  test(':root declares --path-hash-warn defaulting to var(--danger)', () => {
-    assert.match(rootBlock, /--path-hash-warn:\s*var\(--danger\);/);
+  // The theme token blocks of style.css, sliced at their top-level openers:
+  // the palette :root, the light semantic :root, and the two dark blocks
+  // (OS-level media query and the manual [data-theme="dark"] toggle).
+  function blockAt(opener) {
+    const at = css.indexOf(opener);
+    assert.ok(at >= 0, 'style.css lost ' + JSON.stringify(opener));
+    const indent = opener.match(/^\n( *)/)[1];
+    return css.slice(at, css.indexOf('\n' + indent + '}', at + opener.length));
+  }
+  function decls(block) {
+    const out = {};
+    const re = /(--[\w-]+)\s*:\s*([^;]+);/g;
+    const body = block.replace(/\/\*[\s\S]*?\*\//g, '');
+    let m;
+    while ((m = re.exec(body))) out[m[1]] = m[2].trim();
+    return out;
+  }
+  const rootBlocks = css.split('\n:root {').slice(1, 3).map((b) => b.slice(0, b.indexOf('\n}')));
+  const light = Object.assign({}, decls(rootBlocks[0]), decls(rootBlocks[1]));
+  const darkMedia = blockAt('\n  :root:not([data-theme="light"]) {');
+  const darkToggle = blockAt('\n[data-theme="dark"] {');
+  const themes = {
+    light,
+    'dark (prefers-color-scheme)': Object.assign({}, light, decls(darkMedia)),
+    'dark ([data-theme="dark"])': Object.assign({}, light, decls(darkToggle)),
+  };
+
+  // Resolve var(--x[, fallback]) chains to a #rrggbb colour.
+  function resolve(vars, value, depth) {
+    assert.ok((depth || 0) < 20, 'var() cycle at ' + value);
+    const v = value.trim();
+    const m = v.match(/^var\(\s*(--[\w-]+)\s*(?:,\s*(.+))?\)$/);
+    if (!m) return v;
+    if (vars[m[1]] != null) return resolve(vars, vars[m[1]], (depth || 0) + 1);
+    assert.ok(m[2] != null, 'undefined ' + m[1] + ' without a fallback');
+    return resolve(vars, m[2], (depth || 0) + 1);
+  }
+  function luminance(hex) {
+    const h = hex.replace('#', '');
+    assert.ok(/^[0-9a-f]{6}$/i.test(h), 'not a #rrggbb colour: ' + hex);
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.substr(i, 2), 16) / 255)
+      .map((c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  function contrast(a, b) {
+    const x = luminance(a), y = luminance(b);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
+  // The surfaces the warning text sits on: the full packet-detail page
+  // (--content-bg), the packet side pane (--detail-bg), the channel and node
+  // badges (--surface-2), and cards (--card-bg).
+  const SURFACES = ['--content-bg', '--detail-bg', '--surface-2', '--card-bg'];
+
+  test(':root declares --path-hash-warn and both dark blocks redefine it identically', () => {
+    assert.ok(light['--path-hash-warn'], 'light :root lacks --path-hash-warn');
+    const a = decls(darkMedia)['--path-hash-warn'], b = decls(darkToggle)['--path-hash-warn'];
+    assert.ok(a && b, 'a dark block lacks --path-hash-warn (media ' + a + ', toggle ' + b + ')');
+    assert.strictEqual(a, b, 'dark blocks out of sync');
   });
+
+  // F1 of the PR #356 review: --danger (#dc2626) on --content-bg (#f4f5f7)
+  // is 4.43:1, below WCAG AA 4.5:1 for 13px/600 text (axe color-contrast).
+  for (const [theme, vars] of Object.entries(themes)) {
+    test(theme + ': --path-hash-warn meets WCAG AA (4.5:1) on every surface it renders on', () => {
+      const fg = resolve(vars, 'var(--path-hash-warn)');
+      for (const s of SURFACES) {
+        const bg = resolve(vars, 'var(' + s + ')');
+        const ratio = contrast(fg, bg);
+        assert.ok(ratio >= 4.5, fg + ' on ' + s + ' ' + bg + ' is ' + ratio.toFixed(2) + ':1');
+      }
+    });
+  }
 
   test('.path-hash-warn colours its text with the variable, never a hardcoded colour', () => {
     const m = css.match(/\.path-hash-warn\s*\{([^}]*)\}/);
