@@ -10,7 +10,7 @@
  *   column's own cells come out in that order (ties keep the server order);
  * - Last Seen follows the timestamps; a row without one is last either way;
  * - clicking the sorted header flips the direction, another header starts
- *   ascending; aria-sort and the arrow mark the sorted column only;
+ *   text ascending, numeric/time descending; aria-sort and the arrow mark the sorted column only;
  * - a filter click keeps the sort; the filter itself is unchanged;
  * - the sort is written to the URL as mbsort=/mbdir= (URL only), defaults
  *   left out; an unknown value is the default and never reaches markup.
@@ -219,13 +219,13 @@ test('aria-sort and the arrow mark the sorted column only', () => {
 
 console.log('\n=== #226: clicks ===');
 
-test('clicking a header sorts ascending, clicking it again descending', () => {
+test('numeric headers start descending and text headers ascending', () => {
   const e = env();
   e.mount('all');
   e.clickHeader('packets');
-  assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), EXPECTED.packets.asc, 'first click');
+  assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), EXPECTED.packets.desc, 'first click');
   e.clickHeader('packets');
-  assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), EXPECTED.packets.desc, 'second click');
+  assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), EXPECTED.packets.asc, 'second click');
   e.clickHeader('role');
   assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), EXPECTED.role.asc, 'another column starts ascending');
 });
@@ -236,14 +236,14 @@ test('every header click sorts its own column (Role included)', () => {
     e.mount('all');
     e.clickHeader(col);
     const t = parseTable(e.wrap.innerHTML);
-    assert.deepStrictEqual(columnCells(t, col), EXPECTED[col].asc.map((pk) => cellOf(e, pk, col)), col);
+    const dir = ['name', 'role', 'status'].includes(col) ? 'asc' : 'desc';
+    assert.deepStrictEqual(columnCells(t, col), EXPECTED[col][dir].map((pk) => cellOf(e, pk, col)), col);
   }
 });
 
 test('a filter click keeps the sort and still filters', () => {
   const e = env();
   e.mount('all');
-  e.clickHeader('packets');
   e.clickHeader('packets');
   e.clickFilter('confirmed');
   const t = parseTable(e.wrap.innerHTML);
@@ -257,7 +257,7 @@ test('a header click keeps the filter', () => {
   const e = env();
   e.mount('suspected');
   e.clickHeader('packets');
-  assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), ['cc', 'ee']);
+  assert.deepStrictEqual(parseTable(e.wrap.innerHTML).rows.map((r) => r.pubkey), ['ee', 'cc']);
 });
 
 console.log('\n=== #226: URL ===');
@@ -266,11 +266,11 @@ test('clicks write mbsort=/mbdir= next to mbf=; the default direction is left ou
   const e = env();
   e.mount('all');
   e.clickHeader('lastSeen');
-  assert.deepStrictEqual(e.params(), { tab: 'hashsizes', mbsort: 'lastSeen' });
-  e.clickHeader('lastSeen');
   assert.deepStrictEqual(e.params(), { tab: 'hashsizes', mbsort: 'lastSeen', mbdir: 'desc' });
+  e.clickHeader('lastSeen');
+  assert.deepStrictEqual(e.params(), { tab: 'hashsizes', mbsort: 'lastSeen' });
   e.clickFilter('suspected');
-  assert.deepStrictEqual(e.params(), { tab: 'hashsizes', mbf: 'suspected', mbsort: 'lastSeen', mbdir: 'desc' });
+  assert.deepStrictEqual(e.params(), { tab: 'hashsizes', mbf: 'suspected', mbsort: 'lastSeen' });
 });
 
 test('hostile sort values never reach the markup', () => {
