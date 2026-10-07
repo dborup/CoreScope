@@ -519,6 +519,35 @@ console.log('\n=== nodes.js: getStatusTooltip / getStatusInfo (extracted) ===');
       assert.ok(html.includes('room'));
       assert.ok(!html.includes('variable hash size'));
     });
+    // #353: a node advertising a 1-byte path hash gets a warning badge.
+    const nodeWithHash = (hash_size) => ({
+      role: 'repeater', public_key: 'abcdef1234567890', hash_size,
+      last_heard: new Date().toISOString()
+    });
+    test('renderNodeBadges adds the 1-byte path hash warning badge (#353)', () => {
+      for (const size of [1, '1']) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.match(html, /class="badge node-path-hash-badge node-path-hash-badge--warn path-hash-warn"/);
+        assert.match(html, /#ph-warning/);
+        assert.match(html, /<span class="sr-only">Warning: <\/span>1-byte path hash<\/span>/);
+        assert.match(html, /title="[^"]*2- or 3-byte[^"]*path\.hash\.mode/);
+        assert.ok(!html.includes('multibyte-badge'), '1-byte must not claim Multibyte');
+      }
+    });
+    test('renderNodeBadges adds no path hash warning for 2/3-byte nodes (#353)', () => {
+      for (const size of [2, 3]) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.ok(!html.includes('node-path-hash-badge'), size + '-byte got the warning badge');
+        assert.ok(!html.includes('path-hash-warn'), size + '-byte got the warn class');
+        assert.ok(html.includes('multibyte-badge'), size + '-byte lost the Multibyte badge');
+      }
+    });
+    test('renderNodeBadges adds no path hash warning when hash_size is missing/invalid (#353)', () => {
+      for (const size of [null, undefined, 0, 4]) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.ok(!html.includes('node-path-hash-badge'), 'for ' + size);
+      }
+    });
     test('renderNodeBadges handles string hash_sizes_seen gracefully', () => {
       const html = ex.renderNodeBadges({
         role: 'repeater', public_key: 'abcdef1234567890',
