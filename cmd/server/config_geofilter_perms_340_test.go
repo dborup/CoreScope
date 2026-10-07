@@ -255,8 +255,9 @@ func TestSaveGeoFilterCreateTempFailure(t *testing.T) {
 	}
 }
 
-// TestSaveGeoFilterWriteFailureCleansUpOwnTemp exercises a mid-write failure
-// through the create-temp seam: the temp file must be removed, a pre-existing
+// TestSaveGeoFilterWriteFailureCleansUpOwnTemp exercises a failure after the
+// temp file exists on disk but before the rename, injected through the
+// create-temp seam: the temp file must be removed, a pre-existing
 // config.json.tmp must survive, and the config must be unchanged.
 func TestSaveGeoFilterWriteFailureCleansUpOwnTemp(t *testing.T) {
 	dir := t.TempDir()
@@ -273,15 +274,16 @@ func TestSaveGeoFilterWriteFailureCleansUpOwnTemp(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		// A closed descriptor makes the first Write fail with ErrClosed while
-		// the temp file itself stays on disk, so cleanup is observable.
+		// A closed descriptor makes the first operation on it fail with
+		// ErrClosed while the temp file itself stays on disk, so cleanup is
+		// observable.
 		_ = f.Close()
 		return f, nil
 	}
 
 	err := SaveGeoFilter(dir, geoPerm340Filter())
-	if err == nil {
-		t.Fatal("expected a write error, got nil")
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("SaveGeoFilter error = %v, want it to wrap %v", err, os.ErrClosed)
 	}
 	data, rerr := os.ReadFile(path)
 	if rerr != nil {
