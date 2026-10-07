@@ -109,6 +109,7 @@ run test-issue-1418-deeplink-hops-channels.js
 run test-issue-1418-polish-review.js
 run test-issue-1420-tile-providers.js
 run test-issue-1614-tile-url-function.js
+run test-issue-332-tile-provider-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
 run test-issue-1446-cb-preset-cascade.js

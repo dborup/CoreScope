@@ -1766,6 +1766,21 @@
     '</div>';
   }
 
+  /* #332 — both geo-filter preview maps used to hard-code the CARTO
+   * light_all template, so they rendered "API KEY REQUIRED" tiles even on
+   * instances configured for Esri/OpenTopoMap/OSM. Resolve the operator's
+   * configured LIGHT provider instead (these previews are always
+   * light-styled regardless of the app theme), falling back to roles.js
+   * TILE_LIGHT, which is itself non-CARTO. */
+  function _cv2PreviewTile() {
+    var spec = (typeof window.MC_getTileSpec === 'function') ? window.MC_getTileSpec('light') : null;
+    return {
+      url: (spec && spec.url) || window.TILE_LIGHT,
+      attribution: (spec && spec.attribution) || '© OpenStreetMap contributors',
+      maxZoom: (spec && spec.maxZoom) || 19
+    };
+  }
+
   function _gfOpenModal(container) {
     var existing = document.getElementById('cv2-gf-modal-overlay');
     if (existing) existing.remove();
@@ -1835,8 +1850,9 @@
     var modalClosingLine = null;
 
     _gfModalMap = L.map(mapDiv, { zoomControl: true });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
+    var _cv2Tile = _cv2PreviewTile();
+    L.tileLayer(_cv2Tile.url, {
+      attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfModalMap);
 
     function renderModal() {
@@ -2044,8 +2060,9 @@
     if (!mapEl || typeof L === 'undefined') return;
 
     _gfMap = L.map(mapEl, { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
+    var _cv2Tile = _cv2PreviewTile();
+    L.tileLayer(_cv2Tile.url, {
+      attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfMap);
 
     if (!_gfLoaded) {
