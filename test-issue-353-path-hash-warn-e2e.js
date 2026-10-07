@@ -2,7 +2,8 @@
  * #353 — browser regression: a 1-byte path hash reads as a warning in the
  * channel "Sent with" badge, the packet-detail Hash Size row and the node
  * detail badges; 2/3-byte stay neutral. Checked in the light and dark theme
- * and at a 375×812 phone viewport (no horizontal page overflow). Each warning
+ * (OS-level and manual toggle on a light OS) and at a 375×812 phone viewport
+ * (no horizontal page overflow). Each warning
  * also passes axe `color-contrast` (WCAG AA) on the surface it renders on
  * (PR #356 review F1: --danger failed 4.43:1 on the light packet page).
  *
@@ -134,10 +135,13 @@ async function assertContrast(page, selector, where) {
     { name: 'dark desktop', theme: 'dark', viewport: { width: 1400, height: 900 } },
     { name: 'light 375x812', theme: 'light', viewport: { width: 375, height: 812 } },
     { name: 'dark 375x812', theme: 'dark', viewport: { width: 375, height: 812 } },
+    // Manual dark toggle on a light OS: only the [data-theme="dark"] block
+    // applies, not the prefers-color-scheme one.
+    { name: 'dark toggle on light OS', theme: 'dark', os: 'light', viewport: { width: 1400, height: 900 } },
   ];
 
   for (const v of variants) {
-    const context = await browser.newContext({ viewport: v.viewport, colorScheme: v.theme });
+    const context = await browser.newContext({ viewport: v.viewport, colorScheme: v.os || v.theme });
     await context.addInitScript((theme) => { try { localStorage.setItem('meshcore-theme', theme); } catch (_) {} }, v.theme);
     await stubPackets(context);
     const page = await context.newPage();
