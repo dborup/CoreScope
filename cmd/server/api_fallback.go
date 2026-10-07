@@ -70,7 +70,11 @@ func allowedMethodsForPath(router *mux.Router, r *http.Request) []string {
 	seen := map[string]bool{}
 	router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
 		path, err := route.GetPathTemplate()
-		if err != nil || !strings.HasPrefix(path, "/api/") {
+		// Bare /api is an API path too (registerAPIFallback gives it its own
+		// route); the shadow check already counts it, so the Allow computation
+		// must too, or a wrong method on a real /api route would 404 with no
+		// Allow instead of 405.
+		if err != nil || (path != "/api" && !strings.HasPrefix(path, "/api/")) {
 			return nil
 		}
 		methods, err := route.GetMethods()
