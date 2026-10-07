@@ -150,8 +150,13 @@ func routeDescriptions() map[string]routeMeta {
 			}},
 
 		// Channels
-		"GET /api/channels":                 {Summary: "List channels", Description: "Returns known mesh channels with message counts. approvedChannels ([{name, hash}]) lists the shared hashtag channels an administrator approved, even before they carry traffic; omitted when empty. A channel with stored messages whose shared-channel proposal is not approved (revoked, suggested again and pending, or that re-suggestion rejected) is left out of the list (#251), unless the ingestor also decrypts that name through its built-in/config list (rainbow table, hashChannels, channelKeys); only approving the proposal lists it again, with its history. hiddenChannels ([string], omitted when empty) names the channels left out, so the page does not re-create their rows from live packets; it only names channels that have stored messages (never an unreviewed suggestion), it is global and not filtered by region, and another open tab keeps the set it last loaded, also after a re-approval. The messages stay readable per channel (GET /api/channels/{hash}/messages) and nothing is deleted. Decided per channel with stored messages from a short-lived snapshot of the proposals table (10s, dropped early when an approve/revoke result is read), never a per-request query and without a row cap. When the ingestor's built-in names file is missing or unreadable nothing is hidden. GET /api/analytics/channels is not filtered and still counts these channels.", Tag: "channels"},
-		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel.", Tag: "channels"},
+		"GET /api/channels": {Summary: "List channels", Description: "Returns known mesh channels with message counts. approvedChannels ([{name, hash}]) lists the shared hashtag channels an administrator approved, even before they carry traffic; omitted when empty. A channel with stored messages whose shared-channel proposal is not approved (revoked, suggested again and pending, or that re-suggestion rejected) is left out of the list (#251), unless the ingestor also decrypts that name through its built-in/config list (rainbow table, hashChannels, channelKeys); only approving the proposal lists it again, with its history. hiddenChannels ([string], omitted when empty) names the channels left out, so the page does not re-create their rows from live packets; it only names channels that have stored messages (never an unreviewed suggestion), it is global and not filtered by region, and another open tab keeps the set it last loaded, also after a re-approval. The messages stay readable per channel (GET /api/channels/{hash}/messages) and nothing is deleted. Decided per channel with stored messages from a short-lived snapshot of the proposals table (10s, dropped early when an approve/revoke result is read), never a per-request query and without a row cap. When the ingestor's built-in names file is missing or unreadable nothing is hidden. GET /api/analytics/channels is not filtered and still counts these channels.", Tag: "channels"},
+		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel. The {hash} path parameter is the existing channel route key: the operator-assigned channel name for a decrypted channel, or \"enc_<HEX>\" for an undecryptable one — it is not the on-wire channel hash. The separate channelHashHex field on each message carries the actual one-byte hash taken from the packet (see the ChannelMessage schema).", Tag: "channels", Response: schemaRef("ChannelMessagesResponse"),
+			QueryParams: []paramMeta{
+				{Name: "limit", Description: "Max messages to return", Type: "integer"},
+				{Name: "offset", Description: "Pagination offset", Type: "integer"},
+				{Name: "region", Description: "Filter to transmissions observed by an observer in the given region code(s).", Type: "string"},
+			}},
 
 		// Shared channel proposals (internal/channelregistry). The server only
 		// queues requests; the ingestor applies them. Timestamps are Unix ms.
@@ -365,6 +370,45 @@ func componentSchemas() map[string]interface{} {
 					"type": "string", "enum": []string{"A", "B", "C", "D", "F"},
 					"description": "Letter grade derived from usefulness_score. Repeater/room only.",
 				},
+			},
+		},
+		"ChannelMessage": map[string]interface{}{
+			"type": "object",
+			// additionalProperties:true — the message object carries more
+			// fields than are spelled out here (area/bot-reply annotations,
+			// resolved path data). Only the stable contract fields are
+			// documented.
+			"additionalProperties": true,
+			"description":          "A single channel message, aggregated across every observation of the same transmission.",
+			"properties": map[string]interface{}{
+				"sender": str("Display sender, split from the message text at its first \": \" separator. A heuristic label, never an identity: channel frames carry no sender field, so this is a substring of the message body and can be the body's first clause rather than a real name."),
+				"text":   str("Message body with the sender prefix removed."),
+				"timestamp": map[string]interface{}{
+					"type": "string", "nullable": true,
+					"description": "Existing observation/ingest-based display timestamp: the latest observation time recorded for this transmission (server-side), falling back to first-seen when no observation timestamp exists. It reflects when the message was observed, not when the sender stamped it, and it moves forward as further observations of the same transmission arrive. Unchanged by this schema.",
+				},
+				"sender_timestamp": map[string]interface{}{
+					"type": "integer", "nullable": true,
+					"description": "The sender's own embedded wire timestamp, read verbatim from the decrypted payload. The key is always present; its value is null when unavailable (the decoded packet carries no sender timestamp). Unchanged by this schema.",
+				},
+				"channelHashHex": map[string]interface{}{
+					"type": "string", "pattern": "^[0-9A-F]{2}$",
+					"description": "The two-digit uppercase hexadecimal representation of the actual one-byte channel hash carried by the packet, taken from the decoded payload. Always exactly two uppercase hex characters when present, including a leading zero (\"00\", \"03\", \"A7\", \"FF\") — \"00\" is a valid, meaningful present value, never an absence. Optional, and its absence does not mean every new message eventually gets it: the field stays absent whenever the wire byte was never available or could not be trusted, which includes (1) legacy records stored before this field existed, (2) malformed stored values, rejected rather than guessed, and (3) every message ingested through the Companion/MQTT bridge — permanently and by design, not merely legacy backlog, because that path delivers already-decrypted text and never observes the raw packet envelope. Absence always means \"unavailable\", never \"zero\". Non-secret — it is the first byte of the GRP_TXT/GRP_DATA payload envelope, sent unencrypted ahead of the encrypted body (it is not a field of every packet header), and no channel key or PSK is read or exposed to produce it. Never derived or reconstructed from the operator-assigned channel name, the {hash} route/path label, transmissions.channel_hash, or a channel key/PSK — only ever copied from the value the ingestor decoder read off the wire. COLLISION-PRONE: one byte is not a unique channel identity — distinct channels collide, so this field is an evidence component to be combined with other signals, never sufficient on its own to identify a channel. This validated contract covers GET /api/channels/{hash}/messages only. CoreScope's live WebSocket broadcast is a separate, unvalidated surface: it passes each packet's raw decoded_json through verbatim as decoded.payload, so a channelHashHex value observed there has not gone through this validator and must not be treated as equivalent REST evidence.",
+				},
+				"packetId":   map[string]interface{}{"type": "integer", "description": "CoreScope row id associated with this message, but its identity semantics are backend-dependent: which row it identifies (observation vs. transmission) varies by storage backend, a divergence that pre-dates and is unrelated to this schema addition. Must not be used as a cross-backend correlation key. Consumers that need to correlate the same packet across backends -- including MeshViewLive issue #88 -- should use packetHash instead, which is stable regardless of backend."},
+				"packetHash": map[string]interface{}{"type": "string", "nullable": true, "description": "Transmission hash used for dedup."},
+				"repeats":    map[string]interface{}{"type": "integer", "description": "Number of observations aggregated into this message."},
+				"observers":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Distinct observers that heard this transmission."},
+				"hops":       map[string]interface{}{"type": "integer", "description": "Relay path length for the reported observation."},
+				"snr":        map[string]interface{}{"type": "number", "nullable": true},
+				"scope":      map[string]interface{}{"type": "string", "nullable": true},
+			},
+		},
+		"ChannelMessagesResponse": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"messages": map[string]interface{}{"type": "array", "items": schemaRef("ChannelMessage")},
+				"total":    map[string]interface{}{"type": "integer", "description": "Total messages in the channel after region filtering, before pagination."},
 			},
 		},
 		"NodeListResponse": map[string]interface{}{
