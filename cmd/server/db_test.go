@@ -13,7 +13,7 @@ import (
 )
 
 // setupTestDB creates an in-memory SQLite database with the v3 schema.
-func setupTestDB(t *testing.T) *DB {
+func setupTestDB(t testing.TB) *DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -676,7 +676,7 @@ func TestGetPacketPath(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
 		VALUES (1, 2, 4.0, -95, '["aa","bb"]', '["pkAlpha","pkBravo"]', 1736935260)`)
 
-	resp, err := db.GetPacketPath("pathtest00000001", 0)
+	resp, err := db.testPacketPath("pathtest00000001", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +737,7 @@ func TestGetPacketPath_First(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 3, 6.0, -90, '["aa","bb"]', 300)`)
 
-	resp, err := db.GetPacketPath("pathtest00000007", 0)
+	resp, err := db.testPacketPath("pathtest00000007", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,7 +821,7 @@ func TestGetPacketPath_DistanceOmittedWhenApprox(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 2, 4.0, -95, '["aa","bb"]', 200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000011", 0)
+	resp, err := db.testPacketPath("pathtest00000011", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +872,7 @@ func TestGetPacketPath_ExcludesNullIsland(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
 		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkZero"]', 1736935200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000008", 0)
+	resp, err := db.testPacketPath("pathtest00000008", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +924,7 @@ func TestGetPacketPath_FallsBackToSingleNeighborPosition(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
 		VALUES (1, 1, 9.0, -88, '["aa"]', '["pkghost"]', 1736935200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000009", 0)
+	resp, err := db.testPacketPath("pathtest00000009", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +999,7 @@ func TestGetPacketPath_FallsBackToWeightedNeighborCentroid(t *testing.T) {
 	// (nearestPositionedNeighbor's maxEdgeKm) is a separate concern with
 	// its own dedicated tests below and would otherwise drop WeakRepeater
 	// here, breaking ApproxNeighborCount/ApproxSpreadKm's assertions.
-	resp, err := db.GetPacketPath("pathtest00000010", 0)
+	resp, err := db.testPacketPath("pathtest00000010", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1142,7 +1142,7 @@ func TestGetPacketPath_ObserverPositionPrefersOwnGPS(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 9.0, -88, '[]', 1736935200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000004", 0)
+	resp, err := db.testPacketPath("pathtest00000004", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1185,7 +1185,7 @@ func TestGetPacketPath_ObserverPositionFallsBackToNameMatch(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 9.0, -88, '[]', 1736935200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000005", 0)
+	resp, err := db.testPacketPath("pathtest00000005", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1220,7 +1220,7 @@ func TestGetPacketPath_ObserverPositionSkipsAmbiguousNameMatch(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 9.0, -88, '[]', 1736935200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000006", 0)
+	resp, err := db.testPacketPath("pathtest00000006", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1250,7 +1250,7 @@ func TestGetPacketPath_NoResolvedPath(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (1, 1, 9.0, -88, '["aa"]', 1736935200)`)
 
-	resp, err := db.GetPacketPath("pathtest00000002", 0)
+	resp, err := db.testPacketPath("pathtest00000002", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1290,7 +1290,7 @@ func TestGetPacketPath_SameObserverMultipleObservations(t *testing.T) {
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, resolved_path, timestamp)
 		VALUES (1, 1, 6.0, -100, '["aa"]', '["pkAlpha"]', 1736935260)`)
 
-	resp, err := db.GetPacketPath("pathtest00000003", 0)
+	resp, err := db.testPacketPath("pathtest00000003", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1306,7 +1306,7 @@ func TestGetPacketPath_UnknownHash(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	resp, err := db.GetPacketPath("doesnotexist0000", 0)
+	resp, err := db.testPacketPath("doesnotexist0000", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2570,6 +2570,7 @@ func TestHealSchemaFlagsStopsOnceAllTrue(t *testing.T) {
 	db.hasDefaultScopeConfirmedAtFlag.forceTrue()
 	db.hasMultibyteSupColsFlag.forceTrue()
 	db.hasLastSeenFlag.forceTrue()
+	db.hasRouteMaskFlag.forceTrue()
 	db.schemaHealerStop = make(chan struct{})
 
 	done := make(chan struct{})

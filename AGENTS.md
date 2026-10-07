@@ -182,6 +182,14 @@ If you need to know how something works — a flag, a field, a timing, a behavio
 ### Theming
 All colors MUST use CSS variables. Never hardcode `#hex` values outside of `:root` definitions. The customizer controls colors via `THEME_CSS_MAP` in customize.js. If you add a new color, add it as a CSS variable and map it in the customizer.
 
+### XSS preflight gate (CI)
+`scripts/check-xss-sinks.sh --diff` runs on every PR and flags HTML sinks (`innerHTML`, `bindPopup`, URL/`on*` `setAttribute`, …) that interpolate a node-controlled field. In CI a flagged line passes only via:
+- an escape helper on the same line (`escapeHtml` / `escapeAttr` / `esc`), or
+- building the DOM with `createElement` + `textContent` / non-URL `setAttribute` instead of an HTML string — **the preferred fix for false positives**, or
+- `PREFLIGHT-XSS-OPTOUT: <file>:<line> reason="…"` in the PR body **plus** the `xss-optout` label.
+
+Existing or same-PR tests do **not** count in CI: the workflow never sets `PREFLIGHT_TEST_FILES`, so that route only applies to local/skill-side runs that set it.
+
 ### Shared Helpers (roles.js)
 - `getNodeStatus(role, lastSeenMs)` → 'active' | 'stale'
 - `getHealthThresholds(role)` → `{ staleMs, degradedMs, silentMs }`

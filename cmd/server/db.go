@@ -17,6 +17,7 @@ import (
 
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
+	"github.com/meshcore-analyzer/packetpath"
 	regionutil "github.com/meshcore-analyzer/regions"
 	_ "modernc.org/sqlite"
 )
@@ -87,13 +88,57 @@ type DB struct {
 	hasDefaultScopeConfirmedAtFlag schemaFlag    // nodes.default_scope_confirmed_at (#1865 follow-up) -- read via hasDefaultScopeConfirmedAt()
 	hasMultibyteSupColsFlag        schemaFlag    // nodes.multibyte_sup (#903) -- read via hasMultibyteSupCols()
 	hasLastSeenFlag                schemaFlag    // transmissions.last_seen (#1690) -- read via hasLastSeen()
+	hasRouteMaskFlag               schemaFlag    // transmissions.route_mask (#89) -- read via hasRouteMask()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
 
-	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
-	channelsCacheMu  sync.Mutex
-	channelsCacheKey string
-	channelsCacheRes []map[string]interface{}
-	channelsCacheExp time.Time
+	// route_mask backfill status cache (#89), see route_mask.go.
+	routeMaskStatusMu  sync.Mutex
+	routeMaskStatus    RouteMaskBackfillStatus
+	routeMaskStatusExp time.Time
+
+	// Channel list caches (60s TTL, #762): keyed by normalized region, with
+	// concurrent misses coalesced into one query per key (#109). See
+	// channels_list_cache.go.
+	channelsCache    channelListCache
+	encChannelsCache channelListCache
+	// channelsPinFallbacks counts GetChannels queries that fell back to the
+	// unpinned SQL because channelHashIndex was not usable; the first is logged.
+	channelsPinFallbacks atomic.Int64
+	// Test seams (#109), nil in production. channelsMissHook runs after a
+	// cache miss, before the query is built; channelsQueryHook runs right
+	// before the query executes, once per real query. kind is "channels"
+	// (GetChannels) or "encrypted" (GetEncryptedChannels).
+	channelsMissHook  func(kind, region string)
+	channelsQueryHook func(kind, region string) error
+	// channelsRowsHook wraps the result rows of each real query, so a test
+	// can fail the iteration part-way.
+	channelsRowsHook func(kind string, rows channelRows) channelRows
+	// schemaProbeHook (#184), nil in production, runs at the start of every
+	// detectSchema pass. A non-nil error makes the pass give up the way a
+	// failed PRAGMA table_info does: no flag is set.
+	schemaProbeHook func() error
+}
+
+// channelRows is the part of *sql.Rows the channel list scans use.
+type channelRows interface {
+	Next() bool
+	Scan(dest ...interface{}) error
+	Err() error
+}
+
+// channelsRows returns rows, wrapped by channelsRowsHook when a test set it.
+func (db *DB) channelsRows(kind string, rows *sql.Rows) channelRows {
+	if db.channelsRowsHook == nil {
+		return rows
+	}
+	return db.channelsRowsHook(kind, rows)
+}
+
+// channelListEntry is one cached GetChannels / GetEncryptedChannels result.
+// Never modified after it is stored (see channelListCache).
+type channelListEntry struct {
+	channels []map[string]interface{}
+	expires  time.Time
 }
 
 // isV3, hasResolvedPath, hasObsRawHex, hasScopeName, hasDefaultScope,
@@ -110,6 +155,27 @@ func (db *DB) hasConfiguredScope() bool         { return db.hasConfiguredScopeFl
 func (db *DB) hasDefaultScopeConfirmedAt() bool { return db.hasDefaultScopeConfirmedAtFlag.get() }
 func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsFlag.get() }
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
+func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
+
+// ingestCols is one reading of the optional-column flags an ingest query
+// depends on. A caller takes ONE snapshot and uses it for both the SELECT
+// list and the Scan destinations: the flags are atomics that the schema
+// healer (or main.go's forceTrue) may latch between two reads, and a query
+// built with one answer scanned with the other fails Scan with the wrong
+// destination count -- an error the ingest loops swallow, silently dropping
+// the row (#158 follow-up).
+type ingestCols struct {
+	obsRawHex, resolvedPath, scopeName, routeMask bool
+}
+
+func (db *DB) ingestCols() ingestCols {
+	return ingestCols{
+		obsRawHex:    db.hasObsRawHex(),
+		resolvedPath: db.hasResolvedPath(),
+		scopeName:    db.hasScopeName(),
+		routeMask:    db.hasRouteMask(),
+	}
+}
 
 // OpenDB opens a read-only SQLite connection with WAL mode.
 func OpenDB(path string) (*DB, error) {
@@ -147,7 +213,7 @@ func (db *DB) healSchemaFlags() {
 	flags := []*schemaFlag{
 		&db.isV3Flag, &db.hasResolvedPathFlag, &db.hasObsRawHexFlag, &db.hasScopeNameFlag,
 		&db.hasDefaultScopeFlag, &db.hasConfiguredScopeFlag, &db.hasDefaultScopeConfirmedAtFlag,
-		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag,
+		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag, &db.hasRouteMaskFlag,
 	}
 	allTrue := func() bool {
 		for _, f := range flags {
@@ -190,6 +256,11 @@ func (db *DB) Close() error {
 
 // detectSchema checks if the observations table uses v3 schema (observer_idx).
 func (db *DB) detectSchema() {
+	if db.schemaProbeHook != nil {
+		if err := db.schemaProbeHook(); err != nil {
+			return
+		}
+	}
 	rows, err := db.conn.Query("PRAGMA table_info(observations)")
 	if err != nil {
 		return
@@ -231,6 +302,9 @@ func (db *DB) detectSchema() {
 			}
 			if colName == "last_seen" {
 				db.hasLastSeenFlag.forceTrue()
+			}
+			if colName == "route_mask" {
+				db.hasRouteMaskFlag.forceTrue()
 			}
 		}
 	}
@@ -999,6 +1073,60 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 	return obsByTx[txID]
 }
 
+// ObservationRawHexForHash returns the stored wire bytes per observation id for
+// one transmission, keyed by observations.id. Empty when the schema has no
+// observations.raw_hex column (#881 made it optional) or nothing is stored.
+//
+// Why this is read on demand instead of held in memory (upstream #1999): the
+// store deliberately does not retain obs.RawHex (#881, ~98MB on a
+// ~1.7M-observation store), on the belief that one content hash implies one
+// frame. It does not: the firmware hashes payload and type independently of the
+// relay path, so observations of one transmission legitimately carry different
+// bytes. Keeping the memory saving and paying one query on the packet-detail
+// path, which is a single packet a human is looking at, is the trade this makes.
+//
+// Two indexed lookups regardless of observation count: transmissions.hash,
+// then observations.transmission_id. Which index SQLite picks is the planner's
+// choice; on the migrated e2e fixture EXPLAIN QUERY PLAN shows the UNIQUE
+// autoindex sqlite_autoindex_transmissions_1 and the composite
+// idx_observations_tx_ts (idx_transmissions_hash and
+// idx_observations_transmission_id also cover these columns).
+func (db *DB) ObservationRawHexForHash(hash string) (map[int]string, error) {
+	if db == nil || db.conn == nil || !db.hasObsRawHex() || hash == "" {
+		return nil, nil
+	}
+	var txID int
+	if err := db.conn.QueryRow("SELECT id FROM transmissions WHERE hash = ?",
+		strings.ToLower(hash)).Scan(&txID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup transmission for observation frames: %w", err)
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, raw_hex FROM observations
+		 WHERE transmission_id = ? AND raw_hex IS NOT NULL AND raw_hex <> ''`, txID)
+	if err != nil {
+		return nil, fmt.Errorf("query observation frames: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int]string)
+	for rows.Next() {
+		var id int
+		var hx sql.NullString
+		if err := rows.Scan(&id, &hx); err != nil {
+			return nil, fmt.Errorf("scan observation frame: %w", err)
+		}
+		if hx.Valid && hx.String != "" {
+			out[id] = hx.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate observation frames: %w", err)
+	}
+	return out, nil
+}
+
 // GetNodes returns filtered, paginated node list.
 func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortBy, region string) ([]map[string]interface{}, int, map[string]int, error) {
 	var where []string
@@ -1209,19 +1337,29 @@ func (db *DB) GetNodeByPubkey(pubkey string) (map[string]interface{}, error) {
 // same-name false positives and an adversarial spoof path where any node
 // could attribute its transmissions to a victim by naming itself with the
 // victim's pubkey. Pubkey is unique by design — that's the whole point.
-func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int) ([]map[string]interface{}, error) {
+//
+// withRouteClass (node detail with include=advertRoutes, #2073) adds
+// route_class to the ADVERT rows; without it the rows are unchanged.
+func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int, withRouteClass bool) (NodeAdvertRows, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-
-	selectCols, observerJoin := db.transmissionBaseSQL()
-
 	// #1345: order by ingest id, not first_seen (=rxTime). Buffered observer
 	// uploads with old rxTime would otherwise displace fresh activity from
 	// the "recent transmissions for node" list.
-	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s WHERE t.from_pubkey = ? ORDER BY t.id DESC LIMIT ?",
-		selectCols, observerJoin)
-	args := []interface{}{pubkey, limit}
+	return db.queryNodeAdvertRows(true, withRouteClass, "t.from_pubkey = ? ORDER BY t.id DESC LIMIT ?", pubkey, limit)
+}
+
+// queryNodeAdvertRows runs the transmission-centric query with the given
+// WHERE tail (including ORDER BY/LIMIT). With observations it attaches every
+// observation (otherwise the rows keep the transmission shape and the best
+// observation's fields only: the lean #2073 per-class rows). With
+// routeClass it adds, for ADVERTs, route_class (#2073: classifyAdvertRoute
+// over route_mask with the route_type fallback); a failed mask read only
+// leaves route_class out.
+func (db *DB) queryNodeAdvertRows(observations, routeClass bool, whereTail string, args ...interface{}) (NodeAdvertRows, error) {
+	selectCols, observerJoin := db.transmissionBaseSQL()
+	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s WHERE %s", selectCols, observerJoin, whereTail)
 
 	rows, err := db.conn.Query(querySQL, args...)
 	if err != nil {
@@ -1229,22 +1367,30 @@ func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int) ([]map[str
 	}
 	defer rows.Close()
 
-	packets := make([]map[string]interface{}, 0)
+	packets := make(NodeAdvertRows, 0)
 	var txIDs []int
 	for rows.Next() {
 		p := db.scanTransmissionRow(rows)
 		if p != nil {
-			// Placeholder for observations — filled below
-			p["observations"] = []map[string]interface{}{}
+			if observations {
+				// Placeholder for observations — filled below
+				p["observations"] = []map[string]interface{}{}
+			}
 			if id, ok := p["id"].(int); ok {
 				txIDs = append(txIDs, id)
 			}
 			packets = append(packets, p)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(txIDs) == 0 {
+		return packets, nil
+	}
 
 	// Fetch observations for all transmissions
-	if len(txIDs) > 0 {
+	if observations {
 		obsMap := db.getObservationsForTransmissions(txIDs)
 		for _, p := range packets {
 			if id, ok := p["id"].(int); ok {
@@ -1254,7 +1400,21 @@ func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int) ([]map[str
 			}
 		}
 	}
-
+	if !routeClass {
+		return packets, nil
+	}
+	masks := make(map[int]sql.NullInt64, len(txIDs))
+	if db.hasRouteMask() {
+		if err := db.readRouteMasks(txIDs, masks); err != nil {
+			log.Printf("[node-adverts] route_mask read failed, route_class omitted: %v", err)
+			return packets, nil
+		}
+	}
+	for _, p := range packets {
+		if id, ok := p["id"].(int); ok {
+			setAdvertRouteClass(p, masks[id])
+		}
+	}
 	return packets, nil
 }
 
@@ -2033,7 +2193,7 @@ type PacketPathPoint struct {
 }
 
 // PacketPathObserver is the station that produced a given branch's
-// observation of a packet (see GetPacketPath), positioned from its own
+// observation of a packet (see getPacketPath), positioned from its own
 // self-advertised GPS (the same source /api/observers uses) when known,
 // falling back to its configured IATA code, and finally its strongest
 // neighbor_edges neighbor's position (Approx=true), otherwise -- not a
@@ -2055,6 +2215,10 @@ type PacketPathObserver struct {
 	Approx              bool     `json:"approx,omitempty"`
 	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
 	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
+	// Internal scoring evidence only: airport coordinates are a display
+	// fallback, not proof that an observer's own GPS still exists. Kept out
+	// of the wire/archive shape so existing packet-path clients are unchanged.
+	iataFallback bool
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -2137,7 +2301,7 @@ type PacketPathResponse struct {
 	TxID int64 `json:"-"`
 }
 
-// GetPacketPath resolves every distinct station that observed a packet to
+// getPacketPath resolves every distinct station that observed a packet to
 // its own branch: hop count and (where resolvable) relay names/positions
 // in path order, plus that station's own position. A station can hear a
 // packet more than once as flood copies arrive via different routes; only
@@ -2151,8 +2315,8 @@ type PacketPathResponse struct {
 // geo-sanity filter for the Approx position fallback (see its doc
 // comment) -- pass Config.NeighborMaxEdgeKm().
 // obsBranch is one candidate branch of a packet's path: the deepest-hop
-// observation attributed to a single observer. Shared by GetPacketPath
-// (built from one hash's rows) and GetPacketPathsBulk (built the same way,
+// observation attributed to a single observer. Shared by getPacketPath
+// (built from one hash's rows) and getPacketPathsBulk (built the same way,
 // per hash, from a multi-hash result set) via parsePacketPathObsRow so the
 // two can never parse a row differently.
 type obsBranch struct {
@@ -2178,8 +2342,8 @@ type packetPathNodeInfo struct {
 
 // packetPathReduction accumulates one hash's observation rows into the
 // deepest-hop branch per observer (best) and the single earliest-arriving
-// branch overall (first), exactly as GetPacketPath's original inline loop
-// did. GetPacketPathsBulk keeps one packetPathReduction per hash while
+// branch overall (first), exactly as getPacketPath's original inline loop
+// did. getPacketPathsBulk keeps one packetPathReduction per hash while
 // scanning a combined multi-hash result set.
 type packetPathReduction struct {
 	best    map[string]*obsBranch
@@ -2197,8 +2361,8 @@ func newPacketPathReduction() *packetPathReduction {
 // (observations.id), and "earliest wins" ties on equal timestamp the same
 // way. obsID is a real, stable, monotonically-assigned DB identity (unlike
 // scan order, which the query planner is free to vary between the
-// single-hash query GetPacketPath issues and the multi-hash query
-// GetPacketPathsBulk issues) -- so both paths pick the identical branch on
+// single-hash query getPacketPath issues and the multi-hash query
+// getPacketPathsBulk issues) -- so both paths pick the identical branch on
 // a tie regardless of any difference in how their rows happen to arrive.
 // This determinizes previously-undefined behavior; it does not preserve
 // any order that was ever guaranteed before.
@@ -2216,7 +2380,7 @@ func (r *packetPathReduction) fold(key string, branch *obsBranch, tsValid bool, 
 }
 
 // parsePacketPathObsRow parses one row of the packet-path observations/
-// transmissions join (GetPacketPath and GetPacketPathsBulk use the same
+// transmissions join (getPacketPath and getPacketPathsBulk use the same
 // column order, bulk with one leading `hash` column and both with a
 // trailing `o.id` column) into an obsBranch and its best-map key. ok is
 // false for rows that can't contribute a branch -- missing/unparsable
@@ -2383,15 +2547,15 @@ func dedupPacketPathStrings(ss []string) []string {
 // (0,0) sentinel position the same way GetNodesForScopeAdoption and
 // geofilter.PassesFilter do. Input is deduped and chunked at
 // packetPathNodeLookupChunkSize bind parameters per query -- the caller may
-// pass an arbitrarily large pubkey set (e.g. GetPacketPathsBulk's whole-batch
+// pass an arbitrarily large pubkey set (e.g. getPacketPathsBulk's whole-batch
 // union). If any chunk's query or scan fails, the entire call fails --
 // (nil, error), never a partial map, even though earlier chunks may have
 // already resolved cleanly; there is no cross-chunk aggregation logic
 // needed beyond that abort, since each pubkey is confined to exactly one
 // chunk (dedup happens before chunking) and therefore writes exactly one
-// map entry regardless of chunk order. Shared by GetPacketPath (which
+// map entry regardless of chunk order. Shared by getPacketPath (which
 // discards the error, preserving its existing tolerant-on-query-failure
-// behavior unchanged) and GetPacketPathsBulk (which propagates it, per the
+// behavior unchanged) and getPacketPathsBulk (which propagates it, per the
 // bulk helpers' explicit-error contract).
 func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeInfo, error) {
 	nodeByPK := make(map[string]packetPathNodeInfo, len(pubkeys))
@@ -2455,8 +2619,8 @@ func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeI
 // unique name to exactly one chunk, but the logic doesn't rely on that) is
 // still detected correctly rather than only within its own chunk. Any
 // chunk's query/scan failure fails the entire call -- (nil, error), never a
-// partial map. Shared by GetPacketPath (discards the error, preserving
-// existing behavior) and GetPacketPathsBulk (propagates it).
+// partial map. Shared by getPacketPath (discards the error, preserving
+// existing behavior) and getPacketPathsBulk (propagates it).
 func (db *DB) resolveNodesByName(names []string) (map[string]packetPathNodeInfo, error) {
 	nodeByName := make(map[string]packetPathNodeInfo, len(names))
 	if len(names) == 0 {
@@ -2527,10 +2691,10 @@ type neighborEstimate struct {
 // hash, given already-resolved node position maps and a neighbor-estimate
 // lookup. This is the single shared implementation of branch assembly,
 // hop-point/observer position resolution, DistanceFromFirstKm, and sort
-// order -- used identically by GetPacketPath (single hash, maps resolved
+// order -- used identically by getPacketPath (single hash, maps resolved
 // via a per-hash query, neighborLookup calling nearestPositionedNeighbor
 // directly on demand, unchanged from before this refactor) and
-// GetPacketPathsBulk (many hashes, maps resolved via one batched query
+// getPacketPathsBulk (many hashes, maps resolved via one batched query
 // across the whole request, neighborLookup reading a pre-fetched map so no
 // per-point query happens here). Changing this function changes both paths
 // identically -- they cannot silently diverge.
@@ -2605,6 +2769,7 @@ func buildPacketPathResponseFromReduction(
 				if coord, ok := iataCoords[obs.IATA]; ok {
 					lat, lon := coord.Lat, coord.Lon
 					obs.Lat, obs.Lon = &lat, &lon
+					obs.iataFallback = true
 				}
 			}
 			if obs.Lat == nil && b.observerPubkey != "" {
@@ -2675,7 +2840,11 @@ func buildPacketPathResponseFromReduction(
 	return resp
 }
 
-func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse, error) {
+// getPacketPath takes the caller's immutable operator policy explicitly;
+// shared DB handles never hold mutable instance configuration. There is
+// deliberately no always-estimating exported wrapper: a caller that did
+// not state a policy would bypass the operator's #315 setting.
+func (db *DB) getPacketPath(hash string, maxEdgeKm float64, estimatesEnabled bool) (*PacketPathResponse, error) {
 	if !db.hasResolvedPath() {
 		return nil, fmt.Errorf("resolved_path not available on this server")
 	}
@@ -2730,9 +2899,9 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	for pk := range pubkeySet {
 		pubkeys = append(pubkeys, pk)
 	}
-	// Error discarded here on purpose -- preserves GetPacketPath's existing
+	// Error discarded here on purpose -- preserves getPacketPath's existing
 	// tolerant-on-query-failure behavior (a failed lookup just leaves
-	// positions unresolved, same as before this refactor). GetPacketPathsBulk
+	// positions unresolved, same as before this refactor). getPacketPathsBulk
 	// propagates this same helper's error instead; see its own call site.
 	nodeByPK, _ := db.resolveNodesByPubkey(pubkeys)
 
@@ -2744,6 +2913,9 @@ func (db *DB) GetPacketPath(hash string, maxEdgeKm float64) (*PacketPathResponse
 	nodeByName, _ := db.resolveNodesByName(names) // discarded for the same reason as above
 
 	neighborLookup := func(pk string) (neighborEstimate, bool) {
+		if !estimatesEnabled {
+			return neighborEstimate{}, false
+		}
 		_, nLat, nLon, nCount, nSpread, ok := db.nearestPositionedNeighbor(pk, maxEdgeKm)
 		if !ok {
 			return neighborEstimate{}, false
@@ -2934,6 +3106,87 @@ func (db *DB) nearestPositionedNeighbor(pubkey string, maxEdgeKm float64) (name 
 	return strongestName, sumLat / sumWeight, sumLon / sumWeight, len(contributors), spread, true
 }
 
+// channelHashIndex is the ingestor's partial index
+// transmissions(channel_hash) WHERE payload_type = 5 (cmd/ingestor/db.go).
+const channelHashIndex = "idx_tx_channel_hash"
+
+// channelsSQL is GetChannels' query: every decrypted channel (payload_type 5,
+// channel_hash set and not enc_*) with its message count, last activity and
+// the decoded_json of its newest message. regionPlaceholder is "" for all
+// regions, else one "?" per region code; v3 picks the observer join.
+//
+// pinned adds INDEXED BY channelHashIndex to both transmissions references:
+// the outer scan and the correlated sample subquery (issue #100). That is
+// the plan SQLite chooses itself once ANALYZE statistics exist - the outer
+// scan walks the index in channel_hash order, so GROUP BY needs no temp
+// B-tree, and each sample lookup is a channel_hash=? search. Neither binary
+// runs ANALYZE (on a 5 GB database it holds the write lock for ~65 s, PR
+// #106), and without statistics SQLite takes idx_transmissions_payload_type
+// for the outer scan, and for the subquery too when the payload_type index is
+// the newer one, which then visits every GRP_TXT row once per channel.
+//
+// The partial index is only usable when the WHERE clause itself contains its
+// predicate "payload_type = 5", so the payload_type index cannot be avoided
+// with a unary + here (the nodeAdvertScanSQL technique): "+payload_type = 5"
+// no longer implies the index predicate and SQLite falls back to full table
+// scans. Pinning changes the plan only; rows, order and values are those of
+// the unpinned query (TestGetChannels_PinnedMatchesUnpinned).
+func channelsSQL(v3 bool, regionPlaceholder string, pinned bool) string {
+	hint := ""
+	if pinned {
+		hint = " INDEXED BY " + channelHashIndex
+	}
+	if regionPlaceholder == "" {
+		return fmt.Sprintf(`SELECT channel_hash,
+				COUNT(*) AS msg_count,
+				MAX(first_seen) AS last_activity,
+				(SELECT t2.decoded_json FROM transmissions t2%[1]s
+				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+			FROM transmissions t%[1]s
+			WHERE payload_type = 5
+			AND channel_hash IS NOT NULL
+			AND channel_hash NOT LIKE 'enc_%%'
+			GROUP BY channel_hash
+			ORDER BY last_activity DESC`, hint)
+	}
+	if v3 {
+		return fmt.Sprintf(`SELECT t.channel_hash,
+				COUNT(*) AS msg_count,
+				MAX(t.first_seen) AS last_activity,
+				(SELECT t2.decoded_json FROM transmissions t2%[1]s
+				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+			FROM transmissions t%[1]s
+			JOIN observations o ON o.transmission_id = t.id
+			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE t.payload_type = 5
+			AND t.channel_hash IS NOT NULL
+			AND t.channel_hash NOT LIKE 'enc_%%'
+			AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%[2]s)
+			GROUP BY t.channel_hash
+			ORDER BY last_activity DESC`, hint, regionPlaceholder)
+	}
+	return fmt.Sprintf(`SELECT t.channel_hash,
+			COUNT(*) AS msg_count,
+			MAX(t.first_seen) AS last_activity,
+			(SELECT t2.decoded_json FROM transmissions t2%[1]s
+			 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+			 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+		FROM transmissions t%[1]s
+		JOIN observations o ON o.transmission_id = t.id
+		WHERE t.payload_type = 5
+		AND t.channel_hash IS NOT NULL
+		AND t.channel_hash NOT LIKE 'enc_%%'
+		AND EXISTS (
+			SELECT 1 FROM observers obs
+			WHERE obs.id = o.observer_id
+			AND UPPER(TRIM(obs.iata)) IN (%[2]s)
+		)
+		GROUP BY t.channel_hash
+		ORDER BY last_activity DESC`, hint, regionPlaceholder)
+}
+
 // GetChannels returns channel list from GRP_TXT packets.
 // Queries transmissions directly (not a VIEW) to avoid observation-level
 // duplicates that could cause stale lastMessage when an older message has
@@ -2943,90 +3196,56 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
-
-	// Check cache (60s TTL)
-	db.channelsCacheMu.Lock()
-	if db.channelsCacheRes != nil && db.channelsCacheKey == regionParam && time.Now().Before(db.channelsCacheExp) {
-		res := db.channelsCacheRes
-		db.channelsCacheMu.Unlock()
-		return res, nil
+	key := channelsRegionKey(regionParam)
+	e, err := db.channelsCache.load(key, db.channelsMissFunc("channels", key), func() (*channelListEntry, error) {
+		return db.queryChannels(key)
+	})
+	if err != nil {
+		return nil, err
 	}
-	db.channelsCacheMu.Unlock()
+	return e.channels, nil
+}
 
-	regionCodes := normalizeRegionCodes(regionParam)
-
-	var querySQL string
+// queryChannels runs the GetChannels query for a normalized region key.
+func (db *DB) queryChannels(key string) (*channelListEntry, error) {
+	regionCodes := normalizeRegionCodes(key)
+	regionPlaceholder := ""
 	args := make([]interface{}, 0, len(regionCodes))
-
 	if len(regionCodes) > 0 {
 		placeholders := make([]string, len(regionCodes))
 		for i, code := range regionCodes {
 			placeholders[i] = "?"
 			args = append(args, code)
 		}
-		regionPlaceholder := strings.Join(placeholders, ",")
-		if db.isV3() {
-			querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity,
-					(SELECT t2.decoded_json FROM transmissions t2
-					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
-				WHERE t.payload_type = 5
-				AND t.channel_hash IS NOT NULL
-				AND t.channel_hash NOT LIKE 'enc_%%'
-				AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
-		} else {
-			querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity,
-					(SELECT t2.decoded_json FROM transmissions t2
-					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				WHERE t.payload_type = 5
-				AND t.channel_hash IS NOT NULL
-				AND t.channel_hash NOT LIKE 'enc_%%'
-				AND EXISTS (
-					SELECT 1 FROM observers obs
-					WHERE obs.id = o.observer_id
-					AND UPPER(TRIM(obs.iata)) IN (%s)
-				)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
-		}
-	} else {
-		querySQL = `SELECT channel_hash,
-				COUNT(*) AS msg_count,
-				MAX(first_seen) AS last_activity,
-				(SELECT t2.decoded_json FROM transmissions t2
-				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-			FROM transmissions t
-			WHERE payload_type = 5
-			AND channel_hash IS NOT NULL
-			AND channel_hash NOT LIKE 'enc_%%'
-			GROUP BY channel_hash
-			ORDER BY last_activity DESC`
+		regionPlaceholder = strings.Join(placeholders, ",")
 	}
 
-	rows, err := db.conn.Query(querySQL, args...)
+	if db.channelsQueryHook != nil {
+		if err := db.channelsQueryHook("channels", key); err != nil {
+			return nil, err
+		}
+	}
+	// Pinned to channelHashIndex first; INDEXED BY fails at prepare time
+	// (before any row is read) when that index is missing or unusable, and
+	// then the unpinned query - the pre-pinning SQL - runs instead.
+	rows, err := db.conn.Query(channelsSQL(db.isV3(), regionPlaceholder, true), args...)
+	if err != nil {
+		if db.channelsPinFallbacks.Add(1) == 1 {
+			log.Printf("[db] GetChannels: %s not usable (%v); using the unpinned query", channelHashIndex, err)
+		}
+		rows, err = db.conn.Query(channelsSQL(db.isV3(), regionPlaceholder, false), args...)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	it := db.channelsRows("channels", rows)
 
 	channels := make([]map[string]interface{}, 0)
-	for rows.Next() {
+	for it.Next() {
 		var chHash, lastActivity, sampleJSON sql.NullString
 		var msgCount int
-		if err := rows.Scan(&chHash, &msgCount, &lastActivity, &sampleJSON); err != nil {
+		if err := it.Scan(&chHash, &msgCount, &lastActivity, &sampleJSON); err != nil {
 			continue
 		}
 		channelName := nullStr(chHash)
@@ -3058,15 +3277,21 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 			"messageCount": msgCount, "lastActivity": nullStr(lastActivity),
 		})
 	}
+	// A step that fails part-way ends the loop like the last row does; the
+	// truncated list must not be returned (and cached) as a success.
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
 
-	// Store in cache (60s TTL)
-	db.channelsCacheMu.Lock()
-	db.channelsCacheRes = channels
-	db.channelsCacheKey = regionParam
-	db.channelsCacheExp = time.Now().Add(60 * time.Second)
-	db.channelsCacheMu.Unlock()
+	return &channelListEntry{channels: channels}, nil
+}
 
-	return channels, nil
+// channelsMissFunc returns the channelsMissHook call for one lookup, or nil.
+func (db *DB) channelsMissFunc(kind, key string) func() {
+	if db.channelsMissHook == nil {
+		return nil
+	}
+	return func() { db.channelsMissHook(kind, key) }
 }
 
 // GetEncryptedChannels returns channels where all messages are undecryptable (no key).
@@ -3076,7 +3301,20 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 	if len(region) > 0 {
 		regionParam = region[0]
 	}
-	regionCodes := normalizeRegionCodes(regionParam)
+	key := channelsRegionKey(regionParam)
+	e, err := db.encChannelsCache.load(key, db.channelsMissFunc("encrypted", key), func() (*channelListEntry, error) {
+		return db.queryEncryptedChannels(key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.channels, nil
+}
+
+// queryEncryptedChannels runs the GetEncryptedChannels query for a
+// normalized region key.
+func (db *DB) queryEncryptedChannels(key string) (*channelListEntry, error) {
+	regionCodes := normalizeRegionCodes(key)
 
 	var querySQL string
 	args := make([]interface{}, 0, len(regionCodes))
@@ -3127,17 +3365,23 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			ORDER BY last_activity DESC`
 	}
 
+	if db.channelsQueryHook != nil {
+		if err := db.channelsQueryHook("encrypted", key); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := db.conn.Query(querySQL, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	it := db.channelsRows("encrypted", rows)
 
 	channels := make([]map[string]interface{}, 0)
-	for rows.Next() {
+	for it.Next() {
 		var chHash, lastActivity sql.NullString
 		var msgCount int
-		if err := rows.Scan(&chHash, &msgCount, &lastActivity); err != nil {
+		if err := it.Scan(&chHash, &msgCount, &lastActivity); err != nil {
 			continue
 		}
 		fullHash := nullStrVal(chHash) // e.g. "enc_3A"
@@ -3152,7 +3396,10 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			"encrypted":    true,
 		})
 	}
-	return channels, nil
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
+	return &channelListEntry{channels: channels}, nil
 }
 
 // GetChannelMessages returns messages for a specific channel.
@@ -3370,7 +3617,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	}
 	var obsSQL string
 	if db.isV3() {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				obs.id, obs.name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -3378,7 +3625,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
 			ORDER BY o.id ASC`
 	} else {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp, t.route_type` + scopeCol + resolvedPathCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -3393,9 +3640,10 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	defer rows.Close()
 
 	type msg struct {
-		Data        map[string]interface{}
-		Repeats     int
-		LatestEpoch int64 // max observation timestamp (unix seconds) — issue #1366
+		Data             map[string]interface{}
+		Repeats          int
+		LatestEpoch      int64 // max observation timestamp (unix seconds) — issue #1366
+		PathHashSizeMask uint8
 	}
 	msgMap := make(map[int]*msg, len(pageIDs))
 
@@ -3416,7 +3664,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		// reply text -- the same farthest-from-first-hearer distance View
 		// Path shows on its map, computed here as a cheap position-only
 		// pass (no neighbor-centroid approximation) rather than reusing
-		// GetPacketPath's heavier per-branch query for every ping.
+		// getPacketPath's heavier per-branch query for every ping.
 		observerPubkeys map[string]bool
 		firstPubkey     string
 		firstTS         int64
@@ -3425,12 +3673,12 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 
 	for rows.Next() {
 		var pktID, txID int
-		var pktHash, dj, fs, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
+		var pktHash, dj, fs, rawHexHead, obsID, obsName, pathJSON, resolvedPathJSON sql.NullString
 		var snr sql.NullFloat64
 		var obsTs sql.NullInt64
 		var routeType sql.NullInt64
 		var scopeName sql.NullString
-		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
+		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &rawHexHead, &obsID, &obsName, &snr, &pathJSON, &obsTs, &routeType}
 		if db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
@@ -3469,8 +3717,11 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			observerName = obsID.String
 		}
 
+		pathHashSizeMask := observedPathHashSizeMask(nullStrVal(pathJSON))
 		if existing, ok := msgMap[txID]; ok {
 			existing.Repeats++
+			existing.PathHashSizeMask |= pathHashSizeMask
+			existing.Data["observedPathHashSizes"] = observedPathHashSizes(existing.PathHashSizeMask)
 			if obsTs.Valid && obsTs.Int64 > existing.LatestEpoch {
 				existing.LatestEpoch = obsTs.Int64
 			}
@@ -3525,23 +3776,26 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		}
 		m := &msg{
 			Data: map[string]interface{}{
-				"sender":              displaySender,
-				"text":                displayText,
-				"timestamp":           nullStr(fs),
-				"first_seen":          nullStr(fs),
-				"sender_timestamp":    senderTs,
-				"packetId":            pktID,
-				"packetHash":          nullStr(pktHash),
-				"repeats":             1,
-				"observers":           []string{},
-				"hops":                hops,
-				"snr":                 nullFloat(snr),
-				"scope":               nullStr(scopeName),
-				"routeType":           nullInt(routeType),
-				"entryPrefix":         entryPrefix,
-				"entryObserverPubkey": entryObserverPubkey,
+				"sender":                displaySender,
+				"text":                  displayText,
+				"timestamp":             nullStr(fs),
+				"first_seen":            nullStr(fs),
+				"sender_timestamp":      senderTs,
+				"packetId":              pktID,
+				"packetHash":            nullStr(pktHash),
+				"repeats":               1,
+				"observers":             []string{},
+				"hops":                  hops,
+				"snr":                   nullFloat(snr),
+				"scope":                 nullStr(scopeName),
+				"routeType":             nullInt(routeType),
+				"entryPrefix":           entryPrefix,
+				"entryObserverPubkey":   entryObserverPubkey,
+				"observedPathHashSizes": observedPathHashSizes(pathHashSizeMask),
+				"senderPathHashSize":    packetpath.SenderHashSize(rawHexHead.String),
 			},
-			Repeats: 1,
+			Repeats:          1,
+			PathHashSizeMask: pathHashSizeMask,
 		}
 		if obsTs.Valid {
 			m.LatestEpoch = obsTs.Int64
@@ -3593,7 +3847,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		// Bulk-resolve observer positions too, for the "spread up to Nkm"
 		// part of the reply -- only for pings that could possibly show one
 		// (a first-hearer plus at least one other distinct station), and
-		// deliberately WITHOUT GetPacketPath's neighbor-centroid fallback
+		// deliberately WITHOUT getPacketPath's neighbor-centroid fallback
 		// for unpositioned stations: that's a per-node query each, too
 		// expensive to run for every ping on a page of channel messages.
 		// A station missing its own GPS fix just doesn't contribute here.
@@ -3628,7 +3882,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 					var pk string
 					var lat, lon sql.NullFloat64
 					// (0,0) is the ocean off Ghana, not a real fix -- same
-					// exclusion GetPacketPath applies.
+					// exclusion getPacketPath applies.
 					if posRows.Scan(&pk, &lat, &lon) == nil && lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
 						posByPK[pk] = [2]float64{lat.Float64, lon.Float64}
 					}
@@ -5490,7 +5744,7 @@ func (db *DB) gpsByPubkeysExact(pubkeys []string) map[string][2]float64 {
 				continue
 			}
 			// (0,0) is the ocean off Ghana, not a real fix -- same
-			// exclusion GetPacketPath/packetSpreadStats apply.
+			// exclusion getPacketPath/packetSpreadStats apply.
 			if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
 				result[pk] = [2]float64{lat.Float64, lon.Float64}
 			}

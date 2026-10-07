@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -153,6 +154,80 @@ func TestRelayAirtimeShare_ADVERTvsACKDivergence(t *testing.T) {
 	}
 	if rows[0]["payload_type"] != "ADVERT" {
 		t.Errorf("rows[0] = %v, want ADVERT (sort by airtime desc)", rows[0]["payload_type"])
+	}
+}
+
+// TestRelayAirtimeShare_SplitsAdvertRouteClasses is the regression gate for
+// Kpa-clawbot/CoreScope#2041. MeshCore firmware defines route types 0/1 as
+// flood and 2/3 as direct; adverts using the direct route are zero-hop adverts.
+// Legacy rows without a route type retain the historical ADVERT label, while
+// non-advert payloads must remain aggregated solely by payload type.
+func TestRelayAirtimeShare_SplitsAdvertRouteClasses(t *testing.T) {
+	makeTx := func(id, payloadType, routeType int, hash string) *StoreTx {
+		tx := makeRelayAirtimeTx(id, payloadType, 20, 1, hash)
+		tx.RouteType = &routeType
+		return tx
+	}
+
+	transportFloodAdvert := makeTx(1, PayloadADVERT, 0, "advert-tf")
+	floodAdvert := makeTx(2, PayloadADVERT, 1, "advert-f")
+	directAdvert := makeTx(3, PayloadADVERT, 2, "advert-d")
+	transportDirectAdvert := makeTx(4, PayloadADVERT, 3, "advert-td")
+	legacyAdvert := makeRelayAirtimeTx(5, PayloadADVERT, 20, 1, "advert-legacy")
+	unknownRouteAdvert := makeTx(6, PayloadADVERT, 99, "advert-unknown")
+	floodACK := makeTx(7, PayloadACK, 0, "ack-f")
+	directACK := makeTx(8, PayloadACK, 2, "ack-d")
+
+	packets := []*StoreTx{
+		transportFloodAdvert, floodAdvert, directAdvert, transportDirectAdvert,
+		legacyAdvert, unknownRouteAdvert, floodACK, directACK,
+	}
+	store := newRelayAirtimeShareTestStore(packets)
+	for _, tx := range packets {
+		store.addToResolvedPubkeyIndex(tx.ID, []string{"relay"})
+	}
+
+	encoded, err := json.Marshal(store.computeRelayAirtimeShare(TimeWindow{}))
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	var response struct {
+		Rows []struct {
+			PayloadType string `json:"payload_type"`
+			Type        int    `json:"type"`
+			Count       int    `json:"count"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	counts := make(map[string]int, len(response.Rows))
+	types := make(map[string]int, len(response.Rows))
+	for _, row := range response.Rows {
+		counts[row.PayloadType] = row.Count
+		types[row.PayloadType] = row.Type
+	}
+
+	wantCounts := map[string]int{
+		"ADVERT (flood)":    2,
+		"ADVERT (zero-hop)": 2,
+		"ADVERT":            2,
+		"ACK":               2,
+	}
+	if len(counts) != len(wantCounts) {
+		t.Fatalf("bucket count = %d (%v), want %d (%v)", len(counts), counts, len(wantCounts), wantCounts)
+	}
+	for label, want := range wantCounts {
+		if got := counts[label]; got != want {
+			t.Errorf("%s count = %d, want %d (all rows: %v)", label, got, want, counts)
+		}
+	}
+	if types["ADVERT (flood)"] != PayloadADVERT || types["ADVERT (zero-hop)"] != PayloadADVERT || types["ADVERT"] != PayloadADVERT {
+		t.Errorf("advert bucket numeric types = %v, want all %d", types, PayloadADVERT)
+	}
+	if types["ACK"] != PayloadACK {
+		t.Errorf("ACK numeric type = %d, want %d", types["ACK"], PayloadACK)
 	}
 }
 

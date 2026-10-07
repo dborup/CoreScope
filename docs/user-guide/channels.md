@@ -57,6 +57,47 @@ The `hashChannels` config lists channel names that CoreScope should try to match
 
 CoreScope computes the hash of each name and matches incoming packets to identify which channel they belong to.
 
+## Shared channels
+
+When the administrator enables `channelProposals` (see [Configuration](configuration.md#shared-channel-suggestions)), the **Add Channel** dialog gets a **Suggest a Shared Channel** section. Anyone can suggest a public hashtag channel there. Only the name is sent, never a key, and the name is case-sensitive: `#MeshCore` and `#meshcore` are different channels.
+
+Names can be at most 31 bytes including the `#`. That is the firmware's limit (the name is stored in a 32-byte field with a terminating NUL). Any language or emoji is fine; control characters, line breaks, text-direction overrides and other invisible formatting characters (such as zero-width spaces or soft hyphens) are refused. The firmware itself only limits the length; the character rule is CoreScope's own, so that two different channels can never look the same. Emoji built with the zero-width joiner or variation selectors are allowed.
+
+By default, an administrator reviews suggestions at `#/channels?view=proposals`:
+
+1. Enter the `apiKey`. It is kept only in the tab's memory and is forgotten on reload or with **Lock**.
+2. Approve or reject each pending suggestion.
+
+If the operator enables `channelProposals.autoApprove`, a brand-new valid name is approved as soon as the ingestor processes its submission. Suggestions already pending, rejected or revoked are not auto-approved. See [Configuration](configuration.md#shared-channel-suggestions) for the limits and retention caveat.
+
+Approved channels are decrypted by the ingestor from then on and appear for everyone under **Network** with a **Shared** label, even before they carry any messages. Shared channels have no remove button for a regular visitor, because they are not stored in your browser.
+
+A rejected name stays rejected: suggesting it again shows the earlier rejection instead of starting a new review, until the rejection is deleted by retention (`channelProposals.retentionDays`, 30 days by default, counted from the review). After that it can be suggested again.
+
+### Built-in names
+
+CoreScope already decrypts about 320 common hashtag channels out of the box (the rainbow table `channel-rainbow.json`, for example `#test`, `#chat` and `#general`), plus any names in `hashChannels` or `channelKeys`. Suggesting or approving one of these changes nothing, and removing it does not stop it from being decrypted. The review dialog labels such suggestions **Built in: already decrypted**, the Remove confirmation says the channel keeps being decrypted, and a visitor who suggests one is told so.
+
+### Revoking an approved channel
+
+An administrator can undo a previous approval from the same **Pending / Approved / Rejected / Revoked** review dialog: switch to the **Approved** tab and click **Remove** on a channel. A confirmation prompt names the channel before anything happens — nothing is sent until you confirm.
+
+Removing a channel:
+
+- Stops the ingestor from decrypting new traffic on it (unless it is a [built-in name](#built-in-names) — in the rainbow table or configured via `channelKeys`/`hashChannels` in `config.json` — in which case that key keeps working; see [Configuration](configuration.md#channel-decryption)).
+- Takes it out of everyone's **Network** section and out of the channel list, even if messages were already decoded while it was approved. The channel page reloads its list when it opens, when you change the region or the encrypted toggle, and in the tab where the administrator removed the channel; there is no periodic reload. Another tab that has the channel open keeps showing it until its list reloads (for example after a page reload), and a conversation open on it closes then.
+- Does **not** delete any message that was already decoded — the history stays stored and comes back with the channel if the name is approved again. A [built-in name](#built-in-names) is never hidden, because its key keeps decrypting.
+
+Letter case matters: `#HelloWorld` and `#helloworld` are different channels with different keys, so they are separate suggestions. When a suggestion differs from another one (or from a built-in name) only by case, the review dialog says "Same name in different case" so the administrator can decide.
+
+A removed channel shows up under the **Revoked** tab. Suggesting the same name again later starts a fresh review from **Pending** — it is never auto-approved just because it was approved before. The channel stays out of the list while that suggestion is pending and if you reject it; only **Approve** lists it again, with its history. The analytics page still counts messages of removed channels (counts only, no text), and a removed channel's history stays readable by its name.
+
+The hidden set is the same for every region, and another open tab keeps the set it last loaded until its list reloads — also after you approve a channel again, so live messages do not bring its row back in that tab until then.
+
+Because the rule is "not approved" rather than "was approved before", a pending suggestion can also take out a channel you never reviewed: one whose messages were decrypted through a `channelKeys`/`hashChannels` entry you have since removed from `config.json`. Such a channel is listed until someone suggests its name. Nothing is deleted, its history stays readable, a name your configuration still decrypts is never hidden, and you see the suggestion under **Pending** — approving it lists the channel again.
+
+The local **Add Channel** tools (PSK channels, **Monitor Hashtag Channel**) are unchanged and still only affect your browser.
+
 ## Region filter
 
 Channels respect the region filter. Select a region to see only messages captured by observers in that area.

@@ -27,6 +27,17 @@
 #                          and apply the same rules to added lines only.
 #                          BASE defaults to origin/master.
 #
+# CI scope: the PR-only `--diff` step in .github/workflows/deploy.yml sets
+# PREFLIGHT_PR_BODY and PREFLIGHT_PR_LABELS but NEVER PREFLIGHT_TEST_FILES.
+# The same-PR DOM-grep test route therefore only applies to local and
+# skill-side runs that set the variable themselves. In CI a flagged sink
+# passes only via an escape helper on the line, DOM construction
+# (createElement + textContent / non-URL setAttribute) instead of an HTML
+# string, or the PR-body opt-out + `xss-optout` label. This is deliberate:
+# the sham-test check (basename + marker grep) is too weak to trust in CI.
+# The fix hint mirrors this and only mentions the test route when
+# PREFLIGHT_TEST_FILES is non-empty.
+#
 # The canonical pr-preflight gate (skill-side) consumes the same allowlist
 # format documented inline below.
 #
@@ -325,7 +336,16 @@ def emit_finding(file, lineno, token, sink):
         print(f"ℹ️  {file}:{lineno}: flagged token '{token}' in {sink} — author opt-out in PR body (xss-optout label + ≥40ch reason)")
         return False
     print(f"❌ {file}:{lineno}: flagged: {token}  (sink: {sink})")
-    print(f"   fix: wrap with escapeHtml(...) / escapeAttr(...) — or add a DOM-grep test in test*.js asserting the payload renders inert — or add 'PREFLIGHT-XSS-OPTOUT: {file}:{lineno} reason=\"...(≥40 chars)...\"' to the PR body AND apply the xss-optout label.")
+    # Only offer the same-PR test route when this run can honor it. CI's
+    # --diff step never sets PREFLIGHT_TEST_FILES, so there it is dead.
+    test_route = (" — or add a DOM-grep test in test*.js (listed in PREFLIGHT_TEST_FILES)"
+                  " asserting the payload renders inert") if TEST_FILES else ""
+    print(f"   fix: wrap with escapeHtml(...) / escapeAttr(...) / esc(...)"
+          f" — or build the DOM with createElement + textContent (setAttribute for non-URL, non-on* attributes) instead of an HTML string"
+          f"{test_route}"
+          f" — or add 'PREFLIGHT-XSS-OPTOUT: {file}:{lineno} reason=\"...(≥40 chars)...\"' to the PR body AND apply the xss-optout label.")
+    if not TEST_FILES:
+        print("   note: PREFLIGHT_TEST_FILES is not set, so existing or same-PR tests do not count as coverage (CI never sets it).")
     return True
 
 def scan_lines(lines_with_no):

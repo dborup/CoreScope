@@ -34,9 +34,9 @@
     return Math.floor(diffSec / 86400) + 'd ago';
   }
 
-  function viewPathLink(hash) {
+  function viewPathLink(hash, record) {
     if (!hash) return '';
-    return '<button type="button" class="ps-view-path" data-view-path="' + escapeHtml(hash) + '" style="background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--link-color);text-decoration:underline">View path &rarr;</button>';
+    return '<button type="button" class="ps-view-path" data-view-path="' + escapeHtml(hash) + '" data-view-record="' + record + '" style="background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--link-color);text-decoration:underline">View path &rarr;</button>';
   }
 
   // recordDefs: each record's headline metric formatter + a short
@@ -60,7 +60,28 @@
       sub: function (p) { return p.farthestKm != null ? '~' + formatKm(p.farthestKm) + ' total' : ''; } }
   ];
 
-  function recordCardHtml(def, ping) {
+  function validRecord(record) {
+    return recordDefs.some(function (def) {
+      return record === 'allTime.' + def.key || record === 'thisWeek.' + def.key;
+    });
+  }
+
+  function mapRoute(hash, record) {
+    return '#/ping-scores/' + encodeURIComponent(hash) + '?viewPath=1&record=' + encodeURIComponent(record);
+  }
+
+  function mapOptions(hash, record) {
+    return {
+      routePrefix: '#/ping-scores/',
+      routeQueryKey: 'record',
+      shareURL: location.origin + '/' + mapRoute(hash, record),
+      loadPath: function (h) {
+        return api('/ping-scores/' + encodeURIComponent(h) + '/path?record=' + encodeURIComponent(record));
+      }
+    };
+  }
+
+  function recordCardHtml(def, ping, scope) {
     if (!ping) {
       return '<div class="stat-card ps-record-card ps-empty">' +
         '<div class="stat-label">' + def.icon + ' ' + def.title + '</div>' +
@@ -77,7 +98,7 @@
         formatAgo(ping.timestamp) +
       '</div>' +
       '<div class="ps-record-desc">' + def.desc + '</div>' +
-      '<div style="margin-top:6px">' + viewPathLink(ping.hash) + '</div>' +
+      '<div style="margin-top:6px">' + viewPathLink(ping.hash, scope + '.' + def.key) + '</div>' +
       '</div>';
   }
 
@@ -101,11 +122,13 @@
       '</div>';
   }
 
-  function render(container, data) {
+  function render(container, data, invalidLink) {
+    var linkNotice = invalidLink ? '<p class="text-muted">Invalid ping record link. Open a record from the board instead.</p>' : '';
     if (!data || data.totalPings === 0) {
       container.innerHTML =
         '<div class="ping-scores-page">' +
         '<h2>' + phIcon('trophy') + ' Ping Scores</h2>' +
+        linkNotice +
         '<p class="text-muted">Global records and leaderboards from every "ping" sent in any channel. Not scoped by region.</p>' +
         '<div class="ps-empty-state" style="padding:40px;text-align:center;color:var(--text-muted)">' +
         '<p style="font-size:1.1em">No pings recorded yet.</p>' +
@@ -116,7 +139,7 @@
     }
 
     var recordsHtml = recordDefs.map(function (def) {
-      return recordCardHtml(def, data[def.key]);
+      return recordCardHtml(def, data[def.key], 'allTime');
     }).join('');
 
     // ThisWeek mirrors the same 5 slots, scoped to the trailing 7 days --
@@ -127,12 +150,13 @@
     // yet" placeholder via the `|| {}` fallback.
     var week = data.thisWeek || {};
     var weekHtml = recordDefs.map(function (def) {
-      return recordCardHtml(def, week[def.key]);
+      return recordCardHtml(def, week[def.key], 'thisWeek');
     }).join('');
 
     container.innerHTML =
       '<div class="ping-scores-page">' +
       '<h2>' + phIcon('trophy') + ' Ping Scores</h2>' +
+      linkNotice +
       '<p class="text-muted">Global records and leaderboards from every "ping" sent in any channel (' + data.totalPings + ' total). Not scoped by region. Updated ' + escapeHtml(formatAgo(data.generatedAt)) + '.</p>' +
       '<h3>' + phIcon('arrow-clockwise') + ' Last 7 Days</h3>' +
       '<p class="text-muted" style="font-size:0.85em">Rolling window, not a calendar week.</p>' +
@@ -148,20 +172,44 @@
 
     container.querySelectorAll('[data-view-path]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        if (window.PacketPathMap) window.PacketPathMap.open(btn.dataset.viewPath);
+        if (!window.PacketPathMap) return;
+        var hash = btn.dataset.viewPath;
+        var record = btn.dataset.viewRecord;
+        // Keep this entry in history, without reloading the board just to
+        // open its on-demand map. Cold links are restored by init below.
+        history.pushState(null, '', mapRoute(hash, record));
+        window.PacketPathMap.open(hash, mapOptions(hash, record));
       });
     });
   }
 
+  var pageGeneration = 0;
+
   registerPage('ping-scores', {
-    init: function (container) {
+    init: function (container, param) {
+      var generation = ++pageGeneration;
+      var query = new URLSearchParams(String(location.hash || '').split('?')[1] || '');
+      var wantsMap = !!param && query.get('viewPath') === '1';
+      var record = query.get('record');
+      var invalidLink = wantsMap && !validRecord(record);
       container.innerHTML = '<div class="ping-scores-page"><h2>' + phIcon('trophy') + ' Ping Scores</h2><p class="text-muted">Loading…</p></div>';
       return api('/ping-scores').then(function (data) {
-        render(container, data);
+        if (generation !== pageGeneration) return;
+        render(container, data, invalidLink);
+        if (!invalidLink && wantsMap && window.PacketPathMap) {
+          if (!window.PacketPathMap.restore(param, mapOptions(param, record))) {
+            query.delete('viewPath');
+            history.replaceState(null, '', String(location.hash).split('?')[0] + (query.toString() ? '?' + query.toString() : ''));
+          }
+        }
       }).catch(function (e) {
+        if (generation !== pageGeneration) return;
         container.innerHTML = '<div class="ping-scores-page"><h2>' + phIcon('trophy') + ' Ping Scores</h2><p class="text-muted">Failed to load: ' + escapeHtml(e.message) + '</p></div>';
       });
     },
-    destroy: function () {}
+    destroy: function () {
+      pageGeneration++;
+      if (window.PacketPathMap) window.PacketPathMap.close();
+    }
   });
 })();

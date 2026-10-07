@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -73,6 +74,10 @@ func main() {
 
 	sources := cfg.ResolvedSources()
 
+	// #265: surface a clientRxCoverage.sources entry that matches no configured
+	// source once, at boot, instead of silently dropping all coverage.
+	checkClientRxSources(cfg, sources)
+
 	store, err := OpenStoreWithInterval(cfg.DBPath, cfg.MetricsSampleInterval())
 	if err != nil {
 		log.Fatalf("db: %v", err)
@@ -112,6 +117,18 @@ func main() {
 	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
 	defer stopSIGHUPReload()
 
+	// Shared channel proposals: approved hashtag channels join the live keys
+	// before any MQTT traffic is handled, and the ingestor applies the
+	// server's queued suggestions/decisions (the server is read-only).
+	proposals := newChannelProposalRunner(store, keys, cfg.ChannelProposals)
+	if n, err := proposals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[channel-proposals] loading approved channels failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[channel-proposals] %d approved shared channel(s) added to channel keys", n)
+	}
+	stopProposals := proposals.Start(2*time.Second, time.Hour)
+	defer stopProposals()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
@@ -122,60 +139,13 @@ func main() {
 	// Connect to each MQTT source
 	var clients []mqtt.Client
 	connectedCount := 0
-	for _, source := range sources {
-		tag := source.Name
-		if tag == "" {
-			tag = source.Broker
-		}
-
-		opts := buildMQTTOpts(source)
+	tags := mqttSourceTags(sources)
+	for i, source := range sources {
+		tag := tags[i]
+		setup := prepareMQTTSource(source, tag)
+		opts, status, liveness := setup.opts, setup.status, setup.liveness
 		connectTimeout := source.ConnectTimeoutOrDefault()
 		log.Printf("MQTT [%s] connect timeout: %ds", tag, connectTimeout)
-
-		// Pre-allocate the liveness pointer so OnConnect can reset its
-		// stale-message clock on reconnect (PR #1216 r1 item 2). IsConnectedFn
-		// is wired below once the client exists.
-		liveness := &SourceLivenessState{
-			Tag:    tag,
-			Broker: source.Broker,
-		}
-
-		// #1043: per-source status registry. Idempotent — repeated
-		// registration across reconnects returns the same state so
-		// counters accumulate across the process lifetime.
-		status := RegisterSourceStatus(tag, source.Broker)
-
-		opts.SetOnConnectHandler(func(c mqtt.Client) {
-			log.Printf("MQTT [%s] connected to %s", tag, source.Broker)
-			status.MarkConnect(time.Now())
-			// PR #1216 r1 item 2: clear the stale LastMessageUnix from
-			// before the outage so the watchdog doesn't immediately scream
-			// "stalled for 2h". Also restarts the cold-start grace window
-			// and clears the alert cooldown so a fresh stall edge can fire.
-			liveness.MarkReconnected(time.Now())
-			topics := source.Topics
-			if len(topics) == 0 {
-				topics = []string{"meshcore/#"}
-			}
-			for _, t := range topics {
-				token := c.Subscribe(t, 0, nil)
-				token.Wait()
-				if token.Error() != nil {
-					log.Printf("MQTT [%s] subscribe error for %s: %v", tag, t, token.Error())
-				} else {
-					log.Printf("MQTT [%s] subscribed to %s", tag, t)
-				}
-			}
-		})
-
-		opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-			log.Printf("MQTT [%s] disconnected from %s: %v", tag, source.Broker, err)
-			status.MarkDisconnect(time.Now(), err)
-		})
-
-		opts.SetReconnectingHandler(func(c mqtt.Client, options *mqtt.ClientOptions) {
-			log.Printf("MQTT [%s] reconnecting to %s", tag, source.Broker)
-		})
 
 		// Capture source for closure
 		src := source
@@ -196,19 +166,15 @@ func main() {
 		// Wire IsConnectedFn now that the client exists, then register.
 		// Registration BEFORE Connect so the attempt counter is available
 		// to OnConnectAttempt on the very first dial.
-		liveness.IsConnectedFn = client.IsConnected
-		// #1335: wire force-reconnect so the watchdog can drop a
-		// half-open TCP socket and re-dial when paho.IsConnected==true
-		// but no messages have flowed past the stall threshold. Throttled
-		// per source by the watchdog itself (forceReconnectThrottle).
-		// Disconnect(250) gives in-flight publishes 250ms to drain;
-		// Connect() returns immediately and paho's reconnect machinery
-		// takes over from there. Captured-by-value `client` is the same
-		// pointer used everywhere else for this source.
-		liveness.ForceReconnectFn = func() {
-			client.Disconnect(250)
-			client.Connect()
-		}
+		// #1335: attachClient also wires force-reconnect so the watchdog
+		// can drop a half-open TCP socket and re-dial when
+		// paho.IsConnected==true but no messages have flowed past the
+		// stall threshold. Throttled per source by the watchdog itself
+		// (forceReconnectThrottle). Captured-by-value `client` is the same
+		// pointer used everywhere else for this source. See
+		// buildForceReconnectFn for why this is NOT simply
+		// "Disconnect(250) then Connect()".
+		setup.attachClient(client)
 		// PR #1216 r2 item 3: tag collisions used to log.Fatalf, which
 		// killed the entire ingestor over one config typo and recreated
 		// the #1212 total-ingest-stop class this PR exists to prevent.
@@ -227,7 +193,7 @@ func main() {
 			continue
 		}
 		if token.Error() != nil {
-			log.Printf("MQTT [%s] connection failed (non-fatal): %v", tag, token.Error())
+			log.Printf("MQTT [%s] connection failed (non-fatal): %s", tag, errForLog(token.Error(), setup.secrets...))
 			// BL1 fix: Disconnect to stop Paho's internal retry goroutines.
 			// With ConnectRetry=true, Connect() spawns background goroutines
 			// that leak if the client is simply discarded.
@@ -273,13 +239,14 @@ func main() {
 	// Packet (transmissions) retention: previously lived in cmd/server,
 	// moved to ingestor in #1283 to eliminate cross-process write
 	// contention (SQLITE_BUSY). 0 = disabled.
-	packetDays := cfg.PacketDaysOrZero()
-	if packetDays > 0 {
-		if n, err := store.PruneOldPackets(packetDays); err != nil {
-			log.Printf("[prune] error: %v", err)
-		} else if n > 0 {
-			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
-		}
+	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
+	if msg := channelDaysNoEffect(packetDays, channelDays); msg != "" {
+		log.Print(msg)
+	}
+	runTransmissionRetention(store, cfg, "startup")
+	// #89: route_mask_changes rows of transmissions deleted by any path.
+	if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+		log.Printf("[prune] route_mask_changes error: %v", err)
 	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
@@ -308,6 +275,22 @@ func main() {
 	} else {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (0 dropped)")
 	}
+
+	// #89: route_mask backfill runs next to live ingest, after the buffer is
+	// draining, so its one-time pending-index build (~20 s on a staging-sized
+	// DB) is absorbed by IngestBuffer instead of delaying start-up. Cancelled
+	// on shutdown so store.Close() does not wait for it; it resumes on the
+	// next start.
+	routeMaskCtx, stopRouteMaskBackfill := context.WithCancel(context.Background())
+	defer stopRouteMaskBackfill()
+	store.StartRouteMaskBackfill(routeMaskCtx)
+
+	// #215: rehash rows older than the current content-hash formula and merge
+	// the duplicates that creates, once (it is recorded as done). Same
+	// placement and shutdown as the route_mask backfill above.
+	contentHashCtx, stopContentHashMigration := context.WithCancel(context.Background())
+	defer stopContentHashMigration()
+	store.StartContentHashMigration(contentHashCtx)
 
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
@@ -347,14 +330,18 @@ func main() {
 		packetRetentionTicker = time.NewTicker(24 * time.Hour)
 		go func() {
 			for range packetRetentionTicker.C {
-				if n, err := store.PruneOldPackets(packetDays); err != nil {
-					log.Printf("[prune] error: %v", err)
-				} else if n > 0 {
+				if r := runTransmissionRetention(store, cfg, "daily"); r.Packets+r.ChannelMessages > 0 {
 					store.RunIncrementalVacuum(vacuumPages)
+				}
+				if _, err := store.PruneOrphanRouteMaskChanges(); err != nil {
+					log.Printf("[prune] route_mask_changes error: %v", err)
 				}
 			}
 		}()
 		log.Printf("[prune] auto-prune enabled: packets older than %d days will be removed daily", packetDays)
+		if channelDays > packetDays {
+			log.Printf("[prune] channel messages are kept until they are %d days old", channelDays)
+		}
 	}
 
 	// Daily ticker for client-RX coverage retention (#1727).
@@ -463,6 +450,13 @@ func main() {
 	defer stopNeighborBuilder()
 	log.Printf("[neighbor-build] enabled (interval=%s)", NeighborEdgesBuilderInterval)
 
+	// #188: re-resolve NULL resolved_path rows now that the prefix index
+	// and neighbour graph are primed (StartNeighborEdgesBuilder above).
+	if enabled, batch, pause := cfg.ResolvedPathBackfillSettings(); enabled {
+		stopResolvedPathBackfill := store.StartResolvedPathBackfill(batch, pause)
+		defer stopResolvedPathBackfill()
+	}
+
 	// #1212: per-source stall watchdog. Detects "silently dead" sources
 	// where the client reports connected but no messages have flowed. Logs
 	// a WARN line every minute for any source silent for >5m. Scan every
@@ -475,6 +469,8 @@ func main() {
 	<-sig
 
 	log.Println("Shutting down...")
+	stopRouteMaskBackfill()
+	stopContentHashMigration()
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {
@@ -491,6 +487,38 @@ func main() {
 	log.Println("Done.")
 }
 
+// channelDaysNoEffect returns the startup warning for a retention.channelDays
+// that is set but changes nothing (#296), or "" when it applies or is unset.
+func channelDaysNoEffect(packetDays, channelDays int) string {
+	switch {
+	case channelDays <= 0:
+		return ""
+	case packetDays <= 0:
+		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: packetDays is 0, so no transmissions are pruned", channelDays)
+	case channelDays <= packetDays:
+		return fmt.Sprintf("[prune] retention.channelDays=%d has no effect: it is not longer than packetDays=%d", channelDays, packetDays)
+	}
+	return ""
+}
+
+// runTransmissionRetention runs one transmission retention pass
+// (retention.packetDays, #1283; retention.channelDays, #296) and logs what it
+// removed. when names the pass in the log ("startup", "daily").
+func runTransmissionRetention(store *Store, cfg *Config, when string) PruneResult {
+	packetDays, channelDays := cfg.PacketDaysOrZero(), cfg.ChannelDaysOrZero()
+	r, err := store.PruneTransmissions(packetDays, channelDays)
+	if err != nil {
+		log.Printf("[prune] error: %v", err)
+	}
+	if r.Packets > 0 {
+		log.Printf("[prune] %s pruned %d transmissions older than %d days", when, r.Packets, packetDays)
+	}
+	if r.ChannelMessages > 0 {
+		log.Printf("[prune] %s pruned %d channel messages older than %d days", when, r.ChannelMessages, channelDays)
+	}
+	return r
+}
+
 // buildMQTTOpts creates MQTT client options for a source with bounded reconnect
 // backoff, connect timeout, and TLS/auth configuration.
 //
@@ -501,10 +529,7 @@ func main() {
 // #1212 (prod outage on 2026-05-15 where the disconnect was logged but no
 // reconnect activity was ever visible).
 func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
-	tag := source.Name
-	if tag == "" {
-		tag = source.Broker
-	}
+	tag := mqttSourceTag(source)
 	opts := mqtt.NewClientOptions().
 		AddBroker(source.Broker).
 		SetAutoReconnect(true).
@@ -521,7 +546,10 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		// (paho default 30s actually — making this explicit so it can't
 		// drift, and so operators reading the code know it's intentional
 		// per the #1335 RCA).
-		SetKeepAlive(30 * time.Second)
+		SetKeepAlive(30 * time.Second).
+		// #118: explicit ID, generated once per client when not configured;
+		// paho reuses it on every reconnect. See mqtt_client_id.go.
+		SetClientID(mqttClientID(source))
 
 	opts.SetConnectionAttemptHandler(func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
 		// Look up the per-source liveness state (registered in main) so we
@@ -534,7 +562,7 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		if s != nil {
 			attempt = atomic.AddInt64(&s.AttemptCount, 1)
 		}
-		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, broker.String())
+		log.Printf("MQTT [%s] connection attempt #%d to %s", tag, attempt, brokerForLog(broker.String()))
 		return tlsCfg
 	})
 
@@ -552,6 +580,96 @@ func buildMQTTOpts(source MQTTSource) *mqtt.ClientOptions {
 		opts.SetTLSConfig(&tls.Config{})
 	}
 	return opts
+}
+
+// buildForceReconnectFn builds the watchdog's forced-reconnect action for a
+// source (#1335, hardened against a race found while investigating a 100+
+// minute reconnect failure).
+//
+// paho's own client.IsConnected() — used as liveness.IsConnectedFn — reports
+// true not only when genuinely connected but for the ENTIRE time paho's
+// background AutoReconnect/ConnectRetry loop is retrying (status
+// reconnecting/connecting). So the watchdog's LivenessStalled classification
+// (IsConnected==true, no messages) fires just as often for "paho is actively,
+// correctly retrying a still-down broker" as it does for the true #1335
+// half-open-TCP case. Naively doing Disconnect(250) then Connect() in the
+// first case is actively harmful: paho's Disconnecting() must block until the
+// CURRENT in-flight connection attempt plus its backoff sleep unwind (up to
+// ConnectTimeout+MaxReconnectInterval, tens of seconds) before status
+// actually reaches `disconnected`. Disconnect(250) returns to the caller
+// after the 250ms quiesce regardless, so the following Connect() usually runs
+// while status is still the transitional `disconnecting` state — paho then
+// returns an error token (silently discarded by the old code) AND, because
+// Disconnect() was called at all, tears down paho's own retry loop for good
+// ("user requested no auto reconnection"). The client is left with nothing
+// retrying until the watchdog's next trigger fires, which can repeat the same
+// race — compounding into very long outages.
+//
+// client.IsConnectionOpen() (unlike IsConnected()) is strictly status ==
+// connected — never true while paho is reconnecting/connecting — so it
+// reliably distinguishes "genuinely connected, maybe half-open" (safe to
+// Disconnect then Connect; Disconnecting() does not need to wait on any
+// in-flight retry loop from status connected, so it completes well within
+// the 250ms quiesce) from "paho is already retrying on its own" (must NOT
+// call Disconnect).
+//
+// What Connect() then does depends on paho's status (paho.mqtt.golang
+// v1.5.0, client.go Connect and status.go Connecting):
+//   - reconnecting (AutoReconnect loop): a no-op that returns a success token;
+//   - connecting (the initial ConnectRetry loop) or disconnecting: an error
+//     token, errStatusMustBeDisconnected;
+//   - disconnected (paho gave up): starts a fresh attempt.
+//
+// For that status error, IsConnected() tells whether paho reports a retry
+// pending. In connecting it does (ConnectRetry keeps retrying), so the line
+// is info, not a failure (#102). In disconnecting it reflects paho's
+// willReconnect flag, which is sticky after any earlier auto-reconnect and is
+// left set by a Disconnect(), so there it is a strong hint, not a guarantee.
+// The info line therefore keeps paho's error and claims no more than paho
+// reports. With IsConnected() false the error is logged as a failure.
+//
+// Either line logs the error with secrets (mqttSourceSecrets) masked
+// (errForLog): paho's errors may quote the broker URL. The classification
+// reads the raw error, whose text it compares.
+func buildForceReconnectFn(client mqtt.Client, tag string, secrets ...string) func() {
+	return func() {
+		if client.IsConnectionOpen() {
+			client.Disconnect(250)
+		}
+		// Connect() resolves synchronously (Error() readable immediately,
+		// no Wait() needed) for both error returns and the "already
+		// retrying, treated as a safe no-op" success case — only a genuine
+		// fresh connection attempt leaves the token pending in the
+		// background, and we must not block this call on that.
+		err := client.Connect().Error()
+		switch {
+		case err == nil:
+		case connectRetryInProgress(client, err):
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect: Connect() returned %s; paho reports a retry pending (IsConnected=true), not starting a new attempt", tag, errForLog(err, secrets...))
+		default:
+			log.Printf("MQTT [%s] WATCHDOG force-reconnect Connect() failed: %s", tag, errForLog(err, secrets...))
+		}
+	}
+}
+
+// pahoErrStatusMustBeDisconnected is the text of paho's unexported
+// errStatusMustBeDisconnected (paho.mqtt.golang v1.5.0 status.go), which
+// Connect() returns when status is connecting or disconnecting. The paho
+// test TestForceReconnect_RealPaho_InitialRetryLoopIsNotAConnectFailure_102
+// fails if an upgrade changes it.
+const pahoErrStatusMustBeDisconnected = "status can only transition to connecting from disconnected"
+
+// connectRetryInProgress reports whether a Connect() error is paho's status
+// error while paho reports a retry pending (#102). buildMQTTOpts sets
+// ConnectRetry and AutoReconnect, so IsConnected() is true in status
+// connecting (the initial retry loop keeps going) and in disconnecting when
+// paho's willReconnect flag is set. That flag is sticky: an earlier
+// auto-reconnect sets it, a successful reconnect never clears it, and a
+// Disconnect() from connected or reconnecting leaves it alone. In
+// disconnecting a true result is therefore a strong hint that a retry
+// follows, not a guarantee.
+func connectRetryInProgress(client mqtt.Client, err error) bool {
+	return err.Error() == pahoErrStatusMustBeDisconnected && client.IsConnected()
 }
 
 func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string, regionKeys map[string][]byte, cfg *Config) {
@@ -589,6 +707,17 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			return
 		}
 		if cfg.ClientRxCoverageEnabled() && len(parts) >= 4 && parts[3] == "packets" {
+			// Optional per-source allowlist (#265). Trust in this topic is the
+			// broker's binding of the topic pubkey to the publisher, which not
+			// every configured source necessarily provides; when the operator
+			// names the sources that do, coverage from any other source is
+			// dropped here — before any client_receptions / client_observers
+			// write — with a throttled, bounded warning. No allowlist ⇒ every
+			// source is accepted, as before.
+			if !cfg.ClientRxSourceAllowed(source.Name) {
+				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
+				return
+			}
 			handleClientPacket(store, tag, parts[2], msg, channelKeys)
 		}
 		return
@@ -609,6 +738,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 	// Global observer IATA whitelist: if configured, drop messages from observers
 	// in non-whitelisted IATA regions. Applies to ALL message types (status + packets).
 	if len(parts) > 1 && !cfg.IsObserverIATAAllowed(parts[1]) {
+		// Not silently (#110): a throttled, bounded warning per region.
+		cfg.warnIATADrop(tag, parts[1], time.Now())
 		return
 	}
 

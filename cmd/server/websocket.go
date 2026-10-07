@@ -19,6 +19,7 @@ type Hub struct {
 	upgrader       websocket.Upgrader
 	allowedOrigins []string   // exact-match allowlist for /ws CheckOrigin (see SetAllowedOrigins)
 	limits         *wsLimiter // #1794: per-IP caps and deny list; nil allows everything
+	pingInterval   time.Duration // writePump tick: protocol ping + app heartbeat (#117)
 }
 
 // SetAllowedOrigins configures the exact-match origin allowlist consulted by
@@ -74,6 +75,15 @@ func (h *Hub) checkOrigin(r *http.Request) bool {
 	return false
 }
 
+// wsHeartbeat is written to every client on each ping tick (#117). Browser
+// JS never sees protocol ping frames, so without a frame the page receives a
+// quiet mesh and a silently dead (half-open) socket look the same to it.
+// public/app.js matches these exact bytes (WS_HEARTBEAT) and drops a socket
+// that has been silent for WS_STALE_MS; ws_heartbeat_117_test.go keeps the
+// two in step. Tabs still running an app.js from before this change treat
+// it as an ordinary message of an unknown type (see the #117 PR).
+var wsHeartbeat = []byte(`{"type":"heartbeat"}`)
+
 // Client is a single WebSocket connection.
 type Client struct {
 	conn     *websocket.Conn
@@ -109,7 +119,8 @@ func (h *Hub) ConfigureLimits(maxConnsPerIP, upgradesPerMin int, trustedProxies,
 
 func NewHub() *Hub {
 	h := &Hub{
-		clients: make(map[*Client]bool),
+		clients:      make(map[*Client]bool),
+		pingInterval: 30 * time.Second,
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -214,7 +225,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Register(client)
 
-	go client.writePump()
+	go client.writePump(h.pingInterval)
 	go client.readPump(h)
 }
 
@@ -248,8 +259,8 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-func (c *Client) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
+func (c *Client) writePump(pingInterval time.Duration) {
+	ticker := time.NewTicker(pingInterval)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
@@ -268,6 +279,10 @@ func (c *Client) writePump() {
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// #117: same tick, same (only) writer goroutine; see wsHeartbeat.
+			if err := c.conn.WriteMessage(websocket.TextMessage, wsHeartbeat); err != nil {
 				return
 			}
 		}
@@ -310,41 +325,7 @@ func (p *Poller) Start() {
 		select {
 		case <-ticker.C:
 			if p.store != nil {
-				// Ingest new transmissions into in-memory store and broadcast
-				newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
-				if newMax > lastID {
-					lastID = newMax
-				}
-				// Ingest new observations for existing transmissions (fixes #174)
-				nextObsID := lastObsID
-				if err := p.db.conn.QueryRow(`
-					SELECT COALESCE(MAX(id), ?) FROM (
-						SELECT id FROM observations
-						WHERE id > ?
-						ORDER BY id ASC
-						LIMIT 500
-					)`, lastObsID, lastObsID).Scan(&nextObsID); err != nil {
-					nextObsID = lastObsID
-				}
-				newObs := p.store.IngestNewObservations(lastObsID, 500)
-				if nextObsID > lastObsID {
-					lastObsID = nextObsID
-				}
-				if len(newTxs) > 0 {
-					log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
-				}
-				for _, tx := range newTxs {
-					p.hub.Broadcast(WSMessage{
-						Type: "packet",
-						Data: tx,
-					})
-				}
-				for _, obs := range newObs {
-					p.hub.Broadcast(WSMessage{
-						Type: "packet",
-						Data: obs,
-					})
-				}
+				lastID, lastObsID = p.pollStore(lastID, lastObsID)
 			} else {
 				// Fallback: direct DB query (used when store is nil, e.g. tests)
 				newTxs, err := p.db.GetNewTransmissionsSince(lastID, 100)
@@ -373,6 +354,54 @@ func (p *Poller) Start() {
 			return
 		}
 	}
+}
+
+// pollStore is one poller tick against the in-memory store: ingest new
+// transmissions and observations, apply route_mask changes, and broadcast.
+// It returns the advanced cursors.
+func (p *Poller) pollStore(lastID, lastObsID int) (int, int) {
+	// Ingest new transmissions into in-memory store and broadcast
+	newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
+	if newMax > lastID {
+		lastID = newMax
+	}
+	// Ingest new observations for existing transmissions (fixes #174)
+	nextObsID := lastObsID
+	if err := p.db.conn.QueryRow(`
+		SELECT COALESCE(MAX(id), ?) FROM (
+			SELECT id FROM observations
+			WHERE id > ?
+			ORDER BY id ASC
+			LIMIT 500
+		)`, lastObsID, lastObsID).Scan(&nextObsID); err != nil {
+		nextObsID = lastObsID
+	}
+	newObs := p.store.IngestNewObservations(lastObsID, 500)
+	if nextObsID > lastObsID {
+		lastObsID = nextObsID
+	}
+	// #89: route bits that reached existing transmissions without a new
+	// observation id (an upserted observation row), from the change log.
+	p.store.RefreshRouteMaskChanges()
+	// #89: pick up route_mask values the ingestor backfilled
+	// after this server loaded the rows.
+	p.store.RefreshBackfilledRouteMasks()
+	if len(newTxs) > 0 {
+		log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
+	}
+	for _, tx := range newTxs {
+		p.hub.Broadcast(WSMessage{
+			Type: "packet",
+			Data: tx,
+		})
+	}
+	for _, obs := range newObs {
+		p.hub.Broadcast(WSMessage{
+			Type: "packet",
+			Data: obs,
+		})
+	}
+	return lastID, lastObsID
 }
 
 func (p *Poller) Stop() {

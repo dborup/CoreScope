@@ -76,6 +76,8 @@ type Store struct {
 	stmtGetTxByHash            *sql.Stmt
 	stmtInsertTransmission     *sql.Stmt
 	stmtUpdateTxFirstSeen      *sql.Stmt
+	stmtOrTxRouteMask          *sql.Stmt
+	stmtInsertRouteMaskChange  *sql.Stmt
 	stmtBumpTxLastSeen         *sql.Stmt
 	stmtInsertObservation      *sql.Stmt
 	stmtUpsertNode             *sql.Stmt
@@ -93,6 +95,18 @@ type Store struct {
 
 	sampleIntervalSec int
 	backfillWg        sync.WaitGroup
+
+	// pruneMu serialises the channelDays prunes of PruneTransmissions.
+	// packetPruneFloor is the packet cutoff of the last completed one (""
+	// before the first), where the next one starts its walk (#296).
+	pruneMu          sync.Mutex
+	packetPruneFloor string
+	// firstSeenLow is the lowest first_seen InsertTransmission has written
+	// since PruneTransmissions last took it ("" for none), so a backdated
+	// row below packetPruneFloor is still walked (#296). A leaf lock: the
+	// ingest path takes it under writerMu, never under pruneMu's long hold.
+	firstSeenLowMu sync.Mutex
+	firstSeenLow   string
 
 	// prefixIdx holds the prefix → pubkey index used by the
 	// resolved_path writer (#1547). Rebuilt on startup and once per
@@ -849,20 +863,36 @@ func applySchema(db *sql.DB) error {
 func (s *Store) prepareStatements() error {
 	var err error
 
-	s.stmtGetTxByHash, err = s.db.Prepare("SELECT id, first_seen FROM transmissions WHERE hash = ?")
+	s.stmtGetTxByHash, err = s.db.Prepare("SELECT id, first_seen, route_mask FROM transmissions WHERE hash = ?")
 	if err != nil {
 		return err
 	}
 
 	s.stmtInsertTransmission, err = s.db.Prepare(`
-		INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, scope_name, from_pubkey, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, scope_name, from_pubkey, last_seen, route_mask)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
 	}
 
 	s.stmtUpdateTxFirstSeen, err = s.db.Prepare("UPDATE transmissions SET first_seen = ? WHERE id = ?")
+	if err != nil {
+		return err
+	}
+
+	// #89: OR a newly observed route bit into a known route_mask. The OR runs
+	// in SQL, so it is atomic against any other writer; NULL rows are left to
+	// the backfill (backfillTxRouteMask), which owns un-backfilled legacy rows.
+	s.stmtOrTxRouteMask, err = s.db.Prepare(`UPDATE transmissions SET route_mask = route_mask | ?
+		WHERE id = ? AND route_mask IS NOT NULL AND (route_mask & ?) = 0`)
+	if err != nil {
+		return err
+	}
+	// Change log for running servers (route_mask_changes): the transmission's
+	// full mask as it is inside the current transaction, right after the OR.
+	s.stmtInsertRouteMaskChange, err = s.db.Prepare(`INSERT INTO route_mask_changes (transmission_id, route_mask, created_at)
+		SELECT id, route_mask, ? FROM transmissions WHERE id = ? AND route_mask IS NOT NULL`)
 	if err != nil {
 		return err
 	}
@@ -1126,12 +1156,15 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// Check for existing transmission
 	var existingID int64
 	var existingFirstSeen string
-	err := s.stmtGetTxByHash.QueryRow(hash).Scan(&existingID, &existingFirstSeen)
+	var existingMask sql.NullInt64
+	routeBit := packetpath.RouteMaskBit(data.RouteType)
+	err := s.stmtGetTxByHash.QueryRow(hash).Scan(&existingID, &existingFirstSeen, &existingMask)
 	if err == nil {
 		// Existing transmission
 		txID = existingID
 		if rxTime < existingFirstSeen {
 			_, _ = s.stmtUpdateTxFirstSeen.Exec(rxTime, txID)
+			s.noteFirstSeen(rxTime)
 		}
 	} else {
 		// New transmission
@@ -1143,6 +1176,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 			scopeNameForDB(data),
 			nilIfEmpty(data.FromPubkey),
 			epochSecondsForLastSeen(rxTime),
+			routeBit,
 		)
 		if err != nil {
 			s.Stats.WriteErrors.Add(1)
@@ -1150,6 +1184,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		}
 		txID, _ = result.LastInsertId()
 		s.Stats.TransmissionsInserted.Add(1)
+		s.noteFirstSeen(rxTime)
 
 		// Ping-score detection: only for a brand-new CHAN transmission
 		// (payload_type 5), never re-checked on a repeat observation of
@@ -1194,21 +1229,35 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// the ingestor now. Per #1560: use the context-aware resolver so
 	// 1-byte prefix collisions are disambiguated via NeighborGraph
 	// adjacency (anchored on from_pubkey for ADVERTs, previous hop
-	// otherwise). Empty resolved JSON → NULL via nilIfEmpty.
-	resolved := resolvePathWithContext(
+	// otherwise). Per #188: flood paths are also walked backwards from the
+	// observer, whose neighbour the last hop is. Empty resolved JSON → NULL
+	// via nilIfEmpty.
+	resolved := resolveObservationPath(
 		parsePathArray(data.PathJSON),
 		strings.ToLower(data.FromPubkey),
+		data.ObserverID,
+		data.RouteType,
 		s.neighborGraph.load(),
 		s.prefixIdx.load(),
 	)
 	resolvedJSON := marshalResolvedPath(resolved)
 
-	_, err = s.stmtInsertObservation.Exec(
+	obsArgs := []interface{}{
 		txID, observerIdx, data.Direction,
 		data.SNR, data.RSSI, data.Score,
 		data.PathJSON, epochTs, nilIfEmpty(data.RawHex),
 		nilIfEmpty(resolvedJSON),
-	)
+	}
+	// #89: an observation that brings a route bit its transmission does not
+	// have yet is written together with that bit, in one transaction: an
+	// observation must never be visible without its bit, and a known mask is
+	// never backfilled again. Skipped when the bit is already set or the row
+	// is still an un-backfilled legacy row (NULL), which the backfill owns.
+	if !isNew && routeBit != 0 && existingMask.Valid && existingMask.Int64&routeBit == 0 {
+		err = s.insertObservationWithRouteBit(txID, routeBit, obsArgs)
+	} else {
+		_, err = s.stmtInsertObservation.Exec(obsArgs...)
+	}
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
 		log.Printf("[db] observation insert (non-fatal): %v", err)
@@ -1231,6 +1280,36 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	s.Stats.WALCommits.Add(1)
 
 	return isNew, nil
+}
+
+// insertObservationWithRouteBit ORs routeBit into the transmission's
+// route_mask, inserts (or upserts) the observation and, when the mask
+// actually changed, appends a route_mask_changes row with the resulting mask,
+// all in one transaction: either everything becomes visible or nothing does.
+// The change row is what tells a running server about a bit that arrived
+// through an upsert of an existing observation row (same id, so its
+// new-observation poll never sees it). Caller holds writerMu. The pool has a
+// single connection, which this transaction holds until it ends: every
+// statement in between must run on dbTx, never on s.db.
+func (s *Store) insertObservationWithRouteBit(txID, routeBit int64, obsArgs []interface{}) error {
+	dbTx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin route_mask transaction: %w", err)
+	}
+	defer dbTx.Rollback() // no-op after a successful Commit
+	res, err := dbTx.Stmt(s.stmtOrTxRouteMask).Exec(routeBit, txID, routeBit)
+	if err != nil {
+		return fmt.Errorf("route_mask update: %w", err)
+	}
+	if _, err := dbTx.Stmt(s.stmtInsertObservation).Exec(obsArgs...); err != nil {
+		return err
+	}
+	if changed, _ := res.RowsAffected(); changed > 0 {
+		if _, err := dbTx.Stmt(s.stmtInsertRouteMaskChange).Exec(time.Now().Unix(), txID); err != nil {
+			return fmt.Errorf("route_mask change row: %w", err)
+		}
+	}
+	return dbTx.Commit()
 }
 
 // UpsertNode inserts or updates a node.
@@ -1834,6 +1913,16 @@ func (s *Store) LogStats() {
 	)
 }
 
+// staleNodesWhere selects the nodes MoveStaleNodes retires: no advert in
+// nodeDays (?1 = cutoff), unless the pubkey is an observer seen since the
+// cutoff (#199). An observer never hears its own adverts, so an online
+// observer can go nodeDays without one reaching another observer. last_seen
+// stays the last advert. Observer ids arrive upper-case from the MQTT topic
+// and node keys are lower-case, hence lower() on both sides; NULL ids are
+// skipped because a single NULL makes NOT IN false for every node.
+const staleNodesWhere = `last_seen < ?1 AND lower(public_key) NOT IN (
+	SELECT lower(id) FROM observers WHERE id IS NOT NULL AND last_seen >= ?1)`
+
 // MoveStaleNodes moves nodes not seen in nodeDays to the inactive_nodes table.
 // Returns the number of nodes moved.
 func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
@@ -1844,11 +1933,11 @@ func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE last_seen < ?`, cutoff)
+	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE `+staleNodesWhere, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("insert inactive: %w", err)
 	}
-	result, err := tx.Exec(`DELETE FROM nodes WHERE last_seen < ?`, cutoff)
+	result, err := tx.Exec(`DELETE FROM nodes WHERE `+staleNodesWhere, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("delete stale: %w", err)
 	}

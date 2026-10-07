@@ -159,7 +159,11 @@ func (s *PacketStore) maybeCloseIndexReadyCh() {
 // parallel halves the pathHop-not-ready window since the two builders
 // are independent of each other.
 func (s *PacketStore) startBackgroundIndexBuilds() {
+	gate := s.subpathBuildGate // read before the goroutine starts
 	go func() {
+		if gate != nil {
+			gate()
+		}
 		t0 := time.Now()
 		s.mu.Lock()
 		s.buildSubpathIndex()

@@ -7,14 +7,16 @@ import (
 )
 
 // Gap-closing tests for #1885. An independent mutation run against the
-// original seven tests left nine mutants alive; these kill the five that
+// original seven tests left nine mutants alive; these kill the seven that
 // matter. Each test names the mutation it kills so a future reader can tell
-// what it is load-bearing for.
+// what it is load-bearing for. Six tests kill seven mutants because
+// TestRetainedStatusPreservesCanRelaySeen covers both directions of
+// can_relay_seen in two independent scenarios.
 //
-// The four remaining survivors are deliberate: two concern the 24h constant's
+// The two remaining survivors are deliberate: one concerns the 24h constant's
 // exact value (any value between "a few hours" and "months" passes, and the
 // constant is documented as a generous margin rather than a threshold), and
-// two concern Stats.ObserverUpserts, which is a counter with no behavioural
+// one concerns Stats.ObserverUpserts, which is a counter with no behavioural
 // consequence on either path.
 
 // Kills: re-adding `packet_count = packet_count + 1` to UpsertObserverRetained.

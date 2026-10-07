@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -147,6 +148,15 @@ type Config struct {
 	APIKey     string            `json:"apiKey"`
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
+
+	// EstimatedPositions is an operator-side startup policy. Missing means
+	// enabled for compatibility; changes require a server restart.
+	EstimatedPositions *EstimatedPositionsConfig `json:"estimatedPositions,omitempty"`
+
+	// ChannelProposals configures publicly suggested hashtag channels
+	// (internal/channelregistry). Submissions open only when enabled AND a
+	// strong apiKey is set; the same block is read by the ingestor.
+	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
 
 	// HashRegions mirrors the ingestor's region-scope config (same
 	// config.json key). The server never derives HMAC keys from it — it
@@ -607,6 +617,9 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		if err != nil {
 			continue
 		}
+		if err := validateEstimatedPositionsConfig(data); err != nil {
+			return nil, fmt.Errorf("config %s: %w", p, err)
+		}
 		if err := json.Unmarshal(data, cfg); err != nil {
 			continue
 		}
@@ -975,13 +988,29 @@ func (c *Config) BlacklistGeneration() uint64 {
 // lazily on first read from c.NodeBlacklist (covering the JSON-load path
 // where the setter was never called).
 func (c *Config) IsBlacklisted(pubkey string) bool {
-	if c == nil {
+	set := c.blacklistSet()
+	if len(set) == 0 {
 		return false
+	}
+	return set[strings.ToLower(strings.TrimSpace(pubkey))]
+}
+
+// HasNodeBlacklist reports whether at least one (non-blank) pubkey is
+// blacklisted. It reads the same atomic set as IsBlacklisted, so unlike
+// len(c.NodeBlacklist) it is safe against a concurrent SetNodeBlacklist.
+func (c *Config) HasNodeBlacklist() bool {
+	return len(c.blacklistSet()) > 0
+}
+
+// blacklistSet returns the active normalised blacklist set (shared,
+// read-only), materialising it lazily from the JSON-loaded slice on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) blacklistSet() map[string]bool {
+	if c == nil {
+		return nil
 	}
 	mp := c.blacklistSetPtr.Load()
 	if mp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
 		built := buildBlacklistSet(c.NodeBlacklist)
 		if c.blacklistSetPtr.CompareAndSwap(nil, &built) {
 			mp = &built
@@ -989,10 +1018,10 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 			mp = c.blacklistSetPtr.Load()
 		}
 	}
-	if mp == nil || len(*mp) == 0 {
-		return false
+	if mp == nil {
+		return nil
 	}
-	return (*mp)[strings.ToLower(strings.TrimSpace(pubkey))]
+	return *mp
 }
 
 // IsNameHidden returns true if the given node name starts with any of the

@@ -48,6 +48,9 @@
   let _lastAnimFrame = 0;
   let nodeActivity = {};
   let recentPaths = [];
+  // Heat is a mirror like the toggles below (#125): wireLiveControls()
+  // restores from it and its change handler writes it back.
+  let heatEnabled = localStorage.getItem('meshcore-live-heatmap') !== 'false';
   let showGhostHops = localStorage.getItem('live-ghost-hops') !== 'false';
   let realisticPropagation = localStorage.getItem('live-realistic-propagation') === 'true';
   let showOnlyFavorites = localStorage.getItem('live-favorites-only') === 'true';
@@ -1123,6 +1126,107 @@
     startReplay();
   }
 
+  /**
+   * Restore and wire the persisted Live view toggles (#125).
+   *
+   * MUST run synchronously right after init() writes the markup, before init
+   * awaits anything: until it runs the checkboxes are painted and clickable
+   * but show their default state, and a click is neither saved nor kept.
+   * Restoring state and attaching listeners never sits behind an await; the
+   * visible EFFECT of a setting that needs the map, markers or heat layer is
+   * applied again by applyLiveControlEffects() once init has built them.
+   *
+   * Idempotent per element (data-live-wired). init() writes new markup on
+   * every mount, so each mounted checkbox has exactly one listener.
+   *
+   * Not covered, deliberately: #liveAudioToggle (MeshAudio.restore() and its
+   * slider panel; audio needs a user gesture anyway) and the geo-filter and
+   * region controls, which stay hidden or inert until their own fetches.
+   */
+  function wireLiveControls() {
+    const TOGGLES = [
+      { id: 'liveHeatToggle', restore: () => heatEnabled, onChange: (v) => {
+        heatEnabled = v;
+        localStorage.setItem('meshcore-live-heatmap', heatEnabled);
+        if (v) showHeatMap(); else hideHeatMap();
+      } },
+      { id: 'liveGhostToggle', restore: () => showGhostHops, onChange: (v) => {
+        showGhostHops = v;
+        localStorage.setItem('live-ghost-hops', showGhostHops);
+      } },
+      { id: 'liveRealisticToggle', restore: () => realisticPropagation, onChange: (v) => {
+        realisticPropagation = v;
+        localStorage.setItem('live-realistic-propagation', realisticPropagation);
+      } },
+      { id: 'liveColorHashToggle', restore: () => colorByHash, onChange: (v) => {
+        colorByHash = v;
+        localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
+        window.dispatchEvent(new Event('storage'));
+      } },
+      { id: 'liveFavoritesToggle', restore: () => showOnlyFavorites, onChange: (v) => {
+        showOnlyFavorites = v;
+        localStorage.setItem('live-favorites-only', showOnlyFavorites);
+        applyFavoritesFilter();
+      } },
+      { id: 'liveForeignToggle', restore: () => highlightForeign, onChange: (v) => {
+        highlightForeign = v;
+        localStorage.setItem('live-highlight-foreign', highlightForeign);
+      } },
+      { id: 'liveMultibyteToggle', restore: () => multibyteOnly, onChange: (v) => {
+        multibyteOnly = v;
+        localStorage.setItem('live-multibyte-only', multibyteOnly);
+        rebuildFeedList();
+      } },
+      { id: 'liveMatrixToggle', restore: () => matrixMode, onChange: (v) => {
+        matrixMode = v;
+        localStorage.setItem('live-matrix-mode', matrixMode);
+        applyMatrixTheme(matrixMode);
+        syncHeatToggleToMatrix(matrixMode);
+        // Matrix ON hid the heat layer; OFF brings it back as Heat is set.
+        // During init applyLiveControlEffects() (re)builds it after loadNodes().
+        if (!matrixMode && heatEnabled) showHeatMap();
+      } },
+      { id: 'liveMatrixRainToggle', restore: () => matrixRain, onChange: (v) => {
+        matrixRain = v;
+        localStorage.setItem('live-matrix-rain', matrixRain);
+        if (matrixRain) startMatrixRain(); else stopMatrixRain();
+      } },
+    ];
+    for (const t of TOGGLES) {
+      const el = document.getElementById(t.id);
+      if (!el) { console.warn('[live] control not found: ' + t.id); continue; }
+      if (el.dataset.liveWired === '1') continue;
+      el.dataset.liveWired = '1';
+      el.checked = t.restore();
+      el.addEventListener('change', (e) => t.onChange(e.target.checked));
+    }
+    // The Heat/Matrix interlock holds from the first paint.
+    syncHeatToggleToMatrix(matrixMode);
+  }
+
+  // Matrix mode owns the heat map: while it is on, the heat layer is hidden
+  // and its toggle unchecked and disabled. When it is off, the toggle shows
+  // the Heat setting again (#150). Safe before the map exists.
+  function syncHeatToggleToMatrix(on) {
+    const ht = document.getElementById('liveHeatToggle');
+    if (on) {
+      hideHeatMap();
+      if (ht) { ht.checked = false; ht.disabled = true; }
+    } else if (ht) {
+      ht.disabled = false; // recover from stale state
+      ht.checked = heatEnabled;
+    }
+  }
+
+  // Effects of the restored toggles that need what init() builds behind its
+  // awaits: the map, the node markers and the heat layer.
+  function applyLiveControlEffects() {
+    if (heatEnabled && !matrixMode) showHeatMap(); else hideHeatMap();
+    applyMatrixTheme(matrixMode);
+    syncHeatToggleToMatrix(matrixMode);
+    if (matrixRain) startMatrixRain();
+  }
+
   async function init(app) {
     app.innerHTML = `
       <div class="live-page">
@@ -1181,7 +1285,7 @@
             </div>
             <div class="live-toggles">
               <div class="live-node-filter-wrap" style="position:relative">
-                <label class="live-node-filter-hitarea" style="display:inline-flex; align-items:center; min-height:44px; cursor:text;">
+                <label class="live-node-filter-hitarea">
                   <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
                 </label>
                 <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
@@ -1275,6 +1379,10 @@
           <div id="vcrPrompt" class="vcr-prompt hidden"></div>
         </div>
       </div>`;
+
+    // The persisted view toggles are restored and wired before the first
+    // await (#88, #125): see wireLiveControls().
+    wireLiveControls();
 
     // Fetch configurable map defaults (#115)
     let mapCenter = [37.45, -122.0];
@@ -1568,7 +1676,7 @@
     AreaFilter.init(document.getElementById('liveAreaFilter'));
     AreaFilter.onChange(function () { loadNodes(); });
     await loadNodes();
-    showHeatMap();
+    applyLiveControlEffects();
     connectWS();
     initResizeHandler();
     initVCRHeightTracker();
@@ -1596,60 +1704,6 @@
     }
 
     map.on('zoomend', rescaleMarkers);
-
-    // Heat map toggle — persist in localStorage
-    const liveHeatEl = document.getElementById('liveHeatToggle');
-    if (localStorage.getItem('meshcore-live-heatmap') === 'false') { liveHeatEl.checked = false; hideHeatMap(); }
-    else if (localStorage.getItem('meshcore-live-heatmap') === 'true') { liveHeatEl.checked = true; }
-    liveHeatEl.addEventListener('change', (e) => {
-      localStorage.setItem('meshcore-live-heatmap', e.target.checked);
-      if (e.target.checked) showHeatMap(); else hideHeatMap();
-    });
-
-    const ghostToggle = document.getElementById('liveGhostToggle');
-    ghostToggle.checked = showGhostHops;
-    ghostToggle.addEventListener('change', (e) => {
-      showGhostHops = e.target.checked;
-      localStorage.setItem('live-ghost-hops', showGhostHops);
-    });
-
-    const realisticToggle = document.getElementById('liveRealisticToggle');
-    realisticToggle.checked = realisticPropagation;
-    realisticToggle.addEventListener('change', (e) => {
-      realisticPropagation = e.target.checked;
-      localStorage.setItem('live-realistic-propagation', realisticPropagation);
-    });
-
-    const colorHashToggle = document.getElementById('liveColorHashToggle');
-    colorHashToggle.checked = colorByHash;
-    colorHashToggle.addEventListener('change', (e) => {
-      colorByHash = e.target.checked;
-      localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
-      window.dispatchEvent(new Event('storage'));
-    });
-
-    const favoritesToggle = document.getElementById('liveFavoritesToggle');
-    favoritesToggle.checked = showOnlyFavorites;
-    favoritesToggle.addEventListener('change', (e) => {
-      showOnlyFavorites = e.target.checked;
-      localStorage.setItem('live-favorites-only', showOnlyFavorites);
-      applyFavoritesFilter();
-    });
-
-    const multibyteToggle = document.getElementById('liveMultibyteToggle');
-    multibyteToggle.checked = multibyteOnly;
-    multibyteToggle.addEventListener('change', (e) => {
-      multibyteOnly = e.target.checked;
-      localStorage.setItem('live-multibyte-only', multibyteOnly);
-      rebuildFeedList();
-    });
-
-    const foreignToggle = document.getElementById('liveForeignToggle');
-    foreignToggle.checked = highlightForeign;
-    foreignToggle.addEventListener('change', (e) => {
-      highlightForeign = e.target.checked;
-      localStorage.setItem('live-highlight-foreign', highlightForeign);
-    });
 
     // Region filter (#1045): dropdown of observer IATA regions
     (function initLiveRegionFilter() {
@@ -1956,41 +2010,6 @@
       AreaFilter.onChange(refresh);
       refresh();
     })();
-
-    const matrixToggle = document.getElementById('liveMatrixToggle');
-    matrixToggle.checked = matrixMode;
-    matrixToggle.addEventListener('change', (e) => {
-      matrixMode = e.target.checked;
-      localStorage.setItem('live-matrix-mode', matrixMode);
-      applyMatrixTheme(matrixMode);
-      if (matrixMode) {
-        hideHeatMap();
-        const ht = document.getElementById('liveHeatToggle');
-        if (ht) { ht.checked = false; ht.disabled = true; }
-      } else {
-        const ht = document.getElementById('liveHeatToggle');
-        if (ht) { ht.disabled = false; }
-      }
-    });
-    applyMatrixTheme(matrixMode);
-    if (matrixMode) {
-      hideHeatMap();
-      const ht = document.getElementById('liveHeatToggle');
-      if (ht) { ht.checked = false; ht.disabled = true; }
-    } else {
-      // Ensure heat toggle is enabled if matrix mode is off (recover from stale state)
-      const ht = document.getElementById('liveHeatToggle');
-      if (ht) { ht.disabled = false; }
-    }
-
-    const rainToggle = document.getElementById('liveMatrixRainToggle');
-    rainToggle.checked = matrixRain;
-    rainToggle.addEventListener('change', (e) => {
-      matrixRain = e.target.checked;
-      localStorage.setItem('live-matrix-rain', matrixRain);
-      if (matrixRain) startMatrixRain(); else stopMatrixRain();
-    });
-    if (matrixRain) startMatrixRain();
 
     // Audio toggle
     const audioToggle = document.getElementById('liveAudioToggle');
@@ -4389,6 +4408,7 @@
   }
 
   function showHeatMap() {
+    if (!map) return; // a Heat click during init: applyLiveControlEffects() builds it
     if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
     const points = [];
     Object.values(nodeData).forEach(n => {
@@ -4416,7 +4436,8 @@
   }
 
   function hideHeatMap() {
-    if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+    if (heatLayer && map) map.removeLayer(heatLayer);
+    heatLayer = null;
   }
 
   /** Extract channel row style from a packet (shared by feed item builders). */
