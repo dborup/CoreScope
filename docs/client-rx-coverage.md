@@ -291,6 +291,69 @@ to the per-observer view.
 Optional future hardening: have the companion sign a broker-issued token (the firmware exposes
 on-device signing) — not required for the MVP, tracked as a follow-up.
 
+## Erasing one contributor's data (`admin delete-client-rx`)
+
+When a contributor asks to have their coverage removed, an operator erases every row for one
+`rx_pubkey` with a single ingestor subcommand:
+
+```
+corescope-ingestor -config <cfg> admin delete-client-rx --pubkey <64 hex> [--dry-run] [--wait 60s]
+```
+
+It is a subcommand of the **ingestor**, because every write lives there (#1283). `main()` dispatches
+on `admin` before the normal MQTT boot and the subcommand parses its own flags, so a normal
+`-config` boot is unaffected.
+
+**What it deletes** (matched with `=` on the exact key — never a prefix/LIKE):
+
+- `client_receptions` — every row `WHERE rx_pubkey = <key>` (seeks the unique index
+  `(rx_pubkey, heard_key, rx_at)`), deleted in bounded batches.
+- `client_observers` — the single companion-name row `WHERE pubkey = <key>`.
+
+Nothing else references `rx_pubkey`: there are no rollups, persisted caches or sidecars, and the
+client topic writes only these two tables.
+
+**It runs online, through a queue**, so the single-writer invariant holds (#1283) — no second
+read-write process, no `SQLITE_BUSY`:
+
+1. The CLI writes `client-rx-deletes/request-<id>.json` (mode 0600) next to the DB.
+2. The running ingestor picks it up within its 15 s tick and deletes inside
+   `WriterTx("delete_client_rx", …)` (so the work shows up in `/api/perf/write-sources`).
+3. It writes `result-<id>.json` (**counts only — never the key**) and removes the request.
+4. The CLI waits up to `--wait` (default 60 s). With no result it exits `2` with
+   `queued — ingestor not running?`.
+
+**`--dry-run`** opens the DB **read-only** (`mode=ro`), prints the two counts and the `rx_at` range,
+and writes nothing.
+
+**Audit, with no personal data.** The ingestor logs one line and appends one JSONL record to a 0600
+file next to the DB:
+
+```
+[client-rx-delete] id=<id> key=hmac:<16 hex> client_receptions=N client_observers=M took=…
+```
+
+The fingerprint is `HMAC-SHA256(salt, key)` truncated to 16 hex, keyed by a per-install 32-byte salt
+in `client-rx-delete.salt` (0600, created on first use). Pubkeys are public, so an unsalted hash — or
+a prefix — could be reversed; the salted HMAC cannot. **The key, or any prefix of it, never appears in
+a log line, the audit file, or the result file.**
+
+### Operator steps
+
+1. **(Optional) Publish test data.** For a drill, publish a few client-RX messages for a throwaway key.
+2. **Dry-run first:** `… admin delete-client-rx --pubkey <key> --dry-run` — confirm the counts and the
+   `rx_at` range look right.
+3. **Delete for real:** `… admin delete-client-rx --pubkey <key>` — expect
+   `deleted client_receptions=N client_observers=M`.
+4. **Blacklist the key.** As the command's closing hint says, add the key to `observerBlacklist` in the
+   ingestor config. Without this, a later upload (`rx_at` can be backdated up to 30 days) re-inserts the
+   contributor's coverage. See [Restricting which MQTT sources may
+   contribute](#restricting-which-mqtt-sources-may-contribute).
+5. **Verify.** Re-run with `--dry-run`: it must report `0/0`. The RX endpoints have no server cache and
+   send `no-store`, so the leaderboard and `?rx=` coverage reflect the deletion within the queue tick
+   plus the delete time. Check the audit line shows `key=hmac:…` (no key) and that
+   `client-rx-delete.salt` / `client-rx-delete-audit.jsonl` are mode 0600.
+
 ## Configurable values (future customizer)
 
 Hardcoded initially, tracked for the customizer per AGENTS.md rule 8: hex resolution per zoom

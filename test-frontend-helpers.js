@@ -2517,9 +2517,11 @@ console.log('\n=== analytics.js: sortChannels ===');
       { name: 'B', hash: 1, messages: 1, senders: 1, lastActivity: '', encrypted: false },
       { name: null, hash: 2, messages: 2, senders: 2, lastActivity: '', encrypted: false },
     ];
-    const r = sortChannels(data, 'name', 'asc');
-    assert.strictEqual(r[0].name, null);
-    assert.strictEqual(r[1].name, 'B');
+    for (const dir of ['asc', 'desc']) {
+      const r = sortChannels(data, 'name', dir);
+      assert.strictEqual(r[0].name, 'B');
+      assert.strictEqual(r[1].name, null);
+    }
   });
 
   test('sort handles missing lastActivity', () => {

@@ -28,6 +28,13 @@ import (
 )
 
 func main() {
+	// Admin subcommands (e.g. `admin delete-client-rx`) run a one-shot CLI and
+	// exit — they never start MQTT ingest. Dispatched before flag.Parse so the
+	// subcommand owns its own FlagSet; normal `-config` boot is unaffected.
+	if argsHaveAdmin(os.Args[1:]) {
+		os.Exit(runAdmin(os.Args[1:]))
+	}
+
 	// pprof profiling — off by default, enable with ENABLE_PPROF=true
 	if os.Getenv("ENABLE_PPROF") == "true" {
 		pprofPort := os.Getenv("PPROF_PORT")
@@ -412,11 +419,17 @@ func main() {
 	// write handle) executes the DELETEs. Process on startup, then every
 	// 15 seconds — short enough for a one-click UX, long enough to avoid
 	// useless wake-ups.
+	// The same tick also drains the admin delete-client-rx queue (#330): the
+	// one-shot CLI enqueues a marker next to the DB and the ingestor, as the
+	// single writer, runs the DELETEs here — no second read-write process, no
+	// SQLITE_BUSY.
 	store.RunPendingPruneRequests()
+	store.RunPendingClientRxDeletes()
 	pruneQueueTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range pruneQueueTicker.C {
 			store.RunPendingPruneRequests()
+			store.RunPendingClientRxDeletes()
 		}
 	}()
 
