@@ -1190,10 +1190,17 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 			// on live staging 25 of 62104 ADVERTs have NULL from_pubkey, and
 			// all 25 have no pubKey in decoded_json either — nothing is lost,
 			// because there was never a pubkey to record. A COALESCE fallback
-			// to JSON_EXTRACT was measured and rejected: it rescued 0 rows and
-			// cost half the win (1.12x -> 1.05x). If you add a new write path
-			// for transmissions, populate from_pubkey there rather than
-			// reintroducing a per-row JSON parse here.
+			// to JSON_EXTRACT was measured and rejected: it rescued 0 rows,
+			// and it parses decoded_json again for every NULL row, so one
+			// corrupt ADVERT that the backfill has not reached yet fails the
+			// whole query with "malformed JSON" (a 500 on /api/nodes?region=)
+			// exactly as the old expression did. Its speed is not the reason:
+			// on a 4.3GB synthetic DB it times within noise of from_pubkey.
+			// If you add a new write path for transmissions, populate
+			// from_pubkey there rather than reintroducing a per-row JSON parse
+			// here. nodes_region_from_pubkey_test.go locks the result set
+			// against the JSON_EXTRACT expression; TestBackfillFromPubkey_*
+			// in cmd/ingestor locks the backfill's half of the contract.
 			subq := fmt.Sprintf(`public_key IN (
 				SELECT DISTINCT t.from_pubkey
 				FROM transmissions t
