@@ -120,12 +120,18 @@ type DB struct {
 	schemaProbeHook func() error
 
 	// Region-membership cache for GetNodes (see nodes_region_cache.go).
-	nodeRegionCacheMu   sync.Mutex
-	nodeRegionCache     map[string]*nodeRegionEntry
-	nodeRegionLRU       int64
-	nodeRegionSF        singleflight.Group
-	nodeRegionFullMu    sync.Mutex
-	nodeRegionQueryHook func()
+	// nodeRegionUsed holds the LRU tick of each cached key and is written
+	// together with nodeRegionCache under nodeRegionCacheMu.
+	nodeRegionCacheMu sync.Mutex
+	nodeRegionCache   map[string]*nodeRegionEntry
+	nodeRegionUsed    map[string]int64
+	nodeRegionTick    int64
+	nodeRegionSF      singleflight.Group
+	nodeRegionFullMu  sync.Mutex
+	// nodeRegionQueryHook (test seam, nil in production) runs once per real
+	// membership scan, before the query; a non-nil error fails that refresh
+	// the way a failing scan does.
+	nodeRegionQueryHook func() error
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,14 +35,40 @@ import (
 // Only the first request for a region set waits on a full scan, and
 // concurrent first requests share it (the #1910 singleflight pattern, as
 // channelsSF).
+//
+// Two bounds make that safe to expose to a query parameter (AGENTS.md rule 0,
+// "no unbounded data structures"):
+//
+//   - at most nodeRegionMaxEntries entries, kept by evicting the least
+//     recently used one (setNodeRegionEntry), and a stored key longer than
+//     nodeRegionMaxKeyBytes is replaced by its digest (nodeRegionKey);
+//   - an entry older than nodeRegionMaxStale is not served blind: the caller
+//     waits for its refresh, so the ages promised above are the ages
+//     actually served even when refreshes keep failing.
 
 const (
 	nodeRegionFreshTTL        = 30 * time.Second
 	nodeRegionRebuildInterval = 30 * time.Minute
 	// nodeRegionMaxEntries bounds the cache. Entries hold up to a few thousand
-	// pubkeys each, so this is far below the shared maxCacheEntries; in
-	// practice an instance sees a handful of distinct region sets.
+	// pubkeys each (one per node in the region set, so the nodes table caps
+	// an entry), so this is far below the shared maxCacheEntries; in practice
+	// an instance sees a handful of distinct region sets.
 	nodeRegionMaxEntries = 32
+	// nodeRegionMaxKeyBytes caps a stored key, as channelListMaxKeyBytes does
+	// for the channel list cache: ?region= is caller-controlled and
+	// normalizeRegionCodes does not limit how many codes it accepts, so a
+	// long set is stored under "sha256:" + 64 hex digits instead. Normalized
+	// codes are upper-case, so no short key can collide with a digest.
+	nodeRegionMaxKeyBytes = 256
+	// nodeRegionMaxStale bounds the age of a served entry. Below it a stale
+	// entry is served while one refresh runs in the background — the fast
+	// path every page uses. At or above it the caller waits for the refresh,
+	// which is a full rebuild at this age, so the documented bounds hold:
+	// without the wait a refresh that keeps failing serves membership of
+	// unbounded age with only a log line to show it. The cost is that the
+	// first region request after nodeRegionMaxStale with no region traffic
+	// pays one full scan, exactly as a cold start does.
+	nodeRegionMaxStale = nodeRegionRebuildInterval
 )
 
 // errNodeRegionFlightResult means nodeRegionSF returned something other than
@@ -86,7 +114,10 @@ func newNodeRegionEntry(set map[string]struct{}, watermark int64, built time.Tim
 }
 
 // nodeRegionKey canonicalises normalised region codes so "EDI,GLA",
-// "gla, edi" and "EDI,EDI,GLA" share one cache entry.
+// "gla, edi" and "EDI,EDI,GLA" share one cache entry. A set long enough to
+// bloat the map (or the log line) is keyed by its digest instead; the codes
+// themselves are passed to the scan separately, so the key is only an
+// identity.
 func nodeRegionKey(codes []string) string {
 	seen := make(map[string]struct{}, len(codes))
 	uniq := make([]string, 0, len(codes))
@@ -97,23 +128,70 @@ func nodeRegionKey(codes []string) string {
 		}
 	}
 	sort.Strings(uniq)
-	return strings.Join(uniq, ",")
+	key := strings.Join(uniq, ",")
+	if len(key) <= nodeRegionMaxKeyBytes {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// getNodeRegionEntry returns the entry for key and marks it as the most
+// recently used one, so eviction drops the sets nobody is paging through.
 func (db *DB) getNodeRegionEntry(key string) *nodeRegionEntry {
 	db.nodeRegionCacheMu.Lock()
 	defer db.nodeRegionCacheMu.Unlock()
-	return db.nodeRegionCache[key]
+	e := db.nodeRegionCache[key]
+	if e != nil {
+		db.touchNodeRegionLocked(key)
+	}
+	return e
 }
 
+// setNodeRegionEntry stores e, evicting the least recently used entry when
+// the cache is full.
+//
+// It must evict exactly one entry, never clear the map: ?region= is
+// caller-controlled, so a client cycling through more than
+// nodeRegionMaxEntries distinct region sets would otherwise drop the entries
+// the real pages depend on, and every following request would pay a full
+// observation scan — serialised behind nodeRegionFullMu, seconds each on a
+// large database. That is the one thing this cache exists to prevent.
 func (db *DB) setNodeRegionEntry(key string, e *nodeRegionEntry) {
 	db.nodeRegionCacheMu.Lock()
 	defer db.nodeRegionCacheMu.Unlock()
-	_, replacing := db.nodeRegionCache[key]
-	if db.nodeRegionCache == nil || (!replacing && len(db.nodeRegionCache) >= nodeRegionMaxEntries) {
-		db.nodeRegionCache = make(map[string]*nodeRegionEntry)
+	if db.nodeRegionCache == nil {
+		db.nodeRegionCache = make(map[string]*nodeRegionEntry, nodeRegionMaxEntries)
+		db.nodeRegionUsed = make(map[string]int64, nodeRegionMaxEntries)
+	}
+	if _, replacing := db.nodeRegionCache[key]; !replacing {
+		for len(db.nodeRegionCache) >= nodeRegionMaxEntries {
+			victim, oldest, found := "", int64(0), false
+			for k, used := range db.nodeRegionUsed {
+				if !found || used < oldest {
+					victim, oldest, found = k, used, true
+				}
+			}
+			if !found {
+				break // cannot happen: the two maps are written together
+			}
+			delete(db.nodeRegionCache, victim)
+			delete(db.nodeRegionUsed, victim)
+		}
 	}
 	db.nodeRegionCache[key] = e
+	db.touchNodeRegionLocked(key)
+}
+
+// touchNodeRegionLocked records key as the most recent use. Caller holds
+// nodeRegionCacheMu. The tick is a counter, not a clock, so entries touched
+// inside one coarse clock tick still order.
+func (db *DB) touchNodeRegionLocked(key string) {
+	db.nodeRegionTick++
+	if db.nodeRegionUsed == nil {
+		db.nodeRegionUsed = make(map[string]int64, nodeRegionMaxEntries)
+	}
+	db.nodeRegionUsed[key] = db.nodeRegionTick
 }
 
 // nodeRegionKeysJSON returns the JSON array of node public keys heard in the
@@ -123,15 +201,35 @@ func (db *DB) nodeRegionKeysJSON(codes []string) (string, error) {
 	key := nodeRegionKey(codes)
 
 	if e := db.getNodeRegionEntry(key); e != nil {
-		if !e.fresh() {
+		age := time.Since(e.refreshed)
+		switch {
+		case age < nodeRegionFreshTTL:
+			return e.keysJSON, nil
+		case age < nodeRegionMaxStale:
 			// Stale-while-revalidate: kick one refresh, don't wait on it.
 			// DoChan dedups against an in-flight refresh for the same key,
 			// and its buffered result channel may be left unread.
 			db.nodeRegionSF.DoChan(key, func() (any, error) {
 				return db.refreshNodeRegion(key, codes)
 			})
+			return e.keysJSON, nil
 		}
-		return e.keysJSON, nil
+		// Past nodeRegionMaxStale the entry is too old to serve blind, so
+		// wait for the refresh (a full rebuild at this age). A refresh that
+		// fails still falls back to the stale entry: an outage of the
+		// observation scan must not turn /api/nodes?region= into a 500.
+		v, err, _ := db.nodeRegionSF.Do(key, func() (any, error) {
+			return db.refreshNodeRegion(key, codes)
+		})
+		if err != nil {
+			log.Printf("[nodes-region] %s: serving entry %v old, refresh failed: %v",
+				key, age.Round(time.Second), err)
+			return e.keysJSON, nil
+		}
+		if fresh, ok := v.(*nodeRegionEntry); ok {
+			return fresh.keysJSON, nil
+		}
+		return "", fmt.Errorf("nodes-region %s: %w: %T", key, errNodeRegionFlightResult, v)
 	}
 
 	v, err, _ := db.nodeRegionSF.Do(key, func() (any, error) {
@@ -158,7 +256,9 @@ func (db *DB) refreshNodeRegion(key string, codes []string) (*nodeRegionEntry, e
 		return prev, nil // a flight that finished just before this one got here
 	}
 	if db.nodeRegionQueryHook != nil {
-		db.nodeRegionQueryHook()
+		if err := db.nodeRegionQueryHook(); err != nil {
+			return nil, fmt.Errorf("nodes-region %s: %w", key, err)
+		}
 	}
 
 	// A scan still running when the next rebuild would be due is abandoned
@@ -277,15 +377,45 @@ func (db *DB) scanNodeRegionKeys(
 		join = "CROSS JOIN"
 	}
 	// Only fixed fragments and "?" placeholders are formatted in; every value
-	// is bound. Use the indexed from_pubkey for current ADVERTs, but legacy
-	// rows can predate its asynchronous backfill. JSON_EXTRACT preserves the
-	// fork's existing region membership for those rows.
-	q := fmt.Sprintf(`SELECT DISTINCT COALESCE(t.from_pubkey, JSON_EXTRACT(t.decoded_json, '$.pubKey'))
+	// is bound.
+	//
+	// #1143 / PR #38: from_pubkey is a dedicated column the ingestor fills at
+	// write time for ADVERT rows, so this lookup does not have to
+	// JSON_EXTRACT and parse decoded_json for every candidate row. Measured
+	// against a live 4.9GB database, 9 interleaved rounds so concurrent
+	// ingest cannot bias one variant: 934ms -> 835ms median (1.12x) for a
+	// single-region filter, identical result set both ways. The win is purely
+	// the avoided JSON parse — EXPLAIN QUERY PLAN is byte-identical before
+	// and after, both driving off idx_transmissions_payload_type. Despite the
+	// column being indexed, idx_transmissions_from_pubkey does not
+	// participate in this plan at all.
+	//
+	// THE TRAP, for whoever touches this next: from_pubkey is only written
+	// for ADVERTs that actually carry a pubkey — see the guard in
+	// cmd/ingestor/db.go. A NULL here drops out of IN (...) silently, so a
+	// write path that fills decoded_json but forgets from_pubkey would cost
+	// nodes from this filter with no error to notice. That is safe today only
+	// because it is measured to be: on live staging 25 of 62104 ADVERTs have
+	// NULL from_pubkey, and all 25 have no pubKey in decoded_json either —
+	// nothing is lost, because there was never a pubkey to record. A COALESCE
+	// fallback to JSON_EXTRACT was measured and rejected: it rescued 0 rows,
+	// and it parses decoded_json again for every NULL row, so one corrupt
+	// ADVERT that the backfill has not reached yet fails the whole query with
+	// "malformed JSON" (a 500 on /api/nodes?region=). Behind this cache that
+	// is worse, not better: the failed refresh leaves the cached entry stale
+	// for every later request too. Its speed is not the reason: on a 4.3GB
+	// synthetic DB it times within noise of from_pubkey. If you add a new
+	// write path for transmissions, populate from_pubkey there rather than
+	// reintroducing a per-row JSON parse here. nodes_region_from_pubkey_test.go
+	// locks the result set against the JSON_EXTRACT expression;
+	// TestBackfillFromPubkey_* in cmd/ingestor locks the backfill's half of
+	// the contract.
+	q := fmt.Sprintf(`SELECT DISTINCT t.from_pubkey
 		FROM observations o
 		%[1]s transmissions t ON t.id = o.transmission_id
 		%[1]s observers obs ON %[2]s
 		WHERE t.payload_type = ?
-		AND COALESCE(t.from_pubkey, JSON_EXTRACT(t.decoded_json, '$.pubKey')) IS NOT NULL
+		AND t.from_pubkey IS NOT NULL
 		AND UPPER(TRIM(obs.iata)) IN (%[3]s)
 		AND o.id > ? AND o.id <= ?`, join, joinCond, strings.Join(placeholders, ","))
 
