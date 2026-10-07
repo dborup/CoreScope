@@ -95,8 +95,17 @@ function assertWarn(w, block, where) {
 }
 // axe color-contrast on the warning element itself: no violation, and axe
 // must actually have measured it (a pass), not left it "incomplete".
+// Waits for page/pane fade-ins first: mid-animation, axe samples a blended
+// (lighter) foreground and reports a contrast the settled page never has.
 async function assertContrast(page, selector, where) {
-  const r = await new AxeBuilder({ page }).include(selector).withRules(['color-contrast']).analyze();
+  await page.waitForFunction((sel) => {
+    const el = document.querySelector(sel);
+    return !!el && document.getAnimations().every((a) => {
+      const t = a.effect && a.effect.target;
+      return !(t && t.contains(el)) || a.playState !== 'running';
+    });
+  }, selector);
+  const r =await new AxeBuilder({ page }).include(selector).withRules(['color-contrast']).analyze();
   const bad = r.violations.flatMap((v) => v.nodes.map((n) => n.failureSummary || n.html));
   assert(bad.length === 0, where + ': axe color-contrast ' + bad.join(' | '));
   const measured = r.passes.reduce((k, v) => k + v.nodes.length, 0);
