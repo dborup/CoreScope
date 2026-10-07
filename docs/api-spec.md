@@ -816,8 +816,12 @@ example during startup or after a failed load).
 With `?include=advertIntervals`, repeater health may also return
 `advertIntervals` in the same shape as the node-detail `include=advertRoutes`
 response: `{ "window": 20, "flood": AdvertIntervalEstimate,
-"zero_hop": AdvertIntervalEstimate }`. The field is absent by default, for
-non-repeaters, and for hidden identities. The server reuses the bounded,
+"zero_hop": AdvertIntervalEstimate }`, plus `advertRouteBackfill` as a
+`RouteMaskBackfillStatus` (`status`: `pending`, `backfilling`, or `complete`;
+`remaining`: number or null). Both fields are absent by default, for
+non-repeaters, and for hidden identities. If the backfill status is anything
+other than `complete`, including absent in an older response, route classes
+and their estimated intervals are provisional. The server reuses the bounded,
 per-node cached advert-route scan; this is an opt-in because a cold scan of a
 node with many adverts is comparatively expensive. `interval_s` is an
 **estimate** from at most the newest 20 distinct adverts in each route class,

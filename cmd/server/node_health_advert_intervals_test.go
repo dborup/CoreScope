@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNodeHealthAdvertIntervalsOptInRoleAndPrivacy(t *testing.T) {
@@ -35,14 +36,25 @@ func TestNodeHealthAdvertIntervalsOptInRoleAndPrivacy(t *testing.T) {
 	if _, ok := get(repeater, "")["advertIntervals"]; ok {
 		t.Fatal("default response added advertIntervals")
 	}
+	if _, ok := get(repeater, "")["advertRouteBackfill"]; ok {
+		t.Fatal("default response added advertRouteBackfill")
+	}
 	if _, ok := get(companion, "?include=advertIntervals")["advertIntervals"]; ok {
 		t.Fatal("non-repeater exposes intervals")
+	}
+	if _, ok := get(companion, "?include=advertIntervals")["advertRouteBackfill"]; ok {
+		t.Fatal("non-repeater exposes route backfill")
 	}
 	if lookups.Load() != 0 {
 		t.Fatalf("unexpected route lookups: %d", lookups.Load())
 	}
-	if _, ok := get(repeater, "?include=advertIntervals")["advertIntervals"]; !ok {
+	body := get(repeater, "?include=advertIntervals")
+	if _, ok := body["advertIntervals"]; !ok {
 		t.Fatal("repeater missing intervals")
+	}
+	var backfill RouteMaskBackfillStatus
+	if err := json.Unmarshal(body["advertRouteBackfill"], &backfill); err != nil || backfill.Status == "" {
+		t.Fatalf("missing typed backfill status: %v, body=%s", err, body["advertRouteBackfill"])
 	}
 	if lookups.Load() != 1 {
 		t.Fatalf("want one cache lookup, got %d", lookups.Load())
@@ -59,11 +71,25 @@ func TestNodeHealthAdvertIntervalsOptInRoleAndPrivacy(t *testing.T) {
 	if scans.Load() != 1 {
 		t.Fatalf("opt-in health requests should reuse one cached scan, got %d", scans.Load())
 	}
+	for _, status := range []string{"pending", "complete"} {
+		srv.db.routeMaskStatusMu.Lock()
+		srv.db.routeMaskStatus = RouteMaskBackfillStatus{Status: status}
+		srv.db.routeMaskStatusExp = time.Now().Add(time.Minute)
+		srv.db.routeMaskStatusMu.Unlock()
+		body := get(repeater, "?include=advertIntervals")
+		var got RouteMaskBackfillStatus
+		if err := json.Unmarshal(body["advertRouteBackfill"], &got); err != nil || got.Status != status {
+			t.Fatalf("status=%s, wire backfill=%+v err=%v", status, got, err)
+		}
+	}
 	srv.cfg.ObserverBlacklist = []string{strings.ToUpper(repeater)}
 	if _, ok := get(repeater, "?include=advertIntervals")["advertIntervals"]; ok {
 		t.Fatal("hidden identity exposed intervals")
 	}
-	if lookups.Load() != 3 {
+	if _, ok := get(repeater, "?include=advertIntervals")["advertRouteBackfill"]; ok {
+		t.Fatal("hidden identity exposed backfill")
+	}
+	if lookups.Load() != 5 {
 		t.Fatal("privacy must gate before cache")
 	}
 }
@@ -83,7 +109,7 @@ func TestNodeHealthAdvertIntervalsFailsClosedOnIdentityLookupError(t *testing.T)
 	if w.Code != 200 {
 		t.Fatalf("health status %d: %s", w.Code, w.Body.String())
 	}
-	if strings.Contains(w.Body.String(), "advertIntervals") || lookups.Load() != 0 {
+	if strings.Contains(w.Body.String(), "advertIntervals") || strings.Contains(w.Body.String(), "advertRouteBackfill") || lookups.Load() != 0 {
 		t.Fatalf("failed identity lookup must not expose cadence or consult cache: %s", w.Body.String())
 	}
 }

@@ -7,7 +7,7 @@ const { chromium } = require('playwright');
 
 const ROOT = path.join(__dirname, 'public');
 const ORIGIN = 'http://127.0.0.1:18740';
-const KEYS = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+const KEYS = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64)];
 const now = Date.now();
 const end = new Date(now).toISOString();
 const start = new Date(now - 24 * 3600000).toISOString();
@@ -64,10 +64,12 @@ async function render(page, responses, width) {
         node: { name: `Repeater ${i}`, role: 'repeater' }, stats: { lastHeard: end, packetsToday: 2 },
         observers: i === 0 ? names.map(observer_name => ({ observer_name })) : i === 1 ? [{ observer_name: 'One' }] : [],
         recentPackets: [], activity24h: i === 0 ? activity() : i === 1 ? activity(false) : undefined,
+        advertRouteBackfill: i === 0 ? { status: 'pending', remaining: 15 } : i === 1 ? { status: 'complete', remaining: 0 } : undefined,
         advertIntervals: i === 0 ? {
           zero_hop: { status: 'estimated', interval_s: 7200, samples: 5, last_advert: end, confidence: 'medium' },
           flood: { status: 'too_few', interval_s: null, samples: 2, last_advert: end },
-        } : i === 1 ? { zero_hop: { status: 'none_observed', samples: 0 }, flood: { status: 'irregular', samples: 5 } } : undefined,
+        } : i === 1 ? { zero_hop: { status: 'none_observed', samples: 0 }, flood: { status: 'irregular', samples: 5 } }
+          : i === 2 ? { zero_hop: { status: 'estimated', interval_s: 3600, samples: 4 }, flood: { status: 'too_few', samples: 1 } } : undefined,
       }]));
       await render(page, data, width);
       if (process.env.SCREENSHOT_PATH && width === 1280) {
@@ -90,9 +92,12 @@ async function render(page, responses, width) {
       assert.equal(await cards.nth(2).locator('.home-spark-bar').count(), 0);
       assert.match(await cards.nth(2).locator('.mnc-spark').innerText(), /unavailable/i);
       assert.match(await large.locator('.mnc-advert-cadence').innerText(), /Zero-hop[\s\S]*≈ 2 h[\s\S]*Flood[\s\S]*not enough adverts/i);
-      assert.match(await large.locator('.mnc-advert-cadence').innerText(), /observed estimate.*not configured/i);
+      assert.match(await large.locator('.mnc-advert-note').getAttribute('title'), /observed estimate.*not the configured timer/i);
+      assert.match(await large.locator('.mnc-advert-provisional').innerText(), /route classes provisional/i);
       assert.match(await cards.nth(1).locator('.mnc-advert-cadence').innerText(), /not observed[\s\S]*irregular/i);
-      assert.match(await cards.nth(2).locator('.mnc-advert-cadence').innerText(), /unavailable/i);
+      assert.equal(await cards.nth(1).locator('.mnc-advert-provisional').count(), 0);
+      assert.match(await cards.nth(2).locator('.mnc-advert-provisional').innerText(), /route classes provisional/i);
+      assert.match(await cards.nth(3).locator('.mnc-advert-cadence').innerText(), /unavailable/i);
       const heights = await cards.evaluateAll(els => els.map(el => el.getBoundingClientRect().height));
       assert(heights[0] < 350, `repeater card too tall: ${heights[0]} at ${width}px`);
       const open = large.locator('.mnc-view-all');

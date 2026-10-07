@@ -490,6 +490,7 @@
 .mnc-advert-cadence { margin: 0 0 10px; font-size: .75rem; line-height: 1.35; }
 .mnc-advert-row { display: flex; flex-wrap: wrap; gap: .35em; }
 .mnc-advert-row strong { min-width: 5.5em; }
+.mnc-advert-provisional { color: var(--status-yellow); font-size: .7rem; }
 .mnc-advert-note { color: var(--text-muted); font-size: .68rem; }
 
 .mnc-spark { margin-bottom: 8px; }

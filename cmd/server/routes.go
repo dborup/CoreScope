@@ -2117,6 +2117,7 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 				if hideErr == nil && !hidden {
 					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
 						result["advertIntervals"] = adverts.intervals
+						result["advertRouteBackfill"] = adverts.counts.RouteMaskBackfill
 					}
 				}
 			}

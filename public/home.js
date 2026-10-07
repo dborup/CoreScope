@@ -319,7 +319,7 @@
         const sparkHtml = buildSparkline(h.activity24h);
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
         const preview = isRepeater ? obs.slice(0, 3) : obs;
-        const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals) : '';
+        const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals, h.advertRouteBackfill) : '';
 
         return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
@@ -443,7 +443,7 @@
     dialog.showModal();
   }
 
-  function renderMyMeshAdvertIntervals(intervals) {
+  function renderMyMeshAdvertIntervals(intervals, backfill) {
     const row = (label, estimate) => {
       if (!estimate) return `<div class="mnc-advert-row"><strong>${label}</strong> unavailable</div>`;
       const samples = Number(estimate.samples);
@@ -464,9 +464,11 @@
         ? ' · last ' + timeAgo(estimate.last_advert) : '';
       return `<div class="mnc-advert-row"><strong>${label}</strong> ${value}${count}${seen}</div>`;
     };
+    const provisional = intervals && backfill?.status !== 'complete'
+      ? '<div class="mnc-advert-provisional" title="Route-mask backfill incomplete or unknown; flood and zero-hop classifications may change">Route classes provisional</div>' : '';
     return `<div class="mnc-advert-cadence" aria-label="Observed repeater advert intervals">` +
       row('Zero-hop', intervals?.zero_hop) + row('Flood', intervals?.flood) +
-      '<div class="mnc-advert-note">Observed estimate, not configured interval · newest 20 adverts per type; missed receptions can skew it · see Node page</div></div>';
+      provisional + '<div class="mnc-advert-note" title="Observed estimate from at most 20 newest adverts per type; missed receptions can skew it. Not the configured timer.">Observed estimate ≠ setting · ≤20/type · missed receptions skew</div></div>';
   }
 
   function buildSparkline(activity) {
