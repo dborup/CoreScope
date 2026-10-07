@@ -835,6 +835,10 @@
   // (Map keeps insertion order), and destroy() clears it.
   const HOP_CACHE_MAX = 50000;
   let hopNameCache = new Map();
+  // #165 — bumped by destroy(). A hop job that started before it (the
+  // initial load yields between observer groups) stops instead of writing
+  // into the next page's cache.
+  let hopCacheGen = 0;
   function hopCacheHas(k) { return hopNameCache.has(k); }
   function hopCacheGet(k) { return hopNameCache.get(k); }
   function hopCacheSet(k, v) {
@@ -1175,7 +1179,9 @@
   async function resolveHops(hops, observerId) {
     const unknown = hops.filter(h => !hopCacheHas(hopCacheKey(h, observerId)));
     if (!unknown.length) return;
+    const gen = hopCacheGen;
     await ensureHopResolver();
+    if (gen !== hopCacheGen) return;
     const [obsLat, obsLon] = observerPosition(observerId);
     const resolved = HopResolver.resolve(unknown, null, null, obsLat, obsLon, observerId) || {};
     for (const h of unknown) {
@@ -1200,10 +1206,12 @@
     // the resolve itself is local computation, so the loop costs no requests.
     // #165 — but it is CPU: ~42 groups on a 30K load took one ~220 ms block.
     // Yield to the event loop between groups so input and paint get through.
+    const gen = hopCacheGen;
     let first = true;
     for (const [obs, set] of groups) {
       if (!set.size) continue;
       if (!first) await new Promise(r => setTimeout(r, 0));
+      if (gen !== hopCacheGen) return;
       first = false;
       await resolveHops([...set], obs || undefined);
     }
@@ -1668,6 +1676,7 @@
     delete filters.node;
     expandedHashes = new Set();
     hopNameCache = new Map();
+    hopCacheGen++;
     totalCount = 0;
     observers = [];
     observerMap = new Map();
