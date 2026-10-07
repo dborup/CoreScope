@@ -103,4 +103,34 @@ function createSandbox() {
 // Anti-tautology: if validation were removed (always return null), the odd-length test would fail.
 // Mental revert: validatePrefixes = () => null; → testValidateOdd would fail because err would be null.
 
-console.log('\nAll path-inspector tests passed!');
+// The standalone inspector hands off to map init; map.js owns its embedded
+// inspector and must not be reached through nonexistent window drawing APIs.
+assert(!/window\.(?:drawPacketRoute|routeLayer)\b/.test(src),
+  'standalone inspector must not depend on private map drawing globals');
+console.log('✓ no obsolete map drawing globals');
+
+(async function testShowOnMapHandoff() {
+  const sb = createSandbox();
+  const candidate = {
+    path: ['aa'.repeat(32), 'bb'.repeat(32)],
+    names: ['Test A', 'Test B'], score: 1, evidence: { perHop: [] }
+  };
+  let click;
+  const button = { dataset: { idx: '0' }, addEventListener: (event, fn) => { click = fn; } };
+  const results = {
+    innerHTML: '',
+    querySelectorAll: selector => selector === 'button[data-idx]' ? [button] : []
+  };
+  sb.document.getElementById = id => id === 'path-inspector-results' ? results :
+    { textContent: '', addEventListener: () => {} };
+  sb.fetch = async () => ({ ok: true, json: async () => ({ candidates: [candidate], stats: {} }) });
+  sb.location.hash = '#/tools/path-inspector?prefixes=aa,bb';
+  sb.window.PathInspector.init({ innerHTML: '' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(typeof click, 'function', 'candidate button must be wired');
+  click();
+  assert.strictEqual(sb.window._pendingPathInspectorRoute, candidate, 'preserve the full candidate');
+  assert.strictEqual(sb.location.hash, '#/map');
+  console.log('✓ candidate button hands the complete route to map init');
+  console.log('\nAll path-inspector tests passed!');
+})().catch(error => { console.error(error); process.exitCode = 1; });

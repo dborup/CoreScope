@@ -2614,6 +2614,10 @@
     topRoutesLayer = null;
     topRoutesEdges = null;
     if (map) {
+      // Leaflet 1.9.4 ends an animated zoom from a 250 ms setTimeout that
+      // remove() does not cancel; it then reads the removed map pane
+      // ("_leaflet_pos"). With the flag cleared that callback returns early.
+      map._animatingZoom = false;
       map.remove();
       map = null;
     }

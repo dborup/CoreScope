@@ -254,6 +254,32 @@ const settle = (page, ms) => page.waitForTimeout(ms || 400);
     });
   }
 
+  // #345 CI: Leaflet 1.9.4 ends an animated zoom from a 250 ms setTimeout that
+  // map.remove() does not cancel; leaving mid-zoom threw "_leaflet_pos" (e.g.
+  // right after a route's fitBounds).
+  await step('leaving during an animated zoom: Leaflet\'s transition-end timer is inert', async () => {
+    const { ctx, page } = await newPage(browser, errors);
+    const errsBefore = errors.length;
+    try {
+      await page.goto(BASE + '/#/map');
+      await mapLoaded(page);
+      const animating = await page.evaluate(() => new Promise((resolve) => {
+        const m = window.__mc_map;
+        m.setZoom(m.getZoom() + 1, { animate: true });
+        const t0 = Date.now();
+        (function poll() {
+          if (m._animatingZoom) { location.hash = '#/packets'; return resolve(true); }
+          if (Date.now() - t0 > 200) return resolve(false);
+          requestAnimationFrame(poll);
+        })();
+      }));
+      assert(animating, 'fixture: the zoom did not animate');
+      await page.waitForSelector('#pktTable', { state: 'attached' });
+      await settle(page, 800);
+      assert(errors.length === errsBefore, errors.slice(errsBefore).join(' | '));
+    } finally { await ctx.close(); }
+  });
+
   // #123 review round: destroy() must drop the tile-provider listener and the
   // theme MutationObserver of its mount. Counts only map.js's own callbacks
   // (they call _syncDarkTiles; live.js has its own tile listener).
