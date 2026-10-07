@@ -129,6 +129,8 @@ type PruneResult struct {
 // channelDays is longer (#296). Observations go with their transmission, so a
 // kept message keeps its observer and region data. With channelDays 0, or
 // not longer than packetDays, it is exactly PruneOldPackets(packetDays).
+// Ping-triggering GRP_TXT messages follow this channel retention rule. Their
+// ping_triggers index rows survive both prune paths, even after channelDays.
 //
 // Both prunes are batched like PruneOldPackets. As there, the counts of
 // already-committed batches are returned alongside an error.

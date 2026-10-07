@@ -661,13 +661,15 @@ The in-memory packet store grows with retained packets. Configure retention limi
 
 `packetStore.maxMemoryMB` bounds the store **and the caches that belong to it** — the decoded-packet cache, the path indexes, the resolved relay entries and the per-packet index entries, not just the stored rows. It is enforced in two places: the startup load stops at the budget, and the store evicts oldest-first when it exceeds it, down to 85% of it. Leaving it unset means no limit. Actual usage is on `/api/perf` as `packetStore.trackedMB`, next to `maxMB`.
 
-`retention.packetDays` deletes old transmissions and their observations, but
-deliberately keeps `ping_triggers` rows in `meshcore.db`. The trigger is the
-detection index for an old ping; `ping_scores_history.db` holds its computed
-score so it can still appear in all-time results. An old trigger with no
-matching transmission is therefore expected after pruning, not an integrity
-fault. A missing trigger for a stored score, a damaged history DB, or an
-unexpectedly missing recent transmission needs investigation. For a
+`retention.packetDays` deletes old transmissions and their observations;
+channel messages (including ping-triggering GRP_TXT packets) remain until
+`retention.channelDays` when that is longer. Both prune paths deliberately
+keep `ping_triggers` rows in `meshcore.db` beyond either cutoff. The trigger
+is the detection index for an old ping; `ping_scores_history.db` holds its
+computed score so it can still appear in all-time results. An old trigger
+with no matching transmission is therefore expected after pruning, not an
+integrity fault. A missing trigger for a stored score, a damaged history DB,
+or an unexpectedly missing recent transmission needs investigation. For a
 read-only check on a stopped container or a consistent database snapshot:
 
 ```sql
