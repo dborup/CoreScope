@@ -58,6 +58,19 @@ window.HopDisplay = (function() {
   }
 
   /**
+   * The number on a hop's conflict badge; the badge is drawn when it is > 1.
+   * Only regional conflicts count, or every conflict when the resolver fell
+   * back to the global list. #165 — the packets list's path summary counts
+   * hops with this, so the list flags exactly the hops the detail badges.
+   */
+  function conflictBadgeCount(entry) {
+    if (!entry || typeof entry !== 'object') return 0;
+    const conflicts = entry.conflicts || [];
+    const regional = conflicts.filter(c => c.regional).length;
+    return regional > 0 ? regional : (entry.globalFallback ? conflicts.length : 0);
+  }
+
+  /**
    * Render a hop prefix as HTML with conflict info.
    */
   function renderHop(h, entry, opts) {
@@ -77,9 +90,7 @@ window.HopDisplay = (function() {
     let title = h;
     if (unreliable) title += ' — unreliable';
 
-    // Badge — only count regional conflicts
-    const regionalConflicts = conflicts.filter(c => c.regional);
-    const badgeCount = regionalConflicts.length > 0 ? regionalConflicts.length : (globalFallback ? conflicts.length : 0);
+    const badgeCount = conflictBadgeCount(entry);
     const conflictData = escapeHtml(JSON.stringify({ h, conflicts, globalFallback }));
     const conflictBadge = badgeCount > 1
       ? ` <button class="hop-conflict-btn status-warn" data-conflict='${conflictData}' onclick="event.preventDefault();event.stopPropagation();HopDisplay._showFromBtn(this)" title="${badgeCount} candidates — click for details"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>${badgeCount}</button>`
@@ -158,5 +169,5 @@ window.HopDisplay = (function() {
            '<ul class="path-legend-list">' + items + '</ul></details>';
   }
 
-  return { renderHop, renderPath, _showFromBtn, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
+  return { renderHop, renderPath, conflictBadgeCount, _showFromBtn, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
 })();

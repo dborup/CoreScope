@@ -1265,6 +1265,16 @@
     return HopDisplay.renderHop(h, entry, Object.assign({ hexMode: showHexHashes }, opts || {}));
   }
 
+  // #165 (PR #185 review F1, F6) — is this hop uncertain for this observer?
+  // Only the observer's own entry counts: the bare key renderHop() falls
+  // back to for the name is another observer's answer, or the server's for
+  // another observation. And "uncertain" is what the detail pane badges
+  // (HopDisplay.conflictBadgeCount), so list and detail never disagree.
+  function hopUncertainFor(h, observerId) {
+    const entry = observerId ? hopCacheGet(hopCacheKey(h, observerId)) : hopCacheGet(h);
+    return HopDisplay.conflictBadgeCount(entry) > 1;
+  }
+
   // #165 (upstream 2099) — opts.summary renders the list form: names without a badge on every
   // hop, and one indicator for the whole path. A row with five 1-byte hops was
   // five warning triangles, which is noise in a table; the detail pane keeps
@@ -1278,17 +1288,15 @@
       ? window.MC_filterPathHops(hops)
       : hops;
     if (!filtered.length) return '— <span class="text-muted" title="All path hops were 1-byte and are hidden by the customizer toggle">(1-byte filtered)</span>';
-    const summary = !!(opts && opts.summary);
-    const body = filtered
-      .map(h => renderHop(h, observerId, summary ? { badge: false } : null))
-      .join('<span class="arrow">→</span>');
-    if (!summary) return body;
+    const arrow = '<span class="arrow">→</span>';
+    if (!(opts && opts.summary)) return filtered.map(h => renderHop(h, observerId)).join(arrow);
 
     let uncertain = 0;
-    for (const h of filtered) {
-      const entry = hopCacheGet(hopCacheKey(h, observerId)) || hopCacheGet(h);
-      if (entry && entry.ambiguous) uncertain++;
-    }
+    const body = filtered.map(h => {
+      const flag = hopUncertainFor(h, observerId);
+      if (flag) uncertain++;
+      return renderHop(h, observerId, flag ? { badge: false, className: 'hop-uncertain' } : { badge: false });
+    }).join(arrow);
     if (!uncertain) return body;
     const label = uncertain + ' of ' + filtered.length + ' hops have more than one candidate';
     // #165 — first, not last: the list's path cell clips overflow, and the
