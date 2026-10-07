@@ -135,6 +135,47 @@ const fixture = [...Array.from({length: 1000}, (_, i) => packet(i + 1, 11)), pac
     assert.deepStrictEqual(await shown(), [hash(3)]);
     assert.deepStrictEqual(errors, []);
     console.log('PASS: departed view request cannot overwrite remounted packet view');
+
+    // A shared URL may name a time window the dropdown carries no option for
+    // (?timeWindow=240), which leaves the select blank. The refetches added
+    // here must keep that window; reading the blank value as Number('')===0
+    // would silently widen every refetch to All time.
+    const customCtx = await browser.newContext({ viewport: {width: 1024, height: 900} });
+    const customPage = await customCtx.newPage();
+    const customErrors = [];
+    customPage.on('pageerror', error => customErrors.push(error.message));
+    const windows = [];
+    await customPage.routeWebSocket('**', () => {});
+    await customPage.route('**/api/packets?**', async route => {
+      const q = new URL(route.request().url()).searchParams;
+      const since = q.get('since');
+      windows.push(since === null ? null : Math.round((Date.now() - Date.parse(since)) / 60000));
+      const excluded = new Set((q.get('excludeTypes') || '').split(',').filter(Boolean).map(Number));
+      const selected = fixture.filter(p => !excluded.has(p.payload_type)).slice(0, Number(q.get('limit')));
+      await route.fulfill({json: {packets: selected, total: selected.length}});
+    });
+    await customPage.goto(BASE + '/#/packets?timeWindow=240');
+    await customPage.waitForSelector('#pktLeft[data-loaded="true"]');
+    assert.strictEqual(await customPage.locator('#fTimeWindow').inputValue(), '',
+      'a 240-minute window is expected to have no dropdown option');
+    assert(windows.at(-1) >= 235 && windows.at(-1) <= 245,
+      'cold load must honour the URL window, asked for ' + windows.at(-1) + ' minutes');
+    const beforeRefetch = windows.length;
+    if (!(await customPage.locator('#fHideControl').isVisible())) {
+      await customPage.locator('#filterToggleBtn, .filter-toggle-btn-mirror').filter({visible: true}).first().click();
+    }
+    await customPage.locator('#fHideControl').setChecked(true);
+    const refetchDeadline = Date.now() + 15000;
+    while (windows.length === beforeRefetch) {
+      if (Date.now() > refetchDeadline) throw new Error('Hide CONTROL did not refetch');
+      await new Promise(r => setTimeout(r, 10));
+    }
+    const refetched = windows.at(-1);
+    assert(refetched !== null, 'the refetch dropped the time window and asked for all time');
+    assert(refetched >= 235 && refetched <= 245,
+      'the refetch changed the window to ' + refetched + ' minutes');
+    assert.deepStrictEqual(customErrors, []);
+    console.log('PASS: a URL time window absent from the dropdown survives an exclusion refetch');
     if (process.env.SCREENSHOT_PATH) await page.screenshot({path:process.env.SCREENSHOT_PATH});
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
