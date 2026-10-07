@@ -5133,6 +5133,59 @@ func (s *PacketStore) compactDistIndex(remove map[*StoreTx]bool) {
 	s.distPaths = paths[:n]
 }
 
+// refreshDistIndexHashes brings the Hash of every distance record back in line
+// with its transmission's current content hash, and returns how many records
+// it changed. Must be called with s.mu held (Lock).
+//
+// The records carry a copy of the hash rather than reading tx.Hash, because
+// computeAnalyticsDistance walks a snapshot of them without s.mu while ingest
+// mutates the transmissions. So the in-memory content-hash migration (#215),
+// the one thing that rewrites tx.Hash, leaves the old hash behind in every
+// record of a transmission it rehashed without the merge recomputing it: with
+// no collision at all, or with a collision whose survivor was already the
+// earliest row and kept its path, neither of the conditions in finishHashMerge
+// fires (#303). /api/analytics/distance serves that hash in topPaths[].hash
+// and in the hop pairs, where it links to the packet.
+//
+// One pass, no rebuild: the migration calls this once when it is done, not per
+// batch. Nothing is written when nothing is stale, which is the case for a
+// store the ingestor has already converged and for an index the lazy build has
+// not produced yet.
+func (s *PacketStore) refreshDistIndexHashes() int {
+	stale := 0
+	for i := range s.distHops {
+		if tx := s.distHops[i].tx; tx != nil && s.distHops[i].Hash != tx.Hash {
+			stale++
+		}
+	}
+	for i := range s.distPaths {
+		if tx := s.distPaths[i].tx; tx != nil && s.distPaths[i].Hash != tx.Hash {
+			stale++
+		}
+	}
+	if stale == 0 {
+		return 0
+	}
+	// A pinned computeAnalyticsDistance snapshot shares this backing array, so
+	// write into fresh slices instead of through it (as compactDistIndex does).
+	hops, paths := s.distHops, s.distPaths
+	if s.distSnapReaders.Load() != 0 {
+		hops, paths = slices.Clone(hops), slices.Clone(paths)
+	}
+	for i := range hops {
+		if tx := hops[i].tx; tx != nil {
+			hops[i].Hash = tx.Hash
+		}
+	}
+	for i := range paths {
+		if tx := paths[i].tx; tx != nil {
+			paths[i].Hash = tx.Hash
+		}
+	}
+	s.distHops, s.distPaths = hops, paths
+	return stale
+}
+
 // DistanceIndexBuilt reports whether the distance analytics index has
 // been built from the current dataset: false before the first build, and
 // after the background load completed until a build has read the fuller
@@ -9566,12 +9619,19 @@ func (s *PacketStore) computeHashCollisions(region, area string) map[string]inte
 
 		// Sort: local first, then regional, distant, incomplete
 		classOrder := map[string]int{"local": 0, "regional": 1, "distant": 2, "incomplete": 3, "unknown": 4}
+		// #321: prefixMap iteration order is random, so entries tied on both
+		// class and Appearances came out in a different order on each call.
+		// The prefix is the map key the entry was built from, so it is unique
+		// and makes the order total.
 		sort.Slice(collisions, func(i, j int) bool {
 			oi, oj := classOrder[collisions[i].Classification], classOrder[collisions[j].Classification]
 			if oi != oj {
 				return oi < oj
 			}
-			return collisions[i].Appearances > collisions[j].Appearances
+			if collisions[i].Appearances != collisions[j].Appearances {
+				return collisions[i].Appearances > collisions[j].Appearances
+			}
+			return collisions[i].Prefix < collisions[j].Prefix
 		})
 
 		// Stats
@@ -10350,8 +10410,15 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
 			})
 		}
+		// #321: observerStats iteration order is random, so observers tied
+		// on packetCount came out in a different order on each call. The
+		// observer_id is the map key the row was built from, so it is unique
+		// and makes the order total (sibling of GetSubpathDetail/#273).
 		sort.Slice(observerRows, func(i, j int) bool {
-			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+			if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
+				return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+			}
+			return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
 		})
 
 		var avgSnr *float64
@@ -10518,8 +10585,15 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			"can_relay": canRelay,
 		})
 	}
+	// #321: observerStats iteration order is random, so observers tied on
+	// packetCount came out in a different order on each call. The observer_id
+	// is the map key the row was built from, so it is unique and makes the
+	// order total (sibling of GetSubpathDetail/#273).
 	sort.Slice(observerRows, func(i, j int) bool {
-		return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+		if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
+			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
+		}
+		return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
 	})
 
 	var avgSnr *float64
@@ -11299,8 +11373,13 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for path, count := range parentPaths {
 		topParents = append(topParents, map[string]interface{}{"path": path, "count": count})
 	}
+	// #273: parentPaths iteration order is random; ties break on the path so
+	// the order and the top-15 cut are stable (sibling of rankSubpaths/#256).
 	sort.Slice(topParents, func(i, j int) bool {
-		return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		if topParents[i]["count"].(int) != topParents[j]["count"].(int) {
+			return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		}
+		return topParents[i]["path"].(string) < topParents[j]["path"].(string)
 	})
 	if len(topParents) > 15 {
 		topParents = topParents[:15]
@@ -11310,8 +11389,13 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for name, count := range observers {
 		topObs = append(topObs, map[string]interface{}{"name": name, "count": count})
 	}
+	// #273: observers iteration order is random; ties break on the name so
+	// the order and the top-10 cut are stable.
 	sort.Slice(topObs, func(i, j int) bool {
-		return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		if topObs[i]["count"].(int) != topObs[j]["count"].(int) {
+			return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		}
+		return topObs[i]["name"].(string) < topObs[j]["name"].(string)
 	})
 	if len(topObs) > 10 {
 		topObs = topObs[:10]
