@@ -93,6 +93,10 @@ var (
 // It deliberately keeps ping_triggers: those rows identify old pings whose
 // raw packets are gone, while the server's separate history DB preserves
 // their computed all-time scores and marks eligible entries DataPruned.
+// Do not add an orphan sweep for them here or in runTransmissionRetention:
+// the server's reconcile deletes any history entry whose trigger is gone, so
+// a swept trigger loses that ping's all-time score for good. See
+// ensurePingTriggersTable in internal/dbschema.
 //
 // Owned by the ingestor per #1283: the writer process is the only one
 // allowed to hold the DB write lock; previously this lived in

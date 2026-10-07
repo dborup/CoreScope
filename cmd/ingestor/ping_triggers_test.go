@@ -289,3 +289,64 @@ func TestInsertTransmission_NonChanPayloadNotChecked(t *testing.T) {
 		t.Errorf("ping_triggers count = %d, want 0 for a non-CHAN payload type", got)
 	}
 }
+
+// TestRetentionRunKeepsPingTriggers covers the whole scheduled retention
+// pass, not just the Store methods it calls. runTransmissionRetention is what
+// main.go runs at startup and daily, so a trigger sweep bolted on at that
+// level -- the "not intentional" variant #241 weighed, a PruneOrphanPingTriggers
+// next to PruneOrphanRouteMaskChanges -- would slip past the two prune-method
+// tests above. The pass must leave every ping_triggers row intact, including
+// the one whose channel message it just deleted at channelDays.
+func TestRetentionRunKeepsPingTriggers(t *testing.T) {
+	s := openPruneStore(t, "ping-retention-run.db")
+	seenByHash := make(map[string]string)
+	seedPing := func(hash, channel, sender string, ageDays int) {
+		t.Helper()
+		id := seedRetentionTx(t, s, hash, intPtr(payloadTypeGrpTxt), ageDays, 1)
+		var seen string
+		if err := s.db.QueryRow(`SELECT first_seen FROM transmissions WHERE id = ?`, id).Scan(&seen); err != nil {
+			t.Fatalf("first_seen for %s: %v", hash, err)
+		}
+		seenByHash[hash] = seen
+		if _, err := s.db.Exec(`INSERT INTO ping_triggers
+			(tx_id, hash, channel_hash, sender, first_seen) VALUES (?, ?, ?, ?, ?)`,
+			id, hash, channel, sender, seen); err != nil {
+			t.Fatalf("seed trigger %s: %v", hash, err)
+		}
+	}
+
+	seedPing("run-ping-100d", "#old", "Old sender", 100)
+	seedPing("run-ping-30d", "#kept", "Kept sender", 30)
+	seedPing("run-ping-5d", "#fresh", "Fresh sender", 5)
+	seedRetentionTx(t, s, "run-advert-30d", intPtr(4), 30, 1)
+
+	cfg := retentionConfig(t, `{"retention":{"packetDays":14,"channelDays":90}}`)
+	got := runTransmissionRetention(s, cfg, "startup")
+	if got.Packets != 1 || got.ChannelMessages != 1 {
+		t.Fatalf("pruned = %+v, want 1 packet (the aged advert) and 1 channel message", got)
+	}
+	if have := remainingHashes(t, s); !equalStrings(have, []string{"run-ping-30d", "run-ping-5d"}) {
+		t.Fatalf("remaining transmissions = %v, want [run-ping-30d run-ping-5d]", have)
+	}
+
+	// Every trigger survives the pass, the 100-day one included: its raw
+	// channel message is gone, its all-time ping score is not.
+	if n := countPingTriggers(t, s); n != 3 {
+		t.Fatalf("ping_triggers = %d after the retention pass, want all 3", n)
+	}
+	for _, tc := range []struct{ hash, channel, sender string }{
+		{"run-ping-100d", "#old", "Old sender"},
+		{"run-ping-30d", "#kept", "Kept sender"},
+		{"run-ping-5d", "#fresh", "Fresh sender"},
+	} {
+		var channel, sender, seen string
+		if err := s.db.QueryRow(`SELECT channel_hash, sender, first_seen FROM ping_triggers WHERE hash = ?`, tc.hash).
+			Scan(&channel, &sender, &seen); err != nil {
+			t.Fatalf("trigger %s: %v", tc.hash, err)
+		}
+		if channel != tc.channel || sender != tc.sender || seen != seenByHash[tc.hash] {
+			t.Errorf("trigger %s changed: (%q, %q, %q), want (%q, %q, %q)",
+				tc.hash, channel, sender, seen, tc.channel, tc.sender, seenByHash[tc.hash])
+		}
+	}
+}
