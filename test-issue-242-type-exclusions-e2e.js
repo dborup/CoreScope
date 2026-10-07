@@ -99,14 +99,18 @@ const fixture = [...Array.from({length: 1000}, (_, i) => packet(i + 1, 11)), pac
     await checkHide(true);
     await page.waitForFunction(() => document.querySelector('#pktLeft').dataset.loaded === 'false');
     await waitForRelease();
+    // The server ages 1003 out after answering the held request, so the late
+    // response still carries it and stays visibly stale after client filters.
+    const agedOut = fixture.splice(fixture.findIndex(p => p.id === 1003), 1);
     await type('5');
     await ready();
-    assert.deepStrictEqual(await shown(), [hash(1001), hash(1003)]);
+    assert.deepStrictEqual(await shown(), [hash(1001)]);
     const oldRelease = release;
     release = null;
     oldRelease();
     await page.waitForTimeout(200);
-    assert.deepStrictEqual(await shown(), [hash(1001), hash(1003)]);
+    assert.deepStrictEqual(await shown(), [hash(1001)], 'a late earlier response replaced the newest results');
+    fixture.push(...agedOut);
     console.log('PASS: late earlier filter response cannot replace newest results');
     socket.send(JSON.stringify({type:'packet', data:{packet:packet(2003, 4)}}));
     socket.send(JSON.stringify({type:'packet', data:{packet:packet(2004, 5)}}));
