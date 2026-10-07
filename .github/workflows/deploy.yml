@@ -418,6 +418,10 @@ jobs:
           BASE_URL=http://localhost:13581 node test-channels-client-state-152-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-channels-154-155-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-map-modal-fluid-e2e.js 2>&1 | tee -a e2e-output.txt
+          # #332 — no map may request a tile from basemaps.cartocdn.com.
+          # No config.json here, so this exercises the built-in non-CARTO
+          # fallback (tile.openstreetmap.org) a default install resolves to.
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-332-no-carto-tiles-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-map-nodes-pagination-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-123-map-lifecycle-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-observer-iata-1188-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -445,6 +449,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-packet-detail-sender-hash-size-obs-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-353-path-hash-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-242-type-exclusions-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-slideover-1168-munger-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-logo-pulse-1173-e2e.js 2>&1 | tee -a e2e-output.txt

@@ -21,6 +21,11 @@
   #btnClear:hover { background: #7a2020; }
   .hint { font-size: 0.8rem; color: #888; margin-left: auto; }
   #map { flex: 1; }
+  /* #332 — the keyless OSM basemap is a LIGHT style; invert the tile pane so
+     this builder keeps the dark map it had while it hard-coded CARTO
+     dark_all. Same filter string as INVERT_CSS in map-tile-providers.js.
+     Scoped to the tile pane, so markers and the polygon stay true-colour. */
+  #map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(1.05); }
   #output-panel { background: #0f0f23; border-top: 1px solid #333; padding: 12px 16px; display: flex; gap: 12px; align-items: flex-start; }
   #output-panel label { font-size: 0.75rem; color: #888; white-space: nowrap; padding-top: 6px; }
   #output { flex: 1; background: #111; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 0.78rem; color: #7ec8e3; white-space: pre; overflow-x: auto; min-height: 54px; max-height: 140px; overflow-y: auto; cursor: text; }
@@ -88,8 +93,14 @@
 <script>
 const map = L.map('map').setView([50.5, 4.4], 8);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-  attribution: '© OpenStreetMap © CartoDB',
+// #332 — this standalone builder loads neither roles.js nor
+// map-tile-providers.js, so it has no provider registry to consult. It used
+// to hard-code the CARTO dark template, which now returns tiles stamped
+// "API KEY REQUIRED" on every keyless request. Use the same keyless OSM
+// baseline the registry falls back to; the #map .leaflet-tile-pane invert
+// filter in the stylesheet above restores the dark look.
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors',
   maxZoom: 19
 }).addTo(map);
 
