@@ -4511,6 +4511,20 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .multi-select-trigger {
     height: 48px;
   }
+  /* #314: two controls the #239 sweep did not cover. Measured at 375x812
+     with a touch user agent, the swipe tip's "Got it" was 26 px tall and
+     the packets reveal pill 18 px. Both are compact by design on desktop
+     (a hint chip and a column-header badge), so the bump is touch-only,
+     like the rest of this block. Both need the flex centring too: their
+     labels are smaller than the box they now sit in. */
+  .gesture-hint-dismiss,
+  .col-hidden-pill {
+    min-height: 48px;
+    min-width: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
 }
 
 /* #630-3: Status text labels — visually hidden text for screen readers */

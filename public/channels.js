@@ -261,6 +261,24 @@
   }
 
   let autoScroll = true;
+  // #314: the #chMessages scroll handler. A stable module-level reference,
+  // not a fresh closure per init(): a repeat addEventListener of the same
+  // function is a DOM no-op, so a visit leaves at most one listener, and
+  // destroy() can take it off the element it was added to again (the same
+  // leak class as #259/#282, scoped to the element instead of `document`).
+  // _chScrollEl is only the bookkeeping for add/remove; the handler reads the
+  // pane off the event, so it works whether or not that pane is still in the
+  // document.
+  let _chScrollEl = null;
+  function onChMessagesScroll(e) {
+    const el = e.currentTarget;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    autoScroll = atBottom;
+    // Optional-chained like every other #chScrollBtn call site in this file:
+    // a scroll event can reach a detached #chMessages after the page is gone,
+    // and the button is no longer in the document by then.
+    document.getElementById('chScrollBtn')?.classList.toggle('hidden', atBottom);
+  }
   let nodeCache = {};
   let selectedNode = null;
   let observerIataById = {};
@@ -1658,12 +1676,12 @@
     });
 
     const msgEl = document.getElementById('chMessages');
-    msgEl.addEventListener('scroll', () => {
-      const atBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 60;
-      autoScroll = atBottom;
-      document.getElementById('chScrollBtn').classList.toggle('hidden', atBottom);
-    });
-    document.getElementById('chScrollBtn').addEventListener('click', scrollToBottom);
+    // #314: drop the previous #chMessages before taking the new one, so a
+    // re-init cannot leave a live handler on a detached element.
+    if (_chScrollEl && _chScrollEl !== msgEl) _chScrollEl.removeEventListener('scroll', onChMessagesScroll);
+    _chScrollEl = msgEl;
+    msgEl.addEventListener('scroll', onChMessagesScroll);
+    document.getElementById('chScrollBtn')?.addEventListener('click', scrollToBottom);
 
     // Event delegation for node clicks and hovers (click + touchend for mobile reliability)
     function handleNodeTap(e) {
@@ -2019,6 +2037,9 @@
 
   function destroy() {
     if (window.ChannelProposals) window.ChannelProposals.unmount();
+    // #314: the message pane's scroll listener goes with the page.
+    if (_chScrollEl) _chScrollEl.removeEventListener('scroll', onChMessagesScroll);
+    _chScrollEl = null;
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     if (timeAgoTimer) clearInterval(timeAgoTimer);
