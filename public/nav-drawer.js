@@ -39,6 +39,7 @@
   var wired = false;
   var drawerEl = null;
   var backdropEl = null;
+  var versionEl = null;
   var dragging = false;
   var startX = 0;
   var startY = 0;
@@ -71,17 +72,62 @@
   // point MeshConfigReady has resolved window.MC_CLIENT_RX_COVERAGE.
   var COVERAGE_ROUTE = { route: 'rx-coverage', hash: '#/rx-coverage', label: 'Coverage', ph: 'broadcast' };
 
+  // The Privacy route is opt-in too (config `privacy.enabled` -> server omits
+  // or emits cfg.privacy -> window.MC_PRIVACY, see public/roles.js). Appended
+  // last to mirror its desktop top-nav position.
+  var PRIVACY_ROUTE = { route: 'privacy', hash: '#/privacy', label: 'Privacy', ph: 'lock' };
+
   function routes() {
-    if (!window.MC_CLIENT_RX_COVERAGE) return ROUTES;
     var out = ROUTES.slice();
-    var after = out.findIndex(function (r) { return r.route === 'analytics'; }) + 1;
-    out.splice(after, 0, COVERAGE_ROUTE);
+    if (window.MC_CLIENT_RX_COVERAGE) {
+      var after = out.findIndex(function (r) { return r.route === 'analytics'; }) + 1;
+      out.splice(after, 0, COVERAGE_ROUTE);
+    }
+    if (window.MC_PRIVACY) out.push(PRIVACY_ROUTE);
     return out;
   }
 
   function phIconHTML(name) {
     return '<svg class="ph-icon" aria-hidden="true" focusable="false">' +
            '<use href="/icons/phosphor-sprite.svg#ph-' + name + '"></use></svg>';
+  }
+
+  // ── Version footer (#111) ───────────────────────────────────────────────
+  // GET /api/health reports {version, commit, buildTime}; the server fills
+  // any it cannot resolve with "unknown". Fetched on the first open that
+  // passes the width gate (never at page load: the drawer may never open,
+  // and cannot at <= NARROW_MAX), then cached for the page lifetime --
+  // failures included -- so re-opening adds no requests. Values are written
+  // with textContent / title only.
+  var RELEASES_URL = 'https://github.com/dborup/CoreScope/releases';
+  var versionRequested = false;
+
+  function healthField(h, k) {
+    var v = h && h[k];
+    if (typeof v !== 'string') return '';
+    v = v.trim();
+    return (v && v.toLowerCase() !== 'unknown') ? v : '';
+  }
+
+  function applyVersion(el, h) {
+    var version = healthField(h, 'version');
+    if (!version) return; // keep the neutral "CoreScope" label
+    el.textContent = 'CoreScope ' + version;
+    var bits = [];
+    var commit = healthField(h, 'commit');
+    var built = healthField(h, 'buildTime');
+    if (commit) bits.push('commit ' + commit);
+    if (built) bits.push('built ' + built);
+    if (bits.length) el.title = bits.join(' \u00B7 ');
+  }
+
+  function requestVersion() {
+    if (versionRequested || !versionEl || typeof fetch !== 'function') return;
+    versionRequested = true;
+    var el = versionEl;
+    fetch('/api/health', { headers: { Accept: 'application/json' } })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (h) { applyVersion(el, h); }, function () { /* neutral label */ });
   }
 
   var EDGE_PX = 44;          // pointerdown must start within left N px (drawer trigger zone)
@@ -105,6 +151,59 @@
   }
 
   // ── DOM construction (idempotent) ───────────────────────────────────────
+  function makeItem(r) {
+    var a = document.createElement('a');
+    a.className = 'nav-drawer-item';
+    a.setAttribute('href', r.hash);
+    a.setAttribute('data-nav-drawer-item', r.route);
+    a.setAttribute('data-route', r.route);
+
+    var ic = document.createElement('span');
+    ic.className = 'nav-drawer-icon';
+    ic.setAttribute('aria-hidden', 'true');
+    ic.innerHTML = phIconHTML(r.ph);
+
+    var lb = document.createElement('span');
+    lb.className = 'nav-drawer-label';
+    lb.textContent = r.label;
+
+    a.appendChild(ic);
+    a.appendChild(lb);
+    a.addEventListener('click', function () { close(); });
+    return a;
+  }
+
+  // Idempotent: replaces the list's children outright, so calling it again
+  // after config lands can never duplicate a route link or leave a stale
+  // one behind. Listeners live on the <a> elements it owns, so they are
+  // discarded with them -- no accumulation across refreshes.
+  function renderRoutes(list) {
+    while (list.firstChild) list.removeChild(list.firstChild);
+    routes().forEach(function (r) { list.appendChild(makeItem(r)); });
+  }
+
+  // The opt-in routes (rx-coverage, privacy) are only known once
+  // /api/config/client has resolved, which happens well AFTER
+  // DOMContentLoaded builds the drawer. Without this refresh the drawer
+  // would be frozen at its pre-config state and those links could never
+  // appear, no matter how long the user waited.
+  function refreshRoutes() {
+    if (!drawerEl) return;
+    var list = drawerEl.querySelector('.nav-drawer-list');
+    if (list) renderRoutes(list);
+  }
+
+  // Run cb once the client config has SETTLED (resolved or rejected), or
+  // synchronously when there is no config promise at all -- which keeps the
+  // pre-existing ordering for pages/tests that never load roles.js.
+  function whenConfigReady(cb) {
+    var p = (typeof window !== 'undefined') ? window.MeshConfigReady : null;
+    if (!p || typeof p.then !== 'function') { cb(); return; }
+    var done = false;
+    var run = function () { if (done) return; done = true; cb(); };
+    try { p.then(run, run); } catch (_) { run(); }
+  }
+
   function buildDom() {
     if (drawerEl && backdropEl) return;
 
@@ -140,28 +239,21 @@
 
     var list = document.createElement('nav');
     list.className = 'nav-drawer-list';
-    routes().forEach(function (r) {
-      var a = document.createElement('a');
-      a.className = 'nav-drawer-item';
-      a.setAttribute('href', r.hash);
-      a.setAttribute('data-nav-drawer-item', r.route);
-      a.setAttribute('data-route', r.route);
-
-      var ic = document.createElement('span');
-      ic.className = 'nav-drawer-icon';
-      ic.setAttribute('aria-hidden', 'true');
-      ic.innerHTML = phIconHTML(r.ph);
-
-      var lb = document.createElement('span');
-      lb.className = 'nav-drawer-label';
-      lb.textContent = r.label;
-
-      a.appendChild(ic);
-      a.appendChild(lb);
-      a.addEventListener('click', function () { close(); });
-      list.appendChild(a);
-    });
+    renderRoutes(list);
     drawerEl.appendChild(list);
+
+    var footer = document.createElement('div');
+    footer.className = 'nav-drawer-footer';
+    var ver = document.createElement('a');
+    ver.className = 'nav-drawer-version';
+    ver.setAttribute('data-nav-drawer-version', '');
+    ver.setAttribute('href', RELEASES_URL);
+    ver.setAttribute('target', '_blank');
+    ver.setAttribute('rel', 'noopener noreferrer');
+    ver.textContent = 'CoreScope';
+    footer.appendChild(ver);
+    drawerEl.appendChild(footer);
+    versionEl = ver;
 
     document.body.appendChild(backdropEl);
     document.body.appendChild(drawerEl);
@@ -189,6 +281,7 @@
   function open() {
     buildDom();
     if (!isWide()) return; // Option A
+    requestVersion(); // #111: first open only
     if (!drawerWidth) drawerWidth = drawerEl.getBoundingClientRect().width || 320;
     // Capture the previously-focused element BEFORE we move focus, so close()
     // can restore it. Guard against opening twice (don't overwrite on re-open).
@@ -373,6 +466,10 @@
   function init() {
     wireOnce();
     buildDom();
+    // Build now so the drawer is usable immediately, then reconcile once
+    // config is known. Deterministic: driven by the promise, not by how
+    // long the user takes to open the drawer.
+    whenConfigReady(refreshRoutes);
   }
 
   // Public API for tests + manual triggers (e.g. a hamburger button).

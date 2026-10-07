@@ -16,6 +16,36 @@ function test(name, fn) {
   }
 }
 
+// A test of a bug that is known and not fixed yet. It must fail, and says so
+// without failing the run. When it passes, the bug is fixed and the call has to
+// become a plain test(): that is reported as a failure, so the test cannot rot.
+let knownBugs = 0;
+function knownBug(issue, name, fn) {
+  let threw = null;
+  try { fn(); } catch (e) { threw = e; }
+  if (threw) {
+    knownBugs++;
+    console.log(`  XFAIL ${name} (known bug ${issue}): ${threw.message}`);
+  } else {
+    failed++;
+    console.log(`  ❌ ${name}: passes now, so known bug ${issue} is fixed: change knownBug() to test()`);
+  }
+}
+
+// The aria-hidden Phosphor sprite icon packets.js renders. 30627454 (#1648 M2)
+// replaced the row emoji with these, one to one (💬 → chat-circle, 📡 →
+// broadcast, 🔒 → lock, …).
+function phIcon(name) {
+  return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg>';
+}
+
+// The contents of a packet row's expand cell.
+function expandCell(rowHtml) {
+  const m = /<td class="col-expand"[^>]*>([\s\S]*?)<\/td>/.exec(rowHtml);
+  assert(m, 'row has an expand cell');
+  return m[1];
+}
+
 // Build a browser-like sandbox with all deps packets.js needs
 function makeSandbox() {
   const registeredPages = {};
@@ -102,13 +132,14 @@ function loadInCtx(ctx, file) {
   }
 }
 
-function loadPacketsSandbox() {
+function loadPacketsSandbox(captureRoutes = false) {
   const ctx = makeSandbox();
   // Load dependencies first
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
   loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
+  if (captureRoutes) ctx.registerPage = (name, handler) => { ctx._registeredPages[name] = handler; };
   // HopDisplay stub (simpler than loading real file which may have DOM deps)
   vm.runInContext(`
     window.HopDisplay = {
@@ -211,7 +242,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
 
   test('getDetailPreview handles CHAN type', () => {
     const result = api.getDetailPreview({ type: 'CHAN', text: 'hello world', channel: 'general' });
-    assert(result.includes('💬'));
+    assert(result.includes(phIcon('chat-circle')));
     assert(result.includes('hello world'));
     assert(result.includes('chan-tag'));
     assert(result.includes('general'));
@@ -229,7 +260,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
       type: 'ADVERT', name: 'TestNode', pubKey: 'abc123',
       flags: { repeater: true }
     });
-    assert(result.includes('📡'));
+    assert(result.includes(phIcon('broadcast')));
     assert(result.includes('TestNode'));
     assert(result.includes('hop-link'));
   });
@@ -239,7 +270,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
       type: 'ADVERT', name: 'RoomNode', pubKey: 'abc',
       flags: { room: true }
     });
-    assert(result.includes('🏠'));
+    assert(result.includes(phIcon('house-line')));
   });
 
   test('getDetailPreview handles ADVERT sensor', () => {
@@ -247,7 +278,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
       type: 'ADVERT', name: 'Sensor1', pubKey: 'abc',
       flags: { sensor: true }
     });
-    assert(result.includes('🌡'));
+    assert(result.includes(phIcon('thermometer')));
   });
 
   test('getDetailPreview handles ADVERT companion (default)', () => {
@@ -255,14 +286,14 @@ console.log('\n=== packets.js: getDetailPreview ===');
       type: 'ADVERT', name: 'Comp', pubKey: 'abc',
       flags: {}
     });
-    assert(result.includes('📻'));
+    assert(result.includes(phIcon('radio')));
   });
 
   test('getDetailPreview handles GRP_TXT with channelHash (no_key)', () => {
     const result = api.getDetailPreview({
       type: 'GRP_TXT', channelHash: 0xAB, decryptionStatus: 'no_key'
     });
-    assert(result.includes('🔒'));
+    assert(result.includes(phIcon('lock')));
     assert(result.includes('0xAB'));
     assert(result.includes('no key'));
   });
@@ -446,7 +477,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
     const result = api.getDetailPreview({
       type: 'TXT_MSG', srcHash: 'abcdef01', destHash: '12345678'
     });
-    assert(result.includes('✉️'));
+    assert(result.includes(phIcon('envelope')));
     assert(result.includes('abcdef01'));
     assert(result.includes('12345678'));
   });
@@ -455,14 +486,14 @@ console.log('\n=== packets.js: getDetailPreview ===');
     const result = api.getDetailPreview({
       type: 'PATH', srcHash: 'aabb', destHash: 'ccdd'
     });
-    assert(result.includes('🔀'));
+    assert(result.includes(phIcon('shuffle')));
   });
 
   test('getDetailPreview handles REQ', () => {
     const result = api.getDetailPreview({
       type: 'REQ', srcHash: 'aa', destHash: 'bb'
     });
-    assert(result.includes('🔒'));
+    assert(result.includes(phIcon('lock')));
     assert(result.includes('aa'));
   });
 
@@ -470,7 +501,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
     const result = api.getDetailPreview({
       type: 'RESPONSE', srcHash: 'aa', destHash: 'bb'
     });
-    assert(result.includes('🔒'));
+    assert(result.includes(phIcon('lock')));
   });
 
   test('getDetailPreview handles ANON_REQ', () => {
@@ -544,7 +575,7 @@ console.log('\n=== packets.js: getDetailPreview ===');
 
   test('getDetailPreview handles public_key fallback', () => {
     const result = api.getDetailPreview({ public_key: 'abcdef1234567890abcdef' });
-    assert(result.includes('📡'));
+    assert(result.includes(phIcon('broadcast')));
     assert(result.includes('abcdef1234567890'));
   });
 
@@ -994,21 +1025,62 @@ console.log('\n=== packets.js: buildFieldTable ===');
     assert(result.includes('cdcdcdcd'), 'should show the legacy field\'s truncated pubkey hex, got: ' + result);
   });
 
-  test('buildFieldTable hash_size calculation', () => {
-    // Path byte 0xC0 → bits 7-6 = 3 → hash_size = 4, but hash_count = 0
-    // Since #653: when hashCount == 0, shows "hash_count=0 (direct advert)" instead of hash_size
-    const pkt = { raw_hex: '00C0', route_type: 1, payload_type: 0 };
-    const decoded = {};
-    const result = api.buildFieldTable(pkt, decoded, [], []);
-    assert(result.includes('hash_count=0 (direct advert)'));
+  // PR #212 replaced the "direct advert" wording: the path byte encodes the
+  // sender's width even with zero relay hops, so a flood's width is reported
+  // and only the cases that genuinely carry no width stay unknown. The byte
+  // breakdown must still say WHICH case it is, not just "unknown".
+  test('buildFieldTable reports a zero-hop flood width instead of "direct advert"', () => {
+    // header 0x01 = route 1 (FLOOD), payload 0 (ADVERT); path byte 0x40 →
+    // bits 7-6 = 1 → hash_size 2, hash_count = 0.
+    const pkt = { raw_hex: '0140', route_type: 1, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_size=2 bytes, hash_count=0'),
+      'zero-hop flood must keep its encoded width, got: ' + result);
+    assert(!result.includes('direct advert'), 'stale "direct advert" wording resurfaced');
   });
 
-  test('buildFieldTable hash_size shown when hash_count > 0', () => {
-    // Path byte 0xC1 → bits 7-6 = 3 → hash_size = 4, hash_count = 1
-    const pkt = { raw_hex: '00C1aabbccdd', route_type: 1, payload_type: 0 };
-    const decoded = {};
-    const result = api.buildFieldTable(pkt, decoded, [], []);
-    assert(result.includes('hash_size=4'));
+  test('buildFieldTable marks a 0b11 width field as invalid rather than hiding it', () => {
+    // Path byte 0xC1 → bits 7-6 = 3, which is no width at all: the evidence
+    // model (cmd/server/observed_path_hash_sizes.go) knows only 1/2/3 bytes.
+    const pkt = { raw_hex: '01C1aabbccdd', route_type: 1, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=1'), 'hop count lost, got: ' + result);
+    assert(result.includes('width bits 7-6 = 3'), 'invalid width field not explained, got: ' + result);
+    assert(!result.includes('hash_size=4'), 'a 4-byte hash size must not be claimed');
+  });
+
+  test('buildFieldTable keeps the direct zero-hop marker distinct from an invalid width', () => {
+    // header 0x02 = route 2 (DIRECT), path byte 0x00 = sendZeroHop's marker.
+    const pkt = { raw_hex: '0200', route_type: 2, payload_type: 0 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=0 (no encoded hash size)'),
+      'direct zero-hop marker description drifted, got: ' + result);
+  });
+
+  // #322 (2): the zero-hop 0x00 marker is also valid on TRANSPORT_DIRECT
+  // (route 3, firmware/src/Packet.h isRouteDirect()), where the path-length byte
+  // sits at offset 5 behind the transport codes. Nothing covered route 3, so the
+  // direct-marker mutant `(route === 2 || route === 3)` → `(route === 2)`
+  // survived: it would relabel this 0x00 as hash_size=1. This case kills it.
+  test('buildFieldTable keeps the direct zero-hop marker on TRANSPORT_DIRECT (route 3, byte 5)', () => {
+    // header 0x17 = route 3 (TRANSPORT_DIRECT), path-type 5 (hops). 4 transport
+    // code bytes (aabbccdd), then path byte 0x00 at offset 5 = sendZeroHop's
+    // marker. route 3 must be treated like route 2: no encoded hash size.
+    const pkt = { raw_hex: '17aabbccdd00', route_type: 3, payload_type: 5 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('hash_count=0 (no encoded hash size)'),
+      'TRANSPORT_DIRECT zero-hop marker must read as no encoded hash size, got: ' + result);
+    assert(!/hash_size=\d/.test(result),
+      'the 0x00 direct marker must not be read as a hash width on route 3, got: ' + result);
+  });
+
+  test('buildFieldTable does not read a hash width out of TRACE SNR bytes', () => {
+    // header 0x25 = payload 9 (TRACE), route 1. Its path bytes are SNR
+    // readings (internal/packetpath/route.go PathBytesAreHops), not hops.
+    const pkt = { raw_hex: '2541aabbccdd', route_type: 1, payload_type: 9 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    assert(result.includes('TRACE: path bytes are SNR'), 'TRACE path bytes mislabelled, got: ' + result);
+    assert(!result.includes('hash_size='), 'TRACE must not claim a hash size');
   });
 
   test('buildFieldTable handles empty raw_hex', () => {
@@ -1017,6 +1089,30 @@ console.log('\n=== packets.js: buildFieldTable ===');
     const result = api.buildFieldTable(pkt, decoded, [], []);
     assert(result.includes('field-table'));
     assert(result.includes('0B') || result.includes('0 bytes') || result.includes('??'));
+  });
+
+  // #282 (7): the Path Length row must read ONE offset source. The byte it
+  // prints comes from `off` (derived from pkt.route_type); the width label used
+  // to come from senderPathHashSize(buf), which independently re-derives the
+  // offset from the raw_hex header byte. A transport route whose stored
+  // route_type disagrees with its on-wire header route bits splits the two: they
+  // point at different bytes. The fix reads the width from the byte it prints,
+  // so the value and its hash_size label always describe the same byte 5.
+  test('buildFieldTable reads the transport path-length width from the byte it prints (#282 one offset source)', () => {
+    // route_type 0 = TRANSPORT_FLOOD → path length at byte 5. Header byte 0x15:
+    // route bits 1 (FLOOD → byte-1 offset), path-type 5 (hops). Byte 1 = 0x40
+    // (width bits 1 → 2 bytes), byte 5 = 0x80 (width bits 2 → 3 bytes). The row
+    // prints byte 5 (0x80), so its label must say hash_size=3 — not 2, which is
+    // byte 1's width reached via the second (header-derived) offset.
+    const pkt = { raw_hex: '1540aabbcc80', route_type: 0, payload_type: 5 };
+    const result = api.buildFieldTable(pkt, {}, [], []);
+    const m = /<td>Path Length<\/td><td class="mono">([^<]*)<\/td><td class="text-muted">([^<]*)<\/td>/.exec(result);
+    assert(m, 'has a Path Length row, got: ' + result);
+    assert.strictEqual(m[1], '0x80', 'prints the byte at the route_type offset (byte 5), got: ' + m[1]);
+    assert(/hash_size=3 bytes?\b/.test(m[2]),
+      'width must be read from the printed byte (0x80 → 3 bytes), got: ' + m[2]);
+    assert(!/hash_size=2\b/.test(m[2]),
+      'must not read byte 1 (0x40 → 2 bytes) via a second offset source, got: ' + m[2]);
   });
 }
 
@@ -1093,6 +1189,45 @@ console.log('\n=== packets.js: buildFlatRowHtml ===');
   });
 }
 
+// #258: makeColumnsResizable() (app.js) measures inside TableResponsive.unhidden,
+// so a re-measure sees the columns as the first measure did, before register().
+console.log('\n=== packets.js: TableResponsive.unhidden (#258) ===');
+{
+  const ctx = loadPacketsSandbox();
+  const TR = ctx.window.TableResponsive;
+  const el = (classes) => {
+    const set = new Set(classes);
+    return { style: { display: '' }, classList: { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) } };
+  };
+  const makeTable = () => {
+    const els = [el(['col-observer', 'col-hidden']), el(['col-observer', 'col-hidden']), el(['col-time']), el(['col-hidden-pill']), el(['col-hidden-pill', 'col-rehide-pill'])];
+    els[3].style.display = 'inline-block';
+    return {
+      els,
+      querySelectorAll: (sel) => els.filter((e) => e.classList.contains(sel.replace(/^\./, ''))),
+    };
+  };
+  const state = (t) => t.els.map((e) => ['col-hidden', 'col-hidden-pill'].filter((c) => e.classList.contains(c)).join('+') + ':' + e.style.display);
+
+  test('#258: unhidden lifts col-hidden and hides the pills only while fn runs', () => {
+    assert.strictEqual(typeof TR.unhidden, 'function', 'TableResponsive.unhidden is exported');
+    const t = makeTable();
+    const before = state(t);
+    let during = null;
+    const out = TR.unhidden(t, () => { during = state(t); return 42; });
+    assert.strictEqual(out, 42, 'returns what fn returns');
+    assert.deepStrictEqual(during, [':', ':', ':', 'col-hidden-pill:none', 'col-hidden-pill:none'], 'during: ' + JSON.stringify(during));
+    assert.deepStrictEqual(state(t), before, 'restored: ' + JSON.stringify(state(t)));
+  });
+
+  test('#258: unhidden restores the hiding when fn throws', () => {
+    const t = makeTable();
+    const before = state(t);
+    assert.throws(() => TR.unhidden(t, () => { throw new Error('boom'); }), /boom/);
+    assert.deepStrictEqual(state(t), before);
+  });
+}
+
 console.log('\n=== packets.js: buildGroupRowHtml ===');
 {
   const ctx = loadPacketsSandbox();
@@ -1112,17 +1247,244 @@ console.log('\n=== packets.js: buildGroupRowHtml ===');
     assert(!result.includes('group-header'));
   });
 
+  const collapsedGroup = {
+    hash: 'xyz', count: 3, latest: '2024-01-01T00:00:00Z',
+    observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]',
+    observation_count: 3, observer_count: 2
+  };
+
   test('buildGroupRowHtml renders multi-count group with expand arrow', () => {
-    const p = {
-      hash: 'xyz', count: 3, latest: '2024-01-01T00:00:00Z',
-      observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
-      route_type: 0, decoded_json: '{}', path_json: '[]',
-      observation_count: 3, observer_count: 2
-    };
-    const result = api.buildGroupRowHtml(p);
+    const result = api.buildGroupRowHtml(collapsedGroup);
     assert(result.includes('group-header'));
-    assert(result.includes('▶'));  // collapsed arrow
+    // The expand cell of a collapsed group holds a caret, and it is not the
+    // expanded one.
+    const cell = /<td class="col-expand"[^>]*>([\s\S]*?)<\/td>/.exec(result);
+    assert(cell && /#ph-caret-/.test(cell[1]), 'collapsed group has a caret in its expand cell');
+    assert(!result.includes(phIcon('caret-down')), 'collapsed group does not show the expanded caret');
   });
+
+  // #189: before 30627454 (#1648 M2, emoji to Phosphor sprites) a collapsed
+  // group showed ▶ and an expanded one ▼. The migration mapped ▶ to
+  // #ph-caret-up, so a collapsed group pointed up. The disclosure convention in
+  // the front end is caret-right when collapsed and caret-down when expanded
+  // (channels.js, network-digest.js, analytics.js #ptOverviewChevron,
+  // route-view.js paths chevron).
+  test('buildGroupRowHtml shows a right-pointing caret on a collapsed group', () => {
+    const cell = expandCell(api.buildGroupRowHtml(collapsedGroup));
+    assert(cell.includes(phIcon('caret-right')), 'collapsed group shows a right caret');
+    assert(!cell.includes(phIcon('caret-up')), 'collapsed group does not point up');
+    assert(!cell.includes(phIcon('caret-down')), 'collapsed group does not show the expanded caret');
+  });
+
+  test('buildGroupRowHtml shows a down-pointing caret on an expanded group', () => {
+    api._setExpanded(collapsedGroup.hash, true);
+    try {
+      const cell = expandCell(api.buildGroupRowHtml(collapsedGroup));
+      assert(cell.includes(phIcon('caret-down')), 'expanded group shows a down caret');
+      assert(!cell.includes(phIcon('caret-right')), 'expanded group does not show the collapsed caret');
+      assert(!cell.includes(phIcon('caret-up')), 'expanded group does not point up');
+    } finally { api._setExpanded(collapsedGroup.hash, false); }
+  });
+
+  test('buildGroupRowHtml: the group toggle row reports its state in aria-expanded', () => {
+    const header = (html) => /<tr class="group-header[^>]*>/.exec(html)[0];
+    assert(header(api.buildGroupRowHtml(collapsedGroup)).includes('aria-expanded="false"'), 'collapsed: aria-expanded=false');
+    api._setExpanded(collapsedGroup.hash, true);
+    try {
+      assert(header(api.buildGroupRowHtml(collapsedGroup)).includes('aria-expanded="true"'), 'expanded: aria-expanded=true');
+    } finally { api._setExpanded(collapsedGroup.hash, false); }
+  });
+
+  test('buildGroupRowHtml: a single-observation row has no caret and no aria-expanded', () => {
+    const single = Object.assign({}, collapsedGroup, { hash: 'single1', count: 1 });
+    const html = api.buildGroupRowHtml(single);
+    assert(!html.includes('aria-expanded'), 'a row that cannot expand does not claim a state');
+    assert(!/#ph-caret-/.test(expandCell(html)), 'no caret in the expand cell');
+  });
+}
+
+// #254: under the mobile breakpoint mobile-page-actions.js (#1461 #7) hides the
+// expand column and turns a click on a group row into select-hash, so the row
+// selects instead of expanding. There the row must not announce aria-expanded,
+// and its action is select-hash for every activation (tap, Enter, Space).
+// Above the breakpoint the row stays the #189 toggle.
+console.log('\n=== packets.js: group row action and aria-expanded by viewport (#254) ===');
+{
+  const ctx = loadPacketsSandbox();
+  loadInCtx(ctx, 'public/mobile-page-actions.js');
+  const api = ctx._packetsTestAPI;
+  const group = {
+    hash: 'mob254', count: 3, latest: '2024-01-01T00:00:00Z',
+    observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]',
+    observation_count: 3, observer_count: 2
+  };
+  const header = (html) => /<tr [^>]*>/.exec(html)[0];
+  const atWidth = (w, fn) => {
+    const prev = ctx.window.innerWidth;
+    ctx.window.innerWidth = w;
+    try { return fn(); } finally { ctx.window.innerWidth = prev; }
+  };
+
+  test('#254: at 390 px a group row selects and carries no aria-expanded', () => atWidth(390, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="select-hash"'), 'mobile group row selects: ' + tr);
+    assert(!tr.includes('aria-expanded'), 'a row that selects does not announce an expanded state: ' + tr);
+  }));
+
+  test('#254: at 390 px an expanded group row still carries no aria-expanded', () => atWidth(390, () => {
+    api._setExpanded(group.hash, true);
+    try {
+      const tr = header(api.buildGroupRowHtml(group));
+      assert(tr.includes('data-action="select-hash"'), 'mobile group row selects');
+      assert(!tr.includes('aria-expanded'), 'no aria-expanded on mobile, expanded or not');
+    } finally { api._setExpanded(group.hash, false); }
+  }));
+
+  test('#254: at the 600 px breakpoint the row is still the mobile one', () => atWidth(600, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="select-hash"') && !tr.includes('aria-expanded'), tr);
+  }));
+
+  test('#254: at 1400 px the group row is the #189 toggle with aria-expanded', () => atWidth(1400, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="toggle-select"'), 'desktop group row toggles: ' + tr);
+    assert(tr.includes('aria-expanded="false"'), 'desktop collapsed row: aria-expanded=false');
+    api._setExpanded(group.hash, true);
+    try {
+      assert(header(api.buildGroupRowHtml(group)).includes('aria-expanded="true"'), 'desktop expanded row: aria-expanded=true');
+    } finally { api._setExpanded(group.hash, false); }
+  }));
+
+  test('#254: at 601 px the group row toggles', () => atWidth(601, () => {
+    const tr = header(api.buildGroupRowHtml(group));
+    assert(tr.includes('data-action="toggle-select"') && tr.includes('aria-expanded="false"'), tr);
+  }));
+
+  test('#254: a single-observation row is select-hash without aria-expanded at both widths', () => {
+    const single = Object.assign({}, group, { hash: 'single254', count: 1 });
+    for (const w of [390, 1400]) atWidth(w, () => {
+      const tr = header(api.buildGroupRowHtml(single));
+      assert(tr.includes('data-action="select-hash"') && !tr.includes('aria-expanded'), w + ' px: ' + tr);
+    });
+  });
+}
+
+// #259 (1): a group expanded on desktop must not leave visible child rows behind
+// when the layout flips to the mobile mode, where the expand column is hidden
+// and the row only selects — there would be no way to collapse it again. The
+// hash stays in expandedHashes, so the children come back on desktop; the
+// rendered row is the collapsed one while the mobile mode is active.
+console.log('\n=== packets.js: an expanded group across the mobile breakpoint (#259) ===');
+{
+  const ctx = loadPacketsSandbox();
+  loadInCtx(ctx, 'public/mobile-page-actions.js');
+  const api = ctx._packetsTestAPI;
+  const mkChild = (id, obs) => ({
+    id, observer_id: obs, hash: 'grp259', raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]', timestamp: '2024-01-01T00:00:00Z'
+  });
+  const group = {
+    hash: 'grp259', count: 3, latest: '2024-01-01T00:00:00Z',
+    observer_id: null, raw_hex: 'aabbcc', payload_type: 0,
+    route_type: 0, decoded_json: '{}', path_json: '[]',
+    observation_count: 3, observer_count: 3,
+    _children: [mkChild(1, '1'), mkChild(2, '2'), mkChild(3, '3')]
+  };
+  const header = (html) => /<tr [^>]*>/.exec(html)[0];
+  const rowClass = (html) => (/<tr class="([^"]*)"/.exec(header(html)) || [, ''])[1];
+  const childRows = (html) => (html.match(/<tr class="group-child"/g) || []).length;
+  const atWidth = (w, fn) => {
+    const prev = ctx.window.innerWidth;
+    ctx.window.innerWidth = w;
+    try { return fn(); } finally { ctx.window.innerWidth = prev; }
+  };
+
+  // _getRowCount only counts children in grouped mode; the hook lets the
+  // sandbox say so. Guarded so this file still runs against a tree without it.
+  if (typeof api._setDisplayGrouped === 'function') api._setDisplayGrouped(true);
+  api._setExpanded(group.hash, true);
+
+  test('#259: at 1400 px the expanded group renders its children (#248 unchanged)', () => atWidth(1400, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert.strictEqual(childRows(html), 3, 'three child rows: ' + childRows(html));
+    assert(/\bexpanded\b/.test(rowClass(html)), 'the row is marked expanded: ' + rowClass(html));
+    assert(header(html).includes('aria-expanded="true"'), header(html));
+    assert(expandCell(html).includes(phIcon('caret-down')), 'down caret while expanded');
+  }));
+
+  test('#259: at 390 px the same expanded group renders no child rows', () => atWidth(390, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert.strictEqual(childRows(html), 0, 'no visible children on mobile, got ' + childRows(html));
+  }));
+
+  test('#259: at 390 px the row does not claim the expanded class or caret', () => atWidth(390, () => {
+    const html = api.buildGroupRowHtml(group);
+    assert(!/\bexpanded\b/.test(rowClass(html)), 'no expanded class on mobile: ' + rowClass(html));
+    assert(header(html).includes('data-action="select-hash"'), header(html));
+    assert(!header(html).includes('aria-expanded'), 'still no aria-expanded on mobile');
+    assert(!expandCell(html).includes(phIcon('caret-down')), 'no down caret on mobile');
+  }));
+
+  test('#259: _getRowCount matches the rendered rows on both sides of the breakpoint', () => {
+    atWidth(390, () => {
+      assert.strictEqual(api._getRowCount(group), 1, 'mobile: the group is one row');
+    });
+    atWidth(1400, () => {
+      assert.strictEqual(api._getRowCount(group), 4, 'desktop: the group plus three children');
+    });
+  });
+
+  test('#259: 600 px hides the children and 601 px shows them again', () => {
+    atWidth(600, () => {
+      assert.strictEqual(childRows(api.buildGroupRowHtml(group)), 0, 'at the breakpoint the children are hidden');
+    });
+    atWidth(601, () => {
+      assert.strictEqual(childRows(api.buildGroupRowHtml(group)), 3, 'just above it they are back');
+    });
+  });
+
+  test('#259: the expansion survives 1400 -> 390 -> 1400, it is not cleared', () => {
+    atWidth(390, () => { api.buildGroupRowHtml(group); });
+    atWidth(1400, () => {
+      const html = api.buildGroupRowHtml(group);
+      assert.strictEqual(childRows(html), 3, 'the children are back on desktop: ' + childRows(html));
+      assert(header(html).includes('aria-expanded="true"'), 'and the state is still expanded');
+    });
+  });
+
+  test('#259: a collapsed group is unaffected at either width', () => {
+    api._setExpanded(group.hash, false);
+    try {
+      for (const w of [390, 1400]) atWidth(w, () => {
+        const html = api.buildGroupRowHtml(group);
+        assert.strictEqual(childRows(html), 0, w + ' px: a collapsed group has no children');
+        assert(!/\bexpanded\b/.test(rowClass(html)), w + ' px: ' + rowClass(html));
+      });
+    } finally { api._setExpanded(group.hash, true); }
+  });
+}
+
+// Without mobile-page-actions.js there is no #1461 #7 redirect, so a group row
+// toggles at any width.
+console.log('\n=== packets.js: group row without mobile-page-actions.js (#254) ===');
+{
+  const ctx = loadPacketsSandbox();
+  const api = ctx._packetsTestAPI;
+  ctx.window.innerWidth = 390;
+  test('#254: no redirect module loaded, so the row toggles even at 390 px', () => {
+    const tr = /<tr [^>]*>/.exec(api.buildGroupRowHtml({
+      hash: 'nompa', count: 2, latest: '2024-01-01T00:00:00Z', observer_id: null, raw_hex: 'aabb',
+      payload_type: 0, route_type: 0, decoded_json: '{}', path_json: '[]', observation_count: 2, observer_count: 1
+    }))[0];
+    assert(tr.includes('data-action="toggle-select"') && tr.includes('aria-expanded="false"'), tr);
+  });
+}
+
+{
+  const ctx = loadPacketsSandbox();
+  const api = ctx._packetsTestAPI;
 
   test('buildGroupRowHtml shows observation count badge', () => {
     const p = {
@@ -1133,7 +1495,7 @@ console.log('\n=== packets.js: buildGroupRowHtml ===');
     };
     const result = api.buildGroupRowHtml(p);
     assert(result.includes('badge-obs'));
-    assert(result.includes('👁'));
+    assert(result.includes(phIcon('eye')));
     assert(result.includes('5'));
   });
 
@@ -1456,6 +1818,29 @@ console.log('\n=== packets.js: scroll position preserved across renderTableRows 
   });
 }
 
+// ===== packets.js: detail Hash Size source (PR #212 review) =====
+console.log('\n=== packets.js: detail Hash Size reads the selected observation ===');
+{
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+
+  // Behavioural coverage lives in
+  // test-packet-detail-sender-hash-size-obs-e2e.js, which only runs in the
+  // Playwright job. This is the fast guard: observations of one transmission
+  // carry their own frames, so the "Hash Size" summary and the byte table
+  // below it must read the SAME raw_hex, or the panel contradicts itself.
+  test('renderDetail derives Hash Size from the selected observation, not the original frame', () => {
+    assert.ok(src.includes('const hashSize = senderPathHashSize(effectivePkt.raw_hex || pkt.raw_hex);'),
+      'the Hash Size summary must use the effective observation\'s frame');
+    assert.ok(!/const hashSize = senderPathHashSize\(pkt\.raw_hex\)/.test(src),
+      'reading the original transmission reintroduces the observation mismatch');
+  });
+
+  test('the byte table is built from the same frame the summary reads', () => {
+    assert.ok(src.includes('buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt,'),
+      'buildFieldTable must receive the effective observation');
+  });
+}
+
 // ===== packets.js: View Path button (detail panel) =====
 console.log('\n=== packets.js: View Path button ===');
 {
@@ -1489,7 +1874,57 @@ console.log('\n=== packets.js: View Path button ===');
   });
 }
 
-// ===== SUMMARY =====
-console.log(`\n${'='.repeat(40)}`);
-console.log(`packets.js tests: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+// Exercise the real route and renderDetail, awaiting completion so rejected
+// renders cannot accidentally count as passing synchronous assertions.
+async function testChannelDestinations() {
+  console.log('\n=== packets.js: channel destination (#20) ===');
+  const cases = [
+    ['unprefixed channel', { channel: 'test' }, '#test'],
+    ['already-prefixed channel', { channel: '#test' }, '#test'],
+    ['missing channel', {}, '?'],
+    ['empty channel', { channel: '' }, '?'],
+    ['channel HTML is escaped', { channel: '<test>&' }, '#&lt;test&gt;&amp;'],
+    ['prefixed channel HTML is escaped', { channel: '#<test>&' }, '#&lt;test&gt;&amp;'],
+    ['recipient wins over channel and hash', { channel: '#test', recipient: '<recipient>', destHash: '1234567890' }, '&lt;recipient&gt;'],
+    ['destination hash wins over channel', { channel: '#test', destHash: '1234567890' }, '12345678'],
+  ];
+  for (const [name, fields, expected] of cases) {
+    try {
+      const ctx = loadPacketsSandbox(true);
+      const elements = [];
+      const createElement = ctx.document.createElement;
+      ctx.document.createElement = tag => {
+        const element = createElement(tag);
+        elements.push(element);
+        return element;
+      };
+      ctx.api = async path => {
+        if (path === '/observers') return [];
+        if (path === '/packets/channel-fixture') return {
+          packet: { id: 1, hash: 'channel-fixture', payload_type: 5,
+            route_type: 1, timestamp: '2026-01-01T00:00:00Z', path_json: '[]',
+            decoded_json: JSON.stringify({ type: 'GRP_TXT', sender: 'Sender', ...fields }) },
+          observations: [],
+        };
+        throw new Error('Unexpected API request: ' + path);
+      };
+      const app = createElement('div');
+      await ctx._registeredPages['packet-detail'].init(app, 'channel-fixture');
+      const detail = elements.find(el => el.innerHTML.includes('class="detail-srcdst"'));
+      assert.ok(detail, 'real packet detail must render, got: ' + app.innerHTML);
+      const row = detail.innerHTML.match(/<div class="detail-srcdst">(.*?)<\/div>/)[1];
+      assert.strictEqual(row, 'Sender <span class="arrow">→</span> ' + expected);
+      passed++;
+      console.log('  ✅ ' + name);
+    } catch (e) {
+      failed++;
+      console.log('  ❌ ' + name + ': ' + e.message);
+    }
+  }
+}
+
+testChannelDestinations().then(() => {
+  console.log(`\n${'='.repeat(40)}`);
+  console.log(`packets.js tests: ${passed} passed, ${failed} failed, ${knownBugs} known bug(s) still failing`);
+  if (failed > 0) process.exit(1);
+}).catch(error => { console.error(error); process.exit(1); });

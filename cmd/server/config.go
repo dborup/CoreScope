@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -148,6 +149,15 @@ type Config struct {
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
 
+	// EstimatedPositions is an operator-side startup policy. Missing means
+	// enabled for compatibility; changes require a server restart.
+	EstimatedPositions *EstimatedPositionsConfig `json:"estimatedPositions,omitempty"`
+
+	// ChannelProposals configures publicly suggested hashtag channels
+	// (internal/channelregistry). Submissions open only when enabled AND a
+	// strong apiKey is set; the same block is read by the ingestor.
+	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
 	// HashRegions mirrors the ingestor's region-scope config (same
 	// config.json key). The server never derives HMAC keys from it — it
 	// only needs the configured *names* to report which regions have
@@ -279,6 +289,10 @@ type Config struct {
 	// so browsers enforce same-origin policy. Set to ["*"] to allow all origins.
 	CORSAllowedOrigins []string `json:"corsAllowedOrigins,omitempty"`
 
+	// WebSocket carries the /ws transport limits from #1794. Omitted entirely
+	// means: rate limit at its default, connection cap off, no deny list.
+	WebSocket *WebSocketConfig `json:"webSocket,omitempty"`
+
 	DebugAffinity bool `json:"debugAffinity,omitempty"`
 
 	// MapDarkTileProvider selects the default dark-mode basemap provider for
@@ -317,6 +331,12 @@ type Config struct {
 	// (theme/branding/etc.). See CustomizerConfig and issue #1508.
 	Customizer *CustomizerConfig `json:"customizer,omitempty"`
 
+	// Privacy holds the operator-configured content for the opt-in
+	// privacy-notice page (#/privacy). Nil or enabled=false keeps the
+	// feature fully off: no nav link, and /api/config/client omits the
+	// privacy field entirely. See PrivacyConfig.
+	Privacy *PrivacyConfig `json:"privacy,omitempty"`
+
 	// Known-channels catalogue integration (issue #1323).
 	// URL of a JSON catalogue file (channels-by-country shape) fetched
 	// periodically and exposed via /api/known-channels. Empty disables.
@@ -332,6 +352,17 @@ type Config struct {
 // filters those tabs out before rendering. Issue #1508.
 type CustomizerConfig struct {
 	DisabledTabs []string `json:"disabledTabs"`
+}
+
+// PrivacyConfig is the entire privacy feature's configuration: one opt-in
+// switch. The notice itself is a FIXED document in public/privacy.js, not
+// operator text, so the published wording cannot drift from the notice that
+// was signed off. Nothing configured here reaches the page as content --
+// there is deliberately nothing to configure but whether to publish it.
+type PrivacyConfig struct {
+	// Enabled publishes the #/privacy page and the nav links pointing at
+	// it. Default false: a deployment opts in explicitly.
+	Enabled bool `json:"enabled"`
 }
 
 // weakAPIKeys is the blocklist of known default/example API keys that must be rejected.
@@ -586,6 +617,9 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		if err != nil {
 			continue
 		}
+		if err := validateEstimatedPositionsConfig(data); err != nil {
+			return nil, fmt.Errorf("config %s: %w", p, err)
+		}
 		if err := json.Unmarshal(data, cfg); err != nil {
 			continue
 		}
@@ -600,6 +634,81 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
 	return cfg, nil // defaults
+}
+
+// WebSocketConfig holds the /ws transport limits (#1794). These sit behind
+// the CheckOrigin allowlist (#1793) and catch non-browser clients, which can
+// omit or forge Origin.
+type WebSocketConfig struct {
+	// MaxConnsPerIP caps concurrent /ws connections from one client address.
+	// DEFAULT 0, meaning OFF, and that is a deliberate departure from the
+	// value floated on #1794.
+	//
+	// A cap of 5 is safe only when one address means one household. It does
+	// not on mobile: carrier-grade NAT puts thousands of unrelated subscribers
+	// behind a single public IPv4, so a low cap would refuse real visitors on
+	// phones while barely inconveniencing a scraper that can rent more
+	// addresses. Operators who know their audience can set it; we must not
+	// pick it for them.
+	MaxConnsPerIP int `json:"maxConnsPerIP,omitempty"`
+
+	// UpgradesPerMinPerIP caps handshakes per minute from one client address.
+	// DEFAULT 30, on. Unlike the connection cap this is safe under CGNAT: a
+	// real client upgrades a handful of times per minute even while
+	// reconnecting, so 30 leaves ordinary traffic untouched while flattening
+	// the reconnect loop that makes scrapers expensive.
+	UpgradesPerMinPerIP *int `json:"upgradesPerMinPerIP,omitempty"`
+
+	// TrustedProxies lists the addresses or CIDRs of reverse proxies whose
+	// X-Forwarded-For may be believed. REQUIRED for the limits to do anything
+	// behind nginx/Caddy/Traefik/ingress: without it every visitor shares the
+	// proxy's address, so the limits are skipped and a warning is logged.
+	// Never list an address you do not control; anyone reaching the server
+	// from a trusted address can name any client IP they like.
+	TrustedProxies []string `json:"trustedProxies,omitempty"`
+
+	// Deny blocks addresses outright at the upgrade, before the handshake.
+	// Accepts both bare addresses ("1.2.3.4") and CIDRs ("1.2.3.0/24").
+	// Applies even when clients cannot be told apart, because it is an
+	// explicit instruction rather than an inference.
+	Deny []string `json:"deny,omitempty"`
+}
+
+// WSMaxConnsPerIP returns the configured concurrent-connection cap, 0 = off.
+func (c *Config) WSMaxConnsPerIP() int {
+	if c.WebSocket == nil || c.WebSocket.MaxConnsPerIP < 0 {
+		return 0
+	}
+	return c.WebSocket.MaxConnsPerIP
+}
+
+// WSUpgradesPerMinPerIP returns the upgrade-rate cap, defaulting to 30 when
+// unset. A pointer distinguishes "not configured" (use the default) from an
+// explicit 0, which an operator uses to turn the limit off.
+func (c *Config) WSUpgradesPerMinPerIP() int {
+	if c.WebSocket == nil || c.WebSocket.UpgradesPerMinPerIP == nil {
+		return 30
+	}
+	if v := *c.WebSocket.UpgradesPerMinPerIP; v > 0 {
+		return v
+	}
+	return 0
+}
+
+// WSTrustedProxies returns the configured reverse-proxy addresses, if any.
+func (c *Config) WSTrustedProxies() []string {
+	if c.WebSocket == nil {
+		return nil
+	}
+	return c.WebSocket.TrustedProxies
+}
+
+// WSDeny returns the configured deny entries, if any.
+func (c *Config) WSDeny() []string {
+	if c.WebSocket == nil {
+		return nil
+	}
+	return c.WebSocket.Deny
 }
 
 func (c *Config) applyListLimitsDefaults() {
@@ -879,13 +988,29 @@ func (c *Config) BlacklistGeneration() uint64 {
 // lazily on first read from c.NodeBlacklist (covering the JSON-load path
 // where the setter was never called).
 func (c *Config) IsBlacklisted(pubkey string) bool {
-	if c == nil {
+	set := c.blacklistSet()
+	if len(set) == 0 {
 		return false
+	}
+	return set[strings.ToLower(strings.TrimSpace(pubkey))]
+}
+
+// HasNodeBlacklist reports whether at least one (non-blank) pubkey is
+// blacklisted. It reads the same atomic set as IsBlacklisted, so unlike
+// len(c.NodeBlacklist) it is safe against a concurrent SetNodeBlacklist.
+func (c *Config) HasNodeBlacklist() bool {
+	return len(c.blacklistSet()) > 0
+}
+
+// blacklistSet returns the active normalised blacklist set (shared,
+// read-only), materialising it lazily from the JSON-loaded slice on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) blacklistSet() map[string]bool {
+	if c == nil {
+		return nil
 	}
 	mp := c.blacklistSetPtr.Load()
 	if mp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
 		built := buildBlacklistSet(c.NodeBlacklist)
 		if c.blacklistSetPtr.CompareAndSwap(nil, &built) {
 			mp = &built
@@ -893,10 +1018,10 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 			mp = c.blacklistSetPtr.Load()
 		}
 	}
-	if mp == nil || len(*mp) == 0 {
-		return false
+	if mp == nil {
+		return nil
 	}
-	return (*mp)[strings.ToLower(strings.TrimSpace(pubkey))]
+	return *mp
 }
 
 // IsNameHidden returns true if the given node name starts with any of the
@@ -911,25 +1036,7 @@ func (c *Config) IsBlacklisted(pubkey string) bool {
 // IsBlacklisted's CAS-style lazy first-read materialisation for the
 // JSON-load path where SetHiddenNamePrefixes was never called.
 func (c *Config) IsNameHidden(name string) bool {
-	if c == nil {
-		return false
-	}
-	pp := c.hiddenPrefixesPtr.Load()
-	if pp == nil {
-		// Lazy first-read materialisation from the JSON-loaded slice.
-		// CAS-style: if another goroutine wins the race, drop ours.
-		built := make([]string, len(c.HiddenNamePrefixes))
-		copy(built, c.HiddenNamePrefixes)
-		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
-			pp = &built
-		} else {
-			pp = c.hiddenPrefixesPtr.Load()
-		}
-	}
-	if pp == nil || len(*pp) == 0 {
-		return false
-	}
-	for _, p := range *pp {
+	for _, p := range c.hiddenPrefixes() {
 		if p == "" {
 			continue
 		}
@@ -938,6 +1045,70 @@ func (c *Config) IsNameHidden(name string) bool {
 		}
 	}
 	return false
+}
+
+// hiddenPrefixes returns the active hide-prefix slice (shared, read-only),
+// materialising it lazily from the JSON-loaded HiddenNamePrefixes on first
+// read. CAS-style: if another goroutine wins the race, ours is dropped.
+func (c *Config) hiddenPrefixes() []string {
+	if c == nil {
+		return nil
+	}
+	pp := c.hiddenPrefixesPtr.Load()
+	if pp == nil {
+		built := make([]string, len(c.HiddenNamePrefixes))
+		copy(built, c.HiddenNamePrefixes)
+		if c.hiddenPrefixesPtr.CompareAndSwap(nil, &built) {
+			pp = &built
+		} else {
+			pp = c.hiddenPrefixesPtr.Load()
+		}
+	}
+	if pp == nil {
+		return nil
+	}
+	return *pp
+}
+
+// EnforcedHiddenNamePrefixes returns (a copy of) exactly the prefixes
+// IsNameHidden enforces — every non-empty entry, a whitespace-only one
+// included — or nil when none is active, so callers can skip name lookups
+// safely and match the same prefixes elsewhere (e.g. in SQL).
+func (c *Config) EnforcedHiddenNamePrefixes() []string {
+	var out []string
+	for _, p := range c.hiddenPrefixes() {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ActiveHiddenNamePrefixes returns a copy of the hide prefixes IsNameHidden
+// is actually enforcing right now, with empty/whitespace entries dropped —
+// the same entries IsNameHidden skips. Reads through the same atomic pointer
+// (including its lazy first-read materialisation) so a SIGHUP-updated list
+// is reflected, and returns a copy so callers cannot mutate live config.
+//
+// Used by the privacy notice to name the real self-service hide prefix
+// instead of hardcoding one. An empty result means the deployment offers no
+// prefix-based hiding, and the page must not claim it does.
+func (c *Config) ActiveHiddenNamePrefixes() []string {
+	prefixes := c.hiddenPrefixes()
+	if prefixes == nil {
+		return nil
+	}
+	out := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SetHiddenNamePrefixes atomically replaces HiddenNamePrefixes with the

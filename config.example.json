@@ -6,13 +6,16 @@
   "hiddenNamePrefixes": ["🚫"],
   "_comment_hiddenNamePrefixes": "Node name prefixes that mark a node as hidden from this dashboard (#1181). Mirrors a convention used by other MeshCore map dashboards: an operator who wants their node hidden renames it to start with one of these prefixes and sends an advert; the next advert is dropped from /api/nodes, /api/nodes/search and /api/nodes/{pubkey}. DB rows are preserved so observation history (paths, hops, distances) stays intact for analytics. The node is NOT hidden from the mesh itself — only from this dashboard. Set to [] to disable. Default: [\"🚫\"].",
   "observerIATAWhitelist": [],
-  "_comment_observerIATAWhitelist": "Global IATA region whitelist. When non-empty, only observers whose IATA code (from MQTT topic) matches are processed. Case-insensitive. Empty = allow all. Unlike per-source iataFilter, this applies across all MQTT sources.",
+  "_comment_observerIATAWhitelist": "Global IATA region whitelist. When non-empty, only observers whose IATA code (from MQTT topic) matches are processed. Case-insensitive. Empty = allow all. Unlike per-source iataFilter, this applies across all MQTT sources. A dropped region is logged by the ingestor as one '[region-filter] dropping region \"XYZ\"' line, repeated at most every iataWarnIntervalSec while it keeps arriving.",
+  "iataWarnIntervalSec": 21600,
+  "_comment_iataWarnIntervalSec": "Optional (ingestor). Seconds between repeated '[region-filter]' warnings for a region dropped by observerIATAWhitelist. Default 21600 (6h); 0 or omitted = default; maximum 86400 (24h), larger values are capped. At most 512 regions are tracked individually (region codes come from the MQTT topic, so this is bounded); beyond that, drops share one overflow warning with the same interval.",
   "retention": {
     "nodeDays": 7,
     "observerDays": 14,
     "packetDays": 30,
+    "channelDays": 0,
     "clientRxDays": 30,
-    "_comment": "nodeDays: nodes not seen in N days moved to inactive_nodes (default 7). observerDays: observers not sending data in N days are removed (-1 = keep forever, default 14). packetDays: transmissions older than N days are deleted (0 = disabled). clientRxDays: mobile client-RX coverage rows (client_receptions/client_observers) older than N days are deleted (0 = disabled) — bounds the opt-in coverage tables (#1727). NOTE (#1283): all retention fields are consumed by the INGESTOR process. The server is read-only and never prunes."
+    "_comment": "nodeDays: nodes not seen in N days moved to inactive_nodes (default 7). observerDays: observers not sending data in N days are removed (-1 = keep forever, default 14). packetDays: transmissions older than N days are deleted (0 = disabled). channelDays: channel messages (GRP_TXT) and their observations are kept until they are N days old instead of packetDays; only takes effect when packetDays is set and channelDays is larger (0 = channel messages follow packetDays, default) (#296). The server's in-memory window (packetStore.retentionHours) is separate; channel history is read from the database. clientRxDays: mobile client-RX coverage rows (client_receptions/client_observers) older than N days are deleted (0 = disabled) — bounds the opt-in coverage tables (#1727). NOTE (#1283): all retention fields are consumed by the INGESTOR process. The server is read-only and never prunes."
   },
   "db": {
     "vacuumOnStartup": false,
@@ -23,6 +26,12 @@
     },
     "_comment": "vacuumOnStartup: run one-time full VACUUM to enable incremental auto-vacuum on existing DBs. Executed by the INGESTOR at startup, BEFORE the MQTT subscriber starts (#1283), so there is no contention with concurrent writes. Blocks ingestor startup for minutes on large DBs; requires 2x DB file size in free disk space. incrementalVacuumPages: free pages returned to OS after each retention reaper cycle (default 1024). See #919. load.chunkSize: see nested _comment (#1009).",
     "_comment_slowWriterMs": "#1340 — SQLite writer-lock log threshold (default 500). Any wrapped writer call (tagged neighbor_builder, mqtt_handler, prune_packets, prune_observers, prune_metrics, vacuum) whose hold_ms exceeds this emits a single [db-slow-writer] log line. Configured per-process via the CORESCOPE_DB_SLOW_WRITER_MS environment variable on the INGESTOR (e.g. CORESCOPE_DB_SLOW_WRITER_MS=200 for tighter alerting). Per-component wait_ms / hold_ms / contention_total histograms are surfaced via /api/perf/write-sources under .writer_perf regardless of this threshold."
+  },
+  "resolvedPathBackfill": {
+    "disabled": false,
+    "batchSize": 500,
+    "pauseMs": 250,
+    "_comment": "Optional (ingestor, #188). Once per ingestor start, re-resolves observations stored with resolved_path = NULL, from a persisted watermark up to the newest observation at the start of the pass. It waits until a neighbour-edge build has caught up with the stored observations and found at least one edge, then works in batches: each batch reads batchSize rows, resolves them outside any lock, and writes the results and the new watermark in one short write transaction, then sleeps pauseMs. Rows that still do not resolve stay NULL and are not retried. disabled: true skips the pass. batchSize: rows per batch, default 500. pauseMs: milliseconds between batches, default 250, which caps the pass at about 2,000 rows/s. For both numbers, 0 or omitted means the default, so the pause cannot be turned off; the smallest pause is 1. The server sees backfilled values only after its next restart."
   },
   "listLimits": {
     "packetsMax": 10000,
@@ -35,6 +44,16 @@
   "_comment_ingestorStats": "Ingestor publishes a 1-Hz stats snapshot consumed by the server's /api/perf/io and /api/perf/write-sources endpoints (#1120). Path is configured via the CORESCOPE_INGESTOR_STATS environment variable on the INGESTOR process. Default: /tmp/corescope-ingestor-stats.json. The writer uses O_NOFOLLOW + 0o600, so a pre-planted symlink in /tmp cannot be used to clobber an arbitrary file. SECURITY: in shared-tmp environments (multi-tenant hosts), point CORESCOPE_INGESTOR_STATS at a private directory like /var/lib/corescope/ingestor-stats.json that only the corescope user can write to.",
   "corsAllowedOrigins": [],
   "_comment_corsAllowedOrigins": "Cross-origin allowlist for embed scenarios (#1369) AND for /ws WebSocket upgrades (#1793 — CSWSH defense per OWASP WebSocket Security Cheat Sheet). Exact-match origins, e.g. [\"https://blog.example.com\", \"https://embed.example.com\"]. Same-origin requests (Origin host == request Host) and non-browser clients (no Origin header) are always allowed for /ws. When empty (default), no Access-Control-* headers are sent and browsers enforce same-origin; cross-origin /ws upgrades are rejected. When non-empty, only the listed origins receive CORS headers, and Access-Control-Allow-Methods is limited to GET, HEAD, OPTIONS (the cross-domain surface is read-only — same-origin admin writes are unaffected). Use [\"*\"] to allow any origin for CORS XHR (NOT recommended for write-capable deployments); note that \"*\" is deliberately NOT honored for /ws upgrades — list explicit origins to permit cross-origin WebSocket clients (OWASP guidance: avoid wildcards in CSWSH defense). Operators can override per-deployment with the CORS_ALLOWED_ORIGINS environment variable (comma-separated). No credentialed CORS is enabled. To embed the map or channels pages cross-domain, add the embedding origin here and use the URL pattern '/#/map?embed=1' or '/#/channels?embed=1' — embed mode hides the top-nav, bottom-nav, and side drawer for full-bleed iframe rendering.",
+  "webSocket": {
+    "maxConnsPerIP": 0,
+    "_comment_maxConnsPerIP": "#1794 - concurrent /ws connections allowed from one client address. 0 = off, and that is the shipped default ON PURPOSE: carrier-grade NAT puts thousands of unrelated mobile subscribers behind one public IPv4, so a low cap refuses real visitors while a scraper simply rents more addresses. Set it only if you know your audience is not behind shared NAT.",
+    "upgradesPerMinPerIP": 30,
+    "_comment_upgradesPerMinPerIP": "#1794 - handshakes per minute from one client address. On by default. Safe under CGNAT: a real client upgrades a handful of times per minute even while reconnecting, so 30 leaves ordinary traffic alone while flattening a scraper reconnect loop. Set 0 to disable.",
+    "trustedProxies": [],
+    "_comment_trustedProxies": "#1794 - addresses or CIDRs of YOUR reverse proxy. REQUIRED for the per-IP limits to do anything behind nginx/Caddy/Traefik/ingress: without it every visitor shares the proxy's address, so the limits are skipped and one warning is logged at startup. X-Forwarded-For is believed only from these addresses, because anyone else can forge it. Never list an address you do not control.",
+    "deny": [],
+    "_comment_deny": "#1794 - addresses or CIDRs refused at the /ws upgrade, before the handshake. Accepts both \"1.2.3.4\" and \"1.2.3.0/24\". Applies even behind an unconfigured proxy, since it is your explicit instruction. Rejections are counted in /api/stats under websocket.rejectedDeny."
+  },
   "https": {
     "cert": "/path/to/cert.pem",
     "key": "/path/to/key.pem",
@@ -89,10 +108,18 @@
           "provider": "",
           "token": ""
         },
+        "_comment_opentopomap": "OpenTopoMap topographical tile provider. Enabling this makes USERS' BROWSERS fetch tiles from tile.opentopomap.org, exposing their IP and approximate viewing area to that third party. Tiles are CC-BY-SA: the credit and licence link must stay on the map. Limited to zoom level 17, and it is a small volunteer-run service with informal fair-use expectations.",
+        "opentopomap": {
+          "enabled": false
+        },
         "_comment_stamen": "Stamen (hosted by Stadia). WARNING: Tokens are sent to the browser. Apply origin/referrer restrictions.",
         "stamen": {
           "enabled": false,
           "token": ""
+        },
+        "_comment_usgs": "USGS topographical tile providers (USGS Topo, USGS Imagery). Enabling these makes USERS' BROWSERS fetch tiles from basemap.nationalmap.gov, exposing their IP and approximate viewing area to that third party. Limited to zoom level 16, and The National Map only serves the United States and its territories — elsewhere these layers render blank with no on-screen explanation.",
+        "usgs": {
+          "enabled": false
         }
       }
     }
@@ -211,6 +238,16 @@
     "#bookclub",
     "#shtf"
   ],
+  "channelProposals": {
+    "enabled": false,
+    "autoApprove": false,
+    "maxPending": 100,
+    "maxApproved": 128,
+    "maxQueuedRequests": 256,
+    "retentionDays": 30,
+    "submissionsPerHour": 20
+  },
+  "_comment_channelProposals": "Shared hashtag channels: visitors suggest public hashtag channels (names only, never keys) on the Channels page. Submissions open only when enabled is true AND apiKey is strong (16+ characters, not a placeholder). By default an administrator approves or rejects suggestions at #/channels?view=proposals with the apiKey. Opt-in autoApprove immediately approves only brand-new names; existing pending, rejected and revoked names are not auto-approved. Approved channels are decrypted by the ingestor and listed for everyone, even before they carry traffic; they stay active if enabled is later set to false. Limits: maxPending/maxApproved bound the table, maxQueuedRequests bounds the request queue next to the database, submissionsPerHour is a global sliding window, and rejected or unreviewed suggestions are deleted after retentionDays. Read by both server and ingestor; changing this policy requires an ingestor restart.",
   "healthThresholds": {
     "infraDegradedHours": 24,
     "infraSilentHours": 72,
@@ -331,6 +368,10 @@
     "cacheRecomputeIntervalSeconds": 300,
     "_comment": "maxAgeDays: neighbor edges older than this many days are pruned on startup and daily. Default 5. maxEdgeKm: geo-implausibility filter — when both endpoints have GPS, edges with haversine distance > maxEdgeKm are rejected at build time to prevent disambiguator self-reinforcement on wide-geo MQTT deployments. Default 500 km (well above any plausible terrestrial LoRa hop). 0 ⇒ use default; set negative to disable the filter. Rejected count surfaces in /api/analytics/neighbor-graph stats. Issue #1228. cacheRecomputeIntervalSeconds: how often the background recomputer rebuilds the default-shape /api/analytics/neighbor-graph response (#1481 P0-1). Default 300 (5 min). Lower = fresher data, more CPU per minute. Issue #1483."
   },
+  "estimatedPositions": {
+    "enabled": true,
+    "_comment": "Operator policy for neighbor-derived position estimates. Omit this section or enabled to preserve the default (true). Set false to disable estimates in node details, packet/Ping Scores paths, maps, and estimate-dependent analytics. Reported GPS, ordinary neighbor graphs, and independent IATA/name-based fallbacks are unchanged. Requires a Go server restart and browser refresh; not reloaded by SIGHUP."
+  },
   "observersCache": {
     "ttlSeconds": 30,
     "_comment": "TTL for the default-shape /api/observers response cache (#1481 P0-3). Default 30s. Lower = fresher data, more SQL pressure on the 1.9M-row observations table. TTL-boundary refills are collapsed via singleflight so concurrent requests cause exactly one SQL fill. Issue #1483."
@@ -343,7 +384,7 @@
     "criticalMv": 3000,
     "_comment": "Voltage cutoffs (millivolts) for the per-node battery trend chart on /node-analytics. Latest sample below lowMv shows the node as ⚠️ Low; below criticalMv shows 🪫 Critical. Both default to 3300 / 3000 if omitted. Source data: observer_metrics.battery_mv populated from observer status messages; only nodes that are themselves observers (matching pubkey ↔ observer id) yield a series. Issue #663."
   },
-  "_comment_mqttSources": "Each source connects to an MQTT broker. Supported schemes: mqtt:// (plain TCP), mqtts:// (TLS), ws:// (WebSocket), wss:// (WebSocket TLS). topics: what to subscribe to. iataFilter: only ingest packets from these regions (optional). region: default IATA region for this source — used when packet/topic doesn't specify one (optional, priority: payload > topic > this field).",
+  "_comment_mqttSources": "Each source connects to an MQTT broker. Supported schemes: mqtt:// (plain TCP), mqtts:// (TLS), ws:// (WebSocket), wss:// (WebSocket TLS). topics: what to subscribe to. iataFilter: only ingest packets from these regions (optional). region: default IATA region for this source — used when packet/topic doesn't specify one (optional, priority: payload > topic > this field). clientId: MQTT client ID, used verbatim (optional; must be unique among the broker's concurrent clients, and at most 23 characters of [0-9A-Za-z] for strict MQTT 3.1 brokers). When omitted, each ingestor start generates corescope-<name>-<8 random hex>, so copies of this file never share an ID — do not add a fixed clientId here.",
   "compression": {
     "gzip": false,
     "websocket": false,
@@ -362,6 +403,7 @@
   "_comment_compression": "Opt-in HTTP gzip middleware + WebSocket permessage-deflate. Both default to false — enable ONLY when your upstream reverse proxy is NOT already compressing. gzip: enables the gzipMiddleware wrapper around the HTTP handler. websocket: sets gorilla websocket Upgrader.EnableCompression. level: gzip compression level 1..9 (1=BestSpeed, 9=BestCompression, default 6). minSizeBytes: advisory minimum response size below which compression would not pay off. contentTypes: MIME allow-list — only responses with these Content-Type values are compressed. Already-compressed types (image/*, video/*, audio/*, application/zip, application/x-gzip, application/pdf, application/octet-stream) are always skipped, as are responses whose handler already set Content-Encoding. Omit contentTypes to use the built-in default allow-list.",
   "clientRxCoverage": { "enabled": false },
   "_comment_clientRxCoverage": "Opt-in mobile client-RX coverage (corescope-rx companions publishing GPS-tagged receptions to meshcore/client/<pubkey>/packets). Default OFF: when disabled the ingestor writes no client_receptions, the /api/rx-coverage|rx-leaderboard|nodes/{pubkey}/rx-coverage endpoints 404, and the UI hides the Coverage dashboard + Reach overlay. Set enabled=true to turn it on. SINGLE FLAG, BOTH PROCESSES: the ingestor and server each parse this same config.json, so this one clientRxCoverage.enabled entry gates both the ingest write path and the read endpoints — set it once, not per-process. TRUST: the feature requires an ACL-capable broker binding meshcore/client/{pubkey}/packets to that publisher; without ACLs the companion GPS is spoofable (see docs/client-rx-coverage.md). Retention: see retention.clientRxDays. Companion app + setup: https://github.com/efiten/corescope-rx.",
+  "_comment_clientRxCoverage_sources": "OPTIONAL allow-list of mqttSources[].name entries that may contribute client RX coverage. Omitted or empty (the default) = every source is accepted, unchanged behaviour. Set it when this instance reads MORE THAN ONE broker and they do not all bind meshcore/client/<pubkey>/packets to the publisher holding that key: coverage is only as trustworthy as the weakest broker, so on a mixed deployment (one broker with per-device identity + one legacy username/password broker where many accounts may write meshcore/#) any account on the weak broker could otherwise inject coverage under any companion pubkey with any GPS position. Listing the trusted source names keeps the client namespace on those sources — a client message from any other source is dropped before any write (no client_receptions, no client_observers, no observer row), logged per source with throttling and a line cap. Matching is on the source name, trimmed and case-insensitive; a source with no name can never be listed. A name matching no configured source is logged once at startup. Example: \"clientRxCoverage\": { \"enabled\": true, \"sources\": [\"device-auth\"] }. See docs/client-rx-coverage.md.",
   "_comment_channelKeys": "Hex keys for decrypting channel messages. Key name = channel display name. public channel key is well-known.",
   "_comment_hashChannels": "Channel names whose keys are derived via SHA256. Key = SHA256(name)[:16]. Listed here so the ingestor can auto-derive keys.",
   "hashRegions": [
@@ -398,5 +440,9 @@
   "customizer": {
     "disabledTabs": [],
     "_comment_disabledTabs": "Issue #1508. List of customizer-modal tab ids to hide from end users. Useful when operators want to expose only daily-use viewer controls and keep one-shot admin chrome out of the way. Recognized ids: branding, theme, nodes, home, display, geofilter, export. Example: [\"branding\", \"geofilter\", \"export\"] hides the admin tabs and leaves theme/colors/home/display visible. Default [] keeps the legacy behavior (all tabs visible). Operators edit this in config.json directly — there is no in-app UI for this list (by design)."
+  },
+  "privacy": {
+    "enabled": false,
+    "_comment": "Opt-in privacy-notice page at #/privacy. Default off; set enabled=true to publish the page and the nav links that point at it. This flag is the ENTIRE privacy configuration -- the notice itself is a FIXED document in public/privacy.js and is deliberately not operator-editable, so the published wording cannot drift from the notice that was reviewed and signed off. Nothing you can put in config.json adds, removes or rewords a single line of it; changing the notice means editing that file. Older configs may still contain the removed text fields (controllerName, purposesText, retentionText and the rest) -- they are ignored, not rejected. None of this is legal advice, and publishing the page does not by itself make a deployment compliant."
   }
 }

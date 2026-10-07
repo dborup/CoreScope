@@ -1818,6 +1818,7 @@ console.log('\n=== nodes.js: WS handler runtime behavior ===');
           style: {}, dataset: {},
           classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
           addEventListener() {},
+          contains() { return false; }, // nodes.js renderRows() asks tbody.contains(document.activeElement) (#1616)
           querySelectorAll() { return []; },
           querySelector() { return null; },
           getAttribute() { return null; },
@@ -2236,6 +2237,22 @@ console.log('\n=== app.js: computeBreakdownRanges ===');
   loadInCtx(ctx, 'public/roles.js');
   loadInCtx(ctx, 'public/app.js');
   const computeBreakdownRanges = ctx.computeBreakdownRanges;
+
+  test('senderPathHashSize reads 0-hop flood width but not direct marker', () => {
+    assert.strictEqual(ctx.senderPathHashSize('1540DEADBEEF'), 2);
+    assert.strictEqual(ctx.senderPathHashSize('1580DEADBEEF'), 3);
+    assert.strictEqual(ctx.senderPathHashSize('1600DEADBEEF'), null);
+    // #322 (1): the direct zero-hop marker is also valid on TRANSPORT_DIRECT
+    // (route 3), where the path byte sits at offset 5 behind the transport
+    // codes. Header 0x17 = route 3, 4 transport bytes (aabbccdd), path byte
+    // 0x00. The shared width helper must treat route 3 like route 2 → null,
+    // killing the `(route === 2 || route === 3)` → `(route === 2)` mutant here.
+    assert.strictEqual(ctx.senderPathHashSize('17aabbccdd00DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('141122334440DEADBEEF'), 2);
+    assert.strictEqual(ctx.senderPathHashSize('2540DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('15C0DEADBEEF'), null);
+    assert.strictEqual(ctx.senderPathHashSize('15'), null);
+  });
 
   function findRange(ranges, label) {
     return ranges.find(r => r.label === label);
@@ -3608,6 +3625,165 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
   });
 }
 
+// ===== Packets page: observer filter in grouped mode (issue #1748) =====
+{
+  console.log('\n--- Observer filter — grouped vs. flat mode (#1748) ---');
+
+  // Load the REAL applyObserverFilter from packets.js via sandbox, rather
+  // than testing a hand-copied reimplementation of its logic. Per #1748 PR
+  // review (kent-beck): a test that only checks a copy doesn't fail if the
+  // actual production function regresses. Mirrors the same loadInCtx
+  // pattern used below for _calcVisibleRange.
+  const obsFilterCtx = makeSandbox();
+  obsFilterCtx.registerPage = (name, handlers) => {};
+  obsFilterCtx.onWS = () => {};
+  obsFilterCtx.offWS = () => {};
+  obsFilterCtx.api = () => Promise.resolve({});
+  obsFilterCtx.window.getParsedPath = () => [];
+  obsFilterCtx.window.getParsedDecoded = () => ({});
+  loadInCtx(obsFilterCtx, 'public/packets.js');
+  const applyObserverFilter = obsFilterCtx.window._packetsTestAPI.applyObserverFilter;
+
+  // A transmission the server correctly returned for observer "B" (it was
+  // one of several observers of this hash) but whose displayed
+  // "representative" observer is "A" (longest path) — exactly the shape
+  // QueryGroupedPackets returns. `_children` is undefined, matching the
+  // state on initial load (only fetched lazily on expand/obs-sort-change).
+  const groupedRowRepresentativeNotFiltered = {
+    hash: 'hash1', observer_id: 'A', observer_count: 3, _children: undefined,
+  };
+  // A single-observer transmission whose only observer is NOT in the filter —
+  // must still be excluded (it genuinely wasn't observed by the filtered
+  // observer; the server wouldn't have returned it in the first place, but
+  // the client function must not accidentally let everything through).
+  const groupedRowGenuinelyExcludedByServer = {
+    hash: 'hash2', observer_id: 'C', observer_count: 1, _children: undefined,
+  };
+  // A flat/expanded-mode row: single observation, own observer_id.
+  const flatRowMatching = { hash: 'hash3', observer_id: 'B' };
+  const flatRowNonMatching = { hash: 'hash4', observer_id: 'A' };
+  // A flat/expanded-mode row with already-loaded children, only one of
+  // which matches — the pre-existing children-aware fallback path.
+  const flatRowWithMatchingChild = {
+    hash: 'hash5', observer_id: 'A',
+    _children: [{ observer_id: 'A' }, { observer_id: 'B' }],
+  };
+
+  // --- #1900: the VCR replay mapping must carry observer_id ---
+  // Same rationale as applyObserverFilter above: exercise the real
+  // production mapping. Dropping observer_id here previously passed every
+  // test in the suite, because the only coverage lived in
+  // test-live-region-filter.js and only reached live.js's half of the fix.
+  const buildReplayPackets = obsFilterCtx.window._packetsTestAPI.buildReplayPackets;
+  const replayCtx = {
+    typeName: 'ADVERT', decoded: { t: 1 }, pathHops: ['AA'],
+    obsName: (id) => 'Name of ' + id,
+  };
+
+  test('#1900 replay carries observer_id for a single-observation packet', () => {
+    const out = buildReplayPackets(
+      { id: 5, hash: 'h5', raw_hex: 'CAFE', timestamp: '2026-01-01T00:00:00Z', observer_id: 'obs1', observer_iata: 'BRU' },
+      { observations: [{ id: 9 }] }, replayCtx);
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].observer_id, 'obs1', 'the Live region filter matches on observer_id');
+    assert.strictEqual(out[0].observer_iata, 'BRU');
+    assert.strictEqual(out[0].observer, 'Name of obs1', 'the resolved name is still carried too');
+  });
+
+  test('#1900 replay carries observer_id for every observation of a multi-observer packet', () => {
+    const out = buildReplayPackets(
+      { id: 5, hash: 'h5', raw_hex: 'CAFE', timestamp: '2026-01-01T00:00:00Z', observer_id: 'obs1' },
+      { observations: [
+        { id: 1, observer_id: 'obsA', observer_iata: 'BRU', timestamp: '2026-01-01T00:00:00Z' },
+        { id: 2, observer_id: 'obsB', observer_iata: 'LAX', timestamp: '2026-01-01T00:00:01Z' },
+      ] }, replayCtx);
+    assert.strictEqual(out.length, 2, 'one replay packet per observation');
+    // deepEqual, not deepStrictEqual: the array comes from the vm sandbox's
+    // realm, so its prototype differs from this one and a STRICT deep compare
+    // fails on identical contents ("same structure but not reference-equal").
+    // The loose form compares across realms and is stronger than joining.
+    assert.deepEqual(out.map((p) => p.observer_id), ['obsA', 'obsB'],
+      'each observation must carry its OWN observer_id, not the transmission representative');
+    assert.deepEqual(out.map((p) => p.observer_iata), ['BRU', 'LAX']);
+  });
+
+  test('grouped mode: keeps a multi-observer row whose representative is not the filtered observer (#1748 core bug)', () => {
+    const result = applyObserverFilter([groupedRowRepresentativeNotFiltered], { observer: 'B' }, true, false);
+    assert.strictEqual(result.length, 1, 'server already guaranteed observer B saw this transmission');
+  });
+
+  test('grouped mode: does not need _children to keep a valid server-filtered row', () => {
+    // The defining regression: _children is undefined (not yet fetched),
+    // and observer_id (the representative) does not match — pre-fix this
+    // returned zero rows.
+    const result = applyObserverFilter([groupedRowRepresentativeNotFiltered], { observer: 'B' }, true, false);
+    assert.strictEqual(result.length, 1);
+  });
+
+  test('grouped mode: passes through rows unfiltered (server EXISTS filter is authoritative)', () => {
+    // The client no longer second-guesses the server in grouped mode at all —
+    // this row would never have been returned by the server if observer C
+    // weren't a match, so the client trusts it.
+    const result = applyObserverFilter([groupedRowGenuinelyExcludedByServer], { observer: 'B' }, true, false);
+    assert.strictEqual(result.length, 1, 'grouped mode does not re-filter; server already applied the correct filter');
+  });
+
+  test('flat mode: keeps a row whose own observer_id matches', () => {
+    const result = applyObserverFilter([flatRowMatching], { observer: 'B' }, false, false);
+    assert.strictEqual(result.length, 1);
+  });
+
+  test('flat mode: excludes a row whose own observer_id does not match and has no children', () => {
+    const result = applyObserverFilter([flatRowNonMatching], { observer: 'B' }, false, false);
+    assert.strictEqual(result.length, 0);
+  });
+
+  test('flat mode: falls back to matching children when representative does not match', () => {
+    const result = applyObserverFilter([flatRowWithMatchingChild], { observer: 'B' }, false, false);
+    assert.strictEqual(result.length, 1, 'observer B is among the already-loaded children');
+  });
+
+  // groupByHash MUST be false here: with it true the grouped early-return
+  // would return everything anyway, so the assertion would hold even with the
+  // hashOnly guard deleted and would pin nothing. Pinning a hash and then
+  // toggling "Group by Hash" off is a reachable state, and is exactly the
+  // case buildPacketsParams's hash short-circuit (which suppresses the
+  // `observer` param server-side) relies on.
+  test('hashOnly bypasses the observer filter entirely in FLAT mode (pinned-hash view)', () => {
+    const result = applyObserverFilter([flatRowNonMatching, { hash: 'hash6', observer_id: 'C' }], { observer: 'B' }, false, true);
+    assert.strictEqual(result.length, 2, 'hashOnly must return every row unfiltered, matching renderTableRows()');
+  });
+
+  // The children fallback coerces with String() because an observation's
+  // observer_id arrives as a number on some payloads while filters.observer is
+  // always a comma-joined string. A fixture with string ids only would make
+  // the coercion a no-op and let its removal go unnoticed.
+  test('flat mode: numeric child observer_id still matches the string filter', () => {
+    const numericChildRow = { hash: 'hash7', observer_id: 'A', _children: [{ observer_id: 7 }] };
+    const result = applyObserverFilter([numericChildRow], { observer: '7' }, false, false);
+    assert.strictEqual(result.length, 1, 'String(c.observer_id) must bridge a numeric child id to the string filter');
+  });
+
+  test('no observer filter set: all rows pass through unchanged', () => {
+    const result = applyObserverFilter([groupedRowGenuinelyExcludedByServer, flatRowNonMatching], {}, false, false);
+    assert.strictEqual(result.length, 2);
+  });
+
+  // The grouped early-return is only safe because changing the observer
+  // filter refetches from the server. If that handler ever stops calling
+  // loadPackets(), the filter silently becomes a no-op in grouped mode (the
+  // default view) until the next page load — the regression this pins.
+  test('the observer multi-select handler refetches instead of only re-rendering', () => {
+    const src = fs.readFileSync('public/packets.js', 'utf8');
+    const handler = src.slice(src.indexOf("obsMenu.addEventListener('change'"));
+    const body = handler.slice(0, handler.indexOf('\n    });'));
+    assert.ok(body.includes('loadPackets()'),
+      'observer filter changes must refetch from the server (grouped rows are server-filtered)');
+    assert.ok(!/\brenderTableRows\(\)/.test(body),
+      'a bare renderTableRows() would only re-filter the already-loaded page');
+  });
+}
+
 // ===== Packets page: virtual scroll infrastructure =====
 {
   console.log('\nPackets page — virtual scroll:');
@@ -4490,6 +4666,69 @@ console.log('\n=== nodes.js: renderNodeTimestampHtml / renderNodeTimestampText =
   });
 }
 
+console.log('\n=== nodes.js: own advert freshness ===');
+{
+  test('advert timestamp ignores recent arbitrary health traffic and relay-touched last_seen', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const stale = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const n = { public_key: key, role: 'repeater', last_seen: stale, last_heard: stale };
+    const advert = { payload_type: 4, timestamp: stale, decoded_json: JSON.stringify({ pubKey: key }) };
+    const lastAdvert = ctx.window._nodesGetLastAdvert(n, { lastHeard: recent, lastAdvert: stale }, [advert]);
+    assert.strictEqual(lastAdvert, stale);
+    n._lastHeard = lastAdvert;
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(n).status, 'stale');
+  });
+  test('legacy API fallback uses only exact-owned adverts, never ACKs or another origin', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const old = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const adverts = [
+      { payload_type: 4, timestamp: old, decoded_json: JSON.stringify({ pubKey: key.toUpperCase() }) },
+      { payload_type: 4, timestamp: recent, decoded_json: JSON.stringify({ pubKey: 'bb' + '22'.repeat(31) }) },
+      { payload_type: 3, timestamp: recent, decoded_json: JSON.stringify({ pubKey: key }) },
+      { payload_type: 4, timestamp: recent, decoded_json: JSON.stringify({ pubKey: key, signatureValid: false }) },
+    ];
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastHeard: recent }, adverts), old);
+  });
+  test('explicit unknown advert is null, even if legacy packet evidence or last_seen is fresh', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const recent = new Date().toISOString();
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastAdvert: null, lastHeard: recent }, []), null);
+    assert.strictEqual(ctx.window._nodesGetLastAdvert({ public_key: key, last_seen: recent }, { lastHeard: recent }, []), null);
+  });
+  test('safe health activity outranks polluted directory timestamps without mutating the node', () => {
+    const ctx = makeNodesSandbox();
+    const old = new Date(Date.now() - 96 * 3600000).toISOString();
+    const recent = new Date().toISOString();
+    const node = { role: 'repeater', last_seen: recent, last_heard: recent, _liveSeen: Date.now() };
+    const safe = ctx.window._nodesWithHealthActivity(node, { lastAdvert: old, lastHeard: old }, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'stale');
+    assert.strictEqual(node.last_seen, recent);
+    const unknown = ctx.window._nodesWithHealthActivity(node, { lastAdvert: null, lastHeard: null }, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(unknown).status, 'stale');
+  });
+  test('relay-only safe general activity is active but the advert timestamp remains unknown', () => {
+    const ctx = makeNodesSandbox();
+    const stats = { lastAdvert: null, lastHeard: new Date().toISOString() };
+    const node = { role: 'repeater' };
+    const safe = ctx.window._nodesWithHealthActivity(node, stats, []);
+    assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'active');
+    assert.strictEqual(ctx.window._nodesGetLastAdvert(node, stats, []), null);
+  });
+  test('absent or historical relays do not claim the node is alive', () => {
+    const ctx = makeNodesSandbox();
+    for (const node of [{}, { last_relayed: new Date(Date.now() - 96 * 3600000).toISOString(), relay_active: false }]) {
+      const html = ctx.window._nodesRenderRelayActivity(node);
+      assert.ok(html.includes('no recent confirmed relay'));
+      assert.ok(!html.includes('alive'));
+    }
+  });
+}
+
 // ===== NODES.JS: getStatusInfo edge cases (P0 coverage expansion) =====
 console.log('\n=== nodes.js: getStatusInfo edge cases ===');
 {
@@ -5026,16 +5265,20 @@ console.log('\n=== app.js: favorites ===');
   test('favStar returns filled star for favorite', () => {
     ctx.localStorage.setItem('meshcore-favorites', '["pk1"]');
     const html = ctx.favStar('pk1');
-    assert.ok(html.includes('★'));
-    assert.ok(html.includes('on'));
+    // Phosphor migration (#1648 M2): the glyph is now an SVG sprite reference.
+    assert.ok(html.includes('#ph-star-fill'));
+    assert.ok(/class="fav-star[^"]* on"/.test(html));
+    assert.ok(html.includes('aria-pressed="true"'));
     assert.ok(html.includes('Remove from favorites'));
   });
 
   test('favStar returns empty star for non-favorite', () => {
     ctx.localStorage.setItem('meshcore-favorites', '[]');
     const html = ctx.favStar('pk1');
-    assert.ok(html.includes('☆'));
-    assert.ok(!html.includes(' on'));
+    assert.ok(html.includes('#ph-star"'));
+    assert.ok(!html.includes('#ph-star-fill'));
+    assert.ok(!/class="fav-star[^"]* on"/.test(html));
+    assert.ok(html.includes('aria-pressed="false"'));
     assert.ok(html.includes('Add to favorites'));
   });
 
@@ -5907,11 +6150,25 @@ console.log('\n=== packets.js: buildFieldTable transport offsets (#765) ===');
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  const hashHelperCtx = makeSandbox();
+  loadInCtx(hashHelperCtx, 'public/roles.js');
+  loadInCtx(hashHelperCtx, 'public/app.js');
+  ftCtx.senderPathHashSize = hashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable's Path Length row now reads its width through the
+  // shared pathHashSizeFromByte() helper, so the sandbox must expose it too.
+  ftCtx.pathHashSizeFromByte = hashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable, fieldRow } = ftCtx.window._packetsTestAPI;
 
   // Helper: build a hex string with specific bytes
   function makeHex(bytes) { return bytes.map(b => b.toString(16).padStart(2, '0')).join(''); }
+
+  test('packet hex breakdown shows the encoded width for a zero-hop flood', () => {
+    const html = buildFieldTable({ raw_hex: '1540DEADBEEF', route_type: 1, payload_type: 5 }, {}, [], {});
+    assert.ok(html.includes('hash_size=2 bytes, hash_count=0'), 'flood width missing from breakdown');
+    const direct = buildFieldTable({ raw_hex: '1600DEADBEEF', route_type: 2, payload_type: 5 }, {}, [], {});
+    assert.ok(direct.includes('no encoded hash size'), 'direct marker must stay unknown');
+  });
 
   test('FLOOD (route_type=1): path_length at byte 1, no transport codes', () => {
     // header=0x05 (route_type=1, payload=1), path_length=0x41 (hash_size=2, count=1), hop=AABB
@@ -5997,6 +6254,12 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  const secondHashHelperCtx = makeSandbox();
+  loadInCtx(secondHashHelperCtx, 'public/roles.js');
+  loadInCtx(secondHashHelperCtx, 'public/app.js');
+  ftCtx.senderPathHashSize = secondHashHelperCtx.senderPathHashSize;
+  // #322 (1): buildFieldTable now reads its width via the shared helper.
+  ftCtx.pathHashSizeFromByte = secondHashHelperCtx.pathHashSizeFromByte;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 
@@ -6029,13 +6292,13 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
       'Public Key should be at offset 6');
   });
 
-  test('#844: hashCountVal=0 (direct advert) skips Path section', () => {
+  test('#844: zero-hop flood skips Path section but retains encoded width', () => {
     // path_len = 0x00 → hash_size=1, hash_count=0
     const raw = '1100' + '0'.repeat(200);
     const pkt = { raw_hex: raw, route_type: 1, payload_type: 0 };
     const html = buildFieldTable(pkt, {}, [], {});
-    assert.ok(!html.includes('section-path'), 'Should not render Path section for direct advert');
-    assert.ok(html.includes('direct advert'), 'Should note direct advert in path_length description');
+    assert.ok(!html.includes('section-path'), 'Should not render Path section without relay hops');
+    assert.ok(html.includes('hash_size=1 byte, hash_count=0'), 'Should retain flood width in path_length description');
   });
 }
 

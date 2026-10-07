@@ -75,31 +75,154 @@
   }
 
   var activeMap = null;
+  var requestGeneration = 0;
+  var routePrefix = '#/packets/';
+  var routeQueryKey = null;
 
+  // Registered in the capture phase while the modal is open: Escape closes
+  // only this top layer. Stopping it keeps the layers below (the packets
+  // detail pane, a SlideOver), whose Escape handlers listen on document in
+  // the bubble phase, open until the next Escape (#167).
+  // A layer opened over the modal afterwards (the global search via Ctrl+K,
+  // a nav menu, the More sheet, a filter popover) holds focus, and Escape is
+  // that layer's: the event is left alone then (#180).
   function onKeydown(e) {
-    if (e.key === 'Escape') close();
+    var overlay = document.getElementById('packetPathModal');
+    if (e.key !== 'Escape' || !overlay || focusInLayerAbove(overlay, e.target)) return;
+    e.stopPropagation();
+    close();
   }
 
-  function close() {
+  // True when el, the focused element, is in a floating layer drawn over the
+  // modal: outside it, inside a position:fixed ancestor other than the
+  // packets detail surfaces the modal opens over (SlideOver, mobile sheet),
+  // and topmost at its own centre, i.e. not under the modal's backdrop. The
+  // sticky top nav and the page are not floating layers, so Escape with focus
+  // there still closes the modal.
+  function focusInLayerAbove(overlay, el) {
+    if (!el || !el.getBoundingClientRect || overlay.contains(el)) return false;
+    var layer = el;
+    while (layer && layer !== document.body && getComputedStyle(layer).position !== 'fixed') layer = layer.parentElement;
+    if (!layer || layer === document.body || layer.matches('.slide-over-panel, .mobile-detail-sheet')) return false;
+    var r = el.getBoundingClientRect();
+    var top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!top && layer.contains(top);
+  }
+
+  // A #/packets/<hash>?…&viewPath=1 URL describes this modal as open (#147).
+  // Once it closes, drop that one param (the others stay verbatim) so a
+  // refresh or a copied address-bar link does not reopen it. This writes the
+  // hash next to packets.js's updatePacketsUrl(), which adds ?viewPath=1 while
+  // the modal is open on the packet of the #/packets/<hash> subpath.
+  function dropViewPathParam() {
+    if (typeof history === 'undefined' || !history.replaceState) return;
+    var h = String(location.hash || '');
+    var q = h.indexOf('?');
+    if (q < 0 || h.indexOf(routePrefix) !== 0) return;
+    var params = h.slice(q + 1).split('&');
+    var kept = params.filter(function (p) { return p !== 'viewPath=1'; });
+    if (kept.length === params.length) return;
+    history.replaceState(null, '', h.slice(0, q) + (kept.length ? '?' + kept.join('&') : ''));
+  }
+
+  // The modal belongs to the route it was opened on (#180): the hash path
+  // (#/packets/<hash>, without the query) at open(). A hashchange to another
+  // path -- Back/Forward, a nav link -- closes it.
+  var openPath = null;
+  var openQueryValue = null;
+  // The id open() put in the history.state of the #/packets/<hash> entry it
+  // opened on, and the ids of entries whose modal was closed while another
+  // route was shown. Such an entry still carries ?viewPath=1, so Back/Forward
+  // onto it must not reopen the modal (restore()). The id is per entry, so a
+  // new link to the same URL (no state) still opens it. Bounded list.
+  var openEntry = null;
+  var closedEntries = [];
+  var MAX_CLOSED_ENTRIES = 50;
+
+  function hashPath(h) {
+    h = String(h || '');
+    var q = h.indexOf('?');
+    return q < 0 ? h : h.slice(0, q);
+  }
+
+  function modalQueryValue() {
+    return new URLSearchParams(String(location.hash || '').split('?')[1] || '').get(routeQueryKey);
+  }
+
+  function onModalRoute() {
+    return hashPath(location.hash) === openPath && (!routeQueryKey || modalQueryValue() === openQueryValue);
+  }
+
+  function tagEntry() {
+    if (typeof history === 'undefined' || !history.replaceState || openPath.indexOf(routePrefix) !== 0) return null;
+    var id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    var state = {};
+    var cur = history.state;
+    if (cur && typeof cur === 'object') for (var k in cur) state[k] = cur[k];
+    state.packetPathModal = id;
+    // No URL argument: only the entry's state changes.
+    history.replaceState(state, '');
+    return id;
+  }
+
+  function onHashChange() {
+    if (!onModalRoute()) close();
+  }
+
+  // Removes the modal; true when one was open.
+  function removeModal() {
+    requestGeneration++;
     var overlay = document.getElementById('packetPathModal');
     if (overlay) overlay.remove();
     if (activeMap) {
       try { activeMap.remove(); } catch (e) { /* already gone */ }
       activeMap = null;
     }
-    document.removeEventListener('keydown', onKeydown);
+    document.removeEventListener('keydown', onKeydown, true);
+    window.removeEventListener('hashchange', onHashChange);
+    return !!overlay;
+  }
+
+  function close() {
+    var elsewhere = !onModalRoute();
+    var entry = openEntry;
+    if (!removeModal()) return;
+    openPath = openEntry = openQueryValue = null;
+    if (!elsewhere) {
+      dropViewPathParam();
+    } else if (entry) {
+      closedEntries.push(entry);
+      if (closedEntries.length > MAX_CLOSED_ENTRIES) closedEntries.shift();
+    }
+  }
+
+  // Reopens the modal that a #/packets/<hash>?…&viewPath=1 entry describes
+  // (packets.js init(): a shared link, a reload, Back/Forward), unless that
+  // entry's modal was closed while another route was shown (#180). Returns
+  // whether it opened; when not, packets.js drops ?viewPath=1 from the URL.
+  function restore(hash, options) {
+    var state = typeof history !== 'undefined' ? history.state : null;
+    if (state && state.packetPathModal && closedEntries.indexOf(state.packetPathModal) !== -1) return false;
+    open(hash, options);
+    return true;
   }
 
   // A short prefix marking a node's role in tooltips -- purely a label,
   // markers stay circleMarker dots throughout (a role-specific shape
   // would clash with the color/dash coding already carrying primary,
   // approx, and observer meaning).
+  // Phosphor sprite icons, not emoji (#1648 lint gate); same glyphs as
+  // observer-detail.js's directNeighborRoleIcon.
+  function phIcon(name) {
+    return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-' + name + '"/></svg> ';
+  }
+
   function roleIcon(role) {
     switch (role) {
-      case 'repeater': return '📡 ';
-      case 'room': return '🏠 ';
-      case 'client': return '📱 ';
-      case 'sensor': return '🌡️ ';
+      case 'repeater': return phIcon('broadcast');
+      case 'room': return phIcon('house-line');
+      case 'client': return phIcon('radio');
+      case 'sensor': return phIcon('thermometer');
       default: return '';
     }
   }
@@ -114,7 +237,8 @@
   // renders as a hollow, dashed marker instead of a solid one, never
   // mistaken for a real fix.
   function chainForBranch(b) {
-    var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null; });
+    var estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
+    var located = (b.points || []).filter(function (p) { return p.lat != null && p.lon != null && (estimatesEnabled || !p.approx); });
     var chain = located.map(function (p, hi) {
       return {
         lat: p.lat, lon: p.lon, name: p.name, label: 'hop ' + (hi + 1) + ' of ' + b.hops, approx: !!p.approx,
@@ -122,7 +246,7 @@
         publicKey: p.publicKey,
       };
     });
-    if (b.observer && b.observer.lat != null && b.observer.lon != null) {
+    if (b.observer && b.observer.lat != null && b.observer.lon != null && (estimatesEnabled || !b.observer.approx)) {
       var observerLabel = b.hops + ' hop' + (b.hops === 1 ? '' : 's');
       if (typeof b.secondsAfterFirst === 'number') observerLabel += ', ' + formatElapsed(b.secondsAfterFirst);
       if (typeof b.distanceFromFirstKm === 'number' && b.distanceFromFirstKm > 0) observerLabel += ', ' + b.distanceFromFirstKm.toFixed(1) + ' km away';
@@ -136,12 +260,23 @@
     return { chain: chain, missing: (b.points || []).length - located.length };
   }
 
-  async function open(hash) {
-    close(); // in case one's already open
+  // Optional ping-history loader returns a status envelope instead of the
+  // ordinary PacketPathResponse. Ordinary packet callers need no options.
+  async function open(hash, options) {
+    // In case one's already open. Replacing it is not a close, so a
+    // ?viewPath=1 in the URL stays (#167).
+    removeModal();
+    var generation = requestGeneration;
+    options = options || {};
+    routePrefix = options.routePrefix || '#/packets/';
+    routeQueryKey = options.routeQueryKey || null;
+    var historical = typeof options.loadPath === 'function';
 
     var overlay = document.createElement('div');
     overlay.id = 'packetPathModal';
     overlay.className = 'modal-overlay';
+    // The packet shown, for packets.js's ?viewPath=1 (#167).
+    overlay.dataset.hash = hash;
     overlay.innerHTML =
       '<div class="modal" style="max-width:min(92vw,700px);padding:16px">' +
         '<button type="button" id="packetPathClose" aria-label="Close" ' +
@@ -152,22 +287,31 @@
         '</button>' +
         '<h3 style="margin:0 0 4px;padding-right:48px">Relay Path</h3>' +
         '<p class="text-muted" style="margin:0 0 8px;font-size:12px">How far and how wide this packet spread. Click a marker to open that node\'s detail page.</p>' +
-        '<div style="display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin:0 0 10px;font-size:11px;color:var(--text-muted)">' +
+        '<p id="packetPathArchiveNote" class="text-muted" style="display:none;margin:0 0 10px;font-size:12px"></p>' +
+        '<p id="packetPathEstimatePolicy" class="text-muted" style="display:none;margin:0 0 10px;font-size:12px"></p>' +
+        '<div id="packetPathLegend" style="display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin:0 0 10px;font-size:11px;color:var(--text-muted)">' +
           '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:2px;background:var(--accent)"></span><span id="packetPathPrimaryLegendLabel">farthest-traveled route</span></span>' +
           '<span id="packetPathDeepestLegendItem" style="display:none;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:2px;background:var(--status-purple)"></span>deepest (most hops) route</span>' +
           '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:2px;background:var(--text-muted)"></span>other station</span>' +
-          '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:9px;height:9px;border:2px dashed var(--text-muted);border-radius:50%;box-sizing:border-box"></span>approximate position</span>' +
+          '<span id="packetPathApproxLegend" style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:9px;height:9px;border:2px dashed var(--text-muted);border-radius:50%;box-sizing:border-box"></span>approximate position</span>' +
           '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:9px;height:9px;border:2px solid var(--status-green);border-radius:50%;box-sizing:border-box"></span>first to hear it</span>' +
         '</div>' +
         '<div id="packetPathControls"></div>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
+        '<button type="button" id="packetPathRetry" style="display:none;margin-top:12px">Try again</button>' +
       '</div>';
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
     var closeBtn = document.getElementById('packetPathClose');
     if (closeBtn) closeBtn.addEventListener('click', close);
-    document.addEventListener('keydown', onKeydown);
+    document.addEventListener('keydown', onKeydown, true);
+    openPath = hashPath(location.hash);
+    // Two record slots can share a packet hash but have different archived
+    // evidence. A Back to the other slot is navigation, not a close in place.
+    openQueryValue = routeQueryKey ? modalQueryValue() : null;
+    openEntry = tagEntry();
+    window.addEventListener('hashchange', onHashChange);
 
     // Shareable link: #/packets/<hash>?viewPath=1 -- packets.js's init()
     // (public/packets.js) checks for viewPath=1 and re-opens this exact
@@ -176,7 +320,7 @@
     var copyLinkBtn = document.getElementById('packetPathCopyLink');
     if (copyLinkBtn) {
       copyLinkBtn.addEventListener('click', function () {
-        var url = location.origin + '/#/packets/' + encodeURIComponent(hash) + '?viewPath=1';
+        var url = options.shareURL || location.origin + '/#/packets/' + encodeURIComponent(hash) + '?viewPath=1';
         if (typeof window.copyToClipboard === 'function') {
           window.copyToClipboard(url, function () {
             copyLinkBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg>';
@@ -189,13 +333,75 @@
     }
 
     var statusEl = document.getElementById('packetPathStatus');
+    function isCurrent() {
+      return generation === requestGeneration && document.getElementById('packetPathModal') === overlay;
+    }
+    function withoutMap(message, canRetry) {
+      var mapEl = document.getElementById('packetPathMapContainer');
+      var legendEl = document.getElementById('packetPathLegend');
+      var retryBtn = document.getElementById('packetPathRetry');
+      if (mapEl) mapEl.style.display = 'none';
+      if (legendEl) legendEl.style.display = 'none';
+      if (statusEl) statusEl.textContent = message;
+      if (retryBtn && canRetry) {
+        retryBtn.style.display = 'inline-block';
+        retryBtn.addEventListener('click', function () { return open(hash, options); });
+      }
+    }
 
     var data;
     try {
-      data = await api('/packets/' + encodeURIComponent(hash) + '/path');
+      data = historical ? await options.loadPath(hash) : await api('/packets/' + encodeURIComponent(hash) + '/path');
+      if (window.MeshConfigReady) await window.MeshConfigReady;
     } catch (e) {
-      if (statusEl) statusEl.textContent = 'Failed to load path: ' + e.message;
+      if (!isCurrent()) return;
+      if (historical) withoutMap('Failed to load path: ' + e.message, true);
+      else if (statusEl) statusEl.textContent = 'Failed to load path: ' + e.message;
       return;
+    }
+    if (!isCurrent()) return;
+
+    if (window.EstimatedPositions?.enabled() === false) {
+      var approxLegend = document.getElementById('packetPathApproxLegend');
+      if (approxLegend) approxLegend.style.display = 'none';
+      var estimatePolicy = document.getElementById('packetPathEstimatePolicy');
+      if (estimatePolicy) {
+        estimatePolicy.style.display = 'block';
+        estimatePolicy.textContent = window.EstimatedPositions.disabledMessage;
+      }
+    }
+
+    if (historical) {
+      if (data && data.status === 'initializing') {
+        withoutMap('Ping history is initializing. Try again shortly.', true);
+        return;
+      }
+      if (data && data.status === 'unavailable') {
+        var explanations = {
+          raw_data_expired_before_capture: 'The original observations expired before a historical map could be saved. The score is retained, but its old path cannot be recovered.',
+          no_coordinates: 'This record has no known positions available to draw a map.',
+          privacy_filtered: 'This map is unavailable under the current privacy settings.',
+          archive_too_large: 'This path exceeded the historical map size limit. The score is retained, but its map was not saved.',
+          record_evidence_unavailable: 'Current observations no longer reproduce this record; no matching historical map was saved.'
+        };
+        var explanation = Object.prototype.hasOwnProperty.call(explanations, data.reason) ? explanations[data.reason] : 'A historical map is not available for this record.';
+        withoutMap(explanation, false);
+        return;
+      }
+      if (!data || (data.status !== 'live' && data.status !== 'archived') || !data.path || !Array.isArray(data.path.branches)) {
+        withoutMap('Failed to load path: invalid history response.', true);
+        return;
+      }
+      if (data.status === 'archived') {
+        var note = document.getElementById('packetPathArchiveNote');
+        var captured = new Date(typeof data.capturedAt === 'string' ? data.capturedAt : NaN);
+        var savedAt = isNaN(captured.getTime()) ? 'at an unknown time' : captured.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+        if (note) {
+          note.style.display = 'block';
+          note.textContent = 'Archived map — saved ' + savedAt + '. Positions reflect when the map was saved, not necessarily when the packet was sent.';
+        }
+      }
+      data = data.path;
     }
 
     var branches = data.branches || [];
@@ -247,6 +453,10 @@
     }
 
     if (plotted.length === 0) {
+      if (historical) {
+        withoutMap('This record has no known positions available to draw a map.', false);
+        return;
+      }
       if (statusEl) {
         if (branches.length === 0) {
           statusEl.textContent = 'This packet has no observations yet.';
@@ -261,7 +471,8 @@
     }
 
     if (typeof L === 'undefined') {
-      if (statusEl) statusEl.textContent = 'Map library unavailable.';
+      if (historical) withoutMap('Map library unavailable.', false);
+      else if (statusEl) statusEl.textContent = 'Map library unavailable.';
       return;
     }
 
@@ -412,12 +623,18 @@
         radius: 11, color: cssVar('--status-green'), weight: 3, fillOpacity: 0, opacity: 0.9,
       })
         .addTo(map)
-        .bindTooltip('🏁 First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
+        .bindTooltip(phIcon('flag') + 'First to hear it: ' + escapeHtml(firstPoint.name) + ' (' + data.first.hops + ' hop' + (data.first.hops === 1 ? '' : 's') + (firstPoint.approx ? ', approx. position' : '') + ')', { className: 'packet-path-tooltip' });
     }
 
-    try { map.fitBounds(bounds, { padding: [30, 30] }); } catch (e) { /* single point */ }
-    setTimeout(function () { map.invalidateSize(); }, 120);
+    // Historical links can be closed/restored immediately during navigation.
+    // Leaflet 1.9's deferred initial zoom can otherwise finish after remove().
+    // Keep ordinary packet options unchanged; no animation is needed to first
+    // display a saved map at its complete bounds.
+    var fitOptions = { padding: [30, 30] };
+    if (historical) fitOptions.animate = false;
+    try { map.fitBounds(bounds, fitOptions); } catch (e) { /* single point */ }
     activeMap = map;
+    setTimeout(function () { if (activeMap === map) map.invalidateSize(); }, 120);
 
     // Label the highlight(s) honestly, matching the role split above:
     // no distance data at all -> one accent-colored "deepest (most
@@ -541,5 +758,5 @@
     if (statusEl) statusEl.textContent = statusParts.join(' · ');
   }
 
-  window.PacketPathMap = { open: open, close: close };
+  window.PacketPathMap = { open: open, close: close, restore: restore };
 })();

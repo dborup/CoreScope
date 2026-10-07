@@ -13,6 +13,44 @@ function isTransportRoute(rt) { return rt === 0 || rt === 3; }
 /** Byte offset of path_len in raw_hex: 5 for transport routes (4 bytes of next/last hop codes precede it), 1 otherwise. */
 function getPathLenOffset(routeType) { return isTransportRoute(routeType) ? 5 : 1; }
 /**
+ * #322 (1): the ONE implementation of the path-hash width rules. Given a
+ * path-length byte, the route it belongs to, and the frame's header byte,
+ * return the sender-selected hash width (1-3 bytes) or null when the byte
+ * encodes no width. Both senderPathHashSize() below and the packet-detail Path
+ * Length row (public/packets.js buildFieldTable) call this, so the rules live
+ * in one place (AGENTS.md: one implementation) and cannot drift. Each caller
+ * still reads its own path byte at its own offset -- senderPathHashSize derives
+ * route+offset from the header byte, the Path Length row from pkt.route_type --
+ * so there is one offset source per caller; only the width semantics are here.
+ * The rules are the firmware's (firmware/src/Packet.h getPathHashSize()/
+ * isRouteDirect(), firmware/docs/packet_format.md "path_length"):
+ *   - null for TRACE (headerByte path-type 9): those path bytes are per-hop SNR,
+ *     not a hash width (internal/packetpath/route.go PathBytesAreHops);
+ *   - null for a 0b11 width field: a 4-byte width is reserved/invalid, the
+ *     backend evidence model only knows 1/2/3 (cmd/server/observed_path_hash_sizes.go);
+ *   - null for the 0x00 zero-hop marker on a direct route (2 or 3, Packet.h
+ *     isRouteDirect(), sendZeroHop());
+ *   - otherwise (pathByte >> 6) + 1.
+ */
+function pathHashSizeFromByte(pathByte, routeType, headerByte) {
+  if (typeof pathByte !== 'number' || isNaN(pathByte)) return null;
+  if (typeof headerByte === 'number' && !isNaN(headerByte) && ((headerByte >> 2) & 0x0F) === 9) return null; // TRACE path bytes are SNR
+  if (pathByte === 0 && (routeType === 2 || routeType === 3)) return null; // direct zero-hop marker
+  const size = (pathByte >> 6) + 1;
+  return size <= 3 ? size : null;
+}
+/** Sender-selected path-hash width in this frame, or null when not encoded. */
+function senderPathHashSize(rawHex) {
+  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
+  const header = parseInt(rawHex.slice(0, 2), 16);
+  const route = header & 0x03;
+  const offset = getPathLenOffset(route) * 2;
+  const pathHex = rawHex.slice(offset, offset + 2);
+  if (!/^[0-9a-f]{2}$/i.test(pathHex)) return null;
+  const pathByte = parseInt(pathHex, 16);
+  return pathHashSizeFromByte(pathByte, route, header);
+}
+/**
  * scopeName is optional (callers that don't pass it get the original
  * unscoped "T" badge). Pass a packet's scope_name to also surface the
  * region-scope state directly in the badge label (not just on hover): a
@@ -138,7 +176,7 @@ fetch('/api/config/cache').then(r => r.json()).then(cfg => {
     if (k in CLIENT_TTL && typeof v === 'number') CLIENT_TTL[k] = v * 1000;
   }
 }).catch(() => {});
-async function api(path, { ttl = 0, bust = false } = {}) {
+async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
   const t0 = performance.now();
   if (!bust && ttl > 0) {
     const cached = _apiCache.get(path);
@@ -150,8 +188,14 @@ async function api(path, { ttl = 0, bust = false } = {}) {
       return cached.data;
     }
   }
-  // Deduplicate in-flight requests
-  if (_inflight.has(path)) return _inflight.get(path);
+  // Deduplicate in-flight requests. #172: per retry503 too, so a caller
+  // that retries 503s itself never waits on the retry loop below, and a
+  // default caller never gets a 503 that loop would have ridden out.
+  const inflightKey = retry503 ? path : path + '\n#no-retry503';
+  // #243: an explicit refresh (bust) never joins an in-flight request, which
+  // may have been answered before the change the caller wants to see. It
+  // takes the in-flight slot instead, so later callers join the newer one.
+  if (!bust && _inflight.has(inflightKey)) return _inflight.get(inflightKey);
   const promise = (async () => {
     // Issue #1659: 503 with Retry-After indicates server-side warm-up
     // (analytics recomputer first-pass, index build, etc.). Retry with
@@ -166,6 +210,11 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     // per attempt, decremented at most once) and exhausted-retries
     // threw without decrementing at all — banner stuck across three
     // analytics endpoints, multiplied.
+    //
+    // #172: retry503:false skips this loop for a caller that retries on
+    // its own (analytics.js outlasts the server's 60s warm-up and cancels
+    // its retries on navigation). Every error carries the HTTP status, and
+    // a 503's valid Retry-After as retryAfterSeconds.
     let attempt = 0;
     let delay = 1000;
     const maxAttempts = 6;
@@ -173,7 +222,7 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     try {
       while (true) {
         const res = await fetch('/api' + path);
-        if (res.status === 503 && attempt < maxAttempts) {
+        if (res.status === 503 && retry503 && attempt < maxAttempts) {
           const ra = parseInt(res.headers.get('Retry-After'), 10);
           const wait = isFinite(ra) && ra > 0 ? ra * 1000 : delay;
           if (!notified) { _warmupNotify_1659(true); notified = true; }
@@ -182,7 +231,16 @@ async function api(path, { ttl = 0, bust = false } = {}) {
           attempt++;
           continue;
         }
-        if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+        if (!res.ok) {
+          const err = new Error(`API ${res.status}: ${path}`);
+          err.status = res.status;
+          const ra = parseInt(res.headers.get('Retry-After'), 10);
+          if (res.status === 503 && isFinite(ra) && ra > 0) err.retryAfterSeconds = ra;
+          // #199: a JSON error body travels as err.body (e.g. the node-detail
+          // 404's inactive_node / observer); a non-JSON body leaves it unset.
+          try { err.body = await res.json(); } catch (_) { /* not JSON */ }
+          throw err;
+        }
         const data = await res.json();
         const ms = performance.now() - t0;
         _apiPerf.calls++;
@@ -190,7 +248,21 @@ async function api(path, { ttl = 0, bust = false } = {}) {
         _apiPerf.log.push({ path, ms: Math.round(ms), time: Date.now() });
         if (_apiPerf.log.length > 200) _apiPerf.log.shift();
         if (ms > 500) console.warn(`[SLOW API] ${path} took ${Math.round(ms)}ms`);
-        if (ttl > 0) _apiCache.set(path, { data, expires: Date.now() + ttl });
+        if (res.status === 202) {
+          // #120: 202 Accepted is "not ready yet" (the lazy distance index
+          // answers {status:"building"} until it is built), never data to
+          // keep: caching it would serve the placeholder back for the whole
+          // TTL. A valid Retry-After travels to the caller as a
+          // non-enumerable property, so the JSON body itself is unchanged.
+          const ra = parseInt(res.headers.get('Retry-After'), 10);
+          if (data && typeof data === 'object' && isFinite(ra) && ra > 0) {
+            Object.defineProperty(data, 'retryAfterSeconds', { value: ra, enumerable: false });
+          }
+        } else if (ttl > 0 && _inflight.get(inflightKey) === promise) {
+          // #243: a request a bust has superseded keeps its late answer out
+          // of the cache, where it would replace the newer data.
+          _apiCache.set(path, { data, expires: Date.now() + ttl });
+        }
         return data;
       }
     } finally {
@@ -199,8 +271,18 @@ async function api(path, { ttl = 0, bust = false } = {}) {
       if (notified) _warmupNotify_1659(false);
     }
   })();
-  _inflight.set(path, promise);
-  promise.finally(() => _inflight.delete(path));
+  _inflight.set(inflightKey, promise);
+  // `.finally()` returns its own derived promise that mirrors `promise`'s
+  // outcome; discarding it uncaught leaves the real caller's rejection
+  // (delivered via the returned `promise` below, unaffected by this)
+  // duplicated as a second, unobserved rejection on this derived one.
+  // The `.catch()` here only silences that duplicate -- it does not
+  // touch `promise` itself or its resolution to callers.
+  // #243: remove the entry only while it is still this request's; a bust
+  // may have taken the slot over.
+  promise.finally(() => {
+    if (_inflight.get(inflightKey) === promise) _inflight.delete(inflightKey);
+  }).catch(() => {});
   return promise;
 }
 
@@ -660,6 +742,20 @@ function buildHexLegend(ranges) {
 let ws = null;
 let wsListeners = [];
 
+// #117: a half-open connection (a proxy or NAT dropping state, a laptop that
+// slept, a handshake that never completes) can leave the shared socket
+// looking OPEN but silent, with no onclose, so every view stops updating.
+// The server writes WS_HEARTBEAT on each 30 s ping tick
+// (cmd/server/websocket.go wsHeartbeat), and any received frame counts as
+// life. A socket silent for WS_STALE_MS, measured from its creation, is
+// replaced once. 75 s = two heartbeat intervals plus slack, so one late or
+// lost heartbeat is tolerated.
+const WS_STALE_MS = 75000;
+const WS_HEARTBEAT = '{"type":"heartbeat"}';
+let wsLastFrameAt = 0;
+let wsWatchdogTimer = null;
+let wsReconnectTimer = null; // the one pending reconnect, if any
+
 // --- Brand-logo packet-driven pulse (#1173) ---
 // Replaces the legacy live-dot indicator. Class-toggle only (CSS animations); colors come from
 // --logo-accent / --logo-accent-hi tokens. Test seam at window.__corescopeLogo.
@@ -803,16 +899,69 @@ const Logo = (function () {
   return api;
 })();
 
+// Detach the current socket's handlers, then close it. A replaced socket's
+// close event can arrive much later (a half-open connection waits out the
+// closing handshake) and must not schedule another connection.
+function dropWS() {
+  clearTimeout(wsWatchdogTimer);
+  wsWatchdogTimer = null;
+  if (!ws) return;
+  const old = ws;
+  ws = null;
+  old.onopen = old.onclose = old.onerror = old.onmessage = null;
+  try { old.close(); } catch (_) {}
+}
+
+// Watchdog and resume check. Inert while a reconnect is already scheduled
+// (ordinary close keeps its configured delay) or with no socket.
+function checkWSLiveness() {
+  clearTimeout(wsWatchdogTimer);
+  wsWatchdogTimer = null;
+  if (!ws || wsReconnectTimer) return;
+  const silentMs = Date.now() - wsLastFrameAt;
+  // Date.now(), not performance.now(): a tab resumed from sleep must be
+  // measured against real elapsed time. A negative reading means the wall
+  // clock stepped back, so the silence cannot be measured; treat it as stale
+  // instead of re-arming for the size of the step. Either step direction
+  // costs at most one extra reconnect.
+  if (silentMs >= 0 && silentMs < WS_STALE_MS) {
+    wsWatchdogTimer = setTimeout(checkWSLiveness, WS_STALE_MS - silentMs);
+    return;
+  }
+  Logo.setConnected(false);
+  connectWS();
+}
+
+// Opens the shared socket, replacing (detaching + closing) any previous one
+// and cancelling a pending reconnect, so onclose, the watchdog, resume
+// checks and pull-to-reconnect can never leave two live sockets.
 function connectWS() {
+  clearTimeout(wsReconnectTimer);
+  wsReconnectTimer = null;
+  dropWS();
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}`);
-  ws.onopen = () => Logo.setConnected(true);
-  ws.onclose = () => {
+  const sock = new WebSocket(`${proto}//${location.host}`);
+  ws = sock;
+  wsLastFrameAt = Date.now(); // from creation: a stuck handshake is caught too
+  wsWatchdogTimer = setTimeout(checkWSLiveness, WS_STALE_MS);
+  sock.onopen = () => Logo.setConnected(true);
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    clearTimeout(wsWatchdogTimer);
+    wsWatchdogTimer = null;
     Logo.setConnected(false);
-    setTimeout(connectWS, 3000);
+    // WS_RECONNECT_MS comes from roles.js (operator setting `wsReconnectMs`).
+    // It used to be honoured only by the live map's private socket; now that
+    // every view shares this one, the setting applies here or nowhere.
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = setTimeout(connectWS, window.WS_RECONNECT_MS || 3000);
   };
-  ws.onerror = () => ws.close();
-  ws.onmessage = (e) => {
+  sock.onerror = () => sock.close();
+  sock.onmessage = (e) => {
+    wsLastFrameAt = Date.now();
+    // Consumed here, before the logo pulse, cache invalidation and every
+    // onWS listener (and so every pause buffer).
+    if (e.data === WS_HEARTBEAT) return;
     Logo.pulse(e);
     try {
       const msg = JSON.parse(e.data);
@@ -827,6 +976,16 @@ function connectWS() {
       wsListeners.forEach(fn => fn(msg));
     } catch {}
   };
+}
+
+// Timers in a hidden or sleeping tab can run late (or not at all), so check
+// as soon as the page is visible or back online instead of waiting out a
+// watchdog that may be minutes behind.
+function setupWSResumeCheck() {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) checkWSLiveness();
+  });
+  window.addEventListener('online', checkWSLiveness);
 }
 
 function onWS(fn) { wsListeners.push(fn); }
@@ -887,16 +1046,12 @@ function pullReconnect() {
   // If WS is connected (readyState OPEN), give a brief "Connected"
   // confirmation but still cycle so the user sees fresh data.
   const wasOpen = ws && ws.readyState === 1;
-  if (wasOpen) {
-    _showPullToast('Connected', true);
-    // Fast cycle: close and let onclose reconnect immediately
-    try { ws.close(); } catch (e) {}
-  } else {
-    _showPullToast('Reconnecting…', true);
-    try { if (ws) ws.close(); } catch (e) {}
-    // onclose handler schedules reconnect; force one now in case ws was null
-    try { connectWS(); } catch (e) {}
-  }
+  _showPullToast(wasOpen ? 'Connected' : 'Reconnecting…', true);
+  // #117: replace the socket now in both cases. An OPEN socket may be
+  // half-open, and its close event can take about a minute after close();
+  // connectWS() detaches and closes the old socket and cancels a pending
+  // reconnect itself, so this cannot stack sockets.
+  try { connectWS(); } catch (e) {}
 }
 
 function _isTouchDevice() {
@@ -1167,16 +1322,20 @@ function navigate() {
   closeNav();
 
   // Backward-compat redirect: #/traces/<hash> → #/tools/trace/<hash> (issue #944).
+  // Uses replaceState (not location.hash =) so this redirect doesn't add its
+  // own history entry, otherwise the back button gets stuck bouncing off it.
   if (location.hash.startsWith('#/traces/')) {
-    location.hash = location.hash.replace('#/traces/', '#/tools/trace/');
+    history.replaceState(null, '', location.hash.replace('#/traces/', '#/tools/trace/'));
+    navigate();
     return;
   }
 
   // Backward-compat redirect: #/roles → #/analytics?tab=roles (issue #1085).
   // The Roles page was folded into the Analytics tab strip; old links and
-  // bookmarks must keep working.
+  // bookmarks must keep working. Uses replaceState for the same reason as above.
   if (location.hash === '#/roles' || location.hash.startsWith('#/roles?') || location.hash.startsWith('#/roles/')) {
-    location.hash = '#/analytics?tab=roles';
+    history.replaceState(null, '', '#/analytics?tab=roles');
+    navigate();
     return;
   }
 
@@ -1324,6 +1483,7 @@ window.addEventListener('timestamp-mode-changed', () => {
 });
 window.addEventListener('DOMContentLoaded', () => {
   connectWS();
+  setupWSResumeCheck();
   setupPullToReconnect();
 
   // --- Dark Mode ---
@@ -1430,8 +1590,17 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('nav-open');
     hamburger.setAttribute('aria-expanded', String(opening));
   });
-  navLinks.querySelectorAll('.nav-link').forEach(link => {
-    link.addEventListener('click', closeNav);
+  // Delegated, not per-link: roles.js injects the opt-in routes (privacy,
+  // rx-coverage) once /api/config/client resolves, which is long after this
+  // runs. A forEach over the links present right now would silently miss
+  // them, leaving a late link that never closes the hamburger on mobile.
+  // One listener on the container covers every current and future
+  // .nav-link, and cannot double-register on the ones already here.
+  // #navMoreMenu is a sibling of .nav-links, so the menu clones (which get
+  // their own closeNav in rebuildMoreMenu) never reach this handler.
+  navLinks.addEventListener('click', function (e) {
+    var link = e.target && e.target.closest ? e.target.closest('.nav-link') : null;
+    if (link && navLinks.contains(link)) closeNav();
   });
 
   // --- "More" dropdown — JS-driven Priority+ (Issue #1102) ---
@@ -1453,7 +1622,25 @@ window.addEventListener('DOMContentLoaded', () => {
     // at a time (right-to-left, lowest priority first) until it does.
     // Then mirror the hidden links into the "More ▾" menu so nothing
     // disappears from the user's reach.
-    const allLinks = Array.from(linksContainer.querySelectorAll('.nav-link'));
+    // The link set is LIVE, not a snapshot. roles.js injects the opt-in
+    // routes (privacy, rx-coverage) when /api/config/client resolves, which
+    // races this block: when app.js wins (typically a warm cache, where the
+    // 99KB bundle is instant but the config still needs a round trip), an
+    // init-time snapshot would exclude those links permanently. They would
+    // never gain .is-overflow, their width would never enter fits(), and the
+    // More button would render on top of them. Re-querying per run makes a
+    // dynamically added link exactly as overflow-capable as a static one.
+    //
+    // Scoped to DIRECT children so the clones rebuildMoreMenu() puts into
+    // #navMoreMenu can never re-enter the list and duplicate themselves.
+    // (.nav-more-wrap is a sibling of .nav-links today; the containment
+    // check keeps that from becoming a latent trap if it ever nests.)
+    function currentLinks() {
+      return Array.from(linksContainer.children).filter(function (el) {
+        return el.classList && el.classList.contains('nav-link') &&
+               !(navMoreMenu && navMoreMenu.contains(el));
+      });
+    }
     // overflowQueue (#1105 MINOR 6): the order links are removed from the
     // inline strip when space runs out. Built right-to-left from
     // non-priority links (lowest priority dropped first) and then high-
@@ -1468,19 +1655,20 @@ window.addEventListener('DOMContentLoaded', () => {
     // ≥768px." The queue is rebuilt on hashchange (applyNavPriority
     // is wired to hashchange below), so the exclusion tracks the
     // current route automatically.
-    function buildOverflowQueue() {
+    function buildOverflowQueue(links) {
       var isPinned = function(a) {
         return a.dataset.priority === 'high' || a.classList.contains('active');
       };
-      return allLinks.filter(a => !isPinned(a))
-                     .reverse() // right-to-left
-                     .concat(allLinks.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
+      return links.filter(a => !isPinned(a))
+                  .reverse() // right-to-left
+                  .concat(links.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
     }
-    var overflowQueue = buildOverflowQueue();
 
-    function rebuildMoreMenu() {
+    // Always rebuilt from the CURRENT originals, so a link removed since the
+    // last run cannot survive as a stale clone in the menu.
+    function rebuildMoreMenu(links) {
       navMoreMenu.innerHTML = '';
-      const hidden = allLinks.filter(a => a.classList.contains('is-overflow'));
+      const hidden = links.filter(a => a.classList.contains('is-overflow'));
       hidden.forEach(function(link) {
         var clone = link.cloneNode(true);
         // The clone is in the overflow menu, not the inline strip.
@@ -1512,13 +1700,19 @@ window.addEventListener('DOMContentLoaded', () => {
     var MORE_BTN_RESERVE_PX = 70;
 
     function applyNavPriority() {
+      // One fresh read per run, shared by the reset, the queue, the fit
+      // measurement, the overflow count and the menu rebuild — so every
+      // stage of a single run agrees on the same set of links.
+      const allLinks = currentLinks();
       // Skip on mobile (<768px) — hamburger CSS owns that layout.
       if (window.innerWidth < 768) {
         allLinks.forEach(a => a.classList.remove('is-overflow'));
         navMoreWrap.classList.add('is-hidden');
         return;
       }
-      // Reset: show everything, then hide as needed.
+      // Reset: show everything, then hide as needed. Reading the live list
+      // means a link added since the last run starts clean, and one that was
+      // removed simply isn't here to carry stale state.
       allLinks.forEach(a => a.classList.remove('is-overflow'));
       navMoreWrap.classList.remove('is-hidden');
       // #1106: in the 768-1100px narrow-desktop band the CSS already
@@ -1544,7 +1738,7 @@ window.addEventListener('DOMContentLoaded', () => {
             a.classList.add('is-overflow');
           }
         });
-        rebuildMoreMenu();
+        rebuildMoreMenu(allLinks);
         return;
       }
       // Iteratively hide low-priority links until the link strip fits.
@@ -1552,9 +1746,9 @@ window.addEventListener('DOMContentLoaded', () => {
       // an overflowing strip silently clips rather than pushing
       // nav-right out — bounding-rect math on .nav-left lies. Instead
       // measure the *intrinsic* widths of the parts (independent of
-      // current clipping) and compare to the viewport. SAFETY absorbs
-      // the .top-nav side padding + nav-right inner gaps + sub-pixel
-      // rounding (the historic #1055 bug was a 6–20px overlap).
+      // current clipping) and compare to .top-nav's own content box — see
+      // fits() below for why the viewport width and a SAFETY constant were
+      // the wrong yardstick (the historic #1055 bug was a 6–20px overlap).
       //
       // #1105 MINOR 3: at the 1101px media-query flip `.nav-stats`
       // toggles from display:none → flex (and vice-versa). The resize
@@ -1562,7 +1756,11 @@ window.addEventListener('DOMContentLoaded', () => {
       // navRightEl.scrollWidth measured here reflects the post-flip
       // intrinsic width — not stale pre-flip width.
       const navBrand   = document.querySelector('.nav-brand');
-      const SAFETY     = 32;
+      // Sub-pixel tolerance for both the budget test and the containment
+      // test. Widths here are fractional (e.g. 82.79px links, 22.8px gaps)
+      // while clientWidth/scrollWidth are integers, so an exact comparison
+      // would flip on rounding alone.
+      const FIT_EPS    = 1;
       // #1105 MINOR 1+2: read both gap values from CSS rather than a
       // shared `GUTTER = 24` constant. Today `.nav-left` (gap between
       // brand/links/more/right cells) and `.nav-links` (gap between
@@ -1578,7 +1776,18 @@ window.addEventListener('DOMContentLoaded', () => {
       function fits() {
         const visibleLinks = allLinks.filter(a => !a.classList.contains('is-overflow'));
         let linkW = 0;
-        visibleLinks.forEach(a => { linkW += a.getBoundingClientRect().width; });
+        // Intrinsic width per link, not whatever the flex line currently
+        // grants it. Today .nav-link is white-space:nowrap and never actually
+        // shrinks, so rect and scrollWidth agree (measured at 1200px: home
+        // 58.35/58, observers 85.46/85, and the SVG-bearing live 63.16/63) —
+        // scrollWidth is verified to include padding (11.2px a side) and the
+        // inline SVG. Taking the max is therefore a no-op today and a guard
+        // if .nav-link ever becomes shrinkable: a compressed rect would then
+        // under-report and hide links under "More ▾". Read-only, no cloning
+        // and no style mutation per iteration.
+        visibleLinks.forEach(a => {
+          linkW += Math.max(a.getBoundingClientRect().width, a.scrollWidth);
+        });
         const linkGapPx = parseFloat(getComputedStyle(linksContainer).columnGap ||
                                      getComputedStyle(linksContainer).gap || '0') || 0;
         const linksGap = Math.max(0, visibleLinks.length - 1) * linkGapPx;
@@ -1595,15 +1804,41 @@ window.addEventListener('DOMContentLoaded', () => {
         const moreW = liveMoreW > 0 ? liveMoreW
                     : (cachedMoreW > 0 ? cachedMoreW : MORE_BTN_RESERVE_PX);
         const rightW  = navRightEl.scrollWidth; // intrinsic, ignores clipping
-        const needed  = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + navLeftGap + rightW + SAFETY;
-        return needed <= window.innerWidth;
+        // Budget from the REAL container, not window.innerWidth minus a guess.
+        // Measured at 1440px on staging, the old formula reported 5.23px of
+        // headroom while the strip actually overran its box by 18px, because:
+        //   .top-nav padding 28.8px a side (57.6px) was never counted at all;
+        //   window.innerWidth 1440 includes a 6px scrollbar the layout lacks
+        //     (.top-nav clientWidth is 1434);
+        //   the .nav-left/.nav-right seam is governed by .top-nav's own gap
+        //     (16px), but navLeftGap (22.8px) was used, over-counting 6.8px.
+        // SAFETY=32 was an ad-hoc compensation that covered part of that
+        // 57.6 + 6 - 6.8 = 56.8px error and left ~24.8px unreserved.
+        // Reading the padding box and the real seam gap removes the guess.
+        const tnCS   = getComputedStyle(navTop);
+        const avail  = navTop.clientWidth -
+                       (parseFloat(tnCS.paddingLeft) || 0) -
+                       (parseFloat(tnCS.paddingRight) || 0);
+        const topGap = parseFloat(tnCS.columnGap || tnCS.gap || '0') || 0;
+        const needed = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + topGap + rightW;
+        // EPS covers sub-pixel rounding only (contract: at most 1px).
+        return needed <= avail - FIT_EPS;
+      }
+      // Direct containment: whatever the arithmetic says, the strip must not
+      // render wider than the box flex actually granted it. This is the
+      // acceptance contract, checked against the live layout, so a future
+      // CSS change that the formula does not model still cannot leave links
+      // sticking out from under "More ▾".
+      function contained() {
+        return linksContainer.scrollWidth <= linksContainer.clientWidth + FIT_EPS;
       }
       let i = 0;
       // #1391: rebuild queue here so it reflects the CURRENT active
-      // link (hashchange wakes applyNavPriority, but the queue was
-      // captured at init-time; we need to re-evaluate which link is
-      // active on every run). Cheap — just filters allLinks twice.
-      overflowQueue = buildOverflowQueue();
+      // link: hashchange wakes applyNavPriority, and which link carries
+      // .active changes between runs. Cheap — just filters allLinks twice.
+      // Local to the run: the queue must never outlive the link list it was
+      // built from, or a later run could enqueue a detached element.
+      var overflowQueue = buildOverflowQueue(allLinks);
       // #1311 floor: protect data-priority="high" links from being
       // dropped by the greedy fit loop. The bug was that on a non-high
       // active route (e.g. /#/perf, /#/audio-lab) at ~1101-1200px, the
@@ -1620,7 +1855,12 @@ window.addEventListener('DOMContentLoaded', () => {
       // #1391: also break on .active — buildOverflowQueue already
       // excludes the active link from the queue, but the break is a
       // defensive belt for any future code that re-enqueues it.
-      while (!fits() && i < overflowQueue.length) {
+      // Keep dropping while EITHER the budget says no or the strip still
+      // renders wider than its box. Both shrink monotonically as links leave
+      // the line (scrollWidth falls, clientWidth grows), and the queue is
+      // finite, so this converges; the high-priority and active guards below
+      // remain the only stopping conditions that can leave a strip over-full.
+      while ((!fits() || !contained()) && i < overflowQueue.length) {
         if (overflowQueue[i].dataset.priority === 'high') break;
         if (overflowQueue[i].classList.contains('active')) break;
         overflowQueue[i].classList.add('is-overflow');
@@ -1653,27 +1893,84 @@ window.addEventListener('DOMContentLoaded', () => {
           console.warn('[nav] More menu floor: overflowQueue exhausted with 1 item; cannot enforce >=2 floor');
         }
       }
-      rebuildMoreMenu();
+      rebuildMoreMenu(allLinks);
+    }
+
+    // ONE coalescing scheduler owns the nav rAF slot. Every async trigger goes
+    // through it, so at most one applyNavPriority can ever be pending.
+    //
+    // Before this, resize and the ResizeObserver shared a cancel/recreate id
+    // while hashchange and updateNavStats each queued their own unguarded
+    // rAF. rAF callbacks do not run while a tab is hidden, so those two
+    // accumulated without bound: updateNavStats fires on a 15s interval AND
+    // on every debounced WebSocket event, and a backgrounded tab therefore
+    // built up one queued layout pass per tick. Measured on staging: 74
+    // Priority+ runs released in a single frame when the pane became visible.
+    // Not an infinite loop — an unbounded hidden-tab backlog — but the work
+    // is redundant (only the last run can matter) and it all lands in one
+    // frame.
+    //
+    // The flag is cleared BEFORE applyNavPriority runs, so an event fired
+    // from inside the layout pass schedules exactly one follow-up frame
+    // rather than being swallowed. No cancelAnimationFrame is needed: a
+    // pending callback is always still the work we want, so the cheapest
+    // correct behaviour is to keep it and drop the duplicate request.
+    //
+    // A boolean rather than the rAF id, deliberately. Since nothing is ever
+    // cancelled the id has no use, and claiming the slot BEFORE calling
+    // requestAnimationFrame keeps this correct even where rAF runs its
+    // callback synchronously (some test harnesses, and any polyfill that
+    // falls back to a 0ms timer): storing the returned id afterwards would
+    // overwrite the 0 the callback just wrote and wedge the scheduler shut.
+    let navPriorityPending = false;
+    function scheduleNavPriority() {
+      if (navPriorityPending) return;
+      navPriorityPending = true;
+      requestAnimationFrame(function () {
+        navPriorityPending = false;
+        applyNavPriority();
+      });
     }
 
     // Run once on load, again after fonts settle (label widths shift),
-    // and on resize (debounced via rAF).
-    navPriorityFn = applyNavPriority;
+    // and on resize (coalesced via the scheduler).
+    // navPriorityFn is the SCHEDULER, not the raw layout pass, so external
+    // callsites (updateNavStats) are coalesced automatically.
+    navPriorityFn = scheduleNavPriority;
     applyNavPriority();
     if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(applyNavPriority);
+      document.fonts.ready.then(scheduleNavPriority);
     }
-    let rafId = 0;
-    window.addEventListener('resize', function() {
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(applyNavPriority);
-    });
+    window.addEventListener('resize', scheduleNavPriority);
     // Re-apply on route change too: the active link gets bigger padding
     // (background pill), so which links fit can shift between pages.
-    window.addEventListener('hashchange', function() {
-      // Defer so the route handler's class toggles run first.
-      requestAnimationFrame(applyNavPriority);
-    });
+    // Deferred by the scheduler, so the route handler's class toggles run first.
+    window.addEventListener('hashchange', scheduleNavPriority);
+    // ...and when the RIGHT side finishes growing. #navStats is filled from
+    // /api/stats, which lands after DOMContentLoaded — measured on staging at
+    // 1200px: stats responseEnd 2106ms vs domContentLoadedEventEnd 2046ms.
+    // The load-time run therefore measured .nav-right at 212px instead of its
+    // final 467px, under-reserving 255px, so fits() returned true with the
+    // strip already too wide and the greedy loop stopped early. Nothing
+    // re-measured afterwards, so links stayed inline underneath "More ▾"
+    // until the next resize. Observing .nav-right closes that window for any
+    // late-filling right-hand content, not just the stats.
+    //
+    // Safe against feedback: .nav-right is flex-grow:0/flex-shrink:0, so
+    // collapsing links on the left cannot change its width (verified live —
+    // collapsing 3 links left scrollWidth at 467). The width guard below is
+    // a second belt: a run that does not change the observed width cannot
+    // schedule another run, so this cannot loop.
+    if (typeof ResizeObserver === 'function') {
+      var lastRightW = -1;
+      var ro = new ResizeObserver(function () {
+        var w = navRightEl.scrollWidth;
+        if (w === lastRightW) return;
+        lastRightW = w;
+        scheduleNavPriority();
+      });
+      ro.observe(navRightEl);
+    }
 
     // #1406: position the fixed dropdown relative to the More button on each open.
     // Required because .nav-more-menu is position:fixed (so it escapes
@@ -1849,7 +2146,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${c.channel_hash}">
+            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${escapeHtml(c.channel_hash)}">
               <span class="search-result-type">Channel</span>${escapeHtml(c.name)}</div>`;
           }
         }
@@ -1905,7 +2202,10 @@ window.addEventListener('DOMContentLoaded', () => {
         el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
         setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
-        if (navPriorityFn) requestAnimationFrame(navPriorityFn);
+        // navPriorityFn IS the coalescing scheduler, so this cannot stack up
+        // even though updateNavStats runs on a 15s interval and on every
+        // debounced WebSocket event.
+        if (navPriorityFn) navPriorityFn();
       }
     } catch {}
   }
@@ -1992,60 +2292,63 @@ function initTabBar(container, onChange) {
   });
 }
 
+// #258: columns are measured from at most COL_MEASURE_MAX_ROWS body rows. A body
+// with fewer than COL_MEASURE_MIN_ROWS usable rows only gives provisional widths.
+const COL_MEASURE_MAX_ROWS = 30;
+const COL_MEASURE_MIN_ROWS = 5;
+
 /**
- * Make table columns resizable with drag handles. Widths saved to localStorage.
- * Call after table is in DOM. Re-call safe (idempotent per table).
- * @param {string} tableSelector - CSS selector for the table
- * @param {string} storageKey - localStorage key for persisted widths
+ * #258: the body rows a column measurement can use, i.e. rows with exactly one
+ * cell per header cell. A row that spans columns (a virtual-scroll spacer, "No
+ * packets found", a group-detail row) belongs to no single column; measured by
+ * index, it used to inflate column 0.
  */
-function makeColumnsResizable(tableSelector, storageKey) {
-  const table = document.querySelector(tableSelector);
-  if (!table) return;
-  const thead = table.querySelector('thead');
-  if (!thead) return;
-  const ths = Array.from(thead.querySelectorAll('tr:first-child th'));
-  if (ths.length < 2) return;
-
-  if (table.dataset.resizable) return;
-  table.dataset.resizable = '1';
-  table.style.tableLayout = 'fixed';
-
-  const containerW = table.parentElement.clientWidth;
-  const saved = localStorage.getItem(storageKey);
-  let widths;
-
-  if (saved) {
-    try { widths = JSON.parse(saved); } catch { widths = null; }
-    // Validate: must be array of correct length with values summing to ~100 (percentages)
-    if (widths && Array.isArray(widths) && widths.length === ths.length) {
-      const sum = widths.reduce((s, w) => s + w, 0);
-      if (sum > 90 && sum < 110) {
-        // Saved percentages — apply directly
-        table.style.tableLayout = 'fixed';
-        table.style.width = '100%';
-        ths.forEach((th, i) => { th.style.width = widths[i] + '%'; });
-        // Skip measurement, jump to adding handles
-        addResizeHandles();
-        return;
-      }
+function columnMeasureRows(tbody, colCount, limit) {
+  const out = [];
+  if (!tbody) return out;
+  for (const row of tbody.rows) {
+    const cells = row.children;
+    if (cells.length !== colCount) continue;
+    let spans = false;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].colSpan > 1) { spans = true; break; }
     }
-    widths = null; // Force remeasure
+    if (spans) continue;
+    out.push(row);
+    if (out.length >= limit) break;
   }
+  return out;
+}
 
-  if (!widths) {
-    // Measure actual max content width per column by scanning visible rows
-    const tbody = table.querySelector('tbody');
-    const rows = tbody ? Array.from(tbody.querySelectorAll('tr')).slice(0, 30) : [];
+/** Saved column widths (percentages) for storageKey, or null if none are valid. */
+function readSavedColumnWidths(storageKey, colCount) {
+  const saved = localStorage.getItem(storageKey);
+  if (!saved) return null;
+  let widths;
+  try { widths = JSON.parse(saved); } catch { return null; }
+  if (!Array.isArray(widths) || widths.length !== colCount) return null;
+  const sum = widths.reduce((s, w) => s + w, 0);
+  return sum > 90 && sum < 110 ? widths : null;
+}
 
-    // Temporarily set auto layout to measure
+// Max content width per column (header + rows), measured in auto layout without
+// wrapping. TableResponsive's column hiding is lifted while measuring: the first
+// measure runs before TableResponsive.register(), and a re-measure (#258) runs
+// before it has marked the newly rendered cells, so without that the header and
+// the rows would disagree on which columns exist.
+function measureColumnWidths(table, ths, rows) {
+  const tr = window.TableResponsive;
+  const measure = () => {
     table.style.tableLayout = 'auto';
     table.style.width = 'auto';
-    // Remove nowrap temporarily so we get true content width
+    // The resize handles stick out of their th (right: -4px), which would add
+    // to its scrollWidth; the first measure runs before they exist.
+    const handles = table.querySelectorAll('.col-resize-handle');
+    handles.forEach(h => { h.style.display = 'none'; });
+    // Remove wrapping temporarily so we get true content width
     const cells = table.querySelectorAll('td, th');
     cells.forEach(c => { c.dataset.origWs = c.style.whiteSpace || ''; c.style.whiteSpace = 'nowrap'; });
-
-    // Measure each column's max content width across header + rows
-    widths = ths.map((th, i) => {
+    const widths = ths.map((th, i) => {
       let maxW = th.scrollWidth;
       rows.forEach(row => {
         const td = row.children[i];
@@ -2053,11 +2356,16 @@ function makeColumnsResizable(tableSelector, storageKey) {
       });
       return maxW + 4; // small padding buffer
     });
-
     cells.forEach(c => { c.style.whiteSpace = c.dataset.origWs || ''; delete c.dataset.origWs; });
-  }
+    handles.forEach(h => { h.style.display = ''; });
+    return widths;
+  };
+  return tr && typeof tr.unhidden === 'function' ? tr.unhidden(table, measure) : measure();
+}
 
-  // Now fit to container: if total > container, squish widest first
+// Fit measured widths to the container: if the total is too wide, squish the
+// widest columns first; if there is room left, give it to the 2 widest.
+function fitColumnWidths(widths, containerW) {
   const totalNeeded = widths.reduce((s, w) => s + w, 0);
   const finalWidths = [...widths];
 
@@ -2095,12 +2403,71 @@ function makeColumnsResizable(tableSelector, storageKey) {
     const topTotal = topN.reduce((s, x) => s + x.w, 0);
     topN.forEach(x => { finalWidths[x.i] += Math.round(surplus * (x.w / topTotal)); });
   }
+  return finalWidths;
+}
 
+// Measure the columns from `rows` and set them as percentages of the table.
+function applyMeasuredColumnWidths(table, ths, rows) {
+  const containerW = table.parentElement.clientWidth;
+  const finalWidths = fitColumnWidths(measureColumnWidths(table, ths, rows), containerW);
   table.style.width = '100%';
   const totalFinal = finalWidths.reduce((s, w) => s + w, 0);
   ths.forEach((th, i) => { th.style.width = (finalWidths[i] / totalFinal * 100) + '%'; });
+}
 
+/**
+ * Make table columns resizable with drag handles. Widths saved to localStorage.
+ * Call after table is in DOM. Re-call safe (idempotent per table).
+ * Without saved widths the columns are measured from the header and the first
+ * body rows; if the body has too few rows for that, once more when it fills (#258).
+ * @param {string} tableSelector - CSS selector for the table
+ * @param {string} storageKey - localStorage key for persisted widths
+ */
+function makeColumnsResizable(tableSelector, storageKey) {
+  const table = document.querySelector(tableSelector);
+  if (!table) return;
+  const thead = table.querySelector('thead');
+  if (!thead) return;
+  const ths = Array.from(thead.querySelectorAll('tr:first-child th'));
+  if (ths.length < 2) return;
+
+  if (table.dataset.resizable) return;
+  table.dataset.resizable = '1';
+  table.style.tableLayout = 'fixed';
+
+  const saved = readSavedColumnWidths(storageKey, ths.length);
+  if (saved) {
+    // Saved percentages — apply directly, no measurement
+    table.style.width = '100%';
+    ths.forEach((th, i) => { th.style.width = saved[i] + '%'; });
+    addResizeHandles();
+    return;
+  }
+
+  const tbody = table.querySelector('tbody');
+  const authoredWidths = ths.map(th => th.style.width);
+  const rows = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
+  applyMeasuredColumnWidths(table, ths, rows);
   addResizeHandles();
+
+  // #258: an (almost) empty first render, e.g. a quiet packets time window,
+  // only gives provisional widths. Measure once more when real rows arrive,
+  // unless the user has saved widths by then. Until then each body render costs
+  // a cheap guard; after the re-measure the observer is gone.
+  if (tbody && rows.length < COL_MEASURE_MIN_ROWS && typeof MutationObserver === 'function') {
+    const filled = new MutationObserver(() => {
+      if (!table.isConnected || readSavedColumnWidths(storageKey, ths.length)) { filled.disconnect(); return; }
+      if (tbody.rows.length < COL_MEASURE_MIN_ROWS) return;
+      const rowsNow = columnMeasureRows(tbody, ths.length, COL_MEASURE_MAX_ROWS);
+      if (rowsNow.length < COL_MEASURE_MIN_ROWS) return;
+      filled.disconnect();
+      // Measure as the first time: the widths the page itself gave the header
+      // cells, not the provisional ones.
+      ths.forEach((th, i) => { th.style.width = authoredWidths[i]; });
+      applyMeasuredColumnWidths(table, ths, rowsNow);
+    });
+    filled.observe(tbody, { childList: true });
+  }
 
   function addResizeHandles() {
   // Add resize handles

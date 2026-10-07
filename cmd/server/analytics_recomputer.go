@@ -10,6 +10,9 @@
 package main
 
 import (
+	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +40,9 @@ type analyticsRecomputer struct {
 	cache atomic.Value // holds interface{} — the latest snapshot
 	stop  chan struct{}
 	done  chan struct{}
+	// recomputeReq carries RecomputeNow requests to the loop goroutine,
+	// which closes the inner channel when that pass is done (#116).
+	recomputeReq chan chan struct{}
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -44,6 +50,7 @@ type analyticsRecomputer struct {
 	// Stats (atomic).
 	computeRuns   atomic.Int64
 	lastComputeNs atomic.Int64 // duration of last compute in nanoseconds
+	lastStartNs   atomic.Int64 // wall clock when the last compute started (#116)
 
 	// Issue #1659 (PR #1688 r1) — warmup gate state, inlined here so
 	// hot-path readers (IsWarmingUp_1659) do lock-free atomic loads
@@ -66,6 +73,8 @@ func newAnalyticsRecomputer(name string, interval time.Duration, compute func() 
 		compute:  compute,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+
+		recomputeReq: make(chan chan struct{}),
 	}
 }
 
@@ -96,6 +105,13 @@ func (r *analyticsRecomputer) loop() {
 		select {
 		case <-t.C:
 			r.runOnce()
+		case ack := <-r.recomputeReq:
+			// #116: on-demand pass, on this goroutine so it never runs
+			// concurrently with a periodic one; restart the ticker so no
+			// periodic pass follows right behind it.
+			r.runOnce()
+			t.Reset(r.interval)
+			close(ack)
 		case <-r.stop:
 			return
 		}
@@ -114,7 +130,12 @@ func (r *analyticsRecomputer) runOnce() {
 		// reach markFirstPassDone otherwise).
 		_ = recover()
 	}()
+	// #116: sample the warm-up readiness gate BEFORE computing, so a
+	// pass that started on a partially loaded store never ends the
+	// warm-up, even if the load finishes while it runs.
+	ready := r.warmupReadyGateOpen_1659()
 	t0 := time.Now()
+	r.lastStartNs.Store(t0.UnixNano())
 	result := r.compute()
 	r.lastComputeNs.Store(int64(time.Since(t0)))
 	r.computeRuns.Add(1)
@@ -128,9 +149,64 @@ func (r *analyticsRecomputer) runOnce() {
 	// PR #1688 r1: called on EVERY successful pass (even nil
 	// result) so a compute that returns nil but doesn't panic
 	// still lifts the gate — banner-stuck-forever fix (munger #2).
-	// The markFirstPassDone helper is idempotent and additionally
-	// consults the chunked-loader readiness gate (munger #5).
-	r.markFirstPassDone_1659()
+	// The markFirstPassDone helper is idempotent; it only runs for a
+	// pass that started with the readiness gate open (munger #5, #116).
+	if ready {
+		r.markFirstPassDone_1659()
+	}
+}
+
+// RecomputeNow has the loop goroutine run a pass that starts after this
+// call and waits for it to finish; the periodic ticker restarts from
+// that pass (#116). Returns early once the recomputer is stopped; blocks
+// until Start if it has not started yet.
+func (r *analyticsRecomputer) RecomputeNow() {
+	ack := make(chan struct{})
+	select {
+	case r.recomputeReq <- ack:
+	case <-r.stop:
+		return
+	}
+	select {
+	case <-ack:
+	case <-r.stop:
+	}
+}
+
+// LastStartAt returns when the most recent compute started (zero before
+// the first one).
+func (r *analyticsRecomputer) LastStartAt() time.Time {
+	ns := r.lastStartNs.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// recomputeWhenLoaded waits for loaded to close, then recomputes each
+// recomputer once, one at a time, in slice order (#116). Sequential so
+// the post-load passes do not all hold the store read lock at once, and
+// so a recomputer that reads another's snapshot can follow it. Returns
+// when done or when stop closes.
+func recomputeWhenLoaded(loaded, stop <-chan struct{}, rcs []*analyticsRecomputer) {
+	select {
+	case <-loaded:
+	case <-stop:
+		return
+	}
+	t0 := time.Now()
+	parts := make([]string, 0, len(rcs))
+	for _, rc := range rcs {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		rc.RecomputeNow()
+		parts = append(parts, fmt.Sprintf("%s=%s", rc.name, rc.LastComputeDuration().Round(time.Millisecond)))
+	}
+	log.Printf("[analytics-recompute] startup load done: recomputed %d snapshots in %s (%s)",
+		len(rcs), time.Since(t0).Round(time.Millisecond), strings.Join(parts, " "))
 }
 
 // Load returns the most recently computed snapshot, or nil if Start
@@ -260,34 +336,60 @@ func (s *PacketStore) StartAnalyticsRecomputers(defaultInterval time.Duration, o
 		"nodes-clock-skew", pickInterval(ov.NodesClockSkew, defaultInterval),
 		func() interface{} { return s.computeFleetClockSkew() },
 	)
+	// Start and post-load recompute order (#116): the three warm-up-gated
+	// recomputers first, and roles after nodes-clock-skew because
+	// computeAnalyticsRoles reads that snapshot (GetFleetClockSkew).
 	all := []*analyticsRecomputer{
-		s.recompTopology, s.recompRF, s.recompDistance,
-		s.recompChannels, s.recompHashCollisions, s.recompHashSizes,
-		s.recompRoles,
+		s.recompRF, s.recompTopology, s.recompChannels,
+		s.recompDistance, s.recompHashCollisions, s.recompHashSizes,
 		s.recompObserversClockSkew, s.recompNodesClockSkew,
+		s.recompRoles,
 	}
 	s.analyticsRecomputerMu.Unlock()
 
-	// Issue #1659 (PR #1688 r1, munger #5): wire the chunked-loader
-	// readiness gate on the three warmup-gated recomputers (RF,
-	// Topology, Channels). markFirstPassDone_1659 will refuse to
-	// flip first-pass-done until s.LoadComplete() reports true —
-	// i.e. the cold-load has populated all observations. Otherwise
-	// the FIRST recomputer pass runs against the post-restart in-RAM
-	// slice and the gate opens on partial data (the original #1659
-	// bug class).
-	loadCompleteGate := s.LoadComplete
-	s.recompRF.setWarmupReadyGate_1659(loadCompleteGate)
-	s.recompTopology.setWarmupReadyGate_1659(loadCompleteGate)
-	s.recompChannels.setWarmupReadyGate_1659(loadCompleteGate)
+	// Issue #1659 (PR #1688 r1, munger #5): wire the loader readiness
+	// gate on the three warmup-gated recomputers (RF, Topology,
+	// Channels). #116: only a pass that STARTS after the whole startup
+	// load terminated (hot window AND background fill) ends the
+	// warm-up. LoadComplete() is not enough: it flips at the end of the
+	// hot window, so the gate used to open on a snapshot that missed the
+	// background fill.
+	loaded := s.StartupLoadDone()
+	loadedGate := func() bool {
+		select {
+		case <-loaded:
+			return true
+		default:
+			return false
+		}
+	}
+	s.recompRF.setWarmupReadyGate_1659(loadedGate)
+	s.recompTopology.setWarmupReadyGate_1659(loadedGate)
+	s.recompChannels.setWarmupReadyGate_1659(loadedGate)
 
 	for _, rc := range all {
 		rc.Start()
 	}
 
+	// #116: main.go starts the recomputers at the first load chunk, so
+	// the initial computes above saw part of the data. Recompute every
+	// one as soon as the startup load terminates instead of a full
+	// interval later.
+	stopPostLoad := make(chan struct{})
+	postLoadDone := make(chan struct{})
+	go func() {
+		defer close(postLoadDone)
+		recomputeWhenLoaded(loaded, stopPostLoad, all)
+	}()
+
+	var stopOnce sync.Once
 	return func() {
-		for _, rc := range all {
-			rc.Stop()
-		}
+		stopOnce.Do(func() {
+			close(stopPostLoad)
+			for _, rc := range all {
+				rc.Stop()
+			}
+			<-postLoadDone
+		})
 	}
 }

@@ -94,6 +94,63 @@ for (const c of cases) {
   }
 }
 
+// Fix-hint wording. CI's --diff step never sets PREFLIGHT_TEST_FILES, so
+// the same-PR DOM-grep test route is dead there. The hint must only offer
+// that route when the variable is set and non-empty — otherwise authors
+// (and reviewers) assume an existing test covers the sink and CI fails.
+function runGate(file, testFiles) {
+  const env = Object.assign({}, process.env);
+  if (testFiles === undefined) delete env.PREFLIGHT_TEST_FILES;
+  else env.PREFLIGHT_TEST_FILES = testFiles;
+  return spawnSync('bash', [SCRIPT, '--file', path.join(FIXTURE_DIR, file)], {
+    env,
+    encoding: 'utf8',
+  });
+}
+
+const hintCases = [
+  { label: 'PREFLIGHT_TEST_FILES unset → no DOM-grep test hint',
+    testFiles: undefined, domTestHint: false },
+  { label: 'PREFLIGHT_TEST_FILES empty → no DOM-grep test hint',
+    testFiles: '', domTestHint: false },
+  // test-good-2.js does not name bad-1-template-literal.js, so the sink is
+  // still flagged — but the route exists in this run, so the hint stays.
+  { label: 'PREFLIGHT_TEST_FILES set (non-covering) → DOM-grep test hint',
+    testFiles: path.join(FIXTURE_DIR, 'test-good-2.js'), domTestHint: true },
+];
+
+for (const h of hintCases) {
+  const res = runGate('bad-1-template-literal.js', h.testFiles);
+  const out = res.stdout || '';
+  const problems = [];
+  if (res.status !== 1) problems.push(`expected exit 1, got ${res.status}`);
+  if (out.includes('DOM-grep test') !== h.domTestHint) {
+    problems.push(`DOM-grep test hint ${h.domTestHint ? 'missing' : 'present'}`);
+  }
+  for (const needle of ['escapeHtml', 'textContent', 'PREFLIGHT-XSS-OPTOUT', 'xss-optout label']) {
+    if (!out.includes(needle)) problems.push(`hint missing "${needle}"`);
+  }
+  if (problems.length) {
+    console.error(`FAIL: hint — ${h.label}: ${problems.join('; ')}`);
+    console.error('  stdout:', out.trim());
+    failed++;
+  } else {
+    console.log(`PASS: hint — ${h.label}`);
+  }
+}
+
+// Every bad fixture run without test files must omit the dead route.
+for (const c of cases.filter(c => c.expect === 1 && !c.tests)) {
+  const res = runGate(c.file, undefined);
+  if (res.status !== 1 || (res.stdout || '').includes('DOM-grep test')) {
+    console.error(`FAIL: hint — ${c.file} without PREFLIGHT_TEST_FILES mentions DOM-grep test (exit ${res.status})`);
+    console.error('  stdout:', (res.stdout || '').trim());
+    failed++;
+  } else {
+    console.log(`PASS: hint — ${c.file} omits DOM-grep test route in CI mode`);
+  }
+}
+
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed.`);
   process.exit(1);

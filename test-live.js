@@ -891,9 +891,26 @@ console.log('\n=== live.js: source-level safety checks ===');
       'tab restore should clear propagation buffer');
   });
 
-  test('connectWS has reconnect on close', () => {
-    assert.ok(src.includes('ws.onclose = () => setTimeout(connectWS, WS_RECONNECT_MS)'),
-      'WebSocket should auto-reconnect on close');
+  test('the live map owns no socket of its own', () => {
+    // It used to open a second WebSocket to the endpoint app.js already holds
+    // open; the hub does no per-client filtering, so every Live viewer pulled
+    // the full packet stream twice (upstream #1980 / #1991).
+    assert.ok(!src.includes('new WebSocket'),
+      'live.js must not construct a WebSocket; app.js owns the one socket');
+    assert.ok(src.includes('onWS(wsHandler)'),
+      'it must subscribe to the shared channel instead');
+    assert.ok(src.includes('offWS(wsHandler)'),
+      'and unsubscribe rather than closing a socket the rest of the app needs');
+  });
+
+  test('reconnect lives with the socket owner and honours wsReconnectMs', () => {
+    // Moving the subscription took Live's private reconnect loop with it, and
+    // that loop was the only place WS_RECONNECT_MS was honoured.
+    const appSrc = fs.readFileSync('public/app.js', 'utf8');
+    assert.ok(appSrc.includes('setTimeout(connectWS, window.WS_RECONNECT_MS || 3000)'),
+      'app.js should reconnect on the configured interval, defaulting to 3s');
+    assert.ok(!src.includes('WS_RECONNECT_MS'),
+      'live.js must not run a reconnect loop of its own');
   });
 
   test('addNodeMarker avoids duplicates', () => {
@@ -1141,6 +1158,125 @@ console.log('\n=== live.js: foreignPathColor ===');
   test('liveForeignToggle checkbox exists and defaults to checked', () => {
     assert.ok(/id="liveForeignToggle"[^>]*checked/.test(src) || /checked[^>]*id="liveForeignToggle"/.test(src),
       'Foreign origin toggle must default to on');
+  });
+}
+
+// ===== shared WebSocket channel (port of upstream #1991) =====
+// Live subscribes to app.js's onWS/offWS fan-out instead of opening its own
+// socket. These drive the REAL live.js closure through a counting channel.
+console.log('\n=== live.js: shared WebSocket channel ===');
+{
+  function makeWSSandbox() {
+    const ctx = makeSandbox();
+    addLiveGlobals(ctx);
+    let constructed = 0;
+    const registered = [];
+    const pages = {};
+    ctx.WebSocket = function () { constructed++; this.close = () => {}; };
+    ctx.onWS = (fn) => { registered.push(fn); };
+    ctx.offWS = (fn) => {
+      const i = registered.indexOf(fn);
+      if (i >= 0) registered.splice(i, 1);
+    };
+    ctx.registerPage = (name, mod) => { pages[name] = mod; };
+    // destroy() removes body classes (nav-pinned, live-fullscreen). The shared
+    // fixture's document.body has no classList, which made destroy() throw
+    // part-way through; this is the only stub it needs to run to completion.
+    ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
+    loadInCtx(ctx, 'public/payload-labels.js');
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/packet-helpers.js');
+    // Deliberately unguarded: a live.js load failure must fail these tests.
+    loadInCtx(ctx, 'public/live.js');
+    // app.js's real fan-out is `wsListeners.forEach(fn => fn(msg))`.
+    const fanOut = (msg) => registered.slice().forEach((fn) => fn(msg));
+    return {
+      ctx, registered, fanOut,
+      page: () => pages.live,
+      connect: () => ctx.window._liveConnectWS(),
+      handler: () => ctx.window._liveWSHandler(),
+      buffer: () => ctx.window._liveVCR().buffer,
+      constructedCount: () => constructed,
+    };
+  }
+  const pkt = (hash) => ({ type: 'packet', data: { hash, timestamp: new Date().toISOString(), payload_type: 4 } });
+
+  test('Live constructs no WebSocket and registers exactly one shared listener', () => {
+    const t = makeWSSandbox();
+    assert.ok(t.ctx.window._liveConnectWS, '_liveConnectWS must be exposed');
+    t.connect();
+    assert.strictEqual(t.constructedCount(), 0, 'live.js must not construct a WebSocket of its own');
+    assert.strictEqual(t.registered.length, 1, 'exactly one listener on the shared channel');
+    assert.strictEqual(t.registered[0], t.handler(), 'the registered listener is the page handler');
+  });
+
+  test('repeated entry keeps exactly one listener (the newest) and no packet doubles', () => {
+    // connectWS() registers idempotently: each call removes the handler it
+    // registered before and adds a new one, so repeated calls never leave a
+    // duplicate listener on the shared channel. A duplicate would buffer every
+    // broadcast packet twice.
+    const t = makeWSSandbox();
+    t.connect();
+    const first = t.registered[0];
+    t.connect();
+    t.connect();
+    assert.strictEqual(t.registered.length, 1, 'exactly one listener after repeated entry');
+    assert.notStrictEqual(t.registered[0], first, 'and it is the newly registered handler, not the first one');
+    const before = t.buffer().length;
+    t.fanOut(pkt('ws1991-once'));
+    assert.strictEqual(t.buffer().length, before + 1, 'one broadcast must buffer exactly one packet');
+  });
+
+  test('destroy completes, unsubscribes, releases the handler, and a later broadcast reaches nothing', () => {
+    const t = makeWSSandbox();
+    assert.ok(t.page() && typeof t.page().destroy === 'function', 'live page must register destroy');
+    t.connect();
+    t.fanOut(pkt('ws1991-before-destroy'));
+    assert.strictEqual(t.buffer().length, 1, 'precondition: one packet buffered before destroy');
+    assert.doesNotThrow(() => t.page().destroy(), 'destroy() must complete without an exception');
+    // destroy() resets the VCR buffer at its very end, so an empty buffer shows
+    // it ran all the way through rather than stopping after the unsubscribe.
+    assert.strictEqual(t.buffer().length, 0, 'destroy() must reach its final statement (VCR buffer reset)');
+    assert.strictEqual(t.registered.length, 0, 'destroy must remove Live\'s listener');
+    assert.strictEqual(t.handler(), null, 'destroy must release the handler reference');
+    t.fanOut(pkt('ws1991-after-destroy'));
+    assert.strictEqual(t.buffer().length, 0, 'no packet may reach Live after destroy');
+  });
+
+  test('a return visit after destroy re-subscribes exactly once', () => {
+    const t = makeWSSandbox();
+    t.connect();
+    assert.doesNotThrow(() => t.page().destroy(), 'destroy() must complete without an exception');
+    assert.strictEqual(t.handler(), null, 'destroy must release the handler before the return visit');
+    t.connect();
+    assert.strictEqual(t.registered.length, 1, 'return visit must hold exactly one listener');
+    assert.strictEqual(t.constructedCount(), 0, 'and still construct no socket');
+  });
+
+  test('packet messages reach the VCR buffer; other messages do not', () => {
+    const t = makeWSSandbox();
+    t.connect();
+    const h = t.handler();
+    const before = t.buffer().length;
+    assert.doesNotThrow(() => h({ type: 'stats' }));
+    assert.doesNotThrow(() => h(null));
+    assert.doesNotThrow(() => h({ type: 'message', data: { hash: 'nope' } }));
+    assert.strictEqual(t.buffer().length, before, 'non-packet messages must not be buffered');
+    h(pkt('ws1991-packet'));
+    assert.strictEqual(t.buffer().length, before + 1, 'a packet message must be buffered');
+    assert.strictEqual(t.buffer()[t.buffer().length - 1].pkt.hash, 'ws1991-packet');
+  });
+
+  test('a rendering error stays inside Live instead of breaking app.js\'s fan-out loop', () => {
+    // app.js calls every listener in one forEach; an exception escaping Live's
+    // handler would skip the listeners after it. The old private socket
+    // swallowed such errors in its own onmessage; the handler keeps that.
+    const t = makeWSSandbox();
+    t.connect();
+    let laterListenerRan = false;
+    t.registered.push(() => { laterListenerRan = true; });
+    assert.doesNotThrow(() => t.fanOut({ type: 'packet', data: null }));
+    assert.ok(laterListenerRan, 'a listener registered after Live must still receive the message');
   });
 }
 

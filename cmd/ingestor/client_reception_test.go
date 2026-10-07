@@ -170,45 +170,56 @@ func TestRxLeaderboardQueryIsIndexBacked(t *testing.T) {
 
 func TestDeriveHeardKey(t *testing.T) {
 	full := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	k, l, src, ok := deriveHeardKey("rx", packetpath.RouteFlood, nil, strings.ToUpper(full), true)
+	k, l, src, ok := deriveHeardKey("rx", packetpath.RouteFlood, PayloadADVERT, nil, strings.ToUpper(full), true)
 	if !ok || l != 32 || src != "advert" || k != full {
 		t.Fatalf("0-hop advert: got k=%q l=%d src=%q ok=%v", k, l, src, ok)
 	}
-	k, l, src, ok = deriveHeardKey("rx", packetpath.RouteFlood, []string{"aa", "bbccdd"}, "", false)
+	k, l, src, ok = deriveHeardKey("rx", packetpath.RouteFlood, PayloadGRP_TXT, []string{"aa", "bbccdd"}, "", false)
 	if !ok || k != "bbccdd" || l != 3 || src != "rxlog" {
 		t.Fatalf("flood path: got k=%q l=%d src=%q ok=%v", k, l, src, ok)
 	}
 	// DIRECT route: path[last] is the route's far end, not the transmitter — must be rejected.
-	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteDirect, []string{"aa", "bbccdd"}, "", false); ok {
+	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteDirect, PayloadGRP_TXT, []string{"aa", "bbccdd"}, "", false); ok {
 		t.Fatalf("direct-route path must be rejected")
 	}
-	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteTransportDirect, []string{"aa", "bbccdd"}, "", false); ok {
+	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteTransportDirect, PayloadGRP_TXT, []string{"aa", "bbccdd"}, "", false); ok {
 		t.Fatalf("transport-direct-route path must be rejected")
 	}
-	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteFlood, []string{"aa", "bb"}, "", false); ok {
+	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteFlood, PayloadGRP_TXT, []string{"aa", "bb"}, "", false); ok {
 		t.Fatalf("1-byte last hop should be rejected")
 	}
-	if _, _, _, ok = deriveHeardKey("tx", packetpath.RouteFlood, []string{"aabbcc"}, "", false); ok {
+	if _, _, _, ok = deriveHeardKey("tx", packetpath.RouteFlood, PayloadGRP_TXT, []string{"aabbcc"}, "", false); ok {
 		t.Fatalf("tx must be rejected")
 	}
-	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteFlood, nil, "", false); ok {
+	if _, _, _, ok = deriveHeardKey("rx", packetpath.RouteFlood, PayloadGRP_TXT, nil, "", false); ok {
 		t.Fatalf("no hops + non-advert must be rejected")
+	}
+	// TRACE repurposes the header path bytes as per-hop SNR values, so the same
+	// path that yields a heard key above must not be attributable for TRACE.
+	for _, rt := range []int{packetpath.RouteFlood, packetpath.RouteTransportFlood} {
+		if k, _, _, ok := deriveHeardKey("rx", rt, PayloadTRACE, []string{"aa", "bbccdd"}, "", false); ok {
+			t.Fatalf("TRACE path bytes must not be read as hops (route %d): got k=%q", rt, k)
+		}
 	}
 }
 
 func TestBuildClientReception(t *testing.T) {
 	acc := 8.0
-	rec, ok := buildClientReception("companionpk", "rx", packetpath.RouteFlood, []string{"aa", "bbccdd"}, "", false,
+	rec, ok := buildClientReception("companionpk", "rx", packetpath.RouteFlood, PayloadGRP_TXT, []string{"aa", "bbccdd"}, "", false,
 		crF(-7.5), crI(-92), 51.05, 3.72, &acc, "2026-06-09T12:00:00Z", "2026-06-09T12:00:01Z")
 	if !ok || rec.HeardKey != "bbccdd" || rec.HeardKeyLen != 3 || rec.Src != "rxlog" {
 		t.Fatalf("bad reception: %+v ok=%v", rec, ok)
 	}
-	if _, ok := buildClientReception("c", "rx", packetpath.RouteDirect, []string{"bbccdd"}, "", false,
+	if _, ok := buildClientReception("c", "rx", packetpath.RouteDirect, PayloadGRP_TXT, []string{"bbccdd"}, "", false,
 		crF(-7.5), crI(-92), 51.05, 3.72, nil, "t", "t"); ok {
 		t.Fatal("direct-route path must be rejected (not the transmitter)")
 	}
-	if _, ok := buildClientReception("c", "rx", packetpath.RouteFlood, []string{"bbccdd"}, "", false, nil, nil, 99.0, 3.72, nil, "t", "t"); ok {
+	if _, ok := buildClientReception("c", "rx", packetpath.RouteFlood, PayloadGRP_TXT, []string{"bbccdd"}, "", false, nil, nil, 99.0, 3.72, nil, "t", "t"); ok {
 		t.Fatal("out-of-range lat must be rejected")
+	}
+	if _, ok := buildClientReception("c", "rx", packetpath.RouteFlood, PayloadTRACE, []string{"bbccdd"}, "", false,
+		crF(-7.5), crI(-92), 51.05, 3.72, nil, "t", "t"); ok {
+		t.Fatal("TRACE path bytes must not produce a reception")
 	}
 }
 

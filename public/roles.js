@@ -32,7 +32,11 @@
       if (typeof document === 'undefined' || !document.documentElement) return fallback;
       var v = '';
       if (typeof getComputedStyle === 'function') {
-        v = getComputedStyle(document.documentElement).getPropertyValue(name);
+        // Resolve on <body>, not documentElement: an active CB preset delivers
+        // its colours through body[data-cb-preset="X"] (style.css), and since
+        // #1449 customize-v2 no longer mirrors them onto documentElement.
+        // <body> inherits every :root value, so non-preset reads are unchanged.
+        v = getComputedStyle(document.body || document.documentElement).getPropertyValue(name);
       }
       if (!v && document.documentElement.style && typeof document.documentElement.style.getPropertyValue === 'function') {
         v = document.documentElement.style.getPropertyValue(name);
@@ -669,8 +673,20 @@
     flasher: 'https://flasher.meshcore.io/'
   };
 
+  // One operator-owned policy for every estimated-position surface. Local
+  // preferences and deep links cannot enable it; older servers default on.
+  var estimatedPositionsEnabled = true;
+  window.EstimatedPositions = {
+    enabled: function (response) {
+      return estimatedPositionsEnabled && (!response || response.estimatedPositionsEnabled !== false);
+    },
+    disabledMessage: 'Estimated positions are disabled by the instance operator.',
+    disabledNoticeHTML: '<p class="text-muted estimated-positions-note" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
+  };
+
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
+    estimatedPositionsEnabled = !cfg.estimatedPositions || cfg.estimatedPositions.enabled !== false;
     window.MC_CLIENT_RX_COVERAGE = cfg.clientRxCoverage === true;
     // Coverage is opt-in: the nav link is NOT in static HTML (so the default-off
     // nav matches upstream and the nav-overflow tests). Inject it after Analytics
@@ -684,6 +700,26 @@
         covLink.setAttribute('data-route', 'rx-coverage');
         covLink.innerHTML = '<svg class="ph-icon" aria-hidden="true" focusable="false"><use href="/icons/phosphor-sprite.svg#ph-broadcast"></use></svg> Coverage';
         navAnchor.insertAdjacentElement('afterend', covLink);
+        window.dispatchEvent(new Event('resize'));
+      }
+    }
+    // #/privacy page (opt-in, mirrors the rx-coverage pattern above): the
+    // nav link is NOT in static HTML so the default-off nav matches
+    // upstream and the nav-overflow tests. Appended last so it sits at the
+    // end of the nav and overflows into the "More" menu first. The server
+    // omits cfg.privacy entirely unless privacy.enabled is true, so a
+    // simple presence check gates both the link and the page content
+    // (public/privacy.js reads window.MC_PRIVACY).
+    window.MC_PRIVACY = (cfg.privacy && typeof cfg.privacy === 'object') ? cfg.privacy : null;
+    if (window.MC_PRIVACY && !document.querySelector('.nav-links [data-route="privacy"]')) {
+      var navLinksEl = document.querySelector('.nav-links');
+      if (navLinksEl) {
+        var privLink = document.createElement('a');
+        privLink.href = '#/privacy';
+        privLink.className = 'nav-link';
+        privLink.setAttribute('data-route', 'privacy');
+        privLink.innerHTML = '<svg class="ph-icon" aria-hidden="true" focusable="false"><use href="/icons/phosphor-sprite.svg#ph-lock"></use></svg> Privacy';
+        navLinksEl.appendChild(privLink);
         window.dispatchEvent(new Event('resize'));
       }
     }

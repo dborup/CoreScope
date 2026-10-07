@@ -173,6 +173,44 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.evaluate(() => localStorage.removeItem('corescope_saved_filters_v1'));
   });
 
+  // #72: the Saved trigger sits at the right end of the filter row; a
+  // left-anchored, unbounded menu ran past the viewport and made #pktLeft
+  // scroll horizontally. Below 601px the filter expression row is hidden.
+  for (const width of [1400, 1024, 768]) {
+    await step(`Saved-filter menu stays inside the viewport at ${width}px (#72)`, async () => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(() => localStorage.setItem('corescope_saved_filters_v1', JSON.stringify([{
+        name: 'E2E long filter',
+        expr: 'type == ADVERT && payload.flags.repeater == true && snr > 5 && hops > 1 && payload.name contains "a very long repeater name"',
+        ts: 0,
+      }])));
+      await page.evaluate(() => document.getElementById('filterSavedMenu').classList.add('hidden'));
+      await page.click('#filterSavedTrigger');
+      await page.waitForSelector('#filterSavedMenu:not(.hidden)');
+      const r = await page.evaluate(() => {
+        const menu = document.getElementById('filterSavedMenu');
+        const mr = menu.getBoundingClientRect();
+        const left = document.getElementById('pktLeft');
+        const exprs = Array.from(menu.querySelectorAll('.fux-saved-expr'));
+        const long = exprs[exprs.length - 1];
+        return {
+          left: mr.left, right: mr.right, vw: document.documentElement.clientWidth,
+          paneOverflow: left.scrollWidth - left.clientWidth,
+          longTruncated: long.scrollWidth > long.clientWidth,
+          longText: long.textContent,
+        };
+      });
+      await page.evaluate(() => {
+        document.getElementById('filterSavedMenu').classList.add('hidden');
+        localStorage.removeItem('corescope_saved_filters_v1');
+      });
+      assert(r.left >= 0 && r.right <= r.vw, 'menu outside viewport: ' + JSON.stringify(r));
+      assert(r.paneOverflow <= 1, '#pktLeft scrolls horizontally: ' + JSON.stringify(r));
+      assert(/a very long repeater name/.test(r.longText), 'long filter not rendered: ' + JSON.stringify(r));
+      assert(r.longTruncated, 'long expression not ellipsized (menu width unbounded): ' + JSON.stringify(r));
+    });
+  }
+
   await browser.close();
 
   console.log(`\n=== Results: passed ${passed} failed ${failed} ===`);

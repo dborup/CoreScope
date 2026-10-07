@@ -1,7 +1,7 @@
 /**
  * Follow-up UX fixes to #1037 channel modal/sidebar redesign:
  *
- *   1. ✕ remove button must hit a 44×44px touch target (WCAG 2.5.5).
+ *   1. ✕ remove button must hit a 48×48px house touch target (#2052).
  *   2. Channel rows must NOT display "0 messages" — when no messages
  *      have been decrypted yet, omit the count entirely.
  *   3. Modal footer wording: keys removed via ✕ button, not by
@@ -25,12 +25,13 @@ function assert(cond, msg) {
   else { failed++; console.error('  ✗ ' + msg); }
 }
 
-console.log('\n=== Fix 1: ✕ touch target ≥ 44×44px (on shared .ch-icon-btn base) ===');
-const iconBtnRule = (cssSrc.match(/\.ch-icon-btn\s*\{[^}]*\}/) || [''])[0];
-assert(/min-width:\s*44px/.test(iconBtnRule),
-  '.ch-icon-btn declares min-width: 44px');
-assert(/min-height:\s*44px/.test(iconBtnRule),
-  '.ch-icon-btn declares min-height: 44px');
+console.log('\n=== Fix 1: shared touch-target sizing owns channel icon minimums ===');
+// Computed 48x48 hit areas are asserted by test-touch-targets.js. Keep the
+// component rules from silently overriding that shared policy again (#2052).
+const iconBtnRules = cssSrc.match(/(?:^|\n)[^{}]*\.ch-icon-btn\s*\{[^}]*\}/g) || [];
+assert(iconBtnRules.length > 0, '.ch-icon-btn component rules exist');
+assert(iconBtnRules.every(rule => !/min-(?:width|height)\s*:/.test(rule)),
+  '.ch-icon-btn component rules inherit minimum sizes from the shared touch-target group');
 
 console.log('\n=== Fix 2: no "0 messages" in default row ===');
 // renderChannelRow must not emit a literal "0 messages" preview when
@@ -43,8 +44,12 @@ assert(!/\$\{ch\.messageCount\s*\|\|\s*0\}\s*packets/.test(chSrc),
 console.log('\n=== Fix 3: privacy footer wording ===');
 assert(!/Clear browser data to remove stored keys/.test(chSrc),
   'old "Clear browser data to remove stored keys" copy is gone');
-assert(/Use\s+✕\s+to remove individual channels/.test(chSrc),
-  'new copy points at the ✕ button for individual key removal');
+// b812a98a (#1648 M3) swapped the ✕ glyph for the #ph-x sprite and reworded
+// the hint to "close button"; the remove button must still be that X icon.
+assert(/Use the close button to remove individual channels/.test(chSrc),
+  'new copy points at the close (X) button for individual key removal');
+assert(/iconBtn\(\s*'ch-remove-btn'[^)]*'<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-x"\/><\/svg>'/.test(chSrc),
+  "the remove button the copy points at renders the #ph-x close icon");
 
 console.log('\n=== Fix 4: Share/reshare affordance on user-added rows ===');
 // Source-level: data attribute and helper exist. Behavior-level checks
@@ -131,8 +136,12 @@ if (renderRowSrc) {
   // automatically — no hand-rolled duplicate of the psk:* rule.
   const helperSrc = extractFn(chSrc, 'function channelDisplayName(ch');
   assert(helperSrc, 'extracted channelDisplayName source for behavior sandbox');
+  // #155: the unread badge is a shared helper too; eval the real one.
+  const badgeSrc = extractFn(chSrc, 'function renderUnreadBadge(ch)');
+  assert(badgeSrc, 'extracted renderUnreadBadge source for behavior sandbox');
   vm.createContext(sandbox);
   vm.runInContext('const PRIVATE_CHANNEL_LABEL = "Private Channel";\n' + helperSrc, sandbox);
+  vm.runInContext(badgeSrc, sandbox);
   vm.runInContext(renderRowSrc, sandbox);
   const userRow = sandbox.renderChannelRow({
     hash: 'user:Crew',

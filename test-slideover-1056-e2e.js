@@ -56,6 +56,16 @@ const PAGES = [
   // ---- Narrow viewport: slide-over MUST appear ----
   for (const p of PAGES) {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 800 } });
+    if (p.name === 'packets') {
+      // The CI fixture is static: timestamps are freshened once before the
+      // server starts. The packets page defaults to a 15-min window, so rows
+      // vanish ~15 min into the job; 180 is the largest window packets.js
+      // keeps at <=1024px (larger values reset to 15). The e2e job's
+      // timeout-minutes keeps the run inside that window.
+      await ctx.addInitScript(() => {
+        try { localStorage.setItem('meshcore-time-window', '180'); } catch (_) {}
+      });
+    }
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     page.on('pageerror', (e) => console.error('[pageerror]', e.message));

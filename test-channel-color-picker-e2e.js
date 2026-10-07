@@ -161,6 +161,47 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       'Enter should assign focused color (' + nextColor + '), got ' + stored);
   });
 
+  await step('a late focus timer does not snap the selection back (#1943)', async () => {
+    // Deterministic reproduction of #1943. showPopover() defers focusing the
+    // first swatch with setTimeout(0). Reopening while a swatch still has focus
+    // means the test's usual "wait for a focused swatch" is satisfied by the
+    // OLD focus, so ArrowRight runs before the new timer lands. The timer then
+    // fired into the popover and pulled focus back to the first swatch, and
+    // Enter assigned that colour instead of the navigated-to one.
+    await page.evaluate(() => window.ChannelColorPicker.show('#lateA', 100, 100));
+    await page.waitForFunction(() => {
+      const el = document.activeElement;
+      return el && el.classList && el.classList.contains('cc-swatch');
+    }, { timeout: 2000 });
+    await page.keyboard.press('Escape');
+    // Reopen and move immediately, without waiting for the new focus timer.
+    await page.evaluate(() => window.ChannelColorPicker.show('#lateB', 100, 100));
+    const before = await page.evaluate(() =>
+      document.activeElement && document.activeElement.getAttribute
+        ? document.activeElement.getAttribute('data-color') : null);
+    await page.keyboard.press('ArrowRight');
+    const moved = await page.evaluate(() =>
+      document.activeElement.getAttribute('data-color'));
+    // Give any pending setTimeout(0) more than enough time to land.
+    await page.waitForTimeout(150);
+    const settled = await page.evaluate(() =>
+      document.activeElement.getAttribute('data-color'));
+    assert(settled === moved,
+      'a late focus timer must not move focus after the user did (was ' + before
+      + ', moved to ' + moved + ', settled on ' + settled + ')');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.cc-picker-popover');
+      return el && el.style.display === 'none';
+    }, { timeout: 3000 });
+    const stored = await page.evaluate(() =>
+      window.ChannelColors && window.ChannelColors.get('#lateB'));
+    assert(stored === moved,
+      'Enter must assign the swatch the user navigated to (expected ' + moved
+      + ', got ' + stored + ')');
+    await page.evaluate(() => window.ChannelColors.remove('#lateB'));
+  });
+
   await step('outside click closes popover', async () => {
     // De-flake history: #1317 (62a81776) tried `mouse.click(700,500)` + a
     // `rect.width > 0` "listener installed" proxy. That proxy is FALSE — it

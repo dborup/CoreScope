@@ -17,7 +17,9 @@ type Hub struct {
 	mu             sync.RWMutex
 	clients        map[*Client]bool
 	upgrader       websocket.Upgrader
-	allowedOrigins []string // exact-match allowlist for /ws CheckOrigin (see SetAllowedOrigins)
+	allowedOrigins []string   // exact-match allowlist for /ws CheckOrigin (see SetAllowedOrigins)
+	limits         *wsLimiter // #1794: per-IP caps and deny list; nil allows everything
+	pingInterval   time.Duration // writePump tick: protocol ping + app heartbeat (#117)
 }
 
 // SetAllowedOrigins configures the exact-match origin allowlist consulted by
@@ -73,16 +75,52 @@ func (h *Hub) checkOrigin(r *http.Request) bool {
 	return false
 }
 
+// wsHeartbeat is written to every client on each ping tick (#117). Browser
+// JS never sees protocol ping frames, so without a frame the page receives a
+// quiet mesh and a silently dead (half-open) socket look the same to it.
+// public/app.js matches these exact bytes (WS_HEARTBEAT) and drops a socket
+// that has been silent for WS_STALE_MS; ws_heartbeat_117_test.go keeps the
+// two in step. Tabs still running an app.js from before this change treat
+// it as an ordinary message of an unknown type (see the #117 PR).
+var wsHeartbeat = []byte(`{"type":"heartbeat"}`)
+
 // Client is a single WebSocket connection.
 type Client struct {
 	conn     *websocket.Conn
 	send     chan []byte
 	closeOnce sync.Once
+	// release returns this connection's slot to the per-IP concurrent cap
+	// (#1794). Always non-nil so Unregister needs no nil check; it is a no-op
+	// when limits are disabled.
+	release func()
+}
+
+// ConfigureLimits installs the #1794 transport limits. Called once at
+// startup, before the listener binds, so no upgrade can race a half-built
+// limiter. Passing zero values for both caps leaves only the deny list
+// active, which is a legitimate configuration.
+func (h *Hub) ConfigureLimits(maxConnsPerIP, upgradesPerMin int, trustedProxies, deny []string) {
+	l := newWSLimiter()
+	l.maxConnsPerIP = maxConnsPerIP
+	l.upgradesPerMin = upgradesPerMin
+	l.trustedProxies = parseCIDRList(trustedProxies, "webSocket.trustedProxies")
+	l.denyNets = parseCIDRList(deny, "webSocket.deny")
+	h.mu.Lock()
+	h.limits = l
+	h.mu.Unlock()
+	if len(l.denyNets) > 0 {
+		log.Printf("[ws] deny list active: %d network(s)", len(l.denyNets))
+	}
+	if len(l.trustedProxies) == 0 && (maxConnsPerIP > 0 || upgradesPerMin > 0) {
+		log.Printf("[ws] per-IP limits configured with no trustedProxies: they apply only to " +
+			"directly-connected clients. Behind a reverse proxy, set webSocket.trustedProxies.")
+	}
 }
 
 func NewHub() *Hub {
 	h := &Hub{
-		clients: make(map[*Client]bool),
+		clients:      make(map[*Client]bool),
+		pingInterval: 30 * time.Second,
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -112,6 +150,12 @@ func (h *Hub) Unregister(c *Client) {
 		c.closeOnce.Do(func() { close(c.send) })
 	}
 	h.mu.Unlock()
+	// #1794: outside the lock — release takes the limiter's own mutex, and
+	// holding two locks in one order here and the other order elsewhere is how
+	// deadlocks are made. Idempotent, so a double Unregister cannot over-credit.
+	if c.release != nil {
+		c.release()
+	}
 	log.Printf("[ws] client disconnected (%d total)", h.ClientCount())
 }
 
@@ -151,19 +195,37 @@ func (h *Hub) Broadcast(msg interface{}) {
 
 // ServeWS handles the WebSocket upgrade and runs the client.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	// #1794: decide BEFORE the upgrade. Rejecting afterwards would already
+	// have allocated the connection and completed the handshake, which is the
+	// resource this is meant to protect.
+	ok, reason, key, release := h.limits.allow(r)
+	if !ok {
+		status := http.StatusForbidden
+		if reason == wsRejectRate {
+			// 429 tells a well-behaved client to back off; 403 would read as
+			// "never come back" for what is a temporary refusal.
+			status = http.StatusTooManyRequests
+		}
+		log.Printf("[ws] reject ip=%s reason=%s", key, reason)
+		http.Error(w, "websocket upgrade refused", status)
+		return
+	}
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[ws] upgrade error: %v", err)
+		release() // the slot was charged above and this connection never happened
 		return
 	}
 
 	client := &Client{
-		conn: conn,
-		send: make(chan []byte, 256),
+		conn:    conn,
+		send:    make(chan []byte, 256),
+		release: release,
 	}
 	h.Register(client)
 
-	go client.writePump()
+	go client.writePump(h.pingInterval)
 	go client.readPump(h)
 }
 
@@ -197,8 +259,8 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-func (c *Client) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
+func (c *Client) writePump(pingInterval time.Duration) {
+	ticker := time.NewTicker(pingInterval)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
@@ -217,6 +279,10 @@ func (c *Client) writePump() {
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// #117: same tick, same (only) writer goroutine; see wsHeartbeat.
+			if err := c.conn.WriteMessage(websocket.TextMessage, wsHeartbeat); err != nil {
 				return
 			}
 		}
@@ -259,41 +325,7 @@ func (p *Poller) Start() {
 		select {
 		case <-ticker.C:
 			if p.store != nil {
-				// Ingest new transmissions into in-memory store and broadcast
-				newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
-				if newMax > lastID {
-					lastID = newMax
-				}
-				// Ingest new observations for existing transmissions (fixes #174)
-				nextObsID := lastObsID
-				if err := p.db.conn.QueryRow(`
-					SELECT COALESCE(MAX(id), ?) FROM (
-						SELECT id FROM observations
-						WHERE id > ?
-						ORDER BY id ASC
-						LIMIT 500
-					)`, lastObsID, lastObsID).Scan(&nextObsID); err != nil {
-					nextObsID = lastObsID
-				}
-				newObs := p.store.IngestNewObservations(lastObsID, 500)
-				if nextObsID > lastObsID {
-					lastObsID = nextObsID
-				}
-				if len(newTxs) > 0 {
-					log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
-				}
-				for _, tx := range newTxs {
-					p.hub.Broadcast(WSMessage{
-						Type: "packet",
-						Data: tx,
-					})
-				}
-				for _, obs := range newObs {
-					p.hub.Broadcast(WSMessage{
-						Type: "packet",
-						Data: obs,
-					})
-				}
+				lastID, lastObsID = p.pollStore(lastID, lastObsID)
 			} else {
 				// Fallback: direct DB query (used when store is nil, e.g. tests)
 				newTxs, err := p.db.GetNewTransmissionsSince(lastID, 100)
@@ -330,6 +362,54 @@ func (p *Poller) Start() {
 			return
 		}
 	}
+}
+
+// pollStore is one poller tick against the in-memory store: ingest new
+// transmissions and observations, apply route_mask changes, and broadcast.
+// It returns the advanced cursors.
+func (p *Poller) pollStore(lastID, lastObsID int) (int, int) {
+	// Ingest new transmissions into in-memory store and broadcast
+	newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
+	if newMax > lastID {
+		lastID = newMax
+	}
+	// Ingest new observations for existing transmissions (fixes #174)
+	nextObsID := lastObsID
+	if err := p.db.conn.QueryRow(`
+		SELECT COALESCE(MAX(id), ?) FROM (
+			SELECT id FROM observations
+			WHERE id > ?
+			ORDER BY id ASC
+			LIMIT 500
+		)`, lastObsID, lastObsID).Scan(&nextObsID); err != nil {
+		nextObsID = lastObsID
+	}
+	newObs := p.store.IngestNewObservations(lastObsID, 500)
+	if nextObsID > lastObsID {
+		lastObsID = nextObsID
+	}
+	// #89: route bits that reached existing transmissions without a new
+	// observation id (an upserted observation row), from the change log.
+	p.store.RefreshRouteMaskChanges()
+	// #89: pick up route_mask values the ingestor backfilled
+	// after this server loaded the rows.
+	p.store.RefreshBackfilledRouteMasks()
+	if len(newTxs) > 0 {
+		log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
+	}
+	for _, tx := range newTxs {
+		p.hub.Broadcast(WSMessage{
+			Type: "packet",
+			Data: tx,
+		})
+	}
+	for _, obs := range newObs {
+		p.hub.Broadcast(WSMessage{
+			Type: "packet",
+			Data: obs,
+		})
+	}
+	return lastID, lastObsID
 }
 
 func (p *Poller) Stop() {

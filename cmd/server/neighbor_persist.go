@@ -132,9 +132,15 @@ func resolvePathForObs(pathJSON, observerID string, tx *StoreTx, pm *prefixMap, 
 		contextPKs = append(contextPKs, strings.ToLower(fromNode))
 	}
 	resolved := make([]*string, len(hops))
+	// Reuse a single ctx buffer across hops instead of allocating per hop.
+	// At most one element (the previous hop's resolved PK) is ever appended;
+	// the spare capacity is headroom so that append never reallocates.
+	ctx := make([]string, len(contextPKs), len(contextPKs)+2)
+	copy(ctx, contextPKs)
+	ctxLen := len(ctx)
 	for i, hop := range hops {
-		ctx := make([]string, len(contextPKs), len(contextPKs)+2)
-		copy(ctx, contextPKs)
+		// Reset to base context (trim any previously appended resolved PK)
+		ctx = ctx[:ctxLen]
 		if i > 0 && resolved[i-1] != nil {
 			ctx = append(ctx, *resolved[i-1])
 		}

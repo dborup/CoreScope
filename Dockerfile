@@ -3,7 +3,7 @@
 # BUILDPLATFORM is auto-set by buildx; default to linux/amd64 so plain
 # `docker build` (without buildx) doesn't fail on an empty platform string.
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
 
 ARG APP_VERSION=unknown
 ARG GIT_COMMIT=unknown
@@ -22,9 +22,11 @@ COPY internal/dbconfig/ ../../internal/dbconfig/
 COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
+COPY internal/brokerurl/ ../../internal/brokerurl/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/lora/ ../../internal/lora/
 COPY internal/regions/ ../../internal/regions/
+COPY internal/channelregistry/ ../../internal/channelregistry/
 RUN go mod download
 COPY cmd/server/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
@@ -40,8 +42,10 @@ COPY internal/dbconfig/ ../../internal/dbconfig/
 COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
+COPY internal/brokerurl/ ../../internal/brokerurl/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/regions/ ../../internal/regions/
+COPY internal/channelregistry/ ../../internal/channelregistry/
 RUN go mod download
 COPY cmd/ingestor/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
@@ -57,7 +61,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-s -w" -o /corescope-decrypt .
 
 # Runtime image
-FROM alpine:3.20
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 RUN apk add --no-cache mosquitto mosquitto-clients supervisor caddy wget
 

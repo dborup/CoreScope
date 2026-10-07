@@ -59,6 +59,40 @@ step('.legend-toggle-btn bottom uses var(--vcr-bar-height)', () => {
   );
 });
 
+// The offset only works when it is resolved against the same box as the
+// absolute-positioned VCR bar. At 641..768px .live-page is shortened by the
+// bottom navigation reserve; a fixed button remains viewport-relative and
+// consequently drops into the higher-z-index VCR bar.
+function findDeclaration(source, selector, prop) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(escaped + '\\s*\\{([^}]*)\\}', 'g');
+  const propRe = new RegExp('(?:^|;|\\s)' + prop + '\\s*:\\s*([a-z-]+)\\s*;');
+  let m;
+  while ((m = re.exec(source))) {
+    const hit = m[1].match(propRe);
+    if (hit) return hit[1];
+  }
+  return null;
+}
+
+step('.legend-toggle-btn shares .live-page containing block with .vcr-bar', () => {
+  const position = findDeclaration(css, '.legend-toggle-btn', 'position');
+  assert(position !== null, 'no .legend-toggle-btn rule declares `position`');
+  assert(
+    position === 'absolute',
+    '.legend-toggle-btn must be position:absolute (got: ' + position + ')'
+  );
+});
+
+step('.feed-show-btn uses the same anchor as .legend-toggle-btn', () => {
+  const position = findDeclaration(css, '.feed-show-btn', 'position');
+  assert(position !== null, 'no .feed-show-btn rule declares `position`');
+  assert(
+    position === 'absolute',
+    '.feed-show-btn must be position:absolute (got: ' + position + ')'
+  );
+});
+
 step('sister overlays still track --vcr-bar-height (guard against regression sweep)', () => {
   // Sanity check: the pattern we mirror is the same one already used by
   // .live-feed, .live-overlay[data-position="br"], and .feed-show-btn.

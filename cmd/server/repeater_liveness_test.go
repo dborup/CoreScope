@@ -21,10 +21,11 @@ func TestRepeaterRelayActivity_Active(t *testing.T) {
 	// A non-advert packet (payload_type=1, TXT_MSG) with the repeater pubkey
 	// indexed as a path hop. Index by lowercase pubkey directly to mirror
 	// the resolved-path entries that decode-window writes.
-	pt := 1
+	pt, rt := 1, routeTypeFlood
 	relayed := &StoreTx{
 		RawHex:      "0100",
 		PayloadType: &pt,
+		RouteType:   &rt,
 		PathJSON:    `["aa"]`,
 		FirstSeen:   recentTS(2),
 	}
@@ -82,11 +83,11 @@ func seedUnscopedRelayFixture(t *testing.T, hashPrefix string) (*PacketStore, st
 }
 
 // assertUnscopedCounts pins the contract both lookups share: FLOOD hops count
-// as unscoped, DIRECT hops only as plain relays.
+// as unscoped; DIRECT planned hops do not establish observed relays.
 func assertUnscopedCounts(t *testing.T, info RepeaterRelayInfo) {
 	t.Helper()
-	if info.RelayCount24h != 2 {
-		t.Errorf("expected RelayCount24h=2 (both hops), got %d", info.RelayCount24h)
+	if info.RelayCount24h != 1 {
+		t.Errorf("expected RelayCount24h=1 (only observed flood hop, not planned direct route), got %d", info.RelayCount24h)
 	}
 	if info.UnscopedRelayCount24h != 1 {
 		t.Errorf("expected UnscopedRelayCount24h=1 (only the FLOOD hop), got %d", info.UnscopedRelayCount24h)
@@ -139,11 +140,12 @@ func TestRepeaterRelayActivity_Stale(t *testing.T) {
 
 	store := NewPacketStore(db, nil)
 
-	pt := 1
+	pt, rt := 1, routeTypeFlood
 	staleTS := time.Now().UTC().Add(-48 * time.Hour).Format("2006-01-02T15:04:05.000Z")
 	old := &StoreTx{
 		RawHex:      "0100",
 		PayloadType: &pt,
+		RouteType:   &rt,
 		PathJSON:    `["11"]`,
 		FirstSeen:   staleTS,
 	}
@@ -235,10 +237,11 @@ func TestRepeaterRelayActivity_PrefixHop(t *testing.T) {
 	// Non-advert packet with a single raw 1-byte hop matching the target
 	// pubkey's first byte ("a3"). Index it the way addTxToPathHopIndex
 	// does — under the raw hop key only, not the full pubkey.
-	pt := 1
+	pt, rt := 1, routeTypeFlood
 	tx := &StoreTx{
 		RawHex:      "0100",
 		PayloadType: &pt,
+		RouteType:   &rt,
 		PathJSON:    `["a3"]`,
 		FirstSeen:   recentTS(2),
 	}
@@ -262,6 +265,10 @@ func TestRepeaterRelayActivity_PrefixHop(t *testing.T) {
 	if !info.RelayActive {
 		t.Errorf("expected RelayActive=true within 24h window, got false (LastRelayed=%s)", info.LastRelayed)
 	}
+	bulk := store.computeRepeaterRelayInfoMap(24)[pubkey]
+	if bulk.RelayCount24h != info.RelayCount24h || bulk.LastRelayed != info.LastRelayed || bulk.RelayActive != info.RelayActive {
+		t.Fatalf("unique-prefix bulk/single mismatch: single=%+v bulk=%+v", info, bulk)
+	}
 }
 
 // TestRepeaterRelayActivity_DedupAcrossPrefixAndFullKey verifies that when
@@ -279,10 +286,11 @@ func TestRepeaterRelayActivity_DedupAcrossPrefixAndFullKey(t *testing.T) {
 
 	store := NewPacketStore(db, nil)
 
-	pt := 1
+	pt, rt := 1, routeTypeFlood
 	tx := &StoreTx{
 		RawHex:      "0100",
 		PayloadType: &pt,
+		RouteType:   &rt,
 		PathJSON:    `["a3"]`,
 		FirstSeen:   recentTS(2),
 	}

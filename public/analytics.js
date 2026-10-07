@@ -35,6 +35,55 @@
   function _stopForeignTrafficRefresh() {
     if (_foreignTrafficRefreshTimer) { clearInterval(_foreignTrafficRefreshTimer); _foreignTrafficRefreshTimer = null; }
   }
+  // #120 — the distance tab's lazy index answers 202 {status:"building"}
+  // until it is built. The tab shows a building state and retries on the
+  // server's interval. Every render, tab switch away and destroy() bumps
+  // _distanceGen, so a response or retry from an older render can never
+  // write into a newer render, another tab or a left page, and at most one
+  // retry timer exists.
+  var _distanceRetryTimer = null;
+  var _distanceGen = 0;
+  function _leaveDistanceTab() {
+    _distanceGen++;
+    if (_distanceRetryTimer) { clearTimeout(_distanceRetryTimer); _distanceRetryTimer = null; }
+  }
+  function _distanceIsBuilding(data) {
+    return !!(data && data.status === 'building' && !data.summary);
+  }
+  // Retry-After header (passed on by api() on a 202 body or a 503 error),
+  // else the body's retry_after_seconds, else 5s; clamped to 1..30s.
+  function _retryAfterDelayMs(data) {
+    var s = Number(data && data.retryAfterSeconds);
+    if (!(isFinite(s) && s > 0)) s = Number(data && data.retry_after_seconds);
+    if (!(isFinite(s) && s > 0)) s = 5;
+    return Math.min(Math.max(s, 1), 30) * 1000;
+  }
+  // #172 — rf/topology/channels answer 503 + Retry-After while the server
+  // warms up after a restart (#1659), for up to its 60s force-open. The
+  // page shows a "still loading" state and retries on the server's
+  // interval until ANALYTICS_WARMUP_MAX_MS has passed since the load
+  // began, and only then shows the error. Like the distance tab (#120),
+  // every load and destroy() bump _loadGen, so a response or retry from an
+  // older load never renders, and at most one retry timer exists.
+  var ANALYTICS_WARMUP_MAX_MS = 120000;
+  var _loadRetryTimer = null;
+  var _loadGen = 0;
+  // #172: the tabs that render from that load's _analyticsData. Until it
+  // has data, they show the load's status instead (a click during the
+  // warm-up threw a TypeError), and the status is written only while one
+  // of them is shown, never over a tab that fetches its own data.
+  var LOAD_TABS = new Set(['overview', 'rf', 'topology', 'channels', 'hashsizes', 'collisions']);
+  var LOADING_HTML = '<div class="text-center text-muted" style="padding:40px">Loading analytics…</div>';
+  var _loadStatusHtml = LOADING_HTML;
+  function _showLoadStatus(html) {
+    _loadStatusHtml = html;
+    var el = LOAD_TABS.has(_currentTab) && document.getElementById('analyticsContent');
+    if (el) el.innerHTML = html;
+  }
+  function _cancelLoadRetry() {
+    _loadGen++;
+    if (_loadRetryTimer) { clearTimeout(_loadRetryTimer); _loadRetryTimer = null; }
+  }
   var _wardrivingRefreshTimer = null;
   function _stopWardrivingRefresh() {
     if (_wardrivingRefreshTimer) { clearInterval(_wardrivingRefreshTimer); _wardrivingRefreshTimer = null; }
@@ -150,7 +199,7 @@
           </div>
         </div>
         <div id="analyticsContent" class="analytics-content" aria-live="polite">
-          <div class="text-center text-muted" style="padding:40px">Loading analytics…</div>
+          ${LOADING_HTML}
         </div>
       </div>`;
 
@@ -174,11 +223,11 @@
         window: twElNow && twElNow.value ? twElNow.value : ''
       };
       // Drop any subview-specific keys that don't belong to the active tab
-      // so switching tabs gives a clean URL. (rf-health uses 'range', 'observer', 'from', 'to')
-      if (_currentTab !== 'rf-health') {
-        var cleared = ['range', 'observer', 'from', 'to'];
-        for (var i = 0; i < cleared.length; i++) updates[cleared[i]] = '';
-      }
+      // so switching tabs gives a clean URL.
+      Object.keys(TAB_URL_PARAMS).forEach(function (t) {
+        if (t === _currentTab) return;
+        TAB_URL_PARAMS[t].forEach(function (k) { updates[k] = ''; });
+      });
       var newHash = URLState.updateHashParams(updates, location.hash);
       if (newHash !== location.hash) history.replaceState(null, '', newHash);
     }
@@ -196,6 +245,7 @@
       if (_currentTab !== 'foreign-traffic') _stopForeignTrafficRefresh();
       if (_currentTab !== 'wardriving') _stopWardrivingRefresh();
       if (_currentTab !== 'areas') _stopAreasRefresh();
+      if (_currentTab !== 'distance') _leaveDistanceTab();
       _updateAnalyticsUrl();
       renderTab(_currentTab);
     });
@@ -203,15 +253,18 @@
     // Deep-link: #/analytics?tab=collisions&window=7d
     const hashParams = location.hash.split('?')[1] || '';
     const _ap = new URLSearchParams(hashParams);
+    // Every mount starts from the URL, falling back to Overview: the tab
+    // selected before leaving the page must not survive into this mount (#183).
+    // The button is found by comparing data-tab, never by building a selector
+    // from the URL: a quote in ?tab= threw here, and a crafted value matched a
+    // real button while _currentTab took the arbitrary string (#193).
     const urlTab = _ap.get('tab');
-    if (urlTab) {
-      const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
-      if (tabBtn) {
-        analyticsTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        tabBtn.classList.add('active');
-        _currentTab = urlTab;
-      }
-    }
+    const tabBtns = Array.from(analyticsTabs.querySelectorAll('.tab-btn'));
+    const urlTabBtn = urlTab ? tabBtns.find(b => b.dataset.tab === urlTab) : null;
+    _currentTab = urlTabBtn ? urlTab : 'overview';
+    const activeBtn = urlTabBtn || tabBtns.find(b => b.dataset.tab === 'overview');
+    tabBtns.forEach(b => b.classList.remove('active'));
+    if (activeBtn) activeBtn.classList.add('active');
     // #749 — restore time window from URL.
     const urlWindow = _ap.get('window');
     if (urlWindow) {
@@ -246,7 +299,30 @@
     }
 
     // Re-render when distance unit or theme changes
-    _themeRefreshHandler = function () { renderTab(_currentTab); };
+    _themeRefreshHandler = function () {
+      // #1925: never full-rebuild the neighbor-graph tab on theme-refresh.
+      // Every page load fires one theme-refresh ~300ms after
+      // /api/config/theme resolves (app.js dispatches 'theme-changed', then
+      // debounces 300ms). renderTab() here replaced el.innerHTML, which reset
+      // the role checkboxes to their defaults and rebuilt _ngState from the
+      // full graph, discarding any filtering the user had applied in the
+      // meantime. Restarting the renderer keeps the current filter state and
+      // still picks up the new theme: node colors are read live per frame
+      // from window.ROLE_COLORS, role swatches use CSS tokens, and the one
+      // cached value (_labelColor) is re-read on restart. Measured: this also
+      // stops the old path leaking one rAF render loop and one canvas
+      // listener set per theme-refresh (a 10-event burst ran the force
+      // simulation at ~20x speed; it now stays flat).
+      //
+      // Not covered, pre-existing: _ngState is only assigned after the graph
+      // fetch resolves, while the checkboxes exist from the synchronous
+      // innerHTML before it. A theme-refresh landing inside that fetch window
+      // still falls through to renderTab() and still discards a filter
+      // applied during the load. Closing that needs a "load in flight"
+      // sentinel, which is deliberately left out of this port.
+      if (_currentTab === 'neighbor-graph' && _ngState) { startGraphRenderer(); return; }
+      renderTab(_currentTab);
+    };
     window.addEventListener('theme-refresh', _themeRefreshHandler);
 
     loadAnalytics();
@@ -255,7 +331,136 @@
   var _themeRefreshHandler = null;
   let _currentTab = 'overview';
 
-  async function loadAnalytics() {
+  // Append a query fragment to a path (#179, #193). The filter fragments
+  // ("&region=…", "&area=…", "&window=…") start with '&'; '?…' and a bare
+  // 'a=1' are taken too, and an empty fragment (or a lone '&' / '?') leaves
+  // the path as it is. The separator is '&' when the path already has a '?'.
+  function withQuery(path, frag) {
+    const q = frag ? String(frag).replace(/^[?&]/, '') : '';
+    return q ? path + (path.indexOf('?') < 0 ? '?' : '&') + q : path;
+  }
+
+  // #205 — a tab's inner view state (Scopes sub-tab and window, Wardriving
+  // window) lives in the hash next to ?tab=, with sessionStorage as the
+  // fallback for a plain visit of the tab. ?window= is the global time
+  // picker above the tab bar (other values, and it drives the shared
+  // loads), so each tab window gets a key of its own.
+  var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene'], dflt: 'overview' };
+  var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
+  // #208 — Hash Stats' multi-byte adopters filter. URL only (no storageKey):
+  // it had no stored state before, so a plain visit still opens on All.
+  var HASHSTATS_MB_FILTER = { param: 'mbf', allowed: ['all', 'confirmed', 'suspected', 'unknown'], dflt: 'all' };
+  // #226 — the adopters table's sort column and direction, URL only like mbf=.
+  // 'none' keeps the server's order.
+  var HASHSTATS_MB_SORT = { param: 'mbsort', allowed: ['none', 'name', 'role', 'status', 'hashSize', 'packets', 'lastSeen'], dflt: 'none' };
+  var HASHSTATS_MB_DIR = { param: 'mbdir', allowed: ['asc', 'desc'], dflt: 'asc' };
+
+  // The hash keys each tab owns; _updateAnalyticsUrl drops them when
+  // another tab is selected. Hash Issues' bytes= is deliberately not listed:
+  // it has no stored fallback, so it stays in the URL across a tab switch
+  // and a return to Hash Issues keeps the chosen byte size (#1914, #208).
+  // Its section= is a one-shot scroll anchor and is dropped.
+  var TAB_URL_PARAMS = {
+    'rf-health': ['range', 'observer', 'from', 'to'],
+    collisions: ['section'],
+    hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
+    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
+    wardriving: [WARDRIVING_WINDOW.param],
+  };
+
+  // A value from the URL wins; an unknown one falls back to the default,
+  // not to the stored value. Values are only compared with ===, never put
+  // in a selector or markup (#193/#194). Without a URL value, the stored
+  // value is used while it is still a known one.
+  function resolveViewParam(urlValue, storedValue, allowed, dflt) {
+    if (urlValue != null) return allowed.indexOf(urlValue) >= 0 ? urlValue : dflt;
+    return storedValue != null && allowed.indexOf(storedValue) >= 0 ? storedValue : dflt;
+  }
+
+  function _sessionGet(key) {
+    try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(key) : null; } catch (e) { return null; }
+  }
+
+  // #208 — the view each history entry showed is recorded in its
+  // history.state, so Back/Forward to an entry whose view was a default (its
+  // key left out of the URL) restores that default, not the value a later
+  // entry stored. A new entry (a link, location.hash = …) has no record and
+  // still gets the stored value. Only specs with a storageKey are recorded:
+  // for the others a missing key already means the default. A tab switch
+  // writes a null state (_updateAnalyticsUrl), so a tab clicked back within
+  // the same entry also gets the stored value, as before.
+  var ENTRY_VIEW_KEY = 'analyticsView';
+
+  // The current entry's record, as { param: value } with string values only.
+  function _entryView() {
+    var out = {};
+    try {
+      var st = typeof history !== 'undefined' ? history.state : null;
+      var v = st && typeof st === 'object' ? st[ENTRY_VIEW_KEY] : null;
+      if (!v || typeof v !== 'object') return null;
+      Object.keys(v).forEach(function (k) { if (typeof v[k] === 'string') out[k] = v[k]; });
+    } catch (e) { return null; }
+    return out;
+  }
+
+  // history.state with the record replaced; other keys are kept.
+  function _stateWithEntryView(view) {
+    var out = {};
+    var st = typeof history !== 'undefined' ? history.state : null;
+    if (st && typeof st === 'object') Object.keys(st).forEach(function (k) { out[k] = st[k]; });
+    out[ENTRY_VIEW_KEY] = view;
+    return out;
+  }
+
+  // Stores the values and writes them to the hash in one go. A default is
+  // left out, so a tab in its default view keeps the URL it had before #205.
+  // A spec without a storageKey lives in the URL only.
+  function _writeViewParams(specs, values) {
+    var updates = {};
+    var view = _entryView() || {};
+    var viewChanged = false;
+    specs.forEach(function (spec, i) {
+      if (spec.storageKey) {
+        try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(spec.storageKey, values[i]); } catch (e) { /* storage blocked */ }
+        if (view[spec.param] !== values[i]) { view[spec.param] = values[i]; viewChanged = true; }
+      }
+      updates[spec.param] = values[i] === spec.dflt ? '' : values[i];
+    });
+    if (!window.URLState) return;
+    // replaceState can throw (Safari throttles it); the view has already
+    // changed by then, so a failed URL sync must not break the tab (#1914).
+    // It only runs when the URL or the entry's record changes.
+    try {
+      var newHash = URLState.updateHashParams(updates, location.hash);
+      if (newHash !== location.hash || viewChanged) history.replaceState(_stateWithEntryView(view), '', newHash);
+    } catch (e) { /* URL sync is best effort */ }
+  }
+
+  function setViewParam(spec, value) { _writeViewParams([spec], [value]); }
+
+  // Read on render: resolve every value of the tab from the same hash first,
+  // then store them and write them back. Writing one value rebuilds the
+  // hash, which drops an empty key ("?sub=") the next read would still see.
+  // Without a URL value, the entry's own record (#208) comes before the
+  // stored value.
+  function restoreViewParams(specs) {
+    var hash = typeof location !== 'undefined' ? String(location.hash || '') : '';
+    var params = new URLSearchParams(hash.split('?')[1] || '');
+    var entry = _entryView();
+    var values = specs.map(function (spec) {
+      var fallback = null;
+      if (spec.storageKey) fallback = entry && Object.prototype.hasOwnProperty.call(entry, spec.param) ? entry[spec.param] : _sessionGet(spec.storageKey);
+      return resolveViewParam(params.get(spec.param), fallback, spec.allowed, spec.dflt);
+    });
+    _writeViewParams(specs, values);
+    return values;
+  }
+
+  async function loadAnalytics(startedAt) {
+    _cancelLoadRetry();
+    const gen = _loadGen;
+    if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
     try {
       _analyticsData = {};
       const rqs = RegionFilter.regionQueryString(); // "&region=..." or ""
@@ -268,33 +473,59 @@
       const twVal = twEl ? twEl.value : '';
       const tws = twVal ? '&window=' + encodeURIComponent(twVal) : '';
       // hash-sizes / hash-collisions: region + area, no window
-      const baseQS = (rqs + aqs).slice(1);
-      const sepBase = baseQS ? '?' + baseQS : '';
+      const baseQ = rqs + aqs;
       // rf / topology: region + area + window
-      const windowedQS = (rqs + aqs + tws).slice(1);
-      const sepWin = windowedQS ? '?' + windowedQS : '';
+      const windowedQ = rqs + aqs + tws;
       // channels: region + window (no area per original PR intent)
-      const chanQS = (rqs + tws).slice(1);
-      const sepChan = chanQS ? '?' + chanQS : '';
+      const chanQ = rqs + tws;
+      // This load retries 503s itself (retry503:false), see _loadGen.
+      const opts = { ttl: CLIENT_TTL.analyticsRF, retry503: false };
       const [hashData, rfData, topoData, chanData, collisionData, airtimeData] = await Promise.all([
-        api('/analytics/hash-sizes' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/rf' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/topology' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/channels' + sepChan, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/hash-collisions' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/relay-airtime-share' + sepWin, { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
+        api(withQuery('/analytics/hash-sizes', baseQ), opts),
+        api(withQuery('/analytics/rf', windowedQ), opts),
+        api(withQuery('/analytics/topology', windowedQ), opts),
+        api(withQuery('/analytics/channels', chanQ), opts),
+        api(withQuery('/analytics/hash-collisions', baseQ), opts),
+        api(withQuery('/analytics/relay-airtime-share', windowedQ), { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ rows: [] })),
       ]);
+      if (gen !== _loadGen) return;
       _analyticsData = { hashData, rfData, topoData, chanData, collisionData, airtimeData };
       renderTab(_currentTab);
     } catch (e) {
-      document.getElementById('analyticsContent').innerHTML =
-        `<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${e.message}</div>`;
+      if (gen !== _loadGen) return;
+      const ms = _retryAfterDelayMs(e);
+      if (e && e.status === 503 && Date.now() - startedAt + ms <= ANALYTICS_WARMUP_MAX_MS) {
+        _showLoadStatus('<div class="text-center text-muted" role="status" aria-live="polite" style="padding:40px">' +
+          'Analytics are still loading on the server after a restart.' +
+          '<div style="font-size:12px;margin-top:8px">Retrying in ' + Math.round(ms / 1000) + 's.</div></div>');
+        _loadRetryTimer = setTimeout(function () {
+          _loadRetryTimer = null;
+          if (gen === _loadGen) loadAnalytics(startedAt);
+        }, ms);
+        return;
+      }
+      _showLoadStatus(`<div class="text-muted" role="alert" aria-live="polite" style="padding:40px">Failed to load: ${esc(e && e.message)}</div>`);
     }
+  }
+
+  // This runs again after tabs insert tables asynchronously (and on theme
+  // refresh), so a table added ahead of an already-numbered one would reuse
+  // that table's positional index; skip ids that are already taken.
+  function assignAnalyticsTableIds(el, tab) {
+    el.querySelectorAll('.analytics-table').forEach((tbl, i) => {
+      if (!tbl.id) {
+        let n = i;
+        while (document.getElementById(`analytics-tbl-${tab}-${n}`)) n++;
+        tbl.id = `analytics-tbl-${tab}-${n}`;
+      }
+      if (typeof makeColumnsResizable === 'function') makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tab}-${i}-col-widths`);
+    });
   }
 
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
       case 'rf': renderRF(el, d.rfData); break;
@@ -319,10 +550,7 @@
     }
     // Auto-apply column resizing to all analytics tables
     requestAnimationFrame(() => {
-      el.querySelectorAll('.analytics-table').forEach((tbl, i) => {
-        tbl.id = tbl.id || `analytics-tbl-${tab}-${i}`;
-        if (typeof makeColumnsResizable === 'function') makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tab}-${i}-col-widths`);
-      });
+      assignAnalyticsTableIds(el, tab);
       // #206 — Wrap analytics tables in scroll containers on mobile
       el.querySelectorAll('.analytics-table').forEach(tbl => {
         if (!tbl.parentElement.classList.contains('analytics-table-scroll')) {
@@ -532,7 +760,14 @@
       var cpct = Number(r.count_pct || 0);
       var apct = Number(r.airtime_pct || 0);
       var score = Number(r.score || 0);
-      var color = palette[i % palette.length];
+      // #89: a payload seen on both flood and zero-hop routes is one mixed
+      // row; it gets a fixed theme colour so it reads the same in any position.
+      var isMixed = r.route_class === 'mixed';
+      var color = isMixed ? 'var(--status-purple)' : palette[i % palette.length];
+      // Rows are rendered positionally; (type, route_class) is the stable row
+      // identity. The three ADVERT rows share type 4, so type alone is not.
+      var identityAttrs = ' data-payload-type="' + esc(String(Number(r.type))) + '"' +
+        (typeof r.route_class === 'string' ? ' data-route-class="' + esc(r.route_class) + '"' : '');
       var loPct = Math.min(cpct, apct);
       var hiPct = Math.max(cpct, apct);
       // Tooltip per row — payload_type, count %, count N, airtime %, raw score, caveat.
@@ -545,10 +780,11 @@
         : scoreMs.toFixed(2) + ' ms';
       var tip =
         name + '\n' +
+        (isMixed ? 'Same payload observed on both flood and zero-hop routes; counted once.\n' : '') +
         'Count: ' + cnt.toLocaleString() + ' (' + cpct.toFixed(2) + '%)\n' +
         'Airtime: ' + apct.toFixed(2) + '% (score ' + scoreStr + ' · airtime × repeaters)\n' +
         'Score = LoRa Time-on-Air × distinct repeaters. Within-mesh only.';
-      html += '<div class="dumbbell-row" title="' + esc(tip) + '" style="display:grid;grid-template-columns:80px 1fr 180px;align-items:center;gap:10px;font-size:12px">' +
+      html += '<div class="dumbbell-row" title="' + esc(tip) + '"' + identityAttrs + ' style="display:grid;grid-template-columns:80px 1fr 180px;align-items:center;gap:10px;font-size:12px">' +
         '<div class="dumbbell-label" style="font-weight:600;color:var(--text)">' + esc(name) + '</div>' +
         '<div class="dumbbell-track" style="position:relative;height:18px;background:var(--bg-elev,rgba(127,127,127,0.12));border-radius:9px">' +
           '<div class="dumbbell-connector" style="position:absolute;top:50%;left:' + loPct.toFixed(3) + '%;width:' + (hiPct - loPct).toFixed(3) + '%;height:2px;background:var(--text-muted,#888);transform:translateY(-50%);opacity:0.5"></div>' +
@@ -1005,9 +1241,9 @@
     var nameHtml = c.displayNameHtml
       ? c.displayNameHtml
       : esc(c.displayName || c.name || 'Unknown');
-    return '<tr class="clickable-row" data-action="navigate" data-value="#/channels?ch=' + c.hash + '" tabindex="0" role="row">' +
+    return '<tr class="clickable-row" data-action="navigate" data-value="#/channels?ch=' + esc(String(c.hash)) + '" tabindex="0" role="row">' +
       '<td><strong>' + nameHtml + '</strong></td>' +
-      '<td class="mono">' + (typeof c.hash === 'number' ? '0x' + c.hash.toString(16).toUpperCase().padStart(2, '0') : c.hash) + '</td>' +
+      '<td class="mono">' + (typeof c.hash === 'number' ? '0x' + c.hash.toString(16).toUpperCase().padStart(2, '0') : esc(c.hash)) + '</td>' +
       '<td>' + c.messages + '</td>' +
       '<td>' + c.senders + '</td>' +
       '<td>' + timeAgo(c.lastActivity) + '</td>' +
@@ -1308,6 +1544,10 @@
 
   // ===================== HASH SIZES (original) =====================
   function renderHashSizes(el, data) {
+    // ?mbf= (#208), ?mbsort= and ?mbdir= (#226)
+    const [mbFilter, mbSortCol, mbSortDir] = restoreViewParams([HASHSTATS_MB_FILTER, HASHSTATS_MB_SORT, HASHSTATS_MB_DIR]);
+    const mbSort = { col: mbSortCol, dir: mbSortCol === HASHSTATS_MB_SORT.dflt ? HASHSTATS_MB_DIR.dflt : mbSortDir };
+    if (mbSort.dir !== mbSortDir) setViewParam(HASHSTATS_MB_DIR, mbSort.dir);   // no direction without a column
     const d = data.distribution;
     const total = data.total;
     const pct = (n) => total ? (n / total * 100).toFixed(1) : '0';
@@ -1357,7 +1597,7 @@
         </div>
       </div>
 
-      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [])}
+      ${renderMultiByteAdopters(data.multiByteNodes, data.multiByteCapability || [], mbFilter, mbSort)}
 
       <div class="analytics-row">
         <div class="analytics-card flex-1">
@@ -1381,7 +1621,54 @@
     `;
   }
 
-  function renderMultiByteAdopters(nodes, caps) {
+  // #226 — the value an adopter row sorts by in a column: a lower-case string
+  // for Node and Role, a number otherwise. Last Seen is the timestamp (NaN when
+  // missing or unparseable), not the "5m ago" text the cell shows.
+  var MB_STATUS_WEIGHT = { confirmed: 0, suspected: 1, unknown: 2 };
+  function mbAdopterSortValue(r, col) {
+    switch (col) {
+      case 'name': return String(r.name || '').toLowerCase();
+      case 'role': return String(r.role || 'unknown').toLowerCase();
+      case 'status': return Object.prototype.hasOwnProperty.call(MB_STATUS_WEIGHT, r.status) ? MB_STATUS_WEIGHT[r.status] : MB_STATUS_WEIGHT.unknown;
+      case 'hashSize': return Number(r.hashSize);
+      case 'packets': return Number(r.packets);
+      case 'lastSeen': return r.lastSeen ? Date.parse(r.lastSeen) : NaN;
+    }
+    return 0;
+  }
+
+  // The rows in sort order; without a known column, as given. A missing value
+  // (NaN) is last in both directions, and ties keep the given order.
+  function sortMbAdopterRows(rows, sort) {
+    var col = sort && sort.col;
+    if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return rows;
+    var sign = sort.dir === 'desc' ? -1 : 1;
+    return rows.map(function (r, i) { return { r: r, i: i, v: mbAdopterSortValue(r, col) }; })
+      .sort(function (a, b) {
+        var an = typeof a.v === 'number' && isNaN(a.v), bn = typeof b.v === 'number' && isNaN(b.v);
+        if (an || bn) return an === bn ? a.i - b.i : (an ? 1 : -1);
+        if (a.v < b.v) return -sign;
+        if (a.v > b.v) return sign;
+        return a.i - b.i;
+      })
+      .map(function (x) { return x.r; });
+  }
+
+  // Clicking the sorted column flips its direction; another column starts
+  // ascending.
+  function nextMbSort(sort, col) {
+    if (sort && sort.col === col) return { col: col, dir: sort.dir === 'asc' ? 'desc' : 'asc' };
+    return { col: col, dir: 'asc' };
+  }
+
+  // filter: the initially selected filter (All when missing or unknown).
+  // sort: the initial { col, dir } (the server's order when missing or unknown).
+  function renderMultiByteAdopters(nodes, caps, filter, sort) {
+    var initialFilter = HASHSTATS_MB_FILTER.allowed.indexOf(filter) >= 0 ? filter : HASHSTATS_MB_FILTER.dflt;
+    var initialSort = sort && HASHSTATS_MB_SORT.allowed.indexOf(sort.col) >= 0
+      ? { col: sort.col, dir: sort.dir === 'desc' ? 'desc' : 'asc' }
+      : { col: HASHSTATS_MB_SORT.dflt, dir: HASHSTATS_MB_DIR.dflt };
+    var mbBtnClass = function (f) { return f === initialFilter ? 'tab-btn active' : 'tab-btn'; };
     // Merge capability status into adopter nodes
     var capByPubkey = {};
     (caps || []).forEach(function(c) { capByPubkey[c.pubkey] = c; });
@@ -1404,17 +1691,24 @@
     var counts = { confirmed: 0, suspected: 0, unknown: 0 };
     rows.forEach(function(r) { counts[r.status] = (counts[r.status] || 0) + 1; });
 
-    function buildTableContent(rows, filter) {
-      var filtered = filter === 'all' ? rows : rows.filter(function(r) { return r.status === filter; });
+    var sortCols = [
+      { key: 'name', label: 'Node' }, { key: 'role', label: 'Role' }, { key: 'status', label: 'Status' },
+      { key: 'hashSize', label: 'Hash Size' }, { key: 'packets', label: 'Adverts' }, { key: 'lastSeen', label: 'Last Seen' },
+    ];
+    // The keys are the fixed ones above, never a value from the URL.
+    function theadHtml(sort) {
+      return '<thead><tr>' + sortCols.map(function (c) {
+        var active = c.key === sort.col;
+        return '<th scope="col" class="sortable' + (active ? ' sort-active' : '') + '" data-sort="' + c.key + '"' +
+          (active ? ' aria-sort="' + (sort.dir === 'asc' ? 'ascending' : 'descending') + '"' : '') + '>' +
+          c.label + channelSortArrow(c.key, sort.col, sort.dir) + '</th>';
+      }).join('') + '</tr></thead>';
+    }
+
+    function buildTableContent(rows, filter, sort) {
+      var filtered = sortMbAdopterRows(filter === 'all' ? rows : rows.filter(function(r) { return r.status === filter; }), sort);
       return (filtered.length ? '<table class="analytics-table" id="mbAdoptersTable" style="margin-top:12px">' +
-          '<thead><tr>' +
-            '<th scope="col" data-sort="name">Node</th>' +
-            '<th scope="col" data-sort="role">Role</th>' +
-            '<th scope="col" data-sort="status">Status</th>' +
-            '<th scope="col" data-sort="hashSize">Hash Size</th>' +
-            '<th scope="col" data-sort="packets">Adverts</th>' +
-            '<th scope="col" data-sort="lastSeen">Last Seen</th>' +
-          '</tr></thead>' +
+          theadHtml(sort) +
           '<tbody>' +
             filtered.map(function(r) {
               var roleColor = (window.ROLE_COLORS || {})[r.role] || '#6b7280';
@@ -1446,20 +1740,21 @@
           '<strong>Unknown</strong> = no multi-byte evidence yet.</p>' +
         '</div>' +
         '<div style="display:flex;gap:4px;flex-wrap:wrap" id="mbCapFilters">' +
-          '<button class="tab-btn active" data-mb-filter="all">All (' + rows.length + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
-          '<button class="tab-btn" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
+          '<button class="' + mbBtnClass('all') + '" data-mb-filter="all">All (' + rows.length + ')</button>' +
+          '<button class="' + mbBtnClass('confirmed') + '" data-mb-filter="confirmed" style="--filter-color:var(--success, #22c55e)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Confirmed (' + counts.confirmed + ')</button>' +
+          '<button class="' + mbBtnClass('suspected') + '" data-mb-filter="suspected" style="--filter-color:var(--warning, #eab308)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Suspected (' + counts.suspected + ')</button>' +
+          '<button class="' + mbBtnClass('unknown') + '" data-mb-filter="unknown" style="--filter-color:var(--text-muted, #888)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-question"/></svg> Unknown (' + counts.unknown + ')</button>' +
         '</div>' +
       '</div>' +
-      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, 'all') + '</div>' +
+      '<div id="mbAdoptersTableWrap">' + buildTableContent(rows, initialFilter, initialSort) + '</div>' +
     '</div></div>';
 
     // Use setTimeout for event delegation on the stable section container
     setTimeout(function() {
       var section = document.getElementById('mbAdoptersSection');
       if (!section) return;
-      var currentFilter = 'all';
+      var currentFilter = initialFilter;
+      var currentSort = initialSort;
 
       section.addEventListener('click', function handler(e) {
         var btn = e.target.closest('[data-mb-filter]');
@@ -1470,30 +1765,21 @@
           buttons.forEach(function(b) { b.classList.toggle('active', b.dataset.mbFilter === currentFilter); });
           // Replace only the table content, not the whole section
           var wrap = section.querySelector('#mbAdoptersTableWrap');
-          if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter);
+          if (wrap) wrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          setViewParam(HASHSTATS_MB_FILTER, currentFilter);
           return;
         }
+        // #226: a header click re-renders the table (the same path as a
+        // filter click) in the new order, so the sort survives the next
+        // filter click and the header shows it.
         var th = e.target.closest('[data-sort]');
         if (th) {
-          var tbody = section.querySelector('tbody');
-          if (!tbody) return;
-          var sortRows = Array.from(tbody.querySelectorAll('tr'));
           var col = th.dataset.sort;
-          var colIdx = { name: 0, status: 1, hashSize: 2, packets: 3, lastSeen: 4 };
-          var statusWeight = { 'confirmed': 0, 'suspected': 1, 'unknown': 2 };
-          sortRows.sort(function(a, b) {
-            var va = a.children[colIdx[col]] ? a.children[colIdx[col]].textContent.trim() : '';
-            var vb = b.children[colIdx[col]] ? b.children[colIdx[col]].textContent.trim() : '';
-            if (col === 'status') {
-              va = statusWeight[va.toLowerCase().split(' ').pop()] !== undefined ? statusWeight[va.toLowerCase().split(' ').pop()] : 2;
-              vb = statusWeight[vb.toLowerCase().split(' ').pop()] !== undefined ? statusWeight[vb.toLowerCase().split(' ').pop()] : 2;
-            }
-            if (col === 'hashSize' || col === 'packets') { va = parseInt(va) || 0; vb = parseInt(vb) || 0; }
-            if (va < vb) return -1;
-            if (va > vb) return 1;
-            return 0;
-          });
-          sortRows.forEach(function(r) { tbody.appendChild(r); });
+          if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return;
+          currentSort = nextMbSort(currentSort, col);
+          var sortWrap = section.querySelector('#mbAdoptersTableWrap');
+          if (sortWrap) sortWrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          _writeViewParams([HASHSTATS_MB_SORT, HASHSTATS_MB_DIR], [currentSort.col, currentSort.dir]);
         }
       });
     }, 100);
@@ -1514,18 +1800,18 @@
   async function renderCollisionTab(el, data, collisionData) {
     el.innerHTML = `
       <nav id="hashIssuesToc" style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;flex-wrap:wrap">
-        <a href="#/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Sizes</a>
+        <a data-hash-section="inconsistentHashSection" href="#/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Sizes</a>
         <span style="color:var(--border)">|</span>
-        <a href="#/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Hash Matrix</a>
+        <a data-hash-section="hashMatrixSection" href="#/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Hash Matrix</a>
         <span style="color:var(--border)">|</span>
-        <a href="#/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</a>
+        <a data-hash-section="collisionRiskSection" href="#/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</a>
         <span style="color:var(--border)">|</span>
         <a href="#/analytics?tab=prefix-tool" style="color:var(--link-color)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Check a prefix →</a>
       </nav>
       <p class="text-muted" style="margin:0 0 12px;font-size:0.78em">Collisions <strong>actually observed in packet traffic</strong> — among <strong>repeaters</strong> grouped by their configured hash size. For <em>theoretical</em> address conflicts that <em>would</em> occur if all repeaters used a given hash size, see the <a href="#/analytics?tab=prefix-tool" style="color:var(--link-color)">Prefix Tool</a> tab.</p>
 
       <div class="analytics-card" id="inconsistentHashSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Hash Sizes</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Inconsistent Hash Sizes</h3><a data-hash-section="" href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <p class="text-muted" style="margin:4px 0 8px;font-size:0.8em">Repeaters and room servers sending adverts with varying hash sizes in the last 7 days. Originally caused by a <a href="https://github.com/meshcore-dev/MeshCore/commit/fcfdc5f" target="_blank" style="color:var(--link-color)">firmware bug</a> where automatic adverts ignored the configured multibyte path setting, fixed in <a href="https://github.com/meshcore-dev/MeshCore/releases/tag/repeater-v1.14.1" target="_blank" style="color:var(--link-color)">repeater v1.14.1</a>. Companion nodes are excluded.</p>
         <div id="inconsistentHashList"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div></div>
       </div>
@@ -1533,7 +1819,7 @@
       <div class="analytics-card" id="hashMatrixSection">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <h3 style="margin:0" id="hashMatrixTitle"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Hash Usage Matrix</h3>
-          <a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a>
+          <a data-hash-section="" href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a>
         </div>
         <div style="display:flex;align-items:center;gap:16px;margin:8px 0">
           <div class="hash-byte-selector" id="hashByteSelector" style="display:flex;gap:4px">
@@ -1547,7 +1833,7 @@
       </div>
 
       <div class="analytics-card" id="collisionRiskSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0" id="collisionRiskTitle"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0" id="collisionRiskTitle"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-bomb"/></svg> Collision Risk</h3><a data-hash-section="" href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <div id="collisionList"><div class="text-muted" style="padding:8px">Loading…</div></div>
       </div>
     `;
@@ -1584,9 +1870,21 @@
 
     // Repeaters and routing nodes no longer needed — collision data is server-computed
 
-    let currentBytes = 1;
+    // #1914: keep both the bookmark and the section links on this byte size.
+    // Deliberately not part of the rendering path, and called last:
+    // history.replaceState can throw (Safari throttles it, and it is
+    // unavailable on an opaque origin), and a URL-sync failure must not take
+    // the whole tab down with it — the views have already rendered by then.
+    function syncHashUrl(bytes) {
+      if (!window.URLState) return;
+      const newHash = URLState.updateHashParams({ bytes }, location.hash);
+      if (newHash !== location.hash) history.replaceState(null, '', newHash);
+      el.querySelectorAll('[data-hash-section]').forEach(link => {
+        link.href = URLState.updateHashParams({ section: link.dataset.hashSection }, newHash);
+      });
+    }
+
     function refreshHashViews(bytes) {
-      currentBytes = bytes;
       hideMatrixTip();
       // Update selector button states
       document.querySelectorAll('.hash-byte-btn').forEach(b => {
@@ -1608,6 +1906,7 @@
       const riskCard = document.getElementById('collisionRiskSection');
       if (riskCard) riskCard.style.display = '';
       renderCollisionsFromServer(cData.by_size[String(bytes)], bytes);
+      syncHashUrl(bytes);
     }
 
     // Wire up selector
@@ -1615,7 +1914,9 @@
       btn.addEventListener('click', () => refreshHashViews(Number(btn.dataset.bytes)));
     });
 
-    refreshHashViews(1);
+    // Read on every render so tab, filter and theme refreshes retain the view.
+    const urlBytes = new URLSearchParams(location.hash.split('?')[1] || '').get('bytes');
+    refreshHashViews(['1', '2', '3'].includes(urlBytes) ? Number(urlBytes) : 1);
   }
 
   function renderHashTimeline(hourly) {
@@ -2920,10 +3221,24 @@
   // === REPEATER METRICS BLOCK END (test harness slices the renderer block to here) ===
 
   async function renderDistanceTab(el) {
+    // A new render supersedes any earlier one and its pending retry (#120).
+    _leaveDistanceTab();
+    const gen = _distanceGen;
     try {
       const rqs = RegionFilter.regionQueryString();
-      const sep = rqs ? '?' + rqs.slice(1) : '';
-      const data = await api('/analytics/distance' + sep, { ttl: CLIENT_TTL.analyticsRF });
+      const data = await api(withQuery('/analytics/distance', rqs), { ttl: CLIENT_TTL.analyticsRF });
+      if (gen !== _distanceGen) return;   // re-rendered, switched tab or left meanwhile
+      if (_distanceIsBuilding(data)) {
+        const ms = _retryAfterDelayMs(data);
+        el.innerHTML = '<div class="text-center text-muted" id="distanceBuilding" role="status" style="padding:40px">' +
+          'Building the distance index…' +
+          '<div style="font-size:12px;margin-top:8px">This runs once after the server starts. Retrying in ' + Math.round(ms / 1000) + 's.</div></div>';
+        _distanceRetryTimer = setTimeout(function () {
+          _distanceRetryTimer = null;
+          if (gen === _distanceGen) renderDistanceTab(el);
+        }, ms);
+        return;
+      }
       const s = data.summary;
       let html = `<div class="analytics-grid">
         <div class="stat-card"><div class="stat-value">${s.totalHops.toLocaleString()}</div><div class="stat-label">Total Hops Analyzed</div></div>
@@ -3000,14 +3315,18 @@
         });
       });
     } catch (e) {
+      if (gen !== _distanceGen) return;
       el.innerHTML = `<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load distance analytics: ${esc(e.message)}</div>`;
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
+    window._analyticsAssignTableIds = assignAnalyticsTableIds;
+    window._analyticsWithQuery = withQuery;
+    window._analyticsResolveViewParam = resolveViewParam;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
     window._analyticsLoadChannelSort = loadChannelSort;
@@ -3015,6 +3334,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsChannelTbodyHtml = channelTbodyHtml;
     window._analyticsChannelTheadHtml = channelTheadHtml;
     window._analyticsRfNFColumnChart = rfNFColumnChart;
+    window._analyticsRenderRelayAirtimeDumbbell = renderRelayAirtimeDumbbell;
     window._analyticsRenderMultiByteCapability = renderMultiByteCapability;
     window._analyticsRenderMultiByteAdopters = renderMultiByteAdopters;
     window._analyticsHashStatCardsHtml = hashStatCardsHtml;
@@ -3024,6 +3344,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsRenderWardrivingTab = renderWardrivingTab;
     window._analyticsStopWardrivingRefresh = _stopWardrivingRefresh;
     window._analyticsRenderAreasTab = renderAreasTab;
+    window._analyticsRenderDistanceTab = renderDistanceTab;
+    window._analyticsLeaveDistanceTab = _leaveDistanceTab;
     window._analyticsStopAreasRefresh = _stopAreasRefresh;
     window._analyticsComputeNodesWithoutScope = computeNodesWithoutScope;
     window._analyticsComputeRepeatersNeverRelayingScope = computeRepeatersNeverRelayingScope;
@@ -3087,10 +3409,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
     // Load data
     const rqs = RegionFilter.regionQueryString();
-    const sep = rqs ? '?' + rqs.slice(1) : '';
     let graphData;
     try {
-      graphData = await api('/analytics/neighbor-graph' + sep + (sep ? '&' : '?') + 'min_count=1&min_score=0', { ttl: CLIENT_TTL.analyticsRF });
+      graphData = await api(withQuery('/analytics/neighbor-graph', rqs + '&min_count=1&min_score=0'), { ttl: CLIENT_TTL.analyticsRF });
     } catch (e) {
       el.innerHTML = `<div class="analytics-card"><p class="text-muted">Failed to load neighbor graph: ${esc(e.message)}</p></div>`;
       return;
@@ -3569,7 +3890,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         // #1270: fetch CONFIGURED-hash-size counts so the Network Overview
         // tells the operational story (matching Hash Stats "By Repeaters"),
         // not just a math-only count of unique pubkey slices.
-        api('/analytics/hash-sizes' + rq, { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
+        api(withQuery('/analytics/hash-sizes', rq), { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
       ]);
     } catch (e) {
       el.innerHTML = `<div class="text-muted" role="alert" style="padding:40px">Failed to load: ${esc(e.message)}</div>`;
@@ -4802,8 +5123,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
   // ===================== SCOPES =====================
   async function renderScopesTab(el) {
-    var winKey = 'scopes_window';
-    var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
+    // Both views are deep-linked: ?sub= and ?swin= (#205).
+    var scopesView = restoreViewParams([SCOPES_SUBTAB, SCOPES_WINDOW]);
+    var selectedSubtab = scopesView[0];
+    var selectedWindow = scopesView[1];
 
     // #1852: the tab grew to stacked sections (windowed adoption stats,
     // all-time region breakdowns, all-time node/repeater hygiene lists) —
@@ -4817,8 +5140,6 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     // windowed panel gets its own copy of the picker buttons rather than
     // one shared control above the sub-tab bar — every button still
     // drives the same selectedWindow/load(), see the click listener below.
-    var subtabKey = 'scopes_subtab';
-    var selectedSubtab = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(subtabKey)) || 'overview';
 
     // Role/text/geo filter for the "Nodes Without a Default Scope" section
     // below. Lives at this scope (not inside updateData) so it survives
@@ -4905,9 +5226,9 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           var btn = e.target.closest('[data-subtab]');
           if (!btn) return;
           selectedSubtab = btn.dataset.subtab;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(subtabKey, selectedSubtab);
+          setViewParam(SCOPES_SUBTAB, selectedSubtab);
           subtabsEl.querySelectorAll('[data-subtab]').forEach(function(b) { b.classList.toggle('active', b.dataset.subtab === selectedSubtab); });
-          ['overview', 'hopdepth', 'regions', 'hygiene'].forEach(function(key) {
+          SCOPES_SUBTAB.allowed.forEach(function(key) {
             var panel = document.getElementById('scopes-panel-' + key);
             if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
           });
@@ -4918,7 +5239,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       el.querySelectorAll('[data-win]').forEach(function(btn) {
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.win;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(winKey, selectedWindow);
+          setViewParam(SCOPES_WINDOW, selectedWindow);
           el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === selectedWindow); });
           load(selectedWindow);
         });
@@ -6223,8 +6544,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   // and which observer stations — fixed, known locations — actually
   // heard the traffic (Coverage).
   async function renderWardrivingTab(el) {
-    var winKey = 'wardriving_window';
-    var selectedWindow = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(winKey)) || '24h';
+    var selectedWindow = restoreViewParams([WARDRIVING_WINDOW])[0];   // ?wdwin= (#205)
 
     function pct(n, total) {
       if (!total) return '—';
@@ -6506,7 +6826,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       el.querySelectorAll('[data-wdwin]').forEach(function(btn) {
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.wdwin;
-          if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(winKey, selectedWindow);
+          setViewParam(WARDRIVING_WINDOW, selectedWindow);
           load(selectedWindow);
         });
       });
@@ -6837,13 +7157,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   async function _renderAreasTabBody(el) {
     try {
       var d = await api('/analytics/areas', { ttl: 30000 });
+      if (window.MeshConfigReady) await window.MeshConfigReady;
+      var estimatesEnabled = window.EstimatedPositions?.enabled(d) !== false;
       var density = (d && d.density) || [];
       var bridgeNodes = (d && d.bridgeNodes) || [];
-      var positionGaps = (d && d.positionGaps) || [];
-      var estimatedNodes = (d && d.estimatedNodes) || [];
+      var positionGaps = estimatesEnabled ? ((d && d.positionGaps) || []) : [];
+      var estimatedNodes = estimatesEnabled ? ((d && d.estimatedNodes) || []) : [];
 
       if (!density.length && !bridgeNodes.length && !positionGaps.length) {
-        el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No Areas are configured — this tab needs at least one drawn-polygon Area (meshguide.dk sync) to report on.</div>';
+        el.innerHTML = '<div class="text-center text-muted" style="padding:40px">No Areas are configured — this tab needs at least one drawn-polygon Area (meshguide.dk sync) to report on.</div>' +
+          (estimatesEnabled ? '' : window.EstimatedPositions.disabledNoticeHTML);
         return;
       }
 
@@ -7065,7 +7388,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
 
       var unpositionedNote = '<p class="text-muted" style="margin:8px 0 0;font-size:0.85em">' +
         (d.unpositionedTotal || 0).toLocaleString() + ' node' + (d.unpositionedTotal === 1 ? '' : 's') + ' network-wide have no real GPS fix' +
-        (d.unpositionedNoNeighborFix ? ', of which ' + d.unpositionedNoNeighborFix.toLocaleString() + ' also have no positioned neighbor to estimate from — those can\'t be placed anywhere, not even approximately, so they\'re absent from the table above entirely.' : '.') +
+        (estimatesEnabled && d.unpositionedNoNeighborFix ? ', of which ' + d.unpositionedNoNeighborFix.toLocaleString() + ' also have no positioned neighbor to estimate from — those can\'t be placed anywhere, not even approximately, so they\'re absent from the table above entirely.' : '.') +
         '</p>';
 
       el.innerHTML =
@@ -7084,14 +7407,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             '<span>Position-Fix Coverage Gaps by Area</span>' +
             (estimatedNodes.length ? '<a href="#/map?estimatedNodes=1" id="areasViewEstimatedNodes" class="btn-link" style="font-size:12px;font-weight:400;text-decoration:none;background:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--link-color)">View Estimated Nodes on Map (' + estimatedNodes.length.toLocaleString() + ')</a>' : '') +
           '</h3>' +
-          '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">How many of each area\'s nodes have an actual reported GPS position vs. how many were only placeable via a neighbor-based estimate (same technique used for View Path\'s approximate markers). Click a column header to sort by it.</p>' +
-          '<div id="areasPositionGaps">' + gapsSection.tableHtml() + '</div>' +
+          (estimatesEnabled ? '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">How many of each area\'s nodes have an actual reported GPS position vs. how many were only placeable via a neighbor-based estimate (same technique used for View Path\'s approximate markers). Click a column header to sort by it.</p>' : '') +
+          '<div id="areasPositionGaps">' + (estimatesEnabled ? gapsSection.tableHtml() : window.EstimatedPositions.disabledNoticeHTML) + '</div>' +
           unpositionedNote +
         '</div>';
 
       densitySection.attach();
       bridgeSection.attach();
-      gapsSection.attach();
+      if (estimatesEnabled) gapsSection.attach();
     } catch (e) {
       el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:20px">Failed to load area analytics: ' + esc(String(e)) + '</div>';
     }

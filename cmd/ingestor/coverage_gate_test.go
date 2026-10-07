@@ -41,7 +41,8 @@ func TestClientRxCoverageEnabledDefault(t *testing.T) {
 }
 
 // TestClientRxCoverageGateOff drives handleMessage with the feature OFF: the
-// client-topic message must fall through and write no client_receptions rows.
+// client-topic message is dropped and writes no client_receptions rows (see
+// TestClientTopicGateOffWritesNothing for the no-observer-path-writes check).
 func TestClientRxCoverageGateOff(t *testing.T) {
 	store := newTestStore(t)
 	source := MQTTSource{Name: "test"}

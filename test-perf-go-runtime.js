@@ -251,14 +251,15 @@ test('Missing engine field shows Node UI', async () => {
 
 // --- Version card ---
 
-test('Version card shows version tag when health.version is set', async () => {
+test('Version card shows the version string exactly as reported', async () => {
   const sb = loadPerf();
   const health = { ...goHealth, version: '3.8.2', commit: 'unknown' };
   stubFetch(sb, basePerf, health);
   await sb.pages.perf.init({ set innerHTML(v) {} });
   await new Promise(r => setTimeout(r, 50));
   const html = sb.getHtml();
-  assert.ok(html.includes('v3.8.2'), 'should show version tag');
+  assert.ok(html.includes('>3.8.2<'), 'should show version');
+  assert.ok(!html.includes('v3.8.2'), 'should not add a "v" prefix');
   assert.ok(html.includes('Version'), 'should show Version label');
 });
 
@@ -269,7 +270,7 @@ test('Version card shows commit hash when version is unknown', async () => {
   await sb.pages.perf.init({ set innerHTML(v) {} });
   await new Promise(r => setTimeout(r, 50));
   const html = sb.getHtml();
-  assert.ok(html.includes('abc1234'), 'should show short commit hash');
+  assert.ok(html.includes('>abc1234d<'), 'should show 8-char commit hash');
   assert.ok(!html.includes('unknown'), 'should not render literal "unknown"');
 });
 
@@ -281,7 +282,7 @@ test('Version card shows both version and commit when both are known', async () 
   await new Promise(r => setTimeout(r, 50));
   const html = sb.getHtml();
   assert.ok(html.includes('v3.8.2'), 'should show version');
-  assert.ok(html.includes('deadbee'), 'should show short commit');
+  assert.ok(html.includes('>deadbeef<'), 'should show 8-char commit');
 });
 
 test('Version card is absent when health has no version or commit', async () => {
@@ -306,18 +307,98 @@ test('Version card is absent when both version and commit are "unknown"', async 
 
 // --- renderVersionCard unit tests (direct helper) ---
 
-test('renderVersionCard: version link points to release tag', () => {
+const SOURCE_REPO = 'https://github.com/dborup/CoreScope';
+const MASTER_SHA = 'ba6f170e6d0216c6119209e822a17681fecf16f1';
+const LOCAL_INTEGRATION_SHA = 'dc1297db36e0e306044e16161695f4a494ea11f8';
+
+// The only anchor in the card is the fixed source-code link; version and
+// commit are never turned into release-tag or commit links.
+function assertOnlySourceLink(card) {
+  const anchors = card.match(/<a\b[^>]*>/g) || [];
+  assert.deepStrictEqual(anchors, ['<a href="' + SOURCE_REPO + '" target="_blank" rel="noopener">'],
+    'only the source-code link should be an anchor');
+  assert.ok(card.includes('>Source Code</a>'), 'should label the link "Source Code"');
+  assert.ok(!card.includes('releases/tag'), 'should not link a release tag');
+  assert.ok(!card.includes('/commit/'), 'should not link a commit');
+  assert.ok(!/kpa-clawbot/i.test(card), 'should not point at the upstream repo');
+}
+
+test('renderVersionCard: release version and commit render as text', () => {
   const sb = loadPerf();
-  const card = sb.ctx.renderVersionCard({ version: '3.8.2', commit: 'unknown' });
-  assert.ok(card.includes('releases/tag/v3.8.2'), 'version should link to release tag');
-  assert.ok(card.includes('href='), 'should contain an anchor tag');
+  const card = sb.ctx.renderVersionCard({ version: 'v3.9.2', commit: MASTER_SHA });
+  assert.ok(card.includes('<div class="perf-num perf-num--small">v3.9.2 · <span title="' + MASTER_SHA + '">ba6f170e</span></div>'), card);
+  assertOnlySourceLink(card);
 });
 
-test('renderVersionCard: commit link points to commit URL', () => {
+test('renderVersionCard: keeps the version string exactly (no "v" prefix)', () => {
   const sb = loadPerf();
-  const card = sb.ctx.renderVersionCard({ version: 'unknown', commit: 'deadbeef1234' });
-  assert.ok(card.includes('/commit/deadbeef1234'), 'commit should link to commit URL');
-  assert.ok(card.includes('href='), 'should contain an anchor tag');
+  const card = sb.ctx.renderVersionCard({ version: '3.8.2', commit: 'unknown' });
+  assert.ok(card.includes('<div class="perf-num perf-num--small">3.8.2</div>'), card);
+  assert.ok(!card.includes('v3.8.2'), 'should not add a "v" prefix');
+  assertOnlySourceLink(card);
+});
+
+test('renderVersionCard: git-describe version renders as text', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: 'v0.0.1-37-gba6f170e', commit: MASTER_SHA });
+  assert.ok(card.includes('>v0.0.1-37-gba6f170e · <span title="' + MASTER_SHA + '">ba6f170e</span><'), card);
+  assertOnlySourceLink(card);
+});
+
+test('renderVersionCard: local integration SHA is kept, not replaced', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: 'v0.0.1-36-gdc1297db', commit: LOCAL_INTEGRATION_SHA });
+  assert.ok(card.includes('>v0.0.1-36-gdc1297db · <span title="' + LOCAL_INTEGRATION_SHA + '">dc1297db</span><'), card);
+  assert.ok(!card.includes('ba6f170e'), 'should not substitute another commit');
+  assertOnlySourceLink(card);
+});
+
+test('renderVersionCard: commit shorter than 8 chars is shown whole', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: 'unknown', commit: 'abc1234' });
+  assert.ok(card.includes('<div class="perf-num perf-num--small"><span title="abc1234">abc1234</span></div>'), card);
+  assert.ok(!card.includes('unknown'), 'should not render literal "unknown"');
+  assertOnlySourceLink(card);
+});
+
+test('renderVersionCard: handles missing and empty values', () => {
+  const sb = loadPerf();
+  const render = sb.ctx.renderVersionCard;
+  assert.strictEqual(render({}), '');
+  assert.strictEqual(render({ version: '', commit: '' }), '');
+  assert.strictEqual(render({ version: 'unknown' }), '');
+  assert.strictEqual(render({ commit: 'unknown' }), '');
+  const versionOnly = render({ version: 'v1.0.0' });
+  assert.ok(versionOnly.includes('<div class="perf-num perf-num--small">v1.0.0</div>'), versionOnly);
+  assert.ok(!versionOnly.includes('title='), 'should not add a commit title without a commit');
+  assertOnlySourceLink(versionOnly);
+});
+
+test('renderVersionCard: escapes HTML special characters', () => {
+  const sb = loadPerf();
+  const card = sb.ctx.renderVersionCard({ version: '<img src=x onerror="alert(1)">&\'', commit: '"><b>&\'x<i>' });
+  assert.ok(card.includes('>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;&#39; · '), card);
+  // Truncated to 8 characters before escaping, so no entity is cut in half.
+  assert.ok(card.includes('<span title="&quot;&gt;&lt;b&gt;&amp;&#39;x&lt;i&gt;">&quot;&gt;&lt;b&gt;&amp;&#39;x</span>'), card);
+  assert.ok(!/<(img|b|i)\b/.test(card), 'should not emit injected tags');
+  assertOnlySourceLink(card);
+});
+
+test('renderVersionCard: keeps the "Version" label and makes no network calls', () => {
+  const sb = loadPerf();
+  let calls = 0;
+  sb.ctx.fetch = () => { calls++; return Promise.resolve({ json: () => Promise.resolve({}) }); };
+  const card = sb.ctx.renderVersionCard({ version: 'v0.0.1-36-gdc1297db', commit: LOCAL_INTEGRATION_SHA });
+  assert.ok(card.includes('<div class="perf-label">Version</div>'), 'e2e locates the card by this exact label');
+  assert.strictEqual(calls, 0, 'rendering the card should not fetch');
+});
+
+test('perf.js: no upstream repo or derived release/commit links in source', () => {
+  const src = fs.readFileSync('public/perf.js', 'utf8');
+  assert.ok(!/kpa-clawbot/i.test(src), 'should not reference the upstream repo');
+  assert.ok(!src.includes('releases/tag'), 'should not build release-tag links');
+  assert.ok(!src.includes('/commit/'), 'should not build commit links');
+  assert.ok(src.includes("'" + SOURCE_REPO + "'"), 'should use the fork repo URL');
 });
 
 test('renderVersionCard: returns empty string for null health', () => {

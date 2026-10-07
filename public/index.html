@@ -13,7 +13,14 @@
   <meta property="og:image" content="https://raw.githubusercontent.com/Kpa-clawbot/corescope/master/public/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:url" content="https://analyzer.00id.net">
+  <!-- No og:url: the removed tag hardcoded the upstream analyzer instance's
+       own URL as the canonical URL for every self-hosted deployment (#1890)
+       — correct for upstream, wrong canonical metadata for any other
+       instance. og:url is metadata, not an HTTP redirect, and does not by
+       itself decide what a click navigates to. Omitting it lets each
+       instance's own crawled URL serve as the canonical reference instead;
+       this does not refresh previews a consumer already cached under the
+       old, incorrect value. -->
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#0a0a0a">
 
@@ -43,6 +50,7 @@
   <link rel="stylesheet" href="node-reach-coverage.css?v=__BUST__">
   <link rel="stylesheet" href="bottom-nav.css?v=__BUST__">
   <link rel="stylesheet" href="nav-drawer.css?v=__BUST__">
+  <link rel="stylesheet" href="channel-proposals.css?v=__BUST__">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
     crossorigin="anonymous">
@@ -203,9 +211,11 @@
   <script src="route-render.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="route-view-utils.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="route-view.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="channel-proposals.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="channels.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="table-sort.js?v=__BUST__"></script>
   <script src="nodes-export.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="node-adverts.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="nodes.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="traces.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="path-inspector.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
@@ -231,9 +241,11 @@
   <script src="packet-path-map.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="node-reach-coverage.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="node-reach.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="reach-rank.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="rx-coverage.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="perf.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="ping-scores.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <script src="privacy.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script src="mobile-page-actions.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
 </body>
 </html>

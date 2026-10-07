@@ -25,6 +25,8 @@ concurrency:
 jobs:
   retag-or-fallback:
     name: "🏷️ Re-tag :edge → :vX.Y.Z (fast) or dispatch deploy.yml (fallback)"
+    # Fork guard: GHCR re-tag and the deploy.yml dispatch only on the upstream repository.
+    if: github.repository == 'Kpa-clawbot/CoreScope'
     runs-on: ubuntu-latest
     steps:
       - name: Log in to GHCR

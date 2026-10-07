@@ -7,6 +7,63 @@
 'use strict';
 (function () {
   var map = null, covLayer = null, days = 7, selectedRx = '', selectedName = '', boardCache = [], destroyed = false;
+  // Bumped by every init() and destroy() (#124): async work (config, extent,
+  // coverage and leaderboard responses, the settle timer, move handlers)
+  // captures it and does nothing once a newer mount or a destroy happened.
+  var generation = 0;
+  // Request sequence per data stream (#150): a coverage or leaderboard
+  // response renders only if no newer request of its kind has started since,
+  // so a slow response for an earlier days (or rx, or viewport) cannot
+  // overwrite newer data. An observer fit is dropped the same way when a
+  // newer fit starts, or when days or All changes what it was for (#172).
+  var coverageSeq = 0, boardSeq = 0, fitSeq = 0;
+
+  // Initial viewport (#124), first valid one wins: explicit URL lat/lon/zoom,
+  // this page's own saved view, /api/config/map, then this offline fallback
+  // (the page's original start view). The page saves under its own key and
+  // never reads or writes the main map's 'map-view', so the two pages do not
+  // recenter each other.
+  var VIEW_KEY = 'rx-coverage-view';
+  var FALLBACK_VIEW = { lat: 51.0, lon: 4.8, zoom: 8 };
+  var MIN_ZOOM = 1, MAX_ZOOM = 19;
+
+  function isLive(gen) { return !destroyed && gen === generation; }
+  function isLatestCoverage(gen, seq) { return isLive(gen) && seq === coverageSeq; }
+  function isLatestBoard(gen, seq) { return isLive(gen) && seq === boardSeq; }
+  function isLatestFit(gen, seq) { return isLive(gen) && seq === fitSeq; }
+
+  // validView returns {lat, lon, zoom} when all three are present, numeric and
+  // in range; anything invalid, partial or out of range gives null.
+  function validView(lat, lon, zoom) {
+    function num(v) { return (v === null || v === undefined || v === '' || typeof v === 'boolean') ? NaN : Number(v); }
+    lat = num(lat); lon = num(lon); zoom = num(zoom);
+    if (!isFinite(lat) || !isFinite(lon) || !isFinite(zoom)) return null;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180 || zoom < MIN_ZOOM || zoom > MAX_ZOOM) return null;
+    return { lat: lat, lon: lon, zoom: zoom };
+  }
+  function urlView() {
+    try {
+      var p = new URLSearchParams((location.hash.split('?')[1] || ''));
+      return validView(p.get('lat'), p.get('lon'), p.get('zoom'));
+    } catch (e) { return null; }
+  }
+  function savedView() {
+    try {
+      var s = JSON.parse(localStorage.getItem(VIEW_KEY));
+      return s ? validView(s.lat, s.lng, s.zoom) : null;
+    } catch (e) { return null; }
+  }
+  function configView() {
+    return fetch('/api/config/map').then(function (r) { return r.json(); }).then(function (cfg) {
+      if (!cfg || !Array.isArray(cfg.center) || cfg.center.length !== 2) return null;
+      return validView(cfg.center[0], cfg.center[1], cfg.zoom == null ? 9 : cfg.zoom);
+    }).catch(function () { return null; });
+  }
+  function saveView() {
+    if (!map) return;
+    var c = map.getCenter();
+    try { localStorage.setItem(VIEW_KEY, JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() })); } catch (e) {}
+  }
 
   function cssColor(varName) {
     try { return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || '#888'; }
@@ -26,7 +83,7 @@
 
   function pageHtml() {
     return '<div style="max-width:1100px;margin:0 auto;padding:12px 16px">' +
-      '<h2 style="margin:4px 0 2px;font-size:18px">🗺️ Mobile RX coverage</h2>' +
+      '<h2 style="margin:4px 0 2px;font-size:18px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg> Mobile RX coverage</h2>' +
       '<div style="color:var(--text-muted);font-size:11px">Where roaming CoreScope-RX clients heard nodes. Colour = best signal per cell. <a href="https://github.com/efiten/corescope-rx" target="_blank" rel="noopener">Get the companion app →</a></div>' +
       '<div class="analytics-time-range" id="rxDays" style="margin:8px 0">' + dayBtn(1) + dayBtn(7) + dayBtn(14) + dayBtn(30) + '</div>' +
       '<div class="nq-cov-legend"><span><i style="background:var(--nq-cov-strong)"></i>strong</span><span><i style="background:var(--nq-cov-mid)"></i>medium</span><span><i style="background:var(--nq-cov-weak)"></i>weak</span><span><i style="background:var(--nq-cov-grey)"></i>no signal</span></div>' +
@@ -76,11 +133,12 @@
 
   function drawCoverage() {
     if (!map || destroyed) return;
+    var gen = generation, seq = ++coverageSeq;
     var b = map.getBounds();
     var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(',');
     var url = '/api/rx-coverage?bbox=' + bbox + '&z=' + map.getZoom() + '&days=' + days + (selectedRx ? '&rx=' + encodeURIComponent(selectedRx) : '');
     fetch(url).then(function (r) { return r.json(); }).then(function (fc) {
-      if (destroyed || !covLayer) return;
+      if (!isLatestCoverage(gen, seq) || !covLayer) return;
       covLayer.clearLayers();
       (fc.features || []).forEach(function (f) {
         var ring = (f.geometry.coordinates[0] || []).map(function (c) { return [c[1], c[0]]; });
@@ -172,7 +230,7 @@
       });
     });
     var all = document.getElementById('rxAll');
-    if (all) all.addEventListener('click', function () { selectedRx = ''; selectedName = ''; renderBoard(); drawCoverage(); syncHash(); });
+    if (all) all.addEventListener('click', function () { selectedRx = ''; selectedName = ''; fitSeq++; renderBoard(); drawCoverage(); syncHash(); });
   }
 
   // fitToObserver zooms the map to the selected observer's full coverage extent
@@ -180,9 +238,10 @@
   // resulting moveend redraws the hexes at the fitted resolution.
   function fitToObserver() {
     if (!map || !selectedRx) { drawCoverage(); return; }
+    var gen = generation, seq = ++fitSeq;
     var url = '/api/rx-coverage?bbox=-90,-180,90,180&z=' + Math.max(8, map.getZoom()) + '&days=' + days + '&rx=' + encodeURIComponent(selectedRx);
     fetch(url).then(function (r) { return r.json(); }).then(function (fc) {
-      if (destroyed || !map) return;
+      if (!isLatestFit(gen, seq) || !map) return;
       var minLat = 90, minLon = 180, maxLat = -90, maxLon = -180, any = false;
       (fc.features || []).forEach(function (f) {
         (f.geometry.coordinates[0] || []).forEach(function (c) {
@@ -194,13 +253,18 @@
       if (!any) { drawCoverage(); return; } // observer has no data in window → keep view
       map.fitBounds([[minLat, minLon], [maxLat, maxLon]], { padding: [30, 30], maxZoom: 15 });
       drawCoverage(); // fitBounds may not fire moveend if the view is unchanged
-    }).catch(function (e) { console.warn('rx-coverage: observer extent fetch failed', e); drawCoverage(); });
+    }).catch(function (e) {
+      if (!isLatestFit(gen, seq)) return;
+      console.warn('rx-coverage: observer extent fetch failed', e); drawCoverage();
+    });
   }
 
   function loadBoard() {
+    var gen = generation, seq = ++boardSeq;
     fetch('/api/rx-leaderboard?days=' + days + '&limit=25').then(function (r) { return r.json(); })
-      .then(function (d) { if (destroyed) return; boardCache = d.observers || []; renderBoard(); })
+      .then(function (d) { if (!isLatestBoard(gen, seq)) return; boardCache = d.observers || []; renderBoard(); })
       .catch(function (e) {
+        if (!isLatestBoard(gen, seq)) return;
         console.warn('rx-coverage: leaderboard fetch failed', e);
         var el = document.getElementById('rxBoard');
         if (el) el.innerHTML = '<div class="muted" style="color:var(--text-muted);font-size:13px">Could not load mobile observers.</div>';
@@ -209,27 +273,34 @@
 
   function setDays(d) {
     days = d;
+    fitSeq++; // a pending observer fit was for the old days
     var bar = document.getElementById('rxDays');
     if (bar) bar.querySelectorAll('button').forEach(function (b) { b.classList.toggle('active', +b.dataset.days === d); });
     loadBoard(); drawCoverage(); syncHash();
   }
 
+  // days and rx, and the current viewport once the map exists (#124).
   function syncHash() {
-    var q = 'days=' + days + (selectedRx ? '&rx=' + selectedRx : '');
+    var q = 'days=' + days + (selectedRx ? '&rx=' + encodeURIComponent(selectedRx) : '');
+    if (map) {
+      var c = map.getCenter();
+      q += '&lat=' + c.lat.toFixed(5) + '&lon=' + c.lng.toFixed(5) + '&zoom=' + map.getZoom();
+    }
     try { history.replaceState(null, '', '#/rx-coverage?' + q); } catch (e) {}
   }
 
   function init(container) {
     destroyed = false;
+    var gen = ++generation;
     // A direct land on #/rx-coverage can run before MeshConfigReady resolves, at
     // which point MC_CLIENT_RX_COVERAGE is still undefined and the page would
     // wrongly show "not enabled". Defer until server config is loaded (#13).
     Promise.resolve(window.MeshConfigReady).then(function () {
-      if (!destroyed) start(container);
+      if (isLive(gen)) start(container, gen);
     });
   }
 
-  function start(container) {
+  function start(container, gen) {
     if (!window.MC_CLIENT_RX_COVERAGE) {
       container.innerHTML = '<div class="nq-msg">Coverage is not enabled on this deployment.</div>';
       return;
@@ -240,21 +311,41 @@
       if (p) { var dd = parseInt(p.get('days'), 10); if ([1, 7, 14, 30].indexOf(dd) >= 0) days = dd; selectedRx = (p.get('rx') || '').toLowerCase(); }
     } catch (e) {}
     container.innerHTML = pageHtml();
-    map = L.map('rxMap', { zoomControl: true, attributionControl: false }).setView([51.0, 4.8], 8);
+    var bar = document.getElementById('rxDays');
+    if (bar) bar.addEventListener('click', function (e) { var b = e.target.closest('button[data-days]'); if (b) setDays(+b.dataset.days); });
+    loadBoard();
+    var explicit = urlView();
+    var initial = explicit || savedView();
+    (initial ? Promise.resolve(initial) : configView()).then(function (view) {
+      if (isLive(gen)) createMap(view || FALLBACK_VIEW, !!explicit, gen);
+    });
+  }
+
+  // createMap builds the map at the initial view. An observer-only rx= link
+  // (no explicit URL viewport) still fits that observer's coverage.
+  function createMap(view, explicitView, gen) {
+    map = L.map('rxMap', { zoomControl: true, attributionControl: false }).setView([view.lat, view.lon], view.zoom);
     if (typeof window._applyTilesToNodeMap === 'function') window._applyTilesToNodeMap(map);
     else L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
     covLayer = L.layerGroup().addTo(map);
     // Debounce pan/zoom redraws so dragging the map doesn't fire a storm of
     // /api/rx-coverage requests (#6). Direct calls (setDays, fit) stay immediate.
-    map.on('moveend zoomend', debounce(drawCoverage, 200));
-    var bar = document.getElementById('rxDays');
-    if (bar) bar.addEventListener('click', function (e) { var b = e.target.closest('button[data-days]'); if (b) setDays(+b.dataset.days); });
-    setTimeout(function () { if (!destroyed && map) { map.invalidateSize(); if (selectedRx) fitToObserver(); else drawCoverage(); } }, 150);
-    loadBoard();
+    map.on('moveend zoomend', debounce(function () {
+      if (!isLive(gen) || !map) return;
+      saveView();
+      syncHash();
+      drawCoverage();
+    }, 200));
+    setTimeout(function () {
+      if (!isLive(gen) || !map) return;
+      map.invalidateSize();
+      if (selectedRx && !explicitView) fitToObserver(); else drawCoverage();
+    }, 150);
   }
 
   function destroy() {
     destroyed = true;
+    generation++;
     if (map) { try { map.remove(); } catch (e) {} map = null; }
     covLayer = null;
   }

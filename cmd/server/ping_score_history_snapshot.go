@@ -3,7 +3,7 @@
 //
 // buildPingScoresSnapshotFromHistory produces the same PingScoresSnapshot
 // shape computeAllPingScores does, but from already-persisted history
-// entries instead of a live GetPacketPath call per trigger. It is NOT yet
+// entries instead of a live getPacketPath call per trigger. It is NOT yet
 // wired into the production recomputer (Phase 4D+ cuts over) -- it exists
 // now so it can be validated against computeAllPingScores' own output via
 // equivalence tests (ping_score_history_snapshot_test.go) before any
@@ -40,9 +40,9 @@ func (e *PingScoreHistoryMismatchError) Error() string {
 // pubkeys -- v3 schema only.
 //
 // IMPORTANT, investigated for this phase: this mirrors the name SOURCE
-// GetPacketPath's live Observer.Name field actually uses (b.observerName,
+// getPacketPath's live Observer.Name field actually uses (b.observerName,
 // read directly off the observers table via the observer_idx join in
-// GetPacketPath's own query) -- it is observers.name, NOT nodes.name.
+// getPacketPath's own query) -- it is observers.name, NOT nodes.name.
 // These are two independently maintained fields (an observer's own
 // self-reported name at packet-hearing time vs. a node's self-reported
 // name at ADVERT time) that usually agree for the same physical device but
@@ -50,7 +50,7 @@ func (e *PingScoreHistoryMismatchError) Error() string {
 // for RelayLeaderboard names) queries nodes.name instead, matching
 // computeAllPingScores' own existing relay-name lookup exactly. Neither
 // path consults inactive_nodes anywhere -- grep confirms nothing in
-// GetPacketPath, resolveNodesByPubkey/resolveNodesByName, or
+// getPacketPath, resolveNodesByPubkey/resolveNodesByName, or
 // namesAndRolesForPubkeys ever references that table, so this function
 // doesn't either; today's ping-score name resolution has never fallen back
 // to it, and this preserves that.
@@ -65,7 +65,7 @@ func (e *PingScoreHistoryMismatchError) Error() string {
 // correctness here.
 //
 // Legacy (non-v3) schema has no separate observers table at all --
-// GetPacketPath instead reads observer_name directly off each OBSERVATION
+// getPacketPath instead reads observer_name directly off each OBSERVATION
 // row for that schema, a value that can vary per observation and isn't
 // otherwise indexed for a bulk historical lookup like this one. Returns an
 // empty map for that case (a known limitation, not silently pretended
@@ -136,7 +136,7 @@ func (db *DB) observerNamesByPubkey(pubkeys []string) map[string]string {
 // job, not this function's). A trigger with no corresponding entry yet is
 // likewise just excluded (nothing to show for it this cycle), matching
 // computeAllPingScores' own "score == nil -> continue" behavior for a
-// trigger GetPacketPath couldn't resolve. TotalPings is len(triggers) --
+// trigger getPacketPath couldn't resolve. TotalPings is len(triggers) --
 // the fresh, live count -- never len(entries) or an index's Len().
 //
 // A trigger whose hash or timestamp doesn't match its history entry's own

@@ -54,9 +54,15 @@ func TestStatsFileWriter_PublishesProcIO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	// Close via t.Cleanup, not defer: test defers run BEFORE cleanups, so a
+	// deferred Close would let the writer tick against a closed Store. LIFO
+	// cleanup ordering puts the writer's stop (registered next) ahead of it.
+	t.Cleanup(func() { store.Close() })
 
-	StartStatsFileWriter(store, 50*time.Millisecond)
+	// Stop the writer when the test ends: it writes into t.TempDir() and
+	// reads the package-level readProcSelfIOFn hook, neither of which may
+	// outlive the test.
+	t.Cleanup(StartStatsFileWriter(store, 50*time.Millisecond))
 
 	// Wait for at least 2 ticks so the writer has had a chance to populate
 	// procIO rates from a delta.

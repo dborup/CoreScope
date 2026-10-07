@@ -30,6 +30,23 @@ const rolesSrc   = fs.readFileSync(path.join(ROOT, 'public', 'roles.js'), 'utf8'
 const presetsSrc = fs.readFileSync(path.join(ROOT, 'public', 'cb-presets.js'), 'utf8');
 const styleSrc   = fs.readFileSync(path.join(ROOT, 'public', 'style.css'), 'utf8');
 
+// Effective --mc-role-{role} for a descendant of <body>, modelled on the
+// browser cascade: body inline (user override) > body[data-cb-preset="X"]
+// rule in style.css > documentElement inline. Since #1449, applyCSS removes the
+// documentElement write when a preset is active and the role has no user
+// override, so the preset colour is only visible through the stylesheet rule.
+function effectiveRoleVar(env, css, role) {
+  const bodyInline = env.body.style.getPropertyValue('--mc-role-' + role);
+  if (bodyInline) return bodyInline.toLowerCase();
+  const preset = env.body.getAttribute('data-cb-preset');
+  if (preset && preset !== 'none') {
+    const block = css.match(new RegExp('body\\[data-cb-preset="' + preset + '"\\]\\s*\\{([^}]*)\\}'));
+    const m = block && block[1].match(new RegExp('--mc-role-' + role + ':\\s*(#[0-9a-fA-F]{3,8})'));
+    if (m) return m[1].toLowerCase();
+  }
+  return env.root.style.getPropertyValue('--mc-role-' + role).toLowerCase();
+}
+
 function makeSandbox(localStorageMap) {
   localStorageMap = localStorageMap || {};
   function makeStyle() {
@@ -187,7 +204,7 @@ console.log('\n=== #1446 Scenario 5: clear preset → reverts to server config /
   vm.runInContext(cv2Src, env.sandbox);
   env.sandbox.window._customizerV2.init({ nodeColors: { repeater: '#aaaaaa' } });
   // Confirm deut is active first.
-  const repWithPreset = env.root.style.getPropertyValue('--mc-role-repeater').toLowerCase();
+  const repWithPreset = effectiveRoleVar(env, styleSrc, 'repeater');
   assert(repWithPreset === '#fe6100',
     'precondition: deut active → --mc-role-repeater = #FE6100 (got: ' + JSON.stringify(repWithPreset) + ')');
   // Now clear the preset.

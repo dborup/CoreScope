@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // #1865 follow-up: dborup spotted that the raw /neighbors payload also
 // carries snr/heard_secs_ago per neighbor, previously dropped entirely.
@@ -109,26 +112,86 @@ func TestRecordObserverNeighborMetrics_SkipsEntriesWithoutSNR(t *testing.T) {
 	}
 }
 
+// TestPruneOldNeighborMetrics pins the retention boundary of
+// PruneOldNeighborMetrics(30) against a fixed reference instant (via the
+// pruneNeighborMetricsNow hook) instead of a hardcoded calendar date, so the
+// assertions hold regardless of what today's real date is (the original
+// fixture -- "recent" pinned to 2026-07-26 -- aged past the 30-day window
+// and started failing once run after 2026-08-25).
+//
+// The production query is `WHERE timestamp < cutoff` (db.go), a strict
+// less-than, so a row exactly at the cutoff (age == retentionDays) is
+// RETAINED, not pruned. That exact-boundary row can only be asserted
+// deterministically if the test's "now" and PruneOldNeighborMetrics' own
+// cutoff computation read the identical instant -- two independent
+// time.Now() calls a few instructions apart would occasionally straddle a
+// second (the granularity RFC3339 storage truncates to) and flip the
+// boundary row's fate under real timing. Pinning both to the same fixed
+// instant via pruneNeighborMetricsNow removes that race entirely.
+//
+// 30 is passed directly (not imported from a named constant) because
+// PruneOldNeighborMetrics takes retentionDays as a plain parameter -- there
+// is no production-side named retention constant to duplicate; 30 here is
+// simply the boundary value this test chooses to exercise (it happens to
+// match Config.MetricsRetentionDays' own fallback default, config.go, but
+// that default is not itself a value this test needs to reach through).
 func TestPruneOldNeighborMetrics(t *testing.T) {
 	store := openNeighborsStore(t)
 	seedObserverForNeighbors(t, store, "obs-metrics-5")
-	pk := "ffff000000000000000000000000000000000000000000000000000000000006"
+	const retentionDays = 30
 
-	old := "2020-01-01T00:00:00Z"
-	recent := "2026-07-26T12:00:00Z"
-	if err := store.RecordObserverNeighborMetrics("obs-metrics-5", []ObserverNeighborEntry{{Pubkey: pk, SNR: floatPtr(1)}}, old); err != nil {
+	// Fixed reference instant, independent of the real wall clock and of
+	// the test process's local timezone.
+	fixedNow := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	origNow := pruneNeighborMetricsNow
+	t.Cleanup(func() { pruneNeighborMetricsNow = origNow })
+	pruneNeighborMetricsNow = func() time.Time { return fixedNow }
+
+	cutoff := fixedNow.AddDate(0, 0, -retentionDays)
+	pkOld := "ffff000000000000000000000000000000000000000000000000000000000006"
+	pkBoundary := "ffff000000000000000000000000000000000000000000000000000000000007"
+	pkRecent := "ffff000000000000000000000000000000000000000000000000000000000008"
+	pkRecentOffset := "ffff000000000000000000000000000000000000000000000000000000000009"
+
+	seed := func(pk, ts string) {
+		t.Helper()
+		if err := store.RecordObserverNeighborMetrics("obs-metrics-5", []ObserverNeighborEntry{{Pubkey: pk, SNR: floatPtr(1)}}, ts); err != nil {
+			t.Fatalf("seed %s at %s: %v", pk, ts, err)
+		}
+	}
+	// Clearly older than the window: age = retentionDays+1 days -> pruned.
+	seed(pkOld, cutoff.AddDate(0, 0, -1).Format(time.RFC3339))
+	// Exactly at the window edge: age == retentionDays -> retained (`<`, not `<=`).
+	seed(pkBoundary, cutoff.Format(time.RFC3339))
+	// Clearly newer than the window: age = retentionDays-1 days -> retained.
+	seed(pkRecent, cutoff.AddDate(0, 0, 1).Format(time.RFC3339))
+	// Same instant as pkRecent, expressed in a non-UTC offset. normalizeReportTS
+	// (db.go) parses the offset and re-stores it as canonical UTC, so this must
+	// prune/retain identically to pkRecent -- the fixture's timezone must not
+	// change the outcome.
+	recentInCopenhagenOffset := cutoff.AddDate(0, 0, 1).In(time.FixedZone("CEST", 2*60*60)).Format(time.RFC3339)
+	seed(pkRecentOffset, recentInCopenhagenOffset)
+
+	n, err := store.PruneOldNeighborMetrics(retentionDays)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordObserverNeighborMetrics("obs-metrics-5", []ObserverNeighborEntry{{Pubkey: pk, SNR: floatPtr(2)}}, recent); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := store.PruneOldNeighborMetrics(30); err != nil {
-		t.Fatal(err)
-	} else if n != 1 {
+	// Only pkOld crosses the boundary; the other three rows must not
+	// influence each other's fate.
+	if n != 1 {
 		t.Fatalf("expected 1 row pruned, got %d", n)
 	}
-	if n := countObserverNeighborMetrics(t, store, "obs-metrics-5", pk); n != 1 {
-		t.Errorf("expected 1 row remaining after prune, got %d", n)
+	if got := countObserverNeighborMetrics(t, store, "obs-metrics-5", pkOld); got != 0 {
+		t.Errorf("pkOld (age %dd+1): expected pruned, %d row(s) remain", retentionDays, got)
+	}
+	if got := countObserverNeighborMetrics(t, store, "obs-metrics-5", pkBoundary); got != 1 {
+		t.Errorf("pkBoundary (age exactly %dd): expected retained (timestamp < cutoff is strict), got %d row(s)", retentionDays, got)
+	}
+	if got := countObserverNeighborMetrics(t, store, "obs-metrics-5", pkRecent); got != 1 {
+		t.Errorf("pkRecent (age %dd-1): expected retained, got %d row(s)", retentionDays, got)
+	}
+	if got := countObserverNeighborMetrics(t, store, "obs-metrics-5", pkRecentOffset); got != 1 {
+		t.Errorf("pkRecentOffset (same instant as pkRecent, +02:00 offset): expected retained like pkRecent, got %d row(s)", got)
 	}
 }
 

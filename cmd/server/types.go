@@ -586,6 +586,13 @@ type PerfCacheStats struct {
 
 type WebSocketStatsResp struct {
 	Clients int `json:"clients"`
+	// #1794: upgrade rejections since boot, split by cause so an operator can
+	// tell a deny-list hit from a client that is merely reconnecting too fast.
+	// omitempty: an install with no limits configured sends none of these
+	// rather than three permanent zeroes.
+	RejectedDeny    int64 `json:"rejectedDeny,omitempty"`
+	RejectedRate    int64 `json:"rejectedRate,omitempty"`
+	RejectedConnCap int64 `json:"rejectedConnCap,omitempty"`
 }
 
 type HealthPacketStoreStats struct {
@@ -816,11 +823,6 @@ type PacketDetailResponse struct {
 	Observations     []ObservationResp `json:"observations,omitempty"`
 }
 
-type PacketIngestResponse struct {
-	ID      int64       `json:"id"`
-	Decoded interface{} `json:"decoded"`
-}
-
 type DecodeResponse struct {
 	Decoded interface{} `json:"decoded"`
 }
@@ -853,8 +855,55 @@ type NodeSearchResponse struct {
 }
 
 type NodeDetailResponse struct {
-	Node          map[string]interface{}   `json:"node"`
-	RecentAdverts []map[string]interface{} `json:"recentAdverts"`
+	Node          map[string]interface{} `json:"node"`
+	RecentAdverts NodeAdvertRows         `json:"recentAdverts"`
+	// #2073: omitted when the identity is hidden (identityHidden, #68).
+	RecentAdvertsByRoute *NodeAdvertsByRoute `json:"recentAdvertsByRoute,omitempty"`
+	AdvertCounts         *NodeAdvertCounts   `json:"advertCounts,omitempty"`
+	// #245: estimated flood / zero-hop advert intervals, same opt-in.
+	AdvertIntervals *NodeAdvertIntervals `json:"advertIntervals,omitempty"`
+}
+
+// NodeAdvertRow is one transmission row on node detail: the /api/packets
+// transmission shape of the shared scanTransmissionRow plus, depending on
+// the list, observations and route_class (#2073). It stays map-shaped
+// because that shared scanner is (#1383); the named type keeps the response
+// fields typed.
+type NodeAdvertRow map[string]interface{}
+
+// NodeAdvertRows is a list of NodeAdvertRow.
+type NodeAdvertRows []NodeAdvertRow
+
+// NodeAdvertsByRoute is the newest adverts of a node per route class
+// (#2073), classified like Relay Airtime Share (classifyAdvertRoute). The
+// class is filtered in SQL before the per-class limit, so frequent zero-hop
+// adverts cannot push rare flood adverts out. Unknown (no usable route) is
+// only present when the node has such adverts.
+type NodeAdvertsByRoute struct {
+	Limit   int            `json:"limit"`
+	Flood   NodeAdvertRows `json:"flood"`
+	ZeroHop NodeAdvertRows `json:"zero_hop"`
+	Mixed   NodeAdvertRows `json:"mixed"`
+	Unknown NodeAdvertRows `json:"unknown,omitempty"`
+}
+
+// NodeAdvertCounts counts a node's distinct adverts (by hash) per route class
+// whose first_seen lies in the last 24 hours and 7 days (#2073).
+// RouteMaskBackfill tells whether legacy rows are still classified by their
+// first-inserted route_type (anything but "complete": provisional).
+type NodeAdvertCounts struct {
+	H24               AdvertRouteCounts       `json:"24h"`
+	D7                AdvertRouteCounts       `json:"7d"`
+	Truncated         bool                    `json:"truncated"`
+	RouteMaskBackfill RouteMaskBackfillStatus `json:"route_mask_backfill"`
+}
+
+// AdvertRouteCounts is one window of NodeAdvertCounts.
+type AdvertRouteCounts struct {
+	Flood   int `json:"flood"`
+	ZeroHop int `json:"zero_hop"`
+	Mixed   int `json:"mixed"`
+	Unknown int `json:"unknown"`
 }
 
 type NodeStatsResp struct {
@@ -1414,6 +1463,21 @@ type ChannelResp struct {
 
 type ChannelListResponse struct {
 	Channels []map[string]interface{} `json:"channels"`
+	// ApprovedChannels are the shared hashtag channels an administrator
+	// approved, listed even before they carry any traffic. Omitted when empty.
+	ApprovedChannels []ApprovedChannel `json:"approvedChannels,omitempty"`
+	// HiddenChannels names the channels with stored messages that are left out
+	// of Channels because their shared-channel proposal is not approved (#251).
+	// The page uses it so a live message does not bring such a row back.
+	// Omitted when nothing is hidden.
+	HiddenChannels []string `json:"hiddenChannels,omitempty"`
+}
+
+// ApprovedChannel is one shared hashtag channel. Hash equals Name: decrypted
+// hashtag traffic is stored under the channel name (see db.GetChannels).
+type ApprovedChannel struct {
+	Name string `json:"name"`
+	Hash string `json:"hash"`
 }
 
 type ChannelMessagesResponse struct {
@@ -1562,6 +1626,25 @@ type ClientConfigResponse struct {
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when
 	// no geo_filter is configured.
 	GeoFilter *GeoFilterConfig `json:"geoFilter,omitempty"`
+	// Privacy is the opt-in signal for the #/privacy page, not its content:
+	// the notice is a fixed document in public/privacy.js. Omitted entirely
+	// when privacy is unconfigured or privacy.enabled is false — the
+	// frontend treats "field absent" as "feature off" (no nav link
+	// injected). When enabled, the published block is exactly
+	// {"enabled":true}: no operator-configured text is ever sent to the
+	// frontend. See PrivacyClientConfig below and PrivacyConfig (config.go).
+	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
+
+	EstimatedPositions EstimatedPositionsClientConfig `json:"estimatedPositions"`
+}
+
+// PrivacyClientConfig is the privacy block of /api/config/client. It carries
+// the opt-in flag and nothing else: the notice is a fixed document in
+// public/privacy.js, so there is no operator content to ship. Keeping the
+// payload empty is the point -- a field here would be a field that could put
+// unreviewed text on the page.
+type PrivacyClientConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // CustomizerClientConfig is the operator-side customizer-modal knobs that

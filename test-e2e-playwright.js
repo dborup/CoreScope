@@ -45,6 +45,28 @@ async function gotoPackets(page) {
   await page.waitForSelector('table tbody tr[data-hash]', { timeout: 15000 });
 }
 
+// Waits until the channels page has rendered its /api/channels list and the
+// channel count has stopped changing. channels.js sets its WS test hooks
+// synchronously in init(), before loadChannels() resolves, so a test that
+// snapshots the list as soon as the hook exists can see 0 channels and then
+// the full list one evaluate later, whatever its WS message did.
+async function waitForChannelListSettled(page, { timeout = 10000, stableMs = 300 } = {}) {
+  const deadline = Date.now() + timeout;
+  let last = -1;
+  let since = Date.now();
+  for (;;) {
+    const count = await page.evaluate(() => {
+      const list = document.getElementById('chList');
+      if (!list || list.querySelector('.ch-loading') || typeof window._channelsGetStateForTest !== 'function') return -1;
+      return window._channelsGetStateForTest().channels.length;
+    });
+    if (count !== last) { last = count; since = Date.now(); }
+    if (count > 0 && Date.now() - since >= stableMs) return count;
+    if (Date.now() > deadline) throw new Error(`channel list did not settle within ${timeout}ms (last count ${count})`);
+    await page.waitForTimeout(50);
+  }
+}
+
 async function run() {
   console.log('Launching Chromium...');
   const browser = await chromium.launch({
@@ -846,6 +868,71 @@ async function run() {
     assert(winFor(/\/api\/analytics\/channels/), `expected window=24h on channels, saw: ${seen.join(', ')}`);
     assert(noWinFor(/\/api\/analytics\/hash-sizes/), `hash-sizes must NOT carry window param, saw: ${seen.join(', ')}`);
     assert(noWinFor(/\/api\/analytics\/hash-collisions/), `hash-collisions must NOT carry window param, saw: ${seen.join(', ')}`);
+  });
+
+  // #89: Relay Airtime Share rows mirror the API rows, and a mixed ADVERT row
+  // (same payload seen on flood and zero-hop routes) has its own identity,
+  // fixed colour and tooltip. The fixture DB has no mixed rows, so the second
+  // half injects one via page.route.
+  await test('#89 Relay Airtime Share renders API rows and the mixed ADVERT row', async () => {
+    const relayUrl = '**/api/analytics/relay-airtime-share*';
+    const readRows = () => page.$$eval('.dumbbell-row', els => els.map(e => ({
+      type: e.getAttribute('data-payload-type'),
+      routeClass: e.getAttribute('data-route-class'),
+      label: e.querySelector('.dumbbell-label').textContent,
+      dot: e.querySelector('.dumbbell-dot-airtime').style.background,
+      title: e.getAttribute('title'),
+    })));
+
+    await page.goto(`${BASE}/#/analytics?tab=overview`, { waitUntil: 'domcontentloaded' });
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('.dumbbell-chart, .analytics-card .text-muted', { timeout: 15000 });
+    // Re-read exactly the URL the page rendered from (window param included);
+    // the server caches it and the fixture DB is static.
+    const api = await page.evaluate(async () => {
+      const hit = performance.getEntriesByType('resource').map(e => e.name)
+        .filter(u => /\/api\/analytics\/relay-airtime-share(\?|$)/.test(u)).pop();
+      return (await fetch(hit || '/api/analytics/relay-airtime-share')).json();
+    });
+    assert(api.route_mask_backfill && ['pending', 'backfilling', 'complete'].includes(api.route_mask_backfill.status),
+      `route_mask_backfill must report a status, got ${JSON.stringify(api.route_mask_backfill)}`);
+    const real = await readRows();
+    if (api.total_score > 0) {
+      assert(real.length === api.rows.length, `DOM rows ${real.length} != API rows ${api.rows.length}`);
+      api.rows.forEach((r, i) => {
+        assert(real[i].type === String(r.type) && real[i].routeClass === r.route_class && real[i].label === (r.payload_type || 'UNK'),
+          `row ${i}: DOM ${JSON.stringify(real[i])} != API ${JSON.stringify(r)}`);
+      });
+    }
+
+    await page.route(relayUrl, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        total_count: 3, total_score: 3000, window: '', cached: false,
+        route_mask_backfill: { status: 'complete', remaining: 0 },
+        rows: [
+          { payload_type: 'ADVERT (flood)', type: 4, route_class: 'flood', count: 1, count_pct: 33.3, score: 2000, airtime_pct: 66.7 },
+          { payload_type: 'ADVERT (mixed)', type: 4, route_class: 'mixed', count: 1, count_pct: 33.3, score: 1000, airtime_pct: 33.3 },
+          { payload_type: 'ADVERT (zero-hop)', type: 4, route_class: 'zero_hop', count: 1, count_pct: 33.3, score: 0, airtime_pct: 0 },
+        ],
+      }),
+    }));
+    try {
+      await page.reload({ waitUntil: 'load' });
+      await page.waitForSelector('.dumbbell-row[data-route-class="mixed"]', { timeout: 15000 });
+      const rows = await readRows();
+      assert(rows.length === 3, `expected 3 injected rows, got ${rows.length}`);
+      const mixed = rows.find(r => r.routeClass === 'mixed');
+      assert(mixed.label === 'ADVERT (mixed)' && mixed.type === '4', `mixed row identity: ${JSON.stringify(mixed)}`);
+      assert(mixed.dot === 'var(--status-purple)', `mixed row colour must be var(--status-purple), got ${mixed.dot}`);
+      assert(/observed on both flood and zero-hop routes; counted once/.test(mixed.title), `mixed tooltip: ${mixed.title}`);
+      rows.filter(r => r.routeClass !== 'mixed').forEach(r => {
+        assert(!/counted once/.test(r.title), `non-mixed row ${r.label} must not carry the mixed tooltip`);
+      });
+    } finally {
+      await page.unroute(relayUrl);
+    }
   });
 
   // Analytics sub-tab tests
@@ -2231,6 +2318,9 @@ async function run() {
     await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
     // Wait for the channels init() to mount and expose the test hook.
     await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+    // The hook exists before /api/channels has answered; snapshot only the
+    // loaded list, or the count can jump from 0 between before and after.
+    await waitForChannelListSettled(page);
 
     // Snapshot starting state so we can compare deltas.
     const before = await page.evaluate(() => {
@@ -2271,6 +2361,9 @@ async function run() {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+    // Same as above: route the message into the loaded list, not one that
+    // loadChannels() replaces a moment later.
+    await waitForChannelListSettled(page);
 
     const sentinel = '__test_chan_1468_' + Date.now();
     const before = await page.evaluate((name) => {
