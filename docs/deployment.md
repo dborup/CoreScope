@@ -591,88 +591,115 @@ silently wrong one:
 `-shm` is a scratch file rebuilt on open. Do not carry it into a backup, and
 delete it alongside a stale `-wal` on restore.
 
-```bash
-# Copy from the Docker volume while the container is stopped
-docker stop corescope
-STAMP=$(date +%Y%m%d)
-docker cp corescope:/app/data/meshcore.db ./meshcore-$STAMP.db
-docker cp corescope:/app/data/ping_scores_history.db ./ping-history-$STAMP.db
-# The sidecars only exist if the shutdown did not checkpoint; a "No such file"
-# here is the normal, healthy case.
-docker cp corescope:/app/data/meshcore.db-wal ./meshcore-$STAMP.db-wal || true
-docker cp corescope:/app/data/ping_scores_history.db-wal ./ping-history-$STAMP.db-wal || true
-docker start corescope
+Use the checked-in operator helper from a CoreScope checkout (host Docker
+access is required). It works with either a named volume or a bind mount:
+
+```sh
+sh scripts/backup-sqlite.sh corescope /backups
 ```
 
-For a bind mount, replace the `docker cp` commands with these commands
-between `docker stop` and `docker start`:
+The helper prints a new private directory such as
+`/backups/corescope-backup-20261008T030000Z.A1b2c3`, containing exactly
+`meshcore.db`, `ping_scores_history.db`, and their `-wal` files if present.
+There are no `-shm` files or config/secrets in the completed backup. Every run
+gets a fresh directory, so a previous backup's WAL cannot be reused by mistake.
 
-```bash
-STAMP=$(date +%Y%m%d)
-cp ./data/meshcore.db ./meshcore-$STAMP.db
-cp ./data/ping_scores_history.db ./ping-history-$STAMP.db
-[ -e ./data/meshcore.db-wal ] && cp ./data/meshcore.db-wal ./meshcore-$STAMP.db-wal
-[ -e ./data/ping_scores_history.db-wal ] && cp ./data/ping_scores_history.db-wal ./ping-history-$STAMP.db-wal
-```
+It copies the stopped container's **whole `/app/data` directory into temporary
+0700 staging**, then keeps only those database files. Allow free temporary disk
+space for the entire directory, including any unrelated files. The container
+must be its only writer: stop any other process or container sharing that data
+first. The helper never pulls an image or starts an additional container.
 
-Optional files to back up:
-- `config.json` — custom configuration
-- `theme.json` — custom theme/branding
+On a copy/validation failure it attempts to restart a previously running
+container and returns the original error. A restart failure is reported, and
+no completed backup is published. A container already stopped is left stopped.
+For success, both the copy and any required restart must succeed. Temporary
+staging is removed on normal exit or a caught signal; `SIGKILL` or a host crash
+can leave a private `.corescope-backup-*` directory. That directory is **not** a
+completed backup. Check the container's state and remove only that abandoned
+staging directory after investigating. The helper cannot guarantee recovery
+from a dead Docker daemon or host.
+
+Back up `config.json` (which may contain secrets) and `theme.json` separately
+if wanted; the SQLite helper intentionally does not publish them.
 
 ### Restore
 
-Restore each database together with its own `-wal`, if the backup has one, and
-clear whatever `-wal`/`-shm` the container still holds for the file you are
-replacing. With the container stopped, `docker exec` is unavailable, so a
-throwaway container does the deleting on a named volume.
+Restore both databases from **one complete, trusted backup directory**, with
+their own WALs if present. Take a fresh backup of the current state first.
+Set `RESTORE_DIR` to the completed directory (not private temporary staging):
 
-```bash
-# Stop the container
-docker stop corescope
-
-# Clear the stale sidecars of both databases in the volume
-docker run --rm -v corescope-data:/app/data alpine:3.24 \
-  rm -f /app/data/meshcore.db-wal /app/data/meshcore.db-shm \
-        /app/data/ping_scores_history.db-wal /app/data/ping_scores_history.db-shm
-
-# Replace both databases
-docker cp ./meshcore-20260101.db corescope:/app/data/meshcore.db
-docker cp ./ping-history-20260101.db corescope:/app/data/ping_scores_history.db
-
-# Only if the backup itself captured a sidecar, restore it with its own file
-docker cp ./meshcore-20260101.db-wal corescope:/app/data/meshcore.db-wal || true
-docker cp ./ping-history-20260101.db-wal corescope:/app/data/ping_scores_history.db-wal || true
-
-# Restart
-docker start corescope
+```sh
+export RESTORE_DIR=/backups/corescope-backup-20261008T030000Z.A1b2c3
+export CONTAINER=corescope
 ```
 
-On a bind mount the sidecar cleanup is a plain `rm -f ./data/*.db-wal
-./data/*.db-shm` between the `docker stop` and the copies.
+Run the following block in a new shell. It validates the local input before
+stopping, then clears exactly the two databases' stale WAL/SHM files. The
+cleanup container uses the already-installed image and mounted data, works
+with both bind mounts and named volumes, has no network and cannot pull an
+image. No other writer may use the data, and the backup must not change during
+the restore.
+
+<!-- tested-sqlite-restore -->
+```sh
+set -eu
+: "${RESTORE_DIR:?Set RESTORE_DIR to one complete backup directory}"
+CONTAINER=${CONTAINER:-corescope}
+case "$CONTAINER" in
+  ''|-*|*[!a-zA-Z0-9_.-]*) echo 'invalid container name or ID' >&2; exit 2 ;;
+esac
+for db in meshcore ping_scores_history; do
+  file="$RESTORE_DIR/$db.db"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || {
+    echo "missing or unreadable regular database $db.db" >&2; exit 1;
+  }
+  file="$RESTORE_DIR/$db.db-wal"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || {
+      echo "unreadable regular WAL $db.db-wal" >&2; exit 1;
+    }
+  fi
+done
+IMAGE=$(docker inspect --format '{{.Image}}' "$CONTAINER")
+docker stop "$CONTAINER"
+docker run --rm --pull=never --network none --volumes-from "$CONTAINER" \
+  --entrypoint /bin/sh "$IMAGE" -c \
+  'rm -f /app/data/meshcore.db-wal /app/data/meshcore.db-shm /app/data/ping_scores_history.db-wal /app/data/ping_scores_history.db-shm'
+for db in meshcore ping_scores_history; do
+  docker cp "$RESTORE_DIR/$db.db" "$CONTAINER:/app/data/$db.db"
+  # Absence is optional; a failure copying an existing WAL is never ignored.
+  if [ -e "$RESTORE_DIR/$db.db-wal" ]; then
+    docker cp "$RESTORE_DIR/$db.db-wal" "$CONTAINER:/app/data/$db.db-wal"
+  fi
+done
+docker start "$CONTAINER"
+```
+
+**On any restore error after stopping, leave the service stopped.** A failed
+copy can have installed only part of the DB/WAL pair; blindly restarting can
+lose data. Repair the copy problem, then rerun the full block with the same
+complete backup (or your fresh pre-restore backup). Start only after every
+cleanup and copy has succeeded. This is an offline, non-transactional operator
+procedure, not an automatic rollback. A failure of the final `docker start`
+also remains an error requiring an operator check.
 
 ### Automated backups
 
-Schedule a script that stops the container, copies both SQLite files with any
-`-wal` sidecar, restarts it, and then applies the same retention period to
-both backup sets. Two things it must not do: copy `meshcore.db` alone (old
-ping scores may exist only in `ping_scores_history.db`), and copy a live
-database hot (the WAL moves underneath the copy). The cost is a short
-downtime window per run; without a `sqlite3` binary in the image there is no
-online `.backup` to use instead.
+Schedule the same helper using an absolute checkout path and a private backup
+directory. The account needs Docker access and enough disk space; alert on a
+nonzero exit. Each successful run produces one matching snapshot directory,
+not two independent flat-file backup sets. For example, daily at 03:00:
 
-```bash
-#!/bin/sh
-# cron: daily at 3 AM, keep 7 days. /backups must exist.
-set -e
-STAMP=$(date +%Y%m%d)
-docker stop corescope
-for db in meshcore ping_scores_history; do
-  docker cp "corescope:/app/data/$db.db" "/backups/$db-$STAMP.db"
-  docker cp "corescope:/app/data/$db.db-wal" "/backups/$db-$STAMP.db-wal" || true
-done
-docker start corescope
-find /backups \( -name '*.db' -o -name '*.db-wal' \) -mtime +7 -delete
+```cron
+0 3 * * * sh /opt/corescope/scripts/backup-sqlite.sh corescope /backups
 ```
+
+There is a downtime window for each run. Apply retention only to completed
+`corescope-backup-*` directories created by this helper, keeping the whole
+directory together. Do not use a broad `find /backups -name '*.db' -delete`,
+which also removes unrelated backup files. No automatic pruning is performed
+by the helper.
 
 ---
 
