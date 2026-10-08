@@ -2281,10 +2281,10 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 
 // reportTSNow is the package-level clock hook normalizeReportTS reads "now"
 // from when applying the #337 future bound, following the same
-// swap-in-test/restore-in-cleanup pattern as pruneNeighborMetricsNow above:
-// production always leaves this as time.Now, and the #337 tests pin it to a
-// fixed instant so "far future" is deterministic rather than racing the wall
-// clock.
+// swap-in-test/restore-in-cleanup pattern as pruneNeighborMetricsNow later in
+// this file: production always leaves this as time.Now, and the #337 tests pin
+// it to a fixed instant so "far future" is deterministic rather than racing the
+// wall clock.
 var reportTSNow = time.Now
 
 // normalizeReportTS parses an observer report timestamp and returns it in
