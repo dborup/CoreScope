@@ -141,6 +141,16 @@ func main() {
 	stopProposals := proposals.Start(2*time.Second, time.Hour)
 	defer stopProposals()
 
+	// Admin-approved region scopes are a persistent overlay on the inline and
+	// external hashRegions lists. The server only queues decisions; this
+	// process remains the sole database writer.
+	scopeApprovals := newScopeApprovalRunner(store, keys)
+	if err := scopeApprovals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[scope-approval] loading approved scopes failed: %v", err)
+	}
+	stopScopeApprovals := scopeApprovals.Start()
+	defer stopScopeApprovals()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
@@ -1658,8 +1668,10 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 	return keys, err
 }
 
-// matchScope performs one HMAC-SHA256 per configured region. Expected
-// len(regionKeys) ≤ 50; beyond that, consider a pre-indexed lookup table.
+// matchScope performs one HMAC-SHA256 per effective region, including any
+// admin-approved overlay names. Deployments using hashRegionsPath may have
+// ~1100 names; approval is capped at another 128 and adds no database I/O
+// or allocation to this packet-path lookup.
 //
 // code1 is only 16 bits (65534 usable values after the 0x0000/0xFFFF
 // remap), so with enough configured regions a *different*, unrelated
