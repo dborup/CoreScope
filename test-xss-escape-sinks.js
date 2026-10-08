@@ -631,6 +631,129 @@ test('loadDetail catch block does NOT interpolate e.message into innerHTML', () 
 });
 
 // =========================================================================
+// I. Issue #333 — node/observer/route values in favorites, geo-filter prune
+//    preview, observer regions, packet region badges, clock-skew observer
+//    names, RF-health attributes and the unknown-route heading.
+//
+// Each test extracts the PRODUCTION sink (dual-form regex matching both the
+// escaped and the unescaped shape) and evals it with a hostile binding, so
+// removing the escape wrapper in production flips the test red (the mutant).
+// =========================================================================
+console.log('\n=== I. Issue #333 sinks ===');
+
+// 1. Favorites dropdown (app.js) — node name in the fav-dd-name span.
+test('#333 favorites dropdown: fav-dd-name span escapes node name', () => {
+  const src = fs.readFileSync('public/app.js', 'utf8');
+  const m = src.match(/<span class="fav-dd-name">'\s*\+\s*([\s\S]*?)\s*\+\s*'<\/span>'/);
+  assert.ok(m, '#333 favorites: fav-dd-name concat segment not found');
+  const fn = new Function('h', 'pk', 'escapeHtml', 'truncate',
+    'return `<span>` + (' + m[1] + ') + `</span>`;');
+  const html = fn(
+    { node: { name: TAG_PAYLOAD + ATTR_PAYLOAD } }, 'abcdef0123456789',
+    escapeHtml, (s, n) => (s == null ? '' : String(s).slice(0, n)));
+  assertNoXss(html, '#333 favorites dropdown name');
+});
+
+// 2. Geo-filter prune preview (customize-v2.js) — node name in list item.
+test('#333 geo-filter prune preview escapes node name', () => {
+  const src = fs.readFileSync('public/customize-v2.js', 'utf8');
+  const m = src.match(/return '<div>'\s*\+\s*([\s\S]*?)\s*\+\s*coords\s*\+\s*'<\/div>';/);
+  assert.ok(m, '#333 geo-prune: prune list item concat not found');
+  // Production esc() is a textContent-based escaper; model it with escapeHtml
+  // (a superset) so the containment markers hold for the DOM-grep assertion.
+  const fn = new Function('n', 'esc', 'coords',
+    'return `<div>` + (' + m[1] + ') + coords + `</div>`;');
+  const html = fn({ name: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, escapeHtml, '');
+  assertNoXss(html, '#333 geo-filter prune preview name');
+});
+
+// 3a. Observer regions — observers table badge (template-literal form).
+test('#333 observers table region badge escapes o.iata', () => {
+  const src = fs.readFileSync('public/observers.js', 'utf8');
+  const m = src.match(/<span class="badge-region">\$\{[^}]*o\.iata[^}]*\}<\/span>/);
+  assert.ok(m, '#333 observers table badge-region sink not found');
+  const fn = new Function('o', 'escapeHtml', 'return `' + m[0] + '`;');
+  const html = fn({ iata: TAG_PAYLOAD + ATTR_PAYLOAD }, escapeHtml);
+  assertNoXss(html, '#333 observers table region badge');
+});
+
+// 3b. Observer regions — slide-over region badge (concat form).
+test('#333 observers slide-over region badge escapes o.iata', () => {
+  const src = fs.readFileSync('public/observers.js', 'utf8');
+  const m = src.match(/'<span class="badge-region">'\s*\+\s*([\s\S]*?)\s*\+\s*'<\/span>'/);
+  assert.ok(m, '#333 observers slide-over badge-region concat not found');
+  const fn = new Function('o', 'escapeHtml', 'return `<span>` + (' + m[1] + ') + `</span>`;');
+  const html = fn({ iata: TAG_PAYLOAD + ATTR_PAYLOAD }, escapeHtml);
+  assertNoXss(html, '#333 observers slide-over region badge');
+});
+
+// 4. Packet region badge (packets.js) — groupRegion in badge-region span.
+test('#333 packets region badge escapes groupRegion', () => {
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+  const m = src.match(/<span class="badge-region">\$\{[^}]*groupRegion[^}]*\}<\/span>/);
+  assert.ok(m, '#333 packets badge-region sink not found');
+  const fn = new Function('groupRegion', 'escapeHtml', 'return `' + m[0] + '`;');
+  const html = fn(TAG_PAYLOAD + ATTR_PAYLOAD, escapeHtml);
+  assertNoXss(html, '#333 packets region badge');
+});
+
+// 5. Clock-skew observer/node names — clock-health fleet table (regression
+//    pin: already escaped in our fork; the mutant is removing esc()).
+test('#333 clock-health table escapes node name (regression pin)', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/<td><strong>'\s*\+\s*((?:esc\()?n\.nodeName[\s\S]*?)\s*\+\s*'<\/strong><\/td>/);
+  assert.ok(m, '#333 clock-health name cell not found');
+  const fn = new Function('n', 'esc',
+    'return `<td><strong>` + (' + m[1] + ') + `</strong></td>`;');
+  const html = fn({ nodeName: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, escapeHtml);
+  assertNoXss(html, '#333 clock-health node name');
+});
+
+// 6. RF-health attributes (analytics.js) — observer_id in data-observer and
+//    id attributes (double-quoted); observer name in aria-label.
+test('#333 RF-health cell escapes observer_id in attributes', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/grid\.innerHTML = filteredObservers\.map\(obs => \{[\s\S]*?return `([\s\S]*?)`;[\s\S]*?\}\)\.join/);
+  assert.ok(m, '#333 RF-health cell template not found');
+  const fn = new Function(
+    'obs', 'isSelected', 'esc', 'nf', 'avgNf', 'maxNf', 'batt', 'nfClass', 'name',
+    'return `' + m[1] + '`;');
+  // Double-quote attribute breakout attempt on observer_id.
+  const dqPayload = '"><img src=x onerror=alert(1)>';
+  const html = fn(
+    { observer_id: dqPayload, sample_count: 5 }, false, escapeHtml,
+    '-100', '-105', '-95', '', '', TAG_PAYLOAD + ATTR_PAYLOAD);
+  assert.ok(!/<img\b/i.test(html),
+    '#333 RF-health: raw <img survived (observer_id attr breakout): ' + html);
+  assert.ok(html.includes('&quot;') || html.includes('&lt;'),
+    '#333 RF-health: observer_id not escaped in attribute: ' + html);
+  // The aria-label name must also be escaped.
+  assert.ok(!/'\s*onfocus\s*=/i.test(html),
+    '#333 RF-health: aria-label attr-breakout survived: ' + html);
+});
+
+// 7a. Unknown-route heading (app.js) — URL-hash route in <h2>.
+test('#333 unknown-route heading escapes route', () => {
+  const src = fs.readFileSync('public/app.js', 'utf8');
+  const m = src.match(/<h2>\$\{[^}]*route[^}]*\}<\/h2>/);
+  assert.ok(m, '#333 unknown-route <h2> sink not found');
+  const fn = new Function('route', 'escapeHtml', 'return `' + m[0] + '`;');
+  const html = fn('#/' + TAG_PAYLOAD + ATTR_PAYLOAD, escapeHtml);
+  assertNoXss(html, '#333 unknown-route heading');
+});
+
+// 7b. Unknown-route template must not hardcode a hex colour (CSS var).
+test('#333 unknown-route template uses a CSS var, not a hardcoded hex colour', () => {
+  const src = fs.readFileSync('public/app.js', 'utf8');
+  const m = src.match(/`<div style="[^`]*?Page not yet implemented[^`]*?<\/div>`/);
+  assert.ok(m, '#333 unknown-route div template not found');
+  assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(m[0]),
+    '#333 unknown-route div still has a hardcoded hex colour: ' + m[0]);
+  assert.ok(/var\(--/.test(m[0]),
+    '#333 unknown-route div does not use a CSS variable for colour: ' + m[0]);
+});
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
 console.log('\n' + '═'.repeat(48));

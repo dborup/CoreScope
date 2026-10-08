@@ -51,6 +51,10 @@ const cases = [
     label: 'escapeHtml mentioned only in // comment' },
   { file: 'bad-12-setattr-concat.js',   expect: 1,
     label: 'setAttribute("href", "javascript:" + payload) (concat, no $)' },
+  { file: 'bad-13-attr-interp.js',      expect: 1,
+    label: 'innerHTML `…title="${observer_name}"…` (N4: interp in quoted attr)' },
+  { file: 'bad-14-attr-interp-singlequote.js', expect: 1,
+    label: "innerHTML `…title='${observer_name}'…` (N4: single-quoted attr)" },
   // good fixtures: gate MUST pass (exit 0)
   { file: 'good-1-escaped.js', expect: 0, label: 'escapeHtml(${name}) wrapper' },
   { file: 'good-2-tested.js',  expect: 0, label: 'unescaped but DOM-grep-tested in same PR',
@@ -62,6 +66,8 @@ const cases = [
   { file: 'good-4-tested.js', expect: 0,
     label: 'unescaped sink, REAL test (markers in executable code)',
     tests: ['test-good-4.js'] },
+  { file: 'good-5-attr-interp-escaped.js', expect: 0,
+    label: 'escapeHtml(${observer_name}) inside a quoted attr (N4 fix no-FP)' },
 ];
 
 let failed = 0;
