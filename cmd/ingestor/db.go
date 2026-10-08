@@ -2246,6 +2246,13 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 	if reportedAt == "" {
 		return nil
 	}
+	// #337: same bound as UpdateNodeConfiguredScope. self.default_scope is a
+	// single region name, so this is enormously generous for legitimate
+	// input; it exists to keep one number for both scope fields rather than
+	// two thresholds an operator has to remember.
+	if reportScopeTooLong(scope) {
+		return nil
+	}
 	scope = normalizeSingleScope(scope)
 	if scope == "" {
 		return nil
@@ -2272,6 +2279,14 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 	return tx.Commit()
 }
 
+// reportTSNow is the package-level clock hook normalizeReportTS reads "now"
+// from when applying the #337 future bound, following the same
+// swap-in-test/restore-in-cleanup pattern as pruneNeighborMetricsNow later in
+// this file: production always leaves this as time.Now, and the #337 tests pin
+// it to a fixed instant so "far future" is deterministic rather than racing the
+// wall clock.
+var reportTSNow = time.Now
+
 // normalizeReportTS parses an observer report timestamp and returns it in
 // canonical UTC RFC3339 form ("2006-01-02T15:04:05Z"). It accepts both the
 // firmware's fractional/offset form (e.g. "2026-07-26T09:43:48.000000+00:00")
@@ -2279,16 +2294,60 @@ func (s *Store) UpdateNodeDefaultScopeConfirmed(pubkey, scope, reportedAt string
 // the caller writes an empty configured_scope_at and skips the ordering guard;
 // this keeps every stored timestamp either canonical or empty, never a mix of
 // offset/precision formats that would break lexicographic last-write-wins.
+//
+// #337: a timestamp more than maxReportFutureSkew ahead of now is also
+// rejected, returning "" exactly like an unparseable one. Every evidence and
+// freshness path in the report pipeline funnels through here —
+// UpdateNodeConfiguredScope, UpdateNodeDefaultScopeConfirmed,
+// TouchObserverNeighborsReport, ReplaceObserverNeighbors,
+// RecordObserverNeighborMetrics and handleNeighborsReport's log line — so the
+// bound applies to all of them from one place rather than being bolted onto
+// one helper.
+//
+// The bound matters because ordering here is lexicographic on the canonical
+// RFC3339 string. A publisher-chosen timestamp far in the future therefore
+// wins every subsequent comparison until real time catches up: a single
+// year-9999 report would pin configured_scope / default_scope for millennia,
+// and would be even worse on the freshness path, where
+// TouchObserverNeighborsReport stores MAX(stored, incoming) and
+// ReplaceObserverNeighbors then skips any report whose timestamp is not the
+// stored one — permanently freezing that observer's Direct Neighbors
+// snapshot. Rejecting rather than clamping to now() is the same contract the
+// invalid-timestamp case already has (#7/#8/#9): the ingestor never
+// substitutes its own receive time for a timestamp the publisher got wrong,
+// because that would launder a bad report into fresh-looking evidence.
+//
+// A valid, in-window timestamp is NOT an authentication signal — see the
+// trust model in neighbor_report_bounds.go.
 func normalizeReportTS(raw string) string {
-	if raw == "" {
+	t, ok := parseReportTS(raw)
+	if !ok || reportTSTooFarAhead(t) {
 		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// parseReportTS is normalizeReportTS's layout-matching half, split out so
+// handleNeighborsReport can tell the two rejection reasons apart for its
+// single per-report log line (an unparseable envelope and a far-future one are
+// different observer faults) without duplicating the accepted layout list.
+func parseReportTS(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, raw); err == nil {
-			return t.UTC().Format(time.RFC3339)
+			return t, true
 		}
 	}
-	return ""
+	return time.Time{}, false
+}
+
+// reportTSTooFarAhead is normalizeReportTS's #337 future bound (see
+// maxReportFutureSkew for why 15 minutes). A timestamp at exactly the
+// tolerance boundary is accepted; one byte past it is not.
+func reportTSTooFarAhead(t time.Time) bool {
+	return t.After(reportTSNow().UTC().Add(maxReportFutureSkew))
 }
 
 // UpdateNodeConfiguredScope records the region scopes a node has CONFIGURED,
@@ -2327,6 +2386,15 @@ func (s *Store) UpdateNodeConfiguredScope(pubkey, scope, reportedAt string) erro
 	// usable, so malformed/missing timestamps do the least possible work.
 	reportedAt = normalizeReportTS(reportedAt)
 	if reportedAt == "" {
+		return nil
+	}
+	// #337: an oversized scope string is malformed input, not evidence.
+	// Rejected before normalization — both so a hostile string is never
+	// expanded and stored, and so an over-limit report cannot clobber
+	// previously confirmed evidence the way an accepted-but-truncated one
+	// would. Checked here rather than only at the handler so the bound holds
+	// for every caller of this method.
+	if reportScopeTooLong(scope) {
 		return nil
 	}
 	scope = normalizeConfiguredScopeList(scope)
@@ -2381,7 +2449,7 @@ func (s *Store) TouchObserverNeighborsReport(observerID, reportedAt string) erro
 // carrying enough to populate the observer_neighbors and
 // observer_neighbor_metrics tables.
 type ObserverNeighborEntry struct {
-	Pubkey       string   // lowercase, already validated non-empty by the caller
+	Pubkey       string   // full 64-char node key; re-validated by both writers below (#337)
 	Scopes       string   // normalized "#"-prefixed form; empty for timeout entries
 	Status       string   // "responded" | "timeout"
 	SNR          *float64 // dBm signal-to-noise for this direct neighbor; present regardless of status
@@ -2428,10 +2496,17 @@ func (s *Store) ReplaceObserverNeighbors(observerID string, neighbors []Observer
 	}
 	defer stmt.Close()
 	for _, n := range neighbors {
-		if n.Pubkey == "" {
+		// #337: observer_neighbors rows are inserted verbatim with no
+		// foreign key back to nodes, so a malformed key becomes a permanent
+		// row that can never join to anything. Re-validate here, at the row-
+		// creating boundary, rather than trusting the caller: the full key is
+		// preserved (lowercased, never truncated) so node identity is
+		// unchanged for every key that passes.
+		pubkey, ok := normalizeNodePubkey(n.Pubkey)
+		if !ok {
 			continue
 		}
-		if _, err := stmt.Exec(observerID, n.Pubkey, n.Scopes, n.Status, reportedAt); err != nil {
+		if _, err := stmt.Exec(observerID, pubkey, n.Scopes, n.Status, reportedAt); err != nil {
 			return err
 		}
 	}
@@ -2461,14 +2536,19 @@ func (s *Store) RecordObserverNeighborMetrics(observerID string, neighbors []Obs
 	}
 	defer stmt.Close()
 	for _, n := range neighbors {
-		if n.Pubkey == "" || n.SNR == nil {
+		// #337: same row-creating boundary as ReplaceObserverNeighbors, and
+		// the more important of the two — this table is append-only
+		// time-series, so a malformed key would accrue one junk row per
+		// report until retention eventually ages them out.
+		pubkey, ok := normalizeNodePubkey(n.Pubkey)
+		if !ok || n.SNR == nil {
 			continue
 		}
 		var heardSecsAgo interface{}
 		if n.HeardSecsAgo != nil {
 			heardSecsAgo = *n.HeardSecsAgo
 		}
-		if _, err := stmt.Exec(observerID, n.Pubkey, reportedAt, *n.SNR, heardSecsAgo); err != nil {
+		if _, err := stmt.Exec(observerID, pubkey, reportedAt, *n.SNR, heardSecsAgo); err != nil {
 			return err
 		}
 	}
