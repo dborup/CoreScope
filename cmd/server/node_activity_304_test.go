@@ -220,6 +220,46 @@ func TestNodeActivity24hAddPreFilterKeepsBoundaryPackets(t *testing.T) {
 	}
 }
 
+// TestNodeActivity24hPreFilterIgnoresFractionWidth covers #351 R3:
+// RFC3339Nano trims trailing zeros, so WindowStart can carry fewer fraction
+// digits than a stamp ("…:00Z" vs the ingestor's "…:00.100Z"), and a plain
+// string compare then sorts an in-window stamp below the bound. The
+// pre-filter must keep every in-window packet whatever the digit counts.
+func TestNodeActivity24hPreFilterIgnoresFractionWidth(t *testing.T) {
+	cases := []struct {
+		name   string
+		nanos  int
+		offset time.Duration
+		layout string
+	}{
+		{"whole-second now, ms stamp", 0, 100 * time.Millisecond, "2006-01-02T15:04:05.000Z07:00"},
+		{"whole-second now, nano stamp", 0, time.Nanosecond, time.RFC3339Nano},
+		{"trimmed .5 now, ms stamp", 500_000_000, time.Millisecond, "2006-01-02T15:04:05.000Z07:00"},
+		{"trimmed .5 now, us stamp", 500_000_000, time.Microsecond, "2006-01-02T15:04:05.000000Z07:00"},
+		{"exact start, ms stamp", 500_000_000, 0, "2006-01-02T15:04:05.000Z07:00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 10, 7, 13, 17, 0, tc.nanos, time.UTC)
+			start := now.Add(-24 * time.Hour)
+			a := newNodeActivity24h(now, start)
+			a.add(&StoreTx{FirstSeen: start.Add(tc.offset).Format(tc.layout)})
+			if a.Buckets[0].Count != 1 {
+				t.Fatalf("WindowStart=%s, stamp=%s: in-window packet dropped (bucket 0 = %d)",
+					a.WindowStart, start.Add(tc.offset).Format(tc.layout), a.Buckets[0].Count)
+			}
+			// One millisecond before the window must still be dropped.
+			b := newNodeActivity24h(now, start)
+			b.add(&StoreTx{FirstSeen: start.Add(-time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")})
+			for i, bk := range b.Buckets {
+				if bk.Count != 0 {
+					t.Fatalf("pre-window packet counted in bucket %d", i)
+				}
+			}
+		})
+	}
+}
+
 // Test351F1StartupCoverageHonoursRetentionWindow covers #351 F1: the startup
 // coverage ratio must be measured against the rows LoadChunked actually
 // targeted (the retained window), not a raw COUNT(*) over the whole table.
