@@ -4829,7 +4829,7 @@ func (s *Server) handlePruneGeoFilterStatus(w http.ResponseWriter, r *http.Reque
 // NaN/Inf; bufferKm finite, non-negative, ≤ 20000 km. Concurrent PUTs are
 // serialized via s.saveMu so they cannot race on the .tmp file.
 func (s *Server) handlePutConfigGeoFilter(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB cap
+	r.Body = http.MaxBytesReader(w, r.Body, geoFilterBodyLimit)
 
 	var body struct {
 		Polygon  [][2]float64 `json:"polygon"`

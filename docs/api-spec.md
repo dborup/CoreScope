@@ -187,28 +187,40 @@ They return `total` (the unfiltered/filtered count before pagination).
 - `400` — Bad request (missing/invalid params)
 - `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
 - `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
-- `413` — Request body over that endpoint's byte cap
+- `413` — Request body over the byte cap on `POST /api/decode` or `POST /api/packets/observations` (other capped endpoints report an over-cap body as `400`; see below)
 
 `HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
 
 #### Request-body byte caps
 
-Every endpoint that takes a request body caps it **in bytes, before the body is
-parsed**, and answers `413` with the error shape above when the cap is exceeded:
-
-| Endpoint | Cap |
-|---|---|
-| `POST /api/decode` | 4096 bytes |
-| `POST /api/packets/observations` | 65536 bytes |
-| `POST /api/path-inspect` | 4096 bytes |
-| `POST /api/channel-proposals` | 1024 bytes |
-
-The cap is on bytes received, not on the parsed value, so it does not depend on
-the body's shape: a body whose bulk sits in an unknown field, or in a string the
-endpoint never reads, is rejected the same way. It also does not depend on
+Every endpoint below caps its request body **in bytes, before the body is
+parsed**, so an oversized body is never decoded into memory. The cap is on
+bytes received, not on the parsed value, so it does not depend on the body's
+shape: a body whose bulk sits in an unknown field, or in a string the endpoint
+never reads, is rejected the same way. It also does not depend on
 `Content-Length` — a chunked request that declares no length, or one that
 understates it, is cut off at the same byte count. The caps are enforced by the
 application itself, not by a reverse proxy in front of it.
+
+The over-cap **status code is not uniform**. Only the two endpoints capped in
+issue #334 answer `413` with the shared error shape; the endpoints capped
+before it surface an over-cap body as a body that failed to decode, so they
+answer `400`:
+
+| Endpoint | Cap | Over the cap |
+|---|---|---|
+| `POST /api/decode` | 4096 bytes | `413` `{"error":"request body too large (max 4096 bytes)"}`, `application/json` |
+| `POST /api/packets/observations` | 65536 bytes | `413` `{"error":"request body too large (max 65536 bytes)"}`, `application/json` |
+| `POST /api/paths/inspect` | 4096 bytes | `400` `{"error":"invalid JSON"}`, served as `text/plain` |
+| `POST /api/channel-proposals` | 1024 bytes | `400` `{"error":"invalid request body"}`, `application/json` |
+| `PUT /api/config/geo-filter` (API key) | 1048576 bytes (1 MiB) | `400` `{"error":"invalid JSON"}`, `application/json` |
+
+Two gaps are known and deliberately not changed by #334, because both are
+API-visible changes with their own clients to check:
+
+- the three `400` rows above are not aligned on `413` + the shared error shape;
+- `POST /api/admin/prune-geo-filter?confirm=true` (API key) decodes a JSON body
+  with **no byte cap at all**.
 
 Caps are deliberately well above anything a legitimate client sends (see each
 endpoint below), so a per-endpoint semantic limit — such as the 200-hash limit

@@ -35,7 +35,7 @@ const (
 	// 254 bytes, i.e. 508 hex characters, i.e. a ~520-byte JSON body. 4 KiB
 	// leaves ~7x headroom over anything the decoder would not reject anyway.
 	// Matches the 4 KiB upstream uses, and the existing 4096-byte cap on
-	// POST /api/path-inspect (inspectBodyLimit).
+	// POST /api/paths/inspect (inspectBodyLimit).
 	maxDecodeBodyBytes = 4 << 10 // 4 KiB
 
 	// maxBatchObservationsBodyBytes caps POST /api/packets/observations. The
@@ -45,6 +45,13 @@ const (
 	// still gets the established 400 "too many hashes" rather than a 413.
 	// Matches the 64 KiB upstream uses.
 	maxBatchObservationsBodyBytes = 64 << 10 // 64 KiB
+
+	// geoFilterBodyLimit caps PUT /api/config/geo-filter (API key). It predates
+	// #334 and is named here only so the caps table in docs/api-spec.md can be
+	// pinned to the value the handler actually enforces; the handler still
+	// reports an over-cap body as 400 "invalid JSON", not 413. A polygon may
+	// carry 1000 points, so the cap is generous on purpose.
+	geoFilterBodyLimit = 1 << 20 // 1 MiB
 )
 
 // decodeLimitedJSONBody reads at most limit bytes of r.Body and unmarshals them

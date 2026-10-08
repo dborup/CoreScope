@@ -79,7 +79,7 @@ func routeDescriptions() map[string]routeMeta {
 			}},
 		"GET /api/packets/{id}":       {Summary: "Get packet detail", Tag: "packets"},
 		"GET /api/packets/timestamps": {Summary: "Get packet timestamp ranges", Tag: "packets"},
-		"POST /api/packets/observations": {Summary: "Batch submit observations", Description: "Returns the stored observations for up to 200 content hashes in one call: {\"hashes\": [...]} in, {\"results\": {\"<hash>\": [...]}} out. More than 200 hashes is 400. The request body is capped at 65536 bytes before it is parsed (#334) — a larger body is 413 regardless of its shape or of whether it declares a Content-Length, and the byte cap leaves roughly 17x headroom over a full 200-hash request, so the 200-hash limit is what a client actually meets first.", Tag: "packets",
+		"POST /api/packets/observations": {Summary: "Get observations for several packets", Description: "Returns the stored observations for up to 200 content hashes in one call: {\"hashes\": [...]} in, {\"results\": {\"<hash>\": [...]}} out. More than 200 hashes is 400. The request body is capped at 65536 bytes before it is parsed (#334) — a larger body is 413 regardless of its shape or of whether it declares a Content-Length, and the byte cap leaves roughly 17x headroom over a full 200-hash request, so the 200-hash limit is what a client actually meets first.", Tag: "packets",
 			Errors: []routeError{
 				{Status: "413", Description: "Request body over 65536 bytes (#334). Enforced before parsing, on bytes received, so it also applies to a chunked request with no Content-Length."},
 			}},
@@ -968,6 +968,22 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 			respSchema = meta.Response
 		}
 
+		responses := map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "Success",
+				"content": map[string]interface{}{
+					"application/json": map[string]interface{}{
+						"schema": respSchema,
+					},
+				},
+			},
+		}
+		if hasMeta {
+			for _, e := range meta.Errors {
+				responses[e.Status] = jsonErrorResponse(e.Description)
+			}
+		}
+
 		// Build operation
 		op := map[string]interface{}{
 			"summary": func() string {
@@ -976,26 +992,10 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 				}
 				return ri.path
 			}(),
-			"responses": map[string]interface{}{
-				"200": map[string]interface{}{
-					"description": "Success",
-					"content": map[string]interface{}{
-						"application/json": map[string]interface{}{
-							"schema": respSchema,
-						},
-					},
-				},
-			},
+			"responses": responses,
 		}
 
 		if hasMeta {
-			if len(meta.Errors) > 0 {
-				if resps, ok := op["responses"].(map[string]interface{}); ok {
-					for _, e := range meta.Errors {
-						resps[e.Status] = jsonErrorResponse(e.Description)
-					}
-				}
-			}
 			if meta.Description != "" {
 				op["description"] = meta.Description
 			}
@@ -1076,7 +1076,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 		"openapi": "3.0.3",
 		"info": map[string]interface{}{
 			"title":       "CoreScope API",
-			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). Endpoints that take a request body cap it in bytes before parsing it and answer 413 when it is over the cap (#334). Every error body is the ApiError shape. HEAD is served on every GET path.",
+			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). POST /api/decode and POST /api/packets/observations cap their request body in bytes before parsing it and answer 413 with the ApiError body when it is over the cap (#334); the other body-taking endpoints are capped too but report an over-cap body as 400 — docs/api-spec.md lists every cap and its status. HEAD is served on every GET path.",
 			"version":     version,
 			"license": map[string]interface{}{
 				"name": "MIT",

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -527,9 +528,9 @@ func TestAPISpecDocumentsBodyLimits(t *testing.T) {
 	doc := string(raw)
 	for _, want := range []string{
 		"Request-body byte caps",
-		"`413` — Request body over that endpoint's byte cap",
-		fmt.Sprintf("| `POST /api/decode` | %d bytes |", maxDecodeBodyBytes),
-		fmt.Sprintf("| `POST /api/packets/observations` | %d bytes |", maxBatchObservationsBodyBytes),
+		"`413` — Request body over the byte cap on `POST /api/decode` or `POST /api/packets/observations`",
+		fmt.Sprintf("| `POST /api/decode` | %d bytes | `413`", maxDecodeBodyBytes),
+		fmt.Sprintf("| `POST /api/packets/observations` | %d bytes | `413`", maxBatchObservationsBodyBytes),
 		fmt.Sprintf(`{ "error": "request body too large (max %d bytes)" }`, maxDecodeBodyBytes),
 		fmt.Sprintf(`{ "error": "request body too large (max %d bytes)" }`, maxBatchObservationsBodyBytes),
 		"## POST /api/packets/observations",
@@ -538,4 +539,252 @@ func TestAPISpecDocumentsBodyLimits(t *testing.T) {
 			t.Errorf("docs/api-spec.md does not document %q", want)
 		}
 	}
+}
+
+// The caps table has to describe the endpoints it lists as they actually
+// behave: the right route names, the right caps, and the right status code —
+// including the endpoints that answer 400 rather than 413. A table that
+// overclaims is worse than no table, because a client trusts it.
+func TestAPISpecCapsTableMatchesRealBehaviour(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/api-spec.md")
+	if err != nil {
+		t.Fatalf("read api-spec.md: %v", err)
+	}
+	doc := string(raw)
+
+	for _, want := range []string{
+		// Endpoints capped before #334: still 400, and said so.
+		fmt.Sprintf("| `POST /api/paths/inspect` | %d bytes | `400`", inspectBodyLimit),
+		fmt.Sprintf("| `POST /api/channel-proposals` | %d bytes | `400`", maxProposalBodyBytes),
+		fmt.Sprintf("| `PUT /api/config/geo-filter` (API key) | %d bytes (1 MiB) | `400`", geoFilterBodyLimit),
+		// The one body-taking route with no cap at all.
+		"`POST /api/admin/prune-geo-filter?confirm=true`",
+		"**no byte cap at all**",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("docs/api-spec.md does not document %q", want)
+		}
+	}
+
+	// /api/path-inspect is not a route; it 404s. The real path is
+	// /api/paths/inspect.
+	if strings.Contains(doc, "/api/path-inspect") {
+		t.Errorf("docs/api-spec.md still names the non-existent route /api/path-inspect")
+	}
+}
+
+// info.description is the first thing an API consumer reads. It must not claim
+// a blanket 413 the implementation does not give (#334 review F2).
+func TestOpenAPIDescriptionDoesNotOverclaim413(t *testing.T) {
+	router := mux.NewRouter()
+	srv, _ := setupNoStoreServer(t)
+	srv.RegisterRoutes(router)
+	spec := buildOpenAPISpec(router, "test")
+
+	info, _ := spec["info"].(map[string]interface{})
+	desc, _ := info["description"].(string)
+	if desc == "" {
+		t.Fatalf("spec info has no description")
+	}
+	for _, want := range []string{
+		"POST /api/decode and POST /api/packets/observations cap their request body",
+		"413",
+		"report an over-cap body as 400",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("info.description does not say %q; got %q", want, desc)
+		}
+	}
+	if strings.Contains(desc, "Endpoints that take a request body cap it in bytes before parsing it and answer 413") {
+		t.Errorf("info.description still claims every body-taking endpoint answers 413: %q", desc)
+	}
+}
+
+// The summary is what shows up in the route list, so it must not contradict the
+// description: this route returns observations, it does not submit them
+// (#334 review F5).
+func TestBatchObservationsSummaryMatchesBehaviour(t *testing.T) {
+	meta, ok := routeDescriptions()["POST /api/packets/observations"]
+	if !ok {
+		t.Fatalf("POST /api/packets/observations has no route metadata")
+	}
+	if strings.Contains(strings.ToLower(meta.Summary), "submit") {
+		t.Errorf("summary %q says the route submits observations; it returns them", meta.Summary)
+	}
+	if !strings.Contains(strings.ToLower(meta.Summary), "observations") {
+		t.Errorf("summary %q does not mention observations", meta.Summary)
+	}
+}
+
+// --- The cap must bound what the handler READS, not just what it answers ---
+//
+// A handler that reads the whole body and only then checks its size answers
+// exactly the same 413 as one that stops at the cap, so no status-code
+// assertion can tell the two apart — and the second one is the memory
+// regression #334 exists to prevent. The tests below therefore assert on the
+// bytes the handler pulled off the body, which is the actual property.
+
+// errEndlessBodyHardStop aborts a runaway read instead of letting the test hang
+// or allocate without bound. Reaching it is itself a failure signal.
+var errEndlessBodyHardStop = errors.New("endless body hard stop reached")
+
+const (
+	// endlessBodyHardStop is how far a handler is allowed to get before the
+	// body gives up on it. Orders of magnitude above both caps, so only a
+	// handler with no bound at all can reach it.
+	endlessBodyHardStop = 8 << 20 // 8 MiB
+
+	// bodyReadSlack is the margin allowed on top of the cap. http.MaxBytesReader
+	// reads at most limit+1 bytes from the underlying body (it trims each Read
+	// to the remaining budget plus one byte, which is all it needs to know the
+	// limit was passed), so one page of slack is generous while still being
+	// ~2000x below endlessBodyHardStop.
+	bodyReadSlack = 4 << 10
+)
+
+// countingEndlessBody is a request body that never ends: a single '{' followed
+// by spaces forever. It counts every byte it hands out.
+type countingEndlessBody struct {
+	read    int64
+	started bool
+}
+
+func (c *countingEndlessBody) Read(p []byte) (int, error) {
+	if c.read >= endlessBodyHardStop {
+		return 0, errEndlessBodyHardStop
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := len(p)
+	if remaining := endlessBodyHardStop - c.read; int64(n) > remaining {
+		n = int(remaining)
+	}
+	for i := 0; i < n; i++ {
+		p[i] = ' '
+	}
+	if !c.started {
+		// Looks like the start of a JSON object, so a handler that streams the
+		// body into a decoder keeps asking for more rather than failing early.
+		p[0] = '{'
+		c.started = true
+	}
+	c.read += int64(n)
+	return n, nil
+}
+
+func (c *countingEndlessBody) Close() error { return nil }
+
+// countingReader counts the bytes read from a finite body.
+type countingReader struct {
+	r    io.Reader
+	read int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	return n, err
+}
+
+func (c *countingReader) Close() error { return nil }
+
+// bodyLimitedEndpoints is the set of routes decodeLimitedJSONBody guards, with
+// the cap each one enforces.
+func bodyLimitedEndpoints() []struct {
+	path  string
+	limit int64
+} {
+	return []struct {
+		path  string
+		limit int64
+	}{
+		{"/api/decode", maxDecodeBodyBytes},
+		{"/api/packets/observations", maxBatchObservationsBodyBytes},
+	}
+}
+
+// An endless body must be cut off at the cap. A handler that buffers the whole
+// request before measuring it would keep pulling until the hard stop.
+func TestBodyLimitsStopReadingAtTheCap(t *testing.T) {
+	_, router := setupNoStoreServer(t)
+
+	for _, ep := range bodyLimitedEndpoints() {
+		t.Run(ep.path, func(t *testing.T) {
+			body := &countingEndlessBody{}
+			req := httptest.NewRequest("POST", ep.path, body)
+			req.Header.Set("Content-Type", "application/json")
+			req.ContentLength = -1 // as a chunked request arrives
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if body.read > ep.limit+bodyReadSlack {
+				t.Errorf("handler read %d bytes of an endless body; the cap is %d (allowed at most %d). "+
+					"The byte cap has to be enforced while reading, not checked after the body is already buffered.",
+					body.read, ep.limit, ep.limit+bodyReadSlack)
+			}
+			assertJSONError(t, w, http.StatusRequestEntityTooLarge)
+		})
+	}
+}
+
+// The same property on a finite body: a request far over the cap must not be
+// drained in full before it is rejected.
+func TestBodyLimitsDoNotDrainAnOversizedBody(t *testing.T) {
+	_, router := setupNoStoreServer(t)
+
+	for _, ep := range bodyLimitedEndpoints() {
+		t.Run(ep.path, func(t *testing.T) {
+			raw := `{"x":"` + strings.Repeat("A", int(16*ep.limit)) + `"}`
+			body := &countingReader{r: strings.NewReader(raw)}
+			req := httptest.NewRequest("POST", ep.path, body)
+			req.Header.Set("Content-Type", "application/json")
+			req.ContentLength = int64(len(raw))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if body.read > ep.limit+bodyReadSlack {
+				t.Errorf("handler read %d bytes of a %d-byte body; the cap is %d (allowed at most %d)",
+					body.read, len(raw), ep.limit, ep.limit+bodyReadSlack)
+			}
+			assertJSONError(t, w, http.StatusRequestEntityTooLarge)
+		})
+	}
+}
+
+// --- Trailing data after the JSON body (#334 F3) ---
+//
+// Deliberate behaviour change: json.Unmarshal rejects anything but whitespace
+// after the JSON value, while the json.Decoder.Decode these handlers used
+// before silently ignored it. That matches decodeSingleJSONObject on
+// POST /api/channel-proposals, and the frontend only ever sends
+// JSON.stringify output, so nothing legitimate regresses. Pinned here so it
+// stays a decision rather than drifting back.
+func TestBodyLimitsRejectTrailingData(t *testing.T) {
+	_, router := setupNoStoreServer(t)
+
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"decode: junk after the object", "/api/decode", `{"hex":"0200"} trailing`},
+		{"decode: a second JSON object", "/api/decode", `{"hex":"0200"}{"hex":"zz"}`},
+		{"batch: junk after the object", "/api/packets/observations", `{"hashes":[]} junk`},
+		{"batch: a second JSON object", "/api/packets/observations", `{"hashes":[]}{"hashes":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertJSONError(t, postBody(router, tc.path, tc.body), http.StatusBadRequest)
+		})
+	}
+
+	// Trailing whitespace is valid JSON and must still be accepted — that is
+	// what the boundary tests pad with.
+	t.Run("trailing whitespace is still accepted", func(t *testing.T) {
+		w := postBody(router, "/api/decode", `{"hex":"0200"}`+"\n\t  ")
+		if w.Code != http.StatusOK {
+			t.Fatalf("want 200, got %d (body %q)", w.Code, w.Body.String())
+		}
+	})
 }
