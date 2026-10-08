@@ -529,8 +529,8 @@ func TestAPISpecDocumentsBodyLimits(t *testing.T) {
 	for _, want := range []string{
 		"Request-body byte caps",
 		"`413` — Request body over the byte cap on `POST /api/decode` or `POST /api/packets/observations`",
-		fmt.Sprintf("| `POST /api/decode` | %d bytes | `413`", maxDecodeBodyBytes),
-		fmt.Sprintf("| `POST /api/packets/observations` | %d bytes | `413`", maxBatchObservationsBodyBytes),
+		fmt.Sprintf("| `POST /api/decode` | %d bytes | bytes received, before parsing | `413`", maxDecodeBodyBytes),
+		fmt.Sprintf("| `POST /api/packets/observations` | %d bytes | bytes received, before parsing | `413`", maxBatchObservationsBodyBytes),
 		fmt.Sprintf(`{ "error": "request body too large (max %d bytes)" }`, maxDecodeBodyBytes),
 		fmt.Sprintf(`{ "error": "request body too large (max %d bytes)" }`, maxBatchObservationsBodyBytes),
 		"## POST /api/packets/observations",
@@ -554,12 +554,12 @@ func TestAPISpecCapsTableMatchesRealBehaviour(t *testing.T) {
 
 	for _, want := range []string{
 		// Endpoints capped before #334: still 400, and said so.
-		fmt.Sprintf("| `POST /api/paths/inspect` | %d bytes | `400`", inspectBodyLimit),
-		fmt.Sprintf("| `POST /api/channel-proposals` | %d bytes | `400`", maxProposalBodyBytes),
-		fmt.Sprintf("| `PUT /api/config/geo-filter` (API key) | %d bytes (1 MiB) | `400`", geoFilterBodyLimit),
+		fmt.Sprintf("| `POST /api/paths/inspect` | %d bytes | the streaming decoder | `400`", inspectBodyLimit),
+		fmt.Sprintf("| `POST /api/channel-proposals` | %d bytes | the streaming decoder | `400`", maxProposalBodyBytes),
+		fmt.Sprintf("| `PUT /api/config/geo-filter` (API key) | %d bytes (1 MiB) | the streaming decoder | `400`", geoFilterBodyLimit),
 		// The one body-taking route with no cap at all.
 		"`POST /api/admin/prune-geo-filter?confirm=true`",
-		"**no byte cap at all**",
+		"**no limit at all**",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("docs/api-spec.md does not document %q", want)
@@ -589,7 +589,8 @@ func TestOpenAPIDescriptionDoesNotOverclaim413(t *testing.T) {
 	for _, want := range []string{
 		"POST /api/decode and POST /api/packets/observations cap their request body",
 		"413",
-		"report an over-cap body as 400",
+		"bound their body on the JSON decoder instead",
+		"reports an over-cap body as 400",
 	} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("info.description does not say %q; got %q", want, desc)

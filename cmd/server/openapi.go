@@ -1076,7 +1076,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 		"openapi": "3.0.3",
 		"info": map[string]interface{}{
 			"title":       "CoreScope API",
-			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). POST /api/decode and POST /api/packets/observations cap their request body in bytes before parsing it and answer 413 with the ApiError body when it is over the cap (#334); the other body-taking endpoints are capped too but report an over-cap body as 400 — docs/api-spec.md lists every cap and its status. HEAD is served on every GET path.",
+			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). POST /api/decode and POST /api/packets/observations cap their request body in bytes before parsing it and answer 413 with the ApiError body when it is over the cap (#334); the other body-taking endpoints bound their body on the JSON decoder instead, which is weaker and reports an over-cap body as 400 — docs/api-spec.md lists every cap, how it is enforced, and its status. HEAD is served on every GET path.",
 			"version":     version,
 			"license": map[string]interface{}{
 				"name": "MIT",

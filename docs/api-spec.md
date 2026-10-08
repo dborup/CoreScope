@@ -193,34 +193,43 @@ They return `total` (the unfiltered/filtered count before pagination).
 
 #### Request-body byte caps
 
-Every endpoint below caps its request body **in bytes, before the body is
-parsed**, so an oversized body is never decoded into memory. The cap is on
-bytes received, not on the parsed value, so it does not depend on the body's
-shape: a body whose bulk sits in an unknown field, or in a string the endpoint
-never reads, is rejected the same way. It also does not depend on
-`Content-Length` — a chunked request that declares no length, or one that
-understates it, is cut off at the same byte count. The caps are enforced by the
-application itself, not by a reverse proxy in front of it.
+Every endpoint that takes a request body bounds it, and every cap is enforced
+by the application itself, not by a reverse proxy in front of it. **Neither the
+enforcement nor the status code is uniform**, so the table gives both per
+endpoint:
 
-The over-cap **status code is not uniform**. Only the two endpoints capped in
-issue #334 answer `413` with the shared error shape; the endpoints capped
-before it surface an over-cap body as a body that failed to decode, so they
-answer `400`:
+| Endpoint | Cap | Enforced on | Over the cap |
+|---|---|---|---|
+| `POST /api/decode` | 4096 bytes | bytes received, before parsing | `413` `{"error":"request body too large (max 4096 bytes)"}`, `application/json` |
+| `POST /api/packets/observations` | 65536 bytes | bytes received, before parsing | `413` `{"error":"request body too large (max 65536 bytes)"}`, `application/json` |
+| `POST /api/paths/inspect` | 4096 bytes | the streaming decoder | `400` `{"error":"invalid JSON"}`, served as `text/plain` |
+| `POST /api/channel-proposals` | 1024 bytes | the streaming decoder | `400` `{"error":"invalid request body"}`, `application/json` |
+| `PUT /api/config/geo-filter` (API key) | 1048576 bytes (1 MiB) | the streaming decoder | `400` `{"error":"invalid JSON"}`, `application/json` |
 
-| Endpoint | Cap | Over the cap |
-|---|---|---|
-| `POST /api/decode` | 4096 bytes | `413` `{"error":"request body too large (max 4096 bytes)"}`, `application/json` |
-| `POST /api/packets/observations` | 65536 bytes | `413` `{"error":"request body too large (max 65536 bytes)"}`, `application/json` |
-| `POST /api/paths/inspect` | 4096 bytes | `400` `{"error":"invalid JSON"}`, served as `text/plain` |
-| `POST /api/channel-proposals` | 1024 bytes | `400` `{"error":"invalid request body"}`, `application/json` |
-| `PUT /api/config/geo-filter` (API key) | 1048576 bytes (1 MiB) | `400` `{"error":"invalid JSON"}`, `application/json` |
+**Enforced on bytes received, before parsing** (the two rows issue #334
+covers) is the strict reading: the verdict depends only on how many bytes
+arrived. It does not depend on the body's shape — bulk sitting in an unknown
+field, or in a string the endpoint never reads, is rejected the same way — and
+it does not depend on `Content-Length`, so a chunked request that declares no
+length, or one that understates it, is cut off at the same byte count. A body
+of exactly the cap is accepted; one byte more is `413`, and the server stops
+reading there instead of buffering the rest.
 
-Two gaps are known and deliberately not changed by #334, because both are
-API-visible changes with their own clients to check:
+**Enforced on the streaming decoder** is weaker: the limit wraps the body and
+the JSON decoder reads through it, so the limit only bites when the JSON
+*value* runs past it. A body that is over the limit only because of data that
+follows the value is still accepted — for example a 6019-byte
+`POST /api/paths/inspect` body whose JSON object ends at byte 19 answers `200`
+despite the 4096-byte limit. When the limit does bite, the decoder reports a
+parse failure, which is why these rows answer `400` rather than `413`.
 
-- the three `400` rows above are not aligned on `413` + the shared error shape;
+Three gaps are known and deliberately not changed by #334, because each is an
+API-visible change with its own clients to check:
+
+- the three streaming rows are not enforced on bytes received;
+- they are not aligned on `413` + the shared error shape;
 - `POST /api/admin/prune-geo-filter?confirm=true` (API key) decodes a JSON body
-  with **no byte cap at all**.
+  with **no limit at all**.
 
 Caps are deliberately well above anything a legitimate client sends (see each
 endpoint below), so a per-endpoint semantic limit — such as the 200-hash limit
