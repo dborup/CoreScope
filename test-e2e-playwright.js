@@ -98,6 +98,26 @@ async function run() {
     assert(nav, 'Nav bar not found');
   });
 
+  await test('Regions map deep link renders observed repeaters without claiming RF coverage', async () => {
+    const repeater = (key, lat, lon) => ({ public_key: key, name: key, role: 'repeater', lat, lon,
+      transported_scopes_recent: ['#dk'], last_relayed: '2026-10-08T00:00:00Z' });
+    const nodes = [repeater('a', 55, 10), repeater('b', 55, 11), repeater('c', 56, 10)];
+    await page.route('**/api/nodes?*', route => route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ nodes, counts: { repeater: 3 }, total: 3 }) }));
+    try {
+      await page.goto(`${BASE}/#/regions?scope=%23dk`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.regions-status');
+      await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('3 positioned repeaters'));
+      assert(await page.locator('.regions-leaflet .leaflet-interactive').count() >= 3, 'repeater markers missing');
+      assert((await page.locator('.regions-status').textContent()).includes('not measured RF coverage'), 'coverage disclaimer missing');
+      assert(await page.locator('.regions-controls select').inputValue() === '#dk', 'scope deep link not selected');
+      await page.locator('.regions-controls select').selectOption('');
+      assert((await page.evaluate(() => location.hash)) === '#/regions', 'scope change not reflected in URL');
+    } finally {
+      await page.unroute('**/api/nodes?*');
+    }
+  });
+
   // #1137 follow-up: Aldrich webfont must actually load so the navbar logo SVG
   // renders in the intended typeface (not the silent monospace fallback).
   await test('#1137 Aldrich webfont is loaded for navbar logo SVG', async () => {
