@@ -1058,6 +1058,25 @@ Returned when the node is unknown or hidden (see Visibility).
 { "error": "Not found" }
 ```
 
+### Response `429`
+
+Returned when the report is **cold** (not cached) and too many other cold
+reports are already scanning the database. At most two cold reports compute at
+once, so a burst of different nodes/windows cannot occupy the read pool and
+slow unrelated endpoints; a cold request queues briefly for a slot and is only
+shed if the limit is still saturated. Warm (cached) responses are never
+affected, and concurrent requests for the *same* node and window still share
+one computation. Nothing is cached for a shed request — retry after
+`Retry-After` seconds and it recomputes normally.
+
+```
+Retry-After: 2
+```
+
+```json
+{ "error": "reach is busy computing other reports", "retryAfter": 2 }
+```
+
 ### Response `500`
 
 Returned when the scan fails, or when the live name lookup for visibility

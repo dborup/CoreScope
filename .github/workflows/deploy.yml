@@ -447,6 +447,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-147-packets-url-obs-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-165-grouped-hop-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-packet-detail-sender-hash-size-obs-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-353-path-hash-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-242-type-exclusions-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt

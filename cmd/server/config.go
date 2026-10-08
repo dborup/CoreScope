@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -1137,8 +1138,37 @@ func (c *Config) HiddenNamePrefixesGeneration() uint64 {
 	return c.hiddenPrefixesGen.Load()
 }
 
+// Test seams for the atomic config replacement in SaveGeoFilter (#340).
+// Production always uses the os functions; tests swap them to provoke
+// metadata, write and rename failures, which no portable filesystem setup can
+// trigger reliably.
+var (
+	configCreateTemp = os.CreateTemp
+	configRename     = os.Rename
+	configStatFile   = func(f *os.File) (os.FileInfo, error) { return f.Stat() }
+)
+
 // SaveGeoFilter writes the geo_filter section back to config.json on disk.
 // Pass gf=nil to remove the filter. The rest of config.json is preserved as-is.
+//
+// The replacement is atomic and permission-preserving (#340). config.json can
+// hold broker credentials, so a file deliberately restricted to 0600 must not
+// come back 0644 just because the geo filter was edited in the UI — and a
+// deliberately group-readable 0644 must not silently tighten either. Three
+// properties carry that:
+//
+//   - The mode is read from the same descriptor the contents are read from, so
+//     the bits written back belong to the bytes that were parsed. If that
+//     metadata is unavailable the save fails instead of guessing a default.
+//   - The replacement file is created under a unique name in the destination
+//     directory via os.CreateTemp (O_EXCL), so a pre-existing config.json.tmp
+//     — stale file, planted symlink or hard link to somewhere else — is never
+//     opened, never written through and never removed by this function.
+//   - The preserved mode is applied with an explicit chmod on our own
+//     descriptor, which makes the result independent of the process umask.
+//     Copying upstream's WriteFile mode argument would not do either: the mode
+//     argument is ignored for a file that already exists, and it is masked by
+//     the umask for one that does not.
 func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	var configPath string
 	for _, p := range []string{
@@ -1154,7 +1184,20 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 		return fmt.Errorf("config.json not found in %s", configDir)
 	}
 
-	data, err := os.ReadFile(configPath)
+	src, err := os.Open(configPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	info, err := configStatFile(src)
+	if err != nil {
+		src.Close()
+		return fmt.Errorf("stat config: %w", err)
+	}
+	mode := info.Mode().Perm()
+	data, err := io.ReadAll(src)
+	if cerr := src.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
@@ -1181,16 +1224,67 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	}
 	out = append(out, '\n')
 
-	// Atomic write: temp file + rename.
-	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0644); err != nil {
+	// Atomic write: unique temp file in the destination directory + rename.
+	tmpFile, err := configCreateTemp(filepath.Dir(configPath), filepath.Base(configPath)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmpFile.Name()
+	renamed := false
+	defer func() {
+		if renamed {
+			return
+		}
+		// Only ever our own uniquely named file; a pre-existing
+		// config.json.tmp is left alone.
+		tmpFile.Close()
+		os.Remove(tmpName)
+	}()
+
+	if err := tmpFile.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temp config: %w", err)
+	}
+	preserveConfigOwner(tmpFile, info)
+	if _, err := tmpFile.Write(out); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-	if err := os.Rename(tmp, configPath); err != nil {
-		os.Remove(tmp)
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("sync config: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := configRename(tmpName, configPath); err != nil {
 		return fmt.Errorf("rename config: %w", err)
 	}
+	renamed = true
 	return nil
+}
+
+// preserveConfigOwner best-effort carries the replaced file's uid/gid over to
+// its replacement. It is a no-op in the normal case, where the saving process
+// already owns the file it is rewriting — the only arrangement in which it can
+// write at all once the server runs as a non-root container user (#339).
+//
+// It matters only for a privileged process rewriting a bind-mounted config
+// owned by a host user: without the chown the file would silently become
+// root-owned and the host user could no longer edit it. An unprivileged
+// process cannot chown to a foreign uid, so the failure is ignored rather than
+// aborting a save whose security-relevant part — the permission bits — already
+// succeeded.
+func preserveConfigOwner(f *os.File, want os.FileInfo) {
+	wantUID, wantGID, ok := configFileOwnerIDs(want)
+	if !ok {
+		return
+	}
+	cur, err := configStatFile(f)
+	if err != nil {
+		return
+	}
+	if curUID, curGID, ok := configFileOwnerIDs(cur); ok && curUID == wantUID && curGID == wantGID {
+		return
+	}
+	_ = f.Chown(wantUID, wantGID)
 }
 
 // obsBlacklistSet lazily builds and caches the observerBlacklist as a set for O(1) lookups.
