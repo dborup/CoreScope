@@ -211,6 +211,27 @@ async function render(page, responses, width, height) {
       assert.equal(attrs.filter(a => a.title === QUOTE).length, 1, 'quoted name must render verbatim');
       assert.equal(await page.locator('[onmouseover]').count(), 0);
 
+      // #352: a card click opens health with the card's own opt-in URL, so
+      // the client cache answers it instead of a second request. The stub
+      // throws on any other route, which loadHealth shows as a failure.
+      await cards.nth(1).locator('.mnc-status-text').click();
+      const panel = page.locator('#homeHealth');
+      await page.waitForFunction(() => { const el = document.getElementById('homeHealth'); return el && !/Loading/.test(el.textContent); });
+      assert.equal(await panel.locator('.health-banner').count(), 1, `card click must render health from the card's request: ${await panel.innerText()}`);
+      assert.match(await panel.locator('.health-banner').innerText(), /Node 1/);
+      // A node outside My Mesh keeps the plain URL: no advert scan for it.
+      const routes = await page.evaluate(async (key) => {
+        const seen = [];
+        const real = api;
+        api = async (route, opts) => { seen.push(route); return real(route, opts); };
+        localStorage.setItem('meshcore-my-nodes', JSON.stringify(JSON.parse(localStorage.getItem('meshcore-my-nodes')).filter(n => n.pubkey !== key)));
+        document.querySelectorAll('.my-node-card')[1].querySelector('.mnc-status-text').click();
+        await new Promise(r => setTimeout(r, 0));
+        api = real;
+        return seen;
+      }, KEYS[1]);
+      assert.deepEqual(routes, [`/nodes/${KEYS[1]}/health`]);
+
       assert.deepEqual(errors, []);
       await context.close();
     }
