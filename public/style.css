@@ -5817,3 +5817,11 @@ body.embed #app.app-fixed {
 .privacy-page ul { padding-left: 1.3em; }
 .privacy-page li { margin: 6px 0; }
 .privacy-page a { color: var(--link-color); }
+/* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
+.regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
+.regions-page h1, .regions-page p { margin: 0; }
+.regions-note { color: var(--text-muted); max-width: 85ch; }
+.regions-controls { display: flex; gap: 12px; align-items: center; }
+.regions-controls select { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px; border-radius: 6px; }
+.regions-status { color: var(--text-muted); min-height: 2.4em; }
+.regions-leaflet { flex: 1; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; }
