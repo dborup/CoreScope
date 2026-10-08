@@ -581,6 +581,7 @@ jobs:
           CHROMIUM_REQUIRE=1 node test-a11y-1705-subpath-hop-prefix-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-a11y-1719-contrast-root-causes-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-nodes-favorite-rerender-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-xss-333-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-packet-trace-alignment-e2e.js 2>&1 | tee -a e2e-output.txt
           # Root E2Es repaired or ported to plain playwright in #189.
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-live-pulse-ring-weight-e2e.js 2>&1 | tee -a e2e-output.txt

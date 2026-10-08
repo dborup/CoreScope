@@ -13,6 +13,18 @@
 # We accept these as residual risk in exchange for a regex-only gate that
 # runs in <5s on every PR and surfaces actionable file:line evidence.
 #
+# #351 N4 / #333: the gate now flags an unescaped node-controlled ${…}
+# interpolation inside a QUOTED ATTRIBUTE of a template literal on a sink
+# line (e.g. `el.innerHTML = \`<span title="${o.observer_name}">\``), which
+# previously slipped through because the quote-stripper erased the
+# interpolation before the template-literal handler ran (see short_str
+# below). Residual limitation: a plain (non-template) double/single-quoted
+# string that contains a LITERAL "${allowlisted}" sequence on a sink line
+# is now also preserved and could be flagged; such literals are rare and a
+# sink-line false positive is cheap to wrap or opt out. The cross-line
+# `grid.innerHTML = cards.join('')` indirection (O9) is still NOT covered —
+# that needs the sink and the interpolation on the same line.
+#
 # Two modes:
 #   $0 --file <path>       Scan a single file. Exit 1 if any flagged sink
 #                          interpolates a node-controlled identifier
@@ -200,6 +212,16 @@ def strip(line):
     line = re.sub(r"//[^\n]*", "", line)
     def short_str(m, q):
         body = m.group(1)
+        # #351 N4 / #333: a ${...} interpolation that lands inside a quoted
+        # attribute of a template literal (e.g. `<span title="${o.name}">`)
+        # is seen by THIS quote-stripper before the template-literal handler
+        # below, because the attribute value is a double/single-quoted run.
+        # Without preserving the interpolation the node field is erased and
+        # the sink passes unflagged. Keep the ${...} fragments so the RHS
+        # audit still sees the node identifier (escaped ones peel to nothing).
+        interps = re.findall(r"\$\{[^}]*\}", body)
+        if interps:
+            return q + "".join(interps) + q
         if len(body) <= 32 and re.fullmatch(r"[A-Za-z0-9_:\-/.]+", body):
             return q + body + q
         return q + q
