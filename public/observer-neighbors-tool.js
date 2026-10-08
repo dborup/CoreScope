@@ -124,7 +124,9 @@
       '<div class="analytics-card" style="margin:12px 0">' +
         '<h3 style="margin:0 0 4px">Scopes CoreScope Doesn\'t Know About Yet (' + unknownScopes.length.toLocaleString() + ')</h3>' +
         '<p class="text-muted" style="margin:0 0 8px;font-size:0.85em">Region-scope names reported in the wild by neighbors\' OTA scope query, but not part of this deployment\'s configured regions. Might be worth adding to config -- or just neighboring mesh communities using their own naming.</p>' +
-        '<table class="data-table"><thead><tr><th>Scope</th><th style="text-align:right">Seen By</th><th>Example Neighbors</th>' + (scopeAdminKey ? '<th>Admin</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>' +
+        '<p class="text-muted obs-nb-scope-scroll-hint">Scroll the table sideways to see all columns and actions.</p>' +
+        '<div class="table-fluid-wrap" tabindex="0" aria-label="Unknown scopes table; scroll horizontally for all columns">' +
+        '<table class="data-table obs-nb-scope-table' + (scopeAdminKey ? ' has-actions' : '') + '"><thead><tr><th>Scope</th><th style="text-align:right">Seen By</th><th>Example Neighbors</th>' + (scopeAdminKey ? '<th>Admin</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '</div>';
   }
 
@@ -166,7 +168,7 @@
       return '<tr><td><code>' + escapeHtml(d.name) + '</code></td><td>' + escapeHtml(d.status) + '</td><td>' +
         (d.status === 'approved' ? scopeButton('revoke', d.name) : '') + '</td></tr>';
     }).join('');
-    wrap.innerHTML = rows ? '<table class="data-table"><thead><tr><th>Scope</th><th>Status</th><th>Action</th></tr></thead><tbody>' + rows + '</tbody></table>' :
+    wrap.innerHTML = rows ? '<div class="table-fluid-wrap" tabindex="0" aria-label="Region scope decisions table; scroll horizontally for all columns"><table class="data-table"><thead><tr><th>Scope</th><th>Status</th><th>Action</th></tr></thead><tbody>' + rows + '</tbody></table></div>' :
       '<p class="text-muted">No scope decisions yet.</p>';
   }
 
