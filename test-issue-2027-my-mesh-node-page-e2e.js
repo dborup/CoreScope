@@ -152,10 +152,19 @@ async function newHarness(browser) {
 }
 
 function stub(page, path_, data) {
-  return page.evaluate(({ p, d }) => { window.__apiResponders[p] = { data: d }; }, { p: path_, d: data });
+  return page.evaluate(({ p, d }) => {
+    window.__apiResponders[p] = { data: d };
+    // My Mesh cards opt into advert intervals on their existing health
+    // request, and Full health reuses that URL for claimed nodes. Nodes
+    // outside My Mesh fetch the unqualified URL.
+    if (p.endsWith('/health')) window.__apiResponders[p + '?include=advertIntervals'] = { data: d };
+  }, { p: path_, d: data });
 }
 function stubError(page, path_, message) {
-  return page.evaluate(({ p, m }) => { window.__apiResponders[p] = { error: new Error(m) }; }, { p: path_, m: message });
+  return page.evaluate(({ p, m }) => {
+    window.__apiResponders[p] = { error: new Error(m) };
+    if (p.endsWith('/health')) window.__apiResponders[p + '?include=advertIntervals'] = { error: new Error(m) };
+  }, { p: path_, m: message });
 }
 
 async function renderMyMesh(page, myNodes) {
@@ -384,7 +393,7 @@ function cardFor(page, pubkey) {
       // (or a leaked card click) has already recorded its calls by the time
       // the re-render lands.
       const added = await page.evaluate((n) => window.__apiCalls.slice(n), before);
-      assert.deepEqual(added, ['/nodes/' + encodeURIComponent(ERROR_PK) + '/health'],
+      assert.deepEqual(added, ['/nodes/' + encodeURIComponent(ERROR_PK) + '/health?include=advertIntervals'],
         'exactly one re-render of the remaining node and no health fetch for the removed one');
       const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]').map((n) => n.pubkey));
       assert.deepEqual(stored, [ERROR_PK], 'only the focused node is removed from My Mesh');
