@@ -19,7 +19,13 @@ type NodeActivity24h struct {
 	Complete      bool                 `json:"complete"`
 	start         time.Time
 	end           time.Time
+	// startSecond is start truncated to whole seconds in the fixed-width
+	// "2006-01-02T15:04:05" form; add() uses it as a string pre-filter.
+	startSecond string
 }
+
+// nodeActivitySecondLayout is fixed width: no fraction, no zone suffix.
+const nodeActivitySecondLayout = "2006-01-02T15:04:05"
 
 func newNodeActivity24h(now, coverageStart time.Time) NodeActivity24h {
 	end := now.UTC()
@@ -29,6 +35,7 @@ func newNodeActivity24h(now, coverageStart time.Time) NodeActivity24h {
 		WindowEnd:   end.Format(time.RFC3339Nano),
 		start:       start,
 		end:         end,
+		startSecond: start.Format(nodeActivitySecondLayout),
 	}
 	for i := range a.Buckets {
 		bucketStart := start.Add(time.Duration(i) * time.Hour)
@@ -50,18 +57,18 @@ func (a *NodeActivity24h) add(tx *StoreTx) {
 	if tx == nil {
 		return
 	}
-	// #351 F6: cheap pre-filter before the RFC3339Nano parse. WindowStart is
-	// the window lower bound at full nanosecond precision, so any FirstSeen
-	// that sorts strictly below it is older than the window and is dropped
-	// without parsing — the common case for a node whose in-memory history
-	// spans well past 24h. A same-instant stamp at lower precision sorts
-	// >= WindowStart (its shorter string compares greater once WindowStart's
-	// fraction digits run out), so an in-window packet is never skipped here;
-	// the exact bounds check below still runs for everything that survives.
-	// The upper bound is deliberately NOT string-filtered: WindowEnd carries
-	// now's sub-second precision, so a whole-second stamp inside the final
-	// second would sort after it and be dropped incorrectly.
-	if tx.FirstSeen < a.WindowStart {
+	// #351 F6/R3: cheap pre-filter before the RFC3339Nano parse, for the
+	// common case of a node whose in-memory history spans well past 24h.
+	// It compares against startSecond, the window start truncated to whole
+	// seconds, NOT WindowStart: RFC3339Nano trims trailing zeros, so the
+	// fraction widths of WindowStart and a stamp differ ("…:00Z" vs
+	// "…:00.100Z") and a full-string compare can sort an in-window stamp
+	// below the bound. The second prefix is fixed width, so a UTC stamp at
+	// or after the window start always sorts >= startSecond whatever its
+	// fraction. A stamp in the start's own second survives and the exact
+	// bounds check below decides it. The upper bound is deliberately NOT
+	// string-filtered, for the same fraction-width reason.
+	if tx.FirstSeen < a.startSecond {
 		return
 	}
 	when, err := time.Parse(time.RFC3339Nano, tx.FirstSeen)
@@ -77,7 +84,7 @@ func (a *NodeActivity24h) add(tx *StoreTx) {
 // can evict the oldest rows after oldestLoaded was set, so use the current
 // first row as the stricter lower bound when it is enabled.
 //
-// #351 F4: loadCoverage is read by the caller (getNodeHealthAt) BEFORE it
+// #351 F4: loadCoverage is read by the caller (GetNodeHealth) BEFORE it
 // takes s.mu and passed in here, so this function never acquires bgErrMu
 // while holding s.mu. bgErrMu exists precisely so its readers need not
 // synchronise on s.mu (store.go:530); nesting s.mu → bgErrMu would be the
