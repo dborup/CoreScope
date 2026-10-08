@@ -786,6 +786,103 @@ test('M10 customize-v2.js has no hard-coded carto-* id left', () => {
     'hard-coded CARTO provider id(s) in the frontend:\n    ' + offenders.join('\n    '));
 });
 
-// ─── Summary ────────────────────────────────────────────────────────────
-console.log('\n' + (failed === 0 ? '✅' : '❌') + ' #332: ' + passed + ' passed, ' + failed + ' failed');
-process.exit(failed === 0 ? 0 : 1);
+// #364: exercise the real async client-config loader, with browser-like
+// window/global identity. A registry fallback is not an explicit choice.
+async function configuredStack(config, theme, storedLight) {
+  const ctx = makeSandbox({ theme: theme || 'light' });
+  Object.assign(ctx, ctx.window);
+  ctx.window = ctx;
+  if (storedLight) ctx.localStorage.setItem('mc-light-tile-provider', storedLight);
+  ctx.fetch = () => Promise.resolve({ json: () => Promise.resolve(config) });
+  loadInto(ctx, path.join('public', 'roles.js'));
+  loadInto(ctx, path.join('public', 'map-tile-providers.js'));
+  await ctx.MeshConfigReady;
+  return ctx;
+}
+async function asyncTest(name, fn) {
+  try { await fn(); passed++; console.log('  ✅ ' + name); }
+  catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+}
+async function legacyLightTests() {
+  const url = 'https://private.example/tiles/{z}/{x}/{y}.png';
+  for (const [label, config] of [
+    ['tiles.light', { tiles: { light: url } }],
+    ['map.tiles.lightUrl', { map: { tiles: { lightUrl: url } } }],
+  ]) {
+    await asyncTest('#364 ' + label + ' overrides the implicit light fallback', async () => {
+      const ctx = await configuredStack(config);
+      assert.strictEqual(ctx.TILE_LIGHT, url, 'the config loader actually ran');
+      assert.strictEqual(ctx.getTileUrl(), url);
+      const spec = ctx.MC_getTileSpec('light');
+      assert.strictEqual(spec.url, url, 'every resolver sees the same override');
+      assert.strictEqual(spec.invertFilter, null);
+      assert.strictEqual(spec.refUrl, null);
+      assert.strictEqual(ctx.getActiveTileProvider(), null, 'an unknown vendor is not an OSM registry provider');
+      // Synthetic unused metadata makes borrowing the fallback provider's
+      // credit, reference overlay or inversion observable in the real helper.
+      Object.assign(ctx.MC_TILE_PROVIDERS['osm-standard'], {
+        attribution: 'UNUSED VENDOR', refUrl: 'https://unused.example/labels/{z}/{x}/{y}', invertFilter: 'invert(1)',
+      });
+      const spy = makeTileLayerSpy();
+      ctx.L = spy.L;
+      const pane = { style: { filter: 'stale filter' } };
+      ctx.__map = { getPane: () => pane };
+      vm.runInContext(extractFn('public/nodes.js', '_applyTilesToNodeMap') + '\n_applyTilesToNodeMap(__map);', ctx);
+      assert.strictEqual(spy.calls.length, 1, 'an unknown vendor must not borrow a registry reference overlay');
+      assert.strictEqual(spy.calls[0].url, url);
+      assert.strictEqual(spy.calls[0].opts.attribution, '© OpenStreetMap contributors', 'preserve the historical generic fallback credit');
+      assert.strictEqual(pane.style.filter, '');
+    });
+    for (const stored of ['carto-light', 'osm-standard']) {
+      await asyncTest('#364 browser choice ' + stored + ' wins over ' + label, async () => {
+        const ctx = await configuredStack(config, 'light', stored);
+        assert.strictEqual(ctx.MC_getTileSpec('light').id, stored);
+        assert.notStrictEqual(ctx.getTileUrl(), url);
+        assert.ok(ctx.getActiveTileProvider());
+      });
+    }
+    await asyncTest('#364 invalid browser choice falls back to ' + label, async () => {
+      const ctx = await configuredStack(config, 'light', 'missing-provider');
+      assert.strictEqual(ctx.getTileUrl(), url);
+    });
+    await asyncTest('#364 ' + label + ' never replaces dark-provider tiles or their filter', async () => {
+      const ctx = await configuredStack(config, 'dark');
+      const spec = ctx.MC_getTileSpec('dark');
+      assert.strictEqual(spec.id, 'osm-dark');
+      assert.notStrictEqual(ctx.getTileUrl(), url);
+      assert.ok(spec.invertFilter);
+      ctx.MC_applyTileFilter();
+      assert.strictEqual(ctx.tilePane.style.filter, spec.invertFilter);
+    });
+  }
+  await asyncTest('#364 configured provider default wins over legacy URL; browser choice wins over both', async () => {
+    const config = { map: { tiles: { lightUrl: url, lightDefault: 'opentopomap', providers: { opentopomap: { enabled: true } } } } };
+    const ctx = await configuredStack(config);
+    assert.strictEqual(ctx.MC_getTileSpec('light').id, 'opentopomap');
+    assert.ok(ctx.getTileUrl().includes('tile.opentopomap.org'));
+    ctx.MC_setLightTileProvider('osm-standard');
+    assert.strictEqual(ctx.MC_getTileSpec('light').id, 'osm-standard');
+    assert.ok(ctx.getTileUrl().includes('tile.openstreetmap.org'));
+  });
+  await asyncTest('#364 unavailable configured provider and disabled cached provider recover to legacy URL', async () => {
+    const ctx = await configuredStack({ map: { tiles: { lightUrl: url, lightDefault: 'missing-provider', providers: { opentopomap: { enabled: false } } } } }, 'light', 'opentopomap');
+    assert.strictEqual(ctx.getTileUrl(), url);
+  });
+  await asyncTest('#364 explicit programmatic server default wins over legacy URL', async () => {
+    const ctx = await configuredStack({ tiles: { light: url } });
+    ctx.MC_setServerDefaultLightTileProvider('carto-light');
+    assert.strictEqual(ctx.MC_getTileSpec('light').id, 'carto-light');
+    assert.ok(ctx.getTileUrl().includes('cartocdn.com'));
+  });
+  await asyncTest('#364 custom URL keeps generic attribution even when an unused OSM vendor is configured', async () => {
+    const ctx = await configuredStack({ map: { tiles: { lightUrl: url, providers: { osm: { enabled: true, provider: 'maptiler', token: 'synthetic-token' } } } } });
+    assert.strictEqual(ctx.getTileUrl(), url);
+    assert.strictEqual(ctx.MC_getTileSpec('light').attribution, '© OpenStreetMap contributors');
+    assert.strictEqual(ctx.getActiveTileProvider(), null);
+  });
+}
+
+legacyLightTests().then(() => {
+  console.log('\n' + (failed === 0 ? '✅' : '❌') + ' #332: ' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed === 0 ? 0 : 1);
+}).catch((e) => { console.error(e); process.exit(1); });

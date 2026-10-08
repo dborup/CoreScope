@@ -81,9 +81,21 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
   // One fresh context per surface so the recorded request list is scoped,
   // and so a tile cached by an earlier page can't mask a later regression.
-  async function withPage(theme, fn) {
+  async function withPage(theme, fn, options = {}) {
     const ctx = await browser.newContext();
     const tiles = [];
+    if (options.clientConfig) {
+      await ctx.route(BASE + '/api/config/client', async (route) => {
+        const response = await route.fetch();
+        const config = await response.json();
+        // Override only the tile config; keep the fixture's other feature
+        // switches. Legacy cfg.tiles has precedence in the real loader.
+        delete config.tiles;
+        if (options.clientConfig.tiles) config.tiles = options.clientConfig.tiles;
+        config.map = Object.assign({}, config.map, options.clientConfig.map || {});
+        await route.fulfill({ response, json: config });
+      });
+    }
     // Record + stub off-origin IMAGE requests only (tiles). Scripts and
     // stylesheets — Leaflet, Chart.js — must load for real or no map exists.
     await ctx.route(/^https?:\/\/(?!localhost|127\.0\.0\.1)/i, async (route) => {
@@ -97,14 +109,17 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     // 'meshcore-theme' is the key index.html's inline bootstrap and
     // app.js applyTheme() both read; setting data-theme alone is undone by
     // them on load.
-    await ctx.addInitScript((t) => {
-      try { localStorage.setItem('meshcore-theme', t); } catch (_) {}
+    await ctx.addInitScript(({ theme: t, lightProvider }) => {
+      try {
+        localStorage.setItem('meshcore-theme', t);
+        if (lightProvider) localStorage.setItem('mc-light-tile-provider', lightProvider);
+      } catch (_) {}
       const apply = () => {
         try { document.documentElement.setAttribute('data-theme', t); } catch (_) {}
       };
       apply();
       document.addEventListener('DOMContentLoaded', apply);
-    }, theme);
+    }, { theme, lightProvider: options.lightProvider });
     const page = await ctx.newPage();
     page.setDefaultTimeout(15000);
     page.on('pageerror', (e) => console.error('    [pageerror]', e.message));
@@ -299,6 +314,52 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await page.waitForTimeout(1500);
         check('customizer geo-filter modal', tiles, { expectHost: EXPECT.light });
       });
+    });
+  }
+
+  // #364: the operator's legacy URL must reach a real inset's network
+  // requests, not just a resolver assertion. Tiles are intercepted above.
+  const legacyUrl = 'https://private.example/tiles/{z}/{x}/{y}.png';
+  for (const [label, clientConfig] of [
+    ['tiles.light', { tiles: { light: legacyUrl } }],
+    ['map.tiles.lightUrl', { map: { tiles: { lightUrl: legacyUrl } } }],
+  ]) {
+    for (const theme of ['light', 'dark']) {
+      await step(`#364 ${label}: node inset uses ${theme === 'light' ? 'legacy URL' : 'unchanged dark provider'}`, async () => {
+        await withPage(theme, async (page, tiles) => {
+          await page.goto(BASE + '/#/nodes/' + NODE_KEY, { waitUntil: 'domcontentloaded' });
+          await page.waitForSelector('#nodeFullMap .leaflet-tile-pane', { state: 'attached' });
+          await page.waitForTimeout(600);
+          check(label, tiles, { expectHost: theme === 'light' ? 'private.example' : EXPECT.dark });
+          await checkFilter(page, '#nodeFullMap .leaflet-tile-pane', theme, label);
+          if (theme === 'dark') assert(!tiles.some((u) => u.includes('private.example')), 'the legacy LIGHT URL leaked into dark tiles');
+        }, { clientConfig });
+      });
+    }
+    await step(`#364 ${label}: explicit OSM selection recovers from failed legacy tiles`, async () => {
+      await withPage('light', async (page, tiles) => {
+        // Exercise a failed custom provider before switching to the built-in
+        // id explicitly. Choosing osm-standard must not be mistaken for an
+        // implicit fallback; a subsequent mount must stop using the URL.
+        let failedRequests = 0;
+        await page.route('https://private.example/**', (route) => {
+          failedRequests++;
+          return route.fulfill({ status: 503, body: 'synthetic tile failure' });
+        });
+        await page.goto(BASE + '/#/nodes/' + NODE_KEY, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#nodeFullMap .leaflet-tile-pane', { state: 'attached' });
+        await page.waitForTimeout(600);
+        assert(failedRequests > 0, 'the legacy tile URL never produced a failing network request');
+        assert(await page.evaluate(() => window.getTileUrl()) === legacyUrl, 'the failing legacy provider was not active');
+        await page.evaluate(() => window.MC_setLightTileProvider('osm-standard'));
+        tiles.length = 0;
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#nodeFullMap .leaflet-tile-pane', { state: 'attached' });
+        await page.waitForTimeout(600);
+        check('explicit OSM recovery', tiles, { expectHost: OSM_HOST });
+        assert(!tiles.some((u) => u.includes('private.example')), 'legacy URL still masked explicit OSM choice');
+        await checkFilter(page, '#nodeFullMap .leaflet-tile-pane', 'light', label);
+      }, { clientConfig });
     });
   }
 

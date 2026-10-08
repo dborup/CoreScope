@@ -599,6 +599,9 @@
   // `tiles.light` and `map.tiles.darkUrl` / `lightUrl` config keys.
   window.TILE_DARK  = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
   window.TILE_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  // Runtime metadata for the registry, not a new config setting. An
+  // implicit provider fallback must not mask the operator's legacy URL.
+  window.MC_LIGHT_TILE_URL_OVERRIDE = null;
 
   function _tileThemeIsDark() {
     return document.documentElement.getAttribute('data-theme') === 'dark' ||
@@ -651,6 +654,12 @@
    * inset map credits the configured light provider instead of a generic
    * fallback. */
   window.getActiveTileProvider = function () {
+    // A legacy URL has no registry vendor/overlay/filter to borrow. Inset
+    // maps retain their historical generic attribution and clear filters.
+    try {
+      if (typeof window.MC_getTileSpec === 'function' &&
+          window.MC_getTileSpec(_tileThemeIsDark() ? 'dark' : 'light').id === null) return null;
+    } catch (_e) {}
     return _activeTileStyle();
   };
 
@@ -776,6 +785,8 @@
       if (cfg.map.tiles.darkUrl) window.TILE_DARK = cfg.map.tiles.darkUrl;
       if (cfg.map.tiles.lightUrl) window.TILE_LIGHT = cfg.map.tiles.lightUrl;
     }
+    window.MC_LIGHT_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.light || null) :
+      (cfg.map && cfg.map.tiles && cfg.map.tiles.lightUrl) || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
