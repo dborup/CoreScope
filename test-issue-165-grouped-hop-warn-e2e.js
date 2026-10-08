@@ -123,6 +123,113 @@ function warnedRows(page) {
     await ctx.close();
   });
 
+  // Deterministic adversarial API responses supplement the real fixture
+  // above. Same observer/prefix, distinct canonical answers and explicit
+  // holes: these used to overwrite (or borrow) prefix-cache certainty.
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const far = {public_key: 'efbf' + '01'.repeat(30), name: 'CANON-FAR', role: 'repeater', lat: 50.87, lon: 5.52};
+  const near = {public_key: 'ef00' + '02'.repeat(30), name: 'CANON-NEAR', role: 'repeater', lat: 51.08, lon: 3.78};
+  const hash = '7a'.repeat(32), now = new Date().toISOString();
+  const packet = {id: 36301, hash, observer_id: 'CANON-OBS', observer_name: 'CANON-OBS', payload_type: 4,
+    route_type: 1, raw_hex: '1101ef', path_json: '["ef"]', decoded_json: '{}', timestamp: now, first_seen: now,
+    resolved_path: [far.public_key]};
+  const observations = [
+    {id: 36301, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: [far.public_key]},
+    {id: 36302, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: JSON.stringify([near.public_key])},
+    {id: 36303, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: [null]},
+    {id: 36304, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now},
+  ];
+  await ctx.route(/\/api\/nodes(?:\?|$)/, route => route.fulfill({json: {nodes: [far, near], total: 2}}));
+  await ctx.route(/\/api\/observers(?:\?|$)/, route => route.fulfill({json: {observers: [{id: packet.observer_id, name: packet.observer_name, iata: 'XYZ', lat: 51.21, lon: 3.44}]}}));
+  await ctx.route(/\/api\/iata-coords(?:\?|$)/, route => route.fulfill({json: {coords: {}}}));
+  await ctx.route(/\/api\/packets(?:[/?]|$)/, route => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== '/api/packets') return route.fulfill({json: {packet, observations}});
+    const grouped = url.searchParams.get('groupByHash') === 'true';
+    const rows = grouped ? [{...packet, latest: now, count: observations.length, observer_count: 1}]
+      : [{...packet, observations}];
+    return route.fulfill({json: {packets: rows, total: rows.length}});
+  });
+  const page = await ctx.newPage(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await step('observation-local UI: grouped header and expanded children keep different answers and holes', async () => {
+      await page.goto(LIST, {waitUntil: 'domcontentloaded'});
+      const header = page.locator('#pktBody tr[data-hash="' + hash + '"]').first();
+      await page.waitForFunction(() => document.querySelector('#pktBody .hop-named')?.textContent === 'CANON-FAR');
+      await header.click();
+      await page.waitForSelector('#pktBody tr.group-child[data-id="36304"]');
+      for (const [id, name, warns] of [[36301, 'CANON-FAR', 0], [36302, 'CANON-NEAR', 0], [36303, 'CANON-NEAR', 1], [36304, 'CANON-NEAR', 1]]) {
+        const path = page.locator('#pktBody tr.group-child[data-id="' + id + '"] .path-hops');
+        assert((await path.textContent()).includes(name), id + ': wrong child name');
+        assert(await path.locator('.hop-path-warn').count() === warns, id + ': wrong child certainty');
+      }
+      assert((await header.locator('.path-hops').textContent()).includes('CANON-FAR'), 'children overwrote group header');
+    });
+    await step('observation-local UI: changing observation sort keeps header name/certainty aligned', async () => {
+      observations[1].timestamp = new Date(Date.parse(now) - 60000).toISOString();
+      await page.reload({waitUntil: 'domcontentloaded'});
+      const header = page.locator('#pktBody tr.group-header[data-hash="' + hash + '"]');
+      await page.waitForFunction(() => document.querySelector('#pktBody .hop-named')?.textContent === 'CANON-FAR');
+      await header.click();
+      await page.waitForSelector('#pktBody tr.group-child[data-id="36302"]');
+      await page.waitForFunction(() => document.querySelector('#pktBody tr.group-header .hop-named')?.textContent === 'CANON-NEAR');
+      assert(await header.locator('.hop-path-warn').count() === 0, 'sorted canonical header became uncertain');
+      await page.locator('#fObsSort').selectOption('chrono-desc');
+      await page.waitForFunction(() => document.querySelector('#pktBody tr.group-header .hop-named')?.textContent === 'CANON-FAR');
+      await page.locator('#fObsSort').selectOption('chrono-asc');
+      await page.waitForFunction(() => document.querySelector('#pktBody tr.group-header .hop-named')?.textContent === 'CANON-NEAR');
+    });
+    await step('observation-local UI: raw list preserves each observation rather than inheriting parent certainty', async () => {
+      await page.locator('#fGroup').click();
+      await page.waitForSelector('#pktBody tr[data-id="36304"]:not(.group-child)');
+      for (const [id, name, warns] of [[36301, 'CANON-FAR', 0], [36302, 'CANON-NEAR', 0], [36303, 'CANON-NEAR', 1], [36304, 'CANON-NEAR', 1]]) {
+        const path = page.locator('#pktBody tr[data-id="' + id + '"] .path-hops');
+        assert((await path.textContent()).includes(name), id + ': wrong raw-list name');
+        assert(await path.locator('.hop-path-warn').count() === warns, id + ': wrong raw-list certainty');
+      }
+    });
+    await step('observation-local UI: selected detail and byte breakdown both use that observation', async () => {
+      await page.goto(BASE + '/#/packet/' + hash + '?obs=36302', {waitUntil: 'domcontentloaded'});
+      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36302"]');
+      const path = () => page.locator('dt').filter({hasText: /^Path$/}).locator('xpath=following-sibling::dd[1]');
+      assert((await path().textContent()).includes('CANON-NEAR') && await path().locator('.hop-conflict-btn').count() === 0, 'selected canonical detail differs from child');
+      const byteRow = page.locator('tr').filter({hasText: /Hop 0 —/});
+      assert((await byteRow.textContent()).includes('CANON-NEAR'), 'byte table reads another row canonical answer');
+      await page.locator('.detail-obs-row[data-obs-id="36303"]').click();
+      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36303"]');
+      assert(await path().locator('.hop-conflict-btn').count() === 1, 'null canonical selected detail must remain ambiguous');
+      assert(await byteRow.locator('.hop-conflict-btn').count() === 1, 'byte table must preserve null ambiguity too');
+      await page.locator('.detail-obs-row[data-obs-id="36304"]').click();
+      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36304"]');
+      assert(await path().locator('.hop-conflict-btn').count() === 1, 'absent canonical cannot inherit parent answer');
+    });
+    await step('observation-local UI: WS new-group packets keep their canonical path without promoting certainty', async () => {
+      await page.goto(LIST, {waitUntil: 'domcontentloaded'});
+      if (!(await page.locator('#fGroup').getAttribute('class')).includes('active')) await page.locator('#fGroup').click();
+      await page.waitForSelector('#pktBody tr[data-hash="' + hash + '"]');
+      const live = {...packet, id: 36305, hash: '7b'.repeat(32), timestamp: new Date().toISOString()};
+      // Deliver the real WS message shape through app.js's real registered
+      // listener/batching path, without a live broker or copied handler code.
+      await page.evaluate(p => wsListeners.slice().forEach(fn => fn({type: 'packet', data: {packet: p}})), live);
+      await page.waitForFunction(h => document.querySelector('#pktBody tr[data-hash="' + h + '"] .hop-named')?.textContent === 'CANON-FAR', live.hash);
+      const hole = {...live, id: 36306, hash: '7c'.repeat(32), resolved_path: [null]};
+      await page.evaluate(p => wsListeners.slice().forEach(fn => fn({type: 'packet', data: {packet: p}})), hole);
+      await page.waitForSelector('#pktBody tr[data-hash="' + hole.hash + '"] .hop-path-warn');
+      assert((await page.locator('#pktBody tr[data-hash="' + live.hash + '"] .path-hops').textContent()).includes('CANON-FAR'), 'later WS hole overwrote definite earlier row');
+    });
+    await step('observation-local UI: remount and mobile selected-detail deep link keep canonical/null distinctions', async () => {
+      await page.goto(BASE + '/#/packet/' + hash + '?obs=36301', {waitUntil: 'domcontentloaded'});
+      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36301"]');
+      await page.setViewportSize({width: 390, height: 844});
+      await page.goto(BASE + '/#/packet/' + hash + '?obs=36304', {waitUntil: 'domcontentloaded'});
+      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36304"]');
+      const path = page.locator('dt').filter({hasText: /^Path$/}).locator('xpath=following-sibling::dd[1]');
+      assert(await path.locator('.hop-conflict-btn').count() === 1, 'remounted mobile null/missing observation borrowed certainty');
+      assert(!errors.length, 'browser exceptions: ' + errors.join('; '));
+    });
+  } finally { await ctx.close(); }
+
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -6262,6 +6262,9 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.senderPathHashSize = secondHashHelperCtx.senderPathHashSize;
   // #322 (1): buildFieldTable now reads its width via the shared helper.
   ftCtx.pathHashSizeFromByte = secondHashHelperCtx.pathHashSizeFromByte;
+  // The byte table now reads this observation's canonical path. Load the
+  // real helper dependency rather than duplicating or bypassing its parser.
+  loadInCtx(ftCtx, 'public/packet-helpers.js');
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 

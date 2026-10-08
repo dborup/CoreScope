@@ -29,6 +29,7 @@ window.clearParsedCache = function clearParsedCache(p) {
   delete p._parsedPath;
   delete p._parsedDecoded;
   delete p._parsedResolvedPath;
+  delete p._parsedResolvedPathSource;
   return p;
 };
 
@@ -38,14 +39,20 @@ window.clearParsedCache = function clearParsedCache(p) {
  * Cached as _parsedResolvedPath on the packet object.
  */
 window.getResolvedPath = function getResolvedPath(p) {
-  if (p._parsedResolvedPath !== undefined) return p._parsedResolvedPath;
   var raw = p.resolved_path;
+  // WS/poll refreshes can replace the answer on the same row object. Do not
+  // keep an old parsed answer (including old null) after its source changes.
+  if (p._parsedResolvedPath !== undefined && p._parsedResolvedPathSource === raw) return p._parsedResolvedPath;
+  p._parsedResolvedPathSource = raw;
   if (!raw) { p._parsedResolvedPath = null; return null; }
   if (typeof raw !== 'string') {
     p._parsedResolvedPath = Array.isArray(raw) ? raw : null;
     return p._parsedResolvedPath;
   }
-  try { p._parsedResolvedPath = JSON.parse(raw) || null; } catch (e) { p._parsedResolvedPath = null; }
+  try {
+    var parsed = JSON.parse(raw);
+    p._parsedResolvedPath = Array.isArray(parsed) ? parsed : null;
+  } catch (e) { p._parsedResolvedPath = null; }
   return p._parsedResolvedPath;
 };
 
