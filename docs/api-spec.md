@@ -193,10 +193,10 @@ They return `total` (the unfiltered/filtered count before pagination).
 
 #### Request-body byte caps
 
-Every endpoint that takes a request body bounds it, and every cap is enforced
-by the application itself, not by a reverse proxy in front of it. **Neither the
-enforcement nor the status code is uniform**, so the table gives both per
-endpoint:
+Every endpoint that takes a request body bounds it — with one exception, noted
+below — and every bound is enforced by the application itself, not by a reverse
+proxy in front of it. **Neither the enforcement nor the status code is
+uniform**, so the table gives both per endpoint:
 
 | Endpoint | Cap | Enforced on | Over the cap |
 |---|---|---|---|
