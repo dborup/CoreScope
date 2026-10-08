@@ -830,8 +830,10 @@
   if (isMobile && savedTimeWindowMin > 180) savedTimeWindowMin = 15;
   let totalCount = 0;
   let expandedHashes = new Set();
-  // #165 — resolved hop names, keyed by hop and by hop:observer. The
-  // per-observer keys grow with every observer that hears a prefix, so the
+  // #165 — heuristic hop names, keyed by hop and by hop:observer. Canonical
+  // resolved_path answers are read per observation/position, NEVER cached
+  // under a prefix: another row may resolve that same prefix differently.
+  // Per-observer keys grow with every observer that hears a prefix, so the
   // cache is bounded: past HOP_CACHE_MAX the oldest entries are evicted
   // (Map keeps insertion order), and destroy() clears it.
   const HOP_CACHE_MAX = 50000;
@@ -1171,6 +1173,29 @@
     return observerId ? h + ':' + observerId : h;
   }
 
+  // The API returns either JSON text or an array, aligned to this row's
+  // path_json. A missing/null/wrong-length answer cannot confer certainty.
+  function canonicalPath(p, hops) {
+    const rp = p && getResolvedPath(p);
+    return Array.isArray(rp) && rp.length === hops.length ? rp : null;
+  }
+
+  function canonicalKey(rp, i) {
+    return rp && typeof rp[i] === 'string' && rp[i] ? rp[i] : null;
+  }
+
+  function hopEntryFor(h, observerId, rp, i) {
+    const key = canonicalKey(rp, i);
+    if (key && window.HopResolver) return HopResolver.serverHopEntry(key);
+    return hopCacheGet(hopCacheKey(h, observerId)) || hopCacheGet(h);
+  }
+
+  // An observation owns its canonical path, including when the field is
+  // absent. Object-spread alone would inherit the parent packet's certainty.
+  function observationPacket(p, o) {
+    return clearParsedCache({...p, ...o, resolved_path: o.resolved_path, _isObservation: true});
+  }
+
   // #165 (upstream 2099) — resolve WITH the observer. Every 1-byte prefix on the network is
   // shared by several nodes, and the observer is what lets HopResolver filter
   // candidates by region and report the rest as conflicts. Called with the hops
@@ -1196,18 +1221,32 @@
   // Resolve every hop of every packet, grouped by the observer that heard it,
   // so each group gets its own regional filtering.
   async function resolveHopsForPackets(packets) {
+    if (!packets || !packets.length) return;
+    const gen = hopCacheGen;
     const groups = new Map();
-    for (const p of packets || []) {
+    let hasHops = false;
+    for (let row = 0; row < packets.length; row++) {
+      // Canonical answers no longer pre-parse the full page into a cache.
+      // Bound this parse/grouping pass as well as the resolver groups below.
+      if (row && row % 2000 === 0) await new Promise(r => setTimeout(r, 0));
+      if (gen !== hopCacheGen) return;
+      const p = packets[row];
       const obs = (p && p.observer_id) ? String(p.observer_id) : '';
       let set = groups.get(obs);
       if (!set) { set = new Set(); groups.set(obs, set); }
-      try { getParsedPath(p).forEach(h => set.add(h)); } catch {}
+      try {
+        const hops = getParsedPath(p), rp = canonicalPath(p, hops);
+        if (hops.length) hasHops = true;
+        hops.forEach((h, i) => { if (!canonicalKey(rp, i)) set.add(h); });
+      } catch {}
     }
-    // ensureHopResolver() is idempotent and awaited once inside resolveHops;
-    // the resolve itself is local computation, so the loop costs no requests.
+    if (!hasHops) return;
+    await ensureHopResolver();
+    if (gen !== hopCacheGen) return;
+    // Node/observer initialization was awaited once above; each resolver
+    // group is local computation, so the loop costs no per-row requests.
     // #165 — but it is CPU: ~42 groups on a 30K load took one ~220 ms block.
     // Yield to the event loop between groups so input and paint get through.
-    const gen = hopCacheGen;
     let first = true;
     for (const [obs, set] of groups) {
       if (!set.size) continue;
@@ -1219,9 +1258,9 @@
   }
 
   /**
-   * Pre-populate hopNameCache from server-side resolved_path on packets.
-   * Packets with resolved_path skip client-side HopResolver entirely.
-   * Must call ensureHopResolver() first so nodesList is available for name lookup.
+   * Prepare node-name lookup for canonical paths. Keep the existing load-hook
+   * name, but do NOT populate the prefix cache: certainty is observation-local.
+   * Stops at the first path needing lookup rather than rewriting every row.
    */
   async function cacheResolvedPaths(packets) {
     if (!packets || !packets.length) return;
@@ -1231,85 +1270,18 @@
       if (rp) { needsInit = true; break; }
     }
     if (!needsInit) return;
-    const gen = hopCacheGen;
     await ensureHopResolver();
-    // #165 — grouped rows carry resolved_path too since PR #185 F1, so this
-    // walks the whole page (up to 50K rows). Yield every 2000 rows so it is
-    // not one long main-thread block, and stop if destroy() ran meanwhile.
-    for (let i = 0; i < packets.length; i++) {
-      if (i && i % 2000 === 0) await new Promise(r => setTimeout(r, 0));
-      if (gen !== hopCacheGen) return;
-      cacheServerResolvedPath(packets[i]);
-    }
   }
 
-  // Does k already hold exactly this server answer? A client pick of the same
-  // node that was flagged (ambiguous, unreliable, global fallback) does not
-  // count: the server's answer must replace it, or the list keeps warning.
-  function holdsServerAnswer(k, pubkey) {
-    const e = hopCacheGet(k);
-    return !!e && e.pubkey === pubkey && !e.ambiguous && !e.unreliable && !e.globalFallback;
-  }
-
-  // #165 — store the server's resolved_path entries under the bare key AND
-  // under hop:observer. renderHop() and resolveHops() both look at the
-  // per-observer key first, so a server answer stored only under the bare key
-  // was re-resolved by the client heuristic and replaced. Writing it where
-  // the readers look makes the server win without resolveHops() needing to
-  // know which packet a prefix came from. Hops the server left null are not
-  // written, so the client still resolves them and can show the ambiguity.
-  // Caller must have initialised HopResolver.
-  // PR #185 F1 — grouped rows carry resolved_path too, and most rows repeat
-  // an answer that is already cached (same prefix, observer and node). Those
-  // are skipped (holdsServerAnswer), so a 30K page does not rewrite the cache
-  // twice per hop per row.
-  function cacheServerResolvedPath(p) {
-    const rp = getResolvedPath(p);
-    if (!rp) return;
-    const hops = getParsedPath(p);
-    const obs = p.observer_id ? String(p.observer_id) : '';
-    let news = false;
-    for (let i = 0; i < rp.length && !news; i++) {
-      if (rp[i] && (!holdsServerAnswer(hops[i], rp[i]) || (obs && !holdsServerAnswer(hopCacheKey(hops[i], obs), rp[i])))) news = true;
-    }
-    if (!news) return;
-    const resolved = HopResolver.resolveFromServer(hops, rp);
-    for (const h of Object.keys(resolved)) {
-      const v = resolved[h];
-      if (!holdsServerAnswer(h, v.pubkey)) hopCacheSet(h, v);
-      if (obs && !holdsServerAnswer(hopCacheKey(h, obs), v.pubkey)) hopCacheSet(hopCacheKey(h, obs), v);
-    }
-  }
-
-  // Incremental path (WS/poll): pre-populate from server-side resolved_path,
-  // then fall back to the client resolver for the remaining hops.
+  // Incremental path (WS/poll): resolve only remaining heuristic hops.
   // #165 — "already resolved" means resolved for THIS packet's observer. A
   // bare-key check let a second observer reuse the first one's pick.
   function resolveIncomingHops(pkts) {
-    let missing = false;
-    for (const p of pkts) {
-      if (window.HopResolver && HopResolver.ready()) cacheServerResolvedPath(p);
-      const obs = p.observer_id ? String(p.observer_id) : undefined;
-      try { if (getParsedPath(p).some(h => !hopCacheHas(hopCacheKey(h, obs)))) missing = true; } catch {}
-    }
-    return missing ? resolveHopsForPackets(pkts) : Promise.resolve();
+    return resolveHopsForPackets(pkts);
   }
 
-  function renderHop(h, observerId, opts) {
-    // Use per-packet cache key if observer context available (ambiguous hops differ by region)
-    const cacheKey = hopCacheKey(h, observerId);
-    const entry = hopCacheGet(cacheKey) || hopCacheGet(h);
+  function renderHop(h, entry, opts) {
     return HopDisplay.renderHop(h, entry, Object.assign({ hexMode: showHexHashes }, opts || {}));
-  }
-
-  // #165 (PR #185 review F1, F6) — is this hop uncertain for this observer?
-  // Only the observer's own entry counts: the bare key renderHop() falls
-  // back to for the name is another observer's answer, or the server's for
-  // another observation. And "uncertain" is what the detail pane badges
-  // (HopDisplay.conflictBadgeCount), so list and detail never disagree.
-  function hopUncertainFor(h, observerId) {
-    const entry = observerId ? hopCacheGet(hopCacheKey(h, observerId)) : hopCacheGet(h);
-    return HopDisplay.conflictBadgeCount(entry) > 1;
   }
 
   // #165 (upstream 2099) — opts.summary renders the list form: names without a badge on every
@@ -1325,14 +1297,25 @@
       ? window.MC_filterPathHops(hops)
       : hops;
     if (!filtered.length) return '— <span class="text-muted" title="All path hops were 1-byte and are hidden by the customizer toggle">(1-byte filtered)</span>';
+    const rp = canonicalPath(opts && opts.packet, hops);
+    // Filtering returns a subsequence. Retain ORIGINAL hop indices so hiding
+    // a 1-byte hop cannot shift another hop onto its canonical answer. This
+    // single pass also handles repeated prefixes without indexOf/O(n²).
+    const visible = [];
+    for (let i = 0, next = 0; i < hops.length && next < filtered.length; i++) {
+      if (hops[i] === filtered[next]) { visible.push({ h: hops[i], i }); next++; }
+    }
     const arrow = '<span class="arrow">→</span>';
-    if (!(opts && opts.summary)) return filtered.map(h => renderHop(h, observerId)).join(arrow);
+    if (!(opts && opts.summary)) return visible.map(({ h, i }) => renderHop(h, hopEntryFor(h, observerId, rp, i))).join(arrow);
 
     let uncertain = 0;
-    const body = filtered.map(h => {
-      const flag = hopUncertainFor(h, observerId);
+    const body = visible.map(({ h, i }) => {
+      const entry = hopEntryFor(h, observerId, rp, i);
+      // A bare heuristic from another observer is not evidence for this row.
+      const ownEntry = canonicalKey(rp, i) ? entry : hopCacheGet(hopCacheKey(h, observerId));
+      const flag = HopDisplay.conflictBadgeCount(ownEntry) > 1;
       if (flag) uncertain++;
-      return renderHop(h, observerId, flag ? { badge: false, className: 'hop-uncertain' } : { badge: false });
+      return renderHop(h, entry, flag ? { badge: false, className: 'hop-uncertain' } : { badge: false });
     }).join(arrow);
     if (!uncertain) return body;
     const label = uncertain + ' of ' + filtered.length + ' hops have more than one candidate';
@@ -1648,6 +1631,7 @@
                 observer_id: p.observer_id,
                 observer_name: p.observer_name,
                 path_json: p.path_json,
+                resolved_path: p.resolved_path,
                 payload_type: p.payload_type,
                 raw_hex: p.raw_hex,
                 decoded_json: p.decoded_json,
@@ -1812,7 +1796,7 @@
         for (const p of packets) {
           if (p.observations && p.observations.length > 1) {
             for (const o of p.observations) {
-              flat.push(clearParsedCache({...p, ...o, _isObservation: true, observations: undefined}));
+              flat.push(observationPacket({...p, observations: undefined}, o));
             }
           } else {
             flat.push(p);
@@ -1872,7 +1856,7 @@
             // the aggregate. Each child's `id` is the observation id (unique per observer).
             const obs = data.observations || [];
             group._children = obs.length
-              ? obs.map(o => clearParsedCache({...pkt, ...o, _isObservation: true}))
+              ? obs.map(o => observationPacket(pkt, o))
               : [pkt];
             group._fetchedData = { packet: pkt, observations: obs };
             sortGroupChildren(group);
@@ -2372,7 +2356,7 @@
               for (const p of toFetch) {
                 const obs = results[p.hash];
                 if (obs && obs.length) {
-                  p._children = obs.map(o => clearParsedCache({...p, ...o, _isObservation: true}));
+                  p._children = obs.map(o => observationPacket(p, o));
                   p._fetchedData = {packet: p, observations: obs};
                 }
               }
@@ -2653,18 +2637,17 @@
   function buildGroupRowHtml(p, entryIdx = -1) {
     const isExpanded = groupIsExpandedInView(p.hash);
     let headerObserverId = p.observer_id;
-    let headerPathJson = p.path_json;
+    let headerPacket = p;
     if (_observerFilterSet && p._children?.length) {
       const match = p._children.find(c => _observerFilterSet.has(String(c.observer_id)));
       if (match) {
         headerObserverId = match.observer_id;
-        headerPathJson = match.path_json;
+        headerPacket = match;
       }
     }
     const groupRegion = headerObserverId ? (observerMap.get(headerObserverId)?.iata || '') : '';
-    let groupPath = [];
-    try { groupPath = JSON.parse(headerPathJson || '[]'); } catch {}
-    const groupPathStr = renderPath(groupPath, headerObserverId, { summary: true });
+    const groupPath = getParsedPath(headerPacket);
+    const groupPathStr = renderPath(groupPath, headerObserverId, { summary: true, packet: headerPacket });
     const groupTypeName = payloadTypeName(p.payload_type);
     const groupTypeClass = payloadTypeColor(p.payload_type);
     const groupSize = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
@@ -2724,7 +2707,7 @@
             : (childPath.length > 0 ? childPath[0].length / 2 : 0));
         const _cHashSizeTitle = _cIsTrace ? ' title="TRACE path bytes are SNR readings, not hash prefixes — see sidebar decoder for actual hop count"' : '';
         const childRegion = c.observer_id ? (observerMap.get(c.observer_id)?.iata || '') : '';
-        const childPathStr = renderPath(childPath, c.observer_id, { summary: true });
+        const childPathStr = renderPath(childPath, c.observer_id, { summary: true, packet: c });
         const _childHashStripe = _hashStripeStyle(c.hash || p.hash);
         html += `<tr class="group-child" data-id="${c.id}" data-hash="${c.hash || ''}" data-action="select-observation" data-value="${c.id}" data-parent-hash="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_childHashStripe ? ' style="' + _childHashStripe + '"' : ''}>
               <td class="col-expand"></td><td class="col-region">${childRegion ? `<span class="badge-region">${childRegion}</span>` : '—'}</td>
@@ -2759,7 +2742,7 @@
     const _flatIsTrace = p.payload_type === 9;
     const hashBytes = _flatIsTrace ? '—' : (((parseInt(p.raw_hex?.slice(_flatPlOff * 2, _flatPlOff * 2 + 2), 16) || 0) >> 6) + 1);
     const _flatHashSizeTitle = _flatIsTrace ? ' title="TRACE path bytes are SNR readings, not hash prefixes — see sidebar decoder for actual hop count"' : '';
-    const pathStr = renderPath(pathHops, p.observer_id, { summary: true });
+    const pathStr = renderPath(pathHops, p.observer_id, { summary: true, packet: p });
     const detail = getDetailPreview(decoded);
     const _flatHashStripe = _hashStripeStyle(p.hash);
     const _flatStyle = _flatHashStripe + _chanStyle;
@@ -3657,7 +3640,7 @@
     }
 
     // If we have a current observation, build pkt fields from it so summary is per-observation
-    const effectivePkt = currentObs ? clearParsedCache({...pkt, ...currentObs, _isObservation: true}) : pkt;
+    const effectivePkt = currentObs ? observationPacket(pkt, currentObs) : pkt;
     const decoded = getParsedDecoded(effectivePkt) || {};
     const pathHops = getParsedPath(effectivePkt) || [];
 
@@ -3726,28 +3709,11 @@
       if (nd?.node?.public_key) anonReqSenderNode = nd.node;
     }
 
-    // Resolve hops: prefer server-side resolved_path, fall back to client-side HopResolver
+    // Resolve only holes in THIS selected observation. Canonical entries are
+    // read directly at render time, never promoted to prefix-wide certainty.
     if (pathHops.length) {
       try {
-        const serverResolved = getResolvedPath(pkt);
-        let resolved;
-        if (serverResolved && serverResolved.length === pathHops.length) {
-          await ensureHopResolver();
-          resolved = HopResolver.resolveFromServer(pathHops, serverResolved);
-        } else {
-          await ensureHopResolver();
-          // #165 (upstream 2099) — with the observer: the cache write below stores this under
-          // the per-observer key, so it has to have been resolved for that
-          // observer or the key promises something the value is not.
-          const [dLat, dLon] = observerPosition(pkt.observer_id);
-          resolved = HopResolver.resolve(pathHops, null, null, dLat, dLon, pkt.observer_id);
-        }
-        if (resolved) {
-          for (const [k, v] of Object.entries(resolved)) {
-            hopCacheSet(k, v);
-            if (pkt.observer_id) hopCacheSet(hopCacheKey(k, String(pkt.observer_id)), v);
-          }
-        }
+        await resolveHopsForPackets([effectivePkt]);
       } catch {}
     }
 
@@ -3886,7 +3852,7 @@
       ${messageHtml}
       <dl class="detail-meta">
         <dt>Payload Type</dt><dd><span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span></dd>
-        <dt>Path</dt><dd>${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span> ` + renderPath(pathHops, effectivePkt.observer_id) : '— (direct)'}</dd>
+        <dt>Path</dt><dd>${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span> ` + renderPath(pathHops, effectivePkt.observer_id, { packet: effectivePkt }) : '— (direct)'}</dd>
         <dt>Timestamp</dt><dd>${renderTimestampCell(effectivePkt.timestamp)}</dd>
         <dt>Observer</dt><dd>${escapeHtml(obsNameOnly(effectivePkt.observer_id))}${obsIataBadge(effectivePkt)}</dd>
         ${locationHtml ? `<dt>Location</dt><dd>${locationHtml}</dd>` : ''}
@@ -3945,7 +3911,7 @@
         const aggregatePath = getParsedPath(pkt) || [];
         return `<div class="detail-aggregate" style="margin-top:12px;padding:10px;background:var(--card-bg);border-radius:6px;border:1px solid var(--border);font-size:0.9em">
           <div style="font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cross-observer aggregate</div>
-          <div>Longest observed path: ${aggregatePath.length ? `${aggregatePath.length} hops — ${renderPath(aggregatePath, pkt.observer_id)}` : '— (direct)'}</div>
+          <div>Longest observed path: ${aggregatePath.length ? `${aggregatePath.length} hops — ${renderPath(aggregatePath, pkt.observer_id, { packet: pkt })}` : '— (direct)'}</div>
           <div style="font-size:0.8em;color:var(--text-muted);margin-top:2px">Longest path seen across all ${uniqueObservers} observer${uniqueObservers !== 1 ? 's' : ''}</div>
         </div>`;
       })() : ''}
@@ -4010,7 +3976,7 @@
       routeBtn.addEventListener('click', async () => {
         try {
           // Prefer server-side resolved_path if available
-          const serverResolved = getResolvedPath(pkt);
+          const serverResolved = canonicalPath(effectivePkt, pathHops);
           let resolvedKeys;
           if (serverResolved && serverResolved.length === pathHops.length) {
             // Use server-resolved pubkeys, fall back to short prefix for null entries
@@ -4020,9 +3986,9 @@
             const senderLat = decoded.lat || decoded.latitude;
             const senderLon = decoded.lon || decoded.longitude;
             let obsLat = null, obsLon = null;
-            const obsId = obsName(pkt.observer_id);
+            const obsId = obsName(effectivePkt.observer_id);
             await ensureHopResolver();
-            const data = { resolved: HopResolver.resolve(pathHops, senderLat || null, senderLon || null, obsLat, obsLon, pkt.observer_id) };
+            const data = { resolved: HopResolver.resolve(pathHops, senderLat || null, senderLon || null, obsLat, obsLon, effectivePkt.observer_id) };
             resolvedKeys = pathHops.map(h => {
               const r = data.resolved?.[h];
               return r?.pubkey || h;
@@ -4147,7 +4113,7 @@
       for (let i = 0; i < pathHops.length; i++) {
         const hopOff = off + i * hashSize;
         const hex = String(pathHops[i] || '').toUpperCase();
-        const hopHtml = HopDisplay.renderHop(hex, hopCacheGet(hex));
+        const hopHtml = HopDisplay.renderHop(hex, hopEntryFor(pathHops[i], pkt.observer_id, canonicalPath(pkt, pathHops), i));
         const label = `Hop ${i} — ${hopHtml}`;
         rows += fieldRow(hopOff, label, hex, '');
       }
@@ -4485,7 +4451,9 @@
       group.snr = first.snr;
       group.rssi = first.rssi;
       group.path_json = first.path_json;
+      group.resolved_path = first.resolved_path;
       group.direction = first.direction;
+      clearParsedCache(group);
     }
   }
 
@@ -4503,7 +4471,7 @@
       if (!pkt) return;
       const group = hashIndex.get(hash);
       if (group && data.observations) {
-        group._children = data.observations.map(o => clearParsedCache({...pkt, ...o, _isObservation: true}));
+        group._children = data.observations.map(o => observationPacket(pkt, o));
         group._fetchedData = data;
         // Sort children based on current sort mode
         sortGroupChildren(group);
@@ -4576,6 +4544,7 @@
       fieldRow,
       renderTimestampCell,
       renderPath,
+      observationPacket,
       observerPosition,
       resolveHops,
       resolveHopsForPackets,
