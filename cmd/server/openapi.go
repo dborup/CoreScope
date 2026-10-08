@@ -62,6 +62,11 @@ func routeDescriptions() map[string]routeMeta {
 		// "POST /api/admin/prune" removed in #1283 (ingestor owns prune).
 		"GET /api/debug/affinity": {Summary: "Debug neighbor affinity scores", Tag: "admin", Auth: true},
 		"GET /api/backup":         {Summary: "Download SQLite backup", Description: "Streams a consistent SQLite snapshot of the analyzer DB (VACUUM INTO). Response is application/octet-stream with attachment filename corescope-backup-<unix>.db.", Tag: "admin", Auth: true},
+		"GET /api/infrastructure": {Summary: "List curated infrastructure repeaters", Description: "Returns the bounded administrator-selected public keys. Candidate suggestions are computed from the existing bulk /api/nodes metrics and never auto-approved.", Tag: "nodes"},
+		"GET /api/admin/infrastructure/auth": {Summary: "Validate Infrastructure admin API key", Description: "Returns {ok:true} for an authorized administrator; used before showing curation controls.", Tag: "admin", Auth: true},
+		"POST /api/admin/infrastructure/{pubkey}/select": {Summary: "Select an infrastructure repeater", Description: "Queues an administrator decision for the ingestor; returns 202 {requestId}. The server does not write the curated snapshot.", Tag: "admin", Auth: true},
+		"POST /api/admin/infrastructure/{pubkey}/remove": {Summary: "Remove an infrastructure repeater", Description: "Queues an administrator decision for the ingestor; returns 202 {requestId}.", Tag: "admin", Auth: true},
+		"GET /api/admin/infrastructure/requests/{id}": {Summary: "Check infrastructure decision status", Tag: "admin", Auth: true},
 
 		// Packets
 		"GET /api/packets": {Summary: "List packets", Description: "Returns decoded packets with filtering, sorting, and pagination.", Tag: "packets",

@@ -123,6 +123,12 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureChannelProposalsTable(rw, logf); err != nil {
 		return fmt.Errorf("ensure channel_proposals: %w", err)
 	}
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS infrastructure_state (
+		id INTEGER PRIMARY KEY CHECK(id = 1),
+		state_json TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("ensure infrastructure_state: %w", err)
+	}
 	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
 	}
@@ -161,9 +167,9 @@ func (e *NotReadyError) Error() string {
 }
 
 // Transient reports whether the ingestor resolves the problem by itself
-// while it starts: the only missing items are this PR's start-up migration
-// still in progress (route_mask_changes not created yet, and possibly the
-// transmissions.route_mask column added just before it in the same Apply),
+// while it starts: the only missing items are start-up migrations still in
+// progress (route_mask_changes or infrastructure_state not created yet, and
+// possibly transmissions.route_mask added just before the former),
 // and every probe failure is SQLite BUSY or LOCKED. Anything else (another
 // missing item, a malformed change log, a change log whose migration is
 // recorded but whose table is gone, the column missing while the table
@@ -189,7 +195,7 @@ func (e *NotReadyError) Transient() bool {
 	}
 	for _, m := range e.Missing {
 		switch {
-		case m == "table:route_mask_changes":
+		case m == "table:route_mask_changes", m == "table:infrastructure_state":
 		case m == "transmissions.route_mask" && tableUnknown:
 			// Added by the same Apply, right before the table.
 		default:
@@ -313,6 +319,7 @@ func assertReady(ro *sql.DB, probed func(item string)) error {
 	}
 
 	mustTable("neighbor_edges")
+	mustTable("infrastructure_state")
 	mustCol("observations", "resolved_path")
 	mustCol("observers", "inactive")
 	mustCol("observers", "last_packet_at")

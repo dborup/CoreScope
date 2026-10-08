@@ -402,6 +402,71 @@ async function run() {
     }
   });
 
+  await test('Infrastructure page keeps suggestions separate from selected repeaters', async () => {
+    await page.goto(`${BASE}/#/infrastructure`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.infrastructure-page');
+    await page.waitForFunction(() => {
+      const root = document.querySelector('.infrastructure-page');
+      return root && !root.textContent.includes('Loading…');
+    }, { timeout: 15000 });
+    const headings = await page.$$eval('.infrastructure-page h2', els => els.map(e => e.textContent));
+    assert(headings.includes('Selected repeaters') && headings.includes('Suggested candidates'), 'curation and candidates were merged');
+    const hidden = await page.$$eval('.infrastructure-row button', els => els.every(e => e.hidden));
+    assert(hidden, 'admin controls should stay locked until a key is entered');
+  });
+
+  await test('Infrastructure admin select/remove stays explicit on mobile', async () => {
+    const a = 'a'.repeat(64), b = 'b'.repeat(64);
+    let selected = [a], outcome = 'approved', writes = [];
+    const nodes = [
+      { public_key:a, name:'Curated repeater', role:'repeater', relay_count_24h:3, bridge_score:0.1, lat:55, lon:12 },
+      { public_key:b, name:'Candidate repeater', role:'repeater', relay_count_24h:30, bridge_score:0.4, lat:56, lon:13 }
+    ];
+    const oldSize = page.viewportSize();
+    const dialog = d => d.accept();
+    await page.route('**/api/infrastructure', route => route.fulfill({contentType:'application/json', body:JSON.stringify({selected:selected.map(publicKey => ({publicKey, addedAt:1}))})}));
+    await page.route('**/api/nodes?*', route => route.fulfill({contentType:'application/json', body:JSON.stringify({nodes, total:nodes.length, counts:{}})}));
+    await page.route('**/api/admin/infrastructure/**', route => {
+      const url = route.request().url();
+      if (url.endsWith('/auth')) {
+        return route.fulfill({status:route.request().headers()['x-api-key'] === 'test-secret-key' ? 200 : 401, contentType:'application/json', body:'{"ok":true}'});
+      }
+      if (route.request().method() === 'POST') {
+        writes.push({url, key:route.request().headers()['x-api-key']});
+        if (url.endsWith('/select')) { selected = [a,b]; outcome = 'approved'; }
+        else { selected = [a]; outcome = 'revoked'; }
+        return route.fulfill({status:202, contentType:'application/json', body:'{"requestId":"1111111111111111"}'});
+      }
+      return route.fulfill({contentType:'application/json', body:JSON.stringify({status:outcome})});
+    });
+    page.on('dialog', dialog);
+    try {
+      await page.setViewportSize({width:390, height:844});
+      await page.goto(`${BASE}/#/infrastructure`, {waitUntil:'domcontentloaded'});
+      await page.waitForSelector('.infrastructure-row');
+      assert(await page.$eval('.infrastructure-row button', e => e.hidden), 'admin control visible before unlock');
+      await page.locator('.infrastructure-admin summary').click();
+	  await page.locator('.infrastructure-admin input').fill('wrong-key');
+	  await page.locator('.infrastructure-admin button').click();
+	  assert(await page.$eval('.infrastructure-row button', e => e.hidden), 'wrong key unlocked curation');
+      await page.locator('.infrastructure-admin input').fill('test-secret-key');
+      await page.locator('.infrastructure-admin button').click();
+      await page.locator('.infrastructure-row button', {hasText:'Select'}).click();
+      await page.waitForFunction(() => document.querySelectorAll('.infrastructure-list')[0].querySelectorAll('.infrastructure-row').length === 2, null, {timeout:10000});
+      await page.locator('.infrastructure-row button', {hasText:'Remove'}).last().click();
+      await page.waitForFunction(() => document.querySelectorAll('.infrastructure-list')[0].querySelectorAll('.infrastructure-row').length === 1, null, {timeout:10000});
+      assert(writes.length === 2 && writes.every(w => w.key === 'test-secret-key'), 'explicit authenticated select/remove not sent');
+      const width = await page.$eval('.infrastructure-page', e => e.scrollWidth);
+      assert(width <= 390, 'infrastructure content overflows mobile viewport');
+    } finally {
+      page.off('dialog', dialog);
+      await page.unroute('**/api/infrastructure');
+      await page.unroute('**/api/nodes?*');
+      await page.unroute('**/api/admin/infrastructure/**');
+      if (oldSize) await page.setViewportSize(oldSize);
+    }
+  });
+
   // --- Group: Map page (tests 3, 9, 10, 13, 16) ---
 
   // Test 3: Map page loads with markers

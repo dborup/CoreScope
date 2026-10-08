@@ -1340,6 +1340,7 @@ registerPage('tools-landing', {
             '<a href="#/tools/path-inspector" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Path Inspector</h3><p>Resolve prefix paths to candidate full-pubkey routes with confidence scoring.</p></a>' +
             '<a href="#/tools/trace/" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Trace Viewer</h3><p>View detailed packet traces by hash.</p></a>' +
             '<a href="#/tools/observer-neighbors" class="tools-card"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Observer Neighbors</h3><p>Every observer\'s firmware-reported direct neighbors, network-wide in one searchable list.</p></a>' +
+            '<a href="#/infrastructure" class="tools-card"><h3>Infrastructure</h3><p>Curated repeater map and activity-based candidates for admin review.</p></a>' +
           '</div>' +
         '</div>' +
         '<div class="tools-section">' +
@@ -1461,7 +1462,7 @@ function navigate() {
 
   // Update nav active state
   document.querySelectorAll('.nav-link[data-route]').forEach(el => {
-    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'traces' || basePage === 'path-inspector' || basePage === 'observer-neighbors-tool' || basePage === 'new-nodes-tool' || basePage === 'node-changes-tool' || basePage === 'network-digest-tool' || basePage === 'position-gaps-tool' || basePage === 'gps-sanity-tool' || basePage === 'tools-landing')));
+    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'traces' || basePage === 'path-inspector' || basePage === 'observer-neighbors-tool' || basePage === 'new-nodes-tool' || basePage === 'node-changes-tool' || basePage === 'network-digest-tool' || basePage === 'position-gaps-tool' || basePage === 'gps-sanity-tool' || basePage === 'infrastructure' || basePage === 'tools-landing')));
   });
   // Update "More" button to show active state if a low-priority page is selected
   var moreBtn = document.getElementById('navMoreBtn');

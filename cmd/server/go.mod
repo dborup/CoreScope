@@ -65,6 +65,10 @@ require github.com/meshcore-analyzer/channelregistry v0.0.0
 
 replace github.com/meshcore-analyzer/channelregistry => ../../internal/channelregistry
 
+require github.com/meshcore-analyzer/infrastructure v0.0.0
+
+replace github.com/meshcore-analyzer/infrastructure => ../../internal/infrastructure
+
 require github.com/meshcore-analyzer/brokerurl v0.0.0
 
 replace github.com/meshcore-analyzer/brokerurl => ../../internal/brokerurl

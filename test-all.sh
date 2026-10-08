@@ -150,6 +150,7 @@ run test-new-nodes-tool.js
 run test-node-changes-tool.js
 run test-network-digest-tool.js
 run test-position-gaps-tool.js
+run test-infrastructure.js
 run test-gps-sanity-tool.js
 run test-estimated-positions-config.js
 run test-map-scope-filter.js
