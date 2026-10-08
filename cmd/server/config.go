@@ -165,6 +165,9 @@ type Config struct {
 	// only needs the configured *names* to report which regions have
 	// never matched any observed transmission (region-utilization
 	// analytics, /api/scope-stats "unusedRegions").
+	//
+	// This is the INLINE half of the configured set. Read
+	// EffectiveHashRegions() instead, which adds HashRegionsPath.
 	HashRegions []string `json:"hashRegions,omitempty"`
 
 	// HashRegionsPath optionally points at a JSON array of region-scope
