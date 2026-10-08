@@ -45,6 +45,12 @@
     saveMyNodes(getMyNodes().filter(n => n.pubkey !== pubkey));
   }
   function isMyNode(pubkey) { return getMyNodes().some(n => n.pubkey === pubkey); }
+  // My Mesh cards opt into advert intervals on their health request. The
+  // health panel reuses that URL for claimed nodes so the client cache
+  // answers it; other nodes keep the plain URL and skip the advert scan.
+  function healthPath(pubkey, myMesh) {
+    return '/nodes/' + encodeURIComponent(pubkey) + '/health' + (myMesh ? '?include=advertIntervals' : '');
+  }
 
   function isExperienced() { return localStorage.getItem(PREF_KEY) === 'experienced'; }
   function setLevel(level) { localStorage.setItem(PREF_KEY, level); }
@@ -298,7 +304,7 @@
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
-        const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health?include=advertIntervals', { ttl: CLIENT_TTL.nodeHealth });
+        const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};
         const obs = h.observers || [];
@@ -532,7 +538,7 @@
     if (journey) journey.classList.remove('visible');
 
     try {
-      const h = await api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+      const h = await api(healthPath(pubkey, isMyNode(pubkey)), { ttl: CLIENT_TTL.nodeHealth });
       const node = h.node || {};
       const stats = h.stats || {};
       const packets = h.recentPackets || [];

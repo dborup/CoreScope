@@ -155,7 +155,8 @@ function stub(page, path_, data) {
   return page.evaluate(({ p, d }) => {
     window.__apiResponders[p] = { data: d };
     // My Mesh cards opt into advert intervals on their existing health
-    // request; Full health still fetches the original unqualified URL.
+    // request, and Full health reuses that URL for claimed nodes. Nodes
+    // outside My Mesh fetch the unqualified URL.
     if (p.endsWith('/health')) window.__apiResponders[p + '?include=advertIntervals'] = { data: d };
   }, { p: path_, d: data });
 }
