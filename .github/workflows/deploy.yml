@@ -102,6 +102,10 @@ jobs:
           (cd internal/channelregistry && go test ./...)
           (cd internal/dbschema && go test ./...)
           (cd internal/brokerurl && go test ./...)
+          # internal/regions is its own module: the server/ingestor steps
+          # above compile it but never run its tests, and it now holds the
+          # hashRegions/hashRegionsPath loader both processes share (#360).
+          (cd internal/regions && go test ./...)
 
       # internal/anomaly is its own module (not wired into any binary), so the
       # server/ingestor steps above do not reach it. No -fuzz and no -bench:

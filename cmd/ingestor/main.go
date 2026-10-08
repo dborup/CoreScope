@@ -114,7 +114,12 @@ func main() {
 		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
 	}
 
-	regionKeys := loadRegionKeys(cfg)
+	regionKeys, regionErr := loadRegionKeys(cfg, *configPath)
+	if regionErr != nil {
+		// regions.Load already logged which file failed and why; the keys
+		// are the inline hashRegions list, so the ingestor still starts.
+		log.Printf("[regions] startup fell back to the inline hashRegions list")
+	}
 	store.BackfillDefaultScopeAsync(regionKeys)
 
 	// hashChannels/hashRegions additions in config.json otherwise require a
@@ -1631,25 +1636,26 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 	return keys
 }
 
-func loadRegionKeys(cfg *Config) map[string][]byte {
-	keys := make(map[string][]byte)
-	for _, raw := range cfg.HashRegions {
-		name, ok := regions.Normalize(raw)
-		if !ok {
-			log.Printf("[regions] skipping empty hashRegions entry")
-			continue
-		}
-		if _, exists := keys[name]; exists {
-			log.Printf("[regions] duplicate region %q ignored", name)
-			continue
-		}
+// loadRegionKeys derives one HMAC key per configured region scope. The
+// names come from regions.Load, so the inline hashRegions list and the
+// optional hashRegionsPath file are merged, normalized and deduplicated by
+// the same code the server reads its configured set with — the two
+// processes cannot disagree about which scopes are configured.
+//
+// An unusable hashRegionsPath returns the error together with keys derived
+// from the inline list alone: startup logs it and carries on, while
+// hotKeys.reload propagates it so a live reload keeps the previous keys.
+func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
+	res, err := regions.Load(cfg.HashRegions, cfg.HashRegionsPath, configPath, log.Printf)
+	keys := make(map[string][]byte, len(res.Names))
+	for _, name := range res.Names {
 		h := sha256.Sum256([]byte(name))
 		keys[name] = h[:16]
 	}
 	if len(keys) > 0 {
 		log.Printf("[regions] %d region key(s) loaded", len(keys))
 	}
-	return keys
+	return keys, err
 }
 
 // matchScope performs one HMAC-SHA256 per configured region. Expected

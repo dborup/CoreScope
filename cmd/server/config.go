@@ -16,6 +16,7 @@ import (
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
+	regionutil "github.com/meshcore-analyzer/regions"
 )
 
 // AreaEntry defines a geographic area by polygon or bounding box.
@@ -164,7 +165,28 @@ type Config struct {
 	// only needs the configured *names* to report which regions have
 	// never matched any observed transmission (region-utilization
 	// analytics, /api/scope-stats "unusedRegions").
+	//
+	// This is the INLINE half of the configured set. Read
+	// EffectiveHashRegions() instead, which adds HashRegionsPath.
 	HashRegions []string `json:"hashRegions,omitempty"`
+
+	// HashRegionsPath optionally points at a JSON array of region-scope
+	// names merged with the inline HashRegions list (#360). Same key, same
+	// env override (HASH_REGIONS_PATH) and same relative-path rule as the
+	// ingestor, which reads it through the same loader
+	// (internal/regions.Load) — the two processes must never disagree
+	// about which scopes are configured, or the server would report a
+	// file-configured scope as "unknown" while the ingestor matches it.
+	// This is a file READ; the server stays read-only.
+	HashRegionsPath string `json:"hashRegionsPath,omitempty"`
+
+	// hashRegionsFile caches the raw entries read from HashRegionsPath at
+	// config load. The server never reloads its config, so one read at
+	// startup is the whole story here (the ingestor's SIGHUP path is what
+	// re-reads the file). Kept raw rather than merged so
+	// EffectiveHashRegions stays correct for tests that assign
+	// HashRegions directly after load.
+	hashRegionsFile []string
 
 	// NodeBlacklist is a list of public keys to exclude from all API responses.
 	// Blacklisted nodes are hidden from node lists, search, detail, map, and stats.
@@ -628,13 +650,53 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.migrateDeprecatedConfig()
 		cfg.applyListLimitsDefaults()
 		applyCORSEnv(cfg)
+		cfg.loadHashRegionsFile(p)
 		return cfg, nil
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
+	// No config.json anywhere: HASH_REGIONS_PATH alone can still name a
+	// file, and with no config file a relative path has nothing to anchor
+	// at but the working directory.
+	cfg.loadHashRegionsFile("")
 	return cfg, nil // defaults
+}
+
+// loadHashRegionsFile reads the optional hashRegionsPath file once, during
+// config load, and caches its raw entries. A missing or malformed file is
+// logged by the shared loader and leaves the cache empty, so
+// EffectiveHashRegions falls back to the inline list rather than reporting
+// every configured region as unconfigured.
+func (c *Config) loadHashRegionsFile(configPath string) {
+	res, err := regionutil.Load(c.HashRegions, c.HashRegionsPath, configPath, log.Printf)
+	if err != nil {
+		c.hashRegionsFile = nil
+		return
+	}
+	c.hashRegionsFile = res.FileNames
+}
+
+// EffectiveHashRegions returns the configured region-scope names: the
+// normalized, deduplicated union of the inline hashRegions list and the
+// hashRegionsPath file, computed by the same rule the ingestor derives its
+// HMAC keys with (regionutil.Merge).
+//
+// EVERY reader of the configured set must go through this. Reading
+// cfg.HashRegions directly misses the file, which is how the server ends
+// up calling a working scope "unknown" in Observer Neighbors, or dropping
+// it from /api/scope-stats' configured/unused counts.
+//
+// The union is recomputed per call rather than cached, so a caller that
+// assigns HashRegions after load still gets a correct answer. It is a
+// normalize over ~1100 short strings on two low-traffic analytics
+// endpoints, one of which is already response-cached.
+func (c *Config) EffectiveHashRegions() []string {
+	if c == nil {
+		return nil
+	}
+	return regionutil.Merge(c.HashRegions, c.hashRegionsFile)
 }
 
 // WebSocketConfig holds the /ws transport limits (#1794). These sit behind

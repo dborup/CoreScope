@@ -1,0 +1,6 @@
+{
+  "_comment_filename": "Named config.json.fixture rather than config.json because the repo .gitignore excludes config.json everywhere. Both parity tests copy this file into a temp directory AS config.json (together with hash-regions.json) before loading it.",
+  "_comment": "Shared fixture for the server/ingestor parity tests of issue #360. Both processes load THIS config.json and must end up with the identical effective region set: [\"#dk\", \"#eu\", \"#dk-aarhus\", \"#NO\"]. It deliberately mixes a blank inline entry, a blank file entry, an overlap that differs only in the '#' prefix (inline \"#dk\" vs file \"dk\"), an exact overlap (\"#eu\"), and a name that differs only in case (\"#NO\"), which is NOT a duplicate because the ingestor hashes the exact name.",
+  "hashRegions": ["#dk", "eu", "", "  "],
+  "hashRegionsPath": "hash-regions.json"
+}
