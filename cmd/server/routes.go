@@ -1398,8 +1398,9 @@ func (s *Server) handleBatchObservations(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Hashes []string `json:"hashes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
+	// #334: cap the body in bytes before parsing it. maxHashes below is a
+	// cardinality limit that only applies once the JSON is already decoded.
+	if !decodeLimitedJSONBody(w, r, maxBatchObservationsBodyBytes, &body) {
 		return
 	}
 	const maxHashes = 200
@@ -1537,8 +1538,8 @@ func (s *Server) handleDecode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Hex string `json:"hex"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
+	// #334: cap the body in bytes before parsing it.
+	if !decodeLimitedJSONBody(w, r, maxDecodeBodyBytes, &body) {
 		return
 	}
 	hexStr := strings.TrimSpace(body.Hex)
@@ -4829,7 +4830,7 @@ func (s *Server) handlePruneGeoFilterStatus(w http.ResponseWriter, r *http.Reque
 // NaN/Inf; bufferKm finite, non-negative, ≤ 20000 km. Concurrent PUTs are
 // serialized via s.saveMu so they cannot race on the .tmp file.
 func (s *Server) handlePutConfigGeoFilter(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB cap
+	r.Body = http.MaxBytesReader(w, r.Body, geoFilterBodyLimit)
 
 	var body struct {
 		Polygon  [][2]float64 `json:"polygon"`
