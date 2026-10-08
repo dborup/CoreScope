@@ -5817,3 +5817,18 @@ body.embed #app.app-fixed {
 .privacy-page ul { padding-left: 1.3em; }
 .privacy-page li { margin: 6px 0; }
 .privacy-page a { color: var(--link-color); }
+
+/* Scope audit keeps search/pagination stable and at most 50 rows mounted. */
+.scope-audit-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:12px 0; }
+.scope-audit-controls input { max-width:100%; padding:6px 8px; background:var(--bg-secondary); color:var(--text); border:1px solid var(--border); border-radius:4px; }
+.scope-audit-table-wrap { overflow-x:auto; }
+.scope-audit-chip { display:inline-block; margin:2px 4px 2px 0; padding:2px 5px; border:1px solid var(--border); border-radius:4px; }
+.scope-audit-caution { color:var(--warning); }
+#scopes-panel-audit .scope-audit-table { width:100%; min-width:900px; table-layout:fixed; }
+#scopes-panel-audit .scope-audit-table th:nth-child(1) { width:20%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(2) { width:15%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(3) { width:25%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(4) { width:15%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(5) { width:25%; }
+#scopes-panel-audit .scope-audit-table th,
+#scopes-panel-audit .scope-audit-table td { white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; vertical-align:top; }

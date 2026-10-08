@@ -210,6 +210,8 @@ function pageEnv(opts) {
       await flush();
     },
     initError: () => initError,
+    async refreshScopes(hash) { ctx.location.hash = hash; await ctx.window._analyticsRenderScopesTab(content()); await flush(); },
+    panel: key => el('scopes-panel-' + key),
     // History entries (#208): the current one as { hash, state }; a new
     // entry (a link, location.hash = …) has no state; Back/Forward brings
     // an entry back with the state it had when it was left.
@@ -511,6 +513,34 @@ function pageEnv(opts) {
     await env.clickTab('hashsizes');
     await env.clickTab('collisions');
     assert.strictEqual(env.params().bytes, '2', 'bytes= lost: ' + env.hash());
+  });
+
+  await test('retained Scopes DOM restores current hash window and panel', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes&sub=overview&swin=24h');
+    await env.refreshScopes('#/analytics?tab=scopes&sub=hopdepth&swin=7d');
+    assert.strictEqual(env.panel('hopdepth').style.display, '');
+    assert.strictEqual(env.panel('overview').style.display, 'none');
+    assert.ok(env.scopeStatsUrls().some(u => u.includes('window=7d')));
+  });
+
+  await test('Audit window change reloads Overview at the selected window', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes&swin=24h');
+    await env.refreshScopes('#/analytics?tab=scopes&sub=audit&swin=7d');
+    await env.clickSubtab('overview');
+    assert.ok(env.scopeStatsUrls().some(u => u.includes('window=7d')), 'Overview did not fetch 7d data');
+  });
+
+  await test('failed Scope Statistics load is retried after a sub-tab toggle', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=scopes&sub=audit');
+    let requests = 0;
+    env.ctx.api = async () => { requests++; throw new Error('test unavailable'); };
+    await env.clickSubtab('overview');
+    const initial = requests;
+    await env.clickSubtab('hopdepth');
+    assert.ok(requests > initial, 'A failed load was treated as already loaded');
   });
 
   console.log('\n=== #205: Wardriving window (wdwin=) ===');

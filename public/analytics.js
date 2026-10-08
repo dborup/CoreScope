@@ -70,6 +70,8 @@
     if (_rolesRefreshTimer) { clearInterval(_rolesRefreshTimer); _rolesRefreshTimer = null; }
   }
   var _scopesRefreshTimer = null;
+  var _scopeAuditView = null;
+  function _stopScopeAudit() { if (_scopeAuditView) { _scopeAuditView.destroy(); _scopeAuditView = null; } }
   function _stopScopesRefresh() {
     if (_scopesRefreshTimer) { clearInterval(_scopesRefreshTimer); _scopesRefreshTimer = null; }
   }
@@ -283,7 +285,7 @@
       setAreaFilterVisibility(_currentTab);
       // #1085 — Roles tab owns its own 60s auto-refresh; stop it on switch.
       if (_currentTab !== 'roles') _stopRolesRefresh();
-      if (_currentTab !== 'scopes') _stopScopesRefresh();
+      if (_currentTab !== 'scopes') { _stopScopesRefresh(); _stopScopeAudit(); }
       if (_currentTab !== 'foreign-traffic') _stopForeignTrafficRefresh();
       if (_currentTab !== 'wardriving') _stopWardrivingRefresh();
       if (_currentTab !== 'areas') _stopAreasRefresh();
@@ -387,7 +389,7 @@
   // fallback for a plain visit of the tab. ?window= is the global time
   // picker above the tab bar (other values, and it drives the shared
   // loads), so each tab window gets a key of its own.
-  var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene'], dflt: 'overview' };
+  var SCOPES_SUBTAB = { param: 'sub', storageKey: 'scopes_subtab', allowed: ['overview', 'hopdepth', 'regions', 'hygiene', 'audit'], dflt: 'overview' };
   var SCOPES_WINDOW = { param: 'swin', storageKey: 'scopes_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
   var WARDRIVING_WINDOW = { param: 'wdwin', storageKey: 'wardriving_window', allowed: ['1h', '24h', '7d'], dflt: '24h' };
   // #208 — Hash Stats' multi-byte adopters filter. URL only (no storageKey):
@@ -407,7 +409,7 @@
     'rf-health': ['range', 'observer', 'from', 'to'],
     collisions: ['section'],
     hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
-    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param],
+    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap'],
     wardriving: [WARDRIVING_WINDOW.param],
   };
 
@@ -3346,11 +3348,12 @@
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
     window._analyticsAssignTableIds = assignAnalyticsTableIds;
+    window._analyticsRenderScopesTab = renderScopesTab;
     window._analyticsWithQuery = withQuery;
     window._analyticsResolveViewParam = resolveViewParam;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
@@ -5153,8 +5156,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
   async function renderScopesTab(el) {
     // Both views are deep-linked: ?sub= and ?swin= (#205).
     var scopesView = restoreViewParams([SCOPES_SUBTAB, SCOPES_WINDOW]);
+    if (el._refreshScopes && el.querySelector('#scopes-cards')) { el._refreshScopes(scopesView); return; }
     var selectedSubtab = scopesView[0];
     var selectedWindow = scopesView[1];
+    var statsLoadedWindow = null;
 
     // #1852: the tab grew to stacked sections (windowed adoption stats,
     // all-time region breakdowns, all-time node/repeater hygiene lists) —
@@ -5202,6 +5207,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             { key: 'hopdepth', label: 'Hop Depth' },
             { key: 'regions', label: 'Regions' },
             { key: 'hygiene', label: 'Hygiene' },
+            { key: 'audit', label: 'Scope Audit' },
           ].map(function(t) {
             return '<button class="tab-btn' + (selectedSubtab === t.key ? ' active' : '') + '" data-subtab="' + t.key + '">' + t.label + '</button>';
           }).join('') +
@@ -5242,12 +5248,33 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           '<div id="scopes-origin-nodes" style="margin-top:16px"></div>' +
           '<div id="scopes-bridges" style="margin-top:16px"></div>' +
         '</div>' +
+        '<div id="scopes-panel-audit" style="display:' + (selectedSubtab === 'audit' ? '' : 'none') + '"></div>' +
         '<div id="scopes-panel-hygiene" style="display:' + (selectedSubtab === 'hygiene' ? '' : 'none') + '">' +
           '<div id="scopes-no-scope"></div>' +
           '<div id="scopes-never-relay-scope" style="margin-top:16px"></div>' +
         '</div>';
 
-      // Sub-tab click listener (once) — pure visibility toggle, no re-fetch.
+      // Audit is lazy: it fetches only its own bulk endpoint while active.
+      _stopScopeAudit();
+      var auditPanel = el.querySelector('#scopes-panel-audit');
+      var auditView = window.ScopeAudit ? window.ScopeAudit.mount(auditPanel, {
+        api: api, hash: function() { return location.hash; },
+        onWindow: function(w) {
+          selectedWindow = w; setViewParam(SCOPES_WINDOW, w);
+          el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === w); });
+          load(w);
+        },
+        onState: function(query, page) {
+          var parts = location.hash.split('?'); var params = new URLSearchParams(parts[1] || '');
+          if (query) params.set('saq', query); else params.delete('saq');
+          if (page) params.set('sap', String(page)); else params.delete('sap');
+          history.replaceState(history.state, '', parts[0] + (params.toString() ? '?' + params.toString() : ''));
+        }
+      }) : null;
+      _scopeAuditView = auditView;
+      if (auditView) auditView.setActive(selectedSubtab === 'audit');
+
+      // Sub-tab click listener (once).
       var subtabsEl = el.querySelector('#scopesSubtabs');
       if (subtabsEl) {
         subtabsEl.addEventListener('click', function(e) {
@@ -5260,11 +5287,14 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             var panel = document.getElementById('scopes-panel-' + key);
             if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
           });
+          if (auditView) auditView.setActive(selectedSubtab === 'audit');
+          if (selectedSubtab === 'audit' || statsLoadedWindow !== selectedWindow) load(selectedWindow);
         });
       }
 
       // Attach window-button click listeners (once)
       el.querySelectorAll('[data-win]').forEach(function(btn) {
+        if (btn.dataset.auditWindow) return;
         btn.addEventListener('click', function() {
           selectedWindow = btn.dataset.win;
           setViewParam(SCOPES_WINDOW, selectedWindow);
@@ -5482,6 +5512,12 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     }
 
     async function load(w) {
+      if (selectedSubtab === 'audit') {
+        if (auditView) return auditView.load(w);
+        el.querySelector('#scopes-panel-audit').textContent = 'Scope Audit could not initialize. Reload to retry.';
+        return;
+      }
+
       var loadingEl = document.getElementById('scopes-loading');
       if (loadingEl) loadingEl.style.display = '';
       try {
@@ -5494,6 +5530,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           return;
         }
         await updateData(data, w);
+        statsLoadedWindow = w;
       } catch (err) {
         if (loadingEl) loadingEl.style.display = 'none';
         var cardsEl3 = document.getElementById('scopes-cards');
@@ -6040,6 +6077,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     }
 
 
+    el._refreshScopes = function(view) {
+      selectedSubtab = view[0]; selectedWindow = view[1];
+      el.querySelectorAll('[data-subtab]').forEach(function(b) { b.classList.toggle('active', b.dataset.subtab === selectedSubtab); });
+      el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === selectedWindow); });
+      SCOPES_SUBTAB.allowed.forEach(function(key) {
+        var panel = el.querySelector('#scopes-panel-' + key);
+        if (panel) panel.style.display = key === selectedSubtab ? '' : 'none';
+      });
+      if (auditView) { auditView.setActive(selectedSubtab === 'audit'); auditView.syncState(location.hash); }
+      load(selectedWindow);
+    };
     load(selectedWindow);
 
     // Fix 6: auto-refresh every 60s

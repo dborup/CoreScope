@@ -75,6 +75,24 @@ Interactive visualization of which nodes can directly hear each other. Shows the
 
 Per-observer signal health over time. Identifies observers with degrading reception.
 
+## Scopes: Scope Audit
+
+Open **Scopes → Scope Audit** to compare each node's confirmed observer declaration with flood forwarding seen in the last **1h, 24h or 7d**. The audit covers the whole network; its own window controls the observations, independently of the global analytics filters.
+
+The table shows declared regions, observed regions and counts, unscoped traffic, undeclared regions and unscoped forwarding without a declared `*`. Search by node name, public key or declared region. Search, window and pagination are shareable, for example `#/analytics?tab=scopes&sub=audit&swin=7d&saq=dk`.
+
+**Not observed** means no attributable forwarding was recorded in this window. It does not prove that the node is configured incorrectly: quiet regions, limited observer coverage, hop limits and configuration changes can explain the gap. Declarations older than seven days, unknown declaration timestamps, ambiguous hop prefixes, unknown scoped traffic or legacy observations without their own raw header make the evidence incomplete. A node with no attributable forwarding is shown as **No forwarding evidence**, never as consistent.
+
+Only nodes with a confirmed declaration are included. An unanswered node is different from an answered empty list. Observer firmware exports flood-allowed regions; an empty list therefore means no flood-allowed regions, rather than proving that the node has no region definitions. Observer reports can omit names when their response buffer fills, without reporting truncation. Treat undeclared forwarding as a finding to investigate.
+
+Counts deduplicate a node/transmission pair across observers and repeated path hops. A transmission observed under several scope states contributes to each state's count, so those counts can sum above the unique forwarded total. Direct routes are excluded. Only an exact identity or uniquely matching supported hop prefix is attributed; heuristic path resolution is not evidence.
+
+This first version uses observer declarations already collected by CoreScope. It does not collect configuration itself, ingest CoreDrive declarations or verify unknown region codes against declared names.
+
+### Initial limits and customizer follow-up
+
+The initial defaults are 50 visible rows, a 150ms search debounce, the existing 60s refresh interval, a seven-day declaration-age threshold, a 30s backend cache and a 20s query deadline. Expose operator-adjustable display and freshness limits in a later customizer milestone. The resolver memo is capped at 4096 tokens and the cache at the three supported windows; those implementation bounds stay internal.
+
 ## Prefix Tool
 
 Test hash prefix lengths to see how many collisions different sizes would produce. Useful for deciding on hash_size settings.
