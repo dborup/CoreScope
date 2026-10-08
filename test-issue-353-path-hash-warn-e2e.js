@@ -1,8 +1,13 @@
 /**
- * #353 — browser regression: a 1-byte path hash reads as a warning in the
- * channel "Sent with" badge, the packet-detail Hash Size row and the node
- * detail badges; 2/3-byte stay neutral. Checked in the light and dark theme
- * and at a 375×812 phone viewport (no horizontal page overflow).
+ * #353 — browser regression: a 1-byte path hash reads as an amber
+ * recommendation (not a red error) in the channel "Sent with" badge, the
+ * packet-detail Hash Size row and the node detail badges; 2/3-byte stay
+ * neutral. Checked in the light and dark theme (OS-level and manual toggle on
+ * a light OS) and at a 375×812 phone viewport (no horizontal page overflow).
+ * The accent is --path-hash-warn = --warning (amber), not --danger, and each
+ * recommendation passes axe `color-contrast` (WCAG AA) on the surface it
+ * renders on (PR #356 review F1: --danger failed 4.43:1 on the light packet
+ * page; amber is 4.60:1).
  *
  * Channels use channels.js' own test hooks, packet detail a stubbed
  * /api/packets/<hash>, node detail real fixture nodes picked by hash_size.
@@ -14,6 +19,7 @@
 'use strict';
 const path = require('path');
 const { chromium } = require('playwright');
+const { AxeBuilder } = require('@axe-core/playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const SHOTS = process.env.SCREENSHOT_DIR || '';
@@ -58,27 +64,12 @@ async function stubPackets(context) {
 }
 
 // Shared assertions for a rendered recommendation element: modifier class,
-// icon hidden from AT, recommendation text, firmware-named tooltip, colour =
-// --path-hash-warn = --warning (amber, not --danger), and — #353 round 3 — a
-// WCAG AA contrast ratio (>= 4.5:1) against the element's effective background.
+// icon hidden from AT, recommendation text, firmware-named tooltip, and colour
+// = --path-hash-warn = --warning (amber, not --danger). The WCAG AA contrast
+// itself is checked by assertContrast() with real axe.
 async function readWarn(locator) {
   return locator.evaluate((el) => {
-    // sRGB relative luminance + WCAG contrast, computed in-page on the real
-    // rendered colours so the gate catches a sub-AA token in either theme.
-    const toRgb = (s) => (s.match(/\d+(\.\d+)?/g) || []).slice(0, 3).map(Number);
-    const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
-    const lum = (rgb) => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
     const cs = getComputedStyle(el);
-    // Effective background: first ancestor with a non-transparent fill.
-    let bgEl = el, bg = null;
-    while (bgEl) {
-      const c = getComputedStyle(bgEl).backgroundColor;
-      if (c && c !== 'rgba(0, 0, 0, 0)' && c !== 'transparent') { bg = c; break; }
-      bgEl = bgEl.parentElement;
-    }
-    const fgRgb = toRgb(cs.color), bgRgb = toRgb(bg || 'rgb(255,255,255)');
-    const lf = lum(fgRgb), lb = lum(bgRgb);
-    const contrast = (Math.max(lf, lb) + 0.05) / (Math.min(lf, lb) + 0.05);
     const probe = document.createElement('span');
     probe.style.color = 'var(--path-hash-warn)';
     document.body.appendChild(probe);
@@ -92,7 +83,6 @@ async function readWarn(locator) {
     const r = el.getBoundingClientRect();
     return {
       cls: el.className, title: el.getAttribute('title') || '', color: cs.color, want, warning, danger,
-      bg: bg || '(none)', contrast: Math.round(contrast * 100) / 100,
       iconHidden: !!icon && icon.closest('svg').getAttribute('aria-hidden') === 'true',
       iconVisible: !!icon && icon.closest('svg').getBoundingClientRect().width > 0,
       sr: (el.querySelector('.sr-only') || {}).textContent || '',
@@ -110,15 +100,57 @@ function assertWarn(w, block, where, opts) {
   assert(w.sr === sr, where + ': sr-only text ' + JSON.stringify(w.sr));
   assert(/^Recommended: /.test(w.title) && /2- or 3-byte/.test(w.title) && /Experimental Settings/.test(w.title) && /path\.hash\.mode/.test(w.title),
     where + ': tooltip ' + JSON.stringify(w.title));
-  // #353 round 3: WCAG AA on the real rendered colours. Checked before the
-  // exact-token check so a sub-AA accent is reported as a contrast failure
-  // (the round-2 blocker was --danger at 4.43:1 on the light packet detail).
-  assert(w.contrast >= 4.5, where + ': contrast ' + w.contrast + ':1 < AA 4.5 (fg ' + w.color + ' on bg ' + w.bg + ')');
-  // Amber recommendation palette, not the red error palette.
+  // #353 round 3: amber recommendation palette, not the red error palette.
   assert(w.color === w.want && w.want === w.warning, where + ': colour ' + w.color + ' vs --path-hash-warn ' + w.want + ' / --warning ' + w.warning);
   assert(w.want !== w.danger, where + ': --path-hash-warn still equals --danger (' + w.danger + ')');
   assert(w.right <= w.vw + 0.5, where + ': recommendation runs off-screen (' + w.right + ' > ' + w.vw + ')');
   assert(w.overflow <= 0, where + ': page scrolls horizontally by ' + w.overflow + 'px');
+}
+// Direct sRGB-luminance WCAG contrast of an element's text against its first
+// opaque ancestor background. Used as the fallback when axe leaves the element
+// "incomplete" (see assertContrast).
+async function measuredContrast(page, selector) {
+  return page.$eval(selector, (el) => {
+    const toRgb = (s) => (s.match(/\d+(\.\d+)?/g) || []).slice(0, 3).map(Number);
+    const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const lum = (rgb) => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+    const fg = toRgb(getComputedStyle(el).color);
+    let bgEl = el, bg = null;
+    while (bgEl) {
+      const c = getComputedStyle(bgEl).backgroundColor;
+      if (c && c !== 'rgba(0, 0, 0, 0)' && c !== 'transparent') { bg = c; break; }
+      bgEl = bgEl.parentElement;
+    }
+    const bgRgb = toRgb(bg || 'rgb(255,255,255)');
+    const lf = lum(fg), lb = lum(bgRgb);
+    return { ratio: Math.round((Math.max(lf, lb) + 0.05) / (Math.min(lf, lb) + 0.05) * 100) / 100, fg: getComputedStyle(el).color, bg: bg || '(none)' };
+  });
+}
+// axe color-contrast on the warning element itself: no violation, and axe
+// must actually have measured it (a pass), not left it "incomplete".
+// Waits for page/pane fade-ins first: mid-animation, axe samples a blended
+// (lighter) foreground and reports a contrast the settled page never has.
+// When axe cannot settle a background (its "incomplete" overlap heuristic can
+// fire for a short inline badge sitting among others at a narrow viewport), it
+// is not a contrast failure — fall back to a direct WCAG computation on the
+// element's own text and its first opaque ancestor, which is what the user
+// actually sees, and still require AA (>= 4.5:1).
+async function assertContrast(page, selector, where) {
+  await page.waitForFunction((sel) => {
+    const el = document.querySelector(sel);
+    return !!el && document.getAnimations().every((a) => {
+      const t = a.effect && a.effect.target;
+      return !(t && t.contains(el)) || a.playState !== 'running';
+    });
+  }, selector);
+  const r =await new AxeBuilder({ page }).include(selector).withRules(['color-contrast']).analyze();
+  const bad = r.violations.flatMap((v) => v.nodes.map((n) => n.failureSummary || n.html));
+  assert(bad.length === 0, where + ': axe color-contrast ' + bad.join(' | '));
+  const measured = r.passes.reduce((k, v) => k + v.nodes.length, 0);
+  if (measured < 1) {
+    const m = await measuredContrast(page, selector);
+    assert(m.ratio >= 4.5, where + ': contrast ' + m.ratio + ':1 < AA 4.5 (fg ' + m.fg + ' on bg ' + m.bg + ')');
+  }
 }
 
 (async () => {
@@ -142,10 +174,13 @@ function assertWarn(w, block, where, opts) {
     { name: 'dark desktop', theme: 'dark', viewport: { width: 1400, height: 900 } },
     { name: 'light 375x812', theme: 'light', viewport: { width: 375, height: 812 } },
     { name: 'dark 375x812', theme: 'dark', viewport: { width: 375, height: 812 } },
+    // Manual dark toggle on a light OS: only the [data-theme="dark"] block
+    // applies, not the prefers-color-scheme one.
+    { name: 'dark toggle on light OS', theme: 'dark', os: 'light', viewport: { width: 1400, height: 900 } },
   ];
 
   for (const v of variants) {
-    const context = await browser.newContext({ viewport: v.viewport, colorScheme: v.theme });
+    const context = await browser.newContext({ viewport: v.viewport, colorScheme: v.os || v.theme });
     await context.addInitScript((theme) => { try { localStorage.setItem('meshcore-theme', theme); } catch (_) {} }, v.theme);
     await stubPackets(context);
     const page = await context.newPage();
@@ -183,6 +218,7 @@ function assertWarn(w, block, where, opts) {
       assert(await warn.count() === 1, 'warn count ' + await warn.count());
       await warn.scrollIntoViewIfNeeded();
       assertWarn(await readWarn(warn), 'ch-path-hash-badge', 'channel');
+      await assertContrast(page, '.ch-path-hash-badge--warn', 'channel');
       assert(await warn.textContent() === 'Sent with: 1-byte — recommended: 2- or 3-byte path hash', 'warn text ' + await warn.textContent());
       const neutral = await page.locator('.ch-path-hash-badge:not(.ch-path-hash-badge--warn)').evaluateAll((els) =>
         els.map((el) => ({ text: el.textContent, icon: !!el.querySelector('svg'), title: el.title })));
@@ -198,6 +234,7 @@ function assertWarn(w, block, where, opts) {
       await warn.waitFor();
       await warn.scrollIntoViewIfNeeded();
       assertWarn(await readWarn(warn), 'detail-hash-size', 'packet detail');
+      await assertContrast(page, 'dl.detail-meta .detail-hash-size--warn', 'packet detail');
       assert(await warn.textContent() === '1 byte — recommended: 2- or 3-byte path hash', 'text ' + await warn.textContent());
       await shot('packet');
     });
@@ -218,6 +255,7 @@ function assertWarn(w, block, where, opts) {
       await warn.waitFor();
       // The node badge shows the recommendation as its visible label, so no sr-only clause.
       assertWarn(await readWarn(warn), 'node-path-hash-badge', 'node detail', { sr: '' });
+      await assertContrast(page, '.node-full-card .node-path-hash-badge--warn', 'node detail');
       assert(await warn.textContent() === 'Recommended: 2- or 3-byte path hash', 'text ' + await warn.textContent());
       assert(await page.locator('.node-full-card .multibyte-badge').count() === 0, '1-byte node claims Multibyte');
       await shot('node');
