@@ -5817,3 +5817,17 @@ body.embed #app.app-fixed {
 .privacy-page ul { padding-left: 1.3em; }
 .privacy-page li { margin: 6px 0; }
 .privacy-page a { color: var(--link-color); }
+.infrastructure-page { max-width: 1100px; margin: 0 auto; padding: 20px; }
+.infrastructure-map { height: 360px; margin: 16px 0; border-radius: 8px; overflow: hidden; background: var(--surface-1); }
+.infrastructure-list { display: grid; gap: 8px; }
+.infrastructure-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); }
+.infrastructure-row-detail { display: grid; min-width: 0; }
+.infrastructure-row-detail a { overflow-wrap: anywhere; }
+.infrastructure-row-detail small { color: var(--text-muted); }
+.infrastructure-row button[hidden] { display: none; }
+.infrastructure-admin { margin: 12px 0; }
+.infrastructure-admin input { margin: 8px; }
+@media (max-width: 600px) {
+  /* Leave room to scroll the final curation action above the fixed bottom nav. */
+  .infrastructure-page { padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
+}

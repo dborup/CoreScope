@@ -445,11 +445,17 @@ func main() {
 	// SQLITE_BUSY.
 	store.RunPendingPruneRequests()
 	store.RunPendingClientRxDeletes()
+	if err := runInfrastructureQueueOnce(store); err != nil {
+		log.Printf("[infrastructure] startup queue: %v", err)
+	}
 	pruneQueueTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range pruneQueueTicker.C {
 			store.RunPendingPruneRequests()
 			store.RunPendingClientRxDeletes()
+			if err := runInfrastructureQueueOnce(store); err != nil {
+				log.Printf("[infrastructure] queue: %v", err)
+			}
 		}
 	}()
 
