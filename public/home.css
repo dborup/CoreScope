@@ -471,9 +471,24 @@
 .mnc-val { font: 700 1rem var(--font); color: var(--text); }
 .mnc-lbl { font-size: .65rem; color: var(--text-muted); margin-top: 2px; }
 
-.mnc-observers { font-size: .75rem; color: var(--text-muted); margin-bottom: 8px; line-height: 1.4; }
+.mnc-observers { font-size: .75rem; color: var(--text-muted); margin-bottom: 8px; line-height: 1.4; min-height: 22px; }
+.mnc-observer-name { display: inline-block; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.mnc-view-all { margin-left: 4px; }
+.mnc-observers-dialog {
+  width: min(440px, calc(100vw - 24px)); max-height: min(70vh, 600px);
+  position: fixed; inset: 0; margin: auto;
+  padding: 20px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface-1); color: var(--text);
+}
+.mnc-observers-dialog::backdrop { background: var(--surface-0); opacity: .8; }
+.mnc-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.mnc-dialog-header h2 { margin: 0 0 12px; font-size: 1rem; overflow-wrap: anywhere; }
+.mnc-dialog-close { border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; background: var(--surface-2); color: var(--text); cursor: pointer; }
+.mnc-dialog-list { max-height: 50vh; overflow: auto; margin: 0; padding-left: 24px; }
+.mnc-dialog-list li { overflow-wrap: anywhere; margin-bottom: 5px; }
 
 .mnc-spark { margin-bottom: 8px; }
+.home-spark-unavailable { font-size: .7rem; color: var(--text-muted); }
 .spark-label { font-size: .65rem; color: var(--text-muted); margin-bottom: 4px; }
 .spark-bars { display: flex; align-items: flex-end; gap: 2px; height: 28px; }
 .spark-bar { flex: 1; background: var(--accent); border-radius: 1px; min-width: 0; }

@@ -245,10 +245,16 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 		s.mu.RLock()
 		loadedCount := int64(len(s.packets))
 		s.mu.RUnlock()
-		var totalInDB int64
-		if err := s.db.conn.QueryRow(`SELECT COUNT(*) FROM transmissions`).Scan(&totalInDB); err != nil {
-			totalInDB = -1
-		}
+		// #351 F1: measure coverage against the rows LoadChunked actually
+		// targeted (retention/hot-start-filtered), NOT a raw COUNT(*) over
+		// the whole table. With the shipped default (retentionHours=168,
+		// hotStartupHours=0) and a DB holding more than 168h of history, a
+		// whole-table count makes this ratio structurally < 1 forever, so
+		// the 24h activity coverage gate never proves completeness even
+		// though every retained row is in memory. docs/api-spec.md defines
+		// coverage against the RETAINED transmissions, and the bg-loader
+		// path already measures it that way.
+		totalInDB := s.loadWindowTotalInDB
 		var ratio float64
 		switch {
 		case totalInDB <= 0:
@@ -366,6 +372,11 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	if err := s.db.conn.QueryRow(countSQL).Scan(&totalInDB); err != nil {
 		totalInDB = -1
 	}
+	// #351 F1: publish the retention/hot-start-filtered total so
+	// RunStartupLoad's hotStartupHours==0 branch can compute a coverage
+	// ratio against the rows it actually targeted instead of the whole
+	// table. Same goroutine, read-after-return — see field godoc.
+	s.loadWindowTotalInDB = int64(totalInDB)
 
 	// Memory cap honoured by clamping the maximum cursor walk.
 	var maxPackets int64

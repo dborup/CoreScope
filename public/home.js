@@ -115,6 +115,10 @@
       </section>
 
       ${hasNodes ? '<div class="my-nodes-grid" id="myNodesGrid"><div class="my-nodes-loading">Loading your nodes…</div></div>' : '<div class="my-nodes-grid" id="myNodesGrid"></div>'}
+      <dialog class="mnc-observers-dialog" id="homeObserversDialog" aria-labelledby="homeObserversTitle">
+        <div class="mnc-dialog-header"><h2 id="homeObserversTitle"></h2><button type="button" class="mnc-dialog-close" aria-label="Close observer list">Close</button></div>
+        <ul class="mnc-dialog-list"></ul>
+      </dialog>
 
       ${!hasNodes ? `
         <div class="onboarding-prompt">
@@ -263,6 +267,8 @@
     clearTimeout(searchTimeout);
     if (searchAbort) { searchAbort.abort(); searchAbort = null; }
     if (miniMap) { miniMap.remove(); miniMap = null; }
+    const observersDialog = document.getElementById('homeObserversDialog');
+    if (observersDialog?.open) observersDialog.close();
     if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
   }
 
@@ -288,12 +294,15 @@
       return;
     }
 
+    const observerLists = new Map();
+
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
         const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};
         const obs = h.observers || [];
+        observerLists.set(mn.pubkey, obs);
 
         const age = stats.lastHeard ? Date.now() - new Date(stats.lastHeard).getTime() : null;
         const status = age === null ? 'silent' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'healthy' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'degraded' : 'silent';
@@ -307,8 +316,19 @@
         const snrLabel = snrVal != null ? (snrVal > 10 ? 'Excellent' : snrVal > 0 ? 'Good' : snrVal > -5 ? 'Marginal' : 'Poor') : null;
         const snrColor = snrVal != null ? (snrVal > 10 ? 'var(--status-green)' : snrVal > 0 ? 'var(--accent)' : snrVal > -5 ? 'var(--status-yellow)' : 'var(--status-red)') : '#6b7280';
 
-        // Build sparkline from recent packets (packet timestamps → hourly buckets)
-        const sparkHtml = buildSparkline(h.recentPackets || []);
+        const sparkHtml = buildSparkline(h.activity24h);
+        const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
+        const preview = isRepeater ? obs.slice(0, 3) : obs;
+        // #351 F2/R1: a name wider than the CSS max-width: 14ch clamp is
+        // clipped with an ellipsis. The full name must stay recoverable on
+        // EVERY card. Each span carries a title (pointer + assistive tech),
+        // and the accessible dialog (keyboard + touch) is offered when the
+        // preview hides names. Otherwise the button starts hidden and
+        // revealClippedObserverButtons() shows it after layout if a name is
+        // actually clipped — glyph width, not character count, decides that.
+        const obsFullName = o => o.observer_name || o.observer_id || 'Unknown';
+        const hiddenObservers = obs.length - preview.length;
+        const observerBtnText = hiddenObservers > 0 ? `View all ${obs.length} →` : 'Full names →';
 
         return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
@@ -336,8 +356,8 @@
               <div class="mnc-lbl">Avg hops</div>
             </div>
           </div>
-          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${obs.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
-          ${sparkHtml ? `<div class="mnc-spark">${sparkHtml}</div>` : ''}
+          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${obs.length} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
+          <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
             <button class="mnc-btn" data-action="health" data-key="${mn.pubkey}">Full health →</button>
@@ -365,6 +385,7 @@
     }));
 
     grid.innerHTML = cards.join('');
+    revealClippedObserverButtons(grid);
 
     // Wire up remove buttons
     grid.querySelectorAll('.mnc-remove').forEach(btn => {
@@ -385,6 +406,7 @@
         if (btn.dataset.action === 'node') window.location.hash = '#/nodes/' + encodeURIComponent(btn.dataset.key);
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
         if (btn.dataset.action === 'packets') window.location.hash = '#/packets/' + btn.dataset.key;
+        if (btn.dataset.action === 'observers') showObservers(btn, observerLists.get(btn.dataset.key) || []);
       });
     });
 
@@ -407,23 +429,52 @@
     });
   }
 
-  function buildSparkline(packets) {
-    if (!packets.length) return '';
-    // Group into hourly buckets over last 24h
-    const now = Date.now();
-    const buckets = new Array(24).fill(0);
-    packets.forEach(p => {
-      const t = new Date(p.timestamp || p.created_at).getTime();
-      const hoursAgo = Math.floor((now - t) / 3600000);
-      if (hoursAgo >= 0 && hoursAgo < 24) buckets[23 - hoursAgo]++;
+  // #351 R1: measure after layout. scrollWidth > clientWidth is exactly when
+  // the ellipsis is drawn. All reads happen before any write, so the whole
+  // grid costs one layout pass.
+  function revealClippedObserverButtons(grid) {
+    const clipped = [...grid.querySelectorAll('.mnc-view-all[hidden]')].filter(btn =>
+      [...btn.parentElement.querySelectorAll('.mnc-observer-name')].some(el => el.scrollWidth > el.clientWidth));
+    clipped.forEach(btn => { btn.hidden = false; });
+  }
+
+  function showObservers(trigger, observers) {
+    const dialog = document.getElementById('homeObserversDialog');
+    if (!dialog) return;
+    const cardName = trigger.closest('.my-node-card')?.querySelector('.mnc-name')?.textContent || 'Node';
+    dialog.querySelector('#homeObserversTitle').textContent = `${cardName} · ${observers.length} observers`;
+    const list = dialog.querySelector('.mnc-dialog-list');
+    const fragment = document.createDocumentFragment();
+    observers.forEach(observer => {
+      const item = document.createElement('li');
+      item.textContent = observer.observer_name || observer.observer_id || 'Unknown';
+      fragment.appendChild(item);
     });
-    const max = Math.max(...buckets, 1);
-    const bars = buckets.map(v => {
-      const h = Math.max(2, Math.round((v / max) * 24));
-      const opacity = v > 0 ? 0.4 + (v / max) * 0.6 : 0.1;
-      return `<div class="home-spark-bar" style="height:${h}px;opacity:${opacity}"></div>`;
+    list.replaceChildren(fragment);
+    dialog.querySelector('.mnc-dialog-close').onclick = () => dialog.close();
+    dialog.onclick = (event) => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+    };
+    dialog.onclose = () => { if (trigger.isConnected) trigger.focus(); };
+    dialog.showModal();
+  }
+
+  function buildSparkline(activity) {
+    const label = '<div class="home-spark-label">Node-associated transmissions · last 24h</div>';
+    const buckets = activity?.buckets;
+    const valid = activity?.complete === true && Array.isArray(buckets) && buckets.length === 24 &&
+      buckets.every(b => Number.isInteger(b.count) && b.count >= 0 && Number.isFinite(Date.parse(b.start)) && Number.isFinite(Date.parse(b.end)));
+    if (!valid) return label + '<div class="home-spark-unavailable">Activity unavailable: 24h history incomplete</div>';
+    const max = Math.max(1, ...buckets.map(b => b.count));
+    const bars = buckets.map(b => {
+      const height = Math.max(2, Math.round((b.count / max) * 24));
+      const opacity = b.count > 0 ? 0.4 + (b.count / max) * 0.6 : 0.1;
+      const range = `${new Date(b.start).toLocaleString()} to ${new Date(b.end).toLocaleString()}`;
+      return `<div class="home-spark-bar" role="img" aria-label="${escapeAttr(range)}: ${b.count} node-associated transmissions" title="${escapeAttr(range)}: ${b.count} node-associated transmissions" style="height:${height}px;opacity:${opacity}"></div>`;
     }).join('');
-    return `<div class="home-spark-label">24h activity</div><div class="home-spark-bars">${bars}</div>`;
+    return `${label}<div class="home-spark-bars">${bars}</div>`;
   }
 
   // ==================== STATS ====================

@@ -786,9 +786,32 @@ Detailed health information for a single node.
       // Packet fields (see Packet Object) minus `observations`
       "observation_count": number    // added for display
     }
-  ]
+  ],
+  "activity24h": {
+    "windowStart": string (ISO UTC), // inclusive: request time minus 24 hours
+    "windowEnd": string (ISO UTC),   // exclusive: request time
+    "buckets": [                    // always 24 rolling one-hour buckets, oldest first
+      { "start": string (ISO UTC), "end": string (ISO UTC), "count": number }
+    ],
+    "coverageStart": string (ISO UTC) | null,
+    "complete": boolean
+  }
 }
 ```
+
+`activity24h.count` counts unique transmissions associated with this node in
+the in-memory node index, using each transmission's `first_seen` time. Multiple
+observations of one transmission count once. Association can come from node
+identity or a resolved path; it does not prove that a repeater forwarded the
+packet. Bucket boundaries are half-open `[start, end)` and move with request
+time rather than aligning to clock hours. A malformed `first_seen` is ignored.
+`complete` is true only when successful loading reports 100% of the retained
+transmissions in memory and the retention/index bounds cover the whole 24-hour
+window. The server's general background-load “done” threshold of 90% is not
+enough for this field. If `complete` is false, zero-count
+buckets before `coverageStart` represent unknown history rather than confirmed
+silence. A null `coverageStart` means coverage cannot be established (for
+example during startup or after a failed load).
 
 ### Response `404`
 
