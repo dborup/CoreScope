@@ -119,6 +119,8 @@ func (q *Queue) Enqueue(cmd Command, maxQueued int) error {
 		if cmd.Name == "" {
 			return ErrInvalidCommand
 		}
+	case OpScopeApprove, OpScopeReject, OpScopeRevoke:
+		if cmd.Name == "" { return ErrInvalidCommand }
 	case OpApprove, OpReject, OpRevoke:
 		if !ValidID(cmd.ProposalID) {
 			return ErrInvalidCommand

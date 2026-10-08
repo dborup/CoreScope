@@ -1356,6 +1356,16 @@ img.brand-logo {
 /* MAJOR-2: when user-resizable columns push total width past container,
  * fall back to horizontal scroll on the wrap rather than overflowing the page. */
 .table-fluid-wrap { width: 100%; overflow-x: auto; }
+.obs-nb-scope-scroll-hint { display: none; }
+
+/* Observer Neighbors scope review: give both decision buttons a real table
+ * column on phones, then let the existing fluid wrapper scroll it. Without
+ * a min-width, .data-table's max-width:0 cells ellipsize the buttons while
+ * the wrapper has almost nothing to scroll. */
+@media (max-width: 600px) {
+  .obs-nb-scope-scroll-hint { display: block; font-size: 0.8em; margin: 0 0 6px; }
+  .obs-nb-scope-table.has-actions { min-width: 560px; }
+}
 
 /* === #1056 AC#4: Slide-over row-detail overlay (narrow viewports) ========
  * Singleton .slide-over-backdrop + .slide-over-panel injected into <body>

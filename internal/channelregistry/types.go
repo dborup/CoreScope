@@ -36,6 +36,9 @@ const (
 	// OpRevoke undoes a previous approval, moving an approved channel back to
 	// revoked. It reuses Command.ProposalID, same as OpApprove/OpReject.
 	OpRevoke = "revoke"
+	OpScopeApprove = "scope-approve"
+	OpScopeReject = "scope-reject"
+	OpScopeRevoke = "scope-revoke"
 )
 
 // Proposal is one suggested channel. Timestamps are Unix epoch milliseconds.

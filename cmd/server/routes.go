@@ -343,6 +343,14 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.Handle("/api/admin/channel-proposals/{id}/approve", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpApprove))).Methods("POST")
 	r.Handle("/api/admin/channel-proposals/{id}/reject", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpReject))).Methods("POST")
 	r.Handle("/api/admin/channel-proposals/{id}/revoke", s.requireAPIKey(http.HandlerFunc(s.handleAdminChannelProposalRevoke))).Methods("POST")
+	// Admin decisions on OTA-observed region scopes use an ingestor-owned
+	// queue; no SQLite write occurs in this process.
+	r.Handle("/api/admin/region-scopes", s.requireAPIKey(http.HandlerFunc(s.handleRegionScopeDecisions))).Methods("GET")
+	r.Handle("/api/admin/region-scopes/audit", s.requireAPIKey(http.HandlerFunc(s.handleRegionScopeAudit))).Methods("GET")
+	r.Handle("/api/admin/region-scopes/approve", s.requireAPIKey(s.handleRegionScopeDecision(channelregistry.OpScopeApprove))).Methods("POST")
+	r.Handle("/api/admin/region-scopes/reject", s.requireAPIKey(s.handleRegionScopeDecision(channelregistry.OpScopeReject))).Methods("POST")
+	r.Handle("/api/admin/region-scopes/revoke", s.requireAPIKey(s.handleRegionScopeDecision(channelregistry.OpScopeRevoke))).Methods("POST")
+	r.Handle("/api/admin/region-scopes/requests/{id}", s.requireAPIKey(http.HandlerFunc(s.handleRegionScopeRequestStatus))).Methods("GET")
 	r.Handle("/api/debug/affinity", s.requireAPIKey(http.HandlerFunc(s.handleDebugAffinity))).Methods("GET")
 	r.Handle("/api/dropped-packets", s.requireAPIKey(http.HandlerFunc(s.handleDroppedPackets))).Methods("GET")
 	r.Handle("/api/backup", s.requireAPIKey(http.HandlerFunc(s.handleBackup))).Methods("GET")
@@ -3633,10 +3641,10 @@ func (s *Server) handleAllObserverNeighbors(w http.ResponseWriter, r *http.Reque
 	// EffectiveHashRegions, not cfg.HashRegions: a scope configured only
 	// via hashRegionsPath is configured, and must not be reported as one
 	// the deployment does not know about (#360).
-	writeJSON(w, map[string]interface{}{
-		"neighbors":     entries,
-		"unknownScopes": computeUnknownScopes(entries, s.cfg.EffectiveHashRegions()),
-	})
+	decisions, err := s.regionScopeDecisions()
+	if err != nil { writeError(w, 500, "could not read scope decisions"); return }
+	configured := append(append([]string{}, s.cfg.EffectiveHashRegions()...), approvedRegionNames(decisions)...)
+	writeJSON(w, ObserverNeighborsResponse{Neighbors: entries, UnknownScopes: computeUnknownScopes(entries, configured)})
 }
 
 // handleObserverNeighborMetrics serves the SNR/heard_secs_ago history for
