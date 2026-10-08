@@ -3639,6 +3639,16 @@
     return '';
   }
 
+  // Detail-meta "Hash Size" row for the sender-selected width (null = not
+  // encoded, no row). #353: a 1-byte width renders the shared amber
+  // recommendation (app.js). The row is gated on the helper's output, so a
+  // width the helper rejects (null/0 or an out-of-range value) renders no row
+  // at all rather than an empty <dd></dd> (#356 review round 2, finding 2).
+  function hashSizeDetailHtml(hashSize) {
+    const inner = renderPathHashSize(hashSize, hashSize + ' byte' + (hashSize !== 1 ? 's' : ''), { block: 'detail-hash-size' });
+    return inner ? '<dt>Hash Size</dt><dd>' + inner + '</dd>' : '';
+  }
+
   async function renderDetail(panel, data, chosenObsId) {
     const pkt = data.packet;
     const observations = data.observations || [];
@@ -3893,7 +3903,7 @@
         <dt>SNR / RSSI</dt><dd>${snr != null ? snr + ' dB' : '—'} / ${rssi != null ? rssi + ' dBm' : '—'}</dd>
         <dt>Route Type</dt><dd>${routeTypeName(pkt.route_type)}</dd>
         ${pkt.scope_name != null ? `<dt>Scope</dt><dd>${pkt.scope_name !== '' ? escapeHtml(pkt.scope_name) : '<span style="color:var(--text-muted)">unknown scope</span>'}</dd>` : ''}
-        ${hashSize ? `<dt>Hash Size</dt><dd>${hashSize} byte${hashSize !== 1 ? 's' : ''}</dd>` : ''}
+        ${hashSizeDetailHtml(hashSize)}
         <dt>Propagation</dt><dd>${propagationHtml}</dd>
         ${transportCodesRow}
         ${rawCustomRow}
@@ -4567,6 +4577,7 @@
       reconcileVisibleCols,
       getDetailPreview,
       buildDetailMessageHtml,
+      hashSizeDetailHtml,
       sortGroupChildren,
       getPathHopCount,
       renderDecodedPacket,

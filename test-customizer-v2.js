@@ -353,6 +353,28 @@ test('includes sectionBg mapping', () => {
   assert.strictEqual(api.THEME_CSS_MAP.sectionBg, '--section-bg');
 });
 
+// #353: the 1-byte path hash warning colour is themeable.
+test('maps pathHashWarn → --path-hash-warn (#353)', () => {
+  const { api } = loadCustomizer();
+  assert.strictEqual(api.THEME_CSS_MAP.pathHashWarn, '--path-hash-warn');
+});
+
+test('applyCSS writes --path-hash-warn when overridden (#353)', () => {
+  const { ctx, api } = loadCustomizer();
+  const written = {};
+  ctx.document.documentElement.style.setProperty = (k, v) => { written[k] = v; };
+  api.applyCSS({ theme: { pathHashWarn: '#123456' } }, {});
+  assert.strictEqual(written['--path-hash-warn'], '#123456');
+});
+
+test('pathHashWarn has a label, a hint and an Advanced row (#353)', () => {
+  const src = fs.readFileSync('public/customize-v2.js', 'utf8');
+  assert.match(src, /pathHashWarn: '1-byte Path Hash'/);
+  // #353 round 3: the hint describes a recommendation accent, not an error.
+  assert.match(src, /pathHashWarn: '[^']*recommend[^']*1-byte path hash[^']*'/);
+  assert.match(src, /var ADVANCED_KEYS = \[[^\]]*'pathHashWarn'/);
+});
+
 test('matches all keys from old app.js varMap', () => {
   const { api } = loadCustomizer();
   const expectedKeys = [
