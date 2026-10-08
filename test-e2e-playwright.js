@@ -443,17 +443,25 @@ async function run() {
     try {
       await page.setViewportSize({width:390, height:844});
       await page.goto(`${BASE}/#/infrastructure`, {waitUntil:'domcontentloaded'});
+      // A hash-only navigation can retain the previous test's in-memory
+      // /api/nodes cache. Reload so the synthetic route fixture is used.
+      await page.reload({waitUntil:'domcontentloaded'});
       await page.waitForSelector('.infrastructure-row');
+      await page.getByText('Candidate repeater', {exact:true}).waitFor();
       assert(await page.$eval('.infrastructure-row button', e => e.hidden), 'admin control visible before unlock');
       await page.locator('.infrastructure-admin summary').click();
-	  await page.locator('.infrastructure-admin input').fill('wrong-key');
-	  await page.locator('.infrastructure-admin button').click();
-	  assert(await page.$eval('.infrastructure-row button', e => e.hidden), 'wrong key unlocked curation');
+      await page.locator('.infrastructure-admin input').fill('wrong-key');
+      await page.locator('.infrastructure-admin button').click();
+      assert(await page.$eval('.infrastructure-row button', e => e.hidden), 'wrong key unlocked curation');
       await page.locator('.infrastructure-admin input').fill('test-secret-key');
       await page.locator('.infrastructure-admin button').click();
-      await page.locator('.infrastructure-row button', {hasText:'Select'}).click();
+      await page.waitForFunction(() => Array.from(document.querySelectorAll('.infrastructure-row button'))
+        .some(b => b.textContent === 'Select' && !b.hidden));
+      await page.locator('.infrastructure-list').nth(1).locator('.infrastructure-row')
+        .filter({hasText:'Candidate repeater'}).getByRole('button', {name:'Select'}).click();
       await page.waitForFunction(() => document.querySelectorAll('.infrastructure-list')[0].querySelectorAll('.infrastructure-row').length === 2, null, {timeout:10000});
-      await page.locator('.infrastructure-row button', {hasText:'Remove'}).last().click();
+      await page.locator('.infrastructure-list').first().locator('.infrastructure-row')
+        .filter({hasText:'Candidate repeater'}).getByRole('button', {name:'Remove'}).click();
       await page.waitForFunction(() => document.querySelectorAll('.infrastructure-list')[0].querySelectorAll('.infrastructure-row').length === 1, null, {timeout:10000});
       assert(writes.length === 2 && writes.every(w => w.key === 'test-secret-key'), 'explicit authenticated select/remove not sent');
       const width = await page.$eval('.infrastructure-page', e => e.scrollWidth);

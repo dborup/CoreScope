@@ -5827,3 +5827,7 @@ body.embed #app.app-fixed {
 .infrastructure-row button[hidden] { display: none; }
 .infrastructure-admin { margin: 12px 0; }
 .infrastructure-admin input { margin: 8px; }
+@media (max-width: 600px) {
+  /* Leave room to scroll the final curation action above the fixed bottom nav. */
+  .infrastructure-page { padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
+}
