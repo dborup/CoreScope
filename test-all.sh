@@ -78,6 +78,7 @@ run test-channel-issue-1087.js
 run test-issue-1409-no-encrypted-flood.js
 run test-analytics-channels-integration.js
 run test-analytics-foreign-traffic-tab.js
+run test-scope-audit.js
 run test-analytics-nodes-without-scope.js
 run test-analytics-table-ids-unique.js
 run test-analytics-relay-airtime-dumbbell.js

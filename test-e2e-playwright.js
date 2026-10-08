@@ -3630,6 +3630,8 @@ async function run() {
       `.vcr-scope-btn.active border should track --accent-strong, got ${result.border}`);
   });
 
+  await require('./tools/scope-audit-e2e')({page, BASE, assert, test});
+
   await browser.close();
 
   // Summary
