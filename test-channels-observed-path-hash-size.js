@@ -108,6 +108,9 @@ const ctx = {
   // assertions below would have passed against a contract nothing ships.
   senderPathHashSize: loadAppHelper('senderPathHashSize',
     ['isTransportRoute', 'getPathLenOffset', 'pathHashSizeFromByte', 'senderPathHashSize']),
+  // #353: the shared 1-byte warn decision + markup, also the real app.js code.
+  renderPathHashSize: loadAppHelper('renderPathHashSize',
+    ['escapeHtml', 'pathHashSizeValue', 'isPathHashSizeWarn', 'renderPathHashSize']),
 };
 vm.createContext(ctx);
 // Expose the cache fetch helper only inside this VM so the regression can
@@ -179,6 +182,34 @@ test('sender badge uses only a valid encoded width', () => {
   assert.match(senderBadge({ senderPathHashSize: 2 }), />Sent with: 2-byte</);
   assert.strictEqual(senderBadge({ senderPathHashSize: 0 }), '');
   assert.strictEqual(senderBadge({ senderPathHashSize: '<img src=x onerror=alert(1)>' }), '');
+});
+
+// #353: a 1-byte sender width reads as an amber recommendation; 2/3-byte stay neutral.
+test('1-byte sender badge gets the warn class, the warning icon and the recommendation', () => {
+  const html = senderBadge({ senderPathHashSize: 1 });
+  assert.match(html, /class="ch-path-hash-badge ch-path-hash-badge--warn path-hash-warn"/);
+  assert.match(html, /#ph-warning/);
+  assert.match(html, /aria-hidden="true"/);
+  assert.match(html, /Sent with: 1-byte<span class="sr-only"> — recommended: 2- or 3-byte path hash<\/span>/);
+  assert.ok(!/Warning: /.test(html), 'must not read as an error');
+  assert.match(html, /title="Recommended: [^"]*2- or 3-byte[^"]*Experimental Settings/);
+});
+
+test('2- and 3-byte sender badges stay neutral with the header tooltip', () => {
+  for (const size of [2, 3]) {
+    const html = senderBadge({ senderPathHashSize: size });
+    assert.ok(!html.includes('--warn'), size + '-byte got the warn class');
+    assert.ok(!html.includes('ph-warning'), size + '-byte got the warning icon');
+    assert.match(html, /title="Path hash size encoded in the sender’s packet header"/);
+    assert.match(html, new RegExp('>Sent with: ' + size + '-byte</span>$'));
+  }
+});
+
+test('missing or invalid sender widths still render no badge', () => {
+  for (const v of [undefined, null, 0, 4, 'abc']) {
+    assert.strictEqual(senderBadge({ senderPathHashSize: v }), '', 'for ' + String(v));
+  }
+  assert.strictEqual(senderBadge(null), '');
 });
 
 test('REST refresh retains a sender width from the matching live message', () => {

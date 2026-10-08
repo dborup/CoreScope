@@ -143,12 +143,21 @@ function assertProviderSet(ctx, id) {
 
 console.log('── #1470 node-detail inset-map tile-provider routing ──');
 
-test('roles.js + providers: getActiveTileProvider returns null in light mode', () => {
+// #332 — getActiveTileProvider() used to return null in light mode, so the
+// node-detail inset map credited a generic fallback instead of the operator's
+// configured light provider. It now resolves both themes; the light style
+// carries no invertFilter, so the rendered result is unchanged.
+test('roles.js + providers: getActiveTileProvider returns the LIGHT provider in light mode (#332)', () => {
   const ctx = makeSandbox({ theme: 'light', prefersDark: false });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');
   const p = ctx.window.getActiveTileProvider();
-  assert.strictEqual(p, null, 'expected null in light mode, got ' + JSON.stringify(p));
+  assert.ok(p, 'expected a provider in light mode, got ' + JSON.stringify(p));
+  assert.strictEqual(p.type, 'light', 'must be a light style, got ' + p.type);
+  assert.strictEqual(p.invertFilter, null, 'a light style must not carry an invert filter');
+  assert.strictEqual(ctx.window.MC_setLightTileProvider('carto-light'), true);
+  const q = ctx.window.getActiveTileProvider();
+  assert.ok(/CartoDB/.test(q.attribution), 'follows the selected light provider, got ' + q.attribution);
 });
 
 test('roles.js + providers: getActiveTileProvider returns selected provider in dark mode', () => {
@@ -214,7 +223,7 @@ test('_applyTilesToNodeMap: dark + carto-dark (non-inverted) → no invert filte
     'no invert filter for carto-dark — got ' + JSON.stringify(mock.tilePane.style.filter));
 });
 
-test('_applyTilesToNodeMap: light mode → uses TILE_LIGHT (carto light_all), no invert', () => {
+test('_applyTilesToNodeMap: light mode → uses the configured light tile URL, no invert', () => {
   const ctx = makeSandbox({ theme: 'light', prefersDark: false });
   loadInto(ctx, 'public/map-tile-providers.js');
   loadInto(ctx, 'public/roles.js');

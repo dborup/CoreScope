@@ -65,6 +65,17 @@ type Config struct {
 	ValidateSignatures *bool                   `json:"validateSignatures,omitempty"`
 	DB                 *DBConfig               `json:"db,omitempty"`
 
+	// HashRegionsPath optionally points at a JSON array of region-scope
+	// names merged with the inline HashRegions list above (#360). A real
+	// deployment configures ~1100 regions: a large, machine-maintained
+	// block sitting in the middle of hand-edited settings, which this
+	// moves out without changing the inline format for anyone else.
+	// Env override: HASH_REGIONS_PATH. A relative path resolves against
+	// the directory holding this config file, so the server resolves the
+	// same path to the same file. Only read when set — there is no
+	// auto-discovered default. See internal/regions.Load.
+	HashRegionsPath string `json:"hashRegionsPath,omitempty"`
+
 	// ObserverIATAWhitelist restricts which observer IATA regions are processed.
 	// When non-empty, only observers whose IATA code (from the MQTT topic) matches
 	// one of these entries are accepted. Case-insensitive. An empty list means all
@@ -232,6 +243,45 @@ type RetentionConfig struct {
 	// coverage rows in client_receptions / client_observers; 0 disables. Bounds
 	// the table the opt-in coverage feature would otherwise grow without limit.
 	ClientRxDays int `json:"clientRxDays"`
+	// The opt-in windows below cover the tables nothing else prunes (#329);
+	// 0 disables each. See TableRetention.
+	InactiveNodeDays  int `json:"inactiveNodeDays"`
+	NodeChangeDays    int `json:"nodeChangeDays"`
+	ObserverPurgeDays int `json:"observerPurgeDays"`
+}
+
+// TableRetention holds the opt-in retention windows, in days, of the tables
+// nothing else prunes (#329). 0 disables a window, so an instance that sets
+// none of them keeps every row, as before. ping_triggers has no window and is
+// kept forever: the all-time Ping Scores records join it with the history
+// sidecar (#349, #241).
+type TableRetention struct {
+	// InactiveNodeDays deletes inactive_nodes rows whose last advert is
+	// older, once the node has not come back.
+	InactiveNodeDays int
+	// NodeChangeDays deletes node_changes rows detected longer ago.
+	NodeChangeDays int
+	// ObserverPurgeDays hard-deletes observers that observerDays already
+	// soft-deleted, once nothing still references them (upstream#1886).
+	ObserverPurgeDays int
+}
+
+// Enabled reports whether any window is set.
+func (r TableRetention) Enabled() bool {
+	return r.InactiveNodeDays > 0 || r.NodeChangeDays > 0 || r.ObserverPurgeDays > 0
+}
+
+// TableRetention returns the configured opt-in table retention windows,
+// with unset and negative values as 0 (disabled).
+func (c *Config) TableRetention() TableRetention {
+	if c.Retention == nil {
+		return TableRetention{}
+	}
+	return TableRetention{
+		InactiveNodeDays:  max(c.Retention.InactiveNodeDays, 0),
+		NodeChangeDays:    max(c.Retention.NodeChangeDays, 0),
+		ObserverPurgeDays: max(c.Retention.ObserverPurgeDays, 0),
+	}
 }
 
 // PacketDaysOrZero returns the configured retention.packetDays or 0

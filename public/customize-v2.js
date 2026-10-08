@@ -52,6 +52,7 @@
     sectionBg: '--section-bg',
     cardBg: '--card-bg', contentBg: '--content-bg', detailBg: '--detail-bg',
     inputBg: '--input-bg', rowStripe: '--row-stripe', rowHover: '--row-hover', selectedBg: '--selected-bg',
+    pathHashWarn: '--path-hash-warn',
     font: '--font', mono: '--mono'
   };
 
@@ -300,7 +301,7 @@
     statusGreen: 'Healthy', statusYellow: 'Warning', statusRed: 'Error',
     surface1: 'Cards', surface2: 'Panels', surface3: 'Tertiary Surface', sectionBg: 'Section Header', cardBg: 'Card Fill', contentBg: 'Content Area',
     detailBg: 'Detail Panels', inputBg: 'Inputs', rowStripe: 'Table Stripe',
-    rowHover: 'Row Hover', selectedBg: 'Selected',
+    rowHover: 'Row Hover', selectedBg: 'Selected', pathHashWarn: '1-byte Path Hash',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -318,6 +319,7 @@
     cardBg: 'Detail panels, modals', contentBg: 'Content area behind cards',
     detailBg: 'Modal, packet detail, side panels', inputBg: 'Text inputs, dropdowns',
     rowStripe: 'Alternating table rows', rowHover: 'Table row hover', selectedBg: 'Selected/active rows',
+    pathHashWarn: 'Amber accent recommending a 2/3-byte over a 1-byte path hash (channels, packet detail, node badge)',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -379,7 +381,7 @@
   }
 
   var BASIC_KEYS = ['accent', 'navBg', 'navText', 'background', 'text', 'statusGreen', 'statusYellow', 'statusRed'];
-  var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg'];
+  var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg', 'pathHashWarn'];
   var FONT_KEYS = ['font', 'mono'];
 
   // ── Validation helpers ──
@@ -1637,8 +1639,12 @@
   function _renderTileProviderSelector() {
     var reg = (typeof window !== 'undefined') && window.MC_TILE_PROVIDERS;
     if (!reg) return '';
-    var activeDark = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-    var activeLight = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : 'carto-light';
+    // #332 — the last-resort id comes from the registry's own exported
+    // defaults, never from a hard-coded 'carto-*'. CARTO is no longer the
+    // built-in default, so naming it here would have preselected a style
+    // the instance may not even have enabled.
+    var activeDark = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : window.MC_DARK_TILE_DEFAULT;
+    var activeLight = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : window.MC_LIGHT_TILE_DEFAULT;
     
     var darkIds = Object.keys(reg).filter(function(id) { return reg[id].type === 'dark'; });
     var lightIds = Object.keys(reg).filter(function(id) { return reg[id].type === 'light'; });
@@ -1766,6 +1772,21 @@
     '</div>';
   }
 
+  /* #332 — both geo-filter preview maps used to hard-code the CARTO
+   * light_all template, so they rendered "API KEY REQUIRED" tiles even on
+   * instances configured for Esri/OpenTopoMap/OSM. Resolve the operator's
+   * configured LIGHT provider instead (these previews are always
+   * light-styled regardless of the app theme), falling back to roles.js
+   * TILE_LIGHT, which is itself non-CARTO. */
+  function _cv2PreviewTile() {
+    var spec = (typeof window.MC_getTileSpec === 'function') ? window.MC_getTileSpec('light') : null;
+    return {
+      url: (spec && spec.url) || window.TILE_LIGHT,
+      attribution: (spec && spec.attribution) || '© OpenStreetMap contributors',
+      maxZoom: (spec && spec.maxZoom) || 19
+    };
+  }
+
   function _gfOpenModal(container) {
     var existing = document.getElementById('cv2-gf-modal-overlay');
     if (existing) existing.remove();
@@ -1835,8 +1856,9 @@
     var modalClosingLine = null;
 
     _gfModalMap = L.map(mapDiv, { zoomControl: true });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
+    var _cv2Tile = _cv2PreviewTile();
+    L.tileLayer(_cv2Tile.url, {
+      attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfModalMap);
 
     function renderModal() {
@@ -2044,8 +2066,9 @@
     if (!mapEl || typeof L === 'undefined') return;
 
     _gfMap = L.map(mapEl, { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CartoDB', maxZoom: 19
+    var _cv2Tile = _cv2PreviewTile();
+    L.tileLayer(_cv2Tile.url, {
+      attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfMap);
 
     if (!_gfLoaded) {

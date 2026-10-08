@@ -1072,6 +1072,25 @@ Returned when the node is unknown or hidden (see Visibility).
 { "error": "Not found" }
 ```
 
+### Response `429`
+
+Returned when the report is **cold** (not cached) and too many other cold
+reports are already scanning the database. At most two cold reports compute at
+once, so a burst of different nodes/windows cannot occupy the read pool and
+slow unrelated endpoints; a cold request queues briefly for a slot and is only
+shed if the limit is still saturated. Warm (cached) responses are never
+affected, and concurrent requests for the *same* node and window still share
+one computation. Nothing is cached for a shed request — retry after
+`Retry-After` seconds and it recomputes normally.
+
+```
+Retry-After: 2
+```
+
+```json
+{ "error": "reach is busy computing other reports", "retryAfter": 2 }
+```
+
 ### Response `500`
 
 Returned when the scan fails, or when the live name lookup for visibility
@@ -1164,7 +1183,8 @@ Paginated packet (transmission) list with filtering.
 |--------------|--------|---------|----------------------------------------------------|
 | `limit`      | number | `50`    | Page size                                          |
 | `offset`     | number | `0`     | Pagination offset                                  |
-| `type`       | string | —       | Filter by payload type (number or name)            |
+| `type`       | string | —       | Filter by numeric payload type                    |
+| `excludeTypes` | string | —     | Comma-separated numeric payload types (0–15), excluded before pagination |
 | `route`      | string | —       | Filter by route type                               |
 | `region`     | string | —       | Filter by region (IATA code substring)             |
 | `observer`   | string | —       | Filter by observer ID                              |
@@ -1176,6 +1196,24 @@ Paginated packet (transmission) list with filtering.
 | `order`      | string | `DESC`  | Sort direction: `asc` or `desc`                    |
 | `groupByHash`| string | —       | Set to `"true"` for grouped response               |
 | `expand`     | string | —       | Set to `"observations"` to include observation arrays |
+
+`excludeTypes=11` excludes CONTROL transmissions before `limit`, `offset`, and
+`total` are calculated, for both raw and `groupByHash=true` responses. It uses
+the same filtering in memory and in the SQLite fallback. It does not delete
+packets or affect WebSocket delivery or packet-detail endpoints.
+
+The list accepts at most 16 entries and 64 characters. Whitespace around entries
+is trimmed; duplicates collapse. Empty/omitted means no exclusion. Codes 0–15
+include reserved wire types; unknown/NULL stored types remain in the result.
+An overlapping `type` inclusion and exclusion returns no packets for that type.
+Malformed values, repeated `excludeTypes` parameters, and a nonempty exclusion
+combined with `nodes` return HTTP 400. Use `node` for a supported single-node
+combination. All other existing filters continue to compose normally.
+
+The Packets page refetches when its type selection or Hide CONTROL checkbox
+changes, so excluded traffic cannot fill the fetched page. Live updates are
+still filtered locally. Pinned-hash views omit these exclusions so a direct
+packet link remains visible.
 
 ### Response `200` (default)
 

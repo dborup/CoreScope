@@ -21,7 +21,6 @@ import (
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/prunequeue"
-	regionutil "github.com/meshcore-analyzer/regions"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -1263,6 +1262,15 @@ func (s *Server) handlePerfReset(w http.ResponseWriter, r *http.Request) {
 // --- Packet Handlers ---
 
 func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
+	excludeTypes, parseErr := parsePacketTypeExclusions(r.URL.Query())
+	if parseErr != nil {
+		writeError(w, 400, parseErr.Error())
+		return
+	}
+	if excludeTypes != 0 && r.URL.Query().Get("nodes") != "" {
+		writeError(w, 400, "excludeTypes is not supported with nodes; use the single node filter")
+		return
+	}
 	// Multi-node filter: comma-separated pubkeys (Node.js parity)
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
 		pubkeys := strings.Split(nodesParam, ",")
@@ -1300,6 +1308,7 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := PacketQuery{
+		ExcludeTypes:       excludeTypes,
 		Limit:              queryLimit(r, 50, s.cfg.ListLimits.PacketsMax),
 		Offset:             queryInt(r, "offset", 0),
 		Observer:           r.URL.Query().Get("observer"),
@@ -2102,7 +2111,7 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.store != nil {
-		result, err := s.store.GetNodeHealth(pubkey)
+		result, err := s.store.GetNodeHealth(pubkey, time.Now().UTC())
 		if err != nil || result == nil {
 			writeError(w, 404, "Not found")
 			return
@@ -3635,13 +3644,12 @@ func (s *Server) handleAllObserverNeighbors(w http.ResponseWriter, r *http.Reque
 		}
 		entries = filtered
 	}
-	var hashRegions []string
-	if s.cfg != nil {
-		hashRegions = s.cfg.HashRegions
-	}
+	// EffectiveHashRegions, not cfg.HashRegions: a scope configured only
+	// via hashRegionsPath is configured, and must not be reported as one
+	// the deployment does not know about (#360).
 	writeJSON(w, map[string]interface{}{
 		"neighbors":     entries,
-		"unknownScopes": computeUnknownScopes(entries, hashRegions),
+		"unknownScopes": computeUnknownScopes(entries, s.cfg.EffectiveHashRegions()),
 	})
 }
 
@@ -4337,8 +4345,11 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.cfg != nil && len(s.cfg.HashRegions) > 0 {
-		configured := regionutil.NormalizeNames(s.cfg.HashRegions)
+	// Already normalized and deduplicated, and it includes the names from
+	// hashRegionsPath (#360) — a file-only config has no inline entries at
+	// all, so gating on len(cfg.HashRegions) would skip region stats
+	// entirely.
+	if configured := s.cfg.EffectiveHashRegions(); len(configured) > 0 {
 		resp.ConfiguredRegions = len(configured)
 		if matched, err := s.db.GetMatchedRegionNames(); err == nil {
 			unused := make([]string, 0, len(configured))

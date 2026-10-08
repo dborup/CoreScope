@@ -519,6 +519,38 @@ console.log('\n=== nodes.js: getStatusTooltip / getStatusInfo (extracted) ===');
       assert.ok(html.includes('room'));
       assert.ok(!html.includes('variable hash size'));
     });
+    // #353: a node advertising a 1-byte path hash gets a warning badge.
+    const nodeWithHash = (hash_size) => ({
+      role: 'repeater', public_key: 'abcdef1234567890', hash_size,
+      last_heard: new Date().toISOString()
+    });
+    test('renderNodeBadges adds the 1-byte path hash recommendation badge (#353)', () => {
+      for (const size of [1, '1']) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.match(html, /class="badge node-path-hash-badge node-path-hash-badge--warn path-hash-warn"/);
+        assert.match(html, /#ph-warning/);
+        // #353 round 3: the standalone badge shows the recommendation as its
+        // visible label (no duplicate sr-only clause); amber, not red.
+        assert.match(html, />Recommended: 2- or 3-byte path hash<\/span>/);
+        assert.ok(!/Warning: /.test(html), 'must not read as an error');
+        assert.match(html, /title="Recommended: [^"]*2- or 3-byte[^"]*path\.hash\.mode/);
+        assert.ok(!html.includes('multibyte-badge'), '1-byte must not claim Multibyte');
+      }
+    });
+    test('renderNodeBadges adds no path hash warning for 2/3-byte nodes (#353)', () => {
+      for (const size of [2, 3]) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.ok(!html.includes('node-path-hash-badge'), size + '-byte got the warning badge');
+        assert.ok(!html.includes('path-hash-warn'), size + '-byte got the warn class');
+        assert.ok(html.includes('multibyte-badge'), size + '-byte lost the Multibyte badge');
+      }
+    });
+    test('renderNodeBadges adds no path hash warning when hash_size is missing/invalid (#353)', () => {
+      for (const size of [null, undefined, 0, 4]) {
+        const html = ex.renderNodeBadges(nodeWithHash(size), '#dc2626');
+        assert.ok(!html.includes('node-path-hash-badge'), 'for ' + size);
+      }
+    });
     test('renderNodeBadges handles string hash_sizes_seen gracefully', () => {
       const html = ex.renderNodeBadges({
         role: 'repeater', public_key: 'abcdef1234567890',
@@ -2517,9 +2549,11 @@ console.log('\n=== analytics.js: sortChannels ===');
       { name: 'B', hash: 1, messages: 1, senders: 1, lastActivity: '', encrypted: false },
       { name: null, hash: 2, messages: 2, senders: 2, lastActivity: '', encrypted: false },
     ];
-    const r = sortChannels(data, 'name', 'asc');
-    assert.strictEqual(r[0].name, null);
-    assert.strictEqual(r[1].name, 'B');
+    for (const dir of ['asc', 'desc']) {
+      const r = sortChannels(data, 'name', dir);
+      assert.strictEqual(r[0].name, 'B');
+      assert.strictEqual(r[1].name, null);
+    }
   });
 
   test('sort handles missing lastActivity', () => {

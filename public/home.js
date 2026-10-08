@@ -320,6 +320,16 @@
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
         const preview = isRepeater ? obs.slice(0, 3) : obs;
         const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals, h.advertRouteBackfill) : '';
+        // #351 F2/R1: a name wider than the CSS max-width: 14ch clamp is
+        // clipped with an ellipsis. The full name must stay recoverable on
+        // EVERY card. Each span carries a title (pointer + assistive tech),
+        // and the accessible dialog (keyboard + touch) is offered when the
+        // preview hides names. Otherwise the button starts hidden and
+        // revealClippedObserverButtons() shows it after layout if a name is
+        // actually clipped — glyph width, not character count, decides that.
+        const obsFullName = o => o.observer_name || o.observer_id || 'Unknown';
+        const hiddenObservers = obs.length - preview.length;
+        const observerBtnText = hiddenObservers > 0 ? `View all ${obs.length} →` : 'Full names →';
 
         return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
@@ -347,7 +357,7 @@
               <div class="mnc-lbl">Avg hops</div>
             </div>
           </div>
-          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name">${escapeHtml(o.observer_name || o.observer_id || 'Unknown')}</span>`).join(', ')}${isRepeater && obs.length > 3 ? ` <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="View all ${obs.length} observers for ${escapeAttr(name)}">View all ${obs.length} →</button>` : ''}</div>` : ''}
+          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${obs.length} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
           ${cadenceHtml}
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
@@ -377,6 +387,7 @@
     }));
 
     grid.innerHTML = cards.join('');
+    revealClippedObserverButtons(grid);
 
     // Wire up remove buttons
     grid.querySelectorAll('.mnc-remove').forEach(btn => {
@@ -418,6 +429,15 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(e); }
       });
     });
+  }
+
+  // #351 R1: measure after layout. scrollWidth > clientWidth is exactly when
+  // the ellipsis is drawn. All reads happen before any write, so the whole
+  // grid costs one layout pass.
+  function revealClippedObserverButtons(grid) {
+    const clipped = [...grid.querySelectorAll('.mnc-view-all[hidden]')].filter(btn =>
+      [...btn.parentElement.querySelectorAll('.mnc-observer-name')].some(el => el.scrollWidth > el.clientWidth));
+    clipped.forEach(btn => { btn.hidden = false; });
   }
 
   function showObservers(trigger, observers) {

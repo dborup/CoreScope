@@ -19,6 +19,7 @@ import (
 	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/packetpath"
 	regionutil "github.com/meshcore-analyzer/regions"
+	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
 
@@ -117,6 +118,20 @@ type DB struct {
 	// detectSchema pass. A non-nil error makes the pass give up the way a
 	// failed PRAGMA table_info does: no flag is set.
 	schemaProbeHook func() error
+
+	// Region-membership cache for GetNodes (see nodes_region_cache.go).
+	// nodeRegionUsed holds the LRU tick of each cached key and is written
+	// together with nodeRegionCache under nodeRegionCacheMu.
+	nodeRegionCacheMu sync.Mutex
+	nodeRegionCache   map[string]*nodeRegionEntry
+	nodeRegionUsed    map[string]int64
+	nodeRegionTick    int64
+	nodeRegionSF      singleflight.Group
+	nodeRegionFullMu  sync.Mutex
+	// nodeRegionQueryHook (test seam, nil in production) runs once per real
+	// membership scan, before the query; a non-nil error fails that refresh
+	// the way a failing scan does.
+	nodeRegionQueryHook func() error
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.
@@ -687,6 +702,7 @@ type PacketQuery struct {
 	Limit              int
 	Offset             int
 	Type               *int
+	ExcludeTypes       packetTypeExclusions
 	Route              *int
 	Observer           string
 	Hash               string
@@ -792,6 +808,12 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 	if db.hasScopeName() {
 		groupedScopeCol = ", t.scope_name"
 	}
+	// #165 — the displayed observation's resolved_path. Always one column
+	// (NULL without the column), so the Scan below does not depend on it.
+	groupedRPCol := "NULL"
+	if db.hasResolvedPath() {
+		groupedRPCol = "o.resolved_path"
+	}
 	var querySQL string
 	if db.isV3() {
 		querySQL = fmt.Sprintf(`SELECT t.hash, t.first_seen, t.raw_hex, t.decoded_json, t.payload_type, t.route_type,
@@ -799,7 +821,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			COALESCE((SELECT COUNT(DISTINCT oi.observer_idx) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS observer_count,
 			COALESCE((SELECT MAX(strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', oi.timestamp, 'unixepoch')) FROM observations oi WHERE oi.transmission_id = t.id), t.first_seen) AS latest,
 			obs.id AS observer_id, obs.name AS observer_name, COALESCE(obs.iata, '') AS observer_iata,
-			o.snr, o.rssi, o.path_json,
+			o.snr, o.rssi, o.path_json, `+groupedRPCol+`,
 			COALESCE((SELECT GROUP_CONCAT(DISTINCT obi.iata) FROM observations oi JOIN observers obi ON obi.rowid = oi.observer_idx WHERE oi.transmission_id = t.id AND obi.iata IS NOT NULL AND obi.iata != ''), '') AS distinct_iatas`+groupedScopeCol+`
 		FROM transmissions t
 		LEFT JOIN observations o ON o.id = (
@@ -814,7 +836,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			COALESCE((SELECT COUNT(DISTINCT oi.observer_id) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS observer_count,
 			COALESCE((SELECT MAX(oi.timestamp) FROM observations oi WHERE oi.transmission_id = t.id), t.first_seen) AS latest,
 			o.observer_id, o.observer_name, COALESCE(obs2.iata, '') AS observer_iata,
-			o.snr, o.rssi, o.path_json,
+			o.snr, o.rssi, o.path_json, `+groupedRPCol+`,
 			COALESCE((SELECT GROUP_CONCAT(DISTINCT obi.iata) FROM observations oi JOIN observers obi ON obi.id = oi.observer_id WHERE oi.transmission_id = t.id AND obi.iata IS NOT NULL AND obi.iata != ''), '') AS distinct_iatas`+groupedScopeCol+`
 		FROM transmissions t
 		LEFT JOIN observations o ON o.id = (
@@ -837,7 +859,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 
 	packets := make([]map[string]interface{}, 0)
 	for rows.Next() {
-		var hash, firstSeen, rawHex, decodedJSON, latest, observerID, observerName, observerIATA, pathJSON, distinctIatasCSV sql.NullString
+		var hash, firstSeen, rawHex, decodedJSON, latest, observerID, observerName, observerIATA, pathJSON, resolvedPath, distinctIatasCSV sql.NullString
 		var payloadType, routeType sql.NullInt64
 		var count, observerCount int
 		var snr, rssi sql.NullFloat64
@@ -845,7 +867,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 
 		scanArgs := []interface{}{&hash, &firstSeen, &rawHex, &decodedJSON, &payloadType, &routeType,
 			&count, &observerCount, &latest,
-			&observerID, &observerName, &observerIATA, &snr, &rssi, &pathJSON, &distinctIatasCSV}
+			&observerID, &observerName, &observerIATA, &snr, &rssi, &pathJSON, &resolvedPath, &distinctIatasCSV}
 		if db.hasScopeName() {
 			scanArgs = append(scanArgs, &scopeName)
 		}
@@ -853,7 +875,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			continue
 		}
 
-		packets = append(packets, map[string]interface{}{
+		row := map[string]interface{}{
 			"hash":              nullStr(hash),
 			"first_seen":        nullStr(firstSeen),
 			"count":             count,
@@ -872,7 +894,15 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			"snr":               nullFloat(snr),
 			"rssi":              nullFloat(rssi),
 			"scope_name":        nullStr(scopeName),
-		})
+		}
+		// #165 — the displayed observation's resolved_path, as the in-memory
+		// store sends it (groupedPageWithRP).
+		if resolvedPath.Valid {
+			if rp := resolvedPathRaw(resolvedPath.String); rp != nil {
+				row["resolved_path"] = rp
+			}
+		}
+		packets = append(packets, row)
 	}
 
 	return &PacketResult{Packets: packets, Total: total}, nil
@@ -904,6 +934,7 @@ func parseDistinctIatasCSV(v interface{}) []string {
 func (db *DB) buildPacketWhere(q PacketQuery) ([]string, []interface{}) {
 	var where []string
 	var args []interface{}
+	where, args = q.ExcludeTypes.appendSQL(where, args, "payload_type")
 
 	if q.Type != nil {
 		where = append(where, "payload_type = ?")
@@ -948,6 +979,7 @@ func (db *DB) buildPacketWhere(q PacketQuery) ([]string, []interface{}) {
 func (db *DB) buildTransmissionWhere(q PacketQuery) ([]string, []interface{}) {
 	var where []string
 	var args []interface{}
+	where, args = q.ExcludeTypes.appendSQL(where, args, "t.payload_type")
 
 	if q.Type != nil {
 		where = append(where, "t.payload_type = ?")
@@ -1156,30 +1188,18 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 		}
 	}
 
-	if region != "" {
-		codes := normalizeRegionCodes(region)
-		if len(codes) > 0 {
-			placeholders := make([]string, len(codes))
-			regionArgs := make([]interface{}, len(codes))
-			for i, c := range codes {
-				placeholders[i] = "?"
-				regionArgs[i] = c
-			}
-			joinCond := "obs.rowid = o.observer_idx"
-			if !db.isV3() {
-				joinCond = "obs.id = o.observer_id"
-			}
-			subq := fmt.Sprintf(`public_key IN (
-				SELECT DISTINCT JSON_EXTRACT(t.decoded_json, '$.pubKey')
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				JOIN observers obs ON %s
-				WHERE t.payload_type = 4
-				AND UPPER(TRIM(obs.iata)) IN (%s)
-			)`, joinCond, strings.Join(placeholders, ","))
-			where = append(where, subq)
-			args = append(args, regionArgs...)
+	// The region filter is served from the bounded membership cache in
+	// nodes_region_cache.go: the IN (...) observation join is evaluated there
+	// once per region set, not twice per request (COUNT(*) and the page).
+	// #38's from_pubkey contract — and the trap that comes with it — lives
+	// with the query, in scanNodeRegionKeys.
+	if codes := normalizeRegionCodes(region); len(codes) > 0 {
+		keysJSON, err := db.nodeRegionKeysJSON(codes)
+		if err != nil {
+			return nil, 0, nil, err
 		}
+		where = append(where, "public_key IN (SELECT value FROM json_each(?))")
+		args = append(args, keysJSON)
 	}
 
 	w := ""
@@ -3772,6 +3792,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			Repeats:          1,
 			PathHashSizeMask: pathHashSizeMask,
 		}
+		setChannelHashHex(m.Data, decoded[channelHashHexKey])
 		if obsTs.Valid {
 			m.LatestEpoch = obsTs.Int64
 		}

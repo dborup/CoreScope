@@ -588,47 +588,70 @@
   };
 
   // ─── Tile URLs ───
-  window.TILE_DARK  = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-  window.TILE_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  // #332 — these are the LAST-RESORT templates, used only when
+  // map-tile-providers.js has not loaded (standalone pages, unit tests) or
+  // when the active style is malformed. They must not be CARTO: keyless
+  // CARTO raster tiles have been stamped "API KEY REQUIRED" since August
+  // 2026, so a CARTO default produced watermarked maps on every instance
+  // that had not changed providers. Keyless OSM Standard is the baseline
+  // the rest of the app already uses for its registry-less maps.
+  // Operators can still override both via the legacy `tiles.dark` /
+  // `tiles.light` and `map.tiles.darkUrl` / `lightUrl` config keys.
+  window.TILE_DARK  = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  window.TILE_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+  function _tileThemeIsDark() {
+    return document.documentElement.getAttribute('data-theme') === 'dark' ||
+      (document.documentElement.getAttribute('data-theme') !== 'light' &&
+       window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  /* #332 — resolve the configured provider for the current theme.
+   * Returns the registry style object, or null when no registry applies.
+   * Both themes are honoured: before #332 only dark consulted the
+   * registry, so a light-mode map ignored map.tiles.lightDefault entirely
+   * and fell through to the hard-coded CARTO template above. */
+  function _activeTileStyle() {
+    var isDark = _tileThemeIsDark();
+    try {
+      var reg = window.MC_TILE_PROVIDERS;
+      if (!reg) return null;
+      var getId = isDark ? window.MC_getDarkTileProvider : window.MC_getLightTileProvider;
+      if (typeof getId !== 'function') return null;
+      return reg[getId()] || null;
+    } catch (_e) { return null; }
+  }
 
   window.getTileUrl = function () {
-    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
-      (document.documentElement.getAttribute('data-theme') !== 'light' &&
-       window.matchMedia('(prefers-color-scheme: dark)').matches);
-    if (!isDark) return TILE_LIGHT;
-    // #1461 followup: honor customizer's dark-tile-provider pick (#1420 / #1430)
-    // when the registry is loaded. Falls back to TILE_DARK if absent.
+    var isDark = _tileThemeIsDark();
     try {
-      if (window.MC_getDarkTileProvider && window.MC_TILE_PROVIDERS) {
-        var id = window.MC_getDarkTileProvider();
-        var p = window.MC_TILE_PROVIDERS[id];
-        if (p && (p.url || p.baseUrl)) {
-          // #1614: providers added in #1533 (carto/osm/stamen) declare
-          // `url` as a function for lazy config resolution. Invoke it so
-          // we always return a string URL template; L.tileLayer otherwise
-          // stringifies the function source and every tile request 404s.
-          var u = p.url || p.baseUrl;
-          return (typeof u === 'function') ? u() : u;
-        }
+      // Preferred path: the registry's own resolver already invokes lazy
+      // `url` functions and picks the right provider per theme.
+      if (typeof window.MC_getTileSpec === 'function') {
+        var spec = window.MC_getTileSpec(isDark ? 'dark' : 'light');
+        if (spec && spec.url) return spec.url;
+      }
+      // Older/partial registries (and tests that mock only the accessors)
+      // expose MC_TILE_PROVIDERS + MC_get*TileProvider without getTileSpec.
+      var p = _activeTileStyle();
+      if (p && (p.url || p.baseUrl)) {
+        // #1614: providers added in #1533 (carto/osm/stamen) declare
+        // `url` as a function for lazy config resolution. Invoke it so
+        // we always return a string URL template; L.tileLayer otherwise
+        // stringifies the function source and every tile request 404s.
+        var u = p.url || p.baseUrl;
+        return (typeof u === 'function') ? u() : u;
       }
     } catch (_e) {}
-    return TILE_DARK;
+    return isDark ? TILE_DARK : TILE_LIGHT;
   };
   /* Helper: get the full provider object (for callers that also need the
-   * invertFilter or refUrl/attribution). Returns null when no customizer
-   * provider applies (light mode, or registry not loaded). */
+   * invertFilter or refUrl/attribution). Returns null when no registry
+   * provider applies. #332: light mode resolves too, so the node-detail
+   * inset map credits the configured light provider instead of a generic
+   * fallback. */
   window.getActiveTileProvider = function () {
-    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
-      (document.documentElement.getAttribute('data-theme') !== 'light' &&
-       window.matchMedia('(prefers-color-scheme: dark)').matches);
-    if (!isDark) return null;
-    try {
-      if (window.MC_getDarkTileProvider && window.MC_TILE_PROVIDERS) {
-        var id = window.MC_getDarkTileProvider();
-        return window.MC_TILE_PROVIDERS[id] || null;
-      }
-    } catch (_e) {}
-    return null;
+    return _activeTileStyle();
   };
 
   // ─── SNR thresholds ───

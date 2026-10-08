@@ -144,19 +144,19 @@ async function clickHeader(page, col) {
     await coldLoad(page, '#/analytics?tab=hashsizes');
     const t = await readTable(page);
     assert(JSON.stringify(t.rows.map((r) => r.pubkey)) === JSON.stringify(serverOrder), 'not the server order');
-    assert(t.headers.every((h) => !h.ariaSort), 'aria-sort set: ' + JSON.stringify(t.headers));
+    assert(t.headers.every((h) => h.ariaSort === 'none'), 'unexpected active aria-sort: ' + JSON.stringify(t.headers));
     assert(await hash(page) === '#/analytics?tab=hashsizes', 'hash ' + await hash(page));
   });
 
   for (const col of COLS) {
-    await step('clicking ' + col + ' sorts its own cells ascending, again descending; the URL follows', async () => {
+    await step('clicking ' + col + ' uses its type default, then toggles; the URL follows', async () => {
       await coldLoad(page, '#/analytics?tab=hashsizes');
-      await clickHeader(page, col);
-      assertOrdered(await readTable(page), col, 'asc', lastSeenByPk);
-      assert(await hash(page) === '#/analytics?tab=hashsizes&mbsort=' + col, 'asc hash ' + await hash(page));
-      await clickHeader(page, col);
-      assertOrdered(await readTable(page), col, 'desc', lastSeenByPk);
-      assert(await hash(page) === '#/analytics?tab=hashsizes&mbsort=' + col + '&mbdir=desc', 'desc hash ' + await hash(page));
+      const first = ['name', 'role', 'status'].includes(col) ? 'asc' : 'desc';
+      for (const dir of [first, first === 'asc' ? 'desc' : 'asc']) {
+        await clickHeader(page, col);
+        assertOrdered(await readTable(page), col, dir, lastSeenByPk);
+        assert(await hash(page) === '#/analytics?tab=hashsizes&mbsort=' + col + (dir === 'desc' ? '&mbdir=desc' : ''), 'hash ' + await hash(page));
+      }
     });
   }
 
@@ -167,7 +167,7 @@ async function clickHeader(page, col) {
     const idx = t.headers.findIndex((h) => h.col === 'lastSeen');
     const texts = t.rows.map((r) => r.cells[idx]);
     const ts = t.rows.map((r) => Date.parse(lastSeenByPk[r.pubkey]));
-    assert(ts.every((v, i) => i === 0 || ts[i - 1] <= v), 'timestamps not ascending');
+    assert(ts.every((v, i) => i === 0 || ts[i - 1] >= v), 'timestamps not descending');
     // The fixture spans more than one unit ("…m ago", "…h ago"), so text order would differ.
     const textSorted = texts.slice().sort();
     assert(JSON.stringify(textSorted) !== JSON.stringify(texts) || new Set(texts).size < 2, 'text order equals time order; the check proves nothing on this fixture');
@@ -175,7 +175,6 @@ async function clickHeader(page, col) {
 
   await step('a filter click keeps the sort; All brings back every row in the same order', async () => {
     await coldLoad(page, '#/analytics?tab=hashsizes');
-    await clickHeader(page, 'lastSeen');
     await clickHeader(page, 'lastSeen');
     await page.click('#mbCapFilters [data-mb-filter="confirmed"]');
     const t = await readTable(page);

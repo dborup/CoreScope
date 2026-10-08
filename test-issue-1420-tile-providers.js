@@ -82,19 +82,26 @@ const ALL_CARTO_IDS  = ['carto-dark', 'carto-light', 'carto-voyager', 'carto-voy
 const ALL_OSM_IDS    = ['osm-standard', 'osm-dark'];
 const ALL_STAMEN_IDS = ['stamen-toner-lite', 'stamen-toner-dark'];
 const ALL_ESRI_IDS   = ['esri-darkgray-labels'];
+// #332 — the built-in non-CARTO defaults; registered regardless of gating.
+const FALLBACK_IDS   = ['osm-dark', 'osm-standard'];
 const ALL_IDS        = [...ALL_CARTO_IDS, ...ALL_OSM_IDS, ...ALL_STAMEN_IDS, ...ALL_ESRI_IDS];
 
 console.log('\u2500\u2500 #1420 Tile provider registry \u2500\u2500');
 
 // ─── Registry shape ──────────────────────────────────────────────────────────
 
-test('Default registry (no MC_MAP_CFG) contains only Carto providers', () => {
+test('Default registry (no MC_MAP_CFG) has Carto plus the #332 fallback defaults', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(reg, 'registry must exist on window');
   for (const id of ALL_CARTO_IDS) assert.ok(reg[id], 'should have ' + id);
-  for (const id of [...ALL_OSM_IDS, ...ALL_STAMEN_IDS]) assert.ok(!reg[id], 'should NOT have ' + id + ' without config');
+  // #332 — 'osm-dark' / 'osm-standard' are the keyless fallback defaults and
+  // are registered unconditionally so the active id always resolves (and
+  // stays selectable in the layer picker). The token-gated Stamen styles and
+  // the rest of the OSM family still need config.
+  for (const id of FALLBACK_IDS) assert.ok(reg[id], 'should have fallback default ' + id);
+  for (const id of ALL_STAMEN_IDS) assert.ok(!reg[id], 'should NOT have ' + id + ' without config');
 });
 
 test('Every registry entry has a url function or string with {z}', () => {
@@ -227,7 +234,12 @@ test('OSM providers absent when osm.enabled=false', () => {
   ctx.window.MC_MAP_CFG = { tiles: { providers: { osm: { enabled: false } } } };
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
-  for (const id of ALL_OSM_IDS) assert.ok(!reg[id], id + ' should be absent when disabled');
+  // #332 — 'osm-dark' / 'osm-standard' are the built-in fallback defaults and
+  // stay registered even here; `enabled` governs every other OSM style.
+  for (const id of ALL_OSM_IDS) {
+    if (FALLBACK_IDS.includes(id)) assert.ok(reg[id], id + ' is a #332 fallback default — must stay registered');
+    else assert.ok(!reg[id], id + ' should be absent when disabled');
+  }
 });
 
 test('Stamen providers appear when stamen.enabled=true and token provided', () => {
@@ -299,11 +311,11 @@ test('MC_setDarkTileProvider rejects unknown IDs', () => {
   assert.strictEqual(ctx.events.length, 0, 'should not dispatch event on invalid ID');
 });
 
-test('MC_getDarkTileProvider falls back: localStorage > server default > carto-dark', () => {
+test('MC_getDarkTileProvider falls back: localStorage > server default > osm-dark (#332)', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
-  // No state → default
-  assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'carto-dark');
+  // No state → built-in default. #332 made this non-CARTO.
+  assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'osm-dark');
   // Server default surfaces
   ctx.window.MC_setServerDefaultTileProvider('carto-voyager-dark');
   assert.strictEqual(ctx.window.MC_getDarkTileProvider(), 'carto-voyager-dark');
@@ -334,11 +346,11 @@ test('MC_setLightTileProvider rejects unknown IDs', () => {
   assert.strictEqual(ctx.events.length, 0, 'should not dispatch event on invalid ID');
 });
 
-test('MC_getLightTileProvider falls back: localStorage > server default > carto-light', () => {
+test('MC_getLightTileProvider falls back: localStorage > server default > osm-standard (#332)', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
-  // No state → default
-  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-light');
+  // No state → built-in default. #332 made this non-CARTO.
+  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'osm-standard');
   // Server light default
   ctx.window.MC_setServerDefaultLightTileProvider('carto-voyager');
   assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-voyager');
@@ -352,8 +364,9 @@ test('MC_getLightTileProvider ignores stored dark-type providers', () => {
   loadProviders(ctx);
   // Manually jam a dark id into the light storage key to simulate stale state
   ctx.localStorage.setItem('mc-light-tile-provider', 'carto-dark');
-  // Should fall back to default because 'carto-dark' has type === 'dark'
-  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'carto-light');
+  // Should fall back to the built-in light default because 'carto-dark' has
+  // type === 'dark'.
+  assert.strictEqual(ctx.window.MC_getLightTileProvider(), 'osm-standard');
 });
 
 // ─── CSS filter behavior ──────────────────────────────────────────────────────
@@ -411,12 +424,13 @@ test('MC_initTileRegistry(false) does NOT dispatch mc-tile-provider-changed', ()
 test('MC_TILE_PROVIDERS reference stays in sync after MC_initTileRegistry rebuild', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
-  // Initially carto only
-  assert.ok(!ctx.window.MC_TILE_PROVIDERS['osm-standard'], 'osm absent before config');
-  ctx.window.MC_MAP_CFG = { tiles: { providers: { osm: { enabled: true } } } };
+  // #332 keeps the fallback defaults registered, so use a token-gated style
+  // to observe the rebuild instead.
+  assert.ok(!ctx.window.MC_TILE_PROVIDERS['stamen-toner-lite'], 'stamen absent before config');
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { stamen: { enabled: true, token: 'x' } } } };
   ctx.window.MC_initTileRegistry(false);
   // After re-init, window.MC_TILE_PROVIDERS must reflect the new registry
-  assert.ok(ctx.window.MC_TILE_PROVIDERS['osm-standard'], 'osm present after re-init');
+  assert.ok(ctx.window.MC_TILE_PROVIDERS['stamen-toner-lite'], 'stamen present after re-init');
 });
 
 // ─── OSM URL generation ───────────────────────────────────────────────────────

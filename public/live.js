@@ -1227,7 +1227,12 @@
     if (matrixRain) startMatrixRain();
   }
 
+  // Async initialization and search callbacks belong to one Live mount.
+  // Invalidate them on exit, including when the user immediately returns.
+  let liveGeneration = 0;
+
   async function init(app) {
+    const generation = ++liveGeneration;
     app.innerHTML = `
       <div class="live-page">
         <div id="liveMap" style="width:100%;height:100%;position:absolute;top:0;left:0;z-index:1"></div>
@@ -1286,7 +1291,7 @@
             <div class="live-toggles">
               <div class="live-node-filter-wrap" style="position:relative">
                 <label class="live-node-filter-hitarea">
-                  <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
+                  <input type="text" id="liveNodeFilterInput" placeholder="Loading node filter…" disabled aria-busy="true" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
                 </label>
                 <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
                 <button id="liveNodeFilterClear" class="vcr-btn" title="Clear node filter" style="display:none">×</button>
@@ -1392,6 +1397,8 @@
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') mapZoom = mapCfg.zoom;
     } catch { }
+
+    if (generation !== liveGeneration) return;
 
     // #1709: URL hash lat/lon/zoom is the highest-precedence viewport source.
     // Applied here so the very first setView() lands at the requested viewport
@@ -1541,21 +1548,30 @@
       (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // #1420 — multi-provider dark-tile picker. Light mode unchanged.
     let _liveDarkRefLayer = null;
+    // #332 — every tile URL and attribution comes from the configured
+    // dark/light provider. The old body hard-coded CARTO in three places
+    // (the light-mode url fallback, the 'carto-dark' registry fallback and
+    // the '© OpenStreetMap © CartoDB' credit), so a map on an instance
+    // configured for Esri/OpenTopoMap still fetched keyless CARTO tiles —
+    // which have been stamped "API KEY REQUIRED" since August 2026.
     function _liveResolveTile(dark) {
-      const reg = window.MC_TILE_PROVIDERS || {};
-      if (!dark) {
-        const lightId = (typeof window.MC_getLightTileProvider === 'function') ? window.MC_getLightTileProvider() : null;
-        const lp = lightId ? (reg[lightId] || null) : null;
-        if (lp && lp.url) {
-          return { url: (typeof lp.url === 'function' ? lp.url() : lp.url), attribution: lp.attribution || '© OpenStreetMap © CartoDB', refUrl: null };
+      // Preferred path: the registry's single resolver. It picks the
+      // provider for this theme and invokes lazy `url` functions, so url
+      // AND attribution always come from the configured provider.
+      if (typeof window.MC_getTileSpec === 'function') {
+        const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
+        if (s && s.url) {
+          return { url: s.url, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
-        return { url: TILE_LIGHT, attribution: '© OpenStreetMap © CartoDB', refUrl: null };
       }
-      const id  = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
-      const p   = reg[id] || reg['carto-dark'] || {};
+      // Legacy/partial registry: accessors without getTileSpec.
+      const reg = window.MC_TILE_PROVIDERS || {};
+      const getId = dark ? window.MC_getDarkTileProvider : window.MC_getLightTileProvider;
+      const id = (typeof getId === 'function') ? getId() : null;
+      const p = (id && reg[id]) || {};
       return {
-        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || TILE_DARK,
-        attribution: p.attribution || '© OpenStreetMap © CartoDB',
+        url: (typeof p.url === 'function' ? p.url() : p.url) || (typeof p.baseUrl === 'function' ? p.baseUrl() : p.baseUrl) || (dark ? TILE_DARK : TILE_LIGHT),
+        attribution: p.attribution || '© OpenStreetMap contributors',
         refUrl: p.refUrl || null
       };
     }
@@ -1676,6 +1692,7 @@
     AreaFilter.init(document.getElementById('liveAreaFilter'));
     AreaFilter.onChange(function () { loadNodes(); });
     await loadNodes();
+    if (generation !== liveGeneration) return;
     applyLiveControlEffects();
     connectWS();
     initResizeHandler();
@@ -1757,8 +1774,10 @@
       else if (nodeFilterKeys.length) updateNodeFilterUI();
 
       let activeIdx = -1;
+      let suggestionRequest = 0;
 
       function hideDropdown() {
+        suggestionRequest++;
         if (!nodeFilterDropdown) return;
         nodeFilterDropdown.classList.add('hidden');
         nodeFilterDropdown.innerHTML = '';
@@ -1807,11 +1826,17 @@
 
       async function fetchSuggestions(q) {
         if (!nodeFilterDropdown) return;
+        if (document.activeElement !== nodeFilterInput) return;
         if (!q || q.length < 1) { hideDropdown(); return; }
+        const request = ++suggestionRequest;
+        const isCurrent = () => generation === liveGeneration && request === suggestionRequest &&
+          document.activeElement === nodeFilterInput;
         try {
           const resp = await fetch('/api/nodes/search?q=' + encodeURIComponent(q));
+          if (!isCurrent()) return;
           if (!resp.ok) { hideDropdown(); return; }
           const data = await resp.json();
+          if (!isCurrent()) return;
           const nodes = (data && data.nodes) || [];
           if (!nodes.length) { hideDropdown(); return; }
           nodeFilterDropdown.innerHTML = nodes.map(function (n, i) {
@@ -1832,17 +1857,21 @@
               selectSuggestion(opt);
             });
           });
-        } catch (_) { hideDropdown(); }
+        } catch (_) { if (isCurrent()) hideDropdown(); }
       }
 
       const debouncedInput = debounce(function (e) {
+        if (generation !== liveGeneration) return;
         const v = e.target.value.trim();
         // Apply live filter immediately as user types (no Enter required).
         applyFilterFromInput(v);
         fetchSuggestions(v);
       }, 200);
 
-      nodeFilterInput.addEventListener('input', debouncedInput);
+      nodeFilterInput.addEventListener('input', function (e) {
+        suggestionRequest++;
+        debouncedInput(e);
+      });
 
       nodeFilterInput.addEventListener('keydown', function (e) {
         const opts = nodeFilterDropdown ? nodeFilterDropdown.querySelectorAll('.live-node-filter-option') : [];
@@ -1882,6 +1911,7 @@
       });
 
       nodeFilterInput.addEventListener('blur', function () {
+        suggestionRequest++;
         // Slight delay so click on a suggestion can register first.
         setTimeout(hideDropdown, 150);
       });
@@ -1898,6 +1928,11 @@
         const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
         try { history.replaceState(null, '', newUrl); } catch (_) {}
       });
+    }
+    if (nodeFilterInput) {
+      nodeFilterInput.placeholder = 'Filter by node…';
+      nodeFilterInput.setAttribute('aria-busy', 'false');
+      nodeFilterInput.disabled = false;
     }
 
     // Geo filter overlay
@@ -2768,6 +2803,7 @@
   }
 
   async function loadNodes(beforeTs) {
+    const generation = liveGeneration;
     try {
       const aqs = AreaFilter.areaQueryString();
       // #1108 — honor region selector for visible map nodes unless
@@ -2791,6 +2827,7 @@
       const { nodes: list } = await fetchAllNodes(`${beforeQs}${aqs}${rqs}`, {
         safetyCap: window.LIVE_MAP_MAX_NODES || 10000,
       });
+      if (generation !== liveGeneration) return;
       var now = Date.now();
       // Time-scoped reload (VCR scrub/replay): reconcile against the existing
       // markers instead of tearing the layer down. addNodeMarker() already
@@ -4659,6 +4696,7 @@
   }
 
   function destroy() {
+    liveGeneration++;
     // #1514 S3 — drain onComplete callbacks BEFORE clearing the array. Audio
     // `onHop` hooks rely on these firing exactly once per queued animation;
     // previously destroy() dropped them silently when navigating away with

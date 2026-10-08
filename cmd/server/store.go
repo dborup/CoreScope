@@ -543,6 +543,19 @@ type PacketStore struct {
 	// perf payload for prod observability.
 	loadCoverageRatio float64
 
+	// loadWindowTotalInDB: row count LoadChunked actually targeted — i.e.
+	// COUNT(*) honouring the SAME retention/hot-start filter the chunk loop
+	// applied, not the whole table. #351 F1: RunStartupLoad's
+	// hotStartupHours==0 branch divides loadedCount by THIS (not the
+	// unfiltered table count) so loadCoverageRatio means "fraction of the
+	// RETAINED rows that are in memory", matching docs/api-spec.md and the
+	// bg-loader path. -1 when the count could not be taken.
+	// CONCURRENCY: written once by LoadChunked and read once by
+	// RunStartupLoad on the SAME goroutine (RunStartupLoad calls LoadChunked
+	// synchronously, then reads this after it returns), so no lock is
+	// needed; no other goroutine touches it.
+	loadWindowTotalInDB int64
+
 	// Async hash migration state: set after migrateContentHashesAsync completes.
 	hashMigrationComplete atomic.Bool
 
@@ -2347,6 +2360,9 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 
 	// Cache key covers all filter dimensions. Empty key = no filters.
 	cacheKey := q.Since + "|" + q.Until + "|" + q.Region + "|" + q.Area + "|" + q.Node + "|" + q.Hash + "|" + q.Observer + "|" + q.Channel
+	if q.ExcludeTypes != 0 {
+		cacheKey += fmt.Sprintf("|x%d", q.ExcludeTypes)
+	}
 	if q.Type != nil {
 		cacheKey += fmt.Sprintf("|t%d", *q.Type)
 	}
@@ -2360,7 +2376,7 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 		cachedTxs := s.groupedCacheTxs
 		cachedTotal := s.groupedCacheTotal
 		s.groupedCacheMu.Unlock()
-		return groupedTxsToPage(cachedTxs, cachedTotal, q.Offset, q.Limit)
+		return s.groupedPageWithRP(cachedTxs, cachedTotal, q.Offset, q.Limit)
 	}
 	s.groupedCacheMu.Unlock()
 
@@ -2386,7 +2402,48 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 	s.groupedCacheExp = time.Now().Add(3 * time.Second)
 	s.groupedCacheMu.Unlock()
 
-	return groupedTxsToPage(txs, total, q.Offset, q.Limit)
+	return s.groupedPageWithRP(txs, total, q.Offset, q.Limit)
+}
+
+// groupedPageWithRP is groupedTxsToPage plus each row's resolved_path (#165).
+// The packets page resolves hop names from the grouped row, keyed by hop and
+// row observer; without the server's answer it guessed every hop and flagged
+// hops the server had resolved. The path is the one of the observation the
+// row displays (headerObservationID), not the tx's longest-resolved one, so
+// it matches the row's observer_id and path_json. Observation ids are read
+// under s.mu; the SQL runs after it is released, as one batched read per
+// page (fetchResolvedPathsForObsIDs) rather than one per row.
+func (s *PacketStore) groupedPageWithRP(txs []*StoreTx, total, offset, limit int) *PacketResult {
+	res := groupedTxsToPage(txs, total, offset, limit)
+	if len(res.Packets) == 0 {
+		return res
+	}
+	page := txs[offset : offset+len(res.Packets)]
+	ids := make([]int, len(page))
+	s.mu.RLock()
+	for i, tx := range page {
+		ids[i] = headerObservationID(tx)
+	}
+	s.mu.RUnlock()
+	rps := s.fetchResolvedPathsForObsIDs(ids)
+	for i, id := range ids {
+		if rp := rps[id]; rp != nil {
+			res.Packets[i]["resolved_path"] = rp
+		}
+	}
+	return res
+}
+
+// headerObservationID returns the id of the observation pickBestObservation
+// copied onto tx (same observer and path), or 0 when none matches.
+// Caller holds s.mu.
+func headerObservationID(tx *StoreTx) int {
+	for _, o := range tx.Observations {
+		if o != nil && o.ObserverID == tx.ObserverID && o.PathJSON == tx.PathJSON {
+			return o.ID
+		}
+	}
+	return 0
 }
 
 // pagePacketResult returns a window of a PacketResult without re-allocating the slice.
@@ -2441,7 +2498,7 @@ func groupedTxsToPage(txs []*StoreTx, total, offset, limit int) *PacketResult {
 			"rssi":              floatPtrOrNil(tx.RSSI),
 			"scope_name":        strOrNil(tx.ScopeName),
 		}
-		// resolved_path omitted for grouped view (cold path, not worth SQL round-trip)
+		// resolved_path is added by groupedPageWithRP (#165).
 		packets[i] = m
 	}
 
@@ -3414,6 +3471,14 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			},
 		}
 		if tx.DecodedJSON != "" {
+			// Raw pass-through, not the validated REST ChannelMessage
+			// contract: decoded_json is unmarshalled and broadcast
+			// verbatim, including any stored channelHashHex value, without
+			// running it through normalizeChannelHashHex/setChannelHashHex
+			// (cmd/server/channel_hash_hex.go). A malformed or lowercase
+			// stored value that REST would suppress is emitted here as-is.
+			// Consumers must not treat a WebSocket channelHashHex as
+			// pre-validated REST evidence.
 			var payload map[string]interface{}
 			if json.Unmarshal([]byte(tx.DecodedJSON), &payload) == nil {
 				decoded["payload"] = payload
@@ -3908,7 +3973,7 @@ func (s *PacketStore) MaxObservationID() int {
 // filterPackets applies PacketQuery filters to the in-memory packet list.
 func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 	// Fast path: single-key index lookups
-	if q.Hash != "" && q.Type == nil && q.Route == nil && q.Observer == "" &&
+	if q.Hash != "" && q.Type == nil && q.ExcludeTypes == 0 && q.Route == nil && q.Observer == "" &&
 		q.Region == "" && q.Area == "" && q.Node == "" && q.Channel == "" && q.Since == "" && q.Until == "" {
 		h := strings.ToLower(q.Hash)
 		tx := s.byHash[h]
@@ -3917,7 +3982,7 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 		}
 		return []*StoreTx{tx}
 	}
-	if q.Observer != "" && q.Type == nil && q.Route == nil &&
+	if q.Observer != "" && q.Type == nil && q.ExcludeTypes == 0 && q.Route == nil &&
 		q.Region == "" && q.Area == "" && q.Node == "" && q.Channel == "" && q.Hash == "" && q.Since == "" && q.Until == "" {
 		return s.transmissionsForObserver(q.Observer, nil)
 	}
@@ -3986,7 +4051,7 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 	// Determine the source slice. Use index-based source when only node
 	// filter is active and an index exists.
 	source := s.packets
-	if hasNode && !hasType && !hasRoute && q.Observer == "" &&
+	if hasNode && !hasType && q.ExcludeTypes == 0 && !hasRoute && q.Observer == "" &&
 		filterHash == "" && !hasSince && !hasUntil && q.Region == "" && q.Area == "" && filterChannel == "" {
 		if indexed, ok := s.byNode[nodePK]; ok {
 			return indexed
@@ -3999,6 +4064,9 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 			return false
 		}
 		if hasType && (tx.PayloadType == nil || *tx.PayloadType != filterType) {
+			return false
+		}
+		if q.ExcludeTypes.excludes(tx.PayloadType) {
 			return false
 		}
 		if hasRoute && (tx.RouteType == nil || *tx.RouteType != filterRoute) {
@@ -6425,6 +6493,16 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 		Sender          string      `json:"sender"`
 		SenderTimestamp interface{} `json:"sender_timestamp"`
 		PathLen         int         `json:"path_len"`
+		// ChannelHashHex is the on-wire one-byte channel hash the decoder
+		// took from the packet (see normalizeChannelHashHex). Emitted as
+		// evidence only; legacy rows without it stay absent. Typed as
+		// interface{}, not string: decoded_json is untrusted stored data,
+		// and a struct-typed string field would fail the whole Unmarshal
+		// (dropping the entire message) on a non-string stored value. The
+		// raw value is instead handed to setChannelHashHex below, which
+		// already validates it — mirroring the SQLite path in db.go, which
+		// decodes into map[string]interface{} for the same reason.
+		ChannelHashHex interface{} `json:"channelHashHex"`
 	}
 
 	grpTxts := s.byPayloadType[5]
@@ -6557,6 +6635,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 				Repeats:   1,
 				Observers: observers,
 			}
+			setChannelHashHex(entry.Data, decoded.ChannelHashHex)
 			msgMap[dedupeKey] = entry
 			msgOrder = append(msgOrder, dedupeKey)
 		}
@@ -10449,11 +10528,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 // --- Subpaths Analytics ---
 
 // GetNodeHealth returns health info for a single node using in-memory data.
-func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, error) {
-	return s.getNodeHealthAt(pubkey, time.Now().UTC())
-}
-
-func (s *PacketStore) getNodeHealthAt(pubkey string, now time.Time) (map[string]interface{}, error) {
+// #351 F5: now is injected so tests can pin the rolling 24h activity window
+// without a second untyped-map-returning helper (AGENTS.md: the untyped-payload
+// count must not grow). Production callers pass time.Now().UTC(); see routes.go.
+func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]interface{}, error) {
 	// Fetch node info from DB (fast single-row lookup)
 	node, err := s.db.GetNodeByPubkey(pubkey)
 	if err != nil {
@@ -10476,13 +10554,20 @@ func (s *PacketStore) getNodeHealthAt(pubkey string, now time.Time) (map[string]
 		}
 	}
 
+	// #351 F4: snapshot the bgErrMu-guarded coverage ratio BEFORE taking
+	// s.mu so this reader honours bgErrMu's "no s.mu needed" contract
+	// (store.go:530) instead of being the first site to nest s.mu → bgErrMu.
+	s.bgErrMu.RLock()
+	loadCoverage := s.loadCoverageRatio
+	s.bgErrMu.RUnlock()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	packets := s.byNode[pubkey]
 	activityKey := strings.ToLower(pubkey)
 	todayStart := now.UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
-	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now))
+	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now, loadCoverage))
 
 	var packetsToday int
 	var snrSum float64

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
+	regionutil "github.com/meshcore-analyzer/regions"
 )
 
 // AreaEntry defines a geographic area by polygon or bounding box.
@@ -163,7 +165,28 @@ type Config struct {
 	// only needs the configured *names* to report which regions have
 	// never matched any observed transmission (region-utilization
 	// analytics, /api/scope-stats "unusedRegions").
+	//
+	// This is the INLINE half of the configured set. Read
+	// EffectiveHashRegions() instead, which adds HashRegionsPath.
 	HashRegions []string `json:"hashRegions,omitempty"`
+
+	// HashRegionsPath optionally points at a JSON array of region-scope
+	// names merged with the inline HashRegions list (#360). Same key, same
+	// env override (HASH_REGIONS_PATH) and same relative-path rule as the
+	// ingestor, which reads it through the same loader
+	// (internal/regions.Load) — the two processes must never disagree
+	// about which scopes are configured, or the server would report a
+	// file-configured scope as "unknown" while the ingestor matches it.
+	// This is a file READ; the server stays read-only.
+	HashRegionsPath string `json:"hashRegionsPath,omitempty"`
+
+	// hashRegionsFile caches the raw entries read from HashRegionsPath at
+	// config load. The server never reloads its config, so one read at
+	// startup is the whole story here (the ingestor's SIGHUP path is what
+	// re-reads the file). Kept raw rather than merged so
+	// EffectiveHashRegions stays correct for tests that assign
+	// HashRegions directly after load.
+	hashRegionsFile []string
 
 	// NodeBlacklist is a list of public keys to exclude from all API responses.
 	// Blacklisted nodes are hidden from node lists, search, detail, map, and stats.
@@ -627,13 +650,53 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.migrateDeprecatedConfig()
 		cfg.applyListLimitsDefaults()
 		applyCORSEnv(cfg)
+		cfg.loadHashRegionsFile(p)
 		return cfg, nil
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
+	// No config.json anywhere: HASH_REGIONS_PATH alone can still name a
+	// file, and with no config file a relative path has nothing to anchor
+	// at but the working directory.
+	cfg.loadHashRegionsFile("")
 	return cfg, nil // defaults
+}
+
+// loadHashRegionsFile reads the optional hashRegionsPath file once, during
+// config load, and caches its raw entries. A missing or malformed file is
+// logged by the shared loader and leaves the cache empty, so
+// EffectiveHashRegions falls back to the inline list rather than reporting
+// every configured region as unconfigured.
+func (c *Config) loadHashRegionsFile(configPath string) {
+	res, err := regionutil.Load(c.HashRegions, c.HashRegionsPath, configPath, log.Printf)
+	if err != nil {
+		c.hashRegionsFile = nil
+		return
+	}
+	c.hashRegionsFile = res.FileNames
+}
+
+// EffectiveHashRegions returns the configured region-scope names: the
+// normalized, deduplicated union of the inline hashRegions list and the
+// hashRegionsPath file, computed by the same rule the ingestor derives its
+// HMAC keys with (regionutil.Merge).
+//
+// EVERY reader of the configured set must go through this. Reading
+// cfg.HashRegions directly misses the file, which is how the server ends
+// up calling a working scope "unknown" in Observer Neighbors, or dropping
+// it from /api/scope-stats' configured/unused counts.
+//
+// The union is recomputed per call rather than cached, so a caller that
+// assigns HashRegions after load still gets a correct answer. It is a
+// normalize over ~1100 short strings on two low-traffic analytics
+// endpoints, one of which is already response-cached.
+func (c *Config) EffectiveHashRegions() []string {
+	if c == nil {
+		return nil
+	}
+	return regionutil.Merge(c.HashRegions, c.hashRegionsFile)
 }
 
 // WebSocketConfig holds the /ws transport limits (#1794). These sit behind
@@ -1137,8 +1200,37 @@ func (c *Config) HiddenNamePrefixesGeneration() uint64 {
 	return c.hiddenPrefixesGen.Load()
 }
 
+// Test seams for the atomic config replacement in SaveGeoFilter (#340).
+// Production always uses the os functions; tests swap them to provoke
+// metadata, write and rename failures, which no portable filesystem setup can
+// trigger reliably.
+var (
+	configCreateTemp = os.CreateTemp
+	configRename     = os.Rename
+	configStatFile   = func(f *os.File) (os.FileInfo, error) { return f.Stat() }
+)
+
 // SaveGeoFilter writes the geo_filter section back to config.json on disk.
 // Pass gf=nil to remove the filter. The rest of config.json is preserved as-is.
+//
+// The replacement is atomic and permission-preserving (#340). config.json can
+// hold broker credentials, so a file deliberately restricted to 0600 must not
+// come back 0644 just because the geo filter was edited in the UI — and a
+// deliberately group-readable 0644 must not silently tighten either. Three
+// properties carry that:
+//
+//   - The mode is read from the same descriptor the contents are read from, so
+//     the bits written back belong to the bytes that were parsed. If that
+//     metadata is unavailable the save fails instead of guessing a default.
+//   - The replacement file is created under a unique name in the destination
+//     directory via os.CreateTemp (O_EXCL), so a pre-existing config.json.tmp
+//     — stale file, planted symlink or hard link to somewhere else — is never
+//     opened, never written through and never removed by this function.
+//   - The preserved mode is applied with an explicit chmod on our own
+//     descriptor, which makes the result independent of the process umask.
+//     Copying upstream's WriteFile mode argument would not do either: the mode
+//     argument is ignored for a file that already exists, and it is masked by
+//     the umask for one that does not.
 func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	var configPath string
 	for _, p := range []string{
@@ -1154,7 +1246,20 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 		return fmt.Errorf("config.json not found in %s", configDir)
 	}
 
-	data, err := os.ReadFile(configPath)
+	src, err := os.Open(configPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	info, err := configStatFile(src)
+	if err != nil {
+		src.Close()
+		return fmt.Errorf("stat config: %w", err)
+	}
+	mode := info.Mode().Perm()
+	data, err := io.ReadAll(src)
+	if cerr := src.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
@@ -1181,16 +1286,67 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	}
 	out = append(out, '\n')
 
-	// Atomic write: temp file + rename.
-	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0644); err != nil {
+	// Atomic write: unique temp file in the destination directory + rename.
+	tmpFile, err := configCreateTemp(filepath.Dir(configPath), filepath.Base(configPath)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmpFile.Name()
+	renamed := false
+	defer func() {
+		if renamed {
+			return
+		}
+		// Only ever our own uniquely named file; a pre-existing
+		// config.json.tmp is left alone.
+		tmpFile.Close()
+		os.Remove(tmpName)
+	}()
+
+	if err := tmpFile.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temp config: %w", err)
+	}
+	preserveConfigOwner(tmpFile, info)
+	if _, err := tmpFile.Write(out); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-	if err := os.Rename(tmp, configPath); err != nil {
-		os.Remove(tmp)
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("sync config: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := configRename(tmpName, configPath); err != nil {
 		return fmt.Errorf("rename config: %w", err)
 	}
+	renamed = true
 	return nil
+}
+
+// preserveConfigOwner best-effort carries the replaced file's uid/gid over to
+// its replacement. It is a no-op in the normal case, where the saving process
+// already owns the file it is rewriting — the only arrangement in which it can
+// write at all once the server runs as a non-root container user (#339).
+//
+// It matters only for a privileged process rewriting a bind-mounted config
+// owned by a host user: without the chown the file would silently become
+// root-owned and the host user could no longer edit it. An unprivileged
+// process cannot chown to a foreign uid, so the failure is ignored rather than
+// aborting a save whose security-relevant part — the permission bits — already
+// succeeded.
+func preserveConfigOwner(f *os.File, want os.FileInfo) {
+	wantUID, wantGID, ok := configFileOwnerIDs(want)
+	if !ok {
+		return
+	}
+	cur, err := configStatFile(f)
+	if err != nil {
+		return
+	}
+	if curUID, curGID, ok := configFileOwnerIDs(cur); ok && curUID == wantUID && curGID == wantGID {
+		return
+	}
+	_ = f.Chown(wantUID, wantGID)
 }
 
 // obsBlacklistSet lazily builds and caches the observerBlacklist as a set for O(1) lookups.

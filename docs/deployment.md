@@ -222,6 +222,52 @@ preferences and deep links cannot enable it against the server policy. A
 Customizer display preference is deferred to a later milestone and must
 remain subordinate to this operator setting.
 
+### Large region lists in an external file (`hashRegionsPath`)
+
+`hashRegions` lives inline in `config.json`. On a real deployment that is a
+list of ~1,100 names in the middle of hand-edited operational settings and
+credentials, which makes the file hard to review and diff. The optional
+`hashRegionsPath` key moves just that list out:
+
+```json
+{
+  "hashRegions": ["#belgium", "#eu"],
+  "hashRegionsPath": "hash-regions.json"
+}
+```
+
+`hash-regions.json` is a plain JSON array of names:
+
+```json
+["dk", "dk-aarhus", "#dk-fyn"]
+```
+
+Rules:
+
+- **Opt-in.** Omitted or empty means inline `hashRegions` only, exactly as
+  before. There is no auto-discovered default file, so a file that merely
+  happens to sit next to `config.json` is never read.
+- **Union, not replacement.** The effective set is the inline list plus the
+  file, normalized the same way (whitespace trimmed, a leading `#` added,
+  blank entries dropped) and deduplicated after normalization. `dk` and
+  `#dk` are the same scope; `#dk` and `#DK` are **not** — the key is
+  `SHA256` of the exact name, so case matters.
+- **Both processes, one loader.** The ingestor (which derives one HMAC key
+  per region) and the server (unknown scopes in Tools → Observer Neighbors,
+  `unusedRegions` in `/api/scope-stats`) read the file through the same
+  loader, so they cannot disagree about which scopes are configured.
+- **Relative paths resolve against the directory holding `config.json`**,
+  never the process working directory — the two processes are started from
+  different places, and anchoring at the config file is what makes them
+  agree. Absolute paths are used as-is.
+- **Env override.** `HASH_REGIONS_PATH` wins over the config key.
+- **Failures are loud but survivable.** If the path is set and the file is
+  missing or is not a JSON array of strings, the error is logged and
+  startup falls back to the inline `hashRegions` list. On a SIGHUP reload
+  the previous keys are kept instead (see below).
+
+`areas` — the largest block in `config.json` — has no equivalent yet.
+
 ### Reloading config changes without a restart (SIGHUP)
 
 Most `config.json` changes require a container restart to take effect. **`hashChannels`** and **`hashRegions`** are the exception — the ingestor can reload just these two settings live:
@@ -230,14 +276,14 @@ Most `config.json` changes require a container restart to take effect. **`hashCh
 docker exec corescope kill -HUP $(docker exec corescope pgrep corescope-ingestor)
 ```
 
-This re-reads `config.json` and derives fresh channel-decryption and region-scope keys in place — no restart, no dropped MQTT connections. The ingestor logs the result:
+This re-reads `config.json` — and the external `hashRegionsPath` file it names, if any — and derives fresh channel-decryption and region-scope keys in place — no restart, no dropped MQTT connections. The ingestor logs the result:
 
 ```
 [hot-reload] SIGHUP received, reloading hashChannels/hashRegions from /app/config.json
 [hot-reload] reloaded 1415 channel key(s), 1098 region key(s) from /app/config.json
 ```
 
-If the edited `config.json` is malformed, the reload is aborted and logged, and the ingestor keeps its previous, working keys rather than going dark.
+If the edited `config.json` is malformed, the reload is aborted and logged, and the ingestor keeps its previous, working keys rather than going dark. The same holds for the `hashRegionsPath` file: a malformed or missing region-name file aborts the reload and keeps every previous key, so a half-saved file cannot blank out a working ingestor.
 
 Why this matters more than it sounds: restarting the whole container to add a single hashtag channel or region also resets the in-memory relay/scope analytics (Analytics → Scopes tab — Repeaters by Region, Bridge Repeaters, etc.), which take real time to rebuild from live traffic after a cold start. SIGHUP lets you add a channel or region without paying that cost.
 
@@ -567,14 +613,52 @@ docker stats corescope
 
 ### Backup
 
-All persistent data lives in `/app/data`. The critical file is the SQLite database:
+All persistent data lives in `/app/data`. Back up both `meshcore.db` and
+`ping_scores_history.db` together: the latter holds computed ping scores that
+cannot be rebuilt after the underlying packets have passed retention.
+
+**Both databases run in WAL mode**, so the newest commits can still live in a
+`meshcore.db-wal` / `ping_scores_history.db-wal` sidecar instead of the `.db`
+file. The image ships no `sqlite3` binary, so there is no online `.backup` to
+run inside the container — stop it first. A clean shutdown checkpoints the WAL
+into the main file and removes the sidecars, but a hard stop (the stop timeout
+expiring into a `SIGKILL`) can leave them behind, so copy any `-wal` file that
+is still there. Two rules make the difference between a usable backup and a
+silently wrong one:
+
+- **Never copy a `.db` without the `-wal` sitting next to it.** Everything the
+  WAL holds is simply missing from the copy, and the result opens without an
+  error.
+- **Never let a `-wal` meet a different `.db`.** SQLite applies WAL frames by
+  page number without checking which database file they came from, so a
+  leftover sidecar overwrites the restored content and `PRAGMA
+  integrity_check` still reports `ok`.
+
+`-shm` is a scratch file rebuilt on open. Do not carry it into a backup, and
+delete it alongside a stale `-wal` on restore.
 
 ```bash
-# Copy from the Docker volume
-docker cp corescope:/app/data/meshcore.db ./backup-$(date +%Y%m%d).db
+# Copy from the Docker volume while the container is stopped
+docker stop corescope
+STAMP=$(date +%Y%m%d)
+docker cp corescope:/app/data/meshcore.db ./meshcore-$STAMP.db
+docker cp corescope:/app/data/ping_scores_history.db ./ping-history-$STAMP.db
+# The sidecars only exist if the shutdown did not checkpoint; a "No such file"
+# here is the normal, healthy case.
+docker cp corescope:/app/data/meshcore.db-wal ./meshcore-$STAMP.db-wal || true
+docker cp corescope:/app/data/ping_scores_history.db-wal ./ping-history-$STAMP.db-wal || true
+docker start corescope
+```
 
-# Or if using a bind mount
-cp ./data/meshcore.db ./backup-$(date +%Y%m%d).db
+For a bind mount, replace the `docker cp` commands with these commands
+between `docker stop` and `docker start`:
+
+```bash
+STAMP=$(date +%Y%m%d)
+cp ./data/meshcore.db ./meshcore-$STAMP.db
+cp ./data/ping_scores_history.db ./ping-history-$STAMP.db
+[ -e ./data/meshcore.db-wal ] && cp ./data/meshcore.db-wal ./meshcore-$STAMP.db-wal
+[ -e ./data/ping_scores_history.db-wal ] && cp ./data/ping_scores_history.db-wal ./ping-history-$STAMP.db-wal
 ```
 
 Optional files to back up:
@@ -583,22 +667,57 @@ Optional files to back up:
 
 ### Restore
 
+Restore each database together with its own `-wal`, if the backup has one, and
+clear whatever `-wal`/`-shm` the container still holds for the file you are
+replacing. With the container stopped, `docker exec` is unavailable, so a
+throwaway container does the deleting on a named volume.
+
 ```bash
 # Stop the container
 docker stop corescope
 
-# Replace the database
-docker cp ./backup.db corescope:/app/data/meshcore.db
+# Clear the stale sidecars of both databases in the volume
+docker run --rm -v corescope-data:/app/data alpine:3.24 \
+  rm -f /app/data/meshcore.db-wal /app/data/meshcore.db-shm \
+        /app/data/ping_scores_history.db-wal /app/data/ping_scores_history.db-shm
+
+# Replace both databases
+docker cp ./meshcore-20260101.db corescope:/app/data/meshcore.db
+docker cp ./ping-history-20260101.db corescope:/app/data/ping_scores_history.db
+
+# Only if the backup itself captured a sidecar, restore it with its own file
+docker cp ./meshcore-20260101.db-wal corescope:/app/data/meshcore.db-wal || true
+docker cp ./ping-history-20260101.db-wal corescope:/app/data/ping_scores_history.db-wal || true
 
 # Restart
 docker start corescope
 ```
 
+On a bind mount the sidecar cleanup is a plain `rm -f ./data/*.db-wal
+./data/*.db-shm` between the `docker stop` and the copies.
+
 ### Automated backups
 
+Schedule a script that stops the container, copies both SQLite files with any
+`-wal` sidecar, restarts it, and then applies the same retention period to
+both backup sets. Two things it must not do: copy `meshcore.db` alone (old
+ping scores may exist only in `ping_scores_history.db`), and copy a live
+database hot (the WAL moves underneath the copy). The cost is a short
+downtime window per run; without a `sqlite3` binary in the image there is no
+online `.backup` to use instead.
+
 ```bash
-# cron: daily backup at 3 AM, keep 7 days
-0 3 * * * docker cp corescope:/app/data/meshcore.db /backups/corescope-$(date +\%Y\%m\%d).db && find /backups -name "corescope-*.db" -mtime +7 -delete
+#!/bin/sh
+# cron: daily at 3 AM, keep 7 days. /backups must exist.
+set -e
+STAMP=$(date +%Y%m%d)
+docker stop corescope
+for db in meshcore ping_scores_history; do
+  docker cp "corescope:/app/data/$db.db" "/backups/$db-$STAMP.db"
+  docker cp "corescope:/app/data/$db.db-wal" "/backups/$db-$STAMP.db-wal" || true
+done
+docker start corescope
+find /backups \( -name '*.db' -o -name '*.db-wal' \) -mtime +7 -delete
 ```
 
 ---
@@ -647,6 +766,64 @@ The in-memory packet store grows with retained packets. Configure retention limi
 ```
 
 `packetStore.maxMemoryMB` bounds the store **and the caches that belong to it** — the decoded-packet cache, the path indexes, the resolved relay entries and the per-packet index entries, not just the stored rows. It is enforced in two places: the startup load stops at the budget, and the store evicts oldest-first when it exceeds it, down to 85% of it. Leaving it unset means no limit. Actual usage is on `/api/perf` as `packetStore.trackedMB`, next to `maxMB`.
+
+`retention.packetDays` deletes old transmissions and their observations;
+channel messages (including ping-triggering GRP_TXT packets) remain until
+`retention.channelDays` when that is longer. Both prune paths deliberately
+keep `ping_triggers` rows in `meshcore.db` beyond either cutoff. The trigger
+is the detection index for an old ping; `ping_scores_history.db` holds its
+computed score so it can still appear in all-time results. An old trigger
+with no matching transmission is therefore expected after pruning, not an
+integrity fault.
+
+Do not "clean up" such a trigger. The server reconciles its history file
+against a fresh `ping_triggers` read every cycle and deletes any entry whose
+trigger has gone, so removing an old trigger destroys that ping's all-time
+result permanently — the score does not survive in the history file.
+
+A trigger whose transmission is missing *inside* the retention window is the
+case worth investigating, so count the two separately. Pings are GRP_TXT
+channel messages, so their effective cutoff is `N = max(packetDays,
+channelDays)` days; substitute the number, as SQLite cannot parameterise a
+date modifier. Run this read-only, on a stopped container or a consistent
+snapshot:
+
+```sql
+SELECT
+  COALESCE(SUM(p.first_seen <  strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-N days')), 0)
+    AS expected_retained,
+  COALESCE(SUM(p.first_seen >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-N days')), 0)
+    AS investigate
+FROM ping_triggers AS p
+LEFT JOIN transmissions AS t ON t.id = p.tx_id
+WHERE t.id IS NULL;
+```
+
+`ping_triggers.first_seen` is the same RFC3339 UTC string the prune compares
+against, so the two buckets line up with the prune's own cutoff.
+`expected_retained` is the designed state: it grows over time and is not
+bounded by `packetDays`. `investigate` should be 0. List those rows with:
+
+```sql
+SELECT p.tx_id, p.first_seen, p.channel_hash, p.sender
+FROM ping_triggers AS p
+LEFT JOIN transmissions AS t ON t.id = p.tx_id
+WHERE t.id IS NULL
+  AND p.first_seen >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-N days')
+ORDER BY p.first_seen DESC
+LIMIT 20;
+```
+
+A row or two right at the cutoff can still be benign: a trigger's
+`first_seen` is written once, at the first observation, while the
+transmission's own `first_seen` can later be lowered by a relayed copy that
+was received earlier, which can carry the transmission past the cutoff while
+the trigger's copy still reads as newer. Rows well inside the window, a
+missing trigger for a stored score, or a damaged history DB are the real
+signals.
+
+Any future size limit on `ping_triggers` needs a separate policy for
+preserving all-time ping results.
 
 ### Database locked errors
 

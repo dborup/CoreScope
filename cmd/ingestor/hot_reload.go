@@ -130,17 +130,24 @@ func (hk *hotKeys) Regions() map[string][]byte {
 	return *hk.regionKeys.Load()
 }
 
-// reload re-reads configPath from disk and atomically swaps in freshly
-// derived channel/region keys. On any error the previous keys are left in
-// place — a malformed config.json during a live reload must not blank out
-// a working ingestor.
+// reload re-reads configPath from disk — and the external hashRegionsPath
+// file it names (#360) — and atomically swaps in freshly derived
+// channel/region keys. On any error the previous keys are left in place: a
+// malformed config.json, or a malformed region-name file, during a live
+// reload must not blank out a working ingestor.
 func (hk *hotKeys) reload(configPath string) error {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		return err
 	}
 	ck := loadChannelKeys(cfg, configPath)
-	rk := loadRegionKeys(cfg)
+	rk, err := loadRegionKeys(cfg, configPath)
+	if err != nil {
+		// A SIGHUP re-reads hashRegionsPath too, and an unusable file must
+		// not swap in a shrunken region set. Bail before any store, so the
+		// caller logs and every previous key stays live.
+		return err
+	}
 	hk.setBase(ck)
 	hk.regionKeys.Store(&rk)
 	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels kept)", len(ck), len(rk), configPath)

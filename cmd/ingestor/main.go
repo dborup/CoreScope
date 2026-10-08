@@ -28,6 +28,13 @@ import (
 )
 
 func main() {
+	// Admin subcommands (e.g. `admin delete-client-rx`) run a one-shot CLI and
+	// exit — they never start MQTT ingest. Dispatched before flag.Parse so the
+	// subcommand owns its own FlagSet; normal `-config` boot is unaffected.
+	if argsHaveAdmin(os.Args[1:]) {
+		os.Exit(runAdmin(os.Args[1:]))
+	}
+
 	// pprof profiling — off by default, enable with ENABLE_PPROF=true
 	if os.Getenv("ENABLE_PPROF") == "true" {
 		pprofPort := os.Getenv("PPROF_PORT")
@@ -107,7 +114,12 @@ func main() {
 		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
 	}
 
-	regionKeys := loadRegionKeys(cfg)
+	regionKeys, regionErr := loadRegionKeys(cfg, *configPath)
+	if regionErr != nil {
+		// regions.Load already logged which file failed and why; the keys
+		// are the inline hashRegions list, so the ingestor still starts.
+		log.Printf("[regions] startup fell back to the inline hashRegions list")
+	}
 	store.BackfillDefaultScopeAsync(regionKeys)
 
 	// hashChannels/hashRegions additions in config.json otherwise require a
@@ -261,6 +273,17 @@ func main() {
 		}
 	}
 
+	// Opt-in retention for the tables nothing else prunes (#329): after the
+	// observer soft-delete and the metrics and transmission prunes above, so
+	// the observer purge's reference guards see what they left. Every window
+	// unset (the default) = nothing deleted.
+	tableRetention := cfg.TableRetention()
+	if r := tableRetention; r.Enabled() {
+		log.Printf("[prune] table retention enabled (0 = off): inactiveNodeDays=%d nodeChangeDays=%d observerPurgeDays=%d",
+			r.InactiveNodeDays, r.NodeChangeDays, r.ObserverPurgeDays)
+	}
+	runTableRetention(store, tableRetention, "startup")
+
 	vacuumPages := cfg.IncrementalVacuumPages()
 	store.RunIncrementalVacuum(vacuumPages)
 
@@ -301,14 +324,18 @@ func main() {
 		}
 	}()
 
-	// Daily ticker for observer retention (every 24h, staggered 90s after startup)
+	// Daily ticker for observer retention (every 24h, staggered 90s after
+	// startup), followed by the opt-in table retention (#329), whose observer
+	// purge must follow the soft-delete.
 	observerRetentionTicker := time.NewTicker(24 * time.Hour)
 	go func() {
 		time.Sleep(90 * time.Second) // stagger after metrics prune
 		store.RemoveStaleObservers(observerDays)
+		runTableRetention(store, tableRetention, "daily")
 		store.RunIncrementalVacuum(vacuumPages)
 		for range observerRetentionTicker.C {
 			store.RemoveStaleObservers(observerDays)
+			runTableRetention(store, tableRetention, "daily")
 			store.RunIncrementalVacuum(vacuumPages)
 		}
 	}()
@@ -412,11 +439,17 @@ func main() {
 	// write handle) executes the DELETEs. Process on startup, then every
 	// 15 seconds — short enough for a one-click UX, long enough to avoid
 	// useless wake-ups.
+	// The same tick also drains the admin delete-client-rx queue (#330): the
+	// one-shot CLI enqueues a marker next to the DB and the ingestor, as the
+	// single writer, runs the DELETEs here — no second read-write process, no
+	// SQLITE_BUSY.
 	store.RunPendingPruneRequests()
+	store.RunPendingClientRxDeletes()
 	pruneQueueTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range pruneQueueTicker.C {
 			store.RunPendingPruneRequests()
+			store.RunPendingClientRxDeletes()
 		}
 	}()
 
@@ -1603,25 +1636,26 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 	return keys
 }
 
-func loadRegionKeys(cfg *Config) map[string][]byte {
-	keys := make(map[string][]byte)
-	for _, raw := range cfg.HashRegions {
-		name, ok := regions.Normalize(raw)
-		if !ok {
-			log.Printf("[regions] skipping empty hashRegions entry")
-			continue
-		}
-		if _, exists := keys[name]; exists {
-			log.Printf("[regions] duplicate region %q ignored", name)
-			continue
-		}
+// loadRegionKeys derives one HMAC key per configured region scope. The
+// names come from regions.Load, so the inline hashRegions list and the
+// optional hashRegionsPath file are merged, normalized and deduplicated by
+// the same code the server reads its configured set with — the two
+// processes cannot disagree about which scopes are configured.
+//
+// An unusable hashRegionsPath returns the error together with keys derived
+// from the inline list alone: startup logs it and carries on, while
+// hotKeys.reload propagates it so a live reload keeps the previous keys.
+func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
+	res, err := regions.Load(cfg.HashRegions, cfg.HashRegionsPath, configPath, log.Printf)
+	keys := make(map[string][]byte, len(res.Names))
+	for _, name := range res.Names {
 		h := sha256.Sum256([]byte(name))
 		keys[name] = h[:16]
 	}
 	if len(keys) > 0 {
 		log.Printf("[regions] %d region key(s) loaded", len(keys))
 	}
-	return keys
+	return keys, err
 }
 
 // matchScope performs one HMAC-SHA256 per configured region. Expected

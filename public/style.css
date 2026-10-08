@@ -242,6 +242,13 @@
   --success: var(--palette-green-700, #15803d);
   --warning: #b45309;
   --danger: var(--palette-red-600, #dc2626);
+  /* #353 — 1-byte path hash recommendation (renderPathHashSize in app.js).
+     Round 3 (operator decision): a 1-byte hash is a recommendation, not an
+     error, so it follows the amber --warning palette (not --danger) in both
+     themes. WCAG AA (>= 4.5:1) on every surface it renders on: channel badge
+     and node badge 5.02:1 light / 10.51:1 dark, packet-detail row 4.60:1 light
+     / 13.09:1 dark. Themeable via the customizer (pathHashWarn). */
+  --path-hash-warn: var(--warning);
   --link-color: var(--palette-blue-600);
   --accent-bg: rgba(59, 130, 246, 0.12);
   --accent-border: rgba(59, 130, 246, 0.25);
@@ -1974,6 +1981,13 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   overflow-wrap: anywhere;
   vertical-align: baseline;
 }
+/* #353 — 1-byte path hash warning, shared by the channel "Sent with" badge,
+ * the packet-detail Hash Size row and the node badge (renderPathHashSize in
+ * public/app.js). The icon + sr-only text carry it without colour. */
+.path-hash-warn { color: var(--path-hash-warn); font-weight: 600; }
+.path-hash-warn .ph-icon { margin-right: 3px; vertical-align: -0.125em; }
+.ch-path-hash-badge--warn { border-color: var(--path-hash-warn); align-items: center; }
+.node-path-hash-badge { background: var(--surface-2); border: 1px solid var(--path-hash-warn); font-size: 10px; }
 .ch-analyze-link { color: var(--link-color); text-decoration: none; margin-left: 8px; }
 .ch-analyze-link:hover { text-decoration: underline; }
 .ch-scroll-btn {
@@ -3193,6 +3207,21 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 .hop-conflict-btn { background: var(--status-yellow, #f59e0b); color: #000; border: none; border-radius: 4px; font-size: 11px;
   font-weight: 700; padding: 1px 5px; cursor: pointer; vertical-align: middle; margin-left: 3px; line-height: 1.2; }
 .hop-conflict-btn:hover { background: var(--status-yellow, #d97706); filter: brightness(0.85); }
+
+/* #165 (port of upstream 2099) — a badge is a sibling of its pill, so
+   "A [8] -> B [6]" gave no clue which name the 8 belonged to. The group ties the pair together and keeps the
+   separator outside it. Only hops that carry a badge are wrapped. */
+.hop-group { display: inline-flex; align-items: center; white-space: nowrap; }
+.hop-group .hop-conflict-btn,
+.hop-group .hop-unreliable-btn { margin-left: 2px; }
+
+/* One indicator for a whole path, used by the packets list. The detail pane
+   keeps a badge per hop, because that is where the candidates get read. It
+   leads the path so a clipped (overflowing) path cell cannot hide it. */
+.hop-path-warn { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; flex: 0 0 auto;
+  background: var(--status-yellow); color: var(--palette-gray-900); border-radius: 4px;
+  font-size: 11px; font-weight: 700; padding: 1px 5px; line-height: 1.2;
+  vertical-align: middle; white-space: nowrap; }
 .hop-conflict-popover { position: absolute; z-index: var(--z-popover); background: var(--surface-1); border: 1px solid var(--border);
   border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); width: 260px; max-height: 300px; overflow-y: auto; }
 .hop-conflict-header { padding: 10px 12px; font-size: 12px; font-weight: 700; border-bottom: 1px solid var(--border);
@@ -4514,6 +4543,20 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .region-dropdown-trigger,
   .multi-select-trigger {
     height: 48px;
+  }
+  /* #314: two controls the #239 sweep did not cover. Measured at 375x812
+     with a touch user agent, the swipe tip's "Got it" was 26 px tall and
+     the packets reveal pill 18 px. Both are compact by design on desktop
+     (a hint chip and a column-header badge), so the bump is touch-only,
+     like the rest of this block. Both need the flex centring too: their
+     labels are smaller than the box they now sit in. */
+  .gesture-hint-dismiss,
+  .col-hidden-pill {
+    min-height: 48px;
+    min-width: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 }
 

@@ -318,7 +318,7 @@ func TestChannelProposalKeysSurviveSIGHUPAndConfigWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hk := newHotKeys(loadChannelKeys(cfg, configPath), loadRegionKeys(cfg))
+	hk := newHotKeys(loadChannelKeys(cfg, configPath), mustRegionKeys(t, cfg, configPath))
 	if hk.AddApproved("#Shared", "#Manual") != 2 || hk.AddApproved("#Shared") != 0 {
 		t.Fatal("AddApproved must report only new names")
 	}
@@ -543,7 +543,7 @@ func TestChannelProposalRevokedKeySurvivesReloadUnlessBaseConfigured(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	hk := newHotKeys(loadChannelKeys(cfg, configPath), loadRegionKeys(cfg))
+	hk := newHotKeys(loadChannelKeys(cfg, configPath), mustRegionKeys(t, cfg, configPath))
 	hk.AddApproved("#Revocable", "#StillApproved")
 	if !hk.RemoveApproved("#Revocable") {
 		t.Fatal("RemoveApproved must report the name was present")

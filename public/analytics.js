@@ -2,6 +2,48 @@
 'use strict';
 
 (function () {
+  // These data-backed tables have grouped/collapsible rows; TableSort's DOM
+  // cell reader is not suitable. Share their scalar sort policy instead.
+  // Extract keys once (O(n)); stable sorting is O(n log n), with one cached collator.
+  var analyticsCollator = new Intl.Collator(typeof navigator !== 'undefined' ? navigator.languages : undefined, { sensitivity: 'base' });
+  function sortAnalyticsRows(rows, value, type, dir) {
+    var sign = dir === 'desc' ? -1 : 1;
+    return rows.map(function(r, i) {
+      var v = value(r);
+      var missing = v == null || v === '';
+      if (typeof v === 'number' && !Number.isFinite(v)) missing = true;
+      if (!missing && type !== 'text' && type !== 'hash') {
+        v = type === 'date' ? Date.parse(v) : Number(v);
+        missing = !Number.isFinite(v);
+      }
+      return { row: r, index: i, value: v, missing: missing };
+    }).sort(function(a, b) {
+      if (a.missing || b.missing) return a.missing === b.missing ? a.index - b.index : a.missing ? 1 : -1;
+      var text = type === 'text' || (type === 'hash' && (typeof a.value !== 'number' || typeof b.value !== 'number'));
+      var compared = text ? analyticsCollator.compare(String(a.value), String(b.value)) : a.value - b.value;
+      return compared ? compared * sign : a.index - b.index;
+    }).map(function(item) { return item.row; });
+  }
+  function nextAnalyticsSort(sort, col, type) {
+    return { col: col, dir: sort && sort.col === col ? (sort.dir === 'asc' ? 'desc' : 'asc') : (type === 'text' ? 'asc' : 'desc') };
+  }
+  function analyticsSortAttrs(col, activeCol, dir) {
+    return ' tabindex="0" aria-sort="' + (col === activeCol ? (dir === 'asc' ? 'ascending' : 'descending') : 'none') + '"';
+  }
+  function attachSortKeyboard(container, selector) {
+    container.addEventListener('keydown', function(e) {
+      var header = e.target.closest(selector);
+      if (!header || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      header.click();
+    });
+  }
+  function restoreSortFocus(container, selector, focused) {
+    if (!focused) return;
+    var header = container.querySelector(selector);
+    if (header) header.focus();
+  }
   let _analyticsData = {};
   const sf = (v, d) => (v != null ? v.toFixed(d) : '–'); // safe toFixed
   function esc(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : ''; }
@@ -1203,32 +1245,8 @@
   }
 
   function sortChannels(channels, col, dir) {
-    var sorted = channels.slice();
-    var mult = dir === 'asc' ? 1 : -1;
-    sorted.sort(function (a, b) {
-      var av, bv;
-      switch (col) {
-        case 'name':
-          av = (a.name || '').toLowerCase(); bv = (b.name || '').toLowerCase();
-          return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-        case 'hash':
-          av = typeof a.hash === 'number' ? a.hash : String(a.hash);
-          bv = typeof b.hash === 'number' ? b.hash : String(b.hash);
-          if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * mult;
-          av = String(av).toLowerCase(); bv = String(bv).toLowerCase();
-          return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-        case 'messages': return (a.messages - b.messages) * mult;
-        case 'senders': return (a.senders - b.senders) * mult;
-        case 'lastActivity':
-          av = a.lastActivity || ''; bv = b.lastActivity || '';
-          return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-        case 'encrypted':
-          av = a.encrypted ? 1 : 0; bv = b.encrypted ? 1 : 0;
-          return (av - bv) * mult;
-        default: return 0;
-      }
-    });
-    return sorted;
+    var type = col === 'name' ? 'text' : col === 'hash' ? 'hash' : col === 'lastActivity' ? 'date' : 'number';
+    return sortAnalyticsRows(channels, function(c) { return c[col]; }, type, dir);
   }
 
   function channelRowHtml(c) {
@@ -1358,8 +1376,8 @@
   }
 
   function channelSortArrow(col, activeCol, dir) {
-    if (col !== activeCol) return '<span class="sort-arrow">⇅</span>';
-    return '<span class="sort-arrow">' + (dir === 'asc' ? '↑' : '↓') + '</span>';
+    if (col !== activeCol) return '<span class="sort-arrow" aria-hidden="true">⇅</span>';
+    return '<span class="sort-arrow" aria-hidden="true">' + (dir === 'asc' ? '↑' : '↓') + '</span>';
   }
 
   function channelTheadHtml(activeCol, dir) {
@@ -1374,7 +1392,7 @@
     var ths = '';
     for (var i = 0; i < cols.length; i++) {
       var c = cols[i];
-      ths += '<th scope="col" class="sortable' + (c.key === activeCol ? ' sort-active' : '') + '" data-sort-col="' + c.key + '">' +
+      ths += '<th scope="col" class="sortable' + (c.key === activeCol ? ' sort-active' : '') + '" data-sort-col="' + c.key + '"' + analyticsSortAttrs(c.key, activeCol, dir) + '>' +
         c.label + channelSortArrow(c.key, activeCol, dir) + '</th>';
     }
     return '<thead><tr>' + ths + '</tr></thead>';
@@ -1385,7 +1403,13 @@
     var thead = document.querySelector('#channelsTable thead');
     if (!tbody || !_channelData) return;
     tbody.innerHTML = channelTbodyHtml(_channelData, _channelSortState.col, _channelSortState.dir, { grouped: true });
-    if (thead) thead.outerHTML = channelTheadHtml(_channelSortState.col, _channelSortState.dir);
+    if (thead) thead.querySelectorAll('th[data-sort-col]').forEach(function(th) {
+      var active = th.dataset.sortCol === _channelSortState.col;
+      th.classList.toggle('sort-active', active);
+      th.setAttribute('aria-sort', active ? (_channelSortState.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+      var arrow = th.querySelector('.sort-arrow');
+      if (arrow) arrow.textContent = active ? (_channelSortState.dir === 'asc' ? '↑' : '↓') : '⇅';
+    });
   }
 
   function renderChannels(el, ch) {
@@ -1451,16 +1475,12 @@
     // Attach sort handler via delegation on the table
     var table = document.getElementById('channelsTable');
     if (table) {
+      attachSortKeyboard(table, 'th[data-sort-col]');
       table.addEventListener('click', function (e) {
         var th = e.target.closest('th[data-sort-col]');
         if (!th) return;
         var col = th.dataset.sortCol;
-        if (_channelSortState.col === col) {
-          _channelSortState.dir = _channelSortState.dir === 'asc' ? 'desc' : 'asc';
-        } else {
-          _channelSortState.col = col;
-          _channelSortState.dir = col === 'name' || col === 'hash' ? 'asc' : 'desc';
-        }
+        _channelSortState = nextAnalyticsSort(_channelSortState, col, col === 'name' || col === 'hash' ? 'text' : 'number');
         saveChannelSort(_channelSortState);
         updateChannelTable();
       });
@@ -1630,8 +1650,8 @@
       case 'name': return String(r.name || '').toLowerCase();
       case 'role': return String(r.role || 'unknown').toLowerCase();
       case 'status': return Object.prototype.hasOwnProperty.call(MB_STATUS_WEIGHT, r.status) ? MB_STATUS_WEIGHT[r.status] : MB_STATUS_WEIGHT.unknown;
-      case 'hashSize': return Number(r.hashSize);
-      case 'packets': return Number(r.packets);
+      case 'hashSize': return r.hashSize;
+      case 'packets': return r.packets;
       case 'lastSeen': return r.lastSeen ? Date.parse(r.lastSeen) : NaN;
     }
     return 0;
@@ -1642,23 +1662,13 @@
   function sortMbAdopterRows(rows, sort) {
     var col = sort && sort.col;
     if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return rows;
-    var sign = sort.dir === 'desc' ? -1 : 1;
-    return rows.map(function (r, i) { return { r: r, i: i, v: mbAdopterSortValue(r, col) }; })
-      .sort(function (a, b) {
-        var an = typeof a.v === 'number' && isNaN(a.v), bn = typeof b.v === 'number' && isNaN(b.v);
-        if (an || bn) return an === bn ? a.i - b.i : (an ? 1 : -1);
-        if (a.v < b.v) return -sign;
-        if (a.v > b.v) return sign;
-        return a.i - b.i;
-      })
-      .map(function (x) { return x.r; });
+    return sortAnalyticsRows(rows, function(r) { return mbAdopterSortValue(r, col); }, col === 'name' || col === 'role' ? 'text' : 'number', sort.dir);
   }
 
   // Clicking the sorted column flips its direction; another column starts
-  // ascending.
+  // text ascending and numeric/time descending.
   function nextMbSort(sort, col) {
-    if (sort && sort.col === col) return { col: col, dir: sort.dir === 'asc' ? 'desc' : 'asc' };
-    return { col: col, dir: 'asc' };
+    return nextAnalyticsSort(sort, col, col === 'name' || col === 'role' || col === 'status' ? 'text' : 'number');
   }
 
   // filter: the initially selected filter (All when missing or unknown).
@@ -1700,7 +1710,7 @@
       return '<thead><tr>' + sortCols.map(function (c) {
         var active = c.key === sort.col;
         return '<th scope="col" class="sortable' + (active ? ' sort-active' : '') + '" data-sort="' + c.key + '"' +
-          (active ? ' aria-sort="' + (sort.dir === 'asc' ? 'ascending' : 'descending') + '"' : '') + '>' +
+          analyticsSortAttrs(c.key, sort.col, sort.dir) + '>' +
           c.label + channelSortArrow(c.key, sort.col, sort.dir) + '</th>';
       }).join('') + '</tr></thead>';
     }
@@ -1755,6 +1765,7 @@
       if (!section) return;
       var currentFilter = initialFilter;
       var currentSort = initialSort;
+      attachSortKeyboard(section, 'th[data-sort]');
 
       section.addEventListener('click', function handler(e) {
         var btn = e.target.closest('[data-mb-filter]');
@@ -1777,8 +1788,10 @@
           var col = th.dataset.sort;
           if (col === HASHSTATS_MB_SORT.dflt || HASHSTATS_MB_SORT.allowed.indexOf(col) < 0) return;
           currentSort = nextMbSort(currentSort, col);
+          var focused = document.activeElement === th;
           var sortWrap = section.querySelector('#mbAdoptersTableWrap');
           if (sortWrap) sortWrap.innerHTML = buildTableContent(rows, currentFilter, currentSort);
+          restoreSortFocus(section, 'th[data-sort="' + col + '"]', focused);
           _writeViewParams([HASHSTATS_MB_SORT, HASHSTATS_MB_DIR], [currentSort.col, currentSort.dir]);
         }
       });
@@ -2521,7 +2534,20 @@
     // Render minimap
     if (hasMap && typeof L !== 'undefined') {
       const map = L.map('subpathMap', { zoomControl: false, attributionControl: false });
-      L.tileLayer(getTileUrl(), { maxZoom: 18 }).addTo(map);
+      // #332 — go through the one shared helper (nodes.js, also used by the
+      // node-detail inset, node-reach, packet-path, area-nodes and
+      // rx-coverage maps). It resolves the configured provider for the
+      // current theme AND applies that provider's invertFilter to THIS
+      // map's own tile pane. A bare L.tileLayer(getTileUrl()) skipped the
+      // filter, so the keyless-OSM dark default (the light OSM template
+      // plus an invert filter) rendered a light basemap in a dark page.
+      if (typeof window._applyTilesToNodeMap === 'function') {
+        window._applyTilesToNodeMap(map);
+      } else {
+        // Loud, not silent: the shared tile helper is missing.
+        console.warn('subpath minimap: _applyTilesToNodeMap unavailable — using OSM fallback');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+      }
 
       const latlngs = [];
       nodesWithLoc.forEach((n, i) => {
@@ -3329,6 +3355,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
     window._analyticsResolveViewParam = resolveViewParam;
     window._analyticsDecorateChannels = decorateAnalyticsChannels;
     window._analyticsSortChannels = sortChannels;
+    window._analyticsSortRows = sortAnalyticsRows;
+    window._analyticsNextSort = nextAnalyticsSort;
     window._analyticsLoadChannelSort = loadChannelSort;
     window._analyticsSaveChannelSort = saveChannelSort;
     window._analyticsChannelTbodyHtml = channelTbodyHtml;
@@ -7189,8 +7217,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       // Which Areas, where there's no single meaningful sort value) render
       // as a plain header.
       function areasSortArrow(colKey, activeCol, dir) {
-        if (colKey !== activeCol) return '<span class="sort-arrow">⇅</span>';
-        return '<span class="sort-arrow">' + (dir === 'asc' ? '↑' : '↓') + '</span>';
+        return channelSortArrow(colKey, activeCol, dir);
       }
       function areasTheadHtml(cols, activeCol, dir) {
         return cols.map(function (c) {
@@ -7200,6 +7227,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
             classes.push('sortable');
             if (c.key === activeCol) classes.push('sort-active');
             attrs += ' data-sort-col="' + c.key + '"';
+            attrs += analyticsSortAttrs(c.key, activeCol, dir);
           }
           if (classes.length) attrs += ' class="' + classes.join(' ') + '"';
           if (c.align === 'right') attrs += ' style="text-align:right"';
@@ -7221,15 +7249,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
       function makeAreasSection(opts) {
         var state = { expanded: false, col: opts.initialSort.col, dir: opts.initialSort.dir };
         function sortedItems() {
-          var mult = state.dir === 'asc' ? 1 : -1;
-          return opts.items.slice().sort(function (a, b) {
-            var av = opts.getValue(a, state.col), bv = opts.getValue(b, state.col);
-            if (typeof av === 'string' || typeof bv === 'string') {
-              av = String(av).toLowerCase(); bv = String(bv).toLowerCase();
-              return av < bv ? -1 * mult : av > bv ? 1 * mult : 0;
-            }
-            return (av - bv) * mult;
-          });
+          return sortAnalyticsRows(opts.items, function(a) { return opts.getValue(a, state.col); }, opts.ascByDefault && opts.ascByDefault.indexOf(state.col) !== -1 ? 'text' : 'number', state.dir);
         }
         function tableHtml() {
           var items = sortedItems();
@@ -7245,6 +7265,10 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
         function attach() {
           var container = document.getElementById(opts.containerId);
           if (!container) return;
+          if (!container._analyticsSortKeyboard) {
+            attachSortKeyboard(container, 'th[data-sort-col]');
+            container._analyticsSortKeyboard = true;
+          }
           var toggleBtn = container.querySelector('[' + opts.toggleAttr + ']');
           if (toggleBtn) {
             toggleBtn.addEventListener('click', function () {
@@ -7256,14 +7280,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopForeignTraf
           container.querySelectorAll('th[data-sort-col]').forEach(function (th) {
             th.addEventListener('click', function () {
               var col = th.dataset.sortCol;
-              if (state.col === col) {
-                state.dir = state.dir === 'asc' ? 'desc' : 'asc';
-              } else {
-                state.col = col;
-                state.dir = opts.ascByDefault && opts.ascByDefault.indexOf(col) !== -1 ? 'asc' : 'desc';
-              }
+              var next = nextAnalyticsSort(state, col, opts.ascByDefault && opts.ascByDefault.indexOf(col) !== -1 ? 'text' : 'number');
+              state.col = next.col;
+              state.dir = next.dir;
+              var focused = document.activeElement === th;
               container.innerHTML = tableHtml();
               attach();
+              restoreSortFocus(container, 'th[data-sort-col="' + col + '"]', focused);
             });
           });
         }
