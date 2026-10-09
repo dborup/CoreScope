@@ -80,24 +80,27 @@ func TestForkGuardOnSideEffectJobs(t *testing.T) {
 }
 
 func TestForkGuardOnPublishSteps(t *testing.T) {
-	job := workflowJob(t, readWorkflow(t, deployWorkflowRel), "build-and-publish")
-	if cond := jobIf(job); cond != "" {
-		t.Errorf("build-and-publish must stay unconditional at job level so the local image build still validates on forks; got if %q", cond)
+	workflow := readWorkflow(t, deployWorkflowRel)
+	imageJob := workflowJob(t, workflow, "image-check")
+	if cond := jobIf(imageJob); cond != "" {
+		t.Errorf("image-check must stay unconditional so the local image build validates on forks; got if %q", cond)
+	}
+	if !strings.Contains(imageJob, "Build Go Docker image (local staging)") {
+		t.Error("image-check: local staging image build step not found")
+	}
+
+	job := workflowJob(t, workflow, "build-and-publish")
+	if cond := jobIf(job); !strings.Contains(cond, "!cancelled()") || strings.Contains(cond, "github.repository") {
+		t.Errorf("build-and-publish must run as a fork-safe fail-closed gate, not skip after test failures; got if %q", cond)
 	}
 	steps := regexp.MustCompile(`(?m)^      - name:`).Split(job, -1)[1:]
 	publishMarkers := []string{"docker/setup-buildx-action", "docker/setup-qemu-action", "docker/login-action", "docker/metadata-action", "docker/build-push-action"}
-	guarded, sawLocalBuild := 0, false
+	guarded := 0
 	for _, step := range steps {
 		ifLine := regexp.MustCompile(`(?m)^        if:(.*)$`).FindStringSubmatch(step)
 		cond := ""
 		if ifLine != nil {
 			cond = ifLine[1]
-		}
-		if strings.Contains(step, "Build Go Docker image (local staging)") {
-			sawLocalBuild = true
-			if strings.Contains(cond, "github.repository") {
-				t.Errorf("local staging image build must not be repository-guarded (it is fork-safe validation); got if %q", cond)
-			}
 		}
 		for _, marker := range publishMarkers {
 			if strings.Contains(step, marker) {
@@ -108,9 +111,6 @@ func TestForkGuardOnPublishSteps(t *testing.T) {
 			}
 		}
 	}
-	if !sawLocalBuild {
-		t.Errorf("build-and-publish: local staging image build step not found")
-	}
 	if guarded != len(publishMarkers) {
 		t.Errorf("build-and-publish: expected %d guarded publish steps, found %d", len(publishMarkers), guarded)
 	}
@@ -118,7 +118,7 @@ func TestForkGuardOnPublishSteps(t *testing.T) {
 
 func TestForkGuardLeavesTestJobsRunning(t *testing.T) {
 	deploy := readWorkflow(t, deployWorkflowRel)
-	for _, name := range []string{"go-test", "e2e-test"} {
+	for _, name := range []string{"go-test", "e2e-test", "image-check"} {
 		job := workflowJob(t, deploy, name)
 		if cond := jobIf(job); cond != "" {
 			t.Errorf("%s must not gain a job-level condition; got %q", name, cond)
