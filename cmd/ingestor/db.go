@@ -1490,7 +1490,16 @@ func (s *Store) UpsertObserverAt(id, name, iata string, meta *ObserverMeta, last
 	if lastSeen == "" {
 		lastSeen = ingestNow
 	}
-	normalizedIATA := strings.TrimSpace(strings.ToUpper(iata))
+	// #338: bound the display-text metadata before it is stored. The id is NOT
+	// touched here — it is validated and rejected (never truncated) at the
+	// handleMessage gate, upstream of every caller; see
+	// observer_metadata_bounds.go. name/region/model/firmware/client_version/
+	// radio are normalized (controls stripped, rune-truncated) so no untrusted
+	// publisher string reaches the row unbounded, and so the bound holds for
+	// every caller of this method, not just the status/packet handlers.
+	name = normalizeObserverText(name, maxObserverNameRunes)
+	normalizedIATA := normalizeObserverRegion(iata)
+	meta = boundObserverMeta(meta)
 
 	model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay := observerMetaColumns(meta)
 
@@ -1523,7 +1532,11 @@ func (s *Store) UpsertObserverAt(id, name, iata string, meta *ObserverMeta, last
 // months old and does not belong in the list. A live message from the same
 // observer arrives moments later and creates the row through the normal path.
 func (s *Store) UpsertObserverRetained(id, name, iata string, meta *ObserverMeta) error {
-	normalizedIATA := strings.TrimSpace(strings.ToUpper(iata))
+	// #338: same display-text bounds as UpsertObserverAt (see the note there);
+	// the id is validated at the handleMessage gate, not rewritten here.
+	name = normalizeObserverText(name, maxObserverNameRunes)
+	normalizedIATA := normalizeObserverRegion(iata)
+	meta = boundObserverMeta(meta)
 	model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor, canRelay := observerMetaColumns(meta)
 
 	_, err := s.db.Exec(`

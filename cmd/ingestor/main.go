@@ -776,6 +776,24 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		return
 	}
 
+	// #338: the observer id (parts[2]) is the identity key every observer-bearing
+	// topic below writes rows under — the neighbors, status and raw-packet paths
+	// all read it, and RecordNaiveSkew / UpsertObserverAt /
+	// TouchObserverNeighborsReport insert observer rows keyed on it. An
+	// over-limit, non-UTF-8 or control-bearing id is rejected here (the whole
+	// message is dropped) rather than truncated: shortening two distinct ids to a
+	// shared cap would MERGE separate observers into one row, the upstream
+	// behaviour #338 forbids. Non-observer message topics
+	// (meshcore/message/{channel,direct}/...) carry a short literal in parts[2]
+	// and always pass. Diagnostics are rate-limited and never log the full id —
+	// see observer_metadata_bounds.go.
+	if len(parts) > 2 {
+		if reason := observerIDRejectReason(parts[2]); reason != "" {
+			observerIDDrops.record(tag, parts[2], reason, time.Now())
+			return
+		}
+	}
+
 	// Neighbors report topic: meshcore/<region>/<observer_id>/neighbors (#1865).
 	// The ESP32 observer firmware emits a periodic neighbor report carrying its
 	// own configured region scopes (`self`) plus, for each zero-hop neighbor,
