@@ -19,21 +19,40 @@ esac
 # fatal before any stop or data copy; no guessing from Docker error text.
 running=$(docker inspect --format '{{.State.Running}}' "$container")
 case "$running" in true|false) ;; *) echo 'unknown container running state' >&2; exit 1 ;; esac
-mkdir -p "$2"
-backup_root=$(cd "$2" && pwd -P)
+# A leading "-" is neither an option nor `cd -`; CDPATH must not redirect cd.
+case "$2" in -*) target=./$2 ;; *) target=$2 ;; esac
+mkdir -p -- "$target"
+backup_root=$(CDPATH='' cd -- "$target" && pwd -P)
 stage=$(mktemp -d "$backup_root/.corescope-backup-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
 chmod 700 "$stage"
 restart_needed=0
 
+# A zero exit from `docker start` alone is not proof: it is a no-op on a
+# container that is still running (or still stopping).
+start_and_verify() {
+  docker start "$container" >/dev/null || return
+  state=$(docker inspect --format '{{.State.Running}}' "$container") || return
+  if [ "$state" != true ]; then
+    echo "ERROR: $container is not running after start" >&2 || :
+    return 1
+  fi
+}
+
 finish() {
   status=$?
-  trap - 0 HUP INT TERM
+  # A repeated signal to the process group must not cut recovery short.
+  trap '' HUP INT TERM
+  trap - 0
   if [ "$restart_needed" -eq 1 ]; then
-    if docker start "$container" >/dev/null; then
+    # A signal can kill the docker CLI while the daemon is still stopping the
+    # container. Wait for any stop in progress (stop is idempotent) so that
+    # the start below really starts it, then verify it is running.
+    docker stop "$container" >/dev/null || :
+    if start_and_verify; then
       :
     else
       restart_status=$?
-      echo "ERROR: restart failed (exit $restart_status); check $container manually" >&2
+      echo "ERROR: restart failed (exit $restart_status); check $container manually" >&2 || :
       if [ "$status" -eq 0 ]; then status=$restart_status; fi
     fi
   fi
@@ -41,16 +60,20 @@ finish() {
   case "$stage" in
     "$backup_root"/.corescope-backup-*)
       if ! rm -rf "$stage"; then
-        echo "ERROR: could not remove private staging directory $stage" >&2
+        echo "ERROR: could not remove private staging directory $stage" >&2 || :
         if [ "$status" -eq 0 ]; then status=1; fi
       fi ;;
   esac
   exit "$status"
 }
+interrupted() {
+  echo "ERROR: interrupted by SIG$1" >&2 || :
+  exit "$2"
+}
 trap finish 0
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'interrupted HUP 129' HUP
+trap 'interrupted INT 130' INT
+trap 'interrupted TERM 143' TERM
 
 if [ "$running" = true ]; then
   # Even a failed stop may have stopped the container before its API call
@@ -71,6 +94,7 @@ for db in meshcore ping_scores_history; do
     exit 1
   fi
   mv "$file" "$stage/snapshot/$db.db"
+  chmod 600 "$stage/snapshot/$db.db"
   file="$stage/raw/$db.db-wal"
   if [ -e "$file" ] || [ -L "$file" ]; then
     if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
@@ -78,11 +102,12 @@ for db in meshcore ping_scores_history; do
       exit 1
     fi
     mv "$file" "$stage/snapshot/$db.db-wal"
+    chmod 600 "$stage/snapshot/$db.db-wal"
   fi
 done
 
 if [ "$restart_needed" -eq 1 ]; then
-  if docker start "$container" >/dev/null; then
+  if start_and_verify; then
     restart_needed=0
   else
     restart_status=$?

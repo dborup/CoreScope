@@ -74,6 +74,7 @@ if (op === 'start') {
     for (const name of fs.readdirSync(root).filter(n => n.startsWith('.corescope-backup-'))) {
       const destination = path.join(root, name.slice(1));
       if (process.env.MOCK_PRECREATE_DEST === 'symlink') fs.symlinkSync(process.env.MOCK_OUTSIDE, destination);
+      else if (process.env.MOCK_PRECREATE_DEST === 'dangling') fs.symlinkSync(process.env.MOCK_OUTSIDE + '-missing', destination);
       else { fs.mkdirSync(destination); fs.writeFileSync(path.join(destination, 'sentinel'), 'keep'); }
     }
   }
@@ -277,7 +278,7 @@ for (const kind of ['symlink','directory']) test('non-regular WAL (' + kind + ')
   assert.strictEqual(f.state().running, true); assertNoSnapshots(f);
 }));
 
-for (const kind of ['directory','symlink']) test('existing destination (' + kind + ') is never overwritten', () => fixture(f => {
+for (const kind of ['directory','symlink','dangling']) test('existing destination (' + kind + ') is never overwritten', () => fixture(f => {
   const outside = path.join(f.dir, 'outside');
   fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
   const result = f.backup({MOCK_PRECREATE_DEST:kind, MOCK_OUTSIDE:outside});
@@ -286,6 +287,7 @@ for (const kind of ['directory','symlink']) test('existing destination (' + kind
   const left = fs.readdirSync(f.snapshots);
   assert.strictEqual(left.length, 1); assert(!left[0].startsWith('.'), 'staging left behind');
   if (kind === 'directory') assert.deepStrictEqual(fs.readdirSync(path.join(f.snapshots, left[0])), ['sentinel']);
+  assert.strictEqual(fs.existsSync(outside + '-missing'), false);
   assert.strictEqual(f.state().running, true);
 }));
 

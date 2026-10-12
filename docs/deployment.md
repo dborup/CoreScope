@@ -646,7 +646,8 @@ sh scripts/backup-sqlite.sh corescope /backups
 
 The helper prints a new private directory such as
 `/backups/corescope-backup-20261008T030000Z.A1b2c3`, containing exactly
-`meshcore.db`, `ping_scores_history.db`, and their `-wal` files if present.
+`meshcore.db`, `ping_scores_history.db`, and their `-wal` files if present,
+each with mode 0600.
 There are no `-shm` files or config/secrets in the completed backup. Every run
 gets a fresh directory, so a previous backup's WAL cannot be reused by mistake.
 
@@ -656,10 +657,14 @@ space for the entire directory, including any unrelated files. The container
 must be its only writer: stop any other process or container sharing that data
 first. The helper never pulls an image or starts an additional container.
 
-On a copy/validation failure it attempts to restart a previously running
-container and returns the original error. A restart failure is reported, and
-no completed backup is published. A container already stopped is left stopped.
-For success, both the copy and any required restart must succeed. Temporary
+On a copy/validation failure, or on `SIGHUP`/`SIGINT`/`SIGTERM` (also when
+the signal reaches the whole process group and kills `docker stop` mid-way),
+it waits for any stop in progress, restarts a previously running container,
+checks that it is running, and returns the original error (129/130/143 for a
+signal, with an `interrupted` error). A repeated signal does not abort that
+recovery. A restart failure is reported, and no completed backup is published.
+A container already stopped is left stopped. For success, both the copy and
+any required restart must succeed. Temporary
 staging is removed on normal exit or a caught signal; `SIGKILL` or a host crash
 can leave a private `.corescope-backup-*` directory. That directory is **not** a
 completed backup. Check the container's state and remove only that abandoned
