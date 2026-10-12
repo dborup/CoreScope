@@ -330,7 +330,7 @@
     const analyticsContent = document.getElementById('analyticsContent');
     if (analyticsContent) {
       const handler = (e) => {
-        const row = e.target.closest('tr[data-action="navigate"]');
+        const row = e.target.closest('[data-action="navigate"]');
         if (!row) return;
         if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
         if (e.type === 'keydown') e.preventDefault();
@@ -1102,7 +1102,7 @@
     let html = '<div class="repeater-list">';
     repeaters.slice(0, 15).forEach(r => {
       const pct = (r.count / max * 100).toFixed(0);
-      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `onclick="location.hash='#/nodes/${encodeURIComponent(r.pubkey)}'"` : ''}>
+      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `data-action="navigate" data-value="#/nodes/${encodeURIComponent(r.pubkey)}" tabindex="0" role="row"` : ''}>
         <div class="repeater-name">${r.name ? '<strong>' + esc(r.name) + '</strong>' : '<span class="mono">' + r.hop + '</span>'}</div>
         <div class="repeater-bar"><div class="hash-bar-track"><div class="hash-bar-fill" style="width:${pct}%;background:var(--accent)"></div></div></div>
         <div class="repeater-count">${r.count.toLocaleString()}</div>

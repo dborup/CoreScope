@@ -69,6 +69,14 @@ const escapeHtml = loadEscapeHtml();
 // unnoticed. Lift the one-line `function esc(s) { … }` from the file.
 function loadLocalEsc(file, ctxExtra) {
   const src = fs.readFileSync(file, 'utf8');
+  // #333 N4: the regex below lifts the *first* one-line `function esc(s)`.
+  // If a second file-local esc were added above the real sink's escaper, it
+  // would silently retarget this contract test. Pin the assumption: there
+  // must be exactly one esc() definition in the file, else fail loudly.
+  const defs = src.match(/function esc\s*\(/g) || [];
+  if (defs.length !== 1)
+    throw new Error(`expected exactly one function esc() in ${file}, found ${defs.length}; `
+      + 'loadLocalEsc would silently pick the first — add a line anchor to disambiguate');
   const m = src.match(/\n\s*(function esc\(s\) \{[^\n]*\})/);
   if (!m) throw new Error('could not locate function esc(s) in ' + file);
   const ctx = Object.assign({ esc: null }, ctxExtra || {});
@@ -1003,6 +1011,71 @@ test('#333 F3 observers row: no inline handler interpolates the observer id', ()
   const dv = tag.match(/data-value="([^"]*)"/);
   assert.ok(dv && decodeEntities(dv[1]) === '#/observers/' + encodeURIComponent(id),
     '#333 F3: data-value navigation target lost: ' + tag);
+});
+
+// =========================================================================
+// K. Issue #333 round 3 — the two remaining adjacent region sinks the round-2
+//    review flagged (N1, N2) plus the analytics repeater-row inline handler
+//    (N3). N1 and N2 both render the SAME value — observer IATA from
+//    /api/nodes/{pk}/health, via observers.map(o => o.iata) — raw into a
+//    summary line one or two lines above an already-escaped sibling badge.
+//    Each test lifts the REAL production expression by regex and renders it
+//    with a hostile IATA, so dropping the escaper (the mutant) turns it red.
+// =========================================================================
+
+// N1: public/nodes.js detail panel (renderDetail → panel.innerHTML). The
+// "Regions:" summary line joins observers.map(o => o.iata) into text. The
+// sibling full-page view at nodes.js:970 and the "Heard By" rows below both
+// escape the IATA; only this summary line is at issue.
+test('#333 N1 nodes detail panel: Regions summary escapes the observer IATA', () => {
+  const src = fs.readFileSync('public/nodes.js', 'utf8');
+  const m = src.match(/\(\(\) => \{ const regions = \[\.\.\.new Set\(observers\.map\(o => o\.iata\)\.filter\(Boolean\)\)\]; return regions\.length \? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:<\/strong> [^`]*<\/div>` : ''; \}\)\(\)/);
+  assert.ok(m, '#333 N1 nodes detail Regions summary IIFE not found');
+  const render = new Function('observers', 'escapeHtml', 'return ' + m[0] + ';');
+  const html = render([{ iata: 'SJC' }, { iata: REGION_PAYLOAD }], escapeHtml);
+  assertNoXss(html, '#333 N1 nodes detail Regions summary');
+  assert.ok(decodeEntities(html).includes('SJC, ' + REGION_PAYLOAD),
+    '#333 N1: region codes must render as comma-joined text: ' + html);
+});
+
+// N2: public/live.js showNodeDetail (content.innerHTML). The "Heard By"
+// heading appends ' — Regions: ' + the same observers.map(o => o.iata) join.
+// The per-observer rows one line below already escape o.iata.
+test('#333 N2 live node detail: Heard By heading escapes the observer IATA', () => {
+  const src = fs.readFileSync('public/live.js', 'utf8');
+  // The heading template continues past </h4> into the observer list, so lift
+  // just the real join expression that builds the " — Regions: …" text.
+  const m = src.match(/Heard By\$\{regions\.length \? ' — Regions: ' \+ ([^}]*?) : ''\}<\/h4>/);
+  assert.ok(m, '#333 N2 live Heard By heading not found');
+  const render = new Function('regions', 'escapeHtml', "return 'Heard By — Regions: ' + (" + m[1] + ');');
+  const regions = [...new Set([{ iata: 'SJC' }, { iata: REGION_PAYLOAD }].map(o => o.iata).filter(Boolean))];
+  const html = render(regions, escapeHtml);
+  assertNoXss(html, '#333 N2 live Heard By heading');
+  assert.ok(decodeEntities(html).includes('Regions: SJC, ' + REGION_PAYLOAD),
+    '#333 N2: region codes must render as text in the heading: ' + html);
+});
+
+// N3: public/analytics.js renderRepeaterTable. The row carried
+// onclick="location.hash='#/nodes/${encodeURIComponent(r.pubkey)}'".
+// encodeURIComponent leaves ' ( ) alone, so a pubkey quote breaks out of the
+// JS string — the exact pattern F3 removed from observers.js. The fix drops
+// the inline handler and navigates via data-action="navigate"/data-value.
+test('#333 N3 analytics repeater row: no inline handler carries the node pubkey', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/html \+= `<div class="repeater-row [\s\S]*?`;/);
+  assert.ok(m, '#333 N3 analytics repeater-row template not found');
+  const render = new Function('r', 'esc', 'pct', 'encodeURIComponent',
+    'let html = ""; ' + m[0] + ' return html;');
+  const pubkey = "deadbeef'-alert(333)-'";
+  const html = render({ pubkey, name: 'Repeater', count: 5, hop: '1' }, s => String(s), 50, encodeURIComponent);
+  const handlers = Array.from(html.matchAll(/\son[a-z]+\s*=\s*"([^"]*)"/gi), x => x[1]);
+  for (const h of handlers) {
+    assert.ok(!h.includes(pubkey) && !h.includes(encodeURIComponent(pubkey)),
+      '#333 N3: node pubkey reaches an inline JS handler: ' + html);
+  }
+  const dv = html.match(/data-value="([^"]*)"/);
+  assert.ok(dv && decodeEntities(dv[1]) === '#/nodes/' + encodeURIComponent(pubkey),
+    '#333 N3: data-value navigation target lost: ' + html);
 });
 
 // =========================================================================

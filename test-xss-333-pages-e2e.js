@@ -5,6 +5,7 @@
 //   F1  packets region badge in the flat view and in expanded group children
 //   F2  the shared region filter (pills, dropdown items, dropdown trigger)
 //   F3  observers-row navigation with an observer id that contains a quote
+//   N1  (round 3) the nodes-page detail-panel "Regions:" summary line
 //
 // Unlike test-xss-333-e2e.js (production sink fragments rendered on a blank
 // page), this drives the REAL pages against a running Go server. The hostile
@@ -261,6 +262,58 @@ function assertInert(r, label) {
       await page.waitForTimeout(500); // a stray navigation would land by now
       const hash = await page.evaluate(() => location.hash);
       assert(hash === '#/observers', 'narrow row click navigated away: ' + hash);
+    } finally { await ctx.close(); }
+  });
+
+  // ---- N1 (round 3): nodes-page detail panel "Regions:" summary ----------
+  // The detail panel (renderDetail → #nodesRight) joins the observer IATAs
+  // from /api/nodes/{pk}/health into a "Regions:" line, one line above the
+  // already-escaped per-observer badge. Select a node, inject the hostile
+  // IATA into its health response, and judge the DOM.
+  await step('N1 nodes detail panel: Regions summary renders the hostile IATA as text', async () => {
+    const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+    let dialogs = 0;
+    try {
+      await ctx.route((url) => /\/api\/nodes\/[^/]+\/health$/.test(url.pathname), async (route) => {
+        const res = await route.fetch();
+        const body = await res.json();
+        // Guarantee at least one observer so the Regions section renders,
+        // whichever node the first row happens to be.
+        body.observers = (body.observers && body.observers.length)
+          ? body.observers
+          : [{ observer_id: 'OBS-H', observer_name: 'h', packetCount: 1 }];
+        for (const o of body.observers) o.iata = HOSTILE;
+        await route.fulfill({ response: res, json: body });
+      });
+      const page = await ctx.newPage();
+      page.setDefaultTimeout(15000);
+      page.on('dialog', (d) => { dialogs++; d.dismiss().catch(() => {}); });
+      await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#nodesBody tr[data-action="select"]');
+      await page.click('#nodesBody tr[data-action="select"]');
+      await page.waitForFunction(() => {
+        const r = document.getElementById('nodesRight');
+        return Array.from(r ? r.querySelectorAll('div') : [])
+          .some((d) => d.innerHTML.trim().startsWith('<strong>Regions:</strong>'));
+      });
+      await page.waitForTimeout(400);
+      const r = await page.evaluate((h) => {
+        const right = document.getElementById('nodesRight');
+        // The exact summary div, not an ancestor (whose innerHTML could carry
+        // an unrelated <img> such as a node avatar).
+        const line = Array.from(right.querySelectorAll('div'))
+          .find((d) => d.innerHTML.trim().startsWith('<strong>Regions:</strong>'));
+        return {
+          fired: window.__xss333 || 0,
+          imgs: document.querySelectorAll('img[src="x"]').length,
+          showsText: !!line && line.textContent.includes(h),
+          hasRawImg: !!line && /<img\b/i.test(line.innerHTML),
+        };
+      }, HOSTILE);
+      r.dialogs = dialogs;
+      assertInert(r, 'nodes detail Regions summary');
+      assert(r.showsText, 'the hostile IATA is not shown as text in the Regions summary');
+      assert(!r.hasRawImg, 'a raw <img> survived in the Regions summary');
     } finally { await ctx.close(); }
   });
 
