@@ -701,3 +701,218 @@ func TestHandleNeighborsReport_OriginIDMustBeFullKey(t *testing.T) {
 		t.Errorf("full-key origin_id default_scope = %v, want '#dk'", sc)
 	}
 }
+
+// summaryLines returns the per-report bounds-drop summary lines in out.
+func summaryLines(out string) []string {
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "bounds dropped") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// Whatever the bounds drop from a report is summarised on exactly one log
+// line, never one per entry (a hostile report is exactly where per-entry
+// logging would amplify), and the line names only what was actually dropped.
+func TestHandleNeighborsReport_DropSummaryLogLine(t *testing.T) {
+	origin := "a337000000000000000000000000000000000000000000000000000000000040"
+	valid := func(i int) map[string]interface{} {
+		return map[string]interface{}{"pubkey": fmt.Sprintf("b337%060x", i), "scopes": "dk", "status": "responded", "snr": -5.0}
+	}
+
+	t.Run("every neighbor drop is counted on one line", func(t *testing.T) {
+		pinReportClock(t, issue337Now)
+		store := openNeighborsStore(t)
+		buf := captureLogs(t)
+
+		neighbors := []interface{}{
+			map[string]interface{}{"pubkey": "deadbeef", "scopes": "dk", "status": "responded"},
+			map[string]interface{}{"pubkey": fmt.Sprintf("b337%060x", 1000), "scopes": strings.Repeat("a", maxReportScopeBytes+1), "status": "responded"},
+			map[string]interface{}{"pubkey": fmt.Sprintf("b337%060x", 1001), "scopes": "dk", "status": strings.Repeat("s", 100000)},
+		}
+		for i := len(neighbors); i < maxReportNeighbors+2; i++ {
+			neighbors = append(neighbors, valid(i))
+		}
+		handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+			"timestamp": "2026-10-08T11:00:00Z",
+			"origin_id": origin,
+			"neighbors": neighbors,
+		})
+
+		lines := summaryLines(buf.String())
+		if len(lines) != 1 {
+			t.Fatalf("got %d summary lines, want exactly 1:\n%s", len(lines), buf.String())
+		}
+		for _, want := range []string{
+			fmt.Sprintf("2 entr(ies) over the %d cap", maxReportNeighbors),
+			"1 malformed pubkey(s)",
+			"1 oversized scope string(s)",
+			"1 oversized status string(s)",
+		} {
+			if !strings.Contains(lines[0], want) {
+				t.Errorf("summary line missing %q:\n%s", want, lines[0])
+			}
+		}
+		if strings.Contains(lines[0], "origin_id") {
+			t.Errorf("summary line mentions origin_id although it was valid:\n%s", lines[0])
+		}
+	})
+
+	t.Run("malformed origin_id alone names only that", func(t *testing.T) {
+		pinReportClock(t, issue337Now)
+		store := openNeighborsStore(t)
+		buf := captureLogs(t)
+
+		handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+			"timestamp": "2026-10-08T11:00:00Z",
+			"origin_id": "not-a-pubkey",
+			"self":      map[string]interface{}{"scopes": "dk"},
+		})
+
+		lines := summaryLines(buf.String())
+		if len(lines) != 1 {
+			t.Fatalf("got %d summary lines, want exactly 1:\n%s", len(lines), buf.String())
+		}
+		if !strings.Contains(lines[0], "malformed origin_id") {
+			t.Errorf("summary line does not name the malformed origin_id:\n%s", lines[0])
+		}
+		for _, notWant := range []string{"cap", "pubkey(s)", "oversized", " 0 "} {
+			if strings.Contains(lines[0], notWant) {
+				t.Errorf("summary line carries %q although nothing of that kind was dropped:\n%s", notWant, lines[0])
+			}
+		}
+	})
+
+	t.Run("oversized self.scopes is counted", func(t *testing.T) {
+		pinReportClock(t, issue337Now)
+		store := openNeighborsStore(t)
+		seedNode(t, store, origin)
+		buf := captureLogs(t)
+
+		handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+			"timestamp": "2026-10-08T11:00:00Z",
+			"origin_id": origin,
+			"self":      map[string]interface{}{"scopes": strings.Repeat("a", maxReportScopeBytes+1)},
+		})
+
+		if sc, at := configuredScope(t, store, origin); sc.Valid || at.Valid {
+			t.Fatalf("oversized self.scopes wrote %v / %v, want both NULL", sc, at)
+		}
+		lines := summaryLines(buf.String())
+		if len(lines) != 1 || !strings.Contains(lines[0], "1 oversized scope string(s)") {
+			t.Fatalf("oversized self.scopes not reported on the summary line:\n%s", buf.String())
+		}
+	})
+
+	t.Run("clean report logs nothing", func(t *testing.T) {
+		pinReportClock(t, issue337Now)
+		store := openNeighborsStore(t)
+		buf := captureLogs(t)
+
+		handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+			"timestamp": "2026-10-08T11:00:00Z",
+			"origin_id": origin,
+			"self":      map[string]interface{}{"scopes": "dk", "default_scope": "dk"},
+			"neighbors": []interface{}{valid(1), valid(2)},
+		})
+
+		if lines := summaryLines(buf.String()); len(lines) != 0 {
+			t.Fatalf("a clean report logged a summary line:\n%s", buf.String())
+		}
+	})
+}
+
+// status is the last publisher-controlled string on a neighbor entry. An
+// oversized one is malformed input: the neighbor stays (it is still a real
+// zero-hop entry, and its RF metrics are independent of the field), only the
+// unusable status is dropped -- the same keep-the-neighbor, drop-the-field
+// policy an oversized scope string gets.
+func TestHandleNeighborsReport_OversizedStatusIsBounded(t *testing.T) {
+	pinReportClock(t, issue337Now)
+	store := openNeighborsStore(t)
+	huge := "a337000000000000000000000000000000000000000000000000000000000050"
+	atLimit := "a337000000000000000000000000000000000000000000000000000000000051"
+	limitStatus := strings.Repeat("s", maxReportStatusBytes)
+
+	handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+		"timestamp": "2026-10-08T11:00:00Z",
+		"neighbors": []interface{}{
+			map[string]interface{}{"pubkey": huge, "scopes": "dk", "status": strings.Repeat("s", 100000), "snr": -4.0},
+			map[string]interface{}{"pubkey": atLimit, "scopes": "dk", "status": limitStatus, "snr": -4.0},
+		},
+	})
+
+	status := func(pk string) string {
+		t.Helper()
+		var s string
+		if err := store.db.QueryRow(`SELECT COALESCE(status, '') FROM observer_neighbors WHERE neighbor_pubkey = ?`, pk).Scan(&s); err != nil {
+			t.Fatalf("select observer_neighbors for %s: %v", pk, err)
+		}
+		return s
+	}
+	if s := status(huge); s != "" {
+		t.Errorf("oversized status stored (len %d), want ''", len(s))
+	}
+	if s := status(atLimit); s != limitStatus {
+		t.Errorf("at-limit status stored as %q, want it verbatim", s)
+	}
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM observer_neighbor_metrics WHERE neighbor_pubkey = ?`, huge).Scan(&n); err != nil {
+		t.Fatalf("count metrics: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("observer_neighbor_metrics rows = %d, want 1 (snr is independent of status)", n)
+	}
+}
+
+// ReplaceObserverNeighbors re-validates the two free-form strings at the
+// row-creating boundary, as it already does the key, rather than trusting
+// that every caller bounded them. Scopes arrive normalized, so they are held
+// to the normalized ceiling maxStoredScopeBytes, which every raw string
+// inside maxReportScopeBytes normalizes under.
+func TestReplaceObserverNeighbors_BoundsStatusAndScopes(t *testing.T) {
+	pinReportClock(t, issue337Now)
+	store := openNeighborsStore(t)
+
+	// The longest normalized form a handler-accepted raw string can produce:
+	// 128 parts ("aa" + 127 x ",a" = 256 raw bytes), each gaining a "#".
+	worstRaw := "aa" + strings.Repeat(",a", 127)
+	if len(worstRaw) != maxReportScopeBytes {
+		t.Fatalf("worst-case raw is %d bytes, want %d", len(worstRaw), maxReportScopeBytes)
+	}
+	worstNorm := normalizeConfiguredScopeList(worstRaw)
+	if len(worstNorm) > maxStoredScopeBytes {
+		t.Fatalf("an accepted raw scope normalizes to %d bytes, past maxStoredScopeBytes = %d", len(worstNorm), maxStoredScopeBytes)
+	}
+
+	keep := "a337000000000000000000000000000000000000000000000000000000000060"
+	longScope := "a337000000000000000000000000000000000000000000000000000000000061"
+	longStatus := "a337000000000000000000000000000000000000000000000000000000000062"
+	entries := []ObserverNeighborEntry{
+		{Pubkey: keep, Status: "responded", Scopes: worstNorm},
+		{Pubkey: longScope, Status: "responded", Scopes: strings.Repeat("#a,", maxStoredScopeBytes)},
+		{Pubkey: longStatus, Status: strings.Repeat("s", maxReportStatusBytes+1), Scopes: "#dk"},
+	}
+	if err := store.ReplaceObserverNeighbors("obs-337", entries, "2026-10-08T11:00:00Z"); err != nil {
+		t.Fatalf("ReplaceObserverNeighbors: %v", err)
+	}
+
+	row := func(pk string) (scopes, status string) {
+		t.Helper()
+		if err := store.db.QueryRow(`SELECT COALESCE(scopes, ''), COALESCE(status, '') FROM observer_neighbors WHERE neighbor_pubkey = ?`, pk).Scan(&scopes, &status); err != nil {
+			t.Fatalf("select observer_neighbors for %s: %v", pk, err)
+		}
+		return
+	}
+	if sc, st := row(keep); sc != worstNorm || st != "responded" {
+		t.Errorf("worst-case accepted scope stored as (%d bytes, %q), want it verbatim with 'responded'", len(sc), st)
+	}
+	if sc, st := row(longScope); sc != "" || st != "responded" {
+		t.Errorf("over-ceiling scopes stored as (%d bytes, %q), want ('', 'responded')", len(sc), st)
+	}
+	if sc, st := row(longStatus); sc != "#dk" || st != "" {
+		t.Errorf("oversized status stored as (%q, %d bytes), want ('#dk', '')", sc, len(st))
+	}
+}
