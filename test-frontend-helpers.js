@@ -5734,6 +5734,10 @@ console.log('\n=== region-filter.js: setSelected ===');
     removeEventListener: () => {},
   });
 
+  // region-filter.js escapes codes/labels with app.js's global escapeHtml
+  // (#333), as on the page, where app.js is always loaded.
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/area-filter.js');
   loadInCtx(ctx, 'public/region-filter.js');
 
