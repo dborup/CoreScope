@@ -1271,15 +1271,13 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "excludeTypes is not supported with nodes; use the single node filter")
 		return
 	}
-	// Multi-node filter: comma-separated pubkeys (Node.js parity)
+	// Multi-node filter: comma-separated pubkeys or names, bounded before any
+	// lookup, query or store lock (#335).
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
-		pubkeys := strings.Split(nodesParam, ",")
-		var cleaned []string
-		for _, pk := range pubkeys {
-			pk = strings.TrimSpace(pk)
-			if pk != "" {
-				cleaned = append(cleaned, pk)
-			}
+		cleaned, nodesErr := parsePacketNodeFilters(nodesParam)
+		if nodesErr != nil {
+			writeError(w, 400, nodesErr.Error())
+			return
 		}
 		order := "DESC"
 		if r.URL.Query().Get("order") == "asc" {
@@ -2116,6 +2114,21 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 		if err != nil || result == nil {
 			writeError(w, 404, "Not found")
 			return
+		}
+		// My Mesh opts into the existing node-detail estimator on the same
+		// health request. Keep the expensive route scan/cache out of default
+		// health calls and non-repeater cards, and apply its privacy gate first.
+		if wantsNodeInclude(r, "advertIntervals") {
+			node, _ := result["node"].(map[string]interface{})
+			if role, _ := node["role"].(string); strings.EqualFold(role, "repeater") {
+				hidden, hideErr := s.isIdentityHidden(r.Context(), pubkey)
+				if hideErr == nil && !hidden {
+					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
+						result["advertIntervals"] = adverts.intervals
+						result["advertRouteBackfill"] = adverts.counts.RouteMaskBackfill
+					}
+				}
+			}
 		}
 		writeJSON(w, result)
 		return

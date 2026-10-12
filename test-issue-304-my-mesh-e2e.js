@@ -73,20 +73,31 @@ async function render(page, responses, width, height) {
       names[2] = '<svg onload=alert(1)>';
       // Card roles are mixed (#304): a 51-observer repeater, a 1-observer
       // repeater, an observer-less repeater, a ≤3-observer repeater with a
-      // clipped name, and a NON-repeater with a clipped name.
+      // clipped name, and a NON-repeater with a clipped name. Repeaters 0–2
+      // carry advert-interval estimates with pending, complete and missing
+      // route-mask backfill; repeater 3 has no estimate at all (#352).
       const specs = [
-        { role: 'repeater', observers: names.map(observer_name => ({ observer_name })), activity: activity() },
-        { role: 'repeater', observers: [{ observer_name: 'One' }], activity: activity(false) },
-        { role: 'repeater', observers: [], activity: undefined },
+        { role: 'repeater', observers: names.map(observer_name => ({ observer_name })), activity: activity(),
+          backfill: { status: 'pending', remaining: 15 },
+          intervals: {
+            zero_hop: { status: 'estimated', interval_s: 7200, samples: 5, last_advert: end, confidence: 'medium' },
+            flood: { status: 'too_few', interval_s: null, samples: 2, last_advert: end },
+          } },
+        { role: 'repeater', observers: [{ observer_name: 'One' }], activity: activity(false),
+          backfill: { status: 'complete', remaining: 0 },
+          intervals: { zero_hop: { status: 'none_observed', samples: 0 }, flood: { status: 'irregular', samples: 5 } } },
+        { role: 'repeater', observers: [], activity: undefined,
+          intervals: { zero_hop: { status: 'estimated', interval_s: 3600, samples: 4 }, flood: { status: 'too_few', samples: 1 } } },
         { role: 'repeater', observers: [{ observer_name: CLIP }], activity: activity(false) },
         { role: 'client', observers: [{ observer_name: CLIP }, { observer_name: 'Shorty' }], activity: activity(false) },
         { role: 'repeater', observers: [{ observer_name: WIDE }], activity: activity(false) },
         { role: 'repeater', observers: SHORT_WIDE.map(observer_name => ({ observer_name })), activity: activity(false) },
         { role: 'client', observers: [{ observer_name: 'Shorty' }, ...SHORT_WIDE.map(observer_name => ({ observer_name }))], activity: activity(false) },
       ];
-      const data = Object.fromEntries(specs.map((spec, i) => [`/nodes/${KEYS[i]}/health`, {
+      const data = Object.fromEntries(specs.map((spec, i) => [`/nodes/${KEYS[i]}/health?include=advertIntervals`, {
         node: { name: `Node ${i}`, role: spec.role }, stats: { lastHeard: end, packetsToday: 2 },
         observers: spec.observers, recentPackets: [], activity24h: spec.activity,
+        advertRouteBackfill: spec.backfill, advertIntervals: spec.intervals,
       }]));
       await render(page, data, width, height);
       if (process.env.SCREENSHOT_PATH && width === 1280) {
@@ -109,6 +120,15 @@ async function render(page, responses, width, height) {
       assert.match(await cards.nth(1).locator('.mnc-spark').innerText(), /unavailable/i);
       assert.equal(await cards.nth(2).locator('.home-spark-bar').count(), 0);
       assert.match(await cards.nth(2).locator('.mnc-spark').innerText(), /unavailable/i);
+      assert.match(await large.locator('.mnc-advert-cadence').innerText(), /Zero-hop[\s\S]*≈ 2 h[\s\S]*Flood[\s\S]*not enough adverts/i);
+      assert.match(await large.locator('.mnc-advert-note').getAttribute('title'), /observed estimate.*not the configured timer/i);
+      assert.match(await large.locator('.mnc-advert-provisional').innerText(), /route classes provisional/i);
+      assert.match(await cards.nth(1).locator('.mnc-advert-cadence').innerText(), /not observed[\s\S]*irregular/i);
+      assert.equal(await cards.nth(1).locator('.mnc-advert-provisional').count(), 0);
+      assert.match(await cards.nth(2).locator('.mnc-advert-provisional').innerText(), /route classes provisional/i);
+      assert.match(await cards.nth(3).locator('.mnc-advert-cadence').innerText(), /unavailable/i);
+      assert.equal(await cards.nth(3).locator('.mnc-advert-provisional').count(), 0);
+      assert.equal(await cards.nth(4).locator('.mnc-advert-cadence').count(), 0, 'non-repeater card must not show advert intervals');
       const heights = await cards.evaluateAll(els => els.map(el => el.getBoundingClientRect().height));
       assert(heights[0] < 350, `repeater card too tall: ${heights[0]} at ${width}px`);
       const open = large.locator('.mnc-view-all');
@@ -190,6 +210,27 @@ async function render(page, responses, width, height) {
       });
       assert.equal(attrs.filter(a => a.title === QUOTE).length, 1, 'quoted name must render verbatim');
       assert.equal(await page.locator('[onmouseover]').count(), 0);
+
+      // #352: a card click opens health with the card's own opt-in URL, so
+      // the client cache answers it instead of a second request. The stub
+      // throws on any other route, which loadHealth shows as a failure.
+      await cards.nth(1).locator('.mnc-status-text').click();
+      const panel = page.locator('#homeHealth');
+      await page.waitForFunction(() => { const el = document.getElementById('homeHealth'); return el && !/Loading/.test(el.textContent); });
+      assert.equal(await panel.locator('.health-banner').count(), 1, `card click must render health from the card's request: ${await panel.innerText()}`);
+      assert.match(await panel.locator('.health-banner').innerText(), /Node 1/);
+      // A node outside My Mesh keeps the plain URL: no advert scan for it.
+      const routes = await page.evaluate(async (key) => {
+        const seen = [];
+        const real = api;
+        api = async (route, opts) => { seen.push(route); return real(route, opts); };
+        localStorage.setItem('meshcore-my-nodes', JSON.stringify(JSON.parse(localStorage.getItem('meshcore-my-nodes')).filter(n => n.pubkey !== key)));
+        document.querySelectorAll('.my-node-card')[1].querySelector('.mnc-status-text').click();
+        await new Promise(r => setTimeout(r, 0));
+        api = real;
+        return seen;
+      }, KEYS[1]);
+      assert.deepEqual(routes, [`/nodes/${KEYS[1]}/health`]);
 
       assert.deepEqual(errors, []);
       await context.close();
