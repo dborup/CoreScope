@@ -323,8 +323,12 @@ type observerIDDropThrottle struct {
 func (t *observerIDDropThrottle) record(tag, sampleID, reason string, now time.Time) {
 	slot := observerIDRejectSlot(reason)
 	// Bound the sample on the way IN, so the throttle never holds a full id
-	// between lines.
-	sample := observerIDLogSample(sampleID)
+	// between lines. strings.Clone is load-bearing, not decoration:
+	// observerIDLogSample returns a SLICE of the id, which in Go keeps the
+	// whole backing array (the id, and the MQTT topic string it was cut from)
+	// reachable for as long as the slice is retained. Copying is what actually
+	// makes the retained state the 8-rune prefix and nothing more.
+	sample := strings.Clone(observerIDLogSample(sampleID))
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
