@@ -1141,12 +1141,20 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, swaggerUIHTML)
 }
 
+// swaggerUIHTML pins swagger-ui-dist to an exact version and verifies it with
+// Subresource Integrity: a floating "@5" specifier would let whatever upstream
+// publishes next execute unverified on an operator's browser. The digests are
+// sha384 over the exact bytes served for that version; openapi_sri_test.go
+// holds the reviewed values and docs/browser-dependencies.md records how to
+// recompute them when the pin moves.
 const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>CoreScope API — Swagger UI</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css"
+    integrity="sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
+    crossorigin="anonymous">
   <style>
     html { box-sizing: border-box; overflow-y: scroll; }
     *, *:before, *:after { box-sizing: inherit; }
@@ -1156,7 +1164,9 @@ const swaggerUIHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui-bundle.js"
+    integrity="sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
+    crossorigin="anonymous"></script>
   <script>
     SwaggerUIBundle({
       url: '/api/spec',

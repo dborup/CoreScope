@@ -349,18 +349,24 @@ window.HopResolver = (function() {
     const result = {};
     for (let i = 0; i < hops.length; i++) {
       const hop = hops[i];
-      const pubkey = resolvedPath[i];
-      if (!pubkey) continue; // null = unresolved, leave for client-side fallback
-      // O(1) lookup via pubkeyIdx built during init()
-      const node = pubkeyIdx[pubkey.toLowerCase()] || null;
-      result[hop] = {
-        name: node ? node.name : pubkey.slice(0, 8),
-        pubkey: pubkey,
-        candidates: node ? [{ name: node.name, pubkey: pubkey, lat: node.lat, lon: node.lon }] : [],
-        conflicts: []
-      };
+      const entry = serverHopEntry(resolvedPath[i]);
+      if (entry) result[hop] = entry;
     }
     return result;
+  }
+
+  // A canonical answer belongs to one observation's hop POSITION, not a
+  // prefix. Expose the O(1) full-key lookup without resolveFromServer's map
+  // collapsing repeated prefixes. Null/malformed answers remain unresolved.
+  function serverHopEntry(pubkey) {
+    if (typeof pubkey !== 'string' || !pubkey) return null;
+    const node = pubkeyIdx[pubkey.toLowerCase()] || null;
+    return {
+      name: node ? node.name : pubkey.slice(0, 8),
+      pubkey: pubkey,
+      candidates: node ? [{ name: node.name, pubkey: pubkey, lat: node.lat, lon: node.lon }] : [],
+      conflicts: []
+    };
   }
 
   // #1864: O(1) node-name lookup by FULL pubkey (64-char hex). Returns the
@@ -372,5 +378,5 @@ window.HopResolver = (function() {
     return n && n.name ? n.name : null;
   }
 
-  return { init: init, resolve: resolve, resolveFromServer: resolveFromServer, ready: ready, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, nameForKey: nameForKey };
+  return { init: init, resolve: resolve, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, nameForKey: nameForKey };
 })();

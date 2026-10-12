@@ -167,14 +167,20 @@
     return DEFAULT_ID;
   }
 
-  function getActiveLightId() {
+  // A valid explicit choice can itself be the built-in fallback id. Keep
+  // that separate from an implicit fallback when resolving legacy URLs.
+  function getSelectedLightId() {
     try {
       var stored = window.localStorage && window.localStorage.getItem(STORAGE_KEY_LIGHT);
       if (_hasId(stored) && REGISTRY[stored].type === 'light') return stored;
     } catch (_) {}
     if (_cfg && _cfg.lightDefault && _hasId(_cfg.lightDefault)) return _cfg.lightDefault;
     if (_hasId(_serverDefaultLight)) return _serverDefaultLight;
-    return DEFAULT_ID_LIGHT;
+    return null;
+  }
+
+  function getActiveLightId() {
+    return getSelectedLightId() || DEFAULT_ID_LIGHT;
   }
   
   function setActive(id, type) {
@@ -236,6 +242,15 @@
    */
   function getTileSpec(type) {
     var isLight  = (type === 'light');
+    // #364 precedence: browser selection > configured provider default >
+    // legacy light URL > built-in fallback. roles.js records the actual
+    // loaded URL, not TILE_LIGHT's always-present built-in value. Unknown
+    // custom vendors keep the historical generic credit and no inversion;
+    // id:null means this is not a registry provider with vendor metadata.
+    var legacyLightUrl = window.MC_LIGHT_TILE_URL_OVERRIDE;
+    if (isLight && !getSelectedLightId() && typeof legacyLightUrl === 'string' && legacyLightUrl) {
+      return { id: null, url: legacyLightUrl, attribution: '© OpenStreetMap contributors', refUrl: null, maxZoom: BASE_STYLES[DEFAULT_ID_LIGHT].maxZoom, invertFilter: null };
+    }
     var id       = isLight ? getActiveLightId() : getActiveId();
     var fallback = isLight ? DEFAULT_ID_LIGHT : DEFAULT_ID;
     var p        = REGISTRY[id] || BASE_STYLES[id] || BASE_STYLES[fallback];

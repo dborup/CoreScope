@@ -8,8 +8,8 @@
  * loaded into a vm sandbox (no copies of production code):
  *
  *   1. Missing observer coordinates must not become a (0, 0) anchor.
- *   2. A hop the server resolved (resolved_path) keeps the server's node; the
- *      client heuristic must not overwrite it under the same observer.
+ *   2. A hop the server resolved (resolved_path) keeps that observation's
+ *      node at that hop position, without poisoning the shared prefix cache.
  *   3. The incremental path (WS/poll) resolves the same prefix separately for
  *      each observer instead of reusing another observer's bare-key entry.
  *   B. The hop:observer cache is bounded (AGENTS.md: no unbounded maps) and is
@@ -58,6 +58,11 @@ function loadPackets(nodes, observers) {
     performance: { now: () => Date.now() },
     location: { hash: '' },
     escapeHtml,
+    // App-level display helpers only; hop resolution/rendering remains real.
+    payloadTypeName: () => 'ADVERT', payloadTypeColor: () => 'info',
+    routeTypeName: () => 'FLOOD', transportBadge: () => '', scopeCellHtml: () => '',
+    getPathLenOffset: () => 1,
+    truncate: (s, n) => String(s).length > n ? String(s).slice(0, n) + '…' : String(s),
     registerPage() {}, onWS() {}, offWS() {}, debouncedOnWS: fn => fn,
     CLIENT_TTL: {},
     fetchAllNodes: () => Promise.resolve({ nodes }),
@@ -66,11 +71,13 @@ function loadPackets(nodes, observers) {
   };
   ctx.window.localStorage = ctx.localStorage;
   vm.createContext(ctx);
-  for (const f of ['payload-labels.js', 'packet-helpers.js', 'hop-resolver.js', 'hop-display.js', 'packets.js']) {
+  for (const f of ['payload-labels.js', 'packet-helpers.js', 'hop-resolver.js', 'hop-display.js', 'hop-filter.js', 'packets.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx, { filename: f });
     for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
   }
-  return ctx.window._packetsTestAPI;
+  const T = ctx.window._packetsTestAPI;
+  T._context = ctx;
+  return T;
 }
 
 // Three repeaters share the 1-byte prefix "ef". FAR-AWAY is listed first:
@@ -147,9 +154,8 @@ test('initial load: cacheResolvedPaths + resolveHopsForPackets keep the server n
   await T.cacheResolvedPaths([pkt]);
   await T.resolveHopsForPackets([pkt]);
   const entry = T._hopCacheGet('ef:OBS-A');
-  assert(entry && entry.pubkey === FAR.public_key,
-    'ef:OBS-A must be the server node FAR-AWAY; got ' + (entry && entry.name));
-  const html = T.renderPath(['ef'], 'OBS-A');
+  assert(!entry, 'canonical-only ef must not populate the heuristic cache');
+  const html = T.renderPath(['ef', 'c1'], 'OBS-A', {packet: pkt});
   assert(/FAR-AWAY/.test(html) && !/NEAR-ONE/.test(html), 'the rendered hop shows FAR-AWAY: ' + html);
 });
 
@@ -162,7 +168,7 @@ test('a hop the server left unresolved is still resolved and flagged', async () 
   await T.resolveHopsForPackets([pkt]);
   const c1 = T._hopCacheGet('c1:OBS-A');
   assert(c1 && c1.ambiguous, 'c1 (server null) is client-resolved and ambiguous');
-  const list = T.renderPath(['ef', 'c1'], 'OBS-A', { summary: true });
+  const list = T.renderPath(['ef', 'c1'], 'OBS-A', { summary: true, packet: pkt });
   const m = list.match(/hop-path-warn[^>]*>[\s\S]*?<\/svg>(\d+)<\/span>/);
   assert(m && m[1] === '1', 'the list summary counts exactly the one uncertain hop (c1); got ' + (m ? m[1] : 'no summary'));
 });
@@ -170,10 +176,11 @@ test('a hop the server left unresolved is still resolved and flagged', async () 
 test('incremental path: resolveIncomingHops keeps the server node too', async () => {
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
   await T.resolveHops(['00'], 'OBS-A'); // HopResolver ready, as after the initial load
-  await T.resolveIncomingHops([serverPacket()]);
+  const pkt = serverPacket();
+  await T.resolveIncomingHops([pkt]);
   const entry = T._hopCacheGet('ef:OBS-A');
-  assert(entry && entry.pubkey === FAR.public_key,
-    'ef:OBS-A must be the server node FAR-AWAY; got ' + (entry && entry.name));
+  assert(!entry, 'incremental canonical answer must not populate the heuristic cache');
+  assert(/FAR-AWAY/.test(T.renderPath(['ef', 'c1'], 'OBS-A', {packet: pkt})), 'incremental row keeps its canonical node');
 });
 
 section('#165 defect 3: the incremental path resolves per observer');
@@ -253,6 +260,17 @@ test('a timer runs between two observer groups', async () => {
     ', at timer ' + seenAt + ', after ' + after + ')');
 });
 
+test('large parse/grouping pass yields, and destroy cancels it before it can write', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_A]);
+  await T.resolveHops(['00'], 'OBS-A');
+  T._destroy();
+  let yielded = false;
+  setTimeout(() => { yielded = true; T._destroy(); }, 0);
+  await T.resolveHopsForPackets(Array.from({length: 30000}, (_, i) => livePacket(i, 'OBS-A')));
+  assert(yielded, 'collection must yield before scanning the entire page');
+  assert(T._hopCacheSize() === 0, 'cancelled collection cannot write into a remounted page cache');
+});
+
 section('#165 UI: the list summary survives a clipped path cell');
 
 test('the summary indicator comes before the hops, so overflow cannot clip it', async () => {
@@ -315,7 +333,7 @@ test('a grouped row as the server sends it (header resolved_path) is not flagged
     resolved_path: [FAR.public_key, C1A.public_key] };
   await T.cacheResolvedPaths([row]);
   await T.resolveHopsForPackets([row]);
-  const html = T.renderPath(['ef', 'c1'], 'OBS-I', { summary: true });
+  const html = T.renderPath(['ef', 'c1'], 'OBS-I', { summary: true, packet: row });
   assert(warnCount(html) === 0, 'both hops are server-resolved; got a summary: ' + html);
   assert(/FAR-AWAY/.test(html) && /C1-ALPHA/.test(html), 'the server names are shown: ' + html);
 });
@@ -337,46 +355,54 @@ function serverRows(n, obsIds) {
     path_json: '["ef","c1"]', resolved_path: [FAR.public_key, null] }));
 }
 
-test('cacheResolvedPaths yields while it walks a large page', async () => {
+// The old implementation rewrote canonical answers into shared prefix keys,
+// requiring periodic yields. Preparation now only initialises the node index;
+// these checks pin the corrected contract, not the incorrect cache poisoning.
+test('canonical preparation does not walk/rewrite a 30K page after the first answer', async () => {
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A, OBS_B]);
   await T.resolveHops(['00'], 'OBS-A'); // HopResolver ready
-  let ranDuring = false, done = false;
-  setTimeout(() => { ranDuring = !done; }, 0);
-  await T.cacheResolvedPaths(serverRows(5000, ['OBS-A', 'OBS-B']));
-  done = true;
-  assert(ranDuring, 'a timer queued before the call must run before it finishes');
+  const size = T._hopCacheSize();
+  const rows = serverRows(30000, ['OBS-A', 'OBS-B']);
+  Object.defineProperty(rows[1], 'resolved_path', {get() { throw new Error('unnecessary whole-page walk'); }});
+  await T.cacheResolvedPaths(rows);
+  assert(T._hopCacheSize() === size, 'canonical preparation must not write prefix cache entries');
 });
 
 test('a repeated server answer does not rewrite the cache entry', async () => {
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
-  await T.cacheResolvedPaths(serverRows(1, ['OBS-A']));
+  await T.resolveHops(['ef'], 'OBS-A');
   const first = T._hopCacheGet('ef:OBS-A'), bare = T._hopCacheGet('ef');
-  assert(first && first.pubkey === FAR.public_key, 'precondition: the server answer is cached');
+  await T.cacheResolvedPaths(serverRows(1, ['OBS-A']));
+  assert(first && first.pubkey === NEAR.public_key && first.ambiguous, 'precondition: heuristic pick is cached');
   await T.cacheResolvedPaths(serverRows(50, ['OBS-A']));
   assert(T._hopCacheGet('ef:OBS-A') === first && T._hopCacheGet('ef') === bare,
-    'the same answer for the same key is skipped, not written again per row');
+    'canonical answers never replace a cached heuristic, even when repeated');
 });
 
-test('a different server answer for the same key still replaces it', async () => {
+test('different canonical answers for the same prefix remain attached to their rows', async () => {
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A]);
-  await T.cacheResolvedPaths(serverRows(1, ['OBS-A']));
-  await T.cacheResolvedPaths([{ id: 7, hash: 'x7', observer_id: 'OBS-A', path_json: '["ef"]', resolved_path: [NEAR.public_key] }]);
-  const e = T._hopCacheGet('ef:OBS-A');
-  assert(e && e.pubkey === NEAR.public_key, 'ef:OBS-A follows the newer server answer; got ' + (e && e.name));
+  const a = serverRows(1, ['OBS-A'])[0];
+  const b = { id: 7, hash: 'x7', observer_id: 'OBS-A', path_json: '["ef"]', resolved_path: [NEAR.public_key] };
+  await T.cacheResolvedPaths([a, b]);
+  assert(/FAR-AWAY/.test(T.renderPath(['ef', 'c1'], 'OBS-A', {packet: a})), 'earlier row keeps FAR');
+  assert(/NEAR-ONE/.test(T.renderPath(['ef'], 'OBS-A', {packet: b})), 'later row keeps NEAR');
+  assert(!T._hopCacheGet('ef:OBS-A'), 'neither answer becomes prefix-wide certainty');
 });
 
-test('a server answer replaces an ambiguous client pick of the same node', async () => {
+test('a canonical answer overrides an ambiguous client pick only for its own row', async () => {
   // The heuristic already picked NEAR-ONE for OBS-I, flagged as ambiguous;
-  // the server then confirms NEAR-ONE. Same pubkey, but the entry must
-  // become the server's, or the list keeps warning about a resolved hop.
+  // the server then confirms NEAR-ONE for one observation. That observation
+  // becomes definite, but the cached heuristic must keep its uncertainty.
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_I]);
   await T.resolveHops(['ef'], 'OBS-I');
   const pick = T._hopCacheGet('ef:OBS-I');
   assert(pick && pick.ambiguous && pick.pubkey === NEAR.public_key, 'precondition: ambiguous client pick NEAR-ONE; got ' + (pick && pick.name));
-  await T.cacheResolvedPaths([{ id: 8, hash: 'x8', observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [NEAR.public_key] }]);
+  const p = { id: 8, hash: 'x8', observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [NEAR.public_key] };
+  await T.cacheResolvedPaths([p]);
   const e = T._hopCacheGet('ef:OBS-I');
-  assert(e && !e.ambiguous, 'ef:OBS-I is the server answer now, not the ambiguous pick');
-  assert(warnCount(T.renderPath(['ef'], 'OBS-I', { summary: true })) === 0, 'and the list no longer flags it');
+  assert(e === pick && e.ambiguous, 'heuristic cache keeps its original ambiguity');
+  assert(warnCount(T.renderPath(['ef'], 'OBS-I', { summary: true, packet: p })) === 0, 'canonical row is not flagged');
+  assert(warnCount(T.renderPath(['ef'], 'OBS-I', { summary: true })) === 1, 'a row without canonical evidence still is');
 });
 
 section('PR #185 review F2: probes for the two surviving mutants');
@@ -389,21 +415,23 @@ async function serverThenClient() {
   const b = { id: 2, hash: 'h2', observer_id: 'OBS-I', path_json: '["ef"]' };
   await T.cacheResolvedPaths([a, b]);
   await T.resolveHopsForPackets([a, b]);
-  return T;
+  return {T, a, b};
 }
 
 test('probe 1 (MD): the summary counts per observer, so OBS-I\'s ambiguous "ef" is flagged', async () => {
-  const T = await serverThenClient();
+  const {T, a} = await serverThenClient();
   assert(T._hopCacheGet('ef:OBS-I') && T._hopCacheGet('ef:OBS-I').ambiguous, 'precondition: ef:OBS-I is ambiguous');
   const html = T.renderPath(['ef'], 'OBS-I', { summary: true });
   assert(warnCount(html) === 1, 'expected one flagged hop for OBS-I: ' + html);
-  assert(warnCount(T.renderPath(['ef'], 'OBS-A', { summary: true })) === 0, 'and none for OBS-A, which has the server answer');
+  assert(warnCount(T.renderPath(['ef'], 'OBS-A', { summary: true, packet: a })) === 0, 'and none for the canonical OBS-A row');
 });
 
-test('probe 2 (MC): the client heuristic does not overwrite the server answer under the bare key', async () => {
-  const T = await serverThenClient();
+test('probe 2 (MC): the bare key is heuristic-only; the canonical row stays definite', async () => {
+  const {T, a} = await serverThenClient();
   const bare = T._hopCacheGet('ef');
-  assert(bare && bare.pubkey === FAR.public_key, 'bare "ef" stays the server node FAR-AWAY; got ' + (bare && bare.name));
+  assert(bare && bare.ambiguous && bare.pubkey === NEAR.public_key, 'bare key contains only the ambiguous heuristic');
+  const html = T.renderPath(['ef'], 'OBS-A', {summary: true, packet: a});
+  assert(/FAR-AWAY/.test(html) && !warnCount(html), 'canonical row is independent of the bare heuristic: ' + html);
 });
 
 section('PR #185 review F3: the cache cap and its eviction order are pinned');
@@ -420,7 +448,7 @@ test('a bench-sized working set (42 observers x 690 hops) fits without eviction'
   assert(T._hopCacheGet(hops[0] + ':W0') !== undefined, 'the first key written survives the load');
 });
 
-test('rewriting an entry refreshes it, so the server answer is not the next to be evicted', async () => {
+test('canonical answers survive eviction without refreshing shared heuristic entries', async () => {
   const T = loadPackets([FAR, NEAR], [OBS_A, OBS_B]);
   const max = T.HOP_CACHE_MAX;
   await T.resolveHops(['ef'], 'OBS-A'); // oldest: ef:OBS-A and ef
@@ -428,11 +456,12 @@ test('rewriting an entry refreshes it, so the server answer is not the next to b
   for (let i = 0; fill.length < (max - 2) / 2; i++) fill.push((0x100000 + i).toString(16));
   await T.resolveHops(fill, 'OBS-B'); // two keys each: the cache is now exactly full
   assert(T._hopCacheSize() === max, 'precondition: cache full, nothing evicted (' + T._hopCacheSize() + ')');
-  // The server's answer for OBS-A arrives and rewrites both oldest keys.
-  await T.cacheResolvedPaths([{ id: 9, hash: 'h9', observer_id: 'OBS-A', path_json: '["ef"]', resolved_path: JSON.stringify([FAR.public_key]) }]);
+  const p = { id: 9, hash: 'h9', observer_id: 'OBS-A', path_json: '["ef"]', resolved_path: JSON.stringify([FAR.public_key]) };
+  await T.cacheResolvedPaths([p]);
   await T.resolveHops(['abcdef', 'abcdf0'], 'OBS-B'); // four new keys evict four
   const e = T._hopCacheGet('ef:OBS-A');
-  assert(e && e.pubkey === FAR.public_key, 'ef:OBS-A (rewritten last) survives; got ' + (e ? e.name : 'evicted'));
+  assert(e === undefined, 'oldest heuristic still evicts: canonical preparation must not refresh it');
+  assert(/FAR-AWAY/.test(T.renderPath(['ef'], 'OBS-A', {packet: p})), 'canonical row survives cache eviction');
   assert(T._hopCacheGet(fill[0] + ':OBS-B') === undefined, 'the oldest untouched entry is the one evicted');
 });
 
@@ -489,14 +518,193 @@ test('destroy() during resolveHopsForPackets leaves the new cache empty', async 
   assert(T._hopCacheSize() === 0, 'the old job wrote ' + T._hopCacheSize() + ' entries into the new cache');
 });
 
-test('destroy() during cacheResolvedPaths stops it too', async () => {
+test('canonical preparation cannot repopulate the cache after destroy()', async () => {
   const T = loadPackets([FAR, NEAR, C1A, C1B], [OBS_A, OBS_B]);
   await T.resolveHops(['00'], 'OBS-A'); // HopResolver ready
   T._destroy();
   const job = T.cacheResolvedPaths(serverRows(5000, ['OBS-A', 'OBS-B']));
-  setTimeout(() => T._destroy(), 0); // left during the first yield
+  T._destroy();
   await job;
   assert(T._hopCacheSize() === 0, 'the old job wrote ' + T._hopCacheSize() + ' entries into the new cache');
+});
+
+section('Observation-specific canonical answers (review follow-up)');
+
+test('same observer: an unresolved row cannot borrow another row canonical answer', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  const a = { id: 701, observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [FAR.public_key] };
+  const b = { id: 702, observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [null] };
+  await T.cacheResolvedPaths([a, b]);
+  await T.resolveHopsForPackets([a, b]);
+  const definite = T.renderPath(['ef'], 'OBS-I', { summary: true, packet: a });
+  const uncertain = T.renderPath(['ef'], 'OBS-I', { summary: true, packet: b });
+  assert(/FAR-AWAY/.test(definite) && warnCount(definite) === 0, 'canonical row must show FAR without warning: ' + definite);
+  assert(warnCount(uncertain) === 1, 'server-null row must remain ambiguous: ' + uncertain);
+});
+
+test('same observer: canonical rows retain different nodes regardless of processing order', async () => {
+  for (const reverse of [false, true]) {
+    const T = loadPackets([FAR, NEAR], [OBS_I]);
+    const a = { id: 703, observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [FAR.public_key] };
+    const b = { id: 704, observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [NEAR.public_key] };
+    await T.cacheResolvedPaths(reverse ? [b, a] : [a, b]);
+    await T.resolveHopsForPackets([a, b]);
+    assert(/FAR-AWAY/.test(T.renderPath(['ef'], 'OBS-I', {packet: a})), 'first row lost FAR');
+    assert(/NEAR-ONE/.test(T.renderPath(['ef'], 'OBS-I', {packet: b})), 'second row lost NEAR');
+  }
+});
+
+test('repeated prefix at two positions keeps the two canonical nodes', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  const p = { observer_id: 'OBS-I', path_json: '["ef","ef"]', resolved_path: [FAR.public_key, NEAR.public_key] };
+  await T.cacheResolvedPaths([p]);
+  await T.resolveHopsForPackets([p]);
+  const html = T.renderPath(['ef', 'ef'], 'OBS-I', {packet: p});
+  assert(/FAR-AWAY[\s\S]*NEAR-ONE/.test(html), 'path positions collapsed: ' + html);
+});
+
+test('missing, explicit null and invalid canonical shapes use uncertain heuristic only', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  const good = { observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [FAR.public_key] };
+  await T.cacheResolvedPaths([good]);
+  for (const rp of [undefined, null, [], [null], '[null]', '[', {key: FAR.public_key}, [42]]) {
+    const p = { observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: rp };
+    await T.resolveHopsForPackets([p]);
+    const html = T.renderPath(['ef'], 'OBS-I', {summary: true, packet: p});
+    assert(warnCount(html) === 1, 'invalid/missing canonical must not borrow certainty (' + JSON.stringify(rp) + '): ' + html);
+  }
+});
+
+test('same-row canonical replacement is visible without a cache reset', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  const p = { observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [FAR.public_key] };
+  await T.cacheResolvedPaths([p]);
+  await T.resolveHopsForPackets([p]);
+  assert(/FAR-AWAY/.test(T.renderPath(['ef'], 'OBS-I', {packet: p})), 'precondition FAR');
+  p.resolved_path = JSON.stringify([NEAR.public_key]);
+  await T.resolveIncomingHops([p]);
+  assert(/NEAR-ONE/.test(T.renderPath(['ef'], 'OBS-I', {packet: p})), 'updated canonical must be re-read');
+  p.resolved_path = [null];
+  await T.resolveIncomingHops([p]);
+  assert(warnCount(T.renderPath(['ef'], 'OBS-I', {summary: true, packet: p})) === 1, 'updated null must restore uncertainty');
+});
+
+test('grouped header, expanded children and flat rows consume their own canonical paths', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  const a = { id: 707, hash: 'group-707', observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [FAR.public_key], count: 2 };
+  const b = { id: 708, hash: a.hash, observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [NEAR.public_key] };
+  a._children = [a, b];
+  await T.cacheResolvedPaths([a, b]);
+  await T.resolveHopsForPackets([a, b]);
+  T._setExpanded(a.hash, true);
+  const html = T.buildGroupRowHtml(a);
+  const rows = html.match(/<tr[\s\S]*?<\/tr>/g) || [];
+  assert(rows.length === 3, 'expected group plus two children');
+  assert(/FAR-AWAY/.test(rows[0]) && /FAR-AWAY/.test(rows[1]) && /NEAR-ONE/.test(rows[2]), 'group/children borrowed answer: ' + html);
+  assert(/FAR-AWAY/.test(T.buildFlatRowHtml(a)) && /NEAR-ONE/.test(T.buildFlatRowHtml(b)), 'flat rows borrowed answer');
+});
+
+test('sorting group children keeps the header canonical path and parsed cache aligned', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  for (const answer of [NEAR.public_key, null]) {
+    const group = {hash: 'sort-' + answer, observer_id: 'OBS-I', path_json: '["ef","ef"]',
+      resolved_path: [FAR.public_key, FAR.public_key], count: 2};
+    T._context.getParsedPath(group);
+    T._context.getResolvedPath(group);
+    const first = {id: 720, observer_id: 'OBS-I', observer_name: 'station', timestamp: '2026-01-01T00:00:00Z',
+      path_json: '["ef"]', resolved_path: [answer]};
+    const second = {...group, id: 721, observer_name: 'station', timestamp: '2026-01-01T00:01:00Z'};
+    group._children = [second, first];
+    await T.resolveHopsForPackets(group._children);
+    T.sortGroupChildren(group);
+    const html = T.buildGroupRowHtml(group);
+    assert(!/FAR-AWAY/.test(html), 'sorted header retained old canonical answer: ' + html);
+    assert(/NEAR-ONE/.test(html) && warnCount(html) === (answer ? 0 : 1), 'sorted header certainty must follow first child: ' + html);
+    assert(T._context.getParsedPath(group).length === 1, 'sorting did not clear parent parsed path');
+  }
+});
+
+test('hiding a 1-byte hop preserves original canonical indices for later/repeated hops', async () => {
+  const T = loadPackets([FAR, NEAR, C1A], [OBS_I]);
+  const p = { observer_id: 'OBS-I', path_json: ['c1', 'ef00', 'ef00'],
+    resolved_path: [C1A.public_key, NEAR.public_key, FAR.public_key] };
+  await T.resolveHopsForPackets([p]);
+  T._context.window.MC_setHide1ByteHops(true);
+  for (const summary of [false, true]) {
+    const html = T.renderPath(p.path_json, 'OBS-I', {packet: p, summary});
+    assert(/NEAR-ONE[\s\S]*FAR-AWAY/.test(html) && !/C1-ALPHA/.test(html), 'filtered path shifted an answer: ' + html);
+    assert(!warnCount(html), 'canonical multi-byte hops must remain definite');
+  }
+  assert(p.path_json.length === 3 && p.resolved_path[0] === C1A.public_key, 'filter must not mutate stored data');
+  T._context.window.MC_setHide1ByteHops(false);
+  assert(/C1-ALPHA[\s\S]*NEAR-ONE[\s\S]*FAR-AWAY/.test(T.renderPath(p.path_json, 'OBS-I', {packet: p})), 'toggle-off restores original positions');
+});
+
+test('API array/string shapes and absent child answers never inherit parent certainty', async () => {
+  for (const text of [false, true]) {
+    const T = loadPackets([FAR, NEAR], [OBS_I]);
+    const parent = { observer_id: 'OBS-I', path_json: text ? '["ef"]' : ['ef'],
+      resolved_path: text ? JSON.stringify([FAR.public_key]) : [FAR.public_key] };
+    // Parse before spreading, reproducing the actual parent cache inheritance.
+    T._context.getResolvedPath(parent);
+    T._context.getParsedPath(parent);
+    const own = T.observationPacket(parent, {id: 709, path_json: '["ef"]', resolved_path: [NEAR.public_key]});
+    const missing = T.observationPacket(parent, {id: 710, path_json: '["ef"]'});
+    const explicitNull = T.observationPacket(parent, {id: 711, path_json: '["ef"]', resolved_path: null});
+    await T.resolveIncomingHops([parent, own, missing, explicitNull]);
+    assert(/FAR-AWAY/.test(T.buildFlatRowHtml(parent)), 'parent keeps its canonical answer');
+    assert(/NEAR-ONE/.test(T.buildFlatRowHtml(own)), 'child has its own answer');
+    for (const p of [missing, explicitNull]) {
+      const html = T.renderPath(['ef'], 'OBS-I', {packet: p, summary: true});
+      assert(warnCount(html) === 1 && !/FAR-AWAY/.test(html), 'absent child answer inherits parent certainty: ' + html);
+    }
+  }
+});
+
+test('canonical answers are fresh after page destroy/remount and heuristic cache eviction', async () => {
+  const T = loadPackets([FAR, NEAR], [OBS_I]);
+  const a = {observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [FAR.public_key]};
+  await T.resolveIncomingHops([a]);
+  T._destroy();
+  const b = {observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [NEAR.public_key]};
+  const c = {observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [null]};
+  await T.resolveIncomingHops([b, c]);
+  assert(/FAR-AWAY/.test(T.buildFlatRowHtml(a)) && /NEAR-ONE/.test(T.buildFlatRowHtml(b)), 'remount overwrote row answers');
+  assert(warnCount(T.renderPath(['ef'], 'OBS-I', {packet: c, summary: true})) === 1, 'remount null answer must be uncertain');
+});
+
+test('30K realistic rows use linear positional lookups, bounded heuristic cache and constant requests', async () => {
+  let seed = 363;
+  const rnd = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  const nodes = Array.from({length: 2000}, (_, i) => ({
+    public_key: (i % 256).toString(16).padStart(2, '0') + i.toString(16).padStart(62, '0'),
+    name: 'TEST-' + i, role: 'repeater', lat: 51 + rnd(), lon: 3 + rnd(),
+  }));
+  const observers = Array.from({length: 42}, (_, i) => ({id: 'LOAD-' + i, iata: 'XYZ', lat: 51 + rnd(), lon: 3 + rnd()}));
+  let expectedLookups = 0, totalHops = 0;
+  const rows = Array.from({length: 30000}, (_, i) => {
+    const width = rnd() < 0.85 ? 1 : (rnd() < 0.7 ? 2 : 3);
+    const keys = Array.from({length: Math.floor(rnd() * 9)}, () => nodes[Math.floor(rnd() * nodes.length)].public_key);
+    const rp = keys.map(k => { if (rnd() < 0.8) { expectedLookups++; return k; } return null; });
+    totalHops += keys.length;
+    return {id: i, observer_id: observers[i % 42].id, path_json: JSON.stringify(keys.map(k => k.slice(0, width * 2))), resolved_path: JSON.stringify(rp)};
+  });
+  const T = loadPackets(nodes, observers), ctx = T._context;
+  ctx.console = {log() {}, warn() {}, error: console.error};
+  let requests = 0, lookups = 0;
+  const fetchNodes = ctx.fetchAllNodes, api = ctx.api, lookup = ctx.HopResolver.serverHopEntry;
+  ctx.fetchAllNodes = (...args) => { requests++; return fetchNodes(...args); };
+  ctx.api = (...args) => { requests++; return api(...args); };
+  ctx.HopResolver.serverHopEntry = key => { lookups++; return lookup(key); };
+  const start = performance.now();
+  await T.cacheResolvedPaths(rows);
+  await T.resolveHopsForPackets(rows);
+  for (const p of rows) T.renderPath(ctx.getParsedPath(p), p.observer_id, {packet: p, summary: true});
+  assert(lookups === expectedLookups, 'exactly one lookup per canonical position: ' + lookups + ' != ' + expectedLookups);
+  assert(requests === 3, 'node/observer/IATA initialization only, not per-row requests: ' + requests);
+  assert(T._hopCacheSize() <= T.HOP_CACHE_MAX, 'heuristic cache cap holds on real-size load');
+  console.log('    30K bounded work: ' + totalHops + ' hops, ' + lookups + ' canonical lookups, ' + requests + ' requests, ' +
+    T._hopCacheSize() + ' cache entries, ' + Math.round(performance.now() - start) + ' ms (informational)');
 });
 
 (async () => {
