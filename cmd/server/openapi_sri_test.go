@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -95,21 +96,27 @@ func TestSwaggerUIAssetsMatchReviewedPins(t *testing.T) {
 	if len(tags) != len(wantSwaggerUIAssets) {
 		t.Fatalf("swaggerUIHTML has %d external subresources, want %d (update wantSwaggerUIAssets together with the page)", len(tags), len(wantSwaggerUIAssets))
 	}
-	for i, want := range wantSwaggerUIAssets {
-		attrs := tags[i]
-		if attrs["__tag"] != want.tag {
-			t.Errorf("subresource %d: tag = %q, want %q", i, attrs["__tag"], want.tag)
+	// Matched by URL, not by position: reordering <head> is a legitimate edit
+	// and must not fail this test, while a changed version or digest must.
+	byURL := map[string]map[string]string{}
+	for _, attrs := range tags {
+		url := attrs["src"]
+		if attrs["__tag"] == "link" {
+			url = attrs["href"]
+		}
+		byURL[url] = attrs
+	}
+	for _, want := range wantSwaggerUIAssets {
+		attrs, ok := byURL[want.url]
+		if !ok {
+			t.Errorf("swaggerUIHTML does not load %s (it loads %v)", want.url, sortedKeys(byURL))
 			continue
 		}
-		gotURL := attrs["src"]
-		if want.tag == "link" {
-			gotURL = attrs["href"]
-		}
-		if gotURL != want.url {
-			t.Errorf("subresource %d: url = %q, want %q", i, gotURL, want.url)
+		if attrs["__tag"] != want.tag {
+			t.Errorf("%s: tag = %q, want %q", want.url, attrs["__tag"], want.tag)
 		}
 		if attrs["integrity"] != want.integrity {
-			t.Errorf("subresource %d (%s): integrity = %q, want %q", i, want.url, attrs["integrity"], want.integrity)
+			t.Errorf("%s: integrity = %q, want %q", want.url, attrs["integrity"], want.integrity)
 		}
 	}
 }
@@ -122,4 +129,13 @@ func TestSwaggerUIHTMLHasNoUnpinnedFloatingSpecifier(t *testing.T) {
 	if m := floating.FindAllString(swaggerUIHTML, -1); len(m) > 0 {
 		t.Errorf("floating CDN specifier(s) in swaggerUIHTML: %v", m)
 	}
+}
+
+func sortedKeys(m map[string]map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
