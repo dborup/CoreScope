@@ -222,6 +222,52 @@ preferences and deep links cannot enable it against the server policy. A
 Customizer display preference is deferred to a later milestone and must
 remain subordinate to this operator setting.
 
+### Large region lists in an external file (`hashRegionsPath`)
+
+`hashRegions` lives inline in `config.json`. On a real deployment that is a
+list of ~1,100 names in the middle of hand-edited operational settings and
+credentials, which makes the file hard to review and diff. The optional
+`hashRegionsPath` key moves just that list out:
+
+```json
+{
+  "hashRegions": ["#belgium", "#eu"],
+  "hashRegionsPath": "hash-regions.json"
+}
+```
+
+`hash-regions.json` is a plain JSON array of names:
+
+```json
+["dk", "dk-aarhus", "#dk-fyn"]
+```
+
+Rules:
+
+- **Opt-in.** Omitted or empty means inline `hashRegions` only, exactly as
+  before. There is no auto-discovered default file, so a file that merely
+  happens to sit next to `config.json` is never read.
+- **Union, not replacement.** The effective set is the inline list plus the
+  file, normalized the same way (whitespace trimmed, a leading `#` added,
+  blank entries dropped) and deduplicated after normalization. `dk` and
+  `#dk` are the same scope; `#dk` and `#DK` are **not** — the key is
+  `SHA256` of the exact name, so case matters.
+- **Both processes, one loader.** The ingestor (which derives one HMAC key
+  per region) and the server (unknown scopes in Tools → Observer Neighbors,
+  `unusedRegions` in `/api/scope-stats`) read the file through the same
+  loader, so they cannot disagree about which scopes are configured.
+- **Relative paths resolve against the directory holding `config.json`**,
+  never the process working directory — the two processes are started from
+  different places, and anchoring at the config file is what makes them
+  agree. Absolute paths are used as-is.
+- **Env override.** `HASH_REGIONS_PATH` wins over the config key.
+- **Failures are loud but survivable.** If the path is set and the file is
+  missing or is not a JSON array of strings, the error is logged and
+  startup falls back to the inline `hashRegions` list. On a SIGHUP reload
+  the previous keys are kept instead (see below).
+
+`areas` — the largest block in `config.json` — has no equivalent yet.
+
 ### Reloading config changes without a restart (SIGHUP)
 
 Most `config.json` changes require a container restart to take effect. **`hashChannels`** and **`hashRegions`** are the exception — the ingestor can reload just these two settings live:
@@ -230,14 +276,14 @@ Most `config.json` changes require a container restart to take effect. **`hashCh
 docker exec corescope kill -HUP $(docker exec corescope pgrep corescope-ingestor)
 ```
 
-This re-reads `config.json` and derives fresh channel-decryption and region-scope keys in place — no restart, no dropped MQTT connections. The ingestor logs the result:
+This re-reads `config.json` — and the external `hashRegionsPath` file it names, if any — and derives fresh channel-decryption and region-scope keys in place — no restart, no dropped MQTT connections. The ingestor logs the result:
 
 ```
 [hot-reload] SIGHUP received, reloading hashChannels/hashRegions from /app/config.json
 [hot-reload] reloaded 1415 channel key(s), 1098 region key(s) from /app/config.json
 ```
 
-If the edited `config.json` is malformed, the reload is aborted and logged, and the ingestor keeps its previous, working keys rather than going dark.
+If the edited `config.json` is malformed, the reload is aborted and logged, and the ingestor keeps its previous, working keys rather than going dark. The same holds for the `hashRegionsPath` file: a malformed or missing region-name file aborts the reload and keeps every previous key, so a half-saved file cannot blank out a working ingestor.
 
 Why this matters more than it sounds: restarting the whole container to add a single hashtag channel or region also resets the in-memory relay/scope analytics (Analytics → Scopes tab — Repeaters by Region, Bridge Repeaters, etc.), which take real time to rebuild from live traffic after a cold start. SIGHUP lets you add a channel or region without paying that cost.
 

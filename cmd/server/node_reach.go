@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"sort"
@@ -307,6 +308,12 @@ type reachState struct {
 	// sf dedups concurrent cold-cache requests for the same key so N
 	// simultaneous callers run the scan + attribution once, not N times.
 	sf singleflight.Group
+
+	// cold bounds how many *distinct* cold keys may scan the database at the
+	// same time, so a burst of different nodes/windows cannot occupy the
+	// whole read pool and starve unrelated endpoints (#341). sf covers one
+	// key; this covers the set of them. Zero value is ready to use.
+	cold reachColdLimiter
 
 	// lastSeenBlacklistGen is the BlacklistGeneration() value that the cache
 	// was last reconciled with. When the live generation moves past this
@@ -616,6 +623,16 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		if e, ok := s.reachCacheGet(cacheKey); ok {
 			return e, nil
 		}
+		// Only now is the work known to be genuinely cold (cache rechecked
+		// inside the singleflight slot), so this is where the cross-key cold
+		// build limit is taken — never on a warm hit, and once per coalesced
+		// herd rather than once per waiter (#341). The deferred release
+		// covers every exit: success, compute error, marshal error, a
+		// cancelled request and a panic alike.
+		if aErr := s.reach.cold.acquire(r.Context()); aErr != nil {
+			return nil, aErr
+		}
+		defer s.reach.cold.release()
 		resp, ok, cErr := s.computeNodeReach(r.Context(), pubkey, days)
 		if cErr != nil {
 			// Real backend failure (e.g. DB scan exploded) — propagate so the
@@ -648,6 +665,12 @@ func (s *Server) handleNodeReach(w http.ResponseWriter, r *http.Request) {
 		return e, nil
 	})
 	if err != nil {
+		// Shed cold work rather than queue it behind a saturated limiter:
+		// 429 + Retry-After, nothing cached, next request recomputes (#341).
+		if errors.Is(err, errReachColdBusy) {
+			writeReachColdBusy429(w)
+			return
+		}
 		writeError(w, 500, "reach computation failed")
 		return
 	}

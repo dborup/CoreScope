@@ -102,6 +102,10 @@ jobs:
           (cd internal/channelregistry && go test ./...)
           (cd internal/dbschema && go test ./...)
           (cd internal/brokerurl && go test ./...)
+          # internal/regions is its own module: the server/ingestor steps
+          # above compile it but never run its tests, and it now holds the
+          # hashRegions/hashRegionsPath loader both processes share (#360).
+          (cd internal/regions && go test ./...)
 
       # internal/anomaly is its own module (not wired into any binary), so the
       # server/ingestor steps above do not reach it. No -fuzz and no -bench:
@@ -447,6 +451,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-147-packets-url-obs-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-165-grouped-hop-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-packet-detail-sender-hash-size-obs-e2e.js 2>&1 | tee -a e2e-output.txt
+          BASE_URL=http://localhost:13581 node test-issue-353-path-hash-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-242-type-exclusions-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -525,6 +530,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-1279-legend-p2-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1799-label-vocab-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-home-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-issue-304-my-mesh-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 node test-issue-2027-my-mesh-node-page-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-path-inspector-coverage-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1206-resize-observer-leak-e2e.js 2>&1 | tee -a e2e-output.txt

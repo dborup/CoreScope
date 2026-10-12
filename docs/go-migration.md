@@ -110,6 +110,7 @@ Both engines read `cacheTTL` from config. Go serves the same values via `/api/co
 | `dbPath` | SQLite path (also settable via `DB_PATH` env var) | `data/meshcore.db` |
 | `logLevel` | Ingestor log verbosity | (unset) |
 | `channelKeysPath` | Path to channel keys file | `channel-rainbow.json` next to config |
+| `hashRegionsPath` | Optional external JSON array of region-scope names, merged with inline `hashRegions` (also settable via `HASH_REGIONS_PATH` env var). A relative path resolves against the directory holding `config.json`. See [deployment.md](deployment.md#large-region-lists-in-an-external-file-hashregionspath) | (unset — inline `hashRegions` only) |
 
 These are optional and safe to add without breaking Node.js (Node ignores unknown fields).
 

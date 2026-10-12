@@ -65,6 +65,17 @@ type Config struct {
 	ValidateSignatures *bool                   `json:"validateSignatures,omitempty"`
 	DB                 *DBConfig               `json:"db,omitempty"`
 
+	// HashRegionsPath optionally points at a JSON array of region-scope
+	// names merged with the inline HashRegions list above (#360). A real
+	// deployment configures ~1100 regions: a large, machine-maintained
+	// block sitting in the middle of hand-edited settings, which this
+	// moves out without changing the inline format for anyone else.
+	// Env override: HASH_REGIONS_PATH. A relative path resolves against
+	// the directory holding this config file, so the server resolves the
+	// same path to the same file. Only read when set — there is no
+	// auto-discovered default. See internal/regions.Load.
+	HashRegionsPath string `json:"hashRegionsPath,omitempty"`
+
 	// ObserverIATAWhitelist restricts which observer IATA regions are processed.
 	// When non-empty, only observers whose IATA code (from the MQTT topic) matches
 	// one of these entries are accepted. Case-insensitive. An empty list means all

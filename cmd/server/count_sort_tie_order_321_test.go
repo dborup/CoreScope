@@ -148,7 +148,7 @@ func TestNodeHealthObserverRowsTieOrder_321(t *testing.T) {
 	s := newHealthTieStore(t, pubkey, counts)
 
 	assertSameEveryRun(t, "GetNodeHealth observers observer_id", want, func() interface{} {
-		res, err := s.GetNodeHealth(pubkey)
+		res, err := s.GetNodeHealth(pubkey, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("GetNodeHealth: %v", err)
 		}

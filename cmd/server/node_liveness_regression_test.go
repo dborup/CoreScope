@@ -32,7 +32,7 @@ func TestNodeHealth_LastAdvertIsOwnAdvertNotTraffic(t *testing.T) {
 				packets = append([]*StoreTx{advert}, packets...)
 			}
 			store.byNode[key] = packets
-			health, err := store.GetNodeHealth(key)
+			health, err := store.GetNodeHealth(key, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,7 +217,7 @@ func snapshotNodeActivity(t *testing.T, store *PacketStore, key string) activity
 		bulkRelay = RepeaterRelayInfo{WindowHours: 24}
 	}
 	snap.bulkRelay = bulkRelay
-	health, err := store.GetNodeHealth(key)
+	health, err := store.GetNodeHealth(key, time.Now().UTC())
 	if err != nil || health == nil {
 		t.Fatalf("health for %s: %v %v", key, health, err)
 	}

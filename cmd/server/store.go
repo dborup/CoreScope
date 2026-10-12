@@ -543,6 +543,19 @@ type PacketStore struct {
 	// perf payload for prod observability.
 	loadCoverageRatio float64
 
+	// loadWindowTotalInDB: row count LoadChunked actually targeted — i.e.
+	// COUNT(*) honouring the SAME retention/hot-start filter the chunk loop
+	// applied, not the whole table. #351 F1: RunStartupLoad's
+	// hotStartupHours==0 branch divides loadedCount by THIS (not the
+	// unfiltered table count) so loadCoverageRatio means "fraction of the
+	// RETAINED rows that are in memory", matching docs/api-spec.md and the
+	// bg-loader path. -1 when the count could not be taken.
+	// CONCURRENCY: written once by LoadChunked and read once by
+	// RunStartupLoad on the SAME goroutine (RunStartupLoad calls LoadChunked
+	// synchronously, then reads this after it returns), so no lock is
+	// needed; no other goroutine touches it.
+	loadWindowTotalInDB int64
+
 	// Async hash migration state: set after migrateContentHashesAsync completes.
 	hashMigrationComplete atomic.Bool
 
@@ -10515,7 +10528,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 // --- Subpaths Analytics ---
 
 // GetNodeHealth returns health info for a single node using in-memory data.
-func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, error) {
+// #351 F5: now is injected so tests can pin the rolling 24h activity window
+// without a second untyped-map-returning helper (AGENTS.md: the untyped-payload
+// count must not grow). Production callers pass time.Now().UTC(); see routes.go.
+func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]interface{}, error) {
 	// Fetch node info from DB (fast single-row lookup)
 	node, err := s.db.GetNodeByPubkey(pubkey)
 	if err != nil {
@@ -10538,12 +10554,20 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 		}
 	}
 
+	// #351 F4: snapshot the bgErrMu-guarded coverage ratio BEFORE taking
+	// s.mu so this reader honours bgErrMu's "no s.mu needed" contract
+	// (store.go:530) instead of being the first site to nest s.mu → bgErrMu.
+	s.bgErrMu.RLock()
+	loadCoverage := s.loadCoverageRatio
+	s.bgErrMu.RUnlock()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	packets := s.byNode[pubkey]
 	activityKey := strings.ToLower(pubkey)
-	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	todayStart := now.UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now, loadCoverage))
 
 	var packetsToday int
 	var snrSum float64
@@ -10560,6 +10584,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	}{}
 
 	for _, pkt := range packets {
+		activity.add(pkt)
 		totalObservations += pkt.ObservationCount
 		if pkt.FirstSeen > todayStart {
 			packetsToday++
@@ -10694,6 +10719,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			AvgHops: &avgHops, LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 		},
 		"recentPackets": recentPackets,
+		"activity24h":   activity,
 	}, nil
 }
 

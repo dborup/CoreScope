@@ -334,6 +334,13 @@
     if (n.hash_size && Number(n.hash_size) >= 2) {
       html += ` <span class="badge multibyte-badge" title="Node advertises multibyte hash path (firmware Feat1/Feat2)">Multibyte: ${Number(n.hash_size)}-byte</span>`;
     }
+    // #353: a 1-byte advertised path hash collides often -- shared amber
+    // recommendation badge (app.js). The standalone badge spells the
+    // recommendation out as its visible label (recInLabel), so it needs no
+    // separate sr-only clause.
+    if (isPathHashSizeWarn(n.hash_size)) {
+      html += ' ' + renderPathHashSize(1, 'Recommended: 2- or 3-byte path hash', { block: 'node-path-hash-badge', cls: 'badge', recInLabel: true });
+    }
     if (n.hash_size_inconsistent) {
       html += ` <a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> variable hash size</a>`;
     }

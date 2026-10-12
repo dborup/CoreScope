@@ -66,10 +66,15 @@
 
   // The header records the sender's choice even before a flood has relayed.
   // Observation-path evidence is retained internally, but is not the label.
+  // #353: a 1-byte width renders the shared warning variant (app.js). Guarded
+  // like senderSizeFromRawHex below: app.js always loads first in the page.
   function renderSenderPathHashBadge(message) {
+    if (typeof renderPathHashSize !== 'function') return '';
     var size = Number(message && message.senderPathHashSize);
-    if (size !== 1 && size !== 2 && size !== 3) return '';
-    return '<span class="ch-path-hash-badge" title="Path hash size encoded in the sender’s packet header">Sent with: ' + size + '-byte</span>';
+    return renderPathHashSize(size, 'Sent with: ' + size + '-byte', {
+      block: 'ch-path-hash-badge',
+      title: 'Path hash size encoded in the sender’s packet header',
+    });
   }
 
   function senderSizeFromRawHex(rawHex) {

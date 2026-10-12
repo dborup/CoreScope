@@ -21,7 +21,6 @@ import (
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/prunequeue"
-	regionutil "github.com/meshcore-analyzer/regions"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -1272,15 +1271,13 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "excludeTypes is not supported with nodes; use the single node filter")
 		return
 	}
-	// Multi-node filter: comma-separated pubkeys (Node.js parity)
+	// Multi-node filter: comma-separated pubkeys or names, bounded before any
+	// lookup, query or store lock (#335).
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
-		pubkeys := strings.Split(nodesParam, ",")
-		var cleaned []string
-		for _, pk := range pubkeys {
-			pk = strings.TrimSpace(pk)
-			if pk != "" {
-				cleaned = append(cleaned, pk)
-			}
+		cleaned, nodesErr := parsePacketNodeFilters(nodesParam)
+		if nodesErr != nil {
+			writeError(w, 400, nodesErr.Error())
+			return
 		}
 		order := "DESC"
 		if r.URL.Query().Get("order") == "asc" {
@@ -1399,8 +1396,9 @@ func (s *Server) handleBatchObservations(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Hashes []string `json:"hashes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
+	// #334: cap the body in bytes before parsing it. maxHashes below is a
+	// cardinality limit that only applies once the JSON is already decoded.
+	if !decodeLimitedJSONBody(w, r, maxBatchObservationsBodyBytes, &body) {
 		return
 	}
 	const maxHashes = 200
@@ -1538,8 +1536,8 @@ func (s *Server) handleDecode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Hex string `json:"hex"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "invalid JSON body")
+	// #334: cap the body in bytes before parsing it.
+	if !decodeLimitedJSONBody(w, r, maxDecodeBodyBytes, &body) {
 		return
 	}
 	hexStr := strings.TrimSpace(body.Hex)
@@ -2112,10 +2110,25 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.store != nil {
-		result, err := s.store.GetNodeHealth(pubkey)
+		result, err := s.store.GetNodeHealth(pubkey, time.Now().UTC())
 		if err != nil || result == nil {
 			writeError(w, 404, "Not found")
 			return
+		}
+		// My Mesh opts into the existing node-detail estimator on the same
+		// health request. Keep the expensive route scan/cache out of default
+		// health calls and non-repeater cards, and apply its privacy gate first.
+		if wantsNodeInclude(r, "advertIntervals") {
+			node, _ := result["node"].(map[string]interface{})
+			if role, _ := node["role"].(string); strings.EqualFold(role, "repeater") {
+				hidden, hideErr := s.isIdentityHidden(r.Context(), pubkey)
+				if hideErr == nil && !hidden {
+					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
+						result["advertIntervals"] = adverts.intervals
+						result["advertRouteBackfill"] = adverts.counts.RouteMaskBackfill
+					}
+				}
+			}
 		}
 		writeJSON(w, result)
 		return
@@ -3630,13 +3643,12 @@ func (s *Server) handleAllObserverNeighbors(w http.ResponseWriter, r *http.Reque
 		}
 		entries = filtered
 	}
-	var hashRegions []string
-	if s.cfg != nil {
-		hashRegions = s.cfg.HashRegions
-	}
+	// EffectiveHashRegions, not cfg.HashRegions: a scope configured only
+	// via hashRegionsPath is configured, and must not be reported as one
+	// the deployment does not know about (#360).
 	writeJSON(w, map[string]interface{}{
 		"neighbors":     entries,
-		"unknownScopes": computeUnknownScopes(entries, hashRegions),
+		"unknownScopes": computeUnknownScopes(entries, s.cfg.EffectiveHashRegions()),
 	})
 }
 
@@ -4332,8 +4344,11 @@ func (s *Server) handleScopeStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.cfg != nil && len(s.cfg.HashRegions) > 0 {
-		configured := regionutil.NormalizeNames(s.cfg.HashRegions)
+	// Already normalized and deduplicated, and it includes the names from
+	// hashRegionsPath (#360) — a file-only config has no inline entries at
+	// all, so gating on len(cfg.HashRegions) would skip region stats
+	// entirely.
+	if configured := s.cfg.EffectiveHashRegions(); len(configured) > 0 {
 		resp.ConfiguredRegions = len(configured)
 		if matched, err := s.db.GetMatchedRegionNames(); err == nil {
 			unused := make([]string, 0, len(configured))
@@ -4828,7 +4843,7 @@ func (s *Server) handlePruneGeoFilterStatus(w http.ResponseWriter, r *http.Reque
 // NaN/Inf; bufferKm finite, non-negative, ≤ 20000 km. Concurrent PUTs are
 // serialized via s.saveMu so they cannot race on the .tmp file.
 func (s *Server) handlePutConfigGeoFilter(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB cap
+	r.Body = http.MaxBytesReader(w, r.Body, geoFilterBodyLimit)
 
 	var body struct {
 		Polygon  [][2]float64 `json:"polygon"`

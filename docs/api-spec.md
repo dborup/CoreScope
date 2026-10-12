@@ -29,6 +29,7 @@
 - [GET /api/packets](#get-apipackets)
 - [GET /api/packets/timestamps](#get-apipacketstimestamps)
 - [GET /api/packets/:id](#get-apipacketsid)
+- [POST /api/packets/observations](#post-apipacketsobservations)
 - [POST /api/decode](#post-apidecode)
 - [GET /api/observers](#get-apiobservers)
 - [GET /api/observers/:id](#get-apiobserversid)
@@ -186,8 +187,53 @@ They return `total` (the unfiltered/filtered count before pagination).
 - `400` — Bad request (missing/invalid params)
 - `404` — Resource not found, or an unrecognized `/api` or `/api/*` path
 - `405` — A known `/api/*` path called with an unsupported method; the response carries an `Allow` header listing the methods that path does support
+- `413` — Request body over the byte cap on `POST /api/decode` or `POST /api/packets/observations` (other capped endpoints report an over-cap body as `400`; see below)
 
 `HEAD` is accepted on every path that accepts `GET` and returns the same status and headers without a body.
+
+#### Request-body byte caps
+
+Every endpoint that takes a request body bounds it — with one exception, noted
+below — and every bound is enforced by the application itself, not by a reverse
+proxy in front of it. **Neither the enforcement nor the status code is
+uniform**, so the table gives both per endpoint:
+
+| Endpoint | Cap | Enforced on | Over the cap |
+|---|---|---|---|
+| `POST /api/decode` | 4096 bytes | bytes received, before parsing | `413` `{"error":"request body too large (max 4096 bytes)"}`, `application/json` |
+| `POST /api/packets/observations` | 65536 bytes | bytes received, before parsing | `413` `{"error":"request body too large (max 65536 bytes)"}`, `application/json` |
+| `POST /api/paths/inspect` | 4096 bytes | the streaming decoder | `400` `{"error":"invalid JSON"}`, served as `text/plain` |
+| `POST /api/channel-proposals` | 1024 bytes | the streaming decoder | `400` `{"error":"invalid request body"}`, `application/json` |
+| `PUT /api/config/geo-filter` (API key) | 1048576 bytes (1 MiB) | the streaming decoder | `400` `{"error":"invalid JSON"}`, `application/json` |
+
+**Enforced on bytes received, before parsing** (the two rows issue #334
+covers) is the strict reading: the verdict depends only on how many bytes
+arrived. It does not depend on the body's shape — bulk sitting in an unknown
+field, or in a string the endpoint never reads, is rejected the same way — and
+it does not depend on `Content-Length`, so a chunked request that declares no
+length, or one that understates it, is cut off at the same byte count. A body
+of exactly the cap is accepted; one byte more is `413`, and the server stops
+reading there instead of buffering the rest.
+
+**Enforced on the streaming decoder** is weaker: the limit wraps the body and
+the JSON decoder reads through it, so the limit only bites when the JSON
+*value* runs past it. A body that is over the limit only because of data that
+follows the value is still accepted — for example a 6019-byte
+`POST /api/paths/inspect` body whose JSON object ends at byte 19 answers `200`
+despite the 4096-byte limit. When the limit does bite, the decoder reports a
+parse failure, which is why these rows answer `400` rather than `413`.
+
+Three gaps are known and deliberately not changed by #334, because each is an
+API-visible change with its own clients to check:
+
+- the three streaming rows are not enforced on bytes received;
+- they are not aligned on `413` + the shared error shape;
+- `POST /api/admin/prune-geo-filter?confirm=true` (API key) decodes a JSON body
+  with **no limit at all**.
+
+Caps are deliberately well above anything a legitimate client sends (see each
+endpoint below), so a per-endpoint semantic limit — such as the 200-hash limit
+on `POST /api/packets/observations` — is what a real client meets first.
 
 ---
 
@@ -786,9 +832,48 @@ Detailed health information for a single node.
       // Packet fields (see Packet Object) minus `observations`
       "observation_count": number    // added for display
     }
-  ]
+  ],
+  "activity24h": {
+    "windowStart": string (ISO UTC), // inclusive: request time minus 24 hours
+    "windowEnd": string (ISO UTC),   // exclusive: request time
+    "buckets": [                    // always 24 rolling one-hour buckets, oldest first
+      { "start": string (ISO UTC), "end": string (ISO UTC), "count": number }
+    ],
+    "coverageStart": string (ISO UTC) | null,
+    "complete": boolean
+  }
 }
 ```
+
+`activity24h.count` counts unique transmissions associated with this node in
+the in-memory node index, using each transmission's `first_seen` time. Multiple
+observations of one transmission count once. Association can come from node
+identity or a resolved path; it does not prove that a repeater forwarded the
+packet. Bucket boundaries are half-open `[start, end)` and move with request
+time rather than aligning to clock hours. A malformed `first_seen` is ignored.
+`complete` is true only when successful loading reports 100% of the retained
+transmissions in memory and the retention/index bounds cover the whole 24-hour
+window. The server's general background-load “done” threshold of 90% is not
+enough for this field. If `complete` is false, zero-count
+buckets before `coverageStart` represent unknown history rather than confirmed
+silence. A null `coverageStart` means coverage cannot be established (for
+example during startup or after a failed load).
+
+With `?include=advertIntervals`, repeater health may also return
+`advertIntervals` in the same shape as the node-detail `include=advertRoutes`
+response: `{ "window": 20, "flood": AdvertIntervalEstimate,
+"zero_hop": AdvertIntervalEstimate }`, plus `advertRouteBackfill` as a
+`RouteMaskBackfillStatus` (`status`: `pending`, `backfilling`, or `complete`;
+`remaining`: number or null). Both fields are absent by default, for
+non-repeaters, and for hidden identities. If the backfill status is anything
+other than `complete`, including absent in an older response, route classes
+and their estimated intervals are provisional. The server reuses the bounded,
+per-node cached advert-route scan; this is an opt-in because a cold scan of a
+node with many adverts is comparatively expensive. `interval_s` is an
+**estimate** from at most the newest 20 distinct adverts in each route class,
+not the repeater's configured interval. Missed receptions and limited history
+can skew it. `null` plus `status` (`none_observed`, `too_few`, or `irregular`)
+means no defensible estimate, not proof the device's timer is disabled.
 
 ### Response `404`
 
@@ -1033,6 +1118,25 @@ Returned when the node is unknown or hidden (see Visibility).
 { "error": "Not found" }
 ```
 
+### Response `429`
+
+Returned when the report is **cold** (not cached) and too many other cold
+reports are already scanning the database. At most two cold reports compute at
+once, so a burst of different nodes/windows cannot occupy the read pool and
+slow unrelated endpoints; a cold request queues briefly for a slot and is only
+shed if the limit is still saturated. Warm (cached) responses are never
+affected, and concurrent requests for the *same* node and window still share
+one computation. Nothing is cached for a shed request — retry after
+`Retry-After` seconds and it recomputes normally.
+
+```
+Retry-After: 2
+```
+
+```json
+{ "error": "reach is busy computing other reports", "retryAfter": 2 }
+```
+
 ### Response `500`
 
 Returned when the scan fails, or when the live name lookup for visibility
@@ -1134,7 +1238,7 @@ Paginated packet (transmission) list with filtering.
 | `since`      | string | —       | ISO timestamp lower bound                          |
 | `until`      | string | —       | ISO timestamp upper bound                          |
 | `node`       | string | —       | Filter by node pubkey                              |
-| `nodes`      | string | —       | Comma-separated pubkeys (multi-node filter)        |
+| `nodes`      | string | —       | Comma-separated pubkeys or node names (multi-node filter); see below |
 | `order`      | string | `DESC`  | Sort direction: `asc` or `desc`                    |
 | `groupByHash`| string | —       | Set to `"true"` for grouped response               |
 | `expand`     | string | —       | Set to `"observations"` to include observation arrays |
@@ -1151,6 +1255,17 @@ An overlapping `type` inclusion and exclusion returns no packets for that type.
 Malformed values, repeated `excludeTypes` parameters, and a nonempty exclusion
 combined with `nodes` return HTTP 400. Use `node` for a supported single-node
 combination. All other existing filters continue to compose normally.
+
+`nodes` matches each entry exactly (case-sensitive) against a node's public
+key or name. Whitespace around entries is trimmed, empty entries are dropped
+and duplicates collapse, before any node lookup. The list accepts at most 50
+distinct entries, 100 comma-separated entries (empty and duplicate ones
+included) and 4096 characters; a list over any of these bounds returns HTTP
+400 before any lookup, query or packet-store lock (#335). 50 full 64-character
+public keys separated by `, ` fit in 3,298 characters. A list of only empty
+entries returns an empty page, as before. Results, ordering (`order`) and
+pagination (`limit`, `offset`) are unchanged for lists within the bounds. No
+UI page sends `nodes`; the Packets page uses the single `node` filter.
 
 The Packets page refetches when its type selection or Hide CONTROL checkbox
 changes, so excluded traffic cannot fill the fetched page. Live updates are
@@ -1205,6 +1320,17 @@ packet link remains visible.
   "offset":  number
 }
 ```
+
+### Response `400` (nodes=... over its bounds)
+
+Shared error shape; the message names the bound that was exceeded:
+
+```json
+{ "error": "nodes accepts at most 50 distinct entries" }
+```
+
+The other two messages are `nodes accepts at most 100 comma-separated entries`
+and `nodes must be at most 4096 characters`.
 
 ---
 
@@ -1304,6 +1430,12 @@ Decode a raw packet without storing it.
 }
 ```
 
+Capped at **4096 bytes** before parsing (see
+[Request-body byte caps](#request-body-byte-caps)). The largest frame the decoder
+can accept is 1 header + 4 transport codes + 1 path-length byte +
+`MAX_PATH_SIZE` (64) path bytes + `MAX_PACKET_PAYLOAD` (184) payload bytes =
+254 bytes, i.e. 508 hex characters, i.e. a ~520-byte body — roughly 7x headroom.
+
 ### Response `200`
 
 ```jsonc
@@ -1320,6 +1452,62 @@ Decode a raw packet without storing it.
 
 ```json
 { "error": "hex is required" }
+```
+
+### Response `413`
+
+```json
+{ "error": "request body too large (max 4096 bytes)" }
+```
+
+---
+
+## POST /api/packets/observations
+
+Return the stored observations for several packets in one call. Used by the
+packets table when a non-observer sort needs the child observations of the
+groups it is about to render.
+
+### Request Body
+
+```jsonc
+{
+  "hashes": string[]         // required — content hashes, at most 200
+}
+```
+
+Capped at **65536 bytes** before parsing (see
+[Request-body byte caps](#request-body-byte-caps)). A full 200-hash request
+serializes to ~3.8 KB, so the byte cap leaves roughly 17x headroom and the
+200-hash limit below is what a client actually meets first.
+
+### Response `200`
+
+```jsonc
+{
+  "results": {
+    "<hash>": [ Observation, ... ]   // one entry per requested hash
+  }
+}
+```
+
+An empty `hashes` array returns `{"results": {}}`. A hash with no stored
+observations gets an empty array.
+
+### Response `400`
+
+```json
+{ "error": "too many hashes (max 200)" }
+```
+
+```json
+{ "error": "invalid JSON body" }
+```
+
+### Response `413`
+
+```json
+{ "error": "request body too large (max 65536 bytes)" }
 ```
 
 ---

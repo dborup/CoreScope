@@ -22,6 +22,16 @@ type routeMeta struct {
 	// generic {"type":"object"} placeholder. Use schemaRef(...) to point
 	// at a named entry in components/schemas (see componentSchemas).
 	Response map[string]interface{} `json:"-"`
+	// Errors documents the non-200 status codes a route answers with, on top
+	// of the 400/404/405 the whole API shares (see info.description). Bodies
+	// are always the ApiError shape writeError produces (#266).
+	Errors []routeError `json:"-"`
+}
+
+// routeError is one documented non-200 response of a route (#334).
+type routeError struct {
+	Status      string // HTTP status code, e.g. "413"
+	Description string
 }
 
 type paramMeta struct {
@@ -66,13 +76,23 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "timeRange", Description: "Time range filter (e.g. 1h, 24h, 7d)", Type: "string"},
 				{Name: "search", Description: "Full-text search", Type: "string"},
 				{Name: "groupByHash", Description: "Group duplicate packets by hash", Type: "boolean"},
+				{Name: "nodes", Description: "Comma-separated public keys or node names (multi-node filter; exact, case-sensitive match). Entries are trimmed, empty entries are dropped and duplicates collapse. At most 50 distinct entries, 100 comma-separated entries and 4096 characters (#335); over any bound is 400 before any lookup. An all-empty list returns no packets.", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid filter: malformed or repeated excludeTypes, excludeTypes combined with nodes, or a nodes list over its bounds (50 distinct entries, 100 comma-separated entries, 4096 characters; #335)."},
 			}},
-		"GET /api/packets/{id}":          {Summary: "Get packet detail", Tag: "packets"},
-		"GET /api/packets/timestamps":    {Summary: "Get packet timestamp ranges", Tag: "packets"},
-		"POST /api/packets/observations": {Summary: "Batch submit observations", Description: "Submit multiple observer sightings for existing packets.", Tag: "packets"},
+		"GET /api/packets/{id}":       {Summary: "Get packet detail", Tag: "packets"},
+		"GET /api/packets/timestamps": {Summary: "Get packet timestamp ranges", Tag: "packets"},
+		"POST /api/packets/observations": {Summary: "Get observations for several packets", Description: "Returns the stored observations for up to 200 content hashes in one call: {\"hashes\": [...]} in, {\"results\": {\"<hash>\": [...]}} out. More than 200 hashes is 400. The request body is capped at 65536 bytes before it is parsed (#334) — a larger body is 413 regardless of its shape or of whether it declares a Content-Length, and the byte cap leaves roughly 17x headroom over a full 200-hash request, so the 200-hash limit is what a client actually meets first.", Tag: "packets",
+			Errors: []routeError{
+				{Status: "413", Description: "Request body over 65536 bytes (#334). Enforced before parsing, on bytes received, so it also applies to a chunked request with no Content-Length."},
+			}},
 
 		// Decode
-		"POST /api/decode": {Summary: "Decode a raw packet", Description: "Decodes a hex-encoded packet without storing it.", Tag: "packets"},
+		"POST /api/decode": {Summary: "Decode a raw packet", Description: "Decodes a hex-encoded packet without storing it. The request body is capped at 4096 bytes before it is parsed (#334) — a larger body is 413 regardless of its shape or of whether it declares a Content-Length. The largest frame the decoder can accept (header + transport codes + MAX_PATH_SIZE path bytes + MAX_PACKET_PAYLOAD payload bytes) is a ~520-byte body, so the cap leaves roughly 7x headroom.", Tag: "packets",
+			Errors: []routeError{
+				{Status: "413", Description: "Request body over 4096 bytes (#334). Enforced before parsing, on bytes received, so it also applies to a chunked request with no Content-Length."},
+			}},
 
 		// Nodes
 		"GET /api/nodes": {Summary: "List nodes", Description: "Returns all known mesh nodes with status and metadata. Repeater/room rows carry the issue #672 usefulness metrics (traffic_share_score, bridge_score, coverage_score, redundancy_score), the composite usefulness_score + usefulness_grade, and relay-activity counters. See the Node schema.", Tag: "nodes",
@@ -232,6 +252,28 @@ type openAPISchema struct {
 
 func openAPIRef(name string) *openAPISchema {
 	return &openAPISchema{Ref: "#/components/schemas/" + name}
+}
+
+// openAPIResponse / openAPIMediaType are typed OpenAPI 3.0 response objects.
+// They marshal to the same JSON as the map literals used for the shared 200
+// response; routeMeta.Errors uses them instead of new untyped map literals
+// (#1383).
+type openAPIResponse struct {
+	Description string                      `json:"description"`
+	Content     map[string]openAPIMediaType `json:"content,omitempty"`
+}
+
+type openAPIMediaType struct {
+	Schema *openAPISchema `json:"schema,omitempty"`
+}
+
+// jsonErrorResponse is an application/json response carrying the shared
+// ApiError body.
+func jsonErrorResponse(description string) openAPIResponse {
+	return openAPIResponse{
+		Description: description,
+		Content:     map[string]openAPIMediaType{"application/json": {Schema: openAPIRef("ApiError")}},
+	}
 }
 
 // nodeAdvertRouteSchemas documents the #2073 node-detail advert route fields
@@ -859,6 +901,11 @@ func componentSchemas() map[string]interface{} {
 			},
 		},
 	}
+	schemas["ApiError"] = &openAPISchema{
+		Type:        "object",
+		Description: "The shared error body every /api/* error answer uses (#266): a single human-readable message. Status codes carry the machine-readable meaning, not this string.",
+		Properties:  map[string]*openAPISchema{"error": {Type: "string"}},
+	}
 	for name, schema := range nodeAdvertRouteSchemas() {
 		schemas[name] = schema
 	}
@@ -925,6 +972,22 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 			respSchema = meta.Response
 		}
 
+		responses := map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "Success",
+				"content": map[string]interface{}{
+					"application/json": map[string]interface{}{
+						"schema": respSchema,
+					},
+				},
+			},
+		}
+		if hasMeta {
+			for _, e := range meta.Errors {
+				responses[e.Status] = jsonErrorResponse(e.Description)
+			}
+		}
+
 		// Build operation
 		op := map[string]interface{}{
 			"summary": func() string {
@@ -933,16 +996,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 				}
 				return ri.path
 			}(),
-			"responses": map[string]interface{}{
-				"200": map[string]interface{}{
-					"description": "Success",
-					"content": map[string]interface{}{
-						"application/json": map[string]interface{}{
-							"schema": respSchema,
-						},
-					},
-				},
-			},
+			"responses": responses,
 		}
 
 		if hasMeta {
@@ -1026,7 +1080,7 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 		"openapi": "3.0.3",
 		"info": map[string]interface{}{
 			"title":       "CoreScope API",
-			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). HEAD is served on every GET path.",
+			"description": "MeshCore network analyzer — packet capture, node tracking, and mesh analytics. An unrecognized /api or /api/* path returns 404; a documented path called with an unsupported method returns 405 with an Allow header. Both are JSON (#233). POST /api/decode and POST /api/packets/observations cap their request body in bytes before parsing it and answer 413 with the ApiError body when it is over the cap (#334); the other body-taking endpoints bound their body on the JSON decoder instead, which is weaker and reports an over-cap body as 400 — docs/api-spec.md lists every cap, how it is enforced, and its status. HEAD is served on every GET path.",
 			"version":     version,
 			"license": map[string]interface{}{
 				"name": "MIT",
@@ -1087,12 +1141,20 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, swaggerUIHTML)
 }
 
+// swaggerUIHTML pins swagger-ui-dist to an exact version and verifies it with
+// Subresource Integrity: a floating "@5" specifier would let whatever upstream
+// publishes next execute unverified on an operator's browser. The digests are
+// sha384 over the exact bytes served for that version; openapi_sri_test.go
+// holds the reviewed values and docs/browser-dependencies.md records how to
+// recompute them when the pin moves.
 const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>CoreScope API — Swagger UI</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css"
+    integrity="sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
+    crossorigin="anonymous">
   <style>
     html { box-sizing: border-box; overflow-y: scroll; }
     *, *:before, *:after { box-sizing: inherit; }
@@ -1102,7 +1164,9 @@ const swaggerUIHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui-bundle.js"
+    integrity="sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
+    crossorigin="anonymous"></script>
   <script>
     SwaggerUIBundle({
       url: '/api/spec',
