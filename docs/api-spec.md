@@ -1238,7 +1238,7 @@ Paginated packet (transmission) list with filtering.
 | `since`      | string | —       | ISO timestamp lower bound                          |
 | `until`      | string | —       | ISO timestamp upper bound                          |
 | `node`       | string | —       | Filter by node pubkey                              |
-| `nodes`      | string | —       | Comma-separated pubkeys (multi-node filter)        |
+| `nodes`      | string | —       | Comma-separated pubkeys or node names (multi-node filter); see below |
 | `order`      | string | `DESC`  | Sort direction: `asc` or `desc`                    |
 | `groupByHash`| string | —       | Set to `"true"` for grouped response               |
 | `expand`     | string | —       | Set to `"observations"` to include observation arrays |
@@ -1255,6 +1255,17 @@ An overlapping `type` inclusion and exclusion returns no packets for that type.
 Malformed values, repeated `excludeTypes` parameters, and a nonempty exclusion
 combined with `nodes` return HTTP 400. Use `node` for a supported single-node
 combination. All other existing filters continue to compose normally.
+
+`nodes` matches each entry exactly (case-sensitive) against a node's public
+key or name. Whitespace around entries is trimmed, empty entries are dropped
+and duplicates collapse, before any node lookup. The list accepts at most 50
+distinct entries, 100 comma-separated entries (empty and duplicate ones
+included) and 4096 characters; a list over any of these bounds returns HTTP
+400 before any lookup, query or packet-store lock (#335). 50 full 64-character
+public keys separated by `, ` fit in 3,298 characters. A list of only empty
+entries returns an empty page, as before. Results, ordering (`order`) and
+pagination (`limit`, `offset`) are unchanged for lists within the bounds. No
+UI page sends `nodes`; the Packets page uses the single `node` filter.
 
 The Packets page refetches when its type selection or Hide CONTROL checkbox
 changes, so excluded traffic cannot fill the fetched page. Live updates are
@@ -1309,6 +1320,17 @@ packet link remains visible.
   "offset":  number
 }
 ```
+
+### Response `400` (nodes=... over its bounds)
+
+Shared error shape; the message names the bound that was exceeded:
+
+```json
+{ "error": "nodes accepts at most 50 distinct entries" }
+```
+
+The other two messages are `nodes accepts at most 100 comma-separated entries`
+and `nodes must be at most 4096 characters`.
 
 ---
 

@@ -76,6 +76,10 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "timeRange", Description: "Time range filter (e.g. 1h, 24h, 7d)", Type: "string"},
 				{Name: "search", Description: "Full-text search", Type: "string"},
 				{Name: "groupByHash", Description: "Group duplicate packets by hash", Type: "boolean"},
+				{Name: "nodes", Description: "Comma-separated public keys or node names (multi-node filter; exact, case-sensitive match). Entries are trimmed, empty entries are dropped and duplicates collapse. At most 50 distinct entries, 100 comma-separated entries and 4096 characters (#335); over any bound is 400 before any lookup. An all-empty list returns no packets.", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid filter: malformed or repeated excludeTypes, excludeTypes combined with nodes, or a nodes list over its bounds (50 distinct entries, 100 comma-separated entries, 4096 characters; #335)."},
 			}},
 		"GET /api/packets/{id}":       {Summary: "Get packet detail", Tag: "packets"},
 		"GET /api/packets/timestamps": {Summary: "Get packet timestamp ranges", Tag: "packets"},
