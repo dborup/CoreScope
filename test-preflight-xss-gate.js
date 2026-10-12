@@ -55,6 +55,12 @@ const cases = [
     label: 'innerHTML `…title="${observer_name}"…` (N4: interp in quoted attr)' },
   { file: 'bad-14-attr-interp-singlequote.js', expect: 1,
     label: "innerHTML `…title='${observer_name}'…` (N4: single-quoted attr)" },
+  { file: 'bad-15-attr-concat.js',      expect: 1,
+    label: `innerHTML '…title="' + o.name + '"…' (F4: concat into quoted attr)` },
+  { file: 'bad-16-attr-concat-doublequote-pieces.js', expect: 1,
+    label: "innerHTML \"…title='\" + observer_name + \"'…\" (F4: mirror of bad-15)" },
+  { file: 'bad-17-url-in-string.js',    expect: 1,
+    label: `innerHTML '<a href="https://…">' + o.name (F4: // inside a string is not a comment)` },
   // good fixtures: gate MUST pass (exit 0)
   { file: 'good-1-escaped.js', expect: 0, label: 'escapeHtml(${name}) wrapper' },
   { file: 'good-2-tested.js',  expect: 0, label: 'unescaped but DOM-grep-tested in same PR',
@@ -68,6 +74,10 @@ const cases = [
     tests: ['test-good-4.js'] },
   { file: 'good-5-attr-interp-escaped.js', expect: 0,
     label: 'escapeHtml(${observer_name}) inside a quoted attr (N4 fix no-FP)' },
+  { file: 'good-6-attr-concat-escaped.js', expect: 0,
+    label: 'escaped concat into quoted attrs + URL string (F4 no-FP)' },
+  { file: 'good-7-literal-dollar-brace.js', expect: 0,
+    label: "plain '…${name}…' string literal is not an interpolation (F4 no-FP)" },
 ];
 
 let failed = 0;
