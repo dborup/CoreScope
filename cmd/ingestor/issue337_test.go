@@ -621,3 +621,83 @@ func TestUpdateNodeConfiguredScope_OrderingUnderFutureBound(t *testing.T) {
 		t.Fatalf("after newer report: %v / %v, want '#se' at 12:10", sc, at)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Review round 2 (PR #374): pins for behaviour the first round left untested.
+// ---------------------------------------------------------------------------
+
+// The timestamp line names WHICH fault it saw: a far-future stamp (a wrong
+// clock) and an unparseable or missing one (a broken serializer) are
+// different observer problems, and the reason word is the only thing that
+// tells an operator which one to chase.
+func TestHandleNeighborsReport_TimestampRejectReasonIsLogged(t *testing.T) {
+	cases := []struct {
+		name, ts, want, notWant string
+	}{
+		{"far future", "9999-12-31T23:59:59Z", "far-future timestamp", "invalid/missing"},
+		{"just past the window", "2026-10-08T12:15:01Z", "far-future timestamp", "invalid/missing"},
+		{"unparseable", "not-a-time", "invalid/missing timestamp", "far-future"},
+		{"naive (zone-less)", "2026-10-08T11:00:00", "invalid/missing timestamp", "far-future"},
+		{"missing", "", "invalid/missing timestamp", "far-future"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pinReportClock(t, issue337Now)
+			store := openNeighborsStore(t)
+			buf := captureLogs(t)
+
+			handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{"timestamp": tc.ts})
+
+			out := buf.String()
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("log does not name %q for timestamp %q:\n%s", tc.want, tc.ts, out)
+			}
+			if strings.Contains(out, tc.notWant) {
+				t.Fatalf("log names %q for timestamp %q, want only %q:\n%s", tc.notWant, tc.ts, tc.want, out)
+			}
+		})
+	}
+}
+
+// origin_id must be a FULL node public key before either self write. A node
+// row keyed by a short value is the case that tells this apart from the
+// pre-#337 rule (lowercase + non-empty): that rule would match the row and
+// write self evidence under it.
+func TestHandleNeighborsReport_OriginIDMustBeFullKey(t *testing.T) {
+	pinReportClock(t, issue337Now)
+	store := openNeighborsStore(t)
+	const short = "aabbccdd"
+	seedNode(t, store, short)
+
+	handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+		"timestamp": "2026-10-08T11:00:00Z",
+		"origin_id": strings.ToUpper(short),
+		"self":      map[string]interface{}{"scopes": "dk", "default_scope": "dk"},
+	})
+
+	if sc, at := configuredScope(t, store, short); sc.Valid || at.Valid {
+		t.Errorf("short origin_id wrote configured_scope %v / %v, want both NULL", sc, at)
+	}
+	if sc, at := configuredScopeInactive(t, store, short); sc.Valid || at.Valid {
+		t.Errorf("short origin_id wrote inactive configured_scope %v / %v, want both NULL", sc, at)
+	}
+	if sc, at := defaultScopeConfirmed(t, store, short); sc.Valid || at.Valid {
+		t.Errorf("short origin_id wrote default_scope %v / %v, want both NULL", sc, at)
+	}
+
+	// Positive control: the same report under a full key is applied, so the
+	// refusal above is the key check and not some other gate.
+	full := "a337000000000000000000000000000000000000000000000000000000000030"
+	seedNode(t, store, full)
+	handleNeighborsReport(store, "test", "obs-337", map[string]interface{}{
+		"timestamp": "2026-10-08T11:00:00Z",
+		"origin_id": strings.ToUpper(full),
+		"self":      map[string]interface{}{"scopes": "dk", "default_scope": "dk"},
+	})
+	if sc, _ := configuredScope(t, store, full); sc.String != "#dk" {
+		t.Errorf("full-key origin_id configured_scope = %v, want '#dk'", sc)
+	}
+	if sc, _ := defaultScopeConfirmed(t, store, full); sc.String != "#dk" {
+		t.Errorf("full-key origin_id default_scope = %v, want '#dk'", sc)
+	}
+}
