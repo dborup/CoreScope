@@ -13,17 +13,25 @@
 # We accept these as residual risk in exchange for a regex-only gate that
 # runs in <5s on every PR and surfaces actionable file:line evidence.
 #
-# #351 N4 / #333: the gate now flags an unescaped node-controlled ${…}
-# interpolation inside a QUOTED ATTRIBUTE of a template literal on a sink
-# line (e.g. `el.innerHTML = \`<span title="${o.observer_name}">\``), which
-# previously slipped through because the quote-stripper erased the
-# interpolation before the template-literal handler ran (see short_str
-# below). Residual limitation: a plain (non-template) double/single-quoted
-# string that contains a LITERAL "${allowlisted}" sequence on a sink line
-# is now also preserved and could be flagged; such literals are rare and a
-# sink-line false positive is cheap to wrap or opt out. The cross-line
-# `grid.innerHTML = cards.join('')` indirection (O9) is still NOT covered —
-# that needs the sink and the interpolation on the same line.
+# #351 N4 / #333: the gate flags an unescaped node-controlled field inside
+# a QUOTED ATTRIBUTE on a sink line, in both the template form
+# (`el.innerHTML = \`<span title="${o.observer_name}">\``) and the concat
+# form (`el.innerHTML = '<span title="' + o.name + '">'`), because strings,
+# templates and // comments are parsed in one left-to-right pass (see
+# strip() below).
+#
+# KNOWN LIMITATION — same-line sinks only. The gate audits the line that
+# holds the sink (innerHTML = …, insertAdjacentHTML(…), bindPopup(…), …).
+# HTML built on OTHER lines and assigned later is not seen, e.g.
+#   function row(o) { return '<td>' + o.iata + '</td>'; }   // not audited
+#   tbody.innerHTML = rows.map(row).join('');                // no field here
+# This is how every #333 sink was written (packets.js / observers.js /
+# region-filter.js row builders), so the gate does not catch those
+# mutants; the DOM-level tests (test-xss-escape-sinks.js,
+# test-xss-333-*e2e.js) do. Flagging every line that builds an HTML
+# fragment was measured on public/*.js (#333 round 2): 224 lines, nearly
+# all pre-escaped locals or static text, i.e. false positives, so it is
+# not enabled. Closing this gap needs data flow, not a line regex.
 #
 # Two modes:
 #   $0 --file <path>       Scan a single file. Exit 1 if any flagged sink
@@ -207,26 +215,48 @@ def sink_match(line):
 # Comment/string strip — preserves short identifier-like string contents
 # (so setAttribute('href', ...) keeps its 'href' marker) and template
 # literal ${...} interpolations (so the RHS audit can still see node IDs).
+#
+# #333 F4: strings, template literals and // comments are recognised in ONE
+# left-to-right pass. The earlier version erased "…" runs, then '…' runs,
+# then // to end of line, each over the whole line, so a run of the other
+# quote kind could swallow code: in
+#   el.innerHTML = '<span title="' + o.name + '">'
+# the "…" pass took `"' + o.name + '"` for one string and erased the field,
+# and a URL such as 'https://…' was cut at `//` as if it were a comment.
+# Scanning in order means a quote inside a string or a template is just
+# text, so the round-1 N4 workaround (keeping ${…} found inside "…" runs) is
+# no longer needed, and a plain '…${x}…' literal is no longer mistaken for
+# an interpolation.
 def strip(line):
     line = re.sub(r"/\*.*?\*/", "", line)
-    line = re.sub(r"//[^\n]*", "", line)
-    def short_str(m, q):
-        body = m.group(1)
-        # #351 N4 / #333: a ${...} interpolation that lands inside a quoted
-        # attribute of a template literal (e.g. `<span title="${o.name}">`)
-        # is seen by THIS quote-stripper before the template-literal handler
-        # below, because the attribute value is a double/single-quoted run.
-        # Without preserving the interpolation the node field is erased and
-        # the sink passes unflagged. Keep the ${...} fragments so the RHS
-        # audit still sees the node identifier (escaped ones peel to nothing).
-        interps = re.findall(r"\$\{[^}]*\}", body)
-        if interps:
-            return q + "".join(interps) + q
+    def short_str(body, q):
         if len(body) <= 32 and re.fullmatch(r"[A-Za-z0-9_:\-/.]+", body):
             return q + body + q
         return q + q
-    line = re.sub(r"\"((?:[^\"\\]|\\.)*)\"", lambda m: short_str(m, '"'), line)
-    line = re.sub(r"'((?:[^'\\]|\\.)*)'", lambda m: short_str(m, "'"), line)
+    def scan_to(i, q):
+        # Index of the closing quote q for a literal opened just before i,
+        # skipping backslash escapes; len(line) if it is not closed here.
+        while i < len(line) and line[i] != q:
+            i += 2 if line[i] == "\\" else 1
+        return i
+    out = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "/" and line.startswith("//", i):
+            break  # a real comment: we are outside every literal here
+        if c == "`":
+            j = scan_to(i + 1, "`")
+            out.append(line[i:j + 1])  # left whole for tpl() below
+            i = j + 1
+        elif c in "'\"":
+            j = scan_to(i + 1, c)
+            out.append(short_str(line[i + 1:j], c))
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    line = "".join(out)
     def tpl(m):
         body = m.group(1)
         parts = re.findall(r"\$\{[^}]*\}", body)
