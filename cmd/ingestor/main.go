@@ -780,10 +780,13 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 	// topic below writes rows under — the neighbors, status and raw-packet paths
 	// all read it, and RecordNaiveSkew / UpsertObserverAt /
 	// TouchObserverNeighborsReport insert observer rows keyed on it. An
-	// over-limit, non-UTF-8 or control-bearing id is rejected here (the whole
-	// message is dropped) rather than truncated: shortening two distinct ids to a
-	// shared cap would MERGE separate observers into one row, the upstream
-	// behaviour #338 forbids. Non-observer message topics
+	// over-limit, non-UTF-8, control-bearing or bidi-bearing id is rejected here
+	// (the whole message is dropped) rather than truncated: shortening two
+	// distinct ids to a shared cap would MERGE separate observers into one row,
+	// the upstream behaviour #338 forbids. The gate deliberately sits ABOVE the
+	// neighbors/status/packet dispatch so one check covers all three; moving it
+	// below any of them reopens that path (pinned in
+	// observer_metadata_bounds_review_test.go). Non-observer message topics
 	// (meshcore/message/{channel,direct}/...) carry a short literal in parts[2]
 	// and always pass. Diagnostics are rate-limited and never log the full id —
 	// see observer_metadata_bounds.go.
