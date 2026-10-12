@@ -14,8 +14,10 @@
      - every *.html under public/ (shipped: `COPY public/ ./public/`, Dockerfile)
      - every *.html under tools/ (developer helpers, same rule so they cannot
        become the stale example someone copies)
-     - cmd/server/openapi.go, whose swaggerUIHTML const is served at /api/docs
-       (the Go side is additionally pinned by openapi_sri_test.go)
+     - every non-test *.go under cmd/ and internal/, which today means
+       cmd/server/openapi.go's swaggerUIHTML const served at /api/docs (the Go
+       side is additionally pinned by cmd/server/openapi_sri_test.go), and
+       tomorrow means any new handler that prints HTML
 
    Out of scope by design: map tile providers. Tiles are configured endpoints
    requested by Leaflet from JavaScript, not <script>/<link> subresources, so
@@ -44,16 +46,33 @@ const ROOT = __dirname;
 
 // --- surfaces -------------------------------------------------------------
 
-function htmlFilesIn(dir) {
+/** Every file under `dir` whose name ends in `ext`, recursively. Recursive on
+    purpose: a page added in a subdirectory must not escape the rule. */
+function filesUnder(dir, ext, skip = new Set(['node_modules', '.git'])) {
   const abs = path.join(ROOT, dir);
   if (!fs.existsSync(abs)) return [];
-  return fs.readdirSync(abs)
-    .filter((f) => f.endsWith('.html'))
-    .sort()
-    .map((f) => path.posix.join(dir, f));
+  const out = [];
+  for (const entry of fs.readdirSync(abs, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : 1)) {
+    const rel = path.posix.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!skip.has(entry.name)) out.push(...filesUnder(rel, ext, skip));
+    } else if (entry.name.endsWith(ext) && !entry.name.endsWith('_test.go')) {
+      out.push(rel);
+    }
+  }
+  return out;
 }
 
-const SURFACES = [...htmlFilesIn('public'), ...htmlFilesIn('tools'), 'cmd/server/openapi.go'];
+// Go sources too, not just openapi.go: any handler that starts printing HTML
+// with a CDN tag in it is held to the same rule from the first commit. Test
+// files are excluded by filesUnder -- a fixture may legitimately contain an
+// unpinned tag to assert against.
+const SURFACES = [
+  ...filesUnder('public', '.html'),
+  ...filesUnder('tools', '.html'),
+  ...filesUnder('cmd', '.go'),
+  ...filesUnder('internal', '.go'),
+];
 
 // --- tag scanner ----------------------------------------------------------
 
@@ -125,7 +144,7 @@ const SRI_RE = /^sha(256|384|512)-[A-Za-z0-9+/]+={0,2}$/;
 console.log('\n── external browser dependencies: pinning + SRI ──\n');
 
 test('at least one external subresource is found (the scanner is not silently empty)', () => {
-  assert(REFS.length > 0, `no external <script>/<link> found across ${SURFACES.join(', ')}`);
+  assert(REFS.length > 0, `no external <script>/<link> found across ${SURFACES.length} scanned files`);
 });
 
 test('every external subresource is pinned to an exact version', () => {
