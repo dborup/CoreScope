@@ -16,13 +16,25 @@ function test(name, fn) {
   catch (err) { failed++; console.error('FAIL ' + name + ': ' + err.message); }
 }
 
+// Docker's daemon keeps stopping a container after the CLI is killed. The mock
+// models that as a persisted deadline at which the container exits, whether
+// or not any CLI process is still alive to observe it.
+function settle(state) {
+  if (state.stopAt && Date.now() >= state.stopAt) { state.running = false; delete state.stopAt; }
+}
+function sleep(ms) { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+
 const mockSource = `#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const statePath = process.env.MOCK_STATE;
-const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+let state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const args = process.argv.slice(2), op = args[0];
+${settle}
+${sleep}
+settle(state);
 state.calls.push(args);
-function done(code=0) { fs.writeFileSync(statePath, JSON.stringify(state)); process.exit(code); }
+function save() { fs.writeFileSync(statePath, JSON.stringify(state)); }
+function done(code=0) { save(); process.exit(code); }
 if (op === 'inspect') {
   if (process.env.MOCK_FAIL === 'inspect') done(21);
   console.log(args[2].includes('.Image') ? 'sha256:local-test-image' : String(state.running));
@@ -30,6 +42,22 @@ if (op === 'inspect') {
 }
 if (op === 'stop') {
   if (process.env.MOCK_FAIL === 'stop') done(22);
+  const delay = Number(process.env.MOCK_STOP_DELAY_MS || 0);
+  if (delay) {
+    // Slow stop: the CLI waits for the daemon. A signal to the helper's
+    // process group kills this CLI mid-wait; the container still exits.
+    if (state.running && !state.stopAt) state.stopAt = Date.now() + delay;
+    const signal = state.groupSignals === 0 ? process.env.MOCK_GROUP_SIGNAL : process.env.MOCK_RECOVERY_SIGNAL;
+    if (signal && state.groupSignals < 2) {
+      state.groupSignals++; save();
+      // A recovery CLI that inherited an ignored signal survives it.
+      if (state.groupSignals === 2) process.on(signal, () => {});
+      process.kill(0, signal);
+    }
+    save();
+    if (state.stopAt) sleep(state.stopAt - Date.now() + 5);
+    state = JSON.parse(fs.readFileSync(statePath, 'utf8')); settle(state); process.exit(0);
+  }
   state.running = false;
   if (process.env.MOCK_SIGNAL === 'stop') {
     fs.writeFileSync(statePath, JSON.stringify(state));
@@ -39,11 +67,22 @@ if (op === 'stop') {
 }
 if (op === 'start') {
   if (process.env.MOCK_RESTART_FAIL === '1') done(24);
+  if (process.env.MOCK_START_NOOP === '1') done();
+  if (process.env.MOCK_PRECREATE_DEST) {
+    // Something else takes this run's destination name before publication.
+    const root = process.env.MOCK_BACKUP_ROOT;
+    for (const name of fs.readdirSync(root).filter(n => n.startsWith('.corescope-backup-'))) {
+      const destination = path.join(root, name.slice(1));
+      if (process.env.MOCK_PRECREATE_DEST === 'symlink') fs.symlinkSync(process.env.MOCK_OUTSIDE, destination);
+      else { fs.mkdirSync(destination); fs.writeFileSync(path.join(destination, 'sentinel'), 'keep'); }
+    }
+  }
   if (process.env.MOCK_SIGNAL === 'start' && !state.startSignalSent) {
     state.startSignalSent = true;
     fs.writeFileSync(statePath, JSON.stringify(state));
     process.kill(process.ppid, 'SIGTERM'); process.exit(0);
   }
+  // Like Docker, starting a still-running (even stopping) container is a no-op.
   state.running = true; done();
 }
 if (op === 'run') {
@@ -59,6 +98,7 @@ if (op === 'run') {
 if (op === 'cp') {
   const src = args[1], dst = args[2];
   if (src.includes(':/app/data/')) {
+    state.copiedWhileRunning.push(state.running);
     if (process.env.MOCK_SIGNAL === 'copy') {
       fs.mkdirSync(dst, {recursive:true});
       fs.writeFileSync(path.join(dst, 'partial.txt'), 'partial');
@@ -90,11 +130,11 @@ function fixture(fn, options = {}) {
   const incoming = path.join(dir, 'incoming');
   fs.mkdirSync(data); fs.mkdirSync(bin); fs.mkdirSync(snapshots); fs.mkdirSync(incoming);
   for (const db of ['meshcore', 'ping_scores_history']) {
-    fs.writeFileSync(path.join(data, db + '.db'), 'old-' + db);
+    fs.writeFileSync(path.join(data, db + '.db'), 'old-' + db, {mode:0o644});
     fs.writeFileSync(path.join(incoming, db + '.db'), 'new-' + db);
     fs.writeFileSync(path.join(data, db + '.db-shm'), 'scratch');
     if (options.wal) {
-      fs.writeFileSync(path.join(data, db + '.db-wal'), 'old-wal-' + db);
+      fs.writeFileSync(path.join(data, db + '.db-wal'), 'old-wal-' + db, {mode:0o644});
       fs.writeFileSync(path.join(incoming, db + '.db-wal'), 'new-wal-' + db);
     }
   }
@@ -104,13 +144,25 @@ function fixture(fn, options = {}) {
   fs.writeFileSync(path.join(data, 'extra', 'other.txt'), 'unrelated');
   fs.writeFileSync(path.join(bin, 'docker'), mockSource, {mode:0o700});
   const statePath = path.join(dir, 'state.json');
-  fs.writeFileSync(statePath, JSON.stringify({data, running:options.running !== false, calls:[]}));
+  fs.writeFileSync(statePath, JSON.stringify({data, running:options.running !== false, calls:[],
+    groupSignals:0, copiedWhileRunning:[]}));
   const env = {...process.env, PATH:bin + path.delimiter + process.env.PATH, MOCK_STATE:statePath,
-    CONTAINER:'corescope-test', RESTORE_DIR:incoming};
+    CONTAINER:'corescope-test', RESTORE_DIR:incoming, MOCK_BACKUP_ROOT:snapshots};
   const f = {dir, data, incoming, snapshots, env,
     state:() => JSON.parse(fs.readFileSync(statePath, 'utf8')),
-    backup:(extra={}) => spawnSync('sh', [path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', snapshots],
-      {env:{...env,...extra}, encoding:'utf8', timeout:10000}),
+    // Container state once any stop already in progress has completed.
+    settledRunning:() => {
+      const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      if (state.stopAt) sleep(state.stopAt - Date.now() + 5);
+      settle(state); return state.running;
+    },
+    backup:(extra={}, {target=snapshots, cwd=dir, group=false}={}) => {
+      // group: run in a new session so the mock can signal the helper's whole
+      // process group, like a terminal hangup, Ctrl-C or a supervisor would.
+      const argv = ['sh', path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', target];
+      if (group) argv.unshift('setsid', '-w');
+      return spawnSync(argv[0], argv.slice(1), {env:{...env,...extra}, cwd, encoding:'utf8', timeout:10000});
+    },
     restore:(extra={}) => {
       const docs = fs.readFileSync(path.join(root, 'docs/deployment.md'), 'utf8');
       const section = docs.split('<!-- tested-sqlite-restore -->')[1];
@@ -135,6 +187,10 @@ for (const wal of [false, true]) test('backup captures both DBs and ' + (wal ? '
   if (wal) want.push('meshcore.db-wal', 'ping_scores_history.db-wal');
   assert.deepStrictEqual(fs.readdirSync(snapshot).sort(), want.sort());
   assert.strictEqual(fs.statSync(snapshot).mode & 0o777, 0o700);
+  for (const file of want) assert.strictEqual(fs.statSync(path.join(snapshot, file)).mode & 0o777, 0o600, file);
+  // Private staging (raw /app/data copy incl. config/env files) is gone.
+  assert.deepStrictEqual(fs.readdirSync(f.snapshots), [path.basename(snapshot)]);
+  assert.deepStrictEqual(f.state().copiedWhileRunning, [false], 'copied while the container was running');
   for (const db of ['meshcore','ping_scores_history']) {
     assert.strictEqual(fs.readFileSync(path.join(snapshot, db + '.db'),'utf8'), 'old-' + db);
     if (wal) assert.strictEqual(fs.readFileSync(path.join(snapshot, db + '.db-wal'),'utf8'), 'old-wal-' + db);
@@ -185,6 +241,71 @@ test('SIGTERM during final restart retries recovery and does not publish', () =>
   assertNoSnapshots(f);
 }));
 
+for (const [signal, status] of [['SIGHUP',129],['SIGINT',130],['SIGTERM',143]]) test(signal + ' to the process group during a slow stop restarts and fails', () => fixture(f => {
+  const result = f.backup({MOCK_STOP_DELAY_MS:'300', MOCK_GROUP_SIGNAL:signal}, {group:true});
+  assert.strictEqual(result.status, status, result.stderr);
+  assert.strictEqual(f.settledRunning(), true, 'service left stopped after the interrupted stop');
+  assert.match(result.stderr, new RegExp('ERROR: interrupted by ' + signal));
+  assert.strictEqual(calls(f,'cp').length, 0); assertNoSnapshots(f);
+}, {wal:true}));
+
+test('a second group signal does not abort recovery', () => fixture(f => {
+  const result = f.backup({MOCK_STOP_DELAY_MS:'300', MOCK_GROUP_SIGNAL:'SIGHUP', MOCK_RECOVERY_SIGNAL:'SIGINT'}, {group:true});
+  assert.strictEqual(result.status, 129, result.stderr);
+  assert.strictEqual(f.settledRunning(), true, 'service left stopped after a repeated signal');
+  assertNoSnapshots(f);
+}));
+
+test('a start that leaves the container stopped is a restart failure', () => fixture(f => {
+  const result = f.backup({MOCK_START_NOOP:'1'}); assert.notStrictEqual(result.status, 0);
+  assert.match(result.stderr, /restart failed/); assert.strictEqual(f.state().running, false);
+  assertNoSnapshots(f);
+}));
+
+test('recovery reports a start that leaves the container stopped', () => fixture(f => {
+  const result = f.backup({MOCK_FAIL:'copy-wal', MOCK_START_NOOP:'1'}); assert.strictEqual(result.status, 23);
+  assert.match(result.stderr, /restart failed/); assert.strictEqual(f.state().running, false);
+  assertNoSnapshots(f);
+}, {wal:true}));
+
+for (const kind of ['symlink','directory']) test('non-regular WAL (' + kind + ') fails, restarts and does not publish', () => fixture(f => {
+  const wal = path.join(f.data, 'meshcore.db-wal');
+  if (kind === 'symlink') fs.symlinkSync(path.join(f.data, 'config.json'), wal);
+  else fs.mkdirSync(wal);
+  const result = f.backup(); assert.strictEqual(result.status, 1, result.stderr);
+  assert.match(result.stderr, /regular WAL meshcore\.db-wal/);
+  assert.strictEqual(f.state().running, true); assertNoSnapshots(f);
+}));
+
+for (const kind of ['directory','symlink']) test('existing destination (' + kind + ') is never overwritten', () => fixture(f => {
+  const outside = path.join(f.dir, 'outside');
+  fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+  const result = f.backup({MOCK_PRECREATE_DEST:kind, MOCK_OUTSIDE:outside});
+  assert.strictEqual(result.status, 1, result.stderr); assert.match(result.stderr, /refusing to overwrite/);
+  assert.deepStrictEqual(fs.readdirSync(outside), ['sentinel']);
+  const left = fs.readdirSync(f.snapshots);
+  assert.strictEqual(left.length, 1); assert(!left[0].startsWith('.'), 'staging left behind');
+  if (kind === 'directory') assert.deepStrictEqual(fs.readdirSync(path.join(f.snapshots, left[0])), ['sentinel']);
+  assert.strictEqual(f.state().running, true);
+}));
+
+for (const name of ['-', '-snapshots']) test('relative backup directory ' + JSON.stringify(name) + ' is not an option or cd -', () => fixture(f => {
+  const decoy = path.join(f.dir, 'decoy'); fs.mkdirSync(decoy);
+  const result = f.backup({OLDPWD:decoy}, {target:name});
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.strictEqual(path.dirname(result.stdout.trim()), fs.realpathSync(path.join(f.dir, name)));
+  assert.deepStrictEqual(fs.readdirSync(decoy), []);
+}));
+
+test('CDPATH cannot redirect a relative backup directory', () => fixture(f => {
+  const decoy = path.join(f.dir, 'decoy'); fs.mkdirSync(path.join(decoy, 'out'), {recursive:true});
+  fs.mkdirSync(path.join(f.dir, 'out'));
+  const result = f.backup({CDPATH:decoy}, {target:'out'});
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.strictEqual(path.dirname(result.stdout.trim()), fs.realpathSync(path.join(f.dir, 'out')));
+  assert.deepStrictEqual(fs.readdirSync(path.join(decoy, 'out')), []);
+}));
+
 test('failed inspect never stops the container', () => fixture(f => {
   assert.strictEqual(f.backup({MOCK_FAIL:'inspect'}).status, 21);
   assert.strictEqual(calls(f,'stop').length, 0); assertNoSnapshots(f);
@@ -194,6 +315,7 @@ test('backup of an already stopped container leaves it stopped', () => fixture(f
   const result = f.backup(); assert.strictEqual(result.status, 0, result.stderr);
   assert.strictEqual(calls(f,'stop').length, 0); assert.strictEqual(calls(f,'start').length, 0);
   assert.strictEqual(f.state().running, false);
+  assert.deepStrictEqual(fs.readdirSync(f.snapshots), [path.basename(result.stdout.trim())]);
 }, {running:false}));
 
 test('repeated backups have fresh destinations and no stale WALs', () => fixture(f => {
