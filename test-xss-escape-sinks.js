@@ -804,9 +804,217 @@ test('#333 unknown-route template uses a CSS var, not a hardcoded hex colour', (
 });
 
 // =========================================================================
+// J. Issue #333 round 2 — adjacent sinks found in review: packet region
+//    badges in group child rows and the flat view (F1), the shared region
+//    filter (F2) and the observers-row navigation (F3).
+//
+// These drive the REAL render functions (packets.js buildGroupRowHtml /
+// buildFlatRowHtml, region-filter.js render) in a vm sandbox with app.js's
+// real escapeHtml as the page global, so a missing wrapper at any call site
+// turns the test red — no template is lifted by regex.
+// =========================================================================
+const asyncTests = [];
+function asyncTest(name, fn) { asyncTests.push({ name, fn }); }
+
+// Hostile region code: breaks out of a double-quoted attribute AND carries a
+// tag for the text context; the single quote probes single-quoted contexts.
+const REGION_PAYLOAD = '"><img src=x onerror=alert(1)>' + ATTR_PAYLOAD;
+const BENIGN_REGION = 'KØB & Æ';
+
+function decodeEntities(s) {
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+}
+
+// Real public/packets.js in a sandbox (same shape as
+// test-issue-165-hop-resolution-per-observer.js). `observers` is what
+// /api/observers returns; resolveHops() seeds the page's observerMap from it.
+async function loadPacketsWithObservers(observers) {
+  const store = {};
+  const ctx = {
+    window: { addEventListener() {}, dispatchEvent() {}, innerWidth: 1280 },
+    document: {
+      readyState: 'complete',
+      createElement: () => ({ style: {}, dataset: {}, classList: { add() {}, remove() {} }, appendChild() {}, setAttribute() {} }),
+      head: { appendChild() {} }, body: { appendChild() {}, removeChild() {} },
+      getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, removeEventListener() {},
+    },
+    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
+    console, Math, Object, Array, Number, Date, Map, Set, JSON, String, Boolean, RegExp, Error, TypeError, Promise,
+    parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent, URLSearchParams,
+    setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
+    requestAnimationFrame: () => 0, cancelAnimationFrame() {},
+    performance: { now: () => Date.now() },
+    location: { hash: '' },
+    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+    registerPage() {}, onWS() {}, offWS() {}, debouncedOnWS: fn => fn,
+    CLIENT_TTL: {},
+    fetchAllNodes: () => Promise.resolve({ nodes: [] }),
+    api: (p) => Promise.resolve(p.startsWith('/observers') ? { observers } : p.startsWith('/iata-coords') ? { coords: {} } : {}),
+    invalidateApiCache() {},
+  };
+  ctx.window.localStorage = ctx.localStorage;
+  vm.createContext(ctx);
+  const load = (f) => {
+    vm.runInContext(fs.readFileSync('public/' + f, 'utf8'), ctx, { filename: f });
+    for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+  };
+  // roles.js + app.js supply the page globals the row builders call
+  // (payloadTypeName, …); app.js's own escapeHtml becomes the global.
+  for (const f of ['payload-labels.js', 'roles.js', 'app.js']) load(f);
+  ctx.api = (p) => Promise.resolve(p.startsWith('/observers') ? { observers } : p.startsWith('/iata-coords') ? { coords: {} } : {});
+  ctx.fetchAllNodes = () => Promise.resolve({ nodes: [] });
+  for (const f of ['packet-helpers.js', 'hop-resolver.js', 'hop-display.js', 'packets.js']) load(f);
+  const T = ctx.window._packetsTestAPI;
+  await T.resolveHops(['ef'], observers[0].id); // seeds observerMap via ensureHopResolver
+  return T;
+}
+
+// Every .badge-region in a rendered row, decoded the way the browser would.
+function regionBadges(html) {
+  return Array.from(html.matchAll(/<span class="badge-region">([^<]*)<\/span>/g), m => decodeEntities(m[1]));
+}
+
+const RAW_HEX = '15000102030405060708090a0b0c0d0e0f';
+function pkt(extra) {
+  return Object.assign({ hash: 'fae0c9e6d357a814', raw_hex: RAW_HEX, payload_type: 5, route_type: 1,
+    decoded_json: '{}', path_json: '[]', timestamp: '', latest: '' }, extra);
+}
+
+asyncTest('#333 F1 packets flat view: region badge escapes the observer IATA', async () => {
+  const T = await loadPacketsWithObservers([{ id: 'OBS-H', name: 'h', iata: REGION_PAYLOAD }]);
+  const html = T.buildFlatRowHtml(pkt({ id: 7, observer_id: 'OBS-H' }));
+  assertNoXss(html, '#333 F1 flat view region');
+  assert.deepStrictEqual(regionBadges(html), [REGION_PAYLOAD], 'flat view badge must show the code as text');
+});
+
+asyncTest('#333 F1 packets group child rows: region badge escapes the observer IATA', async () => {
+  const T = await loadPacketsWithObservers([
+    { id: 'OBS-B', name: 'b', iata: 'SJC' },
+    { id: 'OBS-H', name: 'h', iata: REGION_PAYLOAD },
+  ]);
+  const p = pkt({ observer_id: 'OBS-B', count: 2, observation_count: 2, observer_count: 2,
+    _children: [pkt({ id: 1, observer_id: 'OBS-B' }), pkt({ id: 2, observer_id: 'OBS-H' })] });
+  T._setExpanded(p.hash, true);
+  const html = T.buildGroupRowHtml(p);
+  assert.ok(html.includes('class="group-child"'), 'expanded group must render child rows');
+  assertNoXss(html, '#333 F1 group child region');
+  assert.deepStrictEqual(regionBadges(html), ['SJC', 'SJC', REGION_PAYLOAD],
+    'header + both child badges must show their codes as text');
+});
+
+asyncTest('#333 F1 packets group header: region badge escapes the observer IATA', async () => {
+  const T = await loadPacketsWithObservers([{ id: 'OBS-H', name: 'h', iata: REGION_PAYLOAD }]);
+  const html = T.buildGroupRowHtml(pkt({ observer_id: 'OBS-H', count: 1, observation_count: 1 }));
+  assertNoXss(html, '#333 F1 group header region');
+  assert.deepStrictEqual(regionBadges(html), [REGION_PAYLOAD]);
+});
+
+asyncTest('#333 F1 packets region badges show a benign code verbatim (no double escape)', async () => {
+  const T = await loadPacketsWithObservers([{ id: 'OBS-K', name: 'k', iata: BENIGN_REGION }]);
+  const flat = T.buildFlatRowHtml(pkt({ id: 3, observer_id: 'OBS-K' }));
+  assert.ok(flat.includes('<span class="badge-region">KØB &amp; Æ</span>'), flat);
+  assert.deepStrictEqual(regionBadges(flat), [BENIGN_REGION]);
+});
+
+// Real public/region-filter.js in a sandbox. `regions` is what
+// /api/config/regions returns; `stored` pre-seeds the persisted selection.
+async function loadRegionFilter(regions, opts) {
+  const store = {};
+  if (opts && opts.stored) store['meshcore-region-filter'] = JSON.stringify(opts.stored);
+  const el = () => ({ hidden: true, onclick: null, setAttribute() {} });
+  const container = { innerHTML: '', style: {}, onclick: null, querySelector: el };
+  const ctx = {
+    window: {},
+    document: { addEventListener() {}, removeEventListener() {} },
+    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
+    fetch: async () => ({ json: async () => regions }),
+    console, setTimeout, clearTimeout,
+    escapeHtml, // app.js's real global escaper
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/region-filter.js', 'utf8'), ctx, { filename: 'region-filter.js' });
+  await ctx.RegionFilter.init(container, opts && opts.dropdown ? { dropdown: true } : undefined);
+  return { RF: ctx.RegionFilter, container, store };
+}
+
+// The value the browser would hand to toggleRegion via el.dataset.region.
+function dataRegions(html) {
+  return Array.from(html.matchAll(/data-region="([^"]*)"/g), m => decodeEntities(m[1]));
+}
+
+asyncTest('#333 F2 region filter pills: hostile code escaped in data-region and label', async () => {
+  const { container } = await loadRegionFilter({ SJC: 'San Jose', [REGION_PAYLOAD]: REGION_PAYLOAD });
+  const html = container.innerHTML;
+  assert.ok(html.includes('region-pill'), 'expected pill mode for 2 regions: ' + html);
+  assertNoXss(html, '#333 F2 region pills');
+  assert.deepStrictEqual(dataRegions(html), ['__all__', 'SJC', REGION_PAYLOAD],
+    'each pill data-region must round-trip to its code');
+  assert.ok(decodeEntities(html).includes('>' + REGION_PAYLOAD + '</button>'), 'pill label must show the code as text');
+});
+
+asyncTest('#333 F2 region filter dropdown: hostile code + label escaped, trigger label escaped', async () => {
+  const { container } = await loadRegionFilter(
+    { SJC: 'San Jose', [REGION_PAYLOAD]: REGION_PAYLOAD + ' city' },
+    { dropdown: true, stored: [REGION_PAYLOAD] });
+  const html = container.innerHTML;
+  assert.ok(html.includes('region-dropdown-trigger'), 'expected dropdown mode: ' + html);
+  assertNoXss(html, '#333 F2 region dropdown');
+  assert.deepStrictEqual(dataRegions(html), ['__all__', 'SJC', REGION_PAYLOAD]);
+  const trigger = html.match(/<button class="region-dropdown-trigger"[^>]*>([^<]*)<\/button>/);
+  assert.ok(trigger, 'trigger button must contain only text: ' + html);
+  assert.strictEqual(decodeEntities(trigger[1]), REGION_PAYLOAD + ' ▾', 'dropdownLabel must show the selected code as text');
+});
+
+asyncTest('#333 F2 region filter: selecting a hostile code still filters by that exact code', async () => {
+  const { RF, container, store } = await loadRegionFilter({ SJC: 'San Jose', [REGION_PAYLOAD]: 'x' });
+  const code = dataRegions(container.innerHTML)[2];
+  container.onclick({ target: { closest: () => ({ dataset: { region: code } }) } });
+  assert.deepStrictEqual(Array.from(RF.getSelected()), [REGION_PAYLOAD]); // re-realm the vm array
+  assert.strictEqual(RF.regionQueryString(), '&region=' + encodeURIComponent(REGION_PAYLOAD));
+  assert.deepStrictEqual(JSON.parse(store['meshcore-region-filter']), [REGION_PAYLOAD]);
+  // Re-rendered after the toggle: still inert, hostile pill now the only active one.
+  assertNoXss(container.innerHTML, '#333 F2 region pills after toggle');
+});
+
+asyncTest('#333 F2 region filter shows a benign code verbatim (no double escape)', async () => {
+  const { container } = await loadRegionFilter({ SJC: 'San Jose', [BENIGN_REGION]: BENIGN_REGION });
+  assert.ok(container.innerHTML.includes('data-region="KØB &amp; Æ"'), container.innerHTML);
+  assert.ok(container.innerHTML.includes('>KØB &amp; Æ</button>'), container.innerHTML);
+  assert.deepStrictEqual(dataRegions(container.innerHTML), ['__all__', 'SJC', BENIGN_REGION]);
+});
+
+// F3: observers row — an observer id containing ' must not reach JS code.
+test('#333 F3 observers row: no inline handler interpolates the observer id', () => {
+  const src = fs.readFileSync('public/observers.js', 'utf8');
+  const m = src.match(/return `(<tr style="cursor:pointer"[^>]*data-action="navigate"[^>]*>)/);
+  assert.ok(m, '#333 F3 observers navigate row not found');
+  const fn = new Function('o', 'escapeHtml', 'return `' + m[1] + '`;');
+  const id = "Q'-console.error(1)-'";
+  const tag = fn({ id }, escapeHtml);
+  const handlers = Array.from(tag.matchAll(/\son[a-z]+="([^"]*)"/gi), x => x[1]);
+  for (const h of handlers) {
+    assert.ok(!h.includes(id) && !h.includes(encodeURIComponent(id)),
+      '#333 F3: observer id reaches an inline JS handler: ' + tag);
+  }
+  // Navigation target stays on the row for the delegated handler.
+  const dv = tag.match(/data-value="([^"]*)"/);
+  assert.ok(dv && decodeEntities(dv[1]) === '#/observers/' + encodeURIComponent(id),
+    '#333 F3: data-value navigation target lost: ' + tag);
+});
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
-console.log('\n' + '═'.repeat(48));
-console.log(`  XSS escape sinks: ${passed} passed, ${failed} failed`);
-console.log('═'.repeat(48));
-if (failed > 0) process.exit(1);
+(async () => {
+  for (const t of asyncTests) {
+    try { await t.fn(); passed++; console.log(`  ✅ ${t.name}`); }
+    catch (e) { failed++; console.log(`  ❌ ${t.name}: ${e.message}`); }
+  }
+  console.log('\n' + '═'.repeat(48));
+  console.log(`  XSS escape sinks: ${passed} passed, ${failed} failed`);
+  console.log('═'.repeat(48));
+  if (failed > 0) process.exit(1);
+})();
