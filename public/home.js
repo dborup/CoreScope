@@ -45,6 +45,12 @@
     saveMyNodes(getMyNodes().filter(n => n.pubkey !== pubkey));
   }
   function isMyNode(pubkey) { return getMyNodes().some(n => n.pubkey === pubkey); }
+  // My Mesh cards opt into advert intervals on their health request. The
+  // health panel reuses that URL for claimed nodes so the client cache
+  // answers it; other nodes keep the plain URL and skip the advert scan.
+  function healthPath(pubkey, myMesh) {
+    return '/nodes/' + encodeURIComponent(pubkey) + '/health' + (myMesh ? '?include=advertIntervals' : '');
+  }
 
   function isExperienced() { return localStorage.getItem(PREF_KEY) === 'experienced'; }
   function setLevel(level) { localStorage.setItem(PREF_KEY, level); }
@@ -298,7 +304,7 @@
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
-        const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+        const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};
         const obs = h.observers || [];
@@ -319,6 +325,7 @@
         const sparkHtml = buildSparkline(h.activity24h);
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
         const preview = isRepeater ? obs.slice(0, 3) : obs;
+        const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals, h.advertRouteBackfill) : '';
         // #351 F2/R1: a name wider than the CSS max-width: 14ch clamp is
         // clipped with an ellipsis. The full name must stay recoverable on
         // EVERY card. Each span carries a title (pointer + assistive tech),
@@ -357,6 +364,7 @@
             </div>
           </div>
           ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${obs.length} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
+          ${cadenceHtml}
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
@@ -461,6 +469,34 @@
     dialog.showModal();
   }
 
+  function renderMyMeshAdvertIntervals(intervals, backfill) {
+    const row = (label, estimate) => {
+      if (!estimate) return `<div class="mnc-advert-row"><strong>${label}</strong> unavailable</div>`;
+      const samples = Number(estimate.samples);
+      const seconds = Number(estimate.interval_s);
+      let value = 'unavailable';
+      if (estimate.status === 'estimated' && estimate.interval_s != null && Number.isFinite(seconds) && seconds > 0) {
+        const hours = seconds / 3600;
+        value = '≈ ' + (hours >= 1 ? Number(hours.toFixed(1)) + ' h' : Math.round(seconds / 60) + ' min');
+      } else if (estimate.status === 'too_few') {
+        value = 'not enough adverts';
+      } else if (estimate.status === 'none_observed') {
+        value = 'not observed';
+      } else if (estimate.status === 'irregular') {
+        value = 'irregular';
+      }
+      const count = Number.isInteger(samples) && samples >= 0 ? ` · ${samples} heard` : '';
+      const seen = estimate.last_advert && Number.isFinite(Date.parse(estimate.last_advert))
+        ? ' · last ' + timeAgo(estimate.last_advert) : '';
+      return `<div class="mnc-advert-row"><strong>${label}</strong> ${value}${count}${seen}</div>`;
+    };
+    const provisional = intervals && backfill?.status !== 'complete'
+      ? '<div class="mnc-advert-provisional" title="Route-mask backfill incomplete or unknown; flood and zero-hop classifications may change">Route classes provisional</div>' : '';
+    return `<div class="mnc-advert-cadence" aria-label="Observed repeater advert intervals">` +
+      row('Zero-hop', intervals?.zero_hop) + row('Flood', intervals?.flood) +
+      provisional + '<div class="mnc-advert-note" title="Observed estimate from at most 20 newest adverts per type; missed receptions can skew it. Not the configured timer.">Observed estimate ≠ setting · ≤20/type · missed receptions skew</div></div>';
+  }
+
   function buildSparkline(activity) {
     const label = '<div class="home-spark-label">Node-associated transmissions · last 24h</div>';
     const buckets = activity?.buckets;
@@ -502,7 +538,7 @@
     if (journey) journey.classList.remove('visible');
 
     try {
-      const h = await api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+      const h = await api(healthPath(pubkey, isMyNode(pubkey)), { ttl: CLIENT_TTL.nodeHealth });
       const node = h.node || {};
       const stats = h.stats || {};
       const packets = h.recentPackets || [];
