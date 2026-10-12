@@ -1,26 +1,34 @@
 package main
 
 import (
+	"log"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
 // Round-2 review tests for the observer-metadata bounds (#338, PR #386).
 //
-// observer_metadata_bounds_test.go pinned the raw-packet path and the
-// UpsertObserverAt display bounds. The reviewer's mutation run showed both
-// pins were too narrow:
+// observer_metadata_bounds_test.go pinned the raw-packet path, the
+// UpsertObserverAt display bounds and a C0+DEL control policy. The reviewer's
+// mutation run showed three of those pins were too narrow and one diagnostic
+// was inaccurate:
 //
 //   - N1: moving the handleMessage id gate below the neighbors+status dispatch
 //     left the whole suite green — only the packet path was pinned.
 //   - N2: stripping every bound from UpsertObserverRetained (the path a
 //     retained status takes, which is the common one on subscribe) left the
 //     whole suite green.
+//   - N3: "control characters" meant C0+DEL only; C1 controls (U+0080-U+009F)
+//     and bidi overrides/isolates (U+202A-U+202E, U+2066-U+2069) passed both
+//     the id gate and the display normalizer untouched.
+//   - N4: the aggregated drop line carried one reason/sample for a count that
+//     could span several reasons, so it could mislabel what was suppressed.
 //
-// Both are test gaps, not code defects: the production behaviour is already
-// correct on every path. These tests pin it so a regression cannot pass.
-// countRows is the shared COUNT(*) helper from prune_chunked_test.go.
+// Everything below closes those gaps. Each group is written so the matching
+// mutant fails here. countRows is the shared COUNT(*) helper from
+// prune_chunked_test.go.
 
 // --- N1: pin WHERE the id gate sits ----------------------------------------
 
@@ -217,4 +225,270 @@ func TestUpsertObserverRetainedValidMetadataUnchanged(t *testing.T) {
 	if gotModel != model || gotFirmware != firmware || gotClient != client || gotRadio != radio {
 		t.Errorf("retained metadata changed: %q %q %q %q", gotModel, gotFirmware, gotClient, gotRadio)
 	}
+}
+
+// --- N3: the control policy covers C1 and bidi overrides/isolates ----------
+
+// C1 controls (U+0080-U+009F) are controls that happen to be two bytes in
+// UTF-8, so a byte-oriented "< 0x20" check misses them entirely. In an id they
+// must be rejected exactly like C0.
+func TestObserverIDRejectReason_C1Controls(t *testing.T) {
+	for _, r := range []rune{'\u0080', '\u0085', '\u009b', '\u009f'} {
+		id := "obs" + string(r) + "01"
+		if got := observerIDRejectReason(id); got != observerIDRejectControlChar {
+			t.Errorf("observerIDRejectReason(%q) = %q, want %q (U+%04X is a C1 control)", id, got, observerIDRejectControlChar, r)
+		}
+	}
+	// U+007E and U+00A0 bracket the policy: the last printable ASCII before
+	// DEL, and the first codepoint past the C1 block (NBSP). Both are text.
+	for _, r := range []rune{'~', '\u00a0'} {
+		id := "obs" + string(r) + "01"
+		if got := observerIDRejectReason(id); got != "" {
+			t.Errorf("observerIDRejectReason(%q) = %q, want accepted (U+%04X is outside the control ranges)", id, got, r)
+		}
+	}
+}
+
+// Bidi embedding/override (U+202A-U+202E) and isolate (U+2066-U+2069)
+// characters reorder everything after them when rendered, so an id carrying
+// one displays as a different id than the one rows are keyed on. Rejected.
+func TestObserverIDRejectReason_BidiControls(t *testing.T) {
+	for _, r := range []rune{'\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069'} {
+		id := "obs" + string(r) + "01"
+		if got := observerIDRejectReason(id); got != observerIDRejectBidiControl {
+			t.Errorf("observerIDRejectReason(%q) = %q, want %q (U+%04X)", id, got, observerIDRejectBidiControl, r)
+		}
+	}
+	// The codepoints immediately outside both ranges are ordinary characters.
+	for _, r := range []rune{'\u2029', '\u202f', '\u2065', '\u206a'} {
+		id := "obs" + string(r) + "01"
+		if got := observerIDRejectReason(id); got != "" {
+			t.Errorf("observerIDRejectReason(%q) = %q, want accepted (U+%04X is outside both bidi ranges)", id, got, r)
+		}
+	}
+}
+
+// Ids made of ordinary non-ASCII text stay acceptable: the policy targets
+// control and bidi-formatting codepoints, not "anything non-ASCII".
+func TestObserverIDRejectReason_ValidUnicodeAccepted(t *testing.T) {
+	for _, id := range []string{
+		"kpabap",
+		"obs-æøå",
+		"OBS-ÆØÅ",
+		"observatør-københavn",
+		"obs-\U0001F5DD",         // emoji
+		strings.Repeat("ab", 32), // 64-char pubkey
+	} {
+		if got := observerIDRejectReason(id); got != "" {
+			t.Errorf("observerIDRejectReason(%q) = %q, want accepted", id, got)
+		}
+	}
+}
+
+// Display text: the same two groups are stripped rather than rejected.
+func TestNormalizeObserverText_StripsC1Controls(t *testing.T) {
+	in := "a\u0080b\u0085c\u009bd\u009fef"
+	if got := normalizeObserverText(in, 64); got != "abcdef" {
+		t.Fatalf("got %q, want %q (C1 controls must be stripped)", got, "abcdef")
+	}
+	// Stripping happens before counting, so C1 padding does not eat the cap.
+	padded := strings.Repeat("\u0085", 100) + "name"
+	if got := normalizeObserverText(padded, 4); got != "name" {
+		t.Fatalf("padded got %q, want %q", got, "name")
+	}
+	// NBSP survives — it is text, not a control.
+	if got := normalizeObserverText("a\u00a0b", 64); got != "a\u00a0b" {
+		t.Fatalf("NBSP stripped: %q", got)
+	}
+}
+
+func TestNormalizeObserverText_StripsBidiControls(t *testing.T) {
+	// A right-to-left override inside a display name makes the rendered string
+	// read differently from the stored bytes — the UI-spoofing case.
+	in := "Observer\u202e01\u202c-SJC"
+	if got := normalizeObserverText(in, 64); got != "Observer01-SJC" {
+		t.Fatalf("got %q, want %q (bidi overrides must be stripped)", got, "Observer01-SJC")
+	}
+	for _, r := range []rune{'\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069'} {
+		if got := normalizeObserverText("a"+string(r)+"b", 64); got != "ab" {
+			t.Errorf("U+%04X survived normalizeObserverText: %q", r, got)
+		}
+	}
+	for _, r := range []rune{'\u2029', '\u202f', '\u2065', '\u206a'} {
+		want := "a" + string(r) + "b"
+		if got := normalizeObserverText(want, 64); got != want {
+			t.Errorf("U+%04X stripped but is outside both bidi ranges: %q", r, got)
+		}
+	}
+}
+
+// Valid Unicode display text is preserved verbatim: Danish letters and emoji
+// are exactly what the fixture's observer names carry.
+func TestNormalizeObserverText_PreservesValidUnicode(t *testing.T) {
+	for _, s := range []string{
+		"Københavns Observatør",
+		"Ærø Øst Ångström",
+		"Key Route Inspector-BRK \U0001F5DD",
+		"Nørrebro \U0001F5DD Relæ",
+	} {
+		if got := normalizeObserverText(s, maxObserverNameRunes); got != s {
+			t.Fatalf("normalizeObserverText(%q) = %q, want unchanged", s, got)
+		}
+	}
+}
+
+// End-to-end: a bidi-bearing id is dropped at the gate, never stored.
+func TestHandleMessage_BidiObserverIDDropped(t *testing.T) {
+	store, source := newTestContext(t)
+	msg := &mockMessage{
+		topic:   "meshcore/SJC/obs\u202e01/status",
+		payload: []byte(`{"origin":"Hostile","noise_floor":-100}`),
+	}
+	handleMessage(store, "test", source, msg, nil, nil, &Config{})
+	if n := countRows(t, store, "observers"); n != 0 {
+		t.Fatalf("observers = %d, want 0 (a bidi-bearing id must be dropped)", n)
+	}
+}
+
+// End-to-end: a C1-bearing id is dropped at the gate too.
+func TestHandleMessage_C1ControlObserverIDDropped(t *testing.T) {
+	store, source := newTestContext(t)
+	msg := &mockMessage{
+		topic:   "meshcore/SJC/obs\u009b01/status",
+		payload: []byte(`{"origin":"Hostile","noise_floor":-100}`),
+	}
+	handleMessage(store, "test", source, msg, nil, nil, &Config{})
+	if n := countRows(t, store, "observers"); n != 0 {
+		t.Fatalf("observers = %d, want 0 (a C1-bearing id must be dropped)", n)
+	}
+}
+
+// Display bounds end-to-end: a C1/bidi-bearing display name reaches the stored
+// row stripped, while the valid Unicode around it survives.
+func TestUpsertObserverStripsC1AndBidiFromDisplayText(t *testing.T) {
+	s := newTestStore(t)
+	id := "obs-display-unicode"
+	radio := "910.5250244,62.5,7,5\u0085"
+	meta := &ObserverMeta{Radio: &radio}
+	if err := s.UpsertObserverAt(id, "Nørrebro\u202e Relæ \U0001F5DD", "SJC", meta, ""); err != nil {
+		t.Fatalf("UpsertObserverAt: %v", err)
+	}
+	name, _, _, _, _, gotRadio := observerStrings(t, s, id)
+	if name != "Nørrebro Relæ \U0001F5DD" {
+		t.Errorf("stored name = %q, want the bidi override stripped and the rest intact", name)
+	}
+	if gotRadio != "910.5250244,62.5,7,5" {
+		t.Errorf("stored radio = %q, want the C1 control stripped", gotRadio)
+	}
+}
+
+// --- N4: the aggregated drop line must not mislabel the batch --------------
+
+// The throttle aggregates several drops into one line. With a single counter
+// plus the LAST reason/sample, a line reading "dropped 3 ... reason=too-long"
+// can actually be summarising two control-char drops and one too-long drop.
+// The line must account for each reason separately.
+func TestObserverIDDropThrottleLineCountsPerReason(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	buf := captureObserverDropLog(t)
+
+	// The first drop logs immediately and is reported on its own.
+	th.record("test", strings.Repeat("a", 200), observerIDRejectTooLong, base)
+	buf.Reset()
+
+	// A mixed batch inside the interval: 1 too-long, 2 control-char,
+	// 1 bidi-control, 1 invalid-utf8.
+	th.record("test", strings.Repeat("b", 200), observerIDRejectTooLong, base.Add(10*time.Second))
+	th.record("test", "obs\x01aa", observerIDRejectControlChar, base.Add(20*time.Second))
+	th.record("test", "obs\x02aa", observerIDRejectControlChar, base.Add(30*time.Second))
+	th.record("test", "obs\u202eaa", observerIDRejectBidiControl, base.Add(40*time.Second))
+	th.record("test", "obs\xffaa", observerIDRejectInvalidUTF8, base.Add(50*time.Second))
+	if got := buf.String(); got != "" {
+		t.Fatalf("within-interval drops logged early: %q", got)
+	}
+	if got := th.pendingDropped(); got != 5 {
+		t.Fatalf("pendingDropped = %d, want 5", got)
+	}
+
+	// The next drop past the interval flushes the batch (5 accumulated + itself).
+	th.record("test", "obs\x03aa", observerIDRejectControlChar, base.Add(observerIDDropLogInterval))
+	line := buf.String()
+	if !strings.Contains(line, "dropped 6 message(s)") {
+		t.Errorf("line does not report the batch total:\n%s", line)
+	}
+	for _, want := range []string{"too-long=1", "control-char=3", "bidi-control=1", "invalid-utf8=1"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line is missing %q — a single last-reason label mislabels the batch:\n%s", want, line)
+		}
+	}
+	if got := th.pendingDropped(); got != 0 {
+		t.Errorf("pendingDropped after flush = %d, want 0", got)
+	}
+}
+
+// A reason that did not occur is not named at all, so the line stays readable
+// and never implies a drop that did not happen.
+func TestObserverIDDropThrottleLineOmitsUnusedReasons(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	buf := captureObserverDropLog(t)
+
+	th.record("test", strings.Repeat("a", 200), observerIDRejectTooLong, base)
+	line := buf.String()
+	if !strings.Contains(line, "too-long=1") {
+		t.Fatalf("line is missing the reason that did occur:\n%s", line)
+	}
+	for _, unwanted := range []string{"control-char", "bidi-control", "invalid-utf8", "=0"} {
+		if strings.Contains(line, unwanted) {
+			t.Errorf("line names %q but no such drop occurred:\n%s", unwanted, line)
+		}
+	}
+}
+
+// A sample is carried per reason, so the sample printed next to a reason
+// belongs to that reason — and it stays bounded to the 8-rune prefix, never
+// the full id.
+func TestObserverIDDropThrottleSamplePerReason(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	buf := captureObserverDropLog(t)
+
+	longID := strings.Repeat("L", 200)
+	th.record("test", longID, observerIDRejectTooLong, base) // first drop: logs now
+	buf.Reset()
+	th.record("test", longID, observerIDRejectTooLong, base.Add(10*time.Second))
+	th.record("test", "CTRLxxxx-tail", observerIDRejectControlChar, base.Add(20*time.Second))
+	th.record("test", "x", observerIDRejectTooLong, base.Add(observerIDDropLogInterval))
+
+	line := buf.String()
+	if !strings.Contains(line, `too-long=2 sample="x"`) {
+		t.Errorf("too-long sample not carried with its own reason:\n%s", line)
+	}
+	if !strings.Contains(line, `control-char=1 sample="CTRLxxxx"`) {
+		t.Errorf("control-char sample not carried with its own reason:\n%s", line)
+	}
+	if strings.Contains(line, longID) {
+		t.Errorf("the full oversized id leaked into the log line:\n%s", line)
+	}
+	if strings.Contains(line, "CTRLxxxx-tail") {
+		t.Errorf("sample was not bounded to 8 runes:\n%s", line)
+	}
+}
+
+// captureObserverDropLog redirects the standard logger into a buffer for the
+// duration of the test. Flags are cleared so assertions can match the line
+// text without a timestamp prefix in the way.
+func captureObserverDropLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	origOut := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+	})
+	return &buf
 }

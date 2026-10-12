@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -27,6 +28,29 @@ import (
 // boundary (normalizeObserverText). A multi-byte name is never split mid-rune,
 // and a stray control byte (the CI fixture carries a radio value ending in a
 // bare CR) is removed rather than stored.
+//
+// # What counts as a control character
+//
+// Both contracts share one definition, in observerRuneIsControl and
+// observerRuneIsBidiControl:
+//
+//   - C0 controls (U+0000-U+001F) and DEL (U+007F) — the classic case, and the
+//     one the CI fixture exercises with its trailing-CR radio value.
+//   - C1 controls (U+0080-U+009F). These are controls that encode as TWO bytes
+//     in UTF-8, so the obvious byte-oriented "< 0x20" test misses them
+//     completely.
+//   - Bidi embeddings/overrides (U+202A-U+202E) and isolates (U+2066-U+2069).
+//     Not controls in the Unicode sense but formatting codepoints that reorder
+//     everything after them when rendered, so an id or name can DISPLAY as a
+//     different string than the one the row actually holds. The diagnostic
+//     below quotes its sample with %q, which escapes these, so this is a
+//     UI-spoofing concern rather than a log-injection sink.
+//
+// Everything else is left alone. Ordinary non-ASCII text passes through
+// untouched — Danish letters and emoji both appear in real observer names — as
+// do the codepoints bordering the ranges above (NBSP U+00A0, U+202F, U+2065,
+// U+206A). An id carrying a forbidden codepoint is REJECTED; display text has
+// it STRIPPED.
 //
 // # These bounds are damage containment, not authentication
 //
@@ -109,6 +133,60 @@ const (
 	observerIDDropLogInterval = 5 * time.Minute
 )
 
+// Reject reasons returned by observerIDRejectReason. A small closed set so the
+// drop throttle can count per reason in O(1) state: a single counter cannot say
+// which of several reasons a batch of drops carried, and labelling the whole
+// batch with the last one seen mislabels the rest.
+const (
+	observerIDRejectTooLong     = "too-long"
+	observerIDRejectInvalidUTF8 = "invalid-utf8"
+	observerIDRejectControlChar = "control-char"
+	observerIDRejectBidiControl = "bidi-control"
+	// observerIDRejectOther is never returned by observerIDRejectReason. It is
+	// the throttle's catch-all slot, so a reason added to the gate without a
+	// counter still surfaces in the aggregate instead of being miscounted as
+	// one of the reasons above.
+	observerIDRejectOther = "other"
+)
+
+// observerIDRejectReasonOrder fixes both the throttle's counter slots and the
+// order reasons appear in the aggregated log line. observerIDRejectOther is
+// last and acts as the catch-all.
+var observerIDRejectReasonOrder = [...]string{
+	observerIDRejectTooLong,
+	observerIDRejectInvalidUTF8,
+	observerIDRejectControlChar,
+	observerIDRejectBidiControl,
+	observerIDRejectOther,
+}
+
+// observerIDRejectSlot maps a reason to its counter slot — O(1) over a
+// five-element array. An unrecognised reason lands in the catch-all.
+func observerIDRejectSlot(reason string) int {
+	for i, r := range observerIDRejectReasonOrder {
+		if r == reason {
+			return i
+		}
+	}
+	return len(observerIDRejectReasonOrder) - 1
+}
+
+// observerRuneIsControl reports whether r is a control character: a C0 control
+// (U+0000-U+001F), DEL (U+007F), or a C1 control (U+0080-U+009F). C1 is the
+// easy one to miss — those codepoints are two bytes in UTF-8, so a byte-wise
+// "< 0x20" check never sees them. See this file's header.
+func observerRuneIsControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// observerRuneIsBidiControl reports whether r is a bidi embedding/override
+// (U+202A-U+202E) or isolate (U+2066-U+2069). These reorder the text that
+// follows them when rendered, so they can make a stored id or name display as
+// something it is not. See this file's header.
+func observerRuneIsBidiControl(r rune) bool {
+	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
+}
+
 // observerIDRejectReason returns a short machine reason an observer id must be
 // rejected, or "" if the id is acceptable. Acceptable ids are stored verbatim —
 // never lowercased, truncated or otherwise rewritten — so identity is preserved
@@ -118,10 +196,13 @@ const (
 //   - "too-long": more than maxObserverIDBytes bytes. Dropped, not truncated,
 //     so two long ids sharing a prefix can never collapse to one row.
 //   - "invalid-utf8": not valid UTF-8. A topic segment the broker delivered as
-//     raw bytes that are not UTF-8 cannot name a real observer.
-//   - "control-char": contains a C0 control byte (< 0x20) or DEL (0x7f). Real
-//     ids are hex pubkeys or printable operator labels; a control byte signals
-//     a malformed segment and is a log-injection vector.
+//     raw bytes that are not UTF-8 cannot name a real observer. Checked before
+//     the rune scan below so that scan only ever sees real codepoints.
+//   - "control-char": contains a C0 control, DEL, or a C1 control. Real ids are
+//     hex pubkeys or printable operator labels; a control character signals a
+//     malformed segment.
+//   - "bidi-control": contains a bidi embedding/override or isolate, which
+//     would render the id as a different string than the one rows are keyed on.
 //
 // The empty id is intentionally NOT rejected here: that is an existing,
 // orthogonal edge (a malformed "meshcore//status" topic) whose behaviour this
@@ -131,24 +212,27 @@ func observerIDRejectReason(id string) string {
 		return ""
 	}
 	if len(id) > maxObserverIDBytes {
-		return "too-long"
+		return observerIDRejectTooLong
 	}
 	if !utf8.ValidString(id) {
-		return "invalid-utf8"
+		return observerIDRejectInvalidUTF8
 	}
 	for _, r := range id {
-		if r < 0x20 || r == 0x7f {
-			return "control-char"
+		switch {
+		case observerRuneIsControl(r):
+			return observerIDRejectControlChar
+		case observerRuneIsBidiControl(r):
+			return observerIDRejectBidiControl
 		}
 	}
 	return ""
 }
 
 // normalizeObserverText is the display-text contract for observer metadata: it
-// strips C0 control bytes and DEL, then truncates to maxRunes on a rune
-// boundary. Stripping happens before counting, so a field padded with control
-// bytes is not counted against the visible cap. An empty input (or one that is
-// entirely control bytes) returns "".
+// strips every control and bidi-formatting codepoint this file's header lists,
+// then truncates to maxRunes on a rune boundary. Stripping happens before
+// counting, so a field padded with control characters is not counted against
+// the visible cap. An empty input (or one that is entirely stripped) returns "".
 //
 // Truncation iterates runes and stops at the cap, so a multi-byte rune is never
 // split — the invariant the Unicode test pins. maxRunes <= 0 means "strip only,
@@ -161,8 +245,8 @@ func normalizeObserverText(s string, maxRunes int) string {
 	b.Grow(len(s))
 	n := 0
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			continue // strip C0 controls + DEL
+		if observerRuneIsControl(r) || observerRuneIsBidiControl(r) {
+			continue // see the control-character policy in this file's header
 		}
 		if maxRunes > 0 && n == maxRunes {
 			break
@@ -213,14 +297,21 @@ func normalizeObserverRegion(iata string) string {
 }
 
 // observerIDDropThrottle aggregates invalid-observer-id drops into one
-// rate-limited log line. It holds O(1) state — a single counter and timestamp,
-// not a per-id table — on purpose: a publisher spraying distinct malformed ids
-// must not be able to grow this throttle's memory, only its (capped) drop
-// count. The full id is never logged (PII / fingerprinting, per #1211); only a
-// short, control-escaped prefix sample accompanies the aggregate count.
+// rate-limited log line. It holds O(1) state — one counter and one bounded
+// sample PER REJECT REASON plus a timestamp, never a per-id table — on
+// purpose: a publisher spraying distinct malformed ids must not be able to grow
+// this throttle's memory, only its (capped) drop counts. The full id is never
+// retained or logged (PII / fingerprinting, per #1211); record stores only the
+// short prefix sample, and the line quotes it with %q.
+//
+// Counting per reason, rather than one counter plus whichever reason happened
+// to arrive last, is what keeps the aggregated line honest: a batch that mixes
+// too-long, invalid-utf8 and control-char drops cannot be labelled with any
+// single one of them without mislabelling the others.
 type observerIDDropThrottle struct {
 	mu         sync.Mutex
-	dropped    int64
+	dropped    [len(observerIDRejectReasonOrder)]int64
+	samples    [len(observerIDRejectReasonOrder)]string
 	lastLogged time.Time
 }
 
@@ -230,24 +321,67 @@ type observerIDDropThrottle struct {
 // silently and are reported in the next line. now is passed in (not read from
 // the wall clock) so tests can drive the throttle deterministically.
 func (t *observerIDDropThrottle) record(tag, sampleID, reason string, now time.Time) {
+	slot := observerIDRejectSlot(reason)
+	// Bound the sample on the way IN, so the throttle never holds a full id
+	// between lines.
+	sample := observerIDLogSample(sampleID)
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.dropped++
+	t.dropped[slot]++
+	t.samples[slot] = sample
 	if !t.lastLogged.IsZero() && now.Sub(t.lastLogged) < observerIDDropLogInterval {
 		return
 	}
-	n := t.dropped
-	t.dropped = 0
+	total, breakdown := t.flushLocked()
 	t.lastLogged = now
-	log.Printf("MQTT [%s] [observer-id] dropped %d message(s) with invalid observer id (reason=%s, sample=%q); further invalid ids suppressed for %s",
-		tag, n, reason, observerIDLogSample(sampleID), observerIDDropLogInterval)
+	log.Printf("MQTT [%s] [observer-id] dropped %d message(s) with invalid observer id (%s); further invalid ids suppressed for %s",
+		tag, total, breakdown, observerIDDropLogInterval)
+}
+
+// flushLocked zeroes the per-reason counters and samples and returns the total
+// drop count plus a breakdown naming only the reasons that actually occurred,
+// each with its own count and its own most recent sample. A reason with no
+// drops is omitted entirely rather than printed as "reason=0". Caller holds
+// t.mu.
+func (t *observerIDDropThrottle) flushLocked() (int64, string) {
+	var total int64
+	var b strings.Builder
+	for i, reason := range observerIDRejectReasonOrder {
+		n := t.dropped[i]
+		if n == 0 {
+			continue
+		}
+		total += n
+		if b.Len() > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s=%d sample=%q", reason, n, t.samples[i])
+		t.dropped[i] = 0
+		t.samples[i] = ""
+	}
+	return total, b.String()
+}
+
+// pendingDropped reports how many drops have accumulated across all reasons
+// since the last logged line. Lets tests assert the accumulate-then-flush
+// behaviour without reaching into the locked counters.
+func (t *observerIDDropThrottle) pendingDropped() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var n int64
+	for _, c := range t.dropped {
+		n += c
+	}
+	return n
 }
 
 // observerIDLogSample returns a bounded, log-safe prefix of a rejected id: at
-// most 8 runes. The caller quotes it with %q, so any control bytes that slipped
-// through (a control-char rejection logs the offending value) are escaped and
-// cannot forge log lines; capping the length keeps even a huge id's diagnostic
-// short.
+// most 8 runes. The log line quotes it with %q, so any control or bidi
+// codepoint that this prefix carries (a control-char or bidi-control rejection
+// samples the offending value) is escaped and cannot forge or reorder a log
+// line; capping the length keeps even a huge id's diagnostic short, and the
+// throttle calls this on the way in so it never retains the full id.
 func observerIDLogSample(id string) string {
 	n := 0
 	for i := range id {

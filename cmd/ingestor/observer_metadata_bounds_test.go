@@ -276,21 +276,21 @@ func TestHandleMessage_LongPrefixIDsStayDistinct(t *testing.T) {
 func TestObserverIDDropThrottleRateLimited(t *testing.T) {
 	th := &observerIDDropThrottle{}
 	base := time.Unix(1_700_000_000, 0).UTC()
-	// First drop logs immediately and resets the counter.
-	th.record("test", "aaaaaaaaX", "too-long", base)
-	if th.dropped != 0 {
-		t.Fatalf("after first record dropped=%d, want 0 (logged+reset)", th.dropped)
+	// First drop logs immediately and resets the counters.
+	th.record("test", "aaaaaaaaX", observerIDRejectTooLong, base)
+	if got := th.pendingDropped(); got != 0 {
+		t.Fatalf("after first record pendingDropped=%d, want 0 (logged+reset)", got)
 	}
 	// Drops inside the interval accumulate without logging.
-	th.record("test", "aaaaaaaaY", "too-long", base.Add(time.Minute))
-	th.record("test", "aaaaaaaaZ", "too-long", base.Add(2*time.Minute))
-	if th.dropped != 2 {
-		t.Fatalf("within-interval dropped=%d, want 2 (accumulated, not logged)", th.dropped)
+	th.record("test", "aaaaaaaaY", observerIDRejectTooLong, base.Add(time.Minute))
+	th.record("test", "aaaaaaaaZ", observerIDRejectTooLong, base.Add(2*time.Minute))
+	if got := th.pendingDropped(); got != 2 {
+		t.Fatalf("within-interval pendingDropped=%d, want 2 (accumulated, not logged)", got)
 	}
 	// After the interval the accumulated count is flushed (logged + reset).
-	th.record("test", "aaaaaaaaW", "too-long", base.Add(observerIDDropLogInterval+time.Second))
-	if th.dropped != 0 {
-		t.Fatalf("after interval dropped=%d, want 0 (flushed)", th.dropped)
+	th.record("test", "aaaaaaaaW", observerIDRejectTooLong, base.Add(observerIDDropLogInterval+time.Second))
+	if got := th.pendingDropped(); got != 0 {
+		t.Fatalf("after interval pendingDropped=%d, want 0 (flushed)", got)
 	}
 }
 
