@@ -1728,7 +1728,8 @@ func init() {
 // #337 bounds the report as untrusted input before any of that: node public
 // keys must be full 64-char hex (normalizeNodePubkey — lowercased, never
 // truncated, so identity is preserved), scope strings over
-// maxReportScopeBytes are dropped as evidence, the neighbor array is capped at
+// maxReportScopeBytes are dropped as evidence, status strings over
+// maxReportStatusBytes are dropped, the neighbor array is capped at
 // maxReportNeighbors, and normalizeReportTS rejects any timestamp more than
 // maxReportFutureSkew ahead of now. None of that authenticates the publisher:
 // anyone able to publish on this topic can claim any origin_id and any
@@ -1795,8 +1796,17 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 		originSent = false
 	}
 	originID, originValid := normalizeNodePubkey(rawOriginID)
+	droppedBadKey, droppedLongScope, droppedLongStatus := 0, 0, 0
 	if self, ok := msg["self"].(map[string]interface{}); ok && originValid {
 		if sc, ok := self["scopes"].(string); ok {
+			// #337: UpdateNodeConfiguredScope refuses an oversized list on
+			// its own; counted here so the refusal reaches the summary line.
+			// self.scopes comes from the observer's local config, not the
+			// air, so the MAX_PACKET_PAYLOAD derivation does not cover it and
+			// an operator over the bound needs to be told.
+			if reportScopeTooLong(sc) {
+				droppedLongScope++
+			}
 			if err := store.UpdateNodeConfiguredScope(originID, sc, reportedAt); err != nil {
 				log.Printf("MQTT [%s] neighbors self scope error: %v", tag, err)
 			}
@@ -1829,7 +1839,6 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 		droppedOverCap = len(neighbors) - maxReportNeighbors
 		neighbors = neighbors[:maxReportNeighbors]
 	}
-	droppedBadKey, droppedLongScope := 0, 0
 	entries := make([]ObserverNeighborEntry, 0, len(neighbors))
 	for _, raw := range neighbors {
 		n, ok := raw.(map[string]interface{})
@@ -1850,6 +1859,13 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 			continue
 		}
 		status, _ := n["status"].(string)
+		// #337: status is publisher-controlled too. An oversized one cannot
+		// be "responded", so it never reaches the evidence write below; it is
+		// dropped and the neighbor kept, as for an oversized scope string.
+		if reportStatusTooLong(status) {
+			droppedLongStatus++
+			status = ""
+		}
 		scopes, _ := n["scopes"].(string)
 		// #337: an oversized scope string is malformed input, not evidence.
 		// The neighbor itself stays — it is still a real zero-hop entry in
@@ -1902,11 +1918,26 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	// #337: one bounded line per report summarising what the bounds dropped,
 	// never one line per entry -- a hostile report is exactly the case where
 	// per-entry logging would turn a rejected payload into a log-volume
-	// amplifier. Silent when nothing was dropped, which is every legitimate
-	// report.
-	if droppedOverCap > 0 || droppedBadKey > 0 || droppedLongScope > 0 || (originSent && !originValid) {
-		log.Printf("MQTT [%s] neighbors report from observer %.8s: dropped %d entr(ies) over the %d cap, %d malformed pubkey(s), %d oversized scope string(s); self origin_id valid: %v",
-			tag, observerID, droppedOverCap, maxReportNeighbors, droppedBadKey, droppedLongScope, originValid)
+	// amplifier. Names only what was actually dropped, and is silent when
+	// nothing was, which is every legitimate report.
+	var dropped []string
+	if droppedOverCap > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d entr(ies) over the %d cap", droppedOverCap, maxReportNeighbors))
+	}
+	if droppedBadKey > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d malformed pubkey(s)", droppedBadKey))
+	}
+	if droppedLongScope > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d oversized scope string(s)", droppedLongScope))
+	}
+	if droppedLongStatus > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d oversized status string(s)", droppedLongStatus))
+	}
+	if originSent && !originValid {
+		dropped = append(dropped, "malformed origin_id (self block skipped)")
+	}
+	if len(dropped) > 0 {
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: bounds dropped %s", tag, observerID, strings.Join(dropped, "; "))
 	}
 }
 

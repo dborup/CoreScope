@@ -2450,8 +2450,8 @@ func (s *Store) TouchObserverNeighborsReport(observerID, reportedAt string) erro
 // observer_neighbor_metrics tables.
 type ObserverNeighborEntry struct {
 	Pubkey       string   // full 64-char node key; re-validated by both writers below (#337)
-	Scopes       string   // normalized "#"-prefixed form; empty for timeout entries
-	Status       string   // "responded" | "timeout"
+	Scopes       string   // normalized "#"-prefixed form; empty for timeout entries and for a scope string over the #337 bound
+	Status       string   // "responded" | "timeout"; empty if the reported status was over the #337 bound
 	SNR          *float64 // dBm signal-to-noise for this direct neighbor; present regardless of status
 	HeardSecsAgo *int     // seconds since the observer last heard this neighbor directly
 }
@@ -2506,7 +2506,16 @@ func (s *Store) ReplaceObserverNeighbors(observerID string, neighbors []Observer
 		if !ok {
 			continue
 		}
-		if _, err := stmt.Exec(observerID, pubkey, n.Scopes, n.Status, reportedAt); err != nil {
+		// #337: the same boundary bounds the two free-form strings, with
+		// the handler's policy -- keep the neighbor, drop the unusable field.
+		scopes, status := n.Scopes, n.Status
+		if storedScopeTooLong(scopes) {
+			scopes = ""
+		}
+		if reportStatusTooLong(status) {
+			status = ""
+		}
+		if _, err := stmt.Exec(observerID, pubkey, scopes, status, reportedAt); err != nil {
 			return err
 		}
 	}

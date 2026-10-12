@@ -28,7 +28,7 @@ import "time"
 //
 // # Configurability
 //
-// All four values are deliberately hardcoded here. Per AGENTS rule 8 they are
+// All of these values are deliberately hardcoded here. Per AGENTS rule 8 they are
 // candidates for the customizer/config surface in a later milestone —
 // maxReportFutureSkew especially, since it is the one an operator running
 // deliberately-skewed test hardware might want to widen. Nothing in this file
@@ -69,6 +69,26 @@ const (
 	// itself does on a hostile string.
 	maxReportScopeBytes = 256
 
+	// maxStoredScopeBytes is the ceiling on a NORMALIZED scope string, which
+	// is what reaches the row-creating boundary (ReplaceObserverNeighbors).
+	// It is not a second policy, only maxReportScopeBytes carried through
+	// normalization: a raw list of at most maxReportScopeBytes bytes has at
+	// most maxReportScopeBytes/2 parts ("aa" + 127 x ",a"), and
+	// normalization adds at most one "#" per part, so every string the
+	// handler accepts normalizes to at most this many bytes.
+	maxStoredScopeBytes = maxReportScopeBytes + maxReportScopeBytes/2
+
+	// maxReportStatusBytes bounds a neighbor entry's status string, the one
+	// publisher-controlled string on an entry that was otherwise stored
+	// verbatim. The documented values are "responded" and "timeout" (9 and
+	// 7 bytes; see the /api/observers/{id}/neighbors schema), and status is
+	// only ever compared against "responded", so 32 bytes leaves room for a
+	// future status word while capping what one entry can store and render.
+	// An oversized status is dropped (stored as "") and the neighbor kept --
+	// the same keep-the-neighbor, drop-the-field policy as an oversized
+	// scope string.
+	maxReportStatusBytes = 32
+
 	// maxReportNeighbors bounds how many neighbor entries one report may
 	// contribute. The firmware's own report is 10 KB-capped and truncates by
 	// ordering (see handleNeighborsReport); a minimal entry
@@ -97,10 +117,18 @@ const (
 	// this check — nothing legitimate reaches this path more than clock jitter
 	// ahead of now.
 	//
-	// The cost of 15 over 5 is bounded and small: a report accepted at the
-	// edge of the window dominates last-write-wins for at most 15 minutes
-	// before real time passes it. Without any bound it dominates until the
-	// claimed timestamp arrives, which for a year-9999 report is forever.
+	// The cost of 15 over 5 scales with the window and has two effects. A
+	// report stamped at the edge of the window dominates the scope
+	// last-write-wins for up to 15 minutes. More sharply, it also FREEZES
+	// that observer's Direct Neighbors snapshot for up to 15 minutes:
+	// TouchObserverNeighborsReport stores MAX(stored, incoming) as
+	// last_neighbors_report_at, and ReplaceObserverNeighbors skips every
+	// report whose timestamp is not the stored one, so each genuine report
+	// in that window is ignored. A publisher that keeps re-sending now+15m
+	// can renew the freeze indefinitely -- but only on a topic it can
+	// already publish to, where an empty report would stall the snapshot
+	// just as well. Without any bound the freeze lasts until the claimed
+	// timestamp arrives, which for a year-9999 report is forever.
 	maxReportFutureSkew = 15 * time.Minute
 )
 
@@ -145,4 +173,16 @@ func normalizeNodePubkey(raw string) (string, bool) {
 // one byte).
 func reportScopeTooLong(raw string) bool {
 	return len(raw) > maxReportScopeBytes
+}
+
+// storedScopeTooLong is reportScopeTooLong for an already-normalized scope
+// string, applied at the row-creating boundary (see maxStoredScopeBytes).
+func storedScopeTooLong(normalized string) bool {
+	return len(normalized) > maxStoredScopeBytes
+}
+
+// reportStatusTooLong reports whether a neighbor entry's status string
+// exceeds maxReportStatusBytes.
+func reportStatusTooLong(status string) bool {
+	return len(status) > maxReportStatusBytes
 }
