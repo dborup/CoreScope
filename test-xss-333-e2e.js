@@ -16,7 +16,9 @@
 // inspected in-browser.
 //
 // Representative paths (issue #333): unknown route, observer region, packet
-// region badge, favorites. No payload ever leaves this machine.
+// region badge, geo-filter prune preview (with customize-v2.js's own esc()),
+// favorites. No payload ever leaves this machine. The full-page versions of
+// the round-2 sinks live in test-xss-333-pages-e2e.js.
 'use strict';
 const { chromium } = require('playwright');
 const http = require('http');
@@ -55,6 +57,12 @@ function liftTemplate(file, regex) {
   return m[1] || m[0];
 }
 
+// #333 F6: sink regexes match the escaped AND the unescaped shape, so a
+// mutant that drops the escaper still finds the sink and fails on behaviour
+// (injected markup), not on "sink not found".
+const OBS_REGION_CELL = /(<td data-value="\$\{(?:escapeHtml\()?o\.iata[\s\S]*?<\/td>)/;
+const PKT_REGION_CELL = /(<td class="col-region">\$\{groupRegion \? `<span class="badge-region">\$\{[^}]*groupRegion[^}]*\}<\/span>` : '—'\}<\/td>)/;
+
 // --- Start a static server on a free port >= 13900 -----------------------
 function startServer() {
   return new Promise((resolve, reject) => {
@@ -76,14 +84,17 @@ function startServer() {
 
 // Render `renderExpr` (a JS expression yielding an HTML string) in-browser,
 // inject it into a real DOM subtree, and report what the parser produced.
-async function renderAndInspect(page, { renderExpr, argNames, args, wrap }) {
-  return page.evaluate(({ escSrc, renderExpr, argNames, args, wrap }) => {
+// `escName`/`escSrc` override the escaper in scope (e.g. customize-v2.js's
+// own esc), so a sink is rendered with the helper its file really calls.
+async function renderAndInspect(page, { renderExpr, argNames, args, wrap, escName, escSrc }) {
+  return page.evaluate(({ appEscSrc, renderExpr, argNames, args, wrap, escName, escSrc }) => {
     delete window.__xss333;
     const truncate = (s, n) => (s == null ? '' : String(s).slice(0, n));
-    const escapeHtml = (new Function(escSrc + '\nreturn escapeHtml;'))();
-    const fn = new Function(...argNames, 'escapeHtml', 'truncate',
+    const escapeHtml = (new Function(appEscSrc + '\nreturn escapeHtml;'))();
+    const localEsc = escSrc ? (new Function(escSrc + '\nreturn ' + escName + ';'))() : escapeHtml;
+    const fn = new Function(...argNames, 'escapeHtml', 'truncate', escName || '__unusedEsc',
       'return (' + renderExpr + ');');
-    const html = fn(...args, escapeHtml, truncate);
+    const html = fn(...args, escapeHtml, truncate, localEsc);
     const host = document.getElementById('host');
     // A standalone <td> is foster-parented (dropped) unless it sits inside a
     // table, so table-cell sinks must be re-homed before the parser runs.
@@ -105,7 +116,7 @@ async function renderAndInspect(page, { renderExpr, argNames, args, wrap }) {
     };
     host.innerHTML = '';
     return out;
-  }, { escSrc: escapeHtmlSrc(), renderExpr, argNames, args, wrap });
+  }, { appEscSrc: escapeHtmlSrc(), renderExpr, argNames, args, wrap, escName, escSrc });
 }
 
 function assertInert(r, label) {
@@ -150,7 +161,7 @@ function assertInert(r, label) {
   //    badge text). Also confirms the data-value sort key survives.
   await test('observer region: hostile iata renders inert, sort key preserved', async () => {
     const tpl = liftTemplate('observers.js',
-      /(<td data-value="\$\{escapeHtml\(o\.iata[\s\S]*?<\/td>)/);
+      OBS_REGION_CELL);
     const r = await renderAndInspect(page, {
       renderExpr: '`' + tpl + '`', argNames: ['o'], args: [{ iata: PAYLOAD }], wrap: 'table',
     });
@@ -163,7 +174,7 @@ function assertInert(r, label) {
 
   await test('observer region: benign iata displays verbatim in the badge', async () => {
     const tpl = liftTemplate('observers.js',
-      /(<td data-value="\$\{escapeHtml\(o\.iata[\s\S]*?<\/td>)/);
+      OBS_REGION_CELL);
     const r = await renderAndInspect(page, {
       renderExpr: '`' + tpl + '`', argNames: ['o'], args: [{ iata: 'KÖLN & Co' }], wrap: 'table',
     });
@@ -175,13 +186,31 @@ function assertInert(r, label) {
   // 3. Packet region badge — groupRegion from the observer map iata.
   await test('packet region badge: hostile region renders inert', async () => {
     const tpl = liftTemplate('packets.js',
-      /(<td class="col-region">\$\{groupRegion \? `<span class="badge-region">\$\{escapeHtml\(groupRegion\)\}<\/span>` : '—'\}<\/td>)/);
+      PKT_REGION_CELL);
     const r = await renderAndInspect(page, {
       renderExpr: '`' + tpl + '`', argNames: ['groupRegion'], args: [PAYLOAD], wrap: 'table',
     });
     assertInert(r, 'packet region badge');
     if (!r.hasRegionBadge)
       throw new Error('packet region badge: badge-region span missing');
+  });
+
+  // 3b. Geo-filter prune preview (customize-v2.js) — rendered with the
+  //     file's own textContent-based esc(), serialized by the real parser.
+  await test('geo-filter prune preview: hostile node name renders inert with customize-v2 esc()', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
+    const escFn = src.match(/\n\s*(function esc\(s\) \{[^\n]*\})/);
+    if (!escFn) throw new Error('could not lift esc() from public/customize-v2.js');
+    const expr = liftTemplate('customize-v2.js', /return '<div>'\s*\+\s*([\s\S]*?)\s*\+\s*coords\s*\+\s*'<\/div>';/);
+    for (const name of [PAYLOAD, BENIGN]) {
+      const r = await renderAndInspect(page, {
+        renderExpr: "'<div>' + (" + expr + ") + '</div>'", argNames: ['n'],
+        args: [{ name, pubkey: 'abcdef012345' }], escName: 'esc', escSrc: escFn[1],
+      });
+      assertInert(r, 'geo-filter prune preview');
+      if (r.text !== name)
+        throw new Error('geo-filter prune preview: name not shown verbatim: ' + JSON.stringify(r.text));
+    }
   });
 
   // 4. Favorites dropdown — node name in the fav-dd-name span.

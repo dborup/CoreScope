@@ -64,6 +64,47 @@ function loadEscapeHtml() {
 }
 const escapeHtml = loadEscapeHtml();
 
+// #333 F5: sinks that call a file-local escaper must be tested with THAT
+// escaper, not with app.js's escapeHtml, or a weakened local escaper goes
+// unnoticed. Lift the one-line `function esc(s) { … }` from the file.
+function loadLocalEsc(file, ctxExtra) {
+  const src = fs.readFileSync(file, 'utf8');
+  const m = src.match(/\n\s*(function esc\(s\) \{[^\n]*\})/);
+  if (!m) throw new Error('could not locate function esc(s) in ' + file);
+  const ctx = Object.assign({ esc: null }, ctxExtra || {});
+  vm.createContext(ctx);
+  vm.runInContext(m[1] + '\nthis.esc = esc;', ctx);
+  return ctx.esc;
+}
+const analyticsEsc = loadLocalEsc('public/analytics.js');
+// customize-v2.js's esc() serializes a text node through a <div>
+// (textContent → innerHTML). Node has no DOM, so model the serializer as the
+// HTML spec defines it for text nodes: & < > and U+00A0 are escaped, quotes
+// are not. The function under test is still the production esc().
+const customizeEsc = loadLocalEsc('public/customize-v2.js', {
+  document: {
+    createElement: () => {
+      let text = '';
+      return {
+        set textContent(v) { text = String(v); },
+        get innerHTML() {
+          return text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/\u00a0/g, '&nbsp;');
+        },
+      };
+    },
+  },
+});
+
+// Text-context check for escapers that legitimately leave quotes alone
+// (customize-v2.js esc): no live tag, and the tag is shown escaped.
+function assertNoTagInText(html, label) {
+  if (/<img\b/i.test(html))
+    throw new Error(label + ': raw <img tag survived → angle-bracket escape broken: ' + html);
+  if (!html.includes('&lt;img'))
+    throw new Error(label + ': missing &lt;img marker (tag was not escaped): ' + html);
+}
+
 // --- Template extraction + eval ------------------------------------------
 // Captures a template literal from a source file, given a regex with ONE
 // group that contains the inner of the backtick-delimited template.
@@ -659,12 +700,12 @@ test('#333 geo-filter prune preview escapes node name', () => {
   const src = fs.readFileSync('public/customize-v2.js', 'utf8');
   const m = src.match(/return '<div>'\s*\+\s*([\s\S]*?)\s*\+\s*coords\s*\+\s*'<\/div>';/);
   assert.ok(m, '#333 geo-prune: prune list item concat not found');
-  // Production esc() is a textContent-based escaper; model it with escapeHtml
-  // (a superset) so the containment markers hold for the DOM-grep assertion.
+  // #333 F5: run customize-v2.js's own esc() (text context, quotes are
+  // legitimately left alone there), not app.js's escapeHtml.
   const fn = new Function('n', 'esc', 'coords',
     'return `<div>` + (' + m[1] + ') + coords + `</div>`;');
-  const html = fn({ name: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, escapeHtml, '');
-  assertNoXss(html, '#333 geo-filter prune preview name');
+  const html = fn({ name: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, customizeEsc, '');
+  assertNoTagInText(html, '#333 geo-filter prune preview name');
 });
 
 // 3a. Observer regions — observers table badge (template-literal form).
@@ -701,11 +742,13 @@ test('#333 packets region badge escapes groupRegion', () => {
 //    pin: already escaped in our fork; the mutant is removing esc()).
 test('#333 clock-health table escapes node name (regression pin)', () => {
   const src = fs.readFileSync('public/analytics.js', 'utf8');
-  const m = src.match(/<td><strong>'\s*\+\s*((?:esc\()?n\.nodeName[\s\S]*?)\s*\+\s*'<\/strong><\/td>/);
+  // Escaped or not (`esc(n.nodeName …)` / `(n.nodeName …)`), so a mutant fails
+  // on behaviour, not on "cell not found" (#333 F6).
+  const m = src.match(/<td><strong>'\s*\+\s*([^\n]*?n\.nodeName[^\n]*?)\s*\+\s*'<\/strong><\/td>/);
   assert.ok(m, '#333 clock-health name cell not found');
   const fn = new Function('n', 'esc',
     'return `<td><strong>` + (' + m[1] + ') + `</strong></td>`;');
-  const html = fn({ nodeName: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, escapeHtml);
+  const html = fn({ nodeName: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, analyticsEsc);
   assertNoXss(html, '#333 clock-health node name');
 });
 
@@ -721,7 +764,7 @@ test('#333 RF-health cell escapes observer_id in attributes', () => {
   // Double-quote attribute breakout attempt on observer_id.
   const dqPayload = '"><img src=x onerror=alert(1)>';
   const html = fn(
-    { observer_id: dqPayload, sample_count: 5 }, false, escapeHtml,
+    { observer_id: dqPayload, sample_count: 5 }, false, analyticsEsc,
     '-100', '-105', '-95', '', '', TAG_PAYLOAD + ATTR_PAYLOAD);
   assert.ok(!/<img\b/i.test(html),
     '#333 RF-health: raw <img survived (observer_id attr breakout): ' + html);
@@ -730,6 +773,13 @@ test('#333 RF-health cell escapes observer_id in attributes', () => {
   // The aria-label name must also be escaped.
   assert.ok(!/'\s*onfocus\s*=/i.test(html),
     '#333 RF-health: aria-label attr-breakout survived: ' + html);
+});
+
+// 6b. #333 F5: the RF-health attribute fix relies on analytics.js's own
+//     esc() encoding both quote characters. Pin that contract directly.
+test("#333 analytics.js esc() encodes the 5-char OWASP set (attribute-safe)", () => {
+  assert.strictEqual(analyticsEsc('&<>"\''), '&amp;&lt;&gt;&quot;&#39;');
+  assert.strictEqual(analyticsEsc(null), '');
 });
 
 // 7a. Unknown-route heading (app.js) — URL-hash route in <h2>.
