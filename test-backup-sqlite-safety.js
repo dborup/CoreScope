@@ -23,7 +23,7 @@ function settle(state) {
   if (state.stopAt && Date.now() >= state.stopAt) { state.running = false; delete state.stopAt; }
 }
 function which(tool) {
-  const found = spawnSync('sh', ['-c', 'command -v "$1"', 'sh', tool], {encoding:'utf8'}).stdout.trim();
+  const found = spawnSync('/bin/sh', ['-c', 'command -v "$1"', 'sh', tool], {encoding:'utf8'}).stdout.trim();
   assert(found.startsWith('/'), 'missing tool ' + tool); return found;
 }
 function sleep(ms) { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
@@ -39,6 +39,16 @@ settle(state);
 state.calls.push(args);
 function save() { fs.writeFileSync(statePath, JSON.stringify(state)); }
 function done(code=0) { save(); process.exit(code); }
+// Like Docker's Go CLI: an inherited ignored SIGHUP stays ignored, but
+// SIGINT/SIGTERM are re-enabled (signal.Notify) and kill it.
+function groupSignal(signal, recovery) {
+  state.groupSignals++; save();
+  if (recovery && signal === 'SIGHUP') process.on(signal, () => {});
+  process.kill(-state.pgid, signal);
+}
+// A repeated signal while recovery runs a start or inspect.
+if (state.groupSignals > 0 && (process.env.MOCK_RECOVERY_SIGNAL_OPS || '').split(',').includes(op))
+  groupSignal(process.env.MOCK_RECOVERY_SIGNAL, true);
 if (op === 'inspect') {
   if (process.env.MOCK_FAIL === 'inspect') done(21);
   console.log(args[2].includes('.Image') ? 'sha256:local-test-image' : String(state.running));
@@ -55,13 +65,7 @@ if (op === 'stop') {
     // The helper is the session leader (setsid -w), so its PID is its group.
     if (first) state.pgid = process.ppid;
     const signal = first ? process.env.MOCK_GROUP_SIGNAL : process.env.MOCK_RECOVERY_SIGNAL;
-    if (signal && state.groupSignals < 1 + Number(process.env.MOCK_RECOVERY_SIGNALS || 1)) {
-      state.groupSignals++; save();
-      // Like Docker's Go CLI: an inherited ignored SIGHUP stays ignored, but
-      // SIGINT/SIGTERM are re-enabled (signal.Notify) and kill it.
-      if (!first && signal === 'SIGHUP') process.on(signal, () => {});
-      process.kill(-state.pgid, signal);
-    }
+    if (signal && state.groupSignals < 1 + Number(process.env.MOCK_RECOVERY_SIGNALS || 1)) groupSignal(signal, !first);
     save();
     if (state.stopAt) sleep(state.stopAt - Date.now() + 5);
     state = JSON.parse(fs.readFileSync(statePath, 'utf8')); settle(state); process.exit(0);
@@ -270,6 +274,15 @@ for (const [first, again, status] of [['SIGHUP','SIGHUP',129],['SIGHUP','SIGINT'
   assertNoSnapshots(f);
 }));
 
+test('repeated group signals during the recovery start and inspect do not abort it', () => fixture(f => {
+  const result = f.backup({MOCK_STOP_DELAY_MS:'300', MOCK_GROUP_SIGNAL:'SIGINT', MOCK_RECOVERY_SIGNAL:'SIGINT',
+    MOCK_RECOVERY_SIGNAL_OPS:'start,inspect'}, {group:true});
+  assert.strictEqual(result.status, 130, result.stderr);
+  assert.strictEqual(f.settledRunning(), true, 'service left stopped after a repeated signal');
+  assert.doesNotMatch(result.stderr, /restart failed|not verified/);
+  assertNoSnapshots(f);
+}));
+
 test('without setsid, recovery retries a stop killed by a repeated signal', () => fixture(f => {
   // A PATH with the helper's tools but no setsid(1), as on macOS.
   const tools = path.join(f.dir, 'tools'); fs.mkdirSync(tools);
@@ -285,7 +298,7 @@ test('without setsid, recovery retries a stop killed by a repeated signal', () =
 test('recovery never trusts a start before the container is confirmed stopped', () => fixture(f => {
   const result = f.backup({MOCK_FAIL:'copy-wal', MOCK_STOP_NOOP:'1'}); assert.strictEqual(result.status, 23);
   assert.match(result.stderr, /could not confirm that corescope-test stopped/);
-  assert.match(result.stderr, /restart failed/); assertNoSnapshots(f);
+  assert.match(result.stderr, /restart not verified/); assertNoSnapshots(f);
 }, {wal:true}));
 
 test('a start that leaves the container stopped is a restart failure', () => fixture(f => {
