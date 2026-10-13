@@ -581,6 +581,98 @@ func TestObserverIDDropThrottleSamplePerReason(t *testing.T) {
 	}
 }
 
+// --- F3: the drop line's SOURCE tag must not mislabel either ---------------
+
+// observerIDDrops is one process-wide throttle shared by every MQTT source, so
+// the aggregated line has the same last-writer-wins problem for the source tag
+// that N4 fixed for the reason: whichever source happened to trigger the flush
+// got its name printed over a batch that several sources contributed to. Per
+// source counting would make the state grow with the source list, so the line
+// names the source only when it can do so truthfully and says "multiple
+// sources" otherwise — the same rule as omitting a reason that did not occur.
+func TestObserverIDDropThrottleLineDoesNotAttributeMixedSources(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	buf := captureObserverDropLog(t)
+
+	// First drop logs immediately; the batch that matters is the next window.
+	th.record("mqtt-SOURCE-A", strings.Repeat("a", 200), observerIDRejectTooLong, base)
+	buf.Reset()
+
+	th.record("mqtt-SOURCE-A", strings.Repeat("b", 200), observerIDRejectTooLong, base.Add(10*time.Second))
+	th.record("mqtt-SOURCE-A", "obs\x01aa", observerIDRejectControlChar, base.Add(20*time.Second))
+	// One drop from a different source flushes the batch.
+	th.record("mqtt-SOURCE-B", "obs\x02aa", observerIDRejectControlChar, base.Add(observerIDDropLogInterval))
+
+	line := buf.String()
+	if !strings.Contains(line, "dropped 3 message(s)") {
+		t.Fatalf("line does not report the batch total:\n%s", line)
+	}
+	if strings.Contains(line, "mqtt-SOURCE-B") {
+		t.Errorf("the line is tagged with the source that merely triggered the flush, attributing SOURCE-A's drops to it:\n%s", line)
+	}
+	if strings.Contains(line, "mqtt-SOURCE-A") {
+		t.Errorf("the line names SOURCE-A over a batch SOURCE-B also contributed to:\n%s", line)
+	}
+	if !strings.Contains(line, observerIDDropMixedSources) {
+		t.Errorf("a mixed-source batch must say so (%q):\n%s", observerIDDropMixedSources, line)
+	}
+}
+
+// The useful half: when every drop in the batch came from one source, that
+// source IS named — the fix must not throw the attribution away wholesale.
+func TestObserverIDDropThrottleLineNamesASingleSource(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	buf := captureObserverDropLog(t)
+
+	th.record("mqtt-SOURCE-A", strings.Repeat("a", 200), observerIDRejectTooLong, base)
+	if line := buf.String(); !strings.Contains(line, "MQTT [mqtt-SOURCE-A] [observer-id]") {
+		t.Errorf("a single-source line must name the source:\n%s", line)
+	}
+	buf.Reset()
+
+	th.record("mqtt-SOURCE-A", "obs\x01aa", observerIDRejectControlChar, base.Add(10*time.Second))
+	th.record("mqtt-SOURCE-A", "obs\x02aa", observerIDRejectControlChar, base.Add(observerIDDropLogInterval))
+	line := buf.String()
+	if !strings.Contains(line, "MQTT [mqtt-SOURCE-A] [observer-id]") {
+		t.Errorf("a single-source batch must name the source:\n%s", line)
+	}
+	if strings.Contains(line, observerIDDropMixedSources) {
+		t.Errorf("a single-source batch must not claim multiple sources:\n%s", line)
+	}
+}
+
+// The mixed flag is per batch, not sticky: once a mixed batch is flushed, the
+// next window starts over and can name its own single source again.
+func TestObserverIDDropThrottleMixedSourceFlagResetsPerBatch(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	buf := captureObserverDropLog(t)
+
+	// The very first drop logs immediately, so the mixed batch is the window
+	// after it.
+	th.record("mqtt-SOURCE-A", "obs\x01aa", observerIDRejectControlChar, base)
+	buf.Reset()
+	th.record("mqtt-SOURCE-A", "obs\x02aa", observerIDRejectControlChar, base.Add(10*time.Second))
+	th.record("mqtt-SOURCE-B", "obs\x03aa", observerIDRejectControlChar, base.Add(20*time.Second))
+	th.record("mqtt-SOURCE-B", "obs\x04aa", observerIDRejectControlChar, base.Add(observerIDDropLogInterval))
+	if line := buf.String(); !strings.Contains(line, observerIDDropMixedSources) {
+		t.Fatalf("the mixed batch must say so:\n%s", line)
+	}
+	buf.Reset()
+
+	// A fresh window, one source only.
+	th.record("mqtt-SOURCE-C", "obs\x05aa", observerIDRejectControlChar, base.Add(2*observerIDDropLogInterval))
+	line := buf.String()
+	if !strings.Contains(line, "MQTT [mqtt-SOURCE-C] [observer-id]") {
+		t.Errorf("the mixed flag leaked into the next batch:\n%s", line)
+	}
+	if strings.Contains(line, observerIDDropMixedSources) {
+		t.Errorf("the mixed flag leaked into the next batch:\n%s", line)
+	}
+}
+
 // --- F4: the builder is sized by the cap, not by the untrusted input -------
 
 // normalizeObserverText is damage containment, so its own allocation must be

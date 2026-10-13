@@ -160,6 +160,11 @@ const (
 	// counter still surfaces in the aggregate instead of being miscounted as
 	// one of the reasons above.
 	observerIDRejectOther = "other"
+
+	// observerIDDropMixedSources stands in for the source tag when the
+	// aggregated batch came from more than one MQTT source. See
+	// observerIDDropThrottle.record.
+	observerIDDropMixedSources = "multiple sources"
 )
 
 // observerIDRejectReasonOrder fixes both the throttle's counter slots and the
@@ -346,10 +351,25 @@ func normalizeObserverRegion(iata string) string {
 // to arrive last, is what keeps the aggregated line honest: a batch that mixes
 // too-long, invalid-utf8 and control-char drops cannot be labelled with any
 // single one of them without mislabelling the others.
+//
+// The SOURCE tag has the same problem and gets the same treatment. This
+// throttle is process-wide across every MQTT source, so printing whichever
+// source happened to trigger the flush attributes one source's drops to
+// another. Per-source counters would make the state grow with the source list,
+// which is the property this throttle exists to keep; instead the batch
+// remembers one tag and whether a second, different one contributed, and the
+// line names the source only when that is true — otherwise
+// observerIDDropMixedSources. Same rule as omitting a reason that did not
+// occur: say what is known, do not invent the rest.
 type observerIDDropThrottle struct {
-	mu         sync.Mutex
-	dropped    [len(observerIDRejectReasonOrder)]int64
-	samples    [len(observerIDRejectReasonOrder)]string
+	mu      sync.Mutex
+	dropped [len(observerIDRejectReasonOrder)]int64
+	samples [len(observerIDRejectReasonOrder)]string
+	// tag is the source tag of the batch accumulated since the last line, and
+	// tagMixed records that a different source also contributed to it. Both
+	// are reset per batch by flushLocked.
+	tag        string
+	tagMixed   bool
 	lastLogged time.Time
 }
 
@@ -370,23 +390,37 @@ func (t *observerIDDropThrottle) record(tag, sampleID, reason string, now time.T
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.pendingLocked() == 0 {
+		// First drop of a new batch: it owns the tag until another source
+		// contributes to the same batch.
+		t.tag, t.tagMixed = tag, false
+	} else if tag != t.tag {
+		t.tagMixed = true
+	}
 	t.dropped[slot]++
 	t.samples[slot] = sample
 	if !t.lastLogged.IsZero() && now.Sub(t.lastLogged) < observerIDDropLogInterval {
 		return
 	}
-	total, breakdown := t.flushLocked()
+	total, source, breakdown := t.flushLocked()
 	t.lastLogged = now
 	log.Printf("MQTT [%s] [observer-id] dropped %d message(s) with invalid observer id (%s); further invalid ids suppressed for %s",
-		tag, total, breakdown, observerIDDropLogInterval)
+		source, total, breakdown, observerIDDropLogInterval)
 }
 
-// flushLocked zeroes the per-reason counters and samples and returns the total
-// drop count plus a breakdown naming only the reasons that actually occurred,
+// flushLocked zeroes the per-reason counters and samples and the batch's
+// source attribution, and returns the total drop count, the source label for
+// the line, and a breakdown naming only the reasons that actually occurred,
 // each with its own count and its own most recent sample. A reason with no
-// drops is omitted entirely rather than printed as "reason=0". Caller holds
-// t.mu.
-func (t *observerIDDropThrottle) flushLocked() (int64, string) {
+// drops is omitted entirely rather than printed as "reason=0", and a batch
+// several sources contributed to is labelled observerIDDropMixedSources rather
+// than with any one of them. Caller holds t.mu.
+func (t *observerIDDropThrottle) flushLocked() (int64, string, string) {
+	source := t.tag
+	if t.tagMixed {
+		source = observerIDDropMixedSources
+	}
+	t.tag, t.tagMixed = "", false
 	var total int64
 	var b strings.Builder
 	for i, reason := range observerIDRejectReasonOrder {
@@ -402,7 +436,7 @@ func (t *observerIDDropThrottle) flushLocked() (int64, string) {
 		t.dropped[i] = 0
 		t.samples[i] = ""
 	}
-	return total, b.String()
+	return total, source, b.String()
 }
 
 // pendingDropped reports how many drops have accumulated across all reasons
@@ -411,6 +445,13 @@ func (t *observerIDDropThrottle) flushLocked() (int64, string) {
 func (t *observerIDDropThrottle) pendingDropped() int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.pendingLocked()
+}
+
+// pendingLocked is pendingDropped without the lock, for callers that already
+// hold t.mu. A zero total means the next drop starts a fresh batch — which is
+// what record uses it for.
+func (t *observerIDDropThrottle) pendingLocked() int64 {
 	var n int64
 	for _, c := range t.dropped {
 		n += c
