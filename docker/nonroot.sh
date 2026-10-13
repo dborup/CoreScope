@@ -149,27 +149,43 @@ untrusted() {
   die "$1. Root uses this file at every start, so CORESCOPE_UID/GID must not be able to write or replace it. Check its content, give it to root or the host user without write access for that group, and start again (docs/deployment.md, \"Running the Go services without root\")"
 }
 
-# check_trust UID:GID...: refuse when any of these IDs owns the data dir, or
-# could have written one of ROOT_FILES.
+# readonly_mount PATH: PATH is itself a read-only mount (e.g. a :ro bind
+# mount of config.json). Nothing in the container can write it, and a mount
+# point cannot be removed or renamed over.
+readonly_mount() {
+  awk -v p="$1" '$5 == p { ro = ($6 ~ /(^|,)ro(,|$)/) } END { exit !ro }' /proc/self/mountinfo
+}
+
+# check_trust: refuse when any UID:GID in $check_ids owns the data dir, or
+# when one of ROOT_FILES could have been written by anyone but root or the
+# data dir's owner. The data dir is writable for the services' group, so a
+# file there must be owned by root or that owner (never by a service UID) and
+# must not be writable for the services' group or for everyone.
 check_trust() {
   dir_owner=$(stat -c %u "$DATA_DIR")
-  for ids in "$@"; do
-    u=${ids%%:*}
-    g=${ids#*:}
-    [ "$dir_owner" != "$u" ] ||
-      die "CORESCOPE_UID=$u owns the data directory $DATA_DIR; the services must never own it. Use a dedicated ID, or give the directory back to root or the host user (docs/deployment.md, \"Running the Go services without root\")"
-    for name in $ROOT_FILES; do
-      p=$DATA_DIR/$name
-      [ ! -L "$p" ] || untrusted "$p is a symlink"
-      [ -e "$p" ] || continue
-      [ -f "$p" ] || untrusted "$p is not a regular file"
-      # shellcheck disable=SC2046 # word splitting is intended
-      set -- $(stat -c '%u %g %a %h' "$p")
-      [ "$4" = 1 ] || untrusted "$p has $4 hard links"
-      [ "$1" != "$u" ] || untrusted "$p is owned by $u, the services' user"
-      mode=$((0$3))
-      [ $((mode & 002)) -eq 0 ] || untrusted "$p is world-writable"
-      [ $((mode & 020)) -eq 0 ] || [ "$2" != "$g" ] || untrusted "$p is writable for group $g, the services' group"
+  for cid in $check_ids; do
+    [ "$dir_owner" != "${cid%%:*}" ] ||
+      die "CORESCOPE_UID=${cid%%:*} owns the data directory $DATA_DIR; the services must never own it. Use a dedicated ID, or give the directory back to root or the host user (docs/deployment.md, \"Running the Go services without root\")"
+  done
+  for name in $ROOT_FILES; do
+    p=$DATA_DIR/$name
+    [ ! -L "$p" ] || untrusted "$p is a symlink"
+    [ -e "$p" ] || continue
+    [ -f "$p" ] || untrusted "$p is not a regular file"
+    # shellcheck disable=SC2046 # word splitting is intended
+    set -- $(stat -c '%u %g %a %h' "$p")
+    [ "$4" = 1 ] || untrusted "$p has $4 hard links"
+    for cid in $check_ids; do
+      [ "$1" != "${cid%%:*}" ] || untrusted "$p is owned by ${cid%%:*}, the services' user"
+    done
+    if readonly_mount "$p"; then continue; fi
+    [ "$1" = 0 ] || [ "$1" = "$dir_owner" ] ||
+      untrusted "$p is owned by $1, which is neither root nor the owner of $DATA_DIR ($dir_owner)"
+    mode=$((0$3))
+    [ $((mode & 002)) -eq 0 ] || untrusted "$p is world-writable"
+    for cid in $check_ids; do
+      [ $((mode & 020)) -eq 0 ] || [ "$2" != "${cid#*:}" ] ||
+        untrusted "$p is writable for group ${cid#*:}, the services' group"
     done
   done
 }
@@ -192,8 +208,20 @@ preflight() {
       ;;
   esac
   [ -n "$ids$m_ids" ] || return 0
-  # shellcheck disable=SC2086 # one or two UID:GID words
-  check_trust $ids $m_ids
+  check_ids="$ids $m_ids"
+  check_trust
+  [ -n "$ids" ] || disarm_data_dir
+}
+
+# disarm_data_dir: the mode is off, but the data dir is still set up for it
+# (rollback step 2 not done yet). Root then runs everything, and the kernel's
+# fs.protected_regular would stop root from opening the services' files in a
+# sticky directory that is group-writable. Take back group write and the
+# sticky bit; restore-owners later restores the recorded mode exactly.
+disarm_data_dir() {
+  [ $((0$(stat -c %a "$DATA_DIR") & 01020)) -ne 0 ] || return 0
+  chmod g-w,-t "$DATA_DIR" || die "could not change the mode of $DATA_DIR"
+  log "the mode is off: removed group write and the sticky bit from $DATA_DIR so root can use the services' files; run restore-owners or set-owner (Rollback step 2) to finish the rollback"
 }
 
 paths() {
@@ -335,8 +363,8 @@ setup() {
   [ -d "$DATA_DIR" ] || die "$DATA_DIR does not exist"
   read_marker
   # Again after .env was sourced, with the IDs that will actually be used.
-  # shellcheck disable=SC2086 # empty or one UID:GID word
-  check_trust "$uid:$gid" $m_ids
+  check_ids="$uid:$gid $m_ids"
+  check_trust
   ensure_account "$uid" "$gid"
   secure_data_dir "$gid"
   migrate "$uid:$gid"
@@ -376,7 +404,8 @@ rollback_check() {
   [ "$(id -u)" = 0 ] || die "this command must run as root"
   [ -d "$DATA_DIR" ] || die "$DATA_DIR does not exist"
   read_marker
-  [ -z "$m_ids" ] || check_trust "$m_ids"
+  check_ids=$m_ids
+  [ -z "$m_ids" ] || check_trust
 }
 
 valid_owner() {

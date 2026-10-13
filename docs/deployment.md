@@ -105,7 +105,7 @@ compromised web server or ingestor can do. Nothing changes until you turn it on.
 |----------|--------|
 | `CORESCOPE_RUN_AS_NONROOT` | `1` or `true` turns it on. Unset, empty, `0` or `false` keep the default. Any other value stops the container with an error. |
 | `CORESCOPE_UID` | Required when on. A dedicated numeric user ID, e.g. `10001`: not 0, not an account that already exists in the image (`mosquitto` 101, `caddy` 100, `nobody` …), and not the owner of the data directory. |
-| `CORESCOPE_GID` | Required when on. Numeric group ID, 100 or higher and not the `mosquitto`/`caddy` group, e.g. `10001`. An existing group such as `users` (100) is reused. |
+| `CORESCOPE_GID` | Required when on. Numeric group ID, 100 or higher and not the `mosquitto`/`caddy` group, e.g. `10001`. Use a dedicated group that no host user belongs to: its members can create files in the data directory. (An existing image group such as `users` (100) is reused, but on most hosts GID 100 is a shared group.) |
 
 Set them with `-e`, in compose `environment:`, or in `/app/data/.env` as plain
 `KEY=VALUE` lines. Use a **dedicated** user ID that owns nothing on the host,
@@ -124,10 +124,12 @@ the old path unchanged and starts the same supervisor config files.
 1. **Check.** Before `.env` is sourced and `config.json`/`theme.json` are
    linked, the start stops with a `[nonroot] ERROR` line, and nothing is
    sourced, linked or changed, if any of those three files is a symlink, a
-   hard link or not a regular file, is owned by `CORESCOPE_UID`, or is
-   writable for `CORESCOPE_GID` or for everyone, or if `CORESCOPE_UID` owns
-   the data directory. A file the services created, or could have changed,
-   is therefore never used by root.
+   hard link or not a regular file, is owned by `CORESCOPE_UID`, is owned by
+   anyone but root or the owner of the data directory, or is writable for
+   `CORESCOPE_GID` or for everyone, or if `CORESCOPE_UID` owns the data
+   directory. A read-only mount (`config.json:ro`) is accepted whoever owns
+   it, since nothing in the container can change or replace it. A file the
+   services created, or could have changed, is therefore never used by root.
 2. The entrypoint creates a `corescope` account with those IDs and writes
    `/run/corescope/supervisord.conf`: the selected config with
    `user=corescope` added to the two Go programs only.
@@ -193,7 +195,10 @@ docker exec -u 10001:10001 corescope /app/corescope-ingestor -config /app/config
 ```
 
 Run as root, `admin delete-client-rx` refuses (`refusing to run as root`) and
-writes nothing.
+writes nothing. Run other tools that open the databases (e.g. `sqlite3`) with
+`-u` too: in the sticky, group-writable data directory the kernel's
+`fs.protected_regular` protection, enabled by default on many distributions,
+can stop even root from opening files that it does not own.
 
 #### Turning it on
 
@@ -240,9 +245,12 @@ previous owner on the host) before you start the new image.
 #### Rollback
 
 1. Remove the three variables (or set `CORESCOPE_RUN_AS_NONROOT=0`) and
-   recreate or restart the container. Everything runs as root again; root can
-   use the non-root-owned files, so this alone restores service. The check
-   from step 1 above keeps running at every start until step 2.
+   recreate or restart the container. Everything runs as root again, and this
+   alone restores service: the first start with the setting off removes group
+   write and the sticky bit from the data directory (logged as
+   `[nonroot] the mode is off: …`), because `fs.protected_regular` would
+   otherwise stop root from opening the services' files there. The check from
+   step 1 above keeps running at every start until step 2.
 2. Restore the recorded owners and modes. With the container **stopped**, run
    the helper from the same image as root:
 
