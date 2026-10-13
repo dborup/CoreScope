@@ -131,13 +131,13 @@ function warnedRows(page) {
   const near = {public_key: 'ef00' + '02'.repeat(30), name: 'CANON-NEAR', role: 'repeater', lat: 51.08, lon: 3.78};
   const hash = '7a'.repeat(32), now = new Date().toISOString();
   const packet = {id: 36301, hash, observer_id: 'CANON-OBS', observer_name: 'CANON-OBS', payload_type: 4,
-    route_type: 1, raw_hex: '1101ef', path_json: '["ef"]', decoded_json: '{}', timestamp: now, first_seen: now,
+    route_type: 1, direction: 'rx', raw_hex: '1101ef', path_json: '["ef"]', decoded_json: '{}', timestamp: now, first_seen: now,
     resolved_path: [far.public_key]};
   const observations = [
-    {id: 36301, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: [far.public_key]},
-    {id: 36302, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: JSON.stringify([near.public_key])},
-    {id: 36303, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: [null]},
-    {id: 36304, observer_id: packet.observer_id, path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now},
+    {id: 36301, observer_id: packet.observer_id, direction: 'rx', path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: [far.public_key]},
+    {id: 36302, observer_id: packet.observer_id, direction: 'rx', path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: JSON.stringify([near.public_key])},
+    {id: 36303, observer_id: packet.observer_id, direction: 'rx', path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now, resolved_path: [null]},
+    {id: 36304, observer_id: packet.observer_id, direction: 'rx', path_json: '["ef"]', raw_hex: packet.raw_hex, timestamp: now},
   ];
   await ctx.route(/\/api\/nodes(?:\?|$)/, route => route.fulfill({json: {nodes: [far, near], total: 2}}));
   await ctx.route(/\/api\/observers(?:\?|$)/, route => route.fulfill({json: {observers: [{id: packet.observer_id, name: packet.observer_name, iata: 'XYZ', lat: 51.21, lon: 3.44}]}}));
@@ -159,7 +159,7 @@ function warnedRows(page) {
       await page.waitForFunction(() => document.querySelector('#pktBody .hop-named')?.textContent === 'CANON-FAR');
       await header.click();
       await page.waitForSelector('#pktBody tr.group-child[data-id="36304"]');
-      for (const [id, name, warns] of [[36301, 'CANON-FAR', 0], [36302, 'CANON-NEAR', 0], [36303, 'CANON-NEAR', 1], [36304, 'CANON-NEAR', 1]]) {
+      for (const [id, name, warns] of [[36301, 'CANON-FAR', 0], [36302, 'CANON-NEAR', 0], [36303, 'CANON-FAR', 1], [36304, 'CANON-FAR', 1]]) {
         const path = page.locator('#pktBody tr.group-child[data-id="' + id + '"] .path-hops');
         assert((await path.textContent()).includes(name), id + ': wrong child name');
         assert(await path.locator('.hop-path-warn').count() === warns, id + ': wrong child certainty');
@@ -183,7 +183,7 @@ function warnedRows(page) {
     await step('observation-local UI: raw list preserves each observation rather than inheriting parent certainty', async () => {
       await page.locator('#fGroup').click();
       await page.waitForSelector('#pktBody tr[data-id="36304"]:not(.group-child)');
-      for (const [id, name, warns] of [[36301, 'CANON-FAR', 0], [36302, 'CANON-NEAR', 0], [36303, 'CANON-NEAR', 1], [36304, 'CANON-NEAR', 1]]) {
+      for (const [id, name, warns] of [[36301, 'CANON-FAR', 0], [36302, 'CANON-NEAR', 0], [36303, 'CANON-FAR', 1], [36304, 'CANON-FAR', 1]]) {
         const path = page.locator('#pktBody tr[data-id="' + id + '"] .path-hops');
         assert((await path.textContent()).includes(name), id + ': wrong raw-list name');
         assert(await path.locator('.hop-path-warn').count() === warns, id + ': wrong raw-list certainty');
@@ -229,6 +229,97 @@ function warnedRows(page) {
       assert(!errors.length, 'browser exceptions: ' + errors.join('; '));
     });
   } finally { await ctx.close(); }
+
+  // #408: current API headers have no observation-owned wire provenance.
+  // All heuristic positions retain global candidates, including terminals.
+  // APIs supply deterministic bulk data;
+  // the real app, resolver, cache, list/detail and WS handlers remain intact.
+  const hopCtx = await browser.newContext({viewport: {width: 1440, height: 900}});
+  const hopNodes = [
+    {public_key: 'aa01' + '01'.repeat(30), name: 'TEST-REMOTE-AA', role: 'repeater', lat: 45, lon: 2},
+    {public_key: 'aa02' + '02'.repeat(30), name: 'TEST-LOCAL-AA', role: 'repeater', lat: 55, lon: 10},
+    {public_key: 'bb01' + '03'.repeat(30), name: 'TEST-REMOTE-BB', role: 'repeater', lat: 45, lon: 2},
+    {public_key: 'bb02' + '04'.repeat(30), name: 'TEST-LOCAL-BB', role: 'repeater', lat: 55, lon: 10},
+  ];
+  const hopRows = [
+    {path_json: '["aa","bb"]', raw_hex: '1102aabb'},
+    {path_json: '["aa","aa"]', raw_hex: '1102aaaa'},
+    {path_json: '["aa"]', raw_hex: '1201aa', route_type: 2},
+    {path_json: '["aa"]', raw_hex: '1101aa', direction: 'tx'},
+    {path_json: '["aa","aa"]', raw_hex: '1102aaaa', resolved_path: [hopNodes[1].public_key, null]},
+    {path_json: '["aa"]', raw_hex: '100000000001aa', route_type: 0},
+  ].map((p, i) => ({id: 40801 + i, hash: (40801 + i).toString(16).padStart(64, '0'), count: 1,
+    observer_id: 'TEST-RX', observer_name: 'TEST-RX', payload_type: 4, route_type: 1, direction: 'rx',
+    timestamp: now, first_seen: now, latest: now, decoded_json: '{}', ...p}));
+  await hopCtx.route(/\/api\/nodes(?:\?|$)/, route => route.fulfill({json: {nodes: hopNodes, total: hopNodes.length}}));
+  await hopCtx.route(/\/api\/observers(?:\?|$)/, route => route.fulfill({json: {observers: [{id: 'TEST-RX', name: 'TEST-RX', iata: 'TST', lat: 55, lon: 10}]}}));
+  await hopCtx.route(/\/api\/iata-coords(?:\?|$)/, route => route.fulfill({json: {coords: {TST: {lat: 55, lon: 10}}}}));
+  await hopCtx.route(/\/api\/packets(?:[/?]|$)/, route => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== '/api/packets') {
+      const p = hopRows.find(row => url.pathname.endsWith(row.hash));
+      return route.fulfill({json: {packet: p, observations: p ? [p] : []}});
+    }
+    return route.fulfill({json: {packets: hopRows, total: hopRows.length}});
+  });
+  const hopPage = await hopCtx.newPage(), hopErrors = [];
+  hopPage.on('pageerror', error => hopErrors.push(error.message));
+  const expected = [
+    ['TEST-REMOTE-AA', 'TEST-REMOTE-BB'], ['TEST-REMOTE-AA', 'TEST-REMOTE-AA'],
+    ['TEST-REMOTE-AA'], ['TEST-REMOTE-AA'], ['TEST-LOCAL-AA', 'TEST-REMOTE-AA'], ['TEST-REMOTE-AA'],
+  ];
+  async function assertHopRow(p, names) {
+    const selector = '#pktBody tr[data-hash="' + p.hash + '"] .path-hops';
+    await hopPage.waitForFunction(([sel, want]) => {
+      const pills = [...(document.querySelector(sel)?.querySelectorAll('.hop') || [])];
+      return pills.length === want.length && pills.every((pill, i) => pill.textContent === want[i]);
+    }, [selector, names], {timeout: 10000});
+    const pills = hopPage.locator(selector + ' .hop');
+    for (let i = 0; i < names.length; i++) {
+      const n = hopNodes.find(node => node.name === names[i]);
+      assert(await pills.nth(i).getAttribute('href') === '#/nodes/' + n.public_key, 'wrong node link at hop ' + i);
+    }
+  }
+  try {
+    await step('#408 UI: unproven API headers do not confer receiver certainty at any heuristic position', async () => {
+      await hopPage.goto(LIST, {waitUntil: 'domcontentloaded'});
+      for (let i = 0; i < hopRows.length; i++) await assertHopRow(hopRows[i], expected[i]);
+      assert(await hopPage.locator('#pktBody tr[data-hash="' + hopRows[1].hash + '"] .hop-uncertain').count() === 2,
+        'both repeated positions stay explicitly uncertain without route provenance');
+    });
+    await step('#408 UI: selected detail and byte table retain global ambiguity for repeated prefixes', async () => {
+      const p = hopRows[1];
+      await hopPage.goto(BASE + '/#/packet/' + p.hash + '?obs=' + p.id, {waitUntil: 'domcontentloaded'});
+      await hopPage.waitForFunction(() => {
+        const dt = [...document.querySelectorAll('dt')].find(el => el.textContent === 'Path');
+        const pills = [...(dt?.nextElementSibling?.querySelectorAll('.hop') || [])];
+        return pills.length === 2 && pills.every(pill => pill.textContent === 'TEST-REMOTE-AA');
+      });
+      const detailPath = hopPage.locator('dt').filter({hasText: /^Path$/}).locator('xpath=following-sibling::dd[1]');
+      const names = await detailPath.locator('.hop').allTextContents();
+      assert(JSON.stringify(names) === JSON.stringify(expected[1]), 'detail collapsed repeated-prefix contexts: ' + JSON.stringify(names));
+      for (let i = 0; i < 2; i++) {
+        const byteRow = hopPage.locator('tr').filter({hasText: new RegExp('Hop ' + i + ' —')});
+        assert((await byteRow.locator('.hop').textContent()) === expected[1][i], 'byte table differs at position ' + i);
+      }
+    });
+    await step('#408 UI: remount and real WS mixed-route headers cannot narrow borrowed observation paths', async () => {
+      await hopPage.goto(LIST, {waitUntil: 'domcontentloaded'});
+      await assertHopRow(hopRows[1], expected[1]);
+      const wsRow = {...hopRows[1], id: 40820, hash: '48'.repeat(32), timestamp: new Date().toISOString()};
+      await hopPage.evaluate(p => wsListeners.slice().forEach(fn => fn({type: 'packet', data: {packet: p}})), wsRow);
+      await assertHopRow(wsRow, expected[1]);
+      // Real poller contract: tx.RawHex/RouteType plus obs.PathJSON/Direction.
+      // A DIRECT observation can be broadcast with a prior FLOOD frame.
+      const mixedRoute = {...hopRows[2], id: 40821, hash: '49'.repeat(32), raw_hex: '1101aa', route_type: 1,
+        direction: 'rx', timestamp: new Date().toISOString()};
+      await hopPage.evaluate(p => wsListeners.slice().forEach(fn => fn({type: 'packet', data: {packet: p}})), mixedRoute);
+      await assertHopRow(mixedRoute, ['TEST-REMOTE-AA']);
+      assert(await hopPage.locator('#pktBody tr[data-hash="' + mixedRoute.hash + '"] .hop-path-warn').count() === 1,
+        'borrowed FLOOD transmission bytes must not confer certainty on the DIRECT observation');
+      assert(!hopErrors.length, 'browser exceptions: ' + hopErrors.join('; '));
+    });
+  } finally { await hopCtx.close(); }
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);
