@@ -65,6 +65,17 @@ const capabilities = {
       finally { fs.rmSync(dir, {recursive:true, force:true}); }
     }},
 };
+// A few cases stub ls(1) or id(1) on PATH; a BusyBox sh built to prefer its
+// own applets never runs such a stub.
+capabilities['PATH stubs'] = {tool:'sh', reason:'this sh runs its own applets instead of commands found on PATH',
+  probe:() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'corescope-backup-probe-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'id'), '#!/bin/sh\necho 4242\n', {mode:0o700});
+      return spawnSync('sh', ['-c', '[ "$(id -u)" = 4242 ] && exit 7'],
+        {stdio:'ignore', timeout:10000, env:{...process.env, PATH:dir + path.delimiter + process.env.PATH}}).status === 7;
+    } finally { fs.rmSync(dir, {recursive:true, force:true}); }
+  }};
 // Every caller runs the helper as `sh …`, and /bin/sh differs between hosts:
 // dash (Debian, Ubuntu), bash in POSIX mode (RHEL, Fedora, Arch; bash 3.2 on
 // macOS) or BusyBox ash (Alpine). Each runs as a symlink named `sh`, which is
@@ -948,6 +959,7 @@ test('the lock lives in /tmp unless CORESCOPE_BACKUP_LOCK_DIR is set, whatever T
 const lsAs = (f, uid) => {
   // ls(1) reporting the private lock directory as uid's, as for a directory
   // another user created first. Everything else is the real ls.
+  need('PATH stubs');
   const shim = path.join(f.dir, 'bin', 'ls');
   fs.writeFileSync(shim, `#!/bin/sh
 for last; do :; done
@@ -955,8 +967,8 @@ case "$last" in */corescope-backup-locks) ${quote(which('ls'))} "$@" | sed 's/^\
 exec ${quote(which('ls'))} "$@"
 `, {mode:0o700});
 };
-const idAs = (f, uid) => fs.writeFileSync(path.join(f.dir, 'bin', 'id'),
-  `#!/bin/sh\nif [ "$1" = -u ]; then echo ${uid}; else exec ${quote(which('id'))} "$@"; fi\n`, {mode:0o700});
+const idAs = (f, uid) => { need('PATH stubs'); fs.writeFileSync(path.join(f.dir, 'bin', 'id'),
+  `#!/bin/sh\nif [ "$1" = -u ]; then echo ${uid}; else exec ${quote(which('id'))} "$@"; fi\n`, {mode:0o700}); };
 for (const backend of Object.keys(LOCK_BACKENDS)) {
   test('the ' + backend + ' lock lives in a private directory of this user', () => fixture(f => {
     const result = f.backup({PATH:LOCK_BACKENDS[backend](f)});
@@ -1158,10 +1170,10 @@ if (!process.env.CORESCOPE_TEST_MISSING_TOOLS) test('the suite is green and skip
   // Minus the deliberate SKIP that the runner self-check above produces.
   const skips = result.stdout.split('\n')
     .filter(line => line.startsWith('SKIP ') && !line.includes(SELF_CHECK));
-  assert.strictEqual(skips.length, 20, 'expected the 20 tool-dependent cases to skip, got ' + skips.length);
+  assert.strictEqual(skips.length, 62, 'expected the 62 tool-dependent cases to skip, got ' + skips.length);
   for (const line of skips) assert.match(line, new RegExp('needs (' + keys.join('|') + '): \\S'), line);
   assert.match(result.stdout, /\b0 failed\b/);
-  assert.match(result.stdout, /\b21 skipped\b/);
+  assert.match(result.stdout, /\b63 skipped\b/);
 });
 
 console.log(`${passed} passed, ${failed} failed` + (skipped ? `, ${skipped} skipped` : ''));

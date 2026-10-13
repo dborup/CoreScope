@@ -15,7 +15,11 @@ if [ "$#" -ne 2 ]; then
   echo "usage: $0 CONTAINER BACKUP_DIRECTORY" >&2
   exit 2
 fi
+# Both arguments are read here, before any function runs: bash 3.2 (also
+# macOS's /bin/sh) clears the script's positional parameters when a function
+# runs `command exec`, as acquire_lock does.
 container=$1
+backup_target=$2
 case "$container" in
   ''|-*|*[!a-zA-Z0-9_.-]*) echo 'invalid container name or ID' >&2; exit 2 ;;
 esac
@@ -33,9 +37,11 @@ esac
 id=$(docker inspect --format '{{.Id}}' "$container")
 case "$id" in *[!0-9a-f]*) id= ;; esac
 if [ "${#id}" -ne 64 ]; then echo 'unknown container ID' >&2; exit 1; fi
-lock=$lock_root/corescope-backup-$id.lock
+uid=$(id -u)
+lock=
 if command -v flock >/dev/null 2>&1; then lock_method=flock; else lock_method=mkdir; fi
 lock_held=0
+completed=0
 stage=
 backup_root=
 restart_needed=0
@@ -131,9 +137,54 @@ owner_gone() {
   [ "$gone" -eq 1 ]
 }
 
+# Mode and numeric owner of a path as ls(1) shows them, in dir_mode and
+# dir_owner; a symlink is not followed. `set --` sets only this function's
+# parameters; no here-document, which bash would write to $TMPDIR.
+dir_info() {
+  info=$(ls -ldn -- "$1") || return
+  set -f; set -- $info; set +f
+  dir_mode=${1-} dir_owner=${3-}
+}
+
+# The locks live in a directory that only this user can write to, so no other
+# user can plant a symlink or file at a lock path between its check and its
+# open. Its parent must not let another user rename it away: owned by root or
+# this user, and not writable by others unless sticky (like /tmp). Another
+# user's directory of that name is refused rather than shared: a lock is only
+# shared by backups run as the same user.
+private_lock_dir() {
+  mkdir -p -- "$lock_root"
+  lock_root=$(CDPATH='' cd -P -- "$lock_root" && pwd -P)
+  safe=0
+  if dir_info "$lock_root"; then
+    case "$dir_owner" in 0|"$uid")
+      # An ACL (+) may let others write, as group/other write bits do.
+      case "$dir_mode" in d????????[tT]*) safe=1 ;; d????w*|d???????w*|*+) ;; d*) safe=1 ;; esac ;;
+    esac
+  fi
+  if [ "$safe" -ne 1 ]; then
+    echo "ERROR: $lock_root lets other users replace the backup lock directory; it must belong to root or uid $uid and not be writable by others unless sticky (like /tmp)" >&2
+    exit 1
+  fi
+  lock_dir=$lock_root/corescope-backup-locks
+  # umask 077 makes a new directory 0700. Whoever created it, it is used only
+  # once verified to be a 0700 directory of this user, not a symlink.
+  mkdir -- "$lock_dir" 2>/dev/null || :
+  safe=0
+  if dir_info "$lock_dir" && [ "$dir_owner" = "$uid" ]; then
+    case "$dir_mode" in drwx------|drwx------[.@]) safe=1 ;; esac
+  fi
+  if [ "$safe" -ne 1 ]; then
+    echo "ERROR: $lock_dir is not a private lock directory (a directory of uid $uid with mode 0700, not a symlink); remove it once no backup is running, or set CORESCOPE_BACKUP_LOCK_DIR" >&2
+    exit 1
+  fi
+  lock=$lock_dir/corescope-backup-$id.lock
+}
+
 # Wait up to $lock_wait seconds for another invocation, then fail with
 # EX_TEMPFAIL (75) without having read or changed the container's state.
 acquire_lock() {
+  private_lock_dir
   if [ "$lock_method" = flock ]; then kind=-f; else kind=-d; fi
   if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! "$kind" "$lock" ]; }; then
     echo "ERROR: $lock is not a $lock_method lock; remove it once no backup of $container is running" >&2
@@ -170,6 +221,12 @@ release_lock() {
 
 finish() {
   status=$?
+  # bash 3.2 reports status 0 to this trap after a shell error such as an
+  # unbound variable; a run that did not reach its end never succeeded.
+  if [ "$status" -eq 0 ] && [ "$completed" -ne 1 ]; then
+    echo 'ERROR: stopped before completing; no backup was published' >&2 || :
+    status=1
+  fi
   # The shell itself must survive a repeated signal during recovery.
   trap '' HUP INT TERM
   trap - 0
@@ -218,7 +275,6 @@ set_signal_traps() {
 trap finish 0
 set_signal_traps
 
-mkdir -p -- "$lock_root"
 acquire_lock
 
 # Preserve an intentionally stopped container's state. Inspection failures are
@@ -226,7 +282,7 @@ acquire_lock
 running=$(docker inspect --format '{{.State.Running}}' "$container")
 case "$running" in true|false) ;; *) echo 'unknown container running state' >&2; exit 1 ;; esac
 # A leading "-" is neither an option nor `cd -`; CDPATH must not redirect cd.
-case "$2" in -*) target=./$2 ;; *) target=$2 ;; esac
+case "$backup_target" in -*) target=./$backup_target ;; *) target=$backup_target ;; esac
 mkdir -p -- "$target"
 backup_root=$(CDPATH='' cd -- "$target" && pwd -P)
 stage=$(mktemp -d "$backup_root/.corescope-backup-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
@@ -285,3 +341,4 @@ if [ -e "$destination" ] || [ -L "$destination" ]; then
 fi
 mv "$stage/snapshot" "$destination"
 printf '%s\n' "$destination"
+completed=1
