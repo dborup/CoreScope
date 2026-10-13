@@ -1252,6 +1252,70 @@ perfCardTest('#393 N5 health(node): el.currentLagMs card is escaped',
   { el: { currentLagMs: PERF_PAYLOAD } }, '#393 N5 el.currentLagMs');
 
 // =========================================================================
+// #393 F3 (round-2 review) — the explicit card tests above cover 8 of the
+// escapeHtml-wrapped perf-num cards. Drive EVERY card instead: list the
+// escaped cards per group, so dropping escapeHtml from any of them fails by
+// label, and evaluate each card's real perf-num template with a hostile
+// value behind every field it reads.
+// =========================================================================
+console.log('\n=== #393 F3 perf.js escaped perf-num cards (all) ===');
+
+const PERF_ESCAPED_CARDS = [
+  // overview
+  'Total Requests', 'Avg Response', 'Uptime',
+  // Go runtime
+  'Goroutines', 'GC Collections', 'CPUs', 'WS Clients',
+  // Node runtime
+  'Heap Used / ${escapeHtml(m.heapTotal)}MB', 'RSS', 'Event Loop p95', 'EL Max Lag',
+  'EL Current', 'WS Clients',
+  // SQLite stats
+  'Page Count', 'Page Size',
+  // cache (server + client)
+  'Server Entries', 'Server Hits', 'Server Misses', 'Server Hit Rate',
+  'Stale Hits (SWR)', 'Recomputes', 'Client Hits', 'Client Misses', 'Client Hit Rate',
+  // packet store
+  'Packets in RAM', 'Tracked Memory', 'Memory Limit', 'Heap (debug)', 'Queries Served',
+  'Live Inserts', 'Evicted', 'Unique Hashes', 'Observers', 'Indexed Nodes',
+  // SQLite
+  'DB Size', 'WAL Size', 'Freelist', 'Transmissions', 'Observations', 'Nodes',
+  'Observers', 'WAL Busy Pages',
+];
+
+function perfCards() {
+  const src = fs.readFileSync('public/perf.js', 'utf8');
+  const re = /<div class="perf-card"><div class="perf-num"(?: style="[^"]*")?>(.*?)<\/div><div class="perf-label">(.*?)<\/div><\/div>/g;
+  return [...src.matchAll(re)].map(m => ({ num: m[1], label: m[2] }));
+}
+
+// Stands in for every API object: any property is another hostile value, and
+// it converts to PERF_PAYLOAD as a string, number or via toLocaleString().
+function hostileValue() {
+  return new Proxy(function () {}, {
+    get(_, k) {
+      if (k === Symbol.toPrimitive) return () => PERF_PAYLOAD;
+      if (k === 'toString' || k === 'valueOf' || k === 'toLocaleString') return () => PERF_PAYLOAD;
+      return hostileValue();
+    },
+  });
+}
+
+test('#393 F3 perf.js: every listed card wraps its perf-num value in escapeHtml', () => {
+  const escaped = perfCards().filter(c => /\$\{escapeHtml\(/.test(c.num)).map(c => c.label);
+  assert.deepStrictEqual(escaped.slice().sort(), PERF_ESCAPED_CARDS.slice().sort(),
+    '#393 F3: the set of escapeHtml-wrapped perf-num cards changed');
+});
+
+for (const card of perfCards().filter(c => /\$\{escapeHtml\(/.test(c.num))) {
+  test(`#393 F3 perf card "${card.label}": hostile value is escaped`, () => {
+    const roots = [...new Set([...card.num.matchAll(/\$\{([\s\S]*?)\}/g)]
+      .flatMap(x => x[1].match(/(?<![.\w$])[A-Za-z_$][\w$]*/g) || []))]
+      .filter(id => id !== 'escapeHtml' && id !== 'Math');
+    const fn = new Function(...roots, 'escapeHtml', 'return `' + card.num + '`;');
+    assertNoXss(fn(...roots.map(hostileValue), escapeHtml), '#393 F3 ' + card.label);
+  });
+}
+
+// =========================================================================
 // #393 N6 (from the #394 re-review) — the error path at perf.js ~374 puts
 // escapeHtml(err.message) into innerHTML. err.message is attacker-influenced:
 // a non-JSON /api/perf body embeds in the JSON.parse message. It was the one
@@ -1291,8 +1355,14 @@ function fakeNavRow(tag, value) {
 
 // N6: the analytics repeater row is a <div> whose parent .repeater-list is a
 // plain <div>, so role="row" has no required rowgroup/table/grid ancestor
-// (11 critical axe violations). It must navigate without that broken role.
-test('#393 N6 analytics repeater row: no role="row" on the bare <div>', () => {
+// (11 critical axe violations). #393 F4 (round-2 review): rejecting only the
+// literal role="row" let role="cell" (equally invalid there) pass. Allow-list
+// the focusable row's role instead, and reject every WAI-ARIA 1.2 role with a
+// required context role anywhere in the row — none has its parent here.
+const ARIA_ROLES_NEEDING_CONTEXT = ['cell', 'columnheader', 'gridcell', 'listitem',
+  'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'row', 'rowgroup',
+  'rowheader', 'tab', 'treeitem'];
+test('#393 N6 analytics repeater row: a standalone interactive role, no role needing a context', () => {
   const src = fs.readFileSync('public/analytics.js', 'utf8');
   const m = src.match(/html \+= `<div class="repeater-row [\s\S]*?`;/);
   assert.ok(m, '#393 N6 analytics repeater-row template not found');
@@ -1300,9 +1370,16 @@ test('#393 N6 analytics repeater row: no role="row" on the bare <div>', () => {
     'let html = ""; ' + m[0] + ' return html;');
   const html = render({ pubkey: 'deadbeef12', name: 'Repeater', count: 5, hop: '1' },
     (s) => String(s), 50, encodeURIComponent);
-  assert.ok(!/\brole="row"/.test(html),
-    '#393 N6: repeater <div> must not carry role="row" (no table/grid ancestor): ' + html);
-  assert.ok(/\btabindex="0"/.test(html),
+  const rowTag = html.match(/^<div class="repeater-row[^>]*>/);
+  assert.ok(rowTag, '#393 N6: rendered repeater row tag not found: ' + html);
+  const rowRole = (rowTag[0].match(/\srole="([^"]*)"/) || [])[1];
+  assert.ok(rowRole === 'link' || rowRole === 'button',
+    '#393 N6: clickable repeater <div> needs role="link" or "button", got ' + rowRole + ': ' + rowTag[0]);
+  const bad = [...html.matchAll(/\srole="([^"]*)"/g)].map(x => x[1])
+    .filter(r => ARIA_ROLES_NEEDING_CONTEXT.includes(r));
+  assert.deepStrictEqual(bad, [],
+    '#393 N6: repeater row carries a role with no required ancestor here: ' + html);
+  assert.ok(/\btabindex="0"/.test(rowTag[0]),
     '#393 N6: repeater row lost tabindex="0" keyboard access: ' + html);
 });
 
@@ -1322,14 +1399,17 @@ test('#393 N7 analytics delegated handler: a DIV row navigates on click', () => 
 });
 
 // N9a: the compare packet row dropped its inline onclick (the latent
-// '-breakout in that double-quoted/JS context). Pin that the row tag carries
-// no inline on* handler — re-adding onclick goes red.
-test('#393 N9 compare.js packet row: no inline on* handler', () => {
+// '-breakout in that double-quoted/JS context). Pin that the row carries no
+// inline on* handler — re-adding onclick goes red. #393 F5 (round-2 review):
+// scan the whole row expression, <tr> through '</tr>', so an on* attribute
+// moved onto a child <td>/<span> goes red too.
+test('#393 N9 compare.js packet row: no inline on* handler on the row or its children', () => {
   const src = fs.readFileSync('public/compare.js', 'utf8');
-  const m = src.match(/return '<tr style="cursor:pointer".*data-action="navigate".*>' \+/);
-  assert.ok(m, '#393 N9 compare packet-row opening tag not found');
-  assert.ok(!/\son[a-z]+=/i.test(m[0]),
-    '#393 N9: compare packet row still has an inline on* handler: ' + m[0]);
+  const m = src.match(/return '<tr style="cursor:pointer"[^\n]*data-action="navigate"[\s\S]*?'<\/tr>';/);
+  assert.ok(m, '#393 N9 compare packet-row expression not found');
+  assert.ok(/<td/.test(m[0]), '#393 N9: captured row has no <td> children: ' + m[0]);
+  const on = m[0].match(/\son[a-z]+\s*=/i);
+  assert.ok(!on, '#393 N9: compare packet row still has an inline handler (' + (on && on[0]) + '): ' + m[0]);
 });
 
 // Run the REAL compare.js init() in a vm with a fake #app whose innerHTML
