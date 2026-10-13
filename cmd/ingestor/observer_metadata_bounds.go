@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -197,21 +198,26 @@ func observerRuneIsControl(r rune) bool {
 	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
-// observerRuneIsBidiControl reports whether r is one of the twelve codepoints
-// Unicode gives the Bidi_Control property: the marks U+061C (ALM), U+200E
-// (LRM) and U+200F (RLM), the embeddings/overrides U+202A-U+202E, and the
-// isolates U+2066-U+2069. All twelve are invisible and all twelve affect how
-// the text around them renders, so they can make a stored id or name display
-// as something it is not. See this file's header.
+// observerRuneIsBidiControl reports whether r has Unicode's Bidi_Control
+// property: the marks U+061C (ALM), U+200E (LRM) and U+200F (RLM), the
+// embeddings/overrides U+202A-U+202E, and the isolates U+2066-U+2069 — twelve
+// codepoints, all invisible, all of which change how the text around them
+// renders, so they can make a stored id or name display as something it is
+// not. See this file's header.
 //
-// The three marks are listed individually because they do not sit in a range
-// with the others — which is exactly why they were missed first time round.
+// It reads the property from the stdlib's table rather than enumerating the
+// codepoints, because enumerating them is exactly how three of the twelve got
+// missed: the marks do not sit in a range with the other nine. A hand-rolled
+// list can fall behind the property; unicode.Is cannot.
+//
+// The twelve are still written out, as a reviewed list, in
+// bidiControlRunes in observer_metadata_bounds_review_test.go, and
+// TestObserverBidiControlMatchesTheUnicodeProperty asserts the two agree over
+// every codepoint. So a Go toolchain whose Unicode version changes this
+// property announces itself as a failing test rather than silently changing
+// which observer ids this ingestor accepts.
 func observerRuneIsBidiControl(r rune) bool {
-	switch r {
-	case 0x061c, 0x200e, 0x200f:
-		return true
-	}
-	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
+	return unicode.Is(unicode.Bidi_Control, r)
 }
 
 // observerIDRejectReason returns a short machine reason an observer id must be

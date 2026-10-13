@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -310,6 +311,44 @@ var bidiControlBorderRunes = []rune{
 	'\u2060', // word joiner — invisible, not Bidi_Control
 	'\u2065', // just below LRI
 	'\u206a', // just above PDI
+}
+
+// bidiControlRunes above is the list a human reviewed; unicode.Bidi_Control is
+// what the implementation reads. This test is the bridge: it asserts the two
+// describe the same set, scanning every codepoint rather than sampling. So the
+// implementation cannot miss a codepoint of the property (the F2 defect), and
+// a Go toolchain whose Unicode version CHANGES the property announces itself
+// here as a failing test instead of silently changing which observer ids this
+// ingestor accepts.
+func TestObserverBidiControlMatchesTheUnicodeProperty(t *testing.T) {
+	reviewed := make(map[rune]bool, len(bidiControlRunes))
+	for _, r := range bidiControlRunes {
+		reviewed[r] = true
+	}
+	var extra, missing []rune
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		property := unicode.Is(unicode.Bidi_Control, r)
+		if property && !reviewed[r] {
+			missing = append(missing, r)
+		}
+		if !property && reviewed[r] {
+			extra = append(extra, r)
+		}
+		// The predicate the ingestor actually uses must agree with the
+		// property everywhere, not just on the reviewed list.
+		if got := observerRuneIsBidiControl(r); got != property {
+			t.Fatalf("observerRuneIsBidiControl(U+%04X) = %v, want %v (unicode.Bidi_Control, Unicode %s)", r, got, property, unicode.Version)
+		}
+	}
+	for _, r := range missing {
+		t.Errorf("U+%04X has the Bidi_Control property but is not in bidiControlRunes (Unicode %s added it?) — review it and add it", r, unicode.Version)
+	}
+	for _, r := range extra {
+		t.Errorf("U+%04X is in bidiControlRunes but no longer has the Bidi_Control property (Unicode %s)", r, unicode.Version)
+	}
+	if len(bidiControlRunes) != 12 {
+		t.Errorf("bidiControlRunes has %d entries, want the 12 Bidi_Control codepoints", len(bidiControlRunes))
+	}
 }
 
 // The three Bidi_Control codepoints round 2 missed, called out on their own so
