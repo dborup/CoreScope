@@ -653,7 +653,11 @@
 
   // ==================== HELPERS ====================
   function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function escapeAttr(s) { return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  /* #368: one shared implementation, defined and exported by public/roles.js
+     (which index.html loads before this file) so the Markdown link
+     destinations in miniMarkdown() and the attribute sinks here cannot drift
+     apart. Behaviour is unchanged from the local copy this replaces. */
+  function escapeAttr(s) { return window.escapeAttr(s); }
   function timeSinceMs(d) { return Date.now() - d.getTime(); }
 
   function checklist(homeCfg) {
