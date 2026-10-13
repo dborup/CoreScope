@@ -79,12 +79,13 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
 
   await step(`first table row appears < ${FIRST_ROW_BUDGET_MS}ms despite ${OBSERVERS_DELAY_MS}ms /api/observers stub`, async () => {
-    // Clean SPA state — mirrors gotoPackets() pattern from test-e2e-playwright.js.
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-    await page.evaluate(() => {
+    // Clean SPA state, seeded before any app script runs: packets.js reads
+    // meshcore-time-window when it is evaluated, not on each init() (#439).
+    await ctx.addInitScript((windowMin) => {
       localStorage.removeItem('meshcore-groupbyhash');
-      localStorage.setItem('meshcore-time-window', '525600');
-    });
+      localStorage.setItem('meshcore-time-window', String(windowMin));
+    }, SEEDED_WINDOW_MIN);
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' });
     firstPacketsUrl = null;
 
     const t0 = Date.now();
