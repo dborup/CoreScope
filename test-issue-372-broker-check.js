@@ -116,6 +116,30 @@ test('the legacy mqtt block is ignored when mqttSources is present', () => {
     'the ignored legacy block must not raise a loopback warning:\n' + r.out);
 });
 
+test('an empty mqttSources array falls back to the legacy block, as LoadConfig does', () => {
+  const config = JSON.stringify({
+    mqttSources: [],
+    mqtt: { broker: 'mqtt://legacy.example:1883', topic: 'meshcore/#' },
+  });
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'true' }, config });
+  assert.strictEqual(r.status, 0, 'expected exit 0, got ' + r.status + '\n' + r.out);
+  assert.match(r.out, /legacy\.example/, r.out);
+});
+
+test('a "]" inside a topic pattern does not truncate the mqttSources array', () => {
+  // The mqttSources region is bracket-matched and string-aware; a naive
+  // scan to the first "]" would stop inside the topics list and miss the
+  // broker, reporting "no source configured" for a configured install.
+  const config = JSON.stringify({
+    mqttSources: [{ name: 'weird]name', broker: 'mqtt://real.example:1883', topics: ['meshcore/]odd/#', 'a[b]c'] }],
+    mqtt: { broker: 'mqtt://localhost:1883', topic: 'x' },
+  });
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'true' }, config });
+  assert.strictEqual(r.status, 0, 'expected exit 0, got ' + r.status + '\n' + r.out);
+  assert.match(r.out, /real\.example/, r.out);
+  assert.doesNotMatch(r.out, /loopback/i, 'the ignored legacy block must not be counted:\n' + r.out);
+});
+
 test('config.example.json reports exactly the sources the ingestor will use', () => {
   // The shipped example has three mqttSources plus a legacy mqtt block; the
   // ingestor sees three, one of them loopback.
