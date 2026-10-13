@@ -786,7 +786,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 	// the upstream behaviour #338 forbids. The gate deliberately sits ABOVE the
 	// neighbors/status/packet dispatch so one check covers all three; moving it
 	// below any of them reopens that path (pinned in
-	// observer_metadata_bounds_review_test.go). Non-observer message topics
+	// observer_metadata_bounds_review_test.go). The guard is `> 2` and not
+	// `>= 4`, because meshcore/<region>/<observer_id> — three segments, no
+	// sub-topic — is itself a raw-packet ingestion topic; narrowing it to `> 3`
+	// ungates that form, which is pinned separately in
+	// observer_bounds_followups_395_test.go. Non-observer message topics
 	// (meshcore/message/{channel,direct}/...) carry a short literal in parts[2]
 	// and always pass. Diagnostics are rate-limited and never log the full id —
 	// see observer_metadata_bounds.go.

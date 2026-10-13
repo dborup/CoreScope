@@ -141,6 +141,32 @@ const (
 	// 64 runes is 3x the longest observed.
 	maxObserverRadioRunes = 64
 
+	// maxObserverTextScanRunes bounds how many runes normalizeObserverText
+	// EXAMINES, as opposed to how many it keeps (#395). The per-field rune caps
+	// above bound the output and, since F4, the allocation — but not the walk:
+	// stripping happens before the output cap is consulted (it has to, or a
+	// field padded with control bytes would count that padding against the
+	// visible cap), so a run of control or bidi runes is otherwise visited in
+	// full however long it is. Each visit costs an observerRuneIsControl plus an
+	// observerRuneIsBidiControl, and the latter is a binary search over
+	// Unicode's Bidi_Control table. There is no MQTT payload size cap anywhere
+	// in cmd/ingestor — handleMessage hands json.Unmarshal the raw payload — so
+	// the length of a display field is a broker deployment property, and a
+	// publisher sending megabytes of U+202E would otherwise buy megabytes of
+	// table lookups per message.
+	//
+	// Derivation: 4096 is 64x the largest display cap (64 runes), so every
+	// field this ingestor stores still has ~63 runes of stripped padding per
+	// kept rune available to it before the budget bites — far more slack than
+	// any legitimate value needs (the only control character the CI fixture
+	// carries is a single trailing CR). The trade is deliberate and asserted:
+	// text that sits BEYOND the budget behind a run of stripped runes is not
+	// reached, so a field that is 4096 control runes followed by a name
+	// normalizes to "" rather than to the name. For a damage-containment
+	// helper, dropping an absurdly padded field is the better failure than
+	// walking it.
+	maxObserverTextScanRunes = 4096
+
 	// observerIDDropLogInterval rate-limits the invalid-id diagnostic. One
 	// aggregated line per interval is enough to make a drop visible without
 	// letting a publisher that sprays malformed ids drive unbounded log volume.
@@ -272,38 +298,62 @@ func observerIDRejectReason(id string) string {
 // split — the invariant the Unicode test pins. maxRunes <= 0 means "strip only,
 // do not truncate".
 //
-// The builder is pre-sized from the cap rather than from len(s): see the
-// comment at the Grow call.
+// Both the WALK and the allocation are bounded, independently of maxRunes: see
+// maxObserverTextScanRunes and the comment at the Grow call.
 func normalizeObserverText(s string, maxRunes int) string {
+	out, _ := normalizeObserverTextScan(s, maxRunes)
+	return out
+}
+
+// normalizeObserverTextScan is normalizeObserverText plus the number of runes
+// the walk actually examined. The scan count is the only observable the walk
+// bound has of its own: an input made entirely of stripped runes returns ""
+// whether the walk stopped at maxObserverTextScanRunes or ran to the end, so
+// without this a test could only pin the bound through elapsed time (flaky) or
+// through the mixed padding-then-text case (which pins one consequence, not the
+// bound). Production calls normalizeObserverText and ignores the count.
+func normalizeObserverTextScan(s string, maxRunes int) (string, int) {
 	if s == "" {
-		return s
+		return s, 0
 	}
 	var b strings.Builder
-	// Size the builder from what this call can RETURN, not from what it was
-	// handed. The output is at most maxRunes runes, i.e. 4*maxRunes bytes in
-	// UTF-8, so a hostile 4 MiB display field no longer buys a 4 MiB
-	// allocation to produce 64 runes — there is no payload size cap upstream
-	// (handleMessage hands json.Unmarshal the raw payload), so the field length
-	// is a broker deployment property. min() keeps the single-allocation intent
-	// for the common short field. maxRunes <= 0 is "strip only, do not
-	// truncate", where the input length IS the bound on the output.
-	if maxRunes > 0 {
-		b.Grow(min(len(s), 4*maxRunes)) // 4 bytes is the widest UTF-8 rune
-	} else {
-		b.Grow(len(s))
-	}
-	n := 0
+	b.Grow(observerTextBuilderBytes(s, maxRunes))
+	kept, scanned := 0, 0
 	for _, r := range s {
+		if scanned == maxObserverTextScanRunes {
+			// Out of walk budget. See maxObserverTextScanRunes: this is the
+			// bound on the WORK, which the output caps below cannot give,
+			// because stripping deliberately does not count against them.
+			break
+		}
+		scanned++
 		if observerRuneIsControl(r) || observerRuneIsBidiControl(r) {
 			continue // see the control-character policy in this file's header
 		}
-		if maxRunes > 0 && n == maxRunes {
+		if maxRunes > 0 && kept == maxRunes {
 			break
 		}
 		b.WriteRune(r)
-		n++
+		kept++
 	}
-	return b.String()
+	return b.String(), scanned
+}
+
+// observerTextBuilderBytes sizes the builder from what the call can RETURN, not
+// from what it was handed, so a hostile 4 MiB display field does not buy a
+// 4 MiB allocation to produce 64 runes. Two bounds apply, whichever is tighter:
+// the output cap (maxRunes runes, i.e. 4*maxRunes bytes in UTF-8) and the walk
+// bound, which caps the output at maxObserverTextScanRunes runes even in the
+// maxRunes <= 0 "strip only, do not truncate" mode that has no output cap of
+// its own. min() against len(s) keeps the single-allocation intent for the
+// common short field.
+func observerTextBuilderBytes(s string, maxRunes int) int {
+	const widestRuneBytes = 4
+	limit := widestRuneBytes * maxObserverTextScanRunes
+	if maxRunes > 0 && widestRuneBytes*maxRunes < limit {
+		limit = widestRuneBytes * maxRunes
+	}
+	return min(len(s), limit)
 }
 
 // boundObserverMeta returns a copy of meta with its four free-text fields
