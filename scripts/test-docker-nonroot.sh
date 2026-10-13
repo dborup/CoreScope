@@ -414,7 +414,10 @@ ROLLBACK=$(printf '%s\n' "$RECORD" | docker run --rm -i --label "$LABEL" --pull 
 check "case 4 rollback: restore-owners exit status" "0" "$?"
 echo "# rollback: $ROLLBACK"
 while read -r own mode name; do
-    check "case 4 rollback: $name back to $own $mode" "$own $mode" "$(as_root "$V4" "stat -c '%u:%g %a' '/app/data/$name'")"
+    # SQLite removes -wal/-shm on a clean stop; restore-owners skips what is gone.
+    now=$(as_root "$V4" "if [ -e '/app/data/$name' ]; then stat -c '%u:%g %a' '/app/data/$name'; else echo gone; fi")
+    if [ "$now" = gone ]; then echo "# info: $name is gone since the record"; continue; fi
+    check "case 4 rollback: $name back to $own $mode" "$own $mode" "$now"
 done <<< "$RECORD"
 check "case 4 rollback: config untouched" "0:0" "$(owner "$V4" config.json)"
 NR_BEFORE=$(docker logs "$C4" 2>&1 | grep -c '^\[nonroot\]')
@@ -448,8 +451,10 @@ check "case 5: volume unchanged" "$BEFORE5" "$(tree "$V5")"
 # ---------------------------------------------------------------------------
 echo "# case 6: the services' user cannot change what root reads"
 V6=$(vol access)
+# Bind-mount-like: the host user owns the data dir and theme.json, root owns
+# config.json.
 as_root "$V6" "printf '%s' '$CONFIG' > /app/data/config.json && echo '{}' > /app/data/theme.json &&
-    chown 1000:1000 /app/data/theme.json"
+    chown 1000:1000 /app/data /app/data/theme.json"
 C6=$(start access "$V6" "${ON[@]}")
 check_cmd "case 6: ready" ready "$C6"
 ROOT_FILES=$(as_root "$V6" 'cd /app/data && md5sum config.json theme.json && stat -c "%n %i %u:%g %a" config.json theme.json')
