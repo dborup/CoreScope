@@ -1079,6 +1079,148 @@ test('#333 N3 analytics repeater row: no inline handler carries the node pubkey'
 });
 
 // =========================================================================
+// #392 — public/perf.js interpolates /api/perf values into innerHTML.
+// The endpoint key (unmatched /api/ routes collapse to the raw path) and
+// the slow-query path (raw r.URL.Path) are request-controlled, so a 404
+// under /api/ that is slow can carry markup. These drive the REAL perf.js
+// row templates (extracted from source) with a hostile value; dropping the
+// escapeHtml() wrapper makes the raw <img survive and flips them red.
+// =========================================================================
+console.log('\n=== #392 perf.js dashboard sinks ===');
+
+const PERF_PAYLOAD = TAG_PAYLOAD + ATTR_PAYLOAD;
+
+test('#392 perf endpoints table: endpoint key is escaped', () => {
+  // First `<tr${cls}>` statement in perf.js is the endpoints row (before the
+  // client-calls row). Captured regardless of the escapeHtml() wrapper so the
+  // assertion — not the match — flips on revert.
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr\$\{cls\}><td><code>\$\{[^`]*?<\/tr>)`;/,
+    { cls: '', path: PERF_PAYLOAD, s: { count: 1, avgMs: 2, p50Ms: 3, p95Ms: 4, maxMs: 5 }, total: 7 }
+  );
+  assertNoXss(html, '#392 perf endpoint key');
+});
+
+test('#392 perf client-calls table: client path is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr\$\{cls\}><td><code>\$\{[^}]*s\.path[^`]*?<\/tr>)`;/,
+    { cls: '', s: { path: PERF_PAYLOAD, count: 1, avgMs: 2, maxMs: 3, totalMs: 4 } }
+  );
+  assertNoXss(html, '#392 perf client path');
+});
+
+test('#392 perf slow-queries table: raw slow-query path is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr class="perf-slow">[^`]*?<\/tr>)`;/,
+    { q: { time: '2020-01-01T00:00:00Z', path: PERF_PAYLOAD, ms: 123, status: 200 } }
+  );
+  assertNoXss(html, '#392 perf slow-query path');
+});
+
+test('#392 perf write-sources table: source name is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr><td><code>\$\{[^`]*?<\/tr>)`;/,
+    { k: PERF_PAYLOAD, v: 1, rateStr: '', baseStr: '', flag: '' }
+  );
+  assertNoXss(html, '#392 perf write-source name');
+});
+
+test('#392 perf overview: server uptime string is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /(<div class="perf-card"><div class="perf-num">\$\{[^`]*?uptimeHuman[^`]*?Uptime<\/div><\/div>)/,
+    { health: { uptimeHuman: PERF_PAYLOAD }, server: { uptime: 60, totalRequests: 0, avgMs: 0 } }
+  );
+  assertNoXss(html, '#392 perf uptimeHuman');
+});
+
+test('#392 perf write-sources footer: sampleAt is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<div style="font-size:11px;[^`]*?Sampled:[^`]*?)`;/,
+    { writeSources: { sampleAt: PERF_PAYLOAD } }
+  );
+  assertNoXss(html, '#392 perf sampleAt');
+});
+
+// =========================================================================
+// #394 F2 — perf.js ships its OWN IIFE-local escapeHtml fallback (used when
+// evaluated without app.js's global, e.g. the perf-render unit sandboxes).
+// The other #392 tests inject app.js's escapeHtml via evalTemplate(), so a
+// weakened perf.js-local fallback went unnoticed. Drive the real selector +
+// fallback straight from source so an identity mutant on it flips red.
+// =========================================================================
+console.log('\n=== #394 F2 perf.js IIFE-local escapeHtml fallback ===');
+
+test('#394 F2 perf.js local escapeHtml fallback escapes (identity mutant → red)', () => {
+  const src = fs.readFileSync('public/perf.js', 'utf8');
+  // Capture the RHS of `const escapeHtml = <ternary>;` — minimal up to the
+  // first `};` (the close of the inline fallback function). Captured whether
+  // or not the fallback body escapes, so the assertion flips, not the match.
+  const m = src.match(/const escapeHtml = ([\s\S]*?\});\s*\n/);
+  assert.ok(m, '#394 F2: `const escapeHtml = <ternary>` not found in perf.js');
+  const select = new Function('globalThis', 'return (' + m[1] + ');');
+  // No global escapeHtml on the passed globalThis → the IIFE-local fallback
+  // branch is taken (exactly the standalone / sandbox case).
+  const fallback = select({});
+  assert.strictEqual(typeof fallback, 'function', '#394 F2: fallback is not a function');
+  assert.strictEqual(fallback('<'), '&lt;', '#394 F2: fallback did not escape <');
+  assert.strictEqual(fallback("'"), '&#39;', '#394 F2: fallback did not escape single quote');
+  assert.strictEqual(fallback('&'), '&amp;');
+  assert.strictEqual(fallback('>'), '&gt;');
+  assert.strictEqual(fallback('"'), '&quot;');
+  assert.strictEqual(fallback(null), '', '#394 F2: fallback null handling changed');
+  // A hostile payload is fully neutralised by the fallback alone.
+  const html = '<code>' + fallback(TAG_PAYLOAD + ATTR_PAYLOAD) + '</code>';
+  assertNoXss(html, '#394 F2 perf.js local fallback');
+  // And when a global escapeHtml IS present, the selector must prefer it.
+  const sentinel = (s) => 'SENTINEL:' + String(s);
+  assert.strictEqual(select({ escapeHtml: sentinel }), sentinel,
+    '#394 F2: selector did not prefer globalThis.escapeHtml when present');
+});
+
+// =========================================================================
+// #394 F1 — defence-in-depth: the numeric perf cards interpolate values
+// straight from /api/perf etc. They are number-typed server-side today, so
+// not request-controlled, but the issue criterion is "escape EVERY
+// interpolated perf value". These drive representative card sinks (one per
+// response object) with a hostile value; dropping the escapeHtml() wrapper
+// lets the raw <img survive and flips them red.
+// =========================================================================
+console.log('\n=== #394 F1 perf.js numeric-card sinks (defence in depth) ===');
+
+function perfCardTest(name, regex, bindings, label) {
+  test(name, () => {
+    const html = evalTemplate('public/perf.js', regex, bindings);
+    assertNoXss(html, label);
+  });
+}
+
+perfCardTest('#394 F1 overview: server.totalRequests card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*totalRequests[^}]*\}<\/div><div class="perf-label">Total Requests<\/div><\/div>)/,
+  { server: { totalRequests: PERF_PAYLOAD } }, '#394 F1 totalRequests');
+
+perfCardTest('#394 F1 cache: c.size card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*c\.size[^}]*\}<\/div><div class="perf-label">Server Entries<\/div><\/div>)/,
+  { c: { size: PERF_PAYLOAD } }, '#394 F1 cache size');
+
+perfCardTest('#394 F1 go runtime: gr.goroutines card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*gr\.goroutines[^}]*\}<\/div><div class="perf-label">Goroutines<\/div><\/div>)/,
+  { gr: { goroutines: PERF_PAYLOAD } }, '#394 F1 goroutines');
+
+perfCardTest('#394 F1 sqlite: sq.walPages.busy card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*sq\.walPages\.busy[^}]*\}<\/div><div class="perf-label">WAL Busy Pages<\/div><\/div>)/,
+  { sq: { walPages: { busy: PERF_PAYLOAD } } }, '#394 F1 walPages.busy');
+
+perfCardTest('#394 F1 packet store: ps.indexes.byObserver card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*ps\.indexes\.byObserver[^}]*\}<\/div><div class="perf-label">Observers<\/div><\/div>)/,
+  { ps: { indexes: { byObserver: PERF_PAYLOAD } } }, '#394 F1 byObserver');
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
 (async () => {
