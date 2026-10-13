@@ -763,6 +763,23 @@
   function filterHiddenControl(list, hide) {
     return hide ? list.filter(p => p.payload_type !== PAYLOAD_TYPE_CONTROL) : list;
   }
+  // Live updates carry decoded_json, not the indexed channel_hash column.
+  // Match the in-memory server's contract: GRP_TXT only, exact decoded.channel
+  // OR enc_<channelHashHex>, even when the payload has a readable channel name.
+  // Do not derive a hex value from channelHash: WS decoded_json is raw DB data.
+  // REST selection stays authoritative: SQL can select sparse decoded rows
+  // using its indexed channel_hash, which the response does not expose.
+  function packetMatchesChannel(p, channel) {
+    if (!channel) return true;
+    if (!p || p.payload_type !== 5) return false;
+    const decoded = getParsedDecoded(p);
+    if (typeof decoded.channel === 'string' && decoded.channel === channel) return true;
+    return channel.startsWith('enc_') && typeof decoded.channelHashHex === 'string' && decoded.channelHashHex !== ''
+      && 'enc_' + decoded.channelHashHex === channel;
+  }
+  function filterChannelPackets(list, channel) {
+    return channel ? list.filter(p => packetMatchesChannel(p, channel)) : list;
+  }
   // Whether hiding CONTROL is what emptied the list: some CONTROL packet from
   // before the CONTROL pass gets through the filters after it (laterFilters).
   // Called only for an empty list, and runs the CONTROL packets only.
@@ -1573,6 +1590,7 @@
         // When user pinned a hash, accept ONLY that exact packet — bypass all
         // other filters (window/region/type/observer/node).
         if (filters.hash) return p.hash === filters.hash;
+        if (!packetMatchesChannel(p, filters.channel)) return false;
         // Excluded live traffic must not consume the bounded matching page.
         if (hideControl && p.payload_type === PAYLOAD_TYPE_CONTROL) return false;
         // Respect time window filter — drop packets outside the selected window
@@ -1596,9 +1614,13 @@
 
       // Resolve any new hops, then update and re-render
       resolveIncomingHops(filtered).then(() => {
+        // The channel may change while hop initialization is in flight. Do
+        // not let stale-channel updates occupy the new bounded matching page.
+        const accepted = filters.hash ? filtered : filterChannelPackets(filtered, filters.channel);
+        if (!accepted.length) return;
         if (groupByHash) {
           // Update existing groups or create new ones
-          for (const p of filtered) {
+          for (const p of accepted) {
             const h = p.hash;
             const existing = hashIndex.get(h);
             if (existing) {
@@ -1611,7 +1633,10 @@
               }
               // Don't update path — header always shows first observer's path
               // Update decoded_json to latest
-              if (p.decoded_json) existing.decoded_json = p.decoded_json;
+              if (p.decoded_json) {
+                existing.decoded_json = p.decoded_json;
+                clearParsedCache(existing);
+              }
               // Update expanded children if this group is expanded
               if (expandedHashes.has(h) && existing._children) {
                 existing._children.unshift(clearParsedCache({...p, _isObservation: true}));
@@ -1652,10 +1677,10 @@
           }
         } else {
           // Flat mode: prepend, then evict oldest beyond the limit
-          packets = filtered.concat(packets);
+          packets = accepted.concat(packets);
           if (packets.length > PACKET_LIMIT) packets.length = PACKET_LIMIT;
         }
-        totalCount += filtered.length;
+        totalCount += accepted.length;
         // Coalesce WS-triggered renders via rAF (#396)
         scheduleWSRender();
       });
@@ -4585,9 +4610,12 @@
       applyObserverFilter,
       readHideControlPref,
       filterHiddenControl,
+      packetMatchesChannel,
+      filterChannelPackets,
       buildReplayPackets,
       renderTableRows,
       _setPackets: function(p) { packets = p; },
+      _packetHashes: function() { return packets.map(p => p.hash); },
       _setFilter: function(k, v) { filters[k] = v; },
       _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
       // #259: at <= 600 px groupIsExpandedInView() renders a hash that *is* in
