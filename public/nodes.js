@@ -616,9 +616,12 @@
   }
 
   let regionChangeHandler = null;
+  let packetCountHelpCleanup = null;
 
   function init(app, routeParam) {
     directNode = routeParam || null;
+    if (packetCountHelpCleanup) packetCountHelpCleanup();
+    packetCountHelpCleanup = setupPacketCountHelp(app);
 
     if (directNode) {
       // Full-screen single node view (desktop + mobile).
@@ -819,6 +822,89 @@
     return { title: name || (pubkey || '').slice(0, 12) + '…', html };
   }
 
+  // #382: help for the "Total Packets" count. The text depends on what the cell
+  // actually shows: the seen count exists only in the full view, and the
+  // advert_count fallback is not a transmission count.
+  function packetCountHelpText(opts) {
+    if (opts.fallback) {
+      return 'No packet statistics are available for this node, so this shows its advert count (adverts recorded for this node), not a count of transmissions.';
+    }
+    return 'Total Packets counts distinct transmissions involving this node as an originator, destination, or resolved relay. ' +
+      'It covers the current packet window (the in-memory packet store, limited by retention and the maximum packet count), not all time.' +
+      (opts.showSeen ? ' The seen count totals observations of those transmissions; one transmission can have multiple observations.' : '');
+  }
+
+  function renderPacketCountLabel(id, opts) {
+    return `<button type="button" class="sort-help node-packet-count-help" aria-label="Total Packets help" aria-describedby="${id}">Total Packets <span aria-hidden="true">ⓘ</span><span class="sort-help-tip" id="${id}" role="tooltip">${escapeHtml(packetCountHelpText(opts))}</span></button>`;
+  }
+
+  function setupPacketCountHelp(app) {
+    let activeHelp = null;
+    let frame = 0;
+
+    function position() {
+      if (!activeHelp || !activeHelp.isConnected) { activeHelp = null; return; }
+      const tip = activeHelp.querySelector('.sort-help-tip');
+      if (!tip.offsetHeight) return;
+      const trigger = activeHelp.getBoundingClientRect();
+      const container = activeHelp.closest('#nodesRight, #nodeFullBody');
+      if (!container) return;
+      const bounds = container.getBoundingClientRect();
+      const top = Math.max(0, bounds.top);
+      const bottom = Math.min(window.innerHeight, bounds.bottom);
+      const left = Math.max(0, bounds.left);
+      const right = Math.min(window.innerWidth, bounds.right);
+      if (trigger.bottom <= top || trigger.top >= bottom) {
+        activeHelp.classList.add('help-dismissed');
+        return;
+      }
+      tip.style.maxWidth = (right - left) + 'px';
+      tip.style.left = Math.max(left - trigger.left, Math.min(0, right - trigger.left - tip.offsetWidth)) + 'px';
+      const height = tip.offsetHeight;
+      const preferredTop = trigger.top - height < top ? trigger.bottom : trigger.top - height;
+      tip.style.top = (Math.max(top, Math.min(preferredTop, bottom - height)) - trigger.top) + 'px';
+      tip.style.bottom = 'auto';
+    }
+
+    function open(event) {
+      const help = event.target.closest('.node-packet-count-help');
+      if (!help || help.contains(event.relatedTarget)) return;
+      activeHelp = help;
+      help.classList.remove('help-dismissed');
+      if (event.type === 'pointerover') help.classList.toggle('help-touch', event.pointerType === 'touch');
+      position();
+    }
+
+    function schedule() {
+      if (!activeHelp || frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; position(); });
+    }
+
+    function dismiss(event) {
+      if (event.key !== 'Escape' || !activeHelp || !activeHelp.isConnected ||
+          !activeHelp.querySelector('.sort-help-tip').offsetHeight) return;
+      activeHelp.classList.add('help-dismissed');
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+
+    app.addEventListener('pointerover', open);
+    app.addEventListener('focusin', open);
+    app.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', schedule);
+    // Capture also dismisses hover-only help before the page's Escape shortcuts.
+    document.addEventListener('keydown', dismiss, true);
+    return () => {
+      app.removeEventListener('pointerover', open);
+      app.removeEventListener('focusin', open);
+      app.removeEventListener('scroll', schedule, true);
+      window.removeEventListener('resize', schedule);
+      document.removeEventListener('keydown', dismiss, true);
+      cancelAnimationFrame(frame);
+      activeHelp = null;
+    };
+  }
+
   async function loadFullNode(pubkey) {
     const body = document.getElementById('nodeFullBody');
     const viewSeq = ++detailViewSeq;
@@ -950,7 +1036,7 @@
           ${(n.role === 'repeater' || n.role === 'room') && Array.isArray(n.transported_scopes) && n.transported_scopes.length ? `<tr id="row-transported-scopes"><td title="Distinct region scopes (transmissions.scope_name) of all non-advert packets in which this repeater appears as a path hop. Shows which regions' traffic this repeater has carried (#1751).">Transported scopes</td><td><span style="display:inline-flex;flex-wrap:wrap;gap:3px;vertical-align:middle">${n.transported_scopes.map(sc => '<span class="badge">' + escapeHtml(String(sc)) + '</span>').join('')}</span></td></tr>` : ''}
           ${'configured_scope' in n && n.configured_scope !== null ? `<tr id="row-configured-scope"><td title="Region scopes this node has CONFIGURED, confirmed via an observer /neighbors report (status=responded) — concrete evidence, distinct from observed default scope and transported scopes (#1865).${n.configured_scope_at ? ' Last confirmed ' + escapeHtml(String(n.configured_scope_at)) + '.' : ''}">Configured scope <span style="color:var(--status-green,#2ecc71)" aria-label="confirmed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg></span></td><td>${n.configured_scope === '' ? '<span style="color:var(--text-muted)">none configured</span>' : `<code style="color:var(--link-color)">${escapeHtml(n.configured_scope)}</code>`}</td></tr>` : ''}
           <tr><td>First Seen</td><td>${renderNodeTimestampHtml(n.first_seen)}</td></tr>
-          <tr><td>Total Packets</td><td>${stats.totalTransmissions || stats.totalPackets || n.advert_count || 0}${stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets) ? ' <span class="text-muted" style="font-size:0.85em">(seen ' + stats.totalObservations + '×)</span>' : ''}</td></tr>
+          <tr><td>${renderPacketCountLabel('fullNodePacketCountHelp', { fallback: !(stats.totalTransmissions || stats.totalPackets), showSeen: !!(stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets)) })}</td><td>${stats.totalTransmissions || stats.totalPackets || n.advert_count || 0}${stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets) ? ' <span class="text-muted" style="font-size:0.85em">(seen ' + stats.totalObservations + '×)</span>' : ''}</td></tr>
           <tr><td>Packets Today</td><td>${stats.packetsToday || 0}</td></tr>
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
@@ -1290,6 +1376,7 @@
   }
 
   function destroy() {
+    if (packetCountHelpCleanup) { packetCountHelpCleanup(); packetCountHelpCleanup = null; }
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     // #259: both Escape handlers are document-level, so they outlive the
@@ -1985,7 +2072,7 @@
             <dt>Last Heard (advert)</dt><dd>${renderNodeTimestampHtml(lastHeard)}</dd>
             ${(n.role === 'repeater' || n.role === 'room') ? `<dt>Last Relayed</dt><dd>${renderRelayActivity(n)}</dd>` : ''}
             <dt>First Seen</dt><dd>${renderNodeTimestampHtml(n.first_seen)}</dd>
-            <dt>Total Packets</dt><dd>${totalPackets}</dd>
+            <dt>${renderPacketCountLabel('nodePacketCountHelp', { fallback: !(stats.totalTransmissions || stats.totalPackets), showSeen: false })}</dt><dd>${totalPackets}</dd>
             <dt>Packets Today</dt><dd>${stats.packetsToday || 0}</dd>
             ${stats.avgHops ? `<dt>Avg Hops</dt><dd>${stats.avgHops}</dd>` : ''}
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
