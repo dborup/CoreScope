@@ -364,6 +364,7 @@ func main() {
 	hub.ConfigureLimits(cfg.WSMaxClients(), cfg.WSMaxConnsPerIP(), cfg.WSUpgradesPerMinPerIP(),
 		cfg.WSTrustedProxies(), cfg.WSDeny()) // #1794, #369
 	hub.upgrader.EnableCompression = cfg.WSCompressionEnabled()
+	stopWSHistory := hub.StartHistorySampler(wsHistoryInterval)
 
 	// HTTP server
 	srv := NewServer(database, cfg, hub)
@@ -566,6 +567,7 @@ func main() {
 		}
 
 		// 3. Close WebSocket hub
+		stopWSHistory()
 		hub.Close()
 
 		// 3b. Stop the ping-score-history worker (fase 5G). MUST happen

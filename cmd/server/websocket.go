@@ -20,6 +20,8 @@ type Hub struct {
 	allowedOrigins []string   // exact-match allowlist for /ws CheckOrigin (see SetAllowedOrigins)
 	limits         *wsLimiter // #1794: per-IP caps and deny list; nil allows everything
 	pingInterval   time.Duration // writePump tick: protocol ping + app heartbeat (#117)
+	history         *wsClientHistory // connection-count history for the Perf page
+	historyInterval time.Duration    // sampler interval; 0 until StartHistorySampler
 }
 
 // SetAllowedOrigins configures the exact-match origin allowlist consulted by
@@ -130,6 +132,7 @@ func NewHub() *Hub {
 	h := &Hub{
 		clients:      make(map[*Client]bool),
 		pingInterval: 30 * time.Second,
+		history:      newWSClientHistory(wsHistoryCapacity),
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -148,8 +151,10 @@ func (h *Hub) ClientCount() int {
 func (h *Hub) Register(c *Client) {
 	h.mu.Lock()
 	h.clients[c] = true
+	n := len(h.clients)
 	h.mu.Unlock()
-	log.Printf("[ws] client connected (%d total)", h.ClientCount())
+	h.history.observe(n)
+	log.Printf("[ws] client connected (%d total)", n)
 }
 
 func (h *Hub) Unregister(c *Client) {

@@ -72,6 +72,73 @@ if (typeof window !== 'undefined') {
   window.detectPerfAnomalies = detectPerfAnomalies;
 }
 
+// buildWSClientChart — pure, testable. Maps WS-client history samples
+// ([{t, clients, peak}], oldest first) onto a w×h box. X follows time, Y is
+// scaled to the highest peak. Everything is coerced to Number at the boundary.
+function buildWSClientChart(samples, w, h) {
+  const rows = (samples || []).map(function (s) {
+    return { t: Date.parse(s.t), clients: Number(s.clients) || 0, peak: Number(s.peak) || 0 };
+  }).filter(function (s) { return isFinite(s.t); });
+  let peakOverall = 0;
+  rows.forEach(function (s) {
+    peakOverall = Math.max(peakOverall, s.peak, s.clients);
+  });
+  const maxY = Math.max(1, peakOverall);
+  const t0 = rows.length ? rows[0].t : 0;
+  const span = rows.length ? rows[rows.length - 1].t - t0 : 0;
+  const pad = 4; // keep lines at 0 / max from being clipped by the svg edge
+  const pt = function (t, v) {
+    return {
+      x: span > 0 ? (t - t0) / span * w : w / 2,
+      y: pad + (h - 2 * pad) * (1 - Math.min(v, maxY) / maxY)
+    };
+  };
+  return {
+    maxY: maxY,
+    latest: rows.length ? rows[rows.length - 1].clients : 0,
+    peakOverall: peakOverall,
+    fromT: t0,
+    toT: t0 + span,
+    clientPoints: rows.map(function (s) { return pt(s.t, s.clients); }),
+    peakPoints: rows.map(function (s) { return pt(s.t, Math.max(s.peak, s.clients)); })
+  };
+}
+
+// renderWSClientHistory — HTML for the "open connections over time" card.
+// Only numbers and locale time strings are interpolated.
+function renderWSClientHistory(hist) {
+  if (!hist) return '';
+  const heading = '<h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lightning"/></svg> WebSocket clients (24 h)</h3>';
+  const samples = Array.isArray(hist.samples) ? hist.samples : [];
+  if (samples.length < 2) {
+    return heading + '<p class="text-muted">Collecting data… one sample per minute, kept in memory since the last server restart.</p>';
+  }
+  const W = 600, H = 120;
+  const c = buildWSClientChart(samples, W, H);
+  const poly = function (pts) {
+    return pts.map(function (p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ');
+  };
+  const hhmm = function (ms) {
+    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+  return heading + '<div class="perf-card" style="text-align:left;">' +
+    '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px;">' +
+    '<span><b>' + c.latest + '</b> open now</span>' +
+    '<span><b>' + c.peakOverall + '</b> highest in period</span>' +
+    '<span class="text-muted">' + hhmm(c.fromT) + ' – ' + hhmm(c.toT) + '</span></div>' +
+    '<svg class="ws-history" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" ' +
+    'aria-label="Open WebSocket connections over time" style="width:100%;height:' + H + 'px;display:block;">' +
+    '<polyline fill="none" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke" points="' + poly(c.peakPoints) + '"/>' +
+    '<polyline fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" points="' + poly(c.clientPoints) + '"/>' +
+    '</svg>' +
+    '<div class="text-muted" style="font-size:12px;">Solid: open at each sample. Dashed: highest count between samples. Y-axis 0–' + c.maxY + '.</div>' +
+    '</div>';
+}
+if (typeof window !== 'undefined') {
+  window.buildWSClientChart = buildWSClientChart;
+  window.renderWSClientHistory = renderWSClientHistory;
+}
+
 // Version and commit render as plain text, never as links: a git-describe
 // build (v0.0.1-36-gdc1297db) or a local integration commit may not exist on
 // GitHub, and the string format can't tell us. The source link is separate.
@@ -119,13 +186,14 @@ function renderVersionCard(health) {
     try {
       // #1258: /api/health was awaited AFTER Promise.all, adding a full RTT
       // (~50-200ms) on every 5s refresh. Issue it in parallel with the rest.
-      const [server, client, ioStats, sqliteStats, writeSources, health] = await Promise.all([
+      const [server, client, ioStats, sqliteStats, writeSources, health, wsHistory] = await Promise.all([
         fetch('/api/perf').then(r => r.json()),
         Promise.resolve(window.apiPerf ? window.apiPerf() : null),
         fetch('/api/perf/io').then(r => r.json()).catch(() => null),
         fetch('/api/perf/sqlite').then(r => r.json()).catch(() => null),
         fetch('/api/perf/write-sources').then(r => r.json()).catch(() => null),
-        fetch('/api/health').then(r => r.json()).catch(() => null)
+        fetch('/api/health').then(r => r.json()).catch(() => null),
+        fetch('/api/perf/ws-clients').then(r => r.json()).catch(() => null)
       ]);
 
       let html = '';
@@ -171,6 +239,8 @@ function renderVersionCard(health) {
           </div>`;
         }
       }
+
+      html += renderWSClientHistory(wsHistory);
 
       // Disk I/O (#1120)
       if (ioStats) {
