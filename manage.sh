@@ -1633,7 +1633,12 @@ backup_databases() {
     warn "Database not backed up: no corescope-prod container"
     return 0
   fi
-  if ! snapshot=$(sh "$(dirname "$0")/scripts/backup-sqlite.sh" corescope-prod "$1"); then
+  local status=0
+  snapshot=$(sh "$(dirname "$0")/scripts/backup-sqlite.sh" corescope-prod "$1") || status=$?
+  if [ "$status" -eq 75 ]; then
+    err "Database backup failed: another backup of corescope-prod is still running; retry once it has finished"
+    return 1
+  elif [ "$status" -ne 0 ]; then
     err "Database backup failed; check that corescope-prod is running"
     return 1
   fi
