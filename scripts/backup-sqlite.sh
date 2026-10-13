@@ -27,29 +27,59 @@ stage=$(mktemp -d "$backup_root/.corescope-backup-$(date -u +%Y%m%dT%H%M%SZ).XXX
 chmod 700 "$stage"
 restart_needed=0
 
+# Docker's CLI re-enables SIGINT/SIGTERM even when they are inherited as
+# ignored, so a repeated Ctrl-C or process-group signal would kill it. Where
+# setsid(1) exists, run it in its own session, out of reach of those signals.
+# Children of this non-interactive shell are never process-group leaders, so
+# setsid execs in place and the shell still waits for the command.
+isolated() {
+  if command -v setsid >/dev/null 2>&1; then setsid "$@"; else "$@"; fi
+}
+
 # A zero exit from `docker start` alone is not proof: it is a no-op on a
 # container that is still running (or still stopping).
 start_and_verify() {
-  docker start "$container" >/dev/null || return
-  state=$(docker inspect --format '{{.State.Running}}' "$container") || return
+  isolated docker start "$container" >/dev/null || return
+  state=$(isolated docker inspect --format '{{.State.Running}}' "$container") || return
   if [ "$state" != true ]; then
     echo "ERROR: $container is not running after start" >&2 || :
     return 1
   fi
 }
 
+# A signal can kill the docker CLI while the daemon is still stopping the
+# container. Wait for any stop in progress (stop is idempotent) and confirm
+# that the container has exited, so the next start really starts it. Retried
+# because, without setsid, a repeated signal can still kill the CLI.
+stop_confirmed() {
+  tries=0
+  while [ "$tries" -lt 3 ]; do
+    tries=$((tries + 1))
+    if isolated docker stop "$container" >/dev/null &&
+      state=$(isolated docker inspect --format '{{.State.Running}}' "$container") &&
+      [ "$state" = false ]; then
+      return 0
+    fi
+  done
+  echo "ERROR: could not confirm that $container stopped" >&2 || :
+  return 1
+}
+
 finish() {
   status=$?
-  # A repeated signal to the process group must not cut recovery short.
+  # The shell itself must survive a repeated signal during recovery.
   trap '' HUP INT TERM
   trap - 0
   if [ "$restart_needed" -eq 1 ]; then
-    # A signal can kill the docker CLI while the daemon is still stopping the
-    # container. Wait for any stop in progress (stop is idempotent) so that
-    # the start below really starts it, then verify it is running.
-    docker stop "$container" >/dev/null || :
+    stopped=0
+    stop_confirmed && stopped=1
+    # Start even after an unconfirmed stop, which may have stopped it, but a
+    # running state is then no proof of a restart.
     if start_and_verify; then
-      :
+      if [ "$stopped" -eq 0 ]; then
+        echo "ERROR: restart not verified; check $container manually" >&2 || :
+        if [ "$status" -eq 0 ]; then status=1; fi
+      fi
     else
       restart_status=$?
       echo "ERROR: restart failed (exit $restart_status); check $container manually" >&2 || :

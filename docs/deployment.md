@@ -659,10 +659,17 @@ first. The helper never pulls an image or starts an additional container.
 
 On a copy/validation failure, or on `SIGHUP`/`SIGINT`/`SIGTERM` (also when
 the signal reaches the whole process group and kills `docker stop` mid-way),
-it waits for any stop in progress, restarts a previously running container,
-checks that it is running, and returns the original error (129/130/143 for a
-signal, with an `interrupted` error). A repeated signal does not abort that
-recovery. A restart failure is reported, and no completed backup is published.
+it waits for any stop in progress and confirms that the container has exited,
+restarts a previously running container, checks that it is running, and returns
+the original error (129/130/143 for a signal, with an `interrupted` error). The
+Docker CLI does not stay immune to a repeated `SIGINT`/`SIGTERM`, so where
+`setsid` exists (util-linux, BusyBox) recovery runs its Docker commands in their
+own session: a repeated Ctrl-C or process-group signal does not reach them.
+A killed or failed recovery stop is retried up to three times (this is what
+covers a repeated signal without `setsid`, e.g. on macOS). If the stop still
+cannot be confirmed, the helper attempts a start anyway but reports `restart not
+verified`; a restart failure is reported too. `SIGKILL` of the helper itself is
+not covered. No completed backup is published.
 A container already stopped is left stopped. For success, both the copy and
 any required restart must succeed. Temporary
 staging is removed on normal exit or a caught signal; `SIGKILL` or a host crash
