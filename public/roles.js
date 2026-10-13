@@ -601,7 +601,11 @@
   window.TILE_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
   // Runtime metadata for the registry, not a new config setting. An
   // implicit provider fallback must not mask the operator's legacy URL.
+  // #390 — dark needs the same treatment as light got in #366: before it,
+  // `tiles.dark` / `map.tiles.darkUrl` were silently masked by whichever
+  // dark style the registry defaulted to.
   window.MC_LIGHT_TILE_URL_OVERRIDE = null;
+  window.MC_DARK_TILE_URL_OVERRIDE  = null;
 
   function _tileThemeIsDark() {
     return document.documentElement.getAttribute('data-theme') === 'dark' ||
@@ -787,6 +791,8 @@
     }
     window.MC_LIGHT_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.light || null) :
       (cfg.map && cfg.map.tiles && cfg.map.tiles.lightUrl) || null;
+    window.MC_DARK_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.dark || null) :
+      (cfg.map && cfg.map.tiles && cfg.map.tiles.darkUrl) || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
