@@ -1064,6 +1064,17 @@ img.brand-logo {
   box-shadow: 0 4px 12px rgba(0,0,0,.3); pointer-events: none;
 }
 .sort-help:hover .sort-help-tip { display: block; }
+.node-packet-count-help {
+  border: 0; padding: 0; background: none; color: inherit; font: inherit;
+  text-align: left; text-transform: inherit; letter-spacing: inherit;
+}
+.node-packet-count-help .sort-help-tip {
+  top: auto; bottom: 100%; left: 0; transform: none; pointer-events: auto;
+  font-weight: normal; text-transform: none; letter-spacing: normal;
+}
+.node-packet-count-help.help-dismissed .sort-help-tip { display: none; }
+/* Avoid touch target expansion redirecting nearby table-cell taps into the help button. */
+.node-packet-count-help.help-touch .sort-help-tip { pointer-events: none; }
 .filter-bar .btn:hover { background: var(--row-hover); }
 /* #96 — "Hide CONTROL packets" checkbox in the packets filter bar. */
 .filter-bar .filter-checkbox { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text); white-space: nowrap; cursor: pointer; }
@@ -3469,10 +3480,17 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .node-top-row .node-qr-wrap { flex: 1; align-self: flex-start; min-width: 120px; max-width: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
 .node-top-row .node-qr-wrap .node-qr { margin-top: 0; }
 .node-qr-wrap--full { max-width: 240px; margin: 0 auto; }
-.node-stats-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+.node-stats-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; overflow: visible; margin-bottom: 12px; }
 .node-stats-table td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .node-stats-table tr:last-child td { border-bottom: none; }
-.node-stats-table tr:nth-child(even) { background: var(--row-stripe); }
+/* #382: no overflow clipping (the packet-count help tooltip extends past the
+   table), so stripes and hovers are painted on the cells, which carry the
+   rounded corners themselves (border width 1px inside an 8px radius). */
+.node-stats-table tr:nth-child(even) td { background: var(--row-stripe); }
+.node-stats-table tr:first-child td:first-child { border-top-left-radius: 7px; }
+.node-stats-table tr:first-child td:last-child { border-top-right-radius: 7px; }
+.node-stats-table tr:last-child td:first-child { border-bottom-left-radius: 7px; }
+.node-stats-table tr:last-child td:last-child { border-bottom-right-radius: 7px; }
 .node-stats-table td:first-child { font-weight: 600; color: var(--text-muted); width: 40%; white-space: nowrap; }
 .node-stats-table td:last-child { font-weight: 500; }
 @media (max-width: 768px) {
