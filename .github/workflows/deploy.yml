@@ -21,9 +21,9 @@ env:
   STAGING_SERVICE: staging-go
   STAGING_CONTAINER: corescope-staging-go
 
-# Pipeline (sequential, fail-fast):
-#   go-test → e2e-test → build-and-publish → deploy → publish-badges
-#   PRs stop after build-and-publish (no GHCR push). Master continues to deploy + badges.
+# Pipeline: independent Go tests, E2E and image validation run in parallel.
+# The stable build-and-publish check fails unless all three pass; only then may
+# an upstream push publish to GHCR and deploy. Fork runs never publish/deploy.
 #
 # Fork guard: everything with an external side effect (GHCR login/push, release
 # upload, staging deploy, badge commits) additionally requires
@@ -232,7 +232,6 @@ jobs:
   # ───────────────────────────────────────────────────────────────
   e2e-test:
     name: "🎭 Playwright E2E Tests"
-    needs: [go-test]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     defaults:
@@ -431,7 +430,10 @@ jobs:
           BASE_URL=http://localhost:13581 node test-observer-iata-1188-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-xss-333-pages-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-xss-392-perf-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-xss-368-home-links-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-xss-429-home-footer-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-1639-observers-sort-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-405-observers-listener-leak-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-issue-1758-ng-filter-rerenders-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-nav-fluid-1055-e2e.js 2>&1 | tee -a e2e-output.txt
           CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13581 node test-nav-priority-1102-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -456,6 +458,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-353-path-hash-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-242-type-exclusions-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-issue-406-packets-live-channel-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-slideover-1168-munger-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-logo-pulse-1173-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -667,13 +670,53 @@ jobs:
           include-hidden-files: true
 
   # ───────────────────────────────────────────────────────────────
-  # 3. Build & Publish Docker Image
+  # 3. Validate the staging image independently of tests
+  # ───────────────────────────────────────────────────────────────
+  image-check:
+    name: "🧱 Validate Docker Image"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Verify staging compose file
+        run: docker compose -f "$STAGING_COMPOSE_FILE" config --quiet
+
+      - name: Build Go Docker image (local staging)
+        run: |
+          GIT_COMMIT="${GITHUB_SHA::7}" \
+          APP_VERSION=edge \
+          BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+          docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging build "$STAGING_SERVICE"
+          echo "Built Go staging image ✅"
+
+  # ───────────────────────────────────────────────────────────────
+  # 4. Stable required gate and GHCR publisher
   # ───────────────────────────────────────────────────────────────
   build-and-publish:
     name: "🏗️ Build & Publish Docker Image"
-    needs: [e2e-test]
+    needs: [go-test, e2e-test, image-check]
+    # A failed dependency normally skips this job. A skipped required check
+    # can count as passing in branch protection, so run and fail explicitly.
+    # A cancelled run reports this job as cancelled (not skipped), which does
+    # not pass either. Later steps keep the implicit success(), so nothing
+    # publishes after a failed gate.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require tests and image validation
+        env:
+          GO_RESULT: ${{ needs.go-test.result }}
+          E2E_RESULT: ${{ needs.e2e-test.result }}
+          IMAGE_RESULT: ${{ needs.image-check.result }}
+        run: |
+          for result in "$GO_RESULT" "$E2E_RESULT" "$IMAGE_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "Required CI job did not pass: $result"
+              exit 1
+            fi
+          done
+
       - name: Checkout code
         uses: actions/checkout@v5
 
@@ -691,14 +734,6 @@ jobs:
           echo "git_commit=$GIT_COMMIT" >> "$GITHUB_OUTPUT"
           echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
           echo "Build: version=$APP_VERSION commit=$GIT_COMMIT time=$BUILD_TIME"
-
-      - name: Build Go Docker image (local staging)
-        run: |
-          GIT_COMMIT="${{ steps.meta.outputs.git_commit }}" \
-          APP_VERSION="${{ steps.meta.outputs.app_version }}" \
-          BUILD_TIME="${{ steps.meta.outputs.build_time }}" \
-          docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging build "$STAGING_SERVICE"
-          echo "Built Go staging image ✅"
 
       - name: Set up Docker Buildx
         if: github.event_name == 'push' && github.repository == 'Kpa-clawbot/CoreScope'
