@@ -254,8 +254,8 @@ timeout 120 docker restart "$C1" > /dev/null
 check_cmd "case 1: ready after docker restart" ready "$C1"
 procs_as "case 1 after docker restart" "$C1" "$U:$G"
 ps_dump "case 1, after docker restart" "$C1"
-check "case 1: second start changes no ownership" "1" \
-    "$(docker logs "$C1" 2>&1 | grep -cE '^\[nonroot\] ownership: 0 of [0-9]+ path')"
+check_cmd "case 1: second start changes no ownership" sh -c \
+    "docker logs '$C1' 2>&1 | grep -E '^\[nonroot\] ownership:' | tail -1 | grep -qE ' 0 of [1-9][0-9]* path'"
 publish "$C1" 3
 check_cmd "case 1: server reads 3 packets after docker restart" wait_until "$WAIT_S" api_tx_is "$C1" 3
 docker rm -fv "$C1" > /dev/null
@@ -338,7 +338,8 @@ docker rm -fv "$C3" > /dev/null
 # finding 2), whoever owns it and wherever the save would resolve to.
 for cfg_owner in 0:0 1000:1000; do
     V3C=$(vol "inplace-${cfg_owner%%:*}")
-    as_root "$V3C" "printf '%s' '$CONFIG' > /app/data/config.json && chown $cfg_owner /app/data/config.json && chmod 644 /app/data/config.json"
+    # The data dir has the config's owner, as on a bind mount the host user owns.
+    as_root "$V3C" "printf '%s' '$CONFIG' > /app/data/config.json && chown $cfg_owner /app/data /app/data/config.json && chmod 644 /app/data/config.json"
     CFG_STAT=$(as_root "$V3C" 'md5sum < /app/data/config.json; stat -c "%i %u:%g %a" /app/data/config.json')
     C3=$(start "inplace-${cfg_owner%%:*}" "$V3C" "${ON[@]}")
     check_cmd "case 3 (in-volume config $cfg_owner): ready" ready "$C3"
@@ -385,7 +386,9 @@ C4=$(start toggle-off2 "$V4")
 check_cmd "case 4 off again: ready" ready "$C4"
 procs_as "case 4 off again" "$C4" "0:0"
 ps_dump "case 4, off again" "$C4"
-check "case 4 off again: no ownership step ran" "0" "$(docker logs "$C4" 2>&1 | grep -c '^\[nonroot\]')"
+check "case 4 off again: no ownership step ran" "0" "$(docker logs "$C4" 2>&1 | grep -c '^\[nonroot\] ownership')"
+check "case 4 off again: group write and sticky bit taken back once" "1" \
+    "$(docker logs "$C4" 2>&1 | grep -c '^\[nonroot\] the mode is off: removed group write and the sticky bit')"
 check "case 4 off again: DB keeps the non-root owner" "$U:$G" "$(owner "$V4" meshcore.db)"
 publish "$C4" 9
 check_cmd "case 4 off again: packet stored and read" wait_until "$WAIT_S" api_tx_is "$C4" 3
@@ -414,9 +417,10 @@ while read -r own mode name; do
     check "case 4 rollback: $name back to $own $mode" "$own $mode" "$(as_root "$V4" "stat -c '%u:%g %a' '/app/data/$name'")"
 done <<< "$RECORD"
 check "case 4 rollback: config untouched" "0:0" "$(owner "$V4" config.json)"
+NR_BEFORE=$(docker logs "$C4" 2>&1 | grep -c '^\[nonroot\]')
 docker start "$C4" > /dev/null
 check_cmd "case 4 after rollback: ready" ready "$C4"
-check "case 4 after rollback: no [nonroot] line" "0" "$(docker logs --since 1m "$C4" 2>&1 | grep -c '^\[nonroot\]')"
+check "case 4 after rollback: no new [nonroot] line" "$NR_BEFORE" "$(docker logs "$C4" 2>&1 | grep -c '^\[nonroot\]')"
 docker rm -fv "$C4" > /dev/null
 
 # ---------------------------------------------------------------------------

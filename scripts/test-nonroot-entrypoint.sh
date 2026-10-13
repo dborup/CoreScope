@@ -287,6 +287,18 @@ gate_case "setting in .env not written as a plain number" \
     "printf 'CORESCOPE_RUN_AS_NONROOT=1\nCORESCOPE_UID=\$(echo $U)\nCORESCOPE_GID=$G\n' > .env"
 gate_case "data dir handed to the services" "chown $U /app/data" "${ON[@]}"
 gate_case "marker not written by root" "chown $U:$G .corescope-nonroot"
+gate_case ".env owned by neither root nor the data dir's owner" "echo '$PAYLOAD' >> .env && chown 2000:2000 .env" "${ON[@]}"
+
+# A read-only mount cannot be changed or replaced from inside the container,
+# whoever owns it on the host.
+V=$(vol gate-ro-mount)
+layout "$V"
+as_root "$V" "cd /app/data && chown 0:0 . .env theme.json"
+printf '{"apiKey":"k"}' > "$TMP/ro-config.json"
+chmod 644 "$TMP/ro-config.json"
+start "$V" "${ON[@]}" -v "$TMP/ro-config.json:/app/data/config.json:ro"
+check "read-only config mount owned by $(id -u) (not root, not the data dir owner): accepted" 0 "$RC"
+has "read-only config mount: linked" "$OUT" '^linked: /app/config.json$'
 
 # The setting removed, nothing tampered: root runs everything again, and the
 # check keeps running until the rollback below clears the mark.
@@ -297,6 +309,12 @@ start "$V"
 check "off after on, clean volume: exit status" 0 "$RC"
 has "off after on, clean volume: shipped config" "$OUT" '^argv: -c /etc/supervisor/conf.d/supervisord.conf$'
 has "off after on, clean volume: .env sourced" "$OUT" '^env: FROM_ENV_FILE=yes$'
+has "off after on: says it took back group write and the sticky bit" "$OUT" '^\[nonroot\] the mode is off: removed group write and the sticky bit'
+check "off after on: data dir no longer group-writable or sticky (fs.protected_regular)" "$H:$G 755" "$(stat_of "$V" .)"
+start "$V"
+hasnt "off after on, second start: nothing left to change" "$OUT" '\[nonroot\]'
+start "$V" "${ON[@]}"
+check "on again: data dir set up again" "$H:$G 1775" "$(stat_of "$V" .)"
 
 # ---------------------------------------------------------------------------
 echo "# queue: requests the services did not write are set aside"
@@ -348,12 +366,12 @@ check "record: off start after the rollback" 0 "$RC"
 hasnt "record: no check left after the rollback" "$OUT" '\[nonroot\]'
 # A record that names anything outside the list is refused as a whole.
 for bad in '0:0 755 ../etc' '0:0 644 notes/keep.txt' '0:0 644 /etc/passwd' "0:0 644 config.json" '0 644 meshcore.db'; do
-    out=$(printf '%s\n0:0 644 meshcore.db\n' "$bad" | helper "$V" restore-owners 2>&1)
+    out=$(printf '%s\n%s\n0:0 644 meshcore.db\n' "$H:$H 775 ." "$bad" | helper "$V" restore-owners 2>&1)
     rc=$?
     check "record: bad line '$bad' refused" 1 "$rc"
     has "record: bad line '$bad' says why" "$out" '^\[nonroot\] ERROR: '
 done
-check "record: refused records changed nothing" "$H:$H 664" "$(stat_of "$V" meshcore.db)"
+check "record: refused records changed nothing" "$H:$H 664|$H:$H 775" "$(stat_of "$V" meshcore.db)|$(stat_of "$V" .)"
 # Rollback refuses while a root-consumed file is not trustworthy.
 V=$(vol record-untrusted)
 layout "$V"
