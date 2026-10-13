@@ -103,9 +103,9 @@ function loadNodes() {
       // Deduplicated on (type, fn) exactly as the DOM does, so a stable
       // handler reference registered twice counts once — the test measures
       // real listener count, not add() calls.
-      addEventListener: (type, fn) => {
+      addEventListener: (type, fn, opts) => {
         if (docListeners.some((l) => l.type === type && l.fn === fn)) return;
-        docListeners.push({ type, fn });
+        docListeners.push({ type, fn, capture: opts === true || !!(opts && opts.capture) });
       },
       removeEventListener: (type, fn) => {
         const i = docListeners.findIndex((l) => l.type === type && l.fn === fn);
@@ -131,7 +131,7 @@ function loadNodes() {
       pushState: noop,
     },
     CustomEvent: class CustomEvent {},
-    requestAnimationFrame: noop,
+    requestAnimationFrame: noop, cancelAnimationFrame: noop,
     ROLE_COLORS: {}, ROLE_STYLE: {}, TYPE_COLORS: {},
     getNodeStatus: () => 'active',
     getHealthThresholds: () => ({ staleMs: 1, degradedMs: 2, silentMs: 3 }),
@@ -165,7 +165,11 @@ function loadNodes() {
     page: pages.nodes,
     app: el('app'),
     panel: el('nodesRight'),
-    keydownListeners: () => docListeners.filter((l) => l.type === 'keydown'),
+    // The page's own Escape-to-go-back listeners (bubble phase). The packet
+    // count help (#382) keeps a separate capture-phase listener; it is held to
+    // its own one-listener budget via helpListeners().
+    keydownListeners: () => docListeners.filter((l) => l.type === 'keydown' && !l.capture),
+    helpListeners: () => docListeners.filter((l) => l.type === 'keydown' && l.capture),
     hashWrites,
     replaceStateWrites,
     errors,
@@ -173,7 +177,7 @@ function loadNodes() {
     // renderLeft() inside the same visit.
     regionChange: () => regionChange && regionChange(),
     pressEscape: () => {
-      for (const l of docListeners.filter((x) => x.type === 'keydown').slice()) {
+      for (const l of docListeners.filter((x) => x.type === 'keydown' && !x.capture).slice()) {
         l.fn({ key: 'Escape', preventDefault: () => {}, stopPropagation: () => {} });
       }
     },
@@ -234,6 +238,21 @@ test('Escape still goes back on a page opened after a destroy', () => {
   s.hashWrites.length = 0;
   s.pressEscape();
   assert.deepStrictEqual(s.hashWrites, ['#/nodes'], 'hash writes: ' + JSON.stringify(s.hashWrites));
+});
+
+// #382: the packet count help adds one capture-phase document keydown listener
+// per visit; it must be removed by destroy() and never stack.
+test('the packet count help keeps one document listener per visit and destroy() removes it', () => {
+  const s = loadNodes();
+  for (const pk of ['aa', 'bb', 'cc']) {
+    s.page.destroy();
+    s.page.init(s.app, pk);
+  }
+  assert.strictEqual(s.helpListeners().length, 1, 'got ' + s.helpListeners().length);
+  s.page.init(s.app, 'dd');   // init() without destroy() must not stack either
+  assert.strictEqual(s.helpListeners().length, 1, 'init twice: got ' + s.helpListeners().length);
+  s.page.destroy();
+  assert.strictEqual(s.helpListeners().length, 0, 'after destroy: got ' + s.helpListeners().length);
 });
 
 // --- the list view's own Escape listener (nodesPanelEsc) --------------------
