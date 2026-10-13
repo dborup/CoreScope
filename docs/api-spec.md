@@ -302,7 +302,15 @@ Server health and telemetry. Used by monitoring.
     "hitRate":    number        // percentage (0–100)
   },
   "websocket": {
-    "clients":   number        // connected WS clients
+    "clients":   number,       // connected WS clients
+    // Upgrade refusals since boot, omitted when zero. deny/rate/connCap are
+    // the per-IP rules; globalCap is the server-wide concurrent ceiling
+    // (webSocket.maxClients, default 512 — a nonzero value here means the
+    // server was full, not that one client misbehaved) (#369).
+    "rejectedDeny":      number,
+    "rejectedRate":      number,
+    "rejectedConnCap":   number,
+    "rejectedGlobalCap": number
   },
   "packetStore": {
     "packets":      number,    // loaded transmissions

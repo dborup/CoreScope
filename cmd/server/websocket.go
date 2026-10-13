@@ -90,17 +90,19 @@ type Client struct {
 	send     chan []byte
 	closeOnce sync.Once
 	// release returns this connection's slot to the per-IP concurrent cap
-	// (#1794). Always non-nil so Unregister needs no nil check; it is a no-op
-	// when limits are disabled.
+	// (#1794) and the global ceiling (#369). Always non-nil so Unregister
+	// needs no nil check; it is a no-op when limits are disabled. Every path
+	// that drops a client must call it: Unregister, and Close on shutdown.
 	release func()
 }
 
-// ConfigureLimits installs the #1794 transport limits. Called once at
-// startup, before the listener binds, so no upgrade can race a half-built
-// limiter. Passing zero values for both caps leaves only the deny list
-// active, which is a legitimate configuration.
-func (h *Hub) ConfigureLimits(maxConnsPerIP, upgradesPerMin int, trustedProxies, deny []string) {
+// ConfigureLimits installs the #1794 transport limits plus the #369 global
+// ceiling. Called once at startup, before the listener binds, so no upgrade
+// can race a half-built limiter. Passing zero values for every cap leaves
+// only the deny list active, which is a legitimate configuration.
+func (h *Hub) ConfigureLimits(maxClients, maxConnsPerIP, upgradesPerMin int, trustedProxies, deny []string) {
 	l := newWSLimiter()
+	l.maxClients = maxClients
 	l.maxConnsPerIP = maxConnsPerIP
 	l.upgradesPerMin = upgradesPerMin
 	l.trustedProxies = parseCIDRList(trustedProxies, "webSocket.trustedProxies")
@@ -114,6 +116,13 @@ func (h *Hub) ConfigureLimits(maxConnsPerIP, upgradesPerMin int, trustedProxies,
 	if len(l.trustedProxies) == 0 && (maxConnsPerIP > 0 || upgradesPerMin > 0) {
 		log.Printf("[ws] per-IP limits configured with no trustedProxies: they apply only to " +
 			"directly-connected clients. Behind a reverse proxy, set webSocket.trustedProxies.")
+	}
+	// #369: log the ceiling either way. An operator who turned it off should
+	// see that in the boot log, not discover it from a memory graph.
+	if maxClients > 0 {
+		log.Printf("[ws] global ceiling: at most %d concurrent clients", maxClients)
+	} else {
+		log.Printf("[ws] global ceiling DISABLED (webSocket.maxClients = 0): concurrent /ws clients are unbounded")
 	}
 }
 
@@ -162,6 +171,11 @@ func (h *Hub) Unregister(c *Client) {
 // Close gracefully disconnects all WebSocket clients.
 func (h *Hub) Close() {
 	h.mu.Lock()
+	// #369: collect the clients so their slots can be returned after the hub
+	// lock is dropped. release() takes the limiter's mutex, and taking the two
+	// in one order here and the other order in allow() is how deadlocks are
+	// made (same reasoning as Unregister).
+	dropped := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
 		c.conn.WriteControl(
 			websocket.CloseMessage,
@@ -170,8 +184,16 @@ func (h *Hub) Close() {
 		)
 		c.closeOnce.Do(func() { close(c.send) })
 		delete(h.clients, c)
+		dropped = append(dropped, c)
 	}
 	h.mu.Unlock()
+	// Idempotent per client, so a readPump that notices the close and calls
+	// Unregister cannot credit the same slot twice.
+	for _, c := range dropped {
+		if c.release != nil {
+			c.release()
+		}
+	}
 	log.Println("[ws] all clients disconnected")
 }
 
@@ -201,10 +223,17 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	ok, reason, key, release := h.limits.allow(r)
 	if !ok {
 		status := http.StatusForbidden
-		if reason == wsRejectRate {
+		switch reason {
+		case wsRejectRate:
 			// 429 tells a well-behaved client to back off; 403 would read as
 			// "never come back" for what is a temporary refusal.
 			status = http.StatusTooManyRequests
+		case wsRejectGlobalCap:
+			// #369: the client did nothing wrong, the server is full. 503 plus
+			// Retry-After is the honest answer, and the only one that tells a
+			// non-browser client to come back rather than give up.
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", wsGlobalCapRetryAfter)
 		}
 		log.Printf("[ws] reject ip=%s reason=%s", key, reason)
 		http.Error(w, "websocket upgrade refused", status)
