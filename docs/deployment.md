@@ -6,6 +6,7 @@ Comprehensive guide to deploying and operating CoreScope. For a quick start, see
 
 - [System Requirements](#system-requirements)
 - [Docker Deployment](#docker-deployment)
+- [Migration — pulling the new Compose file](#migration--pulling-the-new-compose-file)
 - [Configuration Reference](#configuration-reference)
 - [MQTT Setup](#mqtt-setup)
 - [TLS / HTTPS](#tls--https)
@@ -78,6 +79,8 @@ docker run -d --name corescope \
 | `-e DISABLE_MOSQUITTO=true` | No | Skip the internal Mosquitto broker (use your own) |
 | `-e DISABLE_CADDY=true` | No | Skip the built-in Caddy reverse proxy |
 | `-e MQTT_BROKER=mqtt://host:1883` | No | Override MQTT broker URL |
+| `-e CORESCOPE_RUN_AS_NONROOT=1` | No | Opt-in: run `corescope-server` and `corescope-ingestor` without root — see [Running the Go services without root](#running-the-go-services-without-root-opt-in) |
+| `-e CORESCOPE_UID=10001 -e CORESCOPE_GID=10001` | With the above | Dedicated numeric user and group the two Go services run as |
 
 #### `/app/data/.env` convenience file
 
@@ -91,6 +94,188 @@ MQTT_BROKER=mqtt://my-broker:1883
 ```
 
 The entrypoint sources this file before starting services. This works with any launch method (`docker run`, compose, or manage.sh).
+
+### Running the Go services without root (opt-in)
+
+By default every program in the container runs as root, exactly as in earlier
+releases. Setting `CORESCOPE_RUN_AS_NONROOT` runs **only** `corescope-server`
+and `corescope-ingestor` as an unprivileged user, which limits what a
+compromised web server or ingestor can do. Nothing changes until you turn it on.
+
+| Variable | Values |
+|----------|--------|
+| `CORESCOPE_RUN_AS_NONROOT` | `1` or `true` turns it on. Unset, empty, `0` or `false` keep the default. Any other value stops the container with an error. |
+| `CORESCOPE_UID` | Required when on. A dedicated numeric user ID, e.g. `10001`: not 0, not an account that already exists in the image (`mosquitto` 101, `caddy` 100, `nobody` …), and not the owner of the data directory. |
+| `CORESCOPE_GID` | Required when on. Numeric group ID, 100 or higher and not the `mosquitto`/`caddy` group, e.g. `10001`. Use a dedicated group that no host user belongs to: its members can create files in the data directory. (An existing image group such as `users` (100) is reused, but on most hosts GID 100 is a shared group.) |
+
+Set them with `-e`, in compose `environment:`, or in `/app/data/.env` as plain
+`KEY=VALUE` lines. Use a **dedicated** user ID that owns nothing on the host,
+not your own host user: root reads `.env`, `config.json` and `theme.json` from
+the data directory at every start, so the services must never own the data
+directory or those files. A start with `CORESCOPE_UID` equal to the owner of
+the data directory is refused.
+
+**What stays the same.** supervisord, the entrypoint and Caddy still run as
+root; Mosquitto still runs as `mosquitto` and still ignores `PUID`/`PGID`.
+With the setting off, on a volume that never used it, the entrypoint takes
+the old path unchanged and starts the same supervisor config files.
+
+**What happens at start.** As root, before any service starts:
+
+1. **Check.** Before `.env` is sourced and `config.json`/`theme.json` are
+   linked, the start stops with a `[nonroot] ERROR` line, and nothing is
+   sourced, linked or changed, if any of those three files is a symlink, a
+   hard link or not a regular file, is owned by `CORESCOPE_UID`, is owned by
+   anyone but root or the owner of the data directory, or is writable for
+   `CORESCOPE_GID` or for everyone, or if `CORESCOPE_UID` owns the data
+   directory. A read-only mount (`config.json:ro`) is accepted whoever owns
+   it, since nothing in the container can change or replace it. A file the
+   services created, or could have changed, is therefore never used by root.
+2. The entrypoint creates a `corescope` account with those IDs and writes
+   `/run/corescope/supervisord.conf`: the selected config with
+   `user=corescope` added to the two Go programs only.
+3. **The data directory keeps its owner.** It gets the group `CORESCOPE_GID`,
+   group write and the sticky bit (for example `755` becomes `1775`). The
+   services can create their database files there (SQLite needs that for
+   `-wal`, `-shm` and `-journal`), but the sticky bit stops them from removing,
+   renaming or replacing anything they do not own.
+4. These paths are given to `CORESCOPE_UID:CORESCOPE_GID`, each one only if
+   its owner differs:
+   - `meshcore.db`, `ping_scores_history.db` and their `-wal`, `-shm` and
+     `-journal` files,
+   - `client-rx-delete.salt` and `client-rx-delete-audit.jsonl` (the only log
+     files the services write; their other logs go to the container output),
+   - the queue directories `prune-requests/`, `mbcap-snapshot/`,
+     `channel-proposal-requests/` and `client-rx-deletes/` (not their
+     contents).
+5. A queued request (`request-*.json`, `cmd-*.json`) in those directories that
+   the services did not write — for example from an admin command run as
+   root, or left by a root run — is **not** handed to them. It is renamed to
+   `….held`, keeps its owner, and the log says
+   `[nonroot] WARNING: … renamed to ….held and NOT run`. Repeat the command as
+   the services' user, or rename the file back if you still want it run.
+6. It writes `/app/data/.corescope-nonroot` (root-owned, holds `UID:GID`).
+   While that file exists, the check in step 1 runs at every start, even
+   after the setting is removed, until the rollback below.
+
+There is no recursive `chown`. Symlinks and hard-linked files on that list are
+left unchanged with a warning in the log. The cost is a few `stat` calls per
+start, plus a `chown` for each wrong owner: a few milliseconds, whatever the
+database size. The log shows what happened, e.g.
+`[nonroot] ownership: 7 of 9 path(s) in /app/data changed to 10001:10001`;
+later starts report `0 of …`. Files that a root process creates later (a
+`docker cp` restore, a run with the setting off) are fixed at the next start
+in this mode.
+
+**Host-side effect.** With a bind mount, the host sees the data directory with
+group `CORESCOPE_GID` and mode `1775` (or similar), the listed files and any
+new file the services create owned by those numeric IDs, the
+`.corescope-nonroot` file, and possibly `….held` requests. Your own files —
+`config.json`, `theme.json`, `.env`, other files and subdirectories — keep
+their owner and mode. They must be readable for the services (mode `0644`, or
+`0640` with group `CORESCOPE_GID`) and must not be writable for that group;
+an unreadable `config.json` stops the start with
+`config.json is not readable for UID:GID`. An external `hashRegionsPath` file,
+a `dbPath` outside `/app/data` and a `CORESCOPE_INGESTOR_STATS` path are not
+migrated and must be accessible to that user.
+
+**config.json is read-only for the services.** In this mode the server never
+writes `config.json`, whether it is mounted read-only
+(`-v /srv/corescope/config.json:/app/data/config.json:ro`) or sits in the data
+directory. Saving the geo filter from the customizer fails with HTTP 409 and
+`geo filter not saved: config.json is read-only for the server …`, and the
+filter is not applied; edit `geo_filter` in `config.json` on the host and
+restart instead.
+
+**Admin commands** must run as the services' user, so the running ingestor can
+read the request files they write:
+
+```bash
+docker exec -u 10001:10001 corescope /app/corescope-ingestor -config /app/config.json \
+  admin delete-client-rx --pubkey <64 hex> --dry-run
+```
+
+Run as root, `admin delete-client-rx` refuses (`refusing to run as root`) and
+writes nothing. Run other tools that open the databases (e.g. `sqlite3`) with
+`-u` too: in the sticky, group-writable data directory the kernel's
+`fs.protected_regular` protection, enabled by default on many distributions,
+can stop even root from opening files that it does not own.
+
+#### Turning it on
+
+This is also the migration from the default mode.
+
+1. Back up both databases with the offline helper (see [Backup](#backup)):
+   `sh scripts/backup-sqlite.sh corescope /backups`. Also keep a copy or
+   snapshot of the whole data directory (salt, audit log, queues,
+   `config.json`, `.env`).
+2. Record the current owner and mode of every path this mode changes, with
+   `nonroot.sh owners`, so you can restore them exactly:
+
+   ```sh
+   IMAGE=$(docker inspect --format '{{.Image}}' corescope)
+   docker run --rm --pull=never --network none --volumes-from corescope \
+     --entrypoint /usr/local/lib/corescope/nonroot.sh "$IMAGE" owners > /backups/corescope-owners.txt
+   ```
+
+3. On the host, make sure `config.json`, `theme.json` and `.env` are readable
+   but not writable for the chosen group, e.g. `chmod 644` (or `chgrp 10001`
+   and `chmod 640`).
+4. Add `CORESCOPE_RUN_AS_NONROOT=1`, `CORESCOPE_UID` and `CORESCOPE_GID` to the
+   container environment or `/app/data/.env`, and recreate or restart the
+   container.
+5. Check the log line `[nonroot] corescope-server and corescope-ingestor run as
+   …`, that there is no `[nonroot] ERROR`, and the processes:
+   `docker exec corescope ps -o pid,user,group,args`.
+
+#### If the start stops with `[nonroot] ERROR`
+
+The line says what is wrong; nothing was sourced, linked or changed. For a file
+that the services own or could write, **check its content before you use it
+again**: the services could have changed it. Then give it to root or the host
+user, remove group write for `CORESCOPE_GID`, and start again. If
+`CORESCOPE_UID` owns the data directory, choose a dedicated ID, or give the
+directory back to its previous owner.
+
+Development builds of this mode from before this check existed gave the data
+directory itself to `CORESCOPE_UID`. If you ran one: stop the container, check
+`.env`, `config.json` and `theme.json` for changes you did not make, then run
+`set-owner` as in Rollback step 2 (or `chown` the directory back to its
+previous owner on the host) before you start the new image.
+
+#### Rollback
+
+1. Remove the three variables (or set `CORESCOPE_RUN_AS_NONROOT=0`) and
+   recreate or restart the container. Everything runs as root again, and this
+   alone restores service: the first start with the setting off removes group
+   write and the sticky bit from the data directory (logged as
+   `[nonroot] the mode is off: …`), because `fs.protected_regular` would
+   otherwise stop root from opening the services' files there. The check from
+   step 1 above keeps running at every start until step 2.
+2. Restore the recorded owners and modes. With the container **stopped**, run
+   the helper from the same image as root:
+
+   ```sh
+   IMAGE=$(docker inspect --format '{{.Image}}' corescope)
+   docker stop corescope
+   docker run --rm -i --pull=never --network none --volumes-from corescope \
+     --entrypoint /usr/local/lib/corescope/nonroot.sh "$IMAGE" restore-owners < /backups/corescope-owners.txt
+   docker start corescope
+   ```
+
+   `restore-owners` gives every recorded path its recorded owner and mode
+   back, the data directory included, so mixed owners come back exactly.
+   Listed paths created while the mode was on go to root (`0:0`, as a root
+   run would create them; pass another `UID:GID` as an argument if needed).
+   It accepts only the data directory and the listed paths, and removes
+   `.corescope-nonroot`. Without a record, `set-owner 0:0` (or another
+   `UID:GID`) gives the data directory and every listed path, queue entries
+   included, to one owner and removes the group write and sticky bit from the
+   data directory. Both refuse while `.env`, `config.json` or `theme.json`
+   fails the check, and neither touches your other files. `….held` requests
+   stay; delete them or rename them back.
+3. If data looks wrong, restore the backup from step 1 as described in
+   [Restore](#restore).
 
 ### Docker Compose (legacy alternative)
 
@@ -110,6 +295,8 @@ docker compose up -d
 | `DATA_DIR` | `./data` | Host path for persistent data |
 | `DISABLE_MOSQUITTO` | `false` | Set `true` to use an external MQTT broker |
 | `DISABLE_CADDY` | `false` | Set `true` to skip the built-in Caddy proxy |
+| `PROD_MQTT_BIND` | *(empty — IPv4 and IPv6)* | Host interface the bundled broker's `1883` is published on; `127.0.0.1` for host-only |
+| `PPROF_BIND` | *(empty — IPv4 and IPv6)* | Host interface the pprof ports are published on (staging compose files) |
 
 ### manage.sh (legacy alternative)
 
@@ -144,6 +331,106 @@ Data is preserved in the volume — updates are non-destructive.
 
 ---
 
+## Migration — pulling the new Compose file
+
+This release makes the bundled MQTT broker's exposure and the pprof
+listeners' exposure **explicit settings** instead of hard-coded values.
+
+**Nothing changes for an existing install.** Every new setting ships with the
+default that reproduces the previous behaviour exactly, so a `git pull` +
+`docker compose up -d` leaves your deployment on the same interfaces and
+ports it was on before. The table below is what you can now change, not what
+changed under you.
+
+| Setting | Shipped default | What the default does | Change it to |
+|---------|-----------------|-----------------------|--------------|
+| `PROD_MQTT_BIND` | empty | Publishes the bundled broker's `1883` with no host interface, i.e. on both IPv4 (`0.0.0.0`) and IPv6 (`[::]`) — byte for byte the mapping this file always had | `127.0.0.1` to reach the plaintext broker from the host only |
+| `PPROF_BIND` | empty | Publishes the staging pprof ports `6060`/`6061` with no host interface, i.e. IPv4 and IPv6 — unchanged from before | `127.0.0.1` to require an SSH tunnel for profiling |
+| `PPROF_HOST` | empty | The in-process pprof listener binds every interface — unchanged from before | `127.0.0.1` for a process with **no** published port (see the warning below) |
+| `PPROF_PORT_SERVER` / `PPROF_PORT_INGESTOR` | `6060` / `6061` | Same ports as before; they must stay distinct | Any free pair, when `6060`/`6061` are taken |
+| `MQTT_SOURCE_STRICT` | `false` | A broker setup that cannot ingest is logged, and the ingestor still starts | `true` to refuse to start instead |
+| `DISABLE_MOSQUITTO` | `false` (`true` in `docker-compose.staging.yml`) | Unchanged — the bundled broker still runs by default | `true` if you run your own broker (use the exact `true`, so manage.sh and a bare `docker compose` agree) |
+| `MQTT_BROKER` / `MQTT_TOPIC` | empty | Unchanged — `config.json` decides the sources | the external broker's URL, as an alternative to editing `config.json` |
+
+**Leave a bind variable empty, do not write `0.0.0.0` into it.** Docker
+publishes a mapping with no host interface (`"1883:1883"`) on *both* `0.0.0.0`
+and `[::]`, but a mapping with an explicit IPv4 host (`"0.0.0.0:1883:1883"`)
+publishes IPv4 **only**. The shipped defaults are therefore empty, so the
+rendered mapping is identical to the one these files had before — run
+`docker compose config` on an unset `.env` and no `host_ip` appears at all.
+Setting `PROD_MQTT_BIND=0.0.0.0` or `PPROF_BIND=0.0.0.0` would quietly drop
+IPv6 reachability of the broker or the profiler.
+
+**`PPROF_BIND` and `PPROF_HOST` are not interchangeable.** `PPROF_BIND` is the
+*host* interface a published container port listens on; `PPROF_HOST` is the
+interface the listener *inside* the process binds. A loopback listener inside
+a container is not reachable through a docker port mapping at all, because
+docker's proxy connects to the container's network address. Use `PPROF_BIND`
+for a containerised deploy and `PPROF_HOST` only for a process that runs
+without a port mapping.
+
+**What you may now see in the log.** Two situations that used to pass silently
+are reported:
+
+- `ENABLE_PPROF` set to something other than the exact string `true` (for
+  example `1`, `yes` or `TRUE`) leaves pprof **off**, as it always did, and
+  the process now logs that it did so.
+- `DISABLE_MOSQUITTO=true` with no `mqttSources` configured, or with only
+  loopback ones, logs a `[broker] error:` line — the ingestor is pointed at a
+  broker that is not running and will ingest nothing. It still starts, so this
+  changes no behaviour; set `MQTT_SOURCE_STRICT=true` if you would rather the
+  startup fail. A value of `DISABLE_MOSQUITTO` that is neither `true` nor
+  `false` logs a `[broker] warn:` line, because what such a value means
+  depends on how the stack was launched — see the next paragraph.
+
+**`DISABLE_MOSQUITTO` depends on the launcher, and `broker-check` reports the
+one that applies.** `./manage.sh` resolves the value itself with `is_true()`
+(`1`, `true`, `TRUE`, `yes`, `y`, `on`, …) and then runs
+`docker-compose.no-mosquitto.yml`, which hard-codes `DISABLE_MOSQUITTO=true`
+in the container — so on a manage.sh-managed host every one of those values
+gives an **external** broker, and `./manage.sh broker-check` validates the
+external sources accordingly. A bare `docker compose up` against
+`docker-compose.yml` passes the value straight to the entrypoint, which
+disables the bundled broker only on the exact string `true`, so `yes` there
+leaves the bundled broker **running**. Both `broker-check` and the ingestor's
+`[broker] warn:` line name that gap when a value falls into it. Set `true` or
+`false` and every launcher agrees.
+
+**Settings in `.env` that a process reads now reach the container.**
+`MQTT_BROKER`, `MQTT_TOPIC`, `MQTT_SOURCE_STRICT`, `ENABLE_PPROF` and the
+`PPROF_HOST*` / `PPROF_PORT*` settings are read by the server and the
+ingestor, not by docker compose, so every app compose file forwards them
+through its `environment:` block with an empty default. An unset setting
+arrives as an empty string, which every reader ignores, so an install that
+never set one is unaffected.
+
+> **The one thing that can change under you: `MQTT_BROKER`.** Before this
+> release the compose files did not forward it, so a value in `.env` was dead
+> and `config.json` decided the sources. It now reaches the ingestor, where it
+> **overrides** `mqttSources` in `config.json` entirely (`LoadConfig`
+> precedence: `MQTT_BROKER` > `mqttSources` > legacy `mqtt.broker`). If you
+> have a stale or experimental `MQTT_BROKER=` line in `.env` *and* real
+> `mqttSources` in `config.json`, the ingestor will switch to that single env
+> source on the next restart. Check which source wins before you restart:
+>
+> ```bash
+> ./manage.sh broker-check
+> ```
+>
+> It prints the sources in the ingestor's own precedence. Delete the `.env`
+> line if `config.json` is the one you meant.
+
+Broker URLs in every one of those diagnostics are masked: user name,
+password, query and fragment never reach the log.
+
+To check an external-broker setup before starting or updating:
+
+```bash
+./manage.sh broker-check
+```
+
+---
+
 ## Configuration Reference
 
 CoreScope uses a layered configuration system (highest priority wins):
@@ -159,8 +446,13 @@ CoreScope uses a layered configuration system (highest priority wins):
 | `MQTT_BROKER` | `mqtt://localhost:1883` | MQTT broker URL (overrides config file) |
 | `MQTT_TOPIC` | `meshcore/#` | MQTT topic subscription pattern |
 | `DB_PATH` | `data/meshcore.db` | SQLite database path |
-| `DISABLE_MOSQUITTO` | `false` | Skip the internal Mosquitto broker |
+| `DISABLE_MOSQUITTO` | `false` | Skip the internal Mosquitto broker. Only the exact string `true` disables it |
 | `DISABLE_CADDY` | `false` | Skip the built-in Caddy reverse proxy |
+| `MQTT_SOURCE_STRICT` | `false` | Refuse to start when the broker setup cannot ingest, instead of only logging it |
+| `ENABLE_PPROF` | `false` | Expose `/debug/pprof/`. Only the exact string `true` enables it |
+| `PPROF_HOST` | *(every interface)* | Host the in-process pprof listener binds; `127.0.0.1` for loopback only |
+| `PPROF_PORT_SERVER` | `6060` | Server pprof port (overrides the shared `PPROF_PORT`) |
+| `PPROF_PORT_INGESTOR` | `6061` | Ingestor pprof port (overrides the shared `PPROF_PORT`) |
 
 ### config.json
 
@@ -339,6 +631,19 @@ To use your own MQTT broker (Mosquitto, EMQX, HiveMQ, etc.):
      ]
    }
    ```
+
+3. Check the result before you start or update:
+   ```bash
+   ./manage.sh broker-check
+   ```
+
+   `DISABLE_MOSQUITTO=true` turns off the bundled broker but does **not**
+   configure a replacement. With no `mqttSources`, the ingestor falls back to
+   its built-in `mqtt://localhost:1883` — the bundled broker's own address,
+   where nothing is now listening — and ingests nothing while otherwise
+   looking healthy. `broker-check` and the ingestor's own startup log both
+   report that, with broker credentials masked. Set `MQTT_SOURCE_STRICT=true`
+   to make the ingestor refuse to start in that state.
 
 ### Multiple brokers
 
@@ -678,6 +983,45 @@ completed backup. Check the container's state and remove only that abandoned
 staging directory after investigating. The helper cannot guarantee recovery
 from a dead Docker daemon or host.
 
+**Concurrent runs.** Invocations for the same container are serialised, so
+a scheduled run that overlaps a manual one cannot restart the writer while the
+other is still copying. Before it reads the container's running state, the
+helper takes an exclusive lock keyed by the container's full ID: a name, the ID
+and a short ID share one lock, whatever backup directory each run uses. The lock
+is held through the stop, the copy, the restart and its check, and any
+recovery, and is released on every exit path, including a caught signal. A
+second run prints `Waiting up to …s for another backup of …` and waits up to
+`CORESCOPE_BACKUP_LOCK_WAIT` (default 600 seconds); `0` gives up at once. It
+then exits with status 75 without having read, stopped or started the
+container.
+The lock lives in a private `corescope-backup-locks` directory inside
+`CORESCOPE_BACKUP_LOCK_DIR` (default `/tmp`); not in `$TMPDIR`, which differs
+per user on macOS and under `sudo`. It is named
+`corescope-backup-<container ID>.lock`. It is host-local: run every backup of a
+container on its Docker host, as the same user, with the same lock directory
+(a systemd unit with `PrivateTmp=yes` needs `CORESCOPE_BACKUP_LOCK_DIR` set to
+a shared absolute path).
+Because `/tmp` is writable by every user, a lock path directly in it could be
+swapped for a symlink between the helper's check and its open. The helper
+therefore creates `corescope-backup-locks` with mode 0700 and uses it only once
+verified to be a directory of the current user with that mode, not a symlink;
+no other user can create anything inside it. `CORESCOPE_BACKUP_LOCK_DIR` itself
+must belong to root or that user and must not be writable by other users
+unless it is sticky like `/tmp`, so that nobody else can rename the private
+directory away. A `corescope-backup-locks` of another user, a symlink there, or
+an unsafe lock directory makes the helper exit with status 1 before it touches
+the container: one user's backups cannot then share, or be redirected by,
+another user's locks. (A POSIX shell cannot open a file with `O_NOFOLLOW`,
+and a directory named per user would let backups run as different users hold
+different locks and overlap.) With `flock` (util-linux, BusyBox) the lock is a file
+that the kernel releases when the helper exits; the file itself stays. Without
+`flock` (macOS) it is a directory holding the owner's PID: a lock whose owner
+no longer exists is removed automatically, one held by a live process (or
+without a readable owner) never is. Remove a lock by hand (with a leftover
+`….lock.reclaim` directory, which only a `SIGKILL` mid-reclaim leaves), or a
+lock path of the wrong type that the helper reports, only once no backup of
+that container is running.
+
 Back up `config.json` (which may contain secrets) and `theme.json` separately
 if wanted; the SQLite helper intentionally does not publish them.
 
@@ -772,9 +1116,10 @@ This is normal on first start with no MQTT sources configured. The dashboard sho
 ### "no MQTT connections established" in logs
 
 The ingestor couldn't connect to any MQTT broker. Check:
-1. Is the internal Mosquitto running? (`DISABLE_MOSQUITTO` should be `false`)
+1. Is the internal Mosquitto running? (`DISABLE_MOSQUITTO` should be `false`, and only the exact string `true` disables it)
 2. Is the external broker reachable? Test with `mosquitto_sub -h broker -t meshcore/#`
 3. Are credentials correct in `config.json`?
+4. Run `./manage.sh broker-check`, and look for `[broker]` lines in the ingestor log — with `DISABLE_MOSQUITTO=true` and no external `mqttSources`, the ingestor is pointed at a broker that is not running.
 
 ### WebSocket disconnects / real-time updates stop
 

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/meshcore-analyzer/pprofbind"
 	"github.com/meshcore-analyzer/regions"
 )
 
@@ -35,18 +36,18 @@ func main() {
 		os.Exit(runAdmin(os.Args[1:]))
 	}
 
-	// pprof profiling — off by default, enable with ENABLE_PPROF=true
-	if os.Getenv("ENABLE_PPROF") == "true" {
-		pprofPort := os.Getenv("PPROF_PORT")
-		if pprofPort == "" {
-			pprofPort = "6061"
-		}
+	// pprof profiling — off by default; see internal/pprofbind for the bind
+	// address and the per-role port that keeps this listener off the
+	// server's (#372).
+	if pp := pprofbind.Ingestor.Resolve(os.Getenv); pp.Enabled {
 		go func() {
-			log.Printf("[pprof] ingestor profiling at http://localhost:%s/debug/pprof/", pprofPort)
-			if err := http.ListenAndServe(":"+pprofPort, nil); err != nil {
+			log.Printf("[pprof] ingestor profiling at %s (listening on %s)", pp.URL, pp.Addr)
+			if err := http.ListenAndServe(pp.Addr, nil); err != nil {
 				log.Printf("[pprof] failed to start: %v (non-fatal)", err)
 			}
 		}()
+	} else if pp.Reason != "" {
+		log.Printf("[pprof] %s", pp.Reason)
 	}
 
 	configPath := flag.String("config", "config.json", "path to config file")
@@ -58,6 +59,14 @@ func main() {
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+
+	// Report the broker arrangement before any connection attempt, so an
+	// external-broker deploy that would ingest nothing says so up front
+	// instead of looking healthy with an empty database (#372). Errors are
+	// only fatal under MQTT_SOURCE_STRICT.
+	if fatal, msg := ReportBrokerSetup(os.Getenv, cfg.MQTTSources, cfg.sourcesDefaulted, log.Printf); fatal {
+		log.Fatal(msg)
 	}
 
 	// Apply Go runtime soft memory limit (GOMEMLIMIT). See #1010.

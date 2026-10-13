@@ -102,6 +102,7 @@ jobs:
           (cd internal/channelregistry && go test ./...)
           (cd internal/dbschema && go test ./...)
           (cd internal/brokerurl && go test ./...)
+          (cd internal/pprofbind && go test ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).
@@ -126,6 +127,19 @@ jobs:
 
       - name: Staging disk-monitor unit tests (issue #1684)
         run: bash scripts/staging/test-disk-monitor.sh
+
+      - name: Non-root container helper unit tests + ShellCheck (issue #339)
+        run: |
+          bash scripts/test-nonroot-helper.sh
+          shellcheck docker/nonroot.sh scripts/test-nonroot-helper.sh scripts/test-docker-nonroot.sh scripts/test-nonroot-entrypoint.sh
+          # SC1091: the entrypoint sources the data volume's .env at run time.
+          shellcheck -e SC1091 docker/entrypoint-go.sh
+
+      # The real entrypoint and helper as root in the runtime image's pinned
+      # Alpine base, supervisord stubbed: off-mode start, ownership changes,
+      # the check before root uses files in the data dir, rollback records.
+      - name: Non-root container start path, supervisord stubbed (issue #339)
+        run: bash scripts/test-nonroot-entrypoint.sh
 
       - name: QA blacklist script unit tests (issues #1977, #83)
         run: bash qa/scripts/test-blacklist-sql.sh
@@ -461,6 +475,7 @@ jobs:
           BASE_URL=http://localhost:13581 node test-issue-353-path-hash-warn-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-96-hide-control-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-242-type-exclusions-e2e.js 2>&1 | tee -a e2e-output.txt
+          CHROMIUM_REQUIRE=1 node test-issue-406-packets-live-channel-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-slideover-1168-munger-e2e.js 2>&1 | tee -a e2e-output.txt
           BASE_URL=http://localhost:13581 node test-logo-pulse-1173-e2e.js 2>&1 | tee -a e2e-output.txt
@@ -677,6 +692,11 @@ jobs:
   image-check:
     name: "🧱 Validate Docker Image"
     runs-on: ubuntu-latest
+    # Local build only: no registry access, and a hung build must not hold the
+    # required gate pending for the 360 minute default.
+    permissions:
+      contents: read
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v5

@@ -243,6 +243,9 @@ func (s *Server) handleNeighborGraph(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	region := r.URL.Query().Get("region")
+	if s.rejectAnalyticsFilters(w, region, "") {
+		return
+	}
 	roleFilter := strings.ToLower(r.URL.Query().Get("role"))
 
 	// #1481 P0-1: serve the default-shape request from the atomic-pointer

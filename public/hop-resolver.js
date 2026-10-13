@@ -183,32 +183,40 @@ window.HopResolver = (function() {
 
     // Determine observer's IATA for regional filtering
     const packetIata = observerId ? observerIataMap[observerId] : null;
+    // This map cannot represent different answers for repeated positions.
+    // Do not narrow a terminal prefix that also occurs earlier in the path.
+    const earlierPrefixes = packetIata ? new Set(hops.slice(0, -1).map(h => h.toLowerCase())) : null;
+    const terminalHasRegion = packetIata && !earlierPrefixes.has(hops[hops.length - 1].toLowerCase());
 
     const resolved = {};
     const hopPositions = {};
 
-    // First pass: find candidates with regional filtering
-    for (const hop of hops) {
+    // A flood's recorded path ends with the transmitter heard by its
+    // observer. Earlier hops may be remote: the receiving region is not
+    // evidence for them. Callers supply observer hints only for RX floods.
+    for (let hopIndex = 0; hopIndex < hops.length; hopIndex++) {
+      const hop = hops[hopIndex];
+      const hopIata = hopIndex === hops.length - 1 && terminalHasRegion ? packetIata : null;
       const h = hop.toLowerCase();
       const allCandidates = prefixIdx[h] || [];
       if (allCandidates.length === 0) {
         resolved[hop] = { name: null, candidates: [], conflicts: [] };
       } else if (allCandidates.length === 1) {
         const c = allCandidates[0];
-        const regionCheck = packetIata ? nodeInRegion(c, packetIata) : null;
+        const regionCheck = hopIata ? nodeInRegion(c, hopIata) : null;
         resolved[hop] = { name: c.name, pubkey: c.public_key,
           candidates: [{ name: c.name, pubkey: c.public_key, lat: c.lat, lon: c.lon, regional: regionCheck ? regionCheck.near : false, filterMethod: regionCheck ? regionCheck.method : 'none', distKm: regionCheck ? regionCheck.distKm : undefined }],
           conflicts: [] };
       } else {
         // Multiple candidates — apply geo regional filtering
         const checked = allCandidates.map(c => {
-          const r = packetIata ? nodeInRegion(c, packetIata) : null;
+          const r = hopIata ? nodeInRegion(c, hopIata) : null;
           return { ...c, regional: r ? r.near : false, filterMethod: r ? r.method : 'none', distKm: r ? r.distKm : undefined };
         });
         const regional = checked.filter(c => c.regional);
         regional.sort((a, b) => (a.distKm || 9999) - (b.distKm || 9999));
         const candidates = regional.length > 0 ? regional : checked;
-        const globalFallback = regional.length === 0 && checked.length > 0 && packetIata != null;
+        const globalFallback = regional.length === 0 && checked.length > 0;
 
         const conflicts = candidates.map(c => ({
           name: c.name, pubkey: c.public_key, lat: c.lat, lon: c.lon,

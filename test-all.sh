@@ -69,6 +69,7 @@ run test-issue-314-chscroll-listener.js
 run test-issue-405-observers-listener-leak.js
 run test-issue-322-comment-guards.js
 run test-backup-sqlite-safety.js
+run test-issue-372-broker-check.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -260,6 +261,7 @@ run test-payload-labels-content.js
 run test-payload-labels-namespace.js
 run test-perf-anomaly.js
 run test-perf-render-1258.js
+run test-perf-ws-clients.js
 run test-pull-to-reconnect.js
 run test-rx-coverage-config-race.js
 run test-slideover-1056-rowsel-strict.js

@@ -4306,7 +4306,7 @@ console.log('\n=== channels.js: formatHashHex (issue #465) ===');
   });
 
   test('packets array is trimmed to PACKET_LIMIT after WS update in flat mode', () => {
-    assert.ok(/packets = filtered\.concat\(packets\)[\s\S]{0,100}packets\.length = PACKET_LIMIT/.test(src),
+    assert.ok(/packets = accepted\.concat\(packets\)[\s\S]{0,100}packets\.length = PACKET_LIMIT/.test(src),
       'flat mode must truncate packets to PACKET_LIMIT after prepend');
   });
 
