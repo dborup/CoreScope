@@ -49,8 +49,14 @@ var attrRe = regexp.MustCompile(`([a-zA-Z-]+)\s*=\s*"([^"]*)"`)
 
 func externalSwaggerTags(t *testing.T) []map[string]string {
 	t.Helper()
+	return externalSubresourceTags(swaggerUIHTML)
+}
+
+// externalSubresourceTags returns the attributes of every off-origin
+// subresource tag in html, with the tag name under "__tag".
+func externalSubresourceTags(html string) []map[string]string {
 	var out []map[string]string
-	for _, m := range externalTagRe.FindAllStringSubmatch(swaggerUIHTML, -1) {
+	for _, m := range externalTagRe.FindAllStringSubmatch(html, -1) {
 		attrs := map[string]string{"__tag": strings.ToLower(m[1])}
 		for _, a := range attrRe.FindAllStringSubmatch(m[2], -1) {
 			attrs[strings.ToLower(a[1])] = a[2]
@@ -86,6 +92,32 @@ func TestSwaggerUIExternalAssetsArePinnedAndHashed(t *testing.T) {
 		if got := attrs["crossorigin"]; !strings.EqualFold(got, "anonymous") {
 			t.Errorf("%s %q: crossorigin = %q, want \"anonymous\"", attrs["__tag"], url, got)
 		}
+	}
+}
+
+// TestExternalSubresourceTagsScopesLinkByRel: only a <link> that loads a
+// script or stylesheet can carry integrity. A preconnect, dns-prefetch or
+// canonical hint pointing at the CDN must not count as an unpinned
+// subresource (or bump the asset count below), while every rel that does
+// load script or style must still be checked.
+func TestExternalSubresourceTagsScopesLinkByRel(t *testing.T) {
+	ignored := `<link rel="preconnect" href="https://unpkg.com">
+<link rel="dns-prefetch" href="//unpkg.com">
+<link rel="canonical" href="https://example.org/">
+<link rel="icon" href="https://example.org/favicon.ico">
+<link href="https://example.org/no-rel">`
+	if got := externalSubresourceTags(ignored); len(got) != 0 {
+		t.Errorf("non-subresource <link> tags treated as subresources: %v", got)
+	}
+	checked := `<link rel="stylesheet" href="https://unpkg.com/a@1/a.css">
+<link rel="alternate stylesheet" href="https://unpkg.com/a@1/b.css">
+<link rel="modulepreload" href="https://unpkg.com/a@1/c.mjs">
+<link rel="preload" as="script" href="https://unpkg.com/a@1/d.js">
+<link rel="preload" as="style" href="https://unpkg.com/a@1/e.css">
+<link rel="PRELOAD" as="Script" href="//unpkg.com/a@1/f.js">
+<script src="https://unpkg.com/a@1/g.js"></script>`
+	if got := externalSubresourceTags(checked); len(got) != 7 {
+		t.Errorf("got %d checked subresources, want 7: %v", len(got), got)
 	}
 }
 
