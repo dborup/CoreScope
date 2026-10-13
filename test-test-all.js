@@ -135,13 +135,16 @@ const KNOWN_UNREGISTERED = {
 console.log('root test registry');
 const deploy = fs.readFileSync(path.join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
 const inDeploy = new Set([...deploy.matchAll(/\bnode (test-[\w.-]+\.js)\b/g)].map((m) => m[1]));
-const runSomewhere = (f) => files.includes(f) || inDeploy.has(f);
+const { manifest: e2eManifest } = require('./scripts/ci/e2e-manifest').readManifest(
+  path.join(ROOT, 'scripts/e2e-shards.json'), ROOT);
+const inE2EManifest = new Set(e2eManifest.suites.map((suite) => suite.file));
+const runSomewhere = (f) => files.includes(f) || inDeploy.has(f) || inE2EManifest.has(f);
 const rootTests = fs.readdirSync(ROOT).filter((f) => /^test-.*\.js$/.test(f));
 
-test('every root test-*.js runs in test-all.sh or deploy.yml', () => {
+test('every root test-*.js runs in test-all.sh or the CI E2E manifest', () => {
   const orphans = rootTests.filter((f) => !runSomewhere(f) && !(f in KNOWN_UNREGISTERED));
   assert.deepStrictEqual(orphans, [], orphans.join(', ') + ' run nowhere: add `run <file>` to ' +
-    'test-all.sh (unit) or a line to the Playwright step in deploy.yml (E2E)');
+    'test-all.sh (unit) or an assignment in scripts/e2e-shards.json (E2E)');
 });
 
 test('KNOWN_UNREGISTERED has no stale entries', () => {
