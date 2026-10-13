@@ -39,18 +39,31 @@ import (
 //   - C1 controls (U+0080-U+009F). These are controls that encode as TWO bytes
 //     in UTF-8, so the obvious byte-oriented "< 0x20" test misses them
 //     completely.
-//   - Bidi embeddings/overrides (U+202A-U+202E) and isolates (U+2066-U+2069).
-//     Not controls in the Unicode sense but formatting codepoints that reorder
-//     everything after them when rendered, so an id or name can DISPLAY as a
-//     different string than the one the row actually holds. The diagnostic
-//     below quotes its sample with %q, which escapes these, so this is a
-//     UI-spoofing concern rather than a log-injection sink.
+//   - Every codepoint with Unicode's Bidi_Control property — all twelve: the
+//     marks U+061C, U+200E and U+200F, the embeddings/overrides U+202A-U+202E
+//     and the isolates U+2066-U+2069. Not controls in the Unicode sense but
+//     invisible formatting codepoints that change how the text around them
+//     renders, so an id or name can DISPLAY as a different string than the one
+//     the row actually holds. For identity that is the sharper case than
+//     reordering: an id differing from another only by an invisible mark
+//     renders identically to it while keying its own row, so an operator
+//     cannot tell the two apart in the UI. The diagnostic below quotes its
+//     sample with %q, which escapes all of these, so this is a UI-spoofing
+//     concern rather than a log-injection sink.
 //
 // Everything else is left alone. Ordinary non-ASCII text passes through
 // untouched — Danish letters and emoji both appear in real observer names — as
 // do the codepoints bordering the ranges above (NBSP U+00A0, U+202F, U+2065,
 // U+206A). An id carrying a forbidden codepoint is REJECTED; display text has
 // it STRIPPED.
+//
+// Deliberately NOT covered: invisible codepoints that are not Bidi_Control —
+// ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D, WJ U+2060, BOM U+FEFF, SHY U+00AD and
+// the variation selectors. They raise the same "two ids render the same"
+// question, but ZWJ and the variation selectors are load-bearing inside
+// legitimate text (emoji sequences, Indic scripts), so excluding them is a
+// separate decision from this one, with its own blast radius. The boundary is
+// pinned by test rather than left implicit.
 //
 // # These bounds are damage containment, not authentication
 //
@@ -179,11 +192,20 @@ func observerRuneIsControl(r rune) bool {
 	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
-// observerRuneIsBidiControl reports whether r is a bidi embedding/override
-// (U+202A-U+202E) or isolate (U+2066-U+2069). These reorder the text that
-// follows them when rendered, so they can make a stored id or name display as
-// something it is not. See this file's header.
+// observerRuneIsBidiControl reports whether r is one of the twelve codepoints
+// Unicode gives the Bidi_Control property: the marks U+061C (ALM), U+200E
+// (LRM) and U+200F (RLM), the embeddings/overrides U+202A-U+202E, and the
+// isolates U+2066-U+2069. All twelve are invisible and all twelve affect how
+// the text around them renders, so they can make a stored id or name display
+// as something it is not. See this file's header.
+//
+// The three marks are listed individually because they do not sit in a range
+// with the others — which is exactly why they were missed first time round.
 func observerRuneIsBidiControl(r rune) bool {
+	switch r {
+	case 0x061c, 0x200e, 0x200f:
+		return true
+	}
 	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
 
@@ -201,8 +223,9 @@ func observerRuneIsBidiControl(r rune) bool {
 //   - "control-char": contains a C0 control, DEL, or a C1 control. Real ids are
 //     hex pubkeys or printable operator labels; a control character signals a
 //     malformed segment.
-//   - "bidi-control": contains a bidi embedding/override or isolate, which
-//     would render the id as a different string than the one rows are keyed on.
+//   - "bidi-control": contains a Bidi_Control codepoint (mark, embedding/
+//     override or isolate), which would render the id as a different string
+//     than the one rows are keyed on.
 //
 // The empty id is intentionally NOT rejected here: that is an existing,
 // orthogonal edge (a malformed "meshcore//status" topic) whose behaviour this

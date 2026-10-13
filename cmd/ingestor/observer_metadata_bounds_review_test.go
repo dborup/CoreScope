@@ -265,21 +265,108 @@ func TestObserverIDRejectReason_C1Controls(t *testing.T) {
 	}
 }
 
+// bidiControlRunes is the COMPLETE set of codepoints Unicode gives the
+// Bidi_Control property — all twelve. Round 2 covered only the embedding/
+// override block (U+202A-U+202E) and the isolates (U+2066-U+2069); the marks
+// U+061C/U+200E/U+200F carry the same property and the same invisibility, and
+// they are the sharper case for #338's identity contract: two ids that differ
+// only by an invisible mark render identically, so an operator reading the UI
+// cannot tell the two stored rows apart.
+//
+// Kept as one table used by every bidi assertion below, so the policy and its
+// tests cannot drift apart the way they did for these three.
+var bidiControlRunes = []rune{
+	'\u061c', // ALM, Arabic letter mark
+	'\u200e', // LRM, left-to-right mark
+	'\u200f', // RLM, right-to-left mark
+	'\u202a', // LRE
+	'\u202b', // RLE
+	'\u202c', // PDF
+	'\u202d', // LRO
+	'\u202e', // RLO
+	'\u2066', // LRI
+	'\u2067', // RLI
+	'\u2068', // FSI
+	'\u2069', // PDI
+}
+
+// bidiControlBorderRunes are the codepoints bracketing the ranges above that
+// are NOT Bidi_Control and must stay text. U+200B/U+200C/U+200D and U+2060 are
+// the interesting ones: they are invisible too, but they are not Bidi_Control
+// and bounding them is a separate question from this policy (see the PR's
+// residuals), so the boundary is pinned here rather than left implicit.
+var bidiControlBorderRunes = []rune{
+	'\u061b', // Arabic semicolon, just below ALM
+	'\u061d', // just above ALM
+	'\u200b', // ZWSP — invisible, not Bidi_Control
+	'\u200c', // ZWNJ
+	'\u200d', // ZWJ, just below LRM
+	'\u2010', // hyphen, just above RLM
+	'\u2029', // paragraph separator
+	'\u202f', // narrow no-break space, just above RLO
+	'\u2060', // word joiner — invisible, not Bidi_Control
+	'\u2065', // just below LRI
+	'\u206a', // just above PDI
+}
+
+// The three Bidi_Control codepoints round 2 missed, called out on their own so
+// the gap is named by a failing test and not only by the table above.
+func TestObserverIDRejectReason_BidiMarks(t *testing.T) {
+	for _, r := range []rune{'\u200e', '\u200f', '\u061c'} {
+		id := "obs" + string(r) + "01"
+		if got := observerIDRejectReason(id); got != observerIDRejectBidiControl {
+			t.Errorf("observerIDRejectReason(%q) = %q, want %q (U+%04X is Bidi_Control)", id, got, observerIDRejectBidiControl, r)
+		}
+		if got := normalizeObserverText("Observer"+string(r)+"01", 64); got != "Observer01" {
+			t.Errorf("U+%04X survived normalizeObserverText: %q", r, got)
+		}
+	}
+	// The identity case the marks create: without the policy these two ids
+	// render the same and are stored as two distinct observers.
+	plain, marked := "obs01", "obs\u200e01"
+	if plain == marked {
+		t.Fatal("test setup: the two ids must differ in bytes")
+	}
+	if observerIDRejectReason(plain) != "" {
+		t.Fatalf("the unmarked id must stay acceptable")
+	}
+	if got := observerIDRejectReason(marked); got == "" {
+		t.Errorf("observerIDRejectReason(%q) accepted it — it renders identically to %q, so the two rows cannot be told apart", marked, plain)
+	}
+}
+
+// End-to-end: a bidi-mark-bearing id is dropped at the gate, like the override
+// and isolate cases above it.
+func TestHandleMessage_BidiMarkObserverIDDropped(t *testing.T) {
+	for _, r := range []rune{'\u200e', '\u200f', '\u061c'} {
+		store, source := newTestContext(t)
+		msg := &mockMessage{
+			topic:   "meshcore/SJC/obs" + string(r) + "01/status",
+			payload: []byte(`{"origin":"Hostile","noise_floor":-100}`),
+		}
+		handleMessage(store, "test", source, msg, nil, nil, &Config{})
+		if n := countRows(t, store, "observers"); n != 0 {
+			t.Errorf("U+%04X: observers = %d, want 0 (a Bidi_Control id must be dropped)", r, n)
+		}
+	}
+}
+
 // Bidi embedding/override (U+202A-U+202E) and isolate (U+2066-U+2069)
 // characters reorder everything after them when rendered, so an id carrying
 // one displays as a different id than the one rows are keyed on. Rejected.
 func TestObserverIDRejectReason_BidiControls(t *testing.T) {
-	for _, r := range []rune{'\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069'} {
+	for _, r := range bidiControlRunes {
 		id := "obs" + string(r) + "01"
 		if got := observerIDRejectReason(id); got != observerIDRejectBidiControl {
 			t.Errorf("observerIDRejectReason(%q) = %q, want %q (U+%04X)", id, got, observerIDRejectBidiControl, r)
 		}
 	}
-	// The codepoints immediately outside both ranges are ordinary characters.
-	for _, r := range []rune{'\u2029', '\u202f', '\u2065', '\u206a'} {
+	// The codepoints immediately outside every covered range are ordinary
+	// characters.
+	for _, r := range bidiControlBorderRunes {
 		id := "obs" + string(r) + "01"
 		if got := observerIDRejectReason(id); got != "" {
-			t.Errorf("observerIDRejectReason(%q) = %q, want accepted (U+%04X is outside both bidi ranges)", id, got, r)
+			t.Errorf("observerIDRejectReason(%q) = %q, want accepted (U+%04X is not a Bidi_Control codepoint)", id, got, r)
 		}
 	}
 }
@@ -325,15 +412,15 @@ func TestNormalizeObserverText_StripsBidiControls(t *testing.T) {
 	if got := normalizeObserverText(in, 64); got != "Observer01-SJC" {
 		t.Fatalf("got %q, want %q (bidi overrides must be stripped)", got, "Observer01-SJC")
 	}
-	for _, r := range []rune{'\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069'} {
+	for _, r := range bidiControlRunes {
 		if got := normalizeObserverText("a"+string(r)+"b", 64); got != "ab" {
 			t.Errorf("U+%04X survived normalizeObserverText: %q", r, got)
 		}
 	}
-	for _, r := range []rune{'\u2029', '\u202f', '\u2065', '\u206a'} {
+	for _, r := range bidiControlBorderRunes {
 		want := "a" + string(r) + "b"
 		if got := normalizeObserverText(want, 64); got != want {
-			t.Errorf("U+%04X stripped but is outside both bidi ranges: %q", r, got)
+			t.Errorf("U+%04X stripped but is not a Bidi_Control codepoint: %q", r, got)
 		}
 	}
 }
