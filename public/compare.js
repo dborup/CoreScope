@@ -110,8 +110,15 @@ if (typeof window !== 'undefined') {
       '<div id="compareContent"></div>' +
     '</div>';
 
+    // #428 — Bind off the shared #app, not onto it (same pattern #405 used
+    // for observers.js; #402 explicitly left this one for the owner). The
+    // next page's app.innerHTML rebuild discards .compare-page along with
+    // this listener, so it can't keep firing — and stacking — on later
+    // pages. .compare-page is the root this init() writes into, so it
+    // still catches every row keydown the #app binding did.
+    var pageEl = app.querySelector('.compare-page');
     // #209 — Keyboard accessibility for compare table rows
-    app.addEventListener('keydown', function (e) {
+    pageEl.addEventListener('keydown', function (e) {
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       if (e.key !== 'Enter' && e.key !== ' ') return;

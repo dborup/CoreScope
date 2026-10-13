@@ -276,6 +276,51 @@
       ]
     },
     {
+      "file": "test-issue-428-compare-listener-leak-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.403333,
+      "secondsByExecution": [
+        2.404,
+        2.441,
+        2.365
+      ]
+    },
+    {
+      "file": "test-issue-428-channels-listener-leak-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 6.801667,
+      "secondsByExecution": [
+        6.753,
+        6.842,
+        6.81
+      ]
+    },
+    {
+      "file": "test-issue-428-live-listener-leak-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.503333,
+      "secondsByExecution": [
+        5.56,
+        5.528,
+        5.422
+      ]
+    },
+    {
       "file": "test-issue-1758-ng-filter-rerenders-e2e.js",
       "shard": 2,
       "env": {

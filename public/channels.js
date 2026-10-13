@@ -10,6 +10,12 @@
   let selectedHash = null;
   let messages = [];
   let wsHandler = null;
+  // #428 — refs for document/window listeners that must be removed in
+  // destroy(); see the note at their bind sites in init().
+  let _chAddModalEscHandler = null;
+  let _chShareModalEscHandler = null;
+  let _chShowEncryptedChangedHandler = null;
+  let _chSidebarDragHandlers = null;
 
   // Normalize the two API spellings at the browser boundary.  Only the three
   // MeshCore path-hash widths are evidence; direct/zero-hop and malformed
@@ -1288,11 +1294,15 @@
           closeAddModal();
         }
       });
-      document.addEventListener('keydown', function (e) {
+      // #428 — Escape must work no matter what's focused, so this stays on
+      // document rather than a page container; stored and removed in
+      // destroy() so it doesn't keep firing (and stacking) on later pages.
+      _chAddModalEscHandler = function (e) {
         if (e.key === 'Escape' && !modalEl.classList.contains('hidden')) {
           closeAddModal();
         }
-      });
+      };
+      document.addEventListener('keydown', _chAddModalEscHandler);
     }
 
     // #1087 Bug 4: dedicated Share modal wiring.
@@ -1435,11 +1445,13 @@
           closeShareModal();
         }
       });
-      document.addEventListener('keydown', function (e) {
+      // #428 — see the Add-modal Esc handler note above.
+      _chShareModalEscHandler = function (e) {
         if (e.key === 'Escape' && !shareModalEl.classList.contains('hidden')) {
           closeShareModal();
         }
-      });
+      };
+      document.addEventListener('keydown', _chShareModalEscHandler);
     }
 
     // Section 1: Generate PSK
@@ -1551,7 +1563,9 @@
     // #1454 — customizer flips the "show encrypted channels" toggle, which
     // writes localStorage and fires this event. Re-fetch the list live so
     // the operator sees the change without a page reload.
-    window.addEventListener('mc-channels-show-encrypted-changed', function () {
+    // #428 — stored (via the assignment expression below) and removed in
+    // destroy(): window outlives the page.
+    window.addEventListener('mc-channels-show-encrypted-changed', _chShowEncryptedChangedHandler = function () {
       loadChannels(true);
     });
 
@@ -1563,8 +1577,14 @@
       if (saved) { var w = parseInt(saved, 10); if (w >= 180 && w <= 600) { sidebar.style.width = w + 'px'; sidebar.style.minWidth = w + 'px'; } }
       var dragging = false, startX, startW;
       handle.addEventListener('mousedown', function (e) { dragging = true; startX = e.clientX; startW = sidebar.getBoundingClientRect().width; e.preventDefault(); });
-      document.addEventListener('mousemove', function (e) { if (!dragging) return; var w = Math.max(180, Math.min(600, startW + e.clientX - startX)); sidebar.style.width = w + 'px'; sidebar.style.minWidth = w + 'px'; });
-      document.addEventListener('mouseup', function () { if (!dragging) return; dragging = false; localStorage.setItem('channels-sidebar-width', parseInt(sidebar.style.width, 10)); });
+      // #428 — the drag can leave the handle/sidebar bounds, so mousemove/up
+      // stay on document; stored here and removed in destroy() so they
+      // don't keep reacting to the mouse (and stacking) on later pages.
+      var onSidebarDragMove = function (e) { if (!dragging) return; var w = Math.max(180, Math.min(600, startW + e.clientX - startX)); sidebar.style.width = w + 'px'; sidebar.style.minWidth = w + 'px'; };
+      var onSidebarDragUp = function () { if (!dragging) return; dragging = false; localStorage.setItem('channels-sidebar-width', parseInt(sidebar.style.width, 10)); };
+      document.addEventListener('mousemove', onSidebarDragMove);
+      document.addEventListener('mouseup', onSidebarDragUp);
+      _chSidebarDragHandlers = { mousemove: onSidebarDragMove, mouseup: onSidebarDragUp };
     })();
 
     // #90: Theme change observer — re-render messages on theme toggle
@@ -1575,8 +1595,16 @@
     });
     _themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
+    // #428 — Bind the delegated click handler to the channels page's OWN
+    // container, not the shared #app (same pattern #405 used for
+    // observers.js). The next page's app.innerHTML rebuild discards this
+    // subtree — and the listener with it — instead of leaving it to fire
+    // on every later page and stack on each revisit. The chNodePanel
+    // appended later under .ch-main (see showNodeDetail) is inside
+    // .ch-layout too, so delegation here still catches ch-close-node.
+    var pageEl = app.querySelector('.ch-layout');
     // Event delegation for data-action buttons
-    app.addEventListener('click', function (e) {
+    pageEl.addEventListener('click', function (e) {
       var btn = e.target.closest('[data-action]');
       if (!btn) return;
       var action = btn.dataset.action;
@@ -2053,6 +2081,18 @@
     timeAgoTimer = null;
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
+    // #428 — undo the document/window listeners from init() that can't be
+    // discarded with #app's subtree (Esc handling, the global
+    // show-encrypted event, and sidebar-drag tracking that must follow the
+    // mouse outside the sidebar's own bounds).
+    if (_chAddModalEscHandler) { document.removeEventListener('keydown', _chAddModalEscHandler); _chAddModalEscHandler = null; }
+    if (_chShareModalEscHandler) { document.removeEventListener('keydown', _chShareModalEscHandler); _chShareModalEscHandler = null; }
+    if (_chShowEncryptedChangedHandler) { window.removeEventListener('mc-channels-show-encrypted-changed', _chShowEncryptedChangedHandler); _chShowEncryptedChangedHandler = null; }
+    if (_chSidebarDragHandlers) {
+      document.removeEventListener('mousemove', _chSidebarDragHandlers.mousemove);
+      document.removeEventListener('mouseup', _chSidebarDragHandlers.mouseup);
+      _chSidebarDragHandlers = null;
+    }
     channels = [];
     messages = [];
     selectedHash = null;
