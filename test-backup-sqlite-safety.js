@@ -83,7 +83,7 @@ if (op === 'stop') {
       }
       fs.writeFileSync(statePath + '.signalled', '');
     }
-    process.kill(process.ppid, 'SIGTERM'); process.exit(0);
+    process.kill(process.ppid, process.env.MOCK_SIGNAL_NAME || 'SIGTERM'); process.exit(0);
   }
   done();
 }
@@ -470,28 +470,29 @@ test('job control (sh -m on a terminal) does not break the isolated Docker calls
 }, {wal:true}));
 
 test('a further signal while the first is handled cannot preempt recovery', () => fixture(f => {
-  // The helper's stderr is a full FIFO, so its `interrupted` error write blocks.
-  // A second signal lands exactly while the first one is being handled.
+  // The helper's stderr is a full FIFO, so the `interrupted` write for the
+  // first signal (HUP) blocks; TERM arrives while that handler runs. Pending
+  // traps run in signal-number order, so even an early TERM cannot overtake HUP.
   const fifo = path.join(f.dir, 'stderr.fifo'), errors = path.join(f.dir, 'stderr.txt');
   assert.strictEqual(spawnSync('mkfifo', [fifo]).status, 0);
   const driver = `
     exec 3<>"$FIFO"
     sh "$HELPER" corescope-test "$OUT" 2>&3 & pid=$!
-    n=0; until grep -qx pipe_write /proc/$pid/wchan 2>/dev/null; do
-      n=$((n + 1)); [ "$n" -lt 400 ] || { kill -9 "$pid"; echo 'helper never blocked on stderr' >&2; exit 99; }
+    n=0; until [ -e "$MOCK_STATE.signalled" ]; do
+      n=$((n + 1)); [ "$n" -lt 400 ] || { kill -9 "$pid"; echo 'first signal never sent' >&2; exit 99; }
       sleep 0.02
     done
-    [ -e "$MOCK_STATE.signalled" ] || { kill -9 "$pid"; echo 'blocked before the first signal' >&2; exit 98; }
-    kill -HUP "$pid"; sleep 0.2
+    sleep 0.5; kill -TERM "$pid"; sleep 0.2
     cat <&3 >"$ERRORS" & reader=$!
     wait "$pid"; status=$?
     sleep 0.2; kill "$reader"; exit "$status"`;
-  const result = spawnSync('sh', ['-c', driver], {env:{...f.env, MOCK_SIGNAL:'stop', MOCK_FILL_STDERR:'1', FIFO:fifo,
-    HELPER:path.join(root, 'scripts/backup-sqlite.sh'), OUT:f.snapshots, ERRORS:errors}, encoding:'utf8', timeout:20000});
+  const result = spawnSync('sh', ['-c', driver], {env:{...f.env, MOCK_SIGNAL:'stop', MOCK_SIGNAL_NAME:'SIGHUP',
+    MOCK_FILL_STDERR:'1', FIFO:fifo, HELPER:path.join(root, 'scripts/backup-sqlite.sh'), OUT:f.snapshots, ERRORS:errors},
+    encoding:'utf8', timeout:20000});
   const stderr = fs.existsSync(errors) ? fs.readFileSync(errors, 'utf8').replace(/x+/g, '') : '';
-  assert.strictEqual(result.status, 143, result.stderr + stderr);
-  assert.match(stderr, /interrupted by SIGTERM/);
-  assert.doesNotMatch(stderr, /SIGHUP/);
+  assert.strictEqual(result.status, 129, result.stderr + stderr);
+  assert.match(stderr, /interrupted by SIGHUP/);
+  assert.doesNotMatch(stderr, /SIGTERM/);
   assert.strictEqual(f.state().running, true); assert.strictEqual(calls(f,'start').length, 1);
   assertNoSnapshots(f);
 }));
