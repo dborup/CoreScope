@@ -692,11 +692,12 @@ jobs:
   build-and-publish:
     name: "🏗️ Build & Publish Docker Image"
     needs: [go-test, e2e-test, image-check]
-    # A failed dependency normally skips this job, and so does a cancelled run
-    # under !cancelled(). A skipped required check can count as passing in
-    # branch protection, so always run and fail explicitly. Later steps keep
-    # the implicit success(), so nothing publishes after a failed gate.
-    if: ${{ always() }}
+    # A failed dependency normally skips this job. A skipped required check
+    # can count as passing in branch protection, so run and fail explicitly.
+    # A cancelled run reports this job as cancelled (not skipped), which does
+    # not pass either. Later steps keep the implicit success(), so nothing
+    # publishes after a failed gate.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require tests and image validation

@@ -90,10 +90,10 @@ func TestForkGuardOnPublishSteps(t *testing.T) {
 	}
 
 	job := workflowJob(t, workflow, "build-and-publish")
-	// always(), not !cancelled(): a cancelled run must still produce a red
-	// gate rather than a skipped one, which branch protection counts as passing.
-	if cond := strings.TrimSpace(jobIf(job)); cond != "${{ always() }}" {
-		t.Errorf("build-and-publish must run as a fork-safe fail-closed gate even when the run is cancelled; want if ${{ always() }}, got %q", cond)
+	// !cancelled() runs the gate after failed or skipped prerequisites. A
+	// cancelled run reports the gate as cancelled, which does not pass.
+	if cond := strings.TrimSpace(jobIf(job)); cond != "${{ !cancelled() }}" {
+		t.Errorf("build-and-publish must run as a fork-safe fail-closed gate, not skip after test failures; want if ${{ !cancelled() }}, got %q", cond)
 	}
 	steps := regexp.MustCompile(`(?m)^      - name:`).Split(job, -1)[1:]
 	publishMarkers := []string{"docker/setup-buildx-action", "docker/setup-qemu-action", "docker/login-action", "docker/metadata-action", "docker/build-push-action"}

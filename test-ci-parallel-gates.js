@@ -26,13 +26,13 @@ assert.ok(!/^    needs:/m.test(e2e), 'E2E must not wait for Go tests');
 assert.ok(!/^    needs:/m.test(image), 'image check must start independently');
 assert.match(image, /docker compose .* build/, 'image check must build the staging image');
 assert.match(publish, /^    needs: \[go-test, e2e-test, image-check\]$/m);
-// always(), not !cancelled(): when the whole run is cancelled the gate must
-// still run and fail instead of being skipped.
-assert.match(publish, /^    if: \$\{\{ always\(\) \}\}$/m, 'gate must run even when the run is cancelled');
+// A cancelled run reports the gate as cancelled (not skipped), which does
+// not pass, so !cancelled() is enough.
+assert.match(publish, /^    if: \$\{\{ !cancelled\(\) \}\}$/m, 'gate must run after failed or skipped prerequisites');
 assert.match(publish, /github\.repository == 'Kpa-clawbot\/CoreScope'/);
 
-// With a job-level always(), only the implicit success() of each later step
-// keeps publishing behind the gate step. No step may override it.
+// The gate job runs after failures, so only the implicit success() of each
+// later step keeps publishing behind the gate step. No step may override it.
 assert.doesNotMatch(publish, /^        if:.*\b(always|cancelled|failure)\(\)/m, 'publish steps must stay behind the gate step');
 
 const gate = publish.match(/      - name: Require tests and image validation\n([\s\S]*?)(?=      - name: Checkout code)/);
