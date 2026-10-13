@@ -315,8 +315,9 @@ Server health and telemetry. Used by monitoring.
     "recentSlow": [            // last 5
       {
         // Same SlowQuery shape as GET /api/perf → slowQueries[]: normalized
-        // route key + a sanitised, control-char-stripped, ≤128-rune-per-half
-        // copy of the raw request path, joined by a space (e.g. "/api/nodes/:id
+        // route key + a sanitised, control-char-stripped copy of the raw
+        // request path (each half ≤128 content runes plus an "…" truncation
+        // marker), joined by a space (e.g. "/api/nodes/:id
         // /api/nodes/abcd1234"); unmatched routes emit the capped raw path
         // once. Not HTML-escaped — clients MUST escape before DOM insertion
         // (#392, #394 F3/F4/F6).
@@ -358,8 +359,9 @@ Detailed performance metrics per endpoint.
       // Normalized route key + a sanitised copy of the raw request path,
       // joined by a single space, e.g. "/api/nodes/:id /api/nodes/abcd1234".
       // BOTH halves are independently control-char-stripped (incl. CR/LF/TAB)
-      // and capped to ≤128 runes each (an "…" marks truncation), so the whole
-      // value is bounded at ≤257 runes regardless of input (#392, #394 F3/F4).
+      // and capped to ≤128 content runes each (an "…" marks truncation), so
+      // the whole value is bounded at ≤259 runes (2×128 content runes + two
+      // "…" markers + the join space) regardless of input (#392, #394 F3/F4).
       // Unmatched routes (key == raw) emit the capped raw path once. Not
       // HTML-escaped — clients MUST escape before inserting into the DOM.
       "path":   string,

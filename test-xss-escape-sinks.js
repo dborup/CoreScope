@@ -67,15 +67,26 @@ const escapeHtml = loadEscapeHtml();
 // #333 F5: sinks that call a file-local escaper must be tested with THAT
 // escaper, not with app.js's escapeHtml, or a weakened local escaper goes
 // unnoticed. Lift the one-line `function esc(s) { … }` from the file.
+// #393 N10: count EVERY declaration named esc, not just `function esc(`.
+// #333 N4 only counted the function form, so a differently-declared second
+// escaper (`const esc = …`, `let`/`var`) slipped past the guard and could
+// silently retarget the contract test. Count both shapes.
+function countEscDefs(src) {
+  const fnDefs = (src.match(/function\s+esc\s*\(/g) || []).length;
+  const bindDefs = (src.match(/\b(?:const|let|var)\s+esc\s*=/g) || []).length;
+  return fnDefs + bindDefs;
+}
+
 function loadLocalEsc(file, ctxExtra) {
   const src = fs.readFileSync(file, 'utf8');
-  // #333 N4: the regex below lifts the *first* one-line `function esc(s)`.
-  // If a second file-local esc were added above the real sink's escaper, it
-  // would silently retarget this contract test. Pin the assumption: there
-  // must be exactly one esc() definition in the file, else fail loudly.
-  const defs = src.match(/function esc\s*\(/g) || [];
-  if (defs.length !== 1)
-    throw new Error(`expected exactly one function esc() in ${file}, found ${defs.length}; `
+  // #333 N4 / #393 N10: the regex below lifts the *first* one-line
+  // `function esc(s)`. If a second file-local esc were added above the real
+  // sink's escaper — in ANY declaration form — it would silently retarget
+  // this contract test. Pin the assumption: there must be exactly one esc
+  // definition in the file, else fail loudly.
+  const defs = countEscDefs(src);
+  if (defs !== 1)
+    throw new Error(`expected exactly one esc definition in ${file}, found ${defs}; `
       + 'loadLocalEsc would silently pick the first — add a line anchor to disambiguate');
   const m = src.match(/\n\s*(function esc\(s\) \{[^\n]*\})/);
   if (!m) throw new Error('could not locate function esc(s) in ' + file);
@@ -1219,6 +1230,135 @@ perfCardTest('#394 F1 sqlite: sq.walPages.busy card is escaped',
 perfCardTest('#394 F1 packet store: ps.indexes.byObserver card is escaped',
   /(<div class="perf-card"><div class="perf-num">\$\{[^}]*ps\.indexes\.byObserver[^}]*\}<\/div><div class="perf-label">Observers<\/div><\/div>)/,
   { ps: { indexes: { byObserver: PERF_PAYLOAD } } }, '#394 F1 byObserver');
+
+// =========================================================================
+// #393 N5 — the #394 F1 cards above only cover the Go-runtime health branch
+// (gr.*). The Node-runtime branch (health.memory `m.*` / health.eventLoop
+// `el.*`) escapes too but no unit test entered it, so dropping escapeHtml on
+// e.g. `m.rss` stayed green. Drive one card per Node-branch response object.
+// =========================================================================
+console.log('\n=== #393 N5 perf.js Node-branch health cards ===');
+
+perfCardTest('#393 N5 health(node): m.rss RSS card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*m\.rss[^}]*\}MB<\/div><div class="perf-label">RSS<\/div><\/div>)/,
+  { m: { rss: PERF_PAYLOAD } }, '#393 N5 m.rss');
+
+perfCardTest('#393 N5 health(node): el.maxLagMs card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*el\.maxLagMs[^}]*\}ms<\/div><div class="perf-label">EL Max Lag<\/div><\/div>)/,
+  { el: { maxLagMs: PERF_PAYLOAD } }, '#393 N5 el.maxLagMs');
+
+perfCardTest('#393 N5 health(node): el.currentLagMs card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*el\.currentLagMs[^}]*\}ms<\/div><div class="perf-label">EL Current<\/div><\/div>)/,
+  { el: { currentLagMs: PERF_PAYLOAD } }, '#393 N5 el.currentLagMs');
+
+// =========================================================================
+// #393 N6 (from the #394 re-review) — the error path at perf.js ~374 puts
+// escapeHtml(err.message) into innerHTML. err.message is attacker-influenced:
+// a non-JSON /api/perf body embeds in the JSON.parse message. It was the one
+// newly escaped sink with no test. Capture the template regardless of the
+// wrapper so dropping escapeHtml flips the assertion, not the match.
+// =========================================================================
+console.log('\n=== #393 N6 perf.js load-error sink ===');
+
+test('#393 N6 perf.js error paragraph: err.message is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /el\.innerHTML = `(<p style="color:red">Error: \$\{[^}]*err\.message[^}]*\}<\/p>)`;/,
+    { err: { message: PERF_PAYLOAD } }
+  );
+  assertNoXss(html, '#393 N6 perf.js err.message');
+});
+
+// =========================================================================
+// #393 follow-ups to #373 — analytics a11y (N6), delegated-nav pin (N7),
+// compare.js onclick removal (N9), loadLocalEsc guard robustness (N10).
+// =========================================================================
+console.log('\n=== #393 follow-ups to #373 ===');
+
+// Minimal element whose closest(sel) honours an optional tag-name prefix, so
+// a DIV row matches `[data-action="navigate"]` but NOT `tr[...]` and a TR row
+// matches both — exactly the distinction the delegated selectors turn on.
+function fakeNavRow(tag, value) {
+  const el = { tagName: tag.toUpperCase(), dataset: { action: 'navigate', value } };
+  el.closest = (sel) => {
+    const mm = sel.match(/^([a-z]*)\[data-action="navigate"\]$/i);
+    if (!mm) return null;
+    if (mm[1] && mm[1].toUpperCase() !== el.tagName) return null;
+    return el.dataset.action === 'navigate' ? el : null;
+  };
+  return el;
+}
+
+// N6: the analytics repeater row is a <div> whose parent .repeater-list is a
+// plain <div>, so role="row" has no required rowgroup/table/grid ancestor
+// (11 critical axe violations). It must navigate without that broken role.
+test('#393 N6 analytics repeater row: no role="row" on the bare <div>', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/html \+= `<div class="repeater-row [\s\S]*?`;/);
+  assert.ok(m, '#393 N6 analytics repeater-row template not found');
+  const render = new Function('r', 'esc', 'pct', 'encodeURIComponent',
+    'let html = ""; ' + m[0] + ' return html;');
+  const html = render({ pubkey: 'deadbeef12', name: 'Repeater', count: 5, hop: '1' },
+    (s) => String(s), 50, encodeURIComponent);
+  assert.ok(!/\brole="row"/.test(html),
+    '#393 N6: repeater <div> must not carry role="row" (no table/grid ancestor): ' + html);
+  assert.ok(/\btabindex="0"/.test(html),
+    '#393 N6: repeater row lost tabindex="0" keyboard access: ' + html);
+});
+
+// N7: the delegated handler selector was broadened to [data-action="navigate"]
+// so the DIV repeater row is clickable; nothing pinned it. Drive the real
+// handler with a DIV row — narrowing the selector back to tr[...] goes red.
+test('#393 N7 analytics delegated handler: a DIV row navigates on click', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/const handler = \(e\) => \{[\s\S]*?location\.hash = row\.dataset\.value;\s*\};/);
+  assert.ok(m, '#393 N7 analytics delegated nav handler not found');
+  const makeHandler = new Function('location', m[0] + '\n return handler;');
+  const loc = { hash: '' };
+  const handler = makeHandler(loc);
+  handler({ type: 'click', target: fakeNavRow('div', '#/nodes/deadbeef12') });
+  assert.strictEqual(loc.hash, '#/nodes/deadbeef12',
+    '#393 N7: delegated [data-action="navigate"] did not navigate a DIV row on click');
+});
+
+// N9a: the compare packet row dropped its inline onclick (the latent
+// '-breakout in that double-quoted/JS context). Pin that the row tag carries
+// no inline on* handler — re-adding onclick goes red.
+test('#393 N9 compare.js packet row: no inline on* handler', () => {
+  const src = fs.readFileSync('public/compare.js', 'utf8');
+  const m = src.match(/return '<tr style="cursor:pointer".*data-action="navigate".*>' \+/);
+  assert.ok(m, '#393 N9 compare packet-row opening tag not found');
+  assert.ok(!/\son[a-z]+=/i.test(m[0]),
+    '#393 N9: compare packet row still has an inline on* handler: ' + m[0]);
+});
+
+// N9b: and the replacement delegated click handler actually navigates. Lift
+// the handler and drive a click on a <tr> nav row — removing or narrowing it
+// goes red.
+test('#393 N9 compare.js delegated click handler navigates a nav row', () => {
+  const src = fs.readFileSync('public/compare.js', 'utf8');
+  const m = src.match(/app\.addEventListener\('click', function \(e\) \{([\s\S]*?)\}\);/);
+  assert.ok(m, '#393 N9: compare delegated click handler not found');
+  const fn = new Function('location', 'e', m[1]);
+  const loc = { hash: '' };
+  fn(loc, { type: 'click', target: fakeNavRow('tr', '#/packets/deadbeef12') });
+  assert.strictEqual(loc.hash, '#/packets/deadbeef12',
+    '#393 N9: compare delegated click did not navigate the nav row');
+});
+
+// N10: loadLocalEsc's guard must also catch a differently-declared second
+// esc (const/let/var), not only a second `function esc(`. Exercise the lifted
+// counter directly — weakening it back to function-only makes case 2 go red.
+test('#393 N10 countEscDefs catches a second, differently-declared esc', () => {
+  assert.strictEqual(countEscDefs('function esc(s){return s;}'), 1,
+    '#393 N10: a single function esc must count as 1');
+  assert.strictEqual(countEscDefs('function esc(s){return s;}\nconst esc = (s) => s;'), 2,
+    '#393 N10: a second `const esc =` must be counted (the N4 blind spot)');
+  assert.strictEqual(countEscDefs('let esc = (s) => s;\nfunction esc(s){}'), 2,
+    '#393 N10: let-declared esc must also be counted');
+  assert.strictEqual(countEscDefs('function other(s){}'), 0,
+    '#393 N10: no esc definition must count as 0');
+});
 
 // =========================================================================
 // SUMMARY
