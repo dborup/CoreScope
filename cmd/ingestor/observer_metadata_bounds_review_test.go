@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Round-2 review tests for the observer-metadata bounds (#338, PR #386).
@@ -578,6 +579,50 @@ func TestObserverIDDropThrottleSamplePerReason(t *testing.T) {
 	}
 	if strings.Contains(line, "CTRLxxxx-tail") {
 		t.Errorf("sample was not bounded to 8 runes:\n%s", line)
+	}
+}
+
+// --- F5: the retained sample must not alias the id -------------------------
+
+// record copies the sample with strings.Clone before retaining it. That is
+// load-bearing, not decoration: observerIDLogSample returns id[:n], a PREFIX
+// SLICE, and a Go string slice keeps its whole backing array alive — here the
+// full observer id and the MQTT topic string it was cut from. Retaining it
+// between log lines would contradict both claims the throttle makes: O(1)
+// state under a publisher spraying distinct malformed ids, and "the full id is
+// never retained".
+//
+// The review noted this was unpinned because retention is not something a Go
+// test can normally see. It can be seen without heap profiling, though:
+// aliasing is exactly "the two strings share a backing array", and
+// unsafe.StringData answers that directly. A clone of a non-empty string
+// always allocates, so the pointers differ iff the copy happened.
+func TestObserverIDDropThrottleRetainedSampleDoesNotAliasTheID(t *testing.T) {
+	th := &observerIDDropThrottle{}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	captureObserverDropLog(t)
+
+	// The first drop logs and flushes, so the sample under test is the one the
+	// SECOND drop leaves retained between lines.
+	th.record("test", strings.Repeat("a", 200), observerIDRejectTooLong, base)
+
+	id := strings.Repeat("L", 200)
+	th.record("test", id, observerIDRejectTooLong, base.Add(10*time.Second))
+
+	slot := observerIDRejectSlot(observerIDRejectTooLong)
+	th.mu.Lock()
+	sample := th.samples[slot]
+	th.mu.Unlock()
+
+	if sample == "" {
+		t.Fatal("no sample retained — the test cannot see what it is checking")
+	}
+	if len(sample) >= len(id) {
+		t.Fatalf("retained sample is %d B for a %d B id: not bounded on the way in", len(sample), len(id))
+	}
+	if unsafe.StringData(sample) == unsafe.StringData(id) {
+		t.Errorf("the retained %d-byte sample shares its backing array with the %d-byte id, so the whole id (and the topic string it was cut from) stays reachable between log lines",
+			len(sample), len(id))
 	}
 }
 

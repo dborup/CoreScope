@@ -385,7 +385,9 @@ func (t *observerIDDropThrottle) record(tag, sampleID, reason string, now time.T
 	// observerIDLogSample returns a SLICE of the id, which in Go keeps the
 	// whole backing array (the id, and the MQTT topic string it was cut from)
 	// reachable for as long as the slice is retained. Copying is what actually
-	// makes the retained state the 8-rune prefix and nothing more.
+	// makes the retained state the 8-rune prefix and nothing more. Pinned by
+	// TestObserverIDDropThrottleRetainedSampleDoesNotAliasTheID, which compares
+	// the backing arrays directly — do not drop the Clone.
 	sample := strings.Clone(observerIDLogSample(sampleID))
 
 	t.mu.Lock()
