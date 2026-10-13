@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/pprofbind"
 )
 
 // Set via -ldflags at build time
@@ -58,18 +59,18 @@ func resolveBuildTime() string {
 }
 
 func main() {
-	// pprof profiling — off by default, enable with ENABLE_PPROF=true
-	if os.Getenv("ENABLE_PPROF") == "true" {
-		pprofPort := os.Getenv("PPROF_PORT")
-		if pprofPort == "" {
-			pprofPort = "6060"
-		}
+	// pprof profiling — off by default; the bind address, and the port that
+	// must stay distinct from the ingestor's, are resolved in one place so
+	// an operator can narrow the listener without editing code (#372).
+	if pp := pprofbind.Server.Resolve(os.Getenv); pp.Enabled {
 		go func() {
-			log.Printf("[pprof] profiling UI at http://localhost:%s/debug/pprof/", pprofPort)
-			if err := http.ListenAndServe(":"+pprofPort, nil); err != nil {
+			log.Printf("[pprof] profiling UI at %s (listening on %s)", pp.URL, pp.Addr)
+			if err := http.ListenAndServe(pp.Addr, nil); err != nil {
 				log.Printf("[pprof] failed to start: %v (non-fatal)", err)
 			}
 		}()
+	} else if pp.Reason != "" {
+		log.Printf("[pprof] %s", pp.Reason)
 	}
 
 	var (
