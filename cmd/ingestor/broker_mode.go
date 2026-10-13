@@ -11,11 +11,16 @@ package main
 //     the bundled broker's address — with the bundled broker off, the
 //     ingestor then connects to nothing and ingest stops with no explanation
 //     beyond a connection error in the log.
-//  2. The value of DISABLE_MOSQUITTO is read differently in different
-//     places. docker/entrypoint-go.sh disables mosquitto on exactly "true";
-//     manage.sh's is_true() also accepts 1/yes/y/on. A value in that gap
-//     makes manage.sh pick the external-broker compose file while the
-//     container still starts the bundled broker.
+//  2. The value of DISABLE_MOSQUITTO is read differently by different
+//     launchers. docker/entrypoint-go.sh — the only reader inside this
+//     container — disables mosquitto on exactly "true". manage.sh's
+//     is_true() also accepts 1/TRUE/yes/y/on, but it resolves the value
+//     itself: dc_prod/dc_staging swap in docker-compose.no-mosquitto.yml,
+//     which hard-codes DISABLE_MOSQUITTO=true in the container. So a
+//     container that can see "yes" here was started WITHOUT manage.sh, by
+//     a bare `docker compose up` against docker-compose.yml, and the
+//     bundled broker is running even though the operator asked for an
+//     external one.
 //
 // This file resolves the mode the way the entrypoint does and reports both
 // hazards as diagnostics. They are diagnostics, not refusals: an install
@@ -55,19 +60,28 @@ type BrokerMode struct {
 	// Bundled is true when the in-container mosquitto is expected to run,
 	// decided exactly as docker/entrypoint-go.sh decides it.
 	Bundled bool
-	// Raw is the trimmed DISABLE_MOSQUITTO value, for diagnostics.
+	// Raw is the DISABLE_MOSQUITTO value exactly as the environment carries
+	// it — untrimmed, because the entrypoint compares it untrimmed.
 	Raw string
 	// Ambiguous is true when Raw is neither the exact "true" the entrypoint
 	// requires nor a recognised false value. Such a value leaves the
-	// bundled broker running while the operator — and manage.sh's
-	// is_true(), which accepts 1/yes/y/on — may believe it was disabled.
+	// bundled broker running in this container even though the operator
+	// who typed it probably meant to disable it.
 	Ambiguous bool
 }
 
 // ResolveBrokerMode reads DISABLE_MOSQUITTO through getenv (os.Getenv in
 // production, a map in tests).
+//
+// The value is compared RAW, not trimmed: docker/entrypoint-go.sh does
+// `[ "${DISABLE_MOSQUITTO:-false}" = "true" ]`, so " true" is not "true" to
+// it and the bundled broker keeps running. Trimming here would report the
+// opposite mode to the one this container is actually in. Such a value can
+// only reach the container through the process environment — manage.sh's
+// own .env reader and docker compose's dotenv parser both trim — which is
+// exactly the case Ambiguous exists to flag.
 func ResolveBrokerMode(getenv func(string) string) BrokerMode {
-	raw := strings.TrimSpace(getenv("DISABLE_MOSQUITTO"))
+	raw := getenv("DISABLE_MOSQUITTO")
 	mode := BrokerMode{Raw: raw, Bundled: raw != "true"}
 	mode.Ambiguous = mode.Bundled && !isClearlyFalse(raw)
 	return mode
@@ -121,9 +135,10 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 		diags = append(diags, BrokerDiagnostic{
 			Severity: SeverityWarn,
 			Message: fmt.Sprintf("DISABLE_MOSQUITTO=%q is neither the exact %q the container entrypoint requires nor a recognised false value, "+
-				"so the bundled broker WILL start — while manage.sh's is_true() may read the same value as a request to disable it. "+
-				"Set it to %q or %q to say which broker you mean.",
-				mode.Raw, "true", "true", "false"),
+				"so the bundled broker WILL start in this container. A container that sees this value was started by a bare "+
+				"`docker compose up` against docker-compose.yml: ./manage.sh resolves the value itself and swaps in "+
+				"docker-compose.no-mosquitto.yml, which passes the exact %q instead. Set it to %q or %q so every launcher reads it the same way.",
+				mode.Raw, "true", "true", "true", "false"),
 		})
 	}
 

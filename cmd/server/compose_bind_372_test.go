@@ -43,31 +43,37 @@ func portsBlockOf(t *testing.T, compose, service string) string {
 	return ports
 }
 
-// bindMapping matches a published port whose host interface comes from an
-// interpolated variable, e.g.
+// bindMapping matches a published port whose host interface is CONDITIONALLY
+// interpolated, e.g.
 //
-//   - "${PROD_MQTT_BIND:-0.0.0.0}:${PROD_MQTT_PORT:-1883}:1883"
+//   - "${PROD_MQTT_BIND:+${PROD_MQTT_BIND}:}${PROD_MQTT_PORT:-1883}:1883"
 //
-// capturing the variable name and its default.
+// The `:+` form is the only one that is inert when the variable is unset.
+// A `:-` default, even `0.0.0.0`, is NOT inert: docker publishes an
+// unqualified mapping on both 0.0.0.0 and [::], while `0.0.0.0:` publishes
+// IPv4 only, so a `:-0.0.0.0` default silently drops IPv6 reachability on
+// the next `up -d`. See TestComposeBindDefaultsStayDualStack.
 func bindMapping(variable, hostPort, containerPort string) *regexp.Regexp {
-	return regexp.MustCompile(`(?m)^\s*-\s*"\$\{` + regexp.QuoteMeta(variable) + `:-([^}]*)\}:` + hostPort + `:` + containerPort + `"\s*$`)
+	v := regexp.QuoteMeta(variable)
+	return regexp.MustCompile(`(?m)^\s*-\s*"\$\{` + v + `:\+\$\{` + v + `\}:\}` + hostPort + `:` + containerPort + `"\s*$`)
 }
+
+// anyHostBindDefault matches a published port whose host interface is
+// interpolated with a `:-` DEFAULT, capturing the variable and the default.
+// Any match is a bug: see TestComposeBindDefaultsStayDualStack.
+// The trailing `[^"]*:[^"]*` requires a second colon after the interpolated
+// host interface, which is what distinguishes a three-field mapping
+// (host:hostPort:containerPort) from an ordinary two-field one such as
+// `"${PROD_HTTP_PORT:-80}:80"`.
+var anyHostBindDefault = regexp.MustCompile(`(?m)^\s*-\s*"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}:[^"]*:[^"]*"\s*$`)
 
 func TestProdCompose_BundledMQTTHostPortBindIsExplicit(t *testing.T) {
 	ports := portsBlockOf(t, "docker-compose.yml", "prod")
 
 	re := bindMapping("PROD_MQTT_BIND", `\$\{PROD_MQTT_PORT:-1883\}`, "1883")
-	m := re.FindStringSubmatch(ports)
-	if m == nil {
-		t.Fatalf("docker-compose.yml: the bundled broker's host port must publish through an explicit bind interface, i.e.\n"+
-			"      - \"${PROD_MQTT_BIND:-0.0.0.0}:${PROD_MQTT_PORT:-1883}:1883\"\nports block:\n%s", ports)
-	}
-	// The default must keep today's exposure. Narrowing it to loopback is a
-	// deployment-visible flip and is explicitly left to the owner, not made
-	// here: an install that publishes 1883 for its gateways would lose them
-	// the moment it pulled this file.
-	if m[1] != "0.0.0.0" {
-		t.Fatalf("PROD_MQTT_BIND default is %q, want \"0.0.0.0\" — the shipped default must not change an existing install's MQTT exposure", m[1])
+	if !re.MatchString(ports) {
+		t.Fatalf("docker-compose.yml: the bundled broker's host port must publish through an explicit, CONDITIONAL bind interface, i.e.\n"+
+			"      - \"${PROD_MQTT_BIND:+${PROD_MQTT_BIND}:}${PROD_MQTT_PORT:-1883}:1883\"\nports block:\n%s", ports)
 	}
 }
 
@@ -98,15 +104,9 @@ func TestStagingComposes_PprofHostPortsBindExplicitlyAndStayDistinct(t *testing.
 			seen := map[string]bool{}
 			for _, port := range []string{"6060", "6061"} {
 				re := bindMapping("PPROF_BIND", port, port)
-				m := re.FindStringSubmatch(ports)
-				if m == nil {
-					t.Fatalf("%s: pprof port %s must publish through an explicit bind interface, i.e.\n"+
-						"      - \"${PPROF_BIND:-0.0.0.0}:%s:%s\"\nports block:\n%s", compose, port, port, port, ports)
-				}
-				// meshview-pve profiles this host remotely; narrowing the
-				// default to loopback would cut that off on the next pull.
-				if m[1] != "0.0.0.0" {
-					t.Fatalf("%s: PPROF_BIND default for %s is %q, want \"0.0.0.0\"", compose, port, m[1])
+				if !re.MatchString(ports) {
+					t.Fatalf("%s: pprof port %s must publish through an explicit, CONDITIONAL bind interface, i.e.\n"+
+						"      - \"${PPROF_BIND:+${PPROF_BIND}:}%s:%s\"\nports block:\n%s", compose, port, port, port, ports)
 				}
 				if seen[port] {
 					t.Fatalf("%s: port %s published twice", compose, port)
@@ -134,8 +134,11 @@ func TestEnvExample_DocumentsEveryNewKnob(t *testing.T) {
 	// otherwise an operator cannot find the setting that keeps or changes
 	// their exposure.
 	for _, knob := range []struct{ key, wantDefault string }{
-		{"PROD_MQTT_BIND", "0.0.0.0"},
-		{"PPROF_BIND", "0.0.0.0"},
+		// The two publish-bind knobs default to EMPTY, not 0.0.0.0: an
+		// unqualified docker mapping is dual-stack and 0.0.0.0: is not, so
+		// an explicit 0.0.0.0 default would silently drop IPv6.
+		{"PROD_MQTT_BIND", "(empty - every interface, IPv4 and IPv6)"},
+		{"PPROF_BIND", "(empty - every interface, IPv4 and IPv6)"},
 		{"PPROF_HOST", ""},
 		{"PPROF_PORT_SERVER", "6060"},
 		{"PPROF_PORT_INGESTOR", "6061"},
@@ -219,5 +222,125 @@ func TestNoComposeFileHardcodesALoopbackBind(t *testing.T) {
 			t.Errorf("%s hardcodes a loopback publish (%s); use the bind variable so operators keep the choice",
 				filepath.Base(path), strings.TrimSpace(m))
 		}
+	}
+}
+
+// TestComposeBindDefaultsStayDualStack is the regression guard for the only
+// way this issue's "explicit bind" change could alter an existing install:
+// the DEFAULT of a publish-bind variable.
+//
+// Docker publishes a two-field mapping ("1883:1883") on BOTH 0.0.0.0 and
+// [::], but a three-field mapping with an IPv4 host ("0.0.0.0:1883:1883")
+// publishes IPv4 only. So `${X:-0.0.0.0}:` is NOT equivalent to the old
+// unqualified mapping — it drops IPv6 reachability on the next `up -d`.
+// Only the conditional `${X:+${X}:}` form, which renders to nothing when X
+// is unset, keeps the dual-stack publish.
+func TestComposeBindDefaultsStayDualStack(t *testing.T) {
+	entries, err := filepath.Glob(filepath.Join("..", "..", "docker-compose*.yml"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no docker-compose*.yml files found")
+	}
+	for _, path := range entries {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, m := range anyHostBindDefault.FindAllStringSubmatch(stripYAMLComments(string(data)), -1) {
+			t.Errorf("%s publishes a port whose host interface defaults to %q via ${%s:-...}; "+
+				"a defaulted host interface is never equivalent to the old unqualified mapping "+
+				"(0.0.0.0: is IPv4-only, the unqualified form is dual-stack). Use ${%s:+${%s}:} instead.",
+				filepath.Base(path), m[2], m[1], m[1], m[1])
+		}
+	}
+}
+
+// appComposeServices are the compose files that run the CoreScope image, and
+// the service that does so in each. Every in-process setting .env.example
+// labels "Used by: the server" or "Used by: the ingestor" has to reach each
+// of them, or the documented one-line .env change does nothing.
+var appComposeServices = []struct{ file, service string }{
+	{"docker-compose.yml", "prod"},
+	{"docker-compose.no-mosquitto.yml", "prod"},
+	{"docker-compose.staging.yml", "staging-go"},
+	{"docker-compose.staging.no-mosquitto.yml", "staging-go"},
+	{"docker-compose.example.yml", "corescope"},
+}
+
+// processKnobsFromEnvExample returns the keys .env.example says a CoreScope
+// PROCESS reads (as opposed to the ones docker compose or manage.sh read
+// themselves). .env.example is the source of truth so a knob added there
+// cannot be forgotten here.
+func processKnobsFromEnvExample(t *testing.T) []string {
+	t.Helper()
+	lines := strings.Split(readRepoFile(t, ".env.example"), "\n")
+	usedBy := regexp.MustCompile(`^# Used by: .*\b(server|ingestor)\b`)
+	var keys []string
+	for i, ln := range lines {
+		if !usedBy.MatchString(ln) {
+			continue
+		}
+		// The KEY= line is the first non-comment line after the block.
+		for j := i + 1; j < len(lines); j++ {
+			if strings.HasPrefix(lines[j], "#") {
+				continue
+			}
+			if k, _, ok := strings.Cut(lines[j], "="); ok && k != "" {
+				keys = append(keys, k)
+			}
+			break
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatal(".env.example documents no process-read knobs; the parser is broken")
+	}
+	return keys
+}
+
+// TestComposeFilesPassEveryProcessKnobToTheContainer is review round 2,
+// finding 3: MQTT_SOURCE_STRICT, MQTT_BROKER and the PPROF_* settings were
+// documented as one-line .env changes, but the compose files passed only
+// NODE_ENV, DISABLE_MOSQUITTO and DISABLE_CADDY and declared no env_file, so
+// those settings never reached the process that reads them. manage.sh's
+// broker preflight then honoured MQTT_BROKER from .env and reported PASS
+// while the container ignored it and fell back to mqtt://localhost:1883.
+func TestComposeFilesPassEveryProcessKnobToTheContainer(t *testing.T) {
+	knobs := processKnobsFromEnvExample(t)
+	for _, target := range appComposeServices {
+		t.Run(target.file, func(t *testing.T) {
+			yaml := stripYAMLComments(readRepoCompose(t, target.file))
+			block := extractServiceBlock(yaml, target.service)
+			if strings.TrimSpace(block) == "" {
+				t.Fatalf("%s: no services.%s block", target.file, target.service)
+			}
+			if strings.Contains(block, "env_file") {
+				return // the whole .env reaches the container
+			}
+			env := extractSubBlock(block, "environment", 4)
+			if strings.TrimSpace(env) == "" {
+				t.Fatalf("%s: services.%s has no environment: sub-block", target.file, target.service)
+			}
+			for _, knob := range knobs {
+				assigned := regexp.MustCompile(`(?m)^\s*-\s*` + regexp.QuoteMeta(knob) + `=(\S*)\s*$`)
+				m := assigned.FindStringSubmatch(env)
+				if m == nil {
+					t.Errorf("%s: services.%s must pass %s through to the container, or an operator who sets it in .env changes nothing\nenvironment block:\n%s",
+						target.file, target.service, knob, env)
+					continue
+				}
+				// A hard-coded value is this file's deliberate choice
+				// (ENABLE_PPROF=true on staging); an interpolated one must
+				// default to EMPTY so an unset knob stays inert.
+				if !strings.HasPrefix(m[1], "${") {
+					continue
+				}
+				if want := "${" + knob + ":-}"; m[1] != want {
+					t.Errorf("%s: services.%s passes %s as %s, want %s — any other default changes behaviour for an install that never set it",
+						target.file, target.service, knob, m[1], want)
+				}
+			}
+		})
 	}
 }

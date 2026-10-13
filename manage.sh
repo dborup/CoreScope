@@ -437,22 +437,39 @@ mask_broker_text() {
     -e 's#(://[^[:space:]]*)\?[^[:space:]]*#\1#g'
 }
 
-# True when the bundled mosquitto will run. Decided EXACTLY as
-# docker/entrypoint-go.sh decides it — only the literal "true" disables it —
-# so this script reports the mode the container will actually be in.
+# True when the bundled mosquitto will run on a host managed by THIS script.
+#
+# manage.sh is the authority for its own hosts, not the container entrypoint:
+# dc_prod/dc_staging pick the compose file with is_true(), and
+# docker-compose.no-mosquitto.yml / docker-compose.staging.no-mosquitto.yml
+# hard-code DISABLE_MOSQUITTO=true in the container's environment. So "yes",
+# "1", "on" and "TRUE" all end up EXTERNAL here, even though the entrypoint
+# on its own only accepts the exact string "true". Reporting the entrypoint's
+# reading instead would claim "bundled" for those values and skip the source
+# validation that catches a deploy which ingests nothing.
 bundled_broker_enabled() {
-  [ "${DISABLE_MOSQUITTO:-}" != "true" ]
+  ! is_true "${DISABLE_MOSQUITTO:-false}"
 }
 
-# True when DISABLE_MOSQUITTO is neither the exact "true" the entrypoint
-# needs nor a recognised false value. Such a value leaves the bundled broker
-# running while is_true() above — and so this script's own compose-file
-# choice — reads it as a request to disable it.
+# True when DISABLE_MOSQUITTO means one thing to this script and another to a
+# bare `docker compose up` against docker-compose.yml. is_true() accepts
+# 1/true/TRUE/yes/YES/y/Y/on/ON; the entrypoint accepts only the exact
+# "true". A value in that gap is external under manage.sh (which swaps in the
+# no-mosquitto compose file) and bundled without it.
 disable_mosquitto_is_ambiguous() {
+  [ "${1:-}" = "true" ] && return 1
+  is_true "${1:-}"
+}
+
+# True when DISABLE_MOSQUITTO is set to something NEITHER this script nor the
+# container entrypoint recognises — " true" with a stray space, or a typo.
+# Both then fall back to keeping the bundled broker, which may be the
+# opposite of what was meant.
+disable_mosquitto_is_unrecognised() {
   case "${1:-}" in
     ""|true|false|FALSE|False|0|no|NO|n|N|off|OFF) return 1 ;;
-    *) return 0 ;;
   esac
+  ! is_true "${1:-}"
 }
 
 # Host part of a broker URL, lowercased, with scheme, user-info, port and
@@ -477,8 +494,57 @@ is_loopback_host() {
   return 1
 }
 
+# The "broker" string values in whatever JSON text arrives on stdin.
+broker_urls() {
+  grep -oE '"broker"[[:space:]]*:[[:space:]]*"[^"]*"' 2>/dev/null \
+    | sed -E 's/^"broker"[[:space:]]*:[[:space:]]*"//; s/"$//'
+}
+
+# The text of the mqttSources array in a config.json, or nothing when the key
+# is absent. Bracket-matched and string-aware, so a "]" inside a topic
+# pattern cannot end the array early.
+mqtt_sources_region() {
+  awk '
+    { buf = buf $0 "\n" }
+    END {
+      k = index(buf, "\"mqttSources\"")
+      if (k == 0) exit
+      n = length(buf)
+      i = k + length("\"mqttSources\"")
+      while (i <= n && substr(buf, i, 1) != "[") {
+        c = substr(buf, i, 1)
+        if (c != ":" && c != " " && c != "\t" && c != "\n" && c != "\r") exit
+        i++
+      }
+      if (i > n) exit
+      depth = 0; instr = 0; esc = 0
+      for (; i <= n; i++) {
+        c = substr(buf, i, 1)
+        out = out c
+        if (esc) { esc = 0; continue }
+        if (instr) {
+          if (c == "\\") esc = 1
+          else if (c == "\"") instr = 0
+          continue
+        }
+        if (c == "\"") { instr = 1; continue }
+        if (c == "[") depth++
+        else if (c == "]") { depth--; if (depth == 0) break }
+      }
+      printf "%s", out
+    }
+  ' "$1"
+}
+
 # The broker URLs the ingestor will use, one per line, in the ingestor's own
-# precedence: MQTT_BROKER wins over config.json (see LoadConfig).
+# precedence (see LoadConfig):
+#
+#   MQTT_BROKER  >  config.json mqttSources[]  >  legacy config.json mqtt.broker
+#
+# The legacy mqtt.broker block is promoted to a source ONLY when mqttSources
+# yields none, so it must not be counted next to mqttSources — the ingestor
+# never connects to it in that case, and a loopback legacy block would
+# otherwise produce a "cannot connect" warning about a source nothing uses.
 broker_sources() {
   local cfg="${1:-$PROD_DATA/config.json}"
   if [ -n "${MQTT_BROKER:-}" ]; then
@@ -486,9 +552,17 @@ broker_sources() {
     return 0
   fi
   [ -f "$cfg" ] || return 0
-  # Matches both mqttSources[].broker and the legacy mqtt.broker block.
-  grep -oE '"broker"[[:space:]]*:[[:space:]]*"[^"]*"' "$cfg" 2>/dev/null \
-    | sed -E 's/^"broker"[[:space:]]*:[[:space:]]*"//; s/"$//'
+  local region urls
+  region=$(mqtt_sources_region "$cfg")
+  if [ -n "$region" ]; then
+    urls=$(printf '%s' "$region" | broker_urls)
+    if [ -n "$urls" ]; then
+      printf '%s\n' "$urls"
+      return 0
+    fi
+  fi
+  # No mqttSources, or an empty one: LoadConfig promotes mqtt.broker.
+  broker_urls < "$cfg"
 }
 
 # Report the broker arrangement. Returns 1 when something means no packets
@@ -499,10 +573,19 @@ broker_check_report() {
   local raw="${DISABLE_MOSQUITTO:-}"
 
   if disable_mosquitto_is_ambiguous "$raw"; then
-    warn "DISABLE_MOSQUITTO='${raw}' is neither \"true\" nor a recognised false value."
-    echo "   The container entrypoint disables the bundled broker only on the exact"
-    echo "   value \"true\", so the bundled broker WILL start — while this script reads"
-    echo "   the same value as a request to disable it. Set it to \"true\" or \"false\"."
+    warn "DISABLE_MOSQUITTO='${raw}' means different things to different launchers."
+    echo "   This script's is_true() accepts it, so ./manage.sh runs the external-broker"
+    echo "   compose file, which hard-codes DISABLE_MOSQUITTO=true in the container — the"
+    echo "   bundled broker will NOT start, and that is the mode reported below. A bare"
+    echo "   'docker compose up' against docker-compose.yml passes '${raw}' straight"
+    echo "   through, and the entrypoint disables the bundled broker only on the exact"
+    echo "   value \"true\", so there the bundled broker WOULD start. Set it to \"true\""
+    echo "   or \"false\" so both read it the same way."
+  elif disable_mosquitto_is_unrecognised "$raw"; then
+    warn "DISABLE_MOSQUITTO='${raw}' is neither a recognised true nor a recognised false value."
+    echo "   This script's is_true() rejects it and the container entrypoint accepts only"
+    echo "   the exact value \"true\", so both keep the bundled broker running. If you"
+    echo "   meant to use an external broker, set it to \"true\"."
   fi
 
   if bundled_broker_enabled; then
@@ -510,7 +593,7 @@ broker_check_report() {
     return 0
   fi
 
-  info "Broker mode: external (DISABLE_MOSQUITTO=true) — the bundled broker will not start."
+  info "Broker mode: external (DISABLE_MOSQUITTO=${raw}) — the bundled broker will not start."
 
   local sources
   sources=$(broker_sources "$cfg")
@@ -1210,12 +1293,14 @@ cmd_start() {
     fi
   fi
 
-  # Advisory only: this host's broker topology is the operator's call.
-  broker_check_report || true
-
   migrate_config || exit 1
   # Always check prod config
   ensure_config "$PROD_DATA"
+
+  # Advisory only: this host's broker topology is the operator's call. It
+  # runs AFTER migrate_config/ensure_config so it reads the config.json the
+  # container is about to use, not a pre-migration or not-yet-created one.
+  broker_check_report || true
 
   if $WITH_STAGING; then
     # Prepare staging data and config

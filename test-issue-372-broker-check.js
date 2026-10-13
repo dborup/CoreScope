@@ -45,12 +45,17 @@ function sandbox({ env = {}, config = null }) {
   return { dir, bin, data };
 }
 
+// `env` goes into the sandbox .env (the usual path); `procEnv` goes into the
+// process environment instead, which is the only way to deliver a value
+// manage.sh's own .env reader would trim — it strips leading and trailing
+// whitespace, and so does docker compose's dotenv parser, so a value like
+// " true" can only arrive through the process environment [T].
 function brokerCheck(opts) {
   const sb = sandbox(opts);
   const res = spawnSync('bash', ['manage.sh', 'broker-check'], {
     cwd: sb.dir,
     encoding: 'utf8',
-    env: { PATH: sb.bin + ':' + process.env.PATH, HOME: sb.dir, TERM: 'dumb' },
+    env: { PATH: sb.bin + ':' + process.env.PATH, HOME: sb.dir, TERM: 'dumb', ...(opts.procEnv || {}) },
   });
   return { ...res, out: (res.stdout || '') + (res.stderr || '') };
 }
@@ -94,6 +99,32 @@ test('the legacy single-broker config block counts as a source', () => {
   assert.strictEqual(r.status, 0, 'expected exit 0, got ' + r.status + '\n' + r.out);
 });
 
+// Review round 2, finding 5: LoadConfig only promotes the legacy mqtt block
+// when mqttSources is empty, so counting it alongside mqttSources invents
+// sources the ingestor will never connect to — and a loopback legacy block
+// then produces a "cannot connect" warning about nothing.
+test('the legacy mqtt block is ignored when mqttSources is present', () => {
+  const config = JSON.stringify({
+    mqttSources: [{ name: 'ext', broker: 'mqtt://broker.example:1883', topics: ['meshcore/#'] }],
+    mqtt: { broker: 'mqtt://localhost:1883', topic: 'meshcore/#' },
+  });
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'true' }, config });
+  assert.strictEqual(r.status, 0, 'expected exit 0, got ' + r.status + '\n' + r.out);
+  assert.doesNotMatch(r.out, /of 2 MQTT source/,
+    'the legacy block must not be counted next to mqttSources:\n' + r.out);
+  assert.doesNotMatch(r.out, /loopback/i,
+    'the ignored legacy block must not raise a loopback warning:\n' + r.out);
+});
+
+test('config.example.json reports exactly the sources the ingestor will use', () => {
+  // The shipped example has three mqttSources plus a legacy mqtt block; the
+  // ingestor sees three, one of them loopback.
+  const config = fs.readFileSync(path.join(root, 'config.example.json'), 'utf8');
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'true' }, config });
+  assert.match(r.out, /1 of 3 MQTT source/,
+    'expected 1 of 3 (the ingestor ignores the legacy block here):\n' + r.out);
+});
+
 test('MQTT_BROKER overrides a loopback-only config.json', () => {
   const config = JSON.stringify({
     mqttSources: [{ name: 'local', broker: 'mqtt://localhost:1883', topics: ['meshcore/#'] }],
@@ -108,29 +139,98 @@ test('MQTT_BROKER overrides a loopback-only config.json', () => {
 
 test('a DISABLE_MOSQUITTO value the entrypoint does not accept is reported', () => {
   // manage.sh's is_true() takes 'yes'; the container entrypoint only takes
-  // the exact string 'true'. The two then disagree about which broker runs.
+  // the exact string 'true'. The two disagree about which broker runs, and
+  // the report must name the disagreement without failing over it.
   const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'yes' }, config: externalWithGoodBroker });
   assert.match(r.out, /DISABLE_MOSQUITTO/, r.out);
   assert.match(r.out, /yes/, r.out);
-  assert.match(r.out, /bundled/i, r.out);
+  assert.match(r.out, /docker compose/i, 'the warning must say which launcher reads it differently:\n' + r.out);
   assert.strictEqual(r.status, 0, 'an ambiguous value is a warning, not a failure\n' + r.out);
 });
 
-test('an ambiguous value reports the mode the container will actually be in', () => {
-  // DISABLE_MOSQUITTO=yes: the entrypoint starts the bundled broker, so the
-  // report must say bundled — and must not demand an external source that
-  // the container is not going to need.
-  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'yes' }, config: null });
-  assert.match(r.out, /Broker mode: bundled/, r.out);
-  assert.doesNotMatch(r.out, /Broker mode: external/, r.out);
-  assert.strictEqual(r.status, 0, 'the bundled broker needs no external source\n' + r.out);
+// Issue #372 review round 2, finding 2: broker-check must report the mode
+// THIS SCRIPT selects, not the mode the entrypoint would pick from the raw
+// value. dc_prod/dc_staging choose the compose file with is_true(), and
+// docker-compose.no-mosquitto.yml hard-codes DISABLE_MOSQUITTO=true in the
+// container — so 'yes', '1' and 'on' all end up in EXTERNAL mode on a
+// manage.sh-managed host, and a check that says "bundled" there skips the
+// source validation that would have caught a dead deploy.
+const MODE_BY_VALUE = [
+  [undefined, 'bundled'],
+  ['false', 'bundled'],
+  ['true', 'external'],
+  ['1', 'external'],
+  ['yes', 'external'],
+  ['on', 'external'],
+];
+
+test('broker-check reports the mode manage.sh actually selects, for every DISABLE_MOSQUITTO value', () => {
+  for (const [value, want] of MODE_BY_VALUE) {
+    const env = value === undefined ? {} : { DISABLE_MOSQUITTO: value };
+    const r = brokerCheck({ env, config: externalWithGoodBroker });
+    const other = want === 'bundled' ? 'external' : 'bundled';
+    assert.match(r.out, new RegExp('Broker mode: ' + want),
+      'DISABLE_MOSQUITTO=' + value + ' selects ' + want + ' via is_true()/dc_prod:\n' + r.out);
+    assert.doesNotMatch(r.out, new RegExp('Broker mode: ' + other),
+      'DISABLE_MOSQUITTO=' + value + ' must not be reported as ' + other + ':\n' + r.out);
+  }
+});
+
+test('an is_true value with no source fails the check, because the container will be external', () => {
+  // The compose file manage.sh picks for these values hard-codes
+  // DISABLE_MOSQUITTO=true, so there is no bundled broker to fall back on
+  // and an unconfigured source means nothing is ingested.
+  for (const value of ['true', '1', 'yes', 'on']) {
+    const r = brokerCheck({ env: { DISABLE_MOSQUITTO: value }, config: null });
+    assert.strictEqual(r.status, 1,
+      'DISABLE_MOSQUITTO=' + value + ' is external, so a missing source must fail; got ' + r.status + '\n' + r.out);
+    assert.match(r.out, /mqttSources/, r.out);
+  }
+});
+
+test('a falsey or unset DISABLE_MOSQUITTO needs no external source', () => {
+  for (const value of [undefined, 'false']) {
+    const env = value === undefined ? {} : { DISABLE_MOSQUITTO: value };
+    const r = brokerCheck({ env, config: null });
+    assert.strictEqual(r.status, 0,
+      'DISABLE_MOSQUITTO=' + value + ' runs the bundled broker; got ' + r.status + '\n' + r.out);
+  }
 });
 
 test('an unambiguous value produces no ambiguity warning', () => {
   for (const value of ['true', 'false']) {
     const r = brokerCheck({ env: { DISABLE_MOSQUITTO: value }, config: externalWithGoodBroker });
-    assert.doesNotMatch(r.out, /neither/i, 'DISABLE_MOSQUITTO=' + value + ':\n' + r.out);
+    assert.doesNotMatch(r.out, /different things|neither a recognised/i,
+      'DISABLE_MOSQUITTO=' + value + ':\n' + r.out);
   }
+  const unset = brokerCheck({ env: {}, config: externalWithGoodBroker });
+  assert.doesNotMatch(unset.out, /different things|neither a recognised/i, unset.out);
+});
+
+test('a value neither launcher recognises is reported as keeping the bundled broker', () => {
+  // A typo falls through is_true() and the entrypoint's exact comparison, so
+  // the bundled broker runs either way.
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'ture' }, config: null });
+  assert.match(r.out, /neither a recognised/i, r.out);
+  assert.match(r.out, /Broker mode: bundled/, r.out);
+  assert.strictEqual(r.status, 0, r.out);
+
+  // ' true' (stray space) is the same case, but it cannot be delivered
+  // through .env: manage.sh's reader trims it, and so does docker compose's.
+  // Through the process environment it survives, and then neither is_true()
+  // nor the entrypoint's `= "true"` accepts it.
+  const spaced = brokerCheck({ env: {}, procEnv: { DISABLE_MOSQUITTO: ' true' }, config: null });
+  assert.match(spaced.out, /neither a recognised/i, spaced.out);
+  assert.match(spaced.out, /Broker mode: bundled/, spaced.out);
+  assert.strictEqual(spaced.status, 0, spaced.out);
+});
+
+test('manage.sh trims a .env value, so a spaced DISABLE_MOSQUITTO from .env still works', () => {
+  // Documents the asymmetry behind review finding 7: the whitespace a value
+  // may carry depends on how it was delivered, not on which reader sees it.
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: ' true' }, config: externalWithGoodBroker });
+  assert.match(r.out, /Broker mode: external/, r.out);
+  assert.doesNotMatch(r.out, /neither a recognised/i, r.out);
 });
 
 test('broker credentials never reach the output', () => {
@@ -187,6 +287,28 @@ test('start, update, restore, promote and setup all run the broker preflight', (
     assert.ok(/broker_check_report/.test(body),
       fn + ' must run broker_check_report so a broker that cannot ingest is reported before the change');
   }
+});
+
+// Review round 2, finding 6: on a first start the preflight used to run
+// before migrate_config/ensure_config, so it read a pre-migration or
+// absent config.json and reported on a file the container would not use.
+test('cmd_start runs the preflight after the config is migrated and ensured', () => {
+  const src = fs.readFileSync(path.join(root, 'manage.sh'), 'utf8');
+  const start = src.indexOf('cmd_start()');
+  assert.ok(start > 0, 'missing cmd_start');
+  const rest = src.slice(start + 'cmd_start'.length);
+  const end = rest.search(/\n[a-z_]+\(\) \{/);
+  const body = end < 0 ? rest : rest.slice(0, end);
+  const at = (needle) => {
+    const i = body.indexOf(needle);
+    assert.ok(i > 0, 'cmd_start must still call ' + needle);
+    return i;
+  };
+  const preflight = at('broker_check_report');
+  assert.ok(preflight > at('migrate_config'),
+    'broker_check_report must run after migrate_config, or it reads the pre-migration config');
+  assert.ok(preflight > at('ensure_config'),
+    'broker_check_report must run after ensure_config, or it reads a config.json that does not exist yet');
 });
 
 test('the preflight never blocks a command', () => {

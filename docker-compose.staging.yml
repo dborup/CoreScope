@@ -50,20 +50,23 @@ services:
       #
       # (drop it in-between the :80 mapping and the pprof ports below).
       # pprof host ports. PPROF_BIND is the host interface they are
-      # published on; the default 0.0.0.0 is every interface, which is what
-      # this file has always published — a deploy that profiles this host
-      # remotely keeps working. Set PPROF_BIND=127.0.0.1 to require an SSH
-      # tunnel instead. The two ports stay distinct: 6060 is the server's
-      # listener, 6061 the ingestor's, and collapsing them would profile
-      # only whichever process won the bind.
+      # published on. Leave it EMPTY (the shipped default) and each mapping
+      # renders with no host interface at all — byte for byte what this file
+      # always had, published on both IPv4 (0.0.0.0) and IPv6 ([::]), so a
+      # deploy that profiles this host remotely keeps working. An explicit
+      # PPROF_BIND=0.0.0.0 would NOT be the same: it publishes IPv4 only.
+      # Set PPROF_BIND=127.0.0.1 to require an SSH tunnel instead. The two
+      # ports stay distinct: 6060 is the server's listener, 6061 the
+      # ingestor's, and collapsing them would profile only whichever
+      # process won the bind.
       #
       # NOTE: narrowing the IN-CONTAINER listener with PPROF_HOST is a
       # different setting and is incompatible with publishing these ports —
       # docker's proxy reaches the container by its network address, not
       # its loopback. Use PPROF_BIND for a published port, PPROF_HOST only
       # when the process runs without a port mapping.
-      - "${PPROF_BIND:-0.0.0.0}:6060:6060"   # pprof server
-      - "${PPROF_BIND:-0.0.0.0}:6061:6061"   # pprof ingestor
+      - "${PPROF_BIND:+${PPROF_BIND}:}6060:6060"   # pprof server
+      - "${PPROF_BIND:+${PPROF_BIND}:}6061:6061"   # pprof ingestor
     volumes:
       - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
       - caddy-data-staging-go:/data/caddy
@@ -77,6 +80,22 @@ services:
       # snippet above so external clients can reach it.
       - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-true}
       - DISABLE_CADDY=${DISABLE_CADDY:-false}
+      # In-process settings — read by the server and the ingestor, not by
+      # docker compose. Without these lines a value in .env reaches docker
+      # compose and stops there, so the documented "one line in .env" would
+      # change nothing in the container (#372). Every one defaults to EMPTY,
+      # which every reader ignores: pprofbind skips a blank host or port,
+      # LoadConfig skips a blank MQTT_BROKER, and MQTT_SOURCE_STRICT is
+      # false unless truthy. An install that never set them is unaffected.
+      - MQTT_BROKER=${MQTT_BROKER:-}
+      - MQTT_TOPIC=${MQTT_TOPIC:-}
+      - MQTT_SOURCE_STRICT=${MQTT_SOURCE_STRICT:-}
+      - PPROF_HOST=${PPROF_HOST:-}
+      - PPROF_HOST_SERVER=${PPROF_HOST_SERVER:-}
+      - PPROF_HOST_INGESTOR=${PPROF_HOST_INGESTOR:-}
+      - PPROF_PORT=${PPROF_PORT:-}
+      - PPROF_PORT_SERVER=${PPROF_PORT_SERVER:-}
+      - PPROF_PORT_INGESTOR=${PPROF_PORT_INGESTOR:-}
     networks:
       # Default compose network for intra-stack DNS (unchanged).
       default: {}

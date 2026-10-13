@@ -38,7 +38,16 @@ func TestResolveBrokerMode_MatchesTheEntrypointSpelling(t *testing.T) {
 		{"FALSE", true, false},
 		{"0", true, false},
 		{"true", false, false},
-		{" true ", false, false},
+		// Review round 2, finding 7: docker/entrypoint-go.sh compares the
+		// RAW value, so a surrounding space is NOT "true" to it and the
+		// bundled broker keeps running. Trimming here would report the
+		// opposite mode to the one the container is in. Such a value can
+		// only arrive through the process environment — manage.sh's .env
+		// reader and docker compose's dotenv parser both trim [T].
+		{" true ", true, true},
+		{" true", true, true},
+		{"true ", true, true},
+		{"\ttrue", true, true},
 		{"TRUE", true, true},
 		{"True", true, true},
 		{"1", true, true},
@@ -57,10 +66,10 @@ func TestResolveBrokerMode_MatchesTheEntrypointSpelling(t *testing.T) {
 }
 
 func TestBrokerMode_AmbiguousValueIsReportedNotSilentlyResolved(t *testing.T) {
-	// manage.sh's is_true() accepts 1/yes/on; the container entrypoint does
-	// not. A value in that gap selects the BUNDLED broker inside the
-	// container while manage.sh believes it selected the external one. The
-	// issue requires that this cannot happen silently.
+	// A value the entrypoint does not accept leaves the BUNDLED broker
+	// running in this container, while the operator who typed it most
+	// likely meant the opposite. The issue requires that this cannot
+	// happen silently.
 	mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "yes"}))
 	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}, false)
 	if len(diags) == 0 {
@@ -74,6 +83,33 @@ func TestBrokerMode_AmbiguousValueIsReportedNotSilentlyResolved(t *testing.T) {
 	}
 	if sev := WorstBrokerSeverity(diags); sev != SeverityWarn {
 		t.Errorf("an ambiguous value is a warning, not an error (it must not block a start); got %q", sev)
+	}
+}
+
+// Review round 2, finding 2: manage.sh does NOT leave the bundled broker
+// running on an is_true() value. dc_prod/dc_staging swap in
+// docker-compose.no-mosquitto.yml, which hard-codes DISABLE_MOSQUITTO=true
+// in the container's environment — so a container that can see "yes" at all
+// was NOT launched by manage.sh. The diagnostic must therefore not tell the
+// operator that manage.sh believes it disabled the broker; it must name the
+// launcher that actually delivers this value, a bare docker compose run.
+func TestAmbiguousDiagnostic_DoesNotMisattributeTheModeToManageSh(t *testing.T) {
+	mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "yes"}))
+	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}, false)
+	joined := diagText(diags)
+	if !strings.Contains(joined, "docker compose") {
+		t.Errorf("the diagnostic must name the launcher that delivers an untranslated value (a bare `docker compose` run); got:\n%s", joined)
+	}
+	// It may mention manage.sh, but only to say it would have selected the
+	// external compose file — never that it "may believe" the broker was
+	// disabled while this container still runs it.
+	for _, forbidden := range []string{"is_true() may read", "may believe", "manage.sh's is_true(), which accepts"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("the diagnostic still attributes this mode to manage.sh (%q); got:\n%s", forbidden, joined)
+		}
+	}
+	if strings.Contains(joined, "manage.sh") && !strings.Contains(joined, "no-mosquitto") {
+		t.Errorf("if the diagnostic mentions manage.sh it must say it swaps in the no-mosquitto compose file; got:\n%s", joined)
 	}
 }
 
@@ -191,6 +227,40 @@ func TestDiagnosticsNeverCarryCredentials(t *testing.T) {
 		diags := CheckBrokerSources(mode, []MQTTSource{{Name: "s", Broker: broker}}, false)
 		joined := diagText(diags)
 		for _, secret := range []string{pass, user, token} {
+			if strings.Contains(joined, secret) {
+				t.Errorf("broker %q: diagnostic leaked %q:\n%s", broker, secret, joined)
+			}
+		}
+	}
+}
+
+// Review round 2, finding 4: the credential test above only proves nothing
+// leaks. Removing the user-info strip in brokerHost makes every credentialed
+// URL fail to parse as a host, so a credentialed loopback-only external
+// setup silently produces NO diagnostic at all — the dead deploy #372 is
+// about goes unreported. Pin the diagnostic, not just the absence of a leak.
+func TestCredentialedLoopbackOnlySourceIsStillFlagged(t *testing.T) {
+	mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "true"}))
+	for _, broker := range []string{
+		"mqtt://observer-rw:sup3rs3cret@localhost:1883",
+		"mqtt://observer-rw:sup3rs3cret@127.0.0.1:1883",
+		"mqtts://observer-rw:sup3rs3cret@[::1]:8883",
+		"mqtt://observer-rw@localhost:1883",
+	} {
+		diags := CheckBrokerSources(mode, []MQTTSource{{Name: "cred", Broker: broker}}, false)
+		joined := diagText(diags)
+		if WorstBrokerSeverity(diags) != SeverityError {
+			t.Errorf("broker %q: a credentialed loopback-only external source must be an error; got:\n%s", broker, joined)
+		}
+		if !strings.Contains(joined, "loopback") {
+			t.Errorf("broker %q: the error must say the source points at loopback; got:\n%s", broker, joined)
+		}
+		// A URL whose user-info was not understood must not be reported as
+		// merely "unusable" — that would hide the loopback problem.
+		if strings.Contains(joined, "unusable") {
+			t.Errorf("broker %q: a credentialed URL is usable; brokerHost must strip the user-info:\n%s", broker, joined)
+		}
+		for _, secret := range []string{"sup3rs3cret", "observer-rw"} {
 			if strings.Contains(joined, secret) {
 				t.Errorf("broker %q: diagnostic leaked %q:\n%s", broker, secret, joined)
 			}
@@ -338,5 +408,33 @@ func TestIngestorMainReportsBrokerSetupBeforeConnecting(t *testing.T) {
 	}
 	if report > connect {
 		t.Fatalf("the broker setup must be reported before the ingestor starts connecting to sources")
+	}
+}
+
+// TestEmptyBrokerEnvironmentIsInert is the ingestor half of review round 2,
+// finding 3. The compose files now forward MQTT_BROKER, MQTT_TOPIC and
+// MQTT_SOURCE_STRICT with an empty default, so those keys are PRESENT and
+// empty in the container of an install that never set them.
+func TestEmptyBrokerEnvironmentIsInert(t *testing.T) {
+	getenv := brokerEnv(map[string]string{
+		"DISABLE_MOSQUITTO":  "",
+		"MQTT_BROKER":        "",
+		"MQTT_TOPIC":         "",
+		"MQTT_SOURCE_STRICT": "",
+	})
+	mode := ResolveBrokerMode(getenv)
+	if !mode.Bundled || mode.Ambiguous {
+		t.Errorf("an empty DISABLE_MOSQUITTO must be the quiet bundled default; got %+v", mode)
+	}
+	if StrictBrokerSources(getenv) {
+		t.Error("an empty MQTT_SOURCE_STRICT must not turn on strict mode")
+	}
+	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}, true)
+	if len(diags) != 0 {
+		t.Errorf("an all-empty broker environment must produce no diagnostic; got:\n%s", diagText(diags))
+	}
+	fatal, msg := ReportBrokerSetup(getenv, []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}, true, func(string, ...any) {})
+	if fatal {
+		t.Errorf("an all-empty broker environment must never refuse to start; got %q", msg)
 	}
 }

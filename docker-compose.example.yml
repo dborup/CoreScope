@@ -24,6 +24,23 @@ services:
     environment:
       - DISABLE_CADDY=${DISABLE_CADDY:-true}
       - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-false}
+      # In-process settings — read by the server and the ingestor, not by
+      # docker compose. Without these lines a value in .env reaches docker
+      # compose and stops there, so the documented "one line in .env" would
+      # change nothing in the container (#372). Every one defaults to EMPTY,
+      # which every reader ignores: pprofbind skips a blank host or port,
+      # LoadConfig skips a blank MQTT_BROKER, and MQTT_SOURCE_STRICT is
+      # false unless truthy. An install that never set them is unaffected.
+      - MQTT_BROKER=${MQTT_BROKER:-}
+      - MQTT_TOPIC=${MQTT_TOPIC:-}
+      - MQTT_SOURCE_STRICT=${MQTT_SOURCE_STRICT:-}
+      - ENABLE_PPROF=${ENABLE_PPROF:-}
+      - PPROF_HOST=${PPROF_HOST:-}
+      - PPROF_HOST_SERVER=${PPROF_HOST_SERVER:-}
+      - PPROF_HOST_INGESTOR=${PPROF_HOST_INGESTOR:-}
+      - PPROF_PORT=${PPROF_PORT:-}
+      - PPROF_PORT_SERVER=${PPROF_PORT_SERVER:-}
+      - PPROF_PORT_INGESTOR=${PPROF_PORT_INGESTOR:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]

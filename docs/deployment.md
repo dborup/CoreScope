@@ -111,8 +111,8 @@ docker compose up -d
 | `DATA_DIR` | `./data` | Host path for persistent data |
 | `DISABLE_MOSQUITTO` | `false` | Set `true` to use an external MQTT broker |
 | `DISABLE_CADDY` | `false` | Set `true` to skip the built-in Caddy proxy |
-| `PROD_MQTT_BIND` | `0.0.0.0` | Host interface the bundled broker's `1883` is published on; `127.0.0.1` for host-only |
-| `PPROF_BIND` | `0.0.0.0` | Host interface the pprof ports are published on (staging compose files) |
+| `PROD_MQTT_BIND` | *(empty — IPv4 and IPv6)* | Host interface the bundled broker's `1883` is published on; `127.0.0.1` for host-only |
+| `PPROF_BIND` | *(empty — IPv4 and IPv6)* | Host interface the pprof ports are published on (staging compose files) |
 
 ### manage.sh (legacy alternative)
 
@@ -160,12 +160,22 @@ changed under you.
 
 | Setting | Shipped default | What the default does | Change it to |
 |---------|-----------------|-----------------------|--------------|
-| `PROD_MQTT_BIND` | `0.0.0.0` | Publishes the bundled broker's `1883` on every interface — unchanged from before | `127.0.0.1` to reach the plaintext broker from the host only |
-| `PPROF_BIND` | `0.0.0.0` | Publishes the staging pprof ports `6060`/`6061` on every interface — unchanged from before | `127.0.0.1` to require an SSH tunnel for profiling |
+| `PROD_MQTT_BIND` | empty | Publishes the bundled broker's `1883` with no host interface, i.e. on both IPv4 (`0.0.0.0`) and IPv6 (`[::]`) — byte for byte the mapping this file always had | `127.0.0.1` to reach the plaintext broker from the host only |
+| `PPROF_BIND` | empty | Publishes the staging pprof ports `6060`/`6061` with no host interface, i.e. IPv4 and IPv6 — unchanged from before | `127.0.0.1` to require an SSH tunnel for profiling |
 | `PPROF_HOST` | empty | The in-process pprof listener binds every interface — unchanged from before | `127.0.0.1` for a process with **no** published port (see the warning below) |
 | `PPROF_PORT_SERVER` / `PPROF_PORT_INGESTOR` | `6060` / `6061` | Same ports as before; they must stay distinct | Any free pair, when `6060`/`6061` are taken |
 | `MQTT_SOURCE_STRICT` | `false` | A broker setup that cannot ingest is logged, and the ingestor still starts | `true` to refuse to start instead |
-| `DISABLE_MOSQUITTO` | `false` (`true` in `docker-compose.staging.yml`) | Unchanged — the bundled broker still runs by default | `true` if you run your own broker |
+| `DISABLE_MOSQUITTO` | `false` (`true` in `docker-compose.staging.yml`) | Unchanged — the bundled broker still runs by default | `true` if you run your own broker (use the exact `true`, so manage.sh and a bare `docker compose` agree) |
+| `MQTT_BROKER` / `MQTT_TOPIC` | empty | Unchanged — `config.json` decides the sources | the external broker's URL, as an alternative to editing `config.json` |
+
+**Leave a bind variable empty, do not write `0.0.0.0` into it.** Docker
+publishes a mapping with no host interface (`"1883:1883"`) on *both* `0.0.0.0`
+and `[::]`, but a mapping with an explicit IPv4 host (`"0.0.0.0:1883:1883"`)
+publishes IPv4 **only**. The shipped defaults are therefore empty, so the
+rendered mapping is identical to the one these files had before — run
+`docker compose config` on an unset `.env` and no `host_ip` appears at all.
+Setting `PROD_MQTT_BIND=0.0.0.0` or `PPROF_BIND=0.0.0.0` would quietly drop
+IPv6 reachability of the broker or the profiler.
 
 **`PPROF_BIND` and `PPROF_HOST` are not interchangeable.** `PPROF_BIND` is the
 *host* interface a published container port listens on; `PPROF_HOST` is the
@@ -186,10 +196,29 @@ are reported:
   broker that is not running and will ingest nothing. It still starts, so this
   changes no behaviour; set `MQTT_SOURCE_STRICT=true` if you would rather the
   startup fail. A value of `DISABLE_MOSQUITTO` that is neither `true` nor
-  `false` logs a `[broker] warn:` line, because the container entrypoint only
-  disables the bundled broker on the exact string `true` while `manage.sh`
-  also accepts `1`, `yes` and `on` — so the two can disagree about which
-  broker you meant.
+  `false` logs a `[broker] warn:` line, because what such a value means
+  depends on how the stack was launched — see the next paragraph.
+
+**`DISABLE_MOSQUITTO` depends on the launcher, and `broker-check` reports the
+one that applies.** `./manage.sh` resolves the value itself with `is_true()`
+(`1`, `true`, `TRUE`, `yes`, `y`, `on`, …) and then runs
+`docker-compose.no-mosquitto.yml`, which hard-codes `DISABLE_MOSQUITTO=true`
+in the container — so on a manage.sh-managed host every one of those values
+gives an **external** broker, and `./manage.sh broker-check` validates the
+external sources accordingly. A bare `docker compose up` against
+`docker-compose.yml` passes the value straight to the entrypoint, which
+disables the bundled broker only on the exact string `true`, so `yes` there
+leaves the bundled broker **running**. Both `broker-check` and the ingestor's
+`[broker] warn:` line name that gap when a value falls into it. Set `true` or
+`false` and every launcher agrees.
+
+**Settings in `.env` that a process reads now reach the container.**
+`MQTT_BROKER`, `MQTT_TOPIC`, `MQTT_SOURCE_STRICT`, `ENABLE_PPROF` and the
+`PPROF_HOST*` / `PPROF_PORT*` settings are read by the server and the
+ingestor, not by docker compose, so every app compose file forwards them
+through its `environment:` block with an empty default. An unset setting
+arrives as an empty string, which every reader ignores, so an install that
+never set one is unaffected.
 
 Broker URLs in every one of those diagnostics are masked: user name,
 password, query and fragment never reach the log.

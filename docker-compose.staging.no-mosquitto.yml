@@ -34,8 +34,12 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "${STAGING_GO_HTTP_PORT:-82}:80"
-      - "${PPROF_BIND:-0.0.0.0}:6060:6060"
-      - "${PPROF_BIND:-0.0.0.0}:6061:6061"
+      # PPROF_BIND is the host interface the pprof ports are published on.
+      # Empty (the shipped default) renders no host interface at all, which
+      # is the dual-stack publish this file always had; 127.0.0.1 narrows it
+      # to the host. An explicit 0.0.0.0 would drop IPv6, so do not use it.
+      - "${PPROF_BIND:+${PPROF_BIND}:}6060:6060"
+      - "${PPROF_BIND:+${PPROF_BIND}:}6061:6061"
     volumes:
       - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
       - caddy-data-staging-go:/data/caddy
@@ -43,6 +47,22 @@ services:
       - NODE_ENV=staging
       - ENABLE_PPROF=true
       - DISABLE_MOSQUITTO=true
+      # In-process settings — read by the server and the ingestor, not by
+      # docker compose. Without these lines a value in .env reaches docker
+      # compose and stops there, so the documented "one line in .env" would
+      # change nothing in the container (#372). Every one defaults to EMPTY,
+      # which every reader ignores: pprofbind skips a blank host or port,
+      # LoadConfig skips a blank MQTT_BROKER, and MQTT_SOURCE_STRICT is
+      # false unless truthy. An install that never set them is unaffected.
+      - MQTT_BROKER=${MQTT_BROKER:-}
+      - MQTT_TOPIC=${MQTT_TOPIC:-}
+      - MQTT_SOURCE_STRICT=${MQTT_SOURCE_STRICT:-}
+      - PPROF_HOST=${PPROF_HOST:-}
+      - PPROF_HOST_SERVER=${PPROF_HOST_SERVER:-}
+      - PPROF_HOST_INGESTOR=${PPROF_HOST_INGESTOR:-}
+      - PPROF_PORT=${PPROF_PORT:-}
+      - PPROF_PORT_SERVER=${PPROF_PORT_SERVER:-}
+      - PPROF_PORT_INGESTOR=${PPROF_PORT_INGESTOR:-}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
       interval: 30s

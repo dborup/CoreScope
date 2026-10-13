@@ -193,3 +193,51 @@ func TestURLNamesLocalhostWhenBoundEverywhere(t *testing.T) {
 		t.Errorf("URL = %q, want http://[::1]:6061/debug/pprof/", got.URL)
 	}
 }
+
+// TestEmptyEnvironmentIsInert pins the other half of review round 2,
+// finding 3. The compose files forward every pprof setting with an empty
+// default, so an install that never set one now has PPROF_HOST="",
+// PPROF_PORT="" and so on PRESENT in the container's environment rather
+// than absent. Present-but-empty must behave exactly like absent, or
+// forwarding them would itself be the behaviour change.
+func TestEmptyEnvironmentIsInert(t *testing.T) {
+	empty := map[string]string{
+		"ENABLE_PPROF":        "",
+		"PPROF_HOST":          "",
+		"PPROF_HOST_SERVER":   "",
+		"PPROF_HOST_INGESTOR": "",
+		"PPROF_PORT":          "",
+		"PPROF_PORT_SERVER":   "",
+		"PPROF_PORT_INGESTOR": "",
+	}
+	for _, role := range []Role{Server, Ingestor} {
+		got := role.Resolve(env(empty))
+		if got.Enabled {
+			t.Errorf("%s: an all-empty environment must leave pprof off; got %+v", role.Name, got)
+		}
+		if got.Reason != "" {
+			t.Errorf("%s: an all-empty environment must say nothing; got reason %q", role.Name, got.Reason)
+		}
+	}
+	// With pprof asked for, the empty host and port settings must still
+	// resolve to the pre-#372 listener: every interface, the role's own port.
+	for _, tc := range []struct {
+		role     Role
+		wantAddr string
+	}{
+		{Server, ":6060"},
+		{Ingestor, ":6061"},
+	} {
+		on := map[string]string{"ENABLE_PPROF": "true"}
+		for k, v := range empty {
+			if k == "ENABLE_PPROF" {
+				continue
+			}
+			on[k] = v
+		}
+		got := tc.role.Resolve(env(on))
+		if !got.Enabled || got.Addr != tc.wantAddr {
+			t.Errorf("%s: empty host/port settings must resolve to %q on every interface; got %+v", tc.role.Name, tc.wantAddr, got)
+		}
+	}
+}
