@@ -43,6 +43,7 @@ package main
 // ages badly as ranges are reassigned. Operators who want it can configure it.
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -233,10 +234,17 @@ func (l *wsLimiter) allow(r *http.Request) (ok bool, reason wsRejectReason, key 
 	perIPConfigured := l.maxConnsPerIP > 0 || l.upgradesPerMin > 0
 	if perIPConfigured && !distinct {
 		l.warnedIndistinct.Do(func() {
+			// #369: say which protection is actually left. Claiming the
+			// ceiling still applies when the operator set maxClients to 0
+			// would be the one wrong thing to print here.
+			fallback := "webSocket.maxClients is 0, so NOTHING bounds concurrent clients"
+			if l.maxClients > 0 {
+				fallback = fmt.Sprintf("the global webSocket.maxClients ceiling (%d) still applies", l.maxClients)
+			}
 			log.Printf("[ws] WARNING: per-IP limits are configured but every request arrives from %s, "+
 				"so clients cannot be told apart and the limits are NOT enforced. "+
 				"Set webSocket.trustedProxies to your reverse proxy's address to enable them. "+
-				"The global webSocket.maxClients ceiling still applies.", ip)
+				"Meanwhile %s.", ip, fallback)
 		})
 	}
 	// perIP is what actually gets enforced: configured AND able to tell

@@ -414,3 +414,25 @@ func TestWSGlobalCap_MainWiresTheCeiling_369(t *testing.T) {
 			"any literal there silently un-bounds every deployment")
 	}
 }
+
+// The one-shot "clients cannot be told apart" warning now has to say which
+// protection is left. Printing "the ceiling still applies" to an operator who
+// set maxClients to 0 would be the single most misleading line in the log.
+func TestWSGlobalCap_IndistinctWarningStatesCeilingState_369(t *testing.T) {
+	withCeiling := limiter(1, 1, nil, nil)
+	withCeiling.maxClients = 7
+	out := captureLog(func() { withCeiling.allow(req("127.0.0.1:1", "")) })
+	if !strings.Contains(out, "maxClients ceiling (7) still applies") {
+		t.Errorf("warning did not name the live ceiling and its value, got:\n%s", out)
+	}
+
+	noCeiling := limiter(1, 1, nil, nil)
+	noCeiling.maxClients = 0
+	out = captureLog(func() { noCeiling.allow(req("127.0.0.1:1", "")) })
+	if !strings.Contains(out, "NOTHING bounds concurrent clients") {
+		t.Errorf("with the ceiling off the warning must say so, got:\n%s", out)
+	}
+	if strings.Contains(out, "still applies") {
+		t.Errorf("the warning claims a ceiling that is switched off, got:\n%s", out)
+	}
+}
