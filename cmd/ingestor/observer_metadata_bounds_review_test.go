@@ -32,6 +32,20 @@ import (
 
 // --- N1: pin WHERE the id gate sits ----------------------------------------
 
+// currentReportTS is the report-envelope timestamp the neighbors payloads
+// below carry. It MUST be derived from the clock rather than hardcoded: #374
+// added a future bound to normalizeReportTS (maxReportFutureSkew, 15 minutes),
+// and ReplaceObserverNeighbors drops a report whose envelope timestamp is past
+// it. A fixed literal therefore has an expiry date — before it, the valid-path
+// test fails outright, and worse, the INVALID-path neighbors subtest goes
+// vacuous: the report is rejected for the timestamp instead of the id, so the
+// subtest passes even with the id gate moved below the dispatch, which is the
+// exact mutant it exists to kill. Relative to now, both subtests stay honest
+// on any clock. There is no past bound, so "now" needs no skew of its own.
+func currentReportTS() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
 // The gate is deliberately placed above the neighbors/status/packet dispatch,
 // so one check covers every observer-bearing topic. A packet-only test cannot
 // see that: moving the gate below the neighbors+status branches keeps it green
@@ -42,6 +56,7 @@ func TestHandleMessage_InvalidObserverIDDroppedOnEveryDispatchPath(t *testing.T)
 	badID := strings.Repeat("a", maxObserverIDBytes+1)
 	rawHex := "0A00D69FD7A5A7475DB07337749AE61FA53A4788E976"
 	neighborPubkey := strings.Repeat("cd", 32)
+	reportTS := currentReportTS()
 
 	cases := []struct {
 		name    string
@@ -68,7 +83,7 @@ func TestHandleMessage_InvalidObserverIDDroppedOnEveryDispatchPath(t *testing.T)
 			// SNR history.
 			name:    "neighbors",
 			topic:   "meshcore/SJC/" + badID + "/neighbors",
-			payload: `{"timestamp":"2026-10-13T10:00:00Z","neighbors":[{"pubkey":"` + neighborPubkey + `","status":"responded","scopes":"SJC","snr":-7.5,"heard_secs_ago":12}]}`,
+			payload: `{"timestamp":"` + reportTS + `","neighbors":[{"pubkey":"` + neighborPubkey + `","status":"responded","scopes":"SJC","snr":-7.5,"heard_secs_ago":12}]}`,
 			tables:  []string{"observer_neighbors", "observer_neighbor_metrics"},
 		},
 		{
@@ -100,6 +115,7 @@ func TestHandleMessage_InvalidObserverIDDroppedOnEveryDispatchPath(t *testing.T)
 func TestHandleMessage_ValidObserverIDReachesEveryDispatchPath(t *testing.T) {
 	id := "kpabap" // the fixture's shortest real, non-pubkey operator id
 	neighborPubkey := strings.Repeat("cd", 32)
+	reportTS := currentReportTS()
 
 	t.Run("status", func(t *testing.T) {
 		store, source := newTestContext(t)
@@ -121,7 +137,7 @@ func TestHandleMessage_ValidObserverIDReachesEveryDispatchPath(t *testing.T) {
 		store, source := newTestContext(t)
 		msg := &mockMessage{
 			topic:   "meshcore/SJC/" + id + "/neighbors",
-			payload: []byte(`{"timestamp":"2026-10-13T10:00:00Z","neighbors":[{"pubkey":"` + neighborPubkey + `","status":"responded","scopes":"SJC","snr":-7.5,"heard_secs_ago":12}]}`),
+			payload: []byte(`{"timestamp":"` + reportTS + `","neighbors":[{"pubkey":"` + neighborPubkey + `","status":"responded","scopes":"SJC","snr":-7.5,"heard_secs_ago":12}]}`),
 		}
 		handleMessage(store, "test", source, msg, nil, nil, &Config{})
 		if n := countRows(t, store, "observer_neighbors"); n != 1 {
