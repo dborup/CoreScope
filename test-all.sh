@@ -66,6 +66,7 @@ run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
+run test-issue-405-observers-listener-leak.js
 run test-issue-322-comment-guards.js
 run test-backup-sqlite-safety.js
 run test-issue-372-broker-check.js
@@ -199,6 +200,7 @@ run test-reach-rank.js
 run test-issue-1107-live-layout.js
 run test-issue-1619-feed-detail-card-draggable.js
 run test-xss-escape-sinks.js
+run test-issue-368-minimarkdown-links.js
 run test-issue-393-slowpath-doc-bound.js
 run test-preflight-xss-gate.js
 run test-issue-1648-m4-emoji-scan.js

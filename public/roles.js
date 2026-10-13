@@ -1025,6 +1025,41 @@
     }
   };
 
+  /* #368 — attribute escape for the Markdown link destination below.
+     Same 5-char-minus-&<> set as the escapeAttr helpers in public/home.js and
+     public/path-inspector.js: by the time miniMarkdown() captures a
+     destination it has already turned & < > into entities, so the only
+     characters that can still leave a double-quoted href are the two quote
+     characters. Exported so the Home render path has one shared copy. */
+  function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  window.escapeAttr = escapeAttr;
+
+  /* #368 — scheme allowlist for Markdown link destinations.
+     Home checklist/step text is site-customization content, which is
+     importable and therefore untrusted, so a destination may not be able to
+     pick its own URL scheme. Only these are anchored; everything without a
+     scheme (relative paths, #fragments, ?query) is left alone. mailto: is not
+     in the list because nothing in the product emits one today — adding it is
+     a product decision, not a security one. */
+  var SAFE_LINK_SCHEMES = ['http', 'https'];
+  /* RFC 3986 scheme grammar, lowercased before matching. */
+  var LINK_SCHEME_RE = /^([a-z][a-z0-9+.\-]*):/;
+
+  /* Returns the escaped href for `dest`, or '' when the destination must not
+     become a link. Normalisation mirrors what a browser does before it
+     resolves a scheme: ASCII controls and ASCII whitespace are ignored, and
+     the scheme is case-insensitive. So `JaVa\tScRiPt:alert(1)` is rejected for
+     the same reason `javascript:alert(1)` is. */
+  function safeLinkHref(dest) {
+    var raw = String(dest == null ? '' : dest);
+    var probe = raw.replace(/[\u0000-\u0020\u007f]/g, '').toLowerCase();
+    if (!probe) return '';
+    var m = LINK_SCHEME_RE.exec(probe);
+    if (m && SAFE_LINK_SCHEMES.indexOf(m[1]) === -1) return '';
+    return escapeAttr(raw);
+  }
   // Simple markdown → HTML (bold, italic, links, code, lists, line breaks)
   window.miniMarkdown = function(text) {
     if (!text) return '';
@@ -1033,7 +1068,14 @@
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
       .replace(/`(.+?)`/g, '<code>$1</code>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--link-color)">$1</a>')
+      /* #368: a replacement function, not a '$2' template — a '$&'/"$'" in the
+         destination would otherwise be re-expanded by String.replace. A
+         rejected destination degrades to its already-escaped label text. */
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_m, label, dest) {
+        var href = safeLinkHref(dest);
+        if (!href) return label;
+        return '<a href="' + href + '" target="_blank" rel="noopener" style="color:var(--link-color)">' + label + '</a>';
+      })
       .replace(/^- (.+)/gm, '<li>$1</li>')
       .replace(/\n/g, '<br>');
     // Wrap consecutive <li> in <ul>

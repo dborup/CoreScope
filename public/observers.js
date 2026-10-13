@@ -178,8 +178,17 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
     }
     regionChangeHandler = RegionFilter.onChange(function () { render(); });
     loadObservers();
+    // #405 — Bind the delegated handlers to the observers page's OWN
+    // container, not the shared #app. The next page's init rebuilds
+    // app.innerHTML, which discards this subtree (and its listeners) with
+    // it; binding to #app instead left these handlers firing on every
+    // later page and stacking on each revisit (same leak class #402 fixed
+    // in compare.js). All interactive targets — header buttons, the
+    // last-updated pill and the table rows — live inside .observers-page,
+    // so delegation here still catches every event it did on #app.
+    var pageEl = app.querySelector('.observers-page');
     // Event delegation for data-action buttons
-    app.addEventListener('click', function (e) {
+    pageEl.addEventListener('click', function (e) {
       var btn = e.target.closest('[data-action]');
       if (btn && btn.dataset.action === 'obs-refresh') loadObservers({ bust: true });
       if (btn && btn.dataset.action === 'compare-observers') {
@@ -211,8 +220,9 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
         location.hash = row.dataset.value;
       }
     });
-    // #209 — Keyboard accessibility for observer rows
-    app.addEventListener('keydown', function (e) {
+    // #209 — Keyboard accessibility for observer rows (bound to the page
+    // container, not #app — see the #405 note above).
+    pageEl.addEventListener('keydown', function (e) {
       // #1562 — Last-updated pill (role=button) supports Enter/Space to
       // force a fresh fetch, matching click behavior on data-action="obs-refresh".
       var refreshBtn = e.target.closest('[data-action="obs-refresh"]');
