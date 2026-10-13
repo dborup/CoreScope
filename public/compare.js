@@ -119,6 +119,17 @@ if (typeof window !== 'undefined') {
       location.hash = row.dataset.value;
     });
 
+    // #393 N9 — delegated click navigation for the same rows. Lets the packet
+    // rows drop their per-row inline onclick (consistency with #373), which
+    // also removes the latent `'`-breakout in that double-quoted/JS context.
+    // Bound to #compareContent, not the shared #app: the next page's
+    // app.innerHTML discards it, so it cannot fire on other pages' rows.
+    document.getElementById('compareContent').addEventListener('click', function (e) {
+      var row = e.target.closest('tr[data-action="navigate"]');
+      if (!row) return;
+      location.hash = row.dataset.value;
+    });
+
     loadObservers();
   }
 
@@ -526,7 +537,7 @@ if (typeof window !== 'undefined') {
           } else {
             obsLabel = nameB;
           }
-          return '<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/packets/' + escapeHtml(h) + '" onclick="location.hash=\'#/packets/' + escapeHtml(h) + '\'">' +
+          return '<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/packets/' + escapeHtml(h) + '">' +
             '<td class="mono" style="font-size:0.85em">' + escapeHtml(h.substring(0, 12)) + '</td>' +
             '<td>' + timeAgo(p.timestamp || p.first_seen) + '</td>' +
             '<td><span class="payload-badge badge-' + payloadTypeColor(p.payload_type) + '">' + escapeHtml(typeName) + '</span></td>' +

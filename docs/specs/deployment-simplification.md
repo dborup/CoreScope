@@ -199,11 +199,12 @@ No rebuild. No git pull. No source code needed.
 | Path | Content | Mount |
 |---|---|---|
 | `/app/data/meshcore.db` | SQLite database (all packets, nodes) | Required volume |
+| `/app/data/ping_scores_history.db` | SQLite database (computed ping scores) | Same volume |
 | `/app/data/config.json` | Custom configuration (optional) | Same volume |
 | `/app/data/theme.json` | Custom theme (optional) | Same volume |
 | `/data/caddy` | TLS certificates (Caddy-managed) | Named volume (automatic) |
 
-**Backup:** `cp ~/corescope-data/meshcore.db ~/backup/` — it's just a SQLite file.
+**Backup:** `sh scripts/backup-sqlite.sh corescope ~/backup` from a CoreScope checkout. It is not just a file copy: both SQLite databases run in WAL mode, so the helper stops the container briefly and copies each `.db` together with its `-wal`, if any (see [deployment.md](../deployment.md#backup--restore)).
 
 **Migration:** Existing `~/meshcore-data` directories work unchanged. Just point the volume at the same path.
 

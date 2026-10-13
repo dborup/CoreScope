@@ -67,15 +67,26 @@ const escapeHtml = loadEscapeHtml();
 // #333 F5: sinks that call a file-local escaper must be tested with THAT
 // escaper, not with app.js's escapeHtml, or a weakened local escaper goes
 // unnoticed. Lift the one-line `function esc(s) { … }` from the file.
+// #393 N10: count EVERY declaration named esc, not just `function esc(`.
+// #333 N4 only counted the function form, so a differently-declared second
+// escaper (`const esc = …`, `let`/`var`) slipped past the guard and could
+// silently retarget the contract test. Count both shapes.
+function countEscDefs(src) {
+  const fnDefs = (src.match(/function\s+esc\s*\(/g) || []).length;
+  const bindDefs = (src.match(/\b(?:const|let|var)\s+esc\s*=/g) || []).length;
+  return fnDefs + bindDefs;
+}
+
 function loadLocalEsc(file, ctxExtra) {
   const src = fs.readFileSync(file, 'utf8');
-  // #333 N4: the regex below lifts the *first* one-line `function esc(s)`.
-  // If a second file-local esc were added above the real sink's escaper, it
-  // would silently retarget this contract test. Pin the assumption: there
-  // must be exactly one esc() definition in the file, else fail loudly.
-  const defs = src.match(/function esc\s*\(/g) || [];
-  if (defs.length !== 1)
-    throw new Error(`expected exactly one function esc() in ${file}, found ${defs.length}; `
+  // #333 N4 / #393 N10: the regex below lifts the *first* one-line
+  // `function esc(s)`. If a second file-local esc were added above the real
+  // sink's escaper — in ANY declaration form — it would silently retarget
+  // this contract test. Pin the assumption: there must be exactly one esc
+  // definition in the file, else fail loudly.
+  const defs = countEscDefs(src);
+  if (defs !== 1)
+    throw new Error(`expected exactly one esc definition in ${file}, found ${defs}; `
       + 'loadLocalEsc would silently pick the first — add a line anchor to disambiguate');
   const m = src.match(/\n\s*(function esc\(s\) \{[^\n]*\})/);
   if (!m) throw new Error('could not locate function esc(s) in ' + file);
@@ -1219,6 +1230,264 @@ perfCardTest('#394 F1 sqlite: sq.walPages.busy card is escaped',
 perfCardTest('#394 F1 packet store: ps.indexes.byObserver card is escaped',
   /(<div class="perf-card"><div class="perf-num">\$\{[^}]*ps\.indexes\.byObserver[^}]*\}<\/div><div class="perf-label">Observers<\/div><\/div>)/,
   { ps: { indexes: { byObserver: PERF_PAYLOAD } } }, '#394 F1 byObserver');
+
+// =========================================================================
+// #393 N5 — the #394 F1 cards above only cover the Go-runtime health branch
+// (gr.*). The Node-runtime branch (health.memory `m.*` / health.eventLoop
+// `el.*`) escapes too but no unit test entered it, so dropping escapeHtml on
+// e.g. `m.rss` stayed green. Drive one card per Node-branch response object.
+// =========================================================================
+console.log('\n=== #393 N5 perf.js Node-branch health cards ===');
+
+perfCardTest('#393 N5 health(node): m.rss RSS card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*m\.rss[^}]*\}MB<\/div><div class="perf-label">RSS<\/div><\/div>)/,
+  { m: { rss: PERF_PAYLOAD } }, '#393 N5 m.rss');
+
+perfCardTest('#393 N5 health(node): el.maxLagMs card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*el\.maxLagMs[^}]*\}ms<\/div><div class="perf-label">EL Max Lag<\/div><\/div>)/,
+  { el: { maxLagMs: PERF_PAYLOAD } }, '#393 N5 el.maxLagMs');
+
+perfCardTest('#393 N5 health(node): el.currentLagMs card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*el\.currentLagMs[^}]*\}ms<\/div><div class="perf-label">EL Current<\/div><\/div>)/,
+  { el: { currentLagMs: PERF_PAYLOAD } }, '#393 N5 el.currentLagMs');
+
+// =========================================================================
+// #393 F3 (round-2 review) — the explicit card tests above cover 8 of the
+// escapeHtml-wrapped perf-num cards. Drive EVERY card instead: list the
+// escaped cards per group, so dropping escapeHtml from any of them fails by
+// label, and evaluate each card's real perf-num template with a hostile
+// value behind every field it reads.
+// =========================================================================
+console.log('\n=== #393 F3 perf.js escaped perf-num cards (all) ===');
+
+const PERF_ESCAPED_CARDS = [
+  // overview
+  'Total Requests', 'Avg Response', 'Uptime',
+  // Go runtime
+  'Goroutines', 'GC Collections', 'CPUs', 'WS Clients',
+  // Node runtime
+  'Heap Used / ${escapeHtml(m.heapTotal)}MB', 'RSS', 'Event Loop p95', 'EL Max Lag',
+  'EL Current', 'WS Clients',
+  // SQLite stats
+  'Page Count', 'Page Size',
+  // cache (server + client)
+  'Server Entries', 'Server Hits', 'Server Misses', 'Server Hit Rate',
+  'Stale Hits (SWR)', 'Recomputes', 'Client Hits', 'Client Misses', 'Client Hit Rate',
+  // packet store
+  'Packets in RAM', 'Tracked Memory', 'Memory Limit', 'Heap (debug)', 'Queries Served',
+  'Live Inserts', 'Evicted', 'Unique Hashes', 'Observers', 'Indexed Nodes',
+  // SQLite
+  'DB Size', 'WAL Size', 'Freelist', 'Transmissions', 'Observations', 'Nodes',
+  'Observers', 'WAL Busy Pages',
+];
+
+function perfCards() {
+  const src = fs.readFileSync('public/perf.js', 'utf8');
+  const re = /<div class="perf-card"><div class="perf-num"(?: style="[^"]*")?>(.*?)<\/div><div class="perf-label">(.*?)<\/div><\/div>/g;
+  return [...src.matchAll(re)].map(m => ({ num: m[1], label: m[2] }));
+}
+
+// Stands in for every API object: any property is another hostile value, and
+// it converts to PERF_PAYLOAD as a string, number or via toLocaleString().
+function hostileValue() {
+  return new Proxy(function () {}, {
+    get(_, k) {
+      if (k === Symbol.toPrimitive) return () => PERF_PAYLOAD;
+      if (k === 'toString' || k === 'valueOf' || k === 'toLocaleString') return () => PERF_PAYLOAD;
+      return hostileValue();
+    },
+  });
+}
+
+test('#393 F3 perf.js: every listed card wraps its perf-num value in escapeHtml', () => {
+  const escaped = perfCards().filter(c => /\$\{escapeHtml\(/.test(c.num)).map(c => c.label);
+  assert.deepStrictEqual(escaped.slice().sort(), PERF_ESCAPED_CARDS.slice().sort(),
+    '#393 F3: the set of escapeHtml-wrapped perf-num cards changed');
+});
+
+for (const card of perfCards().filter(c => /\$\{escapeHtml\(/.test(c.num))) {
+  test(`#393 F3 perf card "${card.label}": hostile value is escaped`, () => {
+    const roots = [...new Set([...card.num.matchAll(/\$\{([\s\S]*?)\}/g)]
+      .flatMap(x => x[1].match(/(?<![.\w$])[A-Za-z_$][\w$]*/g) || []))]
+      .filter(id => id !== 'escapeHtml' && id !== 'Math');
+    const fn = new Function(...roots, 'escapeHtml', 'return `' + card.num + '`;');
+    assertNoXss(fn(...roots.map(hostileValue), escapeHtml), '#393 F3 ' + card.label);
+  });
+}
+
+// =========================================================================
+// #393 N6 (from the #394 re-review) — the error path at perf.js ~374 puts
+// escapeHtml(err.message) into innerHTML. err.message is attacker-influenced:
+// a non-JSON /api/perf body embeds in the JSON.parse message. It was the one
+// newly escaped sink with no test. Capture the template regardless of the
+// wrapper so dropping escapeHtml flips the assertion, not the match.
+// =========================================================================
+console.log('\n=== #393 N6 perf.js load-error sink ===');
+
+test('#393 N6 perf.js error paragraph: err.message is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /el\.innerHTML = `(<p style="color:red">Error: \$\{[^}]*err\.message[^}]*\}<\/p>)`;/,
+    { err: { message: PERF_PAYLOAD } }
+  );
+  assertNoXss(html, '#393 N6 perf.js err.message');
+});
+
+// =========================================================================
+// #393 follow-ups to #373 — analytics a11y (N6), delegated-nav pin (N7),
+// compare.js onclick removal (N9), loadLocalEsc guard robustness (N10).
+// =========================================================================
+console.log('\n=== #393 follow-ups to #373 ===');
+
+// Minimal element whose closest(sel) honours an optional tag-name prefix, so
+// a DIV row matches `[data-action="navigate"]` but NOT `tr[...]` and a TR row
+// matches both — exactly the distinction the delegated selectors turn on.
+function fakeNavRow(tag, value) {
+  const el = { tagName: tag.toUpperCase(), dataset: { action: 'navigate', value } };
+  el.closest = (sel) => {
+    const mm = sel.match(/^([a-z]*)\[data-action="navigate"\]$/i);
+    if (!mm) return null;
+    if (mm[1] && mm[1].toUpperCase() !== el.tagName) return null;
+    return el.dataset.action === 'navigate' ? el : null;
+  };
+  return el;
+}
+
+// N6: the analytics repeater row is a <div> whose parent .repeater-list is a
+// plain <div>, so role="row" has no required rowgroup/table/grid ancestor
+// (11 critical axe violations). #393 F4 (round-2 review): rejecting only the
+// literal role="row" let role="cell" (equally invalid there) pass. Allow-list
+// the focusable row's role instead, and reject every WAI-ARIA 1.2 role with a
+// required context role anywhere in the row — none has its parent here.
+const ARIA_ROLES_NEEDING_CONTEXT = ['cell', 'columnheader', 'gridcell', 'listitem',
+  'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'row', 'rowgroup',
+  'rowheader', 'tab', 'treeitem'];
+test('#393 N6 analytics repeater row: a standalone interactive role, no role needing a context', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/html \+= `<div class="repeater-row [\s\S]*?`;/);
+  assert.ok(m, '#393 N6 analytics repeater-row template not found');
+  const render = new Function('r', 'esc', 'pct', 'encodeURIComponent',
+    'let html = ""; ' + m[0] + ' return html;');
+  const html = render({ pubkey: 'deadbeef12', name: 'Repeater', count: 5, hop: '1' },
+    (s) => String(s), 50, encodeURIComponent);
+  const rowTag = html.match(/^<div class="repeater-row[^>]*>/);
+  assert.ok(rowTag, '#393 N6: rendered repeater row tag not found: ' + html);
+  const rowRole = (rowTag[0].match(/\srole="([^"]*)"/) || [])[1];
+  assert.ok(rowRole === 'link' || rowRole === 'button',
+    '#393 N6: clickable repeater <div> needs role="link" or "button", got ' + rowRole + ': ' + rowTag[0]);
+  const bad = [...html.matchAll(/\srole="([^"]*)"/g)].map(x => x[1])
+    .filter(r => ARIA_ROLES_NEEDING_CONTEXT.includes(r));
+  assert.deepStrictEqual(bad, [],
+    '#393 N6: repeater row carries a role with no required ancestor here: ' + html);
+  assert.ok(/\btabindex="0"/.test(rowTag[0]),
+    '#393 N6: repeater row lost tabindex="0" keyboard access: ' + html);
+});
+
+// N7: the delegated handler selector was broadened to [data-action="navigate"]
+// so the DIV repeater row is clickable; nothing pinned it. Drive the real
+// handler with a DIV row — narrowing the selector back to tr[...] goes red.
+test('#393 N7 analytics delegated handler: a DIV row navigates on click', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/const handler = \(e\) => \{[\s\S]*?location\.hash = row\.dataset\.value;\s*\};/);
+  assert.ok(m, '#393 N7 analytics delegated nav handler not found');
+  const makeHandler = new Function('location', m[0] + '\n return handler;');
+  const loc = { hash: '' };
+  const handler = makeHandler(loc);
+  handler({ type: 'click', target: fakeNavRow('div', '#/nodes/deadbeef12') });
+  assert.strictEqual(loc.hash, '#/nodes/deadbeef12',
+    '#393 N7: delegated [data-action="navigate"] did not navigate a DIV row on click');
+});
+
+// N9a: the compare packet row dropped its inline onclick (the latent
+// '-breakout in that double-quoted/JS context). Pin that the row carries no
+// inline on* handler — re-adding onclick goes red. #393 F5 (round-2 review):
+// scan the whole row expression, <tr> through '</tr>', so an on* attribute
+// moved onto a child <td>/<span> goes red too.
+test('#393 N9 compare.js packet row: no inline on* handler on the row or its children', () => {
+  const src = fs.readFileSync('public/compare.js', 'utf8');
+  const m = src.match(/return '<tr style="cursor:pointer"[^\n]*data-action="navigate"[\s\S]*?'<\/tr>';/);
+  assert.ok(m, '#393 N9 compare packet-row expression not found');
+  assert.ok(/<td/.test(m[0]), '#393 N9: captured row has no <td> children: ' + m[0]);
+  const on = m[0].match(/\son[a-z]+\s*=/i);
+  assert.ok(!on, '#393 N9: compare packet row still has an inline handler (' + (on && on[0]) + '): ' + m[0]);
+});
+
+// Run the REAL compare.js init() in a vm with a fake #app whose innerHTML
+// assignment recreates its children, as the browser does. Each call returns
+// the shared app element and that visit's #compareContent so a test can see
+// which element a listener landed on.
+function loadComparePage() {
+  const src = fs.readFileSync('public/compare.js', 'utf8');
+  function fakeEl() {
+    const el = { listeners: {} };
+    el.addEventListener = (type, fn) => { (el.listeners[type] = el.listeners[type] || []).push(fn); };
+    return el;
+  }
+  let children = {};
+  const app = fakeEl();
+  Object.defineProperty(app, 'innerHTML', {
+    set() { children = { compareControls: fakeEl(), compareContent: fakeEl() }; },
+  });
+  const loc = { hash: '#/compare' };
+  const ctx = {
+    window: {}, location: loc, CLIENT_TTL: {}, escapeHtml, URLSearchParams,
+    document: { getElementById: (id) => children[id] || null },
+    api: () => new Promise(() => {}), // observers never load: init's wiring only
+    registerPage: (name, page) => { ctx.page = page; },
+  };
+  vm.runInNewContext(src, ctx);
+  return {
+    app, loc,
+    visit() { ctx.page.init(app, ''); return children.compareContent; },
+    leave() { ctx.page.destroy(); },
+  };
+}
+
+// N9b: and the replacement delegated click handler actually navigates. Drive
+// the click listener the real init() installs on a <tr> nav row — removing
+// or narrowing it goes red.
+test('#393 N9 compare.js delegated click handler navigates a nav row', () => {
+  const cmp = loadComparePage();
+  const content = cmp.visit();
+  const clicks = content.listeners.click || [];
+  assert.strictEqual(clicks.length, 1, '#393 N9: expected one delegated click handler on #compareContent');
+  clicks[0]({ type: 'click', target: fakeNavRow('tr', '#/packets/deadbeef12') });
+  assert.strictEqual(cmp.loc.hash, '#/packets/deadbeef12',
+    '#393 N9: compare delegated click did not navigate the nav row');
+});
+
+// #393 F1 (round-2 review): the N9 click handler was bound to the shared #app
+// element, which every page renders into and nothing ever unbinds. After one
+// compare visit it fired on every later page's tr[data-action="navigate"],
+// overriding the observers slide-over's preventDefault() (#1056 AC#4), and
+// each visit stacked one more. It must live on compare's own container,
+// which the next page's app.innerHTML discards.
+test('#393 F1 compare.js init: no click listener on the shared #app, none stacked per visit', () => {
+  const cmp = loadComparePage();
+  const first = cmp.visit();
+  cmp.leave();
+  const second = cmp.visit();
+  cmp.leave();
+  assert.strictEqual((cmp.app.listeners.click || []).length, 0,
+    '#393 F1: compare.js bound a click listener to the shared #app; it outlives the page');
+  assert.notStrictEqual(first, second, 'harness: each visit must get a fresh #compareContent');
+  assert.strictEqual((second.listeners.click || []).length, 1,
+    '#393 F1: the current visit must carry exactly one row click handler');
+});
+
+// N10: loadLocalEsc's guard must also catch a differently-declared second
+// esc (const/let/var), not only a second `function esc(`. Exercise the lifted
+// counter directly — weakening it back to function-only makes case 2 go red.
+test('#393 N10 countEscDefs catches a second, differently-declared esc', () => {
+  assert.strictEqual(countEscDefs('function esc(s){return s;}'), 1,
+    '#393 N10: a single function esc must count as 1');
+  assert.strictEqual(countEscDefs('function esc(s){return s;}\nconst esc = (s) => s;'), 2,
+    '#393 N10: a second `const esc =` must be counted (the N4 blind spot)');
+  assert.strictEqual(countEscDefs('let esc = (s) => s;\nfunction esc(s){}'), 2,
+    '#393 N10: let-declared esc must also be counted');
+  assert.strictEqual(countEscDefs('function other(s){}'), 0,
+    '#393 N10: no esc definition must count as 0');
+});
 
 // =========================================================================
 // SUMMARY

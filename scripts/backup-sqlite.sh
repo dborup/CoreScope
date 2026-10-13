@@ -4,6 +4,9 @@
 # Requires Docker and ordinary host shell tools; never invokes SQLite or pulls
 # an image. The container's /app/data must not have another active writer.
 set -eu
+# Even under `sh -m`: with job control every child leads its own process
+# group, and setsid(1) would then fork and return early (see isolated below).
+set +m
 umask 077
 
 if [ "$#" -ne 2 ]; then
@@ -30,8 +33,8 @@ restart_needed=0
 # Docker's CLI re-enables SIGINT/SIGTERM even when they are inherited as
 # ignored, so a repeated Ctrl-C or process-group signal would kill it. Where
 # setsid(1) exists, run it in its own session, out of reach of those signals.
-# Children of this non-interactive shell are never process-group leaders, so
-# setsid execs in place and the shell still waits for the command.
+# Without job control (set +m above) children are never process-group leaders,
+# so setsid execs in place and the shell still waits for the command.
 isolated() {
   if command -v setsid >/dev/null 2>&1; then setsid "$@"; else "$@"; fi
 }
@@ -49,8 +52,8 @@ start_and_verify() {
 
 # A signal can kill the docker CLI while the daemon is still stopping the
 # container. Wait for any stop in progress (stop is idempotent) and confirm
-# that the container has exited, so the next start really starts it. Retried
-# because, without setsid, a repeated signal can still kill the CLI.
+# that the container has exited, so the next start really starts it. Up to
+# three attempts because, without setsid, a repeated signal can kill the CLI.
 stop_confirmed() {
   tries=0
   while [ "$tries" -lt 3 ]; do
@@ -97,6 +100,9 @@ finish() {
   exit "$status"
 }
 interrupted() {
+  # Shield from here on: a further signal must not preempt the EXIT trap,
+  # whose own `trap ''` only runs after it has started.
+  trap '' HUP INT TERM
   echo "ERROR: interrupted by SIG$1" >&2 || :
   exit "$2"
 }

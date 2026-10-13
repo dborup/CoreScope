@@ -706,6 +706,35 @@ func (c *Config) EffectiveHashRegions() []string {
 // the CheckOrigin allowlist (#1793) and catch non-browser clients, which can
 // omit or forge Origin.
 type WebSocketConfig struct {
+	// MaxClients is the GLOBAL ceiling on concurrent /ws clients (#369).
+	// DEFAULT 512, on. A pointer distinguishes "not configured" from an
+	// explicit 0, which turns the ceiling off.
+	//
+	// Why a global ceiling exists at all: every limit below is conditional on
+	// telling clients apart, and in the shipped Docker topology (bundled
+	// Caddy → localhost:3000, trustedProxies empty) they are all skipped.
+	// This one counts connections, so it holds regardless.
+	//
+	// Why 512, measured rather than guessed:
+	//   - the frontend opens exactly ONE socket per tab (public/app.js), and
+	//     a reconnect replaces it, so concurrent clients ≈ open tabs. A
+	//     regional mesh instance peaks in the tens; 512 is far above that.
+	//   - each accepted client costs ~12 KB of server heap (measured: 200
+	//     real handshakes cost ~25 KB per in-process dialer/server pair), two
+	//     goroutines and one file descriptor. At 512 that is ~6 MB and ~1024
+	//     goroutines — a rounding error next to the packet store.
+	//   - the ceiling's real job is the 256-message send queue each client
+	//     owns: at ~1 KB per broadcast frame, a backed-up client can hold a
+	//     quarter of a megabyte. 512 bounds that worst case at ~130 MB
+	//     instead of "as much as the attacker opens".
+	//   - 512 descriptors is half of the 1024 soft RLIMIT_NOFILE that is
+	//     still the common default, leaving the other half for SQLite, MQTT
+	//     and HTTP.
+	// Operators serving more than a few hundred simultaneous tabs should
+	// raise it; /api/stats reports websocket.clients and
+	// websocket.rejectedGlobalCap, which is the signal to do so.
+	MaxClients *int `json:"maxClients,omitempty"`
+
 	// MaxConnsPerIP caps concurrent /ws connections from one client address.
 	// DEFAULT 0, meaning OFF, and that is a deliberate departure from the
 	// value floated on #1794.
@@ -738,6 +767,20 @@ type WebSocketConfig struct {
 	// Applies even when clients cannot be told apart, because it is an
 	// explicit instruction rather than an inference.
 	Deny []string `json:"deny,omitempty"`
+}
+
+// WSMaxClients returns the global concurrent-client ceiling (#369),
+// defaulting to wsDefaultMaxClients when unset. An explicit 0 turns it off; a
+// negative value is a typo rather than an intention, so it keeps the default
+// instead of silently removing the ceiling.
+func (c *Config) WSMaxClients() int {
+	if c == nil || c.WebSocket == nil || c.WebSocket.MaxClients == nil {
+		return wsDefaultMaxClients
+	}
+	if v := *c.WebSocket.MaxClients; v >= 0 {
+		return v
+	}
+	return wsDefaultMaxClients
 }
 
 // WSMaxConnsPerIP returns the configured concurrent-connection cap, 0 = off.

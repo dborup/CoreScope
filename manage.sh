@@ -856,7 +856,7 @@ cmd_setup() {
     echo "   Useful commands:"
     echo "     ./manage.sh status     Check health"
     echo "     ./manage.sh logs       View logs"
-    echo "     ./manage.sh backup     Full backup (DB + config + theme)"
+    echo "     ./manage.sh backup     Full backup (DBs + config + theme; stops prod briefly)"
     echo "     ./manage.sh update     Update to latest version"
     echo ""
   else
@@ -1273,13 +1273,7 @@ cmd_promote() {
   info "Backing up production database..."
   local BACKUP_DIR="./backups/pre-promotion-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$BACKUP_DIR"
-  if [ -f "$PROD_DATA/meshcore.db" ]; then
-    cp "$PROD_DATA/meshcore.db" "$BACKUP_DIR/"
-  elif container_running "corescope-prod"; then
-    docker cp corescope-prod:/app/data/meshcore.db "$BACKUP_DIR/"
-  else
-    warn "Could not backup production database."
-  fi
+  backup_databases "$BACKUP_DIR" || { err "Promotion aborted."; exit 1; }
   log "Backup saved to ${BACKUP_DIR}/"
 
   # Restart prod with latest image
@@ -1298,7 +1292,7 @@ cmd_promote() {
     if [ "$i" -eq 30 ]; then
       err "Production failed health check after 30s"
       warn "Check logs: ./manage.sh logs prod"
-      warn "Rollback: cp ${BACKUP_DIR}/meshcore.db ${PROD_DATA}/ && ./manage.sh restart prod"
+      warn "Rollback: ./manage.sh restore ${BACKUP_DIR}"
       exit 1
     fi
     sleep 1
@@ -1365,6 +1359,22 @@ cmd_update() {
 
 # ─── Backup ───────────────────────────────────────────────────────────────
 
+# Offline snapshot of both SQLite databases and their WALs into a new
+# corescope-backup-* directory inside $1, via the tested helper. It stops
+# corescope-prod briefly; a hot single-file copy can miss or mismatch the WAL.
+backup_databases() {
+  local snapshot
+  if ! docker inspect --format '{{.State.Running}}' corescope-prod >/dev/null 2>&1; then
+    warn "Database not backed up: no corescope-prod container"
+    return 0
+  fi
+  if ! snapshot=$(sh "$(dirname "$0")/scripts/backup-sqlite.sh" corescope-prod "$1"); then
+    err "Database backup failed; check that corescope-prod is running"
+    return 1
+  fi
+  log "Databases (offline snapshot) → ${snapshot}/"
+}
+
 cmd_backup() {
   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
   BACKUP_DIR="${1:-./backups/corescope-${TIMESTAMP}}"
@@ -1372,18 +1382,7 @@ cmd_backup() {
 
   info "Backing up to ${BACKUP_DIR}/"
 
-  # Database
-  # Always use bind mount path (from .env or default)
-  DB_PATH="$PROD_DATA/meshcore.db"
-  if [ -f "$DB_PATH" ]; then
-    cp "$DB_PATH" "$BACKUP_DIR/meshcore.db"
-    log "Database ($(du -h "$BACKUP_DIR/meshcore.db" | cut -f1))"
-  elif container_running "corescope-prod"; then
-    docker cp corescope-prod:/app/data/meshcore.db "$BACKUP_DIR/meshcore.db" 2>/dev/null && \
-      log "Database (via docker cp)" || warn "Could not backup database"
-  else
-    warn "Database not found (container not running?)"
-  fi
+  backup_databases "$BACKUP_DIR" || return 1
 
   # Config (now lives in data dir)
   if [ -f "$PROD_DATA/config.json" ]; then
@@ -1440,6 +1439,11 @@ cmd_restore() {
   # Accept either a directory (full backup) or a single .db file
   if [ -d "$1" ]; then
     DB_FILE="$1/meshcore.db"
+    # cmd_backup keeps the databases in one helper snapshot subdirectory.
+    local snapshots=("$1"/corescope-backup-*/meshcore.db)
+    if [ ! -f "$DB_FILE" ] && [ "${#snapshots[@]}" -eq 1 ] && [ -f "${snapshots[0]}" ]; then
+      DB_FILE=${snapshots[0]}
+    fi
     CONFIG_FILE="$1/config.json"
     CADDY_FILE="$1/Caddyfile"
     THEME_FILE="$1/theme.json"
@@ -1572,7 +1576,7 @@ cmd_help() {
   printf '%b\n' "  ${BOLD}Maintain${NC}"
   echo "    update [version]   Update to version (no arg=latest tag, 'latest'=master tip, or e.g. v3.1.0)"
   echo "    promote            Promote staging → production (backup + restart)"
-  echo "    backup [dir]       Full backup: database + config + theme"
+  echo "    backup [dir]       Full backup: databases (prod stops briefly) + config + theme"
   echo "    restore <d>        Restore from backup dir or .db file"
   echo "    mqtt-test          Check if MQTT data is flowing"
   echo ""

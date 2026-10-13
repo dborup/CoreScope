@@ -771,7 +771,7 @@ the original error (129/130/143 for a signal, with an `interrupted` error). The
 Docker CLI does not stay immune to a repeated `SIGINT`/`SIGTERM`, so where
 `setsid` exists (util-linux, BusyBox) recovery runs its Docker commands in their
 own session: a repeated Ctrl-C or process-group signal does not reach them.
-A killed or failed recovery stop is retried up to three times (this is what
+A killed or failed recovery stop gets up to three attempts (this is what
 covers a repeated signal without `setsid`, e.g. on macOS). If the stop still
 cannot be confirmed, the helper attempts a start anyway but reports `restart not
 verified`; a restart failure is reported too. `SIGKILL` of the helper itself is
