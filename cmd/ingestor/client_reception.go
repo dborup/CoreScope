@@ -97,7 +97,24 @@ func handleClientPacket(store *Store, tag, rxPubkey string, msg map[string]inter
 
 // UpsertClientObserver records/updates a mobile client's self-reported name.
 // All writes live in the ingestor (read/write invariant #1283).
+//
+// The name is DISPLAY TEXT from an untrusted payload (`origin` on the mobile-RX
+// topic), the same shape of value as observers.name, so it carries the same
+// display-text policy: normalizeObserverText strips control and bidi-formatting
+// codepoints and truncates to maxObserverNameRunes on a rune boundary (#395,
+// follow-up to #338). This path returns from handleMessage BEFORE the observer
+// id gate, so it never saw #338's work; bounding here rather than in
+// handleClientPacket covers every caller, the same reason the observer display
+// bounds live in the Store.
+//
+// IDENTITY on this path is a different contract and is deliberately unchanged:
+// the companion pubkey is validated by clientPubkeyRe in handleClientPacket
+// (^[0-9a-f]{2,64}$, ACL-bound by the broker) and is never rewritten here
+// beyond the lowercasing this method always did. A name that normalizes away to
+// nothing is treated as "no name reported" and writes no row, which is what the
+// name == "" guard already meant.
 func (s *Store) UpsertClientObserver(pubkey, name, ts string) error {
+	name = normalizeObserverText(name, maxObserverNameRunes)
 	if pubkey == "" || name == "" {
 		return nil
 	}

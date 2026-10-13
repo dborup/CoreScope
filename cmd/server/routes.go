@@ -507,7 +507,7 @@ func (s *Server) perfMiddleware(next http.Handler) http.Handler {
 		}
 		if ms > 100 {
 			slow := SlowQuery{
-				Path:   r.URL.Path,
+				Path:   normalizeSlowPath(key, r.URL.Path),
 				Ms:     round(ms, 1),
 				Time:   time.Now().UTC().Format(time.RFC3339),
 				Status: 200,
@@ -1271,15 +1271,13 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "excludeTypes is not supported with nodes; use the single node filter")
 		return
 	}
-	// Multi-node filter: comma-separated pubkeys (Node.js parity)
+	// Multi-node filter: comma-separated pubkeys or names, bounded before any
+	// lookup, query or store lock (#335).
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
-		pubkeys := strings.Split(nodesParam, ",")
-		var cleaned []string
-		for _, pk := range pubkeys {
-			pk = strings.TrimSpace(pk)
-			if pk != "" {
-				cleaned = append(cleaned, pk)
-			}
+		cleaned, nodesErr := parsePacketNodeFilters(nodesParam)
+		if nodesErr != nil {
+			writeError(w, 400, nodesErr.Error())
+			return
 		}
 		order := "DESC"
 		if r.URL.Query().Get("order") == "asc" {
@@ -1389,6 +1387,58 @@ var muxBraceParam = regexp.MustCompile(`\{([^}]+)\}`)
 
 // perfHexFallback matches hex IDs for perf path normalization fallback.
 var perfHexFallback = regexp.MustCompile(`[0-9a-f]{8,}`)
+
+// slowPathRawCap bounds, in runes, the raw request path stored per slow
+// query. A single pathological URL (long query string, repeated segments)
+// must not bloat the in-memory slow-query ring or the perf dashboard. #392.
+const slowPathRawCap = 128
+
+// normalizeSlowPath pairs the normalized route key (already :id-folded by the
+// perf middleware, matching the endpoints table) with a sanitised,
+// length-capped copy of the raw request path. The slow-query row then carries
+// both the stable route template and a bounded view of the actual URL, so the
+// endpoint key and the slow-query path no longer disagree (#392).
+//
+// It is a pure, read-only string transform. "Sanitise" here means dropping
+// ASCII control characters (which would otherwise mangle the row); it does
+// NOT make the value HTML-safe — the perf dashboard escapes it at render time
+// (public/perf.js, #392). This function only bounds length and strips control
+// bytes, rune-safe so a multibyte character is never split at the cap.
+//
+// #394 F3/F4: BOTH halves are sanitised and capped, so neither the control
+// chars nor the length of the key side can escape the bound. The stored value
+// is therefore at most 2*slowPathRawCap runes (+ a per-half ellipsis + the
+// joining space), regardless of how long or hostile either input is.
+func normalizeSlowPath(key, raw string) string {
+	capped := sanitizeSlowPathComponent(raw)
+	// Unmatched routes fold to key == raw path (see perfMiddleware). There the
+	// template IS the raw path, so emit the capped form once instead of
+	// "<raw> <raw>". Compare against the original raw, not the capped copy.
+	if key == "" || key == raw {
+		return capped
+	}
+	return sanitizeSlowPathComponent(key) + " " + capped
+}
+
+// sanitizeSlowPathComponent drops ASCII control characters (incl. CR/LF/TAB)
+// and caps the result at slowPathRawCap runes, rune-safe so a multibyte
+// character is never split at the cap. An ellipsis marks truncation. #394.
+func sanitizeSlowPathComponent(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue // strip ASCII control characters (incl. CR/LF/TAB)
+		}
+		if n >= slowPathRawCap {
+			b.WriteRune('…') // ellipsis marks truncation
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
 
 // handleBatchObservations returns observations for multiple hashes in a single request.
 // POST /api/packets/observations with JSON body: {"hashes": ["abc123", "def456", ...]}
@@ -2116,6 +2166,26 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 		if err != nil || result == nil {
 			writeError(w, 404, "Not found")
 			return
+		}
+		// My Mesh opts into the existing node-detail estimator on the same
+		// health request. Keep the expensive route scan/cache out of default
+		// health calls and non-repeater cards, and apply its privacy gate first.
+		if wantsNodeInclude(r, "advertIntervals") {
+			node, _ := result["node"].(map[string]interface{})
+			if role, _ := node["role"].(string); strings.EqualFold(role, "repeater") {
+				hidden, hideErr := s.isIdentityHidden(r.Context(), pubkey)
+				if hideErr != nil {
+					log.Printf("WARN isIdentityHidden(%s): %v", pubkey, hideErr)
+				}
+				if hideErr == nil && !hidden {
+					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
+						result["advertIntervals"] = adverts.intervals
+						result["advertRouteBackfill"] = adverts.counts.RouteMaskBackfill
+					} else {
+						log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, advertErr)
+					}
+				}
+			}
 		}
 		writeJSON(w, result)
 		return

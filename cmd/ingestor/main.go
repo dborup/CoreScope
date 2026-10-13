@@ -776,6 +776,31 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		return
 	}
 
+	// #338: the observer id (parts[2]) is the identity key every observer-bearing
+	// topic below writes rows under — the neighbors, status and raw-packet paths
+	// all read it, and RecordNaiveSkew / UpsertObserverAt /
+	// TouchObserverNeighborsReport insert observer rows keyed on it. An
+	// over-limit, non-UTF-8, control-bearing or bidi-bearing id is rejected here
+	// (the whole message is dropped) rather than truncated: shortening two
+	// distinct ids to a shared cap would MERGE separate observers into one row,
+	// the upstream behaviour #338 forbids. The gate deliberately sits ABOVE the
+	// neighbors/status/packet dispatch so one check covers all three; moving it
+	// below any of them reopens that path (pinned in
+	// observer_metadata_bounds_review_test.go). The guard is `> 2` and not
+	// `>= 4`, because meshcore/<region>/<observer_id> — three segments, no
+	// sub-topic — is itself a raw-packet ingestion topic; narrowing it to `> 3`
+	// ungates that form, which is pinned separately in
+	// observer_bounds_followups_395_test.go. Non-observer message topics
+	// (meshcore/message/{channel,direct}/...) carry a short literal in parts[2]
+	// and always pass. Diagnostics are rate-limited and never log the full id —
+	// see observer_metadata_bounds.go.
+	if len(parts) > 2 {
+		if reason := observerIDRejectReason(parts[2]); reason != "" {
+			observerIDDrops.record(tag, parts[2], reason, time.Now())
+			return
+		}
+	}
+
 	// Neighbors report topic: meshcore/<region>/<observer_id>/neighbors (#1865).
 	// The ESP32 observer firmware emits a periodic neighbor report carrying its
 	// own configured region scopes (`self`) plus, for each zero-hop neighbor,
@@ -1724,6 +1749,17 @@ func init() {
 // by ordering, so absent != gone). Report pubkeys are uppercase; nodes.public_key
 // is lowercase hex, so keys are lowercased before the UPDATE. Unknown neighbors
 // are a no-op (the UPDATE matches no row) until a later advert creates the node.
+//
+// #337 bounds the report as untrusted input before any of that: node public
+// keys must be full 64-char hex (normalizeNodePubkey — lowercased, never
+// truncated, so identity is preserved), scope strings over
+// maxReportScopeBytes are dropped as evidence, status strings over
+// maxReportStatusBytes are dropped, the neighbor array is capped at
+// maxReportNeighbors, and normalizeReportTS rejects any timestamp more than
+// maxReportFutureSkew ahead of now. None of that authenticates the publisher:
+// anyone able to publish on this topic can claim any origin_id and any
+// neighbor set, and a well-formed key or an in-window timestamp proves nothing
+// about ownership. See the trust model in neighbor_report_bounds.go.
 func handleNeighborsReport(store *Store, tag string, observerID string, msg map[string]interface{}) {
 	reportedAt, _ := msg["timestamp"].(string)
 	// #7 / default_scope follow-up: both UpdateNodeConfiguredScope and
@@ -1744,8 +1780,19 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	// Metrics already have their own pre-existing guards against a blank
 	// timestamp -- and it says nothing about the rest of the report either;
 	// it only means these two specific evidence types were ignored.
+	//
+	// #337 adds a second rejection reason to the same once-per-report line:
+	// a timestamp that parses but sits more than maxReportFutureSkew ahead of
+	// now. The two are different observer faults (a broken serializer vs. a
+	// wrong clock), so the line names which one it saw, but the
+	// once-per-report discipline and the trailing "configured-scope and
+	// default-scope evidence ignored" wording are unchanged.
 	if normalizeReportTS(reportedAt) == "" {
-		log.Printf("MQTT [%s] neighbors report from observer %.8s: invalid/missing timestamp %q; configured-scope and default-scope evidence ignored", tag, observerID, reportedAt)
+		reason := "invalid/missing"
+		if t, ok := parseReportTS(reportedAt); ok && reportTSTooFarAhead(t) {
+			reason = "far-future"
+		}
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: %s timestamp %q; configured-scope and default-scope evidence ignored", tag, observerID, reason, reportedAt)
 	}
 
 	// #1865 follow-up: record that this observer sends /neighbors reports
@@ -1756,14 +1803,35 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 		log.Printf("MQTT [%s] neighbors report touch error for observer %.8s: %v", tag, observerID, err)
 	}
 
-	// self: the observer's own configured scopes.
-	originID, _ := msg["origin_id"].(string)
-	if originID == "" {
-		originID = observerID
+	// self: the observer's own configured scopes, keyed by origin_id.
+	//
+	// #337: origin_id is validated as a full node public key before either
+	// self write. It was previously only lowercased and checked non-empty, so
+	// a malformed value reached two conditional-UPDATE transactions that
+	// could never match a row. Observers whose MQTT topic id is not a public
+	// key at all are real (the CI fixture carries one named "kpabap"), and
+	// origin_id falls back to that id when the payload omits it — so an
+	// invalid fallback is an expected, silent no-op, exactly as before. Only
+	// an origin_id the publisher actually SENT and got wrong is worth a log
+	// line, and it shares the report's single line below rather than adding
+	// one per report from every non-pubkey observer.
+	rawOriginID, originSent := msg["origin_id"].(string)
+	if !originSent || rawOriginID == "" {
+		rawOriginID = observerID
+		originSent = false
 	}
-	originID = strings.ToLower(originID)
-	if self, ok := msg["self"].(map[string]interface{}); ok && originID != "" {
+	originID, originValid := normalizeNodePubkey(rawOriginID)
+	droppedBadKey, droppedLongScope, droppedLongStatus := 0, 0, 0
+	if self, ok := msg["self"].(map[string]interface{}); ok && originValid {
 		if sc, ok := self["scopes"].(string); ok {
+			// #337: UpdateNodeConfiguredScope refuses an oversized list on
+			// its own; counted here so the refusal reaches the summary line.
+			// self.scopes comes from the observer's local config, not the
+			// air, so the MAX_PACKET_PAYLOAD derivation does not cover it and
+			// an operator over the bound needs to be told.
+			if reportScopeTooLong(sc) {
+				droppedLongScope++
+			}
 			if err := store.UpdateNodeConfiguredScope(originID, sc, reportedAt); err != nil {
 				log.Printf("MQTT [%s] neighbors self scope error: %v", tag, err)
 			}
@@ -1785,19 +1853,65 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	// per the observer's own firmware neighbor table -- collected below for
 	// the #1865 follow-up "Direct Neighbors" panel regardless of status.
 	neighbors, _ := msg["neighbors"].([]interface{})
+	// #337: cap the array before allocating or iterating. The firmware's own
+	// report is 10 KB-capped and already truncates by ordering, so dropping
+	// the tail is the same shortening a legitimately oversized report
+	// receives; a hostile publisher is bound by nothing but the broker, and
+	// every surviving entry costs a conditional-UPDATE transaction plus two
+	// inserts. See maxReportNeighbors for the derivation.
+	droppedOverCap := 0
+	if len(neighbors) > maxReportNeighbors {
+		droppedOverCap = len(neighbors) - maxReportNeighbors
+		neighbors = neighbors[:maxReportNeighbors]
+	}
 	entries := make([]ObserverNeighborEntry, 0, len(neighbors))
 	for _, raw := range neighbors {
 		n, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		pubkey, _ := n["pubkey"].(string)
-		pubkey = strings.ToLower(pubkey)
-		if pubkey == "" {
+		rawPubkey, _ := n["pubkey"].(string)
+		// #337: a neighbor key must be a full 64-char node public key.
+		// observer_neighbors and observer_neighbor_metrics insert it verbatim
+		// with no foreign key back to nodes, so a malformed key is a
+		// permanent row that joins to nothing; the metrics table is
+		// append-only, so it would gain one such row per report. The full key
+		// is kept (lowercased, never shortened to a prefix) for every key
+		// that passes.
+		pubkey, ok := normalizeNodePubkey(rawPubkey)
+		if !ok {
+			droppedBadKey++
 			continue
 		}
 		status, _ := n["status"].(string)
+		// #337: status is publisher-controlled too. An oversized one cannot
+		// be "responded", so it never reaches the evidence write below; it is
+		// dropped and the neighbor kept, as for an oversized scope string.
+		if reportStatusTooLong(status) {
+			droppedLongStatus++
+			status = ""
+		}
 		scopes, _ := n["scopes"].(string)
+		// #337: an oversized scope string is malformed input, not evidence.
+		// The neighbor itself stays — it is still a real zero-hop entry in
+		// the observer's firmware neighbor table, and losing the scope query
+		// must not lose the neighbor, the same rule a timeout already gets.
+		// Its reported status is passed through unchanged (inventing a status
+		// value here would put a string no firmware sends onto a wire-visible
+		// contract) and only its scopes are dropped, which the server already
+		// renders as "no scope data" (scopes == "" reads back as a nil Scopes
+		// in GetObserverNeighbors).
+		//
+		// Critically this must NOT fall through to the status=="responded"
+		// write below with an emptied scopes string: that would store a
+		// "responded, zero scopes configured" row — the valid-empty state
+		// #8 deliberately made distinguishable from no-evidence — on the
+		// strength of a string we just rejected as unusable.
+		scopeUsable := !reportScopeTooLong(scopes)
+		if !scopeUsable {
+			droppedLongScope++
+			scopes = ""
+		}
 		// snr/heard_secs_ago are present regardless of scope-query status --
 		// they come from the firmware's own RF neighbor table, not the OTA
 		// scope query (#1865 follow-up, spotted by dborup in a live payload).
@@ -1810,7 +1924,7 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 			hs := int(v)
 			heardSecsAgo = &hs
 		}
-		if status == "responded" {
+		if status == "responded" && scopeUsable {
 			if err := store.UpdateNodeConfiguredScope(pubkey, scopes, reportedAt); err != nil {
 				log.Printf("MQTT [%s] neighbors scope error for %.8s: %v", tag, pubkey, err)
 			}
@@ -1824,6 +1938,31 @@ func handleNeighborsReport(store *Store, tag string, observerID string, msg map[
 	}
 	if err := store.RecordObserverNeighborMetrics(observerID, entries, reportedAt); err != nil {
 		log.Printf("MQTT [%s] neighbor metrics record error for observer %.8s: %v", tag, observerID, err)
+	}
+
+	// #337: one bounded line per report summarising what the bounds dropped,
+	// never one line per entry -- a hostile report is exactly the case where
+	// per-entry logging would turn a rejected payload into a log-volume
+	// amplifier. Names only what was actually dropped, and is silent when
+	// nothing was, which is every legitimate report.
+	var dropped []string
+	if droppedOverCap > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d entr(ies) over the %d cap", droppedOverCap, maxReportNeighbors))
+	}
+	if droppedBadKey > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d malformed pubkey(s)", droppedBadKey))
+	}
+	if droppedLongScope > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d oversized scope string(s)", droppedLongScope))
+	}
+	if droppedLongStatus > 0 {
+		dropped = append(dropped, fmt.Sprintf("%d oversized status string(s)", droppedLongStatus))
+	}
+	if originSent && !originValid {
+		dropped = append(dropped, "malformed origin_id (self block skipped)")
+	}
+	if len(dropped) > 0 {
+		log.Printf("MQTT [%s] neighbors report from observer %.8s: bounds dropped %s", tag, observerID, strings.Join(dropped, "; "))
 	}
 }
 

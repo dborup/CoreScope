@@ -2724,7 +2724,7 @@
 
       if (observers.length) {
         const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))];
-        html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.join(', ') : ''}</h4>
+        html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.map(escapeHtml).join(', ') : ''}</h4>
           <div style="font-size:11px;">` +
           observers.map(o => `<div style="padding:2px 0;"><a href="#/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--link-color);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
           '</div>';
@@ -3680,27 +3680,36 @@
     const senderLat = hasValidGps ? payload.lat : null;
     const senderLon = hasValidGps ? payload.lon : null;
 
-    // Prefer server-side resolved_path when available
-    var resolvedMap;
-    if (resolvedPath && resolvedPath.length === hops.length && window.HopResolver && HopResolver.ready()) {
-      resolvedMap = HopResolver.resolveFromServer(hops, resolvedPath);
-      // Fill in any null entries from client-side fallback, preserving sender GPS context
-      var nullHops = hops.filter(function(h, i) { return !resolvedPath[i] && !resolvedMap[h]; });
-      if (nullHops.length) {
-        var fallback = HopResolver.resolve(nullHops, senderLat, senderLon, null, null, null);
-        for (var k in fallback) resolvedMap[k] = fallback[k];
+    // Prefer server-side resolved_path when available.
+    // #391 — a canonical answer belongs to one hop POSITION, not to a prefix.
+    // resolveFromServer() returns a map keyed by prefix, so a path that repeats
+    // a prefix collapsed both positions onto the last answer (and a null entry
+    // silently borrowed the other position's node). Resolve each position with
+    // the positional primitive #367 added, and keep the prefix-keyed heuristic
+    // only for the positions the server left open.
+    var resolverReady = !!(window.HopResolver && HopResolver.ready());
+    var perPosition = new Array(hops.length);
+    var heuristicHops = hops;
+    if (resolverReady && typeof HopResolver.serverHopEntry === 'function'
+      && resolvedPath && resolvedPath.length === hops.length) {
+      heuristicHops = [];
+      for (var pi = 0; pi < hops.length; pi++) {
+        perPosition[pi] = HopResolver.serverHopEntry(resolvedPath[pi]);
+        if (!perPosition[pi]) heuristicHops.push(hops[pi]);
       }
-    } else {
-      // Delegate to shared HopResolver (from hop-resolver.js) instead of reimplementing
-      // Use HopResolver if available and initialized, otherwise fall back to simple lookup
-      resolvedMap = (window.HopResolver && HopResolver.ready())
-        ? HopResolver.resolve(hops, senderLat, senderLon, null, null, null)
-        : {};
+    }
+    // Delegate the rest to shared HopResolver (from hop-resolver.js) instead of
+    // reimplementing, preserving sender GPS context. Unresolved hops stay empty.
+    var heuristicMap = (resolverReady && heuristicHops.length)
+      ? (HopResolver.resolve(heuristicHops, senderLat, senderLon, null, null, null) || {})
+      : {};
+    for (var hi = 0; hi < hops.length; hi++) {
+      if (!perPosition[hi]) perPosition[hi] = heuristicMap[hops[hi]];
     }
 
-    // Convert HopResolver's map format to the array format live.js expects: {key, pos, name, known}
-    const raw = hops.map(hop => {
-      const r = resolvedMap[hop];
+    // Convert HopResolver's entry format to the array format live.js expects: {key, pos, name, known}
+    const raw = hops.map((hop, hopIndex) => {
+      const r = perPosition[hopIndex];
       if (r && r.name && r.pubkey && !r.unreliable) {
         // Look up coordinates from nodeData (HopResolver resolves name/pubkey but doesn't return lat/lon directly)
         const node = nodeData[r.pubkey];

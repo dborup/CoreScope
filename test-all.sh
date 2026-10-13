@@ -43,6 +43,7 @@ run test-app-api-bust-inflight-243.js
 run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
+run test-issue-336-external-asset-pinning.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
@@ -66,6 +67,7 @@ run test-issue-282-pktesc-listener.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
 run test-issue-322-comment-guards.js
+run test-backup-sqlite-safety.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -113,6 +115,7 @@ run test-issue-1418-polish-review.js
 run test-issue-1420-tile-providers.js
 run test-issue-1614-tile-url-function.js
 run test-issue-332-tile-provider-fallback.js
+run test-issue-390-legacy-tile-followups.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
 run test-issue-1446-cb-preset-cascade.js

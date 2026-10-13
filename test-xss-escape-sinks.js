@@ -64,6 +64,55 @@ function loadEscapeHtml() {
 }
 const escapeHtml = loadEscapeHtml();
 
+// #333 F5: sinks that call a file-local escaper must be tested with THAT
+// escaper, not with app.js's escapeHtml, or a weakened local escaper goes
+// unnoticed. Lift the one-line `function esc(s) { … }` from the file.
+function loadLocalEsc(file, ctxExtra) {
+  const src = fs.readFileSync(file, 'utf8');
+  // #333 N4: the regex below lifts the *first* one-line `function esc(s)`.
+  // If a second file-local esc were added above the real sink's escaper, it
+  // would silently retarget this contract test. Pin the assumption: there
+  // must be exactly one esc() definition in the file, else fail loudly.
+  const defs = src.match(/function esc\s*\(/g) || [];
+  if (defs.length !== 1)
+    throw new Error(`expected exactly one function esc() in ${file}, found ${defs.length}; `
+      + 'loadLocalEsc would silently pick the first — add a line anchor to disambiguate');
+  const m = src.match(/\n\s*(function esc\(s\) \{[^\n]*\})/);
+  if (!m) throw new Error('could not locate function esc(s) in ' + file);
+  const ctx = Object.assign({ esc: null }, ctxExtra || {});
+  vm.createContext(ctx);
+  vm.runInContext(m[1] + '\nthis.esc = esc;', ctx);
+  return ctx.esc;
+}
+const analyticsEsc = loadLocalEsc('public/analytics.js');
+// customize-v2.js's esc() serializes a text node through a <div>
+// (textContent → innerHTML). Node has no DOM, so model the serializer as the
+// HTML spec defines it for text nodes: & < > and U+00A0 are escaped, quotes
+// are not. The function under test is still the production esc().
+const customizeEsc = loadLocalEsc('public/customize-v2.js', {
+  document: {
+    createElement: () => {
+      let text = '';
+      return {
+        set textContent(v) { text = String(v); },
+        get innerHTML() {
+          return text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/\u00a0/g, '&nbsp;');
+        },
+      };
+    },
+  },
+});
+
+// Text-context check for escapers that legitimately leave quotes alone
+// (customize-v2.js esc): no live tag, and the tag is shown escaped.
+function assertNoTagInText(html, label) {
+  if (/<img\b/i.test(html))
+    throw new Error(label + ': raw <img tag survived → angle-bracket escape broken: ' + html);
+  if (!html.includes('&lt;img'))
+    throw new Error(label + ': missing &lt;img marker (tag was not escaped): ' + html);
+}
+
 // --- Template extraction + eval ------------------------------------------
 // Captures a template literal from a source file, given a regex with ONE
 // group that contains the inner of the backtick-delimited template.
@@ -631,9 +680,556 @@ test('loadDetail catch block does NOT interpolate e.message into innerHTML', () 
 });
 
 // =========================================================================
+// I. Issue #333 — node/observer/route values in favorites, geo-filter prune
+//    preview, observer regions, packet region badges, clock-skew observer
+//    names, RF-health attributes and the unknown-route heading.
+//
+// Each test extracts the PRODUCTION sink (dual-form regex matching both the
+// escaped and the unescaped shape) and evals it with a hostile binding, so
+// removing the escape wrapper in production flips the test red (the mutant).
+// =========================================================================
+console.log('\n=== I. Issue #333 sinks ===');
+
+// 1. Favorites dropdown (app.js) — node name in the fav-dd-name span.
+test('#333 favorites dropdown: fav-dd-name span escapes node name', () => {
+  const src = fs.readFileSync('public/app.js', 'utf8');
+  const m = src.match(/<span class="fav-dd-name">'\s*\+\s*([\s\S]*?)\s*\+\s*'<\/span>'/);
+  assert.ok(m, '#333 favorites: fav-dd-name concat segment not found');
+  const fn = new Function('h', 'pk', 'escapeHtml', 'truncate',
+    'return `<span>` + (' + m[1] + ') + `</span>`;');
+  const html = fn(
+    { node: { name: TAG_PAYLOAD + ATTR_PAYLOAD } }, 'abcdef0123456789',
+    escapeHtml, (s, n) => (s == null ? '' : String(s).slice(0, n)));
+  assertNoXss(html, '#333 favorites dropdown name');
+});
+
+// 2. Geo-filter prune preview (customize-v2.js) — node name in list item.
+test('#333 geo-filter prune preview escapes node name', () => {
+  const src = fs.readFileSync('public/customize-v2.js', 'utf8');
+  const m = src.match(/return '<div>'\s*\+\s*([\s\S]*?)\s*\+\s*coords\s*\+\s*'<\/div>';/);
+  assert.ok(m, '#333 geo-prune: prune list item concat not found');
+  // #333 F5: run customize-v2.js's own esc() (text context, quotes are
+  // legitimately left alone there), not app.js's escapeHtml.
+  const fn = new Function('n', 'esc', 'coords',
+    'return `<div>` + (' + m[1] + ') + coords + `</div>`;');
+  const html = fn({ name: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, customizeEsc, '');
+  assertNoTagInText(html, '#333 geo-filter prune preview name');
+});
+
+// 3a. Observer regions — observers table badge (template-literal form).
+test('#333 observers table region badge escapes o.iata', () => {
+  const src = fs.readFileSync('public/observers.js', 'utf8');
+  const m = src.match(/<span class="badge-region">\$\{[^}]*o\.iata[^}]*\}<\/span>/);
+  assert.ok(m, '#333 observers table badge-region sink not found');
+  const fn = new Function('o', 'escapeHtml', 'return `' + m[0] + '`;');
+  const html = fn({ iata: TAG_PAYLOAD + ATTR_PAYLOAD }, escapeHtml);
+  assertNoXss(html, '#333 observers table region badge');
+});
+
+// 3b. Observer regions — slide-over region badge (concat form).
+test('#333 observers slide-over region badge escapes o.iata', () => {
+  const src = fs.readFileSync('public/observers.js', 'utf8');
+  const m = src.match(/'<span class="badge-region">'\s*\+\s*([\s\S]*?)\s*\+\s*'<\/span>'/);
+  assert.ok(m, '#333 observers slide-over badge-region concat not found');
+  const fn = new Function('o', 'escapeHtml', 'return `<span>` + (' + m[1] + ') + `</span>`;');
+  const html = fn({ iata: TAG_PAYLOAD + ATTR_PAYLOAD }, escapeHtml);
+  assertNoXss(html, '#333 observers slide-over region badge');
+});
+
+// 4. Packet region badge (packets.js) — groupRegion in badge-region span.
+test('#333 packets region badge escapes groupRegion', () => {
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+  const m = src.match(/<span class="badge-region">\$\{[^}]*groupRegion[^}]*\}<\/span>/);
+  assert.ok(m, '#333 packets badge-region sink not found');
+  const fn = new Function('groupRegion', 'escapeHtml', 'return `' + m[0] + '`;');
+  const html = fn(TAG_PAYLOAD + ATTR_PAYLOAD, escapeHtml);
+  assertNoXss(html, '#333 packets region badge');
+});
+
+// 5. Clock-skew observer/node names — clock-health fleet table (regression
+//    pin: already escaped in our fork; the mutant is removing esc()).
+test('#333 clock-health table escapes node name (regression pin)', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  // Escaped or not (`esc(n.nodeName …)` / `(n.nodeName …)`), so a mutant fails
+  // on behaviour, not on "cell not found" (#333 F6).
+  const m = src.match(/<td><strong>'\s*\+\s*([^\n]*?n\.nodeName[^\n]*?)\s*\+\s*'<\/strong><\/td>/);
+  assert.ok(m, '#333 clock-health name cell not found');
+  const fn = new Function('n', 'esc',
+    'return `<td><strong>` + (' + m[1] + ') + `</strong></td>`;');
+  const html = fn({ nodeName: TAG_PAYLOAD + ATTR_PAYLOAD, pubkey: 'abcdef012345' }, analyticsEsc);
+  assertNoXss(html, '#333 clock-health node name');
+});
+
+// 6. RF-health attributes (analytics.js) — observer_id in data-observer and
+//    id attributes (double-quoted); observer name in aria-label.
+test('#333 RF-health cell escapes observer_id in attributes', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/grid\.innerHTML = filteredObservers\.map\(obs => \{[\s\S]*?return `([\s\S]*?)`;[\s\S]*?\}\)\.join/);
+  assert.ok(m, '#333 RF-health cell template not found');
+  const fn = new Function(
+    'obs', 'isSelected', 'esc', 'nf', 'avgNf', 'maxNf', 'batt', 'nfClass', 'name',
+    'return `' + m[1] + '`;');
+  // Double-quote attribute breakout attempt on observer_id.
+  const dqPayload = '"><img src=x onerror=alert(1)>';
+  const html = fn(
+    { observer_id: dqPayload, sample_count: 5 }, false, analyticsEsc,
+    '-100', '-105', '-95', '', '', TAG_PAYLOAD + ATTR_PAYLOAD);
+  assert.ok(!/<img\b/i.test(html),
+    '#333 RF-health: raw <img survived (observer_id attr breakout): ' + html);
+  assert.ok(html.includes('&quot;') || html.includes('&lt;'),
+    '#333 RF-health: observer_id not escaped in attribute: ' + html);
+  // The aria-label name must also be escaped.
+  assert.ok(!/'\s*onfocus\s*=/i.test(html),
+    '#333 RF-health: aria-label attr-breakout survived: ' + html);
+});
+
+// 6b. #333 F5: the RF-health attribute fix relies on analytics.js's own
+//     esc() encoding both quote characters. Pin that contract directly.
+test("#333 analytics.js esc() encodes the 5-char OWASP set (attribute-safe)", () => {
+  assert.strictEqual(analyticsEsc('&<>"\''), '&amp;&lt;&gt;&quot;&#39;');
+  assert.strictEqual(analyticsEsc(null), '');
+});
+
+// 7a. Unknown-route heading (app.js) — URL-hash route in <h2>.
+test('#333 unknown-route heading escapes route', () => {
+  const src = fs.readFileSync('public/app.js', 'utf8');
+  const m = src.match(/<h2>\$\{[^}]*route[^}]*\}<\/h2>/);
+  assert.ok(m, '#333 unknown-route <h2> sink not found');
+  const fn = new Function('route', 'escapeHtml', 'return `' + m[0] + '`;');
+  const html = fn('#/' + TAG_PAYLOAD + ATTR_PAYLOAD, escapeHtml);
+  assertNoXss(html, '#333 unknown-route heading');
+});
+
+// 7b. Unknown-route template must not hardcode a hex colour (CSS var).
+test('#333 unknown-route template uses a CSS var, not a hardcoded hex colour', () => {
+  const src = fs.readFileSync('public/app.js', 'utf8');
+  const m = src.match(/`<div style="[^`]*?Page not yet implemented[^`]*?<\/div>`/);
+  assert.ok(m, '#333 unknown-route div template not found');
+  assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(m[0]),
+    '#333 unknown-route div still has a hardcoded hex colour: ' + m[0]);
+  assert.ok(/var\(--/.test(m[0]),
+    '#333 unknown-route div does not use a CSS variable for colour: ' + m[0]);
+});
+
+// =========================================================================
+// J. Issue #333 round 2 — adjacent sinks found in review: packet region
+//    badges in group child rows and the flat view (F1), the shared region
+//    filter (F2) and the observers-row navigation (F3).
+//
+// These drive the REAL render functions (packets.js buildGroupRowHtml /
+// buildFlatRowHtml, region-filter.js render) in a vm sandbox with app.js's
+// real escapeHtml as the page global, so a missing wrapper at any call site
+// turns the test red — no template is lifted by regex.
+// =========================================================================
+const asyncTests = [];
+function asyncTest(name, fn) { asyncTests.push({ name, fn }); }
+
+// Hostile region code: breaks out of a double-quoted attribute AND carries a
+// tag for the text context; the single quote probes single-quoted contexts.
+const REGION_PAYLOAD = '"><img src=x onerror=alert(1)>' + ATTR_PAYLOAD;
+const BENIGN_REGION = 'KØB & Æ';
+
+function decodeEntities(s) {
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+}
+
+// Real public/packets.js in a sandbox (same shape as
+// test-issue-165-hop-resolution-per-observer.js). `observers` is what
+// /api/observers returns; resolveHops() seeds the page's observerMap from it.
+async function loadPacketsWithObservers(observers) {
+  const store = {};
+  const ctx = {
+    window: { addEventListener() {}, dispatchEvent() {}, innerWidth: 1280 },
+    document: {
+      readyState: 'complete',
+      createElement: () => ({ style: {}, dataset: {}, classList: { add() {}, remove() {} }, appendChild() {}, setAttribute() {} }),
+      head: { appendChild() {} }, body: { appendChild() {}, removeChild() {} },
+      getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, removeEventListener() {},
+    },
+    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
+    console, Math, Object, Array, Number, Date, Map, Set, JSON, String, Boolean, RegExp, Error, TypeError, Promise,
+    parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent, URLSearchParams,
+    setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
+    requestAnimationFrame: () => 0, cancelAnimationFrame() {},
+    performance: { now: () => Date.now() },
+    location: { hash: '' },
+    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+    registerPage() {}, onWS() {}, offWS() {}, debouncedOnWS: fn => fn,
+    CLIENT_TTL: {},
+    fetchAllNodes: () => Promise.resolve({ nodes: [] }),
+    api: (p) => Promise.resolve(p.startsWith('/observers') ? { observers } : p.startsWith('/iata-coords') ? { coords: {} } : {}),
+    invalidateApiCache() {},
+  };
+  ctx.window.localStorage = ctx.localStorage;
+  vm.createContext(ctx);
+  const load = (f) => {
+    vm.runInContext(fs.readFileSync('public/' + f, 'utf8'), ctx, { filename: f });
+    for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+  };
+  // roles.js + app.js supply the page globals the row builders call
+  // (payloadTypeName, …); app.js's own escapeHtml becomes the global.
+  for (const f of ['payload-labels.js', 'roles.js', 'app.js']) load(f);
+  ctx.api = (p) => Promise.resolve(p.startsWith('/observers') ? { observers } : p.startsWith('/iata-coords') ? { coords: {} } : {});
+  ctx.fetchAllNodes = () => Promise.resolve({ nodes: [] });
+  for (const f of ['packet-helpers.js', 'hop-resolver.js', 'hop-display.js', 'packets.js']) load(f);
+  const T = ctx.window._packetsTestAPI;
+  await T.resolveHops(['ef'], observers[0].id); // seeds observerMap via ensureHopResolver
+  return T;
+}
+
+// Every .badge-region in a rendered row, decoded the way the browser would.
+function regionBadges(html) {
+  return Array.from(html.matchAll(/<span class="badge-region">([^<]*)<\/span>/g), m => decodeEntities(m[1]));
+}
+
+const RAW_HEX = '15000102030405060708090a0b0c0d0e0f';
+function pkt(extra) {
+  return Object.assign({ hash: 'fae0c9e6d357a814', raw_hex: RAW_HEX, payload_type: 5, route_type: 1,
+    decoded_json: '{}', path_json: '[]', timestamp: '', latest: '' }, extra);
+}
+
+asyncTest('#333 F1 packets flat view: region badge escapes the observer IATA', async () => {
+  const T = await loadPacketsWithObservers([{ id: 'OBS-H', name: 'h', iata: REGION_PAYLOAD }]);
+  const html = T.buildFlatRowHtml(pkt({ id: 7, observer_id: 'OBS-H' }));
+  assertNoXss(html, '#333 F1 flat view region');
+  assert.deepStrictEqual(regionBadges(html), [REGION_PAYLOAD], 'flat view badge must show the code as text');
+});
+
+asyncTest('#333 F1 packets group child rows: region badge escapes the observer IATA', async () => {
+  const T = await loadPacketsWithObservers([
+    { id: 'OBS-B', name: 'b', iata: 'SJC' },
+    { id: 'OBS-H', name: 'h', iata: REGION_PAYLOAD },
+  ]);
+  const p = pkt({ observer_id: 'OBS-B', count: 2, observation_count: 2, observer_count: 2,
+    _children: [pkt({ id: 1, observer_id: 'OBS-B' }), pkt({ id: 2, observer_id: 'OBS-H' })] });
+  T._setExpanded(p.hash, true);
+  const html = T.buildGroupRowHtml(p);
+  assert.ok(html.includes('class="group-child"'), 'expanded group must render child rows');
+  assertNoXss(html, '#333 F1 group child region');
+  assert.deepStrictEqual(regionBadges(html), ['SJC', 'SJC', REGION_PAYLOAD],
+    'header + both child badges must show their codes as text');
+});
+
+asyncTest('#333 F1 packets group header: region badge escapes the observer IATA', async () => {
+  const T = await loadPacketsWithObservers([{ id: 'OBS-H', name: 'h', iata: REGION_PAYLOAD }]);
+  const html = T.buildGroupRowHtml(pkt({ observer_id: 'OBS-H', count: 1, observation_count: 1 }));
+  assertNoXss(html, '#333 F1 group header region');
+  assert.deepStrictEqual(regionBadges(html), [REGION_PAYLOAD]);
+});
+
+asyncTest('#333 F1 packets region badges show a benign code verbatim (no double escape)', async () => {
+  const T = await loadPacketsWithObservers([{ id: 'OBS-K', name: 'k', iata: BENIGN_REGION }]);
+  const flat = T.buildFlatRowHtml(pkt({ id: 3, observer_id: 'OBS-K' }));
+  assert.ok(flat.includes('<span class="badge-region">KØB &amp; Æ</span>'), flat);
+  assert.deepStrictEqual(regionBadges(flat), [BENIGN_REGION]);
+});
+
+// Real public/region-filter.js in a sandbox. `regions` is what
+// /api/config/regions returns; `stored` pre-seeds the persisted selection.
+async function loadRegionFilter(regions, opts) {
+  const store = {};
+  if (opts && opts.stored) store['meshcore-region-filter'] = JSON.stringify(opts.stored);
+  const el = () => ({ hidden: true, onclick: null, setAttribute() {} });
+  const container = { innerHTML: '', style: {}, onclick: null, querySelector: el };
+  const ctx = {
+    window: {},
+    document: { addEventListener() {}, removeEventListener() {} },
+    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
+    fetch: async () => ({ json: async () => regions }),
+    console, setTimeout, clearTimeout,
+    escapeHtml, // app.js's real global escaper
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/region-filter.js', 'utf8'), ctx, { filename: 'region-filter.js' });
+  await ctx.RegionFilter.init(container, opts && opts.dropdown ? { dropdown: true } : undefined);
+  return { RF: ctx.RegionFilter, container, store };
+}
+
+// The value the browser would hand to toggleRegion via el.dataset.region.
+function dataRegions(html) {
+  return Array.from(html.matchAll(/data-region="([^"]*)"/g), m => decodeEntities(m[1]));
+}
+
+asyncTest('#333 F2 region filter pills: hostile code escaped in data-region and label', async () => {
+  const { container } = await loadRegionFilter({ SJC: 'San Jose', [REGION_PAYLOAD]: REGION_PAYLOAD });
+  const html = container.innerHTML;
+  assert.ok(html.includes('region-pill'), 'expected pill mode for 2 regions: ' + html);
+  assertNoXss(html, '#333 F2 region pills');
+  assert.deepStrictEqual(dataRegions(html), ['__all__', 'SJC', REGION_PAYLOAD],
+    'each pill data-region must round-trip to its code');
+  assert.ok(decodeEntities(html).includes('>' + REGION_PAYLOAD + '</button>'), 'pill label must show the code as text');
+});
+
+asyncTest('#333 F2 region filter dropdown: hostile code + label escaped, trigger label escaped', async () => {
+  const { container } = await loadRegionFilter(
+    { SJC: 'San Jose', [REGION_PAYLOAD]: REGION_PAYLOAD + ' city' },
+    { dropdown: true, stored: [REGION_PAYLOAD] });
+  const html = container.innerHTML;
+  assert.ok(html.includes('region-dropdown-trigger'), 'expected dropdown mode: ' + html);
+  assertNoXss(html, '#333 F2 region dropdown');
+  assert.deepStrictEqual(dataRegions(html), ['__all__', 'SJC', REGION_PAYLOAD]);
+  const trigger = html.match(/<button class="region-dropdown-trigger"[^>]*>([^<]*)<\/button>/);
+  assert.ok(trigger, 'trigger button must contain only text: ' + html);
+  assert.strictEqual(decodeEntities(trigger[1]), REGION_PAYLOAD + ' ▾', 'dropdownLabel must show the selected code as text');
+});
+
+asyncTest('#333 F2 region filter: selecting a hostile code still filters by that exact code', async () => {
+  const { RF, container, store } = await loadRegionFilter({ SJC: 'San Jose', [REGION_PAYLOAD]: 'x' });
+  const code = dataRegions(container.innerHTML)[2];
+  container.onclick({ target: { closest: () => ({ dataset: { region: code } }) } });
+  assert.deepStrictEqual(Array.from(RF.getSelected()), [REGION_PAYLOAD]); // re-realm the vm array
+  assert.strictEqual(RF.regionQueryString(), '&region=' + encodeURIComponent(REGION_PAYLOAD));
+  assert.deepStrictEqual(JSON.parse(store['meshcore-region-filter']), [REGION_PAYLOAD]);
+  // Re-rendered after the toggle: still inert, hostile pill now the only active one.
+  assertNoXss(container.innerHTML, '#333 F2 region pills after toggle');
+});
+
+asyncTest('#333 F2 region filter shows a benign code verbatim (no double escape)', async () => {
+  const { container } = await loadRegionFilter({ SJC: 'San Jose', [BENIGN_REGION]: BENIGN_REGION });
+  assert.ok(container.innerHTML.includes('data-region="KØB &amp; Æ"'), container.innerHTML);
+  assert.ok(container.innerHTML.includes('>KØB &amp; Æ</button>'), container.innerHTML);
+  assert.deepStrictEqual(dataRegions(container.innerHTML), ['__all__', 'SJC', BENIGN_REGION]);
+});
+
+// F3: observers row — an observer id containing ' must not reach JS code.
+test('#333 F3 observers row: no inline handler interpolates the observer id', () => {
+  const src = fs.readFileSync('public/observers.js', 'utf8');
+  const m = src.match(/return `(<tr style="cursor:pointer"[^>]*data-action="navigate"[^>]*>)/);
+  assert.ok(m, '#333 F3 observers navigate row not found');
+  const fn = new Function('o', 'escapeHtml', 'return `' + m[1] + '`;');
+  const id = "Q'-console.error(1)-'";
+  const tag = fn({ id }, escapeHtml);
+  const handlers = Array.from(tag.matchAll(/\son[a-z]+="([^"]*)"/gi), x => x[1]);
+  for (const h of handlers) {
+    assert.ok(!h.includes(id) && !h.includes(encodeURIComponent(id)),
+      '#333 F3: observer id reaches an inline JS handler: ' + tag);
+  }
+  // Navigation target stays on the row for the delegated handler.
+  const dv = tag.match(/data-value="([^"]*)"/);
+  assert.ok(dv && decodeEntities(dv[1]) === '#/observers/' + encodeURIComponent(id),
+    '#333 F3: data-value navigation target lost: ' + tag);
+});
+
+// =========================================================================
+// K. Issue #333 round 3 — the two remaining adjacent region sinks the round-2
+//    review flagged (N1, N2) plus the analytics repeater-row inline handler
+//    (N3). N1 and N2 both render the SAME value — observer IATA from
+//    /api/nodes/{pk}/health, via observers.map(o => o.iata) — raw into a
+//    summary line one or two lines above an already-escaped sibling badge.
+//    Each test lifts the REAL production expression by regex and renders it
+//    with a hostile IATA, so dropping the escaper (the mutant) turns it red.
+// =========================================================================
+
+// N1: public/nodes.js detail panel (renderDetail → panel.innerHTML). The
+// "Regions:" summary line joins observers.map(o => o.iata) into text. The
+// sibling full-page view at nodes.js:970 and the "Heard By" rows below both
+// escape the IATA; only this summary line is at issue.
+test('#333 N1 nodes detail panel: Regions summary escapes the observer IATA', () => {
+  const src = fs.readFileSync('public/nodes.js', 'utf8');
+  const m = src.match(/\(\(\) => \{ const regions = \[\.\.\.new Set\(observers\.map\(o => o\.iata\)\.filter\(Boolean\)\)\]; return regions\.length \? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:<\/strong> [^`]*<\/div>` : ''; \}\)\(\)/);
+  assert.ok(m, '#333 N1 nodes detail Regions summary IIFE not found');
+  const render = new Function('observers', 'escapeHtml', 'return ' + m[0] + ';');
+  const html = render([{ iata: 'SJC' }, { iata: REGION_PAYLOAD }], escapeHtml);
+  assertNoXss(html, '#333 N1 nodes detail Regions summary');
+  assert.ok(decodeEntities(html).includes('SJC, ' + REGION_PAYLOAD),
+    '#333 N1: region codes must render as comma-joined text: ' + html);
+});
+
+// N2: public/live.js showNodeDetail (content.innerHTML). The "Heard By"
+// heading appends ' — Regions: ' + the same observers.map(o => o.iata) join.
+// The per-observer rows one line below already escape o.iata.
+test('#333 N2 live node detail: Heard By heading escapes the observer IATA', () => {
+  const src = fs.readFileSync('public/live.js', 'utf8');
+  // The heading template continues past </h4> into the observer list, so lift
+  // just the real join expression that builds the " — Regions: …" text.
+  const m = src.match(/Heard By\$\{regions\.length \? ' — Regions: ' \+ ([^}]*?) : ''\}<\/h4>/);
+  assert.ok(m, '#333 N2 live Heard By heading not found');
+  const render = new Function('regions', 'escapeHtml', "return 'Heard By — Regions: ' + (" + m[1] + ');');
+  const regions = [...new Set([{ iata: 'SJC' }, { iata: REGION_PAYLOAD }].map(o => o.iata).filter(Boolean))];
+  const html = render(regions, escapeHtml);
+  assertNoXss(html, '#333 N2 live Heard By heading');
+  assert.ok(decodeEntities(html).includes('Regions: SJC, ' + REGION_PAYLOAD),
+    '#333 N2: region codes must render as text in the heading: ' + html);
+});
+
+// N3: public/analytics.js renderRepeaterTable. The row carried
+// onclick="location.hash='#/nodes/${encodeURIComponent(r.pubkey)}'".
+// encodeURIComponent leaves ' ( ) alone, so a pubkey quote breaks out of the
+// JS string — the exact pattern F3 removed from observers.js. The fix drops
+// the inline handler and navigates via data-action="navigate"/data-value.
+test('#333 N3 analytics repeater row: no inline handler carries the node pubkey', () => {
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const m = src.match(/html \+= `<div class="repeater-row [\s\S]*?`;/);
+  assert.ok(m, '#333 N3 analytics repeater-row template not found');
+  const render = new Function('r', 'esc', 'pct', 'encodeURIComponent',
+    'let html = ""; ' + m[0] + ' return html;');
+  const pubkey = "deadbeef'-alert(333)-'";
+  const html = render({ pubkey, name: 'Repeater', count: 5, hop: '1' }, s => String(s), 50, encodeURIComponent);
+  const handlers = Array.from(html.matchAll(/\son[a-z]+\s*=\s*"([^"]*)"/gi), x => x[1]);
+  for (const h of handlers) {
+    assert.ok(!h.includes(pubkey) && !h.includes(encodeURIComponent(pubkey)),
+      '#333 N3: node pubkey reaches an inline JS handler: ' + html);
+  }
+  const dv = html.match(/data-value="([^"]*)"/);
+  assert.ok(dv && decodeEntities(dv[1]) === '#/nodes/' + encodeURIComponent(pubkey),
+    '#333 N3: data-value navigation target lost: ' + html);
+});
+
+// =========================================================================
+// #392 — public/perf.js interpolates /api/perf values into innerHTML.
+// The endpoint key (unmatched /api/ routes collapse to the raw path) and
+// the slow-query path (raw r.URL.Path) are request-controlled, so a 404
+// under /api/ that is slow can carry markup. These drive the REAL perf.js
+// row templates (extracted from source) with a hostile value; dropping the
+// escapeHtml() wrapper makes the raw <img survive and flips them red.
+// =========================================================================
+console.log('\n=== #392 perf.js dashboard sinks ===');
+
+const PERF_PAYLOAD = TAG_PAYLOAD + ATTR_PAYLOAD;
+
+test('#392 perf endpoints table: endpoint key is escaped', () => {
+  // First `<tr${cls}>` statement in perf.js is the endpoints row (before the
+  // client-calls row). Captured regardless of the escapeHtml() wrapper so the
+  // assertion — not the match — flips on revert.
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr\$\{cls\}><td><code>\$\{[^`]*?<\/tr>)`;/,
+    { cls: '', path: PERF_PAYLOAD, s: { count: 1, avgMs: 2, p50Ms: 3, p95Ms: 4, maxMs: 5 }, total: 7 }
+  );
+  assertNoXss(html, '#392 perf endpoint key');
+});
+
+test('#392 perf client-calls table: client path is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr\$\{cls\}><td><code>\$\{[^}]*s\.path[^`]*?<\/tr>)`;/,
+    { cls: '', s: { path: PERF_PAYLOAD, count: 1, avgMs: 2, maxMs: 3, totalMs: 4 } }
+  );
+  assertNoXss(html, '#392 perf client path');
+});
+
+test('#392 perf slow-queries table: raw slow-query path is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr class="perf-slow">[^`]*?<\/tr>)`;/,
+    { q: { time: '2020-01-01T00:00:00Z', path: PERF_PAYLOAD, ms: 123, status: 200 } }
+  );
+  assertNoXss(html, '#392 perf slow-query path');
+});
+
+test('#392 perf write-sources table: source name is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr><td><code>\$\{[^`]*?<\/tr>)`;/,
+    { k: PERF_PAYLOAD, v: 1, rateStr: '', baseStr: '', flag: '' }
+  );
+  assertNoXss(html, '#392 perf write-source name');
+});
+
+test('#392 perf overview: server uptime string is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /(<div class="perf-card"><div class="perf-num">\$\{[^`]*?uptimeHuman[^`]*?Uptime<\/div><\/div>)/,
+    { health: { uptimeHuman: PERF_PAYLOAD }, server: { uptime: 60, totalRequests: 0, avgMs: 0 } }
+  );
+  assertNoXss(html, '#392 perf uptimeHuman');
+});
+
+test('#392 perf write-sources footer: sampleAt is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<div style="font-size:11px;[^`]*?Sampled:[^`]*?)`;/,
+    { writeSources: { sampleAt: PERF_PAYLOAD } }
+  );
+  assertNoXss(html, '#392 perf sampleAt');
+});
+
+// =========================================================================
+// #394 F2 — perf.js ships its OWN IIFE-local escapeHtml fallback (used when
+// evaluated without app.js's global, e.g. the perf-render unit sandboxes).
+// The other #392 tests inject app.js's escapeHtml via evalTemplate(), so a
+// weakened perf.js-local fallback went unnoticed. Drive the real selector +
+// fallback straight from source so an identity mutant on it flips red.
+// =========================================================================
+console.log('\n=== #394 F2 perf.js IIFE-local escapeHtml fallback ===');
+
+test('#394 F2 perf.js local escapeHtml fallback escapes (identity mutant → red)', () => {
+  const src = fs.readFileSync('public/perf.js', 'utf8');
+  // Capture the RHS of `const escapeHtml = <ternary>;` — minimal up to the
+  // first `};` (the close of the inline fallback function). Captured whether
+  // or not the fallback body escapes, so the assertion flips, not the match.
+  const m = src.match(/const escapeHtml = ([\s\S]*?\});\s*\n/);
+  assert.ok(m, '#394 F2: `const escapeHtml = <ternary>` not found in perf.js');
+  const select = new Function('globalThis', 'return (' + m[1] + ');');
+  // No global escapeHtml on the passed globalThis → the IIFE-local fallback
+  // branch is taken (exactly the standalone / sandbox case).
+  const fallback = select({});
+  assert.strictEqual(typeof fallback, 'function', '#394 F2: fallback is not a function');
+  assert.strictEqual(fallback('<'), '&lt;', '#394 F2: fallback did not escape <');
+  assert.strictEqual(fallback("'"), '&#39;', '#394 F2: fallback did not escape single quote');
+  assert.strictEqual(fallback('&'), '&amp;');
+  assert.strictEqual(fallback('>'), '&gt;');
+  assert.strictEqual(fallback('"'), '&quot;');
+  assert.strictEqual(fallback(null), '', '#394 F2: fallback null handling changed');
+  // A hostile payload is fully neutralised by the fallback alone.
+  const html = '<code>' + fallback(TAG_PAYLOAD + ATTR_PAYLOAD) + '</code>';
+  assertNoXss(html, '#394 F2 perf.js local fallback');
+  // And when a global escapeHtml IS present, the selector must prefer it.
+  const sentinel = (s) => 'SENTINEL:' + String(s);
+  assert.strictEqual(select({ escapeHtml: sentinel }), sentinel,
+    '#394 F2: selector did not prefer globalThis.escapeHtml when present');
+});
+
+// =========================================================================
+// #394 F1 — defence-in-depth: the numeric perf cards interpolate values
+// straight from /api/perf etc. They are number-typed server-side today, so
+// not request-controlled, but the issue criterion is "escape EVERY
+// interpolated perf value". These drive representative card sinks (one per
+// response object) with a hostile value; dropping the escapeHtml() wrapper
+// lets the raw <img survive and flips them red.
+// =========================================================================
+console.log('\n=== #394 F1 perf.js numeric-card sinks (defence in depth) ===');
+
+function perfCardTest(name, regex, bindings, label) {
+  test(name, () => {
+    const html = evalTemplate('public/perf.js', regex, bindings);
+    assertNoXss(html, label);
+  });
+}
+
+perfCardTest('#394 F1 overview: server.totalRequests card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*totalRequests[^}]*\}<\/div><div class="perf-label">Total Requests<\/div><\/div>)/,
+  { server: { totalRequests: PERF_PAYLOAD } }, '#394 F1 totalRequests');
+
+perfCardTest('#394 F1 cache: c.size card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*c\.size[^}]*\}<\/div><div class="perf-label">Server Entries<\/div><\/div>)/,
+  { c: { size: PERF_PAYLOAD } }, '#394 F1 cache size');
+
+perfCardTest('#394 F1 go runtime: gr.goroutines card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*gr\.goroutines[^}]*\}<\/div><div class="perf-label">Goroutines<\/div><\/div>)/,
+  { gr: { goroutines: PERF_PAYLOAD } }, '#394 F1 goroutines');
+
+perfCardTest('#394 F1 sqlite: sq.walPages.busy card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*sq\.walPages\.busy[^}]*\}<\/div><div class="perf-label">WAL Busy Pages<\/div><\/div>)/,
+  { sq: { walPages: { busy: PERF_PAYLOAD } } }, '#394 F1 walPages.busy');
+
+perfCardTest('#394 F1 packet store: ps.indexes.byObserver card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*ps\.indexes\.byObserver[^}]*\}<\/div><div class="perf-label">Observers<\/div><\/div>)/,
+  { ps: { indexes: { byObserver: PERF_PAYLOAD } } }, '#394 F1 byObserver');
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
-console.log('\n' + '═'.repeat(48));
-console.log(`  XSS escape sinks: ${passed} passed, ${failed} failed`);
-console.log('═'.repeat(48));
-if (failed > 0) process.exit(1);
+(async () => {
+  for (const t of asyncTests) {
+    try { await t.fn(); passed++; console.log(`  ✅ ${t.name}`); }
+    catch (e) { failed++; console.log(`  ❌ ${t.name}: ${e.message}`); }
+  }
+  console.log('\n' + '═'.repeat(48));
+  console.log(`  XSS escape sinks: ${passed} passed, ${failed} failed`);
+  console.log('═'.repeat(48));
+  if (failed > 0) process.exit(1);
+})();

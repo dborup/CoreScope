@@ -1301,7 +1301,10 @@ func TestUpdateNodeDefaultScope_SecondUpdateFailureRollsBackFirst(t *testing.T) 
 // called at all for this pubkey, so nothing in either table changes.
 func TestHandleNeighborsReportMissingSelfDefaultScopeChangesNothing(t *testing.T) {
 	store := openNeighborsStore(t)
-	pk := "fa0000000000000000000000000000000000000000000000000000000000af"
+	// A full 64-char key: since #337 a shorter origin_id skips the whole self
+	// block, which would make this test pass without ever reaching the
+	// default_scope branch it exists to pin.
+	pk := "fa000000000000000000000000000000000000000000000000000000000000af"
 	seedActiveNodeOnly(t, store, pk)
 
 	report := map[string]interface{}{
@@ -1311,6 +1314,10 @@ func TestHandleNeighborsReportMissingSelfDefaultScopeChangesNothing(t *testing.T
 	}
 	handleNeighborsReport(store, "test", "obs", report)
 
+	// Guard against passing vacuously: the self block must have been applied.
+	if sc, _ := configuredScope(t, store, pk); sc.String != "#dk" {
+		t.Fatalf("configured_scope = %v, want '#dk' -- the self block was never applied, so this test proves nothing", sc)
+	}
 	sc, at := defaultScopeConfirmed(t, store, pk)
 	if sc.Valid || at.Valid {
 		t.Errorf("default_scope = (%v,%v), want still NULL/NULL -- a report without self.default_scope must never touch it", sc, at)
