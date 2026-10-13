@@ -544,6 +544,9 @@ jobs:
           echo '=== E2E SUITE: test-issue-242-type-exclusions-e2e.js ==='
           BASE_URL=http://localhost:13581 node test-issue-242-type-exclusions-e2e.js 2>&1 | tee -a e2e-output.txt
           echo '=== E2E SUITE END: test-issue-242-type-exclusions-e2e.js ==='
+          echo '=== E2E SUITE: test-issue-406-packets-live-channel-e2e.js ==='
+          CHROMIUM_REQUIRE=1 node test-issue-406-packets-live-channel-e2e.js 2>&1 | tee -a e2e-output.txt
+          echo '=== E2E SUITE END: test-issue-406-packets-live-channel-e2e.js ==='
           echo '=== E2E SUITE: test-issue-180-packets-url-modal-e2e.js ==='
           BASE_URL=http://localhost:13581 node test-issue-180-packets-url-modal-e2e.js 2>&1 | tee -a e2e-output.txt
           echo '=== E2E SUITE END: test-issue-180-packets-url-modal-e2e.js ==='
