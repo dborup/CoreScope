@@ -1,5 +1,22 @@
 #!/bin/sh
 
+# Opt-in (#339): run corescope-server and corescope-ingestor as
+# CORESCOPE_UID:CORESCOPE_GID. Unset, empty, 0 or false keeps the historical
+# start, in which every program runs as root.
+nonroot_on() {
+  case "${CORESCOPE_RUN_AS_NONROOT-}" in '' | 0 | false) return 1 ;; esac
+}
+
+# In that mode the services can write in /app/data. Before root trusts a file
+# there (.env is sourced, config.json and theme.json are linked), the helper
+# refuses the start if they could have written it. It runs only when the mode
+# is requested here or in .env, or was used on this volume (its marker); a
+# volume that never used it starts exactly as before.
+if nonroot_on || [ -e /app/data/.corescope-nonroot ] || [ -L /app/data/.corescope-nonroot ] ||
+  { [ -f /app/data/.env ] && [ ! -L /app/data/.env ] && grep -q CORESCOPE_RUN_AS_NONROOT /app/data/.env; }; then
+  /usr/local/lib/corescope/nonroot.sh preflight || exit 1
+fi
+
 # Config lives in the data directory (bind-mounted from host)
 # The Go server already searches /app/data/config.json via LoadConfig
 # but the ingestor expects a direct path — symlink for compatibility
@@ -34,12 +51,8 @@ elif [ "${DISABLE_CADDY:-false}" = "true" ]; then
   SUPERVISORD_CONF="/etc/supervisor/conf.d/supervisord-no-caddy.conf"
 fi
 
-# Opt-in (#339): run corescope-server and corescope-ingestor as
-# CORESCOPE_UID:CORESCOPE_GID. Unset, empty, 0 or false keeps the historical
-# start, in which every program runs as root and the helper never runs.
-case "${CORESCOPE_RUN_AS_NONROOT-}" in
-  '' | 0 | false) ;;
-  *) SUPERVISORD_CONF=$(/usr/local/lib/corescope/nonroot.sh setup "$SUPERVISORD_CONF") || exit 1 ;;
-esac
+if nonroot_on; then
+  SUPERVISORD_CONF=$(/usr/local/lib/corescope/nonroot.sh setup "$SUPERVISORD_CONF") || exit 1
+fi
 
 exec /usr/bin/supervisord -c "$SUPERVISORD_CONF"

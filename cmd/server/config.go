@@ -1263,6 +1263,19 @@ var (
 // instead of as a generic save failure.
 var ErrConfigReadOnly = errors.New("config.json is read-only for the server")
 
+// configWritesDisabled reports whether the deployment forbids the server to
+// write config.json at all: the container's opt-in non-root mode (#339),
+// which the entrypoint passes on to the services. There config.json belongs
+// to the host or root, and the refusal must not depend on which directory a
+// save would happen to resolve to (#339 review, finding 2; #422).
+func configWritesDisabled() bool {
+	switch os.Getenv("CORESCOPE_RUN_AS_NONROOT") {
+	case "1", "true":
+		return true
+	}
+	return false
+}
+
 // configReadOnlyErr wraps a create/rename failure in ErrConfigReadOnly when
 // its cause is a permission or read-only-filesystem error.
 func configReadOnlyErr(op string, err error) error {
@@ -1294,6 +1307,9 @@ func configReadOnlyErr(op string, err error) error {
 //     argument is ignored for a file that already exists, and it is masked by
 //     the umask for one that does not.
 func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
+	if configWritesDisabled() {
+		return fmt.Errorf("%w: CORESCOPE_RUN_AS_NONROOT is on", ErrConfigReadOnly)
+	}
 	var configPath string
 	for _, p := range []string{
 		filepath.Join(configDir, "config.json"),

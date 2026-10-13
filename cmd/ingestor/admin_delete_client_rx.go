@@ -147,7 +147,32 @@ func runAdminDeleteClientRxDryRun(dbPath, key string) int {
 // clientRxGeteuid is os.Geteuid; a package var so tests can model a root CLI.
 var clientRxGeteuid = os.Geteuid
 
+// clientRxCheckRequester refuses a root CLI next to a database that another
+// user owns (#339): the ingestor then runs as that user and cannot read the
+// root-owned 0600 request. It would sit in the queue while the CLI reports
+// "ingestor not running?", and run unannounced once its owner changed.
+func clientRxCheckRequester(dbPath string) error {
+	if clientRxGeteuid() != 0 {
+		return nil
+	}
+	fi, err := os.Stat(dbPath)
+	if err != nil {
+		return nil
+	}
+	uid, ok := fileOwnerUID(fi)
+	if !ok || uid == 0 {
+		return nil
+	}
+	return fmt.Errorf("refusing to run as root: %s belongs to UID %d, so the ingestor runs as that user "+
+		"and could not read a request written by root; run this command as that user "+
+		"(e.g. docker exec -u CORESCOPE_UID:CORESCOPE_GID …)", dbPath, uid)
+}
+
 func runAdminDeleteClientRxOnline(dbPath, key string, wait time.Duration) int {
+	if err := clientRxCheckRequester(dbPath); err != nil {
+		fmt.Fprintf(os.Stderr, "delete-client-rx: %v\n", err)
+		return 1
+	}
 	id := clientRxNewID()
 	if err := clientRxWriteRequest(dbPath, clientRxDeleteRequest{
 		ID:          id,
