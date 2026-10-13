@@ -63,3 +63,7 @@ replace github.com/meshcore-analyzer/channelregistry => ../../internal/channelre
 require github.com/meshcore-analyzer/brokerurl v0.0.0
 
 replace github.com/meshcore-analyzer/brokerurl => ../../internal/brokerurl
+
+require github.com/meshcore-analyzer/pprofbind v0.0.0
+
+replace github.com/meshcore-analyzer/pprofbind => ../../internal/pprofbind
