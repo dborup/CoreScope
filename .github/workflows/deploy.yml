@@ -676,6 +676,11 @@ jobs:
   image-check:
     name: "🧱 Validate Docker Image"
     runs-on: ubuntu-latest
+    # Local build only: no registry access, and a hung build must not hold the
+    # required gate pending for the 360 minute default.
+    permissions:
+      contents: read
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
