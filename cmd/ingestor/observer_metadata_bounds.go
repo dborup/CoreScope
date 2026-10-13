@@ -260,12 +260,27 @@ func observerIDRejectReason(id string) string {
 // Truncation iterates runes and stops at the cap, so a multi-byte rune is never
 // split — the invariant the Unicode test pins. maxRunes <= 0 means "strip only,
 // do not truncate".
+//
+// The builder is pre-sized from the cap rather than from len(s): see the
+// comment at the Grow call.
 func normalizeObserverText(s string, maxRunes int) string {
 	if s == "" {
 		return s
 	}
 	var b strings.Builder
-	b.Grow(len(s))
+	// Size the builder from what this call can RETURN, not from what it was
+	// handed. The output is at most maxRunes runes, i.e. 4*maxRunes bytes in
+	// UTF-8, so a hostile 4 MiB display field no longer buys a 4 MiB
+	// allocation to produce 64 runes — there is no payload size cap upstream
+	// (handleMessage hands json.Unmarshal the raw payload), so the field length
+	// is a broker deployment property. min() keeps the single-allocation intent
+	// for the common short field. maxRunes <= 0 is "strip only, do not
+	// truncate", where the input length IS the bound on the output.
+	if maxRunes > 0 {
+		b.Grow(min(len(s), 4*maxRunes)) // 4 bytes is the widest UTF-8 rune
+	} else {
+		b.Grow(len(s))
+	}
 	n := 0
 	for _, r := range s {
 		if observerRuneIsControl(r) || observerRuneIsBidiControl(r) {

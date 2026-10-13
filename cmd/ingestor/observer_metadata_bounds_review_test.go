@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"math"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -576,6 +578,74 @@ func TestObserverIDDropThrottleSamplePerReason(t *testing.T) {
 	}
 	if strings.Contains(line, "CTRLxxxx-tail") {
 		t.Errorf("sample was not bounded to 8 runes:\n%s", line)
+	}
+}
+
+// --- F4: the builder is sized by the cap, not by the untrusted input -------
+
+// normalizeObserverText is damage containment, so its own allocation must be
+// bounded by what it can RETURN, not by what it was handed. There is no MQTT
+// payload size cap anywhere in cmd/ingestor — the only reader is
+// json.Unmarshal(m.Payload(), ...) in handleMessage — so a display field's
+// length is a broker deployment property, and b.Grow(len(s)) turns a 4 MiB
+// field into a 4 MiB allocation to produce 64 runes.
+//
+// Measured rather than argued: TotalAlloc across the call, lowest of several
+// attempts so a background goroutine's allocation cannot inflate the verdict.
+// The threshold is a quarter of the input, far above the few hundred bytes the
+// bounded builder needs and far below the full-input allocation.
+func TestNormalizeObserverText_BuilderSizedByCapNotInput(t *testing.T) {
+	const inputBytes = 4 << 20
+	in := strings.Repeat("x", inputBytes)
+
+	var lowest uint64 = math.MaxUint64
+	var out string
+	for i := 0; i < 5; i++ {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		out = normalizeObserverText(in, maxObserverNameRunes)
+		runtime.ReadMemStats(&after)
+		if grew := after.TotalAlloc - before.TotalAlloc; grew < lowest {
+			lowest = grew
+		}
+	}
+	// Keep the result reachable so nothing above can be optimised away.
+	if n := utf8.RuneCountInString(out); n != maxObserverNameRunes {
+		t.Fatalf("runes = %d, want %d", n, maxObserverNameRunes)
+	}
+	if limit := uint64(inputBytes / 4); lowest > limit {
+		t.Errorf("normalizeObserverText allocated %d B for a %d B input capped at %d runes (want <= %d B): the builder is sized from the input, not the cap",
+			lowest, inputBytes, maxObserverNameRunes, limit)
+	}
+}
+
+// The other direction: bounding the builder must not change what the function
+// returns for any input shape, including one whose runes are multi-byte (where
+// 4 bytes per rune is the headroom the cap-derived size has to allow) and one
+// shorter than the cap (where the input is the smaller of the two).
+func TestNormalizeObserverText_CapSizedBuilderKeepsOutput(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		maxRunes int
+		want     string
+	}{
+		{"shorter than the cap", "Nørrebro Relæ", 64, "Nørrebro Relæ"},
+		{"multi-byte at the cap", strings.Repeat("ø", 100), 8, strings.Repeat("ø", 8)},
+		{"4-byte runes at the cap", strings.Repeat("\U0001F5DD", 40), 8, strings.Repeat("\U0001F5DD", 8)},
+		{"controls then text", strings.Repeat("\x01", 1000) + "name", 4, "name"},
+		{"strip only, no cap", "a\u202eb\u0085c", 0, "abc"},
+		{"strip only, long input", strings.Repeat("ø", 500), -1, strings.Repeat("ø", 500)},
+		{"empty", "", 64, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeObserverText(tc.in, tc.maxRunes); got != tc.want {
+				t.Errorf("normalizeObserverText(%d runes in, maxRunes=%d) = %q, want %q",
+					utf8.RuneCountInString(tc.in), tc.maxRunes, got, tc.want)
+			}
+		})
 	}
 }
 
