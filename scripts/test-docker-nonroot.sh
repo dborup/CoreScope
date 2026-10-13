@@ -365,10 +365,12 @@ check "case 4 in place: root-owned stats file left in /tmp" "0" "$(dx "$C4" stat
 timeout 120 docker restart "$C4" > /dev/null
 check_cmd "case 4 in place: ready" ready "$C4"
 procs_as "case 4 in place via .env" "$C4" "$U:$G"
+# Two packets: the stale root file from the off run already says 1.
 publish "$C4" 10
-check_cmd "case 4 in place: ingestor stats file rewritten as $U" wait_until "$WAIT_S" ing_tx_is "$C4" 1
+publish "$C4" 11
+check_cmd "case 4 in place: ingestor stats file rewritten as $U" wait_until "$WAIT_S" ing_tx_is "$C4" 2
 check "case 4 in place: stats file owner" "$U" "$(dx "$C4" stat -c %u /tmp/corescope-ingestor-stats.json)"
-check_cmd "case 4 in place: server reads 4 packets" wait_until "$WAIT_S" api_tx_is "$C4" 4
+check_cmd "case 4 in place: server reads 5 packets" wait_until "$WAIT_S" api_tx_is "$C4" 5
 as_root "$V4" "rm /app/data/.env"
 timeout 120 docker restart "$C4" > /dev/null
 check_cmd "case 4 in place off: ready" ready "$C4"
