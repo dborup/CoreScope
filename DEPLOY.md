@@ -58,10 +58,16 @@ docker compose up -d
 
 All persistent data lives in `/app/data`:
 - `meshcore.db` — SQLite database (packets, nodes)
+- `ping_scores_history.db` — SQLite database (computed ping scores)
 - `config.json` — custom config (optional)
 - `theme.json` — custom theme (optional)
 
-**Backup:** `cp data/meshcore.db ~/backup/`
+**Backup:** both databases run in WAL mode, so a plain file copy while the
+container runs can be incomplete or inconsistent. From a CoreScope checkout, run
+the offline helper (it stops the container briefly and restarts it):
+`sh scripts/backup-sqlite.sh corescope ~/backup`. With Compose, use the
+container name `docker compose ps` shows. Details and restore:
+[docs/deployment.md](docs/deployment.md#backup--restore).
 
 ## TLS
 
