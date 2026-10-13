@@ -88,8 +88,8 @@ const (
 	// observer_neighbors, observer_neighbor_metrics and observer_metrics.
 	//
 	// Derivation: the longest structured id is a full MeshCore node public key,
-	// 64 lowercase-hex characters (nodePubkeyHexLen in neighbor_report_bounds.go
-	// once #337 lands; 64 regardless). Non-pubkey operator ids in the CI fixture
+	// 64 lowercase-hex characters (nodePubkeyHexLen in neighbor_report_bounds.go,
+	// which #374 landed). Non-pubkey operator ids in the CI fixture
 	// (test-fixtures/e2e-fixture.db) are far shorter — "kpabap" is 6 bytes, and
 	// the longest id in the fixture is a 64-char pubkey. 128 is 2x the longest
 	// real id: comfortably above anything legitimate, while still bounding a
