@@ -109,7 +109,7 @@ console.log('\n=== #2097: HopDisplay renders a badge only when the count survive
 }
 
 
-console.log('\n=== #2097: packets.js never resolves a hop without its observer ===');
+console.log('\n=== #408: packets.js resolves only global singleton guesses without borrowed receiver context ===');
 
 {
   // Structural guard. The resolver and the display could always report the
@@ -122,15 +122,15 @@ console.log('\n=== #2097: packets.js never resolves a hop without its observer =
     'no HopResolver.resolve() call passes the hops alone'
     + (bare.length ? ': ' + bare.join(', ') : ''));
 
-  assert(/function hopCacheKey\(/.test(src),
-    'the per-observer cache key is computed in one place');
+  assert(/const HOP_CACHE_MAX\s*=\s*50000/.test(src),
+    'the shared global guess cache retains its explicit bound');
   assert(/async function resolveHopsForPackets\(/.test(src),
-    'multi-packet call sites group their hops by observer');
+    'multi-packet call sites prepare the bounded heuristic job');
 
   // renderHop reads the per-observer key; something has to write it.
   // #165: the cache is a bounded Map written through hopCacheSet().
-  assert(/hopCacheSet\(hopCacheKey\(h, observerId\), entry\)/.test(src),
-    'resolveHops writes the per-observer cache key that renderHop reads');
+  assert(/hopCacheSet\(h, entry\)/.test(src),
+    'resolveHops writes only global prefix keys');
 }
 
 console.log('\n=== #2097: a badge belongs to the pill on its left ===');
@@ -235,13 +235,13 @@ console.log('\n=== #2097: the observer position anchors the pick ===');
 
 {
   const src = fs.readFileSync(REPO_ROOT + '/public/packets.js', 'utf8');
-  assert(/HopResolver\.resolve\(unknown, null, null, obsLat, obsLon, observerId\)/.test(src),
-    'resolveHops passes the observer position as the anchor');
+  assert(/HopResolver\.resolve\(\[h\], null, null, null, null, null\)/.test(src),
+    'resolveHops does not infer receiver hints from pooled API prefixes');
   const withId = src.match(/HopResolver\.resolve\([^)]*observer_id[^)]*\)/g) || [];
-  assert(withId.every(c => !/null, null, null, null/.test(c)),
-    'no call passes an observer id but drops its position: ' + withId.join(' | '));
-  assert(/function observerPosition\(/.test(src) && /observerPosition\(observerId\)/.test(src),
-    'one helper looks the observer up, used by every resolve path');
+  assert(withId.length === 0,
+    'no packet-page call treats an API observer id as route provenance: ' + withId.join(' | '));
+  assert(/function observerPosition\(/.test(src),
+    'the existing strict coordinate helper remains available without conferring route evidence');
 }
 
 console.log('\n=== PR #185 review F6: one badge rule for the detail and the list ===');
