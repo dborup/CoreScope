@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -4952,6 +4953,11 @@ func (s *Server) handlePruneGeoFilterStatus(w http.ResponseWriter, r *http.Reque
 	writeError(w, http.StatusNotFound, "unknown request id")
 }
 
+// geoFilterReadOnlyMsg is the 409 answer when config.json cannot be written in
+// this deployment (#339). The filter is then neither saved nor applied.
+const geoFilterReadOnlyMsg = "geo filter not saved: config.json is read-only for the server " +
+	"(read-only mount, or CORESCOPE_RUN_AS_NONROOT is on); edit geo_filter in config.json on the host and restart"
+
 // handlePutConfigGeoFilter writes the geo_filter config to disk and updates the
 // in-memory pointer atomically. Empty/missing polygon clears the filter.
 //
@@ -5001,6 +5007,10 @@ func (s *Server) handlePutConfigGeoFilter(w http.ResponseWriter, r *http.Request
 		if err := SaveGeoFilter(s.configDir, gf); err != nil {
 			s.saveMu.Unlock()
 			log.Printf("[geofilter] save failed: %v", err)
+			if errors.Is(err, ErrConfigReadOnly) {
+				writeError(w, http.StatusConflict, geoFilterReadOnlyMsg)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "failed to save config")
 			return
 		}

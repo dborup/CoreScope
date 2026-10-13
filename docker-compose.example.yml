@@ -41,6 +41,14 @@ services:
       - PPROF_PORT=${PPROF_PORT:-}
       - PPROF_PORT_SERVER=${PPROF_PORT_SERVER:-}
       - PPROF_PORT_INGESTOR=${PPROF_PORT_INGESTOR:-}
+      # Opt-in: run corescope-server and corescope-ingestor without root.
+      # Off unless set. Use a dedicated ID that owns nothing on the host, not
+      # the owner of DATA_DIR. Back up and record owners first, and read
+      # docs/deployment.md, "Running the Go services without root (opt-in)",
+      # for what changes on the host and how to roll back.
+      # - CORESCOPE_RUN_AS_NONROOT=1
+      # - CORESCOPE_UID=10001
+      # - CORESCOPE_GID=10001
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
