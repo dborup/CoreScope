@@ -602,5 +602,54 @@ test('manage.sh promote aborts before recreating prod when the backup fails', ()
   assert.strictEqual(f.state().running, true);
 }));
 
+// Host-tool gate (#389 review): the cases that drive the helper through
+// process-group signals or a pty need tools that not every host has. They must
+// skip with a clear reason instead of failing the suite, and the detection must
+// probe the tool and the capability, never the OS name.
+test('an unavailable tool skips its case instead of failing the suite', () => {
+  const missing = new Set(['setsid', 'script -c', 'mkfifo']);
+  for (const key of missing) {
+    let err; try { need(key, missing); } catch (e) { err = e; }
+    assert(err instanceof Skipped, key + ' must raise Skipped, got: ' + err);
+    assert(err.message.startsWith('needs ' + key + ': '), 'unclear skip reason: ' + err.message);
+    assert(/\S/.test(err.message.slice(('needs ' + key + ': ').length)), 'empty skip reason');
+    // Precise detection: the probe runs the tool, it does not read the platform.
+    assert.strictEqual(typeof capabilities[key].probe, 'function');
+    assert.strictEqual(/darwin|platform|\bos\b/.test(String(capabilities[key].probe)), false,
+      key + ' must probe the tool, not the OS name');
+  }
+  // The runner counts it as skipped, not failed.
+  const before = failed, wasSkipped = skipped;
+  test('inner probe of the skip path (an expected SKIP)', () => need('setsid', missing));
+  assert.strictEqual(failed, before, 'a skipped case must not be counted as a failure');
+  assert.strictEqual(skipped, wasSkipped + 1, 'a skipped case must be counted as skipped');
+});
+
+test('optional host tools are only reached through the skip gate', () => {
+  const source = fs.readFileSync(__filename, 'utf8');
+  for (const tool of ['setsid', 'script', 'mkfifo']) {
+    assert.strictEqual(source.includes("which('" + tool + "')"), false,
+      tool + '(1) must come from gated(), not which(), so a host without it skips');
+    assert.strictEqual(source.includes("spawnSync('" + tool + "'"), false,
+      tool + '(1) must come from gated(), not a bare spawnSync');
+  }
+  // No case may depend on a Linux-only kernel path.
+  assert.strictEqual(source.includes('/proc/' + 'self/fd'), false,
+    'the stderr fill must use the FIFO path, which is portable');
+});
+
+// Guarded against recursion: the nested run does not register this case.
+if (!process.env.CORESCOPE_TEST_MISSING_TOOLS) test('the suite is green and skips those cases on a host without the tools', () => {
+  const keys = Object.keys(capabilities);
+  const result = spawnSync(process.execPath, [__filename], {encoding:'utf8', timeout:600000,
+    env:{...process.env, CORESCOPE_TEST_MISSING_TOOLS:keys.join(',')}});
+  assert.strictEqual(result.status, 0, 'suite must exit 0 without the tools:\n' + result.stdout + result.stderr);
+  const skips = result.stdout.split('\n').filter(line => line.startsWith('SKIP '));
+  assert.strictEqual(skips.length, 11, 'expected the 11 tool-dependent cases to skip, got ' + skips.length);
+  for (const line of skips) assert.match(line, new RegExp('needs (' + keys.join('|') + '): \\S'), line);
+  assert.match(result.stdout, /\b0 failed\b/);
+  assert.match(result.stdout, /\b11 skipped\b/);
+});
+
 console.log(`${passed} passed, ${failed} failed`);
 process.exitCode = failed === 0 ? 0 : 1;
