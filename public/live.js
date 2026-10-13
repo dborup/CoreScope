@@ -150,6 +150,15 @@
   let rainCanvas = null, rainCtx = null, rainDrops = [], rainRAF = null;
   const propagationBuffer = new Map(); // hash -> {timer, packets[]}
   let _onResize = null;
+  // #428 — refs for document/window listeners bound in init() that must be
+  // removed in destroy(); see their bind sites for why each can't just move
+  // to .live-page (teardown/leak notes at each).
+  let _onOrientationChange = null;
+  let _onTileProviderChanged = null;
+  let _onDragManagerResize = null;
+  let _feedResizeHandlers = null;
+  let _moreMenuDocClickHandler = null;
+  let _timelineScrubHandlers = null;
   let _navCleanup = null;
   let _timelineRefreshInterval = null;
   let _lcdClockInterval = null;
@@ -371,10 +380,15 @@
     // Run immediately to set correct initial height
     _onResize();
     window.addEventListener('resize', _onResize);
-    window.addEventListener('orientationchange', () => {
+    // #428 — this anonymous arrow was never the same reference destroy()
+    // removed (it removed _onResize under the 'orientationchange' event
+    // name, which never matched anything bound here): a ref-mismatch leak.
+    // Store it so destroy() removes the actual listener.
+    _onOrientationChange = () => {
       // Orientation change is async — viewport dimensions settle late
       [50, 200, 500, 1000, 2000].forEach(ms => setTimeout(_onResize, ms));
-    });
+    };
+    window.addEventListener('orientationchange', _onOrientationChange);
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', _onResize);
     }
@@ -1664,12 +1678,14 @@
     });
     _themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     // #1420 — re-render on customizer change.
-    window.addEventListener('mc-tile-provider-changed', function (e) {
+    // #428 — stored and removed in destroy(): window outlives the page.
+    _onTileProviderChanged = function (e) {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       if (e && e.detail && e.detail.type && e.detail.type !== (dark ? 'dark' : 'light')) return;
       _liveSyncDarkTiles(dark);
-    });
+    };
+    window.addEventListener('mc-tile-provider-changed', _onTileProviderChanged);
 
     // #1485 — animations + trails need their own pane above markerPane.
     // PR #1334 moved node markers from L.circleMarker (overlayPane @ 400)
@@ -2346,11 +2362,13 @@
       if (!dragMql.matches) dragMgr.disable();
 
       // Resize clamping (debounced)
+      // #428 — stored and removed in destroy(): window outlives the page.
       var resizeTimer = null;
-      window.addEventListener('resize', function () {
+      _onDragManagerResize = function () {
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(function () { dragMgr.handleResize(); }, 200);
-      });
+      };
+      window.addEventListener('resize', _onDragManagerResize);
     }
 
     const roleLegendList = document.getElementById('roleLegendList');
@@ -2391,16 +2409,22 @@
     resizeHandle.addEventListener('mousedown', (e) => {
       feedResizing = true; e.preventDefault();
     });
-    document.addEventListener('mousemove', (e) => {
+    // #428 — the drag can leave feedEl's bounds, so mousemove/up stay on
+    // document; stored and removed in destroy() so they don't keep
+    // reacting to the mouse (and stacking) on later pages.
+    const _onFeedResizeMove = (e) => {
       if (!feedResizing) return;
       const newWidth = Math.max(200, Math.min(800, e.clientX - feedEl.getBoundingClientRect().left));
       feedEl.style.width = newWidth + 'px';
-    });
-    document.addEventListener('mouseup', () => {
+    };
+    const _onFeedResizeUp = () => {
       if (!feedResizing) return;
       feedResizing = false;
       localStorage.setItem('live-feed-width', parseInt(feedEl.style.width));
-    });
+    };
+    document.addEventListener('mousemove', _onFeedResizeMove);
+    document.addEventListener('mouseup', _onFeedResizeUp);
+    _feedResizeHandlers = { mousemove: _onFeedResizeMove, mouseup: _onFeedResizeUp };
 
     // Save/restore map view. #1709: URL hash lat/lon/zoom overrides
     // localStorage. Validated via shared parseViewportHash helper.
@@ -2477,13 +2501,17 @@
         else      { menu.removeAttribute('hidden');  moreBtn.setAttribute('aria-expanded', 'true');  }
       });
       // Click outside closes the menu.
-      document.addEventListener('click', function (e) {
+      // #428 — "outside" means outside moreBtn/menu, which can be anywhere
+      // on the page, so this stays on document; stored and removed in
+      // destroy() so it doesn't keep firing (and stacking) on later pages.
+      _moreMenuDocClickHandler = function (e) {
         if (menu.hasAttribute('hidden')) return;
         if (e.target === moreBtn || moreBtn.contains(e.target) ||
             e.target === menu   || menu.contains(e.target)) return;
         menu.setAttribute('hidden', '');
         moreBtn.setAttribute('aria-expanded', 'false');
-      });
+      };
+      document.addEventListener('click', _moreMenuDocClickHandler);
     })();
 
     // Timeline click to scrub
@@ -2546,14 +2574,20 @@
       scrubVisual(e.clientX);
       e.preventDefault();
     });
-    document.addEventListener('mousemove', (e) => {
+    // #428 — the scrub drag can leave timelineEl's bounds, so mousemove/up
+    // stay on document; stored and removed in destroy() so they don't keep
+    // reacting to the mouse (and stacking) on later pages.
+    const _onTimelineScrubMove = (e) => {
       if (!VCR.dragging) return;
       scrubVisual(e.clientX);
-    });
-    document.addEventListener('mouseup', () => {
+    };
+    const _onTimelineScrubUp = () => {
       if (!VCR.dragging) return;
       scrubRelease();
-    });
+    };
+    document.addEventListener('mousemove', _onTimelineScrubMove);
+    document.addEventListener('mouseup', _onTimelineScrubUp);
+    _timelineScrubHandlers = { mousemove: _onTimelineScrubMove, mouseup: _onTimelineScrubUp };
     timelineEl.addEventListener('touchstart', (e) => {
       VCR.dragging = true;
       VCR.scrubTs = null;
@@ -4754,8 +4788,24 @@
     if (map) { map.remove(); map = null; }
     if (_onResize) {
       window.removeEventListener('resize', _onResize);
-      window.removeEventListener('orientationchange', _onResize);
       if (window.visualViewport) window.visualViewport.removeEventListener('resize', _onResize);
+    }
+    if (_onOrientationChange) { window.removeEventListener('orientationchange', _onOrientationChange); _onOrientationChange = null; }
+    // #428 — undo the remaining document/window listeners from init() that
+    // can't be discarded with #app's subtree (global events, and drag
+    // tracking that must follow the mouse outside its own panel's bounds).
+    if (_onTileProviderChanged) { window.removeEventListener('mc-tile-provider-changed', _onTileProviderChanged); _onTileProviderChanged = null; }
+    if (_onDragManagerResize) { window.removeEventListener('resize', _onDragManagerResize); _onDragManagerResize = null; }
+    if (_feedResizeHandlers) {
+      document.removeEventListener('mousemove', _feedResizeHandlers.mousemove);
+      document.removeEventListener('mouseup', _feedResizeHandlers.mouseup);
+      _feedResizeHandlers = null;
+    }
+    if (_moreMenuDocClickHandler) { document.removeEventListener('click', _moreMenuDocClickHandler); _moreMenuDocClickHandler = null; }
+    if (_timelineScrubHandlers) {
+      document.removeEventListener('mousemove', _timelineScrubHandlers.mousemove);
+      document.removeEventListener('mouseup', _timelineScrubHandlers.mouseup);
+      _timelineScrubHandlers = null;
     }
     if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
     // Restore #app height to CSS default

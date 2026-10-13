@@ -3001,8 +3001,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3123,8 +3122,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3218,8 +3216,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3316,8 +3313,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3410,8 +3406,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},

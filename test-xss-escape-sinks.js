@@ -1426,8 +1426,11 @@ function loadComparePage() {
   let children = {};
   const app = fakeEl();
   Object.defineProperty(app, 'innerHTML', {
-    set() { children = { compareControls: fakeEl(), compareContent: fakeEl() }; },
+    set() { children = { compareControls: fakeEl(), compareContent: fakeEl(), comparePage: fakeEl() }; },
   });
+  // #428: init() binds the row keydown handler to .compare-page (its own
+  // container), not #app — see the test for it below.
+  app.querySelector = (sel) => (sel === '.compare-page' ? children.comparePage : null);
   const loc = { hash: '#/compare' };
   const ctx = {
     window: {}, location: loc, CLIENT_TTL: {}, escapeHtml, URLSearchParams,
