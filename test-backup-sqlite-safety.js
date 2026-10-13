@@ -913,11 +913,19 @@ for (const [backend, wrong] of [['flock', 'directory'], ['flock', 'symlink'], ['
     privateLockDir(f);
     if (wrong === 'directory') fs.mkdirSync(f.lock);
     else if (wrong === 'file') fs.writeFileSync(f.lock, '');
-    else fs.symlinkSync(f.dir, f.lock);
+    // A symlink to the type the backend expects, which only the symlink
+    // check itself refuses: flock(1) would otherwise open and lock the target.
+    const target = path.join(f.dir, 'target');
+    if (wrong === 'symlink') {
+      if (backend === 'flock') fs.writeFileSync(target, 'keep'); else fs.mkdirSync(target);
+      fs.symlinkSync(target, f.lock);
+    }
     const result = f.backup({PATH, CORESCOPE_BACKUP_LOCK_WAIT:'0'});
     assert.strictEqual(result.status, 1, result.stderr);
     assert.match(result.stderr, /is not a .*lock.*remove it once no backup of corescope-test is running/);
     assert.deepStrictEqual(touched(f), []); assertNoSnapshots(f);
+    if (wrong === 'symlink' && backend === 'flock') assert.strictEqual(fs.readFileSync(target, 'utf8'), 'keep');
+    if (wrong === 'symlink' && backend === 'mkdir') assert.deepStrictEqual(fs.readdirSync(target), []);
   }));
 
 for (const [name, extra] of [['lock wait', {CORESCOPE_BACKUP_LOCK_WAIT:'5m'}], ['lock wait', {CORESCOPE_BACKUP_LOCK_WAIT:''}],
