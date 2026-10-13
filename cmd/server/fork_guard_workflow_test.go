@@ -90,8 +90,10 @@ func TestForkGuardOnPublishSteps(t *testing.T) {
 	}
 
 	job := workflowJob(t, workflow, "build-and-publish")
-	if cond := jobIf(job); !strings.Contains(cond, "!cancelled()") || strings.Contains(cond, "github.repository") {
-		t.Errorf("build-and-publish must run as a fork-safe fail-closed gate, not skip after test failures; got if %q", cond)
+	// always(), not !cancelled(): a cancelled run must still produce a red
+	// gate rather than a skipped one, which branch protection counts as passing.
+	if cond := strings.TrimSpace(jobIf(job)); cond != "${{ always() }}" {
+		t.Errorf("build-and-publish must run as a fork-safe fail-closed gate even when the run is cancelled; want if ${{ always() }}, got %q", cond)
 	}
 	steps := regexp.MustCompile(`(?m)^      - name:`).Split(job, -1)[1:]
 	publishMarkers := []string{"docker/setup-buildx-action", "docker/setup-qemu-action", "docker/login-action", "docker/metadata-action", "docker/build-push-action"}
@@ -125,6 +127,32 @@ func TestForkGuardLeavesTestJobsRunning(t *testing.T) {
 		}
 		if strings.Contains(job, "github.repository") {
 			t.Errorf("%s must not be repository-guarded: tests and CI artifact uploads run on forks too", name)
+		}
+	}
+}
+
+// The required check is configured by name, so renaming the gate job would
+// silently drop the requirement.
+func TestRequiredGateCheckNameStable(t *testing.T) {
+	job := workflowJob(t, readWorkflow(t, deployWorkflowRel), "build-and-publish")
+	const want = `    name: "🏗️ Build & Publish Docker Image"`
+	if !strings.Contains(job, want+"\n") {
+		t.Errorf("build-and-publish must keep the stable required check name %q", want)
+	}
+}
+
+// Pins the number of fork guards so one cannot be dropped unnoticed. Update
+// the counts only when a guarded side effect is deliberately added or removed.
+func TestForkGuardCount(t *testing.T) {
+	for _, c := range []struct {
+		rel  string
+		want int
+	}{
+		{deployWorkflowRel, 9},
+		{fastPathWorkflowRel, 1},
+	} {
+		if got := strings.Count(readWorkflow(t, c.rel), upstreamRepoGuard); got != c.want {
+			t.Errorf("%s: expected %d fork guards, found %d", c.rel, c.want, got)
 		}
 	}
 }

@@ -26,8 +26,14 @@ assert.ok(!/^    needs:/m.test(e2e), 'E2E must not wait for Go tests');
 assert.ok(!/^    needs:/m.test(image), 'image check must start independently');
 assert.match(image, /docker compose .* build/, 'image check must build the staging image');
 assert.match(publish, /^    needs: \[go-test, e2e-test, image-check\]$/m);
-assert.match(publish, /^    if: \$\{\{ !cancelled\(\) \}\}$/m);
+// always(), not !cancelled(): when the whole run is cancelled the gate must
+// still run and fail instead of being skipped.
+assert.match(publish, /^    if: \$\{\{ always\(\) \}\}$/m, 'gate must run even when the run is cancelled');
 assert.match(publish, /github\.repository == 'Kpa-clawbot\/CoreScope'/);
+
+// With a job-level always(), only the implicit success() of each later step
+// keeps publishing behind the gate step. No step may override it.
+assert.doesNotMatch(publish, /^        if:.*\b(always|cancelled|failure)\(\)/m, 'publish steps must stay behind the gate step');
 
 const gate = publish.match(/      - name: Require tests and image validation\n([\s\S]*?)(?=      - name: Checkout code)/);
 assert.ok(gate, 'stable required check needs an explicit gate');
@@ -42,6 +48,10 @@ for (const [goResult, e2eResult, imageResult, expected] of [
   ['success', 'success', 'failure', 1],
   ['skipped', 'success', 'success', 1],
   ['success', 'cancelled', 'success', 1],
+  ['success', 'success', 'skipped', 1],
+  ['cancelled', 'success', 'success', 1],
+  ['success', 'success', 'cancelled', 1],
+  ['', 'success', 'success', 1],
 ]) {
   const result = spawnSync('bash', ['-e', '-c', bash], {
     env: { ...process.env, GO_RESULT: goResult, E2E_RESULT: e2eResult, IMAGE_RESULT: imageResult },
