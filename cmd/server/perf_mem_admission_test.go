@@ -366,6 +366,9 @@ func TestPerfMemLimiter_StaleReleaseIsNoop(t *testing.T) {
 		t.Fatal("acquire after the cooldown refused")
 	}
 	relA() // stale: must not touch B's scan
+	// Past any cooldown the stale call could have started, B's scan is still
+	// the only thing that can refuse the next request.
+	clk.advance(perfMemTestCooldown)
 	if _, wait, ok := l.acquire(); ok {
 		t.Fatal("stale release freed the active scan's slot")
 	} else if wait != perfMemTestCooldown {
