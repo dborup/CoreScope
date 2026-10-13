@@ -49,8 +49,10 @@ function groupSignal(signal, recovery) {
 // A repeated signal while recovery runs a start or inspect.
 if (state.groupSignals > 0 && (process.env.MOCK_RECOVERY_SIGNAL_OPS || '').split(',').includes(op))
   groupSignal(process.env.MOCK_RECOVERY_SIGNAL, true);
+if (op === 'compose') done();
 if (op === 'inspect') {
   if (process.env.MOCK_FAIL === 'inspect') done(21);
+  if (args.some(a => a.includes('.State.Health'))) { console.log('healthy'); done(); }
   console.log(args[2].includes('.Image') ? 'sha256:local-test-image' : String(state.running));
   done();
 }
@@ -73,6 +75,14 @@ if (op === 'stop') {
   if (process.env.MOCK_STOP_NOOP !== '1') state.running = false;
   if (process.env.MOCK_SIGNAL === 'stop') {
     fs.writeFileSync(statePath, JSON.stringify(state));
+    if (process.env.MOCK_FILL_STDERR === '1' && !fs.existsSync(statePath + '.signalled')) {
+      // Fill the helper's stderr pipe so its next write blocks.
+      const fd = fs.openSync('/proc/self/fd/2', fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+      for (const size of [4096, 1]) {
+        try { for (;;) fs.writeSync(fd, Buffer.alloc(size, 'x')); } catch (err) { if (err.code !== 'EAGAIN') throw err; }
+      }
+      fs.writeFileSync(statePath + '.signalled', '');
+    }
     process.kill(process.ppid, 'SIGTERM'); process.exit(0);
   }
   done();
@@ -94,6 +104,11 @@ if (op === 'start') {
     state.startSignalSent = true;
     fs.writeFileSync(statePath, JSON.stringify(state));
     process.kill(process.ppid, 'SIGTERM'); process.exit(0);
+  }
+  const delay = Number(process.env.MOCK_START_DELAY_MS || 0);
+  if (delay) {
+    // Slow start: the container runs only once the CLI returns.
+    sleep(delay); state = JSON.parse(fs.readFileSync(statePath, 'utf8')); settle(state); state.calls.push(args);
   }
   // Like Docker, starting a still-running (even stopping) container is a no-op.
   state.running = true; done();
@@ -287,11 +302,12 @@ test('without setsid, recovery retries a stop killed by a repeated signal', () =
   // A PATH with the helper's tools but no setsid(1), as on macOS.
   const tools = path.join(f.dir, 'tools'); fs.mkdirSync(tools);
   for (const tool of ['sh','mkdir','mktemp','date','chmod','rm','mv','node']) fs.symlinkSync(which(tool), path.join(tools, tool));
+  // Two recovery signals: the third and last stop attempt is the one that holds.
   const result = f.backup({PATH:path.join(f.dir, 'bin') + path.delimiter + tools, MOCK_STOP_DELAY_MS:'300',
-    MOCK_GROUP_SIGNAL:'SIGINT', MOCK_RECOVERY_SIGNAL:'SIGINT'}, {group:true});
+    MOCK_GROUP_SIGNAL:'SIGINT', MOCK_RECOVERY_SIGNAL:'SIGINT', MOCK_RECOVERY_SIGNALS:'2'}, {group:true});
   assert.strictEqual(result.status, 130, result.stderr);
   assert.strictEqual(f.settledRunning(), true, 'service left stopped after a repeated signal');
-  assert.doesNotMatch(result.stderr, /restart failed/);
+  assert.doesNotMatch(result.stderr, /restart failed|not verified/);
   assertNoSnapshots(f);
 }));
 
@@ -429,6 +445,160 @@ test('restore stop failure never installs or starts', () => fixture(f => {
 test('restore restart failure is surfaced', () => fixture(f => {
   const result = f.restore({MOCK_RESTART_FAIL:'1'}); assert.strictEqual(result.status, 24);
   assert.strictEqual(f.state().running, false);
+}));
+
+test('the deployment guide states the number of recovery stop attempts', () => {
+  const helper = fs.readFileSync(path.join(root, 'scripts/backup-sqlite.sh'), 'utf8');
+  const attempts = Number(helper.match(/while \[ "\$tries" -lt (\d+) \]/)[1]);
+  const words = ['zero', 'one', 'two', 'three', 'four', 'five'];
+  const docs = fs.readFileSync(path.join(root, 'docs/deployment.md'), 'utf8').replace(/\s+/g, ' ');
+  const claim = 'recovery stop gets up to ' + words[attempts] + ' attempts';
+  assert(docs.includes(claim), 'docs/deployment.md must say: ' + claim);
+});
+
+test('job control (sh -m on a terminal) does not break the isolated Docker calls', () => fixture(f => {
+  // With job control a child leads its own process group, so setsid(1) would
+  // fork and return before the Docker command has finished.
+  const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
+  const command = ['sh', '-m', path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', f.snapshots].map(quote).join(' ');
+  const result = spawnSync(which('script'), ['-qec', command, '/dev/null'],
+    {env:{...f.env, MOCK_START_DELAY_MS:'300'}, encoding:'utf8', timeout:10000});
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /ERROR/);
+  assert.strictEqual(f.state().running, true);
+  assert.strictEqual(fs.readdirSync(f.snapshots).filter(n => n.startsWith('corescope-backup-')).length, 1);
+}, {wal:true}));
+
+test('a further signal while the first is handled cannot preempt recovery', () => fixture(f => {
+  // The helper's stderr is a full FIFO, so its `interrupted` error write blocks.
+  // A second signal lands exactly while the first one is being handled.
+  const fifo = path.join(f.dir, 'stderr.fifo'), errors = path.join(f.dir, 'stderr.txt');
+  assert.strictEqual(spawnSync('mkfifo', [fifo]).status, 0);
+  const driver = `
+    exec 3<>"$FIFO"
+    sh "$HELPER" corescope-test "$OUT" 2>&3 & pid=$!
+    n=0; until grep -qx pipe_write /proc/$pid/wchan 2>/dev/null; do
+      n=$((n + 1)); [ "$n" -lt 400 ] || { kill -9 "$pid"; echo 'helper never blocked on stderr' >&2; exit 99; }
+      sleep 0.02
+    done
+    [ -e "$MOCK_STATE.signalled" ] || { kill -9 "$pid"; echo 'blocked before the first signal' >&2; exit 98; }
+    kill -HUP "$pid"; sleep 0.2
+    cat <&3 >"$ERRORS" & reader=$!
+    wait "$pid"; status=$?
+    sleep 0.2; kill "$reader"; exit "$status"`;
+  const result = spawnSync('sh', ['-c', driver], {env:{...f.env, MOCK_SIGNAL:'stop', MOCK_FILL_STDERR:'1', FIFO:fifo,
+    HELPER:path.join(root, 'scripts/backup-sqlite.sh'), OUT:f.snapshots, ERRORS:errors}, encoding:'utf8', timeout:20000});
+  const stderr = fs.existsSync(errors) ? fs.readFileSync(errors, 'utf8').replace(/x+/g, '') : '';
+  assert.strictEqual(result.status, 143, result.stderr + stderr);
+  assert.match(stderr, /interrupted by SIGTERM/);
+  assert.doesNotMatch(stderr, /SIGHUP/);
+  assert.strictEqual(f.state().running, true); assert.strictEqual(calls(f,'start').length, 1);
+  assertNoSnapshots(f);
+}));
+
+// The other hot single-file DB copies (#389) now use the helper.
+const HOT_DB_COPY = /\bcp\b[^\n]*\b(?:meshcore|ping_scores_history)\.db\b/;
+function shellFunction(source, name) {
+  const match = source.match(new RegExp('^' + name + '\\(\\) \\{\\n[\\s\\S]*?\\n\\}$', 'm'));
+  assert(match, 'missing function ' + name); return match[0];
+}
+for (const doc of ['DEPLOY.md', 'docs/specs/deployment-simplification.md']) test(doc + ' backs up with the helper, not a hot copy', () => fixture(f => {
+  const text = fs.readFileSync(path.join(root, doc), 'utf8');
+  assert.strictEqual((text.match(HOT_DB_COPY) || [])[0], undefined, 'hot DB copy');
+  const command = (text.match(/`([^`\n]*scripts\/backup-sqlite\.sh[^`\n]*)`/) || [])[1];
+  assert(command, 'no helper command');
+  // The documented container name is the one the guide's `docker run` creates.
+  assert.strictEqual(command.split(/\s+/)[2], text.match(/docker run -d --name (\S+)/)[1]);
+  const result = spawnSync('sh', ['-c', command], {cwd:root, env:{...f.env, HOME:f.dir}, encoding:'utf8', timeout:10000});
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert(result.stdout.trim().startsWith(fs.realpathSync(f.dir) + path.sep), result.stdout);
+  assert.deepStrictEqual(fs.readdirSync(result.stdout.trim()).sort(),
+    ['meshcore.db', 'meshcore.db-wal', 'ping_scores_history.db', 'ping_scores_history.db-wal']);
+  assert.deepStrictEqual(f.state().copiedWhileRunning, [false]);
+}, {wal:true}));
+
+function manage(f, args, {input='', extra={}}={}) {
+  return spawnSync('bash', [path.join(root, 'manage.sh'), ...args], {cwd:f.dir, input,
+    env:{...f.env, HOME:f.dir, PROD_DATA_DIR:f.data, ...extra}, encoding:'utf8', timeout:20000});
+}
+function snapshotIn(dir) {
+  const found = fs.readdirSync(dir).filter(n => n.startsWith('corescope-backup-'));
+  assert.strictEqual(found.length, 1, 'expected one helper snapshot in ' + dir + ': ' + fs.readdirSync(dir));
+  return path.join(dir, found[0]);
+}
+const ALL_DB_FILES = ['meshcore.db', 'meshcore.db-wal', 'ping_scores_history.db', 'ping_scores_history.db-wal'];
+
+test('manage.sh backup and promote contain no hot DB copy', () => {
+  const source = fs.readFileSync(path.join(root, 'manage.sh'), 'utf8');
+  for (const name of ['cmd_backup', 'cmd_promote'])
+    assert.strictEqual((shellFunction(source, name).match(HOT_DB_COPY) || [])[0], undefined, name);
+});
+
+test('manage.sh backup snapshots both DBs and WALs offline via the helper', () => fixture(f => {
+  const out = path.join(f.dir, 'manual');
+  const result = manage(f, ['backup', out]); assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.deepStrictEqual(f.state().copiedWhileRunning, [false], 'copied while the container was running');
+  assert(calls(f,'stop').every(c => c.includes('corescope-prod')));
+  assert.deepStrictEqual(fs.readdirSync(snapshotIn(out)).sort(), ALL_DB_FILES);
+  assert.strictEqual(fs.existsSync(path.join(out, 'meshcore.db')), false, 'hot single-file copy');
+  assert.strictEqual(fs.readFileSync(path.join(out, 'config.json'), 'utf8'), 'PRIVATE_CONFIG_MUST_NOT_BE_PUBLISHED');
+  assert.strictEqual(f.state().running, true);
+}, {wal:true}));
+
+test('manage.sh backup fails loudly when the helper fails', () => fixture(f => {
+  const out = path.join(f.dir, 'manual');
+  const result = manage(f, ['backup', out], {extra:{MOCK_FAIL:'copy-main'}});
+  assert.notStrictEqual(result.status, 0);
+  assert.match(result.stdout, /Database backup failed/);
+  assert.strictEqual(fs.existsSync(path.join(out, 'meshcore.db')), false);
+  assert.strictEqual(f.state().running, true);
+}));
+
+test('manage.sh backup without a prod container skips the DB with a warning', () => fixture(f => {
+  const out = path.join(f.dir, 'manual');
+  const result = manage(f, ['backup', out], {extra:{MOCK_FAIL:'inspect'}});
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Database not backed up/);
+  assert.deepStrictEqual(calls(f,'stop'), []);
+  assert.deepStrictEqual(fs.readdirSync(out), ['config.json']);
+}));
+
+test('manage.sh restore finds the database in a manage.sh backup', () => fixture(f => {
+  const out = path.join(f.dir, 'manual');
+  assert.strictEqual(manage(f, ['backup', out]).status, 0);
+  fs.writeFileSync(path.join(f.data, 'meshcore.db'), 'changed');
+  const result = manage(f, ['restore', out], {input:'y'});
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(fs.readFileSync(path.join(f.data, 'meshcore.db'), 'utf8'), 'old-meshcore');
+}));
+
+test('manage.sh restore stops when the pre-restore backup fails', () => fixture(f => {
+  const out = path.join(f.dir, 'manual');
+  assert.strictEqual(manage(f, ['backup', out]).status, 0);
+  fs.writeFileSync(path.join(f.data, 'meshcore.db'), 'changed');
+  const result = manage(f, ['restore', out], {input:'y', extra:{MOCK_FAIL:'copy-main'}});
+  assert.notStrictEqual(result.status, 0);
+  assert.strictEqual(fs.readFileSync(path.join(f.data, 'meshcore.db'), 'utf8'), 'changed');
+  assert.strictEqual(calls(f,'compose').filter(c => c.includes('stop')).length, 0);
+}));
+
+test('manage.sh promote backs up offline via the helper first', () => fixture(f => {
+  const result = manage(f, ['promote'], {input:'y'});
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  const backups = fs.readdirSync(path.join(f.dir, 'backups')).filter(n => n.startsWith('pre-promotion-'));
+  assert.strictEqual(backups.length, 1);
+  assert.deepStrictEqual(fs.readdirSync(snapshotIn(path.join(f.dir, 'backups', backups[0]))).sort(), ALL_DB_FILES);
+  assert.deepStrictEqual(f.state().copiedWhileRunning, [false]);
+  const order = f.state().calls.map(c => c[0]).filter(op => op === 'cp' || op === 'compose');
+  // `compose version` at startup, then the helper's copy, then the recreate.
+  assert.deepStrictEqual(order, ['compose', 'cp', 'compose'], 'backup must precede the recreate');
+}, {wal:true}));
+
+test('manage.sh promote aborts before recreating prod when the backup fails', () => fixture(f => {
+  const result = manage(f, ['promote'], {input:'y', extra:{MOCK_FAIL:'copy-main'}});
+  assert.notStrictEqual(result.status, 0);
+  assert.strictEqual(calls(f,'compose').filter(c => c.includes('up')).length, 0);
+  assert.strictEqual(f.state().running, true);
 }));
 
 console.log(`${passed} passed, ${failed} failed`);
