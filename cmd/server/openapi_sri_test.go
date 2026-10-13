@@ -61,6 +61,9 @@ func externalSubresourceTags(html string) []map[string]string {
 		for _, a := range attrRe.FindAllStringSubmatch(m[2], -1) {
 			attrs[strings.ToLower(a[1])] = a[2]
 		}
+		if attrs["__tag"] == "link" && !linkLoadsScriptOrStyle(attrs) {
+			continue
+		}
 		out = append(out, attrs)
 	}
 	return out
@@ -93,6 +96,25 @@ func TestSwaggerUIExternalAssetsArePinnedAndHashed(t *testing.T) {
 			t.Errorf("%s %q: crossorigin = %q, want \"anonymous\"", attrs["__tag"], url, got)
 		}
 	}
+}
+
+// linkLoadsScriptOrStyle reports whether a <link> fetches something that can
+// carry integrity. preconnect, dns-prefetch, canonical, icon and friends load
+// nothing executable, so demanding SRI from them would be unsatisfiable.
+func linkLoadsScriptOrStyle(attrs map[string]string) bool {
+	rels := strings.Fields(strings.ToLower(attrs["rel"]))
+	for _, rel := range rels {
+		if rel == "stylesheet" || rel == "modulepreload" {
+			return true
+		}
+	}
+	as := strings.ToLower(attrs["as"])
+	for _, rel := range rels {
+		if rel == "preload" && (as == "script" || as == "style") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestExternalSubresourceTagsScopesLinkByRel: only a <link> that loads a

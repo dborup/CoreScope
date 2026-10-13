@@ -19,6 +19,15 @@
        side is additionally pinned by cmd/server/openapi_sri_test.go), and
        tomorrow means any new handler that prints HTML
 
+   Only <link> tags that load a script or stylesheet are checked (stylesheet,
+   modulepreload, preload as=script|style); preconnect, dns-prefetch,
+   canonical and other hints fetch nothing executable and cannot carry SRI.
+   Script/stylesheet injection from code (createElement('script'|'link'),
+   importScripts, off-origin import()) is invisible to a tag scanner, so it is
+   rejected outright on the same surfaces plus every *.js under public/ and
+   tools/. Every digest must also equal its REVIEWED_DIGESTS entry, so a
+   wrong but well-formed hash cannot pass by being edited consistently.
+
    Out of scope by design: map tile providers. Tiles are configured endpoints
    requested by Leaflet from JavaScript, not <script>/<link> subresources, so
    they carry no SRI and are deliberately untouched here (see #332). The
@@ -92,6 +101,15 @@ function attrs(raw) {
   return out;
 }
 
+/** Whether a <link> loads a script or stylesheet, i.e. something that can
+    carry integrity. preconnect, dns-prefetch, canonical, icon and friends
+    fetch nothing executable, and demanding SRI from them is unsatisfiable. */
+function linkLoadsScriptOrStyle(a) {
+  const rels = (a.rel || '').toLowerCase().split(/\s+/);
+  if (rels.includes('stylesheet') || rels.includes('modulepreload')) return true;
+  return rels.includes('preload') && ['script', 'style'].includes((a.as || '').toLowerCase());
+}
+
 /** Every off-origin subresource tag in one source text. */
 function refsInSource(file, src) {
   const refs = [];
@@ -100,6 +118,7 @@ function refsInSource(file, src) {
   while ((m = TAG_RE.exec(src)) !== null) {
     const tag = m[1].toLowerCase();
     const a = attrs(m[2]);
+    if (tag === 'link' && !linkLoadsScriptOrStyle(a)) continue;
     const url = tag === 'script' ? a.src : a.href;
     // Relative paths are same-origin and carry no third-party risk; a
     // protocol-relative URL is external and must not slip through.
@@ -347,7 +366,7 @@ test('documentation names every place a reviewed digest lives', () => {
 
 test('documentation states the <link> rel scope and the dynamic-loader rule', () => {
   const text = fs.readFileSync(path.join(ROOT, 'docs/browser-dependencies.md'), 'utf8');
-  assert(/`preconnect`/.test(text) && /`modulepreload`/.test(text),
+  assert(/rel="preconnect"/.test(text) && /rel="modulepreload"/.test(text),
     'docs/browser-dependencies.md does not say which <link> rel values are checked');
   assert(/createElement\('script'\)/.test(text),
     'docs/browser-dependencies.md does not document the dynamic script injection rule');
