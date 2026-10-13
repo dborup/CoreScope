@@ -1245,6 +1245,16 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	if configPath == "" {
 		return fmt.Errorf("config.json not found in %s", configDir)
 	}
+	// Resolve the selected file before creating its replacement. Containers
+	// can link config.json into a persistent data directory: renaming over
+	// that link would save only in the container layer and leave the mounted
+	// config unchanged. Using the effective path also keeps temp + rename
+	// together on the target filesystem, including relative/chained links.
+	resolvedPath, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config: %w", err)
+	}
+	configPath = resolvedPath
 
 	src, err := os.Open(configPath)
 	if err != nil {
