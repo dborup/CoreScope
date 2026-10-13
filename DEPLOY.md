@@ -41,7 +41,24 @@ Settings can be overridden via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DISABLE_CADDY` | `false` | Skip internal Caddy (set `true` behind a reverse proxy) |
-| `DISABLE_MOSQUITTO` | `true` in `docker-compose.staging.yml`; `false` elsewhere | Skip internal MQTT broker. Default flipped to `true` for the staging deploy in v3.7+ because a standalone `mqtt-broker` container owns MQTT on that host — see "Standalone MQTT broker (staging)" below. |
+| `DISABLE_MOSQUITTO` | `true` in `docker-compose.staging.yml`; `false` elsewhere | Skip internal MQTT broker. **Which values count depends on the launcher.** `./manage.sh` resolves it with `is_true()` (`1`/`true`/`TRUE`/`yes`/`YES`/`y`/`Y`/`on`/`ON`) and then runs `docker-compose.no-mosquitto.yml`, which hard-codes `DISABLE_MOSQUITTO=true` in the container — so any of those values gives an **external** broker on a manage.sh-managed host. A bare `docker compose up` against `docker-compose.yml` passes the value straight through, and the entrypoint disables the broker only on the exact `true`, so there `yes` leaves the bundled broker **running**. `./manage.sh broker-check` reports the mode this script will actually select, and warns when the value falls in that gap. Default flipped to `true` for the staging deploy in v3.7+ because a standalone `mqtt-broker` container owns MQTT on that host — see "Standalone MQTT broker (staging)" below. |
+| `PROD_MQTT_BIND` | *(empty — every interface, IPv4 and IPv6)* | Host interface the bundled broker's `1883` is published on. Empty renders the mapping with no host interface, which is the unchanged dual-stack publish; `127.0.0.1` makes the plaintext broker reachable from the host only. An explicit `0.0.0.0` is **IPv4 only** — not the same as empty. |
+| `PPROF_BIND` | *(empty — every interface, IPv4 and IPv6)* | Host interface the staging pprof ports `6060`/`6061` are published on. Empty is the unchanged dual-stack publish; `127.0.0.1` requires an SSH tunnel to profile. An explicit `0.0.0.0` is IPv4 only. |
+| `PPROF_HOST` | *(every interface)* | Host the in-process pprof listener binds. **Not** a substitute for `PPROF_BIND`: a loopback listener inside a container is unreachable through a docker port mapping. |
+| `PPROF_PORT_SERVER` / `PPROF_PORT_INGESTOR` | `6060` / `6061` | Per-process pprof ports; they must stay distinct. Override the shared `PPROF_PORT`. |
+| `MQTT_SOURCE_STRICT` | `false` | Make the ingestor refuse to start when its broker setup cannot ingest, instead of only logging it. |
+| `MQTT_BROKER` / `MQTT_TOPIC` | *(empty — `config.json` decides)* | External broker URL and topic for the ingestor; `MQTT_BROKER` replaces the `mqttSources` in `config.json`. |
+
+`MQTT_BROKER`, `MQTT_TOPIC`, `MQTT_SOURCE_STRICT`, `ENABLE_PPROF` and the
+`PPROF_HOST*` / `PPROF_PORT*` settings are read by the server and the ingestor,
+not by docker compose, so every app compose file forwards them into the
+container through its `environment:` block with an empty default. Setting one
+in `.env` therefore does reach the process; leaving it unset is inert.
+
+One caveat: `MQTT_BROKER` **overrides** `mqttSources` in `config.json`. Before
+the compose files forwarded it, a value in `.env` was ignored by the container;
+now it decides. Run `./manage.sh broker-check` to see which source the ingestor
+will use, and remove a stale `.env` line if `config.json` is the one you meant.
 | `HTTP_PORT` | `80` | Host port mapping |
 | `DATA_DIR` | `./data` | Host path for persistent data |
 
@@ -289,3 +306,30 @@ prevents recurrence without needing source-side TTL changes.
 If a future feature legitimately needs persistent snapshot DBs, put
 them under `/var/lib/corescope/snapshots/` with explicit rotation —
 not in `/tmp`, which is ephemeral by definition.
+
+## Broker preflight (`./manage.sh broker-check`)
+
+`DISABLE_MOSQUITTO=true` turns the bundled broker off; it does not configure
+a replacement. With no `mqttSources` the ingestor falls back to its built-in
+`mqtt://localhost:1883` — the bundled broker's own address, where nothing is
+then listening — and ingests nothing while the container still reports
+healthy.
+
+```bash
+./manage.sh broker-check
+```
+
+It prints the broker mode and every configured source, and exits `1` when
+the arrangement cannot ingest: no source configured, or every source
+pointing at loopback with the bundled broker off. Broker URLs are masked, so
+the output is safe to paste into an issue.
+
+`setup`, `start`, `update`, `restore` and `promote` run the same check and
+print the same report, but never refuse the command over it — the broker
+topology differs per host and is the operator's call. Set
+`MQTT_SOURCE_STRICT=true` if you want the ingestor itself to refuse to start
+in that state.
+
+See [docs/deployment.md](docs/deployment.md#migration--pulling-the-new-compose-file)
+for what an existing install should expect after pulling the new Compose file
+(short answer: no change — every new setting defaults to today's behaviour).

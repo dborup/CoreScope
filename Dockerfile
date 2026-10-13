@@ -23,6 +23,7 @@ COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
 COPY internal/brokerurl/ ../../internal/brokerurl/
+COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/lora/ ../../internal/lora/
 COPY internal/regions/ ../../internal/regions/
@@ -43,6 +44,7 @@ COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
 COPY internal/brokerurl/ ../../internal/brokerurl/
+COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/regions/ ../../internal/regions/
 COPY internal/channelregistry/ ../../internal/channelregistry/
