@@ -271,6 +271,7 @@ gate_case() {
     check "gate ($label): .env not sourced" "absent" "$(as_root "$v" '[ -e /app/data/ran-as-root ] && echo present || echo absent')"
 }
 gate_case ".env owned by the services" "echo '$PAYLOAD' >> .env && chown $U:$G .env" "${ON[@]}"
+has "gate (.env owned by the services): names the services' user" "$OUT" "ERROR: /app/data/.env is owned by $U, the services' user"
 gate_case ".env created after the enable" "rm .env && echo '$PAYLOAD' > .env && chown $U:$G .env" "${ON[@]}"
 gate_case ".env group-writable for the services" "echo '$PAYLOAD' >> .env && chgrp $G .env && chmod 664 .env" "${ON[@]}"
 gate_case ".env world-writable" "chmod 666 .env" "${ON[@]}"
