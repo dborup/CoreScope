@@ -25,6 +25,15 @@
     if (m) return _renderHomeGlyph(m[1]) + ' ' + _escHtml(m[2]);
     return _escHtml(s); // EMOJI-OK-LEGACY-RENDER
   }
+  // #429 — footerLinks come from importable Home customization, so the URL
+  // gets the same scheme check as miniMarkdown links (roles.js). A rejected
+  // URL renders as its label text.
+  function footerLinkHtml(l) {
+    const href = window.safeUrlAttr(l.url);
+    const label = _renderHomeLabel(l.label);
+    if (!href) return label;
+    return `<a href="${href}" class="home-footer-link" target="_blank" rel="noopener">${label}</a>`;
+  }
   function _escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   const PREF_KEY = 'meshcore-user-level';
@@ -149,7 +158,7 @@
 
       <section class="home-footer">
         <div class="home-footer-links">
-          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${_renderHomeLabel(l.label)}</a>`).join('') : `
+          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(footerLinkHtml).join('') : `
           <a href="#/packets" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg> Packets</a>
           <a href="#/map" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg> Network Map</a>
           <a href="#/live" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Live</a>

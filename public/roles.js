@@ -1047,19 +1047,47 @@
   /* RFC 3986 scheme grammar, lowercased before matching. */
   var LINK_SCHEME_RE = /^([a-z][a-z0-9+.\-]*):/;
 
+  /* True when `url` may become a link or resource URL: it carries no scheme
+     (relative path, #fragment, ?query) or an allowlisted one. Normalisation
+     mirrors what a browser does before it resolves a scheme: ASCII controls
+     and ASCII whitespace are ignored, and the scheme is case-insensitive. So
+     `JaVa\tScRiPt:alert(1)` is rejected for the same reason
+     `javascript:alert(1)` is. #429: exported as the one scheme check for
+     every customization-fed URL sink (Home footer links, branding logo and
+     favicon), so no sink grows an allowlist of its own. */
+  function linkUrlProbe(url) {
+    return String(url == null ? '' : url).replace(/[\u0000-\u0020\u007f]/g, '').toLowerCase();
+  }
+  function isSafeLinkUrl(url) {
+    var probe = linkUrlProbe(url);
+    if (!probe) return false;
+    var m = LINK_SCHEME_RE.exec(probe);
+    return !m || SAFE_LINK_SCHEMES.indexOf(m[1]) !== -1;
+  }
+  window.isSafeLinkUrl = isSafeLinkUrl;
+  /* #429 — image sinks (branding logo, favicon) take the same check plus
+     inline data:image/ URLs: an <img> or icon never runs script from its URL,
+     and the customizer has always accepted an inline logo. */
+  window.isSafeImageUrl = function(url) {
+    return isSafeLinkUrl(url) || linkUrlProbe(url).indexOf('data:image/') === 0;
+  };
+
   /* Returns the escaped href for `dest`, or '' when the destination must not
-     become a link. Normalisation mirrors what a browser does before it
-     resolves a scheme: ASCII controls and ASCII whitespace are ignored, and
-     the scheme is case-insensitive. So `JaVa\tScRiPt:alert(1)` is rejected for
-     the same reason `javascript:alert(1)` is. */
+     become a link. `dest` is already & < > escaped (see miniMarkdown). */
   function safeLinkHref(dest) {
     var raw = String(dest == null ? '' : dest);
-    var probe = raw.replace(/[\u0000-\u0020\u007f]/g, '').toLowerCase();
-    if (!probe) return '';
-    var m = LINK_SCHEME_RE.exec(probe);
-    if (m && SAFE_LINK_SCHEMES.indexOf(m[1]) === -1) return '';
-    return escapeAttr(raw);
+    return isSafeLinkUrl(raw) ? escapeAttr(raw) : '';
   }
+
+  /* #429 — the same check for a RAW url headed for a quoted HTML attribute:
+     returns the fully escaped value (& < > " '), or '' when it must not
+     become a link. '&' matters here: left alone, `&#106;avascript:` carries
+     no scheme for the check but is decoded back into `javascript:` while the
+     browser parses the attribute. */
+  window.safeUrlAttr = function(url) {
+    return safeLinkHref(String(url == null ? '' : url)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  };
   // Simple markdown → HTML (bold, italic, links, code, lists, line breaks)
   window.miniMarkdown = function(text) {
     if (!text) return '';
