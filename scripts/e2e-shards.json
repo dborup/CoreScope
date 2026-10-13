@@ -1,0 +1,2318 @@
+{
+  "version": 1,
+  "suites": [
+    {
+      "file": "test-node-liveness-e2e.js",
+      "shard": 2,
+      "env": {},
+      "output": "node-liveness",
+      "meanSeconds": 2.9313333333333333,
+      "secondsByExecution": [
+        2.005,
+        3.123,
+        3.666
+      ]
+    },
+    {
+      "file": "test-e2e-playwright.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 113.346,
+      "secondsByExecution": [
+        102.226,
+        118.828,
+        118.984
+      ]
+    },
+    {
+      "file": "test-a11y-axe-1668.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL",
+        "AXE_SCREENSHOT_DIR": "/tmp/axe-1668"
+      },
+      "output": "e2e",
+      "meanSeconds": 395.7253333333333,
+      "secondsByExecution": [
+        338.17,
+        425.371,
+        423.635
+      ]
+    },
+    {
+      "file": "test-filter-ux-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.3060000000000005,
+      "secondsByExecution": [
+        1.872,
+        2.494,
+        2.552
+      ]
+    },
+    {
+      "file": "test-channel-issue-1087-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.5233333333333334,
+      "secondsByExecution": [
+        2.084,
+        2.738,
+        2.748
+      ]
+    },
+    {
+      "file": "test-channel-issue-1111-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8086666666666666,
+      "secondsByExecution": [
+        1.454,
+        1.983,
+        1.989
+      ]
+    },
+    {
+      "file": "test-channels-client-state-152-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 9.437333333333333,
+      "secondsByExecution": [
+        8.786,
+        9.751,
+        9.775
+      ]
+    },
+    {
+      "file": "test-channels-154-155-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 13.274000000000001,
+      "secondsByExecution": [
+        12.169,
+        13.74,
+        13.913
+      ]
+    },
+    {
+      "file": "test-map-modal-fluid-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.851666666666667,
+      "secondsByExecution": [
+        5.217,
+        6.144,
+        6.194
+      ]
+    },
+    {
+      "file": "test-issue-332-no-carto-tiles-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 86.52933333333334,
+      "secondsByExecution": [
+        80.243,
+        89.187,
+        90.158
+      ]
+    },
+    {
+      "file": "test-map-nodes-pagination-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.5026666666666666,
+      "secondsByExecution": [
+        1.165,
+        1.668,
+        1.675
+      ]
+    },
+    {
+      "file": "test-issue-123-map-lifecycle-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 29.82766666666667,
+      "secondsByExecution": [
+        27.094,
+        30.984,
+        31.405
+      ]
+    },
+    {
+      "file": "test-observer-iata-1188-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.287333333333334,
+      "secondsByExecution": [
+        3.418,
+        4.688,
+        4.756
+      ]
+    },
+    {
+      "file": "test-xss-333-pages-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 13.585666666666667,
+      "secondsByExecution": [
+        11.445,
+        14.462,
+        14.85
+      ]
+    },
+    {
+      "file": "test-xss-392-perf-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.9543333333333333,
+      "secondsByExecution": [
+        1.642,
+        2.115,
+        2.106
+      ]
+    },
+    {
+      "file": "test-xss-368-home-links-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8883333333333334,
+      "secondsByExecution": [
+        1.548,
+        2.059,
+        2.058
+      ]
+    },
+    {
+      "file": "test-xss-429-home-footer-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 13.470333333333334,
+      "secondsByExecution": [
+        11.592,
+        14.217,
+        14.602
+      ]
+    },
+    {
+      "file": "test-issue-1639-observers-sort-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.427333333333333,
+      "secondsByExecution": [
+        4.609,
+        5.81,
+        5.863
+      ]
+    },
+    {
+      "file": "test-issue-405-observers-listener-leak-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 8.784666666666666,
+      "secondsByExecution": [
+        7.694,
+        9.225,
+        9.435
+      ]
+    },
+    {
+      "file": "test-issue-1758-ng-filter-rerenders-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.2823333333333333,
+      "secondsByExecution": [
+        1.95,
+        2.452,
+        2.445
+      ]
+    },
+    {
+      "file": "test-nav-fluid-1055-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.2216666666666662,
+      "secondsByExecution": [
+        2.917,
+        3.29,
+        3.458
+      ]
+    },
+    {
+      "file": "test-nav-priority-1102-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.7716666666666667,
+      "secondsByExecution": [
+        1.537,
+        1.868,
+        1.91
+      ]
+    },
+    {
+      "file": "test-nav-priority-1311-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.0623333333333336,
+      "secondsByExecution": [
+        2.691,
+        3.238,
+        3.258
+      ]
+    },
+    {
+      "file": "test-nav-priority-1391-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.211333333333333,
+      "secondsByExecution": [
+        3.765,
+        4.436,
+        4.433
+      ]
+    },
+    {
+      "file": "test-issue-1413-nav-overlap-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.9426666666666668,
+      "secondsByExecution": [
+        1.678,
+        2.075,
+        2.075
+      ]
+    },
+    {
+      "file": "test-issue-1400-nav-vertical-clip.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.619,
+      "secondsByExecution": [
+        1.359,
+        1.764,
+        1.734
+      ]
+    },
+    {
+      "file": "test-nav-more-floor-1139-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.504,
+      "secondsByExecution": [
+        2.204,
+        2.647,
+        2.661
+      ]
+    },
+    {
+      "file": "test-bottom-nav-1061-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.9260000000000002,
+      "secondsByExecution": [
+        1.657,
+        2.035,
+        2.086
+      ]
+    },
+    {
+      "file": "test-gestures-1062-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.934666666666668,
+      "secondsByExecution": [
+        4.518,
+        5.102,
+        5.184
+      ]
+    },
+    {
+      "file": "test-gestures-1185-scroll-discriminator-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.285666666666667,
+      "secondsByExecution": [
+        2.029,
+        2.406,
+        2.422
+      ]
+    },
+    {
+      "file": "test-gesture-hints-1065-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 25.150333333333332,
+      "secondsByExecution": [
+        23.726,
+        25.735,
+        25.99
+      ]
+    },
+    {
+      "file": "test-touch-gestures-coverage-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 15.239333333333333,
+      "secondsByExecution": [
+        14.664,
+        15.463,
+        15.591
+      ]
+    },
+    {
+      "file": "test-channel-fluid-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.991666666666667,
+      "secondsByExecution": [
+        5.003,
+        6.415,
+        6.557
+      ]
+    },
+    {
+      "file": "test-table-fluid-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 9.770666666666665,
+      "secondsByExecution": [
+        8.671,
+        10.226,
+        10.415
+      ]
+    },
+    {
+      "file": "test-charts-fluid-1058-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 11.130333333333333,
+      "secondsByExecution": [
+        9.469,
+        11.822,
+        12.1
+      ]
+    },
+    {
+      "file": "test-slideover-1056-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "repeatGate": 3,
+      "meanSeconds": 14.956666666666669,
+      "secondsByExecution": [
+        12.841,
+        15.702,
+        16.327
+      ]
+    },
+    {
+      "file": "test-issue-1692-packets-init-parallel-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.4906666666666666,
+      "secondsByExecution": [
+        1.172,
+        1.636,
+        1.664
+      ]
+    },
+    {
+      "file": "test-issue-147-packets-url-obs-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 13.307333333333332,
+      "secondsByExecution": [
+        11.652,
+        13.967,
+        14.303
+      ]
+    },
+    {
+      "file": "test-issue-165-grouped-hop-warn-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 6.162333333333334,
+      "secondsByExecution": [
+        5.179,
+        6.572,
+        6.736
+      ]
+    },
+    {
+      "file": "test-packet-detail-sender-hash-size-obs-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.9596666666666667,
+      "secondsByExecution": [
+        2.324,
+        3.264,
+        3.291
+      ]
+    },
+    {
+      "file": "test-issue-353-path-hash-warn-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 17.19,
+      "secondsByExecution": [
+        13.948,
+        18.905,
+        18.717
+      ]
+    },
+    {
+      "file": "test-issue-96-hide-control-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 9.615666666666668,
+      "secondsByExecution": [
+        7.105,
+        11.092,
+        10.65
+      ]
+    },
+    {
+      "file": "test-issue-242-type-exclusions-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.44,
+      "secondsByExecution": [
+        4.897,
+        5.844,
+        5.579
+      ]
+    },
+    {
+      "file": "test-issue-406-packets-live-channel-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.835333333333334,
+      "secondsByExecution": [
+        4.57,
+        4.999,
+        4.937
+      ]
+    },
+    {
+      "file": "test-issue-180-packets-url-modal-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 20.19,
+      "secondsByExecution": [
+        16.914,
+        22.457,
+        21.199
+      ]
+    },
+    {
+      "file": "test-slideover-1168-munger-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.8729999999999998,
+      "secondsByExecution": [
+        3.083,
+        4.466,
+        4.07
+      ]
+    },
+    {
+      "file": "test-logo-pulse-1173-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.418666666666667,
+      "secondsByExecution": [
+        3.687,
+        4.942,
+        4.627
+      ]
+    },
+    {
+      "file": "test-issue-1122-packets-filter-ux-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8433333333333335,
+      "secondsByExecution": [
+        1.471,
+        2.078,
+        1.981
+      ]
+    },
+    {
+      "file": "test-issue-1122-details-row-clamp-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.007000000000001,
+      "secondsByExecution": [
+        3.968,
+        5.832,
+        5.221
+      ]
+    },
+    {
+      "file": "test-issue-258-column-widths-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 25.788,
+      "secondsByExecution": [
+        22.59,
+        28.13,
+        26.644
+      ]
+    },
+    {
+      "file": "test-issue-1128-packets-layout-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.2053333333333334,
+      "secondsByExecution": [
+        1.791,
+        2.523,
+        2.302
+      ]
+    },
+    {
+      "file": "test-issue-189-group-caret-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8366666666666667,
+      "secondsByExecution": [
+        1.443,
+        2.11,
+        1.957
+      ]
+    },
+    {
+      "file": "test-issue-254-affinity-toggle-mobile-aria-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 7.23,
+      "secondsByExecution": [
+        6.069,
+        7.984,
+        7.637
+      ]
+    },
+    {
+      "file": "test-issue-259-mobile-expanded-group-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.244666666666667,
+      "secondsByExecution": [
+        4.286,
+        5.831,
+        5.617
+      ]
+    },
+    {
+      "file": "test-issue-1128-multi-viewport-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.819333333333333,
+      "secondsByExecution": [
+        4.619,
+        6.548,
+        6.291
+      ]
+    },
+    {
+      "file": "test-issue-1136-live-region-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.6823333333333335,
+      "secondsByExecution": [
+        1.197,
+        1.979,
+        1.871
+      ]
+    },
+    {
+      "file": "test-live-multibyte-only-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 8.583,
+      "secondsByExecution": [
+        6.273,
+        9.878,
+        9.598
+      ]
+    },
+    {
+      "file": "test-issue-125-live-toggles-early-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 19.155666666666665,
+      "secondsByExecution": [
+        14.006,
+        22.092,
+        21.369
+      ]
+    },
+    {
+      "file": "test-issue-220-live-filter-readiness-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 22.893666666666665,
+      "secondsByExecution": [
+        18.948,
+        25.106,
+        24.627
+      ]
+    },
+    {
+      "file": "test-issue-1150-404-state-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.352,
+      "secondsByExecution": [
+        0.945,
+        1.585,
+        1.526
+      ]
+    },
+    {
+      "file": "test-issue-199-inactive-observer-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.483666666666667,
+      "secondsByExecution": [
+        1.061,
+        1.708,
+        1.682
+      ]
+    },
+    {
+      "file": "test-issue-1146-path-link-contrast-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.446000000000001,
+      "secondsByExecution": [
+        3.242,
+        5.082,
+        5.014
+      ]
+    },
+    {
+      "file": "test-issue-1705-subpath-contrast-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.646,
+      "secondsByExecution": [
+        0.446,
+        0.761,
+        0.731
+      ]
+    },
+    {
+      "file": "test-issue-1147-section-order-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8010000000000002,
+      "secondsByExecution": [
+        1.068,
+        2.156,
+        2.179
+      ]
+    },
+    {
+      "file": "test-issue-2073-recent-adverts-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 7.09,
+      "secondsByExecution": [
+        6.217,
+        7.546,
+        7.507
+      ]
+    },
+    {
+      "file": "test-issue-245-advert-intervals-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.9570000000000003,
+      "secondsByExecution": [
+        2.118,
+        3.414,
+        3.339
+      ]
+    },
+    {
+      "file": "test-issue-1151-orphan-separators-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.9963333333333333,
+      "secondsByExecution": [
+        1.444,
+        2.34,
+        2.205
+      ]
+    },
+    {
+      "file": "test-issue-1486-collapse-reopens-detail-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.472,
+      "secondsByExecution": [
+        2.029,
+        2.714,
+        2.673
+      ]
+    },
+    {
+      "file": "test-logo-rebrand-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.3160000000000003,
+      "secondsByExecution": [
+        1.75,
+        2.633,
+        2.565
+      ]
+    },
+    {
+      "file": "test-logo-theme-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.7260000000000002,
+      "secondsByExecution": [
+        1.245,
+        1.998,
+        1.935
+      ]
+    },
+    {
+      "file": "test-logo-default-sage-teal-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.3966666666666665,
+      "secondsByExecution": [
+        1.703,
+        2.762,
+        2.725
+      ]
+    },
+    {
+      "file": "test-issue-1109-hamburger-dropdown-visible-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8033333333333335,
+      "secondsByExecution": [
+        1.259,
+        2.117,
+        2.034
+      ]
+    },
+    {
+      "file": "test-live-layout-1178-1179-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.392333333333333,
+      "secondsByExecution": [
+        2.611,
+        3.793,
+        3.773
+      ]
+    },
+    {
+      "file": "test-issue-1205-live-controls-anchor-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.241333333333333,
+      "secondsByExecution": [
+        4.099,
+        5.858,
+        5.767
+      ]
+    },
+    {
+      "file": "test-live-mql-leak-1180-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.613,
+      "secondsByExecution": [
+        4.04,
+        4.835,
+        4.964
+      ]
+    },
+    {
+      "file": "test-issue-1204-live-panel-structure-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.158666666666667,
+      "secondsByExecution": [
+        4.08,
+        5.714,
+        5.682
+      ]
+    },
+    {
+      "file": "test-issue-1234-live-chrome-pass2-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.488,
+      "secondsByExecution": [
+        2.733,
+        3.861,
+        3.87
+      ]
+    },
+    {
+      "file": "test-issue-1206-vcr-overlap-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.4006666666666665,
+      "secondsByExecution": [
+        2.591,
+        3.815,
+        3.796
+      ]
+    },
+    {
+      "file": "test-issue-1833-legend-toggle-clickable-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.6976666666666667,
+      "secondsByExecution": [
+        2.113,
+        2.985,
+        2.995
+      ]
+    },
+    {
+      "file": "test-issue-1244-live-vcr-row-hints-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5.410666666666667,
+      "secondsByExecution": [
+        4.693,
+        5.864,
+        5.675
+      ]
+    },
+    {
+      "file": "test-issue-1510-live-nav-pin-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.0323333333333333,
+      "secondsByExecution": [
+        1.389,
+        2.101,
+        2.607
+      ]
+    },
+    {
+      "file": "test-live-fullscreen-1572-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.0613333333333332,
+      "secondsByExecution": [
+        1.549,
+        2.342,
+        2.293
+      ]
+    },
+    {
+      "file": "test-issue-1599-replay-freeze-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.010666666666666,
+      "secondsByExecution": [
+        3.49,
+        4.264,
+        4.278
+      ]
+    },
+    {
+      "file": "test-pr-1490-live-map-gpu-animations-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.1513333333333335,
+      "secondsByExecution": [
+        3.295,
+        4.61,
+        4.549
+      ]
+    },
+    {
+      "file": "test-issue-1648-m1-icons-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.6990000000000003,
+      "secondsByExecution": [
+        3.069,
+        4.025,
+        4.003
+      ]
+    },
+    {
+      "file": "test-issue-1648-m2-icons-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.095,
+      "secondsByExecution": [
+        1.412,
+        2.492,
+        2.381
+      ]
+    },
+    {
+      "file": "test-issue-1648-m3-icons-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.394666666666667,
+      "secondsByExecution": [
+        3.987,
+        4.597,
+        4.6
+      ]
+    },
+    {
+      "file": "test-issue-1648-m4-icons-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 13.578333333333333,
+      "secondsByExecution": [
+        12.997,
+        13.895,
+        13.843
+      ]
+    },
+    {
+      "file": "test-issue-1657-analytics-channels-group-sprites-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.135,
+      "secondsByExecution": [
+        1.695,
+        2.363,
+        2.347
+      ]
+    },
+    {
+      "file": "test-issue-1224-channels-mobile-ux-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 7.440333333333332,
+      "secondsByExecution": [
+        4.479,
+        8.933,
+        8.909
+      ]
+    },
+    {
+      "file": "test-issue-1367-channels-chat-app-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.667666666666667,
+      "secondsByExecution": [
+        2.061,
+        3.019,
+        2.923
+      ]
+    },
+    {
+      "file": "test-issue-2052-touch-target-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 19.30966666666667,
+      "secondsByExecution": [
+        16.273,
+        21.09,
+        20.566
+      ]
+    },
+    {
+      "file": "test-touch-targets.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.8516666666666666,
+      "secondsByExecution": [
+        0.583,
+        0.996,
+        0.976
+      ]
+    },
+    {
+      "file": "test-channel-proposals-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_INGESTOR_BIN": "./corescope-ingestor",
+        "FIXTURE_DB": "test-fixtures/e2e-fixture.db"
+      },
+      "output": "e2e",
+      "meanSeconds": 20.708333333333332,
+      "secondsByExecution": [
+        21.874,
+        20.011,
+        20.24
+      ]
+    },
+    {
+      "file": "test-channels-client-state-152-decrypt-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_INGESTOR_BIN": "./corescope-ingestor",
+        "FIXTURE_DB": "test-fixtures/e2e-fixture.db"
+      },
+      "output": "e2e",
+      "meanSeconds": 8.410333333333334,
+      "secondsByExecution": [
+        7.98,
+        8.644,
+        8.607
+      ]
+    },
+    {
+      "file": "test-issue-315-estimated-positions-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate",
+        "CORESCOPE_LEAFLET_DIR": "$LEAFLET_DIR"
+      },
+      "output": "e2e",
+      "setup": "leaflet-315",
+      "meanSeconds": 5.682666666666667,
+      "secondsByExecution": [
+        4.65,
+        6.435,
+        5.963
+      ]
+    },
+    {
+      "file": "test-issue-1236-map-mobile-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.169,
+      "secondsByExecution": [
+        2.425,
+        3.668,
+        3.414
+      ]
+    },
+    {
+      "file": "test-issue-1329-map-controls-accordion-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.4303333333333335,
+      "secondsByExecution": [
+        2.695,
+        3.842,
+        3.754
+      ]
+    },
+    {
+      "file": "test-issue-1273-qr-overlay-height-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.442,
+      "secondsByExecution": [
+        2.627,
+        3.857,
+        3.842
+      ]
+    },
+    {
+      "file": "test-issue-1281-location-row-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 20.979,
+      "secondsByExecution": [
+        23.193,
+        26.846,
+        12.898
+      ]
+    },
+    {
+      "file": "test-issue-1279-legend-p2-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.1256666666666666,
+      "secondsByExecution": [
+        1.765,
+        2.399,
+        2.213
+      ]
+    },
+    {
+      "file": "test-issue-1799-label-vocab-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.8633333333333333,
+      "secondsByExecution": [
+        2.201,
+        3.148,
+        3.241
+      ]
+    },
+    {
+      "file": "test-home-coverage-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.992,
+      "secondsByExecution": [
+        3.746,
+        5.683,
+        5.547
+      ]
+    },
+    {
+      "file": "test-issue-304-my-mesh-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8373333333333335,
+      "secondsByExecution": [
+        1.405,
+        2.13,
+        1.977
+      ]
+    },
+    {
+      "file": "test-issue-2027-my-mesh-node-page-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 7.748666666666668,
+      "secondsByExecution": [
+        6.32,
+        8.694,
+        8.232
+      ]
+    },
+    {
+      "file": "test-path-inspector-coverage-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.6776666666666669,
+      "secondsByExecution": [
+        1.357,
+        2.149,
+        1.527
+      ]
+    },
+    {
+      "file": "test-issue-1206-resize-observer-leak-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 30.474666666666668,
+      "secondsByExecution": [
+        22.17,
+        35.933,
+        33.321
+      ]
+    },
+    {
+      "file": "test-nav-drawer-1064-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 12.766333333333334,
+      "secondsByExecution": [
+        10.993,
+        14.289,
+        13.017
+      ]
+    },
+    {
+      "file": "test-issue-111-drawer-version-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 11.359333333333334,
+      "secondsByExecution": [
+        9.816,
+        12.367,
+        11.895
+      ]
+    },
+    {
+      "file": "test-audio-live-1297-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.7009999999999998,
+      "secondsByExecution": [
+        1.232,
+        1.994,
+        1.877
+      ]
+    },
+    {
+      "file": "test-audio-lab-1297-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.5236666666666667,
+      "secondsByExecution": [
+        1.971,
+        2.875,
+        2.725
+      ]
+    },
+    {
+      "file": "test-channel-decrypt-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.413,
+      "secondsByExecution": [
+        1.028,
+        1.654,
+        1.557
+      ]
+    },
+    {
+      "file": "test-channel-qr-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.662,
+      "secondsByExecution": [
+        1.238,
+        1.95,
+        1.798
+      ]
+    },
+    {
+      "file": "test-channel-color-picker-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.7793333333333334,
+      "secondsByExecution": [
+        1.358,
+        2.068,
+        1.912
+      ]
+    },
+    {
+      "file": "test-customize-theme-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.401666666666667,
+      "secondsByExecution": [
+        3.355,
+        3.468,
+        3.382
+      ]
+    },
+    {
+      "file": "test-customize-branding-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.4750000000000005,
+      "secondsByExecution": [
+        3.882,
+        4.876,
+        4.667
+      ]
+    },
+    {
+      "file": "test-customize-display-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.909333333333333,
+      "secondsByExecution": [
+        3.364,
+        4.261,
+        4.103
+      ]
+    },
+    {
+      "file": "test-customize-export-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.7936666666666667,
+      "secondsByExecution": [
+        2.274,
+        3.074,
+        3.033
+      ]
+    },
+    {
+      "file": "test-drag-manager-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.559333333333334,
+      "secondsByExecution": [
+        3.678,
+        4.977,
+        5.023
+      ]
+    },
+    {
+      "file": "test-issue-1567-corner-clears-drag-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.5086666666666666,
+      "secondsByExecution": [
+        2.004,
+        2.74,
+        2.782
+      ]
+    },
+    {
+      "file": "test-issue-1306-collisions-terminology-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 18.437,
+      "secondsByExecution": [
+        15.702,
+        19.864,
+        19.745
+      ]
+    },
+    {
+      "file": "test-issue-205-analytics-subtab-deeplinks-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 10.950333333333333,
+      "secondsByExecution": [
+        9.219,
+        11.902,
+        11.73
+      ]
+    },
+    {
+      "file": "test-issue-226-hash-stats-sort-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 14.807,
+      "secondsByExecution": [
+        13.119,
+        15.718,
+        15.584
+      ]
+    },
+    {
+      "file": "test-issue-236-analytics-sorting-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.725333333333333,
+      "secondsByExecution": [
+        4.004,
+        5.098,
+        5.074
+      ]
+    },
+    {
+      "file": "test-issue-1374-route-map-a11y-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 10.14,
+      "secondsByExecution": [
+        9.718,
+        10.599,
+        10.103
+      ]
+    },
+    {
+      "file": "test-channels-list-render-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.0893333333333337,
+      "secondsByExecution": [
+        1.77,
+        2.277,
+        2.221
+      ]
+    },
+    {
+      "file": "test-channels-selection-flow-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.695,
+      "secondsByExecution": [
+        1.323,
+        1.912,
+        1.85
+      ]
+    },
+    {
+      "file": "test-channels-add-modal-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.2243333333333335,
+      "secondsByExecution": [
+        1.842,
+        2.441,
+        2.39
+      ]
+    },
+    {
+      "file": "test-channels-share-color-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.8726666666666667,
+      "secondsByExecution": [
+        1.5,
+        2.086,
+        2.032
+      ]
+    },
+    {
+      "file": "test-channels-ws-batch-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.5493333333333332,
+      "secondsByExecution": [
+        1.186,
+        1.769,
+        1.693
+      ]
+    },
+    {
+      "file": "test-channels-ws-race-1498-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.0766666666666667,
+      "secondsByExecution": [
+        2.349,
+        3.467,
+        3.414
+      ]
+    },
+    {
+      "file": "test-channels-observed-path-hash-size-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.4740000000000002,
+      "secondsByExecution": [
+        1.104,
+        1.671,
+        1.647
+      ]
+    },
+    {
+      "file": "test-issue-1487-byop-modal-layout-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.6130000000000002,
+      "secondsByExecution": [
+        1.282,
+        1.79,
+        1.767
+      ]
+    },
+    {
+      "file": "test-issue-1630-reach-mobile-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.7493333333333334,
+      "secondsByExecution": [
+        1.61,
+        1.57,
+        2.068
+      ]
+    },
+    {
+      "file": "test-node-reach-coverage-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.7589999999999999,
+      "secondsByExecution": [
+        0.627,
+        0.834,
+        0.816
+      ]
+    },
+    {
+      "file": "test-reach-rank-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.7043333333333335,
+      "secondsByExecution": [
+        3.74,
+        5.244,
+        5.129
+      ]
+    },
+    {
+      "file": "test-issue-1640-compare-discovery-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.011,
+      "secondsByExecution": [
+        3.252,
+        4.476,
+        4.305
+      ]
+    },
+    {
+      "file": "test-1110-live-filter.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 4.525666666666666,
+      "secondsByExecution": [
+        3.553,
+        5.115,
+        4.909
+      ]
+    },
+    {
+      "file": "test-analytics-fluid-charts.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.6236666666666664,
+      "secondsByExecution": [
+        2.293,
+        2.807,
+        2.771
+      ]
+    },
+    {
+      "file": "test-e2e-1267-mobile-vcr.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 6.154333333333334,
+      "secondsByExecution": [
+        5.614,
+        6.44,
+        6.409
+      ]
+    },
+    {
+      "file": "test-issue-1274-legend-coverage-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 3.3513333333333333,
+      "secondsByExecution": [
+        2.696,
+        3.668,
+        3.69
+      ]
+    },
+    {
+      "file": "test-issue-1648-m5-icons-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 9.148,
+      "secondsByExecution": [
+        8.467,
+        9.498,
+        9.479
+      ]
+    },
+    {
+      "file": "test-live-dedup.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 6.673333333333333,
+      "secondsByExecution": [
+        6.259,
+        6.882,
+        6.879
+      ]
+    },
+    {
+      "file": "test-nodes-export-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.015,
+      "secondsByExecution": [
+        1.519,
+        2.292,
+        2.234
+      ]
+    },
+    {
+      "file": "test-show-neighbors.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 9.449,
+      "secondsByExecution": [
+        9.062,
+        9.668,
+        9.617
+      ]
+    },
+    {
+      "file": "test-a11y-1705-subpath-hop-prefix-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.029333333333333333,
+      "secondsByExecution": [
+        0.023,
+        0.034,
+        0.031
+      ]
+    },
+    {
+      "file": "test-a11y-1719-contrast-root-causes-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.03566666666666667,
+      "secondsByExecution": [
+        0.029,
+        0.041,
+        0.037
+      ]
+    },
+    {
+      "file": "test-nodes-favorite-rerender-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.2483333333333333,
+      "secondsByExecution": [
+        0.976,
+        1.432,
+        1.337
+      ]
+    },
+    {
+      "file": "test-xss-333-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.5643333333333334,
+      "secondsByExecution": [
+        0.414,
+        0.647,
+        0.632
+      ]
+    },
+    {
+      "file": "test-packet-trace-alignment-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1"
+      },
+      "output": "e2e",
+      "meanSeconds": 0.7123333333333334,
+      "secondsByExecution": [
+        0.55,
+        0.804,
+        0.783
+      ]
+    },
+    {
+      "file": "test-live-pulse-ring-weight-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.5719999999999996,
+      "secondsByExecution": [
+        2.082,
+        2.878,
+        2.756
+      ]
+    },
+    {
+      "file": "test-channel-modal-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.746333333333333,
+      "secondsByExecution": [
+        1.277,
+        2.062,
+        1.9
+      ]
+    },
+    {
+      "file": "test-node-reach-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.6333333333333335,
+      "secondsByExecution": [
+        1.19,
+        1.906,
+        1.804
+      ]
+    },
+    {
+      "file": "test-path-inspector-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 2.856,
+      "secondsByExecution": [
+        2.497,
+        3.144,
+        2.927
+      ]
+    },
+    {
+      "file": "test-issue-1522-trace-url-sync-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.4789999999999999,
+      "secondsByExecution": [
+        1.098,
+        1.713,
+        1.626
+      ]
+    }
+  ],
+  "exclusions": [
+    {
+      "file": "test-rx-coverage-mobile-nav-e2e.js",
+      "reason": "skips when clientRxCoverage is disabled, the default configuration."
+    }
+  ],
+  "metadata": {
+    "repository": "dborup/CoreScope",
+    "sourceWorkflowSha256": "c7591283434035556a480d98206c2db35bde0a05e865e0fc9c8b31a76fd63fa0",
+    "baselineHeadSha": "529e008c941f86c1901e21a62da85173e739200d",
+    "measuredExecutions": [
+      {
+        "runId": 38410864651,
+        "attempt": 1,
+        "headSha": "529e008c941f86c1901e21a62da85173e739200d"
+      },
+      {
+        "runId": 38410864651,
+        "attempt": 2,
+        "headSha": "529e008c941f86c1901e21a62da85173e739200d"
+      },
+      {
+        "runId": 38410864651,
+        "attempt": 3,
+        "headSha": "529e008c941f86c1901e21a62da85173e739200d"
+      }
+    ],
+    "algorithm": "Longest processing time first; tie by suite filename then shard id; execution order retained from baseline",
+    "permanentSlideOverGateMeanSeconds": 45.494,
+    "predictionLimitation": "Permanent slide-over repeat gate weight is bundled with its base suite; fixture/setup/coverage overhead is not included in suite prediction.",
+    "shardPredictions": [
+      {
+        "id": 1,
+        "port": 13581,
+        "predictedSuiteSeconds": 505.9773333333333,
+        "slideOverRepeats": 0,
+        "collectFrontendCoverage": false,
+        "suiteCount": 39
+      },
+      {
+        "id": 2,
+        "port": 13582,
+        "predictedSuiteSeconds": 506.17066666666665,
+        "slideOverRepeats": 0,
+        "collectFrontendCoverage": true,
+        "suiteCount": 58
+      },
+      {
+        "id": 3,
+        "port": 13583,
+        "predictedSuiteSeconds": 505.98266666666655,
+        "slideOverRepeats": 3,
+        "collectFrontendCoverage": false,
+        "suiteCount": 58
+      }
+    ]
+  }
+}

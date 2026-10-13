@@ -120,7 +120,7 @@ func TestForkGuardOnPublishSteps(t *testing.T) {
 
 func TestForkGuardLeavesTestJobsRunning(t *testing.T) {
 	deploy := readWorkflow(t, deployWorkflowRel)
-	for _, name := range []string{"go-test", "e2e-test", "image-check"} {
+	for _, name := range []string{"go-test", "e2e-test-1", "e2e-test-2", "e2e-test-3", "image-check"} {
 		job := workflowJob(t, deploy, name)
 		if cond := jobIf(job); cond != "" {
 			t.Errorf("%s must not gain a job-level condition; got %q", name, cond)
@@ -128,6 +128,13 @@ func TestForkGuardLeavesTestJobsRunning(t *testing.T) {
 		if strings.Contains(job, "github.repository") {
 			t.Errorf("%s must not be repository-guarded: tests and CI artifact uploads run on forks too", name)
 		}
+	}
+	report := workflowJob(t, deploy, "e2e-report")
+	if cond := strings.TrimSpace(jobIf(report)); cond != "${{ !cancelled() }}" {
+		t.Errorf("e2e-report must run after failed or skipped shards; got if %q", cond)
+	}
+	if strings.Contains(report, "github.repository") {
+		t.Error("e2e-report must not be repository-guarded")
 	}
 }
 
@@ -161,6 +168,75 @@ func TestForkGuardCount(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("%s: expected %d fork guards outside comments, found %d", c.rel, c.want, got)
+		}
+	}
+}
+
+// A single shared steps anchor prevents fixtures or setup from silently
+// diverging between shards. The alias jobs may vary only their local port
+// and shard identity, never their preparation or suite runner.
+func TestE2EShardsShareFixtureSteps(t *testing.T) {
+	deploy := readWorkflow(t, deployWorkflowRel)
+	first := workflowJob(t, deploy, "e2e-test-1")
+	if !strings.Contains(first, "    steps: &e2e-shard-steps\n") {
+		t.Fatal("shard 1 must declare the shared E2E steps anchor")
+	}
+	for _, c := range []struct{ job, shard, port string }{
+		{"e2e-test-1", "1", "13581"},
+		{"e2e-test-2", "2", "13582"},
+		{"e2e-test-3", "3", "13583"},
+	} {
+		job := workflowJob(t, deploy, c.job)
+		for _, want := range []string{
+			"      E2E_SHARD: '" + c.shard + "'\n",
+			"      E2E_PORT: '" + c.port + "'\n",
+			"      BASE_URL: http://localhost:" + c.port + "\n",
+			"    timeout-minutes: 150\n",
+		} {
+			if !strings.Contains(job, want) {
+				t.Errorf("%s must contain %q", c.job, want)
+			}
+		}
+		if c.shard != "1" && !strings.HasSuffix(strings.TrimSpace(job), "steps: *e2e-shard-steps") {
+			t.Errorf("%s must use the identical shared steps, without overrides", c.job)
+		}
+	}
+	previous := -1
+	for _, marker := range []string{
+		"bash tools/freshen-fixture.sh test-fixtures/e2e-fixture.db",
+		"sqlite3 test-fixtures/e2e-fixture.db <<'SQL'",
+		"./corescope-migrate -db test-fixtures/e2e-fixture.db",
+		"sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-2073-route-adverts.sql",
+		"sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-199-inactive-observer.sql",
+		"sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-245-advert-intervals.sql",
+		"./corescope-server -port \"$E2E_PORT\" -db test-fixtures/e2e-fixture.db -public public-instrumented &",
+		"node scripts/run-e2e-shard.js\n",
+	} {
+		index := strings.Index(first, marker)
+		if index <= previous {
+			t.Fatalf("fixture step %q is missing or out of order", marker)
+		}
+		previous = index
+	}
+}
+
+func TestE2ECoverageRunsOnCoreShardOnly(t *testing.T) {
+	deploy := readWorkflow(t, deployWorkflowRel)
+	first := workflowJob(t, deploy, "e2e-test-1")
+	if !strings.Contains(first, "node scripts/run-e2e-shard.js --core-shard") {
+		t.Error("coverage owner must be identified from the checked-in manifest")
+	}
+	const condition = "if: success() && github.event_name == 'push' && steps.shard-meta.outputs.core_shard == env.E2E_SHARD"
+	if !strings.Contains(first, condition) {
+		t.Error("coverage collection must stay push-only and run once on the core suite's shard")
+	}
+	if strings.Contains(first, "Generate frontend coverage badges") {
+		t.Error("per-shard badges must not replace the aggregate badge summary")
+	}
+	report := workflowJob(t, deploy, "e2e-report")
+	for _, need := range []string{"node scripts/report-e2e-shards.js", "Generate frontend coverage badges", "name: e2e-badges"} {
+		if !strings.Contains(report, need) {
+			t.Errorf("e2e-report must preserve %q", need)
 		}
 	}
 }
