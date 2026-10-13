@@ -3888,7 +3888,7 @@
         ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
         <div class="hex-dump">${createColoredHexDump(effectivePkt.raw_hex || pkt.raw_hex, ranges)}</div>` : ''}
 
-        ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode) : buildDecodedTable(decoded)}
+        ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode, effectivePkt) : buildDecodedTable(decoded)}
       </details>` : ''}
 
       ${observations.length > 1 ? `
@@ -4064,8 +4064,14 @@
     return rows ? `<table class="detail-decoded" style="width:100%;border-collapse:collapse;margin-top:8px">${rows}</table>` : '';
   }
 
-  function buildFieldTable(pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode) {
+  // #391 — `pathHops` belongs to one observation, but the caller falls back to
+  // the aggregate packet's bytes when that observation carries no raw_hex of
+  // its own. `hopPkt` keeps the hop rows with the packet that reported the
+  // hops, so the byte table can never pair one packet's hops with another's
+  // observer and canonical path. It defaults to the byte source.
+  function buildFieldTable(pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode, hopPkt) {
     const buf = pkt.raw_hex || '';
+    const hopOwner = hopPkt || pkt;
     const size = Math.floor(buf.length / 2);
     let rows = '';
 
@@ -4120,10 +4126,11 @@
     const hashSize = isNaN(pathByte0) ? 1 : ((pathByte0 >> 6) + 1);
     if (pathHops.length > 0) {
       rows += sectionRow('Path (' + pathHops.length + ' hops)', 'section-path');
+      const hopRp = canonicalPath(hopOwner, pathHops);
       for (let i = 0; i < pathHops.length; i++) {
         const hopOff = off + i * hashSize;
         const hex = String(pathHops[i] || '').toUpperCase();
-        const hopHtml = HopDisplay.renderHop(hex, hopEntryFor(pathHops[i], pkt.observer_id, canonicalPath(pkt, pathHops), i));
+        const hopHtml = HopDisplay.renderHop(hex, hopEntryFor(pathHops[i], hopOwner.observer_id, hopRp, i));
         const label = `Hop ${i} — ${hopHtml}`;
         rows += fieldRow(hopOff, label, hex, '');
       }

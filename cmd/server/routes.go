@@ -2174,10 +2174,15 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 			node, _ := result["node"].(map[string]interface{})
 			if role, _ := node["role"].(string); strings.EqualFold(role, "repeater") {
 				hidden, hideErr := s.isIdentityHidden(r.Context(), pubkey)
+				if hideErr != nil {
+					log.Printf("WARN isIdentityHidden(%s): %v", pubkey, hideErr)
+				}
 				if hideErr == nil && !hidden {
 					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
 						result["advertIntervals"] = adverts.intervals
 						result["advertRouteBackfill"] = adverts.counts.RouteMaskBackfill
+					} else {
+						log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, advertErr)
 					}
 				}
 			}

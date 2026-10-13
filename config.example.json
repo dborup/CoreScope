@@ -99,6 +99,7 @@
   "map": {
     "tiles": {
       "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
+      "_comment_legacy": "Legacy raw tile-URL overrides — \"tiles.dark\" / \"tiles.light\" at the top level, or \"darkUrl\" / \"lightUrl\" here — are still honoured: they apply when no provider was chosen in the browser and no darkDefault/lightDefault is set, i.e. precedence is browser choice > darkDefault/lightDefault > raw URL > built-in fallback. A raw URL carries no vendor metadata, so such a map shows the generic \"\u00a9 OpenStreetMap contributors\" credit (no vendor-specific or licence attribution), is never CSS-inverted in dark mode, and is capped at zoom 18 like the built-in OpenStreetMap default. Prefer darkDefault/lightDefault with a registered style id when you need the correct credit, licence link or a different zoom ceiling.",
       "darkDefault": "osm-dark",
       "lightDefault": "osm-standard",
       "providers": {
