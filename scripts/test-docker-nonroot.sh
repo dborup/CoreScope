@@ -22,12 +22,16 @@
 #      reads it; supervisor restarts of both programs; docker restart
 #   2  existing root-owned DB with WAL/SHM (copied fixture, hard-killed root
 #      run): only the listed paths change owner; WAL content survives; no
-#      symlink or hard link is followed
+#      symlink or hard link is followed; a root-written request is set aside
 #   3  read-only config mount + PUID/PGID: services read it; geo-filter save
-#      fails with 409 and a clear message; an unreadable config fails fast
+#      fails with 409 and a clear message; the same for a config.json that
+#      sits writable in the data volume; an unreadable config fails fast
 #   4  toggle off -> on -> off on one volume, in-place toggle via
-#      /app/data/.env + docker restart, rollback with set-owner 0:0
+#      /app/data/.env + docker restart, rollback with owners/restore-owners
 #   5  invalid settings fail fast and change nothing
+#   6  as the services' user inside the running container: the files root
+#      reads cannot be changed, replaced or removed; one created later stops
+#      the next start before root uses it; a root admin command is refused
 #
 # Environment: WAIT_S (default 120) per wait, LOG_DIR for container logs.
 # Exit: 0 all checks passed, 1 a check failed, 2 setup error.
@@ -230,7 +234,8 @@ C1=$(start fresh "$V1" "${ON[@]}")
 check_cmd "case 1: ready" ready "$C1"
 procs_as "case 1" "$C1" "$U:$G"
 ps_dump "case 1, fresh volume" "$C1"
-check "case 1: data dir owner" "$U:$G" "$(owner "$V1" .)"
+check "case 1: data dir keeps its owner, gets the services' group" "0:$G" "$(owner "$V1" .)"
+check "case 1: data dir group-writable and sticky" "1775" "$(as_root "$V1" 'stat -c %a /app/data')"
 check "case 1: meshcore.db owner" "$U:$G" "$(owner "$V1" meshcore.db)"
 publish "$C1" 1
 check_cmd "case 1: ingestor stored packet 1" wait_until "$WAIT_S" ing_tx_is "$C1" 1
@@ -283,9 +288,13 @@ C2=$(start rootdb-nonroot "$V2" "${ON[@]}")
 check_cmd "case 2: non-root run ready" ready "$C2"
 procs_as "case 2" "$C2" "$U:$G"
 ps_dump "case 2, migrated root-owned DB" "$C2"
-for f in . meshcore.db meshcore.db-wal meshcore.db-shm ping_scores_history.db prune-requests prune-requests/request-x.json; do
+for f in meshcore.db meshcore.db-wal meshcore.db-shm ping_scores_history.db prune-requests; do
     check "case 2: $f migrated" "$U:$G" "$(owner "$V2" "$f")"
 done
+check "case 2: data dir keeps its owner" "0:$G" "$(owner "$V2" .)"
+check "case 2: root-written request no longer pending" "absent" \
+    "$(as_root "$V2" '[ -e /app/data/prune-requests/request-x.json ] && echo present || echo absent')"
+check "case 2: root-written request set aside, still root's" "0:0" "$(owner "$V2" prune-requests/request-x.json.held)"
 check "case 2: unrelated files, symlink and hard link untouched" "$UNRELATED_BEFORE" \
     "$(tree "$V2" | grep -E '^\./(config\.json|theme\.json|notes|notes/keep\.txt|backup-old\.db|victim\.txt|victim2\.txt|client-rx-delete\.salt|client-rx-delete-audit\.jsonl) ')"
 check_cmd "case 2: symlink and hard link reported" sh -c "docker logs '$C2' 2>&1 | grep -q 'client-rx-delete.salt is a symlink' &&
@@ -324,6 +333,23 @@ if ready "$C3"; then
     echo "# info: off mode /app/config.json afterwards: $(dx "$C3" stat -c %F /app/config.json); host config unchanged: $([ "$(md5sum < "$TMP/config.json")" = "$CFG_SUM" ] && echo yes || echo no)"
 fi
 docker rm -fv "$C3" > /dev/null
+# The same refusal for a config.json that sits writable in the data volume
+# (no :ro mount): in this mode the server never replaces it (#339 review,
+# finding 2), whoever owns it and wherever the save would resolve to.
+for cfg_owner in 0:0 1000:1000; do
+    V3C=$(vol "inplace-${cfg_owner%%:*}")
+    as_root "$V3C" "printf '%s' '$CONFIG' > /app/data/config.json && chown $cfg_owner /app/data/config.json && chmod 644 /app/data/config.json"
+    CFG_STAT=$(as_root "$V3C" 'md5sum < /app/data/config.json; stat -c "%i %u:%g %a" /app/data/config.json')
+    C3=$(start "inplace-${cfg_owner%%:*}" "$V3C" "${ON[@]}")
+    check_cmd "case 3 (in-volume config $cfg_owner): ready" ready "$C3"
+    GEO=$(geo_put "$C3")
+    check "case 3 (in-volume config $cfg_owner): geo-filter save status" "409" "${GEO%% *}"
+    check "case 3 (in-volume config $cfg_owner): geo filter not applied" "" "$(dx "$C3" wget -qO- http://localhost:3000/api/config/geo-filter | grep -o '"polygon":\[\[')"
+    check "case 3 (in-volume config $cfg_owner): file, inode, owner and mode unchanged" "$CFG_STAT" \
+        "$(as_root "$V3C" 'md5sum < /app/data/config.json; stat -c "%i %u:%g %a" /app/data/config.json')"
+    check "case 3 (in-volume config $cfg_owner): no temp file left" "" "$(as_root "$V3C" 'ls -A /app/data | grep -F config.json. || true')"
+    docker rm -fv "$C3" > /dev/null
+done
 V3B=$(vol unreadable)
 as_root "$V3B" "printf '%s' '$CONFIG' > /app/data/config.json && chmod 600 /app/data/config.json"
 C3=$(start unreadable "$V3B" "${ON[@]}")
@@ -344,6 +370,10 @@ publish "$C4" 7
 check_cmd "case 4 off: packet stored and read" wait_until "$WAIT_S" api_tx_is "$C4" 1
 docker rm -fv "$C4" > /dev/null
 check "case 4 off: DB root-owned" "0:0" "$(owner "$V4" meshcore.db)"
+# Record the owners before the first enable, as the docs say.
+RECORD=$(docker run --rm --label "$LABEL" --pull never --network none -v "$V4:/app/data" \
+    --entrypoint /usr/local/lib/corescope/nonroot.sh "$IMAGE" owners)
+check_cmd "case 4: owners record lists the data dir" sh -c "printf '%s\n' '$RECORD' | grep -qx '0:0 755 \.'"
 C4=$(start toggle-on "$V4" "${ON[@]}")
 check_cmd "case 4 on: ready" ready "$C4"
 procs_as "case 4 on" "$C4" "$U:$G"
@@ -376,13 +406,17 @@ timeout 120 docker restart "$C4" > /dev/null
 check_cmd "case 4 in place off: ready" ready "$C4"
 procs_as "case 4 in place off" "$C4" "0:0"
 timeout 60 docker stop "$C4" > /dev/null
-ROLLBACK=$(docker run --rm --label "$LABEL" --pull never --network none --volumes-from "$C4" \
-    --entrypoint /usr/local/lib/corescope/nonroot.sh "$IMAGE" set-owner 0:0 2>&1)
+ROLLBACK=$(printf '%s\n' "$RECORD" | docker run --rm -i --label "$LABEL" --pull never --network none --volumes-from "$C4" \
+    --entrypoint /usr/local/lib/corescope/nonroot.sh "$IMAGE" restore-owners 2>&1)
+check "case 4 rollback: restore-owners exit status" "0" "$?"
 echo "# rollback: $ROLLBACK"
-for f in . meshcore.db ping_scores_history.db; do
-    check "case 4 rollback: $f back to root" "0:0" "$(owner "$V4" "$f")"
-done
+while read -r own mode name; do
+    check "case 4 rollback: $name back to $own $mode" "$own $mode" "$(as_root "$V4" "stat -c '%u:%g %a' '/app/data/$name'")"
+done <<< "$RECORD"
 check "case 4 rollback: config untouched" "0:0" "$(owner "$V4" config.json)"
+docker start "$C4" > /dev/null
+check_cmd "case 4 after rollback: ready" ready "$C4"
+check "case 4 after rollback: no [nonroot] line" "0" "$(docker logs --since 1m "$C4" 2>&1 | grep -c '^\[nonroot\]')"
 docker rm -fv "$C4" > /dev/null
 
 # ---------------------------------------------------------------------------
@@ -406,6 +440,52 @@ for args in "CORESCOPE_RUN_AS_NONROOT=yes CORESCOPE_UID=$U CORESCOPE_GID=$G" \
     docker rm -fv "$C5" > /dev/null
 done
 check "case 5: volume unchanged" "$BEFORE5" "$(tree "$V5")"
+
+# ---------------------------------------------------------------------------
+echo "# case 6: the services' user cannot change what root reads"
+V6=$(vol access)
+as_root "$V6" "printf '%s' '$CONFIG' > /app/data/config.json && echo '{}' > /app/data/theme.json &&
+    chown 1000:1000 /app/data/theme.json"
+C6=$(start access "$V6" "${ON[@]}")
+check_cmd "case 6: ready" ready "$C6"
+ROOT_FILES=$(as_root "$V6" 'cd /app/data && md5sum config.json theme.json && stat -c "%n %i %u:%g %a" config.json theme.json')
+svc_try() { # LABEL SCRIPT — must be refused for the services' user
+    if dx -u "$U:$G" "$C6" sh -c "cd /app/data && $2" > /dev/null 2>&1; then check "case 6: $1 refused" refused allowed
+    else check "case 6: $1 refused" refused refused; fi
+}
+for f in config.json theme.json; do
+    svc_try "$f write" "echo x >> $f"
+    svc_try "$f remove" "rm -f $f && test ! -e $f"
+    svc_try "$f replace by rename" "echo '{}' > new.json && mv -f new.json $f"
+    svc_try "$f replace by symlink" "ln -sfn /etc/hostname $f"
+done
+svc_try "data dir mode change" "chmod -t /app/data"
+check "case 6: root-read files unchanged" "$ROOT_FILES" \
+    "$(as_root "$V6" 'cd /app/data && md5sum config.json theme.json && stat -c "%n %i %u:%g %a" config.json theme.json')"
+# A missing .env can be created (the directory must stay writable for SQLite);
+# the next start must refuse it before root reads it.
+check_cmd "case 6: services can create a missing .env" dx -u "$U:$G" "$C6" sh -c \
+    'printf "CORESCOPE_RUN_AS_NONROOT=0\ntouch /app/data/ran-as-root\n" > /app/data/.env'
+timeout 120 docker restart "$C6" > /dev/null
+timeout 60 docker wait "$C6" > "$TMP/rc" 2>&1
+check "case 6: next start refused" "1" "$(cat "$TMP/rc")"
+check_cmd "case 6: and says why" sh -c "docker logs '$C6' 2>&1 | grep -q '^\[nonroot\] ERROR: .*\.env'"
+check "case 6: .env not sourced by root" "absent" "$(as_root "$V6" '[ -e /app/data/ran-as-root ] && echo present || echo absent')"
+as_root "$V6" "rm /app/data/.env"
+docker start "$C6" > /dev/null
+check_cmd "case 6: ready again after the operator removed it" ready "$C6"
+procs_as "case 6 after recovery" "$C6" "$U:$G"
+# Admin commands: root is refused and writes nothing; the services' user works.
+PUBKEY=$(printf 'c0ffee39%.0s' 1 2 3 4 5 6 7 8)
+dx "$C6" /app/corescope-ingestor -config /app/config.json admin delete-client-rx --pubkey "$PUBKEY" --wait 5s > "$TMP/admin" 2>&1
+check "case 6: root admin delete exit status" "1" "$?"
+check_cmd "case 6: root admin delete says why" grep -q 'refusing to run as root' "$TMP/admin"
+check "case 6: root admin delete wrote no request" "" \
+    "$(as_root "$V6" 'ls /app/data/client-rx-deletes 2>/dev/null | grep "^request-" || true')"
+dx -u "$U:$G" "$C6" /app/corescope-ingestor -config /app/config.json admin delete-client-rx --pubkey "$PUBKEY" --wait 60s > "$TMP/admin" 2>&1
+check "case 6: admin delete as the services' user exit status" "0" "$?"
+check_cmd "case 6: admin delete as the services' user ran" grep -q '^deleted client_receptions=' "$TMP/admin"
+docker rm -fv "$C6" > /dev/null
 
 echo "1..$CHECKS"
 if [ "$FAILS" -eq 0 ]; then

@@ -3,8 +3,9 @@
 #
 # No Docker and no root: exercises the helper's pure parts (supervisor config
 # rendering, setting/ID validation, the writable-path list) and the docs.
-# The ownership migration itself needs root and is covered by
-# scripts/test-docker-nonroot.sh against a built image.
+# What needs root (ownership changes, the check before root uses files in the
+# data dir, rollback) is covered in CI by scripts/test-nonroot-entrypoint.sh
+# and locally by scripts/test-docker-nonroot.sh against a built image.
 #
 # Run: bash scripts/test-nonroot-helper.sh
 # SHELL_UNDER_TEST=busybox-sh-like command to run the helper with (default sh).
@@ -121,8 +122,10 @@ validate_case "system gid (shadow)" fail 1 1000 42
 # in the migration list, or a non-root service hits a root-owned leftover.
 paths=$(helper paths)
 go_const() { sed -En "s/^[[:space:]]*(const[[:space:]]+)?$2[[:space:]]*=[[:space:]]*\"([^\"]*)\".*/\2/p" "$ROOT/$1" | head -1; }
-expect_paths="meshcore.db meshcore.db-wal meshcore.db-shm
-ping_scores_history.db ping_scores_history.db-wal ping_scores_history.db-shm"
+# -journal too: the data dir is sticky in this mode, so a root-owned hot
+# journal left by a crashed root run could not be removed by SQLite.
+expect_paths="meshcore.db meshcore.db-wal meshcore.db-shm meshcore.db-journal
+ping_scores_history.db ping_scores_history.db-wal ping_scores_history.db-shm ping_scores_history.db-journal"
 for spec in cmd/ingestor/client_rx_delete.go:clientRxSaltFileName \
     cmd/ingestor/client_rx_delete.go:clientRxAuditFileName \
     cmd/ingestor/client_rx_delete_queue.go:clientRxQueueDirName \
@@ -151,9 +154,18 @@ for doc in docker-compose.example.yml docs/deployment.md; do
     done
 done
 section=$(awk '/^### Running the Go services without root/{on=1;print;next} on&&/^##[^#]/{on=0} on&&/^### /&&!/without root/{on=0} on' "$ROOT/docs/deployment.md")
-for want in 'scripts/backup-sqlite.sh' 'Rollback' 'set-owner' 'host'; do
+for want in 'scripts/backup-sqlite.sh' 'Rollback' 'set-owner' 'host' 'nonroot.sh owners' 'restore-owners' \
+    'sticky' 'dedicated' '\[nonroot\] ERROR' 'docker exec -u'; do
     if printf '%s\n' "$section" | grep -q -- "$want"; then ok; else bad "deployment.md non-root section lacks '$want'"; fi
 done
+# The services must not own the data directory or the files root reads, so
+# neither the docs nor the compose example may suggest the host owner's IDs.
+for doc in docker-compose.example.yml docs/deployment.md; do
+    if grep -qE 'id -[ug]' "$ROOT/$doc"; then bad "$doc suggests the host owner's IDs (id -u/id -g) for CORESCOPE_UID/GID"; else ok; fi
+done
+
+# The container start path runs in CI with supervisord stubbed.
+if grep -q 'bash scripts/test-nonroot-entrypoint.sh' "$ROOT/.github/workflows/deploy.yml"; then ok; else bad "deploy.yml does not run scripts/test-nonroot-entrypoint.sh"; fi
 
 echo "test-nonroot-helper: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

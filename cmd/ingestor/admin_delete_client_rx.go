@@ -144,6 +144,9 @@ func runAdminDeleteClientRxDryRun(dbPath, key string) int {
 	return 0
 }
 
+// clientRxGeteuid is os.Geteuid; a package var so tests can model a root CLI.
+var clientRxGeteuid = os.Geteuid
+
 func runAdminDeleteClientRxOnline(dbPath, key string, wait time.Duration) int {
 	id := clientRxNewID()
 	if err := clientRxWriteRequest(dbPath, clientRxDeleteRequest{
