@@ -62,6 +62,10 @@ function loadPackets(nodes, observers) {
     payloadTypeName: () => 'ADVERT', payloadTypeColor: () => 'info',
     routeTypeName: () => 'FLOOD', transportBadge: () => '', scopeCellHtml: () => '',
     getPathLenOffset: () => 1,
+    // app.js helpers buildFieldTable needs. Only the Path Length row's
+    // wording depends on pathHashSizeFromByte; the hop rows under test do not.
+    isTransportRoute: rt => rt === 0 || rt === 3,
+    pathHashSizeFromByte: () => null,
     truncate: (s, n) => String(s).length > n ? String(s).slice(0, n) + '…' : String(s),
     registerPage() {}, onWS() {}, offWS() {}, debouncedOnWS: fn => fn,
     CLIENT_TTL: {},
@@ -671,6 +675,72 @@ test('canonical answers are fresh after page destroy/remount and heuristic cache
   await T.resolveIncomingHops([b, c]);
   assert(/FAR-AWAY/.test(T.buildFlatRowHtml(a)) && /NEAR-ONE/.test(T.buildFlatRowHtml(b)), 'remount overwrote row answers');
   assert(warnCount(T.renderPath(['ef'], 'OBS-I', {packet: c, summary: true})) === 1, 'remount null answer must be uncertain');
+});
+
+section('#391 follow-up: the canonicalPath length guard is observable');
+
+// canonicalPath() only trusts a resolved_path whose length matches the row's
+// path_json. Removing that guard (review mutant M7) left every suite green,
+// so these two checks pin it from both directions. C1-ALPHA shares no prefix
+// with "ef", so it can only appear if a mismatched answer was read anyway.
+test('a resolved_path shorter than path_json confers certainty at no position', async () => {
+  const T = loadPackets([FAR, NEAR, C1A], [OBS_I]);
+  const p = { observer_id: 'OBS-I', path_json: '["ef","ef"]', resolved_path: [C1A.public_key] };
+  await T.cacheResolvedPaths([p]);
+  await T.resolveHopsForPackets([p]);
+  const html = T.renderPath(['ef', 'ef'], 'OBS-I', { summary: true, packet: p });
+  assert(!/C1-ALPHA/.test(html), 'a 1-entry answer must not name a hop of a 2-hop path: ' + html);
+  assert(warnCount(html) === 2, 'both hops stay heuristic and uncertain: ' + html);
+});
+
+test('a resolved_path longer than path_json confers certainty at no position', async () => {
+  const T = loadPackets([FAR, NEAR, C1A], [OBS_I]);
+  const p = { observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: JSON.stringify([C1A.public_key, FAR.public_key]) };
+  await T.cacheResolvedPaths([p]);
+  await T.resolveHopsForPackets([p]);
+  const html = T.renderPath(['ef'], 'OBS-I', { summary: true, packet: p });
+  assert(!/C1-ALPHA/.test(html), 'a 2-entry answer must not name the single hop: ' + html);
+  assert(warnCount(html) === 1, 'the hop stays heuristic and uncertain: ' + html);
+});
+
+test('a matching length is still trusted (control)', async () => {
+  const T = loadPackets([FAR, NEAR, C1A], [OBS_I]);
+  const p = { observer_id: 'OBS-I', path_json: '["ef"]', resolved_path: [C1A.public_key] };
+  await T.cacheResolvedPaths([p]);
+  await T.resolveHopsForPackets([p]);
+  const html = T.renderPath(['ef'], 'OBS-I', { summary: true, packet: p });
+  assert(/C1-ALPHA/.test(html) && warnCount(html) === 0, 'an aligned answer must still win: ' + html);
+});
+
+section('#391 follow-up: the byte table reads hops from the observation');
+
+// renderDetail falls back to the aggregate packet's bytes when an observation
+// carries no raw_hex of its own, but `pathHops` always belongs to the
+// observation. buildFieldTable therefore takes the hop owner separately, so
+// the byte rows cannot pair one packet's hops with another's canonical path.
+const BYTE_HEX = '1501EFDEADBEEF'; // header, path_len=0x01 (1 hop, 1 byte), hop "ef"
+
+test('the hop owner argument, not the byte source, supplies the canonical path', async () => {
+  const T = loadPackets([FAR, NEAR, C1A], [OBS_I, OBS_B]);
+  const aggregate = { observer_id: 'OBS-B', raw_hex: BYTE_HEX, route_type: 1, payload_type: 1,
+    path_json: '["ef"]', resolved_path: [FAR.public_key] };
+  const obs = { observer_id: 'OBS-I', route_type: 1, payload_type: 1,
+    path_json: '["ef"]', resolved_path: [C1A.public_key] };
+  await T.cacheResolvedPaths([aggregate, obs]);
+  await T.resolveHopsForPackets([aggregate, obs]);
+  const html = T.buildFieldTable(aggregate, {}, ['ef'], {}, null, null, obs);
+  assert(/C1-ALPHA/.test(html), 'the observation owns the hops, so its canonical node is shown: ' + html);
+  assert(!/FAR-AWAY/.test(html), 'the aggregate canonical path must not reach the byte table: ' + html);
+});
+
+test('without a hop owner the byte source still supplies the canonical path (control)', async () => {
+  const T = loadPackets([FAR, NEAR, C1A], [OBS_I, OBS_B]);
+  const aggregate = { observer_id: 'OBS-B', raw_hex: BYTE_HEX, route_type: 1, payload_type: 1,
+    path_json: '["ef"]', resolved_path: [FAR.public_key] };
+  await T.cacheResolvedPaths([aggregate]);
+  await T.resolveHopsForPackets([aggregate]);
+  const html = T.buildFieldTable(aggregate, {}, ['ef'], {});
+  assert(/FAR-AWAY/.test(html), 'a single-packet call is unchanged: ' + html);
 });
 
 test('30K realistic rows use linear positional lookups, bounded heuristic cache and constant requests', async () => {

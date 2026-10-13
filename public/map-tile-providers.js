@@ -34,6 +34,10 @@
   var _serverDefaultLight = null;
   
   var INVERT_CSS   = 'invert(1) hue-rotate(180deg) brightness(0.9) contrast(1.05)';
+  /* #364/#390 — a legacy raw tile URL carries no vendor metadata, so it
+   * keeps the historical generic credit. Documented for operators in
+   * config.example.json `map.tiles._comment_legacy`. */
+  var LEGACY_ATTRIBUTION = '© OpenStreetMap contributors';
 
   var _cfg = null;
 
@@ -157,14 +161,21 @@
   }
 
   
-  function getActiveId() {
+  // #390 — mirror of getSelectedLightId(): a valid explicit choice can
+  // itself be the built-in fallback id, so an implicit fallback has to stay
+  // distinguishable from one the operator or user actually picked.
+  function getSelectedDarkId() {
     try {
       var stored = window.localStorage && window.localStorage.getItem(STORAGE_KEY);
       if (_hasId(stored) && REGISTRY[stored].type === 'dark') return stored;
     } catch (_) {}
     if (_cfg && _cfg.darkDefault && _hasId(_cfg.darkDefault)) return _cfg.darkDefault;
     if (_hasId(_serverDefault)) return _serverDefault;
-    return DEFAULT_ID;
+    return null;
+  }
+
+  function getActiveId() {
+    return getSelectedDarkId() || DEFAULT_ID;
   }
 
   // A valid explicit choice can itself be the built-in fallback id. Keep
@@ -221,10 +232,12 @@
       return;
     }
 
+    // #390 — resolve through getTileSpec so the legacy-URL branch is
+    // honoured here too. A legacy dark URL is an operator's own dark
+    // tileset; inverting it on top of that renders the map light.
     var isDark = _isDarkEffective();
-    var id = isDark ? getActiveId() : getActiveLightId();
-    var p  = REGISTRY[id];
-    pane.style.filter = (isDark && p && p.invertFilter) ? p.invertFilter : '';
+    var spec = getTileSpec(isDark ? 'dark' : 'light');
+    pane.style.filter = (isDark && spec && spec.invertFilter) ? spec.invertFilter : '';
   }
 
 
@@ -242,17 +255,21 @@
    */
   function getTileSpec(type) {
     var isLight  = (type === 'light');
-    // #364 precedence: browser selection > configured provider default >
-    // legacy light URL > built-in fallback. roles.js records the actual
-    // loaded URL, not TILE_LIGHT's always-present built-in value. Unknown
-    // custom vendors keep the historical generic credit and no inversion;
-    // id:null means this is not a registry provider with vendor metadata.
-    var legacyLightUrl = window.MC_LIGHT_TILE_URL_OVERRIDE;
-    if (isLight && !getSelectedLightId() && typeof legacyLightUrl === 'string' && legacyLightUrl) {
-      return { id: null, url: legacyLightUrl, attribution: '© OpenStreetMap contributors', refUrl: null, maxZoom: BASE_STYLES[DEFAULT_ID_LIGHT].maxZoom, invertFilter: null };
+    var fallback = isLight ? DEFAULT_ID_LIGHT : DEFAULT_ID;
+    // #364/#390 precedence, applied per theme: browser selection >
+    // configured provider default > legacy URL > built-in fallback.
+    // roles.js records the actual loaded URL, not TILE_DARK/TILE_LIGHT's
+    // always-present built-in value. Unknown custom vendors keep the
+    // historical generic credit and no inversion; id:null means this is
+    // not a registry provider with vendor metadata. #390 gives dark the
+    // branch light got in #366 — `tiles.dark` / `map.tiles.darkUrl` were
+    // masked by the registry default the same way.
+    var legacyUrl = isLight ? window.MC_LIGHT_TILE_URL_OVERRIDE : window.MC_DARK_TILE_URL_OVERRIDE;
+    var selected  = isLight ? getSelectedLightId() : getSelectedDarkId();
+    if (!selected && typeof legacyUrl === 'string' && legacyUrl) {
+      return { id: null, url: legacyUrl, attribution: LEGACY_ATTRIBUTION, refUrl: null, maxZoom: BASE_STYLES[fallback].maxZoom, invertFilter: null };
     }
     var id       = isLight ? getActiveLightId() : getActiveId();
-    var fallback = isLight ? DEFAULT_ID_LIGHT : DEFAULT_ID;
     var p        = REGISTRY[id] || BASE_STYLES[id] || BASE_STYLES[fallback];
     var u        = p ? (p.url || p.baseUrl) : null;
     return {
