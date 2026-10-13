@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const root = __dirname;
+const HELPER = path.join(root, 'scripts/backup-sqlite.sh');
 let passed = 0;
 let failed = 0;
 let skipped = 0;
@@ -64,6 +65,24 @@ const capabilities = {
       finally { fs.rmSync(dir, {recursive:true, force:true}); }
     }},
 };
+// Every caller runs the helper as `sh …`, and /bin/sh differs between hosts:
+// dash (Debian, Ubuntu), bash in POSIX mode (RHEL, Fedora, Arch; bash 3.2 on
+// macOS) or BusyBox ash (Alpine). Each runs as a symlink named `sh`, which is
+// what puts bash into POSIX mode. CORESCOPE_TEST_BASH picks the bash binary,
+// e.g. a bash 3.2, which clears the script's arguments on `command exec`
+// inside a function (#424 review F1) where bash 5 does not.
+const SHELLS = {'bash as sh':process.env.CORESCOPE_TEST_BASH || 'bash', dash:'dash', 'busybox sh':'busybox'};
+for (const [key, tool] of Object.entries(SHELLS)) capabilities[key] = {tool,
+  reason:tool + ' cannot run a script as sh here',
+  probe:() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'corescope-backup-probe-'));
+    try {
+      const found = locate(tool);
+      if (!found) return false;
+      fs.symlinkSync(found, path.join(dir, 'sh'));
+      return probe(path.join(dir, 'sh'), ['-c', 'exit 7'], 7);
+    } finally { fs.rmSync(dir, {recursive:true, force:true}); }
+  }};
 // A seam, so the skip path itself is covered on a host that has every tool.
 const forcedMissing = new Set((process.env.CORESCOPE_TEST_MISSING_TOOLS || '').split(',').filter(Boolean));
 const probed = new Map();
@@ -270,10 +289,10 @@ function fixture(fn, options = {}) {
   const id = crypto.randomBytes(32).toString('hex');
   fs.writeFileSync(statePath, JSON.stringify({data, id, running:options.running !== false, calls:[],
     events:[], groupSignals:0, copiedWhileRunning:[], walCopyRunning:[]}));
-  const locks = path.join(dir, 'locks');
+  const locks = path.join(dir, 'locks'), lockDir = path.join(locks, 'corescope-backup-locks');
   const env = {...process.env, PATH:bin + path.delimiter + process.env.PATH, MOCK_STATE:statePath,
     CONTAINER:'corescope-test', RESTORE_DIR:incoming, MOCK_BACKUP_ROOT:snapshots, CORESCOPE_BACKUP_LOCK_DIR:locks};
-  const f = {dir, data, incoming, snapshots, env, id, lock:path.join(locks, 'corescope-backup-' + id + '.lock'),
+  const f = {dir, data, incoming, snapshots, env, id, locks, lockDir, lock:path.join(lockDir, 'corescope-backup-' + id + '.lock'),
     state:() => JSON.parse(fs.readFileSync(statePath, 'utf8')),
     // Container state once any stop already in progress has completed.
     settledRunning:() => {
@@ -281,10 +300,10 @@ function fixture(fn, options = {}) {
       if (state.stopAt) sleep(state.stopAt - Date.now() + 5);
       settle(state); return state.running;
     },
-    backup:(extra={}, {target=snapshots, cwd=dir, group=false}={}) => {
+    backup:(extra={}, {target=snapshots, cwd=dir, group=false, helper=HELPER}={}) => {
       // group: run in a new session so the mock can signal the helper's whole
       // process group, like a terminal hangup, Ctrl-C or a supervisor would.
-      const argv = ['sh', path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', target];
+      const argv = ['sh', helper, 'corescope-test', target];
       if (group) argv.unshift(gated('setsid'), '-w');
       return spawnSync(argv[0], argv.slice(1), {env:{...env,...extra}, cwd, encoding:'utf8', timeout:10000});
     },
@@ -302,7 +321,7 @@ function fixture(fn, options = {}) {
 const calls = (f, op) => f.state().calls.filter(c => c[0] === op);
 // Every tool the helper runs. A PATH with some of them left out models a host
 // without them, e.g. macOS, which ships neither setsid(1) nor flock(1).
-const HELPER_TOOLS = ['sh','mkdir','mktemp','date','chmod','rm','mv','rmdir','sleep','ps','node','setsid','flock'];
+const HELPER_TOOLS = ['sh','mkdir','mktemp','date','chmod','rm','mv','rmdir','sleep','ps','node','setsid','flock','ls','id'];
 function pathWithout(f, omit) {
   const tools = fs.mkdtempSync(path.join(f.dir, 'tools-'));
   for (const tool of HELPER_TOOLS.filter(t => !omit.includes(t))) {
@@ -777,8 +796,10 @@ function deadPid() {
   const pid = Number(spawnSync('/bin/sh', ['-c', 'echo $$'], {encoding:'utf8'}).stdout.trim());
   assert(pid > 1); return pid;
 }
+// The helper's private lock directory, as it creates it: mode 0700, this user's.
+function privateLockDir(f) { fs.mkdirSync(f.lockDir, {recursive:true, mode:0o700}); fs.chmodSync(f.lockDir, 0o700); }
 function plantLock(f, owner) {
-  fs.mkdirSync(f.lock, {recursive:true});
+  privateLockDir(f); fs.mkdirSync(f.lock);
   if (owner !== undefined) fs.writeFileSync(path.join(f.lock, 'pid'), owner + '\n');
 }
 const touched = f => f.state().events.filter(([, kind]) => kind !== 'inspect-id');
@@ -854,7 +875,7 @@ for (const backend of Object.keys(LOCK_BACKENDS))
     let PATH, holder = ':';
     if (backend === 'mkdir') { PATH = pathWithout(f, ['flock']); plantLock(f, process.pid); }
     else {
-      PATH = LOCK_BACKENDS.flock(f); fs.mkdirSync(path.dirname(f.lock));
+      PATH = LOCK_BACKENDS.flock(f); privateLockDir(f);
       holder = `${quote(gated('flock'))} "$LOCK" sh -c ': >"$MOCK_SYNC/held"; until [ -e "$MOCK_SYNC/release" ]; do sleep 0.02; done' &
         until [ -e "$S/held" ]; do sleep 0.02; done`;
     }
@@ -875,10 +896,10 @@ for (const backend of Object.keys(LOCK_BACKENDS))
     else assert.strictEqual(fs.existsSync(path.join(sync, 'lock')), false, 'the holder lost its flock lock');
   }));
 
-for (const [backend, wrong] of [['flock', 'directory'], ['mkdir', 'file'], ['mkdir', 'symlink']])
+for (const [backend, wrong] of [['flock', 'directory'], ['flock', 'symlink'], ['mkdir', 'file'], ['mkdir', 'symlink']])
   test('a ' + wrong + ' at the ' + backend + ' lock path fails clearly without touching the container', () => fixture(f => {
     const PATH = LOCK_BACKENDS[backend](f);
-    fs.mkdirSync(path.dirname(f.lock));
+    privateLockDir(f);
     if (wrong === 'directory') fs.mkdirSync(f.lock);
     else if (wrong === 'file') fs.writeFileSync(f.lock, '');
     else fs.symlinkSync(f.dir, f.lock);
@@ -904,16 +925,76 @@ for (const id of ['', 'not-an-id', 'a'.repeat(63), '../' + 'a'.repeat(61)])
 
 test('the lock lives in /tmp unless CORESCOPE_BACKUP_LOCK_DIR is set, whatever TMPDIR says', () => fixture(f => {
   const PATH = LOCK_BACKENDS.flock(f);
-  const lock = path.join('/tmp', path.basename(f.lock));
+  const dir = path.join('/tmp', path.basename(f.lockDir)), lock = path.join(dir, path.basename(f.lock));
+  const existed = fs.existsSync(dir);
   try {
     const env = {...f.env, PATH, TMPDIR:path.join(f.dir, 'tmpdir')}; delete env.CORESCOPE_BACKUP_LOCK_DIR;
     const result = spawnSync('sh', [path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', f.snapshots],
       {env, encoding:'utf8', timeout:10000});
     assert.strictEqual(result.status, 0, result.stderr);
-    assert(fs.lstatSync(lock).isFile(), 'no lock file in /tmp');
+    assert(fs.lstatSync(lock).isFile(), 'no lock file in ' + dir);
     assert.strictEqual(fs.existsSync(path.join(f.dir, 'tmpdir')), false);
-  } finally { fs.rmSync(lock, {force:true}); }
+  } finally {
+    fs.rmSync(lock, {force:true});
+    if (!existed) try { fs.rmdirSync(dir); } catch { /* another run's lock is in it */ }
+  }
 }));
+
+// #424 review F4: /tmp is writable by every user, so a lock path directly in
+// it could be a symlink planted between the helper's check and its open. The
+// locks therefore live in a directory that only this user can write to, which
+// the helper verifies after creating it, inside a parent where no other user
+// can rename it away (sticky like /tmp, or not writable by others).
+const lsAs = (f, uid) => {
+  // ls(1) reporting the private lock directory as uid's, as for a directory
+  // another user created first. Everything else is the real ls.
+  const shim = path.join(f.dir, 'bin', 'ls');
+  fs.writeFileSync(shim, `#!/bin/sh
+for last; do :; done
+case "$last" in */corescope-backup-locks) ${quote(which('ls'))} "$@" | sed 's/^\\([^ ]*  *[^ ]*  *\\)[0-9][0-9]*/\\1${uid}/'; exit ;; esac
+exec ${quote(which('ls'))} "$@"
+`, {mode:0o700});
+};
+const idAs = (f, uid) => fs.writeFileSync(path.join(f.dir, 'bin', 'id'),
+  `#!/bin/sh\nif [ "$1" = -u ]; then echo ${uid}; else exec ${quote(which('id'))} "$@"; fi\n`, {mode:0o700});
+for (const backend of Object.keys(LOCK_BACKENDS)) {
+  test('the ' + backend + ' lock lives in a private directory of this user', () => fixture(f => {
+    const result = f.backup({PATH:LOCK_BACKENDS[backend](f)});
+    assert.strictEqual(result.status, 0, result.stderr);
+    const dir = fs.lstatSync(f.lockDir);
+    assert(dir.isDirectory(), 'no private lock directory');
+    assert.strictEqual(dir.mode & 0o7777, 0o700, 'lock directory mode');
+    assert.strictEqual(dir.uid, process.getuid(), 'lock directory owner');
+    if (backend === 'flock') assert(fs.lstatSync(f.lock).isFile(), 'flock lock file');
+    assert.deepStrictEqual(fs.readdirSync(f.locks), [path.basename(f.lockDir)], 'lock outside the private directory');
+  }));
+
+  for (const [what, plant, wrong] of [
+    ['a symlink', f => fs.symlinkSync(path.join(f.dir, 'planted'), f.lockDir), /is not a private lock directory/],
+    ['a dangling symlink', f => fs.symlinkSync(path.join(f.dir, 'planted', 'missing'), f.lockDir), /is not a private lock directory/],
+    ['a directory other users can enter', f => { fs.mkdirSync(f.lockDir); fs.chmodSync(f.lockDir, 0o755); },
+      /is not a private lock directory/],
+    ['a directory of another user', f => { privateLockDir(f); lsAs(f, 4242); }, /is not a private lock directory/],
+    ['a world-writable parent without the sticky bit', f => fs.chmodSync(f.locks, 0o777), /lets other users replace/],
+    ['a parent of another user', f => idAs(f, 4242), /lets other users replace/],
+  ]) test('the ' + backend + ' lock refuses ' + what + ' and touches neither it nor the container', () => fixture(f => {
+    const planted = path.join(f.dir, 'planted'); fs.mkdirSync(planted);
+    fs.mkdirSync(f.locks, {mode:0o700}); plant(f);
+    const result = f.backup({PATH:LOCK_BACKENDS[backend](f), CORESCOPE_BACKUP_LOCK_WAIT:'0'});
+    assert.strictEqual(result.status, 1, result.stderr);
+    assert.match(result.stderr, wrong);
+    assert.deepStrictEqual(fs.readdirSync(planted), [], 'created a file where the planted path points');
+    assert.strictEqual(fs.existsSync(path.join(f.dir, 'planted', 'missing')), false);
+    assert.deepStrictEqual(touched(f), []); assertNoSnapshots(f);
+  }));
+
+  test('the ' + backend + ' lock accepts a sticky world-writable parent like /tmp', () => fixture(f => {
+    fs.mkdirSync(f.locks); fs.chmodSync(f.locks, 0o1777);
+    const result = f.backup({PATH:LOCK_BACKENDS[backend](f)});
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.strictEqual(fs.lstatSync(f.lockDir).mode & 0o7777, 0o700);
+  }));
+}
 
 test('the deployment guide documents the lock settings and the helper\'s defaults', () => {
   const helper = fs.readFileSync(path.join(root, 'scripts/backup-sqlite.sh'), 'utf8');
@@ -925,6 +1006,111 @@ test('the deployment guide documents the lock settings and the helper\'s default
     assert(docs.includes(claim), 'docs/deployment.md must say: ' + claim);
   assert.doesNotMatch(docs, /do not overlap|until serialization is implemented/i, 'stale interim mitigation');
 });
+
+// #424 review F1: bash 3.2 (also macOS's /bin/sh) clears the script's
+// positional parameters when a function runs `command exec 9>>file`, so the
+// helper must read its arguments before any function runs.
+test('the helper reads its arguments before any function can clear them', () => {
+  const late = [];
+  let inFunction = false, sawFunction = false;
+  for (const [i, line] of fs.readFileSync(HELPER, 'utf8').split('\n').entries()) {
+    if (/^[a-z_]+\(\) \{$/.test(line)) { inFunction = sawFunction = true; continue; }
+    if (inFunction) { if (line === '}') inFunction = false; continue; }
+    if (sawFunction && !/^\s*#/.test(line) && /\$[1-9@*#]|\$\{[1-9@*#]\}/.test(line)) late.push((i + 1) + ': ' + line);
+  }
+  assert(sawFunction, 'no shell function found');
+  assert.deepStrictEqual(late, [], 'positional parameters read after a function ran');
+});
+
+// #424 review F3: an abort that the EXIT trap sees as status 0 (bash 3.2
+// after a `set -u` error) must not turn into success. The fault is injected
+// into a copy of the shipped helper right after it stops the container.
+function faultyHelper(f, fault) {
+  const source = fs.readFileSync(HELPER, 'utf8'), stop = '  docker stop "$container" >/dev/null\n';
+  assert.strictEqual(source.split(stop).length, 2, 'no unique stop to inject the fault after');
+  const file = path.join(f.dir, 'backup-sqlite.sh');
+  fs.writeFileSync(file, source.replace(stop, stop + '  ' + fault + '\n'));
+  return file;
+}
+const UNBOUND = ': "$corescope_test_unbound_variable"';
+for (const [what, fault, status] of [['a set -u error', UNBOUND], ['an abort the EXIT trap sees as status 0', 'exit 0', 1]])
+  test(what + ' after the stop fails, restarts and publishes nothing', () => fixture(f => {
+    const result = f.backup({}, {helper:faultyHelper(f, fault)});
+    if (status) assert.strictEqual(result.status, status, result.stderr);
+    else assert.notStrictEqual(result.status, 0, result.stderr);
+    if (fault === 'exit 0') assert.match(result.stderr, /ERROR: stopped before completing/);
+    assert.strictEqual(result.stdout, '');
+    assert.strictEqual(calls(f, 'start').length, 1); assert.strictEqual(f.state().running, true);
+    assertNoSnapshots(f);
+  }, {wal:true}));
+
+// The manage.sh message for a contended lock (#424 review F6).
+test('manage.sh backup says another backup holds the lock, not that prod is down', () => fixture(f => {
+  const sync = path.join(f.dir, 'sync'); fs.mkdirSync(sync); privateLockDir(f);
+  const driver = `${quote(gated('flock'))} "$LOCK" sh -c ': >"$S/held"; until [ -e "$S/release" ]; do sleep 0.02; done' &
+    until [ -e "$S/held" ]; do sleep 0.02; done
+    bash "$MANAGE" backup "$OUT" >"$S/out" 2>&1; echo $? >"$S/status"; : >"$S/release"; wait`;
+  const result = spawnSync('sh', ['-c', driver], {cwd:f.dir, encoding:'utf8', timeout:30000, env:{...f.env, HOME:f.dir,
+    PROD_DATA_DIR:f.data, S:sync, LOCK:f.lock, MANAGE:path.join(root, 'manage.sh'), OUT:path.join(f.dir, 'manual'),
+    CORESCOPE_BACKUP_LOCK_WAIT:'0'}});
+  assert.strictEqual(result.status, 0, result.stderr);
+  const out = fs.readFileSync(path.join(sync, 'out'), 'utf8');
+  assert.notStrictEqual(fs.readFileSync(path.join(sync, 'status'), 'utf8').trim(), '0', out);
+  assert.match(out, /another backup of corescope-prod is still running/);
+  assert.doesNotMatch(out, /check that corescope-prod is running/);
+  assert.deepStrictEqual(calls(f, 'stop'), []);
+}));
+
+// #424 review F1/F2: the cases that matter most, under every /bin/sh found
+// here and with both lock backends.
+// The host's whole PATH minus some tools, for manage.sh, which needs far more
+// tools than the helper does.
+function pathMirror(f, omit) {
+  const dir = fs.mkdtempSync(path.join(f.dir, 'mirror-'));
+  for (const entry of process.env.PATH.split(path.delimiter)) {
+    let names = []; try { names = fs.readdirSync(entry); } catch { continue; }
+    // The first PATH entry with a name wins, as in a PATH lookup.
+    for (const name of names.filter(n => !omit.includes(n) && !fs.existsSync(path.join(dir, n))))
+      fs.symlinkSync(path.join(entry, name), path.join(dir, name));
+  }
+  return dir;
+}
+function shellPath(f, key, backend) {
+  const dir = fs.mkdtempSync(path.join(f.dir, 'shell-'));
+  fs.symlinkSync(gated(key), path.join(dir, 'sh'));
+  return dir + path.delimiter + LOCK_BACKENDS[backend](f);
+}
+const SHELL_CASES = {
+  'backs up a running container and restarts it': (f, PATH) => {
+    const result = f.backup({PATH}); assert.strictEqual(result.status, 0, result.stderr);
+    assert.deepStrictEqual(fs.readdirSync(result.stdout.trim()).sort(), ALL_DB_FILES);
+    assert.deepStrictEqual(f.state().copiedWhileRunning, [false]); assert.strictEqual(f.state().running, true);
+  },
+  'keeps a failed copy\'s status and restarts': (f, PATH) => {
+    const result = f.backup({PATH, MOCK_FAIL:'copy-wal'}); assert.strictEqual(result.status, 23, result.stderr);
+    assert.strictEqual(f.state().running, true); assertNoSnapshots(f);
+  },
+  'fails on a set -u error after the stop and restarts': (f, PATH) => {
+    const result = f.backup({PATH}, {helper:faultyHelper(f, UNBOUND)});
+    assert.notStrictEqual(result.status, 0, result.stderr); assert.strictEqual(result.stdout, '');
+    assert.strictEqual(f.state().running, true); assertNoSnapshots(f);
+  },
+  'lets manage.sh promote abort when the backup fails': (f, PATH, backend) => {
+    const rest = backend === 'flock' ? process.env.PATH : pathMirror(f, ['flock']);
+    const result = manage(f, ['promote'], {input:'y', extra:{PATH:PATH + path.delimiter + rest, MOCK_FAIL:'copy-main'}});
+    assert.notStrictEqual(result.status, 0, result.stdout + result.stderr);
+    assert.strictEqual(calls(f, 'compose').filter(c => c.includes('up')).length, 0);
+  },
+  'serialises overlapping backups': (f, PATH) => {
+    const r = overlap(f, PATH, {a:'corescope-test', b:f.id});
+    assert.strictEqual(r.A.status, 0, 'A: ' + r.A.stderr); assert.strictEqual(r.B.status, 0, 'B: ' + r.B.stderr);
+    assert.deepStrictEqual(f.state().walCopyRunning, [false], 'A copied its WALs while the writer was running');
+    assert.match(r.B.stderr, /Waiting up to 30s/);
+  },
+};
+for (const key of Object.keys(SHELLS)) for (const backend of Object.keys(LOCK_BACKENDS))
+  for (const [name, check] of Object.entries(SHELL_CASES))
+    test('under ' + key + ' with the ' + backend + ' lock the helper ' + name, () => fixture(f => check(f, shellPath(f, key, backend), backend), {wal:true}));
 
 // Host-tool gate (#389 review): the cases that drive the helper through
 // process-group signals or a pty need tools that not every host has. They must
@@ -952,7 +1138,7 @@ test('an unavailable tool skips its case instead of failing the suite', () => {
 
 test('optional host tools are only reached through the skip gate', () => {
   const source = fs.readFileSync(__filename, 'utf8');
-  for (const tool of ['setsid', 'script', 'mkfifo', 'flock']) {
+  for (const tool of ['setsid', 'script', 'mkfifo', 'flock', 'dash', 'busybox']) {
     assert.strictEqual(source.includes("which('" + tool + "')"), false,
       tool + '(1) must come from gated(), not which(), so a host without it skips');
     assert.strictEqual(source.includes("spawnSync('" + tool + "'"), false,
