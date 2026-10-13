@@ -11,9 +11,13 @@ const { spawnSync } = require('child_process');
 const root = __dirname;
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 function test(name, fn) {
   try { fn(); passed++; console.log('PASS ' + name); }
-  catch (err) { failed++; console.error('FAIL ' + name + ': ' + err.message); }
+  catch (err) {
+    if (err instanceof Skipped) { skipped++; console.log('SKIP ' + name + ': ' + err.message); return; }
+    failed++; console.error('FAIL ' + name + ': ' + err.message);
+  }
 }
 
 // Docker's daemon keeps stopping a container after the CLI is killed. The mock
@@ -27,6 +31,44 @@ function which(tool) {
   assert(found.startsWith('/'), 'missing tool ' + tool); return found;
 }
 function sleep(ms) { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+
+// Some cases drive the helper through process-group signals or a pty. That
+// needs tools which not every host ships: util-linux setsid(1) and its `-w`,
+// and a script(1) that takes `-c` (the BSD/macOS one does not). Such a case
+// skips with a reason instead of failing, so the suite stays green there while
+// still running — red or green — everywhere the tools exist. Each probe runs
+// the tool and checks the capability it needs; none looks at the OS name.
+class Skipped extends Error {}
+function probe(tool, args, want = 0) {
+  const result = spawnSync(tool, args, {stdio:'ignore', timeout:10000});
+  return result.status === want;
+}
+const capabilities = {
+  setsid: {tool:'setsid', reason:'setsid(1) with -w, which waits for the command, is not available',
+    probe:() => probe('setsid', ['-w', '/bin/sh', '-c', 'exit 7'], 7)},
+  'script -c': {tool:'script', reason:'script(1) does not accept -c, so no case can get a pty',
+    probe:() => probe('script', ['-qec', 'exit 7', '/dev/null'], 7)},
+  mkfifo: {tool:'mkfifo', reason:'mkfifo(1) cannot create a FIFO here',
+    probe:() => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'corescope-backup-probe-'));
+      try { return probe('mkfifo', [path.join(dir, 'fifo')]) && fs.statSync(path.join(dir, 'fifo')).isFIFO(); }
+      catch { return false; } finally { fs.rmSync(dir, {recursive:true, force:true}); }
+    }},
+};
+// A seam, so the skip path itself is covered on a host that has every tool.
+const forcedMissing = new Set((process.env.CORESCOPE_TEST_MISSING_TOOLS || '').split(',').filter(Boolean));
+const probed = new Map();
+function need(key, missing = forcedMissing) {
+  const capability = capabilities[key];
+  assert(capability, 'unknown capability ' + key);
+  if (!missing.has(key)) {
+    if (!probed.has(key)) probed.set(key, capability.probe());
+    if (probed.get(key)) return;
+  }
+  throw new Skipped('needs ' + key + ': ' + capability.reason);
+}
+// Absolute path of an optional tool, or a skip when the host cannot provide it.
+function gated(key) { need(key); return which(capabilities[key].tool); }
 
 const mockSource = `#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
@@ -75,9 +117,10 @@ if (op === 'stop') {
   if (process.env.MOCK_STOP_NOOP !== '1') state.running = false;
   if (process.env.MOCK_SIGNAL === 'stop') {
     fs.writeFileSync(statePath, JSON.stringify(state));
-    if (process.env.MOCK_FILL_STDERR === '1' && !fs.existsSync(statePath + '.signalled')) {
-      // Fill the helper's stderr pipe so its next write blocks.
-      const fd = fs.openSync('/proc/self/fd/2', fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+    if (process.env.MOCK_FILL_STDERR && !fs.existsSync(statePath + '.signalled')) {
+      // Fill the helper's stderr pipe so its next write blocks. The FIFO is
+      // opened by path, not through /proc, so this works off Linux too.
+      const fd = fs.openSync(process.env.MOCK_FILL_STDERR, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
       for (const size of [4096, 1]) {
         try { for (;;) fs.writeSync(fd, Buffer.alloc(size, 'x')); } catch (err) { if (err.code !== 'EAGAIN') throw err; }
       }
@@ -188,7 +231,7 @@ function fixture(fn, options = {}) {
       // group: run in a new session so the mock can signal the helper's whole
       // process group, like a terminal hangup, Ctrl-C or a supervisor would.
       const argv = ['sh', path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', target];
-      if (group) argv.unshift(which('setsid'), '-w');
+      if (group) argv.unshift(gated('setsid'), '-w');
       return spawnSync(argv[0], argv.slice(1), {env:{...env,...extra}, cwd, encoding:'utf8', timeout:10000});
     },
     restore:(extra={}) => {
@@ -461,7 +504,7 @@ test('job control (sh -m on a terminal) does not break the isolated Docker calls
   // fork and return before the Docker command has finished.
   const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
   const command = ['sh', '-m', path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', f.snapshots].map(quote).join(' ');
-  const result = spawnSync(which('script'), ['-qec', command, '/dev/null'],
+  const result = spawnSync(gated('script -c'), ['-qec', command, '/dev/null'],
     {env:{...f.env, MOCK_START_DELAY_MS:'300'}, encoding:'utf8', timeout:10000});
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
   assert.doesNotMatch(result.stdout, /ERROR/);
@@ -474,7 +517,7 @@ test('a further signal while the first is handled cannot preempt recovery', () =
   // first signal (HUP) blocks; TERM arrives while that handler runs. Pending
   // traps run in signal-number order, so even an early TERM cannot overtake HUP.
   const fifo = path.join(f.dir, 'stderr.fifo'), errors = path.join(f.dir, 'stderr.txt');
-  assert.strictEqual(spawnSync('mkfifo', [fifo]).status, 0);
+  assert.strictEqual(spawnSync(gated('mkfifo'), [fifo]).status, 0);
   const driver = `
     exec 3<>"$FIFO"
     sh "$HELPER" corescope-test "$OUT" 2>&3 & pid=$!
@@ -487,7 +530,7 @@ test('a further signal while the first is handled cannot preempt recovery', () =
     wait "$pid"; status=$?
     sleep 0.2; kill "$reader"; exit "$status"`;
   const result = spawnSync('sh', ['-c', driver], {env:{...f.env, MOCK_SIGNAL:'stop', MOCK_SIGNAL_NAME:'SIGHUP',
-    MOCK_FILL_STDERR:'1', FIFO:fifo, HELPER:path.join(root, 'scripts/backup-sqlite.sh'), OUT:f.snapshots, ERRORS:errors},
+    MOCK_FILL_STDERR:fifo, FIFO:fifo, HELPER:path.join(root, 'scripts/backup-sqlite.sh'), OUT:f.snapshots, ERRORS:errors},
     encoding:'utf8', timeout:20000});
   const stderr = fs.existsSync(errors) ? fs.readFileSync(errors, 'utf8').replace(/x+/g, '') : '';
   assert.strictEqual(result.status, 129, result.stderr + stderr);
@@ -606,6 +649,7 @@ test('manage.sh promote aborts before recreating prod when the backup fails', ()
 // process-group signals or a pty need tools that not every host has. They must
 // skip with a clear reason instead of failing the suite, and the detection must
 // probe the tool and the capability, never the OS name.
+const SELF_CHECK = 'self-check: ';
 test('an unavailable tool skips its case instead of failing the suite', () => {
   const missing = new Set(['setsid', 'script -c', 'mkfifo']);
   for (const key of missing) {
@@ -615,12 +659,12 @@ test('an unavailable tool skips its case instead of failing the suite', () => {
     assert(/\S/.test(err.message.slice(('needs ' + key + ': ').length)), 'empty skip reason');
     // Precise detection: the probe runs the tool, it does not read the platform.
     assert.strictEqual(typeof capabilities[key].probe, 'function');
-    assert.strictEqual(/darwin|platform|\bos\b/.test(String(capabilities[key].probe)), false,
-      key + ' must probe the tool, not the OS name');
+    assert.strictEqual(/process\.platform|os\.(?:platform|type|release)\(|darwin|win32|\blinux\b/
+      .test(String(capabilities[key].probe)), false, key + ' must probe the tool, not the OS name');
   }
   // The runner counts it as skipped, not failed.
   const before = failed, wasSkipped = skipped;
-  test('inner probe of the skip path (an expected SKIP)', () => need('setsid', missing));
+  test(SELF_CHECK + 'probing the skip path, so this SKIP line is expected', () => need('setsid', missing));
   assert.strictEqual(failed, before, 'a skipped case must not be counted as a failure');
   assert.strictEqual(skipped, wasSkipped + 1, 'a skipped case must be counted as skipped');
 });
@@ -644,12 +688,14 @@ if (!process.env.CORESCOPE_TEST_MISSING_TOOLS) test('the suite is green and skip
   const result = spawnSync(process.execPath, [__filename], {encoding:'utf8', timeout:600000,
     env:{...process.env, CORESCOPE_TEST_MISSING_TOOLS:keys.join(',')}});
   assert.strictEqual(result.status, 0, 'suite must exit 0 without the tools:\n' + result.stdout + result.stderr);
-  const skips = result.stdout.split('\n').filter(line => line.startsWith('SKIP '));
+  // Minus the deliberate SKIP that the runner self-check above produces.
+  const skips = result.stdout.split('\n')
+    .filter(line => line.startsWith('SKIP ') && !line.includes(SELF_CHECK));
   assert.strictEqual(skips.length, 11, 'expected the 11 tool-dependent cases to skip, got ' + skips.length);
   for (const line of skips) assert.match(line, new RegExp('needs (' + keys.join('|') + '): \\S'), line);
   assert.match(result.stdout, /\b0 failed\b/);
-  assert.match(result.stdout, /\b11 skipped\b/);
+  assert.match(result.stdout, /\b12 skipped\b/);
 });
 
-console.log(`${passed} passed, ${failed} failed`);
+console.log(`${passed} passed, ${failed} failed` + (skipped ? `, ${skipped} skipped` : ''));
 process.exitCode = failed === 0 ? 0 : 1;
