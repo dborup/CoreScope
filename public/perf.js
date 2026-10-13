@@ -132,8 +132,8 @@ function renderVersionCard(health) {
 
       // Server overview
       html += `<div style="display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;">
-        <div class="perf-card"><div class="perf-num">${server.totalRequests}</div><div class="perf-label">Total Requests</div></div>
-        <div class="perf-card"><div class="perf-num">${server.avgMs}ms</div><div class="perf-label">Avg Response</div></div>
+        <div class="perf-card"><div class="perf-num">${escapeHtml(server.totalRequests)}</div><div class="perf-label">Total Requests</div></div>
+        <div class="perf-card"><div class="perf-num">${escapeHtml(server.avgMs)}ms</div><div class="perf-label">Avg Response</div></div>
         <div class="perf-card"><div class="perf-num">${escapeHtml(health ? health.uptimeHuman : Math.round(server.uptime / 60) + 'm')}</div><div class="perf-label">Uptime</div></div>
         <div class="perf-card"><div class="perf-num">${server.slowQueries.length}</div><div class="perf-label">Slow (&gt;100ms)</div></div>
         ${renderVersionCard(health)}
@@ -146,28 +146,28 @@ function renderVersionCard(health) {
           const gr = server.goRuntime;
           const gcColor = gr.lastPauseMs > 5 ? 'var(--status-red)' : gr.lastPauseMs > 1 ? 'var(--status-yellow)' : 'var(--status-green)';
           html += `<h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-wrench"/></svg> Go Runtime</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-            <div class="perf-card"><div class="perf-num">${gr.goroutines}</div><div class="perf-label">Goroutines</div></div>
-            <div class="perf-card"><div class="perf-num">${gr.numGC}</div><div class="perf-label">GC Collections</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(gr.goroutines)}</div><div class="perf-label">Goroutines</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(gr.numGC)}</div><div class="perf-label">GC Collections</div></div>
             <div class="perf-card"><div class="perf-num" style="color:${gcColor}">${(+gr.pauseTotalMs).toFixed(1)}ms</div><div class="perf-label">GC Pause Total</div></div>
             <div class="perf-card"><div class="perf-num">${(+gr.lastPauseMs).toFixed(1)}ms</div><div class="perf-label">Last GC Pause</div></div>
             <div class="perf-card"><div class="perf-num">${(+gr.heapAllocMB).toFixed(1)}MB</div><div class="perf-label">Heap Alloc</div></div>
             <div class="perf-card"><div class="perf-num">${(+gr.heapSysMB).toFixed(1)}MB</div><div class="perf-label">Heap Sys</div></div>
             <div class="perf-card"><div class="perf-num">${(+gr.heapInuseMB).toFixed(1)}MB</div><div class="perf-label">Heap Inuse</div></div>
             <div class="perf-card"><div class="perf-num">${(+gr.heapIdleMB).toFixed(1)}MB</div><div class="perf-label">Heap Idle</div></div>
-            <div class="perf-card"><div class="perf-num">${gr.numCPU}</div><div class="perf-label">CPUs</div></div>
-            <div class="perf-card"><div class="perf-num">${health.websocket.clients}</div><div class="perf-label">WS Clients</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(gr.numCPU)}</div><div class="perf-label">CPUs</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(health.websocket.clients)}</div><div class="perf-label">WS Clients</div></div>
           </div>`;
         } else {
           const m = health.memory, el = health.eventLoop;
           const elColor = el.p95Ms > 500 ? 'var(--status-red)' : el.p95Ms > 100 ? 'var(--status-yellow)' : 'var(--status-green)';
           const memColor = m.heapUsed > m.heapTotal * 0.85 ? 'var(--status-red)' : m.heapUsed > m.heapTotal * 0.7 ? 'var(--status-yellow)' : 'var(--status-green)';
           html += `<h3>System Health</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-            <div class="perf-card"><div class="perf-num" style="color:${memColor}">${m.heapUsed}MB</div><div class="perf-label">Heap Used / ${m.heapTotal}MB</div></div>
-            <div class="perf-card"><div class="perf-num">${m.rss}MB</div><div class="perf-label">RSS</div></div>
-            <div class="perf-card"><div class="perf-num" style="color:${elColor}">${el.p95Ms}ms</div><div class="perf-label">Event Loop p95</div></div>
-            <div class="perf-card"><div class="perf-num">${el.maxLagMs}ms</div><div class="perf-label">EL Max Lag</div></div>
-            <div class="perf-card"><div class="perf-num">${el.currentLagMs}ms</div><div class="perf-label">EL Current</div></div>
-            <div class="perf-card"><div class="perf-num">${health.websocket.clients}</div><div class="perf-label">WS Clients</div></div>
+            <div class="perf-card"><div class="perf-num" style="color:${memColor}">${escapeHtml(m.heapUsed)}MB</div><div class="perf-label">Heap Used / ${escapeHtml(m.heapTotal)}MB</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(m.rss)}MB</div><div class="perf-label">RSS</div></div>
+            <div class="perf-card"><div class="perf-num" style="color:${elColor}">${escapeHtml(el.p95Ms)}ms</div><div class="perf-label">Event Loop p95</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(el.maxLagMs)}ms</div><div class="perf-label">EL Max Lag</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(el.currentLagMs)}ms</div><div class="perf-label">EL Current</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(health.websocket.clients)}</div><div class="perf-label">WS Clients</div></div>
           </div>`;
         }
       }
@@ -239,7 +239,7 @@ function renderVersionCard(health) {
             const flag = anom.flags[k] ? ' <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' : '';
             const rateStr = (rate != null && isFinite(rate)) ? rate.toFixed(2) : '—';
             const baseStr = (base != null && isFinite(base)) ? base.toFixed(2) : '—';
-            html += `<tr><td><code>${escapeHtml(k)}</code></td><td>${v.toLocaleString()}</td><td>${rateStr}</td><td>${baseStr}</td><td>${flag}</td></tr>`;
+            html += `<tr><td><code>${escapeHtml(k)}</code></td><td>${escapeHtml(v.toLocaleString())}</td><td>${rateStr}</td><td>${baseStr}</td><td>${flag}</td></tr>`;
           }
           html += '</tbody></table></div>';
           if (writeSources.sampleAt) {
@@ -256,8 +256,8 @@ function renderVersionCard(health) {
         const hitFlag = hitRate > 0 && hitRate < 90 ? ' <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' : '';
         html += `<h3>SQLite (WAL + Cache Hit)</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
           <div class="perf-card"><div class="perf-num">${walMB.toFixed(1)}MB${walFlag}</div><div class="perf-label">WAL Size</div></div>
-          <div class="perf-card"><div class="perf-num">${(sqliteStats.pageCount || 0).toLocaleString()}</div><div class="perf-label">Page Count</div></div>
-          <div class="perf-card"><div class="perf-num">${sqliteStats.pageSize || 0}</div><div class="perf-label">Page Size</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml((sqliteStats.pageCount || 0).toLocaleString())}</div><div class="perf-label">Page Count</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(sqliteStats.pageSize || 0)}</div><div class="perf-label">Page Size</div></div>
           <div class="perf-card"><div class="perf-num">${hitRate.toFixed(1)}%${hitFlag}</div><div class="perf-label">Cache Hit Rate</div></div>
         </div>`;
       }
@@ -267,19 +267,19 @@ function renderVersionCard(health) {
         const c = server.cache;
         const clientCache = _apiCache ? _apiCache.size : 0;
         html += `<h3>Cache</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-          <div class="perf-card"><div class="perf-num">${c.size}</div><div class="perf-label">Server Entries</div></div>
-          <div class="perf-card"><div class="perf-num">${c.hits}</div><div class="perf-label">Server Hits</div></div>
-          <div class="perf-card"><div class="perf-num">${c.misses}</div><div class="perf-label">Server Misses</div></div>
-          <div class="perf-card"><div class="perf-num" style="color:${c.hitRate > 50 ? 'var(--status-green)' : c.hitRate > 20 ? 'var(--status-yellow)' : 'var(--status-red)'}">${c.hitRate}%</div><div class="perf-label">Server Hit Rate</div></div>
-          <div class="perf-card"><div class="perf-num">${c.staleHits || 0}</div><div class="perf-label">Stale Hits (SWR)</div></div>
-          <div class="perf-card"><div class="perf-num">${c.recomputes || 0}</div><div class="perf-label">Recomputes</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(c.size)}</div><div class="perf-label">Server Entries</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(c.hits)}</div><div class="perf-label">Server Hits</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(c.misses)}</div><div class="perf-label">Server Misses</div></div>
+          <div class="perf-card"><div class="perf-num" style="color:${c.hitRate > 50 ? 'var(--status-green)' : c.hitRate > 20 ? 'var(--status-yellow)' : 'var(--status-red)'}">${escapeHtml(c.hitRate)}%</div><div class="perf-label">Server Hit Rate</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(c.staleHits || 0)}</div><div class="perf-label">Stale Hits (SWR)</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(c.recomputes || 0)}</div><div class="perf-label">Recomputes</div></div>
           <div class="perf-card"><div class="perf-num">${clientCache}</div><div class="perf-label">Client Entries</div></div>
         </div>`;
         if (client) {
           html += `<div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-            <div class="perf-card"><div class="perf-num">${client.cacheHits || 0}</div><div class="perf-label">Client Hits</div></div>
-            <div class="perf-card"><div class="perf-num">${client.cacheMisses || 0}</div><div class="perf-label">Client Misses</div></div>
-            <div class="perf-card"><div class="perf-num" style="color:${(client.cacheHitRate||0) > 50 ? 'var(--status-green)' : 'var(--status-yellow)'}">${client.cacheHitRate || 0}%</div><div class="perf-label">Client Hit Rate</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(client.cacheHits || 0)}</div><div class="perf-label">Client Hits</div></div>
+            <div class="perf-card"><div class="perf-num">${escapeHtml(client.cacheMisses || 0)}</div><div class="perf-label">Client Misses</div></div>
+            <div class="perf-card"><div class="perf-num" style="color:${(client.cacheHitRate||0) > 50 ? 'var(--status-green)' : 'var(--status-yellow)'}">${escapeHtml(client.cacheHitRate || 0)}%</div><div class="perf-label">Client Hit Rate</div></div>
           </div>`;
         }
       }
@@ -288,16 +288,16 @@ function renderVersionCard(health) {
       if (server.packetStore) {
         const ps = server.packetStore;
         html += `<h3>In-Memory Packet Store</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-          <div class="perf-card"><div class="perf-num">${ps.inMemory.toLocaleString()}</div><div class="perf-label">Packets in RAM</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.trackedMB}MB</div><div class="perf-label">Tracked Memory</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.maxMB}MB</div><div class="perf-label">Memory Limit</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.estimatedMB}MB</div><div class="perf-label">Heap (debug)</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.queries.toLocaleString()}</div><div class="perf-label">Queries Served</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.inserts.toLocaleString()}</div><div class="perf-label">Live Inserts</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.evicted.toLocaleString()}</div><div class="perf-label">Evicted</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.indexes.byHash.toLocaleString()}</div><div class="perf-label">Unique Hashes</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.indexes.byObserver}</div><div class="perf-label">Observers</div></div>
-          <div class="perf-card"><div class="perf-num">${ps.indexes.byNode.toLocaleString()}</div><div class="perf-label">Indexed Nodes</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.inMemory.toLocaleString())}</div><div class="perf-label">Packets in RAM</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.trackedMB)}MB</div><div class="perf-label">Tracked Memory</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.maxMB)}MB</div><div class="perf-label">Memory Limit</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.estimatedMB)}MB</div><div class="perf-label">Heap (debug)</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.queries.toLocaleString())}</div><div class="perf-label">Queries Served</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.inserts.toLocaleString())}</div><div class="perf-label">Live Inserts</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.evicted.toLocaleString())}</div><div class="perf-label">Evicted</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.indexes.byHash.toLocaleString())}</div><div class="perf-label">Unique Hashes</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.indexes.byObserver)}</div><div class="perf-label">Observers</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(ps.indexes.byNode.toLocaleString())}</div><div class="perf-label">Indexed Nodes</div></div>
         </div>`;
       }
 
@@ -307,15 +307,15 @@ function renderVersionCard(health) {
         const walColor = sq.walSizeMB > 50 ? 'var(--status-red)' : sq.walSizeMB > 10 ? 'var(--status-yellow)' : 'var(--status-green)';
         const freelistColor = sq.freelistMB > 10 ? 'var(--status-yellow)' : 'var(--status-green)';
         html += `<h3>SQLite</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-          <div class="perf-card"><div class="perf-num">${sq.dbSizeMB}MB</div><div class="perf-label">DB Size</div></div>
-          <div class="perf-card"><div class="perf-num" style="color:${walColor}">${sq.walSizeMB}MB</div><div class="perf-label">WAL Size</div></div>
-          <div class="perf-card"><div class="perf-num" style="color:${freelistColor}">${sq.freelistMB}MB</div><div class="perf-label">Freelist</div></div>
-          <div class="perf-card"><div class="perf-num">${(sq.rows.transmissions || 0).toLocaleString()}</div><div class="perf-label">Transmissions</div></div>
-          <div class="perf-card"><div class="perf-num">${(sq.rows.observations || 0).toLocaleString()}</div><div class="perf-label">Observations</div></div>
-          <div class="perf-card"><div class="perf-num">${sq.rows.nodes || 0}</div><div class="perf-label">Nodes</div></div>
-          <div class="perf-card"><div class="perf-num">${sq.rows.observers || 0}</div><div class="perf-label">Observers</div></div>`;
+          <div class="perf-card"><div class="perf-num">${escapeHtml(sq.dbSizeMB)}MB</div><div class="perf-label">DB Size</div></div>
+          <div class="perf-card"><div class="perf-num" style="color:${walColor}">${escapeHtml(sq.walSizeMB)}MB</div><div class="perf-label">WAL Size</div></div>
+          <div class="perf-card"><div class="perf-num" style="color:${freelistColor}">${escapeHtml(sq.freelistMB)}MB</div><div class="perf-label">Freelist</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml((sq.rows.transmissions || 0).toLocaleString())}</div><div class="perf-label">Transmissions</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml((sq.rows.observations || 0).toLocaleString())}</div><div class="perf-label">Observations</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(sq.rows.nodes || 0)}</div><div class="perf-label">Nodes</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(sq.rows.observers || 0)}</div><div class="perf-label">Observers</div></div>`;
         if (sq.walPages) {
-          html += `<div class="perf-card"><div class="perf-num">${sq.walPages.busy}</div><div class="perf-label">WAL Busy Pages</div></div>`;
+          html += `<div class="perf-card"><div class="perf-num">${escapeHtml(sq.walPages.busy)}</div><div class="perf-label">WAL Busy Pages</div></div>`;
         }
         html += `</div>`;
       }

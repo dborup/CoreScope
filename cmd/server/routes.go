@@ -1404,10 +1404,29 @@ const slowPathRawCap = 128
 // NOT make the value HTML-safe — the perf dashboard escapes it at render time
 // (public/perf.js, #392). This function only bounds length and strips control
 // bytes, rune-safe so a multibyte character is never split at the cap.
+//
+// #394 F3/F4: BOTH halves are sanitised and capped, so neither the control
+// chars nor the length of the key side can escape the bound. The stored value
+// is therefore at most 2*slowPathRawCap runes (+ a per-half ellipsis + the
+// joining space), regardless of how long or hostile either input is.
 func normalizeSlowPath(key, raw string) string {
+	capped := sanitizeSlowPathComponent(raw)
+	// Unmatched routes fold to key == raw path (see perfMiddleware). There the
+	// template IS the raw path, so emit the capped form once instead of
+	// "<raw> <raw>". Compare against the original raw, not the capped copy.
+	if key == "" || key == raw {
+		return capped
+	}
+	return sanitizeSlowPathComponent(key) + " " + capped
+}
+
+// sanitizeSlowPathComponent drops ASCII control characters (incl. CR/LF/TAB)
+// and caps the result at slowPathRawCap runes, rune-safe so a multibyte
+// character is never split at the cap. An ellipsis marks truncation. #394.
+func sanitizeSlowPathComponent(s string) string {
 	var b strings.Builder
 	n := 0
-	for _, r := range raw {
+	for _, r := range s {
 		if r < 0x20 || r == 0x7f {
 			continue // strip ASCII control characters (incl. CR/LF/TAB)
 		}
@@ -1418,14 +1437,7 @@ func normalizeSlowPath(key, raw string) string {
 		b.WriteRune(r)
 		n++
 	}
-	capped := b.String()
-	// Unmatched routes fold to key == raw path (see perfMiddleware). There the
-	// template IS the raw path, so emit the capped form once instead of
-	// "<raw> <raw>". Compare against the original raw, not the capped copy.
-	if key == "" || key == raw {
-		return capped
-	}
-	return key + " " + capped
+	return b.String()
 }
 
 // handleBatchObservations returns observations for multiple hashes in a single request.

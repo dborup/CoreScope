@@ -1148,6 +1148,79 @@ test('#392 perf write-sources footer: sampleAt is escaped', () => {
 });
 
 // =========================================================================
+// #394 F2 — perf.js ships its OWN IIFE-local escapeHtml fallback (used when
+// evaluated without app.js's global, e.g. the perf-render unit sandboxes).
+// The other #392 tests inject app.js's escapeHtml via evalTemplate(), so a
+// weakened perf.js-local fallback went unnoticed. Drive the real selector +
+// fallback straight from source so an identity mutant on it flips red.
+// =========================================================================
+console.log('\n=== #394 F2 perf.js IIFE-local escapeHtml fallback ===');
+
+test('#394 F2 perf.js local escapeHtml fallback escapes (identity mutant → red)', () => {
+  const src = fs.readFileSync('public/perf.js', 'utf8');
+  // Capture the RHS of `const escapeHtml = <ternary>;` — minimal up to the
+  // first `};` (the close of the inline fallback function). Captured whether
+  // or not the fallback body escapes, so the assertion flips, not the match.
+  const m = src.match(/const escapeHtml = ([\s\S]*?\});\s*\n/);
+  assert.ok(m, '#394 F2: `const escapeHtml = <ternary>` not found in perf.js');
+  const select = new Function('globalThis', 'return (' + m[1] + ');');
+  // No global escapeHtml on the passed globalThis → the IIFE-local fallback
+  // branch is taken (exactly the standalone / sandbox case).
+  const fallback = select({});
+  assert.strictEqual(typeof fallback, 'function', '#394 F2: fallback is not a function');
+  assert.strictEqual(fallback('<'), '&lt;', '#394 F2: fallback did not escape <');
+  assert.strictEqual(fallback("'"), '&#39;', '#394 F2: fallback did not escape single quote');
+  assert.strictEqual(fallback('&'), '&amp;');
+  assert.strictEqual(fallback('>'), '&gt;');
+  assert.strictEqual(fallback('"'), '&quot;');
+  assert.strictEqual(fallback(null), '', '#394 F2: fallback null handling changed');
+  // A hostile payload is fully neutralised by the fallback alone.
+  const html = '<code>' + fallback(TAG_PAYLOAD + ATTR_PAYLOAD) + '</code>';
+  assertNoXss(html, '#394 F2 perf.js local fallback');
+  // And when a global escapeHtml IS present, the selector must prefer it.
+  const sentinel = (s) => 'SENTINEL:' + String(s);
+  assert.strictEqual(select({ escapeHtml: sentinel }), sentinel,
+    '#394 F2: selector did not prefer globalThis.escapeHtml when present');
+});
+
+// =========================================================================
+// #394 F1 — defence-in-depth: the numeric perf cards interpolate values
+// straight from /api/perf etc. They are number-typed server-side today, so
+// not request-controlled, but the issue criterion is "escape EVERY
+// interpolated perf value". These drive representative card sinks (one per
+// response object) with a hostile value; dropping the escapeHtml() wrapper
+// lets the raw <img survive and flips them red.
+// =========================================================================
+console.log('\n=== #394 F1 perf.js numeric-card sinks (defence in depth) ===');
+
+function perfCardTest(name, regex, bindings, label) {
+  test(name, () => {
+    const html = evalTemplate('public/perf.js', regex, bindings);
+    assertNoXss(html, label);
+  });
+}
+
+perfCardTest('#394 F1 overview: server.totalRequests card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*totalRequests[^}]*\}<\/div><div class="perf-label">Total Requests<\/div><\/div>)/,
+  { server: { totalRequests: PERF_PAYLOAD } }, '#394 F1 totalRequests');
+
+perfCardTest('#394 F1 cache: c.size card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*c\.size[^}]*\}<\/div><div class="perf-label">Server Entries<\/div><\/div>)/,
+  { c: { size: PERF_PAYLOAD } }, '#394 F1 cache size');
+
+perfCardTest('#394 F1 go runtime: gr.goroutines card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*gr\.goroutines[^}]*\}<\/div><div class="perf-label">Goroutines<\/div><\/div>)/,
+  { gr: { goroutines: PERF_PAYLOAD } }, '#394 F1 goroutines');
+
+perfCardTest('#394 F1 sqlite: sq.walPages.busy card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*sq\.walPages\.busy[^}]*\}<\/div><div class="perf-label">WAL Busy Pages<\/div><\/div>)/,
+  { sq: { walPages: { busy: PERF_PAYLOAD } } }, '#394 F1 walPages.busy');
+
+perfCardTest('#394 F1 packet store: ps.indexes.byObserver card is escaped',
+  /(<div class="perf-card"><div class="perf-num">\$\{[^}]*ps\.indexes\.byObserver[^}]*\}<\/div><div class="perf-label">Observers<\/div><\/div>)/,
+  { ps: { indexes: { byObserver: PERF_PAYLOAD } } }, '#394 F1 byObserver');
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
 (async () => {

@@ -33,6 +33,28 @@
 # all pre-escaped locals or static text, i.e. false positives, so it is
 # not enabled. Closing this gap needs data flow, not a line regex.
 #
+# #394 F5 — concrete instance of the above in public/perf.js. perf.js is
+# the string-accumulator shape of the same blind spot:
+#   let html = '';
+#   html += `<tr><td><code>${path}</code></td>…`;   // raw sink — NOT audited
+#   …
+#   el.innerHTML = html;                             // sink line, RHS is a
+#                                                    // bare local, no field
+# The only `.innerHTML =` line carries the bare identifier `html`, so the
+# per-line audit finds no interpolation there, and the `html += `…`` lines
+# are not recognised as sinks. The gate therefore reports 0 findings on the
+# pre-#392 perf.js (verified: `--file` on the pre-fix file exits 0) even
+# though `${path}` / `${q.path}` / `${k}` were live XSS. A SECOND reason the
+# gate can't flag them even if it saw the line: those values flow through
+# generically-named locals (`path`, `q.path`, the write-source key `k`) that
+# are NOT in the node-controlled allowlist and cannot be added without a
+# false-positive explosion (`path` and especially single-letter `k` appear
+# all over public/*.js). Extending detection here would also diverge from
+# the canonical skill-side mirror and its shared allowlist. The #392 sinks
+# are instead pinned by DOM-grep unit tests (test-xss-escape-sinks.js, the
+# `#392`/`#394` cases) plus a browser E2E (test-xss-392-perf-e2e.js), each
+# with a mutant, which is the regression guard for this file.
+#
 # Two modes:
 #   $0 --file <path>       Scan a single file. Exit 1 if any flagged sink
 #                          interpolates a node-controlled identifier

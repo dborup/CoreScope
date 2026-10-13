@@ -73,4 +73,36 @@ func TestNormalizeSlowPath(t *testing.T) {
 			t.Fatalf("server must not escape; perf.js does: %q", got)
 		}
 	})
+
+	// #394 F3: the cap must bound the WHOLE stored value, not just the raw
+	// half. A pathological route key (e.g. a template that itself folded in a
+	// long unmatched segment) must not slip past the cap just because it is
+	// on the key side of the join. Mutant: cap only the raw half → red.
+	t.Run("long template key is also capped (total value is bounded)", func(t *testing.T) {
+		key := "/api/:id/" + strings.Repeat("z", 5000)
+		raw := "/api/deadbeef12/" + strings.Repeat("z", 5000)
+		got := normalizeSlowPath(key, raw)
+		// Each half caps at slowPathRawCap runes (+ an ellipsis); the two are
+		// joined by one space. The total can therefore never exceed
+		// 2*cap + 2 ellipses + 1 space.
+		max := 2*slowPathRawCap + 3
+		if n := utf8.RuneCountInString(got); n > max {
+			t.Fatalf("stored value not bounded: %d runes (max %d)", n, max)
+		}
+		if !strings.Contains(got, "…") {
+			t.Fatalf("expected truncation ellipsis in the oversized value: %q", got[:40])
+		}
+	})
+
+	// #394 F4: control characters must be stripped from BOTH halves. A CR/LF
+	// in the normalized route key would otherwise survive into the stored
+	// value (log/row injection). Mutant: strip only the raw half → red.
+	t.Run("control characters are stripped from the key half too", func(t *testing.T) {
+		key := "/api/\r\nX-Injected: 1/:id"
+		raw := "/api/deadbeef12"
+		got := normalizeSlowPath(key, raw)
+		if strings.ContainsAny(got, "\r\n\t") {
+			t.Fatalf("control chars survived in the key half: %q", got)
+		}
+	})
 }

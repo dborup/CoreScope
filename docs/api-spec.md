@@ -314,6 +314,12 @@ Server health and telemetry. Used by monitoring.
     "slowQueries":   number,
     "recentSlow": [            // last 5
       {
+        // Same SlowQuery shape as GET /api/perf → slowQueries[]: normalized
+        // route key + a sanitised, control-char-stripped, ≤128-rune-per-half
+        // copy of the raw request path, joined by a space (e.g. "/api/nodes/:id
+        // /api/nodes/abcd1234"); unmatched routes emit the capped raw path
+        // once. Not HTML-escaped — clients MUST escape before DOM insertion
+        // (#392, #394 F3/F4/F6).
         "path":   string,
         "ms":     number,
         "time":   string,      // ISO timestamp
@@ -349,11 +355,13 @@ Detailed performance metrics per endpoint.
   },
   "slowQueries": [                  // last 20 queries > 100ms
     {
-      // Normalized route key + a sanitised, length-capped (≤128 runes +
-      // "…") copy of the raw request path, e.g. "/api/nodes/:id
-      // /api/nodes/abcd1234". Unmatched routes (key == raw) emit the capped
-      // raw path once. Control characters are stripped. Not HTML-escaped —
-      // clients MUST escape before inserting into the DOM (#392).
+      // Normalized route key + a sanitised copy of the raw request path,
+      // joined by a single space, e.g. "/api/nodes/:id /api/nodes/abcd1234".
+      // BOTH halves are independently control-char-stripped (incl. CR/LF/TAB)
+      // and capped to ≤128 runes each (an "…" marks truncation), so the whole
+      // value is bounded at ≤257 runes regardless of input (#392, #394 F3/F4).
+      // Unmatched routes (key == raw) emit the capped raw path once. Not
+      // HTML-escaped — clients MUST escape before inserting into the DOM.
       "path":   string,
       "ms":     number,
       "time":   string,             // ISO timestamp
