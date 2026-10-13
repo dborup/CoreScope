@@ -1332,18 +1332,67 @@ test('#393 N9 compare.js packet row: no inline on* handler', () => {
     '#393 N9: compare packet row still has an inline on* handler: ' + m[0]);
 });
 
-// N9b: and the replacement delegated click handler actually navigates. Lift
-// the handler and drive a click on a <tr> nav row — removing or narrowing it
-// goes red.
-test('#393 N9 compare.js delegated click handler navigates a nav row', () => {
+// Run the REAL compare.js init() in a vm with a fake #app whose innerHTML
+// assignment recreates its children, as the browser does. Each call returns
+// the shared app element and that visit's #compareContent so a test can see
+// which element a listener landed on.
+function loadComparePage() {
   const src = fs.readFileSync('public/compare.js', 'utf8');
-  const m = src.match(/app\.addEventListener\('click', function \(e\) \{([\s\S]*?)\}\);/);
-  assert.ok(m, '#393 N9: compare delegated click handler not found');
-  const fn = new Function('location', 'e', m[1]);
-  const loc = { hash: '' };
-  fn(loc, { type: 'click', target: fakeNavRow('tr', '#/packets/deadbeef12') });
-  assert.strictEqual(loc.hash, '#/packets/deadbeef12',
+  function fakeEl() {
+    const el = { listeners: {} };
+    el.addEventListener = (type, fn) => { (el.listeners[type] = el.listeners[type] || []).push(fn); };
+    return el;
+  }
+  let children = {};
+  const app = fakeEl();
+  Object.defineProperty(app, 'innerHTML', {
+    set() { children = { compareControls: fakeEl(), compareContent: fakeEl() }; },
+  });
+  const loc = { hash: '#/compare' };
+  const ctx = {
+    window: {}, location: loc, CLIENT_TTL: {}, escapeHtml, URLSearchParams,
+    document: { getElementById: (id) => children[id] || null },
+    api: () => new Promise(() => {}), // observers never load: init's wiring only
+    registerPage: (name, page) => { ctx.page = page; },
+  };
+  vm.runInNewContext(src, ctx);
+  return {
+    app, loc,
+    visit() { ctx.page.init(app, ''); return children.compareContent; },
+    leave() { ctx.page.destroy(); },
+  };
+}
+
+// N9b: and the replacement delegated click handler actually navigates. Drive
+// the click listener the real init() installs on a <tr> nav row — removing
+// or narrowing it goes red.
+test('#393 N9 compare.js delegated click handler navigates a nav row', () => {
+  const cmp = loadComparePage();
+  const content = cmp.visit();
+  const clicks = content.listeners.click || [];
+  assert.strictEqual(clicks.length, 1, '#393 N9: expected one delegated click handler on #compareContent');
+  clicks[0]({ type: 'click', target: fakeNavRow('tr', '#/packets/deadbeef12') });
+  assert.strictEqual(cmp.loc.hash, '#/packets/deadbeef12',
     '#393 N9: compare delegated click did not navigate the nav row');
+});
+
+// #393 F1 (round-2 review): the N9 click handler was bound to the shared #app
+// element, which every page renders into and nothing ever unbinds. After one
+// compare visit it fired on every later page's tr[data-action="navigate"],
+// overriding the observers slide-over's preventDefault() (#1056 AC#4), and
+// each visit stacked one more. It must live on compare's own container,
+// which the next page's app.innerHTML discards.
+test('#393 F1 compare.js init: no click listener on the shared #app, none stacked per visit', () => {
+  const cmp = loadComparePage();
+  const first = cmp.visit();
+  cmp.leave();
+  const second = cmp.visit();
+  cmp.leave();
+  assert.strictEqual((cmp.app.listeners.click || []).length, 0,
+    '#393 F1: compare.js bound a click listener to the shared #app; it outlives the page');
+  assert.notStrictEqual(first, second, 'harness: each visit must get a fresh #compareContent');
+  assert.strictEqual((second.listeners.click || []).length, 1,
+    '#393 F1: the current visit must carry exactly one row click handler');
 });
 
 // N10: loadLocalEsc's guard must also catch a differently-declared second
