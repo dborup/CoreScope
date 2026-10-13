@@ -34,4 +34,12 @@ elif [ "${DISABLE_CADDY:-false}" = "true" ]; then
   SUPERVISORD_CONF="/etc/supervisor/conf.d/supervisord-no-caddy.conf"
 fi
 
+# Opt-in (#339): run corescope-server and corescope-ingestor as
+# CORESCOPE_UID:CORESCOPE_GID. Unset, empty, 0 or false keeps the historical
+# start, in which every program runs as root and the helper never runs.
+case "${CORESCOPE_RUN_AS_NONROOT-}" in
+  '' | 0 | false) ;;
+  *) SUPERVISORD_CONF=$(/usr/local/lib/corescope/nonroot.sh setup "$SUPERVISORD_CONF") || exit 1 ;;
+esac
+
 exec /usr/bin/supervisord -c "$SUPERVISORD_CONF"

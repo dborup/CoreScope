@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/meshcore-analyzer/channelregistry"
@@ -1210,6 +1213,22 @@ var (
 	configStatFile   = func(f *os.File) (os.FileInfo, error) { return f.Stat() }
 )
 
+// ErrConfigReadOnly marks a SaveGeoFilter failure caused by the deployment
+// arrangement rather than by the data: config.json or its directory cannot be
+// written by this process — a read-only mount, or the server running as a
+// non-root user without write access (#339). Callers report it as such
+// instead of as a generic save failure.
+var ErrConfigReadOnly = errors.New("config.json is read-only for the server")
+
+// configReadOnlyErr wraps a create/rename failure in ErrConfigReadOnly when
+// its cause is a permission or read-only-filesystem error.
+func configReadOnlyErr(op string, err error) error {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w: %s: %w", ErrConfigReadOnly, op, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // SaveGeoFilter writes the geo_filter section back to config.json on disk.
 // Pass gf=nil to remove the filter. The rest of config.json is preserved as-is.
 //
@@ -1289,7 +1308,7 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	// Atomic write: unique temp file in the destination directory + rename.
 	tmpFile, err := configCreateTemp(filepath.Dir(configPath), filepath.Base(configPath)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
+		return configReadOnlyErr("create temp config", err)
 	}
 	tmpName := tmpFile.Name()
 	renamed := false
@@ -1317,7 +1336,7 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 		return fmt.Errorf("close temp config: %w", err)
 	}
 	if err := configRename(tmpName, configPath); err != nil {
-		return fmt.Errorf("rename config: %w", err)
+		return configReadOnlyErr("rename config", err)
 	}
 	renamed = true
 	return nil

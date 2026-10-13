@@ -127,6 +127,11 @@ jobs:
       - name: Staging disk-monitor unit tests (issue #1684)
         run: bash scripts/staging/test-disk-monitor.sh
 
+      - name: Non-root container helper unit tests + ShellCheck (issue #339)
+        run: |
+          bash scripts/test-nonroot-helper.sh
+          shellcheck docker/nonroot.sh scripts/test-nonroot-helper.sh scripts/test-docker-nonroot.sh
+
       - name: QA blacklist script unit tests (issues #1977, #83)
         run: bash qa/scripts/test-blacklist-sql.sh
 

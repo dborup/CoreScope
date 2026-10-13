@@ -78,6 +78,8 @@ docker run -d --name corescope \
 | `-e DISABLE_MOSQUITTO=true` | No | Skip the internal Mosquitto broker (use your own) |
 | `-e DISABLE_CADDY=true` | No | Skip the built-in Caddy reverse proxy |
 | `-e MQTT_BROKER=mqtt://host:1883` | No | Override MQTT broker URL |
+| `-e CORESCOPE_RUN_AS_NONROOT=1` | No | Opt-in: run `corescope-server` and `corescope-ingestor` without root — see [Running the Go services without root](#running-the-go-services-without-root-opt-in) |
+| `-e CORESCOPE_UID=1000 -e CORESCOPE_GID=1000` | With the above | Numeric user and group the two Go services run as |
 
 #### `/app/data/.env` convenience file
 
@@ -91,6 +93,110 @@ MQTT_BROKER=mqtt://my-broker:1883
 ```
 
 The entrypoint sources this file before starting services. This works with any launch method (`docker run`, compose, or manage.sh).
+
+### Running the Go services without root (opt-in)
+
+By default every program in the container runs as root, exactly as in earlier
+releases. Setting `CORESCOPE_RUN_AS_NONROOT` runs **only** `corescope-server`
+and `corescope-ingestor` as an unprivileged user, which limits what a
+compromised web server or ingestor can do. Nothing changes until you turn it on.
+
+| Variable | Values |
+|----------|--------|
+| `CORESCOPE_RUN_AS_NONROOT` | `1` or `true` turns it on. Unset, empty, `0` or `false` keep the default. Any other value stops the container with an error. |
+| `CORESCOPE_UID` | Required when on. Numeric user ID, not 0 and not an account that already exists in the image (`mosquitto` 101, `caddy` 100, `nobody` …). |
+| `CORESCOPE_GID` | Required when on. Numeric group ID, 100 or higher and not the `mosquitto`/`caddy` group. An existing group such as `users` (100) is reused. |
+
+Set them with `-e`, in compose `environment:`, or in `/app/data/.env`. For a
+bind mount, use the IDs of the host user that owns the data directory
+(`id -u`, `id -g`), so you can keep editing your files on the host.
+
+**What stays the same.** supervisord, the entrypoint and Caddy still run as
+root; Mosquitto still runs as `mosquitto` and still ignores `PUID`/`PGID`.
+With the setting off, the entrypoint takes the old path unchanged and starts
+the same supervisor config files.
+
+**What changes at start.** As root, before any service starts, the entrypoint
+creates a `corescope` account with those IDs and writes
+`/run/corescope/supervisord.conf`: the selected config with `user=corescope`
+added to the two Go programs only. It then gives these paths to
+`CORESCOPE_UID:CORESCOPE_GID`, each one only if its owner differs:
+
+- the data directory `/app/data` itself (not its contents),
+- `meshcore.db`, `ping_scores_history.db` and their `-wal`/`-shm` files,
+- `client-rx-delete.salt` and `client-rx-delete-audit.jsonl` (the only log
+  files the services write; their other logs go to the container output),
+- the queue directories `prune-requests/`, `mbcap-snapshot/`,
+  `channel-proposal-requests/`, `client-rx-deletes/` and the files directly
+  inside them.
+
+There is no recursive `chown`. Symlinks and hard-linked files on that list are
+left unchanged with a warning in the log. The cost is one `stat` per listed
+path and queue entry on every start, plus a `chown` for each wrong owner — in
+practice a few milliseconds, independent of the database size. The log shows
+what happened, e.g. `[nonroot] ownership: 7 of 9 path(s) in /app/data changed
+to 1000:1000`; after the first start it reports `0 of …`. Files that a root
+process creates later (a `docker cp` restore, a run with the setting off) are
+fixed at the next start in this mode.
+
+**Host-side effect.** With a bind mount, the host sees the data directory and
+the listed files owned by those numeric IDs. If they are not your host user,
+you need `sudo` to create new files in the data directory. Your own files —
+`config.json`, `theme.json`, `.env`, other files and subdirectories — keep
+their owner and mode. They must be readable for the user or group (for
+example mode 0640 with group `CORESCOPE_GID`); an unreadable `config.json`
+stops the start with `config.json is not readable for UID:GID`. The same
+applies to an external `hashRegionsPath` file, a `dbPath` outside `/app/data`
+or a `CORESCOPE_INGESTOR_STATS` path: they are not migrated and must be
+accessible to that user.
+
+**config.json is read-only for the services.** A read-only config mount works
+(`-v /srv/corescope/config.json:/app/data/config.json:ro`). Saving the geo
+filter from the customizer then fails with HTTP 409 and `geo filter not saved:
+config.json is read-only for the server …`; edit `geo_filter` in `config.json`
+on the host and restart instead. Run ingestor admin commands as the same user,
+so the running ingestor can read the request files they write:
+
+```bash
+docker exec -u 1000:1000 corescope /app/corescope-ingestor -config /app/config.json \
+  admin delete-client-rx --pubkey <64 hex> --dry-run
+```
+
+#### Turning it on
+
+1. Back up both databases first with the offline helper (see
+   [Backup](#backup)): `sh scripts/backup-sqlite.sh corescope /backups`.
+2. Note the current owners, so you can restore them exactly:
+   `stat -c '%u:%g %n' /your/data /your/data/*.db*` on the host (named
+   volume: `docker run --rm --volumes-from corescope --entrypoint stat
+   "$(docker inspect --format '{{.Image}}' corescope)" -c '%u:%g %n' /app/data`).
+3. Add `CORESCOPE_RUN_AS_NONROOT=1`, `CORESCOPE_UID` and `CORESCOPE_GID` to the
+   container environment or `/app/data/.env`, and recreate or restart the
+   container.
+4. Check the log line `[nonroot] corescope-server and corescope-ingestor run as
+   …` and the processes: `docker exec corescope ps -o pid,user,group,args`.
+
+#### Rollback
+
+1. Remove the three variables (or set `CORESCOPE_RUN_AS_NONROOT=0`) and
+   recreate or restart the container. Everything runs as root again; root can
+   use the non-root-owned files, so this alone restores service.
+2. Optional — restore the previous owners of the listed paths. With the
+   container **stopped**, run the helper from the same image as root (`0:0`,
+   or the owner you noted):
+
+   ```sh
+   IMAGE=$(docker inspect --format '{{.Image}}' corescope)
+   docker stop corescope
+   docker run --rm --pull=never --network none --volumes-from corescope \
+     --entrypoint /usr/local/lib/corescope/nonroot.sh "$IMAGE" set-owner 0:0
+   docker start corescope
+   ```
+
+   `set-owner` changes exactly the list above, with the same symlink and
+   hard-link rules; it never touches your other files.
+3. If data looks wrong, restore the backup from step 1 as described in
+   [Restore](#restore).
 
 ### Docker Compose (legacy alternative)
 
