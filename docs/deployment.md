@@ -799,6 +799,45 @@ completed backup. Check the container's state and remove only that abandoned
 staging directory after investigating. The helper cannot guarantee recovery
 from a dead Docker daemon or host.
 
+**Concurrent runs.** Invocations for the same container are serialised, so
+a scheduled run that overlaps a manual one cannot restart the writer while the
+other is still copying. Before it reads the container's running state, the
+helper takes an exclusive lock keyed by the container's full ID: a name, the ID
+and a short ID share one lock, whatever backup directory each run uses. The lock
+is held through the stop, the copy, the restart and its check, and any
+recovery, and is released on every exit path, including a caught signal. A
+second run prints `Waiting up to …s for another backup of …` and waits up to
+`CORESCOPE_BACKUP_LOCK_WAIT` (default 600 seconds); `0` gives up at once. It
+then exits with status 75 without having read, stopped or started the
+container.
+The lock lives in a private `corescope-backup-locks` directory inside
+`CORESCOPE_BACKUP_LOCK_DIR` (default `/tmp`); not in `$TMPDIR`, which differs
+per user on macOS and under `sudo`. It is named
+`corescope-backup-<container ID>.lock`. It is host-local: run every backup of a
+container on its Docker host, as the same user, with the same lock directory
+(a systemd unit with `PrivateTmp=yes` needs `CORESCOPE_BACKUP_LOCK_DIR` set to
+a shared absolute path).
+Because `/tmp` is writable by every user, a lock path directly in it could be
+swapped for a symlink between the helper's check and its open. The helper
+therefore creates `corescope-backup-locks` with mode 0700 and uses it only once
+verified to be a directory of the current user with that mode, not a symlink;
+no other user can create anything inside it. `CORESCOPE_BACKUP_LOCK_DIR` itself
+must belong to root or that user and must not be writable by other users
+unless it is sticky like `/tmp`, so that nobody else can rename the private
+directory away. A `corescope-backup-locks` of another user, a symlink there, or
+an unsafe lock directory makes the helper exit with status 1 before it touches
+the container: one user's backups cannot then share, or be redirected by,
+another user's locks. (A POSIX shell cannot open a file with `O_NOFOLLOW`,
+and a directory named per user would let backups run as different users hold
+different locks and overlap.) With `flock` (util-linux, BusyBox) the lock is a file
+that the kernel releases when the helper exits; the file itself stays. Without
+`flock` (macOS) it is a directory holding the owner's PID: a lock whose owner
+no longer exists is removed automatically, one held by a live process (or
+without a readable owner) never is. Remove a lock by hand (with a leftover
+`….lock.reclaim` directory, which only a `SIGKILL` mid-reclaim leaves), or a
+lock path of the wrong type that the helper reports, only once no backup of
+that container is running.
+
 Back up `config.json` (which may contain secrets) and `theme.json` separately
 if wanted; the SQLite helper intentionally does not publish them.
 

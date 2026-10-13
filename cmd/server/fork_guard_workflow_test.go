@@ -14,6 +14,7 @@ package main
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,72 @@ func TestForkGuardOnPublishSteps(t *testing.T) {
 	}
 	if guarded != len(publishMarkers) {
 		t.Errorf("build-and-publish: expected %d guarded publish steps, found %d", len(publishMarkers), guarded)
+	}
+}
+
+// publishSurfaceMarkers are actions or commands that log in to, or push to, a
+// registry. Anywhere in the workflow they are a side effect that must be
+// fork-guarded, not only inside build-and-publish.
+var publishSurfaceMarkers = []string{
+	"docker/login-action", "docker/build-push-action", "docker push", "docker login",
+	"docker buildx imagetools", "push: true",
+}
+
+func workflowJobNames(t *testing.T, src string) []string {
+	t.Helper()
+	jobs := regexp.MustCompile(`(?ms)^jobs:[ \t]*\n(.*)`).FindStringSubmatch(src)
+	if jobs == nil {
+		t.Fatal("jobs: section not found")
+	}
+	var names []string
+	for _, m := range regexp.MustCompile(`(?m)^  ([a-zA-Z0-9_-]+):[ \t]*$`).FindAllStringSubmatch(jobs[1], -1) {
+		names = append(names, m[1])
+	}
+	return names
+}
+
+// Every job, not only build-and-publish, must fork-guard registry login/push
+// steps: either at job level or on the step itself.
+func TestForkGuardScansEveryJobForPublishSteps(t *testing.T) {
+	for _, rel := range []string{deployWorkflowRel, fastPathWorkflowRel} {
+		src := readWorkflow(t, rel)
+		names := workflowJobNames(t, src)
+		if len(names) == 0 || (rel == deployWorkflowRel && len(names) < 5) {
+			t.Fatalf("%s: job parsing found too few jobs: %v", rel, names)
+		}
+		for _, name := range names {
+			job := workflowJob(t, src, name)
+			jobGuarded := strings.Contains(jobIf(job), upstreamRepoGuard)
+			for _, step := range regexp.MustCompile(`(?m)^      - `).Split(job, -1)[1:] {
+				ifLine := regexp.MustCompile(`(?m)^        if:(.*)$`).FindStringSubmatch(step)
+				stepGuarded := ifLine != nil && strings.Contains(ifLine[1], upstreamRepoGuard)
+				for _, marker := range publishSurfaceMarkers {
+					if strings.Contains(step, marker) && !jobGuarded && !stepGuarded {
+						t.Errorf("%s job %q: step using %q must be fork-guarded (job or step if)", rel, name, marker)
+					}
+				}
+			}
+		}
+	}
+}
+
+// image-check only builds locally. It must not inherit packages: write, and a
+// hung Docker build must not hold the required gate pending for the 6 h default.
+func TestImageCheckLeastPrivilegeAndTimeout(t *testing.T) {
+	job := workflowJob(t, readWorkflow(t, deployWorkflowRel), "image-check")
+	perms := regexp.MustCompile(`(?m)^    permissions:[ \t]*\n((?:^      .*\n)+)`).FindStringSubmatch(job)
+	if perms == nil {
+		t.Fatal("image-check must declare job-level permissions")
+	}
+	if strings.TrimSpace(perms[1]) != "contents: read" {
+		t.Errorf("image-check permissions must be exactly contents: read; got %q", strings.TrimSpace(perms[1]))
+	}
+	m := regexp.MustCompile(`(?m)^    timeout-minutes:\s*(\d+)\s*$`).FindStringSubmatch(job)
+	if m == nil {
+		t.Fatal("image-check must set job-level timeout-minutes")
+	}
+	if n, _ := strconv.Atoi(m[1]); n < 10 || n > 30 {
+		t.Errorf("image-check timeout-minutes should be about 20 (10..30); got %d", n)
 	}
 }
 

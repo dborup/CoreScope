@@ -62,4 +62,28 @@ for (const { values, expected } of cases) {
   const result = spawnSync('bash', ['-e', '-c', bash], { env: { ...process.env, ...values }, encoding: 'utf8' });
   assert.equal(result.status, expected, `${JSON.stringify(values)}: ${result.stderr}`);
 }
+// Follow-ups to #383 (#426).
+// 1. Registry login/push steps must be fork-guarded in EVERY job, not only
+//    build-and-publish (job-level or step-level guard).
+const GUARD = "github.repository == 'Kpa-clawbot/CoreScope'";
+const jobNames = [...workflow.slice(workflow.indexOf('\njobs:')).matchAll(/^  ([a-z][a-z0-9-]*):\s*$/gm)].map((m) => m[1]);
+assert.ok(jobNames.length >= 5, 'parsed jobs: ' + jobNames);
+for (const name of jobNames) {
+  const body = job(name);
+  const jobGuarded = /^    if:[\s\S]*?(?=^    [a-z-]+:)/m.exec(body)?.[0].includes(GUARD) ?? false;
+  for (const step of body.split(/^      - /m).slice(1)) {
+    const stepIf = step.match(/^        if:(.*)$/m);
+    const stepGuarded = !!stepIf && stepIf[1].includes(GUARD);
+    for (const marker of ['docker/login-action', 'docker/build-push-action', 'docker push', 'docker login', 'push: true']) {
+      if (step.includes(marker)) {
+        assert.ok(jobGuarded || stepGuarded, `${name}: step using ${marker} must be fork-guarded`);
+      }
+    }
+  }
+}
+// 2. image-check is least-privilege. 3. It has a bounded timeout.
+assert.match(image, /^    permissions:\n      contents: read\n/m, 'image-check must be contents: read only');
+assert.doesNotMatch(image, /packages:\s*write/);
+const timeout = image.match(/^    timeout-minutes: (\d+)$/m);
+assert.ok(timeout && +timeout[1] >= 10 && +timeout[1] <= 30, 'image-check needs timeout-minutes of about 20');
 console.log('CI independent shards and all-six fail-closed prerequisites: PASS');
