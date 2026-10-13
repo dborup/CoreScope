@@ -122,7 +122,9 @@ if (typeof window !== 'undefined') {
     // #393 N9 — delegated click navigation for the same rows. Lets the packet
     // rows drop their per-row inline onclick (consistency with #373), which
     // also removes the latent `'`-breakout in that double-quoted/JS context.
-    app.addEventListener('click', function (e) {
+    // Bound to #compareContent, not the shared #app: the next page's
+    // app.innerHTML discards it, so it cannot fire on other pages' rows.
+    document.getElementById('compareContent').addEventListener('click', function (e) {
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       location.hash = row.dataset.value;
