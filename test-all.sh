@@ -66,6 +66,7 @@ run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
+run test-issue-405-observers-listener-leak.js
 run test-issue-322-comment-guards.js
 run test-backup-sqlite-safety.js
 run test-perf-go-runtime.js
