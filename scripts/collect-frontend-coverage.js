@@ -792,6 +792,9 @@ async function run() {
       if (typeof miniMarkdown === 'function') {
         miniMarkdown('**bold** and *italic* and `code`');
         miniMarkdown('[link](https://example.com)');
+        // #368 — both arms of the link-destination scheme check
+        miniMarkdown('[rel](/nodes) [frag](#/map)');
+        miniMarkdown('[bad](javascript:void0) [bad2](data:text/plain;base64,QQ==)');
         miniMarkdown('- item1\n- item2\n- item3');
         miniMarkdown('');
         miniMarkdown(null);
