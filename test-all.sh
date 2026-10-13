@@ -278,6 +278,7 @@ run test-table-sort.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js
+run test-ci-parallel-gates.js
 
 echo ""
 echo "═══════════════════════════════════════"
