@@ -105,4 +105,17 @@ func TestNormalizeSlowPath(t *testing.T) {
 			t.Fatalf("control chars survived in the key half: %q", got)
 		}
 	})
+
+	// #393 N4: the strip covers DEL (0x7f) as well as C0 (< 0x20); only the
+	// C0 half was pinned. Neighbouring '~' (0x7e) must survive. Mutant: drop
+	// `|| r == 0x7f` → red.
+	t.Run("DEL is stripped from both halves, '~' is kept", func(t *testing.T) {
+		if got := sanitizeSlowPathComponent("a\x7fb~"); got != "ab~" {
+			t.Fatalf("sanitizeSlowPathComponent: got %q, want %q", got, "ab~")
+		}
+		got := normalizeSlowPath("/api/\x7f:id", "/api/x\x7fy")
+		if got != "/api/:id /api/xy" {
+			t.Fatalf("normalizeSlowPath: got %q, want %q", got, "/api/:id /api/xy")
+		}
+	})
 }

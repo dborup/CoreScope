@@ -198,6 +198,7 @@ run test-reach-rank.js
 run test-issue-1107-live-layout.js
 run test-issue-1619-feed-detail-card-draggable.js
 run test-xss-escape-sinks.js
+run test-issue-393-slowpath-doc-bound.js
 run test-preflight-xss-gate.js
 run test-issue-1648-m4-emoji-scan.js
 run test-issue-1753-copy-url-slash.js
