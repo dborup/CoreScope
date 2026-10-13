@@ -22,7 +22,8 @@
 #   gate    a root-consumed file the services could have written (their owner,
 #           group-writable for them, a symlink, a hard link, created after the
 #           enable) stops the start with [nonroot] ERROR before anything is
-#           sourced or linked; also with the setting removed afterwards
+#           sourced or linked; also with the setting removed afterwards, and
+#           on a volume without the marker whose .env alone asks for the mode
 #   queue   requests in the queue directories that the services did not write
 #           are set aside, never handed to the services
 #   record  owners/restore-owners restore mixed owners and the data dir mode
@@ -251,9 +252,20 @@ done
 # ---------------------------------------------------------------------------
 echo "# gate: a file the services could have written is never used by root"
 PAYLOAD='touch /app/data/ran-as-root'
+# gate_refused VOL LABEL [docker args...]: expect the next start to stop
+# before sourcing or linking anything.
+gate_refused() {
+    local v=$1 label=$2
+    shift 2
+    start "$v" "$@"
+    check "gate ($label): start refused" 1 "$RC"
+    has "gate ($label): [nonroot] ERROR" "$OUT" '^\[nonroot\] ERROR: '
+    hasnt "gate ($label): supervisord not started" "$OUT" '^argv: '
+    hasnt "gate ($label): nothing linked" "$OUT" '^linked: '
+    check "gate ($label): .env not sourced" "absent" "$(as_root "$v" '[ -e /app/data/ran-as-root ] && echo present || echo absent')"
+}
 # gate_case LABEL ROOT_SCRIPT [docker args...]: prepare an enabled volume,
-# tamper as ROOT_SCRIPT says, then expect the next start to stop before
-# sourcing or linking anything.
+# tamper as ROOT_SCRIPT says, then expect gate_refused.
 gate_case() {
     local label=$1 prep=$2
     shift 2
@@ -263,12 +275,7 @@ gate_case() {
     start "$v" "${ON[@]}"
     [ "$RC" = 0 ] || { check "gate ($label): setup start" 0 "$RC"; return; }
     as_root "$v" "cd /app/data && $prep"
-    start "$v" "$@"
-    check "gate ($label): start refused" 1 "$RC"
-    has "gate ($label): [nonroot] ERROR" "$OUT" '^\[nonroot\] ERROR: '
-    hasnt "gate ($label): supervisord not started" "$OUT" '^argv: '
-    hasnt "gate ($label): nothing linked" "$OUT" '^linked: '
-    check "gate ($label): .env not sourced" "absent" "$(as_root "$v" '[ -e /app/data/ran-as-root ] && echo present || echo absent')"
+    gate_refused "$v" "$label" "$@"
 }
 gate_case ".env owned by the services" "echo '$PAYLOAD' >> .env && chown $U:$G .env" "${ON[@]}"
 has "gate (.env owned by the services): names the services' user" "$OUT" "ERROR: /app/data/.env is owned by $U, the services' user"
@@ -289,6 +296,19 @@ gate_case "setting in .env not written as a plain number" \
 gate_case "data dir handed to the services" "chown $U /app/data" "${ON[@]}"
 gate_case "marker not written by root" "chown $U:$G .corescope-nonroot"
 gate_case ".env owned by neither root nor the data dir's owner" "echo '$PAYLOAD' >> .env && chown 2000:2000 .env" "${ON[@]}"
+# No marker yet, the setting only in .env: the mention in .env alone must run
+# the check before root sources .env. This is the only trigger on a volume
+# from the earlier draft (eb49596f), which never wrote the marker.
+NR_ENV="printf 'CORESCOPE_RUN_AS_NONROOT=1\nCORESCOPE_UID=$U\nCORESCOPE_GID=$G\n$PAYLOAD\n' > .env"
+for c in "group-writable .env|$NR_ENV && chgrp $G .env && chmod 664 .env" \
+    "earlier draft: data dir and .env owned by the services|$NR_ENV && chown $U:$G . .env && chmod 755 ."; do
+    V=$(vol "gate-$CHECKS")
+    layout "$V"
+    as_root "$V" "cd /app/data && ${c#*|}"
+    check "gate (no marker, ${c%%|*}): volume has no marker" "absent" \
+        "$(as_root "$V" '[ -e /app/data/.corescope-nonroot ] && echo present || echo absent')"
+    gate_refused "$V" "no marker, setting only in .env, ${c%%|*}"
+done
 
 # A read-only mount cannot be changed or replaced from inside the container,
 # whoever owns it on the host.
