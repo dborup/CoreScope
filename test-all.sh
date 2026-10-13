@@ -68,6 +68,7 @@ run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
 run test-issue-322-comment-guards.js
 run test-backup-sqlite-safety.js
+run test-issue-372-broker-check.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js

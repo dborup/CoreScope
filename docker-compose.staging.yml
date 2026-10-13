@@ -49,8 +49,21 @@ services:
       #     - "${STAGING_GO_MQTT_PORT:-1883}:1883"
       #
       # (drop it in-between the :80 mapping and the pprof ports below).
-      - "6060:6060"   # pprof server
-      - "6061:6061"   # pprof ingestor
+      # pprof host ports. PPROF_BIND is the host interface they are
+      # published on; the default 0.0.0.0 is every interface, which is what
+      # this file has always published — a deploy that profiles this host
+      # remotely keeps working. Set PPROF_BIND=127.0.0.1 to require an SSH
+      # tunnel instead. The two ports stay distinct: 6060 is the server's
+      # listener, 6061 the ingestor's, and collapsing them would profile
+      # only whichever process won the bind.
+      #
+      # NOTE: narrowing the IN-CONTAINER listener with PPROF_HOST is a
+      # different setting and is incompatible with publishing these ports —
+      # docker's proxy reaches the container by its network address, not
+      # its loopback. Use PPROF_BIND for a published port, PPROF_HOST only
+      # when the process runs without a port mapping.
+      - "${PPROF_BIND:-0.0.0.0}:6060:6060"   # pprof server
+      - "${PPROF_BIND:-0.0.0.0}:6061:6061"   # pprof ingestor
     volumes:
       - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
       - caddy-data-staging-go:/data/caddy
