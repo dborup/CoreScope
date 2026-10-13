@@ -304,6 +304,8 @@
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
+        // The 240 s nodeHealth TTL is intentional: it matches node detail's
+        // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
         const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};

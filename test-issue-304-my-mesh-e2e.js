@@ -21,6 +21,8 @@ const QUOTE = 'x" onmouseover="alert(1)';
 const now = Date.now();
 const end = new Date(now).toISOString();
 const start = new Date(now - 24 * 3600000).toISOString();
+// #384: a fixed advert age so the card's "· last …" text is pinned.
+const advert33m = new Date(now - 33 * 60000).toISOString();
 const activity = (complete = true) => ({
   windowStart: start, windowEnd: end, coverageStart: complete ? start : new Date(now - 8 * 3600000).toISOString(), complete,
   buckets: Array.from({ length: 24 }, (_, i) => ({
@@ -80,7 +82,7 @@ async function render(page, responses, width, height) {
         { role: 'repeater', observers: names.map(observer_name => ({ observer_name })), activity: activity(),
           backfill: { status: 'pending', remaining: 15 },
           intervals: {
-            zero_hop: { status: 'estimated', interval_s: 7200, samples: 5, last_advert: end, confidence: 'medium' },
+            zero_hop: { status: 'estimated', interval_s: 7200, samples: 5, last_advert: advert33m, confidence: 'medium' },
             flood: { status: 'too_few', interval_s: null, samples: 2, last_advert: end },
           } },
         { role: 'repeater', observers: [{ observer_name: 'One' }], activity: activity(false),
@@ -124,6 +126,15 @@ async function render(page, responses, width, height) {
       assert.match(await large.locator('.mnc-advert-note').getAttribute('title'), /observed estimate.*not the configured timer/i);
       assert.match(await large.locator('.mnc-advert-provisional').innerText(), /route classes provisional/i);
       assert.match(await cards.nth(1).locator('.mnc-advert-cadence').innerText(), /not observed[\s\S]*irregular/i);
+      // #384: each route row pins its value, sample count and latest advert.
+      // Card 2's 3600 s is the hours/minutes boundary (≈ 1 h, not ≈ 60 min);
+      // a row without last_advert has no "· last" part.
+      const advertRows = async card => (await cards.nth(card).locator('.mnc-advert-row').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
+      const [zeroHop0, flood0] = await advertRows(0);
+      assert.match(zeroHop0, /^Zero-hop ≈ 2 h · 5 heard · last 3[34]m ago$/);
+      assert.match(flood0, /^Flood not enough adverts · 2 heard · last \d+s ago$/);
+      assert.deepEqual(await advertRows(1), ['Zero-hop not observed · 0 heard', 'Flood irregular · 5 heard']);
+      assert.deepEqual(await advertRows(2), ['Zero-hop ≈ 1 h · 4 heard', 'Flood not enough adverts · 1 heard']);
       assert.equal(await cards.nth(1).locator('.mnc-advert-provisional').count(), 0);
       assert.match(await cards.nth(2).locator('.mnc-advert-provisional').innerText(), /route classes provisional/i);
       assert.match(await cards.nth(3).locator('.mnc-advert-cadence').innerText(), /unavailable/i);

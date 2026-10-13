@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -112,4 +113,49 @@ func TestNodeHealthAdvertIntervalsFailsClosedOnIdentityLookupError(t *testing.T)
 	if strings.Contains(w.Body.String(), "advertIntervals") || strings.Contains(w.Body.String(), "advertRouteBackfill") || lookups.Load() != 0 {
 		t.Fatalf("failed identity lookup must not expose cadence or consult cache: %s", w.Body.String())
 	}
+}
+
+// #384: the opt-in health path fails closed like node detail, and like node
+// detail it logs the lookup error instead of dropping it, so a My Mesh card
+// that loses its cadence block leaves a trace.
+func TestNodeHealthAdvertIntervalsLogsLookupErrors(t *testing.T) {
+	const key = "abcdabcdabcdabcd"
+	setup := func(t *testing.T) (*Server, http.Handler) {
+		srv, router := setupTestServer(t)
+		if _, err := srv.db.conn.Exec(`INSERT INTO nodes (public_key,name,role,lat,lon,last_seen,first_seen,advert_count) VALUES (?, 'repeater', 'repeater',0,0,'2026-10-07T00:00:00Z','2026-10-07T00:00:00Z',1)`, key); err != nil {
+			t.Fatal(err)
+		}
+		return srv, router
+	}
+	serve := func(t *testing.T, router http.Handler, ctx context.Context) string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", "/api/nodes/"+key+"/health?include=advertIntervals", nil).WithContext(ctx))
+		if w.Code != 200 || strings.Contains(w.Body.String(), "advertIntervals") {
+			t.Fatalf("want fail-closed 200 without cadence, got %d %s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	t.Run("identity lookup", func(t *testing.T) {
+		srv, router := setup(t)
+		srv.cfg.SetHiddenNamePrefixes([]string{"ZZ-unmatched-prefix"})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		out := captureLog(func() { serve(t, router, ctx) })
+		if !strings.Contains(out, "WARN isIdentityHidden("+key+"):") {
+			t.Fatalf("identity lookup error not logged; log=%q", out)
+		}
+	})
+
+	t.Run("advert route lookup", func(t *testing.T) {
+		srv, router := setup(t)
+		if _, err := srv.db.conn.Exec(`ALTER TABLE transmissions RENAME TO transmissions_gone_384`); err != nil {
+			t.Fatal(err)
+		}
+		out := captureLog(func() { serve(t, router, context.Background()) })
+		if !strings.Contains(out, "WARN nodeAdvertRoutes("+key+"):") {
+			t.Fatalf("advert route error not logged; log=%q", out)
+		}
+	})
 }
