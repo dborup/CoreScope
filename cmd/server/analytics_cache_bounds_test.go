@@ -19,7 +19,7 @@ func TestPutCachedResultLocked_BoundsEntries(t *testing.T) {
 	m := make(map[string]*cachedResult)
 	const n = analyticsCacheMaxEntries * 4
 	for i := 0; i < n; i++ {
-		putCachedResultLocked(m, fmt.Sprintf("k%06d", i), map[string]interface{}{"i": i}, time.Minute)
+		putCachedResultLocked(m, fmt.Sprintf("k%06d", i), &cachedResult{data: map[string]interface{}{"i": i}, expiresAt: time.Now().Add(time.Minute)})
 		if len(m) > analyticsCacheMaxEntries {
 			t.Fatalf("after %d inserts len=%d exceeds ceiling %d", i+1, len(m), analyticsCacheMaxEntries)
 		}
@@ -34,7 +34,7 @@ func TestPutCachedResultLocked_BoundsEntries(t *testing.T) {
 func TestPutCachedResultLocked_RefreshDoesNotEvict(t *testing.T) {
 	m := make(map[string]*cachedResult)
 	for i := 0; i < analyticsCacheMaxEntries; i++ {
-		putCachedResultLocked(m, fmt.Sprintf("k%06d", i), map[string]interface{}{"i": i}, time.Minute)
+		putCachedResultLocked(m, fmt.Sprintf("k%06d", i), &cachedResult{data: map[string]interface{}{"i": i}, expiresAt: time.Now().Add(time.Minute)})
 	}
 	// All entries live; map is exactly full.
 	if len(m) != analyticsCacheMaxEntries {
@@ -47,7 +47,7 @@ func TestPutCachedResultLocked_RefreshDoesNotEvict(t *testing.T) {
 	}
 	// Refresh an existing key many times. No other live key may disappear.
 	for r := 0; r < 100; r++ {
-		putCachedResultLocked(m, "k000000", map[string]interface{}{"r": r}, time.Minute)
+		putCachedResultLocked(m, "k000000", &cachedResult{data: map[string]interface{}{"r": r}, expiresAt: time.Now().Add(time.Minute)})
 		if len(m) != analyticsCacheMaxEntries {
 			t.Fatalf("refresh %d changed size to %d (want %d) — refresh evicted a live key", r, len(m), analyticsCacheMaxEntries)
 		}
@@ -68,7 +68,7 @@ func TestEvictCachedResultLocked_ExpiredFirst(t *testing.T) {
 	for i := 0; i < analyticsCacheMaxEntries; i++ {
 		m[fmt.Sprintf("old%06d", i)] = &cachedResult{data: map[string]interface{}{}, expiresAt: past}
 	}
-	putCachedResultLocked(m, "fresh", map[string]interface{}{"x": 1}, time.Minute)
+	putCachedResultLocked(m, "fresh", &cachedResult{data: map[string]interface{}{"x": 1}, expiresAt: time.Now().Add(time.Minute)})
 	if _, ok := m["fresh"]; !ok {
 		t.Fatal("fresh key was not stored")
 	}
@@ -92,7 +92,7 @@ func TestEvictCachedResultLocked_DeterministicVictim(t *testing.T) {
 				expiresAt: base.Add(time.Duration(i) * time.Second),
 			}
 		}
-		putCachedResultLocked(m, "zzz-new", map[string]interface{}{}, time.Hour)
+		putCachedResultLocked(m, "zzz-new", &cachedResult{data: map[string]interface{}{}, expiresAt: time.Now().Add(time.Hour)})
 		if _, ok := m["k000000"]; ok {
 			t.Fatalf("trial %d: soonest-expiry entry k000000 should have been evicted", trial)
 		}
@@ -118,7 +118,7 @@ func TestEvictCachedResultLocked_TieBreakSmallestKey(t *testing.T) {
 		for i := 0; i < analyticsCacheMaxEntries-2; i++ {
 			m[fmt.Sprintf("c%06d", i)] = &cachedResult{data: map[string]interface{}{}, expiresAt: later}
 		}
-		putCachedResultLocked(m, "new", map[string]interface{}{}, time.Hour)
+		putCachedResultLocked(m, "new", &cachedResult{data: map[string]interface{}{}, expiresAt: time.Now().Add(time.Hour)})
 		if _, ok := m["aaa"]; ok {
 			t.Fatalf("trial %d: tie should evict smallest key 'aaa'", trial)
 		}
@@ -160,6 +160,9 @@ func TestAnalyticsFilterError(t *testing.T) {
 			if !c.wantNonEmpty && got != "" {
 				t.Fatalf("expected no rejection, got %q", got)
 			}
+			if !strings.Contains(got, c.wantSubstring) {
+				t.Fatalf("message %q does not mention %q", got, c.wantSubstring)
+			}
 		})
 	}
 }
@@ -187,7 +190,7 @@ func BenchmarkPutCachedResultLocked_FullMapMiss(b *testing.B) {
 	res := map[string]interface{}{"x": 1}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		putCachedResultLocked(m, fmt.Sprintf("new%08d", i), res, time.Hour)
+		putCachedResultLocked(m, fmt.Sprintf("new%08d", i), &cachedResult{data: res, expiresAt: time.Now().Add(time.Hour)})
 	}
 }
 
@@ -202,7 +205,7 @@ func BenchmarkPutCachedResultLocked_Refresh(b *testing.B) {
 	res := map[string]interface{}{"x": 1}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		putCachedResultLocked(m, "seed000000", res, time.Hour)
+		putCachedResultLocked(m, "seed000000", &cachedResult{data: res, expiresAt: time.Now().Add(time.Hour)})
 	}
 }
 

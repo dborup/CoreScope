@@ -28,12 +28,13 @@ const (
 	analyticsCacheMaxEntries = 256
 
 	// subpathMaxLenCeiling clamps the ?maxLen= hop count on the subpath
-	// endpoints. It is part of the subpathCache key, and queryInt places no
+	// endpoints. It is part of the subpathCache key and queryInt places no
 	// upper bound on it, so an unclamped value is a second key-cardinality
-	// vector beyond region. Real relay paths are a handful of hops; this is far
-	// above any legitimate request yet stops unbounded distinct keys. The
-	// subpathCache ceiling still backstops whatever gets through.
-	subpathMaxLenCeiling = 32
+	// vector beyond region. The firmware stores the hop count in bits 0-5 of
+	// path_length (firmware/docs/packet_format.md, Packet::getPathHashCount =
+	// path_len & 63), so no path has more than 63 hops: clamping here leaves
+	// every result unchanged and only collapses larger values onto one key.
+	subpathMaxLenCeiling = 63
 
 	// analyticsFilterMaxLen caps a region/area/channel filter value, rejected
 	// before any cache/index/graph work. A normalized region set is comma-
@@ -182,12 +183,12 @@ func (s *PacketStore) evictRegionObsLocked(newKey string) {
 	}
 }
 
-// putCachedResultLocked stores result under key in m with a ttl-bounded expiry,
-// enforcing analyticsCacheMaxEntries. Caller holds the cache's write lock
-// (s.cacheMu for the store.go analytics caches).
-func putCachedResultLocked(m map[string]*cachedResult, key string, result map[string]interface{}, ttl time.Duration) {
+// putCachedResultLocked stores entry under key in m, enforcing
+// analyticsCacheMaxEntries. Caller holds the cache's write lock (s.cacheMu for
+// the store.go analytics caches).
+func putCachedResultLocked(m map[string]*cachedResult, key string, entry *cachedResult) {
 	evictCachedResultLocked(m, key)
-	m[key] = &cachedResult{data: result, expiresAt: time.Now().Add(ttl)}
+	m[key] = entry
 }
 
 // analyticsFilterError validates the region/area query parameters shared by the
