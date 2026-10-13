@@ -593,6 +593,9 @@ type WebSocketStatsResp struct {
 	RejectedDeny    int64 `json:"rejectedDeny,omitempty"`
 	RejectedRate    int64 `json:"rejectedRate,omitempty"`
 	RejectedConnCap int64 `json:"rejectedConnCap,omitempty"`
+	// #369: upgrades refused by the global concurrent-client ceiling. A
+	// nonzero value means the server was full, not that one client misbehaved.
+	RejectedGlobalCap int64 `json:"rejectedGlobalCap,omitempty"`
 }
 
 type HealthPacketStoreStats struct {

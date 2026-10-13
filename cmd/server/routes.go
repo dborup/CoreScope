@@ -56,6 +56,9 @@ type Server struct {
 	// miss moves through handleStats. Nil in production.
 	statsHook func(stage string)
 
+	// Admits one /api/perf?mem=1 store scan at a time plus a cooldown (#371).
+	perfMem perfMemLimiter
+
 	// Throttles the log of failed GET /api/nodes/{pubkey} 404 lookups (#208).
 	missingNodeLog missingNodeLookupLog
 
@@ -923,10 +926,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(s.startedAt).Seconds()
 
 	wsClients := 0
-	var wsDeny, wsRate, wsConnCap int64
+	var wsDeny, wsRate, wsConnCap, wsGlobalCap int64
 	if s.hub != nil {
 		wsClients = s.hub.ClientCount()
 		wsDeny, wsRate, wsConnCap = s.hub.limits.counts() // #1794; nil-safe
+		wsGlobalCap = s.hub.limits.globalCapRejections()  // #369; nil-safe
 	}
 
 	// Real packet store stats
@@ -1000,7 +1004,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		Cache: cs,
 		WebSocket: WebSocketStatsResp{Clients: wsClients,
-			RejectedDeny: wsDeny, RejectedRate: wsRate, RejectedConnCap: wsConnCap},
+			RejectedDeny: wsDeny, RejectedRate: wsRate, RejectedConnCap: wsConnCap,
+			RejectedGlobalCap: wsGlobalCap},
 		PacketStore: HealthPacketStoreStats{
 			Packets:     pktCount,
 			EstimatedMB: pktEstMB,
@@ -1127,6 +1132,19 @@ func (s *Server) buildStats() (*StatsResponse, error) {
 }
 
 func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
+	// Admit the opt-in store memory scan before anything below touches the
+	// store, so a refused request never takes its lock (#371).
+	var releaseMem func()
+	if s.store != nil && r.URL.Query().Get("mem") == "1" {
+		release, wait, ok := s.perfMem.acquire()
+		if !ok {
+			writePerfMemBusy429(w, wait)
+			return
+		}
+		releaseMem = release
+		defer releaseMem()
+	}
+
 	// Copy perfStats under lock to avoid data races
 	s.perfStats.mu.Lock()
 	type epSnapshot struct {
@@ -1205,12 +1223,15 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Opt-in store memory diagnostic: an O(tx+obs) walk, only when explicitly
-	// requested so the hot /api/perf path stays cheap.
+	// requested and admitted above so the hot /api/perf path stays cheap.
+	// Released as soon as the walk ends: the cooldown runs from scan
+	// completion, and a client slow to read the response cannot hold the slot.
 	var memBreakdown *StoreMemoryBreakdown
 	var breakdownNote string
-	if s.store != nil && r.URL.Query().Get("mem") == "1" {
+	if releaseMem != nil {
 		memBreakdown = s.store.GetStoreMemoryBreakdown()
 		breakdownNote = memBreakdownNote
+		releaseMem()
 	}
 
 	// SQLite stats

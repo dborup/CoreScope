@@ -27,6 +27,15 @@ package main
 //     The deny list still applies, because an explicit block is the
 //     operator's own instruction rather than an inference.
 //
+// #369 adds the piece the per-IP design cannot provide: a GLOBAL ceiling on
+// concurrent clients. Everything above is conditional on telling clients
+// apart, so in the shipped Docker topology (bundled Caddy -> localhost:3000,
+// no trustedProxies) it enforces nothing at all. The ceiling is unconditional
+// — it counts connections, not clients — so it still bounds the resource that
+// actually runs out: sockets, goroutines and 256-slot send queues. It is the
+// last check before a slot is booked, so the deny list and the per-IP rules
+// keep their reasons, their statuses and their precedence.
+//
 // Not shipped: a default deny list of hosting-provider ranges. It was
 // proposed on the issue (44 CIDRs for one VPS host, after a single scraper
 // was seen). Blanket-blocking a provider by default breaks legitimate
@@ -34,6 +43,7 @@ package main
 // ages badly as ranges are reassigned. Operators who want it can configure it.
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -61,7 +71,22 @@ const (
 	wsRejectDeny    wsRejectReason = "deny"
 	wsRejectRate    wsRejectReason = "rate"
 	wsRejectConnCap wsRejectReason = "conncap"
+	// wsRejectGlobalCap is the server-wide ceiling from #369. Kept distinct
+	// from conncap so /api/stats tells "this one client is greedy" apart from
+	// "the server is full", which call for different operator responses.
+	wsRejectGlobalCap wsRejectReason = "globalcap"
 )
+
+// wsDefaultMaxClients is the shipped global ceiling. See WebSocketConfig.MaxClients
+// for the derivation; config.example.json carries the operator-facing version.
+const wsDefaultMaxClients = 512
+
+// wsGlobalCapRetryAfter is the Retry-After sent with a ceiling refusal, in
+// seconds as the header requires. Three seconds matches the frontend's own
+// reconnect delay (WS_RECONNECT_MS, public/app.js), so a refused browser tab
+// and a refused script come back on the same cadence — and a slot freed by
+// any disconnect is offered again almost immediately.
+const wsGlobalCapRetryAfter = "3"
 
 type wsIPState struct {
 	conns      int
@@ -77,6 +102,14 @@ type wsLimiter struct {
 
 	maxConnsPerIP  int // 0 disables the concurrent-connection cap
 	upgradesPerMin int // 0 disables the upgrade-rate limit
+	maxClients     int // #369: global concurrent ceiling; 0 disables it
+
+	// totalConns is the number of slots currently booked against maxClients.
+	// It counts reservations, not registered hub clients: a slot is taken
+	// before the handshake and returned by release(), so a connection that
+	// dies between admission and Register can never be double-counted or
+	// leaked. Guarded by mu.
+	totalConns int
 
 	trustedProxies []*net.IPNet
 	denyNets       []*net.IPNet
@@ -86,6 +119,7 @@ type wsLimiter struct {
 	rejectedDeny    atomic.Int64
 	rejectedRate    atomic.Int64
 	rejectedConnCap atomic.Int64
+	rejectedGlobal  atomic.Int64
 
 	// warnedIndistinct fires the "set trustedProxies" warning once, rather
 	// than on every upgrade from behind an unconfigured proxy.
@@ -174,7 +208,14 @@ func (l *wsLimiter) clientIP(r *http.Request) (ip net.IP, distinct bool) {
 
 // allow decides whether an upgrade may proceed. On rejection it returns the
 // reason. On success it returns a release func the caller MUST invoke when
-// the connection ends, so the concurrent-connection count comes back down.
+// the connection ends, so the concurrent-connection counts come back down.
+//
+// Order of checks, and why: deny list (an explicit instruction) → per-IP rate
+// → per-IP concurrent cap → global ceiling (#369). The ceiling goes last so
+// every pre-existing refusal keeps the reason, status and counter it had
+// before #369; it is still evaluated before anything is charged, so a client
+// the ceiling turns away does not spend its own per-IP budget on a
+// connection it never got.
 func (l *wsLimiter) allow(r *http.Request) (ok bool, reason wsRejectReason, key string, release func()) {
 	noop := func() {}
 	if l == nil {
@@ -189,69 +230,115 @@ func (l *wsLimiter) allow(r *http.Request) (ok bool, reason wsRejectReason, key 
 		l.rejectedDeny.Add(1)
 		return false, wsRejectDeny, ip.String(), noop
 	}
-	if l.maxConnsPerIP <= 0 && l.upgradesPerMin <= 0 {
-		return true, "", "", noop
-	}
-	if !distinct {
+
+	perIPConfigured := l.maxConnsPerIP > 0 || l.upgradesPerMin > 0
+	if perIPConfigured && !distinct {
 		l.warnedIndistinct.Do(func() {
+			// #369: say which protection is actually left. Claiming the
+			// ceiling still applies when the operator set maxClients to 0
+			// would be the one wrong thing to print here.
+			fallback := "webSocket.maxClients is 0, so NOTHING bounds concurrent clients"
+			if l.maxClients > 0 {
+				fallback = fmt.Sprintf("the global webSocket.maxClients ceiling (%d) still applies", l.maxClients)
+			}
 			log.Printf("[ws] WARNING: per-IP limits are configured but every request arrives from %s, "+
 				"so clients cannot be told apart and the limits are NOT enforced. "+
-				"Set webSocket.trustedProxies to your reverse proxy's address to enable them.", ip)
+				"Set webSocket.trustedProxies to your reverse proxy's address to enable them. "+
+				"Meanwhile %s.", ip, fallback)
 		})
+	}
+	// perIP is what actually gets enforced: configured AND able to tell
+	// clients apart. The ceiling does not need that distinction, so it is
+	// enforced in both cases.
+	perIP := perIPConfigured && distinct
+	if !perIP && l.maxClients <= 0 {
 		return true, "", "", noop
 	}
 
-	key = ip.String()
+	if ip != nil {
+		key = ip.String()
+	}
 	now := time.Now()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.gcLocked(now)
 
-	st := l.state[key]
-	if st == nil {
-		st = &wsIPState{}
-		l.state[key] = st
-	}
-	st.lastSeenAt = now
+	var st *wsIPState
+	if perIP {
+		st = l.state[key]
+		if st == nil {
+			st = &wsIPState{}
+			l.state[key] = st
+		}
+		st.lastSeenAt = now
 
-	if l.upgradesPerMin > 0 {
-		cutoff := now.Add(-wsUpgradeWindow)
-		kept := st.upgrades[:0]
-		for _, t := range st.upgrades {
-			if t.After(cutoff) {
-				kept = append(kept, t)
+		if l.upgradesPerMin > 0 {
+			cutoff := now.Add(-wsUpgradeWindow)
+			kept := st.upgrades[:0]
+			for _, t := range st.upgrades {
+				if t.After(cutoff) {
+					kept = append(kept, t)
+				}
+			}
+			st.upgrades = kept
+			if len(st.upgrades) >= l.upgradesPerMin {
+				l.rejectedRate.Add(1)
+				return false, wsRejectRate, key, noop
 			}
 		}
-		st.upgrades = kept
-		if len(st.upgrades) >= l.upgradesPerMin {
-			l.rejectedRate.Add(1)
-			return false, wsRejectRate, key, noop
+		if l.maxConnsPerIP > 0 && st.conns >= l.maxConnsPerIP {
+			l.rejectedConnCap.Add(1)
+			return false, wsRejectConnCap, key, noop
 		}
 	}
-	if l.maxConnsPerIP > 0 && st.conns >= l.maxConnsPerIP {
-		l.rejectedConnCap.Add(1)
-		return false, wsRejectConnCap, key, noop
+
+	// #369: the server-wide ceiling. Checked under the same lock as the
+	// per-IP state and the booking below, so concurrent handshakes cannot
+	// both read "one slot left" and both take it.
+	if l.maxClients > 0 && l.totalConns >= l.maxClients {
+		l.rejectedGlobal.Add(1)
+		return false, wsRejectGlobalCap, key, noop
 	}
 
-	// Both budgets have room, so charge them together: a rejected upgrade
+	// Every budget has room, so charge them together: a rejected upgrade
 	// must never consume rate budget for a connection it did not get.
-	if l.upgradesPerMin > 0 {
-		st.upgrades = append(st.upgrades, now)
+	if perIP {
+		if l.upgradesPerMin > 0 {
+			st.upgrades = append(st.upgrades, now)
+		}
+		st.conns++
 	}
-	st.conns++
+	l.totalConns++
 
 	var once sync.Once
 	return true, "", key, func() {
 		once.Do(func() {
 			l.mu.Lock()
 			defer l.mu.Unlock()
+			if l.totalConns > 0 {
+				l.totalConns--
+			}
+			if !perIP {
+				return
+			}
 			if s := l.state[key]; s != nil && s.conns > 0 {
 				s.conns--
 				s.lastSeenAt = time.Now()
 			}
 		})
 	}
+}
+
+// reserved reports how many slots are currently booked against the global
+// ceiling. Nil-safe, so callers need no special case for an unlimited hub.
+func (l *wsLimiter) reserved() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.totalConns
 }
 
 // gcLocked drops records with no live connections and no recent activity, so
@@ -271,4 +358,14 @@ func (l *wsLimiter) counts() (deny, rate, connCap int64) {
 		return 0, 0, 0
 	}
 	return l.rejectedDeny.Load(), l.rejectedRate.Load(), l.rejectedConnCap.Load()
+}
+
+// globalCapRejections reports how many upgrades the #369 ceiling turned away
+// since boot. Kept separate from counts() so the #1794 call sites, and the
+// tests that pin their three-value shape, stay untouched.
+func (l *wsLimiter) globalCapRejections() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.rejectedGlobal.Load()
 }
