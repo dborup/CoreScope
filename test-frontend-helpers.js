@@ -137,6 +137,20 @@ console.log('\n=== app.js: timeAgo ===');
   });
 }
 
+console.log('\n=== app.js: CLIENT_TTL (#384) ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
+  const ttl = vm.runInContext('CLIENT_TTL', ctx);
+  // home.js says My Mesh's cadence (nodeHealth) is cached as long as node
+  // detail's advertRoutes estimate (nodeDetail), so the two views agree.
+  test('nodeHealth default TTL matches nodeDetail (240 s)', () => {
+    assert.strictEqual(ttl.nodeHealth, 240000);
+    assert.strictEqual(ttl.nodeHealth, ttl.nodeDetail);
+  });
+}
+
 console.log('\n=== app.js: formatTimestamp / formatTimestampWithTooltip ===');
 {
   const ctx = makeSandbox();
