@@ -178,10 +178,18 @@ func knobSection(env, key string) string {
 }
 
 func TestDeploymentDocs_CarryTheComposePullMigrationNote(t *testing.T) {
-	doc := readRepoFile(t, "docs/deployment.md")
+	full := readRepoFile(t, "docs/deployment.md")
 	heading := regexp.MustCompile(`(?m)^#{2,4} .*[Mm]igration.*[Cc]ompose`)
-	if !heading.MatchString(doc) {
+	loc := heading.FindStringIndex(full)
+	if loc == nil {
 		t.Fatalf("docs/deployment.md must carry a migration heading for operators pulling the new compose file")
+	}
+	// Scope the assertions to the migration section itself. Searching the
+	// whole file would pass on a mention anywhere else in the document,
+	// which is not where an operator pulling the new file is reading.
+	doc := full[loc[0]:]
+	if next := regexp.MustCompile(`(?m)^## `).FindStringIndex(doc[3:]); next != nil {
+		doc = doc[:next[0]+3]
 	}
 	// The note is only useful if it names every knob an existing install
 	// might need to touch, and says plainly that nothing changes by default.
@@ -191,6 +199,12 @@ func TestDeploymentDocs_CarryTheComposePullMigrationNote(t *testing.T) {
 		"PPROF_HOST",
 		"MQTT_SOURCE_STRICT",
 		"DISABLE_MOSQUITTO",
+		// Forwarding MQTT_BROKER into the container (review round 2,
+		// finding 3) is inert for an install that never set it, but NOT for
+		// one that has it in .env and relied on config.json while the
+		// container ignored it. That is the one non-inert case in this
+		// release, so the migration note has to name it.
+		"MQTT_BROKER",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("docs/deployment.md migration note must name %s", want)
@@ -198,6 +212,16 @@ func TestDeploymentDocs_CarryTheComposePullMigrationNote(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?i)no change|unchanged|nothing changes`).MatchString(doc) {
 		t.Errorf("docs/deployment.md must state that the shipped defaults leave an existing install unchanged")
+	}
+	// Review round 2, finding 3 has one non-inert consequence: forwarding
+	// MQTT_BROKER means a host that has it in .env — where the container
+	// used to ignore it — now has it OVERRIDE config.json's mqttSources.
+	// That is the only behaviour an existing install can see change, so the
+	// migration note must call it out rather than claim a blanket "nothing
+	// changes".
+	if !regexp.MustCompile(`(?s)MQTT_BROKER.{0,600}?(?i:override|takes precedence|replaces|wins)`).MatchString(doc) &&
+		!regexp.MustCompile(`(?s)(?i:override|takes precedence|replaces|wins).{0,600}?MQTT_BROKER`).MatchString(doc) {
+		t.Errorf("the migration note must warn that a MQTT_BROKER already in .env now reaches the ingestor and overrides config.json; section was:\n%s", doc)
 	}
 }
 

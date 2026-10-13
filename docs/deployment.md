@@ -220,6 +220,22 @@ through its `environment:` block with an empty default. An unset setting
 arrives as an empty string, which every reader ignores, so an install that
 never set one is unaffected.
 
+> **The one thing that can change under you: `MQTT_BROKER`.** Before this
+> release the compose files did not forward it, so a value in `.env` was dead
+> and `config.json` decided the sources. It now reaches the ingestor, where it
+> **overrides** `mqttSources` in `config.json` entirely (`LoadConfig`
+> precedence: `MQTT_BROKER` > `mqttSources` > legacy `mqtt.broker`). If you
+> have a stale or experimental `MQTT_BROKER=` line in `.env` *and* real
+> `mqttSources` in `config.json`, the ingestor will switch to that single env
+> source on the next restart. Check which source wins before you restart:
+>
+> ```bash
+> ./manage.sh broker-check
+> ```
+>
+> It prints the sources in the ingestor's own precedence. Delete the `.env`
+> line if `config.json` is the one you meant.
+
 Broker URLs in every one of those diagnostics are masked: user name,
 password, query and fragment never reach the log.
 

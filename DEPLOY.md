@@ -54,6 +54,11 @@ Settings can be overridden via environment variables:
 not by docker compose, so every app compose file forwards them into the
 container through its `environment:` block with an empty default. Setting one
 in `.env` therefore does reach the process; leaving it unset is inert.
+
+One caveat: `MQTT_BROKER` **overrides** `mqttSources` in `config.json`. Before
+the compose files forwarded it, a value in `.env` was ignored by the container;
+now it decides. Run `./manage.sh broker-check` to see which source the ingestor
+will use, and remove a stale `.env` line if `config.json` is the one you meant.
 | `HTTP_PORT` | `80` | Host port mapping |
 | `DATA_DIR` | `./data` | Host path for persistent data |
 
