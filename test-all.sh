@@ -260,6 +260,7 @@ run test-payload-labels-content.js
 run test-payload-labels-namespace.js
 run test-perf-anomaly.js
 run test-perf-render-1258.js
+run test-perf-ws-clients.js
 run test-pull-to-reconnect.js
 run test-rx-coverage-config-race.js
 run test-slideover-1056-rowsel-strict.js
