@@ -152,8 +152,14 @@ func (h *Hub) Register(c *Client) {
 	h.mu.Lock()
 	h.clients[c] = true
 	n := len(h.clients)
-	h.mu.Unlock()
+	// #433 F3: observe() must run before Unlock, not after. history has its
+	// own private mutex (never held while Hub.mu is held elsewhere, so no
+	// deadlock risk), but a gap here let a concurrent ClientCount() read
+	// (used by the sampler) see the new client while the matching peak
+	// update had not landed yet — a minute boundary crossing that interval
+	// could attribute this registration's spike to the next interval.
 	h.history.observe(n)
+	h.mu.Unlock()
 	log.Printf("[ws] client connected (%d total)", n)
 }
 

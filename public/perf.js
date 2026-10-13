@@ -74,10 +74,18 @@ if (typeof window !== 'undefined') {
 
 // buildWSClientChart — pure, testable. Maps WS-client history samples
 // ([{t, clients, peak}], oldest first) onto a w×h box. X follows time, Y is
-// scaled to the highest peak. Everything is coerced to Number at the boundary.
+// scaled to the highest peak. Everything is coerced to Number at the
+// boundary: a null/non-object entry, a non-numeric field, Infinity (e.g. a
+// huge JSON literal) and negative counts all fall back to 0 rather than
+// throwing or producing NaN/Infinity points (#433 F4).
 function buildWSClientChart(samples, w, h) {
+  const toCount = function (v) {
+    const n = Number(v);
+    return (isFinite(n) && n >= 0) ? n : 0;
+  };
   const rows = (samples || []).map(function (s) {
-    return { t: Date.parse(s.t), clients: Number(s.clients) || 0, peak: Number(s.peak) || 0 };
+    s = s || {};
+    return { t: Date.parse(s.t), clients: toCount(s.clients), peak: toCount(s.peak) };
   }).filter(function (s) { return isFinite(s.t); });
   let peakOverall = 0;
   rows.forEach(function (s) {
@@ -106,7 +114,13 @@ function buildWSClientChart(samples, w, h) {
 
 // renderWSClientHistory — HTML for the "open connections over time" card.
 // Only numbers and locale time strings are interpolated.
-function renderWSClientHistory(hist) {
+//
+// currentClients (#433 F1): the chart's own "latest" value is the last
+// *minute* sample, so it can lag the true count by up to 60s. The page
+// refresh already fetches /api/health every 5s, so pass its
+// health.websocket.clients through here for the "open now" headline and
+// reserve the sampled value as a chart-only fallback (e.g. health failed).
+function renderWSClientHistory(hist, currentClients) {
   if (!hist) return '';
   const heading = '<h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lightning"/></svg> WebSocket clients (24 h)</h3>';
   const samples = Array.isArray(hist.samples) ? hist.samples : [];
@@ -115,6 +129,10 @@ function renderWSClientHistory(hist) {
   }
   const W = 600, H = 120;
   const c = buildWSClientChart(samples, W, H);
+  const openNow = (function () {
+    const n = Number(currentClients);
+    return (currentClients != null && isFinite(n) && n >= 0) ? n : c.latest;
+  })();
   const poly = function (pts) {
     return pts.map(function (p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ');
   };
@@ -123,13 +141,13 @@ function renderWSClientHistory(hist) {
   };
   return heading + '<div class="perf-card" style="text-align:left;">' +
     '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px;">' +
-    '<span><b>' + c.latest + '</b> open now</span>' +
+    '<span><b>' + openNow + '</b> open now</span>' +
     '<span><b>' + c.peakOverall + '</b> highest in period</span>' +
     '<span class="text-muted">' + hhmm(c.fromT) + ' – ' + hhmm(c.toT) + '</span></div>' +
     '<svg class="ws-history" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" ' +
     'aria-label="Open WebSocket connections over time" style="width:100%;height:' + H + 'px;display:block;">' +
     '<polyline fill="none" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke" points="' + poly(c.peakPoints) + '"/>' +
-    '<polyline fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" points="' + poly(c.clientPoints) + '"/>' +
+    '<polyline fill="none" stroke="var(--link-color)" stroke-width="2" vector-effect="non-scaling-stroke" points="' + poly(c.clientPoints) + '"/>' +
     '</svg>' +
     '<div class="text-muted" style="font-size:12px;">Solid: open at each sample. Dashed: highest count between samples. Y-axis 0–' + c.maxY + '.</div>' +
     '</div>';
@@ -160,6 +178,32 @@ function renderVersionCard(health) {
 
 (function () {
   let interval = null;
+
+  // #433 F6: the server only appends a new sample once a minute
+  // (wsHistoryInterval), but the dashboard refreshes every 5s — fetching the
+  // full ~73 KB/24h ring every tick resends the same bytes ~11 times out of
+  // 12 for no new data. Reuse the last successful response for
+  // WS_HISTORY_REFETCH_TICKS refreshes before fetching again; a failed fetch
+  // (network error or non-OK status) is not cached, so the card recovers on
+  // the very next tick once the endpoint is healthy again.
+  let wsHistoryCache = null;
+  let wsRefreshTick = 0;
+  const WS_HISTORY_REFETCH_TICKS = 12; // ~60s at the 5s refresh cadence
+
+  function fetchWSHistory() {
+    const tick = wsRefreshTick++;
+    if (wsHistoryCache !== null && tick % WS_HISTORY_REFETCH_TICKS !== 0) {
+      return Promise.resolve(wsHistoryCache);
+    }
+    return fetch('/api/perf/ws-clients')
+      // #433 F2: /api/* 404s and 500s still return a JSON body, so r.json()
+      // would resolve and renderWSClientHistory would see a shapeless object
+      // and show "Collecting data…" forever. Check r.ok first so a bad
+      // response hides the card (renderWSClientHistory(null) === '') instead.
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { wsHistoryCache = data; return data; })
+      .catch(function () { wsHistoryCache = null; return null; });
+  }
 
   // #392: perf values (endpoint keys, raw slow-query paths) are interpolated
   // into innerHTML below, so they must be HTML-escaped. Prefer app.js's
@@ -193,7 +237,7 @@ function renderVersionCard(health) {
         fetch('/api/perf/sqlite').then(r => r.json()).catch(() => null),
         fetch('/api/perf/write-sources').then(r => r.json()).catch(() => null),
         fetch('/api/health').then(r => r.json()).catch(() => null),
-        fetch('/api/perf/ws-clients').then(r => r.json()).catch(() => null)
+        fetchWSHistory()
       ]);
 
       let html = '';
@@ -240,7 +284,7 @@ function renderVersionCard(health) {
         }
       }
 
-      html += renderWSClientHistory(wsHistory);
+      html += renderWSClientHistory(wsHistory, health && health.websocket ? health.websocket.clients : null);
 
       // Disk I/O (#1120)
       if (ioStats) {
@@ -447,6 +491,10 @@ function renderVersionCard(health) {
 
   registerPage('perf', {
     init(app) {
+      // Force a fresh ws-clients fetch on (re)entry rather than reusing a
+      // cache that may be stale from a previous visit (#433 F6).
+      wsHistoryCache = null;
+      wsRefreshTick = 0;
       render(app);
       // #1258: don't burn CPU/network rebuilding the page (and its many cards
       // + 3 large tables) every 5s while the tab is hidden. Pause polling on

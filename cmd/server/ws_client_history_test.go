@@ -164,6 +164,59 @@ func TestHandlePerfWSClients_NilHubDoesNotPanic(t *testing.T) {
 	}
 }
 
+// TestHub_RegisterObservesPeakUnderHubLock stresses Register/Unregister
+// against a concurrent sampler-shaped reader (ClientCount + history.sample,
+// the exact pair StartHistorySampler uses) under -race (#433 F3). The
+// earlier review flagged that Register used to call history.observe(n)
+// after releasing h.mu, leaving a nanosecond-scale window where a
+// concurrent ClientCount() could see the registration before its peak
+// update landed. The fix moves observe() before Unlock so the two are one
+// critical section; this test cannot deterministically force that
+// nanosecond interleaving (nor could the original review — it was found by
+// reading the code, not by reproducing it), so it serves as a regression
+// guard against observe() drifting back outside the lock and a -race
+// cleanliness check, not a red-before/green-after reproduction of the race
+// itself.
+func TestHub_RegisterObservesPeakUnderHubLock(t *testing.T) {
+	hub := NewHub()
+	done := make(chan struct{})
+	var samplerWG sync.WaitGroup
+	samplerWG.Add(1)
+	go func() {
+		defer samplerWG.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				hub.history.sample(hub.ClientCount(), time.Now())
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				c := &Client{send: make(chan []byte, 1)}
+				hub.Register(c)
+				hub.Unregister(c)
+			}
+		}()
+	}
+	wg.Wait()
+	close(done)
+	samplerWG.Wait()
+
+	for _, s := range hub.history.snapshot() {
+		if s.Peak < s.Clients {
+			t.Fatalf("sample has peak %d < clients %d", s.Peak, s.Clients)
+		}
+	}
+}
+
 // Register runs on every connect, so the extra history bookkeeping must stay
 // negligible next to the map insert it already does.
 func BenchmarkHubRegisterUnregister(b *testing.B) {
