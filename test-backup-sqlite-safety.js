@@ -22,6 +22,10 @@ function test(name, fn) {
 function settle(state) {
   if (state.stopAt && Date.now() >= state.stopAt) { state.running = false; delete state.stopAt; }
 }
+function which(tool) {
+  const found = spawnSync('sh', ['-c', 'command -v "$1"', 'sh', tool], {encoding:'utf8'}).stdout.trim();
+  assert(found.startsWith('/'), 'missing tool ' + tool); return found;
+}
 function sleep(ms) { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
 
 const mockSource = `#!/usr/bin/env node
@@ -47,18 +51,22 @@ if (op === 'stop') {
     // Slow stop: the CLI waits for the daemon. A signal to the helper's
     // process group kills this CLI mid-wait; the container still exits.
     if (state.running && !state.stopAt) state.stopAt = Date.now() + delay;
-    const signal = state.groupSignals === 0 ? process.env.MOCK_GROUP_SIGNAL : process.env.MOCK_RECOVERY_SIGNAL;
-    if (signal && state.groupSignals < 2) {
+    const first = state.groupSignals === 0;
+    // The helper is the session leader (setsid -w), so its PID is its group.
+    if (first) state.pgid = process.ppid;
+    const signal = first ? process.env.MOCK_GROUP_SIGNAL : process.env.MOCK_RECOVERY_SIGNAL;
+    if (signal && state.groupSignals < 1 + Number(process.env.MOCK_RECOVERY_SIGNALS || 1)) {
       state.groupSignals++; save();
-      // A recovery CLI that inherited an ignored signal survives it.
-      if (state.groupSignals === 2) process.on(signal, () => {});
-      process.kill(0, signal);
+      // Like Docker's Go CLI: an inherited ignored SIGHUP stays ignored, but
+      // SIGINT/SIGTERM are re-enabled (signal.Notify) and kill it.
+      if (!first && signal === 'SIGHUP') process.on(signal, () => {});
+      process.kill(-state.pgid, signal);
     }
     save();
     if (state.stopAt) sleep(state.stopAt - Date.now() + 5);
     state = JSON.parse(fs.readFileSync(statePath, 'utf8')); settle(state); process.exit(0);
   }
-  state.running = false;
+  if (process.env.MOCK_STOP_NOOP !== '1') state.running = false;
   if (process.env.MOCK_SIGNAL === 'stop') {
     fs.writeFileSync(statePath, JSON.stringify(state));
     process.kill(process.ppid, 'SIGTERM'); process.exit(0);
@@ -161,7 +169,7 @@ function fixture(fn, options = {}) {
       // group: run in a new session so the mock can signal the helper's whole
       // process group, like a terminal hangup, Ctrl-C or a supervisor would.
       const argv = ['sh', path.join(root, 'scripts/backup-sqlite.sh'), 'corescope-test', target];
-      if (group) argv.unshift('setsid', '-w');
+      if (group) argv.unshift(which('setsid'), '-w');
       return spawnSync(argv[0], argv.slice(1), {env:{...env,...extra}, cwd, encoding:'utf8', timeout:10000});
     },
     restore:(extra={}) => {
@@ -250,12 +258,35 @@ for (const [signal, status] of [['SIGHUP',129],['SIGINT',130],['SIGTERM',143]]) 
   assert.strictEqual(calls(f,'cp').length, 0); assertNoSnapshots(f);
 }, {wal:true}));
 
-test('a second group signal does not abort recovery', () => fixture(f => {
-  const result = f.backup({MOCK_STOP_DELAY_MS:'300', MOCK_GROUP_SIGNAL:'SIGHUP', MOCK_RECOVERY_SIGNAL:'SIGINT'}, {group:true});
-  assert.strictEqual(result.status, 129, result.stderr);
+// Repeated Ctrl-C or kills of the process group while recovery waits for the
+// pending stop: the recovery CLI must not be in that group.
+for (const [first, again, status] of [['SIGHUP','SIGHUP',129],['SIGHUP','SIGINT',129],
+  ['SIGINT','SIGINT',130],['SIGTERM','SIGTERM',143]]) test('repeated group ' + first + '/' + again + ' does not abort recovery', () => fixture(f => {
+  const result = f.backup({MOCK_STOP_DELAY_MS:'300', MOCK_GROUP_SIGNAL:first, MOCK_RECOVERY_SIGNAL:again,
+    MOCK_RECOVERY_SIGNALS:'3'}, {group:true});
+  assert.strictEqual(result.status, status, result.stderr);
   assert.strictEqual(f.settledRunning(), true, 'service left stopped after a repeated signal');
+  assert.doesNotMatch(result.stderr, /restart failed/);
   assertNoSnapshots(f);
 }));
+
+test('without setsid, recovery retries a stop killed by a repeated signal', () => fixture(f => {
+  // A PATH with the helper's tools but no setsid(1), as on macOS.
+  const tools = path.join(f.dir, 'tools'); fs.mkdirSync(tools);
+  for (const tool of ['sh','mkdir','mktemp','date','chmod','rm','mv','node']) fs.symlinkSync(which(tool), path.join(tools, tool));
+  const result = f.backup({PATH:path.join(f.dir, 'bin') + path.delimiter + tools, MOCK_STOP_DELAY_MS:'300',
+    MOCK_GROUP_SIGNAL:'SIGINT', MOCK_RECOVERY_SIGNAL:'SIGINT'}, {group:true});
+  assert.strictEqual(result.status, 130, result.stderr);
+  assert.strictEqual(f.settledRunning(), true, 'service left stopped after a repeated signal');
+  assert.doesNotMatch(result.stderr, /restart failed/);
+  assertNoSnapshots(f);
+}));
+
+test('recovery never trusts a start before the container is confirmed stopped', () => fixture(f => {
+  const result = f.backup({MOCK_FAIL:'copy-wal', MOCK_STOP_NOOP:'1'}); assert.strictEqual(result.status, 23);
+  assert.match(result.stderr, /could not confirm that corescope-test stopped/);
+  assert.match(result.stderr, /restart failed/); assertNoSnapshots(f);
+}, {wal:true}));
 
 test('a start that leaves the container stopped is a restart failure', () => fixture(f => {
   const result = f.backup({MOCK_START_NOOP:'1'}); assert.notStrictEqual(result.status, 0);
