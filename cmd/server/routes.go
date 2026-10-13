@@ -2824,6 +2824,9 @@ func (s *Server) handleFleetClockSkew(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAnalyticsRF(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
+	if s.rejectAnalyticsFilters(w, region, area) {
+		return
+	}
 	window := ParseTimeWindow(r)
 	if s.store != nil {
 		// Issue #1659: gate the default-shape request behind first-pass
@@ -2874,6 +2877,9 @@ func (s *Server) handleAnalyticsRelayAirtimeShare(w http.ResponseWriter, r *http
 func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
+	if s.rejectAnalyticsFilters(w, region, area) {
+		return
+	}
 	window := ParseTimeWindow(r)
 	if s.store != nil {
 		// #1659 warmup gate (see handleAnalyticsRF for rationale).
@@ -2911,6 +2917,9 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		area := r.URL.Query().Get("area")
+		if s.rejectAnalyticsFilters(w, region, area) {
+			return
+		}
 		window := ParseTimeWindow(r)
 		// #1659 warmup gate (see handleAnalyticsRF for rationale).
 		if region == "" && area == "" && window.IsZero() {
@@ -2942,6 +2951,9 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
+	if s.rejectAnalyticsFilters(w, region, area) {
+		return
+	}
 	if s.store != nil {
 		// Lazy build (#1011): distance index is not built at startup.
 		// First request triggers an async build and gets 202 +
@@ -2973,6 +2985,9 @@ func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		area := r.URL.Query().Get("area")
+		if s.rejectAnalyticsFilters(w, region, area) {
+			return
+		}
 		writeJSON(w, s.store.GetAnalyticsHashSizes(region, area))
 		return
 	}
@@ -2990,6 +3005,9 @@ func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Re
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		area := r.URL.Query().Get("area")
+		if s.rejectAnalyticsFilters(w, region, area) {
+			return
+		}
 		writeJSON(w, s.store.GetAnalyticsHashCollisions(region, area))
 		return
 	}
@@ -3006,11 +3024,19 @@ func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		region := r.URL.Query().Get("region")
+		if s.rejectAnalyticsFilters(w, region, "") {
+			return
+		}
 		minLen := queryInt(r, "minLen", 2)
 		if minLen < 2 {
 			minLen = 2
 		}
 		maxLen := queryInt(r, "maxLen", 8)
+		// Clamp maxLen so an unbounded value cannot mint unbounded distinct
+		// subpathCache keys (the ceiling still backstops it, #370).
+		if maxLen > subpathMaxLenCeiling {
+			maxLen = subpathMaxLenCeiling
+		}
 		limit := queryLimit(r, 100, s.cfg.ListLimits.AnalyticsMax)
 		// Issue #1217: honor the Time window filter on Route Patterns.
 		window := ParseTimeWindow(r)
@@ -3037,6 +3063,9 @@ func (s *Server) handleAnalyticsSubpathsBulk(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	region := r.URL.Query().Get("region")
+	if s.rejectAnalyticsFilters(w, region, "") {
+		return
+	}
 	groupsParam := r.URL.Query().Get("groups")
 	if groupsParam == "" {
 		writeJSON(w, ErrorResp{Error: "groups parameter required (e.g. groups=2-2:50,3-3:30)"})
@@ -4623,6 +4652,13 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = "#wardriving"
 	}
+	// Reject an overlong channel before GetWardrivingStats and before it enters
+	// the cache key, so a client cannot drive expensive work or unbounded
+	// distinct wardrivingStatsCache keys with a free-text filter (#370).
+	if len(channel) > analyticsFilterMaxLen {
+		writeError(w, 400, "channel filter too long")
+		return
+	}
 	cacheKey := window + "|" + channel
 
 	s.wardrivingStatsMu.Lock()
@@ -4673,6 +4709,7 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 		s.wardrivingStatsCache = make(map[string]*WardrivingStatsResponse)
 		s.wardrivingStatsCachedAt = make(map[string]time.Time)
 	}
+	evictStatsCacheLocked(s.wardrivingStatsCache, s.wardrivingStatsCachedAt, cacheKey, time.Now(), wardrivingStatsTTL, wardrivingStatsMaxEntries)
 	s.wardrivingStatsCache[cacheKey] = resp
 	s.wardrivingStatsCachedAt[cacheKey] = time.Now()
 	s.wardrivingStatsMu.Unlock()
