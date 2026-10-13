@@ -141,18 +141,26 @@ func TestRequiredGateCheckNameStable(t *testing.T) {
 	}
 }
 
-// Pins the number of fork guards so one cannot be dropped unnoticed. Update
-// the counts only when a guarded side effect is deliberately added or removed.
+// Pins the number of fork guards so one cannot be dropped unnoticed. Comment
+// lines are ignored: deploy.yml also names the guard once in its header, so
+// `grep -c` reports 9 there. Update the counts only when a guarded side effect
+// is deliberately added or removed.
 func TestForkGuardCount(t *testing.T) {
 	for _, c := range []struct {
 		rel  string
 		want int
 	}{
-		{deployWorkflowRel, 9},
+		{deployWorkflowRel, 8},
 		{fastPathWorkflowRel, 1},
 	} {
-		if got := strings.Count(readWorkflow(t, c.rel), upstreamRepoGuard); got != c.want {
-			t.Errorf("%s: expected %d fork guards, found %d", c.rel, c.want, got)
+		got := 0
+		for _, line := range strings.Split(readWorkflow(t, c.rel), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+				got += strings.Count(line, upstreamRepoGuard)
+			}
+		}
+		if got != c.want {
+			t.Errorf("%s: expected %d fork guards outside comments, found %d", c.rel, c.want, got)
 		}
 	}
 }
