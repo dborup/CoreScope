@@ -1079,6 +1079,75 @@ test('#333 N3 analytics repeater row: no inline handler carries the node pubkey'
 });
 
 // =========================================================================
+// #392 — public/perf.js interpolates /api/perf values into innerHTML.
+// The endpoint key (unmatched /api/ routes collapse to the raw path) and
+// the slow-query path (raw r.URL.Path) are request-controlled, so a 404
+// under /api/ that is slow can carry markup. These drive the REAL perf.js
+// row templates (extracted from source) with a hostile value; dropping the
+// escapeHtml() wrapper makes the raw <img survive and flips them red.
+// =========================================================================
+console.log('\n=== #392 perf.js dashboard sinks ===');
+
+const PERF_PAYLOAD = TAG_PAYLOAD + ATTR_PAYLOAD;
+
+test('#392 perf endpoints table: endpoint key is escaped', () => {
+  // First `<tr${cls}>` statement in perf.js is the endpoints row (before the
+  // client-calls row). Captured regardless of the escapeHtml() wrapper so the
+  // assertion — not the match — flips on revert.
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr\$\{cls\}><td><code>\$\{[^`]*?<\/tr>)`;/,
+    { cls: '', path: PERF_PAYLOAD, s: { count: 1, avgMs: 2, p50Ms: 3, p95Ms: 4, maxMs: 5 }, total: 7 }
+  );
+  assertNoXss(html, '#392 perf endpoint key');
+});
+
+test('#392 perf client-calls table: client path is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr\$\{cls\}><td><code>\$\{[^}]*s\.path[^`]*?<\/tr>)`;/,
+    { cls: '', s: { path: PERF_PAYLOAD, count: 1, avgMs: 2, maxMs: 3, totalMs: 4 } }
+  );
+  assertNoXss(html, '#392 perf client path');
+});
+
+test('#392 perf slow-queries table: raw slow-query path is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr class="perf-slow">[^`]*?<\/tr>)`;/,
+    { q: { time: '2020-01-01T00:00:00Z', path: PERF_PAYLOAD, ms: 123, status: 200 } }
+  );
+  assertNoXss(html, '#392 perf slow-query path');
+});
+
+test('#392 perf write-sources table: source name is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<tr><td><code>\$\{[^`]*?<\/tr>)`;/,
+    { k: PERF_PAYLOAD, v: 1, rateStr: '', baseStr: '', flag: '' }
+  );
+  assertNoXss(html, '#392 perf write-source name');
+});
+
+test('#392 perf overview: server uptime string is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /(<div class="perf-card"><div class="perf-num">\$\{[^`]*?uptimeHuman[^`]*?Uptime<\/div><\/div>)/,
+    { health: { uptimeHuman: PERF_PAYLOAD }, server: { uptime: 60, totalRequests: 0, avgMs: 0 } }
+  );
+  assertNoXss(html, '#392 perf uptimeHuman');
+});
+
+test('#392 perf write-sources footer: sampleAt is escaped', () => {
+  const html = evalTemplate(
+    'public/perf.js',
+    /html \+= `(<div style="font-size:11px;[^`]*?Sampled:[^`]*?)`;/,
+    { writeSources: { sampleAt: PERF_PAYLOAD } }
+  );
+  assertNoXss(html, '#392 perf sampleAt');
+});
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
 (async () => {

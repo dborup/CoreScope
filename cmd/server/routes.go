@@ -507,7 +507,7 @@ func (s *Server) perfMiddleware(next http.Handler) http.Handler {
 		}
 		if ms > 100 {
 			slow := SlowQuery{
-				Path:   r.URL.Path,
+				Path:   normalizeSlowPath(key, r.URL.Path),
 				Ms:     round(ms, 1),
 				Time:   time.Now().UTC().Format(time.RFC3339),
 				Status: 200,
@@ -1387,6 +1387,46 @@ var muxBraceParam = regexp.MustCompile(`\{([^}]+)\}`)
 
 // perfHexFallback matches hex IDs for perf path normalization fallback.
 var perfHexFallback = regexp.MustCompile(`[0-9a-f]{8,}`)
+
+// slowPathRawCap bounds, in runes, the raw request path stored per slow
+// query. A single pathological URL (long query string, repeated segments)
+// must not bloat the in-memory slow-query ring or the perf dashboard. #392.
+const slowPathRawCap = 128
+
+// normalizeSlowPath pairs the normalized route key (already :id-folded by the
+// perf middleware, matching the endpoints table) with a sanitised,
+// length-capped copy of the raw request path. The slow-query row then carries
+// both the stable route template and a bounded view of the actual URL, so the
+// endpoint key and the slow-query path no longer disagree (#392).
+//
+// It is a pure, read-only string transform. "Sanitise" here means dropping
+// ASCII control characters (which would otherwise mangle the row); it does
+// NOT make the value HTML-safe — the perf dashboard escapes it at render time
+// (public/perf.js, #392). This function only bounds length and strips control
+// bytes, rune-safe so a multibyte character is never split at the cap.
+func normalizeSlowPath(key, raw string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			continue // strip ASCII control characters (incl. CR/LF/TAB)
+		}
+		if n >= slowPathRawCap {
+			b.WriteRune('…') // ellipsis marks truncation
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	capped := b.String()
+	// Unmatched routes fold to key == raw path (see perfMiddleware). There the
+	// template IS the raw path, so emit the capped form once instead of
+	// "<raw> <raw>". Compare against the original raw, not the capped copy.
+	if key == "" || key == raw {
+		return capped
+	}
+	return key + " " + capped
+}
 
 // handleBatchObservations returns observations for multiple hashes in a single request.
 // POST /api/packets/observations with JSON body: {"hashes": ["abc123", "def456", ...]}

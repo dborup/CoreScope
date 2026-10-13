@@ -349,6 +349,11 @@ Detailed performance metrics per endpoint.
   },
   "slowQueries": [                  // last 20 queries > 100ms
     {
+      // Normalized route key + a sanitised, length-capped (≤128 runes +
+      // "…") copy of the raw request path, e.g. "/api/nodes/:id
+      // /api/nodes/abcd1234". Unmatched routes (key == raw) emit the capped
+      // raw path once. Control characters are stripped. Not HTML-escaped —
+      // clients MUST escape before inserting into the DOM (#392).
       "path":   string,
       "ms":     number,
       "time":   string,             // ISO timestamp

@@ -94,6 +94,20 @@ function renderVersionCard(health) {
 (function () {
   let interval = null;
 
+  // #392: perf values (endpoint keys, raw slow-query paths) are interpolated
+  // into innerHTML below, so they must be HTML-escaped. Prefer app.js's
+  // canonical global escapeHtml (loaded before perf.js in index.html); fall
+  // back to an identical 5-char OWASP escaper so perf.js is also safe when
+  // evaluated standalone (e.g. the perf-render unit-test sandboxes). The RHS
+  // reads globalThis.escapeHtml, never the bare name, to avoid a TDZ
+  // self-reference on this very binding.
+  const escapeHtml = (typeof globalThis !== 'undefined' && typeof globalThis.escapeHtml === 'function')
+    ? globalThis.escapeHtml
+    : function (s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      };
+
   async function render(app) {
     app.innerHTML = '<div id="perfWrapper" style="padding:16px 24px;"><h2><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lightning"/></svg> Performance Dashboard</h2><div id="perfContent">Loading...</div></div>';
     await refresh();
@@ -120,7 +134,7 @@ function renderVersionCard(health) {
       html += `<div style="display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;">
         <div class="perf-card"><div class="perf-num">${server.totalRequests}</div><div class="perf-label">Total Requests</div></div>
         <div class="perf-card"><div class="perf-num">${server.avgMs}ms</div><div class="perf-label">Avg Response</div></div>
-        <div class="perf-card"><div class="perf-num">${health ? health.uptimeHuman : Math.round(server.uptime / 60) + 'm'}</div><div class="perf-label">Uptime</div></div>
+        <div class="perf-card"><div class="perf-num">${escapeHtml(health ? health.uptimeHuman : Math.round(server.uptime / 60) + 'm')}</div><div class="perf-label">Uptime</div></div>
         <div class="perf-card"><div class="perf-num">${server.slowQueries.length}</div><div class="perf-label">Slow (&gt;100ms)</div></div>
         ${renderVersionCard(health)}
       </div>`;
@@ -225,11 +239,11 @@ function renderVersionCard(health) {
             const flag = anom.flags[k] ? ' <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' : '';
             const rateStr = (rate != null && isFinite(rate)) ? rate.toFixed(2) : '—';
             const baseStr = (base != null && isFinite(base)) ? base.toFixed(2) : '—';
-            html += `<tr><td><code>${k}</code></td><td>${v.toLocaleString()}</td><td>${rateStr}</td><td>${baseStr}</td><td>${flag}</td></tr>`;
+            html += `<tr><td><code>${escapeHtml(k)}</code></td><td>${v.toLocaleString()}</td><td>${rateStr}</td><td>${baseStr}</td><td>${flag}</td></tr>`;
           }
           html += '</tbody></table></div>';
           if (writeSources.sampleAt) {
-            html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">Sampled: ${writeSources.sampleAt} · baseline window: 5 min · threshold: 10×</div>`;
+            html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">Sampled: ${escapeHtml(writeSources.sampleAt)} · baseline window: 5 min · threshold: 10×</div>`;
           }
         }
       }
@@ -321,7 +335,7 @@ function renderVersionCard(health) {
         for (const [path, s] of eps) {
           const total = Math.round(s.count * s.avgMs);
           const cls = s.p95Ms > 200 ? ' class="perf-slow"' : s.p95Ms > 50 ? ' class="perf-warn"' : '';
-          html += `<tr${cls}><td><code>${path}</code></td><td>${s.count}</td><td>${s.avgMs}ms</td><td>${s.p50Ms}ms</td><td>${s.p95Ms}ms</td><td>${s.maxMs}ms</td><td>${total}ms</td></tr>`;
+          html += `<tr${cls}><td><code>${escapeHtml(path)}</code></td><td>${escapeHtml(s.count)}</td><td>${escapeHtml(s.avgMs)}ms</td><td>${escapeHtml(s.p50Ms)}ms</td><td>${escapeHtml(s.p95Ms)}ms</td><td>${escapeHtml(s.maxMs)}ms</td><td>${total}ms</td></tr>`;
         }
         html += '</tbody></table></div>';
       }
@@ -332,7 +346,7 @@ function renderVersionCard(health) {
         html += '<div style="overflow-x:auto"><table class="perf-table"><thead><tr><th scope="col">Endpoint</th><th scope="col">Count</th><th scope="col">Avg</th><th scope="col">Max</th><th scope="col">Total</th></tr></thead><tbody>';
         for (const s of client.endpoints) {
           const cls = s.maxMs > 500 ? ' class="perf-slow"' : s.avgMs > 200 ? ' class="perf-warn"' : '';
-          html += `<tr${cls}><td><code>${s.path}</code></td><td>${s.count}</td><td>${s.avgMs}ms</td><td>${s.maxMs}ms</td><td>${s.totalMs}ms</td></tr>`;
+          html += `<tr${cls}><td><code>${escapeHtml(s.path)}</code></td><td>${escapeHtml(s.count)}</td><td>${escapeHtml(s.avgMs)}ms</td><td>${escapeHtml(s.maxMs)}ms</td><td>${escapeHtml(s.totalMs)}ms</td></tr>`;
         }
         html += '</tbody></table></div>';
       }
@@ -342,7 +356,7 @@ function renderVersionCard(health) {
         html += '<h3>Recent Slow Queries (&gt;100ms)</h3>';
         html += '<div style="overflow-x:auto"><table class="perf-table"><thead><tr><th scope="col">Time</th><th scope="col">Path</th><th scope="col">Duration</th><th scope="col">Status</th></tr></thead><tbody>';
         for (const q of server.slowQueries.slice().reverse()) {
-          html += `<tr class="perf-slow"><td>${new Date(q.time).toLocaleTimeString()}</td><td><code>${q.path}</code></td><td>${q.ms}ms</td><td>${q.status}</td></tr>`;
+          html += `<tr class="perf-slow"><td>${escapeHtml(new Date(q.time).toLocaleTimeString())}</td><td><code>${escapeHtml(q.path)}</code></td><td>${escapeHtml(q.ms)}ms</td><td>${escapeHtml(q.status)}</td></tr>`;
         }
         html += '</tbody></table></div>';
       }
@@ -357,7 +371,7 @@ function renderVersionCard(health) {
       });
       document.getElementById('perfRefresh')?.addEventListener('click', refresh);
     } catch (err) {
-      el.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
+      el.innerHTML = `<p style="color:red">Error: ${escapeHtml(err.message)}</p>`;
     }
   }
 
