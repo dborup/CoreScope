@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -672,6 +673,12 @@ func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
 	return router
 }
 
+// vendorVersionedAssetRe matches a locally-vendored browser dependency at
+// public/vendor/<name>/<exact version>/<file> (#442, see
+// docs/browser-dependencies.md). The version is part of the URL, so this
+// shape is immutable and safe to cache far into the future.
+var vendorVersionedAssetRe = regexp.MustCompile(`^/vendor/[^/]+/\d+\.\d+\.\d+(?:[-.][0-9A-Za-z]+)*/`)
+
 // spaHandler serves static files, falling back to index.html for SPA routes.
 // It reads index.html once at creation time and replaces the __BUST__ placeholder
 // with a Unix timestamp so browsers fetch fresh JS/CSS after each server restart.
@@ -714,8 +721,17 @@ func spaHandler(root string, fs http.Handler) http.Handler {
 			w.Write(indexHTML)
 			return
 		}
-		// Disable caching for JS/CSS/HTML
-		if filepath.Ext(path) == ".js" || filepath.Ext(path) == ".css" || filepath.Ext(path) == ".html" {
+		// A vendored browser dependency (public/vendor/<name>/<exact
+		// version>/<file>, #442) is immutable: the version is part of the
+		// URL, so a bump is served from a new path rather than a mutated
+		// file at the old one. Cache it far into the future. Everything
+		// else under vendor/ (pre-#442: jsqr.min.js, aes-ecb.js, ...) keeps
+		// the no-cache rule below -- its URL does not change when the file
+		// does, so its cache-busting relies on no-cache, not on the URL.
+		if vendorVersionedAssetRe.MatchString(r.URL.Path) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if filepath.Ext(path) == ".js" || filepath.Ext(path) == ".css" || filepath.Ext(path) == ".html" {
+			// Disable caching for JS/CSS/HTML
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		}
 		fs.ServeHTTP(w, r)

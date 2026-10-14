@@ -1152,9 +1152,12 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 }
 
 // swaggerUIHTML pins swagger-ui-dist to an exact version and verifies it with
-// Subresource Integrity: a floating "@5" specifier would let whatever upstream
-// publishes next execute unverified on an operator's browser. The digests are
-// sha384 over the exact bytes served for that version; openapi_sri_test.go
+// Subresource Integrity. #442 additionally vendors the bytes into
+// public/vendor/swagger-ui-dist/<version>/ (see tools/browser-deps-manifest.json
+// and tools/fetch-browser-deps.sh) and serves them from there, so the browser
+// makes no third-party request at all. The integrity attribute stays: it is
+// cheap insurance against the file changing underneath the pin on disk. The
+// digests are sha384 over the exact bytes of that version; openapi_sri_test.go
 // holds the reviewed values and docs/browser-dependencies.md records how to
 // recompute them when the pin moves.
 const swaggerUIHTML = `<!DOCTYPE html>
@@ -1162,7 +1165,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <title>CoreScope API — Swagger UI</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css"
+  <link rel="stylesheet" href="/vendor/swagger-ui-dist/5.33.2/swagger-ui.css"
     integrity="sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
     crossorigin="anonymous">
   <style>
@@ -1174,7 +1177,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui-bundle.js"
+  <script src="/vendor/swagger-ui-dist/5.33.2/swagger-ui-bundle.js"
     integrity="sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
     crossorigin="anonymous"></script>
   <script>

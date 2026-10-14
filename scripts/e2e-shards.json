@@ -2318,6 +2318,22 @@
       ]
     },
     {
+      "file": "test-issue-442-local-browser-deps-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.2,
+      "secondsByExecution": [
+        1.1,
+        1.2,
+        1.3
+      ]
+    },
+    {
       "file": "test-regions-map-e2e.js",
       "shard": 3,
       "env": {
