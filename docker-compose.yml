@@ -28,8 +28,8 @@ services:
       # IPv4 (0.0.0.0) and IPv6 ([::]). Setting it to 0.0.0.0 would NOT be
       # the same thing: an explicit IPv4 host publishes IPv4 only.
       # Set PROD_MQTT_BIND=127.0.0.1 to keep the broker reachable only from
-      # the host, or set DISABLE_MOSQUITTO=true to use your own broker
-      # instead (then this mapping has nothing behind it). See
+      # the host. The bundled broker is opt-in (#441): unless
+      # DISABLE_MOSQUITTO=false, nothing listens behind this mapping. See
       # docs/deployment.md, "Migration — pulling the new Compose file".
       - "${PROD_MQTT_BIND:+${PROD_MQTT_BIND}:}${PROD_MQTT_PORT:-1883}:1883"
     volumes:
@@ -38,7 +38,10 @@ services:
       - caddy-data:/data/caddy
     environment:
       - NODE_ENV=production
-      - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-false}
+      # The bundled mosquitto is opt-in (#441): set DISABLE_MOSQUITTO=false
+      # to run it, otherwise point mqttSources in config.json (or
+      # MQTT_BROKER) at your own broker.
+      - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-true}
       - DISABLE_CADDY=${DISABLE_CADDY:-false}
       # In-process settings — read by the server and the ingestor, not by
       # docker compose. Without these lines a value in .env reaches docker

@@ -28,7 +28,7 @@
  * Acceptance (from issue #1396 / #1400):
  *   - .nav-links must never render at a negative top offset (y >= 0).
  *   - In the ≤1100px force-collapse band on /#/channels, More must contain
- *     exactly the 5 non-active non-high routes; channels stays inline.
+ *     exactly the non-active non-high routes; channels stays inline.
  *
  * Mutation guard: removing the "pin active inline" rule in applyNavPriority
  * must make this test fail (active link gets overflowed at 1080px on /#/perf).
@@ -48,7 +48,8 @@ const HIGH_PRIORITY_HREFS = ['#/home', '#/packets', '#/map', '#/live', '#/nodes'
 // "active pill is non-high" branch where the bug surfaces.
 // #1396: extended to include /#/channels — operator screenshot at ~1024px
 // showed the entire inline strip EMPTY and More containing only "Tools".
-const NON_HIGH_ROUTES = ['#/perf', '#/audio-lab', '#/analytics', '#/observers', '#/channels'];
+// Regions is another non-high-priority route and must obey the same contract.
+const NON_HIGH_ROUTES = ['#/perf', '#/audio-lab', '#/analytics', '#/observers', '#/channels', '#/regions'];
 
 // Operator screenshot was ~1080px. Cover the narrow-desktop CSS branch
 // (≤1100) AND the measurement-loop branch (>1100) — bug reproduces in
@@ -197,7 +198,7 @@ async function main() {
         // EXACTLY the non-active non-high routes so the channels link (when
         // active) stays inline and is not orphaned in the dropdown.
         if (w <= 1100) {
-          const ALL_NON_HIGH = ['#/channels', '#/tools', '#/observers', '#/analytics', '#/perf', '#/audio-lab'];
+          const ALL_NON_HIGH = ['#/regions', '#/channels', '#/tools', '#/observers', '#/analytics', '#/perf', '#/audio-lab'];
           const expectedMore = ALL_NON_HIGH.filter(h => h !== expectedActive).sort();
           assert.deepStrictEqual(
             [...data.moreItems].sort(),

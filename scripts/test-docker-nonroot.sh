@@ -197,6 +197,9 @@ DATA_BEFORE=$(tree "$V0")
 for combo in "none" "DISABLE_MOSQUITTO" "DISABLE_CADDY" "DISABLE_MOSQUITTO DISABLE_CADDY"; do
     dis=()
     for d in $combo; do [ "$d" = none ] || dis+=(-e "$d=true"); done
+    # The bundled broker is opt-in (#441): the combinations that keep it ask
+    # for it explicitly.
+    case " $combo " in *" DISABLE_MOSQUITTO "*) ;; *) dis+=(-e DISABLE_MOSQUITTO=false) ;; esac
     case "$combo" in
         none) conf=supervisord.conf ;;
         DISABLE_MOSQUITTO) conf=supervisord-no-mosquitto.conf ;;
