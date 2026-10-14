@@ -21,9 +21,10 @@ import (
 // must neither drop an approved scope nor bring back a revoked one, and a
 // revoked approval of a configured name must leave the configured key live.
 // Uses a real signal and the real runner, so the decisions go through the
-// database exactly as in production.
+// database exactly as in production. #cfg is approved while unconfigured and
+// added to the config afterwards, since a configured name cannot be approved.
 func TestScopeDecisionsSurviveRealSIGHUP(t *testing.T) {
-	configPath := writeTestConfig(t, nil, []string{"#cfg"})
+	configPath := writeTestConfig(t, nil, nil)
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +51,18 @@ func TestScopeDecisionsSurviveRealSIGHUP(t *testing.T) {
 	decide(channelregistry.OpScopeApprove, "#gone", "approved")
 	decide(channelregistry.OpScopeApprove, "#cfg", "approved")
 	decide(channelregistry.OpScopeRevoke, "#gone", "revoked")
+	if err := os.WriteFile(configPath, mustJSON(t, struct {
+		HashRegions []string `json:"hashRegions"`
+	}{HashRegions: []string{"#cfg"}}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := hk.reload(configPath); err != nil {
+		t.Fatal(err)
+	}
 	decide(channelregistry.OpScopeRevoke, "#cfg", "revoked")
+	if _, ok := hk.Regions()["#cfg"]; !ok {
+		t.Fatal("revoking an approval removed the configured #cfg key")
+	}
 
 	stop := startSIGHUPReload(hk, configPath)
 	defer stop()

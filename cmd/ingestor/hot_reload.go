@@ -174,6 +174,15 @@ func (hk *hotKeys) AddApprovedRegions(names ...string) int {
 	return added
 }
 
+// IsConfiguredRegion reports whether name is in the config layer
+// (hashRegions or hashRegionsPath), as last loaded or reloaded.
+func (hk *hotKeys) IsConfiguredRegion(name string) bool {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	_, ok := hk.baseRegions[name]
+	return ok
+}
+
 // ApprovedRegionCount returns the size of the admin-approved region layer.
 func (hk *hotKeys) ApprovedRegionCount() int {
 	hk.mu.Lock()

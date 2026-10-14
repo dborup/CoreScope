@@ -19,6 +19,9 @@ type scopeApprovalRunner struct {
 	store *Store
 	keys  *hotKeys
 	queue *channelregistry.Queue
+	// blacklisted reports observers whose neighbor reports must not count
+	// as observing a scope (cfg.IsObserverBlacklisted); nil allows all.
+	blacklisted func(observerID string) bool
 }
 
 func newScopeApprovalRunner(store *Store, keys *hotKeys) *scopeApprovalRunner {
@@ -57,15 +60,20 @@ func (r *scopeApprovalRunner) LoadApproved(ctx context.Context) error {
 // observedScope rechecks the current OTA neighbor snapshot in the writer.
 // This is admin-event work, never packet-path work.
 func (r *scopeApprovalRunner) observedScope(ctx context.Context, name string) (bool, error) {
-	rows, err := r.store.db.QueryContext(ctx, `SELECT scopes FROM observer_neighbors WHERE scopes IS NOT NULL`)
+	rows, err := r.store.db.QueryContext(ctx, `SELECT observer_id, scopes FROM observer_neighbors WHERE scopes IS NOT NULL`)
 	if err != nil {
 		return false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var scopes string
-		if err := rows.Scan(&scopes); err != nil {
+		var observerID, scopes string
+		if err := rows.Scan(&observerID, &scopes); err != nil {
 			return false, err
+		}
+		// Rows stored before an observer was blacklisted stay in the table;
+		// the server's candidate list skips them, so this check does too.
+		if r.blacklisted != nil && r.blacklisted(observerID) {
+			continue
 		}
 		for _, raw := range strings.Split(scopes, ",") {
 			if s, ok := regions.Normalize(raw); ok && s == name {
@@ -106,6 +114,13 @@ func (r *scopeApprovalRunner) apply(ctx context.Context, cmd channelregistry.Com
 		return res
 	}
 	if cmd.Op != channelregistry.OpScopeRevoke {
+		// Configured names are the baseline, not candidates: approving or
+		// rejecting one would only spend a slot or record a meaningless
+		// decision. Revoking an earlier approval stays possible.
+		if r.keys.IsConfiguredRegion(cmd.Name) {
+			res.Status, res.Error = channelregistry.RequestError, "scope is configured"
+			return res
+		}
 		found, err := r.observedScope(ctx, cmd.Name)
 		if err != nil {
 			log.Printf("[scope-approval] scope observation failed: %v", err)

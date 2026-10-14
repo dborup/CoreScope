@@ -215,3 +215,47 @@ func TestScopeApprovalRunnerObservedOnlyDurableAndRevocable(t *testing.T) {
 		t.Fatalf("audit count = %d, err=%v", audit, err)
 	}
 }
+
+// Review round 2, findings 3 and 7: the ingestor is the authoritative gate.
+// It refuses to approve or reject a configured name (config is the baseline,
+// also after a rejected name is added to hashRegions), and a scope reported
+// only by a blacklisted observer is not observed.
+func TestScopeApprovalRefusesConfiguredAndBlacklistedOnlyScopes(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "scope-gate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.db.Exec(`INSERT INTO observer_neighbors(observer_id,neighbor_pubkey,scopes,status) VALUES
+		('obs','node','#cfg,#open','responded'), ('BAD','node2','#blk','responded')`); err != nil {
+		t.Fatal(err)
+	}
+	cfgKey := sha256.Sum256([]byte("#cfg"))
+	keys := newHotKeys(nil, map[string][]byte{"#cfg": cfgKey[:16]})
+	runner := newScopeApprovalRunner(store, keys)
+	runner.blacklisted = func(id string) bool { return id == "BAD" }
+	ctx := context.Background()
+	cmd := func(op, name string) channelregistry.Command {
+		return channelregistry.Command{RequestID: channelregistry.NewID(), Op: op, Name: name, CreatedAt: time.Now().UnixMilli()}
+	}
+	for _, c := range []struct{ op, name, want string }{
+		{channelregistry.OpScopeApprove, "#cfg", "scope is configured"},
+		{channelregistry.OpScopeReject, "#cfg", "scope is configured"},
+		{channelregistry.OpScopeApprove, "#blk", "scope is no longer observed"},
+		{channelregistry.OpScopeReject, "#blk", "scope is no longer observed"},
+	} {
+		if res := runner.apply(ctx, cmd(c.op, c.name)); res.Status != channelregistry.RequestError || res.Error != c.want {
+			t.Errorf("%s %s = %+v, want error %q", c.op, c.name, res, c.want)
+		}
+	}
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM approved_region_scopes`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("decision rows = %d (err %v), want 0", n, err)
+	}
+	if keys.ApprovedRegionCount() != 0 {
+		t.Fatalf("approved layer = %d, want 0", keys.ApprovedRegionCount())
+	}
+	if res := runner.apply(ctx, cmd(channelregistry.OpScopeApprove, "#open")); res.Status != "approved" {
+		t.Fatalf("approve observed unknown scope = %+v", res)
+	}
+}

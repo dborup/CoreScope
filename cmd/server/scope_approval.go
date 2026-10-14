@@ -191,7 +191,7 @@ func (s *Server) handleRegionScopeDecision(op string) http.HandlerFunc {
 					break
 				}
 			}
-			if !found && current != "rejected" {
+			if !found {
 				writeError(w, 409, "scope is not an observed unknown scope")
 				return
 			}

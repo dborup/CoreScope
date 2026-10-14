@@ -154,6 +154,7 @@ func main() {
 	// external hashRegions lists. The server only queues decisions; this
 	// process remains the sole database writer.
 	scopeApprovals := newScopeApprovalRunner(store, keys)
+	scopeApprovals.blacklisted = cfg.IsObserverBlacklisted
 	if err := scopeApprovals.LoadApproved(context.Background()); err != nil {
 		log.Printf("[scope-approval] loading approved scopes failed: %v", err)
 	}

@@ -134,3 +134,35 @@ func TestRegionScopeOpenAPIDocumentsHistoryAndCap(t *testing.T) {
 		t.Errorf("approve does not document the cap: %q", desc)
 	}
 }
+
+// Review round 2, findings 3 and 7: a rejected decision does not bypass the
+// observed-candidate gate. A name rejected earlier and since configured is
+// not an unknown scope, and a name now reported only by a blacklisted
+// observer is not observed; neither may be queued for approval or another
+// rejection.
+func TestRegionScopeRejectedNameMustStillBeACandidate(t *testing.T) {
+	cfg := &Config{HashRegions: []string{"#cfg"}, ObserverBlacklist: []string{"bad"}}
+	router, db := scopeReviewServer(t, cfg, "#cfg,#open")
+	if _, err := db.conn.Exec(`INSERT INTO observer_neighbors(observer_id,neighbor_pubkey,scopes,status) VALUES('bad','node2','#blk','responded')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"#cfg", "#blk", "#open"} {
+		if _, err := db.conn.Exec(`INSERT INTO approved_region_scopes VALUES (?, 'rejected', 1, 1)`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"#cfg", "#blk"} {
+		for _, op := range []string{"approve", "reject"} {
+			if w := postScope(router, op, name); w.Code != http.StatusConflict {
+				t.Errorf("%s rejected %s = %d %s, want 409", op, name, w.Code, w.Body)
+			}
+		}
+	}
+	if n := queuedScopeRequests(t, db); n != 0 {
+		t.Fatalf("%d request(s) queued for a non-candidate", n)
+	}
+	// A rejected name that is still an observed unknown scope can be approved.
+	if w := postScope(router, "approve", "#open"); w.Code != http.StatusAccepted {
+		t.Fatalf("approve rejected observed candidate = %d %s", w.Code, w.Body)
+	}
+}

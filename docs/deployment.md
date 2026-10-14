@@ -639,9 +639,13 @@ it.
   (`approved_region_scopes`, with a bounded `region_scope_audit` trail), so they
   survive restarts and are part of normal database backups. `config.json` is
   never rewritten. The server only queues the decision; the ingestor writes it.
-- **Configured names win.** A configured name cannot be approved (it is not
-  unknown). If a name is both approved and configured, revoking the approval
+- **Configured names win.** A configured name cannot be approved or rejected
+  (it is not unknown), also not when it was rejected before it was added to
+  the config. If a name is both approved and configured, revoking the approval
   leaves it active.
+- **Observed means reported now.** Approve and reject need a current report
+  from a non-blacklisted observer; the server checks this before queueing and
+  the ingestor checks it again before writing. Revoke needs no report.
 - **SIGHUP keeps decisions.** A reload rebuilds only the configured layer. It
   neither drops an approved scope nor brings back a revoked one; the reload log
   line reports how many approved region scopes were kept.
