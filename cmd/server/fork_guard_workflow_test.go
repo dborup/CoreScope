@@ -12,7 +12,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -187,7 +190,43 @@ func TestImageCheckLeastPrivilegeAndTimeout(t *testing.T) {
 
 func TestForkGuardLeavesTestJobsRunning(t *testing.T) {
 	deploy := readWorkflow(t, deployWorkflowRel)
-	for _, name := range []string{"go-test", "e2e-test-1", "e2e-test-2", "e2e-test-3", "image-check"} {
+	var manifest struct {
+		Shards int `json:"shards"`
+	}
+	if err := json.Unmarshal([]byte(readWorkflow(t, "../../scripts/go-server-shards.json")), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Shards < 3 || manifest.Shards > 4 {
+		t.Fatalf("Go shard count must be measured and between 3 and 4; got %d", manifest.Shards)
+	}
+	goJobs := []string{"go-shards-check"}
+	goKeys := []string{"GO_GUARD_RESULT"}
+	for n := 1; n <= manifest.Shards; n++ {
+		goJobs = append(goJobs, fmt.Sprintf("go-server-%d", n))
+		goKeys = append(goKeys, fmt.Sprintf("GO_SERVER_%d_RESULT", n))
+		job := workflowJob(t, deploy, fmt.Sprintf("go-server-%d", n))
+		if !strings.Contains(job, fmt.Sprintf("      GO_SERVER_SHARD: '%d'\n", n)) {
+			t.Errorf("server shard %d must have its pinned identity", n)
+		}
+		if n > 1 && !strings.HasSuffix(strings.TrimSpace(job), "steps: *go-server-shard-steps") {
+			t.Errorf("server shard %d must share the same steps without overrides", n)
+		}
+	}
+	first := workflowJob(t, deploy, "go-server-1")
+	for _, want := range []string{"steps: &go-server-shard-steps", "node scripts/run-go-server-shard.js\n", "name: go-server-${{ env.GO_SERVER_SHARD }}", "overwrite: true"} {
+		if !strings.Contains(first, want) {
+			t.Errorf("Go shard runner must preserve %q", want)
+		}
+	}
+	guard := workflowJob(t, deploy, "go-shards-check")
+	for _, want := range []string{"node scripts/run-go-server-shard.js --validate", "--runtime-list"} {
+		if !strings.Contains(guard, want) {
+			t.Errorf("Go assignment guard must include %q", want)
+		}
+	}
+	goJobs = append(goJobs, "go-ingestor", "go-libraries", "js-test", "script-test")
+	goKeys = append(goKeys, "GO_INGESTOR_RESULT", "GO_LIBRARIES_RESULT", "JS_RESULT", "SCRIPTS_RESULT")
+	for _, name := range append(append([]string{}, goJobs...), "e2e-test-1", "e2e-test-2", "e2e-test-3", "image-check") {
 		job := workflowJob(t, deploy, name)
 		if cond := jobIf(job); cond != "" {
 			t.Errorf("%s must not gain a job-level condition; got %q", name, cond)
@@ -195,6 +234,69 @@ func TestForkGuardLeavesTestJobsRunning(t *testing.T) {
 		if strings.Contains(job, "github.repository") {
 			t.Errorf("%s must not be repository-guarded: tests and CI artifact uploads run on forks too", name)
 		}
+		if regexp.MustCompile(`(?m)^    needs:`).MatchString(job) {
+			t.Errorf("%s must start independently", name)
+		}
+	}
+	// Execute both real gate loops. Static needs/condition checks alone cannot
+	// catch a loop which silently stops checking one prerequisite or accepts skips.
+	for _, c := range []struct {
+		job, step, nextStep string
+		needs, keys         []string
+	}{
+		{"go-test", "Require all Go and split checks", "Checkout code", goJobs, goKeys},
+		{"build-and-publish", "Require tests and image validation", "Checkout code",
+			append(append([]string{}, goJobs...), "go-test", "e2e-test-1", "e2e-test-2", "e2e-test-3", "e2e-report", "image-check"),
+			append(append([]string{}, goKeys...), "GO_RESULT", "E2E_1_RESULT", "E2E_2_RESULT", "E2E_3_RESULT", "E2E_REPORT_RESULT", "IMAGE_RESULT")},
+	} {
+		job := workflowJob(t, deploy, c.job)
+		if strings.TrimSpace(jobIf(job)) != "${{ !cancelled() }}" {
+			t.Errorf("%s must run fail-closed after failed or skipped prerequisites", c.job)
+		}
+		if !strings.Contains(job, "    needs: ["+strings.Join(c.needs, ", ")+"]\n") {
+			t.Errorf("%s must require exactly every prerequisite: %v", c.job, c.needs)
+		}
+		re := regexp.MustCompile(`(?s)      - name: ` + regexp.QuoteMeta(c.step) + `\n(.*?)      - name: ` + regexp.QuoteMeta(c.nextStep))
+		gate := re.FindStringSubmatch(job)
+		if gate == nil {
+			t.Fatalf("%s explicit prerequisite step missing", c.job)
+		}
+		for i, key := range c.keys {
+			if !strings.Contains(gate[1], key+": ${{ needs."+c.needs[i]+".result }}") {
+				t.Errorf("%s missing correct result binding for %s", c.job, key)
+			}
+		}
+		run := regexp.MustCompile(`(?m)^        run: \|\n((?:^          .*\n)+)`).FindStringSubmatch(gate[1])
+		if run == nil {
+			t.Fatalf("%s gate script missing", c.job)
+		}
+		bash := regexp.MustCompile(`(?m)^          `).ReplaceAllString(run[1], "")
+		check := func(badKey, value string) {
+			t.Helper()
+			cmd := exec.Command("bash", "-e", "-c", bash)
+			cmd.Env = os.Environ()
+			for _, key := range c.keys {
+				result := "success"
+				if key == badKey {
+					result = value
+				}
+				cmd.Env = append(cmd.Env, key+"="+result)
+			}
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != (badKey == "") {
+				t.Errorf("%s gate (%s=%q) exit: %v; %s", c.job, badKey, value, err, out)
+			}
+		}
+		check("", "")
+		for _, key := range c.keys {
+			for _, result := range []string{"failure", "skipped", "cancelled", ""} {
+				check(key, result)
+			}
+		}
+	}
+	goReport := workflowJob(t, deploy, "go-test")
+	if !strings.Contains(goReport, "node scripts/report-go-server-shards.js") || strings.Contains(goReport, "github.repository") {
+		t.Error("Go coverage merge must run and must not be repository-guarded")
 	}
 	report := workflowJob(t, deploy, "e2e-report")
 	if cond := strings.TrimSpace(jobIf(report)); cond != "${{ !cancelled() }}" {

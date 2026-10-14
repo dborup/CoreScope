@@ -341,6 +341,10 @@ type Config struct {
 	// ⇒ off; see ClientRxCoverageEnabled.
 	ClientRxCoverage *ClientRxCoverageConfig `json:"clientRxCoverage,omitempty"`
 
+	// ClientRegions gates GET /api/nodes/{pubkey}/declared-regions (#126). The
+	// same config.json entry gates the ingestor's write path; absent ⇒ off.
+	ClientRegions *ClientRegionsConfig `json:"clientRegions,omitempty"`
+
 	ResolvedPath  *ResolvedPathConfig  `json:"resolvedPath,omitempty"`
 	NeighborGraph *NeighborGraphConfig `json:"neighborGraph,omitempty"`
 
@@ -456,6 +460,17 @@ type ClientRxCoverageConfig struct {
 // feature is on. Nil config or absent/nil section ⇒ off (the safe default).
 func (c *Config) ClientRxCoverageEnabled() bool {
 	return c != nil && c.ClientRxCoverage != nil && c.ClientRxCoverage.Enabled
+}
+
+// ClientRegionsConfig gates the opt-in declared-region reports (#126).
+type ClientRegionsConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ClientRegionsEnabled reports whether the declared-regions endpoint is on.
+// Nil config or absent section ⇒ off.
+func (c *Config) ClientRegionsEnabled() bool {
+	return c != nil && c.ClientRegions != nil && c.ClientRegions.Enabled
 }
 
 // WSCompressionEnabled returns true when WebSocket permessage-deflate is explicitly enabled.

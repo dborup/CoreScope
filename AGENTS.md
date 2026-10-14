@@ -266,6 +266,18 @@ node test-e2e-playwright.js       # 8 Playwright browser tests (default: localho
 
 Tests that need live mesh data can use `https://analyzer.00id.net` — all API endpoints are public, no auth required.
 
+### Go server test shards (CI)
+CI runs the `cmd/server` tests (with `-race` and coverage) in three jobs, `go-server-1..3`. `scripts/go-server-shards.json` pins the slowest Tests to shards 1 and 2 (`go test -run`). Shard 3 is the catch-all: it runs every Test, Fuzz seed target and Example that is not pinned (`go test -skip` of the pinned names).
+- **Adding, renaming or moving a Test needs no manifest edit.** It runs in shard 3. The `📋 Verify Go Test Assignments` job checks that every active entry is selected by exactly one shard and that the AST inventory matches `go test -list`. Run the same check locally with `node scripts/run-go-server-shard.js --validate`.
+- **When to rebalance:** the `✅ Go Build & Test` job summary prints the test seconds per shard. Rebalance when the slowest shard stays above 1.25× the fastest on two green runs, after adding a Test that takes more than ~10 s on CI, or when `--validate` reports stale pins or an empty shard.
+- **How:** download the shard artifacts of one or more green runs (they are kept for one day), regenerate and commit the manifest:
+  ```bash
+  gh run download <run-id> -p 'go-server-*' -D /tmp/go-run-<run-id>
+  node scripts/rebalance-go-server-shards.js /tmp/go-run-<run-id> [/tmp/go-run-<other-id> ...]
+  ```
+  The script averages each Test's top-level `go test -json` time on the GitHub runners, fills shard 3 with the cheapest entries up to a third of the total and pins the rest longest-first.
+- Each pattern is one argv string for the test binary (`-test.run=…`), and Linux caps one string at 128 KiB (`MAX_ARG_STRLEN`). Only pinned names go into a pattern, and the guard refuses any pattern over 96 KiB.
+
 ### What Needs Tests
 - Parsers and decoders (packet-filter, decoder)
 - Threshold/status calculations (aging, health)

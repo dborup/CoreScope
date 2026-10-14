@@ -656,14 +656,44 @@ func (d *Detector) handle(e *Event) {
 		for pi, i := range r.periodic {
 			rule := &d.cfg.Periodic[i]
 			if appliesTo(rule.PayloadTypes, e.PayloadType) {
-				if sig, ok := k.per[pi].observe(t, e.Traffic, rule, &d.perScratch); ok {
+				ps := k.per[pi]
+				before := ps.evaluated
+				ep := &k.eps[slot]
+				tracking := rule.EndAfterMissedPulses > 0
+				followed := tracking && ps.track.armed && ep.state == StateActive
+				sig, ok := ps.observe(t, e.Traffic, rule, &d.perScratch)
+				if ok {
 					ev := sig.ev
 					d.hot(tb, k, slot, &rule.State, emitCtx{at: t, trigger: e, label: sig.label, per: &ev, coverage: cov})
+				}
+				if tracking && ps.evaluated != before { // a new pulse started
+					d.track(tb, k, slot, ps, rule, t, followed, sig, ok)
 				}
 			}
 			slot++
 		}
 	}
+}
+
+// track follows the pulse train of an active periodic episode (track.go).
+// followed says whether the tracker was armed for this same active episode
+// before the pulse; sig is the detection signal of the pulse, if ok.
+func (d *Detector) track(tb *keyTable, k *keyState, slot int, ps *periodicState, rule *PeriodicRule, t int64, followed bool, sig periodicSignal, ok bool) {
+	ep := &k.eps[slot]
+	switch {
+	case ep.state != StateActive:
+		return
+	case followed:
+		if ps.track.pulse(t, rule) != trackMatched {
+			return
+		}
+	case ok:
+		ps.track.arm(t, int64(sig.ev.Period), int64(sig.ev.Tolerance))
+	default:
+		return
+	}
+	ep.track(t, ps.track.quiet(rule))
+	d.schedule(tb, k, slot, &rule.State)
 }
 
 func (d *Detector) coverageFor(tb *keyTable, k *keyState, t int64) CoverageFlags {
