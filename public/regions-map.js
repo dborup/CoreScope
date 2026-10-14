@@ -5,6 +5,7 @@
   const MAX_POINTS = 5000;
   const MAX_SCOPES = 128;
   let leafletMap = null;
+  let themeObserver = null;
   let generation = 0;
 
   function validPosition(node) {
@@ -134,6 +135,7 @@
   }
 
   async function init(container) {
+    destroy();
     const token = ++generation;
     const shell = element('section', 'regions-page');
     shell.appendChild(element('h1', '', 'Regions'));
@@ -158,13 +160,20 @@
       return;
     }
     leafletMap = L.map(mapEl).setView([55.7, 10.5], 6);
-    const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
-    const tile = typeof root.MC_getTileSpec === 'function' ? root.MC_getTileSpec(theme) : null;
-    L.tileLayer(tile && tile.url ? tile.url : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: tile && tile.maxZoom ? tile.maxZoom : 19,
-      attribution: tile && tile.attribution ? tile.attribution : '© OpenStreetMap contributors',
-    }).addTo(leafletMap);
-    if (tile && tile.invertFilter) leafletMap.getPane('tilePane').style.filter = tile.invertFilter;
+    const applyTiles = function () {
+      if (tileLayer) leafletMap.removeLayer(tileLayer);
+      const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+      const tile = typeof root.MC_getTileSpec === 'function' ? root.MC_getTileSpec(theme) : null;
+      tileLayer = L.tileLayer(tile && tile.url ? tile.url : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: tile && tile.maxZoom ? tile.maxZoom : 19,
+        attribution: tile && tile.attribution ? tile.attribution : '© OpenStreetMap contributors',
+      }).addTo(leafletMap);
+      leafletMap.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';
+    };
+    let tileLayer = null;
+    applyTiles();
+    themeObserver = new MutationObserver(applyTiles);
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     const layer = L.layerGroup().addTo(leafletMap);
     try {
       const data = await fetchAllNodes('', { ttl: 60000, pageSize: 500, safetyCap: 5000 });
@@ -195,6 +204,8 @@
 
   function destroy() {
     generation++;
+    if (themeObserver) themeObserver.disconnect();
+    themeObserver = null;
     if (leafletMap) leafletMap.remove();
     leafletMap = null;
   }
