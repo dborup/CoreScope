@@ -1,0 +1,92 @@
+{
+  "_comment": "Source of truth for locally-vendored browser dependencies (#442, following the #387/#336 SRI pins and the #400 follow-ups). Every URL is an exact pinned version on an immutable unpkg.com path; every sha384 was recomputed from bytes downloaded for this change and matches the REVIEWED_DIGESTS values pinned in #387/#400 — vendoring is not an upgrade. fetch-browser-deps.sh reads this file, downloads each file, verifies its sha384 before writing anything, and writes into public/vendor/<name>/<version>/<dest>. The Node and Go tests read the same file to check committed bytes, so this is the only place a version or digest is edited.",
+  "dependencies": [
+    {
+      "name": "leaflet",
+      "version": "1.9.4",
+      "homepage": "https://leafletjs.com/",
+      "license": "BSD-2-Clause",
+      "files": [
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
+          "dest": "leaflet.css",
+          "sha384": "sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+          "dest": "leaflet.js",
+          "sha384": "sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/LICENSE",
+          "dest": "LICENSE",
+          "sha384": "sha384-CXYK4I2izUBQWizu8sKhYyBLtabBOMnWJhiEcYE2hnY+ov3P+/NGnAkucH4hN0hK"
+        }
+      ]
+    },
+    {
+      "name": "leaflet.heat",
+      "version": "0.2.0",
+      "homepage": "https://github.com/Leaflet/Leaflet.heat",
+      "license": "BSD-2-Clause",
+      "files": [
+        {
+          "url": "https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js",
+          "dest": "leaflet-heat.js",
+          "sha384": "sha384-mFKkGiGvT5vo1fEyGCD3hshDdKmW3wzXW/x+fWriYJArD0R3gawT6lMvLboM22c0"
+        },
+        {
+          "url": "https://unpkg.com/leaflet.heat@0.2.0/LICENSE",
+          "dest": "LICENSE",
+          "sha384": "sha384-YnKZ4SDk8IxJBcSwrOJsvv8EO4UNlWGAkdX4iAokYi6KofP3EhPqsQlzp/DvlZ5B"
+        }
+      ]
+    },
+    {
+      "name": "chart.js",
+      "version": "4.5.1",
+      "homepage": "https://www.chartjs.org/",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://unpkg.com/chart.js@4.5.1/dist/chart.umd.min.js",
+          "dest": "chart.umd.min.js",
+          "sha384": "sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+        },
+        {
+          "url": "https://unpkg.com/chart.js@4.5.1/LICENSE.md",
+          "dest": "LICENSE.md",
+          "sha384": "sha384-OkVNKEzJVHeD+74l3M5PpGUZo41MILTzZ1HFy8WjsWiTBQKiieUUB7mWw69IBHFS"
+        }
+      ]
+    },
+    {
+      "name": "swagger-ui-dist",
+      "version": "5.33.2",
+      "homepage": "https://github.com/swagger-api/swagger-ui",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css",
+          "dest": "swagger-ui.css",
+          "sha384": "sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
+        },
+        {
+          "url": "https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui-bundle.js",
+          "dest": "swagger-ui-bundle.js",
+          "sha384": "sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
+        },
+        {
+          "url": "https://unpkg.com/swagger-ui-dist@5.33.2/LICENSE",
+          "dest": "LICENSE",
+          "sha384": "sha384-II9e1ieUDl5AxyiVq3/FflTua1Sr0kMJ25e6imG7rXg7SiAsA2VemsvEqVsLqM7/"
+        },
+        {
+          "url": "https://unpkg.com/swagger-ui-dist@5.33.2/NOTICE",
+          "dest": "NOTICE",
+          "sha384": "sha384-0WsY5RW2lVusdcWTnoCx5fP8TSnX2JZrr3m82bJxkn2hS3VYTh1Ar/IQSNtZJB3d"
+        }
+      ]
+    }
+  ]
+}
