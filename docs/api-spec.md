@@ -302,7 +302,15 @@ Server health and telemetry. Used by monitoring.
     "hitRate":    number        // percentage (0–100)
   },
   "websocket": {
-    "clients":   number        // connected WS clients
+    "clients":   number,       // connected WS clients
+    // Upgrade refusals since boot, omitted when zero. deny/rate/connCap are
+    // the per-IP rules; globalCap is the server-wide concurrent ceiling
+    // (webSocket.maxClients, default 512 — a nonzero value here means the
+    // server was full, not that one client misbehaved) (#369).
+    "rejectedDeny":      number,
+    "rejectedRate":      number,
+    "rejectedConnCap":   number,
+    "rejectedGlobalCap": number
   },
   "packetStore": {
     "packets":      number,    // loaded transmissions
@@ -314,6 +322,13 @@ Server health and telemetry. Used by monitoring.
     "slowQueries":   number,
     "recentSlow": [            // last 5
       {
+        // Same SlowQuery shape as GET /api/perf → slowQueries[]: normalized
+        // route key + a sanitised, control-char-stripped copy of the raw
+        // request path (each half ≤128 content runes plus an "…" truncation
+        // marker), joined by a space (e.g. "/api/nodes/:id
+        // /api/nodes/abcd1234"); unmatched routes emit the capped raw path
+        // once. Not HTML-escaped — clients MUST escape before DOM insertion
+        // (#392, #394 F3/F4/F6).
         "path":   string,
         "ms":     number,
         "time":   string,      // ISO timestamp
@@ -329,6 +344,18 @@ Server health and telemetry. Used by monitoring.
 ## GET /api/perf
 
 Detailed performance metrics per endpoint.
+
+### Query Parameters
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `mem` | string | `1` adds `memoryBreakdown` and `memoryBreakdownNote`: a walk of every stored transmission and observation under the packet-store read lock. Ignored when the server has no packet store. |
+
+`mem=1` is admission-controlled per server process (#371): one scan at a
+time, and none for 5 s after a scan completes. A refused request gets
+`429` with `Retry-After` (whole seconds, rounded up) and
+`{"error": string, "retryAfter": number}`, before the store is touched.
+Requests without `mem=1` are never limited.
 
 ### Response `200`
 
@@ -349,6 +376,14 @@ Detailed performance metrics per endpoint.
   },
   "slowQueries": [                  // last 20 queries > 100ms
     {
+      // Normalized route key + a sanitised copy of the raw request path,
+      // joined by a single space, e.g. "/api/nodes/:id /api/nodes/abcd1234".
+      // BOTH halves are independently control-char-stripped (incl. CR/LF/TAB)
+      // and capped to ≤128 content runes each (an "…" marks truncation), so
+      // the whole value is bounded at ≤259 runes (2×128 content runes + two
+      // "…" markers + the join space) regardless of input (#392, #394 F3/F4).
+      // Unmatched routes (key == raw) emit the capped raw path once. Not
+      // HTML-escaped — clients MUST escape before inserting into the DOM.
       "path":   string,
       "ms":     number,
       "time":   string,             // ISO timestamp
@@ -859,6 +894,22 @@ buckets before `coverageStart` represent unknown history rather than confirmed
 silence. A null `coverageStart` means coverage cannot be established (for
 example during startup or after a failed load).
 
+With `?include=advertIntervals`, repeater health may also return
+`advertIntervals` in the same shape as the node-detail `include=advertRoutes`
+response: `{ "window": 20, "flood": AdvertIntervalEstimate,
+"zero_hop": AdvertIntervalEstimate }`, plus `advertRouteBackfill` as a
+`RouteMaskBackfillStatus` (`status`: `pending`, `backfilling`, or `complete`;
+`remaining`: number or null). Both fields are absent by default, for
+non-repeaters, and for hidden identities. If the backfill status is anything
+other than `complete`, including absent in an older response, route classes
+and their estimated intervals are provisional. The server reuses the bounded,
+per-node cached advert-route scan; this is an opt-in because a cold scan of a
+node with many adverts is comparatively expensive. `interval_s` is an
+**estimate** from at most the newest 20 distinct adverts in each route class,
+not the repeater's configured interval. Missed receptions and limited history
+can skew it. `null` plus `status` (`none_observed`, `too_few`, or `irregular`)
+means no defensible estimate, not proof the device's timer is disabled.
+
 ### Response `404`
 
 ```json
@@ -1222,7 +1273,7 @@ Paginated packet (transmission) list with filtering.
 | `since`      | string | —       | ISO timestamp lower bound                          |
 | `until`      | string | —       | ISO timestamp upper bound                          |
 | `node`       | string | —       | Filter by node pubkey                              |
-| `nodes`      | string | —       | Comma-separated pubkeys (multi-node filter)        |
+| `nodes`      | string | —       | Comma-separated pubkeys or node names (multi-node filter); see below |
 | `order`      | string | `DESC`  | Sort direction: `asc` or `desc`                    |
 | `groupByHash`| string | —       | Set to `"true"` for grouped response               |
 | `expand`     | string | —       | Set to `"observations"` to include observation arrays |
@@ -1239,6 +1290,17 @@ An overlapping `type` inclusion and exclusion returns no packets for that type.
 Malformed values, repeated `excludeTypes` parameters, and a nonempty exclusion
 combined with `nodes` return HTTP 400. Use `node` for a supported single-node
 combination. All other existing filters continue to compose normally.
+
+`nodes` matches each entry exactly (case-sensitive) against a node's public
+key or name. Whitespace around entries is trimmed, empty entries are dropped
+and duplicates collapse, before any node lookup. The list accepts at most 50
+distinct entries, 100 comma-separated entries (empty and duplicate ones
+included) and 4096 characters; a list over any of these bounds returns HTTP
+400 before any lookup, query or packet-store lock (#335). 50 full 64-character
+public keys separated by `, ` fit in 3,298 characters. A list of only empty
+entries returns an empty page, as before. Results, ordering (`order`) and
+pagination (`limit`, `offset`) are unchanged for lists within the bounds. No
+UI page sends `nodes`; the Packets page uses the single `node` filter.
 
 The Packets page refetches when its type selection or Hide CONTROL checkbox
 changes, so excluded traffic cannot fill the fetched page. Live updates are
@@ -1293,6 +1355,17 @@ packet link remains visible.
   "offset":  number
 }
 ```
+
+### Response `400` (nodes=... over its bounds)
+
+Shared error shape; the message names the bound that was exceeded:
+
+```json
+{ "error": "nodes accepts at most 50 distinct entries" }
+```
+
+The other two messages are `nodes accepts at most 100 comma-separated entries`
+and `nodes must be at most 4096 characters`.
 
 ---
 

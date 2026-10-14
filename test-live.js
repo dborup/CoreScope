@@ -752,6 +752,59 @@ console.log('\n=== live.js: resolveHopPositions ===');
   });
 }
 
+// ===== resolveHopPositions: canonical answers are positional (#391) =====
+// #367 made the packets page read `resolved_path` per hop POSITION. The live
+// map still went through HopResolver.resolveFromServer(), whose return value
+// is keyed by hop prefix, so a path that repeats a prefix collapsed both
+// positions onto the last answer. These checks pin the positional contract
+// against the real public/hop-resolver.js, not a stand-in.
+console.log('\n=== live.js: resolveHopPositions canonical positions (#391) ===');
+{
+  const ctx = makeLiveSandbox();
+  const resolve = ctx.window._liveResolveHopPositions;
+  const nodeData = ctx.window._liveNodeData();
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  ctx.window.HopResolver = ctx.HopResolver;
+
+  // Two repeaters share the 1-byte prefix "ef". FAR is listed first, so with
+  // no GPS anchor the heuristic deterministically picks it.
+  const FAR = { public_key: 'ef' + 'a'.repeat(62), name: 'FAR-AWAY', role: 'repeater', lat: 50.87, lon: 5.52 };
+  const NEAR = { public_key: 'ef' + 'b'.repeat(62), name: 'NEAR-ONE', role: 'repeater', lat: 51.08, lon: 3.78 };
+  ctx.HopResolver.init([FAR, NEAR]);
+  for (const n of [FAR, NEAR]) nodeData[n.public_key] = { public_key: n.public_key, name: n.name, lat: n.lat, lon: n.lon };
+
+  test('a repeated prefix keeps the canonical node of each position', () => {
+    const out = resolve(['ef', 'ef'], {}, [FAR.public_key, NEAR.public_key]);
+    assert.strictEqual(out.length, 2, `expected both positions, got ${JSON.stringify(out)}`);
+    assert.strictEqual(out[0].key, FAR.public_key, 'position 0 must keep its own canonical node');
+    assert.strictEqual(out[1].key, NEAR.public_key, 'position 1 must keep its own canonical node');
+  });
+
+  test('a null canonical entry does not borrow the answer of a repeated prefix', () => {
+    const out = resolve(['ef', 'ef'], {}, [null, NEAR.public_key]);
+    assert.strictEqual(out.length, 2, `expected both positions, got ${JSON.stringify(out)}`);
+    assert.strictEqual(out[0].key, FAR.public_key, 'the server left position 0 open: it stays heuristic');
+    assert.strictEqual(out[1].key, NEAR.public_key, 'position 1 keeps the canonical node');
+  });
+
+  test('distinct prefixes still read their own canonical answers', () => {
+    const C1 = { public_key: 'c1' + '1'.repeat(62), name: 'C1-ALPHA', role: 'repeater', lat: 51.1, lon: 3.7 };
+    ctx.HopResolver.init([FAR, NEAR, C1]);
+    nodeData[C1.public_key] = { public_key: C1.public_key, name: C1.name, lat: C1.lat, lon: C1.lon };
+    const out = resolve(['ef', 'c1'], {}, [NEAR.public_key, C1.public_key]);
+    assert.strictEqual(out[0].key, NEAR.public_key, 'canonical answer for "ef"');
+    assert.strictEqual(out[1].key, C1.public_key, 'canonical answer for "c1"');
+    ctx.HopResolver.init([FAR, NEAR]);
+    delete nodeData[C1.public_key];
+  });
+
+  test('a resolved_path of the wrong length is ignored, as on the packets page', () => {
+    const out = resolve(['ef', 'ef'], {}, [NEAR.public_key]);
+    assert.strictEqual(out[0].key, FAR.public_key, 'mismatched length must fall back to the heuristic');
+    assert.strictEqual(out[1].key, FAR.public_key, 'mismatched length must fall back to the heuristic');
+  });
+}
+
 // ===== bufferPacket and VCR buffer management =====
 console.log('\n=== live.js: bufferPacket / VCR buffer ===');
 {

@@ -86,12 +86,16 @@
     _listeners.forEach(function (fn) { fn(getSelected()); });
   }
 
-  /** Build summary label for dropdown trigger */
+  // #333: region codes include observer IATA values from MQTT, so every code
+  // and label is escaped for its attribute or text slot. dataset.region hands
+  // toggleRegion() the decoded code, so selection still matches _regions.
+
+  /** Build summary label for dropdown trigger (HTML-escaped) */
   function dropdownLabel(codes) {
     if (!_selected) return 'All Regions';
     var sel = Array.from(_selected);
     if (sel.length === 0) return 'All Regions';
-    if (sel.length <= 2) return sel.join(', ');
+    if (sel.length <= 2) return escapeHtml(sel.join(', '));
     return sel.length + ' Regions';
   }
 
@@ -106,7 +110,7 @@
       var label = _regions[code] || code;
       var active = allSelected || (_selected && _selected.has(code));
       html += '<button class="region-pill' + (active ? ' region-pill-active' : '') +
-        '" data-region="' + code + '" role="checkbox" aria-checked="' + !!active + '">' + label + '</button>';
+        '" data-region="' + escapeHtml(code) + '" role="checkbox" aria-checked="' + !!active + '">' + escapeHtml(label) + '</button>';
     });
     html += '</div>';
     container.innerHTML = html;
@@ -132,8 +136,8 @@
       var cityName = configLabel || (window.IATA_CITIES && window.IATA_CITIES[code]);
       var label = cityName ? (code + ' - ' + cityName) : code;
       var active = allSelected || (_selected && _selected.has(code));
-      html += '<label class="region-dropdown-item"><input type="checkbox" data-region="' + code + '"' +
-        (active ? ' checked' : '') + '> ' + label + '</label>';
+      html += '<label class="region-dropdown-item"><input type="checkbox" data-region="' + escapeHtml(code) + '"' +
+        (active ? ' checked' : '') + '> ' + escapeHtml(label) + '</label>';
     });
     html += '</div></div>';
     container.innerHTML = html;

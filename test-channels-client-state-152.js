@@ -27,6 +27,30 @@ const assert = require('assert');
 const nodeCrypto = require('crypto');
 const { webcrypto } = nodeCrypto;
 
+// The page code runs against real Web Crypto, whose digest/importKey/sign
+// settle off the event loop: a fixed number of setImmediate turns can run
+// out before they do on a busy machine (#384: F1, N1 and R4-3 S2 flaked
+// that way). Every crypto.subtle call the page makes is tracked here so
+// flush() can wait for it instead of racing it.
+const pendingCrypto = new Set();
+const trackedSubtle = new Proxy(webcrypto.subtle, {
+  get(target, prop) {
+    const value = Reflect.get(target, prop, target);
+    if (typeof value !== 'function') return value;
+    return (...args) => {
+      const p = value.apply(target, args);
+      pendingCrypto.add(p);
+      const done = () => pendingCrypto.delete(p);
+      p.then(done, done);
+      return p;
+    };
+  },
+});
+const trackedCrypto = {
+  subtle: trackedSubtle,
+  getRandomValues: (arr) => webcrypto.getRandomValues(arr),
+};
+
 // Encrypts a channel message exactly the way internal/channel/channel.go /
 // public/channel-decrypt.js expect it (see that file's header comment):
 // AES-128-ECB(timestamp(4 LE) + flags(1) + "sender: message" + 0x00, padded
@@ -84,7 +108,10 @@ function deferred() {
 }
 
 async function flush(n) {
-  for (let i = 0; i < (n || 20); i++) await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < (n || 20); i++) {
+    await new Promise((r) => setImmediate(r));
+    while (pendingCrypto.size) await Promise.allSettled([...pendingCrypto]);
+  }
 }
 
 // Flushes until cond() holds or ~2s of real time pass. For steps that wait
@@ -181,7 +208,7 @@ function makeHarness(opts) {
     },
     location: { hash: '' },
     history: { replaceState(_s, _t, url) { historyCalls.push(url); }, pushState() {} },
-    crypto: webcrypto,
+    crypto: trackedCrypto,
     TextEncoder, TextDecoder,
     Uint8Array, Uint16Array, Uint32Array, Int8Array, Int16Array, Int32Array, ArrayBuffer,
     URLSearchParams,
@@ -357,7 +384,7 @@ function makeDecryptSandbox(opts) {
       removeItem: (k) => { delete sb.storage[k]; },
     },
     console, Date, JSON, Math, String, Number, Object, Array, RegExp, Error, Promise, parseInt,
-    crypto: webcrypto, TextEncoder, TextDecoder, Uint8Array,
+    crypto: trackedCrypto, TextEncoder, TextDecoder, Uint8Array,
   };
   ctx.window = ctx;
   ctx.self = ctx;

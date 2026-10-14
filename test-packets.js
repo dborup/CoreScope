@@ -156,6 +156,53 @@ function loadPacketsSandbox(captureRoutes = false) {
 
 // ===== TESTS =====
 
+console.log('\n=== packets.js: channel matching (#406) ===');
+{
+  const api = loadPacketsSandbox()._packetsTestAPI;
+  const packet = (decoded, type = 5) => ({ payload_type: type,
+    decoded_json: typeof decoded === 'string' ? decoded : JSON.stringify(decoded) });
+  const cases = [
+    ['named channel matches exactly', { channel: '#test' }, '#test', true],
+    ['another named channel does not match', { channel: '#other' }, '#test', false],
+    ['names are not case-folded', { channel: '#Test' }, '#test', false],
+    ['leading # is not synthesized', { channel: 'test' }, '#test', false],
+    ['encrypted channel matches hex evidence', { channelHashHex: 'AB' }, 'enc_AB', true],
+    ['readable name does not suppress encrypted hash match', { channel: '#test', channelHashHex: 'AB' }, 'enc_AB', true],
+    ['other encrypted hash does not match', { channelHashHex: 'CD' }, 'enc_AB', false],
+    ['hex evidence is not case-folded', { channelHashHex: 'ab' }, 'enc_AB', false],
+    ['numeric hash alone is not invented evidence', { channelHash: 171 }, 'enc_AB', false],
+    ['channelHashHex zero byte is valid', { channelHashHex: '00' }, 'enc_00', true],
+    ['empty payload does not match', {}, '#test', false],
+    ['missing channel does not match', { channel: null }, '#test', false],
+    ['non-string channel does not match', { channel: ['#test'] }, '#test', false],
+    ['numeric hex does not match', { channelHashHex: 171 }, 'enc_AB', false],
+    ['empty hex is not evidence for an enc_ filter', { channelHashHex: '' }, 'enc_', false],
+    ['malformed JSON does not match', '{invalid', '#test', false],
+    ['JSON null does not match', 'null', '#test', false],
+    ['JSON array does not match', '[]', '#test', false],
+  ];
+  for (const [name, decoded, channel, expected] of cases) {
+    test(name, () => assert.strictEqual(api.packetMatchesChannel(packet(decoded), channel), expected));
+  }
+  test('only GRP_TXT can match a selected channel', () => {
+    for (const type of [0, 4, 6, 11, null, '5']) {
+      assert.strictEqual(api.packetMatchesChannel(packet({ channel: '#test' }, type), '#test'), false);
+    }
+    assert.strictEqual(api.packetMatchesChannel({ decoded_json: '{"channel":"#test"}' }, '#test'), false);
+  });
+  test('no selected channel keeps the same array with no parsing', () => {
+    const list = [Object.freeze({ payload_type: 4 }), Object.freeze({ payload_type: 5, decoded_json: '{invalid' })];
+    assert.strictEqual(api.filterChannelPackets(list, ''), list);
+  });
+  test('selected channel filters the live batch and keeps order', () => {
+    const list = [packet({ channelHashHex: 'AB' }), packet({ channel: '#other' }),
+      packet({ channel: '#test', channelHashHex: 'AB' })];
+    const found = api.filterChannelPackets(list, 'enc_AB');
+    assert.deepStrictEqual(Array.from(found), [list[0], list[2]]);
+    assert.strictEqual(list.length, 3);
+  });
+}
+
 console.log('\n=== packets.js: typeName ===');
 {
   const ctx = loadPacketsSandbox();
