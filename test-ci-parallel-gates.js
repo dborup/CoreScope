@@ -30,6 +30,12 @@ assert.match(go, /^    if: \$\{\{ !cancelled\(\) \}\}$/m);
 assert.match(go, /node scripts\/report-go-server-shards\.js/);
 assert.match(job('go-shards-check'), /node scripts\/run-go-server-shard\.js --validate/);
 assert.match(job('go-shards-check'), /--runtime-list/);
+// Only the XSS --diff step in js-test needs history; the split jobs use the
+// default shallow checkout.
+for (const name of [...goJobs, 'go-test']) {
+  if (name === 'js-test') assert.match(job(name), /^          fetch-depth: 0$/m, 'js-test keeps full history for the XSS --diff');
+  else assert.ok(!/fetch-depth/.test(job(name)), `${name} must use the default shallow checkout`);
+}
 assert.match(job('go-server-1'), /^    steps: &go-server-shard-steps$/m);
 assert.match(job('go-server-1'), /node scripts\/run-go-server-shard\.js\n/);
 assert.match(job('go-server-1'), /name: go-server-\$\{\{ env\.GO_SERVER_SHARD \}\}\n          overwrite: true\n/);

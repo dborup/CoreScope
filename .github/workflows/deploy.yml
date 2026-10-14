@@ -43,8 +43,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v5
@@ -79,8 +77,6 @@ jobs:
     steps: &go-server-shard-steps
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v5
@@ -144,8 +140,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v5
@@ -206,8 +200,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Clean Go module cache
         run: rm -rf ~/go/pkg/mod 2>/dev/null || true
@@ -336,8 +328,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Verify Dockerfile COPY invariants (issue #1316)
         run: bash scripts/check-dockerfile-internal-pkgs.sh
@@ -411,8 +401,6 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v5
