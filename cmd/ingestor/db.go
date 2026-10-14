@@ -427,6 +427,29 @@ func applySchema(db *sql.DB) error {
 			name      TEXT,
 			last_seen TEXT
 		);
+
+		-- Declared-region reports relayed on meshcore/client/{pubkey}/regions
+		-- (#126, docs/client-regions.md). One row per report, never per-target
+		-- state. The UNIQUE index makes a redelivery a no-op and also serves the
+		-- per-target read ordered by reported_at; idx_cdr_reported backs
+		-- retention, idx_cdr_collector the admin delete-client-rx erasure.
+		CREATE TABLE IF NOT EXISTS client_declared_regions (
+			id               INTEGER PRIMARY KEY AUTOINCREMENT,
+			collector_pubkey TEXT NOT NULL,
+			target_pubkey    TEXT NOT NULL,
+			regions_csv      TEXT NOT NULL,
+			truncated        INTEGER NOT NULL DEFAULT 0,
+			reported_at      TEXT NOT NULL,
+			ingested_at      TEXT NOT NULL,
+			repeater_clock   INTEGER,
+			lat              REAL,
+			lon              REAL,
+			pos_acc_m        REAL,
+			mqtt_source      TEXT NOT NULL DEFAULT '',
+			UNIQUE(target_pubkey, reported_at, collector_pubkey)
+		);
+		CREATE INDEX IF NOT EXISTS idx_cdr_reported ON client_declared_regions(reported_at);
+		CREATE INDEX IF NOT EXISTS idx_cdr_collector ON client_declared_regions(collector_pubkey);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("base schema: %w", err)

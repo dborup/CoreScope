@@ -67,6 +67,7 @@ type Config struct {
 	Metrics            *MetricsConfig          `json:"metrics,omitempty"`
 	Runtime            *RuntimeConfig          `json:"runtime,omitempty"`
 	ClientRxCoverage   *ClientRxCoverageConfig `json:"clientRxCoverage,omitempty"`
+	ClientRegions      *ClientRegionsConfig    `json:"clientRegions,omitempty"`
 	GeoFilter          *GeoFilterConfig        `json:"geo_filter,omitempty"`
 	ForeignAdverts     *ForeignAdvertConfig    `json:"foreignAdverts,omitempty"`
 	ValidateSignatures *bool                   `json:"validateSignatures,omitempty"`
@@ -234,6 +235,21 @@ func (c *Config) ClientRxSourceAllowed(name string) bool {
 	return false
 }
 
+// ClientRegionsConfig gates the opt-in declared-region reports on
+// meshcore/client/{pubkey}/regions (#126, docs/client-regions.md). It is a
+// gate of its own, independent of clientRxCoverage; the coverage source
+// allowlist (clientRxCoverage.sources) still governs the whole client
+// namespace.
+type ClientRegionsConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ClientRegionsEnabled reports whether declared-region reports are stored.
+// Nil config or absent section ⇒ off.
+func (c *Config) ClientRegionsEnabled() bool {
+	return c != nil && c.ClientRegions != nil && c.ClientRegions.Enabled
+}
+
 // RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
 type RetentionConfig struct {
 	NodeDays     int `json:"nodeDays"`
@@ -250,6 +266,10 @@ type RetentionConfig struct {
 	// coverage rows in client_receptions / client_observers; 0 disables. Bounds
 	// the table the opt-in coverage feature would otherwise grow without limit.
 	ClientRxDays int `json:"clientRxDays"`
+	// ClientRegionsDays is the window (by reported_at) for
+	// client_declared_regions; unset or 0 follows ClientRxDays, then
+	// defaultClientRegionsDays. See ClientRegionsDays.
+	ClientRegionsDays int `json:"clientRegionsDays"`
 	// The opt-in windows below cover the tables nothing else prunes (#329);
 	// 0 disables each. See TableRetention.
 	InactiveNodeDays  int `json:"inactiveNodeDays"`
@@ -316,6 +336,26 @@ func (c *Config) ClientRxDaysOrZero() int {
 		return c.Retention.ClientRxDays
 	}
 	return 0
+}
+
+// defaultClientRegionsDays bounds client_declared_regions when neither
+// retention.clientRegionsDays nor retention.clientRxDays is set.
+const defaultClientRegionsDays = 30
+
+// ClientRegionsDays returns the retention window of client_declared_regions:
+// retention.clientRegionsDays, else retention.clientRxDays (the window of the
+// other client-RX data), else defaultClientRegionsDays. Never 0: the table is
+// always bounded, and the same window rejects expired reports at ingest.
+func (c *Config) ClientRegionsDays() int {
+	if c != nil && c.Retention != nil {
+		if c.Retention.ClientRegionsDays > 0 {
+			return c.Retention.ClientRegionsDays
+		}
+		if c.Retention.ClientRxDays > 0 {
+			return c.Retention.ClientRxDays
+		}
+	}
+	return defaultClientRegionsDays
 }
 
 // MetricsConfig controls observer metrics collection.

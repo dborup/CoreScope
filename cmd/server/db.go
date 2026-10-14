@@ -90,6 +90,7 @@ type DB struct {
 	hasMultibyteSupColsFlag        schemaFlag    // nodes.multibyte_sup (#903) -- read via hasMultibyteSupCols()
 	hasLastSeenFlag                schemaFlag    // transmissions.last_seen (#1690) -- read via hasLastSeen()
 	hasRouteMaskFlag               schemaFlag    // transmissions.route_mask (#89) -- read via hasRouteMask()
+	hasClientDeclaredRegionsFlag   schemaFlag    // client_declared_regions table (#126) -- read via hasClientDeclaredRegions()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
 
 	// route_mask backfill status cache (#89), see route_mask.go.
@@ -172,6 +173,13 @@ func (db *DB) hasMultibyteSupCols() bool        { return db.hasMultibyteSupColsF
 func (db *DB) hasLastSeen() bool                { return db.hasLastSeenFlag.get() }
 func (db *DB) hasRouteMask() bool               { return db.hasRouteMaskFlag.get() }
 
+// hasClientDeclaredRegions reports whether the ingestor has created
+// client_declared_regions. Same contract as the column flags: a pure atomic
+// read, latched by detectSchema, so a server that starts before the ingestor
+// creates the table finds it on a later healer tick instead of caching
+// "absent" for its lifetime.
+func (db *DB) hasClientDeclaredRegions() bool { return db.hasClientDeclaredRegionsFlag.get() }
+
 // ingestCols is one reading of the optional-column flags an ingest query
 // depends on. A caller takes ONE snapshot and uses it for both the SELECT
 // list and the Scan destinations: the flags are atomics that the schema
@@ -229,6 +237,7 @@ func (db *DB) healSchemaFlags() {
 		&db.isV3Flag, &db.hasResolvedPathFlag, &db.hasObsRawHexFlag, &db.hasScopeNameFlag,
 		&db.hasDefaultScopeFlag, &db.hasConfiguredScopeFlag, &db.hasDefaultScopeConfirmedAtFlag,
 		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag, &db.hasRouteMaskFlag,
+		&db.hasClientDeclaredRegionsFlag,
 	}
 	allTrue := func() bool {
 		for _, f := range flags {
@@ -276,6 +285,13 @@ func (db *DB) detectSchema() {
 			return
 		}
 	}
+	// Probed first and closed at once: the PRAGMA passes below can return
+	// early, and this table is independent of them.
+	var declaredTables int
+	if db.conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'client_declared_regions'`).Scan(&declaredTables) == nil && declaredTables > 0 {
+		db.hasClientDeclaredRegionsFlag.forceTrue()
+	}
+
 	rows, err := db.conn.Query("PRAGMA table_info(observations)")
 	if err != nil {
 		return

@@ -53,7 +53,10 @@ type clientRxDeleteResult struct {
 	CompletedAt      time.Time `json:"completedAt"`
 	ClientReceptions int64     `json:"clientReceptions"`
 	ClientObservers  int64     `json:"clientObservers"`
-	Error            string    `json:"error,omitempty"`
+	// ClientDeclaredRegions counts the client_declared_regions reports the
+	// key collected (#126).
+	ClientDeclaredRegions int64  `json:"clientDeclaredRegions"`
+	Error                 string `json:"error,omitempty"`
 }
 
 // clientRxNewID returns a 16-hex-char random id suitable for filenames.
