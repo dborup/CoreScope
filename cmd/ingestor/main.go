@@ -1704,8 +1704,10 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 
 // matchScope performs one HMAC-SHA256 per effective region, including any
 // admin-approved overlay names. Deployments using hashRegionsPath may have
-// ~1100 names; approval is capped at another 128 and adds no database I/O
-// or allocation to this packet-path lookup.
+// ~1100 names, and approval adds at most regions.MaxApprovedScopes more. Cost
+// is linear in the region count: BenchmarkMatchScopeApprovalCap measured
+// ~0.62 ms and ~8,650 allocations per scoped packet at 1,100 regions, and
+// ~0.71 ms at 1,228 (i7-1260P). Approval adds no database I/O here.
 //
 // code1 is only 16 bits (65534 usable values after the 0x0000/0xFFFF
 // remap), so with enough configured regions a *different*, unrelated

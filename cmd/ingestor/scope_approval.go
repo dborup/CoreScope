@@ -13,7 +13,6 @@ import (
 	"github.com/meshcore-analyzer/regions"
 )
 
-const maxApprovedRegionScopes = 128
 const scopeQueueDir = "region-scope-requests"
 
 type scopeApprovalRunner struct {
@@ -28,7 +27,7 @@ func newScopeApprovalRunner(store *Store, keys *hotKeys) *scopeApprovalRunner {
 }
 
 func (r *scopeApprovalRunner) LoadApproved(ctx context.Context) error {
-	rows, err := r.store.db.QueryContext(ctx, `SELECT name FROM approved_region_scopes WHERE status = 'approved' LIMIT ?`, maxApprovedRegionScopes+1)
+	rows, err := r.store.db.QueryContext(ctx, `SELECT name FROM approved_region_scopes WHERE status = 'approved' LIMIT ?`, regions.MaxApprovedScopes+1)
 	if err != nil {
 		return err
 	}
@@ -47,10 +46,11 @@ func (r *scopeApprovalRunner) LoadApproved(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(names) > maxApprovedRegionScopes {
+	if len(names) > regions.MaxApprovedScopes {
 		return errors.New("approved region scope limit exceeded")
 	}
 	r.keys.AddApprovedRegions(names...)
+	log.Printf("[scope-approval] %d approved region scope(s) loaded", len(names))
 	return nil
 }
 
@@ -148,7 +148,7 @@ func (r *scopeApprovalRunner) apply(ctx context.Context, cmd channelregistry.Com
 			res.Status, res.Error = channelregistry.RequestError, "could not save decision"
 			return res
 		}
-		if n >= maxApprovedRegionScopes {
+		if n >= regions.MaxApprovedScopes {
 			res.Status, res.Error = channelregistry.RequestError, "approved scope limit reached"
 			return res
 		}
@@ -161,7 +161,7 @@ func (r *scopeApprovalRunner) apply(ctx context.Context, cmd channelregistry.Com
 			res.Status, res.Error = channelregistry.RequestError, "could not save decision"
 			return res
 		}
-		// Keep all active approvals (at most 128), but bound old rejection
+		// Keep all active approvals (at most MaxApprovedScopes), but bound old rejection
 		// and revocation decisions so an unlimited set of OTA names cannot
 		// grow this table forever.
 		_, err = tx.ExecContext(ctx, `DELETE FROM approved_region_scopes WHERE name IN (
@@ -204,6 +204,7 @@ func (r *scopeApprovalRunner) apply(ctx context.Context, cmd channelregistry.Com
 	} else {
 		r.keys.RemoveApprovedRegion(cmd.Name)
 	}
+	log.Printf("[scope-approval] %s %q: %d approved region scope(s) live", status, cmd.Name, r.keys.ApprovedRegionCount())
 	res.Status = status
 	res.Proposal = &channelregistry.Proposal{Name: cmd.Name, Status: status, ReviewedAt: &now}
 	return res

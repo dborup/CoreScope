@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/regions"
 )
 
 // routeMeta holds metadata for a single API route.
@@ -58,9 +59,9 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/stats":  {Summary: "Network statistics", Description: "Returns aggregate stats (node counts, packet counts, observer counts). Cached for 10s.", Tag: "admin"},
 		"GET /api/perf": {Summary: "Performance statistics", Description: "Returns per-endpoint request timing and slow query log. mem=1 adds the store memory breakdown, a full store walk: one scan at a time per server plus a 5 s cooldown after it, otherwise 429 with Retry-After.", Tag: "admin",
 			QueryParams: []paramMeta{{Name: "mem", Description: "1 = include memoryBreakdown (rate-limited, see description)", Type: "string"}}},
-		"GET /api/mqtt/status": {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL credentials (user-info, query, fragment) are masked in broker and lastError, and in a name that is a raw broker URL. Sourced from the ingestor stats file; empty list when unavailable. stale is true when the file's sampleAt is older than the /api/perf/io freshness threshold (5s) or unreadable, i.e. the rows are frozen; sampleAgeSec gives its age. (#1043, #160)", Tag: "admin"},
+		"GET /api/mqtt/status":     {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL credentials (user-info, query, fragment) are masked in broker and lastError, and in a name that is a raw broker URL. Sourced from the ingestor stats file; empty list when unavailable. stale is true when the file's sampleAt is older than the /api/perf/io freshness threshold (5s) or unreadable, i.e. the rows are frozen; sampleAgeSec gives its age. (#1043, #160)", Tag: "admin"},
 		"GET /api/perf/ws-clients": {Summary: "WebSocket client history", Description: "Returns up to 24 h of open WebSocket connection counts, one sample per intervalSec (oldest first). Each sample has the count at that moment (clients) and the highest count since the previous sample (peak). Held in memory only; empty after a restart.", Tag: "admin"},
-		"POST /api/perf/reset": {Summary: "Reset performance stats", Tag: "admin", Auth: true},
+		"POST /api/perf/reset":     {Summary: "Reset performance stats", Tag: "admin", Auth: true},
 		// "POST /api/admin/prune" removed in #1283 (ingestor owns prune).
 		"GET /api/debug/affinity": {Summary: "Debug neighbor affinity scores", Tag: "admin", Auth: true},
 		"GET /api/backup":         {Summary: "Download SQLite backup", Description: "Streams a consistent SQLite snapshot of the analyzer DB (VACUUM INTO). Response is application/octet-stream with attachment filename corescope-backup-<unix>.db.", Tag: "admin", Auth: true},
@@ -190,12 +191,12 @@ func routeDescriptions() map[string]routeMeta {
 		"POST /api/admin/channel-proposals/{id}/approve":  {Summary: "Approve a channel suggestion", Description: "Queues the approval and returns 202 {requestId}. Approved channels are decrypted by the ingestor and listed for everyone.", Tag: "admin", Auth: true},
 		"POST /api/admin/channel-proposals/{id}/reject":   {Summary: "Reject a channel suggestion", Description: "Queues the rejection and returns 202 {requestId}.", Tag: "admin", Auth: true},
 		"POST /api/admin/channel-proposals/{id}/revoke":   {Summary: "Revoke an approved channel suggestion", Description: "Undoes a previous approval: the ingestor stops decrypting the channel and it drops out of GET /api/channels' approvedChannels. The channel also leaves GET /api/channels (#251) unless the ingestor still decrypts that name through its built-in/config list. Historical messages already decoded and stored are NOT deleted: they stay readable per channel (GET /api/channels/{hash}/messages), and the channel returns to the list, with its history, if the suggestion is approved again. Synchronous precondition check: 202 {requestId} only when the proposal is currently approved; 409 (no side effect, nothing queued) when it is not.", Tag: "admin", Auth: true},
-		"GET /api/admin/region-scopes": {Summary: "List region-scope decisions", Description: "Admin-only status of observed OTA region-scope names. config.json and hashRegionsPath remain the baseline; approved names form a persistent overlay.", Tag: "admin", Auth: true},
-		"GET /api/admin/region-scopes/audit": {Summary: "Recent region-scope decisions", Description: "Admin-only bounded audit trail of the latest 100 scope status changes.", Tag: "admin", Auth: true},
-		"POST /api/admin/region-scopes/approve": {Summary: "Approve an observed unknown region scope", Description: "Body {name}; queues a decision for the ingestor. Approval changes future scope matching only, never historical packets.", Tag: "admin", Auth: true},
-		"POST /api/admin/region-scopes/reject": {Summary: "Reject an observed unknown region scope", Description: "Body {name}; queues a rejection for the ingestor. No scope key is activated.", Tag: "admin", Auth: true},
-		"POST /api/admin/region-scopes/revoke": {Summary: "Revoke an approved region scope", Description: "Body {name}; queues revocation. Names still configured in config.json or hashRegionsPath remain active.", Tag: "admin", Auth: true},
-		"GET /api/admin/region-scopes/requests/{id}": {Summary: "Region-scope decision status", Description: "Returns queued, approved, rejected, revoked, or error from the ingestor-owned decision queue.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes":                    {Summary: "List region-scope decisions", Description: "Admin-only status of observed OTA region-scope names. config.json and hashRegionsPath remain the baseline; approved names form a persistent overlay.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes/audit":              {Summary: "Recent region-scope decisions", Description: "Admin-only bounded audit trail of the latest 100 scope status changes.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/approve":           {Summary: "Approve an observed unknown region scope", Description: "Body {name}; queues a decision for the ingestor and returns 202 {requestId}. The scope matches packets received afterwards. Stored packets keep the scope they were stored with (no backfill), including when the same packet is heard again. At most " + fmt.Sprint(regions.MaxApprovedScopes) + " scopes can be approved at once, because every region adds one HMAC per scoped packet and raises the chance of an ambiguous 16-bit code1; at the limit the response is 409 and nothing is queued.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/reject":            {Summary: "Reject an observed unknown region scope", Description: "Body {name}; queues a rejection for the ingestor. No scope key is activated.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/revoke":            {Summary: "Revoke an approved region scope", Description: "Body {name}; queues revocation. The scope stops matching packets received afterwards. Stored packets keep the scope they were stored with. Names still configured in config.json or hashRegionsPath remain active.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes/requests/{id}":      {Summary: "Region-scope decision status", Description: "Returns queued, approved, rejected, revoked, or error from the ingestor-owned decision queue.", Tag: "admin", Auth: true},
 
 		// Observers
 		"GET /api/observers":                                 {Summary: "List observers", Description: "Returns all known packet observers/gateways.", Tag: "observers"},

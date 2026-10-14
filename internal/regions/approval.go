@@ -5,6 +5,14 @@ import (
 	"unicode/utf8"
 )
 
+// MaxApprovedScopes caps the admin-approved overlay on top of the configured
+// hashRegions. Every effective region costs one HMAC per scoped packet and
+// raises the chance that a 16-bit code1 matches more than one region, so the
+// overlay is bounded; docs/deployment.md states the measured trade-off.
+// Shared by the server (synchronous 409) and the ingestor (authoritative,
+// transactional check).
+const MaxApprovedScopes = 128
+
 // ValidateCandidate accepts an exact OTA scope token, without normalizing
 // case or adding '#': those bytes determine its HMAC key. The name must also
 // be a fixed point of Normalize, so an approved name compares identically to

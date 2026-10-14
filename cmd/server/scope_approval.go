@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -24,6 +25,7 @@ type RegionScopeDecision struct {
 
 type RegionScopeDecisionsResponse struct {
 	Decisions []RegionScopeDecision `json:"decisions"`
+	Limit     int                   `json:"limit"` // regions.MaxApprovedScopes
 }
 type RegionScopeAudit struct {
 	Name           string `json:"name"`
@@ -84,7 +86,7 @@ func (s *Server) handleRegionScopeDecisions(w http.ResponseWriter, r *http.Reque
 		writeError(w, 500, "could not read scope decisions")
 		return
 	}
-	writeJSON(w, RegionScopeDecisionsResponse{Decisions: d})
+	writeJSON(w, RegionScopeDecisionsResponse{Decisions: d, Limit: regions.MaxApprovedScopes})
 }
 
 func (s *Server) handleRegionScopeAudit(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +156,12 @@ func (s *Server) handleRegionScopeDecision(op string) http.HandlerFunc {
 				current = d.Status
 				break
 			}
+		}
+		// The ingestor re-checks the cap inside its transaction; this
+		// answers the common case before anything is queued.
+		if op == channelregistry.OpScopeApprove && current != "approved" && len(approvedRegionNames(decisions)) >= regions.MaxApprovedScopes {
+			writeError(w, 409, fmt.Sprintf("approved scope limit reached (%d); revoke one first", regions.MaxApprovedScopes))
+			return
 		}
 		if op == channelregistry.OpScopeRevoke {
 			if current != "approved" {

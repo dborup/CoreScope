@@ -174,6 +174,13 @@ func (hk *hotKeys) AddApprovedRegions(names ...string) int {
 	return added
 }
 
+// ApprovedRegionCount returns the size of the admin-approved region layer.
+func (hk *hotKeys) ApprovedRegionCount() int {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	return len(hk.approvedRegions)
+}
+
 func (hk *hotKeys) RemoveApprovedRegion(name string) bool {
 	hk.mu.Lock()
 	defer hk.mu.Unlock()
@@ -205,7 +212,7 @@ func (hk *hotKeys) reload(configPath string) error {
 	}
 	hk.setBase(ck)
 	hk.setBaseRegions(rk)
-	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels kept)", len(ck), len(rk), configPath)
+	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels and %d approved region scope(s) kept)", len(ck), len(rk), configPath, hk.ApprovedRegionCount())
 	return nil
 }
 

@@ -581,6 +581,51 @@ Why this matters more than it sounds: restarting the whole container to add a si
 
 Other `config.json` changes (MQTT sources, retention, branding, health thresholds, etc.) still require a full restart.
 
+### Approving observed region scopes (Tools → Observer Neighbors)
+
+Observer Neighbors lists region-scope names that neighbors report over the air
+but that are not in `hashRegions`/`hashRegionsPath`. An administrator can
+approve such a name without editing `config.json`: open **Admin: review region
+scopes**, enter the `apiKey`, and approve, reject or revoke. Everyone else sees
+the list read-only. A name is never activated just because a neighbor reports
+it.
+
+- **Overlay, not config.** Approved names are stored in the database
+  (`approved_region_scopes`, with a bounded `region_scope_audit` trail), so they
+  survive restarts and are part of normal database backups. `config.json` is
+  never rewritten. The server only queues the decision; the ingestor writes it.
+- **Configured names win.** A configured name cannot be approved (it is not
+  unknown). If a name is both approved and configured, revoking the approval
+  leaves it active.
+- **SIGHUP keeps decisions.** A reload rebuilds only the configured layer. It
+  neither drops an approved scope nor brings back a revoked one; the reload log
+  line reports how many approved region scopes were kept.
+- **New packets only.** A decision changes matching for packets received after
+  it. Stored transmissions keep the `scope_name` they were stored with: an
+  approval does not re-match them (also not when the same packet is heard again
+  later), and a revocation does not clear matches made while the scope was
+  approved. A backfill of historical packets is out of scope.
+- **Not part of areas.** An approved scope has no `areas[].regionScopes` link,
+  so it does not appear in area-based scope statistics.
+- **Exact names.** The name is used byte for byte, as with `hashRegions`
+  (`#dk` and `#DK` differ). It must use characters the firmware accepts and must
+  not start or end with whitespace.
+- **At most 128 approved scopes.** Every region costs one HMAC per scoped
+  packet, and code1 is only 16 bits: a packet that matches more than one region
+  is stored as unknown-scoped, and a packet from an unconfigured scope can be
+  attributed to a configured one by chance. At the cap the approve request is
+  refused (409) until a scope is revoked. Measured with 1,100 configured regions
+  versus 1,100 plus the full 128 approved:
+
+  | Effective regions | Ambiguous (stored unknown-scoped) | Unconfigured scope misattributed | `matchScope` per scoped packet |
+  |---|---|---|---|
+  | 1,100 | 1.66 % | 1.66 % | ~0.62 ms |
+  | 1,228 | 1.85 % | 1.86 % | ~0.71 ms |
+
+  The rates come from 15,000 random payloads and agree with
+  1 − (1 − 1/65534)^(N−1). The timings come from
+  `BenchmarkMatchScopeApprovalCap` (`cmd/ingestor`) on an i7-1260P.
+
 ### Map Tile Providers
 
 Map tile providers are enabled and configured via the `config.json` file. You can provide your custom API credentials (e.g. `osm_url`, `stamen_api_key`, `mapbox_api_key`) to activate external tile services. Once configured on the server, users can select their preferred tile provider from the Customizer UI on the client, and their choice will be persisted automatically.

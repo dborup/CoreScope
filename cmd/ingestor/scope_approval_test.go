@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/regions"
 )
 
 func TestApprovedRegionsSurviveReloadAndRevokeKeepsConfigured(t *testing.T) {
@@ -79,7 +80,7 @@ func TestScopeApprovalCapacityDoesNotActivateOverLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maxApprovedRegionScopes; i++ {
+	for i := 0; i < regions.MaxApprovedScopes; i++ {
 		_, err := tx.Exec(`INSERT INTO approved_region_scopes(name,status,created_at,reviewed_at) VALUES (?,'approved',1,1)`, fmt.Sprintf("#old%d", i))
 		if err != nil {
 			t.Fatal(err)
