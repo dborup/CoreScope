@@ -58,9 +58,9 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/stats":  {Summary: "Network statistics", Description: "Returns aggregate stats (node counts, packet counts, observer counts). Cached for 10s.", Tag: "admin"},
 		"GET /api/perf": {Summary: "Performance statistics", Description: "Returns per-endpoint request timing and slow query log. mem=1 adds the store memory breakdown, a full store walk: one scan at a time per server plus a 5 s cooldown after it, otherwise 429 with Retry-After.", Tag: "admin",
 			QueryParams: []paramMeta{{Name: "mem", Description: "1 = include memoryBreakdown (rate-limited, see description)", Type: "string"}}},
-		"GET /api/mqtt/status": {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL credentials (user-info, query, fragment) are masked in broker and lastError, and in a name that is a raw broker URL. Sourced from the ingestor stats file; empty list when unavailable. stale is true when the file's sampleAt is older than the /api/perf/io freshness threshold (5s) or unreadable, i.e. the rows are frozen; sampleAgeSec gives its age. (#1043, #160)", Tag: "admin"},
+		"GET /api/mqtt/status":     {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL credentials (user-info, query, fragment) are masked in broker and lastError, and in a name that is a raw broker URL. Sourced from the ingestor stats file; empty list when unavailable. stale is true when the file's sampleAt is older than the /api/perf/io freshness threshold (5s) or unreadable, i.e. the rows are frozen; sampleAgeSec gives its age. (#1043, #160)", Tag: "admin"},
 		"GET /api/perf/ws-clients": {Summary: "WebSocket client history", Description: "Returns up to 24 h of open WebSocket connection counts, one sample per intervalSec (oldest first). Each sample has the count at that moment (clients) and the highest count since the previous sample (peak). Held in memory only; empty after a restart.", Tag: "admin"},
-		"POST /api/perf/reset": {Summary: "Reset performance stats", Tag: "admin", Auth: true},
+		"POST /api/perf/reset":     {Summary: "Reset performance stats", Tag: "admin", Auth: true},
 		// "POST /api/admin/prune" removed in #1283 (ingestor owns prune).
 		"GET /api/debug/affinity": {Summary: "Debug neighbor affinity scores", Tag: "admin", Auth: true},
 		"GET /api/backup":         {Summary: "Download SQLite backup", Description: "Streams a consistent SQLite snapshot of the analyzer DB (VACUUM INTO). Response is application/octet-stream with attachment filename corescope-backup-<unix>.db.", Tag: "admin", Auth: true},
@@ -107,7 +107,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "hashRegion", Description: "Issue #1862. Comma-separated region scope name(s) (e.g. \"eu,be\"; leading \"#\" optional, case-insensitive) — keeps only nodes that have transported at least one of them. Combines with hasScope as AND, not OR.", Type: "string"},
 			}},
 		"GET /api/nodes/search":         {Summary: "Search nodes", Description: "Search nodes by name or public key prefix.", Tag: "nodes", QueryParams: []paramMeta{{Name: "q", Description: "Search query", Type: "string", Required: true}}},
-		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for all nodes in one call.", Tag: "nodes"},
+		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for up to limit nodes in one call, each with its Heard By lists (directObservers / relayObservers, see HeardDirectObserver) and stats.avgSnr over direct receptions only.", Tag: "nodes", Response: schemaRef("BulkHealthResponse")},
 		"GET /api/nodes/network-status": {Summary: "Network status summary", Description: "Returns counts of active, stale, and offline nodes.", Tag: "nodes"},
 		"GET /api/nodes/{pubkey}": {Summary: "Get node detail", Description: "Returns full detail for a single node by public key. For repeater/room nodes this includes the issue #672 usefulness axes + composite score/grade (see the Node schema). recentAdverts is the chronological list; with include=advertRoutes, recentAdvertsByRoute and advertCounts (#2073) split the node's adverts into flood / zero_hop / mixed, advertIntervals (#245) estimates the flood and zero-hop advert intervals, and the ADVERT rows of recentAdverts carry route_class. A 404 for a key with no nodes row (#199) is {error, inactive_node?, observer?}: inactive_node {public_key, name, role, last_seen, first_seen} is the inactive_nodes row when retention retired the node (no advert in retention.nodeDays; last_seen is the last advert), observer {id, name, last_seen} is the observers row when the key uploads as an observer. Both are omitted for an unknown key and for a blacklisted or hidden identity.", Tag: "nodes", Response: schemaRef("NodeDetailResponse"),
 			QueryParams: []paramMeta{
@@ -117,7 +117,7 @@ func routeDescriptions() map[string]routeMeta {
 			QueryParams: []paramMeta{
 				{Name: "sample_limit", Description: "Trims samples to at most the N most-recent entries, chronological order preserved. Omitted, non-numeric, or negative: unchanged, every sample returned (legacy default). 0: samples is omitted from the response entirely. N at or above the current sample count: unchanged, every sample returned. sampleCount and every other field are unaffected regardless of sample_limit.", Type: "integer"},
 			}},
-		"GET /api/nodes/{pubkey}/health":    {Summary: "Get node health", Tag: "nodes"},
+		"GET /api/nodes/{pubkey}/health":    {Summary: "Get node health", Description: "Health of one node: stats, recent packets, the rolling 24 h activity and its Heard By lists. directObservers received the node's own transmission; relayObservers saw only other evidence (see HeardDirectObserver). Both lists describe observed routing evidence, not radio range.", Tag: "nodes", Response: schemaRef("NodeHealthResponse")},
 		"GET /api/nodes/{pubkey}/paths":     {Summary: "Get node routing paths", Tag: "nodes"},
 		"GET /api/nodes/{pubkey}/analytics": {Summary: "Get node analytics", Description: "Per-node packet counts, timing, and RF stats.", Tag: "nodes"},
 		"GET /api/nodes/{pubkey}/analytics/summary": {Summary: "Get node analytics summary", Description: "Fase 5.2a: light sibling of /analytics — timeRange + computedStats only (availabilityPct, longestSilenceMs/Start, signalGrade, snrMean/snrStdDev, relayPct, totalPackets, uniqueObservers, uniquePeers, avgPacketsPerDay). No node object, no clockSkew, and none of the heavy display arrays (activityTimeline/snrTrend/packetTypeBreakdown/observerCoverage/hopDistribution/peerInteractions/uptimeHeatmap) — for callers that only need the summary numbers, not the full endpoint's per-packet detail. Shares its per-packet computation with /analytics, so computedStats is identical between the two for the same pubkey/days.", Tag: "nodes",
@@ -276,6 +276,84 @@ func jsonErrorResponse(description string) openAPIResponse {
 	return openAPIResponse{
 		Description: description,
 		Content:     map[string]openAPIMediaType{"application/json": {Schema: openAPIRef("ApiError")}},
+	}
+}
+
+// heardBySchemas documents the node health endpoints and their Heard By
+// lists (#76).
+func heardBySchemas() map[string]*openAPISchema {
+	zero := 0
+	str := func(desc string) *openAPISchema { return &openAPISchema{Type: "string", Description: desc} }
+	num := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "number", Nullable: true, Description: desc}
+	}
+	canRelay := &openAPISchema{Type: "boolean", Description: "Node health only: false for an observer that reported repeat off (listener), true for repeat on; omitted when it never reported repeat."}
+	stats := &openAPISchema{
+		Type: "object",
+		Properties: map[string]*openAPISchema{
+			"totalTransmissions": {Type: "integer", Minimum: &zero},
+			"totalObservations":  {Type: "integer", Minimum: &zero},
+			"totalPackets":       {Type: "integer", Minimum: &zero, Description: "Same as totalTransmissions (backward compatibility)."},
+			"packetsToday":       {Type: "integer", Minimum: &zero},
+			"avgSnr":             num("Mean SNR (dB) over the node's direct receptions (HeardDirectObserver); null without one. Other copies carry the SNR of whichever node the observer heard."),
+			"avgHops":            {Type: "integer", Description: "Node health only: rounded mean path length of the node's transmissions."},
+			"lastHeard":          {Type: "string", Nullable: true, Description: "Newest own ADVERT or unambiguous relay evidence (#64)."},
+			"lastAdvert":         {Type: "string", Nullable: true, Description: "Newest own ADVERT."},
+		},
+	}
+	direct := &openAPISchema{Type: "array", Items: openAPIRef("HeardDirectObserver"), Description: "Observers that received the node's own transmission, most direct receptions first."}
+	relay := &openAPISchema{Type: "array", Items: openAPIRef("HeardRelayObserver"), Description: "Every other observer of the node's transmissions, most transmissions first."}
+	return map[string]*openAPISchema{
+		"HeardDirectObserver": {
+			Type: "object",
+			Description: "Heard By (#76), direct: at least one observation shows this observer received the node's own transmission on air. Observed routing evidence, not radio range. Only an ADVERT (signature not known invalid) can show it, with the observation's own route type (its frame header; else the transmission's route type, unknown when the transmission was heard on both flood and direct routes) and its own path: " +
+				"a FLOOD or TRANSPORT_FLOOD path that is empty credits the advertiser, a non-empty one its last hop when that hop is the node's full key or a wire prefix unique among relay-capable nodes and the node is not a listener; " +
+				"an empty DIRECT or TRANSPORT_DIRECT path (zero hop) credits the advertiser; a non-empty direct path is the remaining route and credits nobody. " +
+				"An observer never counts as hearing its own upload. Hidden identities are left out.",
+			Properties: map[string]*openAPISchema{
+				"observer_id":   str(""),
+				"observer_name": str(""),
+				"packetCount":   {Type: "integer", Minimum: &zero, Description: "Direct receptions."},
+				"avgSnr":        num("Mean SNR (dB) over the direct receptions: the node's signal at this observer."),
+				"avgRssi":       num("Mean RSSI (dBm) over the direct receptions."),
+				"can_relay":     canRelay,
+			},
+		},
+		"HeardRelayObserver": {
+			Type:        "object",
+			Description: "Heard By (#76), relay: this observer saw the node's traffic, but no observation shows it received the node's own transmission (relayed copies, non-ADVERT traffic, direct routes, an ambiguous last hop). Its signal values describe another transmitter and are not reported. An empty directObservers list is missing evidence, not proof of missing coverage.",
+			Properties: map[string]*openAPISchema{
+				"observer_id":   str(""),
+				"observer_name": str(""),
+				"packetCount":   {Type: "integer", Minimum: &zero, Description: "The node's transmissions this observer saw (any copy)."},
+				"can_relay":     canRelay,
+			},
+		},
+		"NodeHealthResponse": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"node":            {Type: "object", Description: "The node row."},
+				"stats":           stats,
+				"directObservers": direct,
+				"relayObservers":  relay,
+				"recentPackets":   {Type: "array", Items: &openAPISchema{Type: "object"}, Description: "Newest 20 transmissions, observations stripped."},
+				"activity24h":     {Type: "object", Description: "24 rolling one-hour buckets of the node's transmissions."},
+			},
+		},
+		"BulkHealthEntry": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"public_key":      str(""),
+				"name":            {Type: "string", Nullable: true},
+				"role":            {Type: "string", Nullable: true},
+				"lat":             {Type: "number", Nullable: true},
+				"lon":             {Type: "number", Nullable: true},
+				"stats":           stats,
+				"directObservers": direct,
+				"relayObservers":  relay,
+			},
+		},
+		"BulkHealthResponse": {Type: "array", Items: openAPIRef("BulkHealthEntry"), Description: "A bare array, not wrapped in an object."},
 	}
 }
 
@@ -910,6 +988,9 @@ func componentSchemas() map[string]interface{} {
 		Properties:  map[string]*openAPISchema{"error": {Type: "string"}},
 	}
 	for name, schema := range nodeAdvertRouteSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range heardBySchemas() {
 		schemas[name] = schema
 	}
 	return schemas

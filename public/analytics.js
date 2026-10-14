@@ -2584,12 +2584,13 @@
       // Map bulk health by pubkey
       const healthMap = {};
       bulkHealth.forEach(h => { healthMap[h.public_key] = h; });
-      const enriched = nodes.filter(n => healthMap[n.public_key]).map(n => ({ ...n, health: { stats: healthMap[n.public_key].stats, observers: healthMap[n.public_key].observers } }));
+      const enriched = nodes.filter(n => healthMap[n.public_key]).map(n => ({ ...n, health: { stats: healthMap[n.public_key].stats, heard: HeardBy.counts(healthMap[n.public_key]) } }));
 
       // Compute rankings
       const byPackets = [...enriched].sort((a, b) => (b.health.stats.totalTransmissions || b.health.stats.totalPackets || 0) - (a.health.stats.totalTransmissions || a.health.stats.totalPackets || 0));
       const bySnr = [...enriched].filter(n => n.health.stats.avgSnr != null).sort((a, b) => b.health.stats.avgSnr - a.health.stats.avgSnr);
-      const byObservers = [...enriched].sort((a, b) => (b.health.observers?.length || 0) - (a.health.observers?.length || 0));
+      // #76: rank by observers that heard the node itself, then by relay ones.
+      const byObservers = [...enriched].sort((a, b) => (b.health.heard.direct - a.health.heard.direct) || (b.health.heard.relay - a.health.heard.relay));
       const byRecent = [...enriched].filter(n => n.health.stats.lastHeard).sort((a, b) => new Date(b.health.stats.lastHeard) - new Date(a.health.stats.lastHeard));
 
       // Compute network status client-side from loaded nodes using shared getHealthThresholds()
@@ -2650,7 +2651,7 @@
 
           ${myKeys.size ? `<h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg> My Claimed Nodes</h3>
           <table class="analytics-table" style="margin-bottom:24px">
-            <thead><tr><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Packets</th><th scope="col">Avg SNR</th><th scope="col">Observers</th><th scope="col">Last Heard</th></tr></thead>
+            <thead><tr><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Packets</th><th scope="col" title="${esc(HeardBy.SNR_TIP)}">Direct SNR</th><th scope="col" title="${esc(HeardBy.DIRECT_TIP)}">Direct observers</th><th scope="col" title="${esc(HeardBy.RELAY_TIP)}">Via relay</th><th scope="col">Last Heard</th></tr></thead>
             <tbody>
               ${enriched.filter(n => myKeys.has(n.public_key)).map(n => {
                 const s = n.health.stats;
@@ -2659,10 +2660,11 @@
                   <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(ROLE_COLORS[n.role]||'#6b7280')) || ('background:'+(ROLE_COLORS[n.role]||'#6b7280')+';color:#fff')}">${n.role}</span></td>
                   <td>${s.totalTransmissions || s.totalPackets || 0}</td>
                   <td>${s.avgSnr != null ? s.avgSnr.toFixed(1) + ' dB' : '—'}</td>
-                  <td>${n.health.observers?.length || 0}</td>
+                  <td>${n.health.heard.direct}</td>
+                  <td>${n.health.heard.relay}</td>
                   <td>${s.lastHeard ? timeAgo(s.lastHeard) : '—'}</td>
                 </tr>`;
-              }).join('') || '<tr><td colspan="6" class="text-muted">No claimed nodes have health data</td></tr>'}
+              }).join('') || '<tr><td colspan="7" class="text-muted">No claimed nodes have health data</td></tr>'}
             </tbody>
           </table>` : ''}
 
@@ -2683,14 +2685,14 @@
 
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-cell-signal-high"/></svg> Best Signal Quality</h3>
           <table class="analytics-table" style="margin-bottom:24px">
-            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Avg SNR</th><th scope="col">Observers</th><th scope="col">Analytics</th></tr></thead>
+            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col" title="${esc(HeardBy.SNR_TIP)}">Direct SNR</th><th scope="col" title="${esc(HeardBy.DIRECT_TIP)}">Direct observers</th><th scope="col">Analytics</th></tr></thead>
             <tbody>
               ${bySnr.slice(0, 15).map((n, i) => `<tr>
                 <td>${i + 1}</td>
                 <td>${nodeLink(n)}${claimedBadge(n)}</td>
                 <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(ROLE_COLORS[n.role]||'#6b7280')) || ('background:'+(ROLE_COLORS[n.role]||'#6b7280')+';color:#fff')}">${n.role}</span></td>
                 <td>${n.health.stats.avgSnr.toFixed(1)} dB</td>
-                <td>${n.health.observers?.length || 0}</td>
+                <td>${n.health.heard.direct}</td>
                 <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link" aria-label="Per-node analytics"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg></a></td>
               </tr>`).join('')}
             </tbody>
@@ -2698,13 +2700,14 @@
 
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> Most Observed Nodes</h3>
           <table class="analytics-table" style="margin-bottom:24px">
-            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col">Observers</th><th scope="col">Avg SNR</th><th scope="col">Analytics</th></tr></thead>
+            <thead><tr><th scope="col">#</th><th scope="col">Node</th><th scope="col">Role</th><th scope="col" title="${esc(HeardBy.DIRECT_TIP)}">Direct observers</th><th scope="col" title="${esc(HeardBy.RELAY_TIP)}">Via relay</th><th scope="col" title="${esc(HeardBy.SNR_TIP)}">Direct SNR</th><th scope="col">Analytics</th></tr></thead>
             <tbody>
               ${byObservers.slice(0, 15).map((n, i) => `<tr>
                 <td>${i + 1}</td>
                 <td>${nodeLink(n)}${claimedBadge(n)}</td>
                 <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(ROLE_COLORS[n.role]||'#6b7280')) || ('background:'+(ROLE_COLORS[n.role]||'#6b7280')+';color:#fff')}">${n.role}</span></td>
-                <td>${n.health.observers?.length || 0}</td>
+                <td>${n.health.heard.direct}</td>
+                <td>${n.health.heard.relay}</td>
                 <td>${n.health.stats.avgSnr != null ? n.health.stats.avgSnr.toFixed(1) + ' dB' : '—'}</td>
                 <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link" aria-label="Per-node analytics"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg></a></td>
               </tr>`).join('')}

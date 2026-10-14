@@ -318,8 +318,10 @@
         const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};
-        const obs = h.observers || [];
-        observerLists.set(mn.pubkey, obs);
+        // #76: the preview names direct observers; the dialog lists both.
+        const heard = HeardBy.lists(h);
+        const obs = heard.direct;
+        observerLists.set(mn.pubkey, heard);
 
         const age = stats.lastHeard ? Date.now() - new Date(stats.lastHeard).getTime() : null;
         const status = age === null ? 'silent' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'healthy' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'degraded' : 'silent';
@@ -344,9 +346,14 @@
         // preview hides names. Otherwise the button starts hidden and
         // revealClippedObserverButtons() shows it after layout if a name is
         // actually clipped — glyph width, not character count, decides that.
-        const obsFullName = o => o.observer_name || o.observer_id || 'Unknown';
-        const hiddenObservers = obs.length - preview.length;
-        const observerBtnText = hiddenObservers > 0 ? `View all ${obs.length} →` : 'Full names →';
+        const obsFullName = o => HeardBy.observerName(o);
+        const heardTotal = obs.length + heard.relay.length;
+        const hiddenObservers = heardTotal - preview.length;
+        const observerBtnText = hiddenObservers > 0 ? `View all ${heardTotal} →` : 'Full names →';
+        const directNames = obs.length
+          ? preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')
+          : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`;
+        const relayCount = heard.relay.length ? ` · <span class="mnc-relay-count" title="${escapeAttr(HeardBy.RELAY_TIP)}">${heard.relay.length} via relay</span>` : '';
 
         return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
@@ -361,20 +368,20 @@
               <div class="mnc-val">${stats.packetsToday ?? 0}</div>
               <div class="mnc-lbl">Packets today</div>
             </div>
-            <div class="mnc-metric">
+            <div class="mnc-metric" title="${escapeAttr(HeardBy.DIRECT_TIP)}">
               <div class="mnc-val">${obs.length}</div>
-              <div class="mnc-lbl">Observers</div>
+              <div class="mnc-lbl">Direct observers</div>
             </div>
-            <div class="mnc-metric">
+            <div class="mnc-metric" title="${escapeAttr(HeardBy.SNR_TIP)}">
               <div class="mnc-val" style="color:${snrColor}">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div>
-              <div class="mnc-lbl">SNR${snrLabel ? ' · ' + snrLabel : ''}</div>
+              <div class="mnc-lbl">Direct SNR${snrLabel ? ' · ' + snrLabel : ''}</div>
             </div>
             <div class="mnc-metric">
               <div class="mnc-val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div>
               <div class="mnc-lbl">Avg hops</div>
             </div>
           </div>
-          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${obs.length} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
+          ${heardTotal ? `<div class="mnc-observers"><strong title="${escapeAttr(HeardBy.DIRECT_TIP)}">Heard directly by:</strong> ${directNames}${relayCount} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${heardTotal} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
           ${cadenceHtml}
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
@@ -425,7 +432,7 @@
         if (btn.dataset.action === 'node') window.location.hash = '#/nodes/' + encodeURIComponent(btn.dataset.key);
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
         if (btn.dataset.action === 'packets') window.location.hash = '#/packets/' + btn.dataset.key;
-        if (btn.dataset.action === 'observers') showObservers(btn, observerLists.get(btn.dataset.key) || []);
+        if (btn.dataset.action === 'observers') showObservers(btn, observerLists.get(btn.dataset.key) || HeardBy.lists(null));
       });
     });
 
@@ -457,16 +464,18 @@
     clipped.forEach(btn => { btn.hidden = false; });
   }
 
-  function showObservers(trigger, observers) {
+  // heard is HeardBy.lists(health): direct observers first, then the relay
+  // ones, each marked so the list stays truthful about what was received.
+  function showObservers(trigger, heard) {
     const dialog = document.getElementById('homeObserversDialog');
     if (!dialog) return;
     const cardName = trigger.closest('.my-node-card')?.querySelector('.mnc-name')?.textContent || 'Node';
-    dialog.querySelector('#homeObserversTitle').textContent = `${cardName} · ${observers.length} observers`;
+    dialog.querySelector('#homeObserversTitle').textContent = `${cardName} · ${heard.direct.length} direct, ${heard.relay.length} via relay`;
     const list = dialog.querySelector('.mnc-dialog-list');
     const fragment = document.createDocumentFragment();
-    observers.forEach(observer => {
+    heard.direct.concat(heard.relay).forEach((observer, i) => {
       const item = document.createElement('li');
-      item.textContent = observer.observer_name || observer.observer_id || 'Unknown';
+      item.textContent = HeardBy.observerName(observer) + (i >= heard.direct.length ? ' (via relay)' : '');
       fragment.appendChild(item);
     });
     list.replaceChildren(fragment);
@@ -554,7 +563,7 @@
       const stats = h.stats || {};
       const packets = h.recentPackets || [];
       const hasLocation = node.lat != null && node.lon != null;
-      const observers = h.observers || [];
+      const heard = HeardBy.lists(h);
       const claimed = isMyNode(pubkey);
 
       let status = 'silent', color = 'red', statusMsg = 'Not heard in 24+ hours';
@@ -578,12 +587,13 @@
         <div class="health-body">
           <div class="health-metrics">
             <div class="health-metric"><div class="val">${stats.packetsToday ?? '—'}</div><div class="lbl">Packets Today</div></div>
-            <div class="health-metric"><div class="val">${observers.length}</div><div class="lbl">Observers</div></div>
+            <div class="health-metric" title="${escapeAttr(HeardBy.DIRECT_TIP)}"><div class="val">${heard.direct.length}</div><div class="lbl">Direct observers</div></div>
             <div class="health-metric"><div class="val">${stats.lastHeard ? timeAgo(stats.lastHeard) : '—'}</div><div class="lbl">Last seen</div></div>
-            <div class="health-metric"><div class="val">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div><div class="lbl">Avg SNR${snrLabel ? ' · ' + snrLabel : ''}</div></div>
+            <div class="health-metric" title="${escapeAttr(HeardBy.SNR_TIP)}"><div class="val">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div><div class="lbl">Direct SNR${snrLabel ? ' · ' + snrLabel : ''}</div></div>
             <div class="health-metric"><div class="val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div><div class="lbl">Avg Hops</div></div>
           </div>
-          ${observers.length ? `<div class="health-observers"><strong>Heard by:</strong> ${observers.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
+          ${heard.direct.length || heard.relay.length ? `<div class="health-observers"><strong title="${escapeAttr(HeardBy.DIRECT_TIP)}">Heard directly by:</strong> ${heard.direct.length ? heard.direct.map(o => escapeHtml(HeardBy.observerName(o))).join(', ') : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`}</div>` : ''}
+          ${heard.relay.length ? `<div class="health-observers"><strong title="${escapeAttr(HeardBy.RELAY_TIP)}">Heard via relay by:</strong> ${heard.relay.map(o => escapeHtml(HeardBy.observerName(o))).join(', ')}</div>` : ''}
           ${hasLocation ? '<div class="health-map" id="healthMap"></div>' : ''}
           <div class="health-timeline">
             <h3>Recent Activity</h3>

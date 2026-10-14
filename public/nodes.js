@@ -934,7 +934,7 @@
       // Health stats
       const h = healthData || {};
       const stats = h.stats || {};
-      const observers = h.observers || [];
+      const heardByTotal = HeardBy.counts(h).total;
       const recent = h.recentPackets || [];
       const lastHeard = getLastAdvert(n, stats, adverts);
 
@@ -1052,28 +1052,7 @@
           })}
         </div>
 
-        ${observers.length ? `<div class="node-full-card" id="node-observers">
-          ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:8px"><strong>Regions:</strong> ${regions.map(r => '<span class="badge" style="margin:0 2px">' + escapeHtml(r) + '</span>').join(' ')}</div>` : ''; })()}
-          <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
-          <table class="data-table observer-sort-table" style="font-size:12px">
-            <thead><tr>
-              <th scope="col" data-sort-key="observer">Observer</th>
-              <th scope="col" data-sort-key="region">Region</th>
-              <th scope="col" data-sort-key="packets" data-type="numeric" data-sort-default="desc">Packets</th>
-              <th scope="col" data-sort-key="snr" data-type="numeric" data-sort-default="desc">Avg SNR</th>
-              <th scope="col" data-sort-key="rssi" data-type="numeric" data-sort-default="desc">Avg RSSI</th>
-            </tr></thead>
-            <tbody>
-              ${observers.map(o => `<tr>
-                <td data-value="${escapeHtml((o.observer_name || o.observer_id || '').toLowerCase())}" style="font-weight:600">${escapeHtml(o.observer_name || o.observer_id)}${o.can_relay === false ? ' <span class="badge-listener" title="Firmware reported repeat:off — excluded from path-hop disambiguator (#1290)">listener</span>' : (o.can_relay === true ? ' <span class="badge-repeater" title="Firmware reported repeat:on — eligible as a path hop">repeater</span>' : '')}</td>
-                <td data-value="${escapeHtml((o.iata || '').toLowerCase())}">${o.iata ? escapeHtml(o.iata) : '—'}</td>
-                <td data-value="${o.packetCount || 0}">${o.packetCount}</td>
-                <td data-value="${o.avgSnr != null ? Number(o.avgSnr) : ''}">${o.avgSnr != null ? Number(o.avgSnr).toFixed(1) + ' dB' : '—'}</td>
-                <td data-value="${o.avgRssi != null ? Number(o.avgRssi) : ''}">${o.avgRssi != null ? Number(o.avgRssi).toFixed(0) + ' dBm' : '—'}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
+        ${heardByTotal ? `<div class="node-full-card heard-by" id="node-observers">${HeardBy.renderTables(h)}</div>` : ''}
 
         <div class="node-full-card" id="node-neighbors">
           <h4 id="fullNeighborsHeader">Neighbors</h4>
@@ -1173,12 +1152,13 @@
         } catch {}
       }
 
-      // Initialize TableSort on observer table (full detail page)
-      var observerTable = document.querySelector('#node-observers .observer-sort-table');
-      if (observerTable && window.TableSort) {
-        TableSort.init(observerTable, {
-          defaultColumn: 'packets',
-          defaultDirection: 'desc'
+      // Initialize TableSort on the Heard By tables (full detail page, #76)
+      if (window.TableSort) {
+        document.querySelectorAll('#node-observers .observer-sort-table').forEach(function (observerTable) {
+          TableSort.init(observerTable, {
+            defaultColumn: 'packets',
+            defaultDirection: 'desc'
+          });
         });
       }
 
@@ -2027,7 +2007,7 @@
     const adverts = (data.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     const h = data.healthData || {};
     const stats = h.stats || {};
-    const observers = h.observers || [];
+    const heardByTotal = HeardBy.counts(h).total;
     const recent = h.recentPackets || [];
     // Same "real fix" convention and estimate-alongside-real-fix behavior
     // as loadFullNode above -- see its comments.
@@ -2088,21 +2068,7 @@
           })}
         </div>
 
-        ${observers.length ? `<div class="node-detail-section">
-          ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:</strong> ${regions.map(escapeHtml).join(', ')}</div>` : ''; })()}
-          <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
-          <div class="observer-list">
-            ${observers.map(o => {
-              const stats = [`${o.packetCount} pkts`];
-              if (o.avgSnr != null) stats.push('SNR ' + Number(o.avgSnr).toFixed(1) + 'dB');
-              if (o.avgRssi != null) stats.push('RSSI ' + Number(o.avgRssi).toFixed(0));
-              return `<div class="observer-row" style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">
-              <span style="font-weight:600">${escapeHtml(o.observer_name || o.observer_id)}${o.iata ? ' <span class="badge" style="font-size:10px">' + escapeHtml(o.iata) + '</span>' : ''}</span>
-              <span style="color:var(--text-muted)">${stats.join(' · ')}</span>
-            </div>`;
-            }).join('')}
-          </div>
-        </div>` : ''}
+        ${heardByTotal ? `<div class="node-detail-section heard-by" id="panelObserversSection">${HeardBy.renderList(h)}</div>` : ''}
 
         <div class="node-detail-section" id="panelNeighborsSection">
           <h4 id="panelNeighborsHeader">Neighbors</h4>

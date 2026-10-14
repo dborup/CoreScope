@@ -2718,7 +2718,6 @@
       const n = data.node;
       const h = healthData || {};
       const stats = h.stats || {};
-      const observers = h.observers || [];
       const recent = h.recentPackets || [];
       const roleColor = ROLE_COLORS[n.role] || '#6b7280';
       const roleLabel = (ROLE_LABELS[n.role] || n.role || 'unknown').replace(/s$/, '');
@@ -2751,17 +2750,14 @@
   : `<code style="color:var(--link-color)">${escapeHtml(n.default_scope)}</code>`
 }</td></tr>` : ''}
             ${hasLoc ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Location</td><td>${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}</td></tr>` : ''}
-            ${stats.avgSnr != null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Avg SNR</td><td>${stats.avgSnr.toFixed(1)} dB</td></tr>` : ''}
+            ${stats.avgSnr != null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;" title="${escapeHtml(HeardBy.SNR_TIP)}">Direct SNR</td><td>${Number(stats.avgSnr).toFixed(1)} dB</td></tr>` : ''}
             ${stats.avgHops != null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Avg Hops</td><td>${stats.avgHops.toFixed(1)}</td></tr>` : ''}
             ${stats.totalTransmissions || stats.totalPackets ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Total Packets</td><td>${stats.totalTransmissions || stats.totalPackets}</td></tr>` : ''}
           </table>`;
 
-      if (observers.length) {
-        const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))];
-        html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.map(escapeHtml).join(', ') : ''}</h4>
-          <div style="font-size:11px;">` +
-          observers.map(o => `<div style="padding:2px 0;"><a href="#/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--link-color);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
-          '</div>';
+      // #76: direct observers with this node's signal, relay ones without.
+      if (HeardBy.counts(h).total) {
+        html += '<div class="heard-by live-heard-by">' + HeardBy.renderList(h, { link: true }) + '</div>';
       }
 
       if (recent.length) {

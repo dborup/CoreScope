@@ -572,23 +572,18 @@ Returns a JSON array (not wrapped in an object):
       "totalObservations":  number,
       "totalPackets":       number,   // same as totalTransmissions (backward compat)
       "packetsToday":       number,
-      "avgSnr":             number | null,
-      "lastHeard":          string (ISO) | null
+      "avgSnr":             number | null, // direct receptions only (see Heard By)
+      "lastHeard":          string (ISO) | null,
+      "lastAdvert":         string (ISO) | null
     },
-    "observers": [
-      {
-        "observer_id":   string,
-        "observer_name": string | null,
-        "avgSnr":        number | null,
-        "avgRssi":       number | null,
-        "packetCount":   number
-      }
-    ]
+    "directObservers": [ HeardDirectObserver ],  // see Heard By below
+    "relayObservers":  [ HeardRelayObserver ]
   }
 ]
 ```
 
-**Note:** This is a bare array, not `{ nodes: [...] }`.
+**Note:** This is a bare array, not `{ nodes: [...] }`. The rows carry no
+`can_relay`; the single-node endpoint does.
 
 ---
 
@@ -843,14 +838,22 @@ Detailed health information for a single node.
     "first_seen":   string (ISO),
     "advert_count": number
   },
-  "observers": [
+  "directObservers": [               // HeardDirectObserver, see Heard By below
     {
       "observer_id":   string,
-      "observer_name": string | null,
-      "packetCount":   number,
-      "avgSnr":        number | null,
+      "observer_name": string,
+      "packetCount":   number,          // direct receptions
+      "avgSnr":        number | null,   // over those receptions: the node's signal
       "avgRssi":       number | null,
-      "iata":          string | null
+      "can_relay":     boolean          // omitted when the observer never reported repeat
+    }
+  ],
+  "relayObservers": [                // HeardRelayObserver
+    {
+      "observer_id":   string,
+      "observer_name": string,
+      "packetCount":   number,          // the node's transmissions this observer saw
+      "can_relay":     boolean          // omitted when unknown
     }
   ],
   "stats": {
@@ -858,9 +861,10 @@ Detailed health information for a single node.
     "totalObservations":  number,
     "totalPackets":       number,    // same as totalTransmissions (backward compat)
     "packetsToday":       number,
-    "avgSnr":             number | null,
+    "avgSnr":             number | null, // direct receptions only; null without one
     "avgHops":            number,    // rounded integer
-    "lastHeard":          string (ISO) | null
+    "lastHeard":          string (ISO) | null,
+    "lastAdvert":         string (ISO) | null
   },
   "recentPackets": [                 // last 20 packets, observations stripped
     {
@@ -879,6 +883,42 @@ Detailed health information for a single node.
   }
 }
 ```
+
+### Heard By (#76)
+
+`directObservers` and `relayObservers` replace the former `observers` list,
+on this endpoint and on `/api/nodes/bulk-health`. Together they hold every
+observer that recorded any observation of the node's transmissions (as
+originator, destination or resolved relay hop), each in exactly one list.
+They describe **observed routing evidence, not radio range**.
+
+An observer is in `directObservers` when at least one of its observations
+shows that it received the node's own transmission. Only an ADVERT whose
+signature is not known to be invalid can show that, read with the
+observation's own route type (its stored frame header; without one the
+transmission's route type, or unknown when the transmission was heard on
+both flood and direct routes) and its own path:
+
+| Observation route | Path | Credits |
+|---|---|---|
+| FLOOD / TRANSPORT_FLOOD | empty | the advertiser |
+| FLOOD / TRANSPORT_FLOOD | non-empty | the last hop, when it is the node's full key or a wire prefix unique among relay-capable nodes, and the node is not a listener (the evidence `lastHeard` uses) |
+| DIRECT / TRANSPORT_DIRECT | empty (zero hop) | the advertiser |
+| DIRECT / TRANSPORT_DIRECT | non-empty | nobody: it is the remaining route |
+
+This follows the firmware: a flood forwarder appends its own hash before it
+retransmits, `sendZeroHop` sends with an empty direct path, and a direct
+forwarder removes itself from the path. An observer never counts as hearing
+its own upload of the node's transmission.
+
+Every other observer is in `relayObservers`. For those the evidence names
+another transmitter or none (relayed copies, non-ADVERT traffic, direct
+routes, an ambiguous last hop), so their signal values would describe some
+other node and are not reported. An empty `directObservers` is missing
+evidence, not proof that no observer is in radio range.
+
+Observers whose identity is hidden (node or observer blacklist, or a recorded
+or current name with a hidden-name prefix) are left out of both lists.
 
 `activity24h.count` counts unique transmissions associated with this node in
 the in-memory node index, using each transmission's `first_seen` time. Multiple
