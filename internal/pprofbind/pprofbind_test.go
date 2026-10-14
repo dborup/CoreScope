@@ -8,27 +8,64 @@ func env(kv map[string]string) func(string) string {
 	return func(k string) string { return kv[k] }
 }
 
-func TestDefaultsPreserveEveryInterfaceListener(t *testing.T) {
-	// Pre-#372 behaviour: ENABLE_PPROF=true and nothing else listens on
-	// ":"+port, i.e. every interface. Existing installs that profile
-	// remotely depend on it, so the default must not move to loopback.
+// Issue #441 (owner decision on #431): with ENABLE_PPROF=true and nothing
+// else, each listener binds loopback on its own port. /debug/pprof/ is
+// unauthenticated and can stall a process, so reaching it from elsewhere
+// is something an operator asks for (PPROF_HOST here, PPROF_BIND for a
+// published container port) or gets through an SSH tunnel.
+func TestDefaultsBindLoopbackOnly(t *testing.T) {
 	for _, tc := range []struct {
 		role     Role
 		wantAddr string
 	}{
-		{Server, ":6060"},
-		{Ingestor, ":6061"},
+		{Server, "127.0.0.1:6060"},
+		{Ingestor, "127.0.0.1:6061"},
 	} {
 		got := tc.role.Resolve(env(map[string]string{"ENABLE_PPROF": "true"}))
 		if !got.Enabled {
 			t.Fatalf("%s: want enabled, got %+v", tc.role.Name, got)
 		}
 		if got.Addr != tc.wantAddr {
-			t.Errorf("%s: Addr = %q, want %q (every interface, as before #372)", tc.role.Name, got.Addr, tc.wantAddr)
+			t.Errorf("%s: Addr = %q, want %q (loopback by default since #441)", tc.role.Name, got.Addr, tc.wantAddr)
 		}
-		if got.Host != "" {
-			t.Errorf("%s: Host = %q, want %q (empty means every interface)", tc.role.Name, got.Host, "")
+		if got.Host != "127.0.0.1" {
+			t.Errorf("%s: Host = %q, want %q", tc.role.Name, got.Host, "127.0.0.1")
 		}
+		if got.URL != "http://127.0.0.1:"+got.Port+"/debug/pprof/" {
+			t.Errorf("%s: URL = %q", tc.role.Name, got.URL)
+		}
+	}
+}
+
+// The way back to the pre-#441 listener: an explicit wildcard host, shared
+// or per role.
+func TestWildcardHostRestoresEveryInterface(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kv   map[string]string
+		role Role
+		want string
+	}{
+		{"0.0.0.0", map[string]string{"PPROF_HOST": "0.0.0.0"}, Server, "0.0.0.0:6060"},
+		{"star", map[string]string{"PPROF_HOST": "*"}, Ingestor, ":6061"},
+		{"ipv6 wildcard", map[string]string{"PPROF_HOST": "::"}, Server, "[::]:6060"},
+		{"per role", map[string]string{"PPROF_HOST_INGESTOR": "0.0.0.0"}, Ingestor, "0.0.0.0:6061"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kv := map[string]string{"ENABLE_PPROF": "true"}
+			for k, v := range tc.kv {
+				kv[k] = v
+			}
+			got := tc.role.Resolve(env(kv))
+			if !got.Enabled || got.Addr != tc.want {
+				t.Errorf("want enabled on %q, got %+v", tc.want, got)
+			}
+		})
+	}
+	// A per-role override leaves the other role on the loopback default.
+	other := Server.Resolve(env(map[string]string{"ENABLE_PPROF": "true", "PPROF_HOST_INGESTOR": "0.0.0.0"}))
+	if other.Addr != "127.0.0.1:6060" {
+		t.Errorf("PPROF_HOST_INGESTOR must not move the server listener; got %q", other.Addr)
 	}
 }
 
@@ -87,11 +124,11 @@ func TestSharedPortStillAppliesToBothRoles(t *testing.T) {
 	// PPROF_PORT predates #372 and applied to whichever process read it.
 	// Keep that so an existing install that sets it is unaffected.
 	kv := map[string]string{"ENABLE_PPROF": "true", "PPROF_PORT": "7000"}
-	if got := Server.Resolve(env(kv)); got.Addr != ":7000" {
-		t.Errorf("server Addr = %q, want :7000", got.Addr)
+	if got := Server.Resolve(env(kv)); got.Addr != "127.0.0.1:7000" {
+		t.Errorf("server Addr = %q, want 127.0.0.1:7000", got.Addr)
 	}
-	if got := Ingestor.Resolve(env(kv)); got.Addr != ":7000" {
-		t.Errorf("ingestor Addr = %q, want :7000", got.Addr)
+	if got := Ingestor.Resolve(env(kv)); got.Addr != "127.0.0.1:7000" {
+		t.Errorf("ingestor Addr = %q, want 127.0.0.1:7000", got.Addr)
 	}
 }
 
@@ -101,11 +138,11 @@ func TestPerRolePortOverridesSharedPort(t *testing.T) {
 		"PPROF_PORT":        "7000",
 		"PPROF_PORT_SERVER": "7100",
 	}
-	if got := Server.Resolve(env(kv)); got.Addr != ":7100" {
-		t.Errorf("server Addr = %q, want :7100 (per-role port wins)", got.Addr)
+	if got := Server.Resolve(env(kv)); got.Addr != "127.0.0.1:7100" {
+		t.Errorf("server Addr = %q, want 127.0.0.1:7100 (per-role port wins)", got.Addr)
 	}
-	if got := Ingestor.Resolve(env(kv)); got.Addr != ":7000" {
-		t.Errorf("ingestor Addr = %q, want :7000 (shared port still applies)", got.Addr)
+	if got := Ingestor.Resolve(env(kv)); got.Addr != "127.0.0.1:7000" {
+		t.Errorf("ingestor Addr = %q, want 127.0.0.1:7000 (shared port still applies)", got.Addr)
 	}
 }
 
@@ -151,7 +188,7 @@ func TestUnusablePortDisablesWithAReason(t *testing.T) {
 		got := Server.Resolve(env(kv))
 		if port == "" {
 			// Empty reads as unset: fall through to the default.
-			if !got.Enabled || got.Addr != ":6060" {
+			if !got.Enabled || got.Addr != "127.0.0.1:6060" {
 				t.Errorf("PPROF_PORT_SERVER=%q: want the default :6060, got %+v", port, got)
 			}
 			continue
@@ -184,9 +221,17 @@ func TestUnusableHostDisablesWithAReason(t *testing.T) {
 }
 
 func TestURLNamesLocalhostWhenBoundEverywhere(t *testing.T) {
-	got := Server.Resolve(env(map[string]string{"ENABLE_PPROF": "true"}))
+	got := Server.Resolve(env(map[string]string{"ENABLE_PPROF": "true", "PPROF_HOST": "*"}))
 	if got.URL != "http://localhost:6060/debug/pprof/" {
 		t.Errorf("URL = %q, want http://localhost:6060/debug/pprof/", got.URL)
+	}
+	// An unspecified address is every interface too (the staging compose
+	// files pin PPROF_HOST=0.0.0.0), so it names loopback the same way.
+	for _, host := range []string{"0.0.0.0", "::"} {
+		got = Server.Resolve(env(map[string]string{"ENABLE_PPROF": "true", "PPROF_HOST": host}))
+		if got.URL != "http://localhost:6060/debug/pprof/" {
+			t.Errorf("PPROF_HOST=%s: URL = %q, want http://localhost:6060/debug/pprof/", host, got.URL)
+		}
 	}
 	got = Ingestor.Resolve(env(map[string]string{"ENABLE_PPROF": "true", "PPROF_HOST": "::1"}))
 	if got.URL != "http://[::1]:6061/debug/pprof/" {
@@ -219,14 +264,14 @@ func TestEmptyEnvironmentIsInert(t *testing.T) {
 			t.Errorf("%s: an all-empty environment must say nothing; got reason %q", role.Name, got.Reason)
 		}
 	}
-	// With pprof asked for, the empty host and port settings must still
-	// resolve to the pre-#372 listener: every interface, the role's own port.
+	// With pprof asked for, the empty host and port settings must resolve
+	// to the default listener: loopback (#441), the role's own port.
 	for _, tc := range []struct {
 		role     Role
 		wantAddr string
 	}{
-		{Server, ":6060"},
-		{Ingestor, ":6061"},
+		{Server, "127.0.0.1:6060"},
+		{Ingestor, "127.0.0.1:6061"},
 	} {
 		on := map[string]string{"ENABLE_PPROF": "true"}
 		for k, v := range empty {
@@ -237,7 +282,7 @@ func TestEmptyEnvironmentIsInert(t *testing.T) {
 		}
 		got := tc.role.Resolve(env(on))
 		if !got.Enabled || got.Addr != tc.wantAddr {
-			t.Errorf("%s: empty host/port settings must resolve to %q on every interface; got %+v", tc.role.Name, tc.wantAddr, got)
+			t.Errorf("%s: empty host/port settings must resolve to %q; got %+v", tc.role.Name, tc.wantAddr, got)
 		}
 	}
 }

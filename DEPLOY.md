@@ -41,10 +41,10 @@ Settings can be overridden via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DISABLE_CADDY` | `false` | Skip internal Caddy (set `true` behind a reverse proxy) |
-| `DISABLE_MOSQUITTO` | `true` in `docker-compose.staging.yml`; `false` elsewhere | Skip internal MQTT broker. **Which values count depends on the launcher.** `./manage.sh` resolves it with `is_true()` (`1`/`true`/`TRUE`/`yes`/`YES`/`y`/`Y`/`on`/`ON`) and then runs `docker-compose.no-mosquitto.yml`, which hard-codes `DISABLE_MOSQUITTO=true` in the container — so any of those values gives an **external** broker on a manage.sh-managed host. A bare `docker compose up` against `docker-compose.yml` passes the value straight through, and the entrypoint disables the broker only on the exact `true`, so there `yes` leaves the bundled broker **running**. `./manage.sh broker-check` reports the mode this script will actually select, and warns when the value falls in that gap. Default flipped to `true` for the staging deploy in v3.7+ because a standalone `mqtt-broker` container owns MQTT on that host — see "Standalone MQTT broker (staging)" below. |
+| `DISABLE_MOSQUITTO` | `true` | Skip the bundled MQTT broker. The bundled broker is **opt-in** (#441): set `false` to run it. `./manage.sh`, the container entrypoint and the ingestor read the value the same way — `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off`, trimmed, any case; unset, empty or anything else means `true` (and an unrecognised value is reported). `./manage.sh broker-check` prints the effective mode. |
 | `PROD_MQTT_BIND` | *(empty — every interface, IPv4 and IPv6)* | Host interface the bundled broker's `1883` is published on. Empty renders the mapping with no host interface, which is the unchanged dual-stack publish; `127.0.0.1` makes the plaintext broker reachable from the host only. An explicit `0.0.0.0` is **IPv4 only** — not the same as empty. |
-| `PPROF_BIND` | *(empty — every interface, IPv4 and IPv6)* | Host interface the staging pprof ports `6060`/`6061` are published on. Empty is the unchanged dual-stack publish; `127.0.0.1` requires an SSH tunnel to profile. An explicit `0.0.0.0` is IPv4 only. |
-| `PPROF_HOST` | *(every interface)* | Host the in-process pprof listener binds. **Not** a substitute for `PPROF_BIND`: a loopback listener inside a container is unreachable through a docker port mapping. |
+| `PPROF_BIND` | `127.0.0.1` | Host interface the staging pprof ports `6060`/`6061` are published on (#441). Profile through an SSH tunnel (`ssh -L 6060:127.0.0.1:6060 -L 6061:127.0.0.1:6061 you@host`), or set `0.0.0.0` for remote access over IPv4. |
+| `PPROF_HOST` | `127.0.0.1` | Host the in-process pprof listener binds (#441); `0.0.0.0` or `*` for every interface. **Not** a substitute for `PPROF_BIND`: a loopback listener inside a container is unreachable through a docker port mapping, which is why the staging compose files pin it to `0.0.0.0`. |
 | `PPROF_PORT_SERVER` / `PPROF_PORT_INGESTOR` | `6060` / `6061` | Per-process pprof ports; they must stay distinct. Override the shared `PPROF_PORT`. |
 | `MQTT_SOURCE_STRICT` | `false` | Make the ingestor refuse to start when its broker setup cannot ingest, instead of only logging it. |
 | `MQTT_BROKER` / `MQTT_TOPIC` | *(empty — `config.json` decides)* | External broker URL and topic for the ingestor; `MQTT_BROKER` replaces the `mqttSources` in `config.json`. |
@@ -53,7 +53,12 @@ Settings can be overridden via environment variables:
 `PPROF_HOST*` / `PPROF_PORT*` settings are read by the server and the ingestor,
 not by docker compose, so every app compose file forwards them into the
 container through its `environment:` block with an empty default. Setting one
-in `.env` therefore does reach the process; leaving it unset is inert.
+in `.env` therefore does reach the process; leaving it unset is inert. The
+staging compose files pin `PPROF_HOST=0.0.0.0` instead, because they publish
+the pprof ports.
+
+Upgrading past #441 changes two defaults — the bundled broker and the pprof
+bind — see [docs/deployment.md, "Upgrading past #441"](docs/deployment.md#upgrading-past-441--bundled-broker-opt-in-pprof-on-loopback).
 
 One caveat: `MQTT_BROKER` **overrides** `mqttSources` in `config.json`. Before
 the compose files forwarded it, a value in `.env` was ignored by the container;
@@ -309,8 +314,8 @@ not in `/tmp`, which is ephemeral by definition.
 
 ## Broker preflight (`./manage.sh broker-check`)
 
-`DISABLE_MOSQUITTO=true` turns the bundled broker off; it does not configure
-a replacement. With no `mqttSources` the ingestor falls back to its built-in
+The bundled broker is opt-in, and turning it off (the default,
+`DISABLE_MOSQUITTO=true`) does not configure a replacement. With no `mqttSources` the ingestor falls back to its built-in
 `mqtt://localhost:1883` — the bundled broker's own address, where nothing is
 then listening — and ingests nothing while the container still reports
 healthy.

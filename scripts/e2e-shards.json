@@ -2316,6 +2316,19 @@
         1.713,
         1.626
       ]
+    },
+    {
+      "file": "test-regions-map-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 5,
+      "secondsByExecution": [
+        5
+      ]
     }
   ],
   "exclusions": [

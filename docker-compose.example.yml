@@ -3,9 +3,9 @@
 #
 # AUDIENCE: third-party operators running a self-hosted CoreScope on
 # ONE host. Ships with the built-in Mosquitto broker DISABLED by
-# default (DISABLE_MOSQUITTO defaults to `false` here, meaning
-# mosquitto RUNS in-container — the historical shape); flip to `true`
-# if you already have an external MQTT broker to point CoreScope at.
+# default (#441: DISABLE_MOSQUITTO defaults to `true`), so point
+# mqttSources in config.json (or MQTT_BROKER) at your MQTT broker, or
+# set DISABLE_MOSQUITTO=false to run the bundled one in-container.
 #
 # For the CoreScope maintainers' internal staging deployment (with a
 # standalone `mqtt-broker` container on external network
@@ -23,7 +23,7 @@ services:
       - ${DATA_DIR:-./data}:/app/data
     environment:
       - DISABLE_CADDY=${DISABLE_CADDY:-true}
-      - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-false}
+      - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-true}
       # In-process settings — read by the server and the ingestor, not by
       # docker compose. Without these lines a value in .env reaches docker
       # compose and stops there, so the documented "one line in .env" would

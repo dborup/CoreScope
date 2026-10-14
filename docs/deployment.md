@@ -42,12 +42,14 @@ docker run -d --name corescope \
   ghcr.io/kpa-clawbot/corescope:latest
 ```
 
-Open `http://localhost` — you'll see an empty dashboard ready to receive packets.
+Open `http://localhost` — you'll see an empty dashboard.
 
 No `config.json` is required. The server starts with sensible defaults:
 - HTTP on port 3000 (Caddy proxies port 80 → 3000 internally)
-- Internal Mosquitto MQTT broker on port 1883
-- Ingestor connects to `mqtt://localhost:1883` automatically
+- **No MQTT broker.** The bundled Mosquitto is opt-in: add
+  `-e DISABLE_MOSQUITTO=false -p 1883:1883` to run it, or point `mqttSources`
+  in `config.json` (or `-e MQTT_BROKER=…`) at your own broker
+- The ingestor connects to `mqtt://localhost:1883` unless configured otherwise
 - SQLite database at `/app/data/meshcore.db`
 
 ### Full `docker run` Reference (recommended)
@@ -76,7 +78,7 @@ docker run -d --name corescope \
 | `-v /your/data:/app/data` | Yes | Persistent data: SQLite DB, config.json, theme.json |
 | `-v /your/Caddyfile:/etc/caddy/Caddyfile:ro` | No | Custom Caddyfile for HTTPS |
 | `-v /your/caddy-data:/data/caddy` | No | Caddy TLS certificate storage |
-| `-e DISABLE_MOSQUITTO=true` | No | Skip the internal Mosquitto broker (use your own) |
+| `-e DISABLE_MOSQUITTO=false` | No | Run the bundled Mosquitto broker. It is **opt-in**: unset, the broker does not start and the ingestor needs your own broker in `mqttSources` |
 | `-e DISABLE_CADDY=true` | No | Skip the built-in Caddy reverse proxy |
 | `-e MQTT_BROKER=mqtt://host:1883` | No | Override MQTT broker URL |
 | `-e CORESCOPE_RUN_AS_NONROOT=1` | No | Opt-in: run `corescope-server` and `corescope-ingestor` without root — see [Running the Go services without root](#running-the-go-services-without-root-opt-in) |
@@ -293,10 +295,10 @@ docker compose up -d
 |----------|---------|-------------|
 | `HTTP_PORT` | `80` | Host port for the web UI |
 | `DATA_DIR` | `./data` | Host path for persistent data |
-| `DISABLE_MOSQUITTO` | `false` | Set `true` to use an external MQTT broker |
+| `DISABLE_MOSQUITTO` | `true` | Set `false` to run the bundled MQTT broker (opt-in) |
 | `DISABLE_CADDY` | `false` | Set `true` to skip the built-in Caddy proxy |
 | `PROD_MQTT_BIND` | *(empty — IPv4 and IPv6)* | Host interface the bundled broker's `1883` is published on; `127.0.0.1` for host-only |
-| `PPROF_BIND` | *(empty — IPv4 and IPv6)* | Host interface the pprof ports are published on (staging compose files) |
+| `PPROF_BIND` | `127.0.0.1` | Host interface the pprof ports are published on (staging compose files); `0.0.0.0` for remote access |
 
 ### manage.sh (legacy alternative)
 
@@ -333,41 +335,98 @@ Data is preserved in the volume — updates are non-destructive.
 
 ## Migration — pulling the new Compose file
 
-This release makes the bundled MQTT broker's exposure and the pprof
-listeners' exposure **explicit settings** instead of hard-coded values.
+### Upgrading past #441 — bundled broker opt-in, pprof on loopback
 
-**Nothing changes for an existing install.** Every new setting ships with the
-default that reproduces the previous behaviour exactly, so a `git pull` +
-`docker compose up -d` leaves your deployment on the same interfaces and
-ports it was on before. The table below is what you can now change, not what
-changed under you.
+Two defaults change. Both are deliberate and both are one line to undo.
+
+**1. The bundled Mosquitto no longer starts unless you ask for it.**
+`DISABLE_MOSQUITTO` now defaults to `true` everywhere: `docker-compose.yml`,
+`docker-compose.example.yml`, the image's entrypoint (so a bare `docker run`
+too), `manage.sh` and its setup wizard (which now defaults to "no"), and
+`.env.example`. An install that relies on the bundled broker and never set
+the variable — or set it to something that is not a recognised value — will
+start **without a broker** and ingest nothing, with a `[broker] error:` line
+in the ingestor log. To keep the bundled broker, set:
+
+```bash
+DISABLE_MOSQUITTO=false          # in .env, or -e DISABLE_MOSQUITTO=false
+```
+
+An install that already sets `DISABLE_MOSQUITTO=true`, or `false`, behaves
+exactly as before. So does one whose `.env` was copied from an older
+`.env.example`, which carried an explicit `DISABLE_MOSQUITTO=false`.
+
+**2. `DISABLE_MOSQUITTO` is read the same way by every launcher.** The
+entrypoint, `manage.sh` and the ingestor accept, trimmed and in any case,
+`true`/`1`/`yes`/`on` (broker off) and `false`/`0`/`no`/`off` (broker on).
+Unset or empty means the default, `true`. Anything else (`y`, `n`, a typo)
+also means `true`, and is reported by the entrypoint, the ingestor and
+`./manage.sh broker-check`. Before, a bare `docker compose up` disabled the
+broker only on the exact `true` while `manage.sh` also took `yes`/`1`/`on`;
+`broker-check` no longer has a mismatch to report and prints the effective
+mode instead, e.g. `Broker mode: external (DISABLE_MOSQUITTO=yes, read as
+true)`.
+
+**3. pprof listens on loopback when enabled.** With `ENABLE_PPROF=true` the
+server (`6060`) and ingestor (`6061`) listeners bind `127.0.0.1`, and the
+staging compose files publish those ports on `127.0.0.1` only. Ports are
+unchanged and stay distinct. `/debug/pprof/` is unauthenticated, so the
+intended way in is an SSH tunnel:
+
+```bash
+ssh -L 6060:127.0.0.1:6060 -L 6061:127.0.0.1:6061 you@your-host
+# then open http://localhost:6060/debug/pprof/ and http://localhost:6061/debug/pprof/
+```
+
+To keep remote access instead:
+
+| Where pprof runs | Setting that restores remote access |
+|------------------|-------------------------------------|
+| `docker-compose.staging*.yml` (publishes `6060`/`6061`) | `PPROF_BIND=0.0.0.0` in `.env` — IPv4 on every interface. The in-container listener is pinned to every interface by those files, so `PPROF_BIND` alone decides |
+| A bare binary, or a `docker run`/compose file that maps the pprof ports itself | `PPROF_HOST=0.0.0.0` (or `*`) — a loopback listener inside a container is unreachable through a port mapping |
+
+`MQTT_SOURCE_STRICT` is unchanged and stays off by default.
+
+**A non-container ingestor.** An ingestor started outside the image with
+`DISABLE_MOSQUITTO` unset now assumes an external broker, so a loopback-only
+`mqttSources` (a broker on the same host) logs a `[broker] error:` line. It
+still starts and still connects; set `DISABLE_MOSQUITTO=false` to silence it.
+
+### The #372 settings
+
+#372 made the bundled MQTT broker's exposure and the pprof listeners'
+exposure **explicit settings** instead of hard-coded values.
+
+**#372 itself changed nothing for an existing install.** Every setting it
+added shipped with the default that reproduced the previous behaviour; the
+two defaults #441 moved are marked in the table below. The table is what you
+can change, not what changed under you.
 
 | Setting | Shipped default | What the default does | Change it to |
 |---------|-----------------|-----------------------|--------------|
 | `PROD_MQTT_BIND` | empty | Publishes the bundled broker's `1883` with no host interface, i.e. on both IPv4 (`0.0.0.0`) and IPv6 (`[::]`) — byte for byte the mapping this file always had | `127.0.0.1` to reach the plaintext broker from the host only |
-| `PPROF_BIND` | empty | Publishes the staging pprof ports `6060`/`6061` with no host interface, i.e. IPv4 and IPv6 — unchanged from before | `127.0.0.1` to require an SSH tunnel for profiling |
-| `PPROF_HOST` | empty | The in-process pprof listener binds every interface — unchanged from before | `127.0.0.1` for a process with **no** published port (see the warning below) |
+| `PPROF_BIND` | `127.0.0.1` (since #441) | Publishes the staging pprof ports `6060`/`6061` on the host's loopback only | `0.0.0.0` for remote access over IPv4 |
+| `PPROF_HOST` | `127.0.0.1` (since #441; pinned to `0.0.0.0` in the staging compose files) | The in-process pprof listener binds loopback | `0.0.0.0` (or `*`) for a process whose pprof port is reached from outside it (see the warning below) |
 | `PPROF_PORT_SERVER` / `PPROF_PORT_INGESTOR` | `6060` / `6061` | Same ports as before; they must stay distinct | Any free pair, when `6060`/`6061` are taken |
 | `MQTT_SOURCE_STRICT` | `false` | A broker setup that cannot ingest is logged, and the ingestor still starts | `true` to refuse to start instead |
-| `DISABLE_MOSQUITTO` | `false` (`true` in `docker-compose.staging.yml`) | Unchanged — the bundled broker still runs by default | `true` if you run your own broker (use the exact `true`, so manage.sh and a bare `docker compose` agree) |
+| `DISABLE_MOSQUITTO` | `true` (since #441) | The bundled broker does not run | `false` to run the bundled broker |
 | `MQTT_BROKER` / `MQTT_TOPIC` | empty | Unchanged — `config.json` decides the sources | the external broker's URL, as an alternative to editing `config.json` |
 
-**Leave a bind variable empty, do not write `0.0.0.0` into it.** Docker
+**Leave `PROD_MQTT_BIND` empty, do not write `0.0.0.0` into it.** Docker
 publishes a mapping with no host interface (`"1883:1883"`) on *both* `0.0.0.0`
 and `[::]`, but a mapping with an explicit IPv4 host (`"0.0.0.0:1883:1883"`)
-publishes IPv4 **only**. The shipped defaults are therefore empty, so the
-rendered mapping is identical to the one these files had before — run
-`docker compose config` on an unset `.env` and no `host_ip` appears at all.
-Setting `PROD_MQTT_BIND=0.0.0.0` or `PPROF_BIND=0.0.0.0` would quietly drop
-IPv6 reachability of the broker or the profiler.
+publishes IPv4 **only**. Its shipped default is therefore empty, so the
+rendered mapping is identical to the one this file always had. The same is
+why `PPROF_BIND=0.0.0.0` restores remote profiling over IPv4 only.
 
 **`PPROF_BIND` and `PPROF_HOST` are not interchangeable.** `PPROF_BIND` is the
 *host* interface a published container port listens on; `PPROF_HOST` is the
 interface the listener *inside* the process binds. A loopback listener inside
 a container is not reachable through a docker port mapping at all, because
-docker's proxy connects to the container's network address. Use `PPROF_BIND`
-for a containerised deploy and `PPROF_HOST` only for a process that runs
-without a port mapping.
+docker's proxy connects to the container's network address — which is why
+the staging compose files pin `PPROF_HOST=0.0.0.0` and narrow with
+`PPROF_BIND`. Use `PPROF_BIND` for a compose file that publishes pprof and
+`PPROF_HOST` for anything else.
 
 **What you may now see in the log.** Two situations that used to pass silently
 are reported:
@@ -375,26 +434,12 @@ are reported:
 - `ENABLE_PPROF` set to something other than the exact string `true` (for
   example `1`, `yes` or `TRUE`) leaves pprof **off**, as it always did, and
   the process now logs that it did so.
-- `DISABLE_MOSQUITTO=true` with no `mqttSources` configured, or with only
-  loopback ones, logs a `[broker] error:` line — the ingestor is pointed at a
-  broker that is not running and will ingest nothing. It still starts, so this
-  changes no behaviour; set `MQTT_SOURCE_STRICT=true` if you would rather the
-  startup fail. A value of `DISABLE_MOSQUITTO` that is neither `true` nor
-  `false` logs a `[broker] warn:` line, because what such a value means
-  depends on how the stack was launched — see the next paragraph.
-
-**`DISABLE_MOSQUITTO` depends on the launcher, and `broker-check` reports the
-one that applies.** `./manage.sh` resolves the value itself with `is_true()`
-(`1`, `true`, `TRUE`, `yes`, `y`, `on`, …) and then runs
-`docker-compose.no-mosquitto.yml`, which hard-codes `DISABLE_MOSQUITTO=true`
-in the container — so on a manage.sh-managed host every one of those values
-gives an **external** broker, and `./manage.sh broker-check` validates the
-external sources accordingly. A bare `docker compose up` against
-`docker-compose.yml` passes the value straight to the entrypoint, which
-disables the bundled broker only on the exact string `true`, so `yes` there
-leaves the bundled broker **running**. Both `broker-check` and the ingestor's
-`[broker] warn:` line name that gap when a value falls into it. Set `true` or
-`false` and every launcher agrees.
+- With the bundled broker off and no `mqttSources` configured, or with only
+  loopback ones, the ingestor logs a `[broker] error:` line — it is pointed at
+  a broker that is not running and will ingest nothing. It still starts; set
+  `MQTT_SOURCE_STRICT=true` if you would rather the startup fail. A
+  `DISABLE_MOSQUITTO` value that is not recognised logs a `[broker] warn:`
+  line (see "Upgrading past #441" above).
 
 **Settings in `.env` that a process reads now reach the container.**
 `MQTT_BROKER`, `MQTT_TOPIC`, `MQTT_SOURCE_STRICT`, `ENABLE_PPROF` and the
@@ -446,11 +491,11 @@ CoreScope uses a layered configuration system (highest priority wins):
 | `MQTT_BROKER` | `mqtt://localhost:1883` | MQTT broker URL (overrides config file) |
 | `MQTT_TOPIC` | `meshcore/#` | MQTT topic subscription pattern |
 | `DB_PATH` | `data/meshcore.db` | SQLite database path |
-| `DISABLE_MOSQUITTO` | `false` | Skip the internal Mosquitto broker. Only the exact string `true` disables it |
+| `DISABLE_MOSQUITTO` | `true` | Skip the bundled Mosquitto broker; `false` runs it (opt-in). `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off`, trimmed, any case; anything else means `true` |
 | `DISABLE_CADDY` | `false` | Skip the built-in Caddy reverse proxy |
 | `MQTT_SOURCE_STRICT` | `false` | Refuse to start when the broker setup cannot ingest, instead of only logging it |
 | `ENABLE_PPROF` | `false` | Expose `/debug/pprof/`. Only the exact string `true` enables it |
-| `PPROF_HOST` | *(every interface)* | Host the in-process pprof listener binds; `127.0.0.1` for loopback only |
+| `PPROF_HOST` | `127.0.0.1` | Host the in-process pprof listener binds; `0.0.0.0` or `*` for every interface |
 | `PPROF_PORT_SERVER` | `6060` | Server pprof port (overrides the shared `PPROF_PORT`) |
 | `PPROF_PORT_INGESTOR` | `6061` | Ingestor pprof port (overrides the shared `PPROF_PORT`) |
 
@@ -634,16 +679,17 @@ Map tile providers are enabled and configured via the `config.json` file. You ca
 
 ## MQTT Setup
 
-CoreScope receives MeshCore packets via MQTT. The container ships with an internal Mosquitto broker — no setup needed for basic use.
+CoreScope receives MeshCore packets via MQTT. The container ships with an internal Mosquitto broker, which is **opt-in**: it runs only with `DISABLE_MOSQUITTO=false`. Otherwise configure your own broker (below).
 
-### Internal broker (default)
+### Internal broker (opt-in)
 
-The built-in Mosquitto broker listens on port 1883 inside the container. Point your MeshCore gateways at it:
+With `DISABLE_MOSQUITTO=false` the built-in Mosquitto broker listens on port 1883 inside the container. Point your MeshCore gateways at it:
 
 ```bash
-# Expose MQTT port for external gateways
+# Run the bundled broker and expose its port for external gateways
 docker run -d --name corescope \
   -p 80:80 -p 1883:1883 \
+  -e DISABLE_MOSQUITTO=false \
   -v corescope-data:/app/data \
   ghcr.io/kpa-clawbot/corescope:latest
 ```
@@ -652,10 +698,8 @@ docker run -d --name corescope \
 
 To use your own MQTT broker (Mosquitto, EMQX, HiveMQ, etc.):
 
-1. Disable the internal broker:
-   ```bash
-   -e DISABLE_MOSQUITTO=true
-   ```
+1. Leave the internal broker off — the default (`DISABLE_MOSQUITTO` unset or
+   `true`).
 
 2. Point the ingestor at your broker:
    ```bash
@@ -682,8 +726,7 @@ To use your own MQTT broker (Mosquitto, EMQX, HiveMQ, etc.):
    ./manage.sh broker-check
    ```
 
-   `DISABLE_MOSQUITTO=true` turns off the bundled broker but does **not**
-   configure a replacement. With no `mqttSources`, the ingestor falls back to
+   With the bundled broker off, nothing configures a replacement for you. With no `mqttSources`, the ingestor falls back to
    its built-in `mqtt://localhost:1883` — the bundled broker's own address,
    where nothing is now listening — and ingests nothing while otherwise
    looking healthy. `broker-check` and the ingestor's own startup log both
@@ -1155,16 +1198,16 @@ by the helper.
 ### Container starts but dashboard is empty
 
 This is normal on first start with no MQTT sources configured. The dashboard shows data once packets arrive via MQTT. Either:
-- Point a MeshCore gateway at the container's MQTT broker (port 1883)
+- Run the bundled broker (`DISABLE_MOSQUITTO=false`, opt-in) and point a MeshCore gateway at it (port 1883)
 - Configure an external MQTT source in `config.json`
 
 ### "no MQTT connections established" in logs
 
 The ingestor couldn't connect to any MQTT broker. Check:
-1. Is the internal Mosquitto running? (`DISABLE_MOSQUITTO` should be `false`, and only the exact string `true` disables it)
+1. If you rely on the internal Mosquitto, is it running? It is opt-in: `DISABLE_MOSQUITTO` must be `false` (or `0`/`no`/`off`)
 2. Is the external broker reachable? Test with `mosquitto_sub -h broker -t meshcore/#`
 3. Are credentials correct in `config.json`?
-4. Run `./manage.sh broker-check`, and look for `[broker]` lines in the ingestor log — with `DISABLE_MOSQUITTO=true` and no external `mqttSources`, the ingestor is pointed at a broker that is not running.
+4. Run `./manage.sh broker-check`, and look for `[broker]` lines in the ingestor log — with the bundled broker off and no external `mqttSources`, the ingestor is pointed at a broker that is not running.
 
 ### WebSocket disconnects / real-time updates stop
 
