@@ -82,6 +82,10 @@ type Server struct {
 	// (node_advert_routes_cache.go).
 	advertRoutes nodeAdvertRouteCache
 
+	// #122 reference-to-many observer comparison, per (ref, hours, other
+	// observer set) -- see observer_comparison.go.
+	obsComparison observerComparisonCache
+
 	// Cached /api/scope-stats response — per-window, recomputed at most once every 30s
 	scopeStatsMu       sync.Mutex
 	scopeStatsCache    map[string]*ScopeStatsResponse
@@ -324,6 +328,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/stats", s.handleStats).Methods("GET")
 	r.HandleFunc("/api/scope-stats", s.handleScopeStats).Methods("GET")
 	r.HandleFunc("/api/analytics/hop-depth", s.handleHopDepthAnalytics).Methods("GET")
+	r.HandleFunc("/api/analytics/observer-comparison", s.handleObserverComparison).Methods("GET")
 	r.HandleFunc("/api/analytics/wardriving", s.handleWardrivingStats).Methods("GET")
 	r.HandleFunc("/api/analytics/wardriving/sender-messages", s.handleWardrivingSenderMessages).Methods("GET")
 	r.HandleFunc("/api/perf", s.handlePerf).Methods("GET")

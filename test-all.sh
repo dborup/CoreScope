@@ -232,6 +232,7 @@ run test-channel-live-decrypt.js
 run test-color-picker-ux.js
 run test-compare-flood-filter.js
 run test-compare-overlap.js
+run test-issue-122-compare-reference-many.js
 run test-embed-mode-1369.js
 run test-geofilter-draft.js
 run test-hash-color.js

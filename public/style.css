@@ -4238,6 +4238,33 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 .compare-table { font-size: var(--fs-sm); }
 
+/* ── #122 reference-to-many mode ─────────────────────────────────── */
+.compare-mode-toggle {
+  display: flex; gap: var(--space-xs); margin-bottom: var(--space-sm); flex-wrap: wrap;
+}
+.compare-ref-headline {
+  margin-bottom: var(--space-sm);
+}
+.compare-ref-headline-name {
+  font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--text);
+}
+.compare-ref-headline-sub {
+  font-size: var(--fs-sm); color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.compare-ref-note {
+  font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.5;
+  margin: 0 0 var(--space-sm);
+}
+.compare-ref-table { font-size: var(--fs-sm); }
+.compare-ref-table .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.compare-ref-sort-btn {
+  background: transparent; border: none; color: var(--text-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-semibold); cursor: pointer;
+  padding: 2px 0; white-space: nowrap;
+}
+.compare-ref-sort-btn:hover { color: var(--text); }
+.compare-ref-sort-btn.active { color: var(--accent); }
+
 @media (max-width: 640px) {
   .compare-selector { flex-direction: column; align-items: stretch; }
   .compare-select-group { min-width: 0; }

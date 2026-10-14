@@ -2314,6 +2314,14 @@
       "secondsByExecution": [
         5
       ]
+    },
+    {
+      "file": "test-issue-122-compare-reference-many-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e"
     }
   ],
   "exclusions": [
