@@ -259,3 +259,29 @@ func TestScopeApprovalRefusesConfiguredAndBlacklistedOnlyScopes(t *testing.T) {
 		t.Fatalf("approve observed unknown scope = %+v", res)
 	}
 }
+
+// Review round 2, finding 4: the runner reads the queue the server writes.
+// Both sides take the directory from channelregistry.ScopeQueueDir, so a
+// command enqueued there is applied; a runner on another directory would
+// leave it queued forever.
+func TestScopeApprovalRunnerReadsSharedQueueDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scope-dir.db")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.db.Exec(`INSERT INTO observer_neighbors(observer_id,neighbor_pubkey,scopes,status) VALUES('obs','node','#shared','responded')`); err != nil {
+		t.Fatal(err)
+	}
+	serverSide := channelregistry.NewQueue(channelregistry.ScopeQueueDir(path))
+	cmd := channelregistry.Command{RequestID: channelregistry.NewID(), Op: channelregistry.OpScopeApprove, Name: "#shared", CreatedAt: time.Now().UnixMilli()}
+	if err := serverSide.Enqueue(cmd, 100); err != nil {
+		t.Fatal(err)
+	}
+	newScopeApprovalRunner(store, newHotKeys(nil, nil)).RunOnce(context.Background())
+	st, err := serverSide.Lookup(cmd.RequestID)
+	if err != nil || st.Status != "approved" {
+		t.Fatalf("command in the shared queue dir = %+v, err %v; want approved", st, err)
+	}
+}

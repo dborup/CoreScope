@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,7 +24,7 @@ func TestRegionScopeAdminRoutesRefuseNonAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A real queued request, so the status route has something to reveal.
-	queue := channelregistry.NewQueue(filepath.Join(filepath.Dir(db.path), "region-scope-requests"))
+	queue := channelregistry.NewQueue(channelregistry.ScopeQueueDir(db.path))
 	existing := channelregistry.Command{RequestID: channelregistry.NewID(), Op: channelregistry.OpScopeApprove, Name: "#candidate", CreatedAt: time.Now().UnixMilli()}
 	if err := queue.Enqueue(existing, 100); err != nil {
 		t.Fatal(err)

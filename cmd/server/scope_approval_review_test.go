@@ -46,7 +46,7 @@ func postScope(router *mux.Router, action, name string) *httptest.ResponseRecord
 
 func queuedScopeRequests(t *testing.T, db *DB) int {
 	t.Helper()
-	pending, err := channelregistry.NewQueue(filepath.Join(filepath.Dir(db.path), "region-scope-requests")).Pending()
+	pending, err := channelregistry.NewQueue(channelregistry.ScopeQueueDir(db.path)).Pending()
 	if err != nil {
 		t.Fatal(err)
 	}

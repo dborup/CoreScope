@@ -5,15 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"log"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/regions"
 )
-
-const scopeQueueDir = "region-scope-requests"
 
 type scopeApprovalRunner struct {
 	store *Store
@@ -26,7 +23,7 @@ type scopeApprovalRunner struct {
 
 func newScopeApprovalRunner(store *Store, keys *hotKeys) *scopeApprovalRunner {
 	return &scopeApprovalRunner{store: store, keys: keys,
-		queue: channelregistry.NewQueue(filepath.Join(filepath.Dir(store.path), scopeQueueDir))}
+		queue: channelregistry.NewQueue(channelregistry.ScopeQueueDir(store.path))}
 }
 
 func (r *scopeApprovalRunner) LoadApproved(ctx context.Context) error {

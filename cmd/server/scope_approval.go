@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -75,7 +74,7 @@ func (s *Server) regionScopeQueue() *channelregistry.Queue {
 	if s.db == nil || s.db.path == "" {
 		return nil
 	}
-	return channelregistry.NewQueue(filepath.Join(filepath.Dir(s.db.path), "region-scope-requests"))
+	return channelregistry.NewQueue(channelregistry.ScopeQueueDir(s.db.path))
 }
 
 func (s *Server) handleRegionScopeDecisions(w http.ResponseWriter, r *http.Request) {

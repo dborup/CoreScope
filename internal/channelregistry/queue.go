@@ -50,6 +50,16 @@ func QueueDir(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), QueueDirName)
 }
 
+// ScopeQueueDirName holds admin decisions on observed region scopes (#355),
+// with the same layout as QueueDirName: the server enqueues OpScope*
+// commands, the ingestor applies them.
+const ScopeQueueDirName = "region-scope-requests"
+
+// ScopeQueueDir returns the region-scope queue directory for a database path.
+func ScopeQueueDir(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), ScopeQueueDirName)
+}
+
 // NewID returns a random 16-hex-character id. Ids double as file names and as
 // proposal ids, so they are random rather than time-based.
 func NewID() string {
