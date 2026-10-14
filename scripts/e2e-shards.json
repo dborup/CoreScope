@@ -2314,6 +2314,19 @@
       "secondsByExecution": [
         5
       ]
+    },
+    {
+      "file": "test-issue-217-packets-full-names-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 26,
+      "secondsByExecution": [
+        26
+      ]
     }
   ],
   "exclusions": [
