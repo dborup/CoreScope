@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
-const { PACKAGE, sha256, readManifest, assignedTests, testPattern, runContext } = require('./ci/go-server-manifest');
+const { PACKAGE, REBALANCE_HINT, sha256, readManifest, shardSelection, stalePins, runContext } = require('./ci/go-server-manifest');
 
 function spawnLogged(command, args, options) {
   return new Promise((resolve, reject) => {
@@ -106,7 +106,8 @@ function verifyRuntimeList(root, inventory, run = spawnSync) {
 async function runShard(options) {
   const { root, manifestFile, shard } = options;
   const { manifest, inventory, manifestSha256 } = readManifest(manifestFile, root, options.inventory);
-  const selected = assignedTests(manifest, inventory, shard);
+  const selection = shardSelection(manifest, inventory, shard);
+  const selected = selection.tests;
   const env = { ...process.env, ...options.env };
   const folder = options.outputDir || path.join(root, '.ci-go', `server-${shard}`);
   fs.mkdirSync(folder, { recursive: true });
@@ -116,7 +117,7 @@ async function runShard(options) {
   // Never reuse a previous local/profile artifact after a failed rerun.
   for (const file of [profile, jsonFile, log]) fs.writeFileSync(file, '');
   const receipt = {
-    version: 1, shard, package: PACKAGE, manifestSha256, status: 'failure',
+    version: 1, shard, package: PACKAGE, manifestSha256, status: 'failure', selectionFlag: selection.flag,
     runContext: runContext(env), startedAt: new Date().toISOString(), completedAt: null,
     selected: selected.map(test => ({ name: test.name, file: test.file, kind: test.kind })),
     runs: [], tests: [], profileSha256: null, testJSONSha256: null,
@@ -126,7 +127,7 @@ async function runShard(options) {
   try {
     for (const [kind, args] of [
       ['build', ['build', '.']],
-      ['test', ['test', '-timeout', '20m', '-race', `-coverprofile=${profile}`, '-count=1', '-json', '-run', testPattern(selected), './...']],
+      ['test', ['test', '-timeout', '20m', '-race', `-coverprofile=${profile}`, '-count=1', '-json', selection.flag, selection.pattern, './...']],
     ]) {
       const begin = performance.now();
       const result = await execute('go', args, { cwd, env, log, jsonFile: kind === 'test' ? jsonFile : null });
@@ -159,8 +160,15 @@ async function main() {
   if (command === '--validate' || command === '--runtime-list' || command === '--list') {
     const { manifest, inventory } = readManifest(manifestFile, root);
     if (command === '--runtime-list') console.log(`Runtime inventory: ${verifyRuntimeList(root, inventory).length} runnable Go entries`);
-    else if (command === '--list') console.log(testPattern(assignedTests(manifest, inventory, Number(process.env.GO_SERVER_SHARD))));
-    else console.log(`Go assignments: ${manifest.tests.length} tests/fuzz seeds/examples across ${manifest.shards} shards`);
+    else if (command === '--list') {
+      const selection = shardSelection(manifest, inventory, Number(process.env.GO_SERVER_SHARD));
+      console.log(`${selection.flag} ${selection.pattern}`);
+    } else {
+      const counts = Array.from({ length: manifest.shards }, (_, index) => shardSelection(manifest, inventory, index + 1).tests.length);
+      console.log(`Go assignments: ${counts.reduce((a, b) => a + b, 0)} runnable entries, each in exactly one shard (${counts.join(' / ')}); shard ${manifest.shards} is the catch-all for everything not pinned`);
+      const stale = stalePins(manifest, inventory);
+      if (stale.length) console.log(`Note: ${stale.length} pinned entries no longer exist and select nothing (${stale.join(', ')}); ${REBALANCE_HINT}`);
+    }
     return;
   }
   assert.equal(command, undefined, 'unexpected Go shard argument');

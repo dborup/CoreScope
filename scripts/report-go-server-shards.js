@@ -4,7 +4,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { PACKAGE, sha256, readManifest, assignedTests, runContext, requireContext } = require('./ci/go-server-manifest');
+const { PACKAGE, REBALANCE_HINT, sha256, readManifest, assignedTests, assertPartition, runContext, requireContext } = require('./ci/go-server-manifest');
 const { verifyTestJSON } = require('./run-go-server-shard');
 
 function requireFile(file) {
@@ -109,6 +109,7 @@ function aggregateShards({ root, manifestFile, artifactsDir, outputDir = root, e
     assert.equal(receipt.manifestSha256, manifestSha256, 'stale Go manifest receipt');
     requireContext(receipt.runContext, current);
     assert.equal(receipt.status, 'success', `Go shard ${shard} failed`);
+    assert.equal(receipt.selectionFlag, shard === manifest.shards ? '-skip' : '-run', 'Go receipt used the wrong selection');
     const selected = assignedTests(manifest, discovered.inventory, shard);
     assert.deepEqual(receipt.selected, selected.map(test => ({ name: test.name, file: test.file, kind: test.kind })), 'Go receipt selection differs from manifest');
     assert.ok(Number.isFinite(Date.parse(receipt.startedAt)) && Number.isFinite(Date.parse(receipt.completedAt)), 'invalid Go receipt timestamps');
@@ -129,6 +130,11 @@ function aggregateShards({ root, manifestFile, artifactsDir, outputDir = root, e
     profiles.push(rawProfile);
     receipts.push(receipt);
   }
+  // Exactly once overall: the shard receipts together cover every active
+  // entry, and no entry appears in two of them.
+  const ran = receipts.flatMap(receipt => receipt.tests.map(test => test.name));
+  assert.equal(new Set(ran).size, ran.length, 'a Go test ran in two shards');
+  assert.equal(ran.length, assertPartition(manifest, discovered.inventory), 'Go shards did not run every active entry');
   const merged = mergeCoverprofiles(profiles);
   const coverageFile = path.join(outputDir, 'cmd/server/server-coverage.out');
   fs.mkdirSync(path.dirname(coverageFile), { recursive: true });
@@ -140,12 +146,15 @@ function aggregateShards({ root, manifestFile, artifactsDir, outputDir = root, e
     coveredStatements: merged.coveredStatements, coveragePercent: merged.coveragePercent,
     coverageSha256: sha256(merged.profile),
     shardDurationsMs: receipts.map(receipt => receipt.runs.reduce((total, run) => total + run.durationMs, 0)),
+    // Sum of top-level go test -json Elapsed per shard: the same quantity the
+    // rebalance script balances, without build and link time.
+    shardTestSeconds: receipts.map(receipt => Math.round(receipt.tests.reduce((total, test) => total + test.elapsedSeconds, 0) * 1000) / 1000),
     receipts,
   };
   fs.mkdirSync(path.join(outputDir, '.ci-go'), { recursive: true });
   fs.writeFileSync(path.join(outputDir, '.ci-go/server-shards-report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(`Go server coverage: ${merged.coveredStatements}/${merged.totalStatements} statements (${merged.coveragePercent.toFixed(1)}%)`);
-  if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `## Go server shards\n\n${report.testCount} runnable entries verified across ${report.shards} shards.\n\nCoverage: ${merged.coveredStatements}/${merged.totalStatements} statements (${merged.coveragePercent.toFixed(1)}%).\n`);
+  if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `## Go server shards\n\n${report.testCount} runnable entries verified across ${report.shards} shards.\n\nCoverage: ${merged.coveredStatements}/${merged.totalStatements} statements (${merged.coveragePercent.toFixed(1)}%).\n\nTest seconds per shard: ${report.shardTestSeconds.join(' / ')}. If the slowest shard stays above 1.25x the fastest, ${REBALANCE_HINT}.\n`);
   return report;
 }
 

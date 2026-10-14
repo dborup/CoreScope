@@ -7,9 +7,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { PACKAGE, sha256, discoverTests, validateManifest, readManifest, assignedTests, testPattern, requireContext } = require('./scripts/ci/go-server-manifest');
+const { PACKAGE, sha256, discoverTests, validateManifest, readManifest, assignedTests, shardSelection, assertPartition, stalePins, testPattern, MAX_PATTERN_BYTES, requireContext } = require('./scripts/ci/go-server-manifest');
 const { verifyTestJSON, verifyRuntimeList, runShard, spawnLogged } = require('./scripts/run-go-server-shard');
 const { parseCoverprofile, mergeCoverprofiles, aggregateShards, writeIngestorReceipt, verifyIngestorArtifact } = require('./scripts/report-go-server-shards');
+const { readTimingInputs, planShards, buildManifest } = require('./scripts/rebalance-go-server-shards');
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-go-shards-'));
 let passed = 0;
@@ -23,6 +24,7 @@ const root = path.join(temporary, 'repo');
 fs.mkdirSync(path.join(root, 'cmd/server'), { recursive: true });
 fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
 fs.writeFileSync(path.join(root, 'cmd/server/go.mod'), `module ${PACKAGE}\n\ngo 1.22\n`);
+fs.writeFileSync(path.join(root, 'cmd/server/main.go'), 'package main\n\nfunc covered() int { return 1 }\n\nfunc uncovered() int { return 2 }\n\n// Answer and Unexecuted give the fixture Examples real identifiers (go vet).\nfunc Answer() {}\n\nfunc Unexecuted() {}\n\nfunc main() {}\n');
 fs.writeFileSync(path.join(root, 'cmd/server/sample_test.go'), `package main
 import ("fmt"; "testing")
 // func TestComment(t *testing.T) {}
@@ -59,6 +61,7 @@ function jsonFor(selected, statuses = {}) {
   ].map(event => JSON.stringify(event)).join('\n') + '\n';
 }
 
+const testArgs = new Map();
 async function makeArtifacts(directory) {
   fs.mkdirSync(directory, { recursive: true });
   const receipts = [];
@@ -68,6 +71,7 @@ async function makeArtifacts(directory) {
     const receipt = await runShard({ root, manifestFile, shard, inventory, outputDir: folder, env: context,
       runProcess: async (_command, args, options) => {
         if (args[0] === 'test') {
+          testArgs.set(shard, args);
           fs.writeFileSync(options.jsonFile, jsonFor(selected));
           fs.writeFileSync(args.find(arg => arg.startsWith('-coverprofile=')).slice('-coverprofile='.length), shard === 1 ? profileA : profileB);
         }
@@ -91,37 +95,85 @@ async function main() {
     assert.deepEqual(discoverTests(path.relative(process.cwd(), root)), inventory);
     assert.deepEqual(inventory.map(test => test.name).sort(), ['ExampleAnswer', 'FuzzSmoke', 'TestAlpha', 'TestBeta', 'TestGamma', 'TestWindows']);
     assert.equal(inventory.find(test => test.name === 'TestWindows').active, process.platform === 'win32');
-    manifest = { version: 1, shards: 3, package: PACKAGE, tests: inventory.map((test, index) => ({
-      name: test.name, file: test.file, shard: test.name === 'TestAlpha' ? 1 : test.name === 'TestBeta' ? 2 : test.name === 'TestGamma' ? 3 : index % 3 + 1,
-      samplesSeconds: [0.01, 0.02, 0.03], meanSeconds: 0.02,
-    })) };
+    // Shards 1 and 2 run only their pinned entries; shard 3 is the catch-all
+    // and runs every other entry, including Tests the manifest has never seen.
+    manifest = { version: 2, shards: 3, package: PACKAGE, pinned: [
+      { name: 'TestAlpha', shard: 1, samplesSeconds: [3, 5], meanSeconds: 4 },
+      { name: 'TestBeta', shard: 2, samplesSeconds: [4], meanSeconds: 4 },
+    ] };
     manifestFile = path.join(root, 'scripts/go-server-shards.json');
     fs.writeFileSync(manifestFile, JSON.stringify(manifest));
     validateManifest(manifest, root, inventory);
   });
-  await check('unassigned real source function fails the guard', () => {
+  await check('a new Test without a manifest entry runs in the catch-all shard', () => {
     fs.writeFileSync(path.join(root, 'cmd/server/new_test.go'), 'package main\nimport "testing"\nfunc TestNew(t *testing.T) {}\n');
-    try { assert.throws(() => validateManifest(manifest, root), /unassigned Go test: TestNew/); }
-    finally { fs.unlinkSync(path.join(root, 'cmd/server/new_test.go')); }
+    try {
+      const current = discoverTests(root);
+      validateManifest(manifest, root, current);
+      assert.deepEqual(assignedTests(manifest, current, 3).map(test => test.name), ['TestNew', 'TestGamma', 'FuzzSmoke', 'ExampleAnswer']);
+      assert.deepEqual(assignedTests(manifest, current, 1).map(test => test.name), ['TestAlpha']);
+      assert.deepEqual(assignedTests(manifest, current, 2).map(test => test.name), ['TestBeta']);
+      assertPartition(manifest, current);
+    } finally { fs.unlinkSync(path.join(root, 'cmd/server/new_test.go')); }
   });
-  await check('duplicate, stale, empty and invalid timing assignments fail', () => {
-    const duplicate = clone(manifest); duplicate.tests.push(duplicate.tests[0]);
-    assert.throws(() => validateManifest(duplicate, root, inventory), /duplicate test assignment/);
-    const stale = clone(manifest); stale.tests[0].name = 'TestRemoved';
-    assert.throws(() => validateManifest(stale, root, inventory), /stale test assignment/);
-    const empty = clone(manifest); empty.tests.forEach(test => { if (test.shard === 3) test.shard = 2; });
-    assert.throws(() => validateManifest(empty, root, inventory), /empty active Go shard 3/);
-    const timings = clone(manifest); timings.tests[0].meanSeconds = 1;
+  await check('every active entry lands in exactly one shard', () => {
+    const shards = [1, 2, 3].map(shard => assignedTests(manifest, inventory, shard).map(test => test.name));
+    const all = shards.flat();
+    assert.equal(new Set(all).size, all.length, 'an entry is selected by two shards');
+    assert.deepEqual([...all].sort(), inventory.filter(test => test.active).map(test => test.name).sort());
+    assert.equal(assertPartition(manifest, inventory), all.length);
+    assert.ok(!all.includes('TestWindows'), 'inactive build-constrained entries never run');
+  });
+  await check('duplicate, catch-all, out-of-range and invalid timing pins fail', () => {
+    const duplicate = clone(manifest); duplicate.pinned.push({ ...duplicate.pinned[0], shard: 2 });
+    assert.throws(() => validateManifest(duplicate, root, inventory), /duplicate pin: TestAlpha/);
+    for (const shard of [0, 3, 4, 1.5]) {
+      const bad = clone(manifest); bad.pinned[0].shard = shard;
+      assert.throws(() => validateManifest(bad, root, inventory), /pinned shard must be 1\.\.2: TestAlpha/);
+    }
+    const empty = clone(manifest); empty.pinned[1].shard = 1;
+    assert.throws(() => validateManifest(empty, root, inventory), /empty active Go shard 2.*rebalance-go-server-shards/);
+    const timings = clone(manifest); timings.pinned[0].meanSeconds = 1;
     assert.throws(() => validateManifest(timings, root, inventory), /mean differs/);
+    const noSamples = clone(manifest); noSamples.pinned[1].samplesSeconds = [];
+    assert.throws(() => validateManifest(noSamples, root, inventory), /timing samples required/);
+    const v1 = clone(manifest); v1.version = 1;
+    assert.throws(() => validateManifest(v1, root, inventory), /unsupported Go manifest version/);
+  });
+  await check('a removed or renamed pinned Test is reported but does not fail', () => {
+    const stale = clone(manifest);
+    stale.pinned.push({ name: 'TestRemoved', shard: 1, samplesSeconds: [9], meanSeconds: 9 });
+    validateManifest(stale, root, inventory);
+    assert.deepEqual(stalePins(stale, inventory), ['TestRemoved']);
+    assert.deepEqual(assignedTests(stale, inventory, 1).map(test => test.name), ['TestAlpha']);
+    assert.ok(!shardSelection(stale, inventory, 3).pattern.includes('TestRemoved'));
+  });
+  await check('pinned shards use -run, the catch-all uses -skip of every pinned entry', () => {
+    const pinned = shardSelection(manifest, inventory, 1);
+    assert.equal(pinned.flag, '-run');
+    assert.equal(pinned.pattern, '^(TestAlpha)$');
+    const catchAll = shardSelection(manifest, inventory, 3);
+    assert.equal(catchAll.flag, '-skip');
+    assert.equal(catchAll.pattern, '^(TestAlpha|TestBeta)$');
+    assert.deepEqual(catchAll.tests.map(test => test.name), ['TestGamma', 'FuzzSmoke', 'ExampleAnswer']);
+    const skip = new RegExp(catchAll.pattern);
+    assert.ok(!skip.test('TestAlphaExtra') && !skip.test('XTestBeta'), 'skip pattern must be anchored');
   });
   await check('Fuzz seed target is retained in an anchored selection', () => {
-    const entry = manifest.tests.find(test => test.name === 'FuzzSmoke');
-    const selected = assignedTests(manifest, inventory, entry.shard);
+    const selected = assignedTests(manifest, inventory, 3);
     const pattern = testPattern(selected);
     assert.ok(pattern.startsWith('^(') && pattern.endsWith(')$'));
     assert.ok(new RegExp(pattern).test('FuzzSmoke'));
     assert.ok(!new RegExp(pattern).test('FuzzSmokeExtra'));
     assert.equal(verifyTestJSON(jsonFor(selected), selected).tests.find(test => test.name === 'FuzzSmoke').kind, 'fuzz');
+  });
+  await check('a pattern near the Linux single-argument limit is refused', () => {
+    // go test hands the pattern to the test binary as one argv string
+    // (-test.run=… / -test.skip=…); Linux caps one string at 128 KiB.
+    assert.ok(MAX_PATTERN_BYTES < 128 * 1024);
+    const many = Array.from({ length: 3000 }, (_, index) => ({ name: `TestLongGeneratedName_${String(index).padStart(5, '0')}_abcdefghij` }));
+    assert.throws(() => testPattern(many), /MAX_ARG_STRLEN/);
+    assert.ok(testPattern(many.slice(0, 100)).length < MAX_PATTERN_BYTES);
   });
   await check('runtime list verifies all active entries and one package', () => {
     const active = inventory.filter(test => test.active).map(test => test.name);
@@ -200,6 +252,21 @@ async function main() {
     assert.equal(report.testCount, inventory.filter(test => test.active).length);
     assert.equal(fs.readFileSync(path.join(temporary, 'output/cmd/server/server-coverage.out'), 'utf8'), mergeCoverprofiles([profileA, profileB, profileB]).profile);
   });
+  await check('runner passes -run to pinned shards and only -skip to the catch-all', () => {
+    for (const shard of [1, 2]) {
+      const args = testArgs.get(shard);
+      assert.equal(args[args.indexOf('-run') + 1], shardSelection(manifest, inventory, shard).pattern);
+      assert.ok(!args.includes('-skip'));
+    }
+    const args = testArgs.get(3);
+    assert.ok(!args.includes('-run'), 'the catch-all must not restrict with -run');
+    assert.equal(args[args.indexOf('-skip') + 1], '^(TestAlpha|TestBeta)$');
+  });
+  await check('report records per-shard test seconds for rebalancing', () => {
+    const report = aggregateShards(reportOptions(artifacts));
+    assert.equal(report.shardTestSeconds.length, 3);
+    assert.ok(report.shardTestSeconds.every(value => Number.isFinite(value) && value >= 0));
+  });
   await check('all shard, guard and ingestor outcomes are strictly successful', () => {
     for (const key of ['GO_GUARD_RESULT', 'GO_INGESTOR_RESULT', 'GO_SERVER_1_RESULT', 'GO_SERVER_2_RESULT', 'GO_SERVER_3_RESULT']) {
       for (const value of ['failure', 'skipped', 'cancelled', '']) {
@@ -261,6 +328,61 @@ async function main() {
     assert.throws(() => verifyIngestorArtifact(output, folder, { ...env, GO_INGESTOR_RESULT: 'skipped' }), /succeed/);
     fs.appendFileSync(path.join(folder, 'profile.out'), '\n');
     assert.throws(() => verifyIngestorArtifact(output, folder, env), /coverage artifact differs/);
+  });
+  await check('real go test runs every fixture entry exactly once across the three shards', async () => {
+    // No fakes: the real runner, go build, go test -race -run/-skip and the
+    // real aggregator on the fixture module, including a Test that has no pin.
+    fs.writeFileSync(path.join(root, 'cmd/server/late_test.go'), 'package main\nimport "testing"\nfunc TestLate(t *testing.T) { t.Run("sub", func(t *testing.T) { if covered() != 1 { t.Fatal() } }) }\n');
+    const realArtifacts = path.join(temporary, 'real-artifacts');
+    try {
+      const current = discoverTests(root);
+      for (let shard = 1; shard <= 3; shard++) {
+        const receipt = await runShard({ root, manifestFile, shard, inventory: current, outputDir: path.join(realArtifacts, `go-server-${shard}`), env: { ...process.env, ...context } });
+        assert.equal(receipt.status, 'success');
+      }
+      const report = aggregateShards({ ...reportOptions(realArtifacts), inventory: current });
+      const ran = report.receipts.flatMap(receipt => receipt.tests.map(test => test.name)).sort();
+      assert.deepEqual(ran, ['ExampleAnswer', 'FuzzSmoke', 'TestAlpha', 'TestBeta', 'TestGamma', 'TestLate']);
+      assert.deepEqual(report.receipts[2].tests.map(test => test.name), ['TestLate', 'TestGamma', 'FuzzSmoke', 'ExampleAnswer']);
+      const subtests = fs.readFileSync(path.join(realArtifacts, 'go-server-3/test.jsonl'), 'utf8');
+      assert.ok(subtests.includes('"Test":"TestLate/sub"') && subtests.includes('"Test":"FuzzSmoke/seed#0"'), 'subtests and fuzz seeds of the catch-all still run');
+      assert.ok(report.coveredStatements > 0 && report.coveredStatements < report.totalStatements, 'uncovered() stays uncovered');
+    } finally { fs.unlinkSync(path.join(root, 'cmd/server/late_test.go')); }
+  });
+  await check('rebalance reads CI go test -json, pins the heavy entries and leaves the rest to the catch-all', () => {
+    const event = (Action, Test, Elapsed) => JSON.stringify({ Action, Package: PACKAGE, ...(Test ? { Test } : {}), ...(Elapsed !== undefined ? { Elapsed } : {}) });
+    const write = (file, tests) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, [event('start'), ...Object.entries(tests).flatMap(([name, seconds]) => [event('run', name), event('pass', name + '/sub', 0), event(name === 'TestBeta' ? 'skip' : 'pass', name, seconds)]), event('pass', undefined, 1)].join('\n') + '\n');
+    };
+    const runA = path.join(temporary, 'rebalance/run-a');
+    const runB = path.join(temporary, 'rebalance/run-b');
+    write(path.join(runA, 'go-server-1/test.jsonl'), { TestAlpha: 40, FuzzSmoke: 0.5 });
+    write(path.join(runA, 'go-server-2/test.jsonl'), { TestBeta: 30, TestGamma: 10, TestRemoved: 99 });
+    write(path.join(runB, 'go-server-1/test.jsonl'), { TestAlpha: 60, TestBeta: 30 });
+    write(path.join(runB, 'go-server-3/test.jsonl'), { TestGamma: 12, FuzzSmoke: 0.5 });
+    const timings = readTimingInputs([runA, runB]);
+    assert.deepEqual(timings.samples.get('TestAlpha'), [40, 60]);
+    assert.deepEqual(timings.samples.get('TestBeta'), [30, 30], 'skips keep their elapsed time');
+    assert.ok(!timings.samples.has('TestAlpha/sub'), 'subtests are inside their parent');
+    assert.equal(timings.sources.length, 2);
+    assert.ok(timings.sources[0].files.every(file => /^[0-9a-f]{64}$/.test(file.sha256)));
+
+    const plan = planShards({ inventory, samples: timings.samples, shards: 3 });
+    // Total 50 + 30 + 11 + 0.5 = 91.5; the catch-all takes the cheap tail up
+    // to a third, the heavy entries are spread over the pinned shards.
+    assert.deepEqual(plan.pinned.map(pin => [pin.name, pin.shard]), [['TestAlpha', 1], ['TestBeta', 2]]);
+    assert.deepEqual(plan.projectedSeconds, [50, 30, 11.5]);
+    assert.deepEqual(plan.unmeasured, ['ExampleAnswer']);
+    const generated = buildManifest({ plan, sources: timings.sources, shards: 3 });
+    validateManifest(generated, root, inventory);
+    assert.deepEqual(generated.pinned[0], { name: 'TestAlpha', shard: 1, samplesSeconds: [40, 60], meanSeconds: 50 });
+    assert.ok(!JSON.stringify(generated).includes('TestRemoved'), 'removed Tests are not pinned again');
+    assert.deepEqual(buildManifest({ plan: planShards({ inventory, samples: timings.samples, shards: 3 }), sources: timings.sources, shards: 3 }), generated, 'output is deterministic');
+
+    write(path.join(runA, 'go-server-3/test.jsonl'), { TestAlpha: 1 });
+    assert.throws(() => readTimingInputs([runA]), /TestAlpha ran twice in one CI run/);
+    assert.throws(() => readTimingInputs([path.join(temporary, 'rebalance/none')]), /no test\.jsonl/);
   });
   console.log(`Go shard infrastructure: ${passed}/${passed} behavioural cases passed`);
 }
