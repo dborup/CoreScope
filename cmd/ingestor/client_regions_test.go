@@ -39,20 +39,26 @@ func regionsMsg(at time.Time) map[string]interface{} {
 // regionsMQTT wraps a payload on the regions topic of collector.
 func regionsMQTT(t *testing.T, collector string, payload map[string]interface{}) *mockMessage {
 	t.Helper()
-	b, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &mockMessage{topic: "meshcore/client/" + collector + "/regions", payload: b}
+	return &mockMessage{topic: "meshcore/client/" + collector + "/regions", payload: regionsPayload(t, payload)}
 }
 
 func regionsOnCfg() *Config {
 	return &Config{ClientRegions: &ClientRegionsConfig{Enabled: true}}
 }
 
+// regionsPayload marshals a test payload the way a client would send it.
+func regionsPayload(t *testing.T, msg map[string]interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func parseRegions(t *testing.T, msg map[string]interface{}) (*ClientDeclaredRegions, string) {
 	t.Helper()
-	return parseClientRegionsReport(testRegionsCollector, msg, regionsNow, 30*24*time.Hour)
+	return parseClientRegionsReport(testRegionsCollector, regionsPayload(t, msg), regionsNow, 30*24*time.Hour)
 }
 
 func mustParseRegions(t *testing.T, msg map[string]interface{}) *ClientDeclaredRegions {
@@ -248,17 +254,17 @@ func TestClientRegionsTargetValidation(t *testing.T) {
 func TestClientRegionsNormalisation(t *testing.T) {
 	cases := []struct {
 		name string
-		in   []interface{}
+		in   []string
 		want []string
 	}{
-		{"hash added, wildcard kept", []interface{}{"*", "be", "#be-vlg"}, []string{"*", "#be", "#be-vlg"}},
-		{"private region keeps $", []interface{}{"$ops", "be"}, []string{"$ops", "#be"}},
-		{"NUL padding trimmed", []interface{}{"be", "belml\x00\x00\x00"}, []string{"#be", "#belml"}},
-		{"padding-only entry skipped", []interface{}{"be", "\x00\x00"}, []string{"#be"}},
-		{"whitespace trimmed", []interface{}{" be ", "\tnl\n"}, []string{"#be", "#nl"}},
-		{"duplicates dropped, first order kept", []interface{}{"nl", "be", "#nl", "be"}, []string{"#nl", "#be"}},
-		{"case preserved", []interface{}{"BE", "be"}, []string{"#BE", "#be"}},
-		{"30-byte name accepted", []interface{}{strings.Repeat("a", 30)}, []string{"#" + strings.Repeat("a", 30)}},
+		{"hash added, wildcard kept", []string{"*", "be", "#be-vlg"}, []string{"*", "#be", "#be-vlg"}},
+		{"private region keeps $", []string{"$ops", "be"}, []string{"$ops", "#be"}},
+		{"NUL padding trimmed", []string{"be", "belml\x00\x00\x00"}, []string{"#be", "#belml"}},
+		{"padding-only entry skipped", []string{"be", "\x00\x00"}, []string{"#be"}},
+		{"whitespace trimmed", []string{" be ", "\tnl\n"}, []string{"#be", "#nl"}},
+		{"duplicates dropped, first order kept", []string{"nl", "be", "#nl", "be"}, []string{"#nl", "#be"}},
+		{"case preserved", []string{"BE", "be"}, []string{"#BE", "#be"}},
+		{"30-byte name accepted", []string{strings.Repeat("a", 30)}, []string{"#" + strings.Repeat("a", 30)}},
 	}
 	for _, c := range cases {
 		got, reason := normalizeDeclaredRegions(c.in)
@@ -269,20 +275,19 @@ func TestClientRegionsNormalisation(t *testing.T) {
 }
 
 func TestClientRegionsNormalisationRejects(t *testing.T) {
-	many := make([]interface{}, 87)
+	many := make([]string, 87)
 	for i := range many {
 		many[i] = "r"
 	}
-	long := make([]interface{}, 0, 6)
+	long := make([]string, 0, 6)
 	for i := 0; i < 6; i++ { // 6×29 + 5 commas = 179 > 172
 		long = append(long, strings.Repeat(string(rune('a'+i)), 29))
 	}
-	for name, in := range map[string][]interface{}{
-		"non-string entry":  {"be", float64(3)},
-		"null entry":        {"be", nil},
+	for name, in := range map[string][]string{
 		"comma in name":     {"be,nl"},
 		"control character": {"be\x01"},
-		"invalid UTF-8":     {"be\xff"},
+		"C1 control":        {"b\u0085e"},
+		"hash only":         {"#"},
 		"31-byte name":      {strings.Repeat("a", 31)},
 		"too many entries":  many,
 		"list over 172 B":   long,
@@ -294,7 +299,8 @@ func TestClientRegionsNormalisationRejects(t *testing.T) {
 }
 
 func TestClientRegionsMissingOrMalformedListDropped(t *testing.T) {
-	for name, v := range map[string]interface{}{"missing": nil, "string": "be,nl", "object": map[string]interface{}{}, "null": "null"} {
+	for name, v := range map[string]interface{}{"missing": nil, "string": "be,nl", "object": map[string]interface{}{}, "null": "null",
+		"non-string entry": []interface{}{"be", float64(3)}, "null entry": []interface{}{"be", nil}} {
 		msg := regionsMsg(regionsNow)
 		switch {
 		case v == nil:
@@ -487,7 +493,7 @@ func TestClientRegionsProvenanceKeepsCollectorsAndTimes(t *testing.T) {
 		msg := regionsMsg(regionsNow)
 		msg["timestamp"] = ts
 		msg["regions"] = regions
-		r, reason := parseClientRegionsReport(collector, msg, regionsNow, 30*24*time.Hour)
+		r, reason := parseClientRegionsReport(collector, regionsPayload(t, msg), regionsNow, 30*24*time.Hour)
 		if r == nil {
 			t.Fatalf("rejected: %s", reason)
 		}

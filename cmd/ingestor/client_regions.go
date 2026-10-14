@@ -2,13 +2,13 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/regions"
 )
@@ -52,12 +52,46 @@ type ClientDeclaredRegions struct {
 	Source        string   // mqttSources[].name that delivered it
 }
 
+// clientRegionsPayload is the /regions payload. Every field stays raw, so a
+// value of the wrong JSON type (a quoted number, a non-array list, null) is
+// told apart from a valid one instead of decoding to a zero value.
+type clientRegionsPayload struct {
+	Timestamp     json.RawMessage `json:"timestamp"`
+	Target        json.RawMessage `json:"target"`
+	Regions       json.RawMessage `json:"regions"`
+	Truncated     json.RawMessage `json:"truncated"`
+	RepeaterClock json.RawMessage `json:"repeater_clock"`
+	GPS           json.RawMessage `json:"gps"`
+}
+
+// clientRegionsGPS is the optional gps object of a /regions payload.
+type clientRegionsGPS struct {
+	Lat  json.RawMessage `json:"lat"`
+	Lon  json.RawMessage `json:"lon"`
+	AccM json.RawMessage `json:"acc_m"`
+}
+
+// rawPresent reports whether a payload field is present and not null.
+func rawPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
+}
+
+// decodeRaw decodes a present, non-null field as T; a value of another JSON
+// type fails.
+func decodeRaw[T any](raw json.RawMessage) (T, bool) {
+	var v T
+	if !rawPresent(raw) {
+		return v, false
+	}
+	return v, json.Unmarshal(raw, &v) == nil
+}
+
 // handleClientRegions validates and stores one report. collector is the raw
-// topic segment. The caller has already applied the gate, the observer
-// blacklist and the source allowlist.
-func handleClientRegions(store *Store, cfg *Config, tag, source, collector string, msg map[string]interface{}, now time.Time) {
+// topic segment and payload the MQTT payload. The caller has already applied
+// the gate, the observer blacklist and the source allowlist.
+func handleClientRegions(store *Store, cfg *Config, tag, source, collector string, payload []byte, now time.Time) {
 	maxAge := time.Duration(cfg.ClientRegionsDays()) * 24 * time.Hour
-	r, reason := parseClientRegionsReport(collector, msg, now, maxAge)
+	r, reason := parseClientRegionsReport(collector, payload, now, maxAge)
 	if r == nil {
 		log.Printf("MQTT [%s] regions from %.8q dropped: %s", tag, collector, reason)
 		return
@@ -68,32 +102,43 @@ func handleClientRegions(store *Store, cfg *Config, tag, source, collector strin
 	}
 }
 
-// parseClientRegionsReport applies the protocol to one decoded payload.
-// It returns the report, or nil and the reason the whole message is dropped.
-// An invalid position or repeater_clock only drops that field. now is the
-// ingest clock; maxAge is the retention window, past which a report is
-// expired.
-func parseClientRegionsReport(collector string, msg map[string]interface{}, now time.Time, maxAge time.Duration) (*ClientDeclaredRegions, string) {
+// parseClientRegionsReport applies the protocol to one payload. It returns
+// the report, or nil and the reason the whole message is dropped. An invalid
+// position or repeater_clock only drops that field. now is the ingest clock;
+// maxAge is the retention window, past which a report is expired.
+func parseClientRegionsReport(collector string, payload []byte, now time.Time, maxAge time.Duration) (*ClientDeclaredRegions, string) {
 	// Identity is the topic key, never a payload field, and a full key so
 	// that admin delete-client-rx (exact 64 hex) can always reach the rows.
 	collector = strings.ToLower(strings.TrimSpace(collector))
 	if !clientRxPubkeyRe.MatchString(collector) {
 		return nil, "collector is not a 64-hex key"
 	}
-	target, _ := msg["target"].(string)
+	var p clientRegionsPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, "payload is not a JSON object"
+	}
+	target, _ := decodeRaw[string](p.Target)
 	target = strings.ToLower(strings.TrimSpace(target))
 	if !clientRxPubkeyRe.MatchString(target) {
 		return nil, "target is not a 64-hex key"
 	}
-	rawList, ok := msg["regions"].([]interface{})
+	entries, ok := decodeRaw[[]json.RawMessage](p.Regions)
 	if !ok {
 		return nil, "regions missing or not an array"
 	}
-	list, reason := normalizeDeclaredRegions(rawList)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name, ok := decodeRaw[string](e)
+		if !ok {
+			return nil, "non-string region entry"
+		}
+		names = append(names, name)
+	}
+	list, reason := normalizeDeclaredRegions(names)
 	if reason != "" {
 		return nil, reason
 	}
-	ts, _ := msg["timestamp"].(string)
+	ts, _ := decodeRaw[string](p.Timestamp)
 	reported, ok := parseReportTS(ts)
 	if !ok {
 		return nil, "timestamp missing or not RFC3339 with a zone"
@@ -104,8 +149,8 @@ func parseClientRegionsReport(collector string, msg map[string]interface{}, now 
 	if reported.Before(now.Add(-maxAge)) {
 		return nil, "timestamp older than the retention window"
 	}
-	truncated, _ := msg["truncated"].(bool)
-	lat, lon, acc := declaredRegionsPosition(msg["gps"])
+	truncated, _ := decodeRaw[bool](p.Truncated)
+	lat, lon, acc := declaredRegionsPosition(p.GPS)
 	return &ClientDeclaredRegions{
 		Collector:     collector,
 		Target:        target,
@@ -113,39 +158,35 @@ func parseClientRegionsReport(collector string, msg map[string]interface{}, now 
 		Truncated:     truncated,
 		ReportedAt:    reported.UTC().Format(clientRegionsTimeLayout),
 		IngestedAt:    now.UTC().Format(clientRegionsTimeLayout),
-		RepeaterClock: declaredRegionsRepeaterClock(msg["repeater_clock"]),
+		RepeaterClock: declaredRegionsRepeaterClock(p.RepeaterClock),
 		Lat:           lat,
 		Lon:           lon,
 		PosAccM:       acc,
 	}, ""
 }
 
-// normalizeDeclaredRegions turns the payload's region list into the stored
+// normalizeDeclaredRegions turns the payload's region names into the stored
 // form, or returns why the list is malformed. NUL padding (the reply is
 // block-cipher padded) and surrounding whitespace are trimmed and
 // padding-only entries skipped. "*" and private "$name" regions stay as
 // they are, and any other name gets the "#" convention of
 // regions.Normalize. Case is kept (the firmware matches with strcmp), and
 // duplicates go, first order kept. An empty result is a valid answer.
-func normalizeDeclaredRegions(raw []interface{}) ([]string, string) {
+func normalizeDeclaredRegions(raw []string) ([]string, string) {
 	if len(raw) > maxDeclaredRegionEntries {
 		return nil, "too many regions"
 	}
 	out := make([]string, 0, len(raw))
 	seen := make(map[string]bool, len(raw))
 	csvBytes, names := 0, 0
-	for _, e := range raw {
-		s, ok := e.(string)
-		if !ok {
-			return nil, "non-string region entry"
-		}
+	for _, s := range raw {
 		s = strings.TrimSpace(strings.TrimRight(s, "\x00\t\n\v\f\r "))
 		if s == "" {
 			continue
 		}
 		bare := strings.TrimPrefix(s, "#")
-		if bare == "" || !utf8.ValidString(bare) || len(bare) > maxDeclaredRegionNameBytes {
-			return nil, "region name empty, invalid UTF-8 or over 30 bytes"
+		if bare == "" || len(bare) > maxDeclaredRegionNameBytes {
+			return nil, "region name empty or over 30 bytes"
 		}
 		if strings.IndexFunc(bare, func(r rune) bool { return r == ',' || unicode.IsControl(r) }) >= 0 {
 			return nil, "region name contains a comma or control character"
@@ -169,20 +210,20 @@ func normalizeDeclaredRegions(raw []interface{}) ([]string, string) {
 
 // declaredRegionsPosition validates the optional gps object. It returns no
 // position for anything invalid, and an accuracy only together with the
-// position it qualifies.
-func declaredRegionsPosition(v interface{}) (lat, lon, acc *float64) {
-	gps, ok := v.(map[string]interface{})
+// position it qualifies. JSON has no NaN or Inf, so a decoded number is finite.
+func declaredRegionsPosition(raw json.RawMessage) (lat, lon, acc *float64) {
+	gps, ok := decodeRaw[clientRegionsGPS](raw)
 	if !ok {
 		return nil, nil, nil
 	}
-	la, laOK := gps["lat"].(float64)
-	lo, loOK := gps["lon"].(float64)
+	la, laOK := decodeRaw[float64](gps.Lat)
+	lo, loOK := decodeRaw[float64](gps.Lon)
 	if !laOK || !loOK || la < -90 || la > 90 || lo < -180 || lo > 180 || (la == 0 && lo == 0) {
 		return nil, nil, nil
 	}
-	if raw, present := gps["acc_m"]; present {
-		a, ok := raw.(float64)
-		if !ok || math.IsNaN(a) || a < 0 || a > maxDeclaredPosAccM {
+	if rawPresent(gps.AccM) {
+		a, ok := decodeRaw[float64](gps.AccM)
+		if !ok || a < 0 || a > maxDeclaredPosAccM {
 			return nil, nil, nil
 		}
 		acc = &a
@@ -192,8 +233,8 @@ func declaredRegionsPosition(v interface{}) (lat, lon, acc *float64) {
 
 // declaredRegionsRepeaterClock keeps the repeater's RTC reading (uint32
 // seconds) as reported. Anything else, absent included, is nil, never 0.
-func declaredRegionsRepeaterClock(v interface{}) *int64 {
-	f, ok := v.(float64)
+func declaredRegionsRepeaterClock(raw json.RawMessage) *int64 {
+	f, ok := decodeRaw[float64](raw)
 	if !ok || f != math.Trunc(f) || f < 0 || f > math.MaxUint32 {
 		return nil
 	}

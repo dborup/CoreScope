@@ -772,7 +772,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
 				return
 			}
-			handleClientRegions(store, cfg, tag, source.Name, parts[2], msg, time.Now())
+			handleClientRegions(store, cfg, tag, source.Name, parts[2], m.Payload(), time.Now())
 			return
 		}
 		if cfg.ClientRxCoverageEnabled() && len(parts) >= 4 && parts[3] == "packets" {
