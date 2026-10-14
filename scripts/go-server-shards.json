@@ -1,0 +1,72 @@
+{
+  "version": 2,
+  "shards": 3,
+  "package": "github.com/corescope/server",
+  "metadata": {
+    "generatedBy": "scripts/rebalance-go-server-shards.js",
+    "method": "Top-level go test -json Elapsed from GitHub runners, mean per Test over the source runs. The cheapest entries fill catch-all shard 3 up to 1/3 of the total; the rest are pinned longest-first to the lightest of shards 1..2. Unpinned and new Tests run in shard 3.",
+    "projectedTestSeconds": [
+      319.31,
+      325.1,
+      298.805
+    ],
+    "unmeasuredEntries": 5,
+    "sources": [
+      {
+        "input": "run-38529224242-attempt-1",
+        "runContexts": [],
+        "files": [
+          {
+            "file": "go-server-1/test.jsonl",
+            "sha256": "8b9efbdbf04b29108810c68689ced30373c7e7b3d69fcc3628f01849bf507e84"
+          },
+          {
+            "file": "go-server-2/test.jsonl",
+            "sha256": "f7d52b39a8ad8f96caa0e5368a11c4c3754cea5495ce07192f1850a33d07cf9c"
+          },
+          {
+            "file": "go-server-3/test.jsonl",
+            "sha256": "39f46b4ced75dc44c413f89e4ac4d1093b2e85252b5fd35aa42ba98ca4a90d45"
+          }
+        ]
+      },
+      {
+        "input": "run-38529224242-attempt-2",
+        "runContexts": [
+          {
+            "runId": "38529224242",
+            "attempt": "2",
+            "headSha": "c2883a44fede3eb5be8e57a60927ae99a811d940"
+          }
+        ],
+        "files": [
+          {
+            "file": "go-server-1/test.jsonl",
+            "sha256": "236b092944beeb3862acc9012e26d07b999cbcdde0fc25d334e584d4f8189c5a"
+          },
+          {
+            "file": "go-server-2/test.jsonl",
+            "sha256": "bcac2afa27769bb340de9a990ac79dbbdb2dfbd7c2b6e81b07a78ef2626803b3"
+          },
+          {
+            "file": "go-server-3/test.jsonl",
+            "sha256": "3e07521db8e2db95d5fd580b789408acf6cab035699978bf0476fcda76f14da3"
+          }
+        ]
+      }
+    ]
+  },
+  "pinned": [
+    {"name":"TestHotStartup_ConcurrentQueryDuringBackgroundLoad","shard":1,"samplesSeconds":[320.45,280.66],"meanSeconds":300.555},
+    {"name":"TestDifferentRegionsAreNeverMixed_109","shard":1,"samplesSeconds":[14.15,23.36],"meanSeconds":18.755},
+    {"name":"TestChannelsSQL_PlanWithStats","shard":2,"samplesSeconds":[59.96,40.17],"meanSeconds":50.065},
+    {"name":"TestTrackedBytesTracksTheHeap_113","shard":2,"samplesSeconds":[34.89,59.45],"meanSeconds":47.17},
+    {"name":"TestNodeAdvertRoutes_StreamMatchesWindowOracle","shard":2,"samplesSeconds":[34.81,58.93],"meanSeconds":46.87},
+    {"name":"TestGetChannels_PinnedMatchesUnpinned","shard":2,"samplesSeconds":[53.39,36.43],"meanSeconds":44.91},
+    {"name":"TestNodeAdvertRoutes_FloodCountMatchesCountFloodAdvertsForNode","shard":2,"samplesSeconds":[27.42,45.63],"meanSeconds":36.525},
+    {"name":"TestGetChannelMessagesPerfLargeChannel","shard":2,"samplesSeconds":[42.26,29.04],"meanSeconds":35.65},
+    {"name":"TestFloodAdvertCountSQL_Plan","shard":2,"samplesSeconds":[17.9,30.32],"meanSeconds":24.11},
+    {"name":"TestFloodAdvertCountSQL_MatchesUnpinned","shard":2,"samplesSeconds":[25.71,17.17],"meanSeconds":21.44},
+    {"name":"Test1690_BackgroundLoadHonesty","shard":2,"samplesSeconds":[16.11,20.61],"meanSeconds":18.36}
+  ]
+}

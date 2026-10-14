@@ -289,6 +289,7 @@ run test-regions-map.js
 run test-test-all.js
 run test-ci-parallel-gates.js
 run test-ci-shards.js
+run test-ci-go-shards.js
 
 echo ""
 echo "═══════════════════════════════════════"
