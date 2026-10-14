@@ -678,6 +678,12 @@
     if (!o) return id;
     return o.name;
   }
+  // Observer name as the table cell shows it: cut to `maxLen` characters
+  // unless Full Names is on. Escaped, ready for innerHTML (#217).
+  function obsCellName(id, maxLen) {
+    const name = obsNameOnly(id);
+    return escapeHtml(showFullNames ? name : truncate(name, maxLen));
+  }
   // #1189 R1 mesh-operator feedback: in a grouped row the old cell showed ONE
   // observer's IATA + `+N` — operators couldn't tell whether the N additional
   // observers were SAME-region (redundant copies) or CROSS-region (interesting
@@ -802,6 +808,18 @@
   // declare both (test-issue-121/147-…, test-issue-96-hide-control.js).
   let savedHideControl = readHideControlPref(null, readStoredHideControl());
   let hideControl = savedHideControl;
+  // #217: the +N path popover controller while the packets page is up
+  // (_wirePathOverflowPopover); declared here so _pktEsc can see it.
+  let _pathPopover = null;
+  // #217 "Full Names": observer and path hop names untruncated. showFullNames is
+  // what this view shows; savedFullNames is the saved browser choice. A
+  // ?fullNames=1|0 link changes only the view, never the saved choice, and
+  // buildPacketsQuery reads both (like hideControl above).
+  function readStoredFullNames() {
+    try { return localStorage.getItem('meshcore-full-names') === 'true'; } catch (_) { return false; }
+  }
+  let savedFullNames = readStoredFullNames();
+  let showFullNames = savedFullNames;
   let packetLoadGeneration = 0;
   let wsHandler = null;
   let packetsPaused = false;
@@ -889,6 +907,10 @@
     // reload of this URL still shows CONTROL (#211).
     if (hideControl) parts.push('hideControl=1');
     else if (savedHideControl) parts.push('hideControl=0');
+    // #217: fullNames=1 while on; an explicit fullNames=0 stays while the saved
+    // choice is on, so a reload of this URL shows what the link showed.
+    if (showFullNames) parts.push('fullNames=1');
+    else if (savedFullNames) parts.push('fullNames=0');
     // Sort state (#749) — encode as 'col[:asc]'; default 'time:desc' is omitted.
     if (_packetSortColumn) {
       var sortDefault = _packetSortColumn === 'time' && _packetSortDirection === 'desc';
@@ -1346,6 +1368,8 @@
   // a DOM no-op (at most one listener) and destroy() can remove it.
   function _pktEsc(e) {
     if (e.key === 'Escape') {
+      // #217: an open +N path popover takes this Escape; the detail panel stays.
+      if (_pathPopover && _pathPopover.isOpen()) { _pathPopover.close(); return; }
       closeDetailPanel();
     }
   }
@@ -1445,6 +1469,10 @@
     var _storedHideControl = readStoredHideControl();
     savedHideControl = readHideControlPref(null, _storedHideControl);
     hideControl = readHideControlPref(_initUrlParams.get('hideControl'), _storedHideControl);
+    // #217 — ?fullNames=1|0 wins over the saved choice for this view only.
+    savedFullNames = readStoredFullNames();
+    var _urlFullNames = _initUrlParams.get('fullNames');
+    showFullNames = _urlFullNames === '1' ? true : _urlFullNames === '0' ? false : savedFullNames;
     // #749 — restore sort state from URL (overrides localStorage).
     var _urlSort = _initUrlParams.get('sort');
     if (_urlSort && window.URLState) {
@@ -1678,6 +1706,8 @@
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     if (_tableSortInstance) { _tableSortInstance.destroy(); _tableSortInstance = null; }
+    // #217: the path popover's document listeners and any open popover.
+    if (_pathPopover) _pathPopover.destroy();
     detachVScrollListener();
     clearTimeout(_wsRenderTimer);
     if (_wsRafId) { cancelAnimationFrame(_wsRafId); _wsRafId = null; }
@@ -1980,10 +2010,11 @@
             <div class="col-toggle-menu" id="colToggleMenu"></div>
           </div>
           <button class="btn btn-icon${showHexHashes ? ' active' : ''}" id="hexHashToggle" title="Show raw hex hash prefixes instead of resolved node names in the path column">Hex Paths</button>
+          <button class="btn btn-icon${showFullNames ? ' active' : ''}" id="fullNamesToggle" title="Show node names in full in the Observer and Path columns instead of shortening them" aria-pressed="${showFullNames}">Full Names</button>
         </div>
       </div>
       <div class="path-symbols-legend-wrapper">${(window.HopDisplay && HopDisplay.renderPathSymbolsLegend) ? HopDisplay.renderPathSymbolsLegend() : ''}</div>
-      <div class="table-fluid-wrap"><table class="data-table" id="pktTable">
+      <div class="table-fluid-wrap"><table class="data-table${showFullNames ? ' pkt-full-names' : ''}" id="pktTable">
         <thead><tr>
           <th scope="col" class="col-expand" data-priority="1"></th><th scope="col" class="col-region" data-sort-key="region" data-priority="3">Region</th><th scope="col" class="col-time" data-sort-key="time" data-type="date" data-priority="1">Time</th><th scope="col" class="col-hash" data-sort-key="hash" data-priority="3">Hash</th><th scope="col" class="col-size" data-sort-key="size" data-type="numeric" data-priority="4">Size</th>
           <th scope="col" class="col-hashsize" data-sort-key="hb" data-type="numeric" data-priority="5">HB</th>
@@ -2059,7 +2090,8 @@
     if (window.FilterUX && typeof window.FilterUX.init === 'function') {
       window.FilterUX.init();
     }
-    // #1124 (MAJOR-1): wire the path overflow popover (delegated; idempotent).
+    // #1124 (MAJOR-1): wire the path overflow popover on the table body
+    // (#217: per visit, torn down by destroy()).
     _wirePathOverflowPopover();
 
     // --- Observer multi-select ---
@@ -2441,6 +2473,17 @@
       renderTableRows();
     });
 
+    document.getElementById('fullNamesToggle').addEventListener('click', function () {
+      showFullNames = !showFullNames;
+      try { localStorage.setItem('meshcore-full-names', String(showFullNames)); savedFullNames = showFullNames; } catch (_) {}
+      this.classList.toggle('active', showFullNames);
+      this.setAttribute('aria-pressed', String(showFullNames));
+      pktTable.classList.toggle('pkt-full-names', showFullNames);
+      updatePacketsUrl();
+      // Cells and path overflow depend on the names: rebuild the rows.
+      renderTableRows();
+    });
+
     // Node name filter with autocomplete
     const fNode = document.getElementById('fNode');
     const fNodeDrop = document.getElementById('fNodeDropdown');
@@ -2692,7 +2735,7 @@
           <td class="col-hashsize mono"${_grpHashSizeTitle}>${groupHashBytes}</td>
           <td class="col-type" data-filter-field="type" data-filter-value="${escapeHtml(groupTypeName || '')}">${p.payload_type != null ? `<span class="badge badge-${groupTypeClass}">${groupTypeName}</span>${transportBadge(p.route_type, p.scope_name)}` : '—'}</td>
           <td class="col-scope">${scopeCellHtml(p.route_type, p.scope_name)}</td>
-          <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(headerObserverId) || '')}">${isSingle ? escapeHtml(truncate(obsNameOnly(headerObserverId), 16)) + obsIataBadge(p) : escapeHtml(truncate(obsNameOnly(headerObserverId), 10)) + groupedObserverIataBadgesHtml(p)}</td>
+          <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(headerObserverId) || '')}">${isSingle ? obsCellName(headerObserverId, 16) + obsIataBadge(p) : obsCellName(headerObserverId, 10) + groupedObserverIataBadgesHtml(p)}</td>
           <td class="col-path"><span class="path-hops">${groupPathStr}</span></td>
           <td class="col-rpt">${p.observation_count > 1 ? '<span class="badge badge-obs" title="Seen ' + p.observation_count + ' times"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-eye"/></svg> ' + p.observation_count + '</span>' : (isSingle ? '' : p.count)}</td>
           <td class="col-details"><span class="col-details-clip">${getDetailPreview(getParsedDecoded(p))}</span></td>
@@ -2727,7 +2770,7 @@
               <td class="col-hashsize mono"${_cHashSizeTitle}>${childHashBytes}</td>
               <td class="col-type" data-filter-field="type" data-filter-value="${escapeHtml(typeName || '')}"><span class="badge badge-${typeClass}">${typeName}</span>${transportBadge(c.route_type, c.scope_name)}</td>
               <td class="col-scope">${scopeCellHtml(c.route_type, c.scope_name)}</td>
-              <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(c.observer_id) || '')}">${escapeHtml(truncate(obsNameOnly(c.observer_id), 16))}${obsIataBadge(c)}</td>
+              <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(c.observer_id) || '')}">${obsCellName(c.observer_id, 16)}${obsIataBadge(c)}</td>
               <td class="col-path"><span class="path-hops">${childPathStr}</span></td>
               <td class="col-rpt"></td>
               <td class="col-details"><span class="col-details-clip">${getDetailPreview(getParsedDecoded(c))}</span></td>
@@ -2764,7 +2807,7 @@
         <td class="col-hashsize mono"${_flatHashSizeTitle}>${hashBytes}</td>
         <td class="col-type" data-filter-field="type" data-filter-value="${escapeHtml(typeName || '')}"><span class="badge badge-${typeClass}">${typeName}</span>${transportBadge(p.route_type, p.scope_name)}</td>
         <td class="col-scope">${scopeCellHtml(p.route_type, p.scope_name)}</td>
-        <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(p.observer_id) || '')}">${escapeHtml(truncate(obsNameOnly(p.observer_id), 16))}${obsIataBadge(p)}</td>
+        <td class="col-observer" data-filter-field="observer" data-filter-value="${escapeHtml(obsNameOnly(p.observer_id) || '')}">${obsCellName(p.observer_id, 16)}${obsIataBadge(p)}</td>
         <td class="col-path"><span class="path-hops">${pathStr}</span></td>
         <td class="col-rpt"></td>
         <td class="col-details"><span class="col-details-clip">${detail}</span></td>
@@ -2904,6 +2947,7 @@
         }
       }
       if (window.__PERF_LOG_RENDER) console.log('[perf] renderVisibleRows: full rebuild %d entries, %.2fms', endIdx - startIdx, performance.now() - _rvr_t0);
+      _closeStalePathPopover();
       _finalizePathOverflow(tbody);
       // #1128 (Bug 1): hop-resolver mutates chip text from hex prefix to a
       // longer node name AFTER the initial finalize pass — chips that fit at
@@ -2944,6 +2988,7 @@
       bottomSpacer.insertAdjacentHTML('beforebegin', html);
     }
     if (window.__PERF_LOG_RENDER) console.log('[perf] renderVisibleRows: incremental head=%d tail=%d, %.2fms', headRowCount, tailRowCount, performance.now() - _rvr_t0);
+    _closeStalePathPopover();
     _finalizePathOverflow(tbody);
     _scheduleReFinalizePathOverflow(tbody);
   }
@@ -2978,10 +3023,10 @@
         var pill = document.createElement('span');
         pill.className = 'path-overflow-pill';
         pill.textContent = '+' + hidden;
-        pill.title = hidden + ' more hop' + (hidden === 1 ? '' : 's') + ' — click to view';
+        // No native title: hovering shows the full-path popover instead.
         pill.setAttribute('role', 'button');
         pill.setAttribute('tabindex', '0');
-        pill.setAttribute('aria-label', hidden + ' more hops');
+        pill.setAttribute('aria-label', hidden + ' more hop' + (hidden === 1 ? '' : 's') + ', show the full path');
         host.appendChild(pill);
       }
       host.dataset.overflowChecked = '1';
@@ -3030,72 +3075,153 @@
     }
   }
 
-  // Popover body for a .path-hops host: clone all children except the pill
-  // and (#165, upstream 2557894d) the path's ambiguity summary, preserving
-  // rendered chips/arrows. The title counts the hops listed (PR #185 F5).
+  // Popover body for a .path-hops host: the full path as a numbered list, one
+  // hop per line, in path order, each chip keeping its .path-hops styling. A hop
+  // is a child that is not an arrow, the +N pill or (#165) the path's
+  // ambiguity summary, so a hop-group wrapper (pill plus its warning buttons)
+  // counts once. The title counts those hops (#185 F5).
   function _pathPopoverHtml(host) {
-    var body = '', hops = 0;
+    var items = '', hops = 0;
     var kids = Array.prototype.slice.call(host.children);
     for (var i = 0; i < kids.length; i++) {
       var cl = kids[i].classList;
-      if (cl.contains('path-overflow-pill') || cl.contains('hop-path-warn')) continue;
-      if (!cl.contains('arrow')) hops++;
-      body += kids[i].outerHTML;
+      if (cl.contains('path-overflow-pill') || cl.contains('hop-path-warn') || cl.contains('arrow')) continue;
+      hops++;
+      items += '<li><span class="path-popover-idx">' + hops + '</span><span class="path-hops">' + kids[i].outerHTML + '</span></li>';
     }
-    return '<div class="path-popover-title">Full path (' + hops + (hops === 1 ? ' hop' : ' hops') + ')</div><div>' + body + '</div>';
+    return '<div class="path-popover-title">Full path (' + hops + (hops === 1 ? ' hop' : ' hops') + ')</div><ol class="path-popover-list">' + items + '</ol>';
   }
 
-  // Delegated click for path overflow pills — show popover of full path.
+  // Below the pill by default (#1128 Bug 2), above it when there is no room
+  // below; kept inside the viewport horizontally.
+  function _positionPathPopover(pop, pill) {
+    var r = pill.getBoundingClientRect();
+    var popH = pop.getBoundingClientRect().height;
+    var roomBelow = window.innerHeight - r.bottom;
+    var top = (roomBelow < popH + 12 && r.top > popH + 12)
+      ? window.scrollY + r.top - popH - 4
+      : window.scrollY + r.bottom + 4;
+    pop.style.top = top + 'px';
+    pop.style.left = (window.scrollX + r.left) + 'px';
+    var pr = pop.getBoundingClientRect();
+    if (pr.right > window.innerWidth - 8) {
+      pop.style.left = Math.max(8, window.scrollX + window.innerWidth - pr.width - 8) + 'px';
+    }
+  }
+
+  // The open path popover lives on <body>, outside the table, so neither row
+  // re-renders nor page changes remove it. _pathPopover is the controller
+  // while the packets page is up: close(true) closes only a popover whose pill
+  // left the DOM (its row scrolled out of the virtual window), close() always.
+  function _closeStalePathPopover() { if (_pathPopover) _pathPopover.close(true); }
+
+  // Delegated handlers for the +N pills, on the table body. Hovering or focusing
+  // a pill shows the full path; moving into the popover keeps it open. A click,
+  // Enter or Space pins it until an outside press or Escape; a second click or
+  // Enter closes it. Nothing is added to document while no popover is open: the
+  // table body's listeners go with it, the popover's own with the popover, and
+  // the outside-press listener only lives while a popover does (#419, #437,
+  // #282). Escape is handled by _pktEsc, the page's one document keydown.
   function _wirePathOverflowPopover() {
-    if (window.__pathOverflowWired) return;
-    window.__pathOverflowWired = true;
-    var existing = null;
+    var tbody = document.getElementById('pktBody');
+    if (!tbody) return;
+    if (_pathPopover) _pathPopover.destroy();
+    var HOVER_DELAY_MS = 120, HIDE_GRACE_MS = 150;
+    var existing = null, anchor = null, pinned = false, showTimer = null, hideTimer = null;
+    function pillOf(el) { return el && el.closest ? el.closest('.path-overflow-pill') : null; }
+    function inPopover(el) { return !!(existing && el && existing.contains(el)); }
+    // pillOf() is how the E2E tells these document listeners from other pages'.
+    function onOutsidePress(ev) { if (existing && !inPopover(ev.target) && !pillOf(ev.target)) dismiss(); }
     function dismiss() {
+      clearTimeout(showTimer);
+      clearTimeout(hideTimer);
+      document.removeEventListener('mousedown', onOutsidePress, true);
       if (existing) { existing.remove(); existing = null; }
-      document.removeEventListener('mousedown', onDoc, true);
-      document.removeEventListener('keydown', onKey, true);
+      if (anchor) { anchor.removeAttribute('aria-describedby'); anchor = null; }
+      pinned = false;
     }
-    function onDoc(ev) {
-      if (existing && !existing.contains(ev.target) && !ev.target.classList.contains('path-overflow-pill')) dismiss();
-    }
-    function onKey(ev) { if (ev.key === 'Escape') dismiss(); }
-    document.addEventListener('click', function(ev) {
-      var pill = ev.target.closest && ev.target.closest('.path-overflow-pill');
-      if (!pill) return;
-      ev.stopPropagation();
-      var host = pill.closest('.path-hops');
-      if (!host) return;
+    function open(pill, pin) {
+      clearTimeout(showTimer);
+      clearTimeout(hideTimer);
+      if (existing && anchor === pill) { if (pin) pinned = true; return; }
       dismiss();
+      var host = pill.closest('.path-hops');
+      if (!host || !pill.isConnected) return;
       var pop = document.createElement('div');
       pop.className = 'path-popover';
+      pop.id = 'pathPopover';
+      pop.setAttribute('role', 'tooltip');
       pop.innerHTML = _pathPopoverHtml(host);
+      // Moving into the popover keeps it open; leaving it closes it.
+      pop.addEventListener('mouseover', function () { clearTimeout(hideTimer); });
+      pop.addEventListener('mouseout', function (ev) {
+        if (!inPopover(ev.relatedTarget) && !(anchor && pillOf(ev.relatedTarget) === anchor)) scheduleHide();
+      });
       document.body.appendChild(pop);
-      var r = pill.getBoundingClientRect();
-      // #1128 (Bug 2): position below by default, but flip ABOVE when there
-      // isn't enough room — keeps the popover anchored to the pill instead of
-      // hanging arbitrarily over adjacent rows / off-screen.
-      var pr0 = pop.getBoundingClientRect();
-      var popH = pr0.height;
-      var roomBelow = window.innerHeight - r.bottom;
-      var top;
-      if (roomBelow < popH + 12 && r.top > popH + 12) {
-        top = window.scrollY + r.top - popH - 4;
-      } else {
-        top = window.scrollY + r.bottom + 4;
-      }
-      var left = window.scrollX + r.left;
-      pop.style.top = top + 'px';
-      pop.style.left = left + 'px';
-      var pr = pop.getBoundingClientRect();
-      if (pr.right > window.innerWidth - 8) {
-        pop.style.left = Math.max(8, window.scrollX + window.innerWidth - pr.width - 8) + 'px';
-      }
+      _positionPathPopover(pop, pill);
       existing = pop;
-      setTimeout(function() {
-        document.addEventListener('mousedown', onDoc, true);
-        document.addEventListener('keydown', onKey, true);
-      }, 0);
-    });
+      anchor = pill;
+      pinned = !!pin;
+      pill.setAttribute('aria-describedby', pop.id);
+      document.addEventListener('mousedown', onOutsidePress, true);
+    }
+    function scheduleHide() {
+      clearTimeout(showTimer);
+      if (pinned || !existing) return;
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(dismiss, HIDE_GRACE_MS);
+    }
+    function toggle(pill) {
+      if (existing && anchor === pill && pinned) dismiss(); else open(pill, true);
+    }
+    var on = {
+      mouseover: function (ev) {
+        var pill = pillOf(ev.target);
+        if (!pill) return;
+        clearTimeout(hideTimer);
+        if (existing && anchor === pill) return;
+        clearTimeout(showTimer);
+        showTimer = setTimeout(function () { open(pill, false); }, HOVER_DELAY_MS);
+      },
+      mouseout: function (ev) {
+        if (!pillOf(ev.target)) return;
+        var to = ev.relatedTarget;
+        if (inPopover(to) || (anchor && pillOf(to) === anchor)) return;
+        scheduleHide();
+      },
+      focusin: function (ev) { var pill = pillOf(ev.target); if (pill) open(pill, false); },
+      focusout: function (ev) { if (pillOf(ev.target) && !inPopover(ev.relatedTarget)) scheduleHide(); },
+      // Capture phase: the row's own click/keydown handler on this same
+      // element would otherwise select the row first.
+      click: function (ev) {
+        var pill = pillOf(ev.target);
+        if (!pill) return;
+        ev.stopPropagation();
+        toggle(pill);
+      },
+      keydown: function (ev) {
+        var pill = pillOf(ev.target);
+        if (!pill || (ev.key !== 'Enter' && ev.key !== ' ')) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        toggle(pill);
+      },
+    };
+    var capture = { click: true, keydown: true };
+    Object.keys(on).forEach(function (t) { tbody.addEventListener(t, on[t], !!capture[t]); });
+    _pathPopover = {
+      isOpen: function () { return !!existing; },
+      close: function (onlyIfStale) {
+        if (!existing) return;
+        if (onlyIfStale && anchor && anchor.isConnected) return;
+        dismiss();
+      },
+      destroy: function () {
+        dismiss();
+        Object.keys(on).forEach(function (t) { tbody.removeEventListener(t, on[t], !!capture[t]); });
+        _pathPopover = null;
+      },
+    };
   }
 
   // Attach/detach scroll listener for virtual scrolling
@@ -4592,6 +4718,7 @@
       buildFlatRowHtml,
       _calcVisibleRange,
       buildPacketsParams,
+      buildPacketsQuery,
       applyObserverFilter,
       readHideControlPref,
       filterHiddenControl,
@@ -4602,6 +4729,9 @@
       _setPackets: function(p) { packets = p; },
       _packetHashes: function() { return packets.map(p => p.hash); },
       _setFilter: function(k, v) { filters[k] = v; },
+      _setFullNames: function(on, saved) { showFullNames = !!on; savedFullNames = saved === undefined ? !!on : !!saved; },
+      _setObservers: function(list) { observers = list; observerMap = new Map(list.map(o => [o.id, o])); },
+      _pathPopoverHtml,
       _setExpanded: function(hash, on) { if (on) expandedHashes.add(hash); else expandedHashes.delete(hash); },
       // #259: at <= 600 px groupIsExpandedInView() renders a hash that *is* in
       // expandedHashes exactly like a collapsed row, so the DOM alone can no

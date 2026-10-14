@@ -241,6 +241,7 @@ run test-issue-1166-first-seen-column.js
 run test-issue-199-missing-node.js
 run test-issue-1189-composed-cell.js
 run test-issue-1189-live-iata-badge.js
+run test-issue-217-full-names.js
 run test-issue-1415-packets-layout.js
 run test-issue-1488-marker-stroke-vars.js
 run test-issue-1496-reset-all-complete.js
