@@ -50,29 +50,29 @@ services:
       #
       # (drop it in-between the :80 mapping and the pprof ports below).
       # pprof host ports. PPROF_BIND is the host interface they are
-      # published on. Leave it EMPTY (the shipped default) and each mapping
-      # renders with no host interface at all — byte for byte what this file
-      # always had, published on both IPv4 (0.0.0.0) and IPv6 ([::]), so a
-      # deploy that profiles this host remotely keeps working. An explicit
-      # PPROF_BIND=0.0.0.0 would NOT be the same: it publishes IPv4 only.
-      # Set PPROF_BIND=127.0.0.1 to require an SSH tunnel instead. The two
-      # ports stay distinct: 6060 is the server's listener, 6061 the
+      # published on, 127.0.0.1 unless set (#441): /debug/pprof/ is
+      # unauthenticated, so reach it with an SSH tunnel
+      # (ssh -L 6060:127.0.0.1:6060 -L 6061:127.0.0.1:6061 you@host), or
+      # set PPROF_BIND=0.0.0.0 to publish it on every IPv4 interface again.
+      # The two ports stay distinct: 6060 is the server's listener, 6061 the
       # ingestor's, and collapsing them would profile only whichever
       # process won the bind.
       #
-      # NOTE: narrowing the IN-CONTAINER listener with PPROF_HOST is a
-      # different setting and is incompatible with publishing these ports —
-      # docker's proxy reaches the container by its network address, not
-      # its loopback. Use PPROF_BIND for a published port, PPROF_HOST only
-      # when the process runs without a port mapping.
-      - "${PPROF_BIND:+${PPROF_BIND}:}6060:6060"   # pprof server
-      - "${PPROF_BIND:+${PPROF_BIND}:}6061:6061"   # pprof ingestor
+      # The in-container listener is pinned to every interface below
+      # (PPROF_HOST=0.0.0.0): docker's proxy reaches the container by its
+      # network address, not its loopback, so a loopback listener in here
+      # would make these ports dead. PPROF_BIND alone narrows them.
+      - "${PPROF_BIND:-127.0.0.1}:6060:6060"   # pprof server
+      - "${PPROF_BIND:-127.0.0.1}:6061:6061"   # pprof ingestor
     volumes:
       - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
       - caddy-data-staging-go:/data/caddy
     environment:
       - NODE_ENV=staging
       - ENABLE_PPROF=true
+      # Every interface INSIDE the container, so the published pprof ports
+      # above reach it; PPROF_BIND decides who on the host can (#441).
+      - PPROF_HOST=0.0.0.0
       # Default TRUE: the standalone mqtt-broker container owns MQTT on
       # the staging VM (semantic flip vs. pre-v3.7). Override to false
       # only if you intend to run the legacy in-container mosquitto
@@ -90,7 +90,6 @@ services:
       - MQTT_BROKER=${MQTT_BROKER:-}
       - MQTT_TOPIC=${MQTT_TOPIC:-}
       - MQTT_SOURCE_STRICT=${MQTT_SOURCE_STRICT:-}
-      - PPROF_HOST=${PPROF_HOST:-}
       - PPROF_HOST_SERVER=${PPROF_HOST_SERVER:-}
       - PPROF_HOST_INGESTOR=${PPROF_HOST_INGESTOR:-}
       - PPROF_PORT=${PPROF_PORT:-}

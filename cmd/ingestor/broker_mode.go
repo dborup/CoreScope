@@ -2,30 +2,25 @@ package main
 
 // Broker-mode diagnostics (#372).
 //
-// CoreScope ships a bundled mosquitto that an operator can turn off with
-// DISABLE_MOSQUITTO=true to point the ingestor at their own broker. Two
-// things could go wrong silently in that arrangement:
+// CoreScope ships a bundled mosquitto. It is opt-in (#441): it runs only
+// when DISABLE_MOSQUITTO is a recognised false value, and otherwise the
+// ingestor is expected to reach the operator's own broker. Two things could
+// go wrong silently in that arrangement:
 //
 //  1. Nothing validates the external source. LoadConfig falls back to
 //     mqtt://localhost:1883 when no mqttSources are configured, which is
 //     the bundled broker's address — with the bundled broker off, the
 //     ingestor then connects to nothing and ingest stops with no explanation
 //     beyond a connection error in the log.
-//  2. The value of DISABLE_MOSQUITTO is read differently by different
-//     launchers. docker/entrypoint-go.sh — the only reader inside this
-//     container — disables mosquitto on exactly "true". manage.sh's
-//     is_true() also accepts 1/TRUE/yes/y/on, but it resolves the value
-//     itself: dc_prod/dc_staging swap in docker-compose.no-mosquitto.yml,
-//     which hard-codes DISABLE_MOSQUITTO=true in the container. So a
-//     container that can see "yes" here was started WITHOUT manage.sh, by
-//     a bare `docker compose up` against docker-compose.yml, and the
-//     bundled broker is running even though the operator asked for an
-//     external one.
+//  2. A DISABLE_MOSQUITTO value nobody recognises. docker/entrypoint-go.sh,
+//     manage.sh and this file read the value with one table
+//     (test-fixtures/disable-mosquitto-cases.json), so they agree on every
+//     value, but a typo silently takes the default.
 //
 // This file resolves the mode the way the entrypoint does and reports both
 // hazards as diagnostics. They are diagnostics, not refusals: an install
-// that merely updates must behave exactly as before. MQTT_SOURCE_STRICT
-// turns the errors into a refusal to start for operators who want that.
+// that merely updates must keep starting. MQTT_SOURCE_STRICT turns the
+// errors into a refusal to start for operators who want that.
 //
 // Every broker URL reaches a diagnostic through brokerurl.Mask, and hosts
 // are read out of the masked form, so no password, user name or query token
@@ -61,30 +56,38 @@ type BrokerMode struct {
 	// decided exactly as docker/entrypoint-go.sh decides it.
 	Bundled bool
 	// Raw is the DISABLE_MOSQUITTO value exactly as the environment carries
-	// it — untrimmed, because the entrypoint compares it untrimmed.
+	// it, for diagnostics.
 	Raw string
-	// Ambiguous is true when Raw is neither the exact "true" the entrypoint
-	// requires nor a recognised false value. Such a value leaves the
-	// bundled broker running in this container even though the operator
-	// who typed it probably meant to disable it.
-	Ambiguous bool
+	// Unrecognised is true when Raw is neither a true nor a false spelling,
+	// so the default (bundled broker off) applied.
+	Unrecognised bool
 }
 
 // ResolveBrokerMode reads DISABLE_MOSQUITTO through getenv (os.Getenv in
-// production, a map in tests).
-//
-// The value is compared RAW, not trimmed: docker/entrypoint-go.sh does
-// `[ "${DISABLE_MOSQUITTO:-false}" = "true" ]`, so " true" is not "true" to
-// it and the bundled broker keeps running. Trimming here would report the
-// opposite mode to the one this container is actually in. Such a value can
-// only reach the container through the process environment — manage.sh's
-// own .env reader and docker compose's dotenv parser both trim — which is
-// exactly the case Ambiguous exists to flag.
+// production, a map in tests). Trimmed of POSIX whitespace and compared
+// case-insensitively, true/1/yes/on disable the bundled broker and
+// false/0/no/off enable it; unset, empty and anything else take the
+// default, disabled. docker/entrypoint-go.sh and manage.sh's
+// parse_disable_mosquitto apply the same table.
 func ResolveBrokerMode(getenv func(string) string) BrokerMode {
 	raw := getenv("DISABLE_MOSQUITTO")
-	mode := BrokerMode{Raw: raw, Bundled: raw != "true"}
-	mode.Ambiguous = mode.Bundled && !isClearlyFalse(raw)
+	mode := BrokerMode{Raw: raw}
+	switch strings.ToLower(strings.Trim(raw, " \t\n\v\f\r")) {
+	case "false", "0", "no", "off":
+		mode.Bundled = true
+	case "true", "1", "yes", "on", "":
+	default:
+		mode.Unrecognised = true
+	}
 	return mode
+}
+
+// setting renders the DISABLE_MOSQUITTO value a diagnostic is about.
+func (m BrokerMode) setting() string {
+	if m.Raw == "" {
+		return "DISABLE_MOSQUITTO unset (default true)"
+	}
+	return fmt.Sprintf("DISABLE_MOSQUITTO=%q", m.Raw)
 }
 
 // StrictBrokerSources reports whether MQTT_SOURCE_STRICT asks for broker
@@ -95,22 +98,11 @@ func StrictBrokerSources(getenv func(string) string) bool {
 	return isShellTruthy(strings.TrimSpace(getenv("MQTT_SOURCE_STRICT")))
 }
 
-// isShellTruthy mirrors manage.sh's is_true().
+// isShellTruthy is the truthy set .env.example documents for
+// MQTT_SOURCE_STRICT.
 func isShellTruthy(v string) bool {
 	switch v {
 	case "1", "true", "TRUE", "yes", "YES", "y", "Y", "on", "ON":
-		return true
-	}
-	return false
-}
-
-// isClearlyFalse reports whether a value unambiguously means "keep the
-// bundled broker". Anything outside both this set and the exact "true" is
-// ambiguous: the entrypoint keeps the bundled broker, but the operator who
-// typed it may well have meant the opposite.
-func isClearlyFalse(v string) bool {
-	switch v {
-	case "", "false", "FALSE", "False", "0", "no", "NO", "n", "N", "off", "OFF":
 		return true
 	}
 	return false
@@ -131,14 +123,12 @@ var brokerSchemes = map[string]bool{
 func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted bool) []BrokerDiagnostic {
 	var diags []BrokerDiagnostic
 
-	if mode.Ambiguous {
+	if mode.Unrecognised {
 		diags = append(diags, BrokerDiagnostic{
 			Severity: SeverityWarn,
-			Message: fmt.Sprintf("DISABLE_MOSQUITTO=%q is neither the exact %q the container entrypoint requires nor a recognised false value, "+
-				"so the bundled broker WILL start in this container. A container that sees this value was started by a bare "+
-				"`docker compose up` against docker-compose.yml: ./manage.sh resolves the value itself and swaps in "+
-				"docker-compose.no-mosquitto.yml, which passes the exact %q instead. Set it to %q or %q so every launcher reads it the same way.",
-				mode.Raw, "true", "true", "true", "false"),
+			Message: fmt.Sprintf("DISABLE_MOSQUITTO=%q is not a recognised value (true/1/yes/on or false/0/no/off), "+
+				"so the default applies and the bundled broker is off. Set it to %q to run the bundled broker, or to %q.",
+				mode.Raw, "false", "true"),
 		})
 	}
 
@@ -170,23 +160,25 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 	case sourcesDefaulted:
 		diags = append(diags, BrokerDiagnostic{
 			Severity: SeverityError,
-			Message: "DISABLE_MOSQUITTO=true selects an external MQTT broker, but no mqttSources are configured: " +
+			Message: mode.setting() + " selects an external MQTT broker, but no mqttSources are configured: " +
 				"the ingestor fell back to its built-in mqtt://localhost:1883, which is the bundled broker's address and " +
-				"nothing is listening there. Configure mqttSources in config.json (or set MQTT_BROKER) to the external broker.",
+				"nothing is listening there. Configure mqttSources in config.json (or set MQTT_BROKER) to the external broker, " +
+				"or set DISABLE_MOSQUITTO=false to run the bundled broker (it is opt-in).",
 		})
 	case usable == 0:
 		// Every source was malformed; the errors above already say so.
 	case loopback == usable:
 		diags = append(diags, BrokerDiagnostic{
 			Severity: SeverityError,
-			Message: fmt.Sprintf("DISABLE_MOSQUITTO=true disables the bundled broker, but all %d configured mqtt source(s) point at loopback (%s): "+
-				"nothing is listening there. Point them at the external broker's address.", usable, maskedBrokerList(sources)),
+			Message: fmt.Sprintf("%s disables the bundled broker, but all %d configured mqtt source(s) point at loopback (%s): "+
+				"nothing is listening there. Point them at the external broker's address, or set DISABLE_MOSQUITTO=false to run the bundled broker.",
+				mode.setting(), usable, maskedBrokerList(sources)),
 		})
 	case loopback > 0:
 		diags = append(diags, BrokerDiagnostic{
 			Severity: SeverityWarn,
-			Message: fmt.Sprintf("DISABLE_MOSQUITTO=true disables the bundled broker, so %d of %d mqtt source(s) pointing at loopback cannot connect (%s); "+
-				"the remaining source(s) still ingest.", loopback, usable, maskedBrokerList(sources)),
+			Message: fmt.Sprintf("%s disables the bundled broker, so %d of %d mqtt source(s) pointing at loopback cannot connect (%s); "+
+				"the remaining source(s) still ingest.", mode.setting(), loopback, usable, maskedBrokerList(sources)),
 		})
 	}
 	return diags
