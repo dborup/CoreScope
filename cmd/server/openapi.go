@@ -54,10 +54,12 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
 
 		// Admin / system
-		"GET /api/health":      {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},
-		"GET /api/stats":       {Summary: "Network statistics", Description: "Returns aggregate stats (node counts, packet counts, observer counts). Cached for 10s.", Tag: "admin"},
-		"GET /api/perf":        {Summary: "Performance statistics", Description: "Returns per-endpoint request timing and slow query log.", Tag: "admin"},
+		"GET /api/health": {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},
+		"GET /api/stats":  {Summary: "Network statistics", Description: "Returns aggregate stats (node counts, packet counts, observer counts). Cached for 10s.", Tag: "admin"},
+		"GET /api/perf": {Summary: "Performance statistics", Description: "Returns per-endpoint request timing and slow query log. mem=1 adds the store memory breakdown, a full store walk: one scan at a time per server plus a 5 s cooldown after it, otherwise 429 with Retry-After.", Tag: "admin",
+			QueryParams: []paramMeta{{Name: "mem", Description: "1 = include memoryBreakdown (rate-limited, see description)", Type: "string"}}},
 		"GET /api/mqtt/status": {Summary: "MQTT source status", Description: "Returns per-MQTT-source connection state and counters (lastConnectUnix, lastPacketUnix, packetsTotal, etc.). Broker URL credentials (user-info, query, fragment) are masked in broker and lastError, and in a name that is a raw broker URL. Sourced from the ingestor stats file; empty list when unavailable. stale is true when the file's sampleAt is older than the /api/perf/io freshness threshold (5s) or unreadable, i.e. the rows are frozen; sampleAgeSec gives its age. (#1043, #160)", Tag: "admin"},
+		"GET /api/perf/ws-clients": {Summary: "WebSocket client history", Description: "Returns up to 24 h of open WebSocket connection counts, one sample per intervalSec (oldest first). Each sample has the count at that moment (clients) and the highest count since the previous sample (peak). Held in memory only; empty after a restart.", Tag: "admin"},
 		"POST /api/perf/reset": {Summary: "Reset performance stats", Tag: "admin", Auth: true},
 		// "POST /api/admin/prune" removed in #1283 (ingestor owns prune).
 		"GET /api/debug/affinity": {Summary: "Debug neighbor affinity scores", Tag: "admin", Auth: true},
@@ -76,6 +78,10 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "timeRange", Description: "Time range filter (e.g. 1h, 24h, 7d)", Type: "string"},
 				{Name: "search", Description: "Full-text search", Type: "string"},
 				{Name: "groupByHash", Description: "Group duplicate packets by hash", Type: "boolean"},
+				{Name: "nodes", Description: "Comma-separated public keys or node names (multi-node filter; exact, case-sensitive match). Entries are trimmed, empty entries are dropped and duplicates collapse. At most 50 distinct entries, 100 comma-separated entries and 4096 characters (#335); over any bound is 400 before any lookup. An all-empty list returns no packets.", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Invalid filter: malformed or repeated excludeTypes, excludeTypes combined with nodes, or a nodes list over its bounds (50 distinct entries, 100 comma-separated entries, 4096 characters; #335)."},
 			}},
 		"GET /api/packets/{id}":       {Summary: "Get packet detail", Tag: "packets"},
 		"GET /api/packets/timestamps": {Summary: "Get packet timestamp ranges", Tag: "packets"},
@@ -1137,12 +1143,20 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, swaggerUIHTML)
 }
 
+// swaggerUIHTML pins swagger-ui-dist to an exact version and verifies it with
+// Subresource Integrity: a floating "@5" specifier would let whatever upstream
+// publishes next execute unverified on an operator's browser. The digests are
+// sha384 over the exact bytes served for that version; openapi_sri_test.go
+// holds the reviewed values and docs/browser-dependencies.md records how to
+// recompute them when the pin moves.
 const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>CoreScope API — Swagger UI</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css"
+    integrity="sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
+    crossorigin="anonymous">
   <style>
     html { box-sizing: border-box; overflow-y: scroll; }
     *, *:before, *:after { box-sizing: inherit; }
@@ -1152,7 +1166,9 @@ const swaggerUIHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui-bundle.js"
+    integrity="sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
+    crossorigin="anonymous"></script>
   <script>
     SwaggerUIBundle({
       url: '/api/spec',

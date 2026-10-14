@@ -25,6 +25,15 @@
     if (m) return _renderHomeGlyph(m[1]) + ' ' + _escHtml(m[2]);
     return _escHtml(s); // EMOJI-OK-LEGACY-RENDER
   }
+  // #429 — footerLinks come from importable Home customization, so the URL
+  // gets the same scheme check as miniMarkdown links (roles.js). A rejected
+  // URL renders as its label text.
+  function footerLinkHtml(l) {
+    const href = window.safeUrlAttr(l.url);
+    const label = _renderHomeLabel(l.label);
+    if (!href) return label;
+    return `<a href="${href}" class="home-footer-link" target="_blank" rel="noopener">${label}</a>`;
+  }
   function _escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   const PREF_KEY = 'meshcore-user-level';
@@ -45,6 +54,12 @@
     saveMyNodes(getMyNodes().filter(n => n.pubkey !== pubkey));
   }
   function isMyNode(pubkey) { return getMyNodes().some(n => n.pubkey === pubkey); }
+  // My Mesh cards opt into advert intervals on their health request. The
+  // health panel reuses that URL for claimed nodes so the client cache
+  // answers it; other nodes keep the plain URL and skip the advert scan.
+  function healthPath(pubkey, myMesh) {
+    return '/nodes/' + encodeURIComponent(pubkey) + '/health' + (myMesh ? '?include=advertIntervals' : '');
+  }
 
   function isExperienced() { return localStorage.getItem(PREF_KEY) === 'experienced'; }
   function setLevel(level) { localStorage.setItem(PREF_KEY, level); }
@@ -143,7 +158,7 @@
 
       <section class="home-footer">
         <div class="home-footer-links">
-          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${_renderHomeLabel(l.label)}</a>`).join('') : `
+          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(footerLinkHtml).join('') : `
           <a href="#/packets" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-package"/></svg> Packets</a>
           <a href="#/map" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-trifold"/></svg> Network Map</a>
           <a href="#/live" class="home-footer-link"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Live</a>
@@ -298,7 +313,9 @@
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
-        const h = await api('/nodes/' + encodeURIComponent(mn.pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+        // The 240 s nodeHealth TTL is intentional: it matches node detail's
+        // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
+        const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
         const node = h.node || {};
         const stats = h.stats || {};
         const obs = h.observers || [];
@@ -319,6 +336,7 @@
         const sparkHtml = buildSparkline(h.activity24h);
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
         const preview = isRepeater ? obs.slice(0, 3) : obs;
+        const cadenceHtml = isRepeater ? renderMyMeshAdvertIntervals(h.advertIntervals, h.advertRouteBackfill) : '';
         // #351 F2/R1: a name wider than the CSS max-width: 14ch clamp is
         // clipped with an ellipsis. The full name must stay recoverable on
         // EVERY card. Each span carries a title (pointer + assistive tech),
@@ -357,6 +375,7 @@
             </div>
           </div>
           ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${preview.map(o => `<span class="mnc-observer-name" title="${escapeAttr(obsFullName(o))}">${escapeHtml(obsFullName(o))}</span>`).join(', ')} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${obs.length} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
+          ${cadenceHtml}
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
@@ -461,6 +480,34 @@
     dialog.showModal();
   }
 
+  function renderMyMeshAdvertIntervals(intervals, backfill) {
+    const row = (label, estimate) => {
+      if (!estimate) return `<div class="mnc-advert-row"><strong>${label}</strong> unavailable</div>`;
+      const samples = Number(estimate.samples);
+      const seconds = Number(estimate.interval_s);
+      let value = 'unavailable';
+      if (estimate.status === 'estimated' && estimate.interval_s != null && Number.isFinite(seconds) && seconds > 0) {
+        const hours = seconds / 3600;
+        value = '≈ ' + (hours >= 1 ? Number(hours.toFixed(1)) + ' h' : Math.round(seconds / 60) + ' min');
+      } else if (estimate.status === 'too_few') {
+        value = 'not enough adverts';
+      } else if (estimate.status === 'none_observed') {
+        value = 'not observed';
+      } else if (estimate.status === 'irregular') {
+        value = 'irregular';
+      }
+      const count = Number.isInteger(samples) && samples >= 0 ? ` · ${samples} heard` : '';
+      const seen = estimate.last_advert && Number.isFinite(Date.parse(estimate.last_advert))
+        ? ' · last ' + timeAgo(estimate.last_advert) : '';
+      return `<div class="mnc-advert-row"><strong>${label}</strong> ${value}${count}${seen}</div>`;
+    };
+    const provisional = intervals && backfill?.status !== 'complete'
+      ? '<div class="mnc-advert-provisional" title="Route-mask backfill incomplete or unknown; flood and zero-hop classifications may change">Route classes provisional</div>' : '';
+    return `<div class="mnc-advert-cadence" aria-label="Observed repeater advert intervals">` +
+      row('Zero-hop', intervals?.zero_hop) + row('Flood', intervals?.flood) +
+      provisional + '<div class="mnc-advert-note" title="Observed estimate from at most 20 newest adverts per type; missed receptions can skew it. Not the configured timer.">Observed estimate ≠ setting · ≤20/type · missed receptions skew</div></div>';
+  }
+
   function buildSparkline(activity) {
     const label = '<div class="home-spark-label">Node-associated transmissions · last 24h</div>';
     const buckets = activity?.buckets;
@@ -502,7 +549,7 @@
     if (journey) journey.classList.remove('visible');
 
     try {
-      const h = await api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+      const h = await api(healthPath(pubkey, isMyNode(pubkey)), { ttl: CLIENT_TTL.nodeHealth });
       const node = h.node || {};
       const stats = h.stats || {};
       const packets = h.recentPackets || [];
@@ -615,7 +662,11 @@
 
   // ==================== HELPERS ====================
   function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function escapeAttr(s) { return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  /* #368: one shared implementation, defined and exported by public/roles.js
+     (which index.html loads before this file) so the Markdown link
+     destinations in miniMarkdown() and the attribute sinks here cannot drift
+     apart. Behaviour is unchanged from the local copy this replaces. */
+  function escapeAttr(s) { return window.escapeAttr(s); }
   function timeSinceMs(d) { return Date.now() - d.getTime(); }
 
   function checklist(homeCfg) {

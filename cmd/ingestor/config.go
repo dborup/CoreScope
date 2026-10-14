@@ -48,9 +48,16 @@ type MQTTLegacy struct {
 
 // Config holds the ingestor configuration, compatible with the Node.js config.json format.
 type Config struct {
-	DBPath             string                  `json:"dbPath"`
-	MQTT               *MQTTLegacy             `json:"mqtt,omitempty"`
-	MQTTSources        []MQTTSource            `json:"mqttSources,omitempty"`
+	DBPath      string       `json:"dbPath"`
+	MQTT        *MQTTLegacy  `json:"mqtt,omitempty"`
+	MQTTSources []MQTTSource `json:"mqttSources,omitempty"`
+	// sourcesDefaulted records that MQTTSources came from LoadConfig's
+	// built-in mqtt://localhost:1883 fallback rather than from config.json,
+	// the legacy mqtt block or MQTT_BROKER. CheckBrokerSources needs the
+	// distinction: in external-broker mode "the operator configured
+	// localhost" and "nothing was configured at all" call for different
+	// advice. Unexported so it stays out of any JSON round-trip.
+	sourcesDefaulted   bool
 	LogLevel           string                  `json:"logLevel,omitempty"`
 	ChannelKeysPath    string                  `json:"channelKeysPath,omitempty"`
 	ChannelKeys        map[string]string       `json:"channelKeys,omitempty"`
@@ -470,6 +477,7 @@ func LoadConfig(path string) (*Config, error) {
 			Broker: "mqtt://localhost:1883",
 			Topics: []string{"meshcore/#"},
 		}}
+		cfg.sourcesDefaulted = true
 		log.Printf("no MQTT sources configured, defaulting to mqtt://localhost:1883")
 	}
 

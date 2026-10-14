@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -55,6 +56,9 @@ type Server struct {
 	// Test-only hook called with "stats-miss" and "stats-build" as a cache
 	// miss moves through handleStats. Nil in production.
 	statsHook func(stage string)
+
+	// Admits one /api/perf?mem=1 store scan at a time plus a cooldown (#371).
+	perfMem perfMemLimiter
 
 	// Throttles the log of failed GET /api/nodes/{pubkey} 404 lookups (#208).
 	missingNodeLog missingNodeLookupLog
@@ -326,6 +330,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/perf/io", s.handlePerfIO).Methods("GET")
 	r.HandleFunc("/api/perf/sqlite", s.handlePerfSqlite).Methods("GET")
 	r.HandleFunc("/api/perf/write-sources", s.handlePerfWriteSources).Methods("GET")
+	r.HandleFunc("/api/perf/ws-clients", s.handlePerfWSClients).Methods("GET")
 	r.HandleFunc("/api/mqtt/status", s.handleMqttStatus).Methods("GET")
 	r.Handle("/api/perf/reset", s.requireAPIKey(http.HandlerFunc(s.handlePerfReset))).Methods("POST")
 	// /api/admin/prune removed in #1283 — pruning is owned by the
@@ -507,7 +512,7 @@ func (s *Server) perfMiddleware(next http.Handler) http.Handler {
 		}
 		if ms > 100 {
 			slow := SlowQuery{
-				Path:   r.URL.Path,
+				Path:   normalizeSlowPath(key, r.URL.Path),
 				Ms:     round(ms, 1),
 				Time:   time.Now().UTC().Format(time.RFC3339),
 				Status: 200,
@@ -923,10 +928,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(s.startedAt).Seconds()
 
 	wsClients := 0
-	var wsDeny, wsRate, wsConnCap int64
+	var wsDeny, wsRate, wsConnCap, wsGlobalCap int64
 	if s.hub != nil {
 		wsClients = s.hub.ClientCount()
 		wsDeny, wsRate, wsConnCap = s.hub.limits.counts() // #1794; nil-safe
+		wsGlobalCap = s.hub.limits.globalCapRejections()  // #369; nil-safe
 	}
 
 	// Real packet store stats
@@ -1000,7 +1006,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		Cache: cs,
 		WebSocket: WebSocketStatsResp{Clients: wsClients,
-			RejectedDeny: wsDeny, RejectedRate: wsRate, RejectedConnCap: wsConnCap},
+			RejectedDeny: wsDeny, RejectedRate: wsRate, RejectedConnCap: wsConnCap,
+			RejectedGlobalCap: wsGlobalCap},
 		PacketStore: HealthPacketStoreStats{
 			Packets:     pktCount,
 			EstimatedMB: pktEstMB,
@@ -1127,6 +1134,19 @@ func (s *Server) buildStats() (*StatsResponse, error) {
 }
 
 func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
+	// Admit the opt-in store memory scan before anything below touches the
+	// store, so a refused request never takes its lock (#371).
+	var releaseMem func()
+	if s.store != nil && r.URL.Query().Get("mem") == "1" {
+		release, wait, ok := s.perfMem.acquire()
+		if !ok {
+			writePerfMemBusy429(w, wait)
+			return
+		}
+		releaseMem = release
+		defer releaseMem()
+	}
+
 	// Copy perfStats under lock to avoid data races
 	s.perfStats.mu.Lock()
 	type epSnapshot struct {
@@ -1205,12 +1225,15 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Opt-in store memory diagnostic: an O(tx+obs) walk, only when explicitly
-	// requested so the hot /api/perf path stays cheap.
+	// requested and admitted above so the hot /api/perf path stays cheap.
+	// Released as soon as the walk ends: the cooldown runs from scan
+	// completion, and a client slow to read the response cannot hold the slot.
 	var memBreakdown *StoreMemoryBreakdown
 	var breakdownNote string
-	if s.store != nil && r.URL.Query().Get("mem") == "1" {
+	if releaseMem != nil {
 		memBreakdown = s.store.GetStoreMemoryBreakdown()
 		breakdownNote = memBreakdownNote
+		releaseMem()
 	}
 
 	// SQLite stats
@@ -1271,15 +1294,13 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "excludeTypes is not supported with nodes; use the single node filter")
 		return
 	}
-	// Multi-node filter: comma-separated pubkeys (Node.js parity)
+	// Multi-node filter: comma-separated pubkeys or names, bounded before any
+	// lookup, query or store lock (#335).
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
-		pubkeys := strings.Split(nodesParam, ",")
-		var cleaned []string
-		for _, pk := range pubkeys {
-			pk = strings.TrimSpace(pk)
-			if pk != "" {
-				cleaned = append(cleaned, pk)
-			}
+		cleaned, nodesErr := parsePacketNodeFilters(nodesParam)
+		if nodesErr != nil {
+			writeError(w, 400, nodesErr.Error())
+			return
 		}
 		order := "DESC"
 		if r.URL.Query().Get("order") == "asc" {
@@ -1389,6 +1410,58 @@ var muxBraceParam = regexp.MustCompile(`\{([^}]+)\}`)
 
 // perfHexFallback matches hex IDs for perf path normalization fallback.
 var perfHexFallback = regexp.MustCompile(`[0-9a-f]{8,}`)
+
+// slowPathRawCap bounds, in runes, the raw request path stored per slow
+// query. A single pathological URL (long query string, repeated segments)
+// must not bloat the in-memory slow-query ring or the perf dashboard. #392.
+const slowPathRawCap = 128
+
+// normalizeSlowPath pairs the normalized route key (already :id-folded by the
+// perf middleware, matching the endpoints table) with a sanitised,
+// length-capped copy of the raw request path. The slow-query row then carries
+// both the stable route template and a bounded view of the actual URL, so the
+// endpoint key and the slow-query path no longer disagree (#392).
+//
+// It is a pure, read-only string transform. "Sanitise" here means dropping
+// ASCII control characters (which would otherwise mangle the row); it does
+// NOT make the value HTML-safe — the perf dashboard escapes it at render time
+// (public/perf.js, #392). This function only bounds length and strips control
+// bytes, rune-safe so a multibyte character is never split at the cap.
+//
+// #394 F3/F4: BOTH halves are sanitised and capped, so neither the control
+// chars nor the length of the key side can escape the bound. The stored value
+// is therefore at most 2*slowPathRawCap runes (+ a per-half ellipsis + the
+// joining space), regardless of how long or hostile either input is.
+func normalizeSlowPath(key, raw string) string {
+	capped := sanitizeSlowPathComponent(raw)
+	// Unmatched routes fold to key == raw path (see perfMiddleware). There the
+	// template IS the raw path, so emit the capped form once instead of
+	// "<raw> <raw>". Compare against the original raw, not the capped copy.
+	if key == "" || key == raw {
+		return capped
+	}
+	return sanitizeSlowPathComponent(key) + " " + capped
+}
+
+// sanitizeSlowPathComponent drops ASCII control characters (incl. CR/LF/TAB)
+// and caps the result at slowPathRawCap runes, rune-safe so a multibyte
+// character is never split at the cap. An ellipsis marks truncation. #394.
+func sanitizeSlowPathComponent(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue // strip ASCII control characters (incl. CR/LF/TAB)
+		}
+		if n >= slowPathRawCap {
+			b.WriteRune('…') // ellipsis marks truncation
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
 
 // handleBatchObservations returns observations for multiple hashes in a single request.
 // POST /api/packets/observations with JSON body: {"hashes": ["abc123", "def456", ...]}
@@ -2117,6 +2190,26 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "Not found")
 			return
 		}
+		// My Mesh opts into the existing node-detail estimator on the same
+		// health request. Keep the expensive route scan/cache out of default
+		// health calls and non-repeater cards, and apply its privacy gate first.
+		if wantsNodeInclude(r, "advertIntervals") {
+			node, _ := result["node"].(map[string]interface{})
+			if role, _ := node["role"].(string); strings.EqualFold(role, "repeater") {
+				hidden, hideErr := s.isIdentityHidden(r.Context(), pubkey)
+				if hideErr != nil {
+					log.Printf("WARN isIdentityHidden(%s): %v", pubkey, hideErr)
+				}
+				if hideErr == nil && !hidden {
+					if adverts, advertErr := s.nodeAdvertRoutes(pubkey, time.Now()); advertErr == nil {
+						result["advertIntervals"] = adverts.intervals
+						result["advertRouteBackfill"] = adverts.counts.RouteMaskBackfill
+					} else {
+						log.Printf("WARN nodeAdvertRoutes(%s): %v", pubkey, advertErr)
+					}
+				}
+			}
+		}
 		writeJSON(w, result)
 		return
 	}
@@ -2754,6 +2847,9 @@ func (s *Server) handleFleetClockSkew(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAnalyticsRF(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
+	if s.rejectAnalyticsFilters(w, region, area) {
+		return
+	}
 	window := ParseTimeWindow(r)
 	if s.store != nil {
 		// Issue #1659: gate the default-shape request behind first-pass
@@ -2804,6 +2900,9 @@ func (s *Server) handleAnalyticsRelayAirtimeShare(w http.ResponseWriter, r *http
 func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
+	if s.rejectAnalyticsFilters(w, region, area) {
+		return
+	}
 	window := ParseTimeWindow(r)
 	if s.store != nil {
 		// #1659 warmup gate (see handleAnalyticsRF for rationale).
@@ -2841,6 +2940,9 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		area := r.URL.Query().Get("area")
+		if s.rejectAnalyticsFilters(w, region, area) {
+			return
+		}
 		window := ParseTimeWindow(r)
 		// #1659 warmup gate (see handleAnalyticsRF for rationale).
 		if region == "" && area == "" && window.IsZero() {
@@ -2872,6 +2974,9 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
+	if s.rejectAnalyticsFilters(w, region, area) {
+		return
+	}
 	if s.store != nil {
 		// Lazy build (#1011): distance index is not built at startup.
 		// First request triggers an async build and gets 202 +
@@ -2903,6 +3008,9 @@ func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		area := r.URL.Query().Get("area")
+		if s.rejectAnalyticsFilters(w, region, area) {
+			return
+		}
 		writeJSON(w, s.store.GetAnalyticsHashSizes(region, area))
 		return
 	}
@@ -2920,6 +3028,9 @@ func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Re
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		area := r.URL.Query().Get("area")
+		if s.rejectAnalyticsFilters(w, region, area) {
+			return
+		}
 		writeJSON(w, s.store.GetAnalyticsHashCollisions(region, area))
 		return
 	}
@@ -2936,11 +3047,19 @@ func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		region := r.URL.Query().Get("region")
+		if s.rejectAnalyticsFilters(w, region, "") {
+			return
+		}
 		minLen := queryInt(r, "minLen", 2)
 		if minLen < 2 {
 			minLen = 2
 		}
 		maxLen := queryInt(r, "maxLen", 8)
+		// Clamp maxLen so an unbounded value cannot mint unbounded distinct
+		// subpathCache keys (the ceiling still backstops it, #370).
+		if maxLen > subpathMaxLenCeiling {
+			maxLen = subpathMaxLenCeiling
+		}
 		limit := queryLimit(r, 100, s.cfg.ListLimits.AnalyticsMax)
 		// Issue #1217: honor the Time window filter on Route Patterns.
 		window := ParseTimeWindow(r)
@@ -2967,6 +3086,9 @@ func (s *Server) handleAnalyticsSubpathsBulk(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	region := r.URL.Query().Get("region")
+	if s.rejectAnalyticsFilters(w, region, "") {
+		return
+	}
 	groupsParam := r.URL.Query().Get("groups")
 	if groupsParam == "" {
 		writeJSON(w, ErrorResp{Error: "groups parameter required (e.g. groups=2-2:50,3-3:30)"})
@@ -4553,6 +4675,13 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = "#wardriving"
 	}
+	// Reject an overlong channel before GetWardrivingStats and before it enters
+	// the cache key, so a client cannot drive expensive work or unbounded
+	// distinct wardrivingStatsCache keys with a free-text filter (#370).
+	if len(channel) > analyticsFilterMaxLen {
+		writeError(w, 400, "channel filter too long")
+		return
+	}
 	cacheKey := window + "|" + channel
 
 	s.wardrivingStatsMu.Lock()
@@ -4603,6 +4732,7 @@ func (s *Server) handleWardrivingStats(w http.ResponseWriter, r *http.Request) {
 		s.wardrivingStatsCache = make(map[string]*WardrivingStatsResponse)
 		s.wardrivingStatsCachedAt = make(map[string]time.Time)
 	}
+	evictStatsCacheLocked(s.wardrivingStatsCache, s.wardrivingStatsCachedAt, cacheKey, time.Now(), wardrivingStatsTTL, wardrivingStatsMaxEntries)
 	s.wardrivingStatsCache[cacheKey] = resp
 	s.wardrivingStatsCachedAt[cacheKey] = time.Now()
 	s.wardrivingStatsMu.Unlock()
@@ -4823,6 +4953,11 @@ func (s *Server) handlePruneGeoFilterStatus(w http.ResponseWriter, r *http.Reque
 	writeError(w, http.StatusNotFound, "unknown request id")
 }
 
+// geoFilterReadOnlyMsg is the 409 answer when config.json cannot be written in
+// this deployment (#339). The filter is then neither saved nor applied.
+const geoFilterReadOnlyMsg = "geo filter not saved: config.json is read-only for the server " +
+	"(read-only mount, or CORESCOPE_RUN_AS_NONROOT is on); edit geo_filter in config.json on the host and restart"
+
 // handlePutConfigGeoFilter writes the geo_filter config to disk and updates the
 // in-memory pointer atomically. Empty/missing polygon clears the filter.
 //
@@ -4872,6 +5007,10 @@ func (s *Server) handlePutConfigGeoFilter(w http.ResponseWriter, r *http.Request
 		if err := SaveGeoFilter(s.configDir, gf); err != nil {
 			s.saveMu.Unlock()
 			log.Printf("[geofilter] save failed: %v", err)
+			if errors.Is(err, ErrConfigReadOnly) {
+				writeError(w, http.StatusConflict, geoFilterReadOnlyMsg)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "failed to save config")
 			return
 		}

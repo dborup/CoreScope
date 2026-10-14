@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/meshcore-analyzer/channelregistry"
@@ -703,6 +706,35 @@ func (c *Config) EffectiveHashRegions() []string {
 // the CheckOrigin allowlist (#1793) and catch non-browser clients, which can
 // omit or forge Origin.
 type WebSocketConfig struct {
+	// MaxClients is the GLOBAL ceiling on concurrent /ws clients (#369).
+	// DEFAULT 512, on. A pointer distinguishes "not configured" from an
+	// explicit 0, which turns the ceiling off.
+	//
+	// Why a global ceiling exists at all: every limit below is conditional on
+	// telling clients apart, and in the shipped Docker topology (bundled
+	// Caddy → localhost:3000, trustedProxies empty) they are all skipped.
+	// This one counts connections, so it holds regardless.
+	//
+	// Why 512, measured rather than guessed:
+	//   - the frontend opens exactly ONE socket per tab (public/app.js), and
+	//     a reconnect replaces it, so concurrent clients ≈ open tabs. A
+	//     regional mesh instance peaks in the tens; 512 is far above that.
+	//   - each accepted client costs ~12 KB of server heap (measured: 200
+	//     real handshakes cost ~25 KB per in-process dialer/server pair), two
+	//     goroutines and one file descriptor. At 512 that is ~6 MB and ~1024
+	//     goroutines — a rounding error next to the packet store.
+	//   - the ceiling's real job is the 256-message send queue each client
+	//     owns: at ~1 KB per broadcast frame, a backed-up client can hold a
+	//     quarter of a megabyte. 512 bounds that worst case at ~130 MB
+	//     instead of "as much as the attacker opens".
+	//   - 512 descriptors is half of the 1024 soft RLIMIT_NOFILE that is
+	//     still the common default, leaving the other half for SQLite, MQTT
+	//     and HTTP.
+	// Operators serving more than a few hundred simultaneous tabs should
+	// raise it; /api/stats reports websocket.clients and
+	// websocket.rejectedGlobalCap, which is the signal to do so.
+	MaxClients *int `json:"maxClients,omitempty"`
+
 	// MaxConnsPerIP caps concurrent /ws connections from one client address.
 	// DEFAULT 0, meaning OFF, and that is a deliberate departure from the
 	// value floated on #1794.
@@ -735,6 +767,20 @@ type WebSocketConfig struct {
 	// Applies even when clients cannot be told apart, because it is an
 	// explicit instruction rather than an inference.
 	Deny []string `json:"deny,omitempty"`
+}
+
+// WSMaxClients returns the global concurrent-client ceiling (#369),
+// defaulting to wsDefaultMaxClients when unset. An explicit 0 turns it off; a
+// negative value is a typo rather than an intention, so it keeps the default
+// instead of silently removing the ceiling.
+func (c *Config) WSMaxClients() int {
+	if c == nil || c.WebSocket == nil || c.WebSocket.MaxClients == nil {
+		return wsDefaultMaxClients
+	}
+	if v := *c.WebSocket.MaxClients; v >= 0 {
+		return v
+	}
+	return wsDefaultMaxClients
 }
 
 // WSMaxConnsPerIP returns the configured concurrent-connection cap, 0 = off.
@@ -1210,6 +1256,35 @@ var (
 	configStatFile   = func(f *os.File) (os.FileInfo, error) { return f.Stat() }
 )
 
+// ErrConfigReadOnly marks a SaveGeoFilter failure caused by the deployment
+// arrangement rather than by the data: config.json or its directory cannot be
+// written by this process — a read-only mount, or the server running as a
+// non-root user without write access (#339). Callers report it as such
+// instead of as a generic save failure.
+var ErrConfigReadOnly = errors.New("config.json is read-only for the server")
+
+// configWritesDisabled reports whether the deployment forbids the server to
+// write config.json at all: the container's opt-in non-root mode (#339),
+// which the entrypoint passes on to the services. There config.json belongs
+// to the host or root, and the refusal must not depend on which directory a
+// save would happen to resolve to (#339 review, finding 2; #422).
+func configWritesDisabled() bool {
+	switch os.Getenv("CORESCOPE_RUN_AS_NONROOT") {
+	case "1", "true":
+		return true
+	}
+	return false
+}
+
+// configReadOnlyErr wraps a create/rename failure in ErrConfigReadOnly when
+// its cause is a permission or read-only-filesystem error.
+func configReadOnlyErr(op string, err error) error {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w: %s: %w", ErrConfigReadOnly, op, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // SaveGeoFilter writes the geo_filter section back to config.json on disk.
 // Pass gf=nil to remove the filter. The rest of config.json is preserved as-is.
 //
@@ -1232,6 +1307,9 @@ var (
 //     argument is ignored for a file that already exists, and it is masked by
 //     the umask for one that does not.
 func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
+	if configWritesDisabled() {
+		return fmt.Errorf("%w: CORESCOPE_RUN_AS_NONROOT is on", ErrConfigReadOnly)
+	}
 	var configPath string
 	for _, p := range []string{
 		filepath.Join(configDir, "config.json"),
@@ -1245,6 +1323,16 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	if configPath == "" {
 		return fmt.Errorf("config.json not found in %s", configDir)
 	}
+	// Resolve the selected file before creating its replacement. Containers
+	// can link config.json into a persistent data directory: renaming over
+	// that link would save only in the container layer and leave the mounted
+	// config unchanged. Using the effective path also keeps temp + rename
+	// together on the target filesystem, including relative/chained links.
+	resolvedPath, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config: %w", err)
+	}
+	configPath = resolvedPath
 
 	src, err := os.Open(configPath)
 	if err != nil {
@@ -1289,7 +1377,7 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	// Atomic write: unique temp file in the destination directory + rename.
 	tmpFile, err := configCreateTemp(filepath.Dir(configPath), filepath.Base(configPath)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
+		return configReadOnlyErr("create temp config", err)
 	}
 	tmpName := tmpFile.Name()
 	renamed := false
@@ -1317,7 +1405,7 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 		return fmt.Errorf("close temp config: %w", err)
 	}
 	if err := configRename(tmpName, configPath); err != nil {
-		return fmt.Errorf("rename config: %w", err)
+		return configReadOnlyErr("rename config", err)
 	}
 	renamed = true
 	return nil
