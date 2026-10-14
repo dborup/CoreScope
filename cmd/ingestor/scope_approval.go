@@ -68,11 +68,7 @@ func (r *scopeApprovalRunner) observedScope(ctx context.Context, name string) (b
 			return false, err
 		}
 		for _, raw := range strings.Split(scopes, ",") {
-			s := strings.TrimSpace(raw)
-			if s != "" && !strings.HasPrefix(s, "#") {
-				s = "#" + s
-			}
-			if s == name {
+			if s, ok := regions.Normalize(raw); ok && s == name {
 				return true, nil
 			}
 		}

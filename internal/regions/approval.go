@@ -6,10 +6,15 @@ import (
 )
 
 // ValidateCandidate accepts an exact OTA scope token, without normalizing
-// case or adding '#': those bytes determine its HMAC key.
+// case or adding '#': those bytes determine its HMAC key. The name must also
+// be a fixed point of Normalize, so an approved name compares identically to
+// the same name in hashRegions or hashRegionsPath.
 func ValidateCandidate(name string) error {
 	if len(name) < 2 || len(name) > 30 || name[0] != '#' || !utf8.ValidString(name) {
 		return errors.New("scope must start with # and be 2–30 valid UTF-8 bytes")
+	}
+	if normalized, ok := Normalize(name); !ok || normalized != name {
+		return errors.New("scope must not start or end with whitespace")
 	}
 	for i := 1; i < len(name); i++ {
 		c := name[i]
