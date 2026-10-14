@@ -23,6 +23,7 @@ COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
 COPY internal/brokerurl/ ../../internal/brokerurl/
+COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/lora/ ../../internal/lora/
 COPY internal/regions/ ../../internal/regions/
@@ -43,6 +44,7 @@ COPY internal/dbschema/ ../../internal/dbschema/
 COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
 COPY internal/brokerurl/ ../../internal/brokerurl/
+COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/regions/ ../../internal/regions/
 COPY internal/channelregistry/ ../../internal/channelregistry/
@@ -90,9 +92,10 @@ COPY docker/Caddyfile /etc/caddy/Caddyfile
 RUN mkdir -p /app/data /var/lib/mosquitto /data/caddy && \
     chown -R mosquitto:mosquitto /var/lib/mosquitto
 
-# Entrypoint
+# Entrypoint (+ opt-in non-root helper, #339; unused unless enabled)
 COPY docker/entrypoint-go.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/nonroot.sh /usr/local/lib/corescope/nonroot.sh
+RUN chmod +x /entrypoint.sh /usr/local/lib/corescope/nonroot.sh
 
 EXPOSE 80 443 1883
 

@@ -110,12 +110,30 @@ if (typeof window !== 'undefined') {
       '<div id="compareContent"></div>' +
     '</div>';
 
+    // #428 — Bind off the shared #app, not onto it (same pattern #405 used
+    // for observers.js; #402 explicitly left this one for the owner). The
+    // next page's app.innerHTML rebuild discards .compare-page along with
+    // this listener, so it can't keep firing — and stacking — on later
+    // pages. .compare-page is the root this init() writes into, so it
+    // still catches every row keydown the #app binding did.
+    var pageEl = app.querySelector('.compare-page');
     // #209 — Keyboard accessibility for compare table rows
-    app.addEventListener('keydown', function (e) {
+    pageEl.addEventListener('keydown', function (e) {
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       if (e.key !== 'Enter' && e.key !== ' ') return;
       e.preventDefault();
+      location.hash = row.dataset.value;
+    });
+
+    // #393 N9 — delegated click navigation for the same rows. Lets the packet
+    // rows drop their per-row inline onclick (consistency with #373), which
+    // also removes the latent `'`-breakout in that double-quoted/JS context.
+    // Bound to #compareContent, not the shared #app: the next page's
+    // app.innerHTML discards it, so it cannot fire on other pages' rows.
+    document.getElementById('compareContent').addEventListener('click', function (e) {
+      var row = e.target.closest('tr[data-action="navigate"]');
+      if (!row) return;
       location.hash = row.dataset.value;
     });
 
@@ -526,7 +544,7 @@ if (typeof window !== 'undefined') {
           } else {
             obsLabel = nameB;
           }
-          return '<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/packets/' + escapeHtml(h) + '" onclick="location.hash=\'#/packets/' + escapeHtml(h) + '\'">' +
+          return '<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/packets/' + escapeHtml(h) + '">' +
             '<td class="mono" style="font-size:0.85em">' + escapeHtml(h.substring(0, 12)) + '</td>' +
             '<td>' + timeAgo(p.timestamp || p.first_seen) + '</td>' +
             '<td><span class="payload-badge badge-' + payloadTypeColor(p.payload_type) + '">' + escapeHtml(typeName) + '</span></td>' +

@@ -599,6 +599,13 @@
   // `tiles.light` and `map.tiles.darkUrl` / `lightUrl` config keys.
   window.TILE_DARK  = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
   window.TILE_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  // Runtime metadata for the registry, not a new config setting. An
+  // implicit provider fallback must not mask the operator's legacy URL.
+  // #390 — dark needs the same treatment as light got in #366: before it,
+  // `tiles.dark` / `map.tiles.darkUrl` were silently masked by whichever
+  // dark style the registry defaulted to.
+  window.MC_LIGHT_TILE_URL_OVERRIDE = null;
+  window.MC_DARK_TILE_URL_OVERRIDE  = null;
 
   function _tileThemeIsDark() {
     return document.documentElement.getAttribute('data-theme') === 'dark' ||
@@ -651,6 +658,12 @@
    * inset map credits the configured light provider instead of a generic
    * fallback. */
   window.getActiveTileProvider = function () {
+    // A legacy URL has no registry vendor/overlay/filter to borrow. Inset
+    // maps retain their historical generic attribution and clear filters.
+    try {
+      if (typeof window.MC_getTileSpec === 'function' &&
+          window.MC_getTileSpec(_tileThemeIsDark() ? 'dark' : 'light').id === null) return null;
+    } catch (_e) {}
     return _activeTileStyle();
   };
 
@@ -776,6 +789,10 @@
       if (cfg.map.tiles.darkUrl) window.TILE_DARK = cfg.map.tiles.darkUrl;
       if (cfg.map.tiles.lightUrl) window.TILE_LIGHT = cfg.map.tiles.lightUrl;
     }
+    window.MC_LIGHT_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.light || null) :
+      (cfg.map && cfg.map.tiles && cfg.map.tiles.lightUrl) || null;
+    window.MC_DARK_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.dark || null) :
+      (cfg.map && cfg.map.tiles && cfg.map.tiles.darkUrl) || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
@@ -1008,6 +1025,69 @@
     }
   };
 
+  /* #368 — attribute escape for the Markdown link destination below.
+     Same 5-char-minus-&<> set as the escapeAttr helpers in public/home.js and
+     public/path-inspector.js: by the time miniMarkdown() captures a
+     destination it has already turned & < > into entities, so the only
+     characters that can still leave a double-quoted href are the two quote
+     characters. Exported so the Home render path has one shared copy. */
+  function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  window.escapeAttr = escapeAttr;
+
+  /* #368 — scheme allowlist for Markdown link destinations.
+     Home checklist/step text is site-customization content, which is
+     importable and therefore untrusted, so a destination may not be able to
+     pick its own URL scheme. Only these are anchored; everything without a
+     scheme (relative paths, #fragments, ?query) is left alone. mailto: is not
+     in the list because nothing in the product emits one today — adding it is
+     a product decision, not a security one. */
+  var SAFE_LINK_SCHEMES = ['http', 'https'];
+  /* RFC 3986 scheme grammar, lowercased before matching. */
+  var LINK_SCHEME_RE = /^([a-z][a-z0-9+.\-]*):/;
+
+  /* True when `url` may become a link or resource URL: it carries no scheme
+     (relative path, #fragment, ?query) or an allowlisted one. Normalisation
+     mirrors what a browser does before it resolves a scheme: ASCII controls
+     and ASCII whitespace are ignored, and the scheme is case-insensitive. So
+     `JaVa\tScRiPt:alert(1)` is rejected for the same reason
+     `javascript:alert(1)` is. #429: exported as the one scheme check for
+     every customization-fed URL sink (Home footer links, branding logo and
+     favicon), so no sink grows an allowlist of its own. */
+  function linkUrlProbe(url) {
+    return String(url == null ? '' : url).replace(/[\u0000-\u0020\u007f]/g, '').toLowerCase();
+  }
+  function isSafeLinkUrl(url) {
+    var probe = linkUrlProbe(url);
+    if (!probe) return false;
+    var m = LINK_SCHEME_RE.exec(probe);
+    return !m || SAFE_LINK_SCHEMES.indexOf(m[1]) !== -1;
+  }
+  window.isSafeLinkUrl = isSafeLinkUrl;
+  /* #429 — image sinks (branding logo, favicon) take the same check plus
+     inline data:image/ URLs: an <img> or icon never runs script from its URL,
+     and the customizer has always accepted an inline logo. */
+  window.isSafeImageUrl = function(url) {
+    return isSafeLinkUrl(url) || linkUrlProbe(url).indexOf('data:image/') === 0;
+  };
+
+  /* Returns the escaped href for `dest`, or '' when the destination must not
+     become a link. `dest` is already & < > escaped (see miniMarkdown). */
+  function safeLinkHref(dest) {
+    var raw = String(dest == null ? '' : dest);
+    return isSafeLinkUrl(raw) ? escapeAttr(raw) : '';
+  }
+
+  /* #429 — the same check for a RAW url headed for a quoted HTML attribute:
+     returns the fully escaped value (& < > " '), or '' when it must not
+     become a link. '&' matters here: left alone, `&#106;avascript:` carries
+     no scheme for the check but is decoded back into `javascript:` while the
+     browser parses the attribute. */
+  window.safeUrlAttr = function(url) {
+    return safeLinkHref(String(url == null ? '' : url)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  };
   // Simple markdown → HTML (bold, italic, links, code, lists, line breaks)
   window.miniMarkdown = function(text) {
     if (!text) return '';
@@ -1016,7 +1096,14 @@
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
       .replace(/`(.+?)`/g, '<code>$1</code>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--link-color)">$1</a>')
+      /* #368: a replacement function, not a '$2' template — a '$&'/"$'" in the
+         destination would otherwise be re-expanded by String.replace. A
+         rejected destination degrades to its already-escaped label text. */
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_m, label, dest) {
+        var href = safeLinkHref(dest);
+        if (!href) return label;
+        return '<a href="' + href + '" target="_blank" rel="noopener" style="color:var(--link-color)">' + label + '</a>';
+      })
       .replace(/^- (.+)/gm, '<li>$1</li>')
       .replace(/\n/g, '<br>');
     // Wrap consecutive <li> in <ul>

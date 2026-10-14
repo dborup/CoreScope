@@ -68,6 +68,8 @@
   function _setBrandLogoUrl(url, alt) {
     var node = document.querySelector('.nav-brand .brand-logo');
     if (!node) return;
+    // #429 — a URL the shared scheme check rejects is treated as cleared.
+    if (url && !_brandUrlOk(url)) url = '';
     if (url) {
       if (node.tagName.toLowerCase() === 'img') {
         node.setAttribute('src', url);
@@ -96,6 +98,17 @@
       node.setAttribute('src', 'img/corescope-logo.svg');
       if (alt != null) node.setAttribute('alt', alt);
     }
+  }
+  // #429 — branding URLs are customization content (server theme, stored
+  // overrides, theme import), so they get the scheme check roles.js exports
+  // for miniMarkdown and Home footer links, in its image-sink form. Fails
+  // closed when roles.js is not loaded.
+  function _brandUrlOk(url) {
+    return typeof window.isSafeImageUrl === 'function' && window.isSafeImageUrl(url);
+  }
+  function _setFaviconUrl(url) {
+    var link = document.querySelector('link[rel="icon"]');
+    if (link && url && _brandUrlOk(url)) link.href = url;
   }
   function _setBrandAlt(alt) {
     var node = document.querySelector('.nav-brand .brand-logo');
@@ -795,15 +808,8 @@
         var brandEl = document.querySelector('.brand-text');
         if (brandEl) brandEl.textContent = br.siteName;
       }
-      if (br.logoUrl) {
-        _setBrandLogoUrl(br.logoUrl, br.siteName || null);
-        var iconEl = document.querySelector('.brand-icon');
-        if (iconEl) iconEl.innerHTML = '<img src="' + br.logoUrl + '" style="height:24px" onerror="this.style.display=\'none\'">';
-      }
-      if (br.faviconUrl) {
-        var fav = document.querySelector('link[rel="icon"]');
-        if (fav) fav.href = br.faviconUrl;
-      }
+      if (br.logoUrl) _setBrandLogoUrl(br.logoUrl, br.siteName || null);
+      if (br.faviconUrl) _setFaviconUrl(br.faviconUrl);
       // #1518 — apply validated homeUrl override to .nav-brand[href].
       // Always call: invalid/empty restores '#/' so a cleared override visibly
       // reverts. Validator rejects javascript:/data:/etc to prevent XSS.
@@ -1301,7 +1307,7 @@
   function _renderBranding() {
     var eff = _getEffective();
     var b = eff.branding || {};
-    var logoPreview = b.logoUrl ? '<img class="cust-preview-img" src="' + escAttr(b.logoUrl) + '" alt="Logo preview" onerror="this.style.display=\'none\'">' : '';
+    var logoPreview = b.logoUrl && _brandUrlOk(b.logoUrl) ? '<img class="cust-preview-img" src="' + escAttr(b.logoUrl) + '" alt="Logo preview" onerror="this.style.display=\'none\'">' : '';
     return '<div class="cust-panel' + (_activeTab === 'branding' ? ' active' : '') + '" data-panel="branding">' +
       '<div class="cust-field"><label>Site Name' + _overrideDot('branding', 'siteName') + '</label><input type="text" data-cv2-field="branding.siteName" value="' + escAttr(b.siteName || '') + '"></div>' +
       '<div class="cust-field"><label>Tagline' + _overrideDot('branding', 'tagline') + '</label><input type="text" data-cv2-field="branding.tagline" value="' + escAttr(b.tagline || '') + '"></div>' +
@@ -2027,7 +2033,7 @@
       }
       listEl.innerHTML = _gfPruneNodes.map(function (n) {
         var coords = n.lat != null ? (' · ' + n.lat.toFixed(4) + ', ' + n.lon.toFixed(4)) : '';
-        return '<div>' + (n.name || n.pubkey.slice(0, 12)) + coords + '</div>';
+        return '<div>' + esc(n.name || n.pubkey.slice(0, 12)) + coords + '</div>';
       }).join('');
       confirmBtn.textContent = 'Delete ' + count + ' node' + (count !== 1 ? 's' : '');
       resultEl.style.display = '';
@@ -2404,15 +2410,9 @@
           }
           if (section === 'branding' && key === 'logoUrl') {
             _setBrandLogoUrl(inp.value || '', null);
-            var iconEl = document.querySelector('.brand-icon');
-            if (iconEl) {
-              if (inp.value) iconEl.innerHTML = '<img src="' + inp.value + '" style="height:24px" onerror="this.style.display=\'none\'">';
-              else iconEl.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg>';
-            }
           }
           if (section === 'branding' && key === 'faviconUrl') {
-            var link = document.querySelector('link[rel="icon"]');
-            if (link && inp.value) link.href = inp.value;
+            _setFaviconUrl(inp.value);
           }
           if (section === 'branding' && key === 'homeUrl') {
             // #1518 — live nav-brand[href] swap. Validator silently drops
@@ -2766,13 +2766,8 @@
       }
       if (overrides.branding.logoUrl) {
         _setBrandLogoUrl(overrides.branding.logoUrl, overrides.branding.siteName || null);
-        var iconEl = document.querySelector('.brand-icon');
-        if (iconEl) iconEl.innerHTML = '<img src="' + overrides.branding.logoUrl + '" style="height:24px" onerror="this.style.display=\'none\'">';
       }
-      if (overrides.branding.faviconUrl) {
-        var link = document.querySelector('link[rel="icon"]');
-        if (link) link.href = overrides.branding.faviconUrl;
-      }
+      if (overrides.branding.faviconUrl) _setFaviconUrl(overrides.branding.faviconUrl);
       // #1518 — re-apply homeUrl override after DOM is ready (handles cold
       // page loads where the customizer pipeline ran before .nav-brand mounted).
       if (overrides.branding.homeUrl) {

@@ -412,6 +412,252 @@ check_config_placeholders() {
   fi
 }
 
+# ─── Broker Preflight (#372) ──────────────────────────────────────────────
+#
+# DISABLE_MOSQUITTO=true turns the bundled mosquitto off but configures no
+# replacement. With no mqttSources the ingestor falls back to its built-in
+# mqtt://localhost:1883 — the bundled broker's own address, where nothing is
+# then listening — so ingest stops while the deploy still looks healthy.
+# These helpers say so before a setup, start, update, restore or promote.
+#
+# They are advisory: this script never refuses a command over a broker
+# diagnostic, because the right answer differs per host. Only the explicit
+# `./manage.sh broker-check` exits non-zero, so an operator (or a runbook)
+# can gate on it deliberately.
+
+# Remove credentials from anything about to be printed: the user-info of a
+# URL, a bare user:pass@ pair, and any query string. Reads stdin, writes
+# stdout. Used for broker URLs out of config.json and for log lines echoed
+# straight out of `docker logs`, which may come from an ingestor of any
+# version.
+mask_broker_text() {
+  sed -E \
+    -e 's#[^[:space:]:/@]+:[^[:space:]:/@]+@#****@#g' \
+    -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]+@#\1****@#g' \
+    -e 's#(://[^[:space:]]*)\?[^[:space:]]*#\1#g'
+}
+
+# True when the bundled mosquitto will run on a host managed by THIS script.
+#
+# manage.sh is the authority for its own hosts, not the container entrypoint:
+# dc_prod/dc_staging pick the compose file with is_true(), and
+# docker-compose.no-mosquitto.yml / docker-compose.staging.no-mosquitto.yml
+# hard-code DISABLE_MOSQUITTO=true in the container's environment. So "yes",
+# "1", "on" and "TRUE" all end up EXTERNAL here, even though the entrypoint
+# on its own only accepts the exact string "true". Reporting the entrypoint's
+# reading instead would claim "bundled" for those values and skip the source
+# validation that catches a deploy which ingests nothing.
+bundled_broker_enabled() {
+  ! is_true "${DISABLE_MOSQUITTO:-false}"
+}
+
+# True when DISABLE_MOSQUITTO means one thing to this script and another to a
+# bare `docker compose up` against docker-compose.yml. is_true() accepts
+# 1/true/TRUE/yes/YES/y/Y/on/ON; the entrypoint accepts only the exact
+# "true". A value in that gap is external under manage.sh (which swaps in the
+# no-mosquitto compose file) and bundled without it.
+disable_mosquitto_is_ambiguous() {
+  [ "${1:-}" = "true" ] && return 1
+  is_true "${1:-}"
+}
+
+# True when DISABLE_MOSQUITTO is set to something NEITHER this script nor the
+# container entrypoint recognises — " true" with a stray space, or a typo.
+# Both then fall back to keeping the bundled broker, which may be the
+# opposite of what was meant.
+disable_mosquitto_is_unrecognised() {
+  case "${1:-}" in
+    ""|true|false|FALSE|False|0|no|NO|n|N|off|OFF) return 1 ;;
+  esac
+  ! is_true "${1:-}"
+}
+
+# Host part of a broker URL, lowercased, with scheme, user-info, port and
+# path removed.
+broker_host() {
+  local u="${1#*://}"
+  u="${u##*@}"
+  u="${u%%/*}"
+  u="${u%%\?*}"
+  case "$u" in
+    \[*\]*) u="${u%%]*}"; u="${u#[}" ;;
+    *:*)     u="${u%:*}" ;;
+  esac
+  printf '%s' "$u" | tr 'A-Z' 'a-z'
+}
+
+# True for a host only reachable from inside the same network namespace.
+is_loopback_host() {
+  case "${1:-}" in
+    localhost|ip6-localhost|ip6-loopback|::1|127.*|*.localhost) return 0 ;;
+  esac
+  return 1
+}
+
+# The "broker" string values in whatever JSON text arrives on stdin.
+broker_urls() {
+  grep -oE '"broker"[[:space:]]*:[[:space:]]*"[^"]*"' 2>/dev/null \
+    | sed -E 's/^"broker"[[:space:]]*:[[:space:]]*"//; s/"$//'
+}
+
+# The text of the mqttSources array in a config.json, or nothing when the key
+# is absent. Bracket-matched and string-aware, so a "]" inside a topic
+# pattern cannot end the array early.
+mqtt_sources_region() {
+  awk '
+    { buf = buf $0 "\n" }
+    END {
+      k = index(buf, "\"mqttSources\"")
+      if (k == 0) exit
+      n = length(buf)
+      i = k + length("\"mqttSources\"")
+      while (i <= n && substr(buf, i, 1) != "[") {
+        c = substr(buf, i, 1)
+        if (c != ":" && c != " " && c != "\t" && c != "\n" && c != "\r") exit
+        i++
+      }
+      if (i > n) exit
+      depth = 0; instr = 0; esc = 0
+      for (; i <= n; i++) {
+        c = substr(buf, i, 1)
+        out = out c
+        if (esc) { esc = 0; continue }
+        if (instr) {
+          if (c == "\\") esc = 1
+          else if (c == "\"") instr = 0
+          continue
+        }
+        if (c == "\"") { instr = 1; continue }
+        if (c == "[") depth++
+        else if (c == "]") { depth--; if (depth == 0) break }
+      }
+      printf "%s", out
+    }
+  ' "$1"
+}
+
+# The broker URLs the ingestor will use, one per line, in the ingestor's own
+# precedence (see LoadConfig):
+#
+#   MQTT_BROKER  >  config.json mqttSources[]  >  legacy config.json mqtt.broker
+#
+# The legacy mqtt.broker block is promoted to a source ONLY when mqttSources
+# yields none, so it must not be counted next to mqttSources — the ingestor
+# never connects to it in that case, and a loopback legacy block would
+# otherwise produce a "cannot connect" warning about a source nothing uses.
+broker_sources() {
+  local cfg="${1:-$PROD_DATA/config.json}"
+  if [ -n "${MQTT_BROKER:-}" ]; then
+    printf '%s\n' "$MQTT_BROKER"
+    return 0
+  fi
+  [ -f "$cfg" ] || return 0
+  local region urls
+  region=$(mqtt_sources_region "$cfg")
+  if [ -n "$region" ]; then
+    urls=$(printf '%s' "$region" | broker_urls)
+    if [ -n "$urls" ]; then
+      printf '%s\n' "$urls"
+      return 0
+    fi
+  fi
+  # No mqttSources, or an empty one: LoadConfig promotes mqtt.broker.
+  broker_urls < "$cfg"
+}
+
+# Report the broker arrangement. Returns 1 when something means no packets
+# can be ingested, 0 otherwise. Every broker URL printed is masked.
+broker_check_report() {
+  local cfg="${1:-$PROD_DATA/config.json}"
+  local errors=0
+  local raw="${DISABLE_MOSQUITTO:-}"
+
+  if disable_mosquitto_is_ambiguous "$raw"; then
+    warn "DISABLE_MOSQUITTO='${raw}' means different things to different launchers."
+    echo "   This script's is_true() accepts it, so ./manage.sh runs the external-broker"
+    echo "   compose file, which hard-codes DISABLE_MOSQUITTO=true in the container — the"
+    echo "   bundled broker will NOT start, and that is the mode reported below. A bare"
+    echo "   'docker compose up' against docker-compose.yml passes '${raw}' straight"
+    echo "   through, and the entrypoint disables the bundled broker only on the exact"
+    echo "   value \"true\", so there the bundled broker WOULD start. Set it to \"true\""
+    echo "   or \"false\" so both read it the same way."
+  elif disable_mosquitto_is_unrecognised "$raw"; then
+    warn "DISABLE_MOSQUITTO='${raw}' is neither a recognised true nor a recognised false value."
+    echo "   This script's is_true() rejects it and the container entrypoint accepts only"
+    echo "   the exact value \"true\", so both keep the bundled broker running. If you"
+    echo "   meant to use an external broker, set it to \"true\"."
+  fi
+
+  if bundled_broker_enabled; then
+    log "Broker mode: bundled mosquitto (DISABLE_MOSQUITTO=${raw:-false})."
+    return 0
+  fi
+
+  info "Broker mode: external (DISABLE_MOSQUITTO=${raw}) — the bundled broker will not start."
+
+  local sources
+  sources=$(broker_sources "$cfg")
+  if [ -z "$sources" ]; then
+    err "No external MQTT source is configured, so nothing will be ingested."
+    echo "   DISABLE_MOSQUITTO=true disables the bundled broker, but the ingestor then"
+    echo "   falls back to its built-in mqtt://localhost:1883 — the bundled broker's own"
+    echo "   address — where nothing is listening."
+    echo ""
+    echo "   Remediation:"
+    echo "     • Add mqttSources to ${cfg} pointing at your broker"
+    echo "     • Or set MQTT_BROKER=mqtt://your-broker:1883 in .env"
+    echo "     • Or set DISABLE_MOSQUITTO=false to use the bundled broker"
+    return 1
+  fi
+
+  local total=0 loopback=0 line host
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    total=$((total + 1))
+    host=$(broker_host "$line")
+    if [ -z "$host" ]; then
+      err "MQTT source $(printf '%s' "$line" | mask_broker_text) has no host."
+      errors=1
+      continue
+    fi
+    if is_loopback_host "$host"; then
+      loopback=$((loopback + 1))
+      warn "MQTT source $(printf '%s' "$line" | mask_broker_text) points at loopback."
+    else
+      log "MQTT source $(printf '%s' "$line" | mask_broker_text)"
+    fi
+  done <<EOSRC
+$sources
+EOSRC
+
+  if [ "$total" -gt 0 ] && [ "$loopback" -eq "$total" ]; then
+    err "All ${total} configured MQTT source(s) point at loopback, where the disabled"
+    echo "   bundled broker used to listen. Nothing will be ingested."
+    echo ""
+    echo "   Remediation:"
+    echo "     • Point the source(s) at the external broker's address"
+    echo "     • Or set DISABLE_MOSQUITTO=false to use the bundled broker"
+    errors=1
+  elif [ "$loopback" -gt 0 ]; then
+    warn "${loopback} of ${total} MQTT source(s) cannot connect; the rest still ingest."
+  fi
+
+  [ "$errors" -eq 0 ]
+}
+
+cmd_broker_check() {
+  echo ""
+  info "Checking the MQTT broker arrangement..."
+  if broker_check_report "${1:-$PROD_DATA/config.json}"; then
+    log "Broker check passed."
+    return 0
+  fi
+  echo ""
+  err "Broker check failed. See the remediation above."
+  echo "   Set MQTT_SOURCE_STRICT=true to make the ingestor refuse to start in this state."
+  exit 1
+}
+
 # Verify the running container is actually healthy
 verify_health() {
   local container="corescope-prod"
@@ -449,7 +695,9 @@ verify_health() {
   mqtt_errors=$(docker logs "$container" --tail 50 2>&1 | grep -i 'mqtt.*error\|mqtt.*fail\|ECONNREFUSED.*1883' || true)
   if [ -n "$mqtt_errors" ]; then
     warn "MQTT errors detected in logs:"
-    echo "$mqtt_errors" | head -5 | sed 's/^/   /'
+    # Masked: a log line from an ingestor of any version can quote a broker
+    # URL with its user-info, and this output ends up in bug reports.
+    echo "$mqtt_errors" | head -5 | mask_broker_text | sed 's/^/   /'
   fi
 
   # If HTTPS domain configured, try to verify externally
@@ -806,6 +1054,9 @@ cmd_setup() {
   # ── Step 5: Start container ──
   step 5 "Starting container"
 
+  # Advisory only: a broker that cannot ingest must not block a setup.
+  broker_check_report || true
+
   if docker ps --format '{{.Names}}' | grep -q "^corescope-prod$"; then
     info "Production container already running — skipping preflight port check."
   else
@@ -856,7 +1107,7 @@ cmd_setup() {
     echo "   Useful commands:"
     echo "     ./manage.sh status     Check health"
     echo "     ./manage.sh logs       View logs"
-    echo "     ./manage.sh backup     Full backup (DB + config + theme)"
+    echo "     ./manage.sh backup     Full backup (DBs + config + theme; stops prod briefly)"
     echo "     ./manage.sh update     Update to latest version"
     echo ""
   else
@@ -1045,6 +1296,11 @@ cmd_start() {
   migrate_config || exit 1
   # Always check prod config
   ensure_config "$PROD_DATA"
+
+  # Advisory only: this host's broker topology is the operator's call. It
+  # runs AFTER migrate_config/ensure_config so it reads the config.json the
+  # container is about to use, not a pre-migration or not-yet-created one.
+  broker_check_report || true
 
   if $WITH_STAGING; then
     # Prepare staging data and config
@@ -1253,6 +1509,10 @@ cmd_promote() {
   echo "  3. Wait for health check"
   echo ""
 
+  # Promotion replaces the production service; report the broker
+  # arrangement it will come back up with.
+  broker_check_report || true
+
   # Show what's currently running
   local staging_image staging_created prod_image prod_created
   staging_image=$(docker inspect "$STAGING_CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo "not running")
@@ -1273,13 +1533,7 @@ cmd_promote() {
   info "Backing up production database..."
   local BACKUP_DIR="./backups/pre-promotion-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$BACKUP_DIR"
-  if [ -f "$PROD_DATA/meshcore.db" ]; then
-    cp "$PROD_DATA/meshcore.db" "$BACKUP_DIR/"
-  elif container_running "corescope-prod"; then
-    docker cp corescope-prod:/app/data/meshcore.db "$BACKUP_DIR/"
-  else
-    warn "Could not backup production database."
-  fi
+  backup_databases "$BACKUP_DIR" || { err "Promotion aborted."; exit 1; }
   log "Backup saved to ${BACKUP_DIR}/"
 
   # Restart prod with latest image
@@ -1298,7 +1552,7 @@ cmd_promote() {
     if [ "$i" -eq 30 ]; then
       err "Production failed health check after 30s"
       warn "Check logs: ./manage.sh logs prod"
-      warn "Rollback: cp ${BACKUP_DIR}/meshcore.db ${PROD_DATA}/ && ./manage.sh restart prod"
+      warn "Rollback: ./manage.sh restore ${BACKUP_DIR}"
       exit 1
     fi
     sleep 1
@@ -1350,6 +1604,11 @@ cmd_update() {
 
   migrate_config auto
 
+  # The pulled revision may ship a different compose file or a different
+  # DISABLE_MOSQUITTO default. Report the resulting broker arrangement
+  # before the restart, while the old container is still serving.
+  broker_check_report || true
+
   info "Rebuilding image..."
   dc_prod build prod
 
@@ -1365,6 +1624,27 @@ cmd_update() {
 
 # ─── Backup ───────────────────────────────────────────────────────────────
 
+# Offline snapshot of both SQLite databases and their WALs into a new
+# corescope-backup-* directory inside $1, via the tested helper. It stops
+# corescope-prod briefly; a hot single-file copy can miss or mismatch the WAL.
+backup_databases() {
+  local snapshot
+  if ! docker inspect --format '{{.State.Running}}' corescope-prod >/dev/null 2>&1; then
+    warn "Database not backed up: no corescope-prod container"
+    return 0
+  fi
+  local status=0
+  snapshot=$(sh "$(dirname "$0")/scripts/backup-sqlite.sh" corescope-prod "$1") || status=$?
+  if [ "$status" -eq 75 ]; then
+    err "Database backup failed: another backup of corescope-prod is still running; retry once it has finished"
+    return 1
+  elif [ "$status" -ne 0 ]; then
+    err "Database backup failed; check that corescope-prod is running"
+    return 1
+  fi
+  log "Databases (offline snapshot) → ${snapshot}/"
+}
+
 cmd_backup() {
   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
   BACKUP_DIR="${1:-./backups/corescope-${TIMESTAMP}}"
@@ -1372,18 +1652,7 @@ cmd_backup() {
 
   info "Backing up to ${BACKUP_DIR}/"
 
-  # Database
-  # Always use bind mount path (from .env or default)
-  DB_PATH="$PROD_DATA/meshcore.db"
-  if [ -f "$DB_PATH" ]; then
-    cp "$DB_PATH" "$BACKUP_DIR/meshcore.db"
-    log "Database ($(du -h "$BACKUP_DIR/meshcore.db" | cut -f1))"
-  elif container_running "corescope-prod"; then
-    docker cp corescope-prod:/app/data/meshcore.db "$BACKUP_DIR/meshcore.db" 2>/dev/null && \
-      log "Database (via docker cp)" || warn "Could not backup database"
-  else
-    warn "Database not found (container not running?)"
-  fi
+  backup_databases "$BACKUP_DIR" || return 1
 
   # Config (now lives in data dir)
   if [ -f "$PROD_DATA/config.json" ]; then
@@ -1440,6 +1709,11 @@ cmd_restore() {
   # Accept either a directory (full backup) or a single .db file
   if [ -d "$1" ]; then
     DB_FILE="$1/meshcore.db"
+    # cmd_backup keeps the databases in one helper snapshot subdirectory.
+    local snapshots=("$1"/corescope-backup-*/meshcore.db)
+    if [ ! -f "$DB_FILE" ] && [ "${#snapshots[@]}" -eq 1 ] && [ -f "${snapshots[0]}" ]; then
+      DB_FILE=${snapshots[0]}
+    fi
     CONFIG_FILE="$1/config.json"
     CADDY_FILE="$1/Caddyfile"
     THEME_FILE="$1/theme.json"
@@ -1502,6 +1776,10 @@ cmd_restore() {
     cp "$THEME_FILE" "$DEST_THEME"
     log "theme.json restored"
   fi
+
+  # The restored config.json may name different brokers than the running
+  # one did, so re-check before bringing prod back up.
+  broker_check_report || true
 
   dc_prod up -d prod
   log "Restored and restarted."
@@ -1572,9 +1850,10 @@ cmd_help() {
   printf '%b\n' "  ${BOLD}Maintain${NC}"
   echo "    update [version]   Update to version (no arg=latest tag, 'latest'=master tip, or e.g. v3.1.0)"
   echo "    promote            Promote staging → production (backup + restart)"
-  echo "    backup [dir]       Full backup: database + config + theme"
+  echo "    backup [dir]       Full backup: databases (prod stops briefly) + config + theme"
   echo "    restore <d>        Restore from backup dir or .db file"
   echo "    mqtt-test          Check if MQTT data is flowing"
+  echo "    broker-check       Check the MQTT broker arrangement can ingest (exits 1 if not)"
   echo ""
   echo "Prod uses docker-compose.yml; staging uses ${STAGING_COMPOSE_FILE}."
   echo ""
@@ -1594,6 +1873,7 @@ case "${1:-help}" in
   backup)    cmd_backup "$2" ;;
   restore)   cmd_restore "$2" ;;
   mqtt-test) cmd_mqtt_test ;;
+  broker-check) cmd_broker_check ;;
   reset)     cmd_reset ;;
   help|*)    cmd_help ;;
 esac

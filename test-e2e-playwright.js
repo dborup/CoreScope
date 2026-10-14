@@ -86,6 +86,266 @@ async function run() {
 
   console.log(`\nRunning E2E tests against ${BASE}\n`);
 
+  // #382 (port of upstream 2132): Total Packets / "(seen N×)" help in both node views.
+  const packetCountCases = [];
+  for (const [view, width, full] of [['desktop side pane', 1280, false], ['desktop full view', 1280, true], ['mobile full view', 375, true]]) {
+    for (const interaction of ['', 'Escape', 'scroll edges', ...(width < 640 ? [] : ['hover Escape', 'hover transfer'])]) {
+      packetCountCases.push({ view, width, full, interaction, stats: { totalTransmissions: 233, totalPackets: 500, totalObservations: 12278 } });
+    }
+  }
+  // Text variants: no seen count shown, and the advert_count fallback.
+  packetCountCases.push({ view: 'desktop full view', width: 1280, full: true, interaction: '', variant: 'no seen',
+    stats: { totalTransmissions: 233, totalPackets: 233, totalObservations: 233 } });
+  packetCountCases.push({ view: 'desktop full view', width: 1280, full: true, interaction: '', variant: 'advert fallback', stats: {} });
+  packetCountCases.push({ view: 'desktop side pane', width: 1280, full: false, interaction: '', variant: 'advert fallback', stats: {} });
+  for (const { view, width, full, interaction, variant, stats } of packetCountCases) {
+    await test(`#382 packet count help${variant ? ' ' + variant : ''}${interaction ? ' ' + interaction : ''} in ${view}`, async () => {
+      const height = interaction === 'scroll edges' ? 600 : (width < 640 ? 667 : 900);
+      const fixtureContext = await browser.newContext({ viewport: { width, height }, hasTouch: width < 640 });
+      const fixturePage = await fixtureContext.newPage();
+      await fixturePage.addInitScript(() => {
+        window.addEventListener('theme-refresh', () => { window.__packetCountThemeReady = true; }, { once: true });
+      });
+      const pubkey = 'b'.repeat(64);
+      const node = { public_key: pubkey, name: 'Packet count fixture', role: 'repeater',
+        last_seen: new Date().toISOString(), advert_count: 900 };
+      // Keep enough real detail content below the metric to scroll it to either edge.
+      const recentAdverts = Array.from({ length: 12 }, (_, i) => ({ hash: i.toString(16).padStart(64, '0'),
+        timestamp: new Date(Date.now() - i * 60000).toISOString(), payload_type: 4, route_type: 1 }));
+      await fixturePage.route('**/api/nodes**', async route => {
+        const path = new URL(route.request().url()).pathname;
+        let body;
+        if (path === '/api/nodes') body = { nodes: [node], total: 1 };
+        else if (path === '/api/nodes/' + pubkey) body = { node, recentAdverts };
+        else if (path === '/api/nodes/' + pubkey + '/health') body = { stats };
+        else return route.continue();
+        await route.fulfill({ json: body });
+      });
+      try {
+        // Initial theme refresh rebuilds node details; finish it before testing focus.
+        await fixturePage.goto(`${BASE}/#/home`, { waitUntil: 'domcontentloaded' });
+        await fixturePage.waitForFunction(() => window.__packetCountThemeReady);
+        await fixturePage.goto(`${BASE}/#/nodes${full ? '/' + pubkey : ''}`, { waitUntil: 'domcontentloaded' });
+        if (!full) await fixturePage.locator(`tr[data-key="${pubkey}"]`).click();
+        const label = fixturePage.locator(full ? '#nodeFullBody td:first-child' : '#nodesRight dt')
+          .filter({ has: fixturePage.getByRole('button', { name: 'Total Packets help', exact: true }) });
+        await label.waitFor();
+        const count = await label.evaluate(el => el.nextElementSibling.innerText.trim());
+        const fallback = !stats.totalTransmissions;
+        const expectedCount = fallback ? '900' : (full && !variant ? '233 (seen 12278×)' : '233');
+        assert(count === expectedCount, `Packet counts changed: ${count}, expected ${expectedCount}`);
+
+        const help = label.getByRole('button', { name: 'Total Packets help', exact: true });
+        assert(await help.count() === 1, `Total Packets help is missing in ${view}`);
+        const descriptionId = await help.getAttribute('aria-describedby');
+        assert(descriptionId, 'Packet count help must have an accessible description');
+        const tooltip = fixturePage.locator('#' + descriptionId);
+        assert(await tooltip.count() === 1, 'Packet count description must reference one tooltip');
+        await fixturePage.mouse.move(0, 0);
+        assert(!await tooltip.isVisible(), 'Packet count tooltip should start closed');
+        if (width < 640) {
+          await help.tap();
+        } else {
+          await help.hover();
+          assert(await tooltip.isVisible(), 'Packet count help must open on hover');
+          await fixturePage.mouse.move(0, 0);
+          await help.focus();
+          await fixturePage.keyboard.press('Shift+Tab');
+          await fixturePage.keyboard.press('Tab');
+          assert(await help.evaluate(el => el === document.activeElement), 'Packet count help must be keyboard reachable');
+        }
+        assert(await tooltip.isVisible(), `Packet count help is not visible after ${width < 640 ? 'tap' : 'keyboard focus'}`);
+        const explanation = await tooltip.innerText();
+        if (fallback) {
+          assert(/advert count/i.test(explanation) && !/distinct transmissions/i.test(explanation),
+            `Fallback help must describe the advert count, got: ${explanation}`);
+        } else {
+          assert(/distinct transmissions/i.test(explanation), 'Help must explain the Total Packets count');
+          assert(/originator/i.test(explanation) && /destination/i.test(explanation) && /resolved relay/i.test(explanation),
+            'Help must explain that counted traffic can involve this node in different roles');
+          assert(/packet window/i.test(explanation) && /retention/i.test(explanation) && /not all.time/i.test(explanation),
+            `Help must say the count covers the current packet window, got: ${explanation}`);
+          const seenShown = full && !variant;
+          if (seenShown) {
+            assert(/seen/i.test(explanation) && /one transmission can have multiple observations/i.test(explanation),
+              'Help must explain why seen observations can exceed transmissions');
+          } else {
+            assert(!/seen/i.test(explanation), `Help must not mention a seen count that is not shown, got: ${explanation}`);
+          }
+        }
+        const box = await tooltip.boundingBox();
+        assert(box && box.x >= 0 && box.x + box.width <= width && box.y >= 0 && box.y + box.height <= height,
+          `Packet count help is clipped in ${view}`);
+        const clippedBy = await tooltip.evaluate(el => {
+          const rect = el.getBoundingClientRect();
+          for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            const bounds = parent.getBoundingClientRect();
+            if ((/hidden|auto|scroll|clip/.test(style.overflowX) && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1)) ||
+                (/hidden|auto|scroll|clip/.test(style.overflowY) && (rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1))) {
+              return parent.id || parent.className || parent.tagName;
+            }
+          }
+          return null;
+        });
+        assert(!clippedBy, `Packet count help is clipped by ${clippedBy} in ${view}`);
+        if (width < 640) await label.locator('..').locator('td').nth(1).tap();
+        else await fixturePage.keyboard.press('Tab');
+        assert(!await tooltip.isVisible(), 'Packet count help must close when focus or touch moves away');
+
+        if (interaction === 'Escape' || interaction === 'hover Escape') {
+          const selectedUrl = fixturePage.url();
+          if (interaction === 'Escape') await help.focus();
+          else await help.hover();
+          const focusedBeforeEscape = await fixturePage.evaluateHandle(() => document.activeElement);
+          assert(await tooltip.isVisible(), 'Help must be open before Escape');
+          await fixturePage.keyboard.press('Escape');
+          assert(await help.count() === 1, `Escape dismissed the selected node in ${view}`);
+          assert(fixturePage.url() === selectedUrl, `Escape changed the selected node URL in ${view}`);
+          assert(await focusedBeforeEscape.evaluate(el => el === document.activeElement), 'Escape must preserve the current focus');
+          assert(!await tooltip.isVisible(), 'Escape must dismiss the packet count help');
+          await fixturePage.keyboard.press('Escape');
+          await fixturePage.waitForFunction(() => location.hash === '#/nodes');
+          await help.waitFor({ state: 'detached' });
+          assert(await help.count() === 0, 'A second Escape must retain normal node dismissal');
+          if (!full) assert(await fixturePage.locator('#nodesRight.empty').count() === 1, 'A second Escape must clear the side pane');
+        }
+
+        if (interaction === 'scroll edges') {
+          const container = fixturePage.locator(full ? '#nodeFullBody' : '#nodesRight');
+          // Content above the metric varies by layout; pad it so both edges are reachable.
+          await help.evaluate(el => {
+            const spacer = document.createElement('div');
+            spacer.style.height = '700px';
+            el.closest('table, dl').before(spacer);
+          });
+          for (const edge of ['top', 'bottom']) {
+            await help.evaluate((el, edge) => {
+              const scroller = el.closest('#nodeFullBody, #nodesRight');
+              const bounds = scroller.getBoundingClientRect();
+              const trigger = el.getBoundingClientRect();
+              const target = edge === 'top' ? bounds.top + 40 : bounds.bottom - trigger.height - 40;
+              scroller.scrollTop += trigger.top - target;
+            }, edge);
+            const trigger = await help.boundingBox();
+            const bounds = await container.boundingBox();
+            assert(trigger && bounds && trigger.y >= bounds.y && trigger.y + trigger.height <= bounds.y + bounds.height,
+              `Help trigger must remain visible near the ${edge} in ${view}`);
+            assert(edge === 'top' ? trigger.y - bounds.y <= 50 : bounds.y + bounds.height - trigger.y - trigger.height <= 50,
+              `Help trigger did not reach the ${edge} of the scroll container in ${view}`);
+            if (width < 640) await help.tap();
+            else await help.hover();
+            assert(await tooltip.isVisible(), `Help must open after scrolling near the ${edge} in ${view}`);
+            const tip = await tooltip.boundingBox();
+            assert(tip && tip.x >= Math.max(0, bounds.x) && tip.x + tip.width <= Math.min(width, bounds.x + bounds.width) &&
+              tip.y >= Math.max(0, bounds.y) && tip.y + tip.height <= Math.min(height, bounds.y + bounds.height),
+            `Packet count help is clipped at the scroll container ${edge} in ${view}: ${JSON.stringify({ tip, bounds })}`);
+            if (width < 640) await label.locator('..').locator('td').nth(1).tap();
+            else await fixturePage.mouse.move(0, 0);
+            assert(!await tooltip.isVisible(), 'Help must close before testing the next scroll edge');
+          }
+        }
+
+        if (interaction === 'hover transfer') {
+          assert(!await help.evaluate(el => el === document.activeElement), 'Hover transfer must not rely on trigger focus');
+          await help.hover();
+          assert(await tooltip.isVisible(), 'Help must open before pointer transfer');
+          const tip = await tooltip.boundingBox();
+          await fixturePage.mouse.move(tip.x + tip.width / 2, tip.y + tip.height / 2, { steps: 20 });
+          assert(await tooltip.isVisible(), `Help disappeared while the pointer moved into its explanation in ${view}`);
+          await fixturePage.mouse.move(0, 0);
+          assert(!await tooltip.isVisible(), 'Help must close when the pointer leaves both trigger and explanation');
+        }
+      } finally {
+        await fixtureContext.close();
+      }
+    });
+  }
+
+  // #382: position() must tolerate a help label outside the two node containers.
+  await test('#382 packet count help positioning tolerates a label outside the node containers', async () => {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const p = await ctx.newPage();
+    const errors = [];
+    p.on('pageerror', e => errors.push(e.message));
+    const pubkey = 'd'.repeat(64);
+    const node = { public_key: pubkey, name: 'Guard fixture', role: 'repeater', last_seen: new Date().toISOString(), advert_count: 3 };
+    await p.route('**/api/nodes**', async route => {
+      const path = new URL(route.request().url()).pathname;
+      let body;
+      if (path === '/api/nodes') body = { nodes: [node], total: 1 };
+      else if (path === '/api/nodes/' + pubkey) body = { node, recentAdverts: [] };
+      else if (path === '/api/nodes/' + pubkey + '/health') body = { stats: { totalTransmissions: 5, totalObservations: 9 } };
+      else return route.continue();
+      await route.fulfill({ json: body });
+    });
+    try {
+      await p.goto(`${BASE}/#/nodes/${pubkey}`, { waitUntil: 'domcontentloaded' });
+      await p.locator('#nodeFullBody .node-packet-count-help').waitFor();
+      await p.evaluate(() => {
+        const stray = document.createElement('button');
+        stray.id = 'strayHelp';
+        stray.className = 'sort-help node-packet-count-help';
+        stray.innerHTML = 'Stray <span class="sort-help-tip">stray help</span>';
+        document.getElementById('app').appendChild(stray);
+        stray.focus();
+      });
+      await p.waitForTimeout(100);
+      assert(errors.length === 0, `Positioning a help outside the node containers threw: ${errors.join('; ')}`);
+      assert(await p.locator('#strayHelp .sort-help-tip').isVisible(), 'The stray help should still open');
+    } finally { await ctx.close(); }
+  });
+
+  // #382: .node-stats-table no longer clips (overflow: visible, so the help
+  // tooltip can extend past it). Striped and hovered rows must still follow the
+  // rounded corners, in both themes.
+  for (const scheme of ['light', 'dark']) {
+    await test(`#382 node stats table rows follow the rounded corners in ${scheme} theme`, async () => {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: scheme });
+      const p = await ctx.newPage();
+      const pubkey = 'c'.repeat(64);
+      const node = { public_key: pubkey, name: 'Corner fixture', role: 'repeater', last_seen: new Date().toISOString(), advert_count: 3 };
+      await p.route('**/api/nodes**', async route => {
+        const path = new URL(route.request().url()).pathname;
+        let body;
+        if (path === '/api/nodes') body = { nodes: [node], total: 1 };
+        else if (path === '/api/nodes/' + pubkey) body = { node, recentAdverts: [] };
+        else if (path === '/api/nodes/' + pubkey + '/health') body = { stats: { totalTransmissions: 5, totalObservations: 9 } };
+        else return route.continue();
+        await route.fulfill({ json: body });
+      });
+      try {
+        await p.goto(`${BASE}/#/nodes/${pubkey}`, { waitUntil: 'domcontentloaded' });
+        const table = p.locator('#nodeFullBody .node-stats-table').first();
+        await table.waitFor();
+        const rows = table.locator('tr');
+        const last = (await rows.count()) - 1;
+        for (const index of [0, 1, last - 1, last]) {
+          await rows.nth(index).hover();
+          const r = await table.evaluate((t, index) => {
+            const tr = t.querySelectorAll('tr')[index];
+            const cells = tr.querySelectorAll('td');
+            const corner = (td, prop) => parseFloat(getComputedStyle(td)[prop]);
+            const tableRadius = parseFloat(getComputedStyle(t).borderTopLeftRadius);
+            const lastRow = t.querySelectorAll('tr').length - 1;
+            return {
+              tableRadius, collapse: getComputedStyle(t).borderCollapse, overflow: getComputedStyle(t).overflow,
+              trBg: getComputedStyle(tr).backgroundColor,
+              topLeft: corner(cells[0], 'borderTopLeftRadius'), topRight: corner(cells[cells.length - 1], 'borderTopRightRadius'),
+              bottomLeft: corner(cells[0], 'borderBottomLeftRadius'), bottomRight: corner(cells[cells.length - 1], 'borderBottomRightRadius'),
+              isFirst: index === 0, isLast: index === lastRow,
+            };
+          }, index);
+          assert(r.overflow === 'visible', `Table must not clip the help tooltip (overflow ${r.overflow})`);
+          assert(r.collapse === 'separate', `border-radius needs border-collapse: separate, got ${r.collapse} in ${scheme}`);
+          assert(r.trBg === 'rgba(0, 0, 0, 0)', `Row ${index} paints a square background on the tr in ${scheme}: ${r.trBg}`);
+          if (r.isFirst) assert(r.topLeft > 0 && r.topRight > 0, `First row top corners are square in ${scheme}`);
+          if (r.isLast) assert(r.bottomLeft > 0 && r.bottomRight > 0, `Last row bottom corners are square in ${scheme}`);
+        }
+      } finally { await ctx.close(); }
+    });
+  }
+
   // --- Group: Home page (tests 1, 6, 7) ---
 
   // Test 1: Home page loads

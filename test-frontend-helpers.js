@@ -137,6 +137,20 @@ console.log('\n=== app.js: timeAgo ===');
   });
 }
 
+console.log('\n=== app.js: CLIENT_TTL (#384) ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
+  const ttl = vm.runInContext('CLIENT_TTL', ctx);
+  // home.js says My Mesh's cadence (nodeHealth) is cached as long as node
+  // detail's advertRoutes estimate (nodeDetail), so the two views agree.
+  test('nodeHealth default TTL matches nodeDetail (240 s)', () => {
+    assert.strictEqual(ttl.nodeHealth, 240000);
+    assert.strictEqual(ttl.nodeHealth, ttl.nodeDetail);
+  });
+}
+
 console.log('\n=== app.js: formatTimestamp / formatTimestampWithTooltip ===');
 {
   const ctx = makeSandbox();
@@ -2987,8 +3001,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3109,8 +3122,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3204,8 +3216,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3302,8 +3313,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3396,8 +3406,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const appEl = {
       innerHTML: '',
       querySelector(sel) {
-        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
+        if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main' || sel === '.ch-layout') return makeEl(sel);
         return makeEl(sel);
       },
       addEventListener() {},
@@ -4297,7 +4306,7 @@ console.log('\n=== channels.js: formatHashHex (issue #465) ===');
   });
 
   test('packets array is trimmed to PACKET_LIMIT after WS update in flat mode', () => {
-    assert.ok(/packets = filtered\.concat\(packets\)[\s\S]{0,100}packets\.length = PACKET_LIMIT/.test(src),
+    assert.ok(/packets = accepted\.concat\(packets\)[\s\S]{0,100}packets\.length = PACKET_LIMIT/.test(src),
       'flat mode must truncate packets to PACKET_LIMIT after prepend');
   });
 
@@ -5734,6 +5743,10 @@ console.log('\n=== region-filter.js: setSelected ===');
     removeEventListener: () => {},
   });
 
+  // region-filter.js escapes codes/labels with app.js's global escapeHtml
+  // (#333), as on the page, where app.js is always loaded.
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/area-filter.js');
   loadInCtx(ctx, 'public/region-filter.js');
 
@@ -6294,6 +6307,9 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.senderPathHashSize = secondHashHelperCtx.senderPathHashSize;
   // #322 (1): buildFieldTable now reads its width via the shared helper.
   ftCtx.pathHashSizeFromByte = secondHashHelperCtx.pathHashSizeFromByte;
+  // The byte table now reads this observation's canonical path. Load the
+  // real helper dependency rather than duplicating or bypassing its parser.
+  loadInCtx(ftCtx, 'public/packet-helpers.js');
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 

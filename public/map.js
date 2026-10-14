@@ -1502,15 +1502,9 @@
         // Use the SAME resolver the packets page uses, so route view and
         // packet detail agree on hop identities.
         try {
-          // Sender + observer hints help disambiguation
+          // Keep the decoded origin anchor, but not an unproven receiver hint.
           const senderLat = decoded.lat || decoded.latitude || null;
           const senderLon = decoded.lon || decoded.longitude || null;
-          let obsLat = null, obsLon = null;
-          // Try to find observer's coords for geographic affinity scoring
-          if (chosen.observer_id && Array.isArray(nodes)) {
-            const obs = nodes.find(n => (n.public_key || '').toLowerCase() === String(chosen.observer_id).toLowerCase());
-            if (obs && obs.lat != null && obs.lon != null) { obsLat = obs.lat; obsLon = obs.lon; }
-          }
           // HopResolver.init may already have been done by packets.js; if not,
           // do a minimal init from window data we have.
           if (!window.HopResolver.ready || !window.HopResolver.ready()) {
@@ -1518,9 +1512,12 @@
               window.HopResolver.init(nodes || [], { observers: [], iataCoords: {} });
             } catch (_) {}
           }
-          const resolveResult = window.HopResolver.resolve(rawHops, senderLat, senderLon, obsLat, obsLon, chosen.observer_id);
+          // Current detail responses may supply transmission fallback bytes
+          // without a provenance marker. They cannot prove this path belongs
+          // to a received flood: keep all heuristic candidates global.
+          const resolveResult = window.HopResolver.resolve(rawHops, senderLat, senderLon, null, null, null);
           chosenPath = rawHops.map(h => {
-            const r = resolveResult ? resolveResult[h] : null;
+            const r = resolveResult && resolveResult[h];
             return r && r.pubkey ? r.pubkey : h;
           });
         } catch (_) {

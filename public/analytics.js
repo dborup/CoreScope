@@ -332,7 +332,7 @@
     const analyticsContent = document.getElementById('analyticsContent');
     if (analyticsContent) {
       const handler = (e) => {
-        const row = e.target.closest('tr[data-action="navigate"]');
+        const row = e.target.closest('[data-action="navigate"]');
         if (!row) return;
         if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
         if (e.type === 'keydown') e.preventDefault();
@@ -1104,7 +1104,7 @@
     let html = '<div class="repeater-list">';
     repeaters.slice(0, 15).forEach(r => {
       const pct = (r.count / max * 100).toFixed(0);
-      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `onclick="location.hash='#/nodes/${encodeURIComponent(r.pubkey)}'"` : ''}>
+      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `data-action="navigate" data-value="#/nodes/${encodeURIComponent(r.pubkey)}" tabindex="0" role="link"` : ''}>
         <div class="repeater-name">${r.name ? '<strong>' + esc(r.name) + '</strong>' : '<span class="mono">' + r.hop + '</span>'}</div>
         <div class="repeater-bar"><div class="hash-bar-track"><div class="hash-bar-fill" style="width:${pct}%;background:var(--accent)"></div></div></div>
         <div class="repeater-count">${r.count.toLocaleString()}</div>
@@ -4520,13 +4520,13 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
           else if (obs.current_noise_floor >= -100) nfClass = 'rf-nf-warning';
         }
 
-        return `<div class="rf-cell${isSelected ? ' rf-cell-selected' : ''}" data-observer="${obs.observer_id}" tabindex="0" role="button" aria-label="Observer ${esc(name)}, noise floor ${nf} dBm">
+        return `<div class="rf-cell${isSelected ? ' rf-cell-selected' : ''}" data-observer="${esc(obs.observer_id)}" tabindex="0" role="button" aria-label="Observer ${esc(name)}, noise floor ${nf} dBm">
           <div class="rf-cell-header">
             <span class="rf-cell-name">${esc(name)}</span>
             <span class="rf-cell-nf ${nfClass}">${nf} dBm</span>
             ${batt ? `<span class="rf-cell-batt">${batt}</span>` : ''}
           </div>
-          <div class="rf-cell-sparkline" id="rf-spark-${obs.observer_id}"></div>
+          <div class="rf-cell-sparkline" id="rf-spark-${esc(obs.observer_id)}"></div>
           <div class="rf-cell-stats">
             <span>avg: ${avgNf}</span>
             <span>max: ${maxNf}</span>

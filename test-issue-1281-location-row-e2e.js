@@ -216,7 +216,12 @@ async function findPacketDetailByType(page, predicate, maxRows = 40) {
           assert(text.includes(snr), observer.observer_name + ' must retain SNR ' + snr + ', got: ' + text);
         }
         for (const [label, value] of [['Total Packets', '1005'], ['Packets Today', '7'], ['Avg Hops', '2']]) {
-          const metric = stats.getByText(label, { exact: true });
+          // Total Packets carries a help button whose tooltip text would defeat
+          // getByText; select its label cell by the button (#382).
+          const metric = label === 'Total Packets'
+            ? stats.locator(view.full ? 'td:first-child' : 'dt')
+              .filter({ has: nodePage.getByRole('button', { name: 'Total Packets help', exact: true }) })
+            : stats.getByText(label, { exact: true });
           const actual = await metric.evaluate(el => el.nextElementSibling.textContent.trim());
           assert(actual === value, label + ' must remain ' + value + ', got: ' + actual);
         }

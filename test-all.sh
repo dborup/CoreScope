@@ -43,6 +43,7 @@ run test-app-api-bust-inflight-243.js
 run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
+run test-issue-336-external-asset-pinning.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
@@ -65,7 +66,10 @@ run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
+run test-issue-405-observers-listener-leak.js
 run test-issue-322-comment-guards.js
+run test-backup-sqlite-safety.js
+run test-issue-372-broker-check.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -114,6 +118,7 @@ run test-issue-1418-polish-review.js
 run test-issue-1420-tile-providers.js
 run test-issue-1614-tile-url-function.js
 run test-issue-332-tile-provider-fallback.js
+run test-issue-390-legacy-tile-followups.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
 run test-issue-1446-cb-preset-cascade.js
@@ -196,6 +201,9 @@ run test-reach-rank.js
 run test-issue-1107-live-layout.js
 run test-issue-1619-feed-detail-card-draggable.js
 run test-xss-escape-sinks.js
+run test-issue-368-minimarkdown-links.js
+run test-issue-429-config-url-schemes.js
+run test-issue-393-slowpath-doc-bound.js
 run test-preflight-xss-gate.js
 run test-issue-1648-m4-emoji-scan.js
 run test-issue-1753-copy-url-slash.js
@@ -254,6 +262,7 @@ run test-payload-labels-content.js
 run test-payload-labels-namespace.js
 run test-perf-anomaly.js
 run test-perf-render-1258.js
+run test-perf-ws-clients.js
 run test-pull-to-reconnect.js
 run test-rx-coverage-config-race.js
 run test-slideover-1056-rowsel-strict.js
@@ -275,6 +284,8 @@ run test-table-sort.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js
+run test-ci-parallel-gates.js
+run test-ci-shards.js
 
 echo ""
 echo "═══════════════════════════════════════"
