@@ -21,7 +21,7 @@ env:
   STAGING_SERVICE: staging-go
   STAGING_CONTAINER: corescope-staging-go
 
-# Pipeline: Go tests, three E2E shards and image validation run in parallel.
+# Pipeline: measured Go and E2E shards, split checks and image validation run in parallel.
 # The stable build-and-publish check requires every shard and its report; only then may
 # an upstream push publish to GHCR and deploy. Fork runs never publish/deploy.
 #
@@ -34,10 +34,175 @@ jobs:
   # ───────────────────────────────────────────────────────────────
   # 1. Go Build & Test
   # ───────────────────────────────────────────────────────────────
-  go-test:
-    name: "✅ Go Build & Test"
+  go-shards-check:
+    name: "📋 Verify Go Test Assignments"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Clean Go module cache
+        run: rm -rf ~/go/pkg/mod 2>/dev/null || true
+
+      - name: Set up Go 1.27.1
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: |
+            cmd/server/go.sum
+            cmd/ingestor/go.sum
+
+      - name: Guard every Go test and fuzz seed target
+        run: |
+          node scripts/run-go-server-shard.js --validate
+          node scripts/run-go-server-shard.js --runtime-list
+
+
+  go-server-1:
+    name: "✅ Go Server Tests (1/3)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 40
+    env:
+      GO_SERVER_SHARD: '1'
+    steps: &go-server-shard-steps
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Clean Go module cache
+        run: rm -rf ~/go/pkg/mod 2>/dev/null || true
+
+      - name: Set up Go 1.27.1
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: |
+            cmd/server/go.sum
+            cmd/ingestor/go.sum
+
+      - name: Run assigned Go server tests (race and coverage)
+        run: node scripts/run-go-server-shard.js
+
+      - name: Upload Go server coverage and execution proof
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-server-${{ env.GO_SERVER_SHARD }}
+          overwrite: true
+          path: .ci-go/server-${{ env.GO_SERVER_SHARD }}/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+
+
+  go-server-2:
+    name: "✅ Go Server Tests (2/3)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 40
+    env:
+      GO_SERVER_SHARD: '2'
+    steps: *go-server-shard-steps
+
+
+  go-server-3:
+    name: "✅ Go Server Tests (3/3)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 40
+    env:
+      GO_SERVER_SHARD: '3'
+    steps: *go-server-shard-steps
+
+
+  go-ingestor:
+    name: "✅ Go Ingestor Tests"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Clean Go module cache
+        run: rm -rf ~/go/pkg/mod 2>/dev/null || true
+
+      - name: Set up Go 1.27.1
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: |
+            cmd/server/go.sum
+            cmd/ingestor/go.sum
+
+      - name: Build and test Go ingestor (with coverage)
+        run: |
+          set -e -o pipefail
+          cd cmd/ingestor
+          go build .
+          go test -timeout 20m -coverprofile=ingestor-coverage.out ./... 2>&1 | tee ingestor-test.log
+          echo "--- Go Ingestor Coverage ---"
+          go tool cover -func=ingestor-coverage.out | tail -1
+
+      # The full ingestor suite runs without -race (too slow), so the
+      # force-reconnect tests (upstream #1897) get their own -race pass: a
+      # Disconnect moved into a goroutine races paho's retry loop, and the
+      # race detector backs up the behavioural real-paho tests.
+
+      - name: Race-check Go ingestor force-reconnect
+        run: |
+          set -e -o pipefail
+          cd cmd/ingestor
+          go test -race -count=1 -timeout 5m -run 'ForceReconnect' ./...
+
+      - name: Record ingestor coverage identity
+        run: node scripts/report-go-server-shards.js --ingestor-receipt
+
+      - name: Upload ingestor coverage
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-ingestor-coverage
+          overwrite: true
+          path: .ci-go/ingestor/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+
+
+  go-libraries:
+    name: "✅ Go Libraries & CLI"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -54,36 +219,6 @@ jobs:
           cache-dependency-path: |
             cmd/server/go.sum
             cmd/ingestor/go.sum
-
-      - name: Build and test Go server (with coverage)
-        run: |
-          set -e -o pipefail
-          cd cmd/server
-          go build .
-          # -race gates PR #1208's atomic.Pointer migration: the race-detector
-          # is what makes path_inspect_atomic_race_test.go actually assert.
-          go test -timeout 20m -race -coverprofile=server-coverage.out ./... 2>&1 | tee server-test.log
-          echo "--- Go Server Coverage ---"
-          go tool cover -func=server-coverage.out | tail -1
-
-      - name: Build and test Go ingestor (with coverage)
-        run: |
-          set -e -o pipefail
-          cd cmd/ingestor
-          go build .
-          go test -timeout 20m -coverprofile=ingestor-coverage.out ./... 2>&1 | tee ingestor-test.log
-          echo "--- Go Ingestor Coverage ---"
-          go tool cover -func=ingestor-coverage.out | tail -1
-
-      # The full ingestor suite runs without -race (too slow), so the
-      # force-reconnect tests (upstream #1897) get their own -race pass: a
-      # Disconnect moved into a goroutine races paho's retry loop, and the
-      # race detector backs up the behavioural real-paho tests.
-      - name: Race-check Go ingestor force-reconnect
-        run: |
-          set -e -o pipefail
-          cd cmd/ingestor
-          go test -race -count=1 -timeout 5m -run 'ForceReconnect' ./...
 
       - name: Build and test channel library + decrypt CLI
         run: |
@@ -111,6 +246,7 @@ jobs:
       # internal/anomaly is its own module (not wired into any binary), so the
       # server/ingestor steps above do not reach it. No -fuzz and no -bench:
       # fuzz targets run their in-code seeds only, benchmarks do not run.
+
       - name: Vet and test anomaly library (internal/anomaly, with -race)
         run: |
           set -e -o pipefail
@@ -122,30 +258,34 @@ jobs:
           echo "--- Anomaly library: ${passed} top-level tests passed under -race ---"
           test "${passed}" -gt 0
 
-      - name: Verify Dockerfile COPY invariants (issue #1316)
-        run: bash scripts/check-dockerfile-internal-pkgs.sh
 
-      - name: Staging disk-monitor unit tests (issue #1684)
-        run: bash scripts/staging/test-disk-monitor.sh
+  js-test:
+    name: "✅ JavaScript Unit Tests & Lint"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Non-root container helper unit tests + ShellCheck (issue #339)
-        run: |
-          bash scripts/test-nonroot-helper.sh
-          shellcheck docker/nonroot.sh scripts/test-nonroot-helper.sh scripts/test-docker-nonroot.sh scripts/test-nonroot-entrypoint.sh
-          # SC1091: the entrypoint sources the data volume's .env at run time.
-          shellcheck -e SC1091 docker/entrypoint-go.sh
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
 
-      # The real entrypoint and helper as root in the runtime image's pinned
-      # Alpine base, supervisord stubbed: off-mode start, ownership changes,
-      # the check before root uses files in the data dir, rollback records.
-      - name: Non-root container start path, supervisord stubbed (issue #339)
-        run: bash scripts/test-nonroot-entrypoint.sh
+      - name: Clean Go module cache
+        run: rm -rf ~/go/pkg/mod 2>/dev/null || true
 
-      - name: QA blacklist script unit tests (issues #1977, #83)
-        run: bash qa/scripts/test-blacklist-sql.sh
-
-      - name: ShellCheck QA blacklist scripts (issue #83)
-        run: shellcheck -x -P SCRIPTDIR qa/scripts/blacklist-test.sh qa/scripts/test-blacklist-sql.sh
+      - name: Set up Go 1.27.1
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: |
+            cmd/server/go.sum
+            cmd/ingestor/go.sum
 
       - name: Lint CSS variables (issue #1128)
         run: |
@@ -186,6 +326,45 @@ jobs:
           npm install --no-save --no-audit --no-fund eslint@8
           npx eslint public/*.js
 
+
+  script-test:
+    name: "✅ Script & Container Unit Checks"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify Dockerfile COPY invariants (issue #1316)
+        run: bash scripts/check-dockerfile-internal-pkgs.sh
+
+      - name: Staging disk-monitor unit tests (issue #1684)
+        run: bash scripts/staging/test-disk-monitor.sh
+
+      - name: Non-root container helper unit tests + ShellCheck (issue #339)
+        run: |
+          bash scripts/test-nonroot-helper.sh
+          shellcheck docker/nonroot.sh scripts/test-nonroot-helper.sh scripts/test-docker-nonroot.sh scripts/test-nonroot-entrypoint.sh
+          # SC1091: the entrypoint sources the data volume's .env at run time.
+          shellcheck -e SC1091 docker/entrypoint-go.sh
+
+      # The real entrypoint and helper as root in the runtime image's pinned
+      # Alpine base, supervisord stubbed: off-mode start, ownership changes,
+      # the check before root uses files in the data dir, rollback records.
+
+      - name: Non-root container start path, supervisord stubbed (issue #339)
+        run: bash scripts/test-nonroot-entrypoint.sh
+
+      - name: QA blacklist script unit tests (issues #1977, #83)
+        run: bash qa/scripts/test-blacklist-sql.sh
+
+      - name: ShellCheck QA blacklist scripts (issue #83)
+        run: shellcheck -x -P SCRIPTDIR qa/scripts/blacklist-test.sh qa/scripts/test-blacklist-sql.sh
+
       - name: Verify proto syntax
         timeout-minutes: 5
         run: |
@@ -201,6 +380,85 @@ jobs:
             protoc --proto_path=proto --descriptor_set_out=/dev/null "$proto"
           done
           echo "✅ All .proto files are syntactically valid"
+
+
+  go-test:
+    name: "✅ Go Build & Test"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    needs: [go-shards-check, go-server-1, go-server-2, go-server-3, go-ingestor, go-libraries, js-test, script-test]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Require all Go and split checks
+        env:
+          GO_GUARD_RESULT: ${{ needs.go-shards-check.result }}
+          GO_SERVER_1_RESULT: ${{ needs.go-server-1.result }}
+          GO_SERVER_2_RESULT: ${{ needs.go-server-2.result }}
+          GO_SERVER_3_RESULT: ${{ needs.go-server-3.result }}
+          GO_INGESTOR_RESULT: ${{ needs.go-ingestor.result }}
+          GO_LIBRARIES_RESULT: ${{ needs.go-libraries.result }}
+          JS_RESULT: ${{ needs.js-test.result }}
+          SCRIPTS_RESULT: ${{ needs.script-test.result }}
+        run: |
+          for result in "$GO_GUARD_RESULT" "$GO_SERVER_1_RESULT" "$GO_SERVER_2_RESULT" "$GO_SERVER_3_RESULT" "$GO_INGESTOR_RESULT" "$GO_LIBRARIES_RESULT" "$JS_RESULT" "$SCRIPTS_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "Required CI job did not pass: $result"
+              exit 1
+            fi
+          done
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Clean Go module cache
+        run: rm -rf ~/go/pkg/mod 2>/dev/null || true
+
+      - name: Set up Go 1.27.1
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: |
+            cmd/server/go.sum
+            cmd/ingestor/go.sum
+
+      - name: Download server shard coverage and execution proof
+        uses: actions/download-artifact@v6
+        with:
+          pattern: go-server-*
+          path: .ci-go/downloaded
+          merge-multiple: false
+
+      - name: Download ingestor coverage
+        uses: actions/download-artifact@v6
+        with:
+          name: go-ingestor-coverage
+          path: .ci-go/ingestor-downloaded
+
+      - name: Verify execution and merge coverage profiles
+        env:
+          GO_GUARD_RESULT: ${{ needs.go-shards-check.result }}
+          GO_SERVER_1_RESULT: ${{ needs.go-server-1.result }}
+          GO_SERVER_2_RESULT: ${{ needs.go-server-2.result }}
+          GO_SERVER_3_RESULT: ${{ needs.go-server-3.result }}
+          GO_INGESTOR_RESULT: ${{ needs.go-ingestor.result }}
+          GO_LIBRARIES_RESULT: ${{ needs.go-libraries.result }}
+          JS_RESULT: ${{ needs.js-test.result }}
+          SCRIPTS_RESULT: ${{ needs.script-test.result }}
+        run: |
+          node scripts/report-go-server-shards.js
+          echo "--- Go Server Coverage ---"
+          (cd cmd/server && go tool cover -func=server-coverage.out | tail -1)
+          echo "--- Go Ingestor Coverage ---"
+          (cd cmd/ingestor && go tool cover -func=ingestor-coverage.out | tail -1)
 
       - name: Generate Go coverage badges
         if: success()
@@ -236,9 +494,23 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: go-badges
+          overwrite: true
           path: .badges/go-*.json
           retention-days: 1
           if-no-files-found: ignore
+          include-hidden-files: true
+
+      - name: Upload merged Go coverage and report
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-coverage
+          overwrite: true
+          path: |
+            cmd/server/server-coverage.out
+            cmd/ingestor/ingestor-coverage.out
+            .ci-go/server-shards-report.json
+          retention-days: 1
+          if-no-files-found: error
           include-hidden-files: true
 
   # ───────────────────────────────────────────────────────────────
@@ -601,7 +873,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────
   build-and-publish:
     name: "🏗️ Build & Publish Docker Image"
-    needs: [go-test, e2e-test-1, e2e-test-2, e2e-test-3, e2e-report, image-check]
+    needs: [go-shards-check, go-server-1, go-server-2, go-server-3, go-ingestor, go-libraries, js-test, script-test, go-test, e2e-test-1, e2e-test-2, e2e-test-3, e2e-report, image-check]
     # A failed dependency normally skips this job. A skipped required check
     # can count as passing in branch protection, so run and fail explicitly.
     # A cancelled run reports this job as cancelled (not skipped), which does
@@ -612,6 +884,14 @@ jobs:
     steps:
       - name: Require tests and image validation
         env:
+          GO_GUARD_RESULT: ${{ needs.go-shards-check.result }}
+          GO_SERVER_1_RESULT: ${{ needs.go-server-1.result }}
+          GO_SERVER_2_RESULT: ${{ needs.go-server-2.result }}
+          GO_SERVER_3_RESULT: ${{ needs.go-server-3.result }}
+          GO_INGESTOR_RESULT: ${{ needs.go-ingestor.result }}
+          GO_LIBRARIES_RESULT: ${{ needs.go-libraries.result }}
+          JS_RESULT: ${{ needs.js-test.result }}
+          SCRIPTS_RESULT: ${{ needs.script-test.result }}
           GO_RESULT: ${{ needs.go-test.result }}
           E2E_1_RESULT: ${{ needs.e2e-test-1.result }}
           E2E_2_RESULT: ${{ needs.e2e-test-2.result }}
@@ -619,7 +899,7 @@ jobs:
           E2E_REPORT_RESULT: ${{ needs.e2e-report.result }}
           IMAGE_RESULT: ${{ needs.image-check.result }}
         run: |
-          for result in "$GO_RESULT" "$E2E_1_RESULT" "$E2E_2_RESULT" "$E2E_3_RESULT" "$E2E_REPORT_RESULT" "$IMAGE_RESULT"; do
+          for result in "$GO_GUARD_RESULT" "$GO_SERVER_1_RESULT" "$GO_SERVER_2_RESULT" "$GO_SERVER_3_RESULT" "$GO_INGESTOR_RESULT" "$GO_LIBRARIES_RESULT" "$JS_RESULT" "$SCRIPTS_RESULT" "$GO_RESULT" "$E2E_1_RESULT" "$E2E_2_RESULT" "$E2E_3_RESULT" "$E2E_REPORT_RESULT" "$IMAGE_RESULT"; do
             if [ "$result" != success ]; then
               echo "Required CI job did not pass: $result"
               exit 1
