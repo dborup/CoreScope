@@ -37,6 +37,11 @@ type HeardDirectObserver struct {
 	AvgSnr       *float64 `json:"avgSnr"`
 	AvgRssi      *float64 `json:"avgRssi"`
 	CanRelay     *bool    `json:"can_relay,omitempty"`
+
+	// snrSum and snrN let stats.avgSnr be recomputed over the rows that stay
+	// after the hidden filter (visibleHeardBy); they are not serialised.
+	snrSum float64
+	snrN   int
 }
 
 // HeardRelayObserver is an observer that saw the node's traffic, but no
@@ -235,7 +240,8 @@ func (a *heardByAccumulator) lists(canRelay func(id string) *bool) ([]HeardDirec
 		}
 		if r.direct > 0 {
 			direct = append(direct, HeardDirectObserver{ObserverID: r.id, ObserverName: r.name, PacketCount: r.direct,
-				AvgSnr: meanOrNil(r.snrSum, r.snrN), AvgRssi: meanOrNil(r.rssiSum, r.rssiN), CanRelay: cr})
+				AvgSnr: meanOrNil(r.snrSum, r.snrN), AvgRssi: meanOrNil(r.rssiSum, r.rssiN), CanRelay: cr,
+				snrSum: r.snrSum, snrN: r.snrN})
 		} else {
 			relay = append(relay, HeardRelayObserver{ObserverID: r.id, ObserverName: r.name, PacketCount: r.packets, CanRelay: cr})
 		}
@@ -296,4 +302,27 @@ func visibleHeardBy(direct []HeardDirectObserver, relay []HeardRelayObserver, hi
 		}
 	}
 	return d, r
+}
+
+// applyVisibleHeardBy removes hidden observers from entry's Heard By lists
+// and, when any direct row went, recomputes stats.avgSnr over the rows that
+// stay, so a hidden observer's SNR never outlives its row. entry is a
+// GetNodeHealth result or one GetBulkHealth row.
+func applyVisibleHeardBy(entry map[string]interface{}, hidden func(id, name string) bool) {
+	direct, _ := entry["directObservers"].([]HeardDirectObserver)
+	relay, _ := entry["relayObservers"].([]HeardRelayObserver)
+	visible, relay := visibleHeardBy(direct, relay, hidden)
+	entry["directObservers"], entry["relayObservers"] = visible, relay
+	stats, ok := entry["stats"].(NodeHealthStats)
+	if !ok || len(visible) == len(direct) {
+		return
+	}
+	var sum float64
+	var n int
+	for _, o := range visible {
+		sum += o.snrSum
+		n += o.snrN
+	}
+	stats.AvgSnr = meanOrNil(sum, n)
+	entry["stats"] = stats
 }

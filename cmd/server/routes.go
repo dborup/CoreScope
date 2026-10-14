@@ -2239,7 +2239,7 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "observer visibility lookup failed")
 			return
 		}
-		result["directObservers"], result["relayObservers"] = visibleHeardBy(direct, relay, hidden)
+		applyVisibleHeardBy(result, hidden)
 		writeJSON(w, result)
 		return
 	}
@@ -2287,9 +2287,7 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, entry := range results {
-			direct, _ := entry["directObservers"].([]HeardDirectObserver)
-			relay, _ := entry["relayObservers"].([]HeardRelayObserver)
-			entry["directObservers"], entry["relayObservers"] = visibleHeardBy(direct, relay, hidden)
+			applyVisibleHeardBy(entry, hidden)
 		}
 		writeJSON(w, results)
 		return

@@ -529,6 +529,9 @@ func TestOpenAPI_HeardBySchemas_76(t *testing.T) {
 		var out []string
 		rt := reflect.TypeOf(v)
 		for i := 0; i < rt.NumField(); i++ {
+			if !rt.Field(i).IsExported() {
+				continue
+			}
 			out = append(out, strings.Split(rt.Field(i).Tag.Get("json"), ",")[0])
 		}
 		sort.Strings(out)
@@ -551,3 +554,73 @@ func TestOpenAPI_HeardBySchemas_76(t *testing.T) {
 		t.Errorf("BulkHealthEntry properties %v, struct fields %v", got, want)
 	}
 }
+
+// stats.avgSnr covers the direct receptions that stay in the response: a
+// hidden observer's SNR must not survive in the mean (#76 review F1), and a
+// node whose every direct observer is hidden reports no mean at all.
+func TestHeardBy_StatsAvgSnrExcludesHiddenObservers_76(t *testing.T) {
+	cfg := &Config{Port: 3000, ObserverBlacklist: []string{"obs-black"}}
+	cfg.SetHiddenNamePrefixes([]string{"HIDE"})
+	cases := []struct {
+		name string
+		obs  []*StoreObs
+		want *float64
+	}{
+		{"mixed", []*StoreObs{
+			hbObs("obs-visible", "Visible", `[]`, RouteFlood+1, 2, -91),
+			hbObs("obs-visible", "Visible", `[]`, RouteFlood+1, 4, -91),
+			hbObs("obs-named", "HIDE recorded", `[]`, RouteFlood+1, 10, -91),
+			hbObs("OBS-BLACK", "Blacklisted", `[]`, RouteFlood+1, 30, -91)}, hbF64(3)},
+		{"all hidden", []*StoreObs{
+			hbObs("obs-named", "HIDE recorded", `[]`, RouteFlood+1, 7.5, -91)}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db, s := hbStore(t)
+			hbIndex(s, hbNode, hbAdvert(hbNode, RouteFlood, c.obs...))
+			srv := NewServer(db, cfg, NewHub())
+			srv.store = s
+			router := mux.NewRouter()
+			srv.RegisterRoutes(router)
+			get := func(path string) []byte {
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+				if w.Code != http.StatusOK {
+					t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+				}
+				return w.Body.Bytes()
+			}
+			var single hbHealth
+			if err := json.Unmarshal(get("/api/nodes/"+hbNode+"/health"), &single); err != nil {
+				t.Fatal(err)
+			}
+			var bulk []hbHealth
+			var keys []map[string]interface{}
+			raw := get("/api/nodes/bulk-health?limit=10")
+			if err := json.Unmarshal(raw, &bulk); err != nil || json.Unmarshal(raw, &keys) != nil {
+				t.Fatal(err)
+			}
+			got := map[string]*float64{"health": single.Stats.AvgSnr}
+			for i, k := range keys {
+				if k["public_key"] == hbNode {
+					got["bulk-health"] = bulk[i].Stats.AvgSnr
+				}
+			}
+			if len(got) != 2 {
+				t.Fatal("node missing from bulk-health")
+			}
+			for name, v := range got {
+				switch {
+				case c.want == nil && v != nil:
+					t.Errorf("%s stats.avgSnr = %v, want null", name, *v)
+				case c.want != nil && v == nil:
+					t.Errorf("%s stats.avgSnr = null, want %v", name, *c.want)
+				case c.want != nil && *v != *c.want:
+					t.Errorf("%s stats.avgSnr = %v, want %v", name, *v, *c.want)
+				}
+			}
+		})
+	}
+}
+
+func hbF64(v float64) *float64 { return &v }

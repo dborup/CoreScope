@@ -151,7 +151,13 @@ const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
     const col = headers.indexOf('Direct observers') + 1;
     const direct = (await table.locator(`tbody tr td:nth-child(${col})`).allInnerTexts()).map(Number);
     assert(direct.length > 0, 'ranking has rows');
-    for (let i = 1; i < direct.length; i++) assert(direct[i] <= direct[i - 1], 'not ranked by direct observers: ' + direct);
+    const relayCol = headers.indexOf('Via relay') + 1;
+    const relay = (await table.locator(`tbody tr td:nth-child(${relayCol})`).allInnerTexts()).map(Number);
+    for (let i = 1; i < direct.length; i++) {
+      assert(direct[i] <= direct[i - 1], 'not ranked by direct observers: ' + direct);
+      // Ties on direct observers are broken by relay observers, most first.
+      if (direct[i] === direct[i - 1]) assert(relay[i] <= relay[i - 1], `tie on ${direct[i]} direct not ranked by relay: ${relay}`);
+    }
     assert(direct[0] === maxDirect, `top row ${direct[0]} != max direct ${maxDirect}`);
   });
 
