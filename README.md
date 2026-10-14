@@ -99,13 +99,14 @@ docker run -d --name corescope-meshview \
   --restart=unless-stopped \
   -p 127.0.0.1:8080:80 \
   -p 127.0.0.1:1883:1883 \
+  -e DISABLE_MOSQUITTO=false \
   --mount "type=bind,source=$(pwd)/data,target=/app/data" \
   corescope-meshview:local
 ```
 
 Open [http://localhost:8080](http://localhost:8080). The included Caddy proxy forwards HTTP requests to the Go server. The database and configuration persist in `./data`; packets appear once an observer publishes to the local MQTT broker.
 
-This example exposes HTTP and MQTT on the Docker host's loopback interface. A publisher on that host can connect to `mqtt://localhost:1883`. To collect from an external broker, replace `mqttSources` with that broker's connection settings and restart the container. You can then disable the included broker with `-e DISABLE_MOSQUITTO=true` and omit the MQTT port mapping.
+This example exposes HTTP and MQTT on the Docker host's loopback interface. The included broker is opt-in, which is what `-e DISABLE_MOSQUITTO=false` does; a publisher on that host can then connect to `mqtt://localhost:1883`. To collect from an external broker, replace `mqttSources` with that broker's connection settings, drop `-e DISABLE_MOSQUITTO=false` and the MQTT port mapping, and recreate the container.
 
 ```bash
 docker logs -f corescope-meshview
