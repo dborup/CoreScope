@@ -3764,7 +3764,10 @@ func (s *Server) handleAllObserverNeighbors(w http.ResponseWriter, r *http.Reque
 	// via hashRegionsPath is configured, and must not be reported as one
 	// the deployment does not know about (#360).
 	decisions, err := s.regionScopeDecisions()
-	if err != nil { writeError(w, 500, "could not read scope decisions"); return }
+	if err != nil {
+		writeError(w, 500, "could not read scope decisions")
+		return
+	}
 	configured := append(append([]string{}, s.cfg.EffectiveHashRegions()...), approvedRegionNames(decisions)...)
 	writeJSON(w, ObserverNeighborsResponse{Neighbors: entries, UnknownScopes: computeUnknownScopes(entries, configured)})
 }
