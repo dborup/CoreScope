@@ -15,6 +15,7 @@
   var sortState = { col: 'observer', dir: 'asc' };
   var scopeAdminKey = '';
   var scopeDecisions = [];
+  var scopeLimit = 0;
   var scopeClickHandler = null;
 
   function escapeHtml(s) {
@@ -27,6 +28,7 @@
     unknownScopes = [];
     scopeAdminKey = '';
     scopeDecisions = [];
+    scopeLimit = 0;
     filterText = '';
     sortState = { col: 'observer', dir: 'asc' };
 
@@ -76,6 +78,7 @@
     unknownScopes = [];
     scopeAdminKey = '';
     scopeDecisions = [];
+    scopeLimit = 0;
   }
 
   function load() {
@@ -113,7 +116,7 @@
       return;
     }
     var rows = unknownScopes.map(function (u) {
-      var adminButtons = scopeAdminKey ? '<td>' + scopeButton('approve', u.scope) + ' ' + scopeButton('reject', u.scope) + '</td>' : '';
+      var adminButtons = scopeAdminKey ? '<td class="obs-nb-scope-actions">' + scopeButton('approve', u.scope) + ' ' + scopeButton('reject', u.scope) + '</td>' : '';
       return '<tr>' +
         '<td><code>' + escapeHtml(u.scope) + '</code></td>' +
         '<td style="text-align:right">' + u.count.toLocaleString() + '</td>' +
@@ -155,6 +158,7 @@
     adminStatus('Loading decisions…');
     adminFetch('/api/admin/region-scopes').then(function (data) {
       scopeDecisions = Array.isArray(data.decisions) ? data.decisions : [];
+      scopeLimit = Number(data.limit) || 0;
       renderScopeDecisions();
       renderUnknownScopes();
       adminStatus('Decisions loaded. The key stays in this tab only.');
@@ -165,16 +169,27 @@
     var wrap = document.getElementById('obs-nb-admin-list');
     if (!wrap) return;
     var rows = scopeDecisions.map(function (d) {
-      return '<tr><td><code>' + escapeHtml(d.name) + '</code></td><td>' + escapeHtml(d.status) + '</td><td>' +
+      return '<tr><td><code>' + escapeHtml(d.name) + '</code></td><td>' + escapeHtml(d.status) + '</td><td class="obs-nb-scope-actions">' +
         (d.status === 'approved' ? scopeButton('revoke', d.name) : '') + '</td></tr>';
     }).join('');
-    wrap.innerHTML = rows ? '<div class="table-fluid-wrap" tabindex="0" aria-label="Region scope decisions table; scroll horizontally for all columns"><table class="data-table"><thead><tr><th>Scope</th><th>Status</th><th>Action</th></tr></thead><tbody>' + rows + '</tbody></table></div>' :
-      '<p class="text-muted">No scope decisions yet.</p>';
+    var approved = scopeDecisions.filter(function (d) { return d.status === 'approved'; }).length;
+    var usage = scopeLimit ? '<p class="text-muted">' + approved + ' of ' + scopeLimit + ' approval slots used.</p>' : '';
+    wrap.innerHTML = usage + (rows ? '<div class="table-fluid-wrap" tabindex="0" aria-label="Region scope decisions table; scroll horizontally for all columns"><table class="data-table"><thead><tr><th>Scope</th><th>Status</th><th>Action</th></tr></thead><tbody>' + rows + '</tbody></table></div>' :
+      '<p class="text-muted">No scope decisions yet.</p>');
+  }
+
+  // Shown before every decision: the matcher only sees packets received
+  // afterwards, so stored packets never change scope.
+  function confirmMessage(action, name) {
+    var history = ' Stored packets keep their current scope.';
+    if (action === 'approve') return 'Approve ' + name + '? Packets received from now on can match it.' + history;
+    if (action === 'revoke') return 'Revoke ' + name + '? Packets received from now on stop matching it, unless it is also configured.' + history;
+    return 'Reject ' + name + '? Nothing is activated; it stays listed while neighbors report it.';
   }
 
   function decideScope(action, name) {
     if (!scopeAdminKey || !name || ['approve', 'reject', 'revoke'].indexOf(action) < 0) return;
-    if (typeof window.confirm === 'function' && !window.confirm('Confirm ' + action + ' for ' + name + '? This changes future scope matching.')) return;
+    if (typeof window.confirm === 'function' && !window.confirm(confirmMessage(action, name))) return;
     adminStatus('Submitting ' + action + ' for ' + name + '…');
     adminFetch('/api/admin/region-scopes/' + action, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name })

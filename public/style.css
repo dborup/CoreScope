@@ -1368,6 +1368,9 @@ img.brand-logo {
  * fall back to horizontal scroll on the wrap rather than overflowing the page. */
 .table-fluid-wrap { width: 100%; overflow-x: auto; }
 .obs-nb-scope-scroll-hint { display: none; }
+/* Decision buttons are never ellipsized: the narrow-viewport .data-table td
+ * rule (max-width + text-overflow) would paint an overflowing button as "…". */
+.data-table td.obs-nb-scope-actions { max-width: none; overflow: visible; white-space: nowrap; }
 
 /* Observer Neighbors scope review: give both decision buttons a real table
  * column on phones, then let the existing fluid wrapper scroll it. Without
