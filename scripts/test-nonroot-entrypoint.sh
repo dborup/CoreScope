@@ -146,6 +146,9 @@ BEFORE=$(tree "$V")
 for combo in none DISABLE_MOSQUITTO DISABLE_CADDY "DISABLE_MOSQUITTO DISABLE_CADDY"; do
     dis=()
     for d in $combo; do [ "$d" = none ] || dis+=(-e "$d=true"); done
+    # The bundled broker is opt-in (#441): the combinations that keep it ask
+    # for it explicitly.
+    case " $combo " in *" DISABLE_MOSQUITTO "*) ;; *) dis+=(-e DISABLE_MOSQUITTO=false) ;; esac
     case "$combo" in
         none) conf=supervisord.conf ;;
         DISABLE_MOSQUITTO) conf=supervisord-no-mosquitto.conf ;;
@@ -328,7 +331,9 @@ layout "$V"
 start "$V" "${ON[@]}"
 start "$V"
 check "off after on, clean volume: exit status" 0 "$RC"
-has "off after on, clean volume: shipped config" "$OUT" '^argv: -c /etc/supervisor/conf.d/supervisord.conf$'
+# DISABLE_MOSQUITTO is unset here, so the shipped config is the one without
+# the bundled broker, which is opt-in (#441).
+has "off after on, clean volume: shipped config" "$OUT" '^argv: -c /etc/supervisor/conf.d/supervisord-no-mosquitto.conf$'
 has "off after on, clean volume: .env sourced" "$OUT" '^env: FROM_ENV_FILE=yes$'
 has "off after on: says it took back group write and the sticky bit" "$OUT" '^\[nonroot\] the mode is off: removed group write and the sticky bit'
 check "off after on: data dir no longer group-writable or sticky (fs.protected_regular)" "$H:$G 755" "$(stat_of "$V" .)"

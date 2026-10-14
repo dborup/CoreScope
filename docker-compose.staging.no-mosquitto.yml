@@ -34,18 +34,20 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "${STAGING_GO_HTTP_PORT:-82}:80"
-      # PPROF_BIND is the host interface the pprof ports are published on.
-      # Empty (the shipped default) renders no host interface at all, which
-      # is the dual-stack publish this file always had; 127.0.0.1 narrows it
-      # to the host. An explicit 0.0.0.0 would drop IPv6, so do not use it.
-      - "${PPROF_BIND:+${PPROF_BIND}:}6060:6060"
-      - "${PPROF_BIND:+${PPROF_BIND}:}6061:6061"
+      # PPROF_BIND is the host interface the pprof ports are published on,
+      # 127.0.0.1 unless set (#441); reach them with an SSH tunnel or set
+      # PPROF_BIND=0.0.0.0 for remote access. See docker-compose.staging.yml.
+      - "${PPROF_BIND:-127.0.0.1}:6060:6060"
+      - "${PPROF_BIND:-127.0.0.1}:6061:6061"
     volumes:
       - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
       - caddy-data-staging-go:/data/caddy
     environment:
       - NODE_ENV=staging
       - ENABLE_PPROF=true
+      # Every interface INSIDE the container, so the published pprof ports
+      # above reach it; PPROF_BIND decides who on the host can (#441).
+      - PPROF_HOST=0.0.0.0
       - DISABLE_MOSQUITTO=true
       # In-process settings — read by the server and the ingestor, not by
       # docker compose. Without these lines a value in .env reaches docker
@@ -57,7 +59,6 @@ services:
       - MQTT_BROKER=${MQTT_BROKER:-}
       - MQTT_TOPIC=${MQTT_TOPIC:-}
       - MQTT_SOURCE_STRICT=${MQTT_SOURCE_STRICT:-}
-      - PPROF_HOST=${PPROF_HOST:-}
       - PPROF_HOST_SERVER=${PPROF_HOST_SERVER:-}
       - PPROF_HOST_INGESTOR=${PPROF_HOST_INGESTOR:-}
       - PPROF_PORT=${PPROF_PORT:-}

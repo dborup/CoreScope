@@ -68,15 +68,30 @@ err()  { printf '%b\n' "${RED}✗${NC} $1"; }
 info() { printf '%b\n' "${CYAN}→${NC} $1"; }
 step() { printf '%b\n' "\n${BOLD}[$1/$TOTAL_STEPS] $2${NC}"; }
 
-is_true() {
-  case "${1:-}" in
-    1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
-    *) return 1 ;;
+# DISABLE_MOSQUITTO (#441): the bundled mosquitto is opt-in. Prints "true"
+# (bundled broker off), "false" (on) or "invalid". Trimmed and
+# case-insensitive: true/1/yes/on and false/0/no/off; unset or empty is the
+# default, true. docker/entrypoint-go.sh and the ingestor's
+# ResolveBrokerMode read it with the same table
+# (test-fixtures/disable-mosquitto-cases.json), and an invalid value falls
+# back to the default in all three.
+parse_disable_mosquitto() {
+  local v
+  v=$(printf '%s' "${1:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
+  case "$v" in
+    true|1|yes|on|"") echo true ;;
+    false|0|no|off) echo false ;;
+    *) echo invalid ;;
   esac
 }
 
+# True unless DISABLE_MOSQUITTO (or the value given) is a recognised false.
+mosquitto_disabled() {
+  [ "$(parse_disable_mosquitto "${1-${DISABLE_MOSQUITTO:-}}")" != "false" ]
+}
+
 dc_prod() {
-  if is_true "${DISABLE_MOSQUITTO:-false}"; then
+  if mosquitto_disabled; then
     $DC -f docker-compose.no-mosquitto.yml "$@"
   else
     $DC "$@"
@@ -84,7 +99,7 @@ dc_prod() {
 }
 
 dc_staging() {
-  if is_true "${DISABLE_MOSQUITTO:-false}"; then
+  if mosquitto_disabled; then
     $DC -f docker-compose.staging.no-mosquitto.yml -p corescope-staging "$@"
   else
     $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging "$@"
@@ -95,12 +110,6 @@ confirm() {
   read -p "   $1 [y/N] " -n 1 -r
   echo
   [[ $REPLY =~ ^[Yy]$ ]]
-}
-
-confirm_yes_default() {
-  read -p "   $1 [Y/n] " -n 1 -r
-  echo
-  [[ -z "$REPLY" || $REPLY =~ ^[Yy]$ ]]
 }
 
 # State tracking — marks completed steps so re-runs skip them
@@ -370,7 +379,7 @@ preflight_validate_prod_ports() {
   local http_port="${PROD_HTTP_PORT:-80}"
   local https_port="${PROD_HTTPS_PORT:-443}"
   local mqtt_port=""
-  if ! is_true "${DISABLE_MOSQUITTO:-false}"; then
+  if ! mosquitto_disabled; then
     mqtt_port="${PROD_MQTT_PORT:-1883}"
   fi
   local failed=0
@@ -437,39 +446,12 @@ mask_broker_text() {
     -e 's#(://[^[:space:]]*)\?[^[:space:]]*#\1#g'
 }
 
-# True when the bundled mosquitto will run on a host managed by THIS script.
-#
-# manage.sh is the authority for its own hosts, not the container entrypoint:
-# dc_prod/dc_staging pick the compose file with is_true(), and
-# docker-compose.no-mosquitto.yml / docker-compose.staging.no-mosquitto.yml
-# hard-code DISABLE_MOSQUITTO=true in the container's environment. So "yes",
-# "1", "on" and "TRUE" all end up EXTERNAL here, even though the entrypoint
-# on its own only accepts the exact string "true". Reporting the entrypoint's
-# reading instead would claim "bundled" for those values and skip the source
-# validation that catches a deploy which ingests nothing.
+# True when the bundled mosquitto will run. manage.sh, the entrypoint and
+# the ingestor all read DISABLE_MOSQUITTO with parse_disable_mosquitto's
+# table (#441), so the mode reported here is the mode the container is in
+# whichever compose file is used.
 bundled_broker_enabled() {
-  ! is_true "${DISABLE_MOSQUITTO:-false}"
-}
-
-# True when DISABLE_MOSQUITTO means one thing to this script and another to a
-# bare `docker compose up` against docker-compose.yml. is_true() accepts
-# 1/true/TRUE/yes/YES/y/Y/on/ON; the entrypoint accepts only the exact
-# "true". A value in that gap is external under manage.sh (which swaps in the
-# no-mosquitto compose file) and bundled without it.
-disable_mosquitto_is_ambiguous() {
-  [ "${1:-}" = "true" ] && return 1
-  is_true "${1:-}"
-}
-
-# True when DISABLE_MOSQUITTO is set to something NEITHER this script nor the
-# container entrypoint recognises — " true" with a stray space, or a typo.
-# Both then fall back to keeping the bundled broker, which may be the
-# opposite of what was meant.
-disable_mosquitto_is_unrecognised() {
-  case "${1:-}" in
-    ""|true|false|FALSE|False|0|no|NO|n|N|off|OFF) return 1 ;;
-  esac
-  ! is_true "${1:-}"
+  ! mosquitto_disabled
 }
 
 # Host part of a broker URL, lowercased, with scheme, user-info, port and
@@ -571,35 +553,37 @@ broker_check_report() {
   local cfg="${1:-$PROD_DATA/config.json}"
   local errors=0
   local raw="${DISABLE_MOSQUITTO:-}"
+  local parsed setting
+  parsed=$(parse_disable_mosquitto "$raw")
 
-  if disable_mosquitto_is_ambiguous "$raw"; then
-    warn "DISABLE_MOSQUITTO='${raw}' means different things to different launchers."
-    echo "   This script's is_true() accepts it, so ./manage.sh runs the external-broker"
-    echo "   compose file, which hard-codes DISABLE_MOSQUITTO=true in the container — the"
-    echo "   bundled broker will NOT start, and that is the mode reported below. A bare"
-    echo "   'docker compose up' against docker-compose.yml passes '${raw}' straight"
-    echo "   through, and the entrypoint disables the bundled broker only on the exact"
-    echo "   value \"true\", so there the bundled broker WOULD start. Set it to \"true\""
-    echo "   or \"false\" so both read it the same way."
-  elif disable_mosquitto_is_unrecognised "$raw"; then
-    warn "DISABLE_MOSQUITTO='${raw}' is neither a recognised true nor a recognised false value."
-    echo "   This script's is_true() rejects it and the container entrypoint accepts only"
-    echo "   the exact value \"true\", so both keep the bundled broker running. If you"
-    echo "   meant to use an external broker, set it to \"true\"."
-  fi
+  case "$parsed" in
+    invalid)
+      warn "DISABLE_MOSQUITTO='${raw}' is not a recognised value (true/1/yes/on or false/0/no/off)."
+      echo "   The default applies, so the bundled broker will NOT start. Set it to \"false\""
+      echo "   to run the bundled broker, or to \"true\" to silence this warning."
+      setting="DISABLE_MOSQUITTO=${raw}, not recognised, default true"
+      ;;
+    *)
+      if [ -z "$raw" ]; then
+        setting="DISABLE_MOSQUITTO unset, default true"
+      else
+        setting="DISABLE_MOSQUITTO=${raw}, read as ${parsed}"
+      fi
+      ;;
+  esac
 
   if bundled_broker_enabled; then
-    log "Broker mode: bundled mosquitto (DISABLE_MOSQUITTO=${raw:-false})."
+    log "Broker mode: bundled mosquitto (${setting})."
     return 0
   fi
 
-  info "Broker mode: external (DISABLE_MOSQUITTO=${raw}) — the bundled broker will not start."
+  info "Broker mode: external (${setting}) — the bundled broker will not start."
 
   local sources
   sources=$(broker_sources "$cfg")
   if [ -z "$sources" ]; then
     err "No external MQTT source is configured, so nothing will be ingested."
-    echo "   DISABLE_MOSQUITTO=true disables the bundled broker, but the ingestor then"
+    echo "   The bundled broker is off (it is opt-in), but the ingestor then"
     echo "   falls back to its built-in mqtt://localhost:1883 — the bundled broker's own"
     echo "   address — where nothing is listening."
     echo ""
@@ -832,7 +816,7 @@ cmd_setup() {
   local selected_http="$default_http"
   local selected_https="$default_https"
   local selected_mqtt="$default_mqtt"
-  local selected_disable_mosquitto="${DISABLE_MOSQUITTO:-false}"
+  local selected_disable_mosquitto="${DISABLE_MOSQUITTO:-true}"
   local selected_data_dir="${PROD_DATA_DIR:-$HOME/meshcore-data}"
 
   local env_http=""
@@ -856,7 +840,7 @@ cmd_setup() {
   fi
 
   local has_current_ports=false
-  if is_true "$selected_disable_mosquitto"; then
+  if mosquitto_disabled "$selected_disable_mosquitto"; then
     if is_valid_port "$env_http" && is_valid_port "$env_https"; then
       has_current_ports=true
     fi
@@ -911,7 +895,8 @@ cmd_setup() {
     selected_http=$(prompt_for_port "HTTP" "$default_http" "$suggested_http")
     selected_https=$(prompt_for_port "HTTPS" "$default_https" "$suggested_https")
 
-    if confirm_yes_default "Use built-in MQTT broker?"; then
+    # The bundled broker is opt-in (#441), so Enter keeps it off.
+    if confirm "Use built-in MQTT broker?"; then
       selected_disable_mosquitto="false"
       if is_port_in_use "$default_mqtt"; then
         warn "Port ${default_mqtt} is in use."
@@ -924,7 +909,7 @@ cmd_setup() {
       selected_mqtt=$(prompt_for_port "MQTT" "$default_mqtt" "$suggested_mqtt")
     else
       selected_disable_mosquitto="true"
-      log "Internal MQTT broker disabled."
+      log "Internal MQTT broker disabled. Point mqttSources in config.json at your broker."
     fi
   fi
 
@@ -1014,7 +999,7 @@ cmd_setup() {
   echo "   Resolved port mapping:"
   echo "     UI HTTP:  ${selected_http}"
   echo "     UI HTTPS: ${selected_https}"
-  if is_true "$selected_disable_mosquitto"; then
+  if mosquitto_disabled "$selected_disable_mosquitto"; then
     echo "     MQTT:     disabled (external broker)"
   else
     echo "     MQTT:     ${selected_mqtt}"
@@ -1311,7 +1296,7 @@ cmd_start() {
     info "Starting staging container (${STAGING_CONTAINER}) on port ${STAGING_GO_HTTP_PORT:-82}..."
     dc_prod up -d prod
     dc_staging up -d staging-go
-    if is_true "${DISABLE_MOSQUITTO:-false}"; then
+    if mosquitto_disabled; then
       log "Production started on ports ${PROD_HTTP_PORT:-80}/${PROD_HTTPS_PORT:-443} (MQTT disabled)"
       log "Staging started on port ${STAGING_GO_HTTP_PORT:-82} (MQTT disabled)"
     else

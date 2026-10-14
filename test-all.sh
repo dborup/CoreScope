@@ -70,6 +70,7 @@ run test-issue-405-observers-listener-leak.js
 run test-issue-322-comment-guards.js
 run test-backup-sqlite-safety.js
 run test-issue-372-broker-check.js
+run test-issue-441-disable-mosquitto.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
@@ -281,6 +282,7 @@ run test-issue-1470-card-bg-contrast.js
 run test-issue-1646-compare-polish.js
 run test-perf-disk-io-1120.js
 run test-table-sort.js
+run test-regions-map.js
 
 # test-all.sh self-test (#174)
 run test-test-all.js

@@ -7,11 +7,14 @@
 // reports why, so an operator who typed ENABLE_PPROF=1 is told rather than
 // left wondering.
 //
-// The bind host is a separate, explicit setting. Its default is the empty
-// host — ":6060" — which is what the server and the ingestor listened on
-// before this package existed, i.e. every interface. Installs that profile
-// a remote host therefore keep working untouched; an operator who wants
-// loopback only sets PPROF_HOST (or the per-role PPROF_HOST_<ROLE>).
+// The bind host is a separate, explicit setting. Its default is loopback,
+// 127.0.0.1 (#441): /debug/pprof/ is unauthenticated and can stall a
+// process, so it is reached through an SSH tunnel unless an operator widens
+// it with PPROF_HOST (or the per-role PPROF_HOST_<ROLE>) — "0.0.0.0" or "*"
+// for every interface, the pre-#441 listener. A container whose compose
+// file publishes the pprof ports pins PPROF_HOST to every interface itself
+// and narrows the published port with PPROF_BIND, because docker's port
+// proxy cannot reach a loopback listener inside the container.
 //
 // Ports stay distinct per role: the server defaults to 6060 and the
 // ingestor to 6061. The shared PPROF_PORT predates this package and still
@@ -22,7 +25,7 @@
 //
 //	PPROF_HOST_<ROLE>  PPROF_PORT_<ROLE>
 //	PPROF_HOST         PPROF_PORT
-//	""  (every interface)   Role.DefaultPort
+//	DefaultHost        Role.DefaultPort
 package pprofbind
 
 import (
@@ -41,6 +44,10 @@ type Role struct {
 	EnvSuffix   string
 	DefaultPort string
 }
+
+// DefaultHost is where a listener binds when no PPROF_HOST setting names a
+// host.
+const DefaultHost = "127.0.0.1"
 
 // Server and Ingestor are the two roles. Their default ports differ so both
 // listeners can run side by side in one container, which is how
@@ -87,10 +94,11 @@ func (r Role) Resolve(getenv func(string) string) Config {
 	if host != "" {
 		addr = net.JoinHostPort(host, port)
 	}
-	// A listener on every interface has no single hostname to print, so the
-	// URL names loopback — the one address that always reaches it.
+	// A listener on every interface ("" or an unspecified address such as
+	// 0.0.0.0) has no single hostname to print, so the URL names loopback —
+	// the one address that always reaches it.
 	display := host
-	if display == "" {
+	if ip := net.ParseIP(host); display == "" || (ip != nil && ip.IsUnspecified()) {
 		display = "localhost"
 	}
 	return Config{
@@ -121,19 +129,19 @@ func (r Role) resolvePort(getenv func(string) string) (string, error) {
 	return strconv.Itoa(n), nil
 }
 
-// resolveHost applies the host precedence. "" and "*" both mean every
-// interface, which keeps the pre-#372 default reachable by name. Anything
-// that is not a bare host — a CIDR mask, a host:port pair, embedded
-// whitespace — is rejected rather than guessed at.
+// resolveHost applies the host precedence. "*" means every interface, as
+// does an unspecified address such as "0.0.0.0". Anything that is not a
+// bare host — a CIDR mask, a host:port pair, embedded whitespace — is
+// rejected rather than guessed at.
 func (r Role) resolveHost(getenv func(string) string) (string, error) {
-	raw, from := "", "default"
+	raw, from := DefaultHost, "default"
 	if v := strings.TrimSpace(getenv("PPROF_HOST")); v != "" {
 		raw, from = v, "PPROF_HOST"
 	}
 	if v := strings.TrimSpace(getenv("PPROF_HOST_" + r.EnvSuffix)); v != "" {
 		raw, from = v, "PPROF_HOST_"+r.EnvSuffix
 	}
-	if raw == "" || raw == "*" {
+	if raw == "*" {
 		return "", nil
 	}
 	if strings.ContainsAny(raw, " \t/?#@") {
