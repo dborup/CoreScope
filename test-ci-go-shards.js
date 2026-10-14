@@ -43,8 +43,10 @@ let inventory;
 let manifest;
 let manifestFile;
 const context = { GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '2', GITHUB_SHA: 'a'.repeat(40) };
-const profileA = `mode: atomic\n${PACKAGE}/main.go:1.1,2.1 2 1\n${PACKAGE}/main.go:3.1,4.1 3 0\n`;
-const profileB = `mode: atomic\n${PACKAGE}/main.go:1.1,2.1 2 0\n${PACKAGE}/main.go:3.1,4.1 3 7\n`;
+// The third block stays at count 0 in every shard: an uncovered statement must
+// stay uncovered after the merge, not count as covered.
+const profileA = `mode: atomic\n${PACKAGE}/main.go:1.1,2.1 2 1\n${PACKAGE}/main.go:3.1,4.1 3 0\n${PACKAGE}/main.go:5.1,6.1 3 0\n`;
+const profileB = `mode: atomic\n${PACKAGE}/main.go:1.1,2.1 2 0\n${PACKAGE}/main.go:3.1,4.1 3 7\n${PACKAGE}/main.go:5.1,6.1 3 0\n`;
 
 function jsonFor(selected, statuses = {}) {
   return [
@@ -148,10 +150,11 @@ async function main() {
   });
   await check('coverage counters are summed and statement union is not averaged', () => {
     const merged = mergeCoverprofiles([profileA, profileB]);
-    assert.equal(merged.coveragePercent, 100);
-    assert.equal(merged.totalStatements, 5);
+    assert.equal(merged.totalStatements, 8);
     assert.equal(merged.coveredStatements, 5);
+    assert.equal(merged.coveragePercent, 62.5);
     assert.ok(merged.profile.includes('3.1,4.1 3 7'));
+    assert.ok(merged.profile.includes('5.1,6.1 3 0'), 'a block no shard covered stays at zero');
     const huge = profileA.replace('2 1', '2 9007199254740993');
     assert.ok(mergeCoverprofiles([huge, profileA]).profile.includes('2 9007199254740994'));
   });
@@ -192,7 +195,8 @@ async function main() {
   await check('complete receipts and merged profile produce a coverage report', () => {
     const report = aggregateShards(reportOptions(artifacts));
     assert.equal(report.status, 'success');
-    assert.equal(report.coveragePercent, 100);
+    assert.equal(report.coveragePercent, 62.5);
+    assert.equal(report.coveredStatements, 5);
     assert.equal(report.testCount, inventory.filter(test => test.active).length);
     assert.equal(fs.readFileSync(path.join(temporary, 'output/cmd/server/server-coverage.out'), 'utf8'), mergeCoverprofiles([profileA, profileB, profileB]).profile);
   });
