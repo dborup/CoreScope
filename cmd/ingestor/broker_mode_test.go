@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -24,101 +26,104 @@ func diagText(diags []BrokerDiagnostic) string {
 	return b.String()
 }
 
-func TestResolveBrokerMode_MatchesTheEntrypointSpelling(t *testing.T) {
-	// docker/entrypoint-go.sh disables the bundled mosquitto on exactly
-	// `DISABLE_MOSQUITTO=true`. The ingestor must read the same value the
-	// same way, or it would report a broker mode the container is not in.
-	for _, tc := range []struct {
-		value       string
-		wantBundled bool
-		wantAmbig   bool
-	}{
-		{"", true, false},
-		{"false", true, false},
-		{"FALSE", true, false},
-		{"0", true, false},
-		{"true", false, false},
-		// Review round 2, finding 7: docker/entrypoint-go.sh compares the
-		// RAW value, so a surrounding space is NOT "true" to it and the
-		// bundled broker keeps running. Trimming here would report the
-		// opposite mode to the one the container is in. Such a value can
-		// only arrive through the process environment — manage.sh's .env
-		// reader and docker compose's dotenv parser both trim [T].
-		{" true ", true, true},
-		{" true", true, true},
-		{"true ", true, true},
-		{"\ttrue", true, true},
-		{"TRUE", true, true},
-		{"True", true, true},
-		{"1", true, true},
-		{"yes", true, true},
-		{"on", true, true},
-		{"y", true, true},
-	} {
-		got := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": tc.value}))
-		if got.Bundled != tc.wantBundled {
-			t.Errorf("DISABLE_MOSQUITTO=%q: Bundled = %v, want %v", tc.value, got.Bundled, tc.wantBundled)
+// disableMosquittoCase is one row of test-fixtures/disable-mosquitto-cases.json,
+// the table docker/entrypoint-go.sh and manage.sh are held to as well
+// (test-issue-441-disable-mosquitto.js). A nil Value means unset.
+type disableMosquittoCase struct {
+	Value      *string `json:"value"`
+	Disabled   bool    `json:"disabled"`
+	Recognised bool    `json:"recognised"`
+}
+
+func loadDisableMosquittoCases(t *testing.T) []disableMosquittoCase {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "test-fixtures", "disable-mosquitto-cases.json"))
+	if err != nil {
+		t.Fatalf("read the shared DISABLE_MOSQUITTO table: %v", err)
+	}
+	var table struct {
+		Cases []disableMosquittoCase `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil {
+		t.Fatalf("parse the shared DISABLE_MOSQUITTO table: %v", err)
+	}
+	if len(table.Cases) == 0 {
+		t.Fatal("the shared DISABLE_MOSQUITTO table is empty")
+	}
+	return table.Cases
+}
+
+// envFor returns the environment one table row describes. os.Getenv reads
+// an unset variable as "", which is what a missing key gives here.
+func (c disableMosquittoCase) envFor() map[string]string {
+	if c.Value == nil {
+		return map[string]string{}
+	}
+	return map[string]string{"DISABLE_MOSQUITTO": *c.Value}
+}
+
+func (c disableMosquittoCase) String() string {
+	if c.Value == nil {
+		return "<unset>"
+	}
+	return fmt.Sprintf("%q", *c.Value)
+}
+
+// Issue #441: the bundled broker is opt-in, and the ingestor reads
+// DISABLE_MOSQUITTO exactly as the entrypoint and manage.sh do — trimmed,
+// case-insensitive, true/1/yes/on and false/0/no/off, anything else the
+// default (true).
+func TestResolveBrokerMode_FollowsTheSharedTable(t *testing.T) {
+	for _, c := range loadDisableMosquittoCases(t) {
+		got := ResolveBrokerMode(brokerEnv(c.envFor()))
+		if got.Bundled == c.Disabled {
+			t.Errorf("DISABLE_MOSQUITTO=%s: Bundled = %v, want %v", c, got.Bundled, !c.Disabled)
 		}
-		if got.Ambiguous != tc.wantAmbig {
-			t.Errorf("DISABLE_MOSQUITTO=%q: Ambiguous = %v, want %v", tc.value, got.Ambiguous, tc.wantAmbig)
+		if got.Unrecognised == c.Recognised {
+			t.Errorf("DISABLE_MOSQUITTO=%s: Unrecognised = %v, want %v", c, got.Unrecognised, !c.Recognised)
 		}
 	}
 }
 
-func TestBrokerMode_AmbiguousValueIsReportedNotSilentlyResolved(t *testing.T) {
-	// A value the entrypoint does not accept leaves the BUNDLED broker
-	// running in this container, while the operator who typed it most
-	// likely meant the opposite. The issue requires that this cannot
-	// happen silently.
-	mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "yes"}))
-	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}, false)
-	if len(diags) == 0 {
-		t.Fatalf("an ambiguous DISABLE_MOSQUITTO value must produce a diagnostic")
-	}
-	joined := diagText(diags)
-	for _, want := range []string{"DISABLE_MOSQUITTO", "yes", "bundled"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("diagnostic must mention %q; got:\n%s", want, joined)
+func TestBrokerMode_JunkValueIsReportedAndFallsBackToTheDefault(t *testing.T) {
+	good := []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}
+	for _, c := range loadDisableMosquittoCases(t) {
+		if c.Recognised {
+			continue
 		}
-	}
-	if sev := WorstBrokerSeverity(diags); sev != SeverityWarn {
-		t.Errorf("an ambiguous value is a warning, not an error (it must not block a start); got %q", sev)
+		mode := ResolveBrokerMode(brokerEnv(c.envFor()))
+		diags := CheckBrokerSources(mode, good, false)
+		joined := diagText(diags)
+		if WorstBrokerSeverity(diags) != SeverityWarn {
+			t.Errorf("DISABLE_MOSQUITTO=%s is junk: want exactly a warning (it must not block a start); got:\n%s", c, joined)
+		}
+		for _, want := range []string{"DISABLE_MOSQUITTO", *c.Value, "not a recognised", "default"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("DISABLE_MOSQUITTO=%s: the warning must mention %q; got:\n%s", c, want, joined)
+			}
+		}
 	}
 }
 
-// Review round 2, finding 2: manage.sh does NOT leave the bundled broker
-// running on an is_true() value. dc_prod/dc_staging swap in
-// docker-compose.no-mosquitto.yml, which hard-codes DISABLE_MOSQUITTO=true
-// in the container's environment — so a container that can see "yes" at all
-// was NOT launched by manage.sh. The diagnostic must therefore not tell the
-// operator that manage.sh believes it disabled the broker; it must name the
-// launcher that actually delivers this value, a bare docker compose run.
-func TestAmbiguousDiagnostic_DoesNotMisattributeTheModeToManageSh(t *testing.T) {
-	mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "yes"}))
-	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}, false)
-	joined := diagText(diags)
-	if !strings.Contains(joined, "docker compose") {
-		t.Errorf("the diagnostic must name the launcher that delivers an untranslated value (a bare `docker compose` run); got:\n%s", joined)
-	}
-	// It may mention manage.sh, but only to say it would have selected the
-	// external compose file — never that it "may believe" the broker was
-	// disabled while this container still runs it.
-	for _, forbidden := range []string{"is_true() may read", "may believe", "manage.sh's is_true(), which accepts"} {
-		if strings.Contains(joined, forbidden) {
-			t.Errorf("the diagnostic still attributes this mode to manage.sh (%q); got:\n%s", forbidden, joined)
+// Before #441 a value such as "yes" was read one way by manage.sh and
+// another by the entrypoint, and the ingestor said so. Parsing is now the
+// same everywhere, so no recognised value may produce a diagnostic about
+// it: with a usable source in the mode the value selects, the check is
+// silent.
+func TestBrokerMode_RecognisedValuesReportNoMismatch(t *testing.T) {
+	external := []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}
+	bundled := []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}
+	for _, c := range loadDisableMosquittoCases(t) {
+		if !c.Recognised {
+			continue
 		}
-	}
-	if strings.Contains(joined, "manage.sh") && !strings.Contains(joined, "no-mosquitto") {
-		t.Errorf("if the diagnostic mentions manage.sh it must say it swaps in the no-mosquitto compose file; got:\n%s", joined)
-	}
-}
-
-func TestBrokerMode_UnambiguousValuesAreQuiet(t *testing.T) {
-	for _, value := range []string{"", "false", "true"} {
-		mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": value}))
-		diags := CheckBrokerSources(mode, []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}, false)
-		if len(diags) != 0 {
-			t.Errorf("DISABLE_MOSQUITTO=%q with a usable external source must be quiet; got:\n%s", value, diagText(diags))
+		mode := ResolveBrokerMode(brokerEnv(c.envFor()))
+		sources := external
+		if !c.Disabled {
+			sources = bundled
+		}
+		if diags := CheckBrokerSources(mode, sources, false); len(diags) != 0 {
+			t.Errorf("DISABLE_MOSQUITTO=%s with a usable source must be quiet; got:\n%s", c, diagText(diags))
 		}
 	}
 }
@@ -173,7 +178,7 @@ func TestExternalMode_OneLoopbackAmongRealSourcesIsOnlyAWarning(t *testing.T) {
 }
 
 func TestBundledMode_LoopbackSourcesAreFine(t *testing.T) {
-	mode := ResolveBrokerMode(brokerEnv(map[string]string{}))
+	mode := ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "false"}))
 	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}, true)
 	if len(diags) != 0 {
 		t.Fatalf("the bundled broker listens on loopback, so this is the normal shape; got:\n%s", diagText(diags))
@@ -372,10 +377,10 @@ func TestReportBrokerSetup_LogsEveryDiagnosticAndOnlyRefusesUnderStrict(t *testi
 		t.Errorf("the fatal message must name the setting that caused it; got %q", msg)
 	}
 
-	// Strict with only a warning: still starts.
+	// Strict with only a warning (a junk DISABLE_MOSQUITTO): still starts.
 	lines = nil
 	fatal, _ = ReportBrokerSetup(brokerEnv(map[string]string{
-		"DISABLE_MOSQUITTO":  "yes",
+		"DISABLE_MOSQUITTO":  "ture",
 		"MQTT_SOURCE_STRICT": "true",
 	}), []MQTTSource{{Name: "ext", Broker: "mqtt://broker.example:1883"}}, false, logf)
 	if fatal {
@@ -411,11 +416,12 @@ func TestIngestorMainReportsBrokerSetupBeforeConnecting(t *testing.T) {
 	}
 }
 
-// TestEmptyBrokerEnvironmentIsInert is the ingestor half of review round 2,
-// finding 3. The compose files now forward MQTT_BROKER, MQTT_TOPIC and
-// MQTT_SOURCE_STRICT with an empty default, so those keys are PRESENT and
-// empty in the container of an install that never set them.
-func TestEmptyBrokerEnvironmentIsInert(t *testing.T) {
+// TestEmptyBrokerEnvironmentIsTheExternalDefault covers the keys every
+// compose file forwards with an empty default (#372): present and empty is
+// the same as unset. Since #441 that is the EXTERNAL-broker default, not
+// the bundled one, so an install with no source configured is told so —
+// but still starts unless MQTT_SOURCE_STRICT asks otherwise.
+func TestEmptyBrokerEnvironmentIsTheExternalDefault(t *testing.T) {
 	getenv := brokerEnv(map[string]string{
 		"DISABLE_MOSQUITTO":  "",
 		"MQTT_BROKER":        "",
@@ -423,18 +429,20 @@ func TestEmptyBrokerEnvironmentIsInert(t *testing.T) {
 		"MQTT_SOURCE_STRICT": "",
 	})
 	mode := ResolveBrokerMode(getenv)
-	if !mode.Bundled || mode.Ambiguous {
-		t.Errorf("an empty DISABLE_MOSQUITTO must be the quiet bundled default; got %+v", mode)
+	if mode.Bundled || mode.Unrecognised {
+		t.Errorf("an empty DISABLE_MOSQUITTO is the recognised external default; got %+v", mode)
 	}
 	if StrictBrokerSources(getenv) {
 		t.Error("an empty MQTT_SOURCE_STRICT must not turn on strict mode")
 	}
-	diags := CheckBrokerSources(mode, []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}, true)
-	if len(diags) != 0 {
-		t.Errorf("an all-empty broker environment must produce no diagnostic; got:\n%s", diagText(diags))
-	}
-	fatal, msg := ReportBrokerSetup(getenv, []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}, true, func(string, ...any) {})
+	var lines []string
+	logf := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	fatal, msg := ReportBrokerSetup(getenv, []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}, true, logf)
 	if fatal {
-		t.Errorf("an all-empty broker environment must never refuse to start; got %q", msg)
+		t.Errorf("an empty broker environment must not refuse to start without MQTT_SOURCE_STRICT; got %q", msg)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "no mqttSources are configured") || !strings.Contains(joined, "DISABLE_MOSQUITTO=false") {
+		t.Errorf("the missing source must be reported, with the opt-in back to the bundled broker; got:\n%s", joined)
 	}
 }

@@ -103,10 +103,13 @@ func TestStagingComposes_PprofHostPortsBindExplicitlyAndStayDistinct(t *testing.
 			ports := portsBlockOf(t, compose, "staging-go")
 			seen := map[string]bool{}
 			for _, port := range []string{"6060", "6061"} {
-				re := bindMapping("PPROF_BIND", port, port)
+				// #441 moved the default from the conditional, dual-stack
+				// form to loopback; TestStagingComposes_PprofPublishDefaultsToLoopback
+				// pins the exact shape.
+				re := pprofLoopbackMapping(port)
 				if !re.MatchString(ports) {
-					t.Fatalf("%s: pprof port %s must publish through an explicit, CONDITIONAL bind interface, i.e.\n"+
-						"      - \"${PPROF_BIND:+${PPROF_BIND}:}%s:%s\"\nports block:\n%s", compose, port, port, port, ports)
+					t.Fatalf("%s: pprof port %s must publish through the PPROF_BIND bind interface, i.e.\n"+
+						"      - \"${PPROF_BIND:-127.0.0.1}:%s:%s\"\nports block:\n%s", compose, port, port, port, ports)
 				}
 				if seen[port] {
 					t.Fatalf("%s: port %s published twice", compose, port)
@@ -134,12 +137,13 @@ func TestEnvExample_DocumentsEveryNewKnob(t *testing.T) {
 	// otherwise an operator cannot find the setting that keeps or changes
 	// their exposure.
 	for _, knob := range []struct{ key, wantDefault string }{
-		// The two publish-bind knobs default to EMPTY, not 0.0.0.0: an
-		// unqualified docker mapping is dual-stack and 0.0.0.0: is not, so
-		// an explicit 0.0.0.0 default would silently drop IPv6.
+		// PROD_MQTT_BIND defaults to EMPTY, not 0.0.0.0: an unqualified
+		// docker mapping is dual-stack and 0.0.0.0: is not, so an explicit
+		// 0.0.0.0 default would silently drop IPv6. The pprof knobs default
+		// to loopback since #441.
 		{"PROD_MQTT_BIND", "(empty - every interface, IPv4 and IPv6)"},
-		{"PPROF_BIND", "(empty - every interface, IPv4 and IPv6)"},
-		{"PPROF_HOST", ""},
+		{"PPROF_BIND", "127.0.0.1"},
+		{"PPROF_HOST", "127.0.0.1"},
 		{"PPROF_PORT_SERVER", "6060"},
 		{"PPROF_PORT_INGESTOR", "6061"},
 		{"MQTT_SOURCE_STRICT", "false"},
@@ -273,6 +277,13 @@ func TestComposeBindDefaultsStayDualStack(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, m := range anyHostBindDefault.FindAllStringSubmatch(stripYAMLComments(string(data)), -1) {
+			// The one owner-approved default (#441): the pprof ports are
+			// published on loopback unless PPROF_BIND widens them. It
+			// narrows rather than drops part of the old exposure, and is
+			// pinned by TestStagingComposes_PprofPublishDefaultsToLoopback.
+			if m[1] == "PPROF_BIND" && m[2] == "127.0.0.1" {
+				continue
+			}
 			t.Errorf("%s publishes a port whose host interface defaults to %q via ${%s:-...}; "+
 				"a defaulted host interface is never equivalent to the old unqualified mapping "+
 				"(0.0.0.0: is IPv4-only, the unqualified form is dual-stack). Use ${%s:+${%s}:} instead.",
