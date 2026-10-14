@@ -1,0 +1,37 @@
+package regions
+
+import (
+	"errors"
+	"unicode/utf8"
+)
+
+// MaxApprovedScopes caps the admin-approved overlay on top of the configured
+// hashRegions. Every effective region costs one HMAC per scoped packet and
+// raises the chance that a 16-bit code1 matches more than one region, so the
+// overlay is bounded; docs/deployment.md states the measured trade-off.
+// Shared by the server (synchronous 409) and the ingestor (authoritative,
+// transactional check).
+const MaxApprovedScopes = 128
+
+// ValidateCandidate accepts an exact OTA scope token, without normalizing
+// case or adding '#': those bytes determine its HMAC key. The name must also
+// be a fixed point of Normalize, so an approved name compares identically to
+// the same name in hashRegions or hashRegionsPath.
+func ValidateCandidate(name string) error {
+	if len(name) < 2 || len(name) > 30 || name[0] != '#' || !utf8.ValidString(name) {
+		return errors.New("scope must start with # and be 2–30 valid UTF-8 bytes")
+	}
+	if normalized, ok := Normalize(name); !ok || normalized != name {
+		return errors.New("scope must not start or end with whitespace")
+	}
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		// MeshCore RegionMap::is_name_char accepts these exact byte classes.
+		// Exclude DEL even though firmware accepts it, since it is an invisible
+		// control character. The UTF-8 check above prevents malformed names.
+		if !(c == '-' || c == '$' || c == '#' || (c >= '0' && c <= '9') || (c >= 'A' && c != 0x7f)) {
+			return errors.New("scope contains a character not accepted by MeshCore firmware")
+		}
+	}
+	return nil
+}

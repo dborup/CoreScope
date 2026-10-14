@@ -44,6 +44,7 @@ run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
 run test-issue-336-external-asset-pinning.js
+run test-issue-442-instrumented-vendor-copy.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
@@ -83,6 +84,7 @@ run test-channel-issue-1087.js
 run test-issue-1409-no-encrypted-flood.js
 run test-analytics-channels-integration.js
 run test-analytics-foreign-traffic-tab.js
+run test-scope-audit.js
 run test-analytics-nodes-without-scope.js
 run test-analytics-table-ids-unique.js
 run test-analytics-relay-airtime-dumbbell.js

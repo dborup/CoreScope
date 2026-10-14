@@ -1367,6 +1367,19 @@ img.brand-logo {
 /* MAJOR-2: when user-resizable columns push total width past container,
  * fall back to horizontal scroll on the wrap rather than overflowing the page. */
 .table-fluid-wrap { width: 100%; overflow-x: auto; }
+.obs-nb-scope-scroll-hint { display: none; }
+/* Decision buttons are never ellipsized: the narrow-viewport .data-table td
+ * rule (max-width + text-overflow) would paint an overflowing button as "…". */
+.data-table td.obs-nb-scope-actions { max-width: none; overflow: visible; white-space: nowrap; }
+
+/* Observer Neighbors scope review: give both decision buttons a real table
+ * column on phones, then let the existing fluid wrapper scroll it. Without
+ * a min-width, .data-table's max-width:0 cells ellipsize the buttons while
+ * the wrapper has almost nothing to scroll. */
+@media (max-width: 600px) {
+  .obs-nb-scope-scroll-hint { display: block; font-size: 0.8em; margin: 0 0 6px; }
+  .obs-nb-scope-table.has-actions { min-width: 560px; }
+}
 
 /* === #1056 AC#4: Slide-over row-detail overlay (narrow viewports) ========
  * Singleton .slide-over-backdrop + .slide-over-panel injected into <body>
@@ -5862,6 +5875,22 @@ body.embed #app.app-fixed {
 .privacy-page ul { padding-left: 1.3em; }
 .privacy-page li { margin: 6px 0; }
 .privacy-page a { color: var(--link-color); }
+
+/* Scope audit keeps search/pagination stable and at most 50 rows mounted. */
+.scope-audit-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:12px 0; }
+.scope-audit-controls input { max-width:100%; padding:6px 8px; background:var(--bg-secondary); color:var(--text); border:1px solid var(--border); border-radius:4px; }
+.scope-audit-table-wrap { overflow-x:auto; }
+.scope-audit-chip { display:inline-block; margin:2px 4px 2px 0; padding:2px 5px; border:1px solid var(--border); border-radius:4px; }
+.scope-audit-caution { color:var(--warning); }
+#scopes-panel-audit .scope-audit-table { width:100%; min-width:900px; table-layout:fixed; }
+#scopes-panel-audit .scope-audit-table th:nth-child(1) { width:20%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(2) { width:15%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(3) { width:25%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(4) { width:15%; }
+#scopes-panel-audit .scope-audit-table th:nth-child(5) { width:25%; }
+#scopes-panel-audit .scope-audit-table th,
+#scopes-panel-audit .scope-audit-table td { white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; vertical-align:top; }
+
 /* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
 .regions-page h1, .regions-page p { margin: 0; }

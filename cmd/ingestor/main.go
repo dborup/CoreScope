@@ -150,6 +150,17 @@ func main() {
 	stopProposals := proposals.Start(2*time.Second, time.Hour)
 	defer stopProposals()
 
+	// Admin-approved region scopes are a persistent overlay on the inline and
+	// external hashRegions lists. The server only queues decisions; this
+	// process remains the sole database writer.
+	scopeApprovals := newScopeApprovalRunner(store, keys)
+	scopeApprovals.blacklisted = cfg.IsObserverBlacklisted
+	if err := scopeApprovals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[scope-approval] loading approved scopes failed: %v", err)
+	}
+	stopScopeApprovals := scopeApprovals.Start()
+	defer stopScopeApprovals()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
@@ -1683,8 +1694,7 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 	res, err := regions.Load(cfg.HashRegions, cfg.HashRegionsPath, configPath, log.Printf)
 	keys := make(map[string][]byte, len(res.Names))
 	for _, name := range res.Names {
-		h := sha256.Sum256([]byte(name))
-		keys[name] = h[:16]
+		keys[name] = regions.Key(name)
 	}
 	if len(keys) > 0 {
 		log.Printf("[regions] %d region key(s) loaded", len(keys))
@@ -1692,8 +1702,12 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 	return keys, err
 }
 
-// matchScope performs one HMAC-SHA256 per configured region. Expected
-// len(regionKeys) ≤ 50; beyond that, consider a pre-indexed lookup table.
+// matchScope performs one HMAC-SHA256 per effective region, including any
+// admin-approved overlay names. Deployments using hashRegionsPath may have
+// ~1100 names, and approval adds at most regions.MaxApprovedScopes more. Cost
+// is linear in the region count: BenchmarkMatchScopeApprovalCap measured
+// ~0.62 ms and ~8,650 allocations per scoped packet at 1,100 regions, and
+// ~0.71 ms at 1,228 (i7-1260P). Approval adds no database I/O here.
 //
 // code1 is only 16 bits (65534 usable values after the 0x0000/0xFFFF
 // remap), so with enough configured regions a *different*, unrelated

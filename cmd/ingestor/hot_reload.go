@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/meshcore-analyzer/regions"
 )
 
 // hotKeys holds the channel-decryption and region-scope keys behind atomic
@@ -32,16 +34,18 @@ type hotKeys struct {
 	channelKeys atomic.Pointer[map[string]string]
 	regionKeys  atomic.Pointer[map[string][]byte]
 
-	mu       sync.Mutex // serializes writers of base/approved and the merge
-	base     map[string]string
-	approved map[string]string
-	baseGen  uint64 // incremented by every setBase
+	mu              sync.Mutex // serializes writers of base/approved and the merge
+	base            map[string]string
+	approved        map[string]string
+	baseRegions     map[string][]byte
+	approvedRegions map[string][]byte
+	baseGen         uint64 // incremented by every setBase
 }
 
 // newHotKeys wraps the initial startup-loaded key maps.
 func newHotKeys(channelKeys map[string]string, regionKeys map[string][]byte) *hotKeys {
-	hk := &hotKeys{approved: make(map[string]string)}
-	hk.regionKeys.Store(&regionKeys)
+	hk := &hotKeys{approved: make(map[string]string), approvedRegions: make(map[string][]byte)}
+	hk.setBaseRegions(regionKeys)
 	hk.setBase(channelKeys)
 	return hk
 }
@@ -130,6 +134,73 @@ func (hk *hotKeys) Regions() map[string][]byte {
 	return *hk.regionKeys.Load()
 }
 
+// Region layers mirror channel layers: config (including hashRegionsPath)
+// wins over approved names. A published map is immutable for concurrent reads.
+func (hk *hotKeys) publishRegionsLocked() {
+	merged := make(map[string][]byte, len(hk.baseRegions)+len(hk.approvedRegions))
+	for name, key := range hk.approvedRegions {
+		merged[name] = key
+	}
+	for name, key := range hk.baseRegions {
+		merged[name] = key
+	}
+	hk.regionKeys.Store(&merged)
+}
+
+func (hk *hotKeys) setBaseRegions(base map[string][]byte) {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	hk.baseRegions = base
+	hk.publishRegionsLocked()
+}
+
+func (hk *hotKeys) AddApprovedRegions(names ...string) int {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	added := 0
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, exists := hk.approvedRegions[name]; exists {
+			continue
+		}
+		hk.approvedRegions[name] = regions.Key(name)
+		added++
+	}
+	if added > 0 {
+		hk.publishRegionsLocked()
+	}
+	return added
+}
+
+// IsConfiguredRegion reports whether name is in the config layer
+// (hashRegions or hashRegionsPath), as last loaded or reloaded.
+func (hk *hotKeys) IsConfiguredRegion(name string) bool {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	_, ok := hk.baseRegions[name]
+	return ok
+}
+
+// ApprovedRegionCount returns the size of the admin-approved region layer.
+func (hk *hotKeys) ApprovedRegionCount() int {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	return len(hk.approvedRegions)
+}
+
+func (hk *hotKeys) RemoveApprovedRegion(name string) bool {
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	if _, ok := hk.approvedRegions[name]; !ok {
+		return false
+	}
+	delete(hk.approvedRegions, name)
+	hk.publishRegionsLocked()
+	return true
+}
+
 // reload re-reads configPath from disk — and the external hashRegionsPath
 // file it names (#360) — and atomically swaps in freshly derived
 // channel/region keys. On any error the previous keys are left in place: a
@@ -149,8 +220,8 @@ func (hk *hotKeys) reload(configPath string) error {
 		return err
 	}
 	hk.setBase(ck)
-	hk.regionKeys.Store(&rk)
-	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels kept)", len(ck), len(rk), configPath)
+	hk.setBaseRegions(rk)
+	log.Printf("[hot-reload] reloaded %d channel key(s), %d region key(s) from %s (approved shared channels and %d approved region scope(s) kept)", len(ck), len(rk), configPath, hk.ApprovedRegionCount())
 	return nil
 }
 

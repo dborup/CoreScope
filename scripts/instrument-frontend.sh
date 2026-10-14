@@ -39,6 +39,11 @@ fi
 # "Unexpected token '<'" pageerrors and a missing `qrcode` global —
 # which makes the QR Generate path hit the "[QR library not loaded]"
 # fallback in channel-qr.js (issue #1087 bug 1 manifests in CI only).
+# Recursive (`cp -r .../.`), not a flat `cp vendor/*`: #442 vendors Leaflet,
+# Leaflet.heat, Chart.js and swagger-ui-dist under vendor/<name>/<version>/,
+# and a flat copy silently dropped those subdirectories, producing the same
+# "L is not defined" / missing-global failure for the whole page instead of
+# just one icon.
 mkdir -p public-instrumented/vendor
-cp public/vendor/* public-instrumented/vendor/ 2>/dev/null
+cp -r public/vendor/. public-instrumented/vendor/
 echo "Frontend instrumented successfully"

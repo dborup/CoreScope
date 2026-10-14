@@ -1410,6 +1410,21 @@
       ]
     },
     {
+      "file": "test-region-scope-approval-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_INGESTOR_BIN": "./corescope-ingestor",
+        "FIXTURE_DB": "test-fixtures/e2e-fixture.db"
+      },
+      "output": "e2e",
+      "meanSeconds": 29.5,
+      "secondsByExecution": [
+        29.5
+      ]
+    },
+    {
       "file": "test-channels-client-state-152-decrypt-e2e.js",
       "shard": 3,
       "env": {
@@ -2300,6 +2315,22 @@
         1.098,
         1.713,
         1.626
+      ]
+    },
+    {
+      "file": "test-issue-442-local-browser-deps-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate"
+      },
+      "output": "e2e",
+      "meanSeconds": 1.2,
+      "secondsByExecution": [
+        1.1,
+        1.2,
+        1.3
       ]
     },
     {

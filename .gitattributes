@@ -15,3 +15,14 @@
 
 manage.sh text eol=lf
 *.sh text eol=lf
+
+# #442: vendored browser dependencies are SRI/sha384-verified byte-for-byte
+# against the upstream file (tools/browser-deps-manifest.json). Some ship
+# CRLF line endings upstream (e.g. leaflet.css); "* text=auto" above would
+# normalize those to LF on checkout, silently changing the bytes and
+# breaking both the Subresource Integrity attribute in every HTML tag and
+# the recorded digest. Preserve the exact bytes for every vendored file.
+public/vendor/leaflet/** -text
+public/vendor/leaflet.heat/** -text
+public/vendor/chart.js/** -text
+public/vendor/swagger-ui-dist/** -text

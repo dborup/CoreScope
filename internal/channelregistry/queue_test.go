@@ -239,3 +239,16 @@ func TestBuiltinNamesBounded(t *testing.T) {
 		t.Fatal("corrupt file must be an error")
 	}
 }
+
+// The region-scope queue (#355) sits next to the database under a fixed
+// name that deployments must keep writable for the server, and it must not
+// share a directory with channel proposals.
+func TestScopeQueueDir(t *testing.T) {
+	got := ScopeQueueDir(filepath.Join("data", "meshcore.db"))
+	if want := filepath.Join("data", "region-scope-requests"); got != want {
+		t.Fatalf("ScopeQueueDir = %q, want %q", got, want)
+	}
+	if got == QueueDir(filepath.Join("data", "meshcore.db")) {
+		t.Fatal("scope and channel-proposal queues share a directory")
+	}
+}
