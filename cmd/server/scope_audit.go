@@ -70,6 +70,11 @@ type scopeAuditCache struct {
 	mu      sync.Mutex
 	entries map[string]scopeAuditCacheEntry
 	sf      singleflight.Group
+	// recheckHook, if non-nil, runs once after the outer cache miss and
+	// before entering singleflight. Tests use it to land a concurrent fill
+	// in that gap and prove the recheck inside Do reuses it instead of
+	// rebuilding; nil (zero overhead) in production.
+	recheckHook func()
 }
 
 func (c *scopeAuditCache) get(window string) *ScopeAuditResponse {
@@ -86,6 +91,9 @@ func (c *scopeAuditCache) get(window string) *ScopeAuditResponse {
 func (c *scopeAuditCache) load(window string, build func() (*ScopeAuditResponse, error)) (*ScopeAuditResponse, error) {
 	if cached := c.get(window); cached != nil {
 		return cached, nil
+	}
+	if c.recheckHook != nil {
+		c.recheckHook()
 	}
 	value, err, _ := c.sf.Do(window, func() (interface{}, error) {
 		if cached := c.get(window); cached != nil {
@@ -410,7 +418,10 @@ func (s *Server) handleScopeAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := s.scopeAudit.load(window, func() (*ScopeAuditResponse, error) {
-		ctx, cancel := context.WithTimeout(r.Context(), scopeAuditQueryTimeout)
+		// The build is shared across every coalesced singleflight waiter, so it
+		// must not die with the first caller's connection: detach from its
+		// cancellation and keep only the absolute deadline.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), scopeAuditQueryTimeout)
 		defer cancel()
 		return s.buildScopeAuditContext(ctx, window, time.Now())
 	})

@@ -83,10 +83,12 @@ type Server struct {
 	advertRoutes nodeAdvertRouteCache
 
 	// Cached /api/scope-stats response — per-window, recomputed at most once every 30s
-	scopeAudit         scopeAuditCache
 	scopeStatsMu       sync.Mutex
 	scopeStatsCache    map[string]*ScopeStatsResponse
 	scopeStatsCachedAt map[string]time.Time
+
+	// Cached /api/scope-audit response — per-window, recomputed at most once every 30s
+	scopeAudit scopeAuditCache
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex

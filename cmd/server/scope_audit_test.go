@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -88,7 +89,7 @@ func TestScopeAuditCollisionAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.AmbiguousHops != 1 || r.Rows[0].Forwarded != 0 || !r.Rows[0].IncompleteEvidence {
+	if r.AmbiguousHops != 1 || r.Rows[0].Forwarded != 0 || !r.Rows[0].IncompleteEvidence || r.Rows[0].AmbiguousHops != 1 {
 		t.Fatalf("1h=%+v", r)
 	}
 	r, err = s.buildScopeAudit("24h", now)
@@ -340,6 +341,111 @@ func TestScopeAuditCachedHiddenNameAndUnsupportedSchema(t *testing.T) {
 	plain.handleScopeAudit(w, httptest.NewRequest("GET", "/api/scope-audit", nil))
 	if w.Code != 500 {
 		t.Fatalf("unsupported schema status=%d", w.Code)
+	}
+}
+
+// The shared singleflight build must not die with the first caller's
+// connection: a coalesced caller whose own context stays live must still
+// get a response when another caller's context is canceled mid-build.
+func TestScopeAuditHandlerSingleflightShareSurvivesFirstCallerDisconnect(t *testing.T) {
+	s, node, packet := auditFixture(t)
+	now := time.Now().UTC()
+	node(scopeContractMultiPK, "relay", "dk", now.Format(time.RFC3339))
+	dk := "dk"
+	// Enough observations that the build takes long enough for both callers
+	// to join the same singleflight call before the first's cancel lands.
+	for i := 1; i <= 6000; i++ {
+		packet(i, 0, &dk, `["e1","aa","bb","cc"]`, "0001020304", now)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest("GET", "/api/scope-audit?window=24h", nil).WithContext(cancelCtx)
+		w := httptest.NewRecorder()
+		s.handleScopeAudit(w, req)
+		codes <- w.Code
+	}()
+	// Give caller A a head start so it reliably becomes the singleflight
+	// leader (whose context drives the build) before caller B joins it.
+	time.Sleep(2 * time.Millisecond)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest("GET", "/api/scope-audit?window=24h", nil)
+		w := httptest.NewRecorder()
+		s.handleScopeAudit(w, req)
+		codes <- w.Code
+	}()
+	time.Sleep(2 * time.Millisecond)
+	cancel() // simulate caller A's connection dropping mid-build
+	wg.Wait()
+	close(codes)
+	sawLiveCallerSucceed := false
+	for code := range codes {
+		if code == 200 {
+			sawLiveCallerSucceed = true
+		}
+	}
+	if !sawLiveCallerSucceed {
+		t.Fatal("a disconnecting caller's context cancellation took down the shared build for a still-connected caller")
+	}
+}
+
+// A declared repeater that the observers table marks listener-only
+// (can_relay=0, #1290) must not have its own hop token confirmed as a
+// relay — the same exclusion resolveWithContext applies elsewhere.
+func TestScopeAuditListenerOnlyNodeExcludedFromForwardedCount(t *testing.T) {
+	s, node, packet := auditFixture(t)
+	now := time.Now().UTC()
+	at := now.Format(time.RFC3339)
+	node(scopeContractMultiPK, "listener", "dk", at)
+	if _, err := s.db.conn.Exec(`ALTER TABLE observers ADD COLUMN can_relay INTEGER DEFAULT 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.conn.Exec(
+		`INSERT INTO observers(id,name,last_seen,first_seen,packet_count,can_relay) VALUES(?,'obs',?,?,1,0)`,
+		scopeContractMultiPK, at, at); err != nil {
+		t.Fatal(err)
+	}
+	dk := "dk"
+	packet(1, 0, &dk, `["e1"]`, "0001020304", now)
+	r, err := s.buildScopeAudit("24h", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Rows) != 1 || r.Rows[0].Forwarded != 0 || r.Rows[0].Status != "no-evidence" {
+		t.Fatalf("listener-only hop counted as a confirmed relay: %+v", r.Rows[0])
+	}
+}
+
+// load rechecks the cache after entering singleflight (comment on scopeAuditCache.load):
+// a fill that lands in the gap between the outer miss and entering singleflight
+// must be reused instead of triggering a redundant rebuild.
+func TestScopeAuditCacheRecheckInsideSingleflightReusesConcurrentFill(t *testing.T) {
+	var cache scopeAuditCache
+	want := &ScopeAuditResponse{Window: "fresh-from-concurrent-fill"}
+	cache.recheckHook = func() {
+		cache.mu.Lock()
+		cache.entries = map[string]scopeAuditCacheEntry{"24h": {response: want, at: time.Now()}}
+		cache.mu.Unlock()
+	}
+	var built bool
+	got, err := cache.load("24h", func() (*ScopeAuditResponse, error) {
+		built = true
+		return &ScopeAuditResponse{Window: "should-not-be-used"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built {
+		t.Fatal("build ran despite a concurrent fill landing before the singleflight entry")
+	}
+	if got != want {
+		t.Fatalf("got=%+v want=%+v", got, want)
 	}
 }
 

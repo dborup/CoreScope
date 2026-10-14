@@ -6,6 +6,7 @@ assert.strictEqual(audit.windowValue('7d'), '7d');
 assert.strictEqual(audit.searchRows([{name: 'ALPHA', publicKey: 'abc'}, {name: 'Beta', publicKey: 'def'}], 'alpha').length, 1);
 assert.strictEqual(audit.searchRows([{name: null, publicKey: 123}], '123').length, 1);
 assert.strictEqual(audit.declarationAge('86400'), '1d');
+assert.strictEqual(audit.declarationAge('7200'), '2h');
 assert.strictEqual(audit.declarationAge(null), 'Unknown');
 assert.strictEqual(audit.stateFromHash('#/analytics?tab=scopes&sub=audit&swin=7d&saq=a%26b').query, 'a&b');
 assert.strictEqual(audit.stateFromHash('#/analytics?tab=scopes&sub=audit&swin=no').window, '24h');
