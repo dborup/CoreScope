@@ -667,6 +667,14 @@ jobs:
         # header for the rows and the expected interval estimates.
         run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-245-advert-intervals.sql
 
+      - name: Seed reference-to-many overlap data for #122 E2E
+        # The fixture's observations.direction is NULL throughout (it
+        # predates that field), which the #122 endpoint correctly treats
+        # as "not RX" rather than guessing -- so without this seed every
+        # comparison would be all-zero. See the file header for the exact
+        # overlap numbers (matches the issue's own 60%/75% example).
+        run: sqlite3 test-fixtures/e2e-fixture.db < test-fixtures/seed-122-observer-comparison.sql
+
       - name: Start Go server with fixture DB
         run: |
           fuser -k "$E2E_PORT"/tcp 2>/dev/null || true

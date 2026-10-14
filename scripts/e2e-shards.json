@@ -2347,6 +2347,14 @@
       ]
     },
     {
+      "file": "test-issue-122-compare-reference-many-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e"
+    },
+    {
       "file": "test-issue-217-packets-full-names-e2e.js",
       "shard": 1,
       "env": {
