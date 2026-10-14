@@ -1,0 +1,44 @@
+{
+  "_comment": "Issue #441: the one DISABLE_MOSQUITTO table. docker/entrypoint-go.sh, cmd/ingestor (ResolveBrokerMode) and manage.sh must all read every value here the same way; test-issue-441-disable-mosquitto.js and cmd/ingestor/broker_mode_test.go both load this file. value null means unset. disabled: the bundled mosquitto does NOT run. recognised: false means the value is junk, falls back to the default (disabled) and is reported.",
+  "cases": [
+    { "value": null, "disabled": true, "recognised": true },
+    { "value": "", "disabled": true, "recognised": true },
+    { "value": "   ", "disabled": true, "recognised": true },
+
+    { "value": "true", "disabled": true, "recognised": true },
+    { "value": "TRUE", "disabled": true, "recognised": true },
+    { "value": "True", "disabled": true, "recognised": true },
+    { "value": " true ", "disabled": true, "recognised": true },
+    { "value": "\ttrue", "disabled": true, "recognised": true },
+    { "value": "1", "disabled": true, "recognised": true },
+    { "value": "yes", "disabled": true, "recognised": true },
+    { "value": "YES", "disabled": true, "recognised": true },
+    { "value": "Yes", "disabled": true, "recognised": true },
+    { "value": "on", "disabled": true, "recognised": true },
+    { "value": "ON", "disabled": true, "recognised": true },
+    { "value": " On", "disabled": true, "recognised": true },
+
+    { "value": "false", "disabled": false, "recognised": true },
+    { "value": "FALSE", "disabled": false, "recognised": true },
+    { "value": "False", "disabled": false, "recognised": true },
+    { "value": " false ", "disabled": false, "recognised": true },
+    { "value": "false\t", "disabled": false, "recognised": true },
+    { "value": "0", "disabled": false, "recognised": true },
+    { "value": "no", "disabled": false, "recognised": true },
+    { "value": "NO", "disabled": false, "recognised": true },
+    { "value": "No", "disabled": false, "recognised": true },
+    { "value": "off", "disabled": false, "recognised": true },
+    { "value": "OFF", "disabled": false, "recognised": true },
+    { "value": " Off ", "disabled": false, "recognised": true },
+
+    { "value": "ture", "disabled": true, "recognised": false },
+    { "value": "flase", "disabled": true, "recognised": false },
+    { "value": "y", "disabled": true, "recognised": false },
+    { "value": "n", "disabled": true, "recognised": false },
+    { "value": "2", "disabled": true, "recognised": false },
+    { "value": "-1", "disabled": true, "recognised": false },
+    { "value": "enabled", "disabled": true, "recognised": false },
+    { "value": "tr ue", "disabled": true, "recognised": false },
+    { "value": "truefalse", "disabled": true, "recognised": false }
+  ]
+}

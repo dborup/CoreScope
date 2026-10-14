@@ -65,7 +65,8 @@ const externalWithGoodBroker = JSON.stringify({
 });
 
 test('bundled mode with no external config is reported as fine', () => {
-  const r = brokerCheck({ env: {}, config: null });
+  // The bundled broker is opt-in since #441.
+  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'false' }, config: null });
   assert.strictEqual(r.status, 0, 'expected exit 0, got ' + r.status + '\n' + r.out);
   assert.match(r.out, /bundled/i, r.out);
   assert.doesNotMatch(r.out, /\berror\b/i, r.out);
@@ -161,26 +162,12 @@ test('MQTT_BROKER overrides a loopback-only config.json', () => {
   assert.match(r.out, /env\.example/, r.out);
 });
 
-test('a DISABLE_MOSQUITTO value the entrypoint does not accept is reported', () => {
-  // manage.sh's is_true() takes 'yes'; the container entrypoint only takes
-  // the exact string 'true'. The two disagree about which broker runs, and
-  // the report must name the disagreement without failing over it.
-  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'yes' }, config: externalWithGoodBroker });
-  assert.match(r.out, /DISABLE_MOSQUITTO/, r.out);
-  assert.match(r.out, /yes/, r.out);
-  assert.match(r.out, /docker compose/i, 'the warning must say which launcher reads it differently:\n' + r.out);
-  assert.strictEqual(r.status, 0, 'an ambiguous value is a warning, not a failure\n' + r.out);
-});
-
-// Issue #372 review round 2, finding 2: broker-check must report the mode
-// THIS SCRIPT selects, not the mode the entrypoint would pick from the raw
-// value. dc_prod/dc_staging choose the compose file with is_true(), and
-// docker-compose.no-mosquitto.yml hard-codes DISABLE_MOSQUITTO=true in the
-// container — so 'yes', '1' and 'on' all end up in EXTERNAL mode on a
-// manage.sh-managed host, and a check that says "bundled" there skips the
-// source validation that would have caught a dead deploy.
+// broker-check must report the mode the container will be in. Since #441
+// manage.sh, the entrypoint and the ingestor read DISABLE_MOSQUITTO with one
+// table (test-issue-441-disable-mosquitto.js drives all of it); these cases
+// keep the #372 view of it: the mode decides whether sources are validated.
 const MODE_BY_VALUE = [
-  [undefined, 'bundled'],
+  [undefined, 'external'],
   ['false', 'bundled'],
   ['true', 'external'],
   ['1', 'external'],
@@ -188,73 +175,62 @@ const MODE_BY_VALUE = [
   ['on', 'external'],
 ];
 
-test('broker-check reports the mode manage.sh actually selects, for every DISABLE_MOSQUITTO value', () => {
+test('broker-check reports the mode the container will be in, for every DISABLE_MOSQUITTO value', () => {
   for (const [value, want] of MODE_BY_VALUE) {
     const env = value === undefined ? {} : { DISABLE_MOSQUITTO: value };
     const r = brokerCheck({ env, config: externalWithGoodBroker });
     const other = want === 'bundled' ? 'external' : 'bundled';
     assert.match(r.out, new RegExp('Broker mode: ' + want),
-      'DISABLE_MOSQUITTO=' + value + ' selects ' + want + ' via is_true()/dc_prod:\n' + r.out);
+      'DISABLE_MOSQUITTO=' + value + ' selects ' + want + ':\n' + r.out);
     assert.doesNotMatch(r.out, new RegExp('Broker mode: ' + other),
       'DISABLE_MOSQUITTO=' + value + ' must not be reported as ' + other + ':\n' + r.out);
   }
 });
 
-test('an is_true value with no source fails the check, because the container will be external', () => {
-  // The compose file manage.sh picks for these values hard-codes
-  // DISABLE_MOSQUITTO=true, so there is no bundled broker to fall back on
-  // and an unconfigured source means nothing is ingested.
-  for (const value of ['true', '1', 'yes', 'on']) {
-    const r = brokerCheck({ env: { DISABLE_MOSQUITTO: value }, config: null });
+test('an external-mode value with no source fails the check', () => {
+  for (const value of [undefined, 'true', '1', 'yes', 'on']) {
+    const env = value === undefined ? {} : { DISABLE_MOSQUITTO: value };
+    const r = brokerCheck({ env, config: null });
     assert.strictEqual(r.status, 1,
       'DISABLE_MOSQUITTO=' + value + ' is external, so a missing source must fail; got ' + r.status + '\n' + r.out);
     assert.match(r.out, /mqttSources/, r.out);
   }
 });
 
-test('a falsey or unset DISABLE_MOSQUITTO needs no external source', () => {
-  for (const value of [undefined, 'false']) {
-    const env = value === undefined ? {} : { DISABLE_MOSQUITTO: value };
-    const r = brokerCheck({ env, config: null });
+test('a false DISABLE_MOSQUITTO needs no external source', () => {
+  for (const value of ['false', '0', 'no', 'off']) {
+    const r = brokerCheck({ env: { DISABLE_MOSQUITTO: value }, config: null });
     assert.strictEqual(r.status, 0,
       'DISABLE_MOSQUITTO=' + value + ' runs the bundled broker; got ' + r.status + '\n' + r.out);
   }
 });
 
-test('an unambiguous value produces no ambiguity warning', () => {
-  for (const value of ['true', 'false']) {
+test('a recognised value produces no warning about the value', () => {
+  for (const value of ['true', 'false', 'yes', 'OFF']) {
     const r = brokerCheck({ env: { DISABLE_MOSQUITTO: value }, config: externalWithGoodBroker });
-    assert.doesNotMatch(r.out, /different things|neither a recognised/i,
+    assert.doesNotMatch(r.out, /different things|not a recognised/i,
       'DISABLE_MOSQUITTO=' + value + ':\n' + r.out);
   }
   const unset = brokerCheck({ env: {}, config: externalWithGoodBroker });
-  assert.doesNotMatch(unset.out, /different things|neither a recognised/i, unset.out);
+  assert.doesNotMatch(unset.out, /different things|not a recognised/i, unset.out);
 });
 
-test('a value neither launcher recognises is reported as keeping the bundled broker', () => {
-  // A typo falls through is_true() and the entrypoint's exact comparison, so
-  // the bundled broker runs either way.
+test('an unrecognised value is reported and takes the default (external)', () => {
   const r = brokerCheck({ env: { DISABLE_MOSQUITTO: 'ture' }, config: null });
-  assert.match(r.out, /neither a recognised/i, r.out);
-  assert.match(r.out, /Broker mode: bundled/, r.out);
-  assert.strictEqual(r.status, 0, r.out);
-
-  // ' true' (stray space) is the same case, but it cannot be delivered
-  // through .env: manage.sh's reader trims it, and so does docker compose's.
-  // Through the process environment it survives, and then neither is_true()
-  // nor the entrypoint's `= "true"` accepts it.
-  const spaced = brokerCheck({ env: {}, procEnv: { DISABLE_MOSQUITTO: ' true' }, config: null });
-  assert.match(spaced.out, /neither a recognised/i, spaced.out);
-  assert.match(spaced.out, /Broker mode: bundled/, spaced.out);
-  assert.strictEqual(spaced.status, 0, spaced.out);
+  assert.match(r.out, /not a recognised/i, r.out);
+  assert.match(r.out, /Broker mode: external/, r.out);
+  assert.strictEqual(r.status, 1, 'external with no source:\n' + r.out);
 });
 
-test('manage.sh trims a .env value, so a spaced DISABLE_MOSQUITTO from .env still works', () => {
-  // Documents the asymmetry behind review finding 7: the whitespace a value
-  // may carry depends on how it was delivered, not on which reader sees it.
-  const r = brokerCheck({ env: { DISABLE_MOSQUITTO: ' true' }, config: externalWithGoodBroker });
-  assert.match(r.out, /Broker mode: external/, r.out);
-  assert.doesNotMatch(r.out, /neither a recognised/i, r.out);
+test('a spaced DISABLE_MOSQUITTO reads the same from .env and from the process environment', () => {
+  // manage.sh's .env reader trims; since #441 the parser trims as well, so
+  // the delivery route no longer changes the meaning.
+  const viaEnv = brokerCheck({ env: { DISABLE_MOSQUITTO: ' true' }, config: externalWithGoodBroker });
+  const viaProc = brokerCheck({ env: {}, procEnv: { DISABLE_MOSQUITTO: ' true' }, config: externalWithGoodBroker });
+  for (const r of [viaEnv, viaProc]) {
+    assert.match(r.out, /Broker mode: external/, r.out);
+    assert.doesNotMatch(r.out, /not a recognised/i, r.out);
+  }
 });
 
 test('broker credentials never reach the output', () => {
