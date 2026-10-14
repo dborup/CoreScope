@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -230,8 +231,7 @@ func TestScopeApprovalRefusesConfiguredAndBlacklistedOnlyScopes(t *testing.T) {
 		('obs','node','#cfg,#open','responded'), ('BAD','node2','#blk','responded')`); err != nil {
 		t.Fatal(err)
 	}
-	cfgKey := sha256.Sum256([]byte("#cfg"))
-	keys := newHotKeys(nil, map[string][]byte{"#cfg": cfgKey[:16]})
+	keys := newHotKeys(nil, map[string][]byte{"#cfg": regions.Key("#cfg")})
 	runner := newScopeApprovalRunner(store, keys)
 	runner.blacklisted = func(id string) bool { return id == "BAD" }
 	ctx := context.Background()
@@ -283,5 +283,25 @@ func TestScopeApprovalRunnerReadsSharedQueueDir(t *testing.T) {
 	st, err := serverSide.Lookup(cmd.RequestID)
 	if err != nil || st.Status != "approved" {
 		t.Fatalf("command in the shared queue dir = %+v, err %v; want approved", st, err)
+	}
+}
+
+// Review round 2, finding 5: an approved name and the same name in
+// hashRegions derive the same key, so an approval matches exactly the packets
+// a configured entry would.
+func TestApprovedRegionKeyEqualsConfiguredKey(t *testing.T) {
+	names := []string{"#dk", "#DK", "#sjælland", "#a-b$c"}
+	configPath := writeTestConfig(t, nil, names)
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := mustRegionKeys(t, cfg, configPath)
+	approved := newHotKeys(nil, nil)
+	approved.AddApprovedRegions(names...)
+	for _, name := range names {
+		if !bytes.Equal(approved.Regions()[name], configured[name]) || !bytes.Equal(configured[name], regions.Key(name)) {
+			t.Errorf("%s: approved %x, configured %x, regions.Key %x", name, approved.Regions()[name], configured[name], regions.Key(name))
+		}
 	}
 }

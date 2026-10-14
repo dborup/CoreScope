@@ -1694,8 +1694,7 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 	res, err := regions.Load(cfg.HashRegions, cfg.HashRegionsPath, configPath, log.Printf)
 	keys := make(map[string][]byte, len(res.Names))
 	for _, name := range res.Names {
-		h := sha256.Sum256([]byte(name))
-		keys[name] = h[:16]
+		keys[name] = regions.Key(name)
 	}
 	if len(keys) > 0 {
 		log.Printf("[regions] %d region key(s) loaded", len(keys))

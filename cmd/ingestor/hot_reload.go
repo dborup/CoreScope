@@ -1,13 +1,14 @@
 package main
 
 import (
-	"crypto/sha256"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/meshcore-analyzer/regions"
 )
 
 // hotKeys holds the channel-decryption and region-scope keys behind atomic
@@ -164,8 +165,7 @@ func (hk *hotKeys) AddApprovedRegions(names ...string) int {
 		if _, exists := hk.approvedRegions[name]; exists {
 			continue
 		}
-		h := sha256.Sum256([]byte(name))
-		hk.approvedRegions[name] = h[:16]
+		hk.approvedRegions[name] = regions.Key(name)
 		added++
 	}
 	if added > 0 {
