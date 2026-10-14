@@ -43,7 +43,7 @@ async function render(page, responses, width, height) {
   await page.goto(ORIGIN + '/');
   await page.addStyleTag({ path: path.join(ROOT, 'style.css') });
   await page.addStyleTag({ path: path.join(ROOT, 'home.css') });
-  for (const file of ['app.js', 'roles.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
+  for (const file of ['app.js', 'roles.js', 'heard-by.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
   await page.evaluate((data) => {
     window.removeEventListener('hashchange', navigate);
     window.fixturePages = {};
@@ -98,7 +98,7 @@ async function render(page, responses, width, height) {
       ];
       const data = Object.fromEntries(specs.map((spec, i) => [`/nodes/${KEYS[i]}/health?include=advertIntervals`, {
         node: { name: `Node ${i}`, role: spec.role }, stats: { lastHeard: end, packetsToday: 2 },
-        observers: spec.observers, recentPackets: [], activity24h: spec.activity,
+        directObservers: spec.observers, recentPackets: [], activity24h: spec.activity,
         advertRouteBackfill: spec.backfill, advertIntervals: spec.intervals,
       }]));
       await render(page, data, width, height);

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"testing"
@@ -105,22 +106,30 @@ func TestNodeAnalyticsPeerInteractionsTieOrder_321(t *testing.T) {
 }
 
 // newHealthTieStore seeds one node row plus in-memory packets so that each
-// observer in counts heard the node exactly that many times.
-func newHealthTieStore(t *testing.T, pubkey string, counts map[string]int) *PacketStore {
+// observer in counts heard the node exactly that many times. With advert the
+// packets are the node's own zero-path flood adverts, so every observer is a
+// direct Heard By row (#76); otherwise they are relay rows.
+func newHealthTieStore(t *testing.T, pubkey string, counts map[string]int, advert bool) *PacketStore {
 	t.Helper()
 	db := setupTestDBv2(t)
 	mustExecDB(t, db, `INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen)
 		VALUES ('`+pubkey+`', 'Node 321', 'repeater', 0, 0, '2026-05-01T13:00:00Z', '2026-05-01T12:00:00Z')`)
 	s := newTestStoreWithDB(t, db, &Config{})
 	snr := 5.0
+	pt, rt, decoded := PayloadTXT_MSG, RouteFlood, ""
+	if advert {
+		pt, decoded = PayloadADVERT, `{"pubKey":"`+pubkey+`"}`
+	}
 	n := 0
 	for obsID, c := range counts {
 		for i := 0; i < c; i++ {
 			n++
 			s.byNode[pubkey] = append(s.byNode[pubkey], &StoreTx{
 				ID: n, Hash: fmt.Sprintf("hl%d", n), FirstSeen: "2026-05-01T12:00:00Z",
+				PayloadType: &pt, RouteType: &rt, DecodedJSON: decoded,
 				SNR: &snr, ObservationCount: 1,
 				ObserverID: obsID, ObserverName: "Name-" + obsID,
+				Observations: []*StoreObs{{ObserverID: obsID, ObserverName: "Name-" + obsID, SNR: &snr, PathJSON: "[]"}},
 			})
 		}
 	}
@@ -142,32 +151,48 @@ func healthTieCounts() (counts map[string]int, want []string) {
 	return counts, want
 }
 
+// heardByOrder projects observer_id of a typed Heard By list, in order.
+func heardByOrder(t *testing.T, list interface{}) []string {
+	t.Helper()
+	raw, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	return mapField(rows, "observer_id")
+}
+
 func TestNodeHealthObserverRowsTieOrder_321(t *testing.T) {
 	const pubkey = "aa11bb22cc33dd44"
 	counts, want := healthTieCounts()
-	s := newHealthTieStore(t, pubkey, counts)
-
-	assertSameEveryRun(t, "GetNodeHealth observers observer_id", want, func() interface{} {
-		res, err := s.GetNodeHealth(pubkey, time.Now().UTC())
-		if err != nil {
-			t.Fatalf("GetNodeHealth: %v", err)
-		}
-		return mapField(res["observers"], "observer_id")
-	})
+	for field, advert := range map[string]bool{"directObservers": true, "relayObservers": false} {
+		s := newHealthTieStore(t, pubkey, counts, advert)
+		assertSameEveryRun(t, "GetNodeHealth "+field+" observer_id", want, func() interface{} {
+			res, err := s.GetNodeHealth(pubkey, time.Now().UTC())
+			if err != nil {
+				t.Fatalf("GetNodeHealth: %v", err)
+			}
+			return heardByOrder(t, res[field])
+		})
+	}
 }
 
 func TestBulkHealthObserverRowsTieOrder_321(t *testing.T) {
 	const pubkey = "bb11cc22dd33ee44"
 	counts, want := healthTieCounts()
-	s := newHealthTieStore(t, pubkey, counts)
-
-	assertSameEveryRun(t, "GetBulkHealth observers observer_id", want, func() interface{} {
-		rows := s.GetBulkHealth(10, "", "")
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 bulk-health row, got %d", len(rows))
-		}
-		return mapField(rows[0]["observers"], "observer_id")
-	})
+	for field, advert := range map[string]bool{"directObservers": true, "relayObservers": false} {
+		s := newHealthTieStore(t, pubkey, counts, advert)
+		assertSameEveryRun(t, "GetBulkHealth "+field+" observer_id", want, func() interface{} {
+			rows := s.GetBulkHealth(10, "", "")
+			if len(rows) != 1 {
+				t.Fatalf("expected 1 bulk-health row, got %d", len(rows))
+			}
+			return heardByOrder(t, rows[0][field])
+		})
+	}
 }
 
 func TestHashCollisionsTieOrder_321(t *testing.T) {

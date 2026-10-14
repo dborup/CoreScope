@@ -61,12 +61,13 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const stubBody = {
       node: { public_key: pubkey, name: 'TEST-NODE', role: 'repeater' },
       stats: { totalPackets: 200, packetsToday: 10, avgSnr: null, avgHops: 2, lastHeard: new Date().toISOString() },
-      observers: [
+      directObservers: [
         { observer_id: 'obs-both-null', observer_name: 'BothNull', iata: 'SJC', avgSnr: null, avgRssi: null, packetCount: 110 },
         { observer_id: 'obs-snr-null',  observer_name: 'SnrNull',  iata: 'SJC', avgSnr: null, avgRssi: -50, packetCount: 55 },
         { observer_id: 'obs-rssi-null', observer_name: 'RssiNull', iata: 'OAK', avgSnr: 5.5,  avgRssi: null, packetCount: 22 },
         { observer_id: 'obs-both-set',  observer_name: 'BothSet',  iata: 'OAK', avgSnr: 7.0,  avgRssi: -42, packetCount: 11 },
       ],
+      relayObservers: [],
       recentPackets: [],
     };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(stubBody) });
