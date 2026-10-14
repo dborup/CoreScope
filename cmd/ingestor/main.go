@@ -282,6 +282,13 @@ func main() {
 		}
 	}
 
+	// Declared-region reports are always bounded (#126): the window follows
+	// retention.clientRegionsDays, then clientRxDays, then 30 days.
+	clientRegionsDays := cfg.ClientRegionsDays()
+	if n := runClientRegionsRetention(store, clientRegionsDays); n > 0 {
+		log.Printf("[prune] startup pruned %d client_declared_regions older than %d days", n, clientRegionsDays)
+	}
+
 	// Opt-in retention for the tables nothing else prunes (#329): after the
 	// observer soft-delete and the metrics and transmission prunes above, so
 	// the observer purge's reference guards see what they left. Every window
@@ -380,20 +387,28 @@ func main() {
 		}
 	}
 
-	// Daily ticker for client-RX coverage retention (#1727).
-	if clientRxDays > 0 {
-		clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
-		go func() {
-			for range clientRxRetentionTicker.C {
+	// Daily ticker for client-RX retention: coverage (#1727, opt-in window)
+	// and declared-region reports (#126, always bounded).
+	clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range clientRxRetentionTicker.C {
+			pruned := runClientRegionsRetention(store, clientRegionsDays)
+			if clientRxDays > 0 {
 				if n, err := store.PruneOldClientReceptions(clientRxDays); err != nil {
 					log.Printf("[prune] error: %v", err)
-				} else if n > 0 {
-					store.RunIncrementalVacuum(vacuumPages)
+				} else {
+					pruned += n
 				}
 			}
-		}()
+			if pruned > 0 {
+				store.RunIncrementalVacuum(vacuumPages)
+			}
+		}
+	}()
+	if clientRxDays > 0 {
 		log.Printf("[prune] auto-prune enabled: client_receptions older than %d days will be removed daily", clientRxDays)
 	}
+	log.Printf("[prune] auto-prune enabled: client_declared_regions older than %d days will be removed daily", clientRegionsDays)
 
 	// Hourly WAL checkpoint to prevent unbounded WAL growth.
 	// TRUNCATE resets the WAL file to zero bytes when all frames are flushed;
@@ -732,9 +747,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		return
 	}
 
-	// Mobile client RX coverage: dedicated topic meshcore/client/{PUBLIC_KEY}/packets.
-	// A roaming companion reports where it directly heard a node; handled in isolation
-	// from the observer/observations path. EMQX ACL binds parts[2] to the client's own key.
+	// Mobile client topics: meshcore/client/{PUBLIC_KEY}/packets (RX coverage) and
+	// meshcore/client/{PUBLIC_KEY}/regions (declared-region reports). A roaming
+	// companion reports where it directly heard a node, or a repeater's answer to a
+	// region query; both are handled in isolation from the observer/observations
+	// path. EMQX ACL binds parts[2] to the client's own key.
 	//
 	// The client namespace always returns from this branch, whatever the config
 	// says: the gate and the sub-topic only decide handle-vs-drop. Falling through
@@ -746,6 +763,16 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		// (#1). Enforce it here before any coverage write.
 		if len(parts) >= 3 && cfg.IsObserverBlacklisted(parts[2]) {
 			log.Printf("MQTT [%s] client %.8s blacklisted, dropping", tag, parts[2])
+			return
+		}
+		// Declared-region reports (#126, docs/client-regions.md): their own
+		// gate, the same source allowlist, and exactly four topic segments.
+		if cfg.ClientRegionsEnabled() && len(parts) == 4 && parts[3] == "regions" {
+			if !cfg.ClientRxSourceAllowed(source.Name) {
+				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
+				return
+			}
+			handleClientRegions(store, cfg, tag, source.Name, parts[2], msg, time.Now())
 			return
 		}
 		if cfg.ClientRxCoverageEnabled() && len(parts) >= 4 && parts[3] == "packets" {

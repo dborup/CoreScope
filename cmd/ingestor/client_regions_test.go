@@ -524,12 +524,15 @@ func TestClientRegionsOutOfOrderKeepsLatestByReportedTime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	latest, err := s.LatestClientDeclaredRegions(testRegionsTarget)
-	if err != nil {
+	// The read path's order (cmd/server declared_regions.go): reported_at,
+	// never id or ingested_at.
+	var latest string
+	if err := s.db.QueryRow(`SELECT regions_csv FROM client_declared_regions WHERE target_pubkey = ?
+		ORDER BY reported_at DESC LIMIT 1`, testRegionsTarget).Scan(&latest); err != nil {
 		t.Fatal(err)
 	}
-	if latest == nil || strings.Join(latest.Regions, ",") != "#new" {
-		t.Fatalf("latest = %+v, want the greatest reported_at (#new), not the last inserted", latest)
+	if latest != "#new" {
+		t.Fatalf("latest by reported_at = %q, want #new: the late report must keep its own reported_at", latest)
 	}
 	if n := declaredRegionsRows(t, s); n != 2 {
 		t.Fatalf("the late report must still be kept as history, got %d rows", n)

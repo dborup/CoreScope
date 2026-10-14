@@ -309,9 +309,13 @@ on `admin` before the normal MQTT boot and the subcommand parses its own flags, 
 - `client_receptions` — every row `WHERE rx_pubkey = <key>` (seeks the unique index
   `(rx_pubkey, heard_key, rx_at)`), deleted in bounded batches.
 - `client_observers` — the single companion-name row `WHERE pubkey = <key>`.
+- `client_declared_regions` — every declared-region report the key **collected**
+  (`WHERE collector_pubkey = <key>`, seeking `idx_cdr_collector`), deleted in bounded batches
+  (#126, see [docs/client-regions.md](client-regions.md)). Reports where the key is only the
+  *target* repeater are kept.
 
-Nothing else references `rx_pubkey`: there are no rollups, persisted caches or sidecars, and the
-client topic writes only these two tables.
+Nothing else references the contributor key: there are no rollups, persisted caches or sidecars, and
+the client topics write only these three tables.
 
 **It runs online, through a queue**, so the single-writer invariant holds (#1283) — no second
 read-write process, no `SQLITE_BUSY`:
@@ -323,14 +327,15 @@ read-write process, no `SQLITE_BUSY`:
 4. The CLI waits up to `--wait` (default 60 s). With no result it exits `2` with
    `queued — ingestor not running?`.
 
-**`--dry-run`** opens the DB **read-only** (`mode=ro`), prints the two counts and the `rx_at` range,
-and writes nothing.
+**`--dry-run`** opens the DB **read-only** (`mode=ro`), prints the three counts and the `rx_at` range,
+and writes nothing. On a legacy DB that no ingestor of this version has opened yet,
+`client_declared_regions` does not exist and counts 0.
 
 **Audit, with no personal data.** The ingestor logs one line and appends one JSONL record to a 0600
 file next to the DB:
 
 ```
-[client-rx-delete] id=<id> key=hmac:<16 hex> client_receptions=N client_observers=M took=…
+[client-rx-delete] id=<id> key=hmac:<16 hex> client_receptions=N client_observers=M client_declared_regions=R took=…
 ```
 
 The fingerprint is `HMAC-SHA256(salt, key)` truncated to 16 hex, keyed by a per-install 32-byte salt
@@ -344,12 +349,12 @@ a log line, the audit file, or the result file.**
 2. **Dry-run first:** `… admin delete-client-rx --pubkey <key> --dry-run` — confirm the counts and the
    `rx_at` range look right.
 3. **Delete for real:** `… admin delete-client-rx --pubkey <key>` — expect
-   `deleted client_receptions=N client_observers=M`.
+   `deleted client_receptions=N client_observers=M client_declared_regions=R`.
 4. **Blacklist the key.** As the command's closing hint says, add the key to `observerBlacklist` in the
    ingestor config. Without this, a later upload (`rx_at` can be backdated up to 30 days) re-inserts the
    contributor's coverage. See [Restricting which MQTT sources may
    contribute](#restricting-which-mqtt-sources-may-contribute).
-5. **Verify.** Re-run with `--dry-run`: it must report `0/0`. The RX endpoints have no server cache and
+5. **Verify.** Re-run with `--dry-run`: it must report `0/0/0`. The RX endpoints have no server cache and
    send `no-store`, so the leaderboard and `?rx=` coverage reflect the deletion within the queue tick
    plus the delete time. Check the audit line shows `key=hmac:…` (no key) and that
    `client-rx-delete.salt` / `client-rx-delete-audit.jsonl` are mode 0600.

@@ -70,11 +70,11 @@ meshcore/client/{COLLECTOR_PUBKEY}/regions
 
 The steps below run on each entry, in order:
 
-1. Trim trailing NUL bytes, then whitespace. The reply is encrypted with a block cipher, so the last
-   name can carry NUL padding. Older app builds forward that padding.
+1. Trim trailing NUL bytes and surrounding whitespace. The reply is encrypted with a block cipher,
+   so the last name can carry NUL padding. Older app builds forward that padding.
 2. If the entry is now empty, skip it. It was padding, not a region.
 3. Reject the whole message if the name contains a comma, a control character, or invalid UTF-8.
-   Reject it too if the name is over 30 bytes, not counting a leading `#`.
+   Reject it too if the name is over 30 bytes, or empty, not counting a leading `#`.
 4. Normalise the name. `*` (the wildcard) and `$name` (a private region) stay as they are. Any
    other name gets one leading `#` (`be` and `#be` both become `#be`). This is the convention
    `hashRegions` and the observer `/neighbors` scopes already use (`internal/regions.Normalize`).
