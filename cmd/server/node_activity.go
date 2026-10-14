@@ -8,7 +8,9 @@ import (
 // NodeHealthStats keeps packet analytics separate from identity-safe activity.
 // LastHeard is own advert or unambiguous relay evidence; LastAdvert is strictly
 // the node's own ADVERT. Unknown timestamps serialize as null, never last_seen:
-// the ingestor may refresh last_seen from a safely resolved relay hop.
+// the ingestor may refresh last_seen from a safely resolved relay hop. AvgSnr
+// is the mean over the node's direct receptions (Heard By, #76), null without
+// one: other copies carry the SNR of whichever node the observer heard.
 type NodeHealthStats struct {
 	TotalTransmissions int      `json:"totalTransmissions"`
 	TotalObservations  int      `json:"totalObservations"`

@@ -106,6 +106,13 @@ type StoreObs struct {
 	tsParseOnce sync.Once
 	tsParsed    time.Time
 	tsParsedOK  bool
+	// wireRoute is the route type in this observation's own frame header
+	// (observations.raw_hex, #77), plus one; 0 when no frame was stored.
+	// One content hash can be heard on flood and direct routes (#308), so
+	// per-observation routing evidence (Heard By, #76) reads this, not
+	// tx.RouteType. The frame itself is not kept (#881). It fills padding
+	// after tsParsedOK, so StoreObs does not grow.
+	wireRoute uint8
 }
 
 // ParsedTime returns the parsed Timestamp, caching the result.
@@ -1094,6 +1101,7 @@ func (s *PacketStore) Load() error {
 				Score:          nullIntPtr(score),
 				PathJSON:       obsPJ,
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
+				wireRoute:      wireRouteFromRawHex(obsRawHex.String),
 			}
 
 			// Decode-window: feed the relay-hop indexes, don't store on struct.
@@ -1409,6 +1417,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				Score:          nullIntPtr(score),
 				PathJSON:       obsPJ,
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
+				wireRoute:      wireRouteFromRawHex(obsRawHex.String),
 			}
 
 			tx.mergeObservedPathHashSize(obsPJ)
@@ -3372,6 +3381,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				Score:          r.score,
 				PathJSON:       r.pathJSON,
 				Timestamp:      normalizeTimestamp(r.obsTS),
+				wireRoute:      wireRouteFromRawHex(r.obsRawHex),
 			}
 
 			// Relay-hop indexes: same input as Load (#158 follow-up).
@@ -3762,6 +3772,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			// tx.RawHex and enrichObs falls back to tx.RawHex when obs.RawHex
 			// == "". Live-polled observations must not re-introduce the dup.
 			Timestamp: normalizeTimestamp(r.timestamp),
+			wireRoute: wireRouteFromRawHex(r.rawHex),
 		}
 
 		// Relay-hop indexes: same input as Load (#158 follow-up).
@@ -10417,6 +10428,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			break
 		}
 	}
+	// Release the connection before the store work: the early break above
+	// leaves rows open, and relayPrefixMapLocked may query the node table
+	// again (a single-connection pool would block on it forever).
+	rows.Close()
 	// Only cap to limit in the global (no-filter) case; area/region returns full filtered set
 	if regionNodeKeys != nil && areaNodes == nil && len(nodes) > limit {
 		nodes = nodes[:limit]
@@ -10425,20 +10440,15 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
 	results := make([]map[string]interface{}, 0, len(nodes))
 	pm := s.relayPrefixMapLocked()
-	relaySeen := make(map[int]struct{}) // request-local relay-evidence dedupe scratch
+	relaySeen := make(map[int]struct{})    // request-local relay-evidence dedupe scratch
+	heard := newHeardByAccumulator("", pm) // reset per node, storage reused
 
 	for _, n := range nodes {
 		packets := s.byNode[n.pk]
 		activityKey := strings.ToLower(n.pk)
 		var packetsToday int
-		var snrSum float64
-		var snrCount int
 		var lastHeard, lastAdvert string
-		observerStats := map[string]*struct {
-			name                       string
-			snrSum, rssiSum            float64
-			snrCount, rssiCount, count int
-		}{}
+		heard.reset(n.pk)
 		totalObservations := 0
 
 		for _, pkt := range packets {
@@ -10449,65 +10459,11 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			if pkt.FirstSeen > todayStart {
 				packetsToday++
 			}
-			if pkt.SNR != nil {
-				snrSum += *pkt.SNR
-				snrCount++
-			}
 			updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
-			obsID := pkt.ObserverID
-			if obsID != "" {
-				obs := observerStats[obsID]
-				if obs == nil {
-					obs = &struct {
-						name                       string
-						snrSum, rssiSum            float64
-						snrCount, rssiCount, count int
-					}{name: pkt.ObserverName}
-					observerStats[obsID] = obs
-				}
-				obs.count++
-				if pkt.SNR != nil {
-					obs.snrSum += *pkt.SNR
-					obs.snrCount++
-				}
-				if pkt.RSSI != nil {
-					obs.rssiSum += *pkt.RSSI
-					obs.rssiCount++
-				}
-			}
+			heard.add(pkt)
 		}
 		s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, relaySeen)
-
-		observerRows := make([]map[string]interface{}, 0)
-		for id, o := range observerStats {
-			var avgSnr, avgRssi interface{}
-			if o.snrCount > 0 {
-				avgSnr = o.snrSum / float64(o.snrCount)
-			}
-			if o.rssiCount > 0 {
-				avgRssi = o.rssiSum / float64(o.rssiCount)
-			}
-			observerRows = append(observerRows, map[string]interface{}{
-				"observer_id": id, "observer_name": o.name,
-				"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
-			})
-		}
-		// #321: observerStats iteration order is random, so observers tied
-		// on packetCount came out in a different order on each call. The
-		// observer_id is the map key the row was built from, so it is unique
-		// and makes the order total (sibling of GetSubpathDetail/#273).
-		sort.Slice(observerRows, func(i, j int) bool {
-			if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
-				return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
-			}
-			return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
-		})
-
-		var avgSnr *float64
-		if snrCount > 0 {
-			v := snrSum / float64(snrCount)
-			avgSnr = &v
-		}
+		direct, relay := heard.lists(nil)
 
 		results = append(results, map[string]interface{}{
 			"public_key": n.pk,
@@ -10517,10 +10473,11 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			"lon":        n.lon,
 			"stats": NodeHealthStats{
 				TotalTransmissions: len(packets), TotalObservations: totalObservations,
-				TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: avgSnr,
+				TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: heard.avgSnr(),
 				LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 			},
-			"observers": observerRows,
+			"directObservers": direct,
+			"relayObservers":  relay,
 		})
 	}
 
@@ -10572,28 +10529,17 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now, loadCoverage))
 
 	var packetsToday int
-	var snrSum float64
-	var snrCount int
 	var totalHops, hopCount int
 	var lastHeard, lastAdvert string
 	pm := s.relayPrefixMapLocked()
+	heard := newHeardByAccumulator(pubkey, pm)
 	totalObservations := 0
-
-	observerStats := map[string]*struct {
-		name                       string
-		snrSum, rssiSum            float64
-		snrCount, rssiCount, count int
-	}{}
 
 	for _, pkt := range packets {
 		activity.add(pkt)
 		totalObservations += pkt.ObservationCount
 		if pkt.FirstSeen > todayStart {
 			packetsToday++
-		}
-		if pkt.SNR != nil {
-			snrSum += *pkt.SNR
-			snrCount++
 		}
 		updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
 		// Hop counting
@@ -10602,32 +10548,10 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 			totalHops += len(hops)
 			hopCount++
 		}
-		// Observer stats
-		obsID := pkt.ObserverID
-		if obsID != "" {
-			obs := observerStats[obsID]
-			if obs == nil {
-				obs = &struct {
-					name                       string
-					snrSum, rssiSum            float64
-					snrCount, rssiCount, count int
-				}{name: pkt.ObserverName}
-				observerStats[obsID] = obs
-			}
-			obs.count++
-			if pkt.SNR != nil {
-				obs.snrSum += *pkt.SNR
-				obs.snrCount++
-			}
-			if pkt.RSSI != nil {
-				obs.rssiSum += *pkt.RSSI
-				obs.rssiCount++
-			}
-		}
+		heard.add(pkt)
 	}
 	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, make(map[int]struct{}))
 
-	observerRows := make([]map[string]interface{}, 0)
 	// Issue #1290: surface listener/repeater hint on node detail by
 	// looking up can_relay for each observer that heard this node.
 	// One-shot fetch of the non-relay set keeps this O(observers) on
@@ -10656,45 +10580,16 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 			}
 		}
 	}
-	for id, o := range observerStats {
-		var avgSnr, avgRssi interface{}
-		if o.snrCount > 0 {
-			avgSnr = o.snrSum / float64(o.snrCount)
-		}
-		if o.rssiCount > 0 {
-			avgRssi = o.rssiSum / float64(o.rssiCount)
-		}
+	direct, relay := heard.lists(func(id string) *bool {
 		idLower := strings.ToLower(id)
-		var canRelay interface{} // nil = unknown (no repeat field ever)
-		if _, seen := seenSet[idLower]; seen {
-			if _, isListener := nonRelaySet[idLower]; isListener {
-				canRelay = false
-			} else {
-				canRelay = true
-			}
+		if _, seen := seenSet[idLower]; !seen {
+			return nil // unknown: no repeat field ever
 		}
-		observerRows = append(observerRows, map[string]interface{}{
-			"observer_id": id, "observer_name": o.name,
-			"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
-			"can_relay": canRelay,
-		})
-	}
-	// #321: observerStats iteration order is random, so observers tied on
-	// packetCount came out in a different order on each call. The observer_id
-	// is the map key the row was built from, so it is unique and makes the
-	// order total (sibling of GetSubpathDetail/#273).
-	sort.Slice(observerRows, func(i, j int) bool {
-		if observerRows[i]["packetCount"].(int) != observerRows[j]["packetCount"].(int) {
-			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
-		}
-		return observerRows[i]["observer_id"].(string) < observerRows[j]["observer_id"].(string)
+		_, isListener := nonRelaySet[idLower]
+		canRelay := !isListener
+		return &canRelay
 	})
 
-	var avgSnr *float64
-	if snrCount > 0 {
-		v := snrSum / float64(snrCount)
-		avgSnr = &v
-	}
 	avgHops := 0
 	if hopCount > 0 {
 		avgHops = int(math.Round(float64(totalHops) / float64(hopCount)))
@@ -10713,11 +10608,12 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 	}
 
 	return map[string]interface{}{
-		"node":      node,
-		"observers": observerRows,
+		"node":            node,
+		"directObservers": direct,
+		"relayObservers":  relay,
 		"stats": NodeHealthStats{
 			TotalTransmissions: len(packets), TotalObservations: totalObservations,
-			TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: avgSnr,
+			TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: heard.avgSnr(),
 			AvgHops: &avgHops, LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
 		},
 		"recentPackets": recentPackets,

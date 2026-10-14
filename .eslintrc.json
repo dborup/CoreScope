@@ -25,6 +25,7 @@
     "GestureHints": "readonly",
     "HEALTH_THRESHOLDS": "readonly",
     "HashColor": "readonly",
+    "HeardBy": "readonly",
     "HopDisplay": "readonly",
     "HopResolver": "readonly",
     "IATA_CITIES": "readonly",

@@ -62,7 +62,7 @@ function stubNodesApi(path) {
     ? { nodes: mapNodes, total: mapNodes.length, counts: { repeater: mapNodes.length } }
     : node ? { node, recentAdverts: [] }
     : path === '/api/nodes/clock-skew' ? []
-    : /\/health$/.test(path) ? { stats: {}, observers: [], recentPackets: [] }
+    : /\/health$/.test(path) ? { stats: {}, directObservers: [], relayObservers: [], recentPackets: [] }
     : /\/neighbors$/.test(path) ? { neighbors: [] }
     : /\/paths$/.test(path) ? { paths: [] } : {};
 }

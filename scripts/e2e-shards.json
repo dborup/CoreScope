@@ -2366,6 +2366,18 @@
       "secondsByExecution": [
         26
       ]
+    },
+    {
+      "file": "test-issue-76-heard-by-e2e.js",
+      "shard": 3,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 12,
+      "secondsByExecution": [
+        12
+      ]
     }
   ],
   "exclusions": [

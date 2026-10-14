@@ -5,7 +5,8 @@
 //   F1  packets region badge in the flat view and in expanded group children
 //   F2  the shared region filter (pills, dropdown items, dropdown trigger)
 //   F3  observers-row navigation with an observer id that contains a quote
-//   N1  (round 3) the nodes-page detail-panel "Regions:" summary line
+//   N1  (round 3) the nodes-page detail panel Heard By lists (#76 replaced
+//       the never-populated "Regions:" summary line they used to carry)
 //
 // Unlike test-xss-333-e2e.js (production sink fragments rendered on a blank
 // page), this drives the REAL pages against a running Go server. The hostile
@@ -265,24 +266,20 @@ function assertInert(r, label) {
     } finally { await ctx.close(); }
   });
 
-  // ---- N1 (round 3): nodes-page detail panel "Regions:" summary ----------
-  // The detail panel (renderDetail → #nodesRight) joins the observer IATAs
-  // from /api/nodes/{pk}/health into a "Regions:" line, one line above the
-  // already-escaped per-observer badge. Select a node, inject the hostile
-  // IATA into its health response, and judge the DOM.
-  await step('N1 nodes detail panel: Regions summary renders the hostile IATA as text', async () => {
+  // ---- N1 (round 3, #76): nodes-page detail panel Heard By ----------------
+  // The detail panel (renderDetail → #nodesRight) renders the direct and
+  // relay observers of /api/nodes/{pk}/health through public/heard-by.js.
+  // Select a node, inject the hostile value as observer name and id into
+  // both lists, and judge the DOM.
+  await step('N1 nodes detail panel: Heard By renders a hostile observer as text', async () => {
     const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
     let dialogs = 0;
     try {
       await ctx.route((url) => /\/api\/nodes\/[^/]+\/health$/.test(url.pathname), async (route) => {
         const res = await route.fetch();
         const body = await res.json();
-        // Guarantee at least one observer so the Regions section renders,
-        // whichever node the first row happens to be.
-        body.observers = (body.observers && body.observers.length)
-          ? body.observers
-          : [{ observer_id: 'OBS-H', observer_name: 'h', packetCount: 1 }];
-        for (const o of body.observers) o.iata = HOSTILE;
+        body.directObservers = [{ observer_id: HOSTILE, observer_name: HOSTILE, packetCount: 1, avgSnr: 1, avgRssi: -90 }];
+        body.relayObservers = [{ observer_id: 'R' + HOSTILE, observer_name: HOSTILE, packetCount: 2 }];
         await route.fulfill({ response: res, json: body });
       });
       const page = await ctx.newPage();
@@ -291,29 +288,22 @@ function assertInert(r, label) {
       await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#nodesBody tr[data-action="select"]');
       await page.click('#nodesBody tr[data-action="select"]');
-      await page.waitForFunction(() => {
-        const r = document.getElementById('nodesRight');
-        return Array.from(r ? r.querySelectorAll('div') : [])
-          .some((d) => d.innerHTML.trim().startsWith('<strong>Regions:</strong>'));
-      });
+      await page.waitForSelector('#nodesRight .heard-by .observer-row[data-heard="relay"]');
       await page.waitForTimeout(400);
       const r = await page.evaluate((h) => {
-        const right = document.getElementById('nodesRight');
-        // The exact summary div, not an ancestor (whose innerHTML could carry
-        // an unrelated <img> such as a node avatar).
-        const line = Array.from(right.querySelectorAll('div'))
-          .find((d) => d.innerHTML.trim().startsWith('<strong>Regions:</strong>'));
+        const section = document.querySelector('#nodesRight .heard-by');
+        const names = Array.from(section.querySelectorAll('.heard-by-name')).map((el) => el.textContent);
         return {
           fired: window.__xss333 || 0,
           imgs: document.querySelectorAll('img[src="x"]').length,
-          showsText: !!line && line.textContent.includes(h),
-          hasRawImg: !!line && /<img\b/i.test(line.innerHTML),
+          showsText: names.length === 2 && names.every((t) => t.includes(h)),
+          hasRawImg: /<img\b/i.test(section.innerHTML),
         };
       }, HOSTILE);
       r.dialogs = dialogs;
-      assertInert(r, 'nodes detail Regions summary');
-      assert(r.showsText, 'the hostile IATA is not shown as text in the Regions summary');
-      assert(!r.hasRawImg, 'a raw <img> survived in the Regions summary');
+      assertInert(r, 'nodes detail Heard By');
+      assert(r.showsText, 'the hostile observer name is not shown as text in both Heard By lists');
+      assert(!r.hasRawImg, 'a raw <img> survived in Heard By');
     } finally { await ctx.close(); }
   });
 

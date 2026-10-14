@@ -1041,36 +1041,28 @@ test('#333 F3 observers row: no inline handler interpolates the observer id', ()
 //    with a hostile IATA, so dropping the escaper (the mutant) turns it red.
 // =========================================================================
 
-// N1: public/nodes.js detail panel (renderDetail → panel.innerHTML). The
-// "Regions:" summary line joins observers.map(o => o.iata) into text. The
-// sibling full-page view at nodes.js:970 and the "Heard By" rows below both
-// escape the IATA; only this summary line is at issue.
-test('#333 N1 nodes detail panel: Regions summary escapes the observer IATA', () => {
-  const src = fs.readFileSync('public/nodes.js', 'utf8');
-  const m = src.match(/\(\(\) => \{ const regions = \[\.\.\.new Set\(observers\.map\(o => o\.iata\)\.filter\(Boolean\)\)\]; return regions\.length \? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:<\/strong> [^`]*<\/div>` : ''; \}\)\(\)/);
-  assert.ok(m, '#333 N1 nodes detail Regions summary IIFE not found');
-  const render = new Function('observers', 'escapeHtml', 'return ' + m[0] + ';');
-  const html = render([{ iata: 'SJC' }, { iata: REGION_PAYLOAD }], escapeHtml);
-  assertNoXss(html, '#333 N1 nodes detail Regions summary');
-  assert.ok(decodeEntities(html).includes('SJC, ' + REGION_PAYLOAD),
-    '#333 N1: region codes must render as comma-joined text: ' + html);
-});
-
-// N2: public/live.js showNodeDetail (content.innerHTML). The "Heard By"
-// heading appends ' — Regions: ' + the same observers.map(o => o.iata) join.
-// The per-observer rows one line below already escape o.iata.
-test('#333 N2 live node detail: Heard By heading escapes the observer IATA', () => {
-  const src = fs.readFileSync('public/live.js', 'utf8');
-  // The heading template continues past </h4> into the observer list, so lift
-  // just the real join expression that builds the " — Regions: …" text.
-  const m = src.match(/Heard By\$\{regions\.length \? ' — Regions: ' \+ ([^}]*?) : ''\}<\/h4>/);
-  assert.ok(m, '#333 N2 live Heard By heading not found');
-  const render = new Function('regions', 'escapeHtml', "return 'Heard By — Regions: ' + (" + m[1] + ');');
-  const regions = [...new Set([{ iata: 'SJC' }, { iata: REGION_PAYLOAD }].map(o => o.iata).filter(Boolean))];
-  const html = render(regions, escapeHtml);
-  assertNoXss(html, '#333 N2 live Heard By heading');
-  assert.ok(decodeEntities(html).includes('Regions: SJC, ' + REGION_PAYLOAD),
-    '#333 N2: region codes must render as text in the heading: ' + html);
+// N1/N2 (#76 follow-up): the "Regions:" summaries read o.iata, which the
+// health endpoints never emitted, and were removed with the Heard By split.
+// The node detail panel, the full page and the Live panel now render Heard By
+// through public/heard-by.js; lift the shipped renderers and feed them a
+// hostile observer name and id, so dropping an escaper turns this red.
+test('#333 N1/N2 Heard By renderers escape observer names and ids (#76)', () => {
+  for (const [file, call] of [['public/nodes.js', 'HeardBy.renderList(h)'], ['public/nodes.js', 'HeardBy.renderTables(h)'], ['public/live.js', 'HeardBy.renderList(h, { link: true })']]) {
+    assert.ok(fs.readFileSync(file, 'utf8').includes(call), `#333 N1/N2: ${file} must render Heard By via ${call}`);
+    assert.ok(!/observers\.map\(o => o\.iata\)/.test(fs.readFileSync(file, 'utf8')), `#333 N1/N2: ${file} still reads the never-emitted o.iata`);
+  }
+  const ctx = { window: {} };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/heard-by.js', 'utf8'), ctx, { filename: 'heard-by.js' });
+  const HB = ctx.window.HeardBy;
+  const h = {
+    directObservers: [{ observer_id: REGION_PAYLOAD, observer_name: REGION_PAYLOAD, packetCount: 2, avgSnr: 1, avgRssi: -90 }],
+    relayObservers: [{ observer_id: 'x' + REGION_PAYLOAD, observer_name: '', packetCount: 1 }],
+  };
+  for (const [label, html] of [['list', HB.renderList(h)], ['linked list', HB.renderList(h, { link: true })], ['tables', HB.renderTables(h)]]) {
+    assertNoXss(html, '#333 N1/N2 Heard By ' + label);
+    assert.ok(decodeEntities(html).includes(REGION_PAYLOAD), `#333 N1/N2: ${label} must show the name as text: ${html}`);
+  }
 });
 
 // N3: public/analytics.js renderRepeaterTable. The row carried

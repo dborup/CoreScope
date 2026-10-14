@@ -931,13 +931,14 @@ type NodeObserverStatsResp struct {
 }
 
 type BulkHealthEntry struct {
-	PublicKey string                  `json:"public_key"`
-	Name      interface{}             `json:"name"`
-	Role      interface{}             `json:"role"`
-	Lat       interface{}             `json:"lat"`
-	Lon       interface{}             `json:"lon"`
-	Stats     NodeStatsResp           `json:"stats"`
-	Observers []NodeObserverStatsResp `json:"observers"`
+	PublicKey       string                `json:"public_key"`
+	Name            interface{}           `json:"name"`
+	Role            interface{}           `json:"role"`
+	Lat             interface{}           `json:"lat"`
+	Lon             interface{}           `json:"lon"`
+	Stats           NodeHealthStats       `json:"stats"`
+	DirectObservers []HeardDirectObserver `json:"directObservers"`
+	RelayObservers  []HeardRelayObserver  `json:"relayObservers"`
 }
 
 type NetworkStatusResponse struct {

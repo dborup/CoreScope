@@ -2230,6 +2230,16 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Hidden observer identities leave the Heard By lists (#76).
+		direct, _ := result["directObservers"].([]HeardDirectObserver)
+		relay, _ := result["relayObservers"].([]HeardRelayObserver)
+		hidden, hideErr := s.heardByHiddenFilter(r.Context(), heardByIDs(nil, direct, relay))
+		if hideErr != nil {
+			log.Printf("WARN heard-by visibility(%s): %v", pubkey, hideErr)
+			writeError(w, 500, "observer visibility lookup failed")
+			return
+		}
+		applyVisibleHeardBy(result, hidden)
 		writeJSON(w, result)
 		return
 	}
@@ -2260,8 +2270,24 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 				}
 				filtered = append(filtered, entry)
 			}
-			writeJSON(w, filtered)
+			results = filtered
+		}
+		// Hidden observer identities leave the Heard By lists (#76), with
+		// one identity lookup for every row.
+		var ids []string
+		for _, entry := range results {
+			direct, _ := entry["directObservers"].([]HeardDirectObserver)
+			relay, _ := entry["relayObservers"].([]HeardRelayObserver)
+			ids = heardByIDs(ids, direct, relay)
+		}
+		hidden, err := s.heardByHiddenFilter(r.Context(), ids)
+		if err != nil {
+			log.Printf("WARN bulk-health heard-by visibility: %v", err)
+			writeError(w, 500, "observer visibility lookup failed")
 			return
+		}
+		for _, entry := range results {
+			applyVisibleHeardBy(entry, hidden)
 		}
 		writeJSON(w, results)
 		return

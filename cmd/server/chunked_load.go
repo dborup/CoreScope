@@ -660,8 +660,10 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				// obs.RawHex deliberately NOT stored: it duplicates the parent
 				// tx.RawHex (same content hash ⇒ same frame) and enrichObs falls
 				// back to tx.RawHex when obs.RawHex == "". obsRawHex is still
-				// scanned to keep scanArgs aligned with the o.raw_hex column.
+				// scanned to keep scanArgs aligned with the o.raw_hex column,
+				// and its header route feeds wireRoute (#76).
 				Timestamp: normalizeTimestamp(nullStrVal(obsTimestamp)),
+				wireRoute: wireRouteFromRawHex(obsRawHex.String),
 			}
 
 			// Same relay-hop indexing as Load and live ingest (see

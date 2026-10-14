@@ -1462,6 +1462,27 @@ body.scroll-locked { overflow: hidden; }
   font-size: 10px; font-weight: 700; font-family: var(--mono);
   background: var(--nav-bg); color: var(--nav-text); letter-spacing: .5px;
 }
+/* #76 Heard By: direct receptions (with the node's signal) and relay
+   observers (without), shared by node page, side panel and Live panel. */
+.heard-by-subtitle {
+  margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-muted);
+}
+.heard-by-subtitle .heard-by-help { font-size: inherit; font-weight: inherit; color: inherit; }
+.heard-by-help {
+  border: 0; padding: 0; background: none; font: inherit; text-align: left;
+}
+.heard-by-help .sort-help-tip { left: 0; transform: none; font-weight: normal; text-transform: none; letter-spacing: normal; }
+.heard-by-empty { font-size: 12px; margin: 2px 0 6px; }
+.heard-by .observer-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.heard-by .heard-by-name { font-weight: 600; }
+.heard-by .heard-by-stats { color: var(--text-muted); white-space: nowrap; }
+.heard-by-link { color: var(--link-color); text-decoration: none; }
+.live-heard-by .heard-by-title { font-size: 12px; margin: 12px 0 6px; color: var(--text-muted); }
+.live-heard-by .observer-row { font-size: 11px; padding: 2px 0; }
+
 /* Issue #1290: listener vs repeater badge on observers list + detail.
  * Driven by ObserverResp.can_relay (false = firmware reported repeat:off).
  * Server-side disambiguator excludes listener observers from path-hop

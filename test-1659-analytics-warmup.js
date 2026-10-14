@@ -196,6 +196,7 @@ function pageEnv(warmMs, latencyMs, opts) {
   const load = (f) => { vm.runInContext(fs.readFileSync(f, 'utf8'), ctx); for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k]; };
   load('public/payload-labels.js');
   load('public/roles.js');
+  load('public/heard-by.js');
   try { load('public/app.js'); } catch (e) { /* DOM-only tail */ }
   ctx.registerPage = (name, obj) => { pages[name] = obj; };   // app.js defines its own
   load('public/analytics.js');

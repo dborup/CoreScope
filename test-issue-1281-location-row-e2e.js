@@ -167,10 +167,11 @@ async function findPacketDetailByType(page, predicate, maxRows = 40) {
   };
   const health = {
     stats: { totalPackets: 1005, packetsToday: 7, avgSnr: 6.3, avgHops: 2, lastHeard: now },
-    observers: [
+    directObservers: [
       { observer_id: 'observer-a', observer_name: 'Observer A', packetCount: 1000, avgSnr: 12.5, avgRssi: -45 },
       { observer_id: 'observer-b', observer_name: 'Observer B', packetCount: 5, avgSnr: -8.5, avgRssi: -110 },
     ],
+    relayObservers: [],
     recentPackets: [],
   };
 
@@ -209,7 +210,7 @@ async function findPacketDetailByType(page, predicate, maxRows = 40) {
         const readings = nodePage.locator(view.full ? '#node-observers tbody tr' : '#nodesRight .observer-row');
         await readings.first().waitFor({ state: 'visible' });
         assert(await readings.count() === 2, 'Heard By must retain both observers');
-        for (const observer of health.observers) {
+        for (const observer of health.directObservers) {
           const row = readings.filter({ hasText: observer.observer_name });
           const text = (await row.innerText()).replace(/\s+/g, ' ');
           const snr = observer.avgSnr.toFixed(1) + (view.full ? ' dB' : 'dB');
