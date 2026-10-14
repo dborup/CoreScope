@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/regions"
 )
 
 // routeMeta holds metadata for a single API route.
@@ -128,6 +129,7 @@ func routeDescriptions() map[string]routeMeta {
 			QueryParams: []paramMeta{
 				{Name: "days", Description: "Time window in days, 1-365.", Type: "integer"},
 			}},
+		"GET /api/nodes/{pubkey}/declared-regions": {Summary: "Declared-region reports for a node", Description: "Issue #126. The regions this repeater told mobile collectors it lets flood, one report per answer, newest reported_at first, at most 100 (truncated=true when older reports exist). Each report: collector (an opaque number valid only within this response; collector keys and positions are never served), regions ([] = the repeater answered and floods nothing, with empty=true), truncated (the app's hint), reported_at (collector clock), ingested_at (ingest clock), repeater_clock (the repeater's RTC seconds as reported, or null), has_position. Reports are the collectors' claims, not authoritative. 404 unless clientRegions.enabled; 400 for a key that is not 64 hex; 404 for a blacklisted or hidden node. See docs/client-regions.md.", Tag: "nodes"},
 		"GET /api/reach-rank": {Summary: "Reach leaderboard", Description: "Nodes ranked by all-time neighbour count: distinct neighbours over valid neighbor_edges rows (both endpoints 64-hex pubkeys, not equal; within the ingestor's edge retention) — a historical count, not a measure of radio quality, range or traffic. Only nodes with a Reach page (node row, or named observer row) that are not blacklisted or hidden are ranked. Rank is competition ranking (1, 1, 3) with ties listed in pubkey order; a search or page never renumbers. Served from a shared snapshot (60s TTL, refreshed in the background) that also backs the Rank on /api/nodes/{pubkey}/reach; snapshot_at is when it was read.", Tag: "nodes",
 			QueryParams: []paramMeta{
 				{Name: "q", Description: "Case-insensitive substring of node name or pubkey (max 64 characters)", Type: "string"},
@@ -173,6 +175,13 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "until", Description: "RFC3339 end time — overrides window when paired with since", Type: "string"},
 			}},
 
+		"GET /api/analytics/observer-comparison": {Summary: "Reference-to-many observer comparison", Description: "Descriptive packet-overlap comparison between one reference observer and one or more other observers (#122). Computed server-side from every eligible RX observation.timestamp in [window.start, window.end) -- not from a client-side packet-list sample, and not from transmissions.first_seen -- so a transmission re-observed inside the window counts even if first seen earlier. Each transmission_id counts once per observer regardless of how many paths/observations reached it; TX and any non-RX/unknown direction are excluded. rows[].referenceCoveragePct/otherCoveragePct are null (not 0) when their denominator is zero. No SNR/RSSI comparison and no health classification -- counts and percentages only. Bounded to observerComparisonMaxObservers (40) compared observers per request and cached 30s per (ref, hours, observer set).", Tag: "analytics",
+			QueryParams: []paramMeta{
+				{Name: "ref", Description: "Reference observer id (required)", Type: "string"},
+				{Name: "hours", Description: "Window size: 1, 6, or 24 (required)", Type: "integer"},
+				{Name: "observers", Description: "Comma-separated ids of the other observers to compare against the reference (required, 1-40, must not include ref)", Type: "string"},
+			}},
+
 		// Channels
 		"GET /api/channels": {Summary: "List channels", Description: "Returns known mesh channels with message counts. approvedChannels ([{name, hash}]) lists the shared hashtag channels an administrator approved, even before they carry traffic; omitted when empty. A channel with stored messages whose shared-channel proposal is not approved (revoked, suggested again and pending, or that re-suggestion rejected) is left out of the list (#251), unless the ingestor also decrypts that name through its built-in/config list (rainbow table, hashChannels, channelKeys); only approving the proposal lists it again, with its history. hiddenChannels ([string], omitted when empty) names the channels left out, so the page does not re-create their rows from live packets; it only names channels that have stored messages (never an unreviewed suggestion), it is global and not filtered by region, and another open tab keeps the set it last loaded, also after a re-approval. The messages stay readable per channel (GET /api/channels/{hash}/messages) and nothing is deleted. Decided per channel with stored messages from a short-lived snapshot of the proposals table (10s, dropped early when an approve/revoke result is read), never a per-request query and without a row cap. When the ingestor's built-in names file is missing or unreadable nothing is hidden. GET /api/analytics/channels is not filtered and still counts these channels.", Tag: "channels"},
 		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel. The {hash} path parameter is the existing channel route key: the operator-assigned channel name for a decrypted channel, or \"enc_<HEX>\" for an undecryptable one — it is not the on-wire channel hash. The separate channelHashHex field on each message carries the actual one-byte hash taken from the packet (see the ChannelMessage schema).", Tag: "channels", Response: schemaRef("ChannelMessagesResponse"),
@@ -191,6 +200,12 @@ func routeDescriptions() map[string]routeMeta {
 		"POST /api/admin/channel-proposals/{id}/approve":  {Summary: "Approve a channel suggestion", Description: "Queues the approval and returns 202 {requestId}. Approved channels are decrypted by the ingestor and listed for everyone.", Tag: "admin", Auth: true},
 		"POST /api/admin/channel-proposals/{id}/reject":   {Summary: "Reject a channel suggestion", Description: "Queues the rejection and returns 202 {requestId}.", Tag: "admin", Auth: true},
 		"POST /api/admin/channel-proposals/{id}/revoke":   {Summary: "Revoke an approved channel suggestion", Description: "Undoes a previous approval: the ingestor stops decrypting the channel and it drops out of GET /api/channels' approvedChannels. The channel also leaves GET /api/channels (#251) unless the ingestor still decrypts that name through its built-in/config list. Historical messages already decoded and stored are NOT deleted: they stay readable per channel (GET /api/channels/{hash}/messages), and the channel returns to the list, with its history, if the suggestion is approved again. Synchronous precondition check: 202 {requestId} only when the proposal is currently approved; 409 (no side effect, nothing queued) when it is not.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes":                    {Summary: "List region-scope decisions", Description: "Admin-only status of observed OTA region-scope names. config.json and hashRegionsPath remain the baseline; approved names form a persistent overlay.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes/audit":              {Summary: "Recent region-scope decisions", Description: "Admin-only bounded audit trail of the latest 100 scope status changes.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/approve":           {Summary: "Approve an observed unknown region scope", Description: "Body {name}; queues a decision for the ingestor and returns 202 {requestId}. The scope matches packets received afterwards. Stored packets keep the scope they were stored with (no backfill), including when the same packet is heard again. At most " + fmt.Sprint(regions.MaxApprovedScopes) + " scopes can be approved at once, because every region adds one HMAC per scoped packet and raises the chance of an ambiguous 16-bit code1; at the limit the response is 409 and nothing is queued.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/reject":            {Summary: "Reject an observed unknown region scope", Description: "Body {name}; queues a rejection for the ingestor. No scope key is activated.", Tag: "admin", Auth: true},
+		"POST /api/admin/region-scopes/revoke":            {Summary: "Revoke an approved region scope", Description: "Body {name}; queues revocation. The scope stops matching packets received afterwards. Stored packets keep the scope they were stored with. Names still configured in config.json or hashRegionsPath remain active.", Tag: "admin", Auth: true},
+		"GET /api/admin/region-scopes/requests/{id}":      {Summary: "Region-scope decision status", Description: "Returns queued, approved, rejected, revoked, or error from the ingestor-owned decision queue.", Tag: "admin", Auth: true},
 
 		// Observers
 		"GET /api/observers":                                 {Summary: "List observers", Description: "Returns all known packet observers/gateways.", Tag: "observers"},
@@ -1226,9 +1241,12 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 }
 
 // swaggerUIHTML pins swagger-ui-dist to an exact version and verifies it with
-// Subresource Integrity: a floating "@5" specifier would let whatever upstream
-// publishes next execute unverified on an operator's browser. The digests are
-// sha384 over the exact bytes served for that version; openapi_sri_test.go
+// Subresource Integrity. #442 additionally vendors the bytes into
+// public/vendor/swagger-ui-dist/<version>/ (see tools/browser-deps-manifest.json
+// and tools/fetch-browser-deps.sh) and serves them from there, so the browser
+// makes no third-party request at all. The integrity attribute stays: it is
+// cheap insurance against the file changing underneath the pin on disk. The
+// digests are sha384 over the exact bytes of that version; openapi_sri_test.go
 // holds the reviewed values and docs/browser-dependencies.md records how to
 // recompute them when the pin moves.
 const swaggerUIHTML = `<!DOCTYPE html>
@@ -1236,7 +1254,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <title>CoreScope API — Swagger UI</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css"
+  <link rel="stylesheet" href="/vendor/swagger-ui-dist/5.33.2/swagger-ui.css"
     integrity="sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW"
     crossorigin="anonymous">
   <style>
@@ -1248,7 +1266,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui-bundle.js"
+  <script src="/vendor/swagger-ui-dist/5.33.2/swagger-ui-bundle.js"
     integrity="sha384-gNnUp++d7WqR9OKX4OMoUmV2w0JxEs1uu6NPXgcynGClIX5DOu6ol4Lp+lINyZcJ"
     crossorigin="anonymous"></script>
   <script>

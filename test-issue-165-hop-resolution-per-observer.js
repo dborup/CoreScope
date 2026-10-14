@@ -317,7 +317,9 @@ test('the +N popover lists the hops, not the summary indicator (upstream 2557894
   const html = T._pathPopoverHtml(host);
   assert(!/hop-path-warn/.test(html), 'the summary indicator is left out: ' + html);
   assert(!/path-overflow-pill/.test(html), 'the pill is left out: ' + html);
-  assert(/>A</.test(html) && />B</.test(html) && /arrow/.test(html), 'hops and arrows are listed: ' + html);
+  // #217: one numbered line per hop; the arrows between hops are not listed.
+  assert(/>A</.test(html) && />B</.test(html), 'hops are listed: ' + html);
+  assert(!/arrow/.test(html) && (html.match(/<li>/g) || []).length === 2, 'two hop lines, no arrows: ' + html);
 });
 
 section('PR #185 review F1: the list warns only about hops uncertain for the row\'s observer');

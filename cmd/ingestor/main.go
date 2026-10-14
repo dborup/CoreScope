@@ -150,6 +150,17 @@ func main() {
 	stopProposals := proposals.Start(2*time.Second, time.Hour)
 	defer stopProposals()
 
+	// Admin-approved region scopes are a persistent overlay on the inline and
+	// external hashRegions lists. The server only queues decisions; this
+	// process remains the sole database writer.
+	scopeApprovals := newScopeApprovalRunner(store, keys)
+	scopeApprovals.blacklisted = cfg.IsObserverBlacklisted
+	if err := scopeApprovals.LoadApproved(context.Background()); err != nil {
+		log.Printf("[scope-approval] loading approved scopes failed: %v", err)
+	}
+	stopScopeApprovals := scopeApprovals.Start()
+	defer stopScopeApprovals()
+
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
 	// SQLite writer is blocked (e.g. a large CREATE INDEX migration). Received
@@ -282,6 +293,13 @@ func main() {
 		}
 	}
 
+	// Declared-region reports are always bounded (#126): the window follows
+	// retention.clientRegionsDays, then clientRxDays, then 30 days.
+	clientRegionsDays := cfg.ClientRegionsDays()
+	if n := runClientRegionsRetention(store, clientRegionsDays); n > 0 {
+		log.Printf("[prune] startup pruned %d client_declared_regions older than %d days", n, clientRegionsDays)
+	}
+
 	// Opt-in retention for the tables nothing else prunes (#329): after the
 	// observer soft-delete and the metrics and transmission prunes above, so
 	// the observer purge's reference guards see what they left. Every window
@@ -380,20 +398,28 @@ func main() {
 		}
 	}
 
-	// Daily ticker for client-RX coverage retention (#1727).
-	if clientRxDays > 0 {
-		clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
-		go func() {
-			for range clientRxRetentionTicker.C {
+	// Daily ticker for client-RX retention: coverage (#1727, opt-in window)
+	// and declared-region reports (#126, always bounded).
+	clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range clientRxRetentionTicker.C {
+			pruned := runClientRegionsRetention(store, clientRegionsDays)
+			if clientRxDays > 0 {
 				if n, err := store.PruneOldClientReceptions(clientRxDays); err != nil {
 					log.Printf("[prune] error: %v", err)
-				} else if n > 0 {
-					store.RunIncrementalVacuum(vacuumPages)
+				} else {
+					pruned += n
 				}
 			}
-		}()
+			if pruned > 0 {
+				store.RunIncrementalVacuum(vacuumPages)
+			}
+		}
+	}()
+	if clientRxDays > 0 {
 		log.Printf("[prune] auto-prune enabled: client_receptions older than %d days will be removed daily", clientRxDays)
 	}
+	log.Printf("[prune] auto-prune enabled: client_declared_regions older than %d days will be removed daily", clientRegionsDays)
 
 	// Hourly WAL checkpoint to prevent unbounded WAL growth.
 	// TRUNCATE resets the WAL file to zero bytes when all frames are flushed;
@@ -732,9 +758,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		return
 	}
 
-	// Mobile client RX coverage: dedicated topic meshcore/client/{PUBLIC_KEY}/packets.
-	// A roaming companion reports where it directly heard a node; handled in isolation
-	// from the observer/observations path. EMQX ACL binds parts[2] to the client's own key.
+	// Mobile client topics: meshcore/client/{PUBLIC_KEY}/packets (RX coverage) and
+	// meshcore/client/{PUBLIC_KEY}/regions (declared-region reports). A roaming
+	// companion reports where it directly heard a node, or a repeater's answer to a
+	// region query; both are handled in isolation from the observer/observations
+	// path. EMQX ACL binds parts[2] to the client's own key.
 	//
 	// The client namespace always returns from this branch, whatever the config
 	// says: the gate and the sub-topic only decide handle-vs-drop. Falling through
@@ -746,6 +774,16 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		// (#1). Enforce it here before any coverage write.
 		if len(parts) >= 3 && cfg.IsObserverBlacklisted(parts[2]) {
 			log.Printf("MQTT [%s] client %.8s blacklisted, dropping", tag, parts[2])
+			return
+		}
+		// Declared-region reports (#126, docs/client-regions.md): their own
+		// gate, the same source allowlist, and exactly four topic segments.
+		if cfg.ClientRegionsEnabled() && len(parts) == 4 && parts[3] == "regions" {
+			if !cfg.ClientRxSourceAllowed(source.Name) {
+				cfg.warnClientRxSourceDrop(tag, source.Name, time.Now())
+				return
+			}
+			handleClientRegions(store, cfg, tag, source.Name, parts[2], m.Payload(), time.Now())
 			return
 		}
 		if cfg.ClientRxCoverageEnabled() && len(parts) >= 4 && parts[3] == "packets" {
@@ -1683,8 +1721,7 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 	res, err := regions.Load(cfg.HashRegions, cfg.HashRegionsPath, configPath, log.Printf)
 	keys := make(map[string][]byte, len(res.Names))
 	for _, name := range res.Names {
-		h := sha256.Sum256([]byte(name))
-		keys[name] = h[:16]
+		keys[name] = regions.Key(name)
 	}
 	if len(keys) > 0 {
 		log.Printf("[regions] %d region key(s) loaded", len(keys))
@@ -1692,8 +1729,12 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 	return keys, err
 }
 
-// matchScope performs one HMAC-SHA256 per configured region. Expected
-// len(regionKeys) ≤ 50; beyond that, consider a pre-indexed lookup table.
+// matchScope performs one HMAC-SHA256 per effective region, including any
+// admin-approved overlay names. Deployments using hashRegionsPath may have
+// ~1100 names, and approval adds at most regions.MaxApprovedScopes more. Cost
+// is linear in the region count: BenchmarkMatchScopeApprovalCap measured
+// ~0.62 ms and ~8,650 allocations per scoped packet at 1,100 regions, and
+// ~0.71 ms at 1,228 (i7-1260P). Approval adds no database I/O here.
 //
 // code1 is only 16 bits (65534 usable values after the 0x0000/0xFFFF
 // remap), so with enough configured regions a *different*, unrelated

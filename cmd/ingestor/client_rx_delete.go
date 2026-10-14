@@ -135,10 +135,15 @@ func (s *Store) processClientRxDelete(req *clientRxDeleteRequest) {
 
 	start := time.Now()
 	receptions, observers, derr := s.DeleteClientRxByPubkey(key)
+	var declared int64
+	if derr == nil {
+		declared, derr = s.DeleteClientDeclaredRegionsByCollector(key)
+	}
 	took := time.Since(start)
 	res.CompletedAt = time.Now().UTC()
 	res.ClientReceptions = receptions
 	res.ClientObservers = observers
+	res.ClientDeclaredRegions = declared
 
 	keyHMAC := clientRxKeyHMAC(s.path, key)
 	if derr != nil {
@@ -146,9 +151,9 @@ func (s *Store) processClientRxDelete(req *clientRxDeleteRequest) {
 		log.Printf("[client-rx-delete] id=%s key=hmac:%s FAILED after %s: %v",
 			req.ID, keyHMAC, took, derr)
 	} else {
-		log.Printf("[client-rx-delete] id=%s key=hmac:%s client_receptions=%d client_observers=%d took=%s",
-			req.ID, keyHMAC, receptions, observers, took)
-		if aerr := appendClientRxAudit(s.path, req.ID, keyHMAC, receptions, observers, res.CompletedAt); aerr != nil {
+		log.Printf("[client-rx-delete] id=%s key=hmac:%s client_receptions=%d client_observers=%d client_declared_regions=%d took=%s",
+			req.ID, keyHMAC, receptions, observers, declared, took)
+		if aerr := appendClientRxAudit(s.path, req.ID, keyHMAC, clientRxAuditCounts{receptions, observers, declared}, res.CompletedAt); aerr != nil {
 			log.Printf("[client-rx-delete] id=%s audit append failed: %v", req.ID, aerr)
 		}
 	}
@@ -208,20 +213,26 @@ func clientRxKeyHMAC(dbPath, key string) string {
 
 // clientRxAuditLine is one JSONL audit record. Counts + salted HMAC only.
 type clientRxAuditLine struct {
-	ID               string    `json:"id"`
-	At               time.Time `json:"at"`
-	KeyHMAC          string    `json:"keyHmac"`
-	ClientReceptions int64     `json:"clientReceptions"`
-	ClientObservers  int64     `json:"clientObservers"`
+	ID                    string    `json:"id"`
+	At                    time.Time `json:"at"`
+	KeyHMAC               string    `json:"keyHmac"`
+	ClientReceptions      int64     `json:"clientReceptions"`
+	ClientObservers       int64     `json:"clientObservers"`
+	ClientDeclaredRegions int64     `json:"clientDeclaredRegions"`
+}
+
+// clientRxAuditCounts are the per-table row counts of one erasure.
+type clientRxAuditCounts struct {
+	receptions, observers, declaredRegions int64
 }
 
 // appendClientRxAudit appends one JSONL line to the 0600 audit file next to the
 // DB. It carries no personal data — only the id, counts, and the salted HMAC.
-func appendClientRxAudit(dbPath, id, keyHMAC string, receptions, observers int64, at time.Time) error {
+func appendClientRxAudit(dbPath, id, keyHMAC string, c clientRxAuditCounts, at time.Time) error {
 	p := filepath.Join(filepath.Dir(dbPath), clientRxAuditFileName)
 	line, err := json.Marshal(clientRxAuditLine{
 		ID: id, At: at, KeyHMAC: keyHMAC,
-		ClientReceptions: receptions, ClientObservers: observers,
+		ClientReceptions: c.receptions, ClientObservers: c.observers, ClientDeclaredRegions: c.declaredRegions,
 	})
 	if err != nil {
 		return err

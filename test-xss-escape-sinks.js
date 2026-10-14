@@ -253,6 +253,16 @@ test('observers.js renderRow: observer name cell escapes o.name', () => {
   assertNoXss(html, 'observers.js obs name cell');
 });
 
+// #217: the observer cells call obsCellName(), where truncation and escaping
+// now live. Build the real function from packets.js source.
+function realObsCellName(showFullNames, obsNameOnly, truncate) {
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+  const m = src.match(/function obsCellName\(id, maxLen\) \{[\s\S]*?\n  \}/);
+  assert.ok(m, 'packets.js obsCellName not found');
+  return new Function('obsNameOnly', 'escapeHtml', 'truncate', 'showFullNames', m[0] + '\nreturn obsCellName;')(
+    obsNameOnly, escapeHtml, truncate, showFullNames);
+}
+
 // --- 5. public/packets.js observer cell (grouped header — isSingle path) --
 test('packets.js: grouped observer cell escapes observer name', () => {
   // Capture the isSingle ternary on the grouped header row.
@@ -264,18 +274,20 @@ test('packets.js: grouped observer cell escapes observer name', () => {
   );
   assert.ok(m, 'packets.js grouped observer cell template not found');
   const tpl = '`' + m[1] + '`';
-  const fn = new Function(
-    'isSingle','headerObserverId','escapeHtml','truncate','obsNameOnly',
-    'obsIataBadge','groupedObserverIataBadgesHtml','p',
-    'return ' + tpl + ';'
-  );
-  const html = fn(
-    true, 'obs-1', escapeHtml,
-    (s, n) => String(s).slice(0, n),
-    () => TAG_PAYLOAD + ATTR_PAYLOAD,
-    () => '', () => '', {}
-  );
-  assertNoXss(html, 'packets.js grouped observer cell');
+  for (const full of [false, true]) {
+    const trunc = (s, n) => String(s).slice(0, n);
+    const nameOf = () => TAG_PAYLOAD + ATTR_PAYLOAD;
+    const fn = new Function(
+      'isSingle','headerObserverId','obsCellName','escapeHtml','obsNameOnly',
+      'obsIataBadge','groupedObserverIataBadgesHtml','p',
+      'return ' + tpl + ';'
+    );
+    const html = fn(
+      true, 'obs-1', realObsCellName(full, nameOf, trunc), escapeHtml, nameOf,
+      () => '', () => '', {}
+    );
+    assertNoXss(html, 'packets.js grouped observer cell (Full Names ' + (full ? 'on' : 'off') + ')');
+  }
 });
 
 // --- 6. public/packets.js child / flat observer cells --------------------
@@ -285,31 +297,26 @@ test('packets.js: flat observer cell escapes observer name', () => {
   // or            `${escapeHtml(truncate(obsNameOnly(p.observer_id), 16))}${obsIataBadge(p)}`.
   const src = fs.readFileSync('public/packets.js', 'utf8');
   // Find the FLAT row (the third occurrence with p.observer_id, not c.observer_id).
-  const re = /\$\{(?:escapeHtml\()?truncate\(obsNameOnly\(p\.observer_id\),\s*16\)\)?\}\$\{obsIataBadge\(p\)\}/;
+  const re = /\$\{obsCellName\(p\.observer_id,\s*16\)\}\$\{obsIataBadge\(p\)\}/;
   const m = src.match(re);
   assert.ok(m, 'packets.js flat observer cell template not found');
   const tpl = '`<td>' + m[0] + '</td>`';
-  const fn = new Function(
-    'p','escapeHtml','truncate','obsNameOnly','obsIataBadge',
-    'return ' + tpl + ';'
-  );
   // Use short payloads — truncate(_, 16) would lop off the trailing single
   // quote of a longer string. Both must survive in the first 16 chars.
-  const html = fn(
-    { observer_id: 'obs-1' }, escapeHtml,
-    (s, n) => String(s).slice(0, n),
-    () => "'<img onerror=", // 14 chars — both ' and <img present
-    () => ''
-  );
-  // Custom assertions (assertNoXss expects full payloads).
-  assert.ok(!/<img/.test(html),
-    'packets.js flat cell: raw <img survived: ' + html);
-  assert.ok(!/^[^&]*'/.test(html.replace('<td>', '').replace('</td>','')),
-    "packets.js flat cell: raw ' survived: " + html);
-  assert.ok(html.includes('&lt;img'),
-    'packets.js flat cell: &lt;img marker missing: ' + html);
-  assert.ok(html.includes('&#39;'),
-    'packets.js flat cell: &#39; marker missing: ' + html);
+  for (const full of [false, true]) {
+    const fn = new Function('p','obsCellName','obsIataBadge', 'return ' + tpl + ';');
+    const html = fn(
+      { observer_id: 'obs-1' },
+      realObsCellName(full, () => "'<img onerror=", (s, n) => String(s).slice(0, n)),
+      () => ''
+    );
+    const where = 'packets.js flat cell (Full Names ' + (full ? 'on' : 'off') + ')';
+    // Custom assertions (assertNoXss expects full payloads).
+    assert.ok(!/<img/.test(html), where + ': raw <img survived: ' + html);
+    assert.ok(!/^[^&]*'/.test(html.replace('<td>', '').replace('</td>','')), where + ": raw ' survived: " + html);
+    assert.ok(html.includes('&lt;img'), where + ': &lt;img marker missing: ' + html);
+    assert.ok(html.includes('&#39;'), where + ': &#39; marker missing: ' + html);
+  }
 });
 
 // --- 7. public/map.js Leaflet popup — observer popup ---------------------

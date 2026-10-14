@@ -220,7 +220,7 @@ const CLIENT_TTL = {
   channels: 15000, channelMessages: 10000, analyticsRF: 300000,
   analyticsTopology: 300000, analyticsChannels: 300000, analyticsHashSizes: 300000,
   analyticsSubpaths: 300000, analyticsSubpathDetail: 300000,
-  nodeAnalytics: 60000, nodeSearch: 10000
+  nodeAnalytics: 60000, nodeSearch: 10000, observerComparison: 20000
 };
 // Fetch server cache config and use as client TTLs (server values are in seconds)
 fetch('/api/config/cache').then(r => r.json()).then(cfg => {

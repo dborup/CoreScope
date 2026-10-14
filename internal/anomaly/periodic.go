@@ -70,6 +70,7 @@ type periodicState struct {
 	period       int64
 	sufficientAt int64 // first pulse time at which the current chain met every criterion (0 = not yet)
 	alts         []PeriodAlternative
+	track        pulseTracker // see track.go; armed only while the episode is active
 }
 
 func newPeriodicState(historyLen int) *periodicState {

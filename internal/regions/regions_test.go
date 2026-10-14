@@ -1,6 +1,7 @@
 package regions
 
 import (
+	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -46,5 +47,16 @@ func TestNormalizeNamesEmptyInput(t *testing.T) {
 	got := NormalizeNames(nil)
 	if len(got) != 0 {
 		t.Errorf("NormalizeNames(nil) = %v, want empty", got)
+	}
+}
+
+// Key is MeshCore's TransportKeyStore::getAutoKeyFor: SHA-256 of the exact
+// name bytes, truncated to the 16-byte TransportKey.
+func TestKeyMatchesFirmwareAutoKey(t *testing.T) {
+	if got := hex.EncodeToString(Key("#dk")); got != "4a447e7539b0418bd14cf28aa8241529" {
+		t.Fatalf("Key(#dk) = %s", got)
+	}
+	if hex.EncodeToString(Key("#DK")) == hex.EncodeToString(Key("#dk")) {
+		t.Fatal("Key must not fold case")
 	}
 }

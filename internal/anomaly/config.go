@@ -155,7 +155,13 @@ type PeriodicRule struct {
 	// recent (local) pulse rate, over the period search and every pulse
 	// evaluated on the key.
 	MaxChance float64
-	State     StateParams
+	// EndAfterMissedPulses opts into train tracking (see track.go): while
+	// the episode is active it ends when this many consecutive expected
+	// pulses are missing, instead of State.EndAfterQuiet after the last
+	// detection. 0 disables tracking; State.EndAfterQuiet stays the outer
+	// bound. Tracking cannot start an episode.
+	EndAfterMissedPulses int
+	State                StateParams
 }
 
 const (
@@ -339,6 +345,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("anomaly: rule %s: MaxJitterFraction must be in (0,1]", r.Name)
 		case !finiteIn(r.MaxChance, 0, 1) || r.MaxChance == 0:
 			return fmt.Errorf("anomaly: rule %s: MaxChance must be in (0,1]", r.Name)
+		case r.EndAfterMissedPulses < 0 || r.EndAfterMissedPulses > maxMissedPulses:
+			return fmt.Errorf("anomaly: rule %s: EndAfterMissedPulses must be in 0..%d", r.Name, maxMissedPulses)
 		}
 		// A tolerance at or above half the period would let one gap match two
 		// multiples; refuse it.

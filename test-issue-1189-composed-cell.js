@@ -60,6 +60,8 @@ if (m) {
     isSingle: false,
     truncate(s, n) { return String(s || '').slice(0, n); },
     obsNameOnly(_id) { return 'NameA'; },
+    // #217: truncation and escaping moved into obsCellName.
+    obsCellName(id, n) { return ctx.escapeHtml(ctx.truncate(ctx.obsNameOnly(id), n)); },
     obsIataBadge(_p) { return ''; },
     groupedObserverIataBadgesHtml(_p) {
       return '<span class="badge-iata">SJC</span><span class="badge-iata">SFO</span> +1';

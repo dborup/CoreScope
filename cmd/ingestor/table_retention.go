@@ -26,7 +26,12 @@ var retentionBatchRows = 1000
 // args are del's parameters before the LIMIT. On error the rows of the
 // already-committed batches are returned alongside it.
 func (s *Store) deleteInBatches(tag, del string, args ...any) (int64, error) {
-	params := append(append(make([]any, 0, len(args)+1), args...), retentionBatchRows)
+	return s.deleteInBatchesOf(tag, del, retentionBatchRows, args...)
+}
+
+// deleteInBatchesOf is deleteInBatches with an explicit batch size.
+func (s *Store) deleteInBatchesOf(tag, del string, batch int, args ...any) (int64, error) {
+	params := append(append(make([]any, 0, len(args)+1), args...), batch)
 	var total int64
 	for {
 		var n int64
@@ -42,7 +47,7 @@ func (s *Store) deleteInBatches(tag, del string, args ...any) (int64, error) {
 			return total, fmt.Errorf("%s: %w", tag, err)
 		}
 		total += n
-		if n < int64(retentionBatchRows) {
+		if n < int64(batch) {
 			return total, nil
 		}
 	}

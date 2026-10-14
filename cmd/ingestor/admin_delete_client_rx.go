@@ -138,8 +138,13 @@ func runAdminDeleteClientRxDryRun(dbPath, key string) int {
 		fmt.Fprintf(os.Stderr, "delete-client-rx: dry-run query: %v\n", err)
 		return 1
 	}
-	fmt.Printf("dry-run: would delete client_receptions=%d client_observers=%d rx_at=[%s]\n",
-		receptions, observers, rng)
+	declared, err := clientDeclaredRegionsCount(db, key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "delete-client-rx: dry-run query: %v\n", err)
+		return 1
+	}
+	fmt.Printf("dry-run: would delete client_receptions=%d client_observers=%d client_declared_regions=%d rx_at=[%s]\n",
+		receptions, observers, declared, rng)
 	fmt.Println("dry-run: no changes written")
 	return 0
 }
@@ -195,8 +200,8 @@ func runAdminDeleteClientRxOnline(dbPath, key string, wait time.Duration) int {
 				fmt.Fprintf(os.Stderr, "delete-client-rx: ingestor reported error: %s\n", res.Error)
 				return 1
 			}
-			fmt.Printf("deleted client_receptions=%d client_observers=%d\n",
-				res.ClientReceptions, res.ClientObservers)
+			fmt.Printf("deleted client_receptions=%d client_observers=%d client_declared_regions=%d\n",
+				res.ClientReceptions, res.ClientObservers, res.ClientDeclaredRegions)
 			printObserverBlacklistHint()
 			return 0
 		}

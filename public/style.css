@@ -1367,6 +1367,19 @@ img.brand-logo {
 /* MAJOR-2: when user-resizable columns push total width past container,
  * fall back to horizontal scroll on the wrap rather than overflowing the page. */
 .table-fluid-wrap { width: 100%; overflow-x: auto; }
+.obs-nb-scope-scroll-hint { display: none; }
+/* Decision buttons are never ellipsized: the narrow-viewport .data-table td
+ * rule (max-width + text-overflow) would paint an overflowing button as "…". */
+.data-table td.obs-nb-scope-actions { max-width: none; overflow: visible; white-space: nowrap; }
+
+/* Observer Neighbors scope review: give both decision buttons a real table
+ * column on phones, then let the existing fluid wrapper scroll it. Without
+ * a min-width, .data-table's max-width:0 cells ellipsize the buttons while
+ * the wrapper has almost nothing to scroll. */
+@media (max-width: 600px) {
+  .obs-nb-scope-scroll-hint { display: block; font-size: 0.8em; margin: 0 0 6px; }
+  .obs-nb-scope-table.has-actions { min-width: 560px; }
+}
 
 /* === #1056 AC#4: Slide-over row-detail overlay (narrow viewports) ========
  * Singleton .slide-over-backdrop + .slide-over-panel injected into <body>
@@ -1648,6 +1661,11 @@ body.scroll-locked { overflow: hidden; }
    both themes. */
 .path-hops .hop-named { color: var(--text-on-accent); background: var(--accent-strong); padding: 1px 6px; border-radius: 3px; font-family: var(--font); font-size: 12px; font-weight: 600; cursor: default; flex: 0 0 auto; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; }
 .path-hops .arrow { color: var(--text-muted); flex: 0 0 auto; line-height: 18px; }
+/* #217 "Full Names" (packets.js): hop chips keep their whole name. The path
+ * stays on one line; hops past the edge go behind the +N pill. Wrapping would
+ * make rows taller than the fixed VSCROLL_ROW_HEIGHT the virtual scroller
+ * positions rows with. */
+#pktTable.pkt-full-names .path-hops .hop-named { max-width: none; }
 /* #1122/#1128: bound the row height contributed by the path column.
  * `max-height` on a <td> is widely ignored by browsers (table layout
  * overrides it), so use `height` — table cells respect `height` as
@@ -4259,6 +4277,33 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 
 .compare-table { font-size: var(--fs-sm); }
 
+/* ── #122 reference-to-many mode ─────────────────────────────────── */
+.compare-mode-toggle {
+  display: flex; gap: var(--space-xs); margin-bottom: var(--space-sm); flex-wrap: wrap;
+}
+.compare-ref-headline {
+  margin-bottom: var(--space-sm);
+}
+.compare-ref-headline-name {
+  font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--text);
+}
+.compare-ref-headline-sub {
+  font-size: var(--fs-sm); color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.compare-ref-note {
+  font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.5;
+  margin: 0 0 var(--space-sm);
+}
+.compare-ref-table { font-size: var(--fs-sm); }
+.compare-ref-table .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.compare-ref-sort-btn {
+  background: transparent; border: none; color: var(--text-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-semibold); cursor: pointer;
+  padding: 2px 0; white-space: nowrap;
+}
+.compare-ref-sort-btn:hover { color: var(--text); }
+.compare-ref-sort-btn.active { color: var(--accent); }
+
 @media (max-width: 640px) {
   .compare-selector { flex-direction: column; align-items: stretch; }
   .compare-select-group { min-width: 0; }
@@ -5110,18 +5155,31 @@ body[data-cb-preset="achromat"] {
   border-radius: 8px;
   cursor: pointer;
   user-select: none;
+  /* The pill is the last flex item, after the chips that overflow, so on its
+   * own it sat past the clipped edge of .path-hops and never showed (#217).
+   * Stick it to the right edge, over the last chip. */
+  position: sticky; right: 0; z-index: 1;
 }
-.path-overflow-pill:hover { color: var(--text); background: var(--bg-hover, var(--surface)); }
+/* Opaque on hover: the pill sits over the last chip, and --bg-hover is a
+ * translucent tint that let the chip show through. */
+.path-overflow-pill:hover, .path-overflow-pill:focus-visible { color: var(--text); background: var(--row-hover); border-color: var(--accent); }
 .path-popover {
   position: absolute; z-index: var(--z-popover);
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-  padding: 8px 10px; max-width: min(360px, calc(100vw - 32px)); max-height: 240px; overflow: auto;
+  padding: 8px 10px; max-width: min(480px, calc(100vw - 32px)); max-height: min(420px, 60vh); overflow: auto;
   font-family: var(--mono); font-size: 12px;
 }
 .path-popover .path-popover-title { font-family: var(--font); font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
 .path-popover .hop, .path-popover .hop-named { white-space: nowrap; }
+/* Full path, one hop per line (packets.js _pathPopoverHtml). Each hop sits in
+ * its own .path-hops so chips keep their table styling, minus the 120px cap:
+ * the popover exists to show the names the table had to cut. */
+.path-popover-list { list-style: none; margin: 0; padding: 0; }
+.path-popover-list li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.path-popover-idx { min-width: 2ch; text-align: right; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.path-popover .path-hops, .path-popover .path-hops .hop-named { max-width: none; }
 .fux-popover-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
 .fux-popover-close { background: transparent; border: none; color: var(--text-muted); font-size: 16px; cursor: pointer; padding: 0 4px; }
 .fux-popover-close:hover { color: var(--text); }

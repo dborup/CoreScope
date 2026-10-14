@@ -44,6 +44,7 @@ run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
 run test-issue-336-external-asset-pinning.js
+run test-issue-442-instrumented-vendor-copy.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
@@ -234,6 +235,7 @@ run test-channel-live-decrypt.js
 run test-color-picker-ux.js
 run test-compare-flood-filter.js
 run test-compare-overlap.js
+run test-issue-122-compare-reference-many.js
 run test-embed-mode-1369.js
 run test-geofilter-draft.js
 run test-hash-color.js
@@ -241,6 +243,7 @@ run test-issue-1166-first-seen-column.js
 run test-issue-199-missing-node.js
 run test-issue-1189-composed-cell.js
 run test-issue-1189-live-iata-badge.js
+run test-issue-217-full-names.js
 run test-issue-1415-packets-layout.js
 run test-issue-1488-marker-stroke-vars.js
 run test-issue-1496-reset-all-complete.js
@@ -289,6 +292,7 @@ run test-regions-map.js
 run test-test-all.js
 run test-ci-parallel-gates.js
 run test-ci-shards.js
+run test-ci-go-shards.js
 
 echo ""
 echo "═══════════════════════════════════════"

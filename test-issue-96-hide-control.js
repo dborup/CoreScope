@@ -71,6 +71,8 @@ function makeSandbox(storage) {
     filters: {},
     hideControl: false,
     savedHideControl: false,
+    showFullNames: false, // #217 closure state read by buildPacketsQuery
+    savedFullNames: false,
     _packetSortColumn: null,
     _packetSortDirection: 'desc',
     DEFAULT_TIME_WINDOW: 15,

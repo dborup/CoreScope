@@ -15,6 +15,9 @@ type episode struct {
 	endedAt         int64
 	hot             uint32
 	version         uint32 // bumped on every change; invalidates old deadlines
+	// quiet, when > 0, replaces StateParams.EndAfterQuiet for this episode
+	// if shorter (train tracking).
+	quiet int64
 	// label, cov and low summarize the hot signals of the episode, so that
 	// time-driven and eviction transitions, and a reopen, carry the same
 	// traffic label, coverage flags and low confidence as the transitions
@@ -106,12 +109,26 @@ func (ep *episode) onHot(t int64, p *StateParams, out []transition) []transition
 	return out
 }
 
+// track records a pulse of the followed train at time t: it keeps the active
+// episode alive until quiet after t, without counting as a hot signal.
+func (ep *episode) track(t, quiet int64) {
+	if t > ep.lastHot {
+		ep.lastHot = t
+	}
+	ep.quiet = quiet
+	ep.version++
+}
+
 // deadline returns the next data time at which the episode changes by
 // itself, or 0 if none.
 func (ep *episode) deadline(p *StateParams) int64 {
 	switch ep.state {
 	case StateSuspicious, StateActive:
-		return ep.lastHot + int64(p.EndAfterQuiet)
+		q := int64(p.EndAfterQuiet)
+		if ep.quiet > 0 && ep.quiet < q {
+			q = ep.quiet
+		}
+		return ep.lastHot + q
 	case StateEnded:
 		return ep.endedAt + int64(p.Cooldown)
 	}

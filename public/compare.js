@@ -69,16 +69,95 @@ function computeOverlapStats(cmp) {
   };
 }
 
+/**
+ * Reference-to-many observer comparison helpers (#122).
+ */
+
+/**
+ * Format a nullable overlap percentage for display. null means "unavailable"
+ * (zero denominator) per #122 -- never rendered as a misleading 0%.
+ */
+function formatCoveragePct(pct) {
+  return (pct === null || pct === undefined) ? '—' : pct.toFixed(1) + '%';
+}
+
+/**
+ * The ids of every observer except the reference, in `allObservers`' own
+ * order (compare.js keeps that list name-sorted, so the resulting
+ * "observers=" query string is stable across repeated calls with the same
+ * data -- helping the server's response cache hit rather than miss on key
+ * order). Does not mutate allObservers.
+ */
+function buildOtherObserverIds(allObservers, refId) {
+  return (allObservers || [])
+    .filter(function (o) { return o && o.id !== refId; })
+    .map(function (o) { return o.id; });
+}
+
+/**
+ * Pick the reference observer id for reference mode. An explicit URL ref is
+ * honoured as-is (a stale shared link should surface the server's 404). A
+ * ref remembered in localStorage is used only while that observer is still
+ * in the eligible list -- otherwise the page would open on an error for an
+ * observer the user never chose in this session.
+ */
+function resolveRememberedReference(urlRef, storedRef, allObservers) {
+  if (urlRef) return urlRef;
+  if (!storedRef) return null;
+  var known = (allObservers || []).some(function (o) { return o && o.id === storedRef; });
+  return known ? storedRef : null;
+}
+
+/**
+ * Sort a copy of an observer-comparison rows array by `column`, direction
+ * 'asc' | 'desc'. Non-mutating -- callers may hold the original array from
+ * a cached API response. Numeric columns sort null (unavailable) last
+ * regardless of direction, so "unavailable" never reads as the smallest
+ * value. 'name' sorts case-insensitively; ties break by observerId for a
+ * deterministic order.
+ */
+function sortComparisonRows(rows, column, direction) {
+  var copy = (rows || []).slice();
+  var dir = direction === 'asc' ? 1 : -1;
+  copy.sort(function (a, b) {
+    if (column === 'name') {
+      var an = (a.observerName || a.observerId || '').toLowerCase();
+      var bn = (b.observerName || b.observerId || '').toLowerCase();
+      if (an !== bn) return an < bn ? -dir : dir;
+    } else {
+      var av = a[column];
+      var bv = b[column];
+      var aNull = av === null || av === undefined;
+      var bNull = bv === null || bv === undefined;
+      if (aNull !== bNull) return aNull ? 1 : -1;
+      if (!aNull && av !== bv) return av < bv ? -dir : dir;
+    }
+    return (a.observerId || '').localeCompare(b.observerId || '');
+  });
+  return copy;
+}
+
 // Expose for testing
 if (typeof window !== 'undefined') {
   window.comparePacketSets = comparePacketSets;
   window.filterPacketsByRoute = filterPacketsByRoute;
   window.computeOverlapStats = computeOverlapStats;
+  window.formatCoveragePct = formatCoveragePct;
+  window.buildOtherObserverIds = buildOtherObserverIds;
+  window.resolveRememberedReference = resolveRememberedReference;
+  window.sortComparisonRows = sortComparisonRows;
 }
 
 (function () {
   var PAYLOAD_LABELS = { 0: 'Request', 1: 'Response', 2: 'Direct Msg', 3: 'ACK', 4: 'Advert', 5: 'Channel Msg', 7: 'Anon Req', 8: 'Path', 9: 'Trace', 11: 'Control' };
   var MAX_PACKETS = 10000;
+  var REF_OBSERVER_LS_KEY = 'meshcore-compare-reference';
+  // Mirrors the server's observerComparisonMaxObservers (#122): bounding
+  // the "observers=" list here means a real 400 only happens on an
+  // install with more than this many eligible observers, and the message
+  // explains why rather than the request silently getting dropped.
+  var REF_MAX_OBSERVERS = 40;
+  var REF_WINDOWS = [1, 6, 24];
   var observers = [];
   var selA = null;
   var selB = null;
@@ -87,18 +166,56 @@ if (typeof window !== 'undefined') {
   var packetsB = [];
   var currentView = 'summary';
   var routeFilter = 'all';
+  // #122 -- pairwise mode's own packet-fetch window, carried from a
+  // reference-mode drill-down (?hours=) so the detail view below matches
+  // the window the summary above was computed with. Legacy a=/b= deep
+  // links carry no hours= and keep the original 24h behavior.
+  var pairHours = 24;
+
+  // #122 reference-to-many mode state.
+  var mode = 'pair'; // 'pair' | 'ref'
+  var refObserverId = null;
+  var refUrlId = null;     // ref= from the URL; the remembered id is resolved after observers load
+  var refHours = 24;
+  var refResult = null;   // last successful ObserverComparisonResponse
+  var refError = null;    // last error message, or null
+  var refLoading = false;
+  var refSortColumn = 'name';
+  var refSortDir = 'asc';
+  var refRequestToken = 0; // stale-response guard: only the latest request may render
+
+  function safeLocalStorageGet(key) {
+    try { return localStorage.getItem(key); } catch (_) { return null; }
+  }
+  function safeLocalStorageSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (_) { /* storage unavailable/full -- not fatal */ }
+  }
 
   function init(app, routeParam) {
-    // Parse preselected observers from URL: #/compare?a=ID1&b=ID2
+    // Parse state from URL: #/compare?a=ID1&b=ID2 (pair, default) or
+    // #/compare?mode=ref&ref=ID&hours=H (reference-to-many).
     var hashParams = location.hash.split('?')[1] || '';
     var params = new URLSearchParams(hashParams);
     selA = params.get('a') || null;
     selB = params.get('b') || null;
+    var hoursParam = parseInt(params.get('hours'), 10);
+    pairHours = REF_WINDOWS.indexOf(hoursParam) >= 0 ? hoursParam : 24;
     comparisonResult = null;
     packetsA = [];
     packetsB = [];
     currentView = 'summary';
     routeFilter = 'all';
+
+    mode = params.get('mode') === 'ref' ? 'ref' : 'pair';
+    refUrlId = params.get('ref') || null;
+    refObserverId = refUrlId;
+    refHours = REF_WINDOWS.indexOf(hoursParam) >= 0 ? hoursParam : 24;
+    refResult = null;
+    refError = null;
+    refLoading = false;
+    refSortColumn = 'name';
+    refSortDir = 'asc';
+    refRequestToken++;
 
     app.innerHTML = '<div class="compare-page">' +
       '<div class="page-header">' +
@@ -106,19 +223,29 @@ if (typeof window !== 'undefined') {
         '<h2>\uD83D\uDD0D Observer Comparison</h2>' +
       '</div>' +
       '<nav data-role="compare-breadcrumbs" aria-label="Compare breadcrumbs" class="compare-breadcrumbs"></nav>' +
+      '<div class="compare-mode-toggle" role="tablist" aria-label="Comparison mode">' +
+        '<button class="tab-btn" data-mode-btn="pair" role="tab" aria-controls="compareControls compareContent" aria-selected="true">Two observers</button>' +
+        '<button class="tab-btn" data-mode-btn="ref" role="tab" aria-controls="compareControls compareContent" aria-selected="false">One vs. many</button>' +
+      '</div>' +
       '<div id="compareControls" class="compare-controls"><div class="text-center text-muted" style="padding:20px">Loading observers\u2026</div></div>' +
       '<div id="compareContent"></div>' +
     '</div>';
 
-    // #428 — Bind off the shared #app, not onto it (same pattern #405 used
+    // #428 -- Bind off the shared #app, not onto it (same pattern #405 used
     // for observers.js; #402 explicitly left this one for the owner). The
     // next page's app.innerHTML rebuild discards .compare-page along with
-    // this listener, so it can't keep firing — and stacking — on later
+    // this listener, so it can't keep firing -- and stacking -- on later
     // pages. .compare-page is the root this init() writes into, so it
     // still catches every row keydown the #app binding did.
     var pageEl = app.querySelector('.compare-page');
-    // #209 — Keyboard accessibility for compare table rows
+    // #209 -- Keyboard accessibility for compare table rows
     pageEl.addEventListener('keydown', function (e) {
+      var sortBtn = e.target.closest('[data-sort]');
+      if (sortBtn && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        applyRefSort(sortBtn.dataset.sort);
+        return;
+      }
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -126,15 +253,27 @@ if (typeof window !== 'undefined') {
       location.hash = row.dataset.value;
     });
 
-    // #393 N9 — delegated click navigation for the same rows. Lets the packet
+    // #393 N9 -- delegated click navigation for the same rows. Lets the packet
     // rows drop their per-row inline onclick (consistency with #373), which
     // also removes the latent `'`-breakout in that double-quoted/JS context.
     // Bound to #compareContent, not the shared #app: the next page's
     // app.innerHTML discards it, so it cannot fire on other pages' rows.
     document.getElementById('compareContent').addEventListener('click', function (e) {
+      var sortBtn = e.target.closest('[data-sort]');
+      if (sortBtn) { applyRefSort(sortBtn.dataset.sort); return; }
       var row = e.target.closest('tr[data-action="navigate"]');
       if (!row) return;
       location.hash = row.dataset.value;
+    });
+
+    // #122 -- mode toggle is part of the page chrome (outside #compareContent
+    // and #compareControls, both of which get fully replaced on re-render),
+    // so it is bound once here on the stable .compare-page root rather than
+    // re-bound on every render (#419/#437: no stacking, no leak).
+    pageEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-mode-btn]');
+      if (!btn) return;
+      switchMode(btn.dataset.modeBtn);
     });
 
     loadObservers();
@@ -148,6 +287,49 @@ if (typeof window !== 'undefined') {
     packetsA = [];
     packetsB = [];
     routeFilter = 'all';
+    refObserverId = null;
+    refResult = null;
+    refError = null;
+    refLoading = false;
+    refRequestToken++; // any in-flight reference-comparison response is now stale
+  }
+
+  // #122 -- switch between the two-observer and reference-to-many modes
+  // in place (no full page navigate/reload): updates the URL via
+  // replaceState, re-renders the mode toggle + controls, and (re)runs
+  // whichever comparison is ready. Each mode keeps its own selection in
+  // memory, so toggling back restores it.
+  function switchMode(next) {
+    if (next !== 'pair' && next !== 'ref') return;
+    if (next === mode) return;
+    mode = next;
+    refRequestToken++; // abandon any in-flight reference request from the old mode
+    var updates = mode === 'ref' ? { mode: 'ref', a: '', b: '' } : { mode: '', ref: '', hours: '' };
+    var newHash = window.URLState
+      ? URLState.updateHashParams(updates, location.hash)
+      : location.hash;
+    if (newHash !== location.hash) history.replaceState(null, '', newHash);
+    renderModeToggle();
+    renderActiveControls();
+  }
+
+  function renderModeToggle() {
+    document.querySelectorAll('[data-mode-btn]').forEach(function (btn) {
+      var on = btn.dataset.modeBtn === mode;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  }
+
+  function renderActiveControls() {
+    if (mode === 'ref') {
+      renderRefControls();
+      renderBreadcrumbs();
+      if (refObserverId) runReferenceComparison(); else renderRefContent();
+    } else {
+      renderControls();
+      if (isComparisonReady()) runComparison();
+    }
   }
 
   // #1646 round-2 — single shared "should we run a comparison?" predicate
@@ -163,8 +345,9 @@ if (typeof window !== 'undefined') {
       observers = (data.observers || []).sort(function (a, b) {
         return (a.name || a.id).localeCompare(b.name || b.id);
       });
-      renderControls();
-      if (isComparisonReady()) runComparison();
+      refObserverId = resolveRememberedReference(refUrlId, safeLocalStorageGet(REF_OBSERVER_LS_KEY), observers);
+      renderModeToggle();
+      renderActiveControls();
     } catch (e) {
       document.getElementById('compareControls').innerHTML =
         '<div class="text-muted" style="padding:20px">Error loading observers: ' + escapeHtml(e.message) + '</div>';
@@ -245,26 +428,32 @@ if (typeof window !== 'undefined') {
   // Hidden when neither observer is picked; otherwise:
   //   "Observers › <A name> ⇆ <B name>"
   // The "&lrm;" entities keep punctuation LTR in RTL contexts.
+  function linkForObserver(id) {
+    if (!id) return null;
+    var match = null;
+    for (var i = 0; i < observers.length; i++) {
+      if (String(observers[i].id) === String(id)) { match = observers[i]; break; }
+    }
+    var label = match ? (match.name || match.id) : id;
+    return '<a href="#/observers/' + encodeURIComponent(id) + '">' + escapeHtml(label) + '</a>';
+  }
+
   function renderBreadcrumbs() {
     var el = document.querySelector('[data-role="compare-breadcrumbs"]');
     if (!el) return;
-    function linkFor(id) {
-      if (!id) return null;
-      var match = null;
-      for (var i = 0; i < observers.length; i++) {
-        if (String(observers[i].id) === String(id)) { match = observers[i]; break; }
-      }
-      var label = match ? (match.name || match.id) : id;
-      return '<a href="#/observers/' + encodeURIComponent(id) + '">' + escapeHtml(label) + '</a>';
-    }
     var parts = ['<a href="#/observers">Observers</a>'];
-    var aLink = linkFor(selA);
-    var bLink = linkFor(selB);
-    if (aLink || bLink) {
-      var pair = [];
-      if (aLink) pair.push(aLink);
-      if (bLink) pair.push(bLink);
-      parts.push(pair.join(' <span aria-hidden="true">\u21C6</span> '));
+    if (mode === 'ref') {
+      var refLink = linkForObserver(refObserverId);
+      if (refLink) parts.push('Reference: ' + refLink);
+    } else {
+      var aLink = linkForObserver(selA);
+      var bLink = linkForObserver(selB);
+      if (aLink || bLink) {
+        var pair = [];
+        if (aLink) pair.push(aLink);
+        if (bLink) pair.push(bLink);
+        parts.push(pair.join(' <span aria-hidden="true">\u21C6</span> '));
+      }
     }
     el.innerHTML = parts.join(' <span aria-hidden="true">\u203A</span> ');
   }
@@ -280,17 +469,20 @@ if (typeof window !== 'undefined') {
 
     content.innerHTML = '<div class="text-center text-muted" style="padding:40px">Fetching packets\u2026</div>';
 
-    // Update URL for shareability
-    var base = '#/compare?a=' + encodeURIComponent(selA) + '&b=' + encodeURIComponent(selB);
+    // Update URL for shareability. hours= is only written when it differs
+    // from the 24h default, so the common case keeps the original short
+    // #/compare?a=X&b=Y link unchanged (#122).
+    var base = '#/compare?a=' + encodeURIComponent(selA) + '&b=' + encodeURIComponent(selB) +
+      (pairHours !== 24 ? '&hours=' + pairHours : '');
     if (location.hash.split('?')[0] === '#/compare') {
       history.replaceState(null, '', base);
     }
 
     try {
-      var since24h = sinceISO(24);
+      var sinceWindow = sinceISO(pairHours);
       var results = await Promise.all([
-        api('/packets?observer=' + encodeURIComponent(selA) + '&limit=' + MAX_PACKETS + '&since=' + encodeURIComponent(since24h)),
-        api('/packets?observer=' + encodeURIComponent(selB) + '&limit=' + MAX_PACKETS + '&since=' + encodeURIComponent(since24h))
+        api('/packets?observer=' + encodeURIComponent(selA) + '&limit=' + MAX_PACKETS + '&since=' + encodeURIComponent(sinceWindow)),
+        api('/packets?observer=' + encodeURIComponent(selB) + '&limit=' + MAX_PACKETS + '&since=' + encodeURIComponent(sinceWindow))
       ]);
 
       packetsA = results[0].packets || [];
@@ -503,7 +695,7 @@ if (typeof window !== 'undefined') {
       var overlap = total > 0 ? (r.both.length / total * 100).toFixed(1) : '0.0';
       el.innerHTML =
         '<div class="compare-summary-text">' +
-          '<p>In the last 24 hours, <strong>' + nameA + '</strong> saw <strong>' +
+          '<p>In the last ' + (pairHours === 1 ? 'hour' : pairHours + ' hours') + ', <strong>' + nameA + '</strong> saw <strong>' +
             (r.onlyA.length + r.both.length).toLocaleString() + '</strong> unique packets ' +
           'and <strong>' + nameB + '</strong> saw <strong>' +
             (r.onlyB.length + r.both.length).toLocaleString() + '</strong> unique packets. ' +
@@ -553,6 +745,220 @@ if (typeof window !== 'undefined') {
         }).join('') +
         '</tbody>' +
       '</table></div>';
+  }
+
+  // ===== #122 — reference-to-many mode =====================================
+
+  var REF_WINDOW_LABELS = { 1: 'Last hour', 6: 'Last 6 hours', 24: 'Last 24 hours' };
+  var REF_COLUMNS = [
+    { key: 'name', label: 'Observer' },
+    { key: 'total', label: 'Unique' },
+    { key: 'shared', label: 'Shared' },
+    { key: 'referenceOnly', label: 'Ref. only' },
+    { key: 'otherOnly', label: 'Other only' },
+    { key: 'referenceCoveragePct', label: 'Ref. sees' },
+    { key: 'otherCoveragePct', label: 'Other sees' },
+  ];
+
+  function renderRefControls() {
+    var el = document.getElementById('compareControls');
+    if (!el) return;
+
+    var optionsHtml = '<option value="">Select reference\u2026</option>' +
+      observers.map(function (o) {
+        var label = escapeHtml(o.name || o.id);
+        var region = o.iata ? ' (' + escapeHtml(o.iata) + ')' : '';
+        return '<option value="' + escapeHtml(o.id) + '">' + label + region + '</option>';
+      }).join('');
+
+    var hoursOptionsHtml = REF_WINDOWS.map(function (h) {
+      return '<option value="' + h + '">' + escapeHtml(REF_WINDOW_LABELS[h]) + '</option>';
+    }).join('');
+
+    el.innerHTML =
+      '<div class="compare-selector compare-ref-selector">' +
+        '<div class="compare-select-group">' +
+          '<label for="compareRefObs">Reference observer</label>' +
+          '<select id="compareRefObs" class="compare-select">' + optionsHtml + '</select>' +
+        '</div>' +
+        '<div class="compare-select-group">' +
+          '<label for="compareRefHours">Window</label>' +
+          '<select id="compareRefHours" class="compare-select">' + hoursOptionsHtml + '</select>' +
+        '</div>' +
+      '</div>';
+
+    var ddRef = document.getElementById('compareRefObs');
+    var ddHours = document.getElementById('compareRefHours');
+    if (refObserverId) ddRef.value = refObserverId;
+    ddHours.value = String(refHours);
+
+    ddRef.addEventListener('change', function () {
+      refObserverId = ddRef.value || null;
+      if (refObserverId) safeLocalStorageSet(REF_OBSERVER_LS_KEY, refObserverId);
+      renderBreadcrumbs();
+      if (refObserverId) runReferenceComparison(); else renderRefContent();
+    });
+    ddHours.addEventListener('change', function () {
+      var h = parseInt(ddHours.value, 10);
+      refHours = REF_WINDOWS.indexOf(h) >= 0 ? h : 24;
+      if (refObserverId) runReferenceComparison();
+    });
+  }
+
+  function updateRefUrl() {
+    var updates = { mode: 'ref', ref: refObserverId || '', hours: refHours, a: '', b: '' };
+    var newHash = window.URLState ? URLState.updateHashParams(updates, location.hash) : null;
+    if (newHash && newHash !== location.hash && location.hash.split('?')[0] === '#/compare') {
+      history.replaceState(null, '', newHash);
+    }
+  }
+
+  // #122 — the "observers=" list the server compares the reference against:
+  // every OTHER eligible observer /api/observers already returned (so the
+  // existing visibility/blacklist policy applies identically to this mode),
+  // capped to REF_MAX_OBSERVERS. A cap that actually truncates is surfaced
+  // explicitly in renderRefContent, never silently.
+  function refOtherObserverIds() {
+    var ids = buildOtherObserverIds(observers, refObserverId);
+    return { ids: ids.slice(0, REF_MAX_OBSERVERS), truncated: ids.length > REF_MAX_OBSERVERS, total: ids.length };
+  }
+
+  async function runReferenceComparison() {
+    if (!refObserverId) { refResult = null; refError = null; renderRefContent(); return; }
+    updateRefUrl();
+
+    var others = refOtherObserverIds();
+    if (others.ids.length === 0) {
+      refResult = null;
+      refError = 'No other observers are available to compare against this reference.';
+      renderRefContent();
+      return;
+    }
+
+    refLoading = true;
+    refError = null;
+    renderRefContent();
+
+    // #122 — stale-response guard: a slower, older request (e.g. the
+    // previous window) must never overwrite a newer one's result. Every
+    // call that can change what should be displayed (mode switch, window
+    // change, reference change, unmount) bumps refRequestToken; only the
+    // response matching the token captured here is applied.
+    var myToken = refRequestToken;
+    try {
+      var resp = await api(
+        '/analytics/observer-comparison?ref=' + encodeURIComponent(refObserverId) +
+        '&hours=' + encodeURIComponent(refHours) +
+        '&observers=' + others.ids.map(encodeURIComponent).join(','),
+        { ttl: CLIENT_TTL.observerComparison || 20000 }
+      );
+      if (myToken !== refRequestToken) return; // superseded by a newer request
+      refResult = resp;
+      refResult._truncated = others.truncated;
+      refResult._eligibleTotal = others.total;
+      refError = null;
+    } catch (e) {
+      if (myToken !== refRequestToken) return;
+      refResult = null;
+      refError = (e.body && e.body.error) || e.message;
+    } finally {
+      if (myToken === refRequestToken) refLoading = false;
+    }
+    renderRefContent();
+  }
+
+  // #122 — toggle/change the active sort column; same column reverses
+  // direction, a new column starts ascending. Pure client-side re-sort of
+  // the already-fetched result, no refetch.
+  function applyRefSort(column) {
+    if (!refResult) return;
+    if (refSortColumn === column) {
+      refSortDir = refSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      refSortColumn = column;
+      refSortDir = 'asc';
+    }
+    renderRefContent();
+  }
+
+  function refDrillDownLink(otherId) {
+    return '#/compare?a=' + encodeURIComponent(refObserverId) + '&b=' + encodeURIComponent(otherId) +
+      (refHours !== 24 ? '&hours=' + refHours : '');
+  }
+
+  function renderRefContent() {
+    var content = document.getElementById('compareContent');
+    if (!content) return;
+
+    if (!refObserverId) {
+      content.innerHTML = '<div class="text-center text-muted" style="padding:40px">Select a reference observer to compare it against every other eligible observer.</div>';
+      return;
+    }
+    if (refLoading && !refResult) {
+      content.innerHTML = '<div class="text-center text-muted" style="padding:40px">Comparing observers\u2026</div>';
+      return;
+    }
+    if (refError) {
+      content.innerHTML = '<div class="text-muted" style="padding:40px">Error: ' + escapeHtml(refError) + '</div>';
+      return;
+    }
+    if (!refResult) {
+      content.innerHTML = '<div class="text-center text-muted" style="padding:40px">No data.</div>';
+      return;
+    }
+
+    var r = refResult;
+    var refName = escapeHtml(r.reference.name || r.reference.id);
+    var windowLabel = escapeHtml(REF_WINDOW_LABELS[r.window.hours] || (r.window.hours + 'h'));
+    var rows = sortComparisonRows(r.rows, refSortColumn, refSortDir);
+
+    var headerHtml =
+      '<section class="compare-ref-headline" aria-label="Reference observer summary">' +
+        '<div class="compare-ref-headline-name">' + refName + '</div>' +
+        '<div class="compare-ref-headline-sub">' + r.reference.total.toLocaleString() + ' unique RX transmission' + (r.reference.total === 1 ? '' : 's') + ' — ' + windowLabel + '</div>' +
+      '</section>';
+
+    // #122 "Honest interpretation": no data vs. zero overlap are distinct,
+    // and low overlap is never presented as a health/quality verdict.
+    var noteHtml = '<p class="compare-ref-note">Counts cover the window above only and come from every retained RX observation in it, not a packet-list sample. Low overlap can reflect different locations, frequencies, routes, downtime, or reporting gaps — it is not a health score.</p>';
+    if (r._truncated) {
+      noteHtml += '<p class="compare-ref-note compare-warning">\u26A0\uFE0F Showing ' + r.rows.length + ' of ' + r._eligibleTotal + ' eligible observers (request limit). Results below are exact for the observers shown; the comparison is not over the full observer population.</p>';
+    }
+
+    if (r.reference.total === 0) {
+      noteHtml = '<p class="compare-ref-note compare-warning">\u26A0\uFE0F ' + refName + ' has no retained RX data in this window — percentages below are unavailable, not zero.</p>' + noteHtml;
+    }
+
+    if (rows.length === 0) {
+      content.innerHTML = headerHtml + noteHtml + '<div class="text-muted" style="padding:20px">No other eligible observers to compare.</div>';
+      return;
+    }
+
+    var tableHtml =
+      '<div class="analytics-table-scroll"><table class="data-table compare-ref-table">' +
+        '<thead><tr>' +
+        REF_COLUMNS.map(function (c) {
+          var on = refSortColumn === c.key;
+          var arrow = on ? (refSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+          return '<th scope="col"><button type="button" class="compare-ref-sort-btn' + (on ? ' active' : '') + '" data-sort="' + c.key + '" aria-sort="' + (on ? (refSortDir === 'asc' ? 'ascending' : 'descending') : 'none') + '">' + escapeHtml(c.label) + arrow + '</button></th>';
+        }).join('') +
+        '</tr></thead>' +
+        '<tbody>' + rows.map(function (row) {
+          var name = escapeHtml(row.observerName || row.observerId);
+          return '<tr tabindex="0" role="row" data-action="navigate" data-value="' + escapeHtml(refDrillDownLink(row.observerId)) + '" style="cursor:pointer" title="Drill into ' + refName + ' vs. ' + name + '">' +
+            '<td>' + name + '</td>' +
+            '<td class="mono">' + row.total.toLocaleString() + '</td>' +
+            '<td class="mono">' + row.shared.toLocaleString() + '</td>' +
+            '<td class="mono">' + row.referenceOnly.toLocaleString() + '</td>' +
+            '<td class="mono">' + row.otherOnly.toLocaleString() + '</td>' +
+            '<td class="mono">' + escapeHtml(formatCoveragePct(row.referenceCoveragePct)) + '</td>' +
+            '<td class="mono">' + escapeHtml(formatCoveragePct(row.otherCoveragePct)) + '</td>' +
+          '</tr>';
+        }).join('') +
+        '</tbody>' +
+      '</table></div>';
+
+    content.innerHTML = headerHtml + noteHtml + tableHtml;
   }
 
   registerPage('compare', { init: init, destroy: destroy });
