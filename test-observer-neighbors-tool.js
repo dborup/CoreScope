@@ -86,7 +86,7 @@ function createSandbox(rows, unknownScopesFixture) {
 // after fetch resolves, and that async load() runs inside init().
 function initWith(rows, unknownScopesFixture) {
   const sb = createSandbox(rows, unknownScopesFixture);
-  const container = { innerHTML: '' };
+  const container = { innerHTML: '', addEventListener: function () {}, removeEventListener: function () {} };
   sb.window.ObserverNeighborsTool.init(container);
   return sb;
 }
@@ -158,6 +158,65 @@ function waitForLoad() {
     await waitForLoad();
     const wrap = sb.__docStore['obs-nb-unknown-scopes-wrap'];
     assert.strictEqual(wrap.innerHTML, '', 'panel should be empty, not an empty-state message -- absence of unknown scopes is the normal case');
+  });
+
+  await test('admin decisions require a key and escape OTA scope names in action attributes', async () => {
+    const malicious = '#bad"<img src=x onerror=alert(1)>';
+    const sb = initWith([makeRow()], [{ scope: malicious, count: 1, examples: ['Neighbor'] }]);
+    await waitForLoad();
+    const wrap = sb.__docStore['obs-nb-unknown-scopes-wrap'];
+    assert.ok(!wrap.innerHTML.includes('data-scope-action='), 'anonymous users must not see actions');
+    sb.document.getElementById('obs-nb-admin-key').value = 'test-key';
+    sb.fetch = (path) => Promise.resolve({ ok: true, json: () => Promise.resolve({ decisions: [] }) });
+    sb.__docStore['obs-nb-admin-load']._listeners.click();
+    await waitForLoad();
+    assert.ok(wrap.innerHTML.includes('data-scope-action="approve"'), 'authenticated panel must show actions');
+    assert.ok(wrap.innerHTML.includes('data-scope-name="#bad&quot;&lt;img'), 'candidate must be attribute-escaped');
+    assert.ok(!wrap.innerHTML.includes('<img src=x'), 'OTA text must never inject markup');
+    sb.window.ObserverNeighborsTool.destroy();
+  });
+
+  await test('decision confirmations say stored packets keep their scope; the approval cap is shown', async () => {
+    const sb = createSandbox([makeRow()], [{ scope: '#north', count: 2, examples: [] }]);
+    let click = null;
+    const container = { innerHTML: '', addEventListener: (type, fn) => { if (type === 'click') click = fn; }, removeEventListener: () => {} };
+    sb.window.ObserverNeighborsTool.init(container);
+    await waitForLoad();
+    sb.document.getElementById('obs-nb-admin-key').value = 'test-key';
+    sb.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({
+      decisions: [{ name: '#old', status: 'approved', createdAt: 1, reviewedAt: 2 }, { name: '#no', status: 'rejected', createdAt: 1, reviewedAt: 2 }],
+      limit: 128,
+    }) });
+    sb.__docStore['obs-nb-admin-load']._listeners.click();
+    await waitForLoad();
+    assert.ok(/1 of 128 approval slots used/.test(sb.__docStore['obs-nb-admin-list'].innerHTML), 'decision list must show the cap');
+    const prompts = [];
+    sb.window.confirm = (message) => { prompts.push(message); return false; };
+    const fire = (action, name) => click({ target: { closest: () => ({ getAttribute: (attr) => attr === 'data-scope-action' ? action : name }) } });
+    fire('approve', '#north');
+    fire('revoke', '#old');
+    assert.strictEqual(prompts.length, 2, 'every decision needs a confirmation');
+    for (const message of prompts) {
+      assert.ok(/received from now on/.test(message), 'confirmation must say the decision applies to new packets: ' + message);
+      assert.ok(/Stored packets keep their current scope/.test(message), 'confirmation must say history is not rewritten: ' + message);
+    }
+    sb.window.ObserverNeighborsTool.destroy();
+  });
+
+  await test('SPA destroy removes the admin click handler before re-init', () => {
+    const sb = createSandbox([], []);
+    const active = new Set();
+    const container = {
+      innerHTML: '',
+      addEventListener: (type, fn) => { if (type === 'click') active.add(fn); },
+      removeEventListener: (type, fn) => { if (type === 'click') active.delete(fn); },
+    };
+    sb.window.ObserverNeighborsTool.init(container);
+    assert.strictEqual(active.size, 1);
+    sb.window.ObserverNeighborsTool.destroy();
+    assert.strictEqual(active.size, 0);
+    sb.window.ObserverNeighborsTool.init(container);
+    assert.strictEqual(active.size, 1, 'reopening must not stack decision handlers');
   });
 
   await test('sortValue: observer/neighbor fall back to id/pubkey when unresolved, lowercased', () => {

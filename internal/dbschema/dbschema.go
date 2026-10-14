@@ -123,6 +123,24 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureChannelProposalsTable(rw, logf); err != nil {
 		return fmt.Errorf("ensure channel_proposals: %w", err)
 	}
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS approved_region_scopes (
+		name TEXT COLLATE BINARY PRIMARY KEY,
+		status TEXT NOT NULL CHECK(status IN ('approved','rejected','revoked')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("ensure approved_region_scopes: %w", err)
+	}
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS region_scope_audit (
+		request_id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL,
+		operation TEXT NOT NULL,
+		previous_status TEXT,
+		new_status TEXT NOT NULL,
+		decided_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("ensure region_scope_audit: %w", err)
+	}
 	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
 	}
