@@ -796,3 +796,60 @@ func TestScanObserverComparisonPairs_ScanRowLimit(t *testing.T) {
 		t.Fatal("expected an explicit error when the scan row limit is exceeded, got nil (silent truncation is forbidden)")
 	}
 }
+
+// PR #450 review: a single over-long id (ref or inside observers) must be
+// rejected as 400 before any DB lookup, not fall through to a 404 / lookup.
+func TestHandleObserverComparison_OverlongIDRejectedBeforeWork(t *testing.T) {
+	_, router, _ := newObsComparisonTestServer(t)
+	long := strings.Repeat("x", observerComparisonIDMaxLen+1)
+	for name, q := range map[string]string{
+		"ref":      "ref=" + long + "&hours=24&observers=a",
+		"observer": "ref=r&hours=24&observers=a," + long,
+	} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", "/api/analytics/observer-comparison?"+q, nil))
+		if w.Code != 400 {
+			t.Fatalf("%s: status = %d, want 400; body=%s", name, w.Code, w.Body.String())
+		}
+	}
+}
+
+// #122 "Inspect query plans": the window scan must be driven by the
+// (observer_idx, timestamp) index, never a full table scan of observations.
+func TestScanObserverComparisonPairs_QueryPlanUsesObserverTimestampIndex(t *testing.T) {
+	db := setupTestDB(t)
+	// The composite index is built by the ingestor's async migration
+	// obs_observer_ts_idx_v1 (cmd/ingestor/db.go), not by the server or the
+	// test schema; create it with the same DDL so the plan reflects a
+	// migrated production database.
+	if _, err := db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_observations_observer_idx_timestamp ON observations(observer_idx, timestamp)`); err != nil {
+		t.Fatal(err)
+	}
+	refIdx := insertComparisonObserver(t, db, "ref", "Ref", 0)
+	now := time.Now().UTC()
+	tx := insertComparisonTx(t, db, "tx-plan", now.Format(time.RFC3339))
+	insertComparisonObs(t, db, tx, refIdx, "RX", now.Unix(), "[]")
+
+	rows, err := db.conn.Query(`EXPLAIN QUERY PLAN `+observerComparisonScanSQL("?"),
+		refIdx, now.Add(-time.Hour).Unix(), now.Unix()+1)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	joined := strings.Join(plan, " | ")
+	if !strings.Contains(joined, "SEARCH") || !strings.Contains(joined, "idx_observations_observer_idx_timestamp") {
+		t.Fatalf("scan must SEARCH observations via the (observer_idx, timestamp) index, got plan: %s", joined)
+	}
+	if strings.Contains(joined, "SCAN observations") {
+		t.Fatalf("full table scan of observations: %s", joined)
+	}
+}

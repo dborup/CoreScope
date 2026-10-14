@@ -42,6 +42,11 @@ const (
 	// pathological string cannot drive any work at all.
 	observerComparisonObserversParamMaxLen = 4096
 
+	// observerComparisonIDMaxLen caps any single observer id (ref or one
+	// entry of observers), rejected before lookup -- the same bound on a
+	// hostile value as the raw-list cap above.
+	observerComparisonIDMaxLen = 128
+
 	observerComparisonCacheTTL     = 30 * time.Second
 	observerComparisonCacheMaxKeys = 64
 )
@@ -155,6 +160,15 @@ func (db *DB) resolveObserverIdentities(ids []string) (map[string]observerIdenti
 	return out, rows.Err()
 }
 
+// observerComparisonScanSQL is the window scan's statement, shared with the
+// query-plan test so the plan that is asserted is the plan that runs.
+func observerComparisonScanSQL(placeholders string) string {
+	return `SELECT DISTINCT observer_idx, transmission_id FROM observations
+		 WHERE observer_idx IN (` + placeholders + `)
+		   AND timestamp >= ? AND timestamp < ?
+		   AND UPPER(direction) = 'RX'`
+}
+
 // scanObserverComparisonPairs returns every distinct (observer_idx,
 // transmission_id) RX observation for the given observer rowids inside
 // [start, end). It reads the composite (observer_idx, timestamp) index
@@ -173,12 +187,7 @@ func (db *DB) scanObserverComparisonPairs(rowIDs []int64, start, end time.Time) 
 	}
 	args = append(args, start.Unix(), end.Unix())
 
-	rows, err := db.conn.Query(
-		`SELECT DISTINCT observer_idx, transmission_id FROM observations
-		 WHERE observer_idx IN (`+placeholders+`)
-		   AND timestamp >= ? AND timestamp < ?
-		   AND UPPER(direction) = 'RX'`,
-		args...)
+	rows, err := db.conn.Query(observerComparisonScanSQL(placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -396,6 +405,9 @@ func parseObserverComparisonObserverIDs(raw, refID string) ([]string, error) {
 		if id == "" {
 			continue
 		}
+		if len(id) > observerComparisonIDMaxLen {
+			return nil, errors.New("observer id too long")
+		}
 		if id == refID {
 			return nil, errors.New("observers must not include the reference observer")
 		}
@@ -420,6 +432,10 @@ func (s *Server) handleObserverComparison(w http.ResponseWriter, r *http.Request
 	refID := strings.TrimSpace(r.URL.Query().Get("ref"))
 	if refID == "" {
 		writeError(w, 400, "ref is required")
+		return
+	}
+	if len(refID) > observerComparisonIDMaxLen {
+		writeError(w, 400, "ref too long")
 		return
 	}
 

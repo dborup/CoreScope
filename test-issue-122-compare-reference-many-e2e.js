@@ -54,6 +54,18 @@ async function run() {
     assert(/select a reference/i.test(text), 'expected a prompt to select a reference, got: ' + text);
   });
 
+  await step('A remembered reference for a vanished observer is dropped, not shown as an error', async () => {
+    await page.goto(BASE + '/#/compare', { waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => localStorage.setItem('meshcore-compare-reference', 'vanished-observer-id'));
+    await page.goto(BASE + '/#/compare?mode=ref', { waitUntil: 'domcontentloaded' });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#compareRefObs', { timeout: 10000 });
+    const text = await page.$eval('#compareContent', el => el.textContent);
+    await page.evaluate(() => localStorage.removeItem('meshcore-compare-reference'));
+    assert(/select a reference/i.test(text), 'expected the select-a-reference prompt, got: ' + text);
+    assert(!/error/i.test(text), 'a stale remembered reference must not render an error: ' + text);
+  });
+
   let refId, otherIds;
   await step('Picking a reference observer renders the comparison table', async () => {
     await page.goto(BASE + '/#/compare', { waitUntil: 'domcontentloaded' });

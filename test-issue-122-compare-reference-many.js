@@ -158,5 +158,14 @@ test('sortComparisonRows breaks ties by observerId for a deterministic order', (
   assert.deepStrictEqual(sorted.map(r => r.observerId), ['a', 'b']);
 });
 
+test('resolveRememberedReference drops a stored id that is no longer an eligible observer', () => {
+  const obs = [{ id: 'a' }, { id: 'b' }];
+  const f = sandbox.window.resolveRememberedReference;
+  assert.strictEqual(f('gone', 'a', obs), 'gone', 'an explicit URL ref is kept even if unknown (server reports 404)');
+  assert.strictEqual(f(null, 'a', obs), 'a', 'a remembered id that still exists is kept');
+  assert.strictEqual(f(null, 'gone', obs), null, 'a remembered id for a vanished observer is dropped');
+  assert.strictEqual(f(null, null, obs), null);
+});
+
 console.log(`\n  ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

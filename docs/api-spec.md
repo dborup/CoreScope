@@ -43,6 +43,7 @@
 - [POST /api/admin/channel-proposals/:id/approve and /reject](#post-apiadminchannel-proposalsidapprove-and-reject)
 - [POST /api/admin/channel-proposals/:id/revoke](#post-apiadminchannel-proposalsidrevoke)
 - [GET /api/analytics/rf](#get-apianalyticsrf)
+- [GET /api/analytics/observer-comparison](#get-apianalyticsobserver-comparison)
 - [GET /api/analytics/topology](#get-apianalyticstopology)
 - [GET /api/analytics/channels](#get-apianalyticschannels)
 - [GET /api/analytics/distance](#get-apianalyticsdistance)
@@ -1957,6 +1958,48 @@ RF signal analytics.
   ],
   "min": number,
   "max": number
+}
+```
+
+---
+
+## GET /api/analytics/observer-comparison
+
+Reference-to-many observer comparison (#122). Descriptive only: no SNR/RSSI comparison and no health score or classification. Overlap is computed server-side over every retained RX observation in the window, not a packet-list sample.
+
+### Query Parameters
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `ref` | string | yes | Reference observer id (max 128 chars). Unknown, inactive or blacklisted → `404`. |
+| `hours` | int | yes | Window length: `1`, `6` or `24`. |
+| `observers` | string | yes | Comma-separated ids to compare against `ref` (1–40 ids, each max 128 chars, list max 4096 chars, must not contain `ref`). Unknown, inactive or blacklisted ids are silently excluded. |
+
+All limits are checked before any cache or database work (`400`).
+
+### Semantics
+
+- The window is the UTC interval `[start, end)` over `observations.timestamp` (not `transmissions.first_seen`), returned in `window`.
+- Only observations with `direction = 'RX'` (case-insensitive) count; TX and NULL/unknown direction are excluded.
+- Each `transmission_id` counts once per observer.
+- `referenceCoveragePct = 100·shared/|R|` and `otherCoveragePct = 100·shared/|O|`, one decimal. A percentage is `null` (unavailable) when its denominator is zero.
+- If a window holds more than 1,000,000 distinct (observer, transmission) pairs the request fails with `500` and an explicit message; counts are never truncated.
+- Responses are cached for 30 s per `(ref, hours, observer set)` (max 64 entries) and concurrent misses share one computation.
+- The scan uses the `(observer_idx, timestamp)` index built by the ingestor's async migration `obs_observer_ts_idx_v1`; until that migration has finished the query falls back to the timestamp index and is slower but still correct.
+
+### Response `200`
+
+```json
+{
+  "reference": { "id": "…", "name": "…", "total": 1000 },
+  "window": { "hours": 24, "start": "2026-10-13T12:00:00Z", "end": "2026-10-14T12:00:00Z" },
+  "rows": [
+    {
+      "observerId": "…", "observerName": "…",
+      "total": 800, "shared": 600, "referenceOnly": 400, "otherOnly": 200,
+      "referenceCoveragePct": 60.0, "otherCoveragePct": 75.0
+    }
+  ]
 }
 ```
 

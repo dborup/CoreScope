@@ -95,6 +95,20 @@ function buildOtherObserverIds(allObservers, refId) {
 }
 
 /**
+ * Pick the reference observer id for reference mode. An explicit URL ref is
+ * honoured as-is (a stale shared link should surface the server's 404). A
+ * ref remembered in localStorage is used only while that observer is still
+ * in the eligible list -- otherwise the page would open on an error for an
+ * observer the user never chose in this session.
+ */
+function resolveRememberedReference(urlRef, storedRef, allObservers) {
+  if (urlRef) return urlRef;
+  if (!storedRef) return null;
+  var known = (allObservers || []).some(function (o) { return o && o.id === storedRef; });
+  return known ? storedRef : null;
+}
+
+/**
  * Sort a copy of an observer-comparison rows array by `column`, direction
  * 'asc' | 'desc'. Non-mutating -- callers may hold the original array from
  * a cached API response. Numeric columns sort null (unavailable) last
@@ -130,6 +144,7 @@ if (typeof window !== 'undefined') {
   window.computeOverlapStats = computeOverlapStats;
   window.formatCoveragePct = formatCoveragePct;
   window.buildOtherObserverIds = buildOtherObserverIds;
+  window.resolveRememberedReference = resolveRememberedReference;
   window.sortComparisonRows = sortComparisonRows;
 }
 
@@ -160,6 +175,7 @@ if (typeof window !== 'undefined') {
   // #122 reference-to-many mode state.
   var mode = 'pair'; // 'pair' | 'ref'
   var refObserverId = null;
+  var refUrlId = null;     // ref= from the URL; the remembered id is resolved after observers load
   var refHours = 24;
   var refResult = null;   // last successful ObserverComparisonResponse
   var refError = null;    // last error message, or null
@@ -191,7 +207,8 @@ if (typeof window !== 'undefined') {
     routeFilter = 'all';
 
     mode = params.get('mode') === 'ref' ? 'ref' : 'pair';
-    refObserverId = params.get('ref') || safeLocalStorageGet(REF_OBSERVER_LS_KEY) || null;
+    refUrlId = params.get('ref') || null;
+    refObserverId = refUrlId;
     refHours = REF_WINDOWS.indexOf(hoursParam) >= 0 ? hoursParam : 24;
     refResult = null;
     refError = null;
@@ -328,6 +345,7 @@ if (typeof window !== 'undefined') {
       observers = (data.observers || []).sort(function (a, b) {
         return (a.name || a.id).localeCompare(b.name || b.id);
       });
+      refObserverId = resolveRememberedReference(refUrlId, safeLocalStorageGet(REF_OBSERVER_LS_KEY), observers);
       renderModeToggle();
       renderActiveControls();
     } catch (e) {
