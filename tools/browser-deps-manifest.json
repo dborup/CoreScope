@@ -21,6 +21,31 @@
           "url": "https://unpkg.com/leaflet@1.9.4/LICENSE",
           "dest": "LICENSE",
           "sha384": "sha384-CXYK4I2izUBQWizu8sKhYyBLtabBOMnWJhiEcYE2hnY+ov3P+/NGnAkucH4hN0hK"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/images/layers.png",
+          "dest": "images/layers.png",
+          "sha384": "sha384-80x85ZS+G189o0xL8E8D7BnfhuNss6EwUPHzG7e+qByRD2xnpxikZ6UQU4Re5nNy"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/images/layers-2x.png",
+          "dest": "images/layers-2x.png",
+          "sha384": "sha384-+F2ZWK/HTpkV9kN2HnMGCQOTM/cnQJLs770FLOeHznwVWRfDESI8z4JwcGYmy2Au"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+          "dest": "images/marker-icon.png",
+          "sha384": "sha384-wg83fCOXjBtqzFAWhTL9Sd9vmLUNhfEEzfmNUX9zwv2igKlz/YQbdapF4ObdxF+R"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+          "dest": "images/marker-icon-2x.png",
+          "sha384": "sha384-bDEa1RhAAKIr/VQnMZ7gUhhXwmKYB4V0g8AsxOvCEPwGxfHCUEzAEMAEEzkjuxiA"
+        },
+        {
+          "url": "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+          "dest": "images/marker-shadow.png",
+          "sha384": "sha384-dB8ivfvPGb1MSIzX8oWTakCxmq+VwqP/QL1TX4jT4INR3pM5T4FgF3Gx4mN3NTMq"
         }
       ]
     },

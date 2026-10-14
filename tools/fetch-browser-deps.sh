@@ -88,7 +88,9 @@ while [ "$i" -lt "$count" ]; do
       continue
     fi
 
-    mkdir -p "$destdir"
+    # dest may itself contain a subdirectory (e.g. leaflet's "images/foo.png",
+    # #443) -- create that, not just destdir, or the mv below fails.
+    mkdir -p "$(dirname "$out")"
     mv "$tmp" "$out"
     chmod 644 "$out"
     echo "OK       $name/$version/$dest <- $url"

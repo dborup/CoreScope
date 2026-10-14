@@ -249,16 +249,70 @@ test('at least one locally vendored subresource is found (the scanner is not sil
   assert(LOCAL_REFS.length > 0, `no vendored <script>/<link> found across ${SURFACES.length} scanned files`);
 });
 
-test('the manifest is not silently empty, and lists the six #336 dependencies', () => {
+test('the manifest is not silently empty, and lists the six #336 dependencies plus the five #443 Leaflet images', () => {
   const files = manifestFiles();
   const runtime = files.filter((f) => !/^LICENSE|^NOTICE/i.test(f.dest));
-  assert.strictEqual(runtime.length, 6, `expected 6 runtime assets in the manifest, got ${runtime.length}`);
+  assert.strictEqual(runtime.length, 11, `expected 11 runtime assets in the manifest, got ${runtime.length}`);
 });
 
 test('every manifest entry names a well-formed sha384 and an exact version', () => {
   const bad = manifestFiles().filter((f) => !SRI_RE.test(f.sha384) || !EXACT_VERSION.test(f.version));
   assert.strictEqual(bad.length, 0,
     'malformed manifest entry:\n' + bad.map((f) => `    ${f.name}/${f.version}/${f.dest}`).join('\n'));
+});
+
+// --- vendored CSS url(...) references -------------------------------------
+
+// #443 F1: leaflet.css references images/layers.png, images/layers-2x.png
+// and images/marker-icon.png via url(...), and L.Icon.Default additionally
+// loads marker-icon-2x.png and marker-shadow.png relative to the same path
+// (detected from this very CSS rule, see leaflet.css's
+// .leaflet-default-icon-path comment). Vendoring only the CSS/JS/LICENSE and
+// not the images it points at leaves those requests falling through to the
+// SPA handler, which answers 200 text/html instead of the image -- a broken
+// layers-control icon and broken default markers that no existing test
+// caught (the E2E only asserted the JS globals, not the images). This test
+// is deliberately NOT specific to leaflet.css: any vendored CSS file that
+// gains a url(...) reference to something not vendored alongside it must
+// fail here too.
+const CSS_URL_RE = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+
+function vendoredCSSFiles() {
+  const vendorRoot = path.join(ROOT, 'public/vendor');
+  const out = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs);
+      else if (entry.name.endsWith('.css')) out.push(abs);
+    }
+  })(vendorRoot);
+  return out;
+}
+
+test('every url(...) reference in a vendored CSS file resolves to a vendored file (#443 F1)', () => {
+  const missing = [];
+  for (const cssAbs of vendoredCSSFiles()) {
+    const src = fs.readFileSync(cssAbs, 'utf8');
+    let m;
+    CSS_URL_RE.lastIndex = 0;
+    while ((m = CSS_URL_RE.exec(src)) !== null) {
+      const ref = m[2];
+      // data: URIs are self-contained; absolute/protocol-relative URLs are
+      // not a vendoring gap in this file (and would already be caught by
+      // the off-origin tag scanner if they were a <script>/<link>, though a
+      // CSS url() carries no SRI and none is expected here regardless).
+      // A bare fragment (e.g. leaflet.css's `behavior: url(#default#VML)`
+      // IE/VML hack) names no file at all.
+      if (/^(data:|https?:|\/\/|#)/i.test(ref)) continue;
+      const resolved = path.resolve(path.dirname(cssAbs), ref);
+      if (!fs.existsSync(resolved)) {
+        missing.push(`${path.relative(ROOT, cssAbs)}: url(${ref}) -> ${path.relative(ROOT, resolved)} not found`);
+      }
+    }
+  }
+  assert.strictEqual(missing.length, 0,
+    'vendored CSS references a file that was not vendored alongside it:\n' + missing.join('\n'));
 });
 
 test('every committed vendor file matches the digest recorded in the manifest', () => {

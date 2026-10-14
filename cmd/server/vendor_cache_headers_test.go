@@ -33,6 +33,19 @@ func TestVendoredDependencyCacheHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// #443 F1: leaflet.css's images (layers-control icon, default marker)
+	// live one level deeper, at .../1.9.4/images/<file>. They must get the
+	// same immutable caching as the sibling .js/.css -- the versioned-asset
+	// regex matches on the URL prefix only, so it should not care how many
+	// path segments follow the version.
+	images := filepath.Join(versioned, "images")
+	if err := os.MkdirAll(images, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(images, "marker-icon.png"), []byte("\x89PNG fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	legacy := filepath.Join(root, "vendor")
 	if err := os.WriteFile(filepath.Join(legacy, "jsqr.min.js"), []byte("/* jsqr */"), 0644); err != nil {
 		t.Fatal(err)
@@ -48,7 +61,11 @@ func TestVendoredDependencyCacheHeaders(t *testing.T) {
 		return w
 	}
 
-	for _, p := range []string{"/vendor/leaflet/1.9.4/leaflet.js", "/vendor/leaflet/1.9.4/leaflet.css"} {
+	for _, p := range []string{
+		"/vendor/leaflet/1.9.4/leaflet.js",
+		"/vendor/leaflet/1.9.4/leaflet.css",
+		"/vendor/leaflet/1.9.4/images/marker-icon.png",
+	} {
 		t.Run("versioned "+p, func(t *testing.T) {
 			w := get(p)
 			if w.Code != http.StatusOK {

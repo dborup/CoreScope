@@ -19,7 +19,11 @@ enforce that, and all fail closed on anything new:
   recorded in `tools/browser-deps-manifest.json`. It also hashes the committed
   bytes under `public/vendor/` and compares them against the same manifest, so
   a tampered or stale vendored file is caught independently of what any tag
-  claims.
+  claims. It additionally parses every vendored `*.css` file for `url(...)`
+  references (e.g. `leaflet.css`'s layers-control and default-marker icons,
+  see the inventory below) and fails if one points at a file that was not
+  vendored alongside it — a CSS asset can reference images that no
+  `<script>`/`<link>` tag names, so the tag scanner alone cannot see them.
 - `cmd/server/openapi_sri_test.go` pins the `/api/docs` Swagger UI page on its
   own, including the reviewed digest values (`wantSwaggerUIAssets`), and hashes
   the committed `public/vendor/swagger-ui-dist/` bytes the same way.
@@ -69,6 +73,11 @@ still requests it.
 | --- | --- | --- | --- |
 | Leaflet 1.9.4 (CSS) | `public/vendor/leaflet/1.9.4/leaflet.css` | `https://unpkg.com/leaflet@1.9.4/dist/leaflet.css` | `public/index.html`, `public/area-map.html`, `public/geofilter-builder.html`, `tools/area-map.html`, `tools/geofilter-builder.html` |
 | Leaflet 1.9.4 (JS) | `public/vendor/leaflet/1.9.4/leaflet.js` | `https://unpkg.com/leaflet@1.9.4/dist/leaflet.js` | same five pages |
+| Leaflet 1.9.4 (layers-control icon) | `public/vendor/leaflet/1.9.4/images/layers.png` | `https://unpkg.com/leaflet@1.9.4/dist/images/layers.png` | `leaflet.css` (`url(images/layers.png)`) |
+| Leaflet 1.9.4 (layers-control icon, 2x) | `public/vendor/leaflet/1.9.4/images/layers-2x.png` | `https://unpkg.com/leaflet@1.9.4/dist/images/layers-2x.png` | `leaflet.css` (`url(images/layers-2x.png)`) |
+| Leaflet 1.9.4 (default marker icon) | `public/vendor/leaflet/1.9.4/images/marker-icon.png` | `https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png` | `leaflet.css` (`.leaflet-default-icon-path`, used by `L.Icon.Default` to auto-detect its image path) |
+| Leaflet 1.9.4 (default marker icon, 2x) | `public/vendor/leaflet/1.9.4/images/marker-icon-2x.png` | `https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png` | `L.Icon.Default`, relative to the path above |
+| Leaflet 1.9.4 (default marker shadow) | `public/vendor/leaflet/1.9.4/images/marker-shadow.png` | `https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png` | `L.Icon.Default`, relative to the path above |
 | Leaflet.heat 0.2.0 | `public/vendor/leaflet.heat/0.2.0/leaflet-heat.js` | `https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js` | `public/index.html` (live map heatmap) |
 | Chart.js 4.5.1 | `public/vendor/chart.js/4.5.1/chart.umd.min.js` | `https://unpkg.com/chart.js@4.5.1/dist/chart.umd.min.js` | `public/index.html` (analytics charts) |
 | swagger-ui-dist 5.33.2 (CSS) | `public/vendor/swagger-ui-dist/5.33.2/swagger-ui.css` | `https://unpkg.com/swagger-ui-dist@5.33.2/swagger-ui.css` | `cmd/server/openapi.go` → `/api/docs` |

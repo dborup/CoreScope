@@ -152,6 +152,79 @@ async function step(name, fn) {
       assert.deepEqual(sriErrors, [], 'SRI/CORS console errors: ' + sriErrors.join('; '));
     });
 
+    await step('#/live: layers-control icon and default marker images load from vendor, not broken (#443 F1)', async () => {
+      // #443 F1: leaflet.css vendored the CSS/JS but not the images it
+      // points at (url(images/layers.png) etc., plus L.Icon.Default's
+      // marker-icon/marker-shadow). Those requests used to fall through to
+      // the SPA handler, which answers 200 text/html instead of an image --
+      // a broken layers-control toggle icon and broken default L.marker(...)
+      // icons (public/home.js, public/nodes.js). This proves both load as
+      // real images, same-origin, with network blocked.
+      const imageResponses = [];
+      const { dependencyCDNRequests, pageErrors, consoleErrors } = await withBlockedNetwork(async (page) => {
+        page.on('response', (res) => {
+          let u;
+          try { u = new URL(res.url()); } catch (_) { return; }
+          if (u.origin === base && u.pathname.includes('/vendor/leaflet/') && u.pathname.includes('/images/')) {
+            imageResponses.push({ path: u.pathname, status: res.status(), contentType: res.headers()['content-type'] || '' });
+          }
+        });
+        await page.goto(base + '/#/live', { waitUntil: 'load' });
+        await page.waitForFunction(() => window.L && window.L.version === '1.9.4');
+
+        // The layers control is built by MC_createLayerControl (public/live.js
+        // -> public/map-tile-providers.js). Its toggle button's icon comes
+        // from leaflet.css's `.leaflet-control-layers-toggle { background-image:
+        // url(images/layers.png) }` -- resolve and decode that URL for real.
+        await page.waitForSelector('.leaflet-control-layers-toggle', { timeout: 10000 });
+        const layersIcon = await page.evaluate(async () => {
+          const el = document.querySelector('.leaflet-control-layers-toggle');
+          const bg = getComputedStyle(el).backgroundImage;
+          const m = /url\(["']?([^"')]+)["']?\)/.exec(bg);
+          if (!m) return { ok: false, reason: 'no background-image set: ' + bg };
+          const img = new Image();
+          img.src = m[1];
+          try { await img.decode(); return { ok: true, url: m[1], w: img.naturalWidth, h: img.naturalHeight }; }
+          catch (e) { return { ok: false, url: m[1], reason: String(e) }; }
+        });
+        assert.equal(layersIcon.ok, true, 'layers-control icon did not load: ' + JSON.stringify(layersIcon));
+        assert(layersIcon.w > 0 && layersIcon.h > 0, 'layers-control icon decoded with zero size: ' + JSON.stringify(layersIcon));
+
+        // The default L.marker(...) icon (public/home.js:626,
+        // public/nodes.js:1103/2128) is loaded the same way everywhere via
+        // L.Icon.Default; add one to a throwaway map here and decode its
+        // icon + shadow <img> elements.
+        const marker = await page.evaluate(async () => {
+          const div = document.createElement('div');
+          div.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:64px;height:64px';
+          document.body.appendChild(div);
+          const map = window.L.map(div, { zoomControl: false, attributionControl: false }).setView([0, 0], 2);
+          const m = window.L.marker([0, 0]).addTo(map);
+          async function status(img) {
+            try { await img.decode(); return { ok: true, src: img.currentSrc || img.src, w: img.naturalWidth, h: img.naturalHeight }; }
+            catch (e) { return { ok: false, src: img.src, reason: String(e) }; }
+          }
+          const result = { icon: await status(m._icon), shadow: await status(m._shadow) };
+          map.remove();
+          div.remove();
+          return result;
+        });
+        assert.equal(marker.icon.ok, true, 'default marker icon did not load: ' + JSON.stringify(marker.icon));
+        assert(marker.icon.w > 0, 'default marker icon decoded with zero size: ' + JSON.stringify(marker.icon));
+        assert.equal(marker.shadow.ok, true, 'default marker shadow did not load: ' + JSON.stringify(marker.shadow));
+        assert(marker.shadow.w > 0, 'default marker shadow decoded with zero size: ' + JSON.stringify(marker.shadow));
+      });
+      assert.deepEqual(dependencyCDNRequests, [], 'dependency CDN request(s) made:\n    ' + dependencyCDNRequests.join('\n    '));
+      assert.deepEqual(pageErrors, [], 'browser runtime errors: ' + pageErrors.join('; '));
+      const sriErrors = consoleErrors.filter((m) => /integrity|CORS|cross-origin/i.test(m));
+      assert.deepEqual(sriErrors, [], 'SRI/CORS console errors: ' + sriErrors.join('; '));
+      // Direct check of the exact bug reported: before the fix these
+      // requests hit the SPA fallback, which answers 200 text/html.
+      const badImages = imageResponses.filter((r) => r.status !== 200 || !/^image\//.test(r.contentType));
+      assert.deepEqual(badImages, [], 'vendored Leaflet image request(s) did not return a 200 image response:\n    ' +
+        badImages.map((r) => `${r.path} -> ${r.status} ${r.contentType}`).join('\n    '));
+    });
+
     await step('#/nodes/<pk>/analytics renders Chart.js charts locally', async () => {
       const { dependencyCDNRequests, pageErrors, consoleErrors } = await withBlockedNetwork(async (page) => {
         await page.goto(base + '/#/nodes/' + NODE_KEY + '/analytics', { waitUntil: 'load' });
