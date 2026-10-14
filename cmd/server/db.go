@@ -1897,14 +1897,13 @@ func computeUnknownScopes(entries []AllObserverNeighborsEntry, configuredHashReg
 			label = *e.NeighborName
 		}
 		for _, raw := range strings.Split(*e.Scopes, ",") {
-			s := strings.TrimSpace(raw)
-			if s == "" || s == "*" {
+			if strings.TrimSpace(raw) == "*" {
 				continue
 			}
-			if !strings.HasPrefix(s, "#") {
-				s = "#" + s
-			}
-			if configured[s] {
+			// Same rules as the configured list and the ingestor's
+			// observed check, so an offered name is the one it finds.
+			s, ok := regionutil.Normalize(raw)
+			if !ok || configured[s] {
 				continue
 			}
 			if neighborsByScope[s] == nil {
