@@ -216,7 +216,7 @@ func TestExportOutputIsKeyFree(t *testing.T) {
 // join an observation to its transmission; not even the content hash.
 func TestExportQueryReadsOnlyOnWireColumns(t *testing.T) {
 	for _, own := range []bool{true, false} {
-		q := strings.ToLower(exportQuery(own))
+		q := strings.ToLower(exportQuery(own, false))
 		for _, col := range []string{"decoded_json", "from_pubkey", "channel_hash", "observer", "snr", "rssi",
 			"score", "direction", "resolved_path", "name", "first_seen", "hash", "*"} {
 			if strings.Contains(q, col) {
@@ -359,7 +359,7 @@ func TestExportQueryPlanIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.Query(`EXPLAIN QUERY PLAN `+exportQuery(true), 0, 1, 1, 1)
+	rows, err := db.Query(`EXPLAIN QUERY PLAN `+exportQuery(true, false), 0, 1, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

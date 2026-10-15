@@ -132,6 +132,11 @@ type fxObs struct {
 	emptyRaw bool
 	// path is observations.path_json; "" leaves it NULL
 	path string
+	// observer is observations.observer_idx; 0 gives each observation an
+	// observer of its own
+	observer int
+	// noObserver leaves observer_idx NULL
+	noObserver bool
 }
 
 // tx inserts a transmission (with sentinel values in every sensitive
@@ -155,9 +160,16 @@ func (f *fixtureDB) tx(hash, txRaw string, payloadType int, obs ...fxObs) {
 		if o.path != "" {
 			path = o.path
 		}
+		var observer interface{} = f.obs
+		switch {
+		case o.noObserver:
+			observer = nil
+		case o.observer != 0:
+			observer = o.observer
+		}
 		if _, err := f.db.Exec(`INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score,
 			path_json, timestamp, raw_hex, resolved_path) VALUES (?, ?, 'rx', -7.5, -101, 3, ?, ?, ?, ?)`,
-			id, f.obs, path, o.at.Unix(), raw, sentinelResolved); err != nil {
+			id, observer, path, o.at.Unix(), raw, sentinelResolved); err != nil {
 			f.t.Fatal(err)
 		}
 	}

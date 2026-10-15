@@ -108,7 +108,12 @@ type RateRule struct {
 	Window       time.Duration
 	Threshold    int
 	PayloadTypes []PayloadType // empty = all payload types
-	State        StateParams
+	// ExcludeIngestBacklog opts into the backlog guard (#473): events with
+	// Event.IngestBacklog set do not exist for this rule. They are not
+	// counted in its window, are never its signal or trigger, and do not
+	// keep its episodes hot. false keeps the rule as before.
+	ExcludeIngestBacklog bool
+	State                StateParams
 }
 
 // NewStreamRule fires when a key that was not seen before (or was silent for

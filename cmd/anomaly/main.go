@@ -3,6 +3,7 @@
 // ingestor and is not built into any image.
 //
 //	corescope-anomaly export -db PATH [-immutable] -start T -end T -settle D -max-rows N -out FILE
+//	    [-backlog-silence D -backlog-span D]
 //	corescope-anomaly replay -config FILE -input FILE|- -start T -end T -max-line-bytes N [-out FILE]
 //
 // export reads a CoreScope SQLite database read-only (mode=ro; -immutable for
@@ -22,6 +23,7 @@ import (
 
 const usage = `usage:
   corescope-anomaly export -db PATH [-immutable] -start RFC3339 -end RFC3339 -settle DURATION -max-rows N -out FILE
+      [-backlog-silence DURATION -backlog-span DURATION]
   corescope-anomaly replay -config FILE -input FILE|- -start RFC3339 -end RFC3339 -max-line-bytes N [-out FILE]
 `
 
