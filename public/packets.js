@@ -3768,6 +3768,17 @@
     return inner ? '<dt>Hash Size</dt><dd>' + inner + '</dd>' : '';
   }
 
+  // #480: Scope row. A named/unknown scope keeps its existing display; an
+  // unscoped FLOOD GRP_TXT/GRP_DATA gets the shared "no scope" marker.
+  function scopeDetailHtml(pkt) {
+    if (pkt.scope_name != null) {
+      return '<dt>Scope</dt><dd>' + (pkt.scope_name !== '' ? escapeHtml(pkt.scope_name) : '<span style="color:var(--text-muted)">unknown scope</span>') + '</dd>';
+    }
+    if (pkt.payload_type !== 5 && pkt.payload_type !== 6) return '';
+    const marker = renderNoScope(pkt.route_type);
+    return marker ? '<dt>Scope</dt><dd>' + marker + '</dd>' : '';
+  }
+
   async function renderDetail(panel, data, chosenObsId) {
     const pkt = data.packet;
     const observations = data.observations || [];
@@ -4004,7 +4015,7 @@
         ${locationHtml ? `<dt>Location</dt><dd>${locationHtml}</dd>` : ''}
         <dt>SNR / RSSI</dt><dd>${snr != null ? snr + ' dB' : '—'} / ${rssi != null ? rssi + ' dBm' : '—'}</dd>
         <dt>Route Type</dt><dd>${routeTypeName(pkt.route_type)}</dd>
-        ${pkt.scope_name != null ? `<dt>Scope</dt><dd>${pkt.scope_name !== '' ? escapeHtml(pkt.scope_name) : '<span style="color:var(--text-muted)">unknown scope</span>'}</dd>` : ''}
+        ${scopeDetailHtml(pkt)}
         ${hashSizeDetailHtml(hashSize)}
         <dt>Propagation</dt><dd>${propagationHtml}</dd>
         ${transportCodesRow}
@@ -4689,6 +4700,7 @@
       getDetailPreview,
       buildDetailMessageHtml,
       hashSizeDetailHtml,
+      scopeDetailHtml,
       sortGroupChildren,
       getPathHopCount,
       renderDecodedPacket,

@@ -103,6 +103,34 @@ function renderPathHashSize(size, text, opts) {
     label + rec + '</span>';
 }
 /**
+ * #480: the ONE decision for "this flood carries no region scope". Decided
+ * from the transmission's route type only: FLOOD (1) is unscoped,
+ * TRANSPORT_FLOOD (0) is scoped whether or not its name is known (an unknown
+ * name has scope_name = '' and is NOT "no scope"). DIRECT (2) and
+ * TRANSPORT_DIRECT (3) are not flood scope, so they get no marker.
+ */
+function isUnscopedFlood(routeType) {
+  return routeType === 1 || routeType === '1';
+}
+/**
+ * #480: the ONE markup for the "no scope" recommendation, shared by the
+ * Channels message meta line and the packet-detail Scope row. Same amber
+ * --path-hash-warn recommendation style as #353, a warning (not error) icon.
+ * The explanation states only the firmware behaviour (companion default flood
+ * scope; repeater flood.max.unscoped / region denyf, firmware
+ * docs/cli_commands.md) and never attributes a low heard-count to it. Returns
+ * '' unless the route type is an unscoped FLOOD.
+ */
+function renderNoScope(routeType) {
+  if (!isUnscopedFlood(routeType)) return '';
+  const tip = 'Sent without a scope. The message floods outside your region, and repeaters that limit ' +
+    'unscoped traffic (flood.max.unscoped / region denyf) may stop it. ' +
+    'Recommended: set a default scope (region) in the companion app.';
+  return '<span class="no-scope path-hash-warn" title="' + escapeHtml(tip) + '">' +
+    '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' +
+    'no scope<span class="sr-only"> — sent without a scope. Recommended: set a default scope (region) in the companion app</span></span>';
+}
+/**
  * scopeName is optional (callers that don't pass it get the original
  * unscoped "T" badge). Pass a packet's scope_name to also surface the
  * region-scope state directly in the badge label (not just on hover): a
