@@ -39,6 +39,11 @@ const injPrefix = "inj-"
 const (
 	maxInjectBots  = 64
 	maxInjectHoles = 64
+	// maxInjectSizeMix bounds one bot's size distribution, and
+	// maxInjectSizeCount one entry's weight, so the cumulative weights
+	// cannot overflow.
+	maxInjectSizeMix   = 4096
+	maxInjectSizeCount = 1 << 32
 )
 
 // injectSpec is the JSON spec of one injection run. There are no defaults:
@@ -73,23 +78,38 @@ type labellingSpec struct {
 // export; the fields that describe the wire are exactly the fields of a
 // replay record, so an injected line carries nothing a real line does not.
 type injectBot struct {
-	Name         string `json:"name"`
-	Channel      string `json:"channel"`
-	PayloadType  *int   `json:"payload_type"`
-	RouteClass   string `json:"route_class"`
-	RouteKind    string `json:"route_kind"`
-	FirstHop     string `json:"first_hop"`
-	FullRoute    string `json:"full_route"`
-	WireBytes    int    `json:"wire_bytes"`
-	PayloadBytes *int   `json:"payload_bytes"`
-	// PayloadBytesSpread spreads the payload size: each event's size is
-	// drawn uniformly from payload_bytes +/- this many bytes. A real bot's
-	// payload length varies, so a constant one makes an injected line
-	// trivially distinguishable from an exported one. 0 keeps it constant.
-	PayloadBytesSpread *int      `json:"payload_bytes_spread"`
-	Start              time.Time `json:"start"`
-	Stop               time.Time `json:"stop"`
-	Period             dur       `json:"period"`
+	Name        string `json:"name"`
+	Channel     string `json:"channel"`
+	PayloadType *int   `json:"payload_type"`
+	RouteClass  string `json:"route_class"`
+	RouteKind   string `json:"route_kind"`
+	FirstHop    string `json:"first_hop"`
+	FullRoute   string `json:"full_route"`
+	// The sizes are described in exactly one of two ways, and the spec must
+	// pick one.
+	//
+	// SizeMix is the realistic one, and what `keys` produces: the key's own
+	// observed (wire_bytes, payload_bytes) pairs with a count each. One
+	// whole pair is drawn per event, weighted by count. Because every pair
+	// came off a real line, it is valid by construction and carries the
+	// route's own wire-minus-payload overhead, so an injected line cannot be
+	// told from a real one on size.
+	//
+	// WireBytes with PayloadBytes and PayloadBytesSpread is the older,
+	// scalar description, kept for hand-written specs: a fixed wire size and
+	// a payload drawn uniformly from payload_bytes +/- the spread. It cannot
+	// reproduce a real distribution - the payload comes in cipher blocks
+	// while wire - payload is header plus path - so the whole envelope is
+	// required to fit the frame (payload_bytes + spread <= wire_bytes - 2);
+	// a spec that could overflow is refused here rather than aborting the
+	// run on its first wide draw.
+	WireBytes          int        `json:"wire_bytes"`
+	PayloadBytes       *int       `json:"payload_bytes"`
+	PayloadBytesSpread *int       `json:"payload_bytes_spread"`
+	SizeMix            []sizePair `json:"size_mix"`
+	Start              time.Time  `json:"start"`
+	Stop               time.Time  `json:"stop"`
+	Period             dur        `json:"period"`
 	// JitterSD is the standard deviation of the per-pulse offset from the
 	// nominal grid time; JitterMax clamps it. The offset is not cumulative,
 	// so the train does not drift.
@@ -346,6 +366,13 @@ func parseInjectSpec(b []byte) (injectSpec, error) {
 			return injectSpec{}, fmt.Errorf("inject spec: duplicate bot name %q", s.Bots[i].Name)
 		}
 		seen[s.Bots[i].Name] = true
+		// Every size the bot can draw has to make a valid event, and the
+		// check belongs here: a spec that could overflow the frame is
+		// refused outright rather than aborting a run after thousands of
+		// lines, which is what round 2 did on a realistic key.
+		if _, err := botStreamKey(&s.Bots[i], time.Duration(*s.FinalAfter)); err != nil {
+			return injectSpec{}, err
+		}
 	}
 	return s, nil
 }
@@ -407,8 +434,12 @@ func (b *injectBot) validate() error {
 		return bad("multipart_max_extra is required and must be in 0..8")
 	case b.JitterSD == nil || *b.JitterSD < 0:
 		return bad("jitter_sd is required and must be >= 0")
+	case b.SizeMix != nil:
+		if err := b.validateSizeMix(bad); err != nil {
+			return err
+		}
 	case b.WireBytes <= 0:
-		return bad("wire_bytes must be > 0")
+		return bad("size_mix or wire_bytes is required, and wire_bytes must be > 0")
 	case b.PayloadBytes != nil && *b.PayloadBytes <= 0:
 		return bad("payload_bytes must be > 0 when present")
 	case b.PayloadBytesSpread == nil || *b.PayloadBytesSpread < 0:
@@ -417,6 +448,12 @@ func (b *injectBot) validate() error {
 		return bad("payload_bytes_spread needs payload_bytes")
 	case b.PayloadBytes != nil && *b.PayloadBytesSpread >= *b.PayloadBytes:
 		return bad("payload_bytes_spread must be < payload_bytes")
+	case b.PayloadBytes != nil && *b.PayloadBytes+*b.PayloadBytesSpread > b.WireBytes-2:
+		// The top of the draw range, not just payload_bytes, has to fit the
+		// frame: Event.Validate refuses PayloadBytes > WireBytes - 2.
+		return bad("payload_bytes + payload_bytes_spread must fit the frame (<= wire_bytes - 2)")
+	}
+	switch {
 	case b.Start.IsZero() || b.Stop.IsZero() || !b.Stop.After(b.Start):
 		return bad("start and stop are required, with stop after start")
 	case time.Duration(b.Period) <= 0:
@@ -436,6 +473,101 @@ func (b *injectBot) validate() error {
 		}
 	}
 	return nil
+}
+
+// validateSizeMix checks a bot's size distribution. The pairs themselves are
+// checked against the event validator in botStreamKey, which sees the bot's
+// whole wire shape; here only the shape of the list is checked, plus the
+// mutual exclusion with the scalar size fields.
+func (b *injectBot) validateSizeMix(bad func(string) error) error {
+	if b.WireBytes != 0 || b.PayloadBytes != nil || b.PayloadBytesSpread != nil {
+		return bad("size_mix is the whole size description: leave wire_bytes, payload_bytes and payload_bytes_spread out")
+	}
+	if len(b.SizeMix) == 0 || len(b.SizeMix) > maxInjectSizeMix {
+		return bad(fmt.Sprintf("size_mix needs 1..%d entries", maxInjectSizeMix))
+	}
+	seen := map[[2]int]bool{}
+	for _, sp := range b.SizeMix {
+		if sp.Count <= 0 || sp.Count > maxInjectSizeCount {
+			return bad(fmt.Sprintf("every size_mix entry needs a count in 1..%d", maxInjectSizeCount))
+		}
+		if sp.WireBytes <= 0 {
+			return bad("every size_mix entry needs wire_bytes > 0")
+		}
+		if sp.PayloadBytes != nil && *sp.PayloadBytes < 0 {
+			return bad("a size_mix payload_bytes must be >= 0")
+		}
+		k := [2]int{sp.WireBytes, payloadOrUnknown(sp)}
+		if seen[k] {
+			return bad(fmt.Sprintf("size_mix carries the pair (%d, %d) twice", k[0], k[1]))
+		}
+		seen[k] = true
+	}
+	return nil
+}
+
+// sizeDraw turns one bot's size description into a draw. For a size mix it
+// holds the cumulative weights, computed once per bot, so a draw is a binary
+// search rather than a walk over the whole distribution.
+type sizeDraw struct {
+	mix   []sizePair
+	cum   []int64
+	total int64
+	// the scalar description
+	wire    int
+	payload *int
+	spread  int
+}
+
+func newSizeDraw(b *injectBot) sizeDraw {
+	d := sizeDraw{mix: b.SizeMix, wire: b.WireBytes, payload: b.PayloadBytes}
+	if b.PayloadBytesSpread != nil {
+		d.spread = *b.PayloadBytesSpread
+	}
+	for _, sp := range b.SizeMix {
+		d.total += int64(sp.Count)
+		d.cum = append(d.cum, d.total)
+	}
+	return d
+}
+
+// random reports whether a draw consumes a value from the generator. A
+// single-entry mix and a zero spread are constant, so they consume none and
+// leave every other draw of the train where it was.
+func (d sizeDraw) random() bool {
+	if len(d.mix) > 0 {
+		return len(d.mix) > 1
+	}
+	return d.payload != nil && d.spread > 0
+}
+
+// draw returns one event's wire and payload size. It takes exactly one value
+// from p when random() is true, and none otherwise.
+func (d sizeDraw) draw(p *prng) (int, *int) {
+	if len(d.mix) > 0 {
+		i := 0
+		if len(d.mix) > 1 {
+			r := int64(p.float() * float64(d.total))
+			i = sort.Search(len(d.cum), func(j int) bool { return d.cum[j] > r })
+			if i >= len(d.mix) {
+				i = len(d.mix) - 1
+			}
+		}
+		sp := d.mix[i]
+		if sp.PayloadBytes == nil {
+			return sp.WireBytes, nil
+		}
+		pb := *sp.PayloadBytes
+		return sp.WireBytes, &pb
+	}
+	if d.payload == nil {
+		return d.wire, nil
+	}
+	pb := *d.payload
+	if d.spread > 0 {
+		pb += int(p.float()*float64(2*d.spread+1)) - d.spread
+	}
+	return d.wire, &pb
 }
 
 // generate builds every injected event, the per-bot counts and the labelled
@@ -483,6 +615,7 @@ func generateBot(b *injectBot, seed uint64, finalAfter time.Duration, budget int
 		return nil, botStats{}, err
 	}
 	st.Key = key
+	sizes := newSizeDraw(b)
 	var evs []injEvent
 	emit := func(pulse, part int, when time.Time) error {
 		if len(evs) >= budget {
@@ -495,23 +628,18 @@ func generateBot(b *injectBot, seed uint64, finalAfter time.Duration, budget int
 		// the past, so the effective jitter is in [-(jitter_max + 1s),
 		// jitter_max].
 		when = when.UTC().Truncate(time.Second)
+		// One size draw per emitted event: a whole (wire, payload) pair from
+		// the key's observed distribution, or the scalar payload spread.
+		wire, payload := sizes.draw(p)
 		rec := anomaly.ReplayRecord{
 			ID: fmt.Sprintf("%s%s-%d-%d", injPrefix, b.Name, pulse, part), Time: when,
 			FinalAt: when.Add(finalAfter), PayloadType: *b.PayloadType, Channel: b.Channel,
 			RouteClass: b.RouteClass, RouteKind: b.RouteKind, FirstHop: b.FirstHop, FullRoute: b.FullRoute,
-			WireBytes: b.WireBytes, Traffic: "unclassified", Decryption: "unknown",
+			WireBytes: wire, PayloadBytes: payload, Traffic: "unclassified", Decryption: "unknown",
 		}
-		if b.PayloadBytes != nil {
-			pb := *b.PayloadBytes
-			// One payload-size draw per emitted event, taken only when the
-			// spread is nonzero, so a spread of 0 consumes no randomness and
-			// leaves every other draw where it was.
-			if sp := *b.PayloadBytesSpread; sp > 0 {
-				pb += int(p.float()*float64(2*sp+1)) - sp
-			}
-			rec.PayloadBytes = &pb
-		}
-		// An injected line must be exactly as valid as an exported one.
+		// An injected line must be exactly as valid as an exported one. Every
+		// size the draw can produce was checked by botStreamKey before any
+		// event was built, so this cannot fire on a validated spec.
 		if _, err := rec.Event(); err != nil {
 			return fmt.Errorf("inject: bot %q: %w", b.Name, err)
 		}
@@ -570,24 +698,63 @@ func generateBot(b *injectBot, seed uint64, finalAfter time.Duration, budget int
 	return evs, st, nil
 }
 
-// botStreamKey returns the canonical stream key of a bot's events. It builds
-// the same ReplayRecord emit builds, so a spec whose wire fields do not make
-// a valid event fails here rather than silently labelling nothing.
+// botStreamKey returns the canonical stream key of a bot's events, and
+// checks that every size the bot can draw makes a valid event. It builds the
+// same ReplayRecord emit builds, so a spec whose wire fields do not make a
+// valid event fails here - before any event, line or file is produced -
+// rather than aborting the run halfway through or silently labelling nothing.
+//
+// Sizes are not part of a stream key, so every size gives the same key; the
+// loop is there to validate, and the equality is asserted rather than
+// assumed.
 func botStreamKey(b *injectBot, finalAfter time.Duration) (string, error) {
-	rec := anomaly.ReplayRecord{ID: injPrefix + b.Name + "-key", Time: b.Start.UTC().Truncate(time.Second),
-		PayloadType: *b.PayloadType, Channel: b.Channel, RouteClass: b.RouteClass, RouteKind: b.RouteKind,
-		FirstHop: b.FirstHop, FullRoute: b.FullRoute, WireBytes: b.WireBytes,
-		Traffic: "unclassified", Decryption: "unknown"}
-	rec.FinalAt = rec.Time.Add(finalAfter)
-	if b.PayloadBytes != nil {
-		pb := *b.PayloadBytes
-		rec.PayloadBytes = &pb
+	build := func(wire int, payload *int) (string, error) {
+		rec := anomaly.ReplayRecord{ID: injPrefix + b.Name + "-key", Time: b.Start.UTC().Truncate(time.Second),
+			PayloadType: *b.PayloadType, Channel: b.Channel, RouteClass: b.RouteClass, RouteKind: b.RouteKind,
+			FirstHop: b.FirstHop, FullRoute: b.FullRoute, WireBytes: wire, PayloadBytes: payload,
+			Traffic: "unclassified", Decryption: "unknown"}
+		rec.FinalAt = rec.Time.Add(finalAfter)
+		ev, err := rec.Event()
+		if err != nil {
+			return "", fmt.Errorf("inject: bot %q: %w", b.Name, err)
+		}
+		return anomaly.StreamKeyOf(ev).String(), nil
 	}
-	ev, err := rec.Event()
-	if err != nil {
-		return "", fmt.Errorf("inject: bot %q: %w", b.Name, err)
+	var sizes [][2]*int
+	if len(b.SizeMix) > 0 {
+		for _, sp := range b.SizeMix {
+			wire := sp.WireBytes
+			sizes = append(sizes, [2]*int{&wire, sp.PayloadBytes})
+		}
+	} else {
+		// The whole envelope of the scalar draw: the smallest and the largest
+		// payload it can reach.
+		wire := b.WireBytes
+		if b.PayloadBytes == nil {
+			sizes = append(sizes, [2]*int{&wire, nil})
+		} else {
+			lo, hi := *b.PayloadBytes-*b.PayloadBytesSpread, *b.PayloadBytes+*b.PayloadBytesSpread
+			sizes = append(sizes, [2]*int{&wire, &lo}, [2]*int{&wire, &hi})
+		}
 	}
-	return anomaly.StreamKeyOf(ev).String(), nil
+	key := ""
+	for _, s := range sizes {
+		var payload *int
+		if s[1] != nil {
+			pb := *s[1]
+			payload = &pb
+		}
+		k, err := build(*s[0], payload)
+		if err != nil {
+			return "", err
+		}
+		if key == "" {
+			key = k
+		} else if k != key {
+			return "", fmt.Errorf("inject: bot %q: its sizes do not share one stream key", b.Name)
+		}
+	}
+	return key, nil
 }
 
 func inHole(holes []injectHole, t time.Time) bool {

@@ -44,7 +44,27 @@ import (
 const (
 	maxKeySizeBuckets   = 512
 	maxKeyRouteVariants = 64
+	// maxKeySizePairs bounds the distinct (wire, payload) pairs tracked per
+	// key. It is the distribution an injected bot draws from, so it is kept
+	// wider than the per-dimension bucket bound; overflow is reported.
+	maxKeySizePairs = 2048
 )
+
+// sizePair is one observed (wire_bytes, payload_bytes) pair and the number
+// of background lines that carried it. PayloadBytes is absent for the lines
+// whose payload length the export did not know.
+//
+// Why the pair and not two separate figures: the two sizes are not
+// independent. A frame is header plus path plus payload, so wire - payload
+// is the route's own overhead, while the payload itself comes in cipher
+// blocks. Drawing the two separately produces frames real traffic never
+// carries - and, when the drawn payload passes wire - 2, frames the event
+// validator refuses outright.
+type sizePair struct {
+	WireBytes    int  `json:"wire_bytes"`
+	PayloadBytes *int `json:"payload_bytes,omitempty"`
+	Count        int  `json:"count"`
+}
 
 // keyStat is one ranked stream key. Every field is derived from the
 // background lines on that key: hashes, hop prefixes, sizes, counts and
@@ -68,7 +88,13 @@ type keyStat struct {
 	WireBytesMedian    int `json:"wire_bytes_median"`
 	PayloadBytesMedian int `json:"payload_bytes_median,omitempty"`
 	PayloadBytesSpread int `json:"payload_bytes_spread"`
-	Events             int `json:"events"`
+	// SizeMix is the key's whole observed (wire, payload) distribution, one
+	// entry per distinct pair, ordered by wire size then payload size. This
+	// is what an injected bot on this key draws its sizes from, so its lines
+	// cannot be told from the key's real ones by size.
+	SizeMix        []sizePair `json:"size_mix"`
+	SizeMixDropped int        `json:"size_mix_dropped,omitempty"`
+	Events         int        `json:"events"`
 	// SizeBucketsDropped and RouteVariantsDropped count values that did not
 	// fit the per-key bounds above; they affect the medians and the route
 	// mode only, never Events.
@@ -103,9 +129,13 @@ type keyAgg struct {
 	events        int
 	first, last   time.Time
 	payload, wire map[int]int
-	routes        map[string]int
-	sizeDropped   int
-	routeDropped  int
+	// pairs counts the observed (wire, payload) pairs; a payload of -1 is a
+	// line whose payload length the export did not know.
+	pairs        map[[2]int]int
+	routes       map[string]int
+	sizeDropped  int
+	pairDropped  int
+	routeDropped int
 }
 
 func runKeys(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -267,7 +297,8 @@ func rankKeys(r io.Reader, payloadType int, exclude []string, top, maxKeys, maxL
 			if len(aggs) >= maxKeys {
 				return res, errors.New("more than -max-keys distinct keys; raise the bound")
 			}
-			a = &keyAgg{k: k, payload: map[int]int{}, wire: map[int]int{}, routes: map[string]int{}}
+			a = &keyAgg{k: k, payload: map[int]int{}, wire: map[int]int{},
+				pairs: map[[2]int]int{}, routes: map[string]int{}}
 			aggs[k] = a
 		}
 		res.Considered++
@@ -279,9 +310,12 @@ func rankKeys(r io.Reader, payloadType int, exclude []string, top, maxKeys, maxL
 			a.last = rec.Time.UTC()
 		}
 		bump(a.wire, rec.WireBytes, maxKeySizeBuckets, &a.sizeDropped)
+		pb := -1
 		if rec.PayloadBytes != nil {
-			bump(a.payload, *rec.PayloadBytes, maxKeySizeBuckets, &a.sizeDropped)
+			pb = *rec.PayloadBytes
+			bump(a.payload, pb, maxKeySizeBuckets, &a.sizeDropped)
 		}
+		bumpPair(a.pairs, [2]int{rec.WireBytes, pb}, maxKeySizePairs, &a.pairDropped)
 		bumpStr(a.routes, rec.FullRoute, maxKeyRouteVariants, &a.routeDropped)
 	}
 	if err := sc.Err(); err != nil {
@@ -317,6 +351,14 @@ func bump(m map[int]int, v, max int, dropped *int) {
 	m[v]++
 }
 
+func bumpPair(m map[[2]int]int, v [2]int, max int, dropped *int) {
+	if _, ok := m[v]; !ok && len(m) >= max {
+		*dropped++
+		return
+	}
+	m[v]++
+}
+
 func bumpStr(m map[string]int, v string, max int, dropped *int) {
 	if _, ok := m[v]; !ok && len(m) >= max {
 		*dropped++
@@ -329,7 +371,8 @@ func (a *keyAgg) stat(rank int) keyStat {
 	s := keyStat{Rank: rank, Key: a.k.String(), PayloadType: int(a.k.PayloadType),
 		Channel: hexChannel(a.k), RouteClass: a.k.RouteClass.String(), RouteKind: a.k.RouteKind.String(),
 		FirstHop: encodeHop(a.k.FirstHop), Events: a.events, First: a.first, Last: a.last,
-		SizeBucketsDropped: a.sizeDropped, RouteVariantsDropped: a.routeDropped}
+		SizeBucketsDropped: a.sizeDropped, RouteVariantsDropped: a.routeDropped,
+		SizeMix: sizeMixOf(a.pairs), SizeMixDropped: a.pairDropped}
 	s.FullRoute = modeString(a.routes)
 	s.WireBytesMedian = int(histPercentile(a.wire, 0.5))
 	if len(a.payload) > 0 {
@@ -347,6 +390,36 @@ func (a *keyAgg) stat(rank int) keyStat {
 		s.PayloadBytesSpread = spread
 	}
 	return s
+}
+
+// sizeMixOf renders a pair histogram in a fixed order: wire size, then
+// payload size, with the unknown payload (-1) first for a given wire size.
+// The order is a pure function of the histogram, so it does not depend on
+// map iteration.
+func sizeMixOf(m map[[2]int]int) []sizePair {
+	out := make([]sizePair, 0, len(m))
+	for v, n := range m {
+		p := sizePair{WireBytes: v[0], Count: n}
+		if v[1] >= 0 {
+			pb := v[1]
+			p.PayloadBytes = &pb
+		}
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].WireBytes != out[j].WireBytes {
+			return out[i].WireBytes < out[j].WireBytes
+		}
+		return payloadOrUnknown(out[i]) < payloadOrUnknown(out[j])
+	})
+	return out
+}
+
+func payloadOrUnknown(p sizePair) int {
+	if p.PayloadBytes == nil {
+		return -1
+	}
+	return *p.PayloadBytes
 }
 
 // encodeHop renders a first hop in the "width:hex" form a replay record and
