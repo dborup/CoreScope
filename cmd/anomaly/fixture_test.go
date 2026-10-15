@@ -128,6 +128,8 @@ type fxObs struct {
 	// raw is the observation's own frame (observations.raw_hex); "" leaves
 	// it NULL as on rows written before #881
 	raw string
+	// emptyRaw stores raw_hex as '' instead of NULL
+	emptyRaw bool
 	// path is observations.path_json; "" leaves it NULL
 	path string
 }
@@ -147,7 +149,7 @@ func (f *fixtureDB) tx(hash, txRaw string, payloadType int, obs ...fxObs) {
 	for _, o := range obs {
 		f.obs++
 		var raw, path interface{}
-		if o.raw != "" {
+		if o.raw != "" || o.emptyRaw {
 			raw = o.raw
 		}
 		if o.path != "" {

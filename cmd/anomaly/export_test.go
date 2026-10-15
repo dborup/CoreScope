@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -84,10 +87,19 @@ func buildExportFixture(t *testing.T, wal bool) *fixtureDB {
 	f.tx(fxHash(108), frameHex(1, 5, 1, []byte{0x01}, g3), 5, fxObs{at: fxAt(7 * time.Minute)})
 	// 109: an undecodable frame.
 	f.tx(fxHash(109), "ZZ", 5, fxObs{at: fxAt(8 * time.Minute), path: `[]`})
+	// 114: a GRP_DATA (0x06): the channel hash is its first payload byte
+	// too (firmware docs/payloads.md).
+	gd := grpPayload(0x0d, 20)
+	f.tx(fxHash(114), frameHex(1, 6, 1, []byte{0x0e}, gd), 6,
+		relay(fxAt(8*time.Minute+30*time.Second), 1, 6, 1, []byte{0x0e}, gd))
 	// 110: an ADVERT with 3-byte hops.
 	adv := make([]byte, 100)
 	f.tx(fxHash(110), frameHex(1, 4, 3, []byte{0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33}, adv), 4,
 		relay(fxAt(9*time.Minute), 1, 4, 3, []byte{0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33}, adv))
+	// 115: observations.raw_hex is '' rather than NULL: like 107, the frame
+	// comes from the transmission and the path from path_json.
+	f.tx(fxHash(115), frameHex(1, 5, 1, []byte{0x01}, g3), 5,
+		fxObs{at: fxAt(9*time.Minute + 30*time.Second), emptyRaw: true, path: `["AA","BB"]`})
 	// 111 / 112: the last second before End is in, End itself is out.
 	f.tx(fxHash(111), frameHex(1, 5, 1, nil, grp), 5, relay(fxAt(2*time.Hour-time.Second), 1, 5, 1, nil, grp))
 	f.tx(fxHash(112), frameHex(1, 5, 1, nil, grp), 5, relay(fxAt(2*time.Hour), 1, 5, 1, nil, grp))
@@ -120,23 +132,28 @@ func TestExportSyntheticFixture(t *testing.T) {
 	f := buildExportFixture(t, false)
 	got, sum := runExportTo(t, fxOptions(f.path))
 
+	// IDs number the transmissions in the order their first row is read
+	// (tx1 is 102 in the lead-in, tx10 the bad frame 109, tx35 is 112 in
+	// the lead-out).
 	var want []anomaly.ReplayRecord
 	p23 := intp(23)
 	want = append(want,
-		rec(fxHash(100), fxAt(time.Minute), 5, "0a", "flood", "nopath", "", "", 25, p23),
-		rec(fxHash(101), fxAt(2*time.Minute), 5, "0a", "flood", "relay", "1:dd", "1:dd", 26, p23),
-		rec(fxHash(104), fxAt(3*time.Minute), 5, "0b", "tflood", "relay", "2:fd12", "2:fd120001", 33, p23),
-		rec(fxHash(105), fxAt(4*time.Minute), 2, "", "direct", "direct", "", "", 23, intp(20)),
-		rec(fxHash(106), fxAt(5*time.Minute), 9, "", "flood", "unknown", "", "", 16, intp(12)),
-		rec(fxHash(113), fxAt(5*time.Minute+30*time.Second), 9, "", "flood", "unknown", "", "", 0, intp(12)),
-		rec(fxHash(107), fxAt(6*time.Minute), 5, "0c", "flood", "relay", "1:aa", "1:aabb", 27, p23),
-		rec(fxHash(108), fxAt(7*time.Minute), 5, "0c", "unknown", "unknown", "", "", 0, p23),
-		rec(fxHash(110), fxAt(9*time.Minute), 4, "", "flood", "relay", "3:aabbcc", "3:aabbcc112233", 108, intp(100)))
+		rec("tx2", fxAt(time.Minute), 5, "0a", "flood", "nopath", "", "", 25, p23),
+		rec("tx3", fxAt(2*time.Minute), 5, "0a", "flood", "relay", "1:dd", "1:dd", 26, p23),
+		rec("tx4", fxAt(3*time.Minute), 5, "0b", "tflood", "relay", "2:fd12", "2:fd120001", 33, p23),
+		rec("tx5", fxAt(4*time.Minute), 2, "", "direct", "direct", "", "", 23, intp(20)),
+		rec("tx6", fxAt(5*time.Minute), 9, "", "flood", "unknown", "", "", 16, intp(12)),
+		rec("tx7", fxAt(5*time.Minute+30*time.Second), 9, "", "flood", "unknown", "", "", 0, intp(12)),
+		rec("tx8", fxAt(6*time.Minute), 5, "0c", "flood", "relay", "1:aa", "1:aabb", 27, p23),
+		rec("tx9", fxAt(7*time.Minute), 5, "0c", "unknown", "unknown", "", "", 0, p23),
+		rec("tx11", fxAt(8*time.Minute+30*time.Second), 6, "0d", "flood", "relay", "1:0e", "1:0e", 26, p23),
+		rec("tx12", fxAt(9*time.Minute), 4, "", "flood", "relay", "3:aabbcc", "3:aabbcc112233", 108, intp(100)),
+		rec("tx13", fxAt(9*time.Minute+30*time.Second), 5, "0c", "flood", "relay", "1:aa", "1:aabb", 27, p23))
 	for i := 0; i < 20; i++ {
 		at := fxAt(10*time.Minute + time.Duration(i)*5*time.Minute)
-		want = append(want, rec(fxHash(i), at, 5, "0a", "flood", "relay", "1:0b", "1:0b01", 27, p23))
+		want = append(want, rec(fmt.Sprintf("tx%d", 14+i), at, 5, "0a", "flood", "relay", "1:0b", "1:0b01", 27, p23))
 	}
-	want = append(want, rec(fxHash(111), fxAt(2*time.Hour-time.Second), 5, "0a", "flood", "nopath", "", "", 25, p23))
+	want = append(want, rec("tx34", fxAt(2*time.Hour-time.Second), 5, "0a", "flood", "nopath", "", "", 25, p23))
 	var wb bytes.Buffer
 	for _, r := range want {
 		b, _ := json.Marshal(r)
@@ -156,16 +173,16 @@ func TestExportSyntheticFixture(t *testing.T) {
 		t.Fatalf("extra output lines:\n%s", strings.Join(gl[len(wl):], "\n"))
 	}
 
-	wantSum := exportSummary{Rows: 75, FrameFromTransmission: 4, BadFrame: 1, PathUnknown: 1,
-		EventsWritten: 30, EventsOutOfRange: 2}
+	wantSum := exportSummary{Rows: 77, FrameFromTransmission: 5, BadFrame: 1, PathUnknown: 1,
+		EventsWritten: 32, EventsOutOfRange: 2}
 	gotSum := sum
 	gotSum.Normalizer = anomaly.NormalizerStats{}
 	if gotSum != wantSum {
 		t.Fatalf("summary %+v, want %+v", gotSum, wantSum)
 	}
 	ns := sum.Normalizer
-	if ns.Accepted != 74 || ns.Late != 0 || ns.Conflicts != 0 || ns.Invalid != 0 || ns.OutOfArrivalOrder != 0 ||
-		ns.EventsFinalized != 32 || ns.CoverageReduced() || sum.CoverageReduced {
+	if ns.Accepted != 76 || ns.Late != 0 || ns.Conflicts != 0 || ns.Invalid != 0 || ns.OutOfArrivalOrder != 0 ||
+		ns.EventsFinalized != 34 || ns.CoverageReduced() || sum.CoverageReduced {
 		t.Fatalf("normalizer stats %+v", ns)
 	}
 }
@@ -193,12 +210,13 @@ func TestExportOutputIsKeyFree(t *testing.T) {
 	}
 }
 
-// The query names only the frame, its path, its time and its content hash.
+// The query names only the frame, its path, its time and the row IDs that
+// join an observation to its transmission; not even the content hash.
 func TestExportQueryReadsOnlyOnWireColumns(t *testing.T) {
 	for _, own := range []bool{true, false} {
 		q := strings.ToLower(exportQuery(own))
 		for _, col := range []string{"decoded_json", "from_pubkey", "channel_hash", "observer", "snr", "rssi",
-			"score", "direction", "resolved_path", "name", "first_seen", "*"} {
+			"score", "direction", "resolved_path", "name", "first_seen", "hash", "*"} {
 			if strings.Contains(q, col) {
 				t.Fatalf("export query reads %q:\n%s", col, q)
 			}
@@ -355,11 +373,11 @@ func TestExportQueryPlanIsBounded(t *testing.T) {
 func TestExportMaxRowsIsAHardCap(t *testing.T) {
 	f := buildExportFixture(t, false)
 	opt := fxOptions(f.path)
-	opt.MaxRows = 75 // exactly the rows in range
+	opt.MaxRows = 77 // exactly the rows in range
 	runExportTo(t, opt)
-	opt.MaxRows = 74
+	opt.MaxRows = 76
 	if _, err := exportRecords(opt, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "max-rows") {
-		t.Fatalf("75 rows allowed past a cap of 74: %v", err)
+		t.Fatalf("77 rows allowed past a cap of 76: %v", err)
 	}
 }
 
@@ -382,7 +400,7 @@ func TestExportCommandWritesTheFileAndASummary(t *testing.T) {
 		t.Fatalf("output file differs from exportRecords (%v)", err)
 	}
 	var sum exportSummary
-	if err := json.Unmarshal(stderr.Bytes(), &sum); err != nil || sum.EventsWritten != 30 {
+	if err := json.Unmarshal(stderr.Bytes(), &sum); err != nil || sum.EventsWritten != 32 {
 		t.Fatalf("summary %q: %v", stderr.String(), err)
 	}
 	if stdout.Len() != 0 {
@@ -399,7 +417,7 @@ func TestExportCommandLeavesNoFileOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "events.jsonl")
 	args := exportArgs(f.path, out)
-	args[len(args)-3] = "74" // -max-rows
+	args[len(args)-3] = "76" // -max-rows
 	var stdout, stderr bytes.Buffer
 	if code := run(args, nil, &stdout, &stderr); code != 1 {
 		t.Fatalf("exit %d, want 1: %s", code, stderr.String())
@@ -431,6 +449,8 @@ func TestExportCommandRequiresExplicitBounds(t *testing.T) {
 		"max-rows too large": {"-max-rows", "100000001"},
 		"out is the db":      {"-out", f.path},
 		"out is the wal":     {"-out", f.path + "-wal"},
+		"out is the shm":     {"-out", f.path + "-shm"},
+		"out is the journal": {"-out", f.path + "-journal"},
 		"positional args":    {"extra"},
 		"bad time":           {"-start", "yesterday"},
 	}
@@ -477,5 +497,214 @@ func TestExportE2EFixture(t *testing.T) {
 		if bytes.Contains(got, []byte(s)) {
 			t.Fatalf("output contains channel name %q", s)
 		}
+	}
+}
+
+// Review F1: an exported id is the export's own number. It is not the
+// content hash, which joins a line to every CoreScope instance that heard
+// the packet (and on a database not rehashed by #215 is raw_hex[:16], for an
+// ADVERT 6 bytes of the advertiser's public key), and no part of a frame.
+func TestExportIDsAreOpaque(t *testing.T) {
+	f := buildExportFixture(t, false)
+	got, _ := runExportTo(t, fxOptions(f.path))
+	assertOpaqueIDs(t, got, f.path)
+
+	src := filepath.Join("..", "..", "test-fixtures", "e2e-fixture.db")
+	if _, err := os.Stat(src); err != nil {
+		t.Skip("e2e fixture not present")
+	}
+	got, _ = runExportTo(t, exportOptions{DB: src, Start: time.Date(2026, 5, 17, 0, 0, 0, 0, time.UTC),
+		End: time.Date(2026, 5, 18, 0, 0, 0, 0, time.UTC), Settle: 30 * time.Second, MaxRows: 100000})
+	assertOpaqueIDs(t, got, src)
+}
+
+// assertOpaqueIDs checks that every line's id is a fresh per-export number
+// and that no id equals a transmission hash or occurs in any stored frame,
+// and that no hash or 6-byte public key prefix occurs anywhere in out.
+func assertOpaqueIDs(t *testing.T, out []byte, dbPath string) {
+	t.Helper()
+	db, err := openReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	strs := func(q string) []string {
+		rows, err := db.Query(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var vs []string
+		for rows.Next() {
+			var v sql.NullString
+			if err := rows.Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			if v.Valid && v.String != "" {
+				vs = append(vs, strings.ToLower(v.String))
+			}
+		}
+		return vs
+	}
+	hashes := strs(`SELECT hash FROM transmissions`)
+	frames := strs(`SELECT raw_hex FROM transmissions`)
+	if own, _ := hasColumn(db, "observations", "raw_hex"); own {
+		frames = append(frames, strs(`SELECT raw_hex FROM observations`)...)
+	}
+	var keys []string
+	if ok, _ := hasColumn(db, "nodes", "public_key"); ok {
+		for _, k := range strs(`SELECT public_key FROM nodes`) {
+			if len(k) >= 12 {
+				keys = append(keys, k[:12])
+			}
+		}
+	}
+	if len(hashes) == 0 || len(frames) == 0 {
+		t.Fatal("no hashes or frames to check against")
+	}
+	lower := bytes.ToLower(out)
+	for _, s := range append(append([]string{}, hashes...), keys...) {
+		if bytes.Contains(lower, []byte(s)) {
+			t.Fatalf("output contains the stored hash or key prefix %q", s)
+		}
+	}
+	idRe := regexp.MustCompile(`^tx[1-9][0-9]*$`)
+	seen := map[string]bool{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		var r anomaly.ReplayRecord
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			t.Fatal(err)
+		}
+		id := strings.ToLower(r.ID)
+		if !idRe.MatchString(r.ID) || seen[id] {
+			t.Fatalf("id %q is not a fresh per-export number", r.ID)
+		}
+		seen[id] = true
+		for _, h := range hashes {
+			if id == h {
+				t.Fatalf("id %q is a transmission hash", r.ID)
+			}
+		}
+		for _, fr := range frames {
+			if strings.Contains(fr, id) {
+				t.Fatalf("id %q occurs in a stored frame", r.ID)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no lines exported")
+	}
+}
+
+// The numbering keeps a transmission's id for every row up to its settle
+// deadline (the export query admits no later row), forgets it after, and
+// holds at most max transmissions at a time.
+func TestTxNumberingIsPerExportAndBounded(t *testing.T) {
+	n := newTxNumbering(10, 3)
+	must := func(tx, ts int64) anomaly.TxID {
+		t.Helper()
+		id, err := n.id(tx, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	if a, b := must(7, 100), must(9, 105); a != "tx1" || b != "tx2" {
+		t.Fatalf("ids %q %q", a, b)
+	}
+	// row id 7 again exactly at its settle deadline: the same transmission
+	if id := must(7, 110); id != "tx1" {
+		t.Fatalf("same transmission at its deadline got %q", id)
+	}
+	if id := must(5, 111); id != "tx3" || n.live() != 2 {
+		t.Fatalf("id %q, %d live; 7 must be forgotten after its deadline", id, n.live())
+	}
+	if id := must(9, 115); id != "tx2" {
+		t.Fatalf("same transmission got %q", id)
+	}
+	must(6, 115)
+	if _, err := n.id(8, 115); err == nil {
+		t.Fatal("a fourth live transmission was accepted with max 3")
+	}
+	// a refused row takes no number, and numbers are never reused
+	if id := must(4, 200); id != "tx5" {
+		t.Fatalf("id %q after eviction", id)
+	}
+}
+
+// Review F5: mode=ro is not free of side effects on a WAL database: on a
+// cleanly closed WAL file SQLite creates -wal and -shm beside it, and a
+// live database's read snapshot is held for the whole export. Immutable
+// reads a static snapshot copy with no locks and no side files, also from
+// a read-only directory, and refuses a copy that has a -wal or -journal
+// file beside it (immutable mode would ignore its contents).
+func TestExportImmutableSnapshotHasNoSideEffects(t *testing.T) {
+	f := buildExportFixture(t, true)
+	f.db.Close() // a clean close checkpoints and removes -wal and -shm
+	side := func() []string {
+		var s []string
+		for _, sfx := range []string{"-wal", "-shm", "-journal"} {
+			if _, err := os.Stat(f.path + sfx); err == nil {
+				s = append(s, sfx)
+			}
+		}
+		return s
+	}
+	if s := side(); len(s) != 0 {
+		t.Fatalf("snapshot has side files %v before the export", s)
+	}
+	want, _ := runExportTo(t, fxOptions(f.path))
+	// the behaviour the README documents for mode=ro on a WAL file
+	if s := side(); len(s) != 2 {
+		t.Fatalf("mode=ro on a closed WAL database left %v; the README says -wal and -shm", s)
+	}
+	for _, sfx := range []string{"-wal", "-shm"} {
+		if err := os.Remove(f.path + sfx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := fileSum(t, f.path)
+	dir := filepath.Dir(f.path)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	opt := fxOptions(f.path)
+	opt.Immutable = true
+	got, _ := runExportTo(t, opt)
+	if !bytes.Equal(got, want) {
+		t.Fatal("immutable export differs from the mode=ro export")
+	}
+	if s := side(); len(s) != 0 {
+		t.Fatalf("immutable export created %v", s)
+	}
+	if fileSum(t, f.path) != before {
+		t.Fatal("immutable export changed the database")
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, sfx := range []string{"-wal", "-journal"} {
+		if err := os.WriteFile(f.path+sfx, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := exportRecords(opt, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), sfx) {
+			t.Fatalf("immutable export beside a %s file: %v", sfx, err)
+		}
+		os.Remove(f.path + sfx)
+	}
+
+	// the command line: -immutable is opt-in and gives the same lines
+	out := filepath.Join(t.TempDir(), "events.jsonl")
+	var stdout, stderr bytes.Buffer
+	if code := run(exportArgs(f.path, out, "-immutable"), nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if b, err := os.ReadFile(out); err != nil || !bytes.Equal(b, want) {
+		t.Fatalf("-immutable output differs (%v)", err)
+	}
+	if s := side(); len(s) != 0 {
+		t.Fatalf("-immutable command created %v", s)
 	}
 }
