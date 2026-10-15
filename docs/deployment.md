@@ -702,6 +702,15 @@ fresh. An already-resolved row is never touched, a row that still does not
 decrypt keeps its placeholder, and a region match that two regions collide on
 abstains and leaves the row unknown-scoped — the same answer live ingest gives.
 
+**What it does not rewrite.** Only those three columns. Live ingest has one
+side effect the pass deliberately does not replay: a freshly ingested,
+decrypted GRP_TXT whose text is a ping trigger also gets a `ping_triggers` row
+(the ping leaderboard). A backfilled row never does, so adding a key does not
+retroactively change ping scores or who "answered first" months ago. The
+message itself is fully readable on the Channels page; only the leaderboard
+ignores backfilled history. Nothing else in ingest writes a side table off the
+decoded payload.
+
 **What it costs.** One bounded pass over `transmissions` in id order. Each
 batch scans at most `idWindow` ids and at most `batchSize` matching rows,
 writes them in one short transaction together with the new watermark, and then
@@ -712,8 +721,16 @@ large database, measure:
 scripts/decode-backfill-estimate.sh /path/to/corescope.db
 ```
 
-That script is read-only (it opens the database as `immutable`), prints counts
-and an estimated cost, and is safe to run next to a live ingestor.
+That script is read-only — it opens the database through an `immutable` URI, so
+SQLite takes no lock and creates no `-wal`/`-shm` file — prints counts and an
+estimated cost, and never prints row contents, channel names, region names or
+key material. Point it at a **snapshot copy** (a backup, or a stopped
+container's volume). On a live WAL database `immutable=1` makes SQLite ignore
+the `-wal` file, so the counts miss everything not yet checkpointed and are
+approximate; a file that changes underneath an immutable reader can also make
+that reader report wrong counts or a spurious `SQLITE_CORRUPT`. The database is
+never modified either way. Its own estimate is a lower bound on the batch count
+and uses the benchmark throughput, not a measurement of your hardware.
 
 **Crash and restart behaviour.** The row rewrites, the watermark and the
 counters commit together, so a crash or a `docker restart` repeats at most the
@@ -726,12 +743,30 @@ older database copy simply means the pass runs again — it is idempotent.
 
 **What the server sees.** The ingestor is the only writer; the server stays
 read-only. Within one poll tick (one second) it drops its channel caches, so
-Channels, channel messages and the region-scope queries — all of which read the
-database — show the rewritten rows without a restart. The server's in-memory
-copies of transmissions it loaded *before* a rewrite keep their load-time
-decoded payload until it next starts; that affects only the packets page's
-channel filter and the Audio Lab, and is the same boundary the `resolved_path`
-backfill has.
+everything that reads the database shows the rewritten rows without a restart:
+`GET /api/channels`, channel messages, the encrypted-channel list and the
+`scope_name` queries behind the analytics channel tabs.
+
+The server's in-memory copy of a transmission it loaded *before* a rewrite
+keeps its load-time `decoded_json` and `scope_name` until the server next
+starts. That is deliberate — analytics read those strings from snapshots taken
+outside the store lock, so rewriting them in place would be a data race, not a
+refresh — and it is the same boundary the `resolved_path` backfill has. Every
+surface served from that copy therefore shows the old value until a restart:
+
+| Surface | Stale field |
+|---|---|
+| Packets list (`/api/packets`) | `decoded_json`, `scope_name` |
+| Packets page channel filter, Audio Lab buckets | decoded payload |
+| Packet detail (`/api/packets/{hash}`) while the row is still in the store | `decoded_json`, `scope_name` |
+| Node hop analytics, "scoped" share | `scope_name` |
+| Repeater liveness, per-scope relay counts | `scope_name` |
+
+The visible consequence: right after a key is added, a message can read
+*decrypted* on the Channels page while its packet-detail view still says
+*no key*. Both agree again after the next server restart, which the normal
+deploy cycle provides. If an operator needs them to agree immediately, restart
+the server once the pass reports `status: "done"` on `/api/healthz`.
 
 **Deploying it.** Nothing has to be migrated: the ingestor creates its two
 small bookkeeping tables the first time it runs a pass. A server started
@@ -743,8 +778,39 @@ starts first.
 armed kinds, watermark/ceiling, rows rewritten, abstentions, undecodable rows),
 `/api/perf/write-sources` counts rewritten rows as `backfill_decode_channel`
 and `backfill_decode_scope`, and the ingestor logs every pass under
-`[decode_backfill]`. Set `decodeBackfill.disabled` to `true` to switch the pass
-off; see `config.example.json` for the other settings.
+`[decode_backfill]`.
+
+**On by default, and how to turn it off.** The pass is enabled unless you
+disable it, and the first ingestor start after the upgrade runs one full pass:
+nothing has been credited yet, so every effective key counts as new. To turn it
+off, add the block below to `config.json` and restart the ingestor (this
+setting is not picked up by SIGHUP):
+
+```json
+{
+  "decodeBackfill": {
+    "disabled": true
+  }
+}
+```
+
+With `disabled: true` the ingestor never starts the watcher, writes nothing and
+creates neither bookkeeping table; `/api/healthz` keeps reporting
+`decode_backfill: {"status": "absent"}`. Turning it back on later loses
+nothing — the pass walks the whole table from the beginning. The same block
+takes `batchSize`, `idWindow`, `pauseMs` and `pollSeconds`; see
+`config.example.json`. Lowering `batchSize` or raising `pauseMs` makes a pass
+slower and gentler. The pause cannot be set to zero.
+
+The default is on because the measured cost is small. One full pass on a
+7.57 GB staging snapshot (536,245 transmissions, max id 1,470,492, 29,857
+channel candidates and 2,003 scope candidates) estimates at **≈28.5 s**: 1.7 s
+of decode and write plus 26.8 s of deliberate pauses across 107 batches. The
+wall clock scales as
+`max(candidates / batchSize, max(id) / idWindow) × pauseMs` plus the decode
+work, so it is the id range and the pause — not the database size — that set
+it. Run `scripts/decode-backfill-estimate.sh` on your own copy before a large
+upgrade if you want the number for your data.
 
 ### Map Tile Providers
 

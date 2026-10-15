@@ -8,6 +8,20 @@
 # ingestor. No row contents, channel names, region names or key material are
 # printed — counts only.
 #
+# RUN IT ON A SNAPSHOT COPY. immutable=1 is what makes this read-only, and it
+# also tells SQLite to ignore the -wal file: against a live database the counts
+# miss every row that has not been checkpointed yet, so they are a lower bound,
+# and a file changing underneath an immutable reader can make that reader
+# report wrong counts or a spurious SQLITE_CORRUPT (the database itself is
+# never damaged). A backup file or a stopped container's volume gives exact
+# numbers. Two further approximations, on any input:
+#   - the batch count is a lower bound (max(candidates/batchSize, id windows));
+#     real batches can be more when candidates cluster inside one id window;
+#   - decode+write uses the BenchmarkDecodeBackfillRun throughput below, warm
+#     cache, not a measurement of this host or of cold disk I/O.
+# It also runs about 8 full-table COUNT scans, so on a multi-GB database the
+# script's own wall clock is a minute or more.
+#
 # Usage:
 #   scripts/decode-backfill-estimate.sh /path/to/corescope.db
 #
@@ -112,4 +126,6 @@ awk -v maxid="$MAXID" -v cand="$CAND" -v rps="$ROWS_PER_SEC" 'BEGIN {
 	printf "  total wall clock:  %.1f s (%.1f min)\n", work + pause, (work + pause) / 60;
 }'
 echo
+echo "Counts are exact on a snapshot copy; on a live WAL database they omit"
+echo "un-checkpointed rows and the batch count is a lower bound (see the header)."
 echo "This script wrote nothing. Verify with: ls -l \"$ABS\"-wal \"$ABS\"-shm 2>/dev/null"
