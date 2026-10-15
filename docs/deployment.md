@@ -151,6 +151,13 @@ group- or other-writable (for example `0660`), not merely group- or
 other-readable, so a `tar`/`cp` restore under a normal umask (commonly `0644`)
 loads without extra steps.
 
+The sibling `.lock` file is subject to the same check: it too must not be
+group- or other-writable.
+
+On load, journal records dated more than two minutes after the server's current
+time (for example after a backward clock step) are skipped and dropped from the
+file, so sampling is never blocked waiting for wall time to catch up.
+
 ### Running the Go services without root (opt-in)
 
 By default every program in the container runs as root, exactly as in earlier
