@@ -63,7 +63,6 @@ type scoreReport struct {
 
 // episode is one EventID's activation and end.
 type episode struct {
-	id         string
 	channel    string
 	activation time.Time
 	end        time.Time
@@ -187,7 +186,7 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
-	var want []string
+	want := []string{}
 	for _, b := range strings.Split(*bots, ",") {
 		if b = strings.TrimSpace(b); b != "" {
 			want = append(want, b)
@@ -269,7 +268,7 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath string, bots []st
 	days := end.Sub(start).Hours() / 24
 	res := scoreResult{Experimental: true, Rule: rule, Start: start.Format(time.RFC3339),
 		End: end.Format(time.RFC3339), Days: days, Labels: labelsPath, Episodes: len(eps),
-		EpisodesWithoutPeriod: noPeriod, Incidents: len(lab.Incidents), Bots: bots,
+		EpisodesWithoutPeriod: noPeriod, Incidents: len(lab.Incidents), Bots: nonNil(bots),
 		PerIncident: []incidentScore{}, FalsePositivesByChannel: []channelCount{}}
 	selected := func(bot string) bool {
 		if len(bots) == 0 {
@@ -430,7 +429,7 @@ func episodes(rep scoreReport, rule string, start, end time.Time) ([]episode, in
 		if !a.actSet || a.act.Before(start) || !a.act.Before(end) {
 			continue
 		}
-		e := episode{id: id, channel: a.channel, activation: a.act, end: a.endT,
+		e := episode{channel: a.channel, activation: a.act, end: a.endT,
 			hasPeriod: a.hasPeriod, period: a.period}
 		if !a.endSet {
 			e.end = rep.End // never ended: the report's end, as #457 §1 says
@@ -476,6 +475,14 @@ func periodFits(got, p time.Duration, l labellingSpec) bool {
 		}
 	}
 	return false
+}
+
+// nonNil keeps an empty filter out of the JSON as [] rather than null.
+func nonNil(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 func medianFloat(v []float64) float64 {
