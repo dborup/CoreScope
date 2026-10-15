@@ -134,8 +134,9 @@ func New(cfg Config) (*Detector, error) {
 	c.Rate = append([]RateRule(nil), cfg.Rate...)
 	c.NewStream = append([]NewStreamRule(nil), cfg.NewStream...)
 	c.Periodic = append([]PeriodicRule(nil), cfg.Periodic...)
-	// PayloadTypes are the only slices inside the rules: copy them too, so the
-	// caller's config and the Detector never share a backing array.
+	// PayloadTypes, and a periodic rule's ExcludeChannels, are the only
+	// slices inside the rules: copy them too, so the caller's config and the
+	// Detector never share a backing array.
 	for i := range c.Rate {
 		c.Rate[i].PayloadTypes = slices.Clone(c.Rate[i].PayloadTypes)
 	}
@@ -144,6 +145,7 @@ func New(cfg Config) (*Detector, error) {
 	}
 	for i := range c.Periodic {
 		c.Periodic[i].PayloadTypes = slices.Clone(c.Periodic[i].PayloadTypes)
+		c.Periodic[i].ExcludeChannels = slices.Clone(c.Periodic[i].ExcludeChannels)
 	}
 	d := &Detector{cfg: c, dedup: make(map[TxID]int64)}
 	for i := range c.Rate {
@@ -610,7 +612,7 @@ func (d *Detector) handle(e *Event) {
 			applies = applies || appliesTo(d.cfg.NewStream[i].PayloadTypes, e.PayloadType)
 		}
 		for _, i := range r.periodic {
-			applies = applies || appliesTo(d.cfg.Periodic[i].PayloadTypes, e.PayloadType)
+			applies = applies || periodicApplies(&d.cfg.Periodic[i], *e)
 		}
 		if !applies {
 			continue
@@ -655,7 +657,7 @@ func (d *Detector) handle(e *Event) {
 		}
 		for pi, i := range r.periodic {
 			rule := &d.cfg.Periodic[i]
-			if appliesTo(rule.PayloadTypes, e.PayloadType) {
+			if periodicApplies(rule, *e) {
 				ps := k.per[pi]
 				before := ps.evaluated
 				ep := &k.eps[slot]
@@ -673,6 +675,15 @@ func (d *Detector) handle(e *Event) {
 			slot++
 		}
 	}
+}
+
+// periodicApplies reports whether a periodic rule sees this event: its
+// payload type must match, and its channel hash must not be one the rule
+// excludes (PeriodicRule.ExcludeChannels). An excluded event never reaches
+// the rule, so the rule forms no pulse, chain or episode on that channel and
+// an excluded channel alone never claims key state.
+func periodicApplies(rule *PeriodicRule, e Event) bool {
+	return appliesTo(rule.PayloadTypes, e.PayloadType) && !rule.excludes(e.Channel)
 }
 
 // track follows the pulse train of an active periodic episode (track.go).

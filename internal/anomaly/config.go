@@ -155,6 +155,29 @@ type PeriodicRule struct {
 	// recent (local) pulse rate, over the period search and every pulse
 	// evaluated on the key.
 	MaxChance float64
+	// ExcludeChannels lists channel hashes this rule ignores: an event whose
+	// channel hash is in the list is not offered to this rule at all, so the
+	// rule never forms a pulse, a chain or an episode on it. It is opt-in and
+	// has no default: an empty list excludes nothing.
+	//
+	// It exists because some channels carry expected automation, where a
+	// regular pulse train is normal rather than an incident (#474: a
+	// wardriving app posts positions every 75-123 s while someone drives).
+	// The library never learns which channel that is; the caller names the
+	// hashes.
+	//
+	// An entry must be a valid, canonical, non-zero ChannelHash, and matching
+	// is on the whole value, length included: the 1-byte hash 0x81 and the
+	// 2-byte hash 0x81ab are different entries, as everywhere else in this
+	// package, and the zero "no channel" value is not a valid entry.
+	//
+	// A channel hash is not a channel. MeshCore's hash is one byte, so one
+	// entry excludes every channel whose name hashes to that byte: excluding
+	// the hash of #wardriving also excludes the 1/256 of all other channel
+	// names that collide with it, and any traffic of theirs that this rule
+	// would otherwise have reported. That is a deliberate, stated cost of
+	// keying on an opaque 1-byte hash, not something the list can avoid.
+	ExcludeChannels []ChannelHash
 	// EndAfterMissedPulses opts into train tracking (see track.go): while
 	// the episode is active it ends when this many consecutive expected
 	// pulses are missing, instead of State.EndAfterQuiet after the last
@@ -171,6 +194,10 @@ const (
 	maxMissingLimit = 8
 	maxRuleNameLen  = 64
 	maxKeysLimit    = 10_000_000
+	// maxExcludedChannels bounds PeriodicRule.ExcludeChannels. 256 is the
+	// whole 1-byte hash space MeshCore uses today, so the bound can never
+	// stop a caller from naming every channel hash it sees.
+	maxExcludedChannels = 256
 )
 
 var errNoRules = errors.New("anomaly: config enables no rule")
@@ -348,6 +375,9 @@ func (c *Config) Validate() error {
 		case r.EndAfterMissedPulses < 0 || r.EndAfterMissedPulses > maxMissedPulses:
 			return fmt.Errorf("anomaly: rule %s: EndAfterMissedPulses must be in 0..%d", r.Name, maxMissedPulses)
 		}
+		if err := validExcludeChannels(r.ExcludeChannels, r.Name); err != nil {
+			return err
+		}
 		// A tolerance at or above half the period would let one gap match two
 		// multiples; refuse it.
 		if tolFor(r, r.MinPeriod) >= r.MinPeriod/2 {
@@ -369,6 +399,45 @@ func (c *Config) Validate() error {
 		return errors.New("anomaly: Limits.DedupHorizon must cover the longest rate window plus ReorderDelay")
 	}
 	return nil
+}
+
+// validExcludeChannels checks a rule's exclusion list: every entry is a
+// canonical, non-zero channel hash, no entry repeats, and the list stays
+// bounded. An empty list is valid and excludes nothing.
+func validExcludeChannels(cs []ChannelHash, name string) error {
+	if len(cs) > maxExcludedChannels {
+		return fmt.Errorf("anomaly: rule %s: ExcludeChannels must hold at most %d entries", name, maxExcludedChannels)
+	}
+	for i, c := range cs {
+		if c.IsZero() {
+			return fmt.Errorf("anomaly: rule %s: ExcludeChannels must not hold the zero \"no channel\" value", name)
+		}
+		if err := c.canonical(); err != nil {
+			return fmt.Errorf("anomaly: rule %s: ExcludeChannels: %w", name, err)
+		}
+		for _, o := range cs[:i] {
+			if o == c {
+				return fmt.Errorf("anomaly: rule %s: ExcludeChannels lists the same channel hash twice", name)
+			}
+		}
+	}
+	return nil
+}
+
+// excludes reports whether this rule ignores events on channel hash c.
+// Matching is on the whole value (length and bytes), so a 1-byte hash is
+// never read as the prefix of a wider one, and the zero "no channel" value
+// never matches (validExcludeChannels rejects it as an entry).
+func (r *PeriodicRule) excludes(c ChannelHash) bool {
+	if c.IsZero() {
+		return false
+	}
+	for _, x := range r.ExcludeChannels {
+		if x == c {
+			return true
+		}
+	}
+	return false
 }
 
 func tolFor(r PeriodicRule, period time.Duration) time.Duration {

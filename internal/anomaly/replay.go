@@ -373,8 +373,12 @@ type ReplayConfig struct {
 		MaxChance         float64       `json:"max_chance"`
 		// EndAfterMissedPulses is optional: omitted means 0, tracking off
 		// (see PeriodicRule.EndAfterMissedPulses).
-		EndAfterMissedPulses int       `json:"end_after_missed_pulses"`
-		State                stateJSON `json:"state"`
+		EndAfterMissedPulses int `json:"end_after_missed_pulses"`
+		// ExcludeChannels is optional: channel hashes this rule ignores, as
+		// plain lower-case hex of 1 to MaxChannelHashLen bytes ("81").
+		// Omitted means none (see PeriodicRule.ExcludeChannels).
+		ExcludeChannels []string  `json:"exclude_channels"`
+		State           stateJSON `json:"state"`
 	} `json:"periodic"`
 }
 
@@ -440,11 +444,41 @@ func ParseReplayConfig(b []byte) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+		ex, err := parseExcludeChannels(r.ExcludeChannels)
+		if err != nil {
+			return Config{}, err
+		}
 		cfg.Periodic = append(cfg.Periodic, PeriodicRule{Name: r.Name, Scope: s, PayloadTypes: r.PayloadTypes,
-			MinPeriod: time.Duration(r.MinPeriod), MaxPeriod: time.Duration(r.MaxPeriod), BurstGap: time.Duration(r.BurstGap),
+			ExcludeChannels: ex,
+			MinPeriod:       time.Duration(r.MinPeriod), MaxPeriod: time.Duration(r.MaxPeriod), BurstGap: time.Duration(r.BurstGap),
 			JitterAbs: time.Duration(r.JitterAbs), JitterRel: r.JitterRel, MaxMissing: r.MaxMissing, MinPulses: r.MinPulses,
 			HistoryLen: r.HistoryLen, MinCoverage: r.MinCoverage, MaxJitterFraction: r.MaxJitterFraction,
 			MaxChance: r.MaxChance, EndAfterMissedPulses: r.EndAfterMissedPulses, State: r.State.params()})
 	}
 	return cfg, cfg.Validate()
+}
+
+// parseExcludeChannels decodes the JSON form of
+// PeriodicRule.ExcludeChannels: plain lower-case hex, one entry per channel
+// hash. An empty list gives a nil slice, which excludes nothing.
+func parseExcludeChannels(ss []string) ([]ChannelHash, error) {
+	if len(ss) == 0 {
+		return nil, nil
+	}
+	out := make([]ChannelHash, 0, len(ss))
+	for _, s := range ss {
+		if s == "" || strings.ToLower(s) != s {
+			return nil, errors.New("anomaly: exclude_channels: want lower-case hex")
+		}
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			return nil, errors.New("anomaly: exclude_channels: bad hex")
+		}
+		c, err := NewChannelHash(b)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }

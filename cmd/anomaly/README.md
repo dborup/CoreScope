@@ -1,8 +1,11 @@
 # corescope-anomaly (experimental, offline)
 
-Offline tool for the `internal/anomaly` study (#457). It is not part of the
-server or the ingestor, is not built into any image and has no defaults:
+Offline tool for the `internal/anomaly` study (#457, #474). It is not part of
+the server or the ingestor, is not built into any image and has no defaults:
 every bound is an explicit flag.
+
+Only `export` reads a database, read-only. Nothing here ever writes to a
+CoreScope database: `inject` and `score` read and write plain files.
 
 ```sh
 cd cmd/anomaly && go build -o corescope-anomaly .
@@ -110,5 +113,164 @@ corescope-anomaly replay -config config.json -input events.jsonl \
 ```
 
 The config is the replay JSON config (`anomaly.ParseReplayConfig`). Periodic
-rules accept the optional `end_after_missed_pulses` (train tracking, #447).
-Leaving it out means 0, which turns tracking off.
+rules accept two optional fields:
+
+- `end_after_missed_pulses` — train tracking (#447). Leaving it out means 0,
+  which turns tracking off.
+- `exclude_channels` — channel hashes the rule ignores, as plain lower-case
+  hex (`["81"]`). Leaving it out excludes nothing. See
+  [Excluded channels](#excluded-channels).
+
+## Excluded channels
+
+The periodic rule's target is an abusive channel bot (#474). Automation that
+is *expected* on its channel is not a target: a wardriving app posts a
+position every 75-123 s while someone drives, and the #457 round-4 labels
+show that is what the rule was measuring.
+
+`exclude_channels` names the hashes whose automation is expected. An event on
+such a channel never reaches that rule, so it forms no pulse, no chain and no
+episode, and the channel claims no key state.
+
+Two properties worth stating plainly:
+
+- **A channel hash is not a channel.** MeshCore's hash is one byte, so
+  excluding the hash of `#wardriving` also excludes every other channel name
+  that hashes to the same byte (about 1/256 of all names), including any spam
+  on them. That is the price of keying on an opaque 1-byte hash.
+- **The match is on the whole hash**, length included: the 1-byte hash `81`
+  and the 2-byte hash `81ab` are different entries, and a 1-byte entry is
+  never read as the prefix of a wider hash.
+
+There are no default exclusions anywhere: an unconfigured rule behaves
+exactly as it did before #474, and the replay golden file is unchanged.
+
+## inject
+
+Overlays synthetic channel-bot trains on exported background lines, so recall
+can be measured when real spam is rare. It writes two new files and nothing
+else.
+
+```sh
+corescope-anomaly inject -spec spec.json -input events.jsonl \
+  -out events-injected.jsonl -labels labels.json \
+  -max-injected 100000 -max-line-bytes 65536
+```
+
+- **Clearly synthetic.** Every injected line's `id` is
+  `inj-<bot>-<pulse>-<part>`; an export numbers its lines `tx1`, `tx2`, …, so
+  no real line can carry that marker. A background line that already starts
+  with `inj-` is refused, so the marker stays unambiguous.
+- **Never written back.** The tool takes no `-db` flag and opens no database.
+  Injected events exist only in the output file; they must never be imported
+  into any CoreScope database.
+- **File-only and deterministic.** Same spec, same seed, same background →
+  byte-identical output and labels. The generator is splitmix64 inside this
+  tool, not `math/rand`, and each bot's stream is seeded from the spec seed
+  and the bot's name, so adding, removing or reordering bots never changes
+  another bot's events.
+- **Background untouched.** Background lines are copied through byte for
+  byte, in order; injected lines are merged in by data time, so the output is
+  a valid replay input.
+- `-out` and `-labels` must not exist, and neither appears unless the whole
+  run succeeds. `-max-injected` is a hard bound.
+- The summary (counts and times only) is printed as JSON on stderr.
+
+### Spec
+
+Every field is required; there are no defaults. Unknown fields are rejected.
+The example is the shape of the September bot documented in #130 (5 min,
+~3 s jitter, ~30 % multi-part pulses with later parts up to 55 s behind, ~5 %
+single missed pulses, one 35-minute hole, one stable first hop).
+
+```json
+{
+  "seed": 20261015,
+  "final_after": "30s",
+  "labelling": {"pulse_merge_gap": "60s", "min_period": "1m", "max_period": "1h",
+                "min_pulses": 8, "max_harmonic": 3,
+                "tolerance_abs": "30s", "tolerance_rel": 0.1},
+  "bots": [{
+    "name": "sept-shape",
+    "channel": "7f",
+    "payload_type": 5,
+    "route_class": "flood",
+    "route_kind": "relay",
+    "first_hop": "1:fd",
+    "full_route": "1:fd00",
+    "wire_bytes": 60,
+    "payload_bytes": 35,
+    "start": "2026-10-16T00:00:00Z",
+    "stop": "2026-10-19T13:12:00Z",
+    "period": "5m",
+    "jitter_sd": "3s",
+    "jitter_max": "10s",
+    "missed_fraction": 0.05,
+    "multipart_fraction": 0.3,
+    "multipart_max_extra": 2,
+    "multipart_max_delay": "55s",
+    "holes": [{"start": "2026-10-17T04:00:00Z", "duration": "35m"}]
+  }]
+}
+```
+
+- `final_after` is added to each event time to give its `final_at`; set it to
+  the export's `-settle`, so injected lines are final like the background's.
+- `jitter_sd` is the standard deviation of the offset from the nominal grid
+  time, clamped to `±jitter_max`. The offset is not cumulative, so the train
+  does not drift.
+- `missed_fraction` drops pulses other than the first; `multipart_fraction`
+  gives a pulse 1..`multipart_max_extra` later parts within
+  `multipart_max_delay`. A hole drops every pulse inside it.
+- `channel`, `first_hop`, `full_route`, `payload_type` and the sizes are the
+  wire fields of a replay line: an injected line carries nothing a real line
+  does not.
+
+### Labels
+
+`-labels` holds the ground truth of the run, computed from the emitted pulses
+with the `labelling` recipe, which is the #457 §4 periodic recipe:
+
+1. events closer than `pulse_merge_gap` are one pulse, timed at its first
+   event;
+2. P is the median pulse gap inside `[min_period, max_period]`;
+3. an incident is a maximal run of at least `min_pulses` pulses whose every
+   gap is within `max(tolerance_abs, tolerance_rel * P)` of k·P for some
+   k in 1..`max_harmonic`.
+
+So a bot with a long hole is two incidents, and a bot with fewer than
+`min_pulses` pulses is none — the ground truth is what the recipe says, not
+"one bot, one incident". The file holds channel hashes, times, periods and
+counts: no ids, routes, hops, observers, names or text.
+
+## score
+
+Measures a replay report against injected labels, or against no labels at
+all.
+
+```sh
+corescope-anomaly score -report report.json -labels labels.json \
+  -rule p474_periodic -start 2026-10-16T00:00:00Z -end 2026-10-23T00:00:00Z \
+  [-out metrics.json]
+```
+
+The matching is the #457 §5 periodic rule:
+
+- An **episode** is one `EventID`. Its activation is its first transition to
+  `active`; its end is its last transition to `ended`, or the report's end if
+  it never ended. Only episodes activated inside `[-start, -end)` are scored.
+- An episode is a **true positive** when the channel hashes are equal,
+  `[activation, end]` overlaps `[incident start, stop + 4P]`, and the
+  episode's period is within the labelling tolerance of k·P for some
+  k in 1..`max_harmonic`. An episode whose activation carries no periodic
+  evidence can never be a true positive.
+- Every other episode is a **false positive**. Without `-labels` every
+  episode is one, which is the false-alarm arm: run it on background-only
+  traffic to get false alarms per day.
+
+The metrics are episodes, true and false positives, false alarms per day,
+recall, median time to detect (also in units of P), median stop latency,
+median episodes per detected incident, the per-incident detail and the false
+positives per channel hash. Times to detect and stop latencies are properties
+of the rule and the bot's shape, not of the scorer: a noisy train is found
+much later than a clean one.
