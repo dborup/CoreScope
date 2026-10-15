@@ -36,13 +36,18 @@ const (
 	rpComp    = "99aa000000000009" // companion: never a path hop candidate
 )
 
+// rpRefTime is the one reference time every seed helper derives its
+// timestamps from. Reading the clock per seed let two calls straddle a second
+// boundary and split the firstSeen of otherwise identical rows (#483).
+var rpRefTime = time.Now().UTC().Truncate(time.Second)
+
 // seedRoutePatternsDB builds repeaters (and one companion) plus one
 // transmission per tested path. ambWinner picks which of the two nodes
 // sharing the "11" prefix the resolver prefers (higher advert count).
 func seedRoutePatternsDB(t testing.TB, ambWinner string) *DB {
 	t.Helper()
 	db := setupTestDB(t)
-	now := time.Now().UTC()
+	now := rpRefTime
 	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
 	epoch := now.Add(-1 * time.Hour).Unix()
 	mustExec := func(q string, args ...interface{}) {
@@ -265,7 +270,7 @@ func TestRoutePatterns410_ObserverAlias(t *testing.T) {
 	cfg := &Config{Port: 3000}
 	srv, router := setupRoutePatternsServer(t, "visible", cfg)
 	if _, err := srv.db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count) VALUES (?, 'Hidden-Alias', 'SJC', ?, '2026-01-01T00:00:00Z', 1)`,
-		rpEve, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		rpEve, rpRefTime.Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
 	if base := rpList(t, router); !base["Alpha → Eve"] {
@@ -687,7 +692,7 @@ func TestRoutePatterns410_DetailLookupScope(t *testing.T) {
 // at a production-like node count.
 func BenchmarkRoutePatterns410_Detail2000Nodes(b *testing.B) {
 	db := seedRoutePatternsDB(b, "visible")
-	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	recent := rpRefTime.Add(-time.Hour).Format(time.RFC3339)
 	tx, err := db.conn.Begin()
 	if err != nil {
 		b.Fatal(err)
@@ -719,7 +724,7 @@ func BenchmarkRoutePatterns410_Detail2000Nodes(b *testing.B) {
 // rowid obs, on top of seedRoutePatternsDB (before the store loads).
 func rpAddTraffic(t testing.TB, db *DB, obs int, paths ...string) {
 	t.Helper()
-	recent := time.Now().UTC().Add(-time.Hour)
+	recent := rpRefTime.Add(-time.Hour)
 	for _, p := range paths {
 		res, err := db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json) VALUES ('AABB', ?, ?, 1, 5, '{"type":"CHAN"}')`,
 			fmt.Sprintf("rp410-extra-%d-%s", obs, p), recent.Format(time.RFC3339))
@@ -738,7 +743,7 @@ func rpAddTraffic(t testing.TB, db *DB, obs int, paths ...string) {
 func rpInsertObserver(t testing.TB, db *DB, id, name string) int {
 	t.Helper()
 	res, err := db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count) VALUES (?, ?, 'SJC', ?, '2026-01-01T00:00:00Z', 1)`,
-		id, name, time.Now().UTC().Format(time.RFC3339))
+		id, name, rpRefTime.Format(time.RFC3339))
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -959,5 +964,22 @@ func TestRoutePatterns410_DetailLookupScopeCandidates(t *testing.T) {
 		if !got[pk] {
 			t.Errorf("lookup keys %v lack %q", got, pk)
 		}
+	}
+}
+
+// Every seed helper takes its timestamps from one reference time, so a clock
+// that ticks over a second boundary between two seed calls cannot split the
+// firstSeen of the hidden and the unknown rows (#483). The test waits for the
+// next second boundary between the base seed and the added traffic.
+func TestRoutePatterns410_SeedsShareOneClock(t *testing.T) {
+	db := seedRoutePatternsDB(t, "visible")
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 20*time.Millisecond)))
+	rpAddTraffic(t, db, 1, `["aa","f0"]`)
+	var distinct int
+	if err := db.conn.QueryRow(`SELECT COUNT(DISTINCT first_seen) FROM transmissions`).Scan(&distinct); err != nil {
+		t.Fatal(err)
+	}
+	if distinct != 1 {
+		t.Errorf("seeded transmissions carry %d distinct first_seen values, want 1", distinct)
 	}
 }
