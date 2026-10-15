@@ -316,6 +316,16 @@ func (s *Store) decodeBackfillArmedKinds(live map[string][]string) ([]string, er
 	return armed, nil
 }
 
+// newIngestorHotKeys builds the live key sets with the decode backfill's
+// removal hook wired, so a key leaving an effective set is forgotten on the
+// event itself, whether or not the pass is enabled. main and the tests build
+// their key sets here, so the wiring cannot be dropped without a test failing.
+func newIngestorHotKeys(s *Store, channelKeys map[string]string, regionKeys map[string][]byte) *hotKeys {
+	hk := newHotKeys(channelKeys, regionKeys)
+	hk.onRemoved(s.forgetDecodeBackfillKeys)
+	return hk
+}
+
 // forgetDecodeBackfillKeys is the removal hook main wires to hotKeys.onRemoved:
 // it drops the record of every key that just left the effective set (or whose
 // value was replaced), so re-adding it later arms a fresh pass. Without this,
@@ -519,14 +529,25 @@ func (s *Store) startDecodeBackfillRun(armed []string, channelKeys map[string]st
 				run.scope = true
 			}
 		}
-		var ceiling int64
-		if err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM transmissions`).Scan(&ceiling); err != nil {
-			return nil, fmt.Errorf("read ceiling: %w", err)
-		}
-		run.ceiling = ceiling
 		now := time.Now().UTC().Format(time.RFC3339)
 		kinds := run.kinds()
+		if decodeBackfillPreSnapshotHook != nil {
+			decodeBackfillPreSnapshotHook()
+		}
 		if err := s.WriterTx(decodeBackfillComponent, func(tx *sql.Tx) error {
+			// The ceiling is read under the writer lock, in the transaction
+			// that records the snapshot (#467). A removal hook that ran before
+			// this point has already deleted its row, and any row it let
+			// through is at or below the ceiling, so the pass resolves it. A
+			// removal after it finds the "running" rows and deletes them.
+			// Read earlier, a row ingested between a revoke and a re-approve
+			// that both land before the snapshot would sit above the ceiling
+			// of a pass that is nevertheless credited with the key.
+			var ceiling int64
+			if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM transmissions`).Scan(&ceiling); err != nil {
+				return fmt.Errorf("read ceiling: %w", err)
+			}
+			run.ceiling = ceiling
 			if _, err := tx.Exec(`INSERT INTO decode_backfill_state
 				(id, kinds, watermark, ceiling, status, revision, scanned, channel_updated, scope_updated, ambiguous, decode_errors, started_at, updated_at)
 				VALUES (1, ?, 0, ?, 'running', COALESCE((SELECT revision FROM decode_backfill_state WHERE id = 1), 0), 0, 0, 0, 0, 0, ?, ?)
@@ -945,6 +966,12 @@ var decodeBackfillBatchHook func(decodeBackfillBatchResult)
 // rewrite. The per-UPDATE guards close that window; this seam is how a test
 // opens it.
 var decodeBackfillPreWriteHook func()
+
+// decodeBackfillPreSnapshotHook is a test seam, nil in production. It runs in
+// startDecodeBackfillRun after the key set was read and before the transaction
+// that records the run, which is the window a revoke and a re-approve can hide
+// in (#467).
+var decodeBackfillPreSnapshotHook func()
 
 // RunDecodeBackfill runs one pass for the armed kinds (or resumes an
 // unfinished one) and returns what it did. A nil-run (nothing armed and

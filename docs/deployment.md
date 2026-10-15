@@ -759,7 +759,9 @@ is a new key and starts a pass of its own. Only a SHA-256 digest of name and
 value is stored, never the name or the key itself, and the log reports kinds
 and counts only. Removing or revoking a key triggers no pass, but the ingestor
 forgets it at that moment, so adding it back later re-runs the pass over the
-whole table — however quickly it comes back, and also across two SIGHUPs. A
+whole table — however quickly it comes back (the pass records its ceiling
+in the same transaction as its key snapshot, so a re-approval just before a
+pass starts is covered too), and also across two SIGHUPs. A
 revocation also stops a pass that is already running from using that key
 (below).
 
@@ -816,7 +818,9 @@ effective key set before every batch, and each batch checks it once more inside
 its write transaction, redoing the batch without the key if it changed after
 the batch decoded. So a revocation, or a new value under the same name, takes
 effect within one batch: the old key decrypts and matches nothing further,
-nothing it decrypted is written after the revocation, and the pass is not
+nothing it decrypted is written after the batch's in-transaction check (a
+revocation published while that one write transaction is open lets the batch
+finish, and the pass is still not credited with the key), and the pass is not
 credited with it. Re-approving it later re-runs a full pass over the table; a
 new value starts its own pass. Rows the pass had
 already rewritten keep their decoded payload — the same thing an ordinary
