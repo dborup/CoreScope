@@ -23,6 +23,13 @@ import (
 // and a detail's totalMatches/signal/hourDistribution are computed over all
 // traffic, hidden or not. Rows that become identical once masked are merged,
 // so a list can hold fewer rows than its limit.
+//
+// Masking runs after the store has merged raw keys by display name, so a
+// hidden node seen under several raw keys of one hop pair (bb, bb22) is one
+// row in the store and one masked row (smallest raw key, counts summed),
+// while an unknown hop with the same traffic (f0, f0f1) has no name to merge
+// by and stays one row per raw key. Documented in docs/api-spec.md; pinned by
+// TestRoutePatterns464_HiddenNodeSeveralRawKeysVsUnknownHop.
 
 // subpathVisibility is the policy the detail view is built under. A nil
 // *subpathVisibility hides nothing.

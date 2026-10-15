@@ -2389,6 +2389,23 @@ Subpath frequency analysis.
 }
 ```
 
+#### Hidden identities
+
+Hidden identities (node blacklist, observer blacklist, hidden-name prefixes)
+are shown as their raw hop, exactly like a hop that matches no node. Rows are
+masked **after** the store has merged raw keys that resolve to the same display
+name, so the two cases differ:
+
+- A hidden node seen under several raw keys of one hop pair (for example `bb`
+  and `bb22`) is already one row in the store; it stays one masked row, with
+  the counts summed and the smallest raw key as `rawHops`.
+- An unknown hop with the same traffic (`f0` and `f0f1`) has no name to merge
+  by, so it is one row per raw key.
+
+Rows that show the same path once masked are merged (counts summed, `pct`
+recomputed, smallest raw key), so a list can hold fewer rows than `limit`.
+`count`, `pct` and `totalPaths` always cover all traffic, hidden or not.
+
 ---
 
 ## GET /api/analytics/subpath-detail
