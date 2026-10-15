@@ -22,14 +22,16 @@ import (
 
 // Export: CoreScope SQLite -> anomaly.ReplayRecord JSON Lines.
 //
-// Read-only: the database is opened with SQLite's mode=ro and only SELECT
-// statements run. Key-free: the query reads the frame (raw_hex), the
-// observation's path (path_json), its time and the content hash; never
-// decoded_json, channel names, public keys, observer columns, SNR/RSSI or
-// resolved paths. Bounded: one index range scan on observations.timestamp
+// Read-only: the database is opened with SQLite's mode=ro (or, for a static
+// snapshot copy, immutable=1) and only SELECT statements run. Key-free: the
+// query reads the frame (raw_hex), the observation's path (path_json), its
+// time and the row IDs that join it to its transmission; never the content
+// hash, decoded_json, channel names, public keys, observer columns,
+// SNR/RSSI or resolved paths. A line's id is the export's own number (see
+// txNumbering). Bounded: one index range scan on observations.timestamp
 // over [start - settle, end + settle) with a hard -max-rows cap; per row a
-// primary-key lookup and one index search; memory is bounded by the
-// Normalizer's caps below.
+// primary-key lookup and one index search; memory is bounded by the caps
+// below (Normalizer and ID numbering).
 //
 // Events are built by anomaly.Normalizer (its reference observation and
 // finality policy): an observation is evidence when its time is at most
@@ -46,7 +48,8 @@ const (
 	// Normalizer capacity for the export (not detection thresholds).
 	// Pending transmissions are those first heard within the last settle
 	// window; a forced finalization or fan-out drop is counted in the
-	// summary and marks the events truncated.
+	// summary and marks the events truncated. exportMaxPending also caps
+	// the transmissions the ID numbering holds; exceeding it fails.
 	exportMaxPending  = 1 << 17
 	exportMaxObsPerTx = 1024
 )
@@ -56,6 +59,8 @@ type exportOptions struct {
 	Start, End time.Time
 	Settle     time.Duration
 	MaxRows    int
+	// Immutable opens DB as a static snapshot copy (see openImmutable).
+	Immutable bool
 }
 
 func (o exportOptions) validate() error {
@@ -100,12 +105,33 @@ type exportSummary struct {
 }
 
 // openReadOnly opens path with SQLite's mode=ro: the connection cannot
-// write, and a missing file is an error instead of a new database.
+// write, and a missing file is an error instead of a new database. On a WAL
+// database SQLite still creates the -wal and -shm files if they are missing
+// (and fails if the directory is read-only), and the export's single query
+// holds one read snapshot for its whole run, so a live writer cannot
+// checkpoint past it meanwhile. For a static copy use openImmutable.
 func openReadOnly(path string) (*sql.DB, error) {
+	return openSQLite(path, "mode=ro&_pragma=busy_timeout(5000)")
+}
+
+// openImmutable opens a static snapshot copy with mode=ro and immutable=1:
+// SQLite takes no locks and creates no side files. It then assumes nothing
+// changes the file and ignores a -wal or hot -journal file beside it, whose
+// contents would be lost; a copy with either is refused.
+func openImmutable(path string) (*sql.DB, error) {
+	for _, sfx := range []string{"-wal", "-journal"} {
+		if _, err := os.Lstat(path + sfx); !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%s%s exists; an immutable snapshot must be one self-contained file", path, sfx)
+		}
+	}
+	return openSQLite(path, "mode=ro&immutable=1")
+}
+
+func openSQLite(path, params string) (*sql.DB, error) {
 	if path == "" || strings.ContainsAny(path, "?#") {
 		return nil, errors.New("database path must be non-empty and contain no '?' or '#'")
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", "file:"+path+"?"+params)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +152,7 @@ func exportQuery(ownRaw bool) string {
 	if ownRaw {
 		raw = "o.raw_hex"
 	}
-	return `SELECT o.id, o.timestamp, o.path_json, ` + raw + `, t.hash, t.raw_hex
+	return `SELECT o.id, o.timestamp, o.path_json, ` + raw + `, o.transmission_id, t.raw_hex
 FROM observations o JOIN transmissions t ON t.id = o.transmission_id
 WHERE o.timestamp >= ?1 AND o.timestamp < ?2
   AND NOT EXISTS (SELECT 1 FROM observations p
@@ -147,7 +173,11 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 	if err := opt.validate(); err != nil {
 		return sum, err
 	}
-	db, err := openReadOnly(opt.DB)
+	open := openReadOnly
+	if opt.Immutable {
+		open = openImmutable
+	}
+	db, err := open(opt.DB)
 	if err != nil {
 		return sum, err
 	}
@@ -162,6 +192,7 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 	if err != nil {
 		return sum, err
 	}
+	ids := newTxNumbering(int64(opt.Settle/time.Second), exportMaxPending)
 	rows, err := db.Query(exportQuery(ownRaw), opt.Start.Add(-opt.Settle).Unix(), opt.End.Add(opt.Settle).Unix(),
 		int64(opt.Settle/time.Second), opt.MaxRows+1)
 	if err != nil {
@@ -198,10 +229,14 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 			return sum, fmt.Errorf("more than -max-rows %d observation rows in range; output incomplete", opt.MaxRows)
 		}
 		var r obsRow
-		if err := rows.Scan(&r.id, &r.ts, &r.pathJSON, &r.ownRaw, &r.hash, &r.txRaw); err != nil {
+		if err := rows.Scan(&r.id, &r.ts, &r.pathJSON, &r.ownRaw, &r.tx, &r.txRaw); err != nil {
 			return sum, err
 		}
-		o, note, err := observationFrom(r)
+		id, err := ids.id(r.tx, r.ts)
+		if err != nil {
+			return sum, err
+		}
+		o, note, err := observationFrom(r, id)
 		if note.fromTx {
 			sum.FrameFromTransmission++
 		}
@@ -228,10 +263,54 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 }
 
 type obsRow struct {
-	id, ts           int64
+	id, ts, tx       int64
 	pathJSON, ownRaw sql.NullString
-	hash, txRaw      string
+	txRaw            string
 }
+
+// txNumbering gives each transmission an id of the export's own: "tx" and
+// a counter in the order its first row is read. The id is not derived from
+// the content hash, a frame or a row ID, so it does not join a line to a
+// CoreScope database or instance; it is only unique within the export.
+// Rows arrive in time order and the export query admits a row only within
+// settle of its transmission's first observation, so a transmission is
+// forgotten once its first row read is more than settle old. At most max
+// transmissions are held; one more fails the export.
+type txNumbering struct {
+	settle int64
+	max    int
+	next   int
+	ids    map[int64]anomaly.TxID // transmission row ID -> id
+	order  []txFirst              // held transmissions, by first row time
+}
+
+type txFirst struct{ tx, ts int64 }
+
+func newTxNumbering(settle int64, max int) *txNumbering {
+	return &txNumbering{settle: settle, max: max, ids: make(map[int64]anomaly.TxID)}
+}
+
+// id returns the id of transmission row tx for a row at ts (Unix seconds,
+// non-decreasing across calls).
+func (n *txNumbering) id(tx, ts int64) (anomaly.TxID, error) {
+	for len(n.order) > 0 && n.order[0].ts < ts-n.settle {
+		delete(n.ids, n.order[0].tx)
+		n.order = n.order[1:]
+	}
+	if id, ok := n.ids[tx]; ok {
+		return id, nil
+	}
+	if len(n.ids) >= n.max {
+		return "", fmt.Errorf("more than %d transmissions first heard within one -settle window", n.max)
+	}
+	n.next++
+	id := anomaly.TxID("tx" + strconv.Itoa(n.next))
+	n.ids[tx] = id
+	n.order = append(n.order, txFirst{tx, ts})
+	return id, nil
+}
+
+func (n *txNumbering) live() int { return len(n.ids) }
 
 type rowNote struct{ fromTx, pathUnknown bool }
 
@@ -247,7 +326,7 @@ var routeClasses = [4]anomaly.RouteClass{
 // observationFrom builds a key-free Observation from on-wire facts only:
 // header (route and payload type), path, payload size and, for group
 // payloads, the 1-byte channel hash (firmware docs/payloads.md).
-func observationFrom(r obsRow) (anomaly.Observation, rowNote, error) {
+func observationFrom(r obsRow, id anomaly.TxID) (anomaly.Observation, rowNote, error) {
 	note := rowNote{fromTx: !r.ownRaw.Valid || r.ownRaw.String == ""}
 	raw := r.ownRaw.String
 	if note.fromTx {
@@ -257,7 +336,7 @@ func observationFrom(r obsRow) (anomaly.Observation, rowNote, error) {
 	if err != nil {
 		return anomaly.Observation{}, note, err
 	}
-	o := anomaly.Observation{TxID: anomaly.TxID(r.hash), ObsID: strconv.FormatInt(r.id, 10),
+	o := anomaly.Observation{TxID: id, ObsID: strconv.FormatInt(r.id, 10),
 		Time: time.Unix(r.ts, 0).UTC(), PayloadType: anomaly.PayloadType(fr.payloadType),
 		RouteClass: routeClasses[fr.route], PayloadBytes: len(fr.payload), PayloadKnown: true}
 	if fr.payloadType == payloadGrpTxt || fr.payloadType == payloadGrpData {
@@ -384,6 +463,7 @@ func runExport(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "CoreScope SQLite database, opened read-only (required)")
+	immutable := fs.Bool("immutable", false, "-db is a static snapshot copy: open it with immutable=1 (no locks, no side files)")
 	start := fs.String("start", "", "RFC 3339 start, inclusive, whole seconds (required)")
 	end := fs.String("end", "", "RFC 3339 end, exclusive, at most 31 days after -start (required)")
 	settle := fs.Duration("settle", 0, "route evidence window after a transmission's first observation, (0, 1h] (required)")
@@ -399,7 +479,7 @@ func runExport(args []string, stderr io.Writer) int {
 	if fs.NArg() != 0 {
 		return usageErr(errors.New("unexpected arguments"))
 	}
-	opt := exportOptions{DB: *dbPath, Settle: *settle, MaxRows: *maxRows}
+	opt := exportOptions{DB: *dbPath, Settle: *settle, MaxRows: *maxRows, Immutable: *immutable}
 	var err error
 	if opt.Start, err = parseTime("start", *start); err != nil {
 		return usageErr(err)
