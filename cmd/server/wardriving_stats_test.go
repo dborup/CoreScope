@@ -139,12 +139,20 @@ func TestHandleWardrivingStats(t *testing.T) {
 	} else if *sea.Lat < 47 || *sea.Lat > 48 {
 		t.Errorf("SEA lat = %v, want ~47.45 (Seattle)", *sea.Lat)
 	}
+	// Neither observer in this fixture has a `nodes` row of its own, so
+	// SEA's coordinates are still the IATA fallback, not a real position.
+	if sea.PositionSource != PositionSourceIATA {
+		t.Errorf("SEA PositionSource = %q, want %q (no real node position seeded)", sea.PositionSource, PositionSourceIATA)
+	}
 	zzz := resp.Observers[1]
 	if zzz.ObserverName != "UnknownObs" || zzz.ObservationCount != 1 {
 		t.Errorf("Observers[1] = %+v, want {UnknownObs obs=1}", zzz)
 	}
 	if zzz.Lat != nil || zzz.Lon != nil {
 		t.Errorf("ZZZ has an unrecognized IATA — Lat/Lon should stay nil, got lat=%v lon=%v", zzz.Lat, zzz.Lon)
+	}
+	if zzz.PositionSource != PositionSourceNone {
+		t.Errorf("ZZZ PositionSource = %q, want %q (no real position, unmapped IATA)", zzz.PositionSource, PositionSourceNone)
 	}
 
 	// Time series should sum back to TotalMessages.

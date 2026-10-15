@@ -7436,6 +7436,57 @@ console.log('\n=== live.js: node-filter URL update preserves lat/lon/zoom (#1709
   });
 }
 
+// ===== analytics.js: Wardriving "Coverage by Observer" IATA badge (#381 review round 2, finding 5) =====
+console.log('\n=== analytics.js: Wardriving observer table IATA badge ===');
+{
+  function makeAnalyticsSandbox381() {
+    const ctx = makeSandbox();
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/app.js');
+    try { loadInCtx(ctx, 'public/analytics.js'); } catch (e) {
+      for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+    }
+    return ctx;
+  }
+  const ctx = makeAnalyticsSandbox381();
+  const iataPositionBadgeHtml = ctx.window._analyticsIataPositionBadgeHtml;
+
+  test('iataPositionBadgeHtml is exposed', () => assert.ok(iataPositionBadgeHtml, '_analyticsIataPositionBadgeHtml must be exposed'));
+
+  // This is the exact snippet the Wardriving tab's observersHtml() appends
+  // next to a coordinate whenever positionSource === 'iata' -- it's a
+  // self-contained pure function (no closure over tab-local state), so
+  // testing it directly exercises the real markup the badge renders.
+  test('badge markup uses the existing var(--border)/var(--text) pattern, no hardcoded colors', () => {
+    const html = iataPositionBadgeHtml();
+    assert.ok(html.includes('class="badge"'), 'should be a .badge element');
+    assert.ok(html.includes('var(--border)') && html.includes('var(--text)'), 'should use theme CSS vars, not hardcoded hex colors');
+    assert.ok(!/#[0-9a-fA-F]{3,6}/.test(html), 'should contain no hardcoded hex color');
+  });
+
+  test('badge renders the IATA label and an explanatory tooltip', () => {
+    const html = iataPositionBadgeHtml();
+    assert.ok(/>IATA</.test(html), 'should render the IATA label');
+    assert.ok(/title="[^"]*no real node position[^"]*"/.test(html), 'should explain via title that this is an approximate, not a real, position');
+  });
+
+  // analytics.js source-level check: the badge call site is gated on
+  // positionSource === 'iata' and lives inside observersHtml's per-row
+  // mapping, so a real position or no position never gets the badge.
+  const src = fs.readFileSync('public/analytics.js', 'utf8');
+  const observersHtmlSrc = src.slice(src.indexOf('function observersHtml('), src.indexOf('function mapLinkHtml('));
+
+  test('observersHtml only calls the IATA badge when positionSource is "iata"', () => {
+    assert.ok(/positionSource === 'iata'[\s\S]{0,80}iataPositionBadgeHtml\(\)/.test(observersHtmlSrc),
+      'the badge call must be gated on positionSource === "iata"');
+  });
+
+  test('observersHtml does not render a coordinate (and so no badge) when lat/lon are missing', () => {
+    assert.ok(/o\.lat != null && o\.lon != null/.test(observersHtmlSrc),
+      'a missing position must fall through to the dash, never reach the badge branch');
+  });
+}
+
 // ===== SUMMARY =====
 Promise.allSettled(pendingTests).then(() => {
   console.log(`\n${'═'.repeat(40)}`);
