@@ -477,6 +477,37 @@ const PERF_FIXTURE = () => ({
     assert.ok(sb.getHtml().includes('Total Requests'), 'an overtaken-but-first-to-finish refresh must still render, not stay on Loading…');
   });
 
+  await test('refresh: an older response that completes after a newer one has rendered must not overwrite it (#463)', async () => {
+    const sb = makeSandbox();
+    const { ctx } = sb;
+    let tick;
+    ctx.setInterval = fn => { tick = fn; return 1; };
+    const releasers = [];
+    ctx.fetch = (url) => {
+      if (url === '/api/perf') {
+        return new Promise(resolve => {
+          const perf = PERF_FIXTURE();
+          perf.totalRequests = 1111 * (releasers.length + 1);
+          releasers.push(() => resolve({ ok: true, json: () => Promise.resolve(perf) }));
+        });
+      }
+      if (url === '/api/health') return Promise.reject(new Error('no health'));
+      if (url === '/api/perf/ws-clients') return Promise.resolve({ ok: true, json: () => Promise.resolve({ intervalSec: 60, samples: mk(3, () => 1) }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    tick();
+    await flush();
+    assert.strictEqual(releasers.length, 2, 'two overlapping refreshes');
+    releasers[1]();
+    await flush();
+    assert.ok(sb.getHtml().includes('2222'), 'the newer response renders first');
+    releasers[0]();
+    await flush();
+    assert.ok(sb.getHtml().includes('2222') && !sb.getHtml().includes('1111'), 'the older response must not overwrite the newer render');
+  });
+
   await test('refresh: re-entering the page (init) forces a fresh ws-clients fetch, not a stale cache', async () => {
     const { ctx } = makeSandbox();
     const perf = PERF_FIXTURE();

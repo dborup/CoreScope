@@ -17,6 +17,8 @@ const (
 	wsHistoryFileName     = "ws-client-history.jsonl"
 	wsHistoryMaxFileBytes = 8 << 20
 	wsHistoryCompactEvery = 24 * 60
+	// Journal records newer than load time plus this are not loaded (#463).
+	wsHistoryFutureTolerance = 2 * wsHistoryInterval
 )
 
 // One server owns this journal. Only its minute sampler writes it, never a
@@ -190,13 +192,15 @@ func readWSHistoryJournal(path string, now time.Time) ([]WSClientSample, error) 
 		if s.T.Before(now.Add(-wsHistoryRetention)) {
 			continue
 		}
-		// A record dated after "now" (e.g. a backward NTP correction applied
-		// since it was written) is neither corrupt nor out of order — it is
-		// still kept here and re-saved by the next compaction exactly like a
-		// record within the compaction loop's own retention window below.
-		// snapshotRange already excludes anything after its request's "now",
-		// so the point simply reappears once wall time catches up to it
-		// instead of disabling persistence for the rest of the journal.
+		// A record dated well after "now" (e.g. written before a backward
+		// clock step) would make sample() refuse every new timestamp until
+		// wall time caught up, silently stalling the series. Skip it; the
+		// startup compaction then drops it from the file too, so the saved
+		// order stays strictly increasing. Within the tolerance the record is
+		// kept, so the stall is bounded by the tolerance.
+		if s.T.After(now.Add(wsHistoryFutureTolerance)) {
+			continue
+		}
 		tail.sample(s.Clients, s.T)
 		tail.buf[(tail.head-1+len(tail.buf))%len(tail.buf)] = s
 	}
