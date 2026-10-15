@@ -963,3 +963,107 @@ func TestDecodeBackfill_ResumeWithNoKeysLeftScansNothing(t *testing.T) {
 		t.Errorf("status = %q, want done so the run is not retried on every poll", st.Status)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Point 14: a revocation that lands while a pass is running is honoured
+// ---------------------------------------------------------------------------
+
+// A pass can walk a multi-GB table for minutes. A revocation inside that
+// window must stop the pass from decrypting and persisting any further row
+// with the revoked key — the snapshot the pass started with must not outlive
+// the approval. Rows the pass had already rewritten keep their plaintext,
+// which is what an ordinary revocation does too (the API contract: "Historical
+// messages already decoded and stored are NOT deleted").
+func TestDecodeBackfill_RevocationDuringARunIsHonoured(t *testing.T) {
+	s := decodeBFStore(t, "revokemidrun.db")
+	key := deriveHashtagChannelKey(decodeBFChannel)
+	early := decodeBFIngest(t, s, decodeBFGrpTxt(t, key, "A: early", 0x31), nil, nil)
+	late := decodeBFIngest(t, s, decodeBFGrpTxt(t, key, "A: late", 0x32), nil, nil)
+
+	// The approved layer is the one a revocation can remove from.
+	hk := newHotKeys(nil, nil)
+	hk.AddApproved(decodeBFChannel)
+	set := decodeBFSettings(1, 1)
+
+	revoked := false
+	decodeBackfillBatchHook = func(decodeBackfillBatchResult) {
+		if !revoked {
+			revoked = true
+			if !hk.RemoveApproved(decodeBFChannel) {
+				t.Error("RemoveApproved did not remove the approved key")
+			}
+		}
+	}
+	t.Cleanup(func() { decodeBackfillBatchHook = nil })
+	res, err := s.RunDecodeBackfill(context.Background(), hk, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeBackfillBatchHook = nil
+
+	// Written before the revocation: kept, exactly as at an ordinary revoke.
+	if got := decodeBFReadRow(t, s, early); got.channelHash.String != decodeBFChannel {
+		t.Fatalf("precondition: id %d channel_hash = %q, want %q", early, got.channelHash.String, decodeBFChannel)
+	}
+	// Not yet reached when the revocation landed: must stay unresolved.
+	if got := decodeBFReadRow(t, s, late); got.channelHash.String != "enc_32" {
+		t.Errorf("id %d channel_hash = %q: the run kept decrypting with a revoked key", late, got.channelHash.String)
+	} else if strings.Contains(got.decodedJSON.String, "A: late") {
+		t.Errorf("id %d decoded_json holds plaintext written after the revocation: %s", late, got.decodedJSON.String)
+	}
+	if res.ChannelUpdated != 1 {
+		t.Errorf("ChannelUpdated = %d, want 1 (only the row written before the revocation)", res.ChannelUpdated)
+	}
+
+	// The revoked key must not be credited, so re-approving arms a fresh pass
+	// over the whole table rather than leaving `late` unresolved forever.
+	covered, err := s.coveredKeyHashes(decodeBackfillKindChannel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := covered[decodeBackfillKeyHash(decodeBFChannel)]; present {
+		t.Error("a key revoked mid-run was still recorded by that run")
+	}
+	hk.AddApproved(decodeBFChannel)
+	if _, err := s.RunDecodeBackfill(context.Background(), hk, set); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeBFReadRow(t, s, late); got.channelHash.String != decodeBFChannel {
+		t.Errorf("id %d channel_hash = %q after re-approval, want %q", late, got.channelHash.String, decodeBFChannel)
+	}
+}
+
+// A region scope revoked mid-run is honoured the same way: the pass stops
+// matching the rest of the table against it.
+func TestDecodeBackfill_RegionRevocationDuringARunIsHonoured(t *testing.T) {
+	s := decodeBFStore(t, "revokemidrunscope.db")
+	const scope = "#bf-north"
+	early := decodeBFIngest(t, s, decodeBFTransportFrame(t, scope, []byte{0x01}), nil, nil)
+	late := decodeBFIngest(t, s, decodeBFTransportFrame(t, scope, []byte{0x02}), nil, nil)
+
+	hk := newHotKeys(nil, nil)
+	hk.AddApprovedRegions(scope)
+	set := decodeBFSettings(1, 1)
+
+	revoked := false
+	decodeBackfillBatchHook = func(decodeBackfillBatchResult) {
+		if !revoked {
+			revoked = true
+			if !hk.RemoveApprovedRegion(scope) {
+				t.Error("RemoveApprovedRegion did not remove the approved scope")
+			}
+		}
+	}
+	t.Cleanup(func() { decodeBackfillBatchHook = nil })
+	if _, err := s.RunDecodeBackfill(context.Background(), hk, set); err != nil {
+		t.Fatal(err)
+	}
+	decodeBackfillBatchHook = nil
+
+	if got := decodeBFReadRow(t, s, early); got.scopeName.String != scope {
+		t.Fatalf("precondition: id %d scope_name = %q, want %q", early, got.scopeName.String, scope)
+	}
+	if got := decodeBFReadRow(t, s, late); got.scopeName.String != "" {
+		t.Errorf("id %d scope_name = %q: the run kept matching with a revoked region key", late, got.scopeName.String)
+	}
+}

@@ -35,6 +35,20 @@ import (
 // re-adding it later starts a fresh pass over the whole table (see
 // forgetGoneKeys for why that is needed).
 //
+// A revocation reaches a pass that is already running, not only the next one:
+// the batch loop re-reads the effective set before every batch and drops the
+// revoked key from its snapshot (dropRevokedRunKeys), so nothing more is
+// decrypted or persisted with it. Rows it had already rewritten keep their
+// plaintext, which is exactly what an ordinary revocation does for rows
+// decrypted at ingest before it.
+//
+// Side effects are not replayed: the pass rewrites channel_hash, decoded_json
+// and scope_name and nothing else. Live ingest additionally records a
+// ping_triggers row for a decrypted GRP_TXT whose text is a ping trigger
+// (db.go); a backfilled row deliberately does not get one, so adding a key
+// does not retroactively change the ping leaderboard. The message itself is
+// fully readable; only that leaderboard ignores backfilled history.
+//
 // Bounds (ingestion stays responsive):
 //   - one run at a time, with one watermark, resumed from the database;
 //   - each batch covers a bounded id window and at most batchSize matching
@@ -313,6 +327,17 @@ func (r *decodeBackfillRun) kinds() string {
 	return strings.Join(out, ",")
 }
 
+// usableChannel and usableScope report which armed kinds still have a key the
+// run may decode with. They differ from channel/scope only after
+// dropRevokedRunKeys emptied a snapshot mid-run (or a resumed run found every
+// key of one kind gone): the kind stays armed for the bookkeeping, but the
+// candidate predicate narrows so the remaining pass does not keep selecting
+// rows nothing can resolve. The crediting in finishDecodeBackfillRun uses
+// channel/scope, not these — a kind whose keys were dropped has no key rows
+// left to credit.
+func (r *decodeBackfillRun) usableChannel() bool { return r.channel && len(r.channelKeys) > 0 }
+func (r *decodeBackfillRun) usableScope() bool   { return r.scope && len(r.regionKeys) > 0 }
+
 // decodeBackfillCandidateSQL is the unresolved-row predicate for the armed
 // kinds. Channel candidates are GRP_TXT rows still carrying the `enc_<HEX>`
 // routing placeholder (BuildPacketData writes channel_hash only for
@@ -479,6 +504,73 @@ func (s *Store) finishDecodeBackfillRun(run *decodeBackfillRun) error {
 	})
 }
 
+// dropRevokedRunKeys re-reads the effective key set and removes from the
+// run's snapshot every key that is no longer effective, returning how many it
+// dropped. The batch loop calls it before every batch, so a revocation that
+// lands while a pass is walking the table takes effect within one batch
+// instead of at the end of the pass: a revoked key decrypts nothing more and
+// persists nothing more.
+//
+// It also deletes the key's bookkeeping row, which is exactly what
+// forgetGoneKeys would do on the next poll. Two consequences, both wanted:
+// finishDecodeBackfillRun cannot credit a key that was revoked under it, and
+// re-approving the key later arms a fresh pass over the whole table, so the
+// rows this pass walked past with it are not lost.
+//
+// Rows the pass had already rewritten keep their plaintext. That is the same
+// answer an ordinary revocation gives for rows decrypted at ingest before it
+// ("Historical messages already decoded and stored are NOT deleted",
+// cmd/server/openapi.go): a revocation stops future decryption, it does not
+// re-encrypt history. Clearing them would also mean rewriting rows the pass
+// already committed, which the "never touch a resolved row" guard forbids.
+//
+// The map lookups cost one probe per snapshot key per batch, on the published
+// pointer hotKeys already hands out without locking.
+func (s *Store) dropRevokedRunKeys(run *decodeBackfillRun, hk *hotKeys) (int, error) {
+	type goneKey struct{ kind, nameHash string }
+	var gone []goneKey
+	if len(run.channelKeys) > 0 {
+		live := hk.Channels()
+		for name := range run.channelKeys {
+			if _, ok := live[name]; !ok {
+				gone = append(gone, goneKey{decodeBackfillKindChannel, decodeBackfillKeyHash(name)})
+				delete(run.channelKeys, name)
+			}
+		}
+	}
+	if len(run.regionKeys) > 0 {
+		live := hk.Regions()
+		for name := range run.regionKeys {
+			if _, ok := live[name]; !ok {
+				gone = append(gone, goneKey{decodeBackfillKindScope, decodeBackfillKeyHash(name)})
+				delete(run.regionKeys, name)
+			}
+		}
+	}
+	if len(gone) == 0 {
+		return 0, nil
+	}
+	sort.Slice(gone, func(i, j int) bool {
+		if gone[i].kind != gone[j].kind {
+			return gone[i].kind < gone[j].kind
+		}
+		return gone[i].nameHash < gone[j].nameHash
+	})
+	if err := s.WriterTx(decodeBackfillComponent, func(tx *sql.Tx) error {
+		for _, g := range gone {
+			if _, err := tx.Exec(`DELETE FROM decode_backfill_keys WHERE kind = ? AND name_hash = ?`, g.kind, g.nameHash); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	log.Printf("[%s] %d key(s) were revoked while the pass was running; dropped from the pass, %d channel and %d region key(s) left",
+		decodeBackfillComponent, len(gone), len(run.channelKeys), len(run.regionKeys))
+	return len(gone), nil
+}
+
 // decodeBackfillRow is one candidate row.
 type decodeBackfillRow struct {
 	id          int64
@@ -527,7 +619,7 @@ func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun,
 	if windowEnd > run.ceiling {
 		windowEnd = run.ceiling
 	}
-	pred := decodeBackfillCandidateSQL(run.channel, run.scope)
+	pred := decodeBackfillCandidateSQL(run.usableChannel(), run.usableScope())
 	if pred == "" {
 		b.Next, b.Done = run.ceiling, true
 		return b, nil
@@ -563,7 +655,10 @@ func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun,
 	b.Done = b.Next >= run.ceiling
 
 	// Decode outside any transaction, through the normal decode path, so a
-	// rewritten row is byte-identical to the same packet ingested fresh.
+	// rewritten row is byte-identical to the same packet ingested fresh in the
+	// three columns this pass owns. Ingest's one side effect on a decrypted
+	// GRP_TXT — the ping_triggers row — is deliberately not replayed; see the
+	// note at the top of this file.
 	type chanUpdate struct {
 		id          int64
 		channelHash string
@@ -584,14 +679,14 @@ func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun,
 			b.DecodeErrors++
 			continue
 		}
-		if run.channel && r.payloadType == PayloadGRP_TXT && strings.HasPrefix(r.channelHash.String, "enc_") {
+		if run.usableChannel() && r.payloadType == PayloadGRP_TXT && strings.HasPrefix(r.channelHash.String, "enc_") {
 			// Same rule as BuildPacketData: a decrypted GRP_TXT is keyed by
 			// its channel name, an undecryptable one keeps enc_<HEX>.
 			if decoded.Payload.Type == "CHAN" && decoded.Payload.Channel != "" {
 				chanUpdates = append(chanUpdates, chanUpdate{r.id, decoded.Payload.Channel, PayloadJSON(&decoded.Payload)})
 			}
 		}
-		if run.scope && r.scopeName.Valid && r.scopeName.String == "" {
+		if run.usableScope() && r.scopeName.Valid && r.scopeName.String == "" {
 			if decoded.TransportCodes != nil && decoded.TransportCodes.Code1 != "0000" {
 				name, matches := matchScopeDetail(run.regionKeys, byte(decoded.Header.PayloadType), decoded.payloadRaw, decoded.TransportCodes.Code1)
 				switch {
@@ -731,6 +826,17 @@ func (s *Store) RunDecodeBackfill(ctx context.Context, hk *hotKeys, set DecodeBa
 		decodeBackfillComponent, res.Kinds, run.watermark, run.ceiling,
 		len(run.channelKeys), len(run.regionKeys), set.BatchSize, set.IDWindow, set.Pause)
 	for {
+		// Re-read the effective key set before every batch so a revocation
+		// mid-pass is honoured (see dropRevokedRunKeys), not only by the next
+		// pass.
+		if _, err := s.dropRevokedRunKeys(run, hk); err != nil {
+			return res, fmt.Errorf("re-read key set: %w", err)
+		}
+		if !run.usableChannel() && !run.usableScope() {
+			log.Printf("[%s] run for kinds=%s has no effective key left; stopping at watermark %d of %d",
+				decodeBackfillComponent, run.kinds(), run.watermark, run.ceiling)
+			break
+		}
 		b, err := s.decodeBackfillBatch(ctx, run, set)
 		if err != nil {
 			return res, err
