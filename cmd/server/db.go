@@ -2612,7 +2612,7 @@ func (db *DB) resolveNodesByPubkey(pubkeys []string) (map[string]packetPathNodeI
 					return fmt.Errorf("packet path node scan: %w", err)
 				}
 				ni := packetPathNodeInfo{name: name.String, role: role.String}
-				if lat.Valid && lon.Valid && !(lat.Float64 == 0 && lon.Float64 == 0) {
+				if lat.Valid && lon.Valid && isValidNodePosition(lat.Float64, lon.Float64) {
 					v1, v2 := lat.Float64, lon.Float64
 					ni.lat, ni.lon = &v1, &v2
 				}
@@ -2674,6 +2674,12 @@ func (db *DB) resolveNodesByName(names []string) (map[string]packetPathNodeInfo,
 				var lat, lon sql.NullFloat64
 				if err := rows.Scan(&name, &role, &lat, &lon); err != nil {
 					return fmt.Errorf("packet path name scan: %w", err)
+				}
+				if !isValidNodePosition(lat.Float64, lon.Float64) {
+					// The SQL filter above already excludes NULL/0,0; this
+					// also catches out-of-range or NaN values the SQL
+					// filter can't express (#381 review round 2, finding 3).
+					continue
 				}
 				if _, exists := nodeByName[name.String]; exists {
 					ambiguous[name.String] = true // >1 positioned node shares this name -- don't guess which one
@@ -4163,13 +4169,37 @@ type NodePosition struct {
 	Lon float64
 }
 
+// isValidNodePosition reports whether (lat, lon) is a plausible real-world
+// position, not a placeholder or garbage value that would otherwise be
+// treated as "real" by a positionSource resolver (#381 review round 2):
+//   - (0,0) is the DB's own sentinel for "no fix" (same convention as
+//     GetNodesForScopeAdoption, geofilter.PassesFilter, and the
+//     resolveNodesByPubkey/resolveNodesByName 0,0 exclusions below), not a
+//     real position off the coast of west Africa.
+//   - NaN/Inf can round-trip through SQLite's REAL columns but are never a
+//     valid coordinate.
+//   - out-of-range values (|lat| > 90, |lon| > 180) indicate corrupt or
+//     malformed input, not a real fix.
+func isValidNodePosition(lat, lon float64) bool {
+	if lat == 0 && lon == 0 {
+		return false
+	}
+	if math.IsNaN(lat) || math.IsNaN(lon) || math.IsInf(lat, 0) || math.IsInf(lon, 0) {
+		return false
+	}
+	return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+}
+
 // GetNodePositionsByKeys batch-resolves pubkey -> real node position for
 // wardriving observer coverage (#381): unlike GetNodeLocationsByKeys (the
 // untyped wire shape /api/observers already depends on), this returns a
 // typed value only for nodes that actually have a position, so a caller
 // gets a plain map-membership check instead of nil-checking interface{}
 // values -- and a static-analysis-visible guarantee this is not a new
-// map[string]interface{} (AGENTS.md #1383).
+// map[string]interface{} (AGENTS.md #1383). A row whose lat/lon fails
+// isValidNodePosition (0,0 sentinel, NaN/Inf, or out of range) is omitted
+// entirely so the caller falls through to the IATA/none fallback instead of
+// treating garbage as a real fix (#381 review round 2, finding 2).
 func (db *DB) GetNodePositionsByKeys(keys []string) map[string]NodePosition {
 	result := make(map[string]NodePosition)
 	if len(keys) == 0 {
@@ -4191,6 +4221,9 @@ func (db *DB) GetNodePositionsByKeys(keys []string) map[string]NodePosition {
 		var pk string
 		var lat, lon float64
 		if err := rows.Scan(&pk, &lat, &lon); err != nil {
+			continue
+		}
+		if !isValidNodePosition(lat, lon) {
 			continue
 		}
 		result[strings.ToLower(pk)] = NodePosition{Lat: lat, Lon: lon}
