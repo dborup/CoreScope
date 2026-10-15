@@ -111,7 +111,11 @@
 // # Building blocks implemented
 //
 //   - RateRule: sliding windows (t-W, t] at stream, channel, route-group or
-//     global scope, any width from 1 s to 24 h.
+//     global scope, any width from 1 s to 24 h. With ExcludeIngestBacklog
+//     (opt-in, #473) a rule ignores events with Event.IngestBacklog set: a
+//     key-free boolean the caller derives (the export: from observer
+//     activity), taken from the event's first observation. Unguarded
+//     rules, and every other rule kind, never read it.
 //   - NewStreamRule: causal new-stream volume with left censoring (the
 //     censor window must cover QuietPeriod) and reactivation after silence.
 //   - PeriodicRule: causal periodicity with explicit burst, jitter, missing

@@ -29,6 +29,10 @@ import (
 //	 "first_hop":"1:5c","full_route":"1:5c11","wire_bytes":60,"payload_bytes":35,
 //	 "traffic":"unclassified","decryption":"unknown","truncated":false}
 //
+// An optional "ingest_backlog": true marks an event whose first observation
+// belongs to an ingest backlog (Event.IngestBacklog); it is omitted when
+// false, so unflagged lines are unchanged.
+//
 // "channel" is plain hex ("" = no channel); hops and routes are
 // "<width>:<hex>" ("" or "-" = none); "payload_bytes" may be omitted
 // (unknown). Lines must be in data-time order within the config's
@@ -49,6 +53,8 @@ type ReplayRecord struct {
 	Traffic      string    `json:"traffic"`
 	Decryption   string    `json:"decryption"`
 	Truncated    bool      `json:"truncated,omitempty"`
+	// IngestBacklog is written only when true (#473).
+	IngestBacklog bool `json:"ingest_backlog,omitempty"`
 }
 
 // maxReplayLineBytes caps ReplayOptions.MaxLineBytes.
@@ -119,7 +125,8 @@ var decryptNames = []string{"unknown", "decrypted", "not_decrypted"}
 
 // Event converts a record. Errors never echo the record's values.
 func (r ReplayRecord) Event() (Event, error) {
-	e := Event{ID: TxID(r.ID), Time: r.Time.UTC(), WireBytes: r.WireBytes, Truncated: r.Truncated}
+	e := Event{ID: TxID(r.ID), Time: r.Time.UTC(), WireBytes: r.WireBytes, Truncated: r.Truncated,
+		IngestBacklog: r.IngestBacklog}
 	if !r.FinalAt.IsZero() {
 		e.FinalAt = r.FinalAt.UTC()
 	}
@@ -185,7 +192,8 @@ func (r ReplayRecord) Event() (Event, error) {
 func RecordFromEvent(e Event) ReplayRecord {
 	r := ReplayRecord{ID: string(e.ID), Time: e.Time.UTC(), FinalAt: e.finalAt().UTC(), PayloadType: int(e.PayloadType),
 		RouteClass: e.RouteClass.String(), RouteKind: e.RouteKind.String(), WireBytes: e.WireBytes,
-		Traffic: trafficNames[e.Traffic], Decryption: decryptNames[e.Decryption], Truncated: e.Truncated}
+		Traffic: trafficNames[e.Traffic], Decryption: decryptNames[e.Decryption], Truncated: e.Truncated,
+		IngestBacklog: e.IngestBacklog}
 	if !e.Channel.IsZero() {
 		r.Channel = hex.EncodeToString(e.Channel.Bytes())
 	}
@@ -344,7 +352,10 @@ type ReplayConfig struct {
 		Window       Duration      `json:"window"`
 		Threshold    int           `json:"threshold"`
 		PayloadTypes []PayloadType `json:"payload_types"`
-		State        stateJSON     `json:"state"`
+		// ExcludeIngestBacklog is optional: omitted means false, no guard
+		// (see RateRule.ExcludeIngestBacklog).
+		ExcludeIngestBacklog bool      `json:"exclude_ingest_backlog"`
+		State                stateJSON `json:"state"`
 	} `json:"rate"`
 	NewStream []struct {
 		Name         string        `json:"name"`
@@ -428,7 +439,7 @@ func ParseReplayConfig(b []byte) (Config, error) {
 			return Config{}, err
 		}
 		cfg.Rate = append(cfg.Rate, RateRule{Name: r.Name, Scope: s, Window: time.Duration(r.Window), Threshold: r.Threshold,
-			PayloadTypes: r.PayloadTypes, State: r.State.params()})
+			PayloadTypes: r.PayloadTypes, ExcludeIngestBacklog: r.ExcludeIngestBacklog, State: r.State.params()})
 	}
 	for _, r := range rc.NewStream {
 		s, err := scope(r.Scope)

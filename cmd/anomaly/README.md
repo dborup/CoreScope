@@ -1,8 +1,8 @@
 # corescope-anomaly (experimental, offline)
 
-Offline tool for the `internal/anomaly` study (#457, #474). It is not part of
-the server or the ingestor, is not built into any image and has no defaults:
-every bound is an explicit flag.
+Offline tool for the `internal/anomaly` study (#457, #473, #474). It is not
+part of the server or the ingestor, is not built into any image and has no
+defaults: every bound is an explicit flag.
 
 Only `export` reads a database, read-only. Nothing here ever writes to a
 CoreScope database: `inject` and `score` read and write plain files.
@@ -31,7 +31,9 @@ corescope-anomaly export -db /snap/meshcore.db -immutable \
   names, public keys, observer columns, SNR/RSSI or resolved paths. A line
   carries payload type, the 1-byte channel hash (group payloads), route class,
   first hop and full route (hop prefixes as on the wire), frame and payload
-  size.
+  size. The only exception is the optional
+  [ingest-backlog flag](#ingest-backlog-flag-optional-473). It reads
+  `observations.observer_idx` inside the export and writes a boolean only.
 - **Opaque IDs.** A line's `id` is the export's own number: `tx1`, `tx2`, … in
   the order each transmission's first row is read. It is not the content hash,
   which would join the line to every CoreScope instance that heard the packet
@@ -50,6 +52,41 @@ corescope-anomaly export -db /snap/meshcore.db -immutable \
   31 days.
 - `-out` must not exist. The file appears only when the export succeeds. The
   summary (counts only) is printed as JSON on stderr.
+
+### Ingest-backlog flag (optional, #473)
+
+```sh
+corescope-anomaly export ... -backlog-silence 10m -backlog-span 2h
+```
+
+With both flags (whole seconds in (0, 24h]; there are no defaults, and
+without them the output is unchanged), a line whose event's first
+observation follows a silence of that observer gets `"ingest_backlog": true`:
+
+- An observation is a **reconnect** when its observer has no observation in
+  the `-backlog-silence` before it, `[t - silence, t)`. The observer's
+  **backlog span** is `[t, t + span)`.
+- An event is flagged when its first observation (the one that sets its
+  `time`; ties in the same second go by observation row id, as text) lies in a
+  backlog span of the observer that made it. A late re-hearing by a
+  reconnecting observer does not flag a transmission another observer heard
+  first. Rows with a NULL `observer_idx` are never flagged.
+- Times are `observations.timestamp` as stored: the observer's receive time
+  from the MQTT envelope, or the ingest time where the ingestor falls back to
+  it. The #457 artifact label uses the same times.
+
+**Key-free.** The export reads `observations.observer_idx` (never the
+`observers` table) and keeps it in memory only. The flag is the only change to
+a line, and the output is byte-identical when observers are renamed.
+
+**Cost.** One more index range scan on `observations.timestamp` over
+`[start - settle - silence - span, end + settle)` reads the observer and time
+of every row, under the same `-max-rows` cap. Memory holds one entry per
+observer and one per merged backlog span, both capped. The database must hold
+data over that whole lookback, because before its first observation every
+observer would look reconnected. A lookback that starts earlier is refused.
+The summary adds `ingest_backlog` with the scan's row counts and the number
+of flagged events.
 
 Events are built by `anomaly.Normalizer`. An observation is route evidence
 when it lies at most `-settle` after the transmission's first observation.
@@ -120,6 +157,11 @@ rules accept two optional fields:
 - `exclude_channels` — channel hashes the rule ignores, as plain lower-case
   hex (`["81"]`). Leaving it out excludes nothing. See
   [Excluded channels](#excluded-channels).
+
+Rate rules accept the optional `exclude_ingest_backlog` (#473). With `true`,
+the rule ignores lines with `"ingest_backlog": true`: they are not counted in
+its window, never trigger it and do not keep its episodes open. Leaving it out
+means `false`, and then the flag changes nothing.
 
 ## Excluded channels
 
