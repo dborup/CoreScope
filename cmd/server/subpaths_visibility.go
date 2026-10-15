@@ -17,19 +17,19 @@ import (
 // traffic, hidden or not. Only identities are removed, so after filtering a
 // list can hold fewer rows than its limit and its percentages need not add up.
 
-// subpathVisibility is the policy handed to the store for the detail view.
-// A nil *subpathVisibility hides nothing.
+// subpathVisibility is the policy the detail view is built under. A nil
+// *subpathVisibility hides nothing.
 type subpathVisibility struct {
-	hiddenNodes    map[string]bool // lower-case pubkeys
-	hiddenObserver func(id, name string) bool
+	cfg    *Config
+	hidden map[string]bool // lower-case keys the live lookup found hidden
 }
 
-func (v *subpathVisibility) nodeHidden(pubkey string) bool {
-	return v != nil && v.hiddenNodes[strings.ToLower(pubkey)]
-}
-
-func (v *subpathVisibility) observerHidden(id, name string) bool {
-	return v != nil && v.hiddenObserver != nil && v.hiddenObserver(id, name)
+// hides reports whether an identity (a node or an observer) shown under name
+// is hidden: by the live lookup of its key, or by the configured rules
+// applied to its key and the name the detail would show (fail closed when
+// that name is older than the live one).
+func (v *subpathVisibility) hides(id, name string) bool {
+	return v != nil && (v.hidden[strings.ToLower(id)] || identityHidden(v.cfg, id, name))
 }
 
 // routePatternsRestricted reports whether any identity-hiding rule is
@@ -70,29 +70,27 @@ func subpathsResponseOf(v interface{}) (SubpathsResponse, bool) {
 
 // subpathRowHidden decides one row. Each raw hop is a short prefix, never an
 // identity by itself: it counts only through the nodes that carry it
-// (candidates). A prefix whose candidates are all hidden hides the row; for
-// an ambiguous prefix the row is hidden only when the name it displays for
-// that hop is a hidden candidate's name. Rows that do not line up (hops and
-// path segments differ) are hidden (fail closed).
+// (candidates). A prefix with no hidden candidate never hides the row. Once a
+// prefix has a hidden candidate the row is kept only when the name it shows
+// for that hop is a visible candidate's name and no hidden candidate's (fail
+// closed: a cached row can still show a name the node no longer has). Rows
+// that do not line up (hops and path segments differ) are hidden.
 func subpathRowHidden(row SubpathResp, candidates map[string][]nodeInfo, hidden map[string]bool) bool {
 	names := strings.Split(row.Path, " → ")
 	if len(names) != len(row.RawHops) {
 		return true
 	}
 	for i, hop := range row.RawHops {
-		hiddenNames := map[string]bool{}
-		visible := 0
+		anyHidden, shownVisible, shownHidden := false, false, false
 		for _, c := range candidates[strings.ToLower(hop)] {
-			if hidden[strings.ToLower(c.PublicKey)] {
-				hiddenNames[c.Name] = true
-			} else {
-				visible++
+			h := hidden[strings.ToLower(c.PublicKey)]
+			anyHidden = anyHidden || h
+			if c.Name == names[i] {
+				shownHidden = shownHidden || h
+				shownVisible = shownVisible || !h
 			}
 		}
-		if len(hiddenNames) == 0 {
-			continue
-		}
-		if visible == 0 || hiddenNames[names[i]] {
+		if anyHidden && (!shownVisible || shownHidden) {
 			return true
 		}
 	}
@@ -157,21 +155,17 @@ func (s *Server) visibleSubpaths(ctx context.Context, results ...interface{}) ([
 	return s.filterHiddenFromSubpaths(ctx, groups)
 }
 
-// subpathVisibility builds the detail-view policy: every known node's hidden
-// state in one bulk lookup, and the observer rules, which need no database.
-func (s *Server) subpathVisibility(ctx context.Context) (*subpathVisibility, error) {
-	if !s.routePatternsRestricted() || s.store == nil {
+// subpathVisibility builds the detail-view policy for the identities a detail
+// can show (requested hops, parent-path hops and observer ids, see
+// subpathDetailParts.pubkeys) in one bulk lookup, so its cost follows the
+// detail and not the number of known nodes.
+func (s *Server) subpathVisibility(ctx context.Context, pubkeys []string) (*subpathVisibility, error) {
+	if !s.routePatternsRestricted() {
 		return nil, nil
 	}
-	hidden, err := s.hiddenPubkeys(ctx, s.store.AllNodePubkeys())
+	hidden, err := s.hiddenPubkeys(ctx, pubkeys)
 	if err != nil {
 		return nil, err
 	}
-	cfg := s.cfg
-	return &subpathVisibility{
-		hiddenNodes: hidden,
-		hiddenObserver: func(id, name string) bool {
-			return identityHidden(cfg, id, name)
-		},
-	}, nil
+	return &subpathVisibility{cfg: s.cfg, hidden: hidden}, nil
 }

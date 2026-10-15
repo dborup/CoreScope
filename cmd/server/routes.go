@@ -3217,31 +3217,21 @@ func (s *Server) handleAnalyticsSubpathDetail(w http.ResponseWriter, r *http.Req
 		writeJSON(w, ErrorResp{Error: "Need at least 2 hops"})
 		return
 	}
-	// A hop that is a full key of a hidden identity is rejected up front; a
-	// short prefix is never compared with a key, it counts only through the
-	// node the store resolves it to (#410).
-	for _, hop := range rawHops {
-		if identityHidden(s.cfg, hop) {
-			writeError(w, 404, "Not found")
-			return
-		}
-	}
+	// A hop, short prefix or full key, counts only through the node the store
+	// resolves it to; a hidden one is answered like a hop that matches no
+	// node (#410).
 	if s.store != nil {
 		if !s.store.SubpathIndexReady() {
 			writeIndexLoading503(w)
 			return
 		}
-		vis, err := s.subpathVisibility(r.Context())
+		parts := s.store.SubpathDetail(rawHops)
+		vis, err := s.subpathVisibility(r.Context(), parts.pubkeys())
 		if err != nil {
 			writeError(w, 500, "identity visibility lookup failed")
 			return
 		}
-		detail := s.store.GetSubpathDetail(rawHops, vis)
-		if detail == nil {
-			writeError(w, 404, "Not found")
-			return
-		}
-		writeJSON(w, detail)
+		writeJSON(w, parts.response(vis))
 		return
 	}
 	writeJSON(w, SubpathDetailResponse{

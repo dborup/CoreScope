@@ -56,7 +56,11 @@ func TestSubpathDetailParentPathsTieOrder_273(t *testing.T) {
 	sort.Strings(tiedPaths)
 	want := append([]string{"a1 → b1 → " + hiSuffix}, tiedPaths[:14]...)
 	assertSameEveryRun(t, "parentPaths path", want, func() interface{} {
-		return mapField(s.GetSubpathDetail(rawHops)["parentPaths"], "path")
+		var out []string
+		for _, pp := range s.GetSubpathDetail(rawHops).ParentPaths {
+			out = append(out, pp.Path)
+		}
+		return out
 	})
 }
 
@@ -92,6 +96,10 @@ func TestSubpathDetailObserversTieOrder_273(t *testing.T) {
 	sort.Strings(tiedObs)
 	want := append([]string{hiObs}, tiedObs[:9]...)
 	assertSameEveryRun(t, "observers name", want, func() interface{} {
-		return mapField(s.GetSubpathDetail(rawHops)["observers"], "name")
+		var out []string
+		for _, o := range s.GetSubpathDetail(rawHops).Observers {
+			out = append(out, o.Name)
+		}
+		return out
 	})
 }

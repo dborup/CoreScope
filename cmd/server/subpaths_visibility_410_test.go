@@ -634,6 +634,30 @@ func TestSubpathRowHidden410_SharedNameFailsClosed(t *testing.T) {
 	}
 }
 
+// The detail's identity lookup covers exactly what the detail can show: the
+// requested hops' nodes, the parent paths' nodes and the observer ids, and
+// not every known node.
+func TestRoutePatterns410_DetailLookupScope(t *testing.T) {
+	srv, _ := setupRoutePatternsServer(t, "visible", &Config{Port: 3000})
+	got := srv.store.SubpathDetail([]string{"aa", "dd"}).pubkeys()
+	want := []string{rpAlpha, rpDup1, rpHiddenB, "obs1", "obs2"}
+	gotSet := map[string]bool{}
+	for _, pk := range got {
+		if gotSet[pk] {
+			t.Errorf("duplicate key %q in %v", pk, got)
+		}
+		gotSet[pk] = true
+	}
+	if len(got) != len(want) {
+		t.Errorf("lookup keys %v, want %v", got, want)
+	}
+	for _, pk := range want {
+		if !gotSet[pk] {
+			t.Errorf("lookup keys %v lack %q", got, pk)
+		}
+	}
+}
+
 // BenchmarkRoutePatterns410_Detail2000Nodes times one restricted detail
 // request with about 2,000 known nodes, i.e. what the identity lookup costs
 // at a production-like node count.
