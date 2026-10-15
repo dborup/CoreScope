@@ -2038,6 +2038,9 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
  * public/app.js). The icon + sr-only text carry it without colour. */
 .path-hash-warn { color: var(--path-hash-warn); font-weight: 600; }
 .path-hash-warn .ph-icon { margin-right: 3px; vertical-align: -0.125em; }
+/* #480 — "no scope" marker (renderNoScope in app.js): reuses the amber
+ * --path-hash-warn recommendation colour; stays compact on most messages. */
+.no-scope { white-space: nowrap; }
 .ch-path-hash-badge--warn { border-color: var(--path-hash-warn); align-items: center; }
 .node-path-hash-badge { background: var(--surface-2); border: 1px solid var(--path-hash-warn); font-size: 10px; }
 .ch-analyze-link { color: var(--link-color); text-decoration: none; margin-left: 8px; }

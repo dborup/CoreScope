@@ -198,6 +198,7 @@ run test-issue-479-observer-airtime.js
 run test-issue-1509-nav-active-bg.js
 run test-issue-1509-detect-preset.js
 run test-issue-353-path-hash-warn.js
+run test-issue-480-no-scope.js
 run test-live.js
 run test-issue-220-live-filter-readiness.js
 run test-coverage-gate.js
