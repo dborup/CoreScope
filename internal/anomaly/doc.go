@@ -3,9 +3,12 @@
 //
 // # Status
 //
-//   - Experimental and offline only. Nothing in CoreScope calls this package:
-//     no ingestor, server, API, UI, database, config, webhook or notification
-//     wiring exists. Its only callers are its own tests and benchmarks.
+//   - Experimental and offline only. Nothing in the server or the ingestor
+//     calls this package: no ingestor, server, API, UI, database, config,
+//     webhook or notification wiring exists. Its only callers are its own
+//     tests and benchmarks and the offline tool cmd/anomaly (replay, and a
+//     read-only export of replay lines from a CoreScope database), which is
+//     not built into any image.
 //   - There are NO default thresholds. Every limit and threshold must be set
 //     explicitly in Config; New rejects the zero value and rejects a config
 //     that enables no rule. Values used in tests are named experimental
