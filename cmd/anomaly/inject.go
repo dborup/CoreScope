@@ -168,8 +168,14 @@ func botPRNG(seed uint64, name string) *prng {
 
 // botStats counts what one bot produced.
 type botStats struct {
-	Name            string    `json:"name"`
-	Channel         string    `json:"channel"`
+	Name    string `json:"name"`
+	Channel string `json:"channel"`
+	// Key is the stream key every one of this bot's events falls on, in the
+	// library's canonical encoding. The evaluation needs it: a bot placed on
+	// a key real traffic uses shares that key with the background, and
+	// scoring on the channel hash alone could then credit a real train to
+	// the bot (or the other way round).
+	Key             string    `json:"key"`
 	PulsesScheduled int       `json:"pulses_scheduled"`
 	PulsesEmitted   int       `json:"pulses_emitted"`
 	PulsesMissed    int       `json:"pulses_missed"`
@@ -195,12 +201,16 @@ type injectSummary struct {
 // range, with the bot's period. It holds no key material, no observer
 // identity and no text.
 type Incident struct {
-	Bot     string    `json:"bot"`
-	Channel string    `json:"channel"`
-	Start   time.Time `json:"start"`
-	Stop    time.Time `json:"stop"`
-	Period  dur       `json:"period"`
-	Pulses  int       `json:"pulses"`
+	Bot     string `json:"bot"`
+	Channel string `json:"channel"`
+	// Key is the bot's stream key (see botStats.Key). score matches on it
+	// when it is present, so an episode of real traffic on the same channel
+	// but a different route group is never mistaken for the bot.
+	Key    string    `json:"key"`
+	Start  time.Time `json:"start"`
+	Stop   time.Time `json:"stop"`
+	Period dur       `json:"period"`
+	Pulses int       `json:"pulses"`
 }
 
 // InjectLabels is the labels file: the ground truth of one injection run.
@@ -441,7 +451,7 @@ func generate(s injectSpec, maxInjected int) ([]injEvent, []botStats, []Incident
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		inc := labelIncidents(b.Name, b.Channel, botEvs, s.Labelling)
+		inc := labelIncidents(b.Name, b.Channel, st.Key, botEvs, s.Labelling)
 		st.Incidents = len(inc)
 		evs = append(evs, botEvs...)
 		stats = append(stats, st)
@@ -465,6 +475,14 @@ func generateBot(b *injectBot, seed uint64, finalAfter time.Duration, budget int
 	p := botPRNG(seed, b.Name)
 	st := botStats{Name: b.Name, Channel: b.Channel}
 	period := time.Duration(b.Period)
+	// Every one of a bot's events carries the same wire fields, so the bot
+	// has exactly one stream key. Derive it once, from the same Event the
+	// detector would see.
+	key, err := botStreamKey(b, finalAfter)
+	if err != nil {
+		return nil, botStats{}, err
+	}
+	st.Key = key
 	var evs []injEvent
 	emit := func(pulse, part int, when time.Time) error {
 		if len(evs) >= budget {
@@ -552,6 +570,26 @@ func generateBot(b *injectBot, seed uint64, finalAfter time.Duration, budget int
 	return evs, st, nil
 }
 
+// botStreamKey returns the canonical stream key of a bot's events. It builds
+// the same ReplayRecord emit builds, so a spec whose wire fields do not make
+// a valid event fails here rather than silently labelling nothing.
+func botStreamKey(b *injectBot, finalAfter time.Duration) (string, error) {
+	rec := anomaly.ReplayRecord{ID: injPrefix + b.Name + "-key", Time: b.Start.UTC().Truncate(time.Second),
+		PayloadType: *b.PayloadType, Channel: b.Channel, RouteClass: b.RouteClass, RouteKind: b.RouteKind,
+		FirstHop: b.FirstHop, FullRoute: b.FullRoute, WireBytes: b.WireBytes,
+		Traffic: "unclassified", Decryption: "unknown"}
+	rec.FinalAt = rec.Time.Add(finalAfter)
+	if b.PayloadBytes != nil {
+		pb := *b.PayloadBytes
+		rec.PayloadBytes = &pb
+	}
+	ev, err := rec.Event()
+	if err != nil {
+		return "", fmt.Errorf("inject: bot %q: %w", b.Name, err)
+	}
+	return anomaly.StreamKeyOf(ev).String(), nil
+}
+
 func inHole(holes []injectHole, t time.Time) bool {
 	for _, h := range holes {
 		if !t.Before(h.Start) && t.Before(h.Start.Add(time.Duration(h.Duration))) {
@@ -562,7 +600,7 @@ func inHole(holes []injectHole, t time.Time) bool {
 }
 
 // labelIncidents applies the labelling recipe to one bot's emitted events.
-func labelIncidents(bot, channel string, evs []injEvent, l labellingSpec) []Incident {
+func labelIncidents(bot, channel, key string, evs []injEvent, l labellingSpec) []Incident {
 	if len(evs) == 0 {
 		return nil
 	}
@@ -616,7 +654,7 @@ func labelIncidents(bot, channel string, evs []injEvent, l labellingSpec) []Inci
 	runStart := 0
 	flush := func(end int) { // pulses[runStart:end+1] is the run
 		if end-runStart+1 >= l.MinPulses {
-			out = append(out, Incident{Bot: bot, Channel: channel, Start: time.Unix(0, pulses[runStart]).UTC(),
+			out = append(out, Incident{Bot: bot, Channel: channel, Key: key, Start: time.Unix(0, pulses[runStart]).UTC(),
 				Stop: time.Unix(0, pulses[end]).UTC(), Period: dur(period), Pulses: end - runStart + 1})
 		}
 	}

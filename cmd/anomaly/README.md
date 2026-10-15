@@ -239,7 +239,7 @@ single missed pulses, one 35-minute hole, one stable first hop).
     "route_class": "flood",
     "route_kind": "relay",
     "first_hop": "1:fd",
-    "full_route": "3:fd0a1c",
+    "full_route": "1:fd0a1c",
     "wire_bytes": 60,
     "payload_bytes": 35,
     "payload_bytes_spread": 6,

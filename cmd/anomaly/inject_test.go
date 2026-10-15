@@ -576,7 +576,7 @@ func TestInjectLabelsAreKeyFreeAndMarkedSynthetic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, banned := range []string{"1:fd", "fd00", "observer", "tx1", injPrefix, "raw_hex", "public_key"} {
+	for _, banned := range []string{"fd00", "observer", "tx1", injPrefix, "raw_hex", "public_key"} {
 		if bytes.Contains(raw, []byte(banned)) {
 			t.Fatalf("labels file carries %q:\n%s", banned, raw)
 		}
@@ -584,5 +584,13 @@ func TestInjectLabelsAreKeyFreeAndMarkedSynthetic(t *testing.T) {
 	// It does carry the channel hash, the times and the period.
 	if !bytes.Contains(raw, []byte(`"channel": "7f"`)) || !bytes.Contains(raw, []byte(`"period": "5m0s"`)) {
 		t.Fatalf("labels file is missing the ground truth:\n%s", raw)
+	}
+	// Since #474 round 2 it also carries the bot's stream key, which
+	// scoring needs to tell a bot apart from real traffic on the same
+	// channel hash. The key holds the payload type, the channel hash, the
+	// route class and kind and the first hop - fields the export itself
+	// carries - and nothing else: no whole route, no ids, no observers.
+	if !bytes.Contains(raw, []byte(`"key": "`+scoreKey+`"`)) {
+		t.Fatalf("labels file is missing the stream key:\n%s", raw)
 	}
 }
