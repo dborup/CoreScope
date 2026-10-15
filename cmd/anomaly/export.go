@@ -27,8 +27,9 @@ import (
 // query reads the frame (raw_hex), the observation's path (path_json), its
 // time and the row IDs that join it to its transmission; never the content
 // hash, decoded_json, channel names, public keys, observer columns,
-// SNR/RSSI or resolved paths. A line's id is the export's own number (see
-// txNumbering). Bounded: one index range scan on observations.timestamp
+// SNR/RSSI or resolved paths (except observer_idx for the opt-in backlog
+// flag, which only a boolean leaves). A line's id is the export's own
+// number (see txNumbering). Bounded: one index range scan on observations.timestamp
 // over [start - settle, end + settle) with a hard -max-rows cap; per row a
 // primary-key lookup and one index search; memory is bounded by the caps
 // below (Normalizer and ID numbering).
@@ -39,7 +40,11 @@ import (
 // applied in SQL against every observation of the transmission, also those
 // before the range, so a transmission first heard before start never
 // becomes an in-range event. Observation time is observations.timestamp
-// (server ingest time, whole seconds).
+// (whole seconds): the observer's receive time from the MQTT envelope, or
+// the ingest time where the ingestor falls back to it (resolveRxTime).
+//
+// With -backlog-silence and -backlog-span the export also flags events
+// whose first observation follows a silence of its observer (backlog.go).
 
 const (
 	maxExportSpan   = 31 * 24 * time.Hour
@@ -61,6 +66,9 @@ type exportOptions struct {
 	MaxRows    int
 	// Immutable opens DB as a static snapshot copy (see openImmutable).
 	Immutable bool
+	// BacklogSilence and BacklogSpan enable the ingest-backlog flag
+	// (backlog.go); both or neither, 0 is off.
+	BacklogSilence, BacklogSpan time.Duration
 }
 
 func (o exportOptions) validate() error {
@@ -80,7 +88,7 @@ func (o exportOptions) validate() error {
 	case o.MaxRows <= 0 || o.MaxRows > maxExportRows:
 		return fmt.Errorf("-max-rows must be in 1..%d", maxExportRows)
 	}
-	return nil
+	return o.validateBacklog()
 }
 
 // exportSummary counts rows and events; it holds no values from the data.
@@ -102,6 +110,8 @@ type exportSummary struct {
 	InvalidEvents    int                     `json:"invalid_events"`
 	CoverageReduced  bool                    `json:"coverage_reduced"`
 	Normalizer       anomaly.NormalizerStats `json:"normalizer"`
+	// IngestBacklog is set only when the backlog flag is enabled.
+	IngestBacklog *backlogSummary `json:"ingest_backlog,omitempty"`
 }
 
 // openReadOnly opens path with SQLite's mode=ro: the connection cannot
@@ -146,13 +156,17 @@ func openSQLite(path, params string) (*sql.DB, error) {
 // exportQuery selects the observations in [?1, ?2) whose time is at most
 // ?3 seconds after the first observation of their transmission, in arrival
 // order, at most ?4 rows. ownRaw selects observations.raw_hex, which older
-// databases lack.
-func exportQuery(ownRaw bool) string {
-	raw := "NULL"
+// databases lack; observer adds observations.observer_idx for the backlog
+// flag.
+func exportQuery(ownRaw, observer bool) string {
+	raw, obs := "NULL", ""
 	if ownRaw {
 		raw = "o.raw_hex"
 	}
-	return `SELECT o.id, o.timestamp, o.path_json, ` + raw + `, o.transmission_id, t.raw_hex
+	if observer {
+		obs = ", o.observer_idx"
+	}
+	return `SELECT o.id, o.timestamp, o.path_json, ` + raw + `, o.transmission_id, t.raw_hex` + obs + `
 FROM observations o JOIN transmissions t ON t.id = o.transmission_id
 WHERE o.timestamp >= ?1 AND o.timestamp < ?2
   AND NOT EXISTS (SELECT 1 FROM observations p
@@ -192,8 +206,15 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 	if err != nil {
 		return sum, err
 	}
+	var backlog *backlogTracker
+	if opt.backlog() {
+		sum.IngestBacklog = &backlogSummary{}
+		if backlog, err = scanBacklog(db, opt, sum.IngestBacklog); err != nil {
+			return sum, err
+		}
+	}
 	ids := newTxNumbering(int64(opt.Settle/time.Second), exportMaxPending)
-	rows, err := db.Query(exportQuery(ownRaw), opt.Start.Add(-opt.Settle).Unix(), opt.End.Add(opt.Settle).Unix(),
+	rows, err := db.Query(exportQuery(ownRaw, backlog != nil), opt.Start.Add(-opt.Settle).Unix(), opt.End.Add(opt.Settle).Unix(),
 		int64(opt.Settle/time.Second), opt.MaxRows+1)
 	if err != nil {
 		return sum, err
@@ -221,6 +242,9 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 				return err
 			}
 			sum.EventsWritten++
+			if e.IngestBacklog {
+				sum.IngestBacklog.EventsFlagged++
+			}
 		}
 		return nil
 	}
@@ -229,7 +253,11 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 			return sum, fmt.Errorf("more than -max-rows %d observation rows in range; output incomplete", opt.MaxRows)
 		}
 		var r obsRow
-		if err := rows.Scan(&r.id, &r.ts, &r.pathJSON, &r.ownRaw, &r.tx, &r.txRaw); err != nil {
+		dest := []interface{}{&r.id, &r.ts, &r.pathJSON, &r.ownRaw, &r.tx, &r.txRaw}
+		if backlog != nil {
+			dest = append(dest, &r.observer)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return sum, err
 		}
 		id, err := ids.id(r.tx, r.ts)
@@ -246,6 +274,9 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 		}
 		if note.pathUnknown {
 			sum.PathUnknown++
+		}
+		if backlog != nil {
+			o.IngestBacklog = backlog.flagged(r.observer, r.ts)
 		}
 		if err := emit(norm.Add(o).Events); err != nil {
 			return sum, err
@@ -266,6 +297,7 @@ type obsRow struct {
 	id, ts, tx       int64
 	pathJSON, ownRaw sql.NullString
 	txRaw            string
+	observer         sql.NullInt64 // read only for the backlog flag
 }
 
 // txNumbering gives each transmission an id of the export's own: "tx" and
@@ -471,6 +503,8 @@ func runExport(args []string, stderr io.Writer) int {
 	settle := fs.Duration("settle", 0, "route evidence window after a transmission's first observation, (0, 1h] (required)")
 	maxRows := fs.Int("max-rows", 0, "hard cap on observation rows read; exceeding it fails the export (required)")
 	out := fs.String("out", "", "output JSON Lines file; must not exist (required)")
+	silence := fs.Duration("backlog-silence", 0, "with -backlog-span: an observation with no observation of its observer in this long before it is a reconnect (optional, no default)")
+	spn := fs.Duration("backlog-span", 0, "with -backlog-silence: flag events first heard by an observer within this long after its reconnect (optional, no default)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -481,7 +515,8 @@ func runExport(args []string, stderr io.Writer) int {
 	if fs.NArg() != 0 {
 		return usageErr(errors.New("unexpected arguments"))
 	}
-	opt := exportOptions{DB: *dbPath, Settle: *settle, MaxRows: *maxRows, Immutable: *immutable}
+	opt := exportOptions{DB: *dbPath, Settle: *settle, MaxRows: *maxRows, Immutable: *immutable,
+		BacklogSilence: *silence, BacklogSpan: *spn}
 	var err error
 	if opt.Start, err = parseTime("start", *start); err != nil {
 		return usageErr(err)

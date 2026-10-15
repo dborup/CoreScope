@@ -72,6 +72,10 @@ type Event struct {
 	// for capacity (fan-out cap or forced early finalization); its first hop
 	// may then rest on incomplete route evidence.
 	Truncated bool
+	// IngestBacklog is the flag of the first observation (the one that sets
+	// Time; see Observation.IngestBacklog). Only rate rules with
+	// ExcludeIngestBacklog read it; every other rule ignores it.
+	IngestBacklog bool
 }
 
 func (e *Event) finalAt() time.Time {
@@ -173,6 +177,11 @@ type Observation struct {
 	PayloadBytes int
 	PayloadKnown bool
 	Traffic      TrafficClass
+	// IngestBacklog marks an observation that the caller found to belong to
+	// an ingest backlog (for the export: its observer's activity right after
+	// a silence). It is a key-free boolean: the library never learns which
+	// observer, or why.
+	IngestBacklog bool
 }
 
 func (o *Observation) arrived() time.Time {
@@ -254,7 +263,8 @@ func sameObservation(a, b *Observation) bool {
 		a.arrived().Equal(b.arrived()) && a.PayloadType == b.PayloadType && a.Channel == b.Channel &&
 		a.PayloadKnown == b.PayloadKnown && a.PayloadBytes == b.PayloadBytes &&
 		a.Decryption == b.Decryption && a.RouteClass == b.RouteClass &&
-		a.Path.equal(b.Path) && a.WireBytes == b.WireBytes && a.Traffic == b.Traffic
+		a.Path.equal(b.Path) && a.WireBytes == b.WireBytes && a.Traffic == b.Traffic &&
+		a.IngestBacklog == b.IngestBacklog
 }
 
 // obsLess orders observations by data time, then by ObsID. This is the
@@ -281,6 +291,7 @@ func buildEvent(obs []*Observation, finalAt time.Time, excluded int) Event {
 		Channel:              sorted[0].Channel,
 		Observations:         len(sorted),
 		ExcludedObservations: excluded,
+		IngestBacklog:        sorted[0].IngestBacklog,
 	}
 	// Reference observation: the earliest (Time, ObsID) with a relay path;
 	// else the earliest no-path flood; else the earliest direct; else the

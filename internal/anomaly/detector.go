@@ -134,8 +134,9 @@ func New(cfg Config) (*Detector, error) {
 	c.Rate = append([]RateRule(nil), cfg.Rate...)
 	c.NewStream = append([]NewStreamRule(nil), cfg.NewStream...)
 	c.Periodic = append([]PeriodicRule(nil), cfg.Periodic...)
-	// PayloadTypes are the only slices inside the rules: copy them too, so the
-	// caller's config and the Detector never share a backing array.
+	// PayloadTypes, and a periodic rule's ExcludeChannels, are the only
+	// slices inside the rules: copy them too, so the caller's config and the
+	// Detector never share a backing array.
 	for i := range c.Rate {
 		c.Rate[i].PayloadTypes = slices.Clone(c.Rate[i].PayloadTypes)
 	}
@@ -144,10 +145,11 @@ func New(cfg Config) (*Detector, error) {
 	}
 	for i := range c.Periodic {
 		c.Periodic[i].PayloadTypes = slices.Clone(c.Periodic[i].PayloadTypes)
+		c.Periodic[i].ExcludeChannels = slices.Clone(c.Periodic[i].ExcludeChannels)
 	}
 	d := &Detector{cfg: c, dedup: make(map[TxID]int64)}
 	for i := range c.Rate {
-		d.table(c.Rate[i].Scope).addRate(i, c.Rate[i].Window)
+		d.table(c.Rate[i].Scope).addRate(i, c.Rate[i].Window, c.Rate[i].ExcludeIngestBacklog)
 	}
 	for i := range c.NewStream {
 		d.table(c.NewStream[i].Scope).rules.newStream = append(d.table(c.NewStream[i].Scope).rules.newStream, i)
@@ -413,11 +415,14 @@ func (d *Detector) advanceFrontier(t int64) {
 // ---- key tables ----
 
 type scopeRules struct {
-	rate      []int   // indices into Config.Rate
-	widthOf   []int   // per rate rule: index into widths
-	widths    []int64 // distinct window widths (ns)
-	newStream []int
-	periodic  []int
+	rate    []int // indices into Config.Rate
+	widthOf []int // per rate rule: index into widths, or gwidths if guarded
+	// distinct window widths (ns) of the unguarded and of the guarded rate
+	// rules; each set has its own windows, so a guarded count never sees a
+	// flagged event and an unguarded count always does
+	widths, gwidths []int64
+	newStream       []int
+	periodic        []int
 }
 
 func (r *scopeRules) slots() int { return len(r.rate) + len(r.newStream) + len(r.periodic) }
@@ -426,7 +431,8 @@ type keyState struct {
 	key        Key
 	lastSeen   int64
 	prev, next *keyState
-	win        *windowSet
+	win        *windowSet // unguarded rate windows: every event
+	gwin       *windowSet // guarded rate windows: events without IngestBacklog
 	ns         []newStreamState
 	per        []*periodicState
 	eps        []episode
@@ -458,16 +464,20 @@ func newKeyTable(s Scope) *keyTable {
 	return t
 }
 
-func (t *keyTable) addRate(ruleIdx int, w time.Duration) {
+func (t *keyTable) addRate(ruleIdx int, w time.Duration, guarded bool) {
+	widths := &t.rules.widths
+	if guarded {
+		widths = &t.rules.gwidths
+	}
 	wi := -1
-	for i, x := range t.rules.widths {
+	for i, x := range *widths {
 		if x == int64(w) {
 			wi = i
 		}
 	}
 	if wi < 0 {
-		wi = len(t.rules.widths)
-		t.rules.widths = append(t.rules.widths, int64(w))
+		wi = len(*widths)
+		*widths = append(*widths, int64(w))
 	}
 	t.rules.rate = append(t.rules.rate, ruleIdx)
 	t.rules.widthOf = append(t.rules.widthOf, wi)
@@ -541,8 +551,11 @@ func (d *Detector) getKey(t *keyTable, key Key, now int64) *keyState {
 	}
 	k := &keyState{key: key}
 	r := &t.rules
-	if len(r.rate) > 0 {
+	if len(r.widths) > 0 {
 		k.win = newWindowSet(len(r.widths))
+	}
+	if len(r.gwidths) > 0 {
+		k.gwin = newWindowSet(len(r.gwidths))
 	}
 	if len(r.newStream) > 0 {
 		k.ns = make([]newStreamState, len(r.newStream))
@@ -604,13 +617,13 @@ func (d *Detector) handle(e *Event) {
 		r := &tb.rules
 		applies := false
 		for _, i := range r.rate {
-			applies = applies || appliesTo(d.cfg.Rate[i].PayloadTypes, e.PayloadType)
+			applies = applies || d.cfg.Rate[i].counts(e)
 		}
 		for _, i := range r.newStream {
 			applies = applies || appliesTo(d.cfg.NewStream[i].PayloadTypes, e.PayloadType)
 		}
 		for _, i := range r.periodic {
-			applies = applies || appliesTo(d.cfg.Periodic[i].PayloadTypes, e.PayloadType)
+			applies = applies || periodicApplies(&d.cfg.Periodic[i], e)
 		}
 		if !applies {
 			continue
@@ -619,20 +632,28 @@ func (d *Detector) handle(e *Event) {
 		k.lastSeen = t
 		cov := d.coverageFor(tb, k, t)
 		slot := 0
-		if k.win != nil {
-			if k.win.add(t, e.Traffic, r.widths, d.cfg.Limits.MaxWindowEntries) {
+		if len(r.rate) > 0 {
+			merged := k.win != nil && k.win.add(t, e.Traffic, r.widths, d.cfg.Limits.MaxWindowEntries)
+			if k.gwin != nil && !e.IngestBacklog && k.gwin.add(t, e.Traffic, r.gwidths, d.cfg.Limits.MaxWindowEntries) {
+				merged = true
+			}
+			if merged {
 				d.stats.WindowMerges++
 				d.callReduced = true
 				cov |= CoverageWindowSaturated
 			}
 			for ri, i := range r.rate {
 				rule := &d.cfg.Rate[i]
-				if appliesTo(rule.PayloadTypes, e.PayloadType) {
-					sum := k.win.sums[r.widthOf[ri]]
+				if rule.counts(e) {
+					win := k.win
+					if rule.ExcludeIngestBacklog {
+						win = k.gwin
+					}
+					sum := win.sums[r.widthOf[ri]]
 					if sum.n >= uint64(rule.Threshold) {
 						ev := &RateEvidence{Window: rule.Window, Threshold: rule.Threshold, Count: sum.n,
 							Expected: sum.exp, Monitored: sum.mon,
-							Saturated: k.win.lastMerge != 0 && k.win.lastMerge > t-int64(rule.Window)}
+							Saturated: win.lastMerge != 0 && win.lastMerge > t-int64(rule.Window)}
 						c := cov
 						if ev.Saturated {
 							c |= CoverageWindowSaturated
@@ -655,7 +676,7 @@ func (d *Detector) handle(e *Event) {
 		}
 		for pi, i := range r.periodic {
 			rule := &d.cfg.Periodic[i]
-			if appliesTo(rule.PayloadTypes, e.PayloadType) {
+			if periodicApplies(rule, e) {
 				ps := k.per[pi]
 				before := ps.evaluated
 				ep := &k.eps[slot]
@@ -673,6 +694,21 @@ func (d *Detector) handle(e *Event) {
 			slot++
 		}
 	}
+}
+
+// periodicApplies reports whether a periodic rule sees this event: its
+// payload type must match, and its channel hash must not be one the rule
+// excludes (PeriodicRule.ExcludeChannels). An excluded event never reaches
+// the rule, so the rule forms no pulse, chain or episode on that channel and
+// an excluded channel alone never claims key state.
+func periodicApplies(rule *PeriodicRule, e *Event) bool {
+	return appliesTo(rule.PayloadTypes, e.PayloadType) && !rule.excludes(e.Channel)
+}
+
+// counts reports whether the rule counts e: its payload type, and not a
+// flagged event for a guarded rule.
+func (r *RateRule) counts(e *Event) bool {
+	return appliesTo(r.PayloadTypes, e.PayloadType) && !(r.ExcludeIngestBacklog && e.IngestBacklog)
 }
 
 // track follows the pulse train of an active periodic episode (track.go).

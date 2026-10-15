@@ -67,12 +67,28 @@ async function longObserver(page) {
 }
 const observerTexts = (page) => page.$$eval('#pktBody td.col-observer', tds => tds.map(t => t.textContent));
 const firstPill = (page) => page.locator('#pktBody .path-overflow-pill').first();
-async function pillInfo(page) {
-  return page.$$eval('#pktBody .path-overflow-pill', ps => ps.map(p => {
-    const r = p.getBoundingClientRect(), h = p.closest('.path-hops').getBoundingClientRect();
+// One synchronous pass inside the page: the pills are queried and measured in
+// the same task, so a re-render cannot detach one between the two (#471). A
+// pill with no .path-hops ancestor is reported as outside, not thrown on.
+function measurePills() {
+  return [...document.querySelectorAll('#pktBody .path-overflow-pill')].map(p => {
+    const host = p.closest('.path-hops');
+    if (!host) return { text: p.textContent, inside: false };
+    const r = p.getBoundingClientRect(), h = host.getBoundingClientRect();
     return { text: p.textContent, inside: r.width > 0 && r.left >= h.left - 1 && r.right <= h.right + 1 };
-  }));
+  });
 }
+const pillInfo = (page) => page.evaluate(measurePills);
+// The packets table is stable once no re-finalize pass is armed (the observer
+// _scheduleReFinalizePathOverflow wires on #pktBody is gone) and every path
+// host has been measured. Waits on that state, not on a delay (#471).
+const pathOverflowSettled = (page) => page.waitForFunction(() => {
+  const body = document.getElementById('pktBody');
+  return !!body && !body._rePathOverflowObserver &&
+    body.querySelectorAll('.path-hops').length > 0 &&
+    [...body.querySelectorAll('.path-hops')].every(h => h.dataset.overflowChecked === '1') &&
+    body.querySelectorAll('.path-overflow-pill').length > 0;
+}, null, { timeout: 8000 });
 
 (async () => {
   const browser = await chromium.launch({
@@ -144,10 +160,29 @@ async function pillInfo(page) {
 
     await openPackets(page);
     await step('B1 every +N pill sits inside its path cell', async () => {
+      await pathOverflowSettled(page);
       const info = await pillInfo(page);
       assert(info.length > 0, 'no pills');
       const out = info.filter(i => !i.inside);
       assert(out.length === 0, out.length + ' of ' + info.length + ' pills lie outside their cell');
+    });
+    await step('B2 the check is not vacuous: a pill moved out of its path-hops is reported outside', async () => {
+      // The mutant: the pill sits in the <td>, not inside .path-hops. Moved,
+      // measured and put back in one synchronous pass, so no re-render can
+      // interleave and the table the later steps use is untouched.
+      const r = await page.evaluate((src) => {
+        const measure = (0, eval)('(' + src + ')');
+        const p = document.querySelector('#pktBody .path-overflow-pill');
+        const home = p.parentElement, td = p.closest('td');
+        td.appendChild(p);
+        const placed = p.parentElement === td && !p.closest('.path-hops');
+        const info = measure();
+        home.appendChild(p);
+        return { placed, outside: info.filter(i => !i.inside).length, back: measure().every(i => i.inside) };
+      }, String(measurePills));
+      assert(r.placed, 'could not place a pill outside its path-hops');
+      assert(r.outside === 1, 'expected the misplaced pill to be flagged, got ' + r.outside);
+      assert(r.back, 'table not restored');
     });
 
     await step('C1 hover opens a vertical, numbered popover that counts the hidden hops', async () => {

@@ -786,12 +786,18 @@ test('#333 RF-health cell escapes observer_id in attributes', () => {
   assert.ok(m, '#333 RF-health cell template not found');
   const fn = new Function(
     'obs', 'isSelected', 'esc', 'nf', 'avgNf', 'maxNf', 'batt', 'nfClass', 'name',
+    'ObserverAirtime', 'summaryData',
     'return `' + m[1] + '`;');
+  // The tile's TX 1h stat comes from the real shared helper (#479).
+  const airCtx = { window: {} };
+  vm.createContext(airCtx);
+  vm.runInContext(fs.readFileSync('public/observer-airtime.js', 'utf8'), airCtx);
   // Double-quote attribute breakout attempt on observer_id.
   const dqPayload = '"><img src=x onerror=alert(1)>';
   const html = fn(
     { observer_id: dqPayload, sample_count: 5 }, false, analyticsEsc,
-    '-100', '-105', '-95', '', '', TAG_PAYLOAD + ATTR_PAYLOAD);
+    '-100', '-105', '-95', '', '', TAG_PAYLOAD + ATTR_PAYLOAD,
+    airCtx.window.ObserverAirtime, { duty_cycle_warn_pct: 10 });
   assert.ok(!/<img\b/i.test(html),
     '#333 RF-health: raw <img survived (observer_id attr breakout): ' + html);
   assert.ok(html.includes('&quot;') || html.includes('&lt;'),

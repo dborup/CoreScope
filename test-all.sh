@@ -194,9 +194,11 @@ run test-issue-1407-cb-preset-propagation.js
 run test-issue-1412-customizer-no-override.js
 run test-issue-1846-observers-width.js
 run test-issue-1562-observers-summary.js
+run test-issue-479-observer-airtime.js
 run test-issue-1509-nav-active-bg.js
 run test-issue-1509-detect-preset.js
 run test-issue-353-path-hash-warn.js
+run test-issue-480-no-scope.js
 run test-live.js
 run test-issue-220-live-filter-readiness.js
 run test-coverage-gate.js
@@ -224,6 +226,7 @@ run test-a11y-axe-routes-coverage.js
 
 # Green unit tests that no runner registered before (#174 inventory)
 run test-1108-region-hide-nodes.js
+run test-458-scope-name-case.js
 run test-a11y-1715-dark-role-swatches.js
 run test-analytics-distance-view-path.js
 run test-analytics-wardriving-tab.js

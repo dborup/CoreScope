@@ -44,6 +44,28 @@
 //   - A global (payload-type) candidate is never attributed to a stream,
 //     channel or route.
 //
+// # What the periodic rule is for (#474)
+//
+// The periodic rule's target is an abusive channel bot: a sender that floods
+// a public or hashtag channel with automated messages. Automation that is
+// expected on its channel is NOT a target. The #457 round-4 validation
+// measured the opposite: all six labelled periodic incidents were wardriving
+// trips, where an app posts positions every 75-123 s while someone drives,
+// so the recipe counted normal behaviour as incidents and the rule failed on
+// recall (0.17).
+//
+// PeriodicRule.ExcludeChannels is the library's side of that correction: the
+// caller names the channel hashes whose automation is expected, and the rule
+// never sees an event on them. It is opt-in and has no default, so an
+// unconfigured rule behaves exactly as before. Because a MeshCore channel
+// hash is one byte, one entry excludes every channel name that hashes to
+// that byte; see PeriodicRule.ExcludeChannels.
+//
+// Neither the list nor anything else here makes a rule validated. A target
+// definition, an exclusion list and an evaluation are three different
+// things, and only the evaluation (fresh data, pre-registered bars) can
+// support a claim.
+//
 // # Data contract
 //
 // The Detector consumes FINAL Events, one per logical transmission, and
@@ -89,7 +111,11 @@
 // # Building blocks implemented
 //
 //   - RateRule: sliding windows (t-W, t] at stream, channel, route-group or
-//     global scope, any width from 1 s to 24 h.
+//     global scope, any width from 1 s to 24 h. With ExcludeIngestBacklog
+//     (opt-in, #473) a rule ignores events with Event.IngestBacklog set: a
+//     key-free boolean the caller derives (the export: from observer
+//     activity), taken from the event's first observation. Unguarded
+//     rules, and every other rule kind, never read it.
 //   - NewStreamRule: causal new-stream volume with left censoring (the
 //     censor window must cover QuietPeriod) and reactivation after silence.
 //   - PeriodicRule: causal periodicity with explicit burst, jitter, missing

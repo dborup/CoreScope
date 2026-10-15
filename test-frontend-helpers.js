@@ -2430,6 +2430,23 @@ console.log('\n=== app.js: isTransportRoute + transportBadge ===');
   test('isTransportRoute(null) is false', () => assert.strictEqual(isTransportRoute(null), false));
   test('isTransportRoute(undefined) is false', () => assert.strictEqual(isTransportRoute(undefined), false));
 
+  test('transportBadge keeps scope case through CSS (#458 F1)', () => {
+    const fs = require('fs');
+    const css = fs.readFileSync(__dirname + '/public/style.css', 'utf8');
+    const html = transportBadge(0, '#dk-oj');
+    assert(html.includes('T·#dk-oj'), 'label keeps case in markup: ' + html);
+    const classes = html.match(/class="([^"]+)"/)[1].split(/\s+/);
+    // Effective text-transform: last matching declaration wins (single-class selectors).
+    let eff = 'none';
+    const re = /([^{}]+)\{([^}]*)\}/g; let m;
+    while ((m = re.exec(css))) {
+      const sels = m[1].replace(/\/\*[\s\S]*?\*\//g, '').split(',').map(x => x.trim());
+      const hit = sels.some(s => /^\.[\w-]+$/.test(s) && classes.includes(s.slice(1)));
+      const t = hit && m[2].match(/text-transform:\s*([a-z-]+)/);
+      if (t) eff = t[1];
+    }
+    assert.notStrictEqual(eff, 'uppercase', 'transport badge would render uppercased (' + classes.join(' ') + ')');
+  });
   test('transportBadge(0) contains badge-transport class', () => {
     const html = transportBadge(0);
     assert.ok(html.includes('badge-transport'), 'should contain badge-transport class');

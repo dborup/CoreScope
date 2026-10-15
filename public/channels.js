@@ -2840,6 +2840,11 @@
       const isTransportRoute = msg.routeType === 0 || msg.routeType === 3;
       if (msg.scope) meta.push(`scope: ${escapeHtml(msg.scope)}`);
       else if (isTransportRoute) meta.push('scope: unknown');
+      else if (typeof renderNoScope === 'function') {
+        // #480: no scope on a plain FLOOD (decided from the route type, not the name).
+        const noScopeHtml = renderNoScope(msg.routeType);
+        if (noScopeHtml) meta.push(noScopeHtml);
+      }
       // msg.area (set server-side from the message's own path[0]
       // entry-point repeater, not from the scope string) is where the
       // SENDER physically was — distinct from the scope-linked area

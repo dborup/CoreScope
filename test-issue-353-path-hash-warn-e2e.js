@@ -245,7 +245,7 @@ async function assertContrast(page, selector, where) {
       const size = page.locator('dl.detail-meta .detail-hash-size');
       await size.waitFor();
       assert((await size.textContent()) === '2 bytes', 'text ' + await size.textContent());
-      assert(await page.locator('dl.detail-meta .path-hash-warn').count() === 0, '2-byte packet warns');
+      assert(await page.locator('dl.detail-meta .detail-hash-size.path-hash-warn').count() === 0, '2-byte packet warns');
     });
 
     await step(`${v.name}: node detail shows the 1-byte badge, not on a 2-byte node`, async () => {

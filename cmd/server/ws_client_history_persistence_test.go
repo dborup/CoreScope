@@ -116,11 +116,62 @@ func TestWSClientHistory_ClockSkewBeyondToleranceDoesNotDisablePersistence(t *te
 		t.Fatal("persistence must stay healthy across a large clock step-back")
 	}
 	r, _ := wsHistoryRange("24h")
-	if got := reopen.snapshotRange(now, r); len(got) != 1 || got[0].Clients != 3 {
-		t.Fatalf("the far-future sample must stay hidden, not reject the whole journal: %+v", got)
+	if got := reopen.snapshotRange(now.Add(11*time.Minute), r); len(got) != 1 || got[0].Clients != 3 {
+		t.Fatalf("the far-future sample must be skipped at load, not reject the whole journal or block sampling: %+v", got)
 	}
-	if got := reopen.snapshotRange(now.Add(11*time.Minute), r); len(got) != 2 || got[1].Clients != 4 {
-		t.Fatalf("the skipped sample must reappear once wall time catches up to it: %+v", got)
+}
+
+// #463: a journal written by a process whose clock ran ahead must not stall
+// sampling after the clock steps back.
+func TestWSClientHistory_FutureDatedJournalDoesNotStallSampling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	a := newWSClientHistory(100)
+	if err := a.enablePersistence(path, "", now.Add(72*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	a.sampleAndPersist(1, now.Add(72*time.Hour))
+	a.sampleAndPersist(2, now.Add(72*time.Hour+time.Minute))
+	a.closePersistence()
+
+	b := newWSClientHistory(100)
+	if err := b.enablePersistence(path, "", now); err != nil {
+		t.Fatal(err)
+	}
+	b.sampleAndPersist(5, now.Add(time.Minute))
+	b.sampleAndPersist(6, now.Add(2*time.Minute))
+	b.closePersistence()
+	got := b.snapshot()
+	if len(got) != 2 || got[0].Clients != 5 || got[1].Clients != 6 {
+		t.Fatalf("B must keep sampling after loading future-dated records: %+v", got)
+	}
+	// The next restart must still load the journal (order stays valid).
+	c := newWSClientHistory(100)
+	if err := c.enablePersistence(path, "", now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("journal unreadable after new samples: %v", err)
+	}
+	defer c.closePersistence()
+	if got := c.snapshot(); len(got) != 2 || got[1].Clients != 6 {
+		t.Fatalf("reload = %+v", got)
+	}
+}
+
+// #463: equal timestamps are not strictly increasing and must be rejected.
+func TestWSClientHistory_EqualJournalTimestampsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC().Truncate(time.Second)
+	ts := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	line := `{"t":"` + ts + `","clients":1,"peak":1}` + "\n"
+	if err := os.WriteFile(path, []byte(line+line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err == nil {
+		h.closePersistence()
+		t.Fatal("two records with the same timestamp must be rejected")
+	}
+	if got, _ := os.ReadFile(path); string(got) != line+line {
+		t.Fatal("rejected journal must be preserved byte-for-byte")
 	}
 }
 

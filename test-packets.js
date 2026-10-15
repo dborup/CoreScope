@@ -1888,6 +1888,50 @@ console.log('\n=== packets.js: detail Hash Size reads the selected observation =
   });
 }
 
+// ===== packets.js: detail Scope row marks unscoped channel packets (#480) =====
+console.log('\n=== packets.js: detail Scope row marks unscoped channel packets (#480) ===');
+{
+  const api = loadPacketsSandbox()._packetsTestAPI;
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+  const pkt = (o) => Object.assign({ payload_type: 5, route_type: 1, scope_name: null }, o);
+
+  test('unscoped GRP_TXT (FLOOD) gets a Scope row with the marker and explanation', () => {
+    const html = api.scopeDetailHtml(pkt({}));
+    assert.ok(html.startsWith('<dt>Scope</dt><dd>'), html);
+    assert.match(html, /class="no-scope path-hash-warn"/);
+    assert.match(html, /#ph-warning/);
+    assert.match(html, /title="Sent without a scope\./);
+  });
+
+  test('unscoped GRP_DATA (FLOOD) gets the same row', () => {
+    assert.match(api.scopeDetailHtml(pkt({ payload_type: 6 })), /no-scope/);
+  });
+
+  test('scoped packets keep the existing display, with no marker', () => {
+    assert.strictEqual(api.scopeDetailHtml(pkt({ route_type: 0, scope_name: '#dk' })), '<dt>Scope</dt><dd>#dk</dd>');
+    const unknown = api.scopeDetailHtml(pkt({ route_type: 0, scope_name: '' }));
+    assert.match(unknown, /unknown scope/);
+    assert.ok(!unknown.includes('no-scope'));
+  });
+
+  test('a scoped TRANSPORT_FLOOD with an empty name is NOT marked "no scope"', () => {
+    assert.ok(!api.scopeDetailHtml(pkt({ route_type: 0, scope_name: '' })).includes('no-scope'));
+  });
+
+  test('DIRECT / TRANSPORT_DIRECT channel packets get no marker', () => {
+    assert.strictEqual(api.scopeDetailHtml(pkt({ route_type: 2 })), '');
+    assert.ok(!api.scopeDetailHtml(pkt({ route_type: 3, scope_name: '#dk' })).includes('no-scope'));
+  });
+
+  test('non-channel unscoped packets (e.g. adverts) get no Scope row', () => {
+    for (const t of [0, 2, 4, 8, 9]) assert.strictEqual(api.scopeDetailHtml(pkt({ payload_type: t })), '', 'type ' + t);
+  });
+
+  test('renderDetail emits the Scope row through scopeDetailHtml', () => {
+    assert.ok(src.includes('${scopeDetailHtml(pkt)}'), 'detail-meta list must use the shared row helper');
+  });
+}
+
 // ===== packets.js: detail Hash Size warns on 1-byte (#353) =====
 console.log('\n=== packets.js: detail Hash Size row warns on 1-byte (#353) ===');
 {
