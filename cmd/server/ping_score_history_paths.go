@@ -78,7 +78,7 @@ func preservePingDistanceWithoutGPS(existing PingScoreHistoryEntry, score *PingS
 			return false
 		}
 		valid := func(o *PacketPathObserver) bool {
-			return o != nil && strings.EqualFold(o.PublicKey, pk) && !o.Approx && !o.iataFallback && o.Lat != nil && o.Lon != nil
+			return o != nil && strings.EqualFold(o.PublicKey, pk) && !o.Approx && o.PositionSource != PositionSourceIATA && o.Lat != nil && o.Lon != nil
 		}
 		if path.First != nil && valid(path.First.Observer) {
 			return true

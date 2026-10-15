@@ -7,10 +7,11 @@
  *
  *   anonymous   sees the two unknown names, read-only
  *   admin       a wrong key is refused; approve one name, reject the other
- *   packets     scoped packets published through the broker show that the
- *               approval applies to packets received afterwards only, and
- *               that a SIGHUP reload neither drops the approval nor brings
- *               back a revocation
+ *   packets     scoped packets published through the broker show that a new
+ *               packet matches at once, that the ingestor's decode backfill
+ *               then re-matches the stored unknown-scoped one (#380) and
+ *               reports it on /api/healthz, and that a SIGHUP reload neither
+ *               drops the approval nor brings back a revocation
  *   restart     the approval survives restarting both processes
  *   mobile      the decision buttons stay reachable at 390x844
  *
@@ -113,6 +114,10 @@ async function main() {
     dbPath: env.db,
     mqttSources: [{ name: 'e2e', broker: 'mqtt://127.0.0.1:' + broker.port, topics: ['meshcore/#'], connectTimeoutSec: 5 }],
     hashRegions: [CONFIGURED],
+    // #380: the decode backfill polls the effective key set every 30s by
+    // default. One second here so an approval's re-match of stored history is
+    // observable inside a test step; the pass itself is unchanged.
+    decodeBackfill: { pollSeconds: 1, pauseMs: 1 },
   }));
   fs.writeFileSync(path.join(env.serverDir, 'config.json'), JSON.stringify({ apiKey: API_KEY, hashRegions: [CONFIGURED] }));
 
@@ -197,7 +202,7 @@ async function main() {
       await page.locator(`button[data-scope-action="revoke"][data-scope-name="${NORTH}"]`).waitFor();
       await page.waitForFunction((n) => !document.getElementById('obs-nb-unknown-scopes-wrap').textContent.includes(n), NORTH);
       await page.locator('#obs-nb-admin-list').getByText('1 of 128 approval slots used.').waitFor();
-      assert.match(dialogs[dialogs.length - 1], /received from now on.*Stored packets keep their current scope/);
+      assert.match(dialogs[dialogs.length - 1], /received from now on.*still unknown can be re-matched in the background/);
       assert.match(logText(stack.ingestor), new RegExp('approved "' + NORTH + '": 1 approved region scope\\(s\\) live'));
     });
 
@@ -209,7 +214,7 @@ async function main() {
     });
 
     const during = scopedPacket(NORTH, 'received while approved');
-    await step('SIGHUP keeps the approval; only packets received afterwards match', async () => {
+    await step('SIGHUP keeps the approval; a new packet matches and the stored one is re-matched by the decode backfill (#380)', async () => {
       await sighup(stack.ingestor, 1);
       // The stored packet is heard again by another observer. MQTT keeps the
       // order on one connection, so once `during` is stored the repeat has
@@ -217,14 +222,24 @@ async function main() {
       broker.publish('meshcore/SJC/e2eobs2/packets', JSON.stringify({ raw: before }));
       await ingest(during);
       assert.strictEqual(scopeOf(during), NORTH);
-      assert.strictEqual(scopeOf(before), '', 'a stored packet heard again must keep its scope');
       assert.strictEqual(sql("SELECT COUNT(*) FROM transmissions WHERE upper(raw_hex) = '" + before + "'"), '1');
+      // #380: the packet stored before the approval is re-matched by the
+      // ingestor's backfill, which re-decodes it from its stored frame.
+      await waitFor('decode backfill re-matches the stored packet', () => scopeOf(before) === NORTH);
+      assert.match(logText(stack.ingestor), /\[decode_backfill\] done: kinds=scope/);
+      // The server reflects it without a restart: /api/transmissions-shaped
+      // reads come from the database, and the caches were dropped on the next
+      // poll tick.
+      await waitFor('healthz reports the re-matched row', async () => {
+        const health = await (await fetch(env.base + '/api/healthz')).json();
+        return health.decode_backfill && health.decode_backfill.scopeUpdated >= 1;
+      });
     });
 
     await step('revoke: listed as unknown again, still revoked after SIGHUP, history kept', async () => {
       await page.locator(`button[data-scope-action="revoke"][data-scope-name="${NORTH}"]`).click();
       await page.waitForFunction((n) => document.getElementById('obs-nb-unknown-scopes-wrap').textContent.includes(n), NORTH);
-      assert.match(dialogs[dialogs.length - 1], /Stored packets keep their current scope/);
+      assert.match(dialogs[dialogs.length - 1], /Stored packets already matched to a scope keep it/);
       await sighup(stack.ingestor, 0);
       const after = scopedPacket(NORTH, 'received after revocation');
       await ingest(after);

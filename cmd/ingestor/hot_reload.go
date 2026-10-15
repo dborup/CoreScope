@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	"os"
 	"os/signal"
@@ -30,9 +31,15 @@ import (
 // a name already in base (for example one of the ~320 rainbow-table names
 // such as #test or #chat) gains nothing from approval and keeps decrypting
 // after a revoke; BaseNames lets the proposal runner tell the server so.
+//
+// Every change that takes a key out of an effective set — a revoke, a reload
+// without the entry, or a reload that gives a name a new value — is reported
+// to the onRemoved hook after the lock is released (#380: the decode backfill
+// forgets the key on the event itself, so a quick re-approval cannot hide it).
 type hotKeys struct {
 	channelKeys atomic.Pointer[map[string]string]
 	regionKeys  atomic.Pointer[map[string][]byte]
+	removedHook atomic.Pointer[func([]removedKey)]
 
 	mu              sync.Mutex // serializes writers of base/approved and the merge
 	base            map[string]string
@@ -50,13 +57,30 @@ func newHotKeys(channelKeys map[string]string, regionKeys map[string][]byte) *ho
 	return hk
 }
 
+// onRemoved sets the hook that receives every key leaving an effective set.
+// It runs synchronously in the goroutine that made the change, outside hk.mu,
+// so it may write to the database; callers must not hold a transaction.
+func (hk *hotKeys) onRemoved(fn func([]removedKey)) {
+	hk.removedHook.Store(&fn)
+}
+
+func (hk *hotKeys) reportRemoved(removed []removedKey) {
+	if len(removed) == 0 {
+		return
+	}
+	if fn := hk.removedHook.Load(); fn != nil && *fn != nil {
+		(*fn)(removed)
+	}
+}
+
 // setBase replaces the config-derived channel keys and republishes the merge.
 func (hk *hotKeys) setBase(channelKeys map[string]string) {
 	hk.mu.Lock()
-	defer hk.mu.Unlock()
 	hk.base = channelKeys
 	hk.baseGen++
-	hk.publishLocked()
+	removed := hk.publishLocked()
+	hk.mu.Unlock()
+	hk.reportRemoved(removed)
 }
 
 // BaseNames returns the names in the config-derived layer and its generation,
@@ -100,18 +124,22 @@ func (hk *hotKeys) AddApproved(names ...string) int {
 // it). Returns whether it was present.
 func (hk *hotKeys) RemoveApproved(name string) bool {
 	hk.mu.Lock()
-	defer hk.mu.Unlock()
 	if _, ok := hk.approved[name]; !ok {
+		hk.mu.Unlock()
 		return false
 	}
 	delete(hk.approved, name)
-	hk.publishLocked()
+	removed := hk.publishLocked()
+	hk.mu.Unlock()
+	hk.reportRemoved(removed)
 	return true
 }
 
 // publishLocked builds a fresh merged map (never mutating one a reader may
-// hold) and swaps it in. O(base + approved), and only on reload/approval.
-func (hk *hotKeys) publishLocked() {
+// hold) and swaps it in, returning the keys of the previous merge that are
+// gone or now carry a different value. O(base + approved), and only on
+// reload/approval.
+func (hk *hotKeys) publishLocked() []removedKey {
 	merged := make(map[string]string, len(hk.base)+len(hk.approved))
 	for name, key := range hk.approved {
 		merged[name] = key
@@ -119,7 +147,16 @@ func (hk *hotKeys) publishLocked() {
 	for name, key := range hk.base {
 		merged[name] = key
 	}
+	var removed []removedKey
+	if prev := hk.channelKeys.Load(); prev != nil {
+		for name, key := range *prev {
+			if nk, ok := merged[name]; !ok || !sameChannelKey(nk, key) {
+				removed = append(removed, removedKey{decodeBackfillKindChannel, name, channelKeyBytes(key)})
+			}
+		}
+	}
 	hk.channelKeys.Store(&merged)
+	return removed
 }
 
 // Channels returns the current channel-decryption key snapshot. Safe to
@@ -136,7 +173,7 @@ func (hk *hotKeys) Regions() map[string][]byte {
 
 // Region layers mirror channel layers: config (including hashRegionsPath)
 // wins over approved names. A published map is immutable for concurrent reads.
-func (hk *hotKeys) publishRegionsLocked() {
+func (hk *hotKeys) publishRegionsLocked() []removedKey {
 	merged := make(map[string][]byte, len(hk.baseRegions)+len(hk.approvedRegions))
 	for name, key := range hk.approvedRegions {
 		merged[name] = key
@@ -144,14 +181,24 @@ func (hk *hotKeys) publishRegionsLocked() {
 	for name, key := range hk.baseRegions {
 		merged[name] = key
 	}
+	var removed []removedKey
+	if prev := hk.regionKeys.Load(); prev != nil {
+		for name, key := range *prev {
+			if nk, ok := merged[name]; !ok || !bytes.Equal(nk, key) {
+				removed = append(removed, removedKey{decodeBackfillKindScope, name, key})
+			}
+		}
+	}
 	hk.regionKeys.Store(&merged)
+	return removed
 }
 
 func (hk *hotKeys) setBaseRegions(base map[string][]byte) {
 	hk.mu.Lock()
-	defer hk.mu.Unlock()
 	hk.baseRegions = base
-	hk.publishRegionsLocked()
+	removed := hk.publishRegionsLocked()
+	hk.mu.Unlock()
+	hk.reportRemoved(removed)
 }
 
 func (hk *hotKeys) AddApprovedRegions(names ...string) int {
@@ -192,12 +239,14 @@ func (hk *hotKeys) ApprovedRegionCount() int {
 
 func (hk *hotKeys) RemoveApprovedRegion(name string) bool {
 	hk.mu.Lock()
-	defer hk.mu.Unlock()
 	if _, ok := hk.approvedRegions[name]; !ok {
+		hk.mu.Unlock()
 		return false
 	}
 	delete(hk.approvedRegions, name)
-	hk.publishRegionsLocked()
+	removed := hk.publishRegionsLocked()
+	hk.mu.Unlock()
+	hk.reportRemoved(removed)
 	return true
 }
 

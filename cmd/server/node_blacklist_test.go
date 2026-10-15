@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -272,12 +273,16 @@ func TestBlacklistFiltersSubpathDetail(t *testing.T) {
 	srv := NewServer(db, cfg, NewHub())
 	srv.RegisterRoutes(setupTestRouter(srv))
 
-	req := httptest.NewRequest("GET", "/api/analytics/subpath-detail?hops=badnode,othernode", nil)
-	w := httptest.NewRecorder()
-	srv.router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for subpath-detail with blacklisted hop, got %d", w.Code)
+	// A blacklisted hop is answered like a hop that matches no node (#410).
+	get := func(hop string) (int, string) {
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, httptest.NewRequest("GET", "/api/analytics/subpath-detail?hops="+hop+",othernode", nil))
+		return w.Code, strings.ReplaceAll(w.Body.String(), `"`+hop+`"`, `"HOP"`)
+	}
+	bCode, bBody := get("badnode")
+	uCode, uBody := get("unknownx")
+	if bCode != uCode || bBody != uBody {
+		t.Errorf("blacklisted hop: %d %s; unknown hop: %d %s", bCode, bBody, uCode, uBody)
 	}
 }
 

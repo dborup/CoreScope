@@ -270,6 +270,14 @@ type PacketStore struct {
 	routeMaskParked         map[int]uint8
 	routeMaskLoadSettled    atomic.Bool // Load() or RunStartupLoad returned: start-up loading is over
 	routeMaskChangeRowsRead atomic.Int64
+	// #380: the ingestor's decode-backfill revision this server has seen.
+	// decodeBackfillState is 0 before the first poll (which only records the
+	// baseline), 1 while polling, -1 when the state table does not exist.
+	// See decode_backfill.go; guarded by decodeBackfillMu, never s.mu.
+	decodeBackfillMu          sync.Mutex
+	decodeBackfillRev         int64
+	decodeBackfillState       int
+	decodeBackfillAbsentTicks int
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string
@@ -7713,6 +7721,20 @@ type prefixMap struct {
 	nonRelay map[string]struct{}
 }
 
+// without returns a view of pm that never picks the given lower-case
+// pubkeys, as if those nodes did not exist (#410). It shares pm's candidate
+// lists and leaves pm unchanged.
+func (pm *prefixMap) without(pubkeys map[string]bool) *prefixMap {
+	excluded := make(map[string]struct{}, len(pm.nonRelay)+len(pubkeys))
+	for pk := range pm.nonRelay {
+		excluded[pk] = struct{}{}
+	}
+	for pk := range pubkeys {
+		excluded[pk] = struct{}{}
+	}
+	return &prefixMap{m: pm.m, nonRelay: excluded}
+}
+
 // markNonRelay registers a set of lowercase pubkeys as listener-only.
 // Called by the server when wiring the prefix map after reading the
 // observers table's can_relay column. Issue #1290.
@@ -10950,10 +10972,10 @@ func (s *PacketStore) computeAnalyticsSubpathsWindowed(region string, minLen, ma
 				raw := strings.Join(hops[start:start+l], ",")
 				entry := subpathCounts[sub]
 				if entry == nil {
-					entry = &subpathAccum{raw: raw}
+					entry = &subpathAccum{}
 					subpathCounts[sub] = entry
 				}
-				entry.count++
+				entry.add(raw, 1)
 			}
 		}
 	}
@@ -11082,10 +11104,10 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 			}
 			entry := perGroup[gi][namedKey]
 			if entry == nil {
-				entry = &subpathAccum{raw: rawKey}
+				entry = &subpathAccum{}
 				perGroup[gi][namedKey] = entry
 			}
-			entry.count += count
+			entry.add(rawKey, count)
 		}
 	}
 	totalPaths := s.spTotalPaths
@@ -11110,7 +11132,18 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 // subpathAccum holds a running count for a single named subpath.
 type subpathAccum struct {
 	count int
-	raw   string // first raw-hop key seen (used for rawHops in the API response)
+	raw   string // smallest raw-hop key merged into this named subpath (rawHops in the API response)
+}
+
+// add merges n occurrences of raw into the accumulator. Several raw keys can
+// resolve to the same display name (two nodes sharing a name), so the one
+// reported as rawHops is the lexicographically smallest: deterministic across
+// map iteration orders, which the visibility filter (#410) relies on.
+func (a *subpathAccum) add(raw string, n int) {
+	if a.count == 0 || raw < a.raw {
+		a.raw = raw
+	}
+	a.count += n
 }
 
 func (s *PacketStore) computeAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
@@ -11160,10 +11193,10 @@ func (s *PacketStore) computeAnalyticsSubpaths(region string, minLen, maxLen, li
 		namedKey := strings.Join(named, " → ")
 		entry := namedCounts[namedKey]
 		if entry == nil {
-			entry = &subpathAccum{raw: rawKey}
+			entry = &subpathAccum{}
 			namedCounts[namedKey] = entry
 		}
-		entry.count += count
+		entry.add(rawKey, count)
 	}
 
 	return s.rankSubpaths(namedCounts, s.spTotalPaths, limit)
@@ -11207,10 +11240,10 @@ func (s *PacketStore) computeSubpathsSlow(region string, minLen, maxLen, limit i
 				raw := strings.Join(hops[start:start+l], ",")
 				entry := subpathCounts[sub]
 				if entry == nil {
-					entry = &subpathAccum{raw: raw}
+					entry = &subpathAccum{}
 					subpathCounts[sub] = entry
 				}
-				entry.count++
+				entry.add(raw, 1)
 			}
 		}
 	}
@@ -11244,16 +11277,12 @@ func (s *PacketStore) rankSubpaths(counts map[string]*subpathAccum, totalPaths, 
 
 	subpaths := make([]map[string]interface{}, 0, len(ranked))
 	for _, e := range ranked {
-		pct := 0.0
-		if totalPaths > 0 {
-			pct = math.Round(float64(e.count)/float64(totalPaths)*1000) / 10
-		}
 		subpaths = append(subpaths, map[string]interface{}{
 			"path":    e.path,
 			"rawHops": strings.Split(e.raw, ","),
 			"count":   e.count,
 			"hops":    len(strings.Split(e.path, " → ")),
-			"pct":     pct,
+			"pct":     subpathPct(e.count, totalPaths),
 		})
 	}
 
@@ -11263,9 +11292,63 @@ func (s *PacketStore) rankSubpaths(counts map[string]*subpathAccum, totalPaths, 
 	}
 }
 
+// subpathPct is a subpath's share of all paths in percent, to one decimal.
+func subpathPct(count, totalPaths int) float64 {
+	if totalPaths <= 0 {
+		return 0
+	}
+	return math.Round(float64(count)/float64(totalPaths)*1000) / 10
+}
+
 // --- Subpath Detail ---
 
-func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} {
+// GetSubpathDetail reports a subpath's resolved hops, its traffic, the parent
+// paths it was seen in and its observers, with nothing hidden.
+func (s *PacketStore) GetSubpathDetail(rawHops []string) SubpathDetailResponse {
+	return s.SubpathDetail(rawHops).response(nil)
+}
+
+// subpathDetailParts is what a subpath detail is built from, gathered in one
+// pass under the store lock. Identities stay raw (resolved nodes, observer
+// ids) so a visibility policy (#410) can be applied after the lock is
+// released, with one lookup for exactly the identities the detail can show.
+// pm, graph and hopContext are what the requested hops were resolved with,
+// kept so a requested hop can be resolved again over its visible candidates
+// only. Both pm and graph are immutable snapshots once published, so they
+// may be used after the lock is released.
+type subpathDetailParts struct {
+	rawHops             []string
+	nodes               []*nodeInfo // resolved node per requested hop, nil when unresolved
+	pm                  *prefixMap
+	graph               *NeighborGraph
+	hopContext          []string
+	matchCount          int
+	firstSeen, lastSeen string
+	hourBuckets         []int
+	snrSum, rssiSum     float64
+	snrCount, rssiCount int
+	parents             []subpathDetailParent
+	observers           []subpathDetailObserver
+}
+
+// subpathDetailParent is one parent path: each hop as seen on the air and
+// the node it resolved to.
+type subpathDetailParent struct {
+	hops  []subpathDetailHop
+	count int
+}
+
+// subpathDetailHop is a parent-path hop; pubkey and name are empty when the
+// hop resolved to no node.
+type subpathDetailHop struct{ raw, pubkey, name string }
+
+type subpathDetailObserver struct {
+	id, name string
+	count    int
+}
+
+// SubpathDetail gathers the parts of a subpath detail.
+func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -11285,126 +11368,231 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	// carmack #1) — used by the rawHops loop AND the matched-tx loop below.
 	graph := s.graph.Load()
 
-	// Resolve the requested hops
-	nodes := make([]map[string]interface{}, len(rawHops))
+	p := &subpathDetailParts{
+		rawHops:     rawHops,
+		nodes:       make([]*nodeInfo, len(rawHops)),
+		pm:          pm,
+		graph:       graph,
+		hopContext:  contextPubkeys,
+		matchCount:  len(matchedTxs),
+		hourBuckets: make([]int, 24),
+	}
+	// Resolve the requested hops (copies: the parts outlive the lock)
 	for i, hop := range rawHops {
-		r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph)
-		entry := map[string]interface{}{"hop": hop, "name": hop, "lat": nil, "lon": nil, "pubkey": nil}
-		if r != nil {
-			entry["name"] = r.Name
-			entry["pubkey"] = r.PublicKey
-			if r.HasGPS {
-				entry["lat"] = r.Lat
-				entry["lon"] = r.Lon
-			}
+		if r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph); r != nil {
+			n := *r
+			p.nodes[i] = &n
 		}
-		nodes[i] = entry
 	}
 
-	hourBuckets := make([]int, 24)
-	var snrSum, rssiSum float64
-	var snrCount, rssiCount int
-	observers := map[string]int{}
-	parentPaths := map[string]int{}
-	matchCount := len(matchedTxs)
-	var firstSeen, lastSeen string
-
+	parents := map[string]*subpathDetailParent{}
+	observers := map[[2]string]int{} // keyed by observer id and name
 	for _, tx := range matchedTxs {
 		ts := tx.FirstSeen
 		if ts != "" {
-			if firstSeen == "" || ts < firstSeen {
-				firstSeen = ts
+			if p.firstSeen == "" || ts < p.firstSeen {
+				p.firstSeen = ts
 			}
-			if lastSeen == "" || ts > lastSeen {
-				lastSeen = ts
+			if p.lastSeen == "" || ts > p.lastSeen {
+				p.lastSeen = ts
 			}
 			t, err := time.Parse(time.RFC3339, ts)
 			if err != nil {
 				t, err = time.Parse("2006-01-02 15:04:05", ts)
 			}
 			if err == nil {
-				hourBuckets[t.Hour()]++
+				p.hourBuckets[t.Hour()]++
 			}
 		}
 		if tx.SNR != nil {
-			snrSum += *tx.SNR
-			snrCount++
+			p.snrSum += *tx.SNR
+			p.snrCount++
 		}
 		if tx.RSSI != nil {
-			rssiSum += *tx.RSSI
-			rssiCount++
+			p.rssiSum += *tx.RSSI
+			p.rssiCount++
 		}
 		if tx.ObserverName != "" {
-			observers[tx.ObserverName]++
+			observers[[2]string{tx.ObserverID, tx.ObserverName}]++
 		}
 
 		// Full parent path (resolved). Per-tx context so the resolver picks
 		// the right candidate when prefixes are ambiguous. See #1197.
 		txCtx := buildHopContextPubkeys(tx, pm)
 		hops := txGetParsedPath(tx)
-		resolved := make([]string, len(hops))
+		pathHops := make([]subpathDetailHop, len(hops))
+		key := make([]string, 0, 2*len(hops))
 		for i, h := range hops {
-			r, _, _ := pm.resolveWithContext(h, txCtx, graph)
-			if r != nil {
-				resolved[i] = r.Name
-			} else {
-				resolved[i] = h
+			pathHops[i].raw = h
+			if r, _, _ := pm.resolveWithContext(h, txCtx, graph); r != nil {
+				pathHops[i].pubkey, pathHops[i].name = r.PublicKey, r.Name
+			}
+			key = append(key, h, pathHops[i].pubkey)
+		}
+		k := strings.Join(key, "\x00")
+		if pp := parents[k]; pp != nil {
+			pp.count++
+		} else {
+			parents[k] = &subpathDetailParent{hops: pathHops, count: 1}
+		}
+	}
+	p.parents = make([]subpathDetailParent, 0, len(parents))
+	for _, pp := range parents {
+		p.parents = append(p.parents, *pp)
+	}
+	p.observers = make([]subpathDetailObserver, 0, len(observers))
+	for o, count := range observers {
+		p.observers = append(p.observers, subpathDetailObserver{id: o[0], name: o[1], count: count})
+	}
+	return p
+}
+
+// pubkeys lists every identity the detail can show: every candidate of a
+// requested hop (so a hidden one can be left out of the choice), the parent
+// paths' nodes and the observers (lower-case, unique).
+func (p *subpathDetailParts) pubkeys() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(pk string) {
+		if pk = strings.ToLower(pk); pk != "" && !seen[pk] {
+			seen[pk] = true
+			out = append(out, pk)
+		}
+	}
+	for i, n := range p.nodes {
+		if n != nil {
+			add(n.PublicKey)
+		}
+		if p.pm != nil {
+			for _, c := range p.pm.m[strings.ToLower(p.rawHops[i])] {
+				add(c.PublicKey)
 			}
 		}
-		fullPath := strings.Join(resolved, " → ")
-		parentPaths[fullPath]++
+	}
+	for _, pp := range p.parents {
+		for _, h := range pp.hops {
+			add(h.pubkey)
+		}
+	}
+	for _, o := range p.observers {
+		add(o.id)
+	}
+	return out
+}
+
+// requestedNode is the node requested hop i stands for under vis: the
+// store's pick when no candidate of the hop is hidden, otherwise the
+// resolver's pick among the visible candidates only, as if the hidden ones
+// did not exist (nil when none is left).
+func (p *subpathDetailParts) requestedNode(i int, vis *subpathVisibility) *nodeInfo {
+	if vis == nil || p.pm == nil {
+		return p.nodes[i]
+	}
+	var hidden map[string]bool
+	for _, c := range p.pm.m[strings.ToLower(p.rawHops[i])] {
+		if vis.hides(c.PublicKey, c.Name) {
+			if hidden == nil {
+				hidden = map[string]bool{}
+			}
+			hidden[strings.ToLower(c.PublicKey)] = true
+		}
+	}
+	if hidden == nil {
+		return p.nodes[i]
+	}
+	r, _, _ := p.pm.without(hidden).resolveWithContext(p.rawHops[i], p.hopContext, p.graph)
+	return r
+}
+
+// response builds the detail. Under a visibility policy (#410) a hop that
+// stands for a hidden identity is shown exactly like a hop that matches no
+// node: a requested hop is resolved over its visible candidates (raw hop as
+// its name, no key, no position when none is left), and a parent-path hop
+// through a hidden node is shown as its raw hop. Hidden observers are left
+// out. totalMatches, signal and the hour distribution keep describing every
+// matched transmission. A nil policy hides nothing.
+func (p *subpathDetailParts) response(vis *subpathVisibility) SubpathDetailResponse {
+	nodes := make([]SubpathNode, len(p.rawHops))
+	for i, hop := range p.rawHops {
+		nodes[i] = SubpathNode{Hop: hop, Name: hop}
+		if r := p.requestedNode(i, vis); r != nil {
+			nodes[i].Name = r.Name
+			nodes[i].Pubkey = r.PublicKey
+			if r.HasGPS {
+				nodes[i].Lat = r.Lat
+				nodes[i].Lon = r.Lon
+			}
+		}
+	}
+
+	parentPaths := map[string]int{}
+	for _, pp := range p.parents {
+		names := make([]string, len(pp.hops))
+		for i, h := range pp.hops {
+			names[i] = h.raw
+			if h.pubkey != "" && !vis.hides(h.pubkey, h.name) {
+				names[i] = h.name
+			}
+		}
+		parentPaths[strings.Join(names, " → ")] += pp.count
+	}
+	observers := map[string]int{}
+	for _, o := range p.observers {
+		if !vis.hides(o.id, o.name) {
+			observers[o.name] += o.count
+		}
 	}
 
 	var avgSnr, avgRssi interface{}
-	if snrCount > 0 {
-		avgSnr = snrSum / float64(snrCount)
+	if p.snrCount > 0 {
+		avgSnr = p.snrSum / float64(p.snrCount)
 	}
-	if rssiCount > 0 {
-		avgRssi = rssiSum / float64(rssiCount)
+	if p.rssiCount > 0 {
+		avgRssi = p.rssiSum / float64(p.rssiCount)
 	}
 
-	topParents := make([]map[string]interface{}, 0)
+	topParents := make([]ParentPath, 0, len(parentPaths))
 	for path, count := range parentPaths {
-		topParents = append(topParents, map[string]interface{}{"path": path, "count": count})
+		topParents = append(topParents, ParentPath{Path: path, Count: count})
 	}
 	// #273: parentPaths iteration order is random; ties break on the path so
 	// the order and the top-15 cut are stable (sibling of rankSubpaths/#256).
 	sort.Slice(topParents, func(i, j int) bool {
-		if topParents[i]["count"].(int) != topParents[j]["count"].(int) {
-			return topParents[i]["count"].(int) > topParents[j]["count"].(int)
+		if topParents[i].Count != topParents[j].Count {
+			return topParents[i].Count > topParents[j].Count
 		}
-		return topParents[i]["path"].(string) < topParents[j]["path"].(string)
+		return topParents[i].Path < topParents[j].Path
 	})
 	if len(topParents) > 15 {
 		topParents = topParents[:15]
 	}
 
-	topObs := make([]map[string]interface{}, 0)
+	topObs := make([]SubpathObserver, 0, len(observers))
 	for name, count := range observers {
-		topObs = append(topObs, map[string]interface{}{"name": name, "count": count})
+		topObs = append(topObs, SubpathObserver{Name: name, Count: count})
 	}
 	// #273: observers iteration order is random; ties break on the name so
 	// the order and the top-10 cut are stable.
 	sort.Slice(topObs, func(i, j int) bool {
-		if topObs[i]["count"].(int) != topObs[j]["count"].(int) {
-			return topObs[i]["count"].(int) > topObs[j]["count"].(int)
+		if topObs[i].Count != topObs[j].Count {
+			return topObs[i].Count > topObs[j].Count
 		}
-		return topObs[i]["name"].(string) < topObs[j]["name"].(string)
+		return topObs[i].Name < topObs[j].Name
 	})
 	if len(topObs) > 10 {
 		topObs = topObs[:10]
 	}
 
-	return map[string]interface{}{
-		"hops":             rawHops,
-		"nodes":            nodes,
-		"totalMatches":     matchCount,
-		"firstSeen":        firstSeen,
-		"lastSeen":         lastSeen,
-		"signal":           map[string]interface{}{"avgSnr": avgSnr, "avgRssi": avgRssi, "samples": snrCount},
-		"hourDistribution": hourBuckets,
-		"parentPaths":      topParents,
-		"observers":        topObs,
+	return SubpathDetailResponse{
+		Hops:             p.rawHops,
+		Nodes:            nodes,
+		TotalMatches:     p.matchCount,
+		FirstSeen:        p.firstSeen,
+		LastSeen:         p.lastSeen,
+		Signal:           SubpathSignal{AvgSnr: avgSnr, AvgRssi: avgRssi, Samples: p.snrCount},
+		HourDistribution: p.hourBuckets,
+		ParentPaths:      topParents,
+		Observers:        topObs,
 	}
 }
 
@@ -11425,4 +11613,19 @@ func (s *PacketStore) LoadCoverageRatio() float64 {
 	s.bgErrMu.RLock()
 	defer s.bgErrMu.RUnlock()
 	return s.loadCoverageRatio
+}
+
+// HopCandidates returns, per lower-cased hop prefix, the nodes that prefix can
+// stand for (the resolver's candidate set). Values are copies.
+func (s *PacketStore) HopCandidates(prefixes []string) map[string][]nodeInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, pm := s.getCachedNodesAndPM()
+	out := make(map[string][]nodeInfo, len(prefixes))
+	for _, p := range prefixes {
+		if cs := pm.m[strings.ToLower(p)]; len(cs) > 0 {
+			out[strings.ToLower(p)] = append([]nodeInfo(nil), cs...)
+		}
+	}
+	return out
 }

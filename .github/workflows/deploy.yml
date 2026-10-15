@@ -250,6 +250,15 @@ jobs:
           echo "--- Anomaly library: ${passed} top-level tests passed under -race ---"
           test "${passed}" -gt 0
 
+      # cmd/anomaly is the offline replay/export tool for internal/anomaly
+      # (#457): its own module, not built into any image or release.
+      - name: Vet and test anomaly offline tool (cmd/anomaly)
+        run: |
+          set -e -o pipefail
+          cd cmd/anomaly
+          go vet ./...
+          go test ./...
+
 
   js-test:
     name: "✅ JavaScript Unit Tests & Lint"
@@ -348,6 +357,12 @@ jobs:
 
       - name: Non-root container start path, supervisord stubbed (issue #339)
         run: bash scripts/test-nonroot-entrypoint.sh
+
+      - name: Decode-backfill measurement script unit tests (issue #380)
+        run: bash scripts/test-decode-backfill-estimate.sh
+
+      - name: ShellCheck decode-backfill measurement scripts (issue #380)
+        run: shellcheck scripts/decode-backfill-estimate.sh scripts/test-decode-backfill-estimate.sh
 
       - name: QA blacklist script unit tests (issues #1977, #83)
         run: bash qa/scripts/test-blacklist-sql.sh

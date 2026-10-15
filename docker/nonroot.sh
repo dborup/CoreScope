@@ -52,7 +52,7 @@ MARKER=.corescope-nonroot
 # What the Go services create next to the database. Kept in sync with the Go
 # constants by scripts/test-nonroot-helper.sh. Queue directories are flat.
 DB_FILES="meshcore.db meshcore.db-wal meshcore.db-shm meshcore.db-journal ping_scores_history.db ping_scores_history.db-wal ping_scores_history.db-shm ping_scores_history.db-journal"
-SIDE_FILES="client-rx-delete.salt client-rx-delete-audit.jsonl"
+SIDE_FILES="client-rx-delete.salt client-rx-delete-audit.jsonl ws-client-history.jsonl ws-client-history.jsonl.lock"
 QUEUE_DIRS="prune-requests mbcap-snapshot channel-proposal-requests client-rx-deletes"
 # What root uses from the data dir: sourced (.env) or linked into /app.
 ROOT_FILES=".env config.json theme.json"

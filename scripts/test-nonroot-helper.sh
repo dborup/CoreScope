@@ -128,6 +128,7 @@ expect_paths="meshcore.db meshcore.db-wal meshcore.db-shm meshcore.db-journal
 ping_scores_history.db ping_scores_history.db-wal ping_scores_history.db-shm ping_scores_history.db-journal"
 for spec in cmd/ingestor/client_rx_delete.go:clientRxSaltFileName \
     cmd/ingestor/client_rx_delete.go:clientRxAuditFileName \
+    cmd/server/ws_client_history_disk.go:wsHistoryFileName \
     cmd/ingestor/client_rx_delete_queue.go:clientRxQueueDirName \
     internal/prunequeue/prunequeue.go:QueueDirName \
     internal/mbcapqueue/mbcapqueue.go:QueueDirName \
@@ -136,6 +137,7 @@ for spec in cmd/ingestor/client_rx_delete.go:clientRxSaltFileName \
     if [ -n "$v" ]; then ok; else bad "could not read ${spec#*:} from ${spec%%:*}"; fi
     expect_paths="$expect_paths $v"
 done
+expect_paths="$expect_paths ws-client-history.jsonl.lock"
 assert_eq "ping score history DB name in Go" "ping_scores_history.db" \
     "$(grep -o '"ping_scores_history.db"' "$ROOT/cmd/server/ping_score_history.go" | head -1 | tr -d '"')"
 for p in $expect_paths; do

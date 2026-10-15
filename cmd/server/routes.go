@@ -3110,8 +3110,14 @@ func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request)
 		// Issue #1217: honor the Time window filter on Route Patterns.
 		window := ParseTimeWindow(r)
 		data := s.store.GetAnalyticsSubpathsWithWindow(region, minLen, maxLen, limit, window)
-		if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
-			data = s.filterBlacklistedFromSubpaths(data)
+		if s.routePatternsRestricted() {
+			filtered, err := s.visibleSubpaths(r.Context(), data)
+			if err != nil {
+				writeError(w, 500, "identity visibility lookup failed")
+				return
+			}
+			writeJSON(w, filtered[0])
+			return
 		}
 		writeJSON(w, data)
 		return
@@ -3179,10 +3185,18 @@ func (s *Server) handleAnalyticsSubpathsBulk(w http.ResponseWriter, r *http.Requ
 	}
 
 	results := s.store.GetAnalyticsSubpathsBulkWithWindow(region, groups, ParseTimeWindow(r))
-	if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
-		for i, r := range results {
-			results[i] = s.filterBlacklistedFromSubpaths(r)
+	if s.routePatternsRestricted() {
+		raw := make([]interface{}, len(results))
+		for i := range results {
+			raw[i] = results[i]
 		}
+		filtered, err := s.visibleSubpaths(r.Context(), raw...)
+		if err != nil {
+			writeError(w, 500, "identity visibility lookup failed")
+			return
+		}
+		writeJSON(w, SubpathsBulkResponse{Results: filtered})
+		return
 	}
 	writeJSON(w, map[string]interface{}{"results": results})
 }
@@ -3203,21 +3217,21 @@ func (s *Server) handleAnalyticsSubpathDetail(w http.ResponseWriter, r *http.Req
 		writeJSON(w, ErrorResp{Error: "Need at least 2 hops"})
 		return
 	}
-	// Reject if any hop is a blacklisted or hidden-prefix node (#1181).
-	if s.cfg != nil && (len(s.cfg.NodeBlacklist) > 0 || len(s.cfg.HiddenNamePrefixes) > 0) {
-		for _, hop := range rawHops {
-			if s.cfg.IsBlacklisted(hop) || s.isPubkeyHidden(hop) {
-				writeError(w, 404, "Not found")
-				return
-			}
-		}
-	}
+	// A hop, short prefix or full key, counts only through the node the store
+	// resolves it to; a hidden one is answered like a hop that matches no
+	// node (#410).
 	if s.store != nil {
 		if !s.store.SubpathIndexReady() {
 			writeIndexLoading503(w)
 			return
 		}
-		writeJSON(w, s.store.GetSubpathDetail(rawHops))
+		parts := s.store.SubpathDetail(rawHops)
+		vis, err := s.subpathVisibility(r.Context(), parts.pubkeys())
+		if err != nil {
+			writeError(w, 500, "identity visibility lookup failed")
+			return
+		}
+		writeJSON(w, parts.response(vis))
 		return
 	}
 	writeJSON(w, SubpathDetailResponse{
@@ -4429,35 +4443,6 @@ func parseWindowDuration(window string) (time.Duration, error) {
 // constantTimeEqual compares two strings in constant time to prevent timing attacks.
 func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-// filterBlacklistedFromSubpaths removes blacklisted node references from
-// the subpaths analytics response.
-func (s *Server) filterBlacklistedFromSubpaths(data map[string]interface{}) map[string]interface{} {
-	if subpaths, ok := data["subpaths"]; ok {
-		if arr, ok := subpaths.([]interface{}); ok {
-			var filtered []interface{}
-			for _, item := range arr {
-				if m, ok := item.(map[string]interface{}); ok {
-					if hops, ok := m["hops"].([]interface{}); ok {
-						skip := false
-						for _, h := range hops {
-							if hp, ok := h.(string); ok && (s.cfg.IsBlacklisted(hp) || s.isPubkeyHidden(hp)) {
-								skip = true
-								break
-							}
-						}
-						if skip {
-							continue
-						}
-					}
-				}
-				filtered = append(filtered, item)
-			}
-			data["subpaths"] = filtered
-		}
-	}
-	return data
 }
 
 // handleDroppedPackets returns recently dropped packets for investigation.
