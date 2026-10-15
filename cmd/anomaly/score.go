@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/meshcore-analyzer/anomaly"
@@ -31,6 +32,11 @@ import (
 //     evidence can never be a true positive.
 //   - Every other episode is a false positive. With no labels file, every
 //     episode is a false positive, which is the false-alarm arm.
+//   - -bots narrows which incidents the recall and the medians cover, for
+//     example to leave a non-blind sanity-check bot out of the primary
+//     numbers. It never turns a matched episode into a false positive: an
+//     episode that matches any labelled incident is a true positive
+//     whether or not that incident was selected.
 //
 // Scoring reads files only: a report, a labels file and nothing else.
 
@@ -91,7 +97,9 @@ type scoreResult struct {
 	End          string  `json:"end"`
 	Days         float64 `json:"days"`
 	Labels       string  `json:"labels"`
-	Episodes     int     `json:"episodes"`
+	// Bots is the -bots filter, empty when every labelled bot counts.
+	Bots     []string `json:"bots"`
+	Episodes int      `json:"episodes"`
 	// EpisodesWithoutPeriod counts episodes whose activation candidate
 	// carried no periodic evidence; they can never be true positives.
 	EpisodesWithoutPeriod int     `json:"episodes_without_period"`
@@ -100,8 +108,11 @@ type scoreResult struct {
 	FalseAlarmsPerDay     float64 `json:"false_alarms_per_day"`
 	// PeriodMismatches counts episodes that overlap an incident on the same
 	// channel but fail the period check (#457 "also reported").
-	PeriodMismatches  int     `json:"period_mismatches"`
+	PeriodMismatches int `json:"period_mismatches"`
+	// Incidents is every labelled incident; IncidentsSelected is the subset
+	// the bars cover (all of them unless -bots narrows it).
 	Incidents         int     `json:"incidents"`
+	IncidentsSelected int     `json:"incidents_selected"`
 	IncidentsDetected int     `json:"incidents_detected"`
 	Recall            float64 `json:"recall"`
 	// Medians over the detected incidents.
@@ -126,6 +137,7 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 	report := fs.String("report", "", "replay report JSON (required)")
 	labels := fs.String("labels", "", "injected labels JSON; omitted means no ground truth (false alarms only)")
 	rule := fs.String("rule", "", "periodic rule name to score (required)")
+	bots := fs.String("bots", "", "comma-separated bot names whose incidents the bars cover; empty means all")
 	start := fs.String("start", "", "RFC 3339 start of the evaluation window, inclusive (required)")
 	end := fs.String("end", "", "RFC 3339 end of the evaluation window, exclusive (required)")
 	out := fs.String("out", "", "metrics file (must not exist); default stdout")
@@ -175,7 +187,16 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
-	res, err := score(rep, lab, *rule, *labels, opt.start, opt.end)
+	var want []string
+	for _, b := range strings.Split(*bots, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			want = append(want, b)
+		}
+	}
+	res, err := score(rep, lab, *rule, *labels, want, opt.start, opt.end)
+	if err == nil && len(want) > 0 && res.IncidentsSelected == 0 {
+		return fail(errors.New("-bots selected no labelled incident"))
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -238,8 +259,9 @@ func parseInjectLabels(b []byte) (InjectLabels, error) {
 	return l, nil
 }
 
-// score computes the metrics. labelsPath is reported as provenance only.
-func score(rep scoreReport, lab InjectLabels, rule, labelsPath string, start, end time.Time) (scoreResult, error) {
+// score computes the metrics. labelsPath is reported as provenance only;
+// bots, when not empty, selects which bots' incidents the bars cover.
+func score(rep scoreReport, lab InjectLabels, rule, labelsPath string, bots []string, start, end time.Time) (scoreResult, error) {
 	eps, noPeriod, err := episodes(rep, rule, start, end)
 	if err != nil {
 		return scoreResult{}, err
@@ -247,8 +269,19 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath string, start, en
 	days := end.Sub(start).Hours() / 24
 	res := scoreResult{Experimental: true, Rule: rule, Start: start.Format(time.RFC3339),
 		End: end.Format(time.RFC3339), Days: days, Labels: labelsPath, Episodes: len(eps),
-		EpisodesWithoutPeriod: noPeriod, Incidents: len(lab.Incidents), PerIncident: []incidentScore{},
-		FalsePositivesByChannel: []channelCount{}}
+		EpisodesWithoutPeriod: noPeriod, Incidents: len(lab.Incidents), Bots: bots,
+		PerIncident: []incidentScore{}, FalsePositivesByChannel: []channelCount{}}
+	selected := func(bot string) bool {
+		if len(bots) == 0 {
+			return true
+		}
+		for _, b := range bots {
+			if b == bot {
+				return true
+			}
+		}
+		return false
+	}
 	l := lab.Labelling
 	var ttds, stops []int64
 	var perInc []float64
@@ -280,13 +313,22 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath string, start, en
 		}
 		if is.Episodes > 0 {
 			is.Detected = true
-			res.IncidentsDetected++
 			ttd := dur(firstAct.Sub(inc.Start))
 			sl := dur(lastEnd.Sub(inc.Stop))
 			is.TimeToDetect, is.StopLatency = &ttd, &sl
 			is.TTDPeriods = float64(firstAct.Sub(inc.Start)) / float64(p)
-			ttds = append(ttds, int64(ttd))
-			stops = append(stops, int64(sl))
+		}
+		// Only selected incidents enter the recall and the medians; an
+		// episode that matched an unselected incident is still a match, so
+		// it never becomes a false positive.
+		if !selected(inc.Bot) {
+			continue
+		}
+		res.IncidentsSelected++
+		if is.Episodes > 0 {
+			res.IncidentsDetected++
+			ttds = append(ttds, int64(*is.TimeToDetect))
+			stops = append(stops, int64(*is.StopLatency))
 			perInc = append(perInc, float64(is.Episodes))
 		}
 		res.PerIncident = append(res.PerIncident, is)
@@ -306,8 +348,8 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath string, start, en
 	if days > 0 {
 		res.FalseAlarmsPerDay = float64(res.FalsePositives) / days
 	}
-	if res.Incidents > 0 {
-		res.Recall = float64(res.IncidentsDetected) / float64(res.Incidents)
+	if res.IncidentsSelected > 0 {
+		res.Recall = float64(res.IncidentsDetected) / float64(res.IncidentsSelected)
 	}
 	if len(ttds) > 0 {
 		m := dur(medianInt64(ttds))

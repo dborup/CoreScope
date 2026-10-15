@@ -207,15 +207,16 @@ func craftReport(t *testing.T, dir string, eps ...craftedEpisode) string {
 	return p
 }
 
-// craftLabels writes a labels file with one incident on channel 7f.
-func craftLabels(t *testing.T, dir string, start, stop time.Duration, period time.Duration) string {
+// craftLabels writes a labels file with one incident on channel 7f, plus
+// any extra incidents given.
+func craftLabels(t *testing.T, dir string, start, stop time.Duration, period time.Duration, extra ...Incident) string {
 	t.Helper()
 	l := InjectLabels{Experimental: true, Synthetic: true, Seed: 1,
 		Labelling: labellingSpec{PulseMergeGap: dur(time.Minute), MinPeriod: dur(time.Minute),
 			MaxPeriod: dur(time.Hour), MinPulses: 8, MaxHarmonic: 3,
 			ToleranceAbs: dur(30 * time.Second), ToleranceRel: 0.1},
-		Incidents: []Incident{{Bot: "bot-a", Channel: "7f", Start: injT.Add(start), Stop: injT.Add(stop),
-			Period: dur(period), Pulses: 20}}}
+		Incidents: append([]Incident{{Bot: "bot-a", Channel: "7f", Start: injT.Add(start), Stop: injT.Add(stop),
+			Period: dur(period), Pulses: 20}}, extra...)}
 	b, err := json.MarshalIndent(l, "", " ")
 	if err != nil {
 		t.Fatal(err)
@@ -433,5 +434,49 @@ func TestScoreWritesOutFileOnce(t *testing.T) {
 	}
 	if code := run(args, nil, &stdout, &stderr); code != exitFail {
 		t.Fatal("an existing metrics file was overwritten")
+	}
+}
+
+// -bots narrows which incidents the bars cover, for the non-blind
+// sanity-check bot of the #474 pre-registration. An episode that matches an
+// unselected incident stays a true positive: it must never turn into a
+// false alarm.
+func TestScoreBotsFilter(t *testing.T) {
+	dir := t.TempDir()
+	p := 5 * time.Minute
+	labels := craftLabels(t, dir, time.Hour, 2*time.Hour, p,
+		Incident{Bot: "sanity", Channel: "11", Start: injT.Add(10 * time.Hour),
+			Stop: injT.Add(11 * time.Hour), Period: dur(p), Pulses: 20})
+	report := craftReport(t, dir,
+		craftedEpisode{id: "blind", active: 90 * time.Minute, ended: 110 * time.Minute, periodNS: int64(p)},
+		craftedEpisode{id: "sanity", active: 10*time.Hour + 30*time.Minute, ended: 11 * time.Hour,
+			periodNS: int64(p), key: "v1|s=stream|pt=5|ch=1:11|rc=flood|rk=relay|hop=1:fd"},
+	)
+	all := scoreInto(t, report, labels)
+	if all.Incidents != 2 || all.IncidentsSelected != 2 || all.IncidentsDetected != 2 || all.Recall != 1 ||
+		all.TruePositives != 2 || all.FalsePositives != 0 {
+		t.Fatalf("unfiltered: %+v", all)
+	}
+	blind := scoreInto(t, report, labels, "-bots", "bot-a")
+	if blind.Incidents != 2 || blind.IncidentsSelected != 1 || blind.IncidentsDetected != 1 ||
+		blind.Recall != 1 || len(blind.PerIncident) != 1 || blind.PerIncident[0].Bot != "bot-a" {
+		t.Fatalf("blind arm: %+v", blind)
+	}
+	// The sanity bot's episode is still a true positive, not a false alarm.
+	if blind.TruePositives != 2 || blind.FalsePositives != 0 || blind.FalseAlarmsPerDay != 0 {
+		t.Fatalf("the unselected incident's episode was counted as a false alarm: %+v", blind)
+	}
+	if len(blind.Bots) != 1 || blind.Bots[0] != "bot-a" {
+		t.Fatalf("the filter is not reported: %+v", blind.Bots)
+	}
+	sanity := scoreInto(t, report, labels, "-bots", " sanity ,")
+	if sanity.IncidentsSelected != 1 || sanity.PerIncident[0].Bot != "sanity" {
+		t.Fatalf("sanity arm: %+v", sanity)
+	}
+	// A filter that selects nothing is an error, not an empty pass.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"score", "-report", report, "-labels", labels, "-rule", "p474",
+		"-start", injAt(0), "-end", injAt(24 * time.Hour), "-bots", "nobody"}, nil, &stdout, &stderr); code != exitFail {
+		t.Fatalf("-bots with an unknown name: exit %d", code)
 	}
 }
