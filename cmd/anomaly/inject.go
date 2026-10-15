@@ -73,18 +73,23 @@ type labellingSpec struct {
 // export; the fields that describe the wire are exactly the fields of a
 // replay record, so an injected line carries nothing a real line does not.
 type injectBot struct {
-	Name         string    `json:"name"`
-	Channel      string    `json:"channel"`
-	PayloadType  *int      `json:"payload_type"`
-	RouteClass   string    `json:"route_class"`
-	RouteKind    string    `json:"route_kind"`
-	FirstHop     string    `json:"first_hop"`
-	FullRoute    string    `json:"full_route"`
-	WireBytes    int       `json:"wire_bytes"`
-	PayloadBytes *int      `json:"payload_bytes"`
-	Start        time.Time `json:"start"`
-	Stop         time.Time `json:"stop"`
-	Period       dur       `json:"period"`
+	Name         string `json:"name"`
+	Channel      string `json:"channel"`
+	PayloadType  *int   `json:"payload_type"`
+	RouteClass   string `json:"route_class"`
+	RouteKind    string `json:"route_kind"`
+	FirstHop     string `json:"first_hop"`
+	FullRoute    string `json:"full_route"`
+	WireBytes    int    `json:"wire_bytes"`
+	PayloadBytes *int   `json:"payload_bytes"`
+	// PayloadBytesSpread spreads the payload size: each event's size is
+	// drawn uniformly from payload_bytes +/- this many bytes. A real bot's
+	// payload length varies, so a constant one makes an injected line
+	// trivially distinguishable from an exported one. 0 keeps it constant.
+	PayloadBytesSpread *int      `json:"payload_bytes_spread"`
+	Start              time.Time `json:"start"`
+	Stop               time.Time `json:"stop"`
+	Period             dur       `json:"period"`
 	// JitterSD is the standard deviation of the per-pulse offset from the
 	// nominal grid time; JitterMax clamps it. The offset is not cumulative,
 	// so the train does not drift.
@@ -312,8 +317,9 @@ func parseInjectSpec(b []byte) (injectSpec, error) {
 	if s.Seed == nil {
 		return injectSpec{}, errors.New("inject spec: seed is required")
 	}
-	if s.FinalAfter == nil || *s.FinalAfter < 0 || time.Duration(*s.FinalAfter) > time.Hour {
-		return injectSpec{}, errors.New("inject spec: final_after is required and must be in 0..1h")
+	if s.FinalAfter == nil || *s.FinalAfter < 0 || time.Duration(*s.FinalAfter) > time.Hour ||
+		time.Duration(*s.FinalAfter)%time.Second != 0 {
+		return injectSpec{}, errors.New("inject spec: final_after is required and must be whole seconds in 0..1h")
 	}
 	if err := s.Labelling.validate(); err != nil {
 		return injectSpec{}, err
@@ -393,6 +399,14 @@ func (b *injectBot) validate() error {
 		return bad("jitter_sd is required and must be >= 0")
 	case b.WireBytes <= 0:
 		return bad("wire_bytes must be > 0")
+	case b.PayloadBytes != nil && *b.PayloadBytes <= 0:
+		return bad("payload_bytes must be > 0 when present")
+	case b.PayloadBytesSpread == nil || *b.PayloadBytesSpread < 0:
+		return bad("payload_bytes_spread is required and must be >= 0")
+	case *b.PayloadBytesSpread > 0 && b.PayloadBytes == nil:
+		return bad("payload_bytes_spread needs payload_bytes")
+	case b.PayloadBytes != nil && *b.PayloadBytesSpread >= *b.PayloadBytes:
+		return bad("payload_bytes_spread must be < payload_bytes")
 	case b.Start.IsZero() || b.Stop.IsZero() || !b.Stop.After(b.Start):
 		return bad("start and stop are required, with stop after start")
 	case time.Duration(b.Period) <= 0:
@@ -456,14 +470,27 @@ func generateBot(b *injectBot, seed uint64, finalAfter time.Duration, budget int
 		if len(evs) >= budget {
 			return fmt.Errorf("inject: more than -max-injected events; raise the bound or shorten the spec")
 		}
+		// Parity with the export, which times every line from a whole-second
+		// observation time (time.Unix(ts, 0)) and takes a whole-second
+		// -settle: an injected line must not be recognisable by a fractional
+		// second. Truncation moves a time by less than one second towards
+		// the past, so the effective jitter is in [-(jitter_max + 1s),
+		// jitter_max].
+		when = when.UTC().Truncate(time.Second)
 		rec := anomaly.ReplayRecord{
-			ID: fmt.Sprintf("%s%s-%d-%d", injPrefix, b.Name, pulse, part), Time: when.UTC(),
-			FinalAt: when.Add(finalAfter).UTC(), PayloadType: *b.PayloadType, Channel: b.Channel,
+			ID: fmt.Sprintf("%s%s-%d-%d", injPrefix, b.Name, pulse, part), Time: when,
+			FinalAt: when.Add(finalAfter), PayloadType: *b.PayloadType, Channel: b.Channel,
 			RouteClass: b.RouteClass, RouteKind: b.RouteKind, FirstHop: b.FirstHop, FullRoute: b.FullRoute,
 			WireBytes: b.WireBytes, Traffic: "unclassified", Decryption: "unknown",
 		}
 		if b.PayloadBytes != nil {
 			pb := *b.PayloadBytes
+			// One payload-size draw per emitted event, taken only when the
+			// spread is nonzero, so a spread of 0 consumes no randomness and
+			// leaves every other draw where it was.
+			if sp := *b.PayloadBytesSpread; sp > 0 {
+				pb += int(p.float()*float64(2*sp+1)) - sp
+			}
 			rec.PayloadBytes = &pb
 		}
 		// An injected line must be exactly as valid as an exported one.

@@ -30,6 +30,7 @@ type specOpts struct {
 	jitterSD          string
 	missedFraction    float64
 	multipartFraction float64
+	payloadSpread     int
 	holes             string // JSON array body, e.g. {"start":..,"duration":"35m"}
 	extraBots         string // JSON for further bots, with a leading comma
 	leadBots          string // JSON for bots before bot-a, with a trailing comma
@@ -77,6 +78,7 @@ func specJSON(o specOpts) string {
   "full_route": "1:fd00",
   "wire_bytes": 60,
   "payload_bytes": 35,
+  "payload_bytes_spread": %d,
   "start": %q,
   "stop": %q,
   "period": %q,
@@ -88,7 +90,7 @@ func specJSON(o specOpts) string {
   "multipart_max_delay": "55s",
   "holes": %s
  }%s]
-}`, o.seed, o.minPulses, o.leadBots, o.channel, injAt(0), injAt(o.stopAfter), o.period, o.jitterSD,
+}`, o.seed, o.minPulses, o.leadBots, o.channel, o.payloadSpread, injAt(0), injAt(o.stopAfter), o.period, o.jitterSD,
 		o.missedFraction, o.multipartFraction, o.holes, o.extraBots)
 }
 
@@ -283,7 +285,7 @@ func TestInjectIsDeterministic(t *testing.T) {
 func TestInjectBotsAreIndependent(t *testing.T) {
 	botB := `{
   "name": "bot-b", "channel": "22", "payload_type": 5, "route_class": "flood", "route_kind": "relay",
-  "first_hop": "1:ee", "full_route": "1:ee00", "wire_bytes": 60, "payload_bytes": 35,
+  "first_hop": "1:ee", "full_route": "1:ee00", "wire_bytes": 60, "payload_bytes": 35, "payload_bytes_spread": 0,
   "start": "` + injAt(0) + `", "stop": "` + injAt(time.Hour) + `", "period": "7m",
   "jitter_sd": "2s", "jitter_max": "10s", "missed_fraction": 0, "multipart_fraction": 0,
   "multipart_max_extra": 2, "multipart_max_delay": "55s", "holes": []}`
@@ -552,7 +554,7 @@ func TestInjectSpecRejectsMissingAndUnknownFields(t *testing.T) {
 		"duplicate bot": strings.Replace(base, `"holes": []
  }]`, `"holes": []
  }, {"name": "bot-a", "channel": "22", "payload_type": 5, "route_class": "flood", "route_kind": "relay",
-  "first_hop": "1:ee", "full_route": "1:ee00", "wire_bytes": 60, "payload_bytes": 35,
+  "first_hop": "1:ee", "full_route": "1:ee00", "wire_bytes": 60, "payload_bytes": 35, "payload_bytes_spread": 0,
   "start": "`+injAt(0)+`", "stop": "`+injAt(time.Hour)+`", "period": "7m", "jitter_sd": "0s",
   "jitter_max": "10s", "missed_fraction": 0, "multipart_fraction": 0, "multipart_max_extra": 2,
   "multipart_max_delay": "55s", "holes": []}]`, 1),

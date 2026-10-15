@@ -239,9 +239,10 @@ single missed pulses, one 35-minute hole, one stable first hop).
     "route_class": "flood",
     "route_kind": "relay",
     "first_hop": "1:fd",
-    "full_route": "1:fd00",
+    "full_route": "3:fd0a1c",
     "wire_bytes": 60,
     "payload_bytes": 35,
+    "payload_bytes_spread": 6,
     "start": "2026-10-16T00:00:00Z",
     "stop": "2026-10-19T13:12:00Z",
     "period": "5m",
@@ -258,6 +259,16 @@ single missed pulses, one 35-minute hole, one stable first hop).
 
 - `final_after` is added to each event time to give its `final_at`; set it to
   the export's `-settle`, so injected lines are final like the background's.
+  Like `-settle`, it must be whole seconds.
+- **Times are whole seconds.** Every injected event time is truncated to a
+  whole second, as the export's are (`time.Unix(ts, 0)`), so a fractional
+  second never gives an injected line away. Truncation moves a time by less
+  than a second towards the past, so the effective offset from the grid is in
+  `[-(jitter_max + 1s), jitter_max]`.
+- `payload_bytes_spread` draws each event's payload size uniformly from
+  `payload_bytes ± spread`; a real bot's payload length varies, and a
+  constant one is another giveaway. 0 keeps the size constant, and the
+  spread must be smaller than `payload_bytes`.
 - `jitter_sd` is the standard deviation of the offset from the nominal grid
   time, clamped to `±jitter_max`. The offset is not cumulative, so the train
   does not drift.
@@ -266,7 +277,8 @@ single missed pulses, one 35-minute hole, one stable first hop).
   `multipart_max_delay`. A hole drops every pulse inside it.
 - `channel`, `first_hop`, `full_route`, `payload_type` and the sizes are the
   wire fields of a replay line: an injected line carries nothing a real line
-  does not.
+  does not. `full_route` is a whole observed route, not just the first hop
+  repeated, so an injected line's route looks like an exported one's.
 
 ### Labels
 

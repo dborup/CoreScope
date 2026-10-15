@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -147,5 +148,110 @@ func TestScoreTakesTheLastEnded(t *testing.T) {
 	}
 	if !eps[0].end.Equal(last) {
 		t.Fatalf("end %v, want the last ended %v", eps[0].end, last)
+	}
+}
+
+// F6: the export times every line from a whole-second observation time, so
+// an injected line must too. A fractional second would make every injected
+// line trivially distinguishable from an exported one.
+func TestInjectTimesAreWholeSeconds(t *testing.T) {
+	r := injectInto(t, specJSON(specOpts{seed: 31, jitterSD: "3s", multipartFraction: 0.5}),
+		backgroundJSONL(40))
+	recs := injectedLines(t, r)
+	if len(recs) < 20 {
+		t.Fatalf("only %d injected lines", len(recs))
+	}
+	for _, rec := range recs {
+		if rec.Time.Nanosecond() != 0 || rec.FinalAt.Nanosecond() != 0 {
+			t.Fatalf("%s: time %v final_at %v are not whole seconds", rec.ID, rec.Time, rec.FinalAt)
+		}
+	}
+	// The same on the wire: no injected line carries a fractional second.
+	for _, l := range r.lines {
+		if !strings.Contains(l, `"id":"`+injPrefix) {
+			continue
+		}
+		for _, f := range []string{`"time":"`, `"final_at":"`} {
+			i := strings.Index(l, f)
+			if i < 0 {
+				t.Fatalf("line %q has no %s", l, f)
+			}
+			v := l[i+len(f):]
+			v = v[:strings.IndexByte(v, '"')]
+			if strings.Contains(v, ".") {
+				t.Fatalf("%s %s carries a fractional second in %q", f, v, l)
+			}
+		}
+	}
+	// The labels are derived from the same whole-second pulses.
+	for _, inc := range r.labels.Incidents {
+		if inc.Start.Nanosecond() != 0 || inc.Stop.Nanosecond() != 0 {
+			t.Fatalf("incident %+v is not on whole seconds", inc)
+		}
+	}
+}
+
+// F6: a real bot's payload length varies. payload_bytes_spread draws each
+// event's size uniformly from payload_bytes +/- the spread, and a spread of
+// 0 keeps the old constant size.
+func TestInjectPayloadSizeVariesWithinTheSpread(t *testing.T) {
+	const base, spread = 35, 6
+	r := injectInto(t, specJSON(specOpts{seed: 31, payloadSpread: spread}), backgroundJSONL(40))
+	seen := map[int]bool{}
+	for _, rec := range injectedLines(t, r) {
+		if rec.PayloadBytes == nil {
+			t.Fatalf("%s has no payload_bytes", rec.ID)
+		}
+		pb := *rec.PayloadBytes
+		if pb < base-spread || pb > base+spread {
+			t.Fatalf("%s payload %d outside %d +/- %d", rec.ID, pb, base, spread)
+		}
+		seen[pb] = true
+	}
+	if len(seen) < 5 {
+		t.Fatalf("payload size barely varies: %v", seen)
+	}
+	flat := injectInto(t, specJSON(specOpts{seed: 31}), backgroundJSONL(40))
+	for _, rec := range injectedLines(t, flat) {
+		if *rec.PayloadBytes != base {
+			t.Fatalf("spread 0 must keep the size constant, got %d", *rec.PayloadBytes)
+		}
+	}
+}
+
+// F6: the spread is a required field with no default, and it may never push
+// the payload size to zero or below.
+func TestInjectPayloadSpreadIsValidated(t *testing.T) {
+	bot := func(extra string) string {
+		return `{"seed":7,"final_after":"30s",
+ "labelling":{"pulse_merge_gap":"60s","min_period":"1m","max_period":"1h","min_pulses":8,
+  "max_harmonic":3,"tolerance_abs":"30s","tolerance_rel":0.1},
+ "bots":[{"name":"bot-a","channel":"7f","payload_type":5,"route_class":"flood","route_kind":"relay",
+  "first_hop":"1:fd","full_route":"2:fd0a","wire_bytes":60,` + extra + `
+  "start":"` + injAt(0) + `","stop":"` + injAt(time.Hour) + `","period":"5m","jitter_sd":"3s",
+  "jitter_max":"10s","missed_fraction":0,"multipart_fraction":0,"multipart_max_extra":2,
+  "multipart_max_delay":"55s","holes":[]}]}`
+	}
+	for _, tc := range []struct{ name, extra string }{
+		{"missing", `"payload_bytes":35,`},
+		{"negative", `"payload_bytes":35,"payload_bytes_spread":-1,`},
+		{"as wide as the payload", `"payload_bytes":35,"payload_bytes_spread":35,`},
+		{"without a payload size", `"payload_bytes_spread":3,`},
+		{"zero payload size", `"payload_bytes":0,"payload_bytes_spread":0,`},
+	} {
+		if _, err := parseInjectSpec([]byte(bot(tc.extra))); err == nil {
+			t.Fatalf("%s: want an error", tc.name)
+		}
+	}
+	if _, err := parseInjectSpec([]byte(bot(`"payload_bytes":35,"payload_bytes_spread":34,`))); err != nil {
+		t.Fatalf("a spread one below the payload size is legal: %v", err)
+	}
+}
+
+// F6: final_after must be whole seconds, exactly as the export's -settle is.
+func TestInjectFinalAfterIsWholeSeconds(t *testing.T) {
+	spec := strings.Replace(specJSON(specOpts{seed: 7}), `"final_after": "30s"`, `"final_after": "30.5s"`, 1)
+	if _, err := parseInjectSpec([]byte(spec)); err == nil {
+		t.Fatal("a fractional final_after must be refused")
 	}
 }
