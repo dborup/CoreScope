@@ -2377,21 +2377,13 @@ func TestSubpathTxIndexPopulated(t *testing.T) {
 
 	// GetSubpathDetail should return correct match count via indexed lookup
 	detail := store.GetSubpathDetail([]string{"eeff", "0011"})
-	if detail == nil {
-		t.Fatal("expected non-nil detail for existing subpath")
-	}
-	matches, _ := detail["totalMatches"].(int)
-	if matches != 1 {
+	if matches := detail.TotalMatches; matches != 1 {
 		t.Errorf("totalMatches = %d, want 1", matches)
 	}
 
 	// Non-existent subpath should return 0 matches
 	detail2 := store.GetSubpathDetail([]string{"zzzz", "yyyy"})
-	if detail2 == nil {
-		t.Fatal("expected non-nil result even for non-existent subpath")
-	}
-	matches2, _ := detail2["totalMatches"].(int)
-	if matches2 != 0 {
+	if matches2 := detail2.TotalMatches; matches2 != 0 {
 		t.Errorf("totalMatches for non-existent subpath = %d, want 0", matches2)
 	}
 }
@@ -2407,28 +2399,19 @@ func TestSubpathDetailMixedCaseHops(t *testing.T) {
 	}
 
 	// Query with lowercase hops to establish baseline
-	lower := store.GetSubpathDetail([]string{"eeff", "0011"})
-	if lower == nil {
-		t.Fatal("expected non-nil detail for lowercase subpath")
-	}
-	lowerMatches, _ := lower["totalMatches"].(int)
+	lowerMatches := store.GetSubpathDetail([]string{"eeff", "0011"}).TotalMatches
 	if lowerMatches == 0 {
 		t.Fatal("expected >0 matches for lowercase subpath")
 	}
 
 	// Query with mixed-case hops — must return the same results (case-insensitive)
-	mixed := store.GetSubpathDetail([]string{"EEFF", "0011"})
-	if mixed == nil {
-		t.Fatal("expected non-nil detail for mixed-case subpath")
-	}
-	mixedMatches, _ := mixed["totalMatches"].(int)
+	mixedMatches := store.GetSubpathDetail([]string{"EEFF", "0011"}).TotalMatches
 	if mixedMatches != lowerMatches {
 		t.Errorf("mixed-case totalMatches = %d, want %d (same as lowercase)", mixedMatches, lowerMatches)
 	}
 
 	// All-uppercase should also match
-	upper := store.GetSubpathDetail([]string{"EEFF", "0011"})
-	upperMatches, _ := upper["totalMatches"].(int)
+	upperMatches := store.GetSubpathDetail([]string{"EEFF", "0011"}).TotalMatches
 	if upperMatches != lowerMatches {
 		t.Errorf("uppercase totalMatches = %d, want %d", upperMatches, lowerMatches)
 	}
@@ -2606,11 +2589,8 @@ func TestStoreGetSubpathDetail(t *testing.T) {
 	store.Load()
 
 	result := store.GetSubpathDetail([]string{"aabb", "ccdd"})
-	if result == nil {
-		t.Error("expected non-nil result")
-	}
-	if _, ok := result["hops"]; !ok {
-		t.Error("expected hops field")
+	if len(result.Hops) != 2 || len(result.Nodes) != 2 {
+		t.Errorf("expected 2 hops and 2 nodes, got %v / %v", result.Hops, result.Nodes)
 	}
 }
 
