@@ -94,6 +94,24 @@ func dbfChannelNames(t *testing.T, db *DB) []string {
 	return out
 }
 
+// dbfEncryptedHashes lists the hashes GET /api/channels reports as still
+// encrypted, through the same cached DB path the endpoint uses. A resolved
+// row must leave this list, which is a separate cache from the channel list.
+func dbfEncryptedHashes(t *testing.T, db *DB) []string {
+	t.Helper()
+	chans, err := db.GetEncryptedChannels("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, c := range chans {
+		if h, ok := c["hash"].(string); ok {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 func dbfContains(names []string, want string) bool {
 	for _, n := range names {
 		if n == want {
@@ -115,9 +133,12 @@ func TestDecodeBackfill_RewriteReachesChannelsAfterOneTick(t *testing.T) {
 	poll := newRMPoller(db, s)
 	poll.tick() // records the revision baseline
 
-	// Warm the cache with the pre-rewrite answer.
+	// Warm both caches with the pre-rewrite answer.
 	if names := dbfChannelNames(t, db); dbfContains(names, "#dbf") {
 		t.Fatalf("precondition: #dbf already listed: %v", names)
+	}
+	if enc := dbfEncryptedHashes(t, db); !dbfContains(enc, "enc_3A") {
+		t.Fatalf("precondition: enc_3A is not in the encrypted list: %v", enc)
 	}
 
 	dbfRewrite(t, db, 1, "#dbf")
@@ -126,11 +147,20 @@ func TestDecodeBackfill_RewriteReachesChannelsAfterOneTick(t *testing.T) {
 	if names := dbfChannelNames(t, db); dbfContains(names, "#dbf") {
 		t.Fatalf("cache served the rewrite before any invalidation: %v", names)
 	}
+	if enc := dbfEncryptedHashes(t, db); !dbfContains(enc, "enc_3A") {
+		t.Fatalf("the encrypted-list cache dropped enc_3A before any invalidation: %v", enc)
+	}
 
 	poll.tick()
 	names := dbfChannelNames(t, db)
 	if !dbfContains(names, "#dbf") {
 		t.Errorf("/api/channels does not list the backfilled channel after one tick: %v", names)
+	}
+	// The resolved row must also leave the encrypted list, which is its own
+	// cache with its own 60s TTL: without encChannelsCache.reset() the hash
+	// keeps being offered as "Encrypted (0x3A)" next to the decoded channel.
+	if enc := dbfEncryptedHashes(t, db); dbfContains(enc, "enc_3A") {
+		t.Errorf("the encrypted-channel list still offers enc_3A after one tick: %v", enc)
 	}
 }
 
@@ -186,8 +216,9 @@ func TestDecodeBackfill_AbsentTableStopsPolling(t *testing.T) {
 // The table can still appear while the server runs: on a joint deploy the
 // ingestor creates it lazily on its first pass, which can land after this
 // server's first tick. The poller must therefore re-probe on a slow cadence
-// instead of latching off for good, and must take the revision it finds as a
-// baseline rather than treating the rows already rewritten as news.
+// instead of latching off for good, baseline the revision it finds, and — when
+// that revision is already above zero — invalidate once, because rows were
+// rewritten during the absent window and the caches warmed in it are stale.
 func TestDecodeBackfill_AbsentTableIsRecheckedAndPickedUp(t *testing.T) {
 	db := setupTestDB(t)
 	s := NewPacketStore(db, nil)
@@ -217,9 +248,12 @@ func TestDecodeBackfill_AbsentTableIsRecheckedAndPickedUp(t *testing.T) {
 		t.Errorf("state = %d before the re-check window, want -1", early)
 	}
 
-	// The re-check tick finds the table and only records the baseline.
-	if s.RefreshDecodeBackfill() {
-		t.Error("the re-check tick invalidated; it must only baseline the revision it found")
+	// The re-check tick finds the table, baselines its revision and
+	// invalidates exactly once: revision 4 means the ingestor rewrote rows
+	// while this server was polling a missing table, so anything warmed in
+	// that window may still serve the pre-rewrite answer.
+	if !s.RefreshDecodeBackfill() {
+		t.Error("the re-check tick did not invalidate; rows rewritten during the absent window stay cached until the TTL")
 	}
 	s.decodeBackfillMu.Lock()
 	state, rev := s.decodeBackfillState, s.decodeBackfillRev
@@ -227,11 +261,52 @@ func TestDecodeBackfill_AbsentTableIsRecheckedAndPickedUp(t *testing.T) {
 	if state != 1 || rev != 4 {
 		t.Fatalf("state = %d rev = %d, want 1 and 4 after the table appeared", state, rev)
 	}
+	// Once only: the next tick sees the same revision and does nothing.
+	if s.RefreshDecodeBackfill() {
+		t.Error("the tick after the table appeared invalidated again on an unchanged revision")
+	}
 
 	// From then on it behaves like a normal poll.
 	dbfExec(t, db, `UPDATE decode_backfill_state SET revision = 5 WHERE id = 1`)
 	if !s.RefreshDecodeBackfill() {
 		t.Error("a revision written after the table appeared did not invalidate")
+	}
+}
+
+// A state table that appears with revision 0 has had no row rewritten yet, so
+// the tick that finds it must only baseline — invalidating there would drop
+// every warm cache for nothing on each joint deploy.
+func TestDecodeBackfill_AbsentTableAppearingAtRevisionZeroOnlyBaselines(t *testing.T) {
+	db := setupTestDB(t)
+	s := NewPacketStore(db, nil)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	s.RefreshDecodeBackfill() // table missing: latch off
+
+	dbfExec(t, db, dbfStateDDL)
+	dbfExec(t, db, `INSERT INTO decode_backfill_state
+		(id, kinds, watermark, ceiling, status, revision, scanned, channel_updated, scope_updated, ambiguous, decode_errors, started_at, updated_at)
+		VALUES (1, 'channel', 0, 9, 'running', 0, 0, 0, 0, 0, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+
+	for i := 0; i < decodeBackfillAbsentRecheck-1; i++ {
+		if s.RefreshDecodeBackfill() {
+			t.Fatalf("tick %d invalidated before the re-check window", i)
+		}
+	}
+	if s.RefreshDecodeBackfill() {
+		t.Error("the re-check tick invalidated on a table that has rewritten nothing")
+	}
+	s.decodeBackfillMu.Lock()
+	state, rev := s.decodeBackfillState, s.decodeBackfillRev
+	s.decodeBackfillMu.Unlock()
+	if state != 1 || rev != 0 {
+		t.Fatalf("state = %d rev = %d, want 1 and 0", state, rev)
+	}
+	// From then on a growth invalidates normally.
+	dbfExec(t, db, `UPDATE decode_backfill_state SET revision = 1 WHERE id = 1`)
+	if !s.RefreshDecodeBackfill() {
+		t.Error("the first rewrite after the table appeared did not invalidate")
 	}
 }
 

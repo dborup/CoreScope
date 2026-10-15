@@ -35,10 +35,27 @@ import (
 // Analytics read transmissions from snapshots taken outside s.mu (see
 // distance_snapshot_race_test.go, which parks a compute inside
 // tx.ParsedDecoded()), so writing those string fields in place would be a
-// data race, not a refresh. It affects only the in-memory fallbacks — the
-// packets-page channel filter and the Audio Lab buckets — never the Channels
-// page, and the next server start loads the rewritten columns. This is the
-// same boundary the #188 resolved_path backfill already documents.
+// data race, not a refresh. The next server start loads the rewritten
+// columns. This is the same boundary the #188 resolved_path backfill already
+// documents.
+//
+// Every surface served from a StoreTx the server already holds therefore
+// keeps the pre-rewrite value until the next start (docs/deployment.md lists
+// the same set):
+//
+//   - the packets list — groupedTxsToPage emits tx.DecodedJSON and
+//     tx.ScopeName (store.go), and the packets page's channel filter and the
+//     Audio Lab buckets read the same copy;
+//   - packet detail — handlePacketDetail prefers store.GetPacketByHash and
+//     only falls back to the database when the row has aged out of the store
+//     (routes.go), so the same message can read "decrypted" on Channels and
+//     "no key" in its detail view until the next start;
+//   - GetNodeHopAnalytics' Scoped flag (tx.ScopeName != "", store.go);
+//   - repeater liveness — relayEntry.scope (repeater_liveness.go).
+//
+// Everything that reads the database instead — /api/channels, channel
+// messages, the encrypted-channel list, the scope_name queries and the
+// analytics channel tabs — is current within one poll tick.
 
 // decodeBackfillStateTable is the one-row progress table the ingestor writes.
 const decodeBackfillStateTable = "decode_backfill_state"
@@ -147,10 +164,21 @@ func (s *PacketStore) RefreshDecodeBackfill() bool {
 		return false
 	}
 	if s.decodeBackfillState < 0 {
-		// It just appeared: take its revision as the baseline rather than
-		// treating every row the ingestor had already rewritten as news.
+		// It just appeared after this server found it missing. Baseline the
+		// revision — the rows rewritten before this server started are in the
+		// caches' own first read anyway — but invalidate once when that
+		// revision is already above zero: those rewrites landed while this
+		// server was polling a table that did not exist yet, so a cache warmed
+		// during that window can still serve the pre-rewrite answer and would
+		// otherwise only age out on its TTL. Revision 0 means nothing has been
+		// rewritten, so there is nothing to drop.
 		s.decodeBackfillState = 1
 		s.decodeBackfillRev = rev
+		if rev > 0 {
+			s.invalidateDecodeBackfillCaches()
+			log.Printf("[decode-backfill] state table appeared at revision %d; channel and scope caches dropped once", rev)
+			return true
+		}
 		return false
 	}
 	if s.decodeBackfillState == 0 {
