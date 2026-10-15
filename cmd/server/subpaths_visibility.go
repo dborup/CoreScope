@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -12,10 +13,16 @@ import (
 // aliases) with bulk lookups and without touching the store's cached,
 // shared responses.
 //
+// One rule for every hop: a hop that stands for a hidden identity is shown
+// as its raw hop, exactly like a hop that matches no node. Rows and parent
+// paths through it are kept, not dropped, so a hidden hop with traffic has
+// the same form as an unknown hop with the same traffic. Hidden observers are
+// left out of a detail's observer list.
+//
 // Metrics keep their documented meaning: totalPaths, a row's count and pct,
 // and a detail's totalMatches/signal/hourDistribution are computed over all
-// traffic, hidden or not. Only identities are removed, so after filtering a
-// list can hold fewer rows than its limit and its percentages need not add up.
+// traffic, hidden or not. Rows that become identical once masked are merged,
+// so a list can hold fewer rows than its limit.
 
 // subpathVisibility is the policy the detail view is built under. A nil
 // *subpathVisibility hides nothing.
@@ -40,9 +47,11 @@ func (s *Server) routePatternsRestricted() bool {
 }
 
 // hiddenPubkeys returns the lower-case subset of pubkeys that are hidden,
-// reading live names in one bulk query (see hiddenIdentityNames).
+// reading live names in one bulk query. The query runs even for an empty
+// key set (see lookupHiddenIdentityNames), so its cost does not depend on
+// whether a requested hop resolves to a node.
 func (s *Server) hiddenPubkeys(ctx context.Context, pubkeys []string) (map[string]bool, error) {
-	names, err := s.hiddenIdentityNames(ctx, pubkeys)
+	names, err := s.lookupHiddenIdentityNames(ctx, pubkeys)
 	if err != nil {
 		return nil, err
 	}
@@ -68,18 +77,22 @@ func subpathsResponseOf(v interface{}) (SubpathsResponse, bool) {
 	return out, true
 }
 
-// subpathRowHidden decides one row. Each raw hop is a short prefix, never an
-// identity by itself: it counts only through the nodes that carry it
-// (candidates). A prefix with no hidden candidate never hides the row. Once a
-// prefix has a hidden candidate the row is kept only when the name it shows
-// for that hop is a visible candidate's name and no hidden candidate's (fail
-// closed: a cached row can still show a name the node no longer has). Rows
-// that do not line up (hops and path segments differ) are hidden.
-func subpathRowHidden(row SubpathResp, candidates map[string][]nodeInfo, hidden map[string]bool) bool {
+// visibleSubpathRow returns a row as it may be shown, with every hop that
+// stands for a hidden identity shown as its raw hop. Each raw hop is a short
+// prefix, never an identity by itself: it counts only through the nodes that
+// carry it (candidates). A prefix with no hidden candidate is shown as
+// named, unless the name itself is hidden (nameHidden): a cached row can
+// still show the name of a node that has since left the node list or been
+// renamed. Once a prefix has a hidden candidate it is shown as named only
+// when that name is a visible candidate's and no hidden candidate's (fail
+// closed: the name cannot tell them apart otherwise). A row whose hops and
+// path segments do not line up is not shown at all (ok false).
+func visibleSubpathRow(row SubpathResp, candidates map[string][]nodeInfo, hidden map[string]bool, nameHidden func(string) bool) (SubpathResp, bool) {
 	names := strings.Split(row.Path, " → ")
 	if len(names) != len(row.RawHops) {
-		return true
+		return SubpathResp{}, false
 	}
+	masked := false
 	for i, hop := range row.RawHops {
 		anyHidden, shownVisible, shownHidden := false, false, false
 		for _, c := range candidates[strings.ToLower(hop)] {
@@ -90,16 +103,48 @@ func subpathRowHidden(row SubpathResp, candidates map[string][]nodeInfo, hidden 
 				shownVisible = shownVisible || !h
 			}
 		}
-		if anyHidden && (!shownVisible || shownHidden) {
-			return true
+		if nameHidden(names[i]) || (anyHidden && (!shownVisible || shownHidden)) {
+			names[i] = hop
+			masked = true
 		}
 	}
-	return false
+	if masked {
+		row.Path = strings.Join(names, " → ")
+	}
+	return row, true
 }
 
-// filterHiddenFromSubpaths removes hidden-identity rows from list responses
-// (one for /subpaths, one per group for /subpaths-bulk). A group that cannot
-// be read is returned empty (fail closed).
+// mergeSubpathRows merges rows that show the same path once masked, the way
+// the store merges raw keys that resolve to one name (counts summed, the
+// smallest raw key reported), and ranks them as the store does.
+func mergeSubpathRows(rows []SubpathResp, totalPaths int) []SubpathResp {
+	byPath := make(map[string]int, len(rows))
+	out := make([]SubpathResp, 0, len(rows))
+	for _, row := range rows {
+		i, ok := byPath[row.Path]
+		if !ok {
+			byPath[row.Path] = len(out)
+			out = append(out, row)
+			continue
+		}
+		if strings.Join(row.RawHops, ",") < strings.Join(out[i].RawHops, ",") {
+			out[i].RawHops = row.RawHops
+		}
+		out[i].Count += row.Count
+		out[i].Pct = subpathPct(out[i].Count, totalPaths)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+// filterHiddenFromSubpaths masks hidden identities in list responses (one
+// for /subpaths, one per group for /subpaths-bulk). A group that cannot be
+// read is returned empty (fail closed).
 func (s *Server) filterHiddenFromSubpaths(ctx context.Context, groups []SubpathsResponse) ([]SubpathsResponse, error) {
 	prefixSet := map[string]bool{}
 	for _, g := range groups {
@@ -130,12 +175,13 @@ func (s *Server) filterHiddenFromSubpaths(ctx context.Context, groups []Subpaths
 	}
 	out := make([]SubpathsResponse, len(groups))
 	for i, g := range groups {
-		out[i] = SubpathsResponse{Subpaths: make([]SubpathResp, 0, len(g.Subpaths)), TotalPaths: g.TotalPaths}
+		rows := make([]SubpathResp, 0, len(g.Subpaths))
 		for _, row := range g.Subpaths {
-			if !subpathRowHidden(row, candidates, hidden) {
-				out[i].Subpaths = append(out[i].Subpaths, row)
+			if v, ok := visibleSubpathRow(row, candidates, hidden, s.cfg.IsNameHidden); ok {
+				rows = append(rows, v)
 			}
 		}
+		out[i] = SubpathsResponse{Subpaths: mergeSubpathRows(rows, g.TotalPaths), TotalPaths: g.TotalPaths}
 	}
 	return out, nil
 }

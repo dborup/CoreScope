@@ -75,8 +75,20 @@ func hiddenNamesSQL(n int, withInactive bool) string {
 // on the next request, cached response or not. Returns (nil, nil) when no
 // hidden-name prefix is configured: names cannot hide anything then.
 func (s *Server) hiddenIdentityNames(ctx context.Context, pubkeys []string) (map[string][]string, error) {
+	if len(pubkeys) == 0 {
+		return nil, nil
+	}
+	return s.lookupHiddenIdentityNames(ctx, pubkeys)
+}
+
+// lookupHiddenIdentityNames is hiddenIdentityNames without the shortcut for
+// an empty key set: with hidden-name prefixes configured it always runs the
+// query. Callers whose key set depends on whether a requested identity
+// exists (Route Patterns, #410) use it, so the work a request does does not
+// tell a hidden identity apart from one that matches nothing.
+func (s *Server) lookupHiddenIdentityNames(ctx context.Context, pubkeys []string) (map[string][]string, error) {
 	prefixes := s.cfg.EnforcedHiddenNamePrefixes()
-	if len(prefixes) == 0 || len(pubkeys) == 0 {
+	if len(prefixes) == 0 {
 		return nil, nil
 	}
 	if s.db == nil || s.db.conn == nil {

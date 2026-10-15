@@ -251,8 +251,8 @@ func TestRoutePatterns410_AmbiguousPrefix(t *testing.T) {
 			got := rpList(t, router)
 			if winner == "visible" {
 				rpRequire(t, "visible winner", got, shown)
-			} else if got[shown] || rpAnyContains(got, "Hidden-Two") {
-				t.Errorf("hidden winner leaks: %v", got)
+			} else if got[shown] || rpAnyContains(got, "Hidden-Two") || !got["Alpha → 11"] {
+				t.Errorf("hidden winner leaks or is not shown as its raw hop: %v", got)
 			}
 		})
 	}
@@ -623,15 +623,38 @@ func TestRoutePatterns410_AmbiguousPrefixStaleName(t *testing.T) {
 }
 
 // Two candidates of one prefix sharing a name, one of them hidden: the shown
-// name cannot tell them apart, so the row is hidden (fail closed).
-func TestSubpathRowHidden410_SharedNameFailsClosed(t *testing.T) {
+// name cannot tell them apart, so the hop is shown raw (fail closed).
+func TestVisibleSubpathRow410_SharedNameFailsClosed(t *testing.T) {
 	cands := map[string][]nodeInfo{"dd": {{PublicKey: "dd01", Name: "Dup"}, {PublicKey: "dd02", Name: "Dup"}}}
 	row := SubpathResp{Path: "Alpha → Dup", RawHops: []string{"aa", "dd"}}
-	if !subpathRowHidden(row, cands, map[string]bool{"dd02": true}) {
-		t.Error("row kept although its shown name is also a hidden candidate's")
+	noName := func(string) bool { return false }
+	if got, ok := visibleSubpathRow(row, cands, map[string]bool{"dd02": true}, noName); !ok || got.Path != "Alpha → dd" {
+		t.Errorf("shown name is also a hidden candidate's: got %q (ok %v), want the raw hop", got.Path, ok)
 	}
-	if subpathRowHidden(row, cands, map[string]bool{}) {
-		t.Error("row hidden with nothing hidden")
+	if got, ok := visibleSubpathRow(row, cands, map[string]bool{}, noName); !ok || got.Path != "Alpha → Dup" {
+		t.Errorf("nothing hidden: got %q (ok %v)", got.Path, ok)
+	}
+	if _, ok := visibleSubpathRow(SubpathResp{Path: "Alpha", RawHops: []string{"aa", "dd"}}, cands, nil, noName); ok {
+		t.Error("a row whose hops and names do not line up is shown")
+	}
+}
+
+// Rows that show the same path once masked merge like the store merges raw
+// keys of one name: counts summed, pct recomputed, the smallest raw key, and
+// ranked by count then path.
+func TestMergeSubpathRows410(t *testing.T) {
+	rows := []SubpathResp{
+		{Path: "Alpha → Eve", RawHops: []string{"aa", "ee"}, Count: 3, Hops: 2, Pct: 30},
+		{Path: "Alpha → 11", RawHops: []string{"aa", "11"}, Count: 2, Hops: 2, Pct: 20},
+		{Path: "Alpha → 11", RawHops: []string{"aa", "10"}, Count: 2, Hops: 2, Pct: 20},
+	}
+	got := mergeSubpathRows(rows, 10)
+	want := []SubpathResp{
+		{Path: "Alpha → 11", RawHops: []string{"aa", "10"}, Count: 4, Hops: 2, Pct: 40},
+		{Path: "Alpha → Eve", RawHops: []string{"aa", "ee"}, Count: 3, Hops: 2, Pct: 30},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("merged %+v, want %+v", got, want)
 	}
 }
 
