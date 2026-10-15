@@ -274,9 +274,10 @@ type PacketStore struct {
 	// decodeBackfillState is 0 before the first poll (which only records the
 	// baseline), 1 while polling, -1 when the state table does not exist.
 	// See decode_backfill.go; guarded by decodeBackfillMu, never s.mu.
-	decodeBackfillMu    sync.Mutex
-	decodeBackfillRev   int64
-	decodeBackfillState int
+	decodeBackfillMu          sync.Mutex
+	decodeBackfillRev         int64
+	decodeBackfillState       int
+	decodeBackfillAbsentTicks int
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string

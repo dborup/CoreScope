@@ -162,7 +162,7 @@ func TestDecodeBackfill_FirstPollOnlyBaselines(t *testing.T) {
 }
 
 // A database no #380 ingestor has touched has no state table: the server
-// reports "absent", stops polling, and never logs per tick.
+// reports "absent" and stops querying it on every tick.
 func TestDecodeBackfill_AbsentTableStopsPolling(t *testing.T) {
 	db := setupTestDB(t)
 	s := NewPacketStore(db, nil)
@@ -180,6 +180,58 @@ func TestDecodeBackfill_AbsentTableStopsPolling(t *testing.T) {
 	}
 	if got := db.decodeBackfillStatus(); got.Status != "absent" {
 		t.Errorf("status = %q, want absent", got.Status)
+	}
+}
+
+// The table can still appear while the server runs: on a joint deploy the
+// ingestor creates it lazily on its first pass, which can land after this
+// server's first tick. The poller must therefore re-probe on a slow cadence
+// instead of latching off for good, and must take the revision it finds as a
+// baseline rather than treating the rows already rewritten as news.
+func TestDecodeBackfill_AbsentTableIsRecheckedAndPickedUp(t *testing.T) {
+	db := setupTestDB(t)
+	s := NewPacketStore(db, nil)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	s.RefreshDecodeBackfill() // table missing: latch off
+
+	// The ingestor shows up and has already rewritten rows.
+	dbfExec(t, db, dbfStateDDL)
+	dbfExec(t, db, `INSERT INTO decode_backfill_state
+		(id, kinds, watermark, ceiling, status, revision, scanned, channel_updated, scope_updated, ambiguous, decode_errors, started_at, updated_at)
+		VALUES (1, 'channel', 9, 9, 'done', 4, 9, 2, 0, 0, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+
+	// Ticks before the re-check window must not query it again. The latching
+	// tick above did not count towards the window, so the window closes on
+	// the decodeBackfillAbsentRecheck-th tick after it.
+	for i := 0; i < decodeBackfillAbsentRecheck-1; i++ {
+		if s.RefreshDecodeBackfill() {
+			t.Fatalf("tick %d invalidated before the re-check window", i)
+		}
+	}
+	s.decodeBackfillMu.Lock()
+	early := s.decodeBackfillState
+	s.decodeBackfillMu.Unlock()
+	if early != -1 {
+		t.Errorf("state = %d before the re-check window, want -1", early)
+	}
+
+	// The re-check tick finds the table and only records the baseline.
+	if s.RefreshDecodeBackfill() {
+		t.Error("the re-check tick invalidated; it must only baseline the revision it found")
+	}
+	s.decodeBackfillMu.Lock()
+	state, rev := s.decodeBackfillState, s.decodeBackfillRev
+	s.decodeBackfillMu.Unlock()
+	if state != 1 || rev != 4 {
+		t.Fatalf("state = %d rev = %d, want 1 and 4 after the table appeared", state, rev)
+	}
+
+	// From then on it behaves like a normal poll.
+	dbfExec(t, db, `UPDATE decode_backfill_state SET revision = 5 WHERE id = 1`)
+	if !s.RefreshDecodeBackfill() {
+		t.Error("a revision written after the table appeared did not invalidate")
 	}
 }
 

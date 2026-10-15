@@ -43,6 +43,13 @@ import (
 // decodeBackfillStateTable is the one-row progress table the ingestor writes.
 const decodeBackfillStateTable = "decode_backfill_state"
 
+// decodeBackfillAbsentRecheck is how many poller ticks pass between probes
+// once the state table was found missing. The poller ticks about once a
+// second, so this is roughly a minute — slow enough that a database no #380
+// ingestor will ever touch costs one failed query a minute, soon enough that
+// an ingestor started after this server is picked up without a restart.
+const decodeBackfillAbsentRecheck = 60
+
 // DecodeBackfillStatus is the read-only view reported on /api/healthz.
 // Status is "absent" when no ingestor has ever run the backfill against this
 // database (or the ingestor is older than #380).
@@ -122,13 +129,28 @@ func (s *PacketStore) RefreshDecodeBackfill() bool {
 	s.decodeBackfillMu.Lock()
 	defer s.decodeBackfillMu.Unlock()
 	if s.decodeBackfillState < 0 {
-		return false
+		// The table was missing. It can still appear while this server runs:
+		// the ingestor creates it lazily on its first pass, which on a joint
+		// deploy can land after this server's first tick. So re-probe on a
+		// slow cadence instead of latching off, and keep the common case
+		// (a database no #380 ingestor will ever touch) down to one failed
+		// query per decodeBackfillAbsentRecheck ticks.
+		s.decodeBackfillAbsentTicks++
+		if s.decodeBackfillAbsentTicks < decodeBackfillAbsentRecheck {
+			return false
+		}
+		s.decodeBackfillAbsentTicks = 0
 	}
 	rev := s.db.decodeBackfillRevision()
 	if rev < 0 {
-		// A pre-#380 database never grows a state table while this server
-		// runs: stop polling instead of querying a missing table per tick.
 		s.decodeBackfillState = -1
+		return false
+	}
+	if s.decodeBackfillState < 0 {
+		// It just appeared: take its revision as the baseline rather than
+		// treating every row the ingestor had already rewritten as news.
+		s.decodeBackfillState = 1
+		s.decodeBackfillRev = rev
 		return false
 	}
 	if s.decodeBackfillState == 0 {

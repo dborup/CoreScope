@@ -733,6 +733,12 @@ decoded payload until it next starts; that affects only the packets page's
 channel filter and the Audio Lab, and is the same boundary the `resolved_path`
 backfill has.
 
+**Deploying it.** Nothing has to be migrated: the ingestor creates its two
+small bookkeeping tables the first time it runs a pass. A server started
+before that reports `decode_backfill: {"status": "absent"}` and re-checks on a
+slow cadence, so it picks the pass up without a restart whichever process
+starts first.
+
 **Watching it.** `GET /api/healthz` reports a `decode_backfill` object (status,
 armed kinds, watermark/ceiling, rows rewritten, abstentions, undecodable rows),
 `/api/perf/write-sources` counts rewritten rows as `backfill_decode_channel`
