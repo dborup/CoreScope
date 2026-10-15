@@ -202,7 +202,10 @@ function waitForLoad() {
     }
     // #380: an approval also re-matches stored packets whose region is still
     // unknown, so the approve dialog must say so and the revoke one must not.
-    assert.ok(/still unknown are re-matched in the background/.test(prompts[0]), 'approve must mention the backfill: ' + prompts[0]);
+    assert.ok(/still unknown can be re-matched in the background/.test(prompts[0]), 'approve must mention the backfill: ' + prompts[0]);
+    // "can be", not "are": the page cannot know whether the operator left the
+    // ingestor's backfill enabled (decodeBackfill.disabled).
+    assert.ok(!/still unknown are re-matched/.test(prompts[0]), 'approve must not promise the backfill unconditionally: ' + prompts[0]);
     assert.ok(!/re-matched in the background/.test(prompts[1]), 'revoke must not promise a backfill: ' + prompts[1]);
     sb.window.ObserverNeighborsTool.destroy();
   });

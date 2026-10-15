@@ -202,7 +202,7 @@ async function main() {
       await page.locator(`button[data-scope-action="revoke"][data-scope-name="${NORTH}"]`).waitFor();
       await page.waitForFunction((n) => !document.getElementById('obs-nb-unknown-scopes-wrap').textContent.includes(n), NORTH);
       await page.locator('#obs-nb-admin-list').getByText('1 of 128 approval slots used.').waitFor();
-      assert.match(dialogs[dialogs.length - 1], /received from now on.*still unknown are re-matched in the background/);
+      assert.match(dialogs[dialogs.length - 1], /received from now on.*still unknown can be re-matched in the background/);
       assert.match(logText(stack.ingestor), new RegExp('approved "' + NORTH + '": 1 approved region scope\\(s\\) live'));
     });
 

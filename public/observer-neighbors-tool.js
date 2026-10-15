@@ -181,11 +181,13 @@
   // Shown before every decision. The matcher only sees packets received
   // afterwards; stored packets already matched to a scope are never changed.
   // An approval additionally lets the ingestor re-match stored packets whose
-  // region is still unknown (#380), which takes a few minutes on a large
-  // database; a revocation never clears a match it made.
+  // region is still unknown (#380); a revocation never clears a match it made.
+  // Deliberately "can be re-matched", not "are": the backfill is the
+  // ingestor's and an operator can switch it off (decodeBackfill.disabled),
+  // which this page has no way to know.
   function confirmMessage(action, name) {
     var history = ' Stored packets already matched to a scope keep it.';
-    if (action === 'approve') return 'Approve ' + name + '? Packets received from now on can match it, and stored packets whose region is still unknown are re-matched in the background.' + history;
+    if (action === 'approve') return 'Approve ' + name + '? Packets received from now on can match it, and stored packets whose region is still unknown can be re-matched in the background.' + history;
     if (action === 'revoke') return 'Revoke ' + name + '? Packets received from now on stop matching it, unless it is also configured.' + history;
     return 'Reject ' + name + '? Nothing is activated; it stays listed while neighbors report it.';
   }
