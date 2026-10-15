@@ -525,6 +525,20 @@ func main() {
 		defer stopResolvedPathBackfill()
 	}
 
+	// #380: re-decode historical enc_<HEX> GRP_TXT rows and unknown-scoped
+	// transport rows whenever the effective key set grows (config/SIGHUP,
+	// approved shared channels, approved region scopes). Same placement as
+	// the backfills above: next to live ingest, after the buffer is draining,
+	// cancelled on shutdown and resumed from its watermark on the next start.
+	if set := cfg.DecodeBackfillSettings(); set.Enabled {
+		decodeBackfillValidateSignatures = cfg.ShouldValidateSignatures()
+		stopDecodeBackfill := store.StartDecodeBackfill(keys, set)
+		defer stopDecodeBackfill()
+		log.Printf("[decode-backfill] enabled (batch=%d window=%d pause=%s poll=%s)", set.BatchSize, set.IDWindow, set.Pause, set.Poll)
+	} else {
+		log.Printf("[decode-backfill] disabled by config")
+	}
+
 	// #1212: per-source stall watchdog. Detects "silently dead" sources
 	// where the client reports connected but no messages have flowed. Logs
 	// a WARN line every minute for any source silent for >5m. Scan every
@@ -1748,8 +1762,22 @@ func loadRegionKeys(cfg *Config, configPath string) (map[string][]byte, error) {
 // more matches means the code1 doesn't uniquely identify a region for
 // this payload, so we report unknown-scoped ("") rather than guess.
 func matchScope(regionKeys map[string][]byte, payloadType byte, payloadRaw []byte, code1 string) string {
-	if code1 == "0000" || len(regionKeys) == 0 || len(payloadRaw) == 0 {
+	match, matchCount := matchScopeDetail(regionKeys, payloadType, payloadRaw, code1)
+	if matchCount > 1 {
+		log.Printf("[regions] ambiguous scope match for code1=%s: %d regions collide (including %q) — reporting unknown-scoped instead of guessing", code1, matchCount, match)
 		return ""
+	}
+	return match
+}
+
+// matchScopeDetail is matchScope without the decision: it returns the last
+// region whose HMAC produced code1 and how many regions did. Callers that
+// only want the name use matchScope; the #380 decode backfill needs the count
+// so it can report an abstention separately from "no region matched", without
+// changing what ingest stores.
+func matchScopeDetail(regionKeys map[string][]byte, payloadType byte, payloadRaw []byte, code1 string) (string, int) {
+	if code1 == "0000" || len(regionKeys) == 0 || len(payloadRaw) == 0 {
+		return "", 0
 	}
 	var match string
 	matchCount := 0
@@ -1770,11 +1798,7 @@ func matchScope(regionKeys map[string][]byte, payloadType byte, payloadRaw []byt
 			matchCount++
 		}
 	}
-	if matchCount > 1 {
-		log.Printf("[regions] ambiguous scope match for code1=%s: %d regions collide (including %q) — reporting unknown-scoped instead of guessing", code1, matchCount, match)
-		return ""
-	}
-	return match
+	return match, matchCount
 }
 
 // Version info (set via ldflags)

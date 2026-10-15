@@ -649,11 +649,13 @@ it.
 - **SIGHUP keeps decisions.** A reload rebuilds only the configured layer. It
   neither drops an approved scope nor brings back a revoked one; the reload log
   line reports how many approved region scopes were kept.
-- **New packets only.** A decision changes matching for packets received after
-  it. Stored transmissions keep the `scope_name` they were stored with: an
-  approval does not re-match them (also not when the same packet is heard again
-  later), and a revocation does not clear matches made while the scope was
-  approved. A backfill of historical packets is out of scope.
+- **New packets, and then the history.** A decision changes matching for
+  packets received after it immediately. Stored transmissions are re-matched
+  afterwards by the decode backfill (see
+  [Re-decoding history after a key is added](#re-decoding-history-after-a-key-is-added)),
+  which only ever fills in an unknown scope: a revocation never clears matches
+  made while the scope was approved, and an already-matched row is never
+  rewritten.
 - **Not part of areas.** An approved scope has no `areas[].regionScopes` link,
   so it does not appear in area-based scope statistics.
 - **Exact names.** The name is used byte for byte, as with `hashRegions`
@@ -674,6 +676,69 @@ it.
   The rates come from 15,000 random payloads and agree with
   1 − (1 − 1/65534)^(N−1). The timings come from
   `BenchmarkMatchScopeApprovalCap` (`cmd/ingestor`) on an i7-1260P.
+
+### Re-decoding history after a key is added
+
+Channel and region keys are applied when a packet is ingested, so a key added
+later normally helps only future packets: stored GRP_TXT rows keep the
+`enc_<HEX>` routing placeholder and transport-scoped rows keep their unknown
+region, even though their raw frame is still in the database. The ingestor
+closes that gap itself (issue #380).
+
+**What triggers it.** Growth of the *effective* key set, whichever way a key
+arrives: a `hashChannels`/`channelKeys` entry plus a SIGHUP or a restart, an
+approved shared hashtag channel, or an approved region scope. The ingestor
+records which key names a completed pass has already covered (as digests of
+the names — a hashtag channel key *is* its name, so the plain name is not
+stored) and starts a pass whenever a live key is not among them. Removing or
+revoking a key triggers nothing.
+
+**What it rewrites.** Only unresolved rows: GRP_TXT rows whose `channel_hash`
+is still `enc_<HEX>`, and transport-scoped rows whose `scope_name` is the
+empty string. Each candidate is re-decoded from its stored frame through the
+same decode path live ingest uses, so a rewritten `channel_hash`,
+`decoded_json` or `scope_name` is byte-identical to the same packet ingested
+fresh. An already-resolved row is never touched, a row that still does not
+decrypt keeps its placeholder, and a region match that two regions collide on
+abstains and leaves the row unknown-scoped — the same answer live ingest gives.
+
+**What it costs.** One bounded pass over `transmissions` in id order. Each
+batch scans at most `idWindow` ids and at most `batchSize` matching rows,
+writes them in one short transaction together with the new watermark, and then
+sleeps `pauseMs`. Ingestion keeps running next to it. Before enabling it on a
+large database, measure:
+
+```bash
+scripts/decode-backfill-estimate.sh /path/to/corescope.db
+```
+
+That script is read-only (it opens the database as `immutable`), prints counts
+and an estimated cost, and is safe to run next to a live ingestor.
+
+**Crash and restart behaviour.** The row rewrites, the watermark and the
+counters commit together, so a crash or a `docker restart` repeats at most the
+batch that did not commit, and the pass resumes from its watermark on the next
+start. Every rewrite is guarded on the row still being unresolved, so a repeat
+is a no-op. A pass is credited with its keys only when it reaches its end: a
+key added while a pass is running is covered by the *next* pass, which starts
+again from the beginning of the table, so no history is skipped. Restoring an
+older database copy simply means the pass runs again — it is idempotent.
+
+**What the server sees.** The ingestor is the only writer; the server stays
+read-only. Within one poll tick (one second) it drops its channel caches, so
+Channels, channel messages and the region-scope queries — all of which read the
+database — show the rewritten rows without a restart. The server's in-memory
+copies of transmissions it loaded *before* a rewrite keep their load-time
+decoded payload until it next starts; that affects only the packets page's
+channel filter and the Audio Lab, and is the same boundary the `resolved_path`
+backfill has.
+
+**Watching it.** `GET /api/healthz` reports a `decode_backfill` object (status,
+armed kinds, watermark/ceiling, rows rewritten, abstentions, undecodable rows),
+`/api/perf/write-sources` counts rewritten rows as `backfill_decode_channel`
+and `backfill_decode_scope`, and the ingestor logs every pass under
+`[decode_backfill]`. Set `decodeBackfill.disabled` to `true` to switch the pass
+off; see `config.example.json` for the other settings.
 
 ### Map Tile Providers
 

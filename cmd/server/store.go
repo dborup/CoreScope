@@ -270,6 +270,13 @@ type PacketStore struct {
 	routeMaskParked         map[int]uint8
 	routeMaskLoadSettled    atomic.Bool // Load() or RunStartupLoad returned: start-up loading is over
 	routeMaskChangeRowsRead atomic.Int64
+	// #380: the ingestor's decode-backfill revision this server has seen.
+	// decodeBackfillState is 0 before the first poll (which only records the
+	// baseline), 1 while polling, -1 when the state table does not exist.
+	// See decode_backfill.go; guarded by decodeBackfillMu, never s.mu.
+	decodeBackfillMu    sync.Mutex
+	decodeBackfillRev   int64
+	decodeBackfillState int
 	// Short-lived cache for QueryGroupedPackets (avoids repeated full sort)
 	groupedCacheMu    sync.Mutex
 	groupedCacheKey   string

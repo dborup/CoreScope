@@ -82,5 +82,20 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	} else if s.db != nil {
 		resp["route_mask_backfill"] = s.db.routeMaskBackfillStatus()
 	}
+	// #380: the ingestor's historical decode backfill, read-only from its
+	// one-row state table ("absent" on a database no #380 ingestor has
+	// touched). Progress, abstentions and undecodable rows are visible here.
+	if db := s.healthDB(); db != nil {
+		resp["decode_backfill"] = db.decodeBackfillStatus()
+	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// healthDB returns the read-only handle /api/healthz should query: the
+// store's, or the server's when no store is attached (tests, early boot).
+func (s *Server) healthDB() *DB {
+	if s.store != nil && s.store.db != nil {
+		return s.store.db
+	}
+	return s.db
 }

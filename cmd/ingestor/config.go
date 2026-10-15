@@ -134,6 +134,10 @@ type Config struct {
 	// ResolvedPathBackfill tunes the start-up re-resolution of NULL
 	// observations.resolved_path rows (#188, resolved_path_backfill.go).
 	ResolvedPathBackfill *ResolvedPathBackfillConfig `json:"resolvedPathBackfill,omitempty"`
+
+	// DecodeBackfill tunes the re-decoding of historical rows after the
+	// effective channel/region key set grows (#380, decode_backfill.go).
+	DecodeBackfill *DecodeBackfillConfig `json:"decodeBackfill,omitempty"`
 }
 
 // NeighborEdgesDaysOrDefault returns the configured pruning window or 5.
