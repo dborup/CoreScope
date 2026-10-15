@@ -134,10 +134,9 @@ func main() {
 	// hashChannels/hashRegions additions in config.json otherwise require a
 	// full restart to take effect — SIGHUP reloads just these two derived
 	// key sets in place. See hot_reload.go.
-	keys := newHotKeys(channelKeys, regionKeys)
 	// #380: a key leaving the effective set is forgotten by the decode
 	// backfill on the event itself, whether or not the pass is enabled.
-	keys.onRemoved(store.forgetDecodeBackfillKeys)
+	keys := newIngestorHotKeys(store, channelKeys, regionKeys)
 	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
 	defer stopSIGHUPReload()
 
