@@ -16,9 +16,10 @@ import (
 // Offline replay (EXPERIMENTAL). Replay reads normalized events from a
 // neutral JSON Lines format, runs one Detector over an explicit [Start, End)
 // data-time range and returns a deterministic report. It never opens a
-// database, never touches the network and never reads the wall clock. There
-// is deliberately no command-line tool; see TestOfflineReplay for running it
-// from `go test` with local files.
+// database, never touches the network and never reads the wall clock. The
+// offline command cmd/anomaly (`replay`) runs it on local files, and its
+// `export` builds the input lines from a CoreScope database (read-only);
+// TestOfflineReplay runs it from `go test`.
 //
 // Input line format (one final event per line; unknown fields and trailing
 // data after the JSON object are rejected):
@@ -174,6 +175,31 @@ func (r ReplayRecord) Event() (Event, error) {
 	}
 	e.Traffic, e.Decryption = TrafficClass(tc), DecryptStatus(dc)
 	return e, e.Validate()
+}
+
+// RecordFromEvent writes e as a replay line: the inverse of
+// ReplayRecord.Event for every field a line carries (the normalization
+// counts Observations and ExcludedObservations are not part of the format).
+// A zero FinalAt is written as Time, which means the same. e must pass
+// Event.Validate (as every Normalizer event does).
+func RecordFromEvent(e Event) ReplayRecord {
+	r := ReplayRecord{ID: string(e.ID), Time: e.Time.UTC(), FinalAt: e.finalAt().UTC(), PayloadType: int(e.PayloadType),
+		RouteClass: e.RouteClass.String(), RouteKind: e.RouteKind.String(), WireBytes: e.WireBytes,
+		Traffic: trafficNames[e.Traffic], Decryption: decryptNames[e.Decryption], Truncated: e.Truncated}
+	if !e.Channel.IsZero() {
+		r.Channel = hex.EncodeToString(e.Channel.Bytes())
+	}
+	if !e.FirstHop.IsZero() {
+		r.FirstHop = e.FirstHop.encode()
+	}
+	if e.FullRoute.Width() != 0 {
+		r.FullRoute = fmt.Sprintf("%d:%s", e.FullRoute.Width(), hex.EncodeToString(e.FullRoute.hops))
+	}
+	if e.PayloadKnown {
+		pb := e.PayloadBytes
+		r.PayloadBytes = &pb
+	}
+	return r
 }
 
 func orDefault(s, d string) string {
@@ -345,7 +371,10 @@ type ReplayConfig struct {
 		MinCoverage       float64       `json:"min_coverage"`
 		MaxJitterFraction float64       `json:"max_jitter_fraction"`
 		MaxChance         float64       `json:"max_chance"`
-		State             stateJSON     `json:"state"`
+		// EndAfterMissedPulses is optional: omitted means 0, tracking off
+		// (see PeriodicRule.EndAfterMissedPulses).
+		EndAfterMissedPulses int       `json:"end_after_missed_pulses"`
+		State                stateJSON `json:"state"`
 	} `json:"periodic"`
 }
 
@@ -415,7 +444,7 @@ func ParseReplayConfig(b []byte) (Config, error) {
 			MinPeriod: time.Duration(r.MinPeriod), MaxPeriod: time.Duration(r.MaxPeriod), BurstGap: time.Duration(r.BurstGap),
 			JitterAbs: time.Duration(r.JitterAbs), JitterRel: r.JitterRel, MaxMissing: r.MaxMissing, MinPulses: r.MinPulses,
 			HistoryLen: r.HistoryLen, MinCoverage: r.MinCoverage, MaxJitterFraction: r.MaxJitterFraction,
-			MaxChance: r.MaxChance, State: r.State.params()})
+			MaxChance: r.MaxChance, EndAfterMissedPulses: r.EndAfterMissedPulses, State: r.State.params()})
 	}
 	return cfg, cfg.Validate()
 }

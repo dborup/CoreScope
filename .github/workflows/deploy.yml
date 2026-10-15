@@ -250,6 +250,15 @@ jobs:
           echo "--- Anomaly library: ${passed} top-level tests passed under -race ---"
           test "${passed}" -gt 0
 
+      # cmd/anomaly is the offline replay/export tool for internal/anomaly
+      # (#457): its own module, not built into any image or release.
+      - name: Vet and test anomaly offline tool (cmd/anomaly)
+        run: |
+          set -e -o pipefail
+          cd cmd/anomaly
+          go vet ./...
+          go test ./...
+
 
   js-test:
     name: "✅ JavaScript Unit Tests & Lint"
