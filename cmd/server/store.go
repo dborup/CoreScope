@@ -10948,10 +10948,10 @@ func (s *PacketStore) computeAnalyticsSubpathsWindowed(region string, minLen, ma
 				raw := strings.Join(hops[start:start+l], ",")
 				entry := subpathCounts[sub]
 				if entry == nil {
-					entry = &subpathAccum{raw: raw}
+					entry = &subpathAccum{}
 					subpathCounts[sub] = entry
 				}
-				entry.count++
+				entry.add(raw, 1)
 			}
 		}
 	}
@@ -11080,10 +11080,10 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 			}
 			entry := perGroup[gi][namedKey]
 			if entry == nil {
-				entry = &subpathAccum{raw: rawKey}
+				entry = &subpathAccum{}
 				perGroup[gi][namedKey] = entry
 			}
-			entry.count += count
+			entry.add(rawKey, count)
 		}
 	}
 	totalPaths := s.spTotalPaths
@@ -11108,7 +11108,18 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 // subpathAccum holds a running count for a single named subpath.
 type subpathAccum struct {
 	count int
-	raw   string // first raw-hop key seen (used for rawHops in the API response)
+	raw   string // smallest raw-hop key merged into this named subpath (rawHops in the API response)
+}
+
+// add merges n occurrences of raw into the accumulator. Several raw keys can
+// resolve to the same display name (two nodes sharing a name), so the one
+// reported as rawHops is the lexicographically smallest: deterministic across
+// map iteration orders, which the visibility filter (#410) relies on.
+func (a *subpathAccum) add(raw string, n int) {
+	if a.count == 0 || raw < a.raw {
+		a.raw = raw
+	}
+	a.count += n
 }
 
 func (s *PacketStore) computeAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
@@ -11158,10 +11169,10 @@ func (s *PacketStore) computeAnalyticsSubpaths(region string, minLen, maxLen, li
 		namedKey := strings.Join(named, " → ")
 		entry := namedCounts[namedKey]
 		if entry == nil {
-			entry = &subpathAccum{raw: rawKey}
+			entry = &subpathAccum{}
 			namedCounts[namedKey] = entry
 		}
-		entry.count += count
+		entry.add(rawKey, count)
 	}
 
 	return s.rankSubpaths(namedCounts, s.spTotalPaths, limit)
@@ -11205,10 +11216,10 @@ func (s *PacketStore) computeSubpathsSlow(region string, minLen, maxLen, limit i
 				raw := strings.Join(hops[start:start+l], ",")
 				entry := subpathCounts[sub]
 				if entry == nil {
-					entry = &subpathAccum{raw: raw}
+					entry = &subpathAccum{}
 					subpathCounts[sub] = entry
 				}
-				entry.count++
+				entry.add(raw, 1)
 			}
 		}
 	}
@@ -11263,7 +11274,16 @@ func (s *PacketStore) rankSubpaths(counts map[string]*subpathAccum, totalPaths, 
 
 // --- Subpath Detail ---
 
-func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} {
+// An optional identity-visibility policy (#410) makes the result nil when a
+// requested hop resolves to a hidden node (the caller answers 404), and
+// leaves parent paths through a hidden node and hidden observers out;
+// totalMatches, signal and the hour distribution keep describing every
+// matched transmission. Without a policy nothing is hidden.
+func (s *PacketStore) GetSubpathDetail(rawHops []string, visibility ...*subpathVisibility) map[string]interface{} {
+	var vis *subpathVisibility
+	if len(visibility) > 0 {
+		vis = visibility[0]
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -11288,6 +11308,9 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 	for i, hop := range rawHops {
 		r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph)
 		entry := map[string]interface{}{"hop": hop, "name": hop, "lat": nil, "lon": nil, "pubkey": nil}
+		if r != nil && vis.nodeHidden(r.PublicKey) {
+			return nil
+		}
 		if r != nil {
 			entry["name"] = r.Name
 			entry["pubkey"] = r.PublicKey
@@ -11332,7 +11355,7 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 			rssiSum += *tx.RSSI
 			rssiCount++
 		}
-		if tx.ObserverName != "" {
+		if tx.ObserverName != "" && !vis.observerHidden(tx.ObserverID, tx.ObserverName) {
 			observers[tx.ObserverName]++
 		}
 
@@ -11341,13 +11364,18 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 		txCtx := buildHopContextPubkeys(tx, pm)
 		hops := txGetParsedPath(tx)
 		resolved := make([]string, len(hops))
+		pathHidden := false
 		for i, h := range hops {
 			r, _, _ := pm.resolveWithContext(h, txCtx, graph)
 			if r != nil {
 				resolved[i] = r.Name
+				pathHidden = pathHidden || vis.nodeHidden(r.PublicKey)
 			} else {
 				resolved[i] = h
 			}
+		}
+		if pathHidden {
+			continue
 		}
 		fullPath := strings.Join(resolved, " → ")
 		parentPaths[fullPath]++
@@ -11423,4 +11451,31 @@ func (s *PacketStore) LoadCoverageRatio() float64 {
 	s.bgErrMu.RLock()
 	defer s.bgErrMu.RUnlock()
 	return s.loadCoverageRatio
+}
+
+// HopCandidates returns, per lower-cased hop prefix, the nodes that prefix can
+// stand for (the resolver's candidate set). Values are copies.
+func (s *PacketStore) HopCandidates(prefixes []string) map[string][]nodeInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, pm := s.getCachedNodesAndPM()
+	out := make(map[string][]nodeInfo, len(prefixes))
+	for _, p := range prefixes {
+		if cs := pm.m[strings.ToLower(p)]; len(cs) > 0 {
+			out[strings.ToLower(p)] = append([]nodeInfo(nil), cs...)
+		}
+	}
+	return out
+}
+
+// AllNodePubkeys returns the pubkeys of every node the resolver knows.
+func (s *PacketStore) AllNodePubkeys() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	nodes, _ := s.getCachedNodesAndPM()
+	out := make([]string, len(nodes))
+	for i, n := range nodes {
+		out[i] = n.PublicKey
+	}
+	return out
 }

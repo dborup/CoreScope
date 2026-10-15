@@ -1418,6 +1418,12 @@ type SubpathsResponse struct {
 	TotalPaths int           `json:"totalPaths"`
 }
 
+// SubpathsBulkResponse is /api/analytics/subpaths-bulk: one result per
+// requested group, in request order.
+type SubpathsBulkResponse struct {
+	Results []SubpathsResponse `json:"results"`
+}
+
 type SubpathNode struct {
 	Hop    string      `json:"hop"`
 	Name   string      `json:"name"`
