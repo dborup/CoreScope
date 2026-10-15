@@ -251,7 +251,7 @@ all.
 ```sh
 corescope-anomaly score -report report.json -labels labels.json \
   -rule p474_periodic -start 2026-10-16T00:00:00Z -end 2026-10-23T00:00:00Z \
-  [-out metrics.json]
+  [-bots b0-90s-clean,b1-120s-clean] [-out metrics.json]
 ```
 
 The matching is the #457 §5 periodic rule:
@@ -267,6 +267,10 @@ The matching is the #457 §5 periodic rule:
 - Every other episode is a **false positive**. Without `-labels` every
   episode is one, which is the false-alarm arm: run it on background-only
   traffic to get false alarms per day.
+- `-bots` narrows which incidents the recall and the medians cover - for a
+  non-blind sanity-check bot, say. It never turns a matched episode into a
+  false alarm: an episode matching any labelled incident stays a true
+  positive, selected or not. A filter that selects no incident is an error.
 
 The metrics are episodes, true and false positives, false alarms per day,
 recall, median time to detect (also in units of P), median stop latency,
