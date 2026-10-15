@@ -715,6 +715,16 @@ func (s *Store) RunDecodeBackfill(ctx context.Context, hk *hotKeys, set DecodeBa
 	if err != nil || run == nil {
 		return res, err
 	}
+	if len(run.channelKeys) == 0 && len(run.regionKeys) == 0 {
+		// Nothing in the snapshot can resolve a row, so scanning the table
+		// would be pure cost. Reachable after every key a resumed run started
+		// with was revoked while it was parked.
+		log.Printf("[%s] run for kinds=%s has no effective key left; closing it without a scan", decodeBackfillComponent, run.kinds())
+		if err := s.finishDecodeBackfillRun(run); err != nil {
+			return res, fmt.Errorf("finish run: %w", err)
+		}
+		return res, nil
+	}
 	res.Kinds, res.From, res.Ceiling = run.kinds(), run.watermark, run.ceiling
 	start := time.Now()
 	log.Printf("[%s] starting: kinds=%s ids (%d, %d], %d channel key(s), %d region key(s), batch %d, window %d, pause %s",

@@ -930,3 +930,36 @@ func TestDecodeBackfill_ResumeHonoursARevocation(t *testing.T) {
 		t.Errorf("id %d channel_hash = %q after re-approval, want %q", late, got.channelHash.String, decodeBFChannel)
 	}
 }
+
+// A run whose every key was revoked while it was parked cannot resolve
+// anything, so it is closed without scanning the table.
+func TestDecodeBackfill_ResumeWithNoKeysLeftScansNothing(t *testing.T) {
+	s := decodeBFStore(t, "nokeys.db")
+	keys := decodeBFChannelKeys(decodeBFChannel)
+	for i := 0; i < 4; i++ {
+		decodeBFIngest(t, s, decodeBFGrpTxt(t, keys[decodeBFChannel], fmt.Sprintf("A: %d", i), byte(0x30+i)), nil, nil)
+	}
+	set := decodeBFSettings(1, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	decodeBackfillBatchHook = func(decodeBackfillBatchResult) { cancel() }
+	t.Cleanup(func() { decodeBackfillBatchHook = nil })
+	if _, err := s.RunDecodeBackfill(ctx, newHotKeys(keys, nil), set); err != context.Canceled {
+		t.Fatalf("cancelled run returned %v, want context.Canceled", err)
+	}
+	decodeBackfillBatchHook = nil
+
+	res, err := s.RunDecodeBackfill(context.Background(), newHotKeys(nil, nil), set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Batches != 0 || res.Scanned != 0 {
+		t.Errorf("a run with no effective key scanned the table: %+v", res)
+	}
+	st, err := s.DecodeBackfillState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != "done" {
+		t.Errorf("status = %q, want done so the run is not retried on every poll", st.Status)
+	}
+}
