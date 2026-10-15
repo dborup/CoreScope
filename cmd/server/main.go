@@ -75,11 +75,12 @@ func main() {
 	}
 
 	var (
-		configDir string
-		port      int
-		dbPath    string
-		publicDir string
-		pollMs    int
+		configDir     string
+		port          int
+		dbPath        string
+		publicDir     string
+		pollMs        int
+		wsHistoryFile string
 	)
 
 	flag.StringVar(&configDir, "config-dir", ".", "Directory containing config.json")
@@ -87,6 +88,7 @@ func main() {
 	flag.StringVar(&dbPath, "db", "", "SQLite database path (overrides config/env)")
 	flag.StringVar(&publicDir, "public", "public", "Directory to serve static files from")
 	flag.IntVar(&pollMs, "poll-ms", 1000, "SQLite poll interval for WebSocket broadcast (ms)")
+	flag.StringVar(&wsHistoryFile, "ws-history-file", "", "WebSocket history file (default: beside packet database; off disables persistence)")
 	flag.Parse()
 
 	// Load config
@@ -366,7 +368,11 @@ func main() {
 	hub.ConfigureLimits(cfg.WSMaxClients(), cfg.WSMaxConnsPerIP(), cfg.WSUpgradesPerMinPerIP(),
 		cfg.WSTrustedProxies(), cfg.WSDeny()) // #1794, #369
 	hub.upgrader.EnableCompression = cfg.WSCompressionEnabled()
+	if err := hub.history.enablePersistence(wsHistoryPersistencePath(wsHistoryFile, database.path), database.path, time.Now().UTC()); err != nil {
+		log.Printf("[ws-history] persistence unavailable; RAM-only history: %v", err)
+	}
 	stopWSHistory := hub.StartHistorySampler(wsHistoryInterval)
+	defer stopWSHistory()
 
 	// HTTP server
 	srv := NewServer(database, cfg, hub)

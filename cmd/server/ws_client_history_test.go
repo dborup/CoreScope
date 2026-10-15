@@ -125,7 +125,7 @@ func TestHub_HistorySamplerSamplesAndStops(t *testing.T) {
 
 func TestHandlePerfWSClients_Shape(t *testing.T) {
 	srv, router := setupNoStoreServer(t)
-	srv.hub.history.sample(4, time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	srv.hub.history.sample(4, time.Now().UTC())
 	srv.hub.historyInterval = time.Minute
 
 	req := httptest.NewRequest("GET", "/api/perf/ws-clients", nil)

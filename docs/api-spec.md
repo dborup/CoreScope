@@ -2798,6 +2798,40 @@ Representative packets bucketed by payload type for audio lab.
 
 ---
 
+## GET /api/perf/ws-clients
+
+Returns aggregate open WebSocket connection counts, oldest first. This does
+not identify visitors or count unique people.
+
+Query parameter `range` accepts `24h` (default), `7d` or `30d`. Any other value
+returns HTTP 400. The response has this shape:
+
+```json
+{
+  "range": "7d",
+  "intervalSec": 300,
+  "persistence": { "enabled": true, "healthy": true },
+  "samples": [
+    { "t": "2026-10-01T12:04:00Z", "clients": 12, "peak": 18 },
+    { "t": "2026-10-01T12:34:00Z", "clients": 9, "peak": 11, "gapBefore": true }
+  ]
+}
+```
+
+- `24h` retains minute resolution. `7d` and `30d` return five- and
+  fifteen-minute buckets respectively. `clients` is the last observed count
+  in the bucket; `peak` is the highest count in that bucket, not an average.
+- `gapBefore` indicates interrupted sampling (including a process restart).
+  Missing periods are not zero-filled. A selected range can contain less data
+  than requested, especially after first installation.
+- History is capped at 30 days and uses a separate bounded disk journal, not
+  the packet database. Persistence survives deploys only when the journal's
+  data directory is retained and writable.
+- `persistence.enabled: false` means disk persistence was explicitly disabled.
+  `enabled: true, healthy: false` means loading or saving failed and current
+  samples are memory-only; the server logs the cause without exposing file
+  paths through this API.
+
 ## WebSocket Messages
 
 ### Connection
