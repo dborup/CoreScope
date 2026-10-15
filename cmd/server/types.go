@@ -417,6 +417,25 @@ type WardrivingEntryPrefix struct {
 	MessageCount     int    `json:"messageCount"` // distinct transmissions this prefix appeared as path[0] for
 }
 
+// PositionSource identifies where a displayed coordinate came from, so an
+// API/UI consumer can distinguish a station's own measured position from an
+// approximate stand-in instead of treating every non-nil Lat/Lon the same
+// way (issue #381 — upstream #2098). Never fabricate a position: when
+// neither source applies, Lat/Lon stay nil and PositionSource is
+// PositionSourceNone rather than a guess.
+type PositionSource string
+
+const (
+	// PositionSourceReal is the station's own self-reported node position
+	// (nodes.lat/lon for its pubkey), the only source that is an actual fix.
+	PositionSourceReal PositionSource = "real"
+	// PositionSourceIATA is the static IATA/region-code centroid, used only
+	// because no real position exists for this station.
+	PositionSourceIATA PositionSource = "iata"
+	// PositionSourceNone means no position is known at all.
+	PositionSourceNone PositionSource = "none"
+)
+
 // WardrivingObserverCoverage is how much wardriving traffic a given observer
 // station actually heard — observers sit at fixed, known locations (unlike
 // the wardriving sender, whose live GPS is deliberately not carried on-air
@@ -429,8 +448,14 @@ type WardrivingObserverCoverage struct {
 	IATA             string   `json:"iata,omitempty"`
 	Lat              *float64 `json:"lat,omitempty"`
 	Lon              *float64 `json:"lon,omitempty"`
-	ObservationCount int      `json:"observationCount"`
-	MessageCount     int      `json:"messageCount"` // distinct transmissions this observer heard
+	// PositionSource is "real" when Lat/Lon came from the observer's own
+	// node position, "iata" when it's the configured IATA centroid used
+	// as a fallback (no real position known), or "none" when neither is
+	// available (#381: a real position must never be dropped just because
+	// the observer's IATA code isn't in the static table).
+	PositionSource   PositionSource `json:"positionSource"`
+	ObservationCount int            `json:"observationCount"`
+	MessageCount     int            `json:"messageCount"` // distinct transmissions this observer heard
 }
 
 // WardrivingSignalPoint is one time bucket of average signal quality across
