@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ const (
 // seedRoutePatternsDB builds repeaters (and one companion) plus one
 // transmission per tested path. ambWinner picks which of the two nodes
 // sharing the "11" prefix the resolver prefers (higher advert count).
-func seedRoutePatternsDB(t *testing.T, ambWinner string) *DB {
+func seedRoutePatternsDB(t testing.TB, ambWinner string) *DB {
 	t.Helper()
 	db := setupTestDB(t)
 	now := time.Now().UTC()
@@ -51,6 +52,8 @@ func seedRoutePatternsDB(t *testing.T, ambWinner string) *DB {
 	}
 	mustExec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count) VALUES ('obs1','Observer One','SJC',?,'2026-01-01T00:00:00Z',10)`, recent)
 	mustExec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count) VALUES ('obs2','Hidden-Observer','SFO',?,'2026-01-01T00:00:00Z',10)`, recent)
+	// An observer whose id is a node key: it shares that node's identity.
+	mustExec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count) VALUES (?,'Gateway-Three','SJC',?,'2026-01-01T00:00:00Z',10)`, rpHiddenB, recent)
 	visCount, hidCount := 5, 500
 	if ambWinner == "visible" {
 		visCount, hidCount = 500, 5
@@ -90,6 +93,7 @@ func seedRoutePatternsDB(t *testing.T, ambWinner string) *DB {
 		{`["aa","11"]`, 1},
 		{`["aa","99"]`, 1},
 		{`["aa","dd","bb"]`, 2}, // observed by the Hidden-Observer
+		{`["aa","dd"]`, 3},      // observed by Gateway-Three
 	}
 	for i, p := range paths {
 		mustExec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json) VALUES ('AABB', ?, ?, 1, 5, '{"type":"CHAN"}')`, fmt.Sprintf("rp410-%d", i), recent)
@@ -100,7 +104,11 @@ func seedRoutePatternsDB(t *testing.T, ambWinner string) *DB {
 
 func setupRoutePatternsServer(t *testing.T, ambWinner string, cfg *Config) (*Server, *mux.Router) {
 	t.Helper()
-	db := seedRoutePatternsDB(t, ambWinner)
+	return newRoutePatternsServer(t, seedRoutePatternsDB(t, ambWinner), cfg)
+}
+
+func newRoutePatternsServer(t testing.TB, db *DB, cfg *Config) (*Server, *mux.Router) {
+	t.Helper()
 	srv := NewServer(db, cfg, NewHub())
 	store := NewPacketStore(db, nil)
 	if err := store.Load(); err != nil {
@@ -359,22 +367,52 @@ func rpDetailText(t *testing.T, router *mux.Router, url string) string {
 	return w.Body.String()
 }
 
-// Detail: a requested hop that RESOLVES to a hidden identity is a 404, by
-// hidden name or by blacklist; a short prefix is never compared with a key.
+// rpDetailNode returns nodes[i] of a detail response.
+func rpDetailNode(t *testing.T, body map[string]interface{}, i int) map[string]interface{} {
+	t.Helper()
+	nodes, ok := body["nodes"].([]interface{})
+	if !ok || len(nodes) <= i {
+		t.Fatalf("detail has no nodes[%d]: %v", i, body)
+	}
+	return nodes[i].(map[string]interface{})
+}
+
+// rpRequireUnresolved asserts that nodes[i] reports the hop as matching no
+// node: the raw hop as its name and no pubkey or position.
+func rpRequireUnresolved(t *testing.T, node map[string]interface{}, hop string) {
+	t.Helper()
+	if node["hop"] != hop || node["name"] != hop || node["pubkey"] != nil || node["lat"] != nil || node["lon"] != nil {
+		t.Errorf("hop %q is not reported as unresolved: %v", hop, node)
+	}
+}
+
+// Detail: a requested hop that RESOLVES to a hidden identity is reported as
+// an unresolved hop, by hidden name or by blacklist; a short prefix is never
+// compared with a key.
 func TestRoutePatterns410_DetailHiddenHop(t *testing.T) {
 	cfg := &Config{Port: 3000}
 	_, router := setupRoutePatternsServer(t, "visible", cfg)
-	rpGet(t, router, rpDetail("aa", "bb"), 200) // baseline
-	rpGet(t, router, rpDetail("aa", "cc"), 200)
+	resolved := func(hop, name string) {
+		t.Helper()
+		if got := rpDetailNode(t, rpGet(t, router, rpDetail("aa", hop), 200), 1); got["name"] != name {
+			t.Errorf("hop %q resolved to %v, want %s", hop, got["name"], name)
+		}
+	}
+	unresolved := func(hop string) {
+		t.Helper()
+		rpRequireUnresolved(t, rpDetailNode(t, rpGet(t, router, rpDetail("aa", hop), 200), 1), hop)
+	}
+	resolved("bb", "Hidden-Bravo") // baseline
+	resolved("cc", "Charlie")
 
 	cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
-	rpGet(t, router, rpDetail("aa", "bb"), 404)
-	rpGet(t, router, rpDetail("aa", "cc"), 200) // blacklist not set
+	unresolved("bb")
+	resolved("cc", "Charlie") // blacklist not set
 
 	cfg.SetHiddenNamePrefixes(nil)
 	cfg.SetNodeBlacklist([]string{rpCharlie})
-	rpGet(t, router, rpDetail("aa", "cc"), 404)
-	rpGet(t, router, rpDetail("aa", "bb"), 200) // hidden-name not set
+	unresolved("cc")
+	resolved("bb", "Hidden-Bravo") // hidden-name not set
 
 	// Ambiguous prefix: only the resolved node counts.
 	cfg.SetNodeBlacklist([]string{rpAmbHid})
@@ -382,10 +420,89 @@ func TestRoutePatterns410_DetailHiddenHop(t *testing.T) {
 	if strings.Contains(fmt.Sprint(body), "Hidden-Two") {
 		t.Errorf("detail names the hidden candidate: %v", body)
 	}
+	resolved("11", "Visible-One")
 
 	// Duplicate visible names: a sibling's blacklist entry does not hide it.
-	rpGet(t, router, rpDetail("aa", "dd"), 200)
-	rpGet(t, router, rpDetail("aa", "d2"), 200)
+	resolved("dd", "Dup")
+	resolved("d2", "Dup")
+}
+
+// rpDetailRaw returns the status and body of a detail request.
+func rpDetailRaw(router *mux.Router, hops ...string) (int, string) {
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", rpDetail(hops...), nil))
+	return w.Code, w.Body.String()
+}
+
+// A hidden hop and a hop that matches no node must be indistinguishable, for
+// short prefixes of every length and for full keys, under every hiding rule:
+// same status, the same nodes[i] apart from the echoed hop text and, where
+// neither subpath has traffic, the same whole response.
+func TestRoutePatterns410_DetailHiddenLooksUnknown(t *testing.T) {
+	hidden := []string{"bb", "bb2", "bb22", "bb220000", rpHiddenB}
+	unknown := []string{"f0", "f0f", "f0f0", "f0f0f0f0", "f0f0f0f0f0f0f0f0"}
+	rules := []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"hidden name", func(c *Config) { c.SetHiddenNamePrefixes([]string{"Hidden-"}) }},
+		{"node blacklist", func(c *Config) { c.SetNodeBlacklist([]string{rpHiddenB}) }},
+		{"observer blacklist", func(c *Config) { c.ObserverBlacklist = []string{rpHiddenB} }},
+	}
+	for _, rule := range rules {
+		t.Run(rule.name, func(t *testing.T) {
+			cfg := &Config{Port: 3000}
+			_, router := setupRoutePatternsServer(t, "visible", cfg)
+			for _, h := range hidden {
+				if pk := rpDetailNode(t, rpGet(t, router, rpDetail("cc", h), 200), 1)["pubkey"]; pk != rpHiddenB {
+					t.Fatalf("baseline: hop %q resolves to %v, want the hidden node", h, pk)
+				}
+			}
+			rule.apply(cfg)
+			for i := range hidden {
+				// "cc" has no traffic with either hop; "aa" → "bb" has.
+				for _, lead := range []string{"cc", "aa"} {
+					hCode, hBody := rpDetailRaw(router, lead, hidden[i])
+					uCode, uBody := rpDetailRaw(router, lead, unknown[i])
+					if hCode != uCode {
+						t.Errorf("%s,%s: status %d, unknown hop gives %d", lead, hidden[i], hCode, uCode)
+						continue
+					}
+					if strings.Contains(hBody, "Hidden-Bravo") || strings.Contains(hBody, "Gateway-Three") {
+						t.Errorf("%s,%s: body names the hidden identity: %s", lead, hidden[i], hBody)
+					}
+					var hd, ud map[string]interface{}
+					if json.Unmarshal([]byte(hBody), &hd) != nil || json.Unmarshal([]byte(uBody), &ud) != nil {
+						t.Errorf("%s,%s: not JSON: %s / %s", lead, hidden[i], hBody, uBody)
+						continue
+					}
+					hn, un := rpDetailNode(t, hd, 1), rpDetailNode(t, ud, 1)
+					if len(hn) != len(un) {
+						t.Errorf("%s,%s: nodes[1] fields %v, unknown hop has %v", lead, hidden[i], hn, un)
+					}
+					for k, hv := range hn {
+						uv, ok := un[k]
+						switch {
+						case !ok:
+							t.Errorf("%s,%s: nodes[1].%s missing for the unknown hop", lead, hidden[i], k)
+						case k == "hop" || k == "name":
+							if hv != hidden[i] || uv != unknown[i] {
+								t.Errorf("%s,%s: nodes[1].%s = %v / %v, want the raw hops", lead, hidden[i], k, hv, uv)
+							}
+						case !reflect.DeepEqual(hv, uv):
+							t.Errorf("%s,%s: nodes[1].%s = %v, unknown hop gives %v", lead, hidden[i], k, hv, uv)
+						}
+					}
+					if hd["totalMatches"] == 0.0 {
+						norm := func(body, hop string) string { return strings.ReplaceAll(body, `"`+hop+`"`, `"HOP"`) }
+						if norm(hBody, hidden[i]) != norm(uBody, unknown[i]) {
+							t.Errorf("%s,%s: response differs from the unknown hop's:\n%s\n%s", lead, hidden[i], hBody, uBody)
+						}
+					}
+				}
+			}
+		})
+	}
 }
 
 // Detail of a visible subpath must not surface a hidden node through the
@@ -439,6 +556,113 @@ func TestSubpathAccumMergeIsDeterministic(t *testing.T) {
 		}
 		if a.raw != "d2,ee" || a.count != 6 {
 			t.Errorf("order %v: raw=%q count=%d, want d2,ee/6", order, a.raw, a.count)
+		}
+	}
+}
+
+// Detail observers go through the same live identity lookup as the hops: an
+// observer whose id is a hidden identity (a node key whose node name is
+// hidden) is left out, and so is an observer renamed into a hidden name
+// after the store loaded its transmissions.
+func TestRoutePatterns410_DetailObserverLiveIdentity(t *testing.T) {
+	cfg := &Config{Port: 3000}
+	srv, router := setupRoutePatternsServer(t, "visible", cfg)
+	observers := func() map[string]bool {
+		t.Helper()
+		out := map[string]bool{}
+		for _, o := range rpGet(t, router, rpDetail("aa", "dd"), 200)["observers"].([]interface{}) {
+			out[o.(map[string]interface{})["name"].(string)] = true
+		}
+		return out
+	}
+	if base := observers(); !base["Gateway-Three"] || !base["Observer One"] {
+		t.Fatalf("baseline lacks an observer: %v", base)
+	}
+	cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
+	got := observers()
+	if got["Gateway-Three"] {
+		t.Errorf("observer sharing a hidden node's key is listed: %v", got)
+	}
+	if !got["Observer One"] {
+		t.Errorf("visible observer dropped: %v", got)
+	}
+	if _, err := srv.db.conn.Exec(`UPDATE observers SET name = 'Hidden-Renamed' WHERE id = 'obs1'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := observers(); got["Observer One"] {
+		t.Errorf("observer renamed into a hidden name is listed under its old name: %v", got)
+	}
+}
+
+// Ambiguous prefix with a hidden candidate: a row is kept only when the name
+// it shows for that hop is a visible candidate's name. A cached row can still
+// show the previous name of a node that has since been renamed and hidden;
+// that row goes too.
+func TestRoutePatterns410_AmbiguousPrefixStaleName(t *testing.T) {
+	cfg := &Config{Port: 3000}
+	srv, router := setupRoutePatternsServer(t, "visible", cfg)
+	rpRequire(t, "list baseline", rpList(t, router), "Alpha → Visible-One") // fills the cache
+	rpRequire(t, "bulk baseline", rpBulk(t, router), "Alpha → Visible-One")
+	if _, err := srv.db.conn.Exec(`UPDATE nodes SET name = 'Renamed-One' WHERE public_key = ?`, rpAmbVis); err != nil {
+		t.Fatal(err)
+	}
+	// The node list refreshes on its own schedule; the route cache still
+	// holds the row under the old name.
+	srv.store.cacheMu.Lock()
+	srv.store.nodeCache = nil
+	srv.store.cacheMu.Unlock()
+	cfg.SetNodeBlacklist([]string{rpAmbVis})
+	for name, get := range map[string]func(*testing.T, *mux.Router) map[string]bool{"list": rpList, "bulk": rpBulk} {
+		got := get(t, router)
+		if got["Alpha → Visible-One"] {
+			t.Errorf("%s keeps a row under a hidden node's previous name: %v", name, got)
+		}
+		rpRequire(t, name, got, "Alpha → Charlie", "Alpha → Eve")
+	}
+}
+
+// Two candidates of one prefix sharing a name, one of them hidden: the shown
+// name cannot tell them apart, so the row is hidden (fail closed).
+func TestSubpathRowHidden410_SharedNameFailsClosed(t *testing.T) {
+	cands := map[string][]nodeInfo{"dd": {{PublicKey: "dd01", Name: "Dup"}, {PublicKey: "dd02", Name: "Dup"}}}
+	row := SubpathResp{Path: "Alpha → Dup", RawHops: []string{"aa", "dd"}}
+	if !subpathRowHidden(row, cands, map[string]bool{"dd02": true}) {
+		t.Error("row kept although its shown name is also a hidden candidate's")
+	}
+	if subpathRowHidden(row, cands, map[string]bool{}) {
+		t.Error("row hidden with nothing hidden")
+	}
+}
+
+// BenchmarkRoutePatterns410_Detail2000Nodes times one restricted detail
+// request with about 2,000 known nodes, i.e. what the identity lookup costs
+// at a production-like node count.
+func BenchmarkRoutePatterns410_Detail2000Nodes(b *testing.B) {
+	db := seedRoutePatternsDB(b, "visible")
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	tx, err := db.conn.Begin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < 2000; i++ {
+		if _, err := tx.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count) VALUES (?, ?, 'repeater', 37.5, -122.0, ?, '2026-01-01T00:00:00Z', 1)`,
+			fmt.Sprintf("f1%014x", i), fmt.Sprintf("Bench-%d", i), recent); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+	cfg := &Config{Port: 3000}
+	cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
+	_, router := newRoutePatternsServer(b, db, cfg)
+	url := rpDetail("aa", "dd")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", url, nil))
+		if w.Code != 200 {
+			b.Fatalf("HTTP %d", w.Code)
 		}
 	}
 }
