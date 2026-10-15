@@ -245,13 +245,18 @@ func TestInjectPayloadSpreadIsValidated(t *testing.T) {
 		{"as wide as the payload", `"payload_bytes":35,"payload_bytes_spread":35,`},
 		{"without a payload size", `"payload_bytes_spread":3,`},
 		{"zero payload size", `"payload_bytes":0,"payload_bytes_spread":0,`},
+		// Round 3: the top of the draw range has to fit the frame too, not
+		// only payload_bytes itself (see TestInjectSpreadEnvelopeMustFitTheFrame).
+		{"wider than the frame allows", `"payload_bytes":35,"payload_bytes_spread":34,`},
 	} {
 		if _, err := parseInjectSpec([]byte(bot(tc.extra))); err == nil {
 			t.Fatalf("%s: want an error", tc.name)
 		}
 	}
-	if _, err := parseInjectSpec([]byte(bot(`"payload_bytes":35,"payload_bytes_spread":34,`))); err != nil {
-		t.Fatalf("a spread one below the payload size is legal: %v", err)
+	// A spread just inside both bounds - below payload_bytes, and with its
+	// top at exactly wire_bytes - 2 - is legal.
+	if _, err := parseInjectSpec([]byte(bot(`"payload_bytes":35,"payload_bytes_spread":23,`))); err != nil {
+		t.Fatalf("a spread whose envelope fits the frame is legal: %v", err)
 	}
 }
 
