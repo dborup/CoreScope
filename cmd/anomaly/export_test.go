@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -737,7 +738,7 @@ func TestReadmeSnapshotRecipeFinishesUnderAWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(readme, []byte(".backup")) {
+	if regexp.MustCompile(`(?m)^sqlite3 .*\.backup`).Match(readme) {
 		t.Fatal("README still recommends .backup, which may never finish on a live database")
 	}
 	recipe := regexp.MustCompile(`(?m)^sqlite3 -readonly \S+ "VACUUM INTO '[^']+'"`).FindAll(readme, -1)
@@ -754,26 +755,30 @@ func TestReadmeSnapshotRecipeFinishesUnderAWriter(t *testing.T) {
 	if _, err := f.db.Exec(`CREATE TABLE ingest (n INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
-	stop, done := make(chan struct{}), make(chan int)
+	var commits atomic.Int64
+	stop, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		n := 0
+		defer close(done)
 		for {
 			select {
 			case <-stop:
-				done <- n
 				return
 			default:
 			}
-			if _, err := f.db.Exec(`INSERT INTO ingest (n) VALUES (?)`, n); err == nil {
-				n++
+			if _, err := f.db.Exec(`INSERT INTO ingest (n) VALUES (1)`); err == nil {
+				commits.Add(1)
 			}
 		}
 	}()
+	for commits.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
 	snap := filepath.Join(t.TempDir(), "meshcore.db")
 	src, err := openReadOnly(f.path) // sqlite3 -readonly
 	if err != nil {
 		t.Fatal(err)
 	}
+	before := commits.Load()
 	finished := make(chan error, 1)
 	go func() { _, err := src.Exec(`VACUUM INTO ?`, snap); finished <- err }()
 	select {
@@ -781,15 +786,14 @@ func TestReadmeSnapshotRecipeFinishesUnderAWriter(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		err = errors.New("VACUUM INTO did not finish within 60s under a writer")
 	}
+	during := commits.Load() - before
 	close(stop)
-	commits := <-done
+	<-done
 	src.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if commits == 0 {
-		t.Fatal("the writer committed nothing while the snapshot ran")
-	}
+	t.Logf("writer commits while the snapshot ran: %d", during)
 
 	for _, sfx := range []string{"-wal", "-shm", "-journal"} {
 		if _, err := os.Lstat(snap + sfx); !errors.Is(err, os.ErrNotExist) {

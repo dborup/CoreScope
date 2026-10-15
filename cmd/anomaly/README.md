@@ -36,6 +36,11 @@ corescope-anomaly export -db /snap/meshcore.db -immutable \
   bytes of the advertiser's public key). It is not a row ID or part of a frame
   either. IDs are unique within one file; each export numbers from `tx1` again,
   so IDs from different exports mean nothing to each other.
+- **Not anonymous.** The id does not join a line to a database, but the line
+  can still be re-identified: its time, payload type, sizes and route can
+  single out one transmission in any database that heard it. Treat an
+  export, and a replay report built from it, as data from that instance and
+  keep them with whoever runs the study; publish aggregates only.
 - **Bounded.** The query is one index range scan on `observations.timestamp`
   over `[start - settle, end + settle)`, with a primary-key lookup and an index
   search per row. Exceeding `-max-rows` fails the export. The range is at most
@@ -62,18 +67,37 @@ free of side effects:
   whole run. The ingestor cannot checkpoint past it, so its WAL grows until the
   export ends.
 
-So do not export from the live file. Take a snapshot with a short read, then
-export the snapshot with `-immutable`:
+So do not export from the live file. Copy it with `VACUUM INTO` on a
+read-only connection, then export the copy with `-immutable`:
 
 ```sh
-sqlite3 -readonly /path/meshcore.db ".backup /snap/meshcore.db"   # one self-contained file
+sqlite3 -readonly /path/meshcore.db "VACUUM INTO '/snap/meshcore.db'"
 corescope-anomaly export -db /snap/meshcore.db -immutable ...
 ```
 
-`-immutable` opens the file with `immutable=1`: SQLite takes no locks and
-creates no side files, so a read-only directory works. SQLite then also
-ignores a `-wal` or hot `-journal` file, whose contents would silently be
-missing, so the export refuses a snapshot with either file beside it.
+`VACUUM INTO` (SQLite 3.27 or later) copies the database inside one read
+transaction. Writers carry on meanwhile, so it finishes under any ingest
+rate, and the copy is the database as of that transaction's start, in one
+self-contained file. It fails if the target exists, and needs free space
+for a compacted copy of the database. While it runs the ingestor cannot
+checkpoint past it, as with the export, but only for the duration of one
+copy.
+
+Do not use the sqlite3 shell's `.backup`. The backup API copies in steps
+and restarts whenever another connection writes to the source between
+steps, so under steady ingest it may never finish. An interrupted
+`.backup` leaves a partial file and a `-journal` beside it (which
+`-immutable` refuses).
+
+The offline copy from `scripts/backup-sqlite.sh` (container stopped
+briefly) can be the source instead. It may include `meshcore.db-wal`, so
+run the same `VACUUM INTO` on that copy, in a writable directory, rather
+than exporting it with `-immutable` directly.
+
+`-immutable` opens the file with `mode=ro&immutable=1`: SQLite takes no
+locks and creates no side files, so a read-only directory works. SQLite then
+also ignores a `-wal` or hot `-journal` file, whose contents would silently
+be missing, so the export refuses a snapshot with either file beside it.
 
 ## replay
 

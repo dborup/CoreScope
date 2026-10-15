@@ -22,8 +22,8 @@ import (
 
 // Export: CoreScope SQLite -> anomaly.ReplayRecord JSON Lines.
 //
-// Read-only: the database is opened with SQLite's mode=ro (or, for a static
-// snapshot copy, immutable=1) and only SELECT statements run. Key-free: the
+// Read-only: the database is opened with SQLite's mode=ro (for a static
+// snapshot copy also immutable=1) and only SELECT statements run. Key-free: the
 // query reads the frame (raw_hex), the observation's path (path_json), its
 // time and the row IDs that join it to its transmission; never the content
 // hash, decoded_json, channel names, public keys, observer columns,
@@ -270,8 +270,10 @@ type obsRow struct {
 
 // txNumbering gives each transmission an id of the export's own: "tx" and
 // a counter in the order its first row is read. The id is not derived from
-// the content hash, a frame or a row ID, so it does not join a line to a
-// CoreScope database or instance; it is only unique within the export.
+// the content hash, a frame or a row ID, so the id does not join a line to a
+// CoreScope database or instance; it is only unique within the export. The
+// line itself still can: its time, payload type, sizes and route can
+// single out one transmission, so the files stay with the coordinator.
 // Rows arrive in time order and the export query admits a row only within
 // settle of its transmission's first observation, so a transmission is
 // forgotten once its first row read is more than settle old. At most max
