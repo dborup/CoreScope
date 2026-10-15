@@ -38,20 +38,61 @@ test('Transported scopes use badge-scope, not the uppercasing .badge', () => {
   assert(!/class="badge"/.test(l), 'must not use class="badge"');
 });
 
-test('.badge-scope explicitly preserves case', () => {
-  const body = ruleBody('\\.badge-scope');
-  assert(body, '.badge-scope rule missing');
-  assert(/text-transform:\s*none/.test(body), 'text-transform:none required');
-});
+// All rules (in file order) whose selector list names `cls` as a class token.
+function rulesFor(cls) {
+  const re = /([^{}]+)\{([^}]*)\}/g;
+  const tokenRe = new RegExp('\\.' + cls.replace(/[-]/g, '\\-') + '(?![\\w-])');
+  const out = [];
+  let m;
+  while ((m = re.exec(css))) {
+    const sel = m[1].replace(/\/\*[\s\S]*?\*\//g, '');
+    if (sel.split(',').some(s => tokenRe.test(s))) out.push({ selector: sel.trim(), body: m[2] });
+  }
+  return out;
+}
+function textTransforms(rules) {
+  const vals = [];
+  rules.forEach(r => { const re = /text-transform:\s*([a-z-]+)/g; let m; while ((m = re.exec(r.body))) vals.push(m[1]); });
+  return vals;
+}
+
+function assertCaseSafe(cls) {
+  const rules = rulesFor(cls);
+  assert(rules.length, '.' + cls + ' rule missing');
+  const vals = textTransforms(rules);
+  assert(vals.length, '.' + cls + ' must declare text-transform');
+  assert(vals.every(v => v === 'none'), '.' + cls + ' has non-none text-transform in some rule: ' + vals.join(','));
+}
+function assertNoHardcodedColors(cls) {
+  rulesFor(cls).forEach(r => {
+    const noVarFallbacks = r.body.replace(/var\([^)]*\)/g, '');
+    assert(!/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(noVarFallbacks), r.selector + ' has hardcoded color outside var(): ' + noVarFallbacks.trim());
+  });
+}
+
+test('.badge-scope preserves case in every rule (no later uppercase override)', () => assertCaseSafe('badge-scope'));
+test('.badge-transport preserves case in every rule (#458 F1)', () => assertCaseSafe('badge-transport'));
 
 test('generic .badge still uppercases (unchanged)', () => {
   const body = ruleBody('\\.badge');
   assert(/text-transform:\s*uppercase/.test(body));
 });
 
-test('scope badge colors use CSS variables only', () => {
-  const body = ruleBody('\\.badge-scope');
-  assert(/var\(--/.test(body));
+test('scope badge colors use CSS variables only (no hardcoded colors in any rule)', () => {
+  assert(/var\(--/.test(ruleBody('\\.badge-scope')));
+  assertNoHardcodedColors('badge-scope');
+  assertNoHardcodedColors('badge-scope-unknown');
+});
+
+test('Configured scope value is exact case: plain <code>, no badge, no transform', () => {
+  const l = line('id="row-configured-scope"');
+  const m = l.match(/<code([^>]*)>\$\{escapeHtml\(n\.configured_scope\)\}<\/code>/);
+  assert(m, 'expected <code> wrapping escapeHtml(n.configured_scope)');
+  assert(!/text-transform\s*:\s*(?!none)/.test(m[1]), 'inline text-transform on <code>');
+  assert(!/class=/.test(m[1]), '<code> must not carry a class (e.g. badge)');
+  const codeVals = textTransforms(css.split(/(?<=\})/).map(x => x.trim()).filter(x => /^(?:[^{]*[\s,])?code\s*(?:,[^{]*)?\{/.test(x) || /^code\s*\{/.test(x)).map(x => ({ body: x.slice(x.indexOf('{') + 1) })));
+  assert(codeVals.every(v => v === 'none'), 'a bare `code` rule transforms case: ' + codeVals.join(','));
+  assert(!/class="badge"/.test(l), 'Configured scope row must not use class="badge"');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
