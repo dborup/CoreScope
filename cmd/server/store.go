@@ -1273,7 +1273,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	if s.db.isV3() {
 		chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
-				o.id, obs.id, obs.name, o.direction,
+				o.id, obs.id, obs.name, COALESCE(obs.iata, ''), o.direction,
 				o.snr, o.rssi, o.score, o.path_json, strftime('%Y-%m-%dT%H:%M:%fZ', o.timestamp, 'unixepoch')` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
 			LEFT JOIN observations o ON o.transmission_id = t.id
@@ -1282,10 +1282,11 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	} else {
 		chunkSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
 				t.payload_type, t.payload_version, t.decoded_json,
-				o.id, o.observer_id, o.observer_name, o.direction,
+				o.id, o.observer_id, o.observer_name, COALESCE(obs.iata, ''), o.direction,
 				o.snr, o.rssi, o.score, o.path_json, o.timestamp` + obsRawHexCol + rpCol + scopeNameCol + routeMaskCol + `
 			FROM transmissions t
-			LEFT JOIN observations o ON o.transmission_id = t.id` + filterClause + `
+			LEFT JOIN observations o ON o.transmission_id = t.id
+			LEFT JOIN observers obs ON obs.id = o.observer_id` + filterClause + `
 			ORDER BY t.first_seen ASC, o.timestamp DESC`
 	}
 
@@ -1339,7 +1340,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		var rawHex, hash, firstSeen, decodedJSON sql.NullString
 		var routeType, payloadType, payloadVersion sql.NullInt64
 		var obsID sql.NullInt64
-		var observerID, observerName, direction, pathJSON, obsTimestamp sql.NullString
+		var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
 		var snr, rssi sql.NullFloat64
 		var score sql.NullInt64
 		var obsRawHex sql.NullString
@@ -1349,7 +1350,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 
 		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
 			&payloadVersion, &decodedJSON,
-			&obsID, &observerID, &observerName, &direction,
+			&obsID, &observerID, &observerName, &observerIATA, &direction,
 			&snr, &rssi, &score, &pathJSON, &obsTimestamp}
 		if s.db.hasObsRawHex() {
 			scanArgs = append(scanArgs, &obsRawHex)
@@ -1411,6 +1412,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				TransmissionID: txID,
 				ObserverID:     obsIDStr,
 				ObserverName:   nullStrVal(observerName),
+				ObserverIATA:   nullStrVal(observerIATA),
 				Direction:      nullStrVal(direction),
 				SNR:            nullFloatPtr(snr),
 				RSSI:           nullFloatPtr(rssi),
