@@ -2225,10 +2225,19 @@ type PacketPathObserver struct {
 	Approx              bool     `json:"approx,omitempty"`
 	ApproxNeighborCount int      `json:"approxNeighborCount,omitempty"`
 	ApproxSpreadKm      *float64 `json:"approxSpreadKm,omitempty"`
-	// Internal scoring evidence only: airport coordinates are a display
-	// fallback, not proof that an observer's own GPS still exists. Kept out
-	// of the wire/archive shape so existing packet-path clients are unchanged.
-	iataFallback bool
+	// PositionSource records where Lat/Lon came from: the observer's own
+	// self-advertised GPS matched by pubkey or (for bridge-type observers
+	// that publish under a device name instead) by name -- either way
+	// PositionSourceReal -- its configured IATA code's fixed centroid when
+	// no real position exists (PositionSourceIATA), or PositionSourceNone
+	// when Lat/Lon is nil. Left empty (omitted) when positioned via the
+	// neighbor-centroid estimate instead -- that is the distinct, already
+	// self-describing Approx fallback, not part of this three-way
+	// distinction (#381). Airport coordinates are a display fallback, not
+	// proof that an observer's own GPS still exists -- ping score history
+	// (preservePingDistanceWithoutGPS) relies on PositionSource != IATA to
+	// tell the two apart.
+	PositionSource PositionSource `json:"positionSource,omitempty"`
 }
 
 // PacketPathBranch is one station's route to a packet: how far it
@@ -2773,19 +2782,23 @@ func buildPacketPathResponseFromReduction(
 			}
 			if ni, ok := nodeByPK[b.observerPubkey]; ok && ni.lat != nil && ni.lon != nil {
 				obs.Lat, obs.Lon = ni.lat, ni.lon
+				obs.PositionSource = PositionSourceReal
 			} else if ni, ok := nodeByName[b.observerName]; ok {
 				obs.Lat, obs.Lon = ni.lat, ni.lon
+				obs.PositionSource = PositionSourceReal
 			} else if obs.IATA != "" {
 				if coord, ok := iataCoords[obs.IATA]; ok {
 					lat, lon := coord.Lat, coord.Lon
 					obs.Lat, obs.Lon = &lat, &lon
-					obs.iataFallback = true
+					obs.PositionSource = PositionSourceIATA
 				}
 			}
 			if obs.Lat == nil && b.observerPubkey != "" {
 				// Last resort, same as the hop-point fallback above: no
 				// position of its own anywhere, so borrow a weighted
 				// centroid of its positioned neighbors, flagged as approximate.
+				// PositionSource is deliberately left unset here (see its
+				// doc comment) -- Approx already self-describes this case.
 				if est, ok := neighborLookup(b.observerPubkey); ok {
 					lat, lon := est.Lat, est.Lon
 					obs.Lat, obs.Lon, obs.Approx, obs.ApproxNeighborCount = &lat, &lon, true, est.ContributorCount
@@ -2794,6 +2807,9 @@ func buildPacketPathResponseFromReduction(
 						obs.ApproxSpreadKm = &s
 					}
 				}
+			}
+			if obs.Lat == nil {
+				obs.PositionSource = PositionSourceNone
 			}
 			branch.Observer = obs
 		}
@@ -4136,6 +4152,48 @@ func (db *DB) GetNodeLocationsByKeys(keys []string) map[string]map[string]interf
 			"lon":  nullFloat(lon),
 			"role": nullStr(role),
 		}
+	}
+	return result
+}
+
+// NodePosition is a real, self-reported node position -- never an IATA
+// centroid or neighbor-estimate stand-in.
+type NodePosition struct {
+	Lat float64
+	Lon float64
+}
+
+// GetNodePositionsByKeys batch-resolves pubkey -> real node position for
+// wardriving observer coverage (#381): unlike GetNodeLocationsByKeys (the
+// untyped wire shape /api/observers already depends on), this returns a
+// typed value only for nodes that actually have a position, so a caller
+// gets a plain map-membership check instead of nil-checking interface{}
+// values -- and a static-analysis-visible guarantee this is not a new
+// map[string]interface{} (AGENTS.md #1383).
+func (db *DB) GetNodePositionsByKeys(keys []string) map[string]NodePosition {
+	result := make(map[string]NodePosition)
+	if len(keys) == 0 {
+		return result
+	}
+	placeholders := make([]string, len(keys))
+	args := make([]interface{}, len(keys))
+	for i, k := range keys {
+		placeholders[i] = "?"
+		args[i] = strings.ToLower(k)
+	}
+	query := "SELECT public_key, lat, lon FROM nodes WHERE public_key IN (" + strings.Join(placeholders, ",") + ") AND lat IS NOT NULL AND lon IS NOT NULL"
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pk string
+		var lat, lon float64
+		if err := rows.Scan(&pk, &lat, &lon); err != nil {
+			continue
+		}
+		result[strings.ToLower(pk)] = NodePosition{Lat: lat, Lon: lon}
 	}
 	return result
 }
@@ -6029,10 +6087,16 @@ func (db *DB) GetWardrivingStats(window, channel string) (*WardrivingStatsRespon
 		return nil, fmt.Errorf("wardriving entry points iteration: %w", err)
 	}
 
+	// observer_pubkey is obs.id in both schemas -- v3's own observer_id
+	// column is obs.rowid (the internal key observations.observer_idx
+	// references), which is never a real mesh pubkey, so it cannot be
+	// joined against nodes.public_key the way the legacy schema's
+	// observer_id (== obs.id) can. Selecting obs.id separately gives both
+	// schemas the same real-position lookup key (#381).
 	var obsQuery string
 	if db.isV3() {
 		obsQuery = `
-			SELECT obs.rowid AS observer_id, obs.name, COALESCE(obs.iata, ''),
+			SELECT obs.rowid AS observer_id, obs.id AS observer_pubkey, obs.name, COALESCE(obs.iata, ''),
 				COUNT(*) AS observation_count, COUNT(DISTINCT o.transmission_id) AS message_count
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -6042,7 +6106,7 @@ func (db *DB) GetWardrivingStats(window, channel string) (*WardrivingStatsRespon
 			ORDER BY observation_count DESC`
 	} else {
 		obsQuery = `
-			SELECT obs.id AS observer_id, obs.name, COALESCE(obs.iata, ''),
+			SELECT obs.id AS observer_id, obs.id AS observer_pubkey, obs.name, COALESCE(obs.iata, ''),
 				COUNT(*) AS observation_count, COUNT(DISTINCT o.transmission_id) AS message_count
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -6055,26 +6119,53 @@ func (db *DB) GetWardrivingStats(window, channel string) (*WardrivingStatsRespon
 	if err != nil {
 		return nil, fmt.Errorf("wardriving observers query: %w", err)
 	}
-	resp.Observers = make([]WardrivingObserverCoverage, 0)
+	type wardrivingObserverRow struct {
+		coverage WardrivingObserverCoverage
+		pubkey   string
+	}
+	var obsRowsList []wardrivingObserverRow
+	pubkeys := make([]string, 0, 8)
 	for obsRows.Next() {
 		var oc WardrivingObserverCoverage
-		var name sql.NullString
-		if err := obsRows.Scan(&oc.ObserverID, &name, &oc.IATA, &oc.ObservationCount, &oc.MessageCount); err != nil {
+		var name, pubkey sql.NullString
+		if err := obsRows.Scan(&oc.ObserverID, &pubkey, &name, &oc.IATA, &oc.ObservationCount, &oc.MessageCount); err != nil {
 			continue
 		}
 		oc.ObserverName = name.String
 		if oc.ObserverName == "" {
 			oc.ObserverName = oc.ObserverID
 		}
-		if coord, ok := iataCoords[strings.ToUpper(strings.TrimSpace(oc.IATA))]; ok {
-			lat, lon := coord.Lat, coord.Lon
-			oc.Lat, oc.Lon = &lat, &lon
+		pk := strings.ToLower(strings.TrimSpace(pubkey.String))
+		if pk != "" {
+			pubkeys = append(pubkeys, pk)
 		}
-		resp.Observers = append(resp.Observers, oc)
+		obsRowsList = append(obsRowsList, wardrivingObserverRow{coverage: oc, pubkey: pk})
 	}
 	obsRows.Close()
 	if err := obsRows.Err(); err != nil {
 		return nil, fmt.Errorf("wardriving observers iteration: %w", err)
+	}
+
+	// #381: prefer the observer's real node position over its IATA
+	// centroid -- an observer with a real position but an unmapped code
+	// must not lose map placement just because the static table doesn't
+	// have its code. Unknown stays unknown rather than being guessed.
+	positions := db.GetNodePositionsByKeys(pubkeys)
+	resp.Observers = make([]WardrivingObserverCoverage, 0, len(obsRowsList))
+	for _, row := range obsRowsList {
+		oc := row.coverage
+		if pos, ok := positions[row.pubkey]; row.pubkey != "" && ok {
+			lat, lon := pos.Lat, pos.Lon
+			oc.Lat, oc.Lon = &lat, &lon
+			oc.PositionSource = PositionSourceReal
+		} else if coord, ok := iataCoords[strings.ToUpper(strings.TrimSpace(oc.IATA))]; ok {
+			lat, lon := coord.Lat, coord.Lon
+			oc.Lat, oc.Lon = &lat, &lon
+			oc.PositionSource = PositionSourceIATA
+		} else {
+			oc.PositionSource = PositionSourceNone
+		}
+		resp.Observers = append(resp.Observers, oc)
 	}
 
 	// Signal quality over time — same bucketing as the activity time series,

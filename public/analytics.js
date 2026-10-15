@@ -6858,7 +6858,16 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
       var totalObsCount = observers.reduce(function(sum, o) { return sum + o.observationCount; }, 0);
       var shown = expanded ? observers : observers.slice(0, TOP_N_LIMIT);
       var rows = shown.map(function(o) {
-        var loc = (o.lat != null && o.lon != null) ? (o.lat.toFixed(2) + ', ' + o.lon.toFixed(2)) : '—';
+        var loc = '—';
+        if (o.lat != null && o.lon != null) {
+          loc = o.lat.toFixed(2) + ', ' + o.lon.toFixed(2);
+          // #381: positionSource distinguishes a real node fix from the
+          // IATA/region-code centroid used only as a fallback when no real
+          // position is known -- don't let the two look the same on the map.
+          if (o.positionSource === 'iata') {
+            loc += ' <span class="badge" style="background:var(--border);color:var(--text)" title="Approximate — this observer has no real node position; shown at its configured IATA/region code\'s centroid instead">IATA</span>';
+          }
+        }
         return '<tr><td>' + esc(o.observerName) + '</td>' +
           '<td>' + esc(o.iata || '—') + '</td>' +
           '<td>' + loc + '</td>' +
