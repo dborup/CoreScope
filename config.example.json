@@ -38,6 +38,14 @@
     "pauseMs": 250,
     "_comment": "Optional (ingestor, #188). Once per ingestor start, re-resolves observations stored with resolved_path = NULL, from a persisted watermark up to the newest observation at the start of the pass. It waits until a neighbour-edge build has caught up with the stored observations and found at least one edge, then works in batches: each batch reads batchSize rows, resolves them outside any lock, and writes the results and the new watermark in one short write transaction, then sleeps pauseMs. Rows that still do not resolve stay NULL and are not retried. disabled: true skips the pass. batchSize: rows per batch, default 500. pauseMs: milliseconds between batches, default 250, which caps the pass at about 2,000 rows/s. For both numbers, 0 or omitted means the default, so the pause cannot be turned off; the smallest pause is 1. The server sees backfilled values only after its next restart."
   },
+  "decodeBackfill": {
+    "disabled": false,
+    "batchSize": 300,
+    "idWindow": 20000,
+    "pauseMs": 250,
+    "pollSeconds": 30,
+    "_comment": "Optional (ingestor, #380). Re-decodes historical rows whenever the effective key set grows: a hashChannels/channelKeys addition plus a SIGHUP or restart, an approved shared channel, or an approved region scope. Stored enc_<HEX> GRP_TXT rows and transport-scoped rows whose region is unknown are re-decoded through the normal decode path, so a rewritten channel_hash, decoded_json or scope_name is byte-identical to the same packet ingested fresh. Already-resolved rows are never touched and an ambiguous region match abstains. One run at a time, resumed from a persisted watermark after a crash or a restart: each batch scans at most idWindow transmission ids and at most batchSize matching rows, writes them in one short transaction together with the new watermark, then sleeps pauseMs. disabled: true runs no pass; it only keeps forgetting keys that are revoked or removed, so turning the pass back on re-reads what arrived while they were gone. A key is its name and its value: a new value under a configured name starts a pass of its own. pollSeconds: how often the effective key set is checked for growth, default 30. For every number, 0 or omitted means the default, so the pause cannot be turned off. Progress is on /api/healthz under decode_backfill and in /api/perf/write-sources as backfill_decode_channel / backfill_decode_scope. Measure first: scripts/decode-backfill-estimate.sh prints the candidate counts and the estimated cost of one pass, read-only. A running server picks the rewrites up on its next poll for the SQL-backed channel and scope surfaces; its in-memory copies of rows loaded earlier refresh at its next start."
+  },
   "listLimits": {
     "packetsMax": 10000,
     "nodesMax": 2000,

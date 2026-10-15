@@ -119,19 +119,30 @@ func scopeReviewServerWithDB(t *testing.T, db *DB, cfg *Config) (*mux.Router, *D
 	return router, db
 }
 
-// Review of #355, gap 2 and 3: the API reference states that decisions apply
-// to packets received afterwards, that stored packets keep their scope, and
-// the approval cap.
+// Review of #355, gap 2 and 3: the API reference states when a decision takes
+// effect, what happens to stored packets, and the approval cap.
+//
+// #380 changed half of that contract: an approval is still future-only for
+// matching, but the ingestor now re-matches stored transmissions whose region
+// is still unknown, so the approve route documents the backfill instead of
+// "stored packets keep". A revocation is unchanged — it never clears a scope a
+// stored row already has.
 func TestRegionScopeOpenAPIDocumentsHistoryAndCap(t *testing.T) {
 	d := routeDescriptions()
 	for _, route := range []string{"POST /api/admin/region-scopes/approve", "POST /api/admin/region-scopes/revoke"} {
-		desc := d[route].Description
-		if !strings.Contains(desc, "received afterwards") || !strings.Contains(desc, "Stored packets keep") {
-			t.Errorf("%s does not document future-only matching: %q", route, desc)
+		if desc := d[route].Description; !strings.Contains(desc, "received afterwards") {
+			t.Errorf("%s does not document when the decision takes effect: %q", route, desc)
 		}
 	}
-	if desc := d["POST /api/admin/region-scopes/approve"].Description; !strings.Contains(desc, fmt.Sprint(regions.MaxApprovedScopes)) {
-		t.Errorf("approve does not document the cap: %q", desc)
+	if desc := d["POST /api/admin/region-scopes/revoke"].Description; !strings.Contains(desc, "Stored packets keep") {
+		t.Errorf("revoke does not document that stored packets keep their scope: %q", desc)
+	}
+	approve := d["POST /api/admin/region-scopes/approve"].Description
+	if !strings.Contains(approve, "decode backfill") || !strings.Contains(approve, "never rewrites one already matched") {
+		t.Errorf("approve does not document the #380 re-match of unknown-scoped history: %q", approve)
+	}
+	if !strings.Contains(approve, fmt.Sprint(regions.MaxApprovedScopes)) {
+		t.Errorf("approve does not document the cap: %q", approve)
 	}
 }
 

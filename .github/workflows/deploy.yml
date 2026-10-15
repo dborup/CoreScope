@@ -349,6 +349,12 @@ jobs:
       - name: Non-root container start path, supervisord stubbed (issue #339)
         run: bash scripts/test-nonroot-entrypoint.sh
 
+      - name: Decode-backfill measurement script unit tests (issue #380)
+        run: bash scripts/test-decode-backfill-estimate.sh
+
+      - name: ShellCheck decode-backfill measurement scripts (issue #380)
+        run: shellcheck scripts/decode-backfill-estimate.sh scripts/test-decode-backfill-estimate.sh
+
       - name: QA blacklist script unit tests (issues #1977, #83)
         run: bash qa/scripts/test-blacklist-sql.sh
 

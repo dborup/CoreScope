@@ -434,6 +434,9 @@ func (p *Poller) pollStore(lastID, lastObsID int) (int, int) {
 	// #89: pick up route_mask values the ingestor backfilled
 	// after this server loaded the rows.
 	p.store.RefreshBackfilledRouteMasks()
+	// #380: drop the channel and scope caches when the ingestor's decode
+	// backfill has rewritten rows since the last tick.
+	p.store.RefreshDecodeBackfill()
 	if len(newTxs) > 0 {
 		log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)
 	}
