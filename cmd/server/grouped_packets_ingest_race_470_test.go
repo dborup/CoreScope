@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"runtime"
@@ -35,7 +36,48 @@ func applyObservation470(s *PacketStore, tx *StoreTx, obs *StoreObs) {
 	if obs.Timestamp > tx.LatestSeen {
 		tx.LatestSeen = obs.Timestamp
 	}
+	s.trackedBytes += estimateStoreObsBytes(obs)
 	pickBestObservation(tx)
+	s.trackedBytes += rechargeTx(tx)
+}
+
+// applyHashMigration470 rehashes tx to newHash through the content-hash
+// migration's own apply step (applyContentHashUpdates, #215), under
+// s.mu.Lock, then makes the other writes a merge into tx makes
+// (moveObservations): it points tx's observations at tx and fills its route
+// type. Those two write the values the fields already hold, so responses stay
+// comparable; a real merge would need a fresh duplicate per write.
+func applyHashMigration470(s *PacketStore, tx *StoreTx, newHash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyContentHashUpdates([]hashUpdate{{tx: tx, oldHash: tx.Hash, newHash: newHash}})
+	for _, o := range tx.Observations {
+		o.TransmissionID = tx.ID
+	}
+	if tx.RouteType != nil {
+		rt := *tx.RouteType
+		tx.RouteType = &rt
+	}
+}
+
+// storeTxs470 returns the store's transmissions, read under s.mu.
+func storeTxs470(s *PacketStore) []*StoreTx {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]*StoreTx(nil), s.packets...)
+}
+
+// ingestInto470 returns a writer for raceIngest470 that adds an observation
+// with a growing path to one of txs per write, as ingest does.
+func ingestInto470(s *PacketStore, txs []*StoreTx, observer string) func(n int) {
+	now := time.Now().UTC()
+	return func(n int) {
+		tx := txs[n%len(txs)]
+		applyObservation470(s, tx, &StoreObs{
+			ID: 200000 + n, TransmissionID: tx.ID, ObserverID: observer,
+			PathJSON: fmt.Sprintf(`["aa","bb","%04x"]`, n), Timestamp: now.Add(time.Duration(n) * time.Millisecond).Format(time.RFC3339Nano),
+		})
+	}
 }
 
 // raceIngest470 runs readers goroutines that call read reads times each while
@@ -230,4 +272,138 @@ func TestParsedPathConcurrentReaders470(t *testing.T) {
 		applyObservation470(store, tx, &StoreObs{ID: 1000 + n, TransmissionID: tx.ID, ObserverID: "OBS1",
 			PathJSON: "[" + strings.Join(hops, ",") + "]"})
 	})
+}
+
+// The neighbor-graph build copied s.packets under s.mu and then walked every
+// tx.Observations without it, for the whole build.
+func TestNeighborGraphBuildConcurrentIngest470(t *testing.T) {
+	const readers, reads = 2, 40
+
+	srv, _ := setupTestServer(t)
+	store := srv.store
+	txs := storeTxs470(store)
+	if len(txs) == 0 {
+		t.Fatal("test server has no transmissions")
+	}
+	baseline := len(BuildFromStoreWithOptions(store, BuildOptions{}).edges)
+
+	raceIngest470(t, readers, reads, 2*len(txs), func(r, i int) error {
+		if g := BuildFromStoreWithOptions(store, BuildOptions{}); len(g.edges) < baseline {
+			return fmt.Errorf("graph has %d edges, want at least the %d before ingest", len(g.edges), baseline)
+		}
+		return nil
+	}, ingestInto470(store, txs, "obs1"))
+}
+
+// /api/audio-lab/buckets grouped the packets under s.mu and then read each
+// picked packet's header fields (ObservationCount, PathJSON, ObserverID, Hash,
+// FirstSeen) after releasing it.
+func TestAudioLabBucketsConcurrentIngest470(t *testing.T) {
+	const readers, reads = 4, 100
+
+	srv, router := setupTestServer(t)
+	txs := storeTxs470(srv.store)
+	raceIngest470(t, readers, reads, 2*len(txs), func(r, i int) error {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", "/api/audio-lab/buckets", nil))
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"observation_count"`) {
+			return fmt.Errorf("audio-lab buckets: %d %s", w.Code, w.Body.String())
+		}
+		return nil
+	}, ingestInto470(srv.store, txs, "obs1"))
+}
+
+// /api/stats and the perf stats read s.trackedBytes, which ingest adds to
+// under s.mu.Lock, without s.mu.
+func TestStoreStatsTrackedBytesConcurrentIngest470(t *testing.T) {
+	const readers, reads = 4, 100
+
+	srv, _ := setupTestServer(t)
+	txs := storeTxs470(srv.store)
+	raceIngest470(t, readers, reads, 2*len(txs), func(r, i int) error {
+		var mb float64
+		switch i % 3 {
+		case 0:
+			resp, err := srv.buildStats()
+			if err != nil {
+				return fmt.Errorf("buildStats: %v", err)
+			}
+			mb = resp.StoreDataMB
+		case 1:
+			mb = srv.store.GetPerfStoreStatsTyped().TrackedMB
+		default:
+			mb, _ = srv.store.GetPerfStoreStats()["trackedMB"].(float64)
+		}
+		if mb < 0 { // the fixture is a few KB, which rounds to 0 MB
+			return fmt.Errorf("tracked store memory = %v MB", mb)
+		}
+		return nil
+	}, ingestInto470(srv.store, txs, "obs1"))
+}
+
+// /api/observers/{id}/analytics resolved each observation's transmission
+// under s.mu, then read obs.TransmissionID, tx.Hash and tx.RouteType again
+// after releasing it. The content-hash migration (#215), which runs while
+// HTTP is served, rewrites all three under s.mu.Lock.
+func TestObserverAnalyticsConcurrentHashMigration470(t *testing.T) {
+	const readers, reads = 4, 100
+
+	srv, router := setupTestServer(t)
+	txs := storeTxs470(srv.store)
+	hashes := make([]string, len(txs))
+	for i, tx := range txs {
+		hashes[i] = tx.Hash
+	}
+	want := 0
+	for _, tx := range txs {
+		for _, o := range tx.Observations {
+			if o.ObserverID == "obs1" {
+				want++
+			}
+		}
+	}
+
+	raceIngest470(t, readers, reads, 2*len(txs), func(r, i int) error {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", "/api/observers/obs1/analytics?days=7", nil))
+		var resp ObserverAnalyticsResponse
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &resp) != nil || len(resp.RecentPackets) != want {
+			return fmt.Errorf("observer analytics: %d %s, want %d recent packets", w.Code, w.Body.String(), want)
+		}
+		return nil
+	}, func(n int) {
+		i := n % len(txs)
+		h := hashes[i]
+		if n/len(txs)%2 == 0 {
+			h += "70"
+		}
+		applyHashMigration470(srv.store, txs[i], h)
+	})
+}
+
+// LoadChunked publishes each chunk's transmissions to HTTP readers before it
+// picks their best observations, so a tx's parse cache must already be full
+// when its chunk is published; readers otherwise fill it lazily under
+// s.mu.RLock and write it concurrently (race #3).
+func TestLoadChunkedPublishesParsedPath470(t *testing.T) {
+	store := openChunkedTestStore(t, 60)
+	defer store.db.conn.Close()
+	chunks := 0
+	store.OnChunkLoaded(func(_, _ int) {
+		chunks++
+		store.mu.RLock()
+		defer store.mu.RUnlock()
+		for _, tx := range store.packets {
+			if !tx.pathParsed || len(tx.parsedPath) != len(parsePathJSON(tx.PathJSON)) {
+				t.Errorf("chunk %d published tx %d with path %q but parse cache (%v, %v)", chunks, tx.ID, tx.PathJSON, tx.pathParsed, tx.parsedPath)
+				return
+			}
+		}
+	})
+	if err := store.LoadChunked(20); err != nil {
+		t.Fatal(err)
+	}
+	if chunks < 2 {
+		t.Fatalf("%d chunk callbacks, want several", chunks)
+	}
 }
