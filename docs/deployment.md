@@ -691,11 +691,16 @@ closes that gap itself (issue #380).
 **What triggers it.** Growth of the *effective* key set, whichever way a key
 arrives: a `hashChannels`/`channelKeys` entry plus a SIGHUP or a restart, an
 approved shared hashtag channel, or an approved region scope. The ingestor
-records which key names a completed pass has already covered (as digests of
-the names — a hashtag channel key *is* its name, so the plain name is not
-stored) and starts a pass whenever a live key is not among them. Removing or
-revoking a key triggers nothing — but a revocation does stop a pass that is
-already running from using that key any further (below).
+records which keys a completed pass has already covered and starts a pass
+whenever a live key is not among them. A key is its name *and* its value, so a
+new value under an existing name — a corrected or rotated `channelKeys` entry —
+is a new key and starts a pass of its own. Only a SHA-256 digest of name and
+value is stored, never the name or the key itself, and the log reports kinds
+and counts only. Removing or revoking a key triggers no pass, but the ingestor
+forgets it at that moment, so adding it back later re-runs the pass over the
+whole table — however quickly it comes back, and also across two SIGHUPs. A
+revocation also stops a pass that is already running from using that key
+(below).
 
 **What it rewrites.** Only unresolved rows: GRP_TXT rows whose `channel_hash`
 is still `enc_<HEX>`, and transport-scoped rows whose `scope_name` is the
@@ -745,10 +750,14 @@ key added while a pass is running is covered by the *next* pass, which starts
 again from the beginning of the table, so no history is skipped. Restoring an
 older database copy simply means the pass runs again — it is idempotent.
 
-**A key revoked while a pass is running.** The pass re-reads the effective key
-set before every batch, so a revocation takes effect within one batch: that key
-decrypts and matches nothing further, and the pass is not credited with it, so
-re-approving it later re-runs a full pass over the table. Rows the pass had
+**A key revoked or replaced while a pass is running.** The pass re-reads the
+effective key set before every batch, and each batch checks it once more inside
+its write transaction, redoing the batch without the key if it changed after
+the batch decoded. So a revocation, or a new value under the same name, takes
+effect within one batch: the old key decrypts and matches nothing further,
+nothing it decrypted is written after the revocation, and the pass is not
+credited with it. Re-approving it later re-runs a full pass over the table; a
+new value starts its own pass. Rows the pass had
 already rewritten keep their decoded payload — the same thing an ordinary
 revocation does for rows decrypted at ingest before it; a revocation stops
 future decryption, it does not re-encrypt stored history. When every key a pass
@@ -808,10 +817,14 @@ setting is not picked up by SIGHUP):
 }
 ```
 
-With `disabled: true` the ingestor never starts the watcher, writes nothing and
-creates neither bookkeeping table; `/api/healthz` keeps reporting
-`decode_backfill: {"status": "absent"}`. Turning it back on later loses
-nothing — the pass walks the whole table from the beginning. The same block
+With `disabled: true` the ingestor never starts the watcher, runs no pass and
+creates neither bookkeeping table; on a database no pass has touched,
+`/api/healthz` keeps reporting `decode_backfill: {"status": "absent"}`. If an
+earlier pass left its bookkeeping behind, the only thing a disabled ingestor
+writes is to forget keys there: those not effective when it starts, and each
+one it sees revoked or removed while it runs. That is what makes turning it
+back on lose nothing — every key that went away in the meantime starts a pass
+over the whole table again. The same block
 takes `batchSize`, `idWindow`, `pauseMs` and `pollSeconds`; see
 `config.example.json`. Lowering `batchSize` or raising `pauseMs` makes a pass
 slower and gentler. The pause cannot be set to zero.
