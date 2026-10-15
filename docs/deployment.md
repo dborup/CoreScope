@@ -655,7 +655,10 @@ it.
   [Re-decoding history after a key is added](#re-decoding-history-after-a-key-is-added)),
   which only ever fills in an unknown scope: a revocation never clears matches
   made while the scope was approved, and an already-matched row is never
-  rewritten.
+  rewritten. A revocation does reach a pass that is already running — the pass
+  re-reads the effective key set before every batch and stops matching against
+  the revoked scope within one batch — and re-approving later re-runs the pass
+  over the whole table, so nothing it walked past in between is lost.
 - **Not part of areas.** An approved scope has no `areas[].regionScopes` link,
   so it does not appear in area-based scope statistics.
 - **Exact names.** The name is used byte for byte, as with `hashRegions`
