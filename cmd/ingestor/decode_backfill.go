@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -29,18 +32,23 @@ import (
 //
 // Trigger: growth of the effective key set. hotKeys already publishes both
 // effective sets with every lifecycle layer merged (config base ∪ approved),
-// so the watcher compares those snapshots against the key names a completed
-// run has already covered (decode_backfill_keys). Losing a key arms nothing
-// and rewrites nothing — it only makes the watcher forget that key, so that
-// re-adding it later starts a fresh pass over the whole table (see
-// forgetGoneKeys for why that is needed).
+// so the watcher compares those snapshots against the keys a completed run
+// has already covered (decode_backfill_keys). A key is its name *and* its
+// value (decodeBackfillKeyIdentity): a new value under a covered name is a new
+// key and arms a pass. Losing a key arms nothing and rewrites nothing — it
+// only forgets that key, so that re-adding it later starts a fresh pass over
+// the whole table (see forgetDecodeBackfillKeys for why that is needed, and
+// why it is driven by the removal itself rather than by the next poll).
 //
 // A revocation reaches a pass that is already running, not only the next one:
-// the batch loop re-reads the effective set before every batch and drops the
-// revoked key from its snapshot (dropRevokedRunKeys), so nothing more is
-// decrypted or persisted with it. Rows it had already rewritten keep their
-// plaintext, which is exactly what an ordinary revocation does for rows
-// decrypted at ingest before it.
+// the batch loop re-reads the effective set before every batch and drops a
+// revoked or replaced key from its snapshot (dropRevokedRunKeys), and a batch
+// re-checks the set inside its write transaction and starts over without the
+// key if it changed after the batch decoded. So no row is persisted from a
+// decryption with a key that was no longer effective when the batch wrote,
+// and the pass is not credited with it. Rows written before the revocation
+// keep their plaintext, which is exactly what an ordinary revocation does for
+// rows decrypted at ingest before it.
 //
 // Side effects are not replayed: the pass rewrites channel_hash, decoded_json
 // and scope_name and nothing else. Live ingest additionally records a
@@ -139,14 +147,48 @@ func (c *Config) DecodeBackfillSettings() DecodeBackfillSettings {
 	return s
 }
 
-// decodeBackfillKeyHash is the identity a covered key is recorded under. A
-// hashtag channel key *is* derived from its name (sha256 of "#name"), so this
-// table must not become a new place that holds key material: only the digest
-// of the name is stored, and log lines report kinds and counts, never names.
-func decodeBackfillKeyHash(name string) string {
-	sum := sha256.Sum256([]byte(name))
-	return hex.EncodeToString(sum[:])
+// decodeBackfillKeyIdentity is the identity a key is recorded under: a
+// sha256 over the length-prefixed name followed by the key bytes. The value
+// is part of it because channelKeys and the rainbow file map a name to an
+// explicit key, so an operator can replace the key behind a name; that is a
+// different key with different history to decode, and the old value must stop
+// being used. Only the digest is stored — never the name or the key in clear,
+// and log lines report kinds and counts only. For a hashtag channel the key is
+// sha256 of the name, so the digest reveals nothing the name did not; for a
+// pre-shared key it is a one-way digest of a 128-bit secret.
+func decodeBackfillKeyIdentity(name string, key []byte) string {
+	var n [binary.MaxVarintLen64]byte
+	h := sha256.New()
+	h.Write(n[:binary.PutUvarint(n[:], uint64(len(name)))])
+	h.Write([]byte(name))
+	h.Write(key)
+	return hex.EncodeToString(h.Sum(nil))
 }
+
+// channelKeyBytes is the key a channel-key string stands for. Channel keys are
+// hex, in either case; a value that is not hex (which decrypts nothing) is
+// identified by its raw bytes.
+func channelKeyBytes(hexKey string) []byte {
+	if b, err := hex.DecodeString(hexKey); err == nil {
+		return b
+	}
+	return []byte(hexKey)
+}
+
+// sameChannelKey reports whether two channel-key strings are the same key.
+func sameChannelKey(a, b string) bool {
+	return a == b || bytes.Equal(channelKeyBytes(a), channelKeyBytes(b))
+}
+
+// removedKey is a key that left the effective set, or whose value under its
+// name was replaced: hotKeys reports one per removal (onRemoved).
+type removedKey struct {
+	kind string // decodeBackfillKindChannel or decodeBackfillKindScope
+	name string
+	key  []byte
+}
+
+func (k removedKey) identity() string { return decodeBackfillKeyIdentity(k.name, k.key) }
 
 // DecodeBackfillState is the persisted progress of the current or last run.
 type DecodeBackfillState struct {
@@ -183,11 +225,24 @@ func ensureDecodeBackfillTables(db *sql.DB) error {
 	)`); err != nil {
 		return fmt.Errorf("create decode_backfill_state: %w", err)
 	}
+	// An earlier development build recorded sha256(name) under name_hash.
+	// Those digests match no key identity, so the rows are useless; dropping
+	// the table only means the next poll arms one fresh pass.
+	var legacy int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('decode_backfill_keys') WHERE name = 'name_hash'`).Scan(&legacy); err != nil {
+		return fmt.Errorf("inspect decode_backfill_keys: %w", err)
+	}
+	if legacy > 0 {
+		// PREFLIGHT: async=true reason="drops a bookkeeping table bounded by the configured key count; constant cost at any scale"
+		if _, err := db.Exec(`DROP TABLE decode_backfill_keys`); err != nil {
+			return fmt.Errorf("drop legacy decode_backfill_keys: %w", err)
+		}
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS decode_backfill_keys (
-		kind      TEXT NOT NULL,
-		name_hash TEXT NOT NULL,
-		state     TEXT NOT NULL,
-		PRIMARY KEY (kind, name_hash)
+		kind     TEXT NOT NULL,
+		key_hash TEXT NOT NULL,
+		state    TEXT NOT NULL,
+		PRIMARY KEY (kind, key_hash)
 	)`); err != nil {
 		return fmt.Errorf("create decode_backfill_keys: %w", err)
 	}
@@ -212,11 +267,20 @@ func (s *Store) DecodeBackfillState() (*DecodeBackfillState, error) {
 	return &st, nil
 }
 
-// coveredKeyHashes returns the name digests already recorded for kind, with
-// the value reporting whether the digest is "covered" (a run that used it
+// decodeBackfillTablesExist reports whether a pass has ever created the
+// bookkeeping tables. A disabled ingestor and the removal hook use it so they
+// never create them.
+func (s *Store) decodeBackfillTablesExist() (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'decode_backfill_keys'`).Scan(&n)
+	return n > 0, err
+}
+
+// coveredKeyHashes returns the key identities already recorded for kind, with
+// the value reporting whether the identity is "covered" (a run that used it
 // reached its ceiling) rather than merely "running".
 func (s *Store) coveredKeyHashes(kind string) (map[string]bool, error) {
-	rows, err := s.db.Query(`SELECT name_hash, state FROM decode_backfill_keys WHERE kind = ?`, kind)
+	rows, err := s.db.Query(`SELECT key_hash, state FROM decode_backfill_keys WHERE kind = ?`, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +297,7 @@ func (s *Store) coveredKeyHashes(kind string) (map[string]bool, error) {
 }
 
 // decodeBackfillArmedKinds reports which kinds have at least one live key
-// name that no completed run has covered. Growth only: losing a name never
+// identity that no completed run has covered. Growth only: losing a key never
 // arms a run, and no resolved row is ever revisited.
 func (s *Store) decodeBackfillArmedKinds(live map[string][]string) ([]string, error) {
 	var armed []string
@@ -242,8 +306,8 @@ func (s *Store) decodeBackfillArmedKinds(live map[string][]string) ([]string, er
 		if err != nil {
 			return nil, err
 		}
-		for _, name := range live[kind] {
-			if !known[decodeBackfillKeyHash(name)] {
+		for _, id := range live[kind] {
+			if !known[id] {
 				armed = append(armed, kind)
 				break
 			}
@@ -252,21 +316,76 @@ func (s *Store) decodeBackfillArmedKinds(live map[string][]string) ([]string, er
 	return armed, nil
 }
 
-// forgetGoneKeys drops the record of a key that is no longer effective, so
-// re-adding it later arms a fresh run. Without this, a key that was covered,
-// then revoked (or removed from the config), then approved again would leave
-// the packets received during the gap unresolved forever: they were ingested
-// after the run that credited the key, so no later run would be armed for it.
+// forgetDecodeBackfillKeys is the removal hook main wires to hotKeys.onRemoved:
+// it drops the record of every key that just left the effective set (or whose
+// value was replaced), so re-adding it later arms a fresh pass. Without this,
+// a key that was covered, then revoked (or removed from the config), then
+// approved again would leave the packets received during the gap unresolved
+// forever: they were ingested after the run that credited the key, so no
+// later run would be armed for it.
+//
+// It runs on the removal itself, synchronously, not on the watcher's next
+// look at the key set: a revoke followed by a re-approve between two looks —
+// within one batch, within one poll, across two SIGHUPs, or for as long as
+// decodeBackfill.disabled keeps the watcher from looking at all — would
+// otherwise never be seen. It also runs when the pass is disabled, but only
+// ever deletes rows from a table a previous pass created; it never creates
+// one. Revocations and reloads are administrator events, so this is one small
+// write per event, never per packet.
+//
 // Nothing is rewritten here — only the bookkeeping that decides whether a run
-// is needed. A reload that cannot read its config keeps every previous key
-// (hotKeys.reload bails before storing), so a bad config cannot make this
-// forget anything.
+// is needed. Deleting the "running" row of a key the current pass still uses
+// only means the pass is not credited with it, and the next poll arms a fresh
+// pass: conservative, never a loss.
+func (s *Store) forgetDecodeBackfillKeys(removed []removedKey) {
+	n, err := s.deleteDecodeBackfillKeys(removed)
+	if err != nil {
+		log.Printf("[%s] could not forget %d removed key(s): %v", decodeBackfillComponent, len(removed), err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[%s] %d recorded key(s) left the effective set; forgotten, so re-adding one starts a new pass", decodeBackfillComponent, n)
+	}
+}
+
+// deleteDecodeBackfillKeys deletes the bookkeeping rows of removed, if the
+// table exists, and returns how many rows it deleted.
+func (s *Store) deleteDecodeBackfillKeys(removed []removedKey) (int64, error) {
+	if len(removed) == 0 {
+		return 0, nil
+	}
+	var deleted int64
+	err := s.WriterTx(decodeBackfillComponent, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'decode_backfill_keys'`).Scan(&n); err != nil || n == 0 {
+			return err
+		}
+		for _, k := range removed {
+			res, err := tx.Exec(`DELETE FROM decode_backfill_keys WHERE kind = ? AND key_hash = ?`, k.kind, k.identity())
+			if err != nil {
+				return err
+			}
+			if a, _ := res.RowsAffected(); a > 0 {
+				deleted += a
+			}
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+// forgetGoneKeys drops the record of every key that is not effective now. It
+// covers what no in-process removal event can: a key removed from the config
+// across a restart. RunDecodeBackfill calls it on every poll and a disabled
+// ingestor once at start-up. A reload that cannot read its config keeps every
+// previous key (hotKeys.reload bails before storing), so a bad config cannot
+// make this forget anything.
 //
 // It also applies to a run that is resumed after a key it started with was
 // revoked: the resumed run reads its snapshot from these rows, so it stops
 // using that key for the rest of the table. That is the revocation taking
-// effect, not a loss — a later re-approval forgets nothing and arms a fresh
-// pass over the whole table.
+// effect, not a loss — a later re-approval arms a fresh pass over the whole
+// table.
 func (s *Store) forgetGoneKeys(live map[string][]string) error {
 	for _, kind := range []string{decodeBackfillKindChannel, decodeBackfillKindScope} {
 		known, err := s.coveredKeyHashes(kind)
@@ -276,13 +395,13 @@ func (s *Store) forgetGoneKeys(live map[string][]string) error {
 		if len(known) == 0 {
 			continue
 		}
-		liveHashes := make(map[string]bool, len(live[kind]))
-		for _, name := range live[kind] {
-			liveHashes[decodeBackfillKeyHash(name)] = true
+		liveIDs := make(map[string]bool, len(live[kind]))
+		for _, id := range live[kind] {
+			liveIDs[id] = true
 		}
 		var gone []string
 		for h := range known {
-			if !liveHashes[h] {
+			if !liveIDs[h] {
 				gone = append(gone, h)
 			}
 		}
@@ -292,7 +411,7 @@ func (s *Store) forgetGoneKeys(live map[string][]string) error {
 		sort.Strings(gone)
 		if err := s.WriterTx(decodeBackfillComponent, func(tx *sql.Tx) error {
 			for _, h := range gone {
-				if _, err := tx.Exec(`DELETE FROM decode_backfill_keys WHERE kind = ? AND name_hash = ?`, kind, h); err != nil {
+				if _, err := tx.Exec(`DELETE FROM decode_backfill_keys WHERE kind = ? AND key_hash = ?`, kind, h); err != nil {
 					return err
 				}
 			}
@@ -423,9 +542,9 @@ func (s *Store) startDecodeBackfillRun(armed []string, channelKeys map[string]st
 				if (kind == decodeBackfillKindChannel && !run.channel) || (kind == decodeBackfillKindScope && !run.scope) {
 					continue
 				}
-				for _, name := range liveKeyNames(kind, channelKeys, regionKeys) {
-					if _, err := tx.Exec(`INSERT OR IGNORE INTO decode_backfill_keys (kind, name_hash, state) VALUES (?, ?, 'running')`,
-						kind, decodeBackfillKeyHash(name)); err != nil {
+				for _, id := range liveKeyIdentities(kind, channelKeys, regionKeys) {
+					if _, err := tx.Exec(`INSERT OR IGNORE INTO decode_backfill_keys (kind, key_hash, state) VALUES (?, ?, 'running')`,
+						kind, id); err != nil {
 						return err
 					}
 				}
@@ -436,8 +555,9 @@ func (s *Store) startDecodeBackfillRun(armed []string, channelKeys map[string]st
 		}
 	}
 
-	// Decode with the run's own snapshot: the live names whose digest this
-	// run recorded. On a resume that is the set the run started with.
+	// Decode with the run's own snapshot: the live keys whose identity this
+	// run recorded. On a resume that is the set the run started with, minus
+	// any key revoked or replaced since.
 	if run.channel {
 		known, err := s.coveredKeyHashes(decodeBackfillKindChannel)
 		if err != nil {
@@ -445,7 +565,7 @@ func (s *Store) startDecodeBackfillRun(armed []string, channelKeys map[string]st
 		}
 		run.channelKeys = make(map[string]string, len(channelKeys))
 		for name, key := range channelKeys {
-			if _, ok := known[decodeBackfillKeyHash(name)]; ok {
+			if _, ok := known[decodeBackfillKeyIdentity(name, channelKeyBytes(key))]; ok {
 				run.channelKeys[name] = key
 			}
 		}
@@ -457,7 +577,7 @@ func (s *Store) startDecodeBackfillRun(armed []string, channelKeys map[string]st
 		}
 		run.regionKeys = make(map[string][]byte, len(regionKeys))
 		for name, key := range regionKeys {
-			if _, ok := known[decodeBackfillKeyHash(name)]; ok {
+			if _, ok := known[decodeBackfillKeyIdentity(name, key)]; ok {
 				run.regionKeys[name] = key
 			}
 		}
@@ -465,18 +585,18 @@ func (s *Store) startDecodeBackfillRun(armed []string, channelKeys map[string]st
 	return run, nil
 }
 
-// liveKeyNames returns the sorted live key names of one kind, so the recorded
-// snapshot does not depend on Go's map iteration order.
-func liveKeyNames(kind string, channelKeys map[string]string, regionKeys map[string][]byte) []string {
+// liveKeyIdentities returns the sorted identities of the live keys of one
+// kind, so the recorded snapshot does not depend on Go's map iteration order.
+func liveKeyIdentities(kind string, channelKeys map[string]string, regionKeys map[string][]byte) []string {
 	var out []string
 	switch kind {
 	case decodeBackfillKindChannel:
-		for name := range channelKeys {
-			out = append(out, name)
+		for name, key := range channelKeys {
+			out = append(out, decodeBackfillKeyIdentity(name, channelKeyBytes(key)))
 		}
 	case decodeBackfillKindScope:
-		for name := range regionKeys {
-			out = append(out, name)
+		for name, key := range regionKeys {
+			out = append(out, decodeBackfillKeyIdentity(name, key))
 		}
 	}
 	sort.Strings(out)
@@ -504,18 +624,52 @@ func (s *Store) finishDecodeBackfillRun(run *decodeBackfillRun) error {
 	})
 }
 
-// dropRevokedRunKeys re-reads the effective key set and removes from the
-// run's snapshot every key that is no longer effective, returning how many it
-// dropped. The batch loop calls it before every batch, so a revocation that
-// lands while a pass is walking the table takes effect within one batch
-// instead of at the end of the pass: a revoked key decrypts nothing more and
-// persists nothing more.
+// revokedKeys lists the keys of the run's snapshot that are no longer
+// effective with the value the run decodes with: revoked, removed from the
+// config, or replaced by a new value under the same name. It does not change
+// the run. One map probe per snapshot key, on the published pointer hotKeys
+// hands out without locking.
+func (r *decodeBackfillRun) revokedKeys(hk *hotKeys) []removedKey {
+	var out []removedKey
+	if len(r.channelKeys) > 0 {
+		live := hk.Channels()
+		for name, key := range r.channelKeys {
+			if lk, ok := live[name]; !ok || !sameChannelKey(lk, key) {
+				out = append(out, removedKey{decodeBackfillKindChannel, name, channelKeyBytes(key)})
+			}
+		}
+	}
+	if len(r.regionKeys) > 0 {
+		live := hk.Regions()
+		for name, key := range r.regionKeys {
+			if lk, ok := live[name]; !ok || !bytes.Equal(lk, key) {
+				out = append(out, removedKey{decodeBackfillKindScope, name, key})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].kind != out[j].kind {
+			return out[i].kind < out[j].kind
+		}
+		return out[i].name < out[j].name
+	})
+	return out
+}
+
+// dropRevokedRunKeys removes every revokedKeys entry from the run's snapshot
+// and returns how many it dropped. The batch loop calls it before every batch
+// and once more before finishing, and a batch calls it when its in-transaction
+// re-check found the key set changed, so a revocation (or a replaced value)
+// that lands while a pass is walking the table takes effect within one batch
+// instead of at the end of the pass.
 //
-// It also deletes the key's bookkeeping row, which is exactly what
-// forgetGoneKeys would do on the next poll. Two consequences, both wanted:
-// finishDecodeBackfillRun cannot credit a key that was revoked under it, and
-// re-approving the key later arms a fresh pass over the whole table, so the
-// rows this pass walked past with it are not lost.
+// It also deletes the key's bookkeeping row, which the removal hook
+// (forgetDecodeBackfillKeys) has normally done already. Two consequences, both
+// wanted: finishDecodeBackfillRun cannot credit a key that was revoked under
+// it, and re-approving the key later arms a fresh pass over the whole table,
+// so the rows this pass walked past with it are not lost. A replaced value is
+// the same: the old value is never credited, and the new one — which the run
+// never recorded — arms the next pass.
 //
 // Rows the pass had already rewritten keep their plaintext. That is the same
 // answer an ordinary revocation gives for rows decrypted at ingest before it
@@ -523,50 +677,22 @@ func (s *Store) finishDecodeBackfillRun(run *decodeBackfillRun) error {
 // cmd/server/openapi.go): a revocation stops future decryption, it does not
 // re-encrypt history. Clearing them would also mean rewriting rows the pass
 // already committed, which the "never touch a resolved row" guard forbids.
-//
-// The map lookups cost one probe per snapshot key per batch, on the published
-// pointer hotKeys already hands out without locking.
 func (s *Store) dropRevokedRunKeys(run *decodeBackfillRun, hk *hotKeys) (int, error) {
-	type goneKey struct{ kind, nameHash string }
-	var gone []goneKey
-	if len(run.channelKeys) > 0 {
-		live := hk.Channels()
-		for name := range run.channelKeys {
-			if _, ok := live[name]; !ok {
-				gone = append(gone, goneKey{decodeBackfillKindChannel, decodeBackfillKeyHash(name)})
-				delete(run.channelKeys, name)
-			}
-		}
-	}
-	if len(run.regionKeys) > 0 {
-		live := hk.Regions()
-		for name := range run.regionKeys {
-			if _, ok := live[name]; !ok {
-				gone = append(gone, goneKey{decodeBackfillKindScope, decodeBackfillKeyHash(name)})
-				delete(run.regionKeys, name)
-			}
-		}
-	}
+	gone := run.revokedKeys(hk)
 	if len(gone) == 0 {
 		return 0, nil
 	}
-	sort.Slice(gone, func(i, j int) bool {
-		if gone[i].kind != gone[j].kind {
-			return gone[i].kind < gone[j].kind
+	for _, g := range gone {
+		if g.kind == decodeBackfillKindChannel {
+			delete(run.channelKeys, g.name)
+		} else {
+			delete(run.regionKeys, g.name)
 		}
-		return gone[i].nameHash < gone[j].nameHash
-	})
-	if err := s.WriterTx(decodeBackfillComponent, func(tx *sql.Tx) error {
-		for _, g := range gone {
-			if _, err := tx.Exec(`DELETE FROM decode_backfill_keys WHERE kind = ? AND name_hash = ?`, g.kind, g.nameHash); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
+	}
+	if _, err := s.deleteDecodeBackfillKeys(gone); err != nil {
 		return 0, err
 	}
-	log.Printf("[%s] %d key(s) were revoked while the pass was running; dropped from the pass, %d channel and %d region key(s) left",
+	log.Printf("[%s] %d key(s) were revoked or replaced while the pass was running; dropped from the pass, %d channel and %d region key(s) left",
 		decodeBackfillComponent, len(gone), len(run.channelKeys), len(run.regionKeys))
 	return len(gone), nil
 }
@@ -610,9 +736,35 @@ type DecodeBackfillResult struct {
 // it once from the config at start-up.
 var decodeBackfillValidateSignatures bool
 
+// errDecodeBackfillKeysChanged aborts a batch whose write transaction found a
+// key of the run's snapshot revoked or replaced after the batch decoded.
+var errDecodeBackfillKeysChanged = errors.New("key set changed under the batch")
+
 // decodeBackfillBatch re-decodes one bounded id window and commits the
 // rewrites, the new watermark and the counters in a single transaction.
-func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun, set DecodeBackfillSettings) (decodeBackfillBatchResult, error) {
+//
+// The write transaction first re-checks the run's keys against hk. If one was
+// revoked or replaced after the batch decoded its rows, the transaction is
+// rolled back, the key leaves the snapshot (dropRevokedRunKeys) and the batch
+// is redone from the same watermark. That is the filter on the updates, done
+// by redoing rather than by picking updates apart: the decoder reports a
+// decrypted channel under its normalised name (normalizeChannelName), so an
+// update cannot always be traced back to the snapshot key that produced it.
+// It costs one more decode of at most batchSize rows, only in a batch a
+// revocation actually landed in; the snapshot only shrinks, so it terminates.
+func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun, hk *hotKeys, set DecodeBackfillSettings) (decodeBackfillBatchResult, error) {
+	for {
+		b, err := s.decodeBackfillBatchOnce(ctx, run, hk, set)
+		if !errors.Is(err, errDecodeBackfillKeysChanged) {
+			return b, err
+		}
+		if _, err := s.dropRevokedRunKeys(run, hk); err != nil {
+			return decodeBackfillBatchResult{Next: run.watermark}, fmt.Errorf("re-read key set: %w", err)
+		}
+	}
+}
+
+func (s *Store) decodeBackfillBatchOnce(ctx context.Context, run *decodeBackfillRun, hk *hotKeys, set DecodeBackfillSettings) (decodeBackfillBatchResult, error) {
 	var b decodeBackfillBatchResult
 	b.Next = run.watermark
 	windowEnd := run.watermark + set.IDWindow
@@ -708,6 +860,11 @@ func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun,
 	holdStart := time.Now()
 	changed := 0
 	err = s.WriterTx(decodeBackfillComponent, func(tx *sql.Tx) error {
+		// Checked under the writer lock, so a revocation published before
+		// this point cannot be persisted by this batch.
+		if len(run.revokedKeys(hk)) > 0 {
+			return errDecodeBackfillKeysChanged
+		}
 		if len(chanUpdates) > 0 {
 			// The guard keeps an already-resolved row untouched, whoever
 			// resolved it, and makes a repeated batch a no-op.
@@ -756,6 +913,9 @@ func (s *Store) decodeBackfillBatch(ctx context.Context, run *decodeBackfillRun,
 		return err
 	})
 	b.Hold = time.Since(holdStart)
+	if errors.Is(err, errDecodeBackfillKeysChanged) {
+		return decodeBackfillBatchResult{Next: run.watermark}, err
+	}
 	if err != nil {
 		b.ChannelUpdated, b.ScopeUpdated = 0, 0
 		return b, fmt.Errorf("write batch: %w", err)
@@ -795,10 +955,7 @@ func (s *Store) RunDecodeBackfill(ctx context.Context, hk *hotKeys, set DecodeBa
 		return res, err
 	}
 	channelKeys, regionKeys := hk.Channels(), hk.Regions()
-	live := map[string][]string{
-		decodeBackfillKindChannel: liveKeyNames(decodeBackfillKindChannel, channelKeys, nil),
-		decodeBackfillKindScope:   liveKeyNames(decodeBackfillKindScope, nil, regionKeys),
-	}
+	live := liveDecodeBackfillKeys(channelKeys, regionKeys)
 	if err := s.forgetGoneKeys(live); err != nil {
 		return res, fmt.Errorf("forget gone keys: %w", err)
 	}
@@ -837,7 +994,7 @@ func (s *Store) RunDecodeBackfill(ctx context.Context, hk *hotKeys, set DecodeBa
 				decodeBackfillComponent, run.kinds(), run.watermark, run.ceiling)
 			break
 		}
-		b, err := s.decodeBackfillBatch(ctx, run, set)
+		b, err := s.decodeBackfillBatch(ctx, run, hk, set)
 		if err != nil {
 			return res, err
 		}
@@ -860,6 +1017,11 @@ func (s *Store) RunDecodeBackfill(ctx context.Context, hk *hotKeys, set DecodeBa
 		if err := decodeBackfillWait(ctx, set.Pause); err != nil {
 			return res, err
 		}
+	}
+	// One last re-read: a key revoked after the last batch committed must not
+	// be credited by the finish below.
+	if _, err := s.dropRevokedRunKeys(run, hk); err != nil {
+		return res, fmt.Errorf("re-read key set: %w", err)
 	}
 	if err := s.finishDecodeBackfillRun(run); err != nil {
 		return res, fmt.Errorf("finish run: %w", err)
@@ -886,11 +1048,35 @@ func decodeBackfillWait(ctx context.Context, pause time.Duration) error {
 	}
 }
 
+// liveDecodeBackfillKeys is the live key identities of both kinds.
+func liveDecodeBackfillKeys(channelKeys map[string]string, regionKeys map[string][]byte) map[string][]string {
+	return map[string][]string{
+		decodeBackfillKindChannel: liveKeyIdentities(decodeBackfillKindChannel, channelKeys, nil),
+		decodeBackfillKindScope:   liveKeyIdentities(decodeBackfillKindScope, nil, regionKeys),
+	}
+}
+
 // StartDecodeBackfill watches the effective key set and runs one pass per
 // growth, in the background. The returned stop function cancels the current
 // pass and waits for it; the watermark of the last committed batch is kept
 // and the next start resumes from it.
+//
+// With set.Enabled false no watcher starts and no pass runs. If a previous
+// pass left bookkeeping behind, the keys that are not effective at this start
+// are forgotten once (forgetGoneKeys), and main keeps the removal hook wired,
+// so turning the pass back on later re-reads every gap a removal left. No
+// table is created.
 func (s *Store) StartDecodeBackfill(hk *hotKeys, set DecodeBackfillSettings) func() {
+	if !set.Enabled {
+		if ok, err := s.decodeBackfillTablesExist(); err != nil {
+			log.Printf("[%s] error: %v", decodeBackfillComponent, err)
+		} else if ok {
+			if err := s.forgetGoneKeys(liveDecodeBackfillKeys(hk.Channels(), hk.Regions())); err != nil {
+				log.Printf("[%s] error: %v", decodeBackfillComponent, err)
+			}
+		}
+		return func() {}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

@@ -386,7 +386,7 @@ func TestDecodeBackfill_ResumesAfterCancelMidRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if covered[decodeBackfillKeyHash(decodeBFChannel)] {
+	if covered[decodeBFIdentity(decodeBFChannel)] {
 		t.Error("key credited as covered by a cancelled run")
 	}
 
@@ -407,7 +407,7 @@ func TestDecodeBackfill_ResumesAfterCancelMidRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !covered[decodeBackfillKeyHash(decodeBFChannel)] {
+	if !covered[decodeBFIdentity(decodeBFChannel)] {
 		t.Error("key not covered after the run reached its ceiling")
 	}
 }
@@ -445,10 +445,10 @@ func TestDecodeBackfill_KeyAddedMidRunIsNotCredited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !covered[decodeBackfillKeyHash(first)] {
+	if !covered[decodeBFIdentity(first)] {
 		t.Error("the key the run started with is not covered")
 	}
-	if _, present := covered[decodeBackfillKeyHash(second)]; present {
+	if _, present := covered[decodeBFIdentity(second)]; present {
 		t.Error("a key added mid-run was recorded by that run; its history would be skipped")
 	}
 
@@ -592,7 +592,7 @@ func TestDecodeBackfill_BatchHonoursIDWindowAndBatchSize(t *testing.T) {
 	if err != nil || run == nil {
 		t.Fatalf("startDecodeBackfillRun: run=%v err=%v", run, err)
 	}
-	b, err := s.decodeBackfillBatch(context.Background(), run, decodeBFSettings(100, 3))
+	b, err := s.decodeBackfillBatch(context.Background(), run, hk, decodeBFSettings(100, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestDecodeBackfill_BatchHonoursIDWindowAndBatchSize(t *testing.T) {
 
 	// A batch limit below the window truncates and resumes from the last row
 	// read, never from the window end.
-	b, err = s.decodeBackfillBatch(context.Background(), run, decodeBFSettings(2, 100))
+	b, err = s.decodeBackfillBatch(context.Background(), run, hk, decodeBFSettings(2, 100))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +758,8 @@ func TestDecodeBackfill_GuardsKeepConcurrentlyResolvedRows(t *testing.T) {
 	if err := ensureDecodeBackfillTables(s.db); err != nil {
 		t.Fatal(err)
 	}
-	run, err := s.startDecodeBackfillRun([]string{decodeBackfillKindChannel, decodeBackfillKindScope}, keys, decodeBFRegionKeys(scope))
+	hk := newHotKeys(keys, decodeBFRegionKeys(scope))
+	run, err := s.startDecodeBackfillRun([]string{decodeBackfillKindChannel, decodeBackfillKindScope}, hk.Channels(), hk.Regions())
 	if err != nil || run == nil {
 		t.Fatalf("startDecodeBackfillRun: run=%v err=%v", run, err)
 	}
@@ -773,7 +774,7 @@ func TestDecodeBackfill_GuardsKeepConcurrentlyResolvedRows(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { decodeBackfillPreWriteHook = nil })
-	b, err := s.decodeBackfillBatch(context.Background(), run, decodeBFSettings(10, 1000))
+	b, err := s.decodeBackfillBatch(context.Background(), run, hk, decodeBFSettings(10, 1000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -871,7 +872,7 @@ func TestDecodeBackfill_ReaddedKeyIsScannedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, present := covered[decodeBackfillKeyHash(decodeBFChannel)]; present {
+	if _, present := covered[decodeBFIdentity(decodeBFChannel)]; present {
 		t.Error("a key that is no longer effective is still recorded")
 	}
 	if got := decodeBFReadRow(t, s, early); got.channelHash.String != decodeBFChannel {
@@ -1021,7 +1022,7 @@ func TestDecodeBackfill_RevocationDuringARunIsHonoured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, present := covered[decodeBackfillKeyHash(decodeBFChannel)]; present {
+	if _, present := covered[decodeBFIdentity(decodeBFChannel)]; present {
 		t.Error("a key revoked mid-run was still recorded by that run")
 	}
 	hk.AddApproved(decodeBFChannel)

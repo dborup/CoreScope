@@ -135,6 +135,9 @@ func main() {
 	// full restart to take effect — SIGHUP reloads just these two derived
 	// key sets in place. See hot_reload.go.
 	keys := newHotKeys(channelKeys, regionKeys)
+	// #380: a key leaving the effective set is forgotten by the decode
+	// backfill on the event itself, whether or not the pass is enabled.
+	keys.onRemoved(store.forgetDecodeBackfillKeys)
 	stopSIGHUPReload := startSIGHUPReload(keys, *configPath)
 	defer stopSIGHUPReload()
 
@@ -530,13 +533,14 @@ func main() {
 	// approved shared channels, approved region scopes). Same placement as
 	// the backfills above: next to live ingest, after the buffer is draining,
 	// cancelled on shutdown and resumed from its watermark on the next start.
-	if set := cfg.DecodeBackfillSettings(); set.Enabled {
-		decodeBackfillValidateSignatures = cfg.ShouldValidateSignatures()
-		stopDecodeBackfill := store.StartDecodeBackfill(keys, set)
-		defer stopDecodeBackfill()
+	set := cfg.DecodeBackfillSettings()
+	decodeBackfillValidateSignatures = cfg.ShouldValidateSignatures()
+	stopDecodeBackfill := store.StartDecodeBackfill(keys, set)
+	defer stopDecodeBackfill()
+	if set.Enabled {
 		log.Printf("[decode-backfill] enabled (batch=%d window=%d pause=%s poll=%s)", set.BatchSize, set.IDWindow, set.Pause, set.Poll)
 	} else {
-		log.Printf("[decode-backfill] disabled by config")
+		log.Printf("[decode-backfill] disabled by config (no pass runs; removed keys are still forgotten)")
 	}
 
 	// #1212: per-source stall watchdog. Detects "silently dead" sources
