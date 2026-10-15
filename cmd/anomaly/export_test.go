@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -277,22 +278,40 @@ func fileSum(t *testing.T, path string) [32]byte {
 	return sha256.Sum256(b)
 }
 
+// Both ways of opening the database (live file and -immutable snapshot)
+// refuse writes, and a missing file is an error that creates no file.
 func TestExportOpensTheDatabaseReadOnly(t *testing.T) {
 	f := buildExportFixture(t, false)
-	db, err := openReadOnly(f.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, stmt := range []string{`CREATE TABLE x (y INTEGER)`, `DELETE FROM observations`, `PRAGMA user_version = 7`} {
-		if _, err := db.Exec(stmt); err == nil {
-			t.Fatalf("%s succeeded on the export connection", stmt)
-		}
-	}
-	for _, bad := range []string{"", "a?mode=rw", "a#b"} {
-		if _, err := openReadOnly(bad); err == nil {
-			t.Fatalf("path %q accepted", bad)
-		}
+	for name, open := range map[string]func(string) (*sql.DB, error){
+		"openReadOnly": openReadOnly, "openImmutable": openImmutable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			db, err := open(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, stmt := range []string{`CREATE TABLE x (y INTEGER)`, `DELETE FROM observations`, `PRAGMA user_version = 7`} {
+				if _, err := db.Exec(stmt); err == nil {
+					t.Fatalf("%s succeeded on the export connection", stmt)
+				}
+			}
+			for _, bad := range []string{"", "a?mode=rw", "a#b"} {
+				if _, err := open(bad); err == nil {
+					t.Fatalf("path %q accepted", bad)
+				}
+			}
+			missing := filepath.Join(t.TempDir(), "typo.db")
+			if db, err := open(missing); err == nil {
+				db.Close()
+				t.Fatal("a missing database file was opened")
+			}
+			for _, sfx := range []string{"", "-wal", "-shm", "-journal"} {
+				if _, err := os.Lstat(missing + sfx); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("opening a missing database left %s%s (%v)", missing, sfx, err)
+				}
+			}
+		})
 	}
 }
 
@@ -706,5 +725,90 @@ func TestExportImmutableSnapshotHasNoSideEffects(t *testing.T) {
 	}
 	if s := side(); len(s) != 0 {
 		t.Fatalf("-immutable command created %v", s)
+	}
+}
+
+// The README's snapshot recipe is one VACUUM INTO statement on a read-only
+// connection: a single read transaction, so it finishes while a writer
+// commits continuously (the backup API's .backup restarts on every write and
+// may never finish), and its copy is one self-contained file for -immutable.
+func TestReadmeSnapshotRecipeFinishesUnderAWriter(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(readme, []byte(".backup")) {
+		t.Fatal("README still recommends .backup, which may never finish on a live database")
+	}
+	recipe := regexp.MustCompile(`(?m)^sqlite3 -readonly \S+ "VACUUM INTO '[^']+'"`).FindAll(readme, -1)
+	if len(recipe) != 1 {
+		t.Fatalf("README has %d `sqlite3 -readonly <db> \"VACUUM INTO '<snap>'\"` lines, want 1", len(recipe))
+	}
+
+	f := buildExportFixture(t, true) // the writer connection stays open, frames stay in the WAL
+	if st, err := os.Stat(f.path + "-wal"); err != nil || st.Size() == 0 {
+		t.Fatalf("fixture has no uncheckpointed WAL frames (%v)", err)
+	}
+	want, _ := runExportTo(t, fxOptions(f.path))
+
+	if _, err := f.db.Exec(`CREATE TABLE ingest (n INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	stop, done := make(chan struct{}), make(chan int)
+	go func() {
+		n := 0
+		for {
+			select {
+			case <-stop:
+				done <- n
+				return
+			default:
+			}
+			if _, err := f.db.Exec(`INSERT INTO ingest (n) VALUES (?)`, n); err == nil {
+				n++
+			}
+		}
+	}()
+	snap := filepath.Join(t.TempDir(), "meshcore.db")
+	src, err := openReadOnly(f.path) // sqlite3 -readonly
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { _, err := src.Exec(`VACUUM INTO ?`, snap); finished <- err }()
+	select {
+	case err = <-finished:
+	case <-time.After(60 * time.Second):
+		err = errors.New("VACUUM INTO did not finish within 60s under a writer")
+	}
+	close(stop)
+	commits := <-done
+	src.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commits == 0 {
+		t.Fatal("the writer committed nothing while the snapshot ran")
+	}
+
+	for _, sfx := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(snap + sfx); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("snapshot has a %s file", sfx)
+		}
+	}
+	opt := fxOptions(snap)
+	opt.Immutable = true
+	got, _ := runExportTo(t, opt)
+	if !bytes.Equal(got, want) {
+		t.Fatal("-immutable export of the VACUUM INTO snapshot differs from the export of the live file")
+	}
+	db, err := openImmutable(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var check string
+	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("integrity_check: %q (%v)", check, err)
 	}
 }
