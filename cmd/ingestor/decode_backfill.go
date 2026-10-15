@@ -30,8 +30,10 @@ import (
 // Trigger: growth of the effective key set. hotKeys already publishes both
 // effective sets with every lifecycle layer merged (config base ∪ approved),
 // so the watcher compares those snapshots against the key names a completed
-// run has already covered (decode_backfill_keys). A revoked or removed key
-// arms nothing: a resolved row is never revisited.
+// run has already covered (decode_backfill_keys). Losing a key arms nothing
+// and rewrites nothing — it only makes the watcher forget that key, so that
+// re-adding it later starts a fresh pass over the whole table (see
+// forgetGoneKeys for why that is needed).
 //
 // Bounds (ingestion stays responsive):
 //   - one run at a time, with one watermark, resumed from the database;
@@ -316,8 +318,8 @@ func (r *decodeBackfillRun) kinds() string {
 // routing placeholder (BuildPacketData writes channel_hash only for
 // payload_type 5, so GRP_DATA has no placeholder to upgrade and is out of
 // scope). Scope candidates are transport-scoped rows whose region is unknown:
-// scopeNameForDB writes NULL for "not transport-scoped" and ” for
-// "transport-scoped, region unknown".
+// scopeNameForDB writes NULL for "not transport-scoped" and the empty string
+// for "transport-scoped, region unknown".
 func decodeBackfillCandidateSQL(channel, scope bool) string {
 	var preds []string
 	if channel {
