@@ -1326,7 +1326,7 @@ console.log('\n=== #393 N6 perf.js load-error sink ===');
 test('#393 N6 perf.js error paragraph: err.message is escaped', () => {
   const html = evalTemplate(
     'public/perf.js',
-    /el\.innerHTML = `(<p style="color:red">Error: \$\{[^}]*err\.message[^}]*\}<\/p>)`;/,
+    /el\.innerHTML = `(<p style="color:var\(--status-red\)">Error: \$\{[^}]*err\.message[^}]*\}<\/p>)`;/,
     { err: { message: PERF_PAYLOAD } }
   );
   assertNoXss(html, '#393 N6 perf.js err.message');

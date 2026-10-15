@@ -30,6 +30,9 @@ cmd/server/server.exe
 cmd/ingestor/ingestor.exe
 # CI trigger
 !test-fixtures/e2e-fixture.db
+# WS client history journal written by local/E2E runs against the fixture DB
+test-fixtures/ws-client-history.jsonl*
+test-fixtures/.ws-client-history-*.tmp
 corescope-server
 corescope-ingestor
 cmd/server/server

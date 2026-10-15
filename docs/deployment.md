@@ -12,6 +12,7 @@ Comprehensive guide to deploying and operating CoreScope. For a quick start, see
 - [TLS / HTTPS](#tls--https)
 - [Behind a CDN (Cloudflare, Fastly)](#behind-a-cdn-cloudflare-fastly)
 - [Monitoring & Health Checks](#monitoring--health-checks)
+- [WebSocket client history](#websocket-client-history)
 - [Backup & Restore](#backup--restore)
 - [Troubleshooting](#troubleshooting)
 
@@ -96,6 +97,59 @@ MQTT_BROKER=mqtt://my-broker:1883
 ```
 
 The entrypoint sources this file before starting services. This works with any launch method (`docker run`, compose, or manage.sh).
+
+### WebSocket client history
+
+The Perf page offers **24 hours**, **7 days** and **30 days** of open
+WebSocket connection counts. These are connections, not unique people: two
+browser tabs can count twice. Each minute records the current count and the
+highest count since the previous sample. Longer views aggregate samples while
+preserving peaks; periods when the server was not sampling remain gaps, not
+zero-client measurements. The selected period is shareable, for example
+`#/perf?wsRange=7d`.
+
+The server keeps a bounded 30-day journal, `ws-client-history.jsonl`, beside the
+resolved packet database. With the shipped Docker configuration this is
+`/app/data/ws-client-history.jsonl`, inside the existing persistent data mount.
+Keep that mount when replacing a container: the history then survives both
+server restarts and deploys. Keeping only the image or copying only
+`meshcore.db` does **not** retain it. This separate metrics file does not write
+to the packet database and requires no schema migration.
+
+For a directly launched server, `-ws-history-file /persistent/path/history.jsonl`
+overrides the location; `-ws-history-file off` explicitly selects memory-only
+history. A custom location must be writable by the server user and remain
+mounted across deploys. Do not point it at a database. Only one server may own
+the journal: a sibling `.lock` file prevents concurrent writers. A second
+server continues with a visible persistence warning rather than damaging the
+first server's history; restart it after the first has stopped to acquire the
+journal. The bundled non-root ownership migration includes the default journal
+and lock filenames; custom locations need operator-managed permissions.
+
+Each completed minute sample is synced to disk. A crash can lose the current,
+not-yet-sampled minute, but previously synced samples are reloaded. The file is
+compacted to the retention limit; storage and memory are bounded. No older
+history is reconstructed on first installation, so seven- and thirty-day views
+fill gradually.
+
+An interrupted final append is recoverable: when a validated journal prefix
+exists, an unterminated last record is discarded and earlier complete samples
+are reloaded. A complete malformed record, an unrecognized file, an unsafe path
+or a storage error is not silently erased. Instead the dashboard warns that
+history is memory-only/degraded and the server logs the cause. Packet collection
+and the web server keep running. For an unrecoverable journal, stop the server
+and preserve the damaged file before moving it aside, then restart to begin a
+fresh history. A new image alone cannot repair permissions or recover missing
+measurements. Persistence requires Unix file locking; on unsupported platforms
+the server reports degraded memory-only history.
+
+`scripts/backup-sqlite.sh` backs up databases only: it does **not** include this
+journal. Include the journal separately in a stopped-server data-directory
+backup if you also need to restore this history. The journal is always written
+with mode `0600`; the server only refuses it back if the restored copy is
+group- or other-writable (for example `0660`), not merely group- or
+other-readable, so a `tar`/`cp` restore under a normal umask (commonly `0644`)
+loads without extra steps.
 
 ### Running the Go services without root (opt-in)
 

@@ -10,20 +10,33 @@ async function test(name, fn) {
   catch (e) { failed++; console.log(`  ❌ ${name}: ${e.message}`); }
 }
 
-function makeSandbox() {
+function makeSandbox(hash = '#/perf') {
   let capturedHtml = '';
+  let historyHtml = '';
+  let now = Date.now();
+  class ClockDate extends Date { static now() { return now; } }
+  const handlers = {};
+  const rangeSelect = { value: '24h', addEventListener: (ev, fn) => { handlers.range = fn; } };
   const ctx = {
-    window: { addEventListener: () => {}, apiPerf: null },
+    window: { addEventListener: () => {}, apiPerf: null, location: { hash }, history: {
+      replaceState: (state, title, value) => { ctx.window.location.hash = value; },
+    } },
     document: {
-      getElementById: (id) => id === 'perfContent' ? { set innerHTML(v) { capturedHtml = v; } } : null,
+      getElementById: (id) => {
+        if (id === 'perfContent') return { set innerHTML(v) { capturedHtml = v; } };
+        if (id === 'wsHistoryContent') return { set innerHTML(v) { historyHtml = v; } };
+        if (id === 'wsHistoryRange') return rangeSelect;
+        if (id === 'perfRefresh' || id === 'perfReset') return { addEventListener: (ev, fn) => { handlers[id] = fn; } };
+        return null;
+      },
       addEventListener: () => {},
       removeEventListener: () => {},
     },
-    console, Date, Math, Array, Object, String, Number, JSON, RegExp, Error, TypeError,
+    console, Date: ClockDate, Math, Array, Object, String, Number, JSON, RegExp, Error, TypeError,
     parseInt, parseFloat, isNaN, isFinite,
     setTimeout: () => {}, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
     performance: { now: () => Date.now() },
-    Map, Set, Promise,
+    Map, Set, Promise, URLSearchParams,
     registerPage: (name, handler) => { ctx.pages[name] = handler; },
     pages: {},
     _apiCache: null,
@@ -32,7 +45,7 @@ function makeSandbox() {
   ctx.window.document = ctx.document;
   ctx.globalThis = ctx;
   vm.runInNewContext(fs.readFileSync('public/perf.js', 'utf8'), ctx);
-  return { ctx, getHtml: () => capturedHtml };
+  return { ctx, handlers, rangeSelect, advanceNow: ms => { now += ms; }, getHtml: () => capturedHtml, getHistoryHtml: () => historyHtml };
 }
 
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)); };
@@ -99,6 +112,192 @@ const PERF_FIXTURE = () => ({
     const c = ctx.window.buildWSClientChart(mk(4, i => [2, 9, 4, 3][i]), 400, 100);
     assert.strictEqual(c.latest, 3);
     assert.strictEqual(c.peakOverall, 10);
+    assert.ok(c.peakSegments[0][1].y < c.clientSegments[0][1].y, 'aggregate peak must not become the last count');
+  });
+
+  await test('buildWSClientChart: restart/missing intervals split both lines rather than inventing continuity', () => {
+    const { ctx } = makeSandbox();
+    const samples = mk(6, i => i + 2);
+    samples[2].gapBefore = true; // Explicit restart within an aggregate bucket.
+    samples[4].t = new Date(T0 + 20 * 60000).toISOString();
+    samples[5].t = new Date(T0 + 21 * 60000).toISOString();
+    const c = ctx.window.buildWSClientChart(samples, 400, 100, 60);
+    assert.deepStrictEqual(Array.from(c.clientSegments, s => s.length), [2, 2, 2]);
+    assert.deepStrictEqual(Array.from(c.peakSegments, s => s.length), [2, 2, 2]);
+    assert.strictEqual(c.clientPoints.length, 6, 'no zero-filled samples');
+  });
+
+  await test('renderWSClientHistory: 7d/30d show their period, dates and actual aggregate interval', () => {
+    const { ctx } = makeSandbox();
+    for (const [range, intervalSec, label] of [['7d', 300, '7 days'], ['30d', 900, '30 days']]) {
+      const samples = [
+        { t: '2026-10-01T12:00:00Z', clients: 2, peak: 5 },
+        { t: '2026-10-02T12:00:00Z', clients: 3, peak: 6, gapBefore: true },
+      ];
+      const html = ctx.window.renderWSClientHistory({ range, intervalSec, samples, persistence: { enabled: true, healthy: true } }, 8);
+      assert.ok(html.includes(label), html);
+      assert.ok(html.includes('2026'), 'multi-day labels must include the date, not just the clock');
+      assert.ok(html.includes(String(intervalSec / 60) + '-minute'), 'describe aggregated samples');
+      assert.ok(/gaps/i.test(html), 'explain missing intervals');
+      assert.ok(/survives restarts/i.test(html), 'confirm enabled healthy persistence');
+      assert.ok(/<b>8<\/b> open now/.test(html), 'open now is not the aggregate value');
+      assert.strictEqual((html.match(/<polyline/g) || []).length, 4, 'separate segments across restart');
+    }
+  });
+
+  await test('renderWSClientHistory: persistence disabled, unhealthy and legacy metadata are not advertised as durable', () => {
+    const { ctx } = makeSandbox();
+    const base = { range: '30d', intervalSec: 900, samples: mk(2, () => 2) };
+    assert.ok(/disabled/i.test(ctx.window.renderWSClientHistory({ ...base, persistence: { enabled: false, healthy: false } })));
+    assert.ok(/unavailable/i.test(ctx.window.renderWSClientHistory({ ...base, persistence: { enabled: true, healthy: false } })));
+    assert.ok(!/survives restarts/i.test(ctx.window.renderWSClientHistory(base)), 'legacy API cannot prove persistence');
+  });
+
+  await test('refresh: deep-linked ranges, range-specific cache and URL state use the real page handlers', async () => {
+    const sb = makeSandbox('#/perf?other=keep&wsRange=7d');
+    const { ctx, handlers, rangeSelect } = sb;
+    const calls = [];
+    ctx.fetch = url => {
+      calls.push(url);
+      const range = url.includes('range=30d') ? '30d' : url.includes('range=7d') ? '7d' : '24h';
+      const body = url.startsWith('/api/perf/ws-clients') ? { range, intervalSec: range === '7d' ? 300 : 900, samples: mk(10, () => range === '30d' ? 30 : 7) }
+        : url === '/api/perf' ? PERF_FIXTURE() : null;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    assert.strictEqual(rangeSelect.value, '7d');
+    assert.ok(sb.getHistoryHtml().includes('7 days'));
+    rangeSelect.value = '30d';
+    await handlers.range({ target: rangeSelect });
+    await flush();
+    assert.strictEqual(ctx.window.location.hash, '#/perf?other=keep&wsRange=30d');
+    assert.ok(sb.getHistoryHtml().includes('30 days'));
+    rangeSelect.value = '7d';
+    await handlers.range({ target: rangeSelect });
+    await flush();
+    assert.strictEqual(calls.filter(u => u === '/api/perf/ws-clients?range=7d').length, 1, 'switching back reuses only the matching range');
+    sb.advanceNow(60001);
+    await handlers.perfRefresh();
+    await flush();
+    assert.strictEqual(calls.filter(u => u === '/api/perf/ws-clients?range=7d').length, 2, 'refresh after 60s fetches fresh data');
+  });
+
+  await test('refresh: an unsupported URL range falls back safely to 24h', async () => {
+    const { ctx, rangeSelect } = makeSandbox('#/perf?wsRange=%3Cimg%20src%3Dx%3E');
+    const calls = [];
+    ctx.fetch = url => {
+      calls.push(url);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? PERF_FIXTURE() : null) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    assert.strictEqual(rangeSelect.value, '24h');
+    assert.ok(calls.includes('/api/perf/ws-clients'));
+    assert.ok(!calls.some(u => u.includes('img')));
+  });
+
+  await test('refresh: a late range response cannot replace the newly selected range', async () => {
+    const sb = makeSandbox();
+    const { ctx, handlers, rangeSelect } = sb;
+    let releaseSeven;
+    const seven = new Promise(resolve => { releaseSeven = resolve; });
+    ctx.fetch = url => {
+      const range = url.includes('range=30d') ? '30d' : url.includes('range=7d') ? '7d' : '24h';
+      const response = { ok: true, json: () => Promise.resolve({ range, intervalSec: 900, samples: mk(3, () => 2) }) };
+      if (range === '7d') return seven.then(() => response);
+      return Promise.resolve(url.startsWith('/api/perf/ws-clients') ? response : { ok: true, json: () => Promise.resolve(url === '/api/perf' ? PERF_FIXTURE() : null) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    rangeSelect.value = '7d';
+    const oldRefresh = handlers.range({ target: rangeSelect });
+    await flush();
+    rangeSelect.value = '30d';
+    await handlers.range({ target: rangeSelect });
+    await flush();
+    assert.ok(sb.getHistoryHtml().includes('30 days'));
+    releaseSeven();
+    await oldRefresh;
+    await flush();
+    assert.ok(sb.getHistoryHtml().includes('30 days'), 'old request must not overwrite the current chart');
+    assert.strictEqual(rangeSelect.value, '30d');
+  });
+
+  await test('refresh: failed history retries immediately, then caches the successful response', async () => {
+    const sb = makeSandbox('#/perf?wsRange=30d');
+    const { ctx, handlers } = sb;
+    let calls = 0;
+    ctx.fetch = url => {
+      if (url.startsWith('/api/perf/ws-clients')) {
+        calls++;
+        return Promise.resolve({ ok: calls > 1, json: () => Promise.resolve({ range: '30d', intervalSec: 900, samples: mk(3, () => 3) }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? PERF_FIXTURE() : null) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    assert.ok(/unavailable/i.test(sb.getHistoryHtml()));
+    await handlers.perfRefresh();
+    await flush();
+    assert.strictEqual(calls, 2, 'failed result must not spend a minute in the cache');
+    assert.ok(sb.getHistoryHtml().includes('30 days'));
+    await handlers.perfRefresh();
+    await flush();
+    assert.strictEqual(calls, 2, 'successful retry is cached');
+  });
+
+  await test('refresh: overlapping history requests coalesce but latest open-now health still wins', async () => {
+    const sb = makeSandbox();
+    const { ctx } = sb;
+    let releaseHistory;
+    const pending = new Promise(resolve => { releaseHistory = resolve; });
+    let calls = 0, healthCalls = 0, tick;
+    ctx.setInterval = fn => { tick = fn; return 1; };
+    ctx.fetch = url => {
+      if (url === '/api/perf/ws-clients') {
+        calls++;
+        return pending.then(() => ({ ok: true, json: () => Promise.resolve({ intervalSec: 60, samples: mk(3, () => 1) }) }));
+      }
+      const body = url === '/api/perf' ? PERF_FIXTURE()
+        : url === '/api/health' ? { engine: 'go', websocket: { clients: ++healthCalls } } : null;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    tick();
+    await flush();
+    assert.strictEqual(calls, 1, 'a slow history endpoint must not cause overlapping full history downloads');
+    assert.strictEqual(healthCalls, 2, 'health still refreshes independently');
+    releaseHistory();
+    await flush();
+    assert.ok(/<b>2<\/b> open now/.test(sb.getHistoryHtml()), 'latest request wins rather than older health');
+  });
+
+  await test('refresh: a response from a destroyed page does not overwrite a new visit', async () => {
+    const sb = makeSandbox();
+    const { ctx } = sb;
+    let releaseHistory;
+    const pending = new Promise(resolve => { releaseHistory = resolve; });
+    let calls = 0;
+    ctx.fetch = url => {
+      if (url === '/api/perf/ws-clients') {
+        calls++;
+        const clients = calls === 1 ? 91 : 3;
+        const response = { ok: true, json: () => Promise.resolve({ intervalSec: 60, samples: mk(3, () => clients) }) };
+        return calls === 1 ? pending.then(() => response) : Promise.resolve(response);
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? PERF_FIXTURE() : null) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    ctx.pages.perf.destroy();
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    assert.ok(/<b>3<\/b> open now/.test(sb.getHistoryHtml()));
+    releaseHistory();
+    await flush();
+    assert.ok(/<b>3<\/b> open now/.test(sb.getHistoryHtml()), 'old page must not render into the new visit');
   });
 
   await test('renderWSClientHistory: fewer than 2 samples shows a collecting message, no svg', () => {
@@ -169,7 +368,7 @@ const PERF_FIXTURE = () => ({
   });
 
   await test('refresh: fetches /api/perf/ws-clients once and shows the card', async () => {
-    const { ctx, getHtml } = makeSandbox();
+    const { ctx, getHistoryHtml } = makeSandbox();
     const calls = [];
     const perf = PERF_FIXTURE();
     ctx.fetch = (url) => {
@@ -180,12 +379,11 @@ const PERF_FIXTURE = () => ({
         : {};
       return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
     };
-    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } } : null;
     const app = { set innerHTML(v) {} };
     ctx.pages.perf.init(app);
     await flush();
     assert.strictEqual(calls.filter(u => u === '/api/perf/ws-clients').length, 1);
-    assert.ok(String(ctx.__html).includes('<svg class="ws-history'), String(ctx.__html).slice(0, 200));
+    assert.ok(getHistoryHtml().includes('<svg class="ws-history'), getHistoryHtml().slice(0, 200));
   });
 
   await test('refresh: a failing ws-clients endpoint does not break the page', async () => {
@@ -201,7 +399,7 @@ const PERF_FIXTURE = () => ({
   });
 
   await test('refresh: a 404/500 from ws-clients hides the card instead of hanging on "Collecting data…" (#433 F2)', async () => {
-    const { ctx } = makeSandbox();
+    const { ctx, getHistoryHtml } = makeSandbox();
     const perf = PERF_FIXTURE();
     ctx.fetch = (url) => {
       if (url === '/api/health') return Promise.reject(new Error('no health'));
@@ -216,22 +414,23 @@ const PERF_FIXTURE = () => ({
     ctx.pages.perf.init({ set innerHTML(v) {} });
     await flush();
     const html = String(ctx.__html);
-    assert.ok(!html.includes('<svg class="ws-history'), 'no chart expected');
-    assert.ok(!/collecting/i.test(html), '404 must not look like "still collecting"');
+    assert.ok(!getHistoryHtml().includes('<svg class="ws-history'), 'no chart expected');
+    assert.ok(!/collecting/i.test(getHistoryHtml()), '404 must not look like "still collecting"');
     assert.ok(html.includes('Total Requests'), 'rest of the page still renders');
   });
 
   await test('refresh: the ws-clients ring is not re-fetched on every 5s tick (#433 F6)', async () => {
-    const { ctx } = makeSandbox();
+    const { ctx, getHistoryHtml } = makeSandbox();
     const perf = PERF_FIXTURE();
     let wsCalls = 0;
     const handlers = {};
+    const getElementById = ctx.document.getElementById;
     ctx.document.getElementById = (id) => {
       if (id === 'perfContent') return { set innerHTML(v) { ctx.__html = v; } };
       if (id === 'perfRefresh' || id === 'perfReset') {
         return { addEventListener: (ev, fn) => { handlers[id] = fn; } };
       }
-      return null;
+      return getElementById(id);
     };
     ctx.fetch = (url) => {
       if (url === '/api/health') return Promise.reject(new Error('no health'));
@@ -243,7 +442,39 @@ const PERF_FIXTURE = () => ({
     assert.strictEqual(wsCalls, 1, 'first refresh fetches the ring');
     for (let i = 0; i < 10; i++) { await handlers.perfRefresh(); await flush(); }
     assert.strictEqual(wsCalls, 1, 'ten more refreshes within the cache window must reuse it, not re-fetch 72.9 KB each time');
-    assert.ok(String(ctx.__html).includes('<svg class="ws-history'), 'chart still renders from the cached ring');
+    assert.ok(getHistoryHtml().includes('<svg class="ws-history'), 'chart still renders from the cached ring');
+  });
+
+  await test('refresh: a round slower than the 5s tick must still render once it completes, not get stuck on "Loading…" forever (PR#461 F1)', async () => {
+    const sb = makeSandbox();
+    const { ctx } = sb;
+    let tick;
+    ctx.setInterval = fn => { tick = fn; return 1; };
+    const perf = PERF_FIXTURE();
+    const releasers = [];
+    ctx.fetch = (url) => {
+      if (url === '/api/perf') {
+        return new Promise(resolve => { releasers.push(() => resolve({ ok: true, json: () => Promise.resolve(perf) })); });
+      }
+      if (url === '/api/health') return Promise.reject(new Error('no health'));
+      if (url === '/api/perf/ws-clients') return Promise.resolve({ ok: true, json: () => Promise.resolve({ intervalSec: 60, samples: mk(3, () => 1) }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    // Two more 5s ticks elapse while the very first /api/perf round (a loaded
+    // server) is still in flight — exactly the overload scenario from F1.
+    tick();
+    await flush();
+    tick();
+    await flush();
+    assert.strictEqual(releasers.length, 3, 'three refreshes now overlapping, none has resolved yet');
+    // The oldest round finally completes. It was overtaken by two newer
+    // ticks, but nothing has rendered yet, so it must still paint the page
+    // instead of being silently dropped.
+    releasers[0]();
+    await flush();
+    assert.ok(sb.getHtml().includes('Total Requests'), 'an overtaken-but-first-to-finish refresh must still render, not stay on Loading…');
   });
 
   await test('refresh: re-entering the page (init) forces a fresh ws-clients fetch, not a stale cache', async () => {
