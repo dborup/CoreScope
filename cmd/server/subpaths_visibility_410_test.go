@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -687,6 +688,253 @@ func BenchmarkRoutePatterns410_Detail2000Nodes(b *testing.B) {
 		router.ServeHTTP(w, httptest.NewRequest("GET", url, nil))
 		if w.Code != 200 {
 			b.Fatalf("HTTP %d", w.Code)
+		}
+	}
+}
+
+// rpAddTraffic adds one transmission per path, observed by the observer with
+// rowid obs, on top of seedRoutePatternsDB (before the store loads).
+func rpAddTraffic(t testing.TB, db *DB, obs int, paths ...string) {
+	t.Helper()
+	recent := time.Now().UTC().Add(-time.Hour)
+	for _, p := range paths {
+		res, err := db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json) VALUES ('AABB', ?, ?, 1, 5, '{"type":"CHAN"}')`,
+			fmt.Sprintf("rp410-extra-%d-%s", obs, p), recent.Format(time.RFC3339))
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		id, _ := res.LastInsertId()
+		if _, err := db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?, ?, 10, -90, ?, ?)`,
+			id, obs, p, recent.Unix()); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+}
+
+// rpInsertObserver adds an observer row and returns its rowid.
+func rpInsertObserver(t testing.TB, db *DB, id, name string) int {
+	t.Helper()
+	res, err := db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count) VALUES (?, ?, 'SJC', ?, '2026-01-01T00:00:00Z', 1)`,
+		id, name, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rowid, _ := res.LastInsertId()
+	return int(rowid)
+}
+
+// rpHidingRules are the three ways an identity is hidden.
+var rpHidingRules = []struct {
+	name  string
+	apply func(*Config)
+}{
+	{"hidden name", func(c *Config) { c.SetHiddenNamePrefixes([]string{"Hidden-"}) }},
+	{"node blacklist", func(c *Config) { c.SetNodeBlacklist([]string{rpHiddenB}) }},
+	{"observer blacklist", func(c *Config) { c.ObserverBlacklist = []string{rpHiddenB} }},
+}
+
+// With hidden-name prefixes configured the detail issues its identity lookup
+// whether or not a requested hop resolves to a node, so the work a request
+// does is the same for a hop that resolves and one that does not. Without
+// hidden-name prefixes no request issues one.
+func TestRoutePatterns410_DetailLookupAlwaysRuns(t *testing.T) {
+	cfg := &Config{Port: 3000}
+	srv, router := setupRoutePatternsServer(t, "visible", cfg)
+	var queries int
+	srv.db.identityNamesQueryHook = func([]string) { queries++ }
+	count := func(hops ...string) int {
+		t.Helper()
+		queries = 0
+		if code, body := rpDetailRaw(router, hops...); code != 200 {
+			t.Fatalf("%v: HTTP %d %s", hops, code, body)
+		}
+		return queries
+	}
+	cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
+	for _, hops := range [][]string{{"aa", "bb"}, {"cc", "bb"}, {"aa", "f0"}, {"f0", "f1"}, {"f0f0f0f0f0f0f0f0", rpHiddenB}} {
+		if n := count(hops...); n != 1 {
+			t.Errorf("hidden-name config, hops %v: %d identity lookups, want 1", hops, n)
+		}
+	}
+	cfg.SetHiddenNamePrefixes(nil)
+	cfg.SetNodeBlacklist([]string{rpHiddenB})
+	for _, hops := range [][]string{{"aa", "bb"}, {"f0", "f1"}} {
+		if n := count(hops...); n != 0 {
+			t.Errorf("blacklist-only config, hops %v: %d identity lookups, want 0", hops, n)
+		}
+	}
+}
+
+// A hidden hop that carries traffic has the same form as an unknown hop that
+// carries the same traffic: in the detail (parent paths included) and in
+// list and bulk rows it is shown as its raw hop, not dropped. The fixture
+// mirrors every path through the hidden node "bb" with the unknown hop "f0".
+func TestRoutePatterns410_HiddenHopWithTrafficLooksUnknown(t *testing.T) {
+	for _, rule := range rpHidingRules {
+		t.Run(rule.name, func(t *testing.T) {
+			db := seedRoutePatternsDB(t, "visible")
+			rpAddTraffic(t, db, 1, `["aa","f0"]`)
+			rpAddTraffic(t, db, 2, `["aa","dd","f0"]`)
+			cfg := &Config{Port: 3000}
+			_, router := newRoutePatternsServer(t, db, cfg)
+			rule.apply(cfg)
+
+			norm := func(s, hop string) string {
+				s = strings.ReplaceAll(s, `"`+hop+`"`, `"HOP"`)
+				return strings.ReplaceAll(s, "→ "+hop, "→ HOP")
+			}
+			for _, lead := range []string{"aa", "dd"} {
+				hCode, hBody := rpDetailRaw(router, lead, "bb")
+				uCode, uBody := rpDetailRaw(router, lead, "f0")
+				if hCode != 200 || uCode != 200 {
+					t.Fatalf("%s: HTTP %d / %d", lead, hCode, uCode)
+				}
+				if !strings.Contains(uBody, `"totalMatches":1`) {
+					t.Fatalf("%s,f0: fixture has no traffic: %s", lead, uBody)
+				}
+				if norm(hBody, "bb") != norm(uBody, "f0") {
+					t.Errorf("%s: hidden hop with traffic differs from an unknown one:\n%s\n%s", lead, hBody, uBody)
+				}
+			}
+
+			rows := func(group map[string]interface{}, hop string) []string {
+				var out []string
+				for _, r := range group["subpaths"].([]interface{}) {
+					m := r.(map[string]interface{})
+					raw := m["rawHops"].([]interface{})
+					if raw[len(raw)-1] != hop {
+						continue
+					}
+					b, _ := json.Marshal(m)
+					out = append(out, norm(string(b), hop))
+				}
+				sort.Strings(out)
+				return out
+			}
+			list := rpGet(t, router, "/api/analytics/subpaths?minLen=2&maxLen=8&limit=100", 200)
+			groups := []map[string]interface{}{list}
+			for _, g := range rpGet(t, router, "/api/analytics/subpaths-bulk?groups=2-2:50,3-3:50", 200)["results"].([]interface{}) {
+				groups = append(groups, g.(map[string]interface{}))
+			}
+			for i, g := range groups {
+				h, u := rows(g, "bb"), rows(g, "f0")
+				if len(u) == 0 || !reflect.DeepEqual(h, u) {
+					t.Errorf("group %d: rows through the hidden hop %v, through the unknown hop %v", i, h, u)
+				}
+			}
+		})
+	}
+}
+
+// An ambiguous requested hop is resolved over the visible candidates only:
+// with the resolver's favourite hidden, the detail names the visible
+// candidate, exactly as if the hidden node did not exist.
+func TestRoutePatterns410_DetailResolvesVisibleCandidates(t *testing.T) {
+	rules := []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"hidden name", func(c *Config) { c.SetHiddenNamePrefixes([]string{"Hidden-"}) }},
+		{"node blacklist", func(c *Config) { c.SetNodeBlacklist([]string{rpAmbHid}) }},
+		{"observer blacklist", func(c *Config) { c.ObserverBlacklist = []string{rpAmbHid} }},
+	}
+	for _, rule := range rules {
+		t.Run(rule.name, func(t *testing.T) {
+			cfg := &Config{Port: 3000}
+			_, router := setupRoutePatternsServer(t, "hidden", cfg)
+			for _, lead := range []string{"aa", "cc"} {
+				if pk := rpDetailNode(t, rpGet(t, router, rpDetail(lead, "11"), 200), 1)["pubkey"]; pk != rpAmbHid {
+					t.Fatalf("baseline %s,11: resolves to %v, want the hidden candidate", lead, pk)
+				}
+			}
+			rule.apply(cfg)
+			for _, lead := range []string{"aa", "cc"} {
+				got := rpDetailNode(t, rpGet(t, router, rpDetail(lead, "11"), 200), 1)
+				if got["pubkey"] != rpAmbVis || got["name"] != "Visible-One" {
+					t.Errorf("%s,11: nodes[1] = %v, want the visible candidate", lead, got)
+				}
+			}
+		})
+	}
+}
+
+// List and bulk apply the name rules to the name a cached row shows, as the
+// detail does: a row cached under a hidden-prefixed name does not show it
+// after (a) the node left the node list or (b) was renamed out of the prefix.
+func TestRoutePatterns410_CachedHiddenNameFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change string
+	}{
+		{"node gone", `DELETE FROM nodes WHERE public_key = ?`},
+		{"renamed", `UPDATE nodes SET name = 'Bravo' WHERE public_key = ?`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Port: 3000}
+			srv, router := setupRoutePatternsServer(t, "visible", cfg)
+			rpRequire(t, "list baseline", rpList(t, router), "Alpha → Hidden-Bravo") // fills the caches
+			rpRequire(t, "bulk baseline", rpBulk(t, router), "Alpha → Hidden-Bravo")
+			if _, err := srv.db.conn.Exec(tc.change, rpHiddenB); err != nil {
+				t.Fatal(err)
+			}
+			srv.store.cacheMu.Lock()
+			srv.store.nodeCache = nil
+			srv.store.cacheMu.Unlock()
+			cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
+			for name, get := range map[string]func(*testing.T, *mux.Router) map[string]bool{"list": rpList, "bulk": rpBulk} {
+				if got := get(t, router); rpAnyContains(got, "Hidden-") {
+					t.Errorf("%s shows a cached hidden name: %v", name, got)
+				}
+			}
+		})
+	}
+}
+
+// The live lookup is case-insensitive: an observer whose id is a hidden
+// node's key in upper case is left out of the detail.
+func TestRoutePatterns410_DetailObserverIdCase(t *testing.T) {
+	db := seedRoutePatternsDB(t, "visible")
+	rpAddTraffic(t, db, rpInsertObserver(t, db, strings.ToUpper(rpHiddenB), "Gateway-Upper"), `["aa","dd"]`)
+	cfg := &Config{Port: 3000}
+	_, router := newRoutePatternsServer(t, db, cfg)
+	if base := rpDetailText(t, router, rpDetail("aa", "dd")); !strings.Contains(base, "Gateway-Upper") {
+		t.Fatalf("baseline lacks the observer: %s", base)
+	}
+	cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
+	if got := rpDetailText(t, router, rpDetail("aa", "dd")); strings.Contains(got, "Gateway-Upper") {
+		t.Errorf("observer with an upper-case hidden key is listed: %s", got)
+	}
+}
+
+// A node that appears only in a parent path and is hidden only through an
+// observer alias (an observer row with its key and a hidden name, but no
+// traffic of its own) is looked up too.
+func TestRoutePatterns410_DetailParentPathAliasOnly(t *testing.T) {
+	db := seedRoutePatternsDB(t, "visible")
+	rpAddTraffic(t, db, 1, `["aa","dd","ee"]`)
+	rpInsertObserver(t, db, rpEve, "Hidden-Alias")
+	cfg := &Config{Port: 3000}
+	_, router := newRoutePatternsServer(t, db, cfg)
+	if base := rpDetailText(t, router, rpDetail("aa", "dd")); !strings.Contains(base, "Dup → Eve") {
+		t.Fatalf("baseline lacks the parent path: %s", base)
+	}
+	cfg.SetHiddenNamePrefixes([]string{"Hidden-"})
+	if got := rpDetailText(t, router, rpDetail("aa", "dd")); strings.Contains(got, "Eve") {
+		t.Errorf("parent path names a node hidden by its observer alias: %s", got)
+	}
+}
+
+// The lookup scope covers every candidate of a requested hop, not only the
+// resolver's pick, so a hidden candidate can be excluded from the choice.
+func TestRoutePatterns410_DetailLookupScopeCandidates(t *testing.T) {
+	srv, _ := setupRoutePatternsServer(t, "visible", &Config{Port: 3000})
+	got := map[string]bool{}
+	for _, pk := range srv.store.SubpathDetail([]string{"aa", "11"}).pubkeys() {
+		got[pk] = true
+	}
+	for _, pk := range []string{rpAlpha, rpAmbVis, rpAmbHid} {
+		if !got[pk] {
+			t.Errorf("lookup keys %v lack %q", got, pk)
 		}
 	}
 }

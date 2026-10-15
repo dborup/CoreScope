@@ -133,6 +133,10 @@ type DB struct {
 	// membership scan, before the query; a non-nil error fails that refresh
 	// the way a failing scan does.
 	nodeRegionQueryHook func() error
+	// identityNamesQueryHook (#410, test seam, nil in production) runs once
+	// per real hidden-name lookup query, right before it executes, with the
+	// lower-case keys it looks up.
+	identityNamesQueryHook func(keys []string)
 }
 
 // channelRows is the part of *sql.Rows the channel list scans use.

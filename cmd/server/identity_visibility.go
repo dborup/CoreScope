@@ -104,6 +104,9 @@ func (s *Server) hiddenIdentityNames(ctx context.Context, pubkeys []string) (map
 	for _, p := range prefixes {
 		args = append(args, p)
 	}
+	if s.db.identityNamesQueryHook != nil {
+		s.db.identityNamesQueryHook(keys)
+	}
 	rows, err := s.db.conn.QueryContext(ctx, hiddenNamesSQL(len(prefixes), hasInactive), args...)
 	if err != nil {
 		return nil, fmt.Errorf("identity names: %w", err)
