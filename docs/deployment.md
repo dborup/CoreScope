@@ -694,7 +694,8 @@ approved shared hashtag channel, or an approved region scope. The ingestor
 records which key names a completed pass has already covered (as digests of
 the names — a hashtag channel key *is* its name, so the plain name is not
 stored) and starts a pass whenever a live key is not among them. Removing or
-revoking a key triggers nothing.
+revoking a key triggers nothing — but a revocation does stop a pass that is
+already running from using that key any further (below).
 
 **What it rewrites.** Only unresolved rows: GRP_TXT rows whose `channel_hash`
 is still `enc_<HEX>`, and transport-scoped rows whose `scope_name` is the
@@ -744,6 +745,16 @@ key added while a pass is running is covered by the *next* pass, which starts
 again from the beginning of the table, so no history is skipped. Restoring an
 older database copy simply means the pass runs again — it is idempotent.
 
+**A key revoked while a pass is running.** The pass re-reads the effective key
+set before every batch, so a revocation takes effect within one batch: that key
+decrypts and matches nothing further, and the pass is not credited with it, so
+re-approving it later re-runs a full pass over the table. Rows the pass had
+already rewritten keep their decoded payload — the same thing an ordinary
+revocation does for rows decrypted at ingest before it; a revocation stops
+future decryption, it does not re-encrypt stored history. When every key a pass
+started with has been revoked, the pass stops where it is instead of scanning
+the rest of the table for nothing.
+
 **What the server sees.** The ingestor is the only writer; the server stays
 read-only. Within one poll tick (one second) it drops its channel caches, so
 everything that reads the database shows the rewritten rows without a restart:
@@ -761,7 +772,7 @@ surface served from that copy therefore shows the old value until a restart:
 |---|---|
 | Packets list (`/api/packets`) | `decoded_json`, `scope_name` |
 | Packets page channel filter, Audio Lab buckets | decoded payload |
-| Packet detail (`/api/packets/{hash}`) while the row is still in the store | `decoded_json`, `scope_name` |
+| Packet detail (`/api/packets/{id}`, which also accepts a hash) while the row is still in the store | `decoded_json`, `scope_name` |
 | Node hop analytics, "scoped" share | `scope_name` |
 | Repeater liveness, per-scope relay counts | `scope_name` |
 
