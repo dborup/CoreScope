@@ -1876,6 +1876,7 @@ func (s *PacketStore) loadBackgroundChunks() {
 // and sets it as the transmission's display observation.
 func pickBestObservation(tx *StoreTx) {
 	if len(tx.Observations) == 0 {
+		setTxPath(tx, tx.PathJSON)
 		return
 	}
 	best := tx.Observations[0]
@@ -1892,9 +1893,21 @@ func pickBestObservation(tx *StoreTx) {
 	tx.ObserverIATA = best.ObserverIATA
 	tx.SNR = best.SNR
 	tx.RSSI = best.RSSI
-	tx.PathJSON = best.PathJSON
 	tx.Direction = best.Direction
-	tx.pathParsed = false // invalidate cached parsed path
+	setTxPath(tx, best.PathJSON)
+}
+
+// setTxPath sets tx's path and its parsed hops. It runs where tx is written
+// (s.mu held for writing, or tx not yet in the store), so the parse cache is
+// full before readers see tx: they call txGetParsedPath under s.mu.RLock,
+// and a lazy parse there is concurrent readers writing tx.parsedPath (#470).
+func setTxPath(tx *StoreTx, pathJSON string) {
+	if tx.pathParsed && tx.PathJSON == pathJSON {
+		return
+	}
+	tx.PathJSON = pathJSON
+	tx.parsedPath = parsePathJSON(pathJSON)
+	tx.pathParsed = true
 }
 
 // rechargeTx re-estimates tx and returns the change since it was last
@@ -2399,19 +2412,31 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 	}
 	s.groupedCacheMu.Unlock()
 
-	// Collect StoreTx pointers under read lock; sort outside it.
+	// Collect StoreTx pointers and their sort keys under read lock; sort
+	// outside it. Ingest rewrites LatestSeen under s.mu, so the key is
+	// snapshotted rather than read during the sort (#470).
+	type latestTx struct {
+		tx     *StoreTx
+		latest string
+	}
 	s.mu.RLock()
 	results := s.filterPackets(q)
-	txs := make([]*StoreTx, len(results))
-	copy(txs, results)
+	sorted := make([]latestTx, len(results))
+	for i, tx := range results {
+		sorted[i] = latestTx{tx: tx, latest: tx.LatestSeen}
+	}
 	s.mu.RUnlock()
 
-	total := len(txs)
+	total := len(sorted)
 
 	// Full sort by LatestSeen DESC so the cached slice supports all page offsets.
-	sort.Slice(txs, func(i, j int) bool {
-		return txs[i].LatestSeen > txs[j].LatestSeen
+	slices.SortFunc(sorted, func(a, b latestTx) int {
+		return strings.Compare(b.latest, a.latest)
 	})
+	txs := make([]*StoreTx, len(sorted))
+	for i := range sorted {
+		txs[i] = sorted[i].tx
+	}
 
 	// Cache the sorted StoreTx slice (not maps) — lightweight and reusable for any page.
 	s.groupedCacheMu.Lock()
@@ -2429,21 +2454,22 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 // row observer; without the server's answer it guessed every hop and flagged
 // hops the server had resolved. The path is the one of the observation the
 // row displays (headerObservationID), not the tx's longest-resolved one, so
-// it matches the row's observer_id and path_json. Observation ids are read
-// under s.mu; the SQL runs after it is released, as one batched read per
-// page (fetchResolvedPathsForObsIDs) rather than one per row.
+// it matches the row's observer_id and path_json. The rows and their
+// observation ids are read under s.mu: txs is shared (the grouped cache) and
+// ingest appends to tx.Observations and rewrites the header fields under it
+// (#470). The SQL runs after it is released, as one batched read per page
+// (fetchResolvedPathsForObsIDs) rather than one per row.
 func (s *PacketStore) groupedPageWithRP(txs []*StoreTx, total, offset, limit int) *PacketResult {
-	res := groupedTxsToPage(txs, total, offset, limit)
-	if len(res.Packets) == 0 {
-		return res
-	}
-	page := txs[offset : offset+len(res.Packets)]
-	ids := make([]int, len(page))
 	s.mu.RLock()
-	for i, tx := range page {
-		ids[i] = headerObservationID(tx)
+	res := groupedTxsToPage(txs, total, offset, limit)
+	ids := make([]int, len(res.Packets))
+	for i := range ids {
+		ids[i] = headerObservationID(txs[offset+i])
 	}
 	s.mu.RUnlock()
+	if len(ids) == 0 {
+		return res
+	}
 	rps := s.fetchResolvedPathsForObsIDs(ids)
 	for i, id := range ids {
 		if rp := rps[id]; rp != nil {
@@ -2480,6 +2506,7 @@ func pagePacketResult(r *PacketResult, offset, limit int) *PacketResult {
 
 // groupedTxsToPage builds map representations only for the requested page of sorted StoreTx pointers.
 // This avoids allocating maps for all 30K+ transmissions when only 50 are needed.
+// Caller holds s.mu (it reads the transmissions' observations and header fields, #470).
 func groupedTxsToPage(txs []*StoreTx, total, offset, limit int) *PacketResult {
 	if offset >= len(txs) {
 		return &PacketResult{Packets: []map[string]interface{}{}, Total: total}
@@ -2529,6 +2556,7 @@ func groupedTxsToPage(txs []*StoreTx, total, offset, limit int) *PacketResult {
 // (non-nil) []string when the tx has no IATA'd observations so JSON
 // serialization stays consistent across the in-memory store and SQL
 // fallback paths (db.go's parseDistinctIatasCSV does the same).
+// Caller holds s.mu when tx is in the store (#470).
 func storeTxDistinctIatas(tx *StoreTx) []string {
 	if tx == nil {
 		return []string{}
@@ -3945,7 +3973,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 
 // reindexTxPath moves tx in the subpath and path-hop indexes after its best
 // path changed from oldPath to tx.PathJSON (pickBestObservation, which also
-// cleared tx.pathParsed). The caller invalidates the relay-stats cache once for
+// parsed it into tx.parsedPath). The caller invalidates the relay-stats cache once for
 // a batch. Must hold s.mu for writing.
 func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
 	// Path changed — remove old subpaths, add new ones.
@@ -3967,8 +3995,7 @@ func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
 		removeTxFromPathHopIndex(s.byPathHop, tx)
 		tx.parsedPath, tx.pathParsed = saved, savedFlag
 	}
-	// pickBestObservation already set pathParsed=false so
-	// addTxToSubpathIndex will re-parse the new path.
+	// pickBestObservation already parsed the new path into tx.parsedPath.
 	if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
 		s.spTotalPaths++
 	}
@@ -4685,6 +4712,8 @@ func resolvePayloadTypeName(pt *int) string {
 }
 
 // txGetParsedPath returns cached parsed path hops, parsing on first call.
+// pickBestObservation fills the cache before a tx is shared, so the parse
+// here only runs for a tx that is not in the store (#470).
 func txGetParsedPath(tx *StoreTx) []string {
 	if tx.pathParsed {
 		return tx.parsedPath
@@ -10794,10 +10823,18 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 	}
 	candidates = timeFiltered
 
+	// The tx fields the output phase needs are read here, under s.mu: it
+	// runs after the lock is released (resolved_path is SQL), while ingest
+	// and the hash migration rewrite them under the lock (#470).
 	type candidateCheck struct {
-		tx         *StoreTx
-		hasReverse bool
-		inIndex    bool
+		hasReverse   bool
+		inIndex      bool
+		id           int
+		observations []*StoreObs
+		firstSeen    string
+		hash         string
+		transport    string
+		scoped       bool
 	}
 	checks := make([]candidateCheck, len(candidates))
 	// Built once instead of scanning the index list for every candidate.
@@ -10810,7 +10847,10 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 		}
 	}
 	for i, tx := range candidates {
-		cc := candidateCheck{tx: tx}
+		cc := candidateCheck{
+			id: tx.ID, observations: tx.Observations, firstSeen: tx.FirstSeen, hash: tx.Hash,
+			transport: classifyHopAnalyticsTransport(tx), scoped: tx.ScopeName != "",
+		}
 		if !s.useResolvedPathIndex {
 			cc.inIndex = true
 		} else if _, hasRev := s.resolvedPubkeyReverse[tx.ID]; !hasRev {
@@ -10827,17 +10867,17 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 	// (rp == nil / idx < 0 → skip), which also rejects hash collisions and
 	// stale index entries. The query only scanned every observation row of
 	// each candidate tx to reach the same conclusion.
-	confirmed := candidates[:0]
+	confirmed := checks[:0]
 	for _, cc := range checks {
 		if cc.inIndex || cc.hasReverse {
-			confirmed = append(confirmed, cc.tx)
+			confirmed = append(confirmed, cc)
 		}
 	}
 
 	packets := make([]HopAnalyticsPacket, 0, len(confirmed))
 	lruNow := s.lruNow()
-	for _, tx := range confirmed {
-		rp := s.fetchResolvedPathForTxBestAt(tx, lruNow)
+	for _, cc := range confirmed {
+		rp := s.fetchResolvedPathForTxBestAt(cc.id, cc.observations, lruNow)
 		if rp == nil {
 			continue
 		}
@@ -10852,17 +10892,17 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 			continue // conservative "inIndex" keep that didn't actually resolve to this pubkey
 		}
 		tsMs := int64(0)
-		if t, err := time.Parse(time.RFC3339, tx.FirstSeen); err == nil {
+		if t, err := time.Parse(time.RFC3339, cc.firstSeen); err == nil {
 			tsMs = t.UnixMilli()
-		} else if t, err := time.Parse(time.RFC3339Nano, tx.FirstSeen); err == nil {
+		} else if t, err := time.Parse(time.RFC3339Nano, cc.firstSeen); err == nil {
 			tsMs = t.UnixMilli()
 		}
 		packets = append(packets, HopAnalyticsPacket{
-			Hash:      tx.Hash,
+			Hash:      cc.hash,
 			TsMs:      tsMs,
 			Hops:      idx,
-			Transport: classifyHopAnalyticsTransport(tx),
-			Scoped:    tx.ScopeName != "",
+			Transport: cc.transport,
+			Scoped:    cc.scoped,
 		})
 	}
 

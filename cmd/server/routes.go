@@ -2396,7 +2396,11 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 			indexedForTarget[id] = struct{}{}
 		}
 	}
+	// Each candidate's observations as read under the lock, for the
+	// canonical resolved_path lookup that runs after it (#470).
+	observations := make(map[int][]*StoreObs, len(candidates))
 	for i, tx := range candidates {
+		observations[tx.ID] = tx.Observations
 		cc := candidateCheck{tx: tx}
 		if !s.store.useResolvedPathIndex {
 			cc.inIndex = true // flag off — keep all
@@ -2450,7 +2454,7 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 	canonicalRP := make(map[int][]*string, len(candidates))
 	lruNow := s.store.lruNow()
 	for _, tx := range candidates {
-		if rp := s.store.fetchResolvedPathForTxBestAt(tx, lruNow); rp != nil {
+		if rp := s.store.fetchResolvedPathForTxBestAt(tx.ID, observations[tx.ID], lruNow); rp != nil {
 			canonicalRP[tx.ID] = rp
 		}
 	}
