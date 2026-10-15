@@ -255,6 +255,14 @@
       ]
     },
     {
+      "file": "test-issue-479-airtime-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; no CI duration measured yet. Placed beside the sibling observers-sort suite."
+    },
+    {
       "file": "test-issue-1639-observers-sort-e2e.js",
       "shard": 3,
       "env": {

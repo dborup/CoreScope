@@ -35,6 +35,7 @@
     "Logo": "readonly",
     "MAX_HOP_DIST": "readonly",
     "MeshAudio": "readonly",
+    "ObserverAirtime": "readonly",
     "MeshConfigReady": "readonly",
     "NodeAdverts": "readonly",
     "PAYLOAD_COLORS": "readonly",
