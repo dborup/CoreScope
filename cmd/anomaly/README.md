@@ -187,6 +187,48 @@ Two properties worth stating plainly:
 There are no default exclusions anywhere: an unconfigured rule behaves
 exactly as it did before #474, and the replay golden file is unchanged.
 
+## keys
+
+Ranks the stream keys of an exported background by row count, so an
+injection panel can be placed on keys real traffic actually uses.
+
+```sh
+corescope-anomaly keys -input bg.jsonl -payload-type 5 -top 16 \
+  -exclude-channels 81 -max-keys 2000000 -max-line-bytes 65536 -out keys.json
+```
+
+**Why it exists.** The stream key is payload type + channel hash + route
+class + route kind + first hop. A bot on a channel byte and a first hop no
+real transmission carries has that key to itself, so the detector sees a
+clean train and recall measured on it says little about finding a bot inside
+real traffic: a real spam bot on a busy channel shares its key with everyone
+else entering through the same repeater.
+
+**Blind by construction.** `keys` reads the export and counts rows. It never
+runs the detector, reads no report, no labels and no metrics, and has no idea
+which keys would alarm. The ranking is row counts, ties broken by the
+canonical key encoding, so a panel built from its output is chosen
+mechanically and before any detection result exists.
+
+**The filter is mechanical** and is restated in the output, with a counter
+per reason a line was skipped: the payload type must be `-payload-type`, the
+line must carry a channel hash (the periodic rule's target is a channel bot),
+its route kind must be `relay` (only then is the first hop part of the stream
+key, so only then can a bot share the key), and its channel must not be in
+`-exclude-channels`.
+
+Per key the output gives the canonical `key`, the `channel`, `route_class`,
+`route_kind` and `first_hop` an injection spec needs to land on it, the most
+common whole route (`full_route`, ties broken by the smallest encoding), the
+median wire size, the median payload size and a `payload_bytes_spread` of
+(p90 − p10)/2, the row count and the first and last times. Percentiles are
+nearest-rank. Per-key size and route variants are bounded and the overflow is
+reported per key; `-max-keys` is a hard bound on distinct keys, as the
+export's `-max-rows` is on rows.
+
+The output carries hashes, hop prefixes, sizes, counts and times — what the
+export itself carries — and no ids, observers, names or text.
+
 ## inject
 
 Overlays synthetic channel-bot trains on exported background lines, so recall
@@ -272,6 +314,18 @@ single missed pulses, one 35-minute hole, one stable first hop).
 - `jitter_sd` is the standard deviation of the offset from the nominal grid
   time, clamped to `±jitter_max`. The offset is not cumulative, so the train
   does not drift.
+- **Take the jitter from measurement, not from the rule.** Scaling
+  `jitter_sd` to the rule's own per-gap tolerance places every bot inside
+  that tolerance by construction, which makes recall conditional on the rule
+  being evaluated and moves the panel whenever the rule moves. #130 measured
+  a real 5-minute bot over 85.2 h: `|gap − 300 s|` median 3 s, p95 9 s. A gap
+  offset is the difference of two per-pulse offsets, so its standard
+  deviation is √2 times the per-pulse one, and p95 9 s on a normal gap offset
+  gives sd(gap) ≈ 9/1.96 ≈ 4.6 s and a per-pulse sd of ≈ 3.2 s. So
+  `jitter_sd` 3 s with `jitter_max` 9 s (#130's measured p95) is the
+  measured shape, for every period, independent of any rule value. Some
+  pulses of a short-period bot then do fall outside a tight tolerance, which
+  is the point: it is the rule's job to cope, not the panel's to avoid.
 - `missed_fraction` drops pulses other than the first; `multipart_fraction`
   gives a pulse 1..`multipart_max_extra` later parts within
   `multipart_max_delay`. A hole drops every pulse inside it.
@@ -304,6 +358,7 @@ all.
 
 ```sh
 corescope-anomaly score -report report.json -labels labels.json \
+  -baseline report-a.json \
   -rule p474_periodic -start 2026-10-16T00:00:00Z -end 2026-10-23T00:00:00Z \
   [-bots b0-90s-clean,b1-120s-clean] [-out metrics.json]
 ```
@@ -313,11 +368,22 @@ The matching is the #457 §5 periodic rule:
 - An **episode** is one `EventID`. Its activation is its first transition to
   `active`; its end is its last transition to `ended`, or the report's end if
   it never ended. Only episodes activated inside `[-start, -end)` are scored.
-- An episode is a **true positive** when the channel hashes are equal,
-  `[activation, end]` overlaps `[incident start, stop + 4P]`, and the
-  episode's period is within the labelling tolerance of k·P for some
+- An episode is a **true positive** when it is the **same series** as the
+  incident, `[activation, end]` overlaps `[incident start, stop + 4P]`, and
+  the episode's period is within the labelling tolerance of k·P for some
   k in 1..`max_harmonic`. An episode whose activation carries no periodic
   evidence can never be a true positive.
+- **Same series** means the same stream key when the labels carry one (they
+  do since #474 round 2), and the same channel hash otherwise. The key is
+  what makes a panel placed on real traffic's own keys scorable: on a busy
+  channel several route groups share the 1-byte hash, and matching on the
+  hash alone would credit any of them to the bot.
+- `-baseline` takes the replay report of the **same window without the
+  injection** (arm A). An episode it already has, on the same key and
+  overlapping in time, is attributed to the background: it is neither a true
+  positive nor a false positive, and is counted as `baseline_episodes`. That
+  is the differential reading a shared key needs — a detection in the
+  injected arm counts only when it is absent from the plain arm.
 - Every other episode is a **false positive**. Without `-labels` every
   episode is one, which is the false-alarm arm: run it on background-only
   traffic to get false alarms per day.
@@ -327,8 +393,19 @@ The matching is the #457 §5 periodic rule:
   positive, selected or not. A filter that selects no incident is an error.
 
 The metrics are episodes, true and false positives, false alarms per day,
-recall, median time to detect (also in units of P), median stop latency,
-median episodes per detected incident, the per-incident detail and the false
-positives per channel hash. Times to detect and stop latencies are properties
-of the rule and the bot's shape, not of the scorer: a noisy train is found
-much later than a clean one.
+recall, time to detect (also in units of P), stop latency, episodes per
+detected incident, the per-incident detail and the false positives per
+channel hash. Times to detect and stop latencies are properties of the rule
+and the bot's shape, not of the scorer: a noisy train is found much later
+than a clean one.
+
+**The median hides the tail.** A clean train alarms at the earliest pulse
+`min_pulses` allows, so a panel of mostly clean bots puts the median on that
+floor while the realistic shapes take many times longer. Every median is
+therefore reported beside its nearest-rank **p75** and its **maximum**, and
+`-bots` can narrow a run to the realistic subset so that subset gets its own
+numbers. Read the tail, not only the median.
+
+Provenance (`labels`, `baseline`) is recorded as the file names only, never
+the paths they were read from: a path can carry a user or a host name, and a
+metrics file may be shared.
