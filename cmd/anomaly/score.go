@@ -45,6 +45,9 @@ import (
 //     counts only when it is absent from arm A.
 //   - Every other episode is a false positive. With no labels file, every
 //     episode is a false positive, which is the false-alarm arm.
+//   - The time-to-detect tail is reported twice: over the detected incidents,
+//     and over every selected incident with a miss ranked above every finite
+//     value. Only the second can fail on a bot that was never found.
 //   - -bots narrows which incidents the recall and the medians cover, for
 //     example to leave a non-blind sanity-check bot out of the primary
 //     numbers. It never turns a matched episode into a false positive: an
@@ -93,16 +96,27 @@ type episode struct {
 
 // incidentScore reports one labelled incident's outcome.
 type incidentScore struct {
-	Bot          string  `json:"bot"`
-	Channel      string  `json:"channel"`
-	Start        string  `json:"start"`
-	Stop         string  `json:"stop"`
-	Period       dur     `json:"period"`
-	Episodes     int     `json:"episodes"`
-	Detected     bool    `json:"detected"`
-	TimeToDetect *dur    `json:"time_to_detect,omitempty"`
-	TTDPeriods   float64 `json:"time_to_detect_periods,omitempty"`
-	StopLatency  *dur    `json:"stop_latency,omitempty"`
+	Bot      string `json:"bot"`
+	Channel  string `json:"channel"`
+	Start    string `json:"start"`
+	Stop     string `json:"stop"`
+	Period   dur    `json:"period"`
+	Episodes int    `json:"episodes"`
+	Detected bool   `json:"detected"`
+	// BaselineEpisodes counts the episodes on this incident's own series,
+	// overlapping its window, that the -baseline arm already had. They are
+	// not scored either way (see markBaseline), so without this count an
+	// incident whose only episode was absorbed by the background reads as a
+	// plain miss. The period check is not applied to them, because it is
+	// not applied to a baseline episode anywhere.
+	BaselineEpisodes int `json:"baseline_episodes,omitempty"`
+	// BaselineMasked marks exactly that case: not detected, but the
+	// background already had an episode here. It tells a no-go caused by
+	// contamination apart from a detector miss.
+	BaselineMasked bool    `json:"baseline_masked,omitempty"`
+	TimeToDetect   *dur    `json:"time_to_detect,omitempty"`
+	TTDPeriods     float64 `json:"time_to_detect_periods,omitempty"`
+	StopLatency    *dur    `json:"stop_latency,omitempty"`
 }
 
 // scoreResult is the metrics file.
@@ -134,21 +148,43 @@ type scoreResult struct {
 	PeriodMismatches int `json:"period_mismatches"`
 	// Incidents is every labelled incident; IncidentsSelected is the subset
 	// the bars cover (all of them unless -bots narrows it).
-	Incidents         int     `json:"incidents"`
-	IncidentsSelected int     `json:"incidents_selected"`
-	IncidentsDetected int     `json:"incidents_detected"`
-	Recall            float64 `json:"recall"`
+	Incidents         int `json:"incidents"`
+	IncidentsSelected int `json:"incidents_selected"`
+	IncidentsDetected int `json:"incidents_detected"`
+	// IncidentsMissed is the selected incidents that were not detected, and
+	// IncidentsBaselineMasked the subset of those whose own series already
+	// carried a -baseline episode.
+	IncidentsMissed         int     `json:"incidents_missed"`
+	IncidentsBaselineMasked int     `json:"incidents_baseline_masked"`
+	Recall                  float64 `json:"recall"`
 	// Medians over the detected incidents. A median hides the slow tail:
 	// clean trains alarm at the earliest pulse the rule allows, so half the
 	// panel can sit at that floor while the realistic shapes take many times
 	// longer. The p75 and the maximum are reported beside every median so
 	// the tail is visible without reading the per-incident table.
-	MedianTimeToDetect        *dur            `json:"median_time_to_detect,omitempty"`
-	MedianTTDPeriods          float64         `json:"median_time_to_detect_periods,omitempty"`
-	P75TimeToDetect           *dur            `json:"p75_time_to_detect,omitempty"`
-	P75TTDPeriods             float64         `json:"p75_time_to_detect_periods,omitempty"`
-	MaxTimeToDetect           *dur            `json:"max_time_to_detect,omitempty"`
-	MaxTTDPeriods             float64         `json:"max_time_to_detect_periods,omitempty"`
+	MedianTimeToDetect *dur    `json:"median_time_to_detect,omitempty"`
+	MedianTTDPeriods   float64 `json:"median_time_to_detect_periods,omitempty"`
+	P75TimeToDetect    *dur    `json:"p75_time_to_detect,omitempty"`
+	P75TTDPeriods      float64 `json:"p75_time_to_detect_periods,omitempty"`
+	MaxTimeToDetect    *dur    `json:"max_time_to_detect,omitempty"`
+	MaxTTDPeriods      float64 `json:"max_time_to_detect_periods,omitempty"`
+	// The tail over the SELECTED incidents, with a missed incident counting
+	// as +infinity.
+	//
+	// Why both. The medians and p75s above are over the DETECTED incidents
+	// only, so no timing bar on them can fail on a missed bot: a panel whose
+	// four cleanest shapes alarm at the floor and whose four realistic ones
+	// are never found reports recall 0.50 and a p75 of one period, which
+	// passes every timing bar. Ranking a miss above every finite value fixes
+	// that - the same panel's p75 is then infinite, and a bar on it fails.
+	// JSON has no infinity, so an infinite percentile is reported as the
+	// Infinite flag with the value left out.
+	MedianTTDSelected         *dur            `json:"median_time_to_detect_selected,omitempty"`
+	MedianTTDPeriodsSelected  float64         `json:"median_time_to_detect_periods_selected,omitempty"`
+	MedianTTDSelectedInfinite bool            `json:"median_time_to_detect_selected_infinite"`
+	P75TTDSelected            *dur            `json:"p75_time_to_detect_selected,omitempty"`
+	P75TTDPeriodsSelected     float64         `json:"p75_time_to_detect_periods_selected,omitempty"`
+	P75TTDSelectedInfinite    bool            `json:"p75_time_to_detect_selected_infinite"`
 	MedianStopLatency         *dur            `json:"median_stop_latency,omitempty"`
 	P75StopLatency            *dur            `json:"p75_stop_latency,omitempty"`
 	MaxStopLatency            *dur            `json:"max_stop_latency,omitempty"`
@@ -356,7 +392,11 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath, baselinePath str
 				continue
 			}
 			if e.baseline {
-				continue // the background's episode, counted once below
+				// The background's episode: not scored either way, but
+				// recorded here so a masked incident is not read as a plain
+				// miss.
+				is.BaselineEpisodes++
+				continue
 			}
 			if !e.hasPeriod {
 				continue // counted once, as EpisodesWithoutPeriod
@@ -384,6 +424,7 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath, baselinePath str
 		// Only selected incidents enter the recall and the medians; an
 		// episode that matched an unselected incident is still a match, so
 		// it never becomes a false positive.
+		is.BaselineMasked = !is.Detected && is.BaselineEpisodes > 0
 		if !selected(inc.Bot) {
 			continue
 		}
@@ -393,6 +434,11 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath, baselinePath str
 			ttds = append(ttds, int64(*is.TimeToDetect))
 			stops = append(stops, int64(*is.StopLatency))
 			perInc = append(perInc, float64(is.Episodes))
+		} else {
+			res.IncidentsMissed++
+			if is.BaselineMasked {
+				res.IncidentsBaselineMasked++
+			}
 		}
 		res.PerIncident = append(res.PerIncident, is)
 	}
@@ -417,6 +463,30 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath, baselinePath str
 	}
 	if res.IncidentsSelected > 0 {
 		res.Recall = float64(res.IncidentsDetected) / float64(res.IncidentsSelected)
+	}
+	// The selected tail is reported whenever anything is selected, including
+	// the case where every selected incident was missed and every percentile
+	// is infinite.
+	if res.IncidentsSelected > 0 {
+		tp := ttdPeriods(res.PerIncident)
+		for _, q := range []struct {
+			q        float64
+			d        **dur
+			periods  *float64
+			infinite *bool
+		}{
+			{0.5, &res.MedianTTDSelected, &res.MedianTTDPeriodsSelected, &res.MedianTTDSelectedInfinite},
+			{0.75, &res.P75TTDSelected, &res.P75TTDPeriodsSelected, &res.P75TTDSelectedInfinite},
+		} {
+			v, inf := selectedPercentileInt64(ttds, res.IncidentsMissed, q.q)
+			if inf {
+				*q.infinite = true
+				continue
+			}
+			d := dur(v)
+			*q.d = &d
+			*q.periods, _ = selectedPercentileFloat(tp, res.IncidentsMissed, q.q)
+		}
 	}
 	if len(ttds) > 0 {
 		tp := ttdPeriods(res.PerIncident)
@@ -623,6 +693,38 @@ func percentileFloat(v []float64, q float64) float64 {
 	s := append([]float64(nil), v...)
 	sort.Float64s(s)
 	return s[rankIndex(len(s), q)]
+}
+
+// selectedPercentileInt64 is the nearest-rank percentile over the selected
+// incidents, with each missed incident counting as +infinity: the misses
+// rank above every finite value, so the percentile is infinite exactly when
+// its rank falls among them. It reports (value, infinite).
+func selectedPercentileInt64(detected []int64, missed int, q float64) (int64, bool) {
+	n := len(detected) + missed
+	if n == 0 {
+		return 0, false
+	}
+	i := rankIndex(n, q)
+	if i >= len(detected) {
+		return 0, true
+	}
+	s := append([]int64(nil), detected...)
+	sort.Slice(s, func(a, b int) bool { return s[a] < s[b] })
+	return s[i], false
+}
+
+func selectedPercentileFloat(detected []float64, missed int, q float64) (float64, bool) {
+	n := len(detected) + missed
+	if n == 0 {
+		return 0, false
+	}
+	i := rankIndex(n, q)
+	if i >= len(detected) {
+		return 0, true
+	}
+	s := append([]float64(nil), detected...)
+	sort.Float64s(s)
+	return s[i], false
 }
 
 func rankIndex(n int, q float64) int {
