@@ -220,11 +220,27 @@ key, so only then can a bot share the key), and its channel must not be in
 Per key the output gives the canonical `key`, the `channel`, `route_class`,
 `route_kind` and `first_hop` an injection spec needs to land on it, the most
 common whole route (`full_route`, ties broken by the smallest encoding), the
-median wire size, the median payload size and a `payload_bytes_spread` of
-(p90 − p10)/2, the row count and the first and last times. Percentiles are
-nearest-rank. Per-key size and route variants are bounded and the overflow is
-reported per key; `-max-keys` is a hard bound on distinct keys, as the
-export's `-max-rows` is on rows.
+key's whole observed size distribution (`size_mix`), the median wire size,
+the median payload size and a `payload_bytes_spread` of (p90 − p10)/2, the
+row count and the first and last times. Percentiles are nearest-rank and the
+spread is clamped strictly below the median. `first` and `last` are the
+earliest and latest line on the key, whatever order the input is in.
+Per-key size and route variants are bounded and the overflow is reported per
+key; `-max-keys` is a hard bound on distinct keys, as the export's
+`-max-rows` is on rows. `-top` reports exactly that many keys, so the full
+ranking (a large `-top`) is what an absence check should read.
+
+**`size_mix` is the distribution to inject from.** It is one entry per
+distinct `(wire_bytes, payload_bytes)` pair with the number of lines that
+carried it, ordered by wire size then payload size; `payload_bytes` is absent
+for the lines whose payload length the export did not know. The two sizes are
+*not* independent: a frame is header plus path plus payload, so
+`wire − payload` is the route's own overhead, while the payload itself comes
+in 16-byte cipher blocks. Drawing them separately — a fixed median wire with
+a spread payload — both produces frames real traffic never carries and, once
+the drawn payload passes `wire − 2`, frames the event validator refuses
+outright. So `inject` takes whole observed pairs (see `size_mix` under
+Spec).
 
 The output carries hashes, hop prefixes, sizes, counts and times — what the
 export itself carries — and no ids, observers, names or text.
@@ -282,9 +298,9 @@ single missed pulses, one 35-minute hole, one stable first hop).
     "route_kind": "relay",
     "first_hop": "1:fd",
     "full_route": "1:fd0a1c",
-    "wire_bytes": 60,
-    "payload_bytes": 35,
-    "payload_bytes_spread": 6,
+    "size_mix": [{"wire_bytes": 38, "payload_bytes": 35, "count": 70},
+                 {"wire_bytes": 54, "payload_bytes": 51, "count": 20},
+                 {"wire_bytes": 70, "payload_bytes": 67, "count": 10}],
     "start": "2026-10-16T00:00:00Z",
     "stop": "2026-10-19T13:12:00Z",
     "period": "5m",
@@ -307,10 +323,25 @@ single missed pulses, one 35-minute hole, one stable first hop).
   second never gives an injected line away. Truncation moves a time by less
   than a second towards the past, so the effective offset from the grid is in
   `[-(jitter_max + 1s), jitter_max]`.
-- `payload_bytes_spread` draws each event's payload size uniformly from
-  `payload_bytes ± spread`; a real bot's payload length varies, and a
-  constant one is another giveaway. 0 keeps the size constant, and the
-  spread must be smaller than `payload_bytes`.
+- **The sizes are described in exactly one of two ways**, and a spec must
+  pick one.
+  - `size_mix` is the realistic one, and what `keys` emits per key: the
+    observed `(wire_bytes, payload_bytes)` pairs with a count each. One whole
+    pair is drawn per event, weighted by count, so the injected sizes are
+    exactly the sizes the key carries — valid by construction, and nothing an
+    injected line can be recognised by. With `size_mix`, `wire_bytes`,
+    `payload_bytes` and `payload_bytes_spread` must be left out.
+  - `wire_bytes` with `payload_bytes` and `payload_bytes_spread` is the older
+    scalar description, for hand-written specs: a fixed wire size and a
+    payload drawn uniformly from `payload_bytes ± spread`. 0 keeps the size
+    constant. It cannot reproduce a real distribution, so the **whole
+    envelope** is required to fit the frame: the spread must be smaller than
+    `payload_bytes`, and `payload_bytes + payload_bytes_spread` must be at
+    most `wire_bytes − 2`, which is what `Event.Validate` allows.
+  Either way, every size a bot can draw is checked against the event
+  validator while the spec is read — before a single event, line or file is
+  produced — so an impossible size is a spec error and never an abort part
+  way through a run.
 - `jitter_sd` is the standard deviation of the offset from the nominal grid
   time, clamped to `±jitter_max`. The offset is not cumulative, so the train
   does not drift.
@@ -333,6 +364,25 @@ single missed pulses, one 35-minute hole, one stable first hop).
   wire fields of a replay line: an injected line carries nothing a real line
   does not. `full_route` is a whole observed route, not just the first hop
   repeated, so an injected line's route looks like an exported one's.
+
+### make_spec.py
+
+`make_spec.py` beside this README is the #474 round-3 panel generator: it
+takes the validation window's start and a `keys.json` ranking and prints the
+spec for the pre-registered paired panel (nine shapes, each on the key of
+rank *i*+1 and on an isolated twin key). It is stdlib-only, reads nothing
+else and has no clock, so the spec is a pure function of its two inputs and
+can be re-derived from them afterwards.
+
+It lives in the repository rather than only in the pre-registration comment
+so that the whole chain — `export` → `keys` → `make_spec.py` → `inject` — is
+exercised by the tool's own tests on a background whose payload sizes are
+block-quantised like real GRP_TXT traffic. That chain is where round 2 broke:
+the spec it produced could not be injected at all on a realistic key.
+
+```sh
+python3 make_spec.py 2026-10-17T00:00:00Z keys.json > spec.json
+```
 
 ### Labels
 
@@ -405,6 +455,29 @@ floor while the realistic shapes take many times longer. Every median is
 therefore reported beside its nearest-rank **p75** and its **maximum**, and
 `-bots` can narrow a run to the realistic subset so that subset gets its own
 numbers. Read the tail, not only the median.
+
+**A tail over the detected incidents cannot fail on a missed bot.** The
+medians, p75s and maxima above cover the *detected* incidents only, so a
+panel whose four cleanest shapes alarm at the floor and whose four realistic
+ones are never found reports recall 0.50 and a p75 of one period — a pass of
+every timing bar, on a result that found nothing realistic. So the time to
+detect is also reported over every **selected** incident with a miss ranked
+above every finite value:
+`median_time_to_detect_selected` / `p75_time_to_detect_selected`, with
+`_periods` beside each. JSON has no infinity, so a percentile whose rank
+falls among the misses is reported as `..._selected_infinite: true` with the
+value left out — which fails any bar placed on it. `incidents_missed` counts
+the selected incidents that were not detected. A bar belongs on the selected
+tail; the detected-only tail describes the shapes that were found.
+
+**Baseline masking is visible per incident.** A `-baseline` episode is not
+scored either way, so without a marker an incident whose only episode was
+absorbed by the background reads as a plain miss. Each per-incident row
+therefore carries `baseline_episodes` (the episodes on the incident's own
+series, overlapping its window, that the plain arm already had) and
+`baseline_masked` (not detected, but the background already had an episode
+here); `incidents_baseline_masked` counts them. That tells a no-go caused by
+background contamination apart from a detector miss.
 
 Provenance (`labels`, `baseline`) is recorded as the file names only, never
 the paths they were read from: a path can carry a user or a host name, and a
