@@ -145,7 +145,11 @@ the server reports degraded memory-only history.
 
 `scripts/backup-sqlite.sh` backs up databases only: it does **not** include this
 journal. Include the journal separately in a stopped-server data-directory
-backup if you also need to restore this history.
+backup if you also need to restore this history. The journal is always written
+with mode `0600`; the server only refuses it back if the restored copy is
+group- or other-writable (for example `0660`), not merely group- or
+other-readable, so a `tar`/`cp` restore under a normal umask (commonly `0644`)
+loads without extra steps.
 
 ### Running the Go services without root (opt-in)
 

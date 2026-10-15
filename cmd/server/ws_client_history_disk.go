@@ -103,8 +103,10 @@ func (h *wsClientHistory) enablePersistence(path, mainDBPath string, now time.Ti
 	}
 	h.mu.Lock()
 	h.peak = 0 // a previous process's peak is never a live peak
-	h.nextGap = len(samples) > 0
 	h.mu.Unlock()
+	if len(samples) > 0 {
+		h.markRestartGap()
+	}
 	j := &wsHistoryJournal{path: path, mainDBPath: mainDBPath, unlock: unlock}
 	if err := j.compact(h.snapshot(), now); err != nil {
 		return err
@@ -180,7 +182,7 @@ func readWSHistoryJournal(path string, now time.Time) ([]WSClientSample, error) 
 		if err := dec.Decode(new(any)); err != io.EOF {
 			return nil, fmt.Errorf("trailing WebSocket history data; original preserved")
 		}
-		if s.T.IsZero() || (!last.IsZero() && !s.T.After(last)) || s.T.After(now.Add(2*time.Minute)) || s.Clients < 0 || s.Peak < s.Clients {
+		if s.T.IsZero() || (!last.IsZero() && !s.T.After(last)) || s.Clients < 0 || s.Peak < s.Clients {
 			return nil, fmt.Errorf("invalid WebSocket history values/order; original preserved")
 		}
 		last = s.T
@@ -188,6 +190,13 @@ func readWSHistoryJournal(path string, now time.Time) ([]WSClientSample, error) 
 		if s.T.Before(now.Add(-wsHistoryRetention)) {
 			continue
 		}
+		// A record dated after "now" (e.g. a backward NTP correction applied
+		// since it was written) is neither corrupt nor out of order — it is
+		// still kept here and re-saved by the next compaction exactly like a
+		// record within the compaction loop's own retention window below.
+		// snapshotRange already excludes anything after its request's "now",
+		// so the point simply reappears once wall time catches up to it
+		// instead of disabling persistence for the rest of the journal.
 		tail.sample(s.Clients, s.T)
 		tail.buf[(tail.head-1+len(tail.buf))%len(tail.buf)] = s
 	}

@@ -445,6 +445,38 @@ const PERF_FIXTURE = () => ({
     assert.ok(getHistoryHtml().includes('<svg class="ws-history'), 'chart still renders from the cached ring');
   });
 
+  await test('refresh: a round slower than the 5s tick must still render once it completes, not get stuck on "Loading…" forever (PR#461 F1)', async () => {
+    const sb = makeSandbox();
+    const { ctx } = sb;
+    let tick;
+    ctx.setInterval = fn => { tick = fn; return 1; };
+    const perf = PERF_FIXTURE();
+    const releasers = [];
+    ctx.fetch = (url) => {
+      if (url === '/api/perf') {
+        return new Promise(resolve => { releasers.push(() => resolve({ ok: true, json: () => Promise.resolve(perf) })); });
+      }
+      if (url === '/api/health') return Promise.reject(new Error('no health'));
+      if (url === '/api/perf/ws-clients') return Promise.resolve({ ok: true, json: () => Promise.resolve({ intervalSec: 60, samples: mk(3, () => 1) }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
+    ctx.pages.perf.init({ set innerHTML(v) {} });
+    await flush();
+    // Two more 5s ticks elapse while the very first /api/perf round (a loaded
+    // server) is still in flight — exactly the overload scenario from F1.
+    tick();
+    await flush();
+    tick();
+    await flush();
+    assert.strictEqual(releasers.length, 3, 'three refreshes now overlapping, none has resolved yet');
+    // The oldest round finally completes. It was overtaken by two newer
+    // ticks, but nothing has rendered yet, so it must still paint the page
+    // instead of being silently dropped.
+    releasers[0]();
+    await flush();
+    assert.ok(sb.getHtml().includes('Total Requests'), 'an overtaken-but-first-to-finish refresh must still render, not stay on Loading…');
+  });
+
   await test('refresh: re-entering the page (init) forces a fresh ws-clients fetch, not a stale cache', async () => {
     const { ctx } = makeSandbox();
     const perf = PERF_FIXTURE();

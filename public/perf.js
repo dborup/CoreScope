@@ -232,6 +232,7 @@ function renderVersionCard(health) {
   let wsHistoryRange = '24h';
   let pageGeneration = 0;
   let refreshGeneration = 0;
+  let lastRendered = 0;
   let pageActive = false;
   const WS_HISTORY_CACHE_MS = 60000;
 
@@ -333,8 +334,14 @@ function renderVersionCard(health) {
         fetchWSHistory(range)
       ]);
       // A slower old range / old page visit must never overwrite the current
-      // chart, even when its network request could not be cancelled.
-      if (!pageActive || generation !== pageGeneration || request !== refreshGeneration || range !== wsHistoryRange) return;
+      // chart, even when its network request could not be cancelled. But a
+      // round slower than the 5s tick must still render once it completes:
+      // comparing against the latest *rendered* generation (rather than the
+      // latest *started* one) means every response renders in turn instead
+      // of every round being overtaken by the next tick and the page being
+      // stuck on "Loading..." forever (PR#461 F1).
+      if (!pageActive || generation !== pageGeneration || request < lastRendered || range !== wsHistoryRange) return;
+      lastRendered = request;
 
       const historyEl = document.getElementById('wsHistoryContent');
       if (historyEl) historyEl.innerHTML = renderWSClientHistory(wsHistory, health && health.websocket ? health.websocket.clients : null, range, false) ||
@@ -583,8 +590,9 @@ function renderVersionCard(health) {
       });
       document.getElementById('perfRefresh')?.addEventListener('click', refresh);
     } catch (err) {
-      if (pageActive && generation === pageGeneration && request === refreshGeneration) {
-        el.innerHTML = `<p style="color:red">Error: ${escapeHtml(err.message)}</p>`;
+      if (pageActive && generation === pageGeneration && request >= lastRendered) {
+        lastRendered = request;
+        el.innerHTML = `<p style="color:var(--status-red)">Error: ${escapeHtml(err.message)}</p>`;
       }
     }
   }

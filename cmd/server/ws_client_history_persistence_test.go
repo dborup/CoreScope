@@ -93,6 +93,79 @@ func TestWSClientHistory_RestartWithSmallClockRollbackPreservesSavedFuturePoint(
 	}
 }
 
+func TestWSClientHistory_ClockSkewBeyondToleranceDoesNotDisablePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err != nil {
+		t.Fatal(err)
+	}
+	h.sampleAndPersist(3, now.Add(-time.Minute))
+	// A later NTP correction can step the wall clock back by more than the
+	// loader's 2-minute tolerance, leaving the last saved sample looking far
+	// in the future relative to the corrected clock.
+	h.sampleAndPersist(4, now.Add(10*time.Minute))
+	h.closePersistence()
+
+	reopen := newWSClientHistory(10)
+	if err := reopen.enablePersistence(path, "", now); err != nil {
+		t.Fatalf("clock skew beyond 2 minutes must not disable persistence: %v", err)
+	}
+	defer reopen.closePersistence()
+	if !reopen.persistenceStatus().Healthy {
+		t.Fatal("persistence must stay healthy across a large clock step-back")
+	}
+	r, _ := wsHistoryRange("24h")
+	if got := reopen.snapshotRange(now, r); len(got) != 1 || got[0].Clients != 3 {
+		t.Fatalf("the far-future sample must stay hidden, not reject the whole journal: %+v", got)
+	}
+	if got := reopen.snapshotRange(now.Add(11*time.Minute), r); len(got) != 2 || got[1].Clients != 4 {
+		t.Fatalf("the skipped sample must reappear once wall time catches up to it: %+v", got)
+	}
+}
+
+func TestWSClientHistory_RestoredBackupWithGroupReadableModeIsAccepted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	b, _ := json.Marshal(WSClientSample{T: now.Add(-time.Minute), Clients: 2, Peak: 2})
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A backup restored via tar/cp under umask 022 comes back as 0644: still
+	// safe, since group/other can only read it, never write it. Bypass the
+	// process umask with an explicit Chmod so the test is deterministic.
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err != nil {
+		t.Fatalf("restored backup at mode 0644 must still load: %v", err)
+	}
+	defer h.closePersistence()
+	if !h.persistenceStatus().Healthy {
+		t.Fatal("restored backup at mode 0644 must be healthy")
+	}
+	if got := h.snapshot(); len(got) != 1 || got[0].Clients != 2 {
+		t.Fatalf("samples = %+v", got)
+	}
+}
+
+func TestWSClientHistory_GroupWritableJournalStillRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	b, _ := json.Marshal(WSClientSample{T: now.Add(-time.Minute), Clients: 2, Peak: 2})
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0664); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err == nil {
+		t.Fatal("group-writable journal accepted")
+	}
+}
+
 func TestWSClientHistory_OnlyOneWriterAndSamplerStopReleasesLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), wsHistoryFileName)
 	now := time.Now().UTC()
@@ -471,5 +544,151 @@ func TestHandlePerfWSClients_InvalidRangeAndExtendedShape(t *testing.T) {
 		if _, ok := raw["persistence"]; !ok {
 			t.Fatal("missing persistence status")
 		}
+	}
+}
+
+// writeMinimalWSHistoryRecord is the smallest valid journal line: strictly
+// after prev, non-negative, peak >= clients.
+func writeMinimalWSHistoryRecord(w *strings.Builder, at time.Time) {
+	b, _ := json.Marshal(WSClientSample{T: at, Clients: 0, Peak: 0})
+	w.Write(b)
+	w.WriteByte('\n')
+}
+
+func TestWSClientHistory_EightMiBLoadLimitRejectsManyValidRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	// Many small, individually valid records whose combined size crosses the
+	// 8 MiB load cap — distinct from a single oversized/corrupt line, which
+	// a smaller per-record buffer would reject on its own.
+	var buf strings.Builder
+	const n = 170000
+	start := now.Add(-time.Duration(n) * time.Millisecond)
+	for i := 0; i < n; i++ {
+		writeMinimalWSHistoryRecord(&buf, start.Add(time.Duration(i)*time.Millisecond))
+	}
+	if buf.Len() <= wsHistoryMaxFileBytes {
+		t.Fatalf("fixture too small to exercise the cap: %d bytes", buf.Len())
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err == nil {
+		t.Fatal("file over the 8 MiB load cap accepted")
+	}
+	if got, _ := os.ReadFile(path); string(got) != buf.String() {
+		t.Fatal("rejected oversized journal must not be modified")
+	}
+}
+
+func TestWSClientHistory_PerRecordBufferLimitRejectsAnOverlongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	// Padding whitespace is insignificant in JSON, so this line decodes fine
+	// under a larger buffer but must overflow the 4 KiB per-record reader,
+	// well below the 8 MiB whole-file cap (isolating the two checks).
+	valid, _ := json.Marshal(WSClientSample{T: now.Add(-time.Minute), Clients: 1, Peak: 1})
+	line := "{" + strings.Repeat(" ", 8192) + string(valid[1:])
+	if len(line) <= 4096 || len(line) >= wsHistoryMaxFileBytes {
+		t.Fatalf("fixture line length = %d, must sit strictly between the two caps", len(line))
+	}
+	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err == nil {
+		t.Fatal("line longer than the 4 KiB per-record buffer accepted")
+	}
+}
+
+func TestWSClientHistory_AppendCapRejectsAGrownJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", now); err != nil {
+		t.Fatal(err)
+	}
+	defer h.closePersistence()
+	// Simulate a journal that has grown close to the cap over many appends
+	// (enablePersistence's own startup compaction rewrote it small, so
+	// overwrite it directly rather than looping thousands of real appends).
+	filler := make([]byte, wsHistoryMaxFileBytes-10)
+	for i := range filler {
+		filler[i] = 'x'
+	}
+	filler[len(filler)-1] = '\n'
+	if err := os.WriteFile(path, filler, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.sampleAndPersist(1, now.Add(time.Minute))
+	if status := h.persistenceStatus(); !status.Enabled || status.Healthy {
+		t.Fatalf("append over the 8 MiB cap must degrade persistence: %+v", status)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(filler) {
+		t.Fatal("rejected append must not modify the journal")
+	}
+}
+
+func TestWSClientHistory_CompactionRejectsOversizedOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), wsHistoryFileName)
+	now := time.Now().UTC()
+	// One minimal sample encodes to roughly 25 bytes; this many cross the
+	// 8 MiB compacted-output cap even though the live 30-day ring (43200
+	// samples, ~1 MB at this size) never reaches it in practice.
+	const n = 350000
+	samples := make([]WSClientSample, n)
+	for i := range samples {
+		samples[i] = WSClientSample{T: now.Add(time.Duration(i-n) * time.Second), Clients: 0, Peak: 0}
+	}
+	j := &wsHistoryJournal{path: path}
+	if err := j.compact(samples, now); err == nil {
+		t.Fatal("oversized compaction output accepted")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("a rejected compaction must not replace the journal")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".ws-client-history-*.tmp")); len(matches) != 0 {
+		t.Fatalf("temporary file leaked: %v", matches)
+	}
+}
+
+func TestWSClientHistory_HardlinkWithoutDBAliasStillRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, wsHistoryFileName)
+	if err := os.WriteFile(path, []byte("{\"t\":\"2026-10-15T12:00:00Z\",\"clients\":1,\"peak\":1}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "unrelated-hardlink")
+	if err := os.Link(path, other); err != nil {
+		t.Fatal(err)
+	}
+	// No packet database path at all, so the alias check in
+	// checkWSHistoryPath cannot be what rejects this — only the generic
+	// Nlink != 1 guard in openWSHistoryFile can catch a hardlink that is
+	// not a database alias.
+	h := newWSClientHistory(10)
+	if err := h.enablePersistence(path, "", time.Now()); err == nil {
+		t.Fatal("hardlinked journal (not a database alias) accepted")
+	}
+}
+
+func TestWSClientHistory_AggregationPeakUpdatesFromLaterSampleInBucket(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 10, 0, 0, time.UTC)
+	h := newWSClientHistory(20)
+	h.sample(2, time.Date(2026, 10, 15, 12, 0, 30, 0, time.UTC))
+	h.observe(9)
+	// Still within the first sample's 5-minute bucket (12:00-12:05), but not
+	// the bucket's first sample: only an explicit max-peak update carries 9
+	// into the aggregate, since this sample's own Peak starts above 2.
+	h.sample(5, time.Date(2026, 10, 15, 12, 2, 30, 0, time.UTC))
+	h.sample(1, time.Date(2026, 10, 15, 12, 6, 0, 0, time.UTC))
+	r, _ := wsHistoryRange("7d")
+	got := h.snapshotRange(now, r)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 buckets, got %+v", got)
+	}
+	if got[0].Peak != 9 || got[0].Clients != 5 {
+		t.Fatalf("bucket must keep the max peak from its later sample: %+v", got[0])
 	}
 }

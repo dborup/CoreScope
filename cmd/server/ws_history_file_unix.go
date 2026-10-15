@@ -35,9 +35,13 @@ func openWSHistoryFile(path string, flags int) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("WebSocket history must not be hardlinked")
 	}
-	if st.Mode().Perm() != 0600 {
+	// New/rewritten journals are always created at exactly 0600 (CreateTemp's
+	// default). A restored backup can legitimately come back as 0644 (tar/cp
+	// under umask 022); only reject group/other write access, which would let
+	// another local user tamper with the journal.
+	if st.Mode().Perm()&0022 != 0 {
 		f.Close()
-		return nil, fmt.Errorf("WebSocket history must have mode 0600")
+		return nil, fmt.Errorf("WebSocket history must not be group- or other-writable")
 	}
 	return f, nil
 }
