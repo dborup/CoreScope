@@ -224,16 +224,12 @@ func TestBulkScanReuseValues486(t *testing.T) {
 							if o.ObserverID != map[int]string{1: "scan-a", 3: "scan-c"}[observer] || o.ObserverName != map[int]string{1: "Alpha", 3: "Charlie"}[observer] || o.ObserverIATA != map[int]string{1: "SJC", 3: "SEA"}[observer] || o.Direction != fmt.Sprintf("RX-%d", i) || o.SNR == nil || *o.SNR != float64(i)+0.25 || o.RSSI == nil || *o.RSSI != float64(-80-i) || o.Score == nil || *o.Score != i*2 || o.PathJSON != fmt.Sprintf(`["%02x"]`, i) || o.Timestamp != wantStamp {
 								t.Fatalf("observation values or retained numeric pointers changed: %+v", o)
 							}
-							// scanAndMergeChunk does not currently retain wireRoute;
-							// this optimization deliberately preserves that baseline.
-							if loader != "LoadChunked" {
-								wantWire := uint8(0)
-								if optional&1 != 0 {
-									wantWire = uint8(i&3) + 1
-								}
-								if o.wireRoute != wantWire {
-									t.Fatalf("observation %d wire route=%d, want %d", i, o.wireRoute, wantWire)
-								}
+							wantWire := uint8(0)
+							if optional&1 != 0 {
+								wantWire = uint8(i&3) + 1
+							}
+							if o.wireRoute != wantWire {
+								t.Fatalf("observation %d wire route=%d, want %d", i, o.wireRoute, wantWire)
 							}
 							if optional&2 != 0 {
 								pk := strings.Repeat(fmt.Sprintf("%x", i), 64)
