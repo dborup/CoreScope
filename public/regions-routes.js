@@ -1,4 +1,4 @@
-/* Connections retain two separate facts: shared relay membership and directed
+/* Connections retain two separate facts: shared relay-history attribution and directed
  * adjacent steps from scope-matched flood observations. Neither is a handoff. */
 'use strict';
 (function (root) {
@@ -149,8 +149,9 @@
     const panel = el('section', 'regions-connections'); panel.hidden = true;
     panel.setAttribute('aria-label', 'Scope connections and observed relay steps');
     const summary = el('p', 'regions-connections-summary'); panel.appendChild(summary);
-    panel.appendChild(el('h2', '', 'Shared relays between scopes'));
-    panel.appendChild(el('p', 'regions-connections-note', 'Undirected shared membership: distinct visible relays observed carrying both scopes in this interval. This does not establish cross-scope traffic, a scope transition or a direct radio link.'));
+    panel.appendChild(el('h2', '', 'Shared relay-history memberships'));
+    panel.appendChild(el('p', 'regions-connections-provenance', 'Distinct visible identities attributed to both scopes by the transmission-level relay history used by Timeline/Health. Observation route/scope variants are not independently verified here; mixed flood/direct transmissions can include planned-path candidates. Only directed steps below use each observation’s own frame evidence.'));
+    panel.appendChild(el('p', 'regions-connections-note', 'Shared history membership does not establish cross-scope traffic, a scope transition or a direct radio link.'));
     const pairSummary = el('p', 'regions-pairs-summary'); panel.appendChild(pairSummary);
 
     function tableSection(headers, className, pageKey, label) {
@@ -188,7 +189,7 @@
       } };
     }
 
-    const pairTable = tableSection(['Scope pair', 'Shared relay nodes', 'Example relays'], 'regions-pairs-table', 'pairsPage', 'shared scope pairs');
+    const pairTable = tableSection(['Scope pair', 'History identities', 'Example identities'], 'regions-pairs-table', 'pairsPage', 'shared scope pairs');
     panel.appendChild(el('h2', '', 'Observed directed relay steps'));
     panel.appendChild(el('p', 'regions-connections-note', 'Consecutive identity-resolved hops from scope-matched flood observations. Opposite directions are separate. Steps from different observations are never joined into a claimed full route. Counts are distinct transmissions per directed step and scope, not a global packet total.'));
     const stepSummary = el('p', 'regions-steps-summary'); panel.appendChild(stepSummary);
@@ -202,10 +203,10 @@
 
     function update(value, frame, selection) {
       latest = value; panel.hidden = false;
-      const limited = value.complete ? '' : ' Retained evidence is incomplete or limited; counts are lower bounds and empty results do not establish absence.';
-      summary.textContent = 'Observed connections in ' + frame.interval.start + ' — ' + frame.interval.end + '.' + limited;
+      const limited = value.complete ? '' : ' Retained evidence is incomplete or limited; missing results do not establish absence.';
+      summary.textContent = 'History memberships and observed directed steps in ' + frame.interval.start + ' — ' + frame.interval.end + '.' + limited;
       pairSummary.textContent = value.pairs.length + (value.pairsTruncated ? '+ retained' : '') + ' scope pairs; ' + value.sharedRelays +
-        ' distinct shared relay nodes in retained observations.' + (value.sharedComplete ? '' : ' Shared membership history is incomplete or limited.') +
+        ' distinct identities with shared history membership.' + (value.sharedComplete ? '' : ' Shared membership history is incomplete or limited.') +
         (value.pairsTruncated ? ' The 1,000-pair safety limit was reached; this is a deterministic retained subset, not a ranking of all pairs. Select a scope to narrow it.' : '');
       const pairsPage = pairTable.update(value.pairs, selection.pairsPage, pair => {
         const names = el('td', '', pair.from + ' — ' + pair.to), count = el('td', '', pair.count.toLocaleString()), examples = el('td');

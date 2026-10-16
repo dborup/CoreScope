@@ -686,7 +686,7 @@
         saveSelection(true);
         comparison.hidden = true;
         status.textContent = connections.steps.length + ' directed step/scope rows and ' + connections.pairs.length +
-          (connections.pairsTruncated ? '+ retained' : '') + ' shared-scope pairs in retained observations.' +
+          (connections.pairsTruncated ? '+ retained' : '') + ' shared-history scope pairs.' +
           (connections.complete ? '' : ' Evidence is incomplete or capped; absence cannot be established.');
         if (catalog.truncated) status.textContent += ' Scope selector is limited to 128 names; a selected scope outside the list is preserved.';
         if (ensureMap(false)) routesPanel.renderMap(map, layer, L);

@@ -610,6 +610,14 @@ async function main() {
     assert.strictEqual(await page.getByLabel('Compare previous period').isVisible(), false);
     assert.strictEqual(await page.locator('.regions-pairs-table tbody tr').count(), 1);
     assert.match(await page.locator('.regions-pairs-table tbody').textContent(), /#example — #other/);
+    assert.strictEqual(await page.getByRole('heading', { name: 'Shared relay-history memberships', exact: true }).isVisible(), true);
+    assert.strictEqual(await page.getByRole('columnheader', { name: 'History identities', exact: true }).isVisible(), true);
+    const provenance = page.locator('.regions-connections-provenance');
+    assert.strictEqual(await provenance.isVisible(), true);
+    assert.match(await provenance.textContent(), /transmission-level relay history used by Timeline\/Health/);
+    assert.match(await provenance.textContent(), /Observation route\/scope variants are not independently verified here; mixed flood\/direct transmissions can include planned-path candidates/);
+    assert.match(await provenance.textContent(), /Only directed steps below use each observation’s own frame evidence/);
+    assert.match(await page.locator('.regions-pairs-summary').textContent(), /1 distinct identities with shared history membership/);
     assert.match(await page.locator('.regions-connections-note').first().textContent(), /does not establish cross-scope traffic/);
     assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 3);
     assert.match(await page.locator('.regions-steps-summary').textContent(), /6 step appearances/);
@@ -649,7 +657,7 @@ async function main() {
     await page.getByLabel('Region period').selectOption('1h');
   });
 
-  await test('Connections reports partial, unknown, loading and capped evidence as lower bounds', async () => {
+  await test('Connections qualifies partial, unknown, loading and capped evidence without absence claims', async () => {
     for (const override of [{ coverage: { start: '2026-10-16T11:30:00Z', loading: false } },
       { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
       { stepsTruncated: true }, { stepBucketsTruncated: true }, { stepEvidence: { sourceTruncated: true, incomplete: true } },
@@ -658,7 +666,8 @@ async function main() {
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');
       assert.strictEqual(await page.locator('.regions-connections').getAttribute('data-complete'), 'false');
-      assert.match(await page.locator('.regions-connections-summary').textContent(), /lower bounds/);
+      assert.match(await page.locator('.regions-connections-summary').textContent(), /missing results do not establish absence/);
+      assert.doesNotMatch(await page.locator('.regions-connections-summary').textContent(), /lower bounds/);
       assert.match(await page.locator('.regions-steps-summary').textContent(), /6 step appearances/);
     }
     routesOverride = {};
@@ -691,7 +700,7 @@ async function main() {
     assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 1);
     assert.strictEqual(await page.locator('.regions-pairs-table tbody tr').count(), 0);
     assert.strictEqual(await page.locator('.regions-connections').getAttribute('data-complete'), 'false');
-    assert.match(await page.locator('.regions-connections-summary').textContent(), /lower bounds/);
+    assert.match(await page.locator('.regions-connections-summary').textContent(), /missing results do not establish absence/);
     assert.match(await page.locator('.regions-status').textContent(), /selector is limited to 128 names/);
     routesOverride = {};
     await page.evaluate(() => { location.hash = '#/regions?view=connections&window=1h&scope=%23example'; });

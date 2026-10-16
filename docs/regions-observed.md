@@ -136,11 +136,12 @@ thresholds must be evidence-based and exposed through the customizer.
 **Connections & routes** separates two evidence classes instead of drawing
 inferred traffic links between region names:
 
-- **Shared relays between scopes** counts distinct visible relay identities
-  with observed activity in both scopes during the selected interval. This is
-  an undirected relationship. It does not prove that a packet crossed between
-  those scopes, that the relay is a gateway, or that the scopes are neighbouring
-  geographic areas.
+- **Shared relay-history memberships** counts distinct visible identities
+  attributed to both scopes by the existing transmission-level history during
+  the selected interval. This is an undirected history relationship, not
+  independently verified forwarding in both scopes. It does not prove that a
+  packet crossed between those scopes, that the identity is a gateway, or that
+  the scopes are neighbouring geographic areas.
 - **Observed directed relay steps** counts consecutive, unambiguously resolved
   relay identities within a single observed flood path, labelled with that
   observation's attributable packet scope. Opposite directions remain separate.
@@ -148,6 +149,17 @@ inferred traffic links between region names:
   step and scope. Counts across steps are step appearances, not globally unique
   transmissions. Independent steps are never concatenated into a claimed full
   route.
+
+Shared memberships deliberately reuse the history attribution used by Timeline
+and Health. That legacy attribution does not independently check every
+observation's route and scope: when a content transmission has mixed flood and
+direct observations, planned direct-path candidates can enter its canonical
+scope's history. Consequently shared-history counts can contain false
+memberships as well as omissions; they are not guaranteed lower bounds on
+physically shared relays. The UI discloses this provenance. Only the directed
+steps below apply the stricter own-observation frame checks introduced here.
+Repairing the older history attribution is a separate correctness task rather
+than a silent change to previous stages' metrics in this PR.
 
 Flood forwarding appends the forwarding identity to the path. Direct paths
 instead name remaining intended hops, so direct observations are not evidence
@@ -208,8 +220,9 @@ traffic totals. Complete retained history does not imply complete radio
 reception or that all paths can be attributed.
 
 Future work can add independently evidenced scope transitions and comparisons
-of observed routes. A change in timeline relay membership alone does not
-establish a changed route.
+of observed routes, and align the legacy history's mixed-route/scope attribution
+with own-observation evidence. A change in timeline relay membership alone does
+not establish a changed route.
 
 The default period, display limits and any future health thresholds or playback
 settings should be exposed in the customizer in a later milestone. Protocol
