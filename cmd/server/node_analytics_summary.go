@@ -89,8 +89,8 @@ func (a *nodeAnalyticsAccumulator) accumulate(p *StoreTx) {
 	a.totalPackets++
 
 	// Activity timeline bucket.
-	if len(p.FirstSeen) >= 13 {
-		a.timelineBuckets[p.FirstSeen[:13]+":00:00Z"]++
+	if at, ok := parseNodeAnalyticsTime(p.FirstSeen); ok {
+		a.timelineBuckets[at.Truncate(time.Hour).Format(time.RFC3339)]++
 	}
 
 	// SNR — folded into Welford's online mean/M2 in constant memory (mean/
@@ -248,7 +248,7 @@ func nodeAnalyticsPeerCandidates(decoded map[string]interface{}, pubkey string) 
 // finalizeComputedStats derives all 11 ComputedNodeStats fields — identical
 // whether or not withDisplayArrays was set, since every field is sourced
 // from the "always accumulated" state above.
-func (a *nodeAnalyticsAccumulator) finalizeComputedStats(days int) ComputedNodeStats {
+func (a *nodeAnalyticsAccumulator) finalizeComputedStats(days int, coverage ...NodeAnalyticsCoverage) ComputedNodeStats {
 	bucketKeys := make([]string, 0, len(a.timelineBuckets))
 	for k := range a.timelineBuckets {
 		bucketKeys = append(bucketKeys, k)
@@ -257,17 +257,41 @@ func (a *nodeAnalyticsAccumulator) finalizeComputedStats(days int) ComputedNodeS
 
 	distinctHours := len(bucketKeys)
 	totalHours := float64(days) * 24
+	activeHours := float64(distinctHours)
+	if len(coverage) > 0 {
+		c := coverage[0]
+		totalHours = c.Seconds / 3600
+		activeHours = 0
+		from, _ := time.Parse(time.RFC3339Nano, c.From)
+		to, _ := time.Parse(time.RFC3339Nano, c.To)
+		for _, key := range bucketKeys {
+			start, err := time.Parse(time.RFC3339, key)
+			if err != nil {
+				continue
+			}
+			end := start.Add(time.Hour)
+			if start.Before(from) {
+				start = from
+			}
+			if end.After(to) {
+				end = to
+			}
+			if end.After(start) {
+				activeHours += end.Sub(start).Hours()
+			}
+		}
+	}
 	availabilityPct := 0.0
 	if totalHours > 0 {
-		availabilityPct = round(float64(distinctHours)*100.0/totalHours, 1)
+		availabilityPct = round(activeHours*100.0/totalHours, 1)
 		if availabilityPct > 100 {
 			availabilityPct = 100
 		}
 	}
 
 	var avgPacketsPerDay float64
-	if days > 0 {
-		avgPacketsPerDay = round(float64(a.totalPackets)/float64(days), 1)
+	if totalHours > 0 {
+		avgPacketsPerDay = round(float64(a.totalPackets)*24/totalHours, 1)
 	}
 
 	var longestSilenceMs int
@@ -342,7 +366,7 @@ func (a *nodeAnalyticsAccumulator) finalizeComputedStats(days int) ComputedNodeS
 // finalizeDisplayArrays builds the full endpoint's seven heavy client
 // arrays from the accumulator. Only meaningful when withDisplayArrays was
 // true — the summary endpoint never calls this.
-func (a *nodeAnalyticsAccumulator) finalizeDisplayArrays() (
+func (a *nodeAnalyticsAccumulator) finalizeDisplayArrays(coverage ...NodeAnalyticsCoverage) (
 	activityTimeline []TimeBucket,
 	snrTrend []SnrTrendEntry,
 	packetTypeBreakdown []PayloadTypeCount,
@@ -359,6 +383,13 @@ func (a *nodeAnalyticsAccumulator) finalizeDisplayArrays() (
 	activityTimeline = make([]TimeBucket, 0, len(bucketKeys))
 	for _, k := range bucketKeys {
 		b := k
+		if len(coverage) > 0 {
+			at, _ := time.Parse(time.RFC3339, k)
+			from, _ := time.Parse(time.RFC3339Nano, coverage[0].From)
+			if at.Before(from) {
+				b = coverage[0].From
+			}
+		}
 		activityTimeline = append(activityTimeline, TimeBucket{Bucket: &b, Count: a.timelineBuckets[k]})
 	}
 
@@ -440,11 +471,14 @@ func (a *nodeAnalyticsAccumulator) finalizeDisplayArrays() (
 // GRP_TXT packet whose message text contains a node's pubkey is not a
 // packet *for* that node (issue673). Caller must hold s.mu (at least
 // RLock).
-func (s *PacketStore) filterNodePacketsLocked(pubkey, fromISO string) []*StoreTx {
+func (s *PacketStore) filterNodePacketsLocked(pubkey string, from, to time.Time) []*StoreTx {
 	indexed := s.byNode[pubkey]
 	var packets []*StoreTx
+	if !to.After(from) {
+		return packets
+	}
 	for _, p := range indexed {
-		if p.FirstSeen > fromISO {
+		if at, ok := parseNodeAnalyticsTime(p.FirstSeen); ok && !at.Before(from) && !at.After(to) {
 			packets = append(packets, p)
 		}
 	}
@@ -477,13 +511,16 @@ func (s *PacketStore) getNodeAnalyticsSummaryAt(pubkey string, days int, now tim
 		return nil, err
 	}
 
+	now = now.UTC()
 	fromISO := now.Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339)
 	toISO := now.Format(time.RFC3339)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	packets := s.filterNodePacketsLocked(pubkey, fromISO)
+	coverage := s.nodeAnalyticsCoverageLocked(days, now)
+	from, _ := time.Parse(time.RFC3339Nano, coverage.From)
+	packets := s.filterNodePacketsLocked(pubkey, from, now)
 
 	acc := newNodeAnalyticsAccumulator(pubkey, false)
 	for _, p := range packets {
@@ -492,6 +529,7 @@ func (s *PacketStore) getNodeAnalyticsSummaryAt(pubkey string, days int, now tim
 
 	return &NodeAnalyticsSummaryResponse{
 		TimeRange:     TimeRangeResp{From: fromISO, To: toISO, Days: days},
-		ComputedStats: acc.finalizeComputedStats(days),
+		Coverage:      coverage,
+		ComputedStats: acc.finalizeComputedStats(days, coverage),
 	}, nil
 }

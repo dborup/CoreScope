@@ -1090,6 +1090,46 @@ Per-node analytics over a time range.
 
 ---
 
+### Node analytics history coverage (`/analytics` and `/analytics/summary`)
+
+Both endpoints preserve the requested `timeRange` and return an additional
+`coverage` object: `{ from, to, seconds, partial, reason, loading, late_evicted_observations }`. The full
+and lightweight endpoints use exactly the same coverage and computed statistics
+when evaluated at the same instant. All boundaries are UTC and inclusive;
+invalid timestamps and future transmissions are excluded. There is no implicit
+retention-edge tolerance.
+
+`coverage.from` is the later of the requested start, configured retention cutoff,
+successfully loaded contiguous window, and earliest persisted **observation**
+evidence available in that window. An old transmission's `first_seen`, including
+an old hash heard again recently, does not prove earlier coverage. Loader state
+and the evidence edge are captured at startup; requests do not scan SQLite.
+While startup/background loading continues, `partial` and `loading` are true.
+Capped/failed loads conservatively certify only history after their completion;
+memory eviction advances the edge to the evicted transmissions' `first_seen`
+(the eviction boundary; packet membership is by `first_seen`). Late observations
+of evicted, re-heard transmissions never move `from`; they are counted in
+`late_evicted_observations` as a known, bounded gap. A later background completion cannot restore
+an evicted interval. Reasons include `complete`, `available_history`, `loading`,
+`unknown_history`, `load_capped`, `load_failed`, and `memory_eviction`.
+
+The packet set (including all display arrays and the summary numerator) is
+filtered to this effective interval, without changing sender/recipient/relay
+membership rules. Packets/day uses `totalPackets * 86400 / coverage.seconds`.
+Availability is the fraction of supported UTC-hour time bins containing at least
+one packet: a partially covered first or last hour contributes only its actual
+intersection duration, to both numerator and denominator. The first timeline bin
+is clipped to `coverage.from`. Zero supported duration yields zero rates and no
+packets; an empty/unknown store does not claim that missing history was silent.
+A node with no packets in an otherwise known supported interval has zero rates.
+
+This measures **available retained store history**, not uninterrupted recorder
+operation, radio uptime, successful reception, or an exact physical availability
+measurement. No new schema/config, historical SQL fallback, or acquisition-start
+guarantee is introduced. The UI explicitly warns when the requested range is
+only partially supported. It distinguishes unknown/loading history from an
+inactive node in a known interval.
+
 ## GET /api/nodes/:pubkey/reach
 
 Per-node RF reach report (two-way link quality). Computes **directional** link counts from raw

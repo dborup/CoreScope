@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-node-analytics-coverage-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; synthetic coverage metadata against the real local analytics page."
+    },
+    {
       "file": "test-issue-480-no-scope-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
