@@ -137,12 +137,14 @@ window.ObserverDetailNaiveBanner = {
   function destroy() {
     destroyCharts();
     currentId = null;
+    airtimeSeq++;
   }
 
   async function loadDetail() {
     try {
       destroyCharts();
       chartDefaults();
+      const loadId = currentId;
       const [obs, analytics, obsSkewArr, neighborsData] = await Promise.all([
         api('/observers/' + encodeURIComponent(currentId)),
         api('/observers/' + encodeURIComponent(currentId) + '/analytics?days=' + currentDays),
@@ -154,7 +156,10 @@ window.ObserverDetailNaiveBanner = {
       (Array.isArray(obsSkewArr) ? obsSkewArr : []).forEach(function(s) {
         if (s && s.observerID === currentId) obsSkew = s;
       });
-      renderDetail(obs, analytics, obsSkew, neighborsData);
+      // The page does not wait for the slow bulk summary (#497): the TX/RX
+      // cards start as dashes and are filled in below.
+      renderDetail(obs, analytics, obsSkew, neighborsData, window.ObserverAirtime.lookup());
+      loadAirtimeCards(loadId);
     } catch (e) {
       // SECURITY (OBS-2, PR #1539): use textContent for error messages.
       // Error.message is JS-controlled and shouldn't normally carry attacker
@@ -166,6 +171,28 @@ window.ObserverDetailNaiveBanner = {
         errEl.firstChild.textContent = 'Error: ' + e.message;
       }
     }
+  }
+
+  // #497 — same bulk URL and TTL as the observer list, so it is usually a cache
+  // hit. A late answer is dropped if the user has since left or switched
+  // observer (currentId changed) or reloaded the detail (new loadSeq).
+  let airtimeSeq = 0;
+  async function loadAirtimeCards(id) {
+    const seq = ++airtimeSeq;
+    let summary;
+    try {
+      summary = await api('/observers/metrics/summary?window=1h', { ttl: 30000 });
+    } catch (e) {
+      return; // the cards keep their dashes
+    }
+    if (seq !== airtimeSeq || id !== currentId) return;
+    const tx = document.querySelector('[data-testid="obs-detail-tx-airtime"]');
+    const rx = document.querySelector('[data-testid="obs-detail-rx-airtime"]');
+    if (!tx || !rx) return;
+    const tpl = document.createElement('div');
+    tpl.innerHTML = window.ObserverAirtime.statCards(window.ObserverAirtime.lookup(summary, id));
+    tx.replaceWith(tpl.children[0]);
+    rx.replaceWith(tpl.children[0]);
   }
 
   function directNeighborRoleIcon(role) {
@@ -339,7 +366,7 @@ window.ObserverDetailNaiveBanner = {
     if (el) openNeighborSnrModal(el.getAttribute('data-nb-pubkey'));
   });
 
-  function renderDetail(obs, analytics, obsSkew, neighborsData) {
+  function renderDetail(obs, analytics, obsSkew, neighborsData, airtime) {
     const el = document.getElementById('obsDetailContent');
     if (!el) return;
 
@@ -431,6 +458,7 @@ window.ObserverDetailNaiveBanner = {
           <div class="stat-label">Packets/Hour</div>
           <div class="stat-value">${(obs.packetsLastHour || 0).toLocaleString()}</div>
         </div>
+        ${window.ObserverAirtime.statCards(airtime || window.ObserverAirtime.lookup())}
         <div class="stat-card">
           <div class="stat-label">First Seen</div>
           <div class="stat-value" style="font-size:0.85em">${obs.first_seen ? new Date(obs.first_seen).toLocaleDateString() : '—'}</div>

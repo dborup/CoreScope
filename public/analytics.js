@@ -4543,7 +4543,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
             <span>avg: ${avgNf}</span>
             <span>max: ${maxNf}</span>
             <span>${obs.sample_count} samples</span>
-            <span data-testid="rf-cell-airtime" title="Rolling TX airtime over the last hour (not the per-sample value)">TX 1h: ${ObserverAirtime.badge(obs.tx_airtime_pct_1h, summaryData.duty_cycle_warn_pct)}</span>
+            <span data-testid="rf-cell-airtime" title="${ObserverAirtime.TX_TITLE}">TX 1h: ${ObserverAirtime.badge(obs.tx_airtime_pct_1h, summaryData.duty_cycle_warn_pct)}</span>
+            <span data-testid="rf-cell-rx-airtime" title="${ObserverAirtime.RX_TITLE}">RX 1h: ${ObserverAirtime.rxBadge(obs.rx_airtime_pct_1h)}</span>
           </div>
         </div>`;
       }).join('');
