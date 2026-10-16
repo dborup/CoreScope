@@ -1693,6 +1693,16 @@ Per-observer analytics.
 
 List decoded channels with message counts.
 
+The database-backed list uses all retained SQL history, not the server's
+in-memory packet window. `messageCount` counts distinct transmissions, not
+observations. With `region`, a transmission is included when at least one
+observer in any selected region heard it; repeated observations and overlapping
+selected regions do not multiply the count. `lastActivity`, `lastMessage` and
+`lastSender` are selected from that same regional transmission population.
+Without a region filter, transmissions without observations remain eligible.
+`includeEncrypted=true` uses the same unique-transmission regional counting for
+encrypted channels (their message/sender fields remain null).
+
 ### Query Parameters
 
 | Param    | Type   | Default | Description                         |
