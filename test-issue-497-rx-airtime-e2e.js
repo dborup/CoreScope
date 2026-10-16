@@ -68,14 +68,22 @@ async function run() {
   const [overId, edgeId, underId] = ids;
 
   let summaryCalls = 0;
-  await page.route('**/api/observers/metrics/summary*', (route) => {
+  let summaryDelayMs = 0; // F1: set > 0 to hold the summary response back
+  await page.route('**/api/observers/metrics/summary*', async (route) => {
     summaryCalls++;
+    if (summaryDelayMs > 0) await new Promise((r) => setTimeout(r, summaryDelayMs));
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(summaryFor(ids, overId, edgeId, underId)),
     });
   });
+
+  // The detail cards are filled after the summary arrives, so wait for the value.
+  const cardFilled = (which) => page.waitForFunction((w) => {
+    const c = document.querySelector('[data-testid="obs-detail-' + w + '-airtime"]');
+    return c && /\d%/.test(c.textContent);
+  }, which);
 
   const rowCell = (id) => page.$eval(`#obsTable tbody tr[data-observer-id="${id}"] td[data-testid="obs-cell-rx-airtime"]`,
     (td) => ({ html: td.innerHTML, text: td.textContent.trim(), value: td.getAttribute('data-value') }));
@@ -175,6 +183,7 @@ async function run() {
   await test('observer detail shows TX 1h with the warning and RX 1h neutral', async () => {
     await page.goto(`${BASE}/#/observers/${encodeURIComponent(overId)}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('[data-testid="obs-detail-tx-airtime"]');
+    await cardFilled('tx');
     const tx = await page.$eval('[data-testid="obs-detail-tx-airtime"]', (c) => ({ html: c.innerHTML, text: c.textContent }));
     const rx = await page.$eval('[data-testid="obs-detail-rx-airtime"]', (c) => ({ html: c.innerHTML, text: c.textContent }));
     assert(tx.text.includes('TX 1h') && tx.text.includes('12.5%') && tx.html.includes('airtime-over'), JSON.stringify(tx));
@@ -185,6 +194,8 @@ async function run() {
     const stat = async (id, which) => {
       await page.goto(`${BASE}/#/observers/${encodeURIComponent(id)}`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector(`[data-testid="obs-detail-${which}-airtime"]`);
+      if (id !== ids[3]) await cardFilled(which); // the unknown observer stays a dash
+      else await page.waitForTimeout(500);
       return page.$eval(`[data-testid="obs-detail-${which}-airtime"]`, (c) => ({ html: c.innerHTML, text: c.textContent }));
     };
     assert((await stat(edgeId, 'tx')).html.includes('airtime-over'), 'edge');
@@ -205,10 +216,63 @@ async function run() {
     assert(summaryCalls === before, `detail page issued ${summaryCalls - before} extra summary requests (list loaded it within the 30 s TTL)`);
   });
 
+
+  // F1 (review round 2): the detail page must not wait for the slow summary.
+  await test('F1: detail renders at once with dashes while the summary is slow, then fills both cards', async () => {
+    await page.evaluate(() => { try { sessionStorage.clear(); } catch (_) {} });
+    await page.goto(`${BASE}/#/observers`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(100);
+    // Past the 30 s client TTL is not reachable here, so bust the cache by reloading the SPA.
+    summaryDelayMs = 4000;
+    await page.goto('about:blank');
+    await page.goto(`${BASE}/#/observers/${encodeURIComponent(overId)}`, { waitUntil: 'domcontentloaded' });
+    const t0 = Date.now();
+    await page.waitForSelector('[data-testid="obs-detail-tx-airtime"]', { timeout: 2500 });
+    const early = Date.now() - t0;
+    assert(early < 2500, `cards took ${early} ms with a 4000 ms summary`);
+    const dash = await page.$$eval('[data-testid="obs-detail-tx-airtime"], [data-testid="obs-detail-rx-airtime"]',
+      (cs) => cs.map((c) => c.textContent));
+    assert(dash.length === 2 && dash.every((t) => t.includes('—') && !/\d%/.test(t)), 'placeholder dashes expected: ' + JSON.stringify(dash));
+    const others = await page.$eval('#obsDetailContent', (el) => /Uptime/.test(el.textContent) && /Total Packets/.test(el.textContent));
+    assert(others, 'the rest of the detail page must be rendered while the summary is pending');
+    await cardFilled('tx');
+    await cardFilled('rx');
+    const late = await page.$eval('[data-testid="obs-detail-rx-airtime"]', (c) => c.textContent);
+    assert(late.includes('17.5%'), 'RX filled after the summary: ' + late);
+    summaryDelayMs = 0;
+  });
+
+  await test('F1: a late summary for observer A never lands in observer B\'s cards', async () => {
+    summaryDelayMs = 3000;
+    await page.goto('about:blank');
+    await page.goto(`${BASE}/#/observers/${encodeURIComponent(overId)}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('[data-testid="obs-detail-tx-airtime"]');
+    // Record every card node ever inserted from here on.
+    await page.evaluate(() => {
+      window.__cardTexts = [];
+      new MutationObserver((recs) => recs.forEach((r) => r.addedNodes.forEach((n) => {
+        if (n.nodeType !== 1) return;
+        const cards = n.matches && n.matches('[data-testid^="obs-detail-"]') ? [n] : Array.from(n.querySelectorAll('[data-testid^="obs-detail-"]'));
+        cards.forEach((c) => window.__cardTexts.push(c.textContent));
+      }))).observe(document.getElementById('app') || document.body, { childList: true, subtree: true });
+    });
+    await page.evaluate((id) => { location.hash = '#/observers/' + encodeURIComponent(id); }, underId);
+    await page.waitForFunction((id) => document.getElementById('obsDetailContent') &&
+      /\d/.test(document.getElementById('obsDetailContent').textContent), underId);
+    await cardFilled('tx');
+    await page.waitForTimeout(500);
+    const texts = await page.evaluate(() => window.__cardTexts);
+    assert(!texts.some((t) => t.includes('12.5%') || t.includes('17.5%')), 'observer A values leaked into B: ' + JSON.stringify(texts));
+    const tx = await page.$eval('[data-testid="obs-detail-tx-airtime"]', (c) => c.textContent);
+    assert(tx.includes('2.0%'), 'B shows its own TX: ' + tx);
+    summaryDelayMs = 0;
+  });
+
   for (const theme of ['light', 'dark']) {
     await test(`detail: TX warning uses --danger, RX does not, in the ${theme} theme`, async () => {
       await page.goto(`${BASE}/#/observers/${encodeURIComponent(overId)}`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('[data-testid="obs-detail-tx-airtime"]');
+      await cardFilled('tx');
       await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
       const c = await page.evaluate(() => {
         const col = (tid) => getComputedStyle(document.querySelector(`[data-testid="${tid}"] .airtime-pct`)).color;

@@ -137,26 +137,29 @@ window.ObserverDetailNaiveBanner = {
   function destroy() {
     destroyCharts();
     currentId = null;
+    airtimeSeq++;
   }
 
   async function loadDetail() {
     try {
       destroyCharts();
       chartDefaults();
-      const [obs, analytics, obsSkewArr, neighborsData, airtimeSummary] = await Promise.all([
+      const loadId = currentId;
+      const [obs, analytics, obsSkewArr, neighborsData] = await Promise.all([
         api('/observers/' + encodeURIComponent(currentId)),
         api('/observers/' + encodeURIComponent(currentId) + '/analytics?days=' + currentDays),
         api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; }),
         api('/observers/' + encodeURIComponent(currentId) + '/neighbors').catch(function() { return { neighbors: [], reportedAt: '' }; }),
-        // #497 — same bulk URL and TTL as the observer list, so it is usually a cache hit.
-        api('/observers/metrics/summary?window=1h', { ttl: 30000 }).catch(function() { return {}; }),
       ]);
       // Find this observer's calibration data.
       var obsSkew = null;
       (Array.isArray(obsSkewArr) ? obsSkewArr : []).forEach(function(s) {
         if (s && s.observerID === currentId) obsSkew = s;
       });
-      renderDetail(obs, analytics, obsSkew, neighborsData, window.ObserverAirtime.lookup(airtimeSummary, currentId));
+      // The page does not wait for the slow bulk summary (#497): the TX/RX
+      // cards start as dashes and are filled in below.
+      renderDetail(obs, analytics, obsSkew, neighborsData, window.ObserverAirtime.lookup());
+      loadAirtimeCards(loadId);
     } catch (e) {
       // SECURITY (OBS-2, PR #1539): use textContent for error messages.
       // Error.message is JS-controlled and shouldn't normally carry attacker
@@ -168,6 +171,28 @@ window.ObserverDetailNaiveBanner = {
         errEl.firstChild.textContent = 'Error: ' + e.message;
       }
     }
+  }
+
+  // #497 — same bulk URL and TTL as the observer list, so it is usually a cache
+  // hit. A late answer is dropped if the user has since left or switched
+  // observer (currentId changed) or reloaded the detail (new loadSeq).
+  let airtimeSeq = 0;
+  async function loadAirtimeCards(id) {
+    const seq = ++airtimeSeq;
+    let summary;
+    try {
+      summary = await api('/observers/metrics/summary?window=1h', { ttl: 30000 });
+    } catch (e) {
+      return; // the cards keep their dashes
+    }
+    if (seq !== airtimeSeq || id !== currentId) return;
+    const tx = document.querySelector('[data-testid="obs-detail-tx-airtime"]');
+    const rx = document.querySelector('[data-testid="obs-detail-rx-airtime"]');
+    if (!tx || !rx) return;
+    const tpl = document.createElement('div');
+    tpl.innerHTML = window.ObserverAirtime.statCards(window.ObserverAirtime.lookup(summary, id));
+    tx.replaceWith(tpl.children[0]);
+    rx.replaceWith(tpl.children[0]);
   }
 
   function directNeighborRoleIcon(role) {
