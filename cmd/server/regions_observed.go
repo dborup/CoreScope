@@ -21,6 +21,7 @@ type regionScopeRelay struct {
 
 type repeaterRelaySnapshot struct {
 	info          map[string]RepeaterRelayInfo
+	history       *regionsRelayHistory
 	generatedAt   time.Time
 	coverageStart time.Time
 	loading       bool
@@ -96,17 +97,21 @@ func observedRegionWindow(value string) (string, time.Duration, bool) {
 }
 
 type observedRegionNodeMetadata struct {
-	publicKey, name, role string
-	lat, lon              sql.NullFloat64
-	foreign               bool
+	publicKey, name, role, source string
+	lat, lon                      sql.NullFloat64
+	foreign                       bool
 }
 
 // forEachObservedRegionNode streams current metadata with one bulk read. It
 // runs outside s.mu and checks Scan/Rows errors rather than reporting an empty
 // successful result when node metadata is unavailable.
 func (db *DB) forEachObservedRegionNode(ctx context.Context, visit func(observedRegionNodeMetadata) bool) error {
-	rows, err := db.conn.QueryContext(ctx, `SELECT public_key, name, role, lat, lon, foreign_advert
-		FROM nodes WHERE role IN ('repeater','room') ORDER BY public_key`)
+	return db.forEachRegionNodeMetadata(ctx, `SELECT public_key, name, role, lat, lon, foreign_advert, 'current'
+		FROM nodes WHERE role IN ('repeater','room') ORDER BY public_key`, visit)
+}
+
+func (db *DB) forEachRegionNodeMetadata(ctx context.Context, query string, visit func(observedRegionNodeMetadata) bool) error {
+	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
 		return err
 	}
@@ -115,7 +120,7 @@ func (db *DB) forEachObservedRegionNode(ctx context.Context, visit func(observed
 		var n observedRegionNodeMetadata
 		var name, role sql.NullString
 		var foreign sql.NullInt64
-		if err := rows.Scan(&n.publicKey, &name, &role, &n.lat, &n.lon, &foreign); err != nil {
+		if err := rows.Scan(&n.publicKey, &name, &role, &n.lat, &n.lon, &foreign, &n.source); err != nil {
 			return err
 		}
 		n.publicKey, n.name, n.role, n.foreign = strings.ToLower(n.publicKey), name.String, role.String, foreign.Valid && foreign.Int64 != 0
@@ -124,6 +129,47 @@ func (db *DB) forEachObservedRegionNode(ctx context.Context, visit func(observed
 		}
 	}
 	return rows.Err()
+}
+
+// Both Regions endpoints apply live visibility through the same bulk metadata
+// cursor. Any current row supersedes archived metadata, even a non-relay role.
+func (s *Server) forEachVisibleRegionNode(ctx context.Context, keys []string, includeArchived bool, visit func(observedRegionNodeMetadata) bool) error {
+	var hiddenNames map[string][]string
+	if s.cfg != nil && len(s.cfg.EnforcedHiddenNamePrefixes()) > 0 {
+		var err error
+		hiddenNames, err = s.hiddenIdentityNames(ctx, keys)
+		if err != nil {
+			return err
+		}
+	}
+	geo := s.getGeoFilter()
+	applyGeo := s.cfg != nil && !s.cfg.GeoFilterExemptNodeList
+	visible := func(n observedRegionNodeMetadata) bool {
+		if identityHidden(s.cfg, n.publicKey, n.name) || identityHidden(s.cfg, n.publicKey, hiddenNames[n.publicKey]...) {
+			return true
+		}
+		if geo != nil && applyGeo && !n.foreign && !NodePassesGeoFilter(nullFloat(n.lat), nullFloat(n.lon), geo) {
+			return true
+		}
+		return visit(n)
+	}
+	if !includeArchived {
+		return s.db.forEachObservedRegionNode(ctx, visible)
+	}
+	hasArchived, err := s.hasInactiveNodesTable(ctx)
+	if err != nil {
+		return err
+	}
+	if !hasArchived {
+		return s.db.forEachObservedRegionNode(ctx, visible)
+	}
+	return s.db.forEachRegionNodeMetadata(ctx, `SELECT public_key, name, role, lat, lon, foreign_advert, 'current' AS source
+		FROM nodes WHERE role IN ('repeater','room')
+		UNION ALL
+		SELECT i.public_key, i.name, i.role, i.lat, i.lon, i.foreign_advert, 'archived' AS source
+		FROM inactive_nodes i WHERE i.role IN ('repeater','room')
+		AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.public_key=i.public_key)
+		ORDER BY public_key`, visible)
 }
 
 func reportedRegionPosition(lat, lon sql.NullFloat64) bool {
@@ -156,34 +202,16 @@ func (s *Server) handleRegionsObserved(w http.ResponseWriter, r *http.Request) {
 		response.Coverage.Start = &floor
 		response.Coverage.Complete = !snapshot.coverageStart.After(start)
 	}
-	geo := s.getGeoFilter()
-	applyGeo := s.cfg != nil && !s.cfg.GeoFilterExemptNodeList
 	// A relay can also be known as an observer under another display name.
 	// Resolve hiding aliases in bulk before opening the metadata cursor: both
 	// queries must also work with SQLite's single-connection test databases.
-	var hiddenNames map[string][]string
-	if s.cfg != nil && len(s.cfg.EnforcedHiddenNamePrefixes()) > 0 {
-		keys := make([]string, 0, len(snapshot.info))
-		for key, info := range snapshot.info {
-			if len(key) == 64 && len(info.regionScopes) > 0 {
-				keys = append(keys, key)
-			}
-		}
-		var err error
-		hiddenNames, err = s.hiddenIdentityNames(r.Context(), keys)
-		if err != nil {
-			log.Printf("[regions-observed] identity metadata: %v", err)
-			writeError(w, http.StatusInternalServerError, "could not read region identity metadata")
-			return
+	keys := make([]string, 0, len(snapshot.info))
+	for key, info := range snapshot.info {
+		if len(key) == 64 && len(info.regionScopes) > 0 {
+			keys = append(keys, key)
 		}
 	}
-	err := s.db.forEachObservedRegionNode(r.Context(), func(n observedRegionNodeMetadata) bool {
-		if identityHidden(s.cfg, n.publicKey, n.name) || identityHidden(s.cfg, n.publicKey, hiddenNames[n.publicKey]...) {
-			return true
-		}
-		if geo != nil && applyGeo && !n.foreign && !NodePassesGeoFilter(nullFloat(n.lat), nullFloat(n.lon), geo) {
-			return true
-		}
+	err := s.forEachVisibleRegionNode(r.Context(), keys, false, func(n observedRegionNodeMetadata) bool {
 		info, exists := snapshot.info[n.publicKey]
 		if !exists {
 			return true
