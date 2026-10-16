@@ -443,11 +443,11 @@ const (
 // is the reliable half of a coverage picture: "where do we know wardriving
 // signal actually reached."
 type WardrivingObserverCoverage struct {
-	ObserverID       string   `json:"observerId"`
-	ObserverName     string   `json:"observerName"`
-	IATA             string   `json:"iata,omitempty"`
-	Lat              *float64 `json:"lat,omitempty"`
-	Lon              *float64 `json:"lon,omitempty"`
+	ObserverID   string   `json:"observerId"`
+	ObserverName string   `json:"observerName"`
+	IATA         string   `json:"iata,omitempty"`
+	Lat          *float64 `json:"lat,omitempty"`
+	Lon          *float64 `json:"lon,omitempty"`
 	// PositionSource is "real" when Lat/Lon came from the observer's own
 	// node position, "iata" when it's the configured IATA centroid used
 	// as a fallback (no real position known), or "none" when neither is
@@ -1054,6 +1054,7 @@ type ComputedNodeStats struct {
 type NodeAnalyticsResponse struct {
 	Node                map[string]interface{}  `json:"node"`
 	TimeRange           TimeRangeResp           `json:"timeRange"`
+	Coverage            NodeAnalyticsCoverage   `json:"coverage"`
 	ActivityTimeline    []TimeBucket            `json:"activityTimeline"`
 	SnrTrend            []SnrTrendEntry         `json:"snrTrend"`
 	PacketTypeBreakdown []PayloadTypeCount      `json:"packetTypeBreakdown"`
@@ -1066,12 +1067,13 @@ type NodeAnalyticsResponse struct {
 }
 
 // NodeAnalyticsSummaryResponse is the light sibling of NodeAnalyticsResponse
-// (Fase 5.2a) — GET /api/nodes/{pubkey}/analytics/summary. Only timeRange +
-// computedStats: no node object, no clockSkew, none of the heavy display
+// (Fase 5.2a) — GET /api/nodes/{pubkey}/analytics/summary. Only timeRange,
+// coverage and computedStats: no node object, no clockSkew, none of the heavy display
 // arrays. See PacketStore.GetNodeAnalyticsSummary.
 type NodeAnalyticsSummaryResponse struct {
-	TimeRange     TimeRangeResp     `json:"timeRange"`
-	ComputedStats ComputedNodeStats `json:"computedStats"`
+	TimeRange     TimeRangeResp         `json:"timeRange"`
+	Coverage      NodeAnalyticsCoverage `json:"coverage"`
+	ComputedStats ComputedNodeStats     `json:"computedStats"`
 }
 
 // HopAnalyticsPacket is one transmission that passed through a specific node
