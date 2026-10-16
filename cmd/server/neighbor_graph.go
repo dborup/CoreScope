@@ -279,10 +279,15 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 		}
 	}
 
+	// Snapshot what we need under lock, each tx's observations included:
+	// ingest appends to them under s.mu.Lock (#470). The fields the build
+	// reads off an observation, and the tx's payload type and decoded JSON,
+	// do not change once the tx is in the store, so they are read directly.
 	store.mu.RLock()
-	// Snapshot what we need under lock.
-	packets := make([]*StoreTx, len(store.packets))
-	copy(packets, store.packets)
+	packets := make([]graphTx, len(store.packets))
+	for i, tx := range store.packets {
+		packets[i] = graphTx{tx: tx, observations: tx.Observations}
+	}
 	store.mu.RUnlock()
 
 	// Build prefix map for candidate resolution.
@@ -303,7 +308,8 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 	lowerCache := make(map[string]string, 256)
 
 	// Phase 1: Extract edges from every transmission + observation.
-	for _, tx := range packets {
+	for _, p := range packets {
+		tx := p.tx
 		isAdvert := tx.PayloadType != nil && *tx.PayloadType == PayloadADVERT
 		fromNode := extractFromNode(tx)
 		// Pre-compute lowered originator once per tx (not per observation).
@@ -312,7 +318,7 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 			fromLower = cachedToLower(lowerCache, fromNode)
 		}
 
-		for _, obs := range tx.Observations {
+		for _, obs := range p.observations {
 			path := parsePathJSON(obs.PathJSON)
 			observerPK := cachedToLower(lowerCache, obs.ObserverID)
 
@@ -355,6 +361,12 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 	g.mu.Unlock()
 
 	return g
+}
+
+// graphTx is a transmission with its observations as of the build's snapshot.
+type graphTx struct {
+	tx           *StoreTx
+	observations []*StoreObs
 }
 
 // extractFromNode pulls the originator pubkey from a StoreTx's DecodedJSON.

@@ -6,19 +6,21 @@
 // the pre-#1828 handler; JSON output is byte-identical.
 //
 // The `filtered` argument is the time-window-filtered, timestamp-desc sorted
-// slice of *StoreObs produced by the handler after snapshotting under RLock
+// slice of observerObs produced by the handler after snapshotting under RLock
 // (see #1481 P0-2). Helpers do NOT touch store.mu — the handler owns lock
 // scoping.
 //
-// Concurrency note (#1830): buildPacketTypes / buildNodesTimeline /
-// buildRecentPackets take a txByID map instead of *PacketStore for
-// transmission lookups. store.byTxID is guarded by store.mu (writes from
-// ingest/eviction); reading it here — after the handler's RLock snapshot has
-// already been released, to keep JSON decode/enrichment off the hot lock per
-// #1481 P0-2 — would race with those writers (Go maps can panic with
-// "concurrent map read and map write" during a rehash, not just fail under
-// -race). The handler resolves txByID once, under the same RLock that
-// snapshots the observation slice, and passes it down instead.
+// Concurrency note (#1830, #470): the helpers take observerObs, which the
+// handler resolves under the same RLock that snapshots the observation slice,
+// instead of looking transmissions up in store.byTxID. byTxID is guarded by
+// store.mu (writes from ingest/eviction); reading it here — after the
+// handler's RLock snapshot has already been released, to keep JSON
+// decode/enrichment off the hot lock per #1481 P0-2 — would race with those
+// writers (Go maps can panic with "concurrent map read and map write" during
+// a rehash, not just fail under -race). The content-hash migration (#215)
+// also rewrites an observation's TransmissionID and a transmission's hash and
+// route type under store.mu.Lock while HTTP is served, so observerObs carries
+// the values read under the RLock and the helpers never read those fields.
 //
 // Perf note (#1839 MINOR): dropping enrichObs on the histogram / nodes-
 // timeline paths also eliminates N fetchResolvedPathForObs SQL calls per
@@ -33,6 +35,23 @@ import (
 	"strconv"
 	"time"
 )
+
+// observerObs is one of the observer's observations with its transmission
+// as resolved under store.mu (see the concurrency note above).
+type observerObs struct {
+	*StoreObs
+	obsTx
+}
+
+// resolveObserverObs pairs each observation with its transmission. Caller
+// holds store.mu, which guards byTxID and the fields obsTx copies.
+func resolveObserverObs(obsList []*StoreObs, byTxID map[int]*StoreTx) []observerObs {
+	out := make([]observerObs, len(obsList))
+	for i, obs := range obsList {
+		out[i] = observerObs{StoreObs: obs, obsTx: snapObsTx(byTxID[obs.TransmissionID])}
+	}
+	return out
+}
 
 // observerAnalyticsBucketDur returns the timeline bucket size for a given day
 // range. Mirrors the constant table in the legacy handler.
@@ -79,7 +98,7 @@ func buildTimelineBuckets(counts map[int64]int, days int) []TimeBucket {
 }
 
 // buildTimeline builds the packet-timeline aggregate for /analytics.
-func buildTimeline(filtered []*StoreObs, days int) []TimeBucket {
+func buildTimeline(filtered []observerObs, days int) []TimeBucket {
 	bucketDur := observerAnalyticsBucketDur(days)
 	counts := map[int64]int{}
 	for _, obs := range filtered {
@@ -93,15 +112,15 @@ func buildTimeline(filtered []*StoreObs, days int) []TimeBucket {
 	return buildTimelineBuckets(counts, days)
 }
 
-// buildPacketTypes builds the payload-type histogram. Uses a direct
-// store.byTxID read (see #1828 triage) rather than enrichObs — the loop only
-// needs payload_type, which is a single indirection off the transmission.
+// buildPacketTypes builds the payload-type histogram. Reads the resolved
+// transmission directly (see #1828 triage) rather than enrichObs — the loop
+// only needs payload_type, which is a single indirection off the transmission.
 // This avoids one map allocation + several interface-boxing conversions per
 // observation (routes.go:2886 hot path pre-#1828).
-func buildPacketTypes(filtered []*StoreObs, txByID map[int]*StoreTx) map[string]int {
+func buildPacketTypes(filtered []observerObs) map[string]int {
 	out := map[string]int{}
 	for _, obs := range filtered {
-		tx := txByID[obs.TransmissionID]
+		tx := obs.tx
 		if tx == nil || tx.PayloadType == nil {
 			continue
 		}
@@ -112,7 +131,7 @@ func buildPacketTypes(filtered []*StoreObs, txByID map[int]*StoreTx) map[string]
 
 // buildNodesTimeline builds the distinct-node-per-bucket timeline aggregate.
 // Nodes = path-json hops ∪ decoded_json pubKey/srcHash/destHash.
-func buildNodesTimeline(filtered []*StoreObs, days int, txByID map[int]*StoreTx) []TimeBucket {
+func buildNodesTimeline(filtered []observerObs, days int) []TimeBucket {
 	bucketDur := observerAnalyticsBucketDur(days)
 	nodeBucketSets := map[int64]map[string]struct{}{}
 	for _, obs := range filtered {
@@ -126,7 +145,7 @@ func buildNodesTimeline(filtered []*StoreObs, days int, txByID map[int]*StoreTx)
 		}
 		// Legacy handler read decoded_json via enrichObs (which pulls it off
 		// tx.DecodedJSON). Read tx directly for parity + savings.
-		if tx := txByID[obs.TransmissionID]; tx != nil && tx.DecodedJSON != "" {
+		if tx := obs.tx; tx != nil && tx.DecodedJSON != "" {
 			var decoded map[string]interface{}
 			if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) == nil {
 				for _, k := range []string{"pubKey", "srcHash", "destHash"} {
@@ -150,7 +169,7 @@ func buildNodesTimeline(filtered []*StoreObs, days int, txByID map[int]*StoreTx)
 }
 
 // buildSnrDistribution builds the SNR histogram (2-unit buckets, floor).
-func buildSnrDistribution(filtered []*StoreObs) []SnrDistributionEntry {
+func buildSnrDistribution(filtered []observerObs) []SnrDistributionEntry {
 	snrBuckets := map[int]*SnrDistributionEntry{}
 	for _, obs := range filtered {
 		if obs.SNR == nil {
@@ -194,7 +213,7 @@ func buildSnrDistribution(filtered []*StoreObs) []SnrDistributionEntry {
 // good-ts obs. Result can be <limit when bad-ts obs sit in the head of
 // `filtered`. We reproduce that exact semantic here to keep output byte-
 // identical.
-func buildRecentPackets(store *PacketStore, filtered []*StoreObs, limit int, txByID map[int]*StoreTx) []map[string]interface{} {
+func buildRecentPackets(store *PacketStore, filtered []observerObs, limit int) []map[string]interface{} {
 	if limit <= 0 {
 		return []map[string]interface{}{}
 	}
@@ -206,7 +225,7 @@ func buildRecentPackets(store *PacketStore, filtered []*StoreObs, limit int, txB
 		if _, ok := obs.ParsedTime(); !ok {
 			continue
 		}
-		out = append(out, store.enrichObsWithTx(obs, txByID[obs.TransmissionID]))
+		out = append(out, store.enrichObsWithTx(obs.StoreObs, obs.obsTx))
 	}
 	return out
 }

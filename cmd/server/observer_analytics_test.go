@@ -61,7 +61,7 @@ func newStoreForAnalyticsTest() *PacketStore {
 }
 
 // TestBuildPacketTypesDirectRead verifies the packet-type histogram builds
-// from store.byTxID, and skips obs whose tx or tx.PayloadType is missing.
+// from the transmissions resolved from store.byTxID, and skips obs whose tx or tx.PayloadType is missing.
 func TestBuildPacketTypesDirectRead(t *testing.T) {
 	store := newStoreForAnalyticsTest()
 	pt3, pt5 := 3, 5
@@ -78,7 +78,7 @@ func TestBuildPacketTypesDirectRead(t *testing.T) {
 		buildObsForTest(3, now, nil, "[]"),
 		buildObsForTest(4, now, nil, "[]"),
 	}
-	got := buildPacketTypes(filtered, store.byTxID)
+	got := buildPacketTypes(resolveObserverObs(filtered, store.byTxID))
 	if got["3"] != 2 {
 		t.Errorf("packetTypes[3] = %d, want 2", got["3"])
 	}
@@ -103,7 +103,7 @@ func TestBuildTimelineBuckets(t *testing.T) {
 		buildObsForTest(1, base.Add(2*time.Hour), nil, "[]"),
 	}
 	// days=1 → 1-hour buckets → two buckets, counts 2 and 1
-	got := buildTimeline(filtered, 1)
+	got := buildTimeline(resolveObserverObs(filtered, nil), 1)
 	if len(got) != 2 {
 		t.Fatalf("timeline entries = %d, want 2 (got %+v)", len(got), got)
 	}
@@ -122,7 +122,7 @@ func TestBuildSnrDistribution(t *testing.T) {
 		buildObsForTest(1, now, f(-1.0), "[]"), // bucket -2
 		buildObsForTest(1, now, nil, "[]"),     // no SNR → skip
 	}
-	got := buildSnrDistribution(filtered)
+	got := buildSnrDistribution(resolveObserverObs(filtered, nil))
 	if len(got) != 2 {
 		t.Fatalf("snr entries = %d, want 2 (got %+v)", len(got), got)
 	}
@@ -146,7 +146,7 @@ func TestBuildRecentPacketsLimit(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		filtered = append(filtered, buildObsForTest(1, base.Add(-time.Duration(i)*time.Minute), nil, "[]"))
 	}
-	got := buildRecentPackets(store, filtered, 20, store.byTxID)
+	got := buildRecentPackets(store, resolveObserverObs(filtered, store.byTxID), 20)
 	if len(got) != 20 {
 		t.Errorf("recentPackets len = %d, want 20", len(got))
 	}
@@ -177,7 +177,7 @@ func TestBuildRecentPacketsSkipsUnparseableTimestamp(t *testing.T) {
 		filtered = append(filtered, buildObsForTest(1, base.Add(-time.Duration(i)*time.Minute), nil, "[]"))
 	}
 
-	got := buildRecentPackets(store, filtered, 20, store.byTxID)
+	got := buildRecentPackets(store, resolveObserverObs(filtered, store.byTxID), 20)
 
 	// Legacy loop: index 0-2 skipped (bad ts), index 3-19 appended under the
 	// i<20 gate (17 entries), index 20-22 dropped (i>=20). Result len = 17.
@@ -208,7 +208,7 @@ func TestBuildNodesTimelineDistinct(t *testing.T) {
 		buildObsForTest(1, base, nil, `["bb","cc"]`),           // bucket A: nodes {aaaa, bb, cc}
 		buildObsForTest(1, base.Add(10*time.Minute), nil, `["bb"]`), // same bucket: dedup
 	}
-	got := buildNodesTimeline(filtered, 1, store.byTxID)
+	got := buildNodesTimeline(resolveObserverObs(filtered, store.byTxID), 1)
 	if len(got) != 1 {
 		t.Fatalf("nodes timeline entries = %d, want 1 (got %+v)", len(got), got)
 	}

@@ -1898,9 +1898,9 @@ func pickBestObservation(tx *StoreTx) {
 }
 
 // setTxPath sets tx's path and its parsed hops. It runs where tx is written
-// (s.mu held for writing, or tx not yet in the store), so the parse cache is
-// full before readers see tx: they call txGetParsedPath under s.mu.RLock,
-// and a lazy parse there is concurrent readers writing tx.parsedPath (#470).
+// (s.mu held for writing, or tx not yet in the store), so readers, which call
+// txGetParsedPath under s.mu.RLock, never see the path without its parse
+// (#470; see txGetParsedPath for how a tx's first parse gets there).
 func setTxPath(tx *StoreTx, pathJSON string) {
 	if tx.pathParsed && tx.PathJSON == pathJSON {
 		return
@@ -2721,10 +2721,10 @@ func (s *PacketStore) GetPerfStoreStats() map[string]interface{} {
 
 	// Distinct advert pubkey count — precomputed incrementally (see trackAdvertPubkey).
 	advertByObsCount := len(s.advertPubkeys)
+	trackedMB := math.Round(s.trackedMemoryMB()*10) / 10
 	s.mu.RUnlock()
 
 	estimatedMB := math.Round(s.estimatedMemoryMB()*10) / 10
-	trackedMB := math.Round(s.trackedMemoryMB()*10) / 10
 
 	evicted := atomic.LoadInt64(&s.evicted)
 
@@ -2906,6 +2906,8 @@ func (s *PacketStore) GetPerfStoreStatsTyped() PerfPacketStoreStats {
 	retentionHours := s.retentionHours
 
 	advertByObsCount := len(s.advertPubkeys)
+	trackedBytes := s.trackedBytes
+	trackedMB := math.Round(s.trackedMemoryMB()*10) / 10
 	s.mu.RUnlock()
 
 	s.bgErrMu.RLock()
@@ -2914,11 +2916,10 @@ func (s *PacketStore) GetPerfStoreStatsTyped() PerfPacketStoreStats {
 	s.bgErrMu.RUnlock()
 
 	estimatedMB := math.Round(s.estimatedMemoryMB()*10) / 10
-	trackedMB := math.Round(s.trackedMemoryMB()*10) / 10
 
 	var avgBytesPerPacket int64
 	if totalLoaded > 0 {
-		avgBytesPerPacket = s.trackedBytes / int64(totalLoaded)
+		avgBytesPerPacket = trackedBytes / int64(totalLoaded)
 	}
 
 	return PerfPacketStoreStats{
@@ -4518,21 +4519,40 @@ func (s *PacketStore) computeNodeHomeRegions() map[string]string {
 // already holds s.mu (directly, or via a defer'd RLock spanning the call).
 // Callers that snapshot observations under RLock and then release it before
 // iterating (e.g. handleObserverAnalytics, #1830) must use enrichObsWithTx
-// with a tx pointer resolved during that same snapshot instead.
+// with the transmission resolved during that same snapshot instead.
 func (s *PacketStore) enrichObs(obs *StoreObs) map[string]interface{} {
-	return s.enrichObsWithTx(obs, s.byTxID[obs.TransmissionID])
+	return s.enrichObsWithTx(obs, snapObsTx(s.byTxID[obs.TransmissionID]))
 }
 
-// enrichObsWithTx is enrichObs with the transmission pointer already
-// resolved by the caller, instead of looking it up in s.byTxID here. #1830:
-// s.byTxID is guarded by s.mu (writes from ingest/eviction); reading it
-// without holding at least RLock races with those writers — Go maps can
-// panic with "concurrent map read and map write" during a rehash, not just
-// fail under -race. Callers that need to read byTxID after releasing their
-// RLock (to keep JSON decode / enrichment off the hot lock, per #1481)
-// should resolve the *StoreTx for each observation during their RLock-held
+// obsTx is an observation's transmission with the fields of it that the
+// content-hash migration (#215) rewrites under s.mu.Lock while HTTP is
+// served, copied when it was resolved (#470). The fields enrichObsWithTx
+// reads off tx itself (raw hex, payload type, decoded JSON) do not change
+// once the transmission is in the store. tx is nil once it was evicted.
+type obsTx struct {
+	tx        *StoreTx
+	hash      string
+	routeType *int
+}
+
+// snapObsTx copies tx's migrated fields. Caller holds s.mu.
+func snapObsTx(tx *StoreTx) obsTx {
+	if tx == nil {
+		return obsTx{}
+	}
+	return obsTx{tx: tx, hash: tx.Hash, routeType: tx.RouteType}
+}
+
+// enrichObsWithTx is enrichObs with the transmission already resolved by
+// the caller, instead of looking it up in s.byTxID here. #1830: s.byTxID is
+// guarded by s.mu (writes from ingest/eviction); reading it without holding
+// at least RLock races with those writers — Go maps can panic with
+// "concurrent map read and map write" during a rehash, not just fail under
+// -race. Callers that need to read byTxID after releasing their RLock (to
+// keep JSON decode / enrichment off the hot lock, per #1481) should resolve
+// each observation's transmission (snapObsTx) during their RLock-held
 // snapshot and pass it in here.
-func (s *PacketStore) enrichObsWithTx(obs *StoreObs, tx *StoreTx) map[string]interface{} {
+func (s *PacketStore) enrichObsWithTx(obs *StoreObs, t obsTx) map[string]interface{} {
 	m := map[string]interface{}{
 		"id":            obs.ID,
 		"timestamp":     strOrNil(obs.Timestamp),
@@ -4551,8 +4571,8 @@ func (s *PacketStore) enrichObsWithTx(obs *StoreObs, tx *StoreTx) map[string]int
 		m["resolved_path"] = rp
 	}
 
-	if tx != nil {
-		m["hash"] = strOrNil(tx.Hash)
+	if tx := t.tx; tx != nil {
+		m["hash"] = strOrNil(t.hash)
 		// raw_hex comes from the transmission (#881). obs.RawHex is no longer
 		// retained when loading/ingesting the store — it duplicated this exact
 		// value (same content hash ⇒ same frame) and at ~10.6 observations/tx
@@ -4564,7 +4584,7 @@ func (s *PacketStore) enrichObsWithTx(obs *StoreObs, tx *StoreTx) map[string]int
 			m["raw_hex"] = strOrNil(tx.RawHex)
 		}
 		m["payload_type"] = intPtrOrNil(tx.PayloadType)
-		m["route_type"] = intPtrOrNil(tx.RouteType)
+		m["route_type"] = intPtrOrNil(t.routeType)
 		m["decoded_json"] = strOrNil(tx.DecodedJSON)
 	}
 
@@ -4712,8 +4732,16 @@ func resolvePayloadTypeName(pt *int) string {
 }
 
 // txGetParsedPath returns cached parsed path hops, parsing on first call.
-// pickBestObservation fills the cache before a tx is shared, so the parse
-// here only runs for a tx that is not in the store (#470).
+// Readers call it under s.mu.RLock, so the cache must be full before they
+// can see the tx; a lazy parse there is concurrent readers writing
+// tx.parsedPath (#470). Every path that adds a tx to the store charges it
+// under s.mu.Lock first (rechargeTx → estimateStoreTxBytes calls this), and
+// every later path change goes through setTxPath under s.mu.Lock. For
+// LoadChunked that charge is what fills the cache: it publishes each chunk
+// before pickBestObservation runs after the whole load, so until then the
+// cache holds the parse of the tx's still-empty path.
+// TestLoadChunkedPublishesParsedPath470 pins this; keep it in mind when
+// changing estimateStoreTxBytes.
 func txGetParsedPath(tx *StoreTx) []string {
 	if tx.pathParsed {
 		return tx.parsedPath
@@ -5632,6 +5660,7 @@ func (s *PacketStore) estimatedMemoryMB() float64 {
 }
 
 // trackedMemoryMB returns the self-accounted packet store memory in MB.
+// Caller holds s.mu: ingest and eviction update trackedBytes under s.mu.Lock.
 func (s *PacketStore) trackedMemoryMB() float64 {
 	return float64(s.trackedBytes) / 1048576.0
 }
