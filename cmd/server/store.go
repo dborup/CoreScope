@@ -197,23 +197,24 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 // All other locks are acquired independently (no nesting).
 // When adding new lock acquisitions, respect this ordering.
 type PacketStore struct {
-	mu            sync.RWMutex
-	db            *DB
-	packets       []*StoreTx                 // sorted by first_seen ASC (oldest first; newest at tail)
-	byHash        map[string]*StoreTx        // hash → *StoreTx
-	byTxID        map[int]*StoreTx           // transmission_id → *StoreTx
-	byObsID       map[int]*StoreObs          // observation_id → *StoreObs
-	maxTxID       int                        // highest transmission_id in store
-	maxObsID      int                        // highest observation_id in store
-	byObserver    map[string][]*StoreObs     // observer_id → observations
-	byNode        map[string][]*StoreTx      // pubkey → transmissions
-	nodeHashes    map[string]map[string]bool // pubkey → Set<hash>
-	byPathHop     map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
-	byPayloadType map[int][]*StoreTx         // payload_type → transmissions
-	loaded        bool
-	totalObs      int
-	insertCount   int64
-	queryCount    int64
+	mu               sync.RWMutex
+	db               *DB
+	packets          []*StoreTx                 // sorted by first_seen ASC (oldest first; newest at tail)
+	byHash           map[string]*StoreTx        // hash → *StoreTx
+	byTxID           map[int]*StoreTx           // transmission_id → *StoreTx
+	byObsID          map[int]*StoreObs          // observation_id → *StoreObs
+	maxTxID          int                        // highest transmission_id in store
+	maxObsID         int                        // highest observation_id in store
+	byObserver       map[string][]*StoreObs     // observer_id → observations
+	byNode           map[string][]*StoreTx      // pubkey → transmissions
+	nodeHashes       map[string]map[string]bool // pubkey → Set<hash>
+	byPathHop        map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
+	byPayloadType    map[int][]*StoreTx         // payload_type → transmissions
+	loaded           bool
+	analyticsHistory nodeAnalyticsHistory // guarded by mu; retained analytics coverage (#485)
+	totalObs         int
+	insertCount      int64
+	queryCount       int64
 	// Response caches (separate mutex to avoid contention with store RWMutex)
 	cacheMu           sync.RWMutex
 	rfCache           map[string]*cachedResult // region → cached RF result
@@ -890,11 +891,9 @@ func (s *PacketStore) Load() error {
 
 	t0 := time.Now()
 
-	// Count total transmissions for logging.
-	var totalInDB int
-	if err := s.db.conn.QueryRow("SELECT COUNT(*) FROM transmissions").Scan(&totalInDB); err != nil {
-		totalInDB = -1 // non-fatal
-	}
+	// Count the eligible window below, before applying the memory cap.
+	// A configured budget is not proof that any retained rows were omitted.
+	totalInDB := -1
 
 	// Calculate max packets to load based on memory budget.
 	var maxPackets int64
@@ -957,6 +956,13 @@ func (s *PacketStore) Load() error {
 			loadConditions = append(loadConditions, fmt.Sprintf("t.first_seen >= '%s'", hotCutoffStr))
 		}
 	}
+	countSQL := "SELECT COUNT(*) FROM transmissions t"
+	if len(loadConditions) > 0 {
+		countSQL += " WHERE " + strings.Join(loadConditions, " AND ")
+	}
+	if err := s.db.conn.QueryRow(countSQL).Scan(&totalInDB); err != nil {
+		totalInDB = -1
+	}
 	if maxPackets > 0 {
 		if s.db.hasLastSeen() {
 			loadConditions = append(loadConditions, fmt.Sprintf(
@@ -970,6 +976,7 @@ func (s *PacketStore) Load() error {
 	if len(loadConditions) > 0 {
 		filterClause = "\n\t\t\tWHERE " + strings.Join(loadConditions, "\n\t\t\t  AND ")
 	}
+	s.beginNodeAnalyticsLoadLocked(hotCutoffStr)
 
 	if s.db.isV3() {
 		loadSQL = `SELECT t.id, t.raw_hex, t.hash, t.first_seen, t.route_type,
@@ -1046,6 +1053,7 @@ func (s *PacketStore) Load() error {
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] scan error: %v", err)
+			s.analyticsHistory.failed = true
 			continue
 		}
 		if s.loadScannedRowHook != nil {
@@ -1118,6 +1126,7 @@ func (s *PacketStore) Load() error {
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
 			tx.obsKeys[dk] = true
+			s.analyticsHistory.observedFrom = earlierNodeAnalyticsEvidence(s.analyticsHistory.observedFrom, obs.Timestamp)
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
 				tx.observerSet[obs.ObserverID] = true
 				tx.UniqueObserverCount++
@@ -1141,6 +1150,9 @@ func (s *PacketStore) Load() error {
 		}
 	}
 
+	if rows.Err() != nil {
+		s.analyticsHistory.failed = true
+	}
 	// Post-load: pick best observation (longest path) for each transmission,
 	// then re-index so relay hops from resolved_path land in byNode.
 	// indexByNode was called earlier (on StoreTx creation) before observations
@@ -1180,6 +1192,8 @@ func (s *PacketStore) Load() error {
 		s.oldestLoaded = s.packets[0].FirstSeen
 	}
 
+	s.analyticsHistory.failed = s.analyticsHistory.failed || totalInDB < 0
+	s.finishNodeAnalyticsLoadLocked(s.analyticsHistory.loadCutoff, maxPackets > 0 && totalInDB > len(s.packets), s.hotStartupHours > 0)
 	s.loaded = true
 	elapsed := time.Since(t0)
 	if maxPackets > 0 && totalInDB > len(s.packets) {
@@ -1374,7 +1388,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] loadChunk scan error: %v", err)
-			continue
+			return fmt.Errorf("analytics history chunk scan: %w", err)
 		}
 
 		hashStr := nullStrVal(hash)
@@ -1483,8 +1497,14 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 		return err
 	}
 
+	// Evidence is reduced outside s.mu; publish only the scalar with the
+	// final atomic chunk merge, not an extra full-store scan under a lock.
+	var localObservedFrom time.Time
 	// Pick best observation for each local packet before merging.
 	for _, tx := range localPackets {
+		for _, obs := range tx.Observations {
+			localObservedFrom = earlierNodeAnalyticsEvidence(localObservedFrom, obs.Timestamp)
+		}
 		pickBestObservation(tx)
 		localTrackedBytes += rechargeTx(tx)
 	}
@@ -1619,6 +1639,9 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// first_seen (#114). O(len(s.packets) + len(localPackets)), like the
 	// copy the prepend made; no comparison sort under the lock.
 	s.packets = mergeByFirstSeen(s.packets, localPackets)
+	if !localObservedFrom.IsZero() && (s.analyticsHistory.observedFrom.IsZero() || localObservedFrom.Before(s.analyticsHistory.observedFrom)) {
+		s.analyticsHistory.observedFrom = localObservedFrom
+	}
 	s.totalObs += localTotalObs
 	s.trackedBytes += localTrackedBytes
 	if localMaxTxID > s.maxTxID {
@@ -1709,6 +1732,9 @@ func (s *PacketStore) loadBackgroundChunks() {
 	}
 
 	if s.retentionHours <= 0 {
+		s.mu.Lock()
+		s.analyticsHistory.loading = false
+		s.mu.Unlock()
 		s.backgroundLoadDone.Store(true)
 		return
 	}
@@ -1851,6 +1877,10 @@ func (s *PacketStore) loadBackgroundChunks() {
 	}
 	bgErr := s.backgroundLoadErr
 	s.bgErrMu.Unlock()
+	s.mu.Lock()
+	s.analyticsHistory.failed = s.analyticsHistory.failed || chunkErrors > 0 || totalInDB < 0 || (totalInDB > 0 && loadedCount < totalInDB)
+	s.finishNodeAnalyticsLoadLocked(target, false, false)
+	s.mu.Unlock()
 
 	// Only flip done=true when the store truly reflects the DB. Operators
 	// (and the analytics warm-up gate, #1659) read this as "no more rows
@@ -3442,6 +3472,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 
 			tx.Observations = append(tx.Observations, obs)
 			tx.mergeObservedPathHashSize(r.pathJSON)
+			s.observeNodeAnalyticsLiveLocked(obs.Timestamp)
 			tx.obsKeys[dk] = true
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
 				tx.observerSet[obs.ObserverID] = true
@@ -3832,6 +3863,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 
 		tx.Observations = append(tx.Observations, obs)
 		tx.mergeObservedPathHashSize(r.pathJSON)
+		s.observeNodeAnalyticsLiveLocked(obs.Timestamp)
 		tx.obsKeys[dk] = true
 		if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
 			tx.observerSet[obs.ObserverID] = true
@@ -5786,6 +5818,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	}
 
 	evicting := s.packets[:cutoffIdx]
+	s.invalidateNodeAnalyticsEvictionLocked(evicting)
 	evictedObs := 0
 	var evictedBytes int64
 
@@ -10721,13 +10754,16 @@ func (s *PacketStore) getNodeAnalyticsAt(pubkey string, days int, now time.Time)
 		return nil, err
 	}
 
+	now = now.UTC()
 	fromISO := now.Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339)
 	toISO := now.Format(time.RFC3339)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	packets := s.filterNodePacketsLocked(pubkey, fromISO)
+	coverage := s.nodeAnalyticsCoverageLocked(days, now)
+	from, _ := time.Parse(time.RFC3339Nano, coverage.From)
+	packets := s.filterNodePacketsLocked(pubkey, from, now)
 
 	// Fase 5.2a: full analytics and the light /analytics/summary endpoint
 	// share this single per-packet pass (see node_analytics_summary.go) so
@@ -10737,8 +10773,8 @@ func (s *PacketStore) getNodeAnalyticsAt(pubkey string, days int, now time.Time)
 	for _, p := range packets {
 		acc.accumulate(p)
 	}
-	activityTimeline, snrTrend, packetTypeBreakdown, observerCoverage, hopDistribution, peerInteractions, uptimeHeatmap := acc.finalizeDisplayArrays()
-	computedStats := acc.finalizeComputedStats(days)
+	activityTimeline, snrTrend, packetTypeBreakdown, observerCoverage, hopDistribution, peerInteractions, uptimeHeatmap := acc.finalizeDisplayArrays(coverage)
+	computedStats := acc.finalizeComputedStats(days, coverage)
 
 	// Compute clock skew (already under RLock).
 	clockSkew := s.getNodeClockSkewLocked(pubkey)
@@ -10746,6 +10782,7 @@ func (s *PacketStore) getNodeAnalyticsAt(pubkey string, days int, now time.Time)
 	return &NodeAnalyticsResponse{
 		Node:                node,
 		TimeRange:           TimeRangeResp{From: fromISO, To: toISO, Days: days},
+		Coverage:            coverage,
 		ActivityTimeline:    activityTimeline,
 		SnrTrend:            snrTrend,
 		PacketTypeBreakdown: packetTypeBreakdown,
