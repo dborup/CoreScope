@@ -143,18 +143,20 @@ window.ObserverDetailNaiveBanner = {
     try {
       destroyCharts();
       chartDefaults();
-      const [obs, analytics, obsSkewArr, neighborsData] = await Promise.all([
+      const [obs, analytics, obsSkewArr, neighborsData, airtimeSummary] = await Promise.all([
         api('/observers/' + encodeURIComponent(currentId)),
         api('/observers/' + encodeURIComponent(currentId) + '/analytics?days=' + currentDays),
         api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; }),
         api('/observers/' + encodeURIComponent(currentId) + '/neighbors').catch(function() { return { neighbors: [], reportedAt: '' }; }),
+        // #497 — same bulk URL and TTL as the observer list, so it is usually a cache hit.
+        api('/observers/metrics/summary?window=1h', { ttl: 30000 }).catch(function() { return {}; }),
       ]);
       // Find this observer's calibration data.
       var obsSkew = null;
       (Array.isArray(obsSkewArr) ? obsSkewArr : []).forEach(function(s) {
         if (s && s.observerID === currentId) obsSkew = s;
       });
-      renderDetail(obs, analytics, obsSkew, neighborsData);
+      renderDetail(obs, analytics, obsSkew, neighborsData, window.ObserverAirtime.lookup(airtimeSummary, currentId));
     } catch (e) {
       // SECURITY (OBS-2, PR #1539): use textContent for error messages.
       // Error.message is JS-controlled and shouldn't normally carry attacker
@@ -339,7 +341,7 @@ window.ObserverDetailNaiveBanner = {
     if (el) openNeighborSnrModal(el.getAttribute('data-nb-pubkey'));
   });
 
-  function renderDetail(obs, analytics, obsSkew, neighborsData) {
+  function renderDetail(obs, analytics, obsSkew, neighborsData, airtime) {
     const el = document.getElementById('obsDetailContent');
     if (!el) return;
 
@@ -431,6 +433,7 @@ window.ObserverDetailNaiveBanner = {
           <div class="stat-label">Packets/Hour</div>
           <div class="stat-value">${(obs.packetsLastHour || 0).toLocaleString()}</div>
         </div>
+        ${window.ObserverAirtime.statCards(airtime || window.ObserverAirtime.lookup())}
         <div class="stat-card">
           <div class="stat-label">First Seen</div>
           <div class="stat-value" style="font-size:0.85em">${obs.first_seen ? new Date(obs.first_seen).toLocaleDateString() : '—'}</div>

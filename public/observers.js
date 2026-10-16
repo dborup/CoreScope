@@ -141,6 +141,7 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
   let _loadObserversReqId = 0; // #1563: monotonic id; resolutions older than the latest are discarded
   let obsSkewMap = {}; // observerID → {offsetSec, samples}
   let obsAirtimeMap = {}; // #479 observerID → tx_airtime_pct_1h
+  let obsRxAirtimeMap = {}; // #497 observerID → rx_airtime_pct_1h
   let obsAirtimeWarnPct; // #479 duty_cycle_warn_pct from the summary
   let wsHandler = null;
   let refreshTimer = null;
@@ -268,6 +269,7 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
     observers = [];
     obsSkewMap = {};
     obsAirtimeMap = {};
+    obsRxAirtimeMap = {};
   }
 
   async function loadObservers(opts) {
@@ -288,9 +290,10 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
       observers = data.observers || [];
       _fetchedAt = Date.now(); // #1562: stamp freshness for the header label
       obsAirtimeMap = {};
+      obsRxAirtimeMap = {};
       obsAirtimeWarnPct = airData && airData.duty_cycle_warn_pct;
       ((airData && airData.observers) || []).forEach(function(a) {
-        if (a && a.observer_id) obsAirtimeMap[a.observer_id] = a.tx_airtime_pct_1h;
+        if (a && a.observer_id) { obsAirtimeMap[a.observer_id] = a.tx_airtime_pct_1h; obsRxAirtimeMap[a.observer_id] = a.rx_airtime_pct_1h; }
       });
       obsSkewMap = {};
       (Array.isArray(skewData) ? skewData : []).forEach(function(s) {
@@ -417,7 +420,7 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
         <caption class="sr-only">Observer status and statistics</caption>
         <thead><tr>
           <th scope="col" data-priority="1" data-sort-key="status" data-type="numeric">Status</th><th scope="col" data-priority="1" data-sort-key="name">Name</th><th scope="col" data-priority="3" data-sort-key="region">Region</th><th scope="col" data-priority="2" data-sort-key="last_seen" data-type="numeric">Last Status</th><th scope="col" data-priority="2" data-sort-key="last_packet_at" data-type="numeric">Last Packet</th>
-          <th scope="col" data-priority="3" data-sort-key="packet_health" data-type="numeric">Packet Health</th><th scope="col" data-priority="4" data-sort-key="packet_count" data-type="numeric">Total Packets</th><th scope="col" data-priority="3" data-sort-key="packets_hour" data-type="numeric">Packets/Hour</th><th scope="col" data-priority="3" data-sort-key="airtime_1h" data-type="numeric" title="Rolling TX airtime share over the last hour (duty cycle)">TX 1h</th><th scope="col" data-priority="4" data-sort-key="clock_offset" data-type="numeric">Clock Offset</th><th scope="col" data-priority="4" data-sort-key="uptime" data-type="numeric">Uptime</th><th scope="col" data-priority="4" data-sort-key="firmware">Firmware</th><th scope="col" data-priority="4" data-sort-key="client_version">Client</th><th scope="col" data-priority="4" data-sort-key="neighbors_report" data-type="numeric" title="Whether this observer sends /neighbors reports (opt-in firmware feature)">Neighbors</th>
+          <th scope="col" data-priority="3" data-sort-key="packet_health" data-type="numeric">Packet Health</th><th scope="col" data-priority="4" data-sort-key="packet_count" data-type="numeric">Total Packets</th><th scope="col" data-priority="3" data-sort-key="packets_hour" data-type="numeric">Packets/Hour</th><th scope="col" data-priority="3" data-sort-key="airtime_1h" data-type="numeric" title="${window.ObserverAirtime.TX_TITLE}">TX 1h</th><th scope="col" data-priority="3" data-sort-key="rx_airtime_1h" data-type="numeric" title="${window.ObserverAirtime.RX_TITLE}">RX 1h</th><th scope="col" data-priority="4" data-sort-key="clock_offset" data-type="numeric">Clock Offset</th><th scope="col" data-priority="4" data-sort-key="uptime" data-type="numeric">Uptime</th><th scope="col" data-priority="4" data-sort-key="firmware">Firmware</th><th scope="col" data-priority="4" data-sort-key="client_version">Client</th><th scope="col" data-priority="4" data-sort-key="neighbors_report" data-type="numeric" title="Whether this observer sends /neighbors reports (opt-in firmware feature)">Neighbors</th>
           <th scope="col" data-priority="1" class="col-compare-select" style="width:32px"><span class="sr-only">Select for compare</span></th>
         </tr></thead>
         <tbody>${filtered.map(o => {
@@ -454,6 +457,7 @@ window.preserveCompareSelection = function preserveCompareSelection(prevIds, tbo
             <td data-testid="obs-cell-packet-count" data-value="${_packetCount}">${(o.packet_count || 0).toLocaleString()}</td>
             <td data-value="${_packetsHour}">${sparkBar(o.packetsLastHour || 0, maxPktsHr)}</td>
             <td data-testid="obs-cell-airtime" data-value="${obsAirtimeMap[o.id] != null ? obsAirtimeMap[o.id] : ''}">${window.ObserverAirtime.badge(obsAirtimeMap[o.id], obsAirtimeWarnPct)}</td>
+            <td data-testid="obs-cell-rx-airtime" data-value="${obsRxAirtimeMap[o.id] != null ? obsRxAirtimeMap[o.id] : ''}">${window.ObserverAirtime.rxBadge(obsRxAirtimeMap[o.id])}</td>
             <td data-value="${_skewSec}">${(function() {
               var sk = obsSkewMap[o.id];
               if (!sk || sk.samples == null || sk.samples === 0) return '<span class="text-muted">—</span>';
