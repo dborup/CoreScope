@@ -2274,24 +2274,106 @@ window.addEventListener('DOMContentLoaded', () => {
   // (removed — no auth yet)
 
   // --- Nav Stats ---
+  // #491: all nav-only triggers share one foreground cadence. Shared api()
+  // caching/invalidation and other /stats consumers remain independent.
+  // Hardcoded for now; a later customizer setting can expose this interval.
+  const NAV_STATS_INTERVAL_MS = 15000;
+  let navStatsTimer = null;
+  let navStatsFlashTimer = null;
+  let navStatsLastStart = -Infinity;
+  let navStatsInFlight = false;
+  let navStatsActive = true;
+  let navStatsWasHidden = document.hidden;
+
+  function clearNavStatsTimers() {
+    clearTimeout(navStatsTimer);
+    clearTimeout(navStatsFlashTimer);
+    navStatsTimer = navStatsFlashTimer = null;
+    const el = document.getElementById('navStats');
+    if (el) el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated'));
+  }
+
   async function updateNavStats() {
     try {
-      const stats = await api('/stats', { ttl: CLIENT_TTL.stats });
+      // The scheduler owns retries too: api()'s automatic 503 retry loop
+      // could otherwise fetch while hidden. Other consumers keep its default.
+      const stats = await api('/stats', { ttl: CLIENT_TTL.stats, retry503: false });
+      if (!navStatsActive || document.hidden) return;
       const el = document.getElementById('navStats');
       if (el) {
         el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
-        setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
+        clearTimeout(navStatsFlashTimer);
+        navStatsFlashTimer = setTimeout(() => {
+          navStatsFlashTimer = null;
+          el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated'));
+        }, 600);
         // navPriorityFn IS the coalescing scheduler, so this cannot stack up
-        // even though updateNavStats runs on a 15s interval and on every
-        // debounced WebSocket event.
+        // or rebuild the navigation for every WebSocket event.
         if (navPriorityFn) navPriorityFn();
       }
     } catch {}
   }
-  updateNavStats();
-  setInterval(updateNavStats, 15000);
-  debouncedOnWS(function () { updateNavStats(); });
+
+  function requestNavStats() {
+    if (!navStatsActive || document.hidden || navStatsInFlight) return;
+    const remaining = NAV_STATS_INTERVAL_MS - (performance.now() - navStatsLastStart);
+    if (remaining > 0) {
+      if (navStatsTimer === null) navStatsTimer = setTimeout(() => {
+        navStatsTimer = null;
+        requestNavStats();
+      }, remaining);
+      return;
+    }
+    clearTimeout(navStatsTimer);
+    navStatsTimer = null;
+    navStatsLastStart = performance.now();
+    navStatsInFlight = true;
+    updateNavStats().finally(() => {
+      navStatsInFlight = false;
+      if (!navStatsActive || document.hidden) return;
+      navStatsTimer = setTimeout(() => {
+        navStatsTimer = null;
+        requestNavStats();
+      }, Math.max(0, NAV_STATS_INTERVAL_MS - (performance.now() - navStatsLastStart)));
+    });
+  }
+
+  function navStatsVisibilityChanged() {
+    const wasHidden = navStatsWasHidden;
+    navStatsWasHidden = document.hidden;
+    if (document.hidden) clearNavStatsTimers();
+    else if (wasHidden) {
+      navStatsLastStart = -Infinity;
+      requestNavStats();
+    }
+  }
+
+  function suspendNavStats(event) {
+    navStatsActive = false;
+    clearNavStatsTimers();
+    offWS(requestNavStats);
+    document.removeEventListener('visibilitychange', navStatsVisibilityChanged);
+    if (!event.persisted) {
+      window.removeEventListener('pagehide', suspendNavStats);
+      window.removeEventListener('pageshow', resumeNavStats);
+    }
+  }
+  function resumeNavStats(event) {
+    if (!event.persisted || navStatsActive) return;
+    navStatsActive = true;
+    navStatsWasHidden = document.hidden;
+    navStatsLastStart = -Infinity;
+    onWS(requestNavStats);
+    document.addEventListener('visibilitychange', navStatsVisibilityChanged);
+    requestNavStats();
+  }
+
+  onWS(requestNavStats);
+  document.addEventListener('visibilitychange', navStatsVisibilityChanged);
+  window.addEventListener('pagehide', suspendNavStats);
+  window.addEventListener('pageshow', resumeNavStats);
+  requestNavStats();
 
   // --- Theme Customization ---
   // Fetch theme config and apply via customizer v2 pipeline

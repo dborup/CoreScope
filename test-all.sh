@@ -49,6 +49,7 @@ run test-issue-442-instrumented-vendor-copy.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
+run test-nav-stats-throttle-491.js
 run test-geo-filter.js
 run test-fetch-all-nodes-pagination.js
 run test-nodes-geo-scope-filter.js
