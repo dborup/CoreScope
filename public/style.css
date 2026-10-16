@@ -3719,10 +3719,9 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .time-window-select {
   height: 34px; min-height: 34px; padding: 0 10px; border-radius: 6px; box-sizing: border-box;
   font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--border);
-  background: var(--input-bg); color: var(--text); transition: border-color 0.15s;
+  background: var(--input-bg); color: var(--text); font-family: var(--font); transition: border-color 0.15s;
 }
 .time-window-select:hover { border-color: var(--accent); }
-@media (pointer: coarse) { .time-window-select { height: 44px; min-height: 44px; } }
 .perf-range-control { display: inline-flex; align-items: center; gap: 8px; }
 .region-dropdown-wrap { position: relative; display: inline-flex; align-items: center; }
 .region-dropdown-trigger {
@@ -4630,12 +4629,14 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .node-count-pill,
   .analytics-time-range button,
   .detail-back-btn,
-  .filter-toggle-btn {
+  .filter-toggle-btn,
+  .time-window-select {
     min-height: 48px;
     min-width: 48px;
   }
   .filter-bar input,
-  .filter-bar select {
+  .filter-bar select,
+  .time-window-select {
     height: 48px;
   }
   .region-dropdown-trigger,

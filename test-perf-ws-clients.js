@@ -544,12 +544,16 @@ const PERF_FIXTURE = () => ({
     const css = fs.readFileSync('public/style.css', 'utf8');
     const analytics = fs.readFileSync('public/analytics.js', 'utf8');
     assert.ok(!/analytics-time-window-select/.test(css + analytics), 'old analytics-only class name must be gone');
-    assert.strictEqual((analytics.match(/class="time-window-select"/g) || []).length, 3);
-    const rule = (css.match(/\.time-window-select\s*\{[^}]*\}/) || [''])[0];
-    for (const decl of ['background: var(--input-bg)', 'color: var(--text)', 'border: 1px solid var(--border)', 'border-radius: 6px']) {
-      assert.ok(rule.includes(decl), 'shared rule missing ' + decl);
+    assert.ok(/<select id="analyticsTimeWindow" class="time-window-select"/.test(analytics), 'Analytics time window must use the shared class');
+    const rule = (css.match(/(^|\n)\.time-window-select\s*\{[^}]*\}/) || [''])[0];
+    for (const decl of [/background:\s*var\(--input-bg\)/, /(^|[\s;])color:\s*var\(--text\)/, /border:\s*1px solid var\(--border\)/, /font-family:\s*var\(--font\)/]) {
+      assert.ok(decl.test(rule), 'shared rule missing ' + decl);
     }
-    assert.ok(/@media \(pointer: coarse\)\s*\{\s*\.time-window-select\s*\{[^}]*min-height: 44px/.test(css), 'touch screens need a 44px target');
+    // Touch size comes from the #630-1 48px house-minimum block, not a one-off rule.
+    const houseBlock = (css.match(/#630-1: Touch targets[\s\S]*?\n\}/) || [''])[0];
+    assert.ok(/\.time-window-select\s*[,{][\s\S]*?min-height:\s*48px/.test(houseBlock), 'select must be in the #630-1 48px touch block');
+    assert.ok(/\.time-window-select\s*\{\s*height:\s*48px/.test(houseBlock), 'select height must be 48px on touch');
+    assert.ok(!/44px/.test(rule), 'no one-off 44px size on the shared rule');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
