@@ -297,7 +297,8 @@ function renderVersionCard(health) {
     // rebuild, preserving keyboard focus and an open native select menu.
     app.innerHTML = '<div id="perfWrapper" style="padding:16px 24px;"><h2><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lightning"/></svg> Performance Dashboard</h2>' +
       '<section id="wsHistorySection" aria-labelledby="wsHistoryHeading"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">' +
-      '<h3 id="wsHistoryHeading">WebSocket clients</h3><label for="wsHistoryRange">Period <select id="wsHistoryRange" style="min-height:44px;padding:6px;">' +
+      '<h3 id="wsHistoryHeading"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-line"/></svg> WebSocket clients</h3>' +
+      '<label for="wsHistoryRange" class="perf-range-control"><span class="region-filter-label">Period</span><select id="wsHistoryRange" class="time-window-select">' +
       '<option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label></div>' +
       '<div id="wsHistoryContent">Loading history…</div></section><div id="perfContent">Loading...</div></div>';
     const selector = document.getElementById('wsHistoryRange');

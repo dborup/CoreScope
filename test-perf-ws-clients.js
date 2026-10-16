@@ -526,6 +526,32 @@ const PERF_FIXTURE = () => ({
     assert.strictEqual(wsCalls, 2, 'leaving and re-entering the page should not reuse a cache from the previous visit');
   });
 
+  await test('Period control uses the shared themed select + label classes, no inline styling', async () => {
+    const { ctx } = makeSandbox();
+    let appHtml = '';
+    ctx.pages.perf.init({ set innerHTML(v) { appHtml = v; } });
+    await flush();
+    const select = (appHtml.match(/<select id="wsHistoryRange"[^>]*>/) || [''])[0];
+    assert.ok(/class="time-window-select"/.test(select), 'select must use .time-window-select: ' + select);
+    assert.ok(!/style=/.test(select), 'select must not carry inline styles: ' + select);
+    assert.ok(/<span class="region-filter-label">Period<\/span>/.test(appHtml), 'label text must use .region-filter-label');
+    const heading = (appHtml.match(/<h3 id="wsHistoryHeading">[\s\S]*?<\/h3>/) || [''])[0];
+    assert.ok(/<svg class="ph-icon" aria-hidden="true">/.test(heading), 'heading needs the same decorative icon as the other sections');
+    assert.ok(/WebSocket clients<\/h3>$/.test(heading), 'accessible name stays "WebSocket clients"');
+  });
+
+  await test('time-window select styling is one shared rule used by Analytics and Perf', () => {
+    const css = fs.readFileSync('public/style.css', 'utf8');
+    const analytics = fs.readFileSync('public/analytics.js', 'utf8');
+    assert.ok(!/analytics-time-window-select/.test(css + analytics), 'old analytics-only class name must be gone');
+    assert.strictEqual((analytics.match(/class="time-window-select"/g) || []).length, 3);
+    const rule = (css.match(/\.time-window-select\s*\{[^}]*\}/) || [''])[0];
+    for (const decl of ['background: var(--input-bg)', 'color: var(--text)', 'border: 1px solid var(--border)', 'border-radius: 6px']) {
+      assert.ok(rule.includes(decl), 'shared rule missing ' + decl);
+    }
+    assert.ok(/@media \(pointer: coarse\)\s*\{\s*\.time-window-select\s*\{[^}]*min-height: 44px/.test(css), 'touch screens need a 44px target');
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

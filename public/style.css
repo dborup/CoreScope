@@ -3714,12 +3714,16 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   margin-right: 2px; user-select: none; white-space: nowrap; flex-shrink: 0;
 }
 .analytics-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
-.analytics-time-window-select {
+/* The one time-window / metric <select> style: Analytics filters and the
+   Perf page's WebSocket-history Period control. */
+.time-window-select {
   height: 34px; min-height: 34px; padding: 0 10px; border-radius: 6px; box-sizing: border-box;
   font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--border);
   background: var(--input-bg); color: var(--text); transition: border-color 0.15s;
 }
-.analytics-time-window-select:hover { border-color: var(--accent); }
+.time-window-select:hover { border-color: var(--accent); }
+@media (pointer: coarse) { .time-window-select { height: 44px; min-height: 44px; } }
+.perf-range-control { display: inline-flex; align-items: center; gap: 8px; }
 .region-dropdown-wrap { position: relative; display: inline-flex; align-items: center; }
 .region-dropdown-trigger {
   display: inline-flex; align-items: center; padding: 6px 10px; border-radius: 6px;

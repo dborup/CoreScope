@@ -137,6 +137,32 @@ async function check(name, fn) {
         assert.match(await page.locator('#wsHistoryContent').innerText(), /307/);
         assert.match(await page.locator('#wsHistoryContent').innerText(), /saved|persist|restart/i);
       });
+      await check('Period control is themed like the Analytics time-window select, light and dark', async () => {
+        // Compare against the real Analytics control, not a copy of its CSS,
+        // so a later restyle of either page shows up here.
+        const styleOf = (selector, theme) => page.evaluate(async ({ selector, theme }) => {
+          document.documentElement.setAttribute('data-theme', theme);
+          // The customizer re-applies its inline :root theme vars from an
+          // observer on data-theme; read only after it has run and after the
+          // select's 0.15s border-color transition has settled.
+          await new Promise(resolve => setTimeout(resolve, 300));
+          const c = getComputedStyle(document.querySelector(selector));
+          return {
+            background: c.backgroundColor, color: c.color, border: c.border, radius: c.borderRadius,
+            font: c.fontSize + ' ' + c.fontWeight, height: c.height,
+          };
+        }, { selector, theme });
+        const perf = {}, analytics = {};
+        for (const theme of ['light', 'dark']) perf[theme] = await styleOf('#wsHistoryRange', theme);
+        await page.goto(BASE + '/#/analytics', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#analyticsTimeWindow');
+        for (const theme of ['light', 'dark']) analytics[theme] = await styleOf('#analyticsTimeWindow', theme);
+        for (const theme of ['light', 'dark']) {
+          assert.deepEqual(perf[theme], analytics[theme], theme + ' theme: Period select differs from Analytics');
+        }
+        assert.notDeepEqual(perf.light.background, perf.dark.background, 'select background does not follow the theme');
+        assert.equal(perf.dark.radius, '6px');
+      });
       assert.deepEqual(desktop.errors, [], 'unexpected desktop JavaScript errors');
     } finally { await desktop.context.close(); }
 
@@ -148,6 +174,7 @@ async function check(name, fn) {
         await mobile.page.locator('#wsHistoryRange').scrollIntoViewIfNeeded();
         const rect = await mobile.page.locator('#wsHistoryRange').boundingBox();
         assert.ok(rect && rect.width > 0 && rect.x >= 0 && rect.x + rect.width <= 375, 'range control is clipped');
+        assert.ok(rect.height >= 44, 'touch target is ' + rect.height + 'px, needs 44px');
         const hit = await mobile.page.locator('#wsHistoryRange').evaluate(element => {
           const r = element.getBoundingClientRect();
           const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
