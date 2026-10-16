@@ -40,6 +40,13 @@ assert.equal(regions.validScope('#bad<scope'), false);
 const manyScopes = Array.from({ length: 129 }, (_, i) => node('p' + i, { scopes: [scope('#r' + i)] }));
 assert.equal(regions.scopeCatalog(manyScopes).truncated, true);
 assert.equal(regions.scopeCatalog(manyScopes).scopes.length, 128);
+const routeOnlyCatalog = regions.mergeScopeCatalog({ scopes: [], truncated: false },
+  Array.from({ length: 129 }, (_, i) => '#route' + String(i).padStart(3, '0')));
+assert.equal(routeOnlyCatalog.truncated, true, 'route-only scopes participate in the selector cap');
+assert.equal(routeOnlyCatalog.scopes.length, 128);
+assert.equal(routeOnlyCatalog.scopes.includes('#route128'), false);
+assert.deepEqual(regions.mergeScopeCatalog({ scopes: ['#history'], truncated: false }, ['#route', '#route', '<bad>']),
+  { scopes: ['#history', '#route'], truncated: false });
 assert.equal(regions.collectScopeNodes(Array.from({ length: 5001 }, (_, i) => node('p' + i))).length, 5000);
 assert.deepEqual(regions.convexHull([[10, 55], [11, 55], [10, 56], [10.2, 55.2]]), [[10, 55], [11, 55], [10, 56]]);
 assert.deepEqual(regions.convexHull([[10, 55], [11, 55]]), []);
@@ -270,4 +277,90 @@ for (const ending of ['2026-10-26T12:00:00Z', '2026-11-02T12:00:00Z']) {
   assert.equal(dstHealth.bins[167].end, new Date(end).toISOString());
 }
 
-console.log('regions map, timeline and activity unit tests passed');
+const routes = require('./public/regions-routes.js');
+const fullKey = letter => letter.repeat(64);
+const routeNodes = [historical(fullKey('a'), [], { scopes: [{ name: '#a|#b', buckets: [bucket(503)] }, { name: '#c', buckets: [bucket(503)] }] }),
+  historical(fullKey('b'), [], { scopes: [{ name: '#a', buckets: [bucket(503)] }, { name: '#b|#c', buckets: [bucket(503)] }] }),
+  historical(fullKey('c'), [], { positionSource: 'none', lat: null, lon: null, scopes: [{ name: '#a', buckets: [bucket(503)] }, { name: '#c', buckets: [bucket(503)] }] })];
+const routeData = { ...historyData(), nodes: routeNodes, steps: [
+  { from: fullKey('a'), to: fullKey('b'), scope: '#a', buckets: [bucket(503, 3)] },
+  { from: fullKey('b'), to: fullKey('a'), scope: '#a', buckets: [bucket(503, 2)] },
+  { from: fullKey('a'), to: fullKey('c'), scope: '#c', buckets: [bucket(503)] },
+], stepEvidence: { skippedObservations: 0, unresolvedHops: 0, sourceTruncated: false, incomplete: false } };
+const routeHistory = history.indexHistory(routeData, routeNodes);
+let routeIndex = routes.indexRoutes(routeData, routeHistory, regions.validScope);
+let routeFrame = history.selectFrame(routeHistory, { window: '1h' });
+let connections = routes.selectRoutes(routeIndex, routeHistory, routeFrame, {});
+assert.equal(connections.steps.length, 3);
+assert.equal(connections.stepAppearances, 6, 'step totals count edge appearances, not global distinct packets');
+assert.equal(connections.unmappedSteps, 1);
+assert.equal(connections.pairs.length, 3, 'scope names containing delimiters must not collide');
+assert.equal(connections.pairs.find(pair => pair.from === '#a|#b' && pair.to === '#c').count, 1);
+assert.equal(connections.pairs.find(pair => pair.from === '#a' && pair.to === '#b|#c').count, 1);
+assert.equal(connections.complete, true);
+connections = routes.selectRoutes(routeIndex, routeHistory, routeFrame, { scope: '#a' });
+assert.equal(connections.steps.length, 2);
+assert.equal(connections.pairs.length, 2);
+assert(connections.steps.some(step => step.from === fullKey('a') && step.to === fullKey('b')));
+assert(connections.steps.some(step => step.from === fullKey('b') && step.to === fullKey('a')));
+const limitedData = { ...routeData, stepBucketsTruncated: true };
+connections = routes.selectRoutes(routes.indexRoutes(limitedData, routeHistory, regions.validScope), routeHistory, routeFrame, {});
+assert.equal(connections.complete, false);
+assert.equal(connections.stepAppearances, 6, 'limited evidence remains an explicit lower bound');
+for (const key of ['skippedObservations', 'unresolvedHops', 'missingEndpointSteps']) {
+  const contradictory = { ...routeData, stepEvidence: { ...routeData.stepEvidence, [key]: 1, incomplete: false } };
+  const selected = routes.selectRoutes(routes.indexRoutes(contradictory, routeHistory, regions.validScope), routeHistory, routeFrame, {});
+  assert.equal(selected.complete, false, 'omitted evidence cannot be complete even when the server flag contradicts diagnostics');
+  assert.equal(selected.stepAppearances, 6);
+}
+const badRoutes = { ...routeData, steps: [{ ...routeData.steps[0], to: 'bad' }, { ...routeData.steps[0], scope: '<bad>' },
+  { ...routeData.steps[0], buckets: [bucket(504)] }] };
+assert.equal(routes.indexRoutes(badRoutes, routeHistory, regions.validScope).limited, true);
+const cliqueNodes = Array.from({ length: 5000 }, (_, i) => historical(i.toString(16).padStart(64, '0'), [], {
+  scopes: Array.from({ length: 32 }, (_, j) => ({ name: '#scope' + j, buckets: [bucket(503)] })),
+}));
+const cliqueHistory = history.indexHistory(historyData(), cliqueNodes);
+const cliqueIndex = routes.indexRoutes({ steps: [] }, cliqueHistory, regions.validScope);
+const cliqueFrame = history.selectFrame(cliqueHistory, { window: '1h' });
+const clique = routes.selectRoutes(cliqueIndex, cliqueHistory, cliqueFrame, {});
+assert.equal(clique.pairs.length, 496);
+assert(clique.pairs.every(pair => pair.count === 5000), 'retained pairs have exact distinct-relay weights');
+assert(clique.pairs.every(pair => pair.examples.length <= 3));
+assert(clique.pairs.length <= 1000);
+assert.equal(routes.selectRoutes(cliqueIndex, cliqueHistory, cliqueFrame, {}).pairs, clique.pairs, 'same interval reuses bounded relation aggregation');
+const routeOnlyData = { ...routeData, stepNodes: [
+  { publicKey: fullKey('d'), name: 'Route only from', role: 'repeater', lat: 55, lon: 10, positionSource: 'reported' },
+  { publicKey: fullKey('e'), name: 'Route only to', role: 'room', lat: 56, lon: 11, positionSource: 'reported' },
+], steps: [{ from: fullKey('d'), to: fullKey('e'), scope: '#routeonly', buckets: [bucket(503, 7)] }] };
+const routeOnly = routes.selectRoutes(routes.indexRoutes(routeOnlyData, routeHistory, regions.validScope, regions.validPosition), routeHistory, routeFrame, { scope: '#routeonly' });
+assert.equal(routeOnly.steps.length, 1, 'own flood endpoint metadata is independent of canonical-route relay history');
+assert.equal(routeOnly.stepAppearances, 7);
+assert.equal(routeOnly.pairs.length, 0, 'route-only endpoints must not create scope membership');
+assert.equal(routeOnly.mapSteps.length, 1);
+assert.equal(regions.parseSelection('#/regions?view=connections&window=1h&scope=%23routeonly&compare=1&page=2').compare, false);
+assert.equal(regions.scopeHash('#routeonly', '1h', { view: 'connections', at: historyEnd, page: 2, pairsPage: 3, compare: true }),
+  '#/regions?window=1h&scope=%23routeonly&view=connections&at=2026-10-16T12%3A00%3A00.000Z&page=2&pairsPage=3');
+assert.equal(history.scopeCount(cliqueHistory.nodes[0].scopes[0], 503, 504).count, 1, 'connections reuse the existing sparse range reader');
+const populatedSteps = Array.from({ length: 5000 }, (_, index) => ({ from: index.toString(16).padStart(64, '0'),
+  to: ((index + 1) % 5000).toString(16).padStart(64, '0'), scope: '#scope0', buckets: Array.from({ length: 20 }, (_, n) => bucket(484 + n)) }));
+const fullRoutes = routes.indexRoutes({ steps: populatedSteps, stepEvidence: routeData.stepEvidence }, cliqueHistory, regions.validScope);
+const fullConnections = routes.selectRoutes(fullRoutes, cliqueHistory, cliqueFrame, { scope: '#scope0' });
+assert.equal(fullConnections.steps.length, 5000);
+assert.equal(fullConnections.mapSteps.length, 200, 'the map has a separate bounded rendering budget');
+assert.equal(fullRoutes.steps.reduce((sum, step) => sum + step.indices.length, 0), 100000);
+const cappedSteps = routes.indexRoutes({ steps: [...populatedSteps, populatedSteps[0]], stepEvidence: routeData.stepEvidence }, cliqueHistory, regions.validScope);
+assert.equal(cappedSteps.limited, true, 'row caps cannot silently imply complete evidence');
+const diverseNodes = Array.from({ length: 80 }, (_, i) => historical((10000 + i).toString(16).padStart(64, '0'), [], {
+  scopes: Array.from({ length: 32 }, (_, j) => ({ name: '#group' + i + 's' + j, buckets: [bucket(503)] })),
+}));
+const diverseHistory = history.indexHistory(historyData(), diverseNodes);
+const diverseFrame = history.selectFrame(diverseHistory, { window: '1h' });
+const diverseIndex = routes.indexRoutes({ steps: [] }, diverseHistory, regions.validScope);
+const cappedPairs = routes.selectRoutes(diverseIndex, diverseHistory, diverseFrame, {});
+assert.equal(cappedPairs.pairs.length, 1000);
+assert.equal(cappedPairs.pairsTruncated, true);
+assert(cappedPairs.pairs.every(pair => pair.count === 1), 'retained pair counts stay exact after discovery reaches its cap');
+assert.equal(routes.selectRoutes(diverseIndex, diverseHistory, diverseFrame, { scope: '#group79s0' }).pairs.length, 31,
+  'scope filtering finds exact pairs beyond the unfiltered retained subset');
+
+console.log('regions map, timeline, activity and connection unit tests passed');

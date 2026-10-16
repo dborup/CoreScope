@@ -5944,6 +5944,7 @@ body.embed #app.app-fixed {
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
 .regions-page > :not(.regions-leaflet) { flex-shrink: 0; }
 .regions-page-health { overflow-y: auto; }
+.regions-page-connections { overflow-y: auto; }
 .regions-page h1, .regions-page p { margin: 0; }
 .regions-note { color: var(--text-muted); max-width: 85ch; }
 .regions-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
@@ -5960,6 +5961,7 @@ body.embed #app.app-fixed {
 .regions-slider-label input { width: 100%; min-width: 0; accent-color: var(--accent); }
 .regions-compare-label { display: flex; gap: 6px; align-items: center; font-size: 0.9em; }
 .regions-compare-label input { accent-color: var(--accent); }
+.regions-compare-label[hidden] { display: none; }
 .regions-interval { grid-column: 1 / -1; font-size: 0.85em; color: var(--text-muted); overflow-wrap: anywhere; }
 .regions-comparison { display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
 .regions-reference { color: var(--text-muted); overflow-wrap: anywhere; }
@@ -5999,6 +6001,21 @@ body.embed #app.app-fixed {
 .regions-hourly-table caption { text-align: left; color: var(--text-muted); margin-bottom: 6px; }
 .regions-hourly-table th, .regions-hourly-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .regions-hourly-table th { color: var(--text-muted); }
+.regions-connections { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.regions-connections[hidden] { display: none; }
+.regions-connections h2 { margin: 4px 0 0; font-size: 1rem; }
+.regions-connections-summary, .regions-pairs-summary, .regions-steps-summary { font-size: 0.85rem; }
+.regions-connections-note, .regions-step-diagnostics, .regions-connections-map-note { color: var(--text-muted); font-size: 0.8rem; overflow-wrap: anywhere; }
+.regions-connections[data-complete="false"] .regions-connections-summary { border-left: 3px solid var(--warning); padding-left: 8px; }
+.regions-relations-scroll { max-height: 280px; max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.regions-relations-scroll table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 0.8rem; }
+.regions-relations-scroll th, .regions-relations-scroll td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.regions-relations-scroll th { position: sticky; top: 0; color: var(--text-muted); background: var(--surface); }
+.regions-relations-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; color: var(--text-muted); font-size: 0.8rem; }
+.regions-relations-pagination button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); background: var(--surface); cursor: pointer; }
+.regions-relations-pagination button:disabled { opacity: 0.55; cursor: default; }
+.regions-relations-scroll:focus-visible, .regions-relations-pagination button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.regions-step-arrow { fill: var(--accent); }
 .regions-status { color: var(--text-muted); min-height: 2.4em; }
 .regions-snapshot, .regions-coverage, .regions-details { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
 .regions-details summary { cursor: pointer; }

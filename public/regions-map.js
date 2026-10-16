@@ -90,6 +90,11 @@
     return scopeCatalog(nodes).scopes;
   }
 
+  function mergeScopeCatalog(catalog, additionalScopes) {
+    const names = Array.from(new Set(catalog.scopes.concat(additionalScopes.filter(validScope)))).sort((a, b) => a.localeCompare(b));
+    return { scopes: names.slice(0, MAX_SCOPES), truncated: catalog.truncated || names.length > MAX_SCOPES };
+  }
+
   function convexHull(points) {
     if (!Array.isArray(points)) return [];
     const sorted = points.filter(p => Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
@@ -118,10 +123,16 @@
     const scope = params.get('scope') || '';
     const window = params.get('window');
     const selection = { window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h', scope: validScope(scope) ? scope : '' };
-    if (params.get('view') === 'timeline' || params.get('view') === 'health') {
+    if (['timeline', 'health', 'connections'].includes(params.get('view'))) {
       selection.view = params.get('view');
       selection.at = isoTime(params.get('at'));
-      selection.compare = params.get('compare') === '1';
+      selection.compare = selection.view !== 'connections' && params.get('compare') === '1';
+      if (selection.view === 'connections') {
+        for (const key of ['page', 'pairsPage']) {
+          const value = Number(params.get(key));
+          if (Number.isInteger(value) && value > 1 && value <= 200) selection[key] = value;
+        }
+      }
     }
     return selection;
   }
@@ -133,11 +144,14 @@
   function scopeHash(scope, window = '24h', selection = {}) {
     const params = new URLSearchParams({ window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h' });
     if (validScope(scope)) params.set('scope', scope);
-    if (selection.view === 'timeline' || selection.view === 'health') {
+    if (['timeline', 'health', 'connections'].includes(selection.view)) {
       params.set('view', selection.view);
       const at = isoTime(selection.at);
       if (at) params.set('at', at);
-      if (selection.compare) params.set('compare', '1');
+      if (selection.view !== 'connections' && selection.compare) params.set('compare', '1');
+      if (selection.view === 'connections') for (const key of ['page', 'pairsPage']) {
+        if (Number.isInteger(selection[key]) && selection[key] > 1 && selection[key] <= 200) params.set(key, selection[key]);
+      }
     }
     return '#/regions?' + params.toString();
   }
@@ -360,7 +374,7 @@
     const viewLabel = element('label', '', 'View ');
     const view = element('select');
     view.setAttribute('aria-label', 'Region view');
-    view.append(new Option('Latest', 'latest'), new Option('Timeline', 'timeline'), new Option('Health & trends', 'health'));
+    view.append(new Option('Latest', 'latest'), new Option('Timeline', 'timeline'), new Option('Health & trends', 'health'), new Option('Connections', 'connections'));
     view.value = selection.view || 'latest';
     viewLabel.appendChild(view);
     controls.appendChild(viewLabel);
@@ -384,7 +398,7 @@
     controls.appendChild(fitButton);
     shell.appendChild(controls);
     const timelineControls = element('div', 'regions-timeline');
-    timelineControls.hidden = selection.view !== 'timeline' && selection.view !== 'health';
+    timelineControls.hidden = !['timeline', 'health', 'connections'].includes(selection.view);
     const transport = element('div', 'regions-transport');
     function transportButton(text, label) {
       const button = element('button', '', text);
@@ -427,6 +441,11 @@
     shell.appendChild(coverage);
     const activityPanel = createActivityPanel();
     shell.appendChild(activityPanel.panel);
+    const routesTools = root.RegionsRoutes;
+    const routesPanel = routesTools ? routesTools.createPanel((key, value) => {
+      selection[key] = value; saveSelection(); draw(false);
+    }) : null;
+    if (routesPanel) shell.appendChild(routesPanel.panel);
     const details = element('details', 'regions-details');
     details.appendChild(element('summary', '', 'Data & position details'));
     details.appendChild(element('p', '', 'Repeaters and rooms are shown where scoped relay traffic was observed. Positions are self-reported; their accuracy is unverified. Nodes without usable positions are counted but not mapped. Dashed outlines join the outermost node positions and do not measure RF coverage or administrative boundaries.'));
@@ -458,9 +477,9 @@
       if (redrawMap) redrawMap();
     };
     let tileLayer = null;
-    function ensureMap() {
+    function ensureMap(reportError = true) {
       if (map) return true;
-      if (typeof L === 'undefined') { status.textContent = 'Map library unavailable.'; return false; }
+      if (typeof L === 'undefined') { if (reportError) status.textContent = 'Map library unavailable.'; return false; }
       map = L.map(mapEl, { zoomAnimation: false }).setView([55.7, 10.5], 6);
       leafletMap = map;
       layer = L.layerGroup().addTo(map);
@@ -472,20 +491,25 @@
     let requestGeneration = 0, snapshot = null, nodes = [], catalog = { scopes: [], truncated: false };
     let indexedHistory = null, timer = null, lastFrame = null, scrubFrame = null;
     let activity = null, activityScope = null;
+    let routesIndex = null;
     const markers = new Map();
     let hullLayer = null;
     const historyTools = root.RegionsHistory;
 
-    function historicalView() { return selection.view === 'timeline' || selection.view === 'health'; }
+    function historicalView() { return ['timeline', 'health', 'connections'].includes(selection.view); }
 
     function updateView() {
       const health = selection.view === 'health';
+      const connections = selection.view === 'connections';
       timelineControls.hidden = !historicalView();
-      play.hidden = health;
+      play.hidden = health || connections;
+      compareLabel.hidden = connections;
       fitButton.hidden = health;
       mapEl.hidden = health;
       shell.classList.toggle('regions-page-health', health);
+      shell.classList.toggle('regions-page-connections', connections);
       if (!health) activityPanel.clear();
+      if (!connections && routesPanel) routesPanel.clear();
       if (health) shell.insertBefore(comparison, details); else shell.insertBefore(comparison, status);
     }
 
@@ -654,7 +678,20 @@
       coverage.setAttribute('data-coverage-state', frame.currentCoverage);
       exactBounds.replaceChildren(element('p', '', 'Selected interval (UTC): ' + frame.interval.start + ' — ' + frame.interval.end),
         element('p', '', 'History dataset (UTC): ' + new Date(indexedHistory.start).toISOString() + ' — ' + new Date(indexedHistory.end).toISOString()));
-      if (selection.view === 'health') {
+      if (selection.view === 'connections') {
+        if (!routesIndex || !routesPanel) throw new Error('Connection evidence unavailable');
+        const connections = routesTools.selectRoutes(routesIndex, indexedHistory, frame, selection);
+        const pages = routesPanel.update(connections, frame, selection);
+        selection.page = pages.page; selection.pairsPage = pages.pairsPage;
+        saveSelection(true);
+        comparison.hidden = true;
+        status.textContent = connections.steps.length + ' directed step/scope rows and ' + connections.pairs.length +
+          (connections.pairsTruncated ? '+ retained' : '') + ' shared-scope pairs in retained observations.' +
+          (connections.complete ? '' : ' Evidence is incomplete or capped; absence cannot be established.');
+        if (catalog.truncated) status.textContent += ' Scope selector is limited to 128 names; a selected scope outside the list is preserved.';
+        if (ensureMap(false)) routesPanel.renderMap(map, layer, L);
+        else status.textContent += ' Map library unavailable; the evidence tables remain available.';
+      } else if (selection.view === 'health') {
         if (!activity || activityScope !== selection.scope) {
           activity = historyTools.indexActivity(indexedHistory, selection.scope);
           activityScope = selection.scope;
@@ -666,7 +703,7 @@
               'No scoped relay activity observed in this complete interval; this does not establish an outage.') :
             'Retained observations only; history is incomplete or limited.');
       } else renderTimelinePoints(frame);
-      renderComparison(frame);
+      if (selection.view !== 'connections') renderComparison(frame);
     }
 
     function populateScopes(loading) {
@@ -674,7 +711,8 @@
       select.appendChild(new Option('All observed scopes', ''));
       for (const scope of catalog.scopes) select.appendChild(new Option(scope, scope));
       if (selection.scope && !catalog.scopes.includes(selection.scope)) {
-        const hasSelectedData = nodes.some(node => node.scopes.some(s => s.name === selection.scope));
+        const hasSelectedData = nodes.some(node => node.scopes.some(s => s.name === selection.scope)) ||
+          (routesIndex && routesIndex.steps.some(step => step.scope === selection.scope));
         select.appendChild(new Option((loading ? 'Selected scope: ' : hasSelectedData ? 'Selected (outside list): ' : 'No data in interval: ') + selection.scope, selection.scope));
       }
       select.value = selection.scope;
@@ -687,6 +725,7 @@
         if (selection.view === 'timeline' && !ensureMap()) return;
         drawTimeline();
         if (selection.view === 'timeline' && fit) fitTimeline();
+        if (selection.view === 'connections' && fit && map) routesPanel.fitMap(map, L);
         return;
       }
       if (!snapshot) return;
@@ -694,7 +733,11 @@
       renderPoints(layer, map, nodes, selection.scope, status, snapshot.truncated || snapshot.nodes.length > MAX_POINTS,
         snapshot.scopesTruncated || catalog.truncated, fit);
     }
-    redrawMap = () => { if (selection.view === 'timeline' && indexedHistory && lastFrame) renderTimelinePoints(lastFrame); };
+    redrawMap = () => {
+      if (!indexedHistory || !lastFrame) return;
+      if (selection.view === 'timeline') renderTimelinePoints(lastFrame);
+      if (selection.view === 'connections' && routesPanel && map) routesPanel.renderMap(map, layer, L);
+    };
 
     async function load() {
       pause();
@@ -705,6 +748,8 @@
       indexedHistory = null;
       activity = null; activityScope = null;
       activityPanel.clear();
+      routesIndex = null;
+      if (routesPanel) routesPanel.clear();
       nodes = [];
       catalog = { scopes: [], truncated: false };
       clearPoints();
@@ -721,7 +766,7 @@
       exactBounds.replaceChildren();
       coverage.removeAttribute('data-coverage-state');
       try {
-        const data = await api(historical ? '/regions/history' : '/regions/observed?window=' + encodeURIComponent(window), { ttl: 0, bust: true, retry503: false });
+        const data = await api(selection.view === 'connections' ? '/regions/routes' : historical ? '/regions/history' : '/regions/observed?window=' + encodeURIComponent(window), { ttl: 0, bust: true, retry503: false });
         if (token !== generation || request !== requestGeneration || leafletMap !== map) return;
         if (historical) {
           if (!historyTools || !data || !Array.isArray(data.nodes)) throw new Error('Invalid regions history');
@@ -732,6 +777,12 @@
           }, nodes);
           catalog = scopeCatalog(nodes);
           if (catalog.truncated) indexedHistory.limited = true;
+          if (selection.view === 'connections') {
+            if (!routesTools || !routesPanel) throw new Error('Connection module unavailable');
+            routesIndex = routesTools.indexRoutes(data, indexedHistory, validScope, validPosition);
+            catalog = mergeScopeCatalog(catalog, routesIndex.steps.map(step => step.scope));
+            if (catalog.truncated) routesIndex.limited = true;
+          }
           populateScopes(false);
           draw(true);
           saveSelection(true);
@@ -784,13 +835,18 @@
     view.addEventListener('change', () => {
       pause();
       const previousHistorical = historicalView();
+      const previousView = selection.view;
       selection.view = view.value;
+      if (previousView !== selection.view && (previousView === 'connections' || selection.view === 'connections')) clearPoints();
+      if (selection.view === 'connections') { selection.compare = false; compare.checked = false; }
       if (!historicalView()) { selection.at = ''; selection.compare = false; compare.checked = false; }
       updateView();
+      // Health leaves an existing map hidden and skips tile updates. Refresh
+      // both its theme and dimensions before fitting any visible map view.
+      if (map && selection.view !== 'health') { applyTiles(); map.invalidateSize(); }
       saveSelection();
-      if (previousHistorical && historicalView() && indexedHistory) {
-        draw(selection.view === 'timeline');
-        if (map && selection.view === 'timeline') { applyTiles(); map.invalidateSize(); }
+      if (previousHistorical && historicalView() && indexedHistory && (selection.view !== 'connections' || routesIndex)) {
+        draw(selection.view === 'timeline' || selection.view === 'connections');
       } else load();
     });
     compare.addEventListener('change', () => {
@@ -831,7 +887,8 @@
       timer = setTimeout(tick, 1000);
     });
     fitButton.addEventListener('click', () => {
-      if (selection.view === 'timeline') { if (indexedHistory) fitTimeline(); }
+      if (selection.view === 'connections') { if (map && routesPanel) routesPanel.fitMap(map, L); }
+      else if (selection.view === 'timeline') { if (indexedHistory) fitTimeline(); }
       else draw(true);
     });
     refresh.addEventListener('click', load);
@@ -852,7 +909,7 @@
   }
 
   const internals = { validPosition, validScope, collectScopeNodes, collectScopePoints, selectionSummary,
-    lastRelayedForScope, listScopes, scopeCatalog, convexHull, parseSelection, parseSelectedScope, scopeHash, coverageInfo };
+    lastRelayedForScope, listScopes, scopeCatalog, mergeScopeCatalog, convexHull, parseSelection, parseSelectedScope, scopeHash, coverageInfo };
   if (typeof module !== 'undefined' && module.exports) module.exports = internals;
   if (typeof root.registerPage === 'function') root.registerPage('regions', { init, destroy });
 })(typeof window === 'undefined' ? globalThis : window);

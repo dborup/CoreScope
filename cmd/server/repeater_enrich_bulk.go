@@ -98,6 +98,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	index := make(map[int]int, 1<<14)
 	txs := make([]bulkRelayTx, 0, 1<<14)
 	confirmed := make(map[string]struct{})
+	routes := newRegionsRoutesCollector(now)
 	add := func(list []*StoreTx) {
 		for _, tx := range list {
 			if tx == nil {
@@ -109,6 +110,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			b := bulkRelayTx{entry: newRelayEntry(tx, false)}
 			b.entry.parsed = true
 			b.entry.t, b.entry.valid = parseRelayTS(tx.FirstSeen)
+			routes.captureAt(tx, b.entry.t, b.entry.valid)
 			if txHasObservedFloodPath(tx) {
 				forEachObservedRelayHop(tx, func(token string) bool {
 					key := resolve.key(token)
@@ -213,6 +215,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	}
 	snapshot.info = out
 	snapshot.history = history.history
+	snapshot.routes = routes.build(pm)
 	return snapshot
 }
 

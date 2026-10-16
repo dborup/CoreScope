@@ -22,6 +22,7 @@ type regionScopeRelay struct {
 type repeaterRelaySnapshot struct {
 	info          map[string]RepeaterRelayInfo
 	history       *regionsRelayHistory
+	routes        *regionsRouteSnapshot
 	generatedAt   time.Time
 	coverageStart time.Time
 	loading       bool
