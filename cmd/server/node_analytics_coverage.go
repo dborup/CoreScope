@@ -13,6 +13,10 @@ type NodeAnalyticsCoverage struct {
 	Partial bool    `json:"partial"`
 	Reason  string  `json:"reason"`
 	Loading bool    `json:"loading"`
+	// LateEvictedObservations counts observations (since startup) of evicted
+	// transmissions that were heard after the eviction edge. They are a known,
+	// bounded gap in retained evidence and never move From.
+	LateEvictedObservations int `json:"late_evicted_observations"`
 }
 
 // All fields are guarded by PacketStore.mu. This is constant-sized and is
@@ -27,9 +31,50 @@ type nodeAnalyticsHistory struct {
 	loadCutoff   time.Time
 	evictedFrom  time.Time
 	observedFrom time.Time
+	lateEvicted  int
+}
+
+// parseCanonicalUTCSeconds is the hot-path parser for exactly
+// "YYYY-MM-DDTHH:MM:SSZ", the form the store writes. It rejects anything it
+// is not certain about (including out-of-range fields) so the caller can fall
+// back to time.Parse with identical results.
+func parseCanonicalUTCSeconds(raw string) (time.Time, bool) {
+	if len(raw) != 20 || raw[4] != '-' || raw[7] != '-' || raw[10] != 'T' ||
+		raw[13] != ':' || raw[16] != ':' || raw[19] != 'Z' {
+		return time.Time{}, false
+	}
+	num := func(i, n int) (int, bool) {
+		v := 0
+		for ; n > 0; n, i = n-1, i+1 {
+			c := raw[i]
+			if c < '0' || c > '9' {
+				return 0, false
+			}
+			v = v*10 + int(c-'0')
+		}
+		return v, true
+	}
+	y, ok1 := num(0, 4)
+	mo, ok2 := num(5, 2)
+	d, ok3 := num(8, 2)
+	h, ok4 := num(11, 2)
+	mi, ok5 := num(14, 2)
+	sec, ok6 := num(17, 2)
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) || mo < 1 || mo > 12 || d < 1 ||
+		h > 23 || mi > 59 || sec > 59 {
+		return time.Time{}, false
+	}
+	t := time.Date(y, time.Month(mo), d, h, mi, sec, 0, time.UTC)
+	if t.Day() != d { // day overflowed the month (e.g. Feb 30)
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 func parseNodeAnalyticsTime(raw string) (time.Time, bool) {
+	if t, ok := parseCanonicalUTCSeconds(raw); ok {
+		return t, t.Unix() > 0
+	}
 	t, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil {
 		t, err = time.ParseInLocation("2006-01-02 15:04:05", raw, time.UTC)
@@ -120,26 +165,33 @@ func (s *PacketStore) nodeAnalyticsCoverageLocked(days int, now time.Time) NodeA
 	} else if reason == "" || reason == "available_history" {
 		reason = "available_history"
 	}
-	return NodeAnalyticsCoverage{From: from.Format(time.RFC3339Nano), To: now.Format(time.RFC3339Nano), Seconds: now.Sub(from).Seconds(), Partial: partial, Reason: reason, Loading: loading}
+	return NodeAnalyticsCoverage{From: from.Format(time.RFC3339Nano), To: now.Format(time.RFC3339Nano), Seconds: now.Sub(from).Seconds(), Partial: partial, Reason: reason, Loading: loading, LateEvictedObservations: h.lateEvicted}
 }
 
-// invalidateNodeAnalyticsEvictionLocked is deliberately based on removed
-// observation evidence (including re-heard old rows), never on the earliest
-// surviving FirstSeen. Tied timestamps are excluded by advancing one ns.
+// invalidateNodeAnalyticsEvictionLocked advances the coverage edge to the
+// eviction boundary: the evicted transmission's FirstSeen (+1 ns to exclude
+// ties). Analytics membership is by FirstSeen, so nothing at or before that
+// instant can still be complete. Late observations of an evicted, re-heard
+// transmission (up to ~2 days after FirstSeen in production) are a known,
+// bounded gap that is only counted, never allowed to move the edge: routine
+// minute-by-minute eviction would otherwise make coverage jump forward.
+// An unparseable FirstSeen cannot bound anything and stays conservative.
 func (s *PacketStore) invalidateNodeAnalyticsEvictionLocked(removed []*StoreTx) {
 	h := &s.analyticsHistory
 	for _, tx := range removed {
-		valid := false
-		for _, obs := range tx.Observations {
-			if at, ok := parseNodeAnalyticsTime(obs.Timestamp); ok {
-				valid = true
-				if !at.Before(h.from) {
-					h.from = at.Add(time.Nanosecond)
+		edge, ok := parseNodeAnalyticsTime(tx.FirstSeen)
+		if !ok {
+			h.from = time.Now().UTC()
+		} else {
+			edge = edge.Add(time.Nanosecond)
+			if edge.After(h.from) {
+				h.from = edge
+			}
+			for _, obs := range tx.Observations {
+				if at, ok := parseNodeAnalyticsTime(obs.Timestamp); ok && !at.Before(edge) {
+					h.lateEvicted++
 				}
 			}
-		}
-		if !valid {
-			h.from = time.Now().UTC()
 		}
 		if h.from.After(h.evictedFrom) {
 			h.evictedFrom = h.from

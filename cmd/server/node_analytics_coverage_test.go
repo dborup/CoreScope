@@ -170,14 +170,37 @@ func TestNodeAnalyticsCoverage485_LoadLifecycleShortDBAndEviction(t *testing.T) 
 	}
 	s.analyticsHistory.loading = false
 	s.invalidateNodeAnalyticsEvictionLocked(s.packets[:1])
+	// The evicted tx was first seen 40 days ago; its late observations must
+	// not move the edge (F1). Coverage stays at the 24 h loaded edge.
 	f = coverage485Pair(t, s, 30, now)
-	if f.Coverage.Reason != "memory_eviction" || f.Coverage.Seconds >= 3600 || f.ComputedStats.TotalPackets != 0 {
+	if f.Coverage.Reason != "memory_eviction" || f.Coverage.Seconds != 86400 || f.ComputedStats.TotalPackets != 1 {
 		t.Fatalf("reheard eviction=%+v", f)
 	}
 	// A later background completion cannot undo the invalidated edge.
 	s.finishNodeAnalyticsLoadLocked(now.Add(-30*24*time.Hour), false, false)
-	if s.analyticsHistory.from.Before(now.Add(-time.Hour).Add(time.Nanosecond)) {
+	if s.analyticsHistory.from.Before(now.Add(-24 * time.Hour)) {
 		t.Fatal("background completion restored evicted coverage")
+	}
+}
+
+func TestNodeAnalyticsCoverage485_EvictingReheardOldTxDoesNotJumpFrom(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	floor := now.Add(-72 * time.Hour)
+	s := coverage485Store(t, now, floor)
+	// Old tx first seen at the edge, re-heard ~2 days later (production max).
+	coverage485Packet(s, floor.Add(time.Minute).Format(time.RFC3339), floor.Add(time.Minute).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339), now.Add(-30*time.Minute).Format(time.RFC3339))
+	coverage485Packet(s, now.Add(-10*time.Hour).Format(time.RFC3339), now.Add(-10*time.Hour).Format(time.RFC3339))
+	s.invalidateNodeAnalyticsEvictionLocked(s.packets[:1])
+	want := floor.Add(time.Minute).Add(time.Nanosecond)
+	if got := s.analyticsHistory.from; !got.Equal(want) {
+		t.Fatalf("from=%v want eviction boundary %v (late observation must not move it)", got, want)
+	}
+	cov := s.nodeAnalyticsCoverageLocked(30, now)
+	if cov.LateEvictedObservations != 2 {
+		t.Fatalf("late evicted observations=%d want 2", cov.LateEvictedObservations)
+	}
+	if want := now.Sub(floor.Add(time.Minute)).Seconds(); cov.Seconds < want-1 || cov.Seconds > want {
+		t.Fatalf("seconds=%v want ~%v", cov.Seconds, want)
 	}
 }
 
@@ -345,5 +368,32 @@ func TestNodeAnalyticsCoverage485_ExcludedRetentionRowsAreNotMemoryCap(t *testin
 				t.Fatal("eligible historical interval discarded")
 			}
 		})
+	}
+}
+
+// F2: the canonical-UTC fast path must be indistinguishable from the
+// time.Parse fallback for every input shape, valid or not.
+func TestParseNodeAnalyticsTime485_FastPathMatchesFallback(t *testing.T) {
+	slow := func(raw string) (time.Time, bool) {
+		tm, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			tm, err = time.ParseInLocation("2006-01-02 15:04:05", raw, time.UTC)
+		}
+		return tm.UTC(), err == nil && tm.Unix() > 0
+	}
+	for _, raw := range []string{
+		"2026-10-16T12:00:00Z", "2024-02-29T23:59:59Z", "2025-02-29T00:00:00Z",
+		"2026-13-01T00:00:00Z", "2026-00-10T00:00:00Z", "2026-04-31T00:00:00Z",
+		"2026-10-16T24:00:00Z", "2026-10-16T12:60:00Z", "2026-10-16T12:00:60Z",
+		"2026-10-16T12:00:00z", "2026-10-16T12:00:0aZ", "2026-10-16 12:00:00",
+		"2026-10-16T12:00:00+02:00", "2026-10-16T12:00:00.123456789Z",
+		"1970-01-01T00:00:00Z", "1969-12-31T23:59:59Z", "0000-01-01T00:00:00Z",
+		"2026-10-16T12:00:00Z ", "", "x", "2026-10-16T12:00:00ZZ", "2026+10-16T12:00:00Z",
+	} {
+		gt, gok := parseNodeAnalyticsTime(raw)
+		wt, wok := slow(raw)
+		if gok != wok || (gok && !gt.Equal(wt)) {
+			t.Errorf("%q: got (%v,%v) want (%v,%v)", raw, gt, gok, wt, wok)
+		}
 	}
 }

@@ -69,3 +69,21 @@ func BenchmarkNodeAnalyticsCoverage485Endpoints(b *testing.B) {
 		}
 	}
 }
+
+// F2: per-timestamp cost of the canonical-UTC fast path vs the time.Parse
+// fallback it replaces on the request path.
+func BenchmarkParseNodeAnalyticsTime485(b *testing.B) {
+	const canonical = "2026-10-16T12:34:56Z"
+	b.Run("fast_canonical", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			parseNodeAnalyticsTime(canonical)
+		}
+	})
+	b.Run("fallback_time_Parse", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			parseNodeAnalyticsTime("2026-10-16T12:34:56.5Z")
+		}
+	})
+}
