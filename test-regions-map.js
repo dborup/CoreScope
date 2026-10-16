@@ -58,6 +58,15 @@ assert.equal(regions.scopeHash('#dk', '1h', { view: 'timeline', at: '2026-10-16T
   '#/regions?window=1h&scope=%23dk&view=timeline&at=2026-10-16T12%3A00%3A00.000Z&compare=1');
 assert.equal(regions.scopeHash('#dk', '1h', { view: 'latest', at: '2026-10-16T12:00:00Z', compare: true }),
   '#/regions?window=1h&scope=%23dk', 'latest URLs omit timeline state');
+assert.deepEqual(regions.parseSelection('#/regions?view=health&window=7d&scope=%23dk&at=2026-10-16T11%3A37%3A00Z&compare=1'),
+  { window: '7d', scope: '#dk', view: 'health', at: '2026-10-16T11:37:00.000Z', compare: true });
+assert.deepEqual(regions.parseSelection('#/regions?view=health&window=bad&scope=%3Cbad%3E&at=bad&compare=true'),
+  { window: '24h', scope: '', view: 'health', at: '', compare: false });
+assert.equal(regions.scopeHash('#dk', '24h', { view: 'health', at: '2026-10-16T12:00:00Z', compare: true }),
+  '#/regions?window=24h&scope=%23dk&view=health&at=2026-10-16T12%3A00%3A00.000Z&compare=1');
+const healthBookmark = { window: '24h', scope: '#se', view: 'health', at: '2026-10-16T10:00:00.000Z', compare: false };
+assert.deepEqual(regions.parseSelection(regions.scopeHash(healthBookmark.scope, healthBookmark.window, healthBookmark)), healthBookmark,
+  'health selection round-trips through its bookmark');
 
 const snapshot = { window: '24h', windowStart: '2026-10-15T12:00:00Z', windowEnd: '2026-10-16T12:00:00Z',
   generatedAt: '2026-10-16T12:00:00Z', coverage: { start: '2026-10-16T09:00:00Z', complete: false, loading: false } };
@@ -140,4 +149,125 @@ assert(indexed.nodes.reduce((total, n) => total + n.scopes.reduce((sum, s) => su
 assert.throws(() => history.indexHistory(historyData({ bucketCount: 505 }), []), /history/i);
 assert.throws(() => history.indexHistory(historyData({ historyEnd: '2026-10-16T12:30:00Z' }), []), /history/i);
 
-console.log('regions map and timeline unit tests passed');
+const healthNodes = [historical('health-a', [], { scopes: [
+  { name: '#dk', buckets: [bucket(502, 2), bucket(503, 3)] },
+  { name: '#se', buckets: [{ ...bucket(503, 4), lastRelayed: '2026-10-16T11:59:00Z' }] },
+] }), historical('health-b', [{ ...bucket(503, 5), lastRelayed: '2026-10-16T11:00:03Z' }]),
+historical('health-unpositioned', [], { lat: null, lon: null, positionSource: 'none', metadataSource: 'archived',
+  scopes: [{ name: '#no', buckets: [bucket(502, 7)] }] })];
+const healthHistory = history.indexHistory(historyData(), healthNodes);
+const activity = history.indexActivity(healthHistory, '');
+const healthFrame = history.selectFrame(healthHistory, { window: '1h', compare: true });
+const frameBeforeHealth = JSON.stringify(healthFrame);
+let health = history.selectActivity(activity, healthHistory, healthFrame);
+assert.equal(health.bins.length, 1);
+assert.deepEqual(health.bins[0], { start: '2026-10-16T11:00:00.000Z', end: '2026-10-16T12:00:00.000Z',
+  coverage: 'complete', observedAppearances: 12, observedNodes: 2, appearances: 12, nodes: 2 });
+assert.equal(health.lastRelayed, '2026-10-16T11:59:00.000Z');
+assert.equal(health.ratePerHour, 12);
+assert.equal(JSON.stringify(healthFrame), frameBeforeHealth, 'health derivation does not change shared comparison results');
+const dkActivity = history.indexActivity(healthHistory, '#dk');
+const dkFrame = history.selectFrame(healthHistory, { window: '1h', scope: '#dk', compare: true });
+health = history.selectActivity(dkActivity, healthHistory, dkFrame);
+assert.equal(health.bins[0].appearances, 8, 'scope selection excludes other scoped appearances');
+assert.equal(health.bins[0].nodes, 2, 'all-scopes aggregation counts the same relay once per hour');
+assert.equal(health.lastRelayed, '2026-10-16T11:00:03.000Z', 'a newer relay in another scope cannot advance the selected scope timestamp');
+for (const [window, hours] of [['1h', 1], ['24h', 24], ['7d', 168]]) {
+  const selected = history.selectFrame(healthHistory, { window });
+  const view = history.selectActivity(activity, healthHistory, selected);
+  assert.equal(view.bins.length, hours);
+  assert.equal(view.bins.reduce((sum, bin) => sum + bin.observedAppearances, 0), selected.currentAppearances);
+  assert.equal(view.ratePerHour, selected.currentAppearances / hours);
+  for (let i = 1; i < view.bins.length; i++) assert.equal(view.bins[i - 1].end, view.bins[i].start, 'hourly bins are disjoint and contiguous');
+}
+health = history.selectActivity(activity, healthHistory, history.selectFrame(healthHistory, { window: '1h', at: '2026-10-16T11:00:00Z' }));
+assert.equal(health.bins[0].appearances, 9, 'selected end excludes the next hour');
+assert.equal(health.bins[0].nodes, 2, 'unpositioned archived relays contribute activity evidence');
+assert.equal(health.lastRelayed, '2026-10-16T10:00:01.000Z', 'last relay is restricted to selected interval');
+health = history.selectActivity(activity, healthHistory, history.selectFrame(healthHistory, { window: '1h', at: '2026-10-16T10:00:00Z' }));
+assert.equal(health.bins[0].appearances, 0, 'complete empty hours are measured zero');
+assert.equal(health.bins[0].nodes, 0);
+assert.equal(health.lastRelayed, '');
+assert.equal(health.ratePerHour, 0);
+for (const [coverage, expected] of [
+  [{ start: null, loading: false }, 'unknown'], [{ start: historyStart, loading: true }, 'loading'],
+  [{ start: '2026-10-16T12:00:00Z', loading: false }, 'unavailable'],
+  [{ start: '2026-10-16T11:30:00Z', loading: false }, 'partial'],
+]) {
+  const h = history.indexHistory(historyData({ coverage }), healthNodes);
+  const selected = history.selectFrame(h, { window: '1h' });
+  const view = history.selectActivity(history.indexActivity(h, ''), h, selected);
+  assert.equal(view.bins[0].coverage, expected);
+  assert.equal(view.bins[0].appearances, null, 'incomplete history cannot become chart zero');
+  assert.equal(view.bins[0].nodes, null);
+  assert.equal(view.bins[0].observedAppearances, 12, 'partial observed evidence stays available');
+  assert.equal(view.ratePerHour, null, 'incomplete intervals have no hourly rate');
+}
+for (const flag of ['truncated', 'scopesTruncated', 'bucketsTruncated']) {
+  const h = history.indexHistory(historyData({ [flag]: true }), healthNodes);
+  const view = history.selectActivity(history.indexActivity(h, ''), h, history.selectFrame(h, { window: '1h' }));
+  assert.equal(view.bins[0].coverage, 'complete', 'retention coverage remains distinct from safety limits');
+  assert.equal(view.bins[0].appearances, null);
+  assert.equal(view.bins[0].nodes, null);
+  assert.equal(view.ratePerHour, null);
+}
+const mixedCoverage = history.indexHistory(historyData({ coverage: { start: '2026-10-16T10:30:00Z', loading: false } }), healthNodes);
+const mixedActivity = history.indexActivity(mixedCoverage, '');
+const mixedFrame = history.selectFrame(mixedCoverage, { window: '1h', compare: true });
+assert.equal(mixedFrame.comparable, false);
+assert.equal(history.selectActivity(mixedActivity, mixedCoverage, mixedFrame).ratePerHour, 12,
+  'complete selected rate does not require complete reference history');
+health = history.selectActivity(mixedActivity, mixedCoverage, history.selectFrame(mixedCoverage, { window: '24h' }));
+assert.equal(health.bins[22].coverage, 'partial');
+assert.equal(health.bins[22].appearances, null);
+assert.equal(health.bins[22].observedAppearances, 9);
+assert.equal(health.bins[23].appearances, 12, 'complete bins remain available inside a partial interval');
+assert.equal(health.ratePerHour, null);
+const isolatedActivity = history.indexActivity(healthHistory, '#absent');
+health = history.selectActivity(isolatedActivity, healthHistory, history.selectFrame(healthHistory, { window: '1h', scope: '#absent' }));
+assert.equal(health.bins[0].appearances, 0);
+assert.equal(health.lastRelayed, '');
+assert.throws(() => history.selectActivity(activity, mixedCoverage, mixedFrame), /activity/i, 'stale aggregate cannot be paired with a different history snapshot');
+for (const bounds of [
+  { start: '2026-10-16T10:00:00Z', end: '2026-10-16T12:00:00Z' },
+  { start: '2026-10-16T11:30:00Z', end: '2026-10-16T12:30:00Z' },
+  { start: '2026-09-24T11:00:00Z', end: '2026-09-24T12:00:00Z' },
+  { start: '2026-10-16T12:00:00Z', end: '2026-10-16T13:00:00Z' },
+  { start: 'invalid', end: 'invalid' },
+]) assert.throws(() => history.selectActivity(activity, healthHistory, { ...healthFrame, interval: bounds }), /activity interval/i);
+
+// Reading the sparse payload after indexing must not be part of chart playback.
+const playbackFrame = history.selectFrame(healthHistory, { window: '7d' });
+Object.defineProperty(healthHistory, 'nodes', { get() { throw new Error('sparse node rescan'); } });
+assert.equal(history.selectActivity(activity, healthHistory, playbackFrame).bins.length, 168);
+const capNodes = Array.from({ length: 500 }, (_, i) => historical('cap-health-' + i, Array.from({ length: 500 }, (_, index) => bucket(index + 4))));
+const capHistory = history.indexHistory(historyData(), capNodes);
+const capActivity = history.indexActivity(capHistory, '');
+const capFrame = history.selectFrame(capHistory, { window: '7d' });
+health = history.selectActivity(capActivity, capHistory, capFrame);
+assert.equal(capHistory.limited, false);
+assert.equal(health.bins.length, 168);
+assert.equal(health.bins[0].nodes, 500);
+assert.equal(health.bins[0].appearances, 500);
+assert.equal(health.bins.reduce((total, bin) => total + bin.appearances, 0), capFrame.currentAppearances);
+
+const allDayNode = historical('same-relay-all-day', Array.from({ length: 24 }, (_, index) => bucket(480 + index, 2)));
+const allDayHistory = history.indexHistory(historyData(), [allDayNode]);
+const allDayFrame = history.selectFrame(allDayHistory, { window: '24h' });
+health = history.selectActivity(history.indexActivity(allDayHistory, ''), allDayHistory, allDayFrame);
+assert.equal(allDayFrame.currentCount, 1, 'one relay remains one unique relay across the whole selected interval');
+assert(health.bins.every(bin => bin.nodes === 1));
+assert.equal(health.bins.reduce((total, bin) => total + bin.nodes, 0), 24, 'summing hourly relay counts is not a unique interval relay count');
+for (const ending of ['2026-10-26T12:00:00Z', '2026-11-02T12:00:00Z']) {
+  const end = Date.parse(ending), start = end - 504 * 3600000;
+  const dstData = historyData({ historyStart: new Date(start).toISOString(), historyEnd: ending,
+    generatedAt: ending, coverage: { start: new Date(start).toISOString(), loading: false } });
+  const dstHistory = history.indexHistory(dstData, []);
+  const dstFrame = history.selectFrame(dstHistory, { window: '7d' });
+  const dstHealth = history.selectActivity(history.indexActivity(dstHistory, ''), dstHistory, dstFrame);
+  assert.equal(dstHealth.bins.length, 168, 'UTC week keeps 168 hours across European and US DST changes');
+  assert(dstHealth.bins.every(bin => Date.parse(bin.end) - Date.parse(bin.start) === 3600000));
+  assert.equal(dstHealth.bins[167].end, new Date(end).toISOString());
+}
+
+console.log('regions map, timeline and activity unit tests passed');

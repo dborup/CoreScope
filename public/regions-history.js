@@ -134,7 +134,56 @@
       percentChange: comparable && previousAppearances > 0 ? (currentAppearances - previousAppearances) / previousAppearances * 100 : null };
   }
 
-  const api = { indexHistory, frameIndex, frameTime, interval, selectFrame };
+  // Build one selected-scope activity index per payload/scope change. Dense
+  // arrays are bounded to the 504-hour snapshot, never one array per scope.
+  // A node can carry several scopes in an hour but remains one observed relay.
+  function indexActivity(history, scope) {
+    const appearances = new Float64Array(MAX_BUCKETS), nodes = new Uint16Array(MAX_BUCKETS);
+    const times = new Array(MAX_BUCKETS).fill(''), seen = new Uint16Array(MAX_BUCKETS);
+    let generation = 0;
+    for (const node of history.nodes) {
+      generation++;
+      for (const entry of node.scopes) {
+        if (scope && entry.name !== scope) continue;
+        for (let i = 0; i < entry.indices.length; i++) {
+          const index = entry.indices[i];
+          appearances[index] += entry.prefix[i + 1] - entry.prefix[i];
+          if (seen[index] !== generation) { nodes[index]++; seen[index] = generation; }
+          if (entry.times[i] > times[index]) times[index] = entry.times[i];
+        }
+      }
+    }
+    return { history, scope: scope || '', appearances, nodes, times };
+  }
+
+  // Playback reads only bounded hourly arrays. Partial/unknown history has
+  // observed evidence, but no chart value or whole-window activity rate.
+  function selectActivity(activity, history, frame) {
+    if (!activity || activity.history !== history) throw new Error('Activity index does not match history');
+    const start = millis(frame.interval.start), end = millis(frame.interval.end);
+    const hours = (end - start) / HOUR;
+    if (![1, 24, 168].includes(hours) || start % HOUR || end % HOUR || start < history.start || end > history.end) {
+      throw new Error('Invalid activity interval');
+    }
+    const first = (start - history.start) / HOUR;
+    const bins = [];
+    let lastRelayed = '', total = 0;
+    for (let i = 0; i < hours; i++) {
+      const index = first + i, binStart = start + i * HOUR;
+      const coverage = coverageState(history, binStart, binStart + HOUR);
+      const observedAppearances = activity.appearances[index], observedNodes = activity.nodes[index];
+      const complete = coverage === 'complete' && !history.limited;
+      bins.push({ start: new Date(binStart).toISOString(), end: new Date(binStart + HOUR).toISOString(), coverage,
+        observedAppearances, observedNodes, appearances: complete ? observedAppearances : null,
+        nodes: complete ? observedNodes : null });
+      total += observedAppearances;
+      if (activity.times[index] > lastRelayed) lastRelayed = activity.times[index];
+    }
+    return { bins, lastRelayed,
+      ratePerHour: frame.currentCoverage === 'complete' && !history.limited ? total / hours : null };
+  }
+
+  const api = { indexHistory, frameIndex, frameTime, interval, selectFrame, indexActivity, selectActivity };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RegionsHistory = api;
 })(typeof window === 'undefined' ? globalThis : window);

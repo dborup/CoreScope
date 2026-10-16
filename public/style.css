@@ -5943,6 +5943,7 @@ body.embed #app.app-fixed {
 /* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
 .regions-page > :not(.regions-leaflet) { flex-shrink: 0; }
+.regions-page-health { overflow-y: auto; }
 .regions-page h1, .regions-page p { margin: 0; }
 .regions-note { color: var(--text-muted); max-width: 85ch; }
 .regions-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
@@ -5974,6 +5975,30 @@ body.embed #app.app-fixed {
 .regions-change-list summary { cursor: pointer; }
 .regions-change-list ul { margin: 6px 0; padding-left: 20px; max-height: 180px; overflow-y: auto; }
 .regions-controls :focus-visible, .regions-timeline :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.regions-health { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.regions-health[hidden], .regions-leaflet[hidden] { display: none; }
+.regions-health h2 { margin: 0; font-size: 1rem; }
+.regions-health-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.regions-health-card { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); min-width: 0; overflow-wrap: anywhere; }
+.regions-health-label, .regions-health-detail { color: var(--text-muted); font-size: 0.8rem; }
+.regions-health-value { font-size: 1.3rem; line-height: 1.2; }
+.regions-health-card[data-metric="last-relayed"] .regions-health-value { font-size: 1rem; }
+.regions-trend-status, .regions-trend-legend, .regions-health-note { color: var(--text-muted); font-size: 0.8rem; }
+.regions-trend-plot { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 4px; min-width: 0; }
+.regions-trend-scale { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding: 2px 0 12px; color: var(--text-muted); font-size: 0.75rem; }
+.regions-trend { display: block; width: 100%; height: 176px; min-width: 0; }
+.regions-trend-axis { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.regions-trend-bar { fill: var(--accent); }
+.regions-trend-gap { fill: var(--surface); stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.regions-trend-bounds { display: flex; justify-content: space-between; gap: 12px; padding-left: 40px; color: var(--text-muted); font-size: 0.75rem; overflow-wrap: anywhere; }
+.regions-trend-bounds span:last-child { text-align: right; }
+.regions-hourly-details summary { cursor: pointer; font-size: 0.85rem; }
+.regions-hourly-scroll { overflow-x: auto; max-width: 100%; margin-top: 8px; }
+.regions-hourly-scroll:focus-visible, .regions-hourly-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.regions-hourly-table { width: 100%; border-collapse: collapse; min-width: 650px; font-size: 0.8rem; }
+.regions-hourly-table caption { text-align: left; color: var(--text-muted); margin-bottom: 6px; }
+.regions-hourly-table th, .regions-hourly-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.regions-hourly-table th { color: var(--text-muted); }
 .regions-status { color: var(--text-muted); min-height: 2.4em; }
 .regions-snapshot, .regions-coverage, .regions-details { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
 .regions-details summary { cursor: pointer; }
@@ -5990,4 +6015,7 @@ body.embed #app.app-fixed {
   .regions-transport button { flex: 1; min-height: 36px; }
   .regions-compare-label { min-height: 32px; }
   .regions-leaflet { flex-shrink: 0; }
+  .regions-health { padding: 10px; }
+  .regions-health-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .regions-health-card[data-metric="last-relayed"] { grid-column: 1 / -1; }
 }

@@ -118,8 +118,8 @@
     const scope = params.get('scope') || '';
     const window = params.get('window');
     const selection = { window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h', scope: validScope(scope) ? scope : '' };
-    if (params.get('view') === 'timeline') {
-      selection.view = 'timeline';
+    if (params.get('view') === 'timeline' || params.get('view') === 'health') {
+      selection.view = params.get('view');
       selection.at = isoTime(params.get('at'));
       selection.compare = params.get('compare') === '1';
     }
@@ -133,8 +133,8 @@
   function scopeHash(scope, window = '24h', selection = {}) {
     const params = new URLSearchParams({ window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h' });
     if (validScope(scope)) params.set('scope', scope);
-    if (selection.view === 'timeline') {
-      params.set('view', 'timeline');
+    if (selection.view === 'timeline' || selection.view === 'health') {
+      params.set('view', selection.view);
       const at = isoTime(selection.at);
       if (at) params.set('at', at);
       if (selection.compare) params.set('compare', '1');
@@ -216,6 +216,139 @@
     }
   }
 
+  function createActivityPanel() {
+    const panel = element('section', 'regions-health');
+    panel.hidden = true;
+    panel.setAttribute('aria-label', 'Region health and traffic trends');
+    const cards = element('div', 'regions-health-cards');
+    const metrics = {};
+    for (const [key, label] of [['nodes', 'Observed relay nodes'], ['appearances', 'Observed relay appearances'], ['last-relayed', 'Last relay in selected interval']]) {
+      const card = element('div', 'regions-health-card');
+      card.dataset.metric = key;
+      card.appendChild(element('span', 'regions-health-label', label));
+      const value = element('strong', 'regions-health-value', '—');
+      const detail = element('span', 'regions-health-detail');
+      card.append(value, detail); cards.appendChild(card);
+      metrics[key] = { value, detail };
+    }
+    metrics.appearances.detail.classList.add('regions-health-rate');
+    panel.appendChild(cards);
+    panel.appendChild(element('h2', '', 'Hourly traffic'));
+    const chartStatus = element('p', 'regions-trend-status');
+    panel.appendChild(chartStatus);
+    function svgElement(tag, className) {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      if (className) node.setAttribute('class', className);
+      return node;
+    }
+    function attr(node, name, value) {
+      const text = String(value);
+      if (node.getAttribute(name) !== text) node.setAttribute(name, text);
+    }
+    const chart = svgElement('svg', 'regions-trend');
+    chart.setAttribute('viewBox', '0 0 656 176');
+    chart.setAttribute('preserveAspectRatio', 'none');
+    chart.setAttribute('role', 'img');
+    const baseline = svgElement('line', 'regions-trend-axis');
+    baseline.setAttribute('x1', '0'); baseline.setAttribute('x2', '656');
+    baseline.setAttribute('y1', '160'); baseline.setAttribute('y2', '160');
+    const bars = svgElement('g');
+    const scale = element('div', 'regions-trend-scale');
+    const maximum = element('span'), zero = element('span', '', '0');
+    scale.append(maximum, zero);
+    chart.append(baseline, bars);
+    const plot = element('div', 'regions-trend-plot');
+    plot.append(scale, chart); panel.appendChild(plot);
+    const bounds = element('div', 'regions-trend-bounds');
+    const startLabel = element('span'), endLabel = element('span');
+    bounds.append(startLabel, endLabel); panel.appendChild(bounds);
+    panel.appendChild(element('p', 'regions-trend-legend', 'Solid bars: complete hours. Dashed gaps: incomplete or unavailable values. A complete zero hour has no observed relay traffic.'));
+    const details = element('details', 'regions-hourly-details');
+    details.appendChild(element('summary', '', 'Hourly values'));
+    const tableScroll = element('div', 'regions-hourly-scroll');
+    tableScroll.setAttribute('tabindex', '0');
+    tableScroll.setAttribute('role', 'region');
+    tableScroll.setAttribute('aria-label', 'Scrollable hourly activity values');
+    const table = element('table', 'regions-hourly-table');
+    table.appendChild(element('caption', '', 'Completed UTC hours; retained observations are shown separately when complete values are unavailable.'));
+    const head = element('thead'), header = element('tr');
+    for (const name of ['UTC hour', 'Relay appearances', 'Relay nodes', 'History', 'Retained observations']) {
+      const cell = element('th', '', name); cell.scope = 'col'; header.appendChild(cell);
+    }
+    head.appendChild(header);
+    const body = element('tbody');
+    table.append(head, body); tableScroll.appendChild(table); details.appendChild(tableScroll); panel.appendChild(details);
+    panel.appendChild(element('p', 'regions-health-note', 'Traffic increase does not establish better health. Spam, observer reception and routing changes can affect observed counts. Relay appearances can count the same transmission via several relays; this is not a global packet total.'));
+    const rows = new Map();
+
+    function update(frame, activity, scope) {
+      panel.hidden = false;
+      metrics.nodes.value.textContent = frame.currentCount.toLocaleString();
+      const missing = frame.rows.filter(row => row.count && row.node.positionSource !== 'reported').length;
+      metrics.nodes.detail.textContent = missing + ' without usable positions';
+      metrics.appearances.value.textContent = frame.currentAppearances.toLocaleString();
+      metrics.appearances.detail.textContent = activity.ratePerHour == null ? 'Rate unavailable: incomplete or limited history.' :
+        activity.ratePerHour.toFixed(2) + ' relay appearances per hour';
+      metrics['last-relayed'].value.replaceChildren();
+      if (activity.lastRelayed) metrics['last-relayed'].value.appendChild(timeElement(activity.lastRelayed));
+      else metrics['last-relayed'].value.textContent = 'Not observed';
+      metrics['last-relayed'].detail.textContent = activity.lastRelayed ? 'Within the selected interval' : 'No relay in retained observations for this interval';
+      const bins = activity.bins;
+      const available = bins.filter(bin => bin.appearances != null);
+      chartStatus.textContent = available.length + ' of ' + bins.length + ' complete hourly values' + (scope ? ' for ' + scope : ' across observed scopes') +
+        '. Missing values are gaps, not zero traffic.';
+      chart.setAttribute('aria-label', 'Hourly relay appearances' + (scope ? ' for ' + scope : ' across observed scopes') +
+        ': ' + available.length + ' of ' + bins.length + ' complete hours, ' + frame.interval.start + ' to ' + frame.interval.end + '. Exact values follow.');
+      const upper = Math.max(1, ...available.map(bin => bin.appearances));
+      maximum.textContent = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(upper);
+      startLabel.textContent = frame.interval.start.slice(5, 16).replace('T', ' ') + ' UTC';
+      endLabel.textContent = frame.interval.end.slice(5, 16).replace('T', ' ') + ' UTC';
+      const wanted = new Set(bins.map(bin => bin.start));
+      for (const [key, record] of rows) if (!wanted.has(key)) {
+        record.row.remove(); record.rect.remove(); rows.delete(key);
+      }
+      let cursor = body.firstChild;
+      for (let index = 0; index < bins.length; index++) {
+        const bin = bins[index];
+        let record = rows.get(bin.start);
+        if (!record) {
+          const row = element('tr'); row.dataset.start = bin.start;
+          const cells = {};
+          for (const key of ['hour', 'appearances', 'nodes', 'coverage', 'retained']) {
+            const cell = element('td'); cell.dataset.column = key; cells[key] = cell; row.appendChild(cell);
+          }
+          const rect = svgElement('rect');
+          const title = svgElement('title'); rect.appendChild(title); bars.appendChild(rect);
+          record = { row, cells, rect, title }; rows.set(bin.start, record);
+        }
+        const complete = bin.appearances != null && bin.nodes != null;
+        const state = frame.limited ? 'limited' : bin.coverage;
+        record.cells.hour.textContent = bin.start.slice(0, 16).replace('T', ' ') + ' — ' + bin.end.slice(11, 16);
+        record.cells.appearances.textContent = complete ? bin.appearances.toLocaleString() : '—';
+        record.cells.nodes.textContent = complete ? bin.nodes.toLocaleString() : '—';
+        record.cells.coverage.textContent = state;
+        record.cells.retained.textContent = bin.observedAppearances.toLocaleString() + ' appearances; ' + bin.observedNodes + ' relay nodes';
+        if (record.row !== cursor) body.insertBefore(record.row, cursor);
+        cursor = record.row.nextSibling;
+        attr(record.rect, 'class', complete ? 'regions-trend-bar' : 'regions-trend-gap');
+        attr(record.rect, 'data-hour-start', bin.start);
+        if (complete) attr(record.rect, 'data-count', bin.appearances); else record.rect.removeAttribute('data-count');
+        const width = 656 / Math.max(1, bins.length);
+        const height = complete ? (bin.appearances === 0 ? 0 : Math.max(2, bin.appearances / upper * 156)) : 156;
+        attr(record.rect, 'x', index * width + 1);
+        attr(record.rect, 'width', Math.max(1, width - 2));
+        attr(record.rect, 'y', complete ? 160 - height : 4);
+        attr(record.rect, 'height', height);
+        record.title.textContent = record.cells.hour.textContent + ' UTC: ' + (complete ? bin.appearances + ' relay appearances, ' + bin.nodes + ' relay nodes.' :
+          'Complete value unavailable (' + state + '); retained observations: ' + record.cells.retained.textContent + '.');
+      }
+      panel.setAttribute('data-ready', 'true');
+    }
+
+    function clear() { panel.hidden = true; panel.removeAttribute('data-ready'); }
+    return { panel, update, clear };
+  }
+
   async function init(container) {
     destroy();
     const token = ++generation;
@@ -227,7 +360,7 @@
     const viewLabel = element('label', '', 'View ');
     const view = element('select');
     view.setAttribute('aria-label', 'Region view');
-    view.append(new Option('Latest', 'latest'), new Option('Timeline', 'timeline'));
+    view.append(new Option('Latest', 'latest'), new Option('Timeline', 'timeline'), new Option('Health & trends', 'health'));
     view.value = selection.view || 'latest';
     viewLabel.appendChild(view);
     controls.appendChild(viewLabel);
@@ -251,7 +384,7 @@
     controls.appendChild(fitButton);
     shell.appendChild(controls);
     const timelineControls = element('div', 'regions-timeline');
-    timelineControls.hidden = selection.view !== 'timeline';
+    timelineControls.hidden = selection.view !== 'timeline' && selection.view !== 'health';
     const transport = element('div', 'regions-transport');
     function transportButton(text, label) {
       const button = element('button', '', text);
@@ -292,6 +425,8 @@
     shell.appendChild(snapshotMeta);
     const coverage = element('p', 'regions-coverage');
     shell.appendChild(coverage);
+    const activityPanel = createActivityPanel();
+    shell.appendChild(activityPanel.panel);
     const details = element('details', 'regions-details');
     details.appendChild(element('summary', '', 'Data & position details'));
     details.appendChild(element('p', '', 'Repeaters and rooms are shown where scoped relay traffic was observed. Positions are self-reported; their accuracy is unverified. Nodes without usable positions are counted but not mapped. Dashed outlines join the outermost node positions and do not measure RF coverage or administrative boundaries.'));
@@ -305,18 +440,13 @@
     mapEl.setAttribute('aria-label', 'Observed region relay map');
     shell.appendChild(mapEl);
     container.replaceChildren(shell);
-    if (typeof L === 'undefined') {
-      status.textContent = 'Map library unavailable.';
-      return;
-    }
     // Leaflet 1.9.4 leaves its 250ms zoom-transition timeout alive after
     // remove() deletes the map pane. Synchronous zoom also makes immediate
     // period/hash navigation safe when a user just pressed a zoom control.
-    leafletMap = L.map(mapEl, { zoomAnimation: false }).setView([55.7, 10.5], 6);
-    const map = leafletMap;
+    let map = null, layer = null;
     let redrawMap = null;
     const applyTiles = function () {
-      if (token !== generation || leafletMap !== map) return;
+      if (!map || selection.view === 'health' || token !== generation || leafletMap !== map) return;
       if (tileLayer) map.removeLayer(tileLayer);
       const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
       const tile = typeof root.MC_getTileSpec === 'function' ? root.MC_getTileSpec(theme) : null;
@@ -328,15 +458,36 @@
       if (redrawMap) redrawMap();
     };
     let tileLayer = null;
-    applyTiles();
+    function ensureMap() {
+      if (map) return true;
+      if (typeof L === 'undefined') { status.textContent = 'Map library unavailable.'; return false; }
+      map = L.map(mapEl, { zoomAnimation: false }).setView([55.7, 10.5], 6);
+      leafletMap = map;
+      layer = L.layerGroup().addTo(map);
+      applyTiles();
+      return true;
+    }
     themeObserver = new MutationObserver(applyTiles);
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    const layer = L.layerGroup().addTo(map);
     let requestGeneration = 0, snapshot = null, nodes = [], catalog = { scopes: [], truncated: false };
     let indexedHistory = null, timer = null, lastFrame = null, scrubFrame = null;
+    let activity = null, activityScope = null;
     const markers = new Map();
     let hullLayer = null;
     const historyTools = root.RegionsHistory;
+
+    function historicalView() { return selection.view === 'timeline' || selection.view === 'health'; }
+
+    function updateView() {
+      const health = selection.view === 'health';
+      timelineControls.hidden = !historicalView();
+      play.hidden = health;
+      fitButton.hidden = health;
+      mapEl.hidden = health;
+      shell.classList.toggle('regions-page-health', health);
+      if (!health) activityPanel.clear();
+      if (health) shell.insertBefore(comparison, details); else shell.insertBefore(comparison, status);
+    }
 
     function pause() {
       if (timer !== null) clearTimeout(timer);
@@ -352,11 +503,12 @@
     document.addEventListener('visibilitychange', visibilityListener);
 
     function clearPoints() {
-      layer.clearLayers(); markers.clear(); hullLayer = null; lastFrame = null;
+      if (layer) layer.clearLayers();
+      markers.clear(); hullLayer = null; lastFrame = null;
     }
 
     function timelineEnabled(ready) {
-      const enabled = ready && selection.view === 'timeline';
+      const enabled = ready && historicalView();
       for (const control of [slider, compare, previous, next, play]) control.disabled = !enabled;
       if (enabled) {
         previous.disabled = Number(slider.value) <= 0;
@@ -502,7 +654,18 @@
       coverage.setAttribute('data-coverage-state', frame.currentCoverage);
       exactBounds.replaceChildren(element('p', '', 'Selected interval (UTC): ' + frame.interval.start + ' — ' + frame.interval.end),
         element('p', '', 'History dataset (UTC): ' + new Date(indexedHistory.start).toISOString() + ' — ' + new Date(indexedHistory.end).toISOString()));
-      renderTimelinePoints(frame);
+      if (selection.view === 'health') {
+        if (!activity || activityScope !== selection.scope) {
+          activity = historyTools.indexActivity(indexedHistory, selection.scope);
+          activityScope = selection.scope;
+        }
+        activityPanel.update(frame, historyTools.selectActivity(activity, indexedHistory, frame), selection.scope);
+        status.textContent = frame.currentCount + ' observed relay nodes; ' + frame.currentAppearances.toLocaleString() +
+          ' observed relay appearances in the selected interval. ' + (frame.currentCoverage === 'complete' && !frame.limited ?
+            (frame.currentCount ? 'Observed activity; this does not measure RF coverage or observer uptime.' :
+              'No scoped relay activity observed in this complete interval; this does not establish an outage.') :
+            'Retained observations only; history is incomplete or limited.');
+      } else renderTimelinePoints(frame);
       renderComparison(frame);
     }
 
@@ -519,24 +682,29 @@
     }
 
     function draw(fit) {
-      if (selection.view === 'timeline') {
+      if (historicalView()) {
         if (!indexedHistory) return;
+        if (selection.view === 'timeline' && !ensureMap()) return;
         drawTimeline();
-        if (fit) fitTimeline();
+        if (selection.view === 'timeline' && fit) fitTimeline();
         return;
       }
       if (!snapshot) return;
+      if (!ensureMap()) return;
       renderPoints(layer, map, nodes, selection.scope, status, snapshot.truncated || snapshot.nodes.length > MAX_POINTS,
         snapshot.scopesTruncated || catalog.truncated, fit);
     }
-    redrawMap = () => { if (selection.view === 'timeline' && indexedHistory) renderTimelinePoints(lastFrame); };
+    redrawMap = () => { if (selection.view === 'timeline' && indexedHistory && lastFrame) renderTimelinePoints(lastFrame); };
 
     async function load() {
       pause();
       const request = ++requestGeneration, window = selection.window;
-      const historical = selection.view === 'timeline';
+      const historical = historicalView();
+      updateView();
       snapshot = null;
       indexedHistory = null;
+      activity = null; activityScope = null;
+      activityPanel.clear();
       nodes = [];
       catalog = { scopes: [], truncated: false };
       clearPoints();
@@ -605,21 +773,25 @@
       pause();
       selection.window = period.value;
       saveSelection();
-      if (selection.view === 'timeline') draw(false); else load();
+      if (historicalView()) draw(false); else load();
     });
     select.addEventListener('change', () => {
       pause();
       selection.scope = select.value;
       saveSelection();
-      draw(selection.view !== 'timeline');
+      draw(!historicalView());
     });
     view.addEventListener('change', () => {
       pause();
+      const previousHistorical = historicalView();
       selection.view = view.value;
-      if (selection.view !== 'timeline') { selection.at = ''; selection.compare = false; compare.checked = false; }
-      timelineControls.hidden = selection.view !== 'timeline';
+      if (!historicalView()) { selection.at = ''; selection.compare = false; compare.checked = false; }
+      updateView();
       saveSelection();
-      load();
+      if (previousHistorical && historicalView() && indexedHistory) {
+        draw(selection.view === 'timeline');
+        if (map && selection.view === 'timeline') { applyTiles(); map.invalidateSize(); }
+      } else load();
     });
     compare.addEventListener('change', () => {
       pause();
@@ -652,7 +824,7 @@
     }
     play.addEventListener('click', () => {
       if (timer !== null) { pause(); return; }
-      if (!indexedHistory || document.hidden || Number(slider.value) >= 168) return;
+      if (selection.view !== 'timeline' || !indexedHistory || document.hidden || Number(slider.value) >= 168) return;
       play.textContent = 'Pause';
       play.setAttribute('aria-label', 'Pause timeline');
       play.setAttribute('aria-pressed', 'true');
@@ -664,7 +836,7 @@
     });
     refresh.addEventListener('click', load);
     load();
-    setTimeout(() => { if (token === generation && leafletMap === map) map.invalidateSize(); }, 0);
+    setTimeout(() => { if (map && selection.view !== 'health' && token === generation && leafletMap === map) map.invalidateSize(); }, 0);
   }
 
   function destroy() {
