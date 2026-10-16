@@ -90,6 +90,34 @@ func TestGroupedPacketsCarryHeaderResolvedPath165(t *testing.T) {
 	assertGroupedRP165(t, groupedRowsByHash165(t, store.QueryGroupedPackets(PacketQuery{Limit: 50})))
 }
 
+// Each page row carries its own header observation's resolved_path on later
+// pages too (offset > 0), cold and from the grouped sort cache (#470).
+func TestGroupedPacketsPagedCarryHeaderResolvedPath165(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedGroupedRP165(t, db)
+	store := NewPacketStore(db, nil)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 2; pass++ {
+		store.groupedCacheMu.Lock()
+		if pass == 0 {
+			store.groupedCacheTxs = nil
+		}
+		store.groupedCacheMu.Unlock()
+		r := &PacketResult{}
+		for offset := 0; offset < 2; offset++ {
+			page := store.QueryGroupedPackets(PacketQuery{Limit: 1, Offset: offset})
+			if len(page.Packets) != 1 {
+				t.Fatalf("page at offset %d has %d rows, want 1", offset, len(page.Packets))
+			}
+			r.Packets = append(r.Packets, page.Packets...)
+		}
+		assertGroupedRP165(t, groupedRowsByHash165(t, r))
+	}
+}
+
 func TestGroupedPacketsSQLCarryHeaderResolvedPath165(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

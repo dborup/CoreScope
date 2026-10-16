@@ -1115,7 +1115,9 @@ func (s *Server) buildStats() (*StatsResponse, error) {
 	// share a single 1s-cached snapshot to amortize ReadMemStats cost.
 	var storeDataMB float64
 	if s.store != nil {
+		s.store.mu.RLock()
 		storeDataMB = s.store.trackedMemoryMB()
+		s.store.mu.RUnlock()
 	}
 	mem := s.getMemorySnapshot(storeDataMB)
 
@@ -2396,7 +2398,11 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 			indexedForTarget[id] = struct{}{}
 		}
 	}
+	// Each candidate's observations as read under the lock, for the
+	// canonical resolved_path lookup that runs after it (#470).
+	observations := make(map[int][]*StoreObs, len(candidates))
 	for i, tx := range candidates {
+		observations[tx.ID] = tx.Observations
 		cc := candidateCheck{tx: tx}
 		if !s.store.useResolvedPathIndex {
 			cc.inIndex = true // flag off — keep all
@@ -2450,7 +2456,7 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 	canonicalRP := make(map[int][]*string, len(candidates))
 	lruNow := s.store.lruNow()
 	for _, tx := range candidates {
-		if rp := s.store.fetchResolvedPathForTxBestAt(tx, lruNow); rp != nil {
+		if rp := s.store.fetchResolvedPathForTxBestAt(tx.ID, observations[tx.ID], lruNow); rp != nil {
 			canonicalRP[tx.ID] = rp
 		}
 	}
@@ -3869,24 +3875,16 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 	// Single snapshot under RLock (#1481 P0-2), then five composable helpers
 	// off the snapshot. No behavior change; JSON output is byte-identical.
 	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	// #1830, #470: also resolve each observation's transmission under this
+	// same RLock. s.store.byTxID is guarded by s.store.mu (writes from
+	// ingest/eviction), and the content-hash migration rewrites
+	// obs.TransmissionID and the transmission's hash and route type under
+	// it; reading them after RUnlock — as the loop below used to via
+	// s.store.byTxID[...] and enrichObs() — races with those writers.
 	s.store.mu.RLock()
-	obsList := s.store.byObserver[id]
-	obsSnapshot := make([]*StoreObs, len(obsList))
-	copy(obsSnapshot, obsList)
-	// #1830: also resolve each referenced transmission's *StoreTx under
-	// this same RLock. s.store.byTxID is guarded by s.store.mu (writes
-	// from ingest/eviction); reading it after RUnlock — as the loop below
-	// used to via s.store.byTxID[...] and enrichObs() — races with those
-	// writers. Keyed by TransmissionID (not by observation index) since
-	// multiple observations can share one transmission.
-	txByID := make(map[int]*StoreTx, len(obsSnapshot))
-	for _, obs := range obsSnapshot {
-		if _, ok := txByID[obs.TransmissionID]; !ok {
-			txByID[obs.TransmissionID] = s.store.byTxID[obs.TransmissionID]
-		}
-	}
+	obsSnapshot := resolveObserverObs(s.store.byObserver[id], s.store.byTxID)
 	s.store.mu.RUnlock()
-	filtered := make([]*StoreObs, 0, len(obsSnapshot))
+	filtered := make([]observerObs, 0, len(obsSnapshot))
 	for _, obs := range obsSnapshot {
 		t, ok := obs.ParsedTime()
 		if !ok {
@@ -3900,10 +3898,10 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 
 	writeJSON(w, ObserverAnalyticsResponse{
 		Timeline:        buildTimeline(filtered, days),
-		PacketTypes:     buildPacketTypes(filtered, txByID),
-		NodesTimeline:   buildNodesTimeline(filtered, days, txByID),
+		PacketTypes:     buildPacketTypes(filtered),
+		NodesTimeline:   buildNodesTimeline(filtered, days),
 		SnrDistribution: buildSnrDistribution(filtered),
-		RecentPackets:   buildRecentPackets(s.store, filtered, 20, txByID),
+		RecentPackets:   buildRecentPackets(s.store, filtered, 20),
 	})
 }
 
@@ -4106,8 +4104,10 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 			}
 			byType[typeName] = append(byType[typeName], tx)
 		}
-		s.store.mu.RUnlock()
 
+		// Picked under the same lock: ingest rewrites the header fields
+		// (pickBestObservation) and the hash migration the hash and
+		// first_seen under s.mu.Lock (#470). At most 8 rows per type.
 		for typeName, pkts := range byType {
 			sort.Slice(pkts, func(i, j int) bool {
 				return len(pkts[i].RawHex) < len(pkts[j].RawHex)
@@ -4134,6 +4134,7 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 			}
 			buckets[typeName] = picked
 		}
+		s.store.mu.RUnlock()
 	}
 
 	writeJSON(w, AudioLabBucketsResponse{Buckets: buckets})

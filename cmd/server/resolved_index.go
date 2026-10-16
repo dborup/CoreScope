@@ -306,21 +306,28 @@ func (s *PacketStore) fetchResolvedPathForObsAt(obsID int, now int64) []*string 
 // #810 by checking all observations and falling back to the longest sibling
 // that has a stored path.
 func (s *PacketStore) fetchResolvedPathForTxBest(tx *StoreTx) []*string {
-	return s.fetchResolvedPathForTxBestAt(tx, s.lruNow())
+	if tx == nil {
+		return nil
+	}
+	return s.fetchResolvedPathForTxBestAt(tx.ID, tx.Observations, s.lruNow())
 }
 
-// fetchResolvedPathForTxBestAt is fetchResolvedPathForTxBest with the LRU
-// clock read by the caller. /paths and /hop_analytics call it once per
-// candidate; reading the clock once per request keeps a cache hit as cheap as
-// it was before entries had an age (#277).
-func (s *PacketStore) fetchResolvedPathForTxBestAt(tx *StoreTx, now int64) []*string {
-	if tx == nil || len(tx.Observations) == 0 {
+// fetchResolvedPathForTxBestAt is fetchResolvedPathForTxBest for a tx given by
+// its id and observations, with the LRU clock read by the caller. /paths and
+// /hop_analytics call it once per candidate; reading the clock once per
+// request keeps a cache hit as cheap as it was before entries had an age
+// (#277). They call it outside s.mu (it runs SQL and takes lruMu, #1278), so
+// they pass the tx's observations as read under s.mu: ingest appends to
+// tx.Observations under that lock (#470). Ingest only appends, so the
+// elements of such a snapshot never change.
+func (s *PacketStore) fetchResolvedPathForTxBestAt(txID int, observations []*StoreObs, now int64) []*string {
+	if len(observations) == 0 {
 		return nil
 	}
 	// Fast path: try the longest-path obs first via the LRU/SQL helper.
-	longest := tx.Observations[0]
+	longest := observations[0]
 	longestLen := pathLen(longest.PathJSON)
-	for _, obs := range tx.Observations[1:] {
+	for _, obs := range observations[1:] {
 		if l := pathLen(obs.PathJSON); l > longestLen {
 			longest = obs
 			longestLen = l
@@ -332,14 +339,14 @@ func (s *PacketStore) fetchResolvedPathForTxBestAt(tx *StoreTx, now int64) []*st
 	// Fallback: longest-path obs has no stored resolved_path. Query all
 	// observations for this tx and pick the one with the longest path_json
 	// that actually has a stored resolved_path.
-	rpMap := s.fetchResolvedPathsForTx(tx.ID)
+	rpMap := s.fetchResolvedPathsForTx(txID)
 	if len(rpMap) == 0 {
 		return nil
 	}
 	var bestRP []*string
 	bestObsID := 0
 	bestLen := -1
-	for _, obs := range tx.Observations {
+	for _, obs := range observations {
 		rp, ok := rpMap[obs.ID]
 		if !ok || rp == nil {
 			continue
