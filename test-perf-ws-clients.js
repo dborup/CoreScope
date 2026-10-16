@@ -13,6 +13,7 @@ async function test(name, fn) {
 function makeSandbox(hash = '#/perf') {
   let capturedHtml = '';
   let historyHtml = '';
+  let overviewHtml = '';
   let now = Date.now();
   class ClockDate extends Date { static now() { return now; } }
   const handlers = {};
@@ -25,6 +26,7 @@ function makeSandbox(hash = '#/perf') {
       getElementById: (id) => {
         if (id === 'perfContent') return { set innerHTML(v) { capturedHtml = v; } };
         if (id === 'wsHistoryContent') return { set innerHTML(v) { historyHtml = v; } };
+        if (id === 'perfOverview') return { set innerHTML(v) { overviewHtml = v; } };
         if (id === 'wsHistoryRange') return rangeSelect;
         if (id === 'perfRefresh' || id === 'perfReset') return { addEventListener: (ev, fn) => { handlers[id] = fn; } };
         return null;
@@ -45,7 +47,7 @@ function makeSandbox(hash = '#/perf') {
   ctx.window.document = ctx.document;
   ctx.globalThis = ctx;
   vm.runInNewContext(fs.readFileSync('public/perf.js', 'utf8'), ctx);
-  return { ctx, handlers, rangeSelect, advanceNow: ms => { now += ms; }, getHtml: () => capturedHtml, getHistoryHtml: () => historyHtml };
+  return { ctx, handlers, rangeSelect, advanceNow: ms => { now += ms; }, getHtml: () => capturedHtml, getHistoryHtml: () => historyHtml, getOverviewHtml: () => overviewHtml };
 }
 
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)); };
@@ -392,10 +394,12 @@ const PERF_FIXTURE = () => ({
     ctx.fetch = (url) => (url === '/api/perf/ws-clients' || url === '/api/health')
       ? Promise.reject(new Error('boom'))
       : Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? perf : {}) });
-    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } } : null;
+    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } }
+      : id === 'perfOverview' ? { set innerHTML(v) { ctx.__overview = v; } } : null;
     ctx.pages.perf.init({ set innerHTML(v) {} });
     await flush();
-    assert.ok(String(ctx.__html).includes('Total Requests'), 'rest of the page still renders');
+    assert.ok(String(ctx.__overview).includes('Total Requests'), 'the overview still renders');
+    assert.ok(String(ctx.__html).includes('id="perfRefresh"'), 'rest of the page still renders');
   });
 
   await test('refresh: a 404/500 from ws-clients hides the card instead of hanging on "Collecting data…" (#433 F2)', async () => {
@@ -410,13 +414,15 @@ const PERF_FIXTURE = () => ({
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? perf : {}) });
     };
-    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } } : null;
+    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } }
+      : id === 'perfOverview' ? { set innerHTML(v) { ctx.__overview = v; } } : null;
     ctx.pages.perf.init({ set innerHTML(v) {} });
     await flush();
     const html = String(ctx.__html);
     assert.ok(!getHistoryHtml().includes('<svg class="ws-history'), 'no chart expected');
     assert.ok(!/collecting/i.test(getHistoryHtml()), '404 must not look like "still collecting"');
-    assert.ok(html.includes('Total Requests'), 'rest of the page still renders');
+    assert.ok(String(ctx.__overview).includes('Total Requests'), 'the overview still renders');
+    assert.ok(html.includes('id="perfRefresh"'), 'rest of the page still renders');
   });
 
   await test('refresh: the ws-clients ring is not re-fetched on every 5s tick (#433 F6)', async () => {
@@ -474,7 +480,7 @@ const PERF_FIXTURE = () => ({
     // instead of being silently dropped.
     releasers[0]();
     await flush();
-    assert.ok(sb.getHtml().includes('Total Requests'), 'an overtaken-but-first-to-finish refresh must still render, not stay on Loading…');
+    assert.ok(sb.getOverviewHtml().includes('Total Requests'), 'an overtaken-but-first-to-finish refresh must still render, not stay on Loading…');
   });
 
   await test('refresh: an older response that completes after a newer one has rendered must not overwrite it (#463)', async () => {
@@ -502,10 +508,10 @@ const PERF_FIXTURE = () => ({
     assert.strictEqual(releasers.length, 2, 'two overlapping refreshes');
     releasers[1]();
     await flush();
-    assert.ok(sb.getHtml().includes('2222'), 'the newer response renders first');
+    assert.ok(sb.getOverviewHtml().includes('2222'), 'the newer response renders first');
     releasers[0]();
     await flush();
-    assert.ok(sb.getHtml().includes('2222') && !sb.getHtml().includes('1111'), 'the older response must not overwrite the newer render');
+    assert.ok(sb.getOverviewHtml().includes('2222') && !sb.getOverviewHtml().includes('1111'), 'the older response must not overwrite the newer render');
   });
 
   await test('refresh: re-entering the page (init) forces a fresh ws-clients fetch, not a stale cache', async () => {
@@ -517,7 +523,8 @@ const PERF_FIXTURE = () => ({
       if (url === '/api/perf/ws-clients') { wsCalls++; return Promise.resolve({ ok: true, json: () => Promise.resolve({ intervalSec: 60, samples: mk(10, i => i) }) }); }
       return Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? perf : {}) });
     };
-    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } } : null;
+    ctx.document.getElementById = (id) => id === 'perfContent' ? { set innerHTML(v) { ctx.__html = v; } }
+      : id === 'perfOverview' ? { set innerHTML(v) { ctx.__overview = v; } } : null;
     ctx.pages.perf.init({ set innerHTML(v) {} });
     await flush();
     ctx.pages.perf.destroy();
@@ -538,6 +545,20 @@ const PERF_FIXTURE = () => ({
     const heading = (appHtml.match(/<h3 id="wsHistoryHeading">[\s\S]*?<\/h3>/) || [''])[0];
     assert.ok(/<svg class="ph-icon" aria-hidden="true">/.test(heading), 'heading needs the same decorative icon as the other sections');
     assert.ok(/WebSocket clients<\/h3>$/.test(heading), 'accessible name stays "WebSocket clients"');
+  });
+
+  await test('layout: the overview cards sit above the WebSocket history, outside the 5s #perfContent rebuild', async () => {
+    const sb = makeSandbox();
+    sb.ctx.fetch = (url) => url === '/api/health'
+      ? Promise.reject(new Error('no health'))
+      : Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/api/perf' ? PERF_FIXTURE() : {}) });
+    let appHtml = '';
+    sb.ctx.pages.perf.init({ set innerHTML(v) { appHtml = v; } });
+    await flush();
+    const order = ['id="perfOverview"', 'id="wsHistorySection"', 'id="perfContent"'].map(m => appHtml.indexOf(m));
+    assert.ok(order.every(i => i >= 0) && order[0] < order[1] && order[1] < order[2], 'expected overview, then WS history, then the rest: ' + order);
+    assert.ok(sb.getOverviewHtml().includes('Total Requests'), 'overview cards render into #perfOverview');
+    assert.ok(!sb.getHtml().includes('Total Requests'), 'overview cards must not also render in #perfContent');
   });
 
   await test('time-window select styling is one shared rule used by Analytics and Perf', () => {
