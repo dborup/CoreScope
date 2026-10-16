@@ -65,12 +65,13 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 // avoiding collided-prefix fanout. Memory: O(unique tx + keys + distinct hop
 // tokens), bounded by store eviction.
 func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[string]RepeaterRelayInfo {
+	metadata := s.snapshotPathNodes()
 	// Everything that reads store data happens under the read lock: ingest
 	// appends to and eviction compacts byPathHop/byNode slices in place, so a
 	// copied slice header is not a stable snapshot, and StoreTx observations
 	// are mutable. The unlocked phase reads only values owned by this call.
 	s.mu.RLock()
-	pm := s.relayPrefixMapLocked()
+	pm := metadata.pm
 
 	// Per transmission: its relay entry values and the identity-safe relay
 	// keys confirmed by its raw observed flood paths, computed once.

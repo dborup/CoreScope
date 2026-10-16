@@ -22,17 +22,6 @@ type NodeHealthStats struct {
 	LastAdvert         *string  `json:"lastAdvert"`
 }
 
-// relayPrefixMapLocked reuses the existing bounded node cache. Missing node
-// metadata fails closed for short hashes (e.g. during startup/schema failure).
-// Caller holds s.mu. There is no per-node or per-packet SQL query here.
-func (s *PacketStore) relayPrefixMapLocked() *prefixMap {
-	if s.db == nil || s.db.conn == nil {
-		return s.nodePM
-	}
-	_, pm := s.getCachedNodesAndPM()
-	return pm
-}
-
 // confirmedRelayKey deliberately does not use graph/geo/fallback guesses.
 // A full raw identity or a unique wire prefix is evidence; a colliding prefix
 // remains unknown even if a heuristic previously indexed it under a full key.

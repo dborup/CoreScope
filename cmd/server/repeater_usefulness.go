@@ -125,6 +125,7 @@ func (s *PacketStore) GetRepeaterNodeStatsBatch(pubkeys []string, windowHours fl
 	if len(pubkeys) == 0 {
 		return result
 	}
+	metadata := s.snapshotPathNodes()
 
 	type nodeSnap struct {
 		entries []relayEntry
@@ -144,7 +145,7 @@ func (s *PacketStore) GetRepeaterNodeStatsBatch(pubkeys []string, windowHours fl
 	var ids []int
 	for _, pk := range pubkeys {
 		key := strings.ToLower(pk)
-		entries := s.collectRelayEntriesLocked(key)
+		entries := s.collectRelayEntriesLocked(key, metadata)
 		var relayed int
 		relayed, ids = countDistinctNonAdvert(s.byPathHop[key], ids)
 		snaps[pk] = nodeSnap{entries: entries, relayed: relayed}
