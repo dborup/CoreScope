@@ -47,9 +47,12 @@ type paramMeta struct {
 func routeDescriptions() map[string]routeMeta {
 	return map[string]routeMeta{
 		// Config
-		"GET /api/config/cache":      {Summary: "Get cache configuration", Tag: "config"},
-		"GET /api/config/client":     {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
-		"GET /api/config/regions":    {Summary: "Get configured regions", Tag: "config"},
+		"GET /api/config/cache":   {Summary: "Get cache configuration", Tag: "config"},
+		"GET /api/config/client":  {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
+		"GET /api/config/regions": {Summary: "Get configured regions", Tag: "config"},
+		"GET /api/regions/observed": {Summary: "Observed scoped relay positions", Description: "Bulk Regions map snapshot with selectable 1h, 24h or 7d window. Includes unpositioned scoped relays, current identity visibility filters, conservative retained-history coverage and explicit node/scope truncation flags. Reported positions are self-reported coordinates; neighbor estimates are excluded. Window bounds end at generatedAt, the shared relay snapshot time (normally refreshed every five minutes).", Tag: "analytics", Response: schemaRef("RegionsObservedResponse"),
+			QueryParams: []paramMeta{{Name: "window", Description: "1h, 24h (default), or 7d", Type: "string"}},
+			Errors:      []routeError{{Status: "400", Description: "Invalid window."}, {Status: "500", Description: "Current identity or node metadata could not be read."}, {Status: "503", Description: "Relay snapshot is unavailable or warming up."}}},
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
@@ -1005,6 +1008,9 @@ func componentSchemas() map[string]interface{} {
 		Properties:  map[string]*openAPISchema{"error": {Type: "string"}},
 	}
 	for name, schema := range nodeAdvertRouteSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range regionsObservedSchemas() {
 		schemas[name] = schema
 	}
 	for name, schema := range heardBySchemas() {

@@ -359,22 +359,25 @@ async function run() {
   });
 
   await test('Regions map deep link renders observed repeaters without claiming RF coverage', async () => {
-    const repeater = (key, lat, lon) => ({ public_key: key, name: key, role: 'repeater', lat, lon,
-      transported_scopes_recent: ['#dk'], last_relayed: '2026-10-08T00:00:00Z' });
+    const repeater = (key, lat, lon) => ({ publicKey: key, name: key, role: 'repeater', lat, lon,
+      positionSource: 'reported', scopes: [{ name: '#dk', lastRelayed: '2026-10-16T11:00:00Z' }] });
     const nodes = [repeater('a', 55, 10), repeater('b', 55, 11), repeater('c', 56, 10)];
-    await page.route('**/api/nodes?*', route => route.fulfill({ status: 200, contentType: 'application/json',
-      body: JSON.stringify({ nodes, counts: { repeater: 3 }, total: 3 }) }));
+    await page.route('**/api/regions/observed?*', route => route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ window: '24h', windowStart: '2026-10-15T12:00:00Z', windowEnd: '2026-10-16T12:00:00Z',
+        generatedAt: '2026-10-16T12:00:00Z', coverage: { start: '2026-10-15T12:00:00Z', complete: true, loading: false },
+        nodes, truncated: false, scopesTruncated: false }) }));
     try {
       await page.goto(`${BASE}/#/regions?scope=%23dk`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('.regions-status');
-      await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('3 positioned repeaters'));
+      await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('3 positioned relay nodes'));
       assert(await page.locator('.regions-leaflet .leaflet-interactive').count() >= 3, 'repeater markers missing');
-      assert((await page.locator('.regions-status').textContent()).includes('not measured RF coverage'), 'coverage disclaimer missing');
-      assert(await page.locator('.regions-controls select').inputValue() === '#dk', 'scope deep link not selected');
-      await page.locator('.regions-controls select').selectOption('');
-      assert((await page.evaluate(() => location.hash)) === '#/regions', 'scope change not reflected in URL');
+      assert((await page.locator('.regions-note').textContent()).includes('not a radio coverage measurement'), 'coverage disclaimer missing');
+      const scope = page.getByRole('combobox', { name: 'Region scope' });
+      assert(await scope.inputValue() === '#dk', 'scope deep link not selected');
+      await scope.selectOption('');
+      assert((await page.evaluate(() => location.hash)) === '#/regions?window=24h', 'scope change not reflected in URL');
     } finally {
-      await page.unroute('**/api/nodes?*');
+      await page.unroute('**/api/regions/observed?*');
     }
   });
 

@@ -405,6 +405,9 @@ type PacketStore struct {
 	repeaterRelayCache    map[string]RepeaterRelayInfo
 	repeaterRelayCacheWin float64
 	repeaterRelayAt       time.Time
+	// Metadata and Regions evidence are published with repeaterRelayCache
+	// under repeaterEnrichMu, and remain immutable until replacement.
+	repeaterRelaySnapshot *repeaterRelaySnapshot
 	repeaterUsefulCache   map[string]float64
 	repeaterUsefulAt      time.Time
 

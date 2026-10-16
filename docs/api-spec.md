@@ -51,6 +51,7 @@
 - [GET /api/analytics/subpaths](#get-apianalyticssubpaths)
 - [GET /api/analytics/subpath-detail](#get-apianalyticssubpath-detail)
 - [GET /api/scope-stats](#get-apiscope-stats)
+- [GET /api/regions/observed](#get-apiregionsobserved)
 - [GET /api/resolve-hops](#get-apiresolve-hops)
 - [GET /api/traces/:hash](#get-apitraceshash)
 - [GET /api/config/theme](#get-apiconfigtheme)
@@ -2451,6 +2452,58 @@ Detailed stats for a specific subpath.
 ```
 
 ---
+
+## GET /api/regions/observed
+
+Bulk observed scoped relay activity for the Regions map. `window` accepts
+`1h`, `24h` (default), or `7d`; other values return HTTP 400. Returns HTTP 503
+until the background relay snapshot is available, and HTTP 500 if current
+node metadata cannot be read.
+
+```json
+{
+  "window": "24h",
+  "generatedAt": "2026-10-16T12:00:00Z",
+  "windowStart": "2026-10-15T12:00:00Z",
+  "windowEnd": "2026-10-16T12:00:00Z",
+  "coverage": {"start": "2026-10-12T12:00:00Z", "complete": true, "loading": false},
+  "nodes": [{
+    "publicKey": "<public key>", "name": "Example relay", "role": "repeater",
+    "lat": 55.2, "lon": 10.3, "positionSource": "reported",
+    "scopes": [{"name": "#example", "lastRelayed": "2026-10-16T11:55:00Z"}]
+  }],
+  "truncated": false,
+  "scopesTruncated": false
+}
+```
+
+`windowEnd` equals `generatedAt`, the time of the shared relay snapshot
+(normally refreshed every five minutes). A scope is included when its latest
+confirmed non-advert relay timestamp is within the inclusive requested bounds;
+future timestamps are excluded. Scope spelling and case are preserved. Raw
+prefix and heuristic-only paths do not broaden scoped relay attribution.
+
+`coverage.start` is the conservative lower bound of known retained in-memory
+history and may precede `windowStart`. It is `null` when startup loading,
+failed loading, incomplete row coverage, or missing history prevents that bound
+from being established. `complete` is true only when the known interval covers
+the requested window; it does not establish uninterrupted observer operation.
+Memory eviction and configured retention can shorten this interval. `loading`
+describes startup loading when the relay snapshot was generated.
+
+Nodes with active scope evidence but no usable reported coordinates remain in
+the response with `lat: null`, `lon: null`, and `positionSource: "none"`.
+Reported coordinates are self-reported node metadata, not a verified GPS fix.
+Neighbor position estimates are not used. The endpoint applies current node
+and observer blacklists, hidden-name prefixes (including observer aliases), and the node-list geographic filter (including
+its foreign-node exception) on every request and returns `Cache-Control:
+no-store`.
+
+At most 5,000 eligible visible nodes are returned in public-key order;
+`truncated` signals additional eligible nodes. Each node retains its 32 newest
+valid scope timestamps; `scopesTruncated` signals omission from that retained
+scope evidence. Clients must describe incomplete views when either flag is
+true. Empty lists serialize as arrays.
 
 ## GET /api/scope-stats
 

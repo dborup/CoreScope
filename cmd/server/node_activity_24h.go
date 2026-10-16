@@ -90,16 +90,31 @@ func (a *NodeActivity24h) add(tx *StoreTx) {
 // synchronise on s.mu (store.go:530); nesting s.mu → bgErrMu would be the
 // first such site in the codebase and would quietly undermine that contract.
 func (s *PacketStore) nodeActivityCoverageStartLocked(now time.Time, loadCoverage float64) time.Time {
+	// Preserve the existing 24h health contract while other views can expose
+	// a shorter known interval as partial history.
+	if (s.retentionHours > 0 && s.retentionHours < 24) ||
+		(loadCoverage < 1 && s.retentionHours <= 0 && s.hotStartupHours < 24) {
+		return time.Time{}
+	}
+	return s.retainedHistoryCoverageStartLocked(now, loadCoverage)
+}
+
+// retainedHistoryCoverageStartLocked describes the known in-memory history,
+// independent of the requested display window. Caller reads loadCoverage
+// before taking s.mu; no bgErrMu acquisition is allowed under s.mu.
+func (s *PacketStore) retainedHistoryCoverageStartLocked(now time.Time, loadCoverage float64) time.Time {
 	if !s.loaded || !s.backgroundLoadDone.Load() || s.backgroundLoadFailed.Load() ||
-		(s.retentionHours > 0 && s.retentionHours < 24) || len(s.packets) == 0 {
+		len(s.packets) == 0 {
 		return time.Time{}
 	}
 	// The startup "done" gate accepts 90% of DB rows. That is not enough
 	// to call every empty hour a confirmed zero; require the exact count.
 	// Unlimited retention with a hot-start window has no background fill and
-	// leaves loadCoverageRatio at zero. The window itself can still prove 24h
-	// coverage when it is at least 24h wide; oldestLoaded is checked below.
-	if loadCoverage < 1 && !(s.retentionHours <= 0 && s.hotStartupHours >= 24) {
+	// leaves loadCoverageRatio at zero. The hot window proves coverage only
+	// without a memory cap: capped startup can omit newer rows while still
+	// retaining a much older first row. An old floor alone cannot prove that
+	// the interval after it was loaded completely.
+	if loadCoverage < 1 && !(s.retentionHours <= 0 && s.hotStartupHours > 0 && s.maxMemoryMB <= 0) {
 		return time.Time{}
 	}
 	coverage, err := time.Parse(time.RFC3339Nano, s.oldestLoaded)

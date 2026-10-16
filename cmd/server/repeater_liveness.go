@@ -48,6 +48,11 @@ type RepeaterRelayInfo struct {
 	// follow-up). Nil when WindowHours <= 0 (recency undetermined, same
 	// convention as RelayActive staying false in that case).
 	TransportedScopesRecent []string `json:"transportedScopesRecent,omitempty"`
+
+	// Regions keeps its window selection independent of the configured
+	// liveness window. These immutable values never enter existing node JSON.
+	regionScopes          []regionScopeRelay
+	regionScopesTruncated bool
 }
 
 // maxTransportedScopes bounds the per-node TransportedScopes list so a
@@ -202,9 +207,12 @@ func forEachRelayCandidate(pathHop, byNode map[string][]*StoreTx, m relayKeyMatc
 // computeRelayInfoFromEntries derives RepeaterRelayInfo from pre-snapshotted
 // relayEntry values. Safe to call without any lock held.
 func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) RepeaterRelayInfo {
+	return computeRelayInfoFromEntriesAt(entries, windowHours, time.Now().UTC())
+}
+
+func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, now time.Time) RepeaterRelayInfo {
 	info := RepeaterRelayInfo{WindowHours: windowHours}
 
-	now := time.Now().UTC()
 	cutoff1h := now.Add(-time.Hour)
 	cutoff24h := now.Add(-24 * time.Hour)
 
@@ -212,6 +220,7 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 	var latestRaw string
 	var scopeSet map[string]struct{}
 	var scopeLatest map[string]time.Time
+	var regionLatest map[string]time.Time
 	for _, e := range entries {
 		// Self-originated adverts are not relay activity.
 		if e.pt == payloadTypeAdvert {
@@ -233,6 +242,16 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 		}
 		if !ok {
 			continue
+		}
+		// Keep the latest non-future evidence separately: a future-dated
+		// row must neither activate Regions nor hide an older valid relay.
+		if !e.fromPrefix && e.scope != "" && !t.After(now) {
+			if regionLatest == nil {
+				regionLatest = make(map[string]time.Time)
+			}
+			if t.After(regionLatest[e.scope]) {
+				regionLatest[e.scope] = t
+			}
 		}
 		// Map scope-filter parity follow-up: track the latest parseable
 		// timestamp per scope so recency can be judged per-scope, not
@@ -262,6 +281,7 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 	// #1751: emit transported scopes regardless of whether any timestamp
 	// parsed, and before the latestRaw early-return below.
 	info.TransportedScopes = sortedCappedScopes(scopeSet)
+	info.regionScopes, info.regionScopesTruncated = newestRegionScopeRelays(regionLatest)
 	if latestRaw == "" {
 		return info
 	}

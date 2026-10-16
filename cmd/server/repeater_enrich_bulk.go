@@ -39,13 +39,14 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 	// Cache is nil — recomputer hasn't prewarmed yet (edge case: tests
 	// without a running recomputer, or a request racing the initial
 	// synchronous prewarm). Build once inline; the recomputer takes over.
-	result := s.computeRepeaterRelayInfoMap(windowHours)
+	snapshot := s.computeRepeaterRelaySnapshot(windowHours)
 
 	s.repeaterEnrichMu.Lock()
 	if s.repeaterRelayCache == nil {
-		s.repeaterRelayCache = result
+		s.repeaterRelayCache = snapshot.info
+		s.repeaterRelaySnapshot = snapshot
 		s.repeaterRelayCacheWin = windowHours
-		s.repeaterRelayAt = time.Now()
+		s.repeaterRelayAt = snapshot.generatedAt
 	}
 	cached = s.repeaterRelayCache
 	s.repeaterEnrichMu.Unlock()
@@ -65,11 +66,24 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 // avoiding collided-prefix fanout. Memory: O(unique tx + keys + distinct hop
 // tokens), bounded by store eviction.
 func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[string]RepeaterRelayInfo {
+	return s.computeRepeaterRelaySnapshot(windowHours).info
+}
+
+func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeaterRelaySnapshot {
+	// Read before s.mu: bgErrMu readers intentionally do not wait on the
+	// packet lock. The same floor/time describes every entry in this result.
+	loadCoverage := s.LoadCoverageRatio()
+	now := time.Now().UTC()
 	// Everything that reads store data happens under the read lock: ingest
 	// appends to and eviction compacts byPathHop/byNode slices in place, so a
 	// copied slice header is not a stable snapshot, and StoreTx observations
 	// are mutable. The unlocked phase reads only values owned by this call.
 	s.mu.RLock()
+	snapshot := &repeaterRelaySnapshot{
+		generatedAt:   now,
+		coverageStart: s.retainedHistoryCoverageStartLocked(now, loadCoverage),
+		loading:       !s.loaded || (!s.backgroundLoadDone.Load() && !s.backgroundLoadFailed.Load()),
+	}
 	pm := s.relayPrefixMapLocked()
 
 	// Per transmission: its relay entry values and the identity-safe relay
@@ -190,9 +204,10 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 			e.fromPrefix = ref.fromPrefix
 			entries = append(entries, e)
 		}
-		out[k.key] = computeRelayInfoFromEntries(entries, windowHours)
+		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
 	}
-	return out
+	snapshot.info = out
+	return snapshot
 }
 
 // GetRepeaterUsefulnessScoreMap returns a cached pubkey → 0..1 score
