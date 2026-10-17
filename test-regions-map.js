@@ -253,6 +253,49 @@ for (const bounds of [
   { start: 'invalid', end: 'invalid' },
 ]) assert.throws(() => history.selectActivity(activity, healthHistory, { ...healthFrame, interval: bounds }), /activity interval/i);
 
+// F1 (PR #507 review): evidence gaps are per hour bucket and scope. Excluded
+// observations never withhold values; unprovable/capped ones withhold only the
+// rates, chart values and comparisons that include an affected bucket/scope.
+const evidenceCoverage = { start: historyStart, loading: false, evidence: { excluded: 9, unprovable: 1, capped: 1, truncated: false, scopes: [
+  { name: '#dk', excluded: 9, unprovable: 1, capped: 0, buckets: [{ index: 500, excluded: 0, unprovable: 1, capped: 0 }, { index: 503, excluded: 9, unprovable: 0, capped: 0 }] },
+  { name: '#se', excluded: 0, unprovable: 0, capped: 1, buckets: [{ index: 503, excluded: 0, unprovable: 0, capped: 1 }] },
+] } };
+const gapHistory = history.indexHistory(historyData({ coverage: evidenceCoverage }), healthNodes);
+assert.equal(gapHistory.limited, false, 'evidence gaps are not a snapshot-wide limit');
+let gapFrame = history.selectFrame(gapHistory, { window: '1h', scope: '#dk', compare: true });
+assert.equal(gapFrame.comparable, true, 'excluded-only #dk hours stay comparable');
+assert.deepEqual(gapFrame.evidence, { excluded: 9, unprovable: 0, capped: 0, incomplete: false });
+let gapView = history.selectActivity(history.indexActivity(gapHistory, '#dk'), gapHistory, gapFrame);
+assert.equal(gapView.ratePerHour, 8, 'an unaffected bucket keeps its rate despite gaps elsewhere');
+assert.equal(gapView.bins[0].appearances, 8);
+gapFrame = history.selectFrame(gapHistory, { window: '1h', compare: true });
+assert.equal(gapFrame.comparable, false, 'all scopes include the capped #se hour');
+assert.deepEqual(gapFrame.evidence, { excluded: 9, unprovable: 0, capped: 1, incomplete: true });
+gapView = history.selectActivity(history.indexActivity(gapHistory, ''), gapHistory, gapFrame);
+assert.equal(gapView.ratePerHour, null);
+assert.equal(gapView.bins[0].appearances, null);
+assert.equal(gapView.bins[0].evidenceIncomplete, true);
+assert.equal(gapView.bins[0].observedAppearances, 12, 'retained observations stay visible');
+gapFrame = history.selectFrame(gapHistory, { window: '24h', scope: '#dk' });
+gapView = history.selectActivity(history.indexActivity(gapHistory, '#dk'), gapHistory, gapFrame);
+assert.equal(gapView.ratePerHour, null, 'the 24h #dk interval contains the unprovable hour');
+assert.equal(gapView.bins[20].appearances, null, 'bucket 500 is withheld');
+assert.equal(gapView.bins[20].evidenceIncomplete, true);
+assert.equal(gapView.bins[23].appearances, 8, 'other #dk bins in the same interval stay available');
+assert.equal(gapView.bins[22].appearances, 2);
+assert.equal(history.selectFrame(gapHistory, { window: '1h', at: '2026-10-16T11:00:00Z', scope: '#dk', compare: true }).comparable, true,
+  'buckets 502 vs 501 are unaffected');
+assert.equal(history.selectFrame(gapHistory, { window: '1h', at: '2026-10-16T10:00:00Z', scope: '#dk', compare: true }).comparable, false,
+  'the previous interval contains unprovable bucket 500');
+assert.equal(history.selectFrame(gapHistory, { window: '1h', at: '2026-10-16T10:00:00Z', scope: '#se', compare: true }).comparable, true,
+  'another scope is unaffected by the #dk gap');
+for (const evidence of [{ ...evidenceCoverage.evidence, truncated: true }, { scopes: [{ name: '#dk', buckets: [{ index: 504, unprovable: 1 }] }] }, { scopes: 'bad' }]) {
+  const failClosed = history.indexHistory(historyData({ coverage: { ...evidenceCoverage, evidence } }), healthNodes);
+  const selected = history.selectFrame(failClosed, { window: '1h', scope: '#dk', compare: true });
+  assert.equal(selected.comparable, false, 'unknown evidence placement fails closed');
+  assert.equal(history.selectActivity(history.indexActivity(failClosed, '#dk'), failClosed, selected).ratePerHour, null);
+}
+
 // Reading the sparse payload after indexing must not be part of chart playback.
 const playbackFrame = history.selectFrame(healthHistory, { window: '7d' });
 Object.defineProperty(healthHistory, 'nodes', { get() { throw new Error('sparse node rescan'); } });
