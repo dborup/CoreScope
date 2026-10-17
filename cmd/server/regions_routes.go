@@ -91,6 +91,8 @@ type regionsRouteSnapshot struct {
 	steps                            []RegionsRouteStep
 	stepsTruncated, bucketsTruncated bool
 	evidence                         RegionsStepEvidence
+	memberships                      *regionsMembershipSnapshot
+	history                          *regionsRelayHistory
 }
 
 type regionsRoutePath struct {
@@ -105,6 +107,7 @@ type regionsRouteTx struct {
 }
 type regionsRoutesCollector struct {
 	start, end time.Time
+	now        time.Time
 	txs        []regionsRouteTx
 	pathCount  int
 	evidence   RegionsStepEvidence
@@ -112,7 +115,7 @@ type regionsRoutesCollector struct {
 
 func newRegionsRoutesCollector(now time.Time) *regionsRoutesCollector {
 	end := now.UTC().Truncate(time.Hour)
-	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end}
+	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC()}
 }
 
 // capture copies immutable strings and scalar wire evidence while the packet
@@ -127,7 +130,7 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	if tx.PayloadType == nil || *tx.PayloadType == payloadTypeAdvert || *tx.PayloadType == 9 || regions.ValidateCandidate(tx.ScopeName) != nil {
 		return
 	}
-	if !valid || when.Before(c.start) || !when.Before(c.end) {
+	if !valid || when.Before(c.start) || when.After(c.now) {
 		return
 	}
 	canonical, known := wireTransportCodes(tx.RawHex)
@@ -136,16 +139,18 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	seen := make(map[string]int)
 	for _, obs := range tx.Observations {
 		if obs == nil {
-			continue
-		}
-		if obs.wireRoute == 0 {
 			c.evidence.SkippedObservations++
 			continue
 		}
-		if obs.wireRoute != 1 {
+		eligible, incomplete := eligibleRegionsObservation(obs, canonical, known)
+		if incomplete {
+			c.evidence.SkippedObservations++
 			continue
-		} // Only explicit TRANSPORT_FLOOD observation headers.
-		if !known || !obs.transportKnown || obs.wireTransport != canonical || len(obs.PathJSON) > maxRegionsRoutePathBytes {
+		}
+		if !eligible {
+			continue
+		}
+		if len(obs.PathJSON) > maxRegionsRoutePathBytes {
 			c.evidence.SkippedObservations++
 			continue
 		}
@@ -162,7 +167,7 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 		item.paths = append(item.paths, regionsRoutePath{path: obs.PathJSON, observations: 1})
 		c.pathCount++
 	}
-	if len(tx.Observations) == 0 && tx.PathJSON != "" {
+	if len(tx.Observations) == 0 {
 		c.evidence.SkippedObservations++
 	}
 	if len(item.paths) > 0 {
@@ -180,11 +185,14 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 	out := &regionsRouteSnapshot{steps: []RegionsRouteStep{}, evidence: c.evidence}
 	sort.Slice(c.txs, func(i, j int) bool { return c.txs[i].id < c.txs[j].id })
 	resolve := newRelayTokenResolver(pm)
+	memberships := newRegionsMembershipBuilder()
 	rows := make(map[regionsRouteKey]map[int]regionsRouteCell)
 	seen := make(map[regionsRouteKey]bool)
+	seenMembers := make(map[string]bool)
 	cellCount := 0
 	for _, tx := range c.txs {
 		clear(seen)
+		clear(seenMembers)
 		index := int(tx.when.Sub(c.start) / time.Hour)
 		for _, path := range tx.paths {
 			var tokens []string
@@ -201,6 +209,15 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 				if key == "" {
 					previous = ""
 					out.evidence.UnresolvedHops++
+					continue
+				}
+				if !seenMembers[key] {
+					seenMembers[key] = true
+					memberships.add(key, tx)
+				}
+				// Latest includes the current hour. Completed hourly history and
+				// directed steps deliberately do not, even at its exact boundary.
+				if index >= regionsHistoryBucketCount {
 					continue
 				}
 				if previous != "" && previous != key {
@@ -270,7 +287,9 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 		}
 		out.steps = append(out.steps, step)
 	}
-	out.evidence.Incomplete = out.evidence.SkippedObservations > 0 || out.evidence.UnresolvedHops > 0 || out.evidence.SourceTruncated || out.stepsTruncated || out.bucketsTruncated
+	membershipIncomplete := out.evidence.SkippedObservations > 0 || out.evidence.UnresolvedHops > 0 || out.evidence.SourceTruncated
+	out.memberships, out.history = memberships.build(c.now, membershipIncomplete)
+	out.evidence.Incomplete = membershipIncomplete || out.stepsTruncated || out.bucketsTruncated
 	return out
 }
 

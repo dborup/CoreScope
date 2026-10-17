@@ -150,7 +150,7 @@
     panel.setAttribute('aria-label', 'Scope connections and observed relay steps');
     const summary = el('p', 'regions-connections-summary'); panel.appendChild(summary);
     panel.appendChild(el('h2', '', 'Shared relay-history memberships'));
-    panel.appendChild(el('p', 'regions-connections-provenance', 'Distinct visible identities attributed to both scopes by the transmission-level relay history used by Timeline/Health. Observation route/scope variants are not independently verified here; mixed flood/direct transmissions can include planned-path candidates. Only directed steps below use each observation’s own frame evidence.'));
+    panel.appendChild(el('p', 'regions-connections-provenance', 'Distinct visible identities with attributable scoped flood observations in both scopes during the selected interval. Timeline, Health and shared memberships use each observation’s own frame evidence; direct planned paths and unknown or mismatched transport codes are excluded. Membership in both scopes does not establish a cross-scope forwarding event.'));
     panel.appendChild(el('p', 'regions-connections-note', 'Shared history membership does not establish cross-scope traffic, a scope transition or a direct radio link.'));
     const pairSummary = el('p', 'regions-pairs-summary'); panel.appendChild(pairSummary);
 

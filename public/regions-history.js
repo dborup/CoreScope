@@ -26,7 +26,7 @@
     if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(generated) || generated < end ||
         start % HOUR || end % HOUR || data.bucketSeconds !== 3600 || data.bucketCount !== MAX_BUCKETS ||
         end - start !== MAX_BUCKETS * HOUR || !Array.isArray(nodes)) throw new Error('Invalid regions history');
-    let limited = !!(data.truncated || data.scopesTruncated || data.bucketsTruncated || nodes.length > MAX_NODES);
+    let limited = !!(data.truncated || data.scopesTruncated || data.bucketsTruncated || data.coverage?.evidenceIncomplete || nodes.length > MAX_NODES);
     let cells = 0, appearances = 0;
     const indexed = [];
     for (const node of nodes.slice(0, MAX_NODES)) {
@@ -62,7 +62,8 @@
     }
     const coverage = data.coverage || {};
     return { start, end, generatedAt: new Date(generated).toISOString(), nodes: indexed,
-      coverageStart: millis(coverage.start), loading: coverage.loading === true, limited };
+      coverageStart: millis(coverage.start), loading: coverage.loading === true,
+      evidenceIncomplete: coverage.evidenceIncomplete === true, limited };
   }
 
   function frameIndex(history, at) {

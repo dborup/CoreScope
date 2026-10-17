@@ -26,8 +26,9 @@ type regionsRelayHistory struct {
 }
 
 type RegionsHistoryCoverage struct {
-	Start   *string `json:"start"`
-	Loading bool    `json:"loading"`
+	Start              *string `json:"start"`
+	Loading            bool    `json:"loading"`
+	EvidenceIncomplete bool    `json:"evidenceIncomplete"`
 }
 
 type RegionsHistoryBucket struct {
@@ -89,8 +90,8 @@ func historyRelayTime(e relayEntry, start, end time.Time) (time.Time, bool) {
 	return t, valid && !t.Before(start) && t.Before(end)
 }
 
-// add receives the already deduplicated, confirmed entries from the existing
-// bulk relay computation, after the packet lock has been released. Callers
+// add receives deduplicated own-observation memberships from the strict
+// Regions collector, after the packet lock has been released. Callers
 // visit keys in sorted order so the shared cell budget is deterministic.
 func (b *regionsHistoryBuilder) add(key string, entries []relayEntry) {
 	if len(key) != 64 {
@@ -105,28 +106,7 @@ func (b *regionsHistoryBuilder) add(key string, entries []relayEntry) {
 		if !valid {
 			continue
 		}
-		if have, exists := latest[e.scope]; exists {
-			if t.After(have) {
-				latest[e.scope] = t
-			}
-			continue
-		}
-		if len(latest) < maxTransportedScopes {
-			latest[e.scope] = t
-			continue
-		}
-		h.scopesTruncated = true
-		var oldestName string
-		var oldest time.Time
-		for name, when := range latest {
-			if oldestName == "" || when.Before(oldest) || (when.Equal(oldest) && name > oldestName) {
-				oldestName, oldest = name, when
-			}
-		}
-		if t.After(oldest) || (t.Equal(oldest) && e.scope < oldestName) {
-			delete(latest, oldestName)
-			latest[e.scope] = t
-		}
+		h.scopesTruncated = retainLatestRegionScope(latest, e.scope, t) || h.scopesTruncated
 	}
 	if len(latest) == 0 {
 		return
@@ -236,7 +216,7 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 	response := RegionsHistoryResponse{GeneratedAt: snapshot.generatedAt.Format(time.RFC3339Nano),
 		HistoryStart: h.start.Format(time.RFC3339Nano), HistoryEnd: h.end.Format(time.RFC3339Nano),
 		BucketSeconds: 3600, BucketCount: regionsHistoryBucketCount,
-		Coverage: RegionsHistoryCoverage{Loading: snapshot.loading}, Nodes: []RegionsHistoryNode{},
+		Coverage: RegionsHistoryCoverage{Loading: snapshot.loading, EvidenceIncomplete: snapshot.regionMemberships != nil && snapshot.regionMemberships.incomplete}, Nodes: []RegionsHistoryNode{},
 		Truncated: h.truncated, ScopesTruncated: h.scopesTruncated, BucketsTruncated: h.bucketsTruncated}
 	if !snapshot.coverageStart.IsZero() && !snapshot.coverageStart.After(snapshot.generatedAt) {
 		start := snapshot.coverageStart.Format(time.RFC3339Nano)
@@ -282,8 +262,9 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 func regionsHistorySchemas() map[string]*openAPISchema {
 	return map[string]*openAPISchema{
 		"RegionsHistoryCoverage": {Type: "object", Properties: map[string]*openAPISchema{
-			"start":   {Type: "string", Nullable: true, Description: "Conservative retained-history floor, paired with this snapshot; null when unknown."},
-			"loading": {Type: "boolean"},
+			"start":              {Type: "string", Nullable: true, Description: "Conservative retained-history floor, paired with this snapshot; null when unknown."},
+			"loading":            {Type: "boolean"},
+			"evidenceIncomplete": {Type: "boolean", Description: "Snapshot-wide own-observation attribution is incomplete due to missing/mismatched wire evidence, unresolved identities, or bounded source/membership capture. Independent of retained time coverage and directed-step limits."},
 		}},
 		"RegionsHistoryBucket": {Type: "object", Properties: map[string]*openAPISchema{
 			"index":       {Type: "integer", Description: "Zero-based hourly bucket index, 0 through 503."},

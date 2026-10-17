@@ -217,8 +217,8 @@ func regionsRoutesFixture(t testing.TB) (*Server, time.Time, string, string) {
 	}
 	path := `["` + a + `","` + b + `"]`
 	tx := routeTransmission(1, now.Add(-2*time.Hour), path)
-	// Canonical direct with an independently observed flood must work publicly,
-	// even though the unchanged old relay-history path does not include it.
+	// Canonical direct with an independently observed flood must work in both
+	// strict history memberships and directed steps.
 	direct := 3
 	tx.RouteType = &direct
 	tx.RawHex = "17aabbccdd00"
@@ -246,7 +246,7 @@ func getRegionsRoutes(t testing.TB, srv *Server) RegionsRoutesResponse {
 func TestRegionsRoutesPairedMetadataVisibilityAndWarmLock(t *testing.T) {
 	srv, _, a, b := regionsRoutesFixture(t)
 	got := getRegionsRoutes(t, srv)
-	if len(got.Nodes) != 0 || len(got.StepNodes) != 2 || len(got.Steps) != 1 || got.Steps[0].From != a || got.Steps[0].To != b || got.Steps[0].Buckets[0].Count != 1 {
+	if len(got.Nodes) != 2 || len(got.StepNodes) != 2 || len(got.Steps) != 1 || got.Steps[0].From != a || got.Steps[0].To != b || got.Steps[0].Buckets[0].Count != 1 {
 		t.Fatalf("canonical direct scoped flood lost: %+v", got)
 	}
 	srv.store.mu.Lock()

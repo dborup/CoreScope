@@ -296,6 +296,15 @@ async function main() {
     coverageOverride = null;
   });
 
+  await test('retained history cannot hide missing observation evidence', async () => {
+    coverageOverride = { start: '2026-09-01T00:00:00Z', complete: true, loading: false, evidenceIncomplete: true };
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.regions-coverage').textContent.includes('Observation evidence is incomplete'));
+    assert.strictEqual(await page.locator('.regions-coverage').getAttribute('data-coverage-state'), 'complete', 'retention is separate from attribution');
+    assert.match(await page.locator('.regions-coverage').textContent(), /could not be safely attributed/);
+    coverageOverride = null;
+  });
+
   await test('timeline deep links clamp to completed hours and compare equal adjacent periods', async () => {
     await page.evaluate(() => { location.hash = '#/regions?view=timeline&window=1h&scope=%23example&at=2026-10-16T12%3A47%3A00Z&compare=1'; });
     await page.waitForFunction(() => document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'true');
@@ -395,12 +404,17 @@ async function main() {
 
   await test('partial, unknown, loading and capped history withhold all change claims', async () => {
     const overrides = [{ coverage: { start: '2026-10-16T10:30:00Z', loading: false } },
-      { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } }, { bucketsTruncated: true }];
+      { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } }, { bucketsTruncated: true },
+      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidenceIncomplete: true } }];
     for (const value of overrides) {
       historyOverride = value;
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.waitForFunction(() => document.querySelector('.regions-page')?.getAttribute('aria-busy') === 'false' && document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'false');
       assert.match(await page.locator('.regions-comparison-limited').textContent(), /Comparison limited by available history/);
+      if (value.coverage?.evidenceIncomplete) {
+        assert.match(await page.locator('.regions-comparison-limited').textContent(), /Observation evidence is incomplete/);
+        assert.doesNotMatch(await page.locator('.regions-comparison-limited').textContent(), /A data safety limit was reached/);
+      }
       assert.strictEqual(await page.locator('.regions-state-added, .regions-state-not-observed, .regions-appearance-change').count(), 0);
       assert.match(await page.locator('.regions-status').textContent(), /8 relay appearances/);
       assert.strictEqual(await page.locator('.regions-leaflet path.leaflet-interactive').count(), 2, 'limited comparison maps only observed selected relays');
@@ -513,7 +527,8 @@ async function main() {
     assert.match(await partial.textContent(), /7 appearances; 2 relay nodes/);
     assert.strictEqual(await partial.locator('[data-column="appearances"]').textContent(), '—');
     for (const override of [{ coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
-      { truncated: true }, { scopesTruncated: true }, { bucketsTruncated: true }]) {
+      { truncated: true }, { scopesTruncated: true }, { bucketsTruncated: true },
+      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidenceIncomplete: true } }]) {
       historyOverride = override;
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
@@ -614,9 +629,9 @@ async function main() {
     assert.strictEqual(await page.getByRole('columnheader', { name: 'History identities', exact: true }).isVisible(), true);
     const provenance = page.locator('.regions-connections-provenance');
     assert.strictEqual(await provenance.isVisible(), true);
-    assert.match(await provenance.textContent(), /transmission-level relay history used by Timeline\/Health/);
-    assert.match(await provenance.textContent(), /Observation route\/scope variants are not independently verified here; mixed flood\/direct transmissions can include planned-path candidates/);
-    assert.match(await provenance.textContent(), /Only directed steps below use each observation’s own frame evidence/);
+    assert.match(await provenance.textContent(), /Timeline, Health and shared memberships use each observation’s own frame evidence/);
+    assert.match(await provenance.textContent(), /direct planned paths and unknown or mismatched transport codes are excluded/);
+    assert.match(await provenance.textContent(), /does not establish a cross-scope forwarding event/);
     assert.match(await page.locator('.regions-pairs-summary').textContent(), /1 distinct identities with shared history membership/);
     assert.match(await page.locator('.regions-connections-note').first().textContent(), /does not establish cross-scope traffic/);
     assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 3);
@@ -660,6 +675,7 @@ async function main() {
   await test('Connections qualifies partial, unknown, loading and capped evidence without absence claims', async () => {
     for (const override of [{ coverage: { start: '2026-10-16T11:30:00Z', loading: false } },
       { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
+      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidenceIncomplete: true } },
       { stepsTruncated: true }, { stepBucketsTruncated: true }, { stepEvidence: { sourceTruncated: true, incomplete: true } },
       { stepEvidence: { skippedObservations: 12, unresolvedHops: 3, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false } }]) {
       routesOverride = override;

@@ -177,6 +177,7 @@
       message = complete ? 'Retained history covers the requested interval.' :
         (availableStart ? 'Partial retained history; earlier activity in the requested interval is unavailable.' : 'No retained history is available in the requested interval.');
     }
+    if (coverage.evidenceIncomplete) message += ' Observation evidence is incomplete; some paths could not be safely attributed or were omitted by safety limits.';
     return { kind, message, requestedStart, requestedEnd, availableStart, generatedAt: isoTime(data.generatedAt) };
   }
 
@@ -570,7 +571,7 @@
       comparison.appendChild(element('p', '', 'Observed relay nodes: ' + frame.currentCount + ' selected / ' + frame.previousCount +
         ' previous. Relay appearances: ' + frame.currentAppearances.toLocaleString() + ' selected / ' + frame.previousAppearances.toLocaleString() + ' previous.'));
       if (!frame.comparable) {
-        const reasons = frame.limited ? 'A data safety limit was reached.' : 'Selected history: ' + frame.currentCoverage + '; previous history: ' + frame.previousCoverage + '.';
+        const reasons = frame.limited ? 'Observation evidence is incomplete or a data safety limit was reached.' : 'Selected history: ' + frame.currentCoverage + '; previous history: ' + frame.previousCoverage + '.';
         comparison.appendChild(element('p', 'regions-comparison-limited', 'Comparison limited by available history. ' + reasons +
           ' Changes and new/not-observed classifications are unavailable; counts show only retained observations.'));
         comparison.setAttribute('data-comparable', 'false');
@@ -654,7 +655,7 @@
         ' in selected interval. ' + frame.currentAppearances.toLocaleString() + ' relay appearances.';
       if (!frame.currentCount) status.textContent += frame.currentCoverage === 'unavailable' ? ' History is unavailable for this interval.' :
         ' No scoped relay traffic was observed in the available history; this does not imply there is no coverage.';
-      if (frame.limited) status.textContent += ' Data safety limits were reached; counts and map may be incomplete.';
+      if (frame.limited) status.textContent += ' Evidence is incomplete or safety limits were reached; counts and map may be incomplete.';
     }
 
     function fitTimeline() {
@@ -675,6 +676,7 @@
         unavailable: 'No retained history is available in the selected interval.', unknown: 'Retained history bounds are unknown; this view may be incomplete.',
         loading: 'History is still loading; this view may be incomplete.' };
       coverage.textContent = messages[frame.currentCoverage];
+      if (indexedHistory.evidenceIncomplete) coverage.textContent += ' Observation evidence is incomplete; some paths could not be safely attributed or were omitted by safety limits.';
       coverage.setAttribute('data-coverage-state', frame.currentCoverage);
       exactBounds.replaceChildren(element('p', '', 'Selected interval (UTC): ' + frame.interval.start + ' — ' + frame.interval.end),
         element('p', '', 'History dataset (UTC): ' + new Date(indexedHistory.start).toISOString() + ' — ' + new Date(indexedHistory.end).toISOString()));

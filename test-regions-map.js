@@ -88,6 +88,9 @@ assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: null, comple
 assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: null, complete: false, loading: true } }).kind, 'loading');
 assert.match(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-17T00:00:00Z', complete: false } }).message, /No retained history/);
 assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-16T09:00:00Z', complete: true } }).kind, 'partial', 'inconsistent complete flag cannot overstate available history');
+const omittedEvidence = regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-01T00:00:00Z', complete: true, evidenceIncomplete: true } });
+assert.equal(omittedEvidence.kind, 'complete', 'retention and attributable evidence are separate');
+assert.match(omittedEvidence.message, /Observation evidence is incomplete/);
 
 const history = require('./public/regions-history.js');
 const historyEnd = '2026-10-16T12:00:00Z';
@@ -131,6 +134,13 @@ for (const coverage of [{ start: null, loading: false }, { start: historyStart, 
 frame = history.selectFrame(history.indexHistory(historyData({ truncated: true }), historyData().nodes), { window: '1h', compare: true });
 assert.equal(frame.comparable, false, 'caps withhold changes');
 assert.equal(frame.limited, true);
+const unverifiedHistory = history.indexHistory(historyData({ coverage: { start: historyStart, loading: false, evidenceIncomplete: true } }), historyData().nodes);
+frame = history.selectFrame(unverifiedHistory, { window: '1h', compare: true });
+assert.equal(frame.currentCoverage, 'complete', 'evidence omissions do not rewrite the retained-history floor');
+assert.equal(frame.limited, true);
+assert.equal(frame.comparable, false, 'unattributable observations cannot support change classifications');
+assert.equal(frame.added, null);
+assert.equal(history.selectActivity(history.indexActivity(unverifiedHistory, ''), unverifiedHistory, frame).ratePerHour, null);
 frame = history.selectFrame(indexed, { window: '1h', scope: '#absent', compare: true });
 assert.equal(frame.currentCount, 0);
 assert.equal(frame.currentCoverage, 'complete', 'no observations is separate from unavailable history');
