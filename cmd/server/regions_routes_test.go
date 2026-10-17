@@ -368,6 +368,13 @@ func TestOpenAPIRegionsRoutesSchemas(t *testing.T) {
 }
 
 func regionsRoutesBenchmarkFixture(b *testing.B) *Server {
+	return regionsRoutesBenchmarkFixtureWith(b, false)
+}
+
+// mixed adds a realistic evidence mix: 8 scopes, a known-direct and a
+// mismatched-code observation per transmission and an unknown header on
+// every 10th, so per-bucket evidence spans 8 scopes x 168 hours.
+func regionsRoutesBenchmarkFixtureWith(b *testing.B, mixed bool) *Server {
 	srv, now, _ := regionsObservedFixture(b)
 	keys := make([]string, 2000)
 	transaction, err := srv.db.conn.Begin()
@@ -394,6 +401,13 @@ func regionsRoutesBenchmarkFixture(b *testing.B) *Server {
 		path := `["` + a + `","` + b + `","` + c + `"]`
 		tx := routeTransmission(i+1, end.Add(-time.Duration(i%168+1)*time.Hour), path, path)
 		tx.PathJSON = path
+		if mixed {
+			tx.ScopeName = fmt.Sprintf("#s%d", i%8)
+			tx.Observations = append(tx.Observations, routeObservation(path, "17aabbccdd00"), routeObservation(path, "14aabcccdd00"))
+			if i%10 == 0 {
+				tx.Observations = append(tx.Observations, routeObservation(path, ""))
+			}
+		}
 		for _, key := range []string{a, b, c} {
 			srv.store.byPathHop[key] = append(srv.store.byPathHop[key], tx)
 		}
@@ -410,8 +424,25 @@ func BenchmarkRegionsRoutesCompute30K2K(b *testing.B) {
 	}
 }
 
+func BenchmarkRegionsRoutesComputeMixedEvidence30K2K(b *testing.B) {
+	srv := regionsRoutesBenchmarkFixtureWith(b, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = srv.store.computeRepeaterRelaySnapshot(24)
+	}
+}
+
 func BenchmarkRegionsRoutesWarm30K2K(b *testing.B) {
-	srv := regionsRoutesBenchmarkFixture(b)
+	benchmarkRegionsRoutesWarm(b, false)
+}
+
+func BenchmarkRegionsRoutesWarmMixedEvidence30K2K(b *testing.B) {
+	benchmarkRegionsRoutesWarm(b, true)
+}
+
+func benchmarkRegionsRoutesWarm(b *testing.B, mixed bool) {
+	srv := regionsRoutesBenchmarkFixtureWith(b, mixed)
 	recomputeRepeaterEnrichmentSafe(srv.store, 24)
 	response := getRegionsRoutes(b, srv)
 	encoded, err := json.Marshal(response)

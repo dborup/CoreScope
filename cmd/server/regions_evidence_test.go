@@ -360,3 +360,23 @@ func TestRegionsEvidenceAppearancesUnionAcrossObservers(t *testing.T) {
 		t.Fatalf("relay appearances must be the union across observers, once per relay: got %v (total %d)", got, total)
 	}
 }
+
+// Worst-case evidence publication: every scope x hour cell of the budget.
+func BenchmarkRegionsEvidenceCapPayload(b *testing.B) {
+	builder := newRegionsEvidenceBuilder()
+	for i := 0; !builder.truncated; i++ {
+		builder.add(fmt.Sprintf("#scope%03d", i/(regionsHistoryBucketCount+1)), i%(regionsHistoryBucketCount+1), RegionsEvidenceCounts{Excluded: 12345, Unprovable: 1, Capped: 1})
+	}
+	snapshot := builder.build(time.Now().UTC().Truncate(time.Hour).Add(-regionsHistoryBucketCount * time.Hour))
+	encoded, err := json.Marshal(snapshot.history)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = snapshot.window(snapshot.start, snapshot.start.Add(regionsHistoryBucketCount*time.Hour))
+	}
+	b.ReportMetric(float64(len(encoded)), "payload-bytes")
+	b.ReportMetric(float64(len(builder.cells)), "cells")
+}
