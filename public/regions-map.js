@@ -8,6 +8,8 @@
   let leafletMap = null;
   let themeObserver = null;
   let generation = 0;
+  let stopPlayback = null;
+  let visibilityListener = null;
 
   function validPosition(node) {
     if (!node || node.lat == null || node.lon == null || node.lat === '' || node.lon === '') return false;
@@ -30,7 +32,7 @@
     return true;
   }
 
-  function collectScopeNodes(nodes) {
+  function collectScopeNodes(nodes, historical = false) {
     if (!Array.isArray(nodes)) return [];
     const seen = new Set();
     const out = [];
@@ -41,14 +43,16 @@
       const key = String(node.publicKey || '');
       if (!key || seen.has(key)) continue;
       const names = new Set();
-      const scopes = node.scopes.filter(scope => scope && validScope(scope.name) && !names.has(scope.name) && names.add(scope.name))
-        .map(scope => ({ name: scope.name, lastRelayed: Number.isFinite(Date.parse(scope.lastRelayed)) ? scope.lastRelayed : '' }));
+      const source = historical ? node.scopes.slice(0, 32) : node.scopes;
+      const scopes = source.filter(scope => scope && validScope(scope.name) && !names.has(scope.name) && names.add(scope.name))
+        .map(scope => ({ name: scope.name, lastRelayed: Number.isFinite(Date.parse(scope.lastRelayed)) ? scope.lastRelayed : '',
+          ...(historical ? { buckets: Array.isArray(scope.buckets) ? scope.buckets : [] } : {}) }));
       if (!scopes.length) continue;
       seen.add(key);
       const positioned = node.positionSource === 'reported' && validPosition(node);
       out.push({ publicKey: key, name: String(node.name || key.slice(0, 8)), role: node.role,
         lat: positioned ? Number(node.lat) : null, lon: positioned ? Number(node.lon) : null,
-        positionSource: positioned ? 'reported' : 'none', scopes });
+        positionSource: positioned ? 'reported' : 'none', metadataSource: node.metadataSource === 'archived' ? 'archived' : 'current', scopes });
     }
     return out;
   }
@@ -113,16 +117,28 @@
     const params = new URLSearchParams(query);
     const scope = params.get('scope') || '';
     const window = params.get('window');
-    return { window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h', scope: validScope(scope) ? scope : '' };
+    const selection = { window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h', scope: validScope(scope) ? scope : '' };
+    if (params.get('view') === 'timeline') {
+      selection.view = 'timeline';
+      selection.at = isoTime(params.get('at'));
+      selection.compare = params.get('compare') === '1';
+    }
+    return selection;
   }
 
   function parseSelectedScope(hash) {
     return parseSelection(hash).scope;
   }
 
-  function scopeHash(scope, window = '24h') {
+  function scopeHash(scope, window = '24h', selection = {}) {
     const params = new URLSearchParams({ window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h' });
     if (validScope(scope)) params.set('scope', scope);
+    if (selection.view === 'timeline') {
+      params.set('view', 'timeline');
+      const at = isoTime(selection.at);
+      if (at) params.set('at', at);
+      if (selection.compare) params.set('compare', '1');
+    }
     return '#/regions?' + params.toString();
   }
 
@@ -208,6 +224,13 @@
     shell.appendChild(element('p', 'regions-note', 'Observed scoped relay traffic, not a radio coverage measurement.'));
     const controls = element('div', 'regions-controls');
     const selection = parseSelection(location.hash);
+    const viewLabel = element('label', '', 'View ');
+    const view = element('select');
+    view.setAttribute('aria-label', 'Region view');
+    view.append(new Option('Latest', 'latest'), new Option('Timeline', 'timeline'));
+    view.value = selection.view || 'latest';
+    viewLabel.appendChild(view);
+    controls.appendChild(viewLabel);
     const periodLabel = element('label', '', 'Period ');
     const period = element('select');
     period.setAttribute('aria-label', 'Region period');
@@ -223,7 +246,45 @@
     const refresh = element('button', '', 'Refresh');
     refresh.type = 'button';
     controls.appendChild(refresh);
+    const fitButton = element('button', '', 'Fit map');
+    fitButton.type = 'button';
+    controls.appendChild(fitButton);
     shell.appendChild(controls);
+    const timelineControls = element('div', 'regions-timeline');
+    timelineControls.hidden = selection.view !== 'timeline';
+    const transport = element('div', 'regions-transport');
+    function transportButton(text, label) {
+      const button = element('button', '', text);
+      button.type = 'button';
+      button.setAttribute('aria-label', label);
+      transport.appendChild(button);
+      return button;
+    }
+    const previous = transportButton('Previous', 'Previous timeline hour');
+    const play = transportButton('Play', 'Play timeline');
+    const next = transportButton('Next', 'Next timeline hour');
+    play.setAttribute('aria-pressed', 'false');
+    timelineControls.appendChild(transport);
+    const sliderLabel = element('label', 'regions-slider-label', 'Interval ending (completed UTC hours)');
+    const slider = element('input');
+    slider.type = 'range';
+    slider.min = '0'; slider.max = '168'; slider.step = '1'; slider.value = '168';
+    slider.setAttribute('aria-label', 'Timeline interval ending');
+    sliderLabel.appendChild(slider);
+    timelineControls.appendChild(sliderLabel);
+    const compareLabel = element('label', 'regions-compare-label');
+    const compare = element('input');
+    compare.type = 'checkbox'; compare.checked = selection.compare === true;
+    compare.setAttribute('aria-label', 'Compare previous period');
+    compareLabel.append(compare, 'Compare previous period');
+    timelineControls.appendChild(compareLabel);
+    const intervalLabel = element('p', 'regions-interval');
+    timelineControls.appendChild(intervalLabel);
+    shell.appendChild(timelineControls);
+    const comparison = element('section', 'regions-comparison');
+    comparison.setAttribute('aria-label', 'Timeline comparison');
+    comparison.hidden = true;
+    shell.appendChild(comparison);
     const status = element('p', 'regions-status', 'Loading observed relay data…');
     status.setAttribute('role', 'status');
     shell.appendChild(status);
@@ -235,6 +296,7 @@
     details.appendChild(element('summary', '', 'Data & position details'));
     details.appendChild(element('p', '', 'Repeaters and rooms are shown where scoped relay traffic was observed. Positions are self-reported; their accuracy is unverified. Nodes without usable positions are counted but not mapped. Dashed outlines join the outermost node positions and do not measure RF coverage or administrative boundaries.'));
     details.appendChild(element('p', '', 'Retained history is not observer uptime or proof of continuous reception.'));
+    details.appendChild(element('p', '', 'Timeline counts are relay appearances: one transmission observed via two relay nodes contributes one appearance for each relay. Hours use UTC and intervals include their start and exclude their end. Positions use current or last-known self-reported coordinates; playback shows activity, not historical movement. Current catalog metadata can revise historical attribution after a refresh.'));
     const exactBounds = element('div', 'regions-exact-bounds');
     details.appendChild(exactBounds);
     shell.appendChild(details);
@@ -252,6 +314,7 @@
     // period/hash navigation safe when a user just pressed a zoom control.
     leafletMap = L.map(mapEl, { zoomAnimation: false }).setView([55.7, 10.5], 6);
     const map = leafletMap;
+    let redrawMap = null;
     const applyTiles = function () {
       if (token !== generation || leafletMap !== map) return;
       if (tileLayer) map.removeLayer(tileLayer);
@@ -262,6 +325,7 @@
         attribution: tile && tile.attribution ? tile.attribution : '© OpenStreetMap contributors',
       }).addTo(map);
       map.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';
+      if (redrawMap) redrawMap();
     };
     let tileLayer = null;
     applyTiles();
@@ -269,6 +333,178 @@
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     const layer = L.layerGroup().addTo(map);
     let requestGeneration = 0, snapshot = null, nodes = [], catalog = { scopes: [], truncated: false };
+    let indexedHistory = null, timer = null, lastFrame = null, scrubFrame = null;
+    const markers = new Map();
+    let hullLayer = null;
+    const historyTools = root.RegionsHistory;
+
+    function pause() {
+      if (timer !== null) clearTimeout(timer);
+      if (scrubFrame !== null) cancelAnimationFrame(scrubFrame);
+      timer = null;
+      scrubFrame = null;
+      play.textContent = 'Play';
+      play.setAttribute('aria-label', 'Play timeline');
+      play.setAttribute('aria-pressed', 'false');
+    }
+    stopPlayback = pause;
+    visibilityListener = () => { if (document.hidden) pause(); };
+    document.addEventListener('visibilitychange', visibilityListener);
+
+    function clearPoints() {
+      layer.clearLayers(); markers.clear(); hullLayer = null; lastFrame = null;
+    }
+
+    function timelineEnabled(ready) {
+      const enabled = ready && selection.view === 'timeline';
+      for (const control of [slider, compare, previous, next, play]) control.disabled = !enabled;
+      if (enabled) {
+        previous.disabled = Number(slider.value) <= 0;
+        next.disabled = Number(slider.value) >= 168;
+        play.disabled = Number(slider.value) >= 168;
+      }
+    }
+
+    function intervalText(start, end) {
+      return start.replace('T', ' ').replace(':00.000Z', '') + ' — ' + end.replace('T', ' ').replace(':00.000Z', '') + ' UTC';
+    }
+
+    function appendNodeList(parent, labelText, values) {
+      const details = element('details', 'regions-change-list');
+      details.appendChild(element('summary', '', labelText + ' (' + values.length + ')'));
+      const list = element('ul');
+      for (const node of values.slice(0, 20)) {
+        const item = element('li');
+        const link = element('a', '', node.name);
+        link.href = '#/nodes/' + encodeURIComponent(node.publicKey);
+        item.appendChild(link);
+        if (node.positionSource !== 'reported') item.append(' — no usable position');
+        list.appendChild(item);
+      }
+      details.appendChild(list);
+      if (values.length > 20) details.appendChild(element('p', '', 'Showing the first 20 of ' + values.length + ' relay nodes.'));
+      parent.appendChild(details);
+    }
+
+    function renderComparison(frame) {
+      comparison.hidden = !selection.compare;
+      comparison.replaceChildren();
+      if (!selection.compare) return;
+      comparison.appendChild(element('p', 'regions-reference', 'Previous interval: ' + intervalText(frame.interval.previousStart, frame.interval.previousEnd)));
+      comparison.appendChild(element('p', '', 'Observed relay nodes: ' + frame.currentCount + ' selected / ' + frame.previousCount +
+        ' previous. Relay appearances: ' + frame.currentAppearances.toLocaleString() + ' selected / ' + frame.previousAppearances.toLocaleString() + ' previous.'));
+      if (!frame.comparable) {
+        const reasons = frame.limited ? 'A data safety limit was reached.' : 'Selected history: ' + frame.currentCoverage + '; previous history: ' + frame.previousCoverage + '.';
+        comparison.appendChild(element('p', 'regions-comparison-limited', 'Comparison limited by available history. ' + reasons +
+          ' Changes and new/not-observed classifications are unavailable; counts show only retained observations.'));
+        comparison.setAttribute('data-comparable', 'false');
+        return;
+      }
+      comparison.setAttribute('data-comparable', 'true');
+      const legend = element('p', 'regions-comparison-legend');
+      legend.append(element('span', 'regions-state-added', frame.added.length + ' newly observed'),
+        element('span', 'regions-state-retained', frame.retained.length + ' observed in both'),
+        element('span', 'regions-state-not-observed', frame.notObserved.length + ' not observed in selected interval'));
+      comparison.appendChild(legend);
+      const change = frame.appearanceChange;
+      comparison.appendChild(element('p', 'regions-appearance-change', 'Relay appearance change: ' + (change > 0 ? '+' : '') +
+        change.toLocaleString() + (frame.percentChange == null ? ' (percentage unavailable: previous count is zero).' :
+          ' (' + (frame.percentChange > 0 ? '+' : '') + frame.percentChange.toFixed(1) + '%).')));
+      const lists = element('div', 'regions-change-lists');
+      appendNodeList(lists, 'Newly observed in selected interval', frame.added);
+      appendNodeList(lists, 'Not observed in selected interval', frame.notObserved);
+      comparison.appendChild(lists);
+    }
+
+    function timelinePopup(row) {
+      const point = row.node;
+      const popup = element('div');
+      popup.appendChild(element('strong', '', point.name));
+      popup.appendChild(element('div', '', selection.scope || point.scopes.map(s => s.name).join(', ')));
+      popup.appendChild(element('div', '', 'Selected interval: ' + row.count.toLocaleString() + ' relay appearances.'));
+      if (selection.compare) popup.appendChild(element('div', '', 'Previous interval: ' + row.previousCount.toLocaleString() + ' relay appearances.'));
+      if (row.state === 'added') popup.appendChild(element('div', '', 'Newly observed relative to the previous interval.'));
+      if (row.state === 'retained') popup.appendChild(element('div', '', 'Observed in both intervals.'));
+      if (row.state === 'not-observed') popup.appendChild(element('div', '', 'Not observed in selected interval; observed in previous interval. This does not establish an outage.'));
+      if (row.lastRelayed) popup.appendChild(element('div', '', 'Last observed relay in selected interval: ' + row.lastRelayed));
+      popup.appendChild(element('div', '', 'Position: ' + (point.metadataSource === 'archived' ? 'last-known' : 'current') + ' self-reported; accuracy unverified. Not a historical position.'));
+      const link = element('a', '', 'Node page');
+      link.href = '#/nodes/' + encodeURIComponent(point.publicKey);
+      popup.appendChild(link);
+      return popup;
+    }
+
+    function renderTimelinePoints(frame) {
+      const styles = getComputedStyle(document.documentElement);
+      const colors = { observed: styles.getPropertyValue('--accent').trim(), retained: styles.getPropertyValue('--accent').trim(),
+        added: styles.getPropertyValue('--status-green').trim(), 'not-observed': styles.getPropertyValue('--status-yellow').trim() };
+      const visible = new Set();
+      for (const row of frame.rows) {
+        const point = row.node;
+        if (point.positionSource !== 'reported') continue;
+        visible.add(point.publicKey);
+        const style = { radius: row.state === 'added' ? 7 : 6, weight: 2, color: colors[row.state],
+          fillOpacity: row.state === 'not-observed' ? 0.15 : 0.75, dashArray: row.state === 'not-observed' ? '3 3' : null };
+        let record = markers.get(point.publicKey);
+        if (!record) {
+          record = { marker: L.circleMarker([point.lat, point.lon], style), signature: '', style: '' };
+          const current = record;
+          record.marker.bindPopup(() => timelinePopup(current.row));
+          markers.set(point.publicKey, record);
+        }
+        const styleKey = [style.radius, style.color, style.fillOpacity, style.dashArray].join('|');
+        if (record.style !== styleKey) { record.marker.setStyle(style); record.style = styleKey; }
+        if (!layer.hasLayer(record.marker)) layer.addLayer(record.marker);
+        record.row = row;
+        const signature = [row.count, row.previousCount, row.state, row.lastRelayed, row.previousLastRelayed, selection.scope, selection.compare].join('|');
+        if (record.signature !== signature) {
+          if (record.marker.isPopupOpen()) record.marker.getPopup().setContent(timelinePopup(row));
+          record.signature = signature;
+        }
+      }
+      for (const [key, record] of markers) if (!visible.has(key) && layer.hasLayer(record.marker)) layer.removeLayer(record.marker);
+      if (hullLayer) { layer.removeLayer(hullLayer); hullLayer = null; }
+      const currentPoints = frame.rows.filter(row => row.count > 0 && row.node.positionSource === 'reported').map(row => row.node);
+      if (selection.scope && currentPoints.length >= 3) {
+        const hull = convexHull(currentPoints.map(point => [point.lon, point.lat]));
+        if (hull.length >= 3) {
+          hullLayer = L.polygon(hull.map(point => [point[1], point[0]]), { color: colors.observed,
+            fillOpacity: 0.10, weight: 2, dashArray: '6 5', interactive: false });
+          layer.addLayer(hullLayer);
+        }
+      }
+      status.textContent = currentPoints.length + ' positioned relay nodes; ' + (frame.currentCount - currentPoints.length) +
+        ' observed relay nodes without usable positions' + (selection.scope ? ' for ' + selection.scope : '') +
+        ' in selected interval. ' + frame.currentAppearances.toLocaleString() + ' relay appearances.';
+      if (!frame.currentCount) status.textContent += frame.currentCoverage === 'unavailable' ? ' History is unavailable for this interval.' :
+        ' No scoped relay traffic was observed in the available history; this does not imply there is no coverage.';
+      if (frame.limited) status.textContent += ' Data safety limits were reached; counts and map may be incomplete.';
+    }
+
+    function fitTimeline() {
+      const points = lastFrame ? lastFrame.rows.filter(row => row.node.positionSource === 'reported').map(row => row.node) : [];
+      if (points.length) map.fitBounds(L.latLngBounds(points.map(point => [point.lat, point.lon])).pad(0.15), { maxZoom: 10 });
+    }
+
+    function drawTimeline() {
+      const frame = historyTools.selectFrame(indexedHistory, selection);
+      lastFrame = frame;
+      selection.at = frame.interval.end;
+      slider.value = String(historyTools.frameIndex(indexedHistory, selection.at));
+      slider.setAttribute('aria-valuetext', intervalText(frame.interval.start, frame.interval.end));
+      intervalLabel.textContent = 'Selected interval: ' + intervalText(frame.interval.start, frame.interval.end);
+      timelineEnabled(true);
+      snapshotMeta.replaceChildren('Snapshot: ', timeElement(indexedHistory.generatedAt));
+      const messages = { complete: 'Retained history covers the selected interval.', partial: 'Partial retained history for the selected interval.',
+        unavailable: 'No retained history is available in the selected interval.', unknown: 'Retained history bounds are unknown; this view may be incomplete.',
+        loading: 'History is still loading; this view may be incomplete.' };
+      coverage.textContent = messages[frame.currentCoverage];
+      coverage.setAttribute('data-coverage-state', frame.currentCoverage);
+      exactBounds.replaceChildren(element('p', '', 'Selected interval (UTC): ' + frame.interval.start + ' — ' + frame.interval.end),
+        element('p', '', 'History dataset (UTC): ' + new Date(indexedHistory.start).toISOString() + ' — ' + new Date(indexedHistory.end).toISOString()));
+      renderTimelinePoints(frame);
+      renderComparison(frame);
+    }
 
     function populateScopes(loading) {
       select.replaceChildren();
@@ -283,17 +519,32 @@
     }
 
     function draw(fit) {
+      if (selection.view === 'timeline') {
+        if (!indexedHistory) return;
+        drawTimeline();
+        if (fit) fitTimeline();
+        return;
+      }
       if (!snapshot) return;
       renderPoints(layer, map, nodes, selection.scope, status, snapshot.truncated || snapshot.nodes.length > MAX_POINTS,
         snapshot.scopesTruncated || catalog.truncated, fit);
     }
+    redrawMap = () => { if (selection.view === 'timeline' && indexedHistory) renderTimelinePoints(lastFrame); };
 
     async function load() {
+      pause();
       const request = ++requestGeneration, window = selection.window;
+      const historical = selection.view === 'timeline';
       snapshot = null;
+      indexedHistory = null;
       nodes = [];
       catalog = { scopes: [], truncated: false };
-      layer.clearLayers();
+      clearPoints();
+      timelineEnabled(false);
+      comparison.hidden = true;
+      comparison.replaceChildren();
+      comparison.removeAttribute('data-comparable');
+      intervalLabel.textContent = '';
       populateScopes(true);
       shell.setAttribute('aria-busy', 'true');
       status.textContent = 'Loading observed relay data — ' + WINDOWS[window].toLowerCase() + '…';
@@ -302,8 +553,22 @@
       exactBounds.replaceChildren();
       coverage.removeAttribute('data-coverage-state');
       try {
-        const data = await api('/regions/observed?window=' + encodeURIComponent(window), { ttl: 0, bust: true, retry503: false });
+        const data = await api(historical ? '/regions/history' : '/regions/observed?window=' + encodeURIComponent(window), { ttl: 0, bust: true, retry503: false });
         if (token !== generation || request !== requestGeneration || leafletMap !== map) return;
+        if (historical) {
+          if (!historyTools || !data || !Array.isArray(data.nodes)) throw new Error('Invalid regions history');
+          nodes = collectScopeNodes(data.nodes, true);
+          indexedHistory = historyTools.indexHistory({ ...data,
+            truncated: data.truncated || data.nodes.length > MAX_POINTS,
+            scopesTruncated: data.scopesTruncated || data.nodes.some(node => node && Array.isArray(node.scopes) && node.scopes.length > 32),
+          }, nodes);
+          catalog = scopeCatalog(nodes);
+          if (catalog.truncated) indexedHistory.limited = true;
+          populateScopes(false);
+          draw(true);
+          saveSelection(true);
+          return;
+        }
         if (!data || data.window !== window || !Array.isArray(data.nodes) ||
             !isoTime(data.windowStart) || !isoTime(data.windowEnd) || !isoTime(data.generatedAt)) throw new Error('Invalid regions snapshot');
         snapshot = data;
@@ -332,19 +597,70 @@
       }
     }
 
-    function saveSelection() {
-      const hash = scopeHash(selection.scope, selection.window);
-      if (location.hash !== hash) history.pushState(null, '', hash);
+    function saveSelection(replace = false) {
+      const hash = scopeHash(selection.scope, selection.window, selection);
+      if (location.hash !== hash) history[replace ? 'replaceState' : 'pushState'](null, '', hash);
     }
     period.addEventListener('change', () => {
+      pause();
       selection.window = period.value;
+      saveSelection();
+      if (selection.view === 'timeline') draw(false); else load();
+    });
+    select.addEventListener('change', () => {
+      pause();
+      selection.scope = select.value;
+      saveSelection();
+      draw(selection.view !== 'timeline');
+    });
+    view.addEventListener('change', () => {
+      pause();
+      selection.view = view.value;
+      if (selection.view !== 'timeline') { selection.at = ''; selection.compare = false; compare.checked = false; }
+      timelineControls.hidden = selection.view !== 'timeline';
       saveSelection();
       load();
     });
-    select.addEventListener('change', () => {
-      selection.scope = select.value;
+    compare.addEventListener('change', () => {
+      pause();
+      selection.compare = compare.checked;
       saveSelection();
-      draw(true);
+      draw(false);
+    });
+    slider.addEventListener('input', () => {
+      pause();
+      if (!indexedHistory) return;
+      selection.at = historyTools.frameTime(indexedHistory, slider.value);
+      scrubFrame = requestAnimationFrame(() => {
+        scrubFrame = null;
+        if (token !== generation || leafletMap !== map) return;
+        draw(false); saveSelection(true);
+      });
+    });
+    function step(direction) {
+      if (!indexedHistory) return;
+      selection.at = historyTools.frameTime(indexedHistory, Number(slider.value) + direction);
+      draw(false); saveSelection(true);
+    }
+    previous.addEventListener('click', () => { pause(); step(-1); });
+    next.addEventListener('click', () => { pause(); step(1); });
+    function tick() {
+      if (token !== generation || !indexedHistory || selection.view !== 'timeline' || document.hidden || Number(slider.value) >= 168) { pause(); return; }
+      step(1);
+      if (Number(slider.value) >= 168) { pause(); return; }
+      timer = setTimeout(tick, 1000);
+    }
+    play.addEventListener('click', () => {
+      if (timer !== null) { pause(); return; }
+      if (!indexedHistory || document.hidden || Number(slider.value) >= 168) return;
+      play.textContent = 'Pause';
+      play.setAttribute('aria-label', 'Pause timeline');
+      play.setAttribute('aria-pressed', 'true');
+      timer = setTimeout(tick, 1000);
+    });
+    fitButton.addEventListener('click', () => {
+      if (selection.view === 'timeline') { if (indexedHistory) fitTimeline(); }
+      else draw(true);
     });
     refresh.addEventListener('click', load);
     load();
@@ -353,6 +669,10 @@
 
   function destroy() {
     generation++;
+    if (stopPlayback) stopPlayback();
+    stopPlayback = null;
+    if (visibilityListener) document.removeEventListener('visibilitychange', visibilityListener);
+    visibilityListener = null;
     if (themeObserver) themeObserver.disconnect();
     themeObserver = null;
     if (leafletMap) leafletMap.remove();

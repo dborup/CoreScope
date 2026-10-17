@@ -52,6 +52,7 @@
 - [GET /api/analytics/subpath-detail](#get-apianalyticssubpath-detail)
 - [GET /api/scope-stats](#get-apiscope-stats)
 - [GET /api/regions/observed](#get-apiregionsobserved)
+- [GET /api/regions/history](#get-apiregionshistory)
 - [GET /api/resolve-hops](#get-apiresolve-hops)
 - [GET /api/traces/:hash](#get-apitraceshash)
 - [GET /api/config/theme](#get-apiconfigtheme)
@@ -2544,6 +2545,78 @@ At most 5,000 eligible visible nodes are returned in public-key order;
 valid scope timestamps; `scopesTruncated` signals omission from that retained
 scope evidence. Clients must describe incomplete views when either flag is
 true. Empty lists serialize as arrays.
+
+## GET /api/regions/history
+
+One bounded bulk snapshot supplies the Regions timeline and comparisons. The
+response contains 504 hourly buckets spanning 21 days and takes no query
+parameters. `historyEnd` is `generatedAt` rounded down to a completed UTC hour;
+the unfinished current hour is excluded. Bucket `i` covers the half-open
+interval `[historyStart + i hours, historyStart + (i + 1) hours)`. Empty buckets
+are omitted and each scope's populated buckets are sorted by index. These
+absolute clock-hour boundaries support stable bookmarked selections.
+
+```json
+{
+  "generatedAt": "2026-10-16T12:35:00Z",
+  "historyStart": "2026-09-25T12:00:00Z",
+  "historyEnd": "2026-10-16T12:00:00Z",
+  "bucketSeconds": 3600,
+  "bucketCount": 504,
+  "coverage": {"start": "2026-10-02T12:35:00Z", "loading": false},
+  "nodes": [{
+    "publicKey": "<public key>", "name": "Example relay", "role": "repeater",
+    "lat": 55.2, "lon": 10.3, "positionSource": "reported",
+    "metadataSource": "current",
+    "scopes": [{"name": "#example", "buckets": [
+      {"index": 503, "count": 12, "lastRelayed": "2026-10-16T11:55:00Z"}
+    ]}]
+  }],
+  "truncated": false,
+  "scopesTruncated": false,
+  "bucketsTruncated": false
+}
+```
+
+`count` is distinct confirmed transmissions **per node and scope**, using the
+transmission's `FirstSeen` timestamp. It is not the time each observation was
+received. Summing counts over nodes produces relay appearances, not globally
+unique packets: one transmission can be confirmed through several relays.
+Non-advert confirmed scope attribution follows the same identity-safe rules
+as `/api/regions/observed`; heuristic-only and raw-prefix attribution does not
+broaden scope claims. Scope spelling and case are preserved.
+
+`coverage.start` and `loading` are captured together with the relay evidence.
+The 21-day horizon does not extend configured retention or restore evicted
+packets. A null floor, loading state, or floor after a selected interval's
+start means that interval is incomplete. A client comparing equal adjacent
+1h, 24h or 7d intervals must check **both** intervals and withhold new/no-longer
+observed classifications and percentage changes if either is incomplete.
+Even complete retained history does not establish continuous observer uptime.
+
+Names, roles and positions are the latest known metadata, not historical
+samples. A `nodes` row always wins over `inactive_nodes`, even when the current
+role is no longer a repeater or room (which excludes the node). An archived
+row is used only when no current row exists, and is labelled
+`metadataSource: "archived"`. Positions remain self-reported and unverified;
+missing positions have null coordinates and `positionSource: "none"`.
+Relay identity resolution uses the current catalog; the timeline does not
+reconstruct the catalog or node positions as they were in each hour.
+
+The snapshot is rebuilt during the existing background relay computation,
+outside the packet lock. Requests read the published snapshot and current
+metadata in bulk, with no packet scan or per-node query. Current identity
+visibility and geographic policies (including the foreign-node exception)
+are applied on every request; responses use `Cache-Control: no-store`.
+
+Safety limits bound published evidence to 5,000 keys, the 32 newest valid
+scopes per key, and 250,000 populated hourly cells globally. The scratch
+aggregation for one key is bounded to 32 x 504 cells. Keys, scope names and
+bucket indexes are processed in deterministic order. Flags expose omitted
+keys, scopes and cells respectively. Any true truncation flag makes change
+classifications incomplete. Current visibility filtering can reduce the
+returned node count below the evidence cap. HTTP 503 means the snapshot is
+warming up or unavailable; metadata errors return HTTP 500.
 
 ## GET /api/scope-stats
 

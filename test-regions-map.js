@@ -50,6 +50,14 @@ assert.deepEqual(regions.parseSelection('#/regions'), { window: '24h', scope: ''
 assert.equal(regions.scopeHash('#dk', '1h'), '#/regions?window=1h&scope=%23dk');
 assert.equal(regions.scopeHash('', '7d'), '#/regions?window=7d');
 assert.equal(regions.parseSelectedScope('#/regions?scope=%23dk'), '#dk');
+assert.deepEqual(regions.parseSelection('#/regions?view=timeline&window=1h&scope=%23dk&at=2026-10-16T12%3A37%3A00Z&compare=1'),
+  { window: '1h', scope: '#dk', view: 'timeline', at: '2026-10-16T12:37:00.000Z', compare: true });
+assert.deepEqual(regions.parseSelection('#/regions?view=timeline&at=bad&compare=true'),
+  { window: '24h', scope: '', view: 'timeline', at: '', compare: false });
+assert.equal(regions.scopeHash('#dk', '1h', { view: 'timeline', at: '2026-10-16T12:00:00Z', compare: true }),
+  '#/regions?window=1h&scope=%23dk&view=timeline&at=2026-10-16T12%3A00%3A00.000Z&compare=1');
+assert.equal(regions.scopeHash('#dk', '1h', { view: 'latest', at: '2026-10-16T12:00:00Z', compare: true }),
+  '#/regions?window=1h&scope=%23dk', 'latest URLs omit timeline state');
 
 const snapshot = { window: '24h', windowStart: '2026-10-15T12:00:00Z', windowEnd: '2026-10-16T12:00:00Z',
   generatedAt: '2026-10-16T12:00:00Z', coverage: { start: '2026-10-16T09:00:00Z', complete: false, loading: false } };
@@ -65,4 +73,71 @@ assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: null, comple
 assert.match(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-17T00:00:00Z', complete: false } }).message, /No retained history/);
 assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-16T09:00:00Z', complete: true } }).kind, 'partial', 'inconsistent complete flag cannot overstate available history');
 
-console.log('regions map unit tests passed');
+const history = require('./public/regions-history.js');
+const historyEnd = '2026-10-16T12:00:00Z';
+const historyStart = '2026-09-25T12:00:00Z';
+const historical = (key, buckets, extra = {}) => node(key, { scopes: [{ name: '#dk', buckets }], ...extra });
+const bucket = (index, count = 1) => ({ index, count, lastRelayed: new Date(Date.parse(historyStart) + index * 3600000 + 1000).toISOString() });
+const historyData = (extra = {}) => ({ generatedAt: '2026-10-16T12:34:00Z', historyStart, historyEnd,
+  bucketSeconds: 3600, bucketCount: 504, coverage: { start: historyStart, loading: false },
+  nodes: [historical('both', [bucket(502, 2), bucket(503, 3)]), historical('added', [bucket(503, 4)]),
+    historical('before', [bucket(502, 5)], { lat: null, lon: null, positionSource: 'none' })], ...extra });
+let indexed = history.indexHistory(historyData(), historyData().nodes);
+let frame = history.selectFrame(indexed, { window: '1h', scope: '#dk', compare: true });
+assert.equal(frame.interval.start, '2026-10-16T11:00:00.000Z');
+assert.equal(frame.interval.previousStart, '2026-10-16T10:00:00.000Z');
+assert.equal(frame.currentCount, 2);
+assert.equal(frame.previousCount, 2, 'unpositioned relays belong in comparison counts');
+assert.equal(frame.currentAppearances, 7);
+assert.equal(frame.previousAppearances, 7);
+assert.deepEqual(frame.added.map(n => n.publicKey), ['added']);
+assert.deepEqual(frame.notObserved.map(n => n.publicKey), ['before']);
+assert.deepEqual(frame.retained.map(n => n.publicKey), ['both']);
+assert.equal(frame.percentChange, 0);
+assert.equal(frame.rows[0].node.lat, 55, 'historical frames retain supplied latest coordinates');
+frame = history.selectFrame(indexed, { window: '24h', at: '2026-10-16T11:53:00Z', scope: '#dk' });
+assert.equal(frame.interval.end, '2026-10-16T11:00:00.000Z', 'frame boundaries are completed UTC hours');
+assert.equal(frame.interval.start, '2026-10-15T11:00:00.000Z');
+assert.equal(frame.currentAppearances, 7, 'the selected end is exclusive');
+assert.equal(history.frameTime(indexed, 0), '2026-10-09T12:00:00.000Z');
+assert.equal(history.frameTime(indexed, 168), '2026-10-16T12:00:00.000Z');
+assert.equal(history.frameIndex(indexed, '2099-01-01T00:00:00Z'), 168);
+assert.equal(history.frameIndex(indexed, '2000-01-01T00:00:00Z'), 0);
+for (const coverage of [{ start: null, loading: false }, { start: historyStart, loading: true },
+  { start: '2026-10-16T10:30:00Z', loading: false }]) {
+  const partial = history.indexHistory(historyData({ coverage }), historyData().nodes);
+  const limited = history.selectFrame(partial, { window: '1h', compare: true });
+  assert.equal(limited.comparable, false);
+  assert.equal(limited.added, null, 'unavailable history must withhold new/missing classifications');
+  assert.equal(limited.percentChange, null);
+  assert.equal(limited.currentAppearances, 7, 'limited history still shows observed counts');
+}
+frame = history.selectFrame(history.indexHistory(historyData({ truncated: true }), historyData().nodes), { window: '1h', compare: true });
+assert.equal(frame.comparable, false, 'caps withhold changes');
+assert.equal(frame.limited, true);
+frame = history.selectFrame(indexed, { window: '1h', scope: '#absent', compare: true });
+assert.equal(frame.currentCount, 0);
+assert.equal(frame.currentCoverage, 'complete', 'no observations is separate from unavailable history');
+assert.equal(frame.percentChange, null, 'zero baseline has no percentage change');
+const tooMany = Array.from({ length: 5001 }, (_, i) => historical('p' + i, [bucket(503)]));
+indexed = history.indexHistory(historyData(), tooMany);
+assert.equal(indexed.nodes.length, 5000);
+assert.equal(indexed.limited, true);
+const badBuckets = [bucket(-1), bucket(504), bucket(503, -1), bucket(503, Number.MAX_VALUE), bucket(503, 2)];
+indexed = history.indexHistory(historyData(), [historical('bad', badBuckets)]);
+assert.equal(history.selectFrame(indexed, { window: '1h' }).currentAppearances, 2);
+assert.equal(indexed.limited, true, 'invalid cells cannot support a complete comparison');
+indexed = history.indexHistory(historyData(), [historical('many-scopes', [], {
+  scopes: Array.from({ length: 33 }, (_, i) => ({ name: '#s' + i, buckets: [bucket(503)] })),
+})]);
+assert.equal(history.selectFrame(indexed, { window: '1h' }).currentAppearances, 32);
+assert.equal(indexed.limited, true, 'the 32-scope per-node cap withholds comparisons');
+const fullCells = Array.from({ length: 501 }, (_, i) => bucket(i + 3));
+indexed = history.indexHistory(historyData(), Array.from({ length: 500 }, (_, i) => historical('bounded' + i, fullCells)));
+assert.equal(indexed.limited, true, 'the global 250,000-cell bound is enforced');
+assert.equal(history.selectFrame(indexed, { window: '1h', compare: true }).added, null);
+assert(indexed.nodes.reduce((total, n) => total + n.scopes.reduce((sum, s) => sum + s.indices.length, 0), 0) <= 250000);
+assert.throws(() => history.indexHistory(historyData({ bucketCount: 505 }), []), /history/i);
+assert.throws(() => history.indexHistory(historyData({ historyEnd: '2026-10-16T12:30:00Z' }), []), /history/i);
+
+console.log('regions map and timeline unit tests passed');

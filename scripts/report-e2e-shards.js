@@ -54,18 +54,30 @@ function aggregateShards({ root, manifestFile, artifactsDir, outputDir = root, e
     receipts.push(receipt);
   }
   const coreShard = manifest.suites.find(suite => suite.file === CORE_SUITE).shard;
-  const coverageSource = path.join(artifactsDir, `e2e-shard-${coreShard}`, 'coverage');
-  fs.mkdirSync(outputDir, { recursive: true });
-  fs.writeFileSync(path.join(outputDir, 'e2e-output.txt'), logs.join('\n'));
-  if (fs.existsSync(coverageSource)) {
-    const coverageTarget = path.join(outputDir, '.nyc_output');
-    fs.mkdirSync(coverageTarget, { recursive: true });
+  const coverageFiles = [];
+  const coverageNames = new Set();
+  // Coverage is optional, but every verified shard can contribute it. Retain
+  // the core names used by the badge workflow and namespace other shards so
+  // common collector filenames cannot silently overwrite one another.
+  for (const shard of SHARDS) {
+    const coverageSource = path.join(artifactsDir, `e2e-shard-${shard}`, 'coverage');
+    if (!fs.existsSync(coverageSource)) continue;
     for (const file of fs.readdirSync(coverageSource)) {
       assert.ok(/^[a-zA-Z0-9_-]+\.json$/.test(file), `unexpected coverage artifact: ${file}`);
       const raw = requireFile(path.join(coverageSource, file));
       JSON.parse(raw);
-      fs.writeFileSync(path.join(coverageTarget, file), raw);
+      const name = shard === coreShard ? file : `shard-${shard}-${file}`;
+      assert.ok(!coverageNames.has(name), `duplicate coverage artifact target: ${name}`);
+      coverageNames.add(name);
+      coverageFiles.push({ name, raw });
     }
+  }
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(path.join(outputDir, 'e2e-output.txt'), logs.join('\n'));
+  if (coverageFiles.length) {
+    const coverageTarget = path.join(outputDir, '.nyc_output');
+    fs.mkdirSync(coverageTarget, { recursive: true });
+    for (const { name, raw } of coverageFiles) fs.writeFileSync(path.join(coverageTarget, name), raw);
   }
   const report = {
     version: 1, manifestSha256, status: 'success', coreShard,

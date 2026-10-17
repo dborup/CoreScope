@@ -5947,6 +5947,7 @@ body.embed #app.app-fixed {
 
 /* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
+.regions-page > :not(.regions-leaflet) { flex-shrink: 0; }
 .regions-page h1, .regions-page p { margin: 0; }
 .regions-note { color: var(--text-muted); max-width: 85ch; }
 .regions-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
@@ -5954,11 +5955,35 @@ body.embed #app.app-fixed {
 .regions-controls select, .regions-controls button { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px 8px; border-radius: 6px; }
 .regions-controls select { max-width: 100%; }
 .regions-controls button { cursor: pointer; }
+.regions-controls button:disabled, .regions-timeline button:disabled { cursor: default; opacity: 0.55; }
+.regions-timeline { display: grid; grid-template-columns: auto minmax(140px, 1fr) auto; gap: 8px 12px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.regions-timeline[hidden], .regions-comparison[hidden] { display: none; }
+.regions-transport { display: flex; gap: 6px; }
+.regions-transport button { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.regions-slider-label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 0.85em; color: var(--text-muted); }
+.regions-slider-label input { width: 100%; min-width: 0; accent-color: var(--accent); }
+.regions-compare-label { display: flex; gap: 6px; align-items: center; font-size: 0.9em; }
+.regions-compare-label input { accent-color: var(--accent); }
+.regions-interval { grid-column: 1 / -1; font-size: 0.85em; color: var(--text-muted); overflow-wrap: anywhere; }
+.regions-comparison { display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.regions-reference { color: var(--text-muted); overflow-wrap: anywhere; }
+.regions-comparison-limited { color: var(--text-muted); border-left: 3px solid var(--warning); padding-left: 8px; }
+.regions-comparison-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.regions-comparison-legend span::before { content: ''; display: inline-block; width: 0.7em; height: 0.7em; margin-right: 5px; border: 2px solid currentColor; border-radius: 50%; }
+.regions-state-added { color: var(--status-green-text); }
+.regions-state-retained { color: var(--accent); }
+.regions-state-not-observed { color: var(--warning); }
+.regions-state-not-observed::before { border-style: dashed !important; }
+.regions-change-lists { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.regions-change-list { min-width: 0; overflow-wrap: anywhere; }
+.regions-change-list summary { cursor: pointer; }
+.regions-change-list ul { margin: 6px 0; padding-left: 20px; max-height: 180px; overflow-y: auto; }
+.regions-controls :focus-visible, .regions-timeline :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .regions-status { color: var(--text-muted); min-height: 2.4em; }
 .regions-snapshot, .regions-coverage, .regions-details { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
 .regions-details summary { cursor: pointer; }
 .regions-details p { margin-top: 6px; }
-.regions-coverage[data-coverage-state="partial"], .regions-coverage[data-coverage-state="unknown"], .regions-coverage[data-coverage-state="loading"] { border-left: 3px solid var(--warning); padding-left: 8px; }
+.regions-coverage[data-coverage-state="partial"], .regions-coverage[data-coverage-state="unknown"], .regions-coverage[data-coverage-state="loading"], .regions-coverage[data-coverage-state="unavailable"] { border-left: 3px solid var(--warning); padding-left: 8px; }
 .regions-snapshot:empty, .regions-coverage:empty { display: none; }
 .regions-leaflet { flex: 1; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; }
 @media (max-width: 600px) {
@@ -5966,4 +5991,8 @@ body.embed #app.app-fixed {
   .regions-controls { align-items: stretch; }
   .regions-controls label { flex: 1 1 140px; }
   .regions-controls select { min-width: 0; flex: 1; }
+  .regions-timeline { grid-template-columns: 1fr; }
+  .regions-transport button { flex: 1; min-height: 36px; }
+  .regions-compare-label { min-height: 32px; }
+  .regions-leaflet { flex-shrink: 0; }
 }
