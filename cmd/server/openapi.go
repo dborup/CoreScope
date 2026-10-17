@@ -1022,6 +1022,9 @@ func componentSchemas() map[string]interface{} {
 	for name, schema := range regionsRoutesSchemas() {
 		schemas[name] = schema
 	}
+	for name, schema := range regionsEvidenceSchemas() {
+		schemas[name] = schema
+	}
 	for name, schema := range heardBySchemas() {
 		schemas[name] = schema
 	}

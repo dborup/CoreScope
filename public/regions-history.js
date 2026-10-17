@@ -5,6 +5,8 @@
   const HOUR = 3600000;
   const WINDOW_HOURS = { '1h': 1, '24h': 24, '7d': 168 };
   const MAX_NODES = 5000, MAX_SCOPES_PER_NODE = 32, MAX_BUCKETS = 504, MAX_CELLS = 250000;
+  const MAX_EVIDENCE_CELLS = 128 * 505;
+  const COUNT_KEYS = ['excluded', 'unprovable', 'capped'];
 
   function millis(value) {
     return typeof value === 'string' && value ? Date.parse(value) : NaN;
@@ -19,6 +21,56 @@
     return low;
   }
 
+  // Evidence gaps are attributed to the transmission's stored scope and hour.
+  // Sparse prefix sums per scope plus a dense all-scopes aggregate answer any
+  // interval in O(log n). Present-but-unreadable evidence fails closed.
+  function indexEvidence(raw) {
+    const all = COUNT_KEYS.map(() => new Float64Array(MAX_BUCKETS + 1));
+    const evidence = { truncated: false, scopes: new Map(), all };
+    if (raw == null) return evidence;
+    const sourceScopes = raw && Array.isArray(raw.scopes) ? raw.scopes : null;
+    if (!sourceScopes || raw.truncated !== false && raw.truncated != null) evidence.truncated = true;
+    let cells = 0;
+    for (const scope of sourceScopes || []) {
+      if (!scope || typeof scope.name !== 'string' || !Array.isArray(scope.buckets)) { evidence.truncated = true; continue; }
+      const rows = [];
+      for (const bucket of scope.buckets) {
+        if (++cells > MAX_EVIDENCE_CELLS || !bucket || !Number.isInteger(bucket.index) || bucket.index < 0 || bucket.index >= MAX_BUCKETS ||
+            COUNT_KEYS.some(key => bucket[key] != null && (!Number.isSafeInteger(bucket[key]) || bucket[key] < 0))) {
+          evidence.truncated = true; continue;
+        }
+        rows.push({ index: bucket.index, counts: COUNT_KEYS.map(key => bucket[key] || 0) });
+      }
+      rows.sort((a, b) => a.index - b.index);
+      const indices = [], prefix = [COUNT_KEYS.map(() => 0)];
+      for (const row of rows) {
+        if (indices[indices.length - 1] === row.index) { evidence.truncated = true; continue; }
+        indices.push(row.index);
+        prefix.push(prefix[prefix.length - 1].map((total, i) => total + row.counts[i]));
+        row.counts.forEach((count, i) => { all[i][row.index + 1] += count; });
+      }
+      if (evidence.scopes.has(scope.name)) evidence.truncated = true;
+      else evidence.scopes.set(scope.name, { indices, prefix });
+    }
+    for (const totals of all) for (let i = 1; i <= MAX_BUCKETS; i++) totals[i] += totals[i - 1];
+    return evidence;
+  }
+
+  // Counts for [startIndex, endIndex) and the selected scope ('' = all scopes).
+  // Only unprovable or capped evidence makes the interval incomplete.
+  function evidenceCounts(history, scope, startIndex, endIndex) {
+    const evidence = history.evidence;
+    let values = [0, 0, 0];
+    if (!scope) values = evidence.all.map(totals => totals[endIndex] - totals[startIndex]);
+    else if (evidence.scopes.has(scope)) {
+      const entry = evidence.scopes.get(scope);
+      const low = lowerBound(entry.indices, startIndex), high = lowerBound(entry.indices, endIndex);
+      values = entry.prefix[high].map((total, i) => total - entry.prefix[low][i]);
+    }
+    return { excluded: values[0], unprovable: values[1], capped: values[2],
+      incomplete: evidence.truncated || values[1] > 0 || values[2] > 0 };
+  }
+
   // Sparse prefix sums are constructed once. A frame reads two prefix values
   // per scope; it never rescans the bucket payload while scrubbing or playing.
   function indexHistory(data, nodes) {
@@ -26,6 +78,7 @@
     if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(generated) || generated < end ||
         start % HOUR || end % HOUR || data.bucketSeconds !== 3600 || data.bucketCount !== MAX_BUCKETS ||
         end - start !== MAX_BUCKETS * HOUR || !Array.isArray(nodes)) throw new Error('Invalid regions history');
+    // Publication caps are snapshot-wide; evidence gaps are per bucket/scope.
     let limited = !!(data.truncated || data.scopesTruncated || data.bucketsTruncated || nodes.length > MAX_NODES);
     let cells = 0, appearances = 0;
     const indexed = [];
@@ -62,7 +115,8 @@
     }
     const coverage = data.coverage || {};
     return { start, end, generatedAt: new Date(generated).toISOString(), nodes: indexed,
-      coverageStart: millis(coverage.start), loading: coverage.loading === true, limited };
+      coverageStart: millis(coverage.start), loading: coverage.loading === true,
+      evidence: indexEvidence(coverage.evidence), limited };
   }
 
   function frameIndex(history, at) {
@@ -100,12 +154,15 @@
     const start = millis(bounds.start), end = millis(bounds.end), previousStart = millis(bounds.previousStart);
     const currentCoverage = coverageState(history, start, end);
     const previousCoverage = coverageState(history, previousStart, start);
-    const comparable = !history.limited && currentCoverage === 'complete' && previousCoverage === 'complete';
+    const startIndex = (start - history.start) / HOUR, endIndex = (end - history.start) / HOUR;
+    const previousIndex = (previousStart - history.start) / HOUR;
+    const evidence = evidenceCounts(history, selection.scope || '', startIndex, endIndex);
+    const previousEvidence = evidenceCounts(history, selection.scope || '', previousIndex, startIndex);
+    const comparable = !history.limited && currentCoverage === 'complete' && previousCoverage === 'complete' &&
+      !evidence.incomplete && !previousEvidence.incomplete;
     const current = [], previous = [], rows = [];
     const added = comparable ? [] : null, retained = comparable ? [] : null, notObserved = comparable ? [] : null;
     let currentAppearances = 0, previousAppearances = 0;
-    const startIndex = (start - history.start) / HOUR, endIndex = (end - history.start) / HOUR;
-    const previousIndex = (previousStart - history.start) / HOUR;
     for (const node of history.nodes) {
       let count = 0, before = 0, lastRelayed = '', previousLastRelayed = '';
       for (const scope of node.scopes) {
@@ -129,7 +186,7 @@
     }
     return { interval: bounds, rows, currentCount: current.length, previousCount: previous.length,
       currentAppearances, previousAppearances, currentCoverage, previousCoverage, comparable,
-      limited: history.limited, added, retained, notObserved,
+      limited: history.limited, evidence, previousEvidence, added, retained, notObserved,
       appearanceChange: comparable ? currentAppearances - previousAppearances : null,
       percentChange: comparable && previousAppearances > 0 ? (currentAppearances - previousAppearances) / previousAppearances * 100 : null };
   }
@@ -153,7 +210,10 @@
         }
       }
     }
-    return { history, scope: scope || '', appearances, nodes, times };
+    // Withheld hours for this scope, precomputed once per payload/scope change.
+    const evidenceIncomplete = new Uint8Array(MAX_BUCKETS);
+    for (let index = 0; index < MAX_BUCKETS; index++) evidenceIncomplete[index] = evidenceCounts(history, scope || '', index, index + 1).incomplete ? 1 : 0;
+    return { history, scope: scope || '', appearances, nodes, times, evidenceIncomplete };
   }
 
   // Playback reads only bounded hourly arrays. Partial/unknown history has
@@ -172,18 +232,19 @@
       const index = first + i, binStart = start + i * HOUR;
       const coverage = coverageState(history, binStart, binStart + HOUR);
       const observedAppearances = activity.appearances[index], observedNodes = activity.nodes[index];
-      const complete = coverage === 'complete' && !history.limited;
+      const evidenceIncomplete = activity.evidenceIncomplete[index] === 1;
+      const complete = coverage === 'complete' && !history.limited && !evidenceIncomplete;
       bins.push({ start: new Date(binStart).toISOString(), end: new Date(binStart + HOUR).toISOString(), coverage,
-        observedAppearances, observedNodes, appearances: complete ? observedAppearances : null,
+        evidenceIncomplete, observedAppearances, observedNodes, appearances: complete ? observedAppearances : null,
         nodes: complete ? observedNodes : null });
       total += observedAppearances;
       if (activity.times[index] > lastRelayed) lastRelayed = activity.times[index];
     }
     return { bins, lastRelayed,
-      ratePerHour: frame.currentCoverage === 'complete' && !history.limited ? total / hours : null };
+      ratePerHour: frame.currentCoverage === 'complete' && !history.limited && !frame.evidence.incomplete ? total / hours : null };
   }
 
-  const api = { indexHistory, frameIndex, frameTime, interval, selectFrame, scopeCount, indexActivity, selectActivity };
+  const api = { indexHistory, frameIndex, frameTime, interval, selectFrame, scopeCount, evidenceCounts, indexActivity, selectActivity };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RegionsHistory = api;
 })(typeof window === 'undefined' ? globalThis : window);
