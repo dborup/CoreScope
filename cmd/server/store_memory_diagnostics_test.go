@@ -164,9 +164,7 @@ func TestObsRawHexNotRetainedOnLoad(t *testing.T) {
 	}
 
 	// The read path must still serve raw_hex via the parent-tx fallback.
-	store.mu.RLock()
-	m := store.enrichObs(obs)
-	store.mu.RUnlock()
+	m := store.GetPacketByID(obs.ID)
 	rh, _ := m["raw_hex"].(string)
 	if rh != txHex {
 		t.Errorf("enrichObs raw_hex: want parent tx fallback %q, got %q", txHex, rh)

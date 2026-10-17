@@ -419,9 +419,8 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	// PR #1643 R1 munger #1: cold load uses unique_prefix-only gate, so
 	// the neighbor graph is no longer consulted here (affinity-tier
 	// resolution against ≤168h-old observations would silently mis-attribute).
-	s.mu.RLock()
-	_, relayPM := s.getCachedNodesAndPM()
-	s.mu.RUnlock()
+	nodeSnapshot := s.snapshotPathNodes()
+	relayPM := nodeSnapshot.pm
 	var coldLoadAmbiguousHopsSkipped int
 
 	for {
@@ -523,7 +522,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	})
 	s.buildSubpathIndex()
 	s.buildPathHopIndex()
-	s.buildDistanceIndex()
+	s.buildDistanceIndex(nodeSnapshot)
 	if s.hotStartupHours > 0 {
 		s.oldestLoaded = hotCutoffStr
 	} else if len(s.packets) > 0 {

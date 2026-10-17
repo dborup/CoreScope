@@ -3252,7 +3252,7 @@ func TestPerObservationRawHexEnrich(t *testing.T) {
 
 	// Check enriched observations
 	for _, obs := range tx.Observations {
-		m := store.enrichObs(obs)
+		m := store.GetPacketByID(obs.ID)
 		rh, _ := m["raw_hex"].(string)
 		if obs.RawHex != "" {
 			// Observer A: should get per-observation raw_hex

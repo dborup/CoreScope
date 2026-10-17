@@ -151,8 +151,8 @@ func newRelayEntry(tx *StoreTx, fromPrefix bool) relayEntry {
 // Candidate membership is never proof: persisted/live resolution can include
 // heuristic guesses. Every candidate is verified against its raw observation
 // paths, without target-biased resolve. Each transmission is checked once.
-func (s *PacketStore) collectRelayEntriesLocked(key string) []relayEntry {
-	m := newRelayKeyMatcher(key, s.relayPrefixMapLocked())
+func (s *PacketStore) collectRelayEntriesLocked(key string, snapshots ...pathNodeSnapshot) []relayEntry {
+	m := newRelayKeyMatcher(key, s.pathNodeSnapshotLocked(snapshots).pm)
 	var entries []relayEntry
 	if !m.possible() {
 		return entries
@@ -309,9 +309,10 @@ func (s *PacketStore) GetRepeaterRelayInfo(pubkey string, windowHours float64) R
 		return RepeaterRelayInfo{WindowHours: windowHours}
 	}
 	key := strings.ToLower(pubkey)
+	metadata := s.snapshotPathNodes()
 
 	s.mu.RLock()
-	entries := s.collectRelayEntriesLocked(key)
+	entries := s.collectRelayEntriesLocked(key, metadata)
 	s.mu.RUnlock()
 
 	return computeRelayInfoFromEntries(entries, windowHours)

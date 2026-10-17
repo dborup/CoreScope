@@ -19,6 +19,72 @@ import (
 	"time"
 )
 
+type resolvedPathObservation struct {
+	id       int
+	pathJSON string
+}
+
+// A job owns immutable lookup inputs and a response setter, not a StoreTx or
+// a shared observation slice. Setters only mutate this request's response.
+type resolvedPathJob struct {
+	forTx        bool
+	txID         int
+	observations []resolvedPathObservation
+	obsID        int
+	set          func([]*string)
+}
+
+func (s *PacketStore) applyResolvedPathJobs(jobs []resolvedPathJob) {
+	for _, job := range jobs {
+		var rp []*string
+		if job.forTx {
+			rp = s.resolvedPathForSnapshot(job.txID, job.observations)
+		} else {
+			rp = s.fetchResolvedPathForObs(job.obsID)
+		}
+		if rp != nil {
+			job.set(rp)
+		}
+	}
+}
+
+// Same longest-present-path choice and LRU behavior as the live-store helper,
+// but all inputs were copied under s.mu before SQL is attempted.
+func (s *PacketStore) resolvedPathForSnapshot(txID int, observations []resolvedPathObservation) []*string {
+	return s.bestResolvedPathAt(txID, len(observations), func(i int) resolvedPathObservation { return observations[i] }, s.lruNow())
+}
+
+func (s *PacketStore) bestResolvedPathAt(txID, count int, at func(int) resolvedPathObservation, now int64) []*string {
+	if count == 0 {
+		return nil
+	}
+	longest := at(0)
+	for i := 1; i < count; i++ {
+		obs := at(i)
+		if pathLen(obs.pathJSON) > pathLen(longest.pathJSON) {
+			longest = obs
+		}
+	}
+	if rp := s.fetchResolvedPathForObsAt(longest.id, now); rp != nil {
+		return rp
+	}
+	paths := s.fetchResolvedPathsForTx(txID)
+	var best []*string
+	bestLen, bestID := -1, 0
+	for i := 0; i < count; i++ {
+		obs := at(i)
+		if rp := paths[obs.id]; rp != nil && pathLen(obs.pathJSON) > bestLen {
+			best, bestLen, bestID = rp, pathLen(obs.pathJSON), obs.id
+		}
+	}
+	if bestID != 0 {
+		s.lruMu.Lock()
+		s.lruPut(bestID, best)
+		s.lruMu.Unlock()
+	}
+	return best
+}
+
 // resolvedPubkeyHash computes a fast 64-bit hash for membership index keying.
 // Uses FNV-1a from stdlib — good distribution, no external dependency.
 func resolvedPubkeyHash(pk string) uint64 {
@@ -321,50 +387,9 @@ func (s *PacketStore) fetchResolvedPathForTxBest(tx *StoreTx) []*string {
 // tx.Observations under that lock (#470). Ingest only appends, so the
 // elements of such a snapshot never change.
 func (s *PacketStore) fetchResolvedPathForTxBestAt(txID int, observations []*StoreObs, now int64) []*string {
-	if len(observations) == 0 {
-		return nil
-	}
-	// Fast path: try the longest-path obs first via the LRU/SQL helper.
-	longest := observations[0]
-	longestLen := pathLen(longest.PathJSON)
-	for _, obs := range observations[1:] {
-		if l := pathLen(obs.PathJSON); l > longestLen {
-			longest = obs
-			longestLen = l
-		}
-	}
-	if rp := s.fetchResolvedPathForObsAt(longest.ID, now); rp != nil {
-		return rp
-	}
-	// Fallback: longest-path obs has no stored resolved_path. Query all
-	// observations for this tx and pick the one with the longest path_json
-	// that actually has a stored resolved_path.
-	rpMap := s.fetchResolvedPathsForTx(txID)
-	if len(rpMap) == 0 {
-		return nil
-	}
-	var bestRP []*string
-	bestObsID := 0
-	bestLen := -1
-	for _, obs := range observations {
-		rp, ok := rpMap[obs.ID]
-		if !ok || rp == nil {
-			continue
-		}
-		if l := pathLen(obs.PathJSON); l > bestLen {
-			bestLen = l
-			bestRP = rp
-			bestObsID = obs.ID
-		}
-	}
-	// Populate LRU so repeat lookups for this tx don't re-issue the multi-row
-	// SQL fallback (e.g. dashboard polling /api/nodes/{pk}/health).
-	if bestRP != nil && bestObsID != 0 {
-		s.lruMu.Lock()
-		s.lruPut(bestObsID, bestRP)
-		s.lruMu.Unlock()
-	}
-	return bestRP
+	return s.bestResolvedPathAt(txID, len(observations), func(i int) resolvedPathObservation {
+		return resolvedPathObservation{id: observations[i].ID, pathJSON: observations[i].PathJSON}
+	}, now)
 }
 
 // --- Simple LRU cache for resolved paths ---
