@@ -88,9 +88,15 @@ assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: null, comple
 assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: null, complete: false, loading: true } }).kind, 'loading');
 assert.match(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-17T00:00:00Z', complete: false } }).message, /No retained history/);
 assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-16T09:00:00Z', complete: true } }).kind, 'partial', 'inconsistent complete flag cannot overstate available history');
-const omittedEvidence = regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-01T00:00:00Z', complete: true, evidenceIncomplete: true } });
+const omittedEvidence = regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-01T00:00:00Z', complete: true,
+  evidence: { excluded: 4, unprovable: 2, capped: 1, truncated: false, scopes: [] } } });
 assert.equal(omittedEvidence.kind, 'complete', 'retention and attributable evidence are separate');
-assert.match(omittedEvidence.message, /Observation evidence is incomplete/);
+assert.match(omittedEvidence.message, /Observation evidence is incomplete in this interval: 2 observations could not be attributed .* and 1 were omitted by safety limits/);
+assert.match(omittedEvidence.message, /4 observations were identified as direct, unscoped or for a different transport code and excluded; this does not make counts incomplete/);
+const excludedOnly = regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-01T00:00:00Z', complete: true, evidence: { excluded: 3, unprovable: 0, capped: 0, truncated: false, scopes: [] } } });
+assert.doesNotMatch(excludedOnly.message, /incomplete in this interval/, 'identified exclusions are not incomplete evidence');
+assert.match(regions.evidenceText({ truncated: true }), /affected hours are unknown/);
+assert.equal(regions.evidenceText(undefined), '');
 
 const history = require('./public/regions-history.js');
 const historyEnd = '2026-10-16T12:00:00Z';
@@ -134,10 +140,12 @@ for (const coverage of [{ start: null, loading: false }, { start: historyStart, 
 frame = history.selectFrame(history.indexHistory(historyData({ truncated: true }), historyData().nodes), { window: '1h', compare: true });
 assert.equal(frame.comparable, false, 'caps withhold changes');
 assert.equal(frame.limited, true);
-const unverifiedHistory = history.indexHistory(historyData({ coverage: { start: historyStart, loading: false, evidenceIncomplete: true } }), historyData().nodes);
+const unverifiedHistory = history.indexHistory(historyData({ coverage: { start: historyStart, loading: false,
+  evidence: { excluded: 0, unprovable: 1, capped: 0, truncated: false, scopes: [{ name: '#dk', excluded: 0, unprovable: 1, capped: 0, buckets: [{ index: 503, excluded: 0, unprovable: 1, capped: 0 }] }] } } }), historyData().nodes);
 frame = history.selectFrame(unverifiedHistory, { window: '1h', compare: true });
 assert.equal(frame.currentCoverage, 'complete', 'evidence omissions do not rewrite the retained-history floor');
-assert.equal(frame.limited, true);
+assert.equal(frame.limited, false, 'evidence gaps are not snapshot-wide publication limits');
+assert.equal(frame.evidence.incomplete, true);
 assert.equal(frame.comparable, false, 'unattributable observations cannot support change classifications');
 assert.equal(frame.added, null);
 assert.equal(history.selectActivity(history.indexActivity(unverifiedHistory, ''), unverifiedHistory, frame).ratePerHour, null);
@@ -179,7 +187,7 @@ const frameBeforeHealth = JSON.stringify(healthFrame);
 let health = history.selectActivity(activity, healthHistory, healthFrame);
 assert.equal(health.bins.length, 1);
 assert.deepEqual(health.bins[0], { start: '2026-10-16T11:00:00.000Z', end: '2026-10-16T12:00:00.000Z',
-  coverage: 'complete', observedAppearances: 12, observedNodes: 2, appearances: 12, nodes: 2 });
+  coverage: 'complete', evidenceIncomplete: false, observedAppearances: 12, observedNodes: 2, appearances: 12, nodes: 2 });
 assert.equal(health.lastRelayed, '2026-10-16T11:59:00.000Z');
 assert.equal(health.ratePerHour, 12);
 assert.equal(JSON.stringify(healthFrame), frameBeforeHealth, 'health derivation does not change shared comparison results');
@@ -339,7 +347,7 @@ const routeData = { ...historyData(), nodes: routeNodes, steps: [
   { from: fullKey('a'), to: fullKey('b'), scope: '#a', buckets: [bucket(503, 3)] },
   { from: fullKey('b'), to: fullKey('a'), scope: '#a', buckets: [bucket(503, 2)] },
   { from: fullKey('a'), to: fullKey('c'), scope: '#c', buckets: [bucket(503)] },
-], stepEvidence: { skippedObservations: 0, unresolvedHops: 0, sourceTruncated: false, incomplete: false } };
+], stepEvidence: { excludedObservations: 5, unprovableObservations: 0, cappedObservations: 0, unresolvedHops: 0, cappedStepAppearances: 0, sourceTruncated: false, incomplete: false } };
 const routeHistory = history.indexHistory(routeData, routeNodes);
 let routeIndex = routes.indexRoutes(routeData, routeHistory, regions.validScope);
 let routeFrame = history.selectFrame(routeHistory, { window: '1h' });
@@ -356,11 +364,20 @@ assert.equal(connections.steps.length, 2);
 assert.equal(connections.pairs.length, 2);
 assert(connections.steps.some(step => step.from === fullKey('a') && step.to === fullKey('b')));
 assert(connections.steps.some(step => step.from === fullKey('b') && step.to === fullKey('a')));
+for (const [index, expected] of [[503, false], [400, true]]) {
+  const gapRoutes = { ...routeData, coverage: { ...routeData.coverage, evidence: { excluded: 0, unprovable: 1, capped: 0, truncated: false,
+    scopes: [{ name: '#a', excluded: 0, unprovable: 1, capped: 0, buckets: [{ index, excluded: 0, unprovable: 1, capped: 0 }] }] } } };
+  const gapHistory = history.indexHistory(gapRoutes, routeNodes);
+  const selected = routes.selectRoutes(routes.indexRoutes(gapRoutes, gapHistory, regions.validScope), gapHistory, history.selectFrame(gapHistory, { window: '1h' }), {});
+  assert.equal(selected.sharedComplete, expected, 'shared memberships are qualified only by gaps inside the selected interval');
+  assert.equal(selected.complete, expected);
+}
 const limitedData = { ...routeData, stepBucketsTruncated: true };
 connections = routes.selectRoutes(routes.indexRoutes(limitedData, routeHistory, regions.validScope), routeHistory, routeFrame, {});
 assert.equal(connections.complete, false);
 assert.equal(connections.stepAppearances, 6, 'limited evidence remains an explicit lower bound');
-for (const key of ['skippedObservations', 'unresolvedHops', 'missingEndpointSteps']) {
+assert.equal(connections.evidence.excludedObservations, 5, 'identified exclusions are disclosed without qualifying steps');
+for (const key of ['unprovableObservations', 'cappedObservations', 'unresolvedHops', 'cappedStepAppearances', 'missingEndpointSteps']) {
   const contradictory = { ...routeData, stepEvidence: { ...routeData.stepEvidence, [key]: 1, incomplete: false } };
   const selected = routes.selectRoutes(routes.indexRoutes(contradictory, routeHistory, regions.validScope), routeHistory, routeFrame, {});
   assert.equal(selected.complete, false, 'omitted evidence cannot be complete even when the server flag contradicts diagnostics');

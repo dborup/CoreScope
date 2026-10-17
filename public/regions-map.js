@@ -161,6 +161,21 @@
     return Number.isFinite(ms) ? new Date(ms).toISOString() : '';
   }
 
+  // Evidence gaps are disclosed with counts. Only unprovable or capped evidence
+  // withholds values; identified exclusions never make counts incomplete.
+  function evidenceText(evidence) {
+    if (!evidence) return '';
+    const count = value => Number.isSafeInteger(value) && value > 0 ? value : 0;
+    const excluded = count(evidence.excluded), unprovable = count(evidence.unprovable), capped = count(evidence.capped);
+    let text = '';
+    if (evidence.truncated) text += ' The evidence safety limit was reached; affected hours are unknown, so rates and comparisons are withheld.';
+    if (unprovable || capped) text += ' Observation evidence is incomplete in this interval: ' + unprovable.toLocaleString() +
+      ' observations could not be attributed (unknown header or transport code) and ' + capped.toLocaleString() +
+      ' were omitted by safety limits. Rates, chart values and comparisons are withheld only for the affected hours and scopes.';
+    if (excluded) text += ' ' + excluded.toLocaleString() + ' observations were identified as direct, unscoped or for a different transport code and excluded; this does not make counts incomplete.';
+    return text;
+  }
+
   function coverageInfo(data) {
     const coverage = data.coverage || {};
     const requestedStart = isoTime(data.windowStart), requestedEnd = isoTime(data.windowEnd);
@@ -177,7 +192,7 @@
       message = complete ? 'Retained history covers the requested interval.' :
         (availableStart ? 'Partial retained history; earlier activity in the requested interval is unavailable.' : 'No retained history is available in the requested interval.');
     }
-    if (coverage.evidenceIncomplete) message += ' Observation evidence is incomplete; some paths could not be safely attributed or were omitted by safety limits.';
+    message += evidenceText(coverage.evidence);
     return { kind, message, requestedStart, requestedEnd, availableStart, generatedAt: isoTime(data.generatedAt) };
   }
 
@@ -302,7 +317,8 @@
       const missing = frame.rows.filter(row => row.count && row.node.positionSource !== 'reported').length;
       metrics.nodes.detail.textContent = missing + ' without usable positions';
       metrics.appearances.value.textContent = frame.currentAppearances.toLocaleString();
-      metrics.appearances.detail.textContent = activity.ratePerHour == null ? 'Rate unavailable: incomplete or limited history.' :
+      metrics.appearances.detail.textContent = activity.ratePerHour == null ? (frame.evidence.incomplete && !frame.limited ?
+        'Rate unavailable: observation evidence is incomplete in this interval.' : 'Rate unavailable: incomplete or limited history.') :
         activity.ratePerHour.toFixed(2) + ' relay appearances per hour';
       metrics['last-relayed'].value.replaceChildren();
       if (activity.lastRelayed) metrics['last-relayed'].value.appendChild(timeElement(activity.lastRelayed));
@@ -337,7 +353,7 @@
           record = { row, cells, rect, title }; rows.set(bin.start, record);
         }
         const complete = bin.appearances != null && bin.nodes != null;
-        const state = frame.limited ? 'limited' : bin.coverage;
+        const state = frame.limited ? 'limited' : bin.evidenceIncomplete ? 'incomplete evidence' : bin.coverage;
         record.cells.hour.textContent = bin.start.slice(0, 16).replace('T', ' ') + ' — ' + bin.end.slice(11, 16);
         record.cells.appearances.textContent = complete ? bin.appearances.toLocaleString() : '—';
         record.cells.nodes.textContent = complete ? bin.nodes.toLocaleString() : '—';
@@ -571,7 +587,10 @@
       comparison.appendChild(element('p', '', 'Observed relay nodes: ' + frame.currentCount + ' selected / ' + frame.previousCount +
         ' previous. Relay appearances: ' + frame.currentAppearances.toLocaleString() + ' selected / ' + frame.previousAppearances.toLocaleString() + ' previous.'));
       if (!frame.comparable) {
-        const reasons = frame.limited ? 'Observation evidence is incomplete or a data safety limit was reached.' : 'Selected history: ' + frame.currentCoverage + '; previous history: ' + frame.previousCoverage + '.';
+        const reasons = frame.limited ? 'A data safety limit was reached.' :
+          frame.evidence.incomplete || frame.previousEvidence.incomplete ? 'Observation evidence is incomplete in the ' +
+            (frame.evidence.incomplete ? frame.previousEvidence.incomplete ? 'selected and previous intervals.' : 'selected interval.' : 'previous interval.') :
+            'Selected history: ' + frame.currentCoverage + '; previous history: ' + frame.previousCoverage + '.';
         comparison.appendChild(element('p', 'regions-comparison-limited', 'Comparison limited by available history. ' + reasons +
           ' Changes and new/not-observed classifications are unavailable; counts show only retained observations.'));
         comparison.setAttribute('data-comparable', 'false');
@@ -655,7 +674,7 @@
         ' in selected interval. ' + frame.currentAppearances.toLocaleString() + ' relay appearances.';
       if (!frame.currentCount) status.textContent += frame.currentCoverage === 'unavailable' ? ' History is unavailable for this interval.' :
         ' No scoped relay traffic was observed in the available history; this does not imply there is no coverage.';
-      if (frame.limited) status.textContent += ' Evidence is incomplete or safety limits were reached; counts and map may be incomplete.';
+      if (frame.limited || frame.evidence.incomplete) status.textContent += ' Evidence is incomplete or safety limits were reached; counts and map may be incomplete.';
     }
 
     function fitTimeline() {
@@ -676,7 +695,7 @@
         unavailable: 'No retained history is available in the selected interval.', unknown: 'Retained history bounds are unknown; this view may be incomplete.',
         loading: 'History is still loading; this view may be incomplete.' };
       coverage.textContent = messages[frame.currentCoverage];
-      if (indexedHistory.evidenceIncomplete) coverage.textContent += ' Observation evidence is incomplete; some paths could not be safely attributed or were omitted by safety limits.';
+      coverage.textContent += evidenceText({ ...frame.evidence, truncated: indexedHistory.evidence.truncated });
       coverage.setAttribute('data-coverage-state', frame.currentCoverage);
       exactBounds.replaceChildren(element('p', '', 'Selected interval (UTC): ' + frame.interval.start + ' — ' + frame.interval.end),
         element('p', '', 'History dataset (UTC): ' + new Date(indexedHistory.start).toISOString() + ' — ' + new Date(indexedHistory.end).toISOString()));
@@ -700,7 +719,7 @@
         }
         activityPanel.update(frame, historyTools.selectActivity(activity, indexedHistory, frame), selection.scope);
         status.textContent = frame.currentCount + ' observed relay nodes; ' + frame.currentAppearances.toLocaleString() +
-          ' observed relay appearances in the selected interval. ' + (frame.currentCoverage === 'complete' && !frame.limited ?
+          ' observed relay appearances in the selected interval. ' + (frame.currentCoverage === 'complete' && !frame.limited && !frame.evidence.incomplete ?
             (frame.currentCount ? 'Observed activity; this does not measure RF coverage or observer uptime.' :
               'No scoped relay activity observed in this complete interval; this does not establish an outage.') :
             'Retained observations only; history is incomplete or limited.');
@@ -911,7 +930,7 @@
   }
 
   const internals = { validPosition, validScope, collectScopeNodes, collectScopePoints, selectionSummary,
-    lastRelayedForScope, listScopes, scopeCatalog, mergeScopeCatalog, convexHull, parseSelection, parseSelectedScope, scopeHash, coverageInfo };
+    lastRelayedForScope, listScopes, scopeCatalog, mergeScopeCatalog, convexHull, parseSelection, parseSelectedScope, scopeHash, coverageInfo, evidenceText };
   if (typeof module !== 'undefined' && module.exports) module.exports = internals;
   if (typeof root.registerPage === 'function') root.registerPage('regions', { init, destroy });
 })(typeof window === 'undefined' ? globalThis : window);

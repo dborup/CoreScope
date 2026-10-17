@@ -24,10 +24,30 @@ own-frame evidence and mismatched transport codes never acquire membership.
 The canonical transmission may itself be direct: a valid flood observation of
 that same content still supplies evidence. A single resolved flood hop is
 sufficient for membership; a pair of consecutive hops is not required.
-Missing or unresolvable evidence and safety caps are disclosed separately as
-`coverage.evidenceIncomplete`. A fully retained interval is not necessarily
-fully attributable; incomplete evidence withholds comparisons, chart zeros
-and rates while retaining explicitly qualified observed counts.
+Observations of a scoped transmission that do not supply membership are
+counted in `coverage.evidence`, per stored scope and `FirstSeen` hour, in
+three classes:
+
+- **excluded**: identified as not eligible, namely a known DIRECT or unscoped
+  header, or own transport codes that differ from the stored frame. Forwarders
+  never rewrite transport codes (firmware `Mesh::sendFlood`/`sendZeroHop` set
+  them only at origin), so a mismatch is a frame for another scope code.
+  Exclusions never make counts incomplete.
+- **unprovable**: the own header, own transport codes or canonical scope code
+  are unknown or malformed, so eligibility cannot be decided.
+- **capped**: observations, or per-transmission relay memberships, omitted by a
+  safety limit. Directed-step caps are reported in `stepEvidence` instead.
+
+Unprovable or capped evidence makes only its own hour and scope incomplete:
+rates, chart values and comparisons are withheld for intervals that include
+an affected hour of the selected scope (or of any scope for "all scopes"),
+and remain available elsewhere. If the per-bucket evidence budget (128 scopes
+x 505 hours) is exhausted, `coverage.evidence.truncated` withholds every rate
+and comparison. Hop tokens without a unique relay identity are counted in
+`stepEvidence.unresolvedHops`; they break directed-step adjacency but do not
+qualify the memberships of uniquely resolved relays. A fully retained interval
+is not necessarily fully attributable; retained observed counts stay
+explicitly qualified.
 The window is based on transmission `first_seen`, as in the existing relay
 activity fields. It is not an observation-time replay and does not reconstruct
 the historical position of a moving node. Each scope has its own most recent
@@ -71,7 +91,8 @@ Counts are distinct transmissions per relay and scope. Adding counts across
 relays gives **relay appearances**: a packet carried by several relays can
 contribute once for each relay. These totals must not be labelled globally
 unique mesh packets. Traffic changes and classifications are withheld when
-either interval has unknown, loading, partial or truncated evidence. Raw
+either interval has unknown, loading, partial or truncated history, or
+unprovable or capped evidence for the selected scope. Raw
 observed counts may still be shown separately. A zero reference count has no
 defined percentage increase.
 
@@ -116,7 +137,8 @@ as the chart. A zero is shown only for a fully retained, uncapped hour.
 Partial, unknown, loading or capped evidence produces a gap, not a fabricated
 zero; retained observations can still be disclosed explicitly as incomplete
 evidence. The mean appearances/hour is available only when the entire
-selected interval is complete and uncapped. Partial counts are never divided
+selected interval is complete, uncapped and has no unprovable or capped
+evidence for the selected scope. Partial counts are never divided
 by the full requested duration.
 
 The optional comparison reuses Timeline's immediately preceding equal
@@ -220,17 +242,20 @@ transmission, with an 8,192-byte input-path safety bound. The capture includes
 the current hour for Latest, but completed-hour history and steps exclude it.
 Membership aggregation has independent budgets of 1,000,000 transmission/node
 entries and 10,000 identities; step limits cannot suppress a valid singleton
-membership. Each identity retains its 32 newest scope names. Shared source or
-membership limits set the snapshot-wide `coverage.evidenceIncomplete` flag;
-this is not an interval-specific missing-traffic count. Capped capture is a
+membership. Each identity retains its 32 newest scope names. Source and
+membership limits are counted as `capped` in the affected transmission's hour
+and scope; the directed-step, per-transmission pair and cell caps are counted
+separately as `stepEvidence.cappedStepAppearances` and never affect
+memberships or history coverage. Capped capture is a
 retained subset, not a ranking of all possible evidence. Publication retains
 at most 5,000 directed step/scope rows, 100,000 populated hourly cells and 10,000
 endpoint identities. Endpoint metadata is independent of relay-history
 membership, so a valid flood observation of a canonically direct transmission
 can still be shown. The UI retains at most 1,000 shared scope pairs, paginates
 both tables in 25-row pages and maps at most 200 positioned step rows. A capped
-subset is not a ranking of all possible relations. Snapshot-wide skipped-path,
-unresolved-hop and missing-endpoint diagnostics are not selected-interval
+subset is not a ranking of all possible relations. Snapshot-wide
+`stepEvidence` counts (excluded, unprovable and capped observations, unresolved
+hops, capped step appearances and missing endpoints) are not selected-interval
 traffic totals. Complete retained history does not imply complete radio
 reception or that all paths can be attributed.
 

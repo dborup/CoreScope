@@ -99,7 +99,7 @@ func TestRegionRoutesStrictObservationScopeAndBounds(t *testing.T) {
 	if len(got.steps) != 1 || got.steps[0].Buckets[0].Count != 1 || got.steps[0].Buckets[0].Index != 503 {
 		t.Fatalf("unsafe observation or time attribution: %+v", got.steps)
 	}
-	if !got.evidence.Incomplete || got.evidence.SkippedObservations != 3 {
+	if e := got.evidence; !e.Incomplete || e.UnprovableObservations != 2 || e.ExcludedObservations != 3 || e.CappedObservations != 0 {
 		t.Fatalf("missing evidence diagnostic: %+v", got.evidence)
 	}
 }
@@ -131,7 +131,7 @@ func TestRegionRoutesZeroScopeMalformedAndDifferentTransportCodes(t *testing.T) 
 	}
 	collector.capture(routeTransmission(4, now.Add(-time.Hour), `["`+a+`",null,"`+b+`"]`, `["`+a+`","`+b+`" BROKEN]`))
 	got := collector.build(nil)
-	if len(got.steps) != 0 || !got.evidence.Incomplete || got.evidence.SkippedObservations != 4 || got.evidence.UnresolvedHops != 1 {
+	if e := got.evidence; len(got.steps) != 0 || !e.Incomplete || e.UnprovableObservations != 2 || e.ExcludedObservations != 2 || e.UnresolvedHops != 1 {
 		t.Fatalf("invalid scope/path accepted: %+v", got)
 	}
 	// A collided prefix remains unknown, including when one candidate is hidden

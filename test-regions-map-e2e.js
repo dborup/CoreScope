@@ -63,7 +63,8 @@ function routesSnapshot(override = {}) {
     { from: key('cc33'), to: key('bb22'), scope: '#other', buckets: [bucket(503, 4)] },
     { from: key('6666'), to: key('7777'), scope: '#routeonly', buckets: [bucket(503, 7)] },
   ], stepsTruncated: false, stepBucketsTruncated: false,
-  stepEvidence: { skippedObservations: 0, unresolvedHops: 0, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false }, ...override };
+  stepEvidence: { excludedObservations: 0, unprovableObservations: 0, cappedObservations: 0, unresolvedHops: 0, cappedStepAppearances: 0,
+    missingEndpointSteps: 0, sourceTruncated: false, incomplete: false }, ...override };
 }
 
 async function main() {
@@ -297,11 +298,13 @@ async function main() {
   });
 
   await test('retained history cannot hide missing observation evidence', async () => {
-    coverageOverride = { start: '2026-09-01T00:00:00Z', complete: true, loading: false, evidenceIncomplete: true };
+    coverageOverride = { start: '2026-09-01T00:00:00Z', complete: true, loading: false,
+      evidence: { excluded: 4, unprovable: 2, capped: 1, truncated: false, scopes: [{ name: '#example', excluded: 4, unprovable: 2, capped: 1 }] } };
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.regions-coverage').textContent.includes('Observation evidence is incomplete'));
     assert.strictEqual(await page.locator('.regions-coverage').getAttribute('data-coverage-state'), 'complete', 'retention is separate from attribution');
-    assert.match(await page.locator('.regions-coverage').textContent(), /could not be safely attributed/);
+    assert.match(await page.locator('.regions-coverage').textContent(), /2 observations could not be attributed .* and 1 were omitted by safety limits/);
+    assert.match(await page.locator('.regions-coverage').textContent(), /4 observations were identified as direct, unscoped or for a different transport code and excluded/);
     coverageOverride = null;
   });
 
@@ -405,14 +408,15 @@ async function main() {
   await test('partial, unknown, loading and capped history withhold all change claims', async () => {
     const overrides = [{ coverage: { start: '2026-10-16T10:30:00Z', loading: false } },
       { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } }, { bucketsTruncated: true },
-      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidenceIncomplete: true } }];
+      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidence: { excluded: 0, unprovable: 1, capped: 0, truncated: false,
+        scopes: [{ name: '#example', excluded: 0, unprovable: 1, capped: 0, buckets: [{ index: 503, excluded: 0, unprovable: 1, capped: 0 }] }] } } }];
     for (const value of overrides) {
       historyOverride = value;
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.waitForFunction(() => document.querySelector('.regions-page')?.getAttribute('aria-busy') === 'false' && document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'false');
       assert.match(await page.locator('.regions-comparison-limited').textContent(), /Comparison limited by available history/);
-      if (value.coverage?.evidenceIncomplete) {
-        assert.match(await page.locator('.regions-comparison-limited').textContent(), /Observation evidence is incomplete/);
+      if (value.coverage?.evidence) {
+        assert.match(await page.locator('.regions-comparison-limited').textContent(), /Observation evidence is incomplete in the selected interval/);
         assert.doesNotMatch(await page.locator('.regions-comparison-limited').textContent(), /A data safety limit was reached/);
       }
       assert.strictEqual(await page.locator('.regions-state-added, .regions-state-not-observed, .regions-appearance-change').count(), 0);
@@ -528,7 +532,7 @@ async function main() {
     assert.strictEqual(await partial.locator('[data-column="appearances"]').textContent(), '—');
     for (const override of [{ coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
       { truncated: true }, { scopesTruncated: true }, { bucketsTruncated: true },
-      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidenceIncomplete: true } }]) {
+      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidence: { truncated: true, scopes: [] } } }]) {
       historyOverride = override;
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
@@ -541,6 +545,31 @@ async function main() {
     historyOverride = {};
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
+  });
+
+  await test('evidence gaps withhold only the affected hours and scopes', async () => {
+    historyOverride = { coverage: { start: '2026-09-25T12:00:00Z', loading: false, evidence: { excluded: 6, unprovable: 1, capped: 1, truncated: false, scopes: [
+      { name: '#example', excluded: 6, unprovable: 1, capped: 0, buckets: [{ index: 500, excluded: 0, unprovable: 1, capped: 0 }, { index: 503, excluded: 6, unprovable: 0, capped: 0 }] },
+      { name: '#other', excluded: 0, unprovable: 0, capped: 1, buckets: [{ index: 503, excluded: 0, unprovable: 0, capped: 1 }] }] } } };
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true' && document.querySelectorAll('.regions-trend-gap').length === 1);
+    assert.strictEqual(await page.locator('.regions-trend-bar').count(), 23, 'only the unprovable #example hour is a gap');
+    assert.match(await page.locator('.regions-hourly-table tbody tr[data-start="2026-10-16T08:00:00.000Z"]').textContent(), /incomplete evidence/);
+    assert.match(await page.locator('.regions-health-rate').textContent(), /Rate unavailable: observation evidence is incomplete/);
+    await page.getByLabel('Region period').selectOption('1h');
+    await page.waitForFunction(() => /relay appearances per hour/.test(document.querySelector('.regions-health-rate')?.textContent || ''));
+    assert.match(await page.locator('.regions-health-rate').textContent(), /8\.00 relay appearances per hour/, 'an excluded-only #example hour keeps its rate');
+    assert.strictEqual(await page.locator('.regions-trend-gap').count(), 0);
+    assert.match(await page.locator('.regions-coverage').textContent(), /6 observations were identified as direct, unscoped or for a different transport code/);
+    await page.getByLabel('Region scope').selectOption('');
+    await page.waitForFunction(() => /Rate unavailable/.test(document.querySelector('.regions-health-rate')?.textContent || ''));
+    assert.strictEqual(await page.locator('.regions-trend-gap').count(), 1, 'all scopes include the capped #other hour');
+    assert.match(await page.locator('.regions-coverage').textContent(), /0 observations could not be attributed .* and 1 were omitted by safety limits/);
+    await page.getByLabel('Region scope').selectOption('#example');
+    await page.getByLabel('Region period').selectOption('24h');
+    historyOverride = {};
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true' && document.querySelectorAll('.regions-trend-gap').length === 0);
   });
 
   await test('health SVG and exact-value table are accessible, themed and retain keyed rows', async () => {
@@ -642,7 +671,7 @@ async function main() {
     assert(directions.some(value => value.includes('New relay → ' + EVIL)));
     assert.strictEqual(await page.locator('.regions-directed-step').count(), 2);
     assert(await page.locator('.regions-directed-step').first().getAttribute('marker-end'));
-    assert.match(await page.locator('.regions-step-diagnostics').textContent(), /Snapshot-wide evidence diagnostics \(not selected-interval totals\)/);
+    assert.match(await page.locator('.regions-step-diagnostics').textContent(), /Snapshot-wide directed-step diagnostics \(not selected-interval totals\): 0 excluded observations; 0 unprovable observations; 0 observations omitted by source limits; 0 unresolved hops; 0 step appearances omitted by step limits/);
     assert.strictEqual(await page.locator('.regions-connections img').count(), 0);
     assert.strictEqual(await page.evaluate(() => window.__xss), undefined);
     const params = new URLSearchParams((await page.evaluate(() => location.hash)).split('?')[1]);
@@ -675,9 +704,11 @@ async function main() {
   await test('Connections qualifies partial, unknown, loading and capped evidence without absence claims', async () => {
     for (const override of [{ coverage: { start: '2026-10-16T11:30:00Z', loading: false } },
       { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
-      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidenceIncomplete: true } },
+      { coverage: { start: '2026-09-01T00:00:00Z', loading: false, evidence: { excluded: 0, unprovable: 0, capped: 2, truncated: false,
+        scopes: [{ name: '#example', excluded: 0, unprovable: 0, capped: 2, buckets: [{ index: 503, excluded: 0, unprovable: 0, capped: 2 }] }] } } },
       { stepsTruncated: true }, { stepBucketsTruncated: true }, { stepEvidence: { sourceTruncated: true, incomplete: true } },
-      { stepEvidence: { skippedObservations: 12, unresolvedHops: 3, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false } }]) {
+      { stepEvidence: { excludedObservations: 0, unprovableObservations: 12, cappedObservations: 0, unresolvedHops: 3, cappedStepAppearances: 0, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false } },
+      { stepEvidence: { excludedObservations: 0, unprovableObservations: 0, cappedObservations: 0, unresolvedHops: 0, cappedStepAppearances: 4, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false } }]) {
       routesOverride = override;
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');

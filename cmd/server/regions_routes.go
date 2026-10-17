@@ -48,12 +48,19 @@ type RegionsRouteStep struct {
 	Buckets []RegionsHistoryBucket `json:"buckets"`
 }
 
+// RegionsStepEvidence is snapshot-wide. Observation counts use the same
+// classes as RegionsEvidence; CappedStepAppearances counts directed step
+// appearances dropped by the step/pair/cell caps, which never affect
+// memberships or history coverage.
 type RegionsStepEvidence struct {
-	SkippedObservations  int  `json:"skippedObservations"`
-	UnresolvedHops       int  `json:"unresolvedHops"`
-	SourceTruncated      bool `json:"sourceTruncated"`
-	Incomplete           bool `json:"incomplete"`
-	MissingEndpointSteps int  `json:"missingEndpointSteps"`
+	ExcludedObservations   int  `json:"excludedObservations"`
+	UnprovableObservations int  `json:"unprovableObservations"`
+	CappedObservations     int  `json:"cappedObservations"`
+	UnresolvedHops         int  `json:"unresolvedHops"`
+	SourceTruncated        bool `json:"sourceTruncated"`
+	CappedStepAppearances  int  `json:"cappedStepAppearances"`
+	Incomplete             bool `json:"incomplete"`
+	MissingEndpointSteps   int  `json:"missingEndpointSteps"`
 }
 
 type RegionsRouteNode struct {
@@ -111,11 +118,26 @@ type regionsRoutesCollector struct {
 	txs        []regionsRouteTx
 	pathCount  int
 	evidence   RegionsStepEvidence
+	cells      *regionsEvidenceBuilder
 }
 
 func newRegionsRoutesCollector(now time.Time) *regionsRoutesCollector {
 	end := now.UTC().Truncate(time.Hour)
-	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC()}
+	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(), cells: newRegionsEvidenceBuilder()}
+}
+
+// addEvidence records one transmission's evidence in its own FirstSeen hour
+// and stored scope, and in the snapshot-wide step diagnostics.
+func (c *regionsRoutesCollector) addEvidence(tx regionsRouteTx, d RegionsEvidenceCounts) {
+	c.evidence.ExcludedObservations += d.Excluded
+	c.evidence.UnprovableObservations += d.Unprovable
+	c.evidence.CappedObservations += d.Capped
+	c.cells.add(tx.scope, c.bucket(tx), d)
+}
+
+// bucket is 0 through regionsHistoryBucketCount; the last is the current hour.
+func (c *regionsRoutesCollector) bucket(tx regionsRouteTx) int {
+	return int(tx.when.Sub(c.start) / time.Hour)
 }
 
 // capture copies immutable strings and scalar wire evidence while the packet
@@ -136,22 +158,19 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	canonical, known := wireTransportCodes(tx.RawHex)
 	known = known && canonical>>16 != 0
 	item := regionsRouteTx{id: tx.ID, when: when, scope: tx.ScopeName}
+	var counts RegionsEvidenceCounts
 	seen := make(map[string]int)
 	for _, obs := range tx.Observations {
-		if obs == nil {
-			c.evidence.SkippedObservations++
+		switch classifyRegionsObservation(obs, canonical, known) {
+		case regionsObservationExcluded:
+			counts.Excluded++
 			continue
-		}
-		eligible, incomplete := eligibleRegionsObservation(obs, canonical, known)
-		if incomplete {
-			c.evidence.SkippedObservations++
-			continue
-		}
-		if !eligible {
+		case regionsObservationUnprovable:
+			counts.Unprovable++
 			continue
 		}
 		if len(obs.PathJSON) > maxRegionsRoutePathBytes {
-			c.evidence.SkippedObservations++
+			counts.Capped++
 			continue
 		}
 		if index, exists := seen[obs.PathJSON]; exists {
@@ -160,7 +179,7 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 		}
 		if len(item.paths) >= maxRegionsRoutePathsPerTx || c.pathCount >= maxRegionsRoutePaths {
 			c.evidence.SourceTruncated = true
-			c.evidence.SkippedObservations++
+			counts.Capped++
 			continue
 		}
 		seen[obs.PathJSON] = len(item.paths)
@@ -168,8 +187,9 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 		c.pathCount++
 	}
 	if len(tx.Observations) == 0 {
-		c.evidence.SkippedObservations++
+		counts.Unprovable++
 	}
+	c.addEvidence(item, counts)
 	if len(item.paths) > 0 {
 		c.txs = append(c.txs, item)
 	}
@@ -182,7 +202,7 @@ type regionsRouteCell struct {
 }
 
 func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
-	out := &regionsRouteSnapshot{steps: []RegionsRouteStep{}, evidence: c.evidence}
+	out := &regionsRouteSnapshot{steps: []RegionsRouteStep{}}
 	sort.Slice(c.txs, func(i, j int) bool { return c.txs[i].id < c.txs[j].id })
 	resolve := newRelayTokenResolver(pm)
 	memberships := newRegionsMembershipBuilder()
@@ -190,14 +210,24 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 	seen := make(map[regionsRouteKey]bool)
 	seenMembers := make(map[string]bool)
 	cellCount := 0
+	// Directed-step caps are counted only as step appearances: they never
+	// reach membership coverage evidence.
+	capStep := func(truncated *bool) {
+		*truncated = true
+		c.evidence.CappedStepAppearances++
+	}
 	for _, tx := range c.txs {
 		clear(seen)
 		clear(seenMembers)
-		index := int(tx.when.Sub(c.start) / time.Hour)
+		index := c.bucket(tx)
 		for _, path := range tx.paths {
 			var tokens []string
-			if err := json.Unmarshal([]byte(path.path), &tokens); err != nil || len(tokens) > 64 {
-				out.evidence.SkippedObservations += path.observations
+			if err := json.Unmarshal([]byte(path.path), &tokens); err != nil {
+				c.addEvidence(tx, RegionsEvidenceCounts{Unprovable: path.observations})
+				continue
+			}
+			if len(tokens) > 64 {
+				c.addEvidence(tx, RegionsEvidenceCounts{Capped: path.observations})
 				continue
 			}
 			previous := ""
@@ -208,12 +238,15 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 				key := resolve.key(token)
 				if key == "" {
 					previous = ""
-					out.evidence.UnresolvedHops++
+					c.evidence.UnresolvedHops++
 					continue
 				}
 				if !seenMembers[key] {
 					seenMembers[key] = true
-					memberships.add(key, tx)
+					if !memberships.add(key, tx) {
+						// A dropped membership, not an observation: no step count.
+						c.cells.add(tx.scope, c.bucket(tx), RegionsEvidenceCounts{Capped: 1})
+					}
 				}
 				// Latest includes the current hour. Completed hourly history and
 				// directed steps deliberately do not, even at its exact boundary.
@@ -224,7 +257,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 					step := regionsRouteKey{previous, key, tx.scope}
 					if !seen[step] {
 						if len(seen) >= maxRegionsRoutePairsPerTx {
-							out.stepsTruncated = true
+							capStep(&out.stepsTruncated)
 							previous = key
 							continue
 						}
@@ -232,7 +265,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 						byIndex := rows[step]
 						if byIndex == nil {
 							if len(rows) >= maxRegionsRouteSteps {
-								out.stepsTruncated = true
+								capStep(&out.stepsTruncated)
 								previous = key
 								continue
 							}
@@ -241,7 +274,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 						cell, exists := byIndex[index]
 						if !exists {
 							if cellCount >= maxRegionsRouteCells {
-								out.bucketsTruncated = true
+								capStep(&out.bucketsTruncated)
 								previous = key
 								continue
 							}
@@ -287,9 +320,13 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 		}
 		out.steps = append(out.steps, step)
 	}
-	membershipIncomplete := out.evidence.SkippedObservations > 0 || out.evidence.UnresolvedHops > 0 || out.evidence.SourceTruncated
-	out.memberships, out.history = memberships.build(c.now, membershipIncomplete)
-	out.evidence.Incomplete = membershipIncomplete || out.stepsTruncated || out.bucketsTruncated
+	out.memberships, out.history = memberships.build(c.now, c.cells.build(c.start))
+	out.evidence = c.evidence
+	// Directed-step completeness only. Unresolved hops break adjacency, so they
+	// qualify steps; they do not qualify memberships of resolved relays.
+	out.evidence.Incomplete = out.evidence.UnprovableObservations > 0 || out.evidence.CappedObservations > 0 ||
+		out.evidence.UnresolvedHops > 0 || out.evidence.SourceTruncated || out.evidence.CappedStepAppearances > 0 ||
+		out.stepsTruncated || out.bucketsTruncated
 	return out
 }
 
@@ -348,6 +385,14 @@ func regionsRoutesSchemas() map[string]*openAPISchema {
 		"RegionsRouteStep":      {Type: "object", Properties: map[string]*openAPISchema{"from": {Type: "string"}, "to": {Type: "string"}, "scope": {Type: "string"}, "buckets": {Type: "array", Items: openAPIRef("RegionsRouteBucket"), Description: "Counts are not additive unique packet totals."}}},
 		"RegionsRouteBucket":    {Type: "object", Properties: map[string]*openAPISchema{"index": {Type: "integer", Description: "Zero-based completed UTC hour, 0 through 503."}, "count": {Type: "integer", Description: "Distinct transmission IDs for this directed adjacent relay step and scope."}, "lastRelayed": {Type: "string", Description: "Latest transmission FirstSeen in this bucket, RFC3339."}}},
 		"RegionsRouteNode":      {Type: "object", Properties: map[string]*openAPISchema{"publicKey": {Type: "string"}, "name": {Type: "string"}, "role": {Type: "string"}, "lat": {Type: "number", Nullable: true}, "lon": {Type: "number", Nullable: true}, "positionSource": {Type: "string", Enum: []string{"reported", "none"}}, "metadataSource": {Type: "string", Enum: []string{"current", "archived"}}}},
-		"RegionsStepEvidence":   {Type: "object", Description: "Snapshot-wide diagnostics, not selected-window totals or scope-transition evidence.", Properties: map[string]*openAPISchema{"skippedObservations": {Type: "integer"}, "unresolvedHops": {Type: "integer"}, "sourceTruncated": {Type: "boolean"}, "incomplete": {Type: "boolean"}, "missingEndpointSteps": {Type: "integer"}}},
+		"RegionsStepEvidence": {Type: "object", Description: "Snapshot-wide directed-step diagnostics, not selected-window totals or scope-transition evidence. Per-bucket membership evidence is coverage.evidence.", Properties: map[string]*openAPISchema{
+			"excludedObservations":   {Type: "integer", Description: "Known DIRECT/unscoped or mismatched-transport-code observations."},
+			"unprovableObservations": {Type: "integer", Description: "Observations with unknown or malformed own/canonical evidence."},
+			"cappedObservations":     {Type: "integer", Description: "Observations omitted by source path limits."},
+			"unresolvedHops":         {Type: "integer", Description: "Hop tokens without a unique relay identity; they break adjacency but not resolved memberships."},
+			"sourceTruncated":        {Type: "boolean"},
+			"cappedStepAppearances":  {Type: "integer", Description: "Directed step appearances omitted by the step, per-transmission pair or cell caps. Never part of coverage.evidence."},
+			"incomplete":             {Type: "boolean", Description: "Directed steps may be missing: unprovable/capped observations, unresolved hops, step caps or missing endpoints."},
+			"missingEndpointSteps":   {Type: "integer"}}},
 	}
 }

@@ -84,15 +84,18 @@ func TestRegionsEvidenceLatestIncludesCurrentHourButHistoryDoesNot(t *testing.T)
 }
 
 func TestRegionsEvidenceFailsClosedOnOwnWireAndCanonicalScopeMismatch(t *testing.T) {
-	for _, tc := range []struct{ name, canonical, own string }{
-		{"missing-own-header", "14aabbccdd00", ""},
-		{"missing-own-codes", "14aabbccdd00", "14aa"},
-		{"mismatch-first-code", "14aabbccdd00", "14aabcccdd00"},
-		{"mismatch-second-code", "14aabbccdd00", "14aabbccde00"},
-		{"missing-canonical-codes", "14aa", "14aabbccdd00"},
-		{"zero-canonical-code", "140000ccdd00", "140000ccdd00"},
-		{"unscoped-own", "14aabbccdd00", "1500"},
-		{"direct-own", "14aabbccdd00", "17aabbccdd00"},
+	for _, tc := range []struct {
+		name, canonical, own string
+		unprovable           bool
+	}{
+		{"missing-own-header", "14aabbccdd00", "", true},
+		{"missing-own-codes", "14aabbccdd00", "14aa", true},
+		{"mismatch-first-code", "14aabbccdd00", "14aabcccdd00", false},
+		{"mismatch-second-code", "14aabbccdd00", "14aabbccde00", false},
+		{"missing-canonical-codes", "14aa", "14aabbccdd00", true},
+		{"zero-canonical-code", "140000ccdd00", "140000ccdd00", true},
+		{"unscoped-own", "14aabbccdd00", "1500", false},
+		{"direct-own", "14aabbccdd00", "17aabbccdd00", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, now, key := regionsObservedFixture(t)
@@ -104,8 +107,11 @@ func TestRegionsEvidenceFailsClosedOnOwnWireAndCanonicalScopeMismatch(t *testing
 			if history, latest := getRegionsHistory(t, srv), latestRegions(t, srv); len(history.Nodes) != 0 || len(latest.Nodes) != 0 {
 				t.Fatalf("unverified observation entered Regions: history=%+v latest=%+v", history.Nodes, latest.Nodes)
 			}
-			wantIncomplete := tc.name != "direct-own" && tc.name != "unscoped-own"
-			if history, latest := getRegionsHistory(t, srv), latestRegions(t, srv); history.Coverage.EvidenceIncomplete != wantIncomplete || latest.Coverage.EvidenceIncomplete != wantIncomplete {
+			want := RegionsEvidenceCounts{Excluded: 1}
+			if tc.unprovable {
+				want = RegionsEvidenceCounts{Unprovable: 1}
+			}
+			if history, latest := getRegionsHistory(t, srv), latestRegions(t, srv); history.Coverage.Evidence.RegionsEvidenceCounts != want || latest.Coverage.Evidence.RegionsEvidenceCounts != want {
 				t.Fatalf("attribution completeness confused with exclusion: history=%+v latest=%+v", history.Coverage, latest.Coverage)
 			}
 		})
@@ -125,7 +131,9 @@ func TestRegionsEvidencePrefixAmbiguityAndScopeDedup(t *testing.T) {
 	}
 	recomputeRepeaterEnrichmentSafe(srv.store, 24)
 	history := getRegionsHistory(t, srv)
-	if len(history.Nodes) != 1 || history.Nodes[0].PublicKey != key || len(history.Nodes[0].Scopes) != 2 || !history.Coverage.EvidenceIncomplete {
+	// An ambiguous hop qualifies directed steps (stepEvidence.unresolvedHops),
+	// not the provenance of resolved relays' memberships.
+	if len(history.Nodes) != 1 || history.Nodes[0].PublicKey != key || len(history.Nodes[0].Scopes) != 2 || history.Coverage.Evidence.Unprovable != 0 {
 		t.Fatalf("ambiguous prefix broadened membership: %+v", history)
 	}
 	for _, scope := range history.Nodes[0].Scopes {
@@ -145,23 +153,31 @@ func TestRegionsEvidenceMembershipBudgetIndependentOfSteps(t *testing.T) {
 	}
 	got := collector.build(nil)
 	last := fmt.Sprintf("%064x", maxRegionsRouteSteps+1)
-	if len(got.steps) != maxRegionsRouteSteps || !got.stepsTruncated || len(got.memberships.nodes[last].scopes) != 1 || got.memberships.incomplete {
-		t.Fatal("directed-step cap suppressed independent valid membership or polluted its evidence flag")
+	if len(got.steps) != maxRegionsRouteSteps || !got.stepsTruncated || len(got.memberships.nodes[last].scopes) != 1 ||
+		got.memberships.evidence.history.Capped != 0 || got.memberships.evidence.truncated || got.evidence.CappedStepAppearances != 1 {
+		t.Fatal("directed-step cap suppressed independent valid membership or polluted its evidence")
 	}
 	b := newRegionsMembershipBuilder()
 	b.remaining = 1
-	b.add(a, regionsRouteTx{when: now, scope: "#one"})
-	b.add(a, regionsRouteTx{when: now, scope: "#two"})
-	bounded, _ := b.build(now, false)
-	if !bounded.incomplete || len(b.entries[a]) != 1 || len(bounded.nodes[a].scopes) != 1 {
+	if !b.add(a, regionsRouteTx{when: now, scope: "#one"}) || b.add(a, regionsRouteTx{when: now, scope: "#two"}) {
 		t.Fatal("independent membership entry cap was silent")
 	}
-	b = newRegionsMembershipBuilder()
-	for i := 0; i <= maxRegionsMembershipNodes; i++ {
-		b.add(fmt.Sprintf("%064x", i+1), regionsRouteTx{when: now, scope: "#one"})
+	if bounded, _ := b.build(now, nil); len(b.entries[a]) != 1 || len(bounded.nodes[a].scopes) != 1 {
+		t.Fatal("independent membership entry cap was not applied")
 	}
-	if len(b.entries) != maxRegionsMembershipNodes || !b.incomplete {
-		t.Fatal("membership node scratch space is unbounded")
+	// The node cap is counted as capped evidence in the omitted membership's
+	// own hour and scope only.
+	collector = newRegionsRoutesCollector(now)
+	for i := 0; i < maxRegionsMembershipNodes; i++ {
+		collector.capture(routeTransmission(i+1, now.Add(-time.Hour), fmt.Sprintf(`["%064x"]`, i+1)))
+	}
+	collector.capture(routeTransmission(0, now.Add(-2*time.Hour), `["`+a+`"]`)) // Admitted first: lowest ID.
+	got = collector.build(nil)
+	evidence := got.memberships.evidence.history
+	if len(got.memberships.nodes) != maxRegionsMembershipNodes || evidence.Capped != 1 || len(evidence.Scopes) != 1 ||
+		!reflect.DeepEqual(evidence.Scopes[0].Buckets, []RegionsEvidenceBucket{{Index: regionsHistoryBucketCount - 1, RegionsEvidenceCounts: RegionsEvidenceCounts{Capped: 1}}}) ||
+		got.evidence.CappedObservations != 0 {
+		t.Fatalf("membership node cap must be capped evidence in its own bucket: %+v / %+v", evidence, got.evidence)
 	}
 }
 

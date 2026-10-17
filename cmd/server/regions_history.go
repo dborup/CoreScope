@@ -26,9 +26,9 @@ type regionsRelayHistory struct {
 }
 
 type RegionsHistoryCoverage struct {
-	Start              *string `json:"start"`
-	Loading            bool    `json:"loading"`
-	EvidenceIncomplete bool    `json:"evidenceIncomplete"`
+	Start    *string         `json:"start"`
+	Loading  bool            `json:"loading"`
+	Evidence RegionsEvidence `json:"evidence"`
 }
 
 type RegionsHistoryBucket struct {
@@ -216,7 +216,7 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 	response := RegionsHistoryResponse{GeneratedAt: snapshot.generatedAt.Format(time.RFC3339Nano),
 		HistoryStart: h.start.Format(time.RFC3339Nano), HistoryEnd: h.end.Format(time.RFC3339Nano),
 		BucketSeconds: 3600, BucketCount: regionsHistoryBucketCount,
-		Coverage: RegionsHistoryCoverage{Loading: snapshot.loading, EvidenceIncomplete: snapshot.regionMemberships != nil && snapshot.regionMemberships.incomplete}, Nodes: []RegionsHistoryNode{},
+		Coverage: RegionsHistoryCoverage{Loading: snapshot.loading, Evidence: regionsHistoryEvidence(snapshot)}, Nodes: []RegionsHistoryNode{},
 		Truncated: h.truncated, ScopesTruncated: h.scopesTruncated, BucketsTruncated: h.bucketsTruncated}
 	if !snapshot.coverageStart.IsZero() && !snapshot.coverageStart.After(snapshot.generatedAt) {
 		start := snapshot.coverageStart.Format(time.RFC3339Nano)
@@ -259,12 +259,20 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 	return response, stepNodes, err
 }
 
+// regionsHistoryEvidence fails closed when no membership evidence exists.
+func regionsHistoryEvidence(snapshot *repeaterRelaySnapshot) RegionsEvidence {
+	if snapshot.regionMemberships == nil || snapshot.regionMemberships.evidence == nil {
+		return (*regionsEvidenceSnapshot)(nil).summary(0, 0, true)
+	}
+	return snapshot.regionMemberships.evidence.history
+}
+
 func regionsHistorySchemas() map[string]*openAPISchema {
 	return map[string]*openAPISchema{
 		"RegionsHistoryCoverage": {Type: "object", Properties: map[string]*openAPISchema{
-			"start":              {Type: "string", Nullable: true, Description: "Conservative retained-history floor, paired with this snapshot; null when unknown."},
-			"loading":            {Type: "boolean"},
-			"evidenceIncomplete": {Type: "boolean", Description: "Snapshot-wide own-observation attribution is incomplete due to missing/mismatched wire evidence, unresolved identities, or bounded source/membership capture. Independent of retained time coverage and directed-step limits."},
+			"start":    {Type: "string", Nullable: true, Description: "Conservative retained-history floor, paired with this snapshot; null when unknown."},
+			"loading":  {Type: "boolean"},
+			"evidence": openAPIRef("RegionsEvidence"),
 		}},
 		"RegionsHistoryBucket": {Type: "object", Properties: map[string]*openAPISchema{
 			"index":       {Type: "integer", Description: "Zero-based hourly bucket index, 0 through 503."},

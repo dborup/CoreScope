@@ -30,10 +30,10 @@ type repeaterRelaySnapshot struct {
 }
 
 type RegionsObservedCoverage struct {
-	Start              *string `json:"start"`
-	Complete           bool    `json:"complete"`
-	Loading            bool    `json:"loading"`
-	EvidenceIncomplete bool    `json:"evidenceIncomplete"`
+	Start    *string         `json:"start"`
+	Complete bool            `json:"complete"`
+	Loading  bool            `json:"loading"`
+	Evidence RegionsEvidence `json:"evidence"`
 }
 
 type RegionsObservedScope struct {
@@ -199,7 +199,7 @@ func (s *Server) handleRegionsObserved(w http.ResponseWriter, r *http.Request) {
 	start := snapshot.generatedAt.Add(-duration)
 	stamp := snapshot.generatedAt.Format(time.RFC3339Nano)
 	response := RegionsObservedResponse{Window: window, GeneratedAt: stamp, WindowStart: start.Format(time.RFC3339Nano), WindowEnd: stamp,
-		Coverage: RegionsObservedCoverage{Loading: snapshot.loading, EvidenceIncomplete: snapshot.regionMemberships.incomplete}, Nodes: []RegionsObservedNode{}}
+		Coverage: RegionsObservedCoverage{Loading: snapshot.loading, Evidence: snapshot.regionMemberships.evidence.window(start, snapshot.generatedAt)}, Nodes: []RegionsObservedNode{}}
 	if !snapshot.coverageStart.IsZero() && !snapshot.coverageStart.After(snapshot.generatedAt) {
 		floor := snapshot.coverageStart.Format(time.RFC3339Nano)
 		response.Coverage.Start = &floor
@@ -259,10 +259,10 @@ func (s *Server) handleRegionsObserved(w http.ResponseWriter, r *http.Request) {
 func regionsObservedSchemas() map[string]*openAPISchema {
 	return map[string]*openAPISchema{
 		"RegionsObservedCoverage": {Type: "object", Properties: map[string]*openAPISchema{
-			"start":              {Type: "string", Nullable: true, Description: "Known retained-history floor (RFC3339), or null when unknown."},
-			"complete":           {Type: "boolean", Description: "Retained in-memory history covers the requested interval; not an observer uptime guarantee."},
-			"loading":            {Type: "boolean", Description: "Startup loading state when this snapshot was captured."},
-			"evidenceIncomplete": {Type: "boolean", Description: "Snapshot-wide scoped attribution is incomplete: own wire evidence, resolved identities, or independent membership/source budgets omitted candidates. Separate from retained-history coverage."},
+			"start":    {Type: "string", Nullable: true, Description: "Known retained-history floor (RFC3339), or null when unknown."},
+			"complete": {Type: "boolean", Description: "Retained in-memory history covers the requested interval; not an observer uptime guarantee."},
+			"loading":  {Type: "boolean", Description: "Startup loading state when this snapshot was captured."},
+			"evidence": openAPIRef("RegionsEvidence"),
 		}},
 		"RegionsObservedScope": {Type: "object", Properties: map[string]*openAPISchema{
 			"name":        {Type: "string", Description: "Exact observed scope spelling and case."},
