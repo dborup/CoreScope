@@ -1843,7 +1843,7 @@ func TestEnrichObs(t *testing.T) {
 		t.Skip("no observations loaded")
 	}
 
-	enriched := store.enrichObs(obs)
+	enriched := store.GetPacketByID(obs.ID)
 	if enriched["observer_id"] == nil {
 		t.Error("expected observer_id")
 	}

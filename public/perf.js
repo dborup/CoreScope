@@ -292,12 +292,26 @@ function renderVersionCard(health) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       };
 
+  // The server overview row (requests, latency, uptime, slow queries, version).
+  // It sits above the WebSocket history in its own container, so the history's
+  // Period select stays outside the five-second #perfContent rebuild.
+  function renderPerfOverview(server, health) {
+    return `<div style="display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;">
+          <div class="perf-card"><div class="perf-num">${escapeHtml(server.totalRequests)}</div><div class="perf-label">Total Requests</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(server.avgMs)}ms</div><div class="perf-label">Avg Response</div></div>
+          <div class="perf-card"><div class="perf-num">${escapeHtml(health ? health.uptimeHuman : Math.round(server.uptime / 60) + 'm')}</div><div class="perf-label">Uptime</div></div>
+          <div class="perf-card"><div class="perf-num">${server.slowQueries.length}</div><div class="perf-label">Slow (&gt;100ms)</div></div>
+          ${renderVersionCard(health)}
+        </div>`;
+  }
+
   async function render(app) {
     // The selector stays outside perfContent's existing five-second DOM
     // rebuild, preserving keyboard focus and an open native select menu.
-    app.innerHTML = '<div id="perfWrapper" style="padding:16px 24px;"><h2><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lightning"/></svg> Performance Dashboard</h2>' +
+    app.innerHTML = '<div id="perfWrapper" style="padding:16px 24px;"><h2><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lightning"/></svg> Performance Dashboard</h2><div id="perfOverview"></div>' +
       '<section id="wsHistorySection" aria-labelledby="wsHistoryHeading"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">' +
-      '<h3 id="wsHistoryHeading">WebSocket clients</h3><label for="wsHistoryRange">Period <select id="wsHistoryRange" style="min-height:44px;padding:6px;">' +
+      '<h3 id="wsHistoryHeading"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-line"/></svg> WebSocket clients</h3>' +
+      '<label for="wsHistoryRange" class="perf-range-control"><span class="region-filter-label">Period</span><select id="wsHistoryRange" class="time-window-select">' +
       '<option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label></div>' +
       '<div id="wsHistoryContent">Loading history…</div></section><div id="perfContent">Loading...</div></div>';
     const selector = document.getElementById('wsHistoryRange');
@@ -346,17 +360,10 @@ function renderVersionCard(health) {
       const historyEl = document.getElementById('wsHistoryContent');
       if (historyEl) historyEl.innerHTML = renderWSClientHistory(wsHistory, health && health.websocket ? health.websocket.clients : null, range, false) ||
         '<p class="text-muted">History is temporarily unavailable. Retrying on the next refresh.</p>';
+      const overviewEl = document.getElementById('perfOverview');
+      if (overviewEl) overviewEl.innerHTML = renderPerfOverview(server, health);
 
       let html = '';
-
-      // Server overview
-      html += `<div style="display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;">
-        <div class="perf-card"><div class="perf-num">${escapeHtml(server.totalRequests)}</div><div class="perf-label">Total Requests</div></div>
-        <div class="perf-card"><div class="perf-num">${escapeHtml(server.avgMs)}ms</div><div class="perf-label">Avg Response</div></div>
-        <div class="perf-card"><div class="perf-num">${escapeHtml(health ? health.uptimeHuman : Math.round(server.uptime / 60) + 'm')}</div><div class="perf-label">Uptime</div></div>
-        <div class="perf-card"><div class="perf-num">${server.slowQueries.length}</div><div class="perf-label">Slow (&gt;100ms)</div></div>
-        ${renderVersionCard(health)}
-      </div>`;
 
       // System health (memory, event loop / go runtime, WS)
       if (health) {

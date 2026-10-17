@@ -827,11 +827,10 @@ func (s *PacketStore) computeFleetClockSkewForArea(area string) []*NodeClockSkew
 		areaNodes = s.resolveAreaNodes(area)
 	}
 
+	// Refresh node metadata before taking the store lock.
+	allNodes, _ := s.getCachedNodesAndPM()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	// Build name/role lookup from DB cache (requires s.mu held).
-	allNodes, _ := s.getCachedNodesAndPM()
 	nameMap := make(map[string]nodeInfo, len(allNodes))
 	for _, ni := range allNodes {
 		nameMap[ni.PublicKey] = ni

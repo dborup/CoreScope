@@ -2347,8 +2347,8 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		prefix1 = prefix1[:2]
 	}
 
-	s.store.mu.RLock()
 	_, pm := s.store.getCachedNodesAndPM()
+	s.store.mu.RLock()
 
 	// Collect candidate transmissions from the index, deduplicating by tx ID.
 	// confirmedByFullKey tracks TXs found via the full-pubkey index key — these are
@@ -3287,9 +3287,7 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 	// Get the server's prefix map for resolveWithContext.
 	var pm *prefixMap
 	if s.store != nil {
-		s.store.mu.RLock()
 		_, pm = s.store.getCachedNodesAndPM()
-		s.store.mu.RUnlock()
 	}
 
 	for _, hop := range hops {
