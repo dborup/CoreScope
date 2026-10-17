@@ -3,6 +3,11 @@
 
 (function (root) {
   const MAX_POINTS = 5000;
+  // What a relay appearance counts since #507 (own-observation provenance).
+  const APPEARANCES_TEXT = 'A relay appearance is one transmission counted once for each distinct relay identified on any ' +
+    'observer\u2019s own attributable scoped-flood path (the union across observers, not only the displayed path); repeated ' +
+    'observers, paths and loops count once. One transmission can contribute several appearances, more observers can reveal more ' +
+    'relays for the same traffic, and this is not a global packet total.';
   const MAX_SCOPES = 128;
   const WINDOWS = { '1h': 'Last hour', '24h': 'Last 24 hours', '7d': 'Last 7 days' };
   let leafletMap = null;
@@ -308,7 +313,7 @@
     head.appendChild(header);
     const body = element('tbody');
     table.append(head, body); tableScroll.appendChild(table); details.appendChild(tableScroll); panel.appendChild(details);
-    panel.appendChild(element('p', 'regions-health-note', 'Traffic increase does not establish better health. Spam, observer reception and routing changes can affect observed counts. Relay appearances can count the same transmission via several relays; this is not a global packet total.'));
+    panel.appendChild(element('p', 'regions-health-note', 'Traffic increase does not establish better health. Spam, observer reception and routing changes can affect observed counts. ' + APPEARANCES_TEXT));
     const rows = new Map();
 
     function update(frame, activity, scope) {
@@ -467,7 +472,7 @@
     details.appendChild(element('summary', '', 'Data & position details'));
     details.appendChild(element('p', '', 'Repeaters and rooms are shown where scoped relay traffic was observed. Positions are self-reported; their accuracy is unverified. Nodes without usable positions are counted but not mapped. Dashed outlines join the outermost node positions and do not measure RF coverage or administrative boundaries.'));
     details.appendChild(element('p', '', 'Retained history is not observer uptime or proof of continuous reception.'));
-    details.appendChild(element('p', '', 'Timeline counts are relay appearances: one transmission observed via two relay nodes contributes one appearance for each relay. Hours use UTC and intervals include their start and exclude their end. Positions use current or last-known self-reported coordinates; playback shows activity, not historical movement. Current catalog metadata can revise historical attribution after a refresh.'));
+    details.appendChild(element('p', '', 'Timeline counts are relay appearances. ' + APPEARANCES_TEXT + ' Hours use UTC and intervals include their start and exclude their end. Positions use current or last-known self-reported coordinates; playback shows activity, not historical movement. Current catalog metadata can revise historical attribution after a refresh.'));
     const exactBounds = element('div', 'regions-exact-bounds');
     details.appendChild(exactBounds);
     shell.appendChild(details);

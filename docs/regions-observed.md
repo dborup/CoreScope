@@ -88,9 +88,16 @@ it does not establish a node's creation date. "Not observed" does not establish
 that a node is offline. Comparison always identifies both intervals.
 
 Counts are distinct transmissions per relay and scope. Adding counts across
-relays gives **relay appearances**: a packet carried by several relays can
-contribute once for each relay. These totals must not be labelled globally
-unique mesh packets. Traffic changes and classifications are withheld when
+relays gives **relay appearances**: one transmission counts once for each
+distinct relay identified on **any** observer's own attributable scoped-flood
+path, the union across all observers, not only the displayed path. Repeated
+observers, identical paths and loops count once. Before #507 history was
+attributed through the canonical display path and its candidate index, so
+relays seen only on other observers' paths were not counted; appearance totals
+therefore rise where several observers hear the same transmission along
+different paths. More observers can reveal more relays for the same traffic.
+These totals must not be labelled globally unique mesh packets. Traffic
+changes and classifications are withheld when
 either interval has unknown, loading, partial or truncated history, or
 unprovable or capped evidence for the selected scope. Raw
 observed counts may still be shown separately. A zero reference count has no

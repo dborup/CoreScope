@@ -450,6 +450,9 @@ async function main() {
     assert.strictEqual(await page.locator('[data-metric="nodes"] .regions-health-value').textContent(), '4');
     assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '15');
     assert.match(await page.locator('.regions-health-rate').textContent(), /0\.63 relay appearances per hour/);
+    assert.match(await page.locator('.regions-health-note').textContent(), /union across observers, not only the displayed path\); repeated observers, paths and loops count once/,
+      'the UI states what a relay appearance counts');
+    assert.match(await page.locator('.regions-details').textContent(), /Timeline counts are relay appearances\. A relay appearance is one transmission counted once for each distinct relay/);
     assert.strictEqual(await page.locator('[data-metric="last-relayed"] time').getAttribute('datetime'), '2026-10-16T11:00:01.000Z');
     assert.strictEqual(await page.locator('.regions-trend-bar').count(), 24);
     assert.strictEqual(await page.locator('.regions-trend-gap').count(), 0);

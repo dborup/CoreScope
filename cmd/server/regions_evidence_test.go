@@ -326,3 +326,37 @@ func TestRegionsEvidenceStepCapCountedSeparately(t *testing.T) {
 		t.Fatalf("step cap must be counted as capped step appearances only: truncated=%v %+v", body.StepsTruncated, steps)
 	}
 }
+
+// F2 (PR #507 review): a relay appearance is one transmission per distinct
+// relay on ANY observer's own attributable flood path (the union across
+// observers), not only the canonical display path. Repeated observers,
+// identical paths and loops count once.
+func TestRegionsEvidenceAppearancesUnionAcrossObservers(t *testing.T) {
+	srv, now, a := regionsObservedFixture(t)
+	b, c, d := "b1"+strings.Repeat("12", 31), "c1"+strings.Repeat("12", 31), "d1"+strings.Repeat("12", 31)
+	for _, key := range []string{b, c, d} {
+		if _, err := srv.db.conn.Exec("INSERT INTO nodes(public_key,name,role) VALUES(?,'Relay','repeater')", key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	display := `["` + a + `","` + b + `"]`
+	tx := routeTransmission(1, now.Truncate(time.Hour).Add(-time.Minute), display, `["`+c+`","`+d+`"]`, display, `["`+b+`","`+a+`","`+b+`"]`)
+	tx.PathJSON = display
+	srv.store.byPathHop[a] = []*StoreTx{tx}
+	srv.store.byPathHop[b] = []*StoreTx{tx}
+	recomputeRepeaterEnrichmentSafe(srv.store, 24)
+	history := getRegionsHistory(t, srv)
+	got := map[string]int{}
+	total := 0
+	for _, node := range history.Nodes {
+		for _, scope := range node.Scopes {
+			for _, bucket := range scope.Buckets {
+				got[node.PublicKey] += bucket.Count
+				total += bucket.Count
+			}
+		}
+	}
+	if want := map[string]int{a: 1, b: 1, c: 1, d: 1}; !reflect.DeepEqual(got, want) || total != 4 {
+		t.Fatalf("relay appearances must be the union across observers, once per relay: got %v (total %d)", got, total)
+	}
+}
