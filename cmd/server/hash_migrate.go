@@ -132,9 +132,10 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 			store.WaitIndexesReady(30 * time.Second)
 			indexesReady = true
 		}
+		metadata := store.snapshotPathNodes()
 		store.mu.Lock()
 		held := time.Now()
-		r, m := store.applyContentHashUpdates(updates)
+		r, m := store.applyContentHashUpdates(updates, metadata)
 		hold.record(time.Since(held))
 		store.mu.Unlock()
 		rehashed += r
@@ -201,7 +202,7 @@ func staleContentHashes(s *PacketStore, batch []*StoreTx) []hashUpdate {
 // applyContentHashUpdates rehashes the transmissions of updates and merges the
 // ones that collide. Returns how many it rehashed and how many duplicates it
 // merged away. Must hold s.mu for writing.
-func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate) (rehashed, merged int) {
+func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate, snapshots ...pathNodeSnapshot) (rehashed, merged int) {
 	// The batch was chosen under a read lock: drop what changed since
 	// (eviction, a concurrent rehash).
 	live := updates[:0]
@@ -243,7 +244,7 @@ func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate) (rehashed, m
 		s.moveObservations(winner, loser, m)
 		m.add(winner, loser)
 	}
-	merged = s.finishHashMerge(m)
+	merged = s.finishHashMerge(m, s.pathNodeSnapshotLocked(snapshots))
 	return len(live), merged
 }
 
@@ -433,7 +434,7 @@ func (m *hashMerge) add(winner, loser *StoreTx) {
 // finishHashMerge removes every merged-away transmission from every index and
 // from trackedBytes, then refreshes the survivors (best observation, charge,
 // path-derived indexes). Returns the number of duplicates removed.
-func (s *PacketStore) finishHashMerge(m *hashMerge) int {
+func (s *PacketStore) finishHashMerge(m *hashMerge, metadata pathNodeSnapshot) int {
 	if len(m.losers) == 0 {
 		return 0
 	}
@@ -518,7 +519,7 @@ func (s *PacketStore) finishHashMerge(m *hashMerge) int {
 		}
 	}
 	if len(distChanged) > 0 {
-		s.updateDistanceIndexForTxs(distChanged)
+		s.updateDistanceIndexForTxs(distChanged, metadata)
 	}
 
 	s.invalidateRelayStatsCache()

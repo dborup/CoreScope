@@ -222,6 +222,10 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 	s.bgErrMu.Unlock()
 
 	if err := s.LoadChunked(chunkSize); err != nil {
+		s.mu.Lock()
+		s.analyticsHistory.failed = true
+		s.analyticsHistory.loading = false
+		s.mu.Unlock()
 		// Pick a terminal state on the error path so /api/healthz +
 		// backgroundLoadComplete don't stay undefined forever. Both
 		// done AND failed are set true: the LoadChunked read-protocol
@@ -358,6 +362,9 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 			loadConditions = append(loadConditions, fmt.Sprintf("t2.first_seen >= '%s'", hotCutoffStr))
 		}
 	}
+	s.mu.Lock()
+	s.beginNodeAnalyticsLoadLocked(hotCutoffStr)
+	s.mu.Unlock()
 
 	// COUNT honours the same retention/hot-startup filter the chunk
 	// loop applies, so the logged "DB total" matches the rows the
@@ -412,9 +419,8 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	// PR #1643 R1 munger #1: cold load uses unique_prefix-only gate, so
 	// the neighbor graph is no longer consulted here (affinity-tier
 	// resolution against ≤168h-old observations would silently mis-attribute).
-	s.mu.RLock()
-	_, relayPM := s.getCachedNodesAndPM()
-	s.mu.RUnlock()
+	nodeSnapshot := s.snapshotPathNodes()
+	relayPM := nodeSnapshot.pm
 	var coldLoadAmbiguousHopsSkipped int
 
 	for {
@@ -516,12 +522,14 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	})
 	s.buildSubpathIndex()
 	s.buildPathHopIndex()
-	s.buildDistanceIndex()
+	s.buildDistanceIndex(nodeSnapshot)
 	if s.hotStartupHours > 0 {
 		s.oldestLoaded = hotCutoffStr
 	} else if len(s.packets) > 0 {
 		s.oldestLoaded = s.packets[0].FirstSeen
 	}
+	s.analyticsHistory.failed = s.analyticsHistory.failed || totalInDB < 0 || (maxPackets == 0 && totalLoaded < totalInDB)
+	s.finishNodeAnalyticsLoadLocked(s.analyticsHistory.loadCutoff, maxPackets > 0 && totalLoaded < totalInDB, s.hotStartupHours > 0)
 	s.loaded = true
 	s.mu.Unlock()
 
@@ -591,6 +599,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
+			s.analyticsHistory.failed = true
 			continue
 		}
 		if s.loadScannedRowHook != nil {
@@ -674,6 +683,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
 			tx.obsKeys[dk] = true
+			s.analyticsHistory.observedFrom = earlierNodeAnalyticsEvidence(s.analyticsHistory.observedFrom, obs.Timestamp)
 			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
 				tx.observerSet[obs.ObserverID] = true
 				tx.UniqueObserverCount++

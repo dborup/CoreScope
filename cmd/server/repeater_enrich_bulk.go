@@ -74,6 +74,9 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	// packet lock. The same floor/time describes every entry in this result.
 	loadCoverage := s.LoadCoverageRatio()
 	now := time.Now().UTC()
+	// Node metadata (SQL) is read BEFORE s.mu so no query runs under the
+	// packet-store lock (#412/#495).
+	metadata := s.snapshotPathNodes()
 	// Everything that reads store data happens under the read lock: ingest
 	// appends to and eviction compacts byPathHop/byNode slices in place, so a
 	// copied slice header is not a stable snapshot, and StoreTx observations
@@ -84,7 +87,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 		coverageStart: s.retainedHistoryCoverageStartLocked(now, loadCoverage),
 		loading:       !s.loaded || (!s.backgroundLoadDone.Load() && !s.backgroundLoadFailed.Load()),
 	}
-	pm := s.relayPrefixMapLocked()
+	pm := metadata.pm
 
 	// Per transmission: its relay entry values and the identity-safe relay
 	// keys confirmed by its raw observed flood paths, computed once.

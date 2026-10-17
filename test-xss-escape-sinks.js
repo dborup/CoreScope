@@ -540,8 +540,12 @@ function renderObsDetail(obs, neighborsData) {
   const radioBlock = radioBlockM[0];
   const directNeighborsBlock = loadDirectNeighborsBlock();
   // Stub out window globals and helpers used inside the template.
+  // The airtime stat cards come from the real shared helper (#497).
+  const airCtx = { window: {} };
+  vm.createContext(airCtx);
+  vm.runInContext(fs.readFileSync('public/observer-airtime.js', 'utf8'), airCtx);
   const sandbox = {
-    window: { ObserverDetailNaiveBanner: { render: () => '' } },
+    window: { ObserverDetailNaiveBanner: { render: () => '' }, ObserverAirtime: airCtx.window.ObserverAirtime },
     escapeHtml,
     HEALTH_THRESHOLDS: { nodeDegradedMs: 1800000 },
     obsSkew: null,
@@ -563,14 +567,14 @@ function renderObsDetail(obs, neighborsData) {
   const fn = new Function(
     'obs', 'obsSkew', 'escapeHtml', 'window', 'HEALTH_THRESHOLDS',
     'formatDuration', 'timeAgo', 'formatSkew', 'renderSkewBadge', 'observerSkewSeverity',
-    'statusCls', 'statusLabel', 'neighborsData',
+    'statusCls', 'statusLabel', 'neighborsData', 'airtime',
     radioBlock + '\n' + directNeighborsBlock + '\nreturn `' + tpl + '`;'
   );
   return fn(
     obs, sandbox.obsSkew, escapeHtml, sandbox.window, sandbox.HEALTH_THRESHOLDS,
     sandbox.formatDuration, sandbox.timeAgo, sandbox.formatSkew,
     sandbox.renderSkewBadge, sandbox.observerSkewSeverity,
-    statusCls, statusLabel, sandbox.neighborsData
+    statusCls, statusLabel, sandbox.neighborsData, sandbox.window.ObserverAirtime.lookup()
   );
 }
 
