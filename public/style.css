@@ -5949,7 +5949,21 @@ body.embed #app.app-fixed {
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
 .regions-page h1, .regions-page p { margin: 0; }
 .regions-note { color: var(--text-muted); max-width: 85ch; }
-.regions-controls { display: flex; gap: 12px; align-items: center; }
-.regions-controls select { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px; border-radius: 6px; }
+.regions-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.regions-controls label { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.regions-controls select, .regions-controls button { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px 8px; border-radius: 6px; }
+.regions-controls select { max-width: 100%; }
+.regions-controls button { cursor: pointer; }
 .regions-status { color: var(--text-muted); min-height: 2.4em; }
+.regions-snapshot, .regions-coverage, .regions-details { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
+.regions-details summary { cursor: pointer; }
+.regions-details p { margin-top: 6px; }
+.regions-coverage[data-coverage-state="partial"], .regions-coverage[data-coverage-state="unknown"], .regions-coverage[data-coverage-state="loading"] { border-left: 3px solid var(--warning); padding-left: 8px; }
+.regions-snapshot:empty, .regions-coverage:empty { display: none; }
 .regions-leaflet { flex: 1; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; }
+@media (max-width: 600px) {
+  .regions-page { padding: 10px; overflow-y: auto; }
+  .regions-controls { align-items: stretch; }
+  .regions-controls label { flex: 1 1 140px; }
+  .regions-controls select { min-width: 0; flex: 1; }
+}

@@ -4,11 +4,13 @@
 (function (root) {
   const MAX_POINTS = 5000;
   const MAX_SCOPES = 128;
+  const WINDOWS = { '1h': 'Last hour', '24h': 'Last 24 hours', '7d': 'Last 7 days' };
   let leafletMap = null;
   let themeObserver = null;
   let generation = 0;
 
   function validPosition(node) {
+    if (!node || node.lat == null || node.lon == null || node.lat === '' || node.lon === '') return false;
     const lat = Number(node.lat), lon = Number(node.lon);
     return Number.isFinite(lat) && Number.isFinite(lon) &&
       lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
@@ -28,31 +30,52 @@
     return true;
   }
 
-  function collectScopePoints(nodes) {
+  function collectScopeNodes(nodes) {
     if (!Array.isArray(nodes)) return [];
     const seen = new Set();
     const out = [];
     for (const node of nodes) {
       if (out.length >= MAX_POINTS) break;
       if (!node || (node.role !== 'repeater' && node.role !== 'room') ||
-          !validPosition(node) || !Array.isArray(node.transported_scopes_recent)) continue;
-      const key = String(node.public_key || '');
+          !Array.isArray(node.scopes)) continue;
+      const key = String(node.publicKey || '');
       if (!key || seen.has(key)) continue;
-      const scopes = node.transported_scopes_recent.filter(validScope);
+      const names = new Set();
+      const scopes = node.scopes.filter(scope => scope && validScope(scope.name) && !names.has(scope.name) && names.add(scope.name))
+        .map(scope => ({ name: scope.name, lastRelayed: Number.isFinite(Date.parse(scope.lastRelayed)) ? scope.lastRelayed : '' }));
       if (!scopes.length) continue;
       seen.add(key);
-      out.push({ publicKey: key, name: String(node.name || key.slice(0, 8)),
-        lat: Number(node.lat), lon: Number(node.lon), scopes,
-        lastRelayed: typeof node.last_relayed === 'string' ? node.last_relayed : '' });
+      const positioned = node.positionSource === 'reported' && validPosition(node);
+      out.push({ publicKey: key, name: String(node.name || key.slice(0, 8)), role: node.role,
+        lat: positioned ? Number(node.lat) : null, lon: positioned ? Number(node.lon) : null,
+        positionSource: positioned ? 'reported' : 'none', scopes });
     }
     return out;
   }
 
+  function collectScopePoints(nodes) {
+    return collectScopeNodes(nodes).filter(node => node.positionSource === 'reported');
+  }
+
+  function selectionSummary(nodes, scope) {
+    const selected = scope ? nodes.filter(node => node.scopes.some(s => s.name === scope)) : nodes;
+    const points = selected.filter(node => node.positionSource === 'reported');
+    return { selected, points, missingPositionCount: selected.length - points.length };
+  }
+
+  function lastRelayedForScope(node, scope) {
+    let latest = '';
+    for (const relay of node.scopes) {
+      if ((!scope || relay.name === scope) && relay.lastRelayed && (!latest || Date.parse(relay.lastRelayed) > Date.parse(latest))) latest = relay.lastRelayed;
+    }
+    return latest;
+  }
+
   function scopeCatalog(nodes) {
     const scopes = new Set();
-    for (const point of collectScopePoints(nodes)) {
+    for (const point of collectScopeNodes(nodes)) {
       for (const scope of point.scopes) {
-        scopes.add(scope);
+        scopes.add(scope.name);
         if (scopes.size > MAX_SCOPES) return { scopes: Array.from(scopes).slice(0, MAX_SCOPES).sort((a, b) => a.localeCompare(b)), truncated: true };
       }
     }
@@ -85,14 +108,46 @@
     return hull.length >= 3 ? hull : [];
   }
 
-  function parseSelectedScope(hash) {
+  function parseSelection(hash) {
     const query = String(hash || '').split('?')[1] || '';
-    const scope = new URLSearchParams(query).get('scope') || '';
-    return validScope(scope) ? scope : '';
+    const params = new URLSearchParams(query);
+    const scope = params.get('scope') || '';
+    const window = params.get('window');
+    return { window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h', scope: validScope(scope) ? scope : '' };
   }
 
-  function scopeHash(scope) {
-    return scope ? '#/regions?scope=' + encodeURIComponent(scope) : '#/regions';
+  function parseSelectedScope(hash) {
+    return parseSelection(hash).scope;
+  }
+
+  function scopeHash(scope, window = '24h') {
+    const params = new URLSearchParams({ window: Object.prototype.hasOwnProperty.call(WINDOWS, window) ? window : '24h' });
+    if (validScope(scope)) params.set('scope', scope);
+    return '#/regions?' + params.toString();
+  }
+
+  function isoTime(value) {
+    const ms = typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : '';
+  }
+
+  function coverageInfo(data) {
+    const coverage = data.coverage || {};
+    const requestedStart = isoTime(data.windowStart), requestedEnd = isoTime(data.windowEnd);
+    const retainedStart = isoTime(coverage.start);
+    const availableStart = retainedStart && requestedStart && retainedStart < requestedEnd ?
+      (retainedStart > requestedStart ? retainedStart : requestedStart) : null;
+    let kind = 'unknown', message = 'Retained history bounds are unknown; this view may be incomplete.';
+    if (coverage.loading) {
+      kind = 'loading';
+      message = 'History is still loading; this view may be incomplete.';
+    } else if (retainedStart) {
+      const complete = coverage.complete === true && retainedStart <= requestedStart;
+      kind = complete ? 'complete' : 'partial';
+      message = complete ? 'Retained history covers the requested interval.' :
+        (availableStart ? 'Partial retained history; earlier activity in the requested interval is unavailable.' : 'No retained history is available in the requested interval.');
+    }
+    return { kind, message, requestedStart, requestedEnd, availableStart, generatedAt: isoTime(data.generatedAt) };
   }
 
   function element(tag, className, text) {
@@ -102,34 +157,45 @@
     return el;
   }
 
-  function renderPoints(layer, map, points, scope, status, truncated, scopesTruncated) {
+  function timeElement(iso, exact) {
+    const label = exact ? iso : new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }).format(new Date(iso)) + ' UTC';
+    const time = element('time', '', label);
+    time.dateTime = iso;
+    time.title = iso;
+    return time;
+  }
+
+  function renderPoints(layer, map, nodes, scope, status, truncated, scopesTruncated, fit) {
     layer.clearLayers();
-    const selected = scope ? points.filter(p => p.scopes.includes(scope)) : points;
+    const { selected, points, missingPositionCount } = selectionSummary(nodes, scope);
     const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || 'steelblue';
-    for (const point of selected) {
+    for (const point of points) {
       const marker = L.circleMarker([point.lat, point.lon], { radius: 6, weight: 2, color: accent, fillOpacity: 0.75 });
       const popup = element('div');
       popup.appendChild(element('strong', '', point.name));
-      popup.appendChild(element('div', '', point.scopes.join(', ')));
-      if (point.lastRelayed) popup.appendChild(element('div', '', 'Last observed relay: ' + point.lastRelayed));
+      popup.appendChild(element('div', '', point.scopes.map(s => s.name).join(', ')));
+      popup.appendChild(element('div', '', 'Position: self-reported; accuracy unverified.'));
+      const lastRelayed = lastRelayedForScope(point, scope);
+      if (lastRelayed) popup.appendChild(element('div', '', 'Last observed relay' + (scope ? ' for ' + scope : ' across these scopes') + ': ' + lastRelayed));
       const link = element('a', '', 'Node page');
       link.href = '#/nodes/' + encodeURIComponent(point.publicKey);
       popup.appendChild(link);
       marker.bindPopup(popup);
       layer.addLayer(marker);
     }
-    if (scope && selected.length >= 3) {
-      const hull = convexHull(selected.map(p => [p.lon, p.lat]));
+    if (scope && points.length >= 3) {
+      const hull = convexHull(points.map(p => [p.lon, p.lat]));
       if (hull.length >= 3) layer.addLayer(L.polygon(hull.map(p => [p[1], p[0]]), {
         color: accent, fillOpacity: 0.10, weight: 2, dashArray: '6 5', interactive: false,
       }));
     }
-    status.textContent = selected.length ? `${selected.length} positioned repeaters with observed scoped relay traffic in the configured relay-activity window${scope ? ' for ' + scope : ''}. Dashed outline is a convex hull of node positions, not measured RF coverage.`
-      : 'No positioned repeaters with recent observed relay traffic for this selection. This does not imply there is no coverage.';
-    if (truncated) status.textContent += ' Node fetch hit its 5,000-row safety limit; this view may be incomplete.';
-    if (scopesTruncated) status.textContent += ' Scope selector shows only the first 128 observed names; other scopes are omitted from the selector.';
-    if (selected.length) {
-      const bounds = L.latLngBounds(selected.map(p => [p.lat, p.lon]));
+    status.textContent = `${points.length} positioned relay nodes; ${missingPositionCount} observed relay nodes without usable positions${scope ? ' for ' + scope : ''} in this interval.`;
+    if (!selected.length) status.textContent += ' No observed scoped relay traffic for this selection; this does not imply there is no coverage.';
+    if (truncated) status.textContent += ' The 5,000-node safety limit was reached; counts and map may be incomplete.';
+    if (scopesTruncated) status.textContent += ' The scope-name safety limit was reached; the selector may be incomplete.';
+    if (fit && points.length) {
+      const bounds = L.latLngBounds(points.map(p => [p.lat, p.lon]));
       map.fitBounds(bounds.pad(0.15), { maxZoom: 10 });
     }
   }
@@ -139,17 +205,39 @@
     const token = ++generation;
     const shell = element('section', 'regions-page');
     shell.appendChild(element('h1', '', 'Regions'));
-    shell.appendChild(element('p', 'regions-note', 'Inferred from positioned repeaters that recently relayed scoped packets. This is observed routing, not a radio coverage measurement or administrative region boundary.'));
+    shell.appendChild(element('p', 'regions-note', 'Observed scoped relay traffic, not a radio coverage measurement.'));
     const controls = element('div', 'regions-controls');
+    const selection = parseSelection(location.hash);
+    const periodLabel = element('label', '', 'Period ');
+    const period = element('select');
+    period.setAttribute('aria-label', 'Region period');
+    for (const [value, labelText] of Object.entries(WINDOWS)) period.appendChild(new Option(labelText, value));
+    period.value = selection.window;
+    periodLabel.appendChild(period);
+    controls.appendChild(periodLabel);
     const label = element('label', '', 'Scope ');
     const select = element('select');
     select.setAttribute('aria-label', 'Region scope');
     label.appendChild(select);
     controls.appendChild(label);
+    const refresh = element('button', '', 'Refresh');
+    refresh.type = 'button';
+    controls.appendChild(refresh);
     shell.appendChild(controls);
     const status = element('p', 'regions-status', 'Loading observed relay data…');
     status.setAttribute('role', 'status');
     shell.appendChild(status);
+    const snapshotMeta = element('p', 'regions-snapshot');
+    shell.appendChild(snapshotMeta);
+    const coverage = element('p', 'regions-coverage');
+    shell.appendChild(coverage);
+    const details = element('details', 'regions-details');
+    details.appendChild(element('summary', '', 'Data & position details'));
+    details.appendChild(element('p', '', 'Repeaters and rooms are shown where scoped relay traffic was observed. Positions are self-reported; their accuracy is unverified. Nodes without usable positions are counted but not mapped. Dashed outlines join the outermost node positions and do not measure RF coverage or administrative boundaries.'));
+    details.appendChild(element('p', '', 'Retained history is not observer uptime or proof of continuous reception.'));
+    const exactBounds = element('div', 'regions-exact-bounds');
+    details.appendChild(exactBounds);
+    shell.appendChild(details);
     const mapEl = element('div', 'regions-leaflet');
     mapEl.id = 'regionsLeaflet';
     mapEl.setAttribute('aria-label', 'Observed region relay map');
@@ -159,47 +247,108 @@
       status.textContent = 'Map library unavailable.';
       return;
     }
-    leafletMap = L.map(mapEl).setView([55.7, 10.5], 6);
+    // Leaflet 1.9.4 leaves its 250ms zoom-transition timeout alive after
+    // remove() deletes the map pane. Synchronous zoom also makes immediate
+    // period/hash navigation safe when a user just pressed a zoom control.
+    leafletMap = L.map(mapEl, { zoomAnimation: false }).setView([55.7, 10.5], 6);
+    const map = leafletMap;
     const applyTiles = function () {
-      if (tileLayer) leafletMap.removeLayer(tileLayer);
+      if (token !== generation || leafletMap !== map) return;
+      if (tileLayer) map.removeLayer(tileLayer);
       const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
       const tile = typeof root.MC_getTileSpec === 'function' ? root.MC_getTileSpec(theme) : null;
       tileLayer = L.tileLayer(tile && tile.url ? tile.url : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: tile && tile.maxZoom ? tile.maxZoom : 19,
         attribution: tile && tile.attribution ? tile.attribution : '© OpenStreetMap contributors',
-      }).addTo(leafletMap);
-      leafletMap.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';
+      }).addTo(map);
+      map.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';
     };
     let tileLayer = null;
     applyTiles();
     themeObserver = new MutationObserver(applyTiles);
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    const layer = L.layerGroup().addTo(leafletMap);
-    try {
-      const data = await fetchAllNodes('', { ttl: 60000, pageSize: 500, safetyCap: 5000 });
-      if (token !== generation || !leafletMap) return;
-      const points = collectScopePoints(data.nodes);
-      const catalog = scopeCatalog(data.nodes);
-      const scopes = catalog.scopes;
-      const truncated = data.total >= 5000;
+    const layer = L.layerGroup().addTo(map);
+    let requestGeneration = 0, snapshot = null, nodes = [], catalog = { scopes: [], truncated: false };
+
+    function populateScopes(loading) {
+      select.replaceChildren();
       select.appendChild(new Option('All observed scopes', ''));
-      for (const scope of scopes) select.appendChild(new Option(scope, scope));
-      let selected = parseSelectedScope(location.hash);
-      if (selected && !scopes.includes(selected)) {
-        const hasSelectedData = points.some(p => p.scopes.includes(selected));
-        select.appendChild(new Option((hasSelectedData ? 'Selected (outside list): ' : 'No recent data: ') + selected, selected));
+      for (const scope of catalog.scopes) select.appendChild(new Option(scope, scope));
+      if (selection.scope && !catalog.scopes.includes(selection.scope)) {
+        const hasSelectedData = nodes.some(node => node.scopes.some(s => s.name === selection.scope));
+        select.appendChild(new Option((loading ? 'Selected scope: ' : hasSelectedData ? 'Selected (outside list): ' : 'No data in interval: ') + selection.scope, selection.scope));
       }
-      select.value = selected;
-      renderPoints(layer, leafletMap, points, selected, status, truncated, catalog.truncated);
-      select.addEventListener('change', () => {
-        selected = select.value;
-        history.replaceState(null, '', scopeHash(selected));
-        renderPoints(layer, leafletMap, points, selected, status, truncated, catalog.truncated);
-      });
-      setTimeout(() => { if (token === generation && leafletMap) leafletMap.invalidateSize(); }, 0);
-    } catch (err) {
-      if (token === generation) status.textContent = 'Could not load observed relay data. Please try again.';
+      select.value = selection.scope;
+      select.disabled = loading;
     }
+
+    function draw(fit) {
+      if (!snapshot) return;
+      renderPoints(layer, map, nodes, selection.scope, status, snapshot.truncated || snapshot.nodes.length > MAX_POINTS,
+        snapshot.scopesTruncated || catalog.truncated, fit);
+    }
+
+    async function load() {
+      const request = ++requestGeneration, window = selection.window;
+      snapshot = null;
+      nodes = [];
+      catalog = { scopes: [], truncated: false };
+      layer.clearLayers();
+      populateScopes(true);
+      shell.setAttribute('aria-busy', 'true');
+      status.textContent = 'Loading observed relay data — ' + WINDOWS[window].toLowerCase() + '…';
+      snapshotMeta.textContent = '';
+      coverage.textContent = '';
+      exactBounds.replaceChildren();
+      coverage.removeAttribute('data-coverage-state');
+      try {
+        const data = await api('/regions/observed?window=' + encodeURIComponent(window), { ttl: 0, bust: true, retry503: false });
+        if (token !== generation || request !== requestGeneration || leafletMap !== map) return;
+        if (!data || data.window !== window || !Array.isArray(data.nodes) ||
+            !isoTime(data.windowStart) || !isoTime(data.windowEnd) || !isoTime(data.generatedAt)) throw new Error('Invalid regions snapshot');
+        snapshot = data;
+        nodes = collectScopeNodes(data.nodes);
+        catalog = scopeCatalog(nodes);
+        populateScopes(false);
+        const info = coverageInfo(data);
+        snapshotMeta.replaceChildren('Snapshot: ', timeElement(info.generatedAt));
+        coverage.replaceChildren(info.message);
+        if (info.availableStart) coverage.append(' Available from ', timeElement(info.availableStart), ' to the snapshot.');
+        const requested = element('p');
+        requested.append('Requested interval (UTC): ', timeElement(info.requestedStart, true), ' — ', timeElement(info.requestedEnd, true));
+        exactBounds.appendChild(requested);
+        if (info.availableStart) {
+          const available = element('p');
+          available.append('Retained portion of this interval (UTC): ', timeElement(info.availableStart, true), ' — ', timeElement(info.requestedEnd, true));
+          exactBounds.appendChild(available);
+        }
+        coverage.setAttribute('data-coverage-state', info.kind);
+        draw(true);
+      } catch (err) {
+        if (token !== generation || request !== requestGeneration) return;
+        status.textContent = 'Could not load observed relay data for ' + WINDOWS[window].toLowerCase() + '. Use Refresh to try again.';
+      } finally {
+        if (token === generation && request === requestGeneration) shell.setAttribute('aria-busy', 'false');
+      }
+    }
+
+    function saveSelection() {
+      const hash = scopeHash(selection.scope, selection.window);
+      if (location.hash !== hash) history.pushState(null, '', hash);
+    }
+    period.addEventListener('change', () => {
+      selection.window = period.value;
+      saveSelection();
+      load();
+    });
+    select.addEventListener('change', () => {
+      selection.scope = select.value;
+      saveSelection();
+      draw(true);
+    });
+    refresh.addEventListener('click', load);
+    load();
+    setTimeout(() => { if (token === generation && leafletMap === map) map.invalidateSize(); }, 0);
   }
 
   function destroy() {
@@ -210,7 +359,8 @@
     leafletMap = null;
   }
 
-  const internals = { validScope, collectScopePoints, listScopes, scopeCatalog, convexHull, parseSelectedScope, scopeHash };
+  const internals = { validPosition, validScope, collectScopeNodes, collectScopePoints, selectionSummary,
+    lastRelayedForScope, listScopes, scopeCatalog, convexHull, parseSelection, parseSelectedScope, scopeHash, coverageInfo };
   if (typeof module !== 'undefined' && module.exports) module.exports = internals;
   if (typeof root.registerPage === 'function') root.registerPage('regions', { init, destroy });
 })(typeof window === 'undefined' ? globalThis : window);

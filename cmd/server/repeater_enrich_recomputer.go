@@ -113,13 +113,14 @@ func recomputeRepeaterEnrichmentSafe(s *PacketStore, windowHours float64) {
 	// Write directly to the cache fields under mutex rather than going
 	// through the public Get* helpers — those return the existing
 	// non-nil cache immediately, so calling them here would be a no-op.
-	relay := s.computeRepeaterRelayInfoMap(windowHours)
+	relay := s.computeRepeaterRelaySnapshot(windowHours)
 	useful := s.computeRepeaterUsefulnessScoreMap()
 	now := time.Now()
 	s.repeaterEnrichMu.Lock()
-	s.repeaterRelayCache = relay
+	s.repeaterRelayCache = relay.info
+	s.repeaterRelaySnapshot = relay
 	s.repeaterRelayCacheWin = windowHours
-	s.repeaterRelayAt = now
+	s.repeaterRelayAt = relay.generatedAt
 	s.repeaterUsefulCache = useful
 	s.repeaterUsefulAt = now
 	s.repeaterEnrichMu.Unlock()
