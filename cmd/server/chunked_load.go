@@ -569,35 +569,38 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 	seenTxIDs := make(map[int]bool)
 	var maxID int64
 
-	for rows.Next() {
-		var txID int
-		var rawHex, hash, firstSeen, decodedJSON sql.NullString
-		var routeType, payloadType, payloadVersion sql.NullInt64
-		var obsID sql.NullInt64
-		var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
-		var snr, rssi sql.NullFloat64
-		var score sql.NullInt64
-		var obsRawHex sql.NullString
-		var resolvedPathStr sql.NullString
-		var scopeName sql.NullString
-		var routeMask sql.NullInt64
+	// Reuse scan storage for this cursor only. Scan overwrites every target,
+	// including NULLs; retained values are copied by the null* helpers below.
+	var txID int
+	var rawHex, hash, firstSeen, decodedJSON sql.NullString
+	var routeType, payloadType, payloadVersion sql.NullInt64
+	var obsID sql.NullInt64
+	var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
+	var snr, rssi sql.NullFloat64
+	var score sql.NullInt64
+	var obsRawHex sql.NullString
+	var resolvedPathStr sql.NullString
+	var scopeName sql.NullString
+	var routeMask sql.NullInt64
 
-		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
-			&payloadVersion, &decodedJSON,
-			&obsID, &observerID, &observerName, &observerIATA, &direction,
-			&snr, &rssi, &score, &pathJSON, &obsTimestamp}
-		if s.db.hasObsRawHex() {
-			scanArgs = append(scanArgs, &obsRawHex)
-		}
-		if s.db.hasResolvedPath() {
-			scanArgs = append(scanArgs, &resolvedPathStr)
-		}
-		if s.db.hasScopeName() {
-			scanArgs = append(scanArgs, &scopeName)
-		}
-		if s.db.hasRouteMask() {
-			scanArgs = append(scanArgs, &routeMask)
-		}
+	scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
+		&payloadVersion, &decodedJSON,
+		&obsID, &observerID, &observerName, &observerIATA, &direction,
+		&snr, &rssi, &score, &pathJSON, &obsTimestamp}
+	if s.db.hasObsRawHex() {
+		scanArgs = append(scanArgs, &obsRawHex)
+	}
+	if s.db.hasResolvedPath() {
+		scanArgs = append(scanArgs, &resolvedPathStr)
+	}
+	if s.db.hasScopeName() {
+		scanArgs = append(scanArgs, &scopeName)
+	}
+	if s.db.hasRouteMask() {
+		scanArgs = append(scanArgs, &routeMask)
+	}
+
+	for rows.Next() {
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
 			s.analyticsHistory.failed = true
