@@ -79,21 +79,21 @@ func newRegionsHistoryBuilder(now time.Time) *regionsHistoryBuilder {
 	}, remainingCells: maxRegionsHistoryCells}
 }
 
-func historyRelayTime(e relayEntry, start, end time.Time) (time.Time, bool) {
-	if e.fromPrefix || e.pt == payloadTypeAdvert || regions.ValidateCandidate(e.scope) != nil {
-		return time.Time{}, false
-	}
-	t, valid := e.t, e.valid
-	if !e.parsed {
-		t, valid = parseRelayTS(e.ts)
-	}
-	return t, valid && !t.Before(start) && t.Before(end)
+// historyCellEligible keeps completed hours of valid scope candidates only.
+// Adverts, TRACE, planned direct paths, prefix-only evidence and out-of-range
+// timestamps were already excluded before capture, so the current unfinished
+// hour (bucket regionsHistoryBucketCount, which only Latest summarises) and a
+// malformed scope name are all that can still reach here.
+func historyCellEligible(cell regionsMembershipNodeCell) bool {
+	return cell.hour >= 0 && int(cell.hour) < regionsHistoryBucketCount && regions.ValidateCandidate(cell.scope) == nil
 }
 
-// add receives deduplicated own-observation memberships from the strict
-// Regions collector, after the packet lock has been released. Callers
-// visit keys in sorted order so the shared cell budget is deterministic.
-func (b *regionsHistoryBuilder) add(key string, entries []relayEntry) {
+// add receives own-observation memberships from the strict Regions collector,
+// already aggregated per (scope, hour) and with each transmission counted once
+// per relay, after the packet lock has been released. Callers visit keys in
+// sorted order, and cells in (scope, hour) order, so the shared cell budget is
+// deterministic.
+func (b *regionsHistoryBuilder) add(key string, cells []regionsMembershipNodeCell) {
 	if len(key) != 64 {
 		return
 	}
@@ -101,12 +101,11 @@ func (b *regionsHistoryBuilder) add(key string, entries []relayEntry) {
 	// Select the 32 newest valid scopes with bounded scratch space, even if a
 	// sender introduces arbitrarily many names in the retained packet store.
 	latest := make(map[string]time.Time, maxTransportedScopes)
-	for _, e := range entries {
-		t, valid := historyRelayTime(e, h.start, h.end)
-		if !valid {
+	for _, cell := range cells {
+		if !historyCellEligible(cell) {
 			continue
 		}
-		h.scopesTruncated = retainLatestRegionScope(latest, e.scope, t) || h.scopesTruncated
+		h.scopesTruncated = retainLatestRegionScope(latest, cell.scope, cell.last) || h.scopesTruncated
 	}
 	if len(latest) == 0 {
 		return
@@ -126,38 +125,35 @@ func (b *regionsHistoryBuilder) add(key string, entries []relayEntry) {
 		count  int
 		latest time.Time
 	}
-	cells := make(map[string]map[int]historyCell, len(latest))
-	for _, e := range entries {
-		t, valid := historyRelayTime(e, h.start, h.end)
-		if !valid {
+	byScope := make(map[string]map[int]historyCell, len(latest))
+	for _, cell := range cells {
+		if !historyCellEligible(cell) {
 			continue
 		}
-		if _, selected := latest[e.scope]; !selected {
+		if _, selected := latest[cell.scope]; !selected {
 			continue
 		}
-		index := int(t.Sub(h.start) / time.Hour)
-		byIndex := cells[e.scope]
-		bucket, exists := byIndex[index]
-		if !exists {
-			if byIndex == nil {
-				byIndex = make(map[int]historyCell)
-				cells[e.scope] = byIndex
-			}
+		index := int(cell.hour)
+		byIndex := byScope[cell.scope]
+		if byIndex == nil {
+			byIndex = make(map[int]historyCell)
+			byScope[cell.scope] = byIndex
 		}
-		bucket.count++
-		if t.After(bucket.latest) {
-			bucket.latest = t
+		bucket := byIndex[index]
+		bucket.count += cell.count
+		if cell.last.After(bucket.latest) {
+			bucket.latest = cell.last
 		}
 		byIndex[index] = bucket
 	}
-	scopes := make([]RegionsHistoryScope, 0, len(cells))
-	names := make([]string, 0, len(cells))
-	for name := range cells {
+	scopes := make([]RegionsHistoryScope, 0, len(byScope))
+	names := make([]string, 0, len(byScope))
+	for name := range byScope {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		byIndex := cells[name]
+		byIndex := byScope[name]
 		indexes := make([]int, 0, len(byIndex))
 		for index := range byIndex {
 			indexes = append(indexes, index)
@@ -232,8 +228,15 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 		}
 	}
 	stepNodes := []RegionsRouteNode{}
+	endpointLimit := maxRegionsRouteEndpoints
+	if s.stepEndpointLimit > 0 {
+		endpointLimit = s.stepEndpointLimit
+	}
 	err := s.forEachVisibleRegionNode(ctx, keys, true, func(n observedRegionNodeMetadata) bool {
-		if routeKeys[n.publicKey] {
+		// Endpoint metadata has its own publication ceiling, so the directed-step
+		// payload budget cannot be multiplied by the node table. Steps whose
+		// endpoints are omitted become missingEndpointSteps in the handler.
+		if routeKeys[n.publicKey] && len(stepNodes) < endpointLimit {
 			stepNodes = append(stepNodes, regionRouteNodeMetadata(n))
 		}
 		scopes := h.nodes[n.publicKey]

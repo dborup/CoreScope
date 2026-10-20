@@ -12,12 +12,72 @@ import (
 )
 
 const (
-	maxRegionsRouteSteps      = 5000
-	maxRegionsRouteCells      = 100000
-	maxRegionsRoutePaths      = 250000
-	maxRegionsRoutePathsPerTx = 128
+	// Published directed-step payload budget (#508). The retired fixed caps
+	// (5,000 rows and 100,000 hourly cells) were both reached on real data at
+	// 48 h retention, which left directed steps permanently incomplete, and a
+	// larger fixed row count gives no payload guarantee. Rows and hourly cells
+	// now share one estimated-byte budget, so a snapshot whose rows have few
+	// populated hours publishes many more rows while the response-size
+	// guarantee stays explicit and measurable.
+	regionsRouteStepRowBytes  = 180 // from/to/scope plus the row's JSON scaffolding
+	regionsRouteStepCellBytes = 75  // one {index, count, lastRelayed} bucket
+	maxRegionsRouteStepBytes  = 16 << 20
+	// Publication ceilings implied by the byte budget, for the OpenAPI
+	// description and the browser's defensive bounds.
+	maxRegionsRouteSteps = maxRegionsRouteStepBytes / regionsRouteStepRowBytes
+	maxRegionsRouteCells = maxRegionsRouteStepBytes / regionsRouteStepCellBytes
+	// Visible step endpoints published with a snapshot. Steps whose endpoints
+	// are omitted are reported as missing-endpoint steps, never dropped
+	// silently.
+	maxRegionsRouteEndpoints = 10000
+
+	// Distinct observation paths retained for one transmission (#508/#510).
+	// The retired value was 128, which a flood packet reaches on an ordinary
+	// mesh: staging carries 65 observers, each of which can hear one flood
+	// over several relay chains and log every copy, so a single transmission
+	// offers hundreds of distinct chains and the surplus was reported capped.
+	// It is not a memory bound -- every retained path already costs one unit
+	// of the per-hour reference budget, which bounds the snapshot -- it is the
+	// share of an hour one transmission may spend. 4,096 is a sixteenth of
+	// that hour, which at 65 observers still allows 63 chains each.
+	maxRegionsRoutePathsPerTx = 4096
 	maxRegionsRoutePairsPerTx = 8192
 	maxRegionsRoutePathBytes  = 8192
+	// Interning table for observation path strings: a bounded dedup cache, not
+	// a budget. Identical paths share one entry, so one relay chain observed by
+	// thousands of transmissions is parsed and resolved once. Past the table a
+	// path is retained un-interned instead of being refused — it costs a path
+	// slot and a reference rather than a map entry. Refusing would reintroduce
+	// exactly the starvation #508 reported, at a lower ceiling: real path
+	// diversity is high (e2e-fixture.db, real captured traffic, holds 376
+	// distinct path strings in 399 path-carrying observations), so a global
+	// table fills on ordinary traffic and would then cap every later hour.
+	maxRegionsRoutePathVariants = 1 << 17
+	// Retained path references per hourly bucket (#508). The retired global
+	// 250,000-reference budget was exhausted by 48 h of real traffic (~805k
+	// observations): every hour after it was reported capped, which withheld
+	// the Health and Timeline rates for #dk and for all scopes. A per-hour
+	// budget makes the ceiling scale with retention and stops one busy hour
+	// from starving the rest of the horizon. 65,536 is about four times the
+	// ~16,800 observations/hour that 48 h of real traffic averaged across all
+	// scopes, so even a peak hour has headroom if every observation were
+	// transport-scoped and carried a distinct path. It is a fairness and
+	// pathology net, not the memory bound: capture retains at most one
+	// reference per eligible observation and one header per transmission
+	// already in the packet store, at roughly 3-5 % of the store state for the
+	// same rows, so packetStore.maxMemoryMB binds first (the full disclosure,
+	// including the horizon product, is in docs/regions-observed.md).
+	maxRegionsRoutePathRefsPerHour = 1 << 16
+	// Estimated retained cost of the transient capture state, for the capture
+	// diagnostic and for the disclosed horizon ceiling. Path content is shared
+	// with the packet store, so only headers and map overhead are counted.
+	regionsRoutePathRefBytes      = 8  // one regionsRoutePathRef
+	regionsRoutePathSlotBytes     = 24 // one retained path: header plus resolver slot
+	regionsRoutePathInternedBytes = 48 // its interning-table entry on top
+	regionsRouteTxBytes           = 72 // one retained transmission header
+	// Hop tokens cached with resolved paths. Past it, paths are resolved
+	// without caching: slower, never truncated.
+	maxRegionsRouteResolvedTokens = 1 << 21
 )
 
 // Cache only the observation's own header/transport evidence. Full raw frames
@@ -98,32 +158,191 @@ type regionsRouteSnapshot struct {
 	steps                            []RegionsRouteStep
 	stepsTruncated, bucketsTruncated bool
 	evidence                         RegionsStepEvidence
+	capture                          RegionsRouteCapture
 	memberships                      *regionsMembershipSnapshot
 	history                          *regionsRelayHistory
 }
 
-type regionsRoutePath struct {
-	path         string
-	observations int
+// RegionsRouteCapture is the transient capture state's fill against its own
+// budgets (#510). Retained with the published snapshot and reported by the
+// memory diagnostics, so an operator can see how close the budgets that
+// decide `capped` are to their ceilings before one is reached. EstimatedBytes
+// is the same deliberate estimate the store breakdown uses: struct headers,
+// map overhead and resolver slots, with path content excluded because it is
+// shared with the packet store.
+type RegionsRouteCapture struct {
+	PathVariants            int   `json:"pathVariants"`
+	PathVariantsInterned    int   `json:"pathVariantsInterned"`
+	PathVariantInternBudget int   `json:"pathVariantInternBudget"`
+	PathReferences          int   `json:"pathReferences"`
+	MaxHourPathReferences   int   `json:"maxHourPathReferences"`
+	HourPathReferenceBudget int   `json:"hourPathReferenceBudget"`
+	Transmissions           int   `json:"transmissions"`
+	MembershipCells         int   `json:"membershipCells"`
+	MembershipCellBudget    int   `json:"membershipCellBudget"`
+	MembershipNodes         int   `json:"membershipNodes"`
+	MembershipNodeBudget    int   `json:"membershipNodeBudget"`
+	EstimatedBytes          int64 `json:"estimatedBytes"`
+	// Per-transmission and per-path fill. A flood packet heard by many
+	// observers is the shape that reaches the per-transmission ceiling, and
+	// neither it nor the path-byte ceiling was observable before (#510).
+	// Both maxima are over admitted observations, so they are headroom
+	// against their budgets; what the budgets refused is counted below.
+	MaxTransmissionPaths   int `json:"maxTransmissionPaths"`
+	TransmissionPathBudget int `json:"transmissionPathBudget"`
+	MaxPathBytes           int `json:"maxPathBytes"`
+	PathByteBudget         int `json:"pathByteBudget"`
+	// Capped* attribute every capped observation to the ceiling that refused
+	// it, so the cause of a withheld rate is read off the snapshot rather than
+	// bisected. The four observation counters sum to the snapshot-wide
+	// cappedObservations. CappedMembership* are dropped memberships, not
+	// observations: they qualify a bucket's coverage without being counted
+	// among them.
+	CappedPathBytes         int `json:"cappedPathBytes"`
+	CappedTransmissionPaths int `json:"cappedTransmissionPaths"`
+	CappedHourReferences    int `json:"cappedHourReferences"`
+	CappedOverlongPaths     int `json:"cappedOverlongPaths"`
+	CappedMembershipCells   int `json:"cappedMembershipCells"`
+	CappedMembershipNodes   int `json:"cappedMembershipNodes"`
+	// SourceTruncated repeats the capture budget's own refusal flag, so the
+	// fill figures above are never read as a complete capture.
+	SourceTruncated bool `json:"sourceTruncated"`
 }
+
+// regionsRoutePathRef points one transmission at an interned observation path
+// and counts the observations that reported it. Eight bytes per retained
+// reference, so the deferred capture list stays a small fraction of what the
+// packet store already holds for the same observations.
+type regionsRoutePathRef struct{ path, observations int32 }
+
 type regionsRouteTx struct {
 	id    int
 	when  time.Time
 	scope string
-	paths []regionsRoutePath
+	paths []regionsRoutePathRef
 }
 type regionsRoutesCollector struct {
 	start, end time.Time
 	now        time.Time
 	txs        []regionsRouteTx
-	pathCount  int
-	evidence   RegionsStepEvidence
-	cells      *regionsEvidenceBuilder
+	// Interned observation paths, and this snapshot's per-hour reference
+	// budget. Indexed by hourly bucket, 0 through regionsHistoryBucketCount.
+	pathIDs  map[string]int32
+	pathList []string
+	hourRefs []int32
+	// internBound is the interning table's size. A field rather than the
+	// constant so tests can exercise the un-interned fallback without building
+	// 131,072 distinct paths; capture never mutates it.
+	internBound int
+	// The remaining capture ceilings, as fields for the same reason: the
+	// per-reason capped counters below are exercised without a 4,096-chain
+	// transmission or a 10,000-relay mesh. Capture never mutates them.
+	txPathBound         int
+	membershipCellBound int
+	membershipNodeBound int
+	// Per-reason capture refusals and their high-water marks, reported by
+	// captureStats. maxTxPaths and maxPathBytes are headroom, the rest are
+	// refusals; cappedHourRefs also carries the defensive out-of-horizon
+	// guard, which captureAt's window check already makes unreachable.
+	maxTxPaths, maxPathBytes            int
+	cappedPathBytes, cappedTxPaths      int
+	cappedHourRefs, cappedOverlongPaths int
+	// stepBytes is the directed-step payload budget for this snapshot. A field
+	// rather than the constant so tests can exercise truncation without
+	// building a 16 MiB snapshot; build() never mutates it.
+	stepBytes int
+	evidence  RegionsStepEvidence
+	cells     *regionsEvidenceBuilder
 }
 
 func newRegionsRoutesCollector(now time.Time) *regionsRoutesCollector {
 	end := now.UTC().Truncate(time.Hour)
-	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(), cells: newRegionsEvidenceBuilder()}
+	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(),
+		pathIDs: make(map[string]int32), hourRefs: make([]int32, regionsHistoryBucketCount+1),
+		internBound: maxRegionsRoutePathVariants, txPathBound: maxRegionsRoutePathsPerTx,
+		membershipCellBound: maxRegionsMembershipCells, membershipNodeBound: maxRegionsMembershipNodes,
+		stepBytes: maxRegionsRouteStepBytes, cells: newRegionsEvidenceBuilder()}
+}
+
+// pathRefs reports how many observation path references this snapshot
+// retained, for the capture tests and benchmarks.
+func (c *regionsRoutesCollector) pathRefs() int {
+	total := 0
+	for _, used := range c.hourRefs {
+		total += int(used)
+	}
+	return total
+}
+
+// captureStats reports how much of each capture budget this snapshot spent, so
+// the budgets that decide `capped` are observable before they cap (#510). It
+// is O(hourly buckets) and runs with the rest of build(), outside the packet
+// lock.
+func (c *regionsRoutesCollector) captureStats(memberships *regionsMembershipBuilder) RegionsRouteCapture {
+	out := RegionsRouteCapture{
+		PathVariants:            len(c.pathList),
+		PathVariantsInterned:    len(c.pathIDs),
+		PathVariantInternBudget: c.internBound,
+		PathReferences:          c.pathRefs(),
+		HourPathReferenceBudget: maxRegionsRoutePathRefsPerHour,
+		Transmissions:           len(c.txs),
+		MembershipCells:         len(memberships.cells),
+		MembershipCellBudget:    c.membershipCellBound,
+		MembershipNodes:         len(memberships.nodes),
+		MembershipNodeBudget:    c.membershipNodeBound,
+		MaxTransmissionPaths:    c.maxTxPaths,
+		TransmissionPathBudget:  c.txPathBound,
+		MaxPathBytes:            c.maxPathBytes,
+		PathByteBudget:          maxRegionsRoutePathBytes,
+		CappedPathBytes:         c.cappedPathBytes,
+		CappedTransmissionPaths: c.cappedTxPaths,
+		CappedHourReferences:    c.cappedHourRefs,
+		CappedOverlongPaths:     c.cappedOverlongPaths,
+		CappedMembershipCells:   memberships.cellDrops,
+		CappedMembershipNodes:   memberships.nodeDrops,
+		SourceTruncated:         c.evidence.SourceTruncated,
+	}
+	for _, used := range c.hourRefs {
+		if int(used) > out.MaxHourPathReferences {
+			out.MaxHourPathReferences = int(used)
+		}
+	}
+	out.EstimatedBytes = int64(out.PathReferences)*regionsRoutePathRefBytes +
+		int64(out.PathVariants)*regionsRoutePathSlotBytes +
+		int64(out.PathVariantsInterned)*regionsRoutePathInternedBytes +
+		int64(out.Transmissions)*regionsRouteTxBytes
+	return out
+}
+
+// retainPath spends this hour's reference budget and interns the path when it
+// is new and the table has room. Identical paths share one interned entry, so
+// a repeated relay chain is parsed and resolved once per snapshot; the only
+// refusal is the per-hour reference budget, which is fair across the horizon.
+// held is how many distinct paths this transmission already retained. The
+// caller has already looked the path up in the table, so a path new to this
+// transmission costs two string-map lookups and a repeat of one costs one.
+func (c *regionsRoutesCollector) retainPath(path string, id int32, known bool, index, held int) (int32, bool) {
+	switch {
+	case held >= c.txPathBound:
+		c.cappedTxPaths++
+		return 0, false
+	case index < 0 || index >= len(c.hourRefs) || c.hourRefs[index] >= maxRegionsRoutePathRefsPerHour:
+		c.cappedHourRefs++
+		return 0, false
+	}
+	if !known {
+		id = int32(len(c.pathList))
+		c.pathList = append(c.pathList, path)
+		// Past the interning table the path is still retained, just without a
+		// table entry: identical paths then cost one slot each instead of
+		// sharing one. The per-hour reference budget bounds that; nothing is
+		// refused for lack of table space.
+		if len(c.pathIDs) < c.internBound {
+			c.pathIDs[path] = id
+		}
+	}
+	c.hourRefs[index]++
+	return id, true
 }
 
 // addEvidence records one transmission's evidence in its own FirstSeen hour
@@ -158,7 +377,14 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	canonical, known := wireTransportCodes(tx.RawHex)
 	known = known && canonical>>16 != 0
 	item := regionsRouteTx{id: tx.ID, when: when, scope: tx.ScopeName}
+	index := c.bucket(item)
 	var counts RegionsEvidenceCounts
+	// Keyed by the path string, not by the interned id: past the interning
+	// table a path has no id to dedupe on, and the table is full for most of
+	// a 48 h capture on real traffic. Without this, every repeat of one chain
+	// inside a flood transmission took its own slot, its own reference and
+	// its own unit of the per-transmission budget (#510). The string header
+	// is shared with the packet store; the map lives only for this call.
 	seen := make(map[string]int)
 	for _, obs := range tx.Observations {
 		switch classifyRegionsObservation(obs, canonical, known) {
@@ -170,21 +396,29 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 			continue
 		}
 		if len(obs.PathJSON) > maxRegionsRoutePathBytes {
+			c.cappedPathBytes++
 			counts.Capped++
 			continue
 		}
-		if index, exists := seen[obs.PathJSON]; exists {
-			item.paths[index].observations++
+		if len(obs.PathJSON) > c.maxPathBytes {
+			c.maxPathBytes = len(obs.PathJSON)
+		}
+		if at, exists := seen[obs.PathJSON]; exists {
+			item.paths[at].observations++
 			continue
 		}
-		if len(item.paths) >= maxRegionsRoutePathsPerTx || c.pathCount >= maxRegionsRoutePaths {
+		id, interned := c.pathIDs[obs.PathJSON]
+		id, admitted := c.retainPath(obs.PathJSON, id, interned, index, len(item.paths))
+		if !admitted {
 			c.evidence.SourceTruncated = true
 			counts.Capped++
 			continue
 		}
 		seen[obs.PathJSON] = len(item.paths)
-		item.paths = append(item.paths, regionsRoutePath{path: obs.PathJSON, observations: 1})
-		c.pathCount++
+		item.paths = append(item.paths, regionsRoutePathRef{path: id, observations: 1})
+	}
+	if len(item.paths) > c.maxTxPaths {
+		c.maxTxPaths = len(item.paths)
 	}
 	if len(tx.Observations) == 0 {
 		counts.Unprovable++
@@ -201,15 +435,71 @@ type regionsRouteCell struct {
 	last  time.Time
 }
 
+// regionsResolvedPath is one interned observation path, parsed and identity-
+// resolved once per snapshot instead of once per transmission that observed
+// it. keys keeps path order; an empty key is an unresolved hop token, which
+// breaks adjacency without qualifying resolved memberships.
+type regionsResolvedPath struct {
+	keys []string
+	bad  bool // malformed path JSON
+	over bool // more hop tokens than the adjacency scan accepts
+}
+
+// regionsPathResolver runs outside the packet lock. The cache is bounded by
+// retained hop tokens; past that budget paths are resolved uncached, which
+// costs time but never truncates evidence.
+type regionsPathResolver struct {
+	resolve   *relayTokenResolver
+	paths     []string
+	cached    []*regionsResolvedPath
+	remaining int
+}
+
+func newRegionsPathResolver(paths []string, pm *prefixMap) *regionsPathResolver {
+	return &regionsPathResolver{resolve: newRelayTokenResolver(pm), paths: paths,
+		cached: make([]*regionsResolvedPath, len(paths)), remaining: maxRegionsRouteResolvedTokens}
+}
+
+func (r *regionsPathResolver) at(id int32) *regionsResolvedPath {
+	if id < 0 || int(id) >= len(r.paths) {
+		return &regionsResolvedPath{bad: true}
+	}
+	if hit := r.cached[id]; hit != nil {
+		return hit
+	}
+	out := &regionsResolvedPath{}
+	var tokens []string
+	if err := json.Unmarshal([]byte(r.paths[id]), &tokens); err != nil {
+		out.bad = true
+	} else if len(tokens) > 64 {
+		out.over = true
+	} else {
+		out.keys = make([]string, len(tokens))
+		for i, token := range tokens {
+			if len(r.resolve.cache) >= 4096 {
+				clear(r.resolve.cache)
+			}
+			out.keys[i] = r.resolve.key(token)
+		}
+	}
+	if r.remaining >= len(out.keys) {
+		r.remaining -= len(out.keys)
+		r.cached[id] = out
+	}
+	return out
+}
+
 func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 	out := &regionsRouteSnapshot{steps: []RegionsRouteStep{}}
 	sort.Slice(c.txs, func(i, j int) bool { return c.txs[i].id < c.txs[j].id })
-	resolve := newRelayTokenResolver(pm)
-	memberships := newRegionsMembershipBuilder()
+	paths := newRegionsPathResolver(c.pathList, pm)
+	memberships := newRegionsMembershipBuilder(c.membershipCellBound, c.membershipNodeBound)
 	rows := make(map[regionsRouteKey]map[int]regionsRouteCell)
 	seen := make(map[regionsRouteKey]bool)
 	seenMembers := make(map[string]bool)
-	cellCount := 0
+	// Published rows and hourly cells share one estimated-payload budget, so a
+	// row cap can no longer truncate a snapshot that would fit (#508).
+	payload := c.stepBytes
 	// Directed-step caps are counted only as step appearances: they never
 	// reach membership coverage evidence.
 	capStep := func(truncated *bool) {
@@ -220,22 +510,19 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 		clear(seen)
 		clear(seenMembers)
 		index := c.bucket(tx)
-		for _, path := range tx.paths {
-			var tokens []string
-			if err := json.Unmarshal([]byte(path.path), &tokens); err != nil {
-				c.addEvidence(tx, RegionsEvidenceCounts{Unprovable: path.observations})
+		for _, ref := range tx.paths {
+			resolved := paths.at(ref.path)
+			if resolved.bad {
+				c.addEvidence(tx, RegionsEvidenceCounts{Unprovable: int(ref.observations)})
 				continue
 			}
-			if len(tokens) > 64 {
-				c.addEvidence(tx, RegionsEvidenceCounts{Capped: path.observations})
+			if resolved.over {
+				c.cappedOverlongPaths += int(ref.observations)
+				c.addEvidence(tx, RegionsEvidenceCounts{Capped: int(ref.observations)})
 				continue
 			}
 			previous := ""
-			for _, token := range tokens {
-				if len(resolve.cache) >= 4096 {
-					clear(resolve.cache)
-				}
-				key := resolve.key(token)
+			for _, key := range resolved.keys {
 				if key == "" {
 					previous = ""
 					c.evidence.UnresolvedHops++
@@ -243,9 +530,9 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 				}
 				if !seenMembers[key] {
 					seenMembers[key] = true
-					if !memberships.add(key, tx) {
+					if !memberships.add(key, tx.scope, index, tx.when) {
 						// A dropped membership, not an observation: no step count.
-						c.cells.add(tx.scope, c.bucket(tx), RegionsEvidenceCounts{Capped: 1})
+						c.cells.add(tx.scope, index, RegionsEvidenceCounts{Capped: 1})
 					}
 				}
 				// Latest includes the current hour. Completed hourly history and
@@ -263,22 +550,27 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 						}
 						seen[step] = true
 						byIndex := rows[step]
-						if byIndex == nil {
-							if len(rows) >= maxRegionsRouteSteps {
-								capStep(&out.stepsTruncated)
-								previous = key
-								continue
-							}
-							byIndex = make(map[int]regionsRouteCell)
-						}
 						cell, exists := byIndex[index]
-						if !exists {
-							if cellCount >= maxRegionsRouteCells {
+						// A new row pays for its scaffolding and its first
+						// bucket; an existing bucket costs nothing more.
+						cost := 0
+						if byIndex == nil {
+							cost = regionsRouteStepRowBytes + regionsRouteStepCellBytes
+						} else if !exists {
+							cost = regionsRouteStepCellBytes
+						}
+						if cost > payload {
+							if byIndex == nil {
+								capStep(&out.stepsTruncated)
+							} else {
 								capStep(&out.bucketsTruncated)
-								previous = key
-								continue
 							}
-							cellCount++
+							previous = key
+							continue
+						}
+						payload -= cost
+						if byIndex == nil {
+							byIndex = make(map[int]regionsRouteCell)
 						}
 						cell.count++
 						if tx.when.After(cell.last) {
@@ -320,6 +612,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 		}
 		out.steps = append(out.steps, step)
 	}
+	out.capture = c.captureStats(memberships)
 	out.memberships, out.history = memberships.build(c.now, c.cells.build(c.start))
 	out.evidence = c.evidence
 	// Directed-step completeness only. Unresolved hops break adjacency, so they
@@ -375,10 +668,11 @@ func regionsRoutesSchemas() map[string]*openAPISchema {
 	for key, value := range regionsHistorySchemas()["RegionsHistoryResponse"].Properties {
 		properties[key] = value
 	}
-	properties["steps"] = &openAPISchema{Type: "array", Items: openAPIRef("RegionsRouteStep")}
+	properties["steps"] = &openAPISchema{Type: "array", Items: openAPIRef("RegionsRouteStep"),
+		Description: "Directed step/scope rows, sorted by from, to and scope. Rows and their hourly buckets share one 16 MiB estimated-payload budget (at most 93206 rows or 223696 buckets), not a fixed row count; stepsTruncated and stepBucketsTruncated disclose when it was reached."}
 	properties["stepNodes"] = &openAPISchema{Type: "array", Items: openAPIRef("RegionsRouteNode"), Description: "At most 10000 eligible visible endpoints, independent of legacy relay history scope attribution."}
-	properties["stepsTruncated"] = &openAPISchema{Type: "boolean"}
-	properties["stepBucketsTruncated"] = &openAPISchema{Type: "boolean"}
+	properties["stepsTruncated"] = &openAPISchema{Type: "boolean", Description: "A directed step/scope row was omitted by the published payload budget or the per-transmission pair cap."}
+	properties["stepBucketsTruncated"] = &openAPISchema{Type: "boolean", Description: "An hourly bucket of a published row was omitted by the published payload budget."}
 	properties["stepEvidence"] = openAPIRef("RegionsStepEvidence")
 	return map[string]*openAPISchema{
 		"RegionsRoutesResponse": {Type: "object", Properties: properties},
@@ -388,10 +682,10 @@ func regionsRoutesSchemas() map[string]*openAPISchema {
 		"RegionsStepEvidence": {Type: "object", Description: "Snapshot-wide directed-step diagnostics, not selected-window totals or scope-transition evidence. Per-bucket membership evidence is coverage.evidence.", Properties: map[string]*openAPISchema{
 			"excludedObservations":   {Type: "integer", Description: "Known DIRECT/unscoped or mismatched-transport-code observations."},
 			"unprovableObservations": {Type: "integer", Description: "Observations with unknown or malformed own/canonical evidence."},
-			"cappedObservations":     {Type: "integer", Description: "Observations omitted by source path limits."},
+			"cappedObservations":     {Type: "integer", Description: "Observations omitted by the per-hour capture budget, the per-transmission path cap or the path size bound."},
 			"unresolvedHops":         {Type: "integer", Description: "Hop tokens without a unique relay identity; they break adjacency but not resolved memberships."},
 			"sourceTruncated":        {Type: "boolean"},
-			"cappedStepAppearances":  {Type: "integer", Description: "Directed step appearances omitted by the step, per-transmission pair or cell caps. Never part of coverage.evidence."},
+			"cappedStepAppearances":  {Type: "integer", Description: "Directed step appearances omitted by the published payload budget or the per-transmission pair cap. Never part of coverage.evidence."},
 			"incomplete":             {Type: "boolean", Description: "Directed steps may be missing: unprovable/capped observations, unresolved hops, step caps or missing endpoints."},
 			"missingEndpointSteps":   {Type: "integer"}}},
 	}
