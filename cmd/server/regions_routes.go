@@ -31,7 +31,16 @@ const (
 	// silently.
 	maxRegionsRouteEndpoints = 10000
 
-	maxRegionsRoutePathsPerTx = 128
+	// Distinct observation paths retained for one transmission (#508/#510).
+	// The retired value was 128, which a flood packet reaches on an ordinary
+	// mesh: staging carries 65 observers, each of which can hear one flood
+	// over several relay chains and log every copy, so a single transmission
+	// offers hundreds of distinct chains and the surplus was reported capped.
+	// It is not a memory bound -- every retained path already costs one unit
+	// of the per-hour reference budget, which bounds the snapshot -- it is the
+	// share of an hour one transmission may spend. 4,096 is a sixteenth of
+	// that hour, which at 65 observers still allows 63 chains each.
+	maxRegionsRoutePathsPerTx = 4096
 	maxRegionsRoutePairsPerTx = 8192
 	maxRegionsRoutePathBytes  = 8192
 	// Interning table for observation path strings: a bounded dedup cache, not
@@ -174,6 +183,27 @@ type RegionsRouteCapture struct {
 	MembershipNodes         int   `json:"membershipNodes"`
 	MembershipNodeBudget    int   `json:"membershipNodeBudget"`
 	EstimatedBytes          int64 `json:"estimatedBytes"`
+	// Per-transmission and per-path fill. A flood packet heard by many
+	// observers is the shape that reaches the per-transmission ceiling, and
+	// neither it nor the path-byte ceiling was observable before (#510).
+	// Both maxima are over admitted observations, so they are headroom
+	// against their budgets; what the budgets refused is counted below.
+	MaxTransmissionPaths   int `json:"maxTransmissionPaths"`
+	TransmissionPathBudget int `json:"transmissionPathBudget"`
+	MaxPathBytes           int `json:"maxPathBytes"`
+	PathByteBudget         int `json:"pathByteBudget"`
+	// Capped* attribute every capped observation to the ceiling that refused
+	// it, so the cause of a withheld rate is read off the snapshot rather than
+	// bisected. The four observation counters sum to the snapshot-wide
+	// cappedObservations. CappedMembership* are dropped memberships, not
+	// observations: they qualify a bucket's coverage without being counted
+	// among them.
+	CappedPathBytes         int `json:"cappedPathBytes"`
+	CappedTransmissionPaths int `json:"cappedTransmissionPaths"`
+	CappedHourReferences    int `json:"cappedHourReferences"`
+	CappedOverlongPaths     int `json:"cappedOverlongPaths"`
+	CappedMembershipCells   int `json:"cappedMembershipCells"`
+	CappedMembershipNodes   int `json:"cappedMembershipNodes"`
 	// SourceTruncated repeats the capture budget's own refusal flag, so the
 	// fill figures above are never read as a complete capture.
 	SourceTruncated bool `json:"sourceTruncated"`
@@ -204,6 +234,19 @@ type regionsRoutesCollector struct {
 	// constant so tests can exercise the un-interned fallback without building
 	// 131,072 distinct paths; capture never mutates it.
 	internBound int
+	// The remaining capture ceilings, as fields for the same reason: the
+	// per-reason capped counters below are exercised without a 4,096-chain
+	// transmission or a 10,000-relay mesh. Capture never mutates them.
+	txPathBound         int
+	membershipCellBound int
+	membershipNodeBound int
+	// Per-reason capture refusals and their high-water marks, reported by
+	// captureStats. maxTxPaths and maxPathBytes are headroom, the rest are
+	// refusals; cappedHourRefs also carries the defensive out-of-horizon
+	// guard, which captureAt's window check already makes unreachable.
+	maxTxPaths, maxPathBytes            int
+	cappedPathBytes, cappedTxPaths      int
+	cappedHourRefs, cappedOverlongPaths int
 	// stepBytes is the directed-step payload budget for this snapshot. A field
 	// rather than the constant so tests can exercise truncation without
 	// building a 16 MiB snapshot; build() never mutates it.
@@ -216,8 +259,9 @@ func newRegionsRoutesCollector(now time.Time) *regionsRoutesCollector {
 	end := now.UTC().Truncate(time.Hour)
 	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(),
 		pathIDs: make(map[string]int32), hourRefs: make([]int32, regionsHistoryBucketCount+1),
-		internBound: maxRegionsRoutePathVariants,
-		stepBytes:   maxRegionsRouteStepBytes, cells: newRegionsEvidenceBuilder()}
+		internBound: maxRegionsRoutePathVariants, txPathBound: maxRegionsRoutePathsPerTx,
+		membershipCellBound: maxRegionsMembershipCells, membershipNodeBound: maxRegionsMembershipNodes,
+		stepBytes: maxRegionsRouteStepBytes, cells: newRegionsEvidenceBuilder()}
 }
 
 // pathRefs reports how many observation path references this snapshot
@@ -243,9 +287,19 @@ func (c *regionsRoutesCollector) captureStats(memberships *regionsMembershipBuil
 		HourPathReferenceBudget: maxRegionsRoutePathRefsPerHour,
 		Transmissions:           len(c.txs),
 		MembershipCells:         len(memberships.cells),
-		MembershipCellBudget:    maxRegionsMembershipCells,
+		MembershipCellBudget:    c.membershipCellBound,
 		MembershipNodes:         len(memberships.nodes),
-		MembershipNodeBudget:    maxRegionsMembershipNodes,
+		MembershipNodeBudget:    c.membershipNodeBound,
+		MaxTransmissionPaths:    c.maxTxPaths,
+		TransmissionPathBudget:  c.txPathBound,
+		MaxPathBytes:            c.maxPathBytes,
+		PathByteBudget:          maxRegionsRoutePathBytes,
+		CappedPathBytes:         c.cappedPathBytes,
+		CappedTransmissionPaths: c.cappedTxPaths,
+		CappedHourReferences:    c.cappedHourRefs,
+		CappedOverlongPaths:     c.cappedOverlongPaths,
+		CappedMembershipCells:   memberships.cellDrops,
+		CappedMembershipNodes:   memberships.nodeDrops,
 		SourceTruncated:         c.evidence.SourceTruncated,
 	}
 	for _, used := range c.hourRefs {
@@ -265,11 +319,15 @@ func (c *regionsRoutesCollector) captureStats(memberships *regionsMembershipBuil
 // a repeated relay chain is parsed and resolved once per snapshot; the only
 // refusal is the per-hour reference budget, which is fair across the horizon.
 // held is how many distinct paths this transmission already retained. The
-// caller has already looked the path up, so capture costs one string-map
-// lookup per observation, as it did before interning.
+// caller has already looked the path up in the table, so a path new to this
+// transmission costs two string-map lookups and a repeat of one costs one.
 func (c *regionsRoutesCollector) retainPath(path string, id int32, known bool, index, held int) (int32, bool) {
-	if held >= maxRegionsRoutePathsPerTx || index < 0 || index >= len(c.hourRefs) ||
-		c.hourRefs[index] >= maxRegionsRoutePathRefsPerHour {
+	switch {
+	case held >= c.txPathBound:
+		c.cappedTxPaths++
+		return 0, false
+	case index < 0 || index >= len(c.hourRefs) || c.hourRefs[index] >= maxRegionsRoutePathRefsPerHour:
+		c.cappedHourRefs++
 		return 0, false
 	}
 	if !known {
@@ -321,9 +379,13 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	item := regionsRouteTx{id: tx.ID, when: when, scope: tx.ScopeName}
 	index := c.bucket(item)
 	var counts RegionsEvidenceCounts
-	// Keyed by interned path id: repeated observations of one path dedupe
-	// without hashing the path string a second time.
-	seen := make(map[int32]int)
+	// Keyed by the path string, not by the interned id: past the interning
+	// table a path has no id to dedupe on, and the table is full for most of
+	// a 48 h capture on real traffic. Without this, every repeat of one chain
+	// inside a flood transmission took its own slot, its own reference and
+	// its own unit of the per-transmission budget (#510). The string header
+	// is shared with the packet store; the map lives only for this call.
+	seen := make(map[string]int)
 	for _, obs := range tx.Observations {
 		switch classifyRegionsObservation(obs, canonical, known) {
 		case regionsObservationExcluded:
@@ -334,24 +396,29 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 			continue
 		}
 		if len(obs.PathJSON) > maxRegionsRoutePathBytes {
+			c.cappedPathBytes++
 			counts.Capped++
 			continue
 		}
-		id, interned := c.pathIDs[obs.PathJSON]
-		if interned {
-			if at, exists := seen[id]; exists {
-				item.paths[at].observations++
-				continue
-			}
+		if len(obs.PathJSON) > c.maxPathBytes {
+			c.maxPathBytes = len(obs.PathJSON)
 		}
+		if at, exists := seen[obs.PathJSON]; exists {
+			item.paths[at].observations++
+			continue
+		}
+		id, interned := c.pathIDs[obs.PathJSON]
 		id, admitted := c.retainPath(obs.PathJSON, id, interned, index, len(item.paths))
 		if !admitted {
 			c.evidence.SourceTruncated = true
 			counts.Capped++
 			continue
 		}
-		seen[id] = len(item.paths)
+		seen[obs.PathJSON] = len(item.paths)
 		item.paths = append(item.paths, regionsRoutePathRef{path: id, observations: 1})
+	}
+	if len(item.paths) > c.maxTxPaths {
+		c.maxTxPaths = len(item.paths)
 	}
 	if len(tx.Observations) == 0 {
 		counts.Unprovable++
@@ -426,7 +493,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 	out := &regionsRouteSnapshot{steps: []RegionsRouteStep{}}
 	sort.Slice(c.txs, func(i, j int) bool { return c.txs[i].id < c.txs[j].id })
 	paths := newRegionsPathResolver(c.pathList, pm)
-	memberships := newRegionsMembershipBuilder()
+	memberships := newRegionsMembershipBuilder(c.membershipCellBound, c.membershipNodeBound)
 	rows := make(map[regionsRouteKey]map[int]regionsRouteCell)
 	seen := make(map[regionsRouteKey]bool)
 	seenMembers := make(map[string]bool)
@@ -450,6 +517,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 				continue
 			}
 			if resolved.over {
+				c.cappedOverlongPaths += int(ref.observations)
 				c.addEvidence(tx, RegionsEvidenceCounts{Capped: int(ref.observations)})
 				continue
 			}

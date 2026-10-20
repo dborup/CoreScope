@@ -159,7 +159,7 @@ func TestRegionsEvidenceMembershipBudgetIndependentOfSteps(t *testing.T) {
 		got.memberships.evidence.history.Capped != 0 || got.memberships.evidence.truncated || got.evidence.CappedStepAppearances != 1 {
 		t.Fatal("directed-step payload budget suppressed independent valid membership or polluted its evidence")
 	}
-	b := newRegionsMembershipBuilder()
+	b := newRegionsMembershipBuilder(maxRegionsMembershipCells, maxRegionsMembershipNodes)
 	b.remaining = 1
 	if !b.add(a, "#one", 0, now) || b.add(a, "#two", 0, now) {
 		t.Fatal("independent membership cell cap was silent")

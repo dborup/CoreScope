@@ -368,7 +368,15 @@ and how many are interned (`pathVariants`, `pathVariantsInterned`,
 `pathVariantInternBudget`), retained references with the per-hour high-water
 mark (`pathReferences`, `maxHourPathReferences`, `hourPathReferenceBudget`),
 retained transmissions, aggregated membership cells and identities against
-their budgets, `estimatedBytes` and `sourceTruncated`. The walk is O(published cells),
+their budgets, `estimatedBytes` and `sourceTruncated`. It also reports the
+per-transmission and per-path fill a flood packet reaches first
+(`maxTransmissionPaths`, `transmissionPathBudget`, `maxPathBytes`,
+`pathByteBudget`) and attributes every capped observation to the ceiling that
+refused it: `cappedPathBytes`, `cappedTransmissionPaths`,
+`cappedHourReferences` and `cappedOverlongPaths`, which together account for
+the snapshot's `cappedObservations`, plus `cappedMembershipCells` and
+`cappedMembershipNodes`, which are dropped memberships rather than
+observations. The walk is O(published cells),
 touches no packet state and takes no packet lock, so it is not part of the
 admission-controlled store scan; it is absent before the first background relay
 snapshot. Byte figures are struct sizes plus owned string content plus a flat

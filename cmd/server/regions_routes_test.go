@@ -695,3 +695,71 @@ func BenchmarkRegions168HBudgets(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkRegions48HFloodFanout measures the shape #510 round 3 targets: 48 h
+// of retention — staging's configuration — where a fraction of transmissions
+// are floods heard by every observer on the mesh over several relay chains
+// each, with one repeat per observer. Staging carries 65 observers and
+// reported ~1,080 capped observations with directed steps complete, which is
+// what a per-transmission path ceiling below the observer fan-out looks like.
+// The interning table is deliberately left at its real size, so it fills part
+// way through exactly as it does on a 48 h capture.
+func BenchmarkRegions48HFloodFanout(b *testing.B) {
+	const hours, perHour, observers, chains, quiet, pool = 48, 800, 65, 4, 6, 512
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	start := now.UTC().Truncate(time.Hour).Add(-regionsHistoryBucketCount * time.Hour)
+	type item struct {
+		tx   *StoreTx
+		when time.Time
+	}
+	items := make([]item, 0, hours*perHour)
+	id, n := 0, 0
+	for hour := regionsHistoryBucketCount - hours; hour < regionsHistoryBucketCount; hour++ {
+		at := start.Add(time.Duration(hour)*time.Hour + time.Minute)
+		for i := 0; i < perHour; i++ {
+			id, n = id+1, n+1
+			if i%20 == 0 { // 5 % of transmissions reach the whole mesh
+				tx, _ := floodTransmission(id, at, observers, chains, pool)
+				items = append(items, item{tx, at})
+				continue
+			}
+			paths := make([]string, quiet)
+			for p := range paths {
+				paths[p] = fmt.Sprintf(`["%064x","%064x","%064x"]`, n%pool+1, (n*quiet+p)%pool+1, pool+n%observers+1)
+			}
+			items = append(items, item{routeTransmission(id, at, paths...), at})
+		}
+	}
+	rand.New(rand.NewSource(1)).Shuffle(len(items), func(i, j int) { items[i], items[j] = items[j], items[i] })
+	var measured *RegionsSnapshotMemory
+	var steps, capped int
+	var allocated uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for k := 0; k < b.N; k++ {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		collector := newRegionsRoutesCollector(now)
+		for _, it := range items {
+			collector.captureAt(it.tx, it.when, true)
+		}
+		snapshot := collector.build(nil)
+		runtime.ReadMemStats(&after)
+		allocated = after.TotalAlloc - before.TotalAlloc
+		measured = measureRegionsSnapshot(&repeaterRelaySnapshot{generatedAt: now,
+			regionMemberships: snapshot.memberships, history: snapshot.history, routes: snapshot})
+		steps, capped = len(snapshot.steps), snapshot.evidence.CappedObservations
+	}
+	b.StopTimer()
+	c := measured.Capture
+	b.ReportMetric(float64(capped), "capped-observations")
+	b.ReportMetric(float64(c.CappedTransmissionPaths), "capped-tx-paths")
+	b.ReportMetric(float64(c.MaxTransmissionPaths), "max-tx-paths")
+	b.ReportMetric(float64(c.PathVariants), "path-variants")
+	b.ReportMetric(float64(c.PathVariantsInterned), "path-variants-interned")
+	b.ReportMetric(float64(c.MaxHourPathReferences), "max-hour-refs")
+	b.ReportMetric(float64(c.EstimatedBytes), "capture-bytes")
+	b.ReportMetric(float64(measured.TotalBytes), "regions-retained-bytes")
+	b.ReportMetric(float64(steps), "steps")
+	b.ReportMetric(float64(allocated), "aggregate-alloc-bytes")
+}

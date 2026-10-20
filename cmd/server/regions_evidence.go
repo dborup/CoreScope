@@ -253,11 +253,16 @@ type regionsMembershipBuilder struct {
 	cells     map[regionsMembershipCellKey]regionsMembershipCell
 	nodes     map[string]struct{}
 	remaining int
+	nodeBound int
+	// Memberships each ceiling dropped, for the capture diagnostic (#510):
+	// without them a withheld rate cannot be told apart from a capture
+	// refusal, because both reach the bucket as `capped`.
+	cellDrops, nodeDrops int
 }
 
-func newRegionsMembershipBuilder() *regionsMembershipBuilder {
+func newRegionsMembershipBuilder(cells, nodes int) *regionsMembershipBuilder {
 	return &regionsMembershipBuilder{cells: make(map[regionsMembershipCellKey]regionsMembershipCell),
-		nodes: make(map[string]struct{}), remaining: maxRegionsMembershipCells}
+		nodes: make(map[string]struct{}), remaining: cells, nodeBound: nodes}
 }
 
 // retainLatestRegionScope keeps the newest 32 names with bounded scratch
@@ -299,11 +304,13 @@ func (b *regionsMembershipBuilder) add(key, scope string, hour int, when time.Ti
 	id := regionsMembershipCellKey{key: key, scope: scope, hour: int32(hour)}
 	cell, exists := b.cells[id]
 	if !exists {
-		if b.remaining == 0 {
+		if b.remaining <= 0 {
+			b.cellDrops++
 			return false
 		}
 		if _, known := b.nodes[key]; !known {
-			if len(b.nodes) >= maxRegionsMembershipNodes {
+			if len(b.nodes) >= b.nodeBound {
+				b.nodeDrops++
 				return false
 			}
 			b.nodes[key] = struct{}{}

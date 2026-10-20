@@ -493,8 +493,13 @@ func TestRegionsSnapshotCaptureHeadroomMeasured(t *testing.T) {
 		c.MembershipNodes != 4 || c.MembershipNodeBudget != maxRegionsMembershipNodes {
 		t.Fatalf("membership headroom was not reported: %+v", c)
 	}
-	if c.EstimatedBytes <= 0 {
-		t.Fatalf("transient capture cost was not estimated: %+v", c)
+	// N2: pin the sum, not just its sign. Three references, three retained and
+	// interned paths, three transmission headers -- dropping any term, the
+	// transmission header above all, has to show here.
+	want := int64(3*regionsRoutePathRefBytes + 3*regionsRoutePathSlotBytes +
+		3*regionsRoutePathInternedBytes + 3*regionsRouteTxBytes)
+	if c.EstimatedBytes != want {
+		t.Fatalf("transient capture cost was %d, want %d: %+v", c.EstimatedBytes, want, c)
 	}
 }
 
@@ -546,4 +551,210 @@ func TestRegionsSnapshotTruncatedIsBudgetTruncationOnly(t *testing.T) {
 	if got := measure(capped); !got.Truncated {
 		t.Fatalf("capture truncation was not reported: %+v", got)
 	}
+}
+
+// Round 3 (#510). Staging on real data (master f56ef97c + #510, 48 h
+// retention, three restarts) reported directed steps complete but
+// coverage.evidence.capped still 1,068-1,096, all in #dk, so the Health and
+// Timeline rates stayed withheld. The tests below cover the two capture
+// ceilings a 65-observer mesh actually reaches, and make every refusal
+// attributable so the next round reads the cause off the snapshot instead of
+// guessing.
+
+// floodTransmission models one flood packet heard by observers observers,
+// each over chains distinct relay chains, with one repeat of its first chain
+// per observer. Hops are drawn from a fixed relay pool, as on a real mesh:
+// the identities are bounded, the chains are not, and the pool is shifted by
+// the transmission id so two transmissions do not reuse one another's chains.
+// pool must be at least observers*chains for the chains to stay distinct.
+func floodTransmission(id int, when time.Time, observers, chains, pool int) (*StoreTx, int) {
+	relay := func(n int) string { return fmt.Sprintf("%064x", n+1) }
+	paths := make([]string, 0, observers*chains+observers)
+	distinct := 0
+	for o := 0; o < observers; o++ {
+		var first string
+		for c := 0; c < chains; c++ {
+			hops := []string{
+				relay((id*7 + o*chains + c) % pool),    // the chain's entry relay
+				relay((id/pool*31 + o*5 + c*3) % pool), // a relay shared with neighbours
+				relay(pool + o),                        // the observer's own uplink
+			}
+			path := `["` + strings.Join(hops, `","`) + `"]`
+			if c == 0 {
+				first = path
+			}
+			paths = append(paths, path)
+			distinct++
+		}
+		paths = append(paths, first) // the same chain heard twice
+	}
+	return routeTransmission(id, when, paths...), distinct
+}
+
+// N1: past the interning table, identical paths inside one transmission must
+// still share one slot, one reference and one unit of the per-transmission
+// budget. The table is full for most of a 48 h capture on real traffic, so
+// this is the normal state, not an edge case.
+func TestRegionsRouteCaptureDedupesRepeatedPathsUnInterned(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	collector := newRegionsRoutesCollector(now)
+	collector.internBound = 0 // the table is already full
+	a, b := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	const repeats = 200
+	paths := make([]string, repeats)
+	for i := range paths {
+		paths[i] = `["` + a + `","` + b + `"]`
+	}
+	collector.capture(routeTransmission(1, collector.start.Add(500*time.Hour), paths...))
+	got := collector.build(nil)
+	if got.evidence.SourceTruncated || got.evidence.CappedObservations != 0 {
+		t.Fatalf("repeated identical paths were capped: truncated=%v capped=%d",
+			got.evidence.SourceTruncated, got.evidence.CappedObservations)
+	}
+	if got.capture.PathVariants != 1 || got.capture.PathReferences != 1 {
+		t.Fatalf("un-interned duplicates were retained separately: %+v", got.capture)
+	}
+	if got.capture.MaxTransmissionPaths != 1 {
+		t.Fatalf("per-transmission high-water mark was %d, want 1", got.capture.MaxTransmissionPaths)
+	}
+	if e := got.memberships.evidence.history; e.Capped != 0 || e.Truncated {
+		t.Fatalf("duplicate observations withheld membership rates: %+v", e)
+	}
+}
+
+// Point 1/2: a flood transmission heard by a 65-observer mesh over many
+// distinct chains must not be capped, with the interning table full. 65
+// observers x 4 chains is 260 distinct paths in one transmission, twice the
+// retired 128 per-transmission ceiling.
+func TestRegionsRouteCaptureAdmitsFloodHeardByManyObservers(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	collector := newRegionsRoutesCollector(now)
+	collector.internBound = 0 // the table is already full
+	const observers, chains, pool = 65, 4, 512
+	tx, distinct := floodTransmission(1, collector.start.Add(500*time.Hour), observers, chains, pool)
+	collector.capture(tx)
+	got := collector.build(nil)
+	if got.evidence.SourceTruncated || got.evidence.CappedObservations != 0 {
+		t.Fatalf("a flood heard by %d observers over %d chains was capped: truncated=%v capped=%d",
+			observers, distinct, got.evidence.SourceTruncated, got.evidence.CappedObservations)
+	}
+	if got.capture.PathVariants != distinct || got.capture.PathReferences != distinct {
+		t.Fatalf("capture lost chains of a single flood: %+v (want %d)", got.capture, distinct)
+	}
+	if got.capture.MaxTransmissionPaths != distinct || got.capture.TransmissionPathBudget != maxRegionsRoutePathsPerTx {
+		t.Fatalf("per-transmission headroom was not reported: %+v (want %d)", got.capture, distinct)
+	}
+	if e := got.memberships.evidence.history; e.Capped != 0 || e.Truncated {
+		t.Fatalf("a single flood withheld membership rates: %+v", e)
+	}
+	// The per-transmission pair budget used to be exactly 128 x 64, so the
+	// path ceiling always bound first. They are independent now, and a real
+	// flood must not reach the pair budget either.
+	if got.evidence.CappedStepAppearances != 0 || got.stepsTruncated || got.bucketsTruncated {
+		t.Fatalf("a single flood spent the directed-step budgets: %+v", got.evidence)
+	}
+}
+
+// Point 2: the per-transmission ceiling has to clear the observer fan-out real
+// data showed (65 observers on staging) with room for several chains each,
+// while still stopping one transmission from spending most of an hour's
+// reference budget.
+func TestRegionsRouteTransmissionPathBudgetHeadroomOverObservers(t *testing.T) {
+	const stagingObservers = 65
+	if maxRegionsRoutePathsPerTx < 16*stagingObservers {
+		t.Fatalf("per-transmission path budget %d leaves under 16 chains for each of %d observers",
+			maxRegionsRoutePathsPerTx, stagingObservers)
+	}
+	if maxRegionsRoutePathsPerTx > maxRegionsRoutePathRefsPerHour/8 {
+		t.Fatalf("one transmission may spend %d of an hour's %d references",
+			maxRegionsRoutePathsPerTx, maxRegionsRoutePathRefsPerHour)
+	}
+}
+
+// Point 1: every capped observation is attributed to the ceiling that refused
+// it, so an operator reads the cause off /api/perf?mem=1 instead of bisecting
+// the budgets. The per-reason counters account for exactly the snapshot-wide
+// capped observations; membership drops are reported separately because they
+// are memberships, not observations.
+func TestRegionsSnapshotCaptureAttributesCappedObservations(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	a, b := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	at := func(c *regionsRoutesCollector) time.Time { return c.start.Add(500 * time.Hour) }
+	ok := `["` + a + `","` + b + `"]`
+
+	t.Run("path bytes", func(t *testing.T) {
+		c := newRegionsRoutesCollector(now)
+		long := `["` + strings.Join(make([]string, 200), a+`","`) + `"]`
+		if len(long) <= maxRegionsRoutePathBytes {
+			t.Fatalf("fixture path is %d bytes, under the %d ceiling", len(long), maxRegionsRoutePathBytes)
+		}
+		c.capture(routeTransmission(1, at(c), ok, long))
+		got := c.build(nil)
+		if got.capture.CappedPathBytes != 1 || got.evidence.CappedObservations != 1 {
+			t.Fatalf("oversize path JSON was not attributed: %+v", got.capture)
+		}
+		if got.capture.MaxPathBytes != len(ok) || got.capture.PathByteBudget != maxRegionsRoutePathBytes {
+			t.Fatalf("path-byte headroom was not reported: %+v", got.capture)
+		}
+	})
+
+	t.Run("transmission paths", func(t *testing.T) {
+		c := newRegionsRoutesCollector(now)
+		c.txPathBound = 2
+		c.capture(routeTransmission(1, at(c), ok,
+			`["`+a+`","`+strings.Repeat("ef", 32)+`"]`, `["`+b+`","`+a+`"]`))
+		got := c.build(nil)
+		if got.capture.CappedTransmissionPaths != 1 || got.evidence.CappedObservations != 1 {
+			t.Fatalf("the per-transmission ceiling was not attributed: %+v", got.capture)
+		}
+		if !got.capture.SourceTruncated {
+			t.Fatal("a refused path did not set sourceTruncated")
+		}
+	})
+
+	t.Run("hour references", func(t *testing.T) {
+		c := newRegionsRoutesCollector(now)
+		c.hourRefs[500] = maxRegionsRoutePathRefsPerHour
+		c.capture(routeTransmission(1, at(c), ok))
+		got := c.build(nil)
+		if got.capture.CappedHourReferences != 1 || got.evidence.CappedObservations != 1 {
+			t.Fatalf("the per-hour budget was not attributed: %+v", got.capture)
+		}
+	})
+
+	t.Run("overlong path", func(t *testing.T) {
+		c := newRegionsRoutesCollector(now)
+		hops := make([]string, 65)
+		for i := range hops {
+			hops[i] = fmt.Sprintf("%02x", i)
+		}
+		c.capture(routeTransmission(1, at(c), `["`+strings.Join(hops, `","`)+`"]`))
+		got := c.build(nil)
+		if got.capture.CappedOverlongPaths != 1 || got.evidence.CappedObservations != 1 {
+			t.Fatalf("an over-length hop chain was not attributed: %+v", got.capture)
+		}
+	})
+
+	t.Run("membership nodes", func(t *testing.T) {
+		c := newRegionsRoutesCollector(now)
+		c.membershipNodeBound = 1
+		c.capture(routeTransmission(1, at(c), ok))
+		got := c.build(nil)
+		if got.capture.CappedMembershipNodes != 1 || got.capture.CappedMembershipCells != 0 {
+			t.Fatalf("the membership node ceiling was not attributed: %+v", got.capture)
+		}
+		if got.evidence.CappedObservations != 0 {
+			t.Fatalf("a dropped membership was counted as a capped observation: %+v", got.evidence)
+		}
+	})
+
+	t.Run("membership cells", func(t *testing.T) {
+		c := newRegionsRoutesCollector(now)
+		c.membershipCellBound = 1
+		c.capture(routeTransmission(1, at(c), ok))
+		got := c.build(nil)
+		if got.capture.CappedMembershipCells != 1 || got.capture.CappedMembershipNodes != 0 {
+			t.Fatalf("the membership cell ceiling was not attributed: %+v", got.capture)
+		}
+	})
 }

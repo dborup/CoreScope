@@ -282,10 +282,10 @@ it mirrors**, and it cannot mirror rows the store does not hold, so the store
 budget binds first on every host.
 
 The per-hour budget's own nominal ceiling, if every hourly bucket in the 504 h
-horizon were filled to it, is 33.1 M references: about 265 MiB of references,
-up to 794 MiB of path slots if every reference carried a distinct path, 6 MiB
-of interning table and up to 2.4 GiB of transmission headers if each reference
-belonged to its own single-observation transmission — about 3.4 GiB in total.
+horizon were filled to it, is 33.1 M references: about 253 MiB of references,
+up to 758 MiB of path slots if every reference carried a distinct path, 6 MiB
+of interning table and up to 2.22 GiB of transmission headers if each reference
+belonged to its own single-observation transmission — about 3.2 GiB in total.
 That ceiling is unreachable in practice, because reaching it needs the packet
 store to hold 33 M transport-scoped observations across 505 distinct hours,
 which is on the order of a hundred gigabytes of store by the estimate above and
@@ -299,7 +299,25 @@ synthetic snapshot at 5,200 references per hour with a distinct 5-hop chain per
 transmission retains 97 MiB of capture state and caps nothing.
 `/api/perf?mem=1` reports the fill of every capture budget as
 `regionsSnapshot.capture`, so the headroom is observable per snapshot instead of
-inferred from these figures.
+inferred from these figures. It also attributes every capped observation to the
+ceiling that refused it — `cappedPathBytes`, `cappedTransmissionPaths`,
+`cappedHourReferences` and `cappedOverlongPaths`, which together account for
+the snapshot's `cappedObservations`, with `cappedMembershipCells` and
+`cappedMembershipNodes` for dropped memberships — so a withheld rate names its
+own cause.
+
+One transmission retains at most 4,096 distinct observation paths. That is a
+share of its hour's reference budget (a sixteenth of it), not a memory bound:
+every retained path already costs one of that hour's references. The retired
+value was 128, which a flood packet reaches on an ordinary mesh — a 65-observer
+staging instance offers hundreds of distinct relay chains for one flood — and
+the surplus was reported `capped`, which withheld the scope's rates. Repeats of
+one chain inside a transmission share a single path, reference and budget unit
+whether or not the chain is in the interning table.
+`regionsSnapshot.capture.maxTransmissionPaths` reports the high-water mark
+against it. The per-transmission directed-step pair cap (8,192) is independent
+of it rather than, as before, exactly 128 × 64 hops; it is a publication
+budget and is counted as `cappedStepAppearances` only.
 
 Memberships are aggregated straight into (relay, scope, hour) cells, so the
 budget — 500,000 cells and 10,000 identities — grows with populated hours
