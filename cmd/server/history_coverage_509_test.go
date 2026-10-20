@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -337,5 +338,135 @@ func TestCoverage509EdgeRefusesCappedOrFailedLoad(t *testing.T) {
 	s.analyticsHistory.cap, s.analyticsHistory.failed = false, true
 	if _, _, ok := s.retainedHistoryEdgeLocked(); ok {
 		t.Fatal("failed load must not be verifiable")
+	}
+}
+
+// coverage509BelowFloorRows seeds the default-config shape (#351 F1): the DB
+// keeps more history than the server's retentionHours. `reheard` long-lived
+// transmissions have a 60h-old first_seen and a last_seen 30h ago, `plain`
+// rows at 55h ago and `edge` rows two minutes either side of the 48h
+// retention floor sit in the DB, followed by `regular` rows over the last
+// 47h. Only rows with last_seen inside the window are loaded.
+func coverage509BelowFloorRows(t *testing.T, now time.Time, reheard, plain, edge, regular int) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "coverage509.db")
+	floor := now.Add(-coverage509RetentionHours * time.Hour)
+	seedTestDBRows(t, dbPath, reheard+plain+2*edge+regular, 1, func(i int) (string, int64) {
+		var ts time.Time
+		switch {
+		case i <= reheard:
+			return now.Add(-60 * time.Hour).Format(time.RFC3339), now.Add(-30 * time.Hour).Unix()
+		case i <= reheard+plain:
+			ts = now.Add(-55 * time.Hour)
+		case i <= reheard+plain+edge:
+			ts = floor.Add(-2 * time.Minute)
+		case i <= reheard+plain+2*edge:
+			ts = floor.Add(2 * time.Minute)
+		default:
+			ts = now.Add(-47*time.Hour + time.Duration(i-reheard-plain-2*edge-1)*14*time.Minute)
+		}
+		return ts.Format(time.RFC3339), ts.Unix()
+	})
+	return dbPath
+}
+
+// coverage509InsertTx stands in for the ingestor writing a new transmission
+// while the server is starting.
+func coverage509InsertTx(t *testing.T, writer *sql.DB, id int, at time.Time) {
+	t.Helper()
+	// PREFLIGHT: async=true reason="unit-test writer standing in for the ingestor on an ephemeral DB"
+	if _, err := writer.Exec(`INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, last_seen) VALUES (?, 'aabb', ?, ?, 0, 4, 1, '{}', ?)`,
+		id, fmt.Sprintf("live%06d", id), at.Format(time.RFC3339), at.Unix()); err != nil {
+		t.Error(err)
+	}
+	// PREFLIGHT: async=true reason="unit-test writer standing in for the ingestor on an ephemeral DB"
+	if _, err := writer.Exec(`INSERT INTO observations (id, transmission_id, observer_id, observer_name, direction, snr, rssi, score, path_json, timestamp) VALUES (?, ?, 'obs1', 'Obs1', 'RX', -10.0, -80.0, 5, '[]', ?)`,
+		1000000+id, id, at.Format(time.RFC3339)); err != nil {
+		t.Error(err)
+	}
+}
+
+// With hotStartupHours=0 the load floor is s.packets[0].FirstSeen, which a
+// loaded re-heard row pulls below the retention floor. DB rows between it
+// and the floor were never meant to be loaded (their last_seen is outside
+// the window) and must not count as missing. No retention tick runs during
+// the load, the common case for a fast startup.
+func TestCoverage509DBRowsBelowRetentionFloorNoTick(t *testing.T) {
+	for _, hot := range []float64{0, 12} {
+		now := time.Now().UTC()
+		dbPath := coverage509BelowFloorRows(t, now, 5, 3, 0, 200)
+		store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: hot})
+		if err := store.RunStartupLoad(50); err != nil {
+			t.Fatalf("hot=%g: RunStartupLoad: %v", hot, err)
+		}
+		t.Logf("hot=%g: loadCoverageRatio=%.4f", hot, store.LoadCoverageRatio())
+		assertCoverage509Known(t, store, now)
+	}
+}
+
+// The ingestor keeps writing while the server starts and the poller ingests
+// concurrently with the load and with the verification, while DB rows sit
+// on both sides of the retention floor. Rows the ingestor wrote after the
+// store's highest id are not yet evidence either way: in the DB (not polled
+// yet) or in memory (polled between the two counts), they must not turn a
+// complete history into a mismatch. Rows just below the floor were never
+// loaded and must not count as missing; rows just above it were.
+func TestCoverage509ConcurrentIngestAtRetentionEdge(t *testing.T) {
+	for _, hot := range []float64{0, 12} {
+		now := time.Now().UTC()
+		const reheard, plain, edge, regular = 5, 3, 4, 200
+		dbPath := coverage509BelowFloorRows(t, now, reheard, plain, edge, regular)
+		store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: hot})
+		writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextID := reheard + plain + 2*edge + regular
+		insertDuringLoad := func() {
+			for i := 0; i < 3; i++ {
+				nextID++
+				coverage509InsertTx(t, writer, nextID, time.Now().UTC())
+			}
+		}
+		// The background fill only reads windows older than the hot
+		// window, so rows written during it stay above the store's
+		// highest id until the poller picks them up.
+		if hot > 0 {
+			chunks := 0
+			store.loadChunkScannedHook = func() {
+				if chunks++; chunks == 1 {
+					insertDuringLoad()
+				}
+			}
+		} else {
+			first := true
+			store.OnChunkLoaded(func(int, int) {
+				if first {
+					first = false
+					insertDuringLoad()
+				}
+			})
+		}
+		polled := 0
+		store.retainedHistoryCountedHook = func() {
+			if polled++; polled != 1 {
+				return
+			}
+			nextID++
+			coverage509InsertTx(t, writer, nextID, time.Now().UTC())
+			// Poller tick between the SQL and the in-memory count.
+			if _, newMax := store.IngestNewFromDB(store.MaxTransmissionID(), 100); newMax != nextID {
+				t.Errorf("hot=%g: poller reached id %d, want %d", hot, newMax, nextID)
+			}
+		}
+		if err := store.RunStartupLoad(50); err != nil {
+			t.Fatalf("hot=%g: RunStartupLoad: %v", hot, err)
+		}
+		writer.Close()
+		if polled == 0 {
+			t.Fatalf("hot=%g: verification never reached the poller tick", hot)
+		}
+		t.Logf("hot=%g: loadCoverageRatio=%.4f", hot, store.LoadCoverageRatio())
+		assertCoverage509Known(t, store, now)
 	}
 }
