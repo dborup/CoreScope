@@ -101,6 +101,8 @@ type DB struct {
 	// Channel list caches (60s TTL, #762): keyed by normalized region, with
 	// concurrent misses coalesced into one query per key (#109). See
 	// channels_list_cache.go.
+	// Observer metrics summary cache (30s TTL, #506), see metrics_summary_cache.go.
+	metricsSummary metricsSummaryCache
 	channelsCache    channelListCache
 	encChannelsCache channelListCache
 	// channelsPinFallbacks counts GetChannels queries that fell back to the
