@@ -99,7 +99,7 @@ func TestRegionRoutesStrictObservationScopeAndBounds(t *testing.T) {
 	if len(got.steps) != 1 || got.steps[0].Buckets[0].Count != 1 || got.steps[0].Buckets[0].Index != 503 {
 		t.Fatalf("unsafe observation or time attribution: %+v", got.steps)
 	}
-	if !got.evidence.Incomplete || got.evidence.SkippedObservations != 3 {
+	if e := got.evidence; !e.Incomplete || e.UnprovableObservations != 2 || e.ExcludedObservations != 3 || e.CappedObservations != 0 {
 		t.Fatalf("missing evidence diagnostic: %+v", got.evidence)
 	}
 }
@@ -131,7 +131,7 @@ func TestRegionRoutesZeroScopeMalformedAndDifferentTransportCodes(t *testing.T) 
 	}
 	collector.capture(routeTransmission(4, now.Add(-time.Hour), `["`+a+`",null,"`+b+`"]`, `["`+a+`","`+b+`" BROKEN]`))
 	got := collector.build(nil)
-	if len(got.steps) != 0 || !got.evidence.Incomplete || got.evidence.SkippedObservations != 4 || got.evidence.UnresolvedHops != 1 {
+	if e := got.evidence; len(got.steps) != 0 || !e.Incomplete || e.UnprovableObservations != 2 || e.ExcludedObservations != 2 || e.UnresolvedHops != 1 {
 		t.Fatalf("invalid scope/path accepted: %+v", got)
 	}
 	// A collided prefix remains unknown, including when one candidate is hidden
@@ -217,8 +217,8 @@ func regionsRoutesFixture(t testing.TB) (*Server, time.Time, string, string) {
 	}
 	path := `["` + a + `","` + b + `"]`
 	tx := routeTransmission(1, now.Add(-2*time.Hour), path)
-	// Canonical direct with an independently observed flood must work publicly,
-	// even though the unchanged old relay-history path does not include it.
+	// Canonical direct with an independently observed flood must work in both
+	// strict history memberships and directed steps.
 	direct := 3
 	tx.RouteType = &direct
 	tx.RawHex = "17aabbccdd00"
@@ -246,7 +246,7 @@ func getRegionsRoutes(t testing.TB, srv *Server) RegionsRoutesResponse {
 func TestRegionsRoutesPairedMetadataVisibilityAndWarmLock(t *testing.T) {
 	srv, _, a, b := regionsRoutesFixture(t)
 	got := getRegionsRoutes(t, srv)
-	if len(got.Nodes) != 0 || len(got.StepNodes) != 2 || len(got.Steps) != 1 || got.Steps[0].From != a || got.Steps[0].To != b || got.Steps[0].Buckets[0].Count != 1 {
+	if len(got.Nodes) != 2 || len(got.StepNodes) != 2 || len(got.Steps) != 1 || got.Steps[0].From != a || got.Steps[0].To != b || got.Steps[0].Buckets[0].Count != 1 {
 		t.Fatalf("canonical direct scoped flood lost: %+v", got)
 	}
 	srv.store.mu.Lock()
@@ -368,6 +368,13 @@ func TestOpenAPIRegionsRoutesSchemas(t *testing.T) {
 }
 
 func regionsRoutesBenchmarkFixture(b *testing.B) *Server {
+	return regionsRoutesBenchmarkFixtureWith(b, false)
+}
+
+// mixed adds a realistic evidence mix: 8 scopes, a known-direct and a
+// mismatched-code observation per transmission and an unknown header on
+// every 10th, so per-bucket evidence spans 8 scopes x 168 hours.
+func regionsRoutesBenchmarkFixtureWith(b *testing.B, mixed bool) *Server {
 	srv, now, _ := regionsObservedFixture(b)
 	keys := make([]string, 2000)
 	transaction, err := srv.db.conn.Begin()
@@ -394,6 +401,13 @@ func regionsRoutesBenchmarkFixture(b *testing.B) *Server {
 		path := `["` + a + `","` + b + `","` + c + `"]`
 		tx := routeTransmission(i+1, end.Add(-time.Duration(i%168+1)*time.Hour), path, path)
 		tx.PathJSON = path
+		if mixed {
+			tx.ScopeName = fmt.Sprintf("#s%d", i%8)
+			tx.Observations = append(tx.Observations, routeObservation(path, "17aabbccdd00"), routeObservation(path, "14aabcccdd00"))
+			if i%10 == 0 {
+				tx.Observations = append(tx.Observations, routeObservation(path, ""))
+			}
+		}
 		for _, key := range []string{a, b, c} {
 			srv.store.byPathHop[key] = append(srv.store.byPathHop[key], tx)
 		}
@@ -410,8 +424,25 @@ func BenchmarkRegionsRoutesCompute30K2K(b *testing.B) {
 	}
 }
 
+func BenchmarkRegionsRoutesComputeMixedEvidence30K2K(b *testing.B) {
+	srv := regionsRoutesBenchmarkFixtureWith(b, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = srv.store.computeRepeaterRelaySnapshot(24)
+	}
+}
+
 func BenchmarkRegionsRoutesWarm30K2K(b *testing.B) {
-	srv := regionsRoutesBenchmarkFixture(b)
+	benchmarkRegionsRoutesWarm(b, false)
+}
+
+func BenchmarkRegionsRoutesWarmMixedEvidence30K2K(b *testing.B) {
+	benchmarkRegionsRoutesWarm(b, true)
+}
+
+func benchmarkRegionsRoutesWarm(b *testing.B, mixed bool) {
+	srv := regionsRoutesBenchmarkFixtureWith(b, mixed)
 	recomputeRepeaterEnrichmentSafe(srv.store, 24)
 	response := getRegionsRoutes(b, srv)
 	encoded, err := json.Marshal(response)
