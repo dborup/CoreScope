@@ -55,8 +55,9 @@ const (
 	// transport-scoped and carried a distinct path. It is a fairness and
 	// pathology net, not the memory bound: capture retains at most one
 	// reference per eligible observation and one header per transmission
-	// already in the packet store, so the store's own packetStore.maxMemoryMB
-	// budget binds first (see docs/regions-observed.md).
+	// already in the packet store, at roughly 3-5 % of the store state for the
+	// same rows, so packetStore.maxMemoryMB binds first (the full disclosure,
+	// including the horizon product, is in docs/regions-observed.md).
 	maxRegionsRoutePathRefsPerHour = 1 << 16
 	// Estimated retained cost of the transient capture state, for the capture
 	// diagnostic and for the disclosed horizon ceiling. Path content is shared

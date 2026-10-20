@@ -271,31 +271,35 @@ path-carrying observations.
 The capture state is transient — it lives only while a background snapshot is
 being built — but it is the part that decides whether evidence is reported as
 `capped`, so its cost is disclosed rather than implied. Per retained row it is
-about 8 bytes per observation-path reference, 24 for a retained path (a string
-header plus one resolver slot; path content is shared with the packet store,
-not copied) and 72 per retained transmission header, against the roughly 100
-bytes per observation and 1,000 bytes per transmission the packet store already
-holds for the same rows. Capture therefore retains at most about 40 % of what
-the store holds for the rows it mirrors, and it cannot mirror rows the store
-does not hold, so `packetStore.maxMemoryMB` binds first on any host.
+8 bytes per observation-path reference, 24 for a retained path (a string header
+plus one resolver slot; path content is shared with the packet store, not
+copied), 48 more for a path that got an interning-table entry, and 72 per
+retained transmission header. The store's own memory estimate
+(`estimateStoreTxBytesTypical`, the figure `packetStore.maxMemoryMB` divides by)
+assigns 3,214 bytes to a transmission with one observation and 8,506 to one with
+ten. Capture therefore retains roughly **3–5 % of the store state for the rows
+it mirrors**, and it cannot mirror rows the store does not hold, so the store
+budget binds first on every host.
 
 The per-hour budget's own nominal ceiling, if every hourly bucket in the 504 h
 horizon were filled to it, is 33.1 M references: about 265 MiB of references,
 up to 794 MiB of path slots if every reference carried a distinct path, 6 MiB
 of interning table and up to 2.4 GiB of transmission headers if each reference
 belonged to its own single-observation transmission — about 3.4 GiB in total.
-That ceiling is not reachable in practice. It requires the packet store to hold
-33 M transport-scoped observations across 505 distinct hours, roughly ten
-gigabytes of store and several times the `packetStore.maxMemoryMB` budget any
-CoreScope host runs with, which is why the store is the operative bound and the
-per-hour budget is a fairness and pathology net. At the rate real data showed —
-168 h at ~16,800 observations per hour, every one of them transport-scoped with
-a distinct path — the same arithmetic gives about 300 MiB, against roughly
-850 MiB of store for the same rows. A measured 168 h synthetic snapshot at
-5,200 references per hour with a distinct 5-hop chain per transmission retains
-97 MiB of capture state and caps nothing. `/api/perf?mem=1` reports the fill of
-every capture budget as `regionsSnapshot.capture`, so the headroom is
-observable per snapshot instead of inferred from these figures.
+That ceiling is unreachable in practice, because reaching it needs the packet
+store to hold 33 M transport-scoped observations across 505 distinct hours,
+which is on the order of a hundred gigabytes of store by the estimate above and
+orders of magnitude past any `packetStore.maxMemoryMB` a CoreScope host runs
+with. That is why the store is the operative bound and the per-hour budget is a
+fairness and pathology net rather than a memory budget. At the rate real data
+showed — 168 h at ~16,800 observations per hour, every one transport-scoped
+with a distinct path — the same arithmetic gives about 300 MiB of capture state,
+against several gigabytes of store for the same rows. A measured 168 h
+synthetic snapshot at 5,200 references per hour with a distinct 5-hop chain per
+transmission retains 97 MiB of capture state and caps nothing.
+`/api/perf?mem=1` reports the fill of every capture budget as
+`regionsSnapshot.capture`, so the headroom is observable per snapshot instead of
+inferred from these figures.
 
 Memberships are aggregated straight into (relay, scope, hour) cells, so the
 budget — 500,000 cells and 10,000 identities — grows with populated hours
