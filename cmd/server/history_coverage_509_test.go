@@ -327,16 +327,16 @@ func TestCoverage509EdgeRefusesCappedOrFailedLoad(t *testing.T) {
 	s := &PacketStore{loaded: true, maxTxID: 7, oldestLoaded: now.Add(-time.Hour).Format(time.RFC3339Nano),
 		packets: []*StoreTx{{ID: 7, FirstSeen: now.Format(time.RFC3339)}}}
 	s.analyticsHistory.evictedFrom = now.Add(-30*time.Minute + time.Nanosecond)
-	from, maxID, ok := s.retainedHistoryEdgeLocked()
+	from, maxID, ok := s.retainedHistoryEdgeLocked(now)
 	if !ok || maxID != 7 || !from.Equal(now.Add(-30*time.Minute).Truncate(time.Second).Add(time.Second)) {
 		t.Fatalf("edge=%v maxID=%d ok=%v, want the eviction edge rounded up to a whole second", from, maxID, ok)
 	}
 	s.analyticsHistory.cap = true
-	if _, _, ok := s.retainedHistoryEdgeLocked(); ok {
+	if _, _, ok := s.retainedHistoryEdgeLocked(now); ok {
 		t.Fatal("capped load must not be verifiable")
 	}
 	s.analyticsHistory.cap, s.analyticsHistory.failed = false, true
-	if _, _, ok := s.retainedHistoryEdgeLocked(); ok {
+	if _, _, ok := s.retainedHistoryEdgeLocked(now); ok {
 		t.Fatal("failed load must not be verifiable")
 	}
 }
@@ -468,5 +468,30 @@ func TestCoverage509ConcurrentIngestAtRetentionEdge(t *testing.T) {
 		}
 		t.Logf("hot=%g: loadCoverageRatio=%.4f", hot, store.LoadCoverageRatio())
 		assertCoverage509Known(t, store, now)
+	}
+}
+
+// The edge never sits below the retention floor: every row with first_seen
+// at or after the floor has last_seen after it too and was selected by the
+// load, while older rows were never meant to be in memory.
+func TestCoverage509EdgeFlooredAtRetention(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 500, time.UTC)
+	s := &PacketStore{loaded: true, maxTxID: 7, retentionHours: 48,
+		oldestLoaded: now.Add(-60 * time.Hour).Format(time.RFC3339Nano),
+		packets:      []*StoreTx{{ID: 7, FirstSeen: now.Format(time.RFC3339)}}}
+	floor := now.Add(-48 * time.Hour)
+	from, _, ok := s.retainedHistoryEdgeLocked(now)
+	if !ok || !from.Equal(floor.Truncate(time.Second).Add(time.Second)) {
+		t.Fatalf("edge=%v ok=%v, want the retention floor %v rounded up", from, ok, floor)
+	}
+	// An eviction edge above the floor still wins.
+	s.analyticsHistory.evictedFrom = now.Add(-47 * time.Hour)
+	if from, _, _ := s.retainedHistoryEdgeLocked(now); !from.Equal(now.Add(-47 * time.Hour).Truncate(time.Second).Add(time.Second)) {
+		t.Fatalf("edge=%v, want the eviction edge above the floor", from)
+	}
+	// Unlimited retention has no floor.
+	s.retentionHours, s.analyticsHistory.evictedFrom = 0, time.Time{}
+	if from, _, _ := s.retainedHistoryEdgeLocked(now); !from.Equal(now.Add(-60 * time.Hour).Truncate(time.Second).Add(time.Second)) {
+		t.Fatalf("edge=%v, want the load floor with unlimited retention", from)
 	}
 }

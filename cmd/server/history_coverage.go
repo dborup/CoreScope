@@ -12,11 +12,19 @@ const retainedHistoryVerifyAttempts = 3
 
 // retainedHistoryEdgeLocked returns the instant from which every transmission
 // is expected in memory: the load floor, moved past every row an eviction
-// (retention or memory cap) removed since the load began, rounded up to a
-// whole second. maxID is the highest transmission id the store has reached;
-// rows above it are not ingested yet and are no evidence either way. ok is
-// false when nothing can be verified: not loaded, empty, capped or failed.
-func (s *PacketStore) retainedHistoryEdgeLocked() (from time.Time, maxID int, ok bool) {
+// (retention or memory cap) removed since the load began and up to the
+// retention floor at now, rounded up to a whole second. maxID is the highest
+// transmission id the store has reached; rows above it are not ingested yet
+// and are no evidence either way. ok is false when nothing can be verified:
+// not loaded, empty, capped or failed.
+//
+// The retention floor matters with hotStartupHours=0, where the load floor
+// is s.packets[0].FirstSeen: a loaded re-heard row (old first_seen, recent
+// last_seen) puts it below the floor, and the DB rows between the two were
+// never meant to be loaded. A row with first_seen at or after the floor has
+// last_seen after it too, so the load (whose cutoff was taken earlier)
+// selected it.
+func (s *PacketStore) retainedHistoryEdgeLocked(now time.Time) (from time.Time, maxID int, ok bool) {
 	h := &s.analyticsHistory
 	if !s.loaded || len(s.packets) == 0 || h.cap || h.failed {
 		return time.Time{}, 0, false
@@ -27,6 +35,11 @@ func (s *PacketStore) retainedHistoryEdgeLocked() (from time.Time, maxID int, ok
 	}
 	if h.evictedFrom.After(from) {
 		from = h.evictedFrom
+	}
+	if s.retentionHours > 0 {
+		if floor := now.Add(-time.Duration(s.retentionHours * float64(time.Hour))); floor.After(from) {
+			from = floor
+		}
 	}
 	from = from.UTC()
 	if whole := from.Truncate(time.Second); whole.Before(from) {
@@ -66,11 +79,13 @@ func (s *PacketStore) countRetainedSinceLocked(bound string, maxID int) int {
 // (see #351 F6).
 //
 // The SQL count runs without s.mu (#495). An eviction between the two counts
-// moves the edge; the check is then repeated against the new edge.
+// moves the edge; the check is then repeated against the new edge. now is
+// taken once, so only an eviction moves the edge between the two reads.
 func (s *PacketStore) verifyRetainedHistory() time.Time {
+	now := time.Now().UTC()
 	for attempt := 0; attempt < retainedHistoryVerifyAttempts; attempt++ {
 		s.mu.RLock()
-		from, maxID, ok := s.retainedHistoryEdgeLocked()
+		from, maxID, ok := s.retainedHistoryEdgeLocked(now)
 		s.mu.RUnlock()
 		if !ok {
 			return time.Time{}
@@ -86,7 +101,7 @@ func (s *PacketStore) verifyRetainedHistory() time.Time {
 			s.retainedHistoryCountedHook()
 		}
 		s.mu.RLock()
-		again, _, ok := s.retainedHistoryEdgeLocked()
+		again, _, ok := s.retainedHistoryEdgeLocked(now)
 		inMemory := 0
 		if ok && again.Equal(from) {
 			inMemory = s.countRetainedSinceLocked(bound, maxID)
