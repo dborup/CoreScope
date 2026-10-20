@@ -1112,7 +1112,7 @@ While startup/background loading continues, `partial` and `loading` are true.
 Capped/failed loads conservatively certify only history after their completion;
 memory eviction advances the edge to the evicted transmissions' `first_seen`
 (the eviction boundary; packet membership is by `first_seen`). Late observations
-of evicted, re-heard transmissions never move `from`; they are counted in
+of evicted, re-heard transmissions never move `from`; they are counted (when heard more than 1 h after `first_seen`) in
 `late_evicted_observations` as a known, bounded gap. A later background completion cannot restore
 an evicted interval. Reasons include `complete`, `available_history`, `loading`,
 `unknown_history`, `load_capped`, `load_failed`, and `memory_eviction`.
@@ -1736,6 +1736,16 @@ Per-observer analytics.
 ## GET /api/channels
 
 List decoded channels with message counts.
+
+The database-backed list uses all retained SQL history, not the server's
+in-memory packet window. `messageCount` counts distinct transmissions, not
+observations. With `region`, a transmission is included when at least one
+observer in any selected region heard it; repeated observations and overlapping
+selected regions do not multiply the count. `lastActivity`, `lastMessage` and
+`lastSender` are selected from that same regional transmission population.
+Without a region filter, transmissions without observations remain eligible.
+`includeEncrypted=true` uses the same unique-transmission regional counting for
+encrypted channels (their message/sender fields remain null).
 
 ### Query Parameters
 
