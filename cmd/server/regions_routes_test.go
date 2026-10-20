@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -302,8 +303,16 @@ func TestRegionRoutesSourceAndRowBounds(t *testing.T) {
 	a, b := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	path := `["` + a + `","` + b + `"]`
 	tx := routeTransmission(1, now.Add(-time.Hour))
+	// Distinct path strings that parse to the same two hops. The padding
+	// encodes i as JSON whitespace rather than as i spaces, so its length is
+	// logarithmic: a per-transmission ceiling anywhere near
+	// maxRegionsRoutePathBytes would otherwise make these paths oversize and
+	// refuse them for their byte count instead of for the ceiling under test.
+	pad := func(i int) string {
+		return strings.NewReplacer("0", " ", "1", "\t").Replace(strconv.FormatInt(int64(i), 2))
+	}
 	for i := 0; i < maxRegionsRoutePathsPerTx+1; i++ {
-		tx.Observations = append(tx.Observations, routeObservation(strings.Repeat(" ", i)+path, "14aabbccdd00"))
+		tx.Observations = append(tx.Observations, routeObservation(pad(i)+path, "14aabbccdd00"))
 	}
 	collector := newRegionsRoutesCollector(now)
 	collector.capture(tx)
