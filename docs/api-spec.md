@@ -352,7 +352,19 @@ Detailed performance metrics per endpoint.
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `mem` | string | `1` adds `memoryBreakdown` and `memoryBreakdownNote`: a walk of every stored transmission and observation under the packet-store read lock. Ignored when the server has no packet store. |
+| `mem` | string | `1` adds `memoryBreakdown` and `memoryBreakdownNote`: a walk of every stored transmission and observation under the packet-store read lock. It also adds `regionsSnapshot`. Ignored when the server has no packet store. |
+
+`regionsSnapshot` sizes the retained Regions route, membership, hourly history
+and per-bucket evidence snapshot published with the background relay snapshot
+(#508): published counts, per-part and total retained bytes, `totalMB`, and
+`estimatedStepPayloadBytes` against `stepPayloadBudgetBytes` so the directed-step
+payload budget can be read against what a snapshot actually used. `truncated`
+repeats the snapshot's own publication flags. The walk is O(published cells),
+touches no packet state and takes no packet lock, so it is not part of the
+admission-controlled store scan; it is absent before the first background relay
+snapshot. Byte figures are struct sizes plus owned string content plus a flat
+per-map-entry allowance — an estimate of retained heap, not an allocator
+measurement, and not the transient aggregation that builds the snapshot.
 
 `mem=1` is admission-controlled per server process (#371): one scan at a
 time, and none for 5 s after a scan completes. A refused request gets

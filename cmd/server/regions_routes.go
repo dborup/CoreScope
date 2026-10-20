@@ -12,12 +12,44 @@ import (
 )
 
 const (
-	maxRegionsRouteSteps      = 5000
-	maxRegionsRouteCells      = 100000
-	maxRegionsRoutePaths      = 250000
+	// Published directed-step payload budget (#508). The retired fixed caps
+	// (5,000 rows and 100,000 hourly cells) were both reached on real data at
+	// 48 h retention, which left directed steps permanently incomplete, and a
+	// larger fixed row count gives no payload guarantee. Rows and hourly cells
+	// now share one estimated-byte budget, so a snapshot whose rows have few
+	// populated hours publishes many more rows while the response-size
+	// guarantee stays explicit and measurable.
+	regionsRouteStepRowBytes  = 180 // from/to/scope plus the row's JSON scaffolding
+	regionsRouteStepCellBytes = 75  // one {index, count, lastRelayed} bucket
+	maxRegionsRouteStepBytes  = 16 << 20
+	// Publication ceilings implied by the byte budget, for the OpenAPI
+	// description and the browser's defensive bounds.
+	maxRegionsRouteSteps = maxRegionsRouteStepBytes / regionsRouteStepRowBytes
+	maxRegionsRouteCells = maxRegionsRouteStepBytes / regionsRouteStepCellBytes
+	// Visible step endpoints published with a snapshot. Steps whose endpoints
+	// are omitted are reported as missing-endpoint steps, never dropped
+	// silently.
+	maxRegionsRouteEndpoints = 10000
+
 	maxRegionsRoutePathsPerTx = 128
 	maxRegionsRoutePairsPerTx = 8192
 	maxRegionsRoutePathBytes  = 8192
+	// Distinct observation path strings retained for deferred resolution.
+	// Identical paths are interned, so one relay chain observed by thousands of
+	// transmissions costs a single entry and is parsed and resolved once.
+	maxRegionsRoutePathVariants = 1 << 17
+	// Retained path references per hourly bucket (#508). The retired global
+	// 250,000-reference budget was exhausted by 48 h of real traffic (~805k
+	// observations): every hour after it was reported capped, which withheld
+	// the Health and Timeline rates for #dk and for all scopes. A per-hour
+	// budget makes the ceiling scale with retention and stops one busy hour
+	// from starving the rest of the horizon. A reference costs 8 bytes against
+	// the ~200 the packet store already holds for the same observation, so the
+	// real bound stays the retained store, not this safety net.
+	maxRegionsRoutePathRefsPerHour = 1 << 14
+	// Hop tokens cached with resolved paths. Past it, paths are resolved
+	// without caching: slower, never truncated.
+	maxRegionsRouteResolvedTokens = 1 << 21
 )
 
 // Cache only the observation's own header/transport evidence. Full raw frames
@@ -102,28 +134,73 @@ type regionsRouteSnapshot struct {
 	history                          *regionsRelayHistory
 }
 
-type regionsRoutePath struct {
-	path         string
-	observations int
-}
+// regionsRoutePathRef points one transmission at an interned observation path
+// and counts the observations that reported it. Eight bytes per retained
+// reference, so the deferred capture list stays a small fraction of what the
+// packet store already holds for the same observations.
+type regionsRoutePathRef struct{ path, observations int32 }
+
 type regionsRouteTx struct {
 	id    int
 	when  time.Time
 	scope string
-	paths []regionsRoutePath
+	paths []regionsRoutePathRef
 }
 type regionsRoutesCollector struct {
 	start, end time.Time
 	now        time.Time
 	txs        []regionsRouteTx
-	pathCount  int
-	evidence   RegionsStepEvidence
-	cells      *regionsEvidenceBuilder
+	// Interned observation paths, and this snapshot's per-hour reference
+	// budget. Indexed by hourly bucket, 0 through regionsHistoryBucketCount.
+	pathIDs  map[string]int32
+	pathList []string
+	hourRefs []int32
+	// stepBytes is the directed-step payload budget for this snapshot. A field
+	// rather than the constant so tests can exercise truncation without
+	// building a 16 MiB snapshot; build() never mutates it.
+	stepBytes int
+	evidence  RegionsStepEvidence
+	cells     *regionsEvidenceBuilder
 }
 
 func newRegionsRoutesCollector(now time.Time) *regionsRoutesCollector {
 	end := now.UTC().Truncate(time.Hour)
-	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(), cells: newRegionsEvidenceBuilder()}
+	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(),
+		pathIDs: make(map[string]int32), hourRefs: make([]int32, regionsHistoryBucketCount+1),
+		stepBytes: maxRegionsRouteStepBytes, cells: newRegionsEvidenceBuilder()}
+}
+
+// pathRefs reports how many observation paths this snapshot retained, for the
+// memory diagnostics and the capture benchmarks.
+func (c *regionsRoutesCollector) pathRefs() int {
+	total := 0
+	for _, used := range c.hourRefs {
+		total += int(used)
+	}
+	return total
+}
+
+// retainPath interns one observation path and spends its hour's reference
+// budget. Identical paths share one interned entry, so the variant table is
+// bounded by the distinct relay chains on the network rather than by the
+// number of observations. held is how many distinct paths this transmission
+// already retained.
+func (c *regionsRoutesCollector) retainPath(path string, index, held int) (int32, bool) {
+	if held >= maxRegionsRoutePathsPerTx || index < 0 || index >= len(c.hourRefs) ||
+		c.hourRefs[index] >= maxRegionsRoutePathRefsPerHour {
+		return 0, false
+	}
+	id, exists := c.pathIDs[path]
+	if !exists {
+		if len(c.pathList) >= maxRegionsRoutePathVariants {
+			return 0, false
+		}
+		id = int32(len(c.pathList))
+		c.pathList = append(c.pathList, path)
+		c.pathIDs[path] = id
+	}
+	c.hourRefs[index]++
+	return id, true
 }
 
 // addEvidence records one transmission's evidence in its own FirstSeen hour
@@ -158,6 +235,7 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	canonical, known := wireTransportCodes(tx.RawHex)
 	known = known && canonical>>16 != 0
 	item := regionsRouteTx{id: tx.ID, when: when, scope: tx.ScopeName}
+	index := c.bucket(item)
 	var counts RegionsEvidenceCounts
 	seen := make(map[string]int)
 	for _, obs := range tx.Observations {
@@ -173,18 +251,18 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 			counts.Capped++
 			continue
 		}
-		if index, exists := seen[obs.PathJSON]; exists {
-			item.paths[index].observations++
+		if at, exists := seen[obs.PathJSON]; exists {
+			item.paths[at].observations++
 			continue
 		}
-		if len(item.paths) >= maxRegionsRoutePathsPerTx || c.pathCount >= maxRegionsRoutePaths {
+		id, admitted := c.retainPath(obs.PathJSON, index, len(item.paths))
+		if !admitted {
 			c.evidence.SourceTruncated = true
 			counts.Capped++
 			continue
 		}
 		seen[obs.PathJSON] = len(item.paths)
-		item.paths = append(item.paths, regionsRoutePath{path: obs.PathJSON, observations: 1})
-		c.pathCount++
+		item.paths = append(item.paths, regionsRoutePathRef{path: id, observations: 1})
 	}
 	if len(tx.Observations) == 0 {
 		counts.Unprovable++
@@ -201,15 +279,71 @@ type regionsRouteCell struct {
 	last  time.Time
 }
 
+// regionsResolvedPath is one interned observation path, parsed and identity-
+// resolved once per snapshot instead of once per transmission that observed
+// it. keys keeps path order; an empty key is an unresolved hop token, which
+// breaks adjacency without qualifying resolved memberships.
+type regionsResolvedPath struct {
+	keys []string
+	bad  bool // malformed path JSON
+	over bool // more hop tokens than the adjacency scan accepts
+}
+
+// regionsPathResolver runs outside the packet lock. The cache is bounded by
+// retained hop tokens; past that budget paths are resolved uncached, which
+// costs time but never truncates evidence.
+type regionsPathResolver struct {
+	resolve   *relayTokenResolver
+	paths     []string
+	cached    []*regionsResolvedPath
+	remaining int
+}
+
+func newRegionsPathResolver(paths []string, pm *prefixMap) *regionsPathResolver {
+	return &regionsPathResolver{resolve: newRelayTokenResolver(pm), paths: paths,
+		cached: make([]*regionsResolvedPath, len(paths)), remaining: maxRegionsRouteResolvedTokens}
+}
+
+func (r *regionsPathResolver) at(id int32) *regionsResolvedPath {
+	if id < 0 || int(id) >= len(r.paths) {
+		return &regionsResolvedPath{bad: true}
+	}
+	if hit := r.cached[id]; hit != nil {
+		return hit
+	}
+	out := &regionsResolvedPath{}
+	var tokens []string
+	if err := json.Unmarshal([]byte(r.paths[id]), &tokens); err != nil {
+		out.bad = true
+	} else if len(tokens) > 64 {
+		out.over = true
+	} else {
+		out.keys = make([]string, len(tokens))
+		for i, token := range tokens {
+			if len(r.resolve.cache) >= 4096 {
+				clear(r.resolve.cache)
+			}
+			out.keys[i] = r.resolve.key(token)
+		}
+	}
+	if r.remaining >= len(out.keys) {
+		r.remaining -= len(out.keys)
+		r.cached[id] = out
+	}
+	return out
+}
+
 func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 	out := &regionsRouteSnapshot{steps: []RegionsRouteStep{}}
 	sort.Slice(c.txs, func(i, j int) bool { return c.txs[i].id < c.txs[j].id })
-	resolve := newRelayTokenResolver(pm)
+	paths := newRegionsPathResolver(c.pathList, pm)
 	memberships := newRegionsMembershipBuilder()
 	rows := make(map[regionsRouteKey]map[int]regionsRouteCell)
 	seen := make(map[regionsRouteKey]bool)
 	seenMembers := make(map[string]bool)
-	cellCount := 0
+	// Published rows and hourly cells share one estimated-payload budget, so a
+	// row cap can no longer truncate a snapshot that would fit (#508).
+	payload := c.stepBytes
 	// Directed-step caps are counted only as step appearances: they never
 	// reach membership coverage evidence.
 	capStep := func(truncated *bool) {
@@ -220,22 +354,18 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 		clear(seen)
 		clear(seenMembers)
 		index := c.bucket(tx)
-		for _, path := range tx.paths {
-			var tokens []string
-			if err := json.Unmarshal([]byte(path.path), &tokens); err != nil {
-				c.addEvidence(tx, RegionsEvidenceCounts{Unprovable: path.observations})
+		for _, ref := range tx.paths {
+			resolved := paths.at(ref.path)
+			if resolved.bad {
+				c.addEvidence(tx, RegionsEvidenceCounts{Unprovable: int(ref.observations)})
 				continue
 			}
-			if len(tokens) > 64 {
-				c.addEvidence(tx, RegionsEvidenceCounts{Capped: path.observations})
+			if resolved.over {
+				c.addEvidence(tx, RegionsEvidenceCounts{Capped: int(ref.observations)})
 				continue
 			}
 			previous := ""
-			for _, token := range tokens {
-				if len(resolve.cache) >= 4096 {
-					clear(resolve.cache)
-				}
-				key := resolve.key(token)
+			for _, key := range resolved.keys {
 				if key == "" {
 					previous = ""
 					c.evidence.UnresolvedHops++
@@ -243,9 +373,9 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 				}
 				if !seenMembers[key] {
 					seenMembers[key] = true
-					if !memberships.add(key, tx) {
+					if !memberships.add(key, tx.scope, index, tx.when) {
 						// A dropped membership, not an observation: no step count.
-						c.cells.add(tx.scope, c.bucket(tx), RegionsEvidenceCounts{Capped: 1})
+						c.cells.add(tx.scope, index, RegionsEvidenceCounts{Capped: 1})
 					}
 				}
 				// Latest includes the current hour. Completed hourly history and
@@ -263,22 +393,27 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 						}
 						seen[step] = true
 						byIndex := rows[step]
-						if byIndex == nil {
-							if len(rows) >= maxRegionsRouteSteps {
-								capStep(&out.stepsTruncated)
-								previous = key
-								continue
-							}
-							byIndex = make(map[int]regionsRouteCell)
-						}
 						cell, exists := byIndex[index]
-						if !exists {
-							if cellCount >= maxRegionsRouteCells {
+						// A new row pays for its scaffolding and its first
+						// bucket; an existing bucket costs nothing more.
+						cost := 0
+						if byIndex == nil {
+							cost = regionsRouteStepRowBytes + regionsRouteStepCellBytes
+						} else if !exists {
+							cost = regionsRouteStepCellBytes
+						}
+						if cost > payload {
+							if byIndex == nil {
+								capStep(&out.stepsTruncated)
+							} else {
 								capStep(&out.bucketsTruncated)
-								previous = key
-								continue
 							}
-							cellCount++
+							previous = key
+							continue
+						}
+						payload -= cost
+						if byIndex == nil {
+							byIndex = make(map[int]regionsRouteCell)
 						}
 						cell.count++
 						if tx.when.After(cell.last) {
@@ -375,10 +510,11 @@ func regionsRoutesSchemas() map[string]*openAPISchema {
 	for key, value := range regionsHistorySchemas()["RegionsHistoryResponse"].Properties {
 		properties[key] = value
 	}
-	properties["steps"] = &openAPISchema{Type: "array", Items: openAPIRef("RegionsRouteStep")}
+	properties["steps"] = &openAPISchema{Type: "array", Items: openAPIRef("RegionsRouteStep"),
+		Description: "Directed step/scope rows, sorted by from, to and scope. Rows and their hourly buckets share one 16 MiB estimated-payload budget (at most 93206 rows or 223696 buckets), not a fixed row count; stepsTruncated and stepBucketsTruncated disclose when it was reached."}
 	properties["stepNodes"] = &openAPISchema{Type: "array", Items: openAPIRef("RegionsRouteNode"), Description: "At most 10000 eligible visible endpoints, independent of legacy relay history scope attribution."}
-	properties["stepsTruncated"] = &openAPISchema{Type: "boolean"}
-	properties["stepBucketsTruncated"] = &openAPISchema{Type: "boolean"}
+	properties["stepsTruncated"] = &openAPISchema{Type: "boolean", Description: "A directed step/scope row was omitted by the published payload budget or the per-transmission pair cap."}
+	properties["stepBucketsTruncated"] = &openAPISchema{Type: "boolean", Description: "An hourly bucket of a published row was omitted by the published payload budget."}
 	properties["stepEvidence"] = openAPIRef("RegionsStepEvidence")
 	return map[string]*openAPISchema{
 		"RegionsRoutesResponse": {Type: "object", Properties: properties},
@@ -388,10 +524,10 @@ func regionsRoutesSchemas() map[string]*openAPISchema {
 		"RegionsStepEvidence": {Type: "object", Description: "Snapshot-wide directed-step diagnostics, not selected-window totals or scope-transition evidence. Per-bucket membership evidence is coverage.evidence.", Properties: map[string]*openAPISchema{
 			"excludedObservations":   {Type: "integer", Description: "Known DIRECT/unscoped or mismatched-transport-code observations."},
 			"unprovableObservations": {Type: "integer", Description: "Observations with unknown or malformed own/canonical evidence."},
-			"cappedObservations":     {Type: "integer", Description: "Observations omitted by source path limits."},
+			"cappedObservations":     {Type: "integer", Description: "Observations omitted by the per-hour capture budget, the per-transmission path cap or the path size bound."},
 			"unresolvedHops":         {Type: "integer", Description: "Hop tokens without a unique relay identity; they break adjacency but not resolved memberships."},
 			"sourceTruncated":        {Type: "boolean"},
-			"cappedStepAppearances":  {Type: "integer", Description: "Directed step appearances omitted by the step, per-transmission pair or cell caps. Never part of coverage.evidence."},
+			"cappedStepAppearances":  {Type: "integer", Description: "Directed step appearances omitted by the published payload budget or the per-transmission pair cap. Never part of coverage.evidence."},
 			"incomplete":             {Type: "boolean", Description: "Directed steps may be missing: unprovable/capped observations, unresolved hops, step caps or missing endpoints."},
 			"missingEndpointSteps":   {Type: "integer"}}},
 	}

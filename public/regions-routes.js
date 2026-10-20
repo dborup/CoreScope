@@ -3,7 +3,13 @@
 'use strict';
 (function (root) {
   const historyTools = typeof module !== 'undefined' && module.exports ? require('./regions-history.js') : root.RegionsHistory;
-  const MAX_STEPS = 5000, MAX_CELLS = 100000, MAX_PAIRS = 1000, PAGE_SIZE = 25, MAP_LIMIT = 200;
+  // Defensive client bounds mirroring the server's directed-step payload
+  // budget (#508): rows and hourly buckets share one 16 MiB estimate instead
+  // of a fixed 5,000-row / 100,000-cell cap, which real data reached at 48 h
+  // retention. MAX_STEP_NODES mirrors the server's endpoint ceiling.
+  const STEP_ROW_BYTES = 180, STEP_CELL_BYTES = 75, MAX_STEP_BYTES = 16 * 1024 * 1024;
+  const MAX_STEPS = Math.floor(MAX_STEP_BYTES / STEP_ROW_BYTES), MAX_CELLS = Math.floor(MAX_STEP_BYTES / STEP_CELL_BYTES);
+  const MAX_STEP_NODES = 10000, MAX_PAIRS = 1000, PAGE_SIZE = 25, MAP_LIMIT = 200;
   const keyPattern = /^[0-9a-f]{64}$/i;
 
   function indexRoutes(data, history, validScope, validPosition) {
@@ -16,8 +22,8 @@
       if (count != null && (!Number.isSafeInteger(count) || count < 0 || count > 0)) limited = true;
     }
     if (Array.isArray(data.stepNodes)) {
-      if (data.stepNodes.length > MAX_STEPS * 2) limited = true;
-      for (const node of data.stepNodes.slice(0, MAX_STEPS * 2)) {
+      if (data.stepNodes.length > MAX_STEP_NODES) limited = true;
+      for (const node of data.stepNodes.slice(0, MAX_STEP_NODES)) {
         if (!node || !keyPattern.test(node.publicKey) || !['repeater', 'room'].includes(node.role)) { limited = true; continue; }
         const positioned = node.positionSource === 'reported' && typeof validPosition === 'function' && validPosition(node);
         nodes.set(node.publicKey.toLowerCase(), { publicKey: node.publicKey.toLowerCase(), name: String(node.name || node.publicKey.slice(0, 8)), role: node.role,
@@ -295,7 +301,7 @@
     return { panel, update, renderMap, fitMap, clear, clearMap };
   }
 
-  const api = { indexRoutes, selectRoutes, createPanel, PAGE_SIZE, MAP_LIMIT };
+  const api = { indexRoutes, selectRoutes, createPanel, PAGE_SIZE, MAP_LIMIT, MAX_STEPS, MAX_CELLS, MAX_STEP_NODES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RegionsRoutes = api;
 })(typeof window === 'undefined' ? globalThis : window);

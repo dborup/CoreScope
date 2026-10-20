@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -305,45 +306,56 @@ func TestRegionRoutesSourceAndRowBounds(t *testing.T) {
 	}
 	collector := newRegionsRoutesCollector(now)
 	collector.capture(tx)
-	if collector.pathCount != maxRegionsRoutePathsPerTx || !collector.evidence.SourceTruncated {
+	if collector.pathRefs() != maxRegionsRoutePathsPerTx || !collector.evidence.SourceTruncated {
 		t.Fatal("per-transmission source cap missing")
 	}
 	if got := collector.build(nil); len(got.steps) != 1 || got.steps[0].Buckets[0].Count != 1 || !got.evidence.Incomplete {
 		t.Fatal("source bound altered per-transmission dedup")
 	}
+	// Identical paths are interned once, so repeated relay chains do not spend
+	// the variant table (#508). The per-hour reference budget still counts
+	// every retained reference.
 	collector = newRegionsRoutesCollector(now)
-	collector.pathCount = maxRegionsRoutePaths
+	for i := 0; i < 50; i++ {
+		collector.capture(routeTransmission(i+2, now.Add(-time.Hour), path))
+	}
+	if len(collector.pathList) != 1 || collector.pathRefs() != 50 || collector.evidence.SourceTruncated {
+		t.Fatalf("path interning: variants=%d refs=%d", len(collector.pathList), collector.pathRefs())
+	}
+	// The per-hour capture budget, exhausted by one hour of its own.
+	collector = newRegionsRoutesCollector(now)
+	collector.hourRefs[regionsHistoryBucketCount-1] = maxRegionsRoutePathRefsPerHour
 	collector.capture(routeTransmission(2, now.Add(-time.Hour), path))
 	if len(collector.txs) != 0 || !collector.evidence.SourceTruncated {
-		t.Fatal("global path budget missing")
+		t.Fatal("per-hour path reference budget missing")
 	}
 	collector = newRegionsRoutesCollector(now)
-	for i := 0; i < maxRegionsRouteSteps+1; i++ {
+	// One row with its first bucket fits; the rest are budget truncation.
+	collector.stepBytes = regionsRouteStepRowBytes + regionsRouteStepCellBytes
+	for i := 0; i < 3; i++ {
 		to := fmt.Sprintf("%064x", i+1)
-		collector.txs = append(collector.txs, regionsRouteTx{id: i + 1, when: now.Add(-time.Hour), scope: "#sample", paths: []regionsRoutePath{{path: `["` + a + `","` + to + `"]`, observations: 1}}})
+		collector.capture(routeTransmission(i+1, now.Add(-time.Hour), `["`+a+`","`+to+`"]`))
 	}
 	got := collector.build(nil)
-	if len(got.steps) != maxRegionsRouteSteps || !got.stepsTruncated || !got.evidence.Incomplete {
-		t.Fatal("step row budget missing")
-	}
-	for i, j := 0, len(collector.txs)-1; i < j; i, j = i+1, j-1 {
-		collector.txs[i], collector.txs[j] = collector.txs[j], collector.txs[i]
-	}
-	if other := collector.build(nil); !reflect.DeepEqual(got.steps, other.steps) {
-		t.Fatal("row selection depends on map/source encounter order")
+	if len(got.steps) != 1 || !got.stepsTruncated || !got.evidence.Incomplete || got.evidence.CappedStepAppearances != 2 {
+		t.Fatalf("step payload budget missing: steps=%d %+v", len(got.steps), got.evidence)
 	}
 }
 
-func TestRegionRoutesActualGlobalCellBound(t *testing.T) {
+// The payload budget is spent exactly, on rows and hourly cells together, and
+// its selection does not depend on map or source iteration order (#508).
+func TestRegionRoutesActualStepPayloadBound(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 35, 0, 0, time.UTC)
 	collector := newRegionsRoutesCollector(now)
 	a := strings.Repeat("ab", 32)
+	// Two rows and five hourly cells between them; the budget is spent exactly.
+	collector.stepBytes = 2*regionsRouteStepRowBytes + 5*regionsRouteStepCellBytes
 	id := 0
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 5; i++ {
 		path := `["` + a + `","` + fmt.Sprintf("%064x", i+1) + `"]`
-		for hour := 0; hour < 501; hour++ {
+		for hour := 0; hour < 3; hour++ {
 			id++
-			collector.txs = append(collector.txs, regionsRouteTx{id: id, when: collector.start.Add(time.Duration(hour) * time.Hour), scope: "#sample", paths: []regionsRoutePath{{path: path, observations: 1}}})
+			collector.capture(routeTransmission(id, collector.start.Add(time.Duration(hour)*time.Hour+time.Minute), path))
 		}
 	}
 	got := collector.build(nil)
@@ -351,8 +363,17 @@ func TestRegionRoutesActualGlobalCellBound(t *testing.T) {
 	for _, step := range got.steps {
 		cells += len(step.Buckets)
 	}
-	if cells != maxRegionsRouteCells || !got.bucketsTruncated || !got.evidence.Incomplete {
-		t.Fatalf("cell limit=%d truncated=%v", cells, got.bucketsTruncated)
+	if len(got.steps) != 2 || cells != 5 || !got.stepsTruncated || !got.bucketsTruncated || !got.evidence.Incomplete {
+		t.Fatalf("rows=%d cells=%d steps-truncated=%v buckets-truncated=%v", len(got.steps), cells, got.stepsTruncated, got.bucketsTruncated)
+	}
+	if spent := len(got.steps)*regionsRouteStepRowBytes + cells*regionsRouteStepCellBytes; spent != collector.stepBytes {
+		t.Fatalf("published payload estimate %d, budget %d", spent, collector.stepBytes)
+	}
+	for i, j := 0, len(collector.txs)-1; i < j; i, j = i+1, j-1 {
+		collector.txs[i], collector.txs[j] = collector.txs[j], collector.txs[i]
+	}
+	if other := collector.build(nil); !reflect.DeepEqual(got.steps, other.steps) {
+		t.Fatal("payload selection depends on map/source encounter order")
 	}
 }
 
@@ -491,13 +512,28 @@ func BenchmarkRegionsRoutesCapture30K2K(b *testing.B) {
 	}
 }
 
+// Worst-case published step payload, in the two shapes the byte budget admits
+// (#508): one bucket per row, and few rows with many buckets. The reported
+// payload-bytes validate the 180/75 per-row and per-bucket estimates the
+// budget spends against real encoded JSON.
 func BenchmarkRegionsRoutesCapPayload(b *testing.B) {
-	response := RegionsRoutesResponse{Steps: make([]RegionsRouteStep, 5000), StepNodes: []RegionsRouteNode{}}
+	benchmarkRegionsRoutesCapPayload(b, 1)
+}
+
+func BenchmarkRegionsRoutesCapPayloadCellHeavy(b *testing.B) {
+	benchmarkRegionsRoutesCapPayload(b, 504)
+}
+
+func benchmarkRegionsRoutesCapPayload(b *testing.B, cellsPerRow int) {
+	rows := maxRegionsRouteStepBytes / (regionsRouteStepRowBytes + cellsPerRow*regionsRouteStepCellBytes)
+	response := RegionsRoutesResponse{Steps: make([]RegionsRouteStep, rows), StepNodes: []RegionsRouteNode{}}
+	cells := 0
 	for i := range response.Steps {
-		buckets := make([]RegionsHistoryBucket, 20)
+		buckets := make([]RegionsHistoryBucket, cellsPerRow)
 		for j := range buckets {
-			buckets[j] = RegionsHistoryBucket{Index: 480 + j, Count: 12345, LastRelayed: "2026-10-16T11:59:59.123456789Z"}
+			buckets[j] = RegionsHistoryBucket{Index: j, Count: 12345, LastRelayed: "2026-10-16T11:59:59.123456789Z"}
 		}
+		cells += len(buckets)
 		response.Steps[i] = RegionsRouteStep{From: fmt.Sprintf("%064x", i), To: fmt.Sprintf("%064x", i+1), Scope: "#sample", Buckets: buckets}
 	}
 	encoded, err := json.Marshal(response)
@@ -512,6 +548,39 @@ func BenchmarkRegionsRoutesCapPayload(b *testing.B) {
 		}
 	}
 	b.ReportMetric(float64(len(encoded)), "payload-bytes")
+	b.ReportMetric(float64(rows*regionsRouteStepRowBytes+cells*regionsRouteStepCellBytes), "budgeted-bytes")
+	b.ReportMetric(float64(rows), "steps")
+}
+
+// BenchmarkRegionsSnapshotRetainedMemory reports what the published Regions
+// snapshot retains for the 30k-transmission / 2k-relay mixed fixture, plus the
+// allocations the whole paired background recomputation makes and the heap it
+// leaves behind, so #508's memory claim is measured rather than estimated. The
+// timed loop is the diagnostic walk itself, which must stay cheap.
+func BenchmarkRegionsSnapshotRetainedMemory(b *testing.B) {
+	srv := regionsRoutesBenchmarkFixtureWith(b, true)
+	var before, peak, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	snapshot := srv.store.computeRepeaterRelaySnapshot(24)
+	runtime.ReadMemStats(&peak)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	measured := measureRegionsSnapshot(snapshot)
+	b.ReportMetric(float64(measured.TotalBytes), "regions-retained-bytes")
+	b.ReportMetric(float64(measured.MembershipsBytes), "membership-bytes")
+	b.ReportMetric(float64(measured.HistoryBytes), "history-bytes")
+	b.ReportMetric(float64(measured.StepsBytes), "step-bytes")
+	b.ReportMetric(float64(measured.EvidenceBytes), "evidence-bytes")
+	b.ReportMetric(float64(measured.EstimatedStepPayloadBytes), "step-payload-bytes")
+	b.ReportMetric(float64(peak.TotalAlloc-before.TotalAlloc), "recompute-alloc-bytes")
+	b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "paired-snapshot-heap-bytes")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		measureRegionsSnapshot(snapshot)
+	}
+	runtime.KeepAlive(snapshot)
 }
 
 func TestRegionsRoutesUnavailable(t *testing.T) {

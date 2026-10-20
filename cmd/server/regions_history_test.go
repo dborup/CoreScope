@@ -10,25 +10,32 @@ import (
 	"time"
 )
 
-func historyEntry(at time.Time, scope string) relayEntry {
-	return relayEntry{t: at, parsed: true, valid: true, pt: 5, scope: scope}
+// historyCell builds one aggregated membership cell the way the Regions
+// collector does (#508): the hourly bucket index is derived from the
+// transmission time, and a time before the horizon is out of range rather
+// than truncated into bucket 0.
+func historyCell(b *regionsHistoryBuilder, at time.Time, scope string) regionsMembershipNodeCell {
+	hour := int32(at.Sub(b.history.start) / time.Hour)
+	if at.Before(b.history.start) {
+		hour = -1
+	}
+	return regionsMembershipNodeCell{scope: scope, hour: hour, count: 1, last: at}
 }
 
 func TestRegionsHistoryBucketsAndScopeProvenance(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 35, 0, 0, time.UTC)
 	end := now.Truncate(time.Hour)
 	start := end.Add(-21 * 24 * time.Hour)
-	entries := []relayEntry{historyEntry(start, "#sample"), historyEntry(end.Add(-time.Nanosecond), "#sample"),
-		historyEntry(end.Add(-time.Hour), "#sample"), historyEntry(start.Add(-time.Nanosecond), "#old"),
-		historyEntry(end, "#unfinished"), historyEntry(now.Add(time.Hour), "#future")}
-	entries = append(entries, relayEntry{ts: "invalid", scope: "#bad"}, historyEntry(end.Add(-time.Minute), "invalid"))
-	prefix := historyEntry(end.Add(-time.Minute), "#prefix")
-	prefix.fromPrefix = true
-	advert := historyEntry(end.Add(-time.Minute), "#advert")
-	advert.pt = payloadTypeAdvert
-	entries = append(entries, prefix, advert)
+	// Advert/TRACE payloads, planned direct paths, prefix-only evidence and
+	// unparsable timestamps are excluded before capture and can no longer
+	// reach this builder; TestRegionRoutesStrictObservationScopeAndBounds
+	// pins that gate. What remains here is the horizon and the scope name.
 	b := newRegionsHistoryBuilder(now)
-	b.add(strings.Repeat("ab", 32), entries)
+	cells := []regionsMembershipNodeCell{historyCell(b, start, "#sample"), historyCell(b, end.Add(-time.Nanosecond), "#sample"),
+		historyCell(b, end.Add(-time.Hour), "#sample"), historyCell(b, start.Add(-time.Nanosecond), "#old"),
+		historyCell(b, end, "#unfinished"), historyCell(b, now.Add(time.Hour), "#future"),
+		historyCell(b, end.Add(-time.Minute), "invalid")}
+	b.add(strings.Repeat("ab", 32), cells)
 	h := b.history
 	if !h.start.Equal(start) || !h.end.Equal(end) || len(h.nodes) != 1 {
 		t.Fatalf("history bounds/nodes: %+v", h)
@@ -48,10 +55,11 @@ func TestRegionsHistoryBucketsAndScopeProvenance(t *testing.T) {
 func TestRegionsHistoryAdjacentSevenDayWindows(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 35, 0, 0, time.UTC)
 	end := now.Truncate(time.Hour)
-	entries := []relayEntry{historyEntry(end.Add(-14*24*time.Hour), "#sample"), historyEntry(end.Add(-7*24*time.Hour), "#sample"), historyEntry(end.Add(-time.Second), "#sample")}
 	b := newRegionsHistoryBuilder(now)
+	cells := []regionsMembershipNodeCell{historyCell(b, end.Add(-14*24*time.Hour), "#sample"),
+		historyCell(b, end.Add(-7*24*time.Hour), "#sample"), historyCell(b, end.Add(-time.Second), "#sample")}
 	key := strings.Repeat("ab", 32)
-	b.add(key, entries)
+	b.add(key, cells)
 	previous, current := 0, 0
 	for _, bucket := range b.history.nodes[key][0].Buckets {
 		if bucket.Index >= 168 && bucket.Index < 336 {
@@ -70,12 +78,12 @@ func TestRegionsHistoryBoundedScopesAndCells(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 35, 0, 0, time.UTC)
 	b := newRegionsHistoryBuilder(now)
 	b.remainingCells = 2
-	var entries []relayEntry
+	var cells []regionsMembershipNodeCell
 	for i := 0; i < 40; i++ {
-		entries = append(entries, historyEntry(b.history.end.Add(-time.Duration(i+1)*time.Hour), fmt.Sprintf("#s%02d", i)))
+		cells = append(cells, historyCell(b, b.history.end.Add(-time.Duration(i+1)*time.Hour), fmt.Sprintf("#s%02d", i)))
 	}
 	key := strings.Repeat("ab", 32)
-	b.add(key, entries)
+	b.add(key, cells)
 	if !b.history.scopesTruncated || !b.history.bucketsTruncated || len(b.history.nodes[key]) > 32 || b.remainingCells != 0 {
 		t.Fatalf("bounds/flags: %+v", b.history)
 	}
@@ -84,7 +92,7 @@ func TestRegionsHistoryBoundedScopesAndCells(t *testing.T) {
 			t.Fatal("old scope displaced recent scope")
 		}
 	}
-	reversed := append([]relayEntry(nil), entries...)
+	reversed := append([]regionsMembershipNodeCell(nil), cells...)
 	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
 		reversed[i], reversed[j] = reversed[j], reversed[i]
 	}
@@ -211,9 +219,9 @@ func TestRegionsHistoryArchivedMetadataAndVisibility(t *testing.T) {
 func TestRegionsHistoryNodeCapAndAvailability(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 35, 0, 0, time.UTC)
 	b := newRegionsHistoryBuilder(now)
-	entries := []relayEntry{historyEntry(b.history.end.Add(-time.Minute), "#sample")}
+	cells := []regionsMembershipNodeCell{historyCell(b, b.history.end.Add(-time.Minute), "#sample")}
 	for i := 0; i <= maxObservedRegionNodes; i++ {
-		b.add(fmt.Sprintf("%064x", i+1), entries)
+		b.add(fmt.Sprintf("%064x", i+1), cells)
 	}
 	if len(b.history.nodes) != maxObservedRegionNodes || !b.history.truncated {
 		t.Fatal("snapshot node bound not enforced")
@@ -238,12 +246,12 @@ func TestRegionsHistoryNodeCapAndAvailability(t *testing.T) {
 func TestRegionsHistoryActualGlobalCellBudget(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 35, 0, 0, time.UTC)
 	b := newRegionsHistoryBuilder(now)
-	entries := make([]relayEntry, 501)
-	for i := range entries {
-		entries[i] = historyEntry(b.history.start.Add(time.Duration(i)*time.Hour), "#sample")
+	hours := make([]regionsMembershipNodeCell, 501)
+	for i := range hours {
+		hours[i] = historyCell(b, b.history.start.Add(time.Duration(i)*time.Hour), "#sample")
 	}
 	for i := 0; i < 500; i++ {
-		b.add(fmt.Sprintf("%064x", i+1), entries)
+		b.add(fmt.Sprintf("%064x", i+1), hours)
 	}
 	cells := 0
 	for _, scopes := range b.history.nodes {

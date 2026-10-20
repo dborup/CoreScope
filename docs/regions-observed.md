@@ -244,19 +244,37 @@ scope, step and populated-hour limits must be disclosed as incomplete evidence.
 No database writes, schema changes, retention extension, dependencies or new
 operator configuration are required.
 
-The route collector retains at most 250,000 path variants globally and 128 per
-transmission, with an 8,192-byte input-path safety bound. The capture includes
-the current hour for Latest, but completed-hour history and steps exclude it.
-Membership aggregation has independent budgets of 1,000,000 transmission/node
-entries and 10,000 identities; step limits cannot suppress a valid singleton
-membership. Each identity retains its 32 newest scope names. Source and
-membership limits are counted as `capped` in the affected transmission's hour
-and scope; the directed-step, per-transmission pair and cell caps are counted
-separately as `stepEvidence.cappedStepAppearances` and never affect
-memberships or history coverage. Capped capture is a
-retained subset, not a ranking of all possible evidence. Publication retains
-at most 5,000 directed step/scope rows, 100,000 populated hourly cells and 10,000
-endpoint identities. Endpoint metadata is independent of relay-history
+Capture retains at most 16,384 observation-path references **per hourly
+bucket** and 128 per transmission, with an 8,192-byte input-path safety bound.
+Identical paths are interned, so one relay chain observed by thousands of
+transmissions costs a single entry (at most 131,072 distinct paths) and is
+parsed and identity-resolved once per snapshot. A per-hour budget replaces the
+single global 250,000-variant budget, which 48 h of real traffic exhausted and
+which then reported `capped` evidence for every later hour and withheld the
+Health and Timeline rates (#508). The per-hour ceiling makes retained capture
+scale with retention and stops one busy hour from starving the rest of the
+horizon; a reference costs 8 bytes against the roughly 200 the packet store
+already holds for the same observation, so the real bound stays the retained
+store. The capture includes the current hour for Latest, but completed-hour
+history and steps exclude it.
+
+Memberships are aggregated straight into (relay, scope, hour) cells, so the
+budget — 500,000 cells and 10,000 identities — grows with populated hours
+rather than with observations; nothing per transmission is retained. Step
+limits cannot suppress a valid singleton membership. Each identity retains its
+32 newest scope names. Source and membership limits are counted as `capped` in
+the affected transmission's hour and scope; the published-payload budget and
+the per-transmission pair cap are counted separately as
+`stepEvidence.cappedStepAppearances` and never affect memberships or history
+coverage. Capped capture is a retained subset, not a ranking of all possible
+evidence. Published directed steps share one 16 MiB estimated-payload budget
+across rows and hourly buckets (at most 93,206 rows or 223,696 buckets, from
+180 estimated bytes per row and 75 per bucket) instead of the fixed 5,000-row
+and 100,000-cell caps, which real data also reached; `/api/perf?mem=1` reports
+what a snapshot actually spent as `regionsSnapshot.estimatedStepPayloadBytes`
+against `stepPayloadBudgetBytes`. Publication also retains at most 10,000
+endpoint identities; steps whose endpoints are omitted are reported as
+`stepEvidence.missingEndpointSteps`. Endpoint metadata is independent of relay-history
 membership, so a valid flood observation of a canonically direct transmission
 can still be shown. The UI retains at most 1,000 shared scope pairs, paginates
 both tables in 25-row pages and maps at most 200 positioned step rows. A capped
@@ -265,6 +283,13 @@ subset is not a ranking of all possible relations. Snapshot-wide
 hops, capped step appearances and missing endpoints) are not selected-interval
 traffic totals. Complete retained history does not imply complete radio
 reception or that all paths can be attributed.
+
+The published snapshot's retained size is an operator diagnostic rather than a
+guess: `/api/perf?mem=1` reports `regionsSnapshot` with published counts and
+per-part retained bytes for memberships, hourly history, directed steps and
+per-bucket evidence. Publishing this snapshot raised staging container RSS from
+about 1.55 to about 1.72 GiB, and production hosts are smaller, so the figure
+is read against the host rather than against the budgets alone.
 
 Future work can add independently evidenced scope transitions and comparisons
 of observed routes. A change in timeline relay membership alone does

@@ -147,23 +147,29 @@ func TestRegionsEvidenceMembershipBudgetIndependentOfSteps(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
 	collector := newRegionsRoutesCollector(now)
 	a := strings.Repeat("ab", 32)
-	for i := 0; i < maxRegionsRouteSteps+1; i++ {
+	// One row plus its first bucket fits; the second row does not.
+	collector.stepBytes = regionsRouteStepRowBytes + regionsRouteStepCellBytes
+	for i := 0; i < 2; i++ {
 		key := fmt.Sprintf("%064x", i+1)
 		collector.capture(routeTransmission(i+1, now.Add(-time.Hour), `["`+a+`","`+key+`"]`))
 	}
 	got := collector.build(nil)
-	last := fmt.Sprintf("%064x", maxRegionsRouteSteps+1)
-	if len(got.steps) != maxRegionsRouteSteps || !got.stepsTruncated || len(got.memberships.nodes[last].scopes) != 1 ||
+	last := fmt.Sprintf("%064x", 2)
+	if len(got.steps) != 1 || !got.stepsTruncated || len(got.memberships.nodes[last].scopes) != 1 ||
 		got.memberships.evidence.history.Capped != 0 || got.memberships.evidence.truncated || got.evidence.CappedStepAppearances != 1 {
-		t.Fatal("directed-step cap suppressed independent valid membership or polluted its evidence")
+		t.Fatal("directed-step payload budget suppressed independent valid membership or polluted its evidence")
 	}
 	b := newRegionsMembershipBuilder()
 	b.remaining = 1
-	if !b.add(a, regionsRouteTx{when: now, scope: "#one"}) || b.add(a, regionsRouteTx{when: now, scope: "#two"}) {
-		t.Fatal("independent membership entry cap was silent")
+	if !b.add(a, "#one", 0, now) || b.add(a, "#two", 0, now) {
+		t.Fatal("independent membership cell cap was silent")
 	}
-	if bounded, _ := b.build(now, nil); len(b.entries[a]) != 1 || len(bounded.nodes[a].scopes) != 1 {
-		t.Fatal("independent membership entry cap was not applied")
+	// Aggregation: a further transmission in an admitted cell costs no budget.
+	if !b.add(a, "#one", 0, now.Add(time.Minute)) {
+		t.Fatal("an aggregated cell spent the membership budget twice")
+	}
+	if bounded, _ := b.build(now, nil); len(b.cells) != 1 || len(bounded.nodes[a].scopes) != 1 {
+		t.Fatal("independent membership cell cap was not applied")
 	}
 	// The node cap is counted as capped evidence in the omitted membership's
 	// own hour and scope only.
@@ -310,20 +316,26 @@ func TestRegionsEvidenceExcludedOnlyIsComplete(t *testing.T) {
 // appearances in stepEvidence, separately from observation-level evidence, and
 // never makes membership/history coverage incomplete.
 func TestRegionsEvidenceStepCapCountedSeparately(t *testing.T) {
-	srv, now, _ := regionsObservedFixture(t)
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
 	a := strings.Repeat("ab", 32)
-	when := now.Truncate(time.Hour).Add(-time.Hour)
-	for i := 0; i < maxRegionsRouteSteps+1; i++ {
-		srv.store.byPathHop[a] = append(srv.store.byPathHop[a], routeTransmission(i+1, when, fmt.Sprintf(`["%s","%064x"]`, a, i+1)))
+	collector := newRegionsRoutesCollector(now)
+	// Budget for one row and its first bucket only, so a second directed step
+	// is omitted by the published payload budget rather than by evidence.
+	collector.stepBytes = regionsRouteStepRowBytes + regionsRouteStepCellBytes
+	for i := 0; i < 2; i++ {
+		collector.capture(routeTransmission(i+1, now.Add(-time.Hour), fmt.Sprintf(`["%s","%064x"]`, a, i+1)))
 	}
-	recomputeRepeaterEnrichmentSafe(srv.store, 24)
-	body := regionsEvidenceResponse(t, srv, "/api/regions/routes")
-	if got := *body.Coverage.Evidence; got.Excluded != 0 || got.Unprovable != 0 || got.Capped != 0 || got.Truncated || len(got.Scopes) != 0 {
-		t.Fatalf("directed-step cap leaked into membership coverage evidence: %+v", got)
+	got := collector.build(nil)
+	if e := got.memberships.evidence.history; e.Excluded != 0 || e.Unprovable != 0 || e.Capped != 0 || e.Truncated || len(e.Scopes) != 0 {
+		t.Fatalf("directed-step payload budget leaked into membership coverage evidence: %+v", e)
 	}
-	steps := body.StepEvidence
-	if !body.StepsTruncated || steps == nil || steps.CappedStepAppearances != 1 || steps.CappedObservations != 0 || steps.UnprovableObservations != 0 || !steps.Incomplete {
-		t.Fatalf("step cap must be counted as capped step appearances only: truncated=%v %+v", body.StepsTruncated, steps)
+	steps := got.evidence
+	if !got.stepsTruncated || steps.CappedStepAppearances != 1 || steps.CappedObservations != 0 || steps.UnprovableObservations != 0 || !steps.Incomplete {
+		t.Fatalf("the step payload budget must be counted as capped step appearances only: truncated=%v %+v", got.stepsTruncated, steps)
+	}
+	// Both relays keep their membership; only the publication was truncated.
+	if len(got.memberships.nodes) != 3 || len(got.history.nodes) != 3 {
+		t.Fatalf("payload truncation dropped memberships: %d/%d", len(got.memberships.nodes), len(got.history.nodes))
 	}
 }
 

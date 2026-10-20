@@ -741,6 +741,11 @@ type PerfResponse struct {
 	// MemoryBreakdownNote documents the accounting scope of MemoryBreakdown.
 	// It lives here (one occurrence) rather than repeating in every breakdown.
 	MemoryBreakdownNote string `json:"memoryBreakdownNote,omitempty"`
+	// RegionsSnapshot is populated only for /api/perf?mem=1, alongside
+	// MemoryBreakdown: the retained size of the published Regions route,
+	// membership, hourly history and per-bucket evidence snapshot (#508). nil
+	// before the first background relay snapshot is published.
+	RegionsSnapshot *RegionsSnapshotMemory `json:"regionsSnapshot,omitempty"`
 }
 
 // StoreMemoryBreakdown is the opt-in /api/perf?mem=1 diagnostic: the
