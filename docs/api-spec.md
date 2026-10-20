@@ -1110,7 +1110,7 @@ While startup/background loading continues, `partial` and `loading` are true.
 Capped/failed loads conservatively certify only history after their completion;
 memory eviction advances the edge to the evicted transmissions' `first_seen`
 (the eviction boundary; packet membership is by `first_seen`). Late observations
-of evicted, re-heard transmissions never move `from`; they are counted in
+of evicted, re-heard transmissions never move `from`; they are counted (when heard more than 1 h after `first_seen`) in
 `late_evicted_observations` as a known, bounded gap. A later background completion cannot restore
 an evicted interval. Reasons include `complete`, `available_history`, `loading`,
 `unknown_history`, `load_capped`, `load_failed`, and `memory_eviction`.

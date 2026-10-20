@@ -397,3 +397,56 @@ func TestParseNodeAnalyticsTime485_FastPathMatchesFallback(t *testing.T) {
 		}
 	}
 }
+
+// #504 item 2: pin every separator position of the fast-path parser. Dropping
+// any single separator check (mutant M7 dropped raw[13]) must change the
+// result relative to the time.Parse fallback.
+func TestParseNodeAnalyticsTime504_EverySeparatorPositionMatchesFallback(t *testing.T) {
+	const canonical = "2026-10-16T12:30:45Z"
+	slow := func(raw string) (time.Time, bool) {
+		tm, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			tm, err = time.ParseInLocation("2006-01-02 15:04:05", raw, time.UTC)
+		}
+		return tm.UTC(), err == nil && tm.Unix() > 0
+	}
+	for _, pos := range []int{4, 7, 10, 13, 16, 19} {
+		for _, c := range []byte{'X', ' ', '-', ':', 'T', 'Z', '0', '.'} {
+			if canonical[pos] == c {
+				continue
+			}
+			raw := []byte(canonical)
+			raw[pos] = c
+			if _, ok := parseCanonicalUTCSeconds(string(raw)); ok {
+				t.Errorf("fast path accepted %q (separator %d replaced by %q)", raw, pos, c)
+			}
+			gt, gok := parseNodeAnalyticsTime(string(raw))
+			wt, wok := slow(string(raw))
+			if gok != wok || (gok && !gt.Equal(wt)) {
+				t.Errorf("%q: got (%v,%v) want (%v,%v)", raw, gt, gok, wt, wok)
+			}
+		}
+	}
+}
+
+// #504 item 1: late_evicted_observations counts only observations heard more
+// than lateEvictedObservationThreshold after the evicted tx's FirstSeen.
+// Ordinary second-observer hearings seconds later must not count.
+func TestNodeAnalyticsCoverage504_LateEvictedCountsOnlyGenuinelyLate(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	first := now.Add(-60 * time.Hour)
+	s := coverage485Store(t, now, now.Add(-72*time.Hour))
+	f := func(d time.Duration) string { return first.Add(d).Format(time.RFC3339) }
+	coverage485Packet(s, f(0),
+		f(0), f(2*time.Second), f(30*time.Second), f(10*time.Minute), // normal multi-observer hearings
+		f(time.Hour),                     // exactly at the threshold: not late
+		f(time.Hour+time.Second),         // late
+		f(30*time.Hour), f(48*time.Hour)) // late
+	s.invalidateNodeAnalyticsEvictionLocked(s.packets[:1])
+	if got := s.nodeAnalyticsCoverageLocked(30, now).LateEvictedObservations; got != 3 {
+		t.Fatalf("late evicted observations=%d want 3 (only >%v after FirstSeen)", got, lateEvictedObservationThreshold)
+	}
+	if lateEvictedObservationThreshold != time.Hour {
+		t.Fatalf("threshold=%v want 1h", lateEvictedObservationThreshold)
+	}
+}
