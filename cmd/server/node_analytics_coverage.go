@@ -29,7 +29,7 @@ type nodeAnalyticsHistory struct {
 	cap          bool
 	reason       string
 	loadCutoff   time.Time
-	evictedFrom  time.Time
+	evictedFrom  time.Time // newest evicted FirstSeen (+1 ns) since the load began
 	observedFrom time.Time
 	lateEvicted  int
 }
@@ -181,20 +181,24 @@ func (s *PacketStore) invalidateNodeAnalyticsEvictionLocked(removed []*StoreTx) 
 	for _, tx := range removed {
 		edge, ok := parseNodeAnalyticsTime(tx.FirstSeen)
 		if !ok {
-			h.from = time.Now().UTC()
+			edge = time.Now().UTC()
 		} else {
 			edge = edge.Add(time.Nanosecond)
-			if edge.After(h.from) {
-				h.from = edge
-			}
 			for _, obs := range tx.Observations {
 				if at, ok := parseNodeAnalyticsTime(obs.Timestamp); ok && !at.Before(edge) {
 					h.lateEvicted++
 				}
 			}
 		}
-		if h.from.After(h.evictedFrom) {
-			h.evictedFrom = h.from
+		if edge.After(h.from) {
+			h.from = edge
+		}
+		// #509: only the eviction boundary itself. Folding in h.from, the
+		// provisional hot-window floor while the background fill runs, made
+		// one retention eviction of an old re-heard row shrink the final
+		// coverage to the hot window.
+		if edge.After(h.evictedFrom) {
+			h.evictedFrom = edge
 		}
 	}
 	if len(removed) > 0 {

@@ -80,47 +80,36 @@ func (a *NodeActivity24h) add(tx *StoreTx) {
 }
 
 // nodeActivityCoverageStartLocked returns zero unless load and retention
-// provide positive evidence of continuous in-memory coverage. A memory cap
-// can evict the oldest rows after oldestLoaded was set, so use the current
-// first row as the stricter lower bound when it is enabled.
-//
-// #351 F4: loadCoverage is read by the caller (GetNodeHealth) BEFORE it
-// takes s.mu and passed in here, so this function never acquires bgErrMu
-// while holding s.mu. bgErrMu exists precisely so its readers need not
-// synchronise on s.mu (store.go:530); nesting s.mu → bgErrMu would be the
-// first such site in the codebase and would quietly undermine that contract.
-func (s *PacketStore) nodeActivityCoverageStartLocked(now time.Time, loadCoverage float64) time.Time {
+// provide positive evidence of continuous in-memory coverage.
+func (s *PacketStore) nodeActivityCoverageStartLocked(now time.Time) time.Time {
 	// Preserve the existing 24h health contract while other views can expose
-	// a shorter known interval as partial history.
+	// a shorter known interval as partial history: unlimited retention with
+	// a hot window shorter than 24h has no background fill to reach 24h.
 	if (s.retentionHours > 0 && s.retentionHours < 24) ||
-		(loadCoverage < 1 && s.retentionHours <= 0 && s.hotStartupHours < 24) {
+		(s.retentionHours <= 0 && s.hotStartupHours > 0 && s.hotStartupHours < 24) {
 		return time.Time{}
 	}
-	return s.retainedHistoryCoverageStartLocked(now, loadCoverage)
+	return s.retainedHistoryCoverageStartLocked(now)
 }
 
 // retainedHistoryCoverageStartLocked describes the known in-memory history,
-// independent of the requested display window. Caller reads loadCoverage
-// before taking s.mu; no bgErrMu acquisition is allowed under s.mu.
-func (s *PacketStore) retainedHistoryCoverageStartLocked(now time.Time, loadCoverage float64) time.Time {
+// independent of the requested display window.
+func (s *PacketStore) retainedHistoryCoverageStartLocked(now time.Time) time.Time {
 	if !s.loaded || !s.backgroundLoadDone.Load() || s.backgroundLoadFailed.Load() ||
 		len(s.packets) == 0 {
 		return time.Time{}
 	}
 	// The startup "done" gate accepts 90% of DB rows. That is not enough
-	// to call every empty hour a confirmed zero; require the exact count.
-	// Unlimited retention with a hot-start window has no background fill and
-	// leaves loadCoverageRatio at zero. The hot window proves coverage only
-	// without a memory cap: capped startup can omit newer rows while still
-	// retaining a much older first row. An old floor alone cannot prove that
-	// the interval after it was loaded completely.
-	if loadCoverage < 1 && !(s.retentionHours <= 0 && s.hotStartupHours > 0 && s.maxMemoryMB <= 0) {
+	// to call every empty hour a confirmed zero: startup must have proven
+	// the history complete (verifyRetainedHistory, #509). That proof also
+	// covers a capped load, which can omit newer rows while still retaining
+	// a much older first row.
+	coverage := s.retainedHistoryFrom
+	if coverage.IsZero() {
 		return time.Time{}
 	}
-	coverage, err := time.Parse(time.RFC3339Nano, s.oldestLoaded)
-	if err != nil {
-		return time.Time{}
-	}
+	// A memory cap can evict the oldest rows after startup, so use the
+	// current first row as the stricter lower bound when it is enabled.
 	if s.maxMemoryMB > 0 {
 		first, err := time.Parse(time.RFC3339Nano, s.packets[0].FirstSeen)
 		if err != nil {

@@ -274,6 +274,7 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 		s.bgErrMu.Unlock()
 		log.Printf("[store] RunStartupLoad: hotStartupHours=0 — background fill loader SKIPPED (coverage=%.1f%%, loaded=%d, totalInDB=%d)",
 			ratio*100, loadedCount, totalInDB)
+		s.publishRetainedHistory()
 		s.backgroundLoadDone.Store(true)
 		s.backgroundLoadProgress.Store(100)
 		return nil

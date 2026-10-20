@@ -71,9 +71,7 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 }
 
 func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeaterRelaySnapshot {
-	// Read before s.mu: bgErrMu readers intentionally do not wait on the
-	// packet lock. The same floor/time describes every entry in this result.
-	loadCoverage := s.LoadCoverageRatio()
+	// The same floor/time describes every entry in this result.
 	now := time.Now().UTC()
 	// Node metadata (SQL) is read BEFORE s.mu so no query runs under the
 	// packet-store lock (#412/#495).
@@ -85,7 +83,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	s.mu.RLock()
 	snapshot := &repeaterRelaySnapshot{
 		generatedAt:   now,
-		coverageStart: s.retainedHistoryCoverageStartLocked(now, loadCoverage),
+		coverageStart: s.retainedHistoryCoverageStartLocked(now),
 		loading:       !s.loaded || (!s.backgroundLoadDone.Load() && !s.backgroundLoadFailed.Load()),
 	}
 	pm := metadata.pm

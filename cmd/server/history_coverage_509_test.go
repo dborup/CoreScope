@@ -44,11 +44,10 @@ func openCoverage509Store(t *testing.T, dbPath string, cfg *PacketStoreConfig) *
 }
 
 func coverage509Starts(store *PacketStore, now time.Time) (retained, activity time.Time, analytics NodeAnalyticsCoverage) {
-	ratio := store.LoadCoverageRatio()
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	return store.retainedHistoryCoverageStartLocked(now, ratio),
-		store.nodeActivityCoverageStartLocked(now, ratio),
+	return store.retainedHistoryCoverageStartLocked(now),
+		store.nodeActivityCoverageStartLocked(now),
 		store.nodeAnalyticsCoverageLocked(2, now)
 }
 
@@ -249,6 +248,40 @@ func TestCoverage509UnloadedRowKeepsCoverageUnknown(t *testing.T) {
 	}
 }
 
+// A retention tick between the SQL count and the in-memory count evicts rows
+// the SQL count included. The edge moved, so the check is repeated against
+// the new edge instead of reporting those rows as missing.
+func TestCoverage509EvictionBetweenCountsRetries(t *testing.T) {
+	now := time.Now().UTC()
+	dbPath := coverage509Rows(t, now, 0, 200, 0)
+	store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: 12})
+	counted := 0
+	var lastEvicted time.Time
+	store.retainedHistoryCountedHook = func() {
+		if counted++; counted == 1 {
+			// Stand-in for a later tick: the oldest rows aged out.
+			store.mu.Lock()
+			evicted := append([]*StoreTx(nil), store.packets[:4]...)
+			store.invalidateNodeAnalyticsEvictionLocked(evicted)
+			store.packets = store.packets[4:]
+			for _, tx := range evicted {
+				delete(store.byTxID, tx.ID)
+			}
+			store.mu.Unlock()
+			lastEvicted, _ = time.Parse(time.RFC3339, evicted[3].FirstSeen)
+		}
+	}
+	if err := store.RunStartupLoad(50); err != nil {
+		t.Fatalf("RunStartupLoad: %v", err)
+	}
+	if counted < 2 {
+		t.Fatalf("verification was not repeated after the edge moved (%d counts)", counted)
+	}
+	retained, _, _ := coverage509Starts(store, now)
+	if retained.IsZero() || !retained.After(lastEvicted) || retained.After(lastEvicted.Add(time.Hour)) {
+		t.Fatalf("coverage start=%v, want known just after the newest evicted row %v", retained, lastEvicted)
+	}
+}
 
 // Eviction ticks and coverage readers run concurrently with the startup
 // load, as in production. Run with -race: the verification takes s.mu only
@@ -282,5 +315,27 @@ func TestCoverage509ConcurrentEvictionAndReaders(t *testing.T) {
 	if retained, _, _ := coverage509Starts(store, now); !retained.IsZero() &&
 		retained.Before(now.Add(-coverage509RetentionHours*time.Hour)) {
 		t.Fatalf("coverage start %v precedes the retention floor", retained)
+	}
+}
+
+// Capped and failed loads stay unknown however the counts compare: a capped
+// load omits rows above the store's highest id, and a failed load is
+// reported as failed by the #494 analytics coverage as well.
+func TestCoverage509EdgeRefusesCappedOrFailedLoad(t *testing.T) {
+	now := time.Now().UTC()
+	s := &PacketStore{loaded: true, maxTxID: 7, oldestLoaded: now.Add(-time.Hour).Format(time.RFC3339Nano),
+		packets: []*StoreTx{{ID: 7, FirstSeen: now.Format(time.RFC3339)}}}
+	s.analyticsHistory.evictedFrom = now.Add(-30*time.Minute + time.Nanosecond)
+	from, maxID, ok := s.retainedHistoryEdgeLocked()
+	if !ok || maxID != 7 || !from.Equal(now.Add(-30*time.Minute).Truncate(time.Second).Add(time.Second)) {
+		t.Fatalf("edge=%v maxID=%d ok=%v, want the eviction edge rounded up to a whole second", from, maxID, ok)
+	}
+	s.analyticsHistory.cap = true
+	if _, _, ok := s.retainedHistoryEdgeLocked(); ok {
+		t.Fatal("capped load must not be verifiable")
+	}
+	s.analyticsHistory.cap, s.analyticsHistory.failed = false, true
+	if _, _, ok := s.retainedHistoryEdgeLocked(); ok {
+		t.Fatal("failed load must not be verifiable")
 	}
 }

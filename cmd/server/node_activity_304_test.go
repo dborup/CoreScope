@@ -62,9 +62,9 @@ func TestNodeHealthActivity24hUsesFullByNodeIndex(t *testing.T) {
 	srv.store.mu.Lock()
 	srv.store.byNode[pubkey] = packets
 	srv.store.loaded = true
-	srv.store.loadCoverageRatio = 1
 	srv.store.retentionHours = 168
 	srv.store.oldestLoaded = start.Add(-time.Hour).Format(time.RFC3339)
+	srv.store.retainedHistoryFrom = start.Add(-time.Hour)
 	srv.store.packets = []*StoreTx{{ID: 100, FirstSeen: srv.store.oldestLoaded}}
 	srv.store.backgroundLoadDone.Store(true)
 	srv.store.mu.Unlock()
@@ -100,49 +100,49 @@ func TestNodeHealthActivity24hUsesFullByNodeIndex(t *testing.T) {
 func TestNodeActivity24hCoverageRequiresLoadedHistory(t *testing.T) {
 	now := time.Date(2026, 10, 7, 13, 17, 0, 0, time.UTC)
 	start := now.Add(-24 * time.Hour)
-	s := &PacketStore{loaded: true, loadCoverageRatio: 1, oldestLoaded: start.Add(-time.Hour).Format(time.RFC3339), retentionHours: 168,
-		packets: []*StoreTx{{FirstSeen: start.Add(-time.Hour).Format(time.RFC3339)}}}
+	verified := start.Add(-time.Hour)
+	s := &PacketStore{loaded: true, retainedHistoryFrom: verified, oldestLoaded: verified.Format(time.RFC3339), retentionHours: 168,
+		packets: []*StoreTx{{FirstSeen: verified.Format(time.RFC3339)}}}
 	s.backgroundLoadDone.Store(true)
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); got.After(start) || got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); got.After(start) || got.IsZero() {
 		t.Fatalf("complete load coverage=%v", got)
 	}
-	s.loadCoverageRatio = 0.90
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); !got.IsZero() {
-		t.Fatalf("90%% startup gate is not full coverage, got %v", got)
+	s.retainedHistoryFrom = time.Time{} // e.g. the 90% startup gate passed without proof
+	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
+		t.Fatalf("unverified history is not full coverage, got %v", got)
 	}
+	s.retainedHistoryFrom = verified
 	s.retentionHours = 0
 	s.hotStartupHours = 25
-	s.loadCoverageRatio = 0
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); got.After(start) || got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); got.After(start) || got.IsZero() {
 		t.Fatalf("unlimited retention with a fully loaded 25h hot window must be complete, got %v", got)
 	}
 	s.hotStartupHours = 12
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); !got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
 		t.Fatalf("a 12h hot window cannot prove 24h coverage, got %v", got)
 	}
 	s.hotStartupHours = 0
-	s.loadCoverageRatio = 1 // RunStartupLoad sets this after full synchronous loading.
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); got.After(start) || got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); got.After(start) || got.IsZero() {
 		t.Fatalf("unlimited retention with no hot window loads full DB, got %v", got)
 	}
 	s.retentionHours = 168
 	s.maxMemoryMB = 100
 	s.packets[0].FirstSeen = start.Add(time.Hour).Format(time.RFC3339)
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); !got.After(start) {
+	if got := s.nodeActivityCoverageStartLocked(now); !got.After(start) {
 		t.Fatalf("memory cap evicted first hour, coverage=%v", got)
 	}
 	s.backgroundLoadFailed.Store(true)
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); !got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
 		t.Fatalf("failed background load must be unknown, coverage=%v", got)
 	}
 	s.backgroundLoadFailed.Store(false)
 	s.retentionHours = 12
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); !got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
 		t.Fatalf("12h retention cannot cover 24h, coverage=%v", got)
 	}
 	s.retentionHours = 168
 	s.packets = nil
-	if got := s.nodeActivityCoverageStartLocked(now, s.loadCoverageRatio); !got.IsZero() {
+	if got := s.nodeActivityCoverageStartLocked(now); !got.IsZero() {
 		t.Fatalf("empty index cannot prove coverage, coverage=%v", got)
 	}
 }
@@ -289,7 +289,7 @@ func Test351F1StartupCoverageHonoursRetentionWindow(t *testing.T) {
 				"instead of the retained window (finding 1)", store.loadCoverageRatio)
 		}
 		store.mu.RLock()
-		cov := store.nodeActivityCoverageStartLocked(now, store.loadCoverageRatio)
+		cov := store.nodeActivityCoverageStartLocked(now)
 		store.mu.RUnlock()
 		if cov.IsZero() || cov.After(windowStart) {
 			t.Fatalf("24h coverage gate must prove completeness when 7+ days of retained "+
