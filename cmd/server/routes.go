@@ -4405,15 +4405,14 @@ func (s *Server) handleMetricsSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC()
-	since := now.Add(-dur).Format(time.RFC3339)
-	summary, err := s.db.GetMetricsSummary(since, now)
+	// Cached for metricsSummaryTTL, concurrent misses share one query (#506).
+	summary, err := s.db.metricsSummary.load(metricsSummaryKey(dur), func() ([]MetricsSummaryRow, error) {
+		now := time.Now().UTC()
+		return s.db.GetMetricsSummary(now.Add(-dur).Format(time.RFC3339), now)
+	})
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
-	}
-	if summary == nil {
-		summary = []MetricsSummaryRow{}
 	}
 
 	// Filter by region if specified

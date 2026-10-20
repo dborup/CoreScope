@@ -14,8 +14,10 @@ type NodeAnalyticsCoverage struct {
 	Reason  string  `json:"reason"`
 	Loading bool    `json:"loading"`
 	// LateEvictedObservations counts observations (since startup) of evicted
-	// transmissions that were heard after the eviction edge. They are a known,
-	// bounded gap in retained evidence and never move From.
+	// transmissions heard more than lateEvictedObservationThreshold (1 h) after
+	// the transmission's FirstSeen; ordinary second-observer hearings within
+	// that hour are not counted. They are a known, bounded gap in retained
+	// evidence and never move From.
 	LateEvictedObservations int `json:"late_evicted_observations"`
 }
 
@@ -33,6 +35,11 @@ type nodeAnalyticsHistory struct {
 	observedFrom time.Time
 	lateEvicted  int
 }
+
+// lateEvictedObservationThreshold is how long after an evicted transmission's
+// FirstSeen an observation must be heard to count as "late". Routine
+// second-observer hearings arrive within seconds to minutes and are not a gap.
+const lateEvictedObservationThreshold = time.Hour
 
 // parseCanonicalUTCSeconds is the hot-path parser for exactly
 // "YYYY-MM-DDTHH:MM:SSZ", the form the store writes. It rejects anything it
@@ -183,12 +190,13 @@ func (s *PacketStore) invalidateNodeAnalyticsEvictionLocked(removed []*StoreTx) 
 		if !ok {
 			h.from = time.Now().UTC()
 		} else {
+			lateAfter := edge.Add(lateEvictedObservationThreshold)
 			edge = edge.Add(time.Nanosecond)
 			if edge.After(h.from) {
 				h.from = edge
 			}
 			for _, obs := range tx.Observations {
-				if at, ok := parseNodeAnalyticsTime(obs.Timestamp); ok && !at.Before(edge) {
+				if at, ok := parseNodeAnalyticsTime(obs.Timestamp); ok && at.After(lateAfter) {
 					h.lateEvicted++
 				}
 			}
