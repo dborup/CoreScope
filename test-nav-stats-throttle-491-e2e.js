@@ -91,7 +91,14 @@ async function check(name, fn) { await fn(); passed++; console.log((measureOnly 
           await visible.page.evaluate(() => { location.hash = '#/live'; });
           await visible.page.locator('#liveControls').waitFor();
           await settle(visible.page);
-          assert.ok(await visible.page.evaluate(() => wsListeners.length) > before, 'Live must retain its independent subscription');
+          // #514: Live renders #liveControls first and only registers its shared-WS
+          // listener after `await loadNodes()` (live.js init), so the count is
+          // sampled when that registration is observable, not when the DOM is.
+          // If Live never subscribes this wait times out and the assertion fails.
+          const subscribed = await visible.page
+            .waitForFunction(n => wsListeners.length > n, before)
+            .then(() => true, () => false);
+          assert.ok(subscribed && await visible.page.evaluate(() => wsListeners.length) > before, 'Live must retain its independent subscription');
           await visible.page.evaluate(() => { location.hash = '#/tools'; });
           await visible.page.locator('.tools-landing').waitFor();
           assert.equal(await visible.page.evaluate(() => wsListeners.length), before);
