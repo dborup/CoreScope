@@ -219,6 +219,11 @@ type PacketStore struct {
 	totalObs         int
 	insertCount      int64
 	queryCount       int64
+
+	// retainedHistoryFrom is the start of the retained history that startup
+	// proved complete (verifyRetainedHistory, #509); zero = unknown. Guarded by mu.
+	retainedHistoryFrom time.Time
+
 	// Response caches (separate mutex to avoid contention with store RWMutex)
 	cacheMu           sync.RWMutex
 	rfCache           map[string]*cachedResult // region → cached RF result
@@ -580,6 +585,13 @@ type PacketStore struct {
 	// synchronously, then reads this after it returns), so no lock is
 	// needed; no other goroutine touches it.
 	loadWindowTotalInDB int64
+	// loadStartObsID: the highest observation id when LoadChunked began;
+	// -1 when it could not be read or LoadChunked has not run (NewPacketStore
+	// sets -1, so a direct background fill skips the step). The background
+	// fill loads the transmissions observed after it that no window picked
+	// up (#509, loadReheardTransmissions). Same goroutine contract as
+	// loadWindowTotalInDB.
+	loadStartObsID int64
 
 	// Async hash migration state: set after migrateContentHashesAsync completes.
 	hashMigrationComplete atomic.Bool
@@ -640,6 +652,10 @@ type PacketStore struct {
 	// scanned into local maps and before it is merged into the store.
 	// Test-only (#89 route_mask refresh race).
 	loadChunkScannedHook func()
+	// retainedHistoryCountedHook, if non-nil, runs in verifyRetainedHistory
+	// between the SQL count and the in-memory count, without s.mu.
+	// Test-only (#509 edge-moved retry).
+	retainedHistoryCountedHook func()
 	// loadScannedRowHook, if non-nil, runs once in Load / LoadChunked right
 	// after the first transmission row is read, then is cleared. It runs
 	// while s.mu is held, so it must not call anything that takes s.mu
@@ -841,6 +857,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		pathHopResolved:      make(map[*StoreTx][]uint64),
 		fallbackByNode:       make(map[*StoreTx][]string),
 		clockSkew:            NewClockSkewEngine(),
+		loadStartObsID:       -1,
 		useResolvedPathIndex: true,
 		areaNodeCache:        make(map[string]map[string]bool),
 		areaNodeCacheTimes:   make(map[string]time.Time),
@@ -1265,12 +1282,26 @@ func accumulateDedup(byTx map[int][]string, seenByTx map[int]map[string]bool, tx
 func (s *PacketStore) loadChunk(from, to time.Time) error {
 	fromStr := from.UTC().Format(time.RFC3339)
 	toStr := to.UTC().Format(time.RFC3339)
-	fromUnix := from.UTC().Unix()
-	toUnix := to.UTC().Unix()
-	_ = fromStr
-	_ = toStr
 
-	// Build the same SQL as Load() but with a [from, to) window.
+	// #1690: window on the denormalized last_seen (effective recency)
+	// rather than first_seen. See chunked_load.go for the full rationale.
+	// Test/legacy DBs without the column fall back to first_seen.
+	if s.db.hasLastSeen() {
+		return s.loadChunkWhere("t.last_seen >= ? AND t.last_seen < ?",
+			[]interface{}{from.UTC().Unix(), to.UTC().Unix()}, "["+fromStr+", "+toStr+")")
+	}
+	return s.loadChunkWhere("t.first_seen >= ? AND t.first_seen < ?",
+		[]interface{}{fromStr, toStr}, "["+fromStr+", "+toStr+")")
+}
+
+// loadChunkWhere is loadChunk for any transmissions filter: it loads the
+// transmissions matching where (with qArgs) and merges them as loadChunk
+// does. label names the chunk in the log. The caller must not select a
+// transmission that is already in memory.
+func (s *PacketStore) loadChunkWhere(where string, qArgs []interface{}, label string) error {
+	filterClause := "\n\t\t\tWHERE " + where
+
+	// Build the same SQL as Load() but with the caller's filter.
 	rpCol := ""
 	if s.db.hasResolvedPath() {
 		rpCol = ",\n\t\t\t\to.resolved_path"
@@ -1288,19 +1319,6 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	routeMaskCol := ""
 	if s.db.hasRouteMask() {
 		routeMaskCol = ", t.route_mask"
-	}
-
-	// #1690: window on the denormalized last_seen (effective recency)
-	// rather than first_seen. See chunked_load.go for the full rationale.
-	// Test/legacy DBs without the column fall back to first_seen.
-	var filterClause string
-	var qArgs []interface{}
-	if s.db.hasLastSeen() {
-		filterClause = "\n\t\t\tWHERE t.last_seen >= ? AND t.last_seen < ?"
-		qArgs = []interface{}{fromUnix, toUnix}
-	} else {
-		filterClause = "\n\t\t\tWHERE t.first_seen >= ? AND t.first_seen < ?"
-		qArgs = []interface{}{fromStr, toStr}
 	}
 
 	var chunkSQL string
@@ -1665,7 +1683,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	}
 	s.mu.Unlock()
 
-	log.Printf("[store] background chunk [%s, %s) merged: %d tx, %d obs", fromStr, toStr, len(localPackets), localTotalObs)
+	log.Printf("[store] background chunk %s merged: %d tx, %d obs", label, len(localPackets), localTotalObs)
 	if coldLoadAmbiguousHopsSkipped > 0 {
 		log.Printf("[store] background chunk: skipped %d ambiguous-prefix relay hops (unique_prefix gate, PR #1643 R1)",
 			coldLoadAmbiguousHopsSkipped)
@@ -1748,6 +1766,7 @@ func (s *PacketStore) loadBackgroundChunks() {
 		s.mu.Lock()
 		s.analyticsHistory.loading = false
 		s.mu.Unlock()
+		s.publishRetainedHistory()
 		s.backgroundLoadDone.Store(true)
 		return
 	}
@@ -1836,6 +1855,7 @@ func (s *PacketStore) loadBackgroundChunks() {
 		// best-effort and queries fall back to SQL while it runs.
 		runtime.Gosched()
 	}
+	s.loadReheardTransmissions(s.loadStartObsID)
 
 	// Rebuild analytics indexes once after all chunks are merged.
 	s.mu.Lock()
@@ -1868,6 +1888,10 @@ func (s *PacketStore) loadBackgroundChunks() {
 	s.mu.RLock()
 	loadedCount := int64(len(s.packets))
 	s.mu.RUnlock()
+	// #509: whether the retained history is complete is proven by
+	// verifyRetainedHistory, not by this ratio. Rows that retention or
+	// eviction removed while loading lower the ratio without being missing.
+	verified := chunkErrors == 0 && totalInDB >= 0 && s.publishRetainedHistory()
 
 	var ratio float64
 	if totalInDB > 0 {
@@ -1891,7 +1915,7 @@ func (s *PacketStore) loadBackgroundChunks() {
 	bgErr := s.backgroundLoadErr
 	s.bgErrMu.Unlock()
 	s.mu.Lock()
-	s.analyticsHistory.failed = s.analyticsHistory.failed || chunkErrors > 0 || totalInDB < 0 || (totalInDB > 0 && loadedCount < totalInDB)
+	s.analyticsHistory.failed = s.analyticsHistory.failed || chunkErrors > 0 || totalInDB < 0 || (totalInDB > 0 && !verified)
 	s.finishNodeAnalyticsLoadLocked(target, false, false)
 	s.mu.Unlock()
 
@@ -10746,12 +10770,6 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 		}
 	}
 
-	// #351 F4: snapshot the bgErrMu-guarded coverage ratio BEFORE taking
-	// s.mu so this reader honours bgErrMu's "no s.mu needed" contract
-	// (store.go:530) instead of being the first site to nest s.mu → bgErrMu.
-	s.bgErrMu.RLock()
-	loadCoverage := s.loadCoverageRatio
-	s.bgErrMu.RUnlock()
 	_, pm := s.getCachedNodesAndPM()
 	nonRelaySet := map[string]struct{}{}
 	seenSet := map[string]struct{}{}
@@ -10775,7 +10793,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 	packets := s.byNode[pubkey]
 	activityKey := strings.ToLower(pubkey)
 	todayStart := now.UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
-	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now, loadCoverage))
+	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now))
 
 	var packetsToday int
 	var totalHops, hopCount int

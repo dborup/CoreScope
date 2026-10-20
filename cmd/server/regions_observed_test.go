@@ -21,8 +21,9 @@ func regionsObservedFixture(t testing.TB) (*Server, time.Time, string) {
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	store := NewPacketStore(db, nil)
-	store.loaded, store.retentionHours, store.loadCoverageRatio = true, 168, 1
-	store.oldestLoaded = now.Add(-8 * 24 * time.Hour).Format(time.RFC3339Nano)
+	store.loaded, store.retentionHours = true, 168
+	store.retainedHistoryFrom = now.Add(-8 * 24 * time.Hour)
+	store.oldestLoaded = store.retainedHistoryFrom.Format(time.RFC3339Nano)
 	store.packets = []*StoreTx{{FirstSeen: store.oldestLoaded}}
 	store.backgroundLoadDone.Store(true)
 	store.pathHopReady.Store(true)
@@ -168,38 +169,43 @@ func TestRetainedHistoryCoverageForRegions(t *testing.T) {
 	srv, now, _ := regionsObservedFixture(t)
 	s := srv.store
 	s.retentionHours = 12
-	if floor := s.retainedHistoryCoverageStartLocked(now, 1); !floor.Equal(now.Add(-12 * time.Hour)) {
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.Equal(now.Add(-12 * time.Hour)) {
 		t.Fatalf("known partial floor=%v", floor)
 	}
-	if floor := s.nodeActivityCoverageStartLocked(now, 1); !floor.IsZero() {
+	if floor := s.nodeActivityCoverageStartLocked(now); !floor.IsZero() {
 		t.Fatal("existing24h wrapper changed")
 	}
 	s.retentionHours = 168
 	s.maxMemoryMB = 1
 	s.packets[0].FirstSeen = now.Add(-2 * time.Hour).Format(time.RFC3339)
-	if floor := s.retainedHistoryCoverageStartLocked(now, 1); !floor.Equal(now.Add(-2 * time.Hour)) {
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.Equal(now.Add(-2 * time.Hour)) {
 		t.Fatalf("eviction floor=%v", floor)
 	}
-	if floor := s.retainedHistoryCoverageStartLocked(now, .99); !floor.IsZero() {
+	verified := s.retainedHistoryFrom
+	s.retainedHistoryFrom = time.Time{}
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.IsZero() {
 		t.Fatal("partial load must not claim complete coverage")
 	}
+	s.retainedHistoryFrom = verified
 	s.backgroundLoadFailed.Store(true)
-	if floor := s.retainedHistoryCoverageStartLocked(now, 1); !floor.IsZero() {
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.IsZero() {
 		t.Fatal("failed load must not claim coverage")
 	}
 	s.backgroundLoadFailed.Store(false)
 	s.backgroundLoadDone.Store(false)
-	if floor := s.retainedHistoryCoverageStartLocked(now, 1); !floor.IsZero() {
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.IsZero() {
 		t.Fatal("unfinished load must not claim coverage")
 	}
 	s.backgroundLoadDone.Store(true)
 	s.retentionHours, s.hotStartupHours, s.maxMemoryMB = 0, 2, 0
 	s.oldestLoaded = now.Add(-2 * time.Hour).Format(time.RFC3339)
-	if floor := s.retainedHistoryCoverageStartLocked(now, 0); !floor.Equal(now.Add(-2 * time.Hour)) {
+	s.retainedHistoryFrom = now.Add(-2 * time.Hour)
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.Equal(now.Add(-2 * time.Hour)) {
 		t.Fatalf("known hot-window coverage=%v", floor)
 	}
 	s.maxMemoryMB = 1
-	if floor := s.retainedHistoryCoverageStartLocked(now, 0); !floor.IsZero() {
+	s.retainedHistoryFrom = time.Time{}
+	if floor := s.retainedHistoryCoverageStartLocked(now); !floor.IsZero() {
 		t.Fatalf("capped hot startup without exact row coverage must remain unknown, got %v", floor)
 	}
 }

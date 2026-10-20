@@ -274,6 +274,7 @@ func (s *PacketStore) RunStartupLoad(chunkSize int) error {
 		s.bgErrMu.Unlock()
 		log.Printf("[store] RunStartupLoad: hotStartupHours=0 — background fill loader SKIPPED (coverage=%.1f%%, loaded=%d, totalInDB=%d)",
 			ratio*100, loadedCount, totalInDB)
+		s.publishRetainedHistory()
 		s.backgroundLoadDone.Store(true)
 		s.backgroundLoadProgress.Store(100)
 		return nil
@@ -365,6 +366,13 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	s.mu.Lock()
 	s.beginNodeAnalyticsLoadLocked(hotCutoffStr)
 	s.mu.Unlock()
+
+	// #509: observations after this id re-hear transmissions while the
+	// load runs; the background fill loads those that no window picked up.
+	s.loadStartObsID = -1
+	if err := s.db.conn.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM observations`).Scan(&s.loadStartObsID); err != nil {
+		s.loadStartObsID = -1
+	}
 
 	// COUNT honours the same retention/hot-startup filter the chunk
 	// loop applies, so the logged "DB total" matches the rows the

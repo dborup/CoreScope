@@ -929,10 +929,12 @@ observations of one transmission count once. Association can come from node
 identity or a resolved path; it does not prove that a repeater forwarded the
 packet. Bucket boundaries are half-open `[start, end)` and move with request
 time rather than aligning to clock hours. A malformed `first_seen` is ignored.
-`complete` is true only when successful loading reports 100% of the retained
-transmissions in memory and the retention/index bounds cover the whole 24-hour
-window. The server's general background-load “done” threshold of 90% is not
-enough for this field. If `complete` is false, zero-count
+`complete` is true only when successful loading has proven that every retained
+transmission since the coverage start is in memory and the retention/index
+bounds cover the whole 24-hour window. Rows that retention or eviction removed
+while loading lie before the coverage start and do not count as missing. The
+server's general background-load “done” threshold of 90% is not enough for
+this field. If `complete` is false, zero-count
 buckets before `coverageStart` represent unknown history rather than confirmed
 silence. A null `coverageStart` means coverage cannot be established (for
 example during startup or after a failed load).
