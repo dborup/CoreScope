@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -131,4 +133,78 @@ func (s *PacketStore) publishRetainedHistory() bool {
 	s.retainedHistoryFrom = from
 	s.mu.Unlock()
 	return !from.IsZero()
+}
+
+// loadReheardTransmissionsBatch bounds the ids in one loadChunkWhere query.
+const loadReheardTransmissionsBatch = 500
+
+// loadReheardTransmissions loads the transmissions that the ingestor heard
+// again while the startup load ran and that no window picked up (#509). The
+// windows select by last_seen, and the ingestor moves last_seen to the time
+// of the new observation: a transmission re-heard before its background
+// window was read, or after the hot cursor passed it, falls out of every
+// window still to be read, and the poller skips observations of
+// transmissions that are not in memory. It would then stay missing until
+// the next restart, and the retained history could never be proven.
+//
+// Every re-hearing writes an observation first, so the candidates are the
+// transmissions observed after sinceObsID (the highest observation id when
+// the load began). Ids above the store's highest id are new transmissions,
+// which the poller ingests. The rest are loaded when they are not in
+// memory; nothing else loads an id at or below maxTxID that the load
+// skipped, so they cannot be merged twice. Errors only leave rows missing,
+// which verifyRetainedHistory then reports as unknown.
+func (s *PacketStore) loadReheardTransmissions(sinceObsID int64) {
+	if sinceObsID < 0 {
+		return
+	}
+	s.mu.RLock()
+	maxID := s.maxTxID
+	s.mu.RUnlock()
+	rows, err := s.db.conn.Query(`SELECT DISTINCT transmission_id FROM observations WHERE id > ? AND transmission_id <= ?`,
+		sinceObsID, maxID)
+	if err != nil {
+		log.Printf("[store] re-heard transmissions: query failed: %v", err)
+		return
+	}
+	var heard []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			log.Printf("[store] re-heard transmissions: scan failed: %v", err)
+			return
+		}
+		heard = append(heard, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		log.Printf("[store] re-heard transmissions: %v", err)
+		return
+	}
+	s.mu.RLock()
+	missing := heard[:0]
+	for _, id := range heard {
+		if s.byTxID[id] == nil {
+			missing = append(missing, id)
+		}
+	}
+	s.mu.RUnlock()
+	for len(missing) > 0 {
+		batch := missing
+		if len(batch) > loadReheardTransmissionsBatch {
+			batch = batch[:loadReheardTransmissionsBatch]
+		}
+		missing = missing[len(batch):]
+		args := make([]interface{}, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		where := "t.id IN (?" + strings.Repeat(", ?", len(batch)-1) + ")"
+		if err := s.loadChunkWhere(where, args, fmt.Sprintf("(%d re-heard)", len(batch))); err != nil {
+			log.Printf("[store] re-heard transmissions: load failed: %v", err)
+			return
+		}
+	}
 }

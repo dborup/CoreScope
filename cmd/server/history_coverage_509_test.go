@@ -581,6 +581,9 @@ func TestCoverage509StagingShapeBackgroundLoad(t *testing.T) {
 				// memory are skipped.
 				store.IngestNewFromDB(store.MaxTransmissionID(), 100)
 				store.IngestNewObservations(sinceObs, 500)
+				// Written after the poller tick: the poller's, not the load's.
+				nextID++
+				coverage509InsertTx(t, writer, nextID, time.Now().UTC())
 			}
 			// A memory-cap tick once the oldest window is merged, when the
 			// store is fullest: it lands between the two counts, so the
@@ -622,11 +625,16 @@ func TestCoverage509StagingShapeBackgroundLoad(t *testing.T) {
 			}
 			store.mu.RLock()
 			for _, id := range hearAgain {
-				if store.byTxID[id] == nil {
-					t.Errorf("re-heard transmission %d is not in memory", id)
+				if tx := store.byTxID[id]; tx == nil || tx.ObservationCount != 2 {
+					t.Errorf("re-heard transmission %d is not in memory with both observations: %+v", id, tx)
 				}
 			}
 			store.mu.RUnlock()
+			// The newest row is still the poller's: it ingests and
+			// broadcasts it as new.
+			if got, _ := store.IngestNewFromDB(nextID-1, 100); len(got) != 1 {
+				t.Errorf("poller ingested %d new transmissions after the load, want the 1 written after its tick", len(got))
+			}
 			retained, activity, analytics := coverage509Starts(store, now)
 			if retained.IsZero() || !retained.After(lastEvicted) || retained.After(lastEvicted.Add(time.Hour)) {
 				t.Fatalf("retained coverage start=%v, want known just after the memory eviction edge %v", retained, lastEvicted)
