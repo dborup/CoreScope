@@ -20,6 +20,7 @@ const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const PSK_KEY = '0152c0de0152c0de0152c0de0152c0de';
 const PSK_HASH = 'user:psk:0152c0de';
 const PSK_LABEL = 'Issue152 Team';
+const DECRYPT_FETCH_DELAY_MS = 700;
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -55,13 +56,24 @@ async function switchRegion(page, code) {
     const u = decodeURIComponent(r.url());
     return u.indexOf('/api/channels?') !== -1 && u.indexOf('/messages') === -1 && u.indexOf(code) !== -1;
   }, { timeout: 8000 });
+  // The open PSK conversation is re-decrypted for the new region (#152 F1):
+  // loadChannels() resolves, then selectChannel() fetches the region-scoped
+  // packets. That response is the last network step before the render.
+  const decryptResponse = page.waitForResponse((r) => {
+    const u = decodeURIComponent(r.url());
+    return u.indexOf('/api/packets?') !== -1 && u.indexOf('payloadType=5') !== -1 && new RegExp('region=[^&]*' + code).test(u);
+  }, { timeout: 8000 });
   // The mobile detail view hides or covers the sidebar's region pills; fall
   // back to a DOM click, which still goes through the real RegionFilter
   // handler.
   const click = pill.click({ timeout: 2000 }).catch(() => pill.evaluate((el) => el.click()));
-  await Promise.all([response, click]);
-  // loadChannels() renders and reconciles right after the response resolves.
-  await page.waitForTimeout(300);
+  await Promise.all([response, decryptResponse, click]);
+  // Rendering follows the response: wait for the pane to leave its loading
+  // state instead of sleeping.
+  await page.waitForFunction(() => {
+    const m = document.getElementById('chMessages');
+    return m && !m.querySelector('.ch-loading') && m.textContent.indexOf('Decrypting') === -1;
+  });
 }
 
 async function runViewport(browser, vp) {
@@ -69,6 +81,14 @@ async function runViewport(browser, vp) {
   const page = await ctx.newPage();
   page.setDefaultTimeout(8000);
   page.on('pageerror', (e) => console.error('[pageerror ' + vp.name + ']', e.message));
+  // #514: the PSK is re-decrypted after a region change, and the pane shows
+  // "Decrypting messages…" until the region-scoped /api/packets fetch returns.
+  // Hold that fetch back so every run takes the slow-server ordering that
+  // used to depend on CI timing; the test must wait for the render, not a sleep.
+  await page.route(/\/api\/packets\?[^#]*payloadType=5[^#]*region=/, async (route) => {
+    await new Promise((r) => setTimeout(r, DECRYPT_FETCH_DELAY_MS));
+    await route.continue();
+  });
 
   await page.goto(BASE + '/#/channels', { waitUntil: 'domcontentloaded' });
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
@@ -79,7 +99,9 @@ async function runViewport(browser, vp) {
     await page.click('#chAddChannelBtn');
     await page.fill('#chPskKey', PSK_KEY);
     await page.fill('#chPskName', PSK_LABEL);
+    const initialDecrypt = page.waitForResponse((r) => r.url().indexOf('/api/packets?') !== -1 && r.url().indexOf('payloadType=5') !== -1, { timeout: 10000 });
     await page.click('#chPskAddBtn');
+    await initialDecrypt;
     await page.waitForFunction((hash) => location.hash === '#/channels/' + encodeURIComponent(hash), PSK_HASH, { timeout: 10000 });
     await page.waitForFunction((label) => {
       const h = document.querySelector('#chHeader .ch-header-text');
@@ -90,7 +112,6 @@ async function runViewport(browser, vp) {
       const m = document.getElementById('chMessages');
       return m && !m.querySelector('.ch-loading') && m.textContent.indexOf('Decrypting') === -1;
     }, null, { timeout: 15000 });
-    await page.waitForTimeout(500);
     const s = await conversationState(page);
     assert(s.rowPresent && s.rowSelected, 'PSK row must be listed and selected, got ' + JSON.stringify(s));
     if (vp.mobile === false) assert(s.rowInMyChannels, 'PSK row must be in My Channels');
