@@ -567,6 +567,14 @@ func BenchmarkRegionsSnapshotRetainedMemory(b *testing.B) {
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	measured := measureRegionsSnapshot(snapshot)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		measureRegionsSnapshot(snapshot)
+	}
+	b.StopTimer()
+	runtime.KeepAlive(snapshot)
+	// Reported after the timed loop: ResetTimer discards custom metrics.
 	b.ReportMetric(float64(measured.TotalBytes), "regions-retained-bytes")
 	b.ReportMetric(float64(measured.MembershipsBytes), "membership-bytes")
 	b.ReportMetric(float64(measured.HistoryBytes), "history-bytes")
@@ -574,13 +582,7 @@ func BenchmarkRegionsSnapshotRetainedMemory(b *testing.B) {
 	b.ReportMetric(float64(measured.EvidenceBytes), "evidence-bytes")
 	b.ReportMetric(float64(measured.EstimatedStepPayloadBytes), "step-payload-bytes")
 	b.ReportMetric(float64(peak.TotalAlloc-before.TotalAlloc), "recompute-alloc-bytes")
-	b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "paired-snapshot-heap-bytes")
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		measureRegionsSnapshot(snapshot)
-	}
-	runtime.KeepAlive(snapshot)
+	b.ReportMetric(float64(after.HeapAlloc)-float64(before.HeapAlloc), "paired-snapshot-heap-bytes")
 }
 
 func TestRegionsRoutesUnavailable(t *testing.T) {
@@ -596,4 +598,64 @@ func TestRegionsRoutesUnavailable(t *testing.T) {
 	if json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Error == "" {
 		t.Fatal("missing typed error response")
 	}
+}
+
+// BenchmarkRegions168HBudgets measures the shape #508 targets: 168 h of
+// retention at the per-hour rate real data showed at 48 h (about 5,200
+// retained path references per hour) across 400 relays. It reports the
+// retained snapshot size, the aggregation's own allocations and whether any
+// budget truncated, so the before/after claim is measured end to end.
+func BenchmarkRegions168HBudgets(b *testing.B) {
+	const hours, perHour, relays = 168, 5200, 400
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	keys := make([]string, relays)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("%064x", i+1)
+	}
+	type item struct {
+		tx   *StoreTx
+		when time.Time
+	}
+	start := now.UTC().Truncate(time.Hour).Add(-regionsHistoryBucketCount * time.Hour)
+	items := make([]item, 0, hours*perHour)
+	id := 0
+	for hour := regionsHistoryBucketCount - hours; hour < regionsHistoryBucketCount; hour++ {
+		at := start.Add(time.Duration(hour)*time.Hour + time.Minute)
+		for i := 0; i < perHour; i++ {
+			id++
+			j := i % relays
+			path := `["` + keys[j] + `","` + keys[(j+1)%relays] + `"]`
+			items = append(items, item{routeTransmission(id, at, path), at})
+		}
+	}
+	var measured *RegionsSnapshotMemory
+	var truncated, steps, cells int
+	var allocated uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		collector := newRegionsRoutesCollector(now)
+		for _, it := range items {
+			collector.captureAt(it.tx, it.when, true)
+		}
+		snapshot := collector.build(nil)
+		runtime.ReadMemStats(&after)
+		allocated = after.TotalAlloc - before.TotalAlloc
+		measured = measureRegionsSnapshot(&repeaterRelaySnapshot{generatedAt: now,
+			regionMemberships: snapshot.memberships, history: snapshot.history, routes: snapshot})
+		steps, cells = len(snapshot.steps), measured.StepCells
+		truncated = 0
+		if snapshot.evidence.Incomplete {
+			truncated = 1
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(measured.TotalBytes), "regions-retained-bytes")
+	b.ReportMetric(float64(measured.HistoryCells), "history-cells")
+	b.ReportMetric(float64(steps), "steps")
+	b.ReportMetric(float64(cells), "step-cells")
+	b.ReportMetric(float64(truncated), "incomplete")
+	b.ReportMetric(float64(allocated), "aggregate-alloc-bytes")
 }

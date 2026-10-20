@@ -180,18 +180,19 @@ func (c *regionsRoutesCollector) pathRefs() int {
 	return total
 }
 
-// retainPath interns one observation path and spends its hour's reference
-// budget. Identical paths share one interned entry, so the variant table is
+// retainPath spends this hour's reference budget and interns the path when it
+// is new. Identical paths share one interned entry, so the variant table is
 // bounded by the distinct relay chains on the network rather than by the
-// number of observations. held is how many distinct paths this transmission
-// already retained.
-func (c *regionsRoutesCollector) retainPath(path string, index, held int) (int32, bool) {
+// number of observations, and each is parsed and resolved once per snapshot.
+// held is how many distinct paths this transmission already retained. The
+// caller has already looked the path up, so capture costs one string-map
+// lookup per observation, as it did before interning.
+func (c *regionsRoutesCollector) retainPath(path string, id int32, known bool, index, held int) (int32, bool) {
 	if held >= maxRegionsRoutePathsPerTx || index < 0 || index >= len(c.hourRefs) ||
 		c.hourRefs[index] >= maxRegionsRoutePathRefsPerHour {
 		return 0, false
 	}
-	id, exists := c.pathIDs[path]
-	if !exists {
+	if !known {
 		if len(c.pathList) >= maxRegionsRoutePathVariants {
 			return 0, false
 		}
@@ -237,7 +238,9 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 	item := regionsRouteTx{id: tx.ID, when: when, scope: tx.ScopeName}
 	index := c.bucket(item)
 	var counts RegionsEvidenceCounts
-	seen := make(map[string]int)
+	// Keyed by interned path id: repeated observations of one path dedupe
+	// without hashing the path string a second time.
+	seen := make(map[int32]int)
 	for _, obs := range tx.Observations {
 		switch classifyRegionsObservation(obs, canonical, known) {
 		case regionsObservationExcluded:
@@ -251,17 +254,20 @@ func (c *regionsRoutesCollector) captureAt(tx *StoreTx, when time.Time, valid bo
 			counts.Capped++
 			continue
 		}
-		if at, exists := seen[obs.PathJSON]; exists {
-			item.paths[at].observations++
-			continue
+		id, interned := c.pathIDs[obs.PathJSON]
+		if interned {
+			if at, exists := seen[id]; exists {
+				item.paths[at].observations++
+				continue
+			}
 		}
-		id, admitted := c.retainPath(obs.PathJSON, index, len(item.paths))
+		id, admitted := c.retainPath(obs.PathJSON, id, interned, index, len(item.paths))
 		if !admitted {
 			c.evidence.SourceTruncated = true
 			counts.Capped++
 			continue
 		}
-		seen[obs.PathJSON] = len(item.paths)
+		seen[id] = len(item.paths)
 		item.paths = append(item.paths, regionsRoutePathRef{path: id, observations: 1})
 	}
 	if len(tx.Observations) == 0 {
