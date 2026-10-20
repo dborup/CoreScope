@@ -91,7 +91,7 @@ async function check(name, fn) {
         await page.goto(BASE + '/#/perf', { waitUntil: 'domcontentloaded' });
         await waitForRange(page, '24h');
         assert.deepEqual(await page.locator('#wsHistoryRange option').evaluateAll(options => options.map(o => o.value)), ['24h', '7d', '30d']);
-        assert.equal(await page.getByRole('region', { name: 'WebSocket clients' }).getByRole('combobox', { name: 'Period' }).count(), 1);
+        assert.equal(await page.getByRole('region', { name: 'WebSocket clients' }).getByRole('combobox', { name: 'Period', exact: true }).count(), 1);
         assert.equal(requests[0], '24h');
       });
       await check('7-day and 30-day selections fetch the selected range, without stale cached counts', async () => {
@@ -137,6 +137,38 @@ async function check(name, fn) {
         assert.match(await page.locator('#wsHistoryContent').innerText(), /307/);
         assert.match(await page.locator('#wsHistoryContent').innerText(), /saved|persist|restart/i);
       });
+      await check('Period control is themed like the Analytics time-window select, light and dark', async () => {
+        // Compare against the real Analytics control, not a copy of its CSS,
+        // so a later restyle of either page shows up here.
+        const styleOf = (selector, theme) => page.evaluate(async ({ selector, theme }) => {
+          // Transitions off, so a computed colour is never read mid-animation.
+          if (!document.getElementById('e2e-no-transitions')) {
+            const style = document.createElement('style');
+            style.id = 'e2e-no-transitions';
+            style.textContent = '*, *::before, *::after { transition: none !important; }';
+            document.head.appendChild(style);
+          }
+          document.documentElement.setAttribute('data-theme', theme);
+          // The customizer re-applies its inline :root theme vars from an
+          // observer on data-theme; wait one frame so it has run.
+          await new Promise(resolve => requestAnimationFrame(() => resolve()));
+          const c = getComputedStyle(document.querySelector(selector));
+          return {
+            background: c.backgroundColor, color: c.color, border: c.border, radius: c.borderRadius,
+            font: c.fontSize + ' ' + c.fontWeight + ' ' + c.fontFamily, height: c.height,
+          };
+        }, { selector, theme });
+        const perf = {}, analytics = {};
+        for (const theme of ['light', 'dark']) perf[theme] = await styleOf('#wsHistoryRange', theme);
+        await page.goto(BASE + '/#/analytics', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#analyticsTimeWindow');
+        for (const theme of ['light', 'dark']) analytics[theme] = await styleOf('#analyticsTimeWindow', theme);
+        for (const theme of ['light', 'dark']) {
+          assert.deepEqual(perf[theme], analytics[theme], theme + ' theme: Period select differs from Analytics');
+        }
+        assert.notDeepEqual(perf.light.background, perf.dark.background, 'select background does not follow the theme');
+        assert.equal(perf.dark.radius, '6px');
+      });
       assert.deepEqual(desktop.errors, [], 'unexpected desktop JavaScript errors');
     } finally { await desktop.context.close(); }
 
@@ -148,6 +180,7 @@ async function check(name, fn) {
         await mobile.page.locator('#wsHistoryRange').scrollIntoViewIfNeeded();
         const rect = await mobile.page.locator('#wsHistoryRange').boundingBox();
         assert.ok(rect && rect.width > 0 && rect.x >= 0 && rect.x + rect.width <= 375, 'range control is clipped');
+        assert.ok(rect.height >= 48, 'touch target is ' + rect.height + 'px, needs the 48px house minimum');
         const hit = await mobile.page.locator('#wsHistoryRange').evaluate(element => {
           const r = element.getBoundingClientRect();
           const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
@@ -168,6 +201,12 @@ async function check(name, fn) {
         assert.match(await warning.innerText(), /unavailable/i);
         assert.match(await warning.innerText(), /lost.*restart/i);
         assert.doesNotMatch(await warning.innerText(), /survives restarts/);
+      });
+      await check('touch: the shared select keeps the 48px house minimum on Analytics too', async () => {
+        await mobile.page.goto(BASE + '/#/analytics', { waitUntil: 'domcontentloaded' });
+        await mobile.page.waitForSelector('#analyticsTimeWindow');
+        const height = await mobile.page.locator('#analyticsTimeWindow').evaluate(element => element.getBoundingClientRect().height);
+        assert.ok(height >= 48, 'Analytics time window is ' + height + 'px on touch, needs 48px');
       });
       assert.deepEqual(mobile.errors, [], 'unexpected mobile JavaScript errors');
     } finally { await mobile.context.close(); }

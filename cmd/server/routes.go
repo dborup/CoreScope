@@ -312,6 +312,9 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/cache", s.handleConfigCache).Methods("GET")
 	r.HandleFunc("/api/config/client", s.handleConfigClient).Methods("GET")
 	r.HandleFunc("/api/config/regions", s.handleConfigRegions).Methods("GET")
+	r.HandleFunc("/api/regions/observed", s.handleRegionsObserved).Methods("GET")
+	r.HandleFunc("/api/regions/history", s.handleRegionsHistory).Methods("GET")
+	r.HandleFunc("/api/regions/routes", s.handleRegionsRoutes).Methods("GET")
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
@@ -2344,8 +2347,8 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		prefix1 = prefix1[:2]
 	}
 
-	s.store.mu.RLock()
 	_, pm := s.store.getCachedNodesAndPM()
+	s.store.mu.RLock()
 
 	// Collect candidate transmissions from the index, deduplicating by tx ID.
 	// confirmedByFullKey tracks TXs found via the full-pubkey index key — these are
@@ -3284,9 +3287,7 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 	// Get the server's prefix map for resolveWithContext.
 	var pm *prefixMap
 	if s.store != nil {
-		s.store.mu.RLock()
 		_, pm = s.store.getCachedNodesAndPM()
-		s.store.mu.RUnlock()
 	}
 
 	for _, hop := range hops {

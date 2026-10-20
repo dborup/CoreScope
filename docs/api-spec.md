@@ -51,6 +51,8 @@
 - [GET /api/analytics/subpaths](#get-apianalyticssubpaths)
 - [GET /api/analytics/subpath-detail](#get-apianalyticssubpath-detail)
 - [GET /api/scope-stats](#get-apiscope-stats)
+- [GET /api/regions/observed](#get-apiregionsobserved)
+- [GET /api/regions/history](#get-apiregionshistory)
 - [GET /api/resolve-hops](#get-apiresolve-hops)
 - [GET /api/traces/:hash](#get-apitraceshash)
 - [GET /api/config/theme](#get-apiconfigtheme)
@@ -1090,6 +1092,46 @@ Per-node analytics over a time range.
 
 ---
 
+### Node analytics history coverage (`/analytics` and `/analytics/summary`)
+
+Both endpoints preserve the requested `timeRange` and return an additional
+`coverage` object: `{ from, to, seconds, partial, reason, loading, late_evicted_observations }`. The full
+and lightweight endpoints use exactly the same coverage and computed statistics
+when evaluated at the same instant. All boundaries are UTC and inclusive;
+invalid timestamps and future transmissions are excluded. There is no implicit
+retention-edge tolerance.
+
+`coverage.from` is the later of the requested start, configured retention cutoff,
+successfully loaded contiguous window, and earliest persisted **observation**
+evidence available in that window. An old transmission's `first_seen`, including
+an old hash heard again recently, does not prove earlier coverage. Loader state
+and the evidence edge are captured at startup; requests do not scan SQLite.
+While startup/background loading continues, `partial` and `loading` are true.
+Capped/failed loads conservatively certify only history after their completion;
+memory eviction advances the edge to the evicted transmissions' `first_seen`
+(the eviction boundary; packet membership is by `first_seen`). Late observations
+of evicted, re-heard transmissions never move `from`; they are counted in
+`late_evicted_observations` as a known, bounded gap. A later background completion cannot restore
+an evicted interval. Reasons include `complete`, `available_history`, `loading`,
+`unknown_history`, `load_capped`, `load_failed`, and `memory_eviction`.
+
+The packet set (including all display arrays and the summary numerator) is
+filtered to this effective interval, without changing sender/recipient/relay
+membership rules. Packets/day uses `totalPackets * 86400 / coverage.seconds`.
+Availability is the fraction of supported UTC-hour time bins containing at least
+one packet: a partially covered first or last hour contributes only its actual
+intersection duration, to both numerator and denominator. The first timeline bin
+is clipped to `coverage.from`. Zero supported duration yields zero rates and no
+packets; an empty/unknown store does not claim that missing history was silent.
+A node with no packets in an otherwise known supported interval has zero rates.
+
+This measures **available retained store history**, not uninterrupted recorder
+operation, radio uptime, successful reception, or an exact physical availability
+measurement. No new schema/config, historical SQL fallback, or acquisition-start
+guarantee is introduced. The UI explicitly warns when the requested range is
+only partially supported. It distinguishes unknown/loading history from an
+inactive node in a known interval.
+
 ## GET /api/nodes/:pubkey/reach
 
 Per-node RF reach report (two-way link quality). Computes **directional** link counts from raw
@@ -1692,6 +1734,16 @@ Per-observer analytics.
 ## GET /api/channels
 
 List decoded channels with message counts.
+
+The database-backed list uses all retained SQL history, not the server's
+in-memory packet window. `messageCount` counts distinct transmissions, not
+observations. With `region`, a transmission is included when at least one
+observer in any selected region heard it; repeated observations and overlapping
+selected regions do not multiply the count. `lastActivity`, `lastMessage` and
+`lastSender` are selected from that same regional transmission population.
+Without a region filter, transmissions without observations remain eligible.
+`includeEncrypted=true` uses the same unique-transmission regional counting for
+encrypted channels (their message/sender fields remain null).
 
 ### Query Parameters
 
@@ -2451,6 +2503,148 @@ Detailed stats for a specific subpath.
 ```
 
 ---
+
+## GET /api/regions/observed
+
+Bulk observed scoped relay activity for the Regions map. `window` accepts
+`1h`, `24h` (default), or `7d`; other values return HTTP 400. Returns HTTP 503
+until the background relay snapshot is available, and HTTP 500 if current
+node metadata cannot be read.
+
+```json
+{
+  "window": "24h",
+  "generatedAt": "2026-10-16T12:00:00Z",
+  "windowStart": "2026-10-15T12:00:00Z",
+  "windowEnd": "2026-10-16T12:00:00Z",
+  "coverage": {"start": "2026-10-12T12:00:00Z", "complete": true, "loading": false},
+  "nodes": [{
+    "publicKey": "<public key>", "name": "Example relay", "role": "repeater",
+    "lat": 55.2, "lon": 10.3, "positionSource": "reported",
+    "scopes": [{"name": "#example", "lastRelayed": "2026-10-16T11:55:00Z"}]
+  }],
+  "truncated": false,
+  "scopesTruncated": false
+}
+```
+
+`windowEnd` equals `generatedAt`, the time of the shared relay snapshot
+(normally refreshed every five minutes). A scope is included when its latest
+confirmed non-advert relay timestamp is within the inclusive requested bounds;
+future timestamps are excluded. Scope spelling and case are preserved. Raw
+prefix and heuristic-only paths do not broaden scoped relay attribution.
+
+`coverage.start` is the conservative lower bound of known retained in-memory
+history and may precede `windowStart`. It is `null` when startup loading,
+failed loading, incomplete row coverage, or missing history prevents that bound
+from being established. `complete` is true only when the known interval covers
+the requested window; it does not establish uninterrupted observer operation.
+Memory eviction and configured retention can shorten this interval. `loading`
+describes startup loading when the relay snapshot was generated.
+
+Nodes with active scope evidence but no usable reported coordinates remain in
+the response with `lat: null`, `lon: null`, and `positionSource: "none"`.
+Reported coordinates are self-reported node metadata, not a verified GPS fix.
+Neighbor position estimates are not used. The endpoint applies current node
+and observer blacklists, hidden-name prefixes (including observer aliases), and the node-list geographic filter (including
+its foreign-node exception) on every request and returns `Cache-Control:
+no-store`.
+
+At most 5,000 eligible visible nodes are returned in public-key order;
+`truncated` signals additional eligible nodes. Each node retains its 32 newest
+valid scope timestamps; `scopesTruncated` signals omission from that retained
+scope evidence. Clients must describe incomplete views when either flag is
+true. Empty lists serialize as arrays.
+
+## GET /api/regions/history
+
+One bounded bulk snapshot supplies the Regions timeline and comparisons. The
+response contains 504 hourly buckets spanning 21 days and takes no query
+parameters. `historyEnd` is `generatedAt` rounded down to a completed UTC hour;
+the unfinished current hour is excluded. Bucket `i` covers the half-open
+interval `[historyStart + i hours, historyStart + (i + 1) hours)`. Empty buckets
+are omitted and each scope's populated buckets are sorted by index. These
+absolute clock-hour boundaries support stable bookmarked selections.
+
+```json
+{
+  "generatedAt": "2026-10-16T12:35:00Z",
+  "historyStart": "2026-09-25T12:00:00Z",
+  "historyEnd": "2026-10-16T12:00:00Z",
+  "bucketSeconds": 3600,
+  "bucketCount": 504,
+  "coverage": {"start": "2026-10-02T12:35:00Z", "loading": false, "evidence": {
+    "excluded": 7, "unprovable": 1, "capped": 0, "truncated": false,
+    "scopes": [{"name": "#example", "excluded": 7, "unprovable": 1, "capped": 0, "buckets": [
+      {"index": 500, "excluded": 0, "unprovable": 1, "capped": 0},
+      {"index": 503, "excluded": 7, "unprovable": 0, "capped": 0}
+    ]}]
+  }},
+  "nodes": [{
+    "publicKey": "<public key>", "name": "Example relay", "role": "repeater",
+    "lat": 55.2, "lon": 10.3, "positionSource": "reported",
+    "metadataSource": "current",
+    "scopes": [{"name": "#example", "buckets": [
+      {"index": 503, "count": 12, "lastRelayed": "2026-10-16T11:55:00Z"}
+    ]}]
+  }],
+  "truncated": false,
+  "scopesTruncated": false,
+  "bucketsTruncated": false
+}
+```
+
+`count` is distinct confirmed transmissions **per node and scope**, using the
+transmission's `FirstSeen` timestamp. It is not the time each observation was
+received. Summing counts over nodes produces relay appearances, not globally
+unique packets: one transmission can be confirmed through several relays.
+Non-advert confirmed scope attribution follows the same identity-safe rules
+as `/api/regions/observed`; heuristic-only and raw-prefix attribution does not
+broaden scope claims. Scope spelling and case are preserved.
+
+`coverage.evidence` counts observations that supplied no membership, by the
+transmission's stored scope and `FirstSeen` hour: `excluded` (known DIRECT or
+unscoped header, or own transport codes that differ from the stored frame),
+`unprovable` (unknown or malformed own or canonical evidence) and `capped`
+(observations or memberships omitted by safety limits). Only unprovable or
+capped buckets make a scope's interval incomplete; clients withhold rates,
+chart values and comparisons only for intervals that include such a bucket of
+the selected scope, or of any scope when no scope is selected. `truncated`
+means the per-bucket budget was exhausted and every rate and comparison must
+be withheld. `/api/regions/observed` returns the same counts summed over the
+requested rolling window, per scope, without bucket detail.
+
+`coverage.start` and `loading` are captured together with the relay evidence.
+The 21-day horizon does not extend configured retention or restore evicted
+packets. A null floor, loading state, or floor after a selected interval's
+start means that interval is incomplete. A client comparing equal adjacent
+1h, 24h or 7d intervals must check **both** intervals and withhold new/no-longer
+observed classifications and percentage changes if either is incomplete.
+Even complete retained history does not establish continuous observer uptime.
+
+Names, roles and positions are the latest known metadata, not historical
+samples. A `nodes` row always wins over `inactive_nodes`, even when the current
+role is no longer a repeater or room (which excludes the node). An archived
+row is used only when no current row exists, and is labelled
+`metadataSource: "archived"`. Positions remain self-reported and unverified;
+missing positions have null coordinates and `positionSource: "none"`.
+Relay identity resolution uses the current catalog; the timeline does not
+reconstruct the catalog or node positions as they were in each hour.
+
+The snapshot is rebuilt during the existing background relay computation,
+outside the packet lock. Requests read the published snapshot and current
+metadata in bulk, with no packet scan or per-node query. Current identity
+visibility and geographic policies (including the foreign-node exception)
+are applied on every request; responses use `Cache-Control: no-store`.
+
+Safety limits bound published evidence to 5,000 keys, the 32 newest valid
+scopes per key, and 250,000 populated hourly cells globally. The scratch
+aggregation for one key is bounded to 32 x 504 cells. Keys, scope names and
+bucket indexes are processed in deterministic order. Flags expose omitted
+keys, scopes and cells respectively. Any true truncation flag makes change
+classifications incomplete. Current visibility filtering can reduce the
+returned node count below the evidence cap. HTTP 503 means the snapshot is
+warming up or unavailable; metadata errors return HTTP 500.
 
 ## GET /api/scope-stats
 

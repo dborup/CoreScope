@@ -47,9 +47,15 @@ type paramMeta struct {
 func routeDescriptions() map[string]routeMeta {
 	return map[string]routeMeta{
 		// Config
-		"GET /api/config/cache":      {Summary: "Get cache configuration", Tag: "config"},
-		"GET /api/config/client":     {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
-		"GET /api/config/regions":    {Summary: "Get configured regions", Tag: "config"},
+		"GET /api/config/cache":   {Summary: "Get cache configuration", Tag: "config"},
+		"GET /api/config/client":  {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
+		"GET /api/config/regions": {Summary: "Get configured regions", Tag: "config"},
+		"GET /api/regions/observed": {Summary: "Observed scoped relay positions", Description: "Bulk Regions map snapshot with selectable 1h, 24h or 7d window. Includes unpositioned scoped relays, current identity visibility filters, conservative retained-history coverage and explicit node/scope truncation flags. Reported positions are self-reported coordinates; neighbor estimates are excluded. Window bounds end at generatedAt, the shared relay snapshot time (normally refreshed every five minutes).", Tag: "analytics", Response: schemaRef("RegionsObservedResponse"),
+			QueryParams: []paramMeta{{Name: "window", Description: "1h, 24h (default), or 7d", Type: "string"}},
+			Errors:      []routeError{{Status: "400", Description: "Invalid window."}, {Status: "500", Description: "Current identity or node metadata could not be read."}, {Status: "503", Description: "Relay snapshot is unavailable or warming up."}}},
+		"GET /api/regions/history": {Summary: "Hourly scoped relay history", Description: "One bounded bulk snapshot for Regions timeline and equal-window comparison. Includes 504 UTC clock-hour buckets over 21 days, excluding the unfinished current hour. Counts distinct transmissions per confirmed node and scope, assigned by transmission FirstSeen; summed node counts are relay appearances. Metadata is current, or archived only when no current row exists. Current catalog identity resolution and live visibility policies apply. Coverage and truncation must be checked before interpreting changes.", Tag: "analytics", Response: schemaRef("RegionsHistoryResponse"),
+			Errors: []routeError{{Status: "500", Description: "Identity or node metadata could not be read."}, {Status: "503", Description: "Relay history snapshot is unavailable or warming up."}}},
+		"GET /api/regions/routes":    {Summary: "Observed directed scoped relay steps", Description: "Paired Regions history plus bounded directed adjacent relay steps from each explicitly observed scoped flood path. The observation transport codes must match the canonical transmission frame underlying its existing scope name. Counts deduplicate transmission IDs per directed step and scope and use FirstSeen hourly buckets. Scope handoffs, RF links, complete end-to-end paths and observer/origin edges are not inferred. Independent stepNodes carry current or archived endpoint metadata. Snapshot-wide diagnostics expose skipped or incomplete evidence.", Tag: "analytics", Response: schemaRef("RegionsRoutesResponse"), Errors: []routeError{{Status: "500", Description: "Identity or endpoint metadata could not be read."}, {Status: "503", Description: "Paired relay routes snapshot is unavailable or warming up."}}},
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
@@ -121,8 +127,8 @@ func routeDescriptions() map[string]routeMeta {
 			}},
 		"GET /api/nodes/{pubkey}/health":    {Summary: "Get node health", Description: "Health of one node: stats, recent packets, the rolling 24 h activity and its Heard By lists. directObservers received the node's own transmission; relayObservers saw only other evidence (see HeardDirectObserver). Both lists describe observed routing evidence, not radio range.", Tag: "nodes", Response: schemaRef("NodeHealthResponse")},
 		"GET /api/nodes/{pubkey}/paths":     {Summary: "Get node routing paths", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}/analytics": {Summary: "Get node analytics", Description: "Per-node packet counts, timing, and RF stats.", Tag: "nodes"},
-		"GET /api/nodes/{pubkey}/analytics/summary": {Summary: "Get node analytics summary", Description: "Fase 5.2a: light sibling of /analytics — timeRange + computedStats only (availabilityPct, longestSilenceMs/Start, signalGrade, snrMean/snrStdDev, relayPct, totalPackets, uniqueObservers, uniquePeers, avgPacketsPerDay). No node object, no clockSkew, and none of the heavy display arrays (activityTimeline/snrTrend/packetTypeBreakdown/observerCoverage/hopDistribution/peerInteractions/uptimeHeatmap) — for callers that only need the summary numbers, not the full endpoint's per-packet detail. Shares its per-packet computation with /analytics, so computedStats is identical between the two for the same pubkey/days.", Tag: "nodes",
+		"GET /api/nodes/{pubkey}/analytics": {Summary: "Get node analytics", Description: "Per-node packet counts, timing, and RF stats. timeRange is the requested range; coverage describes the effective UTC retained-history interval, partial/loading status and reason (late_evicted_observations counts late observations of evicted transmissions, which never move coverage.from). Rates and packet arrays use that interval; zero supported duration yields zero rates. This is not radio uptime.", Tag: "nodes"},
+		"GET /api/nodes/{pubkey}/analytics/summary": {Summary: "Get node analytics summary", Description: "Light sibling of /analytics: requested timeRange, effective UTC retained-history coverage, and computedStats. No node object, clockSkew, or heavy display arrays. Shares coverage, packet membership and computed statistics with the full endpoint for the same pubkey/days/instant. Partial/loading/unknown history is explicit; rates use coverage.seconds, not the requested days. Zero supported duration yields zero rates. This is available store data, not measured radio uptime.", Tag: "nodes",
 			QueryParams: []paramMeta{
 				{Name: "days", Description: "Time window in days, 1-365. Default 7.", Type: "integer"},
 			}},
@@ -1005,6 +1011,18 @@ func componentSchemas() map[string]interface{} {
 		Properties:  map[string]*openAPISchema{"error": {Type: "string"}},
 	}
 	for name, schema := range nodeAdvertRouteSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range regionsObservedSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range regionsHistorySchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range regionsRoutesSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range regionsEvidenceSchemas() {
 		schemas[name] = schema
 	}
 	for name, schema := range heardBySchemas() {

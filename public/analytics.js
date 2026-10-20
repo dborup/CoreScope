@@ -216,7 +216,7 @@
           <div class="analytics-filters">
             <div id="analyticsRegionFilter" class="region-filter-container"></div>
             <div id="analyticsAreaFilter" style="display:none"></div>
-            <select id="analyticsTimeWindow" class="analytics-time-window-select" data-testid="analytics-time-window" aria-label="Time window">
+            <select id="analyticsTimeWindow" class="time-window-select" data-testid="analytics-time-window" aria-label="Time window">
               <option value="">All data</option>
               <option value="1h">Last 1 hour</option>
               <option value="24h">Last 24 hours</option>
@@ -3194,10 +3194,10 @@
           <p class="text-muted" style="font-size:12px;margin-top:4px">Units — <strong>Usefulness</strong>: the #672 composite (0.30 bridge + 0.25 coverage + 0.25 redundancy + 0.20 traffic). <strong>Traffic share</strong>: % of non-advert traffic relayed. <strong>Bridge/Coverage/Redundancy</strong>: 0–100% (network-normalized). <strong>Relays (1h/24h)</strong> and <strong>Adverts</strong>: packet counts. Axes auto-scale to the data.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
             <label style="display:flex;gap:6px;align-items:center">X axis
-              <select id="metricScatterX" class="analytics-time-window-select" aria-label="X axis metric">${opts(xKey)}</select>
+              <select id="metricScatterX" class="time-window-select" aria-label="X axis metric">${opts(xKey)}</select>
             </label>
             <label style="display:flex;gap:6px;align-items:center">Y axis
-              <select id="metricScatterY" class="analytics-time-window-select" aria-label="Y axis metric">${opts(yKey)}</select>
+              <select id="metricScatterY" class="time-window-select" aria-label="Y axis metric">${opts(yKey)}</select>
             </label>
             <span class="text-muted">${points.length} repeater${points.length === 1 ? '' : 's'}</span>
           </div>
@@ -4543,7 +4543,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
             <span>avg: ${avgNf}</span>
             <span>max: ${maxNf}</span>
             <span>${obs.sample_count} samples</span>
-            <span data-testid="rf-cell-airtime" title="Rolling TX airtime over the last hour (not the per-sample value)">TX 1h: ${ObserverAirtime.badge(obs.tx_airtime_pct_1h, summaryData.duty_cycle_warn_pct)}</span>
+            <span data-testid="rf-cell-airtime" title="${ObserverAirtime.TX_TITLE}">TX 1h: ${ObserverAirtime.badge(obs.tx_airtime_pct_1h, summaryData.duty_cycle_warn_pct)}</span>
+            <span data-testid="rf-cell-rx-airtime" title="${ObserverAirtime.RX_TITLE}">RX 1h: ${ObserverAirtime.rxBadge(obs.rx_airtime_pct_1h)}</span>
           </div>
         </div>`;
       }).join('');

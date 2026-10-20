@@ -40,6 +40,16 @@ func loadPacketsIntoStore(ps *PacketStore, pubkey string, packets []*StoreTx) {
 		ps.byTxID[p.ID] = p
 	}
 	ps.byNode[pubkey] = packets
+	// This synthetic fixture bypasses the loader. Certify the complete
+	// interval explicitly so this test still characterizes all non-coverage
+	// analytics fields rather than accidentally exercising a loading store.
+	ps.loaded = true
+	if len(packets) > 0 {
+		at, ok := parseNodeAnalyticsTime(packets[0].FirstSeen)
+		if ok {
+			ps.analyticsHistory = nodeAnalyticsHistory{known: true, from: at.Add(-365 * 24 * time.Hour)}
+		}
+	}
 }
 
 func mustParseRFC3339UTC(t *testing.T, s string) time.Time {

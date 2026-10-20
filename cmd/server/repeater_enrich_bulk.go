@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"time"
 )
@@ -39,13 +40,14 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 	// Cache is nil — recomputer hasn't prewarmed yet (edge case: tests
 	// without a running recomputer, or a request racing the initial
 	// synchronous prewarm). Build once inline; the recomputer takes over.
-	result := s.computeRepeaterRelayInfoMap(windowHours)
+	snapshot := s.computeRepeaterRelaySnapshot(windowHours)
 
 	s.repeaterEnrichMu.Lock()
 	if s.repeaterRelayCache == nil {
-		s.repeaterRelayCache = result
+		s.repeaterRelayCache = snapshot.info
+		s.repeaterRelaySnapshot = snapshot
 		s.repeaterRelayCacheWin = windowHours
-		s.repeaterRelayAt = time.Now()
+		s.repeaterRelayAt = snapshot.generatedAt
 	}
 	cached = s.repeaterRelayCache
 	s.repeaterEnrichMu.Unlock()
@@ -65,12 +67,28 @@ func (s *PacketStore) GetRepeaterRelayInfoMap(windowHours float64) map[string]Re
 // avoiding collided-prefix fanout. Memory: O(unique tx + keys + distinct hop
 // tokens), bounded by store eviction.
 func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[string]RepeaterRelayInfo {
+	return s.computeRepeaterRelaySnapshot(windowHours).info
+}
+
+func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeaterRelaySnapshot {
+	// Read before s.mu: bgErrMu readers intentionally do not wait on the
+	// packet lock. The same floor/time describes every entry in this result.
+	loadCoverage := s.LoadCoverageRatio()
+	now := time.Now().UTC()
+	// Node metadata (SQL) is read BEFORE s.mu so no query runs under the
+	// packet-store lock (#412/#495).
+	metadata := s.snapshotPathNodes()
 	// Everything that reads store data happens under the read lock: ingest
 	// appends to and eviction compacts byPathHop/byNode slices in place, so a
 	// copied slice header is not a stable snapshot, and StoreTx observations
 	// are mutable. The unlocked phase reads only values owned by this call.
 	s.mu.RLock()
-	pm := s.relayPrefixMapLocked()
+	snapshot := &repeaterRelaySnapshot{
+		generatedAt:   now,
+		coverageStart: s.retainedHistoryCoverageStartLocked(now, loadCoverage),
+		loading:       !s.loaded || (!s.backgroundLoadDone.Load() && !s.backgroundLoadFailed.Load()),
+	}
+	pm := metadata.pm
 
 	// Per transmission: its relay entry values and the identity-safe relay
 	// keys confirmed by its raw observed flood paths, computed once.
@@ -83,6 +101,7 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 	index := make(map[int]int, 1<<14)
 	txs := make([]bulkRelayTx, 0, 1<<14)
 	confirmed := make(map[string]struct{})
+	routes := newRegionsRoutesCollector(now)
 	add := func(list []*StoreTx) {
 		for _, tx := range list {
 			if tx == nil {
@@ -94,6 +113,7 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 			b := bulkRelayTx{entry: newRelayEntry(tx, false)}
 			b.entry.parsed = true
 			b.entry.t, b.entry.valid = parseRelayTS(tx.FirstSeen)
+			routes.captureAt(tx, b.entry.t, b.entry.valid)
 			if txHasObservedFloodPath(tx) {
 				forEachObservedRelayHop(tx, func(token string) bool {
 					key := resolve.key(token)
@@ -182,6 +202,8 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 	s.mu.RUnlock()
 
 	out := make(map[string]RepeaterRelayInfo, len(perKey))
+	// Keep the existing generic relay-map computation independent of Regions.
+	sort.Slice(perKey, func(i, j int) bool { return perKey[i].key < perKey[j].key })
 	var entries []relayEntry
 	for _, k := range perKey {
 		entries = entries[:0]
@@ -190,9 +212,13 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 			e.fromPrefix = ref.fromPrefix
 			entries = append(entries, e)
 		}
-		out[k.key] = computeRelayInfoFromEntries(entries, windowHours)
+		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
 	}
-	return out
+	snapshot.info = out
+	snapshot.routes = routes.build(pm)
+	snapshot.history = snapshot.routes.history
+	snapshot.regionMemberships = snapshot.routes.memberships
+	return snapshot
 }
 
 // GetRepeaterUsefulnessScoreMap returns a cached pubkey → 0..1 score

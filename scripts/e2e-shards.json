@@ -10,6 +10,14 @@
       "measurementNote": "New suite; no CI duration measured yet. Accelerated browser clock and simulated visibility."
     },
     {
+      "file": "test-node-analytics-coverage-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; synthetic coverage metadata against the real local analytics page."
+    },
+    {
       "file": "test-issue-480-no-scope-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -277,6 +285,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; no CI duration measured yet. Placed beside the sibling observers-sort suite."
+    },
+    {
+      "file": "test-issue-497-rx-airtime-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; no CI duration measured yet. Placed beside the sibling airtime suite."
     },
     {
       "file": "test-issue-1639-observers-sort-e2e.js",

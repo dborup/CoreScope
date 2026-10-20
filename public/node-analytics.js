@@ -159,6 +159,22 @@
         </div>
       </div>`;
 
+    // The API's coverage is retained store evidence, not physical radio uptime.
+    // Use textContent for all server-provided metadata and insert one notice;
+    // do not interpolate coverage fields into this page's HTML template.
+    if (data.coverage && data.coverage.partial) {
+      const notice = document.createElement('p');
+      notice.id = 'nodeAnalyticsCoverageNotice';
+      notice.setAttribute('role', 'status');
+      notice.style.cssText = 'padding:10px 12px;color:var(--text-muted);border:1px solid var(--border);border-radius:6px';
+      const coverage = data.coverage;
+      notice.textContent = coverage.seconds > 0
+        ? 'Partial history: statistics use available retained data from ' + coverage.from + ' to ' + coverage.to + ', not the entire requested ' + days + ' days. Missing history is not inactivity; this is not measured radio uptime.'
+        : 'Partial history: a supported history interval is not yet known. Rates are shown as 0 until retained data is available; this is not measured radio uptime.';
+      if (coverage.loading) notice.textContent += ' History is still loading.';
+      container.querySelector('.analytics-stats').before(notice);
+    }
+
     // Time range buttons
     container.querySelectorAll('#timeRangeBtns button').forEach(btn => {
       btn.addEventListener('click', () => {
