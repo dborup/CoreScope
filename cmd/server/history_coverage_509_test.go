@@ -495,3 +495,210 @@ func TestCoverage509EdgeFlooredAtRetention(t *testing.T) {
 		t.Fatalf("edge=%v, want the load floor with unlimited retention", from)
 	}
 }
+
+// coverage509Reheard stands in for the ingestor hearing an existing
+// transmission again: a new observation row, then the last_seen bump
+// (ingestor InsertTransmission, #1690). last_seen moves to `at`, out of any
+// background window that has not been read yet.
+func coverage509Reheard(t *testing.T, writer *sql.DB, txID, obsID int, at time.Time) {
+	t.Helper()
+	// PREFLIGHT: async=true reason="unit-test writer standing in for the ingestor on an ephemeral DB"
+	if _, err := writer.Exec(`INSERT INTO observations (id, transmission_id, observer_id, observer_name, direction, snr, rssi, score, path_json, timestamp) VALUES (?, ?, 'obs2', 'Obs2', 'RX', -9.0, -79.0, 5, '[]', ?)`,
+		obsID, txID, at.Format(time.RFC3339)); err != nil {
+		t.Error(err)
+	}
+	// PREFLIGHT: async=true reason="unit-test writer standing in for the ingestor on an ephemeral DB"
+	if _, err := writer.Exec(`UPDATE transmissions SET last_seen = ? WHERE id = ? AND last_seen < ?`, at.Unix(), txID, at.Unix()); err != nil {
+		t.Error(err)
+	}
+}
+
+// The staging configuration (#509 round 3): retentionHours 48,
+// hotStartupHours 6, a memory cap and the background fill, while the
+// ingestor keeps writing. Retention evicts the re-heard rows the hot window
+// loaded, a memory-cap tick evicts the oldest rows mid-load, the poller
+// runs, and new transmissions arrive. With reheard, the ingestor also hears
+// transmissions again whose last_seen sat in a window not read yet: one
+// after the hot cursor passed it, three before the second background
+// window. Their last_seen moves to now, out of every window the loader
+// will still read, and the poller skips observations of transmissions that
+// are not in memory. They must still end up in memory, and coverage must be
+// known. The control (no re-hearing) isolates the remaining gates:
+// eviction, retention, oldestLoaded at the background start and the 90%
+// done gate.
+func TestCoverage509StagingShapeBackgroundLoad(t *testing.T) {
+	for _, reheard := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reheard=%v", reheard), func(t *testing.T) {
+			now := time.Now().UTC()
+			const reheardOld, regular = 5, 2000
+			dbPath := coverage509Rows(t, now, reheardOld, regular, time.Hour)
+			store := openCoverage509Store(t, dbPath, &PacketStoreConfig{
+				RetentionHours: coverage509RetentionHours, HotStartupHours: 6, MaxMemoryMB: 1})
+			writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			// Regular row i has first_seen == last_seen ≈ now − 47h + (i−6)·step.
+			rowAt := func(hoursAgo float64) int {
+				return reheardOld + 1 + int((47-hoursAgo)/47*regular)
+			}
+			var hearAgain []int
+			nextID, nextObs := reheardOld+regular, 5000000
+			hear := func(id int) {
+				nextObs++
+				coverage509Reheard(t, writer, id, nextObs, time.Now().UTC())
+				hearAgain = append(hearAgain, id)
+			}
+			first := true
+			store.OnChunkLoaded(func(int, int) {
+				if first && reheard {
+					first = false
+					hear(rowAt(20)) // first background window, behind the hot cursor
+				}
+			})
+			var lastEvicted time.Time
+			sinceObs := store.MaxObservationID()
+			chunks := 0
+			store.loadChunkScannedHook = func() {
+				// [now−30h, now−6h) scanned, [now−48h, now−30h) not read yet.
+				if chunks++; chunks != 1 {
+					return
+				}
+				if reheard {
+					for _, ago := range []float64{40, 38, 33} {
+						hear(rowAt(ago))
+					}
+				}
+				for i := 0; i < 3; i++ {
+					nextID++
+					coverage509InsertTx(t, writer, nextID, time.Now().UTC())
+				}
+				if n := store.RunEviction(); n != reheardOld {
+					t.Errorf("retention tick evicted %d rows, want the %d re-heard rows", n, reheardOld)
+				}
+				// Poller tick: observations of transmissions that are not in
+				// memory are skipped.
+				store.IngestNewFromDB(store.MaxTransmissionID(), 100)
+				store.IngestNewObservations(sinceObs, 500)
+			}
+			// A memory-cap tick once the oldest window is merged, when the
+			// store is fullest: it lands between the two counts, so the
+			// check also repeats against the moved edge.
+			counted := 0
+			store.retainedHistoryCountedHook = func() {
+				if counted++; counted != 1 {
+					return
+				}
+				store.mu.Lock()
+				before := append([]*StoreTx(nil), store.packets...)
+				tracked := store.trackedBytes
+				store.trackedBytes = int64(store.maxMemoryMB)*1048576 + 1
+				store.mu.Unlock()
+				if store.RunEviction() == 0 {
+					t.Error("memory eviction did not run")
+				}
+				store.mu.Lock()
+				store.trackedBytes = tracked
+				for _, tx := range before {
+					if store.byTxID[tx.ID] == nil {
+						if at, _ := time.Parse(time.RFC3339, tx.FirstSeen); at.After(lastEvicted) {
+							lastEvicted = at
+						}
+					}
+				}
+				store.mu.Unlock()
+			}
+			if err := store.RunStartupLoad(100); err != nil {
+				t.Fatalf("RunStartupLoad: %v", err)
+			}
+			t.Logf("loadCoverageRatio=%.4f lastEvicted=%v", store.LoadCoverageRatio(), lastEvicted)
+			if !store.backgroundLoadDone.Load() || store.backgroundLoadFailed.Load() {
+				t.Fatalf("load did not finish cleanly: err=%q", store.BackgroundLoadError())
+			}
+			floor := now.Add(-coverage509RetentionHours * time.Hour)
+			if lastEvicted.Before(floor) || lastEvicted.After(now.Add(-25*time.Hour)) {
+				t.Fatalf("fixture: memory eviction edge %v, want inside the window and before 25h ago", lastEvicted)
+			}
+			store.mu.RLock()
+			for _, id := range hearAgain {
+				if store.byTxID[id] == nil {
+					t.Errorf("re-heard transmission %d is not in memory", id)
+				}
+			}
+			store.mu.RUnlock()
+			retained, activity, analytics := coverage509Starts(store, now)
+			if retained.IsZero() || !retained.After(lastEvicted) || retained.After(lastEvicted.Add(time.Hour)) {
+				t.Fatalf("retained coverage start=%v, want known just after the memory eviction edge %v", retained, lastEvicted)
+			}
+			if activity.IsZero() || activity.After(now.Add(-24*time.Hour)) {
+				t.Fatalf("activity24h coverage start=%v, want known and before %v", activity, now.Add(-24*time.Hour))
+			}
+			if analytics.Reason == "load_failed" {
+				t.Fatalf("analytics coverage=%+v, want a verified load", analytics)
+			}
+		})
+	}
+}
+
+// N1 (round 2): the retention floor also bounds the edge on the background
+// path. There oldestLoaded ends at the retention floor taken when the
+// background fill started, which is just below the floor at verification.
+// The ingestor prunes by first_seen, so it can delete rows in that sliver
+// while they are still in memory, before a server tick evicts them. They
+// were never meant to be covered and must not count as surplus.
+func TestCoverage509BackgroundEdgeFlooredAtRetention(t *testing.T) {
+	now := time.Now().UTC()
+	const regular, sliver = 200, 3
+	dbPath := coverage509Rows(t, now, 0, regular, 0)
+	store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: 12})
+	writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	var sliverAt time.Time
+	store.bgLoaderEntryHook = func() {
+		// Start early in a second, so the background floor taken next is
+		// in the same second; the sliver rows sit one second above it.
+		if frac := time.Duration(time.Now().Nanosecond()); frac > 500*time.Millisecond {
+			time.Sleep(time.Second - frac)
+		}
+		sliverAt = time.Now().UTC().Truncate(time.Second).Add(time.Second - coverage509RetentionHours*time.Hour)
+		for i := 1; i <= sliver; i++ {
+			// PREFLIGHT: async=true reason="unit-test writer standing in for the ingestor on an ephemeral DB"
+			if _, err := writer.Exec(`INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, last_seen) VALUES (?, 'aabb', ?, ?, 0, 4, 1, '{}', ?)`,
+				regular+i, fmt.Sprintf("sliver%d", i), sliverAt.Format(time.RFC3339), sliverAt.Unix()); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	chunks := 0
+	store.loadChunkScannedHook = func() {
+		if chunks++; chunks != 2 { // the oldest window, sliver rows scanned
+			return
+		}
+		// Wait until the retention floor has passed the sliver, then let the
+		// ingestor prune it; the scanned rows are still merged.
+		for !time.Now().UTC().Add(-coverage509RetentionHours * time.Hour).After(sliverAt) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		// PREFLIGHT: async=true reason="unit-test writer standing in for ingestor retention on an ephemeral DB"
+		if _, err := writer.Exec(`DELETE FROM transmissions WHERE id > ?`, regular); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := store.RunStartupLoad(50); err != nil {
+		t.Fatalf("RunStartupLoad: %v", err)
+	}
+	store.mu.RLock()
+	inMemory := store.byTxID[regular+1] != nil
+	store.mu.RUnlock()
+	if !inMemory || chunks < 2 {
+		t.Fatalf("fixture: sliver row in memory=%v after %d chunks", inMemory, chunks)
+	}
+	retained, _, _ := coverage509Starts(store, now)
+	if retained.IsZero() || !retained.After(sliverAt) {
+		t.Fatalf("retained coverage start=%v, want known and above the pruned sliver at %v", retained, sliverAt)
+	}
+}
