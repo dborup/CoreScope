@@ -279,16 +279,23 @@ holds for the same rows. Capture therefore retains at most about 40 % of what
 the store holds for the rows it mirrors, and it cannot mirror rows the store
 does not hold, so `packetStore.maxMemoryMB` binds first on any host.
 
-The per-hour budget's own ceiling, if every hourly bucket in the 504 h horizon
-were filled to it, is 33.1 M references — about 265 MiB of references plus up
-to about 794 MiB of path slots if every reference carried a distinct path.
-Reaching it requires the packet store to hold 33 M transport-scoped
-observations across 505 distinct hours, several times the store budget any
-CoreScope host runs with; at the rate real data showed (168 h at ~16,800
-observations per hour) the same arithmetic gives about 23 MiB of references and
-68 MiB of path slots. `/api/perf?mem=1` reports the fill of every capture
-budget as `regionsSnapshot.capture`, so the headroom is observable per snapshot
-instead of inferred from these figures.
+The per-hour budget's own nominal ceiling, if every hourly bucket in the 504 h
+horizon were filled to it, is 33.1 M references: about 265 MiB of references,
+up to 794 MiB of path slots if every reference carried a distinct path, 6 MiB
+of interning table and up to 2.4 GiB of transmission headers if each reference
+belonged to its own single-observation transmission — about 3.4 GiB in total.
+That ceiling is not reachable in practice. It requires the packet store to hold
+33 M transport-scoped observations across 505 distinct hours, roughly ten
+gigabytes of store and several times the `packetStore.maxMemoryMB` budget any
+CoreScope host runs with, which is why the store is the operative bound and the
+per-hour budget is a fairness and pathology net. At the rate real data showed —
+168 h at ~16,800 observations per hour, every one of them transport-scoped with
+a distinct path — the same arithmetic gives about 300 MiB, against roughly
+850 MiB of store for the same rows. A measured 168 h synthetic snapshot at
+5,200 references per hour with a distinct 5-hop chain per transmission retains
+97 MiB of capture state and caps nothing. `/api/perf?mem=1` reports the fill of
+every capture budget as `regionsSnapshot.capture`, so the headroom is
+observable per snapshot instead of inferred from these figures.
 
 Memberships are aggregated straight into (relay, scope, hour) cells, so the
 budget — 500,000 cells and 10,000 identities — grows with populated hours
