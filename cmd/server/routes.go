@@ -60,6 +60,11 @@ type Server struct {
 	// Admits one /api/perf?mem=1 store scan at a time plus a cooldown (#371).
 	perfMem perfMemLimiter
 
+	// Test-only override for the published step-endpoint ceiling (#510), so
+	// the ceiling and its missing-endpoint disclosure can be exercised without
+	// a 10,001-node fixture. Zero means maxRegionsRouteEndpoints.
+	stepEndpointLimit int
+
 	// Throttles the log of failed GET /api/nodes/{pubkey} 404 lookups (#208).
 	missingNodeLog missingNodeLookupLog
 

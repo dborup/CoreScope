@@ -34,19 +34,37 @@ const (
 	maxRegionsRoutePathsPerTx = 128
 	maxRegionsRoutePairsPerTx = 8192
 	maxRegionsRoutePathBytes  = 8192
-	// Distinct observation path strings retained for deferred resolution.
-	// Identical paths are interned, so one relay chain observed by thousands of
-	// transmissions costs a single entry and is parsed and resolved once.
+	// Interning table for observation path strings: a bounded dedup cache, not
+	// a budget. Identical paths share one entry, so one relay chain observed by
+	// thousands of transmissions is parsed and resolved once. Past the table a
+	// path is retained un-interned instead of being refused — it costs a path
+	// slot and a reference rather than a map entry. Refusing would reintroduce
+	// exactly the starvation #508 reported, at a lower ceiling: real path
+	// diversity is high (e2e-fixture.db, real captured traffic, holds 376
+	// distinct path strings in 399 path-carrying observations), so a global
+	// table fills on ordinary traffic and would then cap every later hour.
 	maxRegionsRoutePathVariants = 1 << 17
 	// Retained path references per hourly bucket (#508). The retired global
 	// 250,000-reference budget was exhausted by 48 h of real traffic (~805k
 	// observations): every hour after it was reported capped, which withheld
 	// the Health and Timeline rates for #dk and for all scopes. A per-hour
 	// budget makes the ceiling scale with retention and stops one busy hour
-	// from starving the rest of the horizon. A reference costs 8 bytes against
-	// the ~200 the packet store already holds for the same observation, so the
-	// real bound stays the retained store, not this safety net.
-	maxRegionsRoutePathRefsPerHour = 1 << 14
+	// from starving the rest of the horizon. 65,536 is about four times the
+	// ~16,800 observations/hour that 48 h of real traffic averaged across all
+	// scopes, so even a peak hour has headroom if every observation were
+	// transport-scoped and carried a distinct path. It is a fairness and
+	// pathology net, not the memory bound: capture retains at most one
+	// reference per eligible observation and one header per transmission
+	// already in the packet store, so the store's own packetStore.maxMemoryMB
+	// budget binds first (see docs/regions-observed.md).
+	maxRegionsRoutePathRefsPerHour = 1 << 16
+	// Estimated retained cost of the transient capture state, for the capture
+	// diagnostic and for the disclosed horizon ceiling. Path content is shared
+	// with the packet store, so only headers and map overhead are counted.
+	regionsRoutePathRefBytes      = 8  // one regionsRoutePathRef
+	regionsRoutePathSlotBytes     = 24 // one retained path: header plus resolver slot
+	regionsRoutePathInternedBytes = 48 // its interning-table entry on top
+	regionsRouteTxBytes           = 72 // one retained transmission header
 	// Hop tokens cached with resolved paths. Past it, paths are resolved
 	// without caching: slower, never truncated.
 	maxRegionsRouteResolvedTokens = 1 << 21
@@ -130,8 +148,34 @@ type regionsRouteSnapshot struct {
 	steps                            []RegionsRouteStep
 	stepsTruncated, bucketsTruncated bool
 	evidence                         RegionsStepEvidence
+	capture                          RegionsRouteCapture
 	memberships                      *regionsMembershipSnapshot
 	history                          *regionsRelayHistory
+}
+
+// RegionsRouteCapture is the transient capture state's fill against its own
+// budgets (#510). Retained with the published snapshot and reported by the
+// memory diagnostics, so an operator can see how close the budgets that
+// decide `capped` are to their ceilings before one is reached. EstimatedBytes
+// is the same deliberate estimate the store breakdown uses: struct headers,
+// map overhead and resolver slots, with path content excluded because it is
+// shared with the packet store.
+type RegionsRouteCapture struct {
+	PathVariants            int   `json:"pathVariants"`
+	PathVariantsInterned    int   `json:"pathVariantsInterned"`
+	PathVariantInternBudget int   `json:"pathVariantInternBudget"`
+	PathReferences          int   `json:"pathReferences"`
+	MaxHourPathReferences   int   `json:"maxHourPathReferences"`
+	HourPathReferenceBudget int   `json:"hourPathReferenceBudget"`
+	Transmissions           int   `json:"transmissions"`
+	MembershipCells         int   `json:"membershipCells"`
+	MembershipCellBudget    int   `json:"membershipCellBudget"`
+	MembershipNodes         int   `json:"membershipNodes"`
+	MembershipNodeBudget    int   `json:"membershipNodeBudget"`
+	EstimatedBytes          int64 `json:"estimatedBytes"`
+	// SourceTruncated repeats the capture budget's own refusal flag, so the
+	// fill figures above are never read as a complete capture.
+	SourceTruncated bool `json:"sourceTruncated"`
 }
 
 // regionsRoutePathRef points one transmission at an interned observation path
@@ -155,6 +199,10 @@ type regionsRoutesCollector struct {
 	pathIDs  map[string]int32
 	pathList []string
 	hourRefs []int32
+	// internBound is the interning table's size. A field rather than the
+	// constant so tests can exercise the un-interned fallback without building
+	// 131,072 distinct paths; capture never mutates it.
+	internBound int
 	// stepBytes is the directed-step payload budget for this snapshot. A field
 	// rather than the constant so tests can exercise truncation without
 	// building a 16 MiB snapshot; build() never mutates it.
@@ -167,11 +215,12 @@ func newRegionsRoutesCollector(now time.Time) *regionsRoutesCollector {
 	end := now.UTC().Truncate(time.Hour)
 	return &regionsRoutesCollector{start: end.Add(-regionsHistoryBucketCount * time.Hour), end: end, now: now.UTC(),
 		pathIDs: make(map[string]int32), hourRefs: make([]int32, regionsHistoryBucketCount+1),
-		stepBytes: maxRegionsRouteStepBytes, cells: newRegionsEvidenceBuilder()}
+		internBound: maxRegionsRoutePathVariants,
+		stepBytes:   maxRegionsRouteStepBytes, cells: newRegionsEvidenceBuilder()}
 }
 
-// pathRefs reports how many observation paths this snapshot retained, for the
-// memory diagnostics and the capture benchmarks.
+// pathRefs reports how many observation path references this snapshot
+// retained, for the capture tests and benchmarks.
 func (c *regionsRoutesCollector) pathRefs() int {
 	total := 0
 	for _, used := range c.hourRefs {
@@ -180,10 +229,40 @@ func (c *regionsRoutesCollector) pathRefs() int {
 	return total
 }
 
+// captureStats reports how much of each capture budget this snapshot spent, so
+// the budgets that decide `capped` are observable before they cap (#510). It
+// is O(hourly buckets) and runs with the rest of build(), outside the packet
+// lock.
+func (c *regionsRoutesCollector) captureStats(memberships *regionsMembershipBuilder) RegionsRouteCapture {
+	out := RegionsRouteCapture{
+		PathVariants:            len(c.pathList),
+		PathVariantsInterned:    len(c.pathIDs),
+		PathVariantInternBudget: c.internBound,
+		PathReferences:          c.pathRefs(),
+		HourPathReferenceBudget: maxRegionsRoutePathRefsPerHour,
+		Transmissions:           len(c.txs),
+		MembershipCells:         len(memberships.cells),
+		MembershipCellBudget:    maxRegionsMembershipCells,
+		MembershipNodes:         len(memberships.nodes),
+		MembershipNodeBudget:    maxRegionsMembershipNodes,
+		SourceTruncated:         c.evidence.SourceTruncated,
+	}
+	for _, used := range c.hourRefs {
+		if int(used) > out.MaxHourPathReferences {
+			out.MaxHourPathReferences = int(used)
+		}
+	}
+	out.EstimatedBytes = int64(out.PathReferences)*regionsRoutePathRefBytes +
+		int64(out.PathVariants)*regionsRoutePathSlotBytes +
+		int64(out.PathVariantsInterned)*regionsRoutePathInternedBytes +
+		int64(out.Transmissions)*regionsRouteTxBytes
+	return out
+}
+
 // retainPath spends this hour's reference budget and interns the path when it
-// is new. Identical paths share one interned entry, so the variant table is
-// bounded by the distinct relay chains on the network rather than by the
-// number of observations, and each is parsed and resolved once per snapshot.
+// is new and the table has room. Identical paths share one interned entry, so
+// a repeated relay chain is parsed and resolved once per snapshot; the only
+// refusal is the per-hour reference budget, which is fair across the horizon.
 // held is how many distinct paths this transmission already retained. The
 // caller has already looked the path up, so capture costs one string-map
 // lookup per observation, as it did before interning.
@@ -193,12 +272,15 @@ func (c *regionsRoutesCollector) retainPath(path string, id int32, known bool, i
 		return 0, false
 	}
 	if !known {
-		if len(c.pathList) >= maxRegionsRoutePathVariants {
-			return 0, false
-		}
 		id = int32(len(c.pathList))
 		c.pathList = append(c.pathList, path)
-		c.pathIDs[path] = id
+		// Past the interning table the path is still retained, just without a
+		// table entry: identical paths then cost one slot each instead of
+		// sharing one. The per-hour reference budget bounds that; nothing is
+		// refused for lack of table space.
+		if len(c.pathIDs) < c.internBound {
+			c.pathIDs[path] = id
+		}
 	}
 	c.hourRefs[index]++
 	return id, true
@@ -461,6 +543,7 @@ func (c *regionsRoutesCollector) build(pm *prefixMap) *regionsRouteSnapshot {
 		}
 		out.steps = append(out.steps, step)
 	}
+	out.capture = c.captureStats(memberships)
 	out.memberships, out.history = memberships.build(c.now, c.cells.build(c.start))
 	out.evidence = c.evidence
 	// Directed-step completeness only. Unresolved hops break adjacency, so they

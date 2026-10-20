@@ -51,9 +51,20 @@ type RegionsSnapshotMemory struct {
 	// operator can see how much of maxRegionsRouteStepBytes a snapshot used.
 	EstimatedStepPayloadBytes int64 `json:"estimatedStepPayloadBytes"`
 	StepPayloadBudgetBytes    int64 `json:"stepPayloadBudgetBytes"`
-	// Truncated repeats the snapshot's own publication flags, so a small byte
-	// figure is not mistaken for a complete snapshot.
+	// Truncated is budget truncation only: the hourly-history and directed-step
+	// publication flags plus the capture budget's own refusal. It deliberately
+	// excludes evidence.Incomplete, which is also raised by unresolved hops and
+	// unprovable observations and is therefore almost always true on real data
+	// (#510).
 	Truncated bool `json:"truncated"`
+	// EvidenceIncomplete repeats the snapshot's evidence qualification, so the
+	// distinction above costs no information.
+	EvidenceIncomplete bool `json:"evidenceIncomplete"`
+	// Capture is the transient capture state's fill against its own budgets.
+	// Publication sizes alone do not show how close the per-hour reference
+	// budget, the interning table or the membership cell budget are to their
+	// ceilings, and those are the budgets that decide `capped` (#510).
+	Capture RegionsRouteCapture `json:"capture"`
 }
 
 func stringBytes(s string) int64 { return int64(len(s)) + strHdr }
@@ -109,7 +120,9 @@ func measureRegionsSnapshot(snapshot *repeaterRelaySnapshot) *RegionsSnapshotMem
 		}
 	}
 	if r := snapshot.routes; r != nil {
-		out.Truncated = out.Truncated || r.stepsTruncated || r.bucketsTruncated || r.evidence.Incomplete
+		out.Truncated = out.Truncated || r.stepsTruncated || r.bucketsTruncated || r.evidence.SourceTruncated
+		out.EvidenceIncomplete = r.evidence.Incomplete
+		out.Capture = r.capture
 		out.StepsBytes += sliceHeaderBytes
 		for _, step := range r.steps {
 			out.Steps++

@@ -358,8 +358,17 @@ Detailed performance metrics per endpoint.
 and per-bucket evidence snapshot published with the background relay snapshot
 (#508): published counts, per-part and total retained bytes, `totalMB`, and
 `estimatedStepPayloadBytes` against `stepPayloadBudgetBytes` so the directed-step
-payload budget can be read against what a snapshot actually used. `truncated`
-repeats the snapshot's own publication flags. The walk is O(published cells),
+payload budget can be read against what a snapshot actually used. `truncated` is
+budget truncation only — the hourly-history and directed-step publication flags
+plus the capture budget's own refusal — and `evidenceIncomplete` carries the
+snapshot's evidence qualification separately, because unresolved hops and
+unprovable observations raise that on ordinary data. `capture` reports the
+transient capture state's fill against its own budgets (#510): retained paths
+and how many are interned (`pathVariants`, `pathVariantsInterned`,
+`pathVariantInternBudget`), retained references with the per-hour high-water
+mark (`pathReferences`, `maxHourPathReferences`, `hourPathReferenceBudget`),
+retained transmissions, aggregated membership cells and identities against
+their budgets, `estimatedBytes` and `sourceTruncated`. The walk is O(published cells),
 touches no packet state and takes no packet lock, so it is not part of the
 admission-controlled store scan; it is absent before the first background relay
 snapshot. Byte figures are struct sizes plus owned string content plus a flat

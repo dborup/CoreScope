@@ -228,11 +228,15 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 		}
 	}
 	stepNodes := []RegionsRouteNode{}
+	endpointLimit := maxRegionsRouteEndpoints
+	if s.stepEndpointLimit > 0 {
+		endpointLimit = s.stepEndpointLimit
+	}
 	err := s.forEachVisibleRegionNode(ctx, keys, true, func(n observedRegionNodeMetadata) bool {
 		// Endpoint metadata has its own publication ceiling, so the directed-step
 		// payload budget cannot be multiplied by the node table. Steps whose
 		// endpoints are omitted become missingEndpointSteps in the handler.
-		if routeKeys[n.publicKey] && len(stepNodes) < maxRegionsRouteEndpoints {
+		if routeKeys[n.publicKey] && len(stepNodes) < endpointLimit {
 			stepNodes = append(stepNodes, regionRouteNodeMetadata(n))
 		}
 		scopes := h.nodes[n.publicKey]

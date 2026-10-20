@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // #508: every Regions capture and publication budget was a single global
@@ -89,14 +91,14 @@ func TestRegionsRoutePathCaptureBudgetIsPerHour(t *testing.T) {
 	}
 }
 
-// Point 1: one busy hour cannot starve the rest. 20,000 references in a single
+// Point 1: one busy hour cannot starve the rest. 70,000 references in a single
 // hour is above that hour's budget and far below the old global 250,000, so on
 // the pre-#508 tree nothing was capped at all.
 func TestRegionsRoutePathCaptureBudgetFairAcrossHours(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
 	collector := newRegionsRoutesCollector(now)
 	a, b, c := strings.Repeat("ab", 32), fmt.Sprintf("%064x", 1), fmt.Sprintf("%064x", 2)
-	const overfull = 20000
+	const overfull = 70000
 	for i := 0; i < overfull; i++ {
 		collector.capture(routeTransmission(i+1, collector.start.Add(time.Minute), `["`+a+`","`+b+`"]`))
 	}
@@ -283,5 +285,265 @@ func TestPerfMemRegionsSnapshotMemory(t *testing.T) {
 	}
 	if r.GeneratedAt == "" {
 		t.Fatal("the measured snapshot is not identified by its generation time")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #510 round 2. The first round replaced the global 250,000-reference budget
+// with a per-hour one, but left the interning table (131,072 entries) as a
+// single global ceiling over the whole 504 h horizon: once full, every new
+// path string was refused and reported as capped evidence in whichever hour
+// the transmission fell in. Real path diversity is high — e2e-fixture.db, real
+// captured traffic, holds 376 distinct path_json values in 399 path-carrying
+// observations (94 %) — so ordinary diversity reached that ceiling before the
+// per-hour budget did, which is the same starvation #508 reported at a lower
+// ceiling. These tests pin the redesign: the table is a dedup cache that falls
+// back to un-interned retention, and the only refusal left is per hour.
+
+// shuffledDistinctPathTxs builds one transmission per distinct path, spread
+// evenly over the last `hours` buckets, and shuffles them into the order
+// production capture sees (s.byPathHop is walked by map iteration). Paths are
+// distinct 5-hop chains drawn from a small relay pool, which is how real
+// diversity looks: a few hundred relays, very many distinct chains.
+func shuffledDistinctPathTxs(start time.Time, hours, perHour, relays int) []*StoreTx {
+	keys := make([]string, relays)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("%064x", i+1)
+	}
+	txs := make([]*StoreTx, 0, hours*perHour)
+	id, n := 0, 0
+	for hour := regionsHistoryBucketCount - hours; hour < regionsHistoryBucketCount; hour++ {
+		at := start.Add(time.Duration(hour)*time.Hour + time.Minute)
+		for i := 0; i < perHour; i++ {
+			id, n = id+1, n+1
+			hops := make([]string, 5)
+			for h, d := 0, n; h < len(hops); h, d = h+1, d/relays {
+				hops[h] = keys[d%relays]
+			}
+			txs = append(txs, routeTransmission(id, at, `["`+strings.Join(hops, `","`)+`"]`))
+		}
+	}
+	rand.New(rand.NewSource(1)).Shuffle(len(txs), func(i, j int) { txs[i], txs[j] = txs[j], txs[i] })
+	return txs
+}
+
+// F1/F2: 168 h at one distinct path per transmission must not be capped by any
+// capture budget. 168,000 distinct chains is above the retired 131,072-entry
+// interning table and is only 6 % of the rate real data showed (805k
+// observations in 48 h is about 16,800 per hour), so this is a floor on real
+// diversity, not a flood.
+func TestRegionsRoutePathCaptureBudgetAtRealPathDiversity(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	collector := newRegionsRoutesCollector(now)
+	const hours, perHour, relays = 168, 1000, 20
+	for _, tx := range shuffledDistinctPathTxs(collector.start, hours, perHour, relays) {
+		collector.capture(tx)
+	}
+	got := collector.build(nil)
+	if got.evidence.SourceTruncated || got.evidence.CappedObservations != 0 {
+		t.Fatalf("%d distinct paths over %d h were capped: truncated=%v capped=%d",
+			hours*perHour, hours, got.evidence.SourceTruncated, got.evidence.CappedObservations)
+	}
+	if e := got.memberships.evidence.history; e.Capped != 0 || e.Unprovable != 0 || e.Truncated {
+		t.Fatalf("path diversity withheld membership rates: %+v", e)
+	}
+	// Every one of the 168 hours keeps its own clean evidence: a diverse hour
+	// must not qualify any other hour, whatever the capture order was.
+	for hour := regionsHistoryBucketCount - hours; hour < regionsHistoryBucketCount; hour++ {
+		if counts := capturedEvidenceBucket(t, got, hour); counts != (RegionsEvidenceCounts{}) {
+			t.Fatalf("hour %d reported %+v, want clean evidence", hour, counts)
+		}
+	}
+	if got.stepsTruncated || got.bucketsTruncated || got.evidence.CappedStepAppearances != 0 {
+		t.Fatalf("publication budget truncated the snapshot: %+v", got.evidence)
+	}
+	if got.capture.PathVariants != hours*perHour || got.capture.PathReferences != hours*perHour {
+		t.Fatalf("capture diagnostic lost the retained shape: %+v", got.capture)
+	}
+	if got.capture.MaxHourPathReferences != perHour {
+		t.Fatalf("per-hour reference high-water mark was %d, want %d", got.capture.MaxHourPathReferences, perHour)
+	}
+	// Each hour's 1,000 chains cover the whole relay pool, so every relay keeps
+	// one aggregated membership cell in each of the 168 hours.
+	for key, scopes := range got.history.nodes {
+		if len(scopes) != 1 || len(scopes[0].Buckets) != hours {
+			t.Fatalf("%s retained %d scopes and %d hourly buckets, want 1 and %d",
+				key[:8], len(scopes), len(scopes[0].Buckets), hours)
+		}
+	}
+	if len(got.history.nodes) != relays {
+		t.Fatalf("retained %d of %d relay identities", len(got.history.nodes), relays)
+	}
+}
+
+// F1/F4 (M5): the interning table is a bounded dedup cache, not a budget. Past
+// it, a path is retained un-interned — it costs a path slot and a reference
+// instead of a map entry — and no observation is refused.
+func TestRegionsRoutePathInterningFallsBackUnInterned(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	collector := newRegionsRoutesCollector(now)
+	collector.internBound = 4
+	a := strings.Repeat("ab", 32)
+	const paths = 40
+	at := collector.start.Add(500 * time.Hour)
+	for i := 0; i < paths; i++ {
+		collector.capture(routeTransmission(i+1, at, fmt.Sprintf(`["%s","%064x"]`, a, i+1)))
+	}
+	// Repeating one of the interned paths must still share its entry.
+	collector.capture(routeTransmission(paths+1, at, fmt.Sprintf(`["%s","%064x"]`, a, 1)))
+	got := collector.build(nil)
+	if got.evidence.SourceTruncated || got.evidence.CappedObservations != 0 {
+		t.Fatalf("a full interning table refused paths: truncated=%v capped=%d",
+			got.evidence.SourceTruncated, got.evidence.CappedObservations)
+	}
+	if got.capture.PathVariantsInterned != collector.internBound {
+		t.Fatalf("interned %d paths against a bound of %d", got.capture.PathVariantsInterned, collector.internBound)
+	}
+	if got.capture.PathVariants != paths || got.capture.PathReferences != paths+1 {
+		t.Fatalf("un-interned retention lost paths: %+v", got.capture)
+	}
+	if len(got.steps) != paths {
+		t.Fatalf("published %d of %d directed step rows", len(got.steps), paths)
+	}
+	for _, step := range got.steps {
+		want := 1
+		if step.To == fmt.Sprintf("%064x", 1) {
+			want = 2
+		}
+		if len(step.Buckets) != 1 || step.Buckets[0].Count != want {
+			t.Fatalf("%s..%s published %+v, want one bucket counting %d", step.From[:8], step.To[:8], step.Buckets, want)
+		}
+	}
+}
+
+// F2/F6: the per-hour reference budget must have headroom over the rate real
+// data showed, so only a flood reaches it, and the cost model the disclosed
+// transient ceiling rests on has to stay true. #508 reported about 805,000
+// observations in 48 h of retention — about 16,800 per hour across all scopes
+// — and every one of them could be transport-scoped with a distinct path.
+func TestRegionsRouteCaptureBudgetHeadroomOverMeasuredRate(t *testing.T) {
+	const measuredObservationsPerHour = 805000 / 48
+	if maxRegionsRoutePathRefsPerHour < 2*measuredObservationsPerHour {
+		t.Fatalf("per-hour capture budget %d leaves no headroom over the measured %d observations/hour",
+			maxRegionsRoutePathRefsPerHour, measuredObservationsPerHour)
+	}
+	// The documented per-row capture cost: 8 bytes per retained reference, 24
+	// for a retained path (header plus resolver slot) and 72 per retained
+	// transmission, against the ~100 bytes per observation and ~1,000 bytes
+	// per transmission the packet store already holds.
+	if got := int64(unsafe.Sizeof(regionsRoutePathRef{})); got != regionsRoutePathRefBytes {
+		t.Fatalf("a retained reference is %d bytes, documented as %d", got, regionsRoutePathRefBytes)
+	}
+	if got := int64(unsafe.Sizeof(regionsRouteTx{})); got != regionsRouteTxBytes {
+		t.Fatalf("a retained transmission header is %d bytes, documented as %d", got, regionsRouteTxBytes)
+	}
+	slot := int64(unsafe.Sizeof("")) + int64(unsafe.Sizeof((*regionsResolvedPath)(nil)))
+	if slot != regionsRoutePathSlotBytes {
+		t.Fatalf("a retained path slot is %d bytes, documented as %d", slot, regionsRoutePathSlotBytes)
+	}
+	// The reference ceiling this implies stays a disclosed figure (#510 F6).
+	refs := int64(maxRegionsRoutePathRefsPerHour) * (regionsHistoryBucketCount + 1)
+	if bytes := refs * regionsRoutePathRefBytes; bytes > 320<<20 {
+		t.Fatalf("transient reference ceiling grew to %d bytes; document or lower it", bytes)
+	}
+}
+
+// F4 (M6): the published step-endpoint ceiling is enforced, and steps whose
+// endpoints it omitted are disclosed instead of dropped silently.
+func TestRegionsRouteStepEndpointCeilingDisclosed(t *testing.T) {
+	srv, _, _, _ := regionsRoutesFixture(t)
+	if full := getRegionsRoutes(t, srv); len(full.StepNodes) != 2 || len(full.Steps) != 1 || full.StepEvidence.MissingEndpointSteps != 0 {
+		t.Fatalf("fixture did not publish both endpoints: %+v", full.StepEvidence)
+	}
+	srv.stepEndpointLimit = 1
+	got := getRegionsRoutes(t, srv)
+	if len(got.StepNodes) != 1 {
+		t.Fatalf("published %d step endpoints against a ceiling of 1", len(got.StepNodes))
+	}
+	if len(got.Steps) != 0 || got.StepEvidence.MissingEndpointSteps != 1 || !got.StepEvidence.Incomplete {
+		t.Fatalf("the endpoint ceiling was not disclosed: steps=%d %+v", len(got.Steps), got.StepEvidence)
+	}
+}
+
+// F3: the capture budgets that decide `capped` must be observable before they
+// cap, so the diagnostic reports their fill against their ceilings.
+func TestRegionsSnapshotCaptureHeadroomMeasured(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	collector := newRegionsRoutesCollector(now)
+	a := strings.Repeat("ab", 32)
+	at := collector.start.Add(500 * time.Hour)
+	for i := 0; i < 3; i++ {
+		collector.capture(routeTransmission(i+1, at, fmt.Sprintf(`["%s","%064x"]`, a, i+1)))
+	}
+	snapshot := collector.build(nil)
+	measured := measureRegionsSnapshot(&repeaterRelaySnapshot{generatedAt: now,
+		regionMemberships: snapshot.memberships, history: snapshot.history, routes: snapshot})
+	c := measured.Capture
+	if c.PathVariants != 3 || c.PathVariantsInterned != 3 || c.PathReferences != 3 || c.Transmissions != 3 {
+		t.Fatalf("capture fill was not reported: %+v", c)
+	}
+	if c.MaxHourPathReferences != 3 || c.HourPathReferenceBudget != maxRegionsRoutePathRefsPerHour {
+		t.Fatalf("per-hour reference headroom was not reported: %+v", c)
+	}
+	if c.PathVariantInternBudget != maxRegionsRoutePathVariants {
+		t.Fatalf("interning-table ceiling was not reported: %+v", c)
+	}
+	// Four relays in one hour and one scope: four aggregated membership cells.
+	if c.MembershipCells != 4 || c.MembershipCellBudget != maxRegionsMembershipCells ||
+		c.MembershipNodes != 4 || c.MembershipNodeBudget != maxRegionsMembershipNodes {
+		t.Fatalf("membership headroom was not reported: %+v", c)
+	}
+	if c.EstimatedBytes <= 0 {
+		t.Fatalf("transient capture cost was not estimated: %+v", c)
+	}
+}
+
+// F5/F4 (M10): regionsSnapshot.truncated is budget truncation only. Unresolved
+// hops and unprovable observations also set evidence.Incomplete, which is
+// almost always true on real data, so it is reported separately.
+func TestRegionsSnapshotTruncatedIsBudgetTruncationOnly(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 35, 0, 0, time.UTC)
+	measure := func(snapshot *regionsRouteSnapshot) *RegionsSnapshotMemory {
+		return measureRegionsSnapshot(&repeaterRelaySnapshot{generatedAt: now,
+			regionMemberships: snapshot.memberships, history: snapshot.history, routes: snapshot})
+	}
+	a, b := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	// An unresolved hop token qualifies the evidence without spending any
+	// budget: nothing was truncated.
+	collector := newRegionsRoutesCollector(now)
+	collector.capture(routeTransmission(1, collector.start.Add(500*time.Hour), `["`+a+`","BE","`+b+`"]`))
+	incomplete := collector.build(nil)
+	if !incomplete.evidence.Incomplete || incomplete.evidence.UnresolvedHops == 0 {
+		t.Fatalf("fixture did not produce an unresolved hop: %+v", incomplete.evidence)
+	}
+	if got := measure(incomplete); got.Truncated || !got.EvidenceIncomplete {
+		t.Fatalf("ordinary incompleteness was reported as budget truncation: truncated=%v evidenceIncomplete=%v",
+			got.Truncated, got.EvidenceIncomplete)
+	}
+	// A spent publication budget is budget truncation.
+	collector = newRegionsRoutesCollector(now)
+	collector.stepBytes = regionsRouteStepRowBytes + regionsRouteStepCellBytes
+	for i := 0; i < 3; i++ {
+		collector.capture(routeTransmission(i+1, collector.start.Add(500*time.Hour), fmt.Sprintf(`["%s","%064x"]`, a, i+1)))
+	}
+	truncated := collector.build(nil)
+	if !truncated.stepsTruncated {
+		t.Fatal("fixture did not spend the publication budget")
+	}
+	if got := measure(truncated); !got.Truncated || !got.EvidenceIncomplete {
+		t.Fatalf("publication truncation was not reported: truncated=%v evidenceIncomplete=%v",
+			got.Truncated, got.EvidenceIncomplete)
+	}
+	// So is a spent capture budget, even though the published steps fit.
+	collector = newRegionsRoutesCollector(now)
+	collector.hourRefs[500] = maxRegionsRoutePathRefsPerHour
+	collector.capture(routeTransmission(1, collector.start.Add(500*time.Hour), `["`+a+`","`+b+`"]`))
+	collector.capture(routeTransmission(2, collector.start.Add(501*time.Hour), `["`+a+`","`+b+`"]`))
+	capped := collector.build(nil)
+	if !capped.evidence.SourceTruncated {
+		t.Fatal("fixture did not spend the capture budget")
+	}
+	if got := measure(capped); !got.Truncated {
+		t.Fatalf("capture truncation was not reported: %+v", got)
 	}
 }

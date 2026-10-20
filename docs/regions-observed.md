@@ -244,19 +244,51 @@ scope, step and populated-hour limits must be disclosed as incomplete evidence.
 No database writes, schema changes, retention extension, dependencies or new
 operator configuration are required.
 
-Capture retains at most 16,384 observation-path references **per hourly
+Capture retains at most 65,536 observation-path references **per hourly
 bucket** and 128 per transmission, with an 8,192-byte input-path safety bound.
+A per-hour budget replaces the single global 250,000-variant budget, which 48 h
+of real traffic exhausted and which then reported `capped` evidence for every
+later hour and withheld the Health and Timeline rates (#508). The per-hour
+ceiling makes retained capture scale with retention and stops one busy hour
+from starving the rest of the horizon. 65,536 is roughly four times the ~16,800
+observations per hour that 48 h of real traffic averaged across all scopes, so
+an hour has headroom even if every observation were transport-scoped and
+carried a distinct path. The capture includes the current hour for Latest, but
+completed-hour history and steps exclude it.
+
 Identical paths are interned, so one relay chain observed by thousands of
-transmissions costs a single entry (at most 131,072 distinct paths) and is
-parsed and identity-resolved once per snapshot. A per-hour budget replaces the
-single global 250,000-variant budget, which 48 h of real traffic exhausted and
-which then reported `capped` evidence for every later hour and withheld the
-Health and Timeline rates (#508). The per-hour ceiling makes retained capture
-scale with retention and stops one busy hour from starving the rest of the
-horizon; a reference costs 8 bytes against the roughly 200 the packet store
-already holds for the same observation, so the real bound stays the retained
-store. The capture includes the current hour for Latest, but completed-hour
-history and steps exclude it.
+transmissions is parsed and identity-resolved once per snapshot. The interning
+table (131,072 entries) is a bounded dedup cache, not a budget: past it a path
+is retained **un-interned** — it costs a path slot and a reference instead of a
+table entry — and no observation is ever refused for lack of table space. A
+table that refused new paths when full would reintroduce exactly the starvation
+#508 reported, at a lower ceiling, because real path diversity is high:
+`e2e-fixture.db`, real captured traffic, holds 376 distinct path strings in 399
+path-carrying observations.
+
+### Transient capture memory
+
+The capture state is transient — it lives only while a background snapshot is
+being built — but it is the part that decides whether evidence is reported as
+`capped`, so its cost is disclosed rather than implied. Per retained row it is
+about 8 bytes per observation-path reference, 24 for a retained path (a string
+header plus one resolver slot; path content is shared with the packet store,
+not copied) and 72 per retained transmission header, against the roughly 100
+bytes per observation and 1,000 bytes per transmission the packet store already
+holds for the same rows. Capture therefore retains at most about 40 % of what
+the store holds for the rows it mirrors, and it cannot mirror rows the store
+does not hold, so `packetStore.maxMemoryMB` binds first on any host.
+
+The per-hour budget's own ceiling, if every hourly bucket in the 504 h horizon
+were filled to it, is 33.1 M references — about 265 MiB of references plus up
+to about 794 MiB of path slots if every reference carried a distinct path.
+Reaching it requires the packet store to hold 33 M transport-scoped
+observations across 505 distinct hours, several times the store budget any
+CoreScope host runs with; at the rate real data showed (168 h at ~16,800
+observations per hour) the same arithmetic gives about 23 MiB of references and
+68 MiB of path slots. `/api/perf?mem=1` reports the fill of every capture
+budget as `regionsSnapshot.capture`, so the headroom is observable per snapshot
+instead of inferred from these figures.
 
 Memberships are aggregated straight into (relay, scope, hour) cells, so the
 budget — 500,000 cells and 10,000 identities — grows with populated hours
@@ -290,6 +322,17 @@ per-part retained bytes for memberships, hourly history, directed steps and
 per-bucket evidence. Publishing this snapshot raised staging container RSS from
 about 1.55 to about 1.72 GiB, and production hosts are smaller, so the figure
 is read against the host rather than against the budgets alone.
+`regionsSnapshot.capture` adds the transient capture state's fill against its
+own budgets — retained paths and how many of them are interned against the
+table size, retained references with the per-hour high-water mark against the
+per-hour budget, retained transmissions, aggregated membership cells and
+identities against their budgets, and an estimate of the capture state's bytes
+— because those are the budgets that decide `capped`, and publication sizes
+alone do not show how close they are. `regionsSnapshot.truncated` is budget
+truncation only (the publication flags plus the capture budget's own refusal);
+`regionsSnapshot.evidenceIncomplete` carries the snapshot's evidence
+qualification separately, because unresolved hops and unprovable observations
+raise that on ordinary real data.
 
 Future work can add independently evidenced scope transitions and comparisons
 of observed routes. A change in timeline relay membership alone does
