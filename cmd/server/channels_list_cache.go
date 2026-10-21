@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"log"
 	"slices"
 	"sort"
 	"strings"
@@ -47,6 +49,9 @@ type channelListCache struct {
 	refreshing map[string]bool
 	retryAt    map[string]time.Time
 	bg         sync.WaitGroup
+	// gen counts reset() calls (#519), guarded by mu. A refresh stores its
+	// result only if gen is unchanged since it started.
+	gen uint64
 	// clock is a test seam; nil means time.Now.
 	clock func() time.Time
 }
@@ -106,6 +111,19 @@ func (c *channelListCache) get(key string, now time.Time) (*channelListEntry, bo
 func (c *channelListCache) put(key string, e *channelListEntry, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.putLocked(key, e, now)
+}
+
+// putIfGen stores e unless reset() ran since gen was read (#519).
+func (c *channelListCache) putIfGen(key string, e *channelListEntry, now time.Time, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		c.putLocked(key, e, now)
+	}
+}
+
+func (c *channelListCache) putLocked(key string, e *channelListEntry, now time.Time) {
 	if c.entries == nil {
 		c.entries = make(map[string]*channelListEntry)
 	}
@@ -140,6 +158,7 @@ func (c *channelListCache) reset() {
 	c.mu.Lock()
 	c.entries = nil
 	c.retryAt = nil
+	c.gen++
 	c.mu.Unlock()
 }
 
@@ -176,18 +195,30 @@ func (c *channelListCache) startRefresh(key string, query func() (*channelListEn
 		c.refreshing = make(map[string]bool)
 	}
 	c.refreshing[key] = true
+	gen := c.gen
 	c.bg.Add(1)
 	c.mu.Unlock()
 	go func() {
 		defer c.bg.Done()
-		_, err, _ := c.flights.Do(key, func() (interface{}, error) {
-			e, err := query()
+		_, err, _ := c.flights.Do(key, func() (e interface{}, err error) {
+			// A panic here would kill the process (#519); report it as a
+			// failed refresh so the stale entry stays and the retry backs off.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[channels] background refresh of %q panicked: %v", key, r)
+					e, err = nil, fmt.Errorf("refresh panicked: %v", r)
+				}
+			}()
+			if cur, ok := c.get(key, c.now()); ok {
+				return cur, nil
+			}
+			ne, err := query()
 			if err != nil {
 				return nil, err
 			}
-			e.expires = c.now().Add(channelListTTL)
-			c.put(key, e, c.now())
-			return e, nil
+			ne.expires = c.now().Add(channelListTTL)
+			c.putIfGen(key, ne, c.now(), gen)
+			return ne, nil
 		})
 		c.mu.Lock()
 		delete(c.refreshing, key)
