@@ -262,3 +262,88 @@ func BenchmarkExpiredRegionList_516(b *testing.B) {
 		b.StartTimer()
 	}
 }
+
+// Issue #519: follow-ups to the #516 stale-while-revalidate cache.
+
+// A panicking background query must not kill the process; the stale entry
+// is still served and the refresh is retried after the backoff.
+func TestSWRRefreshPanicRecovered_519(t *testing.T) {
+	c, clk := newSWRCache()
+	var queries atomic.Int32
+	q := func() (*channelListEntry, error) {
+		n := int(queries.Add(1))
+		if n == 2 {
+			panic("boom")
+		}
+		return swrEntry(n), nil
+	}
+	if _, err := c.load("AAR", nil, q); err != nil {
+		t.Fatal(err)
+	}
+	clk.add(channelListTTL + time.Second)
+	if e, err := c.load("AAR", nil, q); err != nil || swrVal(e) != 1 {
+		t.Fatalf("stale load: %v %v", e, err)
+	}
+	c.wait() // an unrecovered panic would have crashed the test binary
+	if e, err := c.load("AAR", nil, q); err != nil || swrVal(e) != 1 {
+		t.Fatalf("stale entry must survive the panic, got %v %v", e, err)
+	}
+	c.wait()
+	if n := queries.Load(); n != 2 {
+		t.Fatalf("queries = %d, want 2 (retry must wait for the backoff)", n)
+	}
+	clk.add(channelListRetryDelay + time.Second)
+	c.load("AAR", nil, q)
+	c.wait()
+	if e, _ := c.load("AAR", nil, q); swrVal(e) != 3 {
+		t.Fatalf("retry after backoff should store a new entry, got %d", swrVal(e))
+	}
+}
+
+// A refresh that started before reset() must not store its result.
+func TestSWRRefreshStartedBeforeResetNotStored_519(t *testing.T) {
+	c, clk := newSWRCache()
+	var queries atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	q := func() (*channelListEntry, error) {
+		n := int(queries.Add(1))
+		if n == 2 {
+			close(started)
+			<-release
+		}
+		return swrEntry(n), nil
+	}
+	c.load("AAR", nil, q)
+	clk.add(channelListTTL + time.Second)
+	c.load("AAR", nil, q) // starts the refresh
+	<-started
+	c.reset()
+	close(release)
+	c.wait()
+	if e, _ := c.peek("AAR", c.now()); e != nil {
+		t.Fatalf("pre-reset refresh stored its result (v=%d)", swrVal(e))
+	}
+	// A refresh may start again after the reset (refreshing was cleared).
+	if e, err := c.load("AAR", nil, q); err != nil || swrVal(e) != 3 {
+		t.Fatalf("post-reset load should query afresh: %v %v", e, err)
+	}
+}
+
+// The background query is skipped when another flight stored a fresh entry
+// between the stale check and the flight (as the synchronous flight does).
+func TestSWRRefreshSkipsQueryWhenFresh_519(t *testing.T) {
+	c, clk := newSWRCache()
+	var queries atomic.Int32
+	q := func() (*channelListEntry, error) { return swrEntry(int(queries.Add(1))), nil }
+	c.load("AAR", nil, q)
+	clk.add(channelListTTL + time.Second)
+	fresh := swrEntry(99)
+	fresh.expires = c.now().Add(channelListTTL)
+	c.put("AAR", fresh, c.now())
+	c.startRefresh("AAR", q)
+	c.wait()
+	if n := queries.Load(); n != 1 {
+		t.Fatalf("queries = %d, want 1: a fresh entry needs no refresh", n)
+	}
+}
