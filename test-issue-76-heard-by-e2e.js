@@ -146,6 +146,8 @@ const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
     const heading = page.locator('h3', { hasText: 'Most Observed Nodes' });
     await heading.waitFor({ state: 'visible', timeout: 30000 });
     const table = heading.locator('xpath=following-sibling::*[1]').locator('table').first();
+    // The heading can be visible a frame before its table is (re)rendered.
+    await table.locator('tbody tr').first().waitFor({ state: 'visible' });
     const headers = (await table.locator('th').allTextContents()).map(norm);
     assert(headers.includes('Direct observers') && headers.includes('Via relay') && headers.includes('Direct SNR'), 'headers: ' + headers);
     const col = headers.indexOf('Direct observers') + 1;

@@ -2426,6 +2426,14 @@
       "secondsByExecution": [
         12
       ]
+    },
+    {
+      "file": "test-issue-521-nodes-url-race-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; no CI duration measured yet. Placed on shard 3 next to the #76 suite whose flake it fixes."
     }
   ],
   "exclusions": [
