@@ -10,9 +10,13 @@ package main
 // (obsKeys, observerSet) keyed by the strings the observations already hold,
 // so a busy transmission keeps O(1) checks and no key is ever concatenated.
 //
-// The threshold comes from the distribution measured for #411: on a skewed
-// 30K-transmission set (median 4 distinct pairs, p99 21, p99.9 36) about
-// 0.2% of transmissions reach 32. BenchmarkObsDedup: a missing check scans
+// The threshold comes from the distributions measured for #411. On a light
+// synthetic 30K-transmission set (median 4 distinct pairs, p99 21, p99.9 36)
+// about 0.2% of transmissions reach 32. With the production mean (about 18
+// observations per transmission: median 15, p90 35, p99 69) about 13% build
+// the maps, and the heap still drops by about 19%. A threshold of 64 measured
+// about 5% less heap on top of that and is a possible follow-up.
+// BenchmarkObsDedup: a missing check scans
 // 31 observations in 100-130 ns (180 ns when one observer holds them all),
 // against 55-95 ns for the old lookup, which also allocated an 80-100 byte
 // key on every check; from 32 on it is a 25 ns map lookup.

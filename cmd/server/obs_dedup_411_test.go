@@ -403,6 +403,9 @@ func TestObsDedup411_HashMergeDedupsAcrossTheThreshold(t *testing.T) {
 	}{
 		{"merged list stays below", 2}, // 8 per row, 12 merged
 		{"merged list crosses", 7},     // 28 per row, 32 merged
+		// 36 per row: each loser already holds maps, so the credit for them
+		// (txChargedBytes) must run before finishHashMerge clears them.
+		{"rows already past", 9},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := hm215Create(t)
