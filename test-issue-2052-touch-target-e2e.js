@@ -4,8 +4,8 @@
  * test-issue-2052-touch-target-css.js checks the stylesheet text; this test
  * measures what the browser actually renders, in the real responsive DOM:
  *
- *  - Desktop 1440x900 (sectioned .ch-item list): the share and remove actions
- *    of a user-added channel are at least 48x48 CSS px, visible, not clipped
+ *  - Desktop 1440x900 (sectioned .ch-item list): the actions trigger of a user-added
+ *    channel, and the share and remove items it opens (#354), are at least 48x48 CSS px, visible, not clipped
  *    by any overflow container, hit at their centre, not overlapping each
  *    other or the row's other parts, reachable by keyboard with focus-visible,
  *    keep their ARIA/title contract, and do their job without side effects
@@ -44,8 +44,11 @@ const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const ORIGIN = new URL(BASE).origin;
 const CHANNEL = '#tt2052probe';
 const HASH = 'user:' + CHANNEL;
-const SHARE = `#chList [data-share-channel="${HASH}"]`;
-const REMOVE = `#chList [data-remove-channel="${HASH}"]`;
+// #354: share and remove moved from inline chips into the row's actions menu,
+// so the row has one trigger and the two actions are menu items.
+const TRIGGER = `#chList [data-row-menu="${HASH}"]`;
+const SHARE = `#chRowMenu [data-share-channel="${HASH}"]`;
+const REMOVE = `#chRowMenu [data-remove-channel="${HASH}"]`;
 const MIN = 48;
 // A server channel the E2E fixture has messages in, so sender avatars render.
 const MSG_CHANNEL = '#test';
@@ -140,11 +143,20 @@ async function assertTarget(page, selector, name) {
   return m;
 }
 
-// Share and remove: each a full target, and not on top of each other.
+async function openMenu(page) {
+  await page.click(TRIGGER);
+  await page.waitForSelector('#chRowMenu:not([hidden])');
+}
+
+// The trigger and the two menu items it opens: each a full target, and the
+// two items not on top of each other.
 async function assertActionTargets(page) {
+  await assertTarget(page, TRIGGER, 'actions trigger');
+  await openMenu(page);
   const share = await assertTarget(page, SHARE, 'share');
   const remove = await assertTarget(page, REMOVE, 'remove');
   assert(!overlaps(share, remove), 'share and remove overlap');
+  await page.keyboard.press('Escape');
 }
 
 // #249: the add-channel dialog's primary buttons.
@@ -202,52 +214,54 @@ async function main() {
   const desk = await openChannels(browser, errors, { viewport: { width: 1440, height: 900 } });
   const dp = desk.page;
   try {
-    await dp.waitForSelector(REMOVE, { state: 'visible' });
+    await dp.waitForSelector(TRIGGER, { state: 'visible' });
 
-    await step(`desktop 1440x900: share and remove are at least ${MIN}x${MIN}, visible, unclipped and hit at their centre`, async () => {
+    await step(`desktop 1440x900: the actions trigger and the share/remove items are at least ${MIN}x${MIN}, visible, unclipped and hit at their centre`, async () => {
       await assertActionTargets(dp);
     });
 
-    await step('desktop: actions do not overlap each other or the rest of the row, and the page has no horizontal overflow', async () => {
-      const share = await measure(dp, SHARE), remove = await measure(dp, REMOVE);
-      assert(!overlaps(share, remove), 'share and remove overlap');
+    await step('desktop: the trigger does not overlap the rest of the row, and the page has no horizontal overflow', async () => {
+      const trigger = await measure(dp, TRIGGER);
       const parts = await dp.evaluate((sel) => {
         const row = document.querySelector(sel).closest('.ch-item');
         return [...row.querySelectorAll('.ch-badge, .ch-item-name, .ch-user-badge, .ch-unread-badge, .ch-color-dot, .ch-color-clear, .ch-item-time, .ch-item-preview')]
           .map((e) => { const r = e.getBoundingClientRect(); return { name: String(e.className).split(' ')[0], left: r.left, right: r.right, top: r.top, bottom: r.bottom }; });
-      }, SHARE);
+      }, TRIGGER);
       assert(parts.length >= 4, 'row parts not found');
-      for (const p of parts) {
-        assert(!overlaps(share, p), 'share overlaps ' + p.name);
-        assert(!overlaps(remove, p), 'remove overlaps ' + p.name);
-      }
+      for (const p of parts) assert(!overlaps(trigger, p), 'trigger overlaps ' + p.name);
       const overflow = await dp.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       assert(overflow <= 0, 'page overflows horizontally by ' + overflow + 'px');
     });
 
-    await step('desktop: ARIA and title contract is unchanged', async () => {
-      const a = await dp.evaluate(([s, r]) => [s, r].map((sel) => {
+    await step('desktop: ARIA and title contract of the trigger and the menu items', async () => {
+      await openMenu(dp);
+      const a = await dp.evaluate(([t, s, r]) => [t, s, r].map((sel) => {
         const e = document.querySelector(sel);
-        return { role: e.getAttribute('role'), tabindex: e.getAttribute('tabindex'), label: e.getAttribute('aria-label'), title: e.getAttribute('title'), popup: e.getAttribute('aria-haspopup') };
-      }), [SHARE, REMOVE]);
-      assert(a[0].role === 'button' && a[0].tabindex === '0' && a[0].label === 'Share ' + CHANNEL && a[0].title === 'Share channel key (QR + URL)' && a[0].popup === 'dialog',
-        'share ARIA/title changed: ' + JSON.stringify(a[0]));
-      assert(a[1].role === 'button' && a[1].tabindex === '0' && a[1].label === 'Remove ' + CHANNEL && a[1].title === 'Remove channel and clear saved key',
-        'remove ARIA/title changed: ' + JSON.stringify(a[1]));
+        return { role: e.getAttribute('role'), tabindex: e.getAttribute('tabindex'), label: e.getAttribute('aria-label'), title: e.getAttribute('title'), popup: e.getAttribute('aria-haspopup'), text: e.textContent.trim() };
+      }), [TRIGGER, SHARE, REMOVE]);
+      assert(a[0].role === 'button' && a[0].tabindex === '0' && a[0].label === 'Actions for ' + CHANNEL && a[0].popup === 'menu',
+        'trigger ARIA changed: ' + JSON.stringify(a[0]));
+      assert(a[1].role === 'menuitem' && a[1].popup === 'dialog' && a[1].text === 'Share', 'share item ARIA changed: ' + JSON.stringify(a[1]));
+      assert(a[2].role === 'menuitem' && a[2].title === 'Remove channel and clear saved key' && a[2].text === 'Remove',
+        'remove item ARIA/title changed: ' + JSON.stringify(a[2]));
+      await dp.keyboard.press('Escape');
     });
 
-    await step('desktop: Tab reaches share then remove with focus-visible, and Enter runs each action without side effects', async () => {
+    await step('desktop: Tab reaches the trigger with focus-visible, and Enter runs share and remove without side effects', async () => {
       await dp.focus(`#chList .ch-item[data-hash="${HASH}"]`);
       await dp.keyboard.press('Tab');
-      await assertFocused(dp, SHARE, 'share (Tab from the row)');
+      await assertFocused(dp, TRIGGER, 'actions trigger (Tab from the row)');
+      await dp.keyboard.press('Enter');
+      await dp.waitForSelector('#chRowMenu:not([hidden])');
       await dp.keyboard.press('Enter');
       await dp.waitForSelector('#chShareModal:not(.hidden)');
       await dp.keyboard.press('Escape');
       await dp.waitForFunction(() => document.getElementById('chShareModal').classList.contains('hidden'));
 
-      await dp.focus(SHARE); // the closed modal does not have to hand focus back
-      await dp.keyboard.press('Tab');
-      await assertFocused(dp, REMOVE, 'remove (Tab from share)');
+      await dp.focus(TRIGGER);
+      await dp.keyboard.press('Enter');
+      await dp.waitForSelector('#chRowMenu:not([hidden])');
+      await dp.keyboard.press('ArrowDown');
       // waitForEvent has a timeout, so a missing confirmation fails the step
       // instead of hanging the run.
       const dialog = dp.waitForEvent('dialog', { timeout: 10000 })
@@ -256,7 +270,7 @@ async function main() {
       const text = await dialog;
       assert(/Remove channel/.test(text), 'remove did not ask for confirmation: ' + text);
       const kept = await dp.evaluate(([sel, name]) => !!document.querySelector(sel) &&
-        !!JSON.parse(localStorage.getItem('corescope_channel_keys') || '{}')[name], [REMOVE, CHANNEL]);
+        !!JSON.parse(localStorage.getItem('corescope_channel_keys') || '{}')[name], [TRIGGER, CHANNEL]);
       assert(kept, 'dismissing the confirmation still removed the channel');
     });
   } finally {
@@ -274,7 +288,7 @@ async function main() {
     await step(`mobile 390x844: the list renders no share/remove actions, and every visible tap target is at least ${MIN}x${MIN}`, async () => {
       const r = await mp.evaluate(([hash, min]) => ({
         mobileRow: !!document.querySelector(`#chList .ch-row[data-hash="${hash}"]`),
-        actions: document.querySelectorAll('#chList .ch-icon-btn, #chList [data-share-channel], #chList [data-remove-channel]').length,
+        actions: document.querySelectorAll('#chList .ch-icon-btn, #chList [data-row-menu], #chList [data-share-channel], #chList [data-remove-channel]').length,
         desktopRows: document.querySelectorAll('#chList .ch-item').length,
         small: [...document.querySelectorAll('.ch-sidebar button, .ch-sidebar a[href], .ch-sidebar [role="button"], .ch-sidebar [tabindex="0"]')]
           .filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0 && getComputedStyle(e).visibility === 'visible'; })
@@ -340,8 +354,8 @@ async function main() {
   for (const width of [768, 1024, 1180, 1330]) {
     const narrow = await openChannels(browser, errors, { viewport: { width, height: 1024 }, hasTouch: width === 768 });
     try {
-      await narrow.page.waitForSelector(REMOVE, { state: 'visible' });
-      await step(`${width}x1024: share and remove are at least ${MIN}x${MIN}, unclipped, hit at their centre and do not overlap`, async () => {
+      await narrow.page.waitForSelector(TRIGGER, { state: 'visible' });
+      await step(`${width}x1024: the actions trigger and the share/remove items are at least ${MIN}x${MIN}, unclipped, hit at their centre and do not overlap`, async () => {
         await assertActionTargets(narrow.page);
       });
     } finally {

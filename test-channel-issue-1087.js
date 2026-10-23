@@ -65,7 +65,7 @@ var shareIdx = chSrc.indexOf("data-share-channel");
 assert(shareIdx > 0, 'found share button DOM marker');
 
 // Find a window of source covering the share button click handler.
-var shareHandlerIdx = chSrc.indexOf("e.target.closest('[data-share-channel]')");
+var shareHandlerIdx = chSrc.indexOf("function shareChannel(");
 assert(shareHandlerIdx > 0, 'found share-channel click handler block');
 var shareBlock = chSrc.substring(shareHandlerIdx, shareHandlerIdx + 2500);
 
@@ -126,7 +126,7 @@ assert(/trusted|privacy|do not share|only share/i.test(shareModalBlock),
   'share modal includes a privacy warning');
 
 // Share click handler must open #chShareModal — not openAddModal().
-var shareClickIdx = chSrc.indexOf("e.target.closest('[data-share-channel]')");
+var shareClickIdx = chSrc.indexOf("function shareChannel(");
 var shareClickBlock = shareClickIdx > 0 ? chSrc.substring(shareClickIdx, shareClickIdx + 2500) : '';
 assert(/openShareModal\s*\(|chShareModal/.test(shareClickBlock),
   'share button click handler opens #chShareModal (not the Add modal)');

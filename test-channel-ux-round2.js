@@ -64,24 +64,18 @@ assert(/channelDisplayName\(ch\)/.test(chSrc),
 console.log('\n=== Fix 2: share button has recognizable label ===');
 assert(!/'⤴'/.test(chSrc) && !/"⤴"/.test(chSrc),
   'bare ⤴ glyph no longer used as the share button content');
-// Tighten: assert the icon + " Share" string is the glyph argument passed
-// into the iconBtn(...) call for ch-share-btn — this catches the case where
-// someone removes the icon from the button content but leaves "Share" in an
-// aria-label or title. b812a98a (#1648 M3) replaced 📤 with the
-// #ph-share-network sprite.
-assert(/iconBtn\(\s*'ch-share-btn'[^)]*'<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-share-network"\/><\/svg> Share'/.test(chSrc),
-  "iconBtn('ch-share-btn', ...) is called with the #ph-share-network icon + ' Share' as the glyph");
+// Tighten: assert the icon + " Share" string is the content of the Share menu
+// item (#354 moved Share from an inline iconBtn into the actions menu), so
+// removing the icon but leaving "Share" in an aria-label cannot pass.
+assert(/data-share-channel="[^>]*>'\s*\+\s*'<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-share-network"\/><\/svg> Share<\/button>'/.test(chSrc),
+  "the Share menu item renders the #ph-share-network icon + ' Share'");
 
-console.log('\n=== Fix 3: ✕ delete button is a visibly red destructive button ===');
-const removeRule = (cssSrc.match(/\.ch-remove-btn\s*\{[^}]*\}/) || [''])[0];
-assert(/background:\s*var\(--statusRed/.test(removeRule) || /background:\s*#b54a4a/.test(removeRule),
-  '.ch-remove-btn has red background (var(--statusRed,...) or #b54a4a)');
-assert(/color:\s*white/.test(removeRule) || /color:\s*#fff/.test(removeRule),
-  '.ch-remove-btn has white text');
-assert(/border-radius:/.test(removeRule),
-  '.ch-remove-btn has border-radius (button shape)');
-assert(/font-weight:\s*bold|font-weight:\s*700/.test(removeRule),
-  '.ch-remove-btn has bold font-weight');
+console.log('\n=== Fix 3: Remove is visibly destructive ===');
+const dangerRule = (cssSrc.match(/\.ch-row-menu-danger\s*\{[^}]*\}/) || [''])[0];
+assert(/color:\s*var\(--danger\)/.test(dangerRule),
+  '.ch-row-menu-danger uses the theme danger colour variable');
+assert(/class="ch-row-menu-item ch-row-menu-danger"[^>]*data-remove-channel/.test(chSrc),
+  'the Remove menu item carries the destructive class');
 
 console.log('\n=== Results ===');
 console.log('Passed: ' + passed + ', Failed: ' + failed);
