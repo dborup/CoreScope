@@ -82,58 +82,12 @@ and scopes. Every truncation is exposed. Its retained-history floor and loading
 state are captured with the relay evidence, rather than taken from a newer
 store state when a request arrives.
 
-## Region activity health and traffic trends
-
-**Health & trends** is a separate view, leaving Latest's rolling-window map
-and Timeline's playback unchanged. It uses the same bounded history snapshot
-as Timeline, completed UTC hours, interval selection and scope filter. The
-view, selected hour, period, scope and comparison checkbox are shareable in
-the URL, for example `#/regions?view=health&window=24h&scope=%23example`.
-Switching between Health and Timeline preserves the selected hour. Health
-does not play automatically and does not render the map.
-
-The summary shows distinct relay nodes observed in the selected interval,
-relay appearances and the most recent observed relay timestamp **within that
-scope and interval**. Nodes without usable positions are included. A node
-seen in several hours or scopes remains one node in the interval total;
-hourly node counts must not be added to obtain that total. A missing last
-relay timestamp means not observed in the interval, not an outage.
-
-The traffic chart uses disjoint one-hour bins: one, 24 or 168 bins for the
-1h, 24h and 7d periods. These are UTC hours, not local days or extrapolated
-daily totals. The exact-values table provides the same timestamps and counts
-as the chart. A zero is shown only for a fully retained, uncapped hour.
-Partial, unknown, loading or capped evidence produces a gap, not a fabricated
-zero; retained observations can still be disclosed explicitly as incomplete
-evidence. The mean appearances/hour is available only when the entire
-selected interval is complete and uncapped. Partial counts are never divided
-by the full requested duration.
-
-The optional comparison reuses Timeline's immediately preceding equal
-interval and its completeness checks. A complete selected period may have
-an hourly mean even when the reference is incomplete, but changes, percentages
-and new/not-observed classifications still require **both** periods to be
-complete and uncapped. A zero reference has no defined percentage increase.
-The expected set for "not observed" is the preceding interval, not all nodes
-ever present in the catalogue.
-
-Health describes observed activity and evidence availability, not service
-availability or radio quality. No healthy/degraded/offline score or alarm
-threshold is inferred. More traffic can reflect spam, changed routing or
-observer reception; it does not establish improved network health. The
-snapshot timestamp and retained-history limitations remain visible.
-
-The selected scope's hourly activity is indexed once per payload or scope
-change into bounded arrays spanning the existing 504-hour horizon. Selecting
-an interval reads at most 168 hourly bins and reuses the existing interval
-comparison; it does not rescan raw packets, fetch each node or request a new
-payload while scrubbing. No new endpoint, persistence, retention setting,
-dependency or operator configuration is introduced. Any future health
-thresholds must be evidence-based and exposed through the customizer.
-
 ## Following milestones
 
-1. **Connections between regions:** add observed paths with direction and
+1. **Region health:** add active relay counts, last relay and traffic trends
+   over comparable periods. Quiet relays should be labelled as not observed in
+   the period; lack of reception alone does not establish that a node is offline.
+2. **Connections between regions:** add observed paths with direction and
    distinct-transmission counts. Preserve scope transitions, distinguish
    ambiguous hop identities and avoid interpreting shared scope membership as
    proof of a direct radio link. Route changes belong to this path-evidence
@@ -159,11 +113,3 @@ stable map bounds, keyboard operation, no per-frame requests, and playback
 cleanup on manual changes, hidden documents and navigation. Performance checks
 cover background snapshot construction, bounded retained history and warm bulk
 responses without acquiring the packet-store lock.
-
-Health tests additionally cover cross-scope and cross-hour node deduplication,
-scoped interval-specific last relay timestamps, complete-zero versus missing
-bins, all coverage/truncation states, hourly means, comparison parity, fixed
-UTC boundaries and no sparse-cell rescans after activity indexing. Browser
-checks include Health deep links, local filter/time changes, Health/Timeline
-transitions, missing-data charts, exact values, themes, teardown and narrow
-mobile/desktop layouts.

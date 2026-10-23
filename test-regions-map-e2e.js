@@ -64,7 +64,6 @@ async function main() {
   page.on('pageerror', e => errors.push(e.stack || String(e)));
   let holdHour = false, heldHour = null, failWeek = false, coverageOverride = null;
   let historyOverride = {}, failHistory = false;
-  let holdHistory = false, heldHistory = null;
   let historyRequests = 0;
   const requests = [];
   const waitForHeldHour = async () => {
@@ -84,7 +83,6 @@ async function main() {
   });
   await page.route('**/api/regions/history*', async r => {
     historyRequests++;
-    if (holdHistory) { holdHistory = false; heldHistory = r; return; }
     if (failHistory) return r.fulfill({ status: 500, body: '{}' });
     await r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(historySnapshot(historyOverride)) });
   });
@@ -396,184 +394,6 @@ async function main() {
     failHistory = false;
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'true');
-  });
-
-  await test('health deep links share the UTC timeline interval and show observed activity cards', async () => {
-    await page.evaluate(() => { location.hash = '#/regions?view=health&window=24h&scope=%23example&at=2026-10-16T14%3A48%3A00%2B02%3A00&compare=1'; });
-    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-    assert.strictEqual(await page.getByLabel('Region view').inputValue(), 'health');
-    assert.strictEqual(await page.locator('.regions-leaflet').isVisible(), false);
-    assert.strictEqual(await page.getByRole('button', { name: 'Play timeline', exact: true }).isVisible(), false);
-    assert.strictEqual(await page.getByRole('button', { name: 'Fit map', exact: true }).isVisible(), false);
-    assert.strictEqual(await page.locator('[data-metric="nodes"] .regions-health-value').textContent(), '4');
-    assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '15');
-    assert.match(await page.locator('.regions-health-rate').textContent(), /0\.63 relay appearances per hour/);
-    assert.strictEqual(await page.locator('[data-metric="last-relayed"] time').getAttribute('datetime'), '2026-10-16T11:00:01.000Z');
-    assert.strictEqual(await page.locator('.regions-trend-bar').count(), 24);
-    assert.strictEqual(await page.locator('.regions-trend-gap').count(), 0);
-    assert.strictEqual(await page.locator('.regions-trend-bar[data-count="0"]').count(), 22, 'complete zero hours are valid measurements');
-    assert.match(await page.locator('.regions-health-note').textContent(), /spam|observer|routing/);
-    const params = new URLSearchParams((await page.evaluate(() => location.hash)).split('?')[1]);
-    assert.strictEqual(params.get('view'), 'health');
-    assert.strictEqual(params.get('at'), '2026-10-16T12:00:00.000Z');
-  });
-
-  await test('health filters, slider and timeline parity reuse one history payload', async () => {
-    const before = historyRequests;
-    await page.evaluate(() => { window.__regionsFitCount = 0; });
-    await page.getByLabel('Region period').selectOption('7d');
-    assert.strictEqual(await page.locator('.regions-trend-bar').count(), 168);
-    await page.getByLabel('Region scope').selectOption('#other');
-    assert.strictEqual(await page.locator('[data-metric="nodes"] .regions-health-value').textContent(), '1');
-    assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '10');
-    await page.getByLabel('Region scope').selectOption('');
-    assert.strictEqual(await page.locator('[data-metric="nodes"] .regions-health-value').textContent(), '4', 'node appears in multiple scopes and hours only once in interval total');
-    assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '25');
-    await page.getByLabel('Region period').selectOption('1h');
-    await page.getByLabel('Region scope').selectOption('#example');
-    await page.getByLabel('Timeline interval ending').focus();
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.waitForFunction(() => document.querySelector('[data-metric="appearances"] .regions-health-value')?.textContent === '7');
-    assert.strictEqual(await page.locator('[data-metric="nodes"] .regions-health-value').textContent(), '2');
-    assert.strictEqual(await page.locator('.regions-trend-bar').count(), 1);
-    assert.match(await page.locator('.regions-appearance-change').textContent(), /percentage unavailable/);
-    assert.strictEqual(await page.evaluate(() => window.__regionsFitCount), 0, 'health rendering must not fit the hidden map');
-    const at = await page.evaluate(() => new URLSearchParams(location.hash.split('?')[1]).get('at'));
-    await page.getByLabel('Region view').selectOption('timeline');
-    assert.match(await page.locator('.regions-status').textContent(), /7 relay appearances/);
-    assert.strictEqual(await page.locator('.regions-leaflet').isVisible(), true);
-    assert.strictEqual(await page.evaluate(() => new URLSearchParams(location.hash.split('?')[1]).get('at')), at);
-    await page.getByLabel('Region view').selectOption('health');
-    assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '7');
-    assert.strictEqual(historyRequests, before, 'historical views and filters made another API request');
-    await page.getByLabel('Timeline interval ending').press('End');
-    await page.waitForFunction(() => document.querySelector('[data-metric="appearances"] .regions-health-value')?.textContent === '8');
-  });
-
-  await test('health renders without Leaflet or hidden map initialization', async () => {
-    await page.evaluate(() => {
-      window.__regionsSavedL = window.L; window.L = undefined;
-      location.hash = '#/regions?view=health&window=1h&scope=%23example&compare=1';
-    });
-    try {
-      await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-      assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '8');
-      assert.strictEqual(await page.locator('.regions-leaflet.leaflet-container').count(), 0);
-      assert.strictEqual(await page.locator('.regions-leaflet .leaflet-tile').count(), 0);
-    } finally { await page.evaluate(() => { window.L = window.__regionsSavedL; delete window.__regionsSavedL; }); }
-  });
-
-  await test('health chart separates unavailable history from zero and withholds limited rates and deltas', async () => {
-    await page.getByLabel('Region scope').selectOption('#other');
-    await page.getByLabel('Timeline interval ending').focus();
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.waitForFunction(() => document.querySelector('[data-metric="appearances"] .regions-health-value')?.textContent === '0');
-    assert.match(await page.locator('.regions-status').textContent(), /No scoped relay activity observed in this complete interval/);
-    assert.strictEqual(await page.locator('.regions-trend-bar[data-count="0"]').getAttribute('height'), '0');
-    assert.strictEqual(await page.locator('.regions-trend-gap').count(), 0);
-    assert.match(await page.locator('.regions-health-rate').textContent(), /0\.00 relay appearances per hour/);
-    await page.getByLabel('Timeline interval ending').press('End');
-    await page.getByLabel('Region scope').selectOption('#example');
-    await page.getByLabel('Region period').selectOption('24h');
-    historyOverride = { coverage: { start: '2026-10-16T10:30:00Z', loading: false } };
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-    assert.strictEqual(await page.locator('.regions-trend-gap').count(), 23);
-    assert.strictEqual(await page.locator('.regions-trend-bar').count(), 1);
-    assert.match(await page.locator('.regions-health-rate').textContent(), /unavailable/);
-    assert.strictEqual(await page.locator('.regions-appearance-change').count(), 0);
-    await page.locator('.regions-hourly-details summary').click();
-    assert.strictEqual(await page.locator('.regions-hourly-table tbody tr').count(), 24);
-    const partial = page.locator('.regions-hourly-table tbody tr[data-start="2026-10-16T10:00:00.000Z"]');
-    assert.match(await partial.textContent(), /partial/i);
-    assert.match(await partial.textContent(), /7 appearances; 2 relay nodes/);
-    assert.strictEqual(await partial.locator('[data-column="appearances"]').textContent(), '—');
-    for (const override of [{ coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
-      { truncated: true }, { scopesTruncated: true }, { bucketsTruncated: true }]) {
-      historyOverride = override;
-      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-      await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-      assert.strictEqual(await page.locator('.regions-trend-gap').count(), 24);
-      assert.strictEqual(await page.locator('.regions-trend-bar').count(), 0);
-      assert.match(await page.locator('.regions-health-rate').textContent(), /unavailable/);
-      assert.strictEqual(await page.locator('.regions-appearance-change').count(), 0);
-      assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '15', 'retained counts stay explicit');
-    }
-    historyOverride = {};
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-  });
-
-  await test('health SVG and exact-value table are accessible, themed and retain keyed rows', async () => {
-    const chart = page.getByRole('img', { name: /Hourly relay appearances/ });
-    assert.strictEqual(await chart.count(), 1);
-    assert.match(await chart.getAttribute('aria-label'), /#example/);
-    const wasOpen = await page.locator('.regions-hourly-details').evaluate(details => details.open);
-    await page.locator('.regions-hourly-details summary').focus();
-    await page.locator('.regions-hourly-details summary').press('Enter');
-    assert.strictEqual(await page.locator('.regions-hourly-table').isVisible(), !wasOpen, 'keyboard did not toggle exact hourly values');
-    if (wasOpen) await page.locator('.regions-hourly-details summary').press('Enter');
-    assert.strictEqual(await page.locator('.regions-hourly-table').isVisible(), true);
-    await page.evaluate(() => { window.__healthRow = document.querySelector('.regions-hourly-table tbody tr:last-child'); });
-    await page.getByLabel('Region scope').selectOption('#other');
-    assert.strictEqual(await page.evaluate(() => window.__healthRow === document.querySelector('.regions-hourly-table tbody tr:last-child')), true, 'scope filtering rebuilt unchanged hourly rows');
-    await page.getByLabel('Region scope').selectOption('#example');
-    await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
-    const fill = await page.locator('.regions-trend-bar').last().evaluate(element => getComputedStyle(element).fill);
-    assert(fill && fill !== 'none');
-    assert.strictEqual(await page.evaluate(() => window.__xss), undefined);
-    assert.strictEqual(await page.locator('.regions-health img').count(), 0);
-    assert.match(await page.locator('.regions-health').textContent(), /traffic increase does not establish better health/i);
-  });
-
-  if (process.env.REGIONS_SCREENSHOT_DIR) {
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-health-desktop.png'), fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-health-mobile.png'), fullPage: true });
-    await test('health chart and controls fit the mobile viewport', async () => {
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-      const bounds = await page.locator('.regions-trend').boundingBox();
-      assert(bounds.width <= 370 && bounds.height >= 120);
-    });
-    await page.locator('.regions-trend').scrollIntoViewIfNeeded();
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-health-mobile-chart.png'), fullPage: true });
-    await page.setViewportSize({ width: 1440, height: 1000 });
-  }
-
-  await test('a delayed health refresh cannot replace a newer timeline selection', async () => {
-    holdHistory = true;
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    const deadline = Date.now() + 5000;
-    while (!heldHistory) {
-      if (Date.now() > deadline) throw new Error('Timed out waiting for delayed history');
-      await page.waitForTimeout(10);
-    }
-    assert.strictEqual(await page.locator('.regions-health').isVisible(), false, 'old health cards stayed visible while refreshing');
-    await page.getByLabel('Region view').selectOption('timeline');
-    await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('15 relay appearances'));
-    const request = heldHistory.request();
-    const finished = page.waitForResponse(response => response.request() === request);
-    await heldHistory.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(historySnapshot({ nodes: [] })) });
-    heldHistory = null;
-    await finished;
-    await page.waitForTimeout(100);
-    assert.strictEqual(await page.getByLabel('Region view').inputValue(), 'timeline');
-    assert.match(await page.locator('.regions-status').textContent(), /15 relay appearances/);
-    assert.strictEqual(await page.locator('.regions-health').isVisible(), false);
-    await page.getByLabel('Region view').selectOption('health');
-    assert.strictEqual(await page.locator('[data-metric="appearances"] .regions-health-value').textContent(), '15');
-  });
-
-  await test('health returns to Latest and teardown stops historical controls', async () => {
-    await page.getByLabel('Region view').selectOption('latest');
-    await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('3 positioned'));
-    assert.strictEqual(await page.locator('.regions-health').isVisible(), false);
-    assert.strictEqual(await page.locator('.regions-leaflet').isVisible(), true);
-    await page.getByLabel('Region view').selectOption('health');
-    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-    await page.getByLabel('Region view').selectOption('timeline');
-    assert.strictEqual(await page.locator('.regions-health').isVisible(), false);
   });
 
   await test('destroy() tears down the map and the theme observer', async () => {
