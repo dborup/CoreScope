@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 	"net/http"
 	"sort"
@@ -216,22 +215,6 @@ func (s *Server) handleRegionsHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "observed relay history is warming up")
 		return
 	}
-	response, err := s.regionsHistoryResponse(r.Context(), snapshot)
-	if err != nil {
-		log.Printf("[regions-history] node metadata: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not read region node metadata")
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, response)
-}
-
-func (s *Server) regionsHistoryResponse(ctx context.Context, snapshot *repeaterRelaySnapshot) (RegionsHistoryResponse, error) {
-	response, _, err := s.regionsHistoryAndStepNodes(ctx, snapshot, nil)
-	return response, err
-}
-
-func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repeaterRelaySnapshot, routeKeys map[string]bool) (RegionsHistoryResponse, []RegionsRouteNode, error) {
 	h := snapshot.history
 	response := RegionsHistoryResponse{GeneratedAt: snapshot.generatedAt.Format(time.RFC3339Nano),
 		HistoryStart: h.start.Format(time.RFC3339Nano), HistoryEnd: h.end.Format(time.RFC3339Nano),
@@ -242,27 +225,18 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 		start := snapshot.coverageStart.Format(time.RFC3339Nano)
 		response.Coverage.Start = &start
 	}
-	keys := make([]string, 0, len(h.nodes)+len(routeKeys))
+	keys := make([]string, 0, len(h.nodes))
 	for key := range h.nodes {
 		keys = append(keys, key)
 	}
-	for key := range routeKeys {
-		if _, exists := h.nodes[key]; !exists {
-			keys = append(keys, key)
-		}
-	}
-	stepNodes := []RegionsRouteNode{}
-	err := s.forEachVisibleRegionNode(ctx, keys, true, func(n observedRegionNodeMetadata) bool {
-		if routeKeys[n.publicKey] {
-			stepNodes = append(stepNodes, regionRouteNodeMetadata(n))
-		}
+	err := s.forEachVisibleRegionNode(r.Context(), keys, true, func(n observedRegionNodeMetadata) bool {
 		scopes := h.nodes[n.publicKey]
 		if len(scopes) == 0 {
 			return true
 		}
 		if len(response.Nodes) >= maxObservedRegionNodes {
 			response.Truncated = true
-			return len(routeKeys) > 0
+			return false
 		}
 		node := RegionsHistoryNode{PublicKey: n.publicKey, Name: n.name, Role: n.role,
 			PositionSource: "none", MetadataSource: n.source, Scopes: scopes}
@@ -276,7 +250,13 @@ func (s *Server) regionsHistoryAndStepNodes(ctx context.Context, snapshot *repea
 		response.Nodes = append(response.Nodes, node)
 		return true
 	})
-	return response, stepNodes, err
+	if err != nil {
+		log.Printf("[regions-history] node metadata: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not read region node metadata")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, response)
 }
 
 func regionsHistorySchemas() map[string]*openAPISchema {

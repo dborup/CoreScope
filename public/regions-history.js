@@ -183,7 +183,7 @@
       ratePerHour: frame.currentCoverage === 'complete' && !history.limited ? total / hours : null };
   }
 
-  const api = { indexHistory, frameIndex, frameTime, interval, selectFrame, scopeCount, indexActivity, selectActivity };
+  const api = { indexHistory, frameIndex, frameTime, interval, selectFrame, indexActivity, selectActivity };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RegionsHistory = api;
 })(typeof window === 'undefined' ? globalThis : window);

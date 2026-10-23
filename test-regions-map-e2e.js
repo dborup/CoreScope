@@ -48,24 +48,6 @@ function historySnapshot(override = {}) {
     truncated: false, scopesTruncated: false, bucketsTruncated: false, ...override };
 }
 
-function routesSnapshot(override = {}) {
-  const data = historySnapshot();
-  data.nodes = data.nodes.map(node => ({ ...node, publicKey: node.publicKey.padEnd(64, '0') }));
-  const key = short => short.padEnd(64, '0');
-  const bucket = (index, count) => ({ index, count, lastRelayed: new Date(Date.parse(data.historyStart) + index * 3600000 + 1000).toISOString() });
-  return { ...data, stepNodes: [
-    { publicKey: key('6666'), name: 'Only own flood from', role: 'repeater', lat: 57, lon: 11, positionSource: 'reported' },
-    { publicKey: key('7777'), name: 'Only own flood to', role: 'room', lat: 56, lon: 12, positionSource: 'reported' },
-  ], steps: [
-    { from: key('aa11'), to: key('bb22'), scope: '#example', buckets: [bucket(502, 2), bucket(503, 3)] },
-    { from: key('bb22'), to: key('aa11'), scope: '#example', buckets: [bucket(503, 2)] },
-    { from: key('aa11'), to: key('dd44'), scope: '#example', buckets: [bucket(503, 1)] },
-    { from: key('cc33'), to: key('bb22'), scope: '#other', buckets: [bucket(503, 4)] },
-    { from: key('6666'), to: key('7777'), scope: '#routeonly', buckets: [bucket(503, 7)] },
-  ], stepsTruncated: false, stepBucketsTruncated: false,
-  stepEvidence: { skippedObservations: 0, unresolvedHops: 0, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false }, ...override };
-}
-
 async function main() {
   let browser;
   try {
@@ -84,7 +66,6 @@ async function main() {
   let historyOverride = {}, failHistory = false;
   let holdHistory = false, heldHistory = null;
   let historyRequests = 0;
-  let routesRequests = 0, routesOverride = {}, holdRoutes = false, heldRoutes = null;
   const requests = [];
   const waitForHeldHour = async () => {
     const deadline = Date.now() + 5000;
@@ -106,11 +87,6 @@ async function main() {
     if (holdHistory) { holdHistory = false; heldHistory = r; return; }
     if (failHistory) return r.fulfill({ status: 500, body: '{}' });
     await r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(historySnapshot(historyOverride)) });
-  });
-  await page.route('**/api/regions/routes*', async route => {
-    routesRequests++;
-    if (holdRoutes) { holdRoutes = false; heldRoutes = route; return; }
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(routesSnapshot(routesOverride)) });
   });
   let failures = 0;
   let coverageCapture = 0;
@@ -598,228 +574,6 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
     await page.getByLabel('Region view').selectOption('timeline');
     assert.strictEqual(await page.locator('.regions-health').isVisible(), false);
-  });
-
-  await test('Connections distinguishes shared membership from directed scoped steps', async () => {
-    const before = routesRequests;
-    await page.evaluate(() => { location.hash = '#/regions?view=connections&window=1h&scope=%23example&at=2026-10-16T12%3A48%3A00Z&compare=1'; });
-    await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');
-    assert.strictEqual(routesRequests, before + 1);
-    assert.strictEqual(await page.getByLabel('Region view').inputValue(), 'connections');
-    assert.strictEqual(await page.getByRole('button', { name: 'Play timeline', exact: true }).isVisible(), false);
-    assert.strictEqual(await page.getByLabel('Compare previous period').isVisible(), false);
-    assert.strictEqual(await page.locator('.regions-pairs-table tbody tr').count(), 1);
-    assert.match(await page.locator('.regions-pairs-table tbody').textContent(), /#example — #other/);
-    assert.strictEqual(await page.getByRole('heading', { name: 'Shared relay-history memberships', exact: true }).isVisible(), true);
-    assert.strictEqual(await page.getByRole('columnheader', { name: 'History identities', exact: true }).isVisible(), true);
-    const provenance = page.locator('.regions-connections-provenance');
-    assert.strictEqual(await provenance.isVisible(), true);
-    assert.match(await provenance.textContent(), /transmission-level relay history used by Timeline\/Health/);
-    assert.match(await provenance.textContent(), /Observation route\/scope variants are not independently verified here; mixed flood\/direct transmissions can include planned-path candidates/);
-    assert.match(await provenance.textContent(), /Only directed steps below use each observation’s own frame evidence/);
-    assert.match(await page.locator('.regions-pairs-summary').textContent(), /1 distinct identities with shared history membership/);
-    assert.match(await page.locator('.regions-connections-note').first().textContent(), /does not establish cross-scope traffic/);
-    assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 3);
-    assert.match(await page.locator('.regions-steps-summary').textContent(), /6 step appearances/);
-    assert.match(await page.locator('.regions-steps-summary').textContent(), /1 rows have endpoints without usable positions/);
-    const directions = await page.locator('.regions-steps-table tbody tr td:first-child').allTextContents();
-    assert(directions.some(value => value.includes(EVIL + ' → New relay')));
-    assert(directions.some(value => value.includes('New relay → ' + EVIL)));
-    assert.strictEqual(await page.locator('.regions-directed-step').count(), 2);
-    assert(await page.locator('.regions-directed-step').first().getAttribute('marker-end'));
-    assert.match(await page.locator('.regions-step-diagnostics').textContent(), /Snapshot-wide evidence diagnostics \(not selected-interval totals\)/);
-    assert.strictEqual(await page.locator('.regions-connections img').count(), 0);
-    assert.strictEqual(await page.evaluate(() => window.__xss), undefined);
-    const params = new URLSearchParams((await page.evaluate(() => location.hash)).split('?')[1]);
-    assert.strictEqual(params.get('at'), '2026-10-16T12:00:00.000Z');
-    assert.strictEqual(params.has('compare'), false);
-  });
-
-  await test('Connections filters frames locally and preserves route-only scope endpoints', async () => {
-    const before = routesRequests;
-    await page.evaluate(() => { window.__regionsFitCount = 0; });
-    await page.getByLabel('Region scope').selectOption('#routeonly');
-    assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 1);
-    assert.strictEqual(await page.locator('.regions-pairs-table tbody tr').count(), 0, 'route-only metadata created false membership');
-    assert.match(await page.locator('.regions-steps-table tbody').textContent(), /Only own flood from → Only own flood to/);
-    assert.match(await page.locator('.regions-steps-summary').textContent(), /7 step appearances/);
-    assert.strictEqual(await page.locator('.regions-directed-step').count(), 1);
-    await page.getByLabel('Timeline interval ending').focus();
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.waitForFunction(() => document.querySelector('.regions-steps-summary')?.textContent.includes('0 directed'));
-    assert.match(await page.locator('.regions-steps-summary').textContent(), /No qualifying directed steps were observed/);
-    await page.getByLabel('Timeline interval ending').press('End');
-    await page.getByLabel('Region period').selectOption('24h');
-    await page.getByLabel('Region scope').selectOption('#example');
-    assert.match(await page.locator('.regions-steps-summary').textContent(), /8 step appearances/);
-    assert.strictEqual(await page.evaluate(() => window.__regionsFitCount), 0);
-    assert.strictEqual(routesRequests, before);
-    await page.getByLabel('Region period').selectOption('1h');
-  });
-
-  await test('Connections qualifies partial, unknown, loading and capped evidence without absence claims', async () => {
-    for (const override of [{ coverage: { start: '2026-10-16T11:30:00Z', loading: false } },
-      { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } },
-      { stepsTruncated: true }, { stepBucketsTruncated: true }, { stepEvidence: { sourceTruncated: true, incomplete: true } },
-      { stepEvidence: { skippedObservations: 12, unresolvedHops: 3, missingEndpointSteps: 0, sourceTruncated: false, incomplete: false } }]) {
-      routesOverride = override;
-      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-      await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');
-      assert.strictEqual(await page.locator('.regions-connections').getAttribute('data-complete'), 'false');
-      assert.match(await page.locator('.regions-connections-summary').textContent(), /missing results do not establish absence/);
-      assert.doesNotMatch(await page.locator('.regions-connections-summary').textContent(), /lower bounds/);
-      assert.match(await page.locator('.regions-steps-summary').textContent(), /6 step appearances/);
-    }
-    routesOverride = {};
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-complete') === 'true');
-  });
-
-  await test('Connections works as accessible evidence tables without Leaflet', async () => {
-    await page.evaluate(() => { window.__regionsSavedL = window.L; window.L = undefined; location.hash = '#/regions?view=connections&window=1h&scope=%23routeonly'; });
-    try {
-      await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');
-      assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 1);
-      assert.match(await page.locator('.regions-status').textContent(), /evidence tables remain available/);
-      assert.strictEqual(await page.locator('.regions-leaflet.leaflet-container').count(), 0);
-    } finally { await page.evaluate(() => { window.L = window.__regionsSavedL; delete window.__regionsSavedL; }); }
-    await page.getByLabel('Region scope').selectOption('#example');
-    await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
-    assert(await page.locator('.regions-directed-step').first().evaluate(element => getComputedStyle(element).stroke !== 'none'));
-  });
-
-  await test('Connections warns when route-only scopes exceed the bounded selector and preserves an outside selection', async () => {
-    const base = routesSnapshot();
-    routesOverride = { nodes: [], steps: Array.from({ length: 129 }, (_, index) => ({ from: base.stepNodes[0].publicKey,
-      to: base.stepNodes[1].publicKey, scope: '#route' + String(index).padStart(3, '0'), buckets: [base.steps[4].buckets[0]] })) };
-    await page.evaluate(() => { location.hash = '#/regions?view=connections&window=1h&scope=%23route128'; });
-    await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');
-    assert.strictEqual(await page.getByLabel('Region scope').inputValue(), '#route128');
-    assert.strictEqual(await page.getByLabel('Region scope').locator('option').count(), 130);
-    assert.match(await page.getByLabel('Region scope').locator('option:checked').textContent(), /Selected \(outside list\)/);
-    assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 1);
-    assert.strictEqual(await page.locator('.regions-pairs-table tbody tr').count(), 0);
-    assert.strictEqual(await page.locator('.regions-connections').getAttribute('data-complete'), 'false');
-    assert.match(await page.locator('.regions-connections-summary').textContent(), /missing results do not establish absence/);
-    assert.match(await page.locator('.regions-status').textContent(), /selector is limited to 128 names/);
-    routesOverride = {};
-    await page.evaluate(() => { location.hash = '#/regions?view=connections&window=1h&scope=%23example'; });
-    await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-complete') === 'true');
-  });
-
-  await test('returning from Health refreshes Connections and Latest tiles and hidden-map dimensions', async () => {
-    const viewport = page.viewportSize();
-    await page.route('https://regions-tiles.invalid/**', route => route.fulfill({ status: 200, contentType: 'image/svg+xml',
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"/>' }));
-    await page.evaluate(() => {
-      window.__regionsResume = { spec: window.MC_getTileSpec, invalidate: L.Map.prototype.invalidateSize,
-        fit: L.Map.prototype.fitBounds, theme: document.documentElement.getAttribute('data-theme'), invalidations: 0 };
-      window.MC_getTileSpec = theme => ({ url: 'https://regions-tiles.invalid/' + theme + '/{z}/{x}/{y}.png', maxZoom: 19 });
-      L.Map.prototype.invalidateSize = function (...args) {
-        window.__regionsResume.invalidations++; return window.__regionsResume.invalidate.apply(this, args);
-      };
-      L.Map.prototype.fitBounds = function (...args) {
-        window.__regionsResume.map = this; return window.__regionsResume.fit.apply(this, args);
-      };
-      document.documentElement.setAttribute('data-theme', 'dark');
-    });
-    try {
-      // Force a theme mutation even when the previous case already used dark.
-      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'));
-      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
-      await page.waitForFunction(() => [...document.querySelectorAll('.regions-leaflet .leaflet-tile')].some(tile => tile.src.includes('regions-tiles.invalid/dark/')));
-      await page.getByRole('button', { name: 'Fit map', exact: true }).click();
-      await page.getByLabel('Region view').selectOption('health');
-      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'));
-      await page.setViewportSize({ width: 390, height: 844 });
-      await page.waitForTimeout(100); // Leaflet's resize frame runs while hidden.
-      await page.evaluate(() => { window.__regionsResume.invalidations = 0; });
-      await page.getByLabel('Region view').selectOption('connections');
-      const state = await page.evaluate(() => {
-        const record = window.__regionsResume, element = document.querySelector('.regions-leaflet'), size = record.map.getSize();
-        return { refreshedLightTiles: [...element.querySelectorAll('.leaflet-tile')].some(tile => tile.src.includes('regions-tiles.invalid/light/')),
-          invalidatedOnReturn: record.invalidations > 0, currentDimensions: size.x === element.clientWidth && size.y === element.clientHeight };
-      });
-      assert.deepStrictEqual(state, { refreshedLightTiles: true, invalidatedOnReturn: true, currentDimensions: true });
-      await page.getByLabel('Region view').selectOption('health');
-      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
-      await page.setViewportSize({ width: 1440, height: 1000 });
-      await page.waitForTimeout(100);
-      await page.evaluate(() => { window.__regionsResume.invalidations = 0; });
-      await page.getByLabel('Region view').selectOption('latest');
-      await page.waitForFunction(() => document.querySelector('.regions-status')?.textContent.includes('positioned relay'));
-      const latestState = await page.evaluate(() => {
-        const record = window.__regionsResume, element = document.querySelector('.regions-leaflet'), size = record.map.getSize();
-        return { refreshedDarkTiles: [...element.querySelectorAll('.leaflet-tile')].some(tile => tile.src.includes('regions-tiles.invalid/dark/')),
-          invalidatedOnReturn: record.invalidations > 0, currentDimensions: size.x === element.clientWidth && size.y === element.clientHeight };
-      });
-      assert.deepStrictEqual(latestState, { refreshedDarkTiles: true, invalidatedOnReturn: true, currentDimensions: true });
-    } finally {
-      await page.evaluate(() => {
-        const record = window.__regionsResume;
-        window.MC_getTileSpec = record.spec; L.Map.prototype.invalidateSize = record.invalidate; L.Map.prototype.fitBounds = record.fit;
-        document.documentElement.setAttribute('data-theme', record.theme); delete window.__regionsResume;
-      });
-      await page.setViewportSize(viewport);
-      await page.unroute('https://regions-tiles.invalid/**');
-      if (await page.getByLabel('Region view').inputValue() !== 'connections') await page.getByLabel('Region view').selectOption('connections');
-      await page.waitForFunction(() => document.querySelector('.regions-connections')?.getAttribute('data-ready') === 'true');
-    }
-  });
-
-  await test('Connections paginates bounded keyed rows and caps only map rendering', async () => {
-    const base = routesSnapshot(), source = base.nodes[0].publicKey;
-    const targets = Array.from({ length: 230 }, (_, index) => ({ publicKey: (10000 + index).toString(16).padStart(64, '0'),
-      name: 'Relay ' + index, role: 'repeater', lat: 55 + (index % 20) / 100, lon: 10 + index / 1000, positionSource: 'reported' }));
-    routesOverride = { stepNodes: targets, steps: targets.map((node, index) => ({ from: source, to: node.publicKey, scope: '#example',
-      buckets: [{ index: 503, count: index + 1, lastRelayed: '2026-10-16T11:00:01Z' }] })) };
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-steps-summary')?.textContent.includes('230 directed'));
-    assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 25);
-    assert.strictEqual(await page.locator('.regions-directed-step').count(), 200);
-    const before = routesRequests;
-    await page.getByRole('button', { name: 'Next directed relay steps page', exact: true }).click();
-    assert.strictEqual(await page.locator('.regions-steps-table tbody tr').count(), 25);
-    assert.strictEqual(await page.evaluate(() => new URLSearchParams(location.hash.split('?')[1]).get('page')), '2');
-    assert.strictEqual(routesRequests, before);
-    await page.getByRole('button', { name: 'Previous directed relay steps page', exact: true }).click();
-    assert.strictEqual(await page.evaluate(() => new URLSearchParams(location.hash.split('?')[1]).has('page')), false);
-    routesOverride = {};
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-steps-summary')?.textContent.includes('3 directed'));
-    assert.strictEqual(await page.locator('.regions-directed-step').count(), 2);
-  });
-
-  if (process.env.REGIONS_SCREENSHOT_DIR) {
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-connections-desktop.png'), fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-connections-mobile.png'), fullPage: true });
-    await test('Connections tables and controls fit narrow mobile layouts', async () => {
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-      await page.locator('.regions-relations-scroll').first().focus();
-      assert(await page.locator('.regions-relations-scroll').first().evaluate(element => document.activeElement === element));
-    });
-    await page.locator('.regions-leaflet').scrollIntoViewIfNeeded();
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-connections-mobile-map.png'), fullPage: true });
-    await page.setViewportSize({ width: 1440, height: 1000 });
-  }
-
-  await test('late Connections evidence cannot replace a newer historical view', async () => {
-    holdRoutes = true;
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    const deadline = Date.now() + 5000;
-    while (!heldRoutes) { if (Date.now() > deadline) throw new Error('Timed out waiting for delayed routes'); await page.waitForTimeout(10); }
-    assert.strictEqual(await page.locator('.regions-connections').isVisible(), false);
-    await page.getByLabel('Region view').selectOption('health');
-    await page.waitForFunction(() => document.querySelector('.regions-health')?.getAttribute('data-ready') === 'true');
-    const request = heldRoutes.request(), finished = page.waitForResponse(response => response.request() === request);
-    await heldRoutes.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(routesSnapshot({ steps: [] })) }); heldRoutes = null;
-    await finished; await page.waitForTimeout(100);
-    assert.strictEqual(await page.getByLabel('Region view').inputValue(), 'health');
-    assert.strictEqual(await page.locator('.regions-connections').isVisible(), false);
-    assert.strictEqual(await page.locator('.regions-leaflet').isVisible(), false);
-    await page.getByLabel('Region view').selectOption('timeline');
   });
 
   await test('destroy() tears down the map and the theme observer', async () => {

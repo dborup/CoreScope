@@ -55,7 +55,6 @@ func routeDescriptions() map[string]routeMeta {
 			Errors:      []routeError{{Status: "400", Description: "Invalid window."}, {Status: "500", Description: "Current identity or node metadata could not be read."}, {Status: "503", Description: "Relay snapshot is unavailable or warming up."}}},
 		"GET /api/regions/history": {Summary: "Hourly scoped relay history", Description: "One bounded bulk snapshot for Regions timeline and equal-window comparison. Includes 504 UTC clock-hour buckets over 21 days, excluding the unfinished current hour. Counts distinct transmissions per confirmed node and scope, assigned by transmission FirstSeen; summed node counts are relay appearances. Metadata is current, or archived only when no current row exists. Current catalog identity resolution and live visibility policies apply. Coverage and truncation must be checked before interpreting changes.", Tag: "analytics", Response: schemaRef("RegionsHistoryResponse"),
 			Errors: []routeError{{Status: "500", Description: "Identity or node metadata could not be read."}, {Status: "503", Description: "Relay history snapshot is unavailable or warming up."}}},
-		"GET /api/regions/routes":    {Summary: "Observed directed scoped relay steps", Description: "Paired Regions history plus bounded directed adjacent relay steps from each explicitly observed scoped flood path. The observation transport codes must match the canonical transmission frame underlying its existing scope name. Counts deduplicate transmission IDs per directed step and scope and use FirstSeen hourly buckets. Scope handoffs, RF links, complete end-to-end paths and observer/origin edges are not inferred. Independent stepNodes carry current or archived endpoint metadata. Snapshot-wide diagnostics expose skipped or incomplete evidence.", Tag: "analytics", Response: schemaRef("RegionsRoutesResponse"), Errors: []routeError{{Status: "500", Description: "Identity or endpoint metadata could not be read."}, {Status: "503", Description: "Paired relay routes snapshot is unavailable or warming up."}}},
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
@@ -1017,9 +1016,6 @@ func componentSchemas() map[string]interface{} {
 		schemas[name] = schema
 	}
 	for name, schema := range regionsHistorySchemas() {
-		schemas[name] = schema
-	}
-	for name, schema := range regionsRoutesSchemas() {
 		schemas[name] = schema
 	}
 	for name, schema := range heardBySchemas() {

@@ -131,104 +131,17 @@ payload while scrubbing. No new endpoint, persistence, retention setting,
 dependency or operator configuration is introduced. Any future health
 thresholds must be evidence-based and exposed through the customizer.
 
-## Connections and observed routes
+## Following milestones
 
-**Connections & routes** separates two evidence classes instead of drawing
-inferred traffic links between region names:
+1. **Connections between regions:** add observed paths with direction and
+   distinct-transmission counts. Preserve scope transitions, distinguish
+   ambiguous hop identities and avoid interpreting shared scope membership as
+   proof of a direct radio link. Route changes belong to this path-evidence
+   milestone; timeline relay membership alone does not establish a changed route.
 
-- **Shared relay-history memberships** counts distinct visible identities
-  attributed to both scopes by the existing transmission-level history during
-  the selected interval. This is an undirected history relationship, not
-  independently verified forwarding in both scopes. It does not prove that a
-  packet crossed between those scopes, that the identity is a gateway, or that
-  the scopes are neighbouring geographic areas.
-- **Observed directed relay steps** counts consecutive, unambiguously resolved
-  relay identities within a single observed flood path, labelled with that
-  observation's attributable packet scope. Opposite directions remain separate.
-  Repeated observers or loops contribute at most once per transmission, directed
-  step and scope. Counts across steps are step appearances, not globally unique
-  transmissions. Independent steps are never concatenated into a claimed full
-  route.
-
-Shared memberships deliberately reuse the history attribution used by Timeline
-and Health. That legacy attribution does not independently check every
-observation's route and scope: when a content transmission has mixed flood and
-direct observations, planned direct-path candidates can enter its canonical
-scope's history. Consequently shared-history counts can contain false
-memberships as well as omissions; they are not guaranteed lower bounds on
-physically shared relays. The UI discloses this provenance. Only the directed
-steps below apply the stricter own-observation frame checks introduced here.
-Repairing the older history attribution is a separate correctness task rather
-than a silent change to previous stages' metrics in this PR.
-
-Flood forwarding appends the forwarding identity to the path. Direct paths
-instead name remaining intended hops, so direct observations are not evidence
-of already-traversed steps. TRACE and ADVERT packets are excluded from this
-traffic view. Unresolved, colliding, invalid or listener-only hop identities
-break adjacency: removing an unknown intermediate hop must not manufacture
-a connection between the endpoints on either side. No origin-to-first-hop or
-last-hop-to-observer edge is inferred from generic packet metadata. Observer
-RSSI/SNR is not a measurement of the internal steps.
-
-One content transmission can have observations with different route types or
-transport codes. A named-scope step therefore requires the observation's own
-explicit transport-flood header and both transport codes matching the stored
-canonical scoped frame. Missing legacy headers and mismatched or malformed
-transport evidence are omitted rather than falling back to the transmission's
-route. This reuses the stored scope attribution; it does not independently
-authenticate the region name. The scope is a property of the observed packet,
-not a home-region assignment to either relay.
-
-The wire path does not label each hop with a region, and the reserved second
-transport code is not a destination-region identifier. Shared relays, current
-declared/default scopes and the order in which listeners reported a packet
-cannot establish a scope-change point. This milestone intentionally does not
-claim directional region-to-region crossings. Such a view needs additional
-explicit crossing evidence, not geographic or membership guesses.
-
-Connections uses the same completed UTC hours, transmission `first_seen`
-assignment and current-knowledge identity reconstruction as Timeline and
-Health. Retained-history limits remain visible. Latest remains a rolling view;
-switching to Connections does not silently turn it into observation-time
-replay. Missing coordinates do not remove a step from the evidence table;
-only usable self-reported endpoint positions can be mapped. Lines describe
-observed path order, not independently verified direct RF links or coverage.
-
-The view is shareable with `view=connections`, `window`, `scope` and `at`.
-Directed-step and shared-pair table pages use `page` and `pairsPage` respectively.
-Connections has no automatic playback or route-comparison control. It can use
-the paired history payload when switching to Health or Timeline, without
-making a request for every selected hour.
-
-Route evidence is published with the existing background relay snapshot, not
-recomputed by scanning packets for each request or slider movement. The bulk
-response contains bounded hourly step counts as well as relay history. Node,
-scope, step and populated-hour limits must be disclosed as incomplete evidence.
-No database writes, schema changes, retention extension, dependencies or new
-operator configuration are required.
-
-The route collector retains at most 250,000 path variants globally and 128 per
-transmission, with an 8,192-byte input-path safety bound. Publication retains
-at most 5,000 directed step/scope rows, 100,000 populated hourly cells and 10,000
-endpoint identities. Endpoint metadata is independent of relay-history
-membership, so a valid flood observation of a canonically direct transmission
-can still be shown. The UI retains at most 1,000 shared scope pairs, paginates
-both tables in 25-row pages and maps at most 200 positioned step rows. A capped
-subset is not a ranking of all possible relations. Snapshot-wide skipped-path,
-unresolved-hop and missing-endpoint diagnostics are not selected-interval
-traffic totals. Complete retained history does not imply complete radio
-reception or that all paths can be attributed.
-
-Future work can add independently evidenced scope transitions and comparisons
-of observed routes, and align the legacy history's mixed-route/scope attribution
-with own-observation evidence. A change in timeline relay membership alone does
-not establish a changed route.
-
-The default period, display limits and any future health thresholds or playback
-settings should be exposed in the customizer in a later milestone. Protocol
-validity checks are not user-adjustable tuning parameters. The first milestone
-uses a 24-hour default and existing theme variables, without a new operator
-config key.
+The default period and any future health thresholds or playback settings should
+be exposed in the customizer in a later milestone. The first milestone uses a
+24-hour default and existing theme variables, without a new operator config key.
 
 ## Verification
 
@@ -254,14 +167,3 @@ UTC boundaries and no sparse-cell rescans after activity indexing. Browser
 checks include Health deep links, local filter/time changes, Health/Timeline
 transitions, missing-data charts, exact values, themes, teardown and narrow
 mobile/desktop layouts.
-
-Connections tests additionally cover per-observation route/transport evidence,
-all observation-loading paths, unchanged observation struct size, separate
-observation boundaries, ambiguous intermediate hops, repeated/looped steps,
-reverse directions, live visibility, archived metadata and source/publication
-limits. Shared-scope relation keys must remain distinct even when region names
-contain delimiter characters. Browser validation covers direction labels,
-missing positions, partial history, local hour/scope selection without extra
-requests, keyed and bounded rendering, failures, navigation, themes and narrow
-screens. Benchmarks include a 30,000-transmission/2,000-node route workload
-and maximum frontend fanout, not only empty snapshots.
