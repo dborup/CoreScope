@@ -420,16 +420,6 @@ assert.equal(fullConnections.mapSteps.length, 200, 'the map has a separate bound
 assert.equal(fullRoutes.steps.reduce((sum, step) => sum + step.indices.length, 0), 100000);
 const cappedSteps = routes.indexRoutes({ steps: [...populatedSteps, populatedSteps[0]], stepEvidence: routeData.stepEvidence }, cliqueHistory, regions.validScope);
 assert.equal(cappedSteps.limited, true, 'row caps cannot silently imply complete evidence');
-// #508: rows and hourly buckets share one estimated-payload budget, so the
-// client no longer discards a snapshot the server published beyond 5,000 rows.
-assert.equal(routes.MAX_STEPS, Math.floor(16 * 1024 * 1024 / 180), 'client row bound mirrors the server payload budget');
-assert.equal(routes.MAX_CELLS, Math.floor(16 * 1024 * 1024 / 75), 'client cell bound mirrors the server payload budget');
-assert.equal(routes.MAX_STEP_NODES, 10000, 'client endpoint bound mirrors the server endpoint ceiling');
-const wideSteps = Array.from({ length: 6000 }, (_, index) => ({ from: (index % 5000).toString(16).padStart(64, '0'),
-  to: ((index + 1) % 5000).toString(16).padStart(64, '0'), scope: '#scope' + Math.floor(index / 5000), buckets: [bucket(503)] }));
-const wideRoutes = routes.indexRoutes({ steps: wideSteps, stepEvidence: routeData.stepEvidence }, cliqueHistory, regions.validScope);
-assert.equal(wideRoutes.steps.length, 6000, 'more than 5,000 published directed step rows are retained');
-assert.equal(wideRoutes.limited, false, 'a snapshot inside the payload budget is not reported as limited');
 const diverseNodes = Array.from({ length: 80 }, (_, i) => historical((10000 + i).toString(16).padStart(64, '0'), [], {
   scopes: Array.from({ length: 32 }, (_, j) => ({ name: '#group' + i + 's' + j, buckets: [bucket(503)] })),
 }));

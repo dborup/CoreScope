@@ -352,36 +352,7 @@ Detailed performance metrics per endpoint.
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `mem` | string | `1` adds `memoryBreakdown` and `memoryBreakdownNote`: a walk of every stored transmission and observation under the packet-store read lock. It also adds `regionsSnapshot`. Ignored when the server has no packet store. |
-
-`regionsSnapshot` sizes the retained Regions route, membership, hourly history
-and per-bucket evidence snapshot published with the background relay snapshot
-(#508): published counts, per-part and total retained bytes, `totalMB`, and
-`estimatedStepPayloadBytes` against `stepPayloadBudgetBytes` so the directed-step
-payload budget can be read against what a snapshot actually used. `truncated` is
-budget truncation only — the hourly-history and directed-step publication flags
-plus the capture budget's own refusal — and `evidenceIncomplete` carries the
-snapshot's evidence qualification separately, because unresolved hops and
-unprovable observations raise that on ordinary data. `capture` reports the
-transient capture state's fill against its own budgets (#510): retained paths
-and how many are interned (`pathVariants`, `pathVariantsInterned`,
-`pathVariantInternBudget`), retained references with the per-hour high-water
-mark (`pathReferences`, `maxHourPathReferences`, `hourPathReferenceBudget`),
-retained transmissions, aggregated membership cells and identities against
-their budgets, `estimatedBytes` and `sourceTruncated`. It also reports the
-per-transmission and per-path fill a flood packet reaches first
-(`maxTransmissionPaths`, `transmissionPathBudget`, `maxPathBytes`,
-`pathByteBudget`) and attributes every capped observation to the ceiling that
-refused it: `cappedPathBytes`, `cappedTransmissionPaths`,
-`cappedHourReferences` and `cappedOverlongPaths`, which together account for
-the snapshot's `cappedObservations`, plus `cappedMembershipCells` and
-`cappedMembershipNodes`, which are dropped memberships rather than
-observations. The walk is O(published cells),
-touches no packet state and takes no packet lock, so it is not part of the
-admission-controlled store scan; it is absent before the first background relay
-snapshot. Byte figures are struct sizes plus owned string content plus a flat
-per-map-entry allowance — an estimate of retained heap, not an allocator
-measurement, and not the transient aggregation that builds the snapshot.
+| `mem` | string | `1` adds `memoryBreakdown` and `memoryBreakdownNote`: a walk of every stored transmission and observation under the packet-store read lock. Ignored when the server has no packet store. |
 
 `mem=1` is admission-controlled per server process (#371): one scan at a
 time, and none for 5 s after a scan completes. A refused request gets

@@ -27,7 +27,7 @@ import (
 
 // memBreakdownNote is the static accounting caveat attached to the opt-in
 // /api/perf?mem=1 store memory breakdown (PerfResponse.MemoryBreakdownNote).
-const memBreakdownNote = "Per-component *MB count string content + one Go string header each and are a deliberate upper bound (the header is also in the *EstimatedMB base figures). struct/index/map overhead, the neighbor graph and analytics caches are excluded, so the totals sit below goHeapInuseMB. floodTxSharePct sizes the flood-forward multiplication: each flood hop is stored as its own transmission. regionsSnapshot is accounted separately and is not part of these totals: it sizes the retained Regions route/membership/history/evidence snapshot (published struct sizes, owned string content and a flat per-map-entry allowance), not the transient aggregation that builds it."
+const memBreakdownNote = "Per-component *MB count string content + one Go string header each and are a deliberate upper bound (the header is also in the *EstimatedMB base figures). struct/index/map overhead, the neighbor graph and analytics caches are excluded, so the totals sit below goHeapInuseMB. floodTxSharePct sizes the flood-forward multiplication: each flood hop is stored as its own transmission."
 
 // Server holds shared state for route handlers.
 type Server struct {
@@ -59,11 +59,6 @@ type Server struct {
 
 	// Admits one /api/perf?mem=1 store scan at a time plus a cooldown (#371).
 	perfMem perfMemLimiter
-
-	// Test-only override for the published step-endpoint ceiling (#510), so
-	// the ceiling and its missing-endpoint disclosure can be exercised without
-	// a 10,001-node fixture. Zero means maxRegionsRouteEndpoints.
-	stepEndpointLimit int
 
 	// Throttles the log of failed GET /api/nodes/{pubkey} 404 lookups (#208).
 	missingNodeLog missingNodeLookupLog
@@ -1259,15 +1254,11 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 	// Released as soon as the walk ends: the cooldown runs from scan
 	// completion, and a client slow to read the response cannot hold the slot.
 	var memBreakdown *StoreMemoryBreakdown
-	var regionsSnapshot *RegionsSnapshotMemory
 	var breakdownNote string
 	if releaseMem != nil {
 		memBreakdown = s.store.GetStoreMemoryBreakdown()
 		breakdownNote = memBreakdownNote
 		releaseMem()
-		// Sizing the published Regions snapshot is O(published cells) and takes
-		// no packet lock, so it runs after the gated store walk is released.
-		regionsSnapshot = s.store.GetRegionsSnapshotMemory()
 	}
 
 	// SQLite stats
@@ -1288,7 +1279,6 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 		Sqlite:              sqliteStats,
 		MemoryBreakdown:     memBreakdown,
 		MemoryBreakdownNote: breakdownNote,
-		RegionsSnapshot:     regionsSnapshot,
 		GoRuntime: func() *GoRuntimeStats {
 			ms := s.getMemStats()
 			return &GoRuntimeStats{

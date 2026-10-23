@@ -6,14 +6,8 @@ import (
 )
 
 const (
-	// Aggregated membership cells, one per (relay, scope, hour) (#508). The
-	// retired budget retained one entry per (relay, transmission), so it grew
-	// with observations: 48 h of real traffic already reached a third of it,
-	// and 168 h would exhaust it. Cells grow with populated hours instead —
-	// about 134,000 for 400 relays x 2 scopes x 168 hours — and repeated
-	// transmissions in one hour reuse their cell.
-	maxRegionsMembershipCells = 500000
-	maxRegionsMembershipNodes = 10000
+	maxRegionsMembershipEntries = 1000000
+	maxRegionsMembershipNodes   = 10000
 )
 
 // regionsObservationClass is the single provenance gate for Regions
@@ -227,42 +221,13 @@ type regionsMembershipSnapshot struct {
 	evidence *regionsEvidenceSnapshot
 }
 
-// regionsMembershipCellKey identifies one relay's membership evidence for one
-// scope in one hourly bucket, 0 through regionsHistoryBucketCount; the last is
-// the current unfinished hour, which only Latest summarises.
-type regionsMembershipCellKey struct {
-	key, scope string
-	hour       int32
-}
-
-type regionsMembershipCell struct {
-	count int
-	last  time.Time
-}
-
-// regionsMembershipNodeCell is one relay's aggregated cell, handed to the
-// hourly history builder in deterministic (scope, hour) order.
-type regionsMembershipNodeCell struct {
-	scope string
-	hour  int32
-	count int
-	last  time.Time
-}
-
 type regionsMembershipBuilder struct {
-	cells     map[regionsMembershipCellKey]regionsMembershipCell
-	nodes     map[string]struct{}
+	entries   map[string][]relayEntry
 	remaining int
-	nodeBound int
-	// Memberships each ceiling dropped, for the capture diagnostic (#510):
-	// without them a withheld rate cannot be told apart from a capture
-	// refusal, because both reach the bucket as `capped`.
-	cellDrops, nodeDrops int
 }
 
-func newRegionsMembershipBuilder(cells, nodes int) *regionsMembershipBuilder {
-	return &regionsMembershipBuilder{cells: make(map[regionsMembershipCellKey]regionsMembershipCell),
-		nodes: make(map[string]struct{}), remaining: cells, nodeBound: nodes}
+func newRegionsMembershipBuilder() *regionsMembershipBuilder {
+	return &regionsMembershipBuilder{entries: make(map[string][]relayEntry), remaining: maxRegionsMembershipEntries}
 }
 
 // retainLatestRegionScope keeps the newest 32 names with bounded scratch
@@ -293,71 +258,42 @@ func retainLatestRegionScope(latest map[string]time.Time, name string, when time
 }
 
 // Called once per resolved node per distinct transmission, outside the packet
-// lock, and aggregated straight into the node's (scope, hour) cell: nothing
-// per-transmission is retained, so this budget no longer grows with the number
-// of observations. It is never spent by directed edges or edge cells, and
-// reports false when a safety limit omitted the membership.
-//
-// Only hour/scope/time are consumed; payload and provenance exclusion already
-// happened before capture, and no canonical/direct relay fields are reused.
-func (b *regionsMembershipBuilder) add(key, scope string, hour int, when time.Time) bool {
-	id := regionsMembershipCellKey{key: key, scope: scope, hour: int32(hour)}
-	cell, exists := b.cells[id]
-	if !exists {
-		if b.remaining <= 0 {
-			b.cellDrops++
-			return false
-		}
-		if _, known := b.nodes[key]; !known {
-			if len(b.nodes) >= b.nodeBound {
-				b.nodeDrops++
-				return false
-			}
-			b.nodes[key] = struct{}{}
-		}
-		b.remaining--
+// lock. This independent budget is never spent by directed edges or edge cells.
+// It reports false when a safety limit omitted the membership.
+func (b *regionsMembershipBuilder) add(key string, tx regionsRouteTx) bool {
+	if b.remaining == 0 {
+		return false
 	}
-	cell.count++
-	if when.After(cell.last) {
-		cell.last = when
+	if _, exists := b.entries[key]; !exists && len(b.entries) >= maxRegionsMembershipNodes {
+		return false
 	}
-	b.cells[id] = cell
+	// Only time/scope are consumed below; payload exclusion was already made
+	// before capture. No canonical/direct relay-entry fields are reused.
+	b.entries[key] = append(b.entries[key], relayEntry{t: tx.when, parsed: true, valid: true, scope: tx.scope})
+	b.remaining--
 	return true
 }
 
 func (b *regionsMembershipBuilder) build(now time.Time, evidence *regionsEvidenceSnapshot) (*regionsMembershipSnapshot, *regionsRelayHistory) {
-	byNode := make(map[string][]regionsMembershipNodeCell, len(b.nodes))
-	for id, cell := range b.cells {
-		byNode[id.key] = append(byNode[id.key], regionsMembershipNodeCell{scope: id.scope, hour: id.hour, count: cell.count, last: cell.last})
-	}
-	out := &regionsMembershipSnapshot{nodes: make(map[string]regionsNodeMembership, len(byNode)), evidence: evidence}
+	out := &regionsMembershipSnapshot{nodes: make(map[string]regionsNodeMembership, len(b.entries)), evidence: evidence}
 	history := newRegionsHistoryBuilder(now)
-	keys := make([]string, 0, len(byNode))
-	for key := range byNode {
+	keys := make([]string, 0, len(b.entries))
+	for key := range b.entries {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		cells := byNode[key]
-		// Keys and cells are both visited in a deterministic order, so neither
-		// the 32-scope selection nor the shared publication budget depends on
-		// map iteration.
-		sort.Slice(cells, func(i, j int) bool {
-			if cells[i].scope != cells[j].scope {
-				return cells[i].scope < cells[j].scope
-			}
-			return cells[i].hour < cells[j].hour
-		})
+		entries := b.entries[key]
 		// At most 32 newest scopes per key, with bounded scratch space even
 		// if an adversary creates a new scope for every retained transmission.
 		latest := make(map[string]time.Time, maxTransportedScopes)
 		truncated := false
-		for _, cell := range cells {
-			truncated = retainLatestRegionScope(latest, cell.scope, cell.last) || truncated
+		for _, e := range entries {
+			truncated = retainLatestRegionScope(latest, e.scope, e.t) || truncated
 		}
 		scopes, _ := newestRegionScopeRelays(latest)
 		out.nodes[key] = regionsNodeMembership{scopes: scopes, scopesTruncated: truncated}
-		history.add(key, cells)
+		history.add(key, entries)
 	}
 	return out, history.history
 }
