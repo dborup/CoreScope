@@ -1641,7 +1641,7 @@
       var hash = openRowMenuHash;
       openRowMenuHash = null;
       rowMenuEl.hidden = true;
-      rowMenuEl.innerHTML = '';
+      rowMenuEl.textContent = '';
       var trig = hash && rowMenuTrigger(hash);
       if (trig) {
         trig.setAttribute('aria-expanded', 'false');
@@ -1664,8 +1664,8 @@
       var hash = trig.getAttribute('data-row-menu');
       if (!hash) return;
       closeRowMenu(false);
-      var ch = channels.find(function (c) { return c.hash === hash; });
-      rowMenuEl.innerHTML = renderRowMenu(hash, (ch && channelDisplayName(ch, '')) || hash);
+      rowMenuEl.textContent = '';
+      ROW_MENU_ITEMS.forEach(function (item) { rowMenuEl.appendChild(buildRowMenuItem(item, hash)); });
       rowMenuEl.hidden = false;
       openRowMenuHash = hash;
       trig.setAttribute('aria-expanded', 'true');
@@ -2278,14 +2278,32 @@
   // element (#chRowMenu) is filled for whichever row opened it. Share first,
   // Remove last and styled as destructive; Remove still asks for confirmation.
   let openRowMenuHash = null;
-  function renderRowMenu(hash, name) {
-    return '<button type="button" class="ch-row-menu-item" role="menuitem" tabindex="-1"'
-      + ' data-share-channel="' + escapeHtml(hash) + '" aria-haspopup="dialog">'
-      + '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Share</button>'
-      + '<button type="button" class="ch-row-menu-item ch-row-menu-danger" role="menuitem" tabindex="-1"'
-      + ' data-remove-channel="' + escapeHtml(hash) + '"'
-      + ' title="Remove channel and clear saved key">'
-      + '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-trash"/></svg> Remove</button>';
+  // The menu is built with createElement from this fixed model (no HTML
+  // string), so the node-controlled hash only ever reaches setAttribute on a
+  // data-* attribute.
+  const ROW_MENU_ITEMS = [
+    { attr: 'data-share-channel', label: 'Share', icon: 'ph-share-network', popup: 'dialog', title: '', danger: false },
+    { attr: 'data-remove-channel', label: 'Remove', icon: 'ph-trash', popup: '', title: 'Remove channel and clear saved key', danger: true },
+  ];
+  function buildRowMenuItem(item, hash) {
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ch-row-menu-item' + (item.danger ? ' ch-row-menu-danger' : '');
+    btn.setAttribute('role', 'menuitem');
+    btn.tabIndex = -1;
+    btn.setAttribute(item.attr, hash);
+    if (item.popup) btn.setAttribute('aria-haspopup', item.popup);
+    if (item.title) btn.title = item.title;
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'ph-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS(SVG_NS, 'use');
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#' + item.icon);
+    svg.appendChild(use);
+    btn.appendChild(svg);
+    btn.appendChild(document.createTextNode(' ' + item.label));
+    return btn;
   }
   // Roving focus for the menu: index to focus after `key`, or -1 if the key
   // is not a menu-navigation key.
@@ -3016,6 +3034,7 @@
   window._channelsLoadChannelsForTest = loadChannels;
   window._channelsRenderChannelRowForTest = renderChannelRow;
   window._channelsRowMenuNextIndexForTest = rowMenuNextIndex;
+  window._channelsRowMenuItemsForTest = ROW_MENU_ITEMS;
   window._channelsTickChannelTimesForTest = tickChannelTimes;
   window._channelsRenderKnownChannelRowForTest = renderKnownChannelRow;
   window._channelsBeginMessageRequestForTest = beginMessageRequest;

@@ -50,7 +50,7 @@ assert(!/Use the close button to remove individual channels/.test(chSrc),
   'old "close button" copy is gone (no inline close button any more)');
 assert(/Use a saved channel's actions menu to share or remove it/.test(chSrc),
   'copy points at the actions menu for individual key removal');
-assert(/renderRowMenu[\s\S]*?data-remove-channel[\s\S]*?#ph-trash/.test(chSrc),
+assert(/ROW_MENU_ITEMS[\s\S]*?data-remove-channel[\s\S]*?ph-trash/.test(chSrc),
   'the Remove item the copy points at renders in the actions menu with the trash icon');
 
 console.log('\n=== Fix 4: Share/reshare affordance on user-added rows ===');
@@ -145,9 +145,6 @@ if (renderRowSrc) {
   vm.runInContext('const PRIVATE_CHANNEL_LABEL = "Private Channel";\n' + helperSrc, sandbox);
   vm.runInContext(badgeSrc, sandbox);
   vm.runInContext(renderRowSrc, sandbox);
-  const rowMenuSrc = extractFn(chSrc, 'function renderRowMenu(');
-  assert(rowMenuSrc, 'extracted renderRowMenu source for behavior sandbox');
-  vm.runInContext(rowMenuSrc, sandbox);
   sandbox.openRowMenuHash = null;
   const userRow = sandbox.renderChannelRow({
     hash: 'user:Crew',
@@ -160,12 +157,9 @@ if (renderRowSrc) {
   // #354: Share/Remove live in the row's overflow menu, not inline.
   assert(/data-row-menu="user:Crew"/.test(userRow),
     'renderChannelRow emits the actions-menu trigger for user-added channels');
-  const userMenu = sandbox.renderRowMenu('user:Crew', 'Crew');
-  assert(/data-share-channel="user:Crew"/.test(userMenu),
-    'the actions menu offers Share for user-added channels');
-  assert(/aria-haspopup="dialog"/.test(userMenu),
-    'Share announces it opens a dialog (aria-haspopup="dialog")');
-  assert(/data-remove-channel="user:Crew"/.test(userMenu),
+  assert(/data-share-channel[\s\S]{0,120}popup: 'dialog'/.test(chSrc),
+    'the actions menu offers Share, announcing it opens a dialog');
+  assert(/data-remove-channel/.test(chSrc) && /ROW_MENU_ITEMS/.test(chSrc),
     'the actions menu offers Remove for user-added channels');
   assert(!/0 messages/.test(userRow) && !/your key/.test(userRow),
     'user-added preview omits "0 messages" and "your key" when no activity');

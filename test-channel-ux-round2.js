@@ -67,14 +67,14 @@ assert(!/'⤴'/.test(chSrc) && !/"⤴"/.test(chSrc),
 // Tighten: assert the icon + " Share" string is the content of the Share menu
 // item (#354 moved Share from an inline iconBtn into the actions menu), so
 // removing the icon but leaving "Share" in an aria-label cannot pass.
-assert(/data-share-channel="[^>]*>'\s*\+\s*'<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-share-network"\/><\/svg> Share<\/button>'/.test(chSrc),
-  "the Share menu item renders the #ph-share-network icon + ' Share'");
+assert(/attr: 'data-share-channel', label: 'Share', icon: 'ph-share-network'/.test(chSrc),
+  "the Share menu item has the #ph-share-network icon and the label 'Share'");
 
 console.log('\n=== Fix 3: Remove is visibly destructive ===');
 const dangerRule = (cssSrc.match(/\.ch-row-menu-danger\s*\{[^}]*\}/) || [''])[0];
 assert(/color:\s*var\(--danger\)/.test(dangerRule),
   '.ch-row-menu-danger uses the theme danger colour variable');
-assert(/class="ch-row-menu-item ch-row-menu-danger"[^>]*data-remove-channel/.test(chSrc),
+assert(/attr: 'data-remove-channel'[^}]*danger: true/.test(chSrc) && /ch-row-menu-danger/.test(chSrc),
   'the Remove menu item carries the destructive class');
 
 console.log('\n=== Results ===');

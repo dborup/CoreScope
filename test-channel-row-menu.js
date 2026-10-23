@@ -42,8 +42,21 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 vm.runInContext('const PRIVATE_CHANNEL_LABEL = "Private Channel";', sandbox);
+// Minimal DOM: just enough to build the menu items and read the result back.
+function fakeEl(tag) {
+  return { tag, attrs: {}, children: [], className: '', tabIndex: 0, title: '', type: '', text: null,
+    setAttribute(k, v) { this.attrs[k] = String(v); }, appendChild(c) { this.children.push(c); return c; } };
+}
+sandbox.document = {
+  createElement: fakeEl,
+  createElementNS: (ns, tag) => fakeEl(tag),
+  createTextNode: (t) => ({ tag: '#text', text: t }),
+};
+const modelStart = chSrc.indexOf('const ROW_MENU_ITEMS = [');
+assert(modelStart > 0, 'channels.js defines ROW_MENU_ITEMS');
+if (modelStart > 0) vm.runInContext(chSrc.substring(modelStart, chSrc.indexOf('];', modelStart) + 2), sandbox);
 for (const h of ['function channelDisplayName(ch', 'function renderUnreadBadge(ch)',
-  'function renderChannelRow(ch)', 'function renderRowMenu(', 'function rowMenuNextIndex(']) {
+  'function renderChannelRow(ch)', 'function buildRowMenuItem(', 'function rowMenuNextIndex(']) {
   const fn = extractFn(chSrc, h);
   assert(fn, 'channels.js defines ' + h.replace('function ', '').replace(/\($/, ''));
   if (fn) vm.runInContext(fn, sandbox);
@@ -71,20 +84,29 @@ const encRow = sandbox.renderChannelRow && sandbox.renderChannelRow({
   hash: 'ff', name: 'Net', userAdded: false, encrypted: true, messageCount: 0, lastActivityMs: 0 });
 assert(encRow && !/data-row-menu/.test(encRow), 'encrypted (unkeyed) rows get no menu trigger');
 
-console.log('\n=== Row menu markup ===');
-const menu = sandbox.renderRowMenu && sandbox.renderRowMenu('user:Crew', 'Crew');
-assert(menu && (menu.match(/role="menuitem"/g) || []).length === 2, 'menu has exactly two menu items');
-assert(menu && /data-share-channel="user:Crew"/.test(menu) && /data-remove-channel="user:Crew"/.test(menu),
+console.log('\n=== Row menu items ===');
+const items = vm.runInContext('ROW_MENU_ITEMS', sandbox);
+assert(items.length === 2, 'menu has exactly two items');
+assert(items[0].attr === 'data-share-channel' && items[0].label === 'Share',
+  'Share comes first');
+assert(items[1].attr === 'data-remove-channel' && items[1].label === 'Remove' && items[1].danger === true,
+  'Remove comes last and is marked destructive (furthest from the default item)');
+assert(items[0].popup === 'dialog', 'Share still announces it opens a dialog');
+const built = items.map((it) => sandbox.buildRowMenuItem(it, 'user:Crew'));
+assert(built.every((b) => b.tag === 'button' && b.type === 'button' && b.attrs.role === 'menuitem'),
+  'items are <button role="menuitem">');
+assert(built.every((b) => b.tabIndex === -1), 'items are focus-managed (roving), not in the tab order');
+assert(built[0].attrs['data-share-channel'] === 'user:Crew' && built[1].attrs['data-remove-channel'] === 'user:Crew',
   'items keep the data-share-channel / data-remove-channel hooks');
-assert(menu && menu.indexOf('data-share-channel') < menu.indexOf('data-remove-channel'),
-  'Share comes first, Remove last (destructive item is furthest from the default)');
-assert(menu && /ch-row-menu-danger[^>]*data-remove-channel|data-remove-channel[^>]*ch-row-menu-danger/.test(menu),
-  'Remove is marked as the destructive item');
-assert(menu && /aria-haspopup="dialog"[^>]*data-share-channel|data-share-channel[^>]*aria-haspopup="dialog"/.test(menu),
-  'Share still announces it opens a dialog');
-assert(menu && /tabindex="-1"/.test(menu), 'items are focus-managed (roving tabindex), not in the tab order');
-const evil = sandbox.renderRowMenu && sandbox.renderRowMenu('user:"><img onerror=x>', '"><img onerror=x>');
-assert(evil && !/<img/.test(evil), 'hash and name are escaped in the menu');
+assert(/ch-row-menu-danger/.test(built[1].className) && !/ch-row-menu-danger/.test(built[0].className),
+  'only Remove carries the danger class');
+assert(built[0].attrs['aria-haspopup'] === 'dialog' && built[1].attrs['aria-haspopup'] === undefined,
+  'aria-haspopup=dialog on Share only');
+const hostile = sandbox.buildRowMenuItem(items[0], '"><img onerror=x>');
+assert(hostile.attrs['data-share-channel'] === '"><img onerror=x>' && hostile.children.every((c) => c.tag !== 'img'),
+  'a hostile hash is only ever an attribute value (DOM-built, no HTML string)');
+const buildSrc = extractFn(chSrc, 'function buildRowMenuItem(') || '';
+assert(!/innerHTML|insertAdjacentHTML/.test(buildSrc), 'menu items are not built from an HTML string');
 
 console.log('\n=== Keyboard navigation logic ===');
 const nav = sandbox.rowMenuNextIndex;
