@@ -565,11 +565,10 @@ func TestEstimateStoreTxBytes(t *testing.T) {
 		PathJSON:    `["aa","bb"]`,
 	}
 	est := estimateStoreTxBytes(tx)
-	// Manual calculation: base + string lengths + index entries + perTxMaps + path hops + subpaths
+	// Manual calculation: base + string lengths + index entries + path hops + subpaths
 	hops := int64(len(txGetParsedPath(tx)))
 	manualCalc := int64(storeTxBaseBytes) + int64(len(tx.RawHex)+len(tx.Hash)+len(tx.DecodedJSON)+len(tx.PathJSON)) + int64(numIndexesPerTx*indexEntryBytes)
 	manualCalc += int64(decodedCacheFactor * len(tx.DecodedJSON))
-	manualCalc += perTxMapsBytes
 	manualCalc += hops * perPathHopBytes
 	if hops > 1 {
 		manualCalc += (hops * (hops - 1) / 2) * perSubpathEntryBytes
@@ -588,9 +587,9 @@ func TestEstimateStoreObsBytes(t *testing.T) {
 		PathJSON:   `["aa"]`,
 	}
 	est := estimateStoreObsBytes(obs)
-	// storeObsBaseBytes(192) + len(ObserverID=6) + len(PathJSON=6) + 2*48(96)
-	// + the dedup key: obsKeyEntryBytes + len(ObserverID) + len(PathJSON)
-	expected := int64(192+6+6+2*48) + int64(obsKeyEntryBytes+6+6)
+	// storeObsBaseBytes(192) + len(ObserverID=6) + len(PathJSON=6) + 2*48(96);
+	// no dedup key is allocated or charged per observation (#411)
+	expected := int64(192 + 6 + 6 + 2*48)
 	if est != expected {
 		t.Fatalf("estimateStoreObsBytes = %d, want %d", est, expected)
 	}

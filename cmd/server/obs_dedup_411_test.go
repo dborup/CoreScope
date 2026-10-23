@@ -144,8 +144,8 @@ func obs411CheckTx(t *testing.T, s *PacketStore, want map[string]obs411Want, whe
 			fail("tx %s maps hold %d keys and %d observers, list %d and %d", tx.Hash, len(tx.obsKeys), len(tx.observerSet), len(tx.Observations), len(observers))
 		}
 		for _, o := range tx.Observations {
-			if !tx.hasObservation(o.ObserverID, o.PathJSON) {
-				fail("tx %s: hasObservation misses its own observation %d", tx.Hash, o.ID)
+			if dup, _ := tx.lookupObservation(o.ObserverID, o.PathJSON); !dup {
+				fail("tx %s: lookupObservation misses its own observation %d", tx.Hash, o.ID)
 				break
 			}
 		}
@@ -402,7 +402,7 @@ func TestObsDedup411_HashMergeDedupsAcrossTheThreshold(t *testing.T) {
 		paths int // distinct paths per observer per duplicate row
 	}{
 		{"merged list stays below", 2}, // 8 per row, 12 merged
-		{"merged list crosses", 7}, // 28 per row, 32 merged
+		{"merged list crosses", 7},     // 28 per row, 32 merged
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := hm215Create(t)

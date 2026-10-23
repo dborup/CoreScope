@@ -280,13 +280,14 @@ func TestEstimateStoreObsBytes_CountsEveryTerm_113(t *testing.T) {
 	}
 	obs := newObs()
 	want := int64(storeObsBaseBytes+numIndexesPerObs*indexEntryBytes) +
-		3 + 5 + 7 + 11 + 13 + 17 + 19 + // every string field, once
-		int64(obsKeyEntryBytes) + 3 + 19 // the dedup key: observer ID + path
+		3 + 5 + 7 + 11 + 13 + 17 + 19 // every string field, once; no dedup key copy (#411)
 	if got := estimateStoreObsBytes(obs); got != want {
 		t.Errorf("estimateStoreObsBytes = %d, want %d", got, want)
 	}
 	// Each string must move the estimate by exactly its length.
 	for name, set := range map[string]func(o *StoreObs){
+		"ObserverID":   func(o *StoreObs) { o.ObserverID += "x" },
+		"PathJSON":     func(o *StoreObs) { o.PathJSON += "x" },
 		"ObserverName": func(o *StoreObs) { o.ObserverName += "x" },
 		"ObserverIATA": func(o *StoreObs) { o.ObserverIATA += "x" },
 		"Direction":    func(o *StoreObs) { o.Direction += "x" },
@@ -297,17 +298,6 @@ func TestEstimateStoreObsBytes_CountsEveryTerm_113(t *testing.T) {
 		set(longer)
 		if d := estimateStoreObsBytes(longer) - estimateStoreObsBytes(obs); d != 1 {
 			t.Errorf("one more byte of %s moved the estimate by %d, want 1", name, d)
-		}
-	}
-	// ObserverID and PathJSON are charged twice: as the field and in the dedup key.
-	for name, set := range map[string]func(o *StoreObs){
-		"ObserverID": func(o *StoreObs) { o.ObserverID += "x" },
-		"PathJSON":   func(o *StoreObs) { o.PathJSON += "x" },
-	} {
-		longer := newObs()
-		set(longer)
-		if d := estimateStoreObsBytes(longer) - estimateStoreObsBytes(obs); d != 2 {
-			t.Errorf("one more byte of %s moved the estimate by %d, want 2 (field and dedup key)", name, d)
 		}
 	}
 }
@@ -341,7 +331,7 @@ func TestTrackedBytes_RebuildCreditsRecordsOfTxNotInTheStore_164(t *testing.T) {
 	acct113CreateDB(t, dbPath, 40, 0)
 	store := acct113Load(t, dbPath)
 
-	ghost := &StoreTx{ID: 99999, Hash: "ghost", PathJSON: `["aa"]`, obsKeys: map[string]bool{}, observerSet: map[string]bool{}}
+	ghost := &StoreTx{ID: 99999, Hash: "ghost", PathJSON: `["aa"]`}
 	hops := map[string]bool{}
 	store.mu.Lock()
 	before := store.trackedBytes
@@ -535,7 +525,6 @@ func TestEstimateStoreTxBytesTypical_TracksTheRealCharge_113(t *testing.T) {
 	rep := func(c string, n int) string { return strings.Repeat(c, n) }
 	tx := &StoreTx{
 		ID: 1, Hash: rep("h", 64), DecodedJSON: rep("d", 200), PathJSON: `["aa","bb","cc"]` + rep(" ", 24),
-		obsKeys: map[string]bool{}, observerSet: map[string]bool{},
 	}
 	tx.PathJSON = tx.PathJSON[:40]
 	total := rechargeTx(tx)
