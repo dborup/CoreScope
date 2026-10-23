@@ -77,14 +77,32 @@ const scanFiles = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(en
   if (entry.isDirectory()) return entry.name === 'vendor' ? [] : scanFiles(full);
   return /\.(js|html|css|md)$/.test(entry.name) ? [full] : [];
 });
-const residual = scanFiles(path.join(__dirname, 'public')).concat(scanFiles(path.join(__dirname, 'docs')))
+const releaseNote = rel => /^docs\/release-notes\//.test(rel) || /^docs\/RELEASE-NOTES-/.test(rel);
+const residualRefs = root => scanFiles(path.join(root, 'public')).concat(scanFiles(path.join(root, 'docs')))
+  .filter(file => !releaseNote(path.relative(root, file).split(path.sep).join('/')))
   .filter(file => removedRegionRefs.test(fs.readFileSync(file, 'utf8')))
-  .map(file => path.relative(__dirname, file));
+  .map(file => path.relative(root, file));
+const residual = residualRefs(__dirname);
 assert.deepEqual(residual, [], 'removed Regions history/routes references remain');
 for (const file of ['regions-history.js', 'regions-routes.js']) {
   assert.equal(fs.existsSync(path.join(__dirname, 'public', file)), false, file + ' must stay removed');
 }
 assert.doesNotMatch(fs.readFileSync(path.join(__dirname, 'docs/regions-observed.md'), 'utf8'), /## Following milestones/,
   'removed Regions views must not be listed as upcoming milestones');
+
+// Nit 2 (round 2): a release note about the removal legitimately names the
+// removed endpoints. It must not trip the scan, while stale docs still do.
+const os = require('node:os');
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'regions-residual-'));
+try {
+  for (const dir of ['public', 'docs/release-notes']) fs.mkdirSync(path.join(fixtureRoot, dir), { recursive: true });
+  const note = 'Removed /api/regions/history and regions-routes.js.\n';
+  fs.writeFileSync(path.join(fixtureRoot, 'docs/release-notes/v9.md'), note);
+  fs.writeFileSync(path.join(fixtureRoot, 'docs/RELEASE-NOTES-v9.md'), note);
+  assert.deepEqual(residualRefs(fixtureRoot), [], 'release notes may mention the removal');
+  fs.writeFileSync(path.join(fixtureRoot, 'docs/stale.md'), note);
+  fs.writeFileSync(path.join(fixtureRoot, 'public/app.js'), "fetch('/api/regions/routes');\n");
+  assert.deepEqual(residualRefs(fixtureRoot).sort(), ['docs/stale.md', 'public/app.js'], 'non-release docs and frontend still flagged');
+} finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); }
 
 console.log('regions map unit tests passed');

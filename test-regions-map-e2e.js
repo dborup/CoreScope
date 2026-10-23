@@ -112,6 +112,10 @@ async function main() {
 
   // #523 trimmed Regions back to the period view (#501): no view switcher,
   // timeline, comparison or health controls, and no history/routes fetches.
+  // The exact control set below is deliberate: this guard exists to catch the
+  // removed view, timeline, compare and health controls coming back. When a new
+  // legitimate control is added to Regions, update these expected lists (and the
+  // selector counts) together with that change.
   await test('only period, scope and refresh controls remain on desktop and mobile', async () => {
     for (const size of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(size);
