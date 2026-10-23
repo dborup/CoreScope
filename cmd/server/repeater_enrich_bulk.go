@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sort"
 	"strings"
 	"time"
 )
@@ -198,9 +197,6 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	s.mu.RUnlock()
 
 	out := make(map[string]RepeaterRelayInfo, len(perKey))
-	history := newRegionsHistoryBuilder(now)
-	// Stable order also makes history's global safety-budget selection stable.
-	sort.Slice(perKey, func(i, j int) bool { return perKey[i].key < perKey[j].key })
 	var entries []relayEntry
 	for _, k := range perKey {
 		entries = entries[:0]
@@ -210,10 +206,8 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			entries = append(entries, e)
 		}
 		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
-		history.add(k.key, entries)
 	}
 	snapshot.info = out
-	snapshot.history = history.history
 	return snapshot
 }
 

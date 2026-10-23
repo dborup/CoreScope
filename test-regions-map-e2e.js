@@ -33,21 +33,6 @@ function snapshot(window, coverage) {
     nodes: window === '1h' ? [values[0], values[3]] : values, truncated: false, scopesTruncated: false };
 }
 
-function historySnapshot(override = {}) {
-  const historyStart = '2026-09-25T12:00:00Z', historyEnd = '2026-10-16T12:00:00Z';
-  const bucket = (index, count) => ({ index, count, lastRelayed: new Date(Date.parse(historyStart) + index * 3600000 + 1000).toISOString() });
-  const mk = (key, name, lat, lon, buckets) => ({ publicKey: key, name, role: 'repeater', lat, lon,
-    positionSource: lat == null ? 'none' : 'reported', metadataSource: 'current', scopes: [{ name: '#example', buckets }] });
-  const values = [mk('aa11', EVIL, 55, 10, [bucket(502, 2), bucket(503, 3)]),
-    mk('bb22', 'New relay', 55, 11, [bucket(503, 4)]), mk('cc33', 'Previous relay', 56, 10, [bucket(502, 5)]),
-    mk('dd44', 'No position', null, null, [bucket(503, 1)]), mk('ff66', 'Old distant relay', -40, -120, [bucket(0, 1)])];
-  values[0].scopes.push({ name: '#other', buckets: [bucket(503, 10)] });
-  values[2].metadataSource = 'archived';
-  return { generatedAt: '2026-10-16T12:34:00Z', historyStart, historyEnd, bucketSeconds: 3600, bucketCount: 504,
-    coverage: { start: historyStart, loading: false }, nodes: values,
-    truncated: false, scopesTruncated: false, bucketsTruncated: false, ...override };
-}
-
 async function main() {
   let browser;
   try {
@@ -63,8 +48,6 @@ async function main() {
   const errors = [];
   page.on('pageerror', e => errors.push(e.stack || String(e)));
   let holdHour = false, heldHour = null, failWeek = false, coverageOverride = null;
-  let historyOverride = {}, failHistory = false;
-  let historyRequests = 0;
   const requests = [];
   const waitForHeldHour = async () => {
     const deadline = Date.now() + 5000;
@@ -81,34 +64,9 @@ async function main() {
     if (window === '7d' && failWeek) return r.fulfill({ status: 500, body: '{}' });
     await fulfill(r, window);
   });
-  await page.route('**/api/regions/history*', async r => {
-    historyRequests++;
-    if (failHistory) return r.fulfill({ status: 500, body: '{}' });
-    await r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(historySnapshot(historyOverride)) });
-  });
   let failures = 0;
-  let coverageCapture = 0;
-  async function captureCoverage() {
-    const coverage = await page.evaluate(() => {
-      if (!window.__coverage__ || !Object.keys(window.__coverage__).length) return null;
-      const snapshot = JSON.parse(JSON.stringify(window.__coverage__));
-      for (const file of Object.values(window.__coverage__)) {
-        for (const key of Object.keys(file.s || {})) file.s[key] = 0;
-        for (const key of Object.keys(file.f || {})) file.f[key] = 0;
-        for (const key of Object.keys(file.b || {})) file.b[key].fill(0);
-      }
-      return snapshot;
-    });
-    if (!coverage) return;
-    const directory = path.join(__dirname, '.nyc_output');
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, 'regions-map-e2e-' + process.pid + '-' + (++coverageCapture) + '.json'), JSON.stringify(coverage));
-  }
   const test = async (name, fn) => {
     try { await fn(); console.log('  ✓ ' + name); } catch (e) { failures++; console.log('  ✗ ' + name + ': ' + e.message); }
-    finally {
-      try { await captureCoverage(); } catch (e) { failures++; console.log('  ✗ coverage capture: ' + e.message); }
-    }
   };
   // Track MutationObservers watching data-theme so teardown can be asserted.
   await page.addInitScript(() => {
@@ -185,9 +143,7 @@ async function main() {
     await page.evaluate(() => {
       const original = L.Map.prototype.fitBounds;
       window.__regionsFitCount = 0;
-      L.Map.prototype.fitBounds = function (...args) { window.__regionsFitCount++; window.__regionsFitBounds = {
-        south: args[0].getSouth(), west: args[0].getWest(), north: args[0].getNorth(), east: args[0].getEast(),
-      }; return original.apply(this, args); };
+      L.Map.prototype.fitBounds = function (...args) { window.__regionsFitCount++; return original.apply(this, args); };
     });
     const dark = await page.evaluate(() => window.MC_getTileSpec('dark'));
     const light = await page.evaluate(() => window.MC_getTileSpec('light'));
@@ -270,147 +226,16 @@ async function main() {
     coverageOverride = null;
   });
 
-  await test('timeline deep links clamp to completed hours and compare equal adjacent periods', async () => {
-    await page.evaluate(() => { location.hash = '#/regions?view=timeline&window=1h&scope=%23example&at=2026-10-16T12%3A47%3A00Z&compare=1'; });
-    await page.waitForFunction(() => document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'true');
-    assert.strictEqual(await page.getByLabel('Region view').inputValue(), 'timeline');
-    assert.strictEqual(await page.getByLabel('Timeline interval ending').inputValue(), '168');
-    assert.strictEqual(await page.getByLabel('Compare previous period').isChecked(), true);
-    assert.strictEqual(await page.getByRole('button', { name: 'Play timeline', exact: true }).getAttribute('aria-pressed'), 'false');
-    assert.match(await page.locator('.regions-interval').textContent(), /2026-10-16 11:00 — 2026-10-16 12:00 UTC/);
-    assert.match(await page.locator('.regions-reference').textContent(), /2026-10-16 10:00 — 2026-10-16 11:00 UTC/);
-    assert.match(await page.locator('.regions-status').textContent(), /2 positioned relay nodes; 1 observed relay nodes without usable positions/);
-    assert.match(await page.locator('.regions-comparison').textContent(), /8 selected \/ 7 previous/);
-    assert.match(await page.locator('.regions-state-added').textContent(), /2 newly observed/);
-    assert.match(await page.locator('.regions-state-retained').textContent(), /1 observed in both/);
-    assert.match(await page.locator('.regions-state-not-observed').textContent(), /1 not observed/);
-    assert.match(await page.locator('.regions-appearance-change').textContent(), /\+1 \(\+14\.3%\)/);
-    assert.strictEqual(await page.locator('.regions-leaflet path.leaflet-interactive').count(), 3, 'previous-only positioned relays remain visible in comparison');
-    const params = new URLSearchParams((await page.evaluate(() => location.hash)).split('?')[1]);
-    assert.strictEqual(params.get('at'), '2026-10-16T12:00:00.000Z');
-    assert.match(await page.locator('.regions-details').textContent(), /playback shows activity, not historical movement/);
-    assert.match(await page.locator('.regions-details').textContent(), /Current catalog metadata can revise historical attribution/);
-  });
-
-  if (process.env.REGIONS_SCREENSHOT_DIR) {
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.locator('.regions-change-list summary').first().click();
-    await page.evaluate(() => Promise.all(document.querySelector('#app').getAnimations().map(animation => animation.finished.catch(() => {}))));
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-timeline-desktop.png'), fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-timeline-mobile.png'), fullPage: true });
-    await test('timeline controls and comparison stay within the mobile viewport', async () => {
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-      assert(await page.evaluate(() => {
-        const status = document.querySelector('.regions-status').getBoundingClientRect();
-        const meta = document.querySelector('.regions-snapshot').getBoundingClientRect();
-        return status.bottom <= meta.top;
-      }), 'wrapped status overlaps snapshot metadata');
-    });
-    await page.locator('.regions-leaflet').scrollIntoViewIfNeeded();
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await page.screenshot({ path: path.join(process.env.REGIONS_SCREENSHOT_DIR, 'regions-timeline-mobile-map.png'), fullPage: true });
-    await page.setViewportSize({ width: 1440, height: 1000 });
-  }
-
-  await test('timeline popup uses literal names and interval-specific appearance counts', async () => {
-    await page.locator('.regions-leaflet path.leaflet-interactive').first().dispatchEvent('click');
-    await page.waitForSelector('.leaflet-popup-content');
-    assert.strictEqual(await page.locator('.leaflet-popup-content img').count(), 0);
-    const text = await page.locator('.leaflet-popup-content').textContent();
-    assert(text.includes(EVIL));
-    assert.match(text, /Selected interval: 3 relay appearances/);
-    assert.match(text, /Previous interval: 2 relay appearances/);
-    assert.match(text, /Not a historical position/);
-    assert.strictEqual(await page.evaluate(() => window.__xss), undefined);
-  });
-
-  await test('timeline keyboard, scope, period and comparison changes need no extra requests or map refits', async () => {
-    const before = historyRequests;
-    await page.evaluate(() => { window.__regionsFitCount = 0; });
-    await page.getByLabel('Timeline interval ending').focus();
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.waitForFunction(() => document.querySelector('.regions-interval').textContent.includes('2026-10-16 10:00 — 2026-10-16 11:00'));
-    assert.strictEqual(await page.getByLabel('Timeline interval ending').inputValue(), '167');
-    assert.match(await page.locator('.regions-appearance-change').textContent(), /percentage unavailable/);
-    await page.getByLabel('Region period').selectOption('7d');
-    assert.match(await page.locator('.regions-interval').textContent(), /2026-10-09 11:00/);
-    await page.getByLabel('Region scope').selectOption('#other');
-    await page.getByLabel('Compare previous period').uncheck();
-    assert.strictEqual(await page.locator('.regions-comparison').isVisible(), false);
-    await page.getByLabel('Region period').selectOption('1h');
-    await page.getByLabel('Region scope').selectOption('#example');
-    await page.getByLabel('Compare previous period').check();
-    assert.strictEqual(historyRequests, before);
-    assert.strictEqual(await page.evaluate(() => window.__regionsFitCount), 0);
-    await page.getByRole('button', { name: 'Fit map', exact: true }).click();
-    assert.strictEqual(await page.evaluate(() => window.__regionsFitCount), 1);
-    const bounds = await page.evaluate(() => window.__regionsFitBounds);
-    assert(bounds.south > 50 && bounds.west > 9, 'an old distant relay outside both displayed intervals distorted the fit');
-  });
-
-  await test('playback advances locally, stops at newest hour and pauses on hidden documents', async () => {
-    const before = historyRequests;
-    await page.getByLabel('Timeline interval ending').focus();
-    await page.getByLabel('Timeline interval ending').press('End');
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.getByRole('button', { name: 'Play timeline', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('[aria-label="Timeline interval ending"]').value === '168' && document.querySelector('[aria-label="Play timeline"]')?.getAttribute('aria-pressed') === 'false');
-    assert.strictEqual(historyRequests, before);
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.getByRole('button', { name: 'Play timeline', exact: true }).click();
-    await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
-    assert.strictEqual(await page.getByRole('button', { name: 'Play timeline', exact: true }).getAttribute('aria-pressed'), 'false');
-    await page.evaluate(() => { delete document.hidden; });
-    await page.getByLabel('Timeline interval ending').press('End');
-  });
-
-  await test('partial, unknown, loading and capped history withhold all change claims', async () => {
-    const overrides = [{ coverage: { start: '2026-10-16T10:30:00Z', loading: false } },
-      { coverage: { start: null, loading: false } }, { coverage: { start: null, loading: true } }, { bucketsTruncated: true }];
-    for (const value of overrides) {
-      historyOverride = value;
-      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-      await page.waitForFunction(() => document.querySelector('.regions-page')?.getAttribute('aria-busy') === 'false' && document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'false');
-      assert.match(await page.locator('.regions-comparison-limited').textContent(), /Comparison limited by available history/);
-      assert.strictEqual(await page.locator('.regions-state-added, .regions-state-not-observed, .regions-appearance-change').count(), 0);
-      assert.match(await page.locator('.regions-status').textContent(), /8 relay appearances/);
-      assert.strictEqual(await page.locator('.regions-leaflet path.leaflet-interactive').count(), 2, 'limited comparison maps only observed selected relays');
-    }
-    historyOverride = {};
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'true');
-  });
-
-  await test('failed history refresh clears stale markers and comparison before retry', async () => {
-    failHistory = true;
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-status').textContent.includes('Could not load'));
-    assert.strictEqual(await page.locator('.regions-leaflet path.leaflet-interactive').count(), 0);
-    assert.strictEqual(await page.locator('.regions-comparison').isVisible(), false);
-    assert.strictEqual(await page.getByLabel('Timeline interval ending').isDisabled(), true);
-    failHistory = false;
-    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.regions-comparison')?.getAttribute('data-comparable') === 'true');
-  });
-
   await test('destroy() tears down the map and the theme observer', async () => {
     // Navigation during Leaflet's 250ms zoom transition used to leave a
     // callback touching a removed map pane. Exercise the real zoom control.
-    await page.getByLabel('Timeline interval ending').focus();
-    await page.getByLabel('Timeline interval ending').press('ArrowLeft');
-    await page.getByRole('button', { name: 'Play timeline', exact: true }).click();
     await page.locator('.regions-leaflet .leaflet-control-zoom-in').click();
     await page.waitForTimeout(40);
     await page.evaluate(() => { location.hash = '#/nodes'; });
     await page.waitForFunction(() => !document.querySelector('.regions-leaflet'));
     assert.strictEqual(await page.locator('.leaflet-container').count(), 0, 'leaflet container left behind');
     await page.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); });
-    const hashAfterDestroy = await page.evaluate(() => location.hash);
-    await page.waitForTimeout(1150);
-    assert.strictEqual(await page.evaluate(() => location.hash), hashAfterDestroy, 'playback timer changed URL after navigation');
+    await page.waitForTimeout(350);
     assert.deepStrictEqual(errors, [], 'theme change after destroy raised errors');
     const live = await page.evaluate(() => window.__themeObservers.filter(o => o.live && o.page === 'regions').length);
     assert.strictEqual(live, 0, 'regions theme observer still connected');

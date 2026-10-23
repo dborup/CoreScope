@@ -168,53 +168,6 @@ test('real child non-zero exit and signal fail the shard without running later s
   }
 });
 
-test('report imports coverage from every successful shard without overwriting shared filenames', t => {
-  const f = fixture(t);
-  for (const shard of [1, 2, 3]) assert.equal(f.run(shard).status, 0);
-  const artifactsDir = f.artifacts();
-  for (const shard of [1, 2, 3]) {
-    const coverage = path.join(artifactsDir, `e2e-shard-${shard}`, 'coverage');
-    fs.mkdirSync(coverage);
-    fs.writeFileSync(path.join(coverage, 'e2e-coverage.json'), JSON.stringify({ shard }));
-  }
-  fs.writeFileSync(path.join(artifactsDir, 'e2e-shard-2/coverage/frontend-coverage.json'), '{"core":true}');
-  fs.writeFileSync(path.join(artifactsDir, 'e2e-shard-3/coverage/regions-map-coverage.json'), '{"regions":true}');
-  const outputDir = path.join(f.root, 'report');
-  const options = { root: f.root, manifestFile: f.manifestFile, artifactsDir, outputDir, env: successfulResults() };
-  aggregateShards(options);
-  const target = path.join(outputDir, '.nyc_output');
-  assert.deepEqual(fs.readdirSync(target).sort(), ['e2e-coverage.json', 'frontend-coverage.json', 'shard-1-e2e-coverage.json', 'shard-3-e2e-coverage.json', 'shard-3-regions-map-coverage.json']);
-  for (const [file, shard] of [['e2e-coverage.json', 2], ['shard-1-e2e-coverage.json', 1], ['shard-3-e2e-coverage.json', 3]]) {
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, file), 'utf8')), { shard });
-  }
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, 'shard-3-regions-map-coverage.json'), 'utf8')), { regions: true });
-  // Even an unusual core filename must not overwrite a namespaced shard file.
-  fs.writeFileSync(path.join(artifactsDir, 'e2e-shard-2/coverage/shard-1-e2e-coverage.json'), '{"collision":true}');
-  assert.throws(() => aggregateShards(options), /duplicate coverage artifact target/);
-});
-
-test('report validates optional non-core coverage filenames, regular files and JSON', t => {
-  const f = fixture(t);
-  for (const shard of [1, 2, 3]) assert.equal(f.run(shard).status, 0);
-  const artifactsDir = f.artifacts();
-  const folder = path.join(artifactsDir, 'e2e-shard-3/coverage');
-  fs.mkdirSync(folder);
-  const options = { root: f.root, manifestFile: f.manifestFile, artifactsDir, outputDir: path.join(f.root, 'report'), env: successfulResults() };
-  const unexpected = path.join(folder, 'coverage.txt');
-  fs.writeFileSync(unexpected, '{}');
-  assert.throws(() => aggregateShards(options), /unexpected coverage artifact/);
-  fs.unlinkSync(unexpected);
-  const file = path.join(folder, 'regions-coverage.json');
-  fs.writeFileSync(file, '{invalid JSON');
-  assert.throws(() => aggregateShards(options), SyntaxError);
-  fs.unlinkSync(file);
-  fs.mkdirSync(file);
-  assert.throws(() => aggregateShards(options), /non-regular shard artifact/);
-  fs.rmdirSync(file);
-  fs.symlinkSync(path.join(artifactsDir, 'e2e-shard-3/result.json'), file);
-  assert.throws(() => aggregateShards(options), /non-regular shard artifact/);
-});
-
 test('report is fail-closed for every shard status, missing artifacts, missing execution, stale manifest and forged success', t => {
   const f = fixture(t);
   for (const shard of [1, 2, 3]) assert.equal(f.run(shard).status, 0);

@@ -303,9 +303,6 @@ async function run() {
     await test(`#382 node stats table rows follow the rounded corners in ${scheme} theme`, async () => {
       const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: scheme });
       const p = await ctx.newPage();
-      await p.addInitScript(() => {
-        window.addEventListener('theme-refresh', () => { window.__packetCountThemeReady = true; }, { once: true });
-      });
       const pubkey = 'c'.repeat(64);
       const node = { public_key: pubkey, name: 'Corner fixture', role: 'repeater', last_seen: new Date().toISOString(), advert_count: 3 };
       await p.route('**/api/nodes**', async route => {
@@ -318,10 +315,6 @@ async function run() {
         await route.fulfill({ json: body });
       });
       try {
-        // The initial theme refresh replaces this table; settle it before
-        // evaluating row styles, just as the packet-count fixtures above do.
-        await p.goto(`${BASE}/#/home`, { waitUntil: 'domcontentloaded' });
-        await p.waitForFunction(() => window.__packetCountThemeReady);
         await p.goto(`${BASE}/#/nodes/${pubkey}`, { waitUntil: 'domcontentloaded' });
         const table = p.locator('#nodeFullBody .node-stats-table').first();
         await table.waitFor();
