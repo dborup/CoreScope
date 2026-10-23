@@ -200,8 +200,9 @@ async function waitFor(page, fn, args, timeout = 5000) {
     await page.click('#chGenerateBtn');
     await page.waitForTimeout(200);
     await page.click('#chModalClose');
-    await page.waitForSelector('[data-share-channel]', { timeout: 5000 });
-    await page.click('[data-share-channel]');
+    await page.waitForSelector('[data-row-menu]', { timeout: 5000 });
+    await page.click('[data-row-menu]');
+    await page.click('#chRowMenu [data-share-channel]');
     await waitFor(page, () => !document.getElementById('chShareModal').classList.contains('hidden'));
     await page.keyboard.press('Escape');
     await waitFor(page, () => document.getElementById('chShareModal').classList.contains('hidden'));

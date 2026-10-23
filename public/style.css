@@ -572,8 +572,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ch-icon-btn,
-.ch-remove-btn,
-.ch-share-btn {
+.ch-row-menu-item {
   min-height: 48px;
   min-width: 48px;
   touch-action: manipulation;
@@ -703,9 +702,7 @@ input[type="radio"] {
   transform: scale(0.97);
   opacity: 0.9;
 }
-.ch-icon-btn:active,
-.ch-remove-btn:active,
-.ch-share-btn:active {
+.ch-icon-btn:active {
   opacity: 1;
   transform: scale(0.92);
 }
@@ -1927,8 +1924,6 @@ button.ch-item.selected { background: var(--selected-bg); }
 }
 .ch-item-body { flex: 1; min-width: 0; }
 .ch-item-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 2px; }
-/* Keep both 48px actions inside narrow user-channel rows (#2052). */
-.ch-item.ch-user-added .ch-item-top { flex-wrap: wrap; }
 .ch-item-name { font-weight: 600; font-size: 14px; }
 .ch-item-time { font-size: 12px; font-weight: var(--fw-medium); color: var(--text-muted); white-space: nowrap; } /* #1668 M3 — was 11px/400 */
 .ch-unread-badge {
@@ -1954,20 +1949,28 @@ button.ch-item.selected { background: var(--selected-bg); }
   opacity: 0.55; transition: opacity 0.15s, color 0.15s;
   line-height: 1; user-select: none;
 }
-.ch-remove-btn {
-  font-size: 14px;
-  background: var(--statusRed, #b54a4a);
-  color: white;
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-weight: bold;
-  opacity: 0.9;
-}
-.ch-share-btn  { font-size: 13px; padding: 4px 8px; }
+/* #354: one overflow trigger per saved channel. It keeps the 48x48 house
+   target (#2052) but the negative margins take it out of the row's height, so
+   a saved row is as tall as a Network row. */
+.ch-row-menu-btn { margin: -4px -8px -4px 0; flex-shrink: 0; opacity: 0.8; }
+.ch-row-menu-btn .ph-icon { width: 18px; height: 18px; }
 button.ch-item:hover .ch-icon-btn { opacity: 1; }
-.ch-icon-btn:hover, .ch-icon-btn:focus { opacity: 1 !important; outline: none; }
-.ch-remove-btn:hover, .ch-remove-btn:focus { background: #8b3838; color: white; }
-.ch-share-btn:hover,  .ch-share-btn:focus  { color: var(--link-color, #3b82f6); }
+.ch-icon-btn:hover, .ch-icon-btn:focus-visible { opacity: 1 !important; }
+.ch-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+.ch-row-menu {
+  position: fixed; z-index: var(--z-popover, 300); min-width: 160px; max-width: calc(100vw - 8px);
+  padding: 4px; background: var(--card-bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px var(--shadow);
+}
+.ch-row-menu[hidden] { display: none; }
+.ch-row-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px;
+  background: none; border: none; border-radius: 6px; color: inherit; font: inherit; text-align: left;
+  cursor: pointer; touch-action: manipulation;
+}
+.ch-row-menu-item:hover, .ch-row-menu-item:focus-visible { background: var(--row-hover); outline: none; }
+.ch-row-menu-item:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.ch-row-menu-danger { color: var(--danger); }
 .ch-user-badge { font-size: 12px; font-weight: var(--fw-medium); margin-left: 2px; opacity: 0.85; flex-shrink: 0; } /* #1668 M3 r1 — chip floor, mirror row chips (adv #2) */
 .ch-item-preview { font-size: 13px; font-weight: var(--fw-medium); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* #1668 M3 — was 12px/400 */
 
@@ -2584,10 +2587,6 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   /* #1648 M5: share-btn now renders an inline <svg.ph-icon> from channels.js,
    * so the legacy `font-size: 0` + `::before { content: '<emoji>' }` shim is
    * obsolete. The SVG inherits color via currentColor. */
-  #chList .ch-share-btn .ph-icon { font-size: 13px; }
-  #chList .ch-share-btn { font-size: 0; }
-  #chList .ch-share-btn .ph-icon, #chList .ch-share-btn svg { font-size: 13px; }
-  #chList .ch-remove-btn { font-size: 12px; padding: 2px 6px; }
   /* Mobile-narrow timestamp — #1668 M3 chip floor (12px+500 carries from base) */
   #chList .ch-item-time { font-size: 12px; }
 
