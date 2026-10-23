@@ -20,6 +20,7 @@ import (
 //	trackedBytes == Σ over live tx of ( tx.chargedBytes
 //	                                   + resolvedRelayBytes(len(pathHopResolved[tx]))
 //	                                   + fallbackRelayBytes(len(fallbackByNode[tx]))
+//	                                   + obsIndexBytes(tx)
 //	                                   + Σ estimateStoreObsBytes(obs) )
 //
 // and tx.chargedBytes == estimateStoreTxBytes(tx) for every live tx, i.e. no
@@ -32,7 +33,7 @@ func acct113Sum(s *PacketStore) (sum int64, stale int) {
 		if int64(tx.chargedBytes) != estimateStoreTxBytes(tx) {
 			stale++
 		}
-		sum += int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx])) + fallbackRelayBytes(len(s.fallbackByNode[tx]))
+		sum += int64(tx.chargedBytes) + resolvedRelayBytes(len(s.pathHopResolved[tx])) + fallbackRelayBytes(len(s.fallbackByNode[tx])) + obsIndexBytes(tx)
 		for _, o := range tx.Observations {
 			sum += estimateStoreObsBytes(o)
 		}
