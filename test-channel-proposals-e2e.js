@@ -324,7 +324,7 @@ async function main() {
       const row = `#chList .ch-item[data-hash="${NAME}"]`;
       await pageB.waitForSelector(row + '[data-shared="true"]');
       assert.ok(await pageB.isVisible(row + ' .ch-shared-badge'));
-      assert.strictEqual(await pageB.locator(row + ' .ch-remove-btn, ' + row + ' .ch-share-btn').count(), 0);
+      assert.strictEqual(await pageB.locator(row + ' [data-row-menu]').count(), 0);
       assert.match(await pageB.textContent(row + ' .ch-item-preview'), /no messages yet/);
       assert.strictEqual(await pageB.getAttribute(row, 'data-user-added'), null);
       const inNetwork = await pageB.locator(`#chList .ch-section-network .ch-item[data-hash="${NAME}"]`).count();

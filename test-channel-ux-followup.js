@@ -44,12 +44,14 @@ assert(!/\$\{ch\.messageCount\s*\|\|\s*0\}\s*packets/.test(chSrc),
 console.log('\n=== Fix 3: privacy footer wording ===');
 assert(!/Clear browser data to remove stored keys/.test(chSrc),
   'old "Clear browser data to remove stored keys" copy is gone');
-// b812a98a (#1648 M3) swapped the ✕ glyph for the #ph-x sprite and reworded
-// the hint to "close button"; the remove button must still be that X icon.
-assert(/Use the close button to remove individual channels/.test(chSrc),
-  'new copy points at the close (X) button for individual key removal');
-assert(/iconBtn\(\s*'ch-remove-btn'[^)]*'<svg class="ph-icon" aria-hidden="true"><use href="\/icons\/phosphor-sprite\.svg#ph-x"\/><\/svg>'/.test(chSrc),
-  "the remove button the copy points at renders the #ph-x close icon");
+// #354 moved Remove from an inline close button into the row's actions menu,
+// so the hint must point there, not at a close button that no longer exists.
+assert(!/Use the close button to remove individual channels/.test(chSrc),
+  'old "close button" copy is gone (no inline close button any more)');
+assert(/Use a saved channel's actions menu to share or remove it/.test(chSrc),
+  'copy points at the actions menu for individual key removal');
+assert(/ROW_MENU_ITEMS[\s\S]*?data-remove-channel[\s\S]*?ph-trash/.test(chSrc),
+  'the Remove item the copy points at renders in the actions menu with the trash icon');
 
 console.log('\n=== Fix 4: Share/reshare affordance on user-added rows ===');
 // Source-level: data attribute and helper exist. Behavior-level checks
@@ -143,6 +145,7 @@ if (renderRowSrc) {
   vm.runInContext('const PRIVATE_CHANNEL_LABEL = "Private Channel";\n' + helperSrc, sandbox);
   vm.runInContext(badgeSrc, sandbox);
   vm.runInContext(renderRowSrc, sandbox);
+  sandbox.openRowMenuHash = null;
   const userRow = sandbox.renderChannelRow({
     hash: 'user:Crew',
     name: 'Crew',
@@ -151,12 +154,13 @@ if (renderRowSrc) {
     messageCount: 0,
     lastActivityMs: Date.now(),
   });
-  assert(/data-share-channel="user:Crew"/.test(userRow),
-    'renderChannelRow emits a share button for user-added channels');
-  assert(/aria-haspopup="dialog"/.test(userRow),
-    'share button announces it opens a dialog (aria-haspopup="dialog")');
-  assert(/data-remove-channel="user:Crew"/.test(userRow),
-    'renderChannelRow emits a remove button for user-added channels');
+  // #354: Share/Remove live in the row's overflow menu, not inline.
+  assert(/data-row-menu="user:Crew"/.test(userRow),
+    'renderChannelRow emits the actions-menu trigger for user-added channels');
+  assert(/data-share-channel[\s\S]{0,120}popup: 'dialog'/.test(chSrc),
+    'the actions menu offers Share, announcing it opens a dialog');
+  assert(/data-remove-channel/.test(chSrc) && /ROW_MENU_ITEMS/.test(chSrc),
+    'the actions menu offers Remove for user-added channels');
   assert(!/0 messages/.test(userRow) && !/your key/.test(userRow),
     'user-added preview omits "0 messages" and "your key" when no activity');
   // Non-user-added encrypted row should NOT carry share/remove.
@@ -164,8 +168,8 @@ if (renderRowSrc) {
     hash: 'abc123', name: 'Net', userAdded: false, encrypted: true,
     messageCount: 0, lastActivityMs: 0,
   });
-  assert(!/data-share-channel/.test(encRow),
-    'encrypted (non-user) rows do NOT expose a share button');
+  assert(!/data-share-channel|data-row-menu/.test(encRow),
+    'encrypted (non-user) rows do NOT expose share or the actions menu');
   assert(!/0 packets/.test(encRow),
     'encrypted preview omits "0 packets" when count is zero');
 }

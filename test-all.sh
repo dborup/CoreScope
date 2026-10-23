@@ -78,6 +78,7 @@ run test-issue-441-disable-mosquitto.js
 run test-perf-go-runtime.js
 run test-channel-psk-ux.js
 run test-channel-sidebar-layout.js
+run test-channel-row-menu.js
 run test-channel-fluid-layout.js
 run test-channel-modal-ux.js
 run test-channel-decrypt-insecure-context.js

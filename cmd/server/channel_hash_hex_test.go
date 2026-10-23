@@ -634,8 +634,8 @@ func TestOpenAPIDocumentsChannelHashHex(t *testing.T) {
 
 // TestOpenAPIDocumentsPacketIdBackendDivergence locks the corrected
 // packetId description (P3): it must document that packetId's identity
-// semantics are backend-dependent and point consumers -- including
-// MeshViewLive #88 -- at packetHash for stable cross-backend correlation,
+// semantics are backend-dependent and point consumers at packetHash for
+// stable cross-backend correlation,
 // rather than claiming a single consistent meaning the runtime doesn't
 // deliver.
 func TestOpenAPIDocumentsPacketIdBackendDivergence(t *testing.T) {

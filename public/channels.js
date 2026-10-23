@@ -15,6 +15,7 @@
   let _chAddModalEscHandler = null;
   let _chShareModalEscHandler = null;
   let _chShowEncryptedChangedHandler = null;
+  let _chRowMenuResize = null;
   let _chSidebarDragHandlers = null;
 
   // Normalize the two API spellings at the browser boundary.  Only the three
@@ -1123,6 +1124,7 @@
           <div class="ch-loading">Loading channels…</div>
         </div>
         <div class="ch-sidebar-resize" aria-hidden="true"></div>
+        <div id="chRowMenu" class="ch-row-menu" role="menu" aria-label="Channel actions" hidden></div>
       </div>
       <!-- #1034 PR1: Add Channel modal -->
       <div id="chAddChannelModal" class="modal-overlay ch-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="chModalTitle" hidden>
@@ -1179,7 +1181,7 @@
           <section class="ch-modal-section" id="chSuggestSection" aria-labelledby="chSecSuggestTitle" hidden></section>
 
           <div class="ch-modal-footer">
-            <span class=""><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg></span> Keys stay in your browser — CoreScope is a passive observer that monitors and decrypts traffic but cannot transmit over RF. Use the close button to remove individual channels.
+            <span class=""><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-lock"/></svg></span> Keys stay in your browser — CoreScope is a passive observer that monitors and decrypts traffic but cannot transmit over RF. Use a saved channel's actions menu to share or remove it.
           </div>
         </div>
       </div>
@@ -1627,67 +1629,136 @@
     var chListEl = document.getElementById('chList');
     // Keyboard accessibility for the role="button" remove/share spans
     // (Enter/Space). Single .closest() call with a combined selector.
-    chListEl.addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
-      var rb = e.target.closest && e.target.closest('[data-remove-channel],[data-share-channel]');
-      if (!rb) return;
-      e.preventDefault();
-      e.stopPropagation();
-      // Re-dispatch as a click so the existing click handler runs.
-      rb.click();
-    });
-    chListEl.addEventListener('click', (e) => {
-      // #1087 Bug 2 + Bug 4: Share/reshare opens a DEDICATED share modal
-      // (not the Add Channel modal) and resolves the user's display
-      // label via ChannelDecrypt.getLabel — never the raw `psk:<hex8>`
-      // lookup key.
-      const shareBtn = e.target.closest('[data-share-channel]');
-      if (shareBtn) {
-        e.stopPropagation();
-        var shareHash = shareBtn.getAttribute('data-share-channel');
-        if (!shareHash) return;
-        var sCh = channels.find(function (c) { return c.hash === shareHash; });
-        var channelName = shareHash.startsWith('user:')
-          ? shareHash.substring(5)
-          : (sCh && sCh.name) || shareHash;
-        var keys = ChannelDecrypt.getStoredKeys();
-        var keyHex = keys[channelName];
-        // Resolve display label: explicit user label > channel.userLabel
-        // > strip the psk: prefix > raw channelName.
-        var labels = (typeof ChannelDecrypt.getLabels === 'function')
-          ? ChannelDecrypt.getLabels() : {};
-        var labelFromStore = (typeof ChannelDecrypt.getLabel === 'function')
-          ? ChannelDecrypt.getLabel(channelName)
-          : (labels[channelName] || '');
-        var displayName = labelFromStore
-          || (sCh && sCh.userLabel)
-          || (channelName.indexOf('psk:') === 0
-              ? 'Private Channel'
-              : channelName);
-        if (!keyHex) {
-          openShareModalError(displayName, 'No stored key found for "' + displayName + '" — cannot share.');
-          return;
-        }
-        if (typeof openShareModal === 'function') {
-          openShareModal(displayName, channelName, keyHex);
-        }
+    var rowMenuEl = document.getElementById('chRowMenu');
+    function rowMenuTrigger(hash) {
+      var all = chListEl.querySelectorAll('[data-row-menu]');
+      for (var i = 0; i < all.length; i++) if (all[i].getAttribute('data-row-menu') === hash) return all[i];
+      return null;
+    }
+    function rowMenuItems() { return Array.prototype.slice.call(rowMenuEl.querySelectorAll('[role="menuitem"]')); }
+    function closeRowMenu(returnFocus) {
+      if (!rowMenuEl || rowMenuEl.hidden) return;
+      var hash = openRowMenuHash;
+      openRowMenuHash = null;
+      rowMenuEl.hidden = true;
+      rowMenuEl.textContent = '';
+      var trig = hash && rowMenuTrigger(hash);
+      if (trig) {
+        trig.setAttribute('aria-expanded', 'false');
+        if (returnFocus) try { trig.focus(); } catch (e) { /* noop */ }
+      }
+    }
+    function placeRowMenu(trig) {
+      // position:fixed, right-aligned under the trigger, flipped above it when
+      // there is no room below, kept inside the viewport.
+      var r = trig.getBoundingClientRect();
+      var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+      var w = rowMenuEl.offsetWidth, h = rowMenuEl.offsetHeight;
+      var left = Math.max(4, Math.min(r.right - w, vw - w - 4));
+      var top = r.bottom + 2;
+      if (top + h > vh - 4) top = Math.max(4, r.top - h - 2);
+      rowMenuEl.style.left = left + 'px';
+      rowMenuEl.style.top = top + 'px';
+    }
+    function openRowMenu(trig, focusIndex) {
+      var hash = trig.getAttribute('data-row-menu');
+      if (!hash) return;
+      closeRowMenu(false);
+      rowMenuEl.textContent = '';
+      ROW_MENU_ITEMS.forEach(function (item) { rowMenuEl.appendChild(buildRowMenuItem(item, hash)); });
+      rowMenuEl.hidden = false;
+      openRowMenuHash = hash;
+      trig.setAttribute('aria-expanded', 'true');
+      placeRowMenu(trig);
+      var items = rowMenuItems();
+      if (items.length) items[Math.max(0, Math.min(focusIndex, items.length - 1))].focus();
+    }
+    // Share/Remove run after the menu has closed and focus is back on the
+    // trigger, so the share dialog restores focus there and a cancelled
+    // Remove leaves the user where they started.
+    function shareChannel(shareHash) {
+      var sCh = channels.find(function (c) { return c.hash === shareHash; });
+      var channelName = shareHash.startsWith('user:')
+        ? shareHash.substring(5)
+        : (sCh && sCh.name) || shareHash;
+      var keys = ChannelDecrypt.getStoredKeys();
+      var keyHex = keys[channelName];
+      // Resolve display label: explicit user label > channel.userLabel
+      // > strip the psk: prefix > raw channelName.
+      var labels = (typeof ChannelDecrypt.getLabels === 'function')
+        ? ChannelDecrypt.getLabels() : {};
+      var labelFromStore = (typeof ChannelDecrypt.getLabel === 'function')
+        ? ChannelDecrypt.getLabel(channelName)
+        : (labels[channelName] || '');
+      var displayName = labelFromStore
+        || (sCh && sCh.userLabel)
+        || (channelName.indexOf('psk:') === 0
+            ? 'Private Channel'
+            : channelName);
+      if (!keyHex) {
+        openShareModalError(displayName, 'No stored key found for "' + displayName + '" — cannot share.');
         return;
       }
-      // M4: Remove channel button
-      const removeBtn = e.target.closest('[data-remove-channel]');
-      if (removeBtn) {
+      if (typeof openShareModal === 'function') {
+        openShareModal(displayName, channelName, keyHex);
+      }
+    }
+    function removeChannel(channelHash) {
+      // The localStorage key is the channel name. For user:-prefixed entries
+      // strip the prefix; for server-known channels look up the channel
+      // object so we use its display name (the hash itself isn't the key).
+      var confirmCh = channels.find(function (c) { return c.hash === channelHash; });
+      var confirmName = channelHash.startsWith('user:')
+        ? channelHash.substring(5)
+        : (confirmCh && confirmCh.name) || channelHash;
+      if (!confirm('Remove channel "' + confirmName + '"?\n\nThis will permanently remove the key from this browser and clear cached messages. You will need to re-enter the key to decrypt this channel again.')) return;
+      removeUserChannelKey(channelHash);
+    }
+    // Keyboard: Enter/Space/ArrowDown on a row trigger opens the menu.
+    chListEl.addEventListener('keydown', function (e) {
+      var trig = e.target.closest && e.target.closest('[data-row-menu]');
+      if (!trig) return;
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
         e.stopPropagation();
-        var channelHash = removeBtn.getAttribute('data-remove-channel');
-        if (!channelHash) return;
-        // The localStorage key is the channel name. For user:-prefixed entries
-        // strip the prefix; for server-known channels look up the channel
-        // object so we use its display name (the hash itself isn't the key).
-        var confirmCh = channels.find(function (c) { return c.hash === channelHash; });
-        var confirmName = channelHash.startsWith('user:')
-          ? channelHash.substring(5)
-          : (confirmCh && confirmCh.name) || channelHash;
-        if (!confirm('Remove channel "' + confirmName + '"?\n\nThis will permanently remove the key from this browser and clear cached messages. You will need to re-enter the key to decrypt this channel again.')) return;
-        removeUserChannelKey(channelHash);
+        if (e.key === 'ArrowUp') openRowMenu(trig, 99);
+        else openRowMenu(trig, 0);
+      } else if (e.key === 'Escape' && openRowMenuHash) {
+        closeRowMenu(true);
+      }
+    });
+    rowMenuEl.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRowMenu(true); return; }
+      if (e.key === 'Tab') { closeRowMenu(false); return; }
+      var items = rowMenuItems();
+      var next = rowMenuNextIndex(e.key, items.indexOf(document.activeElement), items.length);
+      if (next >= 0) { e.preventDefault(); items[next].focus(); }
+    });
+    rowMenuEl.addEventListener('click', function (e) {
+      var item = e.target.closest('[role="menuitem"]');
+      if (!item) return;
+      e.stopPropagation();
+      var shareHash = item.getAttribute('data-share-channel');
+      var removeHash = item.getAttribute('data-remove-channel');
+      closeRowMenu(true);
+      if (shareHash) shareChannel(shareHash);
+      else if (removeHash) removeChannel(removeHash);
+    });
+    // Anything outside the menu and its trigger dismisses it.
+    pageEl.addEventListener('click', function (e) {
+      if (!openRowMenuHash) return;
+      if (e.target.closest('#chRowMenu') || e.target.closest('[data-row-menu]')) return;
+      closeRowMenu(false);
+    });
+    chListEl.addEventListener('scroll', function () { closeRowMenu(false); });
+    window.addEventListener('resize', _chRowMenuResize = function () { closeRowMenu(false); });
+    chListEl.addEventListener('click', (e) => {
+      // #354: the overflow trigger opens/closes the menu without selecting the row.
+      const menuTrig = e.target.closest('[data-row-menu]');
+      if (menuTrig) {
+        e.stopPropagation();
+        if (menuTrig.getAttribute('aria-expanded') === 'true') closeRowMenu(true);
+        else openRowMenu(menuTrig, 0);
         return;
       }
       // Color clear button — remove color without opening picker (#681)
@@ -2088,6 +2159,8 @@
     if (_chAddModalEscHandler) { document.removeEventListener('keydown', _chAddModalEscHandler); _chAddModalEscHandler = null; }
     if (_chShareModalEscHandler) { document.removeEventListener('keydown', _chShareModalEscHandler); _chShareModalEscHandler = null; }
     if (_chShowEncryptedChangedHandler) { window.removeEventListener('mc-channels-show-encrypted-changed', _chShowEncryptedChangedHandler); _chShowEncryptedChangedHandler = null; }
+    if (_chRowMenuResize) { window.removeEventListener('resize', _chRowMenuResize); _chRowMenuResize = null; }
+    openRowMenuHash = null;
     if (_chSidebarDragHandlers) {
       document.removeEventListener('mousemove', _chSidebarDragHandlers.mousemove);
       document.removeEventListener('mouseup', _chSidebarDragHandlers.mouseup);
@@ -2201,6 +2274,48 @@
   }
 
   // #1034 PR1: render a single channel row (used by all sidebar sections).
+  // #354: overflow menu for a saved channel's secondary actions. One shared
+  // element (#chRowMenu) is filled for whichever row opened it. Share first,
+  // Remove last and styled as destructive; Remove still asks for confirmation.
+  let openRowMenuHash = null;
+  // The menu is built with createElement from this fixed model (no HTML
+  // string), so the node-controlled hash only ever reaches setAttribute on a
+  // data-* attribute.
+  const ROW_MENU_ITEMS = [
+    { attr: 'data-share-channel', label: 'Share', icon: 'ph-share-network', popup: 'dialog', title: '', danger: false },
+    { attr: 'data-remove-channel', label: 'Remove', icon: 'ph-trash', popup: '', title: 'Remove channel and clear saved key', danger: true },
+  ];
+  function buildRowMenuItem(item, hash) {
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ch-row-menu-item' + (item.danger ? ' ch-row-menu-danger' : '');
+    btn.setAttribute('role', 'menuitem');
+    btn.tabIndex = -1;
+    btn.setAttribute(item.attr, hash);
+    if (item.popup) btn.setAttribute('aria-haspopup', item.popup);
+    if (item.title) btn.title = item.title;
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'ph-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS(SVG_NS, 'use');
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#' + item.icon);
+    svg.appendChild(use);
+    btn.appendChild(svg);
+    btn.appendChild(document.createTextNode(' ' + item.label));
+    return btn;
+  }
+  // Roving focus for the menu: index to focus after `key`, or -1 if the key
+  // is not a menu-navigation key.
+  function rowMenuNextIndex(key, current, count) {
+    if (!count) return -1;
+    if (key === 'Home') return 0;
+    if (key === 'End') return count - 1;
+    if (key === 'ArrowDown') return current < 0 ? 0 : (current + 1) % count;
+    if (key === 'ArrowUp') return current < 0 ? count - 1 : (current - 1 + count) % count;
+    return -1;
+  }
+
   function renderChannelRow(ch) {
     const isEncrypted = ch.encrypted === true;
     const isUserAdded = ch.userAdded === true;
@@ -2243,25 +2358,18 @@
     const borderStyle = chColor ? ` style="border-left:3px solid ${chColor}"` : '';
     // #1033: must NOT be a <button> — outer .ch-item is itself a <button>;
     // nested <button> is invalid HTML5 and the parser orphans everything
-    // after it. Use <span role="button">; keydown handler on #chList
-    // (Enter/Space) keeps it keyboard-accessible.
-    // Icon button factory — used for the per-row remove/share controls.
-    // Both share the .ch-icon-btn base class (touch target, opacity); a
-    // modifier class (.ch-remove-btn / .ch-share-btn) supplies size + color.
-    function iconBtn(modClass, dataAttr, hash, name, glyph, title, ariaVerb, extraAttrs) {
-      return ' <span class="ch-icon-btn ' + modClass + '" role="button" tabindex="0"'
-        + ' ' + dataAttr + '="' + escapeHtml(hash) + '"'
-        + (extraAttrs || '')
-        + ' title="' + title + '"'
-        + ' aria-label="' + ariaVerb + ' ' + escapeHtml(name) + '">' + glyph + '</span>';
-    }
-    const removeBtn = managesLocalKey
-      ? iconBtn('ch-remove-btn', 'data-remove-channel', ch.hash, name, '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg>',
-                'Remove channel and clear saved key', 'Remove', '')
-      : '';
-    const shareBtn = managesLocalKey
-      ? iconBtn('ch-share-btn', 'data-share-channel', ch.hash, name, '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Share',
-                'Share channel key (QR + URL)', 'Share', ' aria-haspopup="dialog"')
+    // after it. Use <span role="button">; the keydown handler on #chList
+    // (Enter/Space/ArrowDown) keeps it keyboard-accessible.
+    // #354: Share and Remove no longer render inline. A saved channel gets one
+    // compact overflow trigger that opens the shared #chRowMenu.
+    const menuOpen = openRowMenuHash === ch.hash;
+    const menuBtn = managesLocalKey
+      ? '<span class="ch-icon-btn ch-row-menu-btn" role="button" tabindex="0"'
+        + ' data-row-menu="' + escapeHtml(ch.hash) + '"'
+        + ' aria-haspopup="menu" aria-expanded="' + (menuOpen ? 'true' : 'false') + '" aria-controls="chRowMenu"'
+        + ' title="Channel actions"'
+        + ' aria-label="Actions for ' + escapeHtml(name) + '">'
+        + '<svg class="ph-icon" aria-hidden="true" viewBox="0 0 256 256" fill="currentColor"><circle cx="128" cy="60" r="20"/><circle cx="128" cy="128" r="20"/><circle cx="128" cy="196" r="20"/></svg></span>'
       : '';
     const userBadge = isUserAdded ? ' <span class="ch-user-badge" title="You added this key" aria-label="Your key"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-key"/></svg></span>' : '';
     const sharedBadge = isShared ? ' <span class="ch-shared-badge" title="Shared channel approved for everyone on this site">Shared</span>' : '';
@@ -2273,10 +2381,10 @@
         <div class="ch-item-top">
           <span class="ch-item-name">${escapeHtml(name)}</span>${sharedBadge}${userBadge}${unreadBadge ? ' ' + unreadBadge : ''}
           <span class="ch-color-dot" data-channel="${escapeHtml(ch.hash)}"${dotStyle} title="Change channel color" aria-label="Change color for ${escapeHtml(name)}"></span>${chColor ? '<span class="ch-color-clear" data-channel="' + escapeHtml(ch.hash) + '" title="Clear color" aria-label="Clear color for ' + escapeHtml(name) + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></span>' : ''}
-          <span class="ch-item-time" data-channel-hash="${escapeHtml(ch.hash)}">${time}</span>${shareBtn}${removeBtn}
+          <span class="ch-item-time" data-channel-hash="${escapeHtml(ch.hash)}">${time}</span>
         </div>
         <div class="ch-item-preview">${escapeHtml(preview)}</div>
-      </div>
+      </div>${menuBtn}
     </button>`;
   }
 
@@ -2925,6 +3033,8 @@
   window._channelsDeduplicateAndMergeForTest = deduplicateAndMerge;
   window._channelsLoadChannelsForTest = loadChannels;
   window._channelsRenderChannelRowForTest = renderChannelRow;
+  window._channelsRowMenuNextIndexForTest = rowMenuNextIndex;
+  window._channelsRowMenuItemsForTest = ROW_MENU_ITEMS;
   window._channelsTickChannelTimesForTest = tickChannelTimes;
   window._channelsRenderKnownChannelRowForTest = renderKnownChannelRow;
   window._channelsBeginMessageRequestForTest = beginMessageRequest;

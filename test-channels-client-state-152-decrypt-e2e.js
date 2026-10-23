@@ -579,10 +579,11 @@ async function runViewport(browser, vp, base, seed) {
     ok(before.indexOf(seed.sfo.text) !== -1,
       'precondition: the SFO decrypt must have cached its plaintext before Remove (localStorage keys: ' +
       JSON.stringify(await page.evaluate(() => Object.keys(localStorage))) + ')');
-    const btn = page.locator('#chList [data-remove-channel="' + seed.hash + '"]');
+    const btn = page.locator('#chList [data-row-menu="' + seed.hash + '"]');
     if (await btn.count()) {
       page.once('dialog', (d) => d.accept());
       await btn.click({ timeout: 2000 });
+      await page.locator('#chRowMenu [data-remove-channel]').click({ timeout: 2000 });
     } else {
       // The mobile channel list (.ch-row) has no Remove button yet — a known
       // gap outside this PR's scope. Call the handler that button invokes

@@ -6,7 +6,8 @@
  *
  * This test reads the shipped stylesheet and, for every rule anywhere in it
  * (including inside @media blocks), looks at each selector whose last compound
- * targets .nav-btn, .ch-icon-btn, .ch-share-btn or .ch-remove-btn. More
+ * targets .nav-btn, .ch-icon-btn or .ch-row-menu-item (#354 moved Share/Remove
+ * from inline chips into that overflow menu). More
  * specific selectors such as `#chList .ch-icon-btn` count too; an earlier
  * version matched only the exact selector text and missed a 32px override.
  * Every min-width/min-height declared for these controls must be at least
@@ -26,7 +27,7 @@ const path = require('path');
 const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
-const CONTROLS = ['.nav-btn', '.ch-icon-btn', '.ch-share-btn', '.ch-remove-btn'];
+const CONTROLS = ['.nav-btn', '.ch-icon-btn', '.ch-row-menu-item'];
 const MIN = 48;
 
 // The innermost { } blocks are the style rules, also inside @media.

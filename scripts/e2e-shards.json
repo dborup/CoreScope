@@ -2434,6 +2434,17 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; no CI duration measured yet. Placed on shard 3 next to the #76 suite whose flake it fixes."
+    },
+    {
+      "file": "test-issue-354-compact-my-channels-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; no CI duration measured yet."
     }
   ],
   "exclusions": [
