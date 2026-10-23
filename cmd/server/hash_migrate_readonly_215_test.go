@@ -163,8 +163,6 @@ func hm215OpenIdx(t testing.TB, d *hm215DB, resolvedIndex bool) *PacketStore {
 }
 
 // hm215Snapshot is the part of the store a leftover would show up in.
-// spTotalPaths is left out on purpose: eviction never decrements it (master
-// behaviour, unrelated to this change), so it cannot return to a baseline.
 type hm215Snapshot struct {
 	Packets       int
 	TrackedBytes  int64
@@ -181,8 +179,6 @@ type hm215Snapshot struct {
 	TotalObs      int
 	AdvertKeys    map[string]int
 	ByPathHop     map[string]int
-	SpIndex       map[string]int
-	SpTxIndex     map[string]int
 }
 
 func hm215Snap(s *PacketStore) hm215Snapshot {
@@ -196,7 +192,7 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 		PathHopRecs: len(s.pathHopResolved), FallbackRecs: len(s.fallbackByNode),
 		ResolvedIdx: len(s.resolvedPubkeyIndex), TotalObs: s.totalObs,
 		AdvertKeys: map[string]int{},
-		ByPathHop:  map[string]int{}, SpIndex: map[string]int{}, SpTxIndex: map[string]int{},
+		ByPathHop:  map[string]int{},
 	}
 	for pk, list := range s.byNode {
 		for _, tx := range list {
@@ -221,12 +217,6 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 	}
 	for k, list := range s.byPathHop {
 		sn.ByPathHop[k] = len(list)
-	}
-	for k, n := range s.spIndex {
-		sn.SpIndex[k] = n
-	}
-	for k, list := range s.spTxIndex {
-		sn.SpTxIndex[k] = len(list)
 	}
 	return sn
 }
@@ -456,17 +446,6 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 						t.Errorf("nodeHashes[%s...] still holds the old hash %s", pk[:4], h)
 					}
 				}
-			}
-			// The subpath total follows the merge: it counts transmissions with a
-			// path of 2+ hops, and a merged-away duplicate no longer counts.
-			multiHop := 0
-			for _, tx := range s.packets {
-				if len(txGetParsedPath(tx)) >= 2 {
-					multiHop++
-				}
-			}
-			if s.spTotalPaths != multiHop {
-				t.Errorf("spTotalPaths = %d, want %d (transmissions with 2+ hop paths)", s.spTotalPaths, multiHop)
 			}
 			// Every observation of the DB survives, except the 4 identical
 			// (obs0, ["aa"]) ones that merge into 1 per group.

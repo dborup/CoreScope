@@ -19,7 +19,6 @@ func makeTestStore(count int, startTime time.Time, intervalMin int) *PacketStore
 		byNode:        make(map[string][]*StoreTx),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
-		spIndex:       make(map[string]int),
 		distHops:      make([]distHopRecord, 0),
 		distPaths:     make([]distPathRecord, 0),
 		rfCache:       make(map[string]*cachedResult),
@@ -82,9 +81,6 @@ func makeTestStore(count int, startTime time.Time, intervalMin int) *PacketStore
 		// Add to distance index
 		store.distHops = append(store.distHops, distHopRecord{tx: tx, Hash: hash})
 		store.distPaths = append(store.distPaths, distPathRecord{tx: tx, Hash: hash})
-
-		// Subpath index
-		addTxToSubpathIndex(store.spIndex, tx)
 
 		// Track bytes for self-accounting
 		store.trackedBytes += rechargeTx(tx)
@@ -261,7 +257,6 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 		byNode:        make(map[string][]*StoreTx),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
-		spIndex:       make(map[string]int),
 		distHops:      make([]distHopRecord, 0),
 		distPaths:     make([]distPathRecord, 0),
 		rfCache:       make(map[string]*cachedResult),
@@ -565,15 +560,12 @@ func TestEstimateStoreTxBytes(t *testing.T) {
 		PathJSON:    `["aa","bb"]`,
 	}
 	est := estimateStoreTxBytes(tx)
-	// Manual calculation: base + string lengths + index entries + perTxMaps + path hops + subpaths
+	// Manual calculation: base + string lengths + index entries + perTxMaps + path hops
 	hops := int64(len(txGetParsedPath(tx)))
 	manualCalc := int64(storeTxBaseBytes) + int64(len(tx.RawHex)+len(tx.Hash)+len(tx.DecodedJSON)+len(tx.PathJSON)) + int64(numIndexesPerTx*indexEntryBytes)
 	manualCalc += int64(decodedCacheFactor * len(tx.DecodedJSON))
 	manualCalc += perTxMapsBytes
 	manualCalc += hops * perPathHopBytes
-	if hops > 1 {
-		manualCalc += (hops * (hops - 1) / 2) * perSubpathEntryBytes
-	}
 	if est != manualCalc {
 		t.Fatalf("estimateStoreTxBytes = %d, want %d (manual calc)", est, manualCalc)
 	}
