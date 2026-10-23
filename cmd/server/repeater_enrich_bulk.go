@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sort"
 	"strings"
 	"time"
 )
@@ -99,7 +98,6 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	index := make(map[int]int, 1<<14)
 	txs := make([]bulkRelayTx, 0, 1<<14)
 	confirmed := make(map[string]struct{})
-	routes := newRegionsRoutesCollector(now)
 	add := func(list []*StoreTx) {
 		for _, tx := range list {
 			if tx == nil {
@@ -111,7 +109,6 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			b := bulkRelayTx{entry: newRelayEntry(tx, false)}
 			b.entry.parsed = true
 			b.entry.t, b.entry.valid = parseRelayTS(tx.FirstSeen)
-			routes.captureAt(tx, b.entry.t, b.entry.valid)
 			if txHasObservedFloodPath(tx) {
 				forEachObservedRelayHop(tx, func(token string) bool {
 					key := resolve.key(token)
@@ -200,8 +197,6 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	s.mu.RUnlock()
 
 	out := make(map[string]RepeaterRelayInfo, len(perKey))
-	// Keep the existing generic relay-map computation independent of Regions.
-	sort.Slice(perKey, func(i, j int) bool { return perKey[i].key < perKey[j].key })
 	var entries []relayEntry
 	for _, k := range perKey {
 		entries = entries[:0]
@@ -213,9 +208,6 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
 	}
 	snapshot.info = out
-	snapshot.routes = routes.build(pm)
-	snapshot.history = snapshot.routes.history
-	snapshot.regionMemberships = snapshot.routes.memberships
 	return snapshot
 }
 

@@ -113,10 +113,6 @@ type StoreObs struct {
 	// tx.RouteType. The frame itself is not kept (#881). It fills padding
 	// after tsParsedOK, so StoreObs does not grow.
 	wireRoute uint8
-	// Own transport codes, cached without retaining a duplicate raw frame.
-	// These fields consume existing trailing padding (StoreObs stays 200 B).
-	transportKnown bool
-	wireTransport  uint32
 }
 
 // ParsedTime returns the parsed Timestamp, caching the result.
@@ -1146,8 +1142,8 @@ func (s *PacketStore) Load() error {
 				Score:          nullIntPtr(score),
 				PathJSON:       obsPJ,
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
+				wireRoute:      wireRouteFromRawHex(obsRawHex.String),
 			}
-			cacheObservationWireEvidence(obs, obsRawHex.String)
 
 			// Decode-window: feed the relay-hop indexes, don't store on struct.
 			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, &coldLoadAmbiguousHopsSkipped)
@@ -1472,8 +1468,8 @@ func (s *PacketStore) loadChunkWhere(where string, qArgs []interface{}, label st
 				Score:          nullIntPtr(score),
 				PathJSON:       obsPJ,
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
+				wireRoute:      wireRouteFromRawHex(obsRawHex.String),
 			}
-			cacheObservationWireEvidence(obs, obsRawHex.String)
 
 			tx.mergeObservedPathHashSize(obsPJ)
 			tx.Observations = append(tx.Observations, obs)
@@ -3507,8 +3503,8 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				Score:          r.score,
 				PathJSON:       r.pathJSON,
 				Timestamp:      normalizeTimestamp(r.obsTS),
+				wireRoute:      wireRouteFromRawHex(r.obsRawHex),
 			}
-			cacheObservationWireEvidence(obs, r.obsRawHex)
 
 			// Relay-hop indexes: same input as Load (#158 follow-up).
 			// Decode-window discipline: decode once, feed consumers, never
@@ -3901,8 +3897,8 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			// tx.RawHex and enrichObs falls back to tx.RawHex when obs.RawHex
 			// == "". Live-polled observations must not re-introduce the dup.
 			Timestamp: normalizeTimestamp(r.timestamp),
+			wireRoute: wireRouteFromRawHex(r.rawHex),
 		}
-		cacheObservationWireEvidence(obs, r.rawHex)
 
 		// Relay-hop indexes: same input as Load (#158 follow-up).
 		// Decode-window discipline: decode, feed consumers, don't store on struct.

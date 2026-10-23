@@ -5947,9 +5947,6 @@ body.embed #app.app-fixed {
 
 /* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }
-.regions-page > :not(.regions-leaflet) { flex-shrink: 0; }
-.regions-page-health { overflow-y: auto; }
-.regions-page-connections { overflow-y: auto; }
 .regions-page h1, .regions-page p { margin: 0; }
 .regions-note { color: var(--text-muted); max-width: 85ch; }
 .regions-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
@@ -5957,75 +5954,11 @@ body.embed #app.app-fixed {
 .regions-controls select, .regions-controls button { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px 8px; border-radius: 6px; }
 .regions-controls select { max-width: 100%; }
 .regions-controls button { cursor: pointer; }
-.regions-controls button:disabled, .regions-timeline button:disabled { cursor: default; opacity: 0.55; }
-.regions-timeline { display: grid; grid-template-columns: auto minmax(140px, 1fr) auto; gap: 8px 12px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.regions-timeline[hidden], .regions-comparison[hidden] { display: none; }
-.regions-transport { display: flex; gap: 6px; }
-.regions-transport button { background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); padding: 6px 8px; border-radius: 6px; cursor: pointer; }
-.regions-slider-label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 0.85em; color: var(--text-muted); }
-.regions-slider-label input { width: 100%; min-width: 0; accent-color: var(--accent); }
-.regions-compare-label { display: flex; gap: 6px; align-items: center; font-size: 0.9em; }
-.regions-compare-label input { accent-color: var(--accent); }
-.regions-compare-label[hidden] { display: none; }
-.regions-interval { grid-column: 1 / -1; font-size: 0.85em; color: var(--text-muted); overflow-wrap: anywhere; }
-.regions-comparison { display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
-.regions-reference { color: var(--text-muted); overflow-wrap: anywhere; }
-.regions-comparison-limited { color: var(--text-muted); border-left: 3px solid var(--warning); padding-left: 8px; }
-.regions-comparison-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; }
-.regions-comparison-legend span::before { content: ''; display: inline-block; width: 0.7em; height: 0.7em; margin-right: 5px; border: 2px solid currentColor; border-radius: 50%; }
-.regions-state-added { color: var(--status-green-text); }
-.regions-state-retained { color: var(--accent); }
-.regions-state-not-observed { color: var(--warning); }
-.regions-state-not-observed::before { border-style: dashed !important; }
-.regions-change-lists { display: flex; flex-wrap: wrap; gap: 8px 24px; }
-.regions-change-list { min-width: 0; overflow-wrap: anywhere; }
-.regions-change-list summary { cursor: pointer; }
-.regions-change-list ul { margin: 6px 0; padding-left: 20px; max-height: 180px; overflow-y: auto; }
-.regions-controls :focus-visible, .regions-timeline :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.regions-health { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
-.regions-health[hidden], .regions-leaflet[hidden] { display: none; }
-.regions-health h2 { margin: 0; font-size: 1rem; }
-.regions-health-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.regions-health-card { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); min-width: 0; overflow-wrap: anywhere; }
-.regions-health-label, .regions-health-detail { color: var(--text-muted); font-size: 0.8rem; }
-.regions-health-value { font-size: 1.3rem; line-height: 1.2; }
-.regions-health-card[data-metric="last-relayed"] .regions-health-value { font-size: 1rem; }
-.regions-trend-status, .regions-trend-legend, .regions-health-note { color: var(--text-muted); font-size: 0.8rem; }
-.regions-trend-plot { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 4px; min-width: 0; }
-.regions-trend-scale { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding: 2px 0 12px; color: var(--text-muted); font-size: 0.75rem; }
-.regions-trend { display: block; width: 100%; height: 176px; min-width: 0; }
-.regions-trend-axis { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.regions-trend-bar { fill: var(--accent); }
-.regions-trend-gap { fill: var(--surface); stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
-.regions-trend-bounds { display: flex; justify-content: space-between; gap: 12px; padding-left: 40px; color: var(--text-muted); font-size: 0.75rem; overflow-wrap: anywhere; }
-.regions-trend-bounds span:last-child { text-align: right; }
-.regions-hourly-details summary { cursor: pointer; font-size: 0.85rem; }
-.regions-hourly-scroll { overflow-x: auto; max-width: 100%; margin-top: 8px; }
-.regions-hourly-scroll:focus-visible, .regions-hourly-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.regions-hourly-table { width: 100%; border-collapse: collapse; min-width: 650px; font-size: 0.8rem; }
-.regions-hourly-table caption { text-align: left; color: var(--text-muted); margin-bottom: 6px; }
-.regions-hourly-table th, .regions-hourly-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-.regions-hourly-table th { color: var(--text-muted); }
-.regions-connections { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
-.regions-connections[hidden] { display: none; }
-.regions-connections h2 { margin: 4px 0 0; font-size: 1rem; }
-.regions-connections-summary, .regions-pairs-summary, .regions-steps-summary { font-size: 0.85rem; }
-.regions-connections-note, .regions-step-diagnostics, .regions-connections-map-note { color: var(--text-muted); font-size: 0.8rem; overflow-wrap: anywhere; }
-.regions-connections[data-complete="false"] .regions-connections-summary { border-left: 3px solid var(--warning); padding-left: 8px; }
-.regions-relations-scroll { max-height: 280px; max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
-.regions-relations-scroll table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 0.8rem; }
-.regions-relations-scroll th, .regions-relations-scroll td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-.regions-relations-scroll th { position: sticky; top: 0; color: var(--text-muted); background: var(--surface); }
-.regions-relations-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; color: var(--text-muted); font-size: 0.8rem; }
-.regions-relations-pagination button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); background: var(--surface); cursor: pointer; }
-.regions-relations-pagination button:disabled { opacity: 0.55; cursor: default; }
-.regions-relations-scroll:focus-visible, .regions-relations-pagination button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.regions-step-arrow { fill: var(--accent); }
 .regions-status { color: var(--text-muted); min-height: 2.4em; }
 .regions-snapshot, .regions-coverage, .regions-details { color: var(--text-muted); font-size: 0.85em; overflow-wrap: anywhere; }
 .regions-details summary { cursor: pointer; }
 .regions-details p { margin-top: 6px; }
-.regions-coverage[data-coverage-state="partial"], .regions-coverage[data-coverage-state="unknown"], .regions-coverage[data-coverage-state="loading"], .regions-coverage[data-coverage-state="unavailable"] { border-left: 3px solid var(--warning); padding-left: 8px; }
+.regions-coverage[data-coverage-state="partial"], .regions-coverage[data-coverage-state="unknown"], .regions-coverage[data-coverage-state="loading"] { border-left: 3px solid var(--warning); padding-left: 8px; }
 .regions-snapshot:empty, .regions-coverage:empty { display: none; }
 .regions-leaflet { flex: 1; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; }
 @media (max-width: 600px) {
@@ -6033,11 +5966,4 @@ body.embed #app.app-fixed {
   .regions-controls { align-items: stretch; }
   .regions-controls label { flex: 1 1 140px; }
   .regions-controls select { min-width: 0; flex: 1; }
-  .regions-timeline { grid-template-columns: 1fr; }
-  .regions-transport button { flex: 1; min-height: 36px; }
-  .regions-compare-label { min-height: 32px; }
-  .regions-leaflet { flex-shrink: 0; }
-  .regions-health { padding: 10px; }
-  .regions-health-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .regions-health-card[data-metric="last-relayed"] { grid-column: 1 / -1; }
 }
