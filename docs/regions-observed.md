@@ -17,37 +17,7 @@ available. Unknown or loading history must never be presented as a complete
 period. Even a complete retained window does not prove uninterrupted radio
 reception or observer uptime.
 
-Relay identity and scope attribution require each observation's own scoped
-transport-flood header, with both known transport codes matching the stored
-canonical scoped frame and a nonzero scope code. Direct planned paths, missing
-own-frame evidence and mismatched transport codes never acquire membership.
-The canonical transmission may itself be direct: a valid flood observation of
-that same content still supplies evidence. A single resolved flood hop is
-sufficient for membership; a pair of consecutive hops is not required.
-Observations of a scoped transmission that do not supply membership are
-counted in `coverage.evidence`, per stored scope and `FirstSeen` hour, in
-three classes:
-
-- **excluded**: identified as not eligible, namely a known DIRECT or unscoped
-  header, or own transport codes that differ from the stored frame. Forwarders
-  never rewrite transport codes (firmware `Mesh::sendFlood`/`sendZeroHop` set
-  them only at origin), so a mismatch is a frame for another scope code.
-  Exclusions never make counts incomplete.
-- **unprovable**: the own header, own transport codes or canonical scope code
-  are unknown or malformed, so eligibility cannot be decided.
-- **capped**: observations, or per-transmission relay memberships, omitted by a
-  safety limit. Directed-step caps are reported in `stepEvidence` instead.
-
-Unprovable or capped evidence makes only its own hour and scope incomplete:
-rates, chart values and comparisons are withheld for intervals that include
-an affected hour of the selected scope (or of any scope for "all scopes"),
-and remain available elsewhere. If the per-bucket evidence budget (128 scopes
-x 505 hours) is exhausted, `coverage.evidence.truncated` withholds every rate
-and comparison. Hop tokens without a unique relay identity are counted in
-`stepEvidence.unresolvedHops`; they break directed-step adjacency but do not
-qualify the memberships of uniquely resolved relays. A fully retained interval
-is not necessarily fully attributable; retained observed counts stay
-explicitly qualified.
+Relay identity and scope attribution reuse the existing relay-evidence rules.
 The window is based on transmission `first_seen`, as in the existing relay
 activity fields. It is not an observation-time replay and does not reconstruct
 the historical position of a moving node. Each scope has its own most recent
@@ -88,18 +58,10 @@ it does not establish a node's creation date. "Not observed" does not establish
 that a node is offline. Comparison always identifies both intervals.
 
 Counts are distinct transmissions per relay and scope. Adding counts across
-relays gives **relay appearances**: one transmission counts once for each
-distinct relay identified on **any** observer's own attributable scoped-flood
-path, the union across all observers, not only the displayed path. Repeated
-observers, identical paths and loops count once. Before #507 history was
-attributed through the canonical display path and its candidate index, so
-relays seen only on other observers' paths were not counted; appearance totals
-therefore rise where several observers hear the same transmission along
-different paths. More observers can reveal more relays for the same traffic.
-These totals must not be labelled globally unique mesh packets. Traffic
-changes and classifications are withheld when
-either interval has unknown, loading, partial or truncated history, or
-unprovable or capped evidence for the selected scope. Raw
+relays gives **relay appearances**: a packet carried by several relays can
+contribute once for each relay. These totals must not be labelled globally
+unique mesh packets. Traffic changes and classifications are withheld when
+either interval has unknown, loading, partial or truncated evidence. Raw
 observed counts may still be shown separately. A zero reference count has no
 defined percentage increase.
 
@@ -144,8 +106,7 @@ as the chart. A zero is shown only for a fully retained, uncapped hour.
 Partial, unknown, loading or capped evidence produces a gap, not a fabricated
 zero; retained observations can still be disclosed explicitly as incomplete
 evidence. The mean appearances/hour is available only when the entire
-selected interval is complete, uncapped and has no unprovable or capped
-evidence for the selected scope. Partial counts are never divided
+selected interval is complete and uncapped. Partial counts are never divided
 by the full requested duration.
 
 The optional comparison reuses Timeline's immediately preceding equal
@@ -176,8 +137,9 @@ thresholds must be evidence-based and exposed through the customizer.
 inferred traffic links between region names:
 
 - **Shared relay-history memberships** counts distinct visible identities
-  with attributable scoped flood observations in both scopes during the
-  selected interval. This is an undirected history relationship. It does not prove that a
+  attributed to both scopes by the existing transmission-level history during
+  the selected interval. This is an undirected history relationship, not
+  independently verified forwarding in both scopes. It does not prove that a
   packet crossed between those scopes, that the identity is a gateway, or that
   the scopes are neighbouring geographic areas.
 - **Observed directed relay steps** counts consecutive, unambiguously resolved
@@ -188,15 +150,16 @@ inferred traffic links between region names:
   transmissions. Independent steps are never concatenated into a claimed full
   route.
 
-Shared memberships, Timeline, Health and Latest use the same strict
-own-observation attribution. Mixed flood/direct observations cannot promote
-planned direct paths into scope history. Repeated paths, observers and loops
-contribute at most once per transmission, relay identity and scope. This
-corrects the older transmission-level history: counts can decrease when
-previously accepted paths cannot be proven, or increase where a valid flood
-observation was previously hidden by a canonical direct transmission. No stored
-packets are changed or deleted. Generic node liveness, relay statistics and
-traffic-share calculations are deliberately unchanged by this Regions-only fix.
+Shared memberships deliberately reuse the history attribution used by Timeline
+and Health. That legacy attribution does not independently check every
+observation's route and scope: when a content transmission has mixed flood and
+direct observations, planned direct-path candidates can enter its canonical
+scope's history. Consequently shared-history counts can contain false
+memberships as well as omissions; they are not guaranteed lower bounds on
+physically shared relays. The UI discloses this provenance. Only the directed
+steps below apply the stricter own-observation frame checks introduced here.
+Repairing the older history attribution is a separate correctness task rather
+than a silent change to previous stages' metrics in this PR.
 
 Flood forwarding appends the forwarding identity to the path. Direct paths
 instead name remaining intended hops, so direct observations are not evidence
@@ -245,29 +208,20 @@ No database writes, schema changes, retention extension, dependencies or new
 operator configuration are required.
 
 The route collector retains at most 250,000 path variants globally and 128 per
-transmission, with an 8,192-byte input-path safety bound. The capture includes
-the current hour for Latest, but completed-hour history and steps exclude it.
-Membership aggregation has independent budgets of 1,000,000 transmission/node
-entries and 10,000 identities; step limits cannot suppress a valid singleton
-membership. Each identity retains its 32 newest scope names. Source and
-membership limits are counted as `capped` in the affected transmission's hour
-and scope; the directed-step, per-transmission pair and cell caps are counted
-separately as `stepEvidence.cappedStepAppearances` and never affect
-memberships or history coverage. Capped capture is a
-retained subset, not a ranking of all possible evidence. Publication retains
+transmission, with an 8,192-byte input-path safety bound. Publication retains
 at most 5,000 directed step/scope rows, 100,000 populated hourly cells and 10,000
 endpoint identities. Endpoint metadata is independent of relay-history
 membership, so a valid flood observation of a canonically direct transmission
 can still be shown. The UI retains at most 1,000 shared scope pairs, paginates
 both tables in 25-row pages and maps at most 200 positioned step rows. A capped
-subset is not a ranking of all possible relations. Snapshot-wide
-`stepEvidence` counts (excluded, unprovable and capped observations, unresolved
-hops, capped step appearances and missing endpoints) are not selected-interval
+subset is not a ranking of all possible relations. Snapshot-wide skipped-path,
+unresolved-hop and missing-endpoint diagnostics are not selected-interval
 traffic totals. Complete retained history does not imply complete radio
 reception or that all paths can be attributed.
 
 Future work can add independently evidenced scope transitions and comparisons
-of observed routes. A change in timeline relay membership alone does
+of observed routes, and align the legacy history's mixed-route/scope attribution
+with own-observation evidence. A change in timeline relay membership alone does
 not establish a changed route.
 
 The default period, display limits and any future health thresholds or playback
@@ -305,12 +259,7 @@ Connections tests additionally cover per-observation route/transport evidence,
 all observation-loading paths, unchanged observation struct size, separate
 observation boundaries, ambiguous intermediate hops, repeated/looped steps,
 reverse directions, live visibility, archived metadata and source/publication
-limits. Mixed flood/direct tests additionally cover planned-path exclusion,
-canonical direct packets with valid non-display flood observations, singleton
-memberships, current-hour Latest versus completed history, independent step
-and membership budgets, and unchanged generic relay metrics. Missing wire
-evidence suppresses comparisons/rates/chart zeros, not the retention floor.
-Shared-scope relation keys must remain distinct even when region names
+limits. Shared-scope relation keys must remain distinct even when region names
 contain delimiter characters. Browser validation covers direction labels,
 missing positions, partial history, local hour/scope selection without extra
 requests, keyed and bounded rendering, failures, navigation, themes and narrow

@@ -35,9 +35,10 @@ func regionsObservedFixture(t testing.TB) (*Server, time.Time, string) {
 
 func seedRegionRelaySnapshot(t testing.TB, srv *Server, now time.Time, key string) {
 	t.Helper()
+	pt, rt := 5, routeTypeFlood
 	for i, d := range []time.Duration{30 * time.Minute, 12 * time.Hour, 72 * time.Hour} {
-		tx := routeTransmission(i+1, now.Add(-d), `["`+key+`"]`)
-		tx.ScopeName, tx.PathJSON = fmt.Sprintf("#scope%d", i), `["`+key+`"]`
+		tx := &StoreTx{ID: i + 1, FirstSeen: now.Add(-d).Format(time.RFC3339Nano), PayloadType: &pt, RouteType: &rt,
+			ScopeName: fmt.Sprintf("#scope%d", i), PathJSON: `["` + key + `"]`}
 		srv.store.byPathHop[key] = append(srv.store.byPathHop[key], tx)
 	}
 	recomputeRepeaterEnrichmentSafe(srv.store, 24)
@@ -291,9 +292,9 @@ func TestRegionsObservedExactBoundsAndPairedSnapshot(t *testing.T) {
 	seedRegionRelaySnapshot(t, srv, now, key)
 	snapshot := srv.store.repeaterRelaySnapshot
 	end, start := snapshot.generatedAt, snapshot.generatedAt.Add(-time.Hour)
-	info := snapshot.regionMemberships.nodes[key]
-	info.scopes = []regionScopeRelay{{"#start", start}, {"#end", end}, {"#before", start.Add(-time.Nanosecond)}, {"#future", end.Add(time.Nanosecond)}}
-	snapshot.regionMemberships.nodes[key] = info
+	info := snapshot.info[key]
+	info.regionScopes = []regionScopeRelay{{"#start", start}, {"#end", end}, {"#before", start.Add(-time.Nanosecond)}, {"#future", end.Add(time.Nanosecond)}}
+	snapshot.info[key] = info
 	// A later change to live history must not get paired with older cached
 	// relay evidence. The endpoint also must not wait for the packet lock.
 	srv.store.mu.Lock()
@@ -377,7 +378,7 @@ func TestRegionsObservedDeterministicLimitAfterVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stmt.Close()
-	info := srv.store.repeaterRelaySnapshot.regionMemberships.nodes[key]
+	info := srv.store.repeaterRelaySnapshot.info[key]
 	for i := 0; i < maxObservedRegionNodes+2; i++ {
 		pk, name := fmt.Sprintf("%064x", i+1), "Visible"
 		if i < 2 {
@@ -386,7 +387,7 @@ func TestRegionsObservedDeterministicLimitAfterVisibility(t *testing.T) {
 		if _, err := stmt.Exec(pk, name); err != nil {
 			t.Fatal(err)
 		}
-		srv.store.repeaterRelaySnapshot.regionMemberships.nodes[pk] = info
+		srv.store.repeaterRelaySnapshot.info[pk] = info
 	}
 	if err := transaction.Commit(); err != nil {
 		t.Fatal(err)
@@ -424,13 +425,13 @@ func BenchmarkRegionsObservedWarm(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	info := srv.store.repeaterRelaySnapshot.regionMemberships.nodes[key]
+	info := srv.store.repeaterRelaySnapshot.info[key]
 	for i := 0; i < 2000; i++ {
 		pk := fmt.Sprintf("%064x", i+1)
 		if _, err := stmt.Exec(pk); err != nil {
 			b.Fatal(err)
 		}
-		srv.store.repeaterRelaySnapshot.regionMemberships.nodes[pk] = info
+		srv.store.repeaterRelaySnapshot.info[pk] = info
 	}
 	stmt.Close()
 	if err := transaction.Commit(); err != nil {

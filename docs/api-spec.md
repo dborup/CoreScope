@@ -2575,13 +2575,7 @@ absolute clock-hour boundaries support stable bookmarked selections.
   "historyEnd": "2026-10-16T12:00:00Z",
   "bucketSeconds": 3600,
   "bucketCount": 504,
-  "coverage": {"start": "2026-10-02T12:35:00Z", "loading": false, "evidence": {
-    "excluded": 7, "unprovable": 1, "capped": 0, "truncated": false,
-    "scopes": [{"name": "#example", "excluded": 7, "unprovable": 1, "capped": 0, "buckets": [
-      {"index": 500, "excluded": 0, "unprovable": 1, "capped": 0},
-      {"index": 503, "excluded": 7, "unprovable": 0, "capped": 0}
-    ]}]
-  }},
+  "coverage": {"start": "2026-10-02T12:35:00Z", "loading": false},
   "nodes": [{
     "publicKey": "<public key>", "name": "Example relay", "role": "repeater",
     "lat": 55.2, "lon": 10.3, "positionSource": "reported",
@@ -2603,18 +2597,6 @@ unique packets: one transmission can be confirmed through several relays.
 Non-advert confirmed scope attribution follows the same identity-safe rules
 as `/api/regions/observed`; heuristic-only and raw-prefix attribution does not
 broaden scope claims. Scope spelling and case are preserved.
-
-`coverage.evidence` counts observations that supplied no membership, by the
-transmission's stored scope and `FirstSeen` hour: `excluded` (known DIRECT or
-unscoped header, or own transport codes that differ from the stored frame),
-`unprovable` (unknown or malformed own or canonical evidence) and `capped`
-(observations or memberships omitted by safety limits). Only unprovable or
-capped buckets make a scope's interval incomplete; clients withhold rates,
-chart values and comparisons only for intervals that include such a bucket of
-the selected scope, or of any scope when no scope is selected. `truncated`
-means the per-bucket budget was exhausted and every rate and comparison must
-be withheld. `/api/regions/observed` returns the same counts summed over the
-requested rolling window, per scope, without bucket detail.
 
 `coverage.start` and `loading` are captured together with the relay evidence.
 The 21-day horizon does not extend configured retention or restore evicted

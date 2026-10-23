@@ -20,20 +20,18 @@ type regionScopeRelay struct {
 }
 
 type repeaterRelaySnapshot struct {
-	info              map[string]RepeaterRelayInfo
-	regionMemberships *regionsMembershipSnapshot
-	history           *regionsRelayHistory
-	routes            *regionsRouteSnapshot
-	generatedAt       time.Time
-	coverageStart     time.Time
-	loading           bool
+	info          map[string]RepeaterRelayInfo
+	history       *regionsRelayHistory
+	routes        *regionsRouteSnapshot
+	generatedAt   time.Time
+	coverageStart time.Time
+	loading       bool
 }
 
 type RegionsObservedCoverage struct {
-	Start    *string         `json:"start"`
-	Complete bool            `json:"complete"`
-	Loading  bool            `json:"loading"`
-	Evidence RegionsEvidence `json:"evidence"`
+	Start    *string `json:"start"`
+	Complete bool    `json:"complete"`
+	Loading  bool    `json:"loading"`
 }
 
 type RegionsObservedScope struct {
@@ -192,14 +190,14 @@ func (s *Server) handleRegionsObserved(w http.ResponseWriter, r *http.Request) {
 	s.store.repeaterEnrichMu.Lock()
 	snapshot := s.store.repeaterRelaySnapshot
 	s.store.repeaterEnrichMu.Unlock()
-	if snapshot == nil || snapshot.regionMemberships == nil {
+	if snapshot == nil {
 		writeError(w, http.StatusServiceUnavailable, "observed relay snapshot is warming up")
 		return
 	}
 	start := snapshot.generatedAt.Add(-duration)
 	stamp := snapshot.generatedAt.Format(time.RFC3339Nano)
 	response := RegionsObservedResponse{Window: window, GeneratedAt: stamp, WindowStart: start.Format(time.RFC3339Nano), WindowEnd: stamp,
-		Coverage: RegionsObservedCoverage{Loading: snapshot.loading, Evidence: snapshot.regionMemberships.evidence.window(start, snapshot.generatedAt)}, Nodes: []RegionsObservedNode{}}
+		Coverage: RegionsObservedCoverage{Loading: snapshot.loading}, Nodes: []RegionsObservedNode{}}
 	if !snapshot.coverageStart.IsZero() && !snapshot.coverageStart.After(snapshot.generatedAt) {
 		floor := snapshot.coverageStart.Format(time.RFC3339Nano)
 		response.Coverage.Start = &floor
@@ -208,19 +206,19 @@ func (s *Server) handleRegionsObserved(w http.ResponseWriter, r *http.Request) {
 	// A relay can also be known as an observer under another display name.
 	// Resolve hiding aliases in bulk before opening the metadata cursor: both
 	// queries must also work with SQLite's single-connection test databases.
-	keys := make([]string, 0, len(snapshot.regionMemberships.nodes))
-	for key, info := range snapshot.regionMemberships.nodes {
-		if len(key) == 64 && len(info.scopes) > 0 {
+	keys := make([]string, 0, len(snapshot.info))
+	for key, info := range snapshot.info {
+		if len(key) == 64 && len(info.regionScopes) > 0 {
 			keys = append(keys, key)
 		}
 	}
 	err := s.forEachVisibleRegionNode(r.Context(), keys, false, func(n observedRegionNodeMetadata) bool {
-		info, exists := snapshot.regionMemberships.nodes[n.publicKey]
+		info, exists := snapshot.info[n.publicKey]
 		if !exists {
 			return true
 		}
-		scopes := make([]RegionsObservedScope, 0, len(info.scopes))
-		for _, scope := range info.scopes {
+		scopes := make([]RegionsObservedScope, 0, len(info.regionScopes))
+		for _, scope := range info.regionScopes {
 			if !scope.when.Before(start) && !scope.when.After(snapshot.generatedAt) {
 				scopes = append(scopes, RegionsObservedScope{Name: scope.name, LastRelayed: scope.when.Format(time.RFC3339Nano)})
 			}
@@ -242,7 +240,7 @@ func (s *Server) handleRegionsObserved(w http.ResponseWriter, r *http.Request) {
 			node.Lat, node.Lon, node.PositionSource = &lat, &lon, "reported"
 		}
 		response.Nodes = append(response.Nodes, node)
-		response.ScopesTruncated = response.ScopesTruncated || info.scopesTruncated
+		response.ScopesTruncated = response.ScopesTruncated || info.regionScopesTruncated
 		return true
 	})
 	if err != nil {
@@ -262,7 +260,6 @@ func regionsObservedSchemas() map[string]*openAPISchema {
 			"start":    {Type: "string", Nullable: true, Description: "Known retained-history floor (RFC3339), or null when unknown."},
 			"complete": {Type: "boolean", Description: "Retained in-memory history covers the requested interval; not an observer uptime guarantee."},
 			"loading":  {Type: "boolean", Description: "Startup loading state when this snapshot was captured."},
-			"evidence": openAPIRef("RegionsEvidence"),
 		}},
 		"RegionsObservedScope": {Type: "object", Properties: map[string]*openAPISchema{
 			"name":        {Type: "string", Description: "Exact observed scope spelling and case."},

@@ -109,8 +109,8 @@ func getRegionsHistory(t testing.TB, srv *Server) RegionsHistoryResponse {
 
 func TestRegionsHistoryDedupCoverageAndWarmLock(t *testing.T) {
 	srv, now, key := regionsObservedFixture(t)
-	tx := routeTransmission(5, now.Add(-2*time.Hour), `["`+key+`","`+key+`"]`)
-	tx.PathJSON = `["` + key + `","` + key + `"]`
+	pt, rt := 5, routeTypeFlood
+	tx := &StoreTx{ID: 5, FirstSeen: now.Add(-2 * time.Hour).Format(time.RFC3339Nano), PayloadType: &pt, RouteType: &rt, ScopeName: "#sample", PathJSON: `["` + key + `","` + key + `"]`}
 	srv.store.byPathHop[key] = []*StoreTx{tx, tx}
 	srv.store.byNode[key] = []*StoreTx{tx}
 	recomputeRepeaterEnrichmentSafe(srv.store, 24)
@@ -277,6 +277,7 @@ func TestOpenAPIRegionsHistorySchema(t *testing.T) {
 
 func regionsHistoryBenchmarkFixture(b *testing.B) (*Server, time.Time) {
 	srv, now, _ := regionsObservedFixture(b)
+	pt, rt := 5, routeTypeFlood
 	end := now.Truncate(time.Hour)
 	transaction, err := srv.db.conn.Begin()
 	if err != nil {
@@ -292,8 +293,7 @@ func regionsHistoryBenchmarkFixture(b *testing.B) (*Server, time.Time) {
 			b.Fatal(err)
 		}
 		for j := 0; j < 60; j++ {
-			tx := routeTransmission(i*60+j+1, end.Add(-time.Duration(j*8+1)*time.Hour), `["`+key+`"]`)
-			tx.PathJSON = `["` + key + `"]`
+			tx := &StoreTx{ID: i*60 + j + 1, FirstSeen: end.Add(-time.Duration(j*8+1) * time.Hour).Format(time.RFC3339Nano), PayloadType: &pt, RouteType: &rt, ScopeName: "#sample", PathJSON: `["` + key + `"]`}
 			srv.store.byPathHop[key] = append(srv.store.byPathHop[key], tx)
 		}
 	}

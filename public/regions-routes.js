@@ -9,9 +9,7 @@
   function indexRoutes(data, history, validScope, validPosition) {
     const nodes = new Map(history.nodes.map(node => [node.publicKey.toLowerCase(), node]));
     let limited = !!(data.stepsTruncated || data.stepBucketsTruncated || data.stepEvidence?.sourceTruncated || data.stepEvidence?.incomplete);
-    // Directed steps stay snapshot-wide: identified exclusions are not gaps, but
-    // unprovable/capped observations, unresolved hops and step caps can remove steps.
-    for (const key of ['unprovableObservations', 'cappedObservations', 'unresolvedHops', 'cappedStepAppearances', 'missingEndpointSteps']) {
+    for (const key of ['skippedObservations', 'unresolvedHops', 'missingEndpointSteps']) {
       const count = data.stepEvidence?.[key];
       if (count != null && (!Number.isSafeInteger(count) || count < 0 || count > 0)) limited = true;
     }
@@ -59,9 +57,8 @@
     }
     const evidence = data.stepEvidence || {};
     const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
-    return { history, steps, limited, evidence: { excludedObservations: count(evidence.excludedObservations), unprovableObservations: count(evidence.unprovableObservations),
-      cappedObservations: count(evidence.cappedObservations), unresolvedHops: count(evidence.unresolvedHops), cappedStepAppearances: count(evidence.cappedStepAppearances),
-      missingEndpointSteps: count(evidence.missingEndpointSteps), sourceTruncated: evidence.sourceTruncated === true, incomplete: evidence.incomplete === true }, cached: null };
+    return { history, steps, limited, evidence: { skippedObservations: count(evidence.skippedObservations), unresolvedHops: count(evidence.unresolvedHops), missingEndpointSteps: count(evidence.missingEndpointSteps),
+      sourceTruncated: evidence.sourceTruncated === true, incomplete: evidence.incomplete === true }, cached: null };
   }
 
   function sharedPairs(history, first, last, scope) {
@@ -133,8 +130,8 @@
     steps.sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
     const pairs = sharedPairs(history, first, last, selection.scope || '');
     const value = { ...pairs, steps, stepAppearances, unmappedSteps,
-      complete: frame.currentCoverage === 'complete' && !history.limited && !frame.evidence.incomplete && !index.limited,
-      sharedComplete: frame.currentCoverage === 'complete' && !history.limited && !frame.evidence.incomplete,
+      complete: frame.currentCoverage === 'complete' && !history.limited && !index.limited,
+      sharedComplete: frame.currentCoverage === 'complete' && !history.limited,
       evidence: index.evidence, limited: index.limited || history.limited,
       mapSteps: steps.filter(step => positioned(step.fromNode) && positioned(step.toNode)).slice(0, MAP_LIMIT) };
     index.cached = { key, value };
@@ -153,7 +150,7 @@
     panel.setAttribute('aria-label', 'Scope connections and observed relay steps');
     const summary = el('p', 'regions-connections-summary'); panel.appendChild(summary);
     panel.appendChild(el('h2', '', 'Shared relay-history memberships'));
-    panel.appendChild(el('p', 'regions-connections-provenance', 'Distinct visible identities with attributable scoped flood observations in both scopes during the selected interval. Timeline, Health and shared memberships use each observation’s own frame evidence; direct planned paths and unknown or mismatched transport codes are excluded. Membership in both scopes does not establish a cross-scope forwarding event.'));
+    panel.appendChild(el('p', 'regions-connections-provenance', 'Distinct visible identities attributed to both scopes by the transmission-level relay history used by Timeline/Health. Observation route/scope variants are not independently verified here; mixed flood/direct transmissions can include planned-path candidates. Only directed steps below use each observation’s own frame evidence.'));
     panel.appendChild(el('p', 'regions-connections-note', 'Shared history membership does not establish cross-scope traffic, a scope transition or a direct radio link.'));
     const pairSummary = el('p', 'regions-pairs-summary'); panel.appendChild(pairSummary);
 
@@ -225,10 +222,8 @@
         return [direction, el('td', '', step.scope), el('td', '', step.count.toLocaleString()), el('td', '', step.lastRelayed)];
       }, step => JSON.stringify([step.count, step.lastRelayed, step.fromNode.name, step.toNode.name]));
       const evidence = value.evidence;
-      diagnostics.textContent = 'Snapshot-wide directed-step diagnostics (not selected-interval totals): ' + evidence.excludedObservations +
-        ' excluded observations; ' + evidence.unprovableObservations + ' unprovable observations; ' + evidence.cappedObservations +
-        ' observations omitted by source limits; ' + evidence.unresolvedHops + ' unresolved hops; ' + evidence.cappedStepAppearances +
-        ' step appearances omitted by step limits; ' + evidence.missingEndpointSteps +
+      diagnostics.textContent = 'Snapshot-wide evidence diagnostics (not selected-interval totals): ' + evidence.skippedObservations +
+        ' excluded or unusable observations; ' + evidence.unresolvedHops + ' unresolved hops; ' + evidence.missingEndpointSteps +
         ' steps without publishable endpoint metadata.' + (evidence.incomplete || evidence.sourceTruncated ? ' The source snapshot is incomplete or capped.' : '') +
         ' Direct planned paths, TRACE/adverts and mismatched or unknown scopes are excluded. Unresolved or hidden hops break adjacency.';
       mapSummary.textContent = value.mapSteps.length + ' directed step rows mapped of ' + (value.steps.length - value.unmappedSteps) +

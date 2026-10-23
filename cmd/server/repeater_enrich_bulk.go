@@ -200,7 +200,8 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	s.mu.RUnlock()
 
 	out := make(map[string]RepeaterRelayInfo, len(perKey))
-	// Keep the existing generic relay-map computation independent of Regions.
+	history := newRegionsHistoryBuilder(now)
+	// Stable order also makes history's global safety-budget selection stable.
 	sort.Slice(perKey, func(i, j int) bool { return perKey[i].key < perKey[j].key })
 	var entries []relayEntry
 	for _, k := range perKey {
@@ -211,11 +212,11 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			entries = append(entries, e)
 		}
 		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
+		history.add(k.key, entries)
 	}
 	snapshot.info = out
+	snapshot.history = history.history
 	snapshot.routes = routes.build(pm)
-	snapshot.history = snapshot.routes.history
-	snapshot.regionMemberships = snapshot.routes.memberships
 	return snapshot
 }
 
