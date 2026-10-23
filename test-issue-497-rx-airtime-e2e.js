@@ -133,10 +133,15 @@ async function run() {
     assert(known.length >= 3 && known.every((v, i) => i === 0 || known[i - 1] <= v), `ascending expected: ${known}`);
   });
 
+  // RF Health renders its grid a second time when the page's theme-refresh
+  // fires (~300 ms after load): renderTab() replaces the tab's innerHTML and
+  // re-fetches the summary, so the grid is briefly empty. A tile found by
+  // waitForSelector('.rf-cell') can be gone before a one-shot page.$eval runs.
+  // Locator evaluation waits for the tile to be attached when it is used.
   await test('RF Health tiles show "RX 1h" next to "TX 1h", RX without warning', async () => {
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.rf-cell');
-    const rx = await page.$eval(`.rf-cell[data-observer="${overId}"] [data-testid="rf-cell-rx-airtime"]`,
+    const rx = await page.locator(`.rf-cell[data-observer="${overId}"] [data-testid="rf-cell-rx-airtime"]`).evaluate(
       (el) => ({ html: el.innerHTML, text: el.textContent.trim(), prev: el.previousElementSibling && el.previousElementSibling.getAttribute('data-testid') }));
     assert(rx.text === 'RX 1h: 17.5%' && !rx.html.includes('airtime-over'), JSON.stringify(rx));
     assert(rx.prev === 'rf-cell-airtime', `RX must follow TX, got ${rx.prev}`);
@@ -146,7 +151,7 @@ async function run() {
     await page.setViewportSize({ width: 360, height: 800 });
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.rf-cell');
-    const m = await page.$eval(`.rf-cell[data-observer="${overId}"]`, (cell) => {
+    const m = await page.locator(`.rf-cell[data-observer="${overId}"]`).evaluate((cell) => {
       const box = cell.getBoundingClientRect();
       return ['rf-cell-airtime', 'rf-cell-rx-airtime'].map((tid) => {
         const el = cell.querySelector(`[data-testid="${tid}"]`);
@@ -161,7 +166,7 @@ async function run() {
   await test('a very narrow tile wraps between stats: no stat overflows or breaks inside itself', async () => {
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.rf-cell');
-    const m = await page.$eval(`.rf-cell[data-observer="${overId}"]`, (cell) => {
+    const m = await page.locator(`.rf-cell[data-observer="${overId}"]`).evaluate((cell) => {
       cell.style.width = '130px';
       cell.style.boxSizing = 'border-box';
       const box = cell.getBoundingClientRect();
@@ -179,6 +184,22 @@ async function run() {
   });
 
   await page.setViewportSize({ width: 1400, height: 900 });
+
+  await test('tile lookup survives the theme-refresh re-render of the grid', async () => {
+    await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.rf-cell');
+    // Hold the re-fetch back so the grid stays empty after the re-render;
+    // a one-shot page.$eval here fails exactly as the CI flake did.
+    summaryDelayMs = 1500;
+    try {
+      await page.evaluate(() => window.dispatchEvent(new Event('theme-refresh')));
+      const rx = await page.locator(`.rf-cell[data-observer="${overId}"] [data-testid="rf-cell-rx-airtime"]`)
+        .evaluate((el) => el.textContent.trim());
+      assert(rx === 'RX 1h: 17.5%', `after theme-refresh: ${rx}`);
+    } finally {
+      summaryDelayMs = 0;
+    }
+  });
 
   await test('observer detail shows TX 1h with the warning and RX 1h neutral', async () => {
     await page.goto(`${BASE}/#/observers/${encodeURIComponent(overId)}`, { waitUntil: 'domcontentloaded' });
