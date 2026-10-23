@@ -178,7 +178,11 @@
     var cur = String(location.hash || '');
     var subpath = '';
     var m = cur.match(/^#\/nodes(\/[^?]*)?/);
-    if (m && m[1]) subpath = m[1];
+    // #521: location.hash already names the next page while hashchange has
+    // not run yet (and after destroy() for the debounced search). Writing the
+    // filters then replaces that hash and the router re-opens Nodes.
+    if (!m) return;
+    if (m[1]) subpath = m[1];
     history.replaceState(null, '', '#/nodes' + subpath + buildNodesQuery(activeTab, search));
   }
 
