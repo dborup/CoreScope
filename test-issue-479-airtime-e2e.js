@@ -129,10 +129,15 @@ async function run() {
       `known values ascending = ${known.map((r) => r.v)}`);
   });
 
+  // RF Health renders its grid a second time when the page's theme-refresh
+  // fires (~300 ms after load): renderTab() replaces the tab's innerHTML and
+  // re-fetches the summary, so the grid is briefly empty. A tile found by
+  // waitForSelector('.rf-cell') can be gone before a one-shot page.$eval runs.
+  // Locator evaluation waits for the tile to be attached when it is used.
   await test('RF Health tiles show the TX 1h share with the warning', async () => {
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.rf-cell');
-    const over = await page.$eval(`.rf-cell[data-observer="${overId}"] [data-testid="rf-cell-airtime"]`,
+    const over = await page.locator(`.rf-cell[data-observer="${overId}"] [data-testid="rf-cell-airtime"]`).evaluate(
       (el) => ({ html: el.innerHTML, text: el.textContent.trim() }));
     assert(over.html.includes('airtime-over') && over.text === 'TX 1h: 12.5%', `tile: ${JSON.stringify(over)}`);
   });
@@ -141,7 +146,7 @@ async function run() {
     await page.setViewportSize({ width: 360, height: 800 });
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.rf-cell');
-    const m = await page.$eval(`.rf-cell[data-observer="${overId}"]`, (cell) => {
+    const m = await page.locator(`.rf-cell[data-observer="${overId}"]`).evaluate((cell) => {
       const box = cell.getBoundingClientRect();
       const el = cell.querySelector('[data-testid="rf-cell-airtime"]');
       const stat = el.getBoundingClientRect();
