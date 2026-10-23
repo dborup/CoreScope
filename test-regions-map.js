@@ -65,4 +65,26 @@ assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: null, comple
 assert.match(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-17T00:00:00Z', complete: false } }).message, /No retained history/);
 assert.equal(regions.coverageInfo({ ...snapshot, coverage: { start: '2026-10-16T09:00:00Z', complete: true } }).kind, 'partial', 'inconsistent complete flag cannot overstate available history');
 
+// #523: Regions was trimmed back to the Latest view (#501). The removed
+// history/routes endpoints and their page scripts must not be referenced
+// by the frontend, the SPA shell or the docs, and the docs must not keep
+// announcing the removed views as planned milestones.
+const fs = require('node:fs');
+const path = require('node:path');
+const removedRegionRefs = /\/api\/regions\/(history|routes)\b|regions-(history|routes)\.js/;
+const scanFiles = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+  const full = path.join(dir, entry.name);
+  if (entry.isDirectory()) return entry.name === 'vendor' ? [] : scanFiles(full);
+  return /\.(js|html|css|md)$/.test(entry.name) ? [full] : [];
+});
+const residual = scanFiles(path.join(__dirname, 'public')).concat(scanFiles(path.join(__dirname, 'docs')))
+  .filter(file => removedRegionRefs.test(fs.readFileSync(file, 'utf8')))
+  .map(file => path.relative(__dirname, file));
+assert.deepEqual(residual, [], 'removed Regions history/routes references remain');
+for (const file of ['regions-history.js', 'regions-routes.js']) {
+  assert.equal(fs.existsSync(path.join(__dirname, 'public', file)), false, file + ' must stay removed');
+}
+assert.doesNotMatch(fs.readFileSync(path.join(__dirname, 'docs/regions-observed.md'), 'utf8'), /## Following milestones/,
+  'removed Regions views must not be listed as upcoming milestones');
+
 console.log('regions map unit tests passed');

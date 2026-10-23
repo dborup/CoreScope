@@ -4,6 +4,7 @@
  *  - bindPopup(html string) / innerHTML of node name   -> XSS test fails
  *  - removing the data-theme MutationObserver          -> theme test fails
  *  - removing observer.disconnect() in destroy()       -> teardown test fails
+ *  - restoring a removed view select or its endpoints  -> controls test fails (#523)
  */
 'use strict';
 const assert = require('node:assert');
@@ -49,6 +50,8 @@ async function main() {
   page.on('pageerror', e => errors.push(e.stack || String(e)));
   let holdHour = false, heldHour = null, failWeek = false, coverageOverride = null;
   const requests = [];
+  const removedRequests = [];
+  page.on('request', req => { if (/\/api\/regions\/(history|routes)\b/.test(req.url())) removedRequests.push(req.url()); });
   const waitForHeldHour = async () => {
     const deadline = Date.now() + 5000;
     while (!heldHour) {
@@ -105,6 +108,21 @@ async function main() {
     assert.match(await page.locator('.regions-details').textContent(), /self-reported; their accuracy is unverified/);
     assert.match(await page.locator('.regions-status').textContent(), /2 observed relay nodes without usable positions/);
     assert.strictEqual(await page.locator('.regions-leaflet path.leaflet-interactive').count(), 3, 'null latitude must not create an equator marker');
+  });
+
+  // #523 trimmed Regions back to the period view (#501): no view switcher,
+  // timeline, comparison or health controls, and no history/routes fetches.
+  await test('only period, scope and refresh controls remain on desktop and mobile', async () => {
+    for (const size of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(size);
+      const selects = await page.locator('.regions-controls select').evaluateAll(els => els.map(e => e.getAttribute('aria-label')));
+      assert.deepStrictEqual(selects, ['Region period', 'Region scope'], `${size.width}px selects`);
+      assert.deepStrictEqual(await page.locator('.regions-controls button').allTextContents(), ['Refresh'], `${size.width}px buttons`);
+      assert.strictEqual(await page.locator('.regions-controls input').count(), 0, `${size.width}px inputs`);
+      assert.strictEqual(await page.locator('.regions-health, .regions-timeline, .regions-compare-label').count(), 0);
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    assert.deepStrictEqual(removedRequests, []);
   });
 
   if (process.env.REGIONS_SCREENSHOT_DIR) {

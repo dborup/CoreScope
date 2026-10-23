@@ -32,24 +32,19 @@ The endpoint reuses the background relay snapshot instead of scanning packet
 history for each period change. Limits on nodes and scope evidence must be
 reported as truncation, rather than silently suggesting a complete map.
 
-## Following milestones
+## Scope
 
-1. **Timeline and comparison:** introduce historical snapshot selection and
-   playback, then compare equal, explicitly bounded periods. Show newly observed
-   and no-longer-observed relays and changed routes. Distinguish missing history
-   from an observed absence. A comparison must identify its two periods and the
-   position basis used for each.
-2. **Region health:** add active relay counts, last relay and traffic trends
-   over comparable periods. Quiet relays should be labelled as not observed in
-   the period; lack of reception alone does not establish that a node is offline.
-3. **Connections between regions:** add observed paths with direction and
-   distinct-transmission counts. Preserve scope transitions, distinguish
-   ambiguous hop identities and avoid interpreting shared scope membership as
-   proof of a direct radio link.
+Regions is limited to the period view described above. Timeline and period
+comparison, health and trends, and connections between regions were added in
+#502–#510 and removed again in #523: the retained route, membership, history
+and evidence snapshot raised server memory and made every relay snapshot
+recompute walk all transmissions and observations. Any return of those views
+needs a design whose retained memory and recompute cost is measured before it
+lands.
 
-The default period and any future health thresholds or playback settings should
-be exposed in the customizer in a later milestone. The first milestone uses a
-24-hour default and existing theme variables, without a new operator config key.
+The default period should be exposed in the customizer in a later milestone.
+The page uses a 24-hour default and existing theme variables, without a new
+operator config key.
 
 ## Verification
 
