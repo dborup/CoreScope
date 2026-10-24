@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,15 +24,37 @@ import (
 type manualRecomputeTicker struct {
 	c      chan time.Time
 	resets atomic.Int64
+	// resetC gets one (non-blocking) send per Reset. The loop calls Reset
+	// after a kick or RecomputeNow pass, so a receive means that pass is
+	// done.
+	resetC chan struct{}
 }
 
 func newManualRecomputeTicker() *manualRecomputeTicker {
-	return &manualRecomputeTicker{c: make(chan time.Time)}
+	return &manualRecomputeTicker{c: make(chan time.Time), resetC: make(chan struct{}, 16)}
 }
 
 func (m *manualRecomputeTicker) C() <-chan time.Time { return m.c }
-func (m *manualRecomputeTicker) Reset(time.Duration) { m.resets.Add(1) }
 func (m *manualRecomputeTicker) Stop()               {}
+func (m *manualRecomputeTicker) Reset(time.Duration) {
+	m.resets.Add(1)
+	select {
+	case m.resetC <- struct{}{}:
+	default:
+	}
+}
+
+// snapshotClock is an injectable analyticsRecomputer.now.
+type snapshotClock struct{ ns atomic.Int64 }
+
+func newSnapshotClock() *snapshotClock {
+	c := &snapshotClock{}
+	c.ns.Store(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixNano())
+	return c
+}
+
+func (c *snapshotClock) now() time.Time          { return time.Unix(0, c.ns.Load()) }
+func (c *snapshotClock) advance(d time.Duration) { c.ns.Add(int64(d)) }
 
 const pauseTestDeadline = 5 * time.Second
 
@@ -255,6 +276,35 @@ func TestPauseWhenIdle_ContinuousReadsKeepComputing(t *testing.T) {
 	h.noPendingEvent()
 }
 
+// A read while a pass is computing may have got the previous snapshot, so
+// it counts towards the next tick: the pass clears the read flag before
+// computing, not after.
+func TestPauseWhenIdle_ReadDuringPassCounts(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	h := newPauseHarness(t, "read-during-pass", true, func(pass int64) interface{} {
+		if pass == 2 {
+			close(started)
+			<-release
+		}
+		return pass
+	}).start()
+	h.r.Load() // so the next tick computes
+	select {
+	case h.tk.c <- time.Now():
+	case <-time.After(pauseTestDeadline):
+		t.Fatal("loop did not accept a tick")
+	}
+	<-started
+	if v := h.r.Load(); v != int64(1) { // read while pass 2 runs
+		t.Fatalf("read during the pass got %v, want the previous snapshot", v)
+	}
+	close(release)
+	h.expect("tick-run")
+	h.expectTick("tick-run") // the read during pass 2 is not forgotten
+	h.expectTick("tick-skip")
+}
+
 // The first read after idle returns the existing snapshot while the wake
 // pass is still blocked, a burst of concurrent readers coalesces into ONE
 // pass, and later reads see the refreshed snapshot.
@@ -304,6 +354,11 @@ func TestPauseWhenIdle_WakeServesSnapshotAndCoalesces(t *testing.T) {
 	}
 	close(release)
 	h.expect("kick-run")
+	// The wake pass restarts the schedule, so the next tick comes a full
+	// interval after it instead of marking the new snapshot stale at once.
+	if got := h.tk.resets.Load(); got != 1 {
+		t.Fatalf("ticker resets after the wake pass = %d, want 1", got)
+	}
 
 	// Barrier: RecomputeNow is served after any wake-up still queued, so
 	// every event before it belongs to the burst.
@@ -401,33 +456,45 @@ func TestPauseWhenIdle_StartupLoad(t *testing.T) {
 	h.expectTick("tick-skip")
 }
 
+// A failed pass is a panic or a nil result; both keep the recomputer from
+// pausing.
 func TestPauseWhenIdle_FailedComputationRecovers(t *testing.T) {
-	fail := atomic.Bool{}
-	h := newPauseHarness(t, "fail", true, func(pass int64) interface{} {
-		if fail.Load() {
-			panic("compute failed")
-		}
-		return pass
-	}).start()
-	h.expectTick("tick-skip")
+	for _, mode := range []string{"panic", "nil"} {
+		t.Run(mode, func(t *testing.T) {
+			fail := atomic.Bool{}
+			h := newPauseHarness(t, "fail-"+mode, true, func(pass int64) interface{} {
+				if !fail.Load() {
+					return pass
+				}
+				if mode == "panic" {
+					panic("compute failed")
+				}
+				return nil
+			}).start()
+			h.expectTick("tick-skip")
 
-	// A failed wake pass keeps the old snapshot, still marked stale, and
-	// the next tick retries even though nothing read it.
-	fail.Store(true)
-	if v := h.r.Load(); v != int64(1) {
-		t.Fatalf("read got %v, want the existing snapshot", v)
-	}
-	h.expect("kick-run")
-	if _, stale := h.r.SnapshotInfo(); !stale {
-		t.Fatal("a failed refresh made the old snapshot look fresh")
-	}
-	h.expectTick("tick-run")
-	h.expectTick("tick-run")
-	fail.Store(false)
-	h.expectTick("tick-run") // recovers
-	h.expectTick("tick-skip")
-	if v := h.r.Load(); v != int64(5) {
-		t.Fatalf("snapshot = %v, want pass 5", v)
+			// A failed wake pass keeps the old snapshot, still marked
+			// stale, and the next tick retries even though nothing read it.
+			fail.Store(true)
+			if v := h.r.Load(); v != int64(1) {
+				t.Fatalf("read got %v, want the existing snapshot", v)
+			}
+			h.expect("kick-run")
+			if _, stale := h.r.SnapshotInfo(); !stale {
+				t.Fatal("a failed refresh made the old snapshot look fresh")
+			}
+			h.expectTick("tick-run")
+			h.expectTick("tick-run")
+			if v := h.r.Load(); v != int64(1) {
+				t.Fatalf("read after failed passes got %v, want the existing snapshot", v)
+			}
+			fail.Store(false)
+			h.expectTick("tick-run") // recovers
+			h.expectTick("tick-skip")
+			if v := h.r.Load(); v != int64(5) {
+				t.Fatalf("snapshot = %v, want pass 5", v)
+			}
+		})
 	}
 }
 
@@ -575,25 +642,69 @@ func TestPauseWhenIdle_DefaultOffNeverStale(t *testing.T) {
 	}
 }
 
+// startRecomputersWithManualTickers starts s's analytics recomputers with
+// one manual ticker per recomputer name (names must list all of them), so
+// no scheduled tick fires on its own.
+func startRecomputersWithManualTickers(t *testing.T, s *PacketStore, names []string, ov AnalyticsRecomputeIntervals) (func(), map[string]*manualRecomputeTicker) {
+	t.Helper()
+	tickers := make(map[string]*manualRecomputeTicker, len(names))
+	for _, n := range names {
+		tickers[n] = newManualRecomputeTicker()
+	}
+	prev := newRecomputeTicker
+	// Called later on each loop goroutine; tickers is read-only by then.
+	newRecomputeTicker = func(name string, _ time.Duration) recomputeTicker {
+		tk, ok := tickers[name]
+		if !ok {
+			panic("no manual ticker for recomputer " + name)
+		}
+		return tk
+	}
+	// Each recomputer copies the factory when it is constructed.
+	stop := s.StartAnalyticsRecomputers(time.Hour, ov)
+	newRecomputeTicker = prev
+	return stop, tickers
+}
+
 // Every default-shape endpoint served from a recomputer carries the
 // snapshot headers when the opt-in is on, reports a skipped refresh as
-// stale, and is byte-for-byte unchanged (no headers) when it is off.
+// stale and gives the snapshot's exact age; non-default shapes (region,
+// area, window) carry none. With the opt-in off no response has them.
 func TestPauseWhenIdle_SnapshotHeaders(t *testing.T) {
-	endpoints := map[string]string{
-		"/api/analytics/rf":              "recompRF",
-		"/api/analytics/topology":        "recompTopology",
-		"/api/analytics/channels":        "recompChannels",
-		"/api/analytics/distance":        "recompDistance",
-		"/api/analytics/hash-sizes":      "recompHashSizes",
-		"/api/analytics/hash-collisions": "recompHashCollisions",
-		"/api/analytics/roles":           "recompRoles",
-		"/api/observers/clock-skew":      "recompObserversClockSkew",
-		"/api/nodes/clock-skew":          "recompNodesClockSkew",
+	endpoints := []struct {
+		path, field, name string
+		other             []string // non-default shapes, not recomputer-served
+	}{
+		{"/api/analytics/rf", "recompRF", "rf", []string{"region=SJC", "area=fyn", "window=1h"}},
+		{"/api/analytics/topology", "recompTopology", "topology", []string{"region=SJC", "area=fyn", "window=1h"}},
+		{"/api/analytics/channels", "recompChannels", "channels", []string{"region=SJC", "area=fyn", "window=1h"}},
+		{"/api/analytics/distance", "recompDistance", "distance", []string{"region=SJC", "area=fyn"}},
+		{"/api/analytics/hash-sizes", "recompHashSizes", "hash-sizes", []string{"region=SJC", "area=fyn"}},
+		{"/api/analytics/hash-collisions", "recompHashCollisions", "hash-collisions", []string{"region=SJC", "area=fyn"}},
+		{"/api/analytics/roles", "recompRoles", "roles", nil},
+		{"/api/observers/clock-skew", "recompObserversClockSkew", "observers-clock-skew", nil},
+		{"/api/nodes/clock-skew", "recompNodesClockSkew", "nodes-clock-skew", []string{"area=fyn"}},
+	}
+	names := make([]string, 0, len(endpoints))
+	for _, e := range endpoints {
+		names = append(names, e.name)
 	}
 	for _, on := range []bool{false, true} {
 		srv, router := setupTestServer(t)
-		stop := srv.store.StartAnalyticsRecomputers(time.Hour, AnalyticsRecomputeIntervals{PauseWhenIdle: on})
+		srv.cfg.Areas = map[string]AreaEntry{"fyn": {}}
+		stop, tickers := startRecomputersWithManualTickers(t, srv.store, names, AnalyticsRecomputeIntervals{PauseWhenIdle: on})
 		srv.store.signalStartupLoadDone()
+		// Wait for the post-load pass of every recomputer (#116): it
+		// stores a new snapshot, which would clear a stale mark set below.
+		// It is the first Reset on each ticker, and with manual tickers
+		// nothing else runs a pass from here on except this test.
+		for _, n := range names {
+			select {
+			case <-tickers[n].resetC:
+			case <-time.After(pauseTestDeadline):
+				t.Fatalf("pause=%v %s: no post-load pass", on, n)
+			}
+		}
 		srv.store.distLazyMu.Lock()
 		srv.store.distLazyBuilding = true
 		srv.store.distLazyMu.Unlock()
@@ -602,38 +713,49 @@ func TestPauseWhenIdle_SnapshotHeaders(t *testing.T) {
 			t.Fatal("distance index not built")
 		}
 		fields := storeRecomputerFields(t, srv.store)
-		for _, rc := range fields {
-			rc.RecomputeNow() // a pass started after the load: warm-up over
-		}
 		if len(fields) != len(endpoints) {
 			t.Fatalf("%d recomputers, %d endpoints under test", len(fields), len(endpoints))
 		}
-		for path, field := range endpoints {
-			get := func() *httptest.ResponseRecorder {
-				w := httptest.NewRecorder()
-				router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
-				if w.Code != http.StatusOK {
-					t.Fatalf("pause=%v %s: status %d", on, path, w.Code)
-				}
-				return w
+		// Every loop is idle (its last pass is done), so swapping the clock
+		// does not race; the passes below store snapshots dated clock.now().
+		clock := newSnapshotClock()
+		for _, rc := range fields {
+			rc.now = clock.now
+			rc.RecomputeNow()
+		}
+		clock.advance(125*time.Second + 900*time.Millisecond)
+		get := func(path string) *httptest.ResponseRecorder {
+			t.Helper()
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			if w.Code != http.StatusOK {
+				t.Fatalf("pause=%v %s: status %d", on, path, w.Code)
 			}
-			w := get()
+			return w
+		}
+		for _, e := range endpoints {
+			for _, q := range e.other {
+				w := get(e.path + "?" + q)
+				if h := w.Header(); h.Get(analyticsSnapshotHeader) != "" || h.Get(analyticsSnapshotAgeHeader) != "" {
+					t.Errorf("pause=%v %s?%s: snapshot headers on a shape not served from the recomputer", on, e.path, q)
+				}
+			}
+			w := get(e.path)
 			state, age := w.Header().Get(analyticsSnapshotHeader), w.Header().Get(analyticsSnapshotAgeHeader)
 			if !on {
 				if state != "" || age != "" {
-					t.Errorf("%s: snapshot headers set with pauseWhenIdle off", path)
+					t.Errorf("%s: snapshot headers set with pauseWhenIdle off", e.path)
 				}
 				continue
 			}
-			if state != "current" {
-				t.Errorf("%s: %s = %q, want current", path, analyticsSnapshotHeader, state)
+			if state != "current" || age != "125" {
+				t.Errorf("%s: %s = %q, %s = %q, want current, 125", e.path, analyticsSnapshotHeader, state, analyticsSnapshotAgeHeader, age)
 			}
-			if n, err := strconv.Atoi(age); err != nil || n < 0 {
-				t.Errorf("%s: %s = %q, want a non-negative integer", path, analyticsSnapshotAgeHeader, age)
-			}
-			fields[field].missedRefresh.Store(true) // as after a skipped tick
-			if got := get().Header().Get(analyticsSnapshotHeader); got != "stale" {
-				t.Errorf("%s: %s = %q after a skipped refresh, want stale", path, analyticsSnapshotHeader, got)
+			fields[e.field].missedRefresh.Store(true) // as after a skipped tick
+			w = get(e.path)
+			state, age = w.Header().Get(analyticsSnapshotHeader), w.Header().Get(analyticsSnapshotAgeHeader)
+			if state != "stale" || age != "125" {
+				t.Errorf("%s after a skipped refresh: %s = %q, %s = %q, want stale, 125", e.path, analyticsSnapshotHeader, state, analyticsSnapshotAgeHeader, age)
 			}
 		}
 		stop()
