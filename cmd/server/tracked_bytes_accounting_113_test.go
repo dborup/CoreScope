@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -406,10 +405,7 @@ func TestAcct113Fixture_ServerReadDoesNotBlockWriter_567(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "acct.db")
 	acct113CreateDB(t, dbPath, 5, 0)
 	store := acct113Load(t, dbPath)
-	conn, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := acct113OpenWriter(t, dbPath)
 	defer conn.Close()
 
 	reader, err := store.db.conn.Conn(context.Background())
@@ -440,10 +436,7 @@ func TestTrackedBytes_MixedSequenceDoesNotDrift_113(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "acct.db")
 	acct113CreateDB(t, dbPath, 200, 0)
 	store := acct113Load(t, dbPath)
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := acct113OpenWriter(t, dbPath)
 	defer conn.Close()
 
 	rng := rand.New(rand.NewSource(113))
