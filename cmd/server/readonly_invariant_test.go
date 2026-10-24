@@ -29,6 +29,9 @@ func TestServerSourceHasNoCachedRWCalls(t *testing.T) {
 		regexp.MustCompile(`\bcachedRW\s*\(`),
 		regexp.MustCompile(`mode=rw`),
 		regexp.MustCompile(`sql\.Open\([^)]*\?[^)]*_journal_mode=WAL[^)]*\)`),
+		// Setting a journal mode takes a write lock; WAL is the
+		// ingestor's to set (#576).
+		regexp.MustCompile(`_pragma=journal_mode`),
 		// The node directory is ingestor-owned; the server opens mode=ro
 		// since #1289 and may never write it.
 		//
