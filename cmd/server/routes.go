@@ -74,9 +74,10 @@ type Server struct {
 	// can't race on the .tmp file or interleave disk/memory updates.
 	saveMu sync.Mutex
 
-	// Neighbor affinity graph (lazy-built, cached with TTL)
-	neighborMu    sync.Mutex
-	neighborGraph *NeighborGraph
+	// Neighbor affinity graph: background-built, with one synchronous first build.
+	neighborMu      sync.Mutex // protects the published pointer, never a graph build
+	neighborBuildMu sync.Mutex // serializes initial and background builds
+	neighborGraph   *NeighborGraph
 
 	// #2073 node-detail advert route breakdown, per pubkey
 	// (node_advert_routes_cache.go).
