@@ -38,6 +38,7 @@ run test-issue-180-packets-detail-close.js
 run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
+run test-health-status.js
 run test-bottom-nav-route-coverage.js
 run test-app-api-inflight-cleanup-rejection.js
 run test-app-api-bust-inflight-243.js
@@ -147,6 +148,7 @@ run test-issue-1473-prefix-generator.js
 run test-issue-1770-mobile-row-clamp.js
 run test-issue-1849-trace-hashbytes.js
 run test-node-analytics-hop-chart.js
+run test-page-lifecycle-2248.js
 run test-analytics-hop-depth-ui.js
 run test-channels-ping-bot-reply.js
 run test-channels-observed-path-hash-size.js

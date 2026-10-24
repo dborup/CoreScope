@@ -448,6 +448,35 @@
     };
   };
 
+  // Three-state health only applies the existing role thresholds. Callers
+  // choose their evidence; this never turns a guessed relay into activity.
+  function _healthTimestamp(value) {
+    var stamp = _parseFreshnessCandidate(value);
+    return stamp !== null && stamp > 0 ? stamp : null;
+  }
+
+  window.getHealthStatus = function (role, heard, nowMs) {
+    var stamp = _healthTimestamp(heard);
+    if (stamp === null) return null;
+    var now = _resolveNow(nowMs);
+    if (stamp > now + NODE_FRESHNESS_FUTURE_TOLERANCE_MS) return null;
+    var age = Math.max(0, now - stamp);
+    var thresholds = getHealthThresholds(role);
+    return age < thresholds.degradedMs ? 'healthy'
+      : age < thresholds.silentMs ? 'degraded' : 'silent';
+  };
+
+  // Health APIs explicitly return null when there is no identity-safe
+  // activity. Never fall back from that null to relay-touched directory
+  // timestamps. Only legacy responses missing lastHeard use directory data.
+  window.getHealthLastHeard = function (node, stats) {
+    if (stats && Object.prototype.hasOwnProperty.call(stats, 'lastHeard')) {
+      return _healthTimestamp(stats.lastHeard) !== null ? stats.lastHeard : null;
+    }
+    if (node && _healthTimestamp(node.last_heard) !== null) return node.last_heard;
+    return node && _healthTimestamp(node.last_seen) !== null ? node.last_seen : null;
+  };
+
   function _nodeStaleMs(role) {
     var isInfra = role === 'repeater' || role === 'room';
     return isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;

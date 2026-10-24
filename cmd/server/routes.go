@@ -74,9 +74,10 @@ type Server struct {
 	// can't race on the .tmp file or interleave disk/memory updates.
 	saveMu sync.Mutex
 
-	// Neighbor affinity graph (lazy-built, cached with TTL)
-	neighborMu    sync.Mutex
-	neighborGraph *NeighborGraph
+	// Neighbor affinity graph: background-built, with one synchronous first build.
+	neighborMu      sync.Mutex // protects the published pointer, never a graph build
+	neighborBuildMu sync.Mutex // serializes initial and background builds
+	neighborGraph   *NeighborGraph
 
 	// #2073 node-detail advert route breakdown, per pubkey
 	// (node_advert_routes_cache.go).
@@ -3095,10 +3096,6 @@ func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
-		if !s.store.SubpathIndexReady() {
-			writeIndexLoading503(w)
-			return
-		}
 		region := r.URL.Query().Get("region")
 		if s.rejectAnalyticsFilters(w, region, "") {
 			return
@@ -3140,10 +3137,6 @@ func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request)
 //
 //	?groups=2-2:50,3-3:30,4-4:20,5-8:15   (minLen-maxLen:limit per group)
 func (s *Server) handleAnalyticsSubpathsBulk(w http.ResponseWriter, r *http.Request) {
-	if s.store != nil && !s.store.SubpathIndexReady() {
-		writeIndexLoading503(w)
-		return
-	}
 	region := r.URL.Query().Get("region")
 	if s.rejectAnalyticsFilters(w, region, "") {
 		return
@@ -3228,10 +3221,6 @@ func (s *Server) handleAnalyticsSubpathDetail(w http.ResponseWriter, r *http.Req
 	// resolves it to; a hidden one is answered like a hop that matches no
 	// node (#410).
 	if s.store != nil {
-		if !s.store.SubpathIndexReady() {
-			writeIndexLoading503(w)
-			return
-		}
 		parts := s.store.SubpathDetail(rawHops)
 		vis, err := s.subpathVisibility(r.Context(), parts.pubkeys())
 		if err != nil {

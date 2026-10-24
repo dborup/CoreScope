@@ -121,8 +121,8 @@ func acct113Load(tb testing.TB, dbPath string) *PacketStore {
 	if err := store.Load(); err != nil {
 		tb.Fatal(err)
 	}
-	// Load starts the path-hop and subpath index builds in the background;
-	// they read every tx, so let them finish before a test touches one.
+	// Load starts the path-hop index build in the background; it reads
+	// every tx, so let it finish before a test touches one.
 	if !store.WaitIndexesReady(30 * time.Second) {
 		tb.Fatal("background index builds did not finish")
 	}

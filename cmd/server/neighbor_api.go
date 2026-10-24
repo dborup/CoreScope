@@ -80,24 +80,56 @@ type GraphStats struct {
 
 // ─── Graph accessor on Server ──────────────────────────────────────────────────
 
-// getNeighborGraph returns the current neighbor graph, rebuilding if stale.
+// getNeighborGraph serves the published graph until the background recomputer
+// replaces it. Only an initial request with no graph waits for a build.
 func (s *Server) getNeighborGraph() *NeighborGraph {
 	s.neighborMu.Lock()
-	defer s.neighborMu.Unlock()
-
-	if s.neighborGraph == nil || s.neighborGraph.IsStale() {
-		if s.store != nil {
-			opts := BuildOptions{MaxEdgeKm: DefaultMaxEdgeKm}
-			if s.cfg != nil {
-				opts.EnableLog = s.cfg.DebugAffinity
-				opts.MaxEdgeKm = s.cfg.NeighborMaxEdgeKm()
-			}
-			s.neighborGraph = BuildFromStoreWithOptions(s.store, opts)
-		} else {
-			s.neighborGraph = NewNeighborGraph()
-		}
+	g := s.neighborGraph
+	s.neighborMu.Unlock()
+	if g != nil {
+		return g
 	}
-	return s.neighborGraph
+
+	s.neighborBuildMu.Lock()
+	defer s.neighborBuildMu.Unlock()
+	s.neighborMu.Lock()
+	g = s.neighborGraph
+	s.neighborMu.Unlock()
+	if g != nil {
+		return g // a concurrent initial request or recomputer built it
+	}
+	g = s.buildNeighborGraph()
+	s.neighborMu.Lock()
+	s.neighborGraph = g
+	s.neighborMu.Unlock()
+	return g
+}
+
+// rebuildNeighborGraph runs on every recompute tick, not just after the old
+// TTL. Builds are serialized, but readers retain the previous snapshot while
+// the potentially expensive store scan runs outside the pointer mutex.
+func (s *Server) rebuildNeighborGraph() {
+	if s.store == nil {
+		return // preserve injected graphs when there is no source to rebuild
+	}
+	s.neighborBuildMu.Lock()
+	defer s.neighborBuildMu.Unlock()
+	g := s.buildNeighborGraph()
+	s.neighborMu.Lock()
+	s.neighborGraph = g
+	s.neighborMu.Unlock()
+}
+
+func (s *Server) buildNeighborGraph() *NeighborGraph {
+	if s.store == nil {
+		return NewNeighborGraph()
+	}
+	opts := BuildOptions{MaxEdgeKm: DefaultMaxEdgeKm}
+	if s.cfg != nil {
+		opts.EnableLog = s.cfg.DebugAffinity
+		opts.MaxEdgeKm = s.cfg.NeighborMaxEdgeKm()
+	}
+	return BuildFromStoreWithOptions(s.store, opts)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────────────────────

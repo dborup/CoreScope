@@ -353,12 +353,19 @@ func TestHandleAnalyticsSubpaths_MaxLenFirmwareCeiling(t *testing.T) {
 	for i := range hops {
 		hops[i] = fmt.Sprintf("%02x", i)
 	}
+	// A time window counts every subpath length of each transmission (the
+	// unfiltered list stops at subpathMaxHops, #413), so the 63-hop path is
+	// asked for through ?window=.
+	pathJSON, _ := json.Marshal(hops)
 	srv.store.mu.Lock()
-	srv.store.spIndex[strings.Join(hops, ",")] = 1
+	srv.store.packets = append(srv.store.packets, &StoreTx{
+		ID: 1 << 30, Hash: "ceiling63", PathJSON: string(pathJSON),
+		FirstSeen: time.Now().UTC().Format(time.RFC3339),
+	})
 	srv.store.mu.Unlock()
 
 	get := func(maxLen string) []interface{} {
-		req := httptest.NewRequest(http.MethodGet, "/api/analytics/subpaths?minLen=63&maxLen="+maxLen, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/subpaths?minLen=63&window=24h&maxLen="+maxLen, nil)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		if w.Code != 200 {

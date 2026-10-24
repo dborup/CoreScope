@@ -2,6 +2,22 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-health-status-e2e.js",
+      "shard": 2,
+      "env": {},
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; local synthetic API server, default and configured role thresholds across desktop and mobile. No CI duration measured yet."
+    },
+    {
+      "file": "test-page-lifecycle-2248-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; controlled-response navigation and range races at desktop/mobile. No CI duration measured yet; assigned to the lowest measured shard."
+    },
+    {
       "file": "test-nav-stats-throttle-491-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

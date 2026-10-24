@@ -125,9 +125,9 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 			continue
 		}
 
-		// A merge edits the subpath and path-hop indexes: let their
-		// background build finish first, or it could index a duplicate that
-		// was just removed.
+		// A merge edits the path-hop index: let its background build
+		// finish first, or it could index a duplicate that was just
+		// removed.
 		if !indexesReady {
 			store.WaitIndexesReady(30 * time.Second)
 			indexesReady = true
@@ -446,9 +446,6 @@ func (s *PacketStore) finishHashMerge(m *hashMerge, metadata pathNodeSnapshot) i
 		s.trackedBytes -= s.txChargedBytes(l)
 		s.untrackAdvertPubkey(l)
 		s.removeFromResolvedPubkeyIndex(l.ID)
-		if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, l) {
-			s.spTotalPaths--
-		}
 		delete(s.pathHopResolved, l)
 		delete(s.fallbackByNode, l)
 		if l.PayloadType != nil {
